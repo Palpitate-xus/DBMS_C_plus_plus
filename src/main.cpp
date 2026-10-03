@@ -626,6 +626,8 @@ static size_t findUnquotedIdentifierWhitespace(const string& text,
 
 static string foldConstants(const string& s);
 static size_t findTopLevelKeyword(const string& sql, const string& kw, size_t startPos);
+static bool hasTopLevelSetOperation(const string& sql);
+static string unwrapParenthesizedQuery(const string& sql);
 static size_t findTextOutsideQuotes(const string& sql, const string& text,
                                     size_t from = 0);
 static size_t findKeywordOutsideQuotes(const string& sql,
@@ -1055,26 +1057,41 @@ static string sqlProcessor(string raw, bool /*normalizeBooleanLiterals*/ = false
                             "FETCH WITH TIES requires ORDER BY "
                             "(SQLSTATE 42601)");
                     }
-                    throw runtime_error("feature not supported: outer FETCH WITH TIES (SQLSTATE 0A000)");
-                }
-                const string count = fetchMatch[1].matched ? fetchMatch[1].str() : "1";
-                string replacement = "limit " + count;
-                size_t replacePos = fetchPos;
-                const size_t offsetPos = findTopLevelKeyword(raw, "offset", 0);
-                bool canRewrite = true;
-                if (offsetPos != string::npos && offsetPos < fetchPos) {
-                    static const regex offsetClause(R"(^offset\s+([0-9]+)(?:\s+rows?)?\s*$)");
-                    const string offsetText = raw.substr(offsetPos, fetchPos - offsetPos);
-                    smatch offsetMatch;
-                    canRewrite = regex_match(offsetText, offsetMatch, offsetClause);
-                    if (canRewrite) {
-                        replacement += " offset " + offsetMatch[1].str();
-                        replacePos = offsetPos;
+                    if (!hasTopLevelSetOperation(raw)) {
+                        throw runtime_error(
+                            "feature not supported: outer FETCH WITH TIES "
+                            "(SQLSTATE 0A000)");
                     }
-                }
-                if (canRewrite) {
-                    raw.replace(replacePos, fetchPos + fetchMatch.length() - replacePos,
-                                replacement);
+                    // Keep this tail intact so the set-operation result path
+                    // can extend FETCH to include peers of the boundary row.
+                } else {
+                    const string count = fetchMatch[1].matched
+                        ? fetchMatch[1].str() : "1";
+                    string replacement = "limit " + count;
+                    size_t replacePos = fetchPos;
+                    const size_t offsetPos =
+                        findTopLevelKeyword(raw, "offset", 0);
+                    bool canRewrite = true;
+                    if (offsetPos != string::npos && offsetPos < fetchPos) {
+                        static const regex offsetClause(
+                            R"(^offset\s+([0-9]+)(?:\s+rows?)?\s*$)");
+                        const string offsetText =
+                            raw.substr(offsetPos, fetchPos - offsetPos);
+                        smatch offsetMatch;
+                        canRewrite = regex_match(
+                            offsetText, offsetMatch, offsetClause);
+                        if (canRewrite) {
+                            replacement += " offset " +
+                                offsetMatch[1].str();
+                            replacePos = offsetPos;
+                        }
+                    }
+                    if (canRewrite) {
+                        raw.replace(
+                            replacePos,
+                            fetchPos + fetchMatch.length() - replacePos,
+                            replacement);
+                    }
                 }
             }
         }
@@ -6212,6 +6229,13 @@ static SetOperationSplit findTopLevelSetOperation(const string& sql) {
     return selected;
 }
 
+static bool hasTopLevelSetOperation(const string& sql) {
+    if (findTopLevelSetOperation(sql).position != string::npos) return true;
+    const string unwrapped = unwrapParenthesizedQuery(sql);
+    return unwrapped != trim(sql) &&
+        findTopLevelSetOperation(unwrapped).position != string::npos;
+}
+
 struct StructuredSetOperand {
     dbms::OpPtr plan;
     string header;
@@ -6551,15 +6575,16 @@ static vector<string> splitSetOperationOrderList(const string& orderSql) {
 static bool applySetOperationTail(
     dbms::DmlResult& result,
     const vector<SetOperationOrderKey>& orderBy,
-    size_t limitN, bool hasLimit, size_t offsetN, bool hasOffset,
+    size_t limitN, bool hasLimit, bool fetchWithTies,
+    size_t offsetN, bool hasOffset,
     const string& leftSql,
     const string& rightSql, string& error, string& sqlState) {
+    vector<size_t> orderIndexes;
+    vector<const dbms::TypeEntry*> typeEntries;
+    vector<string> textCollations;
     if (!orderBy.empty()) {
-        vector<size_t> orderIndexes;
         vector<bool> orderAscending;
         vector<bool> nullsFirst;
-        vector<const dbms::TypeEntry*> typeEntries;
-        vector<string> textCollations;
         orderIndexes.reserve(orderBy.size());
         orderAscending.reserve(orderBy.size());
         nullsFirst.reserve(orderBy.size());
@@ -6693,8 +6718,51 @@ static bool applySetOperationTail(
         result.nulls.erase(result.nulls.begin(), result.nulls.begin() + skip);
     }
     if (hasLimit && result.rows.size() > limitN) {
-        result.rows.resize(limitN);
-        result.nulls.resize(limitN);
+        size_t end = limitN;
+        if (fetchWithTies && limitN > 0 && !orderIndexes.empty()) {
+            const size_t boundary = limitN - 1;
+            for (; end < result.rows.size(); ++end) {
+                bool peers = true;
+                for (size_t keyIndex = 0;
+                     keyIndex < orderIndexes.size(); ++keyIndex) {
+                    const size_t column = orderIndexes[keyIndex];
+                    const bool boundaryNull = result.nulls[boundary][column];
+                    const bool candidateNull = result.nulls[end][column];
+                    if (boundaryNull || candidateNull) {
+                        if (boundaryNull != candidateNull) peers = false;
+                    } else {
+                        const string& boundaryValue =
+                            result.rows[boundary][column];
+                        const string& candidateValue = result.rows[end][column];
+                        const auto* typeEntry = typeEntries[keyIndex];
+                        if (typeEntry &&
+                            typeEntry->category == dbms::TypeCategory::Numeric) {
+                            try {
+                                const dbms::Numeric a(boundaryValue);
+                                const dbms::Numeric b(candidateValue);
+                                if (a < b || b < a) peers = false;
+                            } catch (...) {
+                                if (boundaryValue != candidateValue)
+                                    peers = false;
+                            }
+                        } else if (typeEntry &&
+                                   typeEntry->category ==
+                                       dbms::TypeCategory::String) {
+                            if (dbms::collation::compare(
+                                    boundaryValue, candidateValue,
+                                    textCollations[keyIndex]) != 0)
+                                peers = false;
+                        } else if (boundaryValue != candidateValue) {
+                            peers = false;
+                        }
+                    }
+                    if (!peers) break;
+                }
+                if (!peers) break;
+            }
+        }
+        result.rows.resize(end);
+        result.nulls.resize(end);
     }
     result.commandTag = "SELECT " + to_string(result.rows.size());
     return true;
@@ -6719,6 +6787,7 @@ static bool executeSetOperation(const string& sql, Session& s, bool& handled) {
     vector<SetOperationOrderKey> tailOrderBy;
     size_t tailLimit = 0;
     bool tailHasLimit = false;
+    bool tailFetchWithTies = false;
     size_t tailOffset = 0;
     bool tailHasOffset = false;
     {
@@ -6757,6 +6826,57 @@ static bool executeSetOperation(const string& sql, Session& s, bool& handled) {
             tailCountState = "42601";
             return false;
         };
+        const size_t fetchPos = findTopLevelKeyword(rightSql, "fetch");
+        if (fetchPos != string::npos) {
+            const vector<string> tokens =
+                tokenize(trim(rightSql.substr(fetchPos + 5)));
+            if (tokens.size() >= 4) {
+                const string direction = toLower(tokens[0]);
+                const bool hasCount = toLower(tokens[1]) != "row" &&
+                    toLower(tokens[1]) != "rows";
+                const size_t rowIndex = hasCount ? 2 : 1;
+                const size_t modeIndex = rowIndex + 1;
+                if ((direction == "first" || direction == "next") &&
+                    rowIndex < tokens.size() &&
+                    (toLower(tokens[rowIndex]) == "row" ||
+                     toLower(tokens[rowIndex]) == "rows") &&
+                    modeIndex + 1 < tokens.size() &&
+                    toLower(tokens[modeIndex]) == "with" &&
+                    toLower(tokens[modeIndex + 1]) == "ties" &&
+                    tokens.size() == modeIndex + 2) {
+                    if (findTopLevelKeyword(
+                            rightSql.substr(0, fetchPos), "order by") ==
+                        string::npos) {
+                        cout << "ERROR: FETCH WITH TIES requires ORDER BY "
+                                "(SQLSTATE 42601)" << endl;
+                        return true;
+                    }
+                    if (findTopLevelKeyword(
+                            rightSql.substr(0, fetchPos), "limit") !=
+                        string::npos) {
+                        cout << "ERROR: LIMIT and FETCH cannot both be "
+                                "specified (SQLSTATE 42601)" << endl;
+                        return true;
+                    }
+                    const string count = hasCount ? tokens[1] : "1";
+                    if (toLower(count) == "null" ||
+                        toLower(count) == "all" ||
+                        !parseCount(count, true)) {
+                        cout << "ERROR: "
+                             << (tailCountError.empty()
+                                     ? "invalid FETCH count in set operation"
+                                     : tailCountError)
+                             << " (SQLSTATE "
+                             << (tailCountState.empty()
+                                     ? "42601" : tailCountState)
+                             << ")" << endl;
+                        return true;
+                    }
+                    tailFetchWithTies = true;
+                    rightSql = trim(rightSql.substr(0, fetchPos));
+                }
+            }
+        }
         const size_t limitPos = findTopLevelKeyword(rightSql, "limit");
         const size_t offsetPos = findTopLevelKeyword(rightSql, "offset");
         vector<pair<size_t, bool>> clauses;
@@ -6768,8 +6888,16 @@ static bool executeSetOperation(const string& sql, Session& s, bool& handled) {
             const bool isLimit = clauses[i].second;
             const size_t end = i + 1 < clauses.size()
                 ? clauses[i + 1].first : rightSql.size();
-            const string num = trim(rightSql.substr(
+            string num = trim(rightSql.substr(
                 at + (isLimit ? 5 : 6), end - at - (isLimit ? 5 : 6)));
+            if (!isLimit) {
+                const vector<string> offsetTokens = tokenize(num);
+                if (offsetTokens.size() == 2 &&
+                    (toLower(offsetTokens[1]) == "row" ||
+                     toLower(offsetTokens[1]) == "rows")) {
+                    num = offsetTokens[0];
+                }
+            }
             if (!parseCount(num, isLimit)) {
                 cout << "ERROR: " << tailCountError << " (SQLSTATE "
                      << tailCountState << ")" << endl;
@@ -6872,6 +7000,7 @@ static bool executeSetOperation(const string& sql, Session& s, bool& handled) {
     string tailSqlState;
     if (!applySetOperationTail(
             result, tailOrderBy, tailLimit, tailHasLimit,
+            tailFetchWithTies,
             tailOffset, tailHasOffset,
             leftSql, rightSql, tailError, tailSqlState)) {
         cout << "ERROR: " << tailError << " (SQLSTATE "
