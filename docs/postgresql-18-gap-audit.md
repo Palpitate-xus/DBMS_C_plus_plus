@@ -1,6 +1,10 @@
 # DBMS_C_plus_plus 对标 PostgreSQL 18.6：完整差距清单
 
-2026-10-03 第963项 source `258bd554` 现在在UNION／INTERSECT／EXCEPT最终结果上执行合法 `FETCH FIRST/NEXT ... WITH TIES`，不再把limit错误放到右操作数；支持排序后offset、排序键peer扩展以及numeric等值／text collation／NULL peer。普通、parenthesized、offset、数值等价和NULL peer wire回归均过，PostgreSQL 18.6 direct oracle同结果。完整套件未重跑、generic pgdiff因Docker参考是17.2而未执行。第962项的无ORDER SQLSTATE修复仍有效；“WITH TIES仍不支持”现在仅指非集合运算query路径。QRY-06保持partial，详见 `docs/issue-963-set-fetch-with-ties.md`。
+2026-10-03 第965项 source `aa27818d` 改用列类型语义判断WITH TIES peers，修复CHAR尾随空格并让未知比较类型安全回0A000。生产build、定向结构化wire、FETCH boundary E2E及最终全量套件460 C++／197 E2E全部通过；fresh en_US.utf8 PG18.6 `set_operation_precedence` 差分 cases=1 failed=0。更大PG18差分在 `quoted_sequence_dot_schema_owned` 的DROP TABLE等待120秒超时；该三条sequence case family的fresh focused复跑均通过，未据此宣称全量差分通过。QRY-06仍partial，详见 `docs/issue-965-fetch-ties-column-equality.md`。
+
+2026-10-03 第964项 source `bec759db` 在普通单表SELECT上实现有限的 `FETCH FIRST/NEXT n ROW(S) WITH TIES`，包括OFFSET、Numeric等值、NULL peer及显式ASC；支持限于plain-column投影和投影内排序键，复杂query形态明确fail-closed。生产构建、定向wire和PG18.6 direct oracle通过；最终460 C++／197 E2E全量suite由965复跑并通过，supported query shapes还在fresh en_US.utf8 PG18.6 `set_operation_precedence` case中差分通过。更大PG18差分存在独立DROP TABLE timeout，未冒称全量通过。QRY-06仍partial，详见 `docs/issue-964-ordinary-fetch-with-ties.md`。
+
+2026-10-03 第963项 source `258bd554` 在UNION／INTERSECT／EXCEPT最终结果上执行合法 `FETCH FIRST/NEXT ... WITH TIES`，不再把limit错误放到右操作数；支持排序后offset、排序键peer扩展以及numeric等值／text collation／NULL peer。普通、parenthesized、offset、数值等价和NULL peer wire回归均过，PostgreSQL 18.6 direct oracle同结果；后续全套460 C++／197 E2E通过。第962项的无ORDER SQLSTATE修复仍有效；有限普通单表子集由964支持，复杂非集合query仍未闭合。QRY-06保持partial，详见 `docs/issue-963-set-fetch-with-ties.md`。
 
 2026-10-03 第962项 source `36b73cd5` 修正外层 `FETCH ... WITH TIES` 缺少query级ORDER BY时的SQLSTATE：PG18返回42601，现在本地也返回42601；有ORDER BY的合法WITH TIES当前明确返回0A000，功能仍未实现。FETCH ONLY及OFFSET＋FETCH相邻wire回归和生产build通过，PG18.6 direct oracle核实；没有全量套件／generic PG diff。QRY-06仍partial，见 `docs/issue-962-fetch-ties-order-error.md`。
 

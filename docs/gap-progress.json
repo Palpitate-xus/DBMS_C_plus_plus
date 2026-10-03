@@ -2,6 +2,39 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "965",
+      "gap_ids": ["P0-02", "P0-16", "QRY-06"],
+      "status": "partial",
+      "integrated_source_commit": "aa27818d",
+      "evidence": ["docs/code-review-progress.md", "docs/issue-965-fetch-ties-column-equality.md", "src/main.cpp"],
+      "tests": ["tests/set_operation_structured_protocol_e2e_test.py", "tests/fetch_clause_boundary_e2e_test.py", "tests/compat/cases/set_operation_precedence.sql"],
+      "verification": {
+        "production_build": "bash scripts/build.sh: passed",
+        "focused_wire": "DBMS_PROTOCOL_TEST_TIMEOUT=120 python3 tests/set_operation_structured_protocol_e2e_test.py: passed, including CHAR trailing-space peers",
+        "fetch_boundary": "DBMS_PROTOCOL_TEST_TIMEOUT=120 python3 tests/fetch_clause_boundary_e2e_test.py: passed after updating its stale unsupported assertion",
+        "first_full_suite": "460 C++ tests passed; one of 197 E2E/protocol entries failed only because the older fetch-boundary test still expected 0A000 after ordinary WITH TIES support",
+        "full_suites": "DBMS_PROTOCOL_TEST_TIMEOUT=120 DBMS_PROTOCOL_STARTUP_TIMEOUT=120 DBMS_PROTOCOL_SHUTDOWN_TIMEOUT=120 bash scripts/build_tests.sh on aa27818d: passed, 460 C++ tests and all 197 E2E/protocol entries, exit 0",
+        "focused_pg18_differential": "fresh en_US.utf8 PostgreSQL 18.6 database: set_operation_precedence cases=1 failed=0",
+        "full_pg18_differential": "incomplete; full en_US.utf8 PostgreSQL 18.6 run timed out at local DROP TABLE in quoted_sequence_dot_schema_owned after earlier cases; all three quoted_sequence_dot_schema* cases passed together in a fresh focused run. No full-diff pass claimed."
+      }
+    },
+    {
+      "issue": "964",
+      "gap_ids": ["P0-02", "P0-16", "QRY-06"],
+      "status": "partial",
+      "integrated_source_commit": "bec759db",
+      "evidence": ["docs/code-review-progress.md", "docs/issue-964-ordinary-fetch-with-ties.md", "src/main.cpp"],
+      "tests": ["tests/set_operation_structured_protocol_e2e_test.py", "tests/compat/cases/set_operation_precedence.sql"],
+      "verification": {
+        "production_build": "bash scripts/build.sh: passed after final source change",
+        "focused_wire": "DBMS_PROTOCOL_TEST_TIMEOUT=120 python3 tests/set_operation_structured_protocol_e2e_test.py: passed for bounded ordinary SELECT ties, OFFSET, numeric equality, NULL peers, explicit ASC and fail-closed shapes",
+        "pg18_direct_oracle": "PostgreSQL 18.6 server_version_num=180006; supported ordinary-table query rows matched",
+        "full_suites": "first run on bec759db: 460 C++ passed; 196 of 197 E2E/protocol entries passed; the only failure was the obsolete fetch_clause_boundary_e2e_test.py assertion expecting 0A000; corrected in issue 965",
+        "focused_pg18_differential": "fresh en_US.utf8 PostgreSQL 18.6 database: set_operation_precedence cases=1 failed=0",
+        "full_pg18_differential": "incomplete on aa27818d: full run timed out at local DROP TABLE in quoted_sequence_dot_schema_owned; the three quoted_sequence_dot_schema* cases passed together in a focused run. No full-diff pass claimed."
+      }
+    },
+    {
       "issue": "963",
       "gap_ids": ["P0-02", "P0-16", "QRY-06"],
       "status": "partial",

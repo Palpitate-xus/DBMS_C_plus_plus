@@ -1,6 +1,10 @@
 # 总差距清单执行计划
 
-2026-10-03 第963项 `258bd554` 将set-operation的FETCH WITH TIES应用到完整排序结果，按 peers 扩展FETCH边界，并验证括号／OFFSET／数值等价／NULL情况。生产构建、结构化wire和PG18.6 direct oracle通过；完整套件未跑。第962项对缺ORDER BY返回42601的错误状态仍有效；非集合query的合法WITH TIES保持未实现。QRY-06仍partial，见 `docs/issue-963-set-fetch-with-ties.md`。不push。
+2026-10-03 第965项 `aa27818d` 修正WITH TIES的typed peer相等比较，避免CHAR尾随空格值被截掉，并更新旧boundary测试的过期unsupported预期。定向生产build、wire、boundary E2E及460 C++／197 E2E完整suite通过；en_US.utf8 PostgreSQL 18.6 `set_operation_precedence` 实际差分通过。更大差分在 `quoted_sequence_dot_schema_owned` 的DROP TABLE等待120秒超时；三条quoted sequence schema case的fresh focused复跑全部通过，因此全量PG差分仍未通过验收。QRY-06仍partial，见 `docs/issue-965-fetch-ties-column-equality.md`。不push。
+
+2026-10-03 第964项 `bec759db` 已支持普通单表SELECT的有限 `FETCH FIRST/NEXT n ROW(S) WITH TIES` 子集，支持投影内plain-column排序键、OFFSET、Numeric／NULL peers和显式ASC；join／CTE／aggregate／DISTINCT／window／hidden或表达式排序键仍fail-closed。定向wire和PG18.6 direct oracle通过。首轮整套唯一失败由965修复；QRY-06仍partial，见 `docs/issue-964-ordinary-fetch-with-ties.md`。不push。
+
+2026-10-03 第963项 `258bd554` 将set-operation的FETCH WITH TIES应用到完整排序结果，按 peers 扩展FETCH边界，并验证括号／OFFSET／数值等价／NULL情况。生产构建、结构化wire和PG18.6 direct oracle通过；完整套件随后已通过。第962项对缺ORDER BY返回42601的错误状态仍有效；普通单表SELECT的有限子集由964支持，复杂普通query仍未支持。QRY-06仍partial，见 `docs/issue-963-set-fetch-with-ties.md`。不push。
 
 2026-10-03 第962项 `36b73cd5` 修复FETCH WITH TIES缺少ORDER BY的SQLSTATE，编译、专项wire与PG18.6 direct SQLSTATE oracle均通过；该提交时有ORDER的合法WITH TIES返回0A000，随后第963项已支持set-operation结果，普通SELECT仍未支持。未执行全量验证，QRY-06继续partial，见 `docs/issue-962-fetch-ties-order-error.md`。不push。
 
