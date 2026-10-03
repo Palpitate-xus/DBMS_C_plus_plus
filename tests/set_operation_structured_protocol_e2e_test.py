@@ -221,6 +221,8 @@ def main():
             ("SELECT 1 UNION SELECT 1, 2;", "42601"),
             ("SELECT 1 UNION SELECT DATE '2024-01-01';", "42804"),
             ("SELECT 1 AS n UNION SELECT 2 ORDER BY missing;", "42P10"),
+            ("SELECT 1 AS x, 2 AS x UNION ALL SELECT 3, 4 ORDER BY x;",
+             "42702"),
         ]
         for sql, expected_state in error_cases:
             _, state, _, _ = runner.ours_query(

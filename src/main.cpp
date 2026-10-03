@@ -6572,15 +6572,34 @@ static bool applySetOperationTail(
                 }
             } catch (...) {}
             if (orderIndex == result.columns.size()) {
-                string name = key.column;
-                if (name.size() >= 2 && name.front() == '"' &&
-                    name.back() == '"')
-                    name = name.substr(1, name.size() - 2);
-                for (size_t i = 0; i < result.columns.size(); ++i) {
-                    if (result.columns[i] == name) {
-                        orderIndex = i;
-                        break;
+                const bool quoted = key.column.size() >= 2 &&
+                    key.column.front() == '"' && key.column.back() == '"';
+                string name = quoted
+                    ? key.column.substr(1, key.column.size() - 2)
+                    : toLower(key.column);
+                if (quoted) {
+                    string unescaped;
+                    for (size_t i = 0; i < name.size(); ++i) {
+                        unescaped += name[i];
+                        if (name[i] == '"' && i + 1 < name.size() &&
+                            name[i + 1] == '"')
+                            ++i;
                     }
+                    name = std::move(unescaped);
+                }
+                size_t matchCount = 0;
+                for (size_t i = 0; i < result.columns.size(); ++i) {
+                    const string candidate = quoted
+                        ? result.columns[i] : toLower(result.columns[i]);
+                    if (candidate == name) {
+                        orderIndex = i;
+                        ++matchCount;
+                    }
+                }
+                if (matchCount > 1) {
+                    error = "ORDER BY \"" + name + "\" is ambiguous";
+                    sqlState = "42702";
+                    return false;
                 }
             }
             if (orderIndex == result.columns.size()) {
