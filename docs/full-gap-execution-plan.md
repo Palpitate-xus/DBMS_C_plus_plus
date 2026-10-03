@@ -1,5 +1,7 @@
 # 总差距清单执行计划
 
+2026-10-03 第966项 `9d07b4e7`：`FETCH ... WITH TIES`现接受`+n`和`-0`，对负非零数返回PG18 SQLSTATE 2201W；parser的LIMIT／OFFSET／FETCH同步识别被tokenizer拆开的符号。生产build、修正后的parser_phase1_test、FETCH boundary E2E和PG18.6 `set_operation_precedence`定向差分通过。首轮全套460 C++／197 E2E仅parser_phase1_test失败，原因是第一版遗漏独立sign token；修复后该测试单独重跑通过，但未把两轮包装成一次全套绿色。完整PG18.6差分462 cases中461项相同，唯一无关差异为`to_char_numeric`本地缺少locale货币符号，保留待修，不宣称全差分通过。QRY-06仍partial，见 `docs/issue-966-fetch-signed-counts.md`。不push。
+
 2026-10-03 第965项 `aa27818d` 修正WITH TIES的typed peer相等比较，避免CHAR尾随空格值被截掉，并更新旧boundary测试的过期unsupported预期。定向生产build、wire、boundary E2E及460 C++／197 E2E完整suite通过；en_US.utf8 PostgreSQL 18.6 `set_operation_precedence` 实际差分通过。更大差分在 `quoted_sequence_dot_schema_owned` 的DROP TABLE等待120秒超时；三条quoted sequence schema case的fresh focused复跑全部通过，因此全量PG差分仍未通过验收。QRY-06仍partial，见 `docs/issue-965-fetch-ties-column-equality.md`。不push。
 
 2026-10-03 第964项 `bec759db` 已支持普通单表SELECT的有限 `FETCH FIRST/NEXT n ROW(S) WITH TIES` 子集，支持投影内plain-column排序键、OFFSET、Numeric／NULL peers和显式ASC；join／CTE／aggregate／DISTINCT／window／hidden或表达式排序键仍fail-closed。定向wire和PG18.6 direct oracle通过。首轮整套唯一失败由965修复；QRY-06仍partial，见 `docs/issue-964-ordinary-fetch-with-ties.md`。不push。

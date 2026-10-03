@@ -1291,3 +1291,5 @@ D已合并源 `f5f9ce81`；下一轮根/A快进相同源码后正式production�
 投影子查询上批支持普通单表的解析及行选择。JOIN、分组、DISTINCT、集合运算、CTE、锁定子句、命名窗口等未实现形态，以及虚拟目录排序，显式返回 `0A000`，不再当作普通无修饰查询静默执行。WITH TIES 的后续补充见第 200 项。这是明确的支持边界，不是 PostgreSQL 子查询全语法实现。
 
 本次执行范围、阶段及验收见 [收尾计划](review-closeout-plan.md)。
+
+2026-10-03 第966项 source `9d07b4e7`：`FETCH ... WITH TIES`原只接受无符号数字，`+1`被误报42601，负非零count也没有PG的2201W；parser tokenizer还会把LIMIT／OFFSET／FETCH前的正负号拆成独立token。现完整校验signed decimal，WITH TIES负非零返回2201W，`+n`与`-0`先规范化后解析；通用parser消费独立sign token，接受正数与负零并继续拒绝负非零。生产build、重编后的parser_phase1_test、FETCH boundary E2E及PG18.6 `set_operation_precedence`定向差分均通过。完整460 C++／197 E2E首轮仅parser_phase1_test因最初sign-token实现失败，其余测试通过；修正后该native测试单独重跑成功，但未在同一轮次重跑完整脚本。全量PG18.6差分完成462 case、failed=1；唯一差异是无关的`to_char_numeric`货币符号格式（见issue记录），FETCH所属case通过。QRY-06保持partial；详见 `docs/issue-966-fetch-signed-counts.md`。不push。
