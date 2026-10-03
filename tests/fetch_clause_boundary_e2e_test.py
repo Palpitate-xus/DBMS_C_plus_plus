@@ -37,6 +37,30 @@ def main():
             "SELECT id FROM fetch_boundary_rows ORDER BY id FETCH FIRST 1 ROWS WITH TIES;")
         assert state is None, (state, message)
         assert rows == [["1"]], rows
+        rows, state, message, _ = runner.ours_query(
+            client, server["sock"],
+            "SELECT id FROM fetch_boundary_rows ORDER BY id FETCH FIRST +1 ROWS WITH TIES;")
+        assert state is None, (state, message)
+        assert rows == [["1"]], rows
+        rows, state, message, _ = runner.ours_query(
+            client, server["sock"],
+            "SELECT id FROM fetch_boundary_rows ORDER BY id FETCH FIRST -1 ROWS WITH TIES;")
+        assert state == "2201W", (state, message)
+        rows, state, message, _ = runner.ours_query(
+            client, server["sock"],
+            "SELECT id FROM fetch_boundary_rows ORDER BY id FETCH FIRST -0 ROWS WITH TIES;")
+        assert state is None and rows == [], (state, rows, message)
+        rows, state, message, _ = runner.ours_query(
+            client, server["sock"],
+            "SELECT id FROM fetch_boundary_rows ORDER BY id LIMIT +1;")
+        assert state is None and rows == [["1"]], (state, rows, message)
+        rows, state, message, _ = runner.ours_query(
+            client, server["sock"],
+            "SELECT id FROM fetch_boundary_rows ORDER BY id OFFSET +1;")
+        assert state is None and rows == [["2"], ["3"]], (state, rows, message)
+        rows, state, message, _ = runner.ours_query(
+            client, server["sock"], "SELECT id FROM fetch_boundary_rows ORDER BY id;")
+        assert state is None and rows == [["1"], ["2"], ["3"]], (state, rows, message)
         print("[FETCH CLAUSE BOUNDARY E2E] passed")
     finally:
         runner.stop_ours(server)

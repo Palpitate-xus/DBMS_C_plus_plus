@@ -23,6 +23,9 @@ SELECT score AS amount, id FROM fetch_ties_plain ORDER BY amount FETCH FIRST 2 R
 SELECT id, score FROM fetch_ties_plain ORDER BY score OFFSET 1 ROW FETCH NEXT 1 ROW WITH TIES;
 SELECT label, id, score FROM fetch_ties_plain ORDER BY score DESC NULLS LAST, label ASC FETCH FIRST 2 ROWS WITH TIES;
 SELECT id, score FROM fetch_ties_plain ORDER BY score NULLS FIRST FETCH FIRST 1 ROW WITH TIES;
+SELECT id FROM fetch_ties_plain ORDER BY id FETCH FIRST +1 ROWS WITH TIES;
+SELECT id FROM fetch_ties_plain ORDER BY id FETCH FIRST -1 ROWS WITH TIES;
+SELECT id FROM fetch_ties_plain ORDER BY id FETCH FIRST -0 ROWS WITH TIES;
 DROP TABLE fetch_ties_plain;
 CREATE TABLE fetch_ties_char (id INT, code CHAR(3));
 INSERT INTO fetch_ties_char VALUES (1, 'a'), (2, 'a '), (3, 'b');

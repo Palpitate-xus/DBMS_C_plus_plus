@@ -482,6 +482,18 @@ int main() {
         assert(s2 && s2->fetchFirst && s2->limit == 5);
         assert(s2->fromClause && s2->fromClause->type == FromItem::Type::Table);
         assert(s2->fromClause->tableName == "t");
+        auto signedFetch = parser.parse(
+            "SELECT * FROM t FETCH FIRST +5 ROWS WITH TIES");
+        assert(signedFetch.success);
+        assert(asSelect(signedFetch.stmt)->limit == 5);
+        auto negativeZeroFetch = parser.parse(
+            "SELECT * FROM t FETCH FIRST -0 ROWS WITH TIES");
+        assert(negativeZeroFetch.success);
+        assert(asSelect(negativeZeroFetch.stmt)->limit == 0);
+        auto signedLimit = parser.parse("SELECT * FROM t LIMIT +5");
+        assert(signedLimit.success && asSelect(signedLimit.stmt)->limit == 5);
+        auto signedOffset = parser.parse("SELECT * FROM t OFFSET +2 ROWS");
+        assert(signedOffset.success && asSelect(signedOffset.stmt)->offset == 2);
         auto constantFetch = parser.parse("SELECT 42 FETCH FIRST ROW ONLY");
         assert(constantFetch.success);
         const auto* constantSelect = asSelect(constantFetch.stmt);

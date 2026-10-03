@@ -105,8 +105,18 @@ static std::string parseRoutineIdentifier(const std::string& token) {
 
 static bool parseNonNegativeInteger(const std::string& token, size_t& value) {
     if (token.empty()) return false;
-    for (unsigned char c : token) {
+    const bool negative = token.front() == '-';
+    const size_t firstDigit =
+        token.front() == '+' || negative ? 1 : 0;
+    if (firstDigit == token.size()) return false;
+    for (size_t index = firstDigit; index < token.size(); ++index) {
+        const unsigned char c = static_cast<unsigned char>(token[index]);
         if (!std::isdigit(c)) return false;
+    }
+    if (negative && std::any_of(
+            token.begin() + firstDigit,
+            token.end(), [](char c) { return c != '0'; })) {
+        return false;
     }
     try {
         size_t consumed = 0;
@@ -119,6 +129,29 @@ static bool parseNonNegativeInteger(const std::string& token, size_t& value) {
     } catch (...) {
         return false;
     }
+}
+
+static bool parseNonNegativeInteger(const std::vector<std::string>& tokens,
+                                    size_t& pos, size_t& value) {
+    if (pos >= tokens.size()) return false;
+
+    bool negative = false;
+    size_t numberPos = pos;
+    if (tokens[numberPos] == "+" || tokens[numberPos] == "-") {
+        negative = tokens[numberPos] == "-";
+        ++numberPos;
+    }
+    if (numberPos >= tokens.size()) return false;
+
+    size_t parsed = 0;
+    if (!parseNonNegativeInteger(tokens[numberPos], parsed) ||
+        (negative && parsed != 0)) {
+        return false;
+    }
+
+    value = parsed;
+    pos = numberPos + 1;
+    return true;
 }
 
 static bool parseSignedInteger(const std::string& token, int& value) {
@@ -3001,12 +3034,11 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
             ++pos;
         } else {
             size_t limit = 0;
-            if (!parseNonNegativeInteger(tokens[pos], limit)) {
+            if (!parseNonNegativeInteger(tokens, pos, limit)) {
                 r.error = "LIMIT requires a non-negative integer or ALL";
                 return r;
             }
             stmt->limit = limit;
-            ++pos;
         }
         if (pos < tokens.size() && toLower(tokens[pos]) == "with") {
             ++pos;
@@ -3022,12 +3054,11 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
             return r;
         }
         size_t offset = 0;
-        if (!parseNonNegativeInteger(tokens[pos], offset)) {
+        if (!parseNonNegativeInteger(tokens, pos, offset)) {
             r.error = "OFFSET requires a non-negative integer";
             return r;
         }
         stmt->offset = offset;
-        ++pos;
         if (pos < tokens.size() &&
             (toLower(tokens[pos]) == "row" || toLower(tokens[pos]) == "rows")) ++pos;
     }
@@ -3049,12 +3080,11 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
                 return r;
             }
             size_t limit = 0;
-            if (!parseNonNegativeInteger(tokens[pos], limit)) {
+            if (!parseNonNegativeInteger(tokens, pos, limit)) {
                 r.error = "FETCH requires a non-negative integer count";
                 return r;
             }
             stmt->limit = limit;
-            ++pos;
         }
 
         if (pos >= tokens.size() || (toLower(tokens[pos]) != "row" && toLower(tokens[pos]) != "rows")) {

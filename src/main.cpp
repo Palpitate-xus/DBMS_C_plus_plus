@@ -19641,8 +19641,36 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         throw dbms::DbError(
                             "42601", "LIMIT and FETCH cannot both be specified");
                     }
-                    const std::string count = hasCount ? tokens[1] : "1";
+                    const std::string rawCount = hasCount ? tokens[1] : "1";
+                    std::string count = rawCount;
                     size_t parsedCount = 0;
+                    const bool negativeCount = !count.empty() &&
+                        count.front() == '-';
+                    const size_t firstDigit =
+                        (!count.empty() &&
+                         (count.front() == '+' || count.front() == '-'))
+                            ? 1 : 0;
+                    if (firstDigit == count.size() ||
+                        !std::all_of(
+                            count.begin() + static_cast<std::ptrdiff_t>(firstDigit),
+                            count.end(), [](unsigned char c) {
+                                return std::isdigit(c) != 0;
+                            })) {
+                        throw dbms::DbError(
+                            "42601", "invalid FETCH count in WITH TIES");
+                    }
+                    if (negativeCount) {
+                        const bool isZero = std::all_of(
+                            count.begin() + 1, count.end(),
+                            [](char c) { return c == '0'; });
+                        if (!isZero) {
+                            throw dbms::DbError(
+                                "2201W", "FETCH row count must not be negative");
+                        }
+                        count = "0";
+                    } else if (firstDigit != 0) {
+                        count.erase(0, firstDigit);
+                    }
                     try {
                         size_t consumed = 0;
                         const unsigned long long value =
@@ -19655,7 +19683,24 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         throw dbms::DbError(
                             "42601", "invalid FETCH count in WITH TIES");
                     }
-
+                    count = std::to_string(parsedCount);
+                    if (hasCount && rawCount != count) {
+                        size_t countPos = dbms::skipLeadingSqlTrivia(
+                            sql, fetchPos + 5);
+                        if (countPos == std::string::npos ||
+                            countPos + direction.size() > sql.size()) {
+                            throw dbms::DbError(
+                                "42601", "invalid FETCH count in WITH TIES");
+                        }
+                        countPos = dbms::skipLeadingSqlTrivia(
+                            sql, countPos + direction.size());
+                        if (countPos == std::string::npos ||
+                            sql.compare(countPos, rawCount.size(), rawCount) != 0) {
+                            throw dbms::DbError(
+                                "42601", "invalid FETCH count in WITH TIES");
+                        }
+                        sql.replace(countPos, rawCount.size(), count);
+                    }
                     dbms::SQLParser parser;
                     const auto parsed = parser.parse(sql);
                     const auto* select = parsed.success
@@ -19731,7 +19776,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     }
 
                     static const std::regex fetchClause(
-                        R"(^fetch\s+(?:first|next)(?:\s+([0-9]+))?\s+rows?\s+with\s+ties\b)");
+                        R"(^fetch\s+(?:first|next)(?:\s+([+-]?[0-9]+))?\s+rows?\s+with\s+ties\b)");
                     std::smatch match;
                     const std::string tail = sql.substr(fetchPos);
                     if (!std::regex_search(tail, match, fetchClause)) {
