@@ -11997,7 +11997,9 @@ DBStatus StorageEngine::reindex(const std::string& dbname,
         }
         // A rollback generation is useful only if every dirty main/sidecar
         // page has reached disk before its path is renamed into the backup.
-        if (cached && !cached->flush()) {
+        // A closed cache has no resident pages to persist; REINDEX must still
+        // be able to replace its corrupt or otherwise failed generation.
+        if (cached && cached->isOpen() && !cached->flush()) {
             return finishFailure(DBStatus::IO_ERROR);
         }
 

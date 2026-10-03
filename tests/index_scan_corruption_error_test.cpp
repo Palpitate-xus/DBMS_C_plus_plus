@@ -119,6 +119,23 @@ int main() {
     const auto afterFailure = dbms::QueryPlanner::executePlanChecked(
         std::make_unique<dbms::TableScanOp>(&g_engine, database, "items"));
     assert(afterFailure.ok && afterFailure.rows == heap.rows);
+    // The rejected write must not claim to repair a pre-existing corrupt
+    // B-tree. Reindex is the explicit recovery operation; after it succeeds,
+    // both access paths and writes should be usable again.
+    assert(g_engine.reindex(database, "items") == dbms::DBStatus::OK);
+    const auto repairedPrimary = dbms::QueryPlanner::executePlanChecked(
+        std::make_unique<dbms::IndexScanOp>(
+            &g_engine, database, "items", "id", "1"));
+    assert(repairedPrimary.ok && repairedPrimary.rows == heap.rows);
+    const auto repairedSecondary = dbms::QueryPlanner::executePlanChecked(
+        std::make_unique<dbms::IndexScanOp>(
+            &g_engine, database, "items", "value", "7"));
+    assert(repairedSecondary.ok && repairedSecondary.rows == heap.rows);
+    assert(g_engine.update(database, "items", {{"value", "9"}}, {}) ==
+           dbms::DBStatus::OK);
+    const auto updated = g_engine.query(
+        database, "items", {"=id 1"}, {"value"});
+    assert(updated == std::vector<std::string>{"9 "});
     assert(g_engine.dropDatabase(database) == dbms::DBStatus::OK);
     finalCleanupTestData();
     std::cout << "[INDEX SCAN CORRUPTION ERROR] passed" << std::endl;
