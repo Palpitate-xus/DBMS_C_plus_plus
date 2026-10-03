@@ -1221,10 +1221,13 @@ bool SemiJoinOp::open() {
     };
 
     if (!keys_.empty()) {
-        // Multi-key correlated semi/anti join. Keep fields structural so a
-        // delimiter byte stored in one column cannot collide with a boundary
-        // between two columns. NULL state comes from the producing operator;
-        // an empty non-NULL string remains an ordinary key component.
+        // Multi-column semi/anti join. Keep fields structural so a delimiter
+        // byte stored in one column cannot collide with a boundary between
+        // columns. For IN/NOT IN, each inner row is compared as a SQL row
+        // value: a definite unequal field makes that row comparison FALSE,
+        // even if another field is NULL; UNKNOWN is retained only when no
+        // field proves inequality. EXISTS correlations use the same equality
+        // test but treat UNKNOWN as a non-match, as a WHERE clause does.
         std::vector<size_t> outerIdxs, innerIdxs;
         for (const auto& k : keys_) {
             size_t oi = outerTbl_.len, ii = innerTbl_.len;
@@ -1237,45 +1240,70 @@ bool SemiJoinOp::open() {
             innerIdxs.push_back(ii);
         }
         if (!inner_->open()) return false;
+        struct KeyValue {
+            std::string text;
+            bool isNull = false;
+        };
         const auto rowKey = [](const std::string& row,
                                const TableSchema& table,
                                const std::vector<size_t>& indexes,
-                               const Operator* source, bool& isNull) {
-            std::vector<std::string> key;
+                               const Operator* source) {
+            std::vector<KeyValue> key;
             key.reserve(indexes.size());
             for (const size_t index : indexes) {
-                if (source->lastColumnIsNull(index)) isNull = true;
-                key.push_back(StorageEngine::extractColumnValueStatic(
-                    row, table, index));
+                const bool isNull = source->lastColumnIsNull(index) ||
+                                    rawColumnIsNull(row, table, index);
+                key.push_back({StorageEngine::extractColumnValueStatic(
+                                   row, table, index),
+                               isNull});
             }
             return key;
         };
-        std::set<std::vector<std::string>> innerKeys;
-        bool innerHasNull = false;
-        bool innerHasRow = false;
+        std::vector<std::vector<KeyValue>> innerRows;
         std::string row;
         while (inner_->next(row)) {
-            innerHasRow = true;
-            bool isNull = false;
-            const std::vector<std::string> key = rowKey(
-                row, innerTbl_, innerIdxs, inner_.get(), isNull);
-            if (isNull) innerHasNull = true;
-            else innerKeys.insert(key);
+            innerRows.push_back(rowKey(row, innerTbl_, innerIdxs, inner_.get()));
+        }
+        if (inner_->hasError()) {
+            return propagateChildError(inner_.get(), "semi-join inner scan failed");
         }
         inner_->close();
         if (!outer_->open()) return false;
         while (outer_->next(row)) {
-            bool isNull2 = false;
-            const std::vector<std::string> outerKey = rowKey(
-                row, outerTbl_, outerIdxs, outer_.get(), isNull2);
-            const bool found = !isNull2 && innerKeys.count(outerKey) > 0;
+            const std::vector<KeyValue> outerKey = rowKey(
+                row, outerTbl_, outerIdxs, outer_.get());
+            bool found = false;
+            bool comparisonUnknown = false;
+            for (const auto& innerKey : innerRows) {
+                bool rowUnequal = false;
+                bool rowUnknown = false;
+                for (size_t index = 0; index < outerKey.size(); ++index) {
+                    const auto equal = StorageEngine::compareValues(
+                        outerTbl_.cols[outerIdxs[index]],
+                        outerKey[index].text, outerKey[index].isNull,
+                        innerKey[index].text, innerKey[index].isNull, "=");
+                    if (equal == StorageEngine::PredicateTruth::False) {
+                        rowUnequal = true;
+                        break;
+                    }
+                    if (equal == StorageEngine::PredicateTruth::Unknown)
+                        rowUnknown = true;
+                }
+                if (!rowUnequal && !rowUnknown) {
+                    found = true;
+                    break;
+                }
+                if (!rowUnequal && rowUnknown) comparisonUnknown = true;
+            }
             const bool keep = nullSemantics_ == NullSemantics::ExistsCorrelation
                 ? (anti_ ? !found : found)
                 : (anti_
-                    ? (!innerHasRow || (!isNull2 && !found && !innerHasNull))
+                    ? (innerRows.empty() || (!found && !comparisonUnknown))
                     : found);
             if (keep) rememberOuterRow(row);
         }
+        if (outer_->hasError())
+            return propagateChildError(outer_.get(), "semi-join outer scan failed");
         outer_->close();
         return true;
     }

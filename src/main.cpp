@@ -11530,11 +11530,40 @@ static bool parseSimpleSemiJoinSubquery(
     if (opPos == std::string::npos) return false;
 
     const size_t keywordLength = anti ? 6 : 2;
-    std::string outerColumn = trim(clause.substr(0, opPos));
-    if (outerColumn.empty() || outerColumn.find_first_of(" ()\t\r\n") != std::string::npos)
+    std::string outerList = trim(clause.substr(0, opPos));
+    bool outerListParenthesized = false;
+    if (!outerList.empty() && outerList.front() == '(') {
+        const size_t outerEnd = findMatchingParen(outerList, 0);
+        if (outerEnd == outerList.size() - 1) {
+            outerList = trim(outerList.substr(1, outerEnd - 1));
+            outerListParenthesized = true;
+        }
+    }
+    std::vector<std::string> outerColumns = splitTopLevelComma(outerList);
+    if (outerColumns.empty() || (outerColumns.size() > 1 && !outerListParenthesized))
         return false;
-    const size_t outerDot = outerColumn.rfind('.');
-    if (outerDot != std::string::npos) outerColumn = trim(outerColumn.substr(outerDot + 1));
+    const auto normalizeColumnReference = [](std::string name) {
+        name = trim(name);
+        if (name.empty() || name.find_first_of(" ()\t\r\n,") != std::string::npos)
+            return std::string();
+        const size_t dot = name.rfind('.');
+        if (dot != std::string::npos) name = trim(name.substr(dot + 1));
+        if (name.size() >= 2 && name.front() == '"' && name.back() == '"') {
+            name = stripQuotes(name);
+        }
+        if (name.empty() ||
+            !((name.front() >= 'A' && name.front() <= 'Z') ||
+              (name.front() >= 'a' && name.front() <= 'z') || name.front() == '_'))
+            return std::string();
+        for (const unsigned char ch : name) {
+            if (!std::isalnum(ch) && ch != '_' && ch != '$') return std::string();
+        }
+        return name;
+    };
+    for (std::string& column : outerColumns) {
+        column = normalizeColumnReference(std::move(column));
+        if (column.empty()) return false;
+    }
 
     size_t parenStart = opPos + keywordLength;
     while (parenStart < clause.size() && isspace(static_cast<unsigned char>(clause[parenStart])))
@@ -11551,12 +11580,15 @@ static bool parseSimpleSemiJoinSubquery(
 
     const std::string innerColumns = trim(inner.substr(6, fromPos - 6));
     const auto selectedColumns = splitTopLevelComma(innerColumns);
-    if (selectedColumns.size() != 1) return false;
-    std::string innerColumn = trim(selectedColumns.front());
-    if (innerColumn.empty() || innerColumn == "distinct" ||
-        innerColumn.find_first_of(" ()\t\r\n,") != std::string::npos) return false;
-    const size_t innerDot = innerColumn.rfind('.');
-    if (innerDot != std::string::npos) innerColumn = trim(innerColumn.substr(innerDot + 1));
+    if (selectedColumns.size() != outerColumns.size()) return false;
+    std::vector<std::string> innerColumnsByName;
+    innerColumnsByName.reserve(selectedColumns.size());
+    for (std::string selected : selectedColumns) {
+        if (trim(selected) == "distinct") return false;
+        selected = normalizeColumnReference(std::move(selected));
+        if (selected.empty()) return false;
+        innerColumnsByName.push_back(std::move(selected));
+    }
 
     const size_t wherePos = findTopLevelKeyword(inner, "where", fromPos + 4);
     const size_t groupPos = findTopLevelKeyword(inner, "group by", fromPos + 4);
@@ -11584,7 +11616,13 @@ static bool parseSimpleSemiJoinSubquery(
         }
         return false;
     };
-    if (!hasColumn(outerSchema, outerColumn) || !hasColumn(innerSchema, innerColumn)) return false;
+    std::vector<std::pair<std::string, std::string>> rowColumns;
+    rowColumns.reserve(outerColumns.size());
+    for (size_t index = 0; index < outerColumns.size(); ++index) {
+        if (!hasColumn(outerSchema, outerColumns[index]) ||
+            !hasColumn(innerSchema, innerColumnsByName[index])) return false;
+        rowColumns.emplace_back(outerColumns[index], innerColumnsByName[index]);
+    }
 
     std::vector<dbms::StorageEngine::Condition> innerConds;
     if (wherePos != std::string::npos) {
@@ -11605,9 +11643,10 @@ static bool parseSimpleSemiJoinSubquery(
 
     outSpec.dbname = outerDb;
     outSpec.tablename = innerTable;
-    outSpec.outerColumn = outerColumn;
-    outSpec.innerColumn = innerColumn;
+    outSpec.outerColumn = rowColumns.front().first;
+    outSpec.innerColumn = rowColumns.front().second;
     outSpec.innerConds = std::move(innerConds);
+    if (rowColumns.size() > 1) outSpec.correlations = std::move(rowColumns);
     outSpec.anti = anti;
     return true;
 }
