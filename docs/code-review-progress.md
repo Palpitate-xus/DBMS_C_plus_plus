@@ -5,6 +5,8 @@
 2026-10-02 第948项 source `d1dee20b` 整合为D merge `cdca3fea`：TEMP index现在有真实pg_class身份、临时持久性与table dependency；DROP INDEX按当前临时namespace/OID清理，DROP TABLE和DISCARD TEMP按owning session清理index/table身份并让savepoint回滚恢复相同OID及物理索引。真实旧协议/C++清理反证与PG18 oracle通过；接受worktree全自有55生产对象签名、22 C++、16 wire含完整协议、19不同PG18 actual均exit0。D整合时解决build registry同段冲突并保留双方条目。此为TEMP索引局部生命周期证据；MVCC/WAL/catalog全面语义仍partial，合入954/955后的D完整统一门禁尚待运行。总账仍273项，22 complete／140 partial／96 unverified／15 deferred_by_user；Actions仍本地disabled，未push。
 # 代码复查进度（续接第 178 项）
 
+2026-10-03 第962项 source `36b73cd5`：`FETCH ... WITH TIES` 外层改写曾无条件回0A000；无顶层ORDER BY时现在按PG回42601，带ORDER BY仍明确fail-closed为0A000（合法WITH TIES执行尚未实现）。生产build、wire错误/连接恢复及set-operation FETCH ONLY邻居测试通过；PG18.6 direct oracle版本180006确认无ORDER的SQLSTATE。未跑PG18 generic diff及全量套件；QRY-06仍partial，详见 `docs/issue-962-fetch-ties-order-error.md`。
+
 2026-10-03 第961项 source `9d095496`：集合运算 `ORDER BY` 按重名输出列的名称排序过去静默选第一列；现 unquoted 名称按SQL规则折叠、quoted 名称按精确字面量和双引号转义解析，多重匹配返回 `42702`。最终生产build、结构化wire测试（含失败后同连接继续）与PG18.6 direct SQLSTATE oracle通过；pg_diff受默认pgref版本17.2阻止，没有算成PG18全差分；未跑全套。QRY-06仍partial，详见 `docs/issue-961-ambiguous-set-order-name.md`。
 
 2026-10-03 第960项 source `439a8ef7`：集合运算尾部支持多个输出列名／序号排序键，逐键应用方向、文本/数值比较、显式collation和NULL顺序。最终 `bash scripts/build.sh` 与真实wire结构化回归 `tests/set_operation_structured_protocol_e2e_test.py` 通过；PostgreSQL 18.6 local direct query oracle版本为180006并返回相同行序。通用runner预检发现配置的docker `pgref` 是17.2，拒绝后没有把该尝试计作PG18 diff；未运行全量套件。QRY-06仍partial，详见 `docs/issue-960-set-operation-multi-key-order.md`。

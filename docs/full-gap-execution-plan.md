@@ -1,5 +1,7 @@
 # 总差距清单执行计划
 
+2026-10-03 第962项 `36b73cd5` 修复FETCH WITH TIES缺少ORDER BY的SQLSTATE，编译、专项wire与PG18.6 direct SQLSTATE oracle均通过；完整WITH TIES结果仍暂不支持，明确返回0A000。未执行全量验证，QRY-06继续partial，见 `docs/issue-962-fetch-ties-order-error.md`。不push。
+
 2026-10-03 第961项 `9d095496` 本地提交后，重复set-operation输出名上的 `ORDER BY name` 不再错误绑定首列，而是按PG返回42702；有效序号仍不歧义。生产构建、结构化wire专项与PG18.6 direct oracle通过。全量门禁未跑，QRY-06仍partial，详见 `docs/issue-961-ambiguous-set-order-name.md`。不push。
 
 2026-10-03 第960项 `439a8ef7` 已本地提交：集合运算整体ORDER BY现按多个输出列名／序号稳定逐键排序，保持各键ASC/DESC、collation和NULL顺序；`bash scripts/build.sh`、结构化wire回归及PostgreSQL 18.6 direct read-only oracle通过。通用pg_diff预检拒绝配置的17.2 Docker实例，未计为PG18差分；最终源码未跑全套门禁。QRY-06仍partial，详见 `docs/issue-960-set-operation-multi-key-order.md`。不push。
