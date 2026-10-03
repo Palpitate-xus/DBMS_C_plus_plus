@@ -17,6 +17,11 @@ constexpr uint32_t kTxnIdVersion = 1;
 constexpr size_t kLegacyStateSize = sizeof(uint64_t) * 2;
 constexpr size_t kStatePayloadSize = sizeof(uint32_t) * 2 + sizeof(uint64_t) * 2;
 constexpr size_t kStateSize = kStatePayloadSize + sizeof(uint64_t);
+// HeapTupleFields currently stores xmin/xmax as 32-bit values and there is
+// no epoch/freeze scheme to disambiguate wraparound.  Do not allocate a full
+// transaction ID that the durable tuple header would silently truncate.
+constexpr uint64_t kMaxHeapTupleXid =
+    std::numeric_limits<uint32_t>::max();
 
 uint64_t checksum(const char* data, size_t size) {
     uint64_t hash = 1469598103934665603ULL;
@@ -114,7 +119,7 @@ bool TxnIdGenerator::save(uint64_t nextTxId,
 
 uint64_t TxnIdGenerator::nextTxId() {
     std::lock_guard<std::mutex> lock(mtx_);
-    if (!healthy_ || nextTxId_ == std::numeric_limits<uint64_t>::max()) return 0;
+    if (!healthy_ || nextTxId_ > kMaxHeapTupleXid) return 0;
 
     const uint64_t id = nextTxId_;
     const uint64_t persistedNext = id + 1;

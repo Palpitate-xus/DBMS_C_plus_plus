@@ -98,6 +98,20 @@ int childMode(const std::string& mode) {
     if (mode == "exhausted") {
         return generator.nextTxId() == 0 ? 0 : 1;
     }
+    if (mode == "heap_xid_boundary") {
+        const uint64_t heapXidMax =
+            std::numeric_limits<uint32_t>::max();
+        if (generator.nextTxId() != heapXidMax ||
+            generator.maxCommittedTxId() != heapXidMax ||
+            generator.nextTxId() != 0) {
+            return 1;
+        }
+        uint64_t next = 0;
+        uint64_t highWater = 0;
+        return readCurrentState(next, highWater) &&
+                       next == heapXidMax + 1 && highWater == heapXidMax
+                   ? 0 : 1;
+    }
     if (mode == "save_failure") {
         if (generator.nextTxId() != 1 || generator.maxCommittedTxId() != 1 ||
             ::chmod(".", 0500) != 0) return 1;
@@ -167,11 +181,18 @@ int main(int argc, char** argv) {
                       std::numeric_limits<uint64_t>::max() - 1, false);
     assert(runChild(executable, exhausted, "exhausted"));
 
+    const fs::path heapXidBoundary = makeCase(base, "heap_xid_boundary");
+    const uint64_t heapXidMax = std::numeric_limits<uint32_t>::max();
+    writeCurrentState(heapXidBoundary / ".txnid", heapXidMax,
+                      heapXidMax - 1, false);
+    assert(runChild(executable, heapXidBoundary, "heap_xid_boundary"));
+    assert(runChild(executable, heapXidBoundary, "exhausted"));
+
     const fs::path failedSave = makeCase(base, "save_failure");
     assert(runChild(executable, failedSave, "save_failure"));
 
     fs::permissions(failedSave, fs::perms::owner_all, fs::perm_options::replace);
     fs::remove_all(base);
-    std::cout << "[TXNID] strict load, atomic allocation, and exhaustion OK\n";
+    std::cout << "[TXNID] strict load, atomic allocation, tuple-XID boundary, and exhaustion OK\n";
     return 0;
 }

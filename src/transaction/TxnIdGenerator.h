@@ -6,7 +6,9 @@
 
 namespace dbms {
 
-// Persistent 64-bit transaction ID generator.
+// Persistent 64-bit transaction ID generator. Allocation currently stops at
+// the 32-bit heap-tuple XID limit because tuple headers do not store an epoch
+// and the engine does not yet implement freeze/wraparound semantics.
 // Thread-safe singleton. Stores nextTxId and a durable allocation high-water
 // mark in a checksummed file.  The legacy maxCommittedTxId() name is retained
 // for callers; snapshot xmax must conservatively include allocated-but-aborted
