@@ -1,5 +1,7 @@
 # 总差距清单执行计划
 
+2026-10-03 第973项 `d6ce9adf` 修复semi-join把空字符串误判成SQL NULL的缺陷，标量／复合 `IN`／`NOT IN` 均改用权威NULL元数据；补充C++、wire与兼容fixture。最终正式注册套件 `DBMS_PROTOCOL_TEST_TIMEOUT=120 DBMS_PROTOCOL_STARTUP_TIMEOUT=120 DBMS_PROTOCOL_SHUTDOWN_TIMEOUT=120 bash scripts/build_tests.sh` exit 0，输出 `All tests passed`。同一源码对本地真实PostgreSQL 18.6（`server_version_num=180006`、en_US.utf8）运行完整兼容差分，`cases=464 failed=0`、exit 0。这是最新基线的验证结果；此前PG17预检受阻及较早PG18差分timeout记录仍作历史保留。总账仍273项：22 complete、140 partial、96 unverified、15 deferred_by_user；QRY-04／QRY-10等只因局部测试通过不改为complete。未push；GitHub Actions禁用；用户跳过的安全/TDE继续deferred。详情见 `docs/issue-973-semi-join-empty-text-null.md`。
+
 2026-10-03 第972项 `e5cc492b` 已本地提交：单表semi/anti-join计划此前仅传递排序列与方向，显式 `NULLS FIRST/LAST` 在QueryPlanner上下文中丢失，SortOp错误应用默认Null顺序；同时sorter无法区分空文本和SQL NULL。现保留显式Null放置并从行来源读取实际NULL状态；显式Null排序暂不走尚不携带该排序属性的并行GatherMerge路径。旧E2E明确复现FIRST变LAST，修复后通过；稳定生产build、排序terminator与结构化表wire回归通过，本机PG18.6只读oracle确认行序。QRY-10仍partial，详情见 `docs/issue-972-order-by-null-semantics-after-subquery.md`。全量suite与冻结组合差分待最后验收。不push。
 
 2026-10-03 第971项 `f0317ce6` 已本地提交：修复多列 `IN`／`NOT IN` 的SQL行比较三值逻辑。旧二进制在内层含 `(3,NULL)` 时把外层四行全部保留，错误地忽略“其他字段已确定不等”；PG18.6 row-comparison oracle确认应区分TRUE／UNKNOWN，空右侧仍令NOT IN为真。新增的协议E2E及相关subquery／外键可见性／完整协议回归通过；生产build已通过。QRY-04保持partial，相关子查询表达式、类型转换、ANY/ALL及完整语义仍待审；本轮全套测试待合并独立排序修复后再跑。详情见 `docs/issue-971-composite-not-in-null-semantics.md`。不push。
