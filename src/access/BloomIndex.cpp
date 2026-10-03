@@ -4,6 +4,8 @@
 #include <cstring>
 #include <limits>
 #include <new>
+#include <cerrno>
+#include <sys/stat.h>
 #include <stdexcept>
 
 namespace dbms {
@@ -105,21 +107,26 @@ void BloomIndex::rebuildBitsLocked(size_t sizingEntryCount) {
     for (const auto& kv : entries_) addKeyBits(kv.first);
 }
 
-bool BloomIndex::loadFromFile() {
-    std::ifstream in(filePath_, std::ios::binary);
-    if (!in) {
-        std::error_code ec;
-        const bool exists = std::filesystem::exists(filePath_, ec);
-        if (ec || exists) return false;
-
-        // Genuinely absent file: start empty (create path).
+bool BloomIndex::loadFromFile(bool allowMissing) {
+    entries_.clear();
+    bits_.clear();
+    m_ = 0;
+    struct stat before {};
+    if (::lstat(filePath_.c_str(), &before) != 0) {
+        if (errno != ENOENT || !allowMissing) return false;
         entries_.clear();
         bits_.clear();
         m_ = 0;
         loaded_ = true;
         dirty_ = false;
+        generationValid_ = false;
+        buildPending_ = false;
         return true;
     }
+    if (!S_ISREG(before.st_mode) || !captureFileGeneration()) return false;
+
+    std::ifstream in(filePath_, std::ios::binary);
+    if (!in) return false;
 
     try {
         std::string buf((std::istreambuf_iterator<char>(in)),
@@ -175,6 +182,7 @@ bool BloomIndex::loadFromFile() {
         return false;
     }
 
+    if (!fileGenerationMatches()) return false;
     loaded_ = true;
     dirty_ = false;
     return true;
@@ -208,14 +216,83 @@ bool BloomIndex::saveToFile() {
     std::error_code ec;
     std::filesystem::rename(tmp, filePath_, ec);
     if (ec) return false;
+    if (!captureFileGeneration()) return false;
     dirty_ = false;
     return true;
+}
+
+bool BloomIndex::captureFileGeneration() {
+    struct stat status {};
+    if (::lstat(filePath_.c_str(), &status) != 0 ||
+        !S_ISREG(status.st_mode)) {
+        generationValid_ = false;
+        buildPending_ = false;
+        return false;
+    }
+    device_ = status.st_dev;
+    inode_ = status.st_ino;
+    fileSize_ = status.st_size;
+    mtimeSec_ = status.st_mtim.tv_sec;
+    mtimeNsec_ = status.st_mtim.tv_nsec;
+    ctimeSec_ = status.st_ctim.tv_sec;
+    ctimeNsec_ = status.st_ctim.tv_nsec;
+    generationValid_ = true;
+    buildPending_ = false;
+    return true;
+}
+
+bool BloomIndex::fileGenerationMatches() const {
+    if (!generationValid_) return false;
+    struct stat status {};
+    return ::lstat(filePath_.c_str(), &status) == 0 &&
+           S_ISREG(status.st_mode) && status.st_dev == device_ &&
+           status.st_ino == inode_ && status.st_size == fileSize_ &&
+           status.st_mtim.tv_sec == mtimeSec_ &&
+           status.st_mtim.tv_nsec == mtimeNsec_ &&
+           status.st_ctim.tv_sec == ctimeSec_ &&
+           status.st_ctim.tv_nsec == ctimeNsec_;
 }
 
 bool BloomIndex::open() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (loaded_) return true;
-    return loadFromFile();
+    return loadFromFile(true);
+}
+
+bool BloomIndex::openExisting() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (loaded_) return fileGenerationMatches();
+    return loadFromFile(false);
+}
+
+bool BloomIndex::openForBuild() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    entries_.clear();
+    bits_.clear();
+    m_ = 0;
+    loaded_ = true;
+    dirty_ = true;
+    generationValid_ = false;
+    buildPending_ = true;
+    return true;
+}
+
+bool BloomIndex::hasStaleFileGeneration() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!loaded_) return true;
+    if (!generationValid_) return !buildPending_;
+    return !fileGenerationMatches();
+}
+
+void BloomIndex::discard() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    entries_.clear();
+    bits_.clear();
+    m_ = 0;
+    loaded_ = false;
+    dirty_ = false;
+    generationValid_ = false;
+    buildPending_ = false;
 }
 
 bool BloomIndex::close() {

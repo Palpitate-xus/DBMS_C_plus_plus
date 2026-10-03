@@ -6,6 +6,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <sys/types.h>
 #include <vector>
 
 namespace dbms {
@@ -36,6 +37,10 @@ public:
                uint32_t bitsPerEntry = 128, uint32_t hashes = 7);
 
     bool open();
+    // Runtime access must distinguish a missing persisted relation from an
+    // intentionally empty mapping being built by CREATE INDEX/REINDEX.
+    bool openExisting();
+    bool openForBuild();
     bool close();
     bool flush();
 
@@ -54,6 +59,8 @@ public:
 
     void clear();
     bool isOpen() const { return loaded_; }
+    bool hasStaleFileGeneration() const;
+    void discard();
     const std::filesystem::path& filePath() const { return filePath_; }
     bool hasDirtyData() const { return dirty_; }
     size_t size() const;
@@ -76,8 +83,20 @@ private:
     bool probeKeyBits(const std::string& key) const;
     void rebuildBitsLocked(size_t sizingEntryCount = 0);
     void sizeBitsLocked(size_t entryCount);
-    bool loadFromFile();
+    bool loadFromFile(bool allowMissing);
     bool saveToFile();
+    bool captureFileGeneration();
+    bool fileGenerationMatches() const;
+
+    bool generationValid_ = false;
+    dev_t device_ = 0;
+    ino_t inode_ = 0;
+    off_t fileSize_ = 0;
+    int64_t mtimeSec_ = 0;
+    int64_t mtimeNsec_ = 0;
+    int64_t ctimeSec_ = 0;
+    int64_t ctimeNsec_ = 0;
+    bool buildPending_ = false;
 };
 
 }  // namespace dbms

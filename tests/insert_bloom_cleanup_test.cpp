@@ -5,6 +5,7 @@
 #include "test_utils.h"
 
 #include <cassert>
+#include <filesystem>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -38,10 +39,11 @@ void test_failed_insert_removes_earlier_bloom_entries() {
     dbms::BloomIndex* first = g_engine.getBloomIndex(database, "t", "b1");
     dbms::BloomIndex* second = g_engine.getBloomIndex(database, "t", "b2");
     assert(first != nullptr && second != nullptr);
-    assert(second->close());
-
-    // b1 is inserted first. The closed b2 then forces abortIndexUpdate after
-    // b1 already contains the new RID.
+    // b1 is inserted first. Removing b2's backing relation forces
+    // abortIndexUpdate after b1 already contains the new RID; a runtime
+    // lookup must not reopen the deleted sidecar as an empty map.
+    const auto secondPath = second->filePath();
+    assert(std::filesystem::remove(secondPath));
     assert(g_engine.insert(
                database, "t",
                {{"id", "1"}, {"b1", "first-key"}, {"b2", "second-key"}}) ==
@@ -50,8 +52,15 @@ void test_failed_insert_removes_earlier_bloom_entries() {
     assert(first->search("first-key").empty());
 
     // Reusing the slot must create exactly one mapping, not expose the stale
-    // Bloom RID left by the failed attempt plus the successful retry.
-    assert(second->open());
+    // Bloom RID left by the failed attempt plus the successful retry. Rebuild
+    // b2 explicitly from the still-empty heap first.
+    assert(g_engine.dropBloomIndex(database, "t", "b2") ==
+           dbms::DBStatus::OK);
+    assert(g_engine.createBloomIndex(database, "t", "b2") ==
+           dbms::DBStatus::OK);
+    first = g_engine.getBloomIndex(database, "t", "b1");
+    second = g_engine.getBloomIndex(database, "t", "b2");
+    assert(first != nullptr && second != nullptr);
     assert(g_engine.insert(
                database, "t",
                {{"id", "1"}, {"b1", "first-key"}, {"b2", "second-key"}}) ==

@@ -44,6 +44,7 @@ class VisibilityMap;
 class CommitLog;
 class WALManager;
 class HashIndex;
+class BloomIndex;
 class SPGiSTIndex;
 
 // MVCC header size per row
@@ -1798,6 +1799,12 @@ private:
                                              const std::string& tablename) const;
     mutable std::map<std::string, std::unique_ptr<HashIndex>> hashIndexCache_;
     mutable std::map<std::string, std::unique_ptr<class BloomIndex>> bloomIndexCache_;
+    HashIndex* getHashIndexForBuild(const std::string& dbname,
+                                    const std::string& tablename,
+                                    const std::string& colname) const;
+    BloomIndex* getBloomIndexForBuild(const std::string& dbname,
+                                      const std::string& tablename,
+                                      const std::string& colname) const;
 
     // SP-GiST index cache
     mutable std::mutex spGiSTMutex_;

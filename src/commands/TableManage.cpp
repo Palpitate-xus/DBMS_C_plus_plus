@@ -7862,14 +7862,39 @@ HashIndex* StorageEngine::getHashIndex(const std::string& dbname,
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     std::string key = dbname + "." + tablename + "." + colname;
     auto it = hashIndexCache_.find(key);
-    if (it != hashIndexCache_.end()) return it->second.get();
+    if (it != hashIndexCache_.end()) {
+        if (it->second && !it->second->hasStaleFileGeneration())
+            return it->second.get();
+        if (it->second) it->second->discard();
+        hashIndexCache_.erase(it);
+    }
     auto idx = std::make_unique<HashIndex>(hashIndexPath(dbname, tablename, colname));
-    if (idx->open()) {
+    if (idx->openExisting()) {
         HashIndex* ptr = idx.get();
         hashIndexCache_[key] = std::move(idx);
         return ptr;
     }
     return nullptr;
+}
+
+HashIndex* StorageEngine::getHashIndexForBuild(
+        const std::string& dbname, const std::string& tablename,
+        const std::string& colname) const {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+    const std::string key = dbname + "." + tablename + "." + colname;
+    auto it = hashIndexCache_.find(key);
+    if (it != hashIndexCache_.end()) {
+        if (it->second && !it->second->hasStaleFileGeneration())
+            return it->second.get();
+        if (it->second) it->second->discard();
+        hashIndexCache_.erase(it);
+    }
+    auto index = std::make_unique<HashIndex>(
+        hashIndexPath(dbname, tablename, colname));
+    if (!index->openForBuild()) return nullptr;
+    HashIndex* result = index.get();
+    hashIndexCache_[key] = std::move(index);
+    return result;
 }
 
 DBStatus StorageEngine::createHashIndex(const std::string& dbname,
@@ -7896,7 +7921,7 @@ DBStatus StorageEngine::createHashIndex(const std::string& dbname,
     existing.insert(colname);
 
     // Build hash index from existing data
-    HashIndex* hidx = getHashIndex(dbname, tablename, colname);
+    HashIndex* hidx = getHashIndexForBuild(dbname, tablename, colname);
     if (!hidx) return DBStatus::IO_ERROR;
     const std::string cacheKey = dbname + "." + tablename + "." + colname;
     auto discardIndex = [&]() {
@@ -7994,14 +8019,39 @@ BloomIndex* StorageEngine::getBloomIndex(const std::string& dbname,
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     std::string key = dbname + "." + tablename + "." + colname;
     auto it = bloomIndexCache_.find(key);
-    if (it != bloomIndexCache_.end()) return it->second.get();
+    if (it != bloomIndexCache_.end()) {
+        if (it->second && !it->second->hasStaleFileGeneration())
+            return it->second.get();
+        if (it->second) it->second->discard();
+        bloomIndexCache_.erase(it);
+    }
     auto idx = std::make_unique<BloomIndex>(bloomIndexPath(dbname, tablename, colname));
-    if (idx->open()) {
+    if (idx->openExisting()) {
         BloomIndex* ptr = idx.get();
         bloomIndexCache_[key] = std::move(idx);
         return ptr;
     }
     return nullptr;
+}
+
+BloomIndex* StorageEngine::getBloomIndexForBuild(
+        const std::string& dbname, const std::string& tablename,
+        const std::string& colname) const {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+    const std::string key = dbname + "." + tablename + "." + colname;
+    auto it = bloomIndexCache_.find(key);
+    if (it != bloomIndexCache_.end()) {
+        if (it->second && !it->second->hasStaleFileGeneration())
+            return it->second.get();
+        if (it->second) it->second->discard();
+        bloomIndexCache_.erase(it);
+    }
+    auto index = std::make_unique<BloomIndex>(
+        bloomIndexPath(dbname, tablename, colname));
+    if (!index->openForBuild()) return nullptr;
+    BloomIndex* result = index.get();
+    bloomIndexCache_[key] = std::move(index);
+    return result;
 }
 
 DBStatus StorageEngine::createBloomIndex(const std::string& dbname,
@@ -8026,7 +8076,7 @@ DBStatus StorageEngine::createBloomIndex(const std::string& dbname,
     if (existing.count(colname)) return DBStatus::OK;  // already exists
     existing.insert(colname);
 
-    BloomIndex* bidx = getBloomIndex(dbname, tablename, colname);
+    BloomIndex* bidx = getBloomIndexForBuild(dbname, tablename, colname);
     if (!bidx) return DBStatus::IO_ERROR;
     const std::string cacheKey = dbname + "." + tablename + "." + colname;
     auto discardIndex = [&]() {
@@ -16354,7 +16404,7 @@ DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
     if (indexStatus != DBStatus::OK) return indexStatus;
 
     for (const auto& cn : hashCols) {
-        HashIndex* hidx = getHashIndex(dbname, tablename, cn);
+        HashIndex* hidx = getHashIndexForBuild(dbname, tablename, cn);
         if (!hidx) return DBStatus::IO_ERROR;
         hidx->clear();
         TableSchema rebuilt = getTableSchema(dbname, tablename);
@@ -16375,7 +16425,7 @@ DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
     }
     const auto bloomCols = getBloomIndexedColumns(dbname, tablename);
     for (const auto& cn : bloomCols) {
-        BloomIndex* bidx = getBloomIndex(dbname, tablename, cn);
+        BloomIndex* bidx = getBloomIndexForBuild(dbname, tablename, cn);
         if (!bidx) return DBStatus::IO_ERROR;
         bidx->clear();
         TableSchema rebuilt = getTableSchema(dbname, tablename);
@@ -16664,7 +16714,7 @@ DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
     DBStatus indexStatus = reindex(dbname, tablename);
     if (indexStatus != DBStatus::OK) return indexStatus;
     for (const auto& cn : hashCols) {
-        HashIndex* hidx = getHashIndex(dbname, tablename, cn);
+        HashIndex* hidx = getHashIndexForBuild(dbname, tablename, cn);
         if (!hidx) return DBStatus::IO_ERROR;
         hidx->clear();
         TableSchema rebuilt = getTableSchema(dbname, tablename);
@@ -38356,13 +38406,13 @@ bool StorageEngine::resetTableStorage(
             if (!index || !index->flush()) return false;
         }
         for (const auto& column : hashColumns) {
-            HashIndex* index = getHashIndex(dbname, tablename, column);
+            HashIndex* index = getHashIndexForBuild(dbname, tablename, column);
             if (!index) return false;
             index->clear();
             if (!index->flush()) return false;
         }
         for (const auto& column : bloomColumns) {
-            BloomIndex* index = getBloomIndex(dbname, tablename, column);
+            BloomIndex* index = getBloomIndexForBuild(dbname, tablename, column);
             if (!index) return false;
             index->clear();
             if (!index->flush()) return false;
@@ -38549,13 +38599,13 @@ bool StorageEngine::rebuildIndexesAfterRecovery(
             };
 
             for (const auto& columnName : hashColumns) {
-                if (!populate(getHashIndex(dbname, tableName, columnName),
+                if (!populate(getHashIndexForBuild(dbname, tableName, columnName),
                               columnName)) {
                     return false;
                 }
             }
             for (const auto& columnName : bloomColumns) {
-                if (!populate(getBloomIndex(dbname, tableName, columnName),
+                if (!populate(getBloomIndexForBuild(dbname, tableName, columnName),
                               columnName)) {
                     return false;
                 }
@@ -41179,23 +41229,61 @@ bool StorageEngine::physicalRestoreLocked(
             }
         }
 
-        // The backup intentionally contains only empty init/definition state
-        // for UNLOGGED relations, not their mutable B-tree files. This is an
-        // explicit restore operation, so construct those derived relations
-        // before reporting success rather than relying on runtime lookups to
-        // create an empty tree. Keep the displaced generations until this
-        // work succeeds so a rebuild failure can still roll the restore back.
+        // Public physical backups omit mutable UNLOGGED forks, while
+        // transaction snapshots deliberately include them. Distinguish the
+        // two from the restored heap files: reset omitted forks from their
+        // init images and rebuild every index, but preserve transaction
+        // snapshots' rows and reindex their B-trees. Keep displaced
+        // generations until this work succeeds so a rebuild failure can
+        // still roll the restore back.
         restoredCachesOpened = true;
         for (const auto& tableName : getTableNames(dbname)) {
             const TableSchema table = getTableSchema(dbname, tableName);
             if (!table.isUnlogged) continue;
-            bool initialized = reindex(dbname, tableName) == DBStatus::OK;
-            if (initialized && std::any_of(
-                    table.cols, table.cols + table.len,
-                    [](const Column& column) { return column.isVariableLength; })) {
-                BPTree toastIndex(toastIndexPath(dbname, tableName));
-                initialized = toastIndex.open() && toastIndex.flush();
+
+            std::set<std::filesystem::path> mainHeapForks;
+            if (table.partitionType == TableSchema::PartitionType::None) {
+                mainHeapForks.insert(dataPath(dbname, tableName));
+            } else {
+                for (const auto& leaf : partitionLeaves(table)) {
+                    mainHeapForks.insert(partitionDataPath(
+                        dbname, tableName, leaf.partition));
+                    if (!leaf.subPartition.empty()) {
+                        mainHeapForks.insert(partitionDataPath(
+                            dbname, tableName, leaf.partition,
+                            leaf.subPartition));
+                    }
+                }
             }
+
+            bool anyMainFork = false;
+            bool allMainForks = true;
+            for (const auto& path : mainHeapForks) {
+                std::error_code forkError;
+                const bool exists = std::filesystem::exists(path, forkError);
+                if (forkError ||
+                    (exists &&
+                     !std::filesystem::is_regular_file(path, forkError)) ||
+                    forkError) {
+                    allMainForks = false;
+                    anyMainFork = true;
+                    break;
+                }
+                anyMainFork = anyMainFork || exists;
+                allMainForks = allMainForks && exists;
+            }
+            if (anyMainFork && !allMainForks) {
+                if (!rollbackPublished()) {
+                    std::cerr << "[storage] restore fork validation rollback "
+                                 "incomplete; retained recovery generations"
+                              << std::endl;
+                }
+                return false;
+            }
+
+            const bool initialized = !anyMainFork
+                ? resetTableStorage(dbname, tableName)
+                : reindex(dbname, tableName) == DBStatus::OK;
             if (!initialized) {
                 if (!rollbackPublished()) {
                     std::cerr << "[storage] restore index initialization rollback "
@@ -41203,6 +41291,21 @@ bool StorageEngine::physicalRestoreLocked(
                               << std::endl;
                 }
                 return false;
+            }
+            if (anyMainFork && std::any_of(
+                    table.cols, table.cols + table.len,
+                    [](const Column& column) {
+                        return column.isVariableLength;
+                    })) {
+                BPTree toastIndex(toastIndexPath(dbname, tableName));
+                if (!toastIndex.open() || !toastIndex.flush()) {
+                    if (!rollbackPublished()) {
+                        std::cerr << "[storage] restore TOAST index rollback "
+                                     "incomplete; retained recovery generations"
+                                  << std::endl;
+                    }
+                    return false;
+                }
             }
         }
 
@@ -42200,7 +42303,7 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
 
     bool auxiliaryValid = true;
     for (const auto& column : hashColumns) {
-        HashIndex* index = getHashIndex(dbname, tablename, column);
+        HashIndex* index = getHashIndexForBuild(dbname, tablename, column);
         if (!index) return failRewrite();
         index->clear();
         if (!forEachRow(dbname, tablename,
@@ -42231,7 +42334,7 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
         }
     }
     for (const auto& column : bloomColumns) {
-        BloomIndex* index = getBloomIndex(dbname, tablename, column);
+        BloomIndex* index = getBloomIndexForBuild(dbname, tablename, column);
         if (!index) return failRewrite();
         index->clear();
         auxiliaryValid = true;

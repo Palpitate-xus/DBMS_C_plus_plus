@@ -81,6 +81,14 @@ int main() {
         database = renamed;
         const auto path = std::filesystem::path(database) / file;
         assert(std::filesystem::remove(path));
+        // The runtime getter must not turn a missing persisted index into a
+        // usable empty map. Bitmap guards alone are insufficient because the
+        // DML and ordinary equality paths share these getters.
+        if (bloom) {
+            assert(g_engine.getBloomIndex(database, "items", "value") == nullptr);
+        } else {
+            assert(g_engine.getHashIndex(database, "items", "value") == nullptr);
+        }
         expectRejected(database);
         assert(!std::filesystem::exists(path));
         assert(g_engine.query(database, "items", {}, {"*"}).size() == 2);
@@ -94,11 +102,64 @@ int main() {
         assert(create() == dbms::DBStatus::OK);
         result = bitmap(database, "items");
         assert(result.ok && result.rows.size() == 1);
-        // Repeat with the already-loaded mapping. A cached complete RID set
-        // is not authority to ignore the loss of its backing relation.
+        // A cached complete RID set is not authority to ignore deletion or
+        // atomic replacement of its backing relation.
         assert(std::filesystem::remove(path));
+        if (bloom) {
+            assert(g_engine.getBloomIndex(database, "items", "value") == nullptr);
+        } else {
+            assert(g_engine.getHashIndex(database, "items", "value") == nullptr);
+        }
         expectRejected(database);
         assert(!std::filesystem::exists(path));
+        assert(g_engine.query(database, "items", {}, {"*"}).size() == 2);
+
+        // Rebuild explicitly, warm the cache, then atomically replace the
+        // sidecar with a corrupt generation. The old in-memory RID map must
+        // not survive the rename.
+        assert((bloom ? g_engine.dropBloomIndex(database, "items", "value")
+                      : g_engine.dropHashIndex(database, "items", "value")) ==
+               dbms::DBStatus::OK);
+        assert(create() == dbms::DBStatus::OK);
+        result = bitmap(database, "items");
+        assert(result.ok && result.rows.size() == 1);
+        auto replacement = path;
+        replacement += ".replacement";
+        {
+            std::ofstream out(replacement, std::ios::binary | std::ios::trunc);
+            out << "corrupt replacement generation";
+            assert(out.good());
+        }
+        std::filesystem::rename(replacement, path);
+        if (bloom) {
+            assert(g_engine.getBloomIndex(database, "items", "value") == nullptr);
+        } else {
+            assert(g_engine.getHashIndex(database, "items", "value") == nullptr);
+        }
+        expectRejected(database);
+        assert(std::filesystem::exists(path));
+        assert(g_engine.query(database, "items", {}, {"*"}).size() == 2);
+
+        assert((bloom ? g_engine.dropBloomIndex(database, "items", "value")
+                      : g_engine.dropHashIndex(database, "items", "value")) ==
+               dbms::DBStatus::OK);
+        assert(create() == dbms::DBStatus::OK);
+        result = bitmap(database, "items");
+        assert(result.ok && result.rows.size() == 1);
+        {
+            // Change the same inode in place. Size and nanosecond timestamps
+            // are part of the cached generation, not just inode identity.
+            std::ofstream out(path, std::ios::binary | std::ios::trunc);
+            out << "truncated in-place generation";
+            assert(out.good());
+        }
+        if (bloom) {
+            assert(g_engine.getBloomIndex(database, "items", "value") == nullptr);
+        } else {
+            assert(g_engine.getHashIndex(database, "items", "value") == nullptr);
+        }
+        expectRejected(database);
+        assert(std::filesystem::exists(path));
         assert(g_engine.query(database, "items", {}, {"*"}).size() == 2);
         assert(g_engine.dropDatabase(database) == dbms::DBStatus::OK);
     }

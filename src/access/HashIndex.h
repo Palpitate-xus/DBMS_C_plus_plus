@@ -5,6 +5,7 @@
 #include <fstream>
 #include <mutex>
 #include <string>
+#include <sys/types.h>
 #include <unordered_map>
 #include <vector>
 
@@ -20,6 +21,12 @@ public:
     ~HashIndex() { close(); }
 
     bool open();
+    // Runtime access must not manufacture a valid-looking empty index when
+    // its persisted sidecar is missing. Explicit rebuild paths use
+    // openForBuild() instead.
+    bool openExisting();
+    // Start an intentional heap-derived rebuild with an empty in-memory map.
+    bool openForBuild();
     bool close();
     // Persist the current in-memory mapping without closing the index.
     bool flush();
@@ -39,6 +46,10 @@ public:
     void clear();
 
     bool isOpen() const;
+    bool hasStaleFileGeneration() const;
+    // Discard an invalidated cached generation without flushing it back over
+    // the replacement (or recreating a removed sidecar).
+    void discard();
     const std::filesystem::path& filePath() const { return filePath_; }
     bool hasDirtyData() const;
 
@@ -51,8 +62,20 @@ private:
     bool dirty_ = false;
     mutable std::mutex mutex_;
 
-    bool loadFromFile();
+    bool loadFromFile(bool allowMissing);
     bool saveToFile();
+    bool captureFileGeneration();
+    bool fileGenerationMatches() const;
+
+    bool generationValid_ = false;
+    dev_t device_ = 0;
+    ino_t inode_ = 0;
+    off_t fileSize_ = 0;
+    int64_t mtimeSec_ = 0;
+    int64_t mtimeNsec_ = 0;
+    int64_t ctimeSec_ = 0;
+    int64_t ctimeNsec_ = 0;
+    bool buildPending_ = false;
 };
 
 } // namespace dbms
