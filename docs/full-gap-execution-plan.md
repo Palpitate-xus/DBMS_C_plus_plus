@@ -1,6 +1,8 @@
 # 总差距清单执行计划
 
-2026-10-03 第962项 `36b73cd5` 修复FETCH WITH TIES缺少ORDER BY的SQLSTATE，编译、专项wire与PG18.6 direct SQLSTATE oracle均通过；完整WITH TIES结果仍暂不支持，明确返回0A000。未执行全量验证，QRY-06继续partial，见 `docs/issue-962-fetch-ties-order-error.md`。不push。
+2026-10-03 第963项 `258bd554` 将set-operation的FETCH WITH TIES应用到完整排序结果，按 peers 扩展FETCH边界，并验证括号／OFFSET／数值等价／NULL情况。生产构建、结构化wire和PG18.6 direct oracle通过；完整套件未跑。第962项对缺ORDER BY返回42601的错误状态仍有效；非集合query的合法WITH TIES保持未实现。QRY-06仍partial，见 `docs/issue-963-set-fetch-with-ties.md`。不push。
+
+2026-10-03 第962项 `36b73cd5` 修复FETCH WITH TIES缺少ORDER BY的SQLSTATE，编译、专项wire与PG18.6 direct SQLSTATE oracle均通过；该提交时有ORDER的合法WITH TIES返回0A000，随后第963项已支持set-operation结果，普通SELECT仍未支持。未执行全量验证，QRY-06继续partial，见 `docs/issue-962-fetch-ties-order-error.md`。不push。
 
 2026-10-03 第961项 `9d095496` 本地提交后，重复set-operation输出名上的 `ORDER BY name` 不再错误绑定首列，而是按PG返回42702；有效序号仍不歧义。生产构建、结构化wire专项与PG18.6 direct oracle通过。全量门禁未跑，QRY-06仍partial，详见 `docs/issue-961-ambiguous-set-order-name.md`。不push。
 

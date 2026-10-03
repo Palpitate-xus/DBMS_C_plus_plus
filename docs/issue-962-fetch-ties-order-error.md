@@ -18,4 +18,4 @@ The focused wire test covers both error boundaries, confirms the connection rema
 - The generic compatibility runner still cannot run against PostgreSQL 18.6 because its configured Docker `pgref` is 17.2; the strict preflight was not bypassed.
 - Full C++/E2E/actual suites were not rerun after this change.
 
-QRY-06 remains `partial`. Correct execution of valid `FETCH ... WITH TIES` on set operations is still unsupported. No push was performed.
+Follow-up commit `258bd554` (issue 963) subsequently implemented valid `FETCH ... WITH TIES` for set-operation results. The remaining unsupported case is valid WITH TIES on non-set SELECTs in this legacy outer-query path. QRY-06 remains `partial`; no push was performed.

@@ -5,7 +5,9 @@
 2026-10-02 第948项 source `d1dee20b` 整合为D merge `cdca3fea`：TEMP index现在有真实pg_class身份、临时持久性与table dependency；DROP INDEX按当前临时namespace/OID清理，DROP TABLE和DISCARD TEMP按owning session清理index/table身份并让savepoint回滚恢复相同OID及物理索引。真实旧协议/C++清理反证与PG18 oracle通过；接受worktree全自有55生产对象签名、22 C++、16 wire含完整协议、19不同PG18 actual均exit0。D整合时解决build registry同段冲突并保留双方条目。此为TEMP索引局部生命周期证据；MVCC/WAL/catalog全面语义仍partial，合入954/955后的D完整统一门禁尚待运行。总账仍273项，22 complete／140 partial／96 unverified／15 deferred_by_user；Actions仍本地disabled，未push。
 # 代码复查进度（续接第 178 项）
 
-2026-10-03 第962项 source `36b73cd5`：`FETCH ... WITH TIES` 外层改写曾无条件回0A000；无顶层ORDER BY时现在按PG回42601，带ORDER BY仍明确fail-closed为0A000（合法WITH TIES执行尚未实现）。生产build、wire错误/连接恢复及set-operation FETCH ONLY邻居测试通过；PG18.6 direct oracle版本180006确认无ORDER的SQLSTATE。未跑PG18 generic diff及全量套件；QRY-06仍partial，详见 `docs/issue-962-fetch-ties-order-error.md`。
+2026-10-03 第963项 source `258bd554`：set-operation `FETCH ... WITH TIES`现作用于合并/排序后的整体结果；先OFFSET，再按numeric/text-collation/NULL peer比较扩展FETCH边界。覆盖普通／整体括号／OFFSET／1与1.00数值peer／NULLS FIRST peer。最终生产build、结构化wire及PG18.6 direct oracle均通过；完整套件没跑，generic pg_diff被17.2 Docker参考阻止。单表SELECT的WITH TIES仍未实现，QRY-06保持partial，详见 `docs/issue-963-set-fetch-with-ties.md`。
+
+2026-10-03 第962项 source `36b73cd5`：`FETCH ... WITH TIES` 外层改写曾无条件回0A000；无顶层ORDER BY时现在按PG回42601。当时带ORDER BY路径仍0A000；随后的第963项已实现set-operation结果的WITH TIES，非集合SELECT仍unsupported。该提交生产build、wire错误/连接恢复及FETCH ONLY邻居测试通过；PG18.6 direct oracle版本180006确认无ORDER的SQLSTATE。未跑PG18 generic diff及全量套件；QRY-06仍partial，详见 `docs/issue-962-fetch-ties-order-error.md`。
 
 2026-10-03 第961项 source `9d095496`：集合运算 `ORDER BY` 按重名输出列的名称排序过去静默选第一列；现 unquoted 名称按SQL规则折叠、quoted 名称按精确字面量和双引号转义解析，多重匹配返回 `42702`。最终生产build、结构化wire测试（含失败后同连接继续）与PG18.6 direct SQLSTATE oracle通过；pg_diff受默认pgref版本17.2阻止，没有算成PG18全差分；未跑全套。QRY-06仍partial，详见 `docs/issue-961-ambiguous-set-order-name.md`。
 

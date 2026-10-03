@@ -1,5 +1,7 @@
 # DBMS_C_plus_plus 对标 PostgreSQL 18.6：完整差距清单
 
+2026-10-03 第963项 source `258bd554` 现在在UNION／INTERSECT／EXCEPT最终结果上执行合法 `FETCH FIRST/NEXT ... WITH TIES`，不再把limit错误放到右操作数；支持排序后offset、排序键peer扩展以及numeric等值／text collation／NULL peer。普通、parenthesized、offset、数值等价和NULL peer wire回归均过，PostgreSQL 18.6 direct oracle同结果。完整套件未重跑、generic pgdiff因Docker参考是17.2而未执行。第962项的无ORDER SQLSTATE修复仍有效；“WITH TIES仍不支持”现在仅指非集合运算query路径。QRY-06保持partial，详见 `docs/issue-963-set-fetch-with-ties.md`。
+
 2026-10-03 第962项 source `36b73cd5` 修正外层 `FETCH ... WITH TIES` 缺少query级ORDER BY时的SQLSTATE：PG18返回42601，现在本地也返回42601；有ORDER BY的合法WITH TIES当前明确返回0A000，功能仍未实现。FETCH ONLY及OFFSET＋FETCH相邻wire回归和生产build通过，PG18.6 direct oracle核实；没有全量套件／generic PG diff。QRY-06仍partial，见 `docs/issue-962-fetch-ties-order-error.md`。
 
 2026-10-03 第961项 source `9d095496` 修复集合运算 `ORDER BY` 对重复输出列名的错误绑定：名称引用歧义现在返回PG一致SQLSTATE `42702`，序号引用保持可用；定向生产构建、真实wire错误边界及PG18.6 direct oracle通过。全量套件未重跑，QRY-06仍partial，详见 `docs/issue-961-ambiguous-set-order-name.md`。
