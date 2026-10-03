@@ -12107,6 +12107,7 @@ static std::vector<std::string> runDerivedSubQuery(const std::string& rawSql, Se
                         std::string nl = toLower(ot[ti + 1]);
                         if (nl == "first") spec.nullsFirst = true;
                         else if (nl == "last") spec.nullsFirst = false;
+                        spec.hasExplicitNullOrder = true;
                         ++ti;
                     }
                 }
@@ -12126,6 +12127,7 @@ static std::vector<std::string> runDerivedSubQuery(const std::string& rawSql, Se
                         std::string nl = toLower(ot[ti + 1]);
                         if (nl == "first") spec.nullsFirst = true;
                         else if (nl == "last") spec.nullsFirst = false;
+                        spec.hasExplicitNullOrder = true;
                         ++ti;
                     }
                 }
@@ -12141,6 +12143,7 @@ static std::vector<std::string> runDerivedSubQuery(const std::string& rawSql, Se
                         std::string nl = toLower(ot[ti + 1]);
                         if (nl == "first") spec.nullsFirst = true;
                         else if (nl == "last") spec.nullsFirst = false;
+                        spec.hasExplicitNullOrder = true;
                         ++ti;
                     }
                 }
@@ -12160,6 +12163,9 @@ static std::vector<std::string> runDerivedSubQuery(const std::string& rawSql, Se
         if (!orderBy.empty()) {
             ctx.orderByCol = orderBy[0].colName;
             ctx.orderByAsc = orderBy[0].ascending;
+            ctx.orderByNullsFirst = orderBy[0].nullsFirst;
+            ctx.hasExplicitOrderNulls =
+                orderBy[0].hasExplicitNullOrder;
         }
         auto plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
         auto execution = dbms::QueryPlanner::executePlanChecked(std::move(plan));
@@ -24208,9 +24214,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 bool nullsFirst = false;
                 bool nullsSpecified = false;
                 // Detect NULLS FIRST / NULLS LAST
-                size_t nullsPos = sortItem.find("nulls");
+                const size_t nullsPos = findTopLevelKeyword(sortItem, "nulls");
                 if (nullsPos != string::npos) {
-                    string afterNulls = trim(sortItem.substr(nullsPos + 5));
+                    string afterNulls = toLower(
+                        trim(sortItem.substr(nullsPos + 5)));
                     if (afterNulls == "first") nullsFirst = true;
                     nullsSpecified = true;
                     sortItem = trim(sortItem.substr(0, nullsPos));
@@ -24346,6 +24353,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         }
                         spec.ascending = asc;
                         spec.nullsFirst = nullsFirst;
+                        spec.hasExplicitNullOrder = nullsSpecified;
                         exprOrderBySpecs.push_back(spec);
                         orderKeyRefs.emplace_back(true, exprOrderBySpecs.size() - 1);
                         continue;
@@ -24367,6 +24375,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             spec.exprArg2 = right;
                             spec.ascending = asc;
                             spec.nullsFirst = nullsFirst;
+                            spec.hasExplicitNullOrder = nullsSpecified;
                             spec.collation = collation;
                             exprOrderBySpecs.push_back(spec);
                             orderKeyRefs.emplace_back(true, exprOrderBySpecs.size() - 1);
@@ -24393,6 +24402,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 spec.colName = sortItem;
                 spec.ascending = asc;
                 spec.nullsFirst = nullsFirst;
+                spec.hasExplicitNullOrder = nullsSpecified;
                 spec.collation = collation;
                 orderBySpecs.push_back(spec);
                 orderKeyRefs.emplace_back(false, orderBySpecs.size() - 1);
@@ -25927,6 +25937,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     if (orderTable.cols[i].dataName == orderBy->colName) {
                         ctx.orderByCol = orderBy->colName;
                         ctx.orderByAsc = orderBy->ascending;
+                        ctx.orderByNullsFirst = orderBy->nullsFirst;
+                        ctx.hasExplicitOrderNulls =
+                            orderBy->hasExplicitNullOrder;
                         break;
                     }
                 }
@@ -25978,7 +25991,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         dbms::OpPtr sortPlan = std::make_unique<dbms::MaterializedRowsOp>(
                             std::move(unionRows));
                         sortPlan = std::make_unique<dbms::SortOp>(std::move(sortPlan), otbl,
-                                                                 ctx.orderByCol, ctx.orderByAsc);
+                            ctx.orderByCol, ctx.orderByAsc,
+                            ctx.orderByNullsFirst,
+                            ctx.hasExplicitOrderNulls);
                         auto sortedRun = dbms::QueryPlanner::executePlanChecked(
                             std::move(sortPlan));
                         if (!sortedRun.ok) {
@@ -27829,6 +27844,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 if (!orderBySpecs.empty()) {
                     ctx.orderByCol = orderBySpecs.front().colName;
                     ctx.orderByAsc = orderBySpecs.front().ascending;
+                    ctx.orderByNullsFirst = orderBySpecs.front().nullsFirst;
+                    ctx.hasExplicitOrderNulls =
+                        orderBySpecs.front().hasExplicitNullOrder;
                 }
                 if (!volcanoWindowGroups.empty()) {
                     ctx.conds = dbms::StorageEngine::parseConditions(volcanoWindowGroups.front());

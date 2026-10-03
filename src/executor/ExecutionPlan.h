@@ -696,7 +696,8 @@ private:
 class SortOp : public Operator {
 public:
     SortOp(OpPtr child, const TableSchema& tbl,
-           const std::string& orderByCol, bool asc);
+           const std::string& orderByCol, bool asc,
+           bool nullsFirst = false, bool hasExplicitNullOrder = false);
 
     bool open() override;
     bool next(std::string& outRow) override;
@@ -716,6 +717,7 @@ private:
     TableSchema tbl_;
     std::string orderByCol_;
     bool asc_;
+    bool nullsFirst_;
     std::vector<std::string> buffer_;
     std::vector<Operator::ScanOrigin> origins_;  // parallel to buffer_ pre-sort
     std::vector<Operator::ScanOrigin> sortedOrigins_;  // parallel to buffer_ post-sort
@@ -1138,6 +1140,8 @@ struct PlanContext {
     std::set<std::string> selectCols;
     std::string orderByCol;
     bool orderByAsc = true;
+    bool orderByNullsFirst = false;
+    bool hasExplicitOrderNulls = false;
     size_t offset = 0;
     size_t limit = 0;
     bool distinct = false;

@@ -2486,8 +2486,10 @@ void WindowOp::close() {
 // ========================================================================
 
 SortOp::SortOp(OpPtr child, const TableSchema& tbl,
-                const std::string& orderByCol, bool asc)
-    : child_(std::move(child)), tbl_(tbl), orderByCol_(orderByCol), asc_(asc) {}
+                const std::string& orderByCol, bool asc,
+                bool nullsFirst, bool hasExplicitNullOrder)
+    : child_(std::move(child)), tbl_(tbl), orderByCol_(orderByCol), asc_(asc),
+      nullsFirst_(hasExplicitNullOrder ? nullsFirst : !asc) {}
 
 bool SortOp::open() {
     if (!child_->open()) return false;
@@ -2499,6 +2501,7 @@ bool SortOp::open() {
     // binding is still live (the binding is cleared on close).
     std::string row;
     std::vector<std::string> preVals;
+    std::vector<bool> preNulls;
     origins_.clear();
     while (child_->next(row)) {
         buffer_.push_back(std::move(row));
@@ -2508,9 +2511,14 @@ bool SortOp::open() {
         // clear any stale binding so extraction reads raw values.
         if (!org.engine) StorageEngine::unbindNullRow();
         else StorageEngine::bindNullRow(org.engine, org.dbname, org.tablename, org.rid, tbl_.len);
-        if (sortIdxPre < tbl_.len)
+        if (sortIdxPre < tbl_.len) {
             preVals.push_back(StorageEngine::extractColumnValueStatic(
                 buffer_.back(), tbl_, sortIdxPre));
+            const auto origin = child_->scanOrigin();
+            preNulls.push_back(origin.engine && origin.rid != 0
+                ? child_->lastColumnIsNull(sortIdxPre)
+                : rawColumnIsNull(buffer_.back(), tbl_, sortIdxPre));
+        }
     }
     if (child_->hasError()) return propagateChildError(child_.get(), "sort child failed");
     child_->close();
@@ -2523,7 +2531,9 @@ bool SortOp::open() {
         for (size_t ri = 0; ri < buffer_.size(); ++ri) {
             std::string val = (ri < preVals.size()) ? preVals[ri] : "";
             // PG default: NULLS LAST for ASC, NULLS FIRST for DESC.
-            const bool valNull = val.empty() || val == "NULL" || val == "null";
+            const bool valNull = ri < preNulls.size()
+                ? preNulls[ri]
+                : (val.empty() || val == "NULL" || val == "null");
             Item it{"", 0, {}, 0.0, valNull, ri};
             if (scol.dataType == "char" || scol.isVariableLength) {
                 it.s = val;
@@ -2540,7 +2550,7 @@ bool SortOp::open() {
         }
         std::sort(items.begin(), items.end(), [&](const auto& a, const auto& b) {
             if (a.second.isNull != b.second.isNull)
-                return a.second.isNull ? !asc_ : asc_;
+                return a.second.isNull == nullsFirst_;
             if (scol.dataType == "char" || scol.isVariableLength) {
                 const auto comparison = StorageEngine::compareValues(
                     scol, a.second.s, false, b.second.s, false, "<");
@@ -4585,7 +4595,8 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ct
             // Parallel path: worker threads sort disjoint rid partitions and
             // GatherMerge k-way merges the sorted streams (PG Gather Merge).
             const uint32_t pageCount = engine->tableNumPages(ctx.dbname, ctx.tablename);
-            if (!rlsApplies && parallelWorkers_ > 1 && !engine->inTransaction() &&
+            if (!rlsApplies && !ctx.hasExplicitOrderNulls &&
+                parallelWorkers_ > 1 && !engine->inTransaction() &&
                 pageCount > 2 && ctx.conds.empty()) {
                 const int activeWorkers = static_cast<int>(
                     std::min<size_t>(static_cast<size_t>(parallelWorkers_),
@@ -4640,7 +4651,8 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ct
                 checkForQueryInterrupt();
                 if (failed.load(std::memory_order_relaxed)) {
                     root = std::make_unique<SortOp>(std::move(root), tbl,
-                                                    ctx.orderByCol, ctx.orderByAsc);
+                        ctx.orderByCol, ctx.orderByAsc,
+                        ctx.orderByNullsFirst, ctx.hasExplicitOrderNulls);
                 } else {
                     std::vector<OpPtr> runs;
                     runs.reserve(parts.size());
@@ -4655,7 +4667,8 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ct
                 }
             } else {
                 root = std::make_unique<SortOp>(std::move(root), tbl,
-                                                ctx.orderByCol, ctx.orderByAsc);
+                    ctx.orderByCol, ctx.orderByAsc,
+                    ctx.orderByNullsFirst, ctx.hasExplicitOrderNulls);
             }
         }
 
@@ -4714,7 +4727,8 @@ OpPtr QueryPlanner::buildDisjunctiveSelectPlan(
 
     if (!ctx.orderByCol.empty()) {
         root = std::make_unique<SortOp>(std::move(root), tbl,
-                                        ctx.orderByCol, ctx.orderByAsc);
+            ctx.orderByCol, ctx.orderByAsc,
+            ctx.orderByNullsFirst, ctx.hasExplicitOrderNulls);
     }
     root = std::make_unique<ProjectOp>(std::move(root), tbl, ctx.selectCols);
     if (ctx.distinct) root = std::make_unique<DistinctOp>(std::move(root));

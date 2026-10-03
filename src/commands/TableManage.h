@@ -620,6 +620,7 @@ public:
         std::string expressionSql; // Parsed SQL for supported general scalar sort keys
         bool isExpression = false;
         bool nullsFirst = false;  // NULLS FIRST / NULLS LAST
+        bool hasExplicitNullOrder = false;
         std::string collation = "";    // explicit override; empty uses SQL default
     };
     std::vector<std::string> query(const std::string& dbname, const std::string& tablename,
