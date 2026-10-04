@@ -24107,14 +24107,21 @@ static bool executeInternal(const string& rawSql, Session& s) {
         }
 
         // These PostgreSQL system catalogs have no protocol-visible schema
-        // or typed execution path yet.  Letting them continue into the
-        // physical table-schema/lock path reports a misleading 55P03 instead
-        // of the actual capability gap.
+        // or typed execution path yet. Letting them continue into the
+        // physical table-schema/lock path reports a misleading lock or
+        // missing-relation error instead of the actual capability gap.
         const std::string catalogName = toLower(tname);
         const bool unresolvedUnqualifiedRelation =
             queryDb == s.currentDB && !g_engine.tableExists(queryDb, tname);
+        static const std::set<std::string> unimplementedCatalogRelations = {
+            "pg_am", "pg_auth_members", "pg_authid", "pg_cast",
+            "pg_collation", "pg_constraint", "pg_default_acl", "pg_index",
+            "pg_opclass", "pg_operator", "pg_policy", "pg_publication",
+            "pg_rewrite", "pg_replication_origin", "pg_statistic_ext",
+            "pg_subscription", "pg_tablespace", "pg_trigger"};
         if ((queryDb == "pg_catalog" || unresolvedUnqualifiedRelation) &&
-            (catalogName == "pg_index" || catalogName == "pg_operator")) {
+            unimplementedCatalogRelations.find(catalogName) !=
+                unimplementedCatalogRelations.end()) {
             throw dbms::DbError(
                 "0A000", "system catalog relation \"pg_catalog." +
                              catalogName + "\" is not implemented");
