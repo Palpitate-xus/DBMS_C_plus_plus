@@ -1,3 +1,5 @@
+2026-10-04 第982项复核FUNC-03，协议测试commit `1944c64c`：用户自定义operator/runtime及planner metadata未实现；extended mode新增`CREATE/ALTER/DROP OPERATOR`均以0A000 fail-closed，协议回归通过，未写假对象。无production改动、未运行PG18.6 oracle/diff。commutator/negator、selectivity support、hash/merge标记和dependency仍未实现，因此FUNC-03仅partial。详见`docs/issue-982-user-operator-gate-audit.md`。不push；Actions禁用；用户跳过的安全/TDE保持deferred。
+
 # 总差距清单执行计划
 
 2026-10-04 第981项复核OPT-06：现有ScalarSubquery与Volcano SemiJoin/AntiJoin/ExistenceFilter分别覆盖有限相关标量、NULL/基数边界和ANY/ALL子集；三个定向C++回归通过，当前源码此前的完整注册C++／protocol／E2E suite通过。无本步代码改动，无PG18.6 oracle/diff。复杂相关quantified/aggregate/expression、一般parameterized paths、inner index选择、initplan及memoize仍未实现；OPT-06转为partial而非complete。详见`docs/issue-981-correlated-subquery-execution-scope.md`。未push，Actions禁用，安全/TDE跳过项仍deferred。

@@ -2,6 +2,21 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "982",
+      "gap_ids": ["FUNC-03"],
+      "status": "partial",
+      "commits": ["1944c64c"],
+      "evidence": ["docs/code-review-progress.md", "docs/issue-982-user-operator-gate-audit.md", "src/main.cpp", "src/parser/parser.cpp"],
+      "tests": ["tests/div14_feature_gate_test.py"],
+      "verification": {
+        "postgresql_mode_gate": "python3 tests/div14_feature_gate_test.py: passed; CREATE/ALTER/DROP OPERATOR and operator class/family DDL reject with SQLSTATE 0A000; no compatibility-object store is created",
+        "extended_mode_gate": "Added protocol negative cases for CREATE/ALTER/DROP OPERATOR under compatibility_mode=extended; all remain SQLSTATE 0A000",
+        "production_change": "none; generic compatibility-object handler already fails closed",
+        "postgresql_18_oracle": "not run; no PG18.6 oracle/differential is claimed",
+        "scope": "Verifies only the fail-closed boundary. User-defined operator catalog/execution, commutator/negator, selectivity support, hash/merge metadata, dependency tracking, and invalidation remain unimplemented; FUNC-03 stays partial"
+      }
+    },
+    {
       "issue": "981",
       "gap_ids": ["OPT-06"],
       "status": "partial",
@@ -507,7 +522,7 @@
     {"id":"TYPE-22","status":"partial","evidence":["docs/code-review-progress.md","src/catalog/systables.cpp","src/expression/ExprEvaluator.cpp","src/expression/expr_helper.cpp","src/network/NetworkServer.cpp"],"tests":["tests/postgres_protocol_test.py"],"commits":["06dd3cb"]},
     {"id":"FUNC-01","status":"partial","evidence":["docs/code-review-progress.md","src/expression/ExprEvaluator.cpp","src/expression/expr_helper.cpp","src/commands/TableManage.cpp","src/common/NotificationManager.h","src/main.cpp","scripts/build_common.sh","src/commands/TableManage.h","src/utils/Session.h","src/network/NetworkServer.cpp","src/types/numeric.cpp"],"tests":["tests/postgres_protocol_test.py","tests/notification_manager_test.cpp","tests/compat/pg_diff_runner.py","tests/string_functions_test.cpp","tests/compat/cases/overlay_negative_count.sql","tests/compat/cases/timezone_named_conversion.sql","tests/compat/cases/timezone_named_table_conversion.sql","tests/constraint_expr_test.cpp","tests/coalesce_predicate_null_test.cpp","tests/coalesce_predicate_protocol_e2e_test.py","tests/compat/cases/coalesce_predicate_null.sql","tests/coalesce_projection_null_test.cpp","tests/expression_evaluator_test.cpp","tests/nonstrict_predicate_null_test.cpp","tests/nonstrict_predicate_protocol_e2e_test.py","tests/compat/cases/nonstrict_predicate_null.sql","tests/numeric_truncated_quotient_test.cpp","tests/numeric_truncated_quotient_protocol_e2e_test.py","tests/compat/cases/numeric_truncated_quotients.sql","tests/math_functions_test.cpp","tests/to_char_test.cpp","tests/money_test.cpp","tests/to_char_currency_protocol_e2e_test.py","tests/compat/cases/to_char_currency_locale.sql","tests/to_char_zero_test.cpp","tests/to_char_zero_protocol_e2e_test.py","tests/compat/cases/to_char_zero_placeholders.sql","tests/to_char_exact_rounding_test.cpp","tests/to_char_exact_rounding_protocol_e2e_test.py","tests/compat/cases/to_char_exact_rounding.sql"],"commits":["06dd3cb","96e8a83","90592c9","88af25b","f7601f4","48ab267","9636460","26e5ce0b","e3617958","55165e14","d1e571ce","b08ff199","b0bddd32","b4d5157e"]},
     {"id":"FUNC-02","status":"partial","evidence":["docs/code-review-progress.md","src/executor/ExecutionPlan.cpp","src/main.cpp","src/commands/TableManage.cpp","scripts/build_common.sh"],"tests":["tests/quoted_alias_protocol_e2e_test.py","tests/compat/pg_diff_runner.py","tests/group_collection_aggregate_test.cpp","tests/table_structured_protocol_e2e_test.py","tests/window_type_protocol_e2e_test.py","tests/join_type_protocol_e2e_test.py","tests/arithmetic_predicate_test.cpp","tests/arithmetic_predicate_protocol_e2e_test.py","tests/compat/cases/arithmetic_predicates.sql"],"commits":["8b6b5e4","f227ebd","f918e7b","15a7f55","d4afb8e","4b56c30","adbf3b72"]},
-    {"id":"FUNC-03","status":"unverified","evidence":[]},
+    {"id":"FUNC-03","status":"partial","evidence":["docs/code-review-progress.md","docs/issue-982-user-operator-gate-audit.md","src/main.cpp","src/parser/parser.cpp"],"tests":["tests/div14_feature_gate_test.py"],"commits":["1944c64c"]},
     {"id":"FUNC-04","status":"partial","evidence":["docs/code-review-progress.md","src/parser/ast.h","src/parser/parser.cpp","src/commands/DdlExecutor.cpp","src/commands/TableManage.h","src/commands/TableManage.cpp"],"tests":["tests/parser_phase1_test.cpp","tests/function_procedure_test.cpp","tests/function_result_protocol_e2e_test.py","tests/postgres_protocol_test.py","tests/compat/cases/drop_function_transaction.sql","tests/compat/cases/drop_function_signature_guard.sql","tests/ddl_ast_bridge_test.cpp","tests/compat/cases/drop_procedure_transaction.sql","tests/compat/cases/drop_routine_transaction.sql"],"commits":["8c8351f","d99139b","bef0365","c2a52a7"]},
     {"id":"FUNC-05","status":"partial","evidence":["docs/code-review-progress.md","src/parser/parser.cpp","src/commands/DdlExecutor.cpp","src/commands/TableManage.h","src/commands/TableManage.cpp","src/main.cpp"],"tests":["tests/constraint_expr_test.cpp","tests/compat/pg_diff_runner.py","tests/parser_phase1_test.cpp","tests/function_procedure_test.cpp","tests/function_result_protocol_e2e_test.py","tests/postgres_protocol_test.py"],"commits":["2bbcbec","69a7bbf","854af68","c703138","dd7ce04"]},
     {"id":"FUNC-06","status":"partial","evidence":["docs/code-review-progress.md","src/commands/DdlExecutor.cpp","src/commands/TableManage.h","src/commands/TableManage.cpp","src/utils/plpgsql.h","src/utils/plpgsql.cpp","src/main.cpp"],"tests":["tests/function_procedure_test.cpp","tests/plpgsql_test.cpp","tests/function_result_protocol_e2e_test.py","tests/postgres_protocol_test.py"],"commits":["38f43ee","69a7bbf","8c8351f","854af68"]},
