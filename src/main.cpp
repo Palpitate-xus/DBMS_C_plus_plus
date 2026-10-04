@@ -16401,6 +16401,16 @@ static bool executePgClassQuery(const string& rawSql, Session& session,
         hints[qualifier + "." + names[i]] = types[i];
         if (select->fromClause->alias.empty()) hints["pg_catalog.pg_class." + names[i]] = types[i];
     }
+    static const set<string> kPg18ClassColumns = {
+        "oid", "relname", "relnamespace", "reltype", "reloftype",
+        "relowner", "relam", "relfilenode", "reltablespace", "relpages",
+        "reltuples", "relallvisible", "relallfrozen", "reltoastrelid",
+        "relhasindex", "relisshared", "relpersistence", "relkind",
+        "relnatts", "relchecks", "relhasrules", "relhastriggers",
+        "relhassubclass", "relrowsecurity", "relforcerowsecurity",
+        "relispopulated", "relreplident", "relispartition", "relrewrite",
+        "relfrozenxid", "relminmxid", "relacl", "reloptions",
+        "relpartbound"};
     std::function<void(const dbms::Expr*, bool)> validate =
         [&](const dbms::Expr* expression, bool countArgument) {
             if (!expression) return;
@@ -16411,6 +16421,12 @@ static bool executePgClassQuery(const string& rawSql, Session& session,
                       (select->fromClause->alias.empty() && column->schema == "pg_catalog")));
                 if (!validQualifier) throw dbms::DbError("42P01", "missing FROM-clause entry");
                 if (column->column == "*" && countArgument) return;
+                if (!hints.count(column->column) &&
+                    kPg18ClassColumns.count(column->column)) {
+                    throw dbms::DbError(
+                        "0A000", "pg_class column \"" + column->column +
+                                     "\" is not implemented");
+                }
                 if (!hints.count(column->column))
                     throw dbms::DbError("42703", "column does not exist: " + column->column);
                 return;
@@ -16443,7 +16459,6 @@ static bool executePgClassQuery(const string& rawSql, Session& session,
         string type;
         bool count;
     };
-    vector<dbms::ExprPtr> expanded;
     vector<OutputColumn> output;
     std::function<string(const dbms::Expr*)> header = [&](const dbms::Expr* expression) {
         if (const auto* column = dynamic_cast<const dbms::ColumnRefExpr*>(expression)) return column->column;
@@ -16465,15 +16480,10 @@ static bool executePgClassQuery(const string& rawSql, Session& session,
     for (size_t i = 0; i < select->selectList.size(); ++i) {
         const auto& item = select->selectList[i];
         const auto* column = dynamic_cast<const dbms::ColumnRefExpr*>(item.expr.get());
-        if (column && column->column == "*") {
-            validate(column, true);
-            for (size_t j = 0; j < names.size(); ++j) {
-                auto reference = std::make_unique<dbms::ColumnRefExpr>();
-                reference->column = names[j];
-                output.push_back({reference.get(), names[j], types[j], false});
-                expanded.push_back(std::move(reference));
-            }
-            continue;
+        if ((column && column->column == "*") ||
+            item.expr->toString() == "*") {
+            throw dbms::DbError(
+                "0A000", "SELECT * requires the complete pg_class schema");
         }
         validate(item.expr.get(), true);
         const auto* call = dynamic_cast<const dbms::FunctionCallExpr*>(item.expr.get());

@@ -59,6 +59,9 @@ def main():
         query(f"CREATE TABLE {one}(id INT);")
         query(f"CREATE TABLE {two}(id INT,v TEXT);")
         for extended in (False, True):
+            if not reference:
+                query("SELECT * FROM pg_catalog.pg_class;", extended,
+                      state="0A000")
             query(f"SELECT count(*) FROM pg_class WHERE relname='{one}';", extended,
                   [["1"]], ["count"], [20])
             query(f"SELECT count(*) FROM pg_class WHERE relname='{one}' AND FALSE;", extended,
@@ -93,6 +96,9 @@ def main():
             query(f"SELECT NULL::text AS absent FROM pg_class WHERE relname='{one}';", extended,
                   [[None]], ["absent"], [25])
             query(f"SELECT missing_catalog_column FROM pg_class WHERE FALSE;", extended, state="42703")
+            if not reference:
+                query(f"SELECT relhasindex FROM pg_class WHERE FALSE;", extended,
+                      state="0A000")
             query(f"SELECT wrong.relname FROM pg_class WHERE FALSE;", extended, state="42P01")
             query(f"SELECT relname FROM pg_class WHERE relname;", extended, state="42804")
             query(f"SELECT relname FROM pg_class WHERE NULL::text;", extended, state="42804")
