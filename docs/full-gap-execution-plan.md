@@ -1,5 +1,7 @@
 # 总差距清单执行计划
 
+2026-10-04 第980项 source/test commit `e808d50d`：精化SSI空扫描粒度；旧relation级fallback使不同缺失主键点查加不同键插入也冲突。现在可用索引谓词覆盖的空结果使用索引predicate read-set；未索引空范围保留relation fallback，交叉匹配仍触发serialization failure。新增精确回归与旧行为复现。`phase5_remaining_test`、生产build、最终全注册C++／完整协议／E2E suite均通过，最后`All tests passed`；没有PG18.6 oracle/diff。TXN-09仍partial，完整谓词锁层级/访问方法与SSI图待实现。详见`docs/issue-980-ssi-empty-index-predicate-granularity.md`。未push，Actions禁用，安全/TDE跳过仍deferred。
+
 2026-10-04 第979项 test commit `df0c59de`：为显式相对`-D`增加启动E2E：从独立launch目录启动既有cluster，连接成功、control identity不变且启动目录未误建数据。`python3 tests/data_directory_e2e_test.py`通过；现有data-directory实现已在bootstrap `chdir`前解析启动相对路径。OPS-01只由unverified推进为partial；GUC配置来源/context/reload/restart的PostgreSQL语义仍未完成。无production改动，无本步全量suite宣称。详见`docs/issue-979-relative-data-directory.md`。未push，Actions禁用，安全/TDE跳过保持deferred。
 
 2026-10-04 第978项 `1612d142`：关系存储未共享会使ATTACH或CREATE PARTITION OF报告成功、parent/child却看到不同数据；真实relation的两种DDL路径现明确报0A000并保持回滚，底层virtual partition路由不变。约束失败优先保留23514，缺失child保持42P01。三个相关定向C++测试、生产构建通过；全量注册suite未在最终版重跑。CAT-11仍partial，真正child relation storage/index mapping待实现。详见`docs/issue-978-attach-relation-storage-guard.md`。不push，Actions禁用，安全/TDE跳过仍deferred。
