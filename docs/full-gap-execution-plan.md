@@ -1,5 +1,7 @@
 # 总差距清单执行计划
 
+2026-10-04 第978项 `1612d142`：关系存储未共享会使ATTACH或CREATE PARTITION OF报告成功、parent/child却看到不同数据；真实relation的两种DDL路径现明确报0A000并保持回滚，底层virtual partition路由不变。约束失败优先保留23514，缺失child保持42P01。三个相关定向C++测试、生产构建通过；全量注册suite未在最终版重跑。CAT-11仍partial，真正child relation storage/index mapping待实现。详见`docs/issue-978-attach-relation-storage-guard.md`。不push，Actions禁用，安全/TDE跳过仍deferred。
+
 2026-10-04 第977项 `40b72024`：DDL `ATTACH PARTITION`先确认子表存在，missing relation现在返回PG一致的42P01并保持parent schema/fork不变；测试覆盖错误状态、无变更和合法空child成功，生产构建通过。PostgreSQL 18.6 oracle确认SQLSTATE。全量注册suite未在此小步后重跑（第976项刚完成全量suite）。child schema兼容/已存在数据仍待处理，CAT-11继续partial。总账273：22 complete、142 partial、94 unverified、15 deferred_by_user。未push，Actions禁用，用户跳过的安全/TDE继续deferred。详见`docs/issue-977-attach-missing-partition-relation.md`。
 
 2026-10-04 第976项 `c83e67ac`：RANGE attach现在先检查DEFAULT分区既有行是否违反新增半开区间约束；冲突时storage返回CHECK_VIOLATION，DDL映射23514并通过DDL transaction保持原数据/metadata，无冲突attach仍成功。`partition_test`覆盖冲突、回滚和成功路由；完整注册C++／protocol／E2E套件exit 0、`All tests passed`，真实PG18.6 oracle确认匹配。此步骤不搬移冲突行，CAT-11继续partial，constraint proof、detach concurrently/finalize、partition indexes/global uniqueness未完成。总账273：22 complete、142 partial、94 unverified、15 deferred_by_user。未push，Actions禁用，安全/TDE用户跳过项保持deferred。详见`docs/issue-976-range-attach-default-validation.md`。
