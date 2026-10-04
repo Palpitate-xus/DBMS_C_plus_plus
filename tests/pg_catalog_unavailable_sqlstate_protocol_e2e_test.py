@@ -68,6 +68,13 @@ def main():
         assert result[3] == ["encoding"] and result[5] == [23], result
         assert messages[-1] == (b"Z", b"I"), messages[-1]
 
+        messages = client.simple_query(
+            sock, "SELECT count(*), count(NULL) FROM pg_catalog.pg_database")
+        result = runner.decode_wire_result(messages, include_types=True)
+        assert result[1] is None and result[0] == [["1", "0"]], result
+        assert result[3] == ["count", "count"] and result[5] == [20, 20], result
+        assert messages[-1] == (b"Z", b"I"), messages[-1]
+
         for sql in (
                 "SELECT * FROM pg_catalog.pg_database",
                 "SELECT datcollate FROM pg_catalog.pg_database"):

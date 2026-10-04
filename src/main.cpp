@@ -16317,8 +16317,20 @@ static bool executePgDatabaseQuery(const string& rawSql,
     vector<vector<dbms::ExprValue>> results;
     if (aggregate) {
         vector<dbms::ExprValue> row;
-        for (size_t i = 0; i < output.size(); ++i)
-            row.emplace_back("bigint", to_string(inputs.size()), false);
+        for (const auto& column : output) {
+            const auto* call =
+                static_cast<const dbms::FunctionCallExpr*>(column.expression);
+            const auto* star = dynamic_cast<const dbms::ColumnRefExpr*>(
+                call->args[0].get());
+            size_t count = 0;
+            for (const auto& input : inputs) {
+                if ((star && star->column == "*") ||
+                    !evaluator.eval(call->args[0].get(), input).isNull) {
+                    ++count;
+                }
+            }
+            row.emplace_back("bigint", to_string(count), false);
+        }
         results.push_back(std::move(row));
     } else {
         for (const auto& input : inputs) {
