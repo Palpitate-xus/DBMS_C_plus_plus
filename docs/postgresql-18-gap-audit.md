@@ -1,3 +1,5 @@
+2026-10-04 第986项复核SQL-14：没有query-tree deep copy、rule rewrite runtime、权限标记传播或rewrite依赖失效。第983项`div14_feature_gate_test.py`已验证RULE和EVENT TRIGGER在PG/extended mode都按0A000拒绝且不产生伪兼容对象，因此SQL-14从unverified改partial但未完成；CAT-19仍独立partial。无源码改动、无PG18.6 rewrite oracle/diff。详见`docs/issue-986-query-rewrite-capability-audit.md`。未push；Actions禁用；用户跳过安全/TDE仍deferred。总账273项：22 complete、149 partial、87 unverified、15 deferred_by_user。
+
 2026-10-04 第985项修复CAT-03中16个额外catalog缺失路径，代码/测试commit `c79c51bb`：18个已探测无SQL catalog执行路径的关系对`pg_catalog.name`及当前库无同名普通relation的未限定查询显式返回0A000，替代此前误报的55P03/42P01。定向协议E2E逐项通过，并确认支持的pg_database/pg_statistic和同名用户pg_constraint表仍可读写。生产构建通过；完整注册脚本因人工提前终止plpgsql_test退出1（不计全套通过），之后完成的其余测试通过，plpgsql_test单独重跑退出0（约94秒）。无PG18.6 oracle/diff；catalog数据/schema仍缺，CAT-03保持partial。详见`docs/issue-985-pg-catalog-fail-closed.md`。未push；Actions禁用；用户跳过安全/TDE继续deferred。总账273项：22 complete、148 partial、88 unverified、15 deferred_by_user。
 
 2026-10-04 第984项修复CAT-03错误分类，代码/测试commit `ffb63d19`：未实现的`pg_catalog.pg_index`和`pg_operator`带限定及未限定名称查询，在当前库无同名relation时均显式返回0A000，避免此前误报55P03/42P01；新协议回归还验证同连接后续查询正常。最终生产构建和定向E2E通过；完整注册suite在未限定名称扩展前通过，扩展后未重跑；无PG18.6 oracle/diff。真实catalog schema/data及其余catalog仍缺，CAT-03仅partial。详见`docs/issue-984-pg-catalog-error-state.md`。未push；Actions禁用；用户跳过安全/TDE继续deferred。总账273项：22 complete、148 partial、88 unverified、15 deferred_by_user。
@@ -249,7 +251,7 @@
 - [ ] **SQL-11** 对所有语句做尾随 token 检查、准确 error position、hint/detail/context 和 PostgreSQL SQLSTATE 映射。
 - [ ] **SQL-12** 移除以空格分割行/列的内部结果格式；它不能正确承载含空格、NULL、转义和复合值的数据。
 - [ ] **SQL-13** 统一 SQL 级 `PREPARE ... AS ... $n` 与协议 prepared statement 的类型、计划、失效和 portal 生命周期。
-- [ ] **SQL-14** 实现 rewrite system 所需的 query tree 复制、权限标记和依赖失效。
+- [ ] **SQL-14** 实现 rewrite system 所需的 query tree 复制、权限标记和依赖失效。（已核实未实现，partial；RULE/Event Trigger 入口 fail-closed，尚无 rewrite runtime，见第986项。）
 
 ## 7. Catalog、OID、对象和 DDL
 
