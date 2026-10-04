@@ -10,6 +10,7 @@
 #include <iomanip>
 #include <iostream>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <numeric>
@@ -16146,6 +16147,187 @@ static string expandSessionUserVariables(const string& input,
     return output;
 }
 
+// Expose only the activity columns backed by ProcessInfo, with PostgreSQL
+// types and query-text visibility rules.  The old text renderer ignored the
+// caller's projection/filter and exposed every session's SQL to every role.
+static bool executePgStatActivityQuery(const string& rawSql,
+                                       const Session& session) {
+    dbms::SQLParser parser;
+    const auto parsed = parser.parse(rawSql);
+    const auto* select = parsed.success
+        ? dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()) : nullptr;
+    if (!select || !select->fromClause ||
+        select->fromClause->type != dbms::FromItem::Type::Table) {
+        throw dbms::DbError("42601", "invalid pg_stat_activity query");
+    }
+    if (select->distinct || !select->groupBy.empty() ||
+        !select->groupByElems.empty() || select->having ||
+        select->setOp != dbms::SetOp::None || !select->locking.empty() ||
+        !select->distinctOn.empty() || !select->windowDefs.empty() ||
+        select->withTies || !select->orderBy.empty()) {
+        throw dbms::DbError(
+            "0A000", "complex pg_stat_activity query is not supported");
+    }
+
+    const string qualifier = select->fromClause->alias.empty()
+        ? "pg_stat_activity" : select->fromClause->alias;
+    const vector<pair<string, string>> fields = {
+        {"pid", "integer"}, {"datname", "name"}, {"usename", "name"},
+        {"state", "text"}, {"query", "text"}};
+    map<string, size_t> fieldIndexes;
+    map<string, string> hints;
+    for (size_t i = 0; i < fields.size(); ++i) {
+        fieldIndexes[fields[i].first] = i;
+        hints[fields[i].first] = fields[i].second;
+        hints[qualifier + "." + fields[i].first] = fields[i].second;
+        if (select->fromClause->alias.empty())
+            hints["pg_catalog.pg_stat_activity." + fields[i].first] =
+                fields[i].second;
+    }
+    static const set<string> kPg18ActivityColumns = {
+        "datid", "datname", "pid", "leader_pid", "usesysid", "usename",
+        "application_name", "client_addr", "client_hostname", "client_port",
+        "backend_start", "xact_start", "query_start", "state_change",
+        "wait_event_type", "wait_event", "state", "backend_xid",
+        "backend_xmin", "query_id", "query", "backend_type"};
+    function<void(const dbms::Expr*)> validate =
+        [&](const dbms::Expr* expression) {
+            if (!expression) return;
+            if (const auto* column =
+                    dynamic_cast<const dbms::ColumnRefExpr*>(expression)) {
+                const bool validQualifier = column->table.empty() ||
+                    (column->table == qualifier &&
+                     (column->schema.empty() ||
+                      (select->fromClause->alias.empty() &&
+                       column->schema == "pg_catalog")));
+                if (!validQualifier)
+                    throw dbms::DbError("42P01", "missing FROM-clause entry");
+                if (fieldIndexes.count(column->column)) return;
+                if (kPg18ActivityColumns.count(column->column))
+                    throw dbms::DbError(
+                        "0A000", "pg_stat_activity column \"" +
+                                     column->column + "\" is not implemented");
+                throw dbms::DbError(
+                    "42703", "column does not exist: " + column->column);
+            }
+            if (dynamic_cast<const dbms::LiteralExpr*>(expression)) return;
+            if (const auto* unary =
+                    dynamic_cast<const dbms::UnaryOpExpr*>(expression)) {
+                validate(unary->operand.get());
+                return;
+            }
+            if (const auto* binary =
+                    dynamic_cast<const dbms::BinaryOpExpr*>(expression)) {
+                validate(binary->left.get());
+                validate(binary->right.get());
+                return;
+            }
+            if (const auto* cast =
+                    dynamic_cast<const dbms::CastExpr*>(expression)) {
+                validate(cast->operand.get());
+                return;
+            }
+            throw dbms::DbError(
+                "0A000", "pg_stat_activity expression is not supported");
+        };
+
+    vector<const dbms::ColumnRefExpr*> projection;
+    vector<string> headers, columnTypes;
+    for (const auto& item : select->selectList) {
+        const auto* column =
+            dynamic_cast<const dbms::ColumnRefExpr*>(item.expr.get());
+        if (!column || column->column == "*")
+            throw dbms::DbError(
+                "0A000", "SELECT * requires the complete pg_stat_activity schema");
+        validate(item.expr.get());
+        projection.push_back(column);
+        headers.push_back(item.alias.empty()
+            ? column->column : decodeQuotedIdentifier(item.alias));
+        columnTypes.push_back(fields[fieldIndexes.at(column->column)].second);
+    }
+    if (projection.empty())
+        throw dbms::DbError("42601", "pg_stat_activity query has no projection");
+    validate(select->whereClause.get());
+    if (select->whereClause) {
+        const string predicateType = dbms::ExprHelper::inferResultType(
+            select->whereClause->toString(), hints);
+        if (predicateType != "boolean" && predicateType != "bool")
+            throw dbms::DbError("42804", "argument of WHERE must be type boolean");
+    }
+
+    const string sessionUser = session.authenticatedUser.empty()
+        ? session.username : session.authenticatedUser;
+    const bool canReadAllQueries = sessionIsAdmin(session) ||
+        userHasRole(effectiveSessionRole(session), "pg_read_all_stats");
+    dbms::ExprEvaluator evaluator;
+    evaluator.setCurrentDB(session.currentDB);
+    vector<vector<dbms::ExprValue>> results;
+    for (const auto& process : dbms::getProcessList()) {
+        if (process.id > static_cast<uint64_t>(numeric_limits<int32_t>::max()))
+            throw dbms::DbError(
+                "22003", "backend pid is outside pg_stat_activity range");
+        const bool canReadQuery = canReadAllQueries || process.user == sessionUser;
+        const string query = process.info.empty()
+            ? process.lastQuery : process.info;
+        string state = process.state;
+        if (state.empty()) state = "idle";
+        else if (state == "executing") state = "active";
+        const vector<dbms::ExprValue> values = {
+            dbms::ExprValue("integer", to_string(process.id), false),
+            dbms::ExprValue("name", process.db, false),
+            dbms::ExprValue("name", process.user, false),
+            dbms::ExprValue("text", state, false),
+            dbms::ExprValue("text", query,
+                            !canReadQuery || query.empty())};
+        dbms::RowContext context;
+        for (size_t i = 0; i < fields.size(); ++i) {
+            context.set(fields[i].first, values[i]);
+            context.set(qualifier + "." + fields[i].first, values[i]);
+            if (select->fromClause->alias.empty())
+                context.set("pg_catalog.pg_stat_activity." + fields[i].first,
+                            values[i]);
+        }
+        if (select->whereClause) {
+            const auto predicate = evaluator.eval(select->whereClause.get(), context);
+            if (!predicate.isNull && predicate.typeName != "boolean" &&
+                predicate.typeName != "bool") {
+                throw dbms::DbError("42804", "argument of WHERE must be type boolean");
+            }
+            if (predicate.isNull || !predicate.asBool()) continue;
+        }
+        vector<dbms::ExprValue> row;
+        for (const auto* column : projection)
+            row.push_back(values[fieldIndexes.at(column->column)]);
+        results.push_back(std::move(row));
+    }
+
+    const size_t first = min(select->offset.value_or(0), results.size());
+    const size_t kept = min(select->limit.value_or(results.size()),
+                            results.size() - first);
+    vector<vector<string>> rows;
+    vector<vector<bool>> nulls;
+    for (size_t i = first; i < first + kept; ++i) {
+        vector<string> row;
+        vector<bool> bitmap;
+        for (const auto& value : results[i]) {
+            row.push_back(value.value);
+            bitmap.push_back(value.isNull);
+        }
+        rows.push_back(std::move(row));
+        nulls.push_back(std::move(bitmap));
+    }
+    publishStructuredUtilityResult(headers, columnTypes, rows, nulls,
+                                    "SELECT " + to_string(rows.size()));
+    for (const auto& header : headers) cout << renderLegacyHeader(header) << ' ';
+    cout << '\n';
+    for (size_t i = 0; i < rows.size(); ++i) {
+        for (size_t j = 0; j < rows[i].size(); ++j)
+            cout << (nulls[i][j] ? "NULL" : rows[i][j]) << ' ';
+        cout << '\n';
+    }
+    return false;
+}
+
 // pg_settings is exposed as a deliberate typed subset.  PostgreSQL 18 has
 // seventeen columns; this server currently has reliable values only for the
 // first three.  Do not let the legacy text renderer silently ignore the
@@ -24296,8 +24478,13 @@ static bool executeInternal(const string& rawSql, Session& s) {
              (queryDb == s.currentDB &&
               !g_engine.tableExists(queryDb, tname) &&
               !g_engine.viewExists(queryDb, tname)));
+        const bool virtualPgStatActivity = tname == "pg_stat_activity" &&
+            (queryDb == "pg_catalog" ||
+             (queryDb == s.currentDB &&
+              !g_engine.tableExists(queryDb, tname) &&
+              !g_engine.viewExists(queryDb, tname)));
         // pg_stat_* virtual tables
-        if (tname == "pg_stat_database" || tname == "pg_stat_tables" || tname == "pg_stat_statements" || tname == "pg_seclabels" || tname == "pg_buffercache" || tname == "pg_locks" || tname == "pg_stat_wait_events" || tname == "pg_stat_activity" || virtualPgDatabase || virtualPgSettings || tname == "pg_tables" || tname == "pg_views" || tname == "pg_indexes" || tname == "pg_class") {
+        if (tname == "pg_stat_database" || tname == "pg_stat_tables" || tname == "pg_stat_statements" || tname == "pg_seclabels" || tname == "pg_buffercache" || tname == "pg_locks" || tname == "pg_stat_wait_events" || virtualPgStatActivity || virtualPgDatabase || virtualPgSettings || tname == "pg_tables" || tname == "pg_views" || tname == "pg_indexes" || tname == "pg_class") {
             auto bpStats = g_engine.getBufferPoolStats();
             const std::string catalogDb = queryDb == "pg_catalog"
                 ? s.currentDB : queryDb;
@@ -24411,12 +24598,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 cout << "Activity BgWriterHibernate 0" << endl;
                 cout << "Activity BgWriterMain 0" << endl;
                 cout << "Activity WalWriterMain 0" << endl;
-            } else if (tname == "pg_stat_activity") {
-                cout << "pid usename datname state query " << endl;
-                auto procs = dbms::getProcessList();
-                for (const auto& p : procs) {
-                    cout << p.id << " " << p.user << " " << p.db << " " << p.state << " " << p.info << endl;
-                }
+            } else if (virtualPgStatActivity) {
+                return executePgStatActivityQuery(effectiveRawSql, s);
             } else if (tname == "pg_database") {
                 return executePgDatabaseQuery(effectiveRawSql, s);
             } else if (tname == "pg_tables") {

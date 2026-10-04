@@ -172,7 +172,7 @@ BackendRegistration registerProcess(
     info.db = db;
     info.command = "Sleep";
     info.timeSec = 0.0;
-    info.state = "";
+    info.state = "idle";
     info.info = "";
     info.connectTime = std::chrono::steady_clock::now();
     g_processList[pid] = std::move(info);
@@ -260,6 +260,8 @@ void updateProcessInfo(uint64_t pid, const std::string& command,
         it->second.command = command;
         it->second.state = state;
         it->second.info = info;
+        if (state == "active" || state == "executing")
+            it->second.lastQuery = info;
     }
 }
 
@@ -1588,6 +1590,7 @@ bool describePreparedResult(const std::string& sql, Session& session,
     std::map<std::string, std::string> typeHints;
     bool virtualPgClass = false;
     bool virtualPgSettings = false;
+    bool virtualPgStatActivity = false;
     if (!sourceName.empty()) {
         relation = resolveTableName(session, sourceName);
         if (g_engine.tableExists(session.currentDB, relation)) {
@@ -1608,12 +1611,23 @@ bool describePreparedResult(const std::string& sql, Session& session,
                 (settingsName.schema == "pg_catalog" ||
                  (!g_engine.tableExists(session.currentDB, relation) &&
                   !g_engine.viewExists(session.currentDB, relation)));
-            if (!virtualPgClass && !virtualPgSettings) return false;
+            CatalogManager::QualifiedName activityName;
+            const bool namesPgStatActivity = select &&
+                CatalogManager::parseQualifiedName(sourceName, activityName, true) &&
+                activityName.name == "pg_stat_activity" &&
+                (activityName.schema.empty() ||
+                 activityName.schema == "pg_catalog");
+            virtualPgStatActivity = namesPgStatActivity &&
+                (activityName.schema == "pg_catalog" ||
+                 (!g_engine.tableExists(session.currentDB, relation) &&
+                  !g_engine.viewExists(session.currentDB, relation)));
+            if (!virtualPgClass && !virtualPgSettings &&
+                !virtualPgStatActivity) return false;
 
             // Match each virtual catalog's supported typed execution shape
             // without executing SELECT (Describe must never acquire rows or
-            // cause side effects).  pg_settings intentionally exposes only
-            // its implemented three-column subset.
+            // cause side effects). pg_settings and pg_stat_activity
+            // intentionally expose only their implemented subsets.
             const std::vector<std::pair<std::string, std::string>> fields =
                 virtualPgClass
                     ? std::vector<std::pair<std::string, std::string>>{
@@ -1622,16 +1636,22 @@ bool describePreparedResult(const std::string& sql, Session& session,
                           {"relnatts", "smallint"},
                           {"relpersistence", "\"char\""},
                           {"relowner", "oid"}}
-                    : std::vector<std::pair<std::string, std::string>>{
+                    : virtualPgSettings
+                    ? std::vector<std::pair<std::string, std::string>>{
                           {"name", "text"}, {"setting", "text"},
-                          {"unit", "text"}};
+                          {"unit", "text"}}
+                    : std::vector<std::pair<std::string, std::string>>{
+                          {"pid", "integer"}, {"datname", "name"},
+                          {"usename", "name"}, {"state", "text"},
+                          {"query", "text"}};
             for (const auto& field : fields) {
                 Column column;
                 column.dataName = field.first;
                 column.dataType = field.second;
                 schema.cols[schema.len++] = std::move(column);
             }
-            relation = virtualPgClass ? "pg_class" : "pg_settings";
+            relation = virtualPgClass ? "pg_class"
+                : virtualPgSettings ? "pg_settings" : "pg_stat_activity";
         }
         for (size_t i = 0; i < schema.len; ++i) {
             const Column& column = schema.cols[i];
@@ -1641,6 +1661,9 @@ bool describePreparedResult(const std::string& sql, Session& session,
                 typeHints["pg_catalog.pg_class." + column.dataName] = column.dataType;
             if (virtualPgSettings && sourceAlias.empty())
                 typeHints["pg_catalog.pg_settings." + column.dataName] =
+                    column.dataType;
+            if (virtualPgStatActivity && sourceAlias.empty())
+                typeHints["pg_catalog.pg_stat_activity." + column.dataName] =
                     column.dataType;
             if (!sourceAlias.empty()) {
                 typeHints[sourceAlias + "." + column.dataName] =
@@ -1672,7 +1695,9 @@ bool describePreparedResult(const std::string& sql, Session& session,
         const std::string source = sourceAlias.empty() ? relation : sourceAlias;
         const std::string qualifier = lowerProtocolText(reference.table);
         return qualifier == lowerProtocolText(source) ||
-               (virtualPgSettings && qualifier == "pg_catalog.pg_settings");
+               (virtualPgSettings && qualifier == "pg_catalog.pg_settings") ||
+               (virtualPgStatActivity &&
+                qualifier == "pg_catalog.pg_stat_activity");
     };
     for (const auto& item : *projections) {
         if (!item.expr) return false;
@@ -1681,7 +1706,7 @@ bool describePreparedResult(const std::string& sql, Session& session,
         if ((literal && literal->value == "*") ||
             (reference && reference->column == "*")) {
             if (relation.empty()) return false;
-            if (virtualPgSettings) return false;
+            if (virtualPgSettings || virtualPgStatActivity) return false;
             if (reference && !qualifierMatches(*reference)) return false;
             appendPhysicalColumns();
             continue;
@@ -1777,8 +1802,12 @@ bool describePreparedResult(const std::string& sql, Session& session,
         directParameterOids.push_back(parameterOid);
     }
     if (shape.columns.empty()) return false;
+    const std::string descriptionSql =
+        (virtualPgSettings || virtualPgStatActivity)
+            ? "SELECT 1"
+            : relation.empty() ? sql : "SELECT * FROM " + relation;
     columns = describeProtocolColumns(shape,
-        relation.empty() ? sql : "SELECT * FROM " + relation, session);
+                                      descriptionSql, session);
     for (size_t i = 0; i < columns.size(); ++i) {
         columns[i].name = outputNames[i];
         if (directParameterOids[i] != 0) {
@@ -3990,6 +4019,13 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         if (transactionFailed) return 'E';
         return g_engine.inTransaction() ? 'T' : 'I';
     };
+    const auto updateProcessIdle = [&]() {
+        const char status = readyStatus();
+        const std::string state = status == 'E'
+            ? "idle in transaction (aborted)"
+            : status == 'T' ? "idle in transaction" : "idle";
+        updateProcessInfo(pid, "Idle", state, "");
+    };
     const auto abortActiveTransaction = [&]() -> bool {
         // Short-rent pooling may have executed on a now-returned Session.
         // Snapshot restoration must use this connection's live state.
@@ -4490,7 +4526,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 protocol.sendReadyForQuery(readyStatus());
                 continue;
             }
-            updateProcessInfo(pid, "Query", "executing", trimText(sql));
+            updateProcessInfo(pid, "Query", "active", trimText(sql));
             // A Simple Query invalidates the unnamed extended-query objects.
             session.preparedStmts.erase("");
             session.preparedStmtTypes.erase("");
@@ -4499,7 +4535,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             if (!SQLParser::lexicalError(sql).empty()) {
                 const QueryResult result = executeForProtocol(sql);
                 (void)finishExtendedImplicitTransaction(true);
-                updateProcessInfo(pid, "Idle", "", "");
+                updateProcessIdle();
                 sendQueryResult(protocol, result, readyStatus());
                 continue;
             }
@@ -4507,7 +4543,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 splitSimpleQueryStatements(sql);
             if (statements.empty()) {
                 const QueryResult completion = finishExtendedImplicitTransaction(false);
-                updateProcessInfo(pid, "Idle", "", "");
+                updateProcessIdle();
                 QueryResult empty;
                 sendQueryResult(protocol, completion.error ? completion : empty, readyStatus());
                 continue;
@@ -4519,7 +4555,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 !transactionFailed) {
                 const QueryResult completion = finishExtendedImplicitTransaction(false);
                 if (completion.error) {
-                    updateProcessInfo(pid, "Idle", "", "");
+                    updateProcessIdle();
                     sendQueryResult(protocol, completion, readyStatus());
                     continue;
                 }
@@ -4547,7 +4583,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                     "ERROR", "0A000",
                     "wire COPY cannot be combined with other statements in one Query message");
                 (void)finishExtendedImplicitTransaction(true);
-                updateProcessInfo(pid, "Idle", "", "");
+                updateProcessIdle();
                 protocol.sendReadyForQuery(readyStatus());
                 continue;
             }
@@ -4562,7 +4598,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                     "ERROR", copyPlans.front().sqlState,
                     copyPlans.front().error);
                 (void)finishExtendedImplicitTransaction(true);
-                updateProcessInfo(pid, "Idle", "", "");
+                updateProcessIdle();
                 protocol.sendReadyForQuery(readyStatus());
                 continue;
             }
@@ -4578,7 +4614,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                         "ERROR", completion.sqlState, trimText(completion.errorMessage))) break;
                 if (!g_engine.inTransaction()) portals.clear();
                 updateProcessDb(pid, session.currentDB);
-                updateProcessInfo(pid, "Idle", "", "");
+                updateProcessIdle();
                 if (!sendPendingNotifications(protocol, session.pid)) break;
                 if (!sendChangedParameterStatuses()) break;
                 if (!protocol.sendReadyForQuery(readyStatus())) break;
@@ -4601,7 +4637,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             }
             if (!batchError) {
                 for (const auto& statement : statements) {
-                    updateProcessInfo(pid, "Query", "executing", trimText(statement));
+                    updateProcessInfo(pid, "Query", "active", trimText(statement));
                     results.push_back(executeForProtocol(statement));
                     if (results.back().error) {
                         batchError = true;
@@ -4634,7 +4670,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 portals.clear();
             }
             updateProcessDb(pid, session.currentDB);
-            updateProcessInfo(pid, "Idle", "", "");
+            updateProcessIdle();
             if (!sendPendingNotifications(protocol, session.pid)) break;
             for (const auto& result : results) {
                 sendQueryResult(protocol, result, readyStatus(), false);
@@ -5053,7 +5089,10 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                     extendedImplicitExecuted = false;
                 }
                 if (extendedImplicitTransaction) extendedImplicitExecuted = true;
+                updateProcessInfo(pid, "Query", "active",
+                                  trimText(portalState.sql));
                 portalState.result = executeForProtocol(portalState.sql);
+                updateProcessIdle();
                 portalState.executed = true;
             }
             if (!sendPendingNotifications(protocol, session.pid)) break;

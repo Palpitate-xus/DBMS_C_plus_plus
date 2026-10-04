@@ -29,6 +29,7 @@ struct ProcessInfo {
     double timeSec;
     std::string state;
     std::string info;
+    std::string lastQuery;
     std::chrono::steady_clock::time_point connectTime;
     bool cancelRequested = false;    // set by pg_cancel_backend
     bool terminateRequested = false; // set by pg_terminate_backend
