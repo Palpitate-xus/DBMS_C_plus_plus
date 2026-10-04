@@ -17,6 +17,7 @@
 #include "Session.h"
 #include <cassert>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <map>
 #include <string>
@@ -72,6 +73,94 @@ static size_t rowCountInPartitions(
         [&](uint32_t, uint16_t, const char*, size_t) { ++n; },
         nullptr, partitions));
     return n;
+}
+
+// Partition heap names currently share a delimiter-based namespace with
+// standalone relation names. Reject both creation orders and renames that
+// would alias files, while preserving the already-created relation.
+static void test_relation_name_storage_collision_guard() {
+    const std::string db = testDbPath("part_locator_collision");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    auto parent = makeSchema("orders", {"id int", "region varchar"});
+    parent.partitionType = dbms::TableSchema::PartitionType::List;
+    parent.partitionKey = "region";
+    parent.listPartitions = {{"p1", {"north"}}};
+    assert(g_engine.createTable(db, parent) == dbms::DBStatus::OK);
+    assert(g_engine.insert(
+               db, "orders", {{"id", "1"}, {"region", "north"}}) ==
+           dbms::DBStatus::OK);
+
+    auto unrelated = makeSchema("orders2", {"id int", "region varchar"});
+    assert(g_engine.createTable(db, unrelated) == dbms::DBStatus::OK);
+
+    auto renameSource = makeSchema("rename_source", {"id int", "region varchar"});
+    assert(g_engine.createTable(db, renameSource) == dbms::DBStatus::OK);
+    assert(g_engine.alterTableRenameTable(
+               db, "rename_source", "orders#p1") ==
+           dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.tableExists(db, "rename_source"));
+
+    auto standalone = makeSchema("orders#p1", {"id int", "region varchar"});
+    assert(g_engine.createTable(db, standalone) ==
+           dbms::DBStatus::INVALID_ARGUMENT);
+    assert(!g_engine.tableExists(db, "orders#p1"));
+    assert(rowCount(db, "orders") == 1);
+    assert(std::filesystem::is_regular_file(
+        std::filesystem::path(db) / "orders#p1.dt"));
+
+    // Simulate a legacy database created before the namespace guard. The
+    // overlapping catalog entry now aliases a real partition heap; DROP on
+    // either name must fail closed and leave that heap in place.
+    const auto legacySchema = std::filesystem::path(db) / "orders#p1.stc";
+    std::filesystem::copy_file(
+        std::filesystem::path(db) / "orders2.stc", legacySchema);
+    std::string tableNameRecord(dbms::MAX_TABLE_NAME_LEN, '\0');
+    const std::string legacyName = "orders#p1";
+    for (size_t i = 0; i < legacyName.size(); ++i) {
+        tableNameRecord[i] = legacyName[i];
+    }
+    {
+        std::ofstream tableList(
+            std::filesystem::path(db) / "tlist.lst",
+            std::ios::binary | std::ios::app);
+        tableList.write(tableNameRecord.data(),
+                        static_cast<std::streamsize>(tableNameRecord.size()));
+        assert(tableList.good());
+    }
+    assert(g_engine.tableExists(db, legacyName));
+    assert(g_engine.dropTable(db, legacyName) == dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.dropTable(db, "orders") == dbms::DBStatus::INVALID_VALUE);
+    assert(std::filesystem::is_regular_file(
+        std::filesystem::path(db) / "orders#p1.dt"));
+
+    const std::string reverseDb = testDbPath("part_locator_collision_reverse");
+    cleanup(reverseDb);
+    assert(g_engine.createDatabase(reverseDb, "utf8") == dbms::DBStatus::OK);
+    auto reverseStandalone =
+        makeSchema("events#p1", {"id int", "region varchar"});
+    assert(g_engine.createTable(reverseDb, reverseStandalone) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.insert(
+               reverseDb, "events#p1",
+               {{"id", "7"}, {"region", "south"}}) ==
+           dbms::DBStatus::OK);
+
+    auto reverseParent = makeSchema("events", {"id int", "region varchar"});
+    reverseParent.partitionType = dbms::TableSchema::PartitionType::List;
+    reverseParent.partitionKey = "region";
+    reverseParent.listPartitions = {{"p1", {"south"}}};
+    assert(g_engine.createTable(reverseDb, reverseParent) ==
+           dbms::DBStatus::INVALID_ARGUMENT);
+    assert(!g_engine.tableExists(reverseDb, "events"));
+    assert(rowCount(reverseDb, "events#p1") == 1);
+    assert(std::filesystem::is_regular_file(
+        std::filesystem::path(reverseDb) / "events#p1.dt"));
+
+    cleanup(db);
+    cleanup(reverseDb);
+    std::cout << "[PART] relation storage namespace collisions rejected" << std::endl;
 }
 
 // Range-partitioned table: rows route to p1/p2/p3 based on year.
@@ -674,6 +763,7 @@ static void test_partition_wal_routing() {
 
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
+    test_relation_name_storage_collision_guard();
     test_range_partitioning();
     test_list_partitioning();
     test_range_default_partition();

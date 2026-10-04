@@ -2615,22 +2615,78 @@ static bool isRelationPhysicalFileName(const std::string& name,
             tablename);
     }
     if (name == tablename + ".toast") return true;
-    if (name.rfind(tablename + "#", 0) != 0 &&
-        name.rfind(tablename + "_", 0) != 0 &&
-        name.rfind(tablename + ".", 0) != 0) {
-        return false;
-    }
     const std::array<std::string, 11> suffixes = {
         ".dt", ".fsm", ".vm", ".idx", ".hidx", ".bidx", ".fti",
         ".gin", ".gist", ".spgist", ".brin"};
+    const auto hasSuffix = [&](const std::string& suffix) {
+        return name.size() >= suffix.size() &&
+               name.compare(name.size() - suffix.size(), suffix.size(),
+                            suffix) == 0;
+    };
+
+    // Partitions have their own `#` component, and all supported relation
+    // forks/access-method files may follow it.
+    if (name.rfind(tablename + "#", 0) == 0) {
+        for (const auto& suffix : suffixes) {
+            if (hasSuffix(suffix)) return true;
+        }
+        return false;
+    }
+
+    // Column indexes use `<table>_<column>.<am>`; underscore alone does not
+    // make a neighboring table's `.dt` heap part of this relation.
+    if (name.rfind(tablename + "_", 0) == 0) {
+        const std::array<std::string, 8> indexSuffixes = {
+            ".idx", ".hidx", ".bidx", ".fti", ".gin", ".gist",
+            ".spgist", ".brin"};
+        const size_t prefixLength = tablename.size() + 1;
+        for (const auto& suffix : indexSuffixes) {
+            if (name.size() > prefixLength + suffix.size() &&
+                hasSuffix(suffix)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Main relation forks and indexes use exact `<table>.<fork>` names. TOAST
+    // heaps/indexes are the only multi-component dotted storage names.
     for (const auto& suffix : suffixes) {
-        if (name.size() >= suffix.size() &&
-            name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0) {
+        if (name == tablename + suffix ||
+            name == tablename + ".toast" + suffix) return true;
+    }
+    const std::string compositeIndexPrefix = tablename + ".idx_";
+    return name == tablename + ".toastmeta" ||
+           (name.rfind(compositeIndexPrefix, 0) == 0 &&
+            name.size() > compositeIndexPrefix.size());
+}
+
+// Until relation files are keyed by OID, a table's main heap name can also
+// be interpreted as another table's partition/fork/index file. Reject names
+// whose canonical heap filenames overlap those legacy ownership prefixes.
+static bool relationHeapNamesOverlap(const std::string& first,
+                                     const std::string& second) {
+    return isRelationPhysicalFileName(first + ".dt", second) ||
+           isRelationPhysicalFileName(second + ".dt", first);
+}
+
+static bool relationNamespaceContainsPhysicalFiles(
+    const std::filesystem::path& relationDirectory,
+    const std::string& tablename, std::error_code& error) {
+    std::filesystem::directory_iterator it(relationDirectory, error), end;
+    if (error == std::errc::no_such_file_or_directory) {
+        error.clear();
+        return false;
+    }
+    if (error) return false;
+    for (; it != end; it.increment(error)) {
+        if (error) return false;
+        if (isRelationPhysicalFileName(
+                it->path().filename().string(), tablename)) {
             return true;
         }
     }
-    return name == tablename + ".toastmeta" ||
-           name.rfind(tablename + ".idx_", 0) == 0;
+    return false;
 }
 
 static bool isDefinitionBearingSpecializedIndexFileName(
@@ -15632,6 +15688,40 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
             return DBStatus::INVALID_VALUE;
         }
     }
+    const auto prospectiveRelationDir =
+        tblWithVersion.tablespace == "pg_default"
+            ? dbPath(dbname)
+            : tablespaceDir(dbname, tblWithVersion.tablespace) / dbname;
+    std::string conflictingRelationName;
+    for (const auto& existingName : getTableNames(dbname)) {
+        if (relationHeapNamesOverlap(
+                tblWithVersion.tablename, existingName) &&
+            relationDir(dbname, existingName).lexically_normal() ==
+                prospectiveRelationDir.lexically_normal()) {
+            conflictingRelationName = existingName;
+            break;
+        }
+    }
+    if (!conflictingRelationName.empty()) {
+        if (error) {
+            *error = "relation name overlaps the name-based storage namespace of '" +
+                     conflictingRelationName + "'";
+        }
+        return DBStatus::INVALID_ARGUMENT;
+    }
+    std::error_code relationNamespaceError;
+    if (relationNamespaceContainsPhysicalFiles(
+            prospectiveRelationDir, tblWithVersion.tablename,
+            relationNamespaceError)) {
+        if (error) {
+            *error = "physical relation namespace is already occupied";
+        }
+        return DBStatus::INVALID_ARGUMENT;
+    }
+    if (relationNamespaceError) {
+        if (error) *error = "could not inspect physical relation namespace";
+        return DBStatus::IO_ERROR;
+    }
     for (size_t i = 0; i < tblWithVersion.len; ++i) {
         std::string typeErr = TypeRegistry::instance().validateColumn(tblWithVersion.cols[i]);
         if (!typeErr.empty()) {
@@ -16012,6 +16102,23 @@ private:
 DBStatus StorageEngine::dropTable(const std::string& dbname,
                                    const std::string& tablename) {
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
+    std::string conflictingRelationName;
+    const auto relationDirectory = relationDir(dbname, tablename).lexically_normal();
+    for (const auto& existingName : getTableNames(dbname)) {
+        if (existingName != tablename &&
+            relationHeapNamesOverlap(tablename, existingName) &&
+            relationDir(dbname, existingName).lexically_normal() ==
+                relationDirectory) {
+            conflictingRelationName = existingName;
+            break;
+        }
+    }
+    if (!conflictingRelationName.empty()) {
+        // A legacy overlapping name makes prefix-based file ownership
+        // ambiguous. Refuse destructive cleanup rather than risk unlinking
+        // another logical relation's heap.
+        return DBStatus::INVALID_VALUE;
+    }
     noteTemporaryRelationAccess(dbname, tablename);
     if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
@@ -17515,6 +17622,20 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
     if (!tableExists(dbname, oldName)) return DBStatus::TABLE_NOT_FOUND;
     if (!validStoredIdentifier(newName, MAX_TABLE_NAME_LEN)) return DBStatus::INVALID_VALUE;
     if (tableExists(dbname, newName)) return DBStatus::TABLE_ALREADY_EXISTS;
+    std::string conflictingRelationName;
+    const auto relationDirectory = relationDir(dbname, oldName).lexically_normal();
+    for (const auto& existingName : getTableNames(dbname)) {
+        if (existingName != oldName &&
+            relationHeapNamesOverlap(newName, existingName) &&
+            relationDir(dbname, existingName).lexically_normal() ==
+                relationDirectory) {
+            conflictingRelationName = existingName;
+            break;
+        }
+    }
+    if (!conflictingRelationName.empty()) {
+        return DBStatus::INVALID_VALUE;
+    }
     // Always acquire the two relation locks in name order.  Rename is a
     // multi-relation operation; a canonical order prevents two concurrent
     // cross-renames from forming an avoidable lock cycle.

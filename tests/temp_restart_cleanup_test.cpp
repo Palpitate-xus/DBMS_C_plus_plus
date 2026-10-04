@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 
 dbms::Config g_config;
 
@@ -28,9 +29,8 @@ int main() {
         assert(engine.createTable(dbname, persistent, &error) == DBStatus::INVALID_ARGUMENT);
         assert(!engine.tableExists(dbname, physicalName));
 
-        // A corrupted pre-existing heap forces initialization to fail after
-        // the schema stage.  The failed CREATE must remove every partial
-        // artifact and relation-list entry.
+        // A corrupted pre-existing heap is an occupied physical namespace.
+        // CREATE must fail before publishing a schema or deleting the file.
         const std::string failedName = "failed_create";
         {
             std::ofstream corrupt(dbname + "/" + failedName + ".dt", std::ios::binary);
@@ -39,9 +39,17 @@ int main() {
         TableSchema failed;
         failed.tablename = failedName;
         failed.append(makeIntColumn("id", false, 0, true));
-        assert(engine.createTable(dbname, failed, &error) == DBStatus::INVALID_VALUE);
+        assert(engine.createTable(dbname, failed, &error) == DBStatus::INVALID_ARGUMENT);
         assert(!engine.tableExists(dbname, failedName));
-        assert(!std::filesystem::exists(dbname + "/" + failedName + ".dt"));
+        assert(std::filesystem::is_regular_file(
+            dbname + "/" + failedName + ".dt"));
+        {
+            std::ifstream corrupt(dbname + "/" + failedName + ".dt",
+                                  std::ios::binary);
+            std::string contents((std::istreambuf_iterator<char>(corrupt)),
+                                 std::istreambuf_iterator<char>());
+            assert(contents == "corrupt heap");
+        }
         for (const auto& name : engine.getTableNames(dbname)) assert(name != failedName);
 
         TableSchema table;
