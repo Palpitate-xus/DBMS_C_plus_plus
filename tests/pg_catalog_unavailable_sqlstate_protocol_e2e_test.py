@@ -18,6 +18,7 @@ UNIMPLEMENTED_CATALOGS = (
     "pg_auth_members",
     "pg_default_acl",
     "pg_tablespace",
+    "pg_namespace",
     "pg_stats",
     "pg_statistic",
     "pg_statistic_ext",

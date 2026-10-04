@@ -24068,7 +24068,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
               !g_engine.tableExists(queryDb, tname) &&
               !g_engine.viewExists(queryDb, tname)));
         // pg_stat_* virtual tables
-        if (tname == "pg_stat_database" || tname == "pg_stat_tables" || tname == "pg_stat_statements" || tname == "pg_seclabels" || tname == "pg_buffercache" || tname == "pg_locks" || tname == "pg_stat_wait_events" || tname == "pg_stat_activity" || virtualPgDatabase || tname == "pg_tables" || tname == "pg_views" || tname == "pg_indexes" || tname == "pg_settings" || tname == "pg_roles" || tname == "pg_namespace" || tname == "pg_class" || tname == "pg_type" || tname == "pg_enum") {
+        if (tname == "pg_stat_database" || tname == "pg_stat_tables" || tname == "pg_stat_statements" || tname == "pg_seclabels" || tname == "pg_buffercache" || tname == "pg_locks" || tname == "pg_stat_wait_events" || tname == "pg_stat_activity" || virtualPgDatabase || tname == "pg_tables" || tname == "pg_views" || tname == "pg_indexes" || tname == "pg_settings" || tname == "pg_roles" || tname == "pg_class" || tname == "pg_type" || tname == "pg_enum") {
             auto bpStats = g_engine.getBufferPoolStats();
             const std::string catalogDb = queryDb == "pg_catalog"
                 ? s.currentDB : queryDb;
@@ -24280,17 +24280,6 @@ static bool executeInternal(const string& rawSql, Session& s) {
                          << (account.rolcreatedb ? "t" : "f") << " "
                          << (account.rolcanlogin ? "t" : "f") << " " << endl;
                 }
-            } else if (tname == "pg_namespace") {
-                cout << "oid nspname nspowner " << endl;
-                if (!catalogDb.empty()) {
-                    try {
-                        for (const auto& ns : g_engine.catalogService().get(catalogDb).listNamespaces()) {
-                            cout << ns.oid << " " << ns.nspname << " " << ns.nspowner << " " << endl;
-                        }
-                    } catch (const std::exception& e) {
-                        std::cerr << "WARNING: pg_namespace lookup failed: " << e.what() << std::endl;
-                    }
-                }
             } else if (tname == "pg_class") {
                 return executePgClassQuery(effectiveRawSql, s, catalogDb);
             } else if (tname == "pg_type") {
@@ -24337,7 +24326,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
         static const std::set<std::string> unimplementedCatalogRelations = {
             "pg_am", "pg_auth_members", "pg_authid", "pg_cast",
             "pg_collation", "pg_constraint", "pg_default_acl", "pg_index",
-            "pg_opclass", "pg_operator", "pg_policy", "pg_publication",
+            "pg_namespace", "pg_opclass", "pg_operator", "pg_policy",
+            "pg_publication",
             "pg_rewrite", "pg_replication_origin", "pg_stats", "pg_statistic",
             "pg_statistic_ext",
             "pg_subscription", "pg_tablespace", "pg_trigger"};
