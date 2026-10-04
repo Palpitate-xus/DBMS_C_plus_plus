@@ -4,6 +4,8 @@
 
 # 总差距清单执行计划
 
+2026-10-04 第985项 source/test commit `c79c51bb`：协议探测发现16个额外缺失系统catalog错误落为55P03/42P01。18个明确未实现SQL catalog现在对限定／未限定名字fail-closed为0A000，且既有虚拟pg_database/pg_statistic与同名用户relation不受影响。最终生产构建和catalog定向E2E通过。整套脚本曾因我提前终止plpgsql_test而exit 1，不能记作suite通过；所有随后完成的用例通过。无PG18.6 oracle/diff。CAT-03 catalog数据/schema仍不完整。详见`docs/issue-985-pg-catalog-fail-closed.md`。未push；Actions禁用；用户跳过的安全/TDE保持deferred。
+
 2026-10-04 第984项 source/test commit `ffb63d19`：未实现的`pg_index`／`pg_operator` catalog查询此前会泄露为55P03／42P01；现在对限定和未限定名称（当前库无同名relation时）一致返回0A000，且同连接可继续查询。最终`bash scripts/build.sh`与定向`python3 tests/pg_catalog_unavailable_sqlstate_protocol_e2e_test.py`通过。完整注册suite仅在未限定名称扩展前通过，扩展后未重跑；无PG18.6 oracle/diff。实际catalog schema/data和其他CAT-03对象仍缺，CAT-03只推进到partial。详见`docs/issue-984-pg-catalog-error-state.md`。未push，Actions禁用，用户跳过的安全/TDE保持deferred。
 
 2026-10-04 第981项复核OPT-06：现有ScalarSubquery与Volcano SemiJoin/AntiJoin/ExistenceFilter分别覆盖有限相关标量、NULL/基数边界和ANY/ALL子集；三个定向C++回归通过，当前源码此前的完整注册C++／protocol／E2E suite通过。无本步代码改动，无PG18.6 oracle/diff。复杂相关quantified/aggregate/expression、一般parameterized paths、inner index选择、initplan及memoize仍未实现；OPT-06转为partial而非complete。详见`docs/issue-981-correlated-subquery-execution-scope.md`。未push，Actions禁用，安全/TDE跳过项仍deferred。
