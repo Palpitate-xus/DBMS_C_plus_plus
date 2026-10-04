@@ -955,7 +955,7 @@
     {"id":"VAC-02","status":"unverified","evidence":[]},
     {"id":"VAC-03","status":"unverified","evidence":[]},
     {"id":"VAC-04","status":"unverified","evidence":[]},
-    {"id":"STO-01","status":"unverified","evidence":[]},
+    {"id":"STO-01","status":"partial","evidence":["docs/issue-sto-01-control-format-integrity.md","docs/PACKAGING.md","docs/MANUAL.md","src/common/DataDirectory.cpp"],"tests":["tests/data_directory_e2e_test.py","tests/checksum_verification_e2e_test.py","scripts/build_tests.sh"],"commits":["b662ff97"]},
     {"id":"STO-02","status":"unverified","evidence":[]},
     {"id":"STO-03","status":"unverified","evidence":[]},
     {"id":"STO-04","status":"unverified","evidence":[]},
