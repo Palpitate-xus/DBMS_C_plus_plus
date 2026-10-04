@@ -12,6 +12,8 @@
 
 代码与协议测试提交：`b7fb4224 fix(catalog): expose typed pg_database subset`。
 
+同一执行路径的 `COUNT(expr)` NULL 语义在后续复查中单独发现并修复：`COUNT(*)` 计总行数，`COUNT(NULL)` 计零，见[第 988 项](issue-988-pg-database-count-aggregate.md)。
+
 ## 验证
 
 - `bash scripts/build.sh`：生产构建通过。
