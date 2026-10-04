@@ -2,6 +2,21 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "981",
+      "gap_ids": ["OPT-06"],
+      "status": "partial",
+      "evidence": ["docs/code-review-progress.md", "docs/issue-981-correlated-subquery-execution-scope.md", "src/main.cpp", "src/executor/ExecutionPlan.cpp", "src/executor/ExecutionPlan.h"],
+      "tests": ["tests/scalar_subquery_projection_cardinality_test.cpp", "tests/scalar_subquery_self_correlation_test.cpp", "tests/volcano_select_phase51_test.cpp", "tests/postgres_protocol_test.py", "scripts/build_tests.sh"],
+      "verification": {
+        "scalar_projection_cardinality": "bash scripts/build_one_test.sh scalar_subquery_projection_cardinality_test: passed; correlated scalar value, empty-result NULL, multi-row SQLSTATE 21000, alias, and simple predicate boundaries",
+        "scalar_self_correlation": "bash scripts/build_one_test.sh scalar_subquery_self_correlation_test: passed; outer-row binding, aliases, and NULL propagation",
+        "volcano_correlated_operators": "bash scripts/build_one_test.sh volcano_select_phase51_test: passed; SemiJoin/AntiJoin, ExistenceFilter, and ANY/ALL subset",
+        "full_registered_suite": "Current source state previously passed the complete registered C++, protocol, and E2E suite with All tests passed",
+        "postgresql_18_oracle": "not run specifically for this bounded audit",
+        "scope": "Evidence verifies only existing execution subsets. General parameterized paths, inner index path selection, initplan/memoize, broad correlated aggregate/expression execution, and full costing/invalidation remain incomplete; OPT-06 stays partial"
+      }
+    },
+    {
       "issue": "980",
       "gap_ids": ["TXN-09"],
       "status": "partial",
@@ -565,7 +580,7 @@
     {"id":"OPT-03","status":"unverified","evidence":[]},
     {"id":"OPT-04","status":"partial","evidence":["src/commands/TableManage.cpp","src/commands/TableManage.h","src/executor/ExecutionPlan.cpp","docs/code-review-progress.md","src/main.cpp","src/commands/DmlExecutor.cpp"],"tests":["tests/unknown_relation_rows_test.cpp","tests/unknown_relation_rows_protocol_e2e_test.py","tests/planner_runtime_stats_test.cpp","tests/cost_model_test.cpp","tests/analyze_native_protocol_e2e_test.py","tests/compat/cases/analyze_native_relations.sql","tests/legacy_forced_analyze_protocol_e2e_test.py","tests/dml_semantics_test.cpp","tests/analyze_null_statistics_test.cpp","tests/analyze_null_statistics_protocol_e2e_test.py","tests/stats_planner_test.cpp","tests/pg_stats_test.cpp","tests/partition_test.cpp","tests/analyze_typed_statistics_test.cpp","tests/analyze_typed_statistics_protocol_e2e_test.py","tests/pg_stats_histogram_extent_test.cpp","tests/pg_stats_histogram_extent_protocol_e2e_test.py","tests/typed_statistics_mcv_test.cpp","tests/typed_statistics_mcv_protocol_e2e_test.py"],"commits":["d83b3cbe","1887105f","5faa59fe","f640eea1","75d73a4a","f62447b4","cbb0946f"]},
     {"id":"OPT-05","status":"partial","evidence":["src/commands/TableManage.cpp","src/commands/TableManage.h","src/executor/ExecutionPlan.cpp","docs/code-review-progress.md"],"tests":["tests/unknown_relation_rows_test.cpp","tests/unknown_relation_rows_protocol_e2e_test.py","tests/planner_runtime_stats_test.cpp","tests/cost_model_test.cpp","tests/analyze_null_statistics_test.cpp","tests/analyze_null_statistics_protocol_e2e_test.py","tests/stats_planner_test.cpp","tests/pg_stats_test.cpp","tests/partition_test.cpp","tests/analyze_typed_statistics_test.cpp","tests/analyze_typed_statistics_protocol_e2e_test.py","tests/typed_statistics_mcv_test.cpp","tests/typed_statistics_mcv_protocol_e2e_test.py"],"commits":["d83b3cbe","f640eea1","75d73a4a","cbb0946f"]},
-    {"id":"OPT-06","status":"unverified","evidence":[]},
+    {"id":"OPT-06","status":"partial","evidence":["docs/code-review-progress.md","docs/issue-981-correlated-subquery-execution-scope.md","src/main.cpp","src/executor/ExecutionPlan.cpp","src/executor/ExecutionPlan.h"],"tests":["tests/scalar_subquery_projection_cardinality_test.cpp","tests/scalar_subquery_self_correlation_test.cpp","tests/volcano_select_phase51_test.cpp","tests/postgres_protocol_test.py","scripts/build_tests.sh"],"commits":[]},
     {"id":"OPT-07","status":"unverified","evidence":[]},
     {"id":"OPT-08","status":"unverified","evidence":[]},
     {"id":"OPT-09","status":"unverified","evidence":[]},

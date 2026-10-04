@@ -1,5 +1,7 @@
 # 总差距清单执行计划
 
+2026-10-04 第981项复核OPT-06：现有ScalarSubquery与Volcano SemiJoin/AntiJoin/ExistenceFilter分别覆盖有限相关标量、NULL/基数边界和ANY/ALL子集；三个定向C++回归通过，当前源码此前的完整注册C++／protocol／E2E suite通过。无本步代码改动，无PG18.6 oracle/diff。复杂相关quantified/aggregate/expression、一般parameterized paths、inner index选择、initplan及memoize仍未实现；OPT-06转为partial而非complete。详见`docs/issue-981-correlated-subquery-execution-scope.md`。未push，Actions禁用，安全/TDE跳过项仍deferred。
+
 2026-10-04 第980项 source/test commit `e808d50d`：精化SSI空扫描粒度；旧relation级fallback使不同缺失主键点查加不同键插入也冲突。现在可用索引谓词覆盖的空结果使用索引predicate read-set；未索引空范围保留relation fallback，交叉匹配仍触发serialization failure。新增精确回归与旧行为复现。`phase5_remaining_test`、生产build、最终全注册C++／完整协议／E2E suite均通过，最后`All tests passed`；没有PG18.6 oracle/diff。TXN-09仍partial，完整谓词锁层级/访问方法与SSI图待实现。详见`docs/issue-980-ssi-empty-index-predicate-granularity.md`。未push，Actions禁用，安全/TDE跳过仍deferred。
 
 2026-10-04 第979项 test commit `df0c59de`：为显式相对`-D`增加启动E2E：从独立launch目录启动既有cluster，连接成功、control identity不变且启动目录未误建数据。`python3 tests/data_directory_e2e_test.py`通过；现有data-directory实现已在bootstrap `chdir`前解析启动相对路径。OPS-01只由unverified推进为partial；GUC配置来源/context/reload/restart的PostgreSQL语义仍未完成。无production改动，无本步全量suite宣称。详见`docs/issue-979-relative-data-directory.md`。未push，Actions禁用，安全/TDE跳过保持deferred。
