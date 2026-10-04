@@ -1990,7 +1990,7 @@ private:
         std::set<BloomIndex*>& bloomUndoIndexes);
     struct SsiIndexPredicate;
     struct SsiIndexKey;
-    void recordSsiIndexPredicate(const std::string& dbname, const std::string& tablename,
+    bool recordSsiIndexPredicate(const std::string& dbname, const std::string& tablename,
                                  const Condition& condition, const TableSchema& tbl);
     void recordSsiIndexKeys(const std::string& dbname, const std::string& tablename,
                             const std::string& rowData, const TableSchema& tbl);
@@ -2027,11 +2027,10 @@ private:
     static std::mutex ssiMutex_;
     static std::map<uint64_t, std::set<std::string>> ssiReadSets_;   // txId -> relation-qualified RIDs read
     static std::map<uint64_t, std::set<std::string>> ssiWriteSets_;  // txId -> relation-qualified RIDs written
-    // Coarse-grained SIREAD coverage.  A relation marker is retained for the
-    // lifetime of overlapping serializable transactions so empty/range reads
-    // still conflict with concurrent writes (the row sets alone cannot see a
-    // phantom).  This is conservative by design until page/index predicate
-    // locks are implemented.
+    // Coarse-grained SIREAD coverage. A relation marker is retained for the
+    // lifetime of overlapping serializable transactions when a scan has no
+    // row, page, or usable index-predicate coverage. It is the conservative
+    // fallback for empty/unindexed scans.
     static std::map<uint64_t, std::set<std::string>> ssiReadRelations_;
     static std::map<uint64_t, std::set<std::string>> ssiWriteRelations_;
     // Page-level SIREAD coverage for non-empty scans. Relation markers remain

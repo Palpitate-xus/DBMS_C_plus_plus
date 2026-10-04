@@ -24919,10 +24919,12 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
     };
 
     // Record logical index predicates independently of the physical access
-    // path.  Range conditions may still use a heap scan today, but their
+    // path. Range conditions may still use a heap scan today, but their
     // serializable read dependency must cover matching future index keys.
+    bool hasSsiIndexPredicate = false;
     for (const auto& condition : conds) {
-        recordSsiIndexPredicate(dbname, tablename, condition, tbl);
+        hasSsiIndexPredicate = recordSsiIndexPredicate(
+            dbname, tablename, condition, tbl) || hasSsiIndexPredicate;
     }
 
     // During an overlapping transaction an index contains only the current
@@ -24968,6 +24970,12 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
             transactionContext().txnDB != dbname ||
             transactionContext().txnIsolationLevel != IsolationLevel::SERIALIZABLE) return;
         if (ids.empty()) {
+            // A recorded index predicate is a sound superset of an empty
+            // query result: any future row matching the query must also match
+            // this indexed conjunct. Keep the relation fallback only when no
+            // usable predicate was recorded, avoiding false conflicts between
+            // disjoint empty index probes.
+            if (hasSsiIndexPredicate) return;
             const std::string relation = ssiRelationKey(dbname, tablename);
             transactionContext().txnReadRelations.insert(relation);
             std::lock_guard<std::mutex> lock(ssiMutex_);
@@ -42641,7 +42649,7 @@ bool StorageEngine::ssiIndexPredicateMatches(const SsiIndexPredicate& predicate,
     return false;
 }
 
-void StorageEngine::recordSsiIndexPredicate(const std::string& dbname,
+bool StorageEngine::recordSsiIndexPredicate(const std::string& dbname,
                                             const std::string& tablename,
                                             const Condition& condition,
                                             const TableSchema& tbl) {
@@ -42650,7 +42658,7 @@ void StorageEngine::recordSsiIndexPredicate(const std::string& dbname,
         transactionContext().txnIsolationLevel != IsolationLevel::SERIALIZABLE ||
         (condition.op != "=" && condition.op != ">" && condition.op != ">=" &&
          condition.op != "<" && condition.op != "<=")) {
-        return;
+        return false;
     }
 
     size_t columnIndex = tbl.len;
@@ -42662,7 +42670,7 @@ void StorageEngine::recordSsiIndexPredicate(const std::string& dbname,
     }
     if (columnIndex >= tbl.len ||
         !columnUsesBinaryCollation(tbl.cols[columnIndex])) {
-        return;
+        return false;
     }
 
     std::vector<std::string> indexNames;
@@ -42674,7 +42682,7 @@ void StorageEngine::recordSsiIndexPredicate(const std::string& dbname,
     }
     const std::string predicateValue = canonicalColumnKeyValue(
         tbl.cols[columnIndex], condition.value);
-    if (indexNames.empty() || predicateValue.empty()) return;
+    if (indexNames.empty() || predicateValue.empty()) return false;
 
     const SsiIndexPredicate predicateBase{
         dbname, tablename, "", condition.op, predicateValue};
@@ -42685,6 +42693,7 @@ void StorageEngine::recordSsiIndexPredicate(const std::string& dbname,
         transactionContext().txnReadIndexPredicates.insert(predicate);
         ssiReadIndexPredicates_[transactionContext().currentTxnId].insert(std::move(predicate));
     }
+    return !indexNames.empty();
 }
 
 void StorageEngine::recordSsiIndexKeys(const std::string& dbname,

@@ -71,19 +71,23 @@ static void test_ssi_empty_predicate() {
         dbms::TableSchema items;
         items.tablename = "items";
         items.append(dbms::makeIntColumn("id", false, 2, true));
+        items.append(dbms::makeIntColumn("bucket", false, 2));
         items.pkColIndices.push_back(0);
         assert(first.createTable(db, items) == dbms::DBStatus::OK);
-        assert(first.insert(db, "items", {{"id", "1"}}) == dbms::DBStatus::OK);
+        assert(first.insert(db, "items", {{"id", "1"}, {"bucket", "1"}}) ==
+               dbms::DBStatus::OK);
 
         first.setIsolationLevel(dbms::IsolationLevel::SERIALIZABLE);
         second.setIsolationLevel(dbms::IsolationLevel::SERIALIZABLE);
         assert(first.beginTransaction(db) == dbms::DBStatus::OK);
         assert(second.beginTransaction(db) == dbms::DBStatus::OK);
 
-        assert(first.query(db, "items", {"=id 99"}, {"id"}).empty());
-        assert(second.query(db, "items", {"=id 100"}, {"id"}).empty());
-        assert(first.insert(db, "items", {{"id", "99"}}) == dbms::DBStatus::OK);
-        assert(second.insert(db, "items", {{"id", "100"}}) == dbms::DBStatus::OK);
+        assert(first.query(db, "items", {"=bucket 99"}, {"id"}).empty());
+        assert(second.query(db, "items", {"=bucket 100"}, {"id"}).empty());
+        assert(first.insert(db, "items", {{"id", "99"}, {"bucket", "99"}}) ==
+               dbms::DBStatus::OK);
+        assert(second.insert(db, "items", {{"id", "100"}, {"bucket", "100"}}) ==
+               dbms::DBStatus::OK);
 
         const dbms::DBStatus firstCommit = first.commitTransaction();
         const dbms::DBStatus secondCommit = second.commitTransaction();
@@ -94,6 +98,83 @@ static void test_ssi_empty_predicate() {
     }
     cleanupTestDb("ssi_empty_predicate");
     std::cout << "[P5.43] empty predicate SIREAD abort OK" << std::endl;
+}
+
+// Exact disjoint probes on the primary-key index do not conflict in
+// PostgreSQL's SSI predicate-lock model.  Relation-level fallback for every
+// empty result creates avoidable serialization failures here.
+static void test_ssi_disjoint_empty_index_predicates() {
+    const std::string db = testDbPath("ssi_disjoint_empty_predicates");
+    cleanupTestDb("ssi_disjoint_empty_predicates");
+    {
+        dbms::StorageEngine first;
+        dbms::StorageEngine second;
+        assert(first.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+        dbms::TableSchema items;
+        items.tablename = "items";
+        items.append(dbms::makeIntColumn("id", false, 2, true));
+        items.pkColIndices.push_back(0);
+        assert(first.createTable(db, items) == dbms::DBStatus::OK);
+
+        first.setIsolationLevel(dbms::IsolationLevel::SERIALIZABLE);
+        second.setIsolationLevel(dbms::IsolationLevel::SERIALIZABLE);
+        assert(first.beginTransaction(db) == dbms::DBStatus::OK);
+        assert(second.beginTransaction(db) == dbms::DBStatus::OK);
+
+        assert(first.query(db, "items", {"=id 99"}, {"id"}).empty());
+        assert(second.query(db, "items", {"=id 100"}, {"id"}).empty());
+        assert(first.insert(db, "items", {{"id", "99"}}) ==
+               dbms::DBStatus::OK);
+        assert(second.insert(db, "items", {{"id", "100"}}) ==
+               dbms::DBStatus::OK);
+
+        assert(first.commitTransaction() == dbms::DBStatus::OK);
+        assert(second.commitTransaction() == dbms::DBStatus::OK);
+    }
+    cleanupTestDb("ssi_disjoint_empty_predicates");
+    std::cout << "[P5.43] disjoint empty index predicates avoid false conflict OK"
+              << std::endl;
+}
+
+static void test_ssi_overlapping_empty_index_predicates() {
+    const std::string db = testDbPath("ssi_overlapping_empty_predicates");
+    cleanupTestDb("ssi_overlapping_empty_predicates");
+    {
+        dbms::StorageEngine first;
+        dbms::StorageEngine second;
+        assert(first.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+        dbms::TableSchema items;
+        items.tablename = "items";
+        items.append(dbms::makeIntColumn("id", false, 2, true));
+        items.pkColIndices.push_back(0);
+        assert(first.createTable(db, items) == dbms::DBStatus::OK);
+
+        first.setIsolationLevel(dbms::IsolationLevel::SERIALIZABLE);
+        second.setIsolationLevel(dbms::IsolationLevel::SERIALIZABLE);
+        assert(first.beginTransaction(db) == dbms::DBStatus::OK);
+        assert(second.beginTransaction(db) == dbms::DBStatus::OK);
+
+        assert(first.query(db, "items", {"=id 99"}, {"id"}).empty());
+        assert(second.query(db, "items", {"=id 100"}, {"id"}).empty());
+        assert(first.insert(db, "items", {{"id", "100"}}) ==
+               dbms::DBStatus::OK);
+        assert(second.insert(db, "items", {{"id", "99"}}) ==
+               dbms::DBStatus::OK);
+
+        const dbms::DBStatus firstCommit = first.commitTransaction();
+        const dbms::DBStatus secondCommit = second.commitTransaction();
+        const bool oneAborted =
+            firstCommit == dbms::DBStatus::SERIALIZATION_FAILURE ||
+            secondCommit == dbms::DBStatus::SERIALIZATION_FAILURE;
+        assert(oneAborted);
+        assert(firstCommit == dbms::DBStatus::OK ||
+               secondCommit == dbms::DBStatus::OK);
+    }
+    cleanupTestDb("ssi_overlapping_empty_predicates");
+    std::cout << "[P5.43] overlapping empty index predicates still detect cycle OK"
+              << std::endl;
 }
 
 static void createWideSsiTable(dbms::StorageEngine& engine, const std::string& db) {
@@ -177,6 +258,8 @@ int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_ssi_locks();
     test_ssi_empty_predicate();
+    test_ssi_disjoint_empty_index_predicates();
+    test_ssi_overlapping_empty_index_predicates();
     test_ssi_disjoint_pages();
     test_ssi_cross_page_conflict();
     std::cout << "[P5_REMAINING] all passed" << std::endl;
