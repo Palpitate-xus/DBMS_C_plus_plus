@@ -3060,7 +3060,8 @@ CopyStreamResult sendCopyOut(PostgresProtocol& protocol,
 
 } // namespace
 
-QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
+QueryResult executeProtocolQuery(const std::string& sql, Session& session,
+                                 int statementTimeoutOverrideMs = -1) {
     QueryResult result;
     dbms::clearLastDmlResult();
     // Stored-NULL row bindings must not leak across statements (a sort
@@ -3069,6 +3070,13 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
     std::string trimmed = trimText(sql);
     if (trimmed.empty()) {
         result.commandTag.clear();
+        return result;
+    }
+    if (statementTimeoutOverrideMs == 0) {
+        result.error = true;
+        result.sqlState = "57014";
+        result.errorMessage =
+            "canceling statement due to statement timeout";
         return result;
     }
 
@@ -3151,7 +3159,9 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
             state->timeoutRequested.store(false, std::memory_order_release);
         }
     } interruptGuard(session.interruptState, g_engine.getLockManager(),
-                     session.statementTimeoutMs);
+                     statementTimeoutOverrideMs >= 0
+                         ? statementTimeoutOverrideMs
+                         : session.statementTimeoutMs);
     {
         std::ostringstream output;
         dbms::ScopedOutputCapture capture(output);
@@ -4044,6 +4054,31 @@ void handleClient(SecureSocket socket, std::string clientHost) {
     bool transactionFailed = false;
     bool extendedQueryError = false;
     bool extendedImplicitTransaction = false;
+    bool extendedQueryTimeoutActive = false;
+    std::chrono::steady_clock::time_point extendedQueryDeadline{};
+    const auto clearExtendedQueryTimeout = [&]() {
+        extendedQueryTimeoutActive = false;
+    };
+    const auto startExtendedQueryTimeout = [&]() {
+        if (extendedQueryTimeoutActive || session.statementTimeoutMs <= 0)
+            return;
+        extendedQueryTimeoutActive = true;
+        extendedQueryDeadline = std::chrono::steady_clock::now() +
+            std::chrono::milliseconds(session.statementTimeoutMs);
+    };
+    const auto remainingExtendedQueryTimeoutMs = [&]() -> int {
+        if (!extendedQueryTimeoutActive) return -1;
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= extendedQueryDeadline) return 0;
+        const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(
+            extendedQueryDeadline - now).count();
+        return static_cast<int>(std::min<int64_t>(
+            remaining, std::numeric_limits<int>::max()));
+    };
+    const auto extendedQueryTimeoutExpired = [&]() {
+        return extendedQueryTimeoutActive &&
+            std::chrono::steady_clock::now() >= extendedQueryDeadline;
+    };
     // Parse/Bind can own a snapshot without having entered an implicit
     // transaction block through Execute. DISCARD ALL distinguishes these.
     bool extendedImplicitExecuted = false;
@@ -4090,6 +4125,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
     };
     const auto sendExtendedProtocolError = [&](const std::string& sqlState,
                                                 const std::string& errorMessage) -> bool {
+        clearExtendedQueryTimeout();
         // Parse, Bind, Describe, and wire validation can fail before
         // executeForProtocol runs. They must use the same abort boundary,
         // before ErrorResponse, not defer lock/undo cleanup until Sync.
@@ -4183,7 +4219,9 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 execSession = &rented->session;
             }
         }
-        QueryResult result = executeProtocolQuery(effectiveSql, *execSession);
+        QueryResult result = executeProtocolQuery(
+            effectiveSql, *execSession,
+            remainingExtendedQueryTimeoutMs());
         if (!result.error && (!wasInTransaction || extendedImplicitTransaction) &&
             SQLParser::isSetTransactionStatement(sql)) {
             SQLParser parser;
@@ -4502,6 +4540,9 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             extendedImplicitTransaction = false;
             portals.clear();
             if (endResult.error && (transactionFailed || g_engine.inTransaction())) {
+                // Once the statement has failed, its deadline must not block
+                // protocol-owned rollback cleanup.
+                clearExtendedQueryTimeout();
                 (void)executeForProtocol("ROLLBACK");
             }
         }
@@ -4520,17 +4561,31 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         if (!sendPendingNotifications(protocol, session.pid)) return false;
         if (!sendChangedParameterStatuses()) return false;
         if (!protocol.sendReadyForQuery(readyStatus())) return false;
+        // PostgreSQL cancels an extended-protocol statement timeout only
+        // after the Sync response has completed.
+        clearExtendedQueryTimeout();
         extendedQueryError = false;
         return true;
     };
     while (true) {
+        if (extendedQueryError) clearExtendedQueryTimeout();
+        if (extendedQueryTimeoutExpired()) {
+            if (!sendExtendedProtocolError(
+                    "57014", "canceling statement due to statement timeout"))
+                break;
+            continue;
+        }
         if (!socket.hasBufferedInput()) {
             pollfd descriptor{};
             descriptor.fd = socket.fd;
             descriptor.events = POLLIN;
             int ready = 0;
             do {
-                ready = ::poll(&descriptor, 1, 100);
+                const int pollTimeoutMs = extendedQueryTimeoutActive
+                    ? std::min(100, std::max(
+                          1, remainingExtendedQueryTimeoutMs()))
+                    : 100;
+                ready = ::poll(&descriptor, 1, pollTimeoutMs);
             } while (ready < 0 && errno == EINTR);
             if (ready < 0) break;
             if (ready == 0) {
@@ -4544,6 +4599,13 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         }
         PgFrontendMessage message;
         if (!protocol.readMessage(message, protocolError)) break;
+        if (!extendedQueryError &&
+            (message.type == 'P' || message.type == 'B' ||
+             message.type == 'D' || message.type == 'E')) {
+            // Start at message arrival, before notification processing or
+            // Parse/Bind/Describe work can consume the statement's budget.
+            startExtendedQueryTimeout();
+        }
         if (!sendPendingNotifications(protocol, session.pid)) break;
         if (message.type == 'X') {
             if (!message.payload.empty()) {
@@ -4553,7 +4615,18 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             break;
         }
         if (extendedQueryError && message.type != 'S') continue;
+        if (extendedQueryTimeoutExpired()) {
+            if (!sendExtendedProtocolError(
+                    "57014", "canceling statement due to statement timeout"))
+                break;
+            // Sync itself is the other protocol boundary that cancels the
+            // timeout, so continue processing it after reporting expiry.
+            if (message.type != 'S') continue;
+        }
         if (message.type == 'Q') {
+            // A simple-query message executes its statements under their own
+            // per-statement timers, independent of a pending extended cycle.
+            clearExtendedQueryTimeout();
             size_t queryOffset = 0;
             std::string sql;
             if (!PostgresProtocol::readCString(message.payload, queryOffset, sql) ||
@@ -5209,6 +5282,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 extendedImplicitTransaction = false;
                 extendedImplicitExecuted = false;
             }
+            clearExtendedQueryTimeout();
             continue;
         }
         if (message.type == 'D') {

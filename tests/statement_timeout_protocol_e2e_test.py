@@ -5,6 +5,7 @@ import importlib.util
 from pathlib import Path
 import socket
 import struct
+import time
 
 
 def main():
@@ -68,6 +69,21 @@ def main():
         query(blocker, "ROLLBACK")
         result = query(waiter, "SELECT v FROM statement_timeout_lock WHERE id = 1")
         assert result[0] == [["0"]], result
+
+        # PostgreSQL starts an extended-protocol timer at the first
+        # query-related message, not only when Execute begins. Parse opens
+        # the implicit snapshot here; with no later Bind/Execute, the server
+        # must time out the pending cycle and recover on Sync.
+        parse = client.typed(b"P", b"\0SELECT 1\0\0\0")
+        waiter.sendall(parse)
+        kind, body = client.read_message(waiter)
+        assert (kind, body) == (b"1", b""), (kind, body)
+        time.sleep(0.4)
+        kind, body = client.read_message(waiter)
+        assert kind == b"E" and b"C57014\0" in body, (kind, body)
+        waiter.sendall(client.typed(b"S"))
+        sync_messages = client.read_until_ready(waiter)
+        assert sync_messages[-1] == (b"Z", b"I"), sync_messages[-1]
 
         # Inside an explicit transaction the timeout must leave PostgreSQL's
         # aborted-transaction ReadyForQuery state until ROLLBACK.
