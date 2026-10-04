@@ -18,6 +18,8 @@ UNIMPLEMENTED_CATALOGS = (
     "pg_auth_members",
     "pg_default_acl",
     "pg_tablespace",
+    "pg_stats",
+    "pg_statistic",
     "pg_statistic_ext",
     "pg_subscription",
     "pg_publication",
@@ -45,10 +47,10 @@ def main():
                 assert result[1] == "0A000", (name, result)
                 assert messages[-1] == (b"Z", b"I"), (name, messages[-1])
 
-        # pg_database exposes only its verified typed subset.  The complete
+        # pg_database exposes only its verified typed subset. The complete
         # PostgreSQL schema is not fabricated, so SELECT * and real but
-        # unsupported columns fail closed. pg_statistic remains an existing
-        # compatibility relation.
+        # unsupported columns fail closed. pg_stats/pg_statistic also fail
+        # closed until their distinct PostgreSQL shapes have typed execution.
         messages = client.simple_query(
             sock, "SELECT datname, encoding FROM pg_catalog.pg_database "
             "WHERE datname = 'info'")
@@ -83,12 +85,6 @@ def main():
             assert result[1] == "0A000", (sql, result)
             assert messages[-1] == (b"Z", b"I"), (sql, messages[-1])
 
-        messages = client.simple_query(
-            sock, "SELECT * FROM pg_catalog.pg_statistic")
-        result = runner.decode_wire_result(messages, include_types=True)
-        assert result[1] is None, ("pg_statistic", result)
-        assert messages[-1] == (b"Z", b"I"), messages[-1]
-
         # A user relation with the same unqualified name still wins normal
         # search-path lookup; only the absent unqualified catalog is gated.
         for sql in (
@@ -100,6 +96,20 @@ def main():
         messages = client.simple_query(sock, "SELECT * FROM pg_constraint")
         result = runner.decode_wire_result(messages, include_types=True)
         assert result[1] is None and result[0] == [["7"]], result
+
+        # Once a current-database table exists, the unqualified name follows
+        # the project's normal same-name relation path rather than the
+        # unsupported-catalog gate.
+        for sql in (
+                "CREATE TABLE pg_statistic (id INTEGER)",
+                "INSERT INTO pg_statistic VALUES (9)"):
+            result = runner.decode_wire_result(
+                client.simple_query(sock, sql), include_types=True)
+            assert result[1] is None, (sql, result)
+        messages = client.simple_query(sock, "SELECT * FROM pg_statistic")
+        result = runner.decode_wire_result(messages, include_types=True)
+        assert result[1] is None and result[0] == [["9"]], result
+        assert result[3] == ["id"] and result[5] == [23], result
 
         # The explicit unsupported-catalog error is statement-scoped; it must
         # not poison a following query in the same connection.

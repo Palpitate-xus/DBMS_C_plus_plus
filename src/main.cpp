@@ -24068,7 +24068,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
               !g_engine.tableExists(queryDb, tname) &&
               !g_engine.viewExists(queryDb, tname)));
         // pg_stat_* virtual tables
-        if (tname == "pg_stat_database" || tname == "pg_stat_tables" || tname == "pg_stat_statements" || tname == "pg_seclabels" || tname == "pg_buffercache" || tname == "pg_locks" || tname == "pg_stat_wait_events" || tname == "pg_stat_activity" || virtualPgDatabase || tname == "pg_tables" || tname == "pg_views" || tname == "pg_indexes" || tname == "pg_settings" || tname == "pg_roles" || tname == "pg_namespace" || tname == "pg_class" || tname == "pg_type" || tname == "pg_enum" || tname == "pg_stats" || tname == "pg_statistic") {
+        if (tname == "pg_stat_database" || tname == "pg_stat_tables" || tname == "pg_stat_statements" || tname == "pg_seclabels" || tname == "pg_buffercache" || tname == "pg_locks" || tname == "pg_stat_wait_events" || tname == "pg_stat_activity" || virtualPgDatabase || tname == "pg_tables" || tname == "pg_views" || tname == "pg_indexes" || tname == "pg_settings" || tname == "pg_roles" || tname == "pg_namespace" || tname == "pg_class" || tname == "pg_type" || tname == "pg_enum") {
             auto bpStats = g_engine.getBufferPoolStats();
             const std::string catalogDb = queryDb == "pg_catalog"
                 ? s.currentDB : queryDb;
@@ -24323,18 +24323,12 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                   << e.what() << std::endl;
                     }
                 }
-            } else if (tname == "pg_stats" || tname == "pg_statistic") {
-                cout << "schemaname tablename attname null_frac n_distinct "
-                        "most_common_vals most_common_freqs histogram_bounds " << endl;
-                for (const auto& row : g_engine.getPgStatsRows()) {
-                    cout << row << endl;
-                }
             }
             return false;
         }
 
-        // These PostgreSQL system catalogs have no protocol-visible schema
-        // or typed execution path yet. Letting them continue into the
+        // These PostgreSQL system catalogs/views have no protocol-visible
+        // schema or typed execution path yet. Letting them continue into the
         // physical table-schema/lock path reports a misleading lock or
         // missing-relation error instead of the actual capability gap.
         const std::string catalogName = toLower(tname);
@@ -24344,7 +24338,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
             "pg_am", "pg_auth_members", "pg_authid", "pg_cast",
             "pg_collation", "pg_constraint", "pg_default_acl", "pg_index",
             "pg_opclass", "pg_operator", "pg_policy", "pg_publication",
-            "pg_rewrite", "pg_replication_origin", "pg_statistic_ext",
+            "pg_rewrite", "pg_replication_origin", "pg_stats", "pg_statistic",
+            "pg_statistic_ext",
             "pg_subscription", "pg_tablespace", "pg_trigger"};
         if ((queryDb == "pg_catalog" || unresolvedUnqualifiedRelation) &&
             unimplementedCatalogRelations.find(catalogName) !=
