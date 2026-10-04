@@ -46,7 +46,11 @@ frontend data; an idle COPY and a stalled partial CopyData frame both time out
 with `57014`. The partial-frame case closes the connection after reporting the
 error, because the remaining frame bytes cannot safely be parsed as a new
 message, and verifies the inserted row was rolled back. CancelRequest also
-interrupts COPY FROM while it is waiting for more input.
+interrupts COPY FROM while it is waiting for more input. COPY TO now writes
+CopyData and CopyDone with deadline-aware nonblocking socket polling and checks
+interrupts while waiting for writability. If a timeout occurs after output has
+started, its ErrorResponse gets a bounded flush attempt; a still-backpressured
+connection is closed instead of blocking indefinitely.
 
 ## Verification
 
@@ -65,22 +69,30 @@ interrupts COPY FROM while it is waiting for more input.
   that 10-second client bound under concurrent test load; the serial rerun
   passed.
 - `python3 tests/copy_protocol_e2e_test.py` — passed, including CancelRequest
-  while COPY FROM is waiting for the next frontend message.
+  while COPY FROM is waiting for the next frontend message, plus a COPY TO
+  client that does not read a multi-megabyte result and whose backend exits
+  active state at the configured timeout.
 - `python3 tests/cli_error_recovery_e2e_test.py` and
   `python3 tests/pg_stat_activity_protocol_e2e_test.py` — passed.
 - Python compilation and `git diff --check` — passed.
+- `g++ -std=c++17 -Wall -Wextra -Isrc/network -c src/network/TLSWrapper.cpp`
+  — passed as a compile-only check. The production build selected the TLS stub
+  because OpenSSL is unavailable in this environment; no TLS runtime behavior
+  is claimed.
 
 The initial implementation is local commit `9d13355b`; first-message Extended
 Query timing and its regression are local commit `aa904b22`; COPY input wait
-timeout/cancellation and its regressions are local commit `78e0a0d7`. No full
-registered suite or PostgreSQL 18.6 runtime differential is claimed.
+timeout/cancellation and its regressions are local commit `78e0a0d7`; bounded
+COPY output writes and backpressure regression are local commit `57422dbf`. No
+full registered suite or PostgreSQL 18.6 runtime differential is claimed.
 
 ## Remaining scope
 
-OPT-17 remains partial. First-message Extended Query timing and COPY FROM idle
-and partial plaintext-frame waits are now covered, but the implementation is
-still cooperative: executor loops and lock waits must poll for interrupts.
-COPY TO blocked output writes, TLS partial-record waits, other blocking socket
-I/O, non-cooperative waits/loops, complete interrupt propagation through every
+OPT-17 remains partial. First-message Extended Query timing, COPY FROM idle and
+partial plaintext-frame waits, and COPY TO TCP output backpressure are now
+covered, but the implementation is still cooperative: executor loops and lock
+waits must poll for interrupts. TLS partial-record waits (and TLS runtime
+behavior, unavailable in this build environment), other blocking socket I/O,
+non-cooperative waits/loops, complete interrupt propagation through every
 operator/worker/I/O path, and resource-owner cleanup are not proven complete.
 The CLI and protocol tests verify only the paths listed above.
