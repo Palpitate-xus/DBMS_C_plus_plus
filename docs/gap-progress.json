@@ -2,6 +2,20 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "976",
+      "gap_ids": ["CAT-11"],
+      "status": "partial",
+      "integrated_source_commit": "c83e67ac",
+      "evidence": ["docs/code-review-progress.md", "docs/issue-976-range-attach-default-validation.md", "src/commands/TableManage.cpp", "src/commands/DdlExecutor.cpp"],
+      "tests": ["tests/partition_test.cpp", "scripts/build_tests.sh"],
+      "verification": {
+        "focused_partition_test": "bash scripts/build_one_test.sh partition_test: passed; covers conflicting DEFAULT rows, unchanged data/schema, DDL SQLSTATE 23514 and rollback, plus successful disjoint attach/routing",
+        "full_registered_suite": "DBMS_PROTOCOL_TEST_TIMEOUT=120 DBMS_PROTOCOL_STARTUP_TIMEOUT=120 DBMS_PROTOCOL_SHUTDOWN_TIMEOUT=120 bash scripts/build_tests.sh: exit 0; All tests passed (registered C++ tests, postgres_protocol_test.py, and E2E tests)",
+        "postgresql_18_oracle": "local PostgreSQL 18.6, server_version_num=180006: attaching [10,20) with DEFAULT key 15 failed with 23514 and preserved rows; after removing the conflict it succeeded, routed later key 15 to the attached partition, and kept 25 in DEFAULT",
+        "scope": "Existing DEFAULT rows that violate a new range constraint now block attach without mutation. Rows are not automatically moved; constraint proofs, concurrent detach/finalize, partition indexes, and cross-partition uniqueness remain unresolved; CAT-11 stays partial"
+      }
+    },
+    {
       "issue": "975",
       "gap_ids": ["CAT-11"],
       "status": "partial",
@@ -379,7 +393,7 @@
     {"id":"CAT-08","status":"partial","evidence":["docs/code-review-progress.md","src/parser/ast.h","src/parser/parser.cpp","src/commands/DdlExecutor.h","src/commands/DdlExecutor.cpp","src/commands/TableManage.cpp"],"tests":["tests/create_database_options_test.cpp","tests/create_database_options_e2e_test.py"],"commits":["12128af"]},
     {"id":"CAT-09","status":"partial","evidence":["docs/code-review-progress.md","src/utils/Session.h","src/main.cpp","src/commands/DdlExecutor.cpp","src/commands/DmlExecutor.cpp","src/network/NetworkServer.cpp"],"tests":["tests/postgres_protocol_test.py","tests/ddl_ast_bridge_test.cpp","tests/compat/cases/quoted_qualified_dml.sql","tests/compat/cases/quoted_mixed_case_relation.sql","tests/compat/cases/quoted_qualified_column.sql"],"commits":["19dcc9b","fe9310b","5931007","8d59848"]},
     {"id":"CAT-10","status":"partial","evidence":["docs/code-review-progress.md","src/commands/TableManage.cpp","src/parser/parser.cpp","src/main.cpp"],"tests":["tests/alter_add_column_null_test.cpp","tests/alter_column_type_test.cpp","tests/compat/cases/quoted_column_dml.sql","tests/compat/cases/quoted_escaped_column.sql","tests/compat/cases/quoted_alter_add_column.sql","tests/compat/cases/quoted_alter_rename_column.sql","tests/compat/cases/quoted_alter_column_actions.sql","tests/compat/cases/quoted_drop_table_dot_schema.sql","tests/compat/cases/quoted_sequence_dot_schema_default.sql"],"commits":["ad543b9","1a46222","cfa6cf6","c0b5126","232f8ae","37414ed","bf3fb086"]},
-    {"id":"CAT-11","status":"partial","evidence":["docs/code-review-progress.md","docs/issue-975-range-partition-bounds.md","src/commands/TableManage.cpp","src/interfaces/table_schema.h","src/commands/DdlExecutor.cpp","src/main.cpp"],"tests":["tests/partition_test.cpp","tests/create_table_options_test.cpp","tests/schema_format_test.cpp","scripts/build_tests.sh"],"commits":["5ac83dae"]},
+    {"id":"CAT-11","status":"partial","evidence":["docs/code-review-progress.md","docs/issue-975-range-partition-bounds.md","docs/issue-976-range-attach-default-validation.md","src/commands/TableManage.cpp","src/interfaces/table_schema.h","src/commands/DdlExecutor.cpp","src/main.cpp"],"tests":["tests/partition_test.cpp","tests/create_table_options_test.cpp","tests/schema_format_test.cpp","scripts/build_tests.sh"],"commits":["5ac83dae","c83e67ac"]},
     {"id":"CAT-12","status":"partial","evidence":["docs/code-review-progress.md","src/commands/DdlExecutor.cpp"],"tests":["tests/alter_inherit_test.cpp","tests/create_table_like_test.cpp","tests/create_table_options_test.cpp","tests/identity_semantics_test.cpp","tests/catalog_service_test.cpp","tests/inherit_only_e2e_test.py"],"commits":["e21047a"]},
     {"id":"CAT-13","status":"partial","evidence":["docs/code-review-progress.md","src/utils/Session.h","src/main.cpp","src/commands/DdlExecutor.cpp","src/commands/DmlExecutor.cpp","src/catalog/CatalogService.cpp","src/commands/TableManage.cpp","src/commands/TableManage.h","src/network/NetworkServer.cpp","scripts/build_common.sh","src/parser/ast.h","src/parser/parser.cpp","src/commands/DdlTransaction.cpp"],"tests":["tests/postgres_protocol_test.py","tests/temp_serial_owned_sequence_test.cpp","tests/temp_serial_owned_sequence_protocol_e2e_test.py","tests/compat/cases/temp_serial_owned_sequence.sql","tests/temp_alter_column_catalog_test.cpp","tests/temp_alter_column_catalog_protocol_e2e_test.py","tests/compat/cases/temp_alter_column_catalog.sql","tests/pg_temp_missing_index_test.cpp","tests/pg_temp_missing_index_protocol_e2e_test.py","tests/compat/cases/pg_temp_missing_index.sql","tests/discard_temp_test.cpp","tests/discard_temp_protocol_e2e_test.py","tests/compat/cases/discard_temp.sql","tests/discard_all_pending_protocol_e2e_test.py","tests/mixed_query_implicit_lifecycle_protocol_e2e_test.py"],"commits":["19dcc9b","78a3216d","9d925a89","afab6812","b70db5d9","416d640f","84b258de","38e697af","d68b7781","1c68b73b","0302afd4"]},
     {"id":"CAT-14","status":"partial","evidence":["docs/code-review-progress.md","src/commands/TableManage.h","src/commands/TableManage.cpp","src/main.cpp"],"tests":["tests/unlogged_recovery_test.cpp","tests/alter_set_logged_test.cpp","tests/logical_decoding_test.cpp","tests/alter_table_only_test.cpp","tests/physical_backup_manifest_test.cpp"],"commits":["5e4d4d2"]},
