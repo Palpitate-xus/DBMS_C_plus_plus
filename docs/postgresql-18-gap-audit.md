@@ -1,6 +1,8 @@
+2026-10-04 第989项修正CAT-03中`pg_stats`与`pg_statistic`共用错误schema：旧wire查询将两者都描述为8个text列；现因缺少分离typed schema/权限语义而对限定名及未限定缺失用户relation返回0A000。底层统计API保持可用；`bash scripts/build.sh`、catalog与pg_class协议E2E、`pg_stats_test`通过。PG18官方文档核schema，本机PG参考为17.2，不声称18.6 runtime oracle；CAT-03仍partial。详见`docs/issue-989-pg-stats-shape-fail-closed.md`。未push；Actions禁用；安全/TDE跳过项仍deferred。总账273：22 complete、149 partial、87 unverified、15 deferred_by_user。
+
 2026-10-04 第986项复核SQL-14：没有query-tree deep copy、rule rewrite runtime、权限标记传播或rewrite依赖失效。第983项`div14_feature_gate_test.py`已验证RULE和EVENT TRIGGER在PG/extended mode都按0A000拒绝且不产生伪兼容对象，因此SQL-14从unverified改partial但未完成；CAT-19仍独立partial。无源码改动、无PG18.6 rewrite oracle/diff。详见`docs/issue-986-query-rewrite-capability-audit.md`。未push；Actions禁用；用户跳过安全/TDE仍deferred。总账273项：22 complete、149 partial、87 unverified、15 deferred_by_user。
 
-2026-10-04 第985项修复CAT-03中16个额外catalog缺失路径，代码/测试commit `c79c51bb`：18个已探测无SQL catalog执行路径的关系对`pg_catalog.name`及当前库无同名普通relation的未限定查询显式返回0A000，替代此前误报的55P03/42P01。定向协议E2E逐项通过，并确认支持的pg_database/pg_statistic和同名用户pg_constraint表仍可读写。生产构建通过；完整注册脚本因人工提前终止plpgsql_test退出1（不计全套通过），之后完成的其余测试通过，plpgsql_test单独重跑退出0（约94秒）。无PG18.6 oracle/diff；catalog数据/schema仍缺，CAT-03保持partial。详见`docs/issue-985-pg-catalog-fail-closed.md`。未push；Actions禁用；用户跳过安全/TDE继续deferred。总账273项：22 complete、148 partial、88 unverified、15 deferred_by_user。
+2026-10-04 第985项修复CAT-03中16个额外catalog缺失路径，代码/测试commit `c79c51bb`：18个已探测无SQL catalog执行路径的关系对`pg_catalog.name`及当前库无同名普通relation的未限定查询显式返回0A000，替代此前误报的55P03/42P01。定向协议E2E逐项通过，并确认支持的pg_database和当时未改动的pg_statistic路径、同名用户pg_constraint表仍可读写；`pg_stats`/`pg_statistic`的错误schema在第989项后续修正。生产构建通过；完整注册脚本因人工提前终止plpgsql_test退出1（不计全套通过），之后完成的其余测试通过，plpgsql_test单独重跑退出0（约94秒）。无PG18.6 oracle/diff；catalog数据/schema仍缺，CAT-03保持partial。详见`docs/issue-985-pg-catalog-fail-closed.md`。未push；Actions禁用；用户跳过安全/TDE继续deferred。总账273项：22 complete、148 partial、88 unverified、15 deferred_by_user。
 
 2026-10-04 第984项修复CAT-03错误分类，代码/测试commit `ffb63d19`：未实现的`pg_catalog.pg_index`和`pg_operator`带限定及未限定名称查询，在当前库无同名relation时均显式返回0A000，避免此前误报55P03/42P01；新协议回归还验证同连接后续查询正常。最终生产构建和定向E2E通过；完整注册suite在未限定名称扩展前通过，扩展后未重跑；无PG18.6 oracle/diff。真实catalog schema/data及其余catalog仍缺，CAT-03仅partial。详见`docs/issue-984-pg-catalog-error-state.md`。未push；Actions禁用；用户跳过安全/TDE继续deferred。总账273项：22 complete、148 partial、88 unverified、15 deferred_by_user。
 
@@ -257,7 +259,7 @@
 
 - [ ] **CAT-01** 将 catalog 从 CSV/sidecar 缓存提升为 WAL/MVCC 管理的普通系统关系。
 - [ ] **CAT-02** `pg_class`、`pg_attribute`、`pg_type`、`pg_proc`、`pg_depend`、`pg_namespace` 等必须是内部执行的真实来源，而不是另一套虚拟输出。
-- [ ] **CAT-03** 补齐 `pg_constraint`、`pg_index`、`pg_am`、`pg_opclass`、`pg_operator`、`pg_cast`、`pg_collation`、`pg_rewrite`、`pg_trigger`、`pg_policy`、`pg_auth*`、`pg_default_acl`、`pg_database`、`pg_tablespace`、`pg_statistic*`、复制 catalog 等。未实现的 `pg_index`／`pg_operator` 查询已改为明确 `0A000`（第984项）；`pg_database` 仅准确暴露 `datname`／UTF8 `encoding` 子集（第987项）。catalog 完整 schema、数据与执行语义仍缺。
+- [ ] **CAT-03** 补齐 `pg_constraint`、`pg_index`、`pg_am`、`pg_opclass`、`pg_operator`、`pg_cast`、`pg_collation`、`pg_rewrite`、`pg_trigger`、`pg_policy`、`pg_auth*`、`pg_default_acl`、`pg_database`、`pg_tablespace`、`pg_stats`、`pg_statistic*`、复制 catalog 等。未实现的 `pg_index`／`pg_operator` 查询已改为明确 `0A000`（第984项）；`pg_database` 仅准确暴露 `datname`／UTF8 `encoding` 子集（第987项）；`pg_stats`／`pg_statistic` 在补齐各自typed schema前fail-closed（第989项）。catalog 完整 schema、数据与执行语义仍缺。
 - [ ] **CAT-04** 实现所有对象的稳定 OID、reg* 查找、OID 引用和 dump/restore 保真。
 - [ ] **CAT-05** 统一 owner、ACL、comment、security label、extension membership 和 dependency graph。
 - [ ] **CAT-06** 完整 `CASCADE/RESTRICT`、internal/auto/normal/pin/extension dependency 行为。

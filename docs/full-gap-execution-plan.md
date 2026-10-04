@@ -4,13 +4,15 @@
 
 # 总差距清单执行计划
 
+2026-10-04 第989项修正CAT-03中`pg_stats`和`pg_statistic`共用8个text列的伪输出：wire复现旧路径对两者均报告OID25，PG18官方文档核实前者是按权限过滤的17列view、后者是不同且敏感的内部catalog。现两条SQL路径在具备typed schema/权限前以0A000拒绝；生产构建、catalog/pg_class E2E及底层`pg_stats_test`通过。代码/测试commit `5b7df04c`，详见`docs/issue-989-pg-stats-shape-fail-closed.md`。CAT-03仍partial；未push、Actions禁用、安全/TDE跳过项保持deferred。
+
 2026-10-04 第988项跟进修正`pg_database` typed 子集中的聚合 NULL 计数错误：`COUNT(*)`按总行数、`COUNT(expr)`按非NULL值计数；生产构建、catalog E2E及pg_class相邻E2E通过。代码/测试commit `cbb7bd0c`，详见`docs/issue-988-pg-database-count-aggregate.md`。完整catalog和CAT-03仍partial；未push、Actions禁用、安全/TDE跳过项保持deferred。
 
 2026-10-04 第987项修复虚拟`pg_database`的错类型/伪schema：只提供准确typed `datname`与UTF8 `encoding`，完整schema不足时拒绝`SELECT *`及未实现列；代码/测试commit `b7fb4224`，审计commit `9e7ef01d`。生产构建及catalog、pg_class协议E2E通过；PG18官方文档核对类型，本机oracle为PG17.2，未声称PG18.6 runtime对照。CAT-03仍partial；未push、Actions禁用、安全/TDE跳过项保持deferred。后续COUNT(NULL)边界见第988项。
 
 2026-10-04 第986项复核SQL-14：源码/AST只有parser及兼容对象拒绝路径，没有query-tree deep copy、权限标记、rewrite应用或依赖失效；第983项的规则/event trigger协议回归证明两种兼容模式下均fail-closed且不建伪对象。只作能力边界复核，SQL-14由unverified转partial、仍未完成；无production更改、无PG18.6 oracle/diff。见`docs/issue-986-query-rewrite-capability-audit.md`。不push，Actions禁用，安全/TDE用户跳过项仍deferred。
 
-2026-10-04 第985项 source/test commit `c79c51bb`：协议探测发现16个额外缺失系统catalog错误落为55P03/42P01。18个明确未实现SQL catalog现在对限定／未限定名字fail-closed为0A000，且既有虚拟pg_database/pg_statistic与同名用户relation不受影响。最终生产构建和catalog定向E2E通过。整套脚本曾因我提前终止plpgsql_test而exit 1，不能记作suite通过；所有随后完成的用例通过，plpgsql_test之后单独重跑退出0（约94秒）。无PG18.6 oracle/diff。CAT-03 catalog数据/schema仍不完整。详见`docs/issue-985-pg-catalog-fail-closed.md`。未push；Actions禁用；用户跳过的安全/TDE保持deferred。
+2026-10-04 第985项 source/test commit `c79c51bb`：协议探测发现16个额外缺失系统catalog错误落为55P03/42P01。18个明确未实现SQL catalog现在对限定／未限定名字fail-closed为0A000，且当时既有的虚拟pg_database/pg_statistic路径与同名用户relation不受影响；pg_statistic随后在第989项因schema伪造而fail-closed。最终生产构建和catalog定向E2E通过。整套脚本曾因我提前终止plpgsql_test而exit 1，不能记作suite通过；所有随后完成的用例通过，plpgsql_test之后单独重跑退出0（约94秒）。无PG18.6 oracle/diff。CAT-03 catalog数据/schema仍不完整。详见`docs/issue-985-pg-catalog-fail-closed.md`。未push；Actions禁用；用户跳过的安全/TDE保持deferred。
 
 2026-10-04 第984项 source/test commit `ffb63d19`：未实现的`pg_index`／`pg_operator` catalog查询此前会泄露为55P03／42P01；现在对限定和未限定名称（当前库无同名relation时）一致返回0A000，且同连接可继续查询。最终`bash scripts/build.sh`与定向`python3 tests/pg_catalog_unavailable_sqlstate_protocol_e2e_test.py`通过。完整注册suite仅在未限定名称扩展前通过，扩展后未重跑；无PG18.6 oracle/diff。实际catalog schema/data和其他CAT-03对象仍缺，CAT-03只推进到partial。详见`docs/issue-984-pg-catalog-error-state.md`。未push，Actions禁用，用户跳过的安全/TDE保持deferred。
 

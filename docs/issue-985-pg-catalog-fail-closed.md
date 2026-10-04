@@ -6,7 +6,7 @@
 
 ## 修复
 
-上述 18 个已确认缺少 SQL catalog 执行路径的系统 relation（包括第 984 项的两项）对 `pg_catalog.name` 与缺少用户 relation 的未限定 `name` 统一返回 `0A000`。已存在的虚拟 `pg_database`/`pg_statistic` 保持可用；如果用户数据库中确有同名普通 relation，未限定查找仍访问它。错误后同一连接可继续查询。
+上述 18 个已确认缺少 SQL catalog 执行路径的系统 relation（包括第 984 项的两项）对 `pg_catalog.name` 与缺少用户 relation 的未限定 `name` 统一返回 `0A000`。当时已存在的虚拟 `pg_database`/`pg_statistic` 路径保持可用；后续复核发现 `pg_statistic` 与 `pg_stats` 共用错误的文本 schema，现均已按第 989 项改为 fail-closed。如果用户数据库中确有同名普通 relation，未限定查找仍访问它。错误后同一连接可继续查询。
 
 代码/测试提交：`c79c51bb fix(catalog): fail closed for unsupported relations`。
 
