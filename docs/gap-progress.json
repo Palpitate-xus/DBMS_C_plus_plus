@@ -2,6 +2,20 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "979",
+      "gap_ids": ["OPS-01"],
+      "status": "partial",
+      "integrated_source_commit": "df0c59de",
+      "evidence": ["docs/code-review-progress.md", "docs/issue-979-relative-data-directory.md", "src/common/DataDirectory.cpp", "src/main.cpp"],
+      "tests": ["tests/data_directory_e2e_test.py"],
+      "verification": {
+        "relative_data_directory_e2e": "python3 tests/data_directory_e2e_test.py: passed; starts from a separate launch CWD with relative -D, authenticates to the existing cluster, and verifies control identity and launch-directory contents",
+        "production_change": "none; existing bootstrap resolves selected paths before changing CWD",
+        "full_registered_suite": "not run specifically for this test-only change",
+        "scope": "Only explicit/relative data-directory startup path is verified. PostgreSQL-compatible GUC context/source/reload/restart semantics remain incomplete; OPS-01 stays partial"
+      }
+    },
+    {
       "issue": "978",
       "gap_ids": ["CAT-11"],
       "status": "partial",
@@ -648,7 +662,7 @@
     {"id":"MON-09","status":"unverified","evidence":[]},
     {"id":"MON-10","status":"unverified","evidence":[]},
     {"id":"MON-11","status":"unverified","evidence":[]},
-    {"id":"OPS-01","status":"unverified","evidence":[]},
+    {"id":"OPS-01","status":"partial","evidence":["docs/code-review-progress.md","docs/issue-979-relative-data-directory.md","src/common/DataDirectory.cpp","src/main.cpp"],"tests":["tests/data_directory_e2e_test.py"],"commits":["df0c59de"]},
     {"id":"OPS-02","status":"partial","evidence":["docs/code-review-progress.md","src/common/Config.h","src/common/Config.cpp","src/common/NotificationManager.h","src/main.cpp","src/expression/ExprEvaluator.cpp","src/commands/TableManage.h","src/utils/Session.h","src/network/NetworkServer.cpp","scripts/build_common.sh","src/types/numeric.cpp","src/parser/parser.cpp","src/catalog/systables.cpp","src/common/SqlSyntax.h"],"tests":["tests/config_test.cpp","tests/postgres_protocol_test.py","tests/to_char_test.cpp","tests/money_test.cpp","tests/to_char_currency_protocol_e2e_test.py","tests/compat/cases/to_char_currency_locale.sql","tests/to_char_zero_test.cpp","tests/to_char_zero_protocol_e2e_test.py","tests/compat/cases/to_char_zero_placeholders.sql","tests/to_char_exact_rounding_test.cpp","tests/to_char_exact_rounding_protocol_e2e_test.py","tests/compat/cases/to_char_exact_rounding.sql","tests/cast_explicit_alias_test.cpp","tests/cast_explicit_alias_protocol_e2e_test.py","tests/compat/cases/cast_explicit_alias.sql","tests/parser_phase1_test.cpp","tests/pg_class_query_ast_test.cpp","tests/pg_class_query_protocol_e2e_test.py","tests/compat/cases/pg_class_query_clauses.sql","tests/order_by_terminator_test.cpp","tests/order_by_terminator_protocol_e2e_test.py","tests/compat/cases/order_by_terminator.sql","tests/table_literal_comment_expression_test.cpp","tests/table_literal_comment_protocol_e2e_test.py","tests/compat/cases/table_literal_comment.sql"],"commits":["96e8a83","d1e571ce","b08ff199","b0bddd32","b4d5157e","811cc75d","60ceb474","f4ce4992","ccde689f","e9b9264e","e0b0b874","f75f9a6d","68bbe256"]},
     {"id":"OPS-03","status":"partial","evidence":["docs/code-review-progress.md","src/network/NetworkServer.cpp"],"tests":["tests/postgres_protocol_test.py"],"commits":["576740c"]},
     {"id":"OPS-04","status":"unverified","evidence":[]},
