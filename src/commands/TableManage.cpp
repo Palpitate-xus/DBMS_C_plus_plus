@@ -3380,6 +3380,47 @@ DBStatus StorageEngine::attachPartition(const std::string& dbname,
                     return DBStatus::INVALID_VALUE;
                 }
             }
+            if (!tbl.defaultPartitionName.empty()) {
+                size_t partitionKeyIndex = tbl.len;
+                for (size_t columnIndex = 0; columnIndex < tbl.len;
+                     ++columnIndex) {
+                    if (tbl.cols[columnIndex].dataName == tbl.partitionKey) {
+                        partitionKeyIndex = columnIndex;
+                        break;
+                    }
+                }
+                if (partitionKeyIndex == tbl.len) {
+                    lockManager_.unlock(tablename);
+                    return DBStatus::CORRUPTED_DATA;
+                }
+
+                bool defaultRowsConflict = false;
+                const bool scannedDefault = forEachRow(
+                    dbname, tablename,
+                    [&](uint32_t, uint16_t, const char* row, size_t length) {
+                        const std::string rowBuffer(row, length);
+                        bool valueIsNull = false;
+                        const std::string value = extractColumnValue(
+                            rowBuffer, tbl, partitionKeyIndex, dbname, false,
+                            &valueIsNull);
+                        if (!valueIsNull &&
+                            comparePartitionValues(
+                                tbl, value, lowerBound, false, true) >= 0 &&
+                            comparePartitionValues(
+                                tbl, value, upperBound, false, true) < 0) {
+                            defaultRowsConflict = true;
+                        }
+                    },
+                    nullptr, {tbl.defaultPartitionName});
+                if (!scannedDefault) {
+                    lockManager_.unlock(tablename);
+                    return DBStatus::IO_ERROR;
+                }
+                if (defaultRowsConflict) {
+                    lockManager_.unlock(tablename);
+                    return DBStatus::CHECK_VIOLATION;
+                }
+            }
             lowerBounds.insert(
                 lowerBounds.begin() +
                     static_cast<std::ptrdiff_t>(insertIndex),

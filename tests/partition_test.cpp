@@ -8,10 +8,13 @@
 // ============================================================================
 
 #include "commands/TableManage.h"
+#include "commands/DdlExecutor.h"
 #include "catalog/type_registry.h"
+#include "common/DbError.h"
 #include "executor/ExecutionPlan.h"
 #include "storage/PageAllocator.h"
 #include "storage/PageCrypto.h"
+#include "Session.h"
 #include <cassert>
 #include <filesystem>
 #include <iostream>
@@ -204,6 +207,76 @@ static void test_range_default_partition() {
 
     cleanup(db);
     std::cout << "[PART] range default partition OK" << std::endl;
+}
+
+// Attaching a range must not strand already-routed DEFAULT rows outside the
+// new partition's constraint. PostgreSQL rejects that ATTACH with 23514.
+static void test_range_attach_validates_default_rows() {
+    std::string db = testDbPath("part_attach_default_validation");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+
+    auto conflicting = makeSchema("conflicting", {"id int", "value int"});
+    conflicting.partitionType = dbms::TableSchema::PartitionType::Range;
+    conflicting.partitionKey = "value";
+    conflicting.rangePartitions = {{"below10", "10"}};
+    conflicting.defaultPartitionName = "fallback";
+    assert(g_engine.createTable(db, conflicting) == dbms::DBStatus::OK);
+    assert(g_engine.insert(
+               db, "conflicting", {{"id", "1"}, {"value", "15"}}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.insert(
+               db, "conflicting", {{"id", "2"}, {"value", "25"}}) ==
+           dbms::DBStatus::OK);
+
+    const dbms::DBStatus conflictingAttach = g_engine.attachPartition(
+        db, "conflicting", "middle", "FOR VALUES FROM (10) TO (20)");
+    assert(conflictingAttach == dbms::DBStatus::CHECK_VIOLATION);
+    const auto unchanged = g_engine.getTableSchema(db, "conflicting");
+    assert(unchanged.rangePartitions.size() == 1);
+    assert(unchanged.rangePartitions[0].first == "below10");
+    assert(rowCountInPartitions(db, "conflicting", {"fallback"}) == 2);
+    assert(rowCount(db, "conflicting") == 2);
+
+    // The SQL DDL boundary should report PostgreSQL's check-violation SQLSTATE
+    // and roll back its DDL transaction when the storage check rejects attach.
+    Session session;
+    session.username = "admin";
+    session.permission = 1;
+    session.currentDB = db;
+    dbms::DdlExecutor ddl;
+    bool reportedCheckViolation = false;
+    try {
+        ddl.executeSql(
+            "ALTER TABLE conflicting ATTACH PARTITION middle "
+            "FOR VALUES FROM (10) TO (20)", session);
+    } catch (const dbms::DbError& error) {
+        reportedCheckViolation = error.sqlState() == "23514";
+    }
+    assert(reportedCheckViolation);
+    assert(g_engine.getTableSchema(db, "conflicting").rangePartitions.size() == 1);
+    assert(rowCountInPartitions(db, "conflicting", {"fallback"}) == 2);
+
+    auto disjoint = makeSchema("disjoint", {"id int", "value int"});
+    disjoint.partitionType = dbms::TableSchema::PartitionType::Range;
+    disjoint.partitionKey = "value";
+    disjoint.rangePartitions = {{"below10", "10"}};
+    disjoint.defaultPartitionName = "fallback";
+    assert(g_engine.createTable(db, disjoint) == dbms::DBStatus::OK);
+    assert(g_engine.insert(
+               db, "disjoint", {{"id", "1"}, {"value", "25"}}) ==
+           dbms::DBStatus::OK);
+    assert(g_engine.attachPartition(
+               db, "disjoint", "middle",
+               "FOR VALUES FROM (10) TO (20)") == dbms::DBStatus::OK);
+    assert(g_engine.insert(
+               db, "disjoint", {{"id", "2"}, {"value", "15"}}) ==
+           dbms::DBStatus::OK);
+    assert(rowCountInPartitions(db, "disjoint", {"middle"}) == 1);
+    assert(rowCountInPartitions(db, "disjoint", {"fallback"}) == 1);
+
+    cleanup(db);
+    std::cout << "[PART] RANGE attach validates DEFAULT rows OK" << std::endl;
 }
 
 static void test_typed_range_routing_and_predicates() {
@@ -602,6 +675,7 @@ int main() {
     test_range_partitioning();
     test_list_partitioning();
     test_range_default_partition();
+    test_range_attach_validates_default_rows();
     test_typed_range_routing_and_predicates();
     test_hash_partitioning();
     test_subpartitioning();

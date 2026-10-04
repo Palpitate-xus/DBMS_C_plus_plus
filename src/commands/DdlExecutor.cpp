@@ -2560,6 +2560,16 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                 }
                 status = g_engine.attachPartition(s.currentDB, tableName, sub.name,
                                                   sub.partitionSpec);
+                if (status == DBStatus::CHECK_VIOLATION) {
+                    const std::string defaultPartition =
+                        g_engine.getTableSchema(s.currentDB, tableName)
+                            .defaultPartitionName;
+                    throw DbError(
+                        "23514",
+                        "updated partition constraint for default partition \"" +
+                            defaultPartition +
+                            "\" would be violated by some row");
+                }
                 if (!alterStatusOk(status, "Partition")) return true;
                 if (!tableIsTemporary &&
                     !synchronizeTableHierarchyFlagsInCatalog(
