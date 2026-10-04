@@ -35,7 +35,9 @@ NULL fraction 和 histogram 上界。
 
 现已同步两项协议回归：继续验证 `ANALYZE` 后 SQL 查询及连接恢复，并
 显式确认未实现的 `pg_stats` SQL 路径返回 `0A000`。两项修改后的 E2E
-单独重跑均通过；完整注册入口尚未在这次仅测试修改后重跑。此次默认构建
-使用 TLS stub，TLS E2E 按设计跳过；TLS 专项运行时证据见第 997 项。
+单独重跑均通过。随后在集成提交 `525116eb` 上再次运行完整注册入口，
+`bash scripts/build_tests.sh` 退出码 0 并输出 `All tests passed`：460 个
+C++ 测试、203 个实际执行的 E2E 全部通过；另一个 TLS E2E 因默认二进制
+没有 OpenSSL 按设计 skip。TLS 专项运行时证据见第 997 项。
 
 CAT-03 仍缺 `pg_stats`／`pg_statistic` 的不同真实 schema、typed 查询、权限及统计槽语义，清单保持 `partial`、未勾选。
