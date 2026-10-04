@@ -2,6 +2,41 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "995",
+      "gap_ids": ["MON-04"],
+      "status": "partial",
+      "commits": ["9b3a7272", "fb01e1ec"],
+      "evidence": [
+        "docs/code-review-progress.md",
+        "docs/full-gap-execution-plan.md",
+        "docs/issue-995-pg-stat-activity-privacy.md",
+        "docs/postgresql-18-gap-audit.md",
+        "src/main.cpp",
+        "src/network/NetworkServer.cpp",
+        "src/network/NetworkServer.h"
+      ],
+      "tests": [
+        "tests/pg_stat_activity_protocol_e2e_test.py",
+        "tests/pg_settings_query_protocol_e2e_test.py",
+        "tests/postgres_protocol_test.py",
+        "tests/div14_feature_gate_test.py",
+        "tests/pg_catalog_unavailable_sqlstate_protocol_e2e_test.py",
+        "scripts/build.sh"
+      ],
+      "verification": {
+        "official_schema": "PostgreSQL 18 documents 22 pg_stat_activity columns; only five are implemented here",
+        "privacy_reproduction": "An unrelated ordinary user previously read a unique SQL comment marker from a lock-waiting victim session",
+        "typed_subset": "pid/datname/usename/state/query return OIDs 23/19/19/25/25; supported projection, simple boolean filtering, LIMIT and OFFSET work",
+        "privacy_rules": "Query text is visible to the backend user, superusers and inherited pg_read_all_stats members; unrelated users receive SQL NULL",
+        "extended_protocol": "Parse/Describe and execution agree on supported projected columns and types",
+        "resolution": "Explicit pg_catalog uses the virtual view; same-name unqualified physical relations retain ordinary resolution",
+        "production_build": "bash scripts/build.sh passed",
+        "regressions": "Concurrent activity E2E, pg_settings E2E, full postgres_protocol_test.py, div14_feature_gate_test.py and catalog SQLSTATE E2E passed",
+        "runtime_oracle": "No PostgreSQL 18.6 runtime oracle/differential is claimed; the full registered test suite was not rerun",
+        "scope": "query_id, timestamps, wait/client/backend/leader fields and full snapshot semantics remain absent; MON-04 remains partial"
+      }
+    },
+    {
       "issue": "994",
       "gap_ids": ["CAT-03"],
       "status": "partial",
@@ -912,7 +947,7 @@
     {"id":"MON-01","status":"unverified","evidence":[]},
     {"id":"MON-02","status":"unverified","evidence":[]},
     {"id":"MON-03","status":"unverified","evidence":[]},
-    {"id":"MON-04","status":"unverified","evidence":[]},
+    {"id":"MON-04","status":"partial","evidence":["docs/issue-995-pg-stat-activity-privacy.md","src/main.cpp","src/network/NetworkServer.cpp","src/network/NetworkServer.h"],"tests":["tests/pg_stat_activity_protocol_e2e_test.py","tests/postgres_protocol_test.py"]},
     {"id":"MON-05","status":"partial","evidence":["docs/code-review-progress.md","src/process/AdvisoryLockManager.h","src/process/AdvisoryLockManager.cpp","src/main.cpp"],"tests":["tests/advisory_lock_manager_test.cpp","tests/advisory_lock_e2e_test.py"],"commits":["c0d28e5"]},
     {"id":"MON-06","status":"unverified","evidence":[]},
     {"id":"MON-07","status":"unverified","evidence":[]},

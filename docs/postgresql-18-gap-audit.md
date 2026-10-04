@@ -1,3 +1,5 @@
+2026-10-04 第995项复核`pg_stat_activity`旧renderer：实际锁等待证明普通用户可读另一会话的`PRIVATE_ACTIVITY_MARKER`，并且旧路径忽略投影/过滤且列类型全错。PG18 view为22列；当前只提供准确typed `pid/datname/usename/state/query`子集，对query实施本人/superuser/`pg_read_all_stats`可见性；并发隐私专项、Simple/Extended类型、完整协议、pg_settings、DIV-14、catalog SQLSTATE及生产构建通过。生产代码commit `9b3a7272`，本人可见性回归commit `fb01e1ec`。query_id、时间、wait、client、backend等仍缺，MON-04仅partial；无PG18.6 runtime oracle/diff，未跑完整注册suite。详见`docs/issue-995-pg-stat-activity-privacy.md`。未push；Actions禁用；安全/TDE跳过项保持deferred。总账273：22 complete、150 partial、86 unverified、15 deferred_by_user。
+
 2026-10-04 第994项复核`pg_settings`旧renderer：它忽略投影/过滤，只返三列text且Extended Describe为NoData；官方PG18文档定义17列。代码/测试commit `d4ab5852`现只承诺准确的`name/setting/unit`typed子集，执行WHERE和LIMIT/OFFSET，返回OID25及unit SQL NULL；SELECT *、已知未实现列和复杂query fail-closed，unknown column仍42703。Simple/Extended E2E、完整协议、DIV-14、catalog SQLSTATE及生产构建通过；未声称18.6 runtime oracle/diff，未跑完整注册suite。CAT-03仍partial。详见`docs/issue-994-pg-settings-typed-subset.md`。未push；Actions禁用；安全/TDE跳过项保持deferred。总账273：22 complete、149 partial、87 unverified、15 deferred_by_user。
 
 2026-10-04 第993项修正`pg_roles`四列text renderer冒充完整系统view的问题：PG18视图有13列，旧路径不遵循projection/filter。现限定目录及无同名用户relation的未限定查询返回0A000；`SHOW USERS/ROLES`、底层角色API及同名普通表/视图路径不变。生产构建、catalog SQLSTATE E2E、pg_class E2E、`div14_feature_gate_test.py`通过；官方PG18文档核schema，不声称18.6 runtime oracle；未跑完整注册suite。CAT-03仍partial。详见`docs/issue-993-pg-roles-view-fail-closed.md`。未push；Actions禁用；安全/TDE跳过项保持deferred。总账273：22 complete、149 partial、87 unverified、15 deferred_by_user。
@@ -490,7 +492,7 @@
 - [ ] **MON-01** `pg_catalog` 补 PostgreSQL 18 system catalogs/views/functions 的结构、OID、类型和权限过滤。
 - [ ] **MON-02** 当前 `information_schema` 只有 tables/columns/statistics/routines/views/triggers/key_column_usage 等少量虚拟表；补标准全集和角色可见性。
 - [ ] **MON-03** 统计子系统补 shared/persistent counters、snapshot semantics、reset、track_* GUC、function/SLRU/WAL/checkpointer/bgwriter/I/O 统计。
-- [ ] **MON-04** `pg_stat_activity` 补 state、query_id、xact/query start、wait_event_type/event、backend type、client、leader pid 和权限脱敏。
+- [ ] **MON-04** `pg_stat_activity` 目前仅有 `pid/datname/usename/state/query` typed 子集，且 query 文本已按本人/superuser/`pg_read_all_stats`过滤（第995项）；仍需补 `query_id`、xact/query start、wait_event_type/event、backend type、client、leader pid 等 PostgreSQL 18 字段与完整权限/快照语义。
 - [ ] **MON-05** `pg_locks` 补全部 locktag/mode/granted/fastpath/waitstart 和 predicate locks。
 - [ ] **MON-06** 复制/归档/SSL/GSS/subscription/slot/recovery 统计视图。
 - [ ] **MON-07** PostgreSQL 18 `pg_stat_io`、`pg_aios`、WAL/checkpointer/slru 和 backend memory context 视图。
