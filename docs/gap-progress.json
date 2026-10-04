@@ -2,6 +2,40 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "997",
+      "gap_ids": ["OPT-17"],
+      "status": "partial",
+      "commits": ["9d13355b"],
+      "evidence": [
+        "docs/code-review-progress.md",
+        "docs/full-gap-execution-plan.md",
+        "docs/issue-997-statement-timeout-cooperative-cancel.md",
+        "docs/postgresql-18-gap-audit.md",
+        "src/main.cpp",
+        "src/network/NetworkServer.cpp",
+        "src/utils/Session.h",
+        "src/commands/TableManage.cpp"
+      ],
+      "tests": [
+        "tests/statement_timeout_protocol_e2e_test.py",
+        "tests/statement_timeout_cli_e2e_test.py",
+        "tests/postgres_protocol_test.py",
+        "tests/copy_protocol_e2e_test.py",
+        "tests/cli_error_recovery_e2e_test.py",
+        "tests/pg_stat_activity_protocol_e2e_test.py",
+        "scripts/build.sh"
+      ],
+      "verification": {
+        "reproduction": "Before the fix, a 100ms timeout waiting on a row lock lasted until the 4s client socket timeout",
+        "protocol": "Simple and Extended execution cancel cooperatively with SQLSTATE 57014; explicit transaction E/25P02 and ROLLBACK recovery to I are covered",
+        "cli": "A timed-out long query is canceled and a subsequent SELECT succeeds",
+        "regressions": "Production build, complete protocol E2E, COPY cancel, CLI error recovery and pg_stat_activity E2E passed",
+        "scope": "Cancellation remains cooperative; COPY blocking I/O, non-cooperative execution paths, complete worker/operator coverage and resource-owner cleanup are not established",
+        "protocol_semantics": "Extended-query timeout currently starts at Execute, not the PostgreSQL 18 first query-related Parse/Bind/Describe message",
+        "full_suite_oracle": "No full registered suite or PostgreSQL 18.6 runtime oracle/differential is claimed; OPT-17 remains partial"
+      }
+    },
+    {
       "issue": "996",
       "gap_ids": ["CAT-01"],
       "status": "partial",
@@ -883,7 +917,7 @@
     {"id":"OPT-14","status":"unverified","evidence":[]},
     {"id":"OPT-15","status":"partial","evidence":["docs/code-review-progress.md","src/main.cpp","src/utils/PlanCacheEpoch.h","src/parser/ast.h","src/parser/parser.cpp","src/commands/DdlTransaction.cpp","src/commands/TableManage.cpp","src/network/NetworkServer.cpp","scripts/build_common.sh"],"tests":["tests/plan_cache_epoch_test.cpp","tests/plan_cache_invalidation_protocol_e2e_test.py","tests/primary_key_plan_protocol_e2e_test.py","tests/explain_analyze_e2e_test.py","tests/postgres_protocol_test.py","tests/explain_json_cache_protocol_e2e_test.py","tests/discard_temp_test.cpp","tests/discard_temp_protocol_e2e_test.py","tests/compat/cases/discard_temp.sql"],"commits":["0ed48635","10b590ce","38e697af","1c68b73b"]},
     {"id":"OPT-16","status":"partial","evidence":["docs/code-review-progress.md","src/executor/ExecutionPlan.cpp","src/executor/ExecutionPlan.h","src/main.cpp","src/commands/TableManage.cpp","src/common/SqlConjunction.h","src/commands/TableManage.h","src/commands/DmlExecutor.cpp","scripts/build_common.sh"],"tests":["tests/bitmap_explain_test.cpp","tests/bitmap_explain_protocol_e2e_test.py","tests/explain_analyze_test.cpp","tests/explain_analyze_e2e_test.py","tests/stats_planner_test.cpp","tests/explain_json_options_protocol_e2e_test.py","tests/cost_model_test.cpp","tests/eq_class_pathkey_test.cpp","tests/explain_json_cache_protocol_e2e_test.py","tests/explain_json_actuals_test.cpp","tests/explain_json_analyze_protocol_e2e_test.py","tests/integer_index_plan_key_test.cpp","tests/integer_index_plan_protocol_e2e_test.py","tests/explain_timing_option_test.cpp","tests/explain_timing_protocol_e2e_test.py","tests/typed_index_plan_key_test.cpp","tests/typed_index_plan_protocol_e2e_test.py","tests/integer_numeric_predicate_test.cpp","tests/integer_numeric_protocol_e2e_test.py","tests/compat/cases/integer_numeric_predicates.sql","tests/sql_conjunction_test.cpp","tests/explain_between_protocol_e2e_test.py","tests/sql_boolean_groups_test.cpp","tests/explain_boolean_protocol_e2e_test.py","tests/unknown_relation_rows_test.cpp","tests/unknown_relation_rows_protocol_e2e_test.py","tests/planner_runtime_stats_test.cpp","tests/legacy_forced_analyze_protocol_e2e_test.py","tests/dml_semantics_test.cpp","tests/explain_relation_protocol_e2e_test.py","tests/analyze_null_statistics_test.cpp","tests/analyze_null_statistics_protocol_e2e_test.py","tests/pg_stats_test.cpp","tests/partition_test.cpp","tests/typed_statistics_mcv_test.cpp","tests/typed_statistics_mcv_protocol_e2e_test.py","tests/explain_join_protocol_e2e_test.py","tests/typed_count_distinct_test.cpp","tests/typed_count_distinct_protocol_e2e_test.py","tests/compat/cases/typed_count_distinct.sql","tests/typed_group_key_test.cpp","tests/typed_group_key_protocol_e2e_test.py","tests/compat/cases/typed_group_keys.sql","tests/group_distinct_filter_test.cpp","tests/group_distinct_filter_protocol_e2e_test.py","tests/compat/cases/group_distinct_filter.sql","tests/native_distinct_structured_test.cpp","tests/native_distinct_protocol_e2e_test.py","tests/index_scan_full_value_recheck_test.cpp","tests/index_scan_full_value_protocol_e2e_test.py","tests/compat/cases/index_scan_full_value_recheck.sql","tests/empty_index_equality_test.cpp","tests/empty_index_equality_protocol_e2e_test.py","tests/compat/cases/empty_index_equality.sql","tests/expression_null_predicate_test.cpp","tests/expression_null_predicate_protocol_e2e_test.py","tests/compat/cases/expression_null_predicate.sql","tests/integer_index_full_value_recheck_test.cpp","tests/integer_index_recheck_protocol_e2e_test.py","tests/compat/cases/integer_index_full_value_recheck.sql"],"commits":["b219803a","02f0cf49","10b590ce","c90d8352","53eaf913","0fc9c7e7","c0698a05","19abc7bb","d91cf1d8","f07ed3b9","d83b3cbe","5faa59fe","c329265c","f640eea1","cbb0946f","043a7920","6d66e7cf","7706212a","79024a0b","6d2aa8c5","b710d6c4","2a45ffd9","458523b7","10f2ecbf"]},
-    {"id":"OPT-17","status":"unverified","evidence":[]},
+    {"id":"OPT-17","status":"partial","evidence":["docs/code-review-progress.md","docs/full-gap-execution-plan.md","docs/issue-997-statement-timeout-cooperative-cancel.md","docs/postgresql-18-gap-audit.md","src/main.cpp","src/network/NetworkServer.cpp","src/network/NetworkServer.h","src/utils/Session.h","src/commands/TableManage.cpp"],"tests":["tests/statement_timeout_protocol_e2e_test.py","tests/statement_timeout_cli_e2e_test.py","tests/postgres_protocol_test.py","tests/copy_protocol_e2e_test.py","tests/cli_error_recovery_e2e_test.py","tests/pg_stat_activity_protocol_e2e_test.py","scripts/build.sh"],"commits":["9d13355b"]},
     {"id":"IDX-01","status":"unverified","evidence":[]},
     {"id":"IDX-02","status":"unverified","evidence":[]},
     {"id":"IDX-03","status":"partial","evidence":["src/access/BPTree.cpp","src/access/BPTree.h","src/executor/ExecutionPlan.cpp","docs/code-review-progress.md","src/commands/TableManage.cpp","src/storage/BufferPool.cpp","src/executor/ExecutionPlan.h","scripts/build_common.sh"],"tests":["tests/bptree_topology_corruption_test.cpp","tests/bptree_concurrency_test.cpp","tests/index_scan_corruption_error_test.cpp","tests/index_corruption_protocol_e2e_test.py","tests/missing_btree_file_guard_test.cpp","tests/missing_index_protocol_e2e_test.py","tests/physical_restore_validation_test.cpp","tests/unlogged_recovery_test.cpp","tests/primary_key_plan_encoding_test.cpp","tests/primary_key_plan_protocol_e2e_test.py","tests/compat/cases/primary_key_lookup_variants.sql","tests/integer_index_write_key_test.cpp","tests/integer_index_write_protocol_e2e_test.py","tests/compat/cases/integer_key_write_normalization.sql","tests/numeric_index_key_equality_test.cpp","tests/numeric_index_key_protocol_e2e_test.py","tests/compat/cases/numeric_key_equality.sql","tests/index_scan_full_value_recheck_test.cpp","tests/index_scan_full_value_protocol_e2e_test.py","tests/compat/cases/index_scan_full_value_recheck.sql","tests/empty_index_equality_test.cpp","tests/empty_index_equality_protocol_e2e_test.py","tests/compat/cases/empty_index_equality.sql","tests/integer_index_full_value_recheck_test.cpp","tests/integer_index_recheck_protocol_e2e_test.py","tests/compat/cases/integer_index_full_value_recheck.sql","tests/unique_prefix_collision_test.cpp","tests/unique_prefix_collision_protocol_e2e_test.py","tests/compat/cases/unique_prefix_collision.sql","tests/legacy_index_prefix_recheck_test.cpp","tests/legacy_index_prefix_recheck_protocol_e2e_test.py","tests/compat/cases/legacy_index_prefix_recheck.sql"],"commits":["b78d5b49","747ff8da","677bfa0f","1bcd1349","e9f7adf2","b710d6c4","2a45ffd9","10f2ecbf","0d64c528","c2cc8529"]},

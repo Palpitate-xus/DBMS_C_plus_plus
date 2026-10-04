@@ -1,3 +1,5 @@
+2026-10-04 第997项修复PostgreSQL wire与交互CLI中`statement_timeout`未中断执行的问题：行锁基线从4秒socket超时收敛为57014；Simple/Extended显式事务Ready状态E/25P02及rollback恢复I、CLI长查询取消并继续下一条SELECT均通过。生产commit `9d13355b`，完整`postgres_protocol_test.py`、COPY/CLI/pg_stat_activity回归、构建通过。只覆盖轮询的执行/锁等待；COPY阻塞I/O、非协作路径及完整ResourceOwner cleanup仍缺。PG18文档还要求Extended Query timer始于首个Parse/Bind/Describe query-related message，本实现始于execute，故OPT-17仅partial。无全注册suite或18.6 runtime differential；详见`docs/issue-997-statement-timeout-cooperative-cancel.md`。未push、Actions禁用、安全/TDE用户跳过项保持deferred。总账273：22 complete、152 partial、84 unverified、15 deferred_by_user。
+
 2026-10-04 第996项核实CAT-01目录目前是CatalogManager内存缓存加每类单独CSV `.cat` 文件，OID计数器/空闲OID另存；`persistAll`会原子替换单个文件，但无heap tuple/WAL/MVCC、无多目录事务原子提交。catalog service/persistence failure/name resolution隔离测试通过；一个storage snapshot测试带有heap allocator close警告且不证明catalog MVCC。该项仅从unverified修正为partial，没有代码改动；不声称全套或PG18.6 runtime oracle/diff。详见`docs/issue-996-catalog-not-mvcc-audit.md`。CAT-01架构仍未完成；未push、Actions禁用、安全/TDE跳过项保持deferred。总账273：22 complete、151 partial、85 unverified、15 deferred_by_user。
 
 2026-10-04 第995项复核`pg_stat_activity`旧renderer：实际锁等待证明普通用户可读另一会话的`PRIVATE_ACTIVITY_MARKER`，并且旧路径忽略投影/过滤且列类型全错。PG18 view为22列；当前只提供准确typed `pid/datname/usename/state/query`子集，对query实施本人/superuser/`pg_read_all_stats`可见性；并发隐私专项、Simple/Extended类型、完整协议、pg_settings、DIV-14、catalog SQLSTATE及生产构建通过。生产代码commit `9b3a7272`，本人可见性回归commit `fb01e1ec`。query_id、时间、wait、client、backend等仍缺，MON-04仅partial；无PG18.6 runtime oracle/diff，未跑完整注册suite。详见`docs/issue-995-pg-stat-activity-privacy.md`。未push；Actions禁用；安全/TDE跳过项保持deferred。总账273：22 complete、150 partial、86 unverified、15 deferred_by_user。
@@ -378,7 +380,7 @@
 - [ ] **OPT-14** LLVM JIT：expression、tuple deform、cost threshold、EXPLAIN JIT 信息和平台构建。
 - [ ] **OPT-15** generic/custom prepared plans、catalog/GUC/statistics invalidation、search_path/role/RLS 安全的 plan cache。
 - [ ] **OPT-16** EXPLAIN 覆盖所有 statement/node，补 VERBOSE、COSTS、SETTINGS、WAL、MEMORY、SERIALIZE、SUMMARY、FORMAT JSON/XML/YAML 完整结构。
-- [ ] **OPT-17** executor cancellation、interrupt、statement timeout、error cleanup 和 resource owner 必须贯穿全部算子/worker/I/O。
+- [ ] **OPT-17** executor cancellation、interrupt、statement timeout、error cleanup 和 resource owner 必须贯穿全部算子/worker/I/O。CLI及wire的普通协作执行/锁等待现有`statement_timeout`（第997项）；仍缺首个Extended query-related消息启动计时、COPY/阻塞I/O中断和所有算子/worker完整资源清理。
 
 ## 12. 索引和访问方法
 
