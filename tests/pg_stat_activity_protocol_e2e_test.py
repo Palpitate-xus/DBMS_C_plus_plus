@@ -89,6 +89,12 @@ def main():
             result = query(monitor, sql, state=state)
             assert result[2], (sql, result)
 
+        own_query = (
+            "SELECT query FROM pg_catalog.pg_stat_activity "
+            "WHERE usename = 'act_monitor'")
+        own_visible = query(monitor, own_query)
+        assert own_visible[0] and own_query in own_visible[0][0][0], own_visible
+
         # Hold a row lock as Alice and park the victim on an UPDATE carrying a
         # unique SQL marker. An unrelated ordinary role may see the session,
         # but not its SQL text.
