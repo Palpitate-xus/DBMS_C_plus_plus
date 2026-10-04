@@ -1,3 +1,5 @@
+2026-10-04 第996项核实CAT-01目录目前是CatalogManager内存缓存加每类单独CSV `.cat` 文件，OID计数器/空闲OID另存；`persistAll`会原子替换单个文件，但无heap tuple/WAL/MVCC、无多目录事务原子提交。catalog service/persistence failure/name resolution隔离测试通过；一个storage snapshot测试带有heap allocator close警告且不证明catalog MVCC。该项仅从unverified修正为partial，没有代码改动；不声称全套或PG18.6 runtime oracle/diff。详见`docs/issue-996-catalog-not-mvcc-audit.md`。CAT-01架构仍未完成；未push、Actions禁用、安全/TDE跳过项保持deferred。总账273：22 complete、151 partial、85 unverified、15 deferred_by_user。
+
 2026-10-04 第995项复核`pg_stat_activity`旧renderer：实际锁等待证明普通用户可读另一会话的`PRIVATE_ACTIVITY_MARKER`，并且旧路径忽略投影/过滤且列类型全错。PG18 view为22列；当前只提供准确typed `pid/datname/usename/state/query`子集，对query实施本人/superuser/`pg_read_all_stats`可见性；并发隐私专项、Simple/Extended类型、完整协议、pg_settings、DIV-14、catalog SQLSTATE及生产构建通过。生产代码commit `9b3a7272`，本人可见性回归commit `fb01e1ec`。query_id、时间、wait、client、backend等仍缺，MON-04仅partial；无PG18.6 runtime oracle/diff，未跑完整注册suite。详见`docs/issue-995-pg-stat-activity-privacy.md`。未push；Actions禁用；安全/TDE跳过项保持deferred。总账273：22 complete、150 partial、86 unverified、15 deferred_by_user。
 
 2026-10-04 第994项复核`pg_settings`旧renderer：它忽略投影/过滤，只返三列text且Extended Describe为NoData；官方PG18文档定义17列。代码/测试commit `d4ab5852`现只承诺准确的`name/setting/unit`typed子集，执行WHERE和LIMIT/OFFSET，返回OID25及unit SQL NULL；SELECT *、已知未实现列和复杂query fail-closed，unknown column仍42703。Simple/Extended E2E、完整协议、DIV-14、catalog SQLSTATE及生产构建通过；未声称18.6 runtime oracle/diff，未跑完整注册suite。CAT-03仍partial。详见`docs/issue-994-pg-settings-typed-subset.md`。未push；Actions禁用；安全/TDE跳过项保持deferred。总账273：22 complete、149 partial、87 unverified、15 deferred_by_user。
@@ -269,7 +271,7 @@
 
 ## 7. Catalog、OID、对象和 DDL
 
-- [ ] **CAT-01** 将 catalog 从 CSV/sidecar 缓存提升为 WAL/MVCC 管理的普通系统关系。
+- [ ] **CAT-01** 将 catalog 从 CSV/sidecar 缓存提升为 WAL/MVCC 管理的普通系统关系。现为每库内存vector/hash加每目录独立 `.cat` CSV、显式/析构持久化（第996项）；无目录heap tuple、WAL/MVCC或多目录原子DDL事务。
 - [ ] **CAT-02** `pg_class`、`pg_attribute`、`pg_type`、`pg_proc`、`pg_depend`、`pg_namespace` 等必须是内部执行的真实来源，而不是另一套虚拟输出。
 - [ ] **CAT-03** 补齐 `pg_constraint`、`pg_index`、`pg_am`、`pg_opclass`、`pg_operator`、`pg_cast`、`pg_collation`、`pg_rewrite`、`pg_trigger`、`pg_policy`、`pg_auth*`、`pg_default_acl`、`pg_database`、`pg_namespace`、`pg_tablespace`、`pg_stats`、`pg_statistic*`、复制 catalog 等。未实现的 `pg_index`／`pg_operator` 查询已改为明确 `0A000`（第984项）；`pg_database` 仅准确暴露 `datname`／UTF8 `encoding` 子集（第987项）；`pg_stats`／`pg_statistic` 在补齐各自typed schema前fail-closed（第989项）；`pg_namespace` 在真实schema/ACL/session temp生命周期齐备前fail-closed（第990项）；`pg_class`星号投影和已知未实现列 fail-closed（第991项）；`pg_type`/`pg_enum`不可信的文本SQL renderer fail-closed（第992项）；`pg_roles`不完整的四列renderer fail-closed（第993项）；`pg_settings`目前仅提供准确`name/setting/unit`子集、拒绝不完整星号投影并正确支持Extended列描述（第994项）。catalog 完整 schema、数据与执行语义仍缺。
 - [ ] **CAT-04** 实现所有对象的稳定 OID、reg* 查找、OID 引用和 dump/restore 保真。

@@ -4,6 +4,8 @@
 
 # 总差距清单执行计划
 
+2026-10-04 第996项核实CAT-01目录架构仍非heap/WAL/MVCC：每库CatalogManager持有内存vector/hash并将每类系统目录序列化为独立`pg_<name>.cat`；OID状态另存，显式persistAll/析构持久化。现有atomic replace只能保护单文件替换，不提供多目录事务一致性、行版本、WAL恢复或迁移。隔离`catalog_service_test`、`catalog_persistence_failure_test`、`catalog_resolve_test`通过；snapshot test有清理warning且不是catalog MVCC证据。仅审计/分类，无代码改动；无全套或PG18.6 oracle/diff。CAT-01从unverified转partial，所需目录heap/WAL/MVCC和原子事务仍未实现。详见`docs/issue-996-catalog-not-mvcc-audit.md`。不push；Actions禁用；安全/TDE跳过项保持deferred。
+
 2026-10-04 第995项修复`pg_stat_activity`旧renderer忽略投影/过滤、返回五个text列并向普通用户泄露其他会话SQL的问题。真实锁等待复现`PRIVATE_ACTIVITY_MARKER`泄露。现仅实现typed `pid/datname/usename/state/query`子集及投影、简单布尔过滤、LIMIT/OFFSET；query仅本人、superuser及`pg_read_all_stats`可见，Extended Describe与实际OID一致。同名普通relation解析保留。生产代码commit `9b3a7272`、本人可见性回归commit `fb01e1ec`；生产构建、专项并发E2E、pg_settings专项、完整协议、DIV-14、catalog SQLSTATE回归通过。PG18 view定义22列，query_id、时间、等待、客户端、backend等尚未实现，故MON-04只标partial；无PG18.6 runtime oracle/diff，未跑完整注册suite。详见`docs/issue-995-pg-stat-activity-privacy.md`。不push；Actions禁用；安全/TDE跳过项保持deferred。
 
 2026-10-04 第994项修复`pg_settings`旧三列renderer忽略projection/filter并在Extended Describe返回NoData的问题。PG18有17列，本项目仅将`name/setting/unit`作为typed子集：WHERE与LIMIT/OFFSET实际执行、空unit为SQL NULL、OID为25；SELECT *及已知未实现列/复杂查询返回0A000，未知列42703。Extended RowDescription与实际结果一致，同名用户table/view仍走普通解析。代码/测试commit `d4ab5852`；生产构建、Simple/Extended E2E、完整协议回归、DIV-14与catalog SQLSTATE E2E通过。CAT-03仍partial；无PG18.6 runtime oracle/diff，未跑完整注册suite。详见`docs/issue-994-pg-settings-typed-subset.md`。不push；Actions禁用；安全/TDE跳过项保持deferred。
