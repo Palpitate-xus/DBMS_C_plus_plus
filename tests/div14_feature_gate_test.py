@@ -550,6 +550,15 @@ def main():
                      "removed extended-mode compat catalog")
         expect_0a000(sock, "CREATE EXTENSION hstore",
                      "extended CREATE EXTENSION")
+        # Project extension mode does not implement user-defined operators or
+        # their catalog/planner metadata; reject all three lifecycle paths
+        # instead of persisting a decorative object record.
+        for sql in [
+                "CREATE OPERATOR === (LEFTARG = int, RIGHTARG = int)",
+                "ALTER OPERATOR === (int, int) OWNER TO alice",
+                "DROP OPERATOR === (int, int)",
+        ]:
+            expect_0a000(sock, sql, "extended user-defined operator gate")
         expect_0a000(sock,
                      "IMPORT FOREIGN SCHEMA fs FROM SERVER s1 INTO public",
                      "extended IMPORT FOREIGN SCHEMA")
