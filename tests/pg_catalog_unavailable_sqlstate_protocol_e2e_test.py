@@ -29,6 +29,7 @@ UNIMPLEMENTED_CATALOGS = (
     "pg_operator",
     "pg_type",
     "pg_enum",
+    "pg_roles",
 )
 
 
@@ -125,7 +126,8 @@ def main():
         assert result[1] is None and result[0] == [["11"]], result
         assert result[3] == ["id"] and result[5] == [23], result
 
-        for relation, value in (("pg_type", 13), ("pg_enum", 15)):
+        for relation, value in (("pg_type", 13), ("pg_enum", 15),
+                                ("pg_roles", 19)):
             for sql in (
                     "CREATE TABLE %s (id INTEGER)" % relation,
                     "INSERT INTO %s VALUES (%d)" % (relation, value)):
@@ -138,17 +140,17 @@ def main():
             assert result[1] is None and result[0] == [[str(value)]], result
             assert result[3] == ["id"] and result[5] == [23], result
 
-        # An ordinary view named after an unimplemented catalog likewise
+        # An ordinary view named after an unimplemented system view likewise
         # follows normal lookup rather than the unsupported-catalog gate.
         for sql in (
                 "CREATE TABLE catalog_view_source (id INTEGER)",
                 "INSERT INTO catalog_view_source VALUES (17)",
-                "DROP TABLE pg_enum",
-                "CREATE VIEW pg_enum AS SELECT id FROM catalog_view_source"):
+                "DROP TABLE pg_roles",
+                "CREATE VIEW pg_roles AS SELECT id FROM catalog_view_source"):
             result = runner.decode_wire_result(
                 client.simple_query(sock, sql), include_types=True)
             assert result[1] is None, (sql, result)
-        messages = client.simple_query(sock, "SELECT * FROM pg_enum")
+        messages = client.simple_query(sock, "SELECT * FROM pg_roles")
         result = runner.decode_wire_result(messages, include_types=True)
         assert result[1] is None and result[0] == [["17"]], result
         assert result[3] == ["id"] and result[5] == [23], result

@@ -24078,7 +24078,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
               !g_engine.tableExists(queryDb, tname) &&
               !g_engine.viewExists(queryDb, tname)));
         // pg_stat_* virtual tables
-        if (tname == "pg_stat_database" || tname == "pg_stat_tables" || tname == "pg_stat_statements" || tname == "pg_seclabels" || tname == "pg_buffercache" || tname == "pg_locks" || tname == "pg_stat_wait_events" || tname == "pg_stat_activity" || virtualPgDatabase || tname == "pg_tables" || tname == "pg_views" || tname == "pg_indexes" || tname == "pg_settings" || tname == "pg_roles" || tname == "pg_class") {
+        if (tname == "pg_stat_database" || tname == "pg_stat_tables" || tname == "pg_stat_statements" || tname == "pg_seclabels" || tname == "pg_buffercache" || tname == "pg_locks" || tname == "pg_stat_wait_events" || tname == "pg_stat_activity" || virtualPgDatabase || tname == "pg_tables" || tname == "pg_views" || tname == "pg_indexes" || tname == "pg_settings" || tname == "pg_class") {
             auto bpStats = g_engine.getBufferPoolStats();
             const std::string catalogDb = queryDb == "pg_catalog"
                 ? s.currentDB : queryDb;
@@ -24283,13 +24283,6 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 cout << "auto_analyze " << (g_config.autoAnalyzeEnabled ? "on" : "off") << " " << endl;
                 cout << "password_policy_level " << g_config.passwordPolicyLevel << " " << endl;
                 cout << "audit_level " << g_config.auditLevel << " " << endl;
-            } else if (tname == "pg_roles") {
-                cout << "rolname rolsuper rolcreatedb rolcanlogin " << endl;
-                for (const auto& account : g_engine.catalogService().get("info").listAuthIds()) {
-                    cout << account.rolname << " " << (account.rolsuper ? "t" : "f") << " "
-                         << (account.rolcreatedb ? "t" : "f") << " "
-                         << (account.rolcanlogin ? "t" : "f") << " " << endl;
-                }
             } else if (tname == "pg_class") {
                 return executePgClassQuery(effectiveRawSql, s, catalogDb);
             }
@@ -24312,7 +24305,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             "pg_rewrite", "pg_replication_origin", "pg_stats", "pg_statistic",
             "pg_statistic_ext",
             "pg_subscription", "pg_tablespace", "pg_trigger", "pg_type",
-            "pg_enum"};
+            "pg_enum", "pg_roles"};
         if ((queryDb == "pg_catalog" || unresolvedUnqualifiedRelation) &&
             unimplementedCatalogRelations.find(catalogName) !=
                 unimplementedCatalogRelations.end()) {
