@@ -29,4 +29,4 @@ DBMS_PROTOCOL_TEST_TIMEOUT=120 DBMS_PROTOCOL_STARTUP_TIMEOUT=120 DBMS_PROTOCOL_S
 exit 0; All tests passed
 ```
 
-No PostgreSQL 18.6 direct oracle result is claimed: the local PG18 server rejected passwordless access and no usable credential was available in this environment. No push was performed; GitHub Actions remain disabled as requested.
+The same boundary behavior was checked directly against local PostgreSQL 18.6 (`server_version_num=180006`) using temporary tables: values 5 and 20 are rejected for `[10,20)` with check-violation semantics; 10 and 19 land in that partition; overlapping `[15,25)` is rejected; adjacent `[20,30)` is accepted and receives its lower-bound row. The test ran through the local Unix socket as the current OS user. No push was performed; GitHub Actions remain disabled as requested.

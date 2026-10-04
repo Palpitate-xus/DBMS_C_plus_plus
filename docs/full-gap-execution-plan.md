@@ -1,6 +1,6 @@
 # 总差距清单执行计划
 
-2026-10-04 第975项 `5ac83dae`：RANGE ATTACH旧逻辑只保存upper bound，导致lower endpoint前的值错路由、重叠partition可attach。现将下界追加持久化、按完整半开区间路由并拒绝重叠；覆盖DDL、相邻边界和StorageEngine重开。最终注册C++／protocol／E2E全套 exit 0，`All tests passed`。PG18.6 direct oracle因本机认证不可用未执行。CAT-11仅标partial，default partition校验/迁移、constraint proof、并发detach与partition index/全局唯一性仍欠缺。总账273：22 complete、142 partial、94 unverified、15 deferred_by_user。未push，Actions禁用，安全/TDE用户跳过项保持deferred。详见 `docs/issue-975-range-partition-bounds.md`。
+2026-10-04 第975项 `5ac83dae`：RANGE ATTACH旧逻辑只保存upper bound，导致lower endpoint前的值错路由、重叠partition可attach。现将下界追加持久化、按完整半开区间路由并拒绝重叠；覆盖DDL、相邻边界和StorageEngine重开。最终注册C++／protocol／E2E全套 exit 0，`All tests passed`；真实PG18.6临时分区表oracle确认相同边界、重叠拒绝和相邻行为。CAT-11仅标partial，default partition校验/迁移、constraint proof、并发detach与partition index/全局唯一性仍欠缺。总账273：22 complete、142 partial、94 unverified、15 deferred_by_user。未push，Actions禁用，安全/TDE用户跳过项保持deferred。详见 `docs/issue-975-range-partition-bounds.md`。
 
 2026-10-03 第974项 `c18bd1bd` 局部缓解P0-08的tuple XID越界：`HeapTupleFields::xmin/xmax` 是32位而分配器是64位，超过 `UINT32_MAX` 原会静默截断。现停止在tuple header可表示的最后一个ID，边界测试验证持久化和重启行为；定向 `txnid_generator_test` 与完整 `build_tests.sh`（全部C++、协议、E2E）通过。该保护会在耗尽后拒绝新事务，不等同完整epoch/freeze/MultiXact/oldest-xmin方案，P0-08仍partial。273项总账仍22 complete、140 partial、96 unverified、15 deferred_by_user。详见 `docs/issue-974-xid-tuple-width-guard.md`；未push，Actions禁用，用户跳过的安全/TDE继续deferred。
 

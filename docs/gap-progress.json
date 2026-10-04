@@ -12,7 +12,7 @@
         "old_behavior_regression": "Against the old implementation, partition_test aborted because inserting key 5 into the attached [10, 20) range returned OK; the test also covers rejection of overlapping [15, 25)",
         "focused_partition_test": "bash scripts/build_one_test.sh partition_test: passed, including StorageEngine reopen and lower-bound routing",
         "full_registered_suite": "DBMS_PROTOCOL_TEST_TIMEOUT=120 DBMS_PROTOCOL_STARTUP_TIMEOUT=120 DBMS_PROTOCOL_SHUTDOWN_TIMEOUT=120 bash scripts/build_tests.sh: exit 0; All tests passed (registered C++ tests, postgres_protocol_test.py, and E2E tests)",
-        "postgresql_18_oracle": "Not run: the local PG18 server requires a password and no usable credential was available; no oracle result is claimed",
+        "postgresql_18_oracle": "local PostgreSQL 18.6, server_version_num=180006: temporary partitioned-table oracle confirmed [10,20) rejects 5 and exclusive upper 20, routes 10/19 to the attached child, rejects overlapping [15,25), and accepts adjacent [20,30) with key 20 routed there",
         "scope": "Explicit RANGE lower endpoints now persist and route correctly, and overlapping attached ranges are rejected. Default-partition row validation/migration, constraint proofs, concurrent detach/finalize, partition indexes, and cross-partition uniqueness remain unresolved; CAT-11 stays partial"
       }
     },
