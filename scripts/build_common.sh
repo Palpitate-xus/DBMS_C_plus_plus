@@ -83,6 +83,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/xml_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/prepared_statement_lifecycle_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/copy_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/statement_timeout_tls_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/copy_error_lock_release_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/copy_integer_input_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/bigint_minimum_protocol_e2e_test.py)

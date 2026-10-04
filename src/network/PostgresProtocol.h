@@ -25,7 +25,6 @@ struct PgFrontendMessage {
     std::vector<uint8_t> payload;
 };
 
-enum class ProtocolInputWaitResult { Ready, TimedOut, Error };
 enum class ProtocolMessageReadResult { Complete, TimedOut, Interrupted, Error };
 using ProtocolMessageWriteResult = SocketWriteResult;
 
@@ -54,12 +53,9 @@ public:
         PgFrontendMessage& message, std::string& error,
         std::chrono::steady_clock::time_point deadline,
         const std::function<bool()>& interrupted,
+        // True when input transport/message bytes were consumed before an
+        // incomplete message; callers must close rather than attempt resync.
         bool& partialMessage);
-
-    // Wait until at least one frontend byte is available or the absolute
-    // deadline expires. SSL-decrypted bytes already buffered are ready too.
-    ProtocolInputWaitResult waitForInputUntil(
-        std::chrono::steady_clock::time_point deadline);
 
     bool sendAuthenticationOk();
     bool sendAuthenticationCleartextPassword();

@@ -94,6 +94,54 @@ ssize_t SecureSocket::recv(void* buf, size_t len) {
     if (fd < 0) return -1;
     return ::recv(fd, buf, len, 0);
 }
+SocketReadResult SecureSocket::recvSomeUntil(
+    void* buf, size_t len, size_t& received,
+    std::chrono::steady_clock::time_point deadline,
+    const std::function<bool()>& interrupted,
+    bool& transportProgress) {
+    received = 0;
+    transportProgress = false;
+    if (fd < 0 || len == 0) return SocketReadResult::Error;
+    while (true) {
+        if (interrupted && interrupted())
+            return SocketReadResult::Interrupted;
+        if (deadline != std::chrono::steady_clock::time_point::max() &&
+            std::chrono::steady_clock::now() >= deadline)
+            return SocketReadResult::TimedOut;
+        const ssize_t count = ::recv(fd, buf, len, MSG_DONTWAIT);
+        if (count > 0) {
+            received = static_cast<size_t>(count);
+            transportProgress = true;
+            return SocketReadResult::Data;
+        }
+        if (count == 0) return SocketReadResult::Error;
+        if (errno == EINTR) continue;
+        if (errno != EAGAIN && errno != EWOULDBLOCK)
+            return SocketReadResult::Error;
+
+        const auto now = std::chrono::steady_clock::now();
+        if (deadline != std::chrono::steady_clock::time_point::max() &&
+            now >= deadline)
+            return SocketReadResult::TimedOut;
+        int timeoutMs = 50;
+        if (deadline != std::chrono::steady_clock::time_point::max()) {
+            const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(
+                deadline - now).count();
+            timeoutMs = static_cast<int>(std::min<int64_t>(50, remaining));
+        }
+        pollfd descriptor{};
+        descriptor.fd = fd;
+        descriptor.events = POLLIN;
+        const int ready = ::poll(&descriptor, 1, timeoutMs);
+        if (ready == 0) continue;
+        if (ready < 0) {
+            if (errno == EINTR) continue;
+            return SocketReadResult::Error;
+        }
+        if ((descriptor.revents & POLLIN) == 0)
+            return SocketReadResult::Error;
+    }
+}
 bool SecureSocket::hasBufferedInput() const { return false; }
 void SecureSocket::close() {
     if (fd >= 0) { ::close(fd); fd = -1; }

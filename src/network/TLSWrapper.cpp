@@ -182,12 +182,121 @@ ssize_t SecureSocket::recv(void* buf, size_t len) {
     return -1;
 }
 
+SocketReadResult SecureSocket::recvSomeUntil(
+    void* buf, size_t len, size_t& received,
+    std::chrono::steady_clock::time_point deadline,
+    const std::function<bool()>& interrupted,
+    bool& transportProgress) {
+    received = 0;
+    transportProgress = false;
+    if (fd < 0 || (useTLS && (!ssl || !tlsOK)) || len == 0)
+        return SocketReadResult::Error;
+
+    const int oldFlags = ::fcntl(fd, F_GETFL, 0);
+    if (oldFlags < 0) return SocketReadResult::Error;
+    const bool restoreBlocking = (oldFlags & O_NONBLOCK) == 0;
+    if (restoreBlocking && ::fcntl(fd, F_SETFL, oldFlags | O_NONBLOCK) < 0)
+        return SocketReadResult::Error;
+    struct RestoreFlags {
+        int fd;
+        int flags;
+        bool restore;
+        ~RestoreFlags() {
+            if (restore) (void)::fcntl(fd, F_SETFL, flags);
+        }
+    } restore{fd, oldFlags, restoreBlocking};
+
+    short waitEvents = POLLIN;
+    bool tlsReadReady = false;
+    while (true) {
+        if (interrupted && interrupted())
+            return SocketReadResult::Interrupted;
+        if (deadline != std::chrono::steady_clock::time_point::max() &&
+            std::chrono::steady_clock::now() >= deadline)
+            return SocketReadResult::TimedOut;
+
+        if (useTLS && ssl && tlsOK) {
+            const int chunk = static_cast<int>(std::min<size_t>(
+                len, static_cast<size_t>(std::numeric_limits<int>::max())));
+            errno = 0;
+            const int count = SSL_read(ssl, buf, chunk);
+            if (count > 0) {
+                received = static_cast<size_t>(count);
+                transportProgress = true;
+                return SocketReadResult::Data;
+            }
+            const int sslError = SSL_get_error(ssl, count);
+            if (tlsReadReady) transportProgress = true;
+            tlsReadReady = false;
+            if (sslError == SSL_ERROR_WANT_READ) {
+                waitEvents = POLLIN;
+            } else if (sslError == SSL_ERROR_WANT_WRITE) {
+                waitEvents = POLLOUT;
+            } else if (sslError == SSL_ERROR_SYSCALL &&
+                       (errno == EINTR || errno == EAGAIN ||
+                        errno == EWOULDBLOCK)) {
+                waitEvents = POLLIN;
+            } else {
+                return SocketReadResult::Error;
+            }
+        } else {
+            const ssize_t count = ::recv(
+                fd, buf, len, MSG_DONTWAIT);
+            if (count > 0) {
+                received = static_cast<size_t>(count);
+                transportProgress = true;
+                return SocketReadResult::Data;
+            }
+            if (count == 0) return SocketReadResult::Error;
+            if (errno == EINTR) continue;
+            if (errno != EAGAIN && errno != EWOULDBLOCK)
+                return SocketReadResult::Error;
+            waitEvents = POLLIN;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (deadline != std::chrono::steady_clock::time_point::max() &&
+            now >= deadline)
+            return SocketReadResult::TimedOut;
+        int timeoutMs = 50;
+        if (deadline != std::chrono::steady_clock::time_point::max()) {
+            const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(
+                deadline - now).count();
+            timeoutMs = static_cast<int>(std::min<int64_t>(50, remaining));
+        }
+        pollfd descriptor{};
+        descriptor.fd = fd;
+        descriptor.events = waitEvents;
+        const int ready = ::poll(&descriptor, 1, timeoutMs);
+        if (ready == 0) continue;
+        if (ready < 0) {
+            if (errno == EINTR) continue;
+            return SocketReadResult::Error;
+        }
+        if ((descriptor.revents & waitEvents) == 0)
+            return SocketReadResult::Error;
+        if (useTLS && (waitEvents & POLLIN) != 0 &&
+            (descriptor.revents & POLLIN) != 0) {
+            tlsReadReady = true;
+            transportProgress = true;
+        }
+    }
+}
+
 bool SecureSocket::hasBufferedInput() const {
     return useTLS && ssl && tlsOK && SSL_pending(ssl) > 0;
 }
 
 void SecureSocket::close() {
     if (ssl) {
+        // Shutdown is best-effort. In particular, a peer that stopped in the
+        // middle of a TLS record must not make destruction wait forever for
+        // the remaining bytes or its own close_notify.
+        if (fd >= 0) {
+            const int flags = ::fcntl(fd, F_GETFL, 0);
+            if (flags >= 0 && (flags & O_NONBLOCK) == 0)
+                (void)::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+        }
         SSL_shutdown(ssl);
         SSL_free(ssl);
         ssl = nullptr;

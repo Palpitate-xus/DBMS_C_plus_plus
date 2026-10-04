@@ -37,6 +37,7 @@ constexpr int SSL_ERROR_SYSCALL = 5;
 namespace dbms {
 
 enum class SocketWriteResult { Complete, TimedOut, Interrupted, Error };
+enum class SocketReadResult { Data, TimedOut, Interrupted, Error };
 
 // Secure socket wrapper: uses OpenSSL TLS when a context is supplied.
 // Plain socket I/O is retained only for the explicitly requested insecure
@@ -64,6 +65,11 @@ struct SecureSocket {
         std::chrono::steady_clock::time_point deadline,
         const std::function<bool()>& interrupted);
     ssize_t recv(void* buf, size_t len);
+    SocketReadResult recvSomeUntil(
+        void* buf, size_t len, size_t& received,
+        std::chrono::steady_clock::time_point deadline,
+        const std::function<bool()>& interrupted,
+        bool& transportProgress);
     bool hasBufferedInput() const;
     void close();
 };
