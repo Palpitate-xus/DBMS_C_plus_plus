@@ -2553,10 +2553,17 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     s.currentDB, sub.name, tableName);
                 if (!alterStatusOk(status, "Trigger")) return true;
                 break;
-            case AlterTableStmt::Action::AttachPartition:
+            case AlterTableStmt::Action::AttachPartition: {
                 if (sub.name.empty()) {
                     std::cout << "SQL syntax error: ATTACH PARTITION requires a name" << std::endl;
                     return true;
+                }
+                const std::string partitionTableName =
+                    resolveTableName(s, sub.name);
+                if (!g_engine.tableExists(s.currentDB, partitionTableName)) {
+                    throw DbError(
+                        "42P01",
+                        "relation \"" + sub.name + "\" does not exist");
                 }
                 status = g_engine.attachPartition(s.currentDB, tableName, sub.name,
                                                   sub.partitionSpec);
@@ -2579,8 +2586,6 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     return true;
                 }
                 if (!tableIsTemporary) {
-                    const std::string partitionTableName =
-                        resolveTableName(s, sub.name);
                     if (g_engine.tableExists(
                             s.currentDB, partitionTableName) &&
                         !synchronizeTableHierarchyFlagsInCatalog(
@@ -2591,6 +2596,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     }
                 }
                 break;
+            }
             case AlterTableStmt::Action::DetachPartition:
                 if (sub.name.empty()) {
                     std::cout << "SQL syntax error: DETACH PARTITION requires a name" << std::endl;

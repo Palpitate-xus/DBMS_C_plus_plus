@@ -1,5 +1,6 @@
 #include "commands/DdlExecutor.h"
 #include "commands/TableManage.h"
+#include "common/DbError.h"
 #include "parser/parser.h"
 #include "Session.h"
 #include "catalog/type_registry.h"
@@ -319,6 +320,17 @@ static void test_typed_security_partition_and_trigger_actions() {
 
     assert(!ddl.executeSql(
         "CREATE TABLE parent (id INT, yr INT) PARTITION BY RANGE (yr)", s));
+    bool missingPartitionRelation = false;
+    try {
+        executeAlter(
+            "ALTER TABLE parent ATTACH PARTITION no_such_partition "
+            "FOR VALUES FROM (10) TO (20)");
+    } catch (const dbms::DbError& error) {
+        missingPartitionRelation = error.sqlState() == "42P01";
+    }
+    assert(missingPartitionRelation);
+    assert(g_engine.getTableSchema(db, "parent").rangePartitions.empty());
+    assert(!ddl.executeSql("CREATE TABLE p2 (id INT, yr INT)", s));
     auto attachAst = parser.parse(
         "ALTER TABLE parent ATTACH PARTITION p2 FOR VALUES FROM (10) TO (20)");
     assert(attachAst.success);
