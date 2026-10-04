@@ -1,5 +1,7 @@
 # 总差距清单执行计划
 
+2026-10-04 第977项 `40b72024`：DDL `ATTACH PARTITION`先确认子表存在，missing relation现在返回PG一致的42P01并保持parent schema/fork不变；测试覆盖错误状态、无变更和合法空child成功，生产构建通过。PostgreSQL 18.6 oracle确认SQLSTATE。全量注册suite未在此小步后重跑（第976项刚完成全量suite）。child schema兼容/已存在数据仍待处理，CAT-11继续partial。总账273：22 complete、142 partial、94 unverified、15 deferred_by_user。未push，Actions禁用，用户跳过的安全/TDE继续deferred。详见`docs/issue-977-attach-missing-partition-relation.md`。
+
 2026-10-04 第976项 `c83e67ac`：RANGE attach现在先检查DEFAULT分区既有行是否违反新增半开区间约束；冲突时storage返回CHECK_VIOLATION，DDL映射23514并通过DDL transaction保持原数据/metadata，无冲突attach仍成功。`partition_test`覆盖冲突、回滚和成功路由；完整注册C++／protocol／E2E套件exit 0、`All tests passed`，真实PG18.6 oracle确认匹配。此步骤不搬移冲突行，CAT-11继续partial，constraint proof、detach concurrently/finalize、partition indexes/global uniqueness未完成。总账273：22 complete、142 partial、94 unverified、15 deferred_by_user。未push，Actions禁用，安全/TDE用户跳过项保持deferred。详见`docs/issue-976-range-attach-default-validation.md`。
 
 2026-10-04 第975项 `5ac83dae`：RANGE ATTACH旧逻辑只保存upper bound，导致lower endpoint前的值错路由、重叠partition可attach。现将下界追加持久化、按完整半开区间路由并拒绝重叠；覆盖DDL、相邻边界和StorageEngine重开。最终注册C++／protocol／E2E全套 exit 0，`All tests passed`；真实PG18.6临时分区表oracle确认相同边界、重叠拒绝和相邻行为。CAT-11仅标partial，default partition校验/迁移、constraint proof、并发detach与partition index/全局唯一性仍欠缺。总账273：22 complete、142 partial、94 unverified、15 deferred_by_user。未push，Actions禁用，安全/TDE用户跳过项保持deferred。详见 `docs/issue-975-range-partition-bounds.md`。
