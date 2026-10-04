@@ -45,13 +45,42 @@ def main():
                 assert result[1] == "0A000", (name, result)
                 assert messages[-1] == (b"Z", b"I"), (name, messages[-1])
 
-        # Existing virtual relations are not part of the unsupported set.
-        for relation in ("pg_database", "pg_statistic"):
-            messages = client.simple_query(
-                sock, "SELECT * FROM pg_catalog." + relation)
+        # pg_database exposes only its verified typed subset.  The complete
+        # PostgreSQL schema is not fabricated, so SELECT * and real but
+        # unsupported columns fail closed. pg_statistic remains an existing
+        # compatibility relation.
+        messages = client.simple_query(
+            sock, "SELECT datname, encoding FROM pg_catalog.pg_database "
+            "WHERE datname = 'info'")
+        result = runner.decode_wire_result(messages, include_types=True)
+        assert result[1] is None, result
+        assert result[0] == [["info", "6"]], result
+        assert result[3] == ["datname", "encoding"], result
+        assert result[5] == [19, 23], result
+        assert messages[-1] == (b"Z", b"I"), messages[-1]
+
+        # An unqualified reference reaches the virtual catalog only while no
+        # same-named user relation is present in the current database.
+        messages = client.simple_query(
+            sock, "SELECT encoding FROM pg_database WHERE datname = 'info'")
+        result = runner.decode_wire_result(messages, include_types=True)
+        assert result[1] is None and result[0] == [["6"]], result
+        assert result[3] == ["encoding"] and result[5] == [23], result
+        assert messages[-1] == (b"Z", b"I"), messages[-1]
+
+        for sql in (
+                "SELECT * FROM pg_catalog.pg_database",
+                "SELECT datcollate FROM pg_catalog.pg_database"):
+            messages = client.simple_query(sock, sql)
             result = runner.decode_wire_result(messages, include_types=True)
-            assert result[1] is None, (relation, result)
-            assert messages[-1] == (b"Z", b"I"), (relation, messages[-1])
+            assert result[1] == "0A000", (sql, result)
+            assert messages[-1] == (b"Z", b"I"), (sql, messages[-1])
+
+        messages = client.simple_query(
+            sock, "SELECT * FROM pg_catalog.pg_statistic")
+        result = runner.decode_wire_result(messages, include_types=True)
+        assert result[1] is None, ("pg_statistic", result)
+        assert messages[-1] == (b"Z", b"I"), messages[-1]
 
         # A user relation with the same unqualified name still wins normal
         # search-path lookup; only the absent unqualified catalog is gated.

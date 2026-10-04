@@ -16148,6 +16148,219 @@ static string expandSessionUserVariables(const string& input,
 
 // Execute the available pg_class columns as typed rows.  The old renderer
 // ignored SELECT/WHERE entirely, making catalog queries silently misleading.
+static bool executePgDatabaseQuery(const string& rawSql,
+                                   const Session& session) {
+    dbms::SQLParser parser;
+    const auto parsed = parser.parse(rawSql);
+    const auto* select = parsed.success
+        ? dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()) : nullptr;
+    if (!select || !select->fromClause ||
+        select->fromClause->type != dbms::FromItem::Type::Table) {
+        throw dbms::DbError("42601", "invalid pg_database query");
+    }
+    if (!select->groupBy.empty() || !select->groupByElems.empty() ||
+        select->having || select->setOp != dbms::SetOp::None ||
+        !select->locking.empty() || !select->distinctOn.empty() ||
+        !select->windowDefs.empty() || select->withTies || select->distinct ||
+        !select->orderBy.empty()) {
+        throw dbms::DbError("0A000", "complex pg_database query is not supported");
+    }
+
+    const string qualifier = select->fromClause->alias.empty()
+        ? "pg_database" : select->fromClause->alias;
+    map<string, string> hints = {{"datname", "name"},
+                                 {"encoding", "integer"},
+                                 {qualifier + ".datname", "name"},
+                                 {qualifier + ".encoding", "integer"}};
+    if (select->fromClause->alias.empty()) {
+        hints["pg_catalog.pg_database.datname"] = "name";
+        hints["pg_catalog.pg_database.encoding"] = "integer";
+    }
+
+    static const set<string> kPg18DatabaseColumns = {
+        "oid", "datname", "datdba", "encoding", "datlocprovider",
+        "datistemplate", "datallowconn", "dathasloginevt", "datconnlimit",
+        "datfrozenxid", "datminmxid", "dattablespace", "datcollate",
+        "datctype", "datlocale", "daticurules", "datcollversion", "datacl"};
+    auto validateColumn = [&](const dbms::ColumnRefExpr* column,
+                              bool countArgument) {
+        if (!column) return;
+        const bool validQualifier = column->table.empty() ||
+            (column->table == qualifier &&
+             (column->schema.empty() ||
+              (select->fromClause->alias.empty() &&
+               column->schema == "pg_catalog")));
+        if (!validQualifier)
+            throw dbms::DbError("42P01", "missing FROM-clause entry");
+        if (column->column == "*" && countArgument) return;
+        if (column->column == "datname" || column->column == "encoding") return;
+        if (kPg18DatabaseColumns.count(column->column)) {
+            throw dbms::DbError(
+                "0A000", "pg_database column \"" + column->column +
+                             "\" is not implemented");
+        }
+        throw dbms::DbError("42703", "column does not exist: " + column->column);
+    };
+    function<void(const dbms::Expr*, bool)> validate =
+        [&](const dbms::Expr* expression, bool countArgument) {
+            if (!expression) return;
+            if (const auto* column =
+                    dynamic_cast<const dbms::ColumnRefExpr*>(expression)) {
+                validateColumn(column, countArgument);
+                return;
+            }
+            if (dynamic_cast<const dbms::LiteralExpr*>(expression)) return;
+            if (const auto* unary =
+                    dynamic_cast<const dbms::UnaryOpExpr*>(expression)) {
+                validate(unary->operand.get(), false);
+                return;
+            }
+            if (const auto* binary =
+                    dynamic_cast<const dbms::BinaryOpExpr*>(expression)) {
+                validate(binary->left.get(), false);
+                validate(binary->right.get(), false);
+                return;
+            }
+            if (const auto* cast =
+                    dynamic_cast<const dbms::CastExpr*>(expression)) {
+                validate(cast->operand.get(), false);
+                return;
+            }
+            if (const auto* call =
+                    dynamic_cast<const dbms::FunctionCallExpr*>(expression)) {
+                const bool count = toLower(call->funcName) == "count";
+                if (call->hasOver || call->distinct || call->filter ||
+                    !call->orderBy.empty() || !call->namedArgs.empty() ||
+                    (count && (!countArgument || call->args.size() != 1))) {
+                    throw dbms::DbError(
+                        "0A000", "complex pg_database expression is not supported");
+                }
+                for (const auto& argument : call->args)
+                    validate(argument.get(), count);
+                return;
+            }
+            throw dbms::DbError("0A000", "pg_database expression is not supported");
+        };
+
+    struct OutputColumn {
+        const dbms::Expr* expression;
+        string name;
+        string type;
+        bool count;
+    };
+    vector<OutputColumn> output;
+    function<string(const dbms::Expr*)> header = [&](const dbms::Expr* expr) {
+        if (const auto* column = dynamic_cast<const dbms::ColumnRefExpr*>(expr))
+            return column->column;
+        if (const auto* cast = dynamic_cast<const dbms::CastExpr*>(expr))
+            return header(cast->operand.get());
+        if (const auto* binary = dynamic_cast<const dbms::BinaryOpExpr*>(expr))
+            if (binary->op == "::") return header(binary->left.get());
+        if (const auto* call = dynamic_cast<const dbms::FunctionCallExpr*>(expr))
+            return toLower(call->funcName);
+        return string("?column?");
+    };
+    for (const auto& item : select->selectList) {
+        if (const auto* column =
+                dynamic_cast<const dbms::ColumnRefExpr*>(item.expr.get());
+            (column && column->column == "*") ||
+                item.expr->toString() == "*") {
+            throw dbms::DbError(
+                "0A000", "SELECT * requires the complete pg_database schema");
+        }
+        validate(item.expr.get(), true);
+        const auto* call = dynamic_cast<const dbms::FunctionCallExpr*>(item.expr.get());
+        const bool count = call && toLower(call->funcName) == "count";
+        const string type = count ? "bigint" :
+            dbms::ExprHelper::inferResultType(item.expr->toString(), hints);
+        output.push_back({item.expr.get(),
+                          item.alias.empty() ? header(item.expr.get())
+                                             : decodeQuotedIdentifier(item.alias),
+                          type, count});
+    }
+    if (output.empty())
+        throw dbms::DbError("42601", "pg_database query has no projection");
+    const bool aggregate = any_of(output.begin(), output.end(),
+        [](const auto& column) { return column.count; });
+    if (aggregate && any_of(output.begin(), output.end(),
+        [](const auto& column) { return !column.count; })) {
+        throw dbms::DbError("42803", "catalog column must appear in GROUP BY");
+    }
+    validate(select->whereClause.get(), false);
+
+    dbms::ExprEvaluator evaluator;
+    evaluator.setCurrentDB(session.currentDB);
+    vector<dbms::RowContext> inputs;
+    for (const auto& name : g_engine.getDatabaseNames()) {
+        dbms::RowContext context;
+        context.set("datname", dbms::ExprValue("name", name, false));
+        context.set("encoding", dbms::ExprValue("integer", "6", false));
+        context.set(qualifier + ".datname", dbms::ExprValue("name", name, false));
+        context.set(qualifier + ".encoding", dbms::ExprValue("integer", "6", false));
+        if (select->fromClause->alias.empty()) {
+            context.set("pg_catalog.pg_database.datname",
+                        dbms::ExprValue("name", name, false));
+            context.set("pg_catalog.pg_database.encoding",
+                        dbms::ExprValue("integer", "6", false));
+        }
+        if (select->whereClause) {
+            const auto predicate = evaluator.eval(select->whereClause.get(), context);
+            if (!predicate.isNull && predicate.typeName != "boolean" &&
+                predicate.typeName != "bool") {
+                throw dbms::DbError("42804", "argument of WHERE must be type boolean");
+            }
+            if (predicate.isNull || !predicate.asBool()) continue;
+        }
+        inputs.push_back(std::move(context));
+    }
+
+    vector<vector<dbms::ExprValue>> results;
+    if (aggregate) {
+        vector<dbms::ExprValue> row;
+        for (size_t i = 0; i < output.size(); ++i)
+            row.emplace_back("bigint", to_string(inputs.size()), false);
+        results.push_back(std::move(row));
+    } else {
+        for (const auto& input : inputs) {
+            vector<dbms::ExprValue> row;
+            for (const auto& column : output)
+                row.push_back(evaluator.eval(column.expression, input));
+            results.push_back(std::move(row));
+        }
+    }
+
+    vector<string> columns, columnTypes;
+    for (const auto& column : output) {
+        columns.push_back(column.name);
+        columnTypes.push_back(column.type);
+    }
+    const size_t first = min(select->offset.value_or(0), results.size());
+    const size_t kept = min(select->limit.value_or(results.size()),
+                            results.size() - first);
+    vector<vector<string>> rows;
+    vector<vector<bool>> nulls;
+    for (size_t i = first; i < first + kept; ++i) {
+        vector<string> row;
+        vector<bool> bitmap;
+        for (const auto& value : results[i]) {
+            row.push_back(value.value);
+            bitmap.push_back(value.isNull);
+        }
+        rows.push_back(std::move(row));
+        nulls.push_back(std::move(bitmap));
+    }
+    publishStructuredUtilityResult(columns, columnTypes, rows, nulls,
+                                    "SELECT " + to_string(rows.size()));
+    for (const auto& column : columns) cout << renderLegacyHeader(column) << ' ';
+    cout << '\n';
+    for (size_t i = 0; i < rows.size(); ++i) {
+        for (size_t j = 0; j < rows[i].size(); ++j)
+            cout << (nulls[i][j] ? "NULL" : rows[i][j]) << ' ';
+        cout << '\n';
+    }
+    return false;
+}
+
 static bool executePgClassQuery(const string& rawSql, Session& session,
                                 const string& database) {
     dbms::SQLParser parser;
@@ -23837,8 +24050,13 @@ static bool executeInternal(const string& rawSql, Session& s) {
             return false;
         }
 
+        const bool virtualPgDatabase = tname == "pg_database" &&
+            (queryDb == "pg_catalog" ||
+             (queryDb == s.currentDB &&
+              !g_engine.tableExists(queryDb, tname) &&
+              !g_engine.viewExists(queryDb, tname)));
         // pg_stat_* virtual tables
-        if (tname == "pg_stat_database" || tname == "pg_stat_tables" || tname == "pg_stat_statements" || tname == "pg_seclabels" || tname == "pg_buffercache" || tname == "pg_locks" || tname == "pg_stat_wait_events" || tname == "pg_stat_activity" || tname == "pg_database" || tname == "pg_tables" || tname == "pg_views" || tname == "pg_indexes" || tname == "pg_settings" || tname == "pg_roles" || tname == "pg_namespace" || tname == "pg_class" || tname == "pg_type" || tname == "pg_enum" || tname == "pg_stats" || tname == "pg_statistic") {
+        if (tname == "pg_stat_database" || tname == "pg_stat_tables" || tname == "pg_stat_statements" || tname == "pg_seclabels" || tname == "pg_buffercache" || tname == "pg_locks" || tname == "pg_stat_wait_events" || tname == "pg_stat_activity" || virtualPgDatabase || tname == "pg_tables" || tname == "pg_views" || tname == "pg_indexes" || tname == "pg_settings" || tname == "pg_roles" || tname == "pg_namespace" || tname == "pg_class" || tname == "pg_type" || tname == "pg_enum" || tname == "pg_stats" || tname == "pg_statistic") {
             auto bpStats = g_engine.getBufferPoolStats();
             const std::string catalogDb = queryDb == "pg_catalog"
                 ? s.currentDB : queryDb;
@@ -23959,10 +24177,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     cout << p.id << " " << p.user << " " << p.db << " " << p.state << " " << p.info << endl;
                 }
             } else if (tname == "pg_database") {
-                cout << "datname encoding datcollate datctype " << endl;
-                for (const auto& dbname : g_engine.getDatabaseNames()) {
-                    cout << dbname << " UTF8 en_US.UTF-8 en_US.UTF-8 " << endl;
-                }
+                return executePgDatabaseQuery(effectiveRawSql, s);
             } else if (tname == "pg_tables") {
                 cout << "schemaname tablename tableowner " << endl;
                 if (queryDb != "information_schema" && queryDb != "pg_catalog") {
