@@ -1,5 +1,7 @@
 # 总差距清单执行计划
 
+2026-10-04 第975项 `5ac83dae`：RANGE ATTACH旧逻辑只保存upper bound，导致lower endpoint前的值错路由、重叠partition可attach。现将下界追加持久化、按完整半开区间路由并拒绝重叠；覆盖DDL、相邻边界和StorageEngine重开。最终注册C++／protocol／E2E全套 exit 0，`All tests passed`。PG18.6 direct oracle因本机认证不可用未执行。CAT-11仅标partial，default partition校验/迁移、constraint proof、并发detach与partition index/全局唯一性仍欠缺。总账273：22 complete、142 partial、94 unverified、15 deferred_by_user。未push，Actions禁用，安全/TDE用户跳过项保持deferred。详见 `docs/issue-975-range-partition-bounds.md`。
+
 2026-10-03 第974项 `c18bd1bd` 局部缓解P0-08的tuple XID越界：`HeapTupleFields::xmin/xmax` 是32位而分配器是64位，超过 `UINT32_MAX` 原会静默截断。现停止在tuple header可表示的最后一个ID，边界测试验证持久化和重启行为；定向 `txnid_generator_test` 与完整 `build_tests.sh`（全部C++、协议、E2E）通过。该保护会在耗尽后拒绝新事务，不等同完整epoch/freeze/MultiXact/oldest-xmin方案，P0-08仍partial。273项总账仍22 complete、140 partial、96 unverified、15 deferred_by_user。详见 `docs/issue-974-xid-tuple-width-guard.md`；未push，Actions禁用，用户跳过的安全/TDE继续deferred。
 
 2026-10-03 第973项 `d6ce9adf` 修复semi-join把空字符串误判成SQL NULL的缺陷，标量／复合 `IN`／`NOT IN` 均改用权威NULL元数据；补充C++、wire与兼容fixture。最终正式注册套件 `DBMS_PROTOCOL_TEST_TIMEOUT=120 DBMS_PROTOCOL_STARTUP_TIMEOUT=120 DBMS_PROTOCOL_SHUTDOWN_TIMEOUT=120 bash scripts/build_tests.sh` exit 0，输出 `All tests passed`。同一源码对本地真实PostgreSQL 18.6（`server_version_num=180006`、en_US.utf8）运行完整兼容差分，`cases=464 failed=0`、exit 0。这是最新基线的验证结果；此前PG17预检受阻及较早PG18差分timeout记录仍作历史保留。总账仍273项：22 complete、140 partial、96 unverified、15 deferred_by_user；QRY-04／QRY-10等只因局部测试通过不改为complete。未push；GitHub Actions禁用；用户跳过的安全/TDE继续deferred。详情见 `docs/issue-973-semi-join-empty-text-null.md`。
