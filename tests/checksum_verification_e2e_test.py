@@ -35,6 +35,15 @@ def fletcher16(data):
     return value if value else 0xffff
 
 
+def crc32c(data):
+    value = 0xffffffff
+    for byte in data:
+        value ^= byte
+        for _ in range(8):
+            value = (value >> 1) ^ (0x82f63b78 if value & 1 else 0)
+    return value ^ 0xffffffff
+
+
 def heap_page():
     page = bytearray(PAGE_SIZE)
     page_size_version = ((PAGE_SIZE // 512) << 8) | 4
@@ -80,14 +89,18 @@ def write_encrypted_heap(path, key):
 
 
 def write_control(cluster):
-    cluster.joinpath("DBMS_CONTROL").write_text(
-        "DBMS_CPP_CLUSTER_CONTROL_V2\n"
-        "control_format_version=2\n"
+    prefix = (
+        "DBMS_CPP_CLUSTER_CONTROL_V3\n"
+        "control_format_version=3\n"
         "catalog_format_version=1\n"
         "heap_format_version=2\n"
         "block_size=8192\n"
+        "wal_segment_size=16777216\n"
         f"byte_order={'little' if struct.pack('=H', 1)[0] == 1 else 'big'}\n"
-        "system_identifier=0123456789abcdef\n",
+        "feature_flags=00000000\n"
+        "system_identifier=0123456789abcdef\n")
+    cluster.joinpath("DBMS_CONTROL").write_text(
+        prefix + f"control_checksum={crc32c(prefix.encode()):08x}\n",
         encoding="utf-8")
 
 

@@ -1294,11 +1294,14 @@ SHOW 入口已经删除。该模式是会话级设置，进入事务后不可切
   提示“这不是 PostgreSQL server cluster”；`server_version` 参数上报
   `18.0 DBMS-C++ 0.2.0`：前导主版本供 PostgreSQL 客户端解析，后缀标识
   实际产品版本；该字段不是 PostgreSQL 18 兼容认证。所有正常启动必须用
-  `-D/--data-dir` 或 `DBMS_DATA_DIR` 显式选取数据根；首次启动写入 V2
+  `-D/--data-dir` 或 `DBMS_DATA_DIR` 显式选取数据根；首次启动写入 V3
   `DBMS_CONTROL`，其中包含 control/catalog/heap format version、8 KiB block size、
-  native byte order 和随机 system identifier。正常启动不会自动升级旧格式：
+  16 MiB WAL segment size、
+  native byte order、feature flags、随机 system identifier 和 CRC32C。控制文件
+  限定为小型普通文件并拒绝符号链接。正常启动不会自动升级旧格式：
   `--check-data-directory` 只读检查，`--upgrade-data-directory` 当前仅显式支持
-  V1→V2 control 升级并保留 system identifier。损坏或未知 control、不匹配的
+  V1/V2→V3 control 升级并保留 system identifier；该操作不迁移 catalog、heap
+  或索引数据。损坏或未知 control、不匹配的
   format/block size/byte order、非空无标识目录，以及含 `PG_VERSION` 的
   PostgreSQL cluster 会在全局存储对象构造前被拒绝。服务端
   无默认端口，必须显式 `--server PORT`

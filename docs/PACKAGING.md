@@ -20,13 +20,38 @@ cd dbms-<version>
 ## 目录约定（显式 data directory）
 
 每次正常启动都必须用 `-D/--data-dir` 或 `DBMS_DATA_DIR` 显式选择数据根；
-启动 CWD 不再决定状态位置。首次打开空目录时会原子写入 V2
+启动 CWD 不再决定状态位置。首次打开空目录时会原子写入 V3
 `DBMS_CONTROL`（项目 magic、control/catalog/heap format version、8 KiB block size、
-native byte order、随机 system identifier）。正常启动只接受完整兼容的 V2；
-`--check-data-directory` 执行只读检查，`--upgrade-data-directory` 当前仅执行
-V1→V2 control 升级，不会转换 catalog/关系/索引数据。损坏或未知 control、
+16 MiB WAL segment size、
+native byte order、feature flags、随机 system identifier 和 CRC32C checksum）。
+控制文件必须是有大小上限的普通文件，不接受符号链接。正常启动只接受完整兼容的
+V3；`--check-data-directory` 执行只读检查，`--upgrade-data-directory` 显式执行
+V1/V2→V3 control 升级并保留 system identifier，不会转换 catalog/关系/索引数据。
+损坏或未知 control、
 无 DBMS 标识的任意非空目录以及含 `PG_VERSION` 的 PostgreSQL cluster
 都会在引擎全局对象构造前被拒绝。
+
+V3 `DBMS_CONTROL` 是 ASCII 单行键值格式，行顺序固定，文件以 LF 结束；
+当前 canonical 内容为：
+
+```text
+DBMS_CPP_CLUSTER_CONTROL_V3
+control_format_version=3
+catalog_format_version=1
+heap_format_version=2
+block_size=8192
+wal_segment_size=16777216
+byte_order=<native: little or big>
+feature_flags=00000000
+system_identifier=<16 lowercase hex digits>
+control_checksum=<8 lowercase hex digits>
+```
+
+`byte_order` 必须匹配运行平台；`feature_flags` 当前只接受全零值，其他值表示
+未识别的磁盘特性并会被拒绝。CRC32C（Castagnoli，反射多项式 `0x82F63B78`）
+覆盖 magic 行至 `system_identifier` 行末尾的全部原始字节（包括 LF），不含
+checksum 行；额外字段、尾随行、损坏值均 fail-closed。V3 替换使用同目录临时文件、
+文件 `fsync`、原子 rename 和父目录 `fsync`。
 
 部署或恢复后可在服务停止时执行严格只读的 heap 校验：
 

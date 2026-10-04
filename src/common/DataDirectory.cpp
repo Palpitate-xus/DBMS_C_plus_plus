@@ -5,6 +5,7 @@
 #include "storage/DataFileHeader.h"
 #include "storage/PageCrypto.h"
 #include "storage/PgPage.h"
+#include "storage/WAL.h"
 #include "interfaces/dbms_defs.h"
 
 #include <array>
@@ -73,11 +74,15 @@ private:
 };
 
 constexpr const char* kCurrentControlMagic =
+    "DBMS_CPP_CLUSTER_CONTROL_V3";
+constexpr const char* kVersion2ControlMagic =
     "DBMS_CPP_CLUSTER_CONTROL_V2";
 constexpr const char* kLegacyControlMagic =
     "DBMS_CPP_CLUSTER_CONTROL_V1";
-constexpr uint32_t kControlFormatVersion = 2;
+constexpr uint32_t kControlFormatVersion = 3;
 constexpr uint32_t kCatalogFormatVersion = 1;
+constexpr const char* kCurrentFeatureFlags = "00000000";
+constexpr size_t kMaxControlFileBytes = 1024;
 
 const char* nativeByteOrder() {
     const uint16_t marker = 1;
@@ -85,8 +90,27 @@ const char* nativeByteOrder() {
         ? "little" : "big";
 }
 
+uint32_t controlChecksum(const std::string& data) {
+    uint32_t crc = 0xFFFFFFFFu;
+    for (unsigned char byte : data) {
+        crc ^= byte;
+        for (int bit = 0; bit < 8; ++bit) {
+            crc = (crc >> 1) ^
+                (0x82F63B78u & static_cast<uint32_t>(-(crc & 1u)));
+        }
+    }
+    return crc ^ 0xFFFFFFFFu;
+}
+
+std::string formatControlChecksum(uint32_t checksum) {
+    std::ostringstream output;
+    output << std::hex << std::nouppercase << std::setfill('0')
+           << std::setw(8) << checksum;
+    return output.str();
+}
+
 std::string currentControlContents(const std::string& systemIdentifier) {
-    return std::string(kCurrentControlMagic) + "\n" +
+    const std::string prefix = std::string(kCurrentControlMagic) + "\n" +
         "control_format_version=" +
         std::to_string(kControlFormatVersion) + "\n" +
         "catalog_format_version=" +
@@ -94,8 +118,13 @@ std::string currentControlContents(const std::string& systemIdentifier) {
         "heap_format_version=" +
         std::to_string(DATA_FILE_FORMAT_VERSION) + "\n" +
         "block_size=" + std::to_string(BLCKSZ) + "\n" +
+        "wal_segment_size=" +
+        std::to_string(WALManager::kSegmentSize) + "\n" +
         "byte_order=" + nativeByteOrder() + "\n" +
+        "feature_flags=" + std::string(kCurrentFeatureFlags) + "\n" +
         "system_identifier=" + systemIdentifier + "\n";
+    return prefix + "control_checksum=" +
+        formatControlChecksum(controlChecksum(prefix)) + "\n";
 }
 
 BootstrapState& state() {
@@ -220,18 +249,72 @@ std::string newSystemIdentifier() {
 
 enum class ControlFileVersion {
     Current,
+    Version2,
     LegacyV1
 };
+
+std::string controlVersionUpgradeRequired(ControlFileVersion version) {
+    const char* number = version == ControlFileVersion::LegacyV1 ? "1" : "2";
+    return "data directory uses control version " + std::string(number) +
+        "; offline upgrade is required";
+}
 
 bool loadControlFile(const std::filesystem::path& path,
                      std::string& systemIdentifier,
                      ControlFileVersion& version,
                      std::string& error) {
-    std::ifstream input(path);
-    if (!input) {
-        error = "could not open DBMS_CONTROL";
+    const int fd = ::open(
+        path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) {
+        error = "could not open DBMS_CONTROL: " +
+            std::string(std::strerror(errno));
         return false;
     }
+    struct stat metadata {};
+    if (::fstat(fd, &metadata) != 0) {
+        const int savedErrno = errno;
+        (void)::close(fd);
+        error = "could not inspect DBMS_CONTROL: " +
+            std::string(std::strerror(savedErrno));
+        return false;
+    }
+    if (!S_ISREG(metadata.st_mode)) {
+        (void)::close(fd);
+        error = "DBMS_CONTROL is not a regular file";
+        return false;
+    }
+    if (metadata.st_size < 0 ||
+        static_cast<uint64_t>(metadata.st_size) > kMaxControlFileBytes) {
+        (void)::close(fd);
+        error = "DBMS_CONTROL exceeds the maximum supported size";
+        return false;
+    }
+    std::array<char, kMaxControlFileBytes + 1> buffer {};
+    size_t bytesRead = 0;
+    while (bytesRead < buffer.size()) {
+        const ssize_t count = ::read(
+            fd, buffer.data() + bytesRead, buffer.size() - bytesRead);
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) {
+            const int savedErrno = errno;
+            (void)::close(fd);
+            error = "could not read DBMS_CONTROL: " +
+                std::string(std::strerror(savedErrno));
+            return false;
+        }
+        if (count == 0) break;
+        bytesRead += static_cast<size_t>(count);
+    }
+    (void)::close(fd);
+    if (bytesRead > kMaxControlFileBytes) {
+        error = "DBMS_CONTROL exceeds the maximum supported size";
+        return false;
+    }
+    if (bytesRead == 0 || buffer[bytesRead - 1] != '\n') {
+        error = "invalid DBMS_CONTROL format or missing final LF";
+        return false;
+    }
+    std::istringstream input(std::string(buffer.data(), bytesRead));
     std::string header;
     if (!std::getline(input, header)) {
         error = "invalid DBMS_CONTROL format or magic";
@@ -251,7 +334,7 @@ bool loadControlFile(const std::filesystem::path& path,
             return false;
         }
         version = ControlFileVersion::LegacyV1;
-    } else if (header == kCurrentControlMagic) {
+    } else if (header == kVersion2ControlMagic) {
         std::array<std::string, 6> fields;
         for (auto& field : fields) {
             if (!std::getline(input, field)) {
@@ -270,6 +353,42 @@ bool loadControlFile(const std::filesystem::path& path,
             return false;
         }
         identifier = fields[5];
+        version = ControlFileVersion::Version2;
+    } else if (header == kCurrentControlMagic) {
+        std::array<std::string, 9> fields;
+        for (auto& field : fields) {
+            if (!std::getline(input, field)) {
+                error = "invalid DBMS_CONTROL version 3 format";
+                return false;
+            }
+        }
+        if (fields[0] != "control_format_version=3" ||
+            fields[1] != "catalog_format_version=1" ||
+            fields[2] != "heap_format_version=2" ||
+            fields[3] != "block_size=8192" ||
+            fields[4] != std::string("wal_segment_size=") +
+                std::to_string(WALManager::kSegmentSize) ||
+            fields[5] != std::string("byte_order=") + nativeByteOrder() ||
+            fields[6] != std::string("feature_flags=") +
+                kCurrentFeatureFlags ||
+            fields[7].rfind("system_identifier=", 0) != 0) {
+            error = "incompatible or invalid DBMS_CONTROL version 3 fields";
+            return false;
+        }
+        std::string prefix = header + "\n";
+        for (size_t i = 0; i < 8; ++i) prefix += fields[i] + "\n";
+        const std::string expectedChecksum =
+            "control_checksum=" +
+            formatControlChecksum(controlChecksum(prefix));
+        if (fields[8] != expectedChecksum) {
+            error = "DBMS_CONTROL checksum mismatch";
+            return false;
+        }
+        if (std::getline(input, trailing)) {
+            error = "incompatible or invalid DBMS_CONTROL version 3 fields";
+            return false;
+        }
+        identifier = fields[7];
         version = ControlFileVersion::Current;
     } else {
         if (header.rfind("DBMS_CPP_CLUSTER_CONTROL_V", 0) == 0) {
@@ -305,8 +424,9 @@ bool initializeControlFile(const std::filesystem::path& root,
             return false;
         }
         if (version != ControlFileVersion::Current) {
-            error = "DBMS_CONTROL version 1 requires offline upgrade; run "
-                    "dbms_main -D <data-directory> --upgrade-data-directory";
+            error = controlVersionUpgradeRequired(version) +
+                "; run dbms_main -D <data-directory> "
+                "--upgrade-data-directory";
             return false;
         }
         return true;
@@ -860,7 +980,7 @@ bool runDataDirectoryUtility(DataDirectoryUtility utility,
 
     if (utility == DataDirectoryUtility::VerifyChecksums) {
         if (version != ControlFileVersion::Current) {
-            error = "data directory uses control version 1; offline upgrade is required";
+            error = controlVersionUpgradeRequired(version);
             return false;
         }
         return verifyHeapDataChecksums(selected, output, error);
@@ -868,26 +988,25 @@ bool runDataDirectoryUtility(DataDirectoryUtility utility,
 
     if (utility == DataDirectoryUtility::Check) {
         if (version != ControlFileVersion::Current) {
-            error = "data directory uses control version 1; offline upgrade is required";
+            error = controlVersionUpgradeRequired(version);
             return false;
         }
         output = "data directory is compatible\n" +
-            std::string("control_format_version=2\n") +
-            "catalog_format_version=1\nheap_format_version=2\n" +
-            "block_size=8192\nbyte_order=" + nativeByteOrder() + "\n" +
-            "system_identifier=" + identifier;
+            currentControlContents(identifier);
         return true;
     }
 
     if (version == ControlFileVersion::Current) {
-        output = "data directory is already at control format version 2";
+        output = "data directory is already at control format version 3";
         return true;
     }
+    const char* oldVersion = version == ControlFileVersion::LegacyV1 ? "1" : "2";
     if (!index_file::writeAtomically(control, currentControlContents(identifier))) {
         error = "could not durably upgrade DBMS_CONTROL";
         return false;
     }
-    output = "upgraded DBMS_CONTROL from version 1 to version 2; "
+    output = "upgraded DBMS_CONTROL from version " +
+             std::string(oldVersion) + " to version 3; "
              "system identifier preserved";
     return true;
 }
