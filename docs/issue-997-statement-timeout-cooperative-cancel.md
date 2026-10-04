@@ -23,19 +23,25 @@ and [transaction tutorial](https://www.postgresql.org/docs/18/tutorial-transacti
 
 ## Change
 
-Each protocol statement execution now starts a bounded watchdog. On expiry it
-sets a timeout-specific interrupt flag that the existing cooperative executor
-and lock-wait checks convert to SQLSTATE `57014` with a statement-timeout
-message. The guard stops and joins the watchdog before clearing the shared
-backend interrupt state. The CLI timeout waiter now signals the same
-cooperative cancellation state to its worker instead of merely printing an
-error while execution continues.
+Simple Query statements use a bounded watchdog per statement. Extended Query
+protocol now records one deadline at the first Parse, Bind, Execute, or Describe
+message, carries the remaining budget through protocol setup and execution,
+and keeps it active until Execute or Sync completes. If it expires while the
+backend is waiting for the next message, the server returns SQLSTATE `57014`
+and requires Sync recovery; during execution, the remaining budget drives a
+watchdog that the existing cooperative executor and lock-wait checks convert
+to the same timeout error. The guard stops and joins the watchdog before
+clearing shared backend interrupt state. The CLI timeout waiter now signals
+that cooperative cancellation state to its worker instead of merely printing
+an error while execution continues.
 
 The `timeoutRequested` flag distinguishes timeout errors from explicit
-CancelRequest errors while retaining the same SQLSTATE. The timeout is tested
-for Simple Query and Parse/Bind/Execute while waiting on row locks. For an
-explicit transaction, the regression verifies `ReadyForQuery=E`, a subsequent
-`25P02`, then successful `ROLLBACK` and `ReadyForQuery=I`.
+CancelRequest errors while retaining the same SQLSTATE. Tests cover Simple
+Query and Parse/Bind/Execute lock waits, plus a Parse-only cycle that remains
+open past the timeout and is canceled before Execute; Sync then restores
+`ReadyForQuery=I`. For an explicit transaction, the regression verifies
+`ReadyForQuery=E`, a subsequent `25P02`, then successful `ROLLBACK` and
+`ReadyForQuery=I`.
 
 ## Verification
 
@@ -46,24 +52,26 @@ explicit transaction, the regression verifies `ReadyForQuery=E`, a subsequent
   and Extended Query, autocommit and failed explicit-transaction recovery.
 - `python3 tests/statement_timeout_cli_e2e_test.py` — passed; after a long
   generated-series query times out, the next `SELECT 1` executes.
-- `python3 tests/postgres_protocol_test.py` — passed, including forged/valid
-  CancelRequest, lock-wait cancellation, and connection reuse.
+- `python3 tests/postgres_protocol_test.py` — passed with its default bounded
+  socket timeout on a serial run, including forged/valid CancelRequest,
+  lock-wait cancellation, and connection reuse. An earlier parallel run hit
+  that 10-second client bound under concurrent test load; the serial rerun
+  passed.
 - `python3 tests/copy_protocol_e2e_test.py` — passed for existing COPY cancel
   behavior.
 - `python3 tests/cli_error_recovery_e2e_test.py` and
   `python3 tests/pg_stat_activity_protocol_e2e_test.py` — passed.
 - Python compilation, shell syntax check, and `git diff --check` — passed.
 
-Implementation and regression tests are local commit `9d13355b`. No full
-registered suite or PostgreSQL 18.6 runtime differential is claimed.
+The initial implementation is local commit `9d13355b`; first-message Extended
+Query timing and its regression are local commit `aa904b22`. No full registered
+suite or PostgreSQL 18.6 runtime differential is claimed.
 
 ## Remaining scope
 
-OPT-17 remains partial. The implementation is cooperative: executor loops and
-lock waits must poll for interrupts. COPY's blocking wire I/O, other
-non-cooperative waits/loops, complete interrupt propagation through every
-operator/worker/I/O path, and resource-owner cleanup are not proven complete.
-The current Extended Query watchdog is installed at statement execution, not
-at the first Parse/Bind/Describe message as PostgreSQL 18 documents; setup-time
-timeout semantics therefore still differ. CLI and Simple/Extended execution
-tests verify the implemented scope only.
+OPT-17 remains partial. First-message Extended Query timing is now covered, but
+the implementation is still cooperative: executor loops and lock waits must
+poll for interrupts. COPY's blocking wire I/O, blocked/partial socket reads and
+writes, other non-cooperative waits/loops, complete interrupt propagation
+through every operator/worker/I/O path, and resource-owner cleanup are not
+proven complete. The CLI and protocol tests verify only the paths listed above.

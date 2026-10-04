@@ -4,7 +4,7 @@
 
 # 总差距清单执行计划
 
-2026-10-04 第997项修复CLI和wire查询缺少可执行`statement_timeout`中断的问题。之前PostgreSQL wire设置100ms后在行锁上一直等到4秒测试socket超时，CLI则只打印消息、后台`std::async`仍继续执行。现超时驱动executor/LockManager已有协作中断，返回57014；Simple/Extended行锁超时、explicit transaction E→25P02→ROLLBACK I以及CLI取消后的下一条SELECT均有回归。代码/测试commit `9d13355b`；生产构建、完整协议、COPY cancel、CLI recovery和活动视图隐私回归通过。按PostgreSQL 18文档，Extended Query timer还应从Parse/Bind/Describe首个相关消息开始；COPY阻塞I/O、非协作路径与所有算子/worker清理未完成，故OPT-17只为partial。未跑完整注册suite或PG18.6 runtime differential。详见`docs/issue-997-statement-timeout-cooperative-cancel.md`。不push；Actions禁用；安全/TDE跳过项保持deferred。
+2026-10-04 第997项修复CLI和wire查询缺少可执行`statement_timeout`中断的问题。旧wire设置100ms后在行锁上一直等到4秒测试socket超时，CLI只打印消息而后台查询继续执行。现在Simple Query按语句计时；Extended Query自首个Parse/Bind/Execute/Describe开始累计至Execute或Sync完成，执行期把剩余期限传给协作interrupt并返回57014。Parse停顿超时/Sync恢复、显式事务E→25P02→ROLLBACK I和CLI超时后继续查询均有测试。代码/测试commit `9d13355b`、`aa904b22`；生产构建、默认限时完整协议、timeout wire/CLI、COPY、CLI恢复和活动视图隐私回归通过。COPY阻塞I/O、阻塞socket读写、非协作路径及全部算子/worker清理未完成，OPT-17保持partial；未跑全注册suite或PG18.6 runtime differential。详见`docs/issue-997-statement-timeout-cooperative-cancel.md`。不push；Actions禁用；安全/TDE跳过项保持deferred。
 
 2026-10-04 第996项核实CAT-01目录架构仍非heap/WAL/MVCC：每库CatalogManager持有内存vector/hash并将每类系统目录序列化为独立`pg_<name>.cat`；OID状态另存，显式persistAll/析构持久化。现有atomic replace只能保护单文件替换，不提供多目录事务一致性、行版本、WAL恢复或迁移。隔离`catalog_service_test`、`catalog_persistence_failure_test`、`catalog_resolve_test`通过；snapshot test有清理warning且不是catalog MVCC证据。仅审计/分类，无代码改动；无全套或PG18.6 oracle/diff。CAT-01从unverified转partial，所需目录heap/WAL/MVCC和原子事务仍未实现。详见`docs/issue-996-catalog-not-mvcc-audit.md`。不push；Actions禁用；安全/TDE跳过项保持deferred。
 
