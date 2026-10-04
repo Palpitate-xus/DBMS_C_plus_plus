@@ -257,7 +257,7 @@
 
 - [ ] **CAT-01** 将 catalog 从 CSV/sidecar 缓存提升为 WAL/MVCC 管理的普通系统关系。
 - [ ] **CAT-02** `pg_class`、`pg_attribute`、`pg_type`、`pg_proc`、`pg_depend`、`pg_namespace` 等必须是内部执行的真实来源，而不是另一套虚拟输出。
-- [ ] **CAT-03** 补齐 `pg_constraint`、`pg_index`、`pg_am`、`pg_opclass`、`pg_operator`、`pg_cast`、`pg_collation`、`pg_rewrite`、`pg_trigger`、`pg_policy`、`pg_auth*`、`pg_default_acl`、`pg_database`、`pg_tablespace`、`pg_statistic*`、复制 catalog 等。未实现的 `pg_index`／`pg_operator` 查询已改为明确 `0A000`（第984项），catalog 数据与schema仍缺。
+- [ ] **CAT-03** 补齐 `pg_constraint`、`pg_index`、`pg_am`、`pg_opclass`、`pg_operator`、`pg_cast`、`pg_collation`、`pg_rewrite`、`pg_trigger`、`pg_policy`、`pg_auth*`、`pg_default_acl`、`pg_database`、`pg_tablespace`、`pg_statistic*`、复制 catalog 等。未实现的 `pg_index`／`pg_operator` 查询已改为明确 `0A000`（第984项）；`pg_database` 仅准确暴露 `datname`／UTF8 `encoding` 子集（第987项）。catalog 完整 schema、数据与执行语义仍缺。
 - [ ] **CAT-04** 实现所有对象的稳定 OID、reg* 查找、OID 引用和 dump/restore 保真。
 - [ ] **CAT-05** 统一 owner、ACL、comment、security label、extension membership 和 dependency graph。
 - [ ] **CAT-06** 完整 `CASCADE/RESTRICT`、internal/auto/normal/pin/extension dependency 行为。
