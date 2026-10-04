@@ -154,6 +154,25 @@ def main():
         assert "data directory is compatible" in checked.stdout, checked
         assert f"system_identifier={match.group(1)}" in checked.stdout, checked
 
+        # Relative -D paths are resolved against the launch directory before
+        # bootstrap chdir; restart must select the same existing cluster, not
+        # create a sibling relative to the changed process CWD.
+        relative_cluster = os.path.relpath(cluster, launch)
+        port = free_port()
+        process = subprocess.Popen(
+            [DBMS_MAIN, "-D", relative_cluster, "--server", str(port),
+             "--insecure"], cwd=launch, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL)
+        try:
+            sock = connect(port)
+            _helpers.startup(sock, "alice", "info")
+            sock.close()
+        finally:
+            process.terminate()
+            process.wait(timeout=30)
+        assert (cluster / "DBMS_CONTROL").read_text(encoding="utf-8") == control
+        assert list(launch.iterdir()) == [], list(launch.iterdir())
+
         legacy_identifier = "0123456789abcdef"
         (legacy / "DBMS_CONTROL").write_text(
             "DBMS_CPP_CLUSTER_CONTROL_V1\nformat_version=1\n"
