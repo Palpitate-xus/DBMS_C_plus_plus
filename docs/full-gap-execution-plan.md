@@ -4,6 +4,8 @@
 
 # 总差距清单执行计划
 
+2026-10-04 第990项修正`pg_namespace` SQL目录把三列text化并暴露静态`pg_temp_1`的失真：在nspacl、typed metadata与session temp namespace未齐前，限定/未限定查询现fail-closed为0A000；同名普通表仍可查。生产构建、catalog与pg_class E2E通过；代码commit `6daf7bf1`，同名表回归commit `b43445d3`。见`docs/issue-990-pg-namespace-shape-fail-closed.md`。CAT-03仍partial；未push、Actions禁用、安全/TDE跳过项保持deferred。
+
 2026-10-04 第989项修正CAT-03中`pg_stats`和`pg_statistic`共用8个text列的伪输出：wire复现旧路径对两者均报告OID25，PG18官方文档核实前者是按权限过滤的17列view、后者是不同且敏感的内部catalog。现两条SQL路径在具备typed schema/权限前以0A000拒绝；生产构建、catalog/pg_class E2E及底层`pg_stats_test`通过。代码/测试commit `5b7df04c`，详见`docs/issue-989-pg-stats-shape-fail-closed.md`。CAT-03仍partial；未push、Actions禁用、安全/TDE跳过项保持deferred。
 
 2026-10-04 第988项跟进修正`pg_database` typed 子集中的聚合 NULL 计数错误：`COUNT(*)`按总行数、`COUNT(expr)`按非NULL值计数；生产构建、catalog E2E及pg_class相邻E2E通过。代码/测试commit `cbb7bd0c`，详见`docs/issue-988-pg-database-count-aggregate.md`。完整catalog和CAT-03仍partial；未push、Actions禁用、安全/TDE跳过项保持deferred。
