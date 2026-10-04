@@ -84,13 +84,24 @@ connection because the TLS/protocol stream cannot be safely resumed.
   `python3 tests/pg_stat_activity_protocol_e2e_test.py` — passed.
 - Python compilation and `git diff --check` — passed.
 
+- The complete registered `bash scripts/build_tests.sh` was run on the
+  integrated local branch: all 460 C++ tests passed; 202 E2E tests passed and
+  two older statistics E2E fixtures failed because they still queried the
+  intentionally fail-closed `pg_stats` view (issue 989). Those two tests have
+  since been updated and each passes in a targeted rerun; the full registered
+  script has not been rerun after that test-only update. The default suite
+  binary uses the TLS stub, so its TLS E2E was skipped; the OpenSSL-enabled TLS
+  build and dedicated runtime test above passed.
+
 The initial implementation is local commit `9d13355b`; first-message Extended
 Query timing and its regression are local commit `aa904b22`; COPY input wait
 timeout/cancellation and its regressions are local commit `78e0a0d7`; bounded
 COPY output writes and backpressure regression are local commit `57422dbf`;
 TLS COPY input deadlines and their live regression are local commit
-`a9b662e2`. No full registered suite or PostgreSQL 18.6 runtime differential
-is claimed.
+`a9b662e2`. No PostgreSQL 18.6 runtime differential is claimed. The full
+registered suite result and the
+two stale statistics fixtures are recorded above; a clean full-suite rerun
+after those fixture updates remains pending.
 
 ## Remaining scope
 

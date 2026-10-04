@@ -22,4 +22,20 @@ PostgreSQL 18 文档中，`pg_stats` 是按调用用户可读权限过滤的视�
 - 本机 `pgref` 为 PostgreSQL 17.2；本项按 PostgreSQL 18 官方文档核 schema，不声称 PG18.6 runtime oracle/differential。
 - 未运行完整注册 suite。
 
+## 回归测试同步（2026-10-04）
+
+之后在当前工作分支运行了完整注册入口 `bash scripts/build_tests.sh`：460
+个 C++ 测试全部通过，204 个 E2E 中 202 个通过；仅
+`analyze_null_statistics_protocol_e2e_test.py` 与
+`pg_stats_histogram_extent_protocol_e2e_test.py` 仍试图通过 SQL 查询旧的
+8 列 `pg_stats` 假视图，因此与本项的 `0A000` fail-closed 行为冲突。其
+对应的 `analyze_null_statistics_test.cpp` 和
+`pg_stats_histogram_extent_test.cpp` 已在同一轮全部通过，分别验证内部
+NULL fraction 和 histogram 上界。
+
+现已同步两项协议回归：继续验证 `ANALYZE` 后 SQL 查询及连接恢复，并
+显式确认未实现的 `pg_stats` SQL 路径返回 `0A000`。两项修改后的 E2E
+单独重跑均通过；完整注册入口尚未在这次仅测试修改后重跑。此次默认构建
+使用 TLS stub，TLS E2E 按设计跳过；TLS 专项运行时证据见第 997 项。
+
 CAT-03 仍缺 `pg_stats`／`pg_statistic` 的不同真实 schema、typed 查询、权限及统计槽语义，清单保持 `partial`、未勾选。
