@@ -51,6 +51,10 @@ CopyData and CopyDone with deadline-aware nonblocking socket polling and checks
 interrupts while waiting for writability. If a timeout occurs after output has
 started, its ErrorResponse gets a bounded flush attempt; a still-backpressured
 connection is closed instead of blocking indefinitely.
+The TLS path uses nonblocking `SSL_read`/`SSL_write` retries as well. During
+TLS COPY FROM, an idle timeout remains recoverable at `ReadyForQuery=I`; if a
+partial encrypted record is received, timeout reports `57014` and closes the
+connection because the TLS/protocol stream cannot be safely resumed.
 
 ## Verification
 
@@ -72,27 +76,30 @@ connection is closed instead of blocking indefinitely.
   while COPY FROM is waiting for the next frontend message, plus a COPY TO
   client that does not read a multi-megabyte result and whose backend exits
   active state at the configured timeout.
+- An OpenSSL 3.5.5-enabled `bash scripts/build.sh` — passed.
+- `python3 tests/statement_timeout_tls_protocol_e2e_test.py` — passed repeatedly
+  against a real TLS server: idle TLS COPY returns `57014` and ReadyForQuery I;
+  sending only a TLS record header then stalling returns `57014` and closes.
 - `python3 tests/cli_error_recovery_e2e_test.py` and
   `python3 tests/pg_stat_activity_protocol_e2e_test.py` — passed.
 - Python compilation and `git diff --check` — passed.
-- `g++ -std=c++17 -Wall -Wextra -Isrc/network -c src/network/TLSWrapper.cpp`
-  — passed as a compile-only check. The production build selected the TLS stub
-  because OpenSSL is unavailable in this environment; no TLS runtime behavior
-  is claimed.
 
 The initial implementation is local commit `9d13355b`; first-message Extended
 Query timing and its regression are local commit `aa904b22`; COPY input wait
 timeout/cancellation and its regressions are local commit `78e0a0d7`; bounded
-COPY output writes and backpressure regression are local commit `57422dbf`. No
-full registered suite or PostgreSQL 18.6 runtime differential is claimed.
+COPY output writes and backpressure regression are local commit `57422dbf`;
+TLS COPY input deadlines and their live regression are local commit
+`a9b662e2`. No full registered suite or PostgreSQL 18.6 runtime differential
+is claimed.
 
 ## Remaining scope
 
 OPT-17 remains partial. First-message Extended Query timing, COPY FROM idle and
 partial plaintext-frame waits, and COPY TO TCP output backpressure are now
 covered, but the implementation is still cooperative: executor loops and lock
-waits must poll for interrupts. TLS partial-record waits (and TLS runtime
-behavior, unavailable in this build environment), other blocking socket I/O,
+waits must poll for interrupts. TLS partial-record timeout has a live regression
+for COPY FROM, but ordinary frontend reads outside COPY still use the legacy
+blocking path; TLS output backpressure outside COPY, other blocking socket I/O,
 non-cooperative waits/loops, complete interrupt propagation through every
 operator/worker/I/O path, and resource-owner cleanup are not proven complete.
 The CLI and protocol tests verify only the paths listed above.
