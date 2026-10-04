@@ -2,6 +2,30 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "STO-02",
+      "gap_ids": ["STO-02"],
+      "status": "partial",
+      "commits": ["1a76a3fb"],
+      "evidence": [
+        "docs/code-review-progress.md",
+        "docs/issue-sto-02-relation-storage-namespace.md",
+        "src/commands/TableManage.cpp"
+      ],
+      "tests": [
+        "tests/partition_test.cpp",
+        "tests/temp_restart_cleanup_test.cpp",
+        "tests/create_table_like_test.cpp",
+        "scripts/build_tests.sh"
+      ],
+      "verification": {
+        "reproduction": "Before the fix, partition orders/p1 and standalone orders#p1 shared orders#p1.dt; the second relation saw the first relation's row and DROP removed that heap",
+        "fix": "CREATE rejects same-directory relation-name overlaps and occupied physical namespaces; RENAME rejects overlaps; DROP refuses ambiguous legacy names; underscore-based column-index files no longer classify a neighboring .dt heap as owned storage",
+        "focused_tests": "partition_test, create_table_like_test, and the revised temp_restart_cleanup_test passed",
+        "full_suite": "scripts/build_tests.sh reached all registered tests but exited 1 because temp_restart_cleanup_test had already been compiled with its old expectation that CREATE deletes a pre-existing corrupt heap; the revised focused test passed. Other registered tests passed; TLS timeout E2E skipped under the TLS stub",
+        "scope": "STO-02 remains partial: relation OIDs/RelFileLocator, OID database/tablespace paths, fork/segment redesign, legacy backup/move ownership audit, and PostgreSQL 18.6 differential remain open"
+      }
+    },
+    {
       "issue": "997",
       "gap_ids": ["OPT-17"],
       "status": "partial",
@@ -956,7 +980,7 @@
     {"id":"VAC-03","status":"unverified","evidence":[]},
     {"id":"VAC-04","status":"unverified","evidence":[]},
     {"id":"STO-01","status":"partial","evidence":["docs/issue-sto-01-control-format-integrity.md","docs/PACKAGING.md","docs/MANUAL.md","src/common/DataDirectory.cpp"],"tests":["tests/data_directory_e2e_test.py","tests/checksum_verification_e2e_test.py","scripts/build_tests.sh"],"commits":["b662ff97"]},
-    {"id":"STO-02","status":"unverified","evidence":[]},
+    {"id":"STO-02","status":"partial","evidence":["docs/issue-sto-02-relation-storage-namespace.md","docs/code-review-progress.md","src/commands/TableManage.cpp"],"tests":["tests/partition_test.cpp","tests/temp_restart_cleanup_test.cpp","tests/create_table_like_test.cpp","scripts/build_tests.sh"],"commits":["1a76a3fb"]},
     {"id":"STO-03","status":"unverified","evidence":[]},
     {"id":"STO-04","status":"unverified","evidence":[]},
     {"id":"STO-05","status":"unverified","evidence":[]},
