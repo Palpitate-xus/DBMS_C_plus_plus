@@ -5,7 +5,7 @@
       "issue": "997",
       "gap_ids": ["OPT-17"],
       "status": "partial",
-      "commits": ["9d13355b", "aa904b22"],
+      "commits": ["9d13355b", "aa904b22", "78e0a0d7"],
       "evidence": [
         "docs/code-review-progress.md",
         "docs/full-gap-execution-plan.md",
@@ -13,6 +13,8 @@
         "docs/postgresql-18-gap-audit.md",
         "src/main.cpp",
         "src/network/NetworkServer.cpp",
+        "src/network/PostgresProtocol.cpp",
+        "src/network/PostgresProtocol.h",
         "src/utils/Session.h",
         "src/commands/TableManage.cpp"
       ],
@@ -29,9 +31,9 @@
         "reproduction": "Before the fix, a 100ms timeout waiting on a row lock lasted until the 4s client socket timeout",
         "protocol": "Simple Query is timed per statement; Extended Query counts from the first Parse/Bind/Execute/Describe message through Execute/Sync completion; a Parse-only cycle times out with 57014 and Sync recovers to I",
         "cli": "A timed-out long query is canceled and a subsequent SELECT succeeds",
-        "regressions": "Production build, statement-timeout wire/CLI E2E, default-bounded full protocol E2E, COPY, CLI error recovery and pg_stat_activity E2E passed",
-        "scope": "Cancellation remains cooperative; COPY blocking I/O, blocked/partial socket reads and writes, non-cooperative execution paths, complete worker/operator coverage and resource-owner cleanup are not established",
-        "protocol_semantics": "First-message Extended Query timing and Execute/Sync cancellation boundaries are covered; non-cooperative parse/output and COPY I/O interruption remain incomplete",
+        "regressions": "Production build, statement-timeout wire/CLI E2E, default-bounded full protocol E2E, COPY idle/partial-frame timeout and CancelRequest, CLI error recovery and pg_stat_activity E2E passed",
+        "scope": "Cancellation remains cooperative; COPY TO blocked writes, TLS partial-record waits, other blocking socket I/O, non-cooperative execution paths, complete worker/operator coverage and resource-owner cleanup are not established",
+        "protocol_semantics": "First-message Extended Query timing and Execute/Sync cancellation boundaries are covered; COPY FROM idle and partial plaintext-frame waits time out with rollback, but TLS partial-record waits and COPY output blocking remain incomplete",
         "full_suite_oracle": "No full registered suite or PostgreSQL 18.6 runtime oracle/differential is claimed; OPT-17 remains partial"
       }
     },

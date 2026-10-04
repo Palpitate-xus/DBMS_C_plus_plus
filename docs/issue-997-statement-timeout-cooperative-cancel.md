@@ -41,7 +41,12 @@ Query and Parse/Bind/Execute lock waits, plus a Parse-only cycle that remains
 open past the timeout and is canceled before Execute; Sync then restores
 `ReadyForQuery=I`. For an explicit transaction, the regression verifies
 `ReadyForQuery=E`, a subsequent `25P02`, then successful `ROLLBACK` and
-`ReadyForQuery=I`.
+`ReadyForQuery=I`. COPY FROM now uses the statement deadline while waiting for
+frontend data; an idle COPY and a stalled partial CopyData frame both time out
+with `57014`. The partial-frame case closes the connection after reporting the
+error, because the remaining frame bytes cannot safely be parsed as a new
+message, and verifies the inserted row was rolled back. CancelRequest also
+interrupts COPY FROM while it is waiting for more input.
 
 ## Verification
 
@@ -49,7 +54,9 @@ open past the timeout and is canceled before Execute; Sync then restores
   failed because the lock-wait query reached the bounded socket timeout.
 - `bash scripts/build.sh` — passed.
 - `python3 tests/statement_timeout_protocol_e2e_test.py` — passed for Simple
-  and Extended Query, autocommit and failed explicit-transaction recovery.
+  and Extended Query, autocommit and failed explicit-transaction recovery,
+  idle COPY FROM, extended-protocol COPY timeout, and partial-frame timeout
+  with rollback.
 - `python3 tests/statement_timeout_cli_e2e_test.py` — passed; after a long
   generated-series query times out, the next `SELECT 1` executes.
 - `python3 tests/postgres_protocol_test.py` — passed with its default bounded
@@ -57,21 +64,23 @@ open past the timeout and is canceled before Execute; Sync then restores
   lock-wait cancellation, and connection reuse. An earlier parallel run hit
   that 10-second client bound under concurrent test load; the serial rerun
   passed.
-- `python3 tests/copy_protocol_e2e_test.py` — passed for existing COPY cancel
-  behavior.
+- `python3 tests/copy_protocol_e2e_test.py` — passed, including CancelRequest
+  while COPY FROM is waiting for the next frontend message.
 - `python3 tests/cli_error_recovery_e2e_test.py` and
   `python3 tests/pg_stat_activity_protocol_e2e_test.py` — passed.
-- Python compilation, shell syntax check, and `git diff --check` — passed.
+- Python compilation and `git diff --check` — passed.
 
 The initial implementation is local commit `9d13355b`; first-message Extended
-Query timing and its regression are local commit `aa904b22`. No full registered
-suite or PostgreSQL 18.6 runtime differential is claimed.
+Query timing and its regression are local commit `aa904b22`; COPY input wait
+timeout/cancellation and its regressions are local commit `78e0a0d7`. No full
+registered suite or PostgreSQL 18.6 runtime differential is claimed.
 
 ## Remaining scope
 
-OPT-17 remains partial. First-message Extended Query timing is now covered, but
-the implementation is still cooperative: executor loops and lock waits must
-poll for interrupts. COPY's blocking wire I/O, blocked/partial socket reads and
-writes, other non-cooperative waits/loops, complete interrupt propagation
-through every operator/worker/I/O path, and resource-owner cleanup are not
-proven complete. The CLI and protocol tests verify only the paths listed above.
+OPT-17 remains partial. First-message Extended Query timing and COPY FROM idle
+and partial plaintext-frame waits are now covered, but the implementation is
+still cooperative: executor loops and lock waits must poll for interrupts.
+COPY TO blocked output writes, TLS partial-record waits, other blocking socket
+I/O, non-cooperative waits/loops, complete interrupt propagation through every
+operator/worker/I/O path, and resource-owner cleanup are not proven complete.
+The CLI and protocol tests verify only the paths listed above.
