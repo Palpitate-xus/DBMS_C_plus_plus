@@ -31232,17 +31232,76 @@ int main(int argc, char* argv[]) {
             bool ok = false;
             bool timedOut = false;
             try {
+                const auto executeWithInterruptContext = [&]() {
+                    struct CliInterruptGuard {
+                        Session& session;
+                        dbms::LockManager& lockManager;
+                        std::shared_ptr<SessionInterruptState> state;
+
+                        CliInterruptGuard(Session& activeSession,
+                                          dbms::LockManager& manager)
+                            : session(activeSession), lockManager(manager),
+                              state(activeSession.interruptState) {
+                            state->cancelRequested.store(
+                                false, std::memory_order_release);
+                            state->timeoutRequested.store(
+                                false, std::memory_order_release);
+                            state->queryActive.store(
+                                true, std::memory_order_release);
+                            dbms::setCurrentSession(&session);
+                            dbms::setCurrentQueryInterruptState(state);
+                            lockManager.setInterruptHandler(
+                                [interruptState = state]() {
+                                    if (interruptState->terminateRequested.load(
+                                            std::memory_order_acquire)) {
+                                        throw dbms::DbError(
+                                            "57P01",
+                                            "terminating connection due to administrator command");
+                                    }
+                                    if (interruptState->cancelRequested.load(
+                                            std::memory_order_acquire)) {
+                                        if (interruptState->timeoutRequested.load(
+                                                std::memory_order_acquire)) {
+                                            throw dbms::DbError(
+                                                "57014",
+                                                "canceling statement due to statement timeout");
+                                        }
+                                        throw dbms::DbError(
+                                            "57014",
+                                            "canceling statement due to user request");
+                                    }
+                                });
+                        }
+
+                        ~CliInterruptGuard() {
+                            lockManager.clearInterruptHandler();
+                            dbms::setCurrentQueryInterruptState(nullptr);
+                            state->queryActive.store(
+                                false, std::memory_order_release);
+                            state->cancelRequested.store(
+                                false, std::memory_order_release);
+                            state->timeoutRequested.store(
+                                false, std::memory_order_release);
+                        }
+                    } interruptGuard(s, g_engine.getLockManager());
+                    return execute(sql, s);
+                };
                 if (s.statementTimeoutMs > 0) {
-                    auto future = std::async(std::launch::async, [&]() { return execute(sql, s); });
+                    auto future = std::async(
+                        std::launch::async, executeWithInterruptContext);
                     if (future.wait_for(std::chrono::milliseconds(s.statementTimeoutMs))
                         == std::future_status::timeout) {
                         timedOut = true;
+                        s.interruptState->timeoutRequested.store(
+                            true, std::memory_order_release);
+                        s.interruptState->cancelRequested.store(
+                            true, std::memory_order_release);
                         cout << "ERROR: statement timeout" << endl;
                     } else {
                         ok = future.get();
                     }
                 } else {
-                    ok = execute(sql, s);
+                    ok = executeWithInterruptContext();
                 }
             } catch (const dbms::DbError& error) {
                 cout << "ERROR: " << error.message() << " (SQLSTATE "

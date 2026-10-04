@@ -119,6 +119,7 @@ inline std::string expandSessionSearchPathEntry(
 struct SessionInterruptState {
     std::atomic<bool> queryActive{false};
     std::atomic<bool> cancelRequested{false};
+    std::atomic<bool> timeoutRequested{false};
     std::atomic<bool> terminateRequested{false};
 };
 

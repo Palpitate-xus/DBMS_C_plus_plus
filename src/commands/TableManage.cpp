@@ -362,6 +362,11 @@ void checkForQueryInterrupt() {
     }
     if (g_currentInterruptState->cancelRequested.load(
             std::memory_order_acquire)) {
+        if (g_currentInterruptState->timeoutRequested.load(
+                std::memory_order_acquire)) {
+            throw DbError("57014",
+                          "canceling statement due to statement timeout");
+        }
         throw DbError("57014", "canceling statement due to user request");
     }
 }

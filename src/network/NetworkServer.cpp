@@ -39,6 +39,7 @@
 #include <cctype>
 #include <chrono>
 #include <cerrno>
+#include <condition_variable>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -318,6 +319,7 @@ bool cancelBackend(uint32_t pid, uint32_t secretKey) {
     if (!state || !state->queryActive.load(std::memory_order_acquire)) {
         return false;
     }
+    state->timeoutRequested.store(false, std::memory_order_release);
     state->cancelRequested.store(true, std::memory_order_release);
     const auto process = g_processList.find(pid);
     if (process != g_processList.end()) process->second.cancelRequested = true;
@@ -3088,11 +3090,16 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
     struct QueryInterruptGuard {
         std::shared_ptr<SessionInterruptState> state;
         dbms::LockManager& lockManager;
+        std::mutex timeoutMutex;
+        std::condition_variable timeoutCv;
+        bool queryComplete = false;
+        std::thread timeoutThread;
         explicit QueryInterruptGuard(
             std::shared_ptr<SessionInterruptState> interruptState,
-            dbms::LockManager& manager)
+            dbms::LockManager& manager, int statementTimeoutMs)
             : state(std::move(interruptState)), lockManager(manager) {
             state->cancelRequested.store(false, std::memory_order_release);
+            state->timeoutRequested.store(false, std::memory_order_release);
             state->queryActive.store(true, std::memory_order_release);
             dbms::setCurrentQueryInterruptState(state);
             lockManager.setInterruptHandler([interruptState = state]() {
@@ -3104,18 +3111,47 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session) {
                 }
                 if (interruptState->cancelRequested.load(
                         std::memory_order_acquire)) {
+                    if (interruptState->timeoutRequested.load(
+                            std::memory_order_acquire)) {
+                        throw dbms::DbError(
+                            "57014",
+                            "canceling statement due to statement timeout");
+                    }
                     throw dbms::DbError(
                         "57014", "canceling statement due to user request");
                 }
             });
+            if (statementTimeoutMs > 0) {
+                timeoutThread = std::thread([this, statementTimeoutMs]() {
+                    std::unique_lock<std::mutex> lock(timeoutMutex);
+                    const bool completed = timeoutCv.wait_for(
+                        lock, std::chrono::milliseconds(statementTimeoutMs),
+                        [this]() { return queryComplete; });
+                    if (!completed && state->queryActive.load(
+                                          std::memory_order_acquire)) {
+                        state->timeoutRequested.store(
+                            true, std::memory_order_release);
+                        state->cancelRequested.store(
+                            true, std::memory_order_release);
+                    }
+                });
+            }
         }
         ~QueryInterruptGuard() {
+            {
+                std::lock_guard<std::mutex> lock(timeoutMutex);
+                queryComplete = true;
+            }
+            timeoutCv.notify_all();
+            if (timeoutThread.joinable()) timeoutThread.join();
             lockManager.clearInterruptHandler();
             dbms::setCurrentQueryInterruptState(nullptr);
             state->queryActive.store(false, std::memory_order_release);
             state->cancelRequested.store(false, std::memory_order_release);
+            state->timeoutRequested.store(false, std::memory_order_release);
         }
-    } interruptGuard(session.interruptState, g_engine.getLockManager());
+    } interruptGuard(session.interruptState, g_engine.getLockManager(),
+                     session.statementTimeoutMs);
     {
         std::ostringstream output;
         dbms::ScopedOutputCapture capture(output);
