@@ -4,6 +4,8 @@
 
 # 总差距清单执行计划
 
+2026-10-04 第992项将`pg_type`/`pg_enum`旧文本SQL renderer fail-closed：前者5列无法代表PG18 32列，后者忽略projection/filter且类型元数据不可信。限定目录查询及当前库中无同名table/view的未限定查询返回0A000；同名用户relation和enum DDL路径保留。生产构建、catalog SQLSTATE E2E、pg_class E2E、完整postgres protocol测试通过，未跑完整注册suite。代码/测试commit `3ce4345a`；详见`docs/issue-992-pg-type-enum-query-fail-closed.md`。CAT-03仍partial；未push、Actions禁用、安全/TDE跳过项保持deferred。
+
 2026-10-04 第991项收紧`pg_class`typed子集：34列PG18 schema不可用时，星号投影与已知未实现列fail-closed为0A000，真正未知列保持42703、COUNT(*)不受影响。生产构建、Simple/Extended pg_class E2E及catalog E2E通过；代码/测试commit `4e6a78d7`，见`docs/issue-991-pg-class-incomplete-projection.md`。CAT-03仍partial；未push、Actions禁用、安全/TDE跳过项保持deferred。
 
 2026-10-04 第990项修正`pg_namespace` SQL目录把三列text化并暴露静态`pg_temp_1`的失真：在nspacl、typed metadata与session temp namespace未齐前，限定/未限定查询现fail-closed为0A000；同名普通表仍可查。生产构建、catalog与pg_class E2E通过；代码commit `6daf7bf1`，同名表回归commit `b43445d3`。见`docs/issue-990-pg-namespace-shape-fail-closed.md`。CAT-03仍partial；未push、Actions禁用、安全/TDE跳过项保持deferred。
