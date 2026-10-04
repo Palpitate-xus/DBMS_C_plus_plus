@@ -27,6 +27,8 @@ UNIMPLEMENTED_CATALOGS = (
     "pg_replication_origin",
     "pg_index",
     "pg_operator",
+    "pg_type",
+    "pg_enum",
 )
 
 
@@ -87,7 +89,7 @@ def main():
             assert messages[-1] == (b"Z", b"I"), (sql, messages[-1])
 
         # A user relation with the same unqualified name still wins normal
-        # search-path lookup; only the absent unqualified catalog is gated.
+        # lookup; only the absent unqualified catalog is gated.
         for sql in (
                 "CREATE TABLE pg_constraint (id INTEGER)",
                 "INSERT INTO pg_constraint VALUES (7)"):
@@ -121,6 +123,34 @@ def main():
         messages = client.simple_query(sock, "SELECT * FROM pg_namespace")
         result = runner.decode_wire_result(messages, include_types=True)
         assert result[1] is None and result[0] == [["11"]], result
+        assert result[3] == ["id"] and result[5] == [23], result
+
+        for relation, value in (("pg_type", 13), ("pg_enum", 15)):
+            for sql in (
+                    "CREATE TABLE %s (id INTEGER)" % relation,
+                    "INSERT INTO %s VALUES (%d)" % (relation, value)):
+                result = runner.decode_wire_result(
+                    client.simple_query(sock, sql), include_types=True)
+                assert result[1] is None, (sql, result)
+            messages = client.simple_query(
+                sock, "SELECT * FROM %s" % relation)
+            result = runner.decode_wire_result(messages, include_types=True)
+            assert result[1] is None and result[0] == [[str(value)]], result
+            assert result[3] == ["id"] and result[5] == [23], result
+
+        # An ordinary view named after an unimplemented catalog likewise
+        # follows normal lookup rather than the unsupported-catalog gate.
+        for sql in (
+                "CREATE TABLE catalog_view_source (id INTEGER)",
+                "INSERT INTO catalog_view_source VALUES (17)",
+                "DROP TABLE pg_enum",
+                "CREATE VIEW pg_enum AS SELECT id FROM catalog_view_source"):
+            result = runner.decode_wire_result(
+                client.simple_query(sock, sql), include_types=True)
+            assert result[1] is None, (sql, result)
+        messages = client.simple_query(sock, "SELECT * FROM pg_enum")
+        result = runner.decode_wire_result(messages, include_types=True)
+        assert result[1] is None and result[0] == [["17"]], result
         assert result[3] == ["id"] and result[5] == [23], result
 
         # The explicit unsupported-catalog error is statement-scoped; it must

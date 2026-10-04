@@ -24078,7 +24078,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
               !g_engine.tableExists(queryDb, tname) &&
               !g_engine.viewExists(queryDb, tname)));
         // pg_stat_* virtual tables
-        if (tname == "pg_stat_database" || tname == "pg_stat_tables" || tname == "pg_stat_statements" || tname == "pg_seclabels" || tname == "pg_buffercache" || tname == "pg_locks" || tname == "pg_stat_wait_events" || tname == "pg_stat_activity" || virtualPgDatabase || tname == "pg_tables" || tname == "pg_views" || tname == "pg_indexes" || tname == "pg_settings" || tname == "pg_roles" || tname == "pg_class" || tname == "pg_type" || tname == "pg_enum") {
+        if (tname == "pg_stat_database" || tname == "pg_stat_tables" || tname == "pg_stat_statements" || tname == "pg_seclabels" || tname == "pg_buffercache" || tname == "pg_locks" || tname == "pg_stat_wait_events" || tname == "pg_stat_activity" || virtualPgDatabase || tname == "pg_tables" || tname == "pg_views" || tname == "pg_indexes" || tname == "pg_settings" || tname == "pg_roles" || tname == "pg_class") {
             auto bpStats = g_engine.getBufferPoolStats();
             const std::string catalogDb = queryDb == "pg_catalog"
                 ? s.currentDB : queryDb;
@@ -24292,36 +24292,6 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 }
             } else if (tname == "pg_class") {
                 return executePgClassQuery(effectiveRawSql, s, catalogDb);
-            } else if (tname == "pg_type") {
-                cout << "oid typname typnamespace typtype typlen " << endl;
-                if (!catalogDb.empty()) {
-                    try {
-                        for (const auto& typ : g_engine.catalogService().get(catalogDb).listTypes()) {
-                            cout << typ.oid << " " << typ.typname << " "
-                                 << typ.typnamespace << " " << typ.typtype << " "
-                                 << typ.typlen << " " << endl;
-                        }
-                    } catch (const std::exception& e) {
-                        std::cerr << "WARNING: pg_type lookup failed: " << e.what() << std::endl;
-                    }
-                }
-            } else if (tname == "pg_enum") {
-                cout << "oid enumtypid enumsortorder enumlabel " << endl;
-                if (!catalogDb.empty()) {
-                    try {
-                        for (const auto& label :
-                             g_engine.catalogService().get(catalogDb)
-                                 .listEnumLabels()) {
-                            cout << label.oid << " " << label.enumtypid
-                                 << " " << label.enumsortorder << " "
-                                 << std::quoted(label.enumlabel) << " "
-                                 << endl;
-                        }
-                    } catch (const std::exception& e) {
-                        std::cerr << "WARNING: pg_enum lookup failed: "
-                                  << e.what() << std::endl;
-                    }
-                }
             }
             return false;
         }
@@ -24332,7 +24302,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
         // missing-relation error instead of the actual capability gap.
         const std::string catalogName = toLower(tname);
         const bool unresolvedUnqualifiedRelation =
-            queryDb == s.currentDB && !g_engine.tableExists(queryDb, tname);
+            queryDb == s.currentDB && !g_engine.tableExists(queryDb, tname) &&
+            !g_engine.viewExists(queryDb, tname);
         static const std::set<std::string> unimplementedCatalogRelations = {
             "pg_am", "pg_auth_members", "pg_authid", "pg_cast",
             "pg_collation", "pg_constraint", "pg_default_acl", "pg_index",
@@ -24340,7 +24311,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
             "pg_publication",
             "pg_rewrite", "pg_replication_origin", "pg_stats", "pg_statistic",
             "pg_statistic_ext",
-            "pg_subscription", "pg_tablespace", "pg_trigger"};
+            "pg_subscription", "pg_tablespace", "pg_trigger", "pg_type",
+            "pg_enum"};
         if ((queryDb == "pg_catalog" || unresolvedUnqualifiedRelation) &&
             unimplementedCatalogRelations.find(catalogName) !=
                 unimplementedCatalogRelations.end()) {
