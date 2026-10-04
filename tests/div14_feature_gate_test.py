@@ -559,6 +559,18 @@ def main():
                 "DROP OPERATOR === (int, int)",
         ]:
             expect_0a000(sock, sql, "extended user-defined operator gate")
+        # Rules and event triggers also have no rewrite/DDL-event runtime;
+        # extension mode must not turn their parsed compatibility records into
+        # apparent success.
+        for sql in [
+                "CREATE RULE extended_rule AS ON SELECT TO t DO INSTEAD SELECT 1",
+                "ALTER RULE extended_rule ON t RENAME TO extended_rule2",
+                "DROP RULE IF EXISTS extended_rule ON t",
+                "CREATE EVENT TRIGGER extended_evt ON ddl_command_start EXECUTE FUNCTION f",
+                "ALTER EVENT TRIGGER extended_evt DISABLE",
+                "DROP EVENT TRIGGER IF EXISTS extended_evt",
+        ]:
+            expect_0a000(sock, sql, "extended rule/event trigger gate")
         expect_0a000(sock,
                      "IMPORT FOREIGN SCHEMA fs FROM SERVER s1 INTO public",
                      "extended IMPORT FOREIGN SCHEMA")
