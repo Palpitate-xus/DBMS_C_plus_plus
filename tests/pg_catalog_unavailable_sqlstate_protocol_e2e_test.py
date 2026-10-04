@@ -112,6 +112,17 @@ def main():
         assert result[1] is None and result[0] == [["9"]], result
         assert result[3] == ["id"] and result[5] == [23], result
 
+        for sql in (
+                "CREATE TABLE pg_namespace (id INTEGER)",
+                "INSERT INTO pg_namespace VALUES (11)"):
+            result = runner.decode_wire_result(
+                client.simple_query(sock, sql), include_types=True)
+            assert result[1] is None, (sql, result)
+        messages = client.simple_query(sock, "SELECT * FROM pg_namespace")
+        result = runner.decode_wire_result(messages, include_types=True)
+        assert result[1] is None and result[0] == [["11"]], result
+        assert result[3] == ["id"] and result[5] == [23], result
+
         # The explicit unsupported-catalog error is statement-scoped; it must
         # not poison a following query in the same connection.
         messages = client.simple_query(sock, "SELECT 1")
