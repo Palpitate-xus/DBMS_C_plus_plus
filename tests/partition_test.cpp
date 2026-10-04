@@ -245,6 +245,8 @@ static void test_range_attach_validates_default_rows() {
     session.permission = 1;
     session.currentDB = db;
     dbms::DdlExecutor ddl;
+    auto attachTarget = makeSchema("middle", {"id int", "value int"});
+    assert(g_engine.createTable(db, attachTarget) == dbms::DBStatus::OK);
     bool reportedCheckViolation = false;
     try {
         ddl.executeSql(
@@ -267,12 +269,12 @@ static void test_range_attach_validates_default_rows() {
                db, "disjoint", {{"id", "1"}, {"value", "25"}}) ==
            dbms::DBStatus::OK);
     assert(g_engine.attachPartition(
-               db, "disjoint", "middle",
+               db, "disjoint", "disjoint_middle",
                "FOR VALUES FROM (10) TO (20)") == dbms::DBStatus::OK);
     assert(g_engine.insert(
                db, "disjoint", {{"id", "2"}, {"value", "15"}}) ==
            dbms::DBStatus::OK);
-    assert(rowCountInPartitions(db, "disjoint", {"middle"}) == 1);
+    assert(rowCountInPartitions(db, "disjoint", {"disjoint_middle"}) == 1);
     assert(rowCountInPartitions(db, "disjoint", {"fallback"}) == 1);
 
     cleanup(db);

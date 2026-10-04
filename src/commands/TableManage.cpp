@@ -3257,11 +3257,45 @@ DBStatus StorageEngine::attachPartition(const std::string& dbname,
                                           const std::string& partitionName,
                                           const std::string& partitionSpec) {
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
-    if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
+    if (tablename == partitionName) return DBStatus::INVALID_VALUE;
+    struct RelationLockSet {
+        LockManager& manager;
+        std::vector<std::string> names;
+
+        bool acquire(const std::string& parent,
+                     const std::string& candidate) {
+            std::vector<std::pair<std::string, bool>> requested{
+                {parent, true}, {candidate, false}};
+            std::sort(requested.begin(), requested.end(),
+                      [](const auto& left, const auto& right) {
+                          return left.first < right.first;
+                      });
+            for (const auto& [name, metadata] : requested) {
+                // A shared child lock is sufficient to stabilize relation
+                // existence against CREATE/DROP and is reusable when this
+                // transaction already holds an IX lock from DML. Requesting
+                // metadata mode there would downgrade/release that IX token.
+                const bool acquired = metadata
+                    ? manager.lockMetadata(name)
+                    : manager.lockShared(name);
+                if (!acquired) return false;
+                names.push_back(name);
+            }
+            return true;
+        }
+
+        ~RelationLockSet() {
+            for (auto it = names.rbegin(); it != names.rend(); ++it) {
+                manager.unlock(*it);
+            }
+        }
+    } relationLocks{lockManager_, {}};
+    if (!relationLocks.acquire(tablename, partitionName)) {
+        return DBStatus::LOCK_CONFLICT;
+    }
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     if (tbl.partitionType == TableSchema::PartitionType::None) {
-        lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;  // table is not partitioned
     }
 
@@ -3288,7 +3322,6 @@ DBStatus StorageEngine::attachPartition(const std::string& dbname,
         return false;
     };
     if (nameExists()) {
-        lockManager_.unlock(tablename);
         return DBStatus::TABLE_ALREADY_EXISTS;
     }
 
@@ -3299,7 +3332,6 @@ DBStatus StorageEngine::attachPartition(const std::string& dbname,
     if (tbl.partitionType == TableSchema::PartitionType::Range) {
         if (trim(specLower) == "default") {
             if (!tbl.defaultPartitionName.empty()) {
-                lockManager_.unlock(tablename);
                 return DBStatus::TABLE_ALREADY_EXISTS;
             }
             tbl.defaultPartitionName = partitionName;
@@ -3308,7 +3340,6 @@ DBStatus StorageEngine::attachPartition(const std::string& dbname,
             size_t fromPos = specLower.find("from");
             size_t toPos = specLower.find(" to ");
             if (fromPos == std::string::npos || toPos == std::string::npos) {
-                lockManager_.unlock(tablename);
                 return DBStatus::SYNTAX_ERROR;
             }
             size_t val1lp = partitionSpec.find('(', fromPos);
@@ -3317,7 +3348,6 @@ DBStatus StorageEngine::attachPartition(const std::string& dbname,
             size_t val2rp = partitionSpec.find(')', val2lp);
             if (val1lp == std::string::npos || val1rp == std::string::npos ||
                 val2lp == std::string::npos || val2rp == std::string::npos) {
-                lockManager_.unlock(tablename);
                 return DBStatus::SYNTAX_ERROR;
             }
             std::string lowerBound = trim(partitionSpec.substr(val1lp + 1, val1rp - val1lp - 1));
@@ -3332,7 +3362,6 @@ DBStatus StorageEngine::attachPartition(const std::string& dbname,
             unquote(upperBound);
             if (comparePartitionValues(
                     tbl, lowerBound, upperBound, true, true) >= 0) {
-                lockManager_.unlock(tablename);
                 return DBStatus::INVALID_VALUE;
             }
             // Routing is driven by the persisted upper bounds, so maintain
@@ -3347,8 +3376,7 @@ DBStatus StorageEngine::attachPartition(const std::string& dbname,
             }
             if (it != tbl.rangePartitions.end() &&
                 comparePartitionValues(
-                    tbl, it->second, upperBound, true, true) == 0) {
-                lockManager_.unlock(tablename);
+                       tbl, it->second, upperBound, true, true) == 0) {
                 return DBStatus::INVALID_VALUE;
             }
             std::vector<std::string> lowerBounds =
@@ -3363,7 +3391,6 @@ DBStatus StorageEngine::attachPartition(const std::string& dbname,
                 }
             }
             if (lowerBounds.size() != tbl.rangePartitions.size()) {
-                lockManager_.unlock(tablename);
                 return DBStatus::INVALID_VALUE;
             }
             const size_t insertIndex = static_cast<size_t>(
@@ -3376,7 +3403,6 @@ DBStatus StorageEngine::attachPartition(const std::string& dbname,
                     comparePartitionValues(
                         tbl, lowerBounds[index], upperBound, true, true) < 0;
                 if (overlaps) {
-                    lockManager_.unlock(tablename);
                     return DBStatus::INVALID_VALUE;
                 }
             }
@@ -3390,7 +3416,6 @@ DBStatus StorageEngine::attachPartition(const std::string& dbname,
                     }
                 }
                 if (partitionKeyIndex == tbl.len) {
-                    lockManager_.unlock(tablename);
                     return DBStatus::CORRUPTED_DATA;
                 }
 
@@ -3413,11 +3438,9 @@ DBStatus StorageEngine::attachPartition(const std::string& dbname,
                     },
                     nullptr, {tbl.defaultPartitionName});
                 if (!scannedDefault) {
-                    lockManager_.unlock(tablename);
                     return DBStatus::IO_ERROR;
                 }
                 if (defaultRowsConflict) {
-                    lockManager_.unlock(tablename);
                     return DBStatus::CHECK_VIOLATION;
                 }
             }
@@ -3431,7 +3454,6 @@ DBStatus StorageEngine::attachPartition(const std::string& dbname,
     } else if (tbl.partitionType == TableSchema::PartitionType::List) {
         if (trim(specLower) == "default") {
             if (!tbl.defaultPartitionName.empty()) {
-                lockManager_.unlock(tablename);
                 return DBStatus::TABLE_ALREADY_EXISTS;
             }
             tbl.defaultPartitionName = partitionName;
@@ -3439,13 +3461,11 @@ DBStatus StorageEngine::attachPartition(const std::string& dbname,
             // Parse: FOR VALUES IN (v1, v2, ...)
             size_t inPos = specLower.find(" in ");
             if (inPos == std::string::npos) {
-                lockManager_.unlock(tablename);
                 return DBStatus::SYNTAX_ERROR;
             }
             size_t valLp = partitionSpec.find('(', inPos);
             size_t valRp = partitionSpec.find(')', valLp);
             if (valLp == std::string::npos || valRp == std::string::npos) {
-                lockManager_.unlock(tablename);
                 return DBStatus::SYNTAX_ERROR;
             }
             std::string valsStr = partitionSpec.substr(valLp + 1, valRp - valLp - 1);
@@ -3472,17 +3492,25 @@ DBStatus StorageEngine::attachPartition(const std::string& dbname,
                 if (idx == tbl.hashPartitions) {
                     tbl.hashPartitions = idx + 1;
                 } else {
-                    lockManager_.unlock(tablename);
                     return DBStatus::INVALID_VALUE; // hash partitions must be attached in order
                 }
             } catch (...) {
-                lockManager_.unlock(tablename);
                 return DBStatus::SYNTAX_ERROR;
             }
         } else {
-            lockManager_.unlock(tablename);
             return DBStatus::SYNTAX_ERROR;
         }
+    }
+
+    // DDL currently stores partition rows in a parent-owned fork rather than
+    // sharing/moving a relation's storage. Any existing relation (even empty)
+    // would keep its own read/write path after ATTACH and diverge from parent
+    // scans. Fail closed after constraint validation so errors such as a
+    // violating DEFAULT row retain their specific SQLSTATE, but before any
+    // file/schema mutation. relationLocks keeps the candidate name stable;
+    // its child Shared lock is compatible with same-transaction DML IX.
+    if (tableExists(dbname, partitionName)) {
+        return DBStatus::FEATURE_NOT_SUPPORTED;
     }
 
     // Create the partition data file
@@ -3498,11 +3526,9 @@ DBStatus StorageEngine::attachPartition(const std::string& dbname,
         std::error_code ignored;
         std::filesystem::remove(
             partitionDataPath(dbname, tablename, partitionName), ignored);
-        lockManager_.unlock(tablename);
         return DBStatus::IO_ERROR;
     }
 
-    lockManager_.unlock(tablename);
     return DBStatus::OK;
 }
 

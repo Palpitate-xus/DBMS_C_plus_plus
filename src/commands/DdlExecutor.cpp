@@ -2565,7 +2565,8 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                         "42P01",
                         "relation \"" + sub.name + "\" does not exist");
                 }
-                status = g_engine.attachPartition(s.currentDB, tableName, sub.name,
+                status = g_engine.attachPartition(s.currentDB, tableName,
+                                                  partitionTableName,
                                                   sub.partitionSpec);
                 if (status == DBStatus::CHECK_VIOLATION) {
                     const std::string defaultPartition =
@@ -2576,6 +2577,13 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                         "updated partition constraint for default partition \"" +
                             defaultPartition +
                             "\" would be violated by some row");
+                }
+                if (status == DBStatus::FEATURE_NOT_SUPPORTED) {
+                    throw DbError(
+                        "0A000",
+                        "ATTACH PARTITION for an existing relation is not "
+                        "supported because partition storage migration is "
+                        "not implemented");
                 }
                 if (!alterStatusOk(status, "Partition")) return true;
                 if (!tableIsTemporary &&
@@ -5057,6 +5065,12 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             s.currentDB, parent, tname, stmt->partitionBoundSpec);
         if (attach != DBStatus::OK) {
             txn.rollback();
+            if (attach == DBStatus::FEATURE_NOT_SUPPORTED) {
+                throw DbError(
+                    "0A000",
+                    "CREATE TABLE PARTITION OF is not supported because "
+                    "partition relation storage mapping is not implemented");
+            }
             std::cout << "CREATE TABLE partition attach failed" << std::endl;
             return true;
         }

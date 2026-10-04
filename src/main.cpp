@@ -17310,6 +17310,12 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 res = g_engine.attachPartition(s.currentDB, parentName, pname, spec);
                 if (res != DBStatus::OK) {
                     g_engine.dropTable(s.currentDB, pname);
+                    if (res == DBStatus::FEATURE_NOT_SUPPORTED) {
+                        cout << "CREATE TABLE PARTITION OF is not supported "
+                             << "because partition relation storage mapping is "
+                             << "not implemented (SQLSTATE 0A000)" << endl;
+                        return true;
+                    }
                     cout << "Failed to attach partition" << endl;
                     return true;
                 }

@@ -330,6 +330,24 @@ static void test_typed_security_partition_and_trigger_actions() {
     }
     assert(missingPartitionRelation);
     assert(g_engine.getTableSchema(db, "parent").rangePartitions.empty());
+    assert(!ddl.executeSql("CREATE TABLE populated_p2 (id INT, yr INT)", s));
+    assert(g_engine.insert(db, "populated_p2",
+                           {{"id", "1"}, {"yr", "15"}}) ==
+           dbms::DBStatus::OK);
+    bool populatedPartitionRejected = false;
+    try {
+        executeAlter(
+            "ALTER TABLE parent ATTACH PARTITION populated_p2 "
+            "FOR VALUES FROM (10) TO (20)");
+    } catch (const dbms::DbError& error) {
+        populatedPartitionRejected = error.sqlState() == "0A000";
+    }
+    assert(populatedPartitionRejected);
+    assert(g_engine.tableExists(db, "populated_p2"));
+    assert(g_engine.getTableSchema(db, "parent").rangePartitions.empty());
+    assert(g_engine.query(db, "populated_p2", {}, {"id"}).size() == 1);
+    assert(g_engine.query(db, "parent", {}, {"id"}).empty());
+
     assert(!ddl.executeSql("CREATE TABLE p2 (id INT, yr INT)", s));
     auto attachAst = parser.parse(
         "ALTER TABLE parent ATTACH PARTITION p2 FOR VALUES FROM (10) TO (20)");
@@ -342,15 +360,18 @@ static void test_typed_security_partition_and_trigger_actions() {
     assert(attach->subCommands[0].partitionSpec.find("FOR") != std::string::npos);
     assert(attach->subCommands[0].partitionSpec.find("FROM") != std::string::npos);
     assert(attach->subCommands[0].partitionSpec.find("TO") != std::string::npos);
-    assert(!executeAlter(
-        "ALTER TABLE parent ATTACH PARTITION p2 FOR VALUES FROM (10) TO (20)"));
+    bool emptyStandalonePartitionRejected = false;
+    try {
+        executeAlter(
+            "ALTER TABLE parent ATTACH PARTITION p2 "
+            "FOR VALUES FROM (10) TO (20)");
+    } catch (const dbms::DbError& error) {
+        emptyStandalonePartitionRejected = error.sqlState() == "0A000";
+    }
+    assert(emptyStandalonePartitionRejected);
+    assert(g_engine.tableExists(db, "p2"));
     schema = g_engine.getTableSchema(db, "parent");
-    assert(std::any_of(schema.rangePartitions.begin(), schema.rangePartitions.end(),
-                       [](const auto& p) { return p.first == "p2"; }));
-    assert(!executeAlter("ALTER TABLE parent DETACH PARTITION p2"));
-    schema = g_engine.getTableSchema(db, "parent");
-    assert(std::none_of(schema.rangePartitions.begin(), schema.rangePartitions.end(),
-                        [](const auto& p) { return p.first == "p2"; }));
+    assert(schema.rangePartitions.empty());
 
     assert(!ddl.executeSql("CREATE TABLE trigger_target (id INT)", s));
     assert(g_engine.createTrigger(db, {
