@@ -13,6 +13,7 @@
         "preserved_relations": "Supported pg_database/pg_statistic continue to query; an unqualified user table named pg_constraint remains accessible",
         "production_build": "bash scripts/build.sh passed",
         "full_registered_suite": "Exited 1 because plpgsql_test was manually terminated during execution; every test after it completed successfully, but this is not a passing full-suite result",
+        "plpgsql_test_rerun": "timeout 300s build/plpgsql_test passed independently in about 94 seconds",
         "postgresql_18_oracle": "not run; no PG18.6 oracle/differential is claimed",
         "scope": "Only corrects error classification for a verified unsupported relation set; catalog rows/schema remain absent and CAT-03 stays partial"
       }

@@ -14,6 +14,7 @@
 
 - `bash scripts/build.sh`：最终生产源码构建通过。
 - `python3 tests/pg_catalog_unavailable_sqlstate_protocol_e2e_test.py`：通过；逐一覆盖 18 个关系的限定/未限定名称、SQLSTATE、idle ReadyForQuery，且验证虚拟 catalog 与同名用户表不被误挡。
+- `timeout 300s build/plpgsql_test`：单独重跑并通过（约 94 秒），包括 200,000 步 runaway guard 和 SQL 函数往返用例。
 - `DBMS_PROTOCOL_TEST_TIMEOUT=120 DBMS_PROTOCOL_STARTUP_TIMEOUT=120 DBMS_PROTOCOL_SHUTDOWN_TIMEOUT=120 bash scripts/build_tests.sh`：退出码 1。完整脚本中除 `plpgsql_test` 被人工提前终止外，已运行 C++、协议和 E2E 用例均通过；catalog 定向 E2E 在完整脚本中通过。该整套结果不记作通过。
 - 未运行 PostgreSQL 18.6 oracle/differential；不声称 catalog 数据或输出等价。
 
