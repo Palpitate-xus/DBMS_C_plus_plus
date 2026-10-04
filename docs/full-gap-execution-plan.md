@@ -4,6 +4,8 @@
 
 # 总差距清单执行计划
 
+2026-10-04 第993项将不完整的`pg_roles`四文本列输出路径fail-closed（PG18视图定义13列）；普通同名relation、`SHOW USERS/ROLES`和底层角色API保留。生产构建、catalog SQLSTATE/pg_class E2E及`div14_feature_gate_test.py`通过；代码/测试commit `b63e3e93`。CAT-03仍partial；详见`docs/issue-993-pg-roles-view-fail-closed.md`。未push，Actions禁用，安全/TDE跳过项保持deferred。
+
 2026-10-04 第992项将`pg_type`/`pg_enum`旧文本SQL renderer fail-closed：前者5列无法代表PG18 32列，后者忽略projection/filter且类型元数据不可信。限定目录查询及当前库中无同名table/view的未限定查询返回0A000；同名用户relation和enum DDL路径保留。生产构建、catalog SQLSTATE E2E、pg_class E2E、完整postgres protocol测试通过，未跑完整注册suite。代码/测试commit `3ce4345a`；详见`docs/issue-992-pg-type-enum-query-fail-closed.md`。CAT-03仍partial；未push、Actions禁用、安全/TDE跳过项保持deferred。
 
 2026-10-04 第991项收紧`pg_class`typed子集：34列PG18 schema不可用时，星号投影与已知未实现列fail-closed为0A000，真正未知列保持42703、COUNT(*)不受影响。生产构建、Simple/Extended pg_class E2E及catalog E2E通过；代码/测试commit `4e6a78d7`，见`docs/issue-991-pg-class-incomplete-projection.md`。CAT-03仍partial；未push、Actions禁用、安全/TDE跳过项保持deferred。
