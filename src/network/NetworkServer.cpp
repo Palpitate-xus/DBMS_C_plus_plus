@@ -3140,7 +3140,32 @@ CopyStreamResult sendCopyOut(PostgresProtocol& protocol,
                     result.error = "COPY output row exceeds 16 MiB limit";
                     return;
                 }
-                if (!protocol.sendCopyData(output)) {
+                const auto interrupt = session.interruptState;
+                const ProtocolMessageWriteResult writeResult =
+                    protocol.sendCopyDataUntil(
+                        output, deadline, [interrupt]() {
+                            return interrupt->terminateRequested.load(
+                                       std::memory_order_acquire) ||
+                                   interrupt->cancelRequested.load(
+                                       std::memory_order_acquire);
+                        });
+                if (writeResult != ProtocolMessageWriteResult::Complete) {
+                    if (writeResult == ProtocolMessageWriteResult::TimedOut ||
+                        interrupt->timeoutRequested.load(
+                            std::memory_order_acquire)) {
+                        result.sqlState = "57014";
+                        result.error =
+                            "canceling statement due to statement timeout";
+                    } else if (writeResult ==
+                               ProtocolMessageWriteResult::Interrupted) {
+                        const bool terminated =
+                            interrupt->terminateRequested.load(
+                                std::memory_order_acquire);
+                        result.sqlState = terminated ? "57P01" : "57014";
+                        result.error = terminated
+                            ? "terminating connection due to administrator command"
+                            : "canceling COPY due to user request";
+                    }
                     result.transportOk = false;
                     return;
                 }
@@ -3160,8 +3185,23 @@ CopyStreamResult sendCopyOut(PostgresProtocol& protocol,
         result.error = error.what();
     }
     if (result.transportOk && result.error.empty()) {
-        result.transportOk = protocol.sendCopyDone();
+        const auto interrupt = session.interruptState;
+        const ProtocolMessageWriteResult writeResult =
+            protocol.sendCopyDoneUntil(deadline, [interrupt]() {
+                return interrupt->terminateRequested.load(
+                           std::memory_order_acquire) ||
+                       interrupt->cancelRequested.load(
+                           std::memory_order_acquire);
+            });
+        result.transportOk =
+            writeResult == ProtocolMessageWriteResult::Complete;
         result.success = result.transportOk;
+        if (!result.transportOk &&
+            (writeResult == ProtocolMessageWriteResult::TimedOut ||
+             interrupt->timeoutRequested.load(std::memory_order_acquire))) {
+            result.sqlState = "57014";
+            result.error = "canceling statement due to statement timeout";
+        }
     }
     return result;
 }
@@ -4632,9 +4672,15 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         if (!outcome.connectionOk) return outcome;
         if (!stream.success) {
             (void)abortCopyTransaction();
-            outcome.connectionOk = protocol.sendErrorResponse(
+            // COPY TO may already have filled the peer's receive window. Do
+            // not re-enter an unbounded blocking write while reporting a
+            // timeout or another mid-stream error; send opportunistically,
+            // then close if the client still cannot drain the response.
+            outcome.connectionOk = protocol.sendErrorResponseUntil(
                 "ERROR", stream.sqlState.empty() ? "XX000" : stream.sqlState,
-                stream.error.empty() ? "COPY TO failed" : stream.error);
+                stream.error.empty() ? "COPY TO failed" : stream.error,
+                std::chrono::steady_clock::now() +
+                    std::chrono::milliseconds(100));
             return outcome;
         }
         if (!finished) {

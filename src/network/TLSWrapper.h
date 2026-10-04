@@ -2,6 +2,7 @@
 
 #include <string>
 #include <functional>
+#include <chrono>
 
 // Minimal OpenSSL forward declarations (link with -lssl -lcrypto)
 // When libssl-dev is installed, these match the real declarations.
@@ -31,8 +32,11 @@ extern "C" {
 constexpr int SSL_FILETYPE_PEM = 1;
 constexpr int SSL_ERROR_WANT_READ = 2;
 constexpr int SSL_ERROR_WANT_WRITE = 3;
+constexpr int SSL_ERROR_SYSCALL = 5;
 
 namespace dbms {
+
+enum class SocketWriteResult { Complete, TimedOut, Interrupted, Error };
 
 // Secure socket wrapper: uses OpenSSL TLS when a context is supplied.
 // Plain socket I/O is retained only for the explicitly requested insecure
@@ -55,6 +59,10 @@ struct SecureSocket {
     bool initTLS(SSL_CTX* ctx);
     bool handshake();
     ssize_t send(const void* buf, size_t len);
+    SocketWriteResult sendAllUntil(
+        const void* buf, size_t len,
+        std::chrono::steady_clock::time_point deadline,
+        const std::function<bool()>& interrupted);
     ssize_t recv(void* buf, size_t len);
     bool hasBufferedInput() const;
     void close();

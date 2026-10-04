@@ -27,6 +27,7 @@ struct PgFrontendMessage {
 
 enum class ProtocolInputWaitResult { Ready, TimedOut, Error };
 enum class ProtocolMessageReadResult { Complete, TimedOut, Interrupted, Error };
+using ProtocolMessageWriteResult = SocketWriteResult;
 
 struct PgColumnDescription {
     std::string name;
@@ -76,6 +77,10 @@ public:
                            const std::string& sqlState,
                            const std::string& message,
                            const std::string& detail = {});
+    bool sendErrorResponseUntil(
+        const std::string& severity, const std::string& sqlState,
+        const std::string& message,
+        std::chrono::steady_clock::time_point deadline);
     bool sendNoticeResponse(const std::string& message,
                             const std::string& severity = "NOTICE",
                             const std::string& sqlState = "00000",
@@ -99,7 +104,14 @@ public:
     bool sendCopyOutResponse(uint8_t overallFormat,
                              const std::vector<uint16_t>& columnFormats);
     bool sendCopyData(const std::string& data);
+    ProtocolMessageWriteResult sendCopyDataUntil(
+        const std::string& data,
+        std::chrono::steady_clock::time_point deadline,
+        const std::function<bool()>& interrupted);
     bool sendCopyDone();
+    ProtocolMessageWriteResult sendCopyDoneUntil(
+        std::chrono::steady_clock::time_point deadline,
+        const std::function<bool()>& interrupted);
     bool sendRowDescription(const std::vector<PgColumnDescription>& columns);
     bool sendDataRow(const std::vector<std::string>& values);
     bool sendDataRow(const std::vector<std::string>& values,

@@ -4,6 +4,7 @@
 import importlib.util
 import socket
 import struct
+import time
 from pathlib import Path
 
 
@@ -75,6 +76,7 @@ def main():
     client = runner.load_protocol_client()
     server = runner.start_ours(client)
     sock = server["sock"]
+    slow_reader = None
     try:
         _, sqlstate = simple(
             client, sock,
@@ -245,8 +247,76 @@ def main():
         assert b"50\n" not in b"".join(
             body for kind, body in exported if kind == b"d"), exported
 
+        # A COPY TO client that stops reading must not pin the backend in a
+        # blocking socket write beyond statement_timeout.  Constrain the
+        # receive buffer and make the output larger than the kernel buffers.
+        payload = "x" * 16384
+        large_rows = b"".join(
+            f"{1000 + row}\t{payload}\n".encode()
+            for row in range(256))
+        begin_copy(
+            client, sock,
+            "COPY copy_wire (id, payload) FROM STDIN", columns=2)
+        sock.sendall(client.typed(b"d", large_rows))
+        sock.sendall(client.typed(b"c"))
+        copied = finish_simple_copy(client, sock)
+        assert command_tags(copied) == [b"COPY 256"], copied
+
+        slow_reader = socket.create_connection(
+            ("127.0.0.1", server["port"]), 15)
+        slow_reader.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024)
+        slow_reader.settimeout(5)
+        slow_pid, _ = client.startup(slow_reader, "alice", "info")
+        timeout_messages, timeout_state = simple(
+            client, slow_reader, "SET statement_timeout = 5000")
+        assert timeout_state is None, timeout_messages
+        settings = client.simple_query(
+            slow_reader,
+            "SELECT setting FROM pg_catalog.pg_settings "
+            "WHERE name = 'statement_timeout'")
+        assert runner.decode_wire_result(settings, include_types=True)[0] == [
+            ["5000"]
+        ], settings
+        begin_copy(
+            client, slow_reader,
+            "COPY copy_wire (id, payload) TO STDOUT", response=b"H",
+            columns=2)
+        initial_activity = client.simple_query(
+            sock,
+            "SELECT state, query FROM pg_catalog.pg_stat_activity "
+            f"WHERE pid = {slow_pid}")
+        initial_rows = runner.decode_wire_result(
+            initial_activity, include_types=True)[0]
+        assert initial_rows and initial_rows[0][0] == "active", initial_rows
+        time.sleep(5.3)
+        timeout_finished = False
+        final_activity_rows = None
+        activity_deadline = time.monotonic() + 3
+        while time.monotonic() < activity_deadline:
+            activity_messages = client.simple_query(
+                sock,
+                "SELECT state FROM pg_catalog.pg_stat_activity "
+                f"WHERE pid = {slow_pid}")
+            activity_rows = runner.decode_wire_result(
+                activity_messages, include_types=True)[0]
+            if not activity_rows or activity_rows[0][0] != "active":
+                timeout_finished = True
+                final_activity_rows = activity_rows
+                break
+            time.sleep(0.05)
+        assert timeout_finished, (
+            "COPY TO backend remained active after statement_timeout while "
+            "the client receive window was not drained")
+        assert not final_activity_rows, (
+            "COPY TO backend stayed connected/idle instead of closing after "
+            "the blocked output frame timed out", final_activity_rows)
+        slow_reader.close()
+        slow_reader = None
+
         print("[COPY PROTOCOL E2E] passed")
     finally:
+        if slow_reader is not None:
+            slow_reader.close()
         server["sock"] = sock
         runner.stop_ours(server)
 

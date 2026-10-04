@@ -447,6 +447,29 @@ bool PostgresProtocol::sendMessage(char type, const std::vector<uint8_t>& body) 
     return writeAll(packet.data(), packet.size());
 }
 
+ProtocolMessageWriteResult PostgresProtocol::sendCopyDataUntil(
+    const std::string& data,
+    std::chrono::steady_clock::time_point deadline,
+    const std::function<bool()>& interrupted) {
+    if (data.size() > std::numeric_limits<uint32_t>::max() - 4)
+        return ProtocolMessageWriteResult::Error;
+    std::vector<uint8_t> packet;
+    packet.reserve(1 + 4 + data.size());
+    packet.push_back(static_cast<uint8_t>('d'));
+    appendUInt32(packet, static_cast<uint32_t>(data.size() + 4));
+    packet.insert(packet.end(), data.begin(), data.end());
+    return socket_.sendAllUntil(
+        packet.data(), packet.size(), deadline, interrupted);
+}
+
+ProtocolMessageWriteResult PostgresProtocol::sendCopyDoneUntil(
+    std::chrono::steady_clock::time_point deadline,
+    const std::function<bool()>& interrupted) {
+    const uint8_t packet[] = {'c', 0, 0, 0, 4};
+    return socket_.sendAllUntil(
+        packet, sizeof(packet), deadline, interrupted);
+}
+
 namespace {
 
 bool appendCopyResponseBody(uint8_t overallFormat,
@@ -594,6 +617,28 @@ bool PostgresProtocol::sendErrorResponse(const std::string& severity,
     }
     body.push_back(0);
     return sendMessage('E', body);
+}
+
+bool PostgresProtocol::sendErrorResponseUntil(
+    const std::string& severity, const std::string& sqlState,
+    const std::string& message,
+    std::chrono::steady_clock::time_point deadline) {
+    std::vector<uint8_t> body;
+    body.push_back('S'); appendCString(body, severity);
+    body.push_back('V'); appendCString(body, severity);
+    body.push_back('C');
+    appendCString(body, sqlState.empty() ? "XX000" : sqlState);
+    body.push_back('M'); appendCString(body, message);
+    body.push_back(0);
+    if (body.size() > std::numeric_limits<uint32_t>::max() - 4)
+        return false;
+    std::vector<uint8_t> packet;
+    packet.reserve(1 + 4 + body.size());
+    packet.push_back(static_cast<uint8_t>('E'));
+    appendUInt32(packet, static_cast<uint32_t>(body.size() + 4));
+    packet.insert(packet.end(), body.begin(), body.end());
+    return socket_.sendAllUntil(packet.data(), packet.size(), deadline, {}) ==
+           ProtocolMessageWriteResult::Complete;
 }
 
 bool PostgresProtocol::sendNoticeResponse(const std::string& message,

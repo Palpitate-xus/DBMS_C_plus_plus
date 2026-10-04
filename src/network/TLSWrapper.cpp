@@ -1,6 +1,11 @@
 #include "TLSWrapper.h"
+#include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <cstring>
+#include <fcntl.h>
+#include <limits>
+#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -69,6 +74,101 @@ ssize_t SecureSocket::send(const void* buf, size_t len) {
         return ::send(fd, buf, len, MSG_NOSIGNAL);
     }
     return -1;
+}
+
+SocketWriteResult SecureSocket::sendAllUntil(
+    const void* buf, size_t len,
+    std::chrono::steady_clock::time_point deadline,
+    const std::function<bool()>& interrupted) {
+    if (fd < 0 || (useTLS && (!ssl || !tlsOK)))
+        return SocketWriteResult::Error;
+
+    const int oldFlags = ::fcntl(fd, F_GETFL, 0);
+    if (oldFlags < 0) return SocketWriteResult::Error;
+    const bool restoreBlocking = (oldFlags & O_NONBLOCK) == 0;
+    if (restoreBlocking && ::fcntl(fd, F_SETFL, oldFlags | O_NONBLOCK) < 0)
+        return SocketWriteResult::Error;
+    struct RestoreFlags {
+        int fd;
+        int flags;
+        bool restore;
+        ~RestoreFlags() {
+            if (restore) (void)::fcntl(fd, F_SETFL, flags);
+        }
+    } restore{fd, oldFlags, restoreBlocking};
+
+    const auto* bytes = static_cast<const unsigned char*>(buf);
+    size_t written = 0;
+    short waitEvents = POLLOUT;
+    while (written < len) {
+        if (interrupted && interrupted())
+            return SocketWriteResult::Interrupted;
+        if (deadline != std::chrono::steady_clock::time_point::max() &&
+            std::chrono::steady_clock::now() >= deadline)
+            return SocketWriteResult::TimedOut;
+
+        if (useTLS && ssl && tlsOK) {
+            const size_t remaining = len - written;
+            const int chunk = static_cast<int>(std::min<size_t>(
+                remaining, static_cast<size_t>(std::numeric_limits<int>::max())));
+            errno = 0;
+            const int count = SSL_write(ssl, bytes + written, chunk);
+            if (count > 0) {
+                written += static_cast<size_t>(count);
+                waitEvents = POLLOUT;
+                continue;
+            }
+            const int sslError = SSL_get_error(ssl, count);
+            if (sslError == SSL_ERROR_WANT_READ) {
+                waitEvents = POLLIN;
+            } else if (sslError == SSL_ERROR_WANT_WRITE) {
+                waitEvents = POLLOUT;
+            } else if (sslError == SSL_ERROR_SYSCALL &&
+                       (errno == EINTR || errno == EAGAIN ||
+                        errno == EWOULDBLOCK)) {
+                waitEvents = POLLOUT;
+            } else {
+                return SocketWriteResult::Error;
+            }
+        } else {
+            const ssize_t count = ::send(
+                fd, bytes + written, len - written,
+                MSG_NOSIGNAL | MSG_DONTWAIT);
+            if (count > 0) {
+                written += static_cast<size_t>(count);
+                continue;
+            }
+            if (count < 0 && errno == EINTR) continue;
+            if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                waitEvents = POLLOUT;
+            } else {
+                return SocketWriteResult::Error;
+            }
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (deadline != std::chrono::steady_clock::time_point::max() &&
+            now >= deadline)
+            return SocketWriteResult::TimedOut;
+        int timeoutMs = 50;
+        if (deadline != std::chrono::steady_clock::time_point::max()) {
+            const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(
+                deadline - now).count();
+            timeoutMs = static_cast<int>(std::min<int64_t>(50, remaining));
+        }
+        pollfd descriptor{};
+        descriptor.fd = fd;
+        descriptor.events = waitEvents;
+        const int ready = ::poll(&descriptor, 1, timeoutMs);
+        if (ready == 0) continue;
+        if (ready < 0) {
+            if (errno == EINTR) continue;
+            return SocketWriteResult::Error;
+        }
+        if ((descriptor.revents & waitEvents) == 0)
+            return SocketWriteResult::Error;
+    }
+    return SocketWriteResult::Complete;
 }
 
 ssize_t SecureSocket::recv(void* buf, size_t len) {
