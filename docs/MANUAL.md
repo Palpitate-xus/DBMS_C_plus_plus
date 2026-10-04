@@ -1199,8 +1199,8 @@ SET deadlock_timeout = 1000;
 RESET search_path;
 RESET ALL;
 
--- PostgreSQL 模式查看当前值
-SELECT * FROM pg_settings;
+-- 查询当前实现支持的 pg_settings 列（完整视图仍未实现）
+SELECT name, setting, unit FROM pg_settings;
 
 -- 配置文件位于显式 data directory 的 dbms.conf；修改后由管理员请求重新加载
 SELECT pg_reload_conf();
