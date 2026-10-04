@@ -3170,10 +3170,17 @@ static int comparePartitionValues(const TableSchema& table,
 std::string StorageEngine::getPartitionName(const TableSchema& tbl, const std::string& keyVal) const {
     if (tbl.partitionType == TableSchema::PartitionType::None) return "";
     if (tbl.partitionType == TableSchema::PartitionType::Range) {
-        for (const auto& rp : tbl.rangePartitions) {
-            if (comparePartitionValues(
-                    tbl, keyVal, rp.second, false, true) < 0) {
-                return rp.first;
+        for (size_t index = 0; index < tbl.rangePartitions.size(); ++index) {
+            const auto& partition = tbl.rangePartitions[index];
+            const std::string inferredLower = index == 0
+                ? "MINVALUE" : tbl.rangePartitions[index - 1].second;
+            const std::string& lower =
+                index < tbl.rangePartitionLowerBounds.size()
+                    ? tbl.rangePartitionLowerBounds[index] : inferredLower;
+            if (comparePartitionValues(tbl, keyVal, lower, false, true) >= 0 &&
+                comparePartitionValues(tbl, keyVal, partition.second,
+                                       false, true) < 0) {
+                return partition.first;
             }
         }
         if (!tbl.defaultPartitionName.empty()) return tbl.defaultPartitionName;
@@ -3344,6 +3351,40 @@ DBStatus StorageEngine::attachPartition(const std::string& dbname,
                 lockManager_.unlock(tablename);
                 return DBStatus::INVALID_VALUE;
             }
+            std::vector<std::string> lowerBounds =
+                tbl.rangePartitionLowerBounds;
+            if (lowerBounds.empty() && !tbl.rangePartitions.empty()) {
+                lowerBounds.reserve(tbl.rangePartitions.size());
+                for (size_t index = 0;
+                     index < tbl.rangePartitions.size(); ++index) {
+                    lowerBounds.push_back(
+                        index == 0 ? "MINVALUE"
+                                   : tbl.rangePartitions[index - 1].second);
+                }
+            }
+            if (lowerBounds.size() != tbl.rangePartitions.size()) {
+                lockManager_.unlock(tablename);
+                return DBStatus::INVALID_VALUE;
+            }
+            const size_t insertIndex = static_cast<size_t>(
+                it - tbl.rangePartitions.begin());
+            for (size_t index = 0; index < tbl.rangePartitions.size(); ++index) {
+                const bool overlaps =
+                    comparePartitionValues(
+                        tbl, lowerBound, tbl.rangePartitions[index].second,
+                        true, true) < 0 &&
+                    comparePartitionValues(
+                        tbl, lowerBounds[index], upperBound, true, true) < 0;
+                if (overlaps) {
+                    lockManager_.unlock(tablename);
+                    return DBStatus::INVALID_VALUE;
+                }
+            }
+            lowerBounds.insert(
+                lowerBounds.begin() +
+                    static_cast<std::ptrdiff_t>(insertIndex),
+                lowerBound);
+            tbl.rangePartitionLowerBounds = std::move(lowerBounds);
             tbl.rangePartitions.insert(it, {partitionName, upperBound});
         }
     } else if (tbl.partitionType == TableSchema::PartitionType::List) {
@@ -3446,7 +3487,14 @@ DBStatus StorageEngine::detachPartition(const std::string& dbname,
         auto it = std::find_if(tbl.rangePartitions.begin(), tbl.rangePartitions.end(),
                                 [&](const auto& rp) { return rp.first == partitionName; });
         if (!found && it != tbl.rangePartitions.end()) {
+            const size_t index = static_cast<size_t>(
+                it - tbl.rangePartitions.begin());
             tbl.rangePartitions.erase(it);
+            if (index < tbl.rangePartitionLowerBounds.size()) {
+                tbl.rangePartitionLowerBounds.erase(
+                    tbl.rangePartitionLowerBounds.begin() +
+                    static_cast<std::ptrdiff_t>(index));
+            }
             found = true;
         }
     } else if (tbl.partitionType == TableSchema::PartitionType::List) {
@@ -13790,6 +13838,7 @@ constexpr int32_t MAX_PERSISTED_COLUMN_SIZE = 65535;
 constexpr uint32_t SCHEMA_ADDITIONAL_CHECK_MAGIC = 0x324B4843;  // "CHK2"
 constexpr uint32_t SCHEMA_IDENTITY_KIND_MAGIC = 0x314E4449;     // "IDN1"
 constexpr uint32_t SCHEMA_LONG_DEFAULT_MAGIC = 0x31544644;      // "DFT1"
+constexpr uint32_t SCHEMA_RANGE_LOWER_BOUNDS_MAGIC = 0x31424C52;  // "RLB1"
 constexpr int32_t MAX_ADDITIONAL_CHECK_CONSTRAINTS = 1024;
 constexpr uint32_t MAX_PERSISTED_CHECK_EXPRESSION = 1024 * 1024;
 constexpr uint32_t MAX_PERSISTED_DEFAULT_EXPRESSION = 1024 * 1024;
@@ -13798,6 +13847,31 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
     if (tbl.len > MAX_COLUMNS) {
         out.setstate(std::ios::failbit);
         return;
+    }
+    if (tbl.rangePartitions.size() > MAX_COLUMNS) {
+        out.setstate(std::ios::failbit);
+        return;
+    }
+    if (!tbl.rangePartitionLowerBounds.empty() &&
+        tbl.rangePartitionLowerBounds.size() != tbl.rangePartitions.size()) {
+        out.setstate(std::ios::failbit);
+        return;
+    }
+    for (size_t index = 0; index < tbl.rangePartitions.size(); ++index) {
+        const std::string inferredLower = index == 0
+            ? "MINVALUE" : tbl.rangePartitions[index - 1].second;
+        const std::string& lower = tbl.rangePartitionLowerBounds.empty()
+            ? inferredLower : tbl.rangePartitionLowerBounds[index];
+        if (lower.empty() || lower.size() > MAX_COL_NAME_LEN ||
+            lower.find('\0') != std::string::npos ||
+            comparePartitionValues(
+                tbl, lower, tbl.rangePartitions[index].second, true, true) >= 0 ||
+            (index > 0 && comparePartitionValues(
+                tbl, lower, tbl.rangePartitions[index - 1].second,
+                true, true) < 0)) {
+            out.setstate(std::ios::failbit);
+            return;
+        }
     }
     for (size_t i = 0; i < tbl.len; ++i) {
         const auto& expression = tbl.cols[i].defaultValue;
@@ -14025,9 +14099,11 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
     uint16_t longDefaultCount = 0;
     for (size_t i = 0; i < tbl.len; ++i)
         if (tbl.cols[i].defaultValue.size() > MAX_COL_NAME_LEN) ++longDefaultCount;
-    if (longDefaultCount != 0) {
-        out.write(reinterpret_cast<const char*>(&SCHEMA_LONG_DEFAULT_MAGIC), sizeof(SCHEMA_LONG_DEFAULT_MAGIC));
-        out.write(reinterpret_cast<const char*>(&longDefaultCount), sizeof(longDefaultCount));
+    if (longDefaultCount != 0 || !tbl.rangePartitions.empty()) {
+        out.write(reinterpret_cast<const char*>(&SCHEMA_LONG_DEFAULT_MAGIC),
+                  sizeof(SCHEMA_LONG_DEFAULT_MAGIC));
+        out.write(reinterpret_cast<const char*>(&longDefaultCount),
+                  sizeof(longDefaultCount));
         for (uint16_t i = 0; i < tbl.len; ++i) {
             const auto& expression = tbl.cols[i].defaultValue;
             if (expression.size() <= MAX_COL_NAME_LEN) continue;
@@ -14035,6 +14111,24 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
             out.write(reinterpret_cast<const char*>(&i), sizeof(i));
             out.write(reinterpret_cast<const char*>(&length), sizeof(length));
             out.write(expression.data(), length);
+        }
+    }
+
+    // Persist lower endpoints without changing the legacy schema prefix. Old
+    // schemas infer them as MINVALUE followed by the preceding upper bound.
+    if (!tbl.rangePartitions.empty()) {
+        out.write(reinterpret_cast<const char*>(&SCHEMA_RANGE_LOWER_BOUNDS_MAGIC),
+                  sizeof(SCHEMA_RANGE_LOWER_BOUNDS_MAGIC));
+        const int32_t lowerBoundCount =
+            static_cast<int32_t>(tbl.rangePartitions.size());
+        out.write(reinterpret_cast<const char*>(&lowerBoundCount),
+                  sizeof(lowerBoundCount));
+        for (size_t index = 0; index < tbl.rangePartitions.size(); ++index) {
+            const std::string inferredLower = index == 0
+                ? "MINVALUE" : tbl.rangePartitions[index - 1].second;
+            const std::string& lower = tbl.rangePartitionLowerBounds.empty()
+                ? inferredLower : tbl.rangePartitionLowerBounds[index];
+            writeFixedString(out, lower, MAX_COL_NAME_LEN);
         }
     }
 }
@@ -14199,7 +14293,11 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
                 for (int32_t i = 0; i < rpCount; ++i) {
                     std::string pname = readFixedString(in, MAX_TABLE_NAME_LEN);
                     std::string bound = readFixedString(in, MAX_COL_NAME_LEN);
+                    const std::string inferredLower =
+                        tbl.rangePartitions.empty()
+                            ? "MINVALUE" : tbl.rangePartitions.back().second;
                     tbl.rangePartitions.push_back({pname, bound});
+                    tbl.rangePartitionLowerBounds.push_back(inferredLower);
                 }
             }
         } else if (tbl.partitionType == TableSchema::PartitionType::List) {
@@ -14421,7 +14519,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     in.read(reinterpret_cast<char*>(&defaultMagic), sizeof(defaultMagic));
     in.read(reinterpret_cast<char*>(&defaultCount), sizeof(defaultCount));
     if (!in || defaultMagic != SCHEMA_LONG_DEFAULT_MAGIC ||
-        defaultCount == 0 || defaultCount > tbl.len) return {};
+        defaultCount > tbl.len) return {};
     std::set<uint16_t> defaultColumns;
     for (uint16_t i = 0; i < defaultCount; ++i) {
         uint16_t column = 0;
@@ -14438,7 +14536,47 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
             return {};
         tbl.cols[column].defaultValue = std::move(expression);
     }
+    if (in.peek() == std::char_traits<char>::eof()) {
+        if (!in.eof()) return {};
+        // A zero-entry DFT1 block is emitted only with the new RANGE-bound
+        // extension; an EOF here therefore means a truncated new schema.
+        if (defaultCount == 0 && !tbl.rangePartitions.empty()) return {};
+        in.clear();
+        return tbl;
+    }
+    uint32_t rangeLowerBoundsMagic = 0;
+    in.read(reinterpret_cast<char*>(&rangeLowerBoundsMagic),
+            sizeof(rangeLowerBoundsMagic));
+    int32_t rangeLowerBoundsCount = 0;
+    in.read(reinterpret_cast<char*>(&rangeLowerBoundsCount),
+            sizeof(rangeLowerBoundsCount));
+    if (!in || rangeLowerBoundsMagic != SCHEMA_RANGE_LOWER_BOUNDS_MAGIC ||
+        rangeLowerBoundsCount !=
+            static_cast<int32_t>(tbl.rangePartitions.size())) {
+        return {};
+    }
+    std::vector<std::string> persistedLowerBounds;
+    persistedLowerBounds.reserve(static_cast<size_t>(rangeLowerBoundsCount));
+    for (int32_t index = 0; index < rangeLowerBoundsCount; ++index) {
+        std::string lower = readFixedString(in, MAX_COL_NAME_LEN);
+        const auto& upper =
+            tbl.rangePartitions[static_cast<size_t>(index)].second;
+        if (!in || lower.empty() ||
+            comparePartitionValues(tbl, lower, upper, true, true) >= 0) {
+            return {};
+        }
+        if (index > 0) {
+            const auto& previousUpper =
+                tbl.rangePartitions[static_cast<size_t>(index - 1)].second;
+            if (comparePartitionValues(
+                    tbl, lower, previousUpper, true, true) < 0) {
+                return {};
+            }
+        }
+        persistedLowerBounds.push_back(std::move(lower));
+    }
     if (in.peek() != std::char_traits<char>::eof() || !in.eof()) return {};
+    tbl.rangePartitionLowerBounds = std::move(persistedLowerBounds);
     in.clear();
     return tbl;
 }

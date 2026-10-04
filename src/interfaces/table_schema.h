@@ -133,6 +133,9 @@ struct TableSchema {
     PartitionType partitionType = PartitionType::None;
     std::string partitionKey;  // column name for partitioning
     std::vector<std::pair<std::string, std::string>> rangePartitions;  // name -> upper bound
+    // Lower bounds parallel rangePartitions; legacy schemas infer MINVALUE
+    // for the first partition and the previous upper bound thereafter.
+    std::vector<std::string> rangePartitionLowerBounds;
     std::vector<std::pair<std::string, std::vector<std::string>>> listPartitions;  // name -> values
     size_t hashPartitions = 0;  // number of hash partitions
     std::string defaultPartitionName; // DEFAULT partition for RANGE/LIST partitioning

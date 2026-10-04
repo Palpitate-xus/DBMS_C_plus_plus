@@ -257,6 +257,11 @@ static void test_partition_by_range_ddl() {
     assert(!ddl.executeSql(
         "CREATE TABLE p2025 PARTITION OF sales FOR VALUES FROM (2025) TO (2026)", s));
 
+    schema = g_engine.getTableSchema(db, "sales");
+    assert(schema.rangePartitionLowerBounds.size() == 2);
+    assert(schema.rangePartitionLowerBounds[0] == "2020");
+    assert(schema.rangePartitionLowerBounds[1] == "2025");
+
     dbms::CatalogManager& catalog =
         g_engine.catalogService().get(db);
     const auto* salesRelation =
@@ -282,6 +287,10 @@ static void test_partition_by_range_ddl() {
     // Insert rows and verify routing.
     assert(g_engine.insert(db, "sales", {{"id", "1"}, {"yr", "2020"}}) == dbms::DBStatus::OK);
     assert(g_engine.insert(db, "sales", {{"id", "2"}, {"yr", "2025"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, "sales", {{"id", "3"}, {"yr", "2019"}}) ==
+           dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.insert(db, "sales", {{"id", "4"}, {"yr", "2022"}}) ==
+           dbms::DBStatus::INVALID_VALUE);
 
     auto rows = g_engine.query(db, "sales", {}, {"id", "yr"});
     assert(rows.size() == 2);

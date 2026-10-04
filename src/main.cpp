@@ -17298,6 +17298,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 newTbl.partitionType = dbms::TableSchema::PartitionType::None;
                 newTbl.partitionKey.clear();
                 newTbl.rangePartitions.clear();
+                newTbl.rangePartitionLowerBounds.clear();
                 newTbl.listPartitions.clear();
                 newTbl.hashPartitions = 0;
                 newTbl.defaultPartitionName.clear();
@@ -17355,6 +17356,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 merged.partitionType = tbl.partitionType;
                 merged.partitionKey = tbl.partitionKey;
                 merged.rangePartitions = tbl.rangePartitions;
+                merged.rangePartitionLowerBounds =
+                    tbl.rangePartitionLowerBounds;
                 merged.listPartitions = tbl.listPartitions;
                 merged.hashPartitions = tbl.hashPartitions;
                 merged.defaultPartitionName = tbl.defaultPartitionName;

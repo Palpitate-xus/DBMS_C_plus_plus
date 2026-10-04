@@ -5023,6 +5023,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         child.partitionType = TableSchema::PartitionType::None;
         child.partitionKey.clear();
         child.rangePartitions.clear();
+        child.rangePartitionLowerBounds.clear();
         child.listPartitions.clear();
         child.hashPartitions = 0;
         child.defaultPartitionName.clear();

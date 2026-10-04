@@ -80,7 +80,7 @@ static void test_range_partitioning() {
     auto tbl = makeSchema("logs", {"id int", "yr int"});
     tbl.partitionType = dbms::TableSchema::PartitionType::Range;
     tbl.partitionKey = "yr";
-    tbl.rangePartitions = {{"p1", "2020"}, {"p2", "2025"}, {"p3", "MAXVALUE"}};
+    tbl.rangePartitions = {{"p1", "2020"}, {"p2", "2025"}, {"p3", "2100"}};
     tbl.cols[0].isPrimaryKey = true;
     tbl.pkColIndices = {0};
     assert(g_engine.createTable(db, tbl) == dbms::DBStatus::OK);
@@ -293,6 +293,58 @@ static void test_typed_range_routing_and_predicates() {
                db, "attached", {{"id", "1"}, {"value", "20"}}) ==
            dbms::DBStatus::OK);
     assert(rowCountInPartitions(db, "attached", {"lt100"}) == 1);
+
+    // ATTACH must retain both endpoints. The previous schema only stored the
+    // upper endpoint, routing values below 10 into this [10, 20) partition
+    // and accepting an overlapping [15, 25) partition.
+    auto bounded = makeSchema("bounded", {"id int", "value int"});
+    bounded.partitionType = dbms::TableSchema::PartitionType::Range;
+    bounded.partitionKey = "value";
+    assert(g_engine.createTable(db, bounded) == dbms::DBStatus::OK);
+    assert(g_engine.attachPartition(
+               db, "bounded", "from10to20",
+               "FOR VALUES FROM (10) TO (20)") == dbms::DBStatus::OK);
+    assert(g_engine.insert(
+               db, "bounded", {{"id", "1"}, {"value", "15"}}) ==
+           dbms::DBStatus::OK);
+    const bool belowRangeWasAccepted =
+        g_engine.insert(db, "bounded", {{"id", "2"}, {"value", "5"}}) ==
+        dbms::DBStatus::OK;
+    const bool upperBoundaryWasAccepted =
+        g_engine.insert(db, "bounded", {{"id", "3"}, {"value", "20"}}) ==
+        dbms::DBStatus::OK;
+    const dbms::DBStatus overlappingAttachStatus = g_engine.attachPartition(
+        db, "bounded", "from15to25", "FOR VALUES FROM (15) TO (25)");
+    assert(!belowRangeWasAccepted);
+    assert(!upperBoundaryWasAccepted);
+    assert(overlappingAttachStatus == dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.attachPartition(
+               db, "bounded", "from20to30",
+               "FOR VALUES FROM (20) TO (30)") == dbms::DBStatus::OK);
+    assert(g_engine.insert(
+               db, "bounded", {{"id", "4"}, {"value", "20"}}) ==
+           dbms::DBStatus::OK);
+    const auto boundedSchema = g_engine.getTableSchema(db, "bounded");
+    assert(boundedSchema.rangePartitions.size() == 2);
+    assert(boundedSchema.rangePartitions[0].first == "from10to20");
+    assert(boundedSchema.rangePartitions[1].first == "from20to30");
+    assert(boundedSchema.rangePartitionLowerBounds.size() == 2);
+    assert(boundedSchema.rangePartitionLowerBounds[0] == "10");
+    assert(boundedSchema.rangePartitionLowerBounds[1] == "20");
+    {
+        dbms::StorageEngine reopened;
+        const auto persistedSchema =
+            reopened.getTableSchema(db, "bounded");
+        assert(persistedSchema.rangePartitionLowerBounds.size() == 2);
+        assert(persistedSchema.rangePartitionLowerBounds[0] == "10");
+        assert(persistedSchema.rangePartitionLowerBounds[1] == "20");
+        assert(reopened.insert(
+                   db, "bounded", {{"id", "5"}, {"value", "25"}}) ==
+               dbms::DBStatus::OK);
+        assert(reopened.insert(
+                   db, "bounded", {{"id", "6"}, {"value", "5"}}) ==
+               dbms::DBStatus::INVALID_VALUE);
+    }
 
     cleanup(db);
     std::cout << "[PART] typed range routing and predicates OK" << std::endl;
