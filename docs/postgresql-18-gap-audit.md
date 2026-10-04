@@ -1,3 +1,5 @@
+2026-10-04 第983项复核CAT-19，协议测试commit `64ab219f`：新增extended mode下`CREATE/ALTER/DROP RULE`及`CREATE/ALTER/DROP EVENT TRIGGER`的0A000回归，`python3 tests/div14_feature_gate_test.py`通过；默认模式既有gate同样通过且不产生伪compat对象。此处仅核实未实现命令不会假成功；规则rewrite、真实DDL event执行、顺序/事务语义及dependency仍缺，CAT-19从unverified转partial。无production源码更改、无PG18.6 oracle/diff。详见`docs/issue-983-rule-event-trigger-gate-audit.md`。未push；Actions禁用；用户跳过安全/TDE继续deferred。总账273项：22 complete、147 partial、89 unverified、15 deferred_by_user。
+
 2026-10-04 第982项复核FUNC-03，协议测试commit `1944c64c`：用户自定义operator目前只有语法/兼容对象fallback，无runtime catalog或planner support。新加的extended-mode `CREATE/ALTER/DROP OPERATOR` protocol回归与已有PG mode、operator class/family gate用例由`python3 tests/div14_feature_gate_test.py`通过；失败路径为0A000且无`.pg_compat_objects`假对象。此处验证的是fail-closed，不是功能完成；commutator/negator、selectivity support、hash/merge标志、dependency/invalidation和PG18.6 oracle仍缺，FUNC-03从unverified转partial。详见`docs/issue-982-user-operator-gate-audit.md`。本步仅改测试/审计，无production变更，不push；Actions禁用，用户跳过的安全/TDE保持deferred。总账273项：22 complete、146 partial、90 unverified、15 deferred_by_user。
 
 # DBMS_C_plus_plus 对标 PostgreSQL 18.6：完整差距清单

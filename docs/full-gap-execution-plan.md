@@ -1,3 +1,5 @@
+2026-10-04 第983项复核CAT-19，协议测试commit `64ab219f`：新增extended mode规则与event trigger生命周期负向测试，CREATE/ALTER/DROP均保持0A000，未写假兼容对象。无production改动、未运行PG18.6 oracle/diff。真实query rewrite、DDL event执行、事务顺序与依赖尚未实现，因此CAT-19保持partial。详见`docs/issue-983-rule-event-trigger-gate-audit.md`。不push；Actions禁用；用户跳过的安全/TDE保持deferred。
+
 2026-10-04 第982项复核FUNC-03，协议测试commit `1944c64c`：用户自定义operator/runtime及planner metadata未实现；extended mode新增`CREATE/ALTER/DROP OPERATOR`均以0A000 fail-closed，协议回归通过，未写假对象。无production改动、未运行PG18.6 oracle/diff。commutator/negator、selectivity support、hash/merge标记和dependency仍未实现，因此FUNC-03仅partial。详见`docs/issue-982-user-operator-gate-audit.md`。不push；Actions禁用；用户跳过的安全/TDE保持deferred。
 
 # 总差距清单执行计划
