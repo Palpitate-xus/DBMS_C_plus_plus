@@ -1345,7 +1345,7 @@ def main():
 
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "SET GLOBAL max_connections = 2"))
-        assert setting_value(simple_query(sock, "SELECT * FROM pg_settings"),
+        assert setting_value(simple_query(sock, "SELECT name, setting, unit FROM pg_settings"),
                              "max_connections") == b"1"
         with open(os.path.join(work_dir, "dbms.conf"), encoding="utf-8") as config:
             assert "max_connections=2\n" in config.read()
@@ -1356,7 +1356,7 @@ def main():
         assert reload_fields[0][0] == b"pg_reload_conf", reload_fields
         assert reload_fields[0][3] == 16, reload_fields
         assert (b"C", b"SELECT 1\0") in reload_messages, reload_messages
-        assert setting_value(simple_query(sock, "SELECT * FROM pg_settings"),
+        assert setting_value(simple_query(sock, "SELECT name, setting, unit FROM pg_settings"),
                              "max_connections") == b"1"
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "SET GLOBAL max_connections = 64"))
@@ -1392,7 +1392,7 @@ def main():
         backend_pid, backend_secret = startup(
             sock, "alice", "info", protocol_version=196610,
             protocol_options={"_pq_.unsupported_test": "1"})
-        assert setting_value(simple_query(sock, "SELECT * FROM pg_settings"),
+        assert setting_value(simple_query(sock, "SELECT name, setting, unit FROM pg_settings"),
                              "max_connections") == b"64"
 
         # CancelRequest must validate the unpredictable BackendKeyData secret
@@ -1461,7 +1461,7 @@ def main():
             },
             expected_application_name="options client")
         settings = simple_query(startup_settings_sock,
-                                "SELECT * FROM pg_settings")
+                                "SELECT name, setting, unit FROM pg_settings")
         assert setting_value(settings, "statement_timeout") == b"321"
         assert setting_value(settings, "lock_timeout") == b"17"
         assert setting_value(settings, "deadlock_timeout") == b"19"
@@ -1561,11 +1561,11 @@ def main():
         malformed_startup_sock.close()
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "SET GLOBAL max_notify_queue_pages = 2"))
-        assert setting_value(simple_query(sock, "SELECT * FROM pg_settings"),
+        assert setting_value(simple_query(sock, "SELECT name, setting, unit FROM pg_settings"),
                              "max_notify_queue_pages") == b"1"
         reload_messages = simple_query(sock, "SELECT pg_reload_conf()")
         assert data_row_values(reload_messages) == [[b"t"]], reload_messages
-        assert setting_value(simple_query(sock, "SELECT * FROM pg_settings"),
+        assert setting_value(simple_query(sock, "SELECT name, setting, unit FROM pg_settings"),
                              "max_notify_queue_pages") == b"1"
 
         # Executor NOTICE/WARNING lines are asynchronous NoticeResponse
@@ -3534,7 +3534,7 @@ def main():
         # exposes the effective value for the current backend.
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "SET statement_timeout = 123"))
-        assert setting_value(simple_query(sock, "SELECT * FROM pg_settings"),
+        assert setting_value(simple_query(sock, "SELECT name, setting, unit FROM pg_settings"),
                              "statement_timeout") == b"123"
 
         peer_sock.sendall(typed(b"X"))
@@ -3567,13 +3567,13 @@ def main():
         startup(role_sock, "bob", "info", password="bObPass9!")
         # A newly opened backend gets the configured default, not another
         # backend's session override.
-        assert setting_value(simple_query(role_sock, "SELECT * FROM pg_settings"),
+        assert setting_value(simple_query(role_sock, "SELECT name, setting, unit FROM pg_settings"),
                              "statement_timeout") == b"0"
         assert any(kind == b"C" for kind, _ in simple_query(
             role_sock, "SET statement_timeout = 456"))
-        assert setting_value(simple_query(role_sock, "SELECT * FROM pg_settings"),
+        assert setting_value(simple_query(role_sock, "SELECT name, setting, unit FROM pg_settings"),
                              "statement_timeout") == b"456"
-        assert setting_value(simple_query(observer_sock, "SELECT * FROM pg_settings"),
+        assert setting_value(simple_query(observer_sock, "SELECT name, setting, unit FROM pg_settings"),
                              "statement_timeout") == b"0"
         assert any(kind == b"E" for kind, _ in simple_query(
             role_sock, "SET GLOBAL audit_level = 2"))

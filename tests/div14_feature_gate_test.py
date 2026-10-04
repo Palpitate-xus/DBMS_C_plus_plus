@@ -895,14 +895,14 @@ def main():
             simple_query(sock, "SHOW REPLICATION SLOTS")))
 
         # DIV-11 in extended mode: project commands work again.
-        assert setting_value(simple_query(sock, "SELECT * FROM pg_settings"),
+        assert setting_value(simple_query(sock, "SELECT name, setting, unit FROM pg_settings"),
                              "auto_vacuum") == b"on"
         expect_command_tag(sock, "SET GLOBAL auto_vacuum = off",
                            "extended SET GLOBAL")
         expect_command_tag(sock, "SET GLOBAL auto_analyze = off",
                            "second extended SET GLOBAL")
         # ALTER SYSTEM semantics persist without changing the live value.
-        assert setting_value(simple_query(sock, "SELECT * FROM pg_settings"),
+        assert setting_value(simple_query(sock, "SELECT name, setting, unit FROM pg_settings"),
                              "auto_vacuum") == b"on"
         persisted = Path(work_dir, "dbms.conf").read_text(encoding="utf-8")
         assert "auto_vacuum=off\n" in persisted, persisted
@@ -910,7 +910,7 @@ def main():
         assert error_of(simple_query(sock, "SHOW VARIABLES")) is None
         reload_messages = simple_query(sock, "SELECT pg_reload_conf()")
         assert data_row_values(reload_messages) == [[b"t"]], reload_messages
-        assert setting_value(simple_query(sock, "SELECT * FROM pg_settings"),
+        assert setting_value(simple_query(sock, "SELECT name, setting, unit FROM pg_settings"),
                              "auto_vacuum") == b"off"
         expect_command_tag(sock, "SET @project_value = 7",
                            "extended user variable")

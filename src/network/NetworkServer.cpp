@@ -1587,6 +1587,7 @@ bool describePreparedResult(const std::string& sql, Session& session,
     TableSchema schema;
     std::map<std::string, std::string> typeHints;
     bool virtualPgClass = false;
+    bool virtualPgSettings = false;
     if (!sourceName.empty()) {
         relation = resolveTableName(session, sourceName);
         if (g_engine.tableExists(session.currentDB, relation)) {
@@ -1597,20 +1598,40 @@ bool describePreparedResult(const std::string& sql, Session& session,
                 CatalogManager::parseQualifiedName(sourceName, name, true) &&
                 name.name == "pg_class" &&
                 (name.schema.empty() || name.schema == "pg_catalog");
-            if (!virtualPgClass) return false;
-            // Match the virtual catalog's typed execution shape without
-            // executing SELECT (Describe must never acquire rows/side effects).
-            const std::vector<std::pair<std::string, std::string>> fields = {
-                {"oid", "oid"}, {"relname", "name"}, {"relnamespace", "oid"},
-                {"relkind", "\"char\""}, {"relnatts", "smallint"},
-                {"relpersistence", "\"char\""}, {"relowner", "oid"}};
+            CatalogManager::QualifiedName settingsName;
+            const bool namesPgSettings = select &&
+                CatalogManager::parseQualifiedName(sourceName, settingsName, true) &&
+                settingsName.name == "pg_settings" &&
+                (settingsName.schema.empty() ||
+                 settingsName.schema == "pg_catalog");
+            virtualPgSettings = namesPgSettings &&
+                (settingsName.schema == "pg_catalog" ||
+                 (!g_engine.tableExists(session.currentDB, relation) &&
+                  !g_engine.viewExists(session.currentDB, relation)));
+            if (!virtualPgClass && !virtualPgSettings) return false;
+
+            // Match each virtual catalog's supported typed execution shape
+            // without executing SELECT (Describe must never acquire rows or
+            // cause side effects).  pg_settings intentionally exposes only
+            // its implemented three-column subset.
+            const std::vector<std::pair<std::string, std::string>> fields =
+                virtualPgClass
+                    ? std::vector<std::pair<std::string, std::string>>{
+                          {"oid", "oid"}, {"relname", "name"},
+                          {"relnamespace", "oid"}, {"relkind", "\"char\""},
+                          {"relnatts", "smallint"},
+                          {"relpersistence", "\"char\""},
+                          {"relowner", "oid"}}
+                    : std::vector<std::pair<std::string, std::string>>{
+                          {"name", "text"}, {"setting", "text"},
+                          {"unit", "text"}};
             for (const auto& field : fields) {
                 Column column;
                 column.dataName = field.first;
                 column.dataType = field.second;
                 schema.cols[schema.len++] = std::move(column);
             }
-            relation = "pg_class";
+            relation = virtualPgClass ? "pg_class" : "pg_settings";
         }
         for (size_t i = 0; i < schema.len; ++i) {
             const Column& column = schema.cols[i];
@@ -1618,6 +1639,9 @@ bool describePreparedResult(const std::string& sql, Session& session,
             typeHints[relation + "." + column.dataName] = column.dataType;
             if (virtualPgClass && sourceAlias.empty())
                 typeHints["pg_catalog.pg_class." + column.dataName] = column.dataType;
+            if (virtualPgSettings && sourceAlias.empty())
+                typeHints["pg_catalog.pg_settings." + column.dataName] =
+                    column.dataType;
             if (!sourceAlias.empty()) {
                 typeHints[sourceAlias + "." + column.dataName] =
                     column.dataType;
@@ -1646,7 +1670,9 @@ bool describePreparedResult(const std::string& sql, Session& session,
     const auto qualifierMatches = [&](const ColumnRefExpr& reference) {
         if (reference.table.empty()) return true;
         const std::string source = sourceAlias.empty() ? relation : sourceAlias;
-        return lowerProtocolText(reference.table) == lowerProtocolText(source);
+        const std::string qualifier = lowerProtocolText(reference.table);
+        return qualifier == lowerProtocolText(source) ||
+               (virtualPgSettings && qualifier == "pg_catalog.pg_settings");
     };
     for (const auto& item : *projections) {
         if (!item.expr) return false;
@@ -1655,6 +1681,7 @@ bool describePreparedResult(const std::string& sql, Session& session,
         if ((literal && literal->value == "*") ||
             (reference && reference->column == "*")) {
             if (relation.empty()) return false;
+            if (virtualPgSettings) return false;
             if (reference && !qualifierMatches(*reference)) return false;
             appendPhysicalColumns();
             continue;

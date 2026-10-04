@@ -16146,7 +16146,221 @@ static string expandSessionUserVariables(const string& input,
     return output;
 }
 
-// Execute the available pg_class columns as typed rows.  The old renderer
+// pg_settings is exposed as a deliberate typed subset.  PostgreSQL 18 has
+// seventeen columns; this server currently has reliable values only for the
+// first three.  Do not let the legacy text renderer silently ignore the
+// caller's projection or predicate.
+static bool executePgSettingsQuery(const string& rawSql,
+                                   const Session& session) {
+    dbms::SQLParser parser;
+    const auto parsed = parser.parse(rawSql);
+    const auto* select = parsed.success
+        ? dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()) : nullptr;
+    if (!select || !select->fromClause ||
+        select->fromClause->type != dbms::FromItem::Type::Table) {
+        throw dbms::DbError("42601", "invalid pg_settings query");
+    }
+    if (select->distinct || !select->groupBy.empty() ||
+        !select->groupByElems.empty() || select->having ||
+        select->setOp != dbms::SetOp::None || !select->locking.empty() ||
+        !select->distinctOn.empty() || !select->windowDefs.empty() ||
+        select->withTies || !select->orderBy.empty()) {
+        throw dbms::DbError("0A000", "complex pg_settings query is not supported");
+    }
+
+    const string qualifier = select->fromClause->alias.empty()
+        ? "pg_settings" : select->fromClause->alias;
+    const vector<string> supported = {"name", "setting", "unit"};
+    map<string, string> hints;
+    for (const auto& column : supported) {
+        hints[column] = "text";
+        hints[qualifier + "." + column] = "text";
+        if (select->fromClause->alias.empty())
+            hints["pg_catalog.pg_settings." + column] = "text";
+    }
+    static const set<string> kPg18SettingsColumns = {
+        "name", "setting", "unit", "category", "short_desc", "extra_desc",
+        "context", "vartype", "source", "min_val", "max_val", "enumvals",
+        "boot_val", "reset_val", "sourcefile", "sourceline",
+        "pending_restart"};
+    function<void(const dbms::Expr*)> validate =
+        [&](const dbms::Expr* expression) {
+            if (!expression) return;
+            if (const auto* column =
+                    dynamic_cast<const dbms::ColumnRefExpr*>(expression)) {
+                const bool validQualifier = column->table.empty() ||
+                    (column->table == qualifier &&
+                     (column->schema.empty() ||
+                      (select->fromClause->alias.empty() &&
+                       column->schema == "pg_catalog")));
+                if (!validQualifier)
+                    throw dbms::DbError("42P01", "missing FROM-clause entry");
+                if (hints.count(column->column)) return;
+                if (kPg18SettingsColumns.count(column->column))
+                    throw dbms::DbError(
+                        "0A000", "pg_settings column \"" + column->column +
+                                     "\" is not implemented");
+                throw dbms::DbError(
+                    "42703", "column does not exist: " + column->column);
+            }
+            if (dynamic_cast<const dbms::LiteralExpr*>(expression)) return;
+            if (const auto* unary =
+                    dynamic_cast<const dbms::UnaryOpExpr*>(expression)) {
+                validate(unary->operand.get());
+                return;
+            }
+            if (const auto* binary =
+                    dynamic_cast<const dbms::BinaryOpExpr*>(expression)) {
+                validate(binary->left.get());
+                validate(binary->right.get());
+                return;
+            }
+            if (const auto* cast =
+                    dynamic_cast<const dbms::CastExpr*>(expression)) {
+                validate(cast->operand.get());
+                return;
+            }
+            throw dbms::DbError("0A000", "pg_settings expression is not supported");
+        };
+
+    vector<const dbms::ColumnRefExpr*> projection;
+    vector<string> headers;
+    for (const auto& item : select->selectList) {
+        const auto* column =
+            dynamic_cast<const dbms::ColumnRefExpr*>(item.expr.get());
+        if (!column || column->column == "*") {
+            throw dbms::DbError(
+                "0A000", "SELECT * requires the complete pg_settings schema");
+        }
+        validate(item.expr.get());
+        projection.push_back(column);
+        headers.push_back(item.alias.empty()
+            ? column->column : decodeQuotedIdentifier(item.alias));
+    }
+    if (projection.empty())
+        throw dbms::DbError("42601", "pg_settings query has no projection");
+    validate(select->whereClause.get());
+    if (select->whereClause) {
+        const string predicateType = dbms::ExprHelper::inferResultType(
+            select->whereClause->toString(), hints);
+        if (predicateType != "boolean" && predicateType != "bool")
+            throw dbms::DbError("42804", "argument of WHERE must be type boolean");
+    }
+
+    struct SettingRow {
+        string name;
+        string setting;
+        string unit;
+        bool unitNull;
+    };
+    vector<SettingRow> settings;
+    const auto addSetting = [&](string name, string value,
+                                string unit = string{}) {
+        const bool unitNull = unit.empty();
+        settings.push_back({std::move(name), std::move(value),
+                            std::move(unit), unitNull});
+    };
+    const auto& cost = dbms::QueryPlanner::costModel();
+    const auto number = [](double value) {
+        std::ostringstream formatted;
+        formatted << value;
+        return formatted.str();
+    };
+    addSetting("max_connections", to_string(g_config.maxConnections));
+    addSetting("shared_buffers", to_string(g_config.bufferPoolFrames), "8kB");
+    addSetting("work_mem", to_string(g_config.workMemKb), "kB");
+    addSetting("max_notify_queue_pages",
+               to_string(dbms::notificationManager().queueCapacityBytes() / 8192));
+    addSetting("checkpoint_timeout", to_string(g_config.checkpointInterval), "s");
+    addSetting("statement_timeout", to_string(session.statementTimeoutMs), "ms");
+    addSetting("lock_timeout", to_string(session.lockTimeoutMs), "ms");
+    addSetting("deadlock_timeout", to_string(session.deadlockTimeoutMs), "ms");
+    addSetting("lc_monetary", session.lcMonetary);
+    addSetting("slow_query_threshold_ms", to_string(g_config.slowQueryThresholdMs), "ms");
+    addSetting("enable_seq_scan", g_config.enableSeqScan ? "on" : "off");
+    addSetting("enable_hash_join", g_config.enableHashJoin ? "on" : "off");
+    addSetting("enable_merge_join", g_config.enableMergeJoin ? "on" : "off");
+    addSetting("max_parallel_workers_per_gather",
+               to_string(g_config.maxParallelWorkersPerGather));
+    addSetting("seq_page_cost", number(cost.seqPageCost));
+    addSetting("random_page_cost", number(cost.randomPageCost));
+    addSetting("cpu_tuple_cost", number(cost.cpuTupleCost));
+    addSetting("cpu_index_tuple_cost", number(cost.cpuIndexTupleCost));
+    addSetting("cpu_operator_cost", number(cost.cpuOperatorCost));
+    addSetting("enable_nestloop", cost.enableNestloop ? "on" : "off");
+    addSetting("auto_explain", g_config.autoExplainEnabled ? "on" : "off");
+    addSetting("auto_explain.log_min_duration",
+               to_string(g_config.autoExplainThresholdMs), "ms");
+    addSetting("auto_vacuum", g_config.autoVacuumEnabled ? "on" : "off");
+    addSetting("auto_analyze", g_config.autoAnalyzeEnabled ? "on" : "off");
+    addSetting("password_policy_level", to_string(g_config.passwordPolicyLevel));
+    addSetting("audit_level", to_string(g_config.auditLevel));
+    if (dbms::isExtendedCompatMode(session.compatibilityMode)) {
+        const auto poolStats = dbms::ConnectionPool::instance().stats();
+        addSetting("pool_mode", poolStats.mode);
+        addSetting("pool_size", to_string(poolStats.poolSize));
+        addSetting("max_client_conn", to_string(poolStats.maxClientConnections));
+    }
+    dbms::ExprEvaluator evaluator;
+    evaluator.setCurrentDB(session.currentDB);
+    vector<vector<dbms::ExprValue>> results;
+    for (const auto& setting : settings) {
+        dbms::RowContext context;
+        const vector<dbms::ExprValue> values = {
+            dbms::ExprValue("text", setting.name, false),
+            dbms::ExprValue("text", setting.setting, false),
+            dbms::ExprValue("text", setting.unit, setting.unitNull)};
+        for (size_t i = 0; i < supported.size(); ++i) {
+            context.set(supported[i], values[i]);
+            context.set(qualifier + "." + supported[i], values[i]);
+            if (select->fromClause->alias.empty())
+                context.set("pg_catalog.pg_settings." + supported[i], values[i]);
+        }
+        if (select->whereClause) {
+            const auto predicate = evaluator.eval(select->whereClause.get(), context);
+            if (!predicate.isNull && predicate.typeName != "boolean" &&
+                predicate.typeName != "bool") {
+                throw dbms::DbError("42804", "argument of WHERE must be type boolean");
+            }
+            if (predicate.isNull || !predicate.asBool()) continue;
+        }
+        vector<dbms::ExprValue> row;
+        for (const auto* column : projection)
+            row.push_back(values[column->column == "name" ? 0 :
+                                 column->column == "setting" ? 1 : 2]);
+        results.push_back(std::move(row));
+    }
+
+    const size_t first = min(select->offset.value_or(0), results.size());
+    const size_t kept = min(select->limit.value_or(results.size()),
+                            results.size() - first);
+    vector<vector<string>> rows;
+    vector<vector<bool>> nulls;
+    for (size_t i = first; i < first + kept; ++i) {
+        vector<string> row;
+        vector<bool> bitmap;
+        for (const auto& value : results[i]) {
+            row.push_back(value.value);
+            bitmap.push_back(value.isNull);
+        }
+        rows.push_back(std::move(row));
+        nulls.push_back(std::move(bitmap));
+    }
+    publishStructuredUtilityResult(headers,
+                                    vector<string>(headers.size(), "text"),
+                                    rows, nulls,
+                                    "SELECT " + to_string(rows.size()));
+    for (const auto& header : headers) cout << renderLegacyHeader(header) << ' ';
+    cout << '\n';
+    for (size_t i = 0; i < rows.size(); ++i) {
+        for (size_t j = 0; j < rows[i].size(); ++j)
+            cout << (nulls[i][j] ? "NULL" : rows[i][j]) << ' ';
+        cout << '\n';
+    }
+    return false;
+}
+
+// Execute the available pg_database columns as typed rows.  The old renderer
 // ignored SELECT/WHERE entirely, making catalog queries silently misleading.
 static bool executePgDatabaseQuery(const string& rawSql,
                                    const Session& session) {
@@ -24077,8 +24291,13 @@ static bool executeInternal(const string& rawSql, Session& s) {
              (queryDb == s.currentDB &&
               !g_engine.tableExists(queryDb, tname) &&
               !g_engine.viewExists(queryDb, tname)));
+        const bool virtualPgSettings = tname == "pg_settings" &&
+            (queryDb == "pg_catalog" ||
+             (queryDb == s.currentDB &&
+              !g_engine.tableExists(queryDb, tname) &&
+              !g_engine.viewExists(queryDb, tname)));
         // pg_stat_* virtual tables
-        if (tname == "pg_stat_database" || tname == "pg_stat_tables" || tname == "pg_stat_statements" || tname == "pg_seclabels" || tname == "pg_buffercache" || tname == "pg_locks" || tname == "pg_stat_wait_events" || tname == "pg_stat_activity" || virtualPgDatabase || tname == "pg_tables" || tname == "pg_views" || tname == "pg_indexes" || tname == "pg_settings" || tname == "pg_class") {
+        if (tname == "pg_stat_database" || tname == "pg_stat_tables" || tname == "pg_stat_statements" || tname == "pg_seclabels" || tname == "pg_buffercache" || tname == "pg_locks" || tname == "pg_stat_wait_events" || tname == "pg_stat_activity" || virtualPgDatabase || virtualPgSettings || tname == "pg_tables" || tname == "pg_views" || tname == "pg_indexes" || tname == "pg_class") {
             auto bpStats = g_engine.getBufferPoolStats();
             const std::string catalogDb = queryDb == "pg_catalog"
                 ? s.currentDB : queryDb;
@@ -24242,47 +24461,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     }
                 }
             } else if (tname == "pg_settings") {
-                cout << "name setting unit " << endl;
-                cout << "max_connections " << g_config.maxConnections << " " << endl;
-                cout << "shared_buffers " << g_config.bufferPoolFrames << " 8kB" << endl;
-                cout << "work_mem " << g_config.workMemKb << " kB" << endl;
-                cout << "max_notify_queue_pages "
-                     << (dbms::notificationManager().queueCapacityBytes() /
-                         static_cast<size_t>(8192)) << " " << endl;
-                cout << "checkpoint_timeout " << g_config.checkpointInterval << " s" << endl;
-                cout << "statement_timeout " << s.statementTimeoutMs << " ms" << endl;
-                cout << "lock_timeout " << s.lockTimeoutMs << " ms" << endl;
-                cout << "deadlock_timeout " << s.deadlockTimeoutMs << " ms" << endl;
-                cout << "lc_monetary " << s.lcMonetary << " " << endl;
-                cout << "slow_query_threshold_ms " << g_config.slowQueryThresholdMs << " ms" << endl;
-                cout << "enable_seq_scan " << (g_config.enableSeqScan ? "on" : "off") << " " << endl;
-                cout << "enable_hash_join " << (g_config.enableHashJoin ? "on" : "off") << " " << endl;
-                cout << "enable_merge_join " << (g_config.enableMergeJoin ? "on" : "off") << " " << endl;
-                cout << "max_parallel_workers_per_gather " << g_config.maxParallelWorkersPerGather << " " << endl;
-                {
-                    const auto& cm = dbms::QueryPlanner::costModel();
-                    cout << "seq_page_cost " << cm.seqPageCost << " " << endl;
-                    cout << "random_page_cost " << cm.randomPageCost << " " << endl;
-                    cout << "cpu_tuple_cost " << cm.cpuTupleCost << " " << endl;
-                    cout << "cpu_index_tuple_cost " << cm.cpuIndexTupleCost << " " << endl;
-                    cout << "cpu_operator_cost " << cm.cpuOperatorCost << " " << endl;
-                    cout << "enable_nestloop " << (cm.enableNestloop ? "on" : "off") << " " << endl;
-                    // DIV-12: PgBouncer-style pool parameters are project
-                    // extensions; hide them from SHOW ALL in postgresql18
-                    // mode so clients do not mistake them for GUCs.
-                    if (dbms::isExtendedCompatMode(s.compatibilityMode)) {
-                        const auto poolStats = dbms::ConnectionPool::instance().stats();
-                        cout << "pool_mode " << poolStats.mode << " " << endl;
-                        cout << "pool_size " << poolStats.poolSize << " " << endl;
-                        cout << "max_client_conn " << poolStats.maxClientConnections << " " << endl;
-                    }
-                }
-                cout << "auto_explain " << (g_config.autoExplainEnabled ? "on" : "off") << " " << endl;
-                cout << "auto_explain.log_min_duration " << g_config.autoExplainThresholdMs << " ms" << endl;
-                cout << "auto_vacuum " << (g_config.autoVacuumEnabled ? "on" : "off") << " " << endl;
-                cout << "auto_analyze " << (g_config.autoAnalyzeEnabled ? "on" : "off") << " " << endl;
-                cout << "password_policy_level " << g_config.passwordPolicyLevel << " " << endl;
-                cout << "audit_level " << g_config.auditLevel << " " << endl;
+                return executePgSettingsQuery(effectiveRawSql, s);
             } else if (tname == "pg_class") {
                 return executePgClassQuery(effectiveRawSql, s, catalogDb);
             }
