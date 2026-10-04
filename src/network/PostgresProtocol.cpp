@@ -12,6 +12,7 @@
 #include <cerrno>
 #include <cstring>
 #include <limits>
+#include <poll.h>
 #include <string>
 
 namespace dbms {
@@ -344,6 +345,96 @@ bool PostgresProtocol::readMessage(PgFrontendMessage& message, std::string& erro
         return false;
     }
     return true;
+}
+
+ProtocolInputWaitResult PostgresProtocol::waitForInputUntil(
+    std::chrono::steady_clock::time_point deadline) {
+    if (socket_.hasBufferedInput()) return ProtocolInputWaitResult::Ready;
+    for (;;) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) return ProtocolInputWaitResult::TimedOut;
+        const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(
+            deadline - now).count();
+        const int timeoutMs = static_cast<int>(std::min<int64_t>(
+            remaining, std::numeric_limits<int>::max()));
+        pollfd descriptor{};
+        descriptor.fd = socket_.fd;
+        descriptor.events = POLLIN;
+        const int ready = ::poll(&descriptor, 1, timeoutMs);
+        if (ready > 0) {
+            if ((descriptor.revents & POLLIN) != 0)
+                return ProtocolInputWaitResult::Ready;
+            return ProtocolInputWaitResult::Error;
+        }
+        if (ready == 0) return ProtocolInputWaitResult::TimedOut;
+        if (errno != EINTR) return ProtocolInputWaitResult::Error;
+    }
+}
+
+ProtocolMessageReadResult PostgresProtocol::readMessageUntil(
+    PgFrontendMessage& message, std::string& error,
+    std::chrono::steady_clock::time_point deadline,
+    const std::function<bool()>& interrupted,
+    bool& partialMessage) {
+    partialMessage = false;
+    const auto readPart = [&](void* destination, size_t length) {
+        auto* bytes = static_cast<uint8_t*>(destination);
+        size_t received = 0;
+        while (received < length) {
+            if (interrupted && interrupted())
+                return ProtocolMessageReadResult::Interrupted;
+            const auto now = std::chrono::steady_clock::now();
+            if (deadline != std::chrono::steady_clock::time_point::max() &&
+                now >= deadline) {
+                return ProtocolMessageReadResult::TimedOut;
+            }
+            auto wakeAt = now + std::chrono::milliseconds(50);
+            if (deadline != std::chrono::steady_clock::time_point::max() &&
+                wakeAt > deadline) {
+                wakeAt = deadline;
+            }
+            const ProtocolInputWaitResult ready = waitForInputUntil(wakeAt);
+            if (ready == ProtocolInputWaitResult::TimedOut) {
+                if (deadline != std::chrono::steady_clock::time_point::max() &&
+                    std::chrono::steady_clock::now() >= deadline) {
+                    return ProtocolMessageReadResult::TimedOut;
+                }
+                continue;
+            }
+            if (ready == ProtocolInputWaitResult::Error)
+                return ProtocolMessageReadResult::Error;
+            const ssize_t count = socket_.recv(
+                bytes + received, length - received);
+            if (count < 0 && (errno == EINTR || errno == EAGAIN ||
+                              errno == EWOULDBLOCK)) {
+                continue;
+            }
+            if (count <= 0) return ProtocolMessageReadResult::Error;
+            received += static_cast<size_t>(count);
+            partialMessage = true;
+        }
+        return ProtocolMessageReadResult::Complete;
+    };
+
+    uint8_t type = 0;
+    ProtocolMessageReadResult result = readPart(&type, sizeof(type));
+    if (result != ProtocolMessageReadResult::Complete) return result;
+    uint8_t lengthBytes[4]{};
+    result = readPart(lengthBytes, sizeof(lengthBytes));
+    if (result != ProtocolMessageReadResult::Complete) return result;
+    const uint32_t length = decodeUInt32(lengthBytes);
+    if (length < 4 || length > kMaxFrontendPacket) {
+        error = "invalid frontend message length";
+        return ProtocolMessageReadResult::Error;
+    }
+    message.type = static_cast<char>(type);
+    message.payload.resize(length - 4);
+    if (!message.payload.empty()) {
+        result = readPart(message.payload.data(), message.payload.size());
+        if (result != ProtocolMessageReadResult::Complete) return result;
+    }
+    partialMessage = false;
+    return ProtocolMessageReadResult::Complete;
 }
 
 bool PostgresProtocol::sendMessage(char type, const std::vector<uint8_t>& body) {

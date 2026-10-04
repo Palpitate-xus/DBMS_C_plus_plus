@@ -2,7 +2,9 @@
 
 #include "TLSWrapper.h"
 
+#include <chrono>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <string>
 #include <vector>
@@ -22,6 +24,9 @@ struct PgFrontendMessage {
     char type = '\0';
     std::vector<uint8_t> payload;
 };
+
+enum class ProtocolInputWaitResult { Ready, TimedOut, Error };
+enum class ProtocolMessageReadResult { Complete, TimedOut, Interrupted, Error };
 
 struct PgColumnDescription {
     std::string name;
@@ -44,6 +49,16 @@ public:
 
     // Read one typed Frontend/Backend protocol message after startup.
     bool readMessage(PgFrontendMessage& message, std::string& error);
+    ProtocolMessageReadResult readMessageUntil(
+        PgFrontendMessage& message, std::string& error,
+        std::chrono::steady_clock::time_point deadline,
+        const std::function<bool()>& interrupted,
+        bool& partialMessage);
+
+    // Wait until at least one frontend byte is available or the absolute
+    // deadline expires. SSL-decrypted bytes already buffered are ready too.
+    ProtocolInputWaitResult waitForInputUntil(
+        std::chrono::steady_clock::time_point deadline);
 
     bool sendAuthenticationOk();
     bool sendAuthenticationCleartextPassword();

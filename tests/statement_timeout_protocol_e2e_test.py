@@ -19,6 +19,7 @@ def main():
     waiter = server["sock"]
     waiter.settimeout(5)
     blocker = None
+    partial_copy = None
 
     def query(sock, sql, expected_state=None, expected_ready=None):
         messages = client.simple_query(sock, sql)
@@ -70,6 +71,66 @@ def main():
         result = query(waiter, "SELECT v FROM statement_timeout_lock WHERE id = 1")
         assert result[0] == [["0"]], result
 
+        # COPY FROM STDIN blocks in the protocol input loop rather than the
+        # executor's lock-wait loop. Its deadline must still abort and restore
+        # an autocommit connection without waiting for CopyDone.
+        waiter.sendall(client.typed(
+            b"Q", b"COPY statement_timeout_lock (id, v) FROM STDIN\0"))
+        kind, body = client.read_message(waiter)
+        assert kind == b"G", (kind, body)
+        time.sleep(0.4)
+        copy_messages = client.read_until_ready(waiter)
+        assert any(kind == b"E" and b"C57014\0" in body
+                   for kind, body in copy_messages), copy_messages
+        assert copy_messages[-1] == (b"Z", b"I"), copy_messages[-1]
+        result = query(waiter, "SELECT v FROM statement_timeout_lock WHERE id = 1")
+        assert result[0] == [["0"]], result
+
+        # The same idle COPY wait through Parse/Bind/Describe/Execute must
+        # retain its first-message deadline and recover only after Sync.
+        copy_sql = b"COPY statement_timeout_lock (id, v) FROM STDIN"
+        parse = client.typed(b"P", b"\0" + copy_sql + b"\0\0\0")
+        bind = client.typed(b"B", b"\0\0" + struct.pack("!HHH", 0, 0, 0))
+        describe = client.typed(b"D", b"P\0")
+        execute = client.typed(b"E", b"\0" + struct.pack("!I", 0))
+        waiter.sendall(parse + bind + describe + execute)
+        assert client.read_message(waiter) == (b"1", b"")
+        assert client.read_message(waiter) == (b"2", b"")
+        assert client.read_message(waiter)[0] == b"n"
+        kind, body = client.read_message(waiter)
+        assert kind == b"G", (kind, body)
+        time.sleep(0.4)
+        kind, body = client.read_message(waiter)
+        assert kind == b"E" and b"C57014\0" in body, (kind, body)
+        waiter.sendall(client.typed(b"S"))
+        sync_messages = client.read_until_ready(waiter)
+        assert sync_messages[-1] == (b"Z", b"I"), sync_messages[-1]
+
+        # A client that begins a CopyData frame and then stalls must not block
+        # the server past the statement deadline. Since part of a protocol
+        # frame was consumed, the server reports the timeout and closes that
+        # connection rather than misparsing the remaining frame bytes.
+        partial_copy = socket.create_connection(
+            ("127.0.0.1", server["port"]), timeout=5)
+        partial_copy.settimeout(5)
+        client.startup(partial_copy, "alice", "info")
+        query(partial_copy, "SET statement_timeout = 250")
+        partial_copy.sendall(client.typed(
+            b"Q", b"COPY statement_timeout_lock (id, v) FROM STDIN\0"))
+        kind, body = client.read_message(partial_copy)
+        assert kind == b"G", (kind, body)
+        partial_copy.sendall(client.typed(b"d", b"2\t8\n"))
+        time.sleep(0.05)
+        partial_copy.sendall(b"d" + struct.pack("!I", 100))
+        time.sleep(0.4)
+        kind, body = client.read_message(partial_copy)
+        assert kind == b"E" and b"C57014\0" in body, (kind, body)
+        assert partial_copy.recv(1) == b"", "partial protocol frame must close"
+        result = query(
+            waiter,
+            "SELECT v FROM statement_timeout_lock WHERE id = 2")
+        assert result[0] == [], result
+
         # PostgreSQL starts an extended-protocol timer at the first
         # query-related message, not only when Execute begins. Parse opens
         # the implicit snapshot here; with no later Bind/Execute, the server
@@ -109,7 +170,9 @@ def main():
         query(blocker, "ROLLBACK")
         result = query(waiter, "SELECT v FROM statement_timeout_lock WHERE id = 1")
         assert result[0] == [["0"]], result
-        print("[STATEMENT TIMEOUT PROTOCOL E2E] Simple/Extended lock waits passed")
+        print(
+            "[STATEMENT TIMEOUT PROTOCOL E2E] Simple/Extended execution and "
+            "COPY waits passed")
     finally:
         if blocker is not None:
             try:
@@ -117,6 +180,8 @@ def main():
             except Exception:
                 pass
             blocker.close()
+        if partial_copy is not None:
+            partial_copy.close()
         runner.stop_ours(server)
 
 

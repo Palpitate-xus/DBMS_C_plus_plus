@@ -224,8 +224,9 @@ def main():
         sock.sendall(client.typed(b"S"))
         assert client.read_until_ready(sock) == [(b"Z", b"I")]
 
-        # CancelRequest targets an active COPY, wakes on the next CopyData,
-        # drains CopyFail, and leaves the implicit transaction empty.
+        # CancelRequest interrupts an active COPY even while the backend is
+        # waiting for the next frontend message, and leaves the implicit
+        # transaction empty without requiring another CopyData/CopyFail.
         sock.close()
         sock = socket.create_connection(("127.0.0.1", server["port"]), 15)
         sock.settimeout(15)
@@ -237,10 +238,8 @@ def main():
         cancel = socket.create_connection(("127.0.0.1", server["port"]), 15)
         cancel.sendall(struct.pack("!IIII", 16, 80877102, backend_pid, secret))
         cancel.close()
-        sock.sendall(client.typed(b"d", b"50\tcancelled\tv\n"))
         kind, body = client.read_message(sock)
         assert kind == b"E" and b"C57014\0" in body, (kind, body)
-        sock.sendall(client.typed(b"f", b"cancel acknowledged\0"))
         assert client.read_until_ready(sock) == [(b"Z", b"I")]
         exported = copy_out(client, sock, "COPY copy_wire (id) TO STDOUT", 1)
         assert b"50\n" not in b"".join(

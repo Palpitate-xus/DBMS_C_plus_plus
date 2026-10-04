@@ -2822,10 +2822,15 @@ struct CopyStreamResult {
 
 class CopyInterruptGuard {
 public:
-    explicit CopyInterruptGuard(Session& session)
+    explicit CopyInterruptGuard(
+        Session& session,
+        std::chrono::steady_clock::time_point deadline =
+            std::chrono::steady_clock::time_point::max())
         : session_(session), state_(session.interruptState) {
         dbms::setCurrentSession(&session_);
         g_engine.setRLSUser(effectiveSessionRole(session_));
+        state_->cancelRequested.store(false, std::memory_order_release);
+        state_->timeoutRequested.store(false, std::memory_order_release);
         state_->queryActive.store(true, std::memory_order_release);
         dbms::setCurrentQueryInterruptState(state_);
         g_engine.getLockManager().setInterruptHandler([state = state_]() {
@@ -2835,38 +2840,95 @@ public:
                     "terminating connection due to administrator command");
             }
             if (state->cancelRequested.load(std::memory_order_acquire)) {
-                throw DbError("57014",
-                              "canceling COPY due to user request");
+                if (state->timeoutRequested.load(std::memory_order_acquire)) {
+                    throw DbError(
+                        "57014",
+                        "canceling statement due to statement timeout");
+                }
+                throw DbError("57014", "canceling COPY due to user request");
             }
         });
+        if (deadline != std::chrono::steady_clock::time_point::max()) {
+            timeoutThread_ = std::thread([this, deadline]() {
+                std::unique_lock<std::mutex> lock(timeoutMutex_);
+                const bool completed = timeoutCv_.wait_until(
+                    lock, deadline, [this]() { return complete_; });
+                if (!completed && state_->queryActive.load(
+                                      std::memory_order_acquire)) {
+                    state_->timeoutRequested.store(
+                        true, std::memory_order_release);
+                    state_->cancelRequested.store(
+                        true, std::memory_order_release);
+                }
+            });
+        }
     }
 
     ~CopyInterruptGuard() {
+        stopTimer();
         g_engine.getLockManager().clearInterruptHandler();
         dbms::setCurrentQueryInterruptState(nullptr);
         state_->queryActive.store(false, std::memory_order_release);
         state_->cancelRequested.store(false, std::memory_order_release);
+        state_->timeoutRequested.store(false, std::memory_order_release);
+    }
+
+    void suspendForCleanup() {
+        stopTimer();
+        state_->queryActive.store(false, std::memory_order_release);
+        state_->cancelRequested.store(false, std::memory_order_release);
+        state_->timeoutRequested.store(false, std::memory_order_release);
     }
 
 private:
+    void stopTimer() {
+        {
+            std::lock_guard<std::mutex> lock(timeoutMutex_);
+            complete_ = true;
+        }
+        timeoutCv_.notify_all();
+        if (timeoutThread_.joinable()) timeoutThread_.join();
+    }
+
     Session& session_;
     std::shared_ptr<SessionInterruptState> state_;
+    std::mutex timeoutMutex_;
+    std::condition_variable timeoutCv_;
+    bool complete_ = false;
+    std::thread timeoutThread_;
 };
 
 CopyStreamResult receiveCopyIn(PostgresProtocol& protocol,
                                const CopyWirePlan& plan,
                                Session& session,
-                               const std::function<bool()>& abortBeforeError) {
+                               const std::function<bool()>& abortBeforeError,
+                               std::chrono::steady_clock::time_point deadline) {
     CopyStreamResult result;
     std::string pending;
     const TableSchema table =
         g_engine.getTableSchema(session.currentDB, plan.physicalTable);
-    CopyInterruptGuard interruptGuard(session);
+    CopyInterruptGuard interruptGuard(session, deadline);
+    const auto checkCopyInterrupt = [&]() {
+        if (deadline != std::chrono::steady_clock::time_point::max() &&
+            std::chrono::steady_clock::now() >= deadline) {
+            throw DbError(
+                "57014",
+                "canceling statement due to statement timeout");
+        }
+        dbms::checkForQueryInterrupt();
+    };
 
     const auto fail = [&](std::string state, std::string message) {
         if (!result.error.empty()) return;
         result.sqlState = std::move(state);
         result.error = std::move(message);
+        // Interrupt cleanup itself must be allowed to release the failed
+        // statement's locks and undo state.
+        session.interruptState->timeoutRequested.store(
+            false, std::memory_order_release);
+        session.interruptState->cancelRequested.store(
+            false, std::memory_order_release);
+        interruptGuard.suspendForCleanup();
         // The frontend may stop sending CopyData as soon as it sees this
         // error. Release aborted transaction resources before responding,
         // not after waiting for CopyDone or Sync from that frontend.
@@ -2883,7 +2945,7 @@ CopyStreamResult receiveCopyIn(PostgresProtocol& protocol,
     const auto insertRecord = [&](std::string record) {
         if (!result.error.empty()) return;
         try {
-            dbms::checkForQueryInterrupt();
+            checkCopyInterrupt();
             std::vector<std::optional<std::string>> fields;
             std::string decodeError;
             if (!decodeCopyTextRecord(
@@ -2931,10 +2993,44 @@ CopyStreamResult receiveCopyIn(PostgresProtocol& protocol,
     while (result.transportOk) {
         PgFrontendMessage message;
         std::string protocolError;
-        if (!protocol.readMessage(message, protocolError)) {
+        bool partialMessage = false;
+        const auto interrupt = session.interruptState;
+        const ProtocolMessageReadResult readResult =
+            protocol.readMessageUntil(
+                message, protocolError, deadline,
+                [interrupt]() {
+                    return interrupt->terminateRequested.load(
+                               std::memory_order_acquire) ||
+                           interrupt->cancelRequested.load(
+                               std::memory_order_acquire);
+                },
+                partialMessage);
+        if (readResult != ProtocolMessageReadResult::Complete) {
+            if (readResult == ProtocolMessageReadResult::TimedOut ||
+                readResult == ProtocolMessageReadResult::Interrupted) {
+                const bool terminated = interrupt->terminateRequested.load(
+                    std::memory_order_acquire);
+                const bool timedOut =
+                    readResult == ProtocolMessageReadResult::TimedOut ||
+                    interrupt->timeoutRequested.load(
+                        std::memory_order_acquire) ||
+                    (deadline != std::chrono::steady_clock::time_point::max() &&
+                     std::chrono::steady_clock::now() >= deadline);
+                fail(terminated ? "57P01" : "57014",
+                     terminated
+                         ? "terminating connection due to administrator command"
+                         : timedOut
+                             ? "canceling statement due to statement timeout"
+                             : "canceling COPY due to user request");
+                // Consumed a prefix of the frontend frame; after reporting the
+                // timeout/cancel, close instead of misreading its remainder
+                // as a new PostgreSQL message.
+                if (partialMessage) result.transportOk = false;
+                return result;
+            }
             result.transportOk = false;
             result.error = protocolError;
-            break;
+            return result;
         }
         if (message.type == 'd') {
             if (!result.error.empty()) continue;
@@ -2996,18 +3092,28 @@ CopyStreamResult receiveCopyIn(PostgresProtocol& protocol,
 
 CopyStreamResult sendCopyOut(PostgresProtocol& protocol,
                              const CopyWirePlan& plan,
-                             Session& session) {
+                             Session& session,
+                             std::chrono::steady_clock::time_point deadline) {
     CopyStreamResult result;
     const TableSchema table =
         g_engine.getTableSchema(session.currentDB, plan.physicalTable);
-    CopyInterruptGuard interruptGuard(session);
+    CopyInterruptGuard interruptGuard(session, deadline);
+    const auto checkCopyInterrupt = [&]() {
+        if (deadline != std::chrono::steady_clock::time_point::max() &&
+            std::chrono::steady_clock::now() >= deadline) {
+            throw DbError(
+                "57014",
+                "canceling statement due to statement timeout");
+        }
+        dbms::checkForQueryInterrupt();
+    };
     try {
         const bool scanned = g_engine.forEachVisibleRow(
             session.currentDB, plan.physicalTable, "SELECT",
             [&](uint32_t pageId, uint16_t slotId, const char* data,
                 size_t length) {
                 if (!result.transportOk || !result.error.empty()) return;
-                dbms::checkForQueryInterrupt();
+                checkCopyInterrupt();
                 const int64_t rid = StorageEngine::encodeRid(pageId, slotId);
                 StorageEngine::bindNullRow(
                     &g_engine, session.currentDB, plan.physicalTable, rid,
@@ -3044,6 +3150,8 @@ CopyStreamResult sendCopyOut(PostgresProtocol& protocol,
             result.sqlState = "XX001";
             result.error = "COPY TO could not read the relation";
         }
+        if (result.error.empty() && result.transportOk)
+            checkCopyInterrupt();
     } catch (const DbError& error) {
         result.sqlState = error.sqlState();
         result.error = error.message();
@@ -4410,6 +4518,12 @@ void handleClient(SecureSocket socket, std::string clientHost) {
     const auto executeCopyWire = [&](CopyWirePlan plan)
         -> CopyExecutionOutcome {
         CopyExecutionOutcome outcome;
+        const auto copyDeadline = extendedQueryTimeoutActive
+            ? extendedQueryDeadline
+            : session.statementTimeoutMs > 0
+                ? std::chrono::steady_clock::now() +
+                    std::chrono::milliseconds(session.statementTimeoutMs)
+                : std::chrono::steady_clock::time_point::max();
         outcome.failedInExistingTransaction = g_engine.inTransaction();
         if (transactionFailed) {
             const QueryResult error = transactionAbortedResult();
@@ -4465,7 +4579,8 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 return outcome;
             }
             CopyStreamResult stream = receiveCopyIn(
-                protocol, plan, session, abortCopyTransaction);
+                protocol, plan, session, abortCopyTransaction,
+                copyDeadline);
             outcome.connectionOk = stream.transportOk;
             outcome.syncConsumed = stream.syncConsumed;
             QueryResult finishError;
@@ -4508,7 +4623,8 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             outcome.connectionOk = false;
             return outcome;
         }
-        CopyStreamResult stream = sendCopyOut(protocol, plan, session);
+        CopyStreamResult stream = sendCopyOut(
+            protocol, plan, session, copyDeadline);
         QueryResult finishError;
         const bool finished = finishCopyBoundary(
             boundary, stream.success, finishError);
