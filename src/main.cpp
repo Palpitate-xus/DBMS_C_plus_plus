@@ -24106,6 +24106,20 @@ static bool executeInternal(const string& rawSql, Session& s) {
             return false;
         }
 
+        // These PostgreSQL system catalogs have no protocol-visible schema
+        // or typed execution path yet.  Letting them continue into the
+        // physical table-schema/lock path reports a misleading 55P03 instead
+        // of the actual capability gap.
+        const std::string catalogName = toLower(tname);
+        const bool unresolvedUnqualifiedRelation =
+            queryDb == s.currentDB && !g_engine.tableExists(queryDb, tname);
+        if ((queryDb == "pg_catalog" || unresolvedUnqualifiedRelation) &&
+            (catalogName == "pg_index" || catalogName == "pg_operator")) {
+            throw dbms::DbError(
+                "0A000", "system catalog relation \"pg_catalog." +
+                             catalogName + "\" is not implemented");
+        }
+
         if (queryDb != "information_schema" && queryDb != "pg_catalog" &&
             !g_engine.tableExists(queryDb, tname)) {
             dbms::CatalogManager::QualifiedName viewQualified;
