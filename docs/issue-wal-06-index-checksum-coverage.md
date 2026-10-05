@@ -36,13 +36,21 @@ instead of a fixed `.tmp` name and non-synced stream/rename sequence, so the
 sidecar file and its parent directory receive the same durability treatment
 as the other index sidecars.
 
+GIN sidecars now use a binary V2 format with length-delimited keys and postings
+plus CRC32C over the complete payload. This also fixes a query correctness bug:
+the old whitespace-delimited V1 format could not represent JSON/array keys
+containing spaces (for example, `"hello world"`). V1 text sidecars remain
+searchable where representable and are reported as unchecked.
+
 The offline `--verify-data-checksums` utility discovers B+ tree files named
-`.idx`/`.idx_*`, hash sidecars named `.hidx`, and Bloom sidecars named `.bidx`
-below the cluster and resolved tablespace roots. It opens them with read-only,
+`.idx`/`.idx_*`, hash sidecars named `.hidx`, Bloom sidecars named `.bidx`, and
+GIN sidecars named `.gin` below the cluster and resolved tablespace roots. It opens them with read-only,
 no-follow descriptors; checks file/header bounds and checksums; and reports
 page-bound, content-only, unchecked B+ tree page counts, and checked/unchecked
-hash and Bloom file counts separately. A zero-marker B+ tree, V1 hash file or
-`BLM1` Bloom file is scanned but explicitly reported as unchecked. Encrypted
+hash, Bloom, and GIN file counts separately. A zero-marker B+ tree, V1 hash
+file, `BLM1` Bloom file, or V1 GIN text file is scanned but explicitly
+reported as unchecked. GIN V2 offline validation checks the signature, version,
+entry-count bound and CRC32C, not posting-list topology. Encrypted
 B+ tree sidecars use the existing `PageCrypto` read path; this addition is not
 a TDE security review.
 
@@ -64,10 +72,12 @@ a TDE security review.
   checks.
 - `scripts/build_one_test.sh bloom_index_test` — passed existing Bloom unit,
   growth, malformed-file and StorageEngine lifecycle/DML regression coverage.
+- `scripts/build_one_test.sh gin_brin_index_test` — passed GIN whitespace-key
+  lookup, V2 checksum-corruption rejection, V1 compatibility and BRIN coverage.
 - `python3 tests/checksum_verification_e2e_test.py` — passed read-only
   snapshots, in-cluster/composite/tablespace B+ tree discovery, page-bit and
-  whole-page-swap rejection, `.hidx` and `.bidx` corruption rejection, V1
-  compatibility and unchecked legacy counts.
+  whole-page-swap rejection, `.hidx`, `.bidx`, and `.gin` corruption rejection,
+  V1 compatibility and unchecked legacy counts.
 - `git diff --check` — passed.
 
 The full registered suite and a PostgreSQL 18.6 runtime differential were not
@@ -76,14 +86,14 @@ run. The encrypted-index sidecar path was not independently exercised.
 ## Remaining gaps
 
 WAL-06 remains partial. Existing `0xC551` B+ tree files are not page-bound
-until rewritten; zero-marker legacy trees, V1 hash files, and `BLM1` Bloom
-files remain unchecked. GIN, GiST, SP-GiST, and BRIN files still lack
-checksums; catalog/schema, FSM/VM, and other metadata do not have unified
-checksums. The offline verifier checks B+ tree page checksums and V2 Hash/Bloom
-sidecar CRCs, but does not parse tree topology or validate the other index AMs.
+until rewritten; zero-marker legacy trees, V1 hash files, `BLM1` Bloom files,
+and V1 GIN text files remain unchecked. GiST, SP-GiST, and BRIN files still
+lack checksums; catalog/schema, FSM/VM, and other metadata do not have unified
+checksums. The offline verifier checks B+ tree page checksums and V2
+Hash/Bloom/GIN sidecar CRCs, but does not parse tree topology or GIN postings.
 There is no `pg_checksums`-style
 enable/disable/rewrite/progress workflow or online whole-cluster verification.
 The custom checksums are not PostgreSQL page checksums.
 
 Source/test commits: `93addab7`, `2685454b`, `3b595189`, `8e92ebd9`,
-`b32ab185` (not pushed).
+`b32ab185`, `f76809b6` (not pushed).
