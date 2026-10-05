@@ -5,10 +5,11 @@ Status: partial. The source/test fixes are local commits `4534b971`,
 (ON-conjunction fix, 2026-10-05), `65718c2b` (RIGHT/FULL residual coverage,
 2026-10-05), `fd79875a` (USING/NATURAL output semantics, 2026-10-05), and
 `3fef4f7d` (typed canonical JOIN keys, 2026-10-05), `124bc278`
-(simple scalar expression projections, 2026-10-05), and `1ef35962`
-(evaluator-supported scalar functions, 2026-10-05), and `de98eddb`
-(simple CASE projections, 2026-10-05), and `cd53df9d`
-(ordering by a projected expression, 2026-10-05).
+(simple scalar expression projections, 2026-10-05), `1ef35962`
+(evaluator-supported scalar functions, 2026-10-05), `de98eddb`
+(simple CASE projections, 2026-10-05), `cd53df9d`
+(ordering by a projected expression, 2026-10-05), and `d7389c77`
+(alias-qualified star expansion, 2026-10-05).
 
 ## Reproduced behavior
 
@@ -31,6 +32,9 @@ Status: partial. The source/test fixes are local commits `4534b971`,
   `abs(a.id - b.val)` with SQLSTATE `0A000`.
 - The multi-table projection binder also rejected CASE expressions even when
   every WHEN/THEN/ELSE reference belonged to the joined inputs.
+- A multi-table target `b.*` was parsed as an ordinary column reference and
+  failed with SQLSTATE `42703` instead of expanding the qualified relation's
+  columns.
 - It also returned rows in join/input order while silently ignoring ORDER BY,
   LIMIT, and OFFSET. `ORDER BY a.id DESC LIMIT 1` returned both rows.
 - The FROM-chain parser stopped after the 12th JOIN without reporting an
@@ -70,6 +74,10 @@ Status: partial. The source/test fixes are local commits `4534b971`,
   condition, result, and ELSE reference against the same joined-row context;
   result type inference and SQL NULL evaluation remain delegated to the
   expression evaluator.
+- Expand a simple relation-alias-qualified `alias.*` in target-list order to
+  the original schema columns from that relation. Keep its duplicate names,
+  type metadata, and per-column NULL bitmap rather than applying unqualified
+  JOIN USING merge rules.
 - Sort supported column-reference or output-position keys with ASC/DESC and
   NULLS FIRST/LAST, then apply LIMIT/OFFSET. Unsupported projections, sort
   expressions, DISTINCT/GROUP/WINDOW forms fail explicitly rather than being
@@ -162,6 +170,11 @@ Status: partial. The source/test fixes are local commits `4534b971`,
   projected now returns the expected descending order by the computed value;
   the previous behavior rejected it with `0A000`. This is not general
   ORDER-BY-expression or collation-aware ordering support.
+- After `d7389c77`, `scripts/build.sh`,
+  `tests/join_type_protocol_e2e_test.py`, and `tests/multijoin_e2e_test.py`
+  passed. `SELECT b.*` on a LEFT JOIN chain now expands the right relation's
+  column and returns NULL for the unmatched row; before the fix it failed with
+  `42703`. General row expansion and schema-qualified star remain incomplete.
 - `tests/compat/cases/multijoin_projection_filter.sql` was added, but the
   differential runner refused preflight because the configured reference
   server reports PostgreSQL 17.2 (`170002`) while the runner requires 18.6
@@ -169,9 +182,9 @@ Status: partial. The source/test fixes are local commits `4534b971`,
 - The full registered suite and PostgreSQL 18.6 differential were not run.
 
 This does not complete QRY-03 or OPT-02. General target-list expressions
-(including SRFs, aggregates, and window expressions; only simple CASE and evaluator-
-supported scalar calls are handled), qualified star expansion,
-DISTINCT/GROUP/HAVING/WINDOW, collation-aware and
-arbitrary-expression ordering, and arbitrary nested/lateral join semantics
-remain open. OPT-02's DP/exhaustive join search, GEQO threshold, semi/anti
-constraints, and bushy plans remain unimplemented.
+(including SRFs, aggregates, and window expressions; only simple CASE and
+evaluator-supported scalar calls are handled), general row expansion beyond
+simple `alias.*`, DISTINCT/GROUP/HAVING/WINDOW, collation-aware and arbitrary-
+expression ordering, and arbitrary nested/lateral join semantics remain open.
+OPT-02's DP/exhaustive join search, GEQO threshold, semi/anti constraints, and
+bushy plans remain unimplemented.
