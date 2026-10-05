@@ -59,6 +59,14 @@ confirmed after their physical work; callers must re-check the relation state.
 Startup aborts rather than serving a database when stale-temp cleanup cannot
 durably update the list or remove the leftover files.
 
+Large-object initialization and `LargeObjectManager::create()` also lacked
+directory barriers. Newly created database/`.lobjects` directory components
+now have their parents synced; object creation fsyncs the empty file and then
+its `.lobjects` directory before returning an ID. If either publication step
+fails, the manager refuses operations when directory initialization was not
+durable, or removes the unreturned object and syncs the rollback when the
+object-name barrier fails.
+
 ## Verification
 
 - `bash scripts/build_one_test.sh schema_marker_publish_guard_test` — passed.
@@ -86,6 +94,15 @@ durably update the list or remove the leftover files.
   fixed-record generation is re-synced before success. The DROP case injects
   the same post-rename failure and verifies surviving names remain intact and
   the file length remains a multiple of the fixed record width.
+- `g++ -std=c++17 -Wall -Wextra -Isrc src/storage/LargeObject.cpp
+  tests/large_object_create_durability_test.cpp -o
+  build/large_object_create_durability_test` followed by the binary — passed.
+  Injected parent-sync failures at directory-tree initialization and after
+  object-file creation both prevented the object from being returned; after a
+  fresh manager reopened the directory, identifier 1 was safely allocated.
+  `large_object_reopen_test`, `large_object_empty_write_test`,
+  `large_object_import_replace_test`, and `large_object_drop_failure_test`
+  were also directly compiled against the updated `LargeObject.cpp` and passed.
 - `bash scripts/build_one_test.sh table_comment_storage_test` — passed before
   the final startup fail-closed adjustment; it covers normal table rename and
   drop behavior. `bash scripts/build_one_test.sh database_lifecycle_test` —
@@ -107,9 +124,12 @@ file/catalog changes are not one WAL-atomic DDL generation: a persistent
 an indeterminate `IO_ERROR` and requires operator/client re-check. A temporary
 hard-link alias may remain if cleanup itself fails, but the schema target was
 synced before that cleanup and the alias is not interpreted as a schema
-marker.
+marker. Large-object byte-range write, truncate, drop restoration, WAL,
+catalog/ACL, and transaction semantics remain outside this create-only
+durability fix.
 
 Source/test commits: `e8a6d1ee` (schema marker create), `cc129973` (schema
 marker drop), `f8c02416` (database creation), `b707afd3` (database drop),
 `ab72c8fe` (database rename), `3db539a9` (sequence rename/drop), and
-`4eca4962` (fixed-record table-list publication), all not pushed.
+`4eca4962` (fixed-record table-list publication), `ca3f936b` (large-object
+creation publication), all not pushed.
