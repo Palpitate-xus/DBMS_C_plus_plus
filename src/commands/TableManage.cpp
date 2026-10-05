@@ -27,6 +27,8 @@
 #include "common/TimeZoneRules.h"
 #include "process/RuntimeStats.h"
 #include "process/SqlStats.h"
+#include "access/GinIndexFormat.h"
+#include "access/IndexChecksum.h"
 #include "access/IndexFileUtil.h"
 // Full definitions for classes only forward-declared in TableManage.h.
 #include "BPTree.h"
@@ -42,6 +44,7 @@
 #include <charconv>
 #include <cmath>
 #include <cctype>
+#include <cstring>
 #include <exception>
 #include <iomanip>
 #include <limits>
@@ -12580,6 +12583,25 @@ static std::vector<std::string> extractGinKeys(const std::string& value, const s
     return keys;
 }
 
+static std::string serializeGinIndex(
+        const std::map<std::string, std::set<int64_t>>& inverted) {
+    using namespace gin_index_format;
+    std::string output;
+    output.append(kMagic.data(), kMagic.size());
+    appendU32(output, kVersion);
+    appendU64(output, static_cast<uint64_t>(inverted.size()));
+    for (const auto& [key, rids] : inverted) {
+        appendU64(output, static_cast<uint64_t>(key.size()));
+        output.append(key);
+        appendU64(output, static_cast<uint64_t>(rids.size()));
+        for (int64_t rid : rids) {
+            appendU64(output, static_cast<uint64_t>(rid));
+        }
+    }
+    appendU32(output, index_checksum::crc32c(output.data(), output.size()));
+    return output;
+}
+
 DBStatus StorageEngine::createGinIndex(const std::string& dbname,
                                         const std::string& tablename,
                                         const std::string& colname) {
@@ -12605,15 +12627,8 @@ DBStatus StorageEngine::createGinIndex(const std::string& dbname,
     })) return DBStatus::IO_ERROR;
 
     auto path = ginIndexPath(dbname, tablename, colname);
-    std::ostringstream out;
-    for (const auto& kv : inverted) {
-        out << kv.first;
-        for (int64_t rid : kv.second) {
-            out << ' ' << rid;
-        }
-        out << '\n';
-    }
-    if (!index_file::writeAtomically(path, out.str())) return DBStatus::IO_ERROR;
+    const std::string bytes = serializeGinIndex(inverted);
+    if (!index_file::writeAtomically(path, bytes)) return DBStatus::IO_ERROR;
     return DBStatus::OK;
 }
 
@@ -12633,6 +12648,193 @@ bool StorageEngine::hasGinIndex(const std::string& dbname,
                                  const std::string& tablename,
                                  const std::string& colname) const {
     return std::filesystem::exists(ginIndexPath(dbname, tablename, colname));
+}
+
+static bool readGinIndexForKey(const std::filesystem::path& path,
+                               const std::string& key,
+                               std::vector<int64_t>& result) {
+    using namespace gin_index_format;
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return false;
+    in.seekg(0, std::ios::end);
+    const std::streamoff streamBytes = in.tellg();
+    if (streamBytes < 0) return false;
+    const uint64_t fileBytes = static_cast<uint64_t>(streamBytes);
+    in.clear();
+    in.seekg(0, std::ios::beg);
+
+    std::array<char, kMagic.size()> probe{};
+    const size_t probeBytes = static_cast<size_t>(
+        std::min<uint64_t>(fileBytes, probe.size()));
+    if (probeBytes != 0) {
+        in.read(probe.data(), static_cast<std::streamsize>(probeBytes));
+        if (in.gcount() != static_cast<std::streamsize>(probeBytes))
+            return false;
+    }
+    if (containsBinaryMarker(probe.data(), probeBytes)) {
+        if (probeBytes != kMagic.size() ||
+            !std::equal(probe.begin(), probe.end(), kMagic.begin()) ||
+            fileBytes < kHeaderBytes + kChecksumBytes) {
+            return false;
+        }
+
+        const uint64_t payloadBytes = fileBytes - kChecksumBytes;
+        std::array<char, kChecksumBytes> checksumBytes{};
+        in.clear();
+        in.seekg(static_cast<std::streamoff>(payloadBytes), std::ios::beg);
+        in.read(checksumBytes.data(), checksumBytes.size());
+        if (in.gcount() != static_cast<std::streamsize>(checksumBytes.size()))
+            return false;
+        const uint32_t storedChecksum = decodeU32(checksumBytes.data());
+
+        in.clear();
+        in.seekg(0, std::ios::beg);
+        uint64_t remainingForChecksum = payloadBytes;
+        uint32_t checksumState = 0xFFFFFFFFu;
+        std::array<char, 64 * 1024> checksumChunk{};
+        while (remainingForChecksum > 0) {
+            const size_t amount = static_cast<size_t>(
+                std::min<uint64_t>(remainingForChecksum,
+                                   checksumChunk.size()));
+            in.read(checksumChunk.data(), static_cast<std::streamsize>(amount));
+            if (in.gcount() != static_cast<std::streamsize>(amount))
+                return false;
+            checksumState = index_checksum::crc32cUpdate(
+                checksumState, checksumChunk.data(), amount);
+            remainingForChecksum -= amount;
+        }
+        if (index_checksum::crc32cFinish(checksumState) != storedChecksum)
+            return false;
+
+        uint64_t consumed = 0;
+        const auto readPayload = [&](char* destination, uint64_t length) {
+            if (length > payloadBytes - consumed ||
+                length > static_cast<uint64_t>(
+                    std::numeric_limits<std::streamsize>::max())) {
+                return false;
+            }
+            if (length != 0) {
+                in.read(destination, static_cast<std::streamsize>(length));
+                if (in.gcount() != static_cast<std::streamsize>(length))
+                    return false;
+            }
+            consumed += length;
+            return true;
+        };
+        const auto skipPayload = [&](uint64_t length) {
+            if (length > payloadBytes - consumed ||
+                length > static_cast<uint64_t>(
+                    std::numeric_limits<std::streamoff>::max())) {
+                return false;
+            }
+            in.seekg(static_cast<std::streamoff>(length), std::ios::cur);
+            if (!in) return false;
+            consumed += length;
+            return true;
+        };
+        const auto readU32 = [&](uint32_t& value) {
+            std::array<char, sizeof(uint32_t)> bytes{};
+            if (!readPayload(bytes.data(), bytes.size())) return false;
+            value = decodeU32(bytes.data());
+            return true;
+        };
+        const auto readU64 = [&](uint64_t& value) {
+            std::array<char, sizeof(uint64_t)> bytes{};
+            if (!readPayload(bytes.data(), bytes.size())) return false;
+            value = decodeU64(bytes.data());
+            return true;
+        };
+
+        in.clear();
+        in.seekg(0, std::ios::beg);
+        std::array<char, kMagic.size()> magic{};
+        uint32_t version = 0;
+        uint64_t entryCount = 0;
+        if (!readPayload(magic.data(), magic.size()) || magic != kMagic ||
+            !readU32(version) || version != kVersion ||
+            !readU64(entryCount) ||
+            entryCount > (payloadBytes - consumed) / kMinimumEntryBytes) {
+            return false;
+        }
+
+        bool matched = false;
+        for (uint64_t entry = 0; entry < entryCount; ++entry) {
+            uint64_t keyLength = 0;
+            if (!readU64(keyLength) || keyLength == 0 ||
+                keyLength > payloadBytes - consumed) {
+                return false;
+            }
+
+            bool keyMatches = keyLength == key.size();
+            if (keyMatches) {
+                std::array<char, 4096> keyChunk{};
+                size_t keyOffset = 0;
+                uint64_t remaining = keyLength;
+                bool equal = true;
+                while (remaining > 0) {
+                    const size_t amount = static_cast<size_t>(
+                        std::min<uint64_t>(remaining, keyChunk.size()));
+                    if (!readPayload(keyChunk.data(), amount)) return false;
+                    if (std::memcmp(keyChunk.data(), key.data() + keyOffset,
+                                    amount) != 0) equal = false;
+                    remaining -= amount;
+                    keyOffset += amount;
+                }
+                keyMatches = equal;
+            } else if (!skipPayload(keyLength)) {
+                return false;
+            }
+
+            uint64_t ridCount = 0;
+            if (!readU64(ridCount) || ridCount == 0 ||
+                ridCount > (payloadBytes - consumed) / sizeof(uint64_t) ||
+                (keyMatches && matched)) {
+                return false;
+            }
+            if (keyMatches) {
+                matched = true;
+                if (ridCount > result.max_size()) return false;
+                result.reserve(static_cast<size_t>(ridCount));
+            }
+            for (uint64_t ridIndex = 0; ridIndex < ridCount; ++ridIndex) {
+                if (keyMatches) {
+                    uint64_t rid = 0;
+                    if (!readU64(rid) ||
+                        rid > static_cast<uint64_t>(
+                            std::numeric_limits<int64_t>::max())) {
+                        return false;
+                    }
+                    result.push_back(static_cast<int64_t>(rid));
+                } else if (!skipPayload(sizeof(uint64_t))) {
+                    return false;
+                }
+            }
+        }
+        return consumed == payloadBytes;
+    }
+
+    // V1 GIN sidecars are whitespace-delimited text. Keep them readable for
+    // compatibility; keys containing whitespace were not representable.
+    in.clear();
+    in.seekg(0, std::ios::beg);
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.empty()) return false;
+        const size_t separator = line.find(' ');
+        const std::string token = separator == std::string::npos
+            ? line : line.substr(0, separator);
+        if (token.empty() || separator == std::string::npos) return false;
+        std::stringstream values(line.substr(separator + 1));
+        std::vector<int64_t> parsed;
+        int64_t rid = 0;
+        while (values >> rid) parsed.push_back(rid);
+        if (!values.eof()) return false;
+        if (token == key) {
+            result = std::move(parsed);
+            break;
+        }
+    }
+    return !in.bad();
 }
 
 std::vector<int64_t> StorageEngine::ginSearch(const std::string& dbname,
@@ -12671,25 +12873,7 @@ std::vector<int64_t> StorageEngine::ginSearch(const std::string& dbname,
         if (!scanned) result.clear();
         return result;
     }
-    std::ifstream in(path);
-    if (!in) return result;
-    std::string line;
-    while (std::getline(in, line)) {
-        if (line.empty()) return {};
-        size_t sp = line.find(' ');
-        std::string tok = (sp == std::string::npos) ? line : line.substr(0, sp);
-        if (tok.empty() || sp == std::string::npos) return {};
-        std::stringstream values(sp == std::string::npos ? std::string() : line.substr(sp + 1));
-        std::vector<int64_t> parsed;
-        int64_t rid = 0;
-        while (values >> rid) parsed.push_back(rid);
-        if (!values.eof()) return {};
-        if (tok == key) {
-            result = std::move(parsed);
-            break;
-        }
-    }
-    if (in.bad()) return {};
+    if (!readGinIndexForKey(path, key, result)) return {};
     return result;
 }
 

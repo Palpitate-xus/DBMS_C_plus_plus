@@ -120,6 +120,25 @@ def write_bloom_index(path, version=2):
     path.write_bytes(contents)
 
 
+def write_gin_index(path, version=2):
+    if version == 1:
+        contents = b"hello 42\n"
+    else:
+        assert version == 2
+        contents = bytearray(b"\x00DBMSG\x002" + struct.pack(
+            "<IQ", 2, 2))
+        for key, rids in ((b"hello world", (42, 43)), (b"other", (44,))):
+            contents.extend(struct.pack("<Q", len(key)))
+            contents.extend(key)
+            contents.extend(struct.pack("<Q", len(rids)))
+            for rid in rids:
+                contents.extend(struct.pack("<Q", rid))
+        contents.extend(struct.pack("<I", crc32c(contents)))
+        contents = bytes(contents)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(contents)
+
+
 def heap_page(page_id, layout_version=5):
     page = bytearray(PAGE_SIZE)
     page_id_bound = layout_version == 5
@@ -243,6 +262,8 @@ def main():
         write_hash_index(hash_index)
         bloom_index = database / "accounts_tags.bidx"
         write_bloom_index(bloom_index)
+        gin_index = database / "accounts_doc.gin"
+        write_gin_index(gin_index)
         legacy_heap = database / "legacy.dt"
         write_heap(legacy_heap, 2, layout_version=4)
         key = bytes.fromhex("11" * 32)
@@ -265,6 +286,8 @@ def main():
         write_hash_index(external_legacy_hash, 1)
         external_legacy_bloom = external / "app" / "ledger_tags.bidx"
         write_bloom_index(external_legacy_bloom, 1)
+        external_legacy_gin = external / "app" / "ledger_doc.gin"
+        write_gin_index(external_legacy_gin, 1)
 
         before_cluster = snapshot_tree(cluster)
         before_external = snapshot_tree(external)
@@ -274,6 +297,7 @@ def main():
         assert "B+ tree index scan completed" in clean.stdout, clean
         assert "hash index scan completed" in clean.stdout, clean
         assert "Bloom index scan completed" in clean.stdout, clean
+        assert "GIN index scan completed" in clean.stdout, clean
         assert "files=5" in clean.stdout and "blocks=9" in clean.stdout, clean
         assert "identity-bound-blocks=3" in clean.stdout, clean
         assert "legacy-identity-unbound-blocks=1" in clean.stdout, clean
@@ -288,6 +312,9 @@ def main():
         assert "bloom-index-files=2" in clean.stdout, clean
         assert "checksummed-bloom-index-files=1" in clean.stdout, clean
         assert "unchecked-legacy-bloom-index-files=1" in clean.stdout, clean
+        assert "gin-index-files=2" in clean.stdout, clean
+        assert "checksummed-gin-index-files=1" in clean.stdout, clean
+        assert "unchecked-legacy-gin-index-files=1" in clean.stdout, clean
         assert snapshot_tree(cluster) == before_cluster
         assert snapshot_tree(external) == before_external
         assert list(launch.iterdir()) == []
@@ -335,6 +362,14 @@ def main():
         assert "app/accounts_tags.bidx" in corrupt_bloom.stderr, corrupt_bloom
         assert "Bloom index checksum mismatch" in corrupt_bloom.stderr, corrupt_bloom
         bloom_index.write_bytes(original_bloom)
+
+        original_gin = gin_index.read_bytes()
+        flip_byte(gin_index, len(original_gin) - 5)
+        corrupt_gin = run_verify(cluster, launch)
+        assert corrupt_gin.returncode == 1, corrupt_gin
+        assert "app/accounts_doc.gin" in corrupt_gin.stderr, corrupt_gin
+        assert "GIN index checksum mismatch" in corrupt_gin.stderr, corrupt_gin
+        gin_index.write_bytes(original_gin)
 
         original_external = external_heap.read_bytes()
         flip_byte(external_heap, PAGE_SIZE + 200)

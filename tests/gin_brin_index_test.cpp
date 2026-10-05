@@ -9,6 +9,8 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
+#include <sstream>
 #include "test_utils.h"
 
 extern dbms::StorageEngine g_engine;
@@ -65,6 +67,48 @@ static void test_storage_engine_gin_brin() {
     assert(g_engine.ginSearch(db, "t", "value", "hello").size() == 2);
     assert(g_engine.ginSearch(db, "t", "value", "world").size() == 2);
     assert(g_engine.ginSearch(db, "t", "value", "missing").empty());
+
+    // JSON string keys can contain spaces, which the legacy text sidecar
+    // format cannot represent.
+    assert(!ddl.executeSql("CREATE TABLE tj (id INT, doc JSONB)", session));
+    assert(g_engine.insert(db, "tj", {
+        {"id", "1"}, {"doc", "{\"body\":\"hello world\"}"}}) ==
+        dbms::DBStatus::OK);
+    assert(!ddl.executeSql(
+        "CREATE INDEX tj_doc_gin ON tj USING GIN (doc)", session));
+    assert(g_engine.ginSearch(db, "tj", "doc", "hello world").size() == 1);
+
+    const fs::path ginPath = fs::path(db) / "t_value.gin";
+    std::string validGin;
+    {
+        std::ifstream input(ginPath, std::ios::binary);
+        assert(input);
+        validGin.assign(std::istreambuf_iterator<char>(input),
+                        std::istreambuf_iterator<char>());
+    }
+    assert(validGin.size() > sizeof(uint32_t));
+    const auto expectedGinResult =
+        g_engine.ginSearch(db, "t", "value", "hello");
+    assert(expectedGinResult.size() == 2);
+    std::string corruptedGin = validGin;
+    corruptedGin[corruptedGin.size() - sizeof(uint32_t) - 1] ^= 1;
+    {
+        std::ofstream output(ginPath, std::ios::binary | std::ios::trunc);
+        assert(output);
+        output.write(corruptedGin.data(),
+                     static_cast<std::streamsize>(corruptedGin.size()));
+        assert(output);
+    }
+    assert(g_engine.ginSearch(db, "t", "value", "hello").empty());
+
+    // Preserve search compatibility with already-created V1 text sidecars.
+    {
+        std::ofstream output(ginPath, std::ios::binary | std::ios::trunc);
+        output << "hello 101 202\nworld 303\n";
+        assert(output);
+    }
+    assert((g_engine.ginSearch(db, "t", "value", "hello") ==
+            std::vector<int64_t>{101, 202}));
 
     assert(!ddl.executeSql("CREATE INDEX t_id_brin ON t USING BRIN (id)", session));
     assert(!g_engine.brinSearchRange(db, "t", "id", "=", "1").empty());

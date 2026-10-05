@@ -2,6 +2,7 @@
 
 #include "access/BPTreeFormat.h"
 #include "access/BloomIndexFormat.h"
+#include "access/GinIndexFormat.h"
 #include "access/HashIndexFormat.h"
 #include "access/IndexChecksum.h"
 #include "access/IndexFileUtil.h"
@@ -509,6 +510,10 @@ bool hasBloomIndexSuffix(const std::filesystem::path& path) {
     return path.filename().extension() == ".bidx";
 }
 
+bool hasGinIndexSuffix(const std::filesystem::path& path) {
+    return path.filename().extension() == ".gin";
+}
+
 std::string displayVerificationPath(const std::filesystem::path& root,
                                     const std::filesystem::path& path) {
     const auto relative = path.lexically_relative(root);
@@ -603,6 +608,12 @@ struct HashIndexVerificationStats {
 };
 
 struct BloomIndexVerificationStats {
+    uint64_t files = 0;
+    uint64_t checksumFiles = 0;
+    uint64_t uncheckedLegacyFiles = 0;
+};
+
+struct GinIndexVerificationStats {
     uint64_t files = 0;
     uint64_t checksumFiles = 0;
     uint64_t uncheckedLegacyFiles = 0;
@@ -1014,6 +1025,44 @@ bool collectBloomIndexFiles(const std::filesystem::path& scanRoot,
     return true;
 }
 
+bool collectGinIndexFiles(const std::filesystem::path& scanRoot,
+                          std::set<std::filesystem::path>& files,
+                          std::string& error) {
+    std::error_code ec;
+    std::filesystem::recursive_directory_iterator iterator(scanRoot, ec);
+    if (ec) {
+        error = "could not enumerate checksum root " + scanRoot.string() +
+            ": " + ec.message();
+        return false;
+    }
+    const std::filesystem::recursive_directory_iterator end;
+    for (; iterator != end; iterator.increment(ec)) {
+        if (ec) {
+            error = "could not enumerate checksum root " + scanRoot.string() +
+                ": " + ec.message();
+            return false;
+        }
+        const auto path = iterator->path();
+        if (!hasGinIndexSuffix(path)) continue;
+        const auto status = iterator->symlink_status(ec);
+        if (ec || status.type() != std::filesystem::file_type::regular) {
+            error = "GIN index is not a regular file: " + path.string();
+            return false;
+        }
+        files.insert(std::filesystem::weakly_canonical(path, ec));
+        if (ec) {
+            error = "could not resolve GIN index: " + path.string();
+            return false;
+        }
+    }
+    if (ec) {
+        error = "could not enumerate checksum root " + scanRoot.string() +
+            ": " + ec.message();
+        return false;
+    }
+    return true;
+}
+
 bool verifyBloomIndex(const std::filesystem::path& root,
                       const std::filesystem::path& path,
                       BloomIndexVerificationStats& stats,
@@ -1110,6 +1159,99 @@ bool verifyBloomIndex(const std::filesystem::path& root,
     }
     if (index_checksum::crc32cFinish(checksumState) != storedChecksum) {
         error = shown + ": Bloom index checksum mismatch";
+        return false;
+    }
+    ++stats.checksumFiles;
+    ++stats.files;
+    return true;
+}
+
+bool verifyGinIndex(const std::filesystem::path& root,
+                    const std::filesystem::path& path,
+                    GinIndexVerificationStats& stats,
+                    std::string& error) {
+    using namespace gin_index_format;
+    const std::string shown = displayVerificationPath(root, path);
+    ReadOnlyDescriptor data(path);
+    if (data.get() < 0) {
+        error = shown + ": could not open GIN index read-only: " +
+            std::strerror(errno);
+        return false;
+    }
+    struct stat status {};
+    if (::fstat(data.get(), &status) != 0 || !S_ISREG(status.st_mode) ||
+        status.st_size < 0) {
+        error = shown + ": could not determine regular GIN index size";
+        return false;
+    }
+    const uint64_t fileBytes = static_cast<uint64_t>(status.st_size);
+
+    std::array<char, kMagic.size()> probe{};
+    const size_t probeBytes = static_cast<size_t>(
+        std::min<uint64_t>(fileBytes, probe.size()));
+    if (probeBytes != 0 &&
+        !readExactlyAt(data.get(), probe.data(), probeBytes, 0)) {
+        error = shown + ": short read of GIN index signature";
+        return false;
+    }
+    if (!containsBinaryMarker(probe.data(), probeBytes)) {
+        // V1 is an unchecked text format; report it without claiming it was
+        // checksum-verified.
+        ++stats.uncheckedLegacyFiles;
+        ++stats.files;
+        return true;
+    }
+
+    if (probeBytes != kMagic.size() ||
+        !std::equal(probe.begin(), probe.end(), kMagic.begin()) ||
+        fileBytes < kHeaderBytes + kChecksumBytes) {
+        error = shown + ": invalid or truncated GIN index signature";
+        return false;
+    }
+    std::array<char, kHeaderBytes> header{};
+    if (!readExactlyAt(data.get(), header.data(), header.size(), 0)) {
+        error = shown + ": short read of GIN index header";
+        return false;
+    }
+    const uint32_t version = decodeU32(header.data() + kMagic.size());
+    const uint64_t entryCount =
+        decodeU64(header.data() + kMagic.size() + sizeof(uint32_t));
+    if (version != kVersion) {
+        error = shown + ": unsupported GIN index version";
+        return false;
+    }
+
+    const uint64_t payloadBytes = fileBytes - kChecksumBytes;
+    if (entryCount > (payloadBytes - kHeaderBytes) / kMinimumEntryBytes) {
+        error = shown + ": invalid checksummed GIN index entry count";
+        return false;
+    }
+    std::array<char, kChecksumBytes> checksumBytes{};
+    if (!readExactlyAt(data.get(), checksumBytes.data(), checksumBytes.size(),
+                       static_cast<off_t>(payloadBytes))) {
+        error = shown + ": short read of GIN index checksum";
+        return false;
+    }
+    const uint32_t storedChecksum = decodeU32(checksumBytes.data());
+
+    uint64_t remaining = payloadBytes;
+    off_t position = 0;
+    uint32_t checksumState = 0xFFFFFFFFu;
+    std::array<char, 64 * 1024> chunk{};
+    while (remaining > 0) {
+        const size_t amount = static_cast<size_t>(
+            std::min<uint64_t>(remaining, chunk.size()));
+        if (!readExactlyAt(data.get(), chunk.data(), amount, position)) {
+            error = shown + ": short read while verifying GIN index checksum";
+            return false;
+        }
+        checksumState = index_checksum::crc32cUpdate(
+            checksumState, chunk.data(), amount);
+        position += static_cast<off_t>(amount);
+        remaining -= amount;
+    }
+    if (index_checksum::crc32cFinish(checksumState) != storedChecksum) {
+        error = shown + ": GIN index checksum mismatch";
         return false;
     }
     ++stats.checksumFiles;
@@ -1434,11 +1576,13 @@ bool verifyHeapDataChecksums(const std::filesystem::path& root,
     std::set<std::filesystem::path> btreeFiles;
     std::set<std::filesystem::path> hashIndexFiles;
     std::set<std::filesystem::path> bloomIndexFiles;
+    std::set<std::filesystem::path> ginIndexFiles;
     for (const auto& scanRoot : scanRoots) {
         if (!collectHeapFiles(scanRoot, heapFiles, error)) return false;
         if (!collectBTreeFiles(scanRoot, btreeFiles, error)) return false;
         if (!collectHashIndexFiles(scanRoot, hashIndexFiles, error)) return false;
         if (!collectBloomIndexFiles(scanRoot, bloomIndexFiles, error)) return false;
+        if (!collectGinIndexFiles(scanRoot, ginIndexFiles, error)) return false;
     }
 
     HeapVerificationStats stats;
@@ -1457,8 +1601,12 @@ bool verifyHeapDataChecksums(const std::filesystem::path& root,
     for (const auto& path : bloomIndexFiles) {
         if (!verifyBloomIndex(root, path, bloomStats, error)) return false;
     }
+    GinIndexVerificationStats ginStats;
+    for (const auto& path : ginIndexFiles) {
+        if (!verifyGinIndex(root, path, ginStats, error)) return false;
+    }
     output = "heap checksum verification passed\n"
-        "B+ tree index scan completed; hash index scan completed; Bloom index scan completed (legacy unchecked data is reported)\nfiles=" +
+        "B+ tree index scan completed; hash index scan completed; Bloom index scan completed; GIN index scan completed (legacy unchecked data is reported)\nfiles=" +
         std::to_string(stats.files) + "\nblocks=" +
         std::to_string(stats.blocks) + "\nidentity-bound-blocks=" +
         std::to_string(stats.identityBoundBlocks) +
@@ -1481,7 +1629,12 @@ bool verifyHeapDataChecksums(const std::filesystem::path& root,
         "\nchecksummed-bloom-index-files=" +
         std::to_string(bloomStats.checksumFiles) +
         "\nunchecked-legacy-bloom-index-files=" +
-        std::to_string(bloomStats.uncheckedLegacyFiles);
+        std::to_string(bloomStats.uncheckedLegacyFiles) +
+        "\ngin-index-files=" + std::to_string(ginStats.files) +
+        "\nchecksummed-gin-index-files=" +
+        std::to_string(ginStats.checksumFiles) +
+        "\nunchecked-legacy-gin-index-files=" +
+        std::to_string(ginStats.uncheckedLegacyFiles);
     return true;
 }
 
