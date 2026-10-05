@@ -1,7 +1,7 @@
 # QRY-03 — Multi-table join chain order and WHERE filtering
 
 Status: partial. The source/test fixes are local commits `4534b971`,
-`b87d4a19`, `858d6da9`, and `0a57fee1` (2026-10-05).
+`b87d4a19`, `858d6da9`, `0a57fee1`, and `e042360b` (2026-10-05).
 
 ## Reproduced behavior
 
@@ -19,6 +19,9 @@ Status: partial. The source/test fixes are local commits `4534b971`,
   protocol caller.
 - It also returned rows in join/input order while silently ignoring ORDER BY,
   LIMIT, and OFFSET. `ORDER BY a.id DESC LIMIT 1` returned both rows.
+- The FROM-chain parser stopped after the 12th JOIN without reporting an
+  error. A 14-relation SELECT referencing the 14th alias incorrectly returned
+  SQLSTATE `42P01` as though that relation were absent.
 
 ## Fixes
 
@@ -36,6 +39,8 @@ Status: partial. The source/test fixes are local commits `4534b971`,
   NULLS FIRST/LAST, then apply LIMIT/OFFSET. Unsupported projections, sort
   expressions, DISTINCT/GROUP/WINDOW forms fail explicitly rather than being
   silently presented as completed queries.
+- Remove the arbitrary 12-JOIN early exit so the parser and executor see the
+  full authored relation chain.
 
 ## Verification
 
@@ -46,6 +51,9 @@ Status: partial. The source/test fixes are local commits `4534b971`,
   and text OIDs, DESC/LIMIT, NULLS FIRST, and output-position/OFFSET checks also
   pass. The new WHERE, projection, and ordering assertions each failed before
   their respective fixes.
+- The same E2E now creates 14 one-row tables and joins all 14; it failed before
+  the cap removal with `42P01`, then passed with the last relation projected
+  and the correct integer OID/command tag.
 - `tests/multijoin_e2e_test.py` passed (three-table chain, reordered inner join,
   and four-table chain).
 - `tests/compat/cases/multijoin_projection_filter.sql` was added, but the

@@ -388,7 +388,7 @@
 - [ ] **DML-06** `COPY` 补 protocol STDIN/STDOUT、binary、PROGRAM、FREEZE、ON_ERROR、REJECT_LIMIT、HEADER MATCH、encoding 和权限。
 - [ ] **QRY-01** SELECT target list 补完整 expression、SRF、row expansion、star qualification、alias visibility 和 resjunk column。
 - [ ] **QRY-02** FROM 补完整 LATERAL、table function、ROWS FROM、WITH ORDINALITY、TABLESAMPLE、XMLTABLE/JSON_TABLE。
-- [ ] **QRY-03** join 补 USING/NATURAL 的输出列合并、FULL/outer null extension、lateral/parameterized join 和任意嵌套语义。（多表链现保留 outer join 的书写顺序、支持纯 CROSS 链、post-join WHERE、简单目标列投影和 typed protocol metadata，并支持列/ordinal 排序及 LIMIT/OFFSET；表达式投影、qualified star、GROUP/HAVING/WINDOW、collation-aware ordering 和任意嵌套仍缺，见 `docs/issue-qry-03-multijoin-order-and-where.md`。）
+- [ ] **QRY-03** join 补 USING/NATURAL 的输出列合并、FULL/outer null extension、lateral/parameterized join 和任意嵌套语义。（多表链现保留 outer join 的书写顺序、支持纯 CROSS 链、post-join WHERE、简单目标列投影和 typed protocol metadata，支持列/ordinal 排序及 LIMIT/OFFSET，且不再静默截断超过 12 个 JOIN 的关系链；表达式投影、qualified star、GROUP/HAVING/WINDOW、collation-aware ordering 和任意嵌套仍缺，见 `docs/issue-qry-03-multijoin-order-and-where.md`。）
 - [ ] **QRY-04** subquery 补 correlated scalar/EXISTS/IN/ANY/ALL、row comparison、decorrelation、parameter passing 和 NULL 三值逻辑。
 - [ ] **QRY-05** CTE 补 recursive evaluation、SEARCH/CYCLE、materialized/not materialized、data-modifying CTE snapshot 和 visibility。
 - [ ] **QRY-06** set operations 补任意 query expression、对应列类型/collation、嵌套 precedence、ALL duplicate count 和 ORDER/LIMIT scope。第959项已修复括号开头的statement路由、完整外围括号操作数、尾部注释和相应Simple/Extended执行；任意type/collation解析、通用表达式排序分页与Extended Describe仍未闭合。
