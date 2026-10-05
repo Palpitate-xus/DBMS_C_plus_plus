@@ -4,6 +4,8 @@
 
 # 总差距清单执行计划
 
+2026-10-05 WAL-04：离线恢复/PITR覆盖目标后commit过滤、heap/index undo、派生index重建与numeric timeline fork；`pitr_recovery_test`验证insert/update回退及重启，`recovery_integrity_test`验证损坏WAL与unsafe path fail-closed，timeline/archive专项通过。restartpoint一致性、hot standby snapshot/conflict、timeline history文件链和promotion state machine仍未实现。仅审计无代码改动，未跑完整suite/PG18.6 differential，本项由unverified转partial。详见`docs/issue-wal-04-standby-and-timeline-audit.md`。
+
 2026-10-05 WAL-03：checkpoint门控数据库事务、flush已加载cache并走WAL barrier、fsync checkpoint record、原子写timestamp/max-xid/LSN sidecar、归档后只截断checkpoint之前segment。`checkpoint_test`通过，覆盖extent崩溃恢复、事务cache作用域与sidecar/WAL LSN。未实现PG redo horizon、完整control file及checkpoint completion状态协议；dirty-buffer调度/节流和WAL保留协调仍不完整。仅审计，未改代码，全注册suite/PG18.6 differential未跑；本项unverified转partial。详见`docs/issue-wal-03-checkpoint-audit.md`。
 
 2026-10-05 WAL-02：验证到本地 WAL 的 CRC32C、8-byte alignment、跨16MiB segment连续 I/O、LSN-range fsync/group commit、switch padding、archive-gated truncate/recycle 与 checkpoint page-image 子集。`wal_basic_test`（含双 manager追加）、`redo_crash_recovery_test`、`wal_full_page_write_test`、`wal_truncate_test`、`wal_timeline_archive_test`通过。记录跨段不是 PostgreSQL page-header/continuation 格式，没有 WAL compression，完整 concurrent insertion/FPI规则仍未实现。无新代码修改、全套或PG18.6 differential。本项从unverified转partial。详见`docs/issue-wal-02-insertion-segments-audit.md`。
