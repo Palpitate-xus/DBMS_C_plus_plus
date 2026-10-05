@@ -274,11 +274,89 @@ bool LargeObjectManager::truncate(int loId, size_t newSize) {
 
 bool LargeObjectManager::drop(int loId) {
     if (!ready_ || loId <= 0) return false;
-    auto path = loPath(loId);
-    std::error_code ec;
-    std::filesystem::remove(path, ec);
-    if (ec) return false;
+    const std::filesystem::path path = loPath(loId);
+    const std::filesystem::path parent = parentDirectory(path);
+
+    // Keep the object under a private temporary name until the canonical-name
+    // removal is durable. If the directory barrier fails, a hard link can
+    // restore the original name without copying a potentially huge object or
+    // overwriting a concurrently-created replacement.
+    const std::string templateName = (parent /
+        (".lo_drop_" + std::to_string(loId) + "_XXXXXX")).string();
+    std::vector<char> temporaryName(templateName.begin(), templateName.end());
+    temporaryName.push_back('\0');
+    const int reservationFd = ::mkstemp(temporaryName.data());
+    if (reservationFd < 0) return false;
+    const bool reservationClosed = (::close(reservationFd) == 0);
+    const std::filesystem::path backup(temporaryName.data());
+    if (!reservationClosed) {
+        (void)::unlink(backup.c_str());
+        return false;
+    }
+
+    struct stat originalStatus {};
+    const int objectFd = openRegularObject(path, O_RDONLY);
+    if (objectFd < 0) {
+        const int openError = errno;
+        (void)::unlink(backup.c_str());
+        // Preserve the historical idempotent DROP behavior for an already
+        // absent object, but do not discard cached metadata on other errors.
+        if (openError == ENOENT) {
+            sizes_.erase(loId);
+            return true;
+        }
+        return false;
+    }
+    if (::fstat(objectFd, &originalStatus) != 0) {
+        (void)::close(objectFd);
+        (void)::unlink(backup.c_str());
+        return false;
+    }
+    if (::close(objectFd) != 0) {
+        (void)::unlink(backup.c_str());
+        return false;
+    }
+
+    if (::rename(path.c_str(), backup.c_str()) != 0) {
+        const int renameError = errno;
+        (void)::unlink(backup.c_str());
+        if (renameError == ENOENT) {
+            sizes_.erase(loId);
+            return true;
+        }
+        return false;
+    }
+
+    struct stat movedStatus {};
+    if (::lstat(backup.c_str(), &movedStatus) != 0 ||
+        movedStatus.st_dev != originalStatus.st_dev ||
+        movedStatus.st_ino != originalStatus.st_ino) {
+        // A path replacement raced the validation. Restore only if the
+        // canonical name is still free; never overwrite a different object.
+        if (::link(backup.c_str(), path.c_str()) == 0) {
+            (void)::unlink(backup.c_str());
+            (void)index_file::syncDirectory(parent);
+        }
+        return false;
+    }
+
+    if (!index_file::syncDirectory(parent)) {
+        // The rename may or may not survive a crash. Restore the public name
+        // without replacement, then persist that best-effort rollback.
+        if (::link(backup.c_str(), path.c_str()) == 0) {
+            (void)::unlink(backup.c_str());
+            (void)index_file::syncDirectory(parent);
+        }
+        return false;
+    }
+
     sizes_.erase(loId);
+    // The canonical name is durably gone. Failure to remove the hidden
+    // backup can leave reclaimable disk space, but cannot resurrect the
+    // object at its public path.
+    if (::unlink(backup.c_str()) == 0) {
+        (void)index_file::syncDirectory(parent);
+    }
     return true;
 }
 
