@@ -85,4 +85,5 @@ There is no `pg_checksums`-style
 enable/disable/rewrite/progress workflow or online whole-cluster verification.
 The custom checksums are not PostgreSQL page checksums.
 
-Source/test commits: `93addab7`, `2685454b`, `3b595189`, `8e92ebd9` (not pushed).
+Source/test commits: `93addab7`, `2685454b`, `3b595189`, `8e92ebd9`,
+`b32ab185` (not pushed).
