@@ -46,6 +46,19 @@ without restoring the sequence file. Rename now syncs its rollback; drop
 retains the original bytes and restores them with no-replace publication when
 the parent sync fails.
 
+`tlist.lst` was also updated with direct append or truncate-and-rewrite
+streams. A crash during DROP/RENAME/startup cleanup could leave a partial
+fixed-width record or truncate unrelated table names. CREATE, DROP, RENAME,
+failed-CREATE cleanup, and stale-temp startup cleanup now serialize a complete
+fixed-record image and publish it with `writeAtomically`. If the atomic helper
+reports a parent-directory sync error after publishing, the wrapper verifies
+that the destination is exactly the intended byte image and retries that
+barrier. CREATE rollback restores the exact pre-publication name snapshot.
+DROP/RENAME return `IO_ERROR` when the list generation cannot be durably
+confirmed after their physical work; callers must re-check the relation state.
+Startup aborts rather than serving a database when stale-temp cleanup cannot
+durably update the list or remove the leftover files.
+
 ## Verification
 
 - `bash scripts/build_one_test.sh schema_marker_publish_guard_test` — passed.
@@ -67,6 +80,17 @@ the parent sync fails.
 - `bash scripts/build_one_test.sh sequence_namespace_durability_test` —
   passed. Injected directory-sync failures after sequence rename and deletion
   restored the original name/content; retries then succeeded.
+- `bash scripts/build_one_test.sh table_list_atomicity_test` — passed. The
+  CREATE case lets the heap allocation-marker barrier succeed, injects `EIO`
+  at the `tlist.lst` publication barrier, and verifies the exact published
+  fixed-record generation is re-synced before success. The DROP case injects
+  the same post-rename failure and verifies surviving names remain intact and
+  the file length remains a multiple of the fixed record width.
+- `bash scripts/build_one_test.sh table_comment_storage_test` — passed before
+  the final startup fail-closed adjustment; it covers normal table rename and
+  drop behavior. `bash scripts/build_one_test.sh database_lifecycle_test` —
+  passed after the final source change, including construction of a fresh
+  engine and database create/drop/recreate paths.
 - `git diff --check` — passed before commit.
 
 No full registered suite, standalone production executable build, or
@@ -77,10 +101,13 @@ PostgreSQL 18.6 differential was run for this change.
 WAL-07 remains partial. The one-shot failure injection validates the live
 rollback path, not real power loss or the persistence behavior of ext4/XFS.
 This change does not establish disk-full, short/partial-write, torn-write,
-cross-device tablespace publication, or multi-root crash guarantees. A
-temporary hard-link alias may remain if cleanup itself fails, but the schema
-target was synced before that cleanup and the alias is not interpreted as a
-schema marker.
+cross-device tablespace publication, or multi-root crash guarantees. Table
+file/catalog changes are not one WAL-atomic DDL generation: a persistent
+`tlist.lst` publication failure after DROP/RENAME file changes still returns
+an indeterminate `IO_ERROR` and requires operator/client re-check. A temporary
+hard-link alias may remain if cleanup itself fails, but the schema target was
+synced before that cleanup and the alias is not interpreted as a schema
+marker.
 
 Source/test commits: `e8a6d1ee` (schema marker create), `cc129973` (schema
 marker drop), `f8c02416` (database creation), `b707afd3` (database drop),
