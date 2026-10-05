@@ -1144,6 +1144,34 @@ static void writeFixedString(std::ostream& out, const std::string& s, size_t len
     out.write(buf.data(), static_cast<std::streamsize>(len));
 }
 
+static bool writeFixedStringRecordsAtomically(
+    const std::filesystem::path& path,
+    const std::vector<std::string>& records,
+    size_t recordLength) {
+    std::ostringstream serialized(std::ios::out | std::ios::binary);
+    for (const auto& record : records) {
+        writeFixedString(serialized, record, recordLength);
+    }
+    if (!serialized) return false;
+    const std::string bytes = serialized.str();
+    if (index_file::writeAtomically(path, bytes)) return true;
+
+    // writeAtomically can report a parent-directory fsync error after the
+    // rename has already published the complete file.  Retry that barrier
+    // only when the destination exactly matches our serialized generation;
+    // this turns transient fsync errors into a confirmed durable result while
+    // preserving the error for failures that did not publish these bytes.
+    std::ifstream current(path, std::ios::binary);
+    if (!current) return false;
+    const std::string published{
+        std::istreambuf_iterator<char>(current),
+        std::istreambuf_iterator<char>()};
+    if (current.bad() || published != bytes) return false;
+    const auto parent = path.parent_path().empty()
+        ? std::filesystem::path(".") : path.parent_path();
+    return index_file::syncDirectory(parent);
+}
+
 static std::string readFixedString(std::istream& in, size_t len) {
     std::string buf(len, '\0');
     in.read(buf.data(), static_cast<std::streamsize>(len));
@@ -2009,7 +2037,10 @@ StorageEngine::StorageEngine()
         throw std::runtime_error(
             "WAL crash recovery failed; startup aborted to protect data");
     }
-    cleanupStaleSessionTemporaryFiles();
+    if (!cleanupStaleSessionTemporaryFiles()) {
+        throw std::runtime_error(
+            "stale session-temporary relation cleanup failed; startup aborted");
+    }
     catalogService_ = std::make_unique<CatalogService>(*this);
     for (const auto& dbname : getDatabaseNames()) {
         // Upgrade legacy public sequences whose quoted relation names contain
@@ -15838,6 +15869,8 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
     // indexes, sequences and tlist.lst are created in stages.  Keep a narrow
     // rollback guard so a failed initializer cannot publish a half-created
     // relation or leave cache entries pointing at removed files.
+    std::vector<std::string> priorTableNames;
+    bool tableListMutationAttempted = false;
     auto cleanupFailedCreate = [&]() {
         const std::string key = dbname + "/" + tbl.tablename;
         pageAllocators_.erase(key);
@@ -15903,13 +15936,12 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
             }
         }
 
-        std::vector<std::string> names = getTableNames(dbname);
-        if (std::find(names.begin(), names.end(), tbl.tablename) != names.end()) {
-            std::ofstream out(tableListPath(dbname), std::ios::binary);
-            if (out) {
-                for (const auto& name : names) {
-                    if (name != tbl.tablename) writeFixedString(out, name, MAX_TABLE_NAME_LEN);
-                }
+        if (tableListMutationAttempted) {
+            if (!writeFixedStringRecordsAtomically(
+                    tableListPath(dbname), priorTableNames,
+                    MAX_TABLE_NAME_LEN)) {
+                std::cerr << "[catalog] failed to restore table list after "
+                          << "CREATE TABLE rollback: " << dbname << std::endl;
             }
             invalidateCatalogTableList(dbname);
         }
@@ -15982,11 +16014,18 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
             return failCreate("could not initialize table heap");
         }
     }
-    {
-        std::ofstream out(tableListPath(dbname), std::ios::binary | std::ios::app);
-        if (!out) return failCreate("could not update table list");
-        writeFixedString(out, tbl.tablename, MAX_TABLE_NAME_LEN);
-        if (!out) return failCreate("could not update table list");
+    priorTableNames = getTableNames(dbname);
+    tableListMutationAttempted = true;
+    auto updatedTableNames = priorTableNames;
+    if (std::find(updatedTableNames.begin(), updatedTableNames.end(),
+                  tbl.tablename) == updatedTableNames.end()) {
+        updatedTableNames.push_back(tbl.tablename);
+    }
+    if (!writeFixedStringRecordsAtomically(
+            tableListPath(dbname), updatedTableNames,
+            MAX_TABLE_NAME_LEN)) {
+        invalidateCatalogTableList(dbname);
+        return failCreate("could not update table list");
     }
     invalidateCatalogTableList(dbname);
     invalidateCatalogSchema(dbname, tbl.tablename);
@@ -16452,19 +16491,20 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
     toastIndexes_.erase(toastKey);
 
     auto names = getTableNames(dbname);
-    {
-        std::ofstream out(tableListPath(dbname), std::ios::binary);
-        for (const auto& name : names) {
-            if (name != tablename) {
-                writeFixedString(out, name, MAX_TABLE_NAME_LEN);
-            }
-        }
+    names.erase(std::remove(names.begin(), names.end(), tablename),
+                names.end());
+    const bool tableListPersisted = writeFixedStringRecordsAtomically(
+        tableListPath(dbname), names, MAX_TABLE_NAME_LEN);
+    if (!tableListPersisted) {
+        std::cerr << "[catalog] DROP TABLE removed relation files but could "
+                  << "not durably publish tlist.lst: " << dbname << "/"
+                  << tablename << std::endl;
     }
     invalidateCatalogTableList(dbname);
     invalidateCatalogSchema(dbname, tablename);
     dbms::resetRuntimeTableStats(dbname, tablename);
     lockManager_.unlock(tablename);
-    return DBStatus::OK;
+    return tableListPersisted ? DBStatus::OK : DBStatus::IO_ERROR;
 }
 
 DBStatus StorageEngine::truncateTable(const std::string& dbname,
@@ -18140,13 +18180,20 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
     }
 
     // Update table list
-    {
-        auto names = getTableNames(dbname);
-        std::ofstream out(tableListPath(dbname), std::ios::binary);
-        for (const auto& name : names) {
-            std::string writeName = (name == oldName) ? newName : name;
-            writeFixedString(out, writeName, MAX_TABLE_NAME_LEN);
-        }
+    auto names = getTableNames(dbname);
+    bool foundOldName = false;
+    for (auto& name : names) {
+        if (name != oldName) continue;
+        name = newName;
+        foundOldName = true;
+    }
+    if (!foundOldName) names.push_back(newName);
+    const bool tableListPersisted = writeFixedStringRecordsAtomically(
+        tableListPath(dbname), names, MAX_TABLE_NAME_LEN);
+    if (!tableListPersisted) {
+        std::cerr << "[catalog] ALTER TABLE RENAME changed relation files but "
+                  << "could not durably publish tlist.lst: " << dbname << "/"
+                  << oldName << " -> " << newName << std::endl;
     }
     std::filesystem::remove(schemaPath(dbname, oldName));
     invalidateCatalogTableList(dbname);
@@ -18383,7 +18430,7 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
 
     lockManager_.unlock(oldName);
     lockManager_.unlock(newName);
-    return DBStatus::OK;
+    return tableListPersisted ? DBStatus::OK : DBStatus::IO_ERROR;
 }
 
 DBStatus StorageEngine::alterTableOwner(const std::string& dbname,
@@ -20179,7 +20226,7 @@ std::vector<std::string> StorageEngine::getTableNames(const std::string& dbname)
     return names;
 }
 
-void StorageEngine::cleanupStaleSessionTemporaryFiles() {
+bool StorageEngine::cleanupStaleSessionTemporaryFiles() {
     for (const auto& dbname : getDatabaseNames()) {
         const auto names = getTableNames(dbname);
         bool tableListChanged = false;
@@ -20193,15 +20240,22 @@ void StorageEngine::cleanupStaleSessionTemporaryFiles() {
         // Remove entries even when the backend died before its schema file was
         // fully written.  This path runs before any client can observe the
         // database, so it is safe to rewrite the persistent relation list
-        // directly instead of taking normal SQL metadata locks.
+        // without SQL metadata locks. Publish the complete fixed-record image
+        // to keep an interrupted cleanup from truncating unrelated names.
         if (tableListChanged) {
-            std::ofstream out(tableListPath(dbname), std::ios::binary);
-            if (out) {
-                for (const auto& name : names) {
-                    if (!isSessionTempPhysicalName(name)) {
-                        writeFixedString(out, name, MAX_TABLE_NAME_LEN);
-                    }
+            std::vector<std::string> retainedNames;
+            for (const auto& name : names) {
+                if (!isSessionTempPhysicalName(name)) {
+                    retainedNames.push_back(name);
                 }
+            }
+            if (!writeFixedStringRecordsAtomically(
+                    tableListPath(dbname), retainedNames,
+                    MAX_TABLE_NAME_LEN)) {
+                std::cerr << "[catalog] startup could not durably clean "
+                          << "temporary table names from " << dbname
+                          << std::endl;
+                return false;
             }
             invalidateCatalogTableList(dbname);
         }
@@ -20216,10 +20270,15 @@ void StorageEngine::cleanupStaleSessionTemporaryFiles() {
                 if (!isSessionTempPhysicalName(filename)) continue;
                 std::error_code ec;
                 std::filesystem::remove_all(entry.path(), ec);
+                if (ec) {
+                    std::cerr << "[catalog] startup could not remove stale "
+                              << "temporary relation file " << entry.path()
+                              << ": " << ec.message() << std::endl;
+                    return false;
+                }
             }
         } catch (const std::filesystem::filesystem_error&) {
-            // Startup cleanup is best effort; normal recovery must still be
-            // able to bring the database online if a directory entry vanishes.
+            return false;
         }
         // Session namespaces and sequences use real catalog identities.
         // They must not survive restart after their temporary heaps vanish.
@@ -20239,12 +20298,15 @@ void StorageEngine::cleanupStaleSessionTemporaryFiles() {
                 if (!dropSessionTemporaryObjects(dbname, std::stoull(suffix))) {
                     std::cerr << "[TEMP] restart namespace cleanup failed for "
                               << dbname << "/" << nameSpace.nspname << std::endl;
+                    return false;
                 }
             }
         } catch (const std::exception& error) {
             std::cerr << "[TEMP] restart catalog cleanup failed: " << error.what() << std::endl;
+            return false;
         }
     }
+    return true;
 }
 
 static std::mutex g_sequenceMutex;
