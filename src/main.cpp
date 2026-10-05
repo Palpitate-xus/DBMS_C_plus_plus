@@ -13717,6 +13717,232 @@ static void substituteLateralBareScalarTargets(
     }
 }
 
+static std::string normalizeLateralIdentifier(const std::string& token) {
+    if (token.size() >= 2 && token.front() == '"' && token.back() == '"')
+        return decodeQuotedIdentifier(token);
+    return toLower(token);
+}
+
+static bool readLateralIdentifier(const std::string& sql, size_t& position,
+                                  std::string& normalized) {
+    if (position >= sql.size()) return false;
+    if (sql[position] == '"') {
+        const size_t start = position++;
+        while (position < sql.size()) {
+            if (sql[position] != '"') {
+                ++position;
+                continue;
+            }
+            if (position + 1 < sql.size() && sql[position + 1] == '"') {
+                position += 2;
+                continue;
+            }
+            ++position;
+            normalized = decodeQuotedIdentifier(
+                sql.substr(start, position - start));
+            return true;
+        }
+        return false;
+    }
+
+    const unsigned char first = static_cast<unsigned char>(sql[position]);
+    if (!(std::isalpha(first) || sql[position] == '_')) return false;
+    const size_t start = position++;
+    while (position < sql.size()) {
+        const unsigned char current =
+            static_cast<unsigned char>(sql[position]);
+        if (!std::isalnum(current) && sql[position] != '_' &&
+            sql[position] != '$') break;
+        ++position;
+    }
+    normalized = toLower(sql.substr(start, position - start));
+    return true;
+}
+
+static size_t skipLateralTrivia(const std::string& sql, size_t position) {
+    while (position < sql.size()) {
+        if (std::isspace(static_cast<unsigned char>(sql[position]))) {
+            ++position;
+            continue;
+        }
+        if (position + 1 < sql.size() && sql[position] == '-' &&
+            sql[position + 1] == '-') {
+            position += 2;
+            while (position < sql.size() && sql[position] != '\n' &&
+                   sql[position] != '\r') ++position;
+            continue;
+        }
+        if (position + 1 < sql.size() && sql[position] == '/' &&
+            sql[position + 1] == '*') {
+            position += 2;
+            size_t depth = 1;
+            while (position < sql.size() && depth != 0) {
+                if (position + 1 < sql.size() && sql[position] == '/' &&
+                    sql[position + 1] == '*') {
+                    ++depth;
+                    position += 2;
+                } else if (position + 1 < sql.size() &&
+                           sql[position] == '*' &&
+                           sql[position + 1] == '/') {
+                    --depth;
+                    position += 2;
+                } else {
+                    ++position;
+                }
+            }
+            continue;
+        }
+        break;
+    }
+    return position;
+}
+
+static size_t skipLateralString(const std::string& sql, size_t position) {
+    const bool escapeString = position > 0 &&
+        (sql[position - 1] == 'e' || sql[position - 1] == 'E') &&
+        (position < 2 ||
+         !(std::isalnum(static_cast<unsigned char>(sql[position - 2])) ||
+           sql[position - 2] == '_' || sql[position - 2] == '$'));
+    ++position;
+    while (position < sql.size()) {
+        if (escapeString && sql[position] == '\\' &&
+            position + 1 < sql.size()) {
+            position += 2;
+        } else if (sql[position] == '\'') {
+            if (position + 1 < sql.size() && sql[position + 1] == '\'')
+                position += 2;
+            else
+                return position + 1;
+        } else {
+            ++position;
+        }
+    }
+    return position;
+}
+
+static size_t skipLateralDollarString(const std::string& sql,
+                                     size_t position) {
+    size_t delimiterEnd = position + 1;
+    while (delimiterEnd < sql.size() && sql[delimiterEnd] != '$' &&
+           (std::isalnum(static_cast<unsigned char>(sql[delimiterEnd])) ||
+            sql[delimiterEnd] == '_')) {
+        ++delimiterEnd;
+    }
+    if (delimiterEnd >= sql.size() || sql[delimiterEnd] != '$')
+        return position + 1;
+    const std::string delimiter =
+        sql.substr(position, delimiterEnd - position + 1);
+    const size_t close = sql.find(delimiter, delimiterEnd + 1);
+    return close == std::string::npos ? sql.size()
+                                      : close + delimiter.size();
+}
+
+static std::vector<std::string> lateralIdentifierPath(
+    const std::string& rawName) {
+    const auto tokens = dbms::SQLParser::tokenize(rawName);
+    std::vector<std::string> path;
+    for (size_t position = 0; position < tokens.size();) {
+        if (tokens[position] == "." || tokens[position] == ",") return {};
+        path.push_back(normalizeLateralIdentifier(tokens[position++]));
+        if (position == tokens.size()) break;
+        if (tokens[position++] != "." || position == tokens.size()) return {};
+    }
+    return path;
+}
+
+static void replaceLateralQualifiedColumn(
+    std::string& sql, const std::vector<std::string>& rawQualifiers,
+    const std::string& column, const std::string& replacement) {
+    std::vector<std::vector<std::string>> qualifierPaths;
+    for (const std::string& rawQualifier : rawQualifiers) {
+        auto path = lateralIdentifierPath(rawQualifier);
+        if (!path.empty() &&
+            std::find(qualifierPaths.begin(), qualifierPaths.end(), path) ==
+                qualifierPaths.end()) {
+            qualifierPaths.push_back(std::move(path));
+        }
+    }
+    if (qualifierPaths.empty()) return;
+
+    size_t position = 0;
+    while (position < sql.size()) {
+        const char current = sql[position];
+        if (current == '\'') {
+            position = skipLateralString(sql, position);
+            continue;
+        }
+        if (current == '$') {
+            const size_t skipped = skipLateralDollarString(sql, position);
+            if (skipped != position + 1) {
+                position = skipped;
+                continue;
+            }
+        }
+        if (current == '-' && position + 1 < sql.size() &&
+            sql[position + 1] == '-') {
+            position = skipLateralTrivia(sql, position);
+            continue;
+        }
+        if (current == '/' && position + 1 < sql.size() &&
+            sql[position + 1] == '*') {
+            position = skipLateralTrivia(sql, position);
+            continue;
+        }
+
+        const size_t identifierStart = position;
+        size_t firstEnd = position;
+        std::string first;
+        if (!readLateralIdentifier(sql, firstEnd, first)) {
+            ++position;
+            continue;
+        }
+
+        bool matched = false;
+        for (const auto& path : qualifierPaths) {
+            if (path.empty() || path.front() != first) continue;
+            if (path.size() == 1 && identifierStart > 0) {
+                size_t previous = identifierStart;
+                while (previous > 0 &&
+                       std::isspace(static_cast<unsigned char>(
+                           sql[previous - 1]))) --previous;
+                if (previous > 0 && sql[previous - 1] == '.') continue;
+            }
+
+            size_t cursor = firstEnd;
+            bool qualifierMatched = true;
+            for (size_t part = 1; part < path.size(); ++part) {
+                cursor = skipLateralTrivia(sql, cursor);
+                if (cursor >= sql.size() || sql[cursor] != '.') {
+                    qualifierMatched = false;
+                    break;
+                }
+                cursor = skipLateralTrivia(sql, cursor + 1);
+                std::string actualPart;
+                if (!readLateralIdentifier(sql, cursor, actualPart) ||
+                    actualPart != path[part]) {
+                    qualifierMatched = false;
+                    break;
+                }
+            }
+            if (!qualifierMatched) continue;
+
+            cursor = skipLateralTrivia(sql, cursor);
+            if (cursor >= sql.size() || sql[cursor] != '.') continue;
+            cursor = skipLateralTrivia(sql, cursor + 1);
+            std::string actualColumn;
+            if (!readLateralIdentifier(sql, cursor, actualColumn) ||
+                actualColumn != column) continue;
+            const size_t columnEnd = cursor;
+            sql.replace(identifierStart, columnEnd - identifierStart,
+                        replacement);
+            position = identifierStart + replacement.size();
+            matched = true;
+            break;
+        }
+        if (!matched) position = firstEnd;
+    }
+}
+
 static bool lateralJoinPredicateMatches(
     const std::string& predicate, const TableSchema& leftSchema,
     const std::vector<std::vector<std::string>>& leftColumnQualifiers,
@@ -14088,27 +14314,9 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
                     const std::string lit = isNull
                         ? "null" : (isNum ? escVal : "'" + escVal + "'");
 
-                    for (const std::string& qualifier :
-                         leftColumnQualifiers[combinedIndex]) {
-                        const std::string place = qualifier + "." +
-                            relation.schema.cols[ci].dataName;
-                        size_t pos = 0;
-                        while ((pos = findTextOutsideQuotes(
-                                    replacedSql, place, pos)) != std::string::npos) {
-                            const size_t after = pos + place.size();
-                            if ((pos > 0 &&
-                                 (isalnum(static_cast<unsigned char>(replacedSql[pos - 1])) ||
-                                  replacedSql[pos - 1] == '_')) ||
-                                (after < replacedSql.size() &&
-                                 (isalnum(static_cast<unsigned char>(replacedSql[after])) ||
-                                  replacedSql[after] == '_'))) {
-                                pos = after;
-                                continue;
-                            }
-                            replacedSql.replace(pos, place.size(), lit);
-                            pos += lit.size();
-                        }
-                    }
+                    replaceLateralQualifiedColumn(
+                        replacedSql, leftColumnQualifiers[combinedIndex],
+                        relation.schema.cols[ci].dataName, lit);
                 }
             }
             substituteLateralBareScalarTargets(
@@ -14302,27 +14510,9 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
             for (const LateralLeftRelation& relation : leftRelations) {
                 for (size_t ci = 0; ci < relation.schema.len; ++ci) {
                     const size_t combinedIndex = relation.columnOffset + ci;
-                    for (const std::string& qualifier :
-                         leftColumnQualifiers[combinedIndex]) {
-                        const std::string place = qualifier + "." +
-                            relation.schema.cols[ci].dataName;
-                        size_t pos = 0;
-                        while ((pos = findTextOutsideQuotes(
-                                    probeSql, place, pos)) != std::string::npos) {
-                            const size_t after = pos + place.size();
-                            if ((pos > 0 &&
-                                 (isalnum(static_cast<unsigned char>(probeSql[pos - 1])) ||
-                                  probeSql[pos - 1] == '_')) ||
-                                (after < probeSql.size() &&
-                                 (isalnum(static_cast<unsigned char>(probeSql[after])) ||
-                                  probeSql[after] == '_'))) {
-                                pos = after;
-                                continue;
-                            }
-                            probeSql.replace(pos, place.size(), "null");
-                            pos += 4;
-                        }
-                    }
+                    replaceLateralQualifiedColumn(
+                        probeSql, leftColumnQualifiers[combinedIndex],
+                        relation.schema.cols[ci].dataName, "null");
                 }
             }
             substituteLateralBareScalarTargets(
@@ -14404,23 +14594,8 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
                                     const std::string& column,
                                     const std::string& replacement) {
             if (qualifier.empty()) return;
-            const std::string needle = qualifier + "." + column;
-            size_t pos = 0;
-            while ((pos = findTextOutsideQuotes(result, needle, pos)) !=
-                   std::string::npos) {
-                const size_t after = pos + needle.size();
-                if ((pos > 0 &&
-                     (isalnum(static_cast<unsigned char>(result[pos - 1])) ||
-                      result[pos - 1] == '_')) ||
-                    (after < result.size() &&
-                     (isalnum(static_cast<unsigned char>(result[after])) ||
-                      result[after] == '_'))) {
-                    pos = after;
-                    continue;
-                }
-                result.replace(pos, needle.size(), replacement);
-                pos += replacement.size();
-            }
+            replaceLateralQualifiedColumn(result, {qualifier}, column,
+                                          replacement);
         };
         for (const LateralLeftRelation& relation : leftRelations) {
             for (size_t ci = 0; ci < relation.schema.len; ++ci) {
