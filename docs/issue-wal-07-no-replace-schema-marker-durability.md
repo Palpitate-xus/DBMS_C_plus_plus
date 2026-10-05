@@ -67,6 +67,13 @@ fails, the manager refuses operations when directory initialization was not
 durable, or removes the unreturned object and syncs the rollback when the
 object-name barrier fails.
 
+Large-object byte-range writes and truncations now use validated no-follow
+file descriptors and sync modified file contents before returning success.
+This does not make them WAL/transactional, and DROP still lacks a durable
+directory-removal/rollback protocol. Object path symlink handling and its
+bounded residual scope are tracked separately in
+`docs/issue-sto-07-large-object-path-integrity.md`.
+
 ## Verification
 
 - `bash scripts/build_one_test.sh schema_marker_publish_guard_test` — passed.
@@ -100,9 +107,12 @@ object-name barrier fails.
   Injected parent-sync failures at directory-tree initialization and after
   object-file creation both prevented the object from being returned; after a
   fresh manager reopened the directory, identifier 1 was safely allocated.
-  `large_object_reopen_test`, `large_object_empty_write_test`,
-  `large_object_import_replace_test`, and `large_object_drop_failure_test`
-  were also directly compiled against the updated `LargeObject.cpp` and passed.
+  `large_object_symlink_guard_test`, `large_object_reopen_test`,
+  `large_object_empty_write_test`, `large_object_import_replace_test`,
+  `large_object_drop_failure_test`, `large_object_truncate_failure_test`,
+  `large_object_export_alias_test`, `large_object_export_missing_test`, and
+  `large_object_missing_import_test` were rebuilt with the current source and
+  passed.
 - `bash scripts/build_one_test.sh table_comment_storage_test` — passed before
   the final startup fail-closed adjustment; it covers normal table rename and
   drop behavior. `bash scripts/build_one_test.sh database_lifecycle_test` —
@@ -124,12 +134,13 @@ file/catalog changes are not one WAL-atomic DDL generation: a persistent
 an indeterminate `IO_ERROR` and requires operator/client re-check. A temporary
 hard-link alias may remain if cleanup itself fails, but the schema target was
 synced before that cleanup and the alias is not interpreted as a schema
-marker. Large-object byte-range write, truncate, drop restoration, WAL,
-catalog/ACL, and transaction semantics remain outside this create-only
-durability fix.
+marker. Large-object byte-range write/truncate now sync file contents but have
+no transactional rollback or WAL integration; drop-directory durability and
+restoration, catalog/ACL semantics, and transaction behavior remain open.
 
 Source/test commits: `e8a6d1ee` (schema marker create), `cc129973` (schema
 marker drop), `f8c02416` (database creation), `b707afd3` (database drop),
 `ab72c8fe` (database rename), `3db539a9` (sequence rename/drop), and
 `4eca4962` (fixed-record table-list publication), `ca3f936b` (large-object
-creation publication), all not pushed.
+creation publication), and `258456ad` (large-object file operations), all not
+pushed.
