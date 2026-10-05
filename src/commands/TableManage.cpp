@@ -13825,9 +13825,13 @@ DBStatus StorageEngine::createDatabase(const std::string& dbname, const std::str
     if (!std::filesystem::create_directory(dbPath(dbname), ec) || ec) {
         return DBStatus::IO_ERROR;
     }
+    const auto databasePath = dbPath(dbname);
+    const auto databaseParent = databasePath.parent_path().empty()
+        ? std::filesystem::path(".") : databasePath.parent_path();
     auto failCreateDatabase = [&]() {
         std::error_code cleanupEc;
-        std::filesystem::remove_all(dbPath(dbname), cleanupEc);
+        std::filesystem::remove_all(databasePath, cleanupEc);
+        if (!cleanupEc) (void)index_file::syncDirectory(databaseParent);
         return DBStatus::IO_ERROR;
     };
     if (!index_file::writeAtomically(tableListPath(dbname), "") ||
@@ -13845,6 +13849,12 @@ DBStatus StorageEngine::createDatabase(const std::string& dbname, const std::str
     // even when the database has never emitted a WAL record.
     if (!writeUnloggedLifecycle(
             dbPath(dbname), kUnloggedLifecycleRunning)) {
+        return failCreateDatabase();
+    }
+    // The per-file writes synced entries inside the database directory, but
+    // the database directory itself was created in its parent. Persist that
+    // final namespace link before reporting CREATE DATABASE success.
+    if (!index_file::syncDirectory(databaseParent)) {
         return failCreateDatabase();
     }
     return DBStatus::OK;

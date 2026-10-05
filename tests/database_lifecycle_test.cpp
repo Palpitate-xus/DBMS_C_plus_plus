@@ -1,3 +1,4 @@
+#include "access/IndexFileUtil.h"
 #include "storage/CommitLog.h"
 #include "TableManage.h"
 
@@ -11,6 +12,16 @@ extern dbms::StorageEngine g_engine;
 int main() {
     const std::string dbname = "__t_database_lifecycle";
     std::filesystem::remove_all(dbname);
+
+    const std::string failedCreate = "__t_database_lifecycle_sync_failure";
+    std::filesystem::remove_all(failedCreate);
+    // Four atomic child-file publications sync the new database directory;
+    // the following parent sync must be the point that publishes CREATE DB.
+    dbms::index_file::failDirectorySyncAfterForTesting(4);
+    assert(g_engine.createDatabase(failedCreate) == dbms::DBStatus::IO_ERROR);
+    assert(!std::filesystem::exists(failedCreate));
+    assert(g_engine.createDatabase(failedCreate) == dbms::DBStatus::OK);
+    assert(g_engine.dropDatabase(failedCreate) == dbms::DBStatus::OK);
 
     assert(g_engine.createDatabase(dbname) == dbms::DBStatus::OK);
     assert(std::filesystem::is_regular_file(std::filesystem::path(dbname) / "tlist.lst"));
