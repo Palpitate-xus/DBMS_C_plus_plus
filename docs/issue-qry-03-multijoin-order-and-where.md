@@ -1,7 +1,8 @@
 # QRY-03 — Multi-table join chain order and WHERE filtering
 
 Status: partial. The source/test fixes are local commits `4534b971`,
-`b87d4a19`, `858d6da9`, `0a57fee1`, and `e042360b` (2026-10-05).
+`b87d4a19`, `858d6da9`, `0a57fee1`, `e042360b`, and `856fe079`
+(2026-10-05).
 
 ## Reproduced behavior
 
@@ -22,6 +23,10 @@ Status: partial. The source/test fixes are local commits `4534b971`,
 - The FROM-chain parser stopped after the 12th JOIN without reporting an
   error. A 14-relation SELECT referencing the 14th alias incorrectly returned
   SQLSTATE `42P01` as though that relation were absent.
+- In a multi-table chain, the parser split an `ON` expression at its first `=`
+  and treated everything after it as a column name. A three-table query with
+  `ON a.id = b.a_id AND b.val = 1` returned no rows instead of applying the
+  second term as part of the join condition.
 
 ## Fixes
 
@@ -41,6 +46,12 @@ Status: partial. The source/test fixes are local commits `4534b971`,
   silently presented as completed queries.
 - Remove the arbitrary 12-JOIN early exit so the parser and executor see the
   full authored relation chain.
+- Split multi-table `ON` conjunctions, use one qualified cross-relation
+  equality as the hash key, and carry supported remaining comparisons as
+  storage-engine `ON` filters. Inner-chain residuals are applied only once
+  their referenced relations are present; outer-chain residuals stay on their
+  authored join edge and are evaluated before NULL extension. Unsupported
+  residual expressions now fail explicitly instead of being silently ignored.
 
 ## Verification
 
@@ -54,8 +65,14 @@ Status: partial. The source/test fixes are local commits `4534b971`,
 - The same E2E now creates 14 one-row tables and joins all 14; it failed before
   the cap removal with `42P01`, then passed with the last relation projected
   and the correct integer OID/command tag.
-- `tests/multijoin_e2e_test.py` passed (three-table chain, reordered inner join,
-  and four-table chain).
+- After the conjunction fix, `scripts/build.sh`,
+  `tests/join_type_protocol_e2e_test.py`, and `tests/multijoin_e2e_test.py`
+  passed. The protocol E2E covers reordered inner joins with additional `ON`
+  filters, a residual that cannot run until an earlier relation joins, and a
+  two-edge LEFT JOIN chain whose filtered second edge must preserve a
+  NULL-extended row. The conjunction case returned no rows before the fix;
+  the multi-join E2E also retains its three-table, reordered, and four-table
+  cases.
 - `tests/compat/cases/multijoin_projection_filter.sql` was added, but the
   differential runner refused preflight because the configured reference
   server reports PostgreSQL 17.2 (`170002`) while the runner requires 18.6
