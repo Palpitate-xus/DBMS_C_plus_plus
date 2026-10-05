@@ -23,6 +23,13 @@ int main() {
     assert(g_engine.createDatabase(failedCreate) == dbms::DBStatus::OK);
     assert(g_engine.dropDatabase(failedCreate) == dbms::DBStatus::OK);
 
+    const std::string failedDrop = "__t_database_lifecycle_drop_sync_failure";
+    std::filesystem::remove_all(failedDrop);
+    assert(g_engine.createDatabase(failedDrop) == dbms::DBStatus::OK);
+    dbms::index_file::failNextDirectorySyncForTesting();
+    assert(g_engine.dropDatabase(failedDrop) == dbms::DBStatus::IO_ERROR);
+    assert(!std::filesystem::exists(failedDrop));
+
     assert(g_engine.createDatabase(dbname) == dbms::DBStatus::OK);
     assert(std::filesystem::is_regular_file(std::filesystem::path(dbname) / "tlist.lst"));
     assert(std::filesystem::is_regular_file(std::filesystem::path(dbname) / ".charset"));

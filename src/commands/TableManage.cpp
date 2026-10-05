@@ -13907,7 +13907,14 @@ DBStatus StorageEngine::dropDatabase(const std::string& dbname) {
     removeStatFile(dbPath(dbname) / ".sql_stats.lock");
     std::error_code removeEc;
     std::filesystem::remove_all(dbPath(dbname), removeEc);
-    return cleanupOk && !removeEc ? DBStatus::OK : DBStatus::IO_ERROR;
+    if (!cleanupOk || removeEc) return DBStatus::IO_ERROR;
+    const auto databaseParent = dbPath(dbname).parent_path().empty()
+        ? std::filesystem::path(".") : dbPath(dbname).parent_path();
+    // Removing the database directory changes its parent, not just the
+    // contents that remove_all traversed. Do not report durable DROP success
+    // until the cluster directory records the removal.
+    return index_file::syncDirectory(databaseParent)
+        ? DBStatus::OK : DBStatus::IO_ERROR;
 }
 
 DBStatus StorageEngine::renameDatabase(const std::string& oldName,
