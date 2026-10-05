@@ -13258,6 +13258,104 @@ static std::string processDerivedTables(const std::string& sql, Session& s,
 // Supports: FROM t CROSS JOIN LATERAL (SELECT ...) AS alias
 //           FROM t, LATERAL (SELECT ...) AS alias
 // The lateral subquery can reference columns from the left table.
+// Resolve a bare outer-column target in a FROM-less lateral SELECT.  In this
+// scope every bare column name denotes the single visible left relation; a
+// SELECT with its own FROM is left to normal local-column resolution.
+static void substituteLateralBareScalarTargets(
+    std::string& selectSql, const TableSchema& leftSchema,
+    const std::vector<std::string>& outerValues,
+    const std::vector<bool>& outerNulls) {
+    const std::string lower = toLower(selectSql);
+    size_t selectPos = findKeywordOutsideQuotes(lower, "select", 0);
+    if (selectPos == std::string::npos ||
+        !trim(selectSql.substr(0, selectPos)).empty()) return;
+    const size_t fromPos = findTopLevelKeyword(lower, "from", selectPos + 6);
+    if (fromPos != std::string::npos) return;
+
+    size_t listStart = selectPos + 6;
+    while (listStart < selectSql.size() &&
+           isspace(static_cast<unsigned char>(selectSql[listStart]))) {
+        ++listStart;
+    }
+    if (lower.compare(listStart, 8, "distinct") == 0 &&
+        (listStart + 8 == lower.size() ||
+         isspace(static_cast<unsigned char>(lower[listStart + 8])))) {
+        listStart += 8;
+        while (listStart < selectSql.size() &&
+               isspace(static_cast<unsigned char>(selectSql[listStart]))) {
+            ++listStart;
+        }
+    }
+
+    size_t listEnd = selectSql.size();
+    for (const char* clause :
+         {"where", "group", "having", "order", "limit", "offset",
+          "fetch", "union", "intersect", "except"}) {
+        const size_t clausePos = findTopLevelKeyword(lower, clause, listStart);
+        if (clausePos != std::string::npos) listEnd = std::min(listEnd, clausePos);
+    }
+    if (listEnd < listStart) return;
+
+    const std::string projection = selectSql.substr(listStart, listEnd - listStart);
+    std::vector<std::string> targets = splitSelectColumns(projection);
+    bool changed = false;
+    for (std::string& target : targets) {
+        const std::string targetLower = toLower(target);
+        const size_t asPos = findTextOutsideQuotes(targetLower, " as ");
+        const std::string expression = trim(
+            asPos == std::string::npos ? target : target.substr(0, asPos));
+        const std::string bareName = toLower(expression);
+        if (bareName.empty() ||
+            !std::all_of(bareName.begin(), bareName.end(), [](unsigned char c) {
+                return std::isalnum(c) || c == '_' || c == '$';
+            })) continue;
+
+        size_t columnIndex = leftSchema.len;
+        for (size_t ci = 0; ci < leftSchema.len; ++ci) {
+            if (toLower(leftSchema.cols[ci].dataName) != bareName) continue;
+            if (columnIndex != leftSchema.len) {
+                columnIndex = leftSchema.len;
+                break;
+            }
+            columnIndex = ci;
+        }
+        if (columnIndex == leftSchema.len) continue;
+
+        const bool isNull = columnIndex >= outerNulls.size() ||
+            outerNulls[columnIndex];
+        std::string literal = "NULL";
+        if (!isNull) {
+            const std::string value = columnIndex < outerValues.size()
+                ? outerValues[columnIndex] : std::string();
+            std::string escaped;
+            for (char c : value) {
+                if (c == '\'') escaped += "''";
+                else escaped += c;
+            }
+            // Quoting every datum before an explicit cast avoids confusing
+            // boolean/date values with identifiers and preserves text bytes.
+            literal = "'" + escaped + "'";
+        }
+        const std::string& type = leftSchema.cols[columnIndex].dataType;
+        if (type.empty()) continue;
+        literal += "::" + type;
+        std::string alias = asPos == std::string::npos
+            ? " as " + leftSchema.cols[columnIndex].dataName
+            : target.substr(asPos);
+        target = literal + alias;
+        changed = true;
+    }
+    if (!changed) return;
+
+    std::string rewrittenProjection;
+    for (const std::string& target : targets) {
+        if (!rewrittenProjection.empty()) rewrittenProjection += ", ";
+        rewrittenProjection += target;
+    }
+    selectSql = selectSql.substr(0, listStart) + rewrittenProjection +
+        selectSql.substr(listEnd);
+}
+
 static std::string processLateralJoins(const std::string& sql, Session& s) {
     std::string result = sql;
     int lateralCount = 0;
@@ -13366,17 +13464,23 @@ static std::string processLateralJoins(const std::string& sql, Session& s) {
         for (const auto& leftRow : leftRows) {
             const std::string& lrow = leftRow.data;
             std::string replacedSql = innerSelect;
+            std::vector<std::string> outerValues(leftTbl.len);
+            std::vector<bool> outerNulls(leftTbl.len, false);
+            for (size_t ci = 0; ci < leftTbl.len; ++ci) {
+                outerValues[ci] = g_engine.extractColumnValue(lrow, leftTbl, ci);
+                outerNulls[ci] = g_engine.isColumnNullByRid(
+                    s.currentDB, resolvedLeft, leftRow.rid, ci);
+            }
             // Replace left table column references with literal values
             for (size_t ci = 0; ci < leftTbl.len; ++ci) {
-                std::string val = g_engine.extractColumnValue(lrow, leftTbl, ci);
+                const std::string& val = outerValues[ci];
                 // Escape single quotes in value
                 std::string escVal;
                 for (char c : val) {
                     if (c == '\'') escVal += "''";
                     else escVal += c;
                 }
-                const bool isNull = g_engine.isColumnNullByRid(
-                    s.currentDB, resolvedLeft, leftRow.rid, ci);
+                const bool isNull = outerNulls[ci];
                 bool isNum = leftTbl.cols[ci].dataType != "char" && !leftTbl.cols[ci].isVariableLength;
                 std::string lit = isNull
                     ? "null" : (isNum ? escVal : "'" + escVal + "'");
@@ -13403,6 +13507,8 @@ static std::string processLateralJoins(const std::string& sql, Session& s) {
                     }
                 }
             }
+            substituteLateralBareScalarTargets(
+                replacedSql, leftTbl, outerValues, outerNulls);
             std::vector<std::string> rowColNames;
             std::vector<std::string> rowColTypes;
             std::vector<std::vector<std::string>> rowStructuredRows;
@@ -13471,6 +13577,8 @@ static std::string processLateralJoins(const std::string& sql, Session& s) {
         // parser to misread as a relation name.
         if (leftRows.empty()) {
             std::string probeSql = innerSelect;
+            std::vector<std::string> nullOuterValues(leftTbl.len);
+            std::vector<bool> nullOuterColumns(leftTbl.len, true);
             for (size_t ci = 0; ci < leftTbl.len; ++ci) {
                 for (const std::string& pref :
                      {leftPrefix + ".", leftTableName + ".",
@@ -13495,6 +13603,8 @@ static std::string processLateralJoins(const std::string& sql, Session& s) {
                     }
                 }
             }
+            substituteLateralBareScalarTargets(
+                probeSql, leftTbl, nullOuterValues, nullOuterColumns);
             std::vector<std::vector<std::string>> probeRows;
             std::vector<std::vector<bool>> probeNulls;
             bool probeStructured = false;

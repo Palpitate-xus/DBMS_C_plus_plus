@@ -24,7 +24,8 @@ def main():
              "(1, DATE '2024-01-10'), (2, NULL);"),
             "CREATE TABLE typed_lateral_left (id INT, payload TEXT);",
             ("INSERT INTO typed_lateral_left VALUES "
-             "(1, 'left one'), (2, ''), (4, 'NULL'), (5, NULL);"),
+             "(1, 'left one'), (2, ''), (4, 'NULL'), (5, NULL), "
+             "(NULL, 'null id'), (6, 'quote '' value');"),
             "CREATE TABLE typed_lateral_empty (id INT);",
             "CREATE TABLE typed_lateral_right (id INT, label TEXT);",
             ("INSERT INTO typed_lateral_right VALUES "
@@ -84,6 +85,21 @@ def main():
               ["4", "NULL"],
               ["5", None]],
              [23, 25]),
+            (("SELECT l.id, x.outer_id FROM typed_lateral_left l "
+              "CROSS JOIN LATERAL (SELECT id AS outer_id) x "
+              "ORDER BY l.id NULLS LAST;"),
+             [["1", "1"], ["2", "2"], ["4", "4"], ["5", "5"],
+              ["6", "6"], [None, None]],
+             [23, 23]),
+            (("SELECT l.id, x.outer_payload FROM typed_lateral_left l "
+              "CROSS JOIN LATERAL (SELECT payload AS outer_payload) x "
+              "ORDER BY l.id NULLS LAST;"),
+             [["1", "left one"], ["2", ""], ["4", "NULL"], ["5", None],
+              ["6", "quote ' value"], [None, "null id"]],
+             [23, 25]),
+            (("SELECT e.id, x.outer_id FROM typed_lateral_empty e "
+              "CROSS JOIN LATERAL (SELECT id AS outer_id) x;"),
+             [], [23, 23]),
             (("SELECT e.id, x.label FROM typed_lateral_empty e "
               "CROSS JOIN LATERAL "
               "(SELECT label FROM typed_lateral_right WHERE id = e.id) x "
@@ -155,8 +171,14 @@ def main():
             assert len(headers) == len(expected_types), (sql, headers)
             assert type_oids == expected_types, (sql, type_oids, expected_types)
             if "lateral" in sql.lower():
-                expected_headers = (["id", "payload", "label"]
-                                    if "payload" in sql else ["id", "label"])
+                if "outer_id" in sql:
+                    expected_headers = ["id", "outer_id"]
+                elif "outer_payload" in sql:
+                    expected_headers = ["id", "outer_payload"]
+                elif "payload" in sql:
+                    expected_headers = ["id", "payload", "label"]
+                else:
+                    expected_headers = ["id", "label"]
                 assert headers == expected_headers, (sql, headers)
             assert command_tag == "SELECT %d" % len(expected_rows), (
                 sql, command_tag)
