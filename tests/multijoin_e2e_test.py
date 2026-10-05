@@ -111,7 +111,7 @@ def main():
             failed += 1
             print(f"[JOIN-E2E] {name} FAIL {ctx}")
 
-    hdr3 = "a.id a.v b.id b.a_id b.w c.id c.b_id c.x"
+    hdr3 = "id v id a_id w id b_id x"
     expected3 = {
         "1 10 1 1 100 1 1 7",
         "1 10 3 1 300 3 3 9",
@@ -128,7 +128,7 @@ def main():
     out, _, _ = run_sql(use + [
         "SELECT * FROM b JOIN a ON a.id = b.a_id JOIN c ON b.id = c.b_id",
     ])
-    hdr3b = "b.id b.a_id b.w a.id a.v c.id c.b_id c.x"
+    hdr3b = "id a_id w id v id b_id x"
     expected3b = {
         "1 1 100 1 10 1 1 7",
         "2 2 200 2 20 2 2 8",

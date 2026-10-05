@@ -47,9 +47,20 @@ def main():
             "CREATE TABLE join_outer_chain_a (id INT);",
             "CREATE TABLE join_outer_chain_b (id INT);",
             "CREATE TABLE join_outer_chain_c (id INT);",
+            "CREATE TABLE join_outer_chain_text_a (id INT, label TEXT);",
+            "CREATE TABLE join_outer_chain_text_b "
+            "(id INT, a_id INT, label TEXT);",
+            "CREATE TABLE join_outer_chain_text_c "
+            "(id INT, b_id INT, label TEXT);",
             "INSERT INTO join_outer_chain_a VALUES (1), (2);",
             "INSERT INTO join_outer_chain_b VALUES (1);",
             "INSERT INTO join_outer_chain_c VALUES (1), (3);",
+            "INSERT INTO join_outer_chain_text_a VALUES "
+            "(1, 'alpha one'), (2, '');",
+            "INSERT INTO join_outer_chain_text_b VALUES "
+            "(1, 1, 'literal NULL'), (2, 2, NULL);",
+            "INSERT INTO join_outer_chain_text_c VALUES "
+            "(1, 1, 'gamma value');",
         ]
         for sql in setup:
             _, state, message, _ = runner.ours_query(
@@ -125,13 +136,14 @@ def main():
              [["1", "1", "1"], ["2", None, None], [None, None, "3"]]),
         ]
         for outer_chain_sql, expected_rows in outer_chain_cases:
-            rows, state, message, headers, command_tag, _ = (
+            rows, state, message, headers, command_tag, type_oids = (
                 runner.decode_wire_result(
                     client.simple_query(server["sock"], outer_chain_sql),
                     include_types=True))
             assert state is None, (outer_chain_sql, state, message)
             assert rows == expected_rows, (outer_chain_sql, rows, expected_rows)
-            assert headers == ["a.id", "b.id", "c.id"], headers
+            assert headers == ["id", "id", "id"], headers
+            assert type_oids == [23, 23, 23], type_oids
             assert command_tag == "SELECT %d" % len(expected_rows), command_tag
 
         outer_chain_where_sql = (
@@ -139,13 +151,14 @@ def main():
             "LEFT JOIN join_outer_chain_b b ON a.id = b.id "
             "LEFT JOIN join_outer_chain_c c ON b.id = c.id "
             "WHERE a.id = 2;")
-        rows, state, message, headers, command_tag, _ = (
+        rows, state, message, headers, command_tag, type_oids = (
             runner.decode_wire_result(
                 client.simple_query(server["sock"], outer_chain_where_sql),
                 include_types=True))
         assert state is None, (state, message)
         assert rows == [["2", None, None]], rows
-        assert headers == ["a.id", "b.id", "c.id"], headers
+        assert headers == ["id", "id", "id"], headers
+        assert type_oids == [23, 23, 23], type_oids
         assert command_tag == "SELECT 1", command_tag
 
         outer_chain_null_filter_sql = (
@@ -153,21 +166,51 @@ def main():
             "LEFT JOIN join_outer_chain_b b ON a.id = b.id "
             "LEFT JOIN join_outer_chain_c c ON b.id = c.id "
             "WHERE b.id IS NULL;")
-        rows, state, message, headers, command_tag, _ = (
+        rows, state, message, headers, command_tag, type_oids = (
             runner.decode_wire_result(
                 client.simple_query(server["sock"],
                                     outer_chain_null_filter_sql),
                 include_types=True))
         assert state is None, (state, message)
         assert rows == [["2", None, None]], rows
-        assert headers == ["a.id", "b.id", "c.id"], headers
+        assert headers == ["id", "id", "id"], headers
+        assert type_oids == [23, 23, 23], type_oids
         assert command_tag == "SELECT 1", command_tag
+
+        projected_chain_sql = (
+            "SELECT a.id FROM join_outer_chain_a a "
+            "LEFT JOIN join_outer_chain_b b ON a.id = b.id "
+            "LEFT JOIN join_outer_chain_c c ON b.id = c.id;")
+        rows, state, message, headers, command_tag, type_oids = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"], projected_chain_sql),
+                include_types=True))
+        assert state is None, (state, message)
+        assert rows == [["1"], ["2"]], rows
+        assert headers == ["id"], headers
+        assert type_oids == [23], type_oids
+        assert command_tag == "SELECT 2", command_tag
+
+        reordered_projection_sql = (
+            "SELECT c.id AS third, a.id AS first "
+            "FROM join_outer_chain_a a "
+            "LEFT JOIN join_outer_chain_b b ON a.id = b.id "
+            "LEFT JOIN join_outer_chain_c c ON b.id = c.id;")
+        rows, state, message, headers, command_tag, type_oids = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"], reordered_projection_sql),
+                include_types=True))
+        assert state is None, (state, message)
+        assert rows == [["1", "1"], [None, "2"]], rows
+        assert headers == ["third", "first"], headers
+        assert type_oids == [23, 23], type_oids
+        assert command_tag == "SELECT 2", command_tag
 
         cross_chain_sql = (
             "SELECT a.id, b.id, c.id FROM join_outer_chain_a a "
             "CROSS JOIN join_outer_chain_b b "
             "CROSS JOIN join_outer_chain_c c;")
-        rows, state, message, headers, command_tag, _ = (
+        rows, state, message, headers, command_tag, type_oids = (
             runner.decode_wire_result(
                 client.simple_query(server["sock"], cross_chain_sql),
                 include_types=True))
@@ -175,7 +218,45 @@ def main():
         assert sorted(rows) == sorted([
             ["1", "1", "1"], ["1", "1", "3"],
             ["2", "1", "1"], ["2", "1", "3"]]), rows
+        assert headers == ["id", "id", "id"], headers
+        assert type_oids == [23, 23, 23], type_oids
         assert command_tag == "SELECT 4", command_tag
+
+        structured_chain_sql = (
+            "SELECT * FROM join_outer_chain_text_a a "
+            "LEFT JOIN join_outer_chain_text_b b ON a.id = b.a_id "
+            "LEFT JOIN join_outer_chain_text_c c ON b.id = c.b_id;")
+        rows, state, message, headers, command_tag, type_oids = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"], structured_chain_sql),
+                include_types=True))
+        assert state is None, (state, message)
+        assert rows == [
+            ["1", "alpha one", "1", "1", "literal NULL", "1", "1",
+             "gamma value"],
+            ["2", "", "2", "2", None, None, None, None],
+        ], rows
+        assert headers == [
+            "id", "label", "id", "a_id", "label", "id", "b_id", "label",
+        ], headers
+        assert type_oids == [23, 25, 23, 23, 25, 23, 23, 25], type_oids
+        assert command_tag == "SELECT 2", command_tag
+
+        structured_where_sql = (
+            "SELECT a.label, b.label, c.label "
+            "FROM join_outer_chain_text_a a "
+            "LEFT JOIN join_outer_chain_text_b b ON a.id = b.a_id "
+            "LEFT JOIN join_outer_chain_text_c c ON b.id = c.b_id "
+            "WHERE b.label IS NULL;")
+        rows, state, message, headers, command_tag, type_oids = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"], structured_where_sql),
+                include_types=True))
+        assert state is None, (state, message)
+        assert rows == [["", None, None]], rows
+        assert headers == ["label", "label", "label"], headers
+        assert type_oids == [25, 25, 25], type_oids
+        assert command_tag == "SELECT 1", command_tag
 
         exact_sql = (
             "SELECT l.id, l.txt, r.txt FROM join_exact_left l "
