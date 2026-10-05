@@ -2,10 +2,10 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
-      "issue": "QRY-03 multi-table join order and filtering",
-      "gap_ids": ["QRY-03", "OPT-02"],
+      "issue": "QRY-02/QRY-03 LATERAL binding and join order/filtering",
+      "gap_ids": ["QRY-02", "QRY-03", "OPT-02"],
       "status": "partial",
-      "commits": ["4534b971", "b87d4a19", "858d6da9", "0a57fee1", "e042360b"],
+      "commits": ["4534b971", "b87d4a19", "858d6da9", "0a57fee1", "e042360b", "e7a9d086", "e3616f82", "6123c5b3", "81853c05"],
       "evidence": [
         "docs/code-review-progress.md",
         "docs/issue-qry-03-multijoin-order-and-where.md",
@@ -20,11 +20,11 @@
         "scripts/build.sh"
       ],
       "verification": {
-        "reproduction": "A three-table LEFT JOIN chain omitted the unmatched first-table row, CROSS-only chains were rejected, and WHERE a.id=2 returned both rows.",
-        "fix": "Outer-containing chains preserve authored left-associative order and each join type; CROSS-only chains are accepted. Intermediate cells/null bitmaps/types remain structured and WHERE is evaluated after the completed join. Supported simple target columns and SELECT * are projected with typed protocol results. Column/ordinal ORDER BY with ASC/DESC/NULLS plus LIMIT/OFFSET are applied. The parser no longer truncates a chain after 12 JOINs.",
-        "focused_tests": "Production scripts/build.sh, join_type_protocol_e2e_test.py, and multijoin_e2e_test.py passed. Red/green regressions cover outer chains, CROSS chains, post-join WHERE, structured NULL/text values, projection/OIDs, DESC/LIMIT, NULLS FIRST, ordinal/OFFSET, and a 14-relation chain whose old path returned 42P01. PostgreSQL differential preflight refused because reference is 17.2, not required 18.6.",
+        "reproduction": "A three-table LEFT JOIN chain omitted the unmatched first-table row, CROSS-only chains were rejected, and WHERE a.id=2 returned both rows. A two-table input before LATERAL returned 42601; two consecutive FROM-less LATERAL items caused a 100%-CPU loop, then exposed a synthetic-column collision returning 3 instead of 2.",
+        "fix": "Outer-containing chains preserve authored left-associative order and each join type; CROSS-only chains are accepted. Intermediate cells/null bitmaps/types remain structured and WHERE is evaluated after the completed join. Supported simple target columns and SELECT * are projected with typed protocol results. Column/ordinal ORDER BY with ASC/DESC/NULLS plus LIMIT/OFFSET are applied. The parser no longer truncates a chain after 12 JOINs. LATERAL now materializes comma/CROSS chains of base tables with qualified references and JOIN ON binding; a bounded two-step FROM-less scalar LATERAL chain advances safely and carries prior synthetic outputs into the next materialized schema.",
+        "focused_tests": "Production scripts/build.sh, derived_type_protocol_e2e_test.py, sql_literal_preservation_e2e_test.py, join_type_protocol_e2e_test.py, and multijoin_e2e_test.py passed on their respective changes. Red/green regressions cover outer chains, CROSS chains, post-join WHERE, structured NULL/text values, projection/OIDs, DESC/LIMIT, NULLS FIRST, ordinal/OFFSET, a 14-relation chain whose old path returned 42P01, multiple left CROSS/comma inputs to LATERAL, a multi-relation LATERAL ON predicate, and two-step LATERAL output pairing. PostgreSQL differential preflight refused because reference is 17.2, not required 18.6.",
         "full_suite": "Full registered suite and PostgreSQL 18.6 differential were not run.",
-        "scope": "QRY-03/OPT-02 remain partial: general projection, collation-aware/arbitrary ORDER BY, GROUP/HAVING/WINDOW, arbitrary nested joins, DP/exhaustive search, GEQO, semi/anti constraints, and bushy plans remain open."
+        "scope": "QRY-02/QRY-03/OPT-02 remain partial: general correlated/nested LATERAL, non-CROSS multi-relation LATERAL left trees, table functions, arbitrary projection, collation-aware/arbitrary ORDER BY, GROUP/HAVING/WINDOW, arbitrary nested joins, DP/exhaustive search, GEQO, semi/anti constraints, and bushy plans remain open. Full suite and PostgreSQL 18.6 differential remain unverified."
       }
     },
     {
