@@ -22402,7 +22402,12 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     p += 4;
                 }
             }
-            if (joinCount >= 2) {
+            const bool hasUsingJoinSyntax =
+                findTopLevelKeyword(sql, "using", fromPos + 4) !=
+                    string::npos ||
+                findTopLevelKeyword(sql, "natural", fromPos + 4) !=
+                    string::npos;
+            if (joinCount >= 2 || hasUsingJoinSyntax) {
                 // ---- parse chain ----
                 struct JoinLink {
                     string table;   // right-side table of this JOIN
@@ -22411,6 +22416,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     string onLeft;  // qualified
                     string onRight;
                     vector<string> onResiduals;
+                    vector<string> usingColumns;
+                    bool natural = false;
                     bool hasOn;
                 };
                 struct ParsedJoin {
@@ -22482,11 +22489,17 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             }
                             return false;
                         };
+                        const bool naturalJoin = matchWord("natural");
                         if (matchWord("left")) jt2 = "left";
                         else if (matchWord("right")) jt2 = "right";
                         else if (matchWord("full")) jt2 = "full";
                         else if (matchWord("cross")) jt2 = "cross";
-                        else if (matchWord("natural")) jt2 = "inner";
+                        else (void)matchWord("inner");
+                        if (naturalJoin && jt2 == "cross") {
+                            cout << "SQL syntax error: NATURAL CROSS JOIN is "
+                                    "not valid (SQLSTATE 42601)" << endl;
+                            return true;
+                        }
                         (void)matchWord("outer");
                         if (!matchWord("join")) {
                             cout << "SQL syntax error in FROM clause near JOIN" << endl;
@@ -22502,7 +22515,13 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         link.alias = ralias;
                         link.type = jt2;
                         link.hasOn = false;
+                        link.natural = naturalJoin;
                         if (jt2 != "cross" && matchWord("on")) {
+                            if (naturalJoin) {
+                                cout << "SQL syntax error: NATURAL JOIN cannot "
+                                        "specify ON (SQLSTATE 42601)" << endl;
+                                return true;
+                            }
                             skipWs(i);
                             size_t st = i;
                             // read until whitespace + next join-type word or end
@@ -22578,6 +22597,47 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                 return true;
                             }
                             link.hasOn = true;
+                        } else if (jt2 != "cross" && matchWord("using")) {
+                            if (naturalJoin) {
+                                cout << "SQL syntax error: NATURAL JOIN cannot "
+                                        "specify USING (SQLSTATE 42601)" << endl;
+                                return true;
+                            }
+                            skipWs(i);
+                            if (i >= seg.size() || seg[i] != '(') {
+                                cout << "SQL syntax error: expected column list "
+                                        "after USING (SQLSTATE 42601)" << endl;
+                                return true;
+                            }
+                            ++i;
+                            while (true) {
+                                skipWs(i);
+                                const size_t start = i;
+                                while (i < seg.size() &&
+                                       (isalnum(static_cast<unsigned char>(seg[i])) ||
+                                        seg[i] == '_')) ++i;
+                                if (start == i) {
+                                    cout << "SQL syntax error: invalid USING "
+                                            "column list (SQLSTATE 42601)"
+                                         << endl;
+                                    return true;
+                                }
+                                link.usingColumns.push_back(
+                                    seg.substr(start, i - start));
+                                skipWs(i);
+                                if (i < seg.size() && seg[i] == ',') {
+                                    ++i;
+                                    continue;
+                                }
+                                if (i < seg.size() && seg[i] == ')') {
+                                    ++i;
+                                    break;
+                                }
+                                cout << "SQL syntax error: invalid USING "
+                                        "column list (SQLSTATE 42601)" << endl;
+                                return true;
+                            }
+                            link.hasOn = true;
                         }
                         pj.tables.push_back({rname, ralias});
                         pj.joins.push_back(std::move(link));
@@ -22613,6 +22673,159 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     r.alias = al.empty() ? tn : al;
                     r.schema = g_engine.getTableSchema(s.currentDB, r.name);
                     pending.push_back(std::move(r));
+                }
+                struct LogicalJoinColumn {
+                    string name;
+                    string type;
+                    vector<pair<size_t, string>> sources;
+                    string physicalName;
+                };
+                const bool hasUsingJoin = std::any_of(
+                    pj.joins.begin(), pj.joins.end(),
+                    [](const JoinLink& link) {
+                        return link.natural || !link.usingColumns.empty();
+                    });
+                vector<LogicalJoinColumn> logicalJoinColumns;
+                vector<vector<LogicalJoinColumn>> logicalJoinStages;
+                if (hasUsingJoin) {
+                    for (size_t column = 0;
+                         column < pending.front().schema.len; ++column) {
+                        logicalJoinColumns.push_back({
+                            pending.front().schema.cols[column].dataName,
+                            pending.front().schema.cols[column].dataType,
+                            {{0, pending.front().schema.cols[column].dataName}},
+                            {}});
+                    }
+                    for (size_t joinIndex = 0;
+                         joinIndex < pj.joins.size(); ++joinIndex) {
+                        auto& link = pj.joins[joinIndex];
+                        const size_t rightRelation = joinIndex + 1;
+                        vector<string> usingColumns = link.usingColumns;
+                        if (link.natural) {
+                            for (const auto& leftColumn : logicalJoinColumns) {
+                                bool existsOnRight = false;
+                                for (size_t column = 0;
+                                     column < pending[rightRelation].schema.len;
+                                     ++column) {
+                                    existsOnRight = existsOnRight ||
+                                        pending[rightRelation].schema.cols[column]
+                                                .dataName == leftColumn.name;
+                                }
+                                if (existsOnRight &&
+                                    std::find(usingColumns.begin(),
+                                              usingColumns.end(),
+                                              leftColumn.name) ==
+                                        usingColumns.end()) {
+                                    usingColumns.push_back(leftColumn.name);
+                                }
+                            }
+                        }
+                        if (link.natural) link.usingColumns = usingColumns;
+                        std::set<string> uniqueUsingColumns;
+                        vector<LogicalJoinColumn> mergedColumns;
+                        for (const auto& name : usingColumns) {
+                            if (!uniqueUsingColumns.insert(name).second) {
+                                cout << "ERROR: column \"" << name
+                                     << "\" specified more than once in USING "
+                                        "clause (SQLSTATE 42701)" << endl;
+                                return true;
+                            }
+                            vector<size_t> leftMatches;
+                            for (size_t column = 0;
+                                 column < logicalJoinColumns.size(); ++column) {
+                                if (logicalJoinColumns[column].name == name)
+                                    leftMatches.push_back(column);
+                            }
+                            size_t rightColumn = pending[rightRelation].schema.len;
+                            size_t rightMatches = 0;
+                            for (size_t column = 0;
+                                 column < pending[rightRelation].schema.len;
+                                 ++column) {
+                                if (pending[rightRelation].schema.cols[column]
+                                        .dataName == name) {
+                                    rightColumn = column;
+                                    ++rightMatches;
+                                }
+                            }
+                            if (leftMatches.size() != 1 || rightMatches != 1) {
+                                const bool missing = leftMatches.empty() ||
+                                                     rightMatches == 0;
+                                cout << "ERROR: column \"" << name << "\" "
+                                     << (missing ? "does not exist" :
+                                         "is ambiguous")
+                                     << " in JOIN USING clause (SQLSTATE "
+                                     << (missing ? "42703" : "42702") << ")"
+                                     << endl;
+                                return true;
+                            }
+                            const auto& leftColumn =
+                                logicalJoinColumns[leftMatches.front()];
+                            const auto& rightSchemaColumn =
+                                pending[rightRelation].schema.cols[rightColumn];
+                            vector<pair<size_t, string>> sources;
+                            if (link.type == "right") {
+                                sources.push_back({rightRelation, name});
+                            } else {
+                                sources = leftColumn.sources;
+                                if (link.type == "full")
+                                    sources.push_back({rightRelation, name});
+                            }
+                            const string resultType = link.type == "right"
+                                ? rightSchemaColumn.dataType : leftColumn.type;
+                            mergedColumns.push_back({
+                                name, resultType, std::move(sources), {}});
+                        }
+                        vector<LogicalJoinColumn> nextColumns =
+                            std::move(mergedColumns);
+                        for (const auto& column : logicalJoinColumns) {
+                            if (!uniqueUsingColumns.count(column.name))
+                                nextColumns.push_back(column);
+                        }
+                        for (size_t column = 0;
+                             column < pending[rightRelation].schema.len;
+                             ++column) {
+                            const auto& schemaColumn =
+                                pending[rightRelation].schema.cols[column];
+                            if (uniqueUsingColumns.count(schemaColumn.dataName))
+                                continue;
+                            nextColumns.push_back({
+                                schemaColumn.dataName, schemaColumn.dataType,
+                                {{rightRelation, schemaColumn.dataName}}, {}});
+                        }
+                        if (!usingColumns.empty()) {
+                            const auto& firstUsing = usingColumns.front();
+                            const auto leftColumn = std::find_if(
+                                logicalJoinColumns.begin(),
+                                logicalJoinColumns.end(),
+                                [&](const LogicalJoinColumn& column) {
+                                    return column.name == firstUsing;
+                                });
+                            if (leftColumn == logicalJoinColumns.end() ||
+                                leftColumn->sources.empty()) {
+                                cout << "ERROR: invalid JOIN USING key "
+                                        "(SQLSTATE XX000)" << endl;
+                                return true;
+                            }
+                            const auto& leftSource = leftColumn->sources.front();
+                            link.onLeft = pending[leftSource.first].alias + "." +
+                                          leftSource.second;
+                            link.onRight = pending[rightRelation].alias + "." +
+                                           firstUsing;
+                            link.hasOn = true;
+                        } else if (link.natural) {
+                            // NATURAL JOIN with no common columns is a
+                            // Cartesian join; outer forms preserve the
+                            // selected side when the other input is empty.
+                            if (link.type == "inner") {
+                                link.type = "cross";
+                            } else {
+                                link.onResiduals.push_back("true");
+                                link.hasOn = true;
+                            }
+                        }
+                        logicalJoinColumns = std::move(nextColumns);
+                        logicalJoinStages.push_back(logicalJoinColumns);
+                    }
                 }
                 auto resolveMultiOnColumn = [&](const dbms::ColumnRefExpr* ref,
                                                 size_t& relationIndex,
@@ -22846,8 +23059,14 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         [](const JoinLink& link) {
                             return link.type == "cross";
                         });
+                const bool onlyNoKeyJoins = !pj.joins.empty() &&
+                    std::all_of(pj.joins.begin(), pj.joins.end(),
+                        [](const JoinLink& link) {
+                            return link.type == "cross" ||
+                                (link.natural && link.usingColumns.empty());
+                        });
                 if (pj.tables.size() < 2 ||
-                    (preds.empty() && !onlyCrossJoins)) {
+                    (preds.empty() && !onlyNoKeyJoins)) {
                     cout << "SQL syntax error: multi-table join requires ON clauses" << endl;
                     return true;
                 }
@@ -22856,7 +23075,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 // join constrains which rows are preserved, so evaluate any
                 // chain containing one in its written (left-associated)
                 // order rather than changing its join tree.
-                const bool preserveJoinOrder = std::any_of(
+                const bool preserveJoinOrder = hasUsingJoin || std::any_of(
                     pj.joins.begin(), pj.joins.end(), [](const JoinLink& link) {
                         return link.type == "left" || link.type == "right" ||
                                link.type == "full";
@@ -22872,7 +23091,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     bestRows = static_cast<double>(rowCount(pending[0].name)) *
                                static_cast<double>(rowCount(pending[1].name));
                 } else if (preserveJoinOrder && !pj.joins.empty() &&
-                    pj.joins.front().type == "cross") {
+                    (pj.joins.front().type == "cross" ||
+                     (pj.joins.front().natural &&
+                      pj.joins.front().usingColumns.empty()))) {
                     bestRows = static_cast<double>(rowCount(pending[0].name)) *
                                static_cast<double>(rowCount(pending[1].name));
                 } else if (preserveJoinOrder) {
@@ -22951,6 +23172,54 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         interTypes.push_back(ts2.cols[c].dataType);
                         colMap[{tIdx, cn}] = out;
                     }
+                };
+                auto appendLogicalJoinStage = [&] (
+                    size_t stageIndex,
+                    vector<vector<string>>& cells,
+                    vector<vector<bool>>& nulls) {
+                    if (!hasUsingJoin) return true;
+                    if (stageIndex >= logicalJoinStages.size() ||
+                        cells.size() != nulls.size()) return false;
+                    auto& stageColumns = logicalJoinStages[stageIndex];
+                    for (size_t columnIndex = 0;
+                         columnIndex < stageColumns.size(); ++columnIndex) {
+                        auto& column = stageColumns[columnIndex];
+                        string hiddenName = "__mj_out_" +
+                            std::to_string(stageIndex) + "_" +
+                            std::to_string(columnIndex);
+                        while (std::find(interCols.begin(), interCols.end(),
+                                         hiddenName) != interCols.end())
+                            hiddenName.push_back('_');
+                        for (size_t row = 0; row < cells.size(); ++row) {
+                            if (cells[row].size() != interCols.size() ||
+                                nulls[row].size() != interCols.size())
+                                return false;
+                            string value;
+                            bool isNull = true;
+                            for (const auto& source : column.sources) {
+                                const auto mapped = colMap.find(source);
+                                if (mapped == colMap.end()) return false;
+                                const auto position = std::find(
+                                    interCols.begin(), interCols.end(),
+                                    mapped->second);
+                                if (position == interCols.end()) return false;
+                                const size_t sourceIndex = static_cast<size_t>(
+                                    position - interCols.begin());
+                                if (sourceIndex >= cells[row].size() ||
+                                    sourceIndex >= nulls[row].size()) return false;
+                                if (nulls[row][sourceIndex]) continue;
+                                value = cells[row][sourceIndex];
+                                isNull = false;
+                                break;
+                            }
+                            cells[row].push_back(std::move(value));
+                            nulls[row].push_back(isNull);
+                        }
+                        interCols.push_back(hiddenName);
+                        interTypes.push_back(column.type);
+                        column.physicalName = std::move(hiddenName);
+                    }
+                    return true;
                 };
                 auto makeResidualCondition = [&](const string& term,
                                                  const vector<size_t>& leftSources,
@@ -23116,6 +23385,38 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     }
                     return true;
                 };
+                auto appendUsingResidualConditions = [&] (
+                    size_t joinIndex,
+                    const string& leftInputName,
+                    const string& rightInputName,
+                    vector<string>& conditions) {
+                    if (joinIndex >= pj.joins.size()) return false;
+                    const auto& usingColumns =
+                        pj.joins[joinIndex].usingColumns;
+                    if (usingColumns.size() <= 1) return true;
+                    for (size_t index = 1; index < usingColumns.size(); ++index) {
+                        const string& name = usingColumns[index];
+                        string leftColumn;
+                        if (joinIndex == 0) {
+                            leftColumn = name;
+                        } else {
+                            const auto& previousStage =
+                                logicalJoinStages[joinIndex - 1];
+                            const auto previousOutput = std::find_if(
+                                previousStage.begin(), previousStage.end(),
+                                [&](const LogicalJoinColumn& column) {
+                                    return column.name == name;
+                                });
+                            if (previousOutput == previousStage.end() ||
+                                previousOutput->physicalName.empty()) return false;
+                            leftColumn = previousOutput->physicalName;
+                        }
+                        conditions.push_back(
+                            "=" + leftInputName + "." + leftColumn + " " +
+                            rightInputName + "." + name);
+                    }
+                    return true;
+                };
                 addCols(bestI, pending[bestI].schema);
                 addCols(bestJ, pending[bestJ].schema);
                 const string firstJoinType = onlyCrossJoins
@@ -23129,6 +23430,14 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         firstJoined, firstLeftSources, bestJ,
                         pending[bestI].name, pending[bestJ].name, false, 0,
                         firstOnConditions)) return true;
+                if (hasUsingJoin &&
+                    !appendUsingResidualConditions(
+                        0, pending[bestI].name, pending[bestJ].name,
+                        firstOnConditions)) {
+                    cout << "ERROR: invalid composite JOIN USING key "
+                            "(SQLSTATE XX000)" << endl;
+                    return true;
+                }
                 vector<string> interRows = doJoin(
                     pending[bestI].name, pending[bestJ].name,
                     bestLCol, bestRCol, firstJoinType,
@@ -23137,6 +23446,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 if (interRows.size() != interCells.size() ||
                     interRows.size() != interNulls.size()) {
                     cout << "ERROR: multi-join returned inconsistent row data "
+                            "(SQLSTATE XX000)" << endl;
+                    return true;
+                }
+                if (!appendLogicalJoinStage(0, interCells, interNulls)) {
+                    cout << "ERROR: failed to materialize JOIN output columns "
                             "(SQLSTATE XX000)" << endl;
                     return true;
                 }
@@ -23191,6 +23505,50 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             if (pickJoinType == "cross") {
                                 pickEst = interEstRows * static_cast<double>(
                                     rowCount(pending[t].name));
+                            } else if (pj.joins[joinIndex].natural &&
+                                       pj.joins[joinIndex].usingColumns.empty()) {
+                                pickLCol.clear();
+                                pickRCol.clear();
+                                pickEst = interEstRows * static_cast<double>(
+                                    rowCount(pending[t].name));
+                            } else if (!pj.joins[joinIndex]
+                                            .usingColumns.empty()) {
+                                if (joinIndex == 0 ||
+                                    joinIndex - 1 >= logicalJoinStages.size()) {
+                                    cout << "ERROR: invalid JOIN USING chain "
+                                            "(SQLSTATE XX000)" << endl;
+                                    return true;
+                                }
+                                const string& usingColumn =
+                                    pj.joins[joinIndex].usingColumns.front();
+                                const auto& previousStage =
+                                    logicalJoinStages[joinIndex - 1];
+                                const auto previousOutput = std::find_if(
+                                    previousStage.begin(), previousStage.end(),
+                                    [&](const LogicalJoinColumn& column) {
+                                        return column.name == usingColumn;
+                                    });
+                                if (previousOutput == previousStage.end() ||
+                                    previousOutput->physicalName.empty()) {
+                                    cout << "ERROR: JOIN USING column is not "
+                                            "available in the left input "
+                                            "(SQLSTATE XX000)" << endl;
+                                    return true;
+                                }
+                                pickLCol = previousOutput->physicalName;
+                                pickRCol = usingColumn;
+                                const double leftDistinct = static_cast<double>(
+                                    g_engine.getColumnStats(
+                                        s.currentDB, interActual,
+                                        pickLCol).cardinality);
+                                const double rightDistinct = static_cast<double>(
+                                    g_engine.getColumnStats(
+                                        s.currentDB, pending[t].name,
+                                        pickRCol).cardinality);
+                                const double distinct = std::max(
+                                    {leftDistinct, rightDistinct, 1.0});
+                                pickEst = interEstRows * static_cast<double>(
+                                    rowCount(pending[t].name)) / distinct;
                             } else {
                                 const auto pred = std::find_if(
                                     preds.begin(), preds.end(),
@@ -23318,6 +23676,14 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             static_cast<size_t>(pickIdx), interActual,
                             pending[pickIdx].name, true, stageJoinIndex,
                             extraOnConditions)) return true;
+                    if (hasUsingJoin &&
+                        !appendUsingResidualConditions(
+                            stageJoinIndex, interActual,
+                            pending[pickIdx].name, extraOnConditions)) {
+                        cout << "ERROR: invalid composite JOIN USING key "
+                                "(SQLSTATE XX000)" << endl;
+                        return true;
+                    }
                     vector<string> newRows = doJoin(
                         interActual, pending[pickIdx].name,
                         pickLCol, pickRCol, pickJoinType,
@@ -23334,6 +23700,13 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     interRows = std::move(newRows);
                     interCells = std::move(newCells);
                     interNulls = std::move(newNulls);
+                    if (!appendLogicalJoinStage(
+                            static_cast<size_t>(pickIdx) - 1,
+                            interCells, interNulls)) {
+                        cout << "ERROR: failed to materialize JOIN output "
+                                "columns (SQLSTATE XX000)" << endl;
+                        return true;
+                    }
                     interEstRows = preserveJoinOrder
                         ? static_cast<double>(interRows.size())
                         : pickEst > 0 ? pickEst
@@ -23393,11 +23766,21 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             }
                             if (ref->table.empty()) {
                                 size_t matches = 0;
-                                for (const auto& relation : pending) {
-                                    for (size_t column = 0;
-                                         column < relation.schema.len; ++column) {
-                                        if (relation.schema.cols[column].dataName ==
-                                            ref->column) ++matches;
+                                if (hasUsingJoin) {
+                                    for (const auto& column :
+                                         logicalJoinColumns) {
+                                        if (column.name == ref->column)
+                                            ++matches;
+                                    }
+                                } else {
+                                    for (const auto& relation : pending) {
+                                        for (size_t column = 0;
+                                             column < relation.schema.len;
+                                             ++column) {
+                                            if (relation.schema.cols[column]
+                                                    .dataName == ref->column)
+                                                ++matches;
+                                        }
                                     }
                                 }
                                 if (matches == 0 &&
@@ -23503,11 +23886,16 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     }
 
                     std::map<string, size_t> bareNameCounts;
-                    for (const auto& relation : pending) {
-                        for (size_t column = 0; column < relation.schema.len;
-                             ++column) {
-                            ++bareNameCounts[
-                                relation.schema.cols[column].dataName];
+                    if (hasUsingJoin) {
+                        for (const auto& column : logicalJoinColumns)
+                            ++bareNameCounts[column.name];
+                    } else {
+                        for (const auto& relation : pending) {
+                            for (size_t column = 0;
+                                 column < relation.schema.len; ++column) {
+                                ++bareNameCounts[
+                                    relation.schema.cols[column].dataName];
+                            }
                         }
                     }
                     vector<string> filteredRows;
@@ -23563,6 +23951,29 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                         .schema.cols[column].dataType;
                                     if (isNull) nullColumns.insert(name);
                                 }
+                            }
+                        }
+                        if (hasUsingJoin && !logicalJoinStages.empty()) {
+                            for (const auto& column :
+                                 logicalJoinStages.back()) {
+                                if (bareNameCounts[column.name] != 1) continue;
+                                const auto position = std::find(
+                                    interCols.begin(), interCols.end(),
+                                    column.physicalName);
+                                if (position == interCols.end()) {
+                                    cout << "ERROR: missing logical JOIN output "
+                                            "column (SQLSTATE XX000)" << endl;
+                                    return true;
+                                }
+                                const size_t cellIndex = static_cast<size_t>(
+                                    position - interCols.begin());
+                                rowValues[column.name] =
+                                    interCells[rowIndex][cellIndex];
+                                typeHints[column.name] = column.type;
+                                if (interNulls[rowIndex][cellIndex])
+                                    nullColumns.insert(column.name);
+                                else
+                                    nullColumns.erase(column.name);
                             }
                         }
                         const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
@@ -23623,17 +24034,35 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     return true;
                 };
                 if (trim(columns) == "*") {
-                    for (size_t relationIndex = 0;
-                         relationIndex < pending.size(); ++relationIndex) {
-                        for (size_t columnIndex = 0;
-                             columnIndex < pending[relationIndex].schema.len;
-                             ++columnIndex) {
-                            const string& name = pending[relationIndex]
-                                .schema.cols[columnIndex].dataName;
-                            if (!addProjection(relationIndex, columnIndex, name)) {
-                                cout << "ERROR: invalid multi-table projection "
+                    if (hasUsingJoin) {
+                        for (const auto& column : logicalJoinStages.back()) {
+                            const auto position = std::find(
+                                interCols.begin(), interCols.end(),
+                                column.physicalName);
+                            if (position == interCols.end()) {
+                                cout << "ERROR: invalid merged JOIN projection "
                                         "mapping (SQLSTATE XX000)" << endl;
                                 return true;
+                            }
+                            projections.push_back({
+                                static_cast<size_t>(position - interCols.begin()),
+                                column.name, column.name, column.type});
+                        }
+                    } else {
+                        for (size_t relationIndex = 0;
+                             relationIndex < pending.size(); ++relationIndex) {
+                            for (size_t columnIndex = 0;
+                                 columnIndex < pending[relationIndex].schema.len;
+                                 ++columnIndex) {
+                                const string& name = pending[relationIndex]
+                                    .schema.cols[columnIndex].dataName;
+                                if (!addProjection(relationIndex, columnIndex,
+                                                   name)) {
+                                    cout << "ERROR: invalid multi-table "
+                                            "projection mapping (SQLSTATE XX000)"
+                                         << endl;
+                                    return true;
+                                }
                             }
                         }
                     }
@@ -23663,6 +24092,41 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                     "requires column references (SQLSTATE "
                                     "0A000)" << endl;
                             return true;
+                        }
+                        if (hasUsingJoin && reference->table.empty()) {
+                            size_t logicalMatches = 0;
+                            const LogicalJoinColumn* logicalColumn = nullptr;
+                            for (const auto& column : logicalJoinStages.back()) {
+                                if (column.name != reference->column) continue;
+                                logicalColumn = &column;
+                                ++logicalMatches;
+                            }
+                            if (logicalMatches > 1) {
+                                cout << "ERROR: column reference \""
+                                     << reference->column
+                                     << "\" is ambiguous (SQLSTATE 42702)"
+                                     << endl;
+                                return true;
+                            }
+                            if (logicalMatches == 1) {
+                                const auto position = std::find(
+                                    interCols.begin(), interCols.end(),
+                                    logicalColumn->physicalName);
+                                if (position == interCols.end()) {
+                                    cout << "ERROR: invalid logical JOIN "
+                                            "projection mapping (SQLSTATE XX000)"
+                                         << endl;
+                                    return true;
+                                }
+                                const string outputName = alias.empty()
+                                    ? reference->column : alias;
+                                projections.push_back({
+                                    static_cast<size_t>(position -
+                                                        interCols.begin()),
+                                    reference->column, outputName,
+                                    logicalColumn->type});
+                                continue;
+                            }
                         }
                         size_t relationIndex = pending.size();
                         if (reference->table.empty()) {

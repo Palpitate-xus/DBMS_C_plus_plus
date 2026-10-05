@@ -56,6 +56,14 @@ def main():
             "CREATE TABLE join_conj_chain_b "
             "(id INT, a_id INT, val INT);",
             "CREATE TABLE join_conj_chain_c (id INT, b_id INT);",
+            "CREATE TABLE join_natural_empty_a (id INT);",
+            "CREATE TABLE join_natural_empty_b (value INT);",
+            "CREATE TABLE join_natural_no_rows (value INT);",
+            "CREATE TABLE join_using_composite_a (id INT, code INT);",
+            "CREATE TABLE join_using_composite_b "
+            "(id INT, code INT, bval INT);",
+            "CREATE TABLE join_using_composite_c "
+            "(id INT, code INT, cval INT);",
             "INSERT INTO join_outer_chain_a VALUES (1), (2);",
             "INSERT INTO join_outer_chain_b VALUES (1);",
             "INSERT INTO join_outer_chain_c VALUES (1), (3);",
@@ -69,6 +77,14 @@ def main():
             "INSERT INTO join_conj_chain_b VALUES "
             "(1, 1, 0), (2, 1, 1), (3, 2, 1);",
             "INSERT INTO join_conj_chain_c VALUES (2, 2), (4, 3);",
+            "INSERT INTO join_natural_empty_a VALUES (1), (2);",
+            "INSERT INTO join_natural_empty_b VALUES (10), (20);",
+            "INSERT INTO join_using_composite_a VALUES "
+            "(1, 10), (1, 20), (2, 20);",
+            "INSERT INTO join_using_composite_b VALUES "
+            "(1, 10, 100), (1, 20, 200), (2, 10, 300);",
+            "INSERT INTO join_using_composite_c VALUES "
+            "(1, 20, 1000), (2, 10, 2000), (1, 10, 3000);",
         ]
         for sql in setup:
             _, state, message, _ = runner.ours_query(
@@ -389,6 +405,193 @@ def main():
         assert headers == ["id", "id", "id"], headers
         assert type_oids == [23, 23, 23], type_oids
         assert command_tag == "SELECT 1", command_tag
+
+        single_using_sql = (
+            "SELECT * FROM join_conj_chain_a a "
+            "JOIN join_conj_chain_b b USING (id) ORDER BY id;")
+        rows, state, message, headers, command_tag, type_oids = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"], single_using_sql),
+                include_types=True))
+        assert state is None, (state, message)
+        assert rows == [["1", "1", "0"], ["2", "1", "1"]], rows
+        assert headers == ["id", "a_id", "val"], headers
+        assert type_oids == [23, 23, 23], type_oids
+        assert command_tag == "SELECT 2", command_tag
+
+        merged_and_qualified_using_sql = (
+            "SELECT id, a.id, b.id FROM join_conj_chain_a a "
+            "FULL OUTER JOIN join_conj_chain_b b USING (id) "
+            "ORDER BY 1;")
+        rows, state, message, headers, command_tag, type_oids = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"],
+                                    merged_and_qualified_using_sql),
+                include_types=True))
+        assert state is None, (state, message)
+        assert rows == [
+            ["1", "1", "1"], ["2", "2", "2"], ["3", None, "3"],
+        ], rows
+        assert headers == ["id", "id", "id"], headers
+        assert type_oids == [23, 23, 23], type_oids
+        assert command_tag == "SELECT 3", command_tag
+
+        single_natural_sql = (
+            "SELECT * FROM join_conj_chain_a a "
+            "NATURAL JOIN join_conj_chain_b b ORDER BY id;")
+        rows, state, message, headers, command_tag, type_oids = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"], single_natural_sql),
+                include_types=True))
+        assert state is None, (state, message)
+        assert rows == [["1", "1", "0"], ["2", "1", "1"]], rows
+        assert headers == ["id", "a_id", "val"], headers
+        assert type_oids == [23, 23, 23], type_oids
+        assert command_tag == "SELECT 2", command_tag
+
+        using_chain_sql = (
+            "SELECT * FROM join_conj_chain_a a "
+            "JOIN join_conj_chain_b b USING (id) "
+            "JOIN join_conj_chain_c c USING (id) WHERE id = 2;")
+        rows, state, message, headers, command_tag, type_oids = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"], using_chain_sql),
+                include_types=True))
+        assert state is None, (state, message)
+        assert rows == [["2", "1", "1", "2"]], rows
+        assert headers == ["id", "a_id", "val", "b_id"], headers
+        assert type_oids == [23, 23, 23, 23], type_oids
+        assert command_tag == "SELECT 1", command_tag
+
+        composite_using_chain_sql = (
+            "SELECT * FROM join_using_composite_a a "
+            "JOIN join_using_composite_b b USING (id, code) "
+            "JOIN join_using_composite_c c USING (code, id) "
+            "ORDER BY 1, 2;")
+        rows, state, message, headers, command_tag, type_oids = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"],
+                                    composite_using_chain_sql),
+                include_types=True))
+        assert state is None, (state, message)
+        assert rows == [
+            ["10", "1", "100", "3000"],
+            ["20", "1", "200", "1000"],
+        ], rows
+        assert headers == ["code", "id", "bval", "cval"], headers
+        assert type_oids == [23, 23, 23, 23], type_oids
+        assert command_tag == "SELECT 2", command_tag
+
+        natural_chain_sql = (
+            "SELECT * FROM join_conj_chain_a a "
+            "NATURAL JOIN join_conj_chain_b b "
+            "NATURAL JOIN join_conj_chain_c c WHERE id = 2;")
+        rows, state, message, headers, command_tag, type_oids = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"], natural_chain_sql),
+                include_types=True))
+        assert state is None, (state, message)
+        assert rows == [["2", "1", "1", "2"]], rows
+        assert headers == ["id", "a_id", "val", "b_id"], headers
+        assert type_oids == [23, 23, 23, 23], type_oids
+        assert command_tag == "SELECT 1", command_tag
+
+        natural_left_cartesian_sql = (
+            "SELECT * FROM join_natural_empty_a a "
+            "NATURAL LEFT JOIN join_natural_empty_b b "
+            "ORDER BY id, value;")
+        rows, state, message, headers, command_tag, type_oids = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"],
+                                    natural_left_cartesian_sql),
+                include_types=True))
+        assert state is None, (state, message)
+        assert rows == [
+            ["1", "10"], ["1", "20"], ["2", "10"], ["2", "20"],
+        ], rows
+        assert headers == ["id", "value"], headers
+        assert type_oids == [23, 23], type_oids
+        assert command_tag == "SELECT 4", command_tag
+
+        natural_right_cartesian_sql = (
+            "SELECT * FROM join_natural_empty_a a "
+            "NATURAL RIGHT JOIN join_natural_empty_b b "
+            "ORDER BY id, value;")
+        rows, state, message, headers, command_tag, type_oids = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"],
+                                    natural_right_cartesian_sql),
+                include_types=True))
+        assert state is None, (state, message)
+        assert rows == [
+            ["1", "10"], ["1", "20"], ["2", "10"], ["2", "20"],
+        ], rows
+        assert headers == ["id", "value"], headers
+        assert type_oids == [23, 23], type_oids
+        assert command_tag == "SELECT 4", command_tag
+
+        natural_full_empty_sql = (
+            "SELECT * FROM join_natural_empty_a a "
+            "NATURAL FULL OUTER JOIN join_natural_no_rows b "
+            "ORDER BY id;")
+        rows, state, message, headers, command_tag, type_oids = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"], natural_full_empty_sql),
+                include_types=True))
+        assert state is None, (state, message)
+        assert rows == [["1", None], ["2", None]], rows
+        assert headers == ["id", "value"], headers
+        assert type_oids == [23, 23], type_oids
+        assert command_tag == "SELECT 2", command_tag
+
+        left_using_chain_sql = (
+            "SELECT * FROM join_conj_chain_a a "
+            "LEFT JOIN join_conj_chain_b b USING (id) "
+            "LEFT JOIN join_conj_chain_c c USING (id) ORDER BY id;")
+        rows, state, message, headers, command_tag, type_oids = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"], left_using_chain_sql),
+                include_types=True))
+        assert state is None, (state, message)
+        assert rows == [
+            ["1", "1", "0", None], ["2", "1", "1", "2"],
+        ], rows
+        assert headers == ["id", "a_id", "val", "b_id"], headers
+        assert type_oids == [23, 23, 23, 23], type_oids
+        assert command_tag == "SELECT 2", command_tag
+
+        right_using_chain_sql = (
+            "SELECT * FROM join_conj_chain_a a "
+            "RIGHT JOIN join_conj_chain_b b USING (id) "
+            "RIGHT JOIN join_conj_chain_c c USING (id) ORDER BY id;")
+        rows, state, message, headers, command_tag, type_oids = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"], right_using_chain_sql),
+                include_types=True))
+        assert state is None, (state, message)
+        assert rows == [
+            ["2", "1", "1", "2"], ["4", None, None, "3"],
+        ], rows
+        assert headers == ["id", "a_id", "val", "b_id"], headers
+        assert type_oids == [23, 23, 23, 23], type_oids
+        assert command_tag == "SELECT 2", command_tag
+
+        full_using_chain_sql = (
+            "SELECT * FROM join_conj_chain_a a "
+            "FULL OUTER JOIN join_conj_chain_b b USING (id) "
+            "FULL OUTER JOIN join_conj_chain_c c USING (id) ORDER BY id;")
+        rows, state, message, headers, command_tag, type_oids = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"], full_using_chain_sql),
+                include_types=True))
+        assert state is None, (state, message)
+        assert rows == [
+            ["1", "1", "0", None], ["2", "1", "1", "2"],
+            ["3", "2", "1", None], ["4", None, None, "3"],
+        ], rows
+        assert headers == ["id", "a_id", "val", "b_id"], headers
+        assert type_oids == [23, 23, 23, 23], type_oids
+        assert command_tag == "SELECT 4", command_tag
 
         structured_chain_sql = (
             "SELECT * FROM join_outer_chain_text_a a "
