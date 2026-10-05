@@ -10,7 +10,8 @@ Status: partial. The source/test fixes are local commits `4534b971`,
 (simple CASE projections, 2026-10-05), `cd53df9d`
 (ordering by a projected expression, 2026-10-05), `d7389c77`
 (alias-qualified star expansion, 2026-10-05), and `93951ac3`
-(multi-column star protocol coverage, 2026-10-05).
+(multi-column star protocol coverage, 2026-10-05), plus `c7447f26`
+(FROM-less LATERAL direct outer-column targets, 2026-10-05; QRY-02).
 
 ## Reproduced behavior
 
@@ -79,6 +80,12 @@ Status: partial. The source/test fixes are local commits `4534b971`,
   the original schema columns from that relation. Keep its duplicate names,
   type metadata, and per-column NULL bitmap rather than applying unqualified
   JOIN USING merge rules.
+- In a FROM-less LATERAL subquery, bind a direct bare-column target to the
+  unique left input column, preserving its source type by an explicit cast;
+  this also gives an empty left input a typed RowDescription. The regression
+  covers integer/text values, quoted text, NULL, and the empty-input case.
+  This narrow target-list rule does not resolve bare outer references inside
+  expressions or WHERE, nor does it support multiple visible left relations.
 - Sort supported column-reference or output-position keys with ASC/DESC and
   NULLS FIRST/LAST, then apply LIMIT/OFFSET. Unsupported projections, sort
   expressions, DISTINCT/GROUP/WINDOW forms fail explicitly rather than being
@@ -189,5 +196,7 @@ This does not complete QRY-03 or OPT-02. General target-list expressions
 evaluator-supported scalar calls are handled), general row expansion beyond
 simple `alias.*`, DISTINCT/GROUP/HAVING/WINDOW, collation-aware and arbitrary-
 expression ordering, and arbitrary nested/lateral join semantics remain open.
+The FROM-less LATERAL direct-column target case is only a bounded QRY-02 fix;
+other lateral correlation and parameterized join cases remain unsupported.
 OPT-02's DP/exhaustive join search, GEQO threshold, semi/anti constraints, and
 bushy plans remain unimplemented.
