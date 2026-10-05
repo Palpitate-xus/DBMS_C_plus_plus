@@ -30,6 +30,22 @@ int main() {
     assert(g_engine.dropDatabase(failedDrop) == dbms::DBStatus::IO_ERROR);
     assert(!std::filesystem::exists(failedDrop));
 
+    const std::string renameSource = "__t_database_lifecycle_rename_source";
+    const std::string renameTarget = "__t_database_lifecycle_rename_target";
+    std::filesystem::remove_all(renameSource);
+    std::filesystem::remove_all(renameTarget);
+    assert(g_engine.createDatabase(renameSource) == dbms::DBStatus::OK);
+    dbms::index_file::failNextDirectorySyncForTesting();
+    assert(g_engine.renameDatabase(renameSource, renameTarget) ==
+           dbms::DBStatus::IO_ERROR);
+    assert(std::filesystem::is_directory(renameSource));
+    assert(!std::filesystem::exists(renameTarget));
+    assert(g_engine.renameDatabase(renameSource, renameTarget) ==
+           dbms::DBStatus::OK);
+    assert(!std::filesystem::exists(renameSource));
+    assert(std::filesystem::is_directory(renameTarget));
+    assert(g_engine.dropDatabase(renameTarget) == dbms::DBStatus::OK);
+
     assert(g_engine.createDatabase(dbname) == dbms::DBStatus::OK);
     assert(std::filesystem::is_regular_file(std::filesystem::path(dbname) / "tlist.lst"));
     assert(std::filesystem::is_regular_file(std::filesystem::path(dbname) / ".charset"));

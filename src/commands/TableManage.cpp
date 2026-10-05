@@ -13974,6 +13974,8 @@ DBStatus StorageEngine::renameDatabase(const std::string& oldName,
     resetSqlDatabaseStats(oldName);
 
     std::error_code ec;
+    const auto databaseParent = dbPath(oldName).parent_path().empty()
+        ? std::filesystem::path(".") : dbPath(oldName).parent_path();
     if (archiveExists) {
         std::filesystem::rename(oldArchive, newArchive, ec);
         if (ec) return DBStatus::IO_ERROR;
@@ -13984,6 +13986,21 @@ DBStatus StorageEngine::renameDatabase(const std::string& oldName,
             std::error_code rollbackEc;
             std::filesystem::rename(newArchive, oldArchive, rollbackEc);
         }
+        (void)index_file::syncDirectory(databaseParent);
+        return DBStatus::IO_ERROR;
+    }
+    if (!index_file::syncDirectory(databaseParent)) {
+        // Both names moved but publication was not confirmed durable. Restore
+        // the original database/archive names and persist that rollback.
+        std::error_code rollbackDatabaseEc;
+        std::filesystem::rename(dbPath(newName), dbPath(oldName),
+                                rollbackDatabaseEc);
+        if (archiveExists) {
+            std::error_code rollbackArchiveEc;
+            std::filesystem::rename(newArchive, oldArchive,
+                                    rollbackArchiveEc);
+        }
+        (void)index_file::syncDirectory(databaseParent);
         return DBStatus::IO_ERROR;
     }
     return DBStatus::OK;
