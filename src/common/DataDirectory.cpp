@@ -2,6 +2,7 @@
 
 #include "access/BPTreeFormat.h"
 #include "access/BloomIndexFormat.h"
+#include "access/BrinIndexFormat.h"
 #include "access/GinIndexFormat.h"
 #include "access/HashIndexFormat.h"
 #include "access/IndexChecksum.h"
@@ -514,6 +515,10 @@ bool hasGinIndexSuffix(const std::filesystem::path& path) {
     return path.filename().extension() == ".gin";
 }
 
+bool hasBrinIndexSuffix(const std::filesystem::path& path) {
+    return path.filename().extension() == ".brin";
+}
+
 std::string displayVerificationPath(const std::filesystem::path& root,
                                     const std::filesystem::path& path) {
     const auto relative = path.lexically_relative(root);
@@ -614,6 +619,12 @@ struct BloomIndexVerificationStats {
 };
 
 struct GinIndexVerificationStats {
+    uint64_t files = 0;
+    uint64_t checksumFiles = 0;
+    uint64_t uncheckedLegacyFiles = 0;
+};
+
+struct BrinIndexVerificationStats {
     uint64_t files = 0;
     uint64_t checksumFiles = 0;
     uint64_t uncheckedLegacyFiles = 0;
@@ -1063,6 +1074,44 @@ bool collectGinIndexFiles(const std::filesystem::path& scanRoot,
     return true;
 }
 
+bool collectBrinIndexFiles(const std::filesystem::path& scanRoot,
+                           std::set<std::filesystem::path>& files,
+                           std::string& error) {
+    std::error_code ec;
+    std::filesystem::recursive_directory_iterator iterator(scanRoot, ec);
+    if (ec) {
+        error = "could not enumerate checksum root " + scanRoot.string() +
+            ": " + ec.message();
+        return false;
+    }
+    const std::filesystem::recursive_directory_iterator end;
+    for (; iterator != end; iterator.increment(ec)) {
+        if (ec) {
+            error = "could not enumerate checksum root " + scanRoot.string() +
+                ": " + ec.message();
+            return false;
+        }
+        const auto path = iterator->path();
+        if (!hasBrinIndexSuffix(path)) continue;
+        const auto status = iterator->symlink_status(ec);
+        if (ec || status.type() != std::filesystem::file_type::regular) {
+            error = "BRIN index is not a regular file: " + path.string();
+            return false;
+        }
+        files.insert(std::filesystem::weakly_canonical(path, ec));
+        if (ec) {
+            error = "could not resolve BRIN index: " + path.string();
+            return false;
+        }
+    }
+    if (ec) {
+        error = "could not enumerate checksum root " + scanRoot.string() +
+            ": " + ec.message();
+        return false;
+    }
+    return true;
+}
+
 bool verifyBloomIndex(const std::filesystem::path& root,
                       const std::filesystem::path& path,
                       BloomIndexVerificationStats& stats,
@@ -1255,6 +1304,127 @@ bool verifyGinIndex(const std::filesystem::path& root,
         return false;
     }
     ++stats.checksumFiles;
+    ++stats.files;
+    return true;
+}
+
+bool verifyBrinIndex(const std::filesystem::path& root,
+                     const std::filesystem::path& path,
+                     BrinIndexVerificationStats& stats,
+                     std::string& error) {
+    using namespace brin_index_format;
+    const std::string shown = displayVerificationPath(root, path);
+    ReadOnlyDescriptor data(path);
+    if (data.get() < 0) {
+        error = shown + ": could not open BRIN index read-only: " +
+            std::strerror(errno);
+        return false;
+    }
+    struct stat status {};
+    if (::fstat(data.get(), &status) != 0 || !S_ISREG(status.st_mode) ||
+        status.st_size < 0 ||
+        static_cast<uint64_t>(status.st_size) < kHeaderBytes) {
+        error = shown + ": truncated or invalid BRIN index file";
+        return false;
+    }
+    const uint64_t fileBytes = static_cast<uint64_t>(status.st_size);
+
+    std::array<char, sizeof(uint32_t) * 2> prefixBytes{};
+    if (!readExactlyAt(data.get(), prefixBytes.data(), prefixBytes.size(), 0)) {
+        error = shown + ": short read of BRIN index header";
+        return false;
+    }
+    const std::string prefix(prefixBytes.data(), prefixBytes.size());
+    size_t prefixOffset = 0;
+    uint32_t magic = 0;
+    uint32_t version = 0;
+    const bool littleEndianHeader =
+        readU32(prefix, prefixOffset, magic) &&
+        readU32(prefix, prefixOffset, version) && magic == kMagic;
+    if (littleEndianHeader && version == kChecksumVersion) {
+        if (fileBytes < kHeaderBytes + kChecksumBytes) {
+            error = shown + ": truncated checksummed BRIN index";
+            return false;
+        }
+        const uint64_t payloadBytes = fileBytes - kChecksumBytes;
+        std::array<char, kHeaderBytes> header{};
+        if (!readExactlyAt(data.get(), header.data(), header.size(), 0)) {
+            error = shown + ": short read of checksummed BRIN header";
+            return false;
+        }
+        const std::string headerData(header.data(), header.size());
+        size_t headerOffset = sizeof(uint32_t) * 2;
+        uint64_t rangeCount = 0;
+        if (!readU64(headerData, headerOffset, rangeCount) ||
+            rangeCount > (payloadBytes - kHeaderBytes) /
+                             kMinimumRangeBytes) {
+            error = shown + ": invalid checksummed BRIN range count";
+            return false;
+        }
+
+        std::array<char, kChecksumBytes> checksumBytes{};
+        if (!readExactlyAt(data.get(), checksumBytes.data(),
+                           checksumBytes.size(),
+                           static_cast<off_t>(payloadBytes))) {
+            error = shown + ": short read of BRIN index checksum";
+            return false;
+        }
+        const std::string checksumData(
+            checksumBytes.data(), checksumBytes.size());
+        size_t checksumOffset = 0;
+        uint32_t storedChecksum = 0;
+        if (!readU32(checksumData, checksumOffset, storedChecksum)) {
+            error = shown + ": invalid BRIN index checksum trailer";
+            return false;
+        }
+
+        uint64_t remaining = payloadBytes;
+        off_t position = 0;
+        uint32_t checksumState = 0xFFFFFFFFu;
+        std::array<char, 64 * 1024> chunk{};
+        while (remaining > 0) {
+            const size_t amount = static_cast<size_t>(
+                std::min<uint64_t>(remaining, chunk.size()));
+            if (!readExactlyAt(data.get(), chunk.data(), amount, position)) {
+                error = shown +
+                    ": short read while verifying BRIN index checksum";
+                return false;
+            }
+            checksumState = index_checksum::crc32cUpdate(
+                checksumState, chunk.data(), amount);
+            position += static_cast<off_t>(amount);
+            remaining -= amount;
+        }
+        if (index_checksum::crc32cFinish(checksumState) != storedChecksum) {
+            error = shown + ": BRIN index checksum mismatch";
+            return false;
+        }
+        ++stats.checksumFiles;
+        ++stats.files;
+        return true;
+    }
+
+    // V1 stores native-endian fields and has no checksum.
+    std::array<char, kHeaderBytes> legacyHeader{};
+    if (!readExactlyAt(data.get(), legacyHeader.data(),
+                       legacyHeader.size(), 0)) {
+        error = shown + ": short read of legacy BRIN index header";
+        return false;
+    }
+    uint32_t legacyMagic = 0;
+    uint32_t legacyVersion = 0;
+    uint64_t rangeCount = 0;
+    std::memcpy(&legacyMagic, legacyHeader.data(), sizeof(legacyMagic));
+    std::memcpy(&legacyVersion, legacyHeader.data() + sizeof(legacyMagic),
+                sizeof(legacyVersion));
+    std::memcpy(&rangeCount, legacyHeader.data() + sizeof(legacyMagic) +
+                    sizeof(legacyVersion), sizeof(rangeCount));
+    if (legacyMagic != kMagic || legacyVersion != kLegacyVersion ||
+        rangeCount > (fileBytes - kHeaderBytes) / kMinimumRangeBytes) {
+        error = shown + ": invalid legacy BRIN index header or range count";
+        return false;
+    }
+    ++stats.uncheckedLegacyFiles;
     ++stats.files;
     return true;
 }
@@ -1577,12 +1747,14 @@ bool verifyHeapDataChecksums(const std::filesystem::path& root,
     std::set<std::filesystem::path> hashIndexFiles;
     std::set<std::filesystem::path> bloomIndexFiles;
     std::set<std::filesystem::path> ginIndexFiles;
+    std::set<std::filesystem::path> brinIndexFiles;
     for (const auto& scanRoot : scanRoots) {
         if (!collectHeapFiles(scanRoot, heapFiles, error)) return false;
         if (!collectBTreeFiles(scanRoot, btreeFiles, error)) return false;
         if (!collectHashIndexFiles(scanRoot, hashIndexFiles, error)) return false;
         if (!collectBloomIndexFiles(scanRoot, bloomIndexFiles, error)) return false;
         if (!collectGinIndexFiles(scanRoot, ginIndexFiles, error)) return false;
+        if (!collectBrinIndexFiles(scanRoot, brinIndexFiles, error)) return false;
     }
 
     HeapVerificationStats stats;
@@ -1605,8 +1777,12 @@ bool verifyHeapDataChecksums(const std::filesystem::path& root,
     for (const auto& path : ginIndexFiles) {
         if (!verifyGinIndex(root, path, ginStats, error)) return false;
     }
+    BrinIndexVerificationStats brinStats;
+    for (const auto& path : brinIndexFiles) {
+        if (!verifyBrinIndex(root, path, brinStats, error)) return false;
+    }
     output = "heap checksum verification passed\n"
-        "B+ tree index scan completed; hash index scan completed; Bloom index scan completed; GIN index scan completed (legacy unchecked data is reported)\nfiles=" +
+        "B+ tree index scan completed; hash index scan completed; Bloom index scan completed; GIN index scan completed; BRIN index scan completed (legacy unchecked data is reported)\nfiles=" +
         std::to_string(stats.files) + "\nblocks=" +
         std::to_string(stats.blocks) + "\nidentity-bound-blocks=" +
         std::to_string(stats.identityBoundBlocks) +
@@ -1634,7 +1810,12 @@ bool verifyHeapDataChecksums(const std::filesystem::path& root,
         "\nchecksummed-gin-index-files=" +
         std::to_string(ginStats.checksumFiles) +
         "\nunchecked-legacy-gin-index-files=" +
-        std::to_string(ginStats.uncheckedLegacyFiles);
+        std::to_string(ginStats.uncheckedLegacyFiles) +
+        "\nbrin-index-files=" + std::to_string(brinStats.files) +
+        "\nchecksummed-brin-index-files=" +
+        std::to_string(brinStats.checksumFiles) +
+        "\nunchecked-legacy-brin-index-files=" +
+        std::to_string(brinStats.uncheckedLegacyFiles);
     return true;
 }
 

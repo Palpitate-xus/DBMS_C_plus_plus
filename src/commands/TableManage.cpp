@@ -27,6 +27,7 @@
 #include "common/TimeZoneRules.h"
 #include "process/RuntimeStats.h"
 #include "process/SqlStats.h"
+#include "access/BrinIndexFormat.h"
 #include "access/GinIndexFormat.h"
 #include "access/IndexChecksum.h"
 #include "access/IndexFileUtil.h"
@@ -13508,8 +13509,7 @@ std::vector<std::string> StorageEngine::getSPGiSTIndexedColumns(const std::strin
 // ========================================================================
 
 namespace {
-constexpr uint32_t STORAGE_BRIN_MAGIC = 0x5342524e; // SBRN
-constexpr uint32_t STORAGE_BRIN_VERSION = 1;
+constexpr uint32_t STORAGE_BRIN_MAGIC = brin_index_format::kMagic;
 
 struct StorageBrinRange {
     uint32_t pageStart = 0;
@@ -13519,11 +13519,6 @@ struct StorageBrinRange {
 };
 
 template <typename T>
-void appendStorageBrinBytes(std::string& out, const T& value) {
-    out.append(reinterpret_cast<const char*>(&value), sizeof(T));
-}
-
-template <typename T>
 bool readStorageBrinBytes(const std::string& data, size_t& offset, T& value) {
     if (offset > data.size() || data.size() - offset < sizeof(T)) return false;
     std::memcpy(&value, data.data() + offset, sizeof(T));
@@ -13531,13 +13526,8 @@ bool readStorageBrinBytes(const std::string& data, size_t& offset, T& value) {
     return true;
 }
 
-void appendStorageBrinString(std::string& out, const std::string& value) {
-    const uint64_t length = value.size();
-    appendStorageBrinBytes(out, length);
-    out.append(value);
-}
-
-bool readStorageBrinString(const std::string& data, size_t& offset, std::string& value) {
+bool readLegacyStorageBrinString(const std::string& data, size_t& offset,
+                                 std::string& value) {
     uint64_t length = 0;
     if (!readStorageBrinBytes(data, offset, length) || length > data.size() - offset)
         return false;
@@ -13659,16 +13649,20 @@ DBStatus StorageEngine::createBrinIndex(const std::string& dbname,
 
     if (!scanTable(tablename)) return DBStatus::IO_ERROR;
     std::string bytes;
-    appendStorageBrinBytes(bytes, STORAGE_BRIN_MAGIC);
-    appendStorageBrinBytes(bytes, STORAGE_BRIN_VERSION);
+    using namespace brin_index_format;
+    appendU32(bytes, STORAGE_BRIN_MAGIC);
+    appendU32(bytes, kChecksumVersion);
     const uint64_t rangeCount = ranges.size();
-    appendStorageBrinBytes(bytes, rangeCount);
+    appendU64(bytes, rangeCount);
     for (const auto& range : ranges) {
-        appendStorageBrinBytes(bytes, range.pageStart);
-        appendStorageBrinBytes(bytes, range.pageEnd);
-        appendStorageBrinString(bytes, range.minValue);
-        appendStorageBrinString(bytes, range.maxValue);
+        appendU32(bytes, range.pageStart);
+        appendU32(bytes, range.pageEnd);
+        appendU64(bytes, range.minValue.size());
+        bytes.append(range.minValue);
+        appendU64(bytes, range.maxValue.size());
+        bytes.append(range.maxValue);
     }
+    appendU32(bytes, index_checksum::crc32c(bytes.data(), bytes.size()));
     if (!index_file::writeAtomically(path, bytes)) return DBStatus::IO_ERROR;
     return DBStatus::OK;
 }
@@ -13745,6 +13739,71 @@ std::vector<std::pair<uint32_t, uint32_t>> StorageEngine::brinSearchRange(
     const std::string data((std::istreambuf_iterator<char>(in)),
                            std::istreambuf_iterator<char>());
     if (in.bad()) return {};
+    using namespace brin_index_format;
+    size_t headerOffset = 0;
+    uint32_t littleEndianMagic = 0;
+    uint32_t littleEndianVersion = 0;
+    const bool hasLittleEndianHeader =
+        readU32(data, headerOffset, littleEndianMagic) &&
+        readU32(data, headerOffset, littleEndianVersion) &&
+        littleEndianMagic == kMagic;
+    if (hasLittleEndianHeader &&
+        littleEndianVersion == kChecksumVersion) {
+        if (data.size() < sizeof(uint32_t) * 2 + sizeof(uint64_t) +
+                              kChecksumBytes) return {};
+        const size_t payloadBytes = data.size() - kChecksumBytes;
+        size_t checksumOffset = payloadBytes;
+        uint32_t storedChecksum = 0;
+        if (!readU32(data, checksumOffset, storedChecksum) ||
+            checksumOffset != data.size() ||
+            index_checksum::crc32c(data.data(), payloadBytes) !=
+                storedChecksum) {
+            return {};
+        }
+
+        const std::string_view payload(data.data(), payloadBytes);
+        size_t offset = 0;
+        uint32_t magic = 0;
+        uint32_t version = 0;
+        uint64_t rangeCount = 0;
+        constexpr uint64_t minimumRangeBytes =
+            sizeof(uint32_t) * 2 + sizeof(uint64_t) * 2;
+        if (!readU32(payload, offset, magic) ||
+            !readU32(payload, offset, version) ||
+            !readU64(payload, offset, rangeCount) || magic != kMagic ||
+            version != kChecksumVersion ||
+            rangeCount > (payloadBytes - offset) / minimumRangeBytes) {
+            return {};
+        }
+        for (uint64_t i = 0; i < rangeCount; ++i) {
+            uint32_t pstart = 0;
+            uint32_t pend = 0;
+            std::string rangeMin;
+            std::string rangeMax;
+            if (!readU32(payload, offset, pstart) ||
+                !readU32(payload, offset, pend) ||
+                !readString(payload, offset, rangeMin) ||
+                !readString(payload, offset, rangeMax) ||
+                pstart == 0 || pend < pstart) return {};
+            bool mayMatch = false;
+            if (op == "=") {
+                mayMatch = (rangeMin <= value && value <= rangeMax);
+            } else if (op == "<") {
+                mayMatch = (rangeMin < value);
+            } else if (op == "<=") {
+                mayMatch = (rangeMin <= value);
+            } else if (op == ">") {
+                mayMatch = (rangeMax > value);
+            } else if (op == ">=") {
+                mayMatch = (rangeMax >= value);
+            }
+            if (mayMatch) result.push_back({pstart, pend});
+        }
+        if (offset != payload.size()) return {};
+        return result;
+    }
+
+    // V1 used native byte order and has no checksum.
     size_t offset = 0;
     uint32_t magic = 0;
     uint32_t version = 0;
@@ -13752,7 +13811,7 @@ std::vector<std::pair<uint32_t, uint32_t>> StorageEngine::brinSearchRange(
     if (!readStorageBrinBytes(data, offset, magic) ||
         !readStorageBrinBytes(data, offset, version) ||
         !readStorageBrinBytes(data, offset, rangeCount) ||
-        magic != STORAGE_BRIN_MAGIC || version != STORAGE_BRIN_VERSION ||
+        magic != STORAGE_BRIN_MAGIC || version != kLegacyVersion ||
         rangeCount > data.size() / 24) return {};
     for (uint64_t i = 0; i < rangeCount; ++i) {
         uint32_t pstart = 0;
@@ -13761,8 +13820,8 @@ std::vector<std::pair<uint32_t, uint32_t>> StorageEngine::brinSearchRange(
         std::string rangeMax;
         if (!readStorageBrinBytes(data, offset, pstart) ||
             !readStorageBrinBytes(data, offset, pend) ||
-            !readStorageBrinString(data, offset, rangeMin) ||
-            !readStorageBrinString(data, offset, rangeMax) ||
+            !readLegacyStorageBrinString(data, offset, rangeMin) ||
+            !readLegacyStorageBrinString(data, offset, rangeMax) ||
             pstart == 0 || pend < pstart) return {};
         bool mayMatch = false;
         if (op == "=") {

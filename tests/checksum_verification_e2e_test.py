@@ -139,6 +139,21 @@ def write_gin_index(path, version=2):
     path.write_bytes(contents)
 
 
+def write_brin_index(path, version=2):
+    assert version in (1, 2)
+    byte_order = "<" if version == 2 else "="
+    contents = bytearray(struct.pack(
+        byte_order + "IIQ", 0x5342524E, version, 1))
+    contents.extend(struct.pack(byte_order + "II", 1, 2))
+    for value in (b"alpha", b"omega"):
+        contents.extend(struct.pack(byte_order + "Q", len(value)))
+        contents.extend(value)
+    if version == 2:
+        contents.extend(struct.pack("<I", crc32c(contents)))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(contents)
+
+
 def heap_page(page_id, layout_version=5):
     page = bytearray(PAGE_SIZE)
     page_id_bound = layout_version == 5
@@ -264,6 +279,8 @@ def main():
         write_bloom_index(bloom_index)
         gin_index = database / "accounts_doc.gin"
         write_gin_index(gin_index)
+        brin_index = database / "accounts_amount.brin"
+        write_brin_index(brin_index)
         legacy_heap = database / "legacy.dt"
         write_heap(legacy_heap, 2, layout_version=4)
         key = bytes.fromhex("11" * 32)
@@ -288,6 +305,8 @@ def main():
         write_bloom_index(external_legacy_bloom, 1)
         external_legacy_gin = external / "app" / "ledger_doc.gin"
         write_gin_index(external_legacy_gin, 1)
+        external_legacy_brin = external / "app" / "ledger_amount.brin"
+        write_brin_index(external_legacy_brin, 1)
 
         before_cluster = snapshot_tree(cluster)
         before_external = snapshot_tree(external)
@@ -298,6 +317,7 @@ def main():
         assert "hash index scan completed" in clean.stdout, clean
         assert "Bloom index scan completed" in clean.stdout, clean
         assert "GIN index scan completed" in clean.stdout, clean
+        assert "BRIN index scan completed" in clean.stdout, clean
         assert "files=5" in clean.stdout and "blocks=9" in clean.stdout, clean
         assert "identity-bound-blocks=3" in clean.stdout, clean
         assert "legacy-identity-unbound-blocks=1" in clean.stdout, clean
@@ -315,6 +335,9 @@ def main():
         assert "gin-index-files=2" in clean.stdout, clean
         assert "checksummed-gin-index-files=1" in clean.stdout, clean
         assert "unchecked-legacy-gin-index-files=1" in clean.stdout, clean
+        assert "brin-index-files=2" in clean.stdout, clean
+        assert "checksummed-brin-index-files=1" in clean.stdout, clean
+        assert "unchecked-legacy-brin-index-files=1" in clean.stdout, clean
         assert snapshot_tree(cluster) == before_cluster
         assert snapshot_tree(external) == before_external
         assert list(launch.iterdir()) == []
@@ -370,6 +393,14 @@ def main():
         assert "app/accounts_doc.gin" in corrupt_gin.stderr, corrupt_gin
         assert "GIN index checksum mismatch" in corrupt_gin.stderr, corrupt_gin
         gin_index.write_bytes(original_gin)
+
+        original_brin = brin_index.read_bytes()
+        flip_byte(brin_index, len(original_brin) - 5)
+        corrupt_brin = run_verify(cluster, launch)
+        assert corrupt_brin.returncode == 1, corrupt_brin
+        assert "app/accounts_amount.brin" in corrupt_brin.stderr, corrupt_brin
+        assert "BRIN index checksum mismatch" in corrupt_brin.stderr, corrupt_brin
+        brin_index.write_bytes(original_brin)
 
         original_external = external_heap.read_bytes()
         flip_byte(external_heap, PAGE_SIZE + 200)

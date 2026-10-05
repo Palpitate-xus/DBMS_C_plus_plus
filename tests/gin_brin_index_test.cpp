@@ -111,8 +111,47 @@ static void test_storage_engine_gin_brin() {
             std::vector<int64_t>{101, 202}));
 
     assert(!ddl.executeSql("CREATE INDEX t_id_brin ON t USING BRIN (id)", session));
-    assert(!g_engine.brinSearchRange(db, "t", "id", "=", "1").empty());
+    const auto expectedBrinResult =
+        g_engine.brinSearchRange(db, "t", "id", "=", "1");
+    assert(!expectedBrinResult.empty());
     assert(g_engine.brinSearchRange(db, "t", "id", "=", "99").empty());
+
+    const fs::path brinPath = fs::path(db) / "t_id.brin";
+    std::string validBrin;
+    {
+        std::ifstream input(brinPath, std::ios::binary);
+        assert(input);
+        validBrin.assign(std::istreambuf_iterator<char>(input),
+                         std::istreambuf_iterator<char>());
+    }
+    assert(validBrin.size() > sizeof(uint32_t));
+    std::string corruptedBrin = validBrin;
+    corruptedBrin[corruptedBrin.size() - sizeof(uint32_t) - 1] ^= 1;
+    {
+        std::ofstream output(brinPath, std::ios::binary | std::ios::trunc);
+        assert(output);
+        output.write(corruptedBrin.data(),
+                     static_cast<std::streamsize>(corruptedBrin.size()));
+        assert(output);
+    }
+    assert(g_engine.brinSearchRange(db, "t", "id", "=", "1").empty());
+
+    // V1 is the same native-endian payload without the version-2 checksum.
+    std::string legacyBrin =
+        validBrin.substr(0, validBrin.size() - sizeof(uint32_t));
+    legacyBrin[sizeof(uint32_t)] = 1;
+    legacyBrin[sizeof(uint32_t) + 1] = 0;
+    legacyBrin[sizeof(uint32_t) + 2] = 0;
+    legacyBrin[sizeof(uint32_t) + 3] = 0;
+    {
+        std::ofstream output(brinPath, std::ios::binary | std::ios::trunc);
+        assert(output);
+        output.write(legacyBrin.data(),
+                     static_cast<std::streamsize>(legacyBrin.size()));
+        assert(output);
+    }
+    assert(g_engine.brinSearchRange(db, "t", "id", "=", "1") ==
+           expectedBrinResult);
 
     // The production search paths must reject a damaged sidecar rather than
     // treating it as an empty, valid index.
