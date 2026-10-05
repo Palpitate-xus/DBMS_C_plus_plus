@@ -543,6 +543,39 @@ def main():
         assert type_oids == [23, 23, 23, 23], type_oids
         assert command_tag == "SELECT 1", command_tag
 
+        expression_projection_sql = (
+            "SELECT a.id + b.val AS total, c.id AS c_id "
+            "FROM join_conj_chain_a a "
+            "JOIN join_conj_chain_b b ON a.id = b.a_id "
+            "JOIN join_conj_chain_c c ON b.id = c.b_id "
+            "ORDER BY 1;")
+        rows, state, message, headers, command_tag, type_oids = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"], expression_projection_sql),
+                include_types=True))
+        assert state is None, (state, message)
+        assert rows == [["2", "2"], ["3", "4"]], rows
+        assert headers == ["total", "c_id"], headers
+        assert type_oids == [23, 23], type_oids
+        assert command_tag == "SELECT 2", command_tag
+
+        expression_null_projection_sql = (
+            "SELECT a.id + c.id AS total "
+            "FROM join_conj_chain_a a "
+            "LEFT JOIN join_conj_chain_b b ON a.id = b.a_id "
+            "LEFT JOIN join_conj_chain_c c ON b.id = c.b_id "
+            "ORDER BY c.id NULLS FIRST;")
+        rows, state, message, headers, command_tag, type_oids = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"],
+                                    expression_null_projection_sql),
+                include_types=True))
+        assert state is None, (state, message)
+        assert rows == [[None], ["3"], ["6"]], rows
+        assert headers == ["total"], headers
+        assert type_oids == [23], type_oids
+        assert command_tag == "SELECT 3", command_tag
+
         natural_left_cartesian_sql = (
             "SELECT * FROM join_natural_empty_a a "
             "NATURAL LEFT JOIN join_natural_empty_b b "

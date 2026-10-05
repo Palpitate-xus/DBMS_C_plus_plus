@@ -24009,14 +24009,112 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     string type;
                     bool descending;
                     bool nullsFirst;
+                    size_t projectionIndex;
                 };
                 struct MultiJoinProjection {
                     size_t cellIndex;
                     string column;
                     string header;
                     string type;
+                    string expression;
                 };
                 vector<MultiJoinProjection> projections;
+                map<string, size_t> multiJoinBareNameCounts;
+                if (hasUsingJoin) {
+                    for (const auto& column : logicalJoinStages.back())
+                        ++multiJoinBareNameCounts[column.name];
+                } else {
+                    for (const auto& relation : pending) {
+                        for (size_t column = 0;
+                             column < relation.schema.len; ++column)
+                            ++multiJoinBareNameCounts[
+                                relation.schema.cols[column].dataName];
+                    }
+                }
+                auto buildMultiJoinRowContext = [&](size_t rowIndex,
+                        map<string, string>& rowValues,
+                        map<string, string>& typeHints,
+                        set<string>& nullColumns) {
+                    if (rowIndex >= interCells.size() ||
+                        rowIndex >= interNulls.size() ||
+                        interCells[rowIndex].size() != interCols.size() ||
+                        interNulls[rowIndex].size() != interCols.size())
+                        return false;
+                    for (size_t relationIndex = 0;
+                         relationIndex < pending.size(); ++relationIndex) {
+                        for (size_t column = 0;
+                             column < pending[relationIndex].schema.len;
+                             ++column) {
+                            const string& name = pending[relationIndex]
+                                .schema.cols[column].dataName;
+                            const auto mapped = colMap.find(
+                                {relationIndex, name});
+                            if (mapped == colMap.end()) return false;
+                            const auto position = std::find(
+                                interCols.begin(), interCols.end(),
+                                mapped->second);
+                            if (position == interCols.end()) return false;
+                            const size_t cellIndex = static_cast<size_t>(
+                                position - interCols.begin());
+                            const bool isNull = interNulls[rowIndex][cellIndex];
+                            const string qualified = pending[relationIndex]
+                                .alias + "." + name;
+                            rowValues[qualified] = interCells[rowIndex][cellIndex];
+                            typeHints[qualified] = pending[relationIndex]
+                                .schema.cols[column].dataType;
+                            if (isNull) nullColumns.insert(qualified);
+                            if (multiJoinBareNameCounts[name] == 1) {
+                                rowValues[name] = interCells[rowIndex][cellIndex];
+                                typeHints[name] = pending[relationIndex]
+                                    .schema.cols[column].dataType;
+                                if (isNull) nullColumns.insert(name);
+                            }
+                        }
+                    }
+                    if (hasUsingJoin && !logicalJoinStages.empty()) {
+                        for (const auto& column : logicalJoinStages.back()) {
+                            if (multiJoinBareNameCounts[column.name] != 1)
+                                continue;
+                            const auto position = std::find(
+                                interCols.begin(), interCols.end(),
+                                column.physicalName);
+                            if (position == interCols.end()) return false;
+                            const size_t cellIndex = static_cast<size_t>(
+                                position - interCols.begin());
+                            rowValues[column.name] =
+                                interCells[rowIndex][cellIndex];
+                            typeHints[column.name] = column.type;
+                            if (interNulls[rowIndex][cellIndex])
+                                nullColumns.insert(column.name);
+                            else
+                                nullColumns.erase(column.name);
+                        }
+                    }
+                    return true;
+                };
+                auto projectionTypeHints = [&]() {
+                    map<string, string> hints;
+                    for (const auto& relation : pending) {
+                        for (size_t column = 0;
+                             column < relation.schema.len; ++column) {
+                            const string& name =
+                                relation.schema.cols[column].dataName;
+                            hints[relation.alias + "." + name] =
+                                relation.schema.cols[column].dataType;
+                            if (!hasUsingJoin &&
+                                multiJoinBareNameCounts[name] == 1)
+                                hints[name] =
+                                    relation.schema.cols[column].dataType;
+                        }
+                    }
+                    if (hasUsingJoin && !logicalJoinStages.empty()) {
+                        for (const auto& column : logicalJoinStages.back()) {
+                            if (multiJoinBareNameCounts[column.name] == 1)
+                                hints[column.name] = column.type;
+                        }
+                    }
+                    return hints;
+                }();
                 auto addProjection = [&](size_t relationIndex,
                                          size_t columnIndex,
                                          const string& header) {
@@ -24030,7 +24128,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     projections.push_back({
                         static_cast<size_t>(position - interCols.begin()),
                         column, header,
-                        pending[relationIndex].schema.cols[columnIndex].dataType});
+                        pending[relationIndex].schema.cols[columnIndex].dataType,
+                        {}});
                     return true;
                 };
                 if (trim(columns) == "*") {
@@ -24046,7 +24145,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             }
                             projections.push_back({
                                 static_cast<size_t>(position - interCols.begin()),
-                                column.name, column.name, column.type});
+                                column.name, column.name, column.type, {}});
                         }
                     } else {
                         for (size_t relationIndex = 0;
@@ -24087,7 +24186,124 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             ? dynamic_cast<const dbms::ColumnRefExpr*>(
                                   projectionSelect->selectList.front().expr.get())
                             : nullptr;
-                        if (!reference || !reference->schema.empty()) {
+                        if (!reference) {
+                            const dbms::Expr* expressionTree = projectionSelect &&
+                                    projectionSelect->selectList.size() == 1
+                                ? projectionSelect->selectList.front().expr.get()
+                                : nullptr;
+                            string bindingError;
+                            string bindingState;
+                            function<bool(const dbms::Expr*)>
+                                validateExpressionReferences;
+                            validateExpressionReferences =
+                                [&](const dbms::Expr* node) {
+                                if (!node) return true;
+                                if (const auto* ref = dynamic_cast<const
+                                        dbms::ColumnRefExpr*>(node)) {
+                                    if (!ref->schema.empty()) {
+                                        bindingError =
+                                            "schema-qualified multi-table "
+                                            "projections are not supported";
+                                        bindingState = "0A000";
+                                        return false;
+                                    }
+                                    if (ref->table.empty()) {
+                                        const size_t matches =
+                                            multiJoinBareNameCounts[ref->column];
+                                        if (matches == 1) return true;
+                                        bindingError = matches > 1
+                                            ? "column reference \"" +
+                                                ref->column +
+                                                "\" is ambiguous"
+                                            : "column \"" + ref->column +
+                                                "\" does not exist";
+                                        bindingState = matches > 1
+                                            ? "42702" : "42703";
+                                        return false;
+                                    }
+                                    size_t relationIndex = pending.size();
+                                    for (size_t index = 0;
+                                         index < pending.size(); ++index) {
+                                        const bool hasAlias =
+                                            !pj.tables[index].second.empty();
+                                        if (ref->table == pending[index].alias ||
+                                            (!hasAlias &&
+                                             (ref->table ==
+                                                  pj.tables[index].first ||
+                                              ref->table ==
+                                                  pending[index].name))) {
+                                            relationIndex = index;
+                                            break;
+                                        }
+                                    }
+                                    if (relationIndex == pending.size()) {
+                                        bindingError =
+                                            "missing FROM-clause entry for "
+                                            "table \"" + ref->table + "\"";
+                                        bindingState = "42P01";
+                                        return false;
+                                    }
+                                    for (size_t column = 0;
+                                         column < pending[relationIndex]
+                                                      .schema.len;
+                                         ++column) {
+                                        if (pending[relationIndex]
+                                                .schema.cols[column].dataName ==
+                                            ref->column) return true;
+                                    }
+                                    bindingError = "column \"" +
+                                        ref->toString() + "\" does not exist";
+                                    bindingState = "42703";
+                                    return false;
+                                }
+                                if (const auto* unary = dynamic_cast<const
+                                        dbms::UnaryOpExpr*>(node))
+                                    return validateExpressionReferences(
+                                        unary->operand.get());
+                                if (const auto* binary = dynamic_cast<const
+                                        dbms::BinaryOpExpr*>(node))
+                                    return validateExpressionReferences(
+                                            binary->left.get()) &&
+                                        validateExpressionReferences(
+                                            binary->right.get());
+                                if (const auto* cast = dynamic_cast<const
+                                        dbms::CastExpr*>(node))
+                                    return validateExpressionReferences(
+                                        cast->operand.get());
+                                if (dynamic_cast<const
+                                        dbms::LiteralExpr*>(node))
+                                    return true;
+                                bindingError =
+                                    "multi-table projection expression is "
+                                    "not supported";
+                                bindingState = "0A000";
+                                return false;
+                            };
+                            if (!expressionTree ||
+                                !validateExpressionReferences(expressionTree)) {
+                                cout << "ERROR: "
+                                     << (bindingError.empty()
+                                             ? "invalid multi-table projection"
+                                             : bindingError)
+                                     << " (SQLSTATE "
+                                     << (bindingState.empty()
+                                             ? "0A000" : bindingState)
+                                     << ")" << endl;
+                                return true;
+                            }
+                            string resultType =
+                                dbms::ExprHelper::canonicalResultTypeName(
+                                    dbms::ExprHelper::inferResultType(
+                                        expression, projectionTypeHints));
+                            if (resultType.empty() || resultType == "unknown")
+                                resultType = "text";
+                            projections.push_back({
+                                std::numeric_limits<size_t>::max(), expression,
+                                alias.empty() ? expression : alias,
+                                std::move(resultType), expression});
+                            continue;
+                        }
+                        if (!reference->schema.empty()) {
                             cout << "ERROR: multi-table projection currently "
                                     "requires column references (SQLSTATE "
                                     "0A000)" << endl;
@@ -24124,7 +24340,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                     static_cast<size_t>(position -
                                                         interCols.begin()),
                                     reference->column, outputName,
-                                    logicalColumn->type});
+                                    logicalColumn->type, {}});
                                 continue;
                             }
                         }
@@ -24201,6 +24417,67 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         }
                     }
                 }
+                vector<vector<string>> projectionCells(
+                    interCells.size(), vector<string>(projections.size()));
+                vector<vector<bool>> projectionNulls(
+                    interCells.size(), vector<bool>(projections.size(), false));
+                const bool hasComputedProjection = std::any_of(
+                    projections.begin(), projections.end(),
+                    [](const MultiJoinProjection& projection) {
+                        return !projection.expression.empty();
+                    });
+                for (size_t rowIndex = 0; rowIndex < interCells.size();
+                     ++rowIndex) {
+                    map<string, string> rowValues;
+                    map<string, string> typeHints;
+                    set<string> nullColumns;
+                    if (hasComputedProjection &&
+                        !buildMultiJoinRowContext(
+                            rowIndex, rowValues, typeHints, nullColumns)) {
+                        cout << "ERROR: failed to bind multi-table projection "
+                                "row (SQLSTATE XX000)" << endl;
+                        return true;
+                    }
+                    for (size_t projectionIndex = 0;
+                         projectionIndex < projections.size();
+                         ++projectionIndex) {
+                        const auto& projection = projections[projectionIndex];
+                        if (!projection.expression.empty()) {
+                            const auto evaluated =
+                                dbms::ExprHelper::evalStringWithNulls(
+                                    projection.expression, rowValues,
+                                    nullColumns, typeHints, s.currentDB,
+                                    s.username);
+                            if (!evaluated.ok) {
+                                cout << "ERROR: unsupported multi-table "
+                                        "projection expression: "
+                                     << evaluated.error
+                                     << " (SQLSTATE 0A000)" << endl;
+                                return true;
+                            }
+                            projectionNulls[rowIndex][projectionIndex] =
+                                evaluated.isNull;
+                            if (!evaluated.isNull)
+                                projectionCells[rowIndex][projectionIndex] =
+                                    evaluated.value;
+                            continue;
+                        }
+                        if (projection.cellIndex >=
+                                interCells[rowIndex].size() ||
+                            projection.cellIndex >=
+                                interNulls[rowIndex].size()) {
+                            cout << "ERROR: malformed multi-join projection "
+                                    "(SQLSTATE XX000)" << endl;
+                            return true;
+                        }
+                        projectionNulls[rowIndex][projectionIndex] =
+                            interNulls[rowIndex][projection.cellIndex];
+                        if (!projectionNulls[rowIndex][projectionIndex])
+                            projectionCells[rowIndex][projectionIndex] =
+                                interCells[rowIndex][projection.cellIndex];
+                    }
+                }
+
                 vector<size_t> outputRowOrder(interCells.size());
                 for (size_t index = 0; index < outputRowOrder.size(); ++index)
                     outputRowOrder[index] = index;
@@ -24240,6 +24517,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         else (void)stripSuffix("asc");
 
                         size_t cellIndex = interCols.size();
+                        size_t projectionIndex =
+                            std::numeric_limits<size_t>::max();
                         string type;
                         const string sortExpression = trim(item);
                         bool numericPosition = !sortExpression.empty() &&
@@ -24258,7 +24537,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                         "(SQLSTATE 42P10)" << endl;
                                 return true;
                             }
-                            cellIndex = projections[oneBased - 1].cellIndex;
+                            projectionIndex = oneBased - 1;
                             type = projections[oneBased - 1].type;
                         } else {
                             dbms::SQLParser orderParser;
@@ -24280,9 +24559,12 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             }
                             if (reference->table.empty()) {
                                 size_t aliasMatches = 0;
-                                for (const auto& projection : projections) {
+                                for (size_t index = 0;
+                                     index < projections.size(); ++index) {
+                                    const auto& projection = projections[index];
                                     if (projection.header == reference->column) {
                                         cellIndex = projection.cellIndex;
+                                        projectionIndex = index;
                                         type = projection.type;
                                         ++aliasMatches;
                                     }
@@ -24375,14 +24657,17 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                 }
                             }
                         }
-                        if (cellIndex >= interCols.size()) {
+                        if (projectionIndex ==
+                                std::numeric_limits<size_t>::max() &&
+                            cellIndex >= interCols.size()) {
                             cout << "ERROR: ORDER BY column is not available "
                                     "in the multi-table input "
                                     "(SQLSTATE 42703)" << endl;
                             return true;
                         }
                         sortKeys.push_back({cellIndex, type, descending,
-                            explicitNullOrder ? nullsFirst : descending});
+                            explicitNullOrder ? nullsFirst : descending,
+                            projectionIndex});
                     }
                     if (sortKeys.empty()) {
                         cout << "ERROR: empty multi-table ORDER BY "
@@ -24417,16 +24702,25 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         outputRowOrder.begin(), outputRowOrder.end(),
                         [&](size_t leftRow, size_t rightRow) {
                             for (const auto& key : sortKeys) {
-                                const bool leftNull =
-                                    interNulls[leftRow][key.cellIndex];
-                                const bool rightNull =
-                                    interNulls[rightRow][key.cellIndex];
+                                const bool projected = key.projectionIndex !=
+                                    std::numeric_limits<size_t>::max();
+                                const bool leftNull = projected
+                                    ? projectionNulls[leftRow][key.projectionIndex]
+                                    : interNulls[leftRow][key.cellIndex];
+                                const bool rightNull = projected
+                                    ? projectionNulls[rightRow][key.projectionIndex]
+                                    : interNulls[rightRow][key.cellIndex];
                                 if (leftNull != rightNull)
                                     return key.nullsFirst ? leftNull : !leftNull;
                                 if (leftNull) continue;
+                                const string& leftValue = projected
+                                    ? projectionCells[leftRow][key.projectionIndex]
+                                    : interCells[leftRow][key.cellIndex];
+                                const string& rightValue = projected
+                                    ? projectionCells[rightRow][key.projectionIndex]
+                                    : interCells[rightRow][key.cellIndex];
                                 const int compared = compareValues(
-                                    interCells[leftRow][key.cellIndex],
-                                    interCells[rightRow][key.cellIndex], key.type);
+                                    leftValue, rightValue, key.type);
                                 if (compared != 0)
                                     return key.descending
                                         ? compared > 0 : compared < 0;
@@ -24458,17 +24752,15 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     for (size_t projectionIndex = 0;
                          projectionIndex < projections.size();
                          ++projectionIndex) {
-                        const auto& projection = projections[projectionIndex];
-                        if (projection.cellIndex >= interCells[rowIndex].size() ||
-                            projection.cellIndex >= interNulls[rowIndex].size()) {
+                        if (projectionIndex >= projectionCells[rowIndex].size() ||
+                            projectionIndex >= projectionNulls[rowIndex].size()) {
                             cout << "ERROR: malformed multi-join projection "
                                     "(SQLSTATE XX000)" << endl;
                             return true;
                         }
-                        const bool isNull =
-                            interNulls[rowIndex][projection.cellIndex];
+                        const bool isNull = projectionNulls[rowIndex][projectionIndex];
                         const string value = isNull ? string{} :
-                            interCells[rowIndex][projection.cellIndex];
+                            projectionCells[rowIndex][projectionIndex];
                         if (projectionIndex != 0) display.push_back(' ');
                         display += isNull ? "NULL" : value;
                         values.push_back(value);
