@@ -13356,7 +13356,99 @@ static void substituteLateralBareScalarTargets(
         selectSql.substr(listEnd);
 }
 
-static std::string processLateralJoins(const std::string& sql, Session& s) {
+static bool lateralJoinPredicateMatches(
+    const std::string& predicate, const TableSchema& leftSchema,
+    const std::string& leftPrefix, const std::string& leftTableName,
+    const std::string& resolvedLeft, const std::string& rightAlias,
+    const std::vector<std::string>& leftValues,
+    const std::vector<bool>& leftNulls,
+    const std::vector<std::string>& rightNames,
+    const std::vector<std::string>& rightTypes,
+    const std::vector<std::string>& rightValues,
+    const std::vector<bool>& rightNulls,
+    const std::string& currentDB, const std::string& currentUser,
+    bool& matches, std::string& error) {
+    matches = false;
+    if (rightNames.size() != rightValues.size() ||
+        rightNames.size() != rightNulls.size()) {
+        error = "malformed structured LATERAL row";
+        return false;
+    }
+
+    std::map<std::string, std::string> rowValues;
+    std::map<std::string, std::string> typeHints;
+    std::set<std::string> nullColumns;
+    std::map<std::string, size_t> bareCounts;
+    std::vector<std::string> leftQualifiers = {
+        leftPrefix, leftTableName, resolvedLeft};
+    std::sort(leftQualifiers.begin(), leftQualifiers.end());
+    leftQualifiers.erase(std::unique(leftQualifiers.begin(),
+                                     leftQualifiers.end()),
+                         leftQualifiers.end());
+
+    for (size_t ci = 0; ci < leftSchema.len; ++ci) {
+        const std::string& name = leftSchema.cols[ci].dataName;
+        const std::string value = ci < leftValues.size()
+            ? leftValues[ci] : std::string();
+        const bool isNull = ci >= leftNulls.size() || leftNulls[ci];
+        for (const std::string& qualifier : leftQualifiers) {
+            const std::string key = toLower(qualifier + "." + name);
+            rowValues[key] = value;
+            typeHints[key] = leftSchema.cols[ci].dataType;
+            if (isNull) nullColumns.insert(key);
+        }
+        ++bareCounts[toLower(name)];
+    }
+    for (size_t ci = 0; ci < rightNames.size(); ++ci) {
+        const std::string& name = rightNames[ci];
+        const std::string key = toLower(rightAlias + "." + name);
+        rowValues[key] = rightValues[ci];
+        if (ci < rightTypes.size()) typeHints[key] = rightTypes[ci];
+        if (rightNulls[ci]) nullColumns.insert(key);
+        ++bareCounts[toLower(name)];
+    }
+    for (size_t ci = 0; ci < leftSchema.len; ++ci) {
+        const std::string name = toLower(leftSchema.cols[ci].dataName);
+        if (bareCounts[name] != 1) continue;
+        rowValues[name] = ci < leftValues.size()
+            ? leftValues[ci] : std::string();
+        typeHints[name] = leftSchema.cols[ci].dataType;
+        if (ci >= leftNulls.size() || leftNulls[ci])
+            nullColumns.insert(name);
+    }
+    for (size_t ci = 0; ci < rightNames.size(); ++ci) {
+        const std::string name = toLower(rightNames[ci]);
+        if (bareCounts[name] != 1) continue;
+        rowValues[name] = rightValues[ci];
+        if (ci < rightTypes.size()) typeHints[name] = rightTypes[ci];
+        if (rightNulls[ci]) nullColumns.insert(name);
+    }
+
+    const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
+        predicate, rowValues, nullColumns, typeHints, currentDB, currentUser);
+    if (!evaluated.ok) {
+        error = evaluated.error.empty()
+            ? "could not evaluate LATERAL JOIN condition" : evaluated.error;
+        return false;
+    }
+    if (evaluated.isNull) return true;
+    if (evaluated.typeName != "boolean" && evaluated.typeName != "bool") {
+        error = "LATERAL JOIN condition must have type boolean";
+        return false;
+    }
+    const std::string value = toLower(trim(evaluated.value));
+    if (value == "true" || value == "t" || value == "1") {
+        matches = true;
+        return true;
+    }
+    if (value == "false" || value == "f" || value == "0") return true;
+    error = "LATERAL JOIN condition did not evaluate to boolean";
+    return false;
+}
+
+static std::string processLateralJoins(const std::string& sql, Session& s,
+                                      bool& failed) {
+    failed = false;
     std::string result = sql;
     int lateralCount = 0;
 
@@ -13405,17 +13497,91 @@ static std::string processLateralJoins(const std::string& sql, Session& s) {
         if (fromPos == std::string::npos || fromPos >= latPos) break;
         std::string leftFactor = trim(
             result.substr(fromPos + 4, latPos - fromPos - 4));
+        bool leftOuterJoin = false;
+        bool joinRequiresOn = false;
+        std::string joinCondition;
+        size_t replacementEnd = aliasEnd;
         if (!leftFactor.empty() && leftFactor.back() == ',') {
             leftFactor = trim(leftFactor.substr(0, leftFactor.size() - 1));
         } else {
-            const std::string crossJoin = "cross join";
-            if (leftFactor.size() < crossJoin.size() ||
-                leftFactor.compare(leftFactor.size() - crossJoin.size(),
-                                   crossJoin.size(), crossJoin) != 0) {
+            const std::string lowerLeftFactor = toLower(leftFactor);
+            const std::vector<std::pair<std::string, bool>> joinSuffixes = {
+                {"left outer join", true}, {"left join", true},
+                {"inner join", false}, {"cross join", false},
+                {"join", false}};
+            bool foundSupportedJoin = false;
+            for (const auto& suffix : joinSuffixes) {
+                if (lowerLeftFactor.size() < suffix.first.size() ||
+                    lowerLeftFactor.compare(
+                        lowerLeftFactor.size() - suffix.first.size(),
+                        suffix.first.size(), suffix.first) != 0) continue;
+                leftOuterJoin = suffix.second;
+                joinRequiresOn = suffix.first != "cross join";
+                leftFactor = trim(leftFactor.substr(
+                    0, leftFactor.size() - suffix.first.size()));
+                foundSupportedJoin = true;
                 break;
             }
-            leftFactor = trim(leftFactor.substr(
-                0, leftFactor.size() - crossJoin.size()));
+            if (!foundSupportedJoin) {
+                break;
+            }
+        }
+
+        if (joinRequiresOn) {
+            size_t onPos = aliasEnd;
+            while (onPos < result.size() &&
+                   isspace(static_cast<unsigned char>(result[onPos]))) {
+                ++onPos;
+            }
+            const std::string lowerResult = toLower(result);
+            const bool hasOn = onPos + 2 <= result.size() &&
+                lowerResult.compare(onPos, 2, "on") == 0 &&
+                (onPos + 2 == result.size() ||
+                 !(isalnum(static_cast<unsigned char>(result[onPos + 2])) ||
+                   result[onPos + 2] == '_' || result[onPos + 2] == '$'));
+            size_t predicatePos = onPos + 2;
+            while (predicatePos < result.size() &&
+                   isspace(static_cast<unsigned char>(result[predicatePos]))) {
+                ++predicatePos;
+            }
+            if (!hasOn || predicatePos == result.size()) {
+                cout << "ERROR: LATERAL JOIN requires an ON condition "
+                        "(SQLSTATE 42601)" << endl;
+                failed = true;
+                return result;
+            }
+
+            size_t predicateEnd = result.size();
+            for (const char* keyword :
+                 {"where", "group", "having", "order", "limit", "offset",
+                  "fetch", "for", "union", "intersect", "except", "join",
+                  "inner", "left", "right", "full", "cross", "natural"}) {
+                const size_t keywordPos = findTopLevelKeyword(
+                    lowerResult, keyword, predicatePos);
+                if (keywordPos != std::string::npos)
+                    predicateEnd = std::min(predicateEnd, keywordPos);
+            }
+            const auto protectedBytes = dbms::sqlProtectedBytes(result);
+            size_t depth = 0;
+            for (size_t pos = 0; pos < result.size(); ++pos) {
+                if (protectedBytes[pos]) continue;
+                if (result[pos] == '(') ++depth;
+                else if (result[pos] == ')' && depth > 0) --depth;
+                else if (depth == 0 && pos >= predicatePos &&
+                         (result[pos] == ',' || result[pos] == ';')) {
+                    predicateEnd = std::min(predicateEnd, pos);
+                    break;
+                }
+            }
+            joinCondition = trim(result.substr(
+                predicatePos, predicateEnd - predicatePos));
+            if (joinCondition.empty()) {
+                cout << "ERROR: LATERAL JOIN has an empty ON condition "
+                        "(SQLSTATE 42601)" << endl;
+                failed = true;
+                return result;
+            }
+            replacementEnd = predicateEnd;
         }
         std::vector<std::string> leftTokens = tokenize(leftFactor);
         std::string leftTableName, leftAlias;
@@ -13522,51 +13688,148 @@ static std::string processLateralJoins(const std::string& sql, Session& s) {
                 rows = runDerivedSubQuery(replacedSql, s, rowColNames);
                 rowStructuredAvailable = false;
             }
-            if (rowColNames.empty()) break;
+            if (rowColNames.empty()) {
+                if (joinRequiresOn) {
+                    cout << "ERROR: LATERAL JOIN could not determine its "
+                            "output columns (SQLSTATE 0A000)" << endl;
+                    failed = true;
+                    return result;
+                }
+                break;
+            }
             if (rightColNames.empty()) {
                 rightColNames = rowColNames;
                 rightColTypes = rowColTypes;
             } else if (rightColNames != rowColNames) {
+                if (joinRequiresOn) {
+                    cout << "ERROR: LATERAL JOIN output columns changed across "
+                            "outer rows (SQLSTATE XX000)" << endl;
+                    failed = true;
+                    return result;
+                }
                 break;
             }
-            if (rowStructuredAvailable) {
-                for (size_t rowIndex = 0;
-                     rowIndex < rowStructuredRows.size(); ++rowIndex) {
-                    std::vector<std::string> combinedCells;
-                    std::vector<bool> combinedNulls;
-                    combinedCells.reserve(leftTbl.len + rowColNames.size());
-                    combinedNulls.reserve(leftTbl.len + rowColNames.size());
-                    for (size_t ci = 0; ci < leftTbl.len; ++ci) {
-                        const bool isNull = g_engine.isColumnNullByRid(
-                            s.currentDB, resolvedLeft, leftRow.rid, ci);
-                        combinedCells.push_back(g_engine.extractColumnValue(
-                            lrow, leftTbl, ci));
-                        combinedNulls.push_back(isNull);
-                    }
-                    combinedCells.insert(
-                        combinedCells.end(), rowStructuredRows[rowIndex].begin(),
-                        rowStructuredRows[rowIndex].end());
-                    combinedNulls.insert(
-                        combinedNulls.end(), rowStructuredNulls[rowIndex].begin(),
-                        rowStructuredNulls[rowIndex].end());
-                    allStructuredRows.push_back(std::move(combinedCells));
-                    allStructuredNulls.push_back(std::move(combinedNulls));
-                }
-            } else {
-                allRowsStructured = false;
+            if (joinRequiresOn &&
+                (!rowStructuredAvailable ||
+                 rowStructuredRows.size() != rowStructuredNulls.size())) {
+                cout << "ERROR: LATERAL JOIN ON requires aligned structured "
+                        "inner rows (SQLSTATE 0A000)" << endl;
+                failed = true;
+                return result;
             }
-            for (const auto& r : rows) {
+            if (!rowStructuredAvailable) allRowsStructured = false;
+
+            auto appendStructuredRow = [&](const std::vector<std::string>& right,
+                                           const std::vector<bool>& rightNulls) {
+                if (right.size() != rowColNames.size() ||
+                    rightNulls.size() != rowColNames.size()) return false;
+                std::vector<std::string> combinedCells = outerValues;
+                std::vector<bool> combinedNulls = outerNulls;
+                combinedCells.insert(combinedCells.end(), right.begin(),
+                                     right.end());
+                combinedNulls.insert(combinedNulls.end(), rightNulls.begin(),
+                                     rightNulls.end());
+                allStructuredRows.push_back(std::move(combinedCells));
+                allStructuredNulls.push_back(std::move(combinedNulls));
+                return true;
+            };
+            auto appendRawRow = [&](const std::string& rightDisplay,
+                                    bool nullExtend) {
                 std::string combined;
-                for (size_t ci = 0; ci < leftTbl.len; ++ci) {
+                for (const std::string& value : outerValues) {
                     if (!combined.empty()) combined += ' ';
-                    combined += g_engine.extractColumnValue(
-                        lrow, leftTbl, ci);
+                    combined += value;
                 }
-                if (!r.empty()) {
+                if (nullExtend) {
+                    for (size_t ci = 0; ci < rowColNames.size(); ++ci) {
+                        if (!combined.empty()) combined += ' ';
+                        combined += "NULL";
+                    }
+                } else if (!rightDisplay.empty()) {
                     if (!combined.empty()) combined += ' ';
-                    combined += r;
+                    combined += rightDisplay;
                 }
                 allRows.push_back(std::move(combined));
+            };
+
+            bool matchedRightRow = false;
+            if (joinRequiresOn) {
+                for (size_t rowIndex = 0;
+                     rowIndex < rowStructuredRows.size(); ++rowIndex) {
+                    bool matches = false;
+                    std::string evaluationError;
+                    if (!lateralJoinPredicateMatches(
+                            joinCondition, leftTbl, leftPrefix, leftTableName,
+                            resolvedLeft, alias, outerValues, outerNulls,
+                            rowColNames, rowColTypes,
+                            rowStructuredRows[rowIndex],
+                            rowStructuredNulls[rowIndex], s.currentDB,
+                            s.username, matches,
+                            evaluationError)) {
+                        cout << "ERROR: could not evaluate LATERAL JOIN ON: "
+                             << evaluationError << " (SQLSTATE 0A000)" << endl;
+                        failed = true;
+                        return result;
+                    }
+                    if (!matches) continue;
+                    if (!appendStructuredRow(rowStructuredRows[rowIndex],
+                                             rowStructuredNulls[rowIndex])) {
+                        cout << "ERROR: malformed structured LATERAL row "
+                                "(SQLSTATE XX000)" << endl;
+                        failed = true;
+                        return result;
+                    }
+                    std::string rightDisplay;
+                    for (size_t ci = 0;
+                         ci < rowStructuredRows[rowIndex].size(); ++ci) {
+                        if (!rightDisplay.empty()) rightDisplay += ' ';
+                        rightDisplay += rowStructuredNulls[rowIndex][ci]
+                            ? "NULL" : rowStructuredRows[rowIndex][ci];
+                    }
+                    appendRawRow(rightDisplay, false);
+                    matchedRightRow = true;
+                }
+            } else {
+                if (rowStructuredAvailable) {
+                    if (rowStructuredRows.size() !=
+                        rowStructuredNulls.size()) {
+                        cout << "ERROR: malformed structured LATERAL result "
+                                "(SQLSTATE XX000)" << endl;
+                        failed = true;
+                        return result;
+                    }
+                    for (size_t rowIndex = 0;
+                         rowIndex < rowStructuredRows.size(); ++rowIndex) {
+                        if (!appendStructuredRow(rowStructuredRows[rowIndex],
+                                                 rowStructuredNulls[rowIndex])) {
+                            cout << "ERROR: malformed structured LATERAL row "
+                                    "(SQLSTATE XX000)" << endl;
+                            failed = true;
+                            return result;
+                        }
+                    }
+                }
+                for (const std::string& row : rows)
+                    appendRawRow(row, false);
+                matchedRightRow = !rows.empty();
+            }
+            if (leftOuterJoin && !matchedRightRow) {
+                if (!rowStructuredAvailable) {
+                    cout << "ERROR: LEFT JOIN LATERAL requires structured "
+                            "inner rows for SQL NULL extension "
+                            "(SQLSTATE 0A000)" << endl;
+                    failed = true;
+                    return result;
+                }
+                std::vector<std::string> nullRight(rowColNames.size());
+                std::vector<bool> nullRightBitmap(rowColNames.size(), true);
+                if (!appendStructuredRow(nullRight, nullRightBitmap)) {
+                    cout << "ERROR: malformed NULL-extended LATERAL row "
+                            "(SQLSTATE XX000)" << endl;
+                    failed = true;
+                    return result;
+                }
+                appendRawRow({}, true);
             }
         }
 
@@ -13639,8 +13902,13 @@ static std::string processLateralJoins(const std::string& sql, Session& s) {
         // The temporary relation already contains the correctly paired left
         // and right cells, so replace the whole FROM item, then remap all
         // qualified references in SELECT and following clauses.
-        result = result.substr(0, fromPos + 4) + " " + tmpName +
-                 result.substr(aliasEnd);
+        std::string suffix = result.substr(replacementEnd);
+        if (!suffix.empty() &&
+            !isspace(static_cast<unsigned char>(suffix.front())) &&
+            suffix.front() != ',' && suffix.front() != ';') {
+            suffix.insert(suffix.begin(), ' ');
+        }
+        result = result.substr(0, fromPos + 4) + " " + tmpName + suffix;
         auto replaceQualified = [&](const std::string& qualifier,
                                     const std::string& column,
                                     const std::string& replacement) {
@@ -22073,7 +22341,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
         sql = processDerivedTables(sql, s, derivedFailed);
         if (derivedFailed) return true;
         // Process LATERAL JOINs: materialize into temp tables
-        sql = processLateralJoins(sql, s);
+        bool lateralFailed = false;
+        sql = processLateralJoins(sql, s, lateralFailed);
+        if (lateralFailed) return true;
 
         // Parse FOR UPDATE / FOR SHARE / NOWAIT / SKIP LOCKED
         bool forUpdate = false;

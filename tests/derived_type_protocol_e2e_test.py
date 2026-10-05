@@ -78,6 +78,25 @@ def main():
               ["1", "left one", "right uno"], ["2", "", ""],
               ["4", "NULL", "NULL"], ["5", None, None]],
              [23, 25, 25]),
+            (("SELECT l.id, x.label FROM typed_lateral_left l "
+              "LEFT JOIN LATERAL "
+              "(SELECT label FROM typed_lateral_right WHERE id = l.id) x "
+              "ON true ORDER BY l.id NULLS LAST, x.label NULLS FIRST;"),
+             [["1", "right one"], ["1", "right uno"], ["2", ""],
+              ["4", "NULL"], ["5", None], ["6", None], [None, None]],
+             [23, 25]),
+            (("SELECT l.id, x.label FROM typed_lateral_left l "
+              "LEFT JOIN LATERAL "
+              "(SELECT label FROM typed_lateral_right WHERE id = l.id) x "
+              "ON x.label = 'right one' "
+              "ORDER BY l.id NULLS LAST, x.label NULLS FIRST;"),
+             [["1", "right one"], ["2", None], ["4", None], ["5", None],
+              ["6", None], [None, None]],
+             [23, 25]),
+            (("SELECT l.id, x.label FROM typed_lateral_left l JOIN LATERAL "
+              "(SELECT label FROM typed_lateral_right WHERE id = l.id) x "
+              "ON x.label = 'right one' ORDER BY l.id;"),
+             [["1", "right one"]], [23, 25]),
             (("SELECT l.id, x.label FROM typed_lateral_left l, LATERAL "
               "(SELECT label FROM typed_lateral_right WHERE id = l.id) x "
               "ORDER BY l.id, x.label;"),
