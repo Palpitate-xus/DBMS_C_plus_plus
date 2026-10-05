@@ -24270,6 +24270,37 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                         dbms::CastExpr*>(node))
                                     return validateExpressionReferences(
                                         cast->operand.get());
+                                if (const auto* call = dynamic_cast<const
+                                        dbms::FunctionCallExpr*>(node)) {
+                                    static const set<string> aggregateNames = {
+                                        "avg", "bit_and", "bit_or", "bit_xor",
+                                        "bool_and", "bool_or", "count",
+                                        "every", "json_agg", "jsonb_agg",
+                                        "max", "min", "string_agg", "sum",
+                                        "xmlagg", "array_agg",
+                                        "percentile_cont", "percentile_disc",
+                                        "mode", "range_agg",
+                                        "range_intersect_agg"
+                                    };
+                                    if (aggregateNames.count(
+                                            toLower(call->funcName)) ||
+                                        call->distinct || call->filter ||
+                                        !call->orderBy.empty() ||
+                                        !call->namedArgs.empty() ||
+                                        call->hasOver) {
+                                        bindingError =
+                                            "aggregate, window, or extended "
+                                            "function projection is not "
+                                            "supported over a multi-table join";
+                                        bindingState = "0A000";
+                                        return false;
+                                    }
+                                    for (const auto& argument : call->args) {
+                                        if (!validateExpressionReferences(
+                                                argument.get())) return false;
+                                    }
+                                    return true;
+                                }
                                 if (dynamic_cast<const
                                         dbms::LiteralExpr*>(node))
                                     return true;
