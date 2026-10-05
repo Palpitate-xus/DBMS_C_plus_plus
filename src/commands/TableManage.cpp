@@ -37965,14 +37965,16 @@ std::vector<std::string> StorageEngine::join(
 
     if (leftColIdx < leftTbl.len) {
         for (auto& row : leftRows) {
-            row.joinKey = logicalValue(
-                row, leftTbl, leftTable, leftColIdx, &row.joinKeyNull);
+            row.joinKey = canonicalColumnKeyValue(
+                leftTbl.cols[leftColIdx], logicalValue(
+                    row, leftTbl, leftTable, leftColIdx, &row.joinKeyNull));
         }
     }
     if (rightColIdx < rightTbl.len) {
         for (auto& row : rightRows) {
-            row.joinKey = logicalValue(
-                row, rightTbl, rightTable, rightColIdx, &row.joinKeyNull);
+            row.joinKey = canonicalColumnKeyValue(
+                rightTbl.cols[rightColIdx], logicalValue(
+                    row, rightTbl, rightTable, rightColIdx, &row.joinKeyNull));
         }
     }
 
@@ -38193,14 +38195,16 @@ std::vector<std::string> StorageEngine::leftJoin(
 
     if (leftColIdx < leftTbl.len) {
         for (auto& row : leftRows) {
-            row.joinKey = logicalValue(
-                row, leftTbl, leftTable, leftColIdx, &row.joinKeyNull);
+            row.joinKey = canonicalColumnKeyValue(
+                leftTbl.cols[leftColIdx], logicalValue(
+                    row, leftTbl, leftTable, leftColIdx, &row.joinKeyNull));
         }
     }
     if (rightColIdx < rightTbl.len) {
         for (auto& row : rightRows) {
-            row.joinKey = logicalValue(
-                row, rightTbl, rightTable, rightColIdx, &row.joinKeyNull);
+            row.joinKey = canonicalColumnKeyValue(
+                rightTbl.cols[rightColIdx], logicalValue(
+                    row, rightTbl, rightTable, rightColIdx, &row.joinKeyNull));
         }
     }
 
@@ -38441,14 +38445,16 @@ std::vector<std::string> StorageEngine::rightJoin(
 
     if (leftColIdx < leftTbl.len) {
         for (auto& row : leftRows) {
-            row.joinKey = logicalValue(
-                row, leftTbl, leftTable, leftColIdx, &row.joinKeyNull);
+            row.joinKey = canonicalColumnKeyValue(
+                leftTbl.cols[leftColIdx], logicalValue(
+                    row, leftTbl, leftTable, leftColIdx, &row.joinKeyNull));
         }
     }
     if (rightColIdx < rightTbl.len) {
         for (auto& row : rightRows) {
-            row.joinKey = logicalValue(
-                row, rightTbl, rightTable, rightColIdx, &row.joinKeyNull);
+            row.joinKey = canonicalColumnKeyValue(
+                rightTbl.cols[rightColIdx], logicalValue(
+                    row, rightTbl, rightTable, rightColIdx, &row.joinKeyNull));
         }
     }
 

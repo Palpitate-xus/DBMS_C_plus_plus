@@ -64,6 +64,8 @@ def main():
             "(id INT, code INT, bval INT);",
             "CREATE TABLE join_using_composite_c "
             "(id INT, code INT, cval INT);",
+            "CREATE TABLE join_numeric_scale_a (id NUMERIC);",
+            "CREATE TABLE join_numeric_scale_b (id NUMERIC);",
             "INSERT INTO join_outer_chain_a VALUES (1), (2);",
             "INSERT INTO join_outer_chain_b VALUES (1);",
             "INSERT INTO join_outer_chain_c VALUES (1), (3);",
@@ -85,6 +87,8 @@ def main():
             "(1, 10, 100), (1, 20, 200), (2, 10, 300);",
             "INSERT INTO join_using_composite_c VALUES "
             "(1, 20, 1000), (2, 10, 2000), (1, 10, 3000);",
+            "INSERT INTO join_numeric_scale_a VALUES (1.0);",
+            "INSERT INTO join_numeric_scale_b VALUES (1.00);",
         ]
         for sql in setup:
             _, state, message, _ = runner.ours_query(
@@ -481,6 +485,49 @@ def main():
         assert headers == ["code", "id", "bval", "cval"], headers
         assert type_oids == [23, 23, 23, 23], type_oids
         assert command_tag == "SELECT 2", command_tag
+
+        numeric_scale_using_sql = (
+            "SELECT * FROM join_numeric_scale_a a "
+            "JOIN join_numeric_scale_b b USING (id);")
+        rows, state, message, headers, command_tag, type_oids = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"], numeric_scale_using_sql),
+                include_types=True))
+        assert state is None, (state, message)
+        assert rows == [["1.0"]], rows
+        assert headers == ["id"], headers
+        assert type_oids == [1700], type_oids
+        assert command_tag == "SELECT 1", command_tag
+
+        for numeric_join_sql, expected_key in (
+                ("SELECT * FROM join_numeric_scale_a a "
+                 "LEFT JOIN join_numeric_scale_b b USING (id);", "1.0"),
+                ("SELECT * FROM join_numeric_scale_a a "
+                 "RIGHT JOIN join_numeric_scale_b b USING (id);", "1.00"),
+                ("SELECT * FROM join_numeric_scale_a a "
+                 "FULL OUTER JOIN join_numeric_scale_b b USING (id);", "1.0")):
+            rows, state, message, headers, command_tag, type_oids = (
+                runner.decode_wire_result(
+                    client.simple_query(server["sock"], numeric_join_sql),
+                    include_types=True))
+            assert state is None, (numeric_join_sql, state, message)
+            assert rows == [[expected_key]], (numeric_join_sql, rows)
+            assert headers == ["id"], (numeric_join_sql, headers)
+            assert type_oids == [1700], (numeric_join_sql, type_oids)
+            assert command_tag == "SELECT 1", (numeric_join_sql, command_tag)
+
+        numeric_scale_on_sql = (
+            "SELECT * FROM join_numeric_scale_a a "
+            "JOIN join_numeric_scale_b b ON a.id = b.id;")
+        rows, state, message, headers, command_tag, type_oids = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"], numeric_scale_on_sql),
+                include_types=True))
+        assert state is None, (state, message)
+        assert rows == [["1.0", "1.00"]], rows
+        assert headers == ["id", "id"], headers
+        assert type_oids == [1700, 1700], type_oids
+        assert command_tag == "SELECT 1", command_tag
 
         natural_chain_sql = (
             "SELECT * FROM join_conj_chain_a a "
