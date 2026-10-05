@@ -2,6 +2,29 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "WAL-03",
+      "gap_ids": ["WAL-03"],
+      "status": "partial",
+      "evidence": [
+        "docs/code-review-progress.md",
+        "docs/issue-wal-03-checkpoint-audit.md",
+        "docs/postgresql-18-gap-audit.md",
+        "src/commands/TableManage.cpp",
+        "src/storage/WAL.cpp"
+      ],
+      "tests": [
+        "tests/checkpoint_test.cpp",
+        "scripts/build_one_test.sh"
+      ],
+      "verification": {
+        "reproduction": "No new defect was claimed; source inspection identified missing PostgreSQL redo-horizon/control-file/completion and mature scheduling semantics",
+        "fix": "Audit only; no code changed",
+        "focused_tests": "checkpoint_test passed",
+        "full_suite": "The full registered suite was not rerun on this revision",
+        "scope": "WAL-03 remains partial: redo horizon, full control-file state, checkpoint completion, dirty-buffer scheduling/throttling, and WAL retention coordination remain open; no PostgreSQL 18.6 differential"
+      }
+    },
+    {
       "issue": "WAL-02",
       "gap_ids": ["WAL-02"],
       "status": "partial",
@@ -1143,7 +1166,7 @@
     {"id":"STO-06","status":"partial","evidence":["docs/issue-sto-06-toast-format-audit.md","src/commands/TableManage.cpp","src/commands/TableManage.h","src/commands/DdlExecutor.cpp"],"tests":["tests/toast_test.cpp","tests/vacuum_toast_test.cpp","tests/bytea_large_toast_test.cpp","scripts/build_one_test.sh"]},
     {"id":"WAL-01","status":"partial","evidence":["docs/issue-wal-01-resource-manager-coverage-audit.md","src/storage/WAL.h","src/commands/TableManage.cpp"],"tests":["tests/wal_basic_test.cpp","tests/redo_crash_recovery_test.cpp","tests/wal_full_page_write_test.cpp","scripts/build_one_test.sh"]},
     {"id":"WAL-02","status":"partial","evidence":["docs/issue-wal-02-insertion-segments-audit.md","src/storage/WAL.h","src/storage/WAL.cpp","src/commands/TableManage.cpp"],"tests":["tests/wal_basic_test.cpp","tests/redo_crash_recovery_test.cpp","tests/wal_full_page_write_test.cpp","tests/wal_truncate_test.cpp","tests/wal_timeline_archive_test.cpp","scripts/build_one_test.sh"]},
-    {"id":"WAL-03","status":"unverified","evidence":[]},
+    {"id":"WAL-03","status":"partial","evidence":["docs/issue-wal-03-checkpoint-audit.md","src/commands/TableManage.cpp","src/storage/WAL.cpp"],"tests":["tests/checkpoint_test.cpp","scripts/build_one_test.sh"]},
     {"id":"WAL-04","status":"unverified","evidence":[]},
     {"id":"WAL-05","status":"unverified","evidence":[]},
     {"id":"WAL-06","status":"partial","evidence":["docs/code-review-progress.md","docs/PACKAGING.md","src/common/DataDirectory.h","src/common/DataDirectory.cpp"],"tests":["tests/checksum_verification_e2e_test.py","tests/checksum_test.cpp","tests/data_directory_e2e_test.py"],"commits":["a007be0"]},

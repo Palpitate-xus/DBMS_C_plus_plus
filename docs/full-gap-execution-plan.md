@@ -4,6 +4,8 @@
 
 # 总差距清单执行计划
 
+2026-10-05 WAL-03：checkpoint门控数据库事务、flush已加载cache并走WAL barrier、fsync checkpoint record、原子写timestamp/max-xid/LSN sidecar、归档后只截断checkpoint之前segment。`checkpoint_test`通过，覆盖extent崩溃恢复、事务cache作用域与sidecar/WAL LSN。未实现PG redo horizon、完整control file及checkpoint completion状态协议；dirty-buffer调度/节流和WAL保留协调仍不完整。仅审计，未改代码，全注册suite/PG18.6 differential未跑；本项unverified转partial。详见`docs/issue-wal-03-checkpoint-audit.md`。
+
 2026-10-05 WAL-02：验证到本地 WAL 的 CRC32C、8-byte alignment、跨16MiB segment连续 I/O、LSN-range fsync/group commit、switch padding、archive-gated truncate/recycle 与 checkpoint page-image 子集。`wal_basic_test`（含双 manager追加）、`redo_crash_recovery_test`、`wal_full_page_write_test`、`wal_truncate_test`、`wal_timeline_archive_test`通过。记录跨段不是 PostgreSQL page-header/continuation 格式，没有 WAL compression，完整 concurrent insertion/FPI规则仍未实现。无新代码修改、全套或PG18.6 differential。本项从unverified转partial。详见`docs/issue-wal-02-insertion-segments-audit.md`。
 
 2026-10-05 WAL-01：`WAL.h`定义了 HEAP/XACT/SMGR/CHECKPOINT/CATALOG/INDEX 子集。`wal_basic_test`验证 heap before/after、BTree index image、commit；`redo_crash_recovery_test`验证 uncommitted insert undo 与 committed insert/delete；`wal_full_page_write_test`验证 checkpoint 后 page image。Recovery image applier目前只重放 heap/index image；catalog WAL没有catalog row image，FSM/VM、TOAST、sequence、multixact、standby及其它索引资源未形成完整记录/replay。TOAST提交前落盘和specialized index事务边界重建只是局部机制。审计无生产代码改动，全量suite/PG18.6 differential未跑。WAL-01从unverified转partial，剩余资源日志与恢复仍未实现。详见`docs/issue-wal-01-resource-manager-coverage-audit.md`。
