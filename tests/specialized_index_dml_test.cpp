@@ -366,6 +366,26 @@ void assertRecoveredSidecars(StorageEngine& engine) {
     std::cout << "[SPECIALIZED INDEX] startup reconstruction/dirty fallback OK\n";
 }
 
+void damageSPGiSTAndAssertHeapFallback() {
+    const fs::path sidecar =
+        fs::path(kDatabase) / "items_location.spgist";
+    {
+        std::ofstream output(sidecar, std::ios::binary | std::ios::trunc);
+        output << "interrupted quadtree replacement";
+        assert(output.good());
+    }
+
+    // A fresh engine has no in-memory quadtree cache, and there is no dirty
+    // generation marker. A malformed sidecar must not turn a valid point
+    // lookup into an empty result.
+    StorageEngine engine;
+    const int64_t rid = ridFor(engine, "1");
+    assert(containsRid(engine.spGiSTSearch(
+                           kDatabase, kTable, "location", "=", "3,3"),
+                       rid));
+    std::cout << "[SPECIALIZED INDEX] malformed SP-GiST heap fallback OK\n";
+}
+
 }  // namespace
 
 int main() {
@@ -384,6 +404,7 @@ int main() {
         StorageEngine recovered;
         assertRecoveredSidecars(recovered);
     }
+    damageSPGiSTAndAssertHeapFallback();
     cleanup();
     std::cout << "[SPECIALIZED INDEX] all tests passed\n";
     return 0;

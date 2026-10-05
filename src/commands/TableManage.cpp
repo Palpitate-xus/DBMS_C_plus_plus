@@ -13397,7 +13397,7 @@ std::vector<int64_t> StorageEngine::spGiSTSearch(const std::string& dbname,
         }
     };
 
-    if (specializedIndexesNeedHeapFallback(dbname, tablename)) {
+    const auto scanHeap = [&]() {
         const TableSchema table = getTableSchema(dbname, tablename);
         size_t columnIndex = table.len;
         for (size_t i = 0; i < table.len; ++i) {
@@ -13407,9 +13407,7 @@ std::vector<int64_t> StorageEngine::spGiSTSearch(const std::string& dbname,
             }
         }
         if (columnIndex >= table.len ||
-            table.cols[columnIndex].dataType != "point") {
-            return result;
-        }
+            table.cols[columnIndex].dataType != "point") return result;
         SPGiSTIndex heapIndex(-1e9, -1e9, 1e9, 1e9);
         bool valid = true;
         const bool scanned = forEachRow(
@@ -13433,7 +13431,10 @@ std::vector<int64_t> StorageEngine::spGiSTSearch(const std::string& dbname,
         if (!scanned || !valid) return result;
         searchIndex(heapIndex);
         return result;
-    }
+    };
+
+    if (specializedIndexesNeedHeapFallback(dbname, tablename))
+        return scanHeap();
 
     // Build or retrieve cached quadtree
     std::string cacheKey = dbname + "/" + tablename + "/" + colname;
@@ -13471,7 +13472,7 @@ std::vector<int64_t> StorageEngine::spGiSTSearch(const std::string& dbname,
                 }
                 newIdx->insert(x, y, rid);
             }
-            if (!valid || in.bad()) return result;
+            if (!valid || in.bad()) return scanHeap();
             idx = newIdx.get();
             spGiSTCache_[cacheKey] = std::move(newIdx);
         }
