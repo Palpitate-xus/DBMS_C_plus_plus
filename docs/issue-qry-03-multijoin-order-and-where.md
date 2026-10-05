@@ -3,7 +3,8 @@
 Status: partial. The source/test fixes are local commits `4534b971`,
 `b87d4a19`, `858d6da9`, `0a57fee1`, `e042360b`, `856fe079`
 (ON-conjunction fix, 2026-10-05), `65718c2b` (RIGHT/FULL residual coverage,
-2026-10-05), and `fd79875a` (USING/NATURAL output semantics, 2026-10-05).
+2026-10-05), `fd79875a` (USING/NATURAL output semantics, 2026-10-05), and
+`3fef4f7d` (typed canonical JOIN keys, 2026-10-05).
 
 ## Reproduced behavior
 
@@ -31,6 +32,9 @@ Status: partial. The source/test fixes are local commits `4534b971`,
 - A single JOIN with `USING (id)` reached the legacy path and failed with
   “missing ON clause”; a multi-link USING chain failed parsing with SQLSTATE
   `42601`. NATURAL joins had no merged SQL output schema and were rejected.
+- Join execution used raw display strings as hash keys. A `NUMERIC` pair
+  containing `1.0` and `1.00` therefore produced no match in both `USING` and
+  explicit `ON`, even though the numeric values compare equal.
 
 ## Fixes
 
@@ -65,6 +69,11 @@ Status: partial. The source/test fixes are local commits `4534b971`,
   preservation. The chain is kept in authored order when merged-key outputs
   are present. Quoted USING identifiers, arbitrary expressions, lateral or
   parameterized inputs, and general nested join trees are not implemented.
+- Build inner/left/right join hash keys from the column type's canonical key
+  representation rather than the display cell. This keeps values with equal
+  typed representations (including differing NUMERIC display scales) in the
+  same candidate bucket while preserving their original output cells. The
+  INNER, LEFT, RIGHT, and FULL storage join paths use the same encoding.
 
 ## Verification
 
@@ -94,6 +103,13 @@ Status: partial. The source/test fixes are local commits `4534b971`,
   LEFT/RIGHT/FULL unmatched rows, and NATURAL outer joins with no common
   columns. Before the fix, single USING failed with missing ON and the chained
   USING case failed parsing with `42601`.
+- After `3fef4f7d`, `scripts/build.sh`,
+  `tests/join_type_protocol_e2e_test.py`, and `tests/multijoin_e2e_test.py`
+  passed. A NUMERIC `USING` join of `1.0` to `1.00` returned zero rows before
+  the fix and one row after it. Protocol assertions now cover that case for
+  INNER/LEFT/RIGHT/FULL USING and explicit ON, including retained display
+  values and numeric OIDs. This does not establish complete cross-type,
+  timestamp, or collation-aware join equality.
 - `tests/compat/cases/multijoin_projection_filter.sql` was added, but the
   differential runner refused preflight because the configured reference
   server reports PostgreSQL 17.2 (`170002`) while the runner requires 18.6
