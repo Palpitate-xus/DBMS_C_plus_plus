@@ -4908,14 +4908,16 @@ OpPtr QueryPlanner::buildJoinPlan(StorageEngine* engine, const std::string& dbna
     double costHash = estimateJoinCost(leftRows, rightRows, false, "hash");
     // With join stats, NLJ only pays off when its output is small: charge
     // NLJ with the materialization of its result when selectivity is known.
-    if (haveJoinStats && !rightColIndexed) {
+    if (costNLJ < 1e18 && haveJoinStats && !rightColIndexed) {
         costNLJ = static_cast<double>(leftRows) * static_cast<double>(rightRows)
                   * 0.5 + estJoinRows;
     }
 
-    // Decide: if small tables, NLJ is fine; otherwise pick cheapest.
+    // A small-table shortcut is only valid while nested loop remains a
+    // candidate. enable_nestloop prices the method out above; do not override
+    // that explicit planner setting when another legal join is available.
     std::string chosenAlgo;
-    if (leftRows < 50 && rightRows < 50) {
+    if (leftRows < 50 && rightRows < 50 && costNLJ < 1e18) {
         chosenAlgo = "nlj";
     } else if (costMerge <= costHash && costMerge < costNLJ) {
         chosenAlgo = "merge";

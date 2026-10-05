@@ -79,6 +79,22 @@ int main() {
         &g_engine, db, "left_side", "right_side", "id", "id", {}, {});
     assert(dynamic_cast<dbms::NestedLoopJoinOp*>(runtimePlan.get()));
 
+    // A small-relation heuristic must not override an explicit disabled
+    // join-method setting when another legal algorithm remains available.
+    assert(!ddl.executeSql("CREATE TABLE small_left (id INT)", session));
+    assert(!ddl.executeSql("CREATE TABLE small_right (id INT)", session));
+    insertRows(db, "small_left", 4);
+    insertRows(db, "small_right", 3);
+    assert(g_engine.analyzeTable(db, "small_left"));
+    assert(g_engine.analyzeTable(db, "small_right"));
+    dbms::QueryPlanner::CostModel smallJoinCost;
+    smallJoinCost.enableNestloop = false;
+    dbms::QueryPlanner::setCostModel(smallJoinCost);
+    auto smallJoinPlan = dbms::QueryPlanner::buildJoinPlan(
+        &g_engine, db, "small_left", "small_right", "id", "id", {}, {});
+    assert(dynamic_cast<dbms::HashJoinOp*>(smallJoinPlan.get()));
+    dbms::QueryPlanner::setCostModel(dbms::QueryPlanner::CostModel{});
+
     dbms::PlanContext context;
     context.dbname = db;
     context.tablename = "left_side";
