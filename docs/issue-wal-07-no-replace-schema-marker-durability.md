@@ -29,6 +29,11 @@ final sync fails, the tree has already been removed and the call returns
 `IO_ERROR`; as with other filesystem durability errors, the caller must treat
 the result as indeterminate and re-check database existence before retrying.
 
+`ALTER DATABASE ... RENAME` moved the database directory (and optional WAL
+archive sibling) without syncing the cluster directory. It now syncs the
+shared parent after both moves and attempts to move both names back if that
+sync fails, then syncs the rollback.
+
 ## Verification
 
 - `bash scripts/build_one_test.sh schema_marker_publish_guard_test` — passed.
@@ -42,7 +47,9 @@ the result as indeterminate and re-check database existence before retrying.
   and a same-name retry then succeeded. A separate injected parent-sync error
   after `DROP DATABASE` removed a fresh database returned `IO_ERROR`; the
   database path was absent, confirming that callers must re-check after this
-  post-delete failure.
+  post-delete failure. The rename case injected the parent-sync error after
+  moving a fresh database; it restored the source name, left the destination
+  absent, and a retry succeeded.
 - `git diff --check` — passed before commit.
 
 No full registered suite, standalone production executable build, or
@@ -59,4 +66,5 @@ target was synced before that cleanup and the alias is not interpreted as a
 schema marker.
 
 Source/test commits: `e8a6d1ee` (schema marker), `f8c02416` (database
-creation), and `b707afd3` (database drop), all not pushed.
+creation), `b707afd3` (database drop), and `ab72c8fe` (database rename), all
+not pushed.
