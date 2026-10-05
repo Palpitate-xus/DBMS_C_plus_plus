@@ -106,6 +106,20 @@ def write_hash_index(path, version=2):
     path.write_bytes(contents)
 
 
+def write_bloom_index(path, version=2):
+    assert version in (1, 2)
+    magic = 0x324D4C42 if version == 2 else 0x314D4C42
+    contents = bytearray(struct.pack("=IIII", magic, 64, 7, 1))
+    key = b"key"
+    contents.extend(struct.pack("=I", len(key)))
+    contents.extend(key)
+    contents.extend(struct.pack("=IQ", 1, 42))
+    if version == 2:
+        contents.extend(struct.pack("=I", crc32c(contents)))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(contents)
+
+
 def heap_page(page_id, layout_version=5):
     page = bytearray(PAGE_SIZE)
     page_id_bound = layout_version == 5
@@ -227,6 +241,8 @@ def main():
         write_btree(unchecked_btree_index, 0)
         hash_index = database / "accounts_name.hidx"
         write_hash_index(hash_index)
+        bloom_index = database / "accounts_tags.bidx"
+        write_bloom_index(bloom_index)
         legacy_heap = database / "legacy.dt"
         write_heap(legacy_heap, 2, layout_version=4)
         key = bytes.fromhex("11" * 32)
@@ -247,6 +263,8 @@ def main():
         write_btree(external_index)
         external_legacy_hash = external / "app" / "ledger_id.hidx"
         write_hash_index(external_legacy_hash, 1)
+        external_legacy_bloom = external / "app" / "ledger_tags.bidx"
+        write_bloom_index(external_legacy_bloom, 1)
 
         before_cluster = snapshot_tree(cluster)
         before_external = snapshot_tree(external)
@@ -255,6 +273,7 @@ def main():
         assert "heap checksum verification passed" in clean.stdout, clean
         assert "B+ tree index scan completed" in clean.stdout, clean
         assert "hash index scan completed" in clean.stdout, clean
+        assert "Bloom index scan completed" in clean.stdout, clean
         assert "files=5" in clean.stdout and "blocks=9" in clean.stdout, clean
         assert "identity-bound-blocks=3" in clean.stdout, clean
         assert "legacy-identity-unbound-blocks=1" in clean.stdout, clean
@@ -266,6 +285,9 @@ def main():
         assert "hash-index-files=2" in clean.stdout, clean
         assert "checksummed-hash-index-files=1" in clean.stdout, clean
         assert "unchecked-legacy-hash-index-files=1" in clean.stdout, clean
+        assert "bloom-index-files=2" in clean.stdout, clean
+        assert "checksummed-bloom-index-files=1" in clean.stdout, clean
+        assert "unchecked-legacy-bloom-index-files=1" in clean.stdout, clean
         assert snapshot_tree(cluster) == before_cluster
         assert snapshot_tree(external) == before_external
         assert list(launch.iterdir()) == []
@@ -305,6 +327,14 @@ def main():
         assert "app/accounts_name.hidx" in corrupt_hash.stderr, corrupt_hash
         assert "hash index checksum mismatch" in corrupt_hash.stderr, corrupt_hash
         hash_index.write_bytes(original_hash)
+
+        original_bloom = bloom_index.read_bytes()
+        flip_byte(bloom_index, len(original_bloom) - 5)
+        corrupt_bloom = run_verify(cluster, launch)
+        assert corrupt_bloom.returncode == 1, corrupt_bloom
+        assert "app/accounts_tags.bidx" in corrupt_bloom.stderr, corrupt_bloom
+        assert "Bloom index checksum mismatch" in corrupt_bloom.stderr, corrupt_bloom
+        bloom_index.write_bytes(original_bloom)
 
         original_external = external_heap.read_bytes()
         flip_byte(external_heap, PAGE_SIZE + 200)

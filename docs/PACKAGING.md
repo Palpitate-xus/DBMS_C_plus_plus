@@ -53,18 +53,19 @@ control_checksum=<8 lowercase hex digits>
 checksum 行；额外字段、尾随行、损坏值均 fail-closed。V3 替换使用同目录临时文件、
 文件 `fsync`、原子 rename 和父目录 `fsync`。
 
-部署或恢复后可在服务停止时执行严格只读的 heap、B+Tree 页与 Hash
-索引校验：
+部署或恢复后可在服务停止时执行严格只读的 heap、B+Tree 页、Hash 与
+Bloom 索引校验：
 
 ```bash
 /path/to/dbms_main -D /srv/dbms-instance --verify-data-checksums
 ```
 
 该命令验证主/分区/TOAST/unlogged init heap，以及 `.idx`/`.idx_*` B+Tree
-索引和 `.hidx` Hash 侧车，包括从 tablespace marker 解析的外置文件；诊断定位到文件和 block。
+索引以及 `.hidx` Hash、`.bidx` Bloom 侧车，包括从 tablespace marker
+解析的外置文件；诊断定位到索引文件和 heap block。
 统计会分开列出页号绑定的 `0xC552`、旧内容校验 `0xC551` 与无 checksum 的
-zero-marker legacy 页，并单列带 checksum 的 Hash V2 与未校验 Hash V1 文件。
-它不覆盖 Bloom/GIN/GiST/SP-GiST/BRIN 或全部 catalog/metadata，也没有锁机制
+zero-marker legacy 页，并单列带 checksum 的 Hash V2/Bloom BLM2 与未校验的
+Hash V1/Bloom BLM1 文件。它不覆盖 GIN/GiST/SP-GiST/BRIN 或全部 catalog/metadata，也没有锁机制
 替代运维侧停服保证，因此不得与 server 并发执行。
 
 新建及 REINDEX 生成的 B+Tree 页另有逐页 CRC32C，并在页面首次载入时校验；

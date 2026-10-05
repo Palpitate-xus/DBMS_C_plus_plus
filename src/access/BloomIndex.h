@@ -20,11 +20,12 @@ namespace dbms {
 // equality probe in, rid set out, no false negatives).
 //
 // Layout (little endian):
-//   u32 magic 'BLM1'
+//   u32 magic 'BLM1' (legacy, no checksum) or 'BLM2' (new writes)
 //   u32 m            bits
 //   u32 k            hash functions
 //   u32 entryCount
 //   entryCount entries: u32 keyLen, key bytes, u32 ridCount, ridCount x u64 rid
+//   BLM2 only: u32 CRC32C over every preceding byte
 // The bit array is rebuilt from the entries on load.
 //
 // All public methods are serialized by an internal mutex like HashIndex.

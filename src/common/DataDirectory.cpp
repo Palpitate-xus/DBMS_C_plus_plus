@@ -1,6 +1,7 @@
 #include "DataDirectory.h"
 
 #include "access/BPTreeFormat.h"
+#include "access/BloomIndexFormat.h"
 #include "access/HashIndexFormat.h"
 #include "access/IndexChecksum.h"
 #include "access/IndexFileUtil.h"
@@ -504,6 +505,10 @@ bool hasHashIndexSuffix(const std::filesystem::path& path) {
     return path.filename().extension() == ".hidx";
 }
 
+bool hasBloomIndexSuffix(const std::filesystem::path& path) {
+    return path.filename().extension() == ".bidx";
+}
+
 std::string displayVerificationPath(const std::filesystem::path& root,
                                     const std::filesystem::path& path) {
     const auto relative = path.lexically_relative(root);
@@ -592,6 +597,12 @@ struct IndexVerificationStats {
 };
 
 struct HashIndexVerificationStats {
+    uint64_t files = 0;
+    uint64_t checksumFiles = 0;
+    uint64_t uncheckedLegacyFiles = 0;
+};
+
+struct BloomIndexVerificationStats {
     uint64_t files = 0;
     uint64_t checksumFiles = 0;
     uint64_t uncheckedLegacyFiles = 0;
@@ -965,6 +976,147 @@ bool verifyHashIndex(const std::filesystem::path& root,
     return true;
 }
 
+bool collectBloomIndexFiles(const std::filesystem::path& scanRoot,
+                            std::set<std::filesystem::path>& files,
+                            std::string& error) {
+    std::error_code ec;
+    std::filesystem::recursive_directory_iterator iterator(scanRoot, ec);
+    if (ec) {
+        error = "could not enumerate checksum root " + scanRoot.string() +
+            ": " + ec.message();
+        return false;
+    }
+    const std::filesystem::recursive_directory_iterator end;
+    for (; iterator != end; iterator.increment(ec)) {
+        if (ec) {
+            error = "could not enumerate checksum root " + scanRoot.string() +
+                ": " + ec.message();
+            return false;
+        }
+        const auto path = iterator->path();
+        if (!hasBloomIndexSuffix(path)) continue;
+        const auto status = iterator->symlink_status(ec);
+        if (ec || status.type() != std::filesystem::file_type::regular) {
+            error = "Bloom index is not a regular file: " + path.string();
+            return false;
+        }
+        files.insert(std::filesystem::weakly_canonical(path, ec));
+        if (ec) {
+            error = "could not resolve Bloom index: " + path.string();
+            return false;
+        }
+    }
+    if (ec) {
+        error = "could not enumerate checksum root " + scanRoot.string() +
+            ": " + ec.message();
+        return false;
+    }
+    return true;
+}
+
+bool verifyBloomIndex(const std::filesystem::path& root,
+                      const std::filesystem::path& path,
+                      BloomIndexVerificationStats& stats,
+                      std::string& error) {
+    using namespace bloom_index_format;
+    const std::string shown = displayVerificationPath(root, path);
+    ReadOnlyDescriptor data(path);
+    if (data.get() < 0) {
+        error = shown + ": could not open Bloom index read-only: " +
+            std::strerror(errno);
+        return false;
+    }
+    struct stat status {};
+    if (::fstat(data.get(), &status) != 0 || !S_ISREG(status.st_mode) ||
+        status.st_size < 0 ||
+        static_cast<uint64_t>(status.st_size) < kHeaderBytes) {
+        error = shown + ": truncated or invalid Bloom index file";
+        return false;
+    }
+
+    std::array<char, kHeaderBytes> header{};
+    if (!readExactlyAt(data.get(), header.data(), header.size(), 0)) {
+        error = shown + ": short read of Bloom index header";
+        return false;
+    }
+    const auto readU32 = [&](size_t offset) {
+        uint32_t value = 0;
+        for (unsigned i = 0; i < sizeof(value); ++i) {
+            value |= static_cast<uint32_t>(
+                static_cast<unsigned char>(header[offset + i])) << (8 * i);
+        }
+        return value;
+    };
+    const uint32_t magic = readU32(0);
+    const uint32_t bits = readU32(sizeof(uint32_t));
+    const uint32_t hashes = readU32(sizeof(uint32_t) * 2);
+    const uint32_t count = readU32(sizeof(uint32_t) * 3);
+    if ((magic != kLegacyMagic && magic != kChecksummedMagic) ||
+        hashes == 0 || hashes > 32 || bits % 64 != 0 ||
+        (count != 0 && bits == 0)) {
+        error = shown + ": invalid Bloom index header";
+        return false;
+    }
+
+    const uint64_t fileBytes = static_cast<uint64_t>(status.st_size);
+    constexpr uint64_t kMinEntryBytes = sizeof(uint32_t) * 2 + sizeof(uint64_t);
+    if (magic == kLegacyMagic) {
+        if (count > (fileBytes - kHeaderBytes) / kMinEntryBytes) {
+            error = shown + ": truncated legacy Bloom index";
+            return false;
+        }
+        ++stats.uncheckedLegacyFiles;
+        ++stats.files;
+        return true;
+    }
+
+    if (fileBytes < kHeaderBytes + kChecksumBytes) {
+        error = shown + ": truncated checksummed Bloom index";
+        return false;
+    }
+    const uint64_t payloadBytes = fileBytes - kChecksumBytes;
+    if (count > (payloadBytes - kHeaderBytes) / kMinEntryBytes) {
+        error = shown + ": invalid checksummed Bloom index count";
+        return false;
+    }
+    std::array<unsigned char, sizeof(uint32_t)> checksumBytes{};
+    if (!readExactlyAt(data.get(), checksumBytes.data(), checksumBytes.size(),
+                       static_cast<off_t>(payloadBytes))) {
+        error = shown + ": short read of Bloom index checksum";
+        return false;
+    }
+    // BLM2 uses the same little-endian encoding for the checksum trailer as
+    // the rest of its on-disk fields.
+    uint32_t storedChecksum = 0;
+    for (unsigned i = 0; i < checksumBytes.size(); ++i) {
+        storedChecksum |= static_cast<uint32_t>(checksumBytes[i]) << (8 * i);
+    }
+
+    uint64_t remaining = payloadBytes;
+    off_t position = 0;
+    uint32_t checksumState = 0xFFFFFFFFu;
+    std::array<char, 64 * 1024> chunk{};
+    while (remaining > 0) {
+        const size_t amount = static_cast<size_t>(
+            std::min<uint64_t>(remaining, chunk.size()));
+        if (!readExactlyAt(data.get(), chunk.data(), amount, position)) {
+            error = shown + ": short read while verifying Bloom index checksum";
+            return false;
+        }
+        checksumState = index_checksum::crc32cUpdate(
+            checksumState, chunk.data(), amount);
+        position += static_cast<off_t>(amount);
+        remaining -= amount;
+    }
+    if (index_checksum::crc32cFinish(checksumState) != storedChecksum) {
+        error = shown + ": Bloom index checksum mismatch";
+        return false;
+    }
+    ++stats.checksumFiles;
+    ++stats.files;
+    return true;
+}
+
 bool verifyBTreeIndex(const std::filesystem::path& root,
                       const std::filesystem::path& path,
                       IndexVerificationStats& stats,
@@ -1281,10 +1433,12 @@ bool verifyHeapDataChecksums(const std::filesystem::path& root,
     std::set<std::filesystem::path> heapFiles;
     std::set<std::filesystem::path> btreeFiles;
     std::set<std::filesystem::path> hashIndexFiles;
+    std::set<std::filesystem::path> bloomIndexFiles;
     for (const auto& scanRoot : scanRoots) {
         if (!collectHeapFiles(scanRoot, heapFiles, error)) return false;
         if (!collectBTreeFiles(scanRoot, btreeFiles, error)) return false;
         if (!collectHashIndexFiles(scanRoot, hashIndexFiles, error)) return false;
+        if (!collectBloomIndexFiles(scanRoot, bloomIndexFiles, error)) return false;
     }
 
     HeapVerificationStats stats;
@@ -1299,8 +1453,12 @@ bool verifyHeapDataChecksums(const std::filesystem::path& root,
     for (const auto& path : hashIndexFiles) {
         if (!verifyHashIndex(root, path, hashStats, error)) return false;
     }
+    BloomIndexVerificationStats bloomStats;
+    for (const auto& path : bloomIndexFiles) {
+        if (!verifyBloomIndex(root, path, bloomStats, error)) return false;
+    }
     output = "heap checksum verification passed\n"
-        "B+ tree index scan completed; hash index scan completed (legacy unchecked data is reported)\nfiles=" +
+        "B+ tree index scan completed; hash index scan completed; Bloom index scan completed (legacy unchecked data is reported)\nfiles=" +
         std::to_string(stats.files) + "\nblocks=" +
         std::to_string(stats.blocks) + "\nidentity-bound-blocks=" +
         std::to_string(stats.identityBoundBlocks) +
@@ -1318,7 +1476,12 @@ bool verifyHeapDataChecksums(const std::filesystem::path& root,
         "\nchecksummed-hash-index-files=" +
         std::to_string(hashStats.checksumFiles) +
         "\nunchecked-legacy-hash-index-files=" +
-        std::to_string(hashStats.uncheckedLegacyFiles);
+        std::to_string(hashStats.uncheckedLegacyFiles) +
+        "\nbloom-index-files=" + std::to_string(bloomStats.files) +
+        "\nchecksummed-bloom-index-files=" +
+        std::to_string(bloomStats.checksumFiles) +
+        "\nunchecked-legacy-bloom-index-files=" +
+        std::to_string(bloomStats.uncheckedLegacyFiles);
     return true;
 }
 

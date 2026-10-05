@@ -1,4 +1,7 @@
 #include "access/BloomIndex.h"
+#include "access/BloomIndexFormat.h"
+#include "access/IndexChecksum.h"
+#include "access/IndexFileUtil.h"
 
 #include <algorithm>
 #include <cstring>
@@ -11,7 +14,7 @@
 namespace dbms {
 
 namespace {
-constexpr uint32_t kBloomMagic = 0x314D4C42u;  // 'BLM1'
+using namespace bloom_index_format;
 
 // FNV-1a 64-bit.
 uint64_t fnv1a(const std::string& s, uint64_t seed = 0xcbf29ce484222325ULL) {
@@ -123,7 +126,15 @@ bool BloomIndex::loadFromFile(bool allowMissing) {
         buildPending_ = false;
         return true;
     }
-    if (!S_ISREG(before.st_mode) || !captureFileGeneration()) return false;
+    if (!S_ISREG(before.st_mode) || before.st_size < 0 ||
+        !captureFileGeneration() || before.st_dev != device_ ||
+        before.st_ino != inode_ || before.st_size != fileSize_ ||
+        before.st_mtim.tv_sec != mtimeSec_ ||
+        before.st_mtim.tv_nsec != mtimeNsec_ ||
+        before.st_ctim.tv_sec != ctimeSec_ ||
+        before.st_ctim.tv_nsec != ctimeNsec_) {
+        return false;
+    }
 
     std::ifstream in(filePath_, std::ios::binary);
     if (!in) return false;
@@ -133,8 +144,28 @@ bool BloomIndex::loadFromFile(bool allowMissing) {
                         std::istreambuf_iterator<char>());
         if (in.bad()) return false;
 
+        Reader magicReader{buf};
+        const uint32_t magic = magicReader.u32();
+        if (!magicReader.ok ||
+            (magic != kLegacyMagic && magic != kChecksummedMagic)) {
+            return false;
+        }
+        if (magic == kChecksummedMagic) {
+            if (buf.size() < kHeaderBytes + kChecksumBytes) return false;
+            Reader checksumReader{buf};
+            checksumReader.pos = buf.size() - kChecksumBytes;
+            const uint32_t storedChecksum = checksumReader.u32();
+            if (!checksumReader.ok || index_checksum::crc32c(
+                    buf.data(), buf.size() - kChecksumBytes) != storedChecksum) {
+                return false;
+            }
+            buf.resize(buf.size() - kChecksumBytes);
+        }
+
         Reader r{buf};
-        if (r.u32() != kBloomMagic) return false;
+        const uint32_t parsedMagic = r.u32();
+        if (parsedMagic != kLegacyMagic &&
+            parsedMagic != kChecksummedMagic) return false;
         const uint32_t persistedBits = r.u32();
         const uint32_t parsedHashes = r.u32();
         const uint32_t count = r.u32();
@@ -191,7 +222,7 @@ bool BloomIndex::loadFromFile(bool allowMissing) {
 bool BloomIndex::saveToFile() {
     if (entries_.size() > std::numeric_limits<uint32_t>::max()) return false;
     std::string buf;
-    putU32(buf, kBloomMagic);
+    putU32(buf, kChecksummedMagic);
     putU32(buf, m_);
     putU32(buf, k_);
     putU32(buf, static_cast<uint32_t>(entries_.size()));
@@ -205,17 +236,8 @@ bool BloomIndex::saveToFile() {
         putU32(buf, static_cast<uint32_t>(kv.second.size()));
         for (int64_t rid : kv.second) putU64(buf, static_cast<uint64_t>(rid));
     }
-    std::filesystem::path tmp = filePath_;
-    tmp += ".tmp";
-    {
-        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
-        if (!out) return false;
-        out.write(buf.data(), static_cast<std::streamsize>(buf.size()));
-        if (!out) return false;
-    }
-    std::error_code ec;
-    std::filesystem::rename(tmp, filePath_, ec);
-    if (ec) return false;
+    putU32(buf, index_checksum::crc32c(buf.data(), buf.size()));
+    if (!index_file::writeAtomically(filePath_, buf)) return false;
     if (!captureFileGeneration()) return false;
     dirty_ = false;
     return true;
