@@ -5109,9 +5109,14 @@ DBStatus StorageEngine::dropSchema(const std::string& dbname,
             return DBStatus::INVALID_VALUE;
         }
     }
-    std::error_code ec;
-    std::filesystem::remove(path, ec);
-    return ec ? DBStatus::INVALID_VALUE : DBStatus::OK;
+    if (!index_file::removeDurably(path)) {
+        // Schema markers have an empty payload. If unlink succeeded but the
+        // parent fsync failed, restore the marker without replacing a
+        // concurrently recreated schema name.
+        (void)index_file::writeAtomicallyNoReplace(path, "");
+        return DBStatus::IO_ERROR;
+    }
+    return DBStatus::OK;
 }
 
 DBStatus StorageEngine::renameSchema(const std::string& dbname,

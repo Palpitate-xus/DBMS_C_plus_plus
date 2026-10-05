@@ -38,6 +38,16 @@ int main() {
     assert(first.createSchema(database, "sync_failure") == DBStatus::OK);
     assert(first.dropSchema(database, "sync_failure", false) == DBStatus::OK);
 
+    const fs::path dropSyncFailure = fs::path(database) / ".schema_drop_sync";
+    assert(first.createSchema(database, "drop_sync") == DBStatus::OK);
+    dbms::index_file::failNextDirectorySyncForTesting();
+    assert(first.dropSchema(database, "drop_sync", false) ==
+           DBStatus::IO_ERROR);
+    assert(fs::is_regular_file(dropSyncFailure));
+    assert(first.createSchema(database, "drop_sync") ==
+           DBStatus::TABLE_ALREADY_EXISTS);
+    assert(first.dropSchema(database, "drop_sync", false) == DBStatus::OK);
+
     dbms::StorageEngine second;
     DBStatus firstResult = DBStatus::IO_ERROR;
     DBStatus secondResult = DBStatus::IO_ERROR;
