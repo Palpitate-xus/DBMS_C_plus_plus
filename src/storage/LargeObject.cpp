@@ -15,13 +15,47 @@
 
 namespace dbms {
 
+namespace {
+
+std::filesystem::path parentDirectory(const std::filesystem::path& path) {
+    return path.parent_path().empty()
+        ? std::filesystem::path(".") : path.parent_path();
+}
+
+bool ensureDirectoryTreeDurable(const std::filesystem::path& directory) {
+    std::vector<std::filesystem::path> missing;
+    for (auto current = directory; !current.empty();
+         current = current.parent_path()) {
+        std::error_code ec;
+        const bool exists = std::filesystem::exists(current, ec);
+        if (ec) return false;
+        if (exists) {
+            if (!std::filesystem::is_directory(current, ec) || ec) return false;
+            break;
+        }
+        missing.push_back(current);
+    }
+
+    std::error_code ec;
+    std::filesystem::create_directories(directory, ec);
+    if (ec) return false;
+
+    // Persist each newly-created directory entry from the deepest component
+    // outward. A large-object file is not durable if its containing database
+    // or .lobjects directory can disappear after a crash.
+    for (const auto& created : missing) {
+        if (!index_file::syncDirectory(parentDirectory(created))) return false;
+    }
+    return true;
+}
+
+}  // namespace
+
 LargeObjectManager::LargeObjectManager(const std::string& dbPath) : dbPath_(dbPath) {
     const std::filesystem::path directory =
         std::filesystem::path(dbPath_) / ".lobjects";
+    if (!ensureDirectoryTreeDurable(directory)) return;
     std::error_code ec;
-    std::filesystem::create_directories(directory, ec);
-    if (ec) return;
-
     // Reconstruct the lightweight catalog from the durable object files.
     // Without this scan every new manager restarted allocation at OID 1 and
     // could overwrite a large object created by an earlier instance.
@@ -59,9 +93,11 @@ LargeObjectManager::LargeObjectManager(const std::string& dbPath) : dbPath_(dbPa
         }
         entry.increment(ec);
     }
+    if (!ec) ready_ = true;
 }
 
 int LargeObjectManager::create() {
+    if (!ready_) return 0;
     while (nextId_ > 0) {
         const int id = nextId_;
         nextId_ = id == std::numeric_limits<int>::max() ? 0 : id + 1;
@@ -74,7 +110,15 @@ int LargeObjectManager::create() {
                               O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC,
                               0600);
         if (fd >= 0) {
-            (void)::close(fd);
+            bool durable = (::fsync(fd) == 0);
+            if (::close(fd) != 0) durable = false;
+            const auto parent = parentDirectory(path);
+            if (durable) durable = index_file::syncDirectory(parent);
+            if (!durable) {
+                (void)::unlink(path.c_str());
+                (void)index_file::syncDirectory(parent);
+                return 0;
+            }
             sizes_[id] = 0;
             return id;
         }
@@ -90,7 +134,7 @@ int LargeObjectManager::create() {
 }
 
 bool LargeObjectManager::write(int loId, size_t offset, const std::string& data) {
-    if (loId <= 0) return false;
+    if (!ready_ || loId <= 0) return false;
     auto path = loPath(loId);
 
     if (offset > static_cast<size_t>(std::numeric_limits<std::streamoff>::max()) ||
@@ -117,6 +161,7 @@ bool LargeObjectManager::write(int loId, size_t offset, const std::string& data)
 }
 
 std::string LargeObjectManager::read(int loId, size_t offset, size_t length) const {
+    if (!ready_ || loId <= 0) return "";
     auto path = loPath(loId);
     std::ifstream fs(path, std::ios::binary);
     if (!fs) return "";
@@ -133,6 +178,7 @@ std::string LargeObjectManager::read(int loId, size_t offset, size_t length) con
 }
 
 bool LargeObjectManager::truncate(int loId, size_t newSize) {
+    if (!ready_ || loId <= 0) return false;
     auto path = loPath(loId);
     std::error_code ec;
     std::filesystem::resize_file(path, newSize, ec);
@@ -142,6 +188,7 @@ bool LargeObjectManager::truncate(int loId, size_t newSize) {
 }
 
 bool LargeObjectManager::drop(int loId) {
+    if (!ready_ || loId <= 0) return false;
     auto path = loPath(loId);
     std::error_code ec;
     std::filesystem::remove(path, ec);
@@ -151,12 +198,13 @@ bool LargeObjectManager::drop(int loId) {
 }
 
 size_t LargeObjectManager::size(int loId) const {
+    if (!ready_ || loId <= 0) return 0;
     auto it = sizes_.find(loId);
     return (it != sizes_.end()) ? it->second : 0;
 }
 
 bool LargeObjectManager::importFile(int loId, const std::string& filePath) {
-    if (loId <= 0) return false;
+    if (!ready_ || loId <= 0) return false;
     std::error_code objectError;
     if (!std::filesystem::is_regular_file(loPath(loId), objectError) ||
         objectError) {
@@ -190,6 +238,7 @@ bool LargeObjectManager::importFile(int loId, const std::string& filePath) {
 }
 
 bool LargeObjectManager::exportFile(int loId, const std::string& filePath) const {
+    if (!ready_ || loId <= 0) return false;
     // Open the source first. read() returns an empty string both for a valid
     // zero-length object and for a missing/unreadable object, so using it here
     // would report success and truncate the destination on source failure.

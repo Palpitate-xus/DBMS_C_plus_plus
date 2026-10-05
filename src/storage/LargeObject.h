@@ -41,6 +41,7 @@ private:
     std::string dbPath_;
     std::map<int, size_t> sizes_;
     int nextId_ = 1;
+    bool ready_ = false;
 };
 
 } // namespace dbms
