@@ -6,7 +6,8 @@ Status: partial. The source/test fixes are local commits `4534b971`,
 2026-10-05), `fd79875a` (USING/NATURAL output semantics, 2026-10-05), and
 `3fef4f7d` (typed canonical JOIN keys, 2026-10-05), `124bc278`
 (simple scalar expression projections, 2026-10-05), and `1ef35962`
-(evaluator-supported scalar functions, 2026-10-05).
+(evaluator-supported scalar functions, 2026-10-05), and `de98eddb`
+(simple CASE projections, 2026-10-05).
 
 ## Reproduced behavior
 
@@ -27,6 +28,8 @@ Status: partial. The source/test fixes are local commits `4534b971`,
   evaluated result per joined row.
 - The same target-list path rejected evaluator-supported scalar calls such as
   `abs(a.id - b.val)` with SQLSTATE `0A000`.
+- The multi-table projection binder also rejected CASE expressions even when
+  every WHEN/THEN/ELSE reference belonged to the joined inputs.
 - It also returned rows in join/input order while silently ignoring ORDER BY,
   LIMIT, and OFFSET. `ORDER BY a.id DESC LIMIT 1` returned both rows.
 - The FROM-chain parser stopped after the 12th JOIN without reporting an
@@ -62,6 +65,10 @@ Status: partial. The source/test fixes are local commits `4534b971`,
   same row context. Known aggregates, window calls, FILTER, ordered/named
   function arguments remain explicitly unsupported and fail closed rather
   than being evaluated independently for each row.
+- Bind and evaluate simple CASE expressions by validating every switch,
+  condition, result, and ELSE reference against the same joined-row context;
+  result type inference and SQL NULL evaluation remain delegated to the
+  expression evaluator.
 - Sort supported column-reference or output-position keys with ASC/DESC and
   NULLS FIRST/LAST, then apply LIMIT/OFFSET. Unsupported projections, sort
   expressions, DISTINCT/GROUP/WINDOW forms fail explicitly rather than being
@@ -138,6 +145,12 @@ Status: partial. The source/test fixes are local commits `4534b971`,
   per-row integer values, alias, OID, and ordering; the `count(*)` negative
   control returned explicit `0A000` rather than a scalar result. CASE, SRFs,
   aggregates, and window expressions remain unsupported.
+- After `de98eddb`, `scripts/build.sh`,
+  `tests/join_type_protocol_e2e_test.py`, and `tests/multijoin_e2e_test.py`
+  passed. A three-table CASE expression selected its THEN/ELSE branch per
+  joined row, retained the alias and integer OID, and sorted by the computed
+  output position; the query previously failed with `0A000`. This does not
+  complete arbitrary CASE, SRF, aggregate, or window target-list semantics.
 - `tests/compat/cases/multijoin_projection_filter.sql` was added, but the
   differential runner refused preflight because the configured reference
   server reports PostgreSQL 17.2 (`170002`) while the runner requires 18.6
@@ -145,7 +158,7 @@ Status: partial. The source/test fixes are local commits `4534b971`,
 - The full registered suite and PostgreSQL 18.6 differential were not run.
 
 This does not complete QRY-03 or OPT-02. General target-list expressions
-(including CASE, SRFs, aggregates, and window expressions; only evaluator-
+(including SRFs, aggregates, and window expressions; only simple CASE and evaluator-
 supported scalar calls are handled), qualified star expansion,
 DISTINCT/GROUP/HAVING/WINDOW, collation-aware and
 arbitrary-expression ordering, and arbitrary nested/lateral join semantics
