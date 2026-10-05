@@ -14182,6 +14182,7 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
             : nullptr;
         bool supportedLeftScope = parsedFromSelect &&
                                   parsedFromSelect->fromClause;
+        bool materializeLeftJoinTree = false;
         std::function<void(const dbms::FromItem*)> collectLeftRelations =
             [&](const dbms::FromItem* item) {
             if (!item || !supportedLeftScope) {
@@ -14196,8 +14197,26 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
                 return;
             }
             if (item->type != dbms::FromItem::Type::Join ||
-                toLower(item->joinType) != "cross" || item->joinCondition ||
                 !item->usingCols.empty()) {
+                supportedLeftScope = false;
+                return;
+            }
+            const std::string joinType = toLower(item->joinType);
+            if (joinType == "cross") {
+                if (item->joinCondition) {
+                    supportedLeftScope = false;
+                    return;
+                }
+            } else if (joinType == "inner" || joinType == "left" ||
+                       joinType == "right" || joinType == "full") {
+                if (!item->joinCondition) {
+                    supportedLeftScope = false;
+                    return;
+                }
+                materializeLeftJoinTree = true;
+            } else {
+                // NATURAL/USING have merged output columns; the flattened
+                // leaf schemas below cannot preserve their output mapping.
                 supportedLeftScope = false;
                 return;
             }
@@ -14242,35 +14261,88 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
         }
         if (!supportedLeftScope) break;
 
-        struct LateralStoredRow {
-            std::string data;
-            int64_t rid = -1;
-        };
         struct LateralLeftRow {
-            std::vector<LateralStoredRow> sourceRows;
+            std::vector<std::string> values;
+            std::vector<bool> nulls;
         };
-        std::vector<LateralLeftRow> leftRows(1);
-        for (const LateralLeftRelation& relation : leftRelations) {
-            std::vector<LateralStoredRow> sourceRows;
-            g_engine.forEachRow(
-                s.currentDB, relation.resolvedName,
-                [&](uint32_t pageId, uint16_t slotId, const char* data,
-                    size_t len) {
-                    sourceRows.push_back({
-                        std::string(data, len),
-                        dbms::StorageEngine::encodeRid(pageId, slotId)});
-                });
-            std::vector<LateralLeftRow> products;
-            if (!sourceRows.empty() && !leftRows.empty()) {
-                for (const LateralLeftRow& prefix : leftRows) {
-                    for (const LateralStoredRow& sourceRow : sourceRows) {
-                        LateralLeftRow product = prefix;
-                        product.sourceRows.push_back(sourceRow);
-                        products.push_back(std::move(product));
+        std::vector<LateralLeftRow> leftRows;
+        if (materializeLeftJoinTree) {
+            std::vector<std::string> leftColumnNames;
+            std::vector<std::string> leftColumnTypes;
+            std::vector<std::vector<std::string>> leftStructuredRows;
+            std::vector<std::vector<bool>> leftStructuredNulls;
+            bool leftStructuredAvailable = false;
+            bool leftExecutionFailed = false;
+            std::string leftFailureText;
+            const auto leftDisplayRows = runDerivedSubQueryFull(
+                "SELECT * FROM " + leftFactor, s, leftColumnNames,
+                &leftColumnTypes, &leftStructuredRows, &leftStructuredNulls,
+                &leftStructuredAvailable, &leftExecutionFailed,
+                &leftFailureText);
+            if (leftExecutionFailed) {
+                reportNestedQueryFailure(leftFailureText);
+                failed = true;
+                return result;
+            }
+            if (leftColumnNames.size() != leftTbl.len ||
+                leftStructuredRows.size() != leftStructuredNulls.size() ||
+                (!leftStructuredAvailable && !leftDisplayRows.empty())) {
+                cout << "ERROR: LATERAL left JOIN did not produce aligned "
+                        "structured rows (SQLSTATE 0A000)" << endl;
+                failed = true;
+                return result;
+            }
+            if (leftStructuredAvailable) {
+                for (size_t rowIndex = 0;
+                     rowIndex < leftStructuredRows.size(); ++rowIndex) {
+                    if (leftStructuredRows[rowIndex].size() != leftTbl.len ||
+                        leftStructuredNulls[rowIndex].size() != leftTbl.len) {
+                        cout << "ERROR: malformed structured LATERAL left "
+                                "JOIN row (SQLSTATE XX000)" << endl;
+                        failed = true;
+                        return result;
                     }
+                    leftRows.push_back({leftStructuredRows[rowIndex],
+                                        leftStructuredNulls[rowIndex]});
                 }
             }
-            leftRows.swap(products);
+        } else {
+            leftRows.emplace_back();
+            for (const LateralLeftRelation& relation : leftRelations) {
+                struct LateralStoredRow {
+                    std::string data;
+                    int64_t rid = -1;
+                };
+                std::vector<LateralStoredRow> sourceRows;
+                g_engine.forEachRow(
+                    s.currentDB, relation.resolvedName,
+                    [&](uint32_t pageId, uint16_t slotId, const char* data,
+                        size_t len) {
+                        sourceRows.push_back({
+                            std::string(data, len),
+                            dbms::StorageEngine::encodeRid(pageId, slotId)});
+                    });
+                std::vector<LateralLeftRow> products;
+                if (!sourceRows.empty() && !leftRows.empty()) {
+                    for (const LateralLeftRow& prefix : leftRows) {
+                        for (const LateralStoredRow& sourceRow : sourceRows) {
+                            LateralLeftRow product = prefix;
+                            for (size_t ci = 0; ci < relation.schema.len; ++ci) {
+                                product.values.push_back(
+                                    g_engine.extractColumnValue(
+                                        sourceRow.data, relation.schema, ci));
+                                product.nulls.push_back(
+                                    g_engine.isColumnNullByRid(
+                                        s.currentDB, relation.resolvedName,
+                                        sourceRow.rid, ci));
+                            }
+                            products.push_back(std::move(product));
+                        }
+                    }
+                }
+                leftRows.swap(products);
+                if (leftRows.empty()) break;
+            }
         }
 
         // Execute the lateral subquery for each left row.  Materialize a
@@ -14285,19 +14357,15 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
         std::vector<std::string> rightColTypes;
         for (const auto& leftRow : leftRows) {
             std::string replacedSql = innerSelect;
-            std::vector<std::string> outerValues(leftTbl.len);
-            std::vector<bool> outerNulls(leftTbl.len, false);
-            for (size_t ri = 0; ri < leftRelations.size(); ++ri) {
-                const LateralLeftRelation& relation = leftRelations[ri];
-                const LateralStoredRow& sourceRow = leftRow.sourceRows[ri];
-                for (size_t ci = 0; ci < relation.schema.len; ++ci) {
-                    const size_t combinedIndex = relation.columnOffset + ci;
-                    outerValues[combinedIndex] = g_engine.extractColumnValue(
-                        sourceRow.data, relation.schema, ci);
-                    outerNulls[combinedIndex] = g_engine.isColumnNullByRid(
-                        s.currentDB, relation.resolvedName, sourceRow.rid, ci);
-                }
+            if (leftRow.values.size() != leftTbl.len ||
+                leftRow.nulls.size() != leftTbl.len) {
+                cout << "ERROR: malformed structured LATERAL left row "
+                        "(SQLSTATE XX000)" << endl;
+                failed = true;
+                return result;
             }
+            const std::vector<std::string>& outerValues = leftRow.values;
+            const std::vector<bool>& outerNulls = leftRow.nulls;
             // Replace left table column references with literal values
             for (const LateralLeftRelation& relation : leftRelations) {
                 for (size_t ci = 0; ci < relation.schema.len; ++ci) {

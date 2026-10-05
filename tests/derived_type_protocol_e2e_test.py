@@ -123,6 +123,35 @@ def main():
               "(SELECT \"OuterAlias\".\"MixedId\" + 1 AS next_id) x "
               "WHERE \"OuterAlias\".\"MixedId\" = 1;"),
              [["1", "2"]], [23, 23]),
+            (("SELECT l.id, r.label, x.next_id "
+              "FROM typed_lateral_left AS l "
+              "LEFT JOIN typed_lateral_right AS r ON r.id = l.id "
+              "CROSS JOIN LATERAL (SELECT l.id + 1 AS next_id) x "
+              "WHERE l.id = 6;"),
+             [["6", None, "7"]], [23, 25, 23]),
+            (("SELECT l.id, r.id, x.next_id "
+              "FROM typed_lateral_left AS l "
+              "INNER JOIN typed_lateral_right AS r ON r.id = l.id "
+              "CROSS JOIN LATERAL (SELECT l.id + 1 AS next_id) x "
+              "WHERE l.id = 1 ORDER BY r.id;"),
+             [["1", "1", "2"], ["1", "1", "2"]], [23, 23, 23]),
+            (("SELECT l.payload, r.id, x.next_id "
+              "FROM typed_lateral_left AS l "
+              "RIGHT JOIN typed_lateral_right AS r ON r.id = l.id "
+              "CROSS JOIN LATERAL (SELECT r.id + 1 AS next_id) x "
+              "WHERE r.id = 3;"),
+             [[None, "3", "4"]], [25, 23, 23]),
+            (("SELECT l.id, x.next_id FROM typed_lateral_empty AS l "
+              "LEFT JOIN typed_lateral_right AS r ON r.id = l.id "
+              "CROSS JOIN LATERAL (SELECT l.id + 1 AS next_id) x;"),
+             [], [23, 23]),
+            (("SELECT l.id, r.id, x.next_id "
+              "FROM typed_lateral_left AS l "
+              "FULL OUTER JOIN typed_lateral_right AS r ON r.id = l.id "
+              "CROSS JOIN LATERAL (SELECT r.id + 1 AS next_id) x "
+              "WHERE l.id = 6 OR r.id = 3 "
+              "ORDER BY l.id NULLS LAST, r.id;"),
+             [["6", None, None], [None, "3", "4"]], [23, 23, 23]),
             (("SELECT l.id, x.label FROM typed_lateral_left l "
               "LEFT JOIN LATERAL "
               "(SELECT label FROM typed_lateral_right WHERE id = l.id) x "
@@ -273,6 +302,14 @@ def main():
                     expected_headers = ["id", "first", "second"]
                 elif "\"MixedId\"" in sql:
                     expected_headers = ["MixedId", "next_id"]
+                elif "x.next_id" in sql and "r.label" in sql:
+                    expected_headers = ["id", "label", "next_id"]
+                elif "RIGHT JOIN" in sql:
+                    expected_headers = ["payload", "id", "next_id"]
+                elif "FULL OUTER JOIN" in sql:
+                    expected_headers = ["id", "id", "next_id"]
+                elif "INNER JOIN typed_lateral_right" in sql:
+                    expected_headers = ["id", "id", "next_id"]
                 elif "x.next_id" in sql:
                     expected_headers = ["id", "next_id"]
                 elif "l.payload" in sql:
