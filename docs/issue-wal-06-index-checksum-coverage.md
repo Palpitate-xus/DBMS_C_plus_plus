@@ -46,6 +46,13 @@ BRIN sidecars now use a portable little-endian V2 encoding and CRC32C trailer.
 The online reader validates the checksum before parsing range summaries; V1
 native-endian files remain readable and are explicitly unchecked.
 
+SP-GiST sidecars still do not have checksums. A malformed sidecar found on a
+cold cache previously produced an empty search result instead of rebuilding a
+temporary index from the heap. The query path now falls back to a heap scan when
+SP-GiST parsing fails, preventing malformed/truncated files from silently
+turning valid point matches into misses. This does not detect structurally
+valid bit flips and does not add SP-GiST checksum coverage.
+
 The offline `--verify-data-checksums` utility discovers B+ tree files named
 `.idx`/`.idx_*`, hash sidecars named `.hidx`, Bloom sidecars named `.bidx`, and
 GIN/BRIN sidecars named `.gin`/`.brin` below the cluster and resolved tablespace roots. It opens them with read-only,
@@ -80,6 +87,10 @@ a TDE security review.
 - `scripts/build_one_test.sh gin_brin_index_test` — passed GIN whitespace-key
   lookup, GIN/BRIN V2 checksum-corruption rejection, V1 compatibility and BRIN
   range lookup coverage.
+- `scripts/build_one_test.sh specialized_index_dml_test` — passed malformed
+  cold-cache SP-GiST sidecar heap-fallback regression and existing specialized
+  index DML/lifecycle cases.
+- `scripts/build.sh` — production build passed after the SP-GiST fallback fix.
 - `python3 tests/checksum_verification_e2e_test.py` — passed read-only
   snapshots, in-cluster/composite/tablespace B+ tree discovery, page-bit and
   whole-page-swap rejection, `.hidx`, `.bidx`, `.gin`, and `.brin` corruption
@@ -103,4 +114,4 @@ enable/disable/rewrite/progress workflow or online whole-cluster verification.
 The custom checksums are not PostgreSQL page checksums.
 
 Source/test commits: `93addab7`, `2685454b`, `3b595189`, `8e92ebd9`,
-`b32ab185`, `f76809b6`, `16b72b0a` (not pushed).
+`b32ab185`, `f76809b6`, `16b72b0a`, `d27eda0f` (not pushed).
