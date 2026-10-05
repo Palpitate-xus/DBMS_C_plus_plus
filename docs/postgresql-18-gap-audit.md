@@ -304,7 +304,7 @@
 - [ ] **CAT-11** 分区表补默认分区、约束证明、attach validation、detach concurrently/finalize、分区索引和跨分区唯一性。
 - [ ] **CAT-12** 继承补约束/default/generated/identity/统计/权限传播和多父表冲突规则。
 - [ ] **CAT-13** 临时对象补 `pg_temp_N` catalog、search_path、ON COMMIT、两阶段事务限制和 session/backend 清理语义。
-- [ ] **CAT-14** unlogged relation 补 init fork、crash truncate、复制和备份行为。
+- [ ] **CAT-14** unlogged relation 补 init fork、crash truncate、复制和备份行为。已有 clean/unclean 重启及子进程 SIGKILL 后恢复的测试；真实掉电/存储故障注入、可差分物理复制仍未实现，故此项保持 partial。
 - [ ] **CAT-15** sequence 补 relation/catalog 语义、cache、cycle、min/max、owned-by、并发、WAL、session currval/lastval 和非事务行为。
 - [ ] **CAT-16** view 补完整 rewrite rule、自动可更新判断、CHECK OPTION、security barrier/invoker、recursive view 和依赖。
 - [ ] **CAT-17** materialized view 补列类型推断、依赖、populate state、真实 concurrent refresh 和唯一索引要求。
