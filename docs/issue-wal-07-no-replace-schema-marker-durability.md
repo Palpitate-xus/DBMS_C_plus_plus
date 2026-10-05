@@ -34,6 +34,12 @@ archive sibling) without syncing the cluster directory. It now syncs the
 shared parent after both moves and attempts to move both names back if that
 sync fails, then syncs the rollback.
 
+`DROP SCHEMA` previously unlinked its marker without syncing the containing
+database directory. It now uses durable removal; if unlink succeeded but the
+directory sync fails, it attempts a no-replace restoration of the empty marker
+and reports `IO_ERROR` so a failed statement does not silently leave the
+namespace removed.
+
 ## Verification
 
 - `bash scripts/build_one_test.sh schema_marker_publish_guard_test` — passed.
@@ -49,7 +55,9 @@ sync fails, then syncs the rollback.
   database path was absent, confirming that callers must re-check after this
   post-delete failure. The rename case injected the parent-sync error after
   moving a fresh database; it restored the source name, left the destination
-  absent, and a retry succeeded.
+  absent, and a retry succeeded. `schema_marker_publish_guard_test` injected
+  failure after marker unlink and verified the schema marker was restored,
+  duplicate CREATE was reported, and a subsequent DROP succeeded.
 - `git diff --check` — passed before commit.
 
 No full registered suite, standalone production executable build, or
@@ -65,6 +73,6 @@ temporary hard-link alias may remain if cleanup itself fails, but the schema
 target was synced before that cleanup and the alias is not interpreted as a
 schema marker.
 
-Source/test commits: `e8a6d1ee` (schema marker), `f8c02416` (database
-creation), `b707afd3` (database drop), and `ab72c8fe` (database rename), all
-not pushed.
+Source/test commits: `e8a6d1ee` (schema marker create), `cc129973` (schema
+marker drop), `f8c02416` (database creation), `b707afd3` (database drop), and
+`ab72c8fe` (database rename), all not pushed.
