@@ -13705,6 +13705,11 @@ bool StorageEngine::rebuildAllSpecializedIndexes(
     const std::string& dbname) {
     try {
         for (const auto& tableName : getTableNames(dbname)) {
+            // Session temporary relations are discarded by startup cleanup
+            // after WAL recovery. Their catalog name can outlive an
+            // interrupted CREATE before the schema marker is complete, so
+            // there is no valid table schema from which to rebuild an index.
+            if (isSessionTempPhysicalName(tableName)) continue;
             if (!rebuildSpecializedIndexes(dbname, tableName)) return false;
         }
         return true;
