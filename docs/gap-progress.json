@@ -2,6 +2,31 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "STO-05",
+      "gap_ids": ["STO-05"],
+      "status": "partial",
+      "commits": ["9a29e99a"],
+      "evidence": [
+        "docs/code-review-progress.md",
+        "docs/issue-sto-05-vacuum-visibility-horizon.md",
+        "docs/postgresql-18-gap-audit.md",
+        "src/commands/TableManage.cpp",
+        "tests/parallel_vacuum_test.cpp"
+      ],
+      "tests": [
+        "tests/parallel_vacuum_test.cpp",
+        "scripts/build.sh",
+        "scripts/build_one_test.sh"
+      ],
+      "verification": {
+        "reproduction": "An old REPEATABLE READ snapshot retained a pre-UPDATE tuple while a rolled-back INSERT left an unused line pointer; the old liveCount/slotCount heuristic still marked the page all-visible",
+        "fix": "The simplified VACUUM clears all-visible unless a future implementation proves the active visibility horizon",
+        "focused_tests": "The regression failed before the fix and passed after it; bash scripts/build.sh and bash scripts/build_one_test.sh parallel_vacuum_test passed",
+        "full_suite": "The full registered suite was not rerun on this revision",
+        "scope": "STO-05 remains partial: FSM/VM durability and crash rebuild, all-frozen, a real visibility horizon, index-only integration, and PostgreSQL 18.6 differential remain open"
+      }
+    },
+    {
       "issue": "STO-04",
       "gap_ids": ["STO-04"],
       "status": "partial",
@@ -1035,7 +1060,7 @@
     {"id":"STO-02","status":"partial","evidence":["docs/issue-sto-02-relation-storage-namespace.md","docs/code-review-progress.md","src/commands/TableManage.cpp"],"tests":["tests/partition_test.cpp","tests/temp_restart_cleanup_test.cpp","tests/create_table_like_test.cpp","scripts/build_tests.sh"],"commits":["1a76a3fb"]},
     {"id":"STO-03","status":"partial","evidence":["docs/issue-sto-03-page-identity.md","docs/postgresql-18-gap-audit.md","src/storage/PgPage.cpp","src/storage/PageAllocator.cpp","src/common/DataDirectory.cpp"],"tests":["tests/checksum_test.cpp","tests/checksum_verification_e2e_test.py","scripts/build.sh","scripts/build_tests.sh"],"commits":["11d1fa4d"]},
     {"id":"STO-04","status":"partial","evidence":["docs/issue-sto-04-buffer-invalidation-pins.md","docs/postgresql-18-gap-audit.md","src/storage/BufferPool.cpp"],"tests":["tests/buffer_pool_invalidate_all_pins_test.cpp","scripts/build.sh","scripts/build_tests.sh","tests/div14_feature_gate_test.py"],"commits":["019e5ee7"]},
-    {"id":"STO-05","status":"unverified","evidence":[]},
+    {"id":"STO-05","status":"partial","evidence":["docs/issue-sto-05-vacuum-visibility-horizon.md","src/commands/TableManage.cpp"],"tests":["tests/parallel_vacuum_test.cpp","scripts/build.sh","scripts/build_one_test.sh"],"commits":["9a29e99a"]},
     {"id":"STO-06","status":"unverified","evidence":[]},
     {"id":"WAL-01","status":"unverified","evidence":[]},
     {"id":"WAL-02","status":"unverified","evidence":[]},
