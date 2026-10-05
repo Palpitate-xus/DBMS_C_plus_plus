@@ -1,9 +1,9 @@
 # QRY-03 — Multi-table join chain order and WHERE filtering
 
 Status: partial. The source/test fixes are local commits `4534b971`,
-`b87d4a19`, `858d6da9`, `0a57fee1`, `e042360b`, and `856fe079`
-(source fix, 2026-10-05), with follow-up RIGHT/FULL regression coverage in
-`65718c2b` (2026-10-05).
+`b87d4a19`, `858d6da9`, `0a57fee1`, `e042360b`, `856fe079`
+(ON-conjunction fix, 2026-10-05), `65718c2b` (RIGHT/FULL residual coverage,
+2026-10-05), and `fd79875a` (USING/NATURAL output semantics, 2026-10-05).
 
 ## Reproduced behavior
 
@@ -28,6 +28,9 @@ Status: partial. The source/test fixes are local commits `4534b971`,
   and treated everything after it as a column name. A three-table query with
   `ON a.id = b.a_id AND b.val = 1` returned no rows instead of applying the
   second term as part of the join condition.
+- A single JOIN with `USING (id)` reached the legacy path and failed with
+  “missing ON clause”; a multi-link USING chain failed parsing with SQLSTATE
+  `42601`. NATURAL joins had no merged SQL output schema and were rejected.
 
 ## Fixes
 
@@ -53,6 +56,15 @@ Status: partial. The source/test fixes are local commits `4534b971`,
   their referenced relations are present; outer-chain residuals stay on their
   authored join edge and are evaluated before NULL extension. Unsupported
   residual expressions now fail explicitly instead of being silently ignored.
+- For simple identifier lists, parse single and chained `USING`/`NATURAL`
+  joins, build a logical output schema with merged columns first in SQL order,
+  and retain original qualified base columns alongside hidden intermediate
+  outputs. FULL joins coalesce the merged key from both sides; RIGHT joins use
+  the right key; composite USING keys add equality filters after the hash key.
+  NATURAL with no common columns uses Cartesian semantics, including outer
+  preservation. The chain is kept in authored order when merged-key outputs
+  are present. Quoted USING identifiers, arbitrary expressions, lateral or
+  parameterized inputs, and general nested join trees are not implemented.
 
 ## Verification
 
@@ -74,6 +86,14 @@ Status: partial. The source/test fixes are local commits `4534b971`,
   NULL-extended rows on the correct side. The conjunction case returned no
   rows before the fix; the multi-join E2E also retains its three-table,
   reordered, and four-table cases.
+- After `fd79875a`, `scripts/build.sh`,
+  `tests/join_type_protocol_e2e_test.py`, and `tests/multijoin_e2e_test.py`
+  passed. The protocol E2E covers single-pair and chained USING/NATURAL,
+  merged `SELECT *` ordering, bare merged-key WHERE/projection, qualified
+  `a.id`/`b.id` on FULL USING, composite keys with reordered USING lists,
+  LEFT/RIGHT/FULL unmatched rows, and NATURAL outer joins with no common
+  columns. Before the fix, single USING failed with missing ON and the chained
+  USING case failed parsing with `42601`.
 - `tests/compat/cases/multijoin_projection_filter.sql` was added, but the
   differential runner refused preflight because the configured reference
   server reports PostgreSQL 17.2 (`170002`) while the runner requires 18.6
