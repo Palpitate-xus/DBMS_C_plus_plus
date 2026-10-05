@@ -27,6 +27,8 @@ def main():
              "(1, 'left one'), (2, ''), (4, 'NULL'), (5, NULL), "
              "(NULL, 'null id'), (6, 'quote '' value');"),
             "CREATE TABLE typed_lateral_empty (id INT);",
+            "CREATE TABLE typed_lateral_aux (delta INT);",
+            "INSERT INTO typed_lateral_aux VALUES (10);",
             "CREATE TABLE typed_lateral_right (id INT, label TEXT);",
             ("INSERT INTO typed_lateral_right VALUES "
              "(1, 'right one'), (1, 'right uno'), (2, ''), (3, 'unused'), "
@@ -86,6 +88,21 @@ def main():
               "ORDER BY l.id, x.label;"),
              [["1", "right oneleft one"], ["1", "right unoleft one"],
               ["2", ""], ["4", "NULLNULL"]], [23, 25]),
+            (("SELECT l.id, b.delta, x.total "
+              "FROM typed_lateral_left l CROSS JOIN typed_lateral_aux b "
+              "CROSS JOIN LATERAL (SELECT l.id + b.delta AS total) x "
+              "WHERE l.id = 1;"),
+             [["1", "10", "11"]], [23, 23, 23]),
+            (("SELECT l.id, b.delta, x.total "
+              "FROM typed_lateral_left l, typed_lateral_aux b, "
+              "LATERAL (SELECT l.id + b.delta AS total) x "
+              "WHERE l.id = 1;"),
+             [["1", "10", "11"]], [23, 23, 23]),
+            (("SELECT l.id, b.delta, x.value "
+              "FROM typed_lateral_left l CROSS JOIN typed_lateral_aux b "
+              "INNER JOIN LATERAL (SELECT 5 AS value) x "
+              "ON l.id = 1 AND b.delta = 10;"),
+             [["1", "10", "5"]], [23, 23, 23]),
             (("SELECT l.id, x.label FROM typed_lateral_left l "
               "LEFT JOIN LATERAL "
               "(SELECT label FROM typed_lateral_right WHERE id = l.id) x "
@@ -228,6 +245,10 @@ def main():
                     expected_headers = ["id", "out"]
                 elif "x.ok" in sql:
                     expected_headers = ["id", "ok"]
+                elif "x.total" in sql:
+                    expected_headers = ["id", "delta", "total"]
+                elif "x.value" in sql:
+                    expected_headers = ["id", "delta", "value"]
                 elif "l.payload" in sql:
                     expected_headers = ["id", "payload", "label"]
                 elif "x.label" in sql:

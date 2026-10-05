@@ -13735,8 +13735,8 @@ static void substituteLateralBareScalarTargets(
 
 static bool lateralJoinPredicateMatches(
     const std::string& predicate, const TableSchema& leftSchema,
-    const std::string& leftPrefix, const std::string& leftTableName,
-    const std::string& resolvedLeft, const std::string& rightAlias,
+    const std::vector<std::vector<std::string>>& leftColumnQualifiers,
+    const std::string& rightAlias,
     const std::vector<std::string>& leftValues,
     const std::vector<bool>& leftNulls,
     const std::vector<std::string>& rightNames,
@@ -13756,19 +13756,15 @@ static bool lateralJoinPredicateMatches(
     std::map<std::string, std::string> typeHints;
     std::set<std::string> nullColumns;
     std::map<std::string, size_t> bareCounts;
-    std::vector<std::string> leftQualifiers = {
-        leftPrefix, leftTableName, resolvedLeft};
-    std::sort(leftQualifiers.begin(), leftQualifiers.end());
-    leftQualifiers.erase(std::unique(leftQualifiers.begin(),
-                                     leftQualifiers.end()),
-                         leftQualifiers.end());
-
     for (size_t ci = 0; ci < leftSchema.len; ++ci) {
         const std::string& name = leftSchema.cols[ci].dataName;
         const std::string value = ci < leftValues.size()
             ? leftValues[ci] : std::string();
         const bool isNull = ci >= leftNulls.size() || leftNulls[ci];
-        for (const std::string& qualifier : leftQualifiers) {
+        const std::vector<std::string> emptyQualifiers;
+        const auto& qualifiers = ci < leftColumnQualifiers.size()
+            ? leftColumnQualifiers[ci] : emptyQualifiers;
+        for (const std::string& qualifier : qualifiers) {
             const std::string key = toLower(qualifier + "." + name);
             rowValues[key] = value;
             typeHints[key] = leftSchema.cols[ci].dataType;
@@ -13866,10 +13862,9 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
         // Extract the inner SELECT
         std::string innerSelect = trim(result.substr(parenStart + 1, parenEnd - parenStart - 1));
 
-        // This materializer handles one simple left relation followed by
-        // either CROSS JOIN LATERAL or comma LATERAL.  Parse that relation as
-        // "table [AS] alias"; the old last-"join" split accidentally made
-        // "cross" part of the alias.
+        // This materializer handles simple base-table CROSS inputs followed
+        // by CROSS/INNER/LEFT JOIN LATERAL or comma LATERAL. The previous
+        // last-"join" split accidentally made "cross" part of the alias.
         size_t fromPos = findTopLevelKeyword(result, "from");
         if (fromPos == std::string::npos || fromPos >= latPos) break;
         std::string leftFactor = trim(
@@ -13960,39 +13955,112 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
             }
             replacementEnd = predicateEnd;
         }
-        std::vector<std::string> leftTokens = tokenize(leftFactor);
-        std::string leftTableName, leftAlias;
-        if (leftTokens.size() == 1) {
-            leftTableName = leftTokens[0];
-        } else if (leftTokens.size() == 2) {
-            leftTableName = leftTokens[0];
-            leftAlias = leftTokens[1];
-        } else if (leftTokens.size() == 3 && leftTokens[1] == "as") {
-            leftTableName = leftTokens[0];
-            leftAlias = leftTokens[2];
+        struct LateralLeftRelation {
+            std::string tableName;
+            std::string alias;
+            std::string resolvedName;
+            std::string prefix;
+            size_t columnOffset = 0;
+            TableSchema schema;
+        };
+        std::vector<LateralLeftRelation> leftRelations;
+        dbms::SQLParser fromParser;
+        const auto parsedFrom = fromParser.parse("SELECT 1 FROM " + leftFactor);
+        const auto* parsedFromSelect = parsedFrom.success
+            ? dynamic_cast<const dbms::SelectStmt*>(parsedFrom.stmt.get())
+            : nullptr;
+        bool supportedLeftScope = parsedFromSelect &&
+                                  parsedFromSelect->fromClause;
+        std::function<void(const dbms::FromItem*)> collectLeftRelations =
+            [&](const dbms::FromItem* item) {
+            if (!item || !supportedLeftScope) {
+                supportedLeftScope = false;
+                return;
+            }
+            if (item->type == dbms::FromItem::Type::Table) {
+                LateralLeftRelation relation;
+                relation.tableName = item->tableName;
+                relation.alias = item->alias;
+                leftRelations.push_back(std::move(relation));
+                return;
+            }
+            if (item->type != dbms::FromItem::Type::Join ||
+                toLower(item->joinType) != "cross" || item->joinCondition ||
+                !item->usingCols.empty()) {
+                supportedLeftScope = false;
+                return;
+            }
+            collectLeftRelations(item->left.get());
+            collectLeftRelations(item->right.get());
+        };
+        if (supportedLeftScope)
+            collectLeftRelations(parsedFromSelect->fromClause.get());
+        if (!supportedLeftScope || leftRelations.empty()) break;
+
+        TableSchema leftTbl;
+        leftTbl.tablename = "__lateral_outer";
+        std::vector<std::vector<std::string>> leftColumnQualifiers;
+        for (LateralLeftRelation& relation : leftRelations) {
+            relation.resolvedName = resolveTableName(s, relation.tableName);
+            if (relation.resolvedName.empty() ||
+                !g_engine.tableExists(s.currentDB, relation.resolvedName)) {
+                supportedLeftScope = false;
+                break;
+            }
+            relation.prefix = relation.alias.empty()
+                ? relation.tableName : relation.alias;
+            relation.schema = g_engine.getTableSchema(
+                s.currentDB, relation.resolvedName);
+            relation.columnOffset = leftTbl.len;
+            if (relation.schema.len > dbms::MAX_COLUMNS - leftTbl.len) {
+                cout << "ERROR: LATERAL CROSS input has too many columns "
+                        "(SQLSTATE 54011)" << endl;
+                failed = true;
+                return result;
+            }
+            for (size_t ci = 0; ci < relation.schema.len; ++ci) {
+                leftTbl.cols[leftTbl.len++] = relation.schema.cols[ci];
+                std::vector<std::string> qualifiers = {
+                    relation.prefix, relation.tableName, relation.resolvedName};
+                std::sort(qualifiers.begin(), qualifiers.end());
+                qualifiers.erase(std::unique(qualifiers.begin(),
+                                              qualifiers.end()),
+                                 qualifiers.end());
+                leftColumnQualifiers.push_back(std::move(qualifiers));
+            }
         }
-        if (leftTableName.empty()) break;
+        if (!supportedLeftScope) break;
 
-        std::string resolvedLeft = resolveTableName(s, leftTableName);
-        if (!g_engine.tableExists(s.currentDB, resolvedLeft)) break;
-        TableSchema leftTbl = g_engine.getTableSchema(s.currentDB, resolvedLeft);
-        std::string leftPrefix = leftAlias.empty() ? leftTableName : leftAlias;
-
-        // Read all left rows
-        struct LateralLeftRow {
+        struct LateralStoredRow {
             std::string data;
             int64_t rid = -1;
         };
-        std::vector<LateralLeftRow> leftRows;
-        std::vector<std::string> leftColNames;
-        for (size_t i = 0; i < leftTbl.len; ++i) leftColNames.push_back(leftTbl.cols[i].dataName);
-        g_engine.forEachRow(s.currentDB, resolvedLeft, [&](uint32_t pageId,
-                                                           uint16_t slotId,
-                                                           const char* data,
-                                                           size_t len) {
-            leftRows.push_back({std::string(data, len),
-                                dbms::StorageEngine::encodeRid(pageId, slotId)});
-        });
+        struct LateralLeftRow {
+            std::vector<LateralStoredRow> sourceRows;
+        };
+        std::vector<LateralLeftRow> leftRows(1);
+        for (const LateralLeftRelation& relation : leftRelations) {
+            std::vector<LateralStoredRow> sourceRows;
+            g_engine.forEachRow(
+                s.currentDB, relation.resolvedName,
+                [&](uint32_t pageId, uint16_t slotId, const char* data,
+                    size_t len) {
+                    sourceRows.push_back({
+                        std::string(data, len),
+                        dbms::StorageEngine::encodeRid(pageId, slotId)});
+                });
+            std::vector<LateralLeftRow> products;
+            if (!sourceRows.empty() && !leftRows.empty()) {
+                for (const LateralLeftRow& prefix : leftRows) {
+                    for (const LateralStoredRow& sourceRow : sourceRows) {
+                        LateralLeftRow product = prefix;
+                        product.sourceRows.push_back(sourceRow);
+                        products.push_back(std::move(product));
+                    }
+                }
+            }
+            leftRows.swap(products);
+        }
 
         // Execute the lateral subquery for each left row.  Materialize a
         // combined left+right row instead of only collecting right rows and
@@ -14005,48 +14073,56 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
         std::vector<std::string> rightColNames;
         std::vector<std::string> rightColTypes;
         for (const auto& leftRow : leftRows) {
-            const std::string& lrow = leftRow.data;
             std::string replacedSql = innerSelect;
             std::vector<std::string> outerValues(leftTbl.len);
             std::vector<bool> outerNulls(leftTbl.len, false);
-            for (size_t ci = 0; ci < leftTbl.len; ++ci) {
-                outerValues[ci] = g_engine.extractColumnValue(lrow, leftTbl, ci);
-                outerNulls[ci] = g_engine.isColumnNullByRid(
-                    s.currentDB, resolvedLeft, leftRow.rid, ci);
+            for (size_t ri = 0; ri < leftRelations.size(); ++ri) {
+                const LateralLeftRelation& relation = leftRelations[ri];
+                const LateralStoredRow& sourceRow = leftRow.sourceRows[ri];
+                for (size_t ci = 0; ci < relation.schema.len; ++ci) {
+                    const size_t combinedIndex = relation.columnOffset + ci;
+                    outerValues[combinedIndex] = g_engine.extractColumnValue(
+                        sourceRow.data, relation.schema, ci);
+                    outerNulls[combinedIndex] = g_engine.isColumnNullByRid(
+                        s.currentDB, relation.resolvedName, sourceRow.rid, ci);
+                }
             }
             // Replace left table column references with literal values
-            for (size_t ci = 0; ci < leftTbl.len; ++ci) {
-                const std::string& val = outerValues[ci];
-                // Escape single quotes in value
-                std::string escVal;
-                for (char c : val) {
-                    if (c == '\'') escVal += "''";
-                    else escVal += c;
-                }
-                const bool isNull = outerNulls[ci];
-                bool isNum = leftTbl.cols[ci].dataType != "char" && !leftTbl.cols[ci].isVariableLength;
-                std::string lit = isNull
-                    ? "null" : (isNum ? escVal : "'" + escVal + "'");
+            for (const LateralLeftRelation& relation : leftRelations) {
+                for (size_t ci = 0; ci < relation.schema.len; ++ci) {
+                    const size_t combinedIndex = relation.columnOffset + ci;
+                    const std::string& val = outerValues[combinedIndex];
+                    std::string escVal;
+                    for (char c : val) {
+                        if (c == '\'') escVal += "''";
+                        else escVal += c;
+                    }
+                    const bool isNull = outerNulls[combinedIndex];
+                    const bool isNum = relation.schema.cols[ci].dataType != "char" &&
+                                       !relation.schema.cols[ci].isVariableLength;
+                    const std::string lit = isNull
+                        ? "null" : (isNum ? escVal : "'" + escVal + "'");
 
-                for (const std::string& pref :
-                     {leftPrefix + ".", leftTableName + ".",
-                      resolvedLeft + "."}) {
-                    std::string place = pref + leftTbl.cols[ci].dataName;
-                    size_t pos = 0;
-                    while ((pos = findTextOutsideQuotes(
-                                replacedSql, place, pos)) != std::string::npos) {
-                        const size_t after = pos + place.size();
-                        if ((pos > 0 &&
-                             (isalnum(static_cast<unsigned char>(replacedSql[pos - 1])) ||
-                              replacedSql[pos - 1] == '_')) ||
-                            (after < replacedSql.size() &&
-                             (isalnum(static_cast<unsigned char>(replacedSql[after])) ||
-                              replacedSql[after] == '_'))) {
-                            pos = after;
-                            continue;
+                    for (const std::string& qualifier :
+                         leftColumnQualifiers[combinedIndex]) {
+                        const std::string place = qualifier + "." +
+                            relation.schema.cols[ci].dataName;
+                        size_t pos = 0;
+                        while ((pos = findTextOutsideQuotes(
+                                    replacedSql, place, pos)) != std::string::npos) {
+                            const size_t after = pos + place.size();
+                            if ((pos > 0 &&
+                                 (isalnum(static_cast<unsigned char>(replacedSql[pos - 1])) ||
+                                  replacedSql[pos - 1] == '_')) ||
+                                (after < replacedSql.size() &&
+                                 (isalnum(static_cast<unsigned char>(replacedSql[after])) ||
+                                  replacedSql[after] == '_'))) {
+                                pos = after;
+                                continue;
+                            }
+                            replacedSql.replace(pos, place.size(), lit);
+                            pos += lit.size();
                         }
-                        replacedSql.replace(pos, place.size(), lit);
-                        pos += lit.size();
                     }
                 }
             }
@@ -14155,8 +14231,8 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
                     bool matches = false;
                     std::string evaluationError;
                     if (!lateralJoinPredicateMatches(
-                            joinCondition, leftTbl, leftPrefix, leftTableName,
-                            resolvedLeft, alias, outerValues, outerNulls,
+                            joinCondition, leftTbl, leftColumnQualifiers,
+                            alias, outerValues, outerNulls,
                             rowColNames, rowColTypes,
                             rowStructuredRows[rowIndex],
                             rowStructuredNulls[rowIndex], s.currentDB,
@@ -14238,27 +14314,29 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
             std::string probeSql = innerSelect;
             std::vector<std::string> nullOuterValues(leftTbl.len);
             std::vector<bool> nullOuterColumns(leftTbl.len, true);
-            for (size_t ci = 0; ci < leftTbl.len; ++ci) {
-                for (const std::string& pref :
-                     {leftPrefix + ".", leftTableName + ".",
-                      resolvedLeft + "."}) {
-                    const std::string place =
-                        pref + leftTbl.cols[ci].dataName;
-                    size_t pos = 0;
-                    while ((pos = findTextOutsideQuotes(
-                                probeSql, place, pos)) != std::string::npos) {
-                        const size_t after = pos + place.size();
-                        if ((pos > 0 &&
-                             (isalnum(static_cast<unsigned char>(probeSql[pos - 1])) ||
-                              probeSql[pos - 1] == '_')) ||
-                            (after < probeSql.size() &&
-                             (isalnum(static_cast<unsigned char>(probeSql[after])) ||
-                              probeSql[after] == '_'))) {
-                            pos = after;
-                            continue;
+            for (const LateralLeftRelation& relation : leftRelations) {
+                for (size_t ci = 0; ci < relation.schema.len; ++ci) {
+                    const size_t combinedIndex = relation.columnOffset + ci;
+                    for (const std::string& qualifier :
+                         leftColumnQualifiers[combinedIndex]) {
+                        const std::string place = qualifier + "." +
+                            relation.schema.cols[ci].dataName;
+                        size_t pos = 0;
+                        while ((pos = findTextOutsideQuotes(
+                                    probeSql, place, pos)) != std::string::npos) {
+                            const size_t after = pos + place.size();
+                            if ((pos > 0 &&
+                                 (isalnum(static_cast<unsigned char>(probeSql[pos - 1])) ||
+                                  probeSql[pos - 1] == '_')) ||
+                                (after < probeSql.size() &&
+                                 (isalnum(static_cast<unsigned char>(probeSql[after])) ||
+                                  probeSql[after] == '_'))) {
+                                pos = after;
+                                continue;
+                            }
+                            probeSql.replace(pos, place.size(), "null");
+                            pos += 4;
                         }
-                        probeSql.replace(pos, place.size(), "null");
-                        pos += 4;
                     }
                 }
             }
@@ -14327,11 +14405,16 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
                 pos += replacement.size();
             }
         };
-        for (size_t ci = 0; ci < leftTbl.len; ++ci) {
-            const std::string& column = leftTbl.cols[ci].dataName;
-            replaceQualified(leftPrefix, column, combinedColNames[ci]);
-            replaceQualified(leftTableName, column, combinedColNames[ci]);
-            replaceQualified(resolvedLeft, column, combinedColNames[ci]);
+        for (const LateralLeftRelation& relation : leftRelations) {
+            for (size_t ci = 0; ci < relation.schema.len; ++ci) {
+                const size_t combinedIndex = relation.columnOffset + ci;
+                const std::string& column = relation.schema.cols[ci].dataName;
+                for (const std::string& qualifier :
+                     leftColumnQualifiers[combinedIndex]) {
+                    replaceQualified(qualifier, column,
+                                     combinedColNames[combinedIndex]);
+                }
+            }
         }
         for (size_t ci = 0; ci < rightColNames.size(); ++ci) {
             replaceQualified(alias, rightColNames[ci],
