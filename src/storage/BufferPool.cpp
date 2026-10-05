@@ -202,7 +202,25 @@ void BufferPool::invalidateAll() {
         orphanWaiters_.push_back(&cv);
         cv.wait(lock);
     }
+    // Keep frames with outstanding readers alive just as invalidatePage()
+    // does.  Clearing their pin counts here lets the clock sweep overwrite a
+    // pointer that a caller still holds; its later unpin can then decrement a
+    // different page's pin after the frame has been reused.
+    for (const auto& [pageId, idx] : pageMap_) {
+        Frame& frame = frames_[idx];
+        frame.dirty = false;
+        frame.usageCount = 0;
+        if (frame.pinCount > 0) {
+            orphanedPins_[pageId] = {
+                static_cast<size_t>(frame.pinCount), idx};
+            frame.pageId = kOrphanedPage;
+            frame.pinCount = 0;  // orphanedPins_ now owns the pin count
+        } else {
+            frame.pageId = static_cast<uint32_t>(-1);
+        }
+    }
     for (auto& frame : frames_) {
+        if (frame.pageId == kOrphanedPage) continue;
         frame.pageId = static_cast<uint32_t>(-1);
         frame.dirty = false;
         frame.pinCount = 0;
