@@ -54,19 +54,20 @@ checksum 行；额外字段、尾随行、损坏值均 fail-closed。V3 替换�
 文件 `fsync`、原子 rename 和父目录 `fsync`。
 
 部署或恢复后可在服务停止时执行严格只读的 heap、B+Tree 页、Hash、
-Bloom 与 GIN 索引校验：
+Bloom、GIN 与 BRIN 索引校验：
 
 ```bash
 /path/to/dbms_main -D /srv/dbms-instance --verify-data-checksums
 ```
 
 该命令验证主/分区/TOAST/unlogged init heap，以及 `.idx`/`.idx_*` B+Tree
-索引、`.hidx` Hash、`.bidx` Bloom 和 `.gin` GIN 侧车，包括从 tablespace marker
+索引、`.hidx` Hash、`.bidx` Bloom、`.gin` GIN 和 `.brin` BRIN 侧车，包括从 tablespace marker
 解析的外置文件；诊断定位到索引文件和 heap block。
 统计会分开列出页号绑定的 `0xC552`、旧内容校验 `0xC551` 与无 checksum 的
 zero-marker legacy 页，并单列带 checksum 的 Hash V2/Bloom BLM2/GIN V2 与未校验的
-Hash V1/Bloom BLM1/GIN V1 文件。GIN V2 扫描验证格式头、entry-count 边界与
-CRC32C，但不解析 postings 的完整语义。它不覆盖 GiST/SP-GiST/BRIN 或全部 catalog/metadata，也没有锁机制
+Hash V1/Bloom BLM1/GIN V1/BRIN V1 文件。GIN V2/BRIN V2 扫描验证格式头、
+entry-count 边界与 CRC32C，但不解析 GIN postings 或 BRIN range 的完整语义。
+它不覆盖 GiST/SP-GiST 或全部 catalog/metadata，也没有锁机制
 替代运维侧停服保证，因此不得与 server 并发执行。
 
 新建及 REINDEX 生成的 B+Tree 页另有逐页 CRC32C，并在页面首次载入时校验；
