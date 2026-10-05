@@ -438,6 +438,18 @@ def main():
             damaged_gist_signature.stderr, damaged_gist_signature
         gist_index.write_bytes(original_gist)
 
+        gist_count_payload = bytearray(original_gist[:-4])
+        struct.pack_into("<Q", gist_count_payload, len(GIST_INDEX_MAGIC) + 4,
+                         2**63)
+        gist_count_payload.extend(
+            crc32c(gist_count_payload).to_bytes(4, "little"))
+        gist_index.write_bytes(gist_count_payload)
+        invalid_gist_count = run_verify(cluster, launch)
+        assert invalid_gist_count.returncode == 1, invalid_gist_count
+        assert "invalid checksummed GiST index entry count" in \
+            invalid_gist_count.stderr, invalid_gist_count
+        gist_index.write_bytes(original_gist)
+
         flip_byte(gist_index, len(original_gist) - 5)
         corrupt_gist = run_verify(cluster, launch)
         assert corrupt_gist.returncode == 1, corrupt_gist
