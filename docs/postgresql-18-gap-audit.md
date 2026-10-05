@@ -1,3 +1,5 @@
+2026-10-05 OPT-01 审查：`PlanContext` 加 `buildSelectPlan()` 返回单个 `OpPtr` 计划树，没有可比较的 relation/path 集合或参数化路径；`EquivalenceClass`/`PathKey` 只是轻量 struct。pathkey overload 丢弃 `eqClasses`，识别出可排序 index 后仍保留 `SortOp`（当前实现内有明确 safe-fallback `break`），因此只是未生效的接口而不是 PostgreSQL 式 path planner。`tests/eq_class_pathkey_test.cpp` 只在空表上执行、未断言计划节点或实际有序数据，不能证明索引排序或等价类传播。仅审查、无生产改动；OPT-01 从 unverified 调整为 partial，架构重做仍未实现，详见 `docs/issue-opt-01-path-planner-audit.md`。总账 273：22 complete、165 partial、71 unverified、15 deferred_by_user。
+
 2026-10-05 VAC-03 部分修复，source/test commit `09611ff0`：`VACUUM (ANALYZE)` 原先被接受却走普通 vacuum 路径，不生成/刷新统计信息；`FULL` 选项也可能未触发表重写；`FREEZE` 被静默忽略，事务块内执行亦未拒绝。现在解析 parenthesized/legacy 维护选项，ANALYZE 实际刷新统计、FULL 调用重写路径并显式传播失败，FREEZE 以 `0A000` 拒绝，事务块中的 VACUUM 以 `25001` 拒绝；补充关系不存在、参数和 verbose 摘要处理。`scripts/build.sh`、`python3 tests/legacy_forced_analyze_protocol_e2e_test.py`、`scripts/build_one_test.sh vacuum_full_test`、`git diff --check` 通过；测试覆盖括号及旧式 ANALYZE、`ANALYZE = true`、统计行数/EXPLAIN估算、FREEZE与事务拒绝、FULL 文件收缩及数据保留。完整注册套件和 PG18.6 differential 未跑。VAC-03 仍 partial：FULL 仍非事务性原子 relation swap，crash consistency 未证明；FREEZE 与 VACUUM progress view 未实现，VERBOSE 输出也非完整 PostgreSQL counters。总账 273：22 complete、164 partial、72 unverified、15 deferred_by_user。
 
 2026-10-05 WAL-06 为 SP-GiST sidecar 增加 checksum，source/test commit `068623bc`：新建 `.spgist` 使用固定宽度 RID/IEEE-754 坐标 V2 记录与 CRC32C，在线完整校验后构造查询索引；CRC、格式或记录验证失败时回退 heap，V1 文本仍兼容读取并列为 unchecked。只读 checksum verifier 扫描 cluster/tablespace `.spgist`，报告 checked/unchecked 数，只校验 signature/version/exact count/CRC，不验证点坐标语义或索引拓扑。`specialized_index_dml_test` 覆盖 V1、带旧 CRC 的有效坐标损坏后 heap fallback、畸形 sidecar fallback；`scripts/build.sh`、checksum E2E 的 SP-GiST signature/count/payload corruption、只读快照通过。未跑完整注册套件或 PG18.6 differential。WAL-06 仍 partial：V1 sidecar、catalog/FSM/VM 等 metadata 仍未统一 checksum；enable/disable/rewrite/progress 与离线语义验证未实现；TDE专项仍 deferred。总账 273：22 complete、163 partial、73 unverified、15 deferred_by_user。
@@ -398,7 +400,7 @@
 
 ## 11. 优化器和执行器
 
-- [ ] **OPT-01** 建立 PostgreSQL 式 relation/path/parameterization/equivalence class/pathkey 框架，而不是直接拼单棵计划树。
+- [ ] **OPT-01** 建立 PostgreSQL 式 relation/path/parameterization/equivalence class/pathkey 框架，而不是直接拼单棵计划树。（当前仅有 `PlanContext` 到单一 `OpPtr` 的 builder；`PathKey` overload 保留 Sort 安全回退且忽略 equivalence classes。现有空表测试不验证路径选择，详见 `docs/issue-opt-01-path-planner-audit.md`。）
 - [ ] **OPT-02** 实现 exhaustive/DP join search、GEQO 阈值、outer/semi/anti join constraints 和 bushy plan。
 - [ ] **OPT-03** 完整 predicate implication、constant propagation、equivalence class、join removal、outer join reduction 和 partition pruning。
 - [ ] **OPT-04** 完整统计：采样、null fraction、ndistinct、MCV、histogram、correlation、extended ndistinct/dependencies/MCV、表达式统计。
