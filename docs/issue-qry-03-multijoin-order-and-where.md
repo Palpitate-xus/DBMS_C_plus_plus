@@ -4,7 +4,8 @@ Status: partial. The source/test fixes are local commits `4534b971`,
 `b87d4a19`, `858d6da9`, `0a57fee1`, `e042360b`, `856fe079`
 (ON-conjunction fix, 2026-10-05), `65718c2b` (RIGHT/FULL residual coverage,
 2026-10-05), `fd79875a` (USING/NATURAL output semantics, 2026-10-05), and
-`3fef4f7d` (typed canonical JOIN keys, 2026-10-05).
+`3fef4f7d` (typed canonical JOIN keys, 2026-10-05), and `124bc278`
+(simple scalar expression projections, 2026-10-05).
 
 ## Reproduced behavior
 
@@ -20,6 +21,9 @@ Status: partial. The source/test fixes are local commits `4534b971`,
   list and published no typed structured result. `SELECT a.id ...` returned all
   joined columns, and integer/text field metadata was not available to the
   protocol caller.
+- Multi-table target lists rejected even simple scalar expressions such as
+  `a.id + b.val AS total` with SQLSTATE `0A000` instead of projecting one
+  evaluated result per joined row.
 - It also returned rows in join/input order while silently ignoring ORDER BY,
   LIMIT, and OFFSET. `ORDER BY a.id DESC LIMIT 1` returned both rows.
 - The FROM-chain parser stopped after the 12th JOIN without reporting an
@@ -45,9 +49,12 @@ Status: partial. The source/test fixes are local commits `4534b971`,
   intermediate materialization. Bind WHERE references against the participating
   relation aliases/schema, then evaluate the predicate on the completed join
   result so outer-join NULL extension happens first.
-- Project `*` in FROM order or supported simple column references (including
-  aliases) in target-list order. Publish projected values, the NULL bitmap,
-  output names/types, and command tag as a structured protocol result.
+- Project `*` in FROM order or supported simple column references and
+  unary/binary/literal/cast scalar expressions (including aliases) in
+  target-list order. Evaluate expressions after joins and WHERE against typed
+  qualified/unambiguous row values with the SQL NULL bitmap. Publish projected
+  values, the NULL bitmap, output names/types, and command tag as a structured
+  protocol result.
 - Sort supported column-reference or output-position keys with ASC/DESC and
   NULLS FIRST/LAST, then apply LIMIT/OFFSET. Unsupported projections, sort
   expressions, DISTINCT/GROUP/WINDOW forms fail explicitly rather than being
@@ -110,14 +117,23 @@ Status: partial. The source/test fixes are local commits `4534b971`,
   INNER/LEFT/RIGHT/FULL USING and explicit ON, including retained display
   values and numeric OIDs. This does not establish complete cross-type,
   timestamp, or collation-aware join equality.
+- After `124bc278`, `scripts/build.sh`,
+  `tests/join_type_protocol_e2e_test.py`, and `tests/multijoin_e2e_test.py`
+  passed. A three-table arithmetic target list returned computed integer
+  values with their alias and OID, and `ORDER BY 1` sorted those computed
+  values; a second case confirmed arithmetic over a NULL-extended input remains
+  NULL and can be sorted with `NULLS FIRST`. The former query failed with
+  `0A000`. Function calls, CASE, SRFs, aggregates, and arbitrary expressions
+  remain unsupported in this path.
 - `tests/compat/cases/multijoin_projection_filter.sql` was added, but the
   differential runner refused preflight because the configured reference
   server reports PostgreSQL 17.2 (`170002`) while the runner requires 18.6
   (`180006`); the case did not execute against that reference.
 - The full registered suite and PostgreSQL 18.6 differential were not run.
 
-This does not complete QRY-03 or OPT-02. General target-list expressions,
-qualified star expansion, DISTINCT/GROUP/HAVING/WINDOW, collation-aware and
+This does not complete QRY-03 or OPT-02. General target-list expressions
+(including function calls, CASE and SRFs), qualified star expansion,
+DISTINCT/GROUP/HAVING/WINDOW, collation-aware and
 arbitrary-expression ordering, and arbitrary nested/lateral join semantics
 remain open. OPT-02's DP/exhaustive join search, GEQO threshold, semi/anti
 constraints, and bushy plans remain unimplemented.
