@@ -26,6 +26,8 @@ def main():
             ("INSERT INTO typed_lateral_left VALUES "
              "(1, 'left one'), (2, ''), (4, 'NULL'), (5, NULL), "
              "(NULL, 'null id'), (6, 'quote '' value');"),
+            'CREATE TABLE typed_lateral_quoted_left ("MixedId" INT);',
+            "INSERT INTO typed_lateral_quoted_left VALUES (1), (2);",
             "CREATE TABLE typed_lateral_empty (id INT);",
             "CREATE TABLE typed_lateral_aux (delta INT);",
             "INSERT INTO typed_lateral_aux VALUES (10);",
@@ -114,6 +116,12 @@ def main():
               "CROSS JOIN LATERAL "
               "(SELECT \"OuterAlias\".id + 1 AS next_id) x "
               "WHERE \"OuterAlias\".id = 1;"),
+             [["1", "2"]], [23, 23]),
+            (("SELECT \"OuterAlias\".\"MixedId\", x.next_id "
+              "FROM typed_lateral_quoted_left AS \"OuterAlias\" "
+              "CROSS JOIN LATERAL "
+              "(SELECT \"OuterAlias\".\"MixedId\" + 1 AS next_id) x "
+              "WHERE \"OuterAlias\".\"MixedId\" = 1;"),
              [["1", "2"]], [23, 23]),
             (("SELECT l.id, x.label FROM typed_lateral_left l "
               "LEFT JOIN LATERAL "
@@ -263,6 +271,8 @@ def main():
                     expected_headers = ["id", "delta", "value"]
                 elif "x.first" in sql:
                     expected_headers = ["id", "first", "second"]
+                elif "\"MixedId\"" in sql:
+                    expected_headers = ["MixedId", "next_id"]
                 elif "x.next_id" in sql:
                     expected_headers = ["id", "next_id"]
                 elif "l.payload" in sql:
