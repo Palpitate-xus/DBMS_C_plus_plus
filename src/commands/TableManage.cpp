@@ -32,6 +32,7 @@
 #include "access/GinIndexFormat.h"
 #include "access/IndexChecksum.h"
 #include "access/IndexFileUtil.h"
+#include "access/SPGiSTIndexFormat.h"
 // Full definitions for classes only forward-declared in TableManage.h.
 #include "BPTree.h"
 #include "BufferPool.h"
@@ -13443,17 +13444,34 @@ DBStatus StorageEngine::createSPGiSTIndex(const std::string& dbname,
         return DBStatus::INVALID_VALUE;
 
     auto path = spGiSTIndexPath(dbname, tablename, colname);
-    std::ostringstream out;
+    std::string entryPayload;
+    uint64_t entryCount = 0;
+    bool valuesValid = true;
 
     if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                        const char* data, size_t len) {
         std::string row(data, len);
         std::string val = extractColumnValue(
             row, tbl, colIdx, dbname, true);
-        int64_t rid = encodeRid(pageId, slotId);
-        out << rid << ' ' << val << '\n';
+        if (val.empty()) return;
+        double x = 0.0;
+        double y = 0.0;
+        std::string canonical;
+        if (!normalizePointLiteral(val, canonical, &x, &y)) {
+            valuesValid = false;
+            return;
+        }
+        spgist_index_format::appendEntryPayload(
+            entryPayload, static_cast<uint64_t>(encodeRid(pageId, slotId)),
+            x, y);
+        ++entryCount;
     })) return DBStatus::IO_ERROR;
-    if (!index_file::writeAtomically(path, out.str())) return DBStatus::IO_ERROR;
+    if (!valuesValid) return DBStatus::INVALID_VALUE;
+    if (!index_file::writeAtomically(
+            path,
+            spgist_index_format::encodeV2(entryCount, entryPayload))) {
+        return DBStatus::IO_ERROR;
+    }
     {
         std::lock_guard<std::mutex> lock(spGiSTMutex_);
         spGiSTCache_.erase(dbname + "/" + tablename + "/" + colname);
@@ -13475,6 +13493,139 @@ bool StorageEngine::hasSPGiSTIndex(const std::string& dbname,
                                     const std::string& tablename,
                                     const std::string& colname) const {
     return std::filesystem::exists(spGiSTIndexPath(dbname, tablename, colname));
+}
+
+template <typename Visitor>
+static bool forEachSPGiSTPoint(
+    const std::filesystem::path& path, Visitor&& visit) {
+    using namespace spgist_index_format;
+    std::ifstream input(path, std::ios::binary);
+    if (!input) return false;
+
+    auto readExactly = [&](char* destination, size_t bytes) {
+        if (bytes > static_cast<size_t>(
+                        std::numeric_limits<std::streamsize>::max())) {
+            return false;
+        }
+        input.read(destination, static_cast<std::streamsize>(bytes));
+        return static_cast<size_t>(input.gcount()) == bytes;
+    };
+
+    std::array<char, kMagic.size()> probe{};
+    input.read(probe.data(), static_cast<std::streamsize>(probe.size()));
+    const size_t probed = static_cast<size_t>(input.gcount());
+    const bool checksummed = probed == probe.size() &&
+        std::equal(probe.begin(), probe.end(), kMagic.begin());
+
+    std::unordered_set<int64_t> seenRids;
+    if (checksummed) {
+        std::array<char, sizeof(uint32_t) + sizeof(uint64_t)> header{};
+        if (!readExactly(header.data(), header.size())) return false;
+        const std::string_view headerView(header.data(), header.size());
+        size_t headerOffset = 0;
+        uint32_t version = 0;
+        uint64_t entryCount = 0;
+        if (!readU32(headerView, headerOffset, version) ||
+            version != kVersion ||
+            !readU64(headerView, headerOffset, entryCount)) {
+            return false;
+        }
+
+        input.clear();
+        input.seekg(0, std::ios::end);
+        const std::streampos end = input.tellg();
+        if (end < 0) return false;
+        const auto signedBytes = static_cast<std::streamoff>(end);
+        if (signedBytes < 0) return false;
+        const uint64_t fileBytes = static_cast<uint64_t>(signedBytes);
+        if (fileBytes < kHeaderBytes + kChecksumBytes) return false;
+        const uint64_t payloadBytes = fileBytes - kChecksumBytes;
+        const uint64_t entryPayloadBytes = payloadBytes - kHeaderBytes;
+        if (entryPayloadBytes % kEntryBytes != 0 ||
+            entryCount != entryPayloadBytes / kEntryBytes) {
+            return false;
+        }
+
+        std::array<char, kChecksumBytes> checksumBytes{};
+        input.seekg(static_cast<std::streamoff>(payloadBytes), std::ios::beg);
+        if (!input || !readExactly(checksumBytes.data(),
+                                   checksumBytes.size())) {
+            return false;
+        }
+        size_t checksumOffset = 0;
+        uint32_t storedChecksum = 0;
+        if (!readU32(std::string_view(checksumBytes.data(),
+                                      checksumBytes.size()),
+                     checksumOffset, storedChecksum)) {
+            return false;
+        }
+
+        input.clear();
+        input.seekg(0, std::ios::beg);
+        if (!input) return false;
+        uint64_t remainingForChecksum = payloadBytes;
+        uint32_t checksumState = 0xFFFFFFFFu;
+        std::array<char, 64 * 1024> chunk{};
+        while (remainingForChecksum > 0) {
+            const size_t amount = static_cast<size_t>(
+                std::min<uint64_t>(remainingForChecksum, chunk.size()));
+            if (!readExactly(chunk.data(), amount)) return false;
+            checksumState = index_checksum::crc32cUpdate(
+                checksumState, chunk.data(), amount);
+            remainingForChecksum -= amount;
+        }
+        if (index_checksum::crc32cFinish(checksumState) != storedChecksum)
+            return false;
+
+        input.clear();
+        input.seekg(static_cast<std::streamoff>(kHeaderBytes), std::ios::beg);
+        if (!input) return false;
+        for (uint64_t i = 0; i < entryCount; ++i) {
+            std::array<char, kEntryBytes> fixed{};
+            if (!readExactly(fixed.data(), fixed.size())) return false;
+            const std::string_view fixedView(fixed.data(), fixed.size());
+            size_t fixedOffset = 0;
+            uint64_t rid = 0;
+            uint64_t xBits = 0;
+            uint64_t yBits = 0;
+            if (!readU64(fixedView, fixedOffset, rid) ||
+                !readU64(fixedView, fixedOffset, xBits) ||
+                !readU64(fixedView, fixedOffset, yBits) ||
+                rid == 0 || rid > static_cast<uint64_t>(
+                    std::numeric_limits<int64_t>::max())) {
+                return false;
+            }
+            const int64_t signedRid = static_cast<int64_t>(rid);
+            const double x = bitsDouble(xBits);
+            const double y = bitsDouble(yBits);
+            if (!seenRids.insert(signedRid).second ||
+                !std::isfinite(x) || !std::isfinite(y)) {
+                return false;
+            }
+            visit(signedRid, x, y);
+        }
+        return true;
+    }
+
+    input.clear();
+    input.seekg(0, std::ios::beg);
+    if (!input) return false;
+    std::string line;
+    while (std::getline(input, line)) {
+        std::stringstream parser(line);
+        int64_t rid = 0;
+        std::string point;
+        if (!(parser >> rid >> point)) return false;
+        parser >> std::ws;
+        if (!parser.eof() || rid <= 0 || !seenRids.insert(rid).second)
+            return false;
+        double x = 0.0;
+        double y = 0.0;
+        std::string canonical;
+        if (!normalizePointLiteral(point, canonical, &x, &y)) return false;
+        visit(rid, x, y);
+    }
+    return input.eof() && !input.bad();
 }
 
 std::vector<int64_t> StorageEngine::spGiSTSearch(const std::string& dbname,
@@ -13577,33 +13728,11 @@ std::vector<int64_t> StorageEngine::spGiSTSearch(const std::string& dbname,
             idx = it->second.get();
         } else {
             auto newIdx = std::make_unique<SPGiSTIndex>(-1e9, -1e9, 1e9, 1e9);
-            std::ifstream in(path);
-            if (!in) return result;
-            bool valid = true;
-            std::unordered_set<int64_t> seenRids;
-            std::string line;
-            while (std::getline(in, line)) {
-                std::stringstream ss(line);
-                int64_t rid = 0;
-                std::string point;
-                if (!(ss >> rid >> point)) {
-                    valid = false;
-                    break;
-                }
-                ss >> std::ws;
-                if (!ss.eof() || !seenRids.insert(rid).second) {
-                    valid = false;
-                    break;
-                }
-                double x = 0.0, y = 0.0;
-                std::string canonical;
-                if (!normalizePointLiteral(point, canonical, &x, &y)) {
-                    valid = false;
-                    break;
-                }
-                newIdx->insert(x, y, rid);
-            }
-            if (!valid || in.bad()) return scanHeap();
+            const bool valid = forEachSPGiSTPoint(
+                path, [&](int64_t rid, double x, double y) {
+                    newIdx->insert(x, y, rid);
+                });
+            if (!valid) return scanHeap();
             idx = newIdx.get();
             spGiSTCache_[cacheKey] = std::move(newIdx);
         }

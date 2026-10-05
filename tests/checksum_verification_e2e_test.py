@@ -172,6 +172,21 @@ def write_gist_index(path, version=2):
     path.write_bytes(payload + crc32c(payload).to_bytes(4, "little"))
 
 
+SPGIST_INDEX_MAGIC = b"\x00DBMSP\x00" + b"2"
+
+
+def write_spgist_index(path, version=2):
+    if version == 1:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("1 7,7\n", encoding="utf-8")
+        return
+    assert version == 2
+    payload = bytearray(SPGIST_INDEX_MAGIC + struct.pack("<IQ", 2, 1))
+    payload.extend(struct.pack("<Qdd", 1, 7.0, 7.0))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(payload + crc32c(payload).to_bytes(4, "little"))
+
+
 def heap_page(page_id, layout_version=5):
     page = bytearray(PAGE_SIZE)
     page_id_bound = layout_version == 5
@@ -301,6 +316,8 @@ def main():
         write_brin_index(brin_index)
         gist_index = database / "accounts_amount.gist"
         write_gist_index(gist_index)
+        spgist_index = database / "accounts_location.spgist"
+        write_spgist_index(spgist_index)
         legacy_heap = database / "legacy.dt"
         write_heap(legacy_heap, 2, layout_version=4)
         key = bytes.fromhex("11" * 32)
@@ -329,6 +346,8 @@ def main():
         write_brin_index(external_legacy_brin, 1)
         external_legacy_gist = external / "app" / "ledger_amount.gist"
         write_gist_index(external_legacy_gist, 1)
+        external_legacy_spgist = external / "app" / "ledger_location.spgist"
+        write_spgist_index(external_legacy_spgist, 1)
 
         before_cluster = snapshot_tree(cluster)
         before_external = snapshot_tree(external)
@@ -341,6 +360,7 @@ def main():
         assert "GIN index scan completed" in clean.stdout, clean
         assert "GiST index scan completed" in clean.stdout, clean
         assert "BRIN index scan completed" in clean.stdout, clean
+        assert "SP-GiST index scan completed" in clean.stdout, clean
         assert "files=5" in clean.stdout and "blocks=9" in clean.stdout, clean
         assert "identity-bound-blocks=3" in clean.stdout, clean
         assert "legacy-identity-unbound-blocks=1" in clean.stdout, clean
@@ -364,6 +384,9 @@ def main():
         assert "gist-index-files=2" in clean.stdout, clean
         assert "checksummed-gist-index-files=1" in clean.stdout, clean
         assert "unchecked-legacy-gist-index-files=1" in clean.stdout, clean
+        assert "spgist-index-files=2" in clean.stdout, clean
+        assert "checksummed-spgist-index-files=1" in clean.stdout, clean
+        assert "unchecked-legacy-spgist-index-files=1" in clean.stdout, clean
         assert snapshot_tree(cluster) == before_cluster
         assert snapshot_tree(external) == before_external
         assert list(launch.iterdir()) == []
@@ -457,6 +480,37 @@ def main():
         assert "GiST index checksum mismatch" in corrupt_gist.stderr, \
             corrupt_gist
         gist_index.write_bytes(original_gist)
+
+        original_spgist = spgist_index.read_bytes()
+        flip_byte(spgist_index, 0)
+        damaged_spgist_signature = run_verify(cluster, launch)
+        assert damaged_spgist_signature.returncode == 1, damaged_spgist_signature
+        assert "app/accounts_location.spgist" in \
+            damaged_spgist_signature.stderr, damaged_spgist_signature
+        assert "invalid or truncated SP-GiST index signature" in \
+            damaged_spgist_signature.stderr, damaged_spgist_signature
+        spgist_index.write_bytes(original_spgist)
+
+        spgist_count_payload = bytearray(original_spgist[:-4])
+        struct.pack_into("<Q", spgist_count_payload,
+                         len(SPGIST_INDEX_MAGIC) + 4, 2)
+        spgist_count_payload.extend(
+            crc32c(spgist_count_payload).to_bytes(4, "little"))
+        spgist_index.write_bytes(spgist_count_payload)
+        invalid_spgist_count = run_verify(cluster, launch)
+        assert invalid_spgist_count.returncode == 1, invalid_spgist_count
+        assert "invalid checksummed SP-GiST index entry count" in \
+            invalid_spgist_count.stderr, invalid_spgist_count
+        spgist_index.write_bytes(original_spgist)
+
+        flip_byte(spgist_index, len(original_spgist) - 5)
+        corrupt_spgist = run_verify(cluster, launch)
+        assert corrupt_spgist.returncode == 1, corrupt_spgist
+        assert "app/accounts_location.spgist" in corrupt_spgist.stderr, \
+            corrupt_spgist
+        assert "SP-GiST index checksum mismatch" in corrupt_spgist.stderr, \
+            corrupt_spgist
+        spgist_index.write_bytes(original_spgist)
 
         original_external = external_heap.read_bytes()
         flip_byte(external_heap, PAGE_SIZE + 200)

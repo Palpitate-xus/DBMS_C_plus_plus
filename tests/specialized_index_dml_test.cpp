@@ -1,6 +1,8 @@
 #include "Config.h"
 #include "TableManage.h"
 #include "access/BPTree.h"
+#include "access/GiSTIndexFormat.h"
+#include "access/SPGiSTIndexFormat.h"
 #include "catalog/type_registry.h"
 
 #include <algorithm>
@@ -8,7 +10,9 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <map>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -71,15 +75,28 @@ void assertTokenAbsent(StorageEngine& engine, const std::string& token) {
 }
 
 bool gistSidecarContains(const std::string& value) {
-    std::ifstream input(
-        fs::path(kDatabase) / "items_score.gist");
+    std::ifstream input(fs::path(kDatabase) / "items_score.gist",
+                        std::ios::binary);
+    assert(input.good());
+    const std::string contents{std::istreambuf_iterator<char>(input),
+                               std::istreambuf_iterator<char>()};
+    assert(!input.bad());
+    std::vector<gist_index_format::Entry> entries;
+    if (gist_index_format::hasMagic(contents)) {
+        assert(gist_index_format::decodeV2(contents, entries));
+        return std::any_of(entries.begin(), entries.end(),
+            [&](const auto& entry) {
+                return entry.low == value || entry.high == value;
+            });
+    }
+    std::istringstream legacy(contents);
     int64_t rid = -1;
     std::string low;
     std::string high;
-    while (input >> rid >> low >> high) {
+    while (legacy >> rid >> low >> high) {
         if (low == value || high == value) return true;
     }
-    assert(input.eof());
+    assert(legacy.eof());
     return false;
 }
 
@@ -369,6 +386,77 @@ void assertRecoveredSidecars(StorageEngine& engine) {
 void damageSPGiSTAndAssertHeapFallback() {
     const fs::path sidecar =
         fs::path(kDatabase) / "items_location.spgist";
+    std::string original;
+    {
+        std::ifstream input(sidecar, std::ios::binary);
+        assert(input.good());
+        original.assign(std::istreambuf_iterator<char>(input),
+                        std::istreambuf_iterator<char>());
+        assert(!input.bad());
+    }
+    std::vector<spgist_index_format::Entry> entries;
+    assert(spgist_index_format::decodeV2(original, entries));
+    int64_t rid = -1;
+    {
+        StorageEngine engine;
+        rid = ridFor(engine, "1");
+    }
+
+    // V1 text sidecars remain readable after new writes move to V2.
+    {
+        std::ofstream output(sidecar, std::ios::binary | std::ios::trunc);
+        for (const auto& entry : entries) {
+            output << entry.rid << ' ' << entry.x << ',' << entry.y << '\n';
+        }
+        assert(output.good());
+    }
+    {
+        StorageEngine engine;
+        assert(containsRid(engine.spGiSTSearch(
+                               kDatabase, kTable, "location", "=", "3,3"),
+                           rid));
+    }
+    {
+        std::ofstream output(sidecar, std::ios::binary | std::ios::trunc);
+        output.write(original.data(),
+                     static_cast<std::streamsize>(original.size()));
+        assert(output.good());
+    }
+
+    bool changed = false;
+    for (auto& entry : entries) {
+        if (entry.rid == static_cast<uint64_t>(rid)) {
+            assert(entry.x == 3.0 && entry.y == 3.0);
+            entry.x = 33.0;
+            entry.y = 33.0;
+            changed = true;
+            break;
+        }
+    }
+    assert(changed);
+    std::string corrupt = spgist_index_format::encodeV2(entries);
+    assert(corrupt.size() == original.size());
+    std::copy(original.end() - spgist_index_format::kChecksumBytes,
+              original.end(),
+              corrupt.end() - spgist_index_format::kChecksumBytes);
+    std::vector<spgist_index_format::Entry> rejected;
+    assert(!spgist_index_format::decodeV2(corrupt, rejected));
+    {
+        std::ofstream output(sidecar, std::ios::binary | std::ios::trunc);
+        output.write(corrupt.data(),
+                     static_cast<std::streamsize>(corrupt.size()));
+        assert(output.good());
+    }
+
+    // A plausible, finite coordinate mutation with the old CRC must not
+    // produce a false-negative lookup; a cold cache should fall back to heap.
+    {
+        StorageEngine engine;
+        assert(containsRid(engine.spGiSTSearch(
+                               kDatabase, kTable, "location", "=", "3,3"),
+                           rid));
+    }
+
     {
         std::ofstream output(sidecar, std::ios::binary | std::ios::trunc);
         output << "interrupted quadtree replacement";
@@ -379,10 +467,10 @@ void damageSPGiSTAndAssertHeapFallback() {
     // generation marker. A malformed sidecar must not turn a valid point
     // lookup into an empty result.
     StorageEngine engine;
-    const int64_t rid = ridFor(engine, "1");
+    const int64_t malformedRid = ridFor(engine, "1");
     assert(containsRid(engine.spGiSTSearch(
                            kDatabase, kTable, "location", "=", "3,3"),
-                       rid));
+                       malformedRid));
     std::cout << "[SPECIALIZED INDEX] malformed SP-GiST heap fallback OK\n";
 }
 
