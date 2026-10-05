@@ -13055,6 +13055,7 @@ static std::string processDerivedTables(const std::string& sql, Session& s,
                                         bool& failed) {
     std::string result = sql;
     int derivedCount = 0;
+    size_t searchFrom = 0;
     failed = false;
 
     auto findDerivedStart = [](const std::string& text, size_t start = 0) {
@@ -13066,7 +13067,7 @@ static std::string processDerivedTables(const std::string& sql, Session& s,
     };
 
     while (true) {
-        size_t parenStart = findDerivedStart(result);
+        size_t parenStart = findDerivedStart(result, searchFrom);
         if (parenStart == std::string::npos) break;
         // A derived table must be preceded by FROM / JOIN / comma / lateral,
         // otherwise the "(select" belongs to a scalar or predicate subquery
@@ -13086,39 +13087,21 @@ static std::string processDerivedTables(const std::string& sql, Session& s,
                 }
             }
             if (!fromCtx) {
-                // Not a FROM item: skip this occurrence to avoid an
-                // infinite loop.
-                parenStart = findDerivedStart(result, parenStart + 1);
-                if (parenStart == std::string::npos) break;
-                // Re-check the new occurrence's context once; if still not
-                // FROM, give up this pass (the outer SELECT machinery will
-                // handle the subquery).
-                std::string before2 = trim(result.substr(0, parenStart));
-                std::string before2Lower;
-                for (char ch : before2) before2Lower += static_cast<char>(tolower(static_cast<unsigned char>(ch)));
-                bool fromCtx2 = false;
-                for (const char* kw : {" from", " join", " cross", " inner",
-                                       " left", " right", " full", " lateral", ","}) {
-                    size_t klen = strlen(kw);
-                    if (before2Lower.size() >= klen &&
-                        before2Lower.compare(before2Lower.size() - klen, klen, kw) == 0) {
-                        fromCtx2 = true;
-                        break;
-                    }
-                }
-                if (!fromCtx2) break;
+                // Not a FROM item: advance past it so later FROM subqueries
+                // are still considered without repeatedly revisiting this
+                // scalar/predicate occurrence.
+                searchFrom = parenStart + 1;
+                continue;
             }
         }
         // Skip LATERAL subqueries — they are handled dynamically per left-row
         std::string beforeParen = trim(result.substr(0, parenStart));
         if (beforeParen.size() >= 7 && beforeParen.substr(beforeParen.size() - 7) == "lateral") {
-            // Move past this occurrence to avoid infinite loop
-            parenStart = findDerivedStart(result, parenStart + 1);
-            if (parenStart == std::string::npos) break;
-            beforeParen = trim(result.substr(0, parenStart));
-            if (beforeParen.size() >= 7 && beforeParen.substr(beforeParen.size() - 7) == "lateral") {
-                continue;
-            }
+            // Keep searching after this item. Consecutive LATERAL items
+            // must each advance the cursor; otherwise the second item keeps
+            // being rediscovered and the backend spins at 100% CPU.
+            searchFrom = parenStart + 1;
+            continue;
         }
         size_t parenEnd = findMatchingParen(result, parenStart);
         if (parenEnd == std::string::npos) break;
@@ -13249,6 +13232,7 @@ static std::string processDerivedTables(const std::string& sql, Session& s,
 
         // Replace the derived table definition with temp table name
         result = result.substr(0, parenStart) + tmpName + result.substr(aliasExprStart);
+        searchFrom = 0;
     }
 
     return result;
@@ -13824,6 +13808,7 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
     failed = false;
     std::string result = sql;
     int lateralCount = 0;
+    std::set<std::string> lateralTempNames;
 
     while (true) {
         size_t latPos = findKeywordOutsideQuotes(result, "lateral");
@@ -14371,6 +14356,7 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
             allRowsStructured ? &allStructuredRows : nullptr,
             allRowsStructured ? &allStructuredNulls : nullptr);
         if (tmpName.empty()) break;
+        lateralTempNames.insert(tmpName);
         lateralCount = counter;
 
         // The temporary relation already contains the correctly paired left
@@ -14383,6 +14369,37 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
             suffix.insert(suffix.begin(), ' ');
         }
         result = result.substr(0, fromPos + 4) + " " + tmpName + suffix;
+        // A preceding LATERAL item has already rewritten its alias-qualified
+        // references to synthetic column names. When that materialized row
+        // becomes the left input of another LATERAL item, carry those names
+        // forward to this item's new combined schema instead of accidentally
+        // resolving (for example) the old `__lat_r_0` as the new right value.
+        for (const LateralLeftRelation& relation : leftRelations) {
+            if (!lateralTempNames.count(relation.tableName)) continue;
+            for (size_t ci = 0; ci < relation.schema.len; ++ci) {
+                const size_t combinedIndex = relation.columnOffset + ci;
+                const std::string& oldName = relation.schema.cols[ci].dataName;
+                if (oldName.rfind("__lat_", 0) != 0) continue;
+                size_t pos = 0;
+                while ((pos = findTextOutsideQuotes(result, oldName, pos)) !=
+                       std::string::npos) {
+                    const size_t after = pos + oldName.size();
+                    const bool validLeftBoundary = pos == 0 ||
+                        (!isalnum(static_cast<unsigned char>(result[pos - 1])) &&
+                         result[pos - 1] != '_' && result[pos - 1] != '.');
+                    const bool validRightBoundary = after == result.size() ||
+                        (!isalnum(static_cast<unsigned char>(result[after])) &&
+                         result[after] != '_' && result[after] != '.');
+                    if (!validLeftBoundary || !validRightBoundary) {
+                        pos = after;
+                        continue;
+                    }
+                    result.replace(pos, oldName.size(),
+                                   combinedColNames[combinedIndex]);
+                    pos += combinedColNames[combinedIndex].size();
+                }
+            }
+        }
         auto replaceQualified = [&](const std::string& qualifier,
                                     const std::string& column,
                                     const std::string& replacement) {

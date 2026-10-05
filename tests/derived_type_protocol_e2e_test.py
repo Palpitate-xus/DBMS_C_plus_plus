@@ -103,6 +103,12 @@ def main():
               "INNER JOIN LATERAL (SELECT 5 AS value) x "
               "ON l.id = 1 AND b.delta = 10;"),
              [["1", "10", "5"]], [23, 23, 23]),
+            (("SELECT l.id, x.first, y.second "
+              "FROM typed_lateral_left l "
+              "CROSS JOIN LATERAL (SELECT l.id + 1 AS first) x "
+              "CROSS JOIN LATERAL (SELECT x.first + 1 AS second) y "
+              "WHERE l.id < 3 ORDER BY l.id;"),
+             [["1", "2", "3"], ["2", "3", "4"]], [23, 23, 23]),
             (("SELECT l.id, x.label FROM typed_lateral_left l "
               "LEFT JOIN LATERAL "
               "(SELECT label FROM typed_lateral_right WHERE id = l.id) x "
@@ -249,6 +255,8 @@ def main():
                     expected_headers = ["id", "delta", "total"]
                 elif "x.value" in sql:
                     expected_headers = ["id", "delta", "value"]
+                elif "x.first" in sql:
+                    expected_headers = ["id", "first", "second"]
                 elif "l.payload" in sql:
                     expected_headers = ["id", "payload", "label"]
                 elif "x.label" in sql:
