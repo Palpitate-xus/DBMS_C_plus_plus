@@ -79,6 +79,14 @@ def main():
               ["4", "NULL", "NULL"], ["5", None, None]],
              [23, 25, 25]),
             (("SELECT l.id, x.label FROM typed_lateral_left l "
+              "CROSS JOIN LATERAL "
+              "(SELECT r.label || payload AS label "
+              "FROM typed_lateral_right r "
+              "WHERE r.id = l.id AND payload <> 'skip') x "
+              "ORDER BY l.id, x.label;"),
+             [["1", "right oneleft one"], ["1", "right unoleft one"],
+              ["2", ""], ["4", "NULLNULL"]], [23, 25]),
+            (("SELECT l.id, x.label FROM typed_lateral_left l "
               "LEFT JOIN LATERAL "
               "(SELECT label FROM typed_lateral_right WHERE id = l.id) x "
               "ON true ORDER BY l.id NULLS LAST, x.label NULLS FIRST;"),
@@ -220,8 +228,10 @@ def main():
                     expected_headers = ["id", "out"]
                 elif "x.ok" in sql:
                     expected_headers = ["id", "ok"]
-                elif "payload" in sql:
+                elif "l.payload" in sql:
                     expected_headers = ["id", "payload", "label"]
+                elif "x.label" in sql:
+                    expected_headers = ["id", "label"]
                 else:
                     expected_headers = ["id", "label"]
                 assert headers == expected_headers, (sql, headers)

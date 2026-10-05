@@ -13262,7 +13262,7 @@ static std::string processDerivedTables(const std::string& sql, Session& s,
 // of a FROM-less lateral SELECT. A SELECT with its own FROM is left to normal
 // local-column resolution, where unqualified local names must keep precedence.
 static void substituteLateralBareScalarTargets(
-    std::string& selectSql, const TableSchema& leftSchema,
+    std::string& selectSql, Session& s, const TableSchema& leftSchema,
     const std::vector<std::string>& outerValues,
     const std::vector<bool>& outerNulls) {
     const std::string lower = toLower(selectSql);
@@ -13270,7 +13270,56 @@ static void substituteLateralBareScalarTargets(
     if (selectPos == std::string::npos ||
         !trim(selectSql.substr(0, selectPos)).empty()) return;
     const size_t fromPos = findTopLevelKeyword(lower, "from", selectPos + 6);
-    if (fromPos != std::string::npos) return;
+    std::set<std::string> localColumnNames = {
+        "ctid", "tableoid", "xmin", "xmax", "cmin", "cmax"
+    };
+    if (fromPos != std::string::npos) {
+        dbms::SQLParser parser;
+        const auto parsed = parser.parse(selectSql);
+        const auto* parsedSelect = parsed.success
+            ? dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()) : nullptr;
+        if (!parsedSelect || !parsedSelect->fromClause ||
+            !parsedSelect->ctes.empty() ||
+            parsedSelect->setOp != dbms::SetOp::None ||
+            parsedSelect->setOpLhs || parsedSelect->setOpRhs) return;
+
+        bool localScopeKnown = true;
+        std::function<void(const dbms::FromItem*)> collectLocalColumns =
+            [&](const dbms::FromItem* item) {
+            if (!item || !localScopeKnown) {
+                localScopeKnown = false;
+                return;
+            }
+            switch (item->type) {
+                case dbms::FromItem::Type::Table: {
+                    const std::string resolved =
+                        resolveTableName(s, item->tableName);
+                    if (resolved.empty() ||
+                        !g_engine.tableExists(s.currentDB, resolved)) {
+                        localScopeKnown = false;
+                        return;
+                    }
+                    const TableSchema schema =
+                        g_engine.getTableSchema(s.currentDB, resolved);
+                    for (size_t ci = 0; ci < schema.len; ++ci)
+                        localColumnNames.insert(schema.cols[ci].dataName);
+                    return;
+                }
+                case dbms::FromItem::Type::Join:
+                    collectLocalColumns(item->left.get());
+                    collectLocalColumns(item->right.get());
+                    return;
+                case dbms::FromItem::Type::Subquery:
+                case dbms::FromItem::Type::Function:
+                    // Their output names are not available from base-table
+                    // schemas. Do not risk capturing a local name as outer.
+                    localScopeKnown = false;
+                    return;
+            }
+        };
+        collectLocalColumns(parsedSelect->fromClause.get());
+        if (!localScopeKnown) return;
+    }
 
     size_t listStart = selectPos + 6;
     while (listStart < selectSql.size() &&
@@ -13299,7 +13348,7 @@ static void substituteLateralBareScalarTargets(
     auto findOuterColumn = [&](const std::string& name) {
         size_t found = leftSchema.len;
         for (size_t ci = 0; ci < leftSchema.len; ++ci) {
-            if (toLower(leftSchema.cols[ci].dataName) != name) continue;
+            if (leftSchema.cols[ci].dataName != name) continue;
             if (found != leftSchema.len) return leftSchema.len;
             found = ci;
         }
@@ -13486,7 +13535,7 @@ static void substituteLateralBareScalarTargets(
         for (const std::string& name : bareReferences) {
             // These SQL special values are not column references even in a
             // FROM-less SELECT. Quoted identifiers remain untouched below.
-            if (isSpecialValue(name)) continue;
+            if (isSpecialValue(name) || localColumnNames.count(name)) continue;
             const size_t columnIndex = findOuterColumn(name);
             if (columnIndex == leftSchema.len) continue;
             std::string literal = makeOuterLiteral(columnIndex);
@@ -13592,7 +13641,8 @@ static void substituteLateralBareScalarTargets(
             });
         const size_t columnIndex = isBareIdentifier
             ? (isSpecialValue(bareName) ? leftSchema.len
-                                        : findOuterColumn(bareName))
+                : localColumnNames.count(bareName) ? leftSchema.len
+                                                   : findOuterColumn(bareName))
             : leftSchema.len;
         if (columnIndex != leftSchema.len) {
             std::string literal = makeOuterLiteral(columnIndex);
@@ -14001,7 +14051,7 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
                 }
             }
             substituteLateralBareScalarTargets(
-                replacedSql, leftTbl, outerValues, outerNulls);
+                replacedSql, s, leftTbl, outerValues, outerNulls);
             std::vector<std::string> rowColNames;
             std::vector<std::string> rowColTypes;
             std::vector<std::vector<std::string>> rowStructuredRows;
@@ -14213,7 +14263,7 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
                 }
             }
             substituteLateralBareScalarTargets(
-                probeSql, leftTbl, nullOuterValues, nullOuterColumns);
+                probeSql, s, leftTbl, nullOuterValues, nullOuterColumns);
             std::vector<std::vector<std::string>> probeRows;
             std::vector<std::vector<bool>> probeNulls;
             bool probeStructured = false;
