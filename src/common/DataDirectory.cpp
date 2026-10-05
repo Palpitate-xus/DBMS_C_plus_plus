@@ -1,6 +1,8 @@
 #include "DataDirectory.h"
 
 #include "access/BPTreeFormat.h"
+#include "access/HashIndexFormat.h"
+#include "access/IndexChecksum.h"
 #include "access/IndexFileUtil.h"
 #include "common/Config.h"
 #include "storage/DataFileHeader.h"
@@ -9,6 +11,7 @@
 #include "storage/WAL.h"
 #include "interfaces/dbms_defs.h"
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <chrono>
@@ -497,6 +500,10 @@ bool hasBTreeIndexSuffix(const std::filesystem::path& path) {
            composite + std::strlen(".idx_") < name.size();
 }
 
+bool hasHashIndexSuffix(const std::filesystem::path& path) {
+    return path.filename().extension() == ".hidx";
+}
+
 std::string displayVerificationPath(const std::filesystem::path& root,
                                     const std::filesystem::path& path) {
     const auto relative = path.lexically_relative(root);
@@ -582,6 +589,12 @@ struct IndexVerificationStats {
     uint64_t pageBoundPages = 0;
     uint64_t contentOnlyPages = 0;
     uint64_t uncheckedPages = 0;
+};
+
+struct HashIndexVerificationStats {
+    uint64_t files = 0;
+    uint64_t checksumFiles = 0;
+    uint64_t uncheckedLegacyFiles = 0;
 };
 
 bool loadVerificationKey(const std::filesystem::path& root,
@@ -815,6 +828,140 @@ bool collectBTreeFiles(const std::filesystem::path& scanRoot,
             ": " + ec.message();
         return false;
     }
+    return true;
+}
+
+bool collectHashIndexFiles(const std::filesystem::path& scanRoot,
+                           std::set<std::filesystem::path>& files,
+                           std::string& error) {
+    std::error_code ec;
+    std::filesystem::recursive_directory_iterator iterator(scanRoot, ec);
+    if (ec) {
+        error = "could not enumerate checksum root " + scanRoot.string() +
+            ": " + ec.message();
+        return false;
+    }
+    const std::filesystem::recursive_directory_iterator end;
+    for (; iterator != end; iterator.increment(ec)) {
+        if (ec) {
+            error = "could not enumerate checksum root " + scanRoot.string() +
+                ": " + ec.message();
+            return false;
+        }
+        const auto path = iterator->path();
+        if (!hasHashIndexSuffix(path)) continue;
+        const auto status = iterator->symlink_status(ec);
+        if (ec || status.type() != std::filesystem::file_type::regular) {
+            error = "hash index is not a regular file: " + path.string();
+            return false;
+        }
+        files.insert(std::filesystem::weakly_canonical(path, ec));
+        if (ec) {
+            error = "could not resolve hash index: " + path.string();
+            return false;
+        }
+    }
+    if (ec) {
+        error = "could not enumerate checksum root " + scanRoot.string() +
+            ": " + ec.message();
+        return false;
+    }
+    return true;
+}
+
+bool verifyHashIndex(const std::filesystem::path& root,
+                     const std::filesystem::path& path,
+                     HashIndexVerificationStats& stats,
+                     std::string& error) {
+    using namespace hash_index_format;
+    const std::string shown = displayVerificationPath(root, path);
+    ReadOnlyDescriptor data(path);
+    if (data.get() < 0) {
+        error = shown + ": could not open hash index read-only: " +
+            std::strerror(errno);
+        return false;
+    }
+    struct stat status {};
+    constexpr uint64_t headerBytes =
+        sizeof(uint32_t) * 2 + sizeof(uint64_t);
+    if (::fstat(data.get(), &status) != 0 || !S_ISREG(status.st_mode) ||
+        status.st_size < 0 ||
+        static_cast<uint64_t>(status.st_size) < headerBytes) {
+        error = shown + ": truncated or invalid hash index file";
+        return false;
+    }
+
+    std::array<char, headerBytes> header{};
+    if (!readExactlyAt(data.get(), header.data(), header.size(), 0)) {
+        error = shown + ": short read of hash index header";
+        return false;
+    }
+    uint32_t magic = 0;
+    uint32_t version = 0;
+    uint64_t count = 0;
+    size_t headerOffset = 0;
+    std::memcpy(&magic, header.data() + headerOffset, sizeof(magic));
+    headerOffset += sizeof(magic);
+    std::memcpy(&version, header.data() + headerOffset, sizeof(version));
+    headerOffset += sizeof(version);
+    std::memcpy(&count, header.data() + headerOffset, sizeof(count));
+    if (magic != kMagic || count > kMaxEntries ||
+        (version != kLegacyVersion && version != kChecksumVersion)) {
+        error = shown + ": invalid hash index header";
+        return false;
+    }
+
+    const uint64_t fileBytes = static_cast<uint64_t>(status.st_size);
+    if (version == kLegacyVersion) {
+        if (count > (fileBytes - headerBytes) /
+                        (sizeof(uint64_t) * 2)) {
+            error = shown + ": truncated legacy hash index";
+            return false;
+        }
+        ++stats.uncheckedLegacyFiles;
+        ++stats.files;
+        return true;
+    }
+
+    if (fileBytes < headerBytes + kChecksumBytes) {
+        error = shown + ": truncated checksummed hash index";
+        return false;
+    }
+    const uint64_t payloadBytes = fileBytes - kChecksumBytes;
+    if (count > (payloadBytes - headerBytes) /
+                    (sizeof(uint64_t) * 2)) {
+        error = shown + ": invalid checksummed hash index count";
+        return false;
+    }
+    uint32_t storedChecksum = 0;
+    if (!readExactlyAt(data.get(), &storedChecksum, sizeof(storedChecksum),
+                       static_cast<off_t>(payloadBytes))) {
+        error = shown + ": short read of hash index checksum";
+        return false;
+    }
+
+    uint64_t remaining = payloadBytes;
+    off_t position = 0;
+    uint32_t checksumState = 0xFFFFFFFFu;
+    std::array<char, 64 * 1024> chunk{};
+    while (remaining > 0) {
+        const size_t amount = static_cast<size_t>(
+            std::min<uint64_t>(remaining, chunk.size()));
+        if (!readExactlyAt(data.get(), chunk.data(), amount, position)) {
+            error = shown + ": short read while verifying hash index checksum";
+            return false;
+        }
+        checksumState = index_checksum::crc32cUpdate(
+            checksumState, chunk.data(), amount);
+        position += static_cast<off_t>(amount);
+        remaining -= amount;
+    }
+    if (index_checksum::crc32cFinish(checksumState) != storedChecksum) {
+        error = shown + ": hash index checksum mismatch";
+        return false;
+    }
+    ++stats.checksumFiles;
+    ++stats.files;
     return true;
 }
 
@@ -1133,9 +1280,11 @@ bool verifyHeapDataChecksums(const std::filesystem::path& root,
 
     std::set<std::filesystem::path> heapFiles;
     std::set<std::filesystem::path> btreeFiles;
+    std::set<std::filesystem::path> hashIndexFiles;
     for (const auto& scanRoot : scanRoots) {
         if (!collectHeapFiles(scanRoot, heapFiles, error)) return false;
         if (!collectBTreeFiles(scanRoot, btreeFiles, error)) return false;
+        if (!collectHashIndexFiles(scanRoot, hashIndexFiles, error)) return false;
     }
 
     HeapVerificationStats stats;
@@ -1146,8 +1295,12 @@ bool verifyHeapDataChecksums(const std::filesystem::path& root,
     for (const auto& path : btreeFiles) {
         if (!verifyBTreeIndex(root, path, indexStats, error)) return false;
     }
+    HashIndexVerificationStats hashStats;
+    for (const auto& path : hashIndexFiles) {
+        if (!verifyHashIndex(root, path, hashStats, error)) return false;
+    }
     output = "heap checksum verification passed\n"
-        "B+ tree index scan completed (legacy unchecked pages are reported)\nfiles=" +
+        "B+ tree index scan completed; hash index scan completed (legacy unchecked data is reported)\nfiles=" +
         std::to_string(stats.files) + "\nblocks=" +
         std::to_string(stats.blocks) + "\nidentity-bound-blocks=" +
         std::to_string(stats.identityBoundBlocks) +
@@ -1160,7 +1313,12 @@ bool verifyHeapDataChecksums(const std::filesystem::path& root,
         "\ncontent-only-index-pages=" +
         std::to_string(indexStats.contentOnlyPages) +
         "\nunchecked-index-pages=" +
-        std::to_string(indexStats.uncheckedPages);
+        std::to_string(indexStats.uncheckedPages) +
+        "\nhash-index-files=" + std::to_string(hashStats.files) +
+        "\nchecksummed-hash-index-files=" +
+        std::to_string(hashStats.checksumFiles) +
+        "\nunchecked-legacy-hash-index-files=" +
+        std::to_string(hashStats.uncheckedLegacyFiles);
     return true;
 }
 

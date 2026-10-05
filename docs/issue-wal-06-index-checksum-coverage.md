@@ -22,14 +22,20 @@ detection. Older zero-marker files remain readable without being falsely
 treated as checksummed. REINDEX-built replacements use the new `0xC552`
 format.
 
-The offline `--verify-data-checksums` utility now also discovers B+ tree
-files named `.idx` and `.idx_*` below the cluster and resolved tablespace
-roots. It opens them with read-only, no-follow descriptors; checks file/header
-bounds and every physical page checksum; and reports page-bound, content-only,
-and unchecked legacy-page counts separately. A zero-marker B+ tree is scanned
-but its pages are explicitly reported as unchecked. Encrypted index sidecars
-use the existing `PageCrypto` read path; this addition is not a TDE security
-review.
+Hash sidecars now use format V2 for new writes: CRC32C covers the complete
+serialized `.hidx` payload and a fixed-width checksum trailer is appended.
+Loading verifies the checksum before trusting entry counts, bounds parsing to
+the checksummed payload, and rejects unknown versions. Existing V1 sidecars
+remain readable but have no checksum and are reported as unchecked.
+
+The offline `--verify-data-checksums` utility discovers B+ tree files named
+`.idx`/`.idx_*` and hash sidecars named `.hidx` below the cluster and resolved
+tablespace roots. It opens them with read-only, no-follow descriptors; checks
+file/header bounds and checksums; and reports page-bound, content-only,
+unchecked B+ tree page counts, and checksummed/unchecked hash-file counts
+separately. A zero-marker B+ tree or V1 hash file is scanned but explicitly
+reported as unchecked. Encrypted B+ tree sidecars use the existing
+`PageCrypto` read path; this addition is not a TDE security review.
 
 ## Verification
 
@@ -40,10 +46,14 @@ review.
 - `scripts/build_one_test.sh bptree_concurrency_test` — passed with concurrent
   readers and a writer.
 - `bash tests/crash_matrix_test.sh` — `PASS=12 FAIL=0`.
+- Direct compile/run of `tests/hash_index_checksum_test.cpp` with
+  `src/access/HashIndex.cpp` — passed V2 write/reload, structurally valid RID
+  bit-flip rejection and V1 compatibility.
 - `python3 tests/checksum_verification_e2e_test.py` — passed read-only
   snapshots, in-cluster/composite/tablespace B+ tree discovery, page-bit and
-  whole-page-swap rejection, plus `0xC551` and unchecked legacy counts.
-- `git diff --check` — passed before the source/test commit.
+  whole-page-swap rejection, `.hidx` corruption rejection, V1 compatibility
+  and unchecked legacy counts.
+- `git diff --check` — passed.
 
 The full registered suite and a PostgreSQL 18.6 runtime differential were not
 run. The encrypted-index sidecar path was not independently exercised.
@@ -51,11 +61,11 @@ run. The encrypted-index sidecar path was not independently exercised.
 ## Remaining gaps
 
 WAL-06 remains partial. Existing `0xC551` B+ tree files are not page-bound
-until rewritten; zero-marker legacy trees remain unchecked. Hash, Bloom, GIN,
-GiST, SP-GiST, and BRIN files still lack this format; catalog/schema, FSM/VM,
-and other metadata do not have unified checksums. The offline verifier only
-checks B+ tree page checksums; it does not parse tree topology or validate the
-other index AMs. There is no `pg_checksums`-style
+until rewritten; zero-marker legacy trees and V1 hash files remain unchecked.
+Bloom, GIN, GiST, SP-GiST, and BRIN files still lack checksums; catalog/schema,
+FSM/VM, and other metadata do not have unified checksums. The offline verifier
+checks B+ tree page checksums and V2 hash sidecar CRCs, but does not parse tree
+topology or validate the other index AMs. There is no `pg_checksums`-style
 enable/disable/rewrite/progress workflow or online whole-cluster verification.
 The custom checksums are not PostgreSQL page checksums.
 

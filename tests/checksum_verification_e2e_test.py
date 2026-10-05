@@ -93,6 +93,19 @@ def write_btree(path, format_marker=BTREE_PAGE_BOUND_CHECKSUM_FORMAT):
     path.write_bytes(b"".join(pages))
 
 
+def write_hash_index(path, version=2):
+    assert version in (1, 2)
+    contents = bytearray(struct.pack("=IIQ", 0x48494458, version, 1))
+    key = b"key"
+    contents.extend(struct.pack("=Q", len(key)))
+    contents.extend(key)
+    contents.extend(struct.pack("=Qq", 1, 42))
+    if version == 2:
+        contents.extend(struct.pack("=I", crc32c(contents)))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(contents)
+
+
 def heap_page(page_id, layout_version=5):
     page = bytearray(PAGE_SIZE)
     page_id_bound = layout_version == 5
@@ -212,6 +225,8 @@ def main():
         write_btree(legacy_btree_index, BTREE_CONTENT_CHECKSUM_FORMAT)
         unchecked_btree_index = database / "old.idx"
         write_btree(unchecked_btree_index, 0)
+        hash_index = database / "accounts_name.hidx"
+        write_hash_index(hash_index)
         legacy_heap = database / "legacy.dt"
         write_heap(legacy_heap, 2, layout_version=4)
         key = bytes.fromhex("11" * 32)
@@ -230,6 +245,8 @@ def main():
         write_heap(external_heap, 2)
         external_index = external / "app" / "ledger.idx"
         write_btree(external_index)
+        external_legacy_hash = external / "app" / "ledger_id.hidx"
+        write_hash_index(external_legacy_hash, 1)
 
         before_cluster = snapshot_tree(cluster)
         before_external = snapshot_tree(external)
@@ -237,6 +254,7 @@ def main():
         assert clean.returncode == 0, clean
         assert "heap checksum verification passed" in clean.stdout, clean
         assert "B+ tree index scan completed" in clean.stdout, clean
+        assert "hash index scan completed" in clean.stdout, clean
         assert "files=5" in clean.stdout and "blocks=9" in clean.stdout, clean
         assert "identity-bound-blocks=3" in clean.stdout, clean
         assert "legacy-identity-unbound-blocks=1" in clean.stdout, clean
@@ -245,6 +263,9 @@ def main():
         assert "page-bound-index-pages=12" in clean.stdout, clean
         assert "content-only-index-pages=4" in clean.stdout, clean
         assert "unchecked-index-pages=4" in clean.stdout, clean
+        assert "hash-index-files=2" in clean.stdout, clean
+        assert "checksummed-hash-index-files=1" in clean.stdout, clean
+        assert "unchecked-legacy-hash-index-files=1" in clean.stdout, clean
         assert snapshot_tree(cluster) == before_cluster
         assert snapshot_tree(external) == before_external
         assert list(launch.iterdir()) == []
@@ -276,6 +297,14 @@ def main():
         assert "app/accounts.idx: block " in swapped_result.stderr, swapped_result
         assert "B+ tree page checksum mismatch" in swapped_result.stderr, swapped_result
         btree_index.write_bytes(original_index)
+
+        original_hash = hash_index.read_bytes()
+        flip_byte(hash_index, len(original_hash) - 5)
+        corrupt_hash = run_verify(cluster, launch)
+        assert corrupt_hash.returncode == 1, corrupt_hash
+        assert "app/accounts_name.hidx" in corrupt_hash.stderr, corrupt_hash
+        assert "hash index checksum mismatch" in corrupt_hash.stderr, corrupt_hash
+        hash_index.write_bytes(original_hash)
 
         original_external = external_heap.read_bytes()
         flip_byte(external_heap, PAGE_SIZE + 200)

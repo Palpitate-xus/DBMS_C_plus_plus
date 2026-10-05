@@ -1,29 +1,20 @@
 #include "HashIndex.h"
+#include "HashIndexFormat.h"
+#include "IndexChecksum.h"
 #include "IndexFileUtil.h"
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <sys/stat.h>
 
 namespace dbms {
 
 namespace {
-constexpr uint32_t HASH_MAGIC = 0x48494458; // HIDX
-constexpr uint32_t HASH_VERSION = 1;
-constexpr size_t MAX_ENTRIES = 1'000'000;
-constexpr size_t MAX_KEY_LENGTH = 10'000;
-constexpr size_t MAX_VALUES_PER_KEY = 1'000'000;
+using namespace hash_index_format;
 
 template <typename T>
 bool readExact(std::istream& in, T& value) {
     in.read(reinterpret_cast<char*>(&value), sizeof(T));
-    return static_cast<bool>(in);
-}
-
-bool readBytes(std::istream& in, std::string& value, size_t length) {
-    if (length > MAX_KEY_LENGTH) return false;
-    value.resize(length);
-    if (length == 0) return true;
-    in.read(value.data(), static_cast<std::streamsize>(length));
     return static_cast<bool>(in);
 }
 
@@ -158,43 +149,130 @@ bool HashIndex::loadFromFile(bool allowMissing) {
         buildPending_ = false;
         return true;
     }
-    if (!S_ISREG(before.st_mode)) return false;
-    if (!captureFileGeneration()) return false;
+    if (!S_ISREG(before.st_mode) || before.st_size < 0) return false;
+    if (!captureFileGeneration() || before.st_dev != device_ ||
+        before.st_ino != inode_ || before.st_size != fileSize_ ||
+        before.st_mtim.tv_sec != mtimeSec_ ||
+        before.st_mtim.tv_nsec != mtimeNsec_ ||
+        before.st_ctim.tv_sec != ctimeSec_ ||
+        before.st_ctim.tv_nsec != ctimeNsec_) {
+        return false;
+    }
     std::ifstream in(filePath_, std::ios::binary);
     if (!in) return false;
     uint32_t magic = 0;
     uint32_t version = 0;
     uint64_t count = 0;
     if (!readExact(in, magic) || !readExact(in, version) ||
-        !readExact(in, count) || magic != HASH_MAGIC || version != HASH_VERSION ||
-        count > MAX_ENTRIES) {
+        !readExact(in, count) || magic != kMagic ||
+        (version != kLegacyVersion && version != kChecksumVersion) ||
+        count > kMaxEntries) {
         map_.clear();
         return false;
     }
-    for (uint64_t i = 0; i < count; ++i) {
+
+    const uint64_t fileBytes = static_cast<uint64_t>(before.st_size);
+    uint64_t payloadBytes = fileBytes;
+    if (version == kChecksumVersion) {
+        if (fileBytes < sizeof(uint32_t) * 2 + sizeof(uint64_t) +
+                            kChecksumBytes) {
+            map_.clear();
+            return false;
+        }
+        payloadBytes -= kChecksumBytes;
+
+        uint32_t storedChecksum = 0;
+        in.seekg(static_cast<std::streamoff>(payloadBytes), std::ios::beg);
+        if (!readExact(in, storedChecksum)) {
+            map_.clear();
+            return false;
+        }
+
+        in.clear();
+        in.seekg(0, std::ios::beg);
+        uint64_t remaining = payloadBytes;
+        uint32_t checksumState = 0xFFFFFFFFu;
+        std::array<char, 64 * 1024> chunk{};
+        while (remaining > 0) {
+            const size_t amount = static_cast<size_t>(
+                std::min<uint64_t>(remaining, chunk.size()));
+            in.read(chunk.data(), static_cast<std::streamsize>(amount));
+            if (in.gcount() != static_cast<std::streamsize>(amount)) {
+                map_.clear();
+                return false;
+            }
+            checksumState = index_checksum::crc32cUpdate(
+                checksumState, chunk.data(), amount);
+            remaining -= amount;
+        }
+        if (index_checksum::crc32cFinish(checksumState) != storedChecksum) {
+            map_.clear();
+            return false;
+        }
+        in.clear();
+        in.seekg(0, std::ios::beg);
+        if (!in) {
+            map_.clear();
+            return false;
+        }
+    }
+
+    // Do not let corrupt counts make fields or RID arrays consume the checksum
+    // trailer, or allocate based on a count the file cannot possibly contain.
+    uint64_t consumed = 0;
+    const auto readPayload = [&](char* destination, size_t length) {
+        if (length > payloadBytes - consumed) return false;
+        if (length != 0) {
+            in.read(destination, static_cast<std::streamsize>(length));
+            if (!in) return false;
+        }
+        consumed += length;
+        return true;
+    };
+    const auto readPayloadValue = [&](auto& value) {
+        return readPayload(reinterpret_cast<char*>(&value), sizeof(value));
+    };
+
+    in.clear();
+    in.seekg(0, std::ios::beg);
+    uint32_t parsedMagic = 0;
+    uint32_t parsedVersion = 0;
+    uint64_t parsedCount = 0;
+    if (!readPayloadValue(parsedMagic) ||
+        !readPayloadValue(parsedVersion) ||
+        !readPayloadValue(parsedCount) || parsedMagic != magic ||
+        parsedVersion != version || parsedCount != count ||
+        parsedCount > (payloadBytes - consumed) /
+                    (sizeof(uint64_t) * 2)) {
+        map_.clear();
+        return false;
+    }
+    for (uint64_t i = 0; i < parsedCount; ++i) {
         uint64_t keyLen = 0;
         uint64_t valCount = 0;
         std::string key;
-        if (!readExact(in, keyLen) || keyLen > MAX_KEY_LENGTH ||
-            !readBytes(in, key, static_cast<size_t>(keyLen)) ||
-            !readExact(in, valCount) || valCount > MAX_VALUES_PER_KEY) {
+        if (!readPayloadValue(keyLen) || keyLen > kMaxKeyLength ||
+            keyLen > payloadBytes - consumed) {
+            map_.clear();
+            return false;
+        }
+        key.resize(static_cast<size_t>(keyLen));
+        if (!readPayload(key.data(), key.size()) ||
+            !readPayloadValue(valCount) || valCount > kMaxValuesPerKey ||
+            valCount > (payloadBytes - consumed) / sizeof(int64_t)) {
             map_.clear();
             return false;
         }
         std::vector<int64_t> vals(static_cast<size_t>(valCount));
         for (auto& value : vals) {
-            if (!readExact(in, value)) {
+            if (!readPayloadValue(value)) {
                 map_.clear();
                 return false;
             }
         }
         map_[key] = std::move(vals);
     }
-    if (in.peek() != std::char_traits<char>::eof()) {
-        map_.clear();
-        return false;
-    }
-    if (!fileGenerationMatches()) {
+    if (consumed != payloadBytes || !fileGenerationMatches()) {
         map_.clear();
         return false;
     }
@@ -203,15 +281,15 @@ bool HashIndex::loadFromFile(bool allowMissing) {
 }
 
 bool HashIndex::saveToFile() {
-    if (map_.size() > MAX_ENTRIES) return false;
+    if (map_.size() > kMaxEntries) return false;
     std::string bytes;
     bytes.reserve(sizeof(uint32_t) * 2 + sizeof(uint64_t));
-    appendBytes(bytes, HASH_MAGIC);
-    appendBytes(bytes, HASH_VERSION);
+    appendBytes(bytes, kMagic);
+    appendBytes(bytes, kChecksumVersion);
     const uint64_t count = map_.size();
     appendBytes(bytes, count);
     for (const auto& [key, vals] : map_) {
-        if (key.size() > MAX_KEY_LENGTH || vals.size() > MAX_VALUES_PER_KEY) return false;
+        if (key.size() > kMaxKeyLength || vals.size() > kMaxValuesPerKey) return false;
         const uint64_t keyLen = key.size();
         appendBytes(bytes, keyLen);
         bytes.append(key);
@@ -221,6 +299,9 @@ bool HashIndex::saveToFile() {
             appendBytes(bytes, v);
         }
     }
+    const uint32_t checksum =
+        index_checksum::crc32c(bytes.data(), bytes.size());
+    appendBytes(bytes, checksum);
     if (!index_file::writeAtomically(filePath_, bytes) ||
         !captureFileGeneration()) return false;
     dirty_ = false;
