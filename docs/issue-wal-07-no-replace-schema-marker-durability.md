@@ -111,5 +111,5 @@ marker.
 
 Source/test commits: `e8a6d1ee` (schema marker create), `cc129973` (schema
 marker drop), `f8c02416` (database creation), `b707afd3` (database drop),
-`ab72c8fe` (database rename), and `3db539a9` (sequence rename/drop), all not
-pushed.
+`ab72c8fe` (database rename), `3db539a9` (sequence rename/drop), and
+`4eca4962` (fixed-record table-list publication), all not pushed.
