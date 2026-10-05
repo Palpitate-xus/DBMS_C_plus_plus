@@ -451,7 +451,7 @@
 - [ ] **WAL-04** restartpoint、recovery consistency、recovery conflict、hot standby snapshot、timeline history 和 promotion。（现有离线redo/undo及PITR timeline fork有专项覆盖；restartpoint、standby snapshot/conflict、timeline history chain与promotion仍缺，详见 `docs/issue-wal-04-standby-and-timeline-audit.md`。）
 - [ ] **WAL-05** recovery 必须是 redo-based 状态机；当前额外 before-image undo 模型需证明与 steal/no-force、并发 checkpoint 的所有 crash window 一致。（修复启动恢复遍历未初始化活动事务集合导致的 SIGSEGV；真实 `SIGKILL` 矩阵12/12通过。undo/replay与redo状态机、并发checkpoint及所有崩溃窗口仍未证明，见 `docs/issue-wal-05-startup-recovery-crash-matrix.md`。）
 - [ ] **WAL-06** 数据页、所有索引和元数据 checksum；补离线/在线启停与 `pg_checksums`/verify 工具等价物。（heap页及新/重建B+Tree子集已有自定义checksum，但不覆盖旧索引、其他索引AM和全部metadata；离线工具仍不验证索引，也无enable/disable/rewrite/progress workflow，见 `docs/issue-wal-06-index-checksum-coverage.md`。）
-- [ ] **WAL-07** 目录/fsync/rename/link/unlink 顺序覆盖 ext4/XFS、跨设备表空间、磁盘满、partial write、torn write 和 power-loss。（修复 `CREATE SCHEMA` no-replace 标记在目录 `fsync` 失败后仍可见、导致失败操作污染重试的问题；故障注入回滚用例通过。ext4/XFS、跨设备全流程、ENOSPC、partial/torn write 与真实 power-loss 仍未覆盖，见 `docs/issue-wal-07-no-replace-schema-marker-durability.md`。）
+- [ ] **WAL-07** 目录/fsync/rename/link/unlink 顺序覆盖 ext4/XFS、跨设备表空间、磁盘满、partial write、torn write 和 power-loss。（修复 `CREATE SCHEMA` no-replace 标记在目录 `fsync` 失败后仍可见、导致失败操作污染重试的问题，以及 `CREATE DATABASE` 成功前未同步集群父目录的问题；两项故障注入回归通过。ext4/XFS、跨设备全流程、ENOSPC、partial/torn write 与真实 power-loss 仍未覆盖，见 `docs/issue-wal-07-no-replace-schema-marker-durability.md`。）
 - [ ] **WAL-08** unlogged/temp relation、2PC、sequence、DDL、logical slot 在 crash 后的专门恢复规则。
 - [ ] **STO-07** 大对象补 catalog、ACL、事务、64-bit offset、lo_* API、protocol/libpq 和 vacuum。
 - [ ] **STO-08** TDE 使用成熟密码库和审计过的 AEAD/KMS 方案；补索引/WAL/temp/backup 全覆盖、密钥轮换、per-database key 和灾难恢复。自研 SHA-256-CTR+EtM 不应直接作为生产加密承诺。

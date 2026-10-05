@@ -16,6 +16,13 @@ rollback. After the first sync succeeds, the destination is durable; removing
 the hidden temporary alias is then cleanup and cannot turn a durable schema
 creation into a reported failure.
 
+`CREATE DATABASE` had a related missing parent-directory barrier. It synced
+the initial files and entries inside the new database directory but did not
+sync the cluster directory containing that database directory. It now syncs
+the parent after all initial files are durable; a failed parent sync removes
+the just-created database tree and attempts to persist that rollback before
+returning `IO_ERROR`.
+
 ## Verification
 
 - `bash scripts/build_one_test.sh schema_marker_publish_guard_test` — passed.
@@ -23,6 +30,10 @@ creation into a reported failure.
   exercised injected directory-`fsync` failure, rollback of the schema marker
   and temporary alias, successful same-name retry, symlink collision, and
   concurrent creators.
+- `bash scripts/build_one_test.sh database_lifecycle_test` — passed. The
+  parent-directory `fsync` was failed after the four initial child-file
+  publications; `CREATE DATABASE` returned `IO_ERROR`, removed the new tree,
+  and a same-name retry then succeeded.
 - `git diff --check` — passed before commit.
 
 No full registered suite, standalone production executable build, or
@@ -38,4 +49,5 @@ temporary hard-link alias may remain if cleanup itself fails, but the schema
 target was synced before that cleanup and the alias is not interpreted as a
 schema marker.
 
-Source/test commit: `e8a6d1ee` (not pushed).
+Source/test commits: `e8a6d1ee` (schema marker) and `f8c02416` (database
+directory publication), both not pushed.
