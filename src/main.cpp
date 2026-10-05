@@ -22537,7 +22537,6 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         }
                         pj.tables.push_back({rname, ralias});
                         pj.joins.push_back(std::move(link));
-                        if (pj.joins.size() >= 12) break;  // safety cap
                     }
                 }
 

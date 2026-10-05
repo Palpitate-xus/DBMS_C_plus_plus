@@ -66,6 +66,15 @@ def main():
             _, state, message, _ = runner.ours_query(
                 client, server["sock"], sql)
             assert state is None, (sql, state, message)
+        for index in range(14):
+            relation = "join_many_%02d" % index
+            for sql in [
+                "CREATE TABLE %s (id INT);" % relation,
+                "INSERT INTO %s VALUES (7);" % relation,
+            ]:
+                _, state, message, _ = runner.ours_query(
+                    client, server["sock"], sql)
+                assert state is None, (sql, state, message)
 
         cases = [
             (("SELECT * FROM join_type_left INNER JOIN join_type_right "
@@ -267,6 +276,24 @@ def main():
         assert headers == ["id", "id", "id"], headers
         assert type_oids == [23, 23, 23], type_oids
         assert command_tag == "SELECT 4", command_tag
+
+        many_relation_refs = [
+            "join_many_%02d t%d" % (index, index) for index in range(14)]
+        many_join_sql = "SELECT t13.id FROM " + many_relation_refs[0]
+        for index in range(1, 14):
+            many_join_sql += (
+                " JOIN " + many_relation_refs[index] +
+                " ON t%d.id = t%d.id" % (index - 1, index))
+        many_join_sql += ";"
+        rows, state, message, headers, command_tag, type_oids = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"], many_join_sql),
+                include_types=True))
+        assert state is None, (state, message)
+        assert rows == [["7"]], rows
+        assert headers == ["id"], headers
+        assert type_oids == [23], type_oids
+        assert command_tag == "SELECT 1", command_tag
 
         structured_chain_sql = (
             "SELECT * FROM join_outer_chain_text_a a "
