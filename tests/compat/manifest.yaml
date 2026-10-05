@@ -132,7 +132,7 @@
   status: open
 
 - id: CAT-03
-  title: 补齐 `pg_constraint`、`pg_index`、`pg_am`、`pg_opclass`、`pg_operator`、`pg_cast`、`pg_collation`、`pg_rewrite`、`pg_trigger`、`pg_policy`、`pg_auth*`、`pg_default_acl`、`pg_database`、`pg_tablespace`、`pg_statistic*`、复制 catalog 等
+  title: 补齐 `pg_constraint`、`pg_index`、`pg_am`、`pg_opclass`、`pg_operator`、`pg_cast`、`pg_collation`、`pg_rewrite`、`pg_trigger`、`pg_policy`、`pg_auth*`、`pg_default_acl`、`pg_database`、`pg_namespace`、`pg_tablespace`、`pg_stats`、`pg_statistic*`、复制 catalog 等
   status: open
 
 - id: CAT-04
@@ -260,7 +260,7 @@
   status: open
 
 - id: TYPE-13
-  title: UUID 补 16-byte 内部/binary 语义和 PostgreSQL 18 `uuidv7()` 等函数
+  title: UUID 使用 16-byte RFC datum 与原生索引键，保留 PostgreSQL 宽松输入/规范输出，并实现 `gen_random_uuid()`、`uuidv4()`、`uuidv7([shift])`、版本/时间提取及 binary protocol
   status: open
 
 - id: TYPE-14
@@ -876,7 +876,7 @@
   status: open
 
 - id: MON-04
-  title: `pg_stat_activity` 补 state、query_id、xact/query start、wait_event_type/event、backend type、client、leader pid 和权限脱敏
+  title: `pg_stat_activity` 目前仅有 `pid/datname/usename/state/query` typed 子集，且 query 文本已按本人/superuser/`pg_read_all_stats`过滤（第995项）；仍需补 `query_id`、xact/query start、wait_event_type/event、backend type、client、leader pid 等 PostgreSQL 18 字段与完整权限/快照语义
   status: open
 
 - id: MON-05
