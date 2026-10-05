@@ -2,6 +2,31 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "STO-04",
+      "gap_ids": ["STO-04"],
+      "status": "partial",
+      "commits": ["019e5ee7"],
+      "evidence": [
+        "docs/code-review-progress.md",
+        "docs/issue-sto-04-buffer-invalidation-pins.md",
+        "docs/postgresql-18-gap-audit.md",
+        "src/storage/BufferPool.cpp"
+      ],
+      "tests": [
+        "tests/buffer_pool_invalidate_all_pins_test.cpp",
+        "scripts/build.sh",
+        "scripts/build_tests.sh",
+        "tests/div14_feature_gate_test.py"
+      ],
+      "verification": {
+        "reproduction": "Before the fix, a one-frame pool returned page 2 after invalidateAll while a caller still held page 1's pointer; the regression assertion failed with exit 134",
+        "fix": "invalidateAll moves mapped pinned frames to orphanedPins_/kOrphanedPage and reclaims them only after the final unpin",
+        "focused_tests": "buffer_pool_invalidate_all_pins_test and scripts/build.sh pass; div14_feature_gate_test.py failed once in the full suite due to a server connection close during extended ALTER TABLE, then passed immediately when rerun alone",
+        "full_suite": "scripts/build_tests.sh exited 1: all 461 C++ tests passed, 202/203 E2E/protocol entries passed, and div14_feature_gate_test.py was the single failure. The isolated rerun passed; the full run is not counted green",
+        "scope": "STO-04 remains partial: one global metadata mutex, no content locks, prefetch, bulk/ring strategy, or automatic ResourceOwner pin cleanup; no PostgreSQL 18.6 differential"
+      }
+    },
+    {
       "issue": "STO-03",
       "gap_ids": ["STO-03"],
       "status": "partial",
@@ -1009,7 +1034,7 @@
     {"id":"STO-01","status":"partial","evidence":["docs/issue-sto-01-control-format-integrity.md","docs/PACKAGING.md","docs/MANUAL.md","src/common/DataDirectory.cpp"],"tests":["tests/data_directory_e2e_test.py","tests/checksum_verification_e2e_test.py","scripts/build_tests.sh"],"commits":["b662ff97"]},
     {"id":"STO-02","status":"partial","evidence":["docs/issue-sto-02-relation-storage-namespace.md","docs/code-review-progress.md","src/commands/TableManage.cpp"],"tests":["tests/partition_test.cpp","tests/temp_restart_cleanup_test.cpp","tests/create_table_like_test.cpp","scripts/build_tests.sh"],"commits":["1a76a3fb"]},
     {"id":"STO-03","status":"partial","evidence":["docs/issue-sto-03-page-identity.md","docs/postgresql-18-gap-audit.md","src/storage/PgPage.cpp","src/storage/PageAllocator.cpp","src/common/DataDirectory.cpp"],"tests":["tests/checksum_test.cpp","tests/checksum_verification_e2e_test.py","scripts/build.sh","scripts/build_tests.sh"],"commits":["11d1fa4d"]},
-    {"id":"STO-04","status":"unverified","evidence":[]},
+    {"id":"STO-04","status":"partial","evidence":["docs/issue-sto-04-buffer-invalidation-pins.md","docs/postgresql-18-gap-audit.md","src/storage/BufferPool.cpp"],"tests":["tests/buffer_pool_invalidate_all_pins_test.cpp","scripts/build.sh","scripts/build_tests.sh","tests/div14_feature_gate_test.py"],"commits":["019e5ee7"]},
     {"id":"STO-05","status":"unverified","evidence":[]},
     {"id":"STO-06","status":"unverified","evidence":[]},
     {"id":"WAL-01","status":"unverified","evidence":[]},
