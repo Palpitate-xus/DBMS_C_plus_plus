@@ -114,8 +114,9 @@ targets and WHERE, 2026-10-05; QRY-02/QRY-03), and `e63e4e1e`
   apply LEFT NULL extension when no right row passes the condition. The left
   input chain must consist only of base tables joined with CROSS/comma and
   have no `ON`/`USING`; this path requires aligned structured rows from the
-  lateral subquery and does not implement arbitrary join trees, lateral
-  chains, or table functions.
+  lateral subquery and does not implement arbitrary join trees, complex or
+  nested lateral chains, or table functions. A two-step FROM-less scalar
+  LATERAL chain is covered by regression.
 - Sort supported column-reference or output-position keys with ASC/DESC and
   NULLS FIRST/LAST, then apply LIMIT/OFFSET. Unsupported projections, sort
   expressions, DISTINCT/GROUP/WINDOW forms fail explicitly rather than being
@@ -250,6 +251,16 @@ targets and WHERE, 2026-10-05; QRY-02/QRY-03), and `e63e4e1e`
   `tests/sql_literal_preservation_e2e_test.py` passed. Non-CROSS left join
   trees, table functions, lateral chains, the full suite, and PostgreSQL 18.6
   differential remain unverified or unsupported.
+- After `6123c5b3`, a two-step FROM-less scalar LATERAL chain no longer spins
+  while `processDerivedTables` scans consecutive LATERAL subqueries, and the
+  previous step's synthetic output column is carried into the next temp schema
+  instead of being confused with that step's right column. Before the fix the
+  query consumed a CPU core until protocol timeout; after cursor advancement
+  alone it returned the wrong first-step value (`3` instead of `2`). The
+  two-row regression now returns `1→2→3` and `2→3→4` with integer OIDs.
+  `bash scripts/build.sh`, `tests/derived_type_protocol_e2e_test.py`, and
+  `tests/sql_literal_preservation_e2e_test.py` passed. Longer/complex correlated
+  chains, the full suite, and PostgreSQL 18.6 differential remain unverified.
 - `tests/compat/cases/multijoin_projection_filter.sql` was added, but the
   differential runner refused preflight because the configured reference
   server reports PostgreSQL 17.2 (`170002`) while the runner requires 18.6
@@ -264,11 +275,13 @@ expression ordering, and arbitrary nested/lateral join semantics remain open.
 The FROM-less LATERAL direct-column target case is only a bounded QRY-02 fix;
 simple INNER/LEFT LATERAL `ON` evaluation works with either one simple left
 relation or a simple base-table comma/CROSS chain before the LATERAL item.
+The regression-tested two-step FROM-less scalar LATERAL chain also works;
+longer or more complex correlated chains remain unsupported/unverified.
 Bare outer references in evaluator-supported scalar targets and WHERE are now
 also bound when that LATERAL SELECT has no own FROM or uses a local base-table
 scope with known columns. Other left join trees remain unsupported. Unknown
 CTE/derived/function FROM scopes, quoted outer identifiers, arbitrary
-correlated expressions/subqueries, lateral chains, table functions, and
+correlated expressions/subqueries, complex lateral chains, table functions, and
 general parameterized or nested join semantics remain unsupported.
 OPT-02's DP/exhaustive join search, GEQO threshold, semi/anti constraints, and
 bushy plans remain unimplemented.
