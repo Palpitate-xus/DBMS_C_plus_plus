@@ -312,9 +312,20 @@ static bool resolvedToastEntry(const std::string& rowBuffer,
 }
 
 // Global active transaction tracking
-std::mutex StorageEngine::globalTxnMutex_;
-std::set<uint64_t> StorageEngine::activeTransactions_;
-std::map<uint64_t, std::string> StorageEngine::activeTransactionDatabases_;
+std::mutex& StorageEngine::globalTxnMutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+std::set<uint64_t>& StorageEngine::activeTransactions() {
+    static std::set<uint64_t> transactions;
+    return transactions;
+}
+
+std::map<uint64_t, std::string>& StorageEngine::activeTransactionDatabases() {
+    static std::map<uint64_t, std::string> databases;
+    return databases;
+}
 std::mutex StorageEngine::ssiMutex_;
 std::map<uint64_t, std::set<std::string>> StorageEngine::ssiReadSets_;
 std::map<uint64_t, std::set<std::string>> StorageEngine::ssiWriteSets_;
@@ -2139,10 +2150,10 @@ StorageEngine::~StorageEngine() {
         }
     }
     {
-        std::lock_guard<std::mutex> lock(globalTxnMutex_);
+        std::lock_guard<std::mutex> lock(globalTxnMutex());
         for (uint64_t xid : abandonedXids) {
-            activeTransactions_.erase(xid);
-            activeTransactionDatabases_.erase(xid);
+            activeTransactions().erase(xid);
+            activeTransactionDatabases().erase(xid);
         }
     }
     if (!abandonedXids.empty()) {
@@ -7232,12 +7243,12 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
         // retains the dead tuple until VACUUM, so a sequential scan must not
         // expose a committed xmax merely because no explicit transaction is
         // active on this backend.
-        std::lock_guard<std::mutex> lock(globalTxnMutex_);
+        std::lock_guard<std::mutex> lock(globalTxnMutex());
         autocommitView.creatorTxnId = 0;
         autocommitView.lowLimitId = TxnIdGenerator::instance().maxCommittedTxId() + 1;
-        autocommitView.upLimitId = activeTransactions_.empty()
-            ? autocommitView.lowLimitId : *activeTransactions_.begin();
-        autocommitView.activeTxnIds = activeTransactions_;
+        autocommitView.upLimitId = activeTransactions().empty()
+            ? autocommitView.lowLimitId : *activeTransactions().begin();
+        autocommitView.activeTxnIds = activeTransactions();
         autocommitView.subTxnIds.clear();
         autocommitView.commitLog = getCommitLog(dbname);
         rv = &autocommitView;
@@ -7271,10 +7282,10 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
         indexMaintenanceView ? getCommitLog(dbname) : nullptr;
     std::set<uint64_t> indexActiveTransactions;
     if (indexMaintenanceView) {
-        std::lock_guard<std::mutex> lock(globalTxnMutex_);
-        for (uint64_t xid : activeTransactions_) {
-            const auto database = activeTransactionDatabases_.find(xid);
-            if (database != activeTransactionDatabases_.end() &&
+        std::lock_guard<std::mutex> lock(globalTxnMutex());
+        for (uint64_t xid : activeTransactions()) {
+            const auto database = activeTransactionDatabases().find(xid);
+            if (database != activeTransactionDatabases().end() &&
                 database->second == dbname) {
                 indexActiveTransactions.insert(xid);
             }
@@ -7533,12 +7544,12 @@ bool StorageEngine::forEachRowPageRange(
         transactionContext().txnDB == dbname) {
         rv = &transactionContext().readView;
     } else if (!rv) {
-        std::lock_guard<std::mutex> lock(globalTxnMutex_);
+        std::lock_guard<std::mutex> lock(globalTxnMutex());
         autocommitView.creatorTxnId = 0;
         autocommitView.lowLimitId = TxnIdGenerator::instance().maxCommittedTxId() + 1;
-        autocommitView.upLimitId = activeTransactions_.empty()
-            ? autocommitView.lowLimitId : *activeTransactions_.begin();
-        autocommitView.activeTxnIds = activeTransactions_;
+        autocommitView.upLimitId = activeTransactions().empty()
+            ? autocommitView.lowLimitId : *activeTransactions().begin();
+        autocommitView.activeTxnIds = activeTransactions();
         autocommitView.subTxnIds.clear();
         autocommitView.commitLog = getCommitLog(dbname);
         rv = &autocommitView;
@@ -7644,12 +7655,12 @@ bool StorageEngine::readVisibleRowByRid(const std::string& dbname, PageAllocator
         transactionContext().txnDB == dbname) {
         rv = &transactionContext().readView;
     } else if (!rv) {
-        std::lock_guard<std::mutex> lock(globalTxnMutex_);
+        std::lock_guard<std::mutex> lock(globalTxnMutex());
         autocommitView.creatorTxnId = 0;
         autocommitView.lowLimitId = TxnIdGenerator::instance().maxCommittedTxId() + 1;
-        autocommitView.upLimitId = activeTransactions_.empty()
-            ? autocommitView.lowLimitId : *activeTransactions_.begin();
-        autocommitView.activeTxnIds = activeTransactions_;
+        autocommitView.upLimitId = activeTransactions().empty()
+            ? autocommitView.lowLimitId : *activeTransactions().begin();
+        autocommitView.activeTxnIds = activeTransactions();
         autocommitView.subTxnIds.clear();
         autocommitView.commitLog = getCommitLog(dbname);
         rv = &autocommitView;
@@ -7682,13 +7693,13 @@ bool StorageEngine::readCurrentRowByRid(
         transactionContext().txnDB == dbname) {
         view = &transactionContext().readView;
     } else {
-        std::lock_guard<std::mutex> lock(globalTxnMutex_);
+        std::lock_guard<std::mutex> lock(globalTxnMutex());
         autocommitView.creatorTxnId = 0;
         autocommitView.lowLimitId =
             TxnIdGenerator::instance().maxCommittedTxId() + 1;
-        autocommitView.upLimitId = activeTransactions_.empty()
-            ? autocommitView.lowLimitId : *activeTransactions_.begin();
-        autocommitView.activeTxnIds = activeTransactions_;
+        autocommitView.upLimitId = activeTransactions().empty()
+            ? autocommitView.lowLimitId : *activeTransactions().begin();
+        autocommitView.activeTxnIds = activeTransactions();
         autocommitView.commitLog = getCommitLog(dbname);
         view = &autocommitView;
     }
@@ -12374,10 +12385,10 @@ bool StorageEngine::hasFullTextIndex(const std::string& dbname,
 bool StorageEngine::specializedIndexesNeedHeapFallback(
     const std::string& dbname, const std::string& tablename) const {
     if (specializedIndexesAreDirty(*this, dbname, tablename)) return true;
-    std::lock_guard<std::mutex> lock(globalTxnMutex_);
+    std::lock_guard<std::mutex> lock(globalTxnMutex());
     return std::any_of(
-        activeTransactionDatabases_.begin(),
-        activeTransactionDatabases_.end(),
+        activeTransactionDatabases().begin(),
+        activeTransactionDatabases().end(),
         [&](const auto& active) { return active.second == dbname; });
 }
 
@@ -13346,13 +13357,13 @@ DBStatus StorageEngine::createBrinIndex(const std::string& dbname,
         transactionContext().txnDB == dbname) {
         indexReadView = &transactionContext().readView;
     } else {
-        std::lock_guard<std::mutex> lock(globalTxnMutex_);
+        std::lock_guard<std::mutex> lock(globalTxnMutex());
         autocommitView.creatorTxnId = 0;
         autocommitView.lowLimitId =
             TxnIdGenerator::instance().maxCommittedTxId() + 1;
-        autocommitView.upLimitId = activeTransactions_.empty()
-            ? autocommitView.lowLimitId : *activeTransactions_.begin();
-        autocommitView.activeTxnIds = activeTransactions_;
+        autocommitView.upLimitId = activeTransactions().empty()
+            ? autocommitView.lowLimitId : *activeTransactions().begin();
+        autocommitView.activeTxnIds = activeTransactions();
         autocommitView.subTxnIds.clear();
         autocommitView.commitLog = getCommitLog(dbname);
         indexReadView = &autocommitView;
@@ -25059,9 +25070,9 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
     // finished; after that, the current-version indexes are complete again.
     bool indexesAreSnapshotComplete = true;
     {
-        std::lock_guard<std::mutex> lock(globalTxnMutex_);
+        std::lock_guard<std::mutex> lock(globalTxnMutex());
         for (const auto& [transactionId, activeDatabase] :
-             activeTransactionDatabases_) {
+             activeTransactionDatabases()) {
             (void)transactionId;
             if (activeDatabase == dbname) {
                 indexesAreSnapshotComplete = false;
@@ -30086,12 +30097,12 @@ std::vector<std::string> StorageEngine::query(
         transactionContext().txnDB == dbname) {
         queryView = &transactionContext().readView;
     } else {
-        std::lock_guard<std::mutex> lock(globalTxnMutex_);
+        std::lock_guard<std::mutex> lock(globalTxnMutex());
         autocommitView.creatorTxnId = 0;
         autocommitView.lowLimitId = TxnIdGenerator::instance().maxCommittedTxId() + 1;
-        autocommitView.upLimitId = activeTransactions_.empty()
-            ? autocommitView.lowLimitId : *activeTransactions_.begin();
-        autocommitView.activeTxnIds = activeTransactions_;
+        autocommitView.upLimitId = activeTransactions().empty()
+            ? autocommitView.lowLimitId : *activeTransactions().begin();
+        autocommitView.activeTxnIds = activeTransactions();
         autocommitView.subTxnIds.clear();
         autocommitView.commitLog = getCommitLog(dbname);
         queryView = &autocommitView;
@@ -39516,10 +39527,10 @@ bool StorageEngine::recoverAllDatabases() {
     // prepared xid cannot be classified as committed merely because it is
     // below the next transaction boundary. Completion removes this entry.
     {
-        std::lock_guard<std::mutex> lock(globalTxnMutex_);
+        std::lock_guard<std::mutex> lock(globalTxnMutex());
         for (const auto& [dbname, xid] : inDoubtPreparedXids) {
-            activeTransactions_.insert(xid);
-            activeTransactionDatabases_[xid] = dbname;
+            activeTransactions().insert(xid);
+            activeTransactionDatabases()[xid] = dbname;
         }
     }
 
@@ -40171,11 +40182,11 @@ bool StorageEngine::recoverAllDatabases() {
 // ========================================================================
 void StorageEngine::refreshReadView() const {
     if (!transactionContext().inTransaction) return;
-    std::lock_guard<std::mutex> lock(globalTxnMutex_);
+    std::lock_guard<std::mutex> lock(globalTxnMutex());
     transactionContext().readView.creatorTxnId = transactionContext().currentTxnId;
-    transactionContext().readView.upLimitId = activeTransactions_.empty() ? transactionContext().currentTxnId : *activeTransactions_.begin();
+    transactionContext().readView.upLimitId = activeTransactions().empty() ? transactionContext().currentTxnId : *activeTransactions().begin();
     transactionContext().readView.lowLimitId = TxnIdGenerator::instance().maxCommittedTxId() + 1;
-    transactionContext().readView.activeTxnIds = activeTransactions_;
+    transactionContext().readView.activeTxnIds = activeTransactions();
     transactionContext().readView.activeTxnIds.erase(transactionContext().currentTxnId);
     transactionContext().readView.subTxnIds.clear();
     transactionContext().readView.subTxnIds.insert(transactionContext().txnSubTxnIds.begin(), transactionContext().txnSubTxnIds.end());
@@ -40313,8 +40324,8 @@ bool StorageEngine::checkpoint(const std::string& dbname) {
     // index image unreachable from recovery; the background checkpointer can
     // retry after the transaction ends.
     {
-        std::lock_guard<std::mutex> lock(globalTxnMutex_);
-        for (const auto& [xid, activeDb] : activeTransactionDatabases_) {
+        std::lock_guard<std::mutex> lock(globalTxnMutex());
+        for (const auto& [xid, activeDb] : activeTransactionDatabases()) {
             (void)xid;
             if (activeDb == dbname) return false;
         }
@@ -41912,9 +41923,9 @@ size_t StorageEngine::vacuumToast(const std::string& dbname,
     // transaction on this database is active; a transaction that begins
     // after this check cannot see versions retired by an earlier commit.
     {
-        std::lock_guard<std::mutex> lock(globalTxnMutex_);
+        std::lock_guard<std::mutex> lock(globalTxnMutex());
         for (const auto& [transactionId, activeDatabase] :
-             activeTransactionDatabases_) {
+             activeTransactionDatabases()) {
             (void)transactionId;
             if (activeDatabase == dbname) return 0;
         }
@@ -42289,12 +42300,12 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
 
     ReadView readView;
     {
-        std::lock_guard<std::mutex> lock(globalTxnMutex_);
+        std::lock_guard<std::mutex> lock(globalTxnMutex());
         readView.creatorTxnId = 0;
         readView.lowLimitId = TxnIdGenerator::instance().maxCommittedTxId() + 1;
-        readView.upLimitId = activeTransactions_.empty()
-            ? readView.lowLimitId : *activeTransactions_.begin();
-        readView.activeTxnIds = activeTransactions_;
+        readView.upLimitId = activeTransactions().empty()
+            ? readView.lowLimitId : *activeTransactions().begin();
+        readView.activeTxnIds = activeTransactions();
         readView.subTxnIds.clear();
         readView.commitLog = getCommitLog(dbname);
     }
@@ -43556,9 +43567,9 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnap
     transactionContext().readView.commandIdVisibility = false;
     transactionContext().readView.comboCommandIds.clear();
     {
-        std::lock_guard<std::mutex> lock(globalTxnMutex_);
-        activeTransactions_.insert(transactionContext().currentTxnId);
-        activeTransactionDatabases_[transactionContext().currentTxnId] = dbname;
+        std::lock_guard<std::mutex> lock(globalTxnMutex());
+        activeTransactions().insert(transactionContext().currentTxnId);
+        activeTransactionDatabases()[transactionContext().currentTxnId] = dbname;
     }
     // Initialize SSI tracking
     {
@@ -43585,11 +43596,11 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnap
     // level therefore starts with a valid snapshot; the two read-committed
     // modes refresh it at subsequent SQL command boundaries.
     {
-        std::lock_guard<std::mutex> lock(globalTxnMutex_);
+        std::lock_guard<std::mutex> lock(globalTxnMutex());
         transactionContext().readView.creatorTxnId = transactionContext().currentTxnId;
-        transactionContext().readView.upLimitId = activeTransactions_.empty() ? transactionContext().currentTxnId : *activeTransactions_.begin();
+        transactionContext().readView.upLimitId = activeTransactions().empty() ? transactionContext().currentTxnId : *activeTransactions().begin();
         transactionContext().readView.lowLimitId = TxnIdGenerator::instance().maxCommittedTxId() + 1;
-        transactionContext().readView.activeTxnIds = activeTransactions_;
+        transactionContext().readView.activeTxnIds = activeTransactions();
         transactionContext().readView.activeTxnIds.erase(transactionContext().currentTxnId);
         transactionContext().readView.subTxnIds.clear();
         transactionContext().readView.subTxnIds.insert(transactionContext().txnSubTxnIds.begin(), transactionContext().txnSubTxnIds.end());
@@ -43937,16 +43948,16 @@ DBStatus StorageEngine::commitTransaction() {
         const IsolationLevel savedIsolation =
             committingContext.txnIsolationLevel;
         {
-            std::lock_guard<std::mutex> lock(globalTxnMutex_);
+            std::lock_guard<std::mutex> lock(globalTxnMutex());
             committingContext.readView.creatorTxnId =
                 committingContext.currentTxnId;
             committingContext.readView.lowLimitId =
                 TxnIdGenerator::instance().maxCommittedTxId() + 1;
             committingContext.readView.upLimitId =
-                activeTransactions_.empty()
+                activeTransactions().empty()
                     ? committingContext.readView.lowLimitId
-                    : *activeTransactions_.begin();
-            committingContext.readView.activeTxnIds = activeTransactions_;
+                    : *activeTransactions().begin();
+            committingContext.readView.activeTxnIds = activeTransactions();
             committingContext.readView.activeTxnIds.erase(
                 committingContext.currentTxnId);
             committingContext.readView.subTxnIds.clear();
@@ -44191,10 +44202,10 @@ DBStatus StorageEngine::commitTransaction() {
     // Remove from active set
     bool noActiveTransactions = false;
     {
-        std::lock_guard<std::mutex> lock(globalTxnMutex_);
-        activeTransactions_.erase(transactionContext().currentTxnId);
-        activeTransactionDatabases_.erase(transactionContext().currentTxnId);
-        noActiveTransactions = activeTransactions_.empty();
+        std::lock_guard<std::mutex> lock(globalTxnMutex());
+        activeTransactions().erase(transactionContext().currentTxnId);
+        activeTransactionDatabases().erase(transactionContext().currentTxnId);
+        noActiveTransactions = activeTransactions().empty();
     }
     if (noActiveTransactions) {
         std::lock_guard<std::mutex> lock(ssiMutex_);
@@ -45215,14 +45226,14 @@ DBStatus StorageEngine::rollbackTransaction() {
     const IsolationLevel savedRollbackIsolation =
         rollbackContext.txnIsolationLevel;
     {
-        std::lock_guard<std::mutex> lock(globalTxnMutex_);
+        std::lock_guard<std::mutex> lock(globalTxnMutex());
         rollbackContext.readView.creatorTxnId = 0;
         rollbackContext.readView.lowLimitId =
             TxnIdGenerator::instance().maxCommittedTxId() + 1;
-        rollbackContext.readView.upLimitId = activeTransactions_.empty()
+        rollbackContext.readView.upLimitId = activeTransactions().empty()
             ? rollbackContext.readView.lowLimitId
-            : *activeTransactions_.begin();
-        rollbackContext.readView.activeTxnIds = activeTransactions_;
+            : *activeTransactions().begin();
+        rollbackContext.readView.activeTxnIds = activeTransactions();
         rollbackContext.readView.subTxnIds.clear();
         rollbackContext.readView.commitLog = getCommitLog(rollbackDb);
     }
@@ -45263,10 +45274,10 @@ DBStatus StorageEngine::rollbackTransaction() {
     // The heap and every current-version index now agree again, so readers
     // may stop treating this xid as a source of snapshot-incomplete indexes.
     {
-        std::lock_guard<std::mutex> lock(globalTxnMutex_);
-        activeTransactions_.erase(transactionContext().currentTxnId);
-        activeTransactionDatabases_.erase(transactionContext().currentTxnId);
-        noActiveTransactions = activeTransactions_.empty();
+        std::lock_guard<std::mutex> lock(globalTxnMutex());
+        activeTransactions().erase(transactionContext().currentTxnId);
+        activeTransactionDatabases().erase(transactionContext().currentTxnId);
+        noActiveTransactions = activeTransactions().empty();
     }
 
     transactionContext().deferredChecks.erase(transactionContext().currentTxnId);
@@ -46066,14 +46077,14 @@ DBStatus StorageEngine::commitPrepared(const std::string& xid) {
     completionContext.inTransaction = true;
     completionContext.txnIsolationLevel = IsolationLevel::READ_COMMITTED;
     {
-        std::lock_guard<std::mutex> lock(globalTxnMutex_);
+        std::lock_guard<std::mutex> lock(globalTxnMutex());
         completionContext.readView.creatorTxnId = savedTxnId;
         completionContext.readView.lowLimitId =
             TxnIdGenerator::instance().maxCommittedTxId() + 1;
-        completionContext.readView.upLimitId = activeTransactions_.empty()
+        completionContext.readView.upLimitId = activeTransactions().empty()
             ? completionContext.readView.lowLimitId
-            : *activeTransactions_.begin();
-        completionContext.readView.activeTxnIds = activeTransactions_;
+            : *activeTransactions().begin();
+        completionContext.readView.activeTxnIds = activeTransactions();
         completionContext.readView.activeTxnIds.erase(savedTxnId);
         completionContext.readView.subTxnIds.clear();
         completionContext.readView.commitLog = getCommitLog(savedDB);
@@ -46147,9 +46158,9 @@ DBStatus StorageEngine::commitPrepared(const std::string& xid) {
     // Normal commit logic
     TxnIdGenerator::instance().notifyCommit(savedTxnId);
     {
-        std::lock_guard<std::mutex> lock(globalTxnMutex_);
-        activeTransactions_.erase(savedTxnId);
-        activeTransactionDatabases_.erase(savedTxnId);
+        std::lock_guard<std::mutex> lock(globalTxnMutex());
+        activeTransactions().erase(savedTxnId);
+        activeTransactionDatabases().erase(savedTxnId);
     }
 
     transactionContext().txnLog.clear();

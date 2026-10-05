@@ -23,6 +23,7 @@ set -u
 
 SRC_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 DBMS_MAIN="${1:-${SRC_DIR}/dbms_main}"
+export DBMS_COMPATIBILITY_MODE=extended
 
 if [ ! -x "$DBMS_MAIN" ]; then
     echo "[crash-matrix] dbms_main not found at $DBMS_MAIN" >&2
@@ -30,7 +31,15 @@ if [ ! -x "$DBMS_MAIN" ]; then
 fi
 
 WORK="$(mktemp -d /tmp/dbms_crash_matrix.XXXXXX)"
-trap 'kill -9 ${CHILD_PIDS[@]:-} 2>/dev/null; rm -rf "$WORK"' EXIT
+cleanup_work() {
+    kill -9 ${CHILD_PIDS[@]:-} 2>/dev/null
+    if [ "${DBMS_CRASH_MATRIX_KEEP_WORK:-0}" = "1" ]; then
+        echo "[crash-matrix] preserved workdir: $WORK"
+    else
+        rm -rf "$WORK"
+    fi
+}
+trap cleanup_work EXIT
 
 PASS=0
 FAIL=0
@@ -64,7 +73,7 @@ PYEOF
 spawn_sql() {
     local dir="$1" sqlfile="$2"
     mkfifo "$dir/in.fifo" 2>/dev/null || true
-    ( cd "$dir" && "$DBMS_MAIN" < "$dir/in.fifo" > "$dir/out.log" 2>&1 ) &
+    ( cd "$dir" && exec "$DBMS_MAIN" -D "$dir" < "$dir/in.fifo" > "$dir/out.log" 2>&1 ) &
     CHILD_PIDS+=($!)
     # Keep the fifo writer end open so dbms_main doesn't see EOF.
     exec 9>"$dir/in.fifo"
@@ -86,7 +95,7 @@ verify() {
     local dir="$1" db="$2" want="$3" unwant="$4"
     local result
     result="$(cd "$dir" && printf 'admin admin\nUSE DATABASE %s;\nSELECT id, payload FROM crash_t ORDER BY id;\nexit\n' "$db" \
-              | timeout 60 "$DBMS_MAIN" 2>&1)"
+              | timeout 60 "$DBMS_MAIN" -D "$dir" 2>&1)"
     local rc=$?
     if [ $rc -ne 0 ]; then
         echo "[crash-matrix] verify: restart process failed rc=$rc"
@@ -126,13 +135,13 @@ run_case() {
 CREATE DATABASE crashdb;
 USE DATABASE crashdb;
 CREATE TABLE crash_t (id INT PRIMARY KEY, payload VARCHAR(64));'
-    (cd "$dir" && printf '%s\nexit\n' "$setup_sql" | timeout 60 "$DBMS_MAIN" > /dev/null 2>&1) || {
+    (cd "$dir" && printf '%s\nexit\n' "$setup_sql" | timeout 60 "$DBMS_MAIN" -D "$dir" > /dev/null 2>&1) || {
         RESULTS+=("FAIL $tag (setup)"); FAIL=$((FAIL+1)); return; }
 
     # Drive the workload with pacing, then kill.
     local pid
     mkfifo "$dir/in.fifo" 2>/dev/null || true
-    ( cd "$dir" && "$DBMS_MAIN" < "$dir/in.fifo" > "$dir/out.log" 2>&1 ) &
+    ( cd "$dir" && exec "$DBMS_MAIN" -D "$dir" < "$dir/in.fifo" > "$dir/out.log" 2>&1 ) &
     pid=$!
     CHILD_PIDS+=($pid)
     exec 9>"$dir/in.fifo"

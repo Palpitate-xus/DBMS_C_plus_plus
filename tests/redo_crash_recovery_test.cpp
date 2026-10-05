@@ -6,6 +6,9 @@
 #include <filesystem>
 #include <iostream>
 #include <cassert>
+#include <csignal>
+#include <sys/wait.h>
+#include <unistd.h>
 
 dbms::Config g_config;
 
@@ -34,29 +37,68 @@ int main() {
     std::filesystem::remove_all(dbname + ".txn_backup");
     std::filesystem::remove_all(".txnid");
 
-    // Scenario 1: uncommitted insert, crash (object destruction), recover -> row not visible.
+    // Establish committed state before exercising a real hard crash.  The
+    // old test only destroyed StorageEngine normally, which ran destructors
+    // and did not cover the process-death path in the crash matrix.
     {
         StorageEngine engine;
         setupTable(engine, dbname);
         assert(engine.beginTransaction(dbname) == DBStatus::OK);
         std::map<std::string, std::string> vals;
-        vals["id"] = "1";
-        vals["name"] = "uncommitted";
+        vals["id"] = "9";
+        vals["name"] = "committed-before-crash";
         assert(engine.insert(dbname, "t", vals) == DBStatus::OK);
-        vals["id"] = "3";
-        vals["name"] = "uncommitted-again";
-        assert(engine.insert(dbname, "t", vals) == DBStatus::OK);
-        // No commit/rollback - simulate crash by destroying engine.
+        assert(engine.commitTransaction() == DBStatus::OK);
     }
+
+    int readyPipe[2]{};
+    assert(::pipe(readyPipe) == 0);
+    const pid_t child = ::fork();
+    assert(child >= 0);
+    if (child == 0) {
+        ::close(readyPipe[0]);
+        char status = 'E';
+        StorageEngine engine;
+        if (engine.beginTransaction(dbname) == DBStatus::OK) {
+            std::map<std::string, std::string> vals{
+                {"id", "1"}, {"name", "uncommitted"}};
+            if (engine.insert(dbname, "t", vals) == DBStatus::OK) {
+                vals["id"] = "3";
+                vals["name"] = "uncommitted-again";
+                if (engine.insert(dbname, "t", vals) == DBStatus::OK) {
+                    status = 'R';
+                }
+            }
+        }
+        const ssize_t statusBytes =
+            ::write(readyPipe[1], &status, sizeof(status));
+        if (statusBytes != static_cast<ssize_t>(sizeof(status))) {
+            ::_exit(3);
+        }
+        if (status != 'R') ::_exit(2);
+        for (;;) ::pause();
+    }
+    ::close(readyPipe[1]);
+    char childReady = 0;
+    assert(::read(readyPipe[0], &childReady, sizeof(childReady)) ==
+           static_cast<ssize_t>(sizeof(childReady)));
+    ::close(readyPipe[0]);
+    assert(childReady == 'R');
+    assert(::kill(child, SIGKILL) == 0);
+    int childStatus = 0;
+    assert(::waitpid(child, &childStatus, 0) == child);
+    assert(WIFSIGNALED(childStatus) && WTERMSIG(childStatus) == SIGKILL);
 
     {
         StorageEngine engine;
         auto rows = engine.query(dbname, "t", {}, {"id", "name"});
+        assert(rowContains(rows, "committed-before-crash"));
         assert(!rowContains(rows, "uncommitted"));
         assert(!rowContains(rows, "uncommitted-again"));
         int64_t rid = 0;
         auto* pk = engine.getPKIndex(dbname, "t");
         assert(pk != nullptr);
+        assert(pk->search("9", rid));
         assert(!pk->search("1", rid));
         assert(!pk->search("3", rid));
         assert(engine.checkpoint(dbname));
