@@ -8,8 +8,9 @@ Status: partial. The source/test fixes are local commits `4534b971`,
 (simple scalar expression projections, 2026-10-05), `1ef35962`
 (evaluator-supported scalar functions, 2026-10-05), `de98eddb`
 (simple CASE projections, 2026-10-05), `cd53df9d`
-(ordering by a projected expression, 2026-10-05), and `d7389c77`
-(alias-qualified star expansion, 2026-10-05).
+(ordering by a projected expression, 2026-10-05), `d7389c77`
+(alias-qualified star expansion, 2026-10-05), and `93951ac3`
+(multi-column star protocol coverage, 2026-10-05).
 
 ## Reproduced behavior
 
@@ -174,7 +175,9 @@ Status: partial. The source/test fixes are local commits `4534b971`,
   `tests/join_type_protocol_e2e_test.py`, and `tests/multijoin_e2e_test.py`
   passed. `SELECT b.*` on a LEFT JOIN chain now expands the right relation's
   column and returns NULL for the unmatched row; before the fix it failed with
-  `42703`. General row expansion and schema-qualified star remain incomplete.
+  `42703`. Follow-up `93951ac3` adds a three-column expansion with INT/TEXT
+  OIDs and a real NULL in the final field. General row expansion and
+  schema-qualified star remain incomplete.
 - `tests/compat/cases/multijoin_projection_filter.sql` was added, but the
   differential runner refused preflight because the configured reference
   server reports PostgreSQL 17.2 (`170002`) while the runner requires 18.6
