@@ -2,7 +2,8 @@
 
 Status: partial. The source/test fixes are local commits `4534b971`,
 `b87d4a19`, `858d6da9`, `0a57fee1`, `e042360b`, and `856fe079`
-(2026-10-05).
+(source fix, 2026-10-05), with follow-up RIGHT/FULL regression coverage in
+`65718c2b` (2026-10-05).
 
 ## Reproduced behavior
 
@@ -68,11 +69,11 @@ Status: partial. The source/test fixes are local commits `4534b971`,
 - After the conjunction fix, `scripts/build.sh`,
   `tests/join_type_protocol_e2e_test.py`, and `tests/multijoin_e2e_test.py`
   passed. The protocol E2E covers reordered inner joins with additional `ON`
-  filters, a residual that cannot run until an earlier relation joins, and a
-  two-edge LEFT JOIN chain whose filtered second edge must preserve a
-  NULL-extended row. The conjunction case returned no rows before the fix;
-  the multi-join E2E also retains its three-table, reordered, and four-table
-  cases.
+  filters, a residual that cannot run until an earlier relation joins, and
+  two-edge LEFT/RIGHT/FULL chains whose filtered edges must preserve
+  NULL-extended rows on the correct side. The conjunction case returned no
+  rows before the fix; the multi-join E2E also retains its three-table,
+  reordered, and four-table cases.
 - `tests/compat/cases/multijoin_projection_filter.sql` was added, but the
   differential runner refused preflight because the configured reference
   server reports PostgreSQL 17.2 (`170002`) while the runner requires 18.6
