@@ -5,7 +5,7 @@
       "issue": "WAL-06",
       "gap_ids": ["WAL-06"],
       "status": "partial",
-      "commits": ["93addab7", "2685454b", "3b595189", "8e92ebd9", "b32ab185", "f76809b6", "16b72b0a", "64978375", "7b210c05"],
+      "commits": ["93addab7", "2685454b", "3b595189", "8e92ebd9", "b32ab185", "f76809b6", "16b72b0a", "64978375", "7b210c05", "068623bc"],
       "evidence": [
         "docs/code-review-progress.md",
         "docs/issue-wal-06-index-checksum-coverage.md",
@@ -21,8 +21,11 @@
         "src/access/HashIndex.cpp",
         "src/access/HashIndexFormat.h",
         "src/access/IndexChecksum.h",
+        "src/access/SPGiSTIndexFormat.h",
         "src/common/DataDirectory.cpp",
-        "tests/gist_range_search_test.cpp"
+        "src/commands/TableManage.cpp",
+        "tests/gist_range_search_test.cpp",
+        "tests/specialized_index_dml_test.cpp"
       ],
       "tests": [
         "tests/bptree_topology_corruption_test.cpp",
@@ -34,14 +37,15 @@
         "tests/gin_brin_index_test.cpp",
         "tests/gist_range_search_test.cpp",
         "tests/checksum_verification_e2e_test.py",
+        "tests/specialized_index_dml_test.cpp",
         "scripts/build.sh"
       ],
       "verification": {
-        "reproduction": "B+ tree pages first had only structural/sorted-key validation; after adding content-only CRC32C, swapping two intact sibling pages still passed CRC and made a key lookup return NotFound. Hash V1 files had bounded structural parsing but no checksum; a structurally valid RID/key bit flip could silently alter lookup results. Legacy whitespace-delimited GIN sidecars could not represent JSON/array keys containing spaces, silently losing matches such as the key 'hello world'. BRIN V1 stored native-endian range summaries without integrity checks, so damaged bounds could silently alter candidate ranges. Legacy GiST text sidecars had no checksum; changing both ends of a plausible range while preserving valid record syntax could silently change range-search candidates",
-        "fix": "New C552 and REINDEX-built B+ tree files store CRC32C over each page plus its fixed-little-endian physical block number. New Hash sidecars use V2 CRC32C trailers, Bloom sidecars use BLM2 CRC32C trailers, GIN sidecars use length-delimited binary V2 plus CRC32C, BRIN sidecars use portable little-endian V2 plus CRC32C, and GiST sidecars use length-delimited binary V2 plus CRC32C; Hash V1, Bloom BLM1, GIN V1, BRIN V1, and GiST V1 remain readable and unchecked. Bloom, GIN and GiST creation use synced atomic publication. The read-only verifier scans .idx/.idx_* pages, .hidx, .bidx, .gin, .brin, and .gist files under cluster and resolved tablespaces. C551/zero-marker B+ tree pages and V1 Hash/Bloom/GIN/BRIN/GiST files are separately reported as legacy unchecked data",
-        "focused_tests": "Production build; direct Hash and Bloom V2 write/reload, corruption rejection, and legacy compatibility tests; Bloom directory-fsync failure/retry regression; complete bloom_index_test StorageEngine lifecycle/DML suite; gin_brin_index_test whitespace-key lookup, GIN/BRIN V2 checksum corruption rejection, V1 compatibility and BRIN range lookup; gist_range_search_test plausible-range checksum corruption fallback, V1 compatibility and malformed-sidecar fallback; offline checksum E2E covering read-only snapshots, cluster/composite/tablespace discovery, B+ tree page bit flips/swaps, Hash/Bloom/GIN/BRIN/GiST corruption, GiST damaged signature and valid-CRC out-of-bound entry count, and all legacy format counts; ledger consistency check passed. Earlier B+ tree topology/concurrency and 12-case process crash evidence remains recorded",
+        "reproduction": "B+ tree pages first had only structural/sorted-key validation; after adding content-only CRC32C, swapping two intact sibling pages still passed CRC and made a key lookup return NotFound. Hash V1 files had bounded structural parsing but no checksum; a structurally valid RID/key bit flip could silently alter lookup results. Legacy whitespace-delimited GIN sidecars could not represent JSON/array keys containing spaces, silently losing matches such as the key 'hello world'. BRIN V1 stored native-endian range summaries without integrity checks, so damaged bounds could silently alter candidate ranges. Legacy GiST text sidecars had no checksum; changing both ends of a plausible range while preserving valid record syntax could silently change range-search candidates. SP-GiST also stored point coordinates as checksum-free V1 text; a valid coordinate edit could remain parseable but point lookup would use stale data",
+        "fix": "New C552 and REINDEX-built B+ tree files store CRC32C over each page plus its fixed-little-endian physical block number. New Hash sidecars use V2 CRC32C trailers, Bloom sidecars use BLM2 CRC32C trailers, GIN sidecars use length-delimited binary V2 plus CRC32C, BRIN sidecars use portable little-endian V2 plus CRC32C, GiST sidecars use length-delimited binary V2 plus CRC32C, and SP-GiST sidecars use fixed-width RID/IEEE-754 point records plus CRC32C; V1 Hash, Bloom, GIN, BRIN, GiST and SP-GiST formats remain readable and unchecked. Bloom, GIN, GiST and SP-GiST creation use synced atomic publication. The read-only verifier scans .idx/.idx_* pages, .hidx, .bidx, .gin, .brin, .gist and .spgist files under cluster and resolved tablespaces. C551/zero-marker B+ tree pages and all V1 sidecars are separately reported as legacy unchecked data",
+        "focused_tests": "Production build; direct Hash and Bloom V2 write/reload, corruption rejection, and legacy compatibility tests; Bloom directory-fsync failure/retry regression; complete bloom_index_test StorageEngine lifecycle/DML suite; gin_brin_index_test whitespace-key lookup, GIN/BRIN V2 checksum corruption rejection, V1 compatibility and BRIN range lookup; gist_range_search_test plausible-range checksum corruption fallback, V1 compatibility and malformed-sidecar fallback; specialized_index_dml_test SP-GiST V1 compatibility plus plausible coordinate corruption with stale CRC falling back to heap; offline checksum E2E covering read-only snapshots, cluster/composite/tablespace discovery, B+ tree page bit flips/swaps, Hash/Bloom/GIN/BRIN/GiST/SP-GiST corruption, damaged signatures and valid-CRC out-of-bound counts, and legacy format counts; ledger consistency check passed. Earlier B+ tree topology/concurrency and 12-case process crash evidence remains recorded",
         "full_suite": "The full registered suite was not run on this revision; the focused offline heap/index verifier E2E passed, but no PostgreSQL 18.6 differential was run",
-        "scope": "WAL-06 remains partial: C551/zero-marker B+ trees, V1 Hash files, BLM1 Bloom files, V1 GIN files, native-endian V1 BRIN files and V1 GiST files remain unchecked; the offline scan does not parse B+ tree topology, GIN posting semantics, BRIN range semantics or GiST entry semantics. SP-GiST and catalog/schema/FSM/VM metadata remain outside unified checksums. Encrypted-index sidecar details, enable/disable/rewrite/progress and online verification remain open; no TDE security review"
+        "scope": "WAL-06 remains partial: C551/zero-marker B+ trees and all V1 Hash/Bloom/GIN/BRIN/GiST/SP-GiST sidecars remain unchecked; the offline scan does not parse B+ tree topology, GIN posting semantics, BRIN range semantics or GiST/SP-GiST entry semantics. Catalog/schema/FSM/VM metadata remain outside unified checksums. Encrypted-index sidecar details, enable/disable/rewrite/progress and online verification remain open; no TDE security review"
       }
     },
     {

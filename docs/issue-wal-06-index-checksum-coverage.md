@@ -55,24 +55,31 @@ sidecar rather than a PostgreSQL GiST tree. The offline verifier recognizes
 V1 unchecked counts, and validates the V2 signature, version, count bound and
 CRC without certifying range semantics or tree topology.
 
-SP-GiST sidecars still do not have checksums. A malformed sidecar found on a
-cold cache previously produced an empty search result instead of rebuilding a
-temporary index from the heap. The query path now falls back to a heap scan when
-SP-GiST parsing fails, preventing malformed/truncated files from silently
-turning valid point matches into misses. This does not detect structurally
-valid bit flips and does not add SP-GiST checksum coverage.
+SP-GiST sidecars now use a fixed-width binary V2 format for new writes: each
+record stores a RID and two IEEE-754 point coordinates, and a CRC32C trailer
+covers the complete header and payload. Online loading verifies the checksum
+before constructing its in-memory quadtree; a malformed file or checksum
+mismatch falls back to a heap scan instead of turning valid point matches into
+misses. V1 text sidecars remain readable but unchecked. The offline verifier
+discovers `.spgist` files in the cluster and resolved tablespaces, verifies the
+V2 signature/version, exact fixed-record count and CRC, and reports V1 as
+unchecked; it does not certify RID/coordinate semantics or index topology.
 
 The offline `--verify-data-checksums` utility discovers B+ tree files named
 `.idx`/`.idx_*`, hash sidecars named `.hidx`, Bloom sidecars named `.bidx`, and
-GIN/BRIN/GiST sidecars named `.gin`/`.brin`/`.gist` below the cluster and resolved tablespace roots. It opens them with read-only,
+GIN/BRIN/GiST/SP-GiST sidecars named `.gin`/`.brin`/`.gist`/`.spgist` below
+the cluster and resolved tablespace roots. It opens them with read-only,
 no-follow descriptors; checks file/header bounds and checksums; and reports
 page-bound, content-only, unchecked B+ tree page counts, and checked/unchecked
-hash, Bloom, GIN, BRIN, and GiST file counts separately. A zero-marker B+ tree, V1 hash
-file, `BLM1` Bloom file, V1 GIN text file, V1 BRIN file, or V1 GiST text file is scanned but explicitly
-reported as unchecked. GIN V2 offline validation checks the signature, version,
+hash, Bloom, GIN, BRIN, GiST, and SP-GiST file counts separately. A zero-marker
+B+ tree, V1 hash file, `BLM1` Bloom file, V1 GIN text file, V1 BRIN file, V1
+GiST text file, or V1 SP-GiST text file is scanned but explicitly reported as
+unchecked. GIN V2 offline validation checks the signature, version,
 entry-count bound and CRC32C, not posting-list topology; BRIN V2 checks the
 header, range-count bound and CRC32C, not range-summary semantics; GiST V2
-checks the signature, version, entry-count bound and CRC32C, not range semantics.
+checks the signature, version, entry-count bound and CRC32C, not range semantics;
+SP-GiST V2 checks the signature, version, exact fixed-record count and CRC32C,
+not RID/coordinate semantics.
 Encrypted
 B+ tree sidecars use the existing `PageCrypto` read path; this addition is not
 a TDE security review.
@@ -102,15 +109,17 @@ a TDE security review.
   searches, a structurally valid V2 range corruption falling back to the heap,
   V1 compatibility and malformed-sidecar fallback.
 - `scripts/build_one_test.sh specialized_index_dml_test` — passed malformed
-  cold-cache SP-GiST sidecar heap-fallback regression and existing specialized
-  index DML/lifecycle cases.
+  and checksum-corrupt cold-cache SP-GiST sidecar heap-fallback regressions,
+  SP-GiST V1 compatibility, and existing specialized index DML/lifecycle cases.
 - `scripts/build.sh` — production build passed after the GiST V2 and SP-GiST
-  fallback changes.
+  checksum changes.
 - `python3 tests/checksum_verification_e2e_test.py` — passed read-only
   snapshots, in-cluster/composite/tablespace B+ tree discovery, page-bit and
-  whole-page-swap rejection, `.hidx`, `.bidx`, `.gin`, `.brin`, and `.gist`
+  whole-page-swap rejection, `.hidx`, `.bidx`, `.gin`, `.brin`, `.gist`, and
+  `.spgist`
   signature/payload corruption and valid-CRC out-of-bound-count rejection,
-  V1 compatibility and unchecked legacy counts.
+  V1 compatibility and unchecked legacy counts, plus SP-GiST damaged signature,
+  exact-count and payload-checksum rejection.
 - `git diff --check` — passed.
 
 The full registered suite and a PostgreSQL 18.6 runtime differential were not
@@ -120,15 +129,17 @@ run. The encrypted-index sidecar path was not independently exercised.
 
 WAL-06 remains partial. Existing `0xC551` B+ tree files are not page-bound
 until rewritten; zero-marker legacy trees, V1 hash files, `BLM1` Bloom files,
-V1 GIN text files, V1 BRIN files and V1 GiST text files remain unchecked.
-SP-GiST files still lack checksums; catalog/schema, FSM/VM, and other metadata do
+V1 GIN text files, V1 BRIN files, V1 GiST text files, and V1 SP-GiST text files
+remain unchecked. Catalog/schema, FSM/VM, and other metadata do
 not have unified checksums. The offline verifier checks B+ tree page checksums
-and V2 Hash/Bloom/GIN/BRIN/GiST sidecar CRCs, but does not parse tree topology,
-GIN postings, BRIN range semantics, or GiST entry semantics. There is no
+and V2 Hash/Bloom/GIN/BRIN/GiST/SP-GiST sidecar CRCs, but does not parse tree
+topology, GIN postings, BRIN range semantics, or GiST/SP-GiST entry semantics.
+There is no
 `pg_checksums`-style enable/disable/rewrite/progress workflow or online
 whole-cluster verification.
 The custom checksums are not PostgreSQL page checksums.
 
 Source/test commits: `93addab7`, `2685454b`, `3b595189`, `8e92ebd9`,
-`b32ab185`, `f76809b6`, `16b72b0a`, `d27eda0f`, `64978375`, `7b210c05`
+`b32ab185`, `f76809b6`, `16b72b0a`, `d27eda0f`, `64978375`, `7b210c05`,
+`068623bc`
 (not pushed).
