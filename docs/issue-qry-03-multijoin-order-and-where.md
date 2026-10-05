@@ -11,7 +11,9 @@ Status: partial. The source/test fixes are local commits `4534b971`,
 (ordering by a projected expression, 2026-10-05), `d7389c77`
 (alias-qualified star expansion, 2026-10-05), and `93951ac3`
 (multi-column star protocol coverage, 2026-10-05), plus `c7447f26`
-(FROM-less LATERAL direct outer-column targets, 2026-10-05; QRY-02).
+(FROM-less LATERAL direct outer-column targets, 2026-10-05; QRY-02), and
+`18fc748b` (bounded INNER/LEFT LATERAL `ON` conditions, 2026-10-05;
+QRY-02/QRY-03).
 
 ## Reproduced behavior
 
@@ -52,6 +54,9 @@ Status: partial. The source/test fixes are local commits `4534b971`,
 - Join execution used raw display strings as hash keys. A `NUMERIC` pair
   containing `1.0` and `1.00` therefore produced no match in both `USING` and
   explicit `ON`, even though the numeric values compare equal.
+- `LEFT JOIN LATERAL (...) x ON ...` was not recognized by the lateral
+  materializer and fell through to a missing-relation error; it also had no
+  per-left-row ON filtering or SQL NULL-extension behavior.
 
 ## Fixes
 
@@ -86,6 +91,13 @@ Status: partial. The source/test fixes are local commits `4534b971`,
   covers integer/text values, quoted text, NULL, and the empty-input case.
   This narrow target-list rule does not resolve bare outer references inside
   expressions or WHERE, nor does it support multiple visible left relations.
+- For one simple left base relation, materialize `JOIN`/`INNER JOIN LATERAL`
+  and `LEFT [OUTER] JOIN LATERAL` per left row, evaluate a supported boolean
+  `ON` expression against typed, NULL-aware left/right values, and apply LEFT
+  NULL extension when no right row passes the condition. This path requires
+  aligned structured rows from the lateral subquery; it does not implement
+  arbitrary join trees, multiple left relations, lateral chains, or table
+  functions.
 - Sort supported column-reference or output-position keys with ASC/DESC and
   NULLS FIRST/LAST, then apply LIMIT/OFFSET. Unsupported projections, sort
   expressions, DISTINCT/GROUP/WINDOW forms fail explicitly rather than being
@@ -185,6 +197,14 @@ Status: partial. The source/test fixes are local commits `4534b971`,
   `42703`. Follow-up `93951ac3` adds a three-column expansion with INT/TEXT
   OIDs and a real NULL in the final field. General row expansion and
   schema-qualified star remain incomplete.
+- After `18fc748b`, `scripts/build.sh`,
+  `tests/derived_type_protocol_e2e_test.py`, and
+  `tests/sql_literal_preservation_e2e_test.py` passed. The protocol test covers
+  LEFT LATERAL `ON true`, LEFT per-row filtering where false/NULL conditions
+  must preserve the left row with a typed SQL NULL, and INNER LATERAL filtering;
+  the original LEFT LATERAL query failed before the fix with `42P01`. This is
+  bounded to one simple left relation and evaluator-supported boolean `ON`
+  expressions; the full suite and PostgreSQL 18.6 differential were not run.
 - `tests/compat/cases/multijoin_projection_filter.sql` was added, but the
   differential runner refused preflight because the configured reference
   server reports PostgreSQL 17.2 (`170002`) while the runner requires 18.6
@@ -197,6 +217,9 @@ evaluator-supported scalar calls are handled), general row expansion beyond
 simple `alias.*`, DISTINCT/GROUP/HAVING/WINDOW, collation-aware and arbitrary-
 expression ordering, and arbitrary nested/lateral join semantics remain open.
 The FROM-less LATERAL direct-column target case is only a bounded QRY-02 fix;
-other lateral correlation and parameterized join cases remain unsupported.
+simple INNER/LEFT LATERAL `ON` evaluation now additionally works for one
+simple left relation, but outer references inside expressions/WHERE, multiple
+left relations, lateral chains, table functions, and general parameterized or
+nested join semantics remain unsupported.
 OPT-02's DP/exhaustive join search, GEQO threshold, semi/anti constraints, and
 bushy plans remain unimplemented.
