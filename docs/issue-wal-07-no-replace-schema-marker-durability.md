@@ -40,6 +40,12 @@ directory sync fails, it attempts a no-replace restoration of the empty marker
 and reports `IO_ERROR` so a failed statement does not silently leave the
 namespace removed.
 
+`RENAME SEQUENCE` previously failed to sync its rollback rename after a
+publication-sync error. `DROP SEQUENCE` could return `IO_ERROR` after unlink
+without restoring the sequence file. Rename now syncs its rollback; drop
+retains the original bytes and restores them with no-replace publication when
+the parent sync fails.
+
 ## Verification
 
 - `bash scripts/build_one_test.sh schema_marker_publish_guard_test` — passed.
@@ -58,6 +64,9 @@ namespace removed.
   absent, and a retry succeeded. `schema_marker_publish_guard_test` injected
   failure after marker unlink and verified the schema marker was restored,
   duplicate CREATE was reported, and a subsequent DROP succeeded.
+- `bash scripts/build_one_test.sh sequence_namespace_durability_test` —
+  passed. Injected directory-sync failures after sequence rename and deletion
+  restored the original name/content; retries then succeeded.
 - `git diff --check` — passed before commit.
 
 No full registered suite, standalone production executable build, or
@@ -74,5 +83,6 @@ target was synced before that cleanup and the alias is not interpreted as a
 schema marker.
 
 Source/test commits: `e8a6d1ee` (schema marker create), `cc129973` (schema
-marker drop), `f8c02416` (database creation), `b707afd3` (database drop), and
-`ab72c8fe` (database rename), all not pushed.
+marker drop), `f8c02416` (database creation), `b707afd3` (database drop),
+`ab72c8fe` (database rename), and `3db539a9` (sequence rename/drop), all not
+pushed.
