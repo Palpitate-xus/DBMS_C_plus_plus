@@ -14,13 +14,48 @@ static_assert(BP_KEY_LEN >= 4, "BP_KEY_LEN too small");
 
 namespace {
 constexpr size_t kMaxLeafKeys =
-    (BP_PAGE_SIZE - 3 - sizeof(uint32_t)) / (BP_KEY_LEN + sizeof(int64_t));
+    (BP_PAGE_SIZE - 3 - 2 * sizeof(uint32_t)) /
+    (BP_KEY_LEN + sizeof(int64_t));
 constexpr size_t kMaxInternalKeys =
-    (BP_PAGE_SIZE - 3 - sizeof(uint32_t)) / (BP_KEY_LEN + sizeof(uint32_t));
+    (BP_PAGE_SIZE - 3 - 2 * sizeof(uint32_t)) /
+    (BP_KEY_LEN + sizeof(uint32_t));
 constexpr size_t kMaxNodeOrder =
     kMaxLeafKeys < kMaxInternalKeys ? kMaxLeafKeys : kMaxInternalKeys;
+constexpr uint16_t kChecksummedIndexFormat = 0xC551;
+constexpr size_t kPageChecksumOffset = BP_PAGE_SIZE - sizeof(uint32_t);
 static_assert(kMaxNodeOrder >= 2 && kMaxNodeOrder <= UINT16_MAX,
               "invalid B+ tree page layout");
+static_assert(3 + kMaxLeafKeys * (BP_KEY_LEN + sizeof(int64_t)) +
+                      sizeof(uint32_t) <= kPageChecksumOffset,
+              "B+ tree leaf payload overlaps the page checksum");
+
+uint32_t indexPageCrc32c(const char* page) {
+    uint32_t crc = 0xFFFFFFFFu;
+    for (size_t i = 0; i < BP_PAGE_SIZE; ++i) {
+        const uint8_t byte = i >= kPageChecksumOffset
+            ? 0 : static_cast<uint8_t>(page[i]);
+        crc ^= byte;
+        for (unsigned bit = 0; bit < 8; ++bit) {
+            crc = (crc >> 1) ^ ((crc & 1u) ? 0x82F63B78u : 0u);
+        }
+    }
+    crc ^= 0xFFFFFFFFu;
+    // Zero means "legacy page without a checksum" in this format.
+    return crc == 0 ? 0xFFFFFFFFu : crc;
+}
+
+void writeIndexPageChecksum(char* page) {
+    uint32_t zero = 0;
+    std::memcpy(page + kPageChecksumOffset, &zero, sizeof(zero));
+    const uint32_t checksum = indexPageCrc32c(page);
+    std::memcpy(page + kPageChecksumOffset, &checksum, sizeof(checksum));
+}
+
+bool verifyIndexPageChecksum(const char* page) {
+    uint32_t stored = 0;
+    std::memcpy(&stored, page + kPageChecksumOffset, sizeof(stored));
+    return stored != 0 && stored == indexPageCrc32c(page);
+}
 }  // namespace
 
 // Index buffer-pool frame count. Overridable with DBMS_INDEX_BUFFER_FRAMES.
@@ -123,7 +158,18 @@ bool BPTree::deserializeNode(const char* buf, Node& node, uint16_t order) {
 // File I/O
 // ========================================================================
 BPTree::BPTree(const std::filesystem::path& indexFile)
-    : filePath_(indexFile), bp_(std::make_unique<BufferPool>(indexFile.string(), indexBufferFrameCount())) {}
+    : filePath_(indexFile),
+      bp_(std::make_unique<BufferPool>(
+          indexFile.string(), indexBufferFrameCount(), BP_PAGE_SIZE)) {
+    bp_->setPageValidator([this](uint32_t pageId, const char* data) {
+        if (pageId == 0 || header_.reserved != kChecksummedIndexFormat)
+            return true;
+        if (verifyIndexPageChecksum(data)) return true;
+        std::cerr << "[index] invalid B+ tree page checksum in " << filePath_
+                  << " at block " << pageId << std::endl;
+        return false;
+    });
+}
 
 BPTree::~BPTree() {
     close();
@@ -168,6 +214,7 @@ bool BPTree::openInternal(bool createIfMissing) {
         header_.nextFreePage = 1;
         header_.order = static_cast<uint16_t>(std::min(size_t(100), kMaxNodeOrder));
         if (header_.order < 2) header_.order = 2;
+        header_.reserved = kChecksummedIndexFormat;
         if (!writeHeader()) {
             bp_->close();
             return false;
@@ -198,6 +245,9 @@ bool BPTree::writeHeader() {
     char* buf = bp_->fetchPage(0);
     if (!buf) return false;
     std::memcpy(buf, &header_, sizeof(FileHeader));
+    if (header_.reserved == kChecksummedIndexFormat) {
+        writeIndexPageChecksum(buf);
+    }
     bp_->markDirty(0);
     bp_->unpinPage(0);
     return true;
@@ -212,8 +262,19 @@ bool BPTree::readHeader() {
     char* buf = bp_->fetchPage(0);
     if (!buf) return false;
     std::memcpy(&header_, buf, sizeof(FileHeader));
+    const bool headerChecksumValid =
+        header_.reserved == kChecksummedIndexFormat
+            ? verifyIndexPageChecksum(buf)
+            : header_.reserved == 0 && [&] {
+                  uint32_t legacyTrailer = 0;
+                  std::memcpy(&legacyTrailer,
+                              buf + kPageChecksumOffset,
+                              sizeof(legacyTrailer));
+                  return legacyTrailer == 0;
+              }();
     bp_->unpinPage(0);
-    if (header_.order < 2 || header_.order > kMaxNodeOrder ||
+    if (!headerChecksumValid || header_.order < 2 ||
+        header_.order > kMaxNodeOrder ||
         header_.nextFreePage < 1 || header_.nextFreePage > pageCount ||
         (header_.rootPage != 0 &&
          (header_.rootPage >= header_.nextFreePage || header_.rootPage >= pageCount))) {
@@ -235,6 +296,9 @@ uint32_t BPTree::allocPage() {
         return 0;
     }
     std::memset(buf, 0, BP_PAGE_SIZE);
+    if (header_.reserved == kChecksummedIndexFormat) {
+        writeIndexPageChecksum(buf);
+    }
     bp_->markDirty(page);
     bp_->unpinPage(page);
     return page;
@@ -258,6 +322,9 @@ bool BPTree::writeNode(uint32_t pageNum, const Node& node) {
     char* buf = bp_->fetchPage(pageNum);
     if (!buf) return false;
     serializeNode(buf, node, header_.order);
+    if (header_.reserved == kChecksummedIndexFormat) {
+        writeIndexPageChecksum(buf);
+    }
     bp_->markDirty(pageNum);
     bp_->unpinPage(pageNum);
     cacheNode(pageNum, node);

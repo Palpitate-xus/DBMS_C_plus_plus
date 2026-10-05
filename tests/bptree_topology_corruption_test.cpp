@@ -90,6 +90,42 @@ void test_checked_lookup_distinguishes_absence() {
     cleanup(path);
 }
 
+void test_checksummed_index_page_rejects_corruption() {
+    const std::string path = "bptree_page_checksum.idx";
+    cleanup(path);
+    {
+        dbms::BPTree tree(path);
+        assert(tree.open());
+        assert(tree.insert("alpha", 42));
+        assert(tree.flush());
+        tree.close();
+    }
+
+    const auto fileSize = std::filesystem::file_size(path);
+    assert(fileSize >= 2 * kPageSize);
+    std::vector<char> bytes(static_cast<size_t>(fileSize));
+    {
+        std::ifstream input(path, std::ios::binary);
+        assert(input);
+        input.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        assert(input);
+    }
+    uint16_t format = 0;
+    std::memcpy(&format, bytes.data() + sizeof(uint32_t) * 2 + sizeof(uint16_t),
+                sizeof(format));
+    assert(format != 0);
+
+    // Flip a key byte without changing the node's shape.  Structural
+    // validation alone would accept the page and silently return a miss.
+    bytes[kPageSize + 3] ^= 0x01;
+    publish(path, bytes);
+    {
+        dbms::BPTree tree(path);
+        assert(!tree.openExisting());
+    }
+    cleanup(path);
+}
+
 void test_internal_page_cycle_fails_closed() {
     const std::string path = "/tmp/bptree_internal_cycle.idx";
     cleanup(path);
@@ -158,6 +194,7 @@ void test_leaf_chain_cycle_and_type_confusion_fail_closed() {
 
 int main() {
     test_checked_lookup_distinguishes_absence();
+    test_checksummed_index_page_rejects_corruption();
     test_internal_page_cycle_fails_closed();
     test_leaf_chain_cycle_and_type_confusion_fail_closed();
     std::cout << "[BPTREE TOPOLOGY] cycles and invalid leaf links rejected OK\n";
