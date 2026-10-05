@@ -53,18 +53,21 @@ control_checksum=<8 lowercase hex digits>
 checksum 行；额外字段、尾随行、损坏值均 fail-closed。V3 替换使用同目录临时文件、
 文件 `fsync`、原子 rename 和父目录 `fsync`。
 
-部署或恢复后可在服务停止时执行严格只读的 heap 校验：
+部署或恢复后可在服务停止时执行严格只读的 heap 与 B+Tree 页校验：
 
 ```bash
 /path/to/dbms_main -D /srv/dbms-instance --verify-data-checksums
 ```
 
-该命令验证主/分区/TOAST/unlogged init heap、外部 tablespace 和已有 TDE 边车；
-报错定位到文件和 block。当前它不覆盖索引与全部 catalog/metadata，也没有锁机制
-替代运维侧的停服保证，因此不得与 server 并发执行。
+该命令验证主/分区/TOAST/unlogged init heap，以及 `.idx`/`.idx_*` B+Tree
+索引，包括从 tablespace marker 解析的外置文件；诊断定位到文件和 block。
+统计会分开列出页号绑定的 `0xC552`、旧内容校验 `0xC551` 与无 checksum 的
+zero-marker legacy 页。它不覆盖 Hash/Bloom/GIN/GiST/SP-GiST/BRIN 或全部
+catalog/metadata，也没有锁机制替代运维侧停服保证，因此不得与 server 并发执行。
 
-新建及 REINDEX 生成的 B+Tree 页另有逐页 CRC32C，并在页面首次载入时校验；旧格式索引
-仍可读，但在重建前没有此校验。离线 verifier 仍不检查 B+Tree，也不覆盖其他索引类型。
+新建及 REINDEX 生成的 B+Tree 页另有逐页 CRC32C，并在页面首次载入时校验；
+离线 verifier 也只读检查其每页 checksum，但不会验证树的完整拓扑。旧格式索引
+仍可读；`0xC551` 在重建前不能检测页交换，zero-marker 格式没有 checksum。
 
 `CREATE TABLESPACE name LOCATION '/absolute/path'` 使用 data directory 内的严格
 `pg_tblspc/<name>.path` marker，并在外部 root 下为当前数据库建立独立子目录。
