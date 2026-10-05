@@ -904,10 +904,12 @@ CHECKPOINT;
 
 **语法**
 ```sql
-VACUUM [table_name]
+VACUUM [(FULL | ANALYZE | VERBOSE | PARALLEL integer [, ...])] [table_name]
+VACUUM FULL [ANALYZE] [table_name]
+VACUUM ANALYZE [table_name]
 ```
 
-**说明** 回收已删除行占用的页空间。若指定表名则只清理该表。
+**说明** 回收已删除行占用的页空间；`ANALYZE` 在清理后更新统计信息，`FULL` 重写表以回收空闲空间，`VERBOSE` 输出逐表摘要。未指定表名时作用于当前库全部表。`PARALLEL 0` 按串行模式运行。VACUUM 不能在显式事务块中运行；`FREEZE` 目前未实现并返回 `0A000`，不会静默当作普通 VACUUM 执行。VACUUM FULL 的持久化方式仍不是 PostgreSQL 的事务性表交换。
 
 **示例**
 ```sql

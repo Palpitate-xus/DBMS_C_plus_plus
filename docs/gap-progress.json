@@ -2,6 +2,35 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "VAC-03",
+      "gap_ids": ["VAC-03"],
+      "status": "partial",
+      "commits": ["09611ff0"],
+      "evidence": [
+        "docs/code-review-progress.md",
+        "docs/commandsList.md",
+        "docs/issue-vac-03-maintenance-options.md",
+        "docs/postgresql-18-gap-audit.md",
+        "src/main.cpp",
+        "src/commands/TableManage.cpp",
+        "src/commands/TableManage.h",
+        "tests/legacy_forced_analyze_protocol_e2e_test.py"
+      ],
+      "tests": [
+        "scripts/build.sh",
+        "scripts/build_one_test.sh",
+        "tests/legacy_forced_analyze_protocol_e2e_test.py",
+        "tests/vacuum_full_test.cpp"
+      ],
+      "verification": {
+        "reproduction": "With auto-analyze disabled, the old production binary accepted VACUUM (ANALYZE) but did not create row statistics; the focused regression failed before the fix. Source inspection also found FULL and FREEZE could be accepted without their requested semantics, and the SQL handler did not reject VACUUM in explicit transactions.",
+        "fix": "Parenthesized and legacy options are parsed and dispatched. ANALYZE updates stats, FULL calls the rewrite API with a distinct success result, unsupported FREEZE fails with 0A000, and an explicit transaction fails with 25001. Whitespace around option equals is covered.",
+        "focused_tests": "Production build, legacy_forced_analyze_protocol_e2e_test.py, vacuum_full_test, and git diff --check passed. The E2E covers persisted statistics, EXPLAIN estimates, both ANALYZE forms, ANALYZE = true, unsupported FREEZE, transaction rejection, and FULL heap shrink with row preservation.",
+        "full_suite": "Full registered suite and PostgreSQL 18.6 differential were not run on this revision.",
+        "scope": "VAC-03 remains partial: VACUUM FULL is not a proven crash-atomic transactional relation swap; tuple freezing and FREEZE, VACUUM progress views, and complete PostgreSQL VERBOSE counters remain unimplemented."
+      }
+    },
+    {
       "issue": "WAL-06",
       "gap_ids": ["WAL-06"],
       "status": "partial",
@@ -1254,7 +1283,7 @@
     {"id":"TXN-12","status":"complete","evidence":["docs/code-review-progress.md","docs/MANUAL.md","docs/commandsList.md","src/common/NotificationManager.h","src/common/Config.h","src/common/Config.cpp","src/main.cpp","src/network/NetworkServer.cpp","src/network/PostgresProtocol.h","src/network/PostgresProtocol.cpp","src/network/TLSWrapper.h","src/network/TLSWrapper.cpp","src/network/TLSWrapper_stub.cpp","src/parser/ast.h","src/parser/parser.cpp","src/expression/ExprEvaluator.cpp","src/expression/expr_helper.cpp","src/commands/TableManage.cpp","src/commands/DdlTransaction.cpp"],"tests":["tests/notification_manager_test.cpp","tests/config_test.cpp","tests/postgres_protocol_test.py","tests/parser_phase1_test.cpp","tests/compat/pg_diff_runner.py"],"commits":["5dcb08b","5e62ed3","a77e553","7f9eeb7","0aaabf0","cc17e0e","06dd3cb","7fe269d","471ab75","96e8a83","90592c9"]},
     {"id":"VAC-01","status":"unverified","evidence":[]},
     {"id":"VAC-02","status":"unverified","evidence":[]},
-    {"id":"VAC-03","status":"unverified","evidence":[]},
+    {"id":"VAC-03","status":"partial","evidence":["docs/code-review-progress.md","docs/commandsList.md","docs/issue-vac-03-maintenance-options.md","docs/postgresql-18-gap-audit.md","src/main.cpp","src/commands/TableManage.cpp","src/commands/TableManage.h"],"tests":["scripts/build.sh","scripts/build_one_test.sh","tests/legacy_forced_analyze_protocol_e2e_test.py","tests/vacuum_full_test.cpp"],"commits":["09611ff0"]},
     {"id":"VAC-04","status":"unverified","evidence":[]},
     {"id":"STO-01","status":"partial","evidence":["docs/issue-sto-01-control-format-integrity.md","docs/PACKAGING.md","docs/MANUAL.md","src/common/DataDirectory.cpp"],"tests":["tests/data_directory_e2e_test.py","tests/checksum_verification_e2e_test.py","scripts/build_tests.sh"],"commits":["b662ff97"]},
     {"id":"STO-02","status":"partial","evidence":["docs/issue-sto-02-relation-storage-namespace.md","docs/code-review-progress.md","src/commands/TableManage.cpp"],"tests":["tests/partition_test.cpp","tests/temp_restart_cleanup_test.cpp","tests/create_table_like_test.cpp","scripts/build_tests.sh"],"commits":["1a76a3fb"]},
