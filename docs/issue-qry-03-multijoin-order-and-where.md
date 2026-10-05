@@ -17,6 +17,8 @@ QRY-02/QRY-03), and `40ef739a` (FROM-less bare outer references in scalar
 targets and WHERE, 2026-10-05; QRY-02/QRY-03), and `e63e4e1e`
 (bare outer references beside a simple local FROM, 2026-10-05; QRY-02/QRY-03),
 and `2080a994` (quoted outer relation-alias binding, 2026-10-05; QRY-02/QRY-03).
+The follow-up regression commit `1a2e42b3` also verifies one mixed-case
+quoted-column path without changing source.
 
 ## Reproduced behavior
 
@@ -110,9 +112,9 @@ and `2080a994` (quoted outer relation-alias binding, 2026-10-05; QRY-02/QRY-03).
   Unknown local scopes (CTE, derived subquery, or table function) are left
   untouched rather than guessed. The visible left input may be one base table
   or a simple comma/CROSS chain of base tables. A simple quoted relation alias
-  followed by an unquoted column is token-aware and regression-tested. Quoted
-  column names and other join trees or arbitrary nested correlations remain
-  unsupported or unverified.
+  followed by an unquoted or mixed-case quoted column is token-aware and
+  regression-tested. More complex quoted/schema-qualified names and other join
+  trees or arbitrary nested correlations remain unsupported or unverified.
 - For one simple left base relation or a comma/CROSS chain of base relations,
   materialize `JOIN`/`INNER JOIN LATERAL` and `LEFT [OUTER] JOIN LATERAL` per
   combined left row, evaluate a supported boolean `ON` expression against
@@ -276,6 +278,13 @@ and `2080a994` (quoted outer relation-alias binding, 2026-10-05; QRY-02/QRY-03).
   the quoted alias with an unquoted column and typed protocol output; quoted
   column names, broader schema-qualified forms, full suite, and PostgreSQL
   18.6 differential remain unverified.
+- Follow-up test commit `1a2e42b3` adds a mixed-case quoted outer column,
+  `"OuterAlias"."MixedId"`, in both a FROM-less LATERAL scalar target and the
+  outer WHERE. The existing production binary built from `2080a994` returns the
+  expected rows, `MixedId`/`next_id` headers, and integer OIDs;
+  `python3 -m py_compile tests/derived_type_protocol_e2e_test.py` and
+  `tests/derived_type_protocol_e2e_test.py` passed. This is bounded test
+  coverage, not general quoted-name or schema-qualified correlation support.
 - `tests/compat/cases/multijoin_projection_filter.sql` was added, but the
   differential runner refused preflight because the configured reference
   server reports PostgreSQL 17.2 (`170002`) while the runner requires 18.6
@@ -295,10 +304,10 @@ longer or more complex correlated chains remain unsupported/unverified.
 Bare outer references in evaluator-supported scalar targets and WHERE are now
 also bound when that LATERAL SELECT has no own FROM or uses a local base-table
 scope with known columns. Other left join trees remain unsupported. Unknown
-CTE/derived/function FROM scopes, quoted column names, arbitrary correlated
+CTE/derived/function FROM scopes, complex quoted/schema-qualified references, arbitrary correlated
 expressions/subqueries, complex lateral chains, table functions, and general
 parameterized or nested join semantics remain unsupported or unverified. A
-simple quoted outer relation alias followed by an unquoted column is covered
-by a regression test.
+simple quoted outer relation alias with an unquoted or one mixed-case quoted
+column is covered by regression tests.
 OPT-02's DP/exhaustive join search, GEQO threshold, semi/anti constraints, and
 bushy plans remain unimplemented.
