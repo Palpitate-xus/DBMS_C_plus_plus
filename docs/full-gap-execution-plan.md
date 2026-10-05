@@ -4,6 +4,8 @@
 
 # 总差距清单执行计划
 
+2026-10-05 WAL-02：验证到本地 WAL 的 CRC32C、8-byte alignment、跨16MiB segment连续 I/O、LSN-range fsync/group commit、switch padding、archive-gated truncate/recycle 与 checkpoint page-image 子集。`wal_basic_test`（含双 manager追加）、`redo_crash_recovery_test`、`wal_full_page_write_test`、`wal_truncate_test`、`wal_timeline_archive_test`通过。记录跨段不是 PostgreSQL page-header/continuation 格式，没有 WAL compression，完整 concurrent insertion/FPI规则仍未实现。无新代码修改、全套或PG18.6 differential。本项从unverified转partial。详见`docs/issue-wal-02-insertion-segments-audit.md`。
+
 2026-10-05 WAL-01：`WAL.h`定义了 HEAP/XACT/SMGR/CHECKPOINT/CATALOG/INDEX 子集。`wal_basic_test`验证 heap before/after、BTree index image、commit；`redo_crash_recovery_test`验证 uncommitted insert undo 与 committed insert/delete；`wal_full_page_write_test`验证 checkpoint 后 page image。Recovery image applier目前只重放 heap/index image；catalog WAL没有catalog row image，FSM/VM、TOAST、sequence、multixact、standby及其它索引资源未形成完整记录/replay。TOAST提交前落盘和specialized index事务边界重建只是局部机制。审计无生产代码改动，全量suite/PG18.6 differential未跑。WAL-01从unverified转partial，剩余资源日志与恢复仍未实现。详见`docs/issue-wal-01-resource-manager-coverage-audit.md`。
 
 2026-10-05 STO-06：审计确认现有自定义 TOAST 分块存储已有 zlib 压缩、bounded de-toast、chunk/index一致性校验、失败清理和旧快照安全回收；`toast_test`、`vacuum_toast_test`、`bytea_large_toast_test` 通过。本次没有证实新的数据损坏 bug，也没有生产代码改动。当前 heap marker + sidecar 格式不是 PG varlena/external pointer；列级 storage strategy、可配置 `toast_tuple_target`、PGLZ/LZ4 与 dedup 未实现，故 STO-06 从 unverified 分类为 partial，不能记作完成。未跑完整注册套件或 PG18.6 differential。详见 `docs/issue-sto-06-toast-format-audit.md`。
