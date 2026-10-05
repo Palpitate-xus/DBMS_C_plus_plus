@@ -24600,13 +24600,40 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                 ? dynamic_cast<const dbms::ColumnRefExpr*>(
                                       orderSelect->selectList.front().expr.get())
                                 : nullptr;
-                            if (!reference || !reference->schema.empty()) {
+                            if (!reference) {
+                                size_t expressionMatches = 0;
+                                const string normalizedOrderExpression =
+                                    toLower(trim(sortExpression));
+                                for (size_t index = 0;
+                                     index < projections.size(); ++index) {
+                                    const auto& projection = projections[index];
+                                    if (projection.expression.empty() ||
+                                        toLower(trim(projection.expression)) !=
+                                            normalizedOrderExpression) continue;
+                                    projectionIndex = index;
+                                    type = projection.type;
+                                    ++expressionMatches;
+                                }
+                                if (expressionMatches > 1) {
+                                    cout << "ERROR: ORDER BY expression is "
+                                            "ambiguous (SQLSTATE 42702)"
+                                         << endl;
+                                    return true;
+                                }
+                                if (expressionMatches == 0) {
+                                    cout << "ERROR: multi-table ORDER BY "
+                                            "currently requires a column "
+                                            "reference, target expression, or "
+                                            "output position (SQLSTATE 0A000)"
+                                         << endl;
+                                    return true;
+                                }
+                            } else if (!reference->schema.empty()) {
                                 cout << "ERROR: multi-table ORDER BY currently "
                                         "requires a column reference or output "
                                         "position (SQLSTATE 0A000)" << endl;
                                 return true;
-                            }
-                            if (reference->table.empty()) {
+                            } else if (reference->table.empty()) {
                                 size_t aliasMatches = 0;
                                 for (size_t index = 0;
                                      index < projections.size(); ++index) {

@@ -548,13 +548,13 @@ def main():
             "FROM join_conj_chain_a a "
             "JOIN join_conj_chain_b b ON a.id = b.a_id "
             "JOIN join_conj_chain_c c ON b.id = c.b_id "
-            "ORDER BY 1;")
+            "ORDER BY a.id + b.val DESC;")
         rows, state, message, headers, command_tag, type_oids = (
             runner.decode_wire_result(
                 client.simple_query(server["sock"], expression_projection_sql),
                 include_types=True))
         assert state is None, (state, message)
-        assert rows == [["2", "2"], ["3", "4"]], rows
+        assert rows == [["3", "4"], ["2", "2"]], rows
         assert headers == ["total", "c_id"], headers
         assert type_oids == [23, 23], type_oids
         assert command_tag == "SELECT 2", command_tag
