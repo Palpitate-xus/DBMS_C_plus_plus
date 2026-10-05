@@ -2,6 +2,34 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "WAL-06",
+      "gap_ids": ["WAL-06"],
+      "status": "partial",
+      "evidence": [
+        "docs/code-review-progress.md",
+        "docs/issue-wal-06-index-checksum-coverage.md",
+        "docs/PACKAGING.md",
+        "docs/postgresql-18-gap-audit.md",
+        "src/access/BPTree.cpp",
+        "src/common/DataDirectory.cpp"
+      ],
+      "tests": [
+        "tests/bptree_topology_corruption_test.cpp",
+        "tests/bptree_concurrency_test.cpp",
+        "tests/crash_matrix_test.sh",
+        "tests/checksum_test.cpp",
+        "tests/checksum_verification_e2e_test.py",
+        "scripts/build.sh"
+      ],
+      "verification": {
+        "reproduction": "B+ tree pages had only structural/sorted-key validation; a key-byte bit flip could preserve a valid-looking node and silently change lookup results",
+        "fix": "New and REINDEX-built B+ tree files now store per-page CRC32C; the buffer pool verifies it on first page load, while legacy files remain readable without being counted as checksummed",
+        "focused_tests": "Production build, directly compiled topology corruption test, directly compiled B+ tree concurrency test, and the 12-case process crash matrix passed after the change",
+        "full_suite": "The full registered suite was not run on this revision; the existing offline heap verifier E2E was not rerun after the B+ tree change",
+        "scope": "WAL-06 remains partial: other index AMs, legacy indexes, catalog/schema/FSM/VM metadata, offline index verification, and enable/disable/rewrite/progress workflow remain open; no PostgreSQL 18.6 differential"
+      }
+    },
+    {
       "issue": "WAL-05",
       "gap_ids": ["WAL-05"],
       "status": "partial",
@@ -1220,7 +1248,7 @@
     {"id":"WAL-03","status":"partial","evidence":["docs/issue-wal-03-checkpoint-audit.md","src/commands/TableManage.cpp","src/storage/WAL.cpp"],"tests":["tests/checkpoint_test.cpp","scripts/build_one_test.sh"]},
     {"id":"WAL-04","status":"partial","evidence":["docs/issue-wal-04-standby-and-timeline-audit.md","src/commands/TableManage.cpp","src/storage/WAL.cpp"],"tests":["tests/pitr_recovery_test.cpp","tests/recovery_integrity_test.cpp","tests/wal_timeline_archive_test.cpp","scripts/build_one_test.sh"]},
     {"id":"WAL-05","status":"partial","evidence":["docs/issue-wal-05-startup-recovery-crash-matrix.md","docs/postgresql-18-gap-audit.md","src/commands/TableManage.cpp","src/commands/TableManage.h"],"tests":["tests/crash_matrix_test.sh","tests/redo_crash_recovery_test.cpp","scripts/build.sh","scripts/build_one_test.sh"],"commits":["a7c15da5"]},
-    {"id":"WAL-06","status":"partial","evidence":["docs/code-review-progress.md","docs/PACKAGING.md","src/common/DataDirectory.h","src/common/DataDirectory.cpp"],"tests":["tests/checksum_verification_e2e_test.py","tests/checksum_test.cpp","tests/data_directory_e2e_test.py"],"commits":["a007be0"]},
+    {"id":"WAL-06","status":"partial","evidence":["docs/issue-wal-06-index-checksum-coverage.md","docs/code-review-progress.md","docs/PACKAGING.md","docs/postgresql-18-gap-audit.md","src/access/BPTree.cpp","src/common/DataDirectory.cpp"],"tests":["tests/bptree_topology_corruption_test.cpp","tests/bptree_concurrency_test.cpp","tests/crash_matrix_test.sh","tests/checksum_verification_e2e_test.py","tests/checksum_test.cpp","scripts/build.sh"],"commits":["a007be0","93addab7"]},
     {"id":"WAL-07","status":"partial","evidence":["docs/code-review-progress.md","src/access/IndexFileUtil.h","src/commands/TableManage.cpp"],"tests":["tests/physical_backup_replacement_test.cpp","tests/physical_restore_validation_test.cpp","tests/logical_decoding_test.cpp","tests/begin_transaction_database_drop_race_test.cpp","tests/background_worker_test.cpp","tests/postgres_protocol_test.py"],"commits":["2ff499c","d28da5f","e1f48e5","83cfbc79","20c28477"]},
     {"id":"WAL-08","status":"partial","evidence":["docs/code-review-progress.md","src/commands/TableManage.cpp","src/catalog/CatalogService.cpp","src/commands/DdlExecutor.cpp","src/commands/TableManage.h","src/main.cpp","src/network/NetworkServer.cpp","src/utils/Session.h","scripts/build_common.sh","src/parser/ast.h","src/parser/parser.cpp","src/commands/DdlTransaction.cpp"],"tests":["tests/alter_table_only_test.cpp","tests/ddl_transaction_skeleton_test.cpp","tests/prepared_transaction_test.cpp","tests/temp_table_ddl_test.cpp","tests/temp_serial_owned_sequence_test.cpp","tests/temp_serial_owned_sequence_protocol_e2e_test.py","tests/compat/cases/temp_serial_owned_sequence.sql","tests/pg_temp_missing_index_test.cpp","tests/pg_temp_missing_index_protocol_e2e_test.py","tests/compat/cases/pg_temp_missing_index.sql","tests/postgres_protocol_test.py","tests/discard_temp_test.cpp","tests/discard_temp_protocol_e2e_test.py","tests/compat/cases/discard_temp.sql"],"commits":["7cb852b","986f186","7530a48","78a3216d","9d925a89","416d640f","84b258de","38e697af","1c68b73b"]},
     {"id":"STO-07","status":"partial","evidence":["docs/code-review-progress.md"]},

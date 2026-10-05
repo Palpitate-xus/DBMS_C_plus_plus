@@ -63,6 +63,9 @@ checksum 行；额外字段、尾随行、损坏值均 fail-closed。V3 替换�
 报错定位到文件和 block。当前它不覆盖索引与全部 catalog/metadata，也没有锁机制
 替代运维侧的停服保证，因此不得与 server 并发执行。
 
+新建及 REINDEX 生成的 B+Tree 页另有逐页 CRC32C，并在页面首次载入时校验；旧格式索引
+仍可读，但在重建前没有此校验。离线 verifier 仍不检查 B+Tree，也不覆盖其他索引类型。
+
 `CREATE TABLESPACE name LOCATION '/absolute/path'` 使用 data directory 内的严格
 `pg_tblspc/<name>.path` marker，并在外部 root 下为当前数据库建立独立子目录。
 marker 不得手工编辑或改成 symlink；location 不得与 data directory 重叠，也不能被
