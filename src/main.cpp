@@ -22698,19 +22698,29 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 // Build initial join result.
                 auto doJoin = [&](const string& lt, const string& rt,
                                   const string& lc, const string& rc,
-                                  const string& type) -> vector<string> {
+                                  const string& type,
+                                  vector<vector<string>>* cells,
+                                  vector<vector<bool>>* nulls) -> vector<string> {
                     if (type == "left")
-                        return g_engine.leftJoin(s.currentDB, lt, rt, lc, rc, {}, {});
+                        return g_engine.leftJoin(
+                            s.currentDB, lt, rt, lc, rc, {}, {}, cells, nulls);
                     if (type == "right")
-                        return g_engine.rightJoin(s.currentDB, lt, rt, lc, rc, {}, {});
+                        return g_engine.rightJoin(
+                            s.currentDB, lt, rt, lc, rc, {}, {}, cells, nulls);
                     if (type == "full")
-                        return g_engine.fullOuterJoin(s.currentDB, lt, rt, lc, rc, {}, {});
+                        return g_engine.fullOuterJoin(
+                            s.currentDB, lt, rt, lc, rc, {}, {}, cells, nulls);
                     if (type == "cross")
-                        return g_engine.crossJoin(s.currentDB, lt, rt, {}, {});
-                    return g_engine.join(s.currentDB, lt, rt, lc, rc, {}, {});
+                        return g_engine.crossJoin(
+                            s.currentDB, lt, rt, {}, {}, cells, nulls);
+                    return g_engine.join(
+                        s.currentDB, lt, rt, lc, rc, {}, {}, cells, nulls);
                 };
                 // column names of the first pair's result (left cols + right cols)
                 std::vector<string> interCols;
+                std::vector<string> interTypes;
+                std::vector<std::vector<string>> interCells;
+                std::vector<std::vector<bool>> interNulls;
                 // original (tableIndex, colName) -> current intermediate
                 // column name (deduplicated on clash)
                 std::map<std::pair<size_t, string>, string> colMap;
@@ -22725,6 +22735,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             ? cn + "_" + std::to_string(interCols.size())
                             : cn;
                         interCols.push_back(out);
+                        interTypes.push_back(ts2.cols[c].dataType);
                         colMap[{tIdx, cn}] = out;
                     }
                 };
@@ -22736,7 +22747,14 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     ? pj.joins.front().type : "inner";
                 vector<string> interRows = doJoin(
                     pending[bestI].name, pending[bestJ].name,
-                    bestLCol, bestRCol, firstJoinType);
+                    bestLCol, bestRCol, firstJoinType,
+                    &interCells, &interNulls);
+                if (interRows.size() != interCells.size() ||
+                    interRows.size() != interNulls.size()) {
+                    cout << "ERROR: multi-join returned inconsistent row data "
+                            "(SQLSTATE XX000)" << endl;
+                    return true;
+                }
 
                 done[bestI] = done[bestJ] = true;
                 // Estimated cardinality of the current intermediate result:
@@ -22759,7 +22777,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 size_t remaining = pending.size() - 2;
                 while (remaining > 0) {
                     // materialize current intermediate
-                    string interName = createTempTableFromRows(s, interRows, interCols, tmpCounter);
+                    string interName = createTempTableFromRows(
+                        s, interRows, interCols, tmpCounter, interTypes,
+                        &interCells, &interNulls);
                     if (interName.empty()) {
                         cout << "ERROR: multi-join intermediate materialization failed" << endl;
                         return true;
@@ -22896,18 +22916,264 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         pickRCol.clear();
                         pickJoinType = "cross";
                     }
+                    vector<vector<string>> newCells;
+                    vector<vector<bool>> newNulls;
                     vector<string> newRows = doJoin(
                         interActual, pending[pickIdx].name,
-                        pickLCol, pickRCol, pickJoinType);
+                        pickLCol, pickRCol, pickJoinType,
+                        &newCells, &newNulls);
+                    if (newRows.size() != newCells.size() ||
+                        newRows.size() != newNulls.size()) {
+                        cout << "ERROR: multi-join returned inconsistent row "
+                                "data (SQLSTATE XX000)" << endl;
+                        return true;
+                    }
                     // extend columns (de-duplicated the same way)
                     addCols(pickIdx, pending[pickIdx].schema);
                     interRows = std::move(newRows);
+                    interCells = std::move(newCells);
+                    interNulls = std::move(newNulls);
                     interEstRows = preserveJoinOrder
                         ? static_cast<double>(interRows.size())
                         : pickEst > 0 ? pickEst
                                       : static_cast<double>(interRows.size());
                     done[pickIdx] = true;
                     --remaining;
+                }
+
+                // A WHERE clause belongs after the complete join tree has
+                // been formed.  In particular, applying it to an outer-join
+                // input would change which rows receive NULL extension.
+                if (wherePos != string::npos) {
+                    const size_t whereEnd = std::min(
+                        {groupPos, havingPos, windowPos, orderPos, limitPos,
+                         offsetPos, sql.size()});
+                    const string predicate = trim(sql.substr(
+                        wherePos + 5, whereEnd - wherePos - 5));
+                    dbms::SQLParser whereParser;
+                    const auto parsedWhere = whereParser.parse(
+                        "SELECT " + predicate);
+                    const auto* whereSelect = parsedWhere.success
+                        ? dynamic_cast<const dbms::SelectStmt*>(
+                              parsedWhere.stmt.get()) : nullptr;
+                    if (!whereSelect || whereSelect->selectList.size() != 1 ||
+                        !whereSelect->selectList.front().expr) {
+                        cout << "ERROR: invalid multi-table WHERE clause "
+                                "(SQLSTATE 42601)" << endl;
+                        return true;
+                    }
+                    string bindingError;
+                    string bindingState;
+                    auto rejectWhereReference = [&](string error,
+                                                    string state) {
+                        bindingError = std::move(error);
+                        bindingState = std::move(state);
+                        return false;
+                    };
+                    function<bool(const dbms::Expr*)> validateWhereReferences;
+                    validateWhereReferences = [&](const dbms::Expr* expression) {
+                        if (!expression) return true;
+                        if (const auto* ref = dynamic_cast<
+                                const dbms::ColumnRefExpr*>(expression)) {
+                            if (!ref->schema.empty()) {
+                                return rejectWhereReference(
+                                    "schema-qualified multi-table WHERE "
+                                    "references are not supported", "0A000");
+                            }
+                            if (ref->table.empty()) {
+                                size_t matches = 0;
+                                for (const auto& relation : pending) {
+                                    for (size_t column = 0;
+                                         column < relation.schema.len; ++column) {
+                                        if (relation.schema.cols[column].dataName ==
+                                            ref->column) ++matches;
+                                    }
+                                }
+                                if (matches == 0 &&
+                                    (ref->column == "current_user" ||
+                                     ref->column == "session_user" ||
+                                     ref->column == "current_date" ||
+                                     ref->column == "current_timestamp" ||
+                                     ref->column == "localtimestamp")) {
+                                    return true;
+                                }
+                                if (matches > 1) {
+                                    return rejectWhereReference(
+                                        "column reference \"" + ref->column +
+                                            "\" is ambiguous", "42702");
+                                }
+                                if (matches == 0) {
+                                    return rejectWhereReference(
+                                        "column \"" + ref->column +
+                                            "\" does not exist", "42703");
+                                }
+                                return true;
+                            }
+                            size_t relationIndex = pending.size();
+                            for (size_t index = 0; index < pending.size(); ++index) {
+                                const bool hasAlias =
+                                    !pj.tables[index].second.empty();
+                                if (ref->table == pending[index].alias ||
+                                    (!hasAlias &&
+                                     (ref->table == pj.tables[index].first ||
+                                      ref->table == pending[index].name))) {
+                                    relationIndex = index;
+                                    break;
+                                }
+                            }
+                            if (relationIndex == pending.size()) {
+                                return rejectWhereReference(
+                                    "missing FROM-clause entry for table \"" +
+                                        ref->table + "\"", "42P01");
+                            }
+                            for (size_t column = 0;
+                                 column < pending[relationIndex].schema.len;
+                                 ++column) {
+                                if (pending[relationIndex].schema.cols[column].dataName ==
+                                    ref->column) return true;
+                            }
+                            return rejectWhereReference(
+                                "column \"" + ref->toString() +
+                                    "\" does not exist", "42703");
+                        }
+                        if (const auto* unary = dynamic_cast<
+                                const dbms::UnaryOpExpr*>(expression)) {
+                            return validateWhereReferences(unary->operand.get());
+                        }
+                        if (const auto* binary = dynamic_cast<
+                                const dbms::BinaryOpExpr*>(expression)) {
+                            return validateWhereReferences(binary->left.get()) &&
+                                validateWhereReferences(binary->right.get());
+                        }
+                        if (const auto* call = dynamic_cast<
+                                const dbms::FunctionCallExpr*>(expression)) {
+                            if (call->filter || !call->namedArgs.empty() ||
+                                !call->orderBy.empty() || call->hasOver) {
+                                return rejectWhereReference(
+                                    "complex multi-table WHERE function is "
+                                    "not supported", "0A000");
+                            }
+                            for (const auto& argument : call->args) {
+                                if (!validateWhereReferences(argument.get()))
+                                    return false;
+                            }
+                            return true;
+                        }
+                        if (const auto* cast = dynamic_cast<
+                                const dbms::CastExpr*>(expression)) {
+                            return validateWhereReferences(cast->operand.get());
+                        }
+                        if (const auto* caseExpression = dynamic_cast<
+                                const dbms::CaseExpr*>(expression)) {
+                            if (caseExpression->switchExpr &&
+                                !validateWhereReferences(
+                                    caseExpression->switchExpr.get())) return false;
+                            for (const auto& clause :
+                                 caseExpression->whenClauses) {
+                                if (!validateWhereReferences(clause.first.get()) ||
+                                    !validateWhereReferences(clause.second.get()))
+                                    return false;
+                            }
+                            return !caseExpression->elseExpr ||
+                                validateWhereReferences(
+                                    caseExpression->elseExpr.get());
+                        }
+                        if (dynamic_cast<const dbms::LiteralExpr*>(expression))
+                            return true;
+                        return rejectWhereReference(
+                            "multi-table WHERE expression is not supported",
+                            "0A000");
+                    };
+                    if (!validateWhereReferences(
+                            whereSelect->selectList.front().expr.get())) {
+                        cout << "ERROR: " << bindingError << " (SQLSTATE "
+                             << bindingState << ")" << endl;
+                        return true;
+                    }
+
+                    std::map<string, size_t> bareNameCounts;
+                    for (const auto& relation : pending) {
+                        for (size_t column = 0; column < relation.schema.len;
+                             ++column) {
+                            ++bareNameCounts[
+                                relation.schema.cols[column].dataName];
+                        }
+                    }
+                    vector<string> filteredRows;
+                    vector<vector<string>> filteredCells;
+                    vector<vector<bool>> filteredNulls;
+                    for (size_t rowIndex = 0; rowIndex < interCells.size();
+                         ++rowIndex) {
+                        if (interCells[rowIndex].size() != interCols.size() ||
+                            interNulls[rowIndex].size() != interCols.size()) {
+                            cout << "ERROR: malformed multi-join row "
+                                    "(SQLSTATE XX000)" << endl;
+                            return true;
+                        }
+                        std::map<string, string> rowValues;
+                        std::map<string, string> typeHints;
+                        std::set<string> nullColumns;
+                        for (size_t relationIndex = 0;
+                             relationIndex < pending.size(); ++relationIndex) {
+                            for (size_t column = 0;
+                                 column < pending[relationIndex].schema.len;
+                                 ++column) {
+                                const string& name = pending[relationIndex]
+                                    .schema.cols[column].dataName;
+                                const auto mapped = colMap.find(
+                                    {relationIndex, name});
+                                if (mapped == colMap.end()) {
+                                    cout << "ERROR: missing multi-join column "
+                                            "mapping (SQLSTATE XX000)" << endl;
+                                    return true;
+                                }
+                                const auto position = std::find(
+                                    interCols.begin(), interCols.end(),
+                                    mapped->second);
+                                if (position == interCols.end()) {
+                                    cout << "ERROR: invalid multi-join column "
+                                            "mapping (SQLSTATE XX000)" << endl;
+                                    return true;
+                                }
+                                const size_t cellIndex = static_cast<size_t>(
+                                    position - interCols.begin());
+                                const bool isNull = interNulls[rowIndex][cellIndex];
+                                const string qualified =
+                                    pending[relationIndex].alias + "." + name;
+                                rowValues[qualified] =
+                                    interCells[rowIndex][cellIndex];
+                                typeHints[qualified] = pending[relationIndex]
+                                    .schema.cols[column].dataType;
+                                if (isNull) nullColumns.insert(qualified);
+                                if (bareNameCounts[name] == 1) {
+                                    rowValues[name] =
+                                        interCells[rowIndex][cellIndex];
+                                    typeHints[name] = pending[relationIndex]
+                                        .schema.cols[column].dataType;
+                                    if (isNull) nullColumns.insert(name);
+                                }
+                            }
+                        }
+                        const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
+                            predicate, rowValues, nullColumns, typeHints,
+                            s.currentDB);
+                        if (!evaluated.ok) {
+                            cout << "ERROR: unsupported multi-table WHERE "
+                                    "expression: " << evaluated.error
+                                 << " (SQLSTATE 0A000)" << endl;
+                            return true;
+                        }
+                        if (evaluated.isNull) continue;
+                        const string truth = toLower(trim(evaluated.value));
+                        if (truth != "true" && truth != "t" && truth != "1")
+                            continue;
+                        filteredRows.push_back(interRows[rowIndex]);
+                        filteredCells.push_back(interCells[rowIndex]);
+                        filteredNulls.push_back(interNulls[rowIndex]);
+                    }
+                    interRows = std::move(filteredRows);
+                    interCells = std::move(filteredCells);
+                    interNulls = std::move(filteredNulls);
                 }
 
                 // ---- output ----

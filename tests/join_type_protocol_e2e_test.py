@@ -134,6 +134,35 @@ def main():
             assert headers == ["a.id", "b.id", "c.id"], headers
             assert command_tag == "SELECT %d" % len(expected_rows), command_tag
 
+        outer_chain_where_sql = (
+            "SELECT a.id, b.id, c.id FROM join_outer_chain_a a "
+            "LEFT JOIN join_outer_chain_b b ON a.id = b.id "
+            "LEFT JOIN join_outer_chain_c c ON b.id = c.id "
+            "WHERE a.id = 2;")
+        rows, state, message, headers, command_tag, _ = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"], outer_chain_where_sql),
+                include_types=True))
+        assert state is None, (state, message)
+        assert rows == [["2", None, None]], rows
+        assert headers == ["a.id", "b.id", "c.id"], headers
+        assert command_tag == "SELECT 1", command_tag
+
+        outer_chain_null_filter_sql = (
+            "SELECT a.id, b.id, c.id FROM join_outer_chain_a a "
+            "LEFT JOIN join_outer_chain_b b ON a.id = b.id "
+            "LEFT JOIN join_outer_chain_c c ON b.id = c.id "
+            "WHERE b.id IS NULL;")
+        rows, state, message, headers, command_tag, _ = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"],
+                                    outer_chain_null_filter_sql),
+                include_types=True))
+        assert state is None, (state, message)
+        assert rows == [["2", None, None]], rows
+        assert headers == ["a.id", "b.id", "c.id"], headers
+        assert command_tag == "SELECT 1", command_tag
+
         cross_chain_sql = (
             "SELECT a.id, b.id, c.id FROM join_outer_chain_a a "
             "CROSS JOIN join_outer_chain_b b "
