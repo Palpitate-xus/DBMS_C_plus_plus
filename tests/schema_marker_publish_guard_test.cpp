@@ -1,3 +1,4 @@
+#include "access/IndexFileUtil.h"
 #include "commands/TableManage.h"
 #include "test_utils.h"
 
@@ -24,6 +25,18 @@ int main() {
     assert(fs::is_symlink(occupied));
     assert(fs::read_symlink(occupied) == "missing_marker_target");
     fs::remove(occupied);
+
+    const fs::path syncFailure = fs::path(database) / ".schema_sync_failure";
+    dbms::index_file::failNextDirectorySyncForTesting();
+    assert(first.createSchema(database, "sync_failure") == DBStatus::IO_ERROR);
+    assert(!fs::exists(syncFailure));
+    for (const auto& entry : fs::directory_iterator(database)) {
+        assert(entry.path().filename().string().rfind(
+                   ".dbms_atomic_.schema_sync_failure.", 0) != 0);
+    }
+    // A failed, rolled-back publication must not turn a retry into a duplicate.
+    assert(first.createSchema(database, "sync_failure") == DBStatus::OK);
+    assert(first.dropSchema(database, "sync_failure", false) == DBStatus::OK);
 
     dbms::StorageEngine second;
     DBStatus firstResult = DBStatus::IO_ERROR;

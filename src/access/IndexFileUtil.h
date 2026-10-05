@@ -107,14 +107,35 @@ inline WriteResult writeAtomicallyImpl(const std::filesystem::path& target,
             return publishError == EEXIST ? WriteResult::ALREADY_EXISTS
                                           : WriteResult::IO_ERROR;
         }
-        if (::unlink(temp.c_str()) != 0) return WriteResult::IO_ERROR;
+        // Make the no-replace target durable before removing its temporary
+        // hard link. If this sync fails, roll back the target only while both
+        // names still identify our temporary inode.
+        if (!syncDirectory(parent)) {
+            struct stat tempStat {};
+            struct stat targetStat {};
+            if (::lstat(temp.c_str(), &tempStat) == 0 &&
+                ::lstat(target.c_str(), &targetStat) == 0 &&
+                tempStat.st_dev == targetStat.st_dev &&
+                tempStat.st_ino == targetStat.st_ino) {
+                (void)::unlink(target.c_str());
+            }
+            (void)::unlink(temp.c_str());
+            (void)syncDirectory(parent);
+            return WriteResult::IO_ERROR;
+        }
+        // The target is durable at this point.  Failure to durably remove the
+        // hidden temporary alias must not turn a successful CREATE into an
+        // error with a visible object left behind; a stale alias is harmless
+        // and does not match any schema-marker name.
+        if (::unlink(temp.c_str()) == 0) (void)syncDirectory(parent);
     } else if (::rename(temp.c_str(), target.c_str()) != 0) {
         std::error_code ignored;
         std::filesystem::remove(temp, ignored);
         return WriteResult::IO_ERROR;
     }
 
-    return syncDirectory(parent) ? WriteResult::OK : WriteResult::IO_ERROR;
+    return noReplace || syncDirectory(parent) ? WriteResult::OK
+                                               : WriteResult::IO_ERROR;
 }
 
 // Replace an index file atomically and make both the file and its directory
