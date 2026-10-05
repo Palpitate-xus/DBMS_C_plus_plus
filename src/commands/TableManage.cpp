@@ -42831,7 +42831,9 @@ size_t StorageEngine::vacuumToast(const std::string& dbname,
 // VACUUM FULL: completely rewrite table, reclaiming all dead space
 // ========================================================================
 size_t StorageEngine::vacuumFull(const std::string& dbname,
-                                 const std::string& tablename) {
+                                 const std::string& tablename,
+                                 bool* succeeded) {
+    if (succeeded) *succeeded = false;
     if (!databaseExists(dbname) || !tableExists(dbname, tablename)) return 0;
     // VACUUM is not transaction-safe and PostgreSQL rejects it inside an
     // explicit transaction.  Rewriting here would otherwise escape rollback.
@@ -43366,7 +43368,8 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
         std::lock_guard<std::mutex> lock(deadTupleMutex_);
         deadTupleCounts_[deadTupleKey] = 0;
     }
-        return rowCount;
+    if (succeeded) *succeeded = true;
+    return rowCount;
     } catch (const std::exception& error) {
         std::cerr << "[vacuum full] rewrite failed: " << error.what()
                   << std::endl;

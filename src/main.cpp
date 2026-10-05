@@ -3693,28 +3693,34 @@ static bool handleCheckpoint(const string& sql, Session& s) {
 static bool handleVacuum(const string& sql, Session& s) {
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
-    if (sql.size() >= 11 && sql.substr(0, 11) == "vacuum full") {
-        string tname = trim(sql.substr(11));
-        if (tname.empty()) {
-            cout << "VACUUM FULL requires a table name" << endl;
-            return true;
-        }
-        string resolvedName = resolveTableName(s, tname);
-        size_t n = g_engine.vacuumFull(s.currentDB, resolvedName);
-        cout << "VACUUM FULL completed, " << n << " rows rewritten" << endl;
-        return false;
+    if (g_engine.inTransaction()) {
+        throw dbms::DbError(
+            "25001", "VACUUM cannot run inside a transaction block");
     }
+
     string rest = trim(sql.substr(6));
     bool concurrent = false;
+    bool full = false;
+    bool analyze = false;
+    bool verbose = false;
+    bool freeze = false;
     int workers = 1;
-    // Option list: VACUUM (option[, ...]) [table] — options before or after
-    // CONCURRENTLY.  Recognized: PARALLEL n (n>=1), CONCURRENTLY (inline
-    // form for parity with the parenthesized syntax).
-    if (!rest.empty() && rest[0] == '(') {
-        size_t close = rest.find(')');
-        if (close == string::npos) {
-            cout << "VACUUM: unterminated option list" << endl;
+
+    const auto parseBoolean = [](const string& option, const string& value) {
+        if (value.empty() || value == "true" || value == "on" || value == "1")
             return true;
+        if (value == "false" || value == "off" || value == "0")
+            return false;
+        throw dbms::DbError(
+            "42601", "invalid boolean value for VACUUM option " + option);
+    };
+
+    // Parenthesized PostgreSQL syntax. Keep option interpretation here rather
+    // than silently accepting an option and then taking the plain-VACUUM path.
+    if (!rest.empty() && rest[0] == '(') {
+        size_t close = findMatchingParen(rest, 0);
+        if (close == string::npos) {
+            throw dbms::DbError("42601", "unterminated VACUUM option list");
         }
         string opts = toLower(rest.substr(1, close - 1));
         rest = trim(rest.substr(close + 1));
@@ -3723,43 +3729,133 @@ static bool handleVacuum(const string& sql, Session& s) {
             size_t comma = opts.find(',', p);
             string tok = trim(opts.substr(p, comma == string::npos
                                                 ? string::npos : comma - p));
-            if (tok.substr(0, 8) == "parallel") {
-                string n = trim(tok.substr(8));
-                if (n.empty() || n.find_first_not_of("0123456789") != string::npos) {
-                    cout << "VACUUM: PARALLEL requires a positive integer" << endl;
-                    return true;
+            if (tok.empty()) {
+                throw dbms::DbError("42601", "empty VACUUM option");
+            }
+            const size_t equals = tok.find('=');
+            const size_t separator = tok.find_first_of(" \t");
+            const size_t split = equals != string::npos ? equals : separator;
+            const string option = split == string::npos
+                ? tok : trim(tok.substr(0, split));
+            string value = split == string::npos
+                ? string() : trim(tok.substr(split + 1));
+            if (equals == string::npos && !value.empty() && value[0] == '=') {
+                value = trim(value.substr(1));
+            }
+            if (option.empty()) {
+                throw dbms::DbError("42601", "invalid VACUUM option");
+            }
+            if (option == "parallel") {
+                if (value.empty() ||
+                    value.find_first_not_of("0123456789") != string::npos) {
+                    throw dbms::DbError(
+                        "42601", "VACUUM PARALLEL requires a non-negative integer");
                 }
-                workers = std::max(1, atoi(n.c_str()));
-            } else if (tok == "concurrently") {
-                concurrent = true;
-            } else if (!tok.empty() && tok != "full" && tok != "analyze" &&
-                       tok != "freeze" && tok != "verbose") {
-                cout << "VACUUM: unsupported option '" << tok << "'" << endl;
-                return true;
+                try {
+                    const long long parsed = std::stoll(value);
+                    if (parsed > std::numeric_limits<int>::max()) {
+                        throw std::out_of_range("parallel worker count");
+                    }
+                    workers = parsed == 0 ? 1 : static_cast<int>(parsed);
+                } catch (const std::exception&) {
+                    throw dbms::DbError(
+                        "22023", "VACUUM PARALLEL value is out of range");
+                }
+            } else if (option == "concurrently") {
+                concurrent = parseBoolean(option, value);
+            } else if (option == "full") {
+                full = parseBoolean(option, value);
+            } else if (option == "analyze") {
+                analyze = parseBoolean(option, value);
+            } else if (option == "verbose") {
+                verbose = parseBoolean(option, value);
+            } else if (option == "freeze") {
+                freeze = parseBoolean(option, value);
+            } else {
+                throw dbms::DbError(
+                    "0A000", "VACUUM option is not supported: " + option);
             }
             if (comma == string::npos) break;
             p = comma + 1;
         }
-    }
-    if (rest.substr(0, 12) == "concurrently") {
-        concurrent = true;
-        rest = trim(rest.substr(12));
-    }
-    if (rest.empty()) {
-        auto tables = g_engine.getTableNames(s.currentDB);
-        size_t totalFreed = 0;
-        for (const auto& tbl : tables) {
-            totalFreed += g_engine.vacuum(s.currentDB, tbl, concurrent, workers);
-        }
-        string mode = concurrent ? " CONCURRENTLY" : "";
-        if (workers > 1) mode += " (PARALLEL " + to_string(workers) + ")";
-        cout << "VACUUM" << mode << " completed, " << totalFreed << " pages freed" << endl;
     } else {
-        string resolvedName = resolveTableName(s, rest);
-        size_t freed = g_engine.vacuum(s.currentDB, resolvedName, concurrent, workers);
-        string mode = concurrent ? " CONCURRENTLY" : "";
-        if (workers > 1) mode += " (PARALLEL " + to_string(workers) + ")";
-        cout << "VACUUM" << mode << " completed, " << freed << " pages freed" << endl;
+        // Accept the legacy spelling VACUUM [FULL] [FREEZE] [VERBOSE]
+        // [ANALYZE] [relation], while respecting quoted identifiers.
+        while (!rest.empty()) {
+            const size_t space = rest.find_first_of(" \t");
+            const string token = rest.substr(0, space);
+            if (token == "full") full = true;
+            else if (token == "analyze") analyze = true;
+            else if (token == "verbose") verbose = true;
+            else if (token == "freeze") freeze = true;
+            else if (token == "concurrently") concurrent = true;
+            else break;
+            rest = space == string::npos ? string() : trim(rest.substr(space + 1));
+        }
+    }
+
+    if (freeze) {
+        throw dbms::DbError(
+            "0A000", "VACUUM FREEZE is not supported by this storage engine");
+    }
+    if (full && concurrent) {
+        throw dbms::DbError(
+            "0A000", "VACUUM FULL cannot be combined with CONCURRENTLY");
+    }
+
+    vector<string> tables;
+    if (rest.empty()) {
+        tables = g_engine.getTableNames(s.currentDB);
+    } else {
+        const string resolvedName = resolveTableName(s, rest);
+        if (!g_engine.tableExists(s.currentDB, resolvedName)) {
+            throw dbms::DbError(
+                "42P01", "relation \"" + rest + "\" does not exist");
+        }
+        tables.push_back(resolvedName);
+    }
+
+    size_t total = 0;
+    for (const auto& table : tables) {
+        size_t processed = 0;
+        if (full) {
+            bool succeeded = false;
+            processed = g_engine.vacuumFull(
+                s.currentDB, table, &succeeded);
+            if (!succeeded) {
+                throw dbms::DbError(
+                    "XX000", "VACUUM FULL failed for relation \"" +
+                                 table + "\"");
+            }
+            if (verbose) {
+                cout << "VACUUM FULL: " << table << ": " << processed
+                     << " rows rewritten" << endl;
+            }
+        } else {
+            processed = g_engine.vacuum(
+                s.currentDB, table, concurrent, workers);
+            if (verbose) {
+                cout << "VACUUM: " << table << ": " << processed
+                     << " pages freed" << endl;
+            }
+        }
+        if (analyze && !g_engine.analyzeTable(s.currentDB, table)) {
+            throw dbms::DbError(
+                "XX000", "ANALYZE failed for relation \"" + table + "\"");
+        }
+        total += processed;
+    }
+
+    string mode = full ? " FULL" : "";
+    if (concurrent) mode += " CONCURRENTLY";
+    if (analyze) mode += " ANALYZE";
+    if (workers > 1) mode += " (PARALLEL " + to_string(workers) + ")";
+    if (full) {
+        cout << "VACUUM" << mode << " completed, " << total
+             << " rows rewritten" << endl;
+    } else {
+        cout << "VACUUM" << mode << " completed, " << total
+             << " pages freed" << endl;
     }
     return false;
 }

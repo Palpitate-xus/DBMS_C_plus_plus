@@ -31,6 +31,11 @@ def main():
         assert state is None, (sql, state, message)
         return rows
 
+    def expect_error(sql, expected_state):
+        _, state, message, _, _ = runner.decode_wire_result(
+            client.simple_query(server["sock"], sql))
+        assert state == expected_state, (sql, state, message)
+
     try:
         query("CREATE TABLE no_forced_analyze (id INT PRIMARY KEY,v INT);")
         initial = stats.read_bytes() if stats.is_file() else b""
@@ -43,6 +48,13 @@ def main():
         document = json.loads("\n".join(row[0] for row in query(
             "EXPLAIN (FORMAT JSON) SELECT id FROM no_forced_analyze;")))
         assert document["totalRows"] == 1000, document
+        query("VACUUM (ANALYZE = true) no_forced_analyze;")
+        vacuum_analyze_stats = stats.read_bytes() if stats.is_file() else b""
+        assert b"no_forced_analyze __rows__ 60||" in vacuum_analyze_stats, \
+            vacuum_analyze_stats
+        document = json.loads("\n".join(row[0] for row in query(
+            "EXPLAIN (FORMAT JSON) SELECT id FROM no_forced_analyze;")))
+        assert document["totalRows"] == 60, document
         query("ANALYZE no_forced_analyze;")
         before = stats.read_bytes()
         assert b"no_forced_analyze __rows__ 60||" in before, before
@@ -58,6 +70,27 @@ def main():
             [str(row)] for row in range(1, 61) if row != 2]
         query("ANALYZE no_forced_analyze;")
         assert b"no_forced_analyze __rows__ 59||" in stats.read_bytes()
+        query("INSERT INTO no_forced_analyze VALUES (61,11);")
+        query("VACUUM ANALYZE no_forced_analyze;")
+        assert b"no_forced_analyze __rows__ 60||" in stats.read_bytes()
+
+        expect_error("VACUUM (FREEZE) no_forced_analyze;", "0A000")
+        query("BEGIN;")
+        expect_error("VACUUM no_forced_analyze;", "25001")
+        query("ROLLBACK;")
+
+        query("CREATE TABLE full_option_probe (id INT PRIMARY KEY, payload VARCHAR(2048));")
+        payload = "x" * 1024
+        values = ",".join(
+            f"({row},'{payload}')" for row in range(1, 201))
+        query("INSERT INTO full_option_probe VALUES " + values + ";")
+        query("DELETE FROM full_option_probe WHERE id > 1;")
+        heap = Path(server["dir"]) / "info" / "full_option_probe.dt"
+        before_full = heap.stat().st_size
+        query("VACUUM (FULL) full_option_probe;")
+        after_full = heap.stat().st_size
+        assert after_full < before_full, (before_full, after_full)
+        assert query("SELECT count(*) FROM full_option_probe;") == [["1"]]
         print("[LEGACY FORCED ANALYZE PROTOCOL E2E] passed")
     finally:
         runner.stop_ours(server)

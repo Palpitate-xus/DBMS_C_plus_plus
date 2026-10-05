@@ -930,7 +930,8 @@ public:
     size_t vacuum(const std::string& dbname, const std::string& tablename,
                   bool concurrent = false, int workers = 1);
     // VACUUM FULL: rewrite table entirely, reclaiming all dead space
-    size_t vacuumFull(const std::string& dbname, const std::string& tablename);
+    size_t vacuumFull(const std::string& dbname, const std::string& tablename,
+                      bool* succeeded = nullptr);
 
     // Auto-VACUUM: per-table dead tuple tracking and automatic triggering
     void maybeAutoVacuum(const std::string& dbname, const std::string& tablename);
