@@ -41839,13 +41839,13 @@ size_t StorageEngine::vacuum(const std::string& dbname,
         size_t freePct = page.freeSpace() * 100 / pa->pageSize();
         getFSM(dbname, tablename)->setFreePercent(pid, static_cast<uint8_t>(freePct));
 
-        // Update VM: if page is fully live after compact, mark AllVisible
+        // LP_NORMAL only describes line-pointer state; it does not prove
+        // that every tuple is visible to every active snapshot. This compact
+        // VACUUM path has no OldestXmin/visibility-horizon check, so claiming
+        // AllVisible here can hide an older tuple version from a snapshot
+        // reader. Stay conservative until VACUUM proves that horizon.
         VisibilityMap* vm = getVM(dbname, tablename);
-        if (page.liveCount() > 0 && page.liveCount() == page.slotCount()) {
-            vm->setAllVisible(pid, true);
-        } else {
-            vm->setAllVisible(pid, false);
-        }
+        vm->setAllVisible(pid, false);
 
         // If page is now empty, return it to the free list
         if (page.liveCount() == 0) {

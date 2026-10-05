@@ -9,6 +9,7 @@
 #include "commands/TableManage.h"
 #include "Session.h"
 #include "catalog/type_registry.h"
+#include "storage/VisibilityMap.h"
 
 #include <cassert>
 #include <filesystem>
@@ -88,6 +89,48 @@ int main() {
 
     // Large worker count caps at page count without deadlock
     (void)g_engine.vacuum(db, "vt_par", false, 64);
+
+    // VACUUM may compact an unused line pointer, but LP_NORMAL alone does
+    // not prove every tuple is visible to every active snapshot. Keep an old
+    // snapshot across UPDATE, create an unused pointer with a rolled-back
+    // INSERT, then verify VACUUM does not publish a false all-visible bit.
+    TableSchema vmTable;
+    vmTable.tablename = "vt_vm_horizon";
+    vmTable.formatVersion = 2;
+    vmTable.append(makeIntColumn("id", false, 0, true));
+    vmTable.append(makeVarCharColumn("payload", false, 64, false));
+    assert(g_engine.createTable(db, vmTable) == DBStatus::OK);
+    assert(g_engine.insert(db, vmTable.tablename,
+                           {{"id", "1"}, {"payload", "before"}}) ==
+           DBStatus::OK);
+
+    StorageEngine oldSnapshot;
+    oldSnapshot.setIsolationLevel(IsolationLevel::REPEATABLE_READ);
+    assert(oldSnapshot.beginTransaction(db) == DBStatus::OK);
+    const auto oldRow = oldSnapshot.query(
+        db, vmTable.tablename, {"=id 1"}, {"payload"});
+    assert(oldRow.size() == 1 && oldRow.front().find("before") !=
+           std::string::npos);
+
+    assert(g_engine.update(db, vmTable.tablename,
+                           {{"payload", "after"}}, {"=id 1"}) ==
+           DBStatus::OK);
+    assert(g_engine.beginTransaction(db) == DBStatus::OK);
+    assert(g_engine.insert(db, vmTable.tablename,
+                           {{"id", "2"}, {"payload", "rollback"}}) ==
+           DBStatus::OK);
+    assert(g_engine.rollbackTransaction() == DBStatus::OK);
+
+    assert(oldSnapshot.query(
+        db, vmTable.tablename, {"=id 1"}, {"payload"}) == oldRow);
+    assert(g_engine.vacuum(db, vmTable.tablename, false, 1) == 0);
+    assert(oldSnapshot.query(
+        db, vmTable.tablename, {"=id 1"}, {"payload"}) == oldRow);
+    VisibilityMap* vm = g_engine.getVM(db, vmTable.tablename);
+    assert(vm != nullptr);
+    assert(!vm->isAllVisible(1));
+    assert(oldSnapshot.commitTransaction() == DBStatus::OK);
+    std::cout << "[VACUUM] does not mark an old-snapshot page all-visible OK\n";
 
     cleanupDb(db);
     std::cout << "[VACUUM] all parallel vacuum tests passed" << std::endl;
