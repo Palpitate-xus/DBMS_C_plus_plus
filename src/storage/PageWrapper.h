@@ -31,6 +31,9 @@ public:
     bool canFit(size_t len) const;
     bool verifyChecksum() const;
     bool isValid() const;
+    bool isValid(uint32_t expectedPageId) const;
+    bool hasBoundPageId() const;
+    bool bindPageId(uint32_t pageId);
     void writeChecksum();
     uint32_t nextPage() const;
     void setNextPage(uint32_t next);

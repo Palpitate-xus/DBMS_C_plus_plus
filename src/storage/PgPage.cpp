@@ -48,9 +48,19 @@ bool PgPage::verifyChecksum() const {
 
 bool PgPage::isValid() const {
     const PageHeaderData* h = header();
-    const uint16_t expectedPageSizeVersion =
-        static_cast<uint16_t>((PAGE_SIZE / 512) << 8) | PG_PAGE_LAYOUT_VERSION;
-    if (!verifyChecksum() || h->pd_pagesize_version != expectedPageSizeVersion ||
+    const uint16_t pageSizeVersion = h->pd_pagesize_version;
+    const uint16_t expectedPageSize =
+        static_cast<uint16_t>((PAGE_SIZE / 512) << 8);
+    const uint16_t encodedPageSize = pageSizeVersion & 0xFF00;
+    const uint16_t layoutVersion = pageSizeVersion & 0x00FF;
+    const bool pageIdBound = (h->pd_flags & PD_PAGE_ID_BOUND) != 0;
+    const uint16_t knownPageFlags = PD_HAS_FREE_LINES | PD_PAGE_FULL |
+        PD_ALL_VISIBLE | PD_PAGE_ID_BOUND;
+    if (!verifyChecksum() || encodedPageSize != expectedPageSize ||
+        (layoutVersion != PAGE_LAYOUT_VERSION &&
+         layoutVersion != LEGACY_PAGE_LAYOUT_VERSION) ||
+        (h->pd_flags & ~knownPageFlags) != 0 ||
+        pageIdBound != (layoutVersion == PAGE_LAYOUT_VERSION) ||
         h->pd_lower < sizeof(PageHeaderData) || h->pd_lower > h->pd_upper ||
         h->pd_upper > h->pd_special || h->pd_special > PAGE_SIZE ||
         ((h->pd_lower - sizeof(PageHeaderData)) % sizeof(ItemIdData)) != 0) {
@@ -83,12 +93,36 @@ bool PgPage::isValid() const {
     return true;
 }
 
+bool PgPage::isValid(PageId expectedPageId) const {
+    return isValid() && hasBoundPageId() &&
+        header()->pd_page_id == expectedPageId;
+}
+
+bool PgPage::hasBoundPageId() const {
+    return (header()->pd_flags & PD_PAGE_ID_BOUND) != 0 &&
+        (header()->pd_pagesize_version & 0x00FF) == PAGE_LAYOUT_VERSION;
+}
+
+bool PgPage::bindPageId(PageId pageId) {
+    PageHeaderData* h = header();
+    if (!isValid()) return false;
+    if (hasBoundPageId()) return h->pd_page_id == pageId;
+    if ((h->pd_pagesize_version & 0x00FF) != LEGACY_PAGE_LAYOUT_VERSION) {
+        return false;
+    }
+    h->pd_page_id = pageId;
+    h->pd_flags |= PD_PAGE_ID_BOUND;
+    h->pd_pagesize_version = static_cast<uint16_t>(
+        (PAGE_SIZE / 512 << 8) | PAGE_LAYOUT_VERSION);
+    writeChecksum();
+    return true;
+}
+
 // ============================================================================
 // Initialization
 // ============================================================================
 
 void PgPage::init(PageId pageId) {
-    (void)pageId; // pageId 不在页头中存储，由外部页号管理
     std::memset(buf_, 0, PAGE_SIZE);
     PageHeaderData* h = header();
     h->pd_lsn = INVALID_LSN;
@@ -97,8 +131,9 @@ void PgPage::init(PageId pageId) {
     h->pd_lower = sizeof(PageHeaderData);
     h->pd_upper = static_cast<uint16_t>(PAGE_SIZE - sizeof(uint32_t)); // reserve special space for nextPage
     h->pd_special = static_cast<uint16_t>(PAGE_SIZE - sizeof(uint32_t));
-    h->pd_pagesize_version = (static_cast<uint16_t>(PAGE_SIZE / 512) << 8) | PG_PAGE_LAYOUT_VERSION;
-    h->pd_prune_xid = 0;
+    h->pd_pagesize_version = (static_cast<uint16_t>(PAGE_SIZE / 512) << 8) | PAGE_LAYOUT_VERSION;
+    h->pd_flags = PD_PAGE_ID_BOUND;
+    h->pd_page_id = static_cast<uint32_t>(pageId);
     writeChecksum();
 }
 

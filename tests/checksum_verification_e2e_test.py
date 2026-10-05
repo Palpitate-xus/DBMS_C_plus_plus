@@ -44,18 +44,20 @@ def crc32c(data):
     return value ^ 0xffffffff
 
 
-def heap_page():
+def heap_page(page_id, layout_version=5):
     page = bytearray(PAGE_SIZE)
-    page_size_version = ((PAGE_SIZE // 512) << 8) | 4
+    page_id_bound = layout_version == 5
+    page_size_version = ((PAGE_SIZE // 512) << 8) | layout_version
     struct.pack_into(
         "=QHHHHHHI", page, 0,
-        0, 0, 0, 24, PAGE_SIZE - 4, PAGE_SIZE - 4,
-        page_size_version, 0)
+        0, 0, 0x0008 if page_id_bound else 0,
+        24, PAGE_SIZE - 4, PAGE_SIZE - 4,
+        page_size_version, page_id if page_id_bound else 0)
     struct.pack_into("=H", page, 8, fletcher16(page))
     return bytes(page)
 
 
-def write_heap(path, blocks=2):
+def write_heap(path, blocks=2, layout_version=5):
     assert blocks >= 1
     header_without_checksum = struct.pack(
         "=IIIII", DATA_FILE_MAGIC, blocks, 0, 64,
@@ -64,7 +66,9 @@ def write_heap(path, blocks=2):
         "=I", fnv1a32(header_without_checksum))
     header_page = header + bytes(PAGE_SIZE - len(header))
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(header_page + heap_page() * (blocks - 1))
+    path.write_bytes(header_page + b"".join(
+        heap_page(page_id, layout_version)
+        for page_id in range(1, blocks)))
 
 
 def write_encrypted_heap(path, key):
@@ -151,6 +155,8 @@ def main():
         init_heap = database / "scratch.dt.init"
         write_heap(main_heap, 2)
         write_heap(init_heap, 1)
+        legacy_heap = database / "legacy.dt"
+        write_heap(legacy_heap, 2, layout_version=4)
         key = bytes.fromhex("11" * 32)
         cluster.joinpath("tde.key").write_text("11" * 32 + "\n",
                                                encoding="ascii")
@@ -171,7 +177,9 @@ def main():
         clean = run_verify(cluster, launch)
         assert clean.returncode == 0, clean
         assert "heap checksum verification passed" in clean.stdout, clean
-        assert "files=4" in clean.stdout and "blocks=7" in clean.stdout, clean
+        assert "files=5" in clean.stdout and "blocks=9" in clean.stdout, clean
+        assert "identity-bound-blocks=3" in clean.stdout, clean
+        assert "legacy-identity-unbound-blocks=1" in clean.stdout, clean
         assert snapshot_tree(cluster) == before_cluster
         assert snapshot_tree(external) == before_external
         assert list(launch.iterdir()) == []

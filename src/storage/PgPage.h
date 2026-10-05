@@ -9,7 +9,7 @@
 namespace dbms {
 
 // ============================================================================
-// PostgreSQL 风格页格式（8KB）
+// PostgreSQL-inspired project page format (8 KiB; not PostgreSQL-compatible).
 // ============================================================================
 //
 // 页布局（从低地址到高地址）：
@@ -27,15 +27,15 @@ namespace dbms {
 //
 // freeSpace = pd_upper - pd_lower
 //
-// The engine accepts only this 8 KiB heap layout.  Older page files are
-// intentionally rejected at open time; migration is outside the product
-// contract for this clean-storage release.
+// Layout v5 binds a page to its physical block number. Layout v4 remains
+// readable and is upgraded on the first dirty mark after a page mutation.
 
 class PgPage {
 public:
     static constexpr size_t PAGE_SIZE = BLCKSZ;           // 8192
     static constexpr size_t MAXALIGN = 8;
-    static constexpr uint16_t PG_PAGE_LAYOUT_VERSION = 4; // PostgreSQL 页布局版本号
+    static constexpr uint16_t PAGE_LAYOUT_VERSION = 5;
+    static constexpr uint16_t LEGACY_PAGE_LAYOUT_VERSION = 4;
 
     // ------------------------------------------------------------------------
     // PageHeaderData - 页头，固定 24 字节
@@ -49,7 +49,7 @@ public:
         uint16_t pd_upper;        // 2 bytes: free space 结束偏移（tuple 起始）
         uint16_t pd_special;      // 2 bytes: special space 起始偏移
         uint16_t pd_pagesize_version; // 2 bytes: 高8位=页大小版本，低8位=布局版本
-        uint32_t pd_prune_xid;    // 4 bytes: 最老的未修剪 XMAX
+        uint32_t pd_page_id;      // v5: physical block number; v4 stored unused prune metadata
     };
 #pragma pack(pop)
 
@@ -57,6 +57,7 @@ public:
     static constexpr uint16_t PD_HAS_FREE_LINES = 0x0001;   // 有未使用的 line pointer
     static constexpr uint16_t PD_PAGE_FULL      = 0x0002;   // 页面已满提示
     static constexpr uint16_t PD_ALL_VISIBLE    = 0x0004;   // 所有行对所有事务可见
+    static constexpr uint16_t PD_PAGE_ID_BOUND  = 0x0008;   // pd_page_id is authenticated by checksum
 
     // ------------------------------------------------------------------------
     // ItemIdData - Line Pointer，每个 tuple 一个，4 字节
@@ -152,6 +153,9 @@ public:
     void writeChecksum();
     bool verifyChecksum() const;
     bool isValid() const;
+    bool isValid(PageId expectedPageId) const;
+    bool hasBoundPageId() const;
+    bool bindPageId(PageId pageId);
 
     // ------------------------------------------------------------------------
     // 行计数

@@ -552,6 +552,8 @@ bool readTablespaceMarker(const std::filesystem::path& marker,
 struct HeapVerificationStats {
     uint64_t files = 0;
     uint64_t blocks = 0;
+    uint64_t identityBoundBlocks = 0;
+    uint64_t legacyIdentityUnboundBlocks = 0;
 };
 
 bool loadVerificationKey(const std::filesystem::path& root,
@@ -872,10 +874,18 @@ bool verifyHeapFile(const std::filesystem::path& root,
                 }
             }
         }
-        if (!PgPage(page.data()).isValid()) {
+        const PgPage verifiedPage(page.data());
+        if (!verifiedPage.isValid() ||
+            (verifiedPage.hasBoundPageId() &&
+             !verifiedPage.isValid(block))) {
             error = shown + ": block " + std::to_string(block) +
                 ": invalid page checksum or layout";
             return false;
+        }
+        if (verifiedPage.hasBoundPageId()) {
+            ++stats.identityBoundBlocks;
+        } else {
+            ++stats.legacyIdentityUnboundBlocks;
         }
     }
 
@@ -909,7 +919,10 @@ bool verifyHeapDataChecksums(const std::filesystem::path& root,
     }
     output = "heap checksum verification passed\nfiles=" +
         std::to_string(stats.files) + "\nblocks=" +
-        std::to_string(stats.blocks);
+        std::to_string(stats.blocks) + "\nidentity-bound-blocks=" +
+        std::to_string(stats.identityBoundBlocks) +
+        "\nlegacy-identity-unbound-blocks=" +
+        std::to_string(stats.legacyIdentityUnboundBlocks);
     return true;
 }
 

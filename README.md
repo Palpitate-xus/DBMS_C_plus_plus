@@ -598,7 +598,7 @@ dbname/
 
 ## 页格式
 
-数据页（8192 字节，当前 v2 格式）：
+数据页（8192 字节，项目内部布局 v5；字段借鉴 PostgreSQL，但不兼容 PostgreSQL on-disk 格式）：
 
 ```
 +----------------------+------------------+-------------+------------------+----------+
@@ -610,13 +610,14 @@ dbname/
 Header:
   - pd_lsn (8B), pd_checksum (2B): LSN 与 Fletcher-16 校验和
   - pd_flags/pd_lower/pd_upper/pd_special (2B each): 页面状态和边界
-  - pd_pagesize_version (2B): 8 KiB + 当前布局版本
-  - pd_prune_xid (4B): VACUUM/HOT 元数据
+  - pd_pagesize_version (2B): 8 KiB + 项目页布局版本
+  - pd_page_id (4B): v5 物理块号，由页 checksum 覆盖；v4 旧页首次写入时惰性升级
+  - pd_flags 的 PD_PAGE_ID_BOUND 位：标记块号身份字段有效
   - special space 末尾 4B：空闲页链表 nextPage
 
 文件头页额外保存 magic、页数、空闲链表头、rowSize、格式版本和 FNV 校验和；`rowSize`
 是逻辑行宽元数据，TEXT/BYTEA 等大值可由 TOAST 外部化，不受单页容量限制。
-打开/读取时严格验证；checksum 为 0、截断文件、非法页边界和坏 line pointer 均拒绝。
+打开/读取时严格验证；checksum 为 0、截断文件、非法页边界、坏 line pointer 或已绑定的错误块号均拒绝。v4 旧页在首次真实写入时升级，离线校验会单独列出尚未绑定块号的 v4 页。
 ```
 
 ## 行格式

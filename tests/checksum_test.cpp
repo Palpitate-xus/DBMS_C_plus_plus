@@ -1,6 +1,7 @@
 #include "PgPage.h"
 #include "PageAllocator.h"
 #include "Config.h"
+#include <array>
 #include <cassert>
 #include <cstddef>
 #include <cstring>
@@ -41,6 +42,9 @@ static void test_page_init_and_verify() {
 
     assert(page.verifyChecksum());
     assert(page.header()->pd_checksum != 0);
+    assert(page.hasBoundPageId());
+    assert(page.isValid(1));
+    assert(!page.isValid(2));
 
     // Corrupt a byte in the data area and verify checksum fails.
     // Use += 1 instead of XOR 0xFF because 0xFF ≡ 0 (mod 255) would not
@@ -223,6 +227,141 @@ static void test_allocator_rejects_corrupt_header_and_truncation() {
     std::cout << "[CHECKSUM] allocator rejects corrupt header/truncation OK\n";
 }
 
+static void test_allocator_rejects_swapped_pages() {
+    const std::filesystem::path path = "checksum_swapped_pages.dat";
+    std::filesystem::remove(path);
+    {
+        PageAllocator allocator(path.string(), 32);
+        assert(allocator.open());
+        assert(allocator.allocPage() == 1);
+        assert(allocator.allocPage() == 2);
+        const char* rows[] = {"first page", "second page"};
+        for (uint32_t pageId = 1; pageId <= 2; ++pageId) {
+            char* data = allocator.fetchPage(pageId);
+            assert(data);
+            PageWrapper page(data, PgPage::PAGE_SIZE,
+                             allocator.formatVersion());
+            uint16_t slot = 0;
+            const char* row = rows[pageId - 1];
+            assert(page.insert(row, std::strlen(row), slot));
+            allocator.markDirty(pageId);
+            allocator.unpinPage(pageId);
+        }
+        assert(allocator.flush());
+    }
+
+    {
+        std::fstream file(path, std::ios::in | std::ios::out |
+                                std::ios::binary);
+        assert(file);
+        std::array<char, PgPage::PAGE_SIZE> first{};
+        std::array<char, PgPage::PAGE_SIZE> second{};
+        file.seekg(static_cast<std::streamoff>(PgPage::PAGE_SIZE));
+        file.read(first.data(), first.size());
+        assert(file);
+        file.seekg(static_cast<std::streamoff>(2 * PgPage::PAGE_SIZE));
+        file.read(second.data(), second.size());
+        assert(file);
+        file.clear();
+        file.seekp(static_cast<std::streamoff>(PgPage::PAGE_SIZE));
+        file.write(second.data(), second.size());
+        assert(file);
+        file.seekp(static_cast<std::streamoff>(2 * PgPage::PAGE_SIZE));
+        file.write(first.data(), first.size());
+        assert(file);
+    }
+
+    {
+        PageAllocator allocator(path.string(), 32);
+        assert(allocator.open());
+        assert(allocator.fetchPage(1) == nullptr);
+        assert(allocator.fetchPage(2) == nullptr);
+    }
+    std::filesystem::remove(path);
+    std::cout << "[CHECKSUM] allocator rejects swapped pages OK\n";
+}
+
+static void test_allocator_upgrades_legacy_page_identity() {
+    const std::filesystem::path path = "checksum_legacy_identity.dat";
+    std::filesystem::remove(path);
+    {
+        PageAllocator allocator(path.string(), 32);
+        assert(allocator.open());
+        assert(allocator.allocPage() == 1);
+        char* data = allocator.fetchPage(1);
+        assert(data);
+        PageWrapper page(data, PgPage::PAGE_SIZE, allocator.formatVersion());
+        const char row[] = "legacy row";
+        uint16_t slot = 0;
+        assert(page.insert(row, sizeof(row), slot));
+        allocator.markDirty(1);
+        allocator.unpinPage(1);
+        assert(allocator.flush());
+    }
+
+    // Emulate a page written by layout v4, which used this 4-byte field for
+    // unused prune metadata and had no block identity.
+    {
+        std::fstream file(path, std::ios::in | std::ios::out |
+                                std::ios::binary);
+        assert(file);
+        std::array<char, PgPage::PAGE_SIZE> legacy{};
+        file.seekg(static_cast<std::streamoff>(PgPage::PAGE_SIZE));
+        file.read(legacy.data(), legacy.size());
+        assert(file);
+        PgPage page(legacy.data());
+        page.header()->pd_flags &= ~PgPage::PD_PAGE_ID_BOUND;
+        page.header()->pd_page_id = 0;
+        page.header()->pd_pagesize_version = static_cast<uint16_t>(
+            (PgPage::PAGE_SIZE / 512 << 8) |
+            PgPage::LEGACY_PAGE_LAYOUT_VERSION);
+        page.writeChecksum();
+        file.clear();
+        file.seekp(static_cast<std::streamoff>(PgPage::PAGE_SIZE));
+        file.write(legacy.data(), legacy.size());
+        assert(file);
+    }
+
+    {
+        PageAllocator allocator(path.string(), 32);
+        assert(allocator.open());
+        char* data = allocator.fetchPage(1);
+        assert(data);
+        PageWrapper page(data, PgPage::PAGE_SIZE, allocator.formatVersion());
+        assert(!page.hasBoundPageId());
+        assert(page.isValid());
+        assert(!page.isValid(1));
+        const char* row = nullptr;
+        size_t rowSize = 0;
+        assert(page.read(0, row, rowSize));
+        assert(std::string(row, rowSize) == std::string("legacy row", 11));
+        const char appended[] = "new row";
+        uint16_t appendedSlot = 0;
+        assert(page.insert(appended, sizeof(appended), appendedSlot));
+        assert(appendedSlot == 1);
+        allocator.markDirty(1);
+        assert(page.hasBoundPageId());
+        assert(page.isValid(1));
+        allocator.unpinPage(1);
+        assert(allocator.flush());
+    }
+    {
+        PageAllocator allocator(path.string(), 32);
+        assert(allocator.open());
+        char* data = allocator.fetchPage(1);
+        assert(data);
+        PageWrapper page(data, PgPage::PAGE_SIZE, allocator.formatVersion());
+        assert(page.isValid(1));
+        const char* row = nullptr;
+        size_t rowSize = 0;
+        assert(page.read(1, row, rowSize));
+        assert(std::string(row, rowSize) == std::string("new row", 8));
+        allocator.unpinPage(1);
+    }
+    std::filesystem::remove(path);
+    std::cout << "[CHECKSUM] legacy page identity upgrade OK\n";
+}
+
 int main() {
     test_compute_checksum_basic();
     test_page_init_and_verify();
@@ -232,6 +371,8 @@ int main() {
     test_allocator_rejects_corrupt_storage();
     test_compaction_preserves_special_space();
     test_allocator_rejects_corrupt_header_and_truncation();
+    test_allocator_rejects_swapped_pages();
+    test_allocator_upgrades_legacy_page_identity();
 
     std::cout << "[CHECKSUM] all passed\n";
     return 0;

@@ -423,7 +423,7 @@
 
 - [ ] **STO-01** 定义稳定 on-disk format、control file、system identifier、catalog version、block size、endianness 和 feature flags。
 - [ ] **STO-02** relation locator/fork/segment 布局、database/tablespace OID 和临时 relation 命名对齐内部模型。
-- [ ] **STO-03** page header、item identifier、tuple/varlena/toast pointer、special space、LSN/checksum 的兼容且自描述格式。
+- [ ] **STO-03** page header、item identifier、tuple/varlena/toast pointer、special space、LSN/checksum 的兼容且自描述格式。（布局 v5 已绑定物理块号并拒绝 v5 页错块；v4 首次 dirty mark 升级。完整 PostgreSQL checksum、tuple/varlena/TOAST 与 LSN 兼容仍缺，详见 `docs/issue-sto-03-page-identity.md`。）
 - [ ] **STO-04** Buffer Manager 补 shared hash/partition locks、buffer content locks、I/O-in-progress、prefetch、bulk strategy、ring buffer 和 resource owner pin cleanup。
 - [ ] **STO-05** FSM/VM 持久化、crash rebuild、all-visible/all-frozen 和 index-only/VACUUM 交互。
 - [ ] **STO-06** TOAST 补 varlena short/compressed/external datum、storage strategy、toast_tuple_target、pglz/lz4、dedup/delete/vacuum 和索引一致性。

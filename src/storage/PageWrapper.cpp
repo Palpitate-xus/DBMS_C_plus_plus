@@ -53,6 +53,16 @@ bool PageWrapper::verifyChecksum() const { return PgPage(buf_).verifyChecksum();
 
 bool PageWrapper::isValid() const { return PgPage(buf_).isValid(); }
 
+bool PageWrapper::isValid(uint32_t expectedPageId) const {
+    return PgPage(buf_).isValid(static_cast<PageId>(expectedPageId));
+}
+
+bool PageWrapper::hasBoundPageId() const { return PgPage(buf_).hasBoundPageId(); }
+
+bool PageWrapper::bindPageId(uint32_t pageId) {
+    return PgPage(buf_).bindPageId(static_cast<PageId>(pageId));
+}
+
 void PageWrapper::writeChecksum() { PgPage(buf_).writeChecksum(); }
 
 uint32_t PageWrapper::nextPage() const { return PgPage(buf_).nextPage(); }

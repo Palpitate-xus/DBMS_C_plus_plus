@@ -321,10 +321,16 @@ PageAllocator::PageAllocator(const std::string& filename, size_t rowSize, size_t
     const uint32_t fv = formatVersion_;
     bp_->setPageValidator([fv](uint32_t pageId, const char* data) -> bool {
         if (pageId == 0) return true;
-        const PageWrapper page(const_cast<char*>(data), PgPage::PAGE_SIZE, fv);
+        PageWrapper page(const_cast<char*>(data), PgPage::PAGE_SIZE, fv);
         if (!page.isValid()) {
             std::cerr << "[storage] invalid heap page " << pageId
                       << "; refusing to load corrupted data" << std::endl;
+            return false;
+        }
+        if (page.hasBoundPageId() && !page.isValid(pageId)) {
+            std::cerr << "[storage] heap page identity mismatch at block "
+                      << pageId << "; refusing to load misplaced data"
+                      << std::endl;
             return false;
         }
         return true;
@@ -558,7 +564,29 @@ void PageAllocator::unpinPage(uint32_t pageId) {
 }
 
 void PageAllocator::markDirty(uint32_t pageId) {
-    if (isOpen()) bp_->markDirty(pageId);
+    if (!isOpen()) return;
+    if (pageId == 0) {
+        bp_->markDirty(pageId);
+        return;
+    }
+
+    // Upgrade legacy v4 identity only when a caller already marks a page
+    // dirty. A read-only page load must not create a new dirty write.
+    char* data = bp_->fetchPage(pageId);
+    if (!data) return;
+    PageWrapper page(data, pageSize_, formatVersion_);
+    if (!page.hasBoundPageId() && !page.bindPageId(pageId)) {
+        std::cerr << "[storage] cannot bind legacy heap page identity at block "
+                  << pageId << std::endl;
+    }
+    if (page.hasBoundPageId() && !page.isValid(pageId)) {
+        std::cerr << "[storage] heap page identity mismatch at block "
+                  << pageId << "; refusing dirty mark" << std::endl;
+        bp_->unpinPage(pageId);
+        return;
+    }
+    bp_->markDirty(pageId);
+    bp_->unpinPage(pageId);
 }
 
 bool PageAllocator::flush() {
