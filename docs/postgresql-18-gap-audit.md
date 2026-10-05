@@ -1,3 +1,5 @@
+2026-10-05 OPT-05 修复 join cost GUC 被小表启发式覆盖，source/test commit `61c8bc57`：`enable_nestloop=off` 时基础代价先把 Nested Loop 置为不可竞争，但统计选择率修正又将其覆盖为有限代价，随后 `<50` 小表捷径无条件选 NLJ。4×3 两表且均已 ANALYZE 的 planner 回归在修复前因拿到 `NestedLoopJoinOp` 而失败；现在统计修正只作用于仍可用的 NLJ，小表捷径也要求 NLJ 仍是候选，因此可用 Hash Join 被选中。`scripts/build_one_test.sh planner_runtime_stats_test`（红/绿）、`scripts/build_one_test.sh cost_model_test`、`scripts/build.sh` 均通过。未跑完整suite或PG18.6 differential。OPT-05 仍 partial：selectivity support、完整类型/operator/collation aware cost、统计失效等仍未实现。总账 273：22 complete、165 partial、71 unverified、15 deferred_by_user。
+
 2026-10-05 OPT-01 审查：`PlanContext` 加 `buildSelectPlan()` 返回单个 `OpPtr` 计划树，没有可比较的 relation/path 集合或参数化路径；`EquivalenceClass`/`PathKey` 只是轻量 struct。pathkey overload 丢弃 `eqClasses`，识别出可排序 index 后仍保留 `SortOp`（当前实现内有明确 safe-fallback `break`），因此只是未生效的接口而不是 PostgreSQL 式 path planner。`tests/eq_class_pathkey_test.cpp` 只在空表上执行、未断言计划节点或实际有序数据，不能证明索引排序或等价类传播。仅审查、无生产改动；OPT-01 从 unverified 调整为 partial，架构重做仍未实现，详见 `docs/issue-opt-01-path-planner-audit.md`。总账 273：22 complete、165 partial、71 unverified、15 deferred_by_user。
 
 2026-10-05 VAC-03 部分修复，source/test commit `09611ff0`：`VACUUM (ANALYZE)` 原先被接受却走普通 vacuum 路径，不生成/刷新统计信息；`FULL` 选项也可能未触发表重写；`FREEZE` 被静默忽略，事务块内执行亦未拒绝。现在解析 parenthesized/legacy 维护选项，ANALYZE 实际刷新统计、FULL 调用重写路径并显式传播失败，FREEZE 以 `0A000` 拒绝，事务块中的 VACUUM 以 `25001` 拒绝；补充关系不存在、参数和 verbose 摘要处理。`scripts/build.sh`、`python3 tests/legacy_forced_analyze_protocol_e2e_test.py`、`scripts/build_one_test.sh vacuum_full_test`、`git diff --check` 通过；测试覆盖括号及旧式 ANALYZE、`ANALYZE = true`、统计行数/EXPLAIN估算、FREEZE与事务拒绝、FULL 文件收缩及数据保留。完整注册套件和 PG18.6 differential 未跑。VAC-03 仍 partial：FULL 仍非事务性原子 relation swap，crash consistency 未证明；FREEZE 与 VACUUM progress view 未实现，VERBOSE 输出也非完整 PostgreSQL counters。总账 273：22 complete、164 partial、72 unverified、15 deferred_by_user。
@@ -404,7 +406,7 @@
 - [ ] **OPT-02** 实现 exhaustive/DP join search、GEQO 阈值、outer/semi/anti join constraints 和 bushy plan。
 - [ ] **OPT-03** 完整 predicate implication、constant propagation、equivalence class、join removal、outer join reduction 和 partition pruning。
 - [ ] **OPT-04** 完整统计：采样、null fraction、ndistinct、MCV、histogram、correlation、extended ndistinct/dependencies/MCV、表达式统计。
-- [ ] **OPT-05** 实现 selectivity/cost support function、数据类型/operator/collation-aware 估算和统计失效。
+- [ ] **OPT-05** 实现 selectivity/cost support function、数据类型/operator/collation-aware 估算和统计失效。（已修复 `enable_nestloop=off` 被有统计的小表 join shortcut 覆盖的问题；更多代价/选择率语义仍缺，见 `docs/issue-opt-05-small-join-guc-cost-override.md`。）
 - [ ] **OPT-06** parameterized path、nested-loop inner index scan、subplan/initplan、memoize 和 correlated execution。
 - [ ] **OPT-07** 补 Seq/TID/TID Range/Sample/Function/Values/CTE/WorkTable/Foreign/Custom/Append/MergeAppend 扫描节点。
 - [ ] **OPT-08** 补真正 index-only scan、visibility map 条件、heap fetch fallback 和 INCLUDE column。
