@@ -22410,6 +22410,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     string type;    // inner/left/right/full/cross
                     string onLeft;  // qualified
                     string onRight;
+                    vector<string> onResiduals;
                     bool hasOn;
                 };
                 struct ParsedJoin {
@@ -22526,13 +22527,56 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                 onText = trim(seg.substr(st, e - st));
                                 i = e;
                             }
-                            size_t eq = onText.find('=');
-                            if (eq == string::npos) {
-                                cout << "SQL syntax error: invalid ON clause" << endl;
+                            // Keep each ON conjunct intact.  Use one simple
+                            // cross-relation equality as the hash key and
+                            // evaluate the remaining terms as ON filters.
+                            for (const auto& term :
+                                 dbms::splitSqlConjunction(onText)) {
+                                dbms::SQLParser onParser;
+                                const auto parsedOn = onParser.parse(
+                                    "SELECT " + term);
+                                const auto* onSelect = parsedOn.success
+                                    ? dynamic_cast<const dbms::SelectStmt*>(
+                                          parsedOn.stmt.get())
+                                    : nullptr;
+                                const auto* comparison = onSelect &&
+                                        onSelect->selectList.size() == 1
+                                        ? dynamic_cast<
+                                              const dbms::BinaryOpExpr*>(
+                                              onSelect->selectList.front()
+                                                  .expr.get())
+                                        : nullptr;
+                                const auto* leftRef = comparison &&
+                                        comparison->op == "="
+                                        ? dynamic_cast<
+                                              const dbms::ColumnRefExpr*>(
+                                              comparison->left.get())
+                                        : nullptr;
+                                const auto* rightRef = comparison &&
+                                        comparison->op == "="
+                                        ? dynamic_cast<
+                                              const dbms::ColumnRefExpr*>(
+                                              comparison->right.get())
+                                        : nullptr;
+                                const bool hashKey = link.onLeft.empty() &&
+                                    leftRef && rightRef &&
+                                    leftRef->schema.empty() &&
+                                    rightRef->schema.empty() &&
+                                    !leftRef->table.empty() &&
+                                    !rightRef->table.empty();
+                                if (hashKey) {
+                                    link.onLeft = leftRef->toString();
+                                    link.onRight = rightRef->toString();
+                                } else {
+                                    link.onResiduals.push_back(term);
+                                }
+                            }
+                            if (link.onLeft.empty() &&
+                                link.onResiduals.empty()) {
+                                cout << "SQL syntax error: invalid ON clause"
+                                     << endl;
                                 return true;
                             }
-                            link.onLeft = trim(onText.substr(0, eq));
-                            link.onRight = trim(onText.substr(eq + 1));
                             link.hasOn = true;
                         }
                         pj.tables.push_back({rname, ralias});
@@ -22569,6 +22613,171 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     r.alias = al.empty() ? tn : al;
                     r.schema = g_engine.getTableSchema(s.currentDB, r.name);
                     pending.push_back(std::move(r));
+                }
+                auto resolveMultiOnColumn = [&](const dbms::ColumnRefExpr* ref,
+                                                size_t& relationIndex,
+                                                string& column,
+                                                string& error,
+                                                string& sqlState) {
+                    if (!ref || !ref->schema.empty()) {
+                        error = "schema-qualified JOIN ON references are not "
+                                "supported";
+                        sqlState = "0A000";
+                        return false;
+                    }
+                    size_t matches = 0;
+                    for (size_t relation = 0; relation < pending.size();
+                         ++relation) {
+                        const bool hasAlias =
+                            !pj.tables[relation].second.empty();
+                        const bool qualifierMatches = ref->table.empty() ||
+                            ref->table == pending[relation].alias ||
+                            (!hasAlias &&
+                             (ref->table == pj.tables[relation].first ||
+                              ref->table == pending[relation].name));
+                        if (!qualifierMatches) continue;
+                        bool columnExists = false;
+                        for (size_t index = 0;
+                             index < pending[relation].schema.len; ++index) {
+                            columnExists = columnExists ||
+                                pending[relation].schema.cols[index].dataName ==
+                                    ref->column;
+                        }
+                        if (columnExists) {
+                            relationIndex = relation;
+                            ++matches;
+                        }
+                    }
+                    if (matches == 1) {
+                        column = ref->column;
+                        return true;
+                    }
+                    if (matches > 1) {
+                        error = "column reference \"" + ref->column +
+                            "\" is ambiguous";
+                        sqlState = "42702";
+                    } else if (ref->table.empty()) {
+                        error = "column \"" + ref->column +
+                            "\" does not exist";
+                        sqlState = "42703";
+                    } else {
+                        bool qualifierExists = false;
+                        for (size_t relation = 0;
+                             relation < pending.size(); ++relation) {
+                            const bool hasAlias =
+                                !pj.tables[relation].second.empty();
+                            qualifierExists = qualifierExists ||
+                                ref->table == pending[relation].alias ||
+                                (!hasAlias &&
+                                 (ref->table == pj.tables[relation].first ||
+                                  ref->table == pending[relation].name));
+                        }
+                        if (qualifierExists) {
+                            error = "column \"" + ref->column +
+                                "\" does not exist";
+                            sqlState = "42703";
+                        } else {
+                            error = "missing FROM-clause entry for table \"" +
+                                ref->table + "\"";
+                            sqlState = "42P01";
+                        }
+                    }
+                    return false;
+                };
+                struct JoinResidual {
+                    size_t joinIndex;
+                    string expression;
+                    vector<size_t> relations;
+                    bool applied = false;
+                };
+                vector<JoinResidual> joinResiduals;
+                for (size_t joinIndex = 0; joinIndex < pj.joins.size();
+                     ++joinIndex) {
+                    for (const auto& term :
+                         pj.joins[joinIndex].onResiduals) {
+                        dbms::SQLParser onParser;
+                        const auto parsedOn = onParser.parse("SELECT " + term);
+                        const auto* onSelect = parsedOn.success
+                            ? dynamic_cast<const dbms::SelectStmt*>(
+                                  parsedOn.stmt.get())
+                            : nullptr;
+                        const dbms::Expr* expression = onSelect &&
+                                onSelect->selectList.size() == 1
+                            ? onSelect->selectList.front().expr.get() : nullptr;
+                        const auto* comparison = dynamic_cast<
+                            const dbms::BinaryOpExpr*>(expression);
+                        const auto* unary = dynamic_cast<
+                            const dbms::UnaryOpExpr*>(expression);
+                        bool validShape = false;
+                        vector<const dbms::ColumnRefExpr*> references;
+                        if (comparison &&
+                            (comparison->op == "=" || comparison->op == "<>" ||
+                             comparison->op == "!=" || comparison->op == "<" ||
+                             comparison->op == ">" || comparison->op == "<=" ||
+                             comparison->op == ">=")) {
+                            const bool leftColumn = dynamic_cast<const
+                                dbms::ColumnRefExpr*>(comparison->left.get());
+                            const bool rightColumn = dynamic_cast<const
+                                dbms::ColumnRefExpr*>(comparison->right.get());
+                            const bool leftLiteral = dynamic_cast<const
+                                dbms::LiteralExpr*>(comparison->left.get());
+                            const bool rightLiteral = dynamic_cast<const
+                                dbms::LiteralExpr*>(comparison->right.get());
+                            validShape = (leftColumn || leftLiteral) &&
+                                         (rightColumn || rightLiteral) &&
+                                         (leftColumn || rightColumn);
+                            if (leftColumn)
+                                references.push_back(static_cast<const
+                                    dbms::ColumnRefExpr*>(
+                                        comparison->left.get()));
+                            if (rightColumn)
+                                references.push_back(static_cast<const
+                                    dbms::ColumnRefExpr*>(
+                                        comparison->right.get()));
+                        } else if (unary &&
+                                   (unary->op == "IS NULL" ||
+                                    unary->op == "IS NOT NULL")) {
+                            const auto* column = dynamic_cast<const
+                                dbms::ColumnRefExpr*>(unary->operand.get());
+                            validShape = column != nullptr;
+                            if (column) references.push_back(column);
+                        } else if (const auto* literal = dynamic_cast<const
+                                       dbms::LiteralExpr*>(expression)) {
+                            validShape = literal->value == "true" ||
+                                         literal->value == "false";
+                        }
+                        if (!validShape) {
+                            cout << "ERROR: unsupported multi-table JOIN ON "
+                                    "predicate (SQLSTATE 0A000)" << endl;
+                            return true;
+                        }
+                        JoinResidual residual;
+                        residual.joinIndex = joinIndex;
+                        residual.expression = term;
+                        for (const auto* reference : references) {
+                            size_t relation = 0;
+                            string column, error, sqlState;
+                            if (!resolveMultiOnColumn(
+                                    reference, relation, column, error,
+                                    sqlState)) {
+                                cout << "ERROR: " << error << " (SQLSTATE "
+                                     << sqlState << ")" << endl;
+                                return true;
+                            }
+                            if (relation > joinIndex + 1) {
+                                cout << "ERROR: JOIN ON references a relation "
+                                        "that is not in scope (SQLSTATE 42P01)"
+                                     << endl;
+                                return true;
+                            }
+                            if (std::find(residual.relations.begin(),
+                                          residual.relations.end(), relation) ==
+                                residual.relations.end()) {
+                                residual.relations.push_back(relation);
+                            }
+                        }
+                        joinResiduals.push_back(std::move(residual));
+                    }
                 }
                 // join predicates that reference table indexes i<j with cols
                 struct Pred {
@@ -22698,22 +22907,27 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 auto doJoin = [&](const string& lt, const string& rt,
                                   const string& lc, const string& rc,
                                   const string& type,
+                                  const vector<string>& onConditions,
                                   vector<vector<string>>* cells,
                                   vector<vector<bool>>* nulls) -> vector<string> {
                     if (type == "left")
                         return g_engine.leftJoin(
-                            s.currentDB, lt, rt, lc, rc, {}, {}, cells, nulls);
+                            s.currentDB, lt, rt, lc, rc, {}, {}, cells, nulls,
+                            onConditions);
                     if (type == "right")
                         return g_engine.rightJoin(
-                            s.currentDB, lt, rt, lc, rc, {}, {}, cells, nulls);
+                            s.currentDB, lt, rt, lc, rc, {}, {}, cells, nulls,
+                            onConditions);
                     if (type == "full")
                         return g_engine.fullOuterJoin(
-                            s.currentDB, lt, rt, lc, rc, {}, {}, cells, nulls);
+                            s.currentDB, lt, rt, lc, rc, {}, {}, cells, nulls,
+                            onConditions);
                     if (type == "cross")
                         return g_engine.crossJoin(
-                            s.currentDB, lt, rt, {}, {}, cells, nulls);
+                            s.currentDB, lt, rt, onConditions, {}, cells, nulls);
                     return g_engine.join(
-                        s.currentDB, lt, rt, lc, rc, {}, {}, cells, nulls);
+                        s.currentDB, lt, rt, lc, rc, {}, {}, cells, nulls,
+                        onConditions);
                 };
                 // column names of the first pair's result (left cols + right cols)
                 std::vector<string> interCols;
@@ -22738,15 +22952,187 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         colMap[{tIdx, cn}] = out;
                     }
                 };
+                auto makeResidualCondition = [&](const string& term,
+                                                 const vector<size_t>& leftSources,
+                                                 size_t rightSource,
+                                                 const string& leftInputName,
+                                                 const string& rightInputName,
+                                                 bool leftIsIntermediate,
+                                                 string& condition,
+                                                 string& error,
+                                                 string& sqlState) {
+                    dbms::SQLParser onParser;
+                    const auto parsedOn = onParser.parse("SELECT " + term);
+                    const auto* onSelect = parsedOn.success
+                        ? dynamic_cast<const dbms::SelectStmt*>(
+                              parsedOn.stmt.get()) : nullptr;
+                    const dbms::Expr* expression = onSelect &&
+                            onSelect->selectList.size() == 1
+                        ? onSelect->selectList.front().expr.get() : nullptr;
+                    if (const auto* literal = dynamic_cast<const
+                            dbms::LiteralExpr*>(expression)) {
+                        if (literal->value == "true" ||
+                            literal->value == "false") {
+                            condition = literal->value == "true"
+                                ? "__join_on_true__" : "__join_on_false__";
+                            return true;
+                        }
+                    }
+                    auto qualifyColumn = [&](const dbms::ColumnRefExpr* ref,
+                                             string& qualified) {
+                        size_t relation = 0;
+                        string column;
+                        if (!resolveMultiOnColumn(ref, relation, column,
+                                                  error, sqlState)) return false;
+                        if (relation == rightSource) {
+                            qualified = rightInputName + "." + column;
+                            return true;
+                        }
+                        if (std::find(leftSources.begin(), leftSources.end(),
+                                      relation) == leftSources.end()) {
+                            error = "JOIN ON column is not available in either "
+                                    "join input";
+                            sqlState = "0A000";
+                            return false;
+                        }
+                        if (leftIsIntermediate) {
+                            const auto mapped = colMap.find({relation, column});
+                            if (mapped == colMap.end()) {
+                                error = "JOIN ON column is not available in its "
+                                        "left input";
+                                sqlState = "0A000";
+                                return false;
+                            }
+                            qualified = leftInputName + "." + mapped->second;
+                        } else {
+                            if (pending[relation].name != leftInputName) {
+                                error = "JOIN ON column is not available in its "
+                                        "left input";
+                                sqlState = "0A000";
+                                return false;
+                            }
+                            qualified = leftInputName + "." + column;
+                        }
+                        return true;
+                    };
+                    const auto* comparison = dynamic_cast<const
+                        dbms::BinaryOpExpr*>(expression);
+                    if (!comparison) {
+                        const auto* unary = dynamic_cast<const
+                            dbms::UnaryOpExpr*>(expression);
+                        const auto* ref = unary ? dynamic_cast<const
+                            dbms::ColumnRefExpr*>(unary->operand.get()) : nullptr;
+                        string qualified;
+                        if (!unary ||
+                            (unary->op != "IS NULL" &&
+                             unary->op != "IS NOT NULL") || !ref ||
+                            !qualifyColumn(ref, qualified)) {
+                            if (error.empty()) {
+                                error = "unsupported multi-table JOIN ON "
+                                        "predicate";
+                                sqlState = "0A000";
+                            }
+                            return false;
+                        }
+                        condition = (unary->op == "IS NULL" ? "isnull "
+                                                              : "isnotnull ") +
+                            qualified;
+                        return true;
+                    }
+                    const auto* firstRef = dynamic_cast<const
+                        dbms::ColumnRefExpr*>(comparison->left.get());
+                    const auto* secondRef = dynamic_cast<const
+                        dbms::ColumnRefExpr*>(comparison->right.get());
+                    const auto* firstLiteral = dynamic_cast<const
+                        dbms::LiteralExpr*>(comparison->left.get());
+                    const auto* secondLiteral = dynamic_cast<const
+                        dbms::LiteralExpr*>(comparison->right.get());
+                    string firstQualified, secondQualified;
+                    if (firstRef && !qualifyColumn(firstRef, firstQualified))
+                        return false;
+                    if (secondRef && !qualifyColumn(secondRef, secondQualified))
+                        return false;
+                    string op = comparison->op;
+                    string operand;
+                    if (firstRef && secondRef) {
+                        condition = op + firstQualified + " " + secondQualified;
+                    } else if (firstRef && secondLiteral) {
+                        condition = op + firstQualified + " " +
+                            secondLiteral->value;
+                    } else if (firstLiteral && secondRef) {
+                        if (op == "<") op = ">";
+                        else if (op == ">") op = "<";
+                        else if (op == "<=") op = ">=";
+                        else if (op == ">=") op = "<=";
+                        condition = op + secondQualified + " " +
+                            firstLiteral->value;
+                    } else {
+                        error = "unsupported multi-table JOIN ON operands";
+                        sqlState = "0A000";
+                        return false;
+                    }
+                    return true;
+                };
+                auto collectResidualConditions = [&] (
+                    const vector<size_t>& joinedAfter,
+                    const vector<size_t>& leftSources,
+                    size_t rightSource,
+                    const string& leftInputName,
+                    const string& rightInputName,
+                    bool leftIsIntermediate,
+                    size_t joinIndex,
+                    vector<string>& conditions) {
+                    for (auto& residual : joinResiduals) {
+                        if (residual.applied) continue;
+                        if (preserveJoinOrder &&
+                            residual.joinIndex != joinIndex) continue;
+                        const bool ready = std::all_of(
+                            residual.relations.begin(), residual.relations.end(),
+                            [&](size_t relation) {
+                                return std::find(joinedAfter.begin(),
+                                                 joinedAfter.end(), relation) !=
+                                    joinedAfter.end();
+                            });
+                        if (!ready) {
+                            if (preserveJoinOrder) {
+                                cout << "ERROR: JOIN ON references a column "
+                                        "not available at this join (SQLSTATE "
+                                        "0A000)" << endl;
+                                return false;
+                            }
+                            continue;
+                        }
+                        string condition, error, sqlState;
+                        if (!makeResidualCondition(
+                                residual.expression, leftSources, rightSource,
+                                leftInputName, rightInputName,
+                                leftIsIntermediate, condition, error, sqlState)) {
+                            cout << "ERROR: " << error << " (SQLSTATE "
+                                 << sqlState << ")" << endl;
+                            return false;
+                        }
+                        conditions.push_back(std::move(condition));
+                        residual.applied = true;
+                    }
+                    return true;
+                };
                 addCols(bestI, pending[bestI].schema);
                 addCols(bestJ, pending[bestJ].schema);
                 const string firstJoinType = onlyCrossJoins
                     ? "cross"
                     : preserveJoinOrder && !pj.joins.empty()
                     ? pj.joins.front().type : "inner";
+                vector<size_t> firstLeftSources{bestI};
+                vector<size_t> firstJoined{bestI, bestJ};
+                vector<string> firstOnConditions;
+                if (!collectResidualConditions(
+                        firstJoined, firstLeftSources, bestJ,
+                        pending[bestI].name, pending[bestJ].name, false, 0,
+                        firstOnConditions)) return true;
                 vector<string> interRows = doJoin(
                     pending[bestI].name, pending[bestJ].name,
                     bestLCol, bestRCol, firstJoinType,
+                    firstOnConditions,
                     &interCells, &interNulls);
                 if (interRows.size() != interCells.size() ||
                     interRows.size() != interNulls.size()) {
@@ -22917,9 +23303,25 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     }
                     vector<vector<string>> newCells;
                     vector<vector<bool>> newNulls;
+                    vector<size_t> leftSources;
+                    for (size_t relation = 0; relation < done.size();
+                         ++relation) {
+                        if (done[relation]) leftSources.push_back(relation);
+                    }
+                    vector<size_t> joinedAfter = leftSources;
+                    joinedAfter.push_back(static_cast<size_t>(pickIdx));
+                    vector<string> extraOnConditions;
+                    const size_t stageJoinIndex = preserveJoinOrder
+                        ? static_cast<size_t>(pickIdx) - 1 : 0;
+                    if (!collectResidualConditions(
+                            joinedAfter, leftSources,
+                            static_cast<size_t>(pickIdx), interActual,
+                            pending[pickIdx].name, true, stageJoinIndex,
+                            extraOnConditions)) return true;
                     vector<string> newRows = doJoin(
                         interActual, pending[pickIdx].name,
                         pickLCol, pickRCol, pickJoinType,
+                        extraOnConditions,
                         &newCells, &newNulls);
                     if (newRows.size() != newCells.size() ||
                         newRows.size() != newNulls.size()) {
@@ -22938,6 +23340,16 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                       : static_cast<double>(interRows.size());
                     done[pickIdx] = true;
                     --remaining;
+                }
+
+                if (std::any_of(joinResiduals.begin(), joinResiduals.end(),
+                                [](const JoinResidual& residual) {
+                                    return !residual.applied;
+                                })) {
+                    cout << "ERROR: multi-table JOIN ON predicate could not "
+                            "be attached to a join input (SQLSTATE 0A000)"
+                         << endl;
+                    return true;
                 }
 
                 // A WHERE clause belongs after the complete join tree has

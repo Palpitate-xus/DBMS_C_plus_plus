@@ -52,6 +52,10 @@ def main():
             "(id INT, a_id INT, label TEXT);",
             "CREATE TABLE join_outer_chain_text_c "
             "(id INT, b_id INT, label TEXT);",
+            "CREATE TABLE join_conj_chain_a (id INT);",
+            "CREATE TABLE join_conj_chain_b "
+            "(id INT, a_id INT, val INT);",
+            "CREATE TABLE join_conj_chain_c (id INT, b_id INT);",
             "INSERT INTO join_outer_chain_a VALUES (1), (2);",
             "INSERT INTO join_outer_chain_b VALUES (1);",
             "INSERT INTO join_outer_chain_c VALUES (1), (3);",
@@ -61,6 +65,10 @@ def main():
             "(1, 1, 'literal NULL'), (2, 2, NULL);",
             "INSERT INTO join_outer_chain_text_c VALUES "
             "(1, 1, 'gamma value');",
+            "INSERT INTO join_conj_chain_a VALUES (1), (2);",
+            "INSERT INTO join_conj_chain_b VALUES "
+            "(1, 1, 0), (2, 1, 1), (3, 2, 1);",
+            "INSERT INTO join_conj_chain_c VALUES (2, 2), (4, 3);",
         ]
         for sql in setup:
             _, state, message, _ = runner.ours_query(
@@ -293,6 +301,55 @@ def main():
         assert rows == [["7"]], rows
         assert headers == ["id"], headers
         assert type_oids == [23], type_oids
+        assert command_tag == "SELECT 1", command_tag
+
+        join_conjunction_chain_sql = (
+            "SELECT a.id, b.id, c.id FROM join_conj_chain_a a "
+            "JOIN join_conj_chain_b b "
+            "ON a.id = b.a_id AND b.val = 1 "
+            "JOIN join_conj_chain_c c "
+            "ON b.id = c.b_id AND c.id > 2;")
+        rows, state, message, headers, command_tag, type_oids = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"],
+                                    join_conjunction_chain_sql),
+                include_types=True))
+        assert state is None, (state, message)
+        assert rows == [["2", "3", "4"]], rows
+        assert headers == ["id", "id", "id"], headers
+        assert type_oids == [23, 23, 23], type_oids
+        assert command_tag == "SELECT 1", command_tag
+
+        outer_join_conjunction_chain_sql = (
+            "SELECT a.id, b.id, c.id FROM join_conj_chain_a a "
+            "LEFT JOIN join_conj_chain_b b "
+            "ON a.id = b.a_id AND b.val = 1 "
+            "LEFT JOIN join_conj_chain_c c "
+            "ON b.id = c.b_id AND c.id > 2 ORDER BY a.id;")
+        rows, state, message, headers, command_tag, type_oids = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"],
+                                    outer_join_conjunction_chain_sql),
+                include_types=True))
+        assert state is None, (state, message)
+        assert rows == [["1", "2", None], ["2", "3", "4"]], rows
+        assert headers == ["id", "id", "id"], headers
+        assert type_oids == [23, 23, 23], type_oids
+        assert command_tag == "SELECT 2", command_tag
+
+        deferred_inner_on_sql = (
+            "SELECT a.id, b.id, c.id FROM join_conj_chain_a a "
+            "JOIN join_conj_chain_b b ON a.id = b.a_id "
+            "JOIN join_conj_chain_c c "
+            "ON b.id = c.b_id AND a.id > 1;")
+        rows, state, message, headers, command_tag, type_oids = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"], deferred_inner_on_sql),
+                include_types=True))
+        assert state is None, (state, message)
+        assert rows == [["2", "3", "4"]], rows
+        assert headers == ["id", "id", "id"], headers
+        assert type_oids == [23, 23, 23], type_oids
         assert command_tag == "SELECT 1", command_tag
 
         structured_chain_sql = (
