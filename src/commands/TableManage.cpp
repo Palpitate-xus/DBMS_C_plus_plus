@@ -20941,15 +20941,14 @@ DBStatus StorageEngine::renameSequence(const std::string& dbname,
     std::filesystem::rename(oldPath, newPath, ec);
     if (ec) return DBStatus::IO_ERROR;
 
-    const int dirFd = ::open(std::filesystem::path(dbname).c_str(),
-                             O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (dirFd < 0 || ::fsync(dirFd) != 0) {
-        if (dirFd >= 0) ::close(dirFd);
+    const auto parent = oldPath.parent_path().empty()
+        ? std::filesystem::path(".") : oldPath.parent_path();
+    if (!index_file::syncDirectory(parent)) {
         std::error_code rollbackEc;
         std::filesystem::rename(newPath, oldPath, rollbackEc);
+        (void)index_file::syncDirectory(parent);
         return DBStatus::IO_ERROR;
     }
-    ::close(dirFd);
     return DBStatus::OK;
 }
 
@@ -20968,14 +20967,17 @@ DBStatus StorageEngine::dropSequence(const std::string& dbname,
     if (!std::filesystem::is_regular_file(fileStatus)) {
         return DBStatus::INVALID_VALUE;
     }
+    std::ifstream originalFile(path, std::ios::binary);
+    if (!originalFile) return DBStatus::IO_ERROR;
+    const std::string originalBytes{
+        std::istreambuf_iterator<char>(originalFile),
+        std::istreambuf_iterator<char>()};
+    if (originalFile.bad()) return DBStatus::IO_ERROR;
     if (!std::filesystem::remove(path, ec) || ec) return DBStatus::IO_ERROR;
-
-    const int dirFd = ::open(path.parent_path().c_str(),
-                             O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (dirFd < 0) return DBStatus::IO_ERROR;
-    const bool durable = ::fsync(dirFd) == 0;
-    const bool closed = ::close(dirFd) == 0;
-    if (!durable || !closed) return DBStatus::IO_ERROR;
+    if (!index_file::syncDirectory(path.parent_path())) {
+        (void)index_file::writeAtomicallyNoReplace(path, originalBytes);
+        return DBStatus::IO_ERROR;
+    }
     return DBStatus::OK;
 }
 
