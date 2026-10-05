@@ -96,23 +96,26 @@ targets and WHERE, 2026-10-05; QRY-02/QRY-03), and `e63e4e1e`
   type metadata, and per-column NULL bitmap rather than applying unqualified
   JOIN USING merge rules.
 - In a FROM-less LATERAL subquery, bind a direct bare-column target to the
-  unique left input column, and bind unique bare outer columns inside
+  unique visible left input column, and bind unique bare outer columns inside
   evaluator-supported scalar target expressions and WHERE predicates by
   per-row, type-aware literals. Direct targets preserve their source type and
   alias; SQL NULL and quoted text are retained. This applies only when the
   lateral SELECT has no own FROM or has a simple local base-table scope whose
   columns are known. Local bare names retain precedence over outer names; a
-  bare name absent locally may bind to the unique left input column. Unknown
-  local scopes (CTE, derived subquery, or table function) are left untouched
-  rather than guessed. Multiple visible left relations, quoted outer
+  bare name absent locally may bind to a unique visible left input column.
+  Unknown local scopes (CTE, derived subquery, or table function) are left
+  untouched rather than guessed. The visible left input may be one base table
+  or a simple comma/CROSS chain of base tables. Other join trees, quoted outer
   identifiers, and arbitrary nested correlations remain unsupported.
-- For one simple left base relation, materialize `JOIN`/`INNER JOIN LATERAL`
-  and `LEFT [OUTER] JOIN LATERAL` per left row, evaluate a supported boolean
-  `ON` expression against typed, NULL-aware left/right values, and apply LEFT
-  NULL extension when no right row passes the condition. This path requires
-  aligned structured rows from the lateral subquery; it does not implement
-  arbitrary join trees, multiple left relations, lateral chains, or table
-  functions.
+- For one simple left base relation or a comma/CROSS chain of base relations,
+  materialize `JOIN`/`INNER JOIN LATERAL` and `LEFT [OUTER] JOIN LATERAL` per
+  combined left row, evaluate a supported boolean `ON` expression against
+  typed, NULL-aware values from all left inputs and the lateral result, and
+  apply LEFT NULL extension when no right row passes the condition. The left
+  input chain must consist only of base tables joined with CROSS/comma and
+  have no `ON`/`USING`; this path requires aligned structured rows from the
+  lateral subquery and does not implement arbitrary join trees, lateral
+  chains, or table functions.
 - Sort supported column-reference or output-position keys with ASC/DESC and
   NULLS FIRST/LAST, then apply LIMIT/OFFSET. Unsupported projections, sort
   expressions, DISTINCT/GROUP/WINDOW forms fail explicitly rather than being
@@ -237,6 +240,16 @@ targets and WHERE, 2026-10-05; QRY-02/QRY-03), and `e63e4e1e`
   with `42703`. The helper only infers local columns from simple existing base
   tables and preserves local-name precedence; the full suite and PostgreSQL
   18.6 differential were not run.
+- After `e7a9d086`, a comma/CROSS chain of simple base-table inputs can feed a
+  LATERAL subquery. Qualified references from each input are bound per
+  combined row, including evaluator-supported `INNER/LEFT JOIN LATERAL ON`
+  predicates. Before the change, a two-table `CROSS JOIN ... CROSS JOIN
+  LATERAL` query failed with `42601`. The protocol regression covers explicit
+  CROSS, comma input, and an `ON` predicate referencing both left relations;
+  `bash scripts/build.sh`, `tests/derived_type_protocol_e2e_test.py`, and
+  `tests/sql_literal_preservation_e2e_test.py` passed. Non-CROSS left join
+  trees, table functions, lateral chains, the full suite, and PostgreSQL 18.6
+  differential remain unverified or unsupported.
 - `tests/compat/cases/multijoin_projection_filter.sql` was added, but the
   differential runner refused preflight because the configured reference
   server reports PostgreSQL 17.2 (`170002`) while the runner requires 18.6
@@ -249,11 +262,12 @@ evaluator-supported scalar calls are handled), general row expansion beyond
 simple `alias.*`, DISTINCT/GROUP/HAVING/WINDOW, collation-aware and arbitrary-
 expression ordering, and arbitrary nested/lateral join semantics remain open.
 The FROM-less LATERAL direct-column target case is only a bounded QRY-02 fix;
-simple INNER/LEFT LATERAL `ON` evaluation now additionally works for one
-simple left relation. Bare outer references in evaluator-supported scalar
-targets and WHERE are now also bound when that LATERAL SELECT has no own FROM
-or uses a local base-table scope with known columns. Multiple left relations,
-unknown CTE/derived/function FROM scopes, quoted outer identifiers, arbitrary
+simple INNER/LEFT LATERAL `ON` evaluation works with either one simple left
+relation or a simple base-table comma/CROSS chain before the LATERAL item.
+Bare outer references in evaluator-supported scalar targets and WHERE are now
+also bound when that LATERAL SELECT has no own FROM or uses a local base-table
+scope with known columns. Other left join trees remain unsupported. Unknown
+CTE/derived/function FROM scopes, quoted outer identifiers, arbitrary
 correlated expressions/subqueries, lateral chains, table functions, and
 general parameterized or nested join semantics remain unsupported.
 OPT-02's DP/exhaustive join search, GEQO threshold, semi/anti constraints, and
