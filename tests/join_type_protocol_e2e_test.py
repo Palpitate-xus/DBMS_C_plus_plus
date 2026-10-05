@@ -575,6 +575,22 @@ def main():
         assert type_oids == [23, 23], type_oids
         assert command_tag == "SELECT 2", command_tag
 
+        case_projection_sql = (
+            "SELECT CASE WHEN a.id = 1 THEN b.val ELSE c.id END AS picked, "
+            "c.id AS c_id FROM join_conj_chain_a a "
+            "JOIN join_conj_chain_b b ON a.id = b.a_id "
+            "JOIN join_conj_chain_c c ON b.id = c.b_id "
+            "ORDER BY 1;")
+        rows, state, message, headers, command_tag, type_oids = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"], case_projection_sql),
+                include_types=True))
+        assert state is None, (state, message)
+        assert rows == [["1", "2"], ["4", "4"]], rows
+        assert headers == ["picked", "c_id"], headers
+        assert type_oids == [23, 23], type_oids
+        assert command_tag == "SELECT 2", command_tag
+
         aggregate_projection_sql = (
             "SELECT count(*) FROM join_conj_chain_a a "
             "JOIN join_conj_chain_b b ON a.id = b.a_id "

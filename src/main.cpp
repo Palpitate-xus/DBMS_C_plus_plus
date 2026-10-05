@@ -24301,6 +24301,24 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                     }
                                     return true;
                                 }
+                                if (const auto* caseExpression = dynamic_cast<
+                                        const dbms::CaseExpr*>(node)) {
+                                    if (caseExpression->switchExpr &&
+                                        !validateExpressionReferences(
+                                            caseExpression->switchExpr.get()))
+                                        return false;
+                                    for (const auto& clause :
+                                         caseExpression->whenClauses) {
+                                        if (!validateExpressionReferences(
+                                                clause.first.get()) ||
+                                            !validateExpressionReferences(
+                                                clause.second.get()))
+                                            return false;
+                                    }
+                                    return !caseExpression->elseExpr ||
+                                        validateExpressionReferences(
+                                            caseExpression->elseExpr.get());
+                                }
                                 if (dynamic_cast<const
                                         dbms::LiteralExpr*>(node))
                                     return true;
