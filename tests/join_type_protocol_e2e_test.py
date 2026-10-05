@@ -337,6 +337,44 @@ def main():
         assert type_oids == [23, 23, 23], type_oids
         assert command_tag == "SELECT 2", command_tag
 
+        right_join_conjunction_chain_sql = (
+            "SELECT a.id, b.id, c.id FROM join_conj_chain_a a "
+            "RIGHT JOIN join_conj_chain_b b "
+            "ON a.id = b.a_id AND b.val = 1 "
+            "RIGHT JOIN join_conj_chain_c c "
+            "ON b.id = c.b_id AND c.id > 2 ORDER BY c.id;")
+        rows, state, message, headers, command_tag, type_oids = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"],
+                                    right_join_conjunction_chain_sql),
+                include_types=True))
+        assert state is None, (state, message)
+        assert rows == [[None, None, "2"], ["2", "3", "4"]], rows
+        assert headers == ["id", "id", "id"], headers
+        assert type_oids == [23, 23, 23], type_oids
+        assert command_tag == "SELECT 2", command_tag
+
+        full_join_conjunction_chain_sql = (
+            "SELECT a.id, b.id, c.id FROM join_conj_chain_a a "
+            "FULL OUTER JOIN join_conj_chain_b b "
+            "ON a.id = b.a_id AND b.val = 1 "
+            "FULL OUTER JOIN join_conj_chain_c c "
+            "ON b.id = c.b_id AND c.id > 2 "
+            "ORDER BY c.id NULLS FIRST, a.id NULLS LAST;")
+        rows, state, message, headers, command_tag, type_oids = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"],
+                                    full_join_conjunction_chain_sql),
+                include_types=True))
+        assert state is None, (state, message)
+        assert rows == [
+            ["1", "2", None], [None, "1", None],
+            [None, None, "2"], ["2", "3", "4"],
+        ], rows
+        assert headers == ["id", "id", "id"], headers
+        assert type_oids == [23, 23, 23], type_oids
+        assert command_tag == "SELECT 4", command_tag
+
         deferred_inner_on_sql = (
             "SELECT a.id, b.id, c.id FROM join_conj_chain_a a "
             "JOIN join_conj_chain_b b ON a.id = b.a_id "
