@@ -10,6 +10,7 @@
 #include <fstream>
 #include <limits>
 #include <string_view>
+#include <sys/stat.h>
 #include <system_error>
 #include <unistd.h>
 
@@ -22,18 +23,48 @@ std::filesystem::path parentDirectory(const std::filesystem::path& path) {
         ? std::filesystem::path(".") : path.parent_path();
 }
 
+int openRegularObject(const std::filesystem::path& path, int flags) {
+    const int fd = ::open(path.c_str(), flags | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return -1;
+    struct stat status {};
+    if (::fstat(fd, &status) != 0) {
+        const int savedError = errno;
+        (void)::close(fd);
+        errno = savedError;
+        return -1;
+    }
+    if (!S_ISREG(status.st_mode)) {
+        (void)::close(fd);
+        errno = EINVAL;
+        return -1;
+    }
+    return fd;
+}
+
+bool fitsOffset(size_t value) {
+    return static_cast<uintmax_t>(value) <=
+        static_cast<uintmax_t>(std::numeric_limits<off_t>::max());
+}
+
 bool ensureDirectoryTreeDurable(const std::filesystem::path& directory) {
     std::vector<std::filesystem::path> missing;
     for (auto current = directory; !current.empty();
          current = current.parent_path()) {
         std::error_code ec;
-        const bool exists = std::filesystem::exists(current, ec);
-        if (ec) return false;
-        if (exists) {
-            if (!std::filesystem::is_directory(current, ec) || ec) return false;
+        const auto status = std::filesystem::symlink_status(current, ec);
+        if (ec == std::errc::no_such_file_or_directory ||
+            (!ec && status.type() == std::filesystem::file_type::not_found)) {
+            ec.clear();
+            missing.push_back(current);
+            continue;
+        }
+        if (ec || std::filesystem::is_symlink(status) ||
+            !std::filesystem::is_directory(status)) {
+            return false;
+        }
+        if (!missing.empty() || current == directory) {
             break;
         }
-        missing.push_back(current);
     }
 
     std::error_code ec;
@@ -63,7 +94,8 @@ LargeObjectManager::LargeObjectManager(const std::string& dbPath) : dbPath_(dbPa
     const std::filesystem::directory_iterator end;
     while (!ec && entry != end) {
         std::error_code fileError;
-        if (entry->is_regular_file(fileError) && !fileError) {
+        const auto fileStatus = entry->symlink_status(fileError);
+        if (!fileError && std::filesystem::is_regular_file(fileStatus)) {
             const std::string filename = entry->path().filename().string();
             constexpr std::string_view prefix = "lo_";
             constexpr std::string_view suffix = ".dat";
@@ -77,17 +109,23 @@ LargeObjectManager::LargeObjectManager(const std::string& dbPath) : dbPath_(dbPa
                 int id = 0;
                 const auto parsed = std::from_chars(first, last, id);
                 if (parsed.ec == std::errc{} && parsed.ptr == last && id > 0) {
-                    const uintmax_t bytes =
-                        std::filesystem::file_size(entry->path(), fileError);
-                    if (!fileError &&
-                        bytes <= std::numeric_limits<size_t>::max()) {
-                        sizes_[id] = static_cast<size_t>(bytes);
+                    const int fileFd = openRegularObject(
+                        entry->path(), O_RDONLY);
+                    struct stat objectStatus {};
+                    if (fileFd >= 0 &&
+                        ::fstat(fileFd, &objectStatus) == 0 &&
+                        objectStatus.st_size >= 0 &&
+                        static_cast<uintmax_t>(objectStatus.st_size) <=
+                            std::numeric_limits<size_t>::max()) {
+                        sizes_[id] =
+                            static_cast<size_t>(objectStatus.st_size);
                         if (id == std::numeric_limits<int>::max()) {
                             nextId_ = 0;
                         } else if (nextId_ != 0 && id >= nextId_) {
                             nextId_ = id + 1;
                         }
                     }
+                    if (fileFd >= 0) (void)::close(fileFd);
                 }
             }
         }
@@ -124,11 +162,15 @@ int LargeObjectManager::create() {
         }
         if (errno != EEXIST) return 0;
 
-        std::error_code ec;
-        const uintmax_t bytes = std::filesystem::file_size(path, ec);
-        if (!ec && bytes <= std::numeric_limits<size_t>::max()) {
-            sizes_[id] = static_cast<size_t>(bytes);
+        const int fileFd = openRegularObject(path, O_RDONLY);
+        struct stat objectStatus {};
+        if (fileFd >= 0 && ::fstat(fileFd, &objectStatus) == 0 &&
+            objectStatus.st_size >= 0 &&
+            static_cast<uintmax_t>(objectStatus.st_size) <=
+                std::numeric_limits<size_t>::max()) {
+            sizes_[id] = static_cast<size_t>(objectStatus.st_size);
         }
+        if (fileFd >= 0) (void)::close(fileFd);
     }
     return 0;
 }
@@ -137,23 +179,33 @@ bool LargeObjectManager::write(int loId, size_t offset, const std::string& data)
     if (!ready_ || loId <= 0) return false;
     auto path = loPath(loId);
 
-    if (offset > static_cast<size_t>(std::numeric_limits<std::streamoff>::max()) ||
-        data.size() > static_cast<size_t>(std::numeric_limits<std::streamsize>::max()) ||
-        data.size() > std::numeric_limits<size_t>::max() - offset) {
+    if (!fitsOffset(offset) ||
+        data.size() > std::numeric_limits<size_t>::max() - offset ||
+        !fitsOffset(offset + data.size())) {
         return false;
     }
 
-    std::fstream fs(path, std::ios::in | std::ios::out | std::ios::binary);
-    if (!fs) return false;
-
-    fs.seekp(static_cast<std::streamoff>(offset));
-    if (!fs) return false;
-    fs.write(data.data(), static_cast<std::streamsize>(data.size()));
-    fs.flush();
-    if (!fs) return false;
-
-    // Seeking beyond EOF does not extend a file when no bytes are written.
-    if (data.empty()) return true;
+    const int fd = openRegularObject(path, O_WRONLY);
+    if (fd < 0) return false;
+    size_t written = 0;
+    bool ok = true;
+    while (written < data.size()) {
+        const size_t chunk = std::min(
+            data.size() - written,
+            static_cast<size_t>(std::numeric_limits<ssize_t>::max()));
+        const ssize_t count = ::pwrite(
+            fd, data.data() + written, chunk,
+            static_cast<off_t>(offset + written));
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) {
+            ok = false;
+            break;
+        }
+        written += static_cast<size_t>(count);
+    }
+    if (ok && !data.empty() && ::fsync(fd) != 0) ok = false;
+    if (::close(fd) != 0) ok = false;
+    if (!ok || data.empty()) return ok;
 
     size_t end = offset + data.size();
     if (end > sizes_[loId]) sizes_[loId] = end;
@@ -163,26 +215,59 @@ bool LargeObjectManager::write(int loId, size_t offset, const std::string& data)
 std::string LargeObjectManager::read(int loId, size_t offset, size_t length) const {
     if (!ready_ || loId <= 0) return "";
     auto path = loPath(loId);
-    std::ifstream fs(path, std::ios::binary);
-    if (!fs) return "";
-
-    fs.seekg(0, std::ios::end);
-    size_t fileSize = static_cast<size_t>(fs.tellg());
-    if (offset >= fileSize) return "";
-
-    fs.seekg(static_cast<std::streamoff>(offset));
-    size_t toRead = length == 0 ? fileSize - offset : std::min(length, fileSize - offset);
-    std::string data(toRead, '\0');
-    fs.read(data.data(), static_cast<std::streamsize>(toRead));
+    if (!fitsOffset(offset)) return "";
+    const int fd = openRegularObject(path, O_RDONLY);
+    if (fd < 0) return "";
+    struct stat status {};
+    if (::fstat(fd, &status) != 0 || status.st_size <= 0) {
+        (void)::close(fd);
+        return "";
+    }
+    if (static_cast<uintmax_t>(status.st_size) >
+        std::numeric_limits<size_t>::max()) {
+        (void)::close(fd);
+        return "";
+    }
+    const size_t fileSize = static_cast<size_t>(status.st_size);
+    if (offset >= fileSize) {
+        (void)::close(fd);
+        return "";
+    }
+    const size_t toRead = length == 0
+        ? fileSize - offset : std::min(length, fileSize - offset);
+    std::string data;
+    if (toRead > data.max_size()) {
+        (void)::close(fd);
+        return "";
+    }
+    data.resize(toRead);
+    size_t received = 0;
+    while (received < toRead) {
+        const size_t chunk = std::min(
+            toRead - received,
+            static_cast<size_t>(std::numeric_limits<ssize_t>::max()));
+        const ssize_t count = ::pread(
+            fd, data.data() + received, chunk,
+            static_cast<off_t>(offset + received));
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) break;
+        received += static_cast<size_t>(count);
+    }
+    (void)::close(fd);
+    data.resize(received);
     return data;
 }
 
 bool LargeObjectManager::truncate(int loId, size_t newSize) {
     if (!ready_ || loId <= 0) return false;
     auto path = loPath(loId);
-    std::error_code ec;
-    std::filesystem::resize_file(path, newSize, ec);
-    if (ec) return false;
+    if (!fitsOffset(newSize)) return false;
+    const int fd = openRegularObject(path, O_WRONLY);
+    if (fd < 0) return false;
+    bool ok = (::ftruncate(fd, static_cast<off_t>(newSize)) == 0);
+    if (ok && ::fsync(fd) != 0) ok = false;
+    if (::close(fd) != 0) ok = false;
+    if (!ok) return false;
     sizes_[loId] = newSize;
     return true;
 }
@@ -205,11 +290,9 @@ size_t LargeObjectManager::size(int loId) const {
 
 bool LargeObjectManager::importFile(int loId, const std::string& filePath) {
     if (!ready_ || loId <= 0) return false;
-    std::error_code objectError;
-    if (!std::filesystem::is_regular_file(loPath(loId), objectError) ||
-        objectError) {
-        return false;
-    }
+    const int objectFd = openRegularObject(loPath(loId), O_RDONLY);
+    if (objectFd < 0) return false;
+    (void)::close(objectFd);
 
     std::ifstream in(filePath, std::ios::binary | std::ios::ate);
     if (!in) return false;
@@ -242,26 +325,45 @@ bool LargeObjectManager::exportFile(int loId, const std::string& filePath) const
     // Open the source first. read() returns an empty string both for a valid
     // zero-length object and for a missing/unreadable object, so using it here
     // would report success and truncate the destination on source failure.
-    std::ifstream in(loPath(loId), std::ios::binary);
-    if (!in) return false;
+    const int sourceFd = openRegularObject(loPath(loId), O_RDONLY);
+    if (sourceFd < 0) return false;
+    struct stat sourceStatus {};
+    if (::fstat(sourceFd, &sourceStatus) != 0) {
+        (void)::close(sourceFd);
+        return false;
+    }
 
     // An export onto the same file is already complete. Compare filesystem
     // identity so hard links and symbolic links cannot truncate the source
     // before the streaming copy reads it.
-    std::error_code identityError;
-    if (std::filesystem::equivalent(loPath(loId), filePath, identityError))
+    struct stat destinationStatus {};
+    if (::stat(filePath.c_str(), &destinationStatus) == 0 &&
+        sourceStatus.st_dev == destinationStatus.st_dev &&
+        sourceStatus.st_ino == destinationStatus.st_ino) {
+        (void)::close(sourceFd);
         return true;
+    }
 
     std::ofstream out(filePath, std::ios::binary | std::ios::trunc);
-    if (!out) return false;
+    if (!out) {
+        (void)::close(sourceFd);
+        return false;
+    }
     char buffer[64 * 1024];
-    while (in && out) {
-        in.read(buffer, sizeof(buffer));
-        const std::streamsize bytes = in.gcount();
-        if (bytes > 0) out.write(buffer, bytes);
+    bool readOk = true;
+    while (out) {
+        const ssize_t bytes = ::read(sourceFd, buffer, sizeof(buffer));
+        if (bytes < 0 && errno == EINTR) continue;
+        if (bytes < 0) {
+            readOk = false;
+            break;
+        }
+        if (bytes == 0) break;
+        out.write(buffer, bytes);
     }
     out.flush();
-    return !in.bad() && out.good();
+    if (::close(sourceFd) != 0) readOk = false;
+    return readOk && out.good();
 }
 
 std::string LargeObjectManager::loPath(int loId) const {
