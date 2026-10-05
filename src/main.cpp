@@ -22572,7 +22572,14 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     pending.push_back(std::move(r));
                 }
                 // join predicates that reference table indexes i<j with cols
-                struct Pred { size_t li, ri; string lcol, rcol; string type; };
+                struct Pred {
+                    size_t joinIndex;
+                    size_t li;
+                    size_t ri;
+                    string lcol;
+                    string rcol;
+                    string type;
+                };
                 std::vector<Pred> preds;
                 {
                     // For each JoinLink, find which pending tables the ON
@@ -22606,7 +22613,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         // orient: li must be the table being attached (later
                         // index) if possible for chain semantics
                         if (li > ri) { std::swap(li, ri); std::swap(lc, rc); }
-                        preds.push_back({li, ri, lc, rc, link.type});
+                        preds.push_back({ji, li, ri, lc, rc, link.type});
                     }
                 }
 
@@ -22626,23 +22633,63 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     return static_cast<double>(lr) * static_cast<double>(rr) / nd;
                 };
 
-                if (pj.tables.size() < 2 || preds.empty()) {
+                const bool onlyCrossJoins = !pj.joins.empty() &&
+                    std::all_of(pj.joins.begin(), pj.joins.end(),
+                        [](const JoinLink& link) {
+                            return link.type == "cross";
+                        });
+                if (pj.tables.size() < 2 ||
+                    (preds.empty() && !onlyCrossJoins)) {
                     cout << "SQL syntax error: multi-table join requires ON clauses" << endl;
                     return true;
                 }
 
-                // Pick starting pair greedily
+                // Reordering is safe only for an inner-join region. An outer
+                // join constrains which rows are preserved, so evaluate any
+                // chain containing one in its written (left-associated)
+                // order rather than changing its join tree.
+                const bool preserveJoinOrder = std::any_of(
+                    pj.joins.begin(), pj.joins.end(), [](const JoinLink& link) {
+                        return link.type == "left" || link.type == "right" ||
+                               link.type == "full";
+                    });
+
+                // Pick the starting pair greedily for inner-only chains;
+                // outer-join chains must start with the first written link.
                 std::vector<bool> done(pending.size(), false);
                 size_t bestI = 0, bestJ = 1;
                 double bestRows = -1;
                 string bestLCol, bestRCol;
-                for (const auto& pr : preds) {
-                    if (pr.li >= pending.size() || pr.ri >= pending.size()) continue;
-                    double est = estPairRows(pr.li, pr.ri, pr.lcol, pr.rcol);
-                    if (bestRows < 0 || est < bestRows) {
-                        bestRows = est;
-                        bestI = pr.li; bestJ = pr.ri;
-                        bestLCol = pr.lcol; bestRCol = pr.rcol;
+                if (onlyCrossJoins) {
+                    bestRows = static_cast<double>(rowCount(pending[0].name)) *
+                               static_cast<double>(rowCount(pending[1].name));
+                } else if (preserveJoinOrder && !pj.joins.empty() &&
+                    pj.joins.front().type == "cross") {
+                    bestRows = static_cast<double>(rowCount(pending[0].name)) *
+                               static_cast<double>(rowCount(pending[1].name));
+                } else if (preserveJoinOrder) {
+                    const auto first = std::find_if(
+                        preds.begin(), preds.end(), [](const Pred& pred) {
+                            return pred.joinIndex == 0 && pred.li == 0 &&
+                                   pred.ri == 1;
+                        });
+                    if (first == preds.end()) {
+                        cout << "ERROR: unsupported outer JOIN ON predicate "
+                                "(SQLSTATE 0A000)" << endl;
+                        return true;
+                    }
+                    bestLCol = first->lcol;
+                    bestRCol = first->rcol;
+                    bestRows = estPairRows(0, 1, bestLCol, bestRCol);
+                } else {
+                    for (const auto& pr : preds) {
+                        if (pr.li >= pending.size() || pr.ri >= pending.size()) continue;
+                        double est = estPairRows(pr.li, pr.ri, pr.lcol, pr.rcol);
+                        if (bestRows < 0 || est < bestRows) {
+                            bestRows = est;
+                            bestI = pr.li; bestJ = pr.ri;
+                            bestLCol = pr.lcol; bestRCol = pr.rcol;
+                        }
                     }
                 }
 
@@ -22683,8 +22730,13 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 };
                 addCols(bestI, pending[bestI].schema);
                 addCols(bestJ, pending[bestJ].schema);
-                vector<string> interRows = doJoin(pending[bestI].name, pending[bestJ].name,
-                                                  bestLCol, bestRCol, "inner");
+                const string firstJoinType = onlyCrossJoins
+                    ? "cross"
+                    : preserveJoinOrder && !pj.joins.empty()
+                    ? pj.joins.front().type : "inner";
+                vector<string> interRows = doJoin(
+                    pending[bestI].name, pending[bestJ].name,
+                    bestLCol, bestRCol, firstJoinType);
 
                 done[bestI] = done[bestJ] = true;
                 // Estimated cardinality of the current intermediate result:
@@ -22717,55 +22769,117 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     // column name; greedy by row count (smallest first)
                     ssize_t pickIdx = -1;
                     string pickLCol, pickRCol;
+                    string pickJoinType = "inner";
                     double pickEst = 0.0;
-                    for (size_t t = 0; t < pending.size(); ++t) {
-                        if (done[t]) continue;
-                        // find a pred connecting t to any done table by
-                        // matching column names in interCols
-                        for (const auto& pr : preds) {
-                            if (pr.li >= pending.size() || pr.ri >= pending.size()) continue;
-                            // pending indexes in preds refer to ORIGINAL
-                            // table indexes; after materialization the
-                            // intermediate holds their columns by name.
-                            bool tIsLeft = (pr.li == t);
-                            bool tIsRight = (pr.ri == t);
-                            if (!tIsLeft && !tIsRight) continue;
-                            size_t other = tIsLeft ? pr.ri : pr.li;
-                            if (!done[other]) continue;
-                            // connect via column names
-                            string myCol = tIsLeft ? pr.lcol : pr.rcol;
-                            string otherCol = tIsLeft ? pr.rcol : pr.lcol;
-                            // map the other side's column through colMap
-                            // (handles deduplicated names)
-                            auto mit = colMap.find({other, otherCol});
-                            if (mit == colMap.end()) continue;
-                            otherCol = mit->second;
-                            // Estimated output cardinality of joining this
-                            // table now: eqjoinsel 1/max(nd_l, nd_r) applied
-                            // to the current intermediate estimate.  Prefers
-                            // attachments whose join keys are most selective,
-                            // not merely the smallest table.
-                            double tRows = static_cast<double>(rowCount(pending[t].name));
-                            double ndL = static_cast<double>(
-                                g_engine.getColumnStats(s.currentDB, pending[t].name,
-                                                        myCol).cardinality);
-                            double ndR = static_cast<double>(
-                                g_engine.getColumnStats(s.currentDB,
-                                                        pending[other].name,
-                                                        tIsLeft ? pr.rcol : pr.lcol)
-                                    .cardinality);
-                            double nd = std::max({ndL, ndR, 1.0});
-                            double est = interEstRows * tRows / nd;
-                            if (pickIdx < 0 || est < pickEst) {
-                                pickIdx = (ssize_t)t;
-                                // join key on the intermediate side
-                                pickLCol = otherCol;
+                    if (preserveJoinOrder) {
+                        size_t t = 0;
+                        while (t < done.size() && done[t]) ++t;
+                        if (t < pending.size()) {
+                            pickIdx = static_cast<ssize_t>(t);
+                            const size_t joinIndex = t - 1;
+                            if (joinIndex >= pj.joins.size()) {
+                                cout << "ERROR: invalid outer JOIN chain "
+                                        "(SQLSTATE 0A000)" << endl;
+                                return true;
+                            }
+                            pickJoinType = pj.joins[joinIndex].type;
+                            if (pickJoinType == "cross") {
+                                pickEst = interEstRows * static_cast<double>(
+                                    rowCount(pending[t].name));
+                            } else {
+                                const auto pred = std::find_if(
+                                    preds.begin(), preds.end(),
+                                    [joinIndex, t, &done](const Pred& candidate) {
+                                        if (candidate.joinIndex != joinIndex ||
+                                            candidate.li >= done.size() ||
+                                            candidate.ri >= done.size()) {
+                                            return false;
+                                        }
+                                        const size_t other = candidate.li == t
+                                            ? candidate.ri : candidate.li;
+                                        return (candidate.li == t ||
+                                                candidate.ri == t) && done[other];
+                                    });
+                                if (pred == preds.end()) {
+                                    cout << "ERROR: unsupported outer JOIN ON "
+                                            "predicate (SQLSTATE 0A000)" << endl;
+                                    return true;
+                                }
+                                const bool tIsLeft = pred->li == t;
+                                const size_t other = tIsLeft
+                                    ? pred->ri : pred->li;
+                                const string myCol = tIsLeft
+                                    ? pred->lcol : pred->rcol;
+                                const string otherBaseCol = tIsLeft
+                                    ? pred->rcol : pred->lcol;
+                                const auto mapped = colMap.find(
+                                    {other, otherBaseCol});
+                                if (mapped == colMap.end()) {
+                                    cout << "ERROR: outer JOIN column is not "
+                                            "available in its left input "
+                                            "(SQLSTATE 0A000)" << endl;
+                                    return true;
+                                }
+                                pickLCol = mapped->second;
                                 pickRCol = myCol;
-                                pickEst = est;
+                                const double tRows = static_cast<double>(
+                                    rowCount(pending[t].name));
+                                const double ndL = static_cast<double>(
+                                    g_engine.getColumnStats(
+                                        s.currentDB, pending[t].name,
+                                        myCol).cardinality);
+                                const double ndR = static_cast<double>(
+                                    g_engine.getColumnStats(
+                                        s.currentDB, pending[other].name,
+                                        otherBaseCol).cardinality);
+                                const double nd = std::max(
+                                    {ndL, ndR, 1.0});
+                                pickEst = interEstRows * tRows / nd;
+                            }
+                        }
+                    } else {
+                        for (size_t t = 0; t < pending.size(); ++t) {
+                            if (done[t]) continue;
+                            // find a pred connecting t to any joined table by
+                            // matching column names in the intermediate.
+                            for (const auto& pr : preds) {
+                                if (pr.li >= pending.size() || pr.ri >= pending.size()) continue;
+                                bool tIsLeft = (pr.li == t);
+                                bool tIsRight = (pr.ri == t);
+                                if (!tIsLeft && !tIsRight) continue;
+                                size_t other = tIsLeft ? pr.ri : pr.li;
+                                if (!done[other]) continue;
+                                string myCol = tIsLeft ? pr.lcol : pr.rcol;
+                                string otherCol = tIsLeft ? pr.rcol : pr.lcol;
+                                auto mit = colMap.find({other, otherCol});
+                                if (mit == colMap.end()) continue;
+                                otherCol = mit->second;
+                                double tRows = static_cast<double>(rowCount(pending[t].name));
+                                double ndL = static_cast<double>(
+                                    g_engine.getColumnStats(s.currentDB, pending[t].name,
+                                                            myCol).cardinality);
+                                double ndR = static_cast<double>(
+                                    g_engine.getColumnStats(s.currentDB,
+                                                            pending[other].name,
+                                                            tIsLeft ? pr.rcol : pr.lcol)
+                                        .cardinality);
+                                double nd = std::max({ndL, ndR, 1.0});
+                                double est = interEstRows * tRows / nd;
+                                if (pickIdx < 0 || est < pickEst) {
+                                    pickIdx = static_cast<ssize_t>(t);
+                                    pickLCol = otherCol;
+                                    pickRCol = myCol;
+                                    pickEst = est;
+                                }
                             }
                         }
                     }
                     if (pickIdx < 0) {
+                        if (preserveJoinOrder) {
+                            cout << "ERROR: could not preserve outer JOIN "
+                                    "order (SQLSTATE 0A000)" << endl;
+                            return true;
+                        }
                         // No connecting predicate: cross join the smallest
                         // remaining table.
                         for (size_t t = 0; t < pending.size(); ++t) {
@@ -22780,17 +22894,18 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         if (pickIdx < 0) break;
                         pickLCol.clear();
                         pickRCol.clear();
+                        pickJoinType = "cross";
                     }
-                    vector<string> newRows = pickLCol.empty()
-                        ? g_engine.crossJoin(s.currentDB, interActual,
-                                             pending[pickIdx].name, {}, {})
-                        : doJoin(interActual, pending[pickIdx].name,
-                                 pickLCol, pickRCol, "inner");
+                    vector<string> newRows = doJoin(
+                        interActual, pending[pickIdx].name,
+                        pickLCol, pickRCol, pickJoinType);
                     // extend columns (de-duplicated the same way)
                     addCols(pickIdx, pending[pickIdx].schema);
                     interRows = std::move(newRows);
-                    interEstRows = pickEst > 0 ? pickEst
-                        : static_cast<double>(interRows.size());
+                    interEstRows = preserveJoinOrder
+                        ? static_cast<double>(interRows.size())
+                        : pickEst > 0 ? pickEst
+                                      : static_cast<double>(interRows.size());
                     done[pickIdx] = true;
                     --remaining;
                 }

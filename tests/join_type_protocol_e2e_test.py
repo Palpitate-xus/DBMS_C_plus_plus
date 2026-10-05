@@ -44,6 +44,12 @@ def main():
              "(1, 'left one'), (2, 'left two');"),
             ("INSERT INTO join_orientation_right VALUES "
              "(1, 'right one'), (3, 'right three');"),
+            "CREATE TABLE join_outer_chain_a (id INT);",
+            "CREATE TABLE join_outer_chain_b (id INT);",
+            "CREATE TABLE join_outer_chain_c (id INT);",
+            "INSERT INTO join_outer_chain_a VALUES (1), (2);",
+            "INSERT INTO join_outer_chain_b VALUES (1);",
+            "INSERT INTO join_outer_chain_c VALUES (1), (3);",
         ]
         for sql in setup:
             _, state, message, _ = runner.ours_query(
@@ -100,6 +106,47 @@ def main():
             assert type_oids == [23, 25], (sql, type_oids)
             assert command_tag == "SELECT %d" % len(expected_rows), (
                 sql, command_tag)
+
+        outer_chain_cases = [
+            (("SELECT a.id, b.id, c.id FROM join_outer_chain_a a "
+              "LEFT JOIN join_outer_chain_b b ON a.id = b.id "
+              "LEFT JOIN join_outer_chain_c c ON b.id = c.id "
+              "ORDER BY a.id;"),
+             [["1", "1", "1"], ["2", None, None]]),
+            (("SELECT a.id, b.id, c.id FROM join_outer_chain_a a "
+              "LEFT JOIN join_outer_chain_b b ON a.id = b.id "
+              "RIGHT JOIN join_outer_chain_c c ON b.id = c.id "
+              "ORDER BY c.id;"),
+             [["1", "1", "1"], [None, None, "3"]]),
+            (("SELECT a.id, b.id, c.id FROM join_outer_chain_a a "
+              "LEFT JOIN join_outer_chain_b b ON a.id = b.id "
+              "FULL OUTER JOIN join_outer_chain_c c ON b.id = c.id "
+              "ORDER BY a.id NULLS LAST;"),
+             [["1", "1", "1"], ["2", None, None], [None, None, "3"]]),
+        ]
+        for outer_chain_sql, expected_rows in outer_chain_cases:
+            rows, state, message, headers, command_tag, _ = (
+                runner.decode_wire_result(
+                    client.simple_query(server["sock"], outer_chain_sql),
+                    include_types=True))
+            assert state is None, (outer_chain_sql, state, message)
+            assert rows == expected_rows, (outer_chain_sql, rows, expected_rows)
+            assert headers == ["a.id", "b.id", "c.id"], headers
+            assert command_tag == "SELECT %d" % len(expected_rows), command_tag
+
+        cross_chain_sql = (
+            "SELECT a.id, b.id, c.id FROM join_outer_chain_a a "
+            "CROSS JOIN join_outer_chain_b b "
+            "CROSS JOIN join_outer_chain_c c;")
+        rows, state, message, headers, command_tag, _ = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"], cross_chain_sql),
+                include_types=True))
+        assert state is None, (state, message)
+        assert sorted(rows) == sorted([
+            ["1", "1", "1"], ["1", "1", "3"],
+            ["2", "1", "1"], ["2", "1", "3"]]), rows
+        assert command_tag == "SELECT 4", command_tag
 
         exact_sql = (
             "SELECT l.id, l.txt, r.txt FROM join_exact_left l "
