@@ -388,7 +388,7 @@
 - [ ] **DML-06** `COPY` 补 protocol STDIN/STDOUT、binary、PROGRAM、FREEZE、ON_ERROR、REJECT_LIMIT、HEADER MATCH、encoding 和权限。
 - [ ] **QRY-01** SELECT target list 补完整 expression、SRF、row expansion、star qualification、alias visibility 和 resjunk column。
 - [ ] **QRY-02** FROM 补完整 LATERAL、table function、ROWS FROM、WITH ORDINALITY、TABLESAMPLE、XMLTABLE/JSON_TABLE。
-- [ ] **QRY-03** join 补 USING/NATURAL 的输出列合并、FULL/outer null extension、lateral/parameterized join 和任意嵌套语义。
+- [ ] **QRY-03** join 补 USING/NATURAL 的输出列合并、FULL/outer null extension、lateral/parameterized join 和任意嵌套语义。（多表链现保留 outer join 的书写顺序、支持纯 CROSS 链，并在 outer null extension 后执行 WHERE；更完整投影、类型 metadata、排序/分组和任意嵌套仍缺，见 `docs/issue-qry-03-multijoin-order-and-where.md`。）
 - [ ] **QRY-04** subquery 补 correlated scalar/EXISTS/IN/ANY/ALL、row comparison、decorrelation、parameter passing 和 NULL 三值逻辑。
 - [ ] **QRY-05** CTE 补 recursive evaluation、SEARCH/CYCLE、materialized/not materialized、data-modifying CTE snapshot 和 visibility。
 - [ ] **QRY-06** set operations 补任意 query expression、对应列类型/collation、嵌套 precedence、ALL duplicate count 和 ORDER/LIMIT scope。第959项已修复括号开头的statement路由、完整外围括号操作数、尾部注释和相应Simple/Extended执行；任意type/collation解析、通用表达式排序分页与Extended Describe仍未闭合。
@@ -403,7 +403,7 @@
 ## 11. 优化器和执行器
 
 - [ ] **OPT-01** 建立 PostgreSQL 式 relation/path/parameterization/equivalence class/pathkey 框架，而不是直接拼单棵计划树。（当前仅有 `PlanContext` 到单一 `OpPtr` 的 builder；`PathKey` overload 保留 Sort 安全回退且忽略 equivalence classes。现有空表测试不验证路径选择，详见 `docs/issue-opt-01-path-planner-audit.md`。）
-- [ ] **OPT-02** 实现 exhaustive/DP join search、GEQO 阈值、outer/semi/anti join constraints 和 bushy plan。
+- [ ] **OPT-02** 实现 exhaustive/DP join search、GEQO 阈值、outer/semi/anti join constraints 和 bushy plan。（多表 outer join 链已禁止不安全重排并按书写顺序执行；目前没有 DP/exhaustive search、GEQO、semi/anti 约束搜索或 bushy plan，见 `docs/issue-qry-03-multijoin-order-and-where.md`。）
 - [ ] **OPT-03** 完整 predicate implication、constant propagation、equivalence class、join removal、outer join reduction 和 partition pruning。
 - [ ] **OPT-04** 完整统计：采样、null fraction、ndistinct、MCV、histogram、correlation、extended ndistinct/dependencies/MCV、表达式统计。
 - [ ] **OPT-05** 实现 selectivity/cost support function、数据类型/operator/collation-aware 估算和统计失效。（已修复 `enable_nestloop=off` 被有统计的小表 join shortcut 覆盖的问题；更多代价/选择率语义仍缺，见 `docs/issue-opt-05-small-join-guc-cost-override.md`。）
