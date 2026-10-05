@@ -4,8 +4,9 @@ Status: partial. The source/test fixes are local commits `4534b971`,
 `b87d4a19`, `858d6da9`, `0a57fee1`, `e042360b`, `856fe079`
 (ON-conjunction fix, 2026-10-05), `65718c2b` (RIGHT/FULL residual coverage,
 2026-10-05), `fd79875a` (USING/NATURAL output semantics, 2026-10-05), and
-`3fef4f7d` (typed canonical JOIN keys, 2026-10-05), and `124bc278`
-(simple scalar expression projections, 2026-10-05).
+`3fef4f7d` (typed canonical JOIN keys, 2026-10-05), `124bc278`
+(simple scalar expression projections, 2026-10-05), and `1ef35962`
+(evaluator-supported scalar functions, 2026-10-05).
 
 ## Reproduced behavior
 
@@ -24,6 +25,8 @@ Status: partial. The source/test fixes are local commits `4534b971`,
 - Multi-table target lists rejected even simple scalar expressions such as
   `a.id + b.val AS total` with SQLSTATE `0A000` instead of projecting one
   evaluated result per joined row.
+- The same target-list path rejected evaluator-supported scalar calls such as
+  `abs(a.id - b.val)` with SQLSTATE `0A000`.
 - It also returned rows in join/input order while silently ignoring ORDER BY,
   LIMIT, and OFFSET. `ORDER BY a.id DESC LIMIT 1` returned both rows.
 - The FROM-chain parser stopped after the 12th JOIN without reporting an
@@ -55,6 +58,10 @@ Status: partial. The source/test fixes are local commits `4534b971`,
   qualified/unambiguous row values with the SQL NULL bitmap. Publish projected
   values, the NULL bitmap, output names/types, and command tag as a structured
   protocol result.
+- Evaluate evaluator-supported scalar function calls recursively against the
+  same row context. Known aggregates, window calls, FILTER, ordered/named
+  function arguments remain explicitly unsupported and fail closed rather
+  than being evaluated independently for each row.
 - Sort supported column-reference or output-position keys with ASC/DESC and
   NULLS FIRST/LAST, then apply LIMIT/OFFSET. Unsupported projections, sort
   expressions, DISTINCT/GROUP/WINDOW forms fail explicitly rather than being
@@ -125,6 +132,12 @@ Status: partial. The source/test fixes are local commits `4534b971`,
   NULL and can be sorted with `NULLS FIRST`. The former query failed with
   `0A000`. Function calls, CASE, SRFs, aggregates, and arbitrary expressions
   remain unsupported in this path.
+- After `1ef35962`, `scripts/build.sh`,
+  `tests/join_type_protocol_e2e_test.py`, and `tests/multijoin_e2e_test.py`
+  passed. A three-table `abs(a.id - b.val)` projection returned the expected
+  per-row integer values, alias, OID, and ordering; the `count(*)` negative
+  control returned explicit `0A000` rather than a scalar result. CASE, SRFs,
+  aggregates, and window expressions remain unsupported.
 - `tests/compat/cases/multijoin_projection_filter.sql` was added, but the
   differential runner refused preflight because the configured reference
   server reports PostgreSQL 17.2 (`170002`) while the runner requires 18.6
@@ -132,7 +145,8 @@ Status: partial. The source/test fixes are local commits `4534b971`,
 - The full registered suite and PostgreSQL 18.6 differential were not run.
 
 This does not complete QRY-03 or OPT-02. General target-list expressions
-(including function calls, CASE and SRFs), qualified star expansion,
+(including CASE, SRFs, aggregates, and window expressions; only evaluator-
+supported scalar calls are handled), qualified star expansion,
 DISTINCT/GROUP/HAVING/WINDOW, collation-aware and
 arbitrary-expression ordering, and arbitrary nested/lateral join semantics
 remain open. OPT-02's DP/exhaustive join search, GEQO threshold, semi/anti
