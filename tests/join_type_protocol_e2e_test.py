@@ -259,6 +259,21 @@ def main():
         assert type_oids == [23], type_oids
         assert command_tag == "SELECT 2", command_tag
 
+        qualified_star_sql = (
+            "SELECT b.* FROM join_outer_chain_a a "
+            "LEFT JOIN join_outer_chain_b b ON a.id = b.id "
+            "LEFT JOIN join_outer_chain_c c ON b.id = c.id "
+            "ORDER BY a.id;")
+        rows, state, message, headers, command_tag, type_oids = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"], qualified_star_sql),
+                include_types=True))
+        assert state is None, (state, message)
+        assert rows == [["1"], [None]], rows
+        assert headers == ["id"], headers
+        assert type_oids == [23], type_oids
+        assert command_tag == "SELECT 2", command_tag
+
         ordinal_offset_chain_sql = (
             "SELECT a.id AS row_no FROM join_outer_chain_a a "
             "LEFT JOIN join_outer_chain_b b ON a.id = b.id "

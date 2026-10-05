@@ -24175,6 +24175,46 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         const string alias = asPosition == string::npos
                             ? string{} : decodeQuotedIdentifier(
                                   trim(item.substr(asPosition + 2)));
+                        if (alias.empty() && expression.size() > 2 &&
+                            expression.compare(expression.size() - 2, 2,
+                                               ".*") == 0) {
+                            const string qualifier = decodeQuotedIdentifier(
+                                trim(expression.substr(0,
+                                    expression.size() - 2)));
+                            size_t relationIndex = pending.size();
+                            for (size_t index = 0; index < pending.size();
+                                 ++index) {
+                                const bool hasAlias =
+                                    !pj.tables[index].second.empty();
+                                if (qualifier == pending[index].alias ||
+                                    (!hasAlias &&
+                                     (qualifier == pj.tables[index].first ||
+                                      qualifier == pending[index].name))) {
+                                    relationIndex = index;
+                                    break;
+                                }
+                            }
+                            if (relationIndex == pending.size()) {
+                                cout << "ERROR: missing FROM-clause entry for "
+                                        "table \"" << qualifier
+                                     << "\" (SQLSTATE 42P01)" << endl;
+                                return true;
+                            }
+                            for (size_t column = 0;
+                                 column < pending[relationIndex].schema.len;
+                                 ++column) {
+                                if (!addProjection(
+                                        relationIndex, column,
+                                        pending[relationIndex].schema.cols[column]
+                                            .dataName)) {
+                                    cout << "ERROR: invalid qualified-star "
+                                            "projection mapping (SQLSTATE XX000)"
+                                         << endl;
+                                    return true;
+                                }
+                            }
+                            continue;
+                        }
                         dbms::SQLParser projectionParser;
                         const auto parsedProjection = projectionParser.parse(
                             "SELECT " + expression);
