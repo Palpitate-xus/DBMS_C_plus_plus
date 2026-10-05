@@ -13258,9 +13258,9 @@ static std::string processDerivedTables(const std::string& sql, Session& s,
 // Supports: FROM t CROSS JOIN LATERAL (SELECT ...) AS alias
 //           FROM t, LATERAL (SELECT ...) AS alias
 // The lateral subquery can reference columns from the left table.
-// Resolve a bare outer-column target in a FROM-less lateral SELECT.  In this
-// scope every bare column name denotes the single visible left relation; a
-// SELECT with its own FROM is left to normal local-column resolution.
+// Resolve bare outer-column references in scalar targets and WHERE predicates
+// of a FROM-less lateral SELECT. A SELECT with its own FROM is left to normal
+// local-column resolution, where unqualified local names must keep precedence.
 static void substituteLateralBareScalarTargets(
     std::string& selectSql, const TableSchema& leftSchema,
     const std::vector<std::string>& outerValues,
@@ -13296,64 +13296,391 @@ static void substituteLateralBareScalarTargets(
     }
     if (listEnd < listStart) return;
 
-    const std::string projection = selectSql.substr(listStart, listEnd - listStart);
-    std::vector<std::string> targets = splitSelectColumns(projection);
-    bool changed = false;
-    for (std::string& target : targets) {
-        const std::string targetLower = toLower(target);
-        const size_t asPos = findTextOutsideQuotes(targetLower, " as ");
-        const std::string expression = trim(
-            asPos == std::string::npos ? target : target.substr(0, asPos));
-        const std::string bareName = toLower(expression);
-        if (bareName.empty() ||
-            !std::all_of(bareName.begin(), bareName.end(), [](unsigned char c) {
-                return std::isalnum(c) || c == '_' || c == '$';
-            })) continue;
-
-        size_t columnIndex = leftSchema.len;
+    auto findOuterColumn = [&](const std::string& name) {
+        size_t found = leftSchema.len;
         for (size_t ci = 0; ci < leftSchema.len; ++ci) {
-            if (toLower(leftSchema.cols[ci].dataName) != bareName) continue;
-            if (columnIndex != leftSchema.len) {
-                columnIndex = leftSchema.len;
-                break;
-            }
-            columnIndex = ci;
+            if (toLower(leftSchema.cols[ci].dataName) != name) continue;
+            if (found != leftSchema.len) return leftSchema.len;
+            found = ci;
         }
-        if (columnIndex == leftSchema.len) continue;
-
-        const bool isNull = columnIndex >= outerNulls.size() ||
-            outerNulls[columnIndex];
+        return found;
+    };
+    auto isSpecialValue = [](const std::string& name) {
+        static const std::set<std::string> specialValues = {
+            "current_catalog", "current_date", "current_role",
+            "current_schema", "current_time", "current_timestamp",
+            "current_user", "localtime", "localtimestamp", "session_user",
+            "user"
+        };
+        return specialValues.count(name) != 0;
+    };
+    auto makeOuterLiteral = [&](size_t columnIndex) {
         std::string literal = "NULL";
-        if (!isNull) {
+        if (columnIndex < outerNulls.size() && !outerNulls[columnIndex]) {
             const std::string value = columnIndex < outerValues.size()
                 ? outerValues[columnIndex] : std::string();
-            std::string escaped;
-            for (char c : value) {
-                if (c == '\'') escaped += "''";
-                else escaped += c;
+            const std::string type =
+                toLower(trim(leftSchema.cols[columnIndex].dataType));
+            static const std::set<std::string> numericTypes = {
+                "smallint", "int2", "integer", "int", "int4", "bigint",
+                "int8", "numeric", "decimal", "real", "float4", "float",
+                "double precision", "float8", "money", "oid"
+            };
+            bool numericValue = !value.empty();
+            size_t numericPos = 0;
+            if (numericPos < value.size() &&
+                (value[numericPos] == '+' || value[numericPos] == '-')) {
+                ++numericPos;
             }
-            // Quoting every datum before an explicit cast avoids confusing
-            // boolean/date values with identifiers and preserves text bytes.
-            literal = "'" + escaped + "'";
+            size_t integerDigits = 0;
+            while (numericPos < value.size() &&
+                   std::isdigit(static_cast<unsigned char>(value[numericPos]))) {
+                ++integerDigits;
+                ++numericPos;
+            }
+            size_t fractionalDigits = 0;
+            if (numericPos < value.size() && value[numericPos] == '.') {
+                ++numericPos;
+                while (numericPos < value.size() &&
+                       std::isdigit(static_cast<unsigned char>(value[numericPos]))) {
+                    ++fractionalDigits;
+                    ++numericPos;
+                }
+            }
+            numericValue = numericValue &&
+                (integerDigits != 0 || fractionalDigits != 0);
+            if (numericValue && numericPos < value.size() &&
+                (value[numericPos] == 'e' || value[numericPos] == 'E')) {
+                ++numericPos;
+                if (numericPos < value.size() &&
+                    (value[numericPos] == '+' || value[numericPos] == '-')) {
+                    ++numericPos;
+                }
+                size_t exponentDigits = 0;
+                while (numericPos < value.size() &&
+                       std::isdigit(static_cast<unsigned char>(value[numericPos]))) {
+                    ++exponentDigits;
+                    ++numericPos;
+                }
+                numericValue = exponentDigits != 0;
+            }
+            numericValue = numericValue && numericPos == value.size();
+            if (numericTypes.count(type) && numericValue) {
+                // Numeric source cells are already valid SQL numeric tokens.
+                // Keeping them unquoted matters: the expression evaluator
+                // otherwise compares quoted text cast-to-numeric as text in
+                // some scalar WHERE paths.
+                literal = value;
+            } else if (type == "bool" || type == "boolean") {
+                const std::string folded = toLower(value);
+                if (folded == "t" || folded == "true" || folded == "1")
+                    literal = "true";
+                else if (folded == "f" || folded == "false" || folded == "0")
+                    literal = "false";
+                else {
+                    std::string escaped;
+                    for (char c : value) {
+                        if (c == '\'') escaped += "''";
+                        else escaped += c;
+                    }
+                    literal = "'" + escaped + "'";
+                }
+            } else {
+                std::string escaped;
+                for (char c : value) {
+                    if (c == '\'') escaped += "''";
+                    else escaped += c;
+                }
+                // Quoting text/date values before an explicit cast avoids
+                // treating their bytes as identifiers and preserves text.
+                literal = "'" + escaped + "'";
+            }
         }
         const std::string& type = leftSchema.cols[columnIndex].dataType;
-        if (type.empty()) continue;
-        literal += "::" + type;
-        std::string alias = asPos == std::string::npos
-            ? " as " + leftSchema.cols[columnIndex].dataName
-            : target.substr(asPos);
-        target = literal + alias;
-        changed = true;
-    }
-    if (!changed) return;
+        if (type.empty()) return std::string();
+        // A cast binds more tightly than the scalar operators we substitute
+        // into. Keep it unparenthesized: the legacy WHERE evaluator mishandles
+        // an otherwise-equivalent parenthesized cast predicate.
+        return literal + "::" + type;
+    };
 
-    std::string rewrittenProjection;
-    for (const std::string& target : targets) {
-        if (!rewrittenProjection.empty()) rewrittenProjection += ", ";
-        rewrittenProjection += target;
+    auto rewriteExpression = [&](const std::string& expression,
+                                 const dbms::Expr* root) {
+        std::set<std::string> bareReferences;
+        bool unsupported = false;
+        std::function<void(const dbms::Expr*)> collect =
+            [&](const dbms::Expr* node) {
+            if (!node || unsupported) return;
+            switch (node->type) {
+                case dbms::ExprType::Literal:
+                    return;
+                case dbms::ExprType::ColumnRef: {
+                    const auto* column =
+                        static_cast<const dbms::ColumnRefExpr*>(node);
+                    if (column->schema.empty() && column->table.empty())
+                        bareReferences.insert(toLower(column->column));
+                    return;
+                }
+                case dbms::ExprType::UnaryOp:
+                    collect(static_cast<const dbms::UnaryOpExpr*>(node)
+                                ->operand.get());
+                    return;
+                case dbms::ExprType::BinaryOp: {
+                    const auto* binary =
+                        static_cast<const dbms::BinaryOpExpr*>(node);
+                    collect(binary->left.get());
+                    // The right operand of a postfix :: cast is a type name,
+                    // not a correlated column reference.
+                    if (binary->op != "::") collect(binary->right.get());
+                    return;
+                }
+                case dbms::ExprType::FunctionCall: {
+                    const auto* call =
+                        static_cast<const dbms::FunctionCallExpr*>(node);
+                    if (call->hasOver) {
+                        unsupported = true;
+                        return;
+                    }
+                    for (const auto& arg : call->args) collect(arg.get());
+                    for (const auto& arg : call->namedArgs)
+                        collect(arg.value.get());
+                    if (call->filter) collect(call->filter.get());
+                    return;
+                }
+                case dbms::ExprType::CastExpr:
+                    collect(static_cast<const dbms::CastExpr*>(node)
+                                ->operand.get());
+                    return;
+                case dbms::ExprType::CaseExpr: {
+                    const auto* expression =
+                        static_cast<const dbms::CaseExpr*>(node);
+                    collect(expression->switchExpr.get());
+                    for (const auto& clause : expression->whenClauses) {
+                        collect(clause.first.get());
+                        collect(clause.second.get());
+                    }
+                    collect(expression->elseExpr.get());
+                    return;
+                }
+                case dbms::ExprType::ArrayExpr:
+                    for (const auto& element :
+                         static_cast<const dbms::ArrayExpr*>(node)->elements)
+                        collect(element.get());
+                    return;
+                case dbms::ExprType::RowExpr:
+                    for (const auto& element :
+                         static_cast<const dbms::RowExpr*>(node)->elements)
+                        collect(element.get());
+                    return;
+                case dbms::ExprType::Subquery:
+                case dbms::ExprType::Parameter:
+                case dbms::ExprType::A_Star:
+                    unsupported = true;
+                    return;
+            }
+        };
+        collect(root);
+        if (unsupported || bareReferences.empty()) return expression;
+
+        std::map<std::string, std::string> replacements;
+        for (const std::string& name : bareReferences) {
+            // These SQL special values are not column references even in a
+            // FROM-less SELECT. Quoted identifiers remain untouched below.
+            if (isSpecialValue(name)) continue;
+            const size_t columnIndex = findOuterColumn(name);
+            if (columnIndex == leftSchema.len) continue;
+            std::string literal = makeOuterLiteral(columnIndex);
+            if (!literal.empty()) replacements[name] = std::move(literal);
+        }
+        if (replacements.empty()) return expression;
+
+        const auto protectedBytes = dbms::sqlProtectedBytes(expression);
+        std::string rewritten;
+        rewritten.reserve(expression.size());
+        auto isIdentifierStart = [](unsigned char c) {
+            return std::isalpha(c) || c == '_' || c == '$';
+        };
+        auto isIdentifierPart = [](unsigned char c) {
+            return std::isalnum(c) || c == '_' || c == '$';
+        };
+        for (size_t pos = 0; pos < expression.size();) {
+            if (protectedBytes[pos] ||
+                !isIdentifierStart(static_cast<unsigned char>(expression[pos]))) {
+                rewritten += expression[pos++];
+                continue;
+            }
+            size_t end = pos + 1;
+            while (end < expression.size() &&
+                   isIdentifierPart(static_cast<unsigned char>(expression[end]))) {
+                ++end;
+            }
+            const std::string name = toLower(expression.substr(pos, end - pos));
+            auto replacement = replacements.find(name);
+            if (replacement == replacements.end()) {
+                rewritten.append(expression, pos, end - pos);
+                pos = end;
+                continue;
+            }
+
+            size_t previous = pos;
+            while (previous > 0 &&
+                   isspace(static_cast<unsigned char>(expression[previous - 1]))) {
+                --previous;
+            }
+            size_t next = end;
+            while (next < expression.size() &&
+                   isspace(static_cast<unsigned char>(expression[next]))) {
+                ++next;
+            }
+            bool typeName = previous > 0 && expression[previous - 1] == '.';
+            if (!typeName && previous > 0 && expression[previous - 1] == ':') {
+                size_t beforeColon = previous - 1;
+                while (beforeColon > 0 &&
+                       isspace(static_cast<unsigned char>(expression[beforeColon - 1]))) {
+                    --beforeColon;
+                }
+                typeName = beforeColon > 0 &&
+                    expression[beforeColon - 1] == ':';
+            }
+            if (!typeName && previous > 0 &&
+                isIdentifierPart(static_cast<unsigned char>(expression[previous - 1]))) {
+                size_t wordStart = previous - 1;
+                while (wordStart > 0 &&
+                       isIdentifierPart(static_cast<unsigned char>(expression[wordStart - 1]))) {
+                    --wordStart;
+                }
+                typeName = toLower(expression.substr(wordStart,
+                    previous - wordStart)) == "as";
+            }
+            const bool qualified = typeName ||
+                (next < expression.size() && expression[next] == '.') ||
+                (next < expression.size() && expression[next] == '(');
+            if (qualified) {
+                rewritten.append(expression, pos, end - pos);
+            } else {
+                rewritten += replacement->second;
+            }
+            pos = end;
+        }
+        return rewritten;
+    };
+
+    const std::string projection = selectSql.substr(listStart, listEnd - listStart);
+    std::vector<std::string> targets = splitSelectColumns(projection);
+    bool projectionChanged = false;
+    for (std::string& target : targets) {
+        const std::string targetLower = toLower(target);
+        const size_t asKeyword = findTopLevelKeyword(targetLower, "as");
+        const size_t asPos = asKeyword != std::string::npos && asKeyword > 0 &&
+            asKeyword + 2 < targetLower.size() &&
+            isspace(static_cast<unsigned char>(targetLower[asKeyword - 1])) &&
+            isspace(static_cast<unsigned char>(targetLower[asKeyword + 2]))
+            ? asKeyword - 1 : std::string::npos;
+        const std::string expression = trim(
+            asPos == std::string::npos ? target : target.substr(0, asPos));
+        dbms::SQLParser parser;
+        const auto parsed = parser.parse("SELECT " + target);
+        const auto* parsedSelect = parsed.success
+            ? dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()) : nullptr;
+        if (!parsedSelect || parsedSelect->selectList.size() != 1 ||
+            !parsedSelect->selectList.front().expr) continue;
+
+        const std::string bareName = toLower(expression);
+        const bool isBareIdentifier = !bareName.empty() &&
+            std::all_of(bareName.begin(), bareName.end(), [](unsigned char c) {
+                return std::isalnum(c) || c == '_' || c == '$';
+            });
+        const size_t columnIndex = isBareIdentifier
+            ? (isSpecialValue(bareName) ? leftSchema.len
+                                        : findOuterColumn(bareName))
+            : leftSchema.len;
+        if (columnIndex != leftSchema.len) {
+            std::string literal = makeOuterLiteral(columnIndex);
+            if (literal.empty()) continue;
+            std::string alias = asPos == std::string::npos
+                ? " AS " + leftSchema.cols[columnIndex].dataName
+                : target.substr(asPos);
+            target = literal + alias;
+            projectionChanged = true;
+            continue;
+        }
+
+        std::string aliasSuffix;
+        size_t expressionEnd = target.size();
+        if (asPos != std::string::npos) {
+            expressionEnd = asPos;
+            aliasSuffix = target.substr(asPos);
+        } else if (!parsedSelect->selectList.front().alias.empty()) {
+            const std::string trimmedTarget = trim(target);
+            const std::string& parsedAlias =
+                parsedSelect->selectList.front().alias;
+            if (trimmedTarget.size() >= parsedAlias.size()) {
+                const size_t aliasStart =
+                    trimmedTarget.size() - parsedAlias.size();
+                if (trimmedTarget.compare(aliasStart, parsedAlias.size(),
+                                          parsedAlias) == 0 &&
+                    aliasStart > 0 &&
+                    isspace(static_cast<unsigned char>(trimmedTarget[aliasStart - 1]))) {
+                    expressionEnd = target.find(trimmedTarget) + aliasStart;
+                    aliasSuffix = target.substr(expressionEnd);
+                }
+            }
+        }
+        const std::string expressionText =
+            trim(target.substr(0, expressionEnd));
+        const std::string rewritten = rewriteExpression(
+            expressionText, parsedSelect->selectList.front().expr.get());
+        if (rewritten != expressionText) {
+            target = rewritten + aliasSuffix;
+            projectionChanged = true;
+        }
     }
-    selectSql = selectSql.substr(0, listStart) + rewrittenProjection +
-        selectSql.substr(listEnd);
+
+    if (projectionChanged) {
+        size_t first = projection.find_first_not_of(" \t\r\n");
+        size_t last = projection.find_last_not_of(" \t\r\n");
+        const std::string leading = first == std::string::npos
+            ? projection : projection.substr(0, first);
+        const std::string trailing = first == std::string::npos
+            ? std::string() : projection.substr(last + 1);
+        std::string rewrittenProjection;
+        for (const std::string& target : targets) {
+            if (!rewrittenProjection.empty()) rewrittenProjection += ", ";
+            rewrittenProjection += target;
+        }
+        selectSql = selectSql.substr(0, listStart) + leading +
+            rewrittenProjection + trailing + selectSql.substr(listEnd);
+    }
+
+    std::string currentLower = toLower(selectSql);
+    const size_t wherePos = findTopLevelKeyword(currentLower, "where", listStart);
+    if (wherePos != std::string::npos) {
+        size_t predicateEnd = selectSql.size();
+        for (const char* clause : {"group", "having", "order", "limit",
+                                    "offset", "fetch", "for", "union",
+                                    "intersect", "except"}) {
+            const size_t clausePos = findTopLevelKeyword(
+                currentLower, clause, wherePos + 5);
+            if (clausePos != std::string::npos)
+                predicateEnd = std::min(predicateEnd, clausePos);
+        }
+        const std::string predicate = trim(selectSql.substr(
+            wherePos + 5, predicateEnd - wherePos - 5));
+        if (!predicate.empty()) {
+            dbms::SQLParser parser;
+            const auto parsed = parser.parse("SELECT 1 WHERE " + predicate);
+            const auto* parsedSelect = parsed.success
+                ? dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()) : nullptr;
+            if (parsedSelect && parsedSelect->whereClause) {
+                const std::string rewritten = rewriteExpression(
+                    predicate, parsedSelect->whereClause.get());
+                if (rewritten != predicate) {
+                    selectSql = selectSql.substr(0, wherePos + 5) + " " +
+                        rewritten + selectSql.substr(predicateEnd);
+                }
+            }
+        }
+    }
 }
 
 static bool lateralJoinPredicateMatches(
@@ -13680,13 +14007,32 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
             std::vector<std::vector<std::string>> rowStructuredRows;
             std::vector<std::vector<bool>> rowStructuredNulls;
             bool rowStructuredAvailable = false;
+            bool rowExecutionFailed = false;
+            std::string rowFailureText;
             auto rows = runDerivedSubQueryFull(
                 replacedSql, s, rowColNames, &rowColTypes,
                 &rowStructuredRows, &rowStructuredNulls,
-                &rowStructuredAvailable);
+                &rowStructuredAvailable, &rowExecutionFailed,
+                &rowFailureText);
             if (rowColNames.empty()) {
                 rows = runDerivedSubQuery(replacedSql, s, rowColNames);
                 rowStructuredAvailable = false;
+            }
+            if (rowColNames.empty() && rowExecutionFailed) {
+                reportNestedQueryFailure(rowFailureText);
+                failed = true;
+                return result;
+            }
+            // Some FROM-less scalar SELECT paths do not publish a row
+            // description when their per-outer-row WHERE predicate filters
+            // everything. Once a previous row established the lateral
+            // schema, reuse that schema to represent this zero-row result;
+            // otherwise an ordinary non-match would abandon the rewrite and
+            // leave the lateral alias unresolved in the outer query.
+            if (rowColNames.empty() && !rightColNames.empty()) {
+                rowColNames = rightColNames;
+                rowColTypes = rightColTypes;
+                rowStructuredAvailable = true;
             }
             if (rowColNames.empty()) {
                 if (joinRequiresOn) {

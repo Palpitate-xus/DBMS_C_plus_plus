@@ -110,6 +110,28 @@ def main():
              [["1", "1"], ["2", "2"], ["4", "4"], ["5", "5"],
               ["6", "6"], [None, None]],
              [23, 23]),
+            (("SELECT l.id, x.outer_id FROM typed_lateral_left l "
+              "CROSS JOIN LATERAL (SELECT id + 10 AS outer_id) x "
+              "ORDER BY l.id NULLS LAST;"),
+             [["1", "11"], ["2", "12"], ["4", "14"], ["5", "15"],
+              ["6", "16"], [None, None]],
+             [23, 23]),
+            (("SELECT l.id, x.out FROM typed_lateral_left l "
+              "CROSS JOIN LATERAL "
+              "(SELECT CAST(payload AS text) || '!' AS out) x "
+              "ORDER BY l.id NULLS LAST;"),
+             [["1", "left one!"], ["2", "!"], ["4", "NULL!"],
+              ["5", None], ["6", "quote ' value!"], [None, "null id!"]],
+             [23, 25]),
+            (("SELECT l.id, x.ok FROM typed_lateral_left l "
+              "CROSS JOIN LATERAL "
+              "(SELECT 'matched'::text AS ok WHERE id < 3) x "
+              "ORDER BY l.id;"),
+             [["1", "matched"], ["2", "matched"]], [23, 25]),
+            (("SELECT l.id, x.ok FROM typed_lateral_left l "
+              "CROSS JOIN LATERAL "
+              "(SELECT 'matched'::text AS ok WHERE id < 0) x;"),
+             [], [23, 25]),
             (("SELECT l.id, x.outer_payload FROM typed_lateral_left l "
               "CROSS JOIN LATERAL (SELECT payload AS outer_payload) x "
               "ORDER BY l.id NULLS LAST;"),
@@ -194,6 +216,10 @@ def main():
                     expected_headers = ["id", "outer_id"]
                 elif "outer_payload" in sql:
                     expected_headers = ["id", "outer_payload"]
+                elif "x.out" in sql:
+                    expected_headers = ["id", "out"]
+                elif "x.ok" in sql:
+                    expected_headers = ["id", "ok"]
                 elif "payload" in sql:
                     expected_headers = ["id", "payload", "label"]
                 else:
