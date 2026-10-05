@@ -2,6 +2,33 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "STO-03",
+      "gap_ids": ["STO-03"],
+      "status": "partial",
+      "commits": ["11d1fa4d"],
+      "evidence": [
+        "README.md",
+        "docs/issue-sto-03-page-identity.md",
+        "docs/postgresql-18-gap-audit.md",
+        "src/storage/PgPage.cpp",
+        "src/storage/PageAllocator.cpp",
+        "src/common/DataDirectory.cpp"
+      ],
+      "tests": [
+        "tests/checksum_test.cpp",
+        "tests/checksum_verification_e2e_test.py",
+        "scripts/build.sh",
+        "scripts/build_tests.sh"
+      ],
+      "verification": {
+        "reproduction": "PgPage::init discarded pageId; before the fix, two distinct valid page images swapped on disk passed checksum/layout validation at both block numbers",
+        "fix": "Layout v5 stores the physical block number under the page checksum; BufferPool and offline verification reject bound-page mismatches. Legacy v4 remains read-only compatible and is bound on its first dirty mark",
+        "focused_tests": "Rebuilt checksum_test and checksum_verification_e2e_test.py pass on the final dirty-mark migration design",
+        "full_suite": "scripts/build_tests.sh ran to completion on the initial page-identity revision and exited 1 only because checksum_test had a test-only NUL-string comparison error; all other registered tests passed and TLS timeout E2E was skipped under the stub. After correcting the assertion and moving legacy migration from read-time to dirty-mark-time, the full suite was not rerun",
+        "scope": "STO-03 remains partial: PostgreSQL checksum/tuple/varlena/TOAST/special-space/LSN compatibility is incomplete; legacy v4 pages cannot prove they were not historically swapped before first dirty mark; no PostgreSQL 18.6 differential"
+      }
+    },
+    {
       "issue": "STO-02",
       "gap_ids": ["STO-02"],
       "status": "partial",
@@ -981,7 +1008,7 @@
     {"id":"VAC-04","status":"unverified","evidence":[]},
     {"id":"STO-01","status":"partial","evidence":["docs/issue-sto-01-control-format-integrity.md","docs/PACKAGING.md","docs/MANUAL.md","src/common/DataDirectory.cpp"],"tests":["tests/data_directory_e2e_test.py","tests/checksum_verification_e2e_test.py","scripts/build_tests.sh"],"commits":["b662ff97"]},
     {"id":"STO-02","status":"partial","evidence":["docs/issue-sto-02-relation-storage-namespace.md","docs/code-review-progress.md","src/commands/TableManage.cpp"],"tests":["tests/partition_test.cpp","tests/temp_restart_cleanup_test.cpp","tests/create_table_like_test.cpp","scripts/build_tests.sh"],"commits":["1a76a3fb"]},
-    {"id":"STO-03","status":"unverified","evidence":[]},
+    {"id":"STO-03","status":"partial","evidence":["docs/issue-sto-03-page-identity.md","docs/postgresql-18-gap-audit.md","src/storage/PgPage.cpp","src/storage/PageAllocator.cpp","src/common/DataDirectory.cpp"],"tests":["tests/checksum_test.cpp","tests/checksum_verification_e2e_test.py","scripts/build.sh","scripts/build_tests.sh"],"commits":["11d1fa4d"]},
     {"id":"STO-04","status":"unverified","evidence":[]},
     {"id":"STO-05","status":"unverified","evidence":[]},
     {"id":"STO-06","status":"unverified","evidence":[]},
