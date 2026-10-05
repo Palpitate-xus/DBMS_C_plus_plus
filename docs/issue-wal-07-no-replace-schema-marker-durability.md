@@ -23,6 +23,12 @@ the parent after all initial files are durable; a failed parent sync removes
 the just-created database tree and attempts to persist that rollback before
 returning `IO_ERROR`.
 
+`DROP DATABASE` likewise removed the database tree without syncing the
+cluster directory. It now syncs that parent before reporting success. If this
+final sync fails, the tree has already been removed and the call returns
+`IO_ERROR`; as with other filesystem durability errors, the caller must treat
+the result as indeterminate and re-check database existence before retrying.
+
 ## Verification
 
 - `bash scripts/build_one_test.sh schema_marker_publish_guard_test` — passed.
@@ -33,7 +39,10 @@ returning `IO_ERROR`.
 - `bash scripts/build_one_test.sh database_lifecycle_test` — passed. The
   parent-directory `fsync` was failed after the four initial child-file
   publications; `CREATE DATABASE` returned `IO_ERROR`, removed the new tree,
-  and a same-name retry then succeeded.
+  and a same-name retry then succeeded. A separate injected parent-sync error
+  after `DROP DATABASE` removed a fresh database returned `IO_ERROR`; the
+  database path was absent, confirming that callers must re-check after this
+  post-delete failure.
 - `git diff --check` — passed before commit.
 
 No full registered suite, standalone production executable build, or
@@ -49,5 +58,5 @@ temporary hard-link alias may remain if cleanup itself fails, but the schema
 target was synced before that cleanup and the alias is not interpreted as a
 schema marker.
 
-Source/test commits: `e8a6d1ee` (schema marker) and `f8c02416` (database
-directory publication), both not pushed.
+Source/test commits: `e8a6d1ee` (schema marker), `f8c02416` (database
+creation), and `b707afd3` (database drop), all not pushed.
