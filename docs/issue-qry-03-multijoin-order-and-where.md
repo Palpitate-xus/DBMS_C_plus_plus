@@ -13,7 +13,8 @@ Status: partial. The source/test fixes are local commits `4534b971`,
 (multi-column star protocol coverage, 2026-10-05), plus `c7447f26`
 (FROM-less LATERAL direct outer-column targets, 2026-10-05; QRY-02), and
 `18fc748b` (bounded INNER/LEFT LATERAL `ON` conditions, 2026-10-05;
-QRY-02/QRY-03).
+QRY-02/QRY-03), and `40ef739a` (FROM-less bare outer references in scalar
+targets and WHERE, 2026-10-05; QRY-02/QRY-03).
 
 ## Reproduced behavior
 
@@ -57,6 +58,10 @@ QRY-02/QRY-03).
 - `LEFT JOIN LATERAL (...) x ON ...` was not recognized by the lateral
   materializer and fell through to a missing-relation error; it also had no
   per-left-row ON filtering or SQL NULL-extension behavior.
+- In a FROM-less lateral subquery, a bare outer column used inside a scalar
+  expression or WHERE predicate was not bound; `id + 10` and `WHERE id < 3`
+  both failed with SQLSTATE `42P01` instead of being evaluated for each left
+  row.
 
 ## Fixes
 
@@ -86,11 +91,12 @@ QRY-02/QRY-03).
   type metadata, and per-column NULL bitmap rather than applying unqualified
   JOIN USING merge rules.
 - In a FROM-less LATERAL subquery, bind a direct bare-column target to the
-  unique left input column, preserving its source type by an explicit cast;
-  this also gives an empty left input a typed RowDescription. The regression
-  covers integer/text values, quoted text, NULL, and the empty-input case.
-  This narrow target-list rule does not resolve bare outer references inside
-  expressions or WHERE, nor does it support multiple visible left relations.
+  unique left input column, and bind unique bare outer columns inside
+  evaluator-supported scalar target expressions and WHERE predicates by
+  per-row, type-aware literals. Direct targets preserve their source type and
+  alias; SQL NULL and quoted text are retained. This applies only when the
+  lateral SELECT has no own FROM, and it does not resolve multiple visible
+  left relations, quoted outer identifiers, or arbitrary nested correlations.
 - For one simple left base relation, materialize `JOIN`/`INNER JOIN LATERAL`
   and `LEFT [OUTER] JOIN LATERAL` per left row, evaluate a supported boolean
   `ON` expression against typed, NULL-aware left/right values, and apply LEFT
@@ -205,6 +211,15 @@ QRY-02/QRY-03).
   the original LEFT LATERAL query failed before the fix with `42P01`. This is
   bounded to one simple left relation and evaluator-supported boolean `ON`
   expressions; the full suite and PostgreSQL 18.6 differential were not run.
+- After `40ef739a`, `scripts/build.sh`,
+  `tests/derived_type_protocol_e2e_test.py`, and
+  `tests/sql_literal_preservation_e2e_test.py` passed. The regression covers
+  `id + 10`, a text CAST/concatenation over empty, quoted, literal-`NULL`, and
+  SQL-NULL values, `WHERE id < 3` true/false/NULL outcomes, and an all-filtered
+  result that still reports typed columns. The former expression and WHERE
+  cases failed with `42P01`. Correlation is limited to a single left relation
+  and evaluator-supported expressions in a LATERAL SELECT with no own FROM;
+  the full suite and PostgreSQL 18.6 differential were not run.
 - `tests/compat/cases/multijoin_projection_filter.sql` was added, but the
   differential runner refused preflight because the configured reference
   server reports PostgreSQL 17.2 (`170002`) while the runner requires 18.6
@@ -218,8 +233,10 @@ simple `alias.*`, DISTINCT/GROUP/HAVING/WINDOW, collation-aware and arbitrary-
 expression ordering, and arbitrary nested/lateral join semantics remain open.
 The FROM-less LATERAL direct-column target case is only a bounded QRY-02 fix;
 simple INNER/LEFT LATERAL `ON` evaluation now additionally works for one
-simple left relation, but outer references inside expressions/WHERE, multiple
-left relations, lateral chains, table functions, and general parameterized or
-nested join semantics remain unsupported.
+simple left relation. Bare outer references in evaluator-supported scalar
+targets and WHERE are now also bound when that LATERAL SELECT has no own FROM.
+Multiple left relations, quoted outer identifiers, arbitrary correlated
+expressions/subqueries, lateral chains, table functions, and general
+parameterized or nested join semantics remain unsupported.
 OPT-02's DP/exhaustive join search, GEQO threshold, semi/anti constraints, and
 bushy plans remain unimplemented.
