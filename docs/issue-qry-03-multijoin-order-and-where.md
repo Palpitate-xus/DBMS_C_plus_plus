@@ -7,7 +7,8 @@ Status: partial. The source/test fixes are local commits `4534b971`,
 `3fef4f7d` (typed canonical JOIN keys, 2026-10-05), `124bc278`
 (simple scalar expression projections, 2026-10-05), and `1ef35962`
 (evaluator-supported scalar functions, 2026-10-05), and `de98eddb`
-(simple CASE projections, 2026-10-05).
+(simple CASE projections, 2026-10-05), and `cd53df9d`
+(ordering by a projected expression, 2026-10-05).
 
 ## Reproduced behavior
 
@@ -73,6 +74,10 @@ Status: partial. The source/test fixes are local commits `4534b971`,
   NULLS FIRST/LAST, then apply LIMIT/OFFSET. Unsupported projections, sort
   expressions, DISTINCT/GROUP/WINDOW forms fail explicitly rather than being
   silently presented as completed queries.
+- If an ORDER BY scalar expression textually matches a projected expression,
+  reuse its precomputed values and inferred result type for sorting. General
+  unprojected expressions and AST-equivalent-but-differently-written forms
+  are still rejected rather than evaluated a second time.
 - Remove the arbitrary 12-JOIN early exit so the parser and executor see the
   full authored relation chain.
 - Split multi-table `ON` conjunctions, use one qualified cross-relation
@@ -151,6 +156,12 @@ Status: partial. The source/test fixes are local commits `4534b971`,
   joined row, retained the alias and integer OID, and sorted by the computed
   output position; the query previously failed with `0A000`. This does not
   complete arbitrary CASE, SRF, aggregate, or window target-list semantics.
+- After `cd53df9d`, `scripts/build.sh`,
+  `tests/join_type_protocol_e2e_test.py`, and `tests/multijoin_e2e_test.py`
+  passed. A three-table query ordered by the same arithmetic expression it
+  projected now returns the expected descending order by the computed value;
+  the previous behavior rejected it with `0A000`. This is not general
+  ORDER-BY-expression or collation-aware ordering support.
 - `tests/compat/cases/multijoin_projection_filter.sql` was added, but the
   differential runner refused preflight because the configured reference
   server reports PostgreSQL 17.2 (`170002`) while the runner requires 18.6
