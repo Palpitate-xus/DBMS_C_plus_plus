@@ -5,16 +5,44 @@
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <stdexcept>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 namespace {
 
 constexpr size_t kPageSize = dbms::BP_PAGE_SIZE;
+constexpr size_t kChecksumOffset = kPageSize - sizeof(uint32_t);
+constexpr uint16_t kLegacyChecksummedFormat = 0xC551;
+constexpr uint16_t kPageBoundChecksummedFormat = 0xC552;
+
+uint32_t legacyChecksum(const char* page) {
+    uint32_t crc = 0xFFFFFFFFu;
+    for (size_t i = 0; i < kPageSize; ++i) {
+        const uint8_t byte = i >= kChecksumOffset
+            ? 0 : static_cast<uint8_t>(page[i]);
+        crc ^= byte;
+        for (unsigned bit = 0; bit < 8; ++bit) {
+            crc = (crc >> 1) ^ ((crc & 1u) ? 0x82F63B78u : 0u);
+        }
+    }
+    crc ^= 0xFFFFFFFFu;
+    return crc == 0 ? 0xFFFFFFFFu : crc;
+}
+
+void stampLegacyChecksum(std::vector<char>& file, size_t pageId) {
+    char* page = file.data() + pageId * kPageSize;
+    uint32_t zero = 0;
+    std::memcpy(page + kChecksumOffset, &zero, sizeof(zero));
+    const uint32_t checksum = legacyChecksum(page);
+    std::memcpy(page + kChecksumOffset, &checksum, sizeof(checksum));
+}
 
 void putU16(std::vector<char>& file, size_t offset, uint16_t value) {
     std::memcpy(file.data() + offset, &value, sizeof(value));
@@ -65,6 +93,19 @@ void cleanup(const std::string& path) {
     std::filesystem::remove(path, ec);
     ec.clear();
     std::filesystem::remove(path + ".tde", ec);
+}
+
+std::filesystem::path createTempDir() {
+    const std::string pattern =
+        (std::filesystem::temp_directory_path() /
+         "dbms_bptree_page_swap_XXXXXX").string();
+    std::vector<char> writable(pattern.begin(), pattern.end());
+    writable.push_back('\0');
+    char* created = ::mkdtemp(writable.data());
+    if (created == nullptr) {
+        throw std::runtime_error("mkdtemp for B+ tree corruption test failed");
+    }
+    return created;
 }
 
 void test_checked_lookup_distinguishes_absence() {
@@ -124,6 +165,95 @@ void test_checksummed_index_page_rejects_corruption() {
         assert(!tree.openExisting());
     }
     cleanup(path);
+}
+
+void test_checksummed_index_rejects_swapped_pages() {
+    const std::filesystem::path tempDir = createTempDir();
+    const std::string path = (tempDir / "page_swap.idx").string();
+    {
+        dbms::BPTree tree(path);
+        assert(tree.open());
+        for (int i = 0; i < 200; ++i) {
+            std::string key = std::to_string(i);
+            key.insert(0, 4 - key.size(), '0');
+            assert(tree.insert("key-" + key, i));
+        }
+        assert(tree.flush());
+        tree.close();
+    }
+
+    const auto fileSize = std::filesystem::file_size(path);
+    assert(fileSize >= 4 * kPageSize);
+    std::vector<char> bytes(static_cast<size_t>(fileSize));
+    {
+        std::ifstream input(path, std::ios::binary);
+        assert(input);
+        input.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        assert(input);
+    }
+    // The first two data pages are sibling leaves after this insertion set.
+    // Swapping whole, individually valid pages preserves each page's CRC but
+    // changes which keys the root's child pointers name.
+    std::swap_ranges(bytes.begin() + kPageSize,
+                     bytes.begin() + 2 * kPageSize,
+                     bytes.begin() + 2 * kPageSize);
+    publish(path, bytes);
+
+    {
+        dbms::BPTree tree(path);
+        const bool opened = tree.openExisting();
+        if (opened) {
+            int64_t value = 0;
+            // A page-number-bound checksum must report corruption, not a
+            // clean NotFound caused by looking in the swapped sibling page.
+            assert(tree.searchChecked("key-0000", value) ==
+                   dbms::BPTree::SearchResult::Error);
+        }
+        tree.close();
+    }
+    std::filesystem::remove_all(tempDir);
+}
+
+void test_previous_checksummed_format_remains_readable() {
+    const std::filesystem::path tempDir = createTempDir();
+    const std::string path = (tempDir / "legacy_checksum.idx").string();
+    {
+        dbms::BPTree tree(path);
+        assert(tree.open());
+        assert(tree.insert("alpha", 42));
+        assert(tree.flush());
+        tree.close();
+    }
+
+    const auto fileSize = std::filesystem::file_size(path);
+    assert(fileSize >= 2 * kPageSize && fileSize % kPageSize == 0);
+    std::vector<char> bytes(static_cast<size_t>(fileSize));
+    {
+        std::ifstream input(path, std::ios::binary);
+        assert(input);
+        input.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        assert(input);
+    }
+    const size_t formatOffset = sizeof(uint32_t) * 2 + sizeof(uint16_t);
+    uint16_t format = 0;
+    std::memcpy(&format, bytes.data() + formatOffset, sizeof(format));
+    assert(format == kPageBoundChecksummedFormat);
+    putU16(bytes, formatOffset, kLegacyChecksummedFormat);
+    for (size_t pageId = 0; pageId < bytes.size() / kPageSize; ++pageId) {
+        stampLegacyChecksum(bytes, pageId);
+    }
+    publish(path, bytes);
+
+    {
+        dbms::BPTree tree(path);
+        assert(tree.openExisting());
+        int64_t value = 0;
+        assert(tree.searchChecked("alpha", value) ==
+               dbms::BPTree::SearchResult::Found);
+        assert(value == 42);
+        tree.close();
+    }
+    std::filesystem::remove_all(tempDir);
 }
 
 void test_internal_page_cycle_fails_closed() {
@@ -195,6 +325,8 @@ void test_leaf_chain_cycle_and_type_confusion_fail_closed() {
 int main() {
     test_checked_lookup_distinguishes_absence();
     test_checksummed_index_page_rejects_corruption();
+    test_checksummed_index_rejects_swapped_pages();
+    test_previous_checksummed_format_remains_readable();
     test_internal_page_cycle_fails_closed();
     test_leaf_chain_cycle_and_type_confusion_fail_closed();
     std::cout << "[BPTREE TOPOLOGY] cycles and invalid leaf links rejected OK\n";
