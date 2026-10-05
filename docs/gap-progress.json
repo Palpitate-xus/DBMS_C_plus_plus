@@ -2,6 +2,32 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "STO-06",
+      "gap_ids": ["STO-06"],
+      "status": "partial",
+      "evidence": [
+        "docs/code-review-progress.md",
+        "docs/issue-sto-06-toast-format-audit.md",
+        "docs/postgresql-18-gap-audit.md",
+        "src/commands/TableManage.cpp",
+        "src/commands/TableManage.h",
+        "src/commands/DdlExecutor.cpp"
+      ],
+      "tests": [
+        "tests/toast_test.cpp",
+        "tests/vacuum_toast_test.cpp",
+        "tests/bytea_large_toast_test.cpp",
+        "scripts/build_one_test.sh"
+      ],
+      "verification": {
+        "reproduction": "No new corruption defect was established; source inspection confirmed the custom marker/chunk format and missing PostgreSQL storage-policy/codec features",
+        "fix": "Audit only; no code changed",
+        "focused_tests": "toast_test, vacuum_toast_test, and bytea_large_toast_test passed",
+        "full_suite": "The full registered suite was not rerun on this revision",
+        "scope": "STO-06 remains partial: PostgreSQL varlena/external pointers, column storage policy, configurable target, PGLZ/LZ4, deduplication, and complete WAL integration remain open; no PostgreSQL 18.6 differential"
+      }
+    },
+    {
       "issue": "STO-05",
       "gap_ids": ["STO-05"],
       "status": "partial",
@@ -1061,7 +1087,7 @@
     {"id":"STO-03","status":"partial","evidence":["docs/issue-sto-03-page-identity.md","docs/postgresql-18-gap-audit.md","src/storage/PgPage.cpp","src/storage/PageAllocator.cpp","src/common/DataDirectory.cpp"],"tests":["tests/checksum_test.cpp","tests/checksum_verification_e2e_test.py","scripts/build.sh","scripts/build_tests.sh"],"commits":["11d1fa4d"]},
     {"id":"STO-04","status":"partial","evidence":["docs/issue-sto-04-buffer-invalidation-pins.md","docs/postgresql-18-gap-audit.md","src/storage/BufferPool.cpp"],"tests":["tests/buffer_pool_invalidate_all_pins_test.cpp","scripts/build.sh","scripts/build_tests.sh","tests/div14_feature_gate_test.py"],"commits":["019e5ee7"]},
     {"id":"STO-05","status":"partial","evidence":["docs/issue-sto-05-vacuum-visibility-horizon.md","src/commands/TableManage.cpp"],"tests":["tests/parallel_vacuum_test.cpp","scripts/build.sh","scripts/build_one_test.sh"],"commits":["9a29e99a"]},
-    {"id":"STO-06","status":"unverified","evidence":[]},
+    {"id":"STO-06","status":"partial","evidence":["docs/issue-sto-06-toast-format-audit.md","src/commands/TableManage.cpp","src/commands/TableManage.h","src/commands/DdlExecutor.cpp"],"tests":["tests/toast_test.cpp","tests/vacuum_toast_test.cpp","tests/bytea_large_toast_test.cpp","scripts/build_one_test.sh"]},
     {"id":"WAL-01","status":"unverified","evidence":[]},
     {"id":"WAL-02","status":"unverified","evidence":[]},
     {"id":"WAL-03","status":"unverified","evidence":[]},

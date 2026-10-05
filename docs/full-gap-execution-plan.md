@@ -4,6 +4,8 @@
 
 # 总差距清单执行计划
 
+2026-10-05 STO-06：审计确认现有自定义 TOAST 分块存储已有 zlib 压缩、bounded de-toast、chunk/index一致性校验、失败清理和旧快照安全回收；`toast_test`、`vacuum_toast_test`、`bytea_large_toast_test` 通过。本次没有证实新的数据损坏 bug，也没有生产代码改动。当前 heap marker + sidecar 格式不是 PG varlena/external pointer；列级 storage strategy、可配置 `toast_tuple_target`、PGLZ/LZ4 与 dedup 未实现，故 STO-06 从 unverified 分类为 partial，不能记作完成。未跑完整注册套件或 PG18.6 differential。详见 `docs/issue-sto-06-toast-format-audit.md`。
+
 2026-10-05 STO-05：简化 VACUUM 把 `LP_NORMAL`/line-pointer 数量相等误当为“所有活动快照均可见”。用旧 REPEATABLE READ 快照、提交 UPDATE、rollback INSERT 留下空 line pointer 复现：VACUUM 后旧快照仍需旧版本，但 VM 被错误设为 all-visible。代码改为在缺少 visibility-horizon/OldestXmin 检查时保守清位；旧实现回归失败，修复后 `parallel_vacuum_test` 和生产构建通过。当前没有 VM 查询/index-only consumer，故此为元数据契约修正，不声称当前查询结果变化。全注册套件未在此 revision 重跑，无 PG18.6 differential。FSM/VM crash rebuild、持久性、all-frozen、visibility horizon 与 index-only 集成仍缺，STO-05 partial。Source/test commit `9a29e99a`，见 `docs/issue-sto-05-vacuum-visibility-horizon.md`。
 
 2026-10-05 STO-04：`BufferPool::invalidateAll()` 以前把仍 pinned 的普通 frame 直接清成空闲，允许复用调用者仍持有的内存，且旧 `unpinPage(pageId)` 可能减到新映射。现在 invalidate 时将带 pin 的映射转入 orphan lifecycle；单帧回归在旧代码失败、修复后通过。生产构建通过。全套注册回归461个C++通过、203个E2E中202个通过；`div14_feature_gate_test.py`一次因 extended `ALTER TABLE ... UNSIGNED` 时连接关闭而失败，单独立即重跑通过；全量脚本仍如实记录exit 1。无PG18.6差分。此修仅关闭一个 pin-lifetime 错误；content locks、partitioned/shared hash、prefetch、bulk/ring与自动ResourceOwner清理仍缺，STO-04 partial。Source/test commit `019e5ee7`，见`docs/issue-sto-04-buffer-invalidation-pins.md`。
