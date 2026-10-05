@@ -23182,6 +23182,12 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             "join is not supported (SQLSTATE 0A000)" << endl;
                     return true;
                 }
+                struct MultiJoinSortKey {
+                    size_t cellIndex;
+                    string type;
+                    bool descending;
+                    bool nullsFirst;
+                };
                 struct MultiJoinProjection {
                     size_t cellIndex;
                     string column;
@@ -23320,14 +23326,255 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         }
                     }
                 }
+                vector<size_t> outputRowOrder(interCells.size());
+                for (size_t index = 0; index < outputRowOrder.size(); ++index)
+                    outputRowOrder[index] = index;
+                if (orderPos != string::npos) {
+                    const size_t orderEnd = std::min(
+                        {limitPos, offsetPos, sql.size()});
+                    const string orderClause = trim(sql.substr(
+                        orderPos + 8, orderEnd - orderPos - 8));
+                    vector<MultiJoinSortKey> sortKeys;
+                    for (string item : splitSelectColumns(orderClause)) {
+                        item = trim(item);
+                        string lowered = toLower(item);
+                        bool explicitNullOrder = false;
+                        bool nullsFirst = false;
+                        const auto stripSuffix = [&](const string& suffix) {
+                            if (lowered.size() < suffix.size() ||
+                                lowered.compare(lowered.size() - suffix.size(),
+                                                suffix.size(), suffix) != 0 ||
+                                (lowered.size() > suffix.size() &&
+                                 !isspace(static_cast<unsigned char>(
+                                     lowered[lowered.size() - suffix.size() - 1]))))
+                                return false;
+                            item = trim(item.substr(
+                                0, item.size() - suffix.size()));
+                            lowered = toLower(item);
+                            return true;
+                        };
+                        if (stripSuffix("nulls first")) {
+                            explicitNullOrder = true;
+                            nullsFirst = true;
+                        } else if (stripSuffix("nulls last")) {
+                            explicitNullOrder = true;
+                            nullsFirst = false;
+                        }
+                        bool descending = false;
+                        if (stripSuffix("desc")) descending = true;
+                        else (void)stripSuffix("asc");
+
+                        size_t cellIndex = interCols.size();
+                        string type;
+                        const string sortExpression = trim(item);
+                        bool numericPosition = !sortExpression.empty() &&
+                            std::all_of(sortExpression.begin(),
+                                        sortExpression.end(), [](char ch) {
+                                return isdigit(static_cast<unsigned char>(ch));
+                            });
+                        if (numericPosition) {
+                            size_t oneBased = 0;
+                            try { oneBased = stoull(sortExpression); }
+                            catch (...) { oneBased = 0; }
+                            if (oneBased == 0 || oneBased > projections.size()) {
+                                cout << "ERROR: ORDER BY position "
+                                     << sortExpression
+                                     << " is not in select list "
+                                        "(SQLSTATE 42P10)" << endl;
+                                return true;
+                            }
+                            cellIndex = projections[oneBased - 1].cellIndex;
+                            type = projections[oneBased - 1].type;
+                        } else {
+                            dbms::SQLParser orderParser;
+                            const auto parsedOrder = orderParser.parse(
+                                "SELECT " + sortExpression);
+                            const auto* orderSelect = parsedOrder.success
+                                ? dynamic_cast<const dbms::SelectStmt*>(
+                                      parsedOrder.stmt.get()) : nullptr;
+                            const auto* reference = orderSelect &&
+                                    orderSelect->selectList.size() == 1
+                                ? dynamic_cast<const dbms::ColumnRefExpr*>(
+                                      orderSelect->selectList.front().expr.get())
+                                : nullptr;
+                            if (!reference || !reference->schema.empty()) {
+                                cout << "ERROR: multi-table ORDER BY currently "
+                                        "requires a column reference or output "
+                                        "position (SQLSTATE 0A000)" << endl;
+                                return true;
+                            }
+                            if (reference->table.empty()) {
+                                size_t aliasMatches = 0;
+                                for (const auto& projection : projections) {
+                                    if (projection.header == reference->column) {
+                                        cellIndex = projection.cellIndex;
+                                        type = projection.type;
+                                        ++aliasMatches;
+                                    }
+                                }
+                                if (aliasMatches > 1) {
+                                    cout << "ERROR: ORDER BY \""
+                                         << reference->column
+                                         << "\" is ambiguous (SQLSTATE 42702)"
+                                         << endl;
+                                    return true;
+                                }
+                                if (aliasMatches == 0) {
+                                    size_t matches = 0;
+                                    for (size_t relationIndex = 0;
+                                         relationIndex < pending.size();
+                                         ++relationIndex) {
+                                        for (size_t columnIndex = 0;
+                                             columnIndex < pending[relationIndex]
+                                                               .schema.len;
+                                             ++columnIndex) {
+                                            if (pending[relationIndex]
+                                                    .schema.cols[columnIndex]
+                                                    .dataName !=
+                                                reference->column) continue;
+                                            ++matches;
+                                            const auto mapped = colMap.find(
+                                                {relationIndex,
+                                                 reference->column});
+                                            if (mapped == colMap.end()) continue;
+                                            const auto position = std::find(
+                                                interCols.begin(),
+                                                interCols.end(), mapped->second);
+                                            if (position == interCols.end()) continue;
+                                            cellIndex = static_cast<size_t>(
+                                                position - interCols.begin());
+                                            type = pending[relationIndex]
+                                                .schema.cols[columnIndex].dataType;
+                                        }
+                                    }
+                                    if (matches > 1) {
+                                        cout << "ERROR: ORDER BY column \""
+                                             << reference->column
+                                             << "\" is ambiguous "
+                                                "(SQLSTATE 42702)" << endl;
+                                        return true;
+                                    }
+                                }
+                            } else {
+                                size_t relationIndex = pending.size();
+                                for (size_t index = 0; index < pending.size();
+                                     ++index) {
+                                    const bool hasAlias =
+                                        !pj.tables[index].second.empty();
+                                    if (reference->table ==
+                                            pending[index].alias ||
+                                        (!hasAlias &&
+                                         (reference->table ==
+                                              pj.tables[index].first ||
+                                          reference->table ==
+                                              pending[index].name))) {
+                                        relationIndex = index;
+                                        break;
+                                    }
+                                }
+                                if (relationIndex == pending.size()) {
+                                    cout << "ERROR: missing FROM-clause entry "
+                                            "for table \"" << reference->table
+                                         << "\" (SQLSTATE 42P01)" << endl;
+                                    return true;
+                                }
+                                for (size_t columnIndex = 0;
+                                     columnIndex < pending[relationIndex]
+                                                       .schema.len;
+                                     ++columnIndex) {
+                                    if (pending[relationIndex]
+                                            .schema.cols[columnIndex].dataName !=
+                                        reference->column) continue;
+                                    const auto mapped = colMap.find(
+                                        {relationIndex, reference->column});
+                                    if (mapped == colMap.end()) break;
+                                    const auto position = std::find(
+                                        interCols.begin(), interCols.end(),
+                                        mapped->second);
+                                    if (position == interCols.end()) break;
+                                    cellIndex = static_cast<size_t>(
+                                        position - interCols.begin());
+                                    type = pending[relationIndex]
+                                        .schema.cols[columnIndex].dataType;
+                                    break;
+                                }
+                            }
+                        }
+                        if (cellIndex >= interCols.size()) {
+                            cout << "ERROR: ORDER BY column is not available "
+                                    "in the multi-table input "
+                                    "(SQLSTATE 42703)" << endl;
+                            return true;
+                        }
+                        sortKeys.push_back({cellIndex, type, descending,
+                            explicitNullOrder ? nullsFirst : descending});
+                    }
+                    if (sortKeys.empty()) {
+                        cout << "ERROR: empty multi-table ORDER BY "
+                                "(SQLSTATE 42601)" << endl;
+                        return true;
+                    }
+                    const auto compareValues = [](const string& left,
+                                                  const string& right,
+                                                  const string& rawType) {
+                        const string type = toLower(rawType);
+                        const bool numeric = type == "smallint" ||
+                            type == "int2" || type == "integer" ||
+                            type == "int" || type == "int4" ||
+                            type == "bigint" || type == "int8" ||
+                            type == "numeric" || type == "decimal" ||
+                            type == "real" || type == "float4" ||
+                            type == "double precision" || type == "float8";
+                        if (numeric) {
+                            try {
+                                const dbms::Numeric leftValue(left);
+                                const dbms::Numeric rightValue(right);
+                                if (leftValue < rightValue) return -1;
+                                if (rightValue < leftValue) return 1;
+                                return 0;
+                            } catch (...) {}
+                        }
+                        if (left < right) return -1;
+                        if (right < left) return 1;
+                        return 0;
+                    };
+                    std::stable_sort(
+                        outputRowOrder.begin(), outputRowOrder.end(),
+                        [&](size_t leftRow, size_t rightRow) {
+                            for (const auto& key : sortKeys) {
+                                const bool leftNull =
+                                    interNulls[leftRow][key.cellIndex];
+                                const bool rightNull =
+                                    interNulls[rightRow][key.cellIndex];
+                                if (leftNull != rightNull)
+                                    return key.nullsFirst ? leftNull : !leftNull;
+                                if (leftNull) continue;
+                                const int compared = compareValues(
+                                    interCells[leftRow][key.cellIndex],
+                                    interCells[rightRow][key.cellIndex], key.type);
+                                if (compared != 0)
+                                    return key.descending
+                                        ? compared > 0 : compared < 0;
+                            }
+                            return false;
+                        });
+                }
+                const size_t outputOffset = std::min(
+                    parsedOffset, outputRowOrder.size());
+                outputRowOrder.erase(
+                    outputRowOrder.begin(),
+                    outputRowOrder.begin() + outputOffset);
+                if (finiteParsedLimit &&
+                    parsedLimit < outputRowOrder.size()) {
+                    outputRowOrder.resize(parsedLimit);
+                }
                 vector<vector<string>> projectedCells;
                 vector<vector<bool>> projectedNulls;
                 vector<string> projectedRows;
-                projectedCells.reserve(interCells.size());
-                projectedNulls.reserve(interCells.size());
-                projectedRows.reserve(interCells.size());
-                for (size_t rowIndex = 0; rowIndex < interCells.size();
-                     ++rowIndex) {
+                projectedCells.reserve(outputRowOrder.size());
+                projectedNulls.reserve(outputRowOrder.size());
+                projectedRows.reserve(outputRowOrder.size());
+                for (const size_t rowIndex : outputRowOrder) {
                     vector<string> values;
                     vector<bool> nulls;
                     string display;

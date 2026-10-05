@@ -191,6 +191,52 @@ def main():
         assert type_oids == [23], type_oids
         assert command_tag == "SELECT 2", command_tag
 
+        ordered_limited_chain_sql = (
+            "SELECT a.id FROM join_outer_chain_a a "
+            "LEFT JOIN join_outer_chain_b b ON a.id = b.id "
+            "LEFT JOIN join_outer_chain_c c ON b.id = c.id "
+            "ORDER BY a.id DESC LIMIT 1;")
+        rows, state, message, headers, command_tag, type_oids = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"],
+                                    ordered_limited_chain_sql),
+                include_types=True))
+        assert state is None, (state, message)
+        assert rows == [["2"]], rows
+        assert headers == ["id"], headers
+        assert type_oids == [23], type_oids
+        assert command_tag == "SELECT 1", command_tag
+
+        nulls_first_chain_sql = (
+            "SELECT a.id FROM join_outer_chain_a a "
+            "LEFT JOIN join_outer_chain_b b ON a.id = b.id "
+            "LEFT JOIN join_outer_chain_c c ON b.id = c.id "
+            "ORDER BY c.id NULLS FIRST;")
+        rows, state, message, headers, command_tag, type_oids = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"], nulls_first_chain_sql),
+                include_types=True))
+        assert state is None, (state, message)
+        assert rows == [["2"], ["1"]], rows
+        assert headers == ["id"], headers
+        assert type_oids == [23], type_oids
+        assert command_tag == "SELECT 2", command_tag
+
+        ordinal_offset_chain_sql = (
+            "SELECT a.id AS row_no FROM join_outer_chain_a a "
+            "LEFT JOIN join_outer_chain_b b ON a.id = b.id "
+            "LEFT JOIN join_outer_chain_c c ON b.id = c.id "
+            "ORDER BY 1 DESC OFFSET 1;")
+        rows, state, message, headers, command_tag, type_oids = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"], ordinal_offset_chain_sql),
+                include_types=True))
+        assert state is None, (state, message)
+        assert rows == [["1"]], rows
+        assert headers == ["row_no"], headers
+        assert type_oids == [23], type_oids
+        assert command_tag == "SELECT 1", command_tag
+
         reordered_projection_sql = (
             "SELECT c.id AS third, a.id AS first "
             "FROM join_outer_chain_a a "
