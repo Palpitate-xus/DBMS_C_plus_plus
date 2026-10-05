@@ -15,6 +15,10 @@ DBMS_MAIN = os.path.abspath(os.environ.get(
 PAGE_SIZE = 8192
 DATA_FILE_MAGIC = 0x44415441
 DATA_FILE_FORMAT_VERSION = 2
+BTREE_PAGE_SIZE = 4096
+BTREE_CHECKSUM_OFFSET = BTREE_PAGE_SIZE - 4
+BTREE_CONTENT_CHECKSUM_FORMAT = 0xC551
+BTREE_PAGE_BOUND_CHECKSUM_FORMAT = 0xC552
 
 
 def fnv1a32(data):
@@ -42,6 +46,51 @@ def crc32c(data):
         for _ in range(8):
             value = (value >> 1) ^ (0x82f63b78 if value & 1 else 0)
     return value ^ 0xffffffff
+
+
+def btree_page_checksum(page, page_id=None):
+    checksum_input = bytearray(page)
+    checksum_input[BTREE_CHECKSUM_OFFSET:] = bytes(4)
+    if page_id is not None:
+        checksum_input.extend(struct.pack("<I", page_id))
+    value = crc32c(checksum_input)
+    return value if value else 0xffffffff
+
+
+def btree_page(key, value, next_leaf=0):
+    page = bytearray(BTREE_PAGE_SIZE)
+    page[0] = 1
+    struct.pack_into("=H", page, 1, 1)
+    encoded_key = key.encode("ascii")
+    assert len(encoded_key) <= 20
+    page[3:23] = encoded_key.ljust(20, b"\0")
+    struct.pack_into("=qI", page, 23, value, next_leaf)
+    return page
+
+
+def write_btree(path, format_marker=BTREE_PAGE_BOUND_CHECKSUM_FORMAT):
+    """Write a small valid four-page B+ tree fixture."""
+    pages = [bytearray(BTREE_PAGE_SIZE) for _ in range(4)]
+    struct.pack_into("=IIHH", pages[0], 0, 3, 4, 2, format_marker)
+    pages[1] = btree_page("a", 1, 2)
+    pages[2] = btree_page("z", 2, 0)
+    pages[3][0] = 0
+    struct.pack_into("=H", pages[3], 1, 1)
+    pages[3][3:23] = b"z".ljust(20, b"\0")
+    struct.pack_into("=II", pages[3], 23, 1, 2)
+
+    if format_marker in (BTREE_CONTENT_CHECKSUM_FORMAT,
+                         BTREE_PAGE_BOUND_CHECKSUM_FORMAT):
+        for page_id, page in enumerate(pages):
+            checksum_page_id = (
+                page_id if format_marker == BTREE_PAGE_BOUND_CHECKSUM_FORMAT
+                else None)
+            struct.pack_into(
+                "=I", page, BTREE_CHECKSUM_OFFSET,
+                btree_page_checksum(page, checksum_page_id))
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"".join(pages))
 
 
 def heap_page(page_id, layout_version=5):
@@ -155,6 +204,14 @@ def main():
         init_heap = database / "scratch.dt.init"
         write_heap(main_heap, 2)
         write_heap(init_heap, 1)
+        btree_index = database / "accounts.idx"
+        write_btree(btree_index)
+        composite_btree_index = database / "accounts.idx_comp"
+        write_btree(composite_btree_index)
+        legacy_btree_index = database / "legacy.idx"
+        write_btree(legacy_btree_index, BTREE_CONTENT_CHECKSUM_FORMAT)
+        unchecked_btree_index = database / "old.idx"
+        write_btree(unchecked_btree_index, 0)
         legacy_heap = database / "legacy.dt"
         write_heap(legacy_heap, 2, layout_version=4)
         key = bytes.fromhex("11" * 32)
@@ -171,15 +228,23 @@ def main():
             str(external) + "\n", encoding="utf-8")
         external_heap = external / "app" / "ledger.toast.dt"
         write_heap(external_heap, 2)
+        external_index = external / "app" / "ledger.idx"
+        write_btree(external_index)
 
         before_cluster = snapshot_tree(cluster)
         before_external = snapshot_tree(external)
         clean = run_verify(cluster, launch)
         assert clean.returncode == 0, clean
         assert "heap checksum verification passed" in clean.stdout, clean
+        assert "B+ tree index scan completed" in clean.stdout, clean
         assert "files=5" in clean.stdout and "blocks=9" in clean.stdout, clean
         assert "identity-bound-blocks=3" in clean.stdout, clean
         assert "legacy-identity-unbound-blocks=1" in clean.stdout, clean
+        assert "index-files=5" in clean.stdout, clean
+        assert "index-pages=20" in clean.stdout, clean
+        assert "page-bound-index-pages=12" in clean.stdout, clean
+        assert "content-only-index-pages=4" in clean.stdout, clean
+        assert "unchecked-index-pages=4" in clean.stdout, clean
         assert snapshot_tree(cluster) == before_cluster
         assert snapshot_tree(external) == before_external
         assert list(launch.iterdir()) == []
@@ -191,6 +256,26 @@ def main():
         assert "app/accounts.dt: block 1" in corrupt_page.stderr, corrupt_page
         assert "checksum or layout" in corrupt_page.stderr, corrupt_page
         main_heap.write_bytes(original_main)
+
+        original_index = btree_index.read_bytes()
+        flip_byte(btree_index, BTREE_PAGE_SIZE + 3)
+        corrupt_index = run_verify(cluster, launch)
+        assert corrupt_index.returncode == 1, corrupt_index
+        assert "app/accounts.idx: block 1" in corrupt_index.stderr, corrupt_index
+        assert "B+ tree page checksum mismatch" in corrupt_index.stderr, corrupt_index
+        btree_index.write_bytes(original_index)
+
+        swapped_index = bytearray(original_index)
+        first_leaf = swapped_index[BTREE_PAGE_SIZE:2 * BTREE_PAGE_SIZE]
+        second_leaf = swapped_index[2 * BTREE_PAGE_SIZE:3 * BTREE_PAGE_SIZE]
+        swapped_index[BTREE_PAGE_SIZE:2 * BTREE_PAGE_SIZE] = second_leaf
+        swapped_index[2 * BTREE_PAGE_SIZE:3 * BTREE_PAGE_SIZE] = first_leaf
+        btree_index.write_bytes(swapped_index)
+        swapped_result = run_verify(cluster, launch)
+        assert swapped_result.returncode == 1, swapped_result
+        assert "app/accounts.idx: block " in swapped_result.stderr, swapped_result
+        assert "B+ tree page checksum mismatch" in swapped_result.stderr, swapped_result
+        btree_index.write_bytes(original_index)
 
         original_external = external_heap.read_bytes()
         flip_byte(external_heap, PAGE_SIZE + 200)
@@ -248,7 +333,7 @@ def main():
         final = run_verify(cluster, launch)
         assert final.returncode == 0, final
 
-    print("[CHECKSUM VERIFY] offline heap scan and corruption diagnostics OK")
+    print("[CHECKSUM VERIFY] offline heap/index scan and corruption diagnostics OK")
 
 
 if __name__ == "__main__":

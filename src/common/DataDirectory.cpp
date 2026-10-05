@@ -1,5 +1,6 @@
 #include "DataDirectory.h"
 
+#include "access/BPTreeFormat.h"
 #include "access/IndexFileUtil.h"
 #include "common/Config.h"
 #include "storage/DataFileHeader.h"
@@ -477,6 +478,25 @@ bool hasHeapFileSuffix(const std::filesystem::path& path) {
                          std::strlen(initSuffix), initSuffix) == 0);
 }
 
+bool hasBTreeIndexSuffix(const std::filesystem::path& path) {
+    const std::string name = path.filename().string();
+    constexpr const char* indexSuffix = ".idx";
+    constexpr const char* encryptedSuffix = ".tde";
+    if (name.size() >= std::strlen(encryptedSuffix) &&
+        name.compare(name.size() - std::strlen(encryptedSuffix),
+                     std::strlen(encryptedSuffix), encryptedSuffix) == 0) {
+        return false;
+    }
+    if (name.size() >= std::strlen(indexSuffix) &&
+        name.compare(name.size() - std::strlen(indexSuffix),
+                     std::strlen(indexSuffix), indexSuffix) == 0) {
+        return true;
+    }
+    const size_t composite = name.rfind(".idx_");
+    return composite != std::string::npos &&
+           composite + std::strlen(".idx_") < name.size();
+}
+
 std::string displayVerificationPath(const std::filesystem::path& root,
                                     const std::filesystem::path& path) {
     const auto relative = path.lexically_relative(root);
@@ -554,6 +574,14 @@ struct HeapVerificationStats {
     uint64_t blocks = 0;
     uint64_t identityBoundBlocks = 0;
     uint64_t legacyIdentityUnboundBlocks = 0;
+};
+
+struct IndexVerificationStats {
+    uint64_t files = 0;
+    uint64_t pages = 0;
+    uint64_t pageBoundPages = 0;
+    uint64_t contentOnlyPages = 0;
+    uint64_t uncheckedPages = 0;
 };
 
 bool loadVerificationKey(const std::filesystem::path& root,
@@ -752,6 +780,201 @@ bool collectHeapFiles(const std::filesystem::path& scanRoot,
     return true;
 }
 
+bool collectBTreeFiles(const std::filesystem::path& scanRoot,
+                       std::set<std::filesystem::path>& files,
+                       std::string& error) {
+    std::error_code ec;
+    std::filesystem::recursive_directory_iterator iterator(scanRoot, ec);
+    if (ec) {
+        error = "could not enumerate checksum root " + scanRoot.string() +
+            ": " + ec.message();
+        return false;
+    }
+    const std::filesystem::recursive_directory_iterator end;
+    for (; iterator != end; iterator.increment(ec)) {
+        if (ec) {
+            error = "could not enumerate checksum root " + scanRoot.string() +
+                ": " + ec.message();
+            return false;
+        }
+        const auto path = iterator->path();
+        if (!hasBTreeIndexSuffix(path)) continue;
+        const auto status = iterator->symlink_status(ec);
+        if (ec || status.type() != std::filesystem::file_type::regular) {
+            error = "B+ tree index is not a regular file: " + path.string();
+            return false;
+        }
+        files.insert(std::filesystem::weakly_canonical(path, ec));
+        if (ec) {
+            error = "could not resolve B+ tree index: " + path.string();
+            return false;
+        }
+    }
+    if (ec) {
+        error = "could not enumerate checksum root " + scanRoot.string() +
+            ": " + ec.message();
+        return false;
+    }
+    return true;
+}
+
+bool verifyBTreeIndex(const std::filesystem::path& root,
+                      const std::filesystem::path& path,
+                      IndexVerificationStats& stats,
+                      std::string& error) {
+    using namespace bptree_format;
+    const std::string shown = displayVerificationPath(root, path);
+    ReadOnlyDescriptor data(path);
+    if (data.get() < 0) {
+        error = shown + ": could not open index read-only: " +
+            std::strerror(errno);
+        return false;
+    }
+    struct stat dataStatus {};
+    if (::fstat(data.get(), &dataStatus) != 0 ||
+        !S_ISREG(dataStatus.st_mode) || dataStatus.st_size < 0) {
+        error = shown + ": could not determine regular index size";
+        return false;
+    }
+    const uint64_t bytes = static_cast<uint64_t>(dataStatus.st_size);
+    if (bytes < kPageSize || bytes % kPageSize != 0) {
+        error = shown + ": truncated or misaligned B+ tree index file";
+        return false;
+    }
+    const uint64_t pageCount = bytes / kPageSize;
+    if (pageCount > UINT32_MAX) {
+        error = shown + ": B+ tree index has too many pages";
+        return false;
+    }
+
+    std::array<char, kPageSize> page{};
+    if (!readExactlyAt(data.get(), page.data(), page.size(), 0)) {
+        error = shown + ": block 0: short read";
+        return false;
+    }
+    FileHeader header{};
+    std::memcpy(&header, page.data(), sizeof(header));
+    if (header.order < 2 || header.order > kMaxNodeOrder ||
+        header.nextFreePage < 1 || header.nextFreePage > pageCount ||
+        (header.rootPage != 0 &&
+         (header.rootPage >= header.nextFreePage ||
+          header.rootPage >= pageCount))) {
+        error = shown + ": block 0: invalid B+ tree header";
+        return false;
+    }
+    bool bindPageId = false;
+    if (header.reserved == kPageBoundChecksumFormat) {
+        bindPageId = true;
+    } else if (header.reserved != kContentChecksumFormat &&
+               header.reserved != 0) {
+        error = shown + ": block 0: unknown B+ tree format marker";
+        return false;
+    }
+    if (header.reserved == 0) {
+        uint32_t legacyTrailer = 0;
+        std::memcpy(&legacyTrailer, page.data() + kChecksumOffset,
+                    sizeof(legacyTrailer));
+        if (legacyTrailer != 0) {
+            error = shown + ": block 0: unexpected legacy checksum trailer";
+            return false;
+        }
+    } else if (!verifyPageChecksum(page.data(), 0, bindPageId)) {
+        error = shown + ": block 0: B+ tree header checksum mismatch";
+        return false;
+    }
+
+    const auto tdePath = std::filesystem::path(path.string() + ".tde");
+    ReadOnlyDescriptor tde(tdePath);
+    const bool hasTde = tde.get() >= 0;
+    uint64_t tdeBytes = 0;
+    if (hasTde) {
+        struct stat tdeStatus {};
+        if (::fstat(tde.get(), &tdeStatus) != 0 ||
+            !S_ISREG(tdeStatus.st_mode) || tdeStatus.st_size < 0) {
+            error = shown + ": invalid TDE sidecar";
+            return false;
+        }
+        tdeBytes = static_cast<uint64_t>(tdeStatus.st_size);
+        const uint64_t maximumTdeBytes = pageCount * PageCrypto::kRecordSize;
+        if (tdeBytes % PageCrypto::kRecordSize != 0 ||
+            tdeBytes > maximumTdeBytes) {
+            error = shown + ": truncated or oversized TDE sidecar";
+            return false;
+        }
+        if (tdeBytes >= PageCrypto::kRecordSize) {
+            uint8_t headerRecord[PageCrypto::kRecordSize];
+            if (!readExactlyAt(tde.get(), headerRecord,
+                               sizeof(headerRecord), 0) ||
+                !PageCrypto::isPlaintextRecord(headerRecord)) {
+                error = shown + ": block 0: invalid TDE header-page envelope";
+                return false;
+            }
+        }
+    } else if (errno != ENOENT) {
+        error = shown + ": could not open TDE sidecar read-only: " +
+            std::strerror(errno);
+        return false;
+    }
+
+    for (uint32_t block = 1; block < pageCount; ++block) {
+        if (!readExactlyAt(data.get(), page.data(), page.size(),
+                           static_cast<off_t>(block) * kPageSize)) {
+            error = shown + ": block " + std::to_string(block) +
+                ": short read";
+            return false;
+        }
+        if (hasTde) {
+            uint8_t record[PageCrypto::kRecordSize];
+            PageCrypto::clearRecord(record);
+            const off_t recordOffset =
+                static_cast<off_t>(block) * PageCrypto::kRecordSize;
+            if (static_cast<uint64_t>(recordOffset) < tdeBytes &&
+                !readExactlyAt(tde.get(), record, sizeof(record), recordOffset)) {
+                error = shown + ": block " + std::to_string(block) +
+                    ": truncated TDE envelope";
+                return false;
+            }
+            if (!PageCrypto::isPlaintextRecord(record)) {
+                if (!PageCrypto::enabled()) {
+                    error = shown + ": block " + std::to_string(block) +
+                        ": encrypted page has no configured read-only key";
+                    return false;
+                }
+                if (!PageCrypto::openPage(block, page.data(), page.size(),
+                                          record)) {
+                    error = shown + ": block " + std::to_string(block) +
+                        ": TDE envelope authentication failed";
+                    return false;
+                }
+            }
+        }
+
+        if (header.reserved == 0) {
+            ++stats.uncheckedPages;
+        } else if (!verifyPageChecksum(page.data(), block, bindPageId)) {
+            error = shown + ": block " + std::to_string(block) +
+                ": B+ tree page checksum mismatch";
+            return false;
+        } else if (bindPageId) {
+            ++stats.pageBoundPages;
+        } else {
+            ++stats.contentOnlyPages;
+        }
+    }
+
+    ++stats.files;
+    ++stats.pages;  // Header page.
+    if (header.reserved == 0) {
+        ++stats.uncheckedPages;
+    } else if (bindPageId) {
+        ++stats.pageBoundPages;
+    } else {
+        ++stats.contentOnlyPages;
+    }
+    stats.pages += pageCount - 1;
+    return true;
+}
+
 bool verifyHeapFile(const std::filesystem::path& root,
                     const std::filesystem::path& path,
                     HeapVerificationStats& stats,
@@ -909,20 +1132,35 @@ bool verifyHeapDataChecksums(const std::filesystem::path& root,
     if (!readTablespaceRoots(root, scanRoots, error)) return false;
 
     std::set<std::filesystem::path> heapFiles;
+    std::set<std::filesystem::path> btreeFiles;
     for (const auto& scanRoot : scanRoots) {
         if (!collectHeapFiles(scanRoot, heapFiles, error)) return false;
+        if (!collectBTreeFiles(scanRoot, btreeFiles, error)) return false;
     }
 
     HeapVerificationStats stats;
     for (const auto& path : heapFiles) {
         if (!verifyHeapFile(root, path, stats, error)) return false;
     }
-    output = "heap checksum verification passed\nfiles=" +
+    IndexVerificationStats indexStats;
+    for (const auto& path : btreeFiles) {
+        if (!verifyBTreeIndex(root, path, indexStats, error)) return false;
+    }
+    output = "heap checksum verification passed\n"
+        "B+ tree index scan completed (legacy unchecked pages are reported)\nfiles=" +
         std::to_string(stats.files) + "\nblocks=" +
         std::to_string(stats.blocks) + "\nidentity-bound-blocks=" +
         std::to_string(stats.identityBoundBlocks) +
         "\nlegacy-identity-unbound-blocks=" +
-        std::to_string(stats.legacyIdentityUnboundBlocks);
+        std::to_string(stats.legacyIdentityUnboundBlocks) +
+        "\nindex-files=" + std::to_string(indexStats.files) +
+        "\nindex-pages=" + std::to_string(indexStats.pages) +
+        "\npage-bound-index-pages=" +
+        std::to_string(indexStats.pageBoundPages) +
+        "\ncontent-only-index-pages=" +
+        std::to_string(indexStats.contentOnlyPages) +
+        "\nunchecked-index-pages=" +
+        std::to_string(indexStats.uncheckedPages);
     return true;
 }
 

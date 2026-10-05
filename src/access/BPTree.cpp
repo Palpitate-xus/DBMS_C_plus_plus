@@ -13,60 +13,28 @@ namespace dbms {
 static_assert(BP_KEY_LEN >= 4, "BP_KEY_LEN too small");
 
 namespace {
-constexpr size_t kMaxLeafKeys =
-    (BP_PAGE_SIZE - 3 - 2 * sizeof(uint32_t)) /
-    (BP_KEY_LEN + sizeof(int64_t));
-constexpr size_t kMaxInternalKeys =
-    (BP_PAGE_SIZE - 3 - 2 * sizeof(uint32_t)) /
-    (BP_KEY_LEN + sizeof(uint32_t));
+constexpr size_t kMaxLeafKeys = bptree_format::kMaxLeafKeys;
+constexpr size_t kMaxInternalKeys = bptree_format::kMaxInternalKeys;
 constexpr size_t kMaxNodeOrder =
     kMaxLeafKeys < kMaxInternalKeys ? kMaxLeafKeys : kMaxInternalKeys;
-constexpr uint16_t kLegacyChecksummedIndexFormat = 0xC551;
-constexpr uint16_t kChecksummedIndexFormat = 0xC552;
-constexpr size_t kPageChecksumOffset = BP_PAGE_SIZE - sizeof(uint32_t);
+constexpr uint16_t kLegacyChecksummedIndexFormat =
+    bptree_format::kContentChecksumFormat;
+constexpr uint16_t kChecksummedIndexFormat =
+    bptree_format::kPageBoundChecksumFormat;
+constexpr size_t kPageChecksumOffset = bptree_format::kChecksumOffset;
+static_assert(BP_PAGE_SIZE == bptree_format::kPageSize);
 static_assert(kMaxNodeOrder >= 2 && kMaxNodeOrder <= UINT16_MAX,
               "invalid B+ tree page layout");
 static_assert(3 + kMaxLeafKeys * (BP_KEY_LEN + sizeof(int64_t)) +
                       sizeof(uint32_t) <= kPageChecksumOffset,
               "B+ tree leaf payload overlaps the page checksum");
 
-uint32_t indexPageCrc32c(const char* page, bool bindPageId, uint32_t pageId) {
-    uint32_t crc = 0xFFFFFFFFu;
-    const auto update = [&crc](uint8_t byte) {
-        crc ^= byte;
-        for (unsigned bit = 0; bit < 8; ++bit) {
-            crc = (crc >> 1) ^ ((crc & 1u) ? 0x82F63B78u : 0u);
-        }
-    };
-    for (size_t i = 0; i < BP_PAGE_SIZE; ++i) {
-        const uint8_t byte = i >= kPageChecksumOffset
-            ? 0 : static_cast<uint8_t>(page[i]);
-        update(byte);
-    }
-    if (bindPageId) {
-        // Encode the page number in a fixed byte order so the checksum input
-        // does not depend on host endianness.
-        for (unsigned shift = 0; shift < 32; shift += 8) {
-            update(static_cast<uint8_t>((pageId >> shift) & 0xFFu));
-        }
-    }
-    crc ^= 0xFFFFFFFFu;
-    // Zero means "legacy page without a checksum" in this format.
-    return crc == 0 ? 0xFFFFFFFFu : crc;
-}
-
 void writeIndexPageChecksum(char* page, uint32_t pageId) {
-    uint32_t zero = 0;
-    std::memcpy(page + kPageChecksumOffset, &zero, sizeof(zero));
-    const uint32_t checksum = indexPageCrc32c(page, true, pageId);
-    std::memcpy(page + kPageChecksumOffset, &checksum, sizeof(checksum));
+    bptree_format::writePageChecksum(page, pageId);
 }
 
 bool verifyIndexPageChecksum(const char* page, uint32_t pageId, bool bindPageId) {
-    uint32_t stored = 0;
-    std::memcpy(&stored, page + kPageChecksumOffset, sizeof(stored));
-    return stored != 0 &&
-           stored == indexPageCrc32c(page, bindPageId, pageId);
+    return bptree_format::verifyPageChecksum(page, pageId, bindPageId);
 }
 }  // namespace
 

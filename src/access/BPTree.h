@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "BufferPool.h"
+#include "BPTreeFormat.h"
 
 namespace dbms {
 
@@ -126,12 +127,8 @@ private:
     // open/close transition.
     mutable std::shared_mutex treeMutex_;
 
-    struct FileHeader {
-        uint32_t rootPage = 0;      // page number of root node
-        uint32_t nextFreePage = 1;  // next unallocated page
-        uint16_t order = 100;       // max keys per node
-        uint16_t reserved = 0;
-    } header_;
+    using FileHeader = bptree_format::FileHeader;
+    FileHeader header_;
 
     struct Node {
         uint8_t isLeaf = 0;
