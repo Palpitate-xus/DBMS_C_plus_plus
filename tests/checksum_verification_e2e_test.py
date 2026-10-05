@@ -154,6 +154,24 @@ def write_brin_index(path, version=2):
     path.write_bytes(contents)
 
 
+GIST_INDEX_MAGIC = b"\x00DBMSS\x00" + b"2"
+
+
+def write_gist_index(path, version=2):
+    if version == 1:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('1 "7" "7"\n', encoding="utf-8")
+        return
+    assert version == 2
+    header = GIST_INDEX_MAGIC + struct.pack("<IQ", 2, 1)
+    low = b"7"
+    high = b"7"
+    entry = struct.pack("<QQQ", 1, len(low), len(high)) + low + high
+    payload = header + entry
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(payload + crc32c(payload).to_bytes(4, "little"))
+
+
 def heap_page(page_id, layout_version=5):
     page = bytearray(PAGE_SIZE)
     page_id_bound = layout_version == 5
@@ -281,6 +299,8 @@ def main():
         write_gin_index(gin_index)
         brin_index = database / "accounts_amount.brin"
         write_brin_index(brin_index)
+        gist_index = database / "accounts_amount.gist"
+        write_gist_index(gist_index)
         legacy_heap = database / "legacy.dt"
         write_heap(legacy_heap, 2, layout_version=4)
         key = bytes.fromhex("11" * 32)
@@ -307,6 +327,8 @@ def main():
         write_gin_index(external_legacy_gin, 1)
         external_legacy_brin = external / "app" / "ledger_amount.brin"
         write_brin_index(external_legacy_brin, 1)
+        external_legacy_gist = external / "app" / "ledger_amount.gist"
+        write_gist_index(external_legacy_gist, 1)
 
         before_cluster = snapshot_tree(cluster)
         before_external = snapshot_tree(external)
@@ -317,6 +339,7 @@ def main():
         assert "hash index scan completed" in clean.stdout, clean
         assert "Bloom index scan completed" in clean.stdout, clean
         assert "GIN index scan completed" in clean.stdout, clean
+        assert "GiST index scan completed" in clean.stdout, clean
         assert "BRIN index scan completed" in clean.stdout, clean
         assert "files=5" in clean.stdout and "blocks=9" in clean.stdout, clean
         assert "identity-bound-blocks=3" in clean.stdout, clean
@@ -338,6 +361,9 @@ def main():
         assert "brin-index-files=2" in clean.stdout, clean
         assert "checksummed-brin-index-files=1" in clean.stdout, clean
         assert "unchecked-legacy-brin-index-files=1" in clean.stdout, clean
+        assert "gist-index-files=2" in clean.stdout, clean
+        assert "checksummed-gist-index-files=1" in clean.stdout, clean
+        assert "unchecked-legacy-gist-index-files=1" in clean.stdout, clean
         assert snapshot_tree(cluster) == before_cluster
         assert snapshot_tree(external) == before_external
         assert list(launch.iterdir()) == []
@@ -401,6 +427,24 @@ def main():
         assert "app/accounts_amount.brin" in corrupt_brin.stderr, corrupt_brin
         assert "BRIN index checksum mismatch" in corrupt_brin.stderr, corrupt_brin
         brin_index.write_bytes(original_brin)
+
+        original_gist = gist_index.read_bytes()
+        flip_byte(gist_index, 0)
+        damaged_gist_signature = run_verify(cluster, launch)
+        assert damaged_gist_signature.returncode == 1, damaged_gist_signature
+        assert "app/accounts_amount.gist" in damaged_gist_signature.stderr, \
+            damaged_gist_signature
+        assert "invalid or truncated GiST index signature" in \
+            damaged_gist_signature.stderr, damaged_gist_signature
+        gist_index.write_bytes(original_gist)
+
+        flip_byte(gist_index, len(original_gist) - 5)
+        corrupt_gist = run_verify(cluster, launch)
+        assert corrupt_gist.returncode == 1, corrupt_gist
+        assert "app/accounts_amount.gist" in corrupt_gist.stderr, corrupt_gist
+        assert "GiST index checksum mismatch" in corrupt_gist.stderr, \
+            corrupt_gist
+        gist_index.write_bytes(original_gist)
 
         original_external = external_heap.read_bytes()
         flip_byte(external_heap, PAGE_SIZE + 200)

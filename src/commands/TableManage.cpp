@@ -28,6 +28,7 @@
 #include "process/RuntimeStats.h"
 #include "process/SqlStats.h"
 #include "access/BrinIndexFormat.h"
+#include "access/GiSTIndexFormat.h"
 #include "access/GinIndexFormat.h"
 #include "access/IndexChecksum.h"
 #include "access/IndexFileUtil.h"
@@ -42,6 +43,7 @@
 #include "HashIndex.h"
 #include "BloomIndex.h"
 #include "SPGiSTIndex.h"
+#include <array>
 #include <charconv>
 #include <cmath>
 #include <cctype>
@@ -12924,7 +12926,8 @@ DBStatus StorageEngine::createGiSTIndex(const std::string& dbname,
     if (colIdx >= tbl.len) return DBStatus::INVALID_VALUE;
 
     auto path = giSTIndexPath(dbname, tablename, colname);
-    std::ostringstream out;
+    std::string entryPayload;
+    uint64_t entryCount = 0;
 
     if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                        const char* data, size_t len) {
@@ -12937,11 +12940,15 @@ DBStatus StorageEngine::createGiSTIndex(const std::string& dbname,
         // For multi-value (array), min=min element, max=max element.
         // For text, we store the value itself (prefix containment).
         if (!val.empty()) {
-            out << rid << ' ' << std::quoted(val) << ' '
-                << std::quoted(val) << '\n';
+            gist_index_format::appendEntryPayload(
+                entryPayload, static_cast<uint64_t>(rid), val, val);
+            ++entryCount;
         }
     })) return DBStatus::IO_ERROR;
-    if (!index_file::writeAtomically(path, out.str())) return DBStatus::IO_ERROR;
+    if (!index_file::writeAtomically(
+            path, gist_index_format::encodeV2(entryCount, entryPayload))) {
+        return DBStatus::IO_ERROR;
+    }
     return DBStatus::OK;
 }
 
@@ -13072,6 +13079,163 @@ static bool gistEntryRangeIsValid(GistKeyOrdering ordering,
            comparison <= 0;
 }
 
+template <typename Visitor>
+static bool forEachGiSTEntry(
+    const std::filesystem::path& path, GistKeyOrdering ordering,
+    Visitor&& visit) {
+    using namespace gist_index_format;
+    std::ifstream input(path, std::ios::binary);
+    if (!input) return false;
+
+    auto readExactly = [&](char* destination, size_t bytes) {
+        if (bytes > static_cast<size_t>(
+                        std::numeric_limits<std::streamsize>::max())) {
+            return false;
+        }
+        input.read(destination, static_cast<std::streamsize>(bytes));
+        return static_cast<size_t>(input.gcount()) == bytes;
+    };
+
+    std::array<char, kMagic.size()> probe{};
+    input.read(probe.data(), static_cast<std::streamsize>(probe.size()));
+    const size_t probed = static_cast<size_t>(input.gcount());
+    const bool checksummed = probed == probe.size() &&
+        std::equal(probe.begin(), probe.end(), kMagic.begin());
+
+    std::unordered_set<int64_t> seenRids;
+    if (checksummed) {
+        std::array<char, sizeof(uint32_t) + sizeof(uint64_t)> header{};
+        if (!readExactly(header.data(), header.size())) return false;
+        size_t headerOffset = 0;
+        uint32_t version = 0;
+        uint64_t entryCount = 0;
+        if (!readU32(std::string_view(header.data(), header.size()),
+                     headerOffset, version) ||
+            version != kVersion ||
+            !readU64(std::string_view(header.data(), header.size()),
+                     headerOffset, entryCount)) {
+            return false;
+        }
+
+        input.clear();
+        input.seekg(0, std::ios::end);
+        const std::streampos end = input.tellg();
+        if (end < 0) return false;
+        const auto signedBytes = static_cast<std::streamoff>(end);
+        if (signedBytes < 0) return false;
+        const uint64_t fileBytes = static_cast<uint64_t>(signedBytes);
+        if (fileBytes < kHeaderBytes + kChecksumBytes) return false;
+        const uint64_t payloadBytes = fileBytes - kChecksumBytes;
+        if (entryCount > (payloadBytes - kHeaderBytes) /
+                             kMinimumEntryBytes) {
+            return false;
+        }
+
+        std::array<char, kChecksumBytes> checksumBytes{};
+        input.seekg(static_cast<std::streamoff>(payloadBytes), std::ios::beg);
+        if (!input || !readExactly(checksumBytes.data(),
+                                   checksumBytes.size())) {
+            return false;
+        }
+        size_t checksumOffset = 0;
+        uint32_t storedChecksum = 0;
+        if (!readU32(std::string_view(checksumBytes.data(),
+                                      checksumBytes.size()),
+                     checksumOffset, storedChecksum)) {
+            return false;
+        }
+
+        input.clear();
+        input.seekg(0, std::ios::beg);
+        if (!input) return false;
+        uint64_t remainingForChecksum = payloadBytes;
+        uint32_t checksumState = 0xFFFFFFFFu;
+        std::array<char, 64 * 1024> chunk{};
+        while (remainingForChecksum > 0) {
+            const size_t amount = static_cast<size_t>(
+                std::min<uint64_t>(remainingForChecksum, chunk.size()));
+            if (!readExactly(chunk.data(), amount)) return false;
+            checksumState = index_checksum::crc32cUpdate(
+                checksumState, chunk.data(), amount);
+            remainingForChecksum -= amount;
+        }
+        if (index_checksum::crc32cFinish(checksumState) != storedChecksum)
+            return false;
+
+        input.clear();
+        input.seekg(static_cast<std::streamoff>(kHeaderBytes), std::ios::beg);
+        if (!input) return false;
+        uint64_t remaining = payloadBytes - kHeaderBytes;
+        for (uint64_t i = 0; i < entryCount; ++i) {
+            if (remaining < kMinimumEntryBytes) return false;
+            std::array<char, kMinimumEntryBytes> fixed{};
+            if (!readExactly(fixed.data(), fixed.size())) return false;
+            size_t fixedOffset = 0;
+            uint64_t rid = 0;
+            uint64_t lowLength = 0;
+            uint64_t highLength = 0;
+            const std::string_view fixedView(fixed.data(), fixed.size());
+            if (!readU64(fixedView, fixedOffset, rid) ||
+                !readU64(fixedView, fixedOffset, lowLength) ||
+                !readU64(fixedView, fixedOffset, highLength) ||
+                rid == 0 || rid > static_cast<uint64_t>(INT64_MAX) ||
+                lowLength > std::numeric_limits<size_t>::max() ||
+                highLength > std::numeric_limits<size_t>::max()) {
+                return false;
+            }
+            remaining -= kMinimumEntryBytes;
+            if (lowLength > remaining ||
+                highLength > remaining - lowLength) {
+                return false;
+            }
+            std::string entryLow;
+            std::string entryHigh;
+            try {
+                entryLow.resize(static_cast<size_t>(lowLength));
+                entryHigh.resize(static_cast<size_t>(highLength));
+            } catch (...) {
+                return false;
+            }
+            if ((!entryLow.empty() &&
+                 !readExactly(entryLow.data(), entryLow.size())) ||
+                (!entryHigh.empty() &&
+                 !readExactly(entryHigh.data(), entryHigh.size()))) {
+                return false;
+            }
+            remaining -= lowLength + highLength;
+            const int64_t signedRid = static_cast<int64_t>(rid);
+            if (!seenRids.insert(signedRid).second ||
+                !gistEntryRangeIsValid(ordering, entryLow, entryHigh)) {
+                return false;
+            }
+            visit(signedRid, entryLow, entryHigh);
+        }
+        return remaining == 0;
+    }
+
+    input.clear();
+    input.seekg(0, std::ios::beg);
+    if (!input) return false;
+    std::string line;
+    while (std::getline(input, line)) {
+        std::stringstream parser(line);
+        int64_t rid = -1;
+        std::string entryLow;
+        std::string entryHigh;
+        if (!(parser >> rid >> std::quoted(entryLow) >>
+              std::quoted(entryHigh))) {
+            return false;
+        }
+        parser >> std::ws;
+        if (!parser.eof() || rid <= 0 || !seenRids.insert(rid).second ||
+            !gistEntryRangeIsValid(ordering, entryLow, entryHigh)) {
+            return false;
+        }
+        visit(rid, entryLow, entryHigh);
+    }
+    return input.eof() && !input.bad();
+}
+
 static bool gistEntryOverlaps(GistKeyOrdering ordering,
                               const std::string& low,
                               const std::string& high,
@@ -13160,34 +13324,18 @@ std::vector<int64_t> StorageEngine::giSTSearchOverlap(const std::string& dbname,
     }
     if (pathError) return scanHeap();
     if (!isIndexFile) return result;
-    std::ifstream in(path);
-    if (!in) return scanHeap();
-    bool valid = true;
-    std::unordered_set<int64_t> seenRids;
-    std::string line;
-    while (std::getline(in, line)) {
-        std::stringstream ss(line);
-        int64_t rid = -1;
-        std::string entryLow, entryHigh;
-        if (!(ss >> rid >> std::quoted(entryLow) >>
-              std::quoted(entryHigh))) {
-            valid = false;
-            break;
-        }
-        ss >> std::ws;
-        if (!ss.eof() || rid <= 0 || !seenRids.insert(rid).second ||
-            !gistEntryRangeIsValid(
-                ordering, entryLow, entryHigh)) {
-            valid = false;
-            break;
-        }
-        // Overlap: entry range [entryLow, entryHigh] intersects [low, high]
-        if (gistEntryOverlaps(
-                ordering, low, high, entryLow, entryHigh)) {
-            result.push_back(rid);
-        }
-    }
-    if (!valid || in.bad()) return scanHeap();
+    const bool valid = forEachGiSTEntry(
+        path, ordering,
+        [&](int64_t rid, const std::string& entryLow,
+            const std::string& entryHigh) {
+            // Overlap: entry range [entryLow, entryHigh] intersects
+            // [low, high].
+            if (gistEntryOverlaps(
+                    ordering, low, high, entryLow, entryHigh)) {
+                result.push_back(rid);
+            }
+        });
+    if (!valid) return scanHeap();
     return result;
 }
 
@@ -13245,34 +13393,17 @@ std::vector<int64_t> StorageEngine::giSTSearchContainedBy(const std::string& dbn
     }
     if (pathError) return scanHeap();
     if (!isIndexFile) return result;
-    std::ifstream in(path);
-    if (!in) return scanHeap();
-    bool valid = true;
-    std::unordered_set<int64_t> seenRids;
-    std::string line;
-    while (std::getline(in, line)) {
-        std::stringstream ss(line);
-        int64_t rid = -1;
-        std::string entryLow, entryHigh;
-        if (!(ss >> rid >> std::quoted(entryLow) >>
-              std::quoted(entryHigh))) {
-            valid = false;
-            break;
-        }
-        ss >> std::ws;
-        if (!ss.eof() || rid <= 0 || !seenRids.insert(rid).second ||
-            !gistEntryRangeIsValid(
-                ordering, entryLow, entryHigh)) {
-            valid = false;
-            break;
-        }
-        // Contained by: entry range is fully within [low, high]
-        if (gistEntryContained(
-                ordering, low, high, entryLow, entryHigh)) {
-            result.push_back(rid);
-        }
-    }
-    if (!valid || in.bad()) return scanHeap();
+    const bool valid = forEachGiSTEntry(
+        path, ordering,
+        [&](int64_t rid, const std::string& entryLow,
+            const std::string& entryHigh) {
+            // Contained by: entry range is fully within [low, high].
+            if (gistEntryContained(
+                    ordering, low, high, entryLow, entryHigh)) {
+                result.push_back(rid);
+            }
+        });
+    if (!valid) return scanHeap();
     return result;
 }
 

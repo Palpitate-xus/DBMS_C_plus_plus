@@ -1,16 +1,21 @@
 #include "Config.h"
 #include "TableManage.h"
 #include "access/BPTree.h"
+#include "access/GiSTIndexFormat.h"
 #include "catalog/type_registry.h"
 
 #include <cassert>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <initializer_list>
 #include <iostream>
+#include <iterator>
 #include <map>
 #include <set>
 #include <string>
+#include <utility>
+#include <vector>
 #include <vector>
 
 dbms::Config g_config;
@@ -150,6 +155,70 @@ void testCorruptSidecarFallback(StorageEngine& engine) {
     std::cout << "[GIST RANGE] corrupt sidecar heap fallback OK\n";
 }
 
+void testV2ChecksumFallback(StorageEngine& engine) {
+    const fs::path path =
+        fs::path(kDatabase) / "values_table_number_value.gist";
+    std::ifstream input(path, std::ios::binary);
+    assert(input.good());
+    std::string bytes((std::istreambuf_iterator<char>(input)),
+                      std::istreambuf_iterator<char>());
+    assert(gist_index_format::hasMagic(bytes));
+    std::vector<gist_index_format::Entry> entries;
+    assert(gist_index_format::decodeV2(bytes, entries));
+    assert(entries.size() == 5);
+
+    // Row 2's two bounds are both changed from 2 to 3, leaving a structurally
+    // valid range. The CRC must be what rejects this otherwise plausible
+    // false-negative source.
+    size_t secondEntryLow = gist_index_format::kHeaderBytes;
+    bool foundSecondRow = false;
+    for (const auto& entry : entries) {
+        if (entry.rid == static_cast<uint64_t>(ridFor(engine, "2"))) {
+            assert(entry.low == "2" && entry.high == "2");
+            foundSecondRow = true;
+            break;
+        }
+        secondEntryLow += gist_index_format::kMinimumEntryBytes +
+                          entry.low.size() + entry.high.size();
+    }
+    assert(foundSecondRow);
+    secondEntryLow += gist_index_format::kMinimumEntryBytes;
+    assert(bytes.at(secondEntryLow) == '2');
+    assert(bytes.at(secondEntryLow + 1) == '2');
+    bytes[secondEntryLow] = '3';
+    bytes[secondEntryLow + 1] = '3';
+    std::vector<gist_index_format::Entry> damagedEntries;
+    assert(!gist_index_format::decodeV2(bytes, damagedEntries));
+    {
+        std::ofstream output(path, std::ios::binary | std::ios::trunc);
+        output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        assert(output.good());
+    }
+
+    assertRids(engine.giSTSearchOverlap(
+                   kDatabase, kTable, "number_value", "2", "2"),
+               {ridFor(engine, "2")});
+    std::cout << "[GIST RANGE] checksummed plausible-corruption fallback OK\n";
+}
+
+void testLegacyCompatibility(StorageEngine& engine) {
+    const fs::path path =
+        fs::path(kDatabase) / "values_table_number_value.gist";
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    for (const auto& row : std::vector<std::pair<std::string, std::string>>{
+             {"1", "-5"}, {"2", "2"}, {"3", "10"},
+             {"4", "100"}, {"5", "1000"}}) {
+        output << ridFor(engine, row.first) << ' ' << std::quoted(row.second)
+               << ' ' << std::quoted(row.second) << '\n';
+    }
+    output.close();
+    assert(output.good());
+    assertRids(engine.giSTSearchOverlap(
+                   kDatabase, kTable, "number_value", "2", "2"),
+               {ridFor(engine, "2")});
+    std::cout << "[GIST RANGE] legacy sidecar compatibility OK\n";
+}
+
 }  // namespace
 
 int main() {
@@ -159,6 +228,8 @@ int main() {
         StorageEngine engine;
         buildFixture(engine);
         testTypedRangeSearch(engine);
+        testV2ChecksumFallback(engine);
+        testLegacyCompatibility(engine);
         testCorruptSidecarFallback(engine);
     }
     cleanup();
