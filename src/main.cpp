@@ -23462,6 +23462,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
         size_t rightJoinPos = findTopLevelKeyword(sql, "right join", fromPos);
         size_t fullOuterJoinPos = findTopLevelKeyword(
             sql, "full outer join", fromPos);
+        size_t fullJoinPos = findTopLevelKeyword(sql, "full join", fromPos);
         size_t crossJoinPos = findTopLevelKeyword(sql, "cross join", fromPos);
         size_t innerJoinPos = findTopLevelKeyword(sql, "inner join", fromPos);
         size_t joinPos = findTopLevelKeyword(sql, "join", fromPos);
@@ -23480,11 +23481,14 @@ static bool executeInternal(const string& rawSql, Session& s) {
                    (orderPos == string::npos || rightJoinPos < orderPos)) {
             jt = JoinType::Right;
             actualJoinPos = rightJoinPos;
-        } else if (fullOuterJoinPos != string::npos &&
-                   (wherePos == string::npos || fullOuterJoinPos < wherePos) &&
-                   (orderPos == string::npos || fullOuterJoinPos < orderPos)) {
+        } else if ((fullOuterJoinPos != string::npos ||
+                    fullJoinPos != string::npos) &&
+                   (wherePos == string::npos ||
+                    min(fullOuterJoinPos, fullJoinPos) < wherePos) &&
+                   (orderPos == string::npos ||
+                    min(fullOuterJoinPos, fullJoinPos) < orderPos)) {
             jt = JoinType::FullOuter;
-            actualJoinPos = fullOuterJoinPos;
+            actualJoinPos = min(fullOuterJoinPos, fullJoinPos);
         } else if (crossJoinPos != string::npos &&
                    (wherePos == string::npos || crossJoinPos < wherePos) &&
                    (orderPos == string::npos || crossJoinPos < orderPos)) {
@@ -26037,13 +26041,13 @@ static bool executeInternal(const string& rawSql, Session& s) {
             // alias ending in "_on" is still an identifier, not the ON
             // clause that follows it.
             size_t onPos = findTopLevelKeyword(sql, "on", actualJoinPos);
-            size_t tableNameStart = actualJoinPos;
-            if (jt == JoinType::Left) tableNameStart += 9;
-            else if (jt == JoinType::Right) tableNameStart += 10;
-            else if (jt == JoinType::FullOuter) tableNameStart += 15;
-            else if (jt == JoinType::Cross) tableNameStart += 10;
-            else if (actualJoinPos + 10 <= sql.size() && sql.substr(actualJoinPos, 10) == "inner join") tableNameStart += 10;
-            else tableNameStart += 4;
+            const size_t joinKeywordPos = findTopLevelKeyword(
+                sql, "join", actualJoinPos);
+            if (joinKeywordPos == string::npos) {
+                cout << "SQL syntax error in FROM clause near JOIN" << endl;
+                return true;
+            }
+            const size_t tableNameStart = joinKeywordPos + 4;
 
             size_t clauseEnd = std::min({wherePos, groupPos, havingPos,
                 windowPos, orderPos, limitPos, offsetPos, sql.size()});

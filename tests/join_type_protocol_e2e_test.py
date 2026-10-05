@@ -183,6 +183,20 @@ def main():
             assert type_oids == [23, 23, 23], type_oids
             assert command_tag == "SELECT %d" % len(expected_rows), command_tag
 
+        full_join_spelling_sql = (
+            "SELECT a.id, c.id FROM join_outer_chain_a a "
+            "FULL JOIN join_outer_chain_c c ON a.id = c.id "
+            "ORDER BY a.id NULLS LAST;")
+        rows, state, message, headers, command_tag, type_oids = (
+            runner.decode_wire_result(
+                client.simple_query(server["sock"], full_join_spelling_sql),
+                include_types=True))
+        assert state is None, (full_join_spelling_sql, state, message)
+        assert rows == [["1", "1"], ["2", None], [None, "3"]], rows
+        assert headers == ["id", "id"], headers
+        assert type_oids == [23, 23], type_oids
+        assert command_tag == "SELECT 3", command_tag
+
         outer_chain_where_sql = (
             "SELECT a.id, b.id, c.id FROM join_outer_chain_a a "
             "LEFT JOIN join_outer_chain_b b ON a.id = b.id "
