@@ -4,6 +4,8 @@
 
 # 总差距清单执行计划
 
+2026-10-05 WAL-01：`WAL.h`定义了 HEAP/XACT/SMGR/CHECKPOINT/CATALOG/INDEX 子集。`wal_basic_test`验证 heap before/after、BTree index image、commit；`redo_crash_recovery_test`验证 uncommitted insert undo 与 committed insert/delete；`wal_full_page_write_test`验证 checkpoint 后 page image。Recovery image applier目前只重放 heap/index image；catalog WAL没有catalog row image，FSM/VM、TOAST、sequence、multixact、standby及其它索引资源未形成完整记录/replay。TOAST提交前落盘和specialized index事务边界重建只是局部机制。审计无生产代码改动，全量suite/PG18.6 differential未跑。WAL-01从unverified转partial，剩余资源日志与恢复仍未实现。详见`docs/issue-wal-01-resource-manager-coverage-audit.md`。
+
 2026-10-05 STO-06：审计确认现有自定义 TOAST 分块存储已有 zlib 压缩、bounded de-toast、chunk/index一致性校验、失败清理和旧快照安全回收；`toast_test`、`vacuum_toast_test`、`bytea_large_toast_test` 通过。本次没有证实新的数据损坏 bug，也没有生产代码改动。当前 heap marker + sidecar 格式不是 PG varlena/external pointer；列级 storage strategy、可配置 `toast_tuple_target`、PGLZ/LZ4 与 dedup 未实现，故 STO-06 从 unverified 分类为 partial，不能记作完成。未跑完整注册套件或 PG18.6 differential。详见 `docs/issue-sto-06-toast-format-audit.md`。
 
 2026-10-05 STO-05：简化 VACUUM 把 `LP_NORMAL`/line-pointer 数量相等误当为“所有活动快照均可见”。用旧 REPEATABLE READ 快照、提交 UPDATE、rollback INSERT 留下空 line pointer 复现：VACUUM 后旧快照仍需旧版本，但 VM 被错误设为 all-visible。代码改为在缺少 visibility-horizon/OldestXmin 检查时保守清位；旧实现回归失败，修复后 `parallel_vacuum_test` 和生产构建通过。当前没有 VM 查询/index-only consumer，故此为元数据契约修正，不声称当前查询结果变化。全注册套件未在此 revision 重跑，无 PG18.6 differential。FSM/VM crash rebuild、持久性、all-frozen、visibility horizon 与 index-only 集成仍缺，STO-05 partial。Source/test commit `9a29e99a`，见 `docs/issue-sto-05-vacuum-visibility-horizon.md`。
