@@ -15,7 +15,8 @@ Status: partial. The source/test fixes are local commits `4534b971`,
 `18fc748b` (bounded INNER/LEFT LATERAL `ON` conditions, 2026-10-05;
 QRY-02/QRY-03), and `40ef739a` (FROM-less bare outer references in scalar
 targets and WHERE, 2026-10-05; QRY-02/QRY-03), and `e63e4e1e`
-(bare outer references beside a simple local FROM, 2026-10-05; QRY-02/QRY-03).
+(bare outer references beside a simple local FROM, 2026-10-05; QRY-02/QRY-03),
+and `2080a994` (quoted outer relation-alias binding, 2026-10-05; QRY-02/QRY-03).
 
 ## Reproduced behavior
 
@@ -67,6 +68,9 @@ targets and WHERE, 2026-10-05; QRY-02/QRY-03), and `e63e4e1e`
   present in the local schema was also unresolved. A correlated `payload`
   reference in the target expression/WHERE failed with SQLSTATE `42703`,
   despite qualified references such as `l.id` being supported.
+- A quoted outer relation alias in a qualified LATERAL reference, such as
+  `"OuterAlias".id`, was skipped by the previous text replacer and failed
+  with SQLSTATE `42P01` even when the matching relation was in scope.
 
 ## Fixes
 
@@ -105,8 +109,10 @@ targets and WHERE, 2026-10-05; QRY-02/QRY-03), and `e63e4e1e`
   bare name absent locally may bind to a unique visible left input column.
   Unknown local scopes (CTE, derived subquery, or table function) are left
   untouched rather than guessed. The visible left input may be one base table
-  or a simple comma/CROSS chain of base tables. Other join trees, quoted outer
-  identifiers, and arbitrary nested correlations remain unsupported.
+  or a simple comma/CROSS chain of base tables. A simple quoted relation alias
+  followed by an unquoted column is token-aware and regression-tested. Quoted
+  column names and other join trees or arbitrary nested correlations remain
+  unsupported or unverified.
 - For one simple left base relation or a comma/CROSS chain of base relations,
   materialize `JOIN`/`INNER JOIN LATERAL` and `LEFT [OUTER] JOIN LATERAL` per
   combined left row, evaluate a supported boolean `ON` expression against
@@ -261,6 +267,15 @@ targets and WHERE, 2026-10-05; QRY-02/QRY-03), and `e63e4e1e`
   `bash scripts/build.sh`, `tests/derived_type_protocol_e2e_test.py`, and
   `tests/sql_literal_preservation_e2e_test.py` passed. Longer/complex correlated
   chains, the full suite, and PostgreSQL 18.6 differential remain unverified.
+- After `2080a994`, a simple quoted outer relation alias such as
+  `"OuterAlias".id` is recognized while binding a LATERAL reference. The
+  pre-fix query failed with `42P01`; the token-aware scanner now skips SQL
+  strings and comments while matching identifier paths. `bash scripts/build.sh`,
+  `tests/derived_type_protocol_e2e_test.py`, and
+  `tests/sql_literal_preservation_e2e_test.py` passed. The regression verifies
+  the quoted alias with an unquoted column and typed protocol output; quoted
+  column names, broader schema-qualified forms, full suite, and PostgreSQL
+  18.6 differential remain unverified.
 - `tests/compat/cases/multijoin_projection_filter.sql` was added, but the
   differential runner refused preflight because the configured reference
   server reports PostgreSQL 17.2 (`170002`) while the runner requires 18.6
@@ -280,8 +295,10 @@ longer or more complex correlated chains remain unsupported/unverified.
 Bare outer references in evaluator-supported scalar targets and WHERE are now
 also bound when that LATERAL SELECT has no own FROM or uses a local base-table
 scope with known columns. Other left join trees remain unsupported. Unknown
-CTE/derived/function FROM scopes, quoted outer identifiers, arbitrary
-correlated expressions/subqueries, complex lateral chains, table functions, and
-general parameterized or nested join semantics remain unsupported.
+CTE/derived/function FROM scopes, quoted column names, arbitrary correlated
+expressions/subqueries, complex lateral chains, table functions, and general
+parameterized or nested join semantics remain unsupported or unverified. A
+simple quoted outer relation alias followed by an unquoted column is covered
+by a regression test.
 OPT-02's DP/exhaustive join search, GEQO threshold, semi/anti constraints, and
 bushy plans remain unimplemented.
