@@ -2659,10 +2659,50 @@ static void validatePatternEscape(const ExprValue& escape) {
 // ----------------------------------------------------------------------------
 
 static ExprValue tsMatch(const std::string& vecText, const std::string& query);
+static bool parseArrayElements(const std::string&, std::vector<std::string>&);
+static std::string arrayElemUnquote(const std::string&);
+static std::string arrayElemQuote(const std::string&);
+static std::optional<std::vector<size_t>> arrayShapeOf(const std::string&);
+
+static std::string arrayExpressionType(const Expr* expression, const RowContext& row,
+                                       const std::string& database, const ExprEvaluator* evaluator = nullptr) {
+    if (const auto* literal=dynamic_cast<const LiteralExpr*>(expression);
+        literal && literal->typeName.empty() && !literal->preparedSubquery &&
+        (isQuotedString(literal->value) || toLower(literal->value)=="null")) return "unknown";
+    if(const auto* function=dynamic_cast<const FunctionCallExpr*>(expression);function && evaluator){
+        const auto type=evaluator->scalarFunctionResultType(function);
+        if(!type.empty())return ExprHelper::canonicalResultTypeName(type);
+    }
+    std::map<std::string,std::string> hints;
+    std::function<void(const Expr*)> collect = [&](const Expr* node) {
+        if (!node || node->preparedSubquery) return;
+        if (const auto* column = dynamic_cast<const ColumnRefExpr*>(node)) {
+            if (!column->binding) {
+                auto cell = row.get(column->toString());
+                if (!cell) cell = row.get(column->column);
+                if (cell) hints[column->toString()] = cell->typeName;
+            }
+        } else if (const auto* array = dynamic_cast<const ArrayExpr*>(node)) for (const auto& value : array->elements) collect(value.get());
+        else if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(node)) { collect(binary->left.get()); if(binary->op!="::")collect(binary->right.get()); }
+        else if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(node)) collect(unary->operand.get());
+        else if (const auto* cast = dynamic_cast<const CastExpr*>(node)) collect(cast->operand.get());
+        else if (const auto* call = dynamic_cast<const FunctionCallExpr*>(node)) for(const auto& value:call->args)collect(value.get());
+        else if (const auto* conditional = dynamic_cast<const CaseExpr*>(node)) {
+            for(const auto& arm:conditional->whenClauses){collect(arm.first.get());collect(arm.second.get());} collect(conditional->elseExpr.get());
+        }
+    };
+    collect(expression);
+    return ExprHelper::inferParsedResultType(expression,hints,database);
+}
 
 ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& ctx) const {
     if (!e || !e->left || !e->right) return ExprValue{};
     std::string op = toLower(e->op);
+    auto arrayConcat = e->arrayConcat;
+    if (op=="||" && !arrayConcat)
+        arrayConcat = ExprHelper::resolveArrayConcatTypes(
+            arrayExpressionType(e->left.get(),ctx,currentDB_,this),
+            arrayExpressionType(e->right.get(),ctx,currentDB_,this));
 
     // Logical short-circuit with SQL three-valued logic:
     //   NULL AND false = false,  NULL AND true  = NULL
@@ -2706,6 +2746,47 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
     }
 
     ExprValue r = eval(e->right.get(), ctx);
+
+    if (arrayConcat) {
+        const auto& binding = *arrayConcat;
+        l = evalCast(nullptr,ctx,l,binding.leftType);
+        r = evalCast(nullptr,ctx,r,binding.rightType);
+        if (binding.leftArray && binding.rightArray) {
+            if (l.isNull && r.isNull) return ExprValue(binding.elementType+"[]","",true);
+            if (l.isNull) return r;
+            if (r.isNull) return l;
+        }
+        std::vector<std::string> left, right;
+        if (binding.leftArray) {
+            if (!l.isNull && !parseArrayElements(l.value,left)) throw DbError("22P02","malformed array literal");
+        } else left.push_back(l.isNull ? "NULL" : arrayElemQuote(l.value));
+        if (binding.rightArray) {
+            if (!r.isNull && !parseArrayElements(r.value,right)) throw DbError("22P02","malformed array literal");
+        } else right.push_back(r.isNull ? "NULL" : arrayElemQuote(r.value));
+        if(binding.leftArray && binding.rightArray){
+            if(left.empty())return r;
+            if(right.empty())return l;
+            const auto a=arrayShapeOf(l.value),b=arrayShapeOf(r.value);
+            if(!a||!b)throw DbError("2202E","cannot concatenate incompatible arrays");
+            if(a->size()==b->size()){
+                if(!std::equal(a->begin()+1,a->end(),b->begin()+1))throw DbError("2202E","cannot concatenate incompatible arrays");
+                left.insert(left.end(),right.begin(),right.end());
+            }else if(a->size()+1==b->size()){
+                if(!std::equal(a->begin(),a->end(),b->begin()+1))throw DbError("2202E","cannot concatenate incompatible arrays");
+                left={l.value};left.insert(left.end(),right.begin(),right.end());
+            }else if(b->size()+1==a->size()){
+                if(!std::equal(b->begin(),b->end(),a->begin()+1))throw DbError("2202E","cannot concatenate incompatible arrays");
+                left.push_back(r.value);
+            }else throw DbError("2202E","cannot concatenate incompatible arrays");
+        }else{
+            const auto shape=arrayShapeOf(binding.leftArray?l.value:r.value);
+            if(shape && shape->size()>1)throw DbError("22000","argument must be empty or one-dimensional array");
+            left.insert(left.end(),right.begin(),right.end());
+        }
+        std::string result="{";
+        for(size_t i=0;i<left.size();++i){if(i)result+=',';result+=left[i];}
+        return ExprValue(binding.elementType+"[]",result+'}',false);
+    }
 
     if (op == "<<" || op == "<<=" || op == ">>" || op == ">>=" ||
         op == "&&") {
@@ -2866,22 +2947,6 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
             return ExprValue(
                 "bytea", ByteaValue::fromBytes(std::move(joined)).toString(),
                 false);
-        }
-        auto isArrayTxt = [](const std::string& v) {
-            std::string s = trimStr(v);
-            return s.size() >= 2 && s.front() == 0x7B && s.back() == 0x7D;
-        };
-        if (isArrayTxt(l.value) && isArrayTxt(r.value)) {
-            std::string a = trimStr(l.value), b = trimStr(r.value);
-            std::string inner = a.substr(1, a.size() - 2);
-            std::string add = b.substr(1, b.size() - 2);
-            std::string out = inner;
-            if (!add.empty()) out += (inner.empty() ? "" : ",") + add;
-            ExprValue result(
-                "text", std::string(1, 0x7B) + out + std::string(1, 0x7D),
-                false);
-            result.collation = std::move(resultCollation);
-            return result;
         }
         // The text concatenation operator casts bpchar operands to text.
         // That cast discards the blank padding, unlike concat(), which
@@ -4262,6 +4327,23 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
             result.collation = v.collation;
         return result;
     }
+    if (target.size()>=2 && target.compare(target.size()-2,2,"[]")==0) {
+        const auto elementType = ExprHelper::canonicalResultTypeName(target.substr(0,target.size()-2));
+        std::function<std::string(const std::string&)> convert = [&](const std::string& source) {
+            std::vector<std::string> elements;
+            if (!parseArrayElements(source,elements)) throw DbError("22P02","malformed array literal: " + source);
+            std::string output="{";
+            for(size_t i=0;i<elements.size();++i){
+                if(i)output+=',';
+                const auto& token=elements[i];
+                if(!token.empty() && token.front()=='{') output+=convert(token);
+                else if(toLower(token)=="null") output+="NULL";
+                else output+=arrayElemQuote(evalCast(nullptr,RowContext{},ExprValue("unknown",arrayElemUnquote(token),false),elementType).value);
+            }
+            return output+'}';
+        };
+        return ExprValue(elementType+"[]",convert(v.value),false);
+    }
 
     if (target == "boolean" || target == "bool") return castToBoolean(v);
     if (target == "integer" || target == "int" || target == "int4")
@@ -4579,6 +4661,10 @@ void ExprEvaluator::bindScalarFunctions(Expr* expression, StorageEngine* engine)
 ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowContext& ctx) const {
     if (!e) return ExprValue{};
     std::string name = toLower(e->funcName);
+    // Keep polymorphic array builtin results typed at the same boundary as
+    // ARRAY constructors. The descriptor is read before any argument runs;
+    // a brace-looking TEXT value never determines the result type.
+    const auto declaredResult=arrayExpressionType(e,ctx,currentDB_,this);
 
     // COALESCE is syntax-like in SQL: stop as soon as the first non-NULL
     // argument is found, so unused arguments are never evaluated.
@@ -4732,6 +4818,8 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
                     argumentCollation, argument.collation);
         }
         ExprValue result = it->second(args);
+        if(declaredResult.size()>=2 && declaredResult.compare(declaredResult.size()-2,2,"[]")==0)
+            result=evalCast(nullptr,ctx,result,declaredResult);
         if (isCollatableExprType(result.typeName))
             result.collation = mergeExplicitCollations(
                 result.collation, argumentCollation);
@@ -4834,8 +4922,33 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
 // Array / Row expressions
 // ----------------------------------------------------------------------------
 
-ExprValue ExprEvaluator::evalArrayExpr(const ArrayExpr*, const RowContext&) const {
-    return ExprValue("unknown", "", true);
+ExprValue ExprEvaluator::evalArrayExpr(const ArrayExpr* array, const RowContext& row) const {
+    auto elementType=array->elementType;
+    if(elementType.empty()){
+        auto type=arrayExpressionType(array,row,currentDB_,this);elementType=type.substr(0,type.size()-2);
+    }
+    std::string output="{";
+    bool nested=array->nestedElements;
+    if(array->elementType.empty())for(const auto& item:array->elements){
+        const auto type=arrayExpressionType(item.get(),row,currentDB_,this);
+        if(type.size()>=2 && type.compare(type.size()-2,2,"[]")==0)nested=true;
+    }
+    size_t nestedWidth=0;
+    for(size_t i=0;i<array->elements.size();++i){
+        ExprValue value=eval(array->elements[i].get(),row);
+        if(i)output+=',';
+        if(nested){
+            if(value.isNull)throw DbError("2202E","multidimensional arrays must have matching dimensions");
+            value=evalCast(nullptr,row,value,elementType+"[]");
+            std::vector<std::string> elements;
+            if(!parseArrayElements(value.value,elements))throw DbError("22P02","malformed array literal");
+            if(i && nestedWidth!=elements.size())throw DbError("2202E","multidimensional arrays must have matching dimensions");
+            nestedWidth=elements.size();output+=value.value;
+        }else{value=evalCast(nullptr,row,value,elementType);output+=value.isNull?"NULL":arrayElemQuote(value.value);}
+    }
+    if(nested && nestedWidth==0)return ExprValue(elementType+"[]","{}",false);
+    if(!arrayShapeOf(output+'}'))throw DbError("2202E","multidimensional arrays must have matching dimensions");
+    return ExprValue(elementType+"[]",output+'}',false);
 }
 
 ExprValue ExprEvaluator::evalRowExpr(const RowExpr*, const RowContext&) const {
@@ -5362,7 +5475,7 @@ static bool parseArrayElements(const std::string& text, std::vector<std::string>
         }
     }
     out.push_back(trimStr(cur));
-    return true;
+    return !inQ && depth==0;
 }
 
 // Strip surrounding double-quotes from an array element token and unescape.
@@ -5397,6 +5510,20 @@ static std::string arrayElemQuote(const std::string& v) {
     }
     out += "\"";
     return out;
+}
+
+static std::optional<std::vector<size_t>> arrayShapeOf(const std::string& value) {
+    std::vector<std::string> elements;
+    if(!parseArrayElements(value,elements))return {};
+    std::vector<size_t> shape{elements.size()};
+    if(elements.empty())return shape;
+    const auto first=arrayShapeOf(elements.front());
+    for(size_t i=1;i<elements.size();++i){
+        const auto child=arrayShapeOf(elements[i]);
+        if(child.has_value()!=first.has_value() || (child && *child!=*first))return {};
+    }
+    if(first)shape.insert(shape.end(),first->begin(),first->end());
+    return shape;
 }
 
 // JSON value text -> normalized type name ('object'/'array'/'string'/'number'/

@@ -12,6 +12,7 @@ class StorageEngine;
 class Expr;
 struct ColumnRefExpr;
 struct PreparedQuery;
+struct ArrayConcatBinding;
 
 // ----------------------------------------------------------------------------
 // Expression evaluation helper
@@ -33,6 +34,13 @@ struct ExprEvalResult {
 
 class ExprHelper {
 public:
+    // Pure SQL ARRAY/array-concatenation analysis. No row, query, sequence or
+    // stored routine is executed. Only execution-owned ASTs may be annotated.
+    static std::optional<ArrayConcatBinding> resolveArrayConcatTypes(
+        const std::string& leftType, const std::string& rightType);
+    static void prepareArrayTypes(Expr* expression,
+        const std::map<std::string, std::string>& typeHints = {},
+        const std::string& currentDB = "", StorageEngine* owner = nullptr);
     // Metadata-only structural identity. The consumer supplies already
     // validated source occurrence/column ordinal/type/collation identities.
     static std::string scalarExpressionIdentity(

@@ -3,6 +3,8 @@
 #include "catalog/catalog.h"
 #include "common/DbError.h"
 #include "expression/common_type.h"
+#include "expression/expr_helper.h"
+#include "expression/array_type.h"
 #include <algorithm>
 #include <map>
 #include <set>
@@ -41,6 +43,15 @@ void checkRangeConflicts(const Namespace& left, const Namespace& right) {
 }
 struct CteDescription { QueryRowDescriptor columns; const Stmt* statement = nullptr; };
 using Ctes = std::map<std::string, CteDescription>;
+void validateArrayConstant(const Expr* source, const std::string& type) {
+    const auto* literal = dynamic_cast<const LiteralExpr*>(source);
+    if (!literal || literal->preparedSubquery || !literal->typeName.empty()) return;
+    const auto tokens = SQLParser::tokenize(literal->value);
+    if (tokens.size()!=1 || tokens.front().empty() ||
+        (tokens.front().front()!='\'' && SQLParser::toLower(tokens.front())!="null")) return;
+    CastExpr cast; cast.typeName=type; cast.operand=std::make_unique<LiteralExpr>(*literal);
+    ExprEvaluator pure; (void)pure.eval(&cast,RowContext{});
+}
 
 class Binder {
 public:
@@ -111,7 +122,7 @@ public:
         input = std::move(cast);
     }
 
-    std::string expression(ExprPtr& node, const std::vector<Namespace>& scopes) {
+    std::string expression(ExprPtr& node, const std::vector<Namespace>& scopes, const std::string& arrayContext = {}) {
         if (!node) return "unknown";
         switch (node->type) {
         case ExprType::Parameter: {
@@ -193,7 +204,7 @@ public:
         }
         case ExprType::CastExpr: {
             auto* cast = static_cast<CastExpr*>(node.get());
-            expression(cast->operand, scopes);
+            expression(cast->operand, scopes, cast->typeName);
             if (metadata.assignmentInput) metadata.assignmentInput({"", cast->typeName}, cast, cast->typeName);
             return cast->typeName;
         }
@@ -205,14 +216,27 @@ public:
         }
         case ExprType::BinaryOp: {
             auto* binary = static_cast<BinaryOpExpr*>(node.get());
-            const auto left = expression(binary->left, scopes);
+            const auto* castTarget = binary->op=="::" ? dynamic_cast<const LiteralExpr*>(binary->right.get()) : nullptr;
+            const auto left = expression(binary->left, scopes, castTarget ? castTarget->value : std::string());
             if (binary->op == "::") {
                 const auto* type = dynamic_cast<const LiteralExpr*>(binary->right.get());
                 if (!type) throw DbError("42601", "cast requires a type name");
                 if (metadata.assignmentInput) metadata.assignmentInput({"", type->value}, binary, type->value);
                 return type->value; // grammar type, not a SQL value namespace
             }
-            expression(binary->right, scopes);
+            const auto right = expression(binary->right, scopes);
+            if (binary->op=="||") {
+                binary->arrayConcat = ExprHelper::resolveArrayConcatTypes(left,right);
+                if (binary->arrayConcat) {
+                    validateArrayConstant(binary->left.get(),binary->arrayConcat->leftType);
+                    validateArrayConstant(binary->right.get(),binary->arrayConcat->rightType);
+                    if (metadata.assignmentInput) {
+                        metadata.assignmentInput({"",binary->arrayConcat->leftType},binary->left.get(),left);
+                        metadata.assignmentInput({"",binary->arrayConcat->rightType},binary->right.get(),right);
+                    }
+                    return binary->arrayConcat->elementType + "[]";
+                }
+            }
             static const std::set<std::string> predicates = {"=", "<>", "!=", "<", ">", "<=", ">=",
                 "AND", "OR", "LIKE", "ILIKE", "IN", "NOT IN", "IS DISTINCT FROM", "IS NOT DISTINCT FROM"};
             return predicates.count(binary->op) ? "boolean" : left;
@@ -271,9 +295,32 @@ public:
                 coerceCaseInput(conditional->whenClauses[i].second,thenTypes[i],type);
             return type;
         }
-        case ExprType::ArrayExpr:
-            for (auto& element : static_cast<ArrayExpr*>(node.get())->elements) expression(element, scopes);
-            return "array";
+        case ExprType::ArrayExpr: {
+            auto* array = static_cast<ArrayExpr*>(node.get());
+            if (arrayContext.size()>=2 && arrayContext.compare(arrayContext.size()-2,2,"[]")==0)
+                array->elementType = ExprHelper::canonicalResultTypeName(arrayContext.substr(0,arrayContext.size()-2));
+            std::vector<std::string> types;
+            for (auto& element : array->elements) {
+                auto type = expression(element,scopes,arrayContext);
+                if(const auto* literal=dynamic_cast<const LiteralExpr*>(element.get());
+                    literal && literal->typeName.empty() && !literal->preparedSubquery)
+                    type=ExprHelper::inferValuesResultType(literal->value);
+                types.push_back(type);
+            }
+            array->nestedElements=std::any_of(types.begin(),types.end(),array_detail::isArray);
+            if(!types.empty()) (void)array_detail::commonElement(types);
+            if (array->elementType.empty()) {
+                array->elementType=array_detail::commonElement(types);
+            }
+            if(!arrayContext.empty())for(const auto& type:types)
+                array_detail::checkExplicitElementCast(type,array->elementType);
+            for (size_t i=0;i<array->elements.size();++i) {
+                validateArrayConstant(array->elements[i].get(),array->elementType);
+                if (metadata.assignmentInput)
+                    metadata.assignmentInput({"array element",array->elementType},array->elements[i].get(),types[i]);
+            }
+            return array->elementType + "[]";
+        }
         case ExprType::RowExpr:
             for (auto& element : static_cast<RowExpr*>(node.get())->elements) expression(element, scopes);
             return "record";

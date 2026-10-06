@@ -2149,7 +2149,7 @@ static ExprPtr parseCastExpr(const std::vector<std::string>& tokens, size_t& pos
                 || w == "union" || w == "intersect" || w == "except" || w == "for"
                 || w == "returning" || w == "on" || w == "using" || w == "set"
                 || w == "into" || w == "values" || w == "by" || w == "asc" || w == "desc"
-                || tokens[pos] == ")" || tokens[pos] == "," || tokens[pos] == ";"
+                || tokens[pos] == ")" || tokens[pos] == "]" || tokens[pos] == "," || tokens[pos] == ";"
                 || tokens[pos] == "::" || tokens[pos] == "||"
                 || tokens[pos] == "&" || tokens[pos] == "|"
                 || tokens[pos] == "#" || tokens[pos] == "<<"
@@ -2335,22 +2335,21 @@ static ExprPtr parsePrimaryExprImpl(const std::vector<std::string>& tokens, size
         return lit;
     }
 
-    // ARRAY[...] constructor: one FunctionCallExpr "__array_construct" whose
-    // args are the element expressions. The evaluator renders it as the
-    // canonical {e1,e2,...} array literal text.
+    // ARRAY is grammar, not a user-visible function name. Retain its actual
+    // value children so pure preparation can choose a fixed element type.
     if (SQLParser::toLower(tokens[pos]) == "array" && pos + 1 < tokens.size()
         && tokens[pos + 1] == "[") {
         pos += 2;
-        auto call = std::make_unique<FunctionCallExpr>();
-        call->funcName = "__array_construct";
+        auto array = std::make_unique<ArrayExpr>();
         while (pos < tokens.size() && tokens[pos] != "]") {
             auto elem = parseExpr(tokens, pos);
-            if (elem) call->args.push_back(std::move(elem));
+            if (elem) array->elements.push_back(std::move(elem));
             if (pos < tokens.size() && tokens[pos] == ",") ++pos;
             else break;
         }
-        if (pos < tokens.size() && tokens[pos] == "]") ++pos;
-        return call;
+        if (pos >= tokens.size() || tokens[pos] != "]") return {};
+        ++pos;
+        return array;
     }
 
     // CASE expression

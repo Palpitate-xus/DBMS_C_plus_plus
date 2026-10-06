@@ -19459,6 +19459,34 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
     auto parsed = parser.parseForBinding(rawSql);
     const auto* candidate = parsed.success ? dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()) : nullptr;
     if (!candidate || !dbms::QueryPlanner::supportsPreparedSelectPlan(*candidate)) return false;
+    // ARRAY is a value AST node. Potential || operands are bound before
+    // deciding between typed array and ordinary text/bytea/bit consumers.
+    function<bool(const dbms::Expr*,bool)> arrayExpression = [&](const dbms::Expr* value,bool prepared) {
+        if(!value)return false;
+        if(dynamic_cast<const dbms::ArrayExpr*>(value))return true;
+        if(const auto* binary=dynamic_cast<const dbms::BinaryOpExpr*>(value))
+            return (binary->op=="||" && (!prepared || binary->arrayConcat.has_value())) ||
+                arrayExpression(binary->left.get(),prepared) || (binary->op!="::" && arrayExpression(binary->right.get(),prepared));
+        if(const auto* unary=dynamic_cast<const dbms::UnaryOpExpr*>(value))return arrayExpression(unary->operand.get(),prepared);
+        if(const auto* cast=dynamic_cast<const dbms::CastExpr*>(value))return arrayExpression(cast->operand.get(),prepared);
+        if(const auto* call=dynamic_cast<const dbms::FunctionCallExpr*>(value)){
+            for(const auto& arg:call->args)if(arrayExpression(arg.get(),prepared))return true;
+            for(const auto& arg:call->namedArgs)if(arrayExpression(arg.value.get(),prepared))return true;
+        }
+        if(const auto* conditional=dynamic_cast<const dbms::CaseExpr*>(value)){
+            if(arrayExpression(conditional->switchExpr.get(),prepared) || arrayExpression(conditional->elseExpr.get(),prepared))return true;
+            for(const auto& arm:conditional->whenClauses)if(arrayExpression(arm.first.get(),prepared)||arrayExpression(arm.second.get(),prepared))return true;
+        }
+        return false;
+    };
+    const auto queryArrays = [&](const dbms::SelectStmt* query,bool prepared) {
+        if(arrayExpression(query->whereClause.get(),prepared))return true;
+        for(const auto& item:query->selectList)if(arrayExpression(item.expr.get(),prepared))return true;
+        for(const auto& item:query->orderBy)if(arrayExpression(item.expr.get(),prepared))return true;
+        return false;
+    };
+    const bool possibleArray = queryArrays(candidate,false);
+    if(possibleArray && dbms::SQLParser::isDatabaseIndependentQuery(*candidate))return false;
     const auto roles = scalarQueryRoles(candidate->whereClause.get());
     bool scalarOrder = false;
     for (const auto& item : candidate->orderBy)
@@ -19468,7 +19496,7 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
     if (!candidate->orderBy.empty())
         for (const auto& item : candidate->selectList)
             scalarOrder = scalarOrder || scalarQueryRoles(item.expr.get()).first;
-    if ((!roles.first && !scalarOrder) || roles.second) return false;
+    if ((!roles.first && !scalarOrder && !possibleArray) || roles.second) return false;
     // Additional multirow roles in targets/order also need their own lowering;
     // never reinterpret a set-valued child as a scalar expression.
     for (const auto& item : candidate->selectList) if (scalarQueryRoles(item.expr.get()).second) return false;
@@ -19496,6 +19524,7 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
     // discarded before the whole immutable query has passed preparation.
     auto prepared = g_engine.prepareBoundQuery(session.currentDB, rawSql);
     auto* select = static_cast<dbms::SelectStmt*>(prepared.ast.get());
+    if(!roles.first && !scalarOrder && !queryArrays(select,true))return false;
     // Preserve column grants on precisely the bound source cells used by
     // this query (including correlated child references), not SELECT *.
     if (select->fromClause && !sessionIsAdmin(session)) {

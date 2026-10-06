@@ -337,11 +337,17 @@ struct UnaryOpExpr : public Expr {
     }
 };
 
+struct ArrayConcatBinding {
+    std::string leftType, rightType, elementType;
+    bool leftArray = false, rightArray = false;
+};
+
 // 二元操作符
 struct BinaryOpExpr : public Expr {
     std::string op;        // =, <>, <, >, <=, >=, +, -, *, /, %, AND, OR, LIKE, ILIKE, IN, BETWEEN
     ExprPtr left;
     ExprPtr right;
+    std::optional<ArrayConcatBinding> arrayConcat;
     BinaryOpExpr() { type = ExprType::BinaryOp; }
     std::string toString() const override {
         return (left ? left->toString() : "?") + " " + op + " " +
@@ -407,8 +413,17 @@ struct CaseExpr : public Expr {
 // ARRAY[expr, ...]
 struct ArrayExpr : public Expr {
     std::vector<ExprPtr> elements;
+    std::string elementType; // fixed metadata, never inferred from row values
+    bool nestedElements = false;
     ArrayExpr() { type = ExprType::ArrayExpr; }
-    std::string toString() const override { return "ARRAY[...]"; }
+    std::string toString() const override {
+        std::string sql = "ARRAY[";
+        for (size_t i = 0; i < elements.size(); ++i) {
+            if (i) sql += ',';
+            sql += elements[i] ? elements[i]->toString() : "NULL";
+        }
+        return sql + ']';
+    }
 };
 
 // ROW(expr, ...)

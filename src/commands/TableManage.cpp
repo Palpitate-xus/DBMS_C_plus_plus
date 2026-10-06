@@ -31779,6 +31779,7 @@ static PlPgsqlQueryResult plpgsqlEvalBoundExpression(
         evaluator.registerFunction("current_user", userValue, 's');
         evaluator.registerFunction("session_user", userValue, 's');
         size_t functionPosition = 0;
+        std::vector<std::pair<FunctionCallExpr*,std::string>> functionNames;
         std::function<void(Expr*)> bind;
         bind = [&](Expr* node) {
             if (!node) throw DbError("42601", "missing scalar expression");
@@ -31892,8 +31893,7 @@ static PlPgsqlQueryResult plpgsqlEvalBoundExpression(
                     evaluator.hasScalarFunction(function, sqlFunctionEngine);
                     throw DbError("42883", "function does not exist: " + function->funcName);
                 }
-                function->funcName = evaluatorName;
-                function->schema.clear();
+                functionNames.emplace_back(function,evaluatorName);
                 // SQL EXTRACT's field is syntax, not a procedural variable.
                 // The shared parser represents it as the first argument.
                 if (name == "extract" && !function->args.empty()) {
@@ -31912,11 +31912,19 @@ static PlPgsqlQueryResult plpgsqlEvalBoundExpression(
                 }
                 for (auto& argument : function->args) bind(argument.get());
                 for (auto& argument : function->namedArgs) bind(argument.value.get());
+            } else if (auto* array = dynamic_cast<ArrayExpr*>(node)) {
+                for(auto& element:array->elements)bind(element.get());
             } else if (node->type != ExprType::Literal) {
                 throw DbError("0A000", "unsupported scalar PL/pgSQL expression");
             }
         };
         bind(select->selectList.front().expr.get());
+        std::map<std::string,std::string> arrayTypes;
+        for(const auto& binding:bindings)arrayTypes[binding.second]=context.get(binding.second)->typeName;
+        // Resolve ARRAY metadata while SQL names and the actual owner remain
+        // available; only then lower functions to execution-private slots.
+        ExprHelper::prepareArrayTypes(select->selectList.front().expr.get(),arrayTypes,dbname,sqlFunctionEngine);
+        for(const auto& function:functionNames){function.first->funcName=function.second;function.first->schema.clear();}
         const ExprValue value = evaluator.eval(select->selectList.front().expr.get(), context);
         ExprEvalResult evaluated;
         evaluated.ok = !value.isUnknown();

@@ -35,6 +35,7 @@ ExprPtr copyExpression(const Expr* source, std::map<const Expr*, const Expr*>& s
         target->operand = copy(node->operand); result = std::move(target);
     } else if (const auto* node = dynamic_cast<const BinaryOpExpr*>(source)) {
         auto target = std::make_unique<BinaryOpExpr>(); target->op = node->op;
+        target->arrayConcat = node->arrayConcat;
         target->left = copy(node->left); target->right = copy(node->right); result = std::move(target);
     } else if (const auto* node = dynamic_cast<const CastExpr*>(source)) {
         auto target = std::make_unique<CastExpr>(); target->typeName = node->typeName;
@@ -66,6 +67,8 @@ ExprPtr copyExpression(const Expr* source, std::map<const Expr*, const Expr*>& s
         target->filter = copy(node->filter); window(node->over,target->over); result = std::move(target);
     } else if (const auto* node = dynamic_cast<const ArrayExpr*>(source)) {
         auto target = std::make_unique<ArrayExpr>();
+        target->elementType = node->elementType;
+        target->nestedElements = node->nestedElements;
         for (const auto& arg : node->elements) target->elements.push_back(copy(arg));
         result = std::move(target);
     } else if (const auto* node = dynamic_cast<const RowExpr*>(source)) {
@@ -201,6 +204,7 @@ void PreparedQueryExecution::prepareExpression(Expr* expression) {
     ExprEvaluator::analyzeExplicitResultCollation(expression);
     std::map<const Expr*, const Expr*> sites;
     auto compiled = copyExpression(expression,sites);
+    ExprHelper::prepareArrayTypes(compiled.get(), {}, database_, engine_);
     evaluator_.bindScalarFunctions(compiled.get(), engine_);
     for (const auto& site : sites) originalSites_[site.first] = site.second;
     compiled_.emplace(expression,std::move(compiled));

@@ -1,5 +1,6 @@
 #include "expr_helper.h"
 #include "expression/common_type.h"
+#include "array_type.h"
 #include "arithmetic_type.h"
 #include "ExprEvaluator.h"
 #include "parser/parser.h"
@@ -243,6 +244,8 @@ std::string inferAstResultType(
         if (op == "->>" || op == "#>>") return "text";
         if (op == "->" || op == "#>") return left;
         if (op == "||") {
+            if (const auto binding = ExprHelper::resolveArrayConcatTypes(left, right))
+                return binding->elementType + "[]";
             if ((left == "bit" || left == "bit varying") &&
                 (right == "bit" || right == "bit varying")) {
                 return "bit";
@@ -281,12 +284,10 @@ std::string inferAstResultType(
         return mergeProtocolTypes(left, right);
     }
     if (const auto* array = dynamic_cast<const ArrayExpr*>(expression)) {
-        std::string element = "unknown";
-        for (const auto& value : array->elements)
-            element = mergeProtocolTypes(
-                element, inferAstResultType(value.get(), typeHints, routineTypes));
-        if (element.empty() || element == "unknown") element = "text";
-        return element + "[]";
+        if (!array->elementType.empty()) return array->elementType + "[]";
+        std::vector<std::string> types;
+        for (const auto& value : array->elements) types.push_back(inferAstResultType(value.get(),typeHints,routineTypes));
+        return array_detail::commonElement(types) + "[]";
     }
     if (dynamic_cast<const RowExpr*>(expression)) return "record";
     if (const auto* caseExpression = dynamic_cast<const CaseExpr*>(expression)) {
@@ -365,7 +366,8 @@ std::string inferAstResultType(
             name == "position" || name == "get_byte" || name == "get_bit" ||
             name == "ascii" || name == "gcd" ||
             name == "lcm") return "integer";
-        if (name == "bit_count" || name == "crc32" || name == "crc32c")
+        if (name == "bit_count" || name == "crc32" || name == "crc32c" ||
+            name == "nextval" || name == "currval" || name == "lastval")
             return "bigint";
         if (name == "percent_rank" || name == "cume_dist" || name == "date_part")
             return "double precision";
@@ -388,6 +390,12 @@ std::string inferAstResultType(
         if (name == "array_append" || name == "array_prepend" ||
             name == "array_remove" || name == "array_replace")
             return name == "array_prepend" ? argType(1) : argType(0);
+        if(name=="array_cat"){
+            const auto binding=ExprHelper::resolveArrayConcatTypes(argType(0),argType(1));
+            return binding ? binding->elementType+"[]" : "text[]";
+        }
+        if(name=="array_position" || name=="array_length" || name=="array_upper" ||
+            name=="array_lower" || name=="array_ndims" || name=="cardinality")return "integer";
         if (name == "array_agg") {
             const std::string element = argType(0);
             return (element.empty() || element == "unknown" ? "text" : element) + "[]";
@@ -1162,7 +1170,8 @@ std::string ExprHelper::scalarExpressionIdentity(
             return result;
         }
         if (const auto* array = dynamic_cast<const ArrayExpr*>(node)) {
-            std::string result = "array";
+            std::string result = "array" + field(canonicalResultTypeName(array->elementType)) +
+                field(array->nestedElements ? "nested" : "scalar");
             for (const auto& value : array->elements) result += field(key(value.get()));
             return result;
         }
@@ -1447,6 +1456,96 @@ std::string ExprHelper::inferParsedResultType(
     return type.empty() || type == "unknown" ? "text" : type;
 }
 
+std::optional<ArrayConcatBinding> ExprHelper::resolveArrayConcatTypes(
+    const std::string& leftRaw, const std::string& rightRaw) {
+    auto canonical = [](std::string type) {
+        const bool array = type.size() >= 2 && type.compare(type.size()-2,2,"[]") == 0;
+        if (array) type.resize(type.size()-2);
+        return canonicalResultTypeName(type) + (array ? "[]" : "");
+    };
+    ArrayConcatBinding result;
+    result.leftType = canonical(leftRaw); result.rightType = canonical(rightRaw);
+    const auto array = [](const std::string& type) {
+        return type.size() >= 2 && type.compare(type.size()-2,2,"[]") == 0;
+    };
+    result.leftArray = array(result.leftType); result.rightArray = array(result.rightType);
+    if (!result.leftArray && !result.rightArray) return {};
+    // An unknown operand chooses the array-cat overload, not append/prepend.
+    if (result.leftType == "unknown") { result.leftType = result.rightType; result.leftArray = true; }
+    if (result.rightType == "unknown") { result.rightType = result.leftType; result.rightArray = true; }
+    const auto element = [&](const std::string& type) { return array(type) ? type.substr(0,type.size()-2) : type; };
+    std::string error;
+    if (!resolveValuesResultType({element(result.leftType),element(result.rightType)}, result.elementType, error))
+        throw DbError("42883", "operator does not exist: " + leftRaw + " || " + rightRaw);
+    result.leftType = result.elementType + (result.leftArray ? "[]" : "");
+    result.rightType = result.elementType + (result.rightArray ? "[]" : "");
+    return result;
+}
+
+void ExprHelper::prepareArrayTypes(Expr* expression,
+    const std::map<std::string, std::string>& hints, const std::string& database,
+    StorageEngine* owner) {
+    const auto routines = collectRoutineResultTypes(expression, database, owner);
+    const auto type = [&](const Expr* node) { return inferAstResultType(node,hints,&routines); };
+    const auto validateConst = [&](const Expr* node, const std::string& target) {
+        const auto* literal = dynamic_cast<const LiteralExpr*>(node);
+        if (!literal || literal->preparedSubquery || !literal->typeName.empty()) return;
+        const auto tokens = SQLParser::tokenize(literal->value);
+        if (tokens.size()!=1 || tokens.front().empty() ||
+            (tokens.front().front()!='\'' && toLower(tokens.front())!="null")) return;
+        CastExpr conversion; conversion.typeName = target;
+        conversion.operand = std::make_unique<LiteralExpr>(*literal);
+        ExprEvaluator pure; (void)pure.eval(&conversion,RowContext{});
+    };
+    std::function<void(Expr*,std::string)> visit = [&](Expr* node,std::string context) {
+        if (!node || node->preparedSubquery) return;
+        if (auto* cast = dynamic_cast<CastExpr*>(node)) { visit(cast->operand.get(),cast->typeName); return; }
+        if (auto* binary = dynamic_cast<BinaryOpExpr*>(node)) {
+            if (binary->op=="::") {
+                const auto* target = dynamic_cast<const LiteralExpr*>(binary->right.get());
+                visit(binary->left.get(),target ? target->value : std::string()); return;
+            }
+            visit(binary->left.get(),{}); visit(binary->right.get(),{});
+            if (binary->op=="||") {
+                binary->arrayConcat = resolveArrayConcatTypes(type(binary->left.get()),type(binary->right.get()));
+                if (binary->arrayConcat) {
+                    validateConst(binary->left.get(),binary->arrayConcat->leftType);
+                    validateConst(binary->right.get(),binary->arrayConcat->rightType);
+                }
+            }
+            return;
+        }
+        if (auto* array = dynamic_cast<ArrayExpr*>(node)) {
+            const bool contextual = context.size()>=2 && context.compare(context.size()-2,2,"[]")==0;
+            if (contextual) array->elementType = canonicalResultTypeName(context.substr(0,context.size()-2));
+            for (auto& item : array->elements) visit(item.get(),contextual ? context : std::string());
+            std::vector<std::string> types;
+            for(const auto& item:array->elements)types.push_back(type(item.get()));
+            array->nestedElements=std::any_of(types.begin(),types.end(),array_detail::isArray);
+            if(!types.empty()) (void)array_detail::commonElement(types);
+            if(contextual)for(const auto& source:types)array_detail::checkExplicitElementCast(source,array->elementType);
+            if (array->elementType.empty()) {
+                auto declared = type(array); array->elementType = declared.substr(0,declared.size()-2);
+            }
+            for (const auto& item : array->elements) validateConst(item.get(),array->elementType);
+            return;
+        }
+        if (auto* unary = dynamic_cast<UnaryOpExpr*>(node)) visit(unary->operand.get(),{});
+        else if (auto* conditional = dynamic_cast<CaseExpr*>(node)) {
+            visit(conditional->switchExpr.get(),{}); visit(conditional->elseExpr.get(),{});
+            for (auto& arm : conditional->whenClauses) { visit(arm.first.get(),{}); visit(arm.second.get(),{}); }
+        } else if (auto* call = dynamic_cast<FunctionCallExpr*>(node)) {
+            for (auto& arg : call->args) visit(arg.get(),{});
+            for (auto& arg : call->namedArgs) visit(arg.value.get(),{});
+            visit(call->filter.get(),{});
+            for (auto& arg : call->over.partitionBy) visit(arg.get(),{});
+            for (auto& arg : call->over.orderBy) visit(arg.first.get(),{});
+            visit(call->over.frameStart.get(),{}); visit(call->over.frameEnd.get(),{});
+        } else if (auto* row = dynamic_cast<RowExpr*>(node)) for (auto& arg : row->elements) visit(arg.get(),{});
+    };
+    visit(expression,{});
+}
+
 std::string ExprHelper::inferResultType(
     const std::string& exprSql,
     const std::map<std::string, std::string>& typeHints,
@@ -1511,7 +1610,7 @@ std::string ExprHelper::inferResultType(
         const bool numericOperator = binary && arithmetic_detail::resultType(
             toLower(binary->op), inferAstResultType(binary->left.get(), typeHints),
             inferAstResultType(binary->right.get(), typeHints)).has_value();
-        if (dynamic_cast<const UnaryOpExpr*>(structural) ||
+        if (dynamic_cast<const UnaryOpExpr*>(structural) || dynamic_cast<const ArrayExpr*>(structural) ||
             (binary && (type == "boolean" || binary->op == "::" ||
                         binary->op == "||" || numericOperator))) {
             return type.empty() || type == "unknown" ? "text" : type;
@@ -2116,6 +2215,9 @@ static ExprEvalResult evalStringImpl(
             reference->table.clear();
             reference->schema.clear();
         }
+        std::map<std::string,std::string> preparedHints;
+        for (const auto& entry : bindings) preparedHints[entry.second] = ctx.get(entry.second)->typeName;
+        ExprHelper::prepareArrayTypes(select->selectList[0].expr.get(),preparedHints,currentDB,functionEngine);
         evaluator.bindScalarFunctions(select->selectList[0].expr.get(), functionEngine);
         v = evaluator.eval(select->selectList[0].expr.get(), ctx);
     } catch (const DbError& e) {
