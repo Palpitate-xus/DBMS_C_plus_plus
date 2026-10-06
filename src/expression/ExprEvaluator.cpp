@@ -1715,8 +1715,8 @@ int ExprEvaluator::compareValues(const ExprValue& a, const ExprValue& b) {
     };
     const bool varyingA = isVaryingCharacter(ta);
     const bool varyingB = isVaryingCharacter(tb);
-    const bool textualA = blankPaddedA || varyingA || ta == "text";
-    const bool textualB = blankPaddedB || varyingB || tb == "text";
+    const bool textualA = blankPaddedA || varyingA || ta == "text" || ta == "name";
+    const bool textualB = blankPaddedB || varyingB || tb == "text" || tb == "name";
     std::string textCollation;
     if (textualA && textualB) {
         const std::string leftCollation =
@@ -1729,6 +1729,9 @@ int ExprEvaluator::compareValues(const ExprValue& a, const ExprValue& b) {
         }
         textCollation = leftCollation.empty()
             ? rightCollation : leftCollation;
+        // NAME's implicit type collation is C, not the database's default
+        // text locale. A supplied expression/source collation still wins.
+        if(textCollation.empty() && (ta=="name" || tb=="name"))textCollation="C";
     }
     if ((blankPaddedA || blankPaddedB) && textualA && textualB) {
         std::string left = a.value;
