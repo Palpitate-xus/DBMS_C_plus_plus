@@ -835,10 +835,18 @@ int main() {
                  "UPDATE target SET val = 2 RETURNING WITH (OLD o) o.val",
                  "UPDATE target SET val = 2 RETURNING WITH (OLD AS o,) o.val",
                  "UPDATE target SET val = 2 RETURNING WITH (OLD AS o, OLD AS p) o.val",
-                 "UPDATE target SET val = 2 RETURNING WITH (OLD AS new) new.val",
-                 "UPDATE target SET val = 2 RETURNING WITH (NEW AS old) old.val",
                  "UPDATE target SET val = 2 RETURNING WITH (OLD AS o)"}) {
             assert(!parser.parse(invalidReturning).success);
+        }
+        // An explicit alias can mask the other row's default name. These
+        // are valid grammar; range collisions are checked during binding.
+        for (const std::string sql : {
+                 "UPDATE target SET val = 2 RETURNING WITH (OLD AS new) new.val",
+                 "UPDATE target SET val = 2 RETURNING WITH (NEW AS old) old.val"}) {
+            auto validReturning = parser.parse(sql);
+            assert(validReturning.success);
+            const auto* update = dynamic_cast<const UpdateStmt*>(validReturning.stmt.get());
+            assert(update && (update->returningOptions.oldAliased || update->returningOptions.newAliased));
         }
         std::cout << "[PARSER P1] INSERT AST DEFAULT handling OK\n";
     }
