@@ -105,3 +105,17 @@ simple physical-column passes do not establish safety for arbitrary residuals.
 No full-suite/PG18.6/TLS
 runtime or whole-engine sanitizer claim. No push or Actions enablement; skipped
 security/TDE work remains deferred.
+
+## Independent residual-effect follow-up
+
+The actual repeated-effect defect was repaired separately in private `e1b03c1d`,
+integrated as ROOT `86ddccf9`: decide physical candidate completeness before
+evaluating residuals, and retain captured row bytes/NULL bitmaps. Its expected-one
+native baseline exited 134; final matching formal-O2 candidate passed 18 distinct
+native and nine wire entry points. The wire control already passed the old
+frontend and is not claimed as a new wire red. Native full UPDATE host support
+still explicitly reports 0A000; real frontend source UPDATE/NULL/rollback is
+verified separately. See `docs/issue-index-residual-execution-once.md` for precise
+scope and retained failures. The ROOT owner/receiver/numeric combination freshly
+rebuilt all 55 objects in terminal 96406; repeat build and all-signature/binary
+stamp audit passed. New matching test groups are running; no combined pass yet.

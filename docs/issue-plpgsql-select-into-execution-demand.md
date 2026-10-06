@@ -1,8 +1,54 @@
-# Open SELECT INTO execution-demand bug
+# SELECT INTO execution-demand bug and independent repair
 
-Date: 2026-10-06. Reproduced; implementation and combined verification remain
-open. SQL-04/FUNC-06 remain partial. A correct first-row value or P0003 alone
+Date: 2026-10-06. The independent receiver repair is implemented and privately
+verified; final ROOT combination verification remains pending. SQL-04/FUNC-06
+remain partial. A correct first-row value or P0003 alone
 does not prove that subsequent projection expressions were not executed.
+
+## Independent repair now integrated, not full-family completion
+
+Private source/test commit `1669e2d9` was integrated as ROOT `c78ea073`.
+Explicit `PlPgsqlQueryOptions` passes one row for non-STRICT INTO, two for
+STRICT, and zero for unbounded demand. Receiver demand is applied after
+qualification and required sorting, not by adding LIMIT or slicing a fully
+evaluated result. Required immutable projections preserve original input error
+order; volatile non-key projections remain above Sort. Genuine source keys,
+output aliases and ordinals are resolved as AST roles. Auxiliary writing CTEs
+complete independently of final projection demand. Ordinary SELECT remains
+unbounded. Native host and the legacy SELECT INTO adapter retain their separate
+explicit demand contracts.
+
+The final private formal O2 V4 candidate is
+`/tmp/dbms-plpgsql-row-demand-fix.UnioEpqx/dbms_main.receiver-v4.o2`, SHA256
+`c418649584d389c1e57a673c3bd437bbf3d09ee5e80d7bdadd81c85fe40320bb`.
+All 55 objects were originally freshly compiled after the new headers; later
+same-header main/TableManage source changes were individually rebuilt and the
+final signatures/normal build stamp passed (`12248b`). Native terminal `38456`
+passed ten entry points, including the newly failing-then-fixed public adapter
+control. Protocol terminal `74470` passed the new 42-control entry point plus
+eight adjacent scripts: nine distinct protocol entry points, not 50 scripts.
+Actual PG17.2 temporary/savepoint reference controls, including physical
+alias/ordinal demand, were preserved and rolled back; none are PG18.6 evidence.
+
+The original formal 5411 baseline's 11 actual differences remain below. Private
+intermediate failures also remain: an initial compile container mismatch,
+one startup connection abort with no case SQL, V1/V2 sort-input error-order
+mismatch, the added compatibility-adapter native assertion, and the later
+physical-ordinal extra-call assertion. Each was corrected without relaxing the
+sequence/error expectation. Logs and frozen versions remain in the private
+artifact directory; earlier passing subsets are not final V4 proof.
+
+ROOT combined this interface with the independently verified actual-engine
+owner fix `8fc7eeda`; the three-way conflict explicitly retained `this` in the
+new projection NULL fallback. The resulting ROOT headers require fresh all-55
+formal O2 compilation and matching tests. Build `96406` completed, and repeat
+build plus 55/55 object/binary-stamp audit passed. Matching native/protocol
+groups are still running at this checkpoint; the private V4 passes do not
+prove that new combination.
+Complete general query preparation, all DML RETURNING demand semantics,
+aggregate/window/record/cursor execution and the broader routine families
+remain independent work. The historical diagnostic text below describes the
+old implementation, not a claim that c78 still uses a demand-free host.
 
 ## Actual baseline and reference
 
@@ -60,9 +106,10 @@ The runner finally cleaned its owned server.
 
 Exact baseline output is transcribed, explicitly not a second run, in
 `/tmp/dbms-plpgsql-into-rowcap.ZX279noB/combination-5411a7aa-baseline-red.txt`.
-The pending private implementation's permanent regression source is
+The independent implementation's permanent regression source was
 `/tmp/dbms-plpgsql-row-demand-fix.UnioEpqx/repo/tests/plpgsql_select_into_execution_demand_protocol_e2e_test.py`.
-It is not yet an integrated passing ROOT test. This evidence removes any
+It is now integrated as c78ea073, but not yet a passing final ROOT combination
+test at this checkpoint. This evidence removes any
 assumption that the independent lexical/atomicity combination fixed the demand.
 
 ## Cause and required implementation
