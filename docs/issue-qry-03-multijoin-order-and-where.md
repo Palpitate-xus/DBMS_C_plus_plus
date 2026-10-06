@@ -30,6 +30,9 @@ selects the left or right USING key, or coalesces FULL keys from their NULL
 bitmaps. Ordinary NATURAL INNER joins also use the merged visible schema.
 `b42e4405` separately fixes no-alias USING dispatch: the FROM-chain reader
 keeps USING as a keyword instead of consuming it as a right-relation alias.
+`208f34d8` then preserves NATURAL INNER/LEFT/RIGHT/FULL kinds in both FROM
+parsing paths, including optional OUTER. LATERAL decodes the natural modifier
+and uses the effective row-preservation kind for visible merged-key sources.
 
 ## Reproduced behavior
 
@@ -148,7 +151,7 @@ keeps USING as a keyword instead of consuming it as a right-relation alias.
   row, evaluate a supported boolean `ON` expression against typed, NULL-aware
   values from all left inputs and the lateral result, and apply LEFT NULL
   extension when no right row passes the condition. The left tree must use
-  supported explicit `ON`/`USING` edges, ordinary NATURAL INNER joins or
+  supported explicit `ON`/`USING` edges, NATURAL INNER/LEFT/RIGHT/FULL joins or
   CROSS/comma joins; it requires aligned structured rows from the lateral
   subquery and does not implement unknown FROM scopes, complex or nested lateral chains,
   or table functions. Regression covers INNER/LEFT/RIGHT/FULL OUTER inputs,
@@ -370,6 +373,19 @@ keeps USING as a keyword instead of consuming it as a right-relation alias.
   order, labels, integer OIDs and command tags are asserted. Full registered
   suite and PostgreSQL 18.6 differential were not run.
 
+- Before `208f34d8`, NATURAL LEFT input before LATERAL returned 42601, and
+  parser assertions showed that explicit NATURAL INNER/outer kinds and their
+  right relation were not preserved. The shared JOIN-kind reader now requires
+  JOIN after the modifier/type, preserves optional OUTER, and leaves a NATURAL
+  source's enclosing MERGE ON to the MERGE parser. Invalid NATURAL CROSS,
+  missing relation/JOIN, and SELECT NATURAL ON/USING controls are rejected.
+  The production build and rebuilt native parser-phase1 test passed, as did
+  derived-type, join-type, SQL-literal and MERGE protocol E2E. Regressions cover
+  NATURAL INNER, LEFT/RIGHT preserved rows, FULL coalesced keys with/without
+  OUTER, and no-common-column outer forms with an empty side and typed empty
+  output. Parser tests also retain UPDATE/DELETE source kinds and MERGE ON.
+  Full registered suite and PostgreSQL 18.6 differential were not run.
+
 This does not complete QRY-03 or OPT-02. General target-list expressions
 (including SRFs, aggregates, and window expressions; only simple CASE and
 evaluator-supported scalar calls are handled), general row expansion beyond
@@ -378,16 +394,17 @@ expression ordering, and arbitrary nested/lateral join semantics remain open.
 The FROM-less LATERAL direct-column target case is only a bounded QRY-02 fix;
 simple INNER/LEFT LATERAL `ON` evaluation works with either one simple left
 relation or a simple base-table comma/CROSS chain before the LATERAL item. A
-simple base-table outer-join tree can now also feed LATERAL; only `ON true` is
-verified when that tree is followed by `LEFT JOIN LATERAL`, so general ON
-filtering across a pre-joined tree remains unverified.
+simple base-table outer-join tree can now also feed LATERAL. Regressions include
+ON true over an explicitly left-joined tree and a merged-key ON predicate over
+a USING tree; general ON filtering across arbitrary pre-joined trees remains
+unverified.
 The regression-tested two-step FROM-less scalar LATERAL chain also works;
 longer or more complex correlated chains remain unsupported/unverified.
 Bare outer references in evaluator-supported scalar targets and WHERE are now
 also bound when that LATERAL SELECT has no own FROM or uses a local base-table
-scope with known columns. Bounded USING and ordinary NATURAL INNER left inputs
+scope with known columns. Bounded USING and NATURAL INNER/LEFT/RIGHT/FULL left inputs
 now have a logical visible-column map. Outer unqualified projections and star
-expansion after LATERAL and NATURAL outer inputs
+expansion after LATERAL
 remain open; the probes above prevent treating this as complete join support.
 Unknown CTE/derived/function FROM scopes, complex quoted/schema-qualified
 references, arbitrary correlated expressions/subqueries, complex lateral
