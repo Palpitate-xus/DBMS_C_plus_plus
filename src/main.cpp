@@ -627,6 +627,7 @@ static size_t findUnquotedIdentifierWhitespace(const string& text,
 
 static string foldConstants(const string& s);
 static size_t findTopLevelKeyword(const string& sql, const string& kw, size_t startPos);
+static bool hasNullSafeComparison(const string& sql, bool wholeQuery = false);
 static string unwrapParenthesizedQuery(const string& sql);
 static size_t findTextOutsideQuotes(const string& sql, const string& text,
                                     size_t from = 0);
@@ -734,7 +735,10 @@ static string sqlProcessor(string raw, bool /*normalizeBooleanLiterals*/ = false
     // projection binder. Keep the SELECT list intact while retaining
     // the legacy rewrite for ON/WHERE clauses after FROM.
     const size_t fromKeyword = findTopLevelKeyword(raw, "from", 0);
-    if (toLower(raw).rfind("select ", 0) == 0 &&
+    if (hasNullSafeComparison(raw, true)) {
+        // Null-safe comparison operands stay genuine expressions, including
+        // CASE in WHERE/ON. Evaluator-only CASE pseudo-tokens lose their AST.
+    } else if (toLower(raw).rfind("select ", 0) == 0 &&
         fromKeyword != string::npos) {
         raw = raw.substr(0, fromKeyword) +
             preprocessCaseWhen(raw.substr(fromKeyword));
@@ -935,93 +939,9 @@ static string sqlProcessor(string raw, bool /*normalizeBooleanLiterals*/ = false
         }
         raw = out;
     }
-    // Convert IS DISTINCT FROM / IS NOT DISTINCT FROM to equivalent expressions
-    {
-        auto extractExprBefore = [&](size_t pos) -> std::pair<size_t, std::string> {
-            size_t end = pos;
-            while (end > 0 && isspace(static_cast<unsigned char>(raw[end - 1]))) end--;
-            size_t start = end;
-            while (start > 0 && !isspace(static_cast<unsigned char>(raw[start - 1])) && raw[start - 1] != '(' && raw[start - 1] != ',') start--;
-            return {start, raw.substr(start, end - start)};
-        };
-        auto extractExprAfter = [&](size_t pos, size_t len) -> std::pair<size_t, std::string> {
-            size_t start = pos + len;
-            while (start < raw.size() && isspace(static_cast<unsigned char>(raw[start]))) start++;
-            size_t end = start;
-            while (end < raw.size() && raw[end] != ',' && raw[end] != ')' && raw[end] != ' ' && raw[end] != ';') end++;
-            return {end, raw.substr(start, end - start)};
-        };
-        // Projection-list occurrences -> scalar function call form.
-        {
-            size_t fromAt = string::npos;
-            {
-                size_t scan = 0;
-                while ((scan = findTextOutsideQuotes(
-                            raw, " from ", scan)) != string::npos) {
-                    fromAt = scan;
-                    scan += 6;
-                }
-            }
-            const size_t projEnd = (fromAt == string::npos) ? raw.size() : fromAt;
-            string head = raw.substr(0, projEnd);
-            string tail = (fromAt == string::npos) ? string() : raw.substr(fromAt);
-            auto rewriteCalls = [](string h) {
-                for (const char* kw : {"is not distinct from", "is distinct from"}) {
-                    const size_t kl = strlen(kw);
-                    string low;
-                    for (char c : h) low += static_cast<char>(tolower(static_cast<unsigned char>(c)));
-                    size_t p = 0;
-                    while ((p = findTextOutsideQuotes(h, kw, p)) != string::npos) {
-                        const bool leftOk = (p == 0) || (!isalnum(static_cast<unsigned char>(h[p - 1])) && h[p - 1] != (char)95);
-                        const size_t after = p + kl;
-                        const bool rightOk = (after >= low.size()) || (!isalnum(static_cast<unsigned char>(low[after])) && low[after] != (char)95);
-                        if (!leftOk || !rightOk) { p += kl; continue; }
-                        size_t le = p;
-                        while (le > 0 && isspace(static_cast<unsigned char>(h[le - 1]))) --le;
-                        size_t ls = le;
-                        while (ls > 0) {
-                            const char c = h[ls - 1];
-                            if (isspace(static_cast<unsigned char>(c))) break;
-                            --ls;
-                        }
-                        size_t rs = after;
-                        while (rs < h.size() && isspace(static_cast<unsigned char>(h[rs]))) ++rs;
-                        size_t re = rs;
-                        while (re < h.size() && !isspace(static_cast<unsigned char>(h[re])) && h[re] != (char)44 && h[re] != (char)41) ++re;
-                        if (ls >= le || rs >= re) { p += kl; continue; }
-                        const string fn = (kl == 20) ? "isnotdistinct" : "isdistinct";
-                        const string call = fn + "(" + h.substr(ls, le - ls) + "," + h.substr(rs, re - rs) + ")";
-                        h = h.substr(0, ls) + call + h.substr(re);
-                        low.clear();
-                        for (char c : h) low += static_cast<char>(tolower(static_cast<unsigned char>(c)));
-                        p = ls + call.size();
-                    }
-                }
-                return h;
-            };
-            head = rewriteCalls(head);
-            raw = head + tail;
-        }
-        size_t pos = 0;
-        // IS NOT DISTINCT FROM first (longer match)
-        while ((pos = findTextOutsideQuotes(
-                    raw, "is not distinct from", pos)) != string::npos) {
-            auto [leftStart, leftExpr] = extractExprBefore(pos);
-            auto [rightEnd, rightExpr] = extractExprAfter(pos, 20);
-            string replacement = "((" + leftExpr + " = " + rightExpr + ") or (" + leftExpr + " is null and " + rightExpr + " is null))";
-            raw = raw.substr(0, leftStart) + replacement + raw.substr(rightEnd);
-            pos = leftStart + replacement.size();
-        }
-        pos = 0;
-        while ((pos = findTextOutsideQuotes(
-                    raw, "is distinct from", pos)) != string::npos) {
-            auto [leftStart, leftExpr] = extractExprBefore(pos);
-            auto [rightEnd, rightExpr] = extractExprAfter(pos, 16);
-            string replacement = "((" + leftExpr + " <> " + rightExpr + ") or (" + leftExpr + " is null and " + rightExpr + " is not null) or (" + leftExpr + " is not null and " + rightExpr + " is null))";
-            raw = raw.substr(0, leftStart) + replacement + raw.substr(rightEnd);
-            pos = leftStart + replacement.size();
-        }
-    }
+    // IS [NOT] DISTINCT FROM is parsed and evaluated as a typed null-safe
+    // comparison. Textual rewrites cannot find complete operands (casts,
+    // functions, CASE and parentheses) and corrupt both values and metadata.
     // substring(v from a [for b]) -> comma form the scalar evaluator
     // decodes; substr(...) is the historical alias and is normalized to
     // substring(...) as well.
@@ -1382,7 +1302,23 @@ static size_t findTopLevelKeyword(const string& sql, const string& kw, size_t st
                 !isIdentifierChar(static_cast<unsigned char>(sql[i - 1]));
             bool rightOk = (i + klen == sql.size()) ||
                 !isIdentifierChar(static_cast<unsigned char>(sql[i + klen]));
-            if (leftOk && rightOk) return i;
+            if (leftOk && rightOk) {
+                if (kw == "from") {
+                    // Distinguish the complete comparison grammar unit from
+                    // a relation clause. Tokenization ignores trivia without
+                    // confusing quoted identifiers or literal contents.
+                    const auto prefix = dbms::SQLParser::tokenize(sql.substr(0, i));
+                    const size_t count = prefix.size();
+                    const auto word = [&](size_t back) {
+                        return count >= back
+                            ? toLower(prefix[count - back]) : string{};
+                    };
+                    if (word(1) == "distinct" &&
+                        (word(2) == "is" ||
+                         (word(2) == "not" && word(3) == "is"))) continue;
+                }
+                return i;
+            }
         }
     }
     return string::npos;
@@ -9302,6 +9238,60 @@ static bool tableHasColumns(const string& dbname, const string& tablename, const
     return true;
 }
 
+static bool hasNullSafeComparison(const string& sql, bool wholeQuery) {
+    dbms::SQLParser parser;
+    const auto parsed = parser.parse(wholeQuery ? sql : "SELECT " + sql);
+    const auto* select = parsed.success
+        ? dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()) : nullptr;
+    if (!select) return false;
+    std::function<bool(const dbms::Expr*)> expression;
+    expression = [&](const dbms::Expr* node) -> bool {
+        if (const auto* binary = dynamic_cast<const dbms::BinaryOpExpr*>(node)) {
+            const string op = toLower(binary->op);
+            return op == "is distinct from" || op == "is not distinct from" ||
+                expression(binary->left.get()) || expression(binary->right.get());
+        }
+        if (const auto* unary = dynamic_cast<const dbms::UnaryOpExpr*>(node))
+            return expression(unary->operand.get());
+        if (const auto* cast = dynamic_cast<const dbms::CastExpr*>(node))
+            return expression(cast->operand.get());
+        if (const auto* call = dynamic_cast<const dbms::FunctionCallExpr*>(node)) {
+            if (expression(call->filter.get())) return true;
+            for (const auto& argument : call->args)
+                if (expression(argument.get())) return true;
+        }
+        if (const auto* conditional = dynamic_cast<const dbms::CaseExpr*>(node)) {
+            if (expression(conditional->switchExpr.get()) ||
+                expression(conditional->elseExpr.get())) return true;
+            for (const auto& branch : conditional->whenClauses)
+                if (expression(branch.first.get()) || expression(branch.second.get())) return true;
+        }
+        return false;
+    };
+    std::function<bool(const dbms::Stmt*)> query;
+    std::function<bool(const dbms::FromItem*)> source;
+    source = [&](const dbms::FromItem* item) {
+        return item && (expression(item->joinCondition.get()) ||
+            query(item->subquery.get()) || source(item->left.get()) || source(item->right.get()));
+    };
+    query = [&](const dbms::Stmt* rawStatement) {
+        const auto* statement = dynamic_cast<const dbms::SelectStmt*>(rawStatement);
+        if (!statement) return false;
+        for (const auto& item : statement->selectList)
+            if (expression(item.expr.get())) return true;
+        if (expression(statement->whereClause.get()) || expression(statement->having.get()) ||
+            source(statement->fromClause.get())) return true;
+        for (const auto& order : statement->orderBy)
+            if (expression(order.expr.get())) return true;
+        for (const auto& group : statement->groupBy)
+            if (expression(group.get())) return true;
+        for (const auto& cte : statement->ctes)
+            if (query(cte.query.get())) return true;
+        return query(statement->setOpLhs.get()) || query(statement->setOpRhs.get());
+    };
+    return query(select);
+}
+
 static bool hasComputedPredicate(const string& sql, bool* immutableConstant = nullptr,
                                  bool* unknownNullPredicate = nullptr) {
     if (immutableConstant) *immutableConstant = false;
@@ -9325,7 +9315,9 @@ static bool hasComputedPredicate(const string& sql, bool* immutableConstant = nu
         if (const auto* binary = dynamic_cast<const dbms::BinaryOpExpr*>(node)) {
             if (binary->op == "+" || binary->op == "-" || binary->op == "*" ||
                 binary->op == "/" || binary->op == "%" || binary->op == "^" ||
-                binary->op == "||" || binary->op == "::") computed = true;
+                binary->op == "||" || binary->op == "::" ||
+                toLower(binary->op) == "is distinct from" ||
+                toLower(binary->op) == "is not distinct from") computed = true;
             inspect(binary->left.get());
             inspect(binary->right.get());
         } else if (const auto* unary = dynamic_cast<const dbms::UnaryOpExpr*>(node)) {
@@ -29605,7 +29597,26 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     continue;
                 }
                 WindowFunc wf;
-                if (startsWithKeyword(item, "case")) {
+                if (hasNullSafeComparison(item)) {
+                    string error, state;
+                    if (!validateFromlessColumnBindings(
+                            item, error, state, tableAlias.empty() ? tnameOrig : tableAlias,
+                            &visibleColumns))
+                        throw dbms::DbError(state, error);
+                    dbms::StorageEngine::SelectExpr expression;
+                    expression.displayName = itemAlias.empty() ? "?column?" : itemAlias;
+                    expression.isScalar = true;
+                    expression.funcName = "expreval";
+                    expression.funcArgs.push_back(item);
+                    selectExprs.push_back(std::move(expression));
+                    hasScalar = true;
+                    exprTypes.push_back(3);
+                    for (size_t column = 0; column < tbl.len; ++column) {
+                        const auto referenced = dbms::ExprHelper::referencesColumn(
+                            item, tbl.cols[column].dataName);
+                        if (!referenced || *referenced) selectCols.insert(tbl.cols[column].dataName);
+                    }
+                } else if (startsWithKeyword(item, "case")) {
                     dbms::SQLParser caseParser;
                     const auto parsedCase = caseParser.parse("SELECT " + item);
                     const auto* caseSelect = parsedCase.success
