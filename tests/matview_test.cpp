@@ -347,6 +347,10 @@ static void test_unpopulated_query_gate_and_search_path_refresh() {
         assert(rejected);
     }
     assert(!ddl.executeSql("CREATE TABLE sink (id INT)", s));
+    Session unrelatedCaller;
+    unrelatedCaller.searchPath = "public";
+    Session* previousSession = dbms::currentSession();
+    dbms::setCurrentSession(&unrelatedCaller);
     bool dmlRejected = false;
     try {
         bool handled = false;
@@ -356,7 +360,10 @@ static void test_unpopulated_query_gate_and_search_path_refresh() {
     } catch (const dbms::DbError& error) {
         dmlRejected = error.sqlState() == "55000";
     }
+    assert(dbms::currentSession() == &unrelatedCaller);
+    dbms::setCurrentSession(previousSession);
     assert(dmlRejected);
+    assert(g_engine.query(db, "reporting__sink", {}, {"*"}).empty());
 
     // REFRESH itself is a relation lookup and must honor search_path too.
     assert(!ddl.executeSql("REFRESH MATERIALIZED VIEW mv", s));
@@ -365,6 +372,22 @@ static void test_unpopulated_query_gate_and_search_path_refresh() {
     assert(populated && populated->populated);
     assert(resolveTableName(s, "mv") == populated->backingTable);
     assert(resolveTableName(s, "reporting.mv") == populated->backingTable);
+
+    assert(!ddl.executeSql(
+        "CREATE VIEW public.session_view AS SELECT id FROM public.t", s));
+    dbms::setCurrentSession(&unrelatedCaller);
+    bool handled = false;
+    assert(!dbms::tryDmlBridge(
+        "INSERT INTO sink VALUES (8)", dbms::SqlCommand::Insert, s, handled));
+    assert(handled && dbms::currentSession() == &unrelatedCaller);
+    assert((readStructuredRows(db, "reporting__sink") ==
+            std::vector<dbms::StorageEngine::SqlRow>{{{"id", std::string("8")}}}));
+    handled = true;
+    assert(!dbms::tryDmlBridge(
+        "INSERT INTO session_view VALUES (9)",
+        dbms::SqlCommand::Insert, s, handled));
+    assert(!handled && dbms::currentSession() == &unrelatedCaller);
+    dbms::setCurrentSession(previousSession);
 
     g_engine.catalogService().evict(db);
     cleanup(db);

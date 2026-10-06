@@ -5704,6 +5704,15 @@ bool tryDmlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
     handled = false;
     if (parsedCmd != SqlCommand::Insert && parsedCmd != SqlCommand::Update &&
         parsedCmd != SqlCommand::Delete && parsedCmd != SqlCommand::Merge) return false;
+    // Native callers pass their session explicitly and need not already own
+    // the server thread's ambient context. Pure preparation and routines must
+    // resolve the same namespace as this DML's target/source consumers. Keep
+    // nested callers' context intact on success, fallback and error unwind.
+    struct SessionScope {
+        Session* previous = currentSession();
+        explicit SessionScope(Session& session) { setCurrentSession(&session); }
+        ~SessionScope() { setCurrentSession(previous); }
+    } sessionScope(s);
     clearLastDmlResult();
 
     SQLParser parser;
