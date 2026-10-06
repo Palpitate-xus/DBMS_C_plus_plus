@@ -50226,7 +50226,13 @@ PlPgsqlQueryResult StorageEngine::plpgsqlQueryNative(
     } catch (const DbError& error) {
         return fail(error.sqlState(), error.message());
     } catch (const std::exception& error) {
-        return fail("XX000", error.what());
+        // The expression evaluator's historical exception interface carries
+        // its SQLSTATE in a terminal diagnostic marker. Preserve that same
+        // checked boundary used by scalar evaluation and typed assignments.
+        ExprEvalResult failure;
+        failure.error = error.what();
+        const auto mapped = plpgsqlScalarResult(failure);
+        return fail(mapped.sqlState, mapped.message);
     }
 }
 
