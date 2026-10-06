@@ -13946,6 +13946,9 @@ static void replaceLateralQualifiedColumn(
 static bool lateralJoinPredicateMatches(
     const std::string& predicate, const TableSchema& leftSchema,
     const std::vector<std::vector<std::string>>& leftColumnQualifiers,
+    const TableSchema& leftVisibleSchema,
+    const std::vector<std::string>& leftVisibleValues,
+    const std::vector<bool>& leftVisibleNulls,
     const std::string& rightAlias,
     const std::vector<std::string>& leftValues,
     const std::vector<bool>& leftNulls,
@@ -13980,7 +13983,6 @@ static bool lateralJoinPredicateMatches(
             typeHints[key] = leftSchema.cols[ci].dataType;
             if (isNull) nullColumns.insert(key);
         }
-        ++bareCounts[toLower(name)];
     }
     for (size_t ci = 0; ci < rightNames.size(); ++ci) {
         const std::string& name = rightNames[ci];
@@ -13988,15 +13990,19 @@ static bool lateralJoinPredicateMatches(
         rowValues[key] = rightValues[ci];
         if (ci < rightTypes.size()) typeHints[key] = rightTypes[ci];
         if (rightNulls[ci]) nullColumns.insert(key);
-        ++bareCounts[toLower(name)];
     }
-    for (size_t ci = 0; ci < leftSchema.len; ++ci) {
-        const std::string name = toLower(leftSchema.cols[ci].dataName);
+    for (size_t ci = 0; ci < leftVisibleSchema.len; ++ci)
+        ++bareCounts[toLower(leftVisibleSchema.cols[ci].dataName)];
+    for (size_t ci = 0; ci < rightNames.size(); ++ci)
+        ++bareCounts[toLower(rightNames[ci])];
+    for (size_t ci = 0; ci < leftVisibleSchema.len; ++ci) {
+        const std::string name =
+            toLower(leftVisibleSchema.cols[ci].dataName);
         if (bareCounts[name] != 1) continue;
-        rowValues[name] = ci < leftValues.size()
-            ? leftValues[ci] : std::string();
-        typeHints[name] = leftSchema.cols[ci].dataType;
-        if (ci >= leftNulls.size() || leftNulls[ci])
+        rowValues[name] = ci < leftVisibleValues.size()
+            ? leftVisibleValues[ci] : std::string();
+        typeHints[name] = leftVisibleSchema.cols[ci].dataType;
+        if (ci >= leftVisibleNulls.size() || leftVisibleNulls[ci])
             nullColumns.insert(name);
     }
     for (size_t ci = 0; ci < rightNames.size(); ++ci) {
@@ -14183,6 +14189,7 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
         bool supportedLeftScope = parsedFromSelect &&
                                   parsedFromSelect->fromClause;
         bool materializeLeftJoinTree = false;
+        bool leftTreeHasMergedJoin = false;
         std::function<void(const dbms::FromItem*)> collectLeftRelations =
             [&](const dbms::FromItem* item) {
             if (!item || !supportedLeftScope) {
@@ -14196,27 +14203,37 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
                 leftRelations.push_back(std::move(relation));
                 return;
             }
-            if (item->type != dbms::FromItem::Type::Join ||
-                !item->usingCols.empty()) {
+            if (item->type != dbms::FromItem::Type::Join) {
                 supportedLeftScope = false;
                 return;
             }
             const std::string joinType = toLower(item->joinType);
             if (joinType == "cross") {
-                if (item->joinCondition) {
+                if (item->joinCondition || !item->usingCols.empty()) {
                     supportedLeftScope = false;
                     return;
                 }
+            } else if (joinType == "natural") {
+                if (item->joinCondition || !item->usingCols.empty()) {
+                    supportedLeftScope = false;
+                    return;
+                }
+                materializeLeftJoinTree = true;
+                leftTreeHasMergedJoin = true;
             } else if (joinType == "inner" || joinType == "left" ||
                        joinType == "right" || joinType == "full") {
-                if (!item->joinCondition) {
+                if (!item->usingCols.empty()) {
+                    if (item->joinCondition) {
+                        supportedLeftScope = false;
+                        return;
+                    }
+                    leftTreeHasMergedJoin = true;
+                } else if (!item->joinCondition) {
                     supportedLeftScope = false;
                     return;
                 }
                 materializeLeftJoinTree = true;
             } else {
-                // NATURAL/USING have merged output columns; the flattened
-                // leaf schemas below cannot preserve their output mapping.
                 supportedLeftScope = false;
                 return;
             }
@@ -14261,9 +14278,136 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
         }
         if (!supportedLeftScope) break;
 
+        struct LateralVisibleColumn {
+            dbms::Column column;
+            // FULL USING is COALESCE of the two visible keys. Keeping the
+            // source indices also preserves each qualified leaf independently.
+            std::vector<size_t> leafIndices;
+        };
+        size_t nextLeftRelation = 0;
+        std::function<std::vector<LateralVisibleColumn>(
+            const dbms::FromItem*)> buildLeftVisibleColumns =
+            [&](const dbms::FromItem* item) {
+            std::vector<LateralVisibleColumn> columns;
+            if (!item || !supportedLeftScope) {
+                supportedLeftScope = false;
+                return columns;
+            }
+            if (item->type == dbms::FromItem::Type::Table) {
+                if (nextLeftRelation >= leftRelations.size()) {
+                    supportedLeftScope = false;
+                    return columns;
+                }
+                const LateralLeftRelation& relation =
+                    leftRelations[nextLeftRelation++];
+                for (size_t ci = 0; ci < relation.schema.len; ++ci) {
+                    LateralVisibleColumn visible;
+                    visible.column = relation.schema.cols[ci];
+                    visible.leafIndices = {relation.columnOffset + ci};
+                    columns.push_back(std::move(visible));
+                }
+                return columns;
+            }
+            if (item->type != dbms::FromItem::Type::Join) {
+                supportedLeftScope = false;
+                return columns;
+            }
+
+            std::vector<LateralVisibleColumn> left =
+                buildLeftVisibleColumns(item->left.get());
+            std::vector<LateralVisibleColumn> right =
+                buildLeftVisibleColumns(item->right.get());
+            if (!supportedLeftScope) return columns;
+
+            const std::string joinType = toLower(item->joinType);
+            std::vector<std::string> usingColumns;
+            if (joinType == "natural") {
+                for (const LateralVisibleColumn& leftColumn : left) {
+                    const size_t rightMatches = static_cast<size_t>(
+                        std::count_if(right.begin(), right.end(),
+                            [&](const LateralVisibleColumn& rightColumn) {
+                                return rightColumn.column.dataName ==
+                                    leftColumn.column.dataName;
+                            }));
+                    if (rightMatches != 0 &&
+                        std::find(usingColumns.begin(), usingColumns.end(),
+                                  leftColumn.column.dataName) ==
+                            usingColumns.end()) {
+                        usingColumns.push_back(leftColumn.column.dataName);
+                    }
+                }
+            } else {
+                for (const std::string& rawName : item->usingCols)
+                    usingColumns.push_back(normalizeLateralIdentifier(rawName));
+            }
+            if (usingColumns.empty()) {
+                columns = std::move(left);
+                columns.insert(columns.end(), right.begin(), right.end());
+                return columns;
+            }
+
+            std::set<std::string> mergedNames;
+            for (const std::string& name : usingColumns) {
+                if (!mergedNames.insert(name).second) {
+                    supportedLeftScope = false;
+                    return std::vector<LateralVisibleColumn>{};
+                }
+                std::vector<size_t> leftMatches;
+                std::vector<size_t> rightMatches;
+                for (size_t ci = 0; ci < left.size(); ++ci) {
+                    if (left[ci].column.dataName == name)
+                        leftMatches.push_back(ci);
+                }
+                for (size_t ci = 0; ci < right.size(); ++ci) {
+                    if (right[ci].column.dataName == name)
+                        rightMatches.push_back(ci);
+                }
+                if (leftMatches.size() != 1 || rightMatches.size() != 1) {
+                    supportedLeftScope = false;
+                    return std::vector<LateralVisibleColumn>{};
+                }
+                const bool takeRight = joinType == "right";
+                LateralVisibleColumn merged = takeRight
+                    ? right[rightMatches.front()] : left[leftMatches.front()];
+                merged.column.dataName = name;
+                if (joinType == "full") {
+                    const auto& rightSources =
+                        right[rightMatches.front()].leafIndices;
+                    merged.leafIndices.insert(merged.leafIndices.end(),
+                        rightSources.begin(), rightSources.end());
+                }
+                columns.push_back(std::move(merged));
+            }
+            for (LateralVisibleColumn& column : left) {
+                if (!mergedNames.count(column.column.dataName))
+                    columns.push_back(std::move(column));
+            }
+            for (LateralVisibleColumn& column : right) {
+                if (!mergedNames.count(column.column.dataName))
+                    columns.push_back(std::move(column));
+            }
+            return columns;
+        };
+        std::vector<LateralVisibleColumn> leftVisibleColumns =
+            buildLeftVisibleColumns(parsedFromSelect->fromClause.get());
+        if (!supportedLeftScope ||
+            nextLeftRelation != leftRelations.size()) break;
+        TableSchema leftVisibleTbl;
+        leftVisibleTbl.tablename = "__lateral_visible";
+        if (leftVisibleColumns.size() > dbms::MAX_COLUMNS) {
+            cout << "ERROR: LATERAL visible join output has too many columns "
+                    "(SQLSTATE 54011)" << endl;
+            failed = true;
+            return result;
+        }
+        for (const LateralVisibleColumn& visible : leftVisibleColumns)
+            leftVisibleTbl.cols[leftVisibleTbl.len++] = visible.column;
+
         struct LateralLeftRow {
             std::vector<std::string> values;
             std::vector<bool> nulls;
+            std::vector<std::string> visibleValues;
+            std::vector<bool> visibleNulls;
         };
         std::vector<LateralLeftRow> leftRows;
         if (materializeLeftJoinTree) {
@@ -14274,8 +14418,41 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
             bool leftStructuredAvailable = false;
             bool leftExecutionFailed = false;
             std::string leftFailureText;
+            std::string leftQuery = "SELECT * FROM " + leftFactor;
+            if (leftTreeHasMergedJoin) {
+                auto quoteIdentifier = [](const std::string& identifier) {
+                    std::string quoted = "\"";
+                    for (char c : identifier) {
+                        if (c == '"') quoted += "\"\"";
+                        else quoted += c;
+                    }
+                    quoted += '"';
+                    return quoted;
+                };
+                std::string leafProjection;
+                for (const LateralLeftRelation& relation : leftRelations) {
+                    const std::string qualifier = relation.alias.empty()
+                        ? relation.tableName
+                        : quoteIdentifier(
+                              normalizeLateralIdentifier(relation.alias));
+                    for (size_t ci = 0; ci < relation.schema.len; ++ci) {
+                        if (!leafProjection.empty()) leafProjection += ", ";
+                        leafProjection += qualifier + "." +
+                            quoteIdentifier(relation.schema.cols[ci].dataName) +
+                            " AS __lat_leaf_" +
+                            std::to_string(relation.columnOffset + ci);
+                    }
+                }
+                if (leafProjection.empty()) {
+                    cout << "ERROR: LATERAL JOIN tree has no projectable "
+                            "base-table columns (SQLSTATE 0A000)" << endl;
+                    failed = true;
+                    return result;
+                }
+                leftQuery = "SELECT " + leafProjection + " FROM " + leftFactor;
+            }
             const auto leftDisplayRows = runDerivedSubQueryFull(
-                "SELECT * FROM " + leftFactor, s, leftColumnNames,
+                leftQuery, s, leftColumnNames,
                 &leftColumnTypes, &leftStructuredRows, &leftStructuredNulls,
                 &leftStructuredAvailable, &leftExecutionFailed,
                 &leftFailureText);
@@ -14302,8 +14479,10 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
                         failed = true;
                         return result;
                     }
-                    leftRows.push_back({leftStructuredRows[rowIndex],
-                                        leftStructuredNulls[rowIndex]});
+                    LateralLeftRow row;
+                    row.values = leftStructuredRows[rowIndex];
+                    row.nulls = leftStructuredNulls[rowIndex];
+                    leftRows.push_back(std::move(row));
                 }
             }
         } else {
@@ -14342,6 +14521,38 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
                 }
                 leftRows.swap(products);
                 if (leftRows.empty()) break;
+            }
+        }
+
+        for (LateralLeftRow& row : leftRows) {
+            if (row.values.size() != leftTbl.len ||
+                row.nulls.size() != leftTbl.len) {
+                cout << "ERROR: malformed LATERAL visible row "
+                        "(SQLSTATE XX000)" << endl;
+                failed = true;
+                return result;
+            }
+            row.visibleValues.reserve(leftVisibleColumns.size());
+            row.visibleNulls.reserve(leftVisibleColumns.size());
+            for (size_t ci = 0; ci < leftVisibleColumns.size(); ++ci) {
+                const LateralVisibleColumn& column = leftVisibleColumns[ci];
+                std::string value;
+                bool isNull = true;
+                for (size_t leafIndex : column.leafIndices) {
+                    if (leafIndex >= row.values.size()) {
+                        cout << "ERROR: invalid LATERAL visible column map "
+                                "(SQLSTATE XX000)" << endl;
+                        failed = true;
+                        return result;
+                    }
+                    if (!row.nulls[leafIndex]) {
+                        value = row.values[leafIndex];
+                        isNull = false;
+                        break;
+                    }
+                }
+                row.visibleValues.push_back(std::move(value));
+                row.visibleNulls.push_back(isNull);
             }
         }
 
@@ -14388,7 +14599,8 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
                 }
             }
             substituteLateralBareScalarTargets(
-                replacedSql, s, leftTbl, outerValues, outerNulls);
+                replacedSql, s, leftVisibleTbl,
+                leftRow.visibleValues, leftRow.visibleNulls);
             std::vector<std::string> rowColNames;
             std::vector<std::string> rowColTypes;
             std::vector<std::vector<std::string>> rowStructuredRows;
@@ -14493,7 +14705,9 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
                     std::string evaluationError;
                     if (!lateralJoinPredicateMatches(
                             joinCondition, leftTbl, leftColumnQualifiers,
-                            alias, outerValues, outerNulls,
+                            leftVisibleTbl, leftRow.visibleValues,
+                            leftRow.visibleNulls, alias,
+                            outerValues, outerNulls,
                             rowColNames, rowColTypes,
                             rowStructuredRows[rowIndex],
                             rowStructuredNulls[rowIndex], s.currentDB,
@@ -14573,8 +14787,8 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
         // parser to misread as a relation name.
         if (leftRows.empty()) {
             std::string probeSql = innerSelect;
-            std::vector<std::string> nullOuterValues(leftTbl.len);
-            std::vector<bool> nullOuterColumns(leftTbl.len, true);
+            std::vector<std::string> nullVisibleValues(leftVisibleTbl.len);
+            std::vector<bool> nullVisibleColumns(leftVisibleTbl.len, true);
             for (const LateralLeftRelation& relation : leftRelations) {
                 for (size_t ci = 0; ci < relation.schema.len; ++ci) {
                     const size_t combinedIndex = relation.columnOffset + ci;
@@ -14584,7 +14798,8 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
                 }
             }
             substituteLateralBareScalarTargets(
-                probeSql, s, leftTbl, nullOuterValues, nullOuterColumns);
+                probeSql, s, leftVisibleTbl, nullVisibleValues,
+                nullVisibleColumns);
             std::vector<std::vector<std::string>> probeRows;
             std::vector<std::vector<bool>> probeNulls;
             bool probeStructured = false;
