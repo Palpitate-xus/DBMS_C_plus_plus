@@ -773,7 +773,17 @@ public:
                         coerceCaseInput(select->valuesRows[row][column],inputs[row][column],common);
                 }
             }
-            expression(select->whereClause, scopes);
+            const auto condition = expression(select->whereClause, scopes);
+            if (select->whereClause) {
+                const auto type = common_type_detail::canonical(condition);
+                if (type != "unknown" && type != "boolean")
+                    throw DbError("42804","argument of WHERE must be type boolean");
+                // Preserve the source's actual expression and static type.
+                // Unknown input acquires boolean context during analysis;
+                // row execution must not rediscover this from datum bytes or
+                // fall back merely because 'true' was still unknown/TEXT.
+                coerceCaseInput(select->whereClause,condition,"boolean");
+            }
             for (auto& value : select->distinctOn) expression(value, scopes);
             for (auto& value : select->groupBy) expression(value, scopes);
             for (auto& group : select->groupByElems) for (auto& value : group.exprs) expression(value, scopes);

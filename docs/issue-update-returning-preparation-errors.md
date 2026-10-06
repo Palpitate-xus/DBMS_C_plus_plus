@@ -18,8 +18,9 @@ Evidence is retained under `/tmp/dbms-materialized-target.fBH1T6Yr`:
 - `consumer-native-final/update_returning_preparation.log`: terminal 0, all
   five errors precise, no published partial result, unchanged target and no
   writer sequence call; valid UPDATE RETURNING value/type/tag also pass.
-- `consumer-native-returning-adjacent`: DML RETURNING, WITH transition RETURNING
-  and transition binding native tests pass with matching objects.
+- `consumer-native-returning-adjacent`: WITH transition RETURNING and transition
+  binding pass. DML RETURNING passes in `consumer-native-returning-adjacent-final`
+  after the precise error-contract fixture adaptation described below.
 - `assignment-wire-returning-candidate.log`: unchanged unsplit protocol matrix
   now reports `42883` for the original failing UPDATE; all monotonic sequence
   and rollback checks pass. It still exits 1 solely for the separate legal

@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Unsplit ordinary-input consumer diagnostic; known failures stay asserted.
-
-The metadata-only foundation does not close legacy UPDATE error propagation or
-INSERT SELECT unknown-WHERE conversion. This script deliberately remains red
-on that foundation rather than relaxing either PostgreSQL18 expectation.
-"""
+"""Unsplit ordinary-input consumer contract, including original failing SQL."""
 import importlib.util
 import socket
 import sys
@@ -50,7 +45,13 @@ def main():
                     "$$BEGIN PERFORM nextval('assignment_effects'); RETURN p; END$$"):
             query(sql + ";")
             assert not failures, failures
-        for index, (sql, state) in enumerate(controls.CASES, 1):
+        cases = controls.CASES + [
+            ("INSERT INTO assignment_rows SELECT assignment_writer(2) WHERE 'bad'", "22P02"),
+            ("INSERT INTO assignment_rows SELECT assignment_writer(2) WHERE 1", "42804"),
+            ("INSERT INTO assignment_rows SELECT assignment_writer(2) WHERE NULL::TEXT", "42804"),
+            ("INSERT INTO assignment_rows SELECT assignment_writer(id) FROM assignment_rows WHERE 'bad'", "22P02"),
+        ]
+        for index, (sql, state) in enumerate(cases, 1):
             query("SAVEPOINT assignment_case;")
             query(sql + ";", state)
             query("ROLLBACK TO assignment_case;")
