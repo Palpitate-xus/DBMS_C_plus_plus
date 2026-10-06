@@ -764,7 +764,9 @@ struct InsertStmt : public Stmt {
 struct UpdateStmt : public Stmt {
     std::string tableName;
     std::string alias;                         // UPDATE t [AS] x
-    std::map<std::string, ExprPtr> setClauses;
+    // Retain every original assignment site until semantic validation.
+    // A map would silently overwrite duplicate targets and their RHS trees.
+    std::vector<std::pair<std::string, ExprPtr>> setClauses;
     ExprPtr whereClause;
     std::string whereCurrentOf;                // WHERE CURRENT OF cursor
     std::unique_ptr<FromItem> fromClause;      // UPDATE ... FROM ...

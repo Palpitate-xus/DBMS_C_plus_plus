@@ -3734,6 +3734,147 @@ bool executeUpdateFrom(const UpdateStmt& stmt, Session& s, bool& fallback) {
     return false;
 }
 
+bool rejectDuplicateUpdateAssignments(const UpdateStmt& statement, Session& session,
+                                      const std::string& originalSql, bool& handled) {
+    std::set<std::string> targets;
+    std::string duplicate;
+    for (const auto& assignment : statement.setClauses) {
+        const auto name = identifier(assignment.first);
+        if (!targets.insert(name).second && duplicate.empty()) duplicate = name;
+    }
+    if (duplicate.empty()) return false;
+    handled = true;
+    if (!checkDatabase(session) ||
+        !checkTablePrivilege(session, identifier(statement.tableName),
+                             StorageEngine::TablePrivilege::Update)) return true;
+    // A duplicate is a semantic error, not a grammar error: preserve every
+    // original RHS and resolve all namespaces/routines before rejecting it.
+    // No FROM scan, volatile expression, DEFAULT or RETURNING is executed.
+    auto prepared = std::make_shared<PreparedQuery>(
+        g_engine.prepareBoundQuery(session.currentDB, originalSql));
+    auto* update = dynamic_cast<UpdateStmt*>(prepared->ast.get());
+    if (!update) throw DbError("XX000", "duplicate UPDATE preparation changed command");
+    const PreparedQuery::SourceRange* target = nullptr;
+    for (const auto& range : prepared->sourceRanges)
+        if (range.owner == update && !range.source) target = &range;
+    if (!target) throw DbError("XX000", "duplicate UPDATE has no target descriptor");
+    for (auto& assignment : update->setClauses) {
+        const auto name = identifier(assignment.first);
+        const auto column = std::find_if(target->columns.begin(), target->columns.end(),
+            [&](const auto& item) { return item.name == name; });
+        if (column == target->columns.end())
+            throw DbError("42703", "column does not exist: " + name);
+        const auto* literal = dynamic_cast<LiteralExpr*>(assignment.second.get());
+        if (literal && !literal->preparedSubquery && literal->typeName.empty() &&
+            !literal->value.empty() && literal->value.front() == '\'') {
+            auto cast = std::make_unique<CastExpr>();
+            cast->typeName = column->type;
+            cast->operand = std::move(assignment.second);
+            assignment.second = std::move(cast);
+        }
+    }
+    if (auto* literal = dynamic_cast<LiteralExpr*>(update->whereClause.get())) {
+        if (!literal->preparedSubquery && literal->typeName.empty() &&
+            (literal->value == "null" || (!literal->value.empty() && literal->value.front() == '\''))) {
+            auto cast = std::make_unique<CastExpr>();
+            cast->typeName = "boolean";
+            cast->operand = std::move(update->whereClause);
+            update->whereClause = std::move(cast);
+        }
+    }
+    PreparedQueryExecution execution(prepared, &g_engine, session.currentDB);
+    if (update->whereClause && ExprHelper::canonicalResultTypeName(
+            ExprHelper::inferParsedResultType(update->whereClause.get(), {},
+                                             session.currentDB, &g_engine)) != "boolean")
+        throw DbError("42804", "argument of WHERE must be type boolean");
+    // PostgreSQL converts unknown input constants during analysis. It does
+    // not run constant arithmetic (1/0) or integer narrowing before the
+    // duplicate-target error. Validate input casts, not all pure expressions.
+    std::function<void(Expr*)> inputConversions;
+    std::function<void(Stmt*)> childInputs;
+    std::function<void(FromItem*)> sourceInputs;
+    const auto windowInputs = [&](WindowDef& window) {
+        for (auto& item : window.partitionBy) inputConversions(item.get());
+        for (auto& item : window.orderBy) inputConversions(item.first.get());
+        inputConversions(window.frameStart.get());
+        inputConversions(window.frameEnd.get());
+    };
+    sourceInputs = [&](FromItem* source) {
+        if (!source) return;
+        sourceInputs(source->left.get());
+        sourceInputs(source->right.get());
+        childInputs(source->subquery.get());
+        inputConversions(source->joinCondition.get());
+    };
+    childInputs = [&](Stmt* child) {
+        auto* select = dynamic_cast<SelectStmt*>(child);
+        if (!select) return;
+        for (auto& cte : select->ctes) childInputs(cte.query.get());
+        sourceInputs(select->fromClause.get());
+        for (auto& item : select->selectList) inputConversions(item.expr.get());
+        for (auto& row : select->valuesRows)
+            for (auto& item : row) inputConversions(item.get());
+        for (auto& item : select->distinctOn) inputConversions(item.get());
+        inputConversions(select->whereClause.get());
+        for (auto& item : select->groupBy) inputConversions(item.get());
+        for (auto& group : select->groupByElems)
+            for (auto& item : group.exprs) inputConversions(item.get());
+        inputConversions(select->having.get());
+        for (auto& item : select->orderBy) inputConversions(item.expr.get());
+        for (auto& window : select->windowDefs) windowInputs(window);
+        childInputs(select->setOpLhs.get()); childInputs(select->setOpRhs.get());
+    };
+    inputConversions = [&](Expr* expression) {
+        if (!expression) return;
+        if (expression->preparedSubquery) {
+            childInputs(expression->preparedSubquery.get());
+            return;
+        }
+        if (auto* cast = dynamic_cast<CastExpr*>(expression)) {
+            inputConversions(cast->operand.get());
+            const auto* literal = dynamic_cast<const LiteralExpr*>(cast->operand.get());
+            if (literal && !literal->preparedSubquery && literal->typeName.empty() &&
+                !literal->value.empty() && literal->value.front() == '\'') {
+                execution.prepareExpression(cast);
+                (void)execution.evaluate(cast, execution.context());
+            }
+        } else if (auto* node = dynamic_cast<UnaryOpExpr*>(expression)) {
+            inputConversions(node->operand.get());
+        } else if (auto* node = dynamic_cast<BinaryOpExpr*>(expression)) {
+            inputConversions(node->left.get()); inputConversions(node->right.get());
+        } else if (auto* node = dynamic_cast<CaseExpr*>(expression)) {
+            inputConversions(node->switchExpr.get()); inputConversions(node->elseExpr.get());
+            for (auto& arm : node->whenClauses) {
+                inputConversions(arm.first.get()); inputConversions(arm.second.get());
+            }
+        } else if (auto* node = dynamic_cast<FunctionCallExpr*>(expression)) {
+            for (auto& argument : node->args) inputConversions(argument.get());
+            for (auto& argument : node->namedArgs) inputConversions(argument.value.get());
+            inputConversions(node->filter.get());
+            if (node->hasOver) windowInputs(node->over);
+        } else if (auto* node = dynamic_cast<ArrayExpr*>(expression)) {
+            for (auto& element : node->elements) inputConversions(element.get());
+        } else if (auto* node = dynamic_cast<RowExpr*>(expression)) {
+            for (auto& element : node->elements) inputConversions(element.get());
+        }
+    };
+    sourceInputs(update->fromClause.get());
+    for (auto& assignment : update->setClauses)
+        if (!isDefaultValue(assignment.second)) {
+            execution.prepareExpression(assignment.second.get());
+            inputConversions(assignment.second.get());
+        }
+    if (update->whereClause) {
+        execution.prepareExpression(update->whereClause.get());
+        inputConversions(update->whereClause.get());
+    }
+    for (auto& item : update->returning)
+        if (item.expr && !isStarProjection(item.expr.get())) {
+            execution.prepareExpression(item.expr.get()); inputConversions(item.expr.get());
+        }
+    throw DbError("42601", "multiple assignments to column \"" + duplicate + "\"");
+}
+
 bool executePreparedUpdate(const UpdateStmt& stmt, Session& s, bool& fallback,
                            const std::string& originalSql) {
     fallback = false;
@@ -5232,6 +5373,8 @@ bool tryDmlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
     } else if (parsedCmd == SqlCommand::Update) {
         const auto* stmt = dynamic_cast<const UpdateStmt*>(parsed.stmt.get());
         if (!stmt) return false;
+        if (rejectDuplicateUpdateAssignments(*stmt, s, rawSql.empty() ? sql : rawSql, handled))
+            return true;
         const bool hasDefault = std::any_of(stmt->setClauses.begin(), stmt->setClauses.end(),
             [](const auto& assignment) { return isDefaultValue(assignment.second); });
         if (!stmt->fromClause && stmt->whereCurrentOf.empty() && !hasDefault &&

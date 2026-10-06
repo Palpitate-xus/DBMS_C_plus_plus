@@ -3769,12 +3769,22 @@ ParseResult SQLParser::parseUpdate(const std::string& sql) {
         }
         std::string col = tokens[pos];
         pos += 2;
-        auto expr = parseSimpleExpr(tokens, pos);
+        const size_t expressionBegin = pos;
+        ExprPtr expr;
+        if (pos < tokens.size() && toLower(tokens[pos]) == "default") {
+            auto value = std::make_unique<LiteralExpr>();
+            value->value = "default";
+            ++pos;
+            markSource(value.get(), tokens, expressionBegin, pos);
+            expr = std::move(value);
+        } else {
+            expr = parseSimpleExpr(tokens, pos);
+        }
         if (!expr) {
             r.error = "missing expression in UPDATE SET clause";
             return r;
         }
-        stmt->setClauses[col] = std::move(expr);
+        stmt->setClauses.emplace_back(col, std::move(expr));
         if (pos < tokens.size() && tokens[pos] == ",") {
             ++pos;
             if (pos >= tokens.size() || tokens[pos] == ";" ||

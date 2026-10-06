@@ -114,7 +114,7 @@ int main() {
     prepared = prepareQuery("UPDATE t AS a SET id=b.id FROM t AS b WHERE a.id=b.id RETURNING a.id", {}, metadata);
     const auto* update = dynamic_cast<UpdateStmt*>(prepared.ast.get());
     const auto* target = dynamic_cast<ColumnRefExpr*>(update->returning[0].expr.get());
-    const auto* source = dynamic_cast<ColumnRefExpr*>(update->setClauses.at("id").get());
+    const auto* source = dynamic_cast<ColumnRefExpr*>(update->setClauses.front().second.get());
     assert(target->binding && source->binding && target->binding->sourceOrdinal != source->binding->sourceOrdinal);
     assert(!prepared.sourceRanges[target->binding->sourceOrdinal].source);
     assert(prepared.sourceRanges[source->binding->sourceOrdinal].source);
