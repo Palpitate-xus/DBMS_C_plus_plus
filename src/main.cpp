@@ -35853,11 +35853,21 @@ static bool executeWithCteInheritance(const std::string& inputSql, Session& s,
         pendingExplainDepth = executeDepth + (command == dbms::SqlCommand::Execute ? 2 : 1);
     }
     bool databaseIndependentQuery = false;
-    if (outermost && !g_engine.inTransaction() && command == dbms::SqlCommand::Select) {
+    if (outermost && command == dbms::SqlCommand::Select) {
         dbms::SQLParser parser;
         const auto parsed = parser.parseForBinding(rawSql);
         databaseIndependentQuery = parsed.success && parsed.stmt &&
             dbms::SQLParser::isDatabaseIndependentQuery(*parsed.stmt);
+    }
+    if (outermost && g_engine.databaseTransactionOwnershipDeferred() &&
+        !databaseIndependentQuery && command != dbms::SqlCommand::Begin &&
+        command != dbms::SqlCommand::StartTransaction && command != dbms::SqlCommand::Commit &&
+        command != dbms::SqlCommand::Rollback &&
+        command != dbms::SqlCommand::Abort && command != dbms::SqlCommand::SetTransaction) {
+        const auto status = g_engine.ensureDatabaseTransactionOwnership();
+        if (status != DBStatus::OK)
+            throw dbms::DbError(dbms::sqlstateForDBStatus(status),
+                               "could not acquire database transaction ownership");
     }
     const bool statementTransaction = outermost &&
         !g_engine.inTransaction() &&

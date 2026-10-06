@@ -891,6 +891,21 @@ public:
     // Start a transaction that will perform file-backed DDL and therefore
     // needs an exclusive database snapshot lock.
     DBStatus beginTransaction(const std::string& dbname, bool ddlSnapshot);
+    // Only a caller with a whole-AST database-independent query proof may
+    // defer physical database ownership. The normal BEGIN coordinator still
+    // owns transaction characteristics, notifications and advisory resources.
+    class DatabaseIndependentBeginScope {
+    public:
+        explicit DatabaseIndependentBeginScope(StorageEngine& engine);
+        ~DatabaseIndependentBeginScope();
+        DatabaseIndependentBeginScope(const DatabaseIndependentBeginScope&) = delete;
+        DatabaseIndependentBeginScope& operator=(const DatabaseIndependentBeginScope&) = delete;
+    private:
+        StorageEngine& engine_;
+        bool previous_;
+    };
+    bool databaseTransactionOwnershipDeferred() const;
+    DBStatus ensureDatabaseTransactionOwnership() const;
     DBStatus commitTransaction();
     DBStatus rollbackTransaction();
     // SQL statements inside one transaction share a command ID.  Tuple
@@ -1503,6 +1518,9 @@ public:
         return transactionContext().currentCommandId;
     }
     const ReadView* getCurrentReadView() const {
+        // Physical consumers may copy this view. Never export a deferred
+        // null-CLOG view into the legacy snapshot-only visibility fallback.
+        requireDatabaseTransactionOwnership();
         const auto& tx = transactionContext();
         return tx.inTransaction ? &tx.readView : nullptr;
     }
@@ -2173,6 +2191,9 @@ private:
         std::map<std::string, bool> constraintMode; // name -> deferred?
         std::map<uint64_t, std::vector<DeferredCheck>> deferredChecks;
         bool inTransaction = false;
+        bool deferDatabaseBeginRequested = false;
+        bool databaseOwnershipDeferred = false;
+        bool promotingDatabaseOwnership = false;
         bool readOnly = false;
         bool preserveBackupOnRollback = false;
         std::string txnDB;
@@ -2281,6 +2302,8 @@ private:
     mutable std::map<std::thread::id, std::unique_ptr<TransactionContext>> transactionContexts_;
     TransactionContext& transactionContext() const;
     DBStatus createSavepoint(const std::string& name, bool internalStatement);
+    DBStatus finishDatabaseIndependentTransaction();
+    void requireDatabaseTransactionOwnership() const;
     bool hasUserSavepoint() const;
     void ensureTransactionSnapshot() const;
     bool markTupleDeletedByCurrentCommand(

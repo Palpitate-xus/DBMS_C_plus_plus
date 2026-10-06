@@ -4981,11 +4981,11 @@ void notePreparedTemporaryObjectAccess(const std::string& sql, Session& session)
         std::find(searchPath.begin(), searchPath.end(), temporarySchema) == searchPath.end()) {
         searchPath.insert(searchPath.begin(), temporarySchema);
     }
-    auto& catalog = g_engine.catalogService().get(session.currentDB);
     const auto visitRelation = [&](const std::string& name, const Names& ctes) {
         CatalogManager::QualifiedName qualified;
         if (name.empty() || !CatalogManager::parseQualifiedName(name, qualified, true)) return;
         if (qualified.schema.empty() && ctes.count(qualified.name)) return;
+        auto& catalog = g_engine.catalogService().get(session.currentDB);
         const PgClassRow* relation = nullptr;
         if (qualified.schema == "pg_temp") {
             const auto* nameSpace = catalog.findTempNamespace(session.pid);

@@ -2394,6 +2394,9 @@ void StorageEngine::backgroundCheckpoint() {
 // Primary Key Index
 // ========================================================================
 std::filesystem::path StorageEngine::dbPath(const std::string& dbname) const {
+    const auto status = ensureDatabaseTransactionOwnership();
+    if (status != DBStatus::OK)
+        throw DbError(sqlstateForDBStatus(status), "could not acquire database transaction ownership");
     return std::filesystem::path(dbname);
 }
 
@@ -6641,6 +6644,9 @@ bool installHeapWritebackWalBarrier(const StorageEngine& engine,
 
 PageAllocator* StorageEngine::getPageAllocator(const std::string& dbname,
                                                 const std::string& tablename) const {
+    const auto status = ensureDatabaseTransactionOwnership();
+    if (status != DBStatus::OK)
+        throw DbError(sqlstateForDBStatus(status), "could not acquire database transaction ownership");
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     std::string key = dbname + "/" + tablename;
     auto it = pageAllocators_.find(key);
@@ -7128,6 +7134,7 @@ void StorageEngine::pruneMissingDatabaseCaches() {
 
 FreeSpaceMap* StorageEngine::getFSM(const std::string& dbname,
                                      const std::string& tablename) const {
+    requireDatabaseTransactionOwnership();
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     std::string key = dbname + "/" + tablename;
     auto it = fsmCache_.find(key);
@@ -7147,6 +7154,7 @@ void StorageEngine::closeAllFSM() {
 
 VisibilityMap* StorageEngine::getVM(const std::string& dbname,
                                      const std::string& tablename) const {
+    requireDatabaseTransactionOwnership();
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     std::string key = dbname + "/" + tablename;
     auto it = vmCache_.find(key);
@@ -7165,6 +7173,9 @@ void StorageEngine::closeAllVM() {
 }
 
 CommitLog* StorageEngine::getCommitLog(const std::string& dbname) const {
+    const auto status = ensureDatabaseTransactionOwnership();
+    if (status != DBStatus::OK)
+        throw DbError(sqlstateForDBStatus(status), "could not acquire database transaction ownership");
     // commitLogs_ is a mutable shared map; lock it (cacheMutex_ is recursive,
     // so callers that already hold it are fine).
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
@@ -7265,6 +7276,9 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
                                 const std::vector<std::string>& targetPartitions,
                                 bool registerSiread,
                                 bool indexMaintenanceView) const {
+    const auto status = ensureDatabaseTransactionOwnership();
+    if (status != DBStatus::OK)
+        throw DbError(sqlstateForDBStatus(status), "could not acquire database transaction ownership");
     if (!indexMaintenanceView) noteTemporaryRelationAccess(dbname, tablename);
     if (!indexMaintenanceView && transactionContext().inTransaction &&
         dbname == transactionContext().txnDB) {
@@ -8097,6 +8111,7 @@ void StorageEngine::invalidateHashidxCache(const std::string& dbname,
 HashIndex* StorageEngine::getHashIndex(const std::string& dbname,
                                         const std::string& tablename,
                                         const std::string& colname) const {
+    requireDatabaseTransactionOwnership();
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     std::string key = dbname + "." + tablename + "." + colname;
     auto it = hashIndexCache_.find(key);
@@ -8118,6 +8133,7 @@ HashIndex* StorageEngine::getHashIndex(const std::string& dbname,
 HashIndex* StorageEngine::getHashIndexForBuild(
         const std::string& dbname, const std::string& tablename,
         const std::string& colname) const {
+    requireDatabaseTransactionOwnership();
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     const std::string key = dbname + "." + tablename + "." + colname;
     auto it = hashIndexCache_.find(key);
@@ -8254,6 +8270,7 @@ std::vector<std::string> StorageEngine::getBloomIndexedColumns(const std::string
 BloomIndex* StorageEngine::getBloomIndex(const std::string& dbname,
                                          const std::string& tablename,
                                          const std::string& colname) const {
+    requireDatabaseTransactionOwnership();
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     std::string key = dbname + "." + tablename + "." + colname;
     auto it = bloomIndexCache_.find(key);
@@ -8275,6 +8292,7 @@ BloomIndex* StorageEngine::getBloomIndex(const std::string& dbname,
 BloomIndex* StorageEngine::getBloomIndexForBuild(
         const std::string& dbname, const std::string& tablename,
         const std::string& colname) const {
+    requireDatabaseTransactionOwnership();
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     const std::string key = dbname + "." + tablename + "." + colname;
     auto it = bloomIndexCache_.find(key);
@@ -14162,13 +14180,15 @@ static bool pathEntryExists(const std::filesystem::path& path,
 
 bool StorageEngine::databaseExists(const std::string& dbname) const {
     if (dbname.empty() || !validStoredIdentifier(dbname, MAX_TABLE_NAME_LEN)) return false;
-    const auto path = dbPath(dbname);
+    // Existence is a name-generation check, not table/catalog access. In
+    // particular, checking a deferred transaction must not promote it.
+    const auto path = std::filesystem::path(dbname);
     std::error_code ec;
     if (std::filesystem::is_symlink(path, ec) || ec ||
         !std::filesystem::is_directory(path, ec) || ec) {
         return false;
     }
-    const auto list = tableListPath(dbname);
+    const auto list = path / "tlist.lst";
     if (std::filesystem::is_symlink(list, ec) || ec ||
         !std::filesystem::is_regular_file(list, ec) || ec) {
         return false;
@@ -15367,6 +15387,7 @@ std::filesystem::path StorageEngine::toastIndexPath(const std::string& dbname,
 
 PageAllocator* StorageEngine::getToastPageAllocator(const std::string& dbname,
                                                     const std::string& tablename) const {
+    requireDatabaseTransactionOwnership();
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     std::string key = dbname + ":" + tablename;
     auto it = toastPageAllocators_.find(key);
@@ -20586,6 +20607,9 @@ std::string StorageEngine::getColumnComment(const std::string& dbname,
 }
 
 std::vector<std::string> StorageEngine::getTableNames(const std::string& dbname) const {
+    const auto status = ensureDatabaseTransactionOwnership();
+    if (status != DBStatus::OK)
+        throw DbError(sqlstateForDBStatus(status), "could not acquire database transaction ownership");
     {
         std::lock_guard<std::mutex> lock(catalogSnapshotMutex_);
         if (transactionContext().catalogSnapshot) {
@@ -21794,6 +21818,9 @@ void StorageEngine::invalidateCachedSchema(const std::string& dbname,
 
 TableSchema StorageEngine::getTableSchema(const std::string& dbname,
                                             const std::string& tablename) const {
+    const auto status = ensureDatabaseTransactionOwnership();
+    if (status != DBStatus::OK)
+        throw DbError(sqlstateForDBStatus(status), "could not acquire database transaction ownership");
     if (dbname.empty() || !validStoredIdentifier(dbname, MAX_TABLE_NAME_LEN) ||
         tablename.empty() || !validStoredIdentifier(tablename, MAX_TABLE_NAME_LEN)) {
         return {};
@@ -23235,6 +23262,8 @@ DBStatus StorageEngine::insertRow(const std::string& dbname,
                                    const SqlRow& sqlValues,
                                    std::vector<SqlRow>* insertedRows,
                                    IdentityOverride identityOverride) {
+    const auto ownershipStatus = ensureDatabaseTransactionOwnership();
+    if (ownershipStatus != DBStatus::OK) return ownershipStatus;
     std::map<std::string, std::string> values;
     std::set<std::string> nullColumns;
     splitSqlRow(sqlValues, values, nullColumns);
@@ -25884,6 +25913,8 @@ DBStatus StorageEngine::removeRows(
     std::vector<SqlRow>* deletedRows,
     const SqlDeleteMatcher& deleteMatcher,
     size_t* affectedRows) {
+    const auto ownershipStatus = ensureDatabaseTransactionOwnership();
+    if (ownershipStatus != DBStatus::OK) return ownershipStatus;
     if (affectedRows) *affectedRows = 0;
     if (transactionContext().inTransaction &&
         dbname != transactionContext().txnDB) {
@@ -27039,6 +27070,8 @@ DBStatus StorageEngine::update(
     const UpdateMatcher& updateMatcher,
     size_t* affectedRows,
     std::vector<UpdateRowImage>* rowImages) {
+    const auto ownershipStatus = ensureDatabaseTransactionOwnership();
+    if (ownershipStatus != DBStatus::OK) return ownershipStatus;
     SqlUpdateResolver typedResolver;
     if (updateResolver) {
         typedResolver = [updateResolver](const SqlRow& oldValues,
@@ -36096,6 +36129,9 @@ std::vector<std::string> StorageEngine::queryExpr(
     std::vector<std::vector<bool>>* structuredNulls,
     std::vector<int64_t>* structuredRowIds,
     const QueryExprExecutionOptions& options) {
+    const auto status = ensureDatabaseTransactionOwnership();
+    if (status != DBStatus::OK)
+        throw DbError(sqlstateForDBStatus(status), "could not acquire database transaction ownership");
     std::vector<std::string> result;
     if (structuredRows) structuredRows->clear();
     if (structuredNulls) structuredNulls->clear();
@@ -40073,6 +40109,7 @@ std::vector<std::string> StorageEngine::crossJoin(
 // ========================================================================
 
 WALManager* StorageEngine::getWAL(const std::string& dbname) const {
+    requireDatabaseTransactionOwnership();
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     auto it = walManagers_.find(dbname);
     if (it != walManagers_.end()) return it->second.get();
@@ -40084,6 +40121,9 @@ WALManager* StorageEngine::getWAL(const std::string& dbname) const {
 }
 
 CatalogService& StorageEngine::catalogService() {
+    const auto status = ensureDatabaseTransactionOwnership();
+    if (status != DBStatus::OK)
+        throw DbError(sqlstateForDBStatus(status), "could not acquire database transaction ownership");
     if (!catalogService_) {
         catalogService_ = std::make_unique<CatalogService>(*this);
     }
@@ -42106,7 +42146,8 @@ void StorageEngine::refreshReadView() const {
     transactionContext().readView.activeTxnIds.erase(transactionContext().currentTxnId);
     transactionContext().readView.subTxnIds.clear();
     transactionContext().readView.subTxnIds.insert(transactionContext().txnSubTxnIds.begin(), transactionContext().txnSubTxnIds.end());
-    transactionContext().readView.commitLog = getCommitLog(transactionContext().txnDB);
+    transactionContext().readView.commitLog = transactionContext().databaseOwnershipDeferred
+        ? nullptr : getCommitLog(transactionContext().txnDB);
     transactionContext().snapshotAcquired = true;
 }
 
@@ -45208,7 +45249,115 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname) {
     return beginTransaction(dbname, false);
 }
 
+StorageEngine::DatabaseIndependentBeginScope::DatabaseIndependentBeginScope(StorageEngine& engine)
+    : engine_(engine), previous_(engine.transactionContext().deferDatabaseBeginRequested) {
+    engine_.transactionContext().deferDatabaseBeginRequested = true;
+}
+
+StorageEngine::DatabaseIndependentBeginScope::~DatabaseIndependentBeginScope() {
+    engine_.transactionContext().deferDatabaseBeginRequested = previous_;
+}
+
+bool StorageEngine::databaseTransactionOwnershipDeferred() const {
+    return transactionContext().inTransaction && transactionContext().databaseOwnershipDeferred;
+}
+
+void StorageEngine::requireDatabaseTransactionOwnership() const {
+    const auto status = ensureDatabaseTransactionOwnership();
+    if (status != DBStatus::OK)
+        throw DbError(sqlstateForDBStatus(status), "could not acquire database transaction ownership");
+}
+
+DBStatus StorageEngine::ensureDatabaseTransactionOwnership() const {
+    auto& context = transactionContext();
+    if (!context.inTransaction || !context.databaseOwnershipDeferred ||
+        context.promotingDatabaseOwnership) return DBStatus::OK;
+    // Keep the same xid, command ID, first-query snapshot and transaction
+    // resources. A failed upgrade leaves a still-live logical transaction
+    // for the ordinary abort/Sync path to terminate.
+    struct PromotionScope {
+        bool& flag;
+        explicit PromotionScope(bool& flag) : flag(flag) { flag = true; }
+        ~PromotionScope() { flag = false; }
+    } promotion(context.promotingDatabaseOwnership);
+    auto mutex = databaseTxnLockFor(context.txnDB);
+    auto lock = std::make_unique<std::shared_lock<std::shared_mutex>>(*mutex, std::defer_lock);
+    const int timeoutMs = lockManager_.getLockTimeout();
+    const auto deadline = timeoutMs > 0
+        ? std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs)
+        : std::chrono::steady_clock::time_point::max();
+    for (;;) {
+        checkForQueryInterrupt();
+        if (lock->try_lock()) break;
+        if (std::chrono::steady_clock::now() >= deadline) return DBStatus::LOCK_CONFLICT;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (!databaseExists(context.txnDB)) return DBStatus::DATABASE_NOT_FOUND;
+    if (catalogService_ && !catalogService_->persistAll()) return DBStatus::IO_ERROR;
+    auto* commitLog = getCommitLog(context.txnDB);
+    if (!commitLog) return DBStatus::IO_ERROR;
+    context.databaseTxnMutex = std::move(mutex);
+    context.databaseSharedLock = std::move(lock);
+    context.readView.commitLog = commitLog;
+    context.databaseOwnershipDeferred = false;
+    return DBStatus::OK;
+}
+
+DBStatus StorageEngine::finishDatabaseIndependentTransaction() {
+    auto& context = transactionContext();
+    if (!context.inTransaction || !context.databaseOwnershipDeferred) return DBStatus::INVALID_VALUE;
+    // These invariants also prevent a future new native entry point from
+    // silently discarding writes if it forgets the physical-access fence.
+    if (context.hasRead || context.hasWrite || !context.txnLog.empty() ||
+        !context.ddlUndoActions.empty() || !context.txnBackupPath.empty() ||
+        !context.txnLogicalChanges.empty() || !context.savepoints.empty() ||
+        !context.txnSubTxnIds.empty() || !context.deferredChecks.empty())
+        return DBStatus::INVALID_VALUE;
+    const auto xid = context.currentTxnId;
+    {
+        std::lock_guard<std::mutex> lock(globalTxnMutex());
+        activeTransactions().erase(xid);
+        activeTransactionDatabases().erase(xid);
+    }
+    {
+        std::lock_guard<std::mutex> lock(ssiMutex_);
+        ssiReadSets_.erase(xid); ssiWriteSets_.erase(xid);
+        ssiReadRelations_.erase(xid); ssiWriteRelations_.erase(xid);
+        ssiReadPages_.erase(xid); ssiWritePages_.erase(xid);
+        ssiReadIndexPredicates_.erase(xid); ssiWriteIndexKeys_.erase(xid);
+        ssiOutEdges_.erase(xid); ssiInEdges_.erase(xid);
+        for (auto& entry : ssiInEdges_) entry.second.erase(xid);
+        for (auto& entry : ssiOutEdges_) entry.second.erase(xid);
+    }
+    lockManager_.unlockAll();
+    lockManager_.unlockAllGaps();
+    // Sequence lastval and the configured isolation are backend-local, not
+    // transaction-local. No row ever referenced this reserved xid, so there
+    // is no CLOG/WAL or database file to publish, abort, flush or restore.
+    auto sequenceValues = std::move(context.sequenceLastValues);
+    auto lastvalDb = std::move(context.lastvalDb);
+    auto lastvalSeq = std::move(context.lastvalSeq);
+    const auto lastvalValue = context.lastvalValue;
+    const auto lastvalDefined = context.lastvalDefined;
+    const auto isolation = context.txnIsolationLevel;
+    const bool beginRequested = context.deferDatabaseBeginRequested;
+    context = TransactionContext{};
+    context.sequenceLastValues = std::move(sequenceValues);
+    context.lastvalDb = std::move(lastvalDb);
+    context.lastvalSeq = std::move(lastvalSeq);
+    context.lastvalValue = lastvalValue;
+    context.lastvalDefined = lastvalDefined;
+    context.txnIsolationLevel = isolation;
+    context.deferDatabaseBeginRequested = beginRequested;
+    return DBStatus::OK;
+}
+
 void StorageEngine::preserveTransactionBackupOnRollback(bool preserve) {
+    if (preserve) {
+        const auto status = ensureDatabaseTransactionOwnership();
+        if (status != DBStatus::OK)
+            throw DbError(sqlstateForDBStatus(status), "could not acquire database transaction ownership");
+    }
     auto& context = transactionContext();
     context.preserveBackupOnRollback = preserve;
     if (!preserve || !context.inTransaction || !context.txnBackupPath.empty()) return;
@@ -45417,6 +45566,15 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnap
         return DBStatus::OK;
     }
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
+    bool deferOwnership = context.deferDatabaseBeginRequested && !ddlSnapshot;
+    if (Session* session = currentSession()) {
+        if (!session->tempTablesCreatedInTransaction.empty()) deferOwnership = false;
+        for (const auto& action : session->tempTableOnCommit) {
+            if (action.second != "preserve") deferOwnership = false;
+        }
+    }
+    context.databaseOwnershipDeferred = deferOwnership;
+    if (!deferOwnership) {
     context.databaseTxnMutex = databaseTxnLockFor(dbname);
     const int lockTimeoutMs = lockManager_.getLockTimeout();
     const auto acquireDatabaseLock = [lockTimeoutMs](auto& lock) {
@@ -45479,6 +45637,13 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnap
         context.databaseTxnMutex.reset();
         return DBStatus::IO_ERROR;
     }
+    }
+    if (Session* session = currentSession(); session && session->currentDB == dbname) {
+        context.tempNamespaceAtTransactionStart = session->tempNamespaceCreated;
+        context.tempTablesAtTransactionStart = session->tempTables;
+        context.tempTableOnCommitAtTransactionStart = session->tempTableOnCommit;
+        context.tempTablesCreatedAtTransactionStart = session->tempTablesCreatedInTransaction;
+    }
 
     // A ReadView and catalog snapshot are logical, in-memory state; neither
     // requires writing unrelated dirty buffers. Physical DDL rollback
@@ -45537,7 +45702,7 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnap
         transactionContext().readView.activeTxnIds.erase(transactionContext().currentTxnId);
         transactionContext().readView.subTxnIds.clear();
         transactionContext().readView.subTxnIds.insert(transactionContext().txnSubTxnIds.begin(), transactionContext().txnSubTxnIds.end());
-        transactionContext().readView.commitLog = getCommitLog(dbname);
+        transactionContext().readView.commitLog = deferOwnership ? nullptr : getCommitLog(dbname);
     }
 
     // Capture catalog snapshot for consistent catalog view within transaction
@@ -45573,6 +45738,9 @@ bool StorageEngine::createTransactionBackup() {
     if (!context.inTransaction || context.txnDB.empty() || context.currentTxnId == 0) {
         return false;
     }
+    // A database-independent owner has no exclusive physical generation to
+    // back up. In particular, do not persist catalogs before this check.
+    if (context.databaseOwnershipDeferred) return false;
     if (!context.txnBackupPath.empty()) return true;
     const std::string dbname = context.txnDB;
     if (catalogService_ && !catalogService_->persistAll()) return false;
@@ -45673,6 +45841,7 @@ void StorageEngine::discardDdlStatementBackup(
 
 DBStatus StorageEngine::commitTransaction() {
     if (!transactionContext().inTransaction) return DBStatus::OK;
+    if (transactionContext().databaseOwnershipDeferred) return finishDatabaseIndependentTransaction();
     lockManager_.setResourceNamespace(transactionContext().txnDB);
 
     // SSI conflict detection for Serializable isolation
@@ -46565,6 +46734,7 @@ bool StorageEngine::undoVersionedUpdate(const TxnLogEntry& entry) {
 
 DBStatus StorageEngine::rollbackTransaction() {
     if (!transactionContext().inTransaction) return DBStatus::OK;
+    if (transactionContext().databaseOwnershipDeferred) return finishDatabaseIndependentTransaction();
     lockManager_.setResourceNamespace(transactionContext().txnDB);
 
     auto& rollbackContext = transactionContext();
@@ -48266,6 +48436,8 @@ bool StorageEngine::hasUserSavepoint() const {
 DBStatus StorageEngine::createSavepoint(
     const std::string& name, bool internalStatement) {
     if (!transactionContext().inTransaction) return DBStatus::INVALID_VALUE;
+    const auto status = ensureDatabaseTransactionOwnership();
+    if (status != DBStatus::OK) return status;
     auto& context = transactionContext();
     std::string ddlBackupPath;
     if (context.transactionBackupDirty &&

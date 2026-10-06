@@ -164,6 +164,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/for_update_insert_gap_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/table_lock_timeout_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/transaction_begin_error_state_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/extended_literal_transaction_demand_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/row_description_literal_source_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/transaction_select_table_lock_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/transaction_ddl_upgrade_timeout_protocol_e2e_test.py)

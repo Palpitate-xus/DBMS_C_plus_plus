@@ -635,15 +635,26 @@ bool applyStartupParameters(const PgStartupMessage& startup,
 }
 
 std::map<std::string, std::string> mutableProtocolParameterStatuses(
-        const Session& session) {
+        const Session& session,
+        const std::string* previouslyReportedSuperuser = nullptr) {
     const std::string effectiveRole = session.currentRole.empty()
                                           ? session.username
                                           : session.currentRole;
-    const auto account = authCatalog().getAuthIdByName(effectiveRole);
+    // A metadata-only deferred transaction has not acquired database catalog
+    // ownership. Reporting an unchanged role is an observation, not a reason
+    // to acquire that ownership. The caller may reuse its already reported
+    // value only while the effective role is unchanged.
+    std::string superuser;
+    if (previouslyReportedSuperuser) {
+        superuser = *previouslyReportedSuperuser;
+    } else {
+        const auto account = authCatalog().getAuthIdByName(effectiveRole);
+        superuser = account && account->rolsuper ? "on" : "off";
+    }
     return {
         {"application_name", session.applicationName},
         {"client_encoding", session.clientEncoding},
-        {"is_superuser", account && account->rolsuper ? "on" : "off"},
+        {"is_superuser", superuser},
         {"search_path", session.searchPath},
         {"lc_monetary", session.lcMonetary},
         {"session_authorization", session.username},
@@ -4181,8 +4192,19 @@ void handleClient(SecureSocket socket, std::string clientHost) {
     }
     auto reportedParameterStatuses =
         mutableProtocolParameterStatuses(session);
+    std::string reportedEffectiveRole = session.currentRole.empty()
+        ? session.username : session.currentRole;
     const auto sendChangedParameterStatuses = [&]() -> bool {
-        const auto current = mutableProtocolParameterStatuses(session);
+        const std::string effectiveRole = session.currentRole.empty()
+            ? session.username : session.currentRole;
+        const auto priorSuperuser = reportedParameterStatuses.find("is_superuser");
+        const std::string* unchangedSuperuser =
+            g_engine.databaseTransactionOwnershipDeferred() &&
+            effectiveRole == reportedEffectiveRole &&
+            priorSuperuser != reportedParameterStatuses.end()
+                ? &priorSuperuser->second : nullptr;
+        const auto current = mutableProtocolParameterStatuses(
+            session, unchangedSuperuser);
         for (const auto& parameter : current) {
             const auto previous = reportedParameterStatuses.find(
                 parameter.first);
@@ -4196,6 +4218,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             }
         }
         reportedParameterStatuses = current;
+        reportedEffectiveRole = effectiveRole;
         return true;
     };
 
@@ -4461,13 +4484,20 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         }
         return result;
     };
-    const auto prepareExtendedQuerySnapshot = [&]() -> bool {
+    const auto prepareExtendedQuerySnapshot = [&](const std::string& sql) -> bool {
         // Parse analysis and Bind planning may take the first snapshot
         // before Execute. Keep an implicit block alive until Sync.
         // Existing failed blocks must not be silently restarted here.
         if (transactionFailed) return true;
         try {
+            SQLParser parser;
+            const auto parsed = parser.parseForBinding(sql);
+            const bool databaseIndependent = parsed.success && parsed.stmt &&
+                SQLParser::isDatabaseIndependentQuery(*parsed.stmt);
             if (!g_engine.inTransaction()) {
+                std::unique_ptr<StorageEngine::DatabaseIndependentBeginScope> deferredBegin;
+                if (databaseIndependent)
+                    deferredBegin = std::make_unique<StorageEngine::DatabaseIndependentBeginScope>(g_engine);
                 const QueryResult begin = executeForProtocol("BEGIN");
                 if (begin.error) {
                     sendExtendedProtocolError(begin.sqlState, begin.errorMessage);
@@ -4475,6 +4505,11 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 }
                 extendedImplicitTransaction = true;
                 extendedImplicitExecuted = false;
+            }
+            if (!databaseIndependent) {
+                const auto status = g_engine.ensureDatabaseTransactionOwnership();
+                if (status != DBStatus::OK)
+                    throw DbError(sqlstateForDBStatus(status), "could not acquire database transaction ownership");
             }
             g_engine.noteQuerySnapshot();
             return true;
@@ -5006,8 +5041,6 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             std::vector<uint32_t> parameterTypes;
             parameterTypes.reserve(parameterCount);
             uint32_t unknownParameterType = 0;
-            auto& parameterCatalog =
-                g_engine.catalogService().get(session.currentDB);
             for (uint16_t i = 0; i < parameterCount; ++i) {
                 const uint32_t parameterType =
                     PostgresProtocol::readUInt32(message.payload, offset);
@@ -5015,7 +5048,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 parameterTypes.push_back(parameterType);
                 if (parameterType != 0 &&
                     !dbms::isBuiltinTypeOid(parameterType) &&
-                    parameterCatalog.findType(parameterType) == nullptr) {
+                    g_engine.catalogService().get(session.currentDB).findType(parameterType) == nullptr) {
                     unknownParameterType = parameterType;
                 }
             }
@@ -5064,7 +5097,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 continue;
             }
             if (SQLParser::requiresQuerySnapshot(sql) &&
-                !prepareExtendedQuerySnapshot()) {
+                !prepareExtendedQuerySnapshot(sql)) {
                 continue;
             }
             if (const auto duplicate = SQLParser::duplicateCteName(sql)) {
@@ -5163,7 +5196,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 continue;
             }
             if ((valueCount != 0 || SQLParser::requiresQuerySnapshot(preparedSql)) &&
-                !prepareExtendedQuerySnapshot()) {
+                !prepareExtendedQuerySnapshot(preparedSql)) {
                 continue;
             }
             std::vector<std::string> literals;
@@ -5259,6 +5292,30 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                     preparedSql, literals, expandedSql, substitutionError)) {
                 sendExtendedProtocolError("42P02", substitutionError);
                 extendedQueryError = true;
+                continue;
+            }
+            try {
+                // Bind planning may fold immutable primitive expressions.
+                // Evaluate only after the *whole* AST proves that it contains
+                // no relation, routine, parameter or opaque SQL child. This
+                // cannot execute a stored writer or a CTE during preparation.
+                SQLParser parser;
+                auto parsed = parser.parseForBinding(expandedSql);
+                if (parsed.success && parsed.stmt &&
+                    SQLParser::isDatabaseIndependentQuery(*parsed.stmt)) {
+                    const auto& select = static_cast<const SelectStmt&>(*parsed.stmt);
+                    ExprEvaluator evaluator;
+                    RowContext row;
+                    for (const auto& item : select.selectList)
+                        (void)evaluator.eval(item.expr, row);
+                    if (select.whereClause) (void)evaluator.eval(select.whereClause, row);
+                    for (const auto& item : select.orderBy)
+                        (void)evaluator.eval(item.expr, row);
+                    for (const auto& expression : select.distinctOn)
+                        (void)evaluator.eval(expression, row);
+                }
+            } catch (const DbError& error) {
+                sendExtendedProtocolError(error.sqlState(), error.message());
                 continue;
             }
             if (!portal.empty() && portals.count(portal) != 0) {
@@ -5516,9 +5573,14 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                     continue;
                 }
                 std::vector<PgColumnDescription> columns;
-                const bool hasColumns =
-                    describePreparedResult(statementIt->second, session,
-                                           columns, oidIt->second);
+                bool hasColumns;
+                try {
+                    hasColumns = describePreparedResult(statementIt->second, session,
+                                                        columns, oidIt->second);
+                } catch (const DbError& error) {
+                    sendExtendedProtocolError(error.sqlState(), error.message());
+                    continue;
+                }
                 if (!protocol.sendParameterDescription(oidIt->second) ||
                     !(hasColumns ? protocol.sendRowDescription(columns)
                                  : protocol.sendNoData())) {
@@ -5534,9 +5596,15 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                     continue;
                 }
                 std::vector<PgColumnDescription> columns;
-                if (!describePreparedResult(
-                        portalIt->second.preparedSql, session, columns,
-                        portalIt->second.parameterOids)) {
+                bool hasColumns;
+                try {
+                    hasColumns = describePreparedResult(portalIt->second.preparedSql, session, columns,
+                                                        portalIt->second.parameterOids);
+                } catch (const DbError& error) {
+                    sendExtendedProtocolError(error.sqlState(), error.message());
+                    continue;
+                }
+                if (!hasColumns) {
                     if (!protocol.sendNoData()) extendedQueryError = true;
                     continue;
                 }
