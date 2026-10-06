@@ -2,6 +2,21 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Five independent source-context CASE NAME INTERVAL quantified integrations and fresh58 normal ABI gate",
+      "gap_ids": ["SQL-04", "SQL-07", "SQL-08", "QRY-01", "QRY-03", "DML-03"],
+      "status": "partial",
+      "commits": ["40fb2c11", "8907d061", "483daa08", "ab26b129", "4f23f997"],
+      "evidence": ["docs/issue-ready-source-integration.md", "docs/issue-prepared-source-contexts-and-view-execution.md", "docs/issue-ordinary-case-prepared-execution.md", "docs/issue-name-comparison-text-codec.md", "docs/issue-interval-comparison-value-codec.md", "docs/issue-quantified-prepared-execution.md"],
+      "tests": ["tests/prepared_source_context_test.cpp", "tests/case_planning_structural_boundary_test.cpp", "tests/name_comparison_type_test.cpp", "tests/interval_comparison_value_test.cpp", "tests/quantified_query_execution_test.cpp", "tests/ordinary_case_prepared_protocol_e2e_test.py", "tests/quantified_query_demand_protocol_e2e_test.py"],
+      "verification": {
+        "reproduction": "Actual source23fails,JOIN4vs1,viewUNKNOWNXX000,ordinaryCASE50fails,NAME6numeric/implicitC3fails,INTERVAL3values and originalQuant2433/2444 preserved. No missing old positive renamed unsupported. Fromless originalPG18pass next_emptycounter1 vsROOT2 independently proven.",
+        "fix": "Five independent ROOT commits preserve genuine full source/CASE contracts with typed ordinals,owned viewAST,lazy joins; NAMEtext implicitC; finiteINTERVAL128bit; QuantAST operatorbinding/child cursor/SRF/actualEXPLAIN. Integration rebinder truly reconstructs logical source/cache/outer, closes actual JOIN children once; capturedCTErestart not fabricated. All existing ARRAY/CASE/label metadata retained.",
+        "focused_tests": "Private source58freshO0/source final wire+strict180006/12initial+6finalnative/11adjacent/scoped4ASan actual0. Private Quant84+3rowreceiver+12plan/TEXTJSON demand+12original+2strictdiff+8adjacent+12native finalserial/native/freeze actual0, O0 donor/tmpfs boundaries explicit. These are not newROOT ABI results.",
+        "full_suite": "Current4f23 inventory564native293registered58; publicheads requirefreshall58normalO2 build45716 live, source/header/tests/registryfreeze. New90native44wire notrun; exact4f detached original564/293 fullsnapshot prepared notstarted. Priorfa f7 85native0/42wire40pass2fail retained, not overwritten byprivate greens.",
+        "scope": "Independentfromless24candidate retains3constant/childplanningerrors whileoriginalPLdestination passes; sharedpureplanner/MVreadonly continues. ELSE404privateREADY pendingfreeze; wideLiteral/geometry and273 families remainopen. Botholdtimeoutcasesactualf7default15sdiskmatch C/enUS, ONE full465f7enUS live notcurrent4f proof. Totals22complete166partial70unverified15deferred unchanged; no push/Actions/securityTDErestart."
+      }
+    },
+    {
       "issue": "Actual sequence-label-view85/42 terminal gates expose FROM-less projection demand",
       "gap_ids": ["SQL-04", "SQL-07", "QRY-01", "QRY-03", "TXN-01"],
       "status": "partial",

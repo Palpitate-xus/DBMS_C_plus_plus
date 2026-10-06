@@ -1,5 +1,55 @@
 # Independent source integrations after canonical 75090
 
+## Five independent ROOT source integrations and new public-layout gate
+
+| Independent change | Private commit | ROOT commit |
+| --- | --- | --- |
+| True source contexts, owned VIEW AST, lazy JOIN demand | `1e6693ab` | `40fb2c11` |
+| Ordinary CASE whole preparation and typed consumer | `faca8954` | `8907d061` |
+| NAME textual values and implicit C collation | `04a6ecb8` | `483daa08` |
+| Finite INTERVAL 128-bit comparison value | `885715bb` | `ab26b129` |
+| Genuine ANY/ALL/SOME, cursors, ProjectSet, EXPLAIN | `d15363c0` | `4f23f997` |
+
+The Quant integration preserves both source/CASE contracts, static projection
+labels and all existing ARRAY/CASE metadata. Its logical correlated provider
+actually closes/rebuilds the source/cache with the new outer row; no captured
+CTE restart is falsely advertised. The strengthened source-context native
+control checks changed real cells, pure restart and exact close-once/errors.
+These are integration changes awaiting matching ROOT runtime verification,
+not proof from the separate private matrices.
+
+Actual private evidence remains scoped: source-context/CASE final matrix and
+strict180006 pass, twelve initial plus six final matching native entries,
+eleven adjacent wire scripts and four scoped sanitizer controls. Quant final
+84 cases plus ordinary receiver/twelve TEXT/JSON demand controls, twelve
+original spaced/compact queries/plans, two original strict18 differential
+files, eight adjacent scripts and twelve native entries pass. Quant's all58
+donor used development O0, not formal ROOT O2; explicit tmpfs semantics do not
+claim a disk I/O or whole-family repair. The NAME and interval proof docs
+retain both independent bugs and their actual oracle controls.
+
+ROOT inventory is564native/293registered/58production. Fresh all58 normalO2
+build45716 is live under `/tmp/dbms-case-quant-integration.g8OmOcrc`, with
+production/header/test/registry frozen. Its new90native/44wire gates have not
+run. Detached original full-runner snapshot is
+`/tmp/dbms-canonical-case-quant.IqZfi3a6/repo`, exact4f23; prepared helper will
+audit every normal ROOT source/header/object/flag before copying matching
+production objects and running unchanged full `scripts/build_tests.sh`.
+Neither the build nor the full564/293 suite is declared passed in advance.
+
+The separate FROM-less demand candidate actually passes the original PL
+destination test, but the full24-control strict18 matrix retains three real
+constant-planning priority failures (six state/tag assertions). It is not
+ROOT-integrated and those assertions are not removed. The shared pure planner
+and MV read-only/error-priority work continues. Strong ELSE label private
+commit404931c4 is independently READY, awaiting the ROOT freeze boundary.
+
+Both original465 timeout cases actually match strict18/C and matched enUS on
+immutablefa/f7 with original15s/disk deadlines. One full original465/f7/enUS
+replay is now live in a separate snapshot, not current4f23 proof; priorfd
+full-run failures remain unchanged. No broad273-item completion, push,
+Actions activation or restart of user-deferred security/TDE occurred.
+
 ## Actual sequence/label/view gate terminal and newly exposed demand bug
 
 ROOT source `fa193704`, documentation checkpoint `dfee8662`, normal optimized
