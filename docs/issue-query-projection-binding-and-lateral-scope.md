@@ -92,9 +92,12 @@ test stubs) and all passed in isolated test directories. This checks the final
 combined source; it is not a claim that each intermediate commit independently
 passed a complete rebuild or full registered suite.
 
-The complete default-configuration `postgres_protocol_test.py` is still running
-at this documentation checkpoint. No result is inferred from its process being
-alive. Full registered-suite and PG18.6 differential gates remain unverified.
+The complete default-configuration `postgres_protocol_test.py` subsequently
+finished with exit 0: plaintext SSLRequest negotiation, extended-query error
+recovery/ReadyForQuery and startup/auth/simple/extended-query assertions passed.
+This was the final optimized TLS-stub/plain-TCP build, not TLS validation. Thus
+the final focused/adjacent checks total 13 protocol/E2E entry points and five
+native tests. Full registered-suite and PG18.6 differential remain unverified.
 
 The configured `pgref` container was checked on 2026-10-06 and reports
 `server_version_num=170002`; it cannot prove PostgreSQL 18.6 compatibility. No
