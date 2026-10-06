@@ -5,6 +5,7 @@
 #include "expression/expr_helper.h"
 #include "parser/parser.h"
 #include <algorithm>
+#include <optional>
 
 namespace dbms {
 namespace {
@@ -81,6 +82,146 @@ ExprPtr copyExpression(const Expr* source, std::map<const Expr*, const Expr*>& s
     result->preparedSubquery = source->preparedSubquery;
     sites.emplace(result.get(),source);
     return result;
+}
+
+ExprPtr constantExpression(const ExprValue& value, const Expr* source) {
+    auto literal = std::make_unique<LiteralExpr>();
+    literal->typeName = value.typeName;
+    if (value.isNull) literal->value = "NULL";
+    else {
+        literal->value = "'";
+        for (char c : value.value) { literal->value += c; if (c == '\'') literal->value += c; }
+        literal->value += '\'';
+    }
+    ExprPtr result = std::move(literal);
+    // Literal NULL itself has unknown type; retain a typed NULL datum without
+    // changing the shared query's output descriptor or original expression.
+    if (value.isNull && value.typeName != "unknown" && !value.typeName.empty()) {
+        auto cast = std::make_unique<CastExpr>();
+        cast->typeName = value.typeName; cast->operand = std::move(result);
+        result = std::move(cast);
+    }
+    if (!value.collation.empty()) {
+        auto collate = std::make_unique<UnaryOpExpr>();
+        collate->op = "COLLATE " + quoteIdentifier(value.collation);
+        collate->operand = std::move(result); result = std::move(collate);
+    }
+    if (source) { result->sourceBegin = source->sourceBegin; result->sourceEnd = source->sourceEnd; }
+    return result;
+}
+
+// CASE has a planning boundary as well as a lazy runtime boundary. Substitute
+// structural constants in its strict equality tests only after whole-query
+// binding. Never infer that a nullable column/parameter is a constant NULL,
+// and never execute a routine or a child query to obtain a planning value.
+std::optional<ExprValue> simplifyCaseConstants(ExprPtr& expression,
+                                               const ExprEvaluator& evaluator) {
+    if (!expression || expression->preparedSubquery) return std::nullopt;
+    if (const auto* literal = dynamic_cast<const LiteralExpr*>(expression.get())) {
+        if (literal->value == "*") return std::nullopt;
+        return evaluator.eval(literal, RowContext{});
+    }
+    if (auto* conditional = dynamic_cast<CaseExpr*>(expression.get())) {
+        const auto switchValue = simplifyCaseConstants(conditional->switchExpr, evaluator);
+        std::vector<std::pair<ExprPtr,ExprPtr>> remaining;
+        std::vector<std::pair<std::string,std::string>> comparisons;
+        bool definiteMatch = false;
+        for (size_t i=0; i<conditional->whenClauses.size(); ++i) {
+            auto& arm = conditional->whenClauses[i];
+            // Fold pure condition subexpressions before applying strict NULL:
+            // NULL = (1/0) still reports the planner's division-by-zero error.
+            const auto conditionValue = simplifyCaseConstants(arm.first, evaluator);
+            std::optional<bool> matches;
+            if (conditional->switchExpr) {
+                if ((switchValue && switchValue->isNull) ||
+                    (conditionValue && conditionValue->isNull)) matches = false;
+                else if (switchValue && conditionValue &&
+                         conditional->simpleComparisonTypes.size()==conditional->whenClauses.size()) {
+                    CaseExpr comparison;
+                    comparison.switchExpr = constantExpression(*switchValue, nullptr);
+                    comparison.simpleComparisonTypes.push_back(conditional->simpleComparisonTypes[i]);
+                    auto yes = std::make_unique<LiteralExpr>(); yes->value = "true";
+                    auto no = std::make_unique<LiteralExpr>(); no->value = "false";
+                    comparison.whenClauses.emplace_back(constantExpression(*conditionValue,nullptr),std::move(yes));
+                    comparison.elseExpr = std::move(no);
+                    matches = evaluator.eval(&comparison,RowContext{}).asBool();
+                }
+            } else if (conditionValue) matches = !conditionValue->isNull && conditionValue->asBool();
+            if (matches && !*matches) continue; // Do not plan the discarded THEN.
+            simplifyCaseConstants(arm.second,evaluator);
+            if (matches && *matches) {
+                conditional->elseExpr = std::move(arm.second);
+                definiteMatch = true;
+                break; // Later WHENs and the original ELSE are unreachable.
+            }
+            remaining.emplace_back(std::move(arm.first),std::move(arm.second));
+            if (!conditional->simpleComparisonTypes.empty())
+                comparisons.push_back(conditional->simpleComparisonTypes.at(i));
+        }
+        if (!definiteMatch) simplifyCaseConstants(conditional->elseExpr,evaluator);
+        conditional->whenClauses = std::move(remaining);
+        conditional->simpleComparisonTypes = std::move(comparisons);
+        if (conditional->whenClauses.empty()) {
+            auto fallback = std::move(conditional->elseExpr);
+            if (!fallback) fallback = constantExpression(ExprValue("unknown","",true),conditional);
+            expression = std::move(fallback);
+            return simplifyCaseConstants(expression,evaluator);
+        }
+        return std::nullopt;
+    }
+    bool constant = false;
+    if (auto* unary = dynamic_cast<UnaryOpExpr*>(expression.get()))
+        constant = simplifyCaseConstants(unary->operand,evaluator).has_value();
+    else if (auto* cast = dynamic_cast<CastExpr*>(expression.get()))
+        constant = simplifyCaseConstants(cast->operand,evaluator).has_value();
+    else if (auto* binary = dynamic_cast<BinaryOpExpr*>(expression.get())) {
+        const auto left = simplifyCaseConstants(binary->left,evaluator);
+        const auto op = SQLParser::toLower(binary->op);
+        // Match boolean constant demand rather than folding a dead right arm.
+        if (left && !left->isNull &&
+            ((op=="and" && !left->asBool()) || (op=="or" && left->asBool()))) {
+            const ExprValue result("boolean",op=="or"?"t":"f",false);
+            expression = constantExpression(result,expression.get()); return result;
+        }
+        const auto right = binary->op=="::" ? std::optional<ExprValue>(ExprValue{})
+            : simplifyCaseConstants(binary->right,evaluator);
+        constant = left.has_value() && right.has_value();
+    } else if (auto* call = dynamic_cast<FunctionCallExpr*>(expression.get())) {
+        // Constant arguments can have planning errors even under a volatile
+        // routine. The routine itself is never evaluated by this simplifier.
+        for (auto& arg : call->args) simplifyCaseConstants(arg,evaluator);
+        for (auto& arg : call->namedArgs) simplifyCaseConstants(arg.value,evaluator);
+        return std::nullopt;
+    } else if (auto* array = dynamic_cast<ArrayExpr*>(expression.get())) {
+        for (auto& element : array->elements) simplifyCaseConstants(element,evaluator);
+        return std::nullopt;
+    } else if (auto* row = dynamic_cast<RowExpr*>(expression.get())) {
+        for (auto& element : row->elements) simplifyCaseConstants(element,evaluator);
+        return std::nullopt;
+    }
+    if (!constant) return std::nullopt;
+    const auto value = evaluator.eval(expression.get(),RowContext{});
+    expression = constantExpression(value,expression.get());
+    return value;
+}
+
+// Do not introduce constant-fold timing changes in unrelated expressions.
+void planCaseConstants(ExprPtr& expression, const ExprEvaluator& evaluator) {
+    if (!expression || expression->preparedSubquery) return;
+    if (dynamic_cast<CaseExpr*>(expression.get())) { simplifyCaseConstants(expression,evaluator); return; }
+    if (auto* unary=dynamic_cast<UnaryOpExpr*>(expression.get())) planCaseConstants(unary->operand,evaluator);
+    else if (auto* cast=dynamic_cast<CastExpr*>(expression.get())) planCaseConstants(cast->operand,evaluator);
+    else if (auto* binary=dynamic_cast<BinaryOpExpr*>(expression.get())) {
+        planCaseConstants(binary->left,evaluator);
+        if(binary->op!="::")planCaseConstants(binary->right,evaluator);
+    } else if (auto* call=dynamic_cast<FunctionCallExpr*>(expression.get())) {
+        for(auto& arg:call->args)planCaseConstants(arg,evaluator);
+        for(auto& arg:call->namedArgs)planCaseConstants(arg.value,evaluator);
+    } else if(auto* array=dynamic_cast<ArrayExpr*>(expression.get())) {
+        for(auto& element:array->elements)planCaseConstants(element,evaluator);
+    } else if(auto* row=dynamic_cast<RowExpr*>(expression.get())) {
+        for(auto& element:row->elements)planCaseConstants(element,evaluator);
+    }
 }
 }
 
@@ -206,6 +347,7 @@ void PreparedQueryExecution::prepareExpression(Expr* expression) {
     std::map<const Expr*, const Expr*> sites;
     auto compiled = copyExpression(expression,sites);
     ExprHelper::prepareArrayTypes(compiled.get(), {}, database_, engine_);
+    planCaseConstants(compiled,evaluator_);
     evaluator_.bindScalarFunctions(compiled.get(), engine_);
     for (const auto& site : sites) originalSites_[site.first] = site.second;
     compiled_.emplace(expression,std::move(compiled));
