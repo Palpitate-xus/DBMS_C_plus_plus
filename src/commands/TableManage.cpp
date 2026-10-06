@@ -22273,10 +22273,10 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
     StorageEngine* valueEngine = nullptr;
     std::string valueDb;
     const bool buffered = g_bufferedConditionSchema == &tbl && g_bufferedConditionNulls;
-    if (!buffered && g_condNullEngine && tbl.tablename == g_condNullTable) {
+    if (g_condNullEngine && tbl.tablename == g_condNullTable) {
         valueEngine = const_cast<StorageEngine*>(g_condNullEngine);
         valueDb = g_condNullDb;
-    } else if (!buffered && g_nullRowEngine && tbl.tablename == g_nullRowTable) {
+    } else if (g_nullRowEngine && tbl.tablename == g_nullRowTable) {
         valueEngine = const_cast<StorageEngine*>(g_nullRowEngine);
         valueDb = g_nullRowDb;
     }
@@ -25655,6 +25655,8 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
     };
 
     if (indexesAreSnapshotComplete) {
+    const Condition* indexPredicate = nullptr;
+    bool recheckIndexPredicate = false;
     const auto indexedCandidates = [&]() -> std::optional<std::set<int64_t>> {
     // Try full-text index for CONTAINS conditions
     for (const auto& c : conds) {
@@ -25663,23 +25665,7 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
                 auto rids = fullTextSearch(dbname, tablename, c.colName, c.value);
                 for (int64_t rid : rids) ids.insert(rid);
                 if (!ids.empty()) {
-                    if (conds.size() > 1) {
-                        PageAllocator* pa = getPageAllocator(dbname, tablename);
-                        std::set<int64_t> toRemove;
-                        for (int64_t rid : ids) {
-                            std::string row;
-                            if (!readRowByRid(pa, rid, row, tbl)) { toRemove.insert(rid); continue; }
-                            bool match = true;
-                            for (const auto& cond : conds) {
-                                if (cond.op == "contains" && cond.colName == c.colName) continue;
-                                if (!evalConditionOnRow(cond, row, tbl)) { match = false; break; }
-                            }
-                            if (!match) toRemove.insert(rid);
-                        }
-                        for (auto r : toRemove) ids.erase(r);
-                    }
-                    if (usedIndex) *usedIndex = true;
-                    finishSerializablePredicateRead();
+                    indexPredicate = &c;
                     return ids;
                 }
             }
@@ -25779,25 +25765,8 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
             if (!ids.empty()) {
                 // Fixed-width index equality only proves prefix equality at
                 // this boundary. Recheck the indexed atom itself as well.
-                const bool needsKeyRecheck = searchValue.size() >= BP_KEY_LEN;
-                if (conds.size() > 1 || needsKeyRecheck) {
-                    PageAllocator* pa = getPageAllocator(dbname, tablename);
-                    std::set<int64_t> toRemove;
-                    for (int64_t rid : ids) {
-                        std::string row;
-                        if (!readRowByRid(pa, rid, row, tbl)) { toRemove.insert(rid); continue; }
-                        NullRowBinding rowBinding(this, dbname, tablename, rid, tbl.len);
-                        bool match = true;
-                        for (const auto& cond : conds) {
-                            if (!needsKeyRecheck && cond.op == "=" && cond.colName == c.colName) continue;
-                            if (!evalConditionOnRow(cond, row, tbl)) { match = false; break; }
-                        }
-                        if (!match) toRemove.insert(rid);
-                    }
-                    for (auto r : toRemove) ids.erase(r);
-                }
-                if (usedIndex) *usedIndex = true;
-                finishSerializablePredicateRead();
+                indexPredicate = &c;
+                recheckIndexPredicate = searchValue.size() >= BP_KEY_LEN;
                 return ids;
             }
         }
@@ -25810,23 +25779,7 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
                 auto rids = ginSearch(dbname, tablename, c.colName, c.value);
                 for (int64_t rid : rids) ids.insert(rid);
                 if (!ids.empty()) {
-                    if (conds.size() > 1) {
-                        PageAllocator* pa = getPageAllocator(dbname, tablename);
-                        std::set<int64_t> toRemove;
-                        for (int64_t rid : ids) {
-                            std::string row;
-                            if (!readRowByRid(pa, rid, row, tbl)) { toRemove.insert(rid); continue; }
-                            bool match = true;
-                            for (const auto& cond : conds) {
-                                if (cond.op == "=" && cond.colName == c.colName) continue;
-                                if (!evalConditionOnRow(cond, row, tbl)) { match = false; break; }
-                            }
-                            if (!match) toRemove.insert(rid);
-                        }
-                        for (auto r : toRemove) ids.erase(r);
-                    }
-                    if (usedIndex) *usedIndex = true;
-                    finishSerializablePredicateRead();
+                    indexPredicate = &c;
                     return ids;
                 }
             }
@@ -25851,23 +25804,7 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
                 for (int64_t rid : rids) ids.insert(rid);
             }
             if (!ids.empty()) {
-                if (conds.size() > 1) {
-                    PageAllocator* pa = getPageAllocator(dbname, tablename);
-                    std::set<int64_t> toRemove;
-                    for (int64_t rid : ids) {
-                        std::string row;
-                        if (!readRowByRid(pa, rid, row, tbl)) { toRemove.insert(rid); continue; }
-                        bool match = true;
-                        for (const auto& cond : conds) {
-                            if (cond.colName == c.colName) continue;
-                            if (!evalConditionOnRow(cond, row, tbl)) { match = false; break; }
-                        }
-                        if (!match) toRemove.insert(rid);
-                    }
-                    for (auto r : toRemove) ids.erase(r);
-                }
-                if (usedIndex) *usedIndex = true;
-                finishSerializablePredicateRead();
+                indexPredicate = &c;
                 return ids;
             }
         }
@@ -25879,19 +25816,58 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
         // Index corruption still fails closed. Do not hide a checked read
         // error merely because concurrent transaction allocation changed.
         if (scanFailureDetected) return *indexedCandidates;
-        if (!currentReadOwner) return *indexedCandidates;
-        // Reacquire the owner state: evaluating a generated/residual value
-        // can itself reach a stored routine. A same-XID write does not
-        // allocate another transaction ID, but also invalidates this proof.
+        // Materialize only physical rows before the allocation fence. Never
+        // run residual/generated SQL speculatively: a stored writer would
+        // invalidate the owner and be executed again by the heap fallback.
+        struct CandidateRow {
+            int64_t rid;
+            std::string value;
+            std::vector<bool> nulls;
+        };
+        std::vector<CandidateRow> candidateRows;
+        if (conds.size() > 1 || recheckIndexPredicate) {
+            PageAllocator* pa = getPageAllocator(dbname, tablename);
+            for (int64_t rid : *indexedCandidates) {
+                CandidateRow row{rid, {}, {}};
+                if (readRowByRid(pa, rid, row.value, tbl, &row.nulls))
+                    candidateRows.push_back(std::move(row));
+            }
+        }
         const auto& current = transactionContext();
-        if (current.inTransaction && current.currentTxnId == indexOwnerXid &&
+        const bool candidatesComplete = !currentReadOwner ||
+            (current.inTransaction && current.currentTxnId == indexOwnerXid &&
             current.txnDB == dbname && !current.hasWrite &&
             current.txnLog.empty() && current.ddlUndoActions.empty() &&
             !current.transactionBackupDirty && current.snapshotAcquired &&
             current.readView.activeTxnIds.empty() &&
             current.readView.lowLimitId == indexAllocationFence + 1 &&
-            TxnIdGenerator::instance().maxCommittedTxId() == indexAllocationFence)
-            return *indexedCandidates;
+            TxnIdGenerator::instance().maxCommittedTxId() == indexAllocationFence);
+        if (candidatesComplete) {
+            // Once physical completeness is established, expression effects
+            // cannot change this already selected snapshot's candidates.
+            // Recheck each required conjunct once; do not restart afterward.
+            if (conds.size() > 1 || recheckIndexPredicate) {
+                ids.clear();
+                for (const auto& candidate : candidateRows) {
+                    const int64_t rid = candidate.rid;
+                    const auto& row = candidate.value;
+                    NullRowBinding rowBinding(this, dbname, tablename, rid, tbl.len);
+                    BufferedNullRowBinding nullBinding(tbl, candidate.nulls);
+                    bool match = true;
+                    for (const auto& condition : conds) {
+                        if (&condition == indexPredicate && !recheckIndexPredicate) continue;
+                        if (!evalConditionOnRow(condition, row, tbl)) {
+                            match = false;
+                            break;
+                        }
+                    }
+                    if (match) ids.insert(rid);
+                }
+            }
+            if (usedIndex) *usedIndex = true;
+            finishSerializablePredicateRead();
+            return ids;
+        }
     }
     // A new transaction may have begun, written and even rolled back before
     // the lookup completed. Discard its possibly incomplete current-index
