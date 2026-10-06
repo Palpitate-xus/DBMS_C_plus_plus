@@ -1,8 +1,9 @@
 # Static arithmetic metadata and exact row-column identities
 
 Date: 2026-10-06. Two independent source/test repairs are committed locally.
-Their new ROOT combination is being built; earlier frozen-binary passes are
-not evidence for this source revision. The overall 273-item goal remains open.
+Their new ROOT combination passed the focused checks and default protocol
+below; earlier frozen-binary passes were not used as this revision's proof.
+The overall 273-item goal remains open.
 
 | Defect | ROOT commit | Repair and current evidence |
 | --- | --- | --- |
@@ -48,10 +49,27 @@ Frozen binary SHA-256 is
 `b418a16758bafa1de3d759cd81f4f020add8c537c3ca91339133ab672d91eb5e`.
 That directory's `verify.sh` checks every production object signature and the
 binary stamp, then freshly compiles/links 41 native entries or runs 38 focused
-protocol entries. Native `83618` and protocol `91373` are live at this
-checkpoint; their partial output is not presented as terminal success.
+protocol entries. Native `83618` exited 1: 40/41 passed and the unchanged
+timezone fixture failed on two references to an absent `tz` column. Actual
+PostgreSQL 17.2 controls confirmed absent `tz` produces 42703, whereas supplied
+UTC/TEXT `tz` retains both original 42883 type-error expectations. Independent
+test-only commit `26d4ea6d` supplies that typed value and adds two separate
+absent-column 42703 assertions; it does not lower the original type-error
+expectations. The original group failure is retained in `native.log`.
+Fresh compile/link of all 41 tests with the same matching production objects
+(`15188`) then exited 0; exact log is `native-fixture-corrected.log`.
+Protocol `91373` exited 0 with all 38 focused entry points passing, in
+`protocol.log`.
 Unchanged known-gap diagnostic `17996` exited 1 with the same seven genuine
 clause errors; it is not one of the supported green protocol entries.
+Complete default protocol `14476` subsequently exited 0 on the same frozen
+binary with its original 10-second timeout. `full-default-protocol.log`
+records SSLRequest/plaintext negotiation, startup/auth/simple/extended
+execution, error recovery and ReadyForQuery checks. This is 39 protocol
+entry points (38 focused plus one full-default script), not the whole
+registered suite, TLS runtime, whole-engine sanitizer or PG18.6 differential.
+Historical timeouts and statement-image I/O amplification remain unresolved;
+one passing default run does not prove their common cause has been repaired.
 The previous `86ddccf9` frozen binary's 39 native/36 focused wire/default-full
 protocol passes remain evidence only for that previous frozen revision.
 
