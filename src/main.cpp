@@ -1289,6 +1289,29 @@ static string preprocessCaseWhen(string s) {
 // ========================================================================
 // Scalar function helpers
 // ========================================================================
+// Aggregate calls are prepared/evaluated by the aggregate executor, not
+// the row-scalar registry. Keep the SELECT and ORDER collectors on one role
+// set so extending scalar binding cannot reclassify existing aggregates.
+static bool isFrontendAggregateName(const string& name) {
+    static const set<string> names = {
+        "count", "sum", "avg", "min", "max", "bool_and", "bool_or", "every",
+        "stddev", "stddev_samp", "stddev_pop", "variance", "var_samp", "var_pop",
+        "array_agg", "string_agg", "json_agg", "jsonb_agg", "bit_and", "bit_or",
+        "xmlagg", "rank", "dense_rank", "percentile_cont", "grouping"
+    };
+    return names.count(name) != 0;
+}
+
+static bool isFrontendAggregateCall(const dbms::FunctionCallExpr* call) {
+    if (!call || call->hasOver) return false;
+    dbms::CatalogManager::QualifiedName name;
+    const string spelling = call->schema.empty() ? call->funcName
+        : call->schema + "." + call->funcName;
+    return dbms::CatalogManager::parseQualifiedName(spelling, name, true) &&
+        (name.schema.empty() || name.schema == "pg_catalog") &&
+        isFrontendAggregateName(name.name);
+}
+
 static bool isScalarFunc(const string& name) {
     static const set<string> scalars = {"length", "char_length", "character_length", "upper", "lower", "trim", "substring", "concat",
                                          "abs", "round", "trunc", "ceil", "floor",
@@ -29432,7 +29455,20 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     const auto* call = dynamic_cast<const dbms::FunctionCallExpr*>(expression);
                     const bool legacyBuiltin = call && call->schema.empty() &&
                         isScalarFunc(toLower(call->funcName));
-                    if (expression && !legacyBuiltin &&
+                    const bool aggregate = isFrontendAggregateCall(call);
+                    if (aggregate) {
+                        // The aggregate result descriptor is sorted below.
+                        // Its operands still need metadata-only scalar name
+                        // checking, even when no group/input row exists.
+                        dbms::ExprEvaluator evaluator;
+                        evaluator.setCurrentDB(queryDb);
+                        for (const auto& argument : call->args)
+                            evaluator.bindScalarFunctions(argument.get(), &g_engine);
+                        for (const auto& argument : call->namedArgs)
+                            evaluator.bindScalarFunctions(argument.value.get(), &g_engine);
+                        evaluator.bindScalarFunctions(call->filter.get(), &g_engine);
+                    }
+                    if (expression && !legacyBuiltin && !aggregate &&
                         expression->type != dbms::ExprType::ColumnRef &&
                         expression->type != dbms::ExprType::Literal &&
                         expression->type != dbms::ExprType::Subquery) {
@@ -30575,7 +30611,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             exprTypes.push_back(3);
                             if (!bareExists)
                                 arithRawText[(size_t)(selectExprs.size() - 1)] = item;
-                        } else if (func == "count" || func == "sum" || func == "avg" || func == "min" || func == "max" || func == "bool_and" || func == "bool_or" || func == "every" || func == "stddev" || func == "stddev_samp" || func == "stddev_pop" || func == "variance" || func == "var_samp" || func == "var_pop" || func == "array_agg" || func == "string_agg" || func == "json_agg" || func == "jsonb_agg" || func == "bit_and" || func == "bit_or" || func == "xmlagg" || func == "rank" || func == "dense_rank" || func == "percentile_cont" || func == "grouping") {
+                        } else if (isFrontendAggregateName(func)) {
                             dbms::StorageEngine::AggItem ai;
                             ai.func = func;
                             ai.arg = arg;
