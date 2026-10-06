@@ -2,6 +2,21 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Canonical full runner exposes four native failures; three independent private follow-ups committed",
+      "gap_ids": ["SQL-03", "SQL-04", "TYPE-01", "IDX-03"],
+      "status": "partial",
+      "commits": ["229b2b19", "da8bb245", "2575ba98"],
+      "evidence": ["docs/issue-full-registered-canonical-1e0a8c5a.md", "src/commands/TableManage.cpp", "src/access/SPGiSTIndexFormat.h"],
+      "tests": ["tests/check_add_validation_test.cpp", "tests/integer_bounds_test.cpp", "tests/geometric_test.cpp", "tests/partial_index_test.cpp"],
+      "verification": {
+        "reproduction": "Canonical40539 frozen1e0a8c5a/0204 binary stilllive:501native/244registered. ActualmissingnullableCHECKINSERT22023, obsoletegeometricASCIIassert, preciseBIGINTdivide22003 vsoldemptyexpectation, partialindex42703onscalardecodedemail. FreshoriginalROOTnative19506 terminal134 reproduceslast.",
+        "fix": "PRIVATEcommits229b2b19 completepost-default/post-triggerNEWimage;da8bb245 precise22003plusvalidmodulo;2575ba98 V2bits/RID/corruptionfallback/freshreload. NotROOTintegrated. ScalarAPIdecodedliteralcandidate infresh56normalO2build, notverified/committedyet.",
+        "focused_tests": "NullchangedTM O2 plus55auditedformalROOTobjects/identicalheaders:47180/11freshnative97756/wire18981 terminal0 SHA5502bb01. Actualoldnewnative90870 exit134/oldwire82610 exit1. Integer71894/geometric88512 terminal0 onoriginal55ROOTproduction. InitialgeometricwrongRIDshift85756 exit134/initialedited-liveBashverifier58134 exit2 retained.",
+        "full_suite": "40539confirmedlive, existingfourfailsmean nofullgreenclaim. ROOTsource/header/test/registryfrozenuntilterminal. Privatepassesnotcanonicalorintegrationproof.",
+        "scope": "273=22complete166partial70unverified15deferredunchanged. Shared57TUcarrier9native7wiredevelopmentpassed butordinaryconsumers/ROOTpending. TypedUPDATE/aggregate/EXPLAIN/scalarWITH/readI/Ooverheadactive, originalfiveclause/full57014retained. Nopush/Actionsenablement/userdeferredsecurity-TDE."
+      }
+    },
+    {
       "issue": "Prepared query namespaces, canonical ranges, aggregate ORDER roles, EXTRACT and independent character/quoted Describe fixes",
       "gap_ids": ["SQL-03", "SQL-04", "TYPE-01", "TYPE-02", "FUNC-05", "FUNC-06", "QRY-01", "QRY-03", "PROTO-04"],
       "status": "partial",
