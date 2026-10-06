@@ -1253,6 +1253,15 @@ ReturningBinding returningBinding(const ReturningOptions& options,
     } else {
         binding.defaultQualifiers.insert(identifier(tableAlias));
     }
+    // Defaults are introduced only if no actual relation or explicit
+    // transition alias already uses that name (PostgreSQL 18 RETURNING).
+    const auto masksDefault = [&](const std::string& name) {
+        return binding.defaultQualifiers.count(name) ||
+            (options.oldAliased && binding.oldName == name) ||
+            (options.newAliased && binding.newName == name);
+    };
+    if (!options.oldAliased && masksDefault("old")) binding.oldName.clear();
+    if (!options.newAliased && masksDefault("new")) binding.newName.clear();
     binding.allowMergeAction = allowMergeAction;
     return binding;
 }
@@ -1271,8 +1280,7 @@ std::optional<ReturningProjection::Source> returningSourceForQualifier(
 }
 
 bool returningBindingIsValid(const ReturningBinding& binding) {
-    if (binding.oldName.empty() || binding.newName.empty() ||
-        binding.oldName == binding.newName) {
+    if (!binding.oldName.empty() && binding.oldName == binding.newName) {
         return false;
     }
     return binding.defaultQualifiers.count(binding.oldName) == 0 &&
@@ -1786,20 +1794,15 @@ InsertSelectBuildResult buildInsertSelectRows(
 }
 
 void addReturningRowToContext(RowContext& context, const SqlRow& source,
-                              const TableSchema& table,
-                              const std::string& qualifier,
-                              bool unqualified) {
+                              const TableSchema& table, size_t sourceOrdinal) {
     for (size_t i = 0; i < table.len; ++i) {
         const Column& column = table.cols[i];
         const auto it = source.find(column.dataName);
         const bool isNull = it == source.end() || !it->second;
         const ExprValue value(
-            column.dataType,
+            column.dataType + (column.isArray ? "[]" : ""),
             isNull ? std::string{} : *it->second, isNull);
-        if (unqualified) context.set(column.dataName, value);
-        if (!qualifier.empty()) {
-            context.set(qualifier + "." + column.dataName, value);
-        }
+        context.setBoundColumn(sourceOrdinal, i, value);
     }
 }
 
@@ -1812,21 +1815,79 @@ const SqlRow& returningSourceRow(
 }
 
 RowContext returningContext(const ReturningRowImage& image,
-                            const TableSchema& table,
-                            const ReturningBinding& binding) {
+                            const TableSchema& table) {
     RowContext context;
     const SqlRow& defaultRow = returningSourceRow(
         image, ReturningProjection::Source::Default);
-    addReturningRowToContext(context, defaultRow, table, "", true);
-    for (const auto& qualifier : binding.defaultQualifiers) {
-        addReturningRowToContext(
-            context, defaultRow, table, qualifier, false);
-    }
+    addReturningRowToContext(context, defaultRow, table,
+        static_cast<size_t>(ReturningProjection::Source::Default));
     addReturningRowToContext(
-        context, image.oldRow, table, binding.oldName, false);
+        context, image.oldRow, table, static_cast<size_t>(ReturningProjection::Source::Old));
     addReturningRowToContext(
-        context, image.newRow, table, binding.newName, false);
+        context, image.newRow, table, static_cast<size_t>(ReturningProjection::Source::New));
     return context;
+}
+
+// Legacy DML retains parsed RETURNING expressions. Compile an execution-owned
+// copy against exact canonical qualifiers and descriptor ordinals, rather
+// than normalizing user names through RowContext or mutating the shared AST.
+ExprPtr copyReturningExpression(const Expr* expression, const TableSchema& table,
+                                const ReturningBinding& binding) {
+    if (!expression) return {};
+    ExprPtr result;
+    const auto copy = [&](const ExprPtr& child) {
+        return copyReturningExpression(child.get(), table, binding);
+    };
+    if (const auto* node = dynamic_cast<const LiteralExpr*>(expression)) {
+        result = std::make_unique<LiteralExpr>(*node);
+    } else if (const auto* node = dynamic_cast<const ColumnRefExpr*>(expression)) {
+        const auto source = returningSourceForQualifier(node->table, binding);
+        auto column = std::make_unique<ColumnRefExpr>(*node);
+        size_t ordinal = 0;
+        while (ordinal < table.len && table.cols[ordinal].dataName != node->column) ++ordinal;
+        if (!source || !node->schema.empty() || ordinal == table.len)
+            throw DbError("XX000", "validated RETURNING column has no row-image binding");
+        const auto& descriptor = table.cols[ordinal];
+        column->binding = QueryColumnBinding{0, static_cast<size_t>(*source), ordinal,
+            descriptor.dataType + (descriptor.isArray ? "[]" : ""), false};
+        result = std::move(column);
+    } else if (const auto* node = dynamic_cast<const UnaryOpExpr*>(expression)) {
+        auto target = std::make_unique<UnaryOpExpr>(); target->op = node->op;
+        target->operand = copy(node->operand); result = std::move(target);
+    } else if (const auto* node = dynamic_cast<const BinaryOpExpr*>(expression)) {
+        auto target = std::make_unique<BinaryOpExpr>(); target->op = node->op;
+        target->left = copy(node->left); target->right = copy(node->right); result = std::move(target);
+    } else if (const auto* node = dynamic_cast<const CastExpr*>(expression)) {
+        auto target = std::make_unique<CastExpr>(); target->typeName = node->typeName;
+        target->typeMods = node->typeMods; target->operand = copy(node->operand); result = std::move(target);
+    } else if (const auto* node = dynamic_cast<const CaseExpr*>(expression)) {
+        auto target = std::make_unique<CaseExpr>();
+        target->switchExpr = copy(node->switchExpr); target->elseExpr = copy(node->elseExpr);
+        for (const auto& arm : node->whenClauses)
+            target->whenClauses.emplace_back(copy(arm.first), copy(arm.second));
+        result = std::move(target);
+    } else if (const auto* node = dynamic_cast<const FunctionCallExpr*>(expression)) {
+        // supportsReturningExpression already excludes aggregate/window and
+        // named-argument roles from this legacy consumer.
+        auto target = std::make_unique<FunctionCallExpr>();
+        target->schema = node->schema; target->funcName = node->funcName;
+        for (const auto& arg : node->args) target->args.push_back(copy(arg));
+        result = std::move(target);
+    } else if (const auto* node = dynamic_cast<const ArrayExpr*>(expression)) {
+        auto target = std::make_unique<ArrayExpr>();
+        for (const auto& item : node->elements) target->elements.push_back(copy(item));
+        result = std::move(target);
+    } else if (const auto* node = dynamic_cast<const RowExpr*>(expression)) {
+        auto target = std::make_unique<RowExpr>();
+        for (const auto& item : node->elements) target->elements.push_back(copy(item));
+        result = std::move(target);
+    } else {
+        throw DbError("XX000", "validated RETURNING expression has no structured copy");
+    }
+    result->sourceBegin = expression->sourceBegin;
+    result->sourceEnd = expression->sourceEnd;
+    result->preparedSubquery = expression->preparedSubquery;
+    return result;
 }
 
 SqlRow returningSqlRow(
@@ -2351,8 +2412,9 @@ bool evaluateReturningExpression(const Expr* expression,
                                  std::string& typeName) {
     ExprEvaluator evaluator;
     evaluator.setCurrentDB(currentDB);
+    auto compiled = copyReturningExpression(expression, table, binding);
     const ExprValue result = evaluator.eval(
-        expression, returningContext(image, table, binding));
+        compiled.get(), returningContext(image, table));
     if (!result.isNull &&
         (result.isUnknown() || result.typeName == "unknown")) {
         return false;
@@ -3955,7 +4017,7 @@ bool executePreparedUpdate(const UpdateStmt& stmt, Session& s, bool& fallback,
     size_t targetOrdinal = static_cast<size_t>(-1);
     const PreparedQuery::SourceRange* targetRange = nullptr;
     for (const auto& source : prepared->sourceRanges) {
-        if (source.owner == update) {
+        if (source.owner == update && !source.relationName.empty()) {
             if (targetOrdinal != static_cast<size_t>(-1))
                 throw DbError("XX000", "ordinary UPDATE has multiple target ranges");
             targetOrdinal = source.ordinal;

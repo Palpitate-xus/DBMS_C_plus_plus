@@ -303,6 +303,29 @@ public:
         }
         return columns;
     }
+    QueryRowDescriptor returning(std::vector<SelectItem>& items,
+        const ReturningOptions& options,const Range& target,std::vector<Namespace> scopes) {
+        if (items.empty()) return {};
+        const auto add = [&](const std::string& name,bool explicitAlias) {
+            const bool exists = std::any_of(scopes.begin(),scopes.end(),[&](const auto& scope){
+                return std::any_of(scope.begin(),scope.end(),[&](const auto& range){return range.name==name;});
+            });
+            if (exists) {
+                if (explicitAlias) throw DbError("42712","table name \""+name+"\" specified more than once");
+                return;
+            }
+            // RETURNING OLD/NEW names are table-only transition namespaces.
+            // Unqualified columns and a bare star retain the target shape.
+            Range transition{"",name,target.columns};
+            for(const auto& column:transition.columns) transition.hiddenUnqualified.insert(column.name);
+            scopes.front().push_back(registerSource(std::move(transition)));
+        };
+        if(options.oldAliased) add(identifier(options.oldAlias),true);
+        if(options.newAliased) add(identifier(options.newAlias),true);
+        if(!options.oldAliased) add("old",false);
+        if(!options.newAliased) add("new",false);
+        return project(items,scopes);
+    }
     Range relation(const std::string& source, const std::string& alias, const Ctes& ctes) {
         CatalogManager::QualifiedName name;
         if (!CatalogManager::parseQualifiedName(source, name, true))
@@ -528,7 +551,7 @@ public:
             }
             for (auto& value : insert->conflictUpdateSet) expression(value.second, conflictScopes);
             expression(insert->conflictWhere, conflictScopes);
-            return project(insert->returning, scopes);
+            return returning(insert->returning,insert->returningOptions,target,std::move(scopes));
         }
         if (auto* update = dynamic_cast<UpdateStmt*>(&node)) {
             auto ranges = from(update->fromClause.get(), outer, ctes);
@@ -543,7 +566,8 @@ public:
                     throw DbError("42703", "UPDATE target column does not exist: " + name);
                 expression(value.second, scopes);
             }
-            expression(update->whereClause, scopes); return project(update->returning, scopes);
+            expression(update->whereClause, scopes);
+            return returning(update->returning,update->returningOptions,scopes.front().front(),scopes);
         }
         if (auto* remove = dynamic_cast<DeleteStmt*>(&node)) {
             auto ranges = from(remove->usingClause.get(), outer, ctes);
@@ -551,7 +575,8 @@ public:
             checkRangeConflicts({target}, ranges);
             ranges.insert(ranges.begin(), target);
             auto scopes = outer; scopes.insert(scopes.begin(), std::move(ranges));
-            expression(remove->whereClause, scopes); return project(remove->returning, scopes);
+            expression(remove->whereClause, scopes);
+            return returning(remove->returning,remove->returningOptions,scopes.front().front(),scopes);
         }
         if (auto* explain = dynamic_cast<ExplainStmt*>(&node)) {
             if (!explain->query) throw DbError("42601", "EXPLAIN query is missing");

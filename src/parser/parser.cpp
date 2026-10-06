@@ -2804,21 +2804,9 @@ static bool parseReturningClause(const std::vector<std::string>& tokens,
             return false;
         }
         ++pos;
-        const auto normalizeAlias = [](std::string alias) {
-            if (alias.size() >= 2 && alias.front() == '"' &&
-                alias.back() == '"') {
-                alias = alias.substr(1, alias.size() - 2);
-            }
-            return SQLParser::toLower(alias);
-        };
-        const std::string activeOld = normalizeAlias(
-            options.oldAliased ? options.oldAlias : "old");
-        const std::string activeNew = normalizeAlias(
-            options.newAliased ? options.newAlias : "new");
-        if (activeOld == activeNew) {
-            error = "RETURNING OLD and NEW aliases must be distinct";
-            return false;
-        }
+        // Alias visibility is semantic, not grammar. Preserve canonical case
+        // and let binding decide existing-range conflicts, masked defaults,
+        // and duplicate explicit aliases after the target/input transforms.
     }
 
     while (pos < tokens.size() && tokens[pos] != ";") {
