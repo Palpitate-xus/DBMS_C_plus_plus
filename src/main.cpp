@@ -32767,6 +32767,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             vector<dbms::StorageEngine::SelectExpr> scalarSortHiddenExprs;
             bool canSortScalarProjected = !exprOrderBySpecs.empty();
             if (canSortScalarProjected) {
+                const auto scalarTargets = splitSelectColumns(columns);
                 for (const auto& [isExpression, keyIndex] : orderKeyRefs) {
                     const auto& spec = isExpression
                         ? exprOrderBySpecs[keyIndex] : orderBySpecs[keyIndex];
@@ -32785,6 +32786,32 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                 match = i;
                                 mapped = true;
                                 break;
+                            }
+                        }
+                        if (!mapped) {
+                            std::string sortSql = spec.expressionSql;
+                            if (sortSql.empty()) {
+                                if (!op.empty()) sortSql = spec.exprArg + " " + op + " " + spec.exprArg2;
+                                else sortSql = spec.exprFunc + "(" + spec.exprArg +
+                                    (spec.exprArg2.empty() ? "" : ", " + spec.exprArg2) + ")";
+                            }
+                            const auto sortTokens = dbms::SQLParser::tokenize(sortSql);
+                            for (size_t i = 0; i < scalarTargets.size(); ++i) {
+                                const size_t alias = findTopLevelKeyword(scalarTargets[i], "as");
+                                if (dbms::SQLParser::tokenize(trim(scalarTargets[i].substr(0, alias))) != sortTokens)
+                                    continue;
+                                match = i;
+                                mapped = true;
+                                break;
+                            }
+                            if (!mapped) {
+                                dbms::StorageEngine::SelectExpr hidden;
+                                hidden.isScalar = true;
+                                hidden.funcName = "expreval";
+                                hidden.funcArgs.push_back(std::move(sortSql));
+                                match = selectExprs.size() + scalarSortHiddenExprs.size();
+                                scalarSortHiddenExprs.push_back(std::move(hidden));
+                                mapped = true;
                             }
                         }
                     } else {
