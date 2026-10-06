@@ -1041,6 +1041,65 @@ bool SQLParser::requiresQuerySnapshot(const std::string& sql) {
            keyword == "delete" || keyword == "merge";
 }
 
+static bool databaseIndependentExpression(const Expr* expression) {
+    if (!expression || expression->preparedSubquery) return false;
+    if (const auto* literal = dynamic_cast<const LiteralExpr*>(expression)) {
+        // Legacy SQL children/array bounds/aggregate decorations can also
+        // occupy LiteralExpr. Only a genuine primitive datum is a proof;
+        // declared/unknown types can require catalog-dependent coercion.
+        if (!literal->typeName.empty() || !SQLParser::lexicalError(literal->value).empty() ||
+            SQLParser::tokenize(literal->value).size() != 1) return false;
+        const auto value = SQLParser::toLower(literal->value);
+        return isNumericToken(literal->value) || isStringLiteralToken(literal->value) ||
+               isBitStringLiteralToken(literal->value) ||
+               value == "null" || value == "true" || value == "false";
+    }
+    if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(expression)) {
+        const auto op = SQLParser::toLower(unary->op);
+        return (op == "+" || op == "-" || op == "not") &&
+               databaseIndependentExpression(unary->operand.get());
+    }
+    if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(expression)) {
+        // These primitive operators execute directly; casts, COLLATE and
+        // operators without that contract remain owned. There is no routine
+        // name/volatility whitelist and no evaluation during this proof.
+        static const std::set<std::string> primitiveOperators = {
+            "+", "-", "*", "/", "%", "||", "and", "or", "=", "!=", "<>",
+            "<", ">", "<=", ">=", "in", "not in", "between", "not between"
+        };
+        return primitiveOperators.count(SQLParser::toLower(binary->op)) &&
+               databaseIndependentExpression(binary->left.get()) &&
+               databaseIndependentExpression(binary->right.get());
+    }
+    if (const auto* row = dynamic_cast<const RowExpr*>(expression)) {
+        if (row->elements.empty()) return false;
+        for (const auto& element : row->elements)
+            if (!databaseIndependentExpression(element.get())) return false;
+        return true;
+    }
+    // Column/parameter references, routines (including builtins), subqueries,
+    // casts and all unhandled nodes retain the database transaction. CASE is
+    // conservative too: legacy execution can lower it to synthetic calls.
+    return false;
+}
+
+bool SQLParser::isDatabaseIndependentQuery(const Stmt& statement) {
+    const auto* select = dynamic_cast<const SelectStmt*>(&statement);
+    if (!select || select->command != SqlCommand::Select || select->fromClause ||
+        !select->ctes.empty() || select->setOp != SetOp::None || select->setOpLhs || select->setOpRhs ||
+        !select->valuesRows.empty() || !select->locking.empty() || select->withTies ||
+        !select->groupBy.empty() || !select->groupByElems.empty() || select->having ||
+        !select->windowDefs.empty() || select->selectList.empty()) return false;
+    for (const auto& target : select->selectList)
+        if (!databaseIndependentExpression(target.expr.get())) return false;
+    if (select->whereClause && !databaseIndependentExpression(select->whereClause.get())) return false;
+    for (const auto& key : select->orderBy)
+        if (!key.usingOp.empty() || !databaseIndependentExpression(key.expr.get())) return false;
+    for (const auto& target : select->distinctOn)
+        if (!databaseIndependentExpression(target.get())) return false;
+    return true;
+}
+
 SqlCommand SQLParser::classify(const std::string& sql) {
     const size_t offset = skipLeadingSqlTrivia(sql);
     if (offset == std::string::npos) return SqlCommand::Unknown;

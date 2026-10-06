@@ -35852,10 +35852,17 @@ static bool executeWithCteInheritance(const std::string& inputSql, Session& s,
         pendingExplainOutput = &explainPublication;
         pendingExplainDepth = executeDepth + (command == dbms::SqlCommand::Execute ? 2 : 1);
     }
+    bool databaseIndependentQuery = false;
+    if (outermost && !g_engine.inTransaction() && command == dbms::SqlCommand::Select) {
+        dbms::SQLParser parser;
+        const auto parsed = parser.parseForBinding(rawSql);
+        databaseIndependentQuery = parsed.success && parsed.stmt &&
+            dbms::SQLParser::isDatabaseIndependentQuery(*parsed.stmt);
+    }
     const bool statementTransaction = outermost &&
         !g_engine.inTransaction() &&
         g_engine.databaseExists(s.currentDB) &&
-        (dbms::SQLParser::requiresQuerySnapshot(rawSql) ||
+        ((dbms::SQLParser::requiresQuerySnapshot(rawSql) && !databaseIndependentQuery) ||
          isTopLevelDml(rawSql) || isTopLevelLockingSelect(rawSql) ||
          command == dbms::SqlCommand::Execute ||
          command == dbms::SqlCommand::Explain);

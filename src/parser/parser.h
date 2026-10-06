@@ -35,6 +35,10 @@ public:
     // DML/query analysis needs a snapshot even without a physical table.
     // Transaction controls and simple SHOW/SET utilities do not.
     static bool requiresQuerySnapshot(const std::string& sql);
+    // Conservative whole-AST proof for an autocommit SELECT that cannot
+    // access the database or invoke a routine. This does not waive snapshot
+    // rules inside an existing transaction or for unknown expression roles.
+    static bool isDatabaseIndependentQuery(const Stmt& statement);
     static bool isSetTransactionStatement(const std::string& sql);
     static std::string lexicalError(const std::string& sql);
     // Analysis preflight: independent WITH lists may shadow outer names,
