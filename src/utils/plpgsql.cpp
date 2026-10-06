@@ -567,6 +567,7 @@ struct Interp {
             bool castFunction = false;
             bool typeNameExpected = false;
             bool typeClause = false;
+            bool collationNameExpected = false;
         };
         std::vector<SqlRole> roles(1);
         size_t i = 0;
@@ -619,7 +620,13 @@ struct Interp {
                     "precision", "varying", "with", "without", "time", "zone",
                     "character"
                 };
-                if (role.typeNameExpected) {
+                if (role.collationNameExpected) {
+                    // COLLATE takes one (possibly qualified and delimited)
+                    // name, not a data expression. readIdentifier above has
+                    // consumed the complete qualified unit, including trivia.
+                    role.collationNameExpected = false;
+                    sqlRole = true;
+                } else if (role.typeNameExpected) {
                     role.typeNameExpected = false;
                     role.typeClause = true;
                     sqlRole = true;
@@ -634,6 +641,9 @@ struct Interp {
                 }
                 if (sqlStatement && !sqlRole) {
                     if (role.identifiersAreLabels) {
+                        sqlRole = true;
+                    } else if (!quoted && name == "collate") {
+                        role.collationNameExpected = true;
                         sqlRole = true;
                     } else if (!quoted && name == "with") {
                         role.cteList = true;
