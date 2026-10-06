@@ -20173,6 +20173,51 @@ public:
 };
 }
 
+static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& handled) {
+    handled=false;
+    dbms::SQLParser parser;auto parsed=parser.parseForBinding(rawSql);
+    auto* select=parsed.isValid()?dynamic_cast<dbms::SelectStmt*>(parsed.stmt.get()):nullptr;
+    if(!select)return false;
+    function<bool(const dbms::Expr*)> hasCase=[&](const dbms::Expr* value) {
+        if(!value)return false;
+        if(dynamic_cast<const dbms::CaseExpr*>(value))return true;
+        if(const auto* binary=dynamic_cast<const dbms::BinaryOpExpr*>(value))return hasCase(binary->left.get()) || (binary->op!="::" && hasCase(binary->right.get()));
+        if(const auto* unary=dynamic_cast<const dbms::UnaryOpExpr*>(value))return hasCase(unary->operand.get());
+        if(const auto* cast=dynamic_cast<const dbms::CastExpr*>(value))return hasCase(cast->operand.get());
+        if(const auto* call=dynamic_cast<const dbms::FunctionCallExpr*>(value)) {
+            for(const auto& arg:call->args)if(hasCase(arg.get()))return true;
+            for(const auto& arg:call->namedArgs)if(hasCase(arg.value.get()))return true;
+        }
+        if(const auto* array=dynamic_cast<const dbms::ArrayExpr*>(value))for(const auto& element:array->elements)if(hasCase(element.get()))return true;
+        if(const auto* row=dynamic_cast<const dbms::RowExpr*>(value))for(const auto& element:row->elements)if(hasCase(element.get()))return true;
+        return false;
+    };
+    bool required=hasCase(select->whereClause.get());
+    for(const auto& item:select->selectList)required=required || hasCase(item.expr.get());
+    for(const auto& item:select->orderBy)required=required || hasCase(item.expr.get());
+    for(const auto& row:select->valuesRows)for(const auto& value:row)required=required || hasCase(value.get());
+    if(!required)return false;
+    if(select->command==dbms::SqlCommand::Values) {
+        if(!select->ctes.empty() || !select->orderBy.empty() || select->whereClause || select->limit || select->offset || select->setOp!=dbms::SetOp::None)return false;
+    } else {
+        // The parsed local tree is only a shape probe. Its original CTEs are
+        // immediately restored; whole preparation below retains every CTE
+        // and byte span, and the borrowed plan builder accepts this envelope.
+        auto definitions=std::move(select->ctes);
+        const bool supported=dbms::QueryPlanner::supportsPreparedSourceSelectPlan(*select);
+        select->ctes=std::move(definitions);
+        if(!supported)return false;
+    }
+    auto query=make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(session.currentDB,rawSql));
+    PreparedWithDmlRuntime runtime(session,std::move(query));auto result=runtime.runRead();
+    for(const auto& name:result.columns)cout<<name<<' ';cout<<'\n';
+    for(size_t i=0;i<result.rows.size();++i) {
+        for(size_t j=0;j<result.rows[i].size();++j)cout<<(result.nulls[i][j]?"NULL":result.rows[i][j])<<' ';
+        cout<<'\n';
+    }
+    dbms::publishLastDmlResult(std::move(result));handled=true;return false;
+}
+
 static bool handlePreparedWithDml(const string& rawSql,Session& session,bool& handled) {
     handled=false;
     const size_t begin=dbms::skipLeadingSqlTrivia(rawSql);
@@ -20580,11 +20625,15 @@ static bool executeInternal(const string& rawSql, Session& s) {
             sql = toLower(discard->toString());
             break;
         }
-        case dbms::SqlCommand::Values:
+        case dbms::SqlCommand::Values: {
+            bool preparedCaseHandled=false;
+            const bool preparedCaseFailed=handlePreparedCaseQuery(effectiveRawSql,s,preparedCaseHandled);
+            if(preparedCaseHandled)return preparedCaseFailed;
             // VALUES owns its expression parsing. Preserve the original
             // spelling here: the legacy normalizer rewrites ARRAY[...] as
             // array_get(array, ...), which changes both syntax and meaning.
             return executeValuesStatement(effectiveRawSql, s);
+        }
 
         case dbms::SqlCommand::UseDatabase: {
             // DIV-01: PostgreSQL cannot switch databases via SQL after
@@ -24962,6 +25011,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
 
     if (sql.substr(0, 6) == "select" || sql.substr(0, 5) == "with ") {
         if (!checkDB(s)) return true;
+
+        bool preparedCaseHandled=false;
+        const bool preparedCaseFailed=handlePreparedCaseQuery(effectiveRawSql,s,preparedCaseHandled);
+        if(preparedCaseHandled)return preparedCaseFailed;
 
         bool preparedWhereHandled = false;
         const bool preparedWhereFailed = handlePreparedScalarQuery(effectiveRawSql, s, preparedWhereHandled);
