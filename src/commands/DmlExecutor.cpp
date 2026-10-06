@@ -5184,6 +5184,8 @@ class BoundDmlExecution {
     std::string physical_;
     PreparedQueryExecution execution_;
     const std::vector<SelectItem>* returning_ = nullptr;
+    std::vector<std::pair<const PreparedQuery::SourceRange*,ReturningProjection::Source>> transitionSources_;
+    std::map<const Expr*,size_t> returningStarSources_;
 
     static bool defaultValue(const Expr* expr) {
         const auto* literal = dynamic_cast<const LiteralExpr*>(expr);
@@ -5215,12 +5217,35 @@ class BoundDmlExecution {
         }
         execution_.setSourceRow(row,target_->ordinal,cells);return row;
     }
+    static bool returningStar(const Expr* value) {
+        const auto* column=dynamic_cast<const ColumnRefExpr*>(value);
+        return isStarProjection(value) || (column && column->column=="*");
+    }
+    RowContext returningContext(const ReturningRowImage& image) const {
+        auto row=context(returningSourceRow(image,ReturningProjection::Source::Default));
+        for(const auto& channel:transitionSources_) {
+            const auto& source=*channel.first;
+            const auto& values=returningSourceRow(image,channel.second);
+            std::vector<ExprValue> cells;
+            for(const auto& column:source.columns) {
+                const auto found=values.find(column.name);
+                // A missing row version is a whole typed NULL row (INSERT
+                // OLD / DELETE NEW), not a guessed textual NULL sentinel.
+                if(!values.empty() && found==values.end())
+                    throw DbError("XX000","RETURNING image lost its bound descriptor column");
+                const bool isNull=found==values.end() || !found->second;
+                cells.emplace_back(column.type,isNull?std::string{}:*found->second,isNull);
+            }
+            execution_.setSourceRow(row,source.ordinal,cells);
+        }
+        return row;
+    }
     bool matches(const Expr* where,const SqlRow& values) const {
         if(!where)return true;
         const auto value=execution_.evaluate(where,context(values));
         return !value.isNull && value.asBool();
     }
-    DmlResult result(const std::vector<SqlRow>& rows,const std::string& command,size_t count) {
+    DmlResult result(const std::vector<ReturningRowImage>& rows,const std::string& command,size_t count) {
         DmlResult output;output.available=true;
         output.commandTag=command=="INSERT"?"INSERT 0 "+std::to_string(count):command+" "+std::to_string(count);
         const auto& descriptor=query_->statementOutputs.at(statement_);
@@ -5229,10 +5254,12 @@ class BoundDmlExecution {
             output.columnTypes.push_back(column.type=="unknown"?"text":ExprHelper::canonicalResultTypeName(column.type));
         }
         for(const auto& image:rows) {
-            auto row=context(image);std::vector<ExprValue> values;
+            auto row=returningContext(image);std::vector<ExprValue> values;
             for(const auto& item:*returning_) {
-                if(isStarProjection(item.expr.get())) {
-                    for(size_t i=0;i<target_->columns.size();++i) values.push_back(row.boundColumn(target_->ordinal,i));
+                if(returningStar(item.expr.get())) {
+                    const size_t ordinal=returningStarSources_.at(item.expr.get());
+                    const auto& source=execution_.sourceRange(ordinal);
+                    for(size_t i=0;i<source.columns.size();++i) values.push_back(row.boundColumn(ordinal,i));
                 } else values.push_back(execution_.evaluate(item.expr.get(),row));
             }
             if(values.size()!=descriptor.size())throw DbError("XX000","DML RETURNING width differs from prepared descriptor");
@@ -5245,7 +5272,7 @@ class BoundDmlExecution {
 public:
     BoundDmlExecution(Stmt* statement,Session& session,std::shared_ptr<PreparedQuery> query)
         :statement_(statement),session_(session),query_(std::move(query)),execution_(query_,&g_engine,session.currentDB) {
-        for(const auto& range:query_->sourceRanges)if(range.owner==statement_ && !range.source && !range.mergedUsing) {
+        for(const auto& range:query_->sourceRanges)if(range.owner==statement_ && !range.source && !range.mergedUsing && !range.relationName.empty()) {
             if(target_)throw DbError("XX000","prepared DML has multiple target occurrences");
             target_=&range;
         }
@@ -5261,12 +5288,16 @@ public:
         for(size_t i=0;i<table_.len;++i)if(table_.cols[i].dataName!=target_->columns[i].name)
             throw DbError("XX000","physical DML target differs from its prepared descriptor");
         StorageEngine::TablePrivilege privilege;
+        const ReturningOptions* options=nullptr;
+        std::string returningRelation,returningAlias;
         if(auto* insert=dynamic_cast<InsertStmt*>(statement_)) {
             privilege=StorageEngine::TablePrivilege::Insert;returning_=&insert->returning;
+            options=&insert->returningOptions;returningRelation=insert->tableName;
             if(!insert->conflictAction.empty())throw DbError("0A000","prepared WITH conflict action requires additional lowering");
             for(auto& values:insert->values)for(auto& value:values)expression(value.get());
         } else if(auto* update=dynamic_cast<UpdateStmt*>(statement_)) {
             privilege=StorageEngine::TablePrivilege::Update;returning_=&update->returning;
+            options=&update->returningOptions;returningRelation=update->tableName;returningAlias=update->alias;
             if(update->fromClause || !update->whereCurrentOf.empty())throw DbError("0A000","prepared WITH UPDATE FROM requires additional range lowering");
             predicate(update->whereClause.get());
             for(auto& assignment:update->setClauses) {
@@ -5275,11 +5306,41 @@ public:
             }
         } else if(auto* remove=dynamic_cast<DeleteStmt*>(statement_)) {
             privilege=StorageEngine::TablePrivilege::Delete;returning_=&remove->returning;
+            options=&remove->returningOptions;returningRelation=remove->tableName;returningAlias=remove->alias;
             if(remove->usingClause || !remove->whereCurrentOf.empty())throw DbError("0A000","prepared WITH DELETE USING requires additional range lowering");
             predicate(remove->whereClause.get());
         } else throw DbError("0A000","prepared WITH primary DML is not lowered");
         if(!temporary && !checkTablePrivilege(session_,physical_,privilege))throw DbError("42501","permission denied for DML target");
-        for(const auto& item:*returning_)expression(item.expr.get());
+        // Resolve canonical transition names once against the prepared
+        // occurrences. Runtime evaluation reads source/column ordinals only.
+        const auto binding=returningBinding(*options,returningRelation,returningAlias);
+        for(const auto& range:query_->sourceRanges) {
+            if(range.owner!=statement_ || range.source || range.mergedUsing ||
+               !range.relationName.empty() || range.cteStatement)continue;
+            ReturningProjection::Source image;
+            if(!binding.oldName.empty() && range.name==binding.oldName)image=ReturningProjection::Source::Old;
+            else if(!binding.newName.empty() && range.name==binding.newName)image=ReturningProjection::Source::New;
+            else throw DbError("XX000","prepared DML has an unknown transition occurrence");
+            if(range.columns.size()!=target_->columns.size())
+                throw DbError("XX000","RETURNING transition descriptor differs from its target");
+            for(size_t i=0;i<range.columns.size();++i)
+                if(range.columns[i].name!=target_->columns[i].name || range.columns[i].type!=target_->columns[i].type)
+                    throw DbError("XX000","RETURNING transition column differs from its target");
+            transitionSources_.emplace_back(&range,image);
+        }
+        for(const auto& item:*returning_) {
+            if(!returningStar(item.expr.get())){expression(item.expr.get());continue;}
+            const auto* star=dynamic_cast<const ColumnRefExpr*>(item.expr.get());
+            const PreparedQuery::SourceRange* source=star?nullptr:target_;
+            if(star)for(const auto& range:query_->sourceRanges)
+                if(range.owner==statement_ && range.name==star->table &&
+                   (star->schema.empty() || range.schema==star->schema)) {
+                    if(source)throw DbError("XX000","RETURNING star has multiple prepared occurrences");
+                    source=&range;
+                }
+            if(!source)throw DbError("XX000","RETURNING star lost its prepared occurrence");
+            returningStarSources_.emplace(item.expr.get(),source->ordinal);
+        }
         // Keep original assignments until metadata has checked every value,
         // WHERE and RETURNING expression. The AST now also preserves exact
         // duplicate spellings; canonical a and "a" are the same target even
@@ -5327,7 +5388,7 @@ public:
                     write(row);
                 }
             }
-            return result(images,"INSERT",count);
+            return result(insertedReturningImages(images),"INSERT",count);
         }
         std::vector<SqlRow> images;size_t count=0;
         if(auto* update=dynamic_cast<UpdateStmt*>(statement_)) {
@@ -5344,13 +5405,13 @@ public:
             const auto status=g_engine.updateRows(session_.currentDB,physical_,{}, {},returning_->empty()?nullptr:&images,
                 resolver,matcher,&count,returning_->empty()?nullptr:&changes);
             if(status!=DBStatus::OK)throw DbError(sqlstateForDBStatus(status),"WITH UPDATE failed");
-            return result(images,"UPDATE",count);
+            return result(updatedReturningImages(changes),"UPDATE",count);
         }
         auto* remove=static_cast<DeleteStmt*>(statement_);
         const auto matcher=[&](const SqlRow& old){return matches(remove->whereClause.get(),old);};
         const auto status=g_engine.removeRows(session_.currentDB,physical_,{},returning_->empty()?nullptr:&images,matcher,&count);
         if(status!=DBStatus::OK)throw DbError(sqlstateForDBStatus(status),"WITH DELETE failed");
-        return result(images,"DELETE",count);
+        return result(deletedReturningImages(images),"DELETE",count);
     }
 };
 } // namespace
