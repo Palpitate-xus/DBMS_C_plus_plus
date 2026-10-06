@@ -1398,7 +1398,9 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
         }
         for (size_t i = 0; i < table.len; ++i) {
             const Column& column = table.cols[i];
-            if (lowerProtocolText(column.dataName) != lowerProtocolText(name)) continue;
+            // Schema/output names are already canonical SQL identities. A
+            // delimited F and an unquoted f are different physical columns.
+            if (column.dataName != name) continue;
             const std::string physicalTypeName =
                 lowerProtocolText(column.dataType);
             const bool structuredMatchesPhysical = hasStructuredType &&
@@ -1588,6 +1590,16 @@ bool describePreparedResult(const std::string& sql, Session& session,
         return false;
     }
     if (!projections || projections->empty()) return false;
+    const auto outputAlias = [](const std::string& token) {
+        CatalogManager::QualifiedName name;
+        if (CatalogManager::parseQualifiedName(token, name, true) && name.schema.empty()) {
+            return name.name;
+        }
+        return token;
+    };
+    // FROM aliases retain source SQL quoting, while ColumnRef components
+    // have already been decoded/folded by the parser. Canonicalize once.
+    sourceAlias = outputAlias(sourceAlias);
     std::string relation;
     TableSchema schema;
     std::map<std::string, std::string> typeHints;
@@ -1679,13 +1691,6 @@ bool describePreparedResult(const std::string& sql, Session& session,
     std::vector<std::string> outputNames;
     std::vector<uint32_t> directParameterOids;
     std::vector<int32_t> projectionTypeModifiers;
-    const auto outputAlias = [](const std::string& token) {
-        CatalogManager::QualifiedName name;
-        if (CatalogManager::parseQualifiedName(token, name, true) && name.schema.empty()) {
-            return name.name;
-        }
-        return token;
-    };
     const auto appendPhysicalColumns = [&]() {
         for (size_t i = 0; i < schema.len; ++i) {
             shape.columns.push_back(schema.cols[i].dataName);
@@ -1696,13 +1701,17 @@ bool describePreparedResult(const std::string& sql, Session& session,
         }
     };
     const auto qualifierMatches = [&](const ColumnRefExpr& reference) {
-        if (reference.table.empty()) return true;
-        const std::string source = sourceAlias.empty() ? relation : sourceAlias;
-        const std::string qualifier = lowerProtocolText(reference.table);
-        return qualifier == lowerProtocolText(source) ||
-               (virtualPgSettings && qualifier == "pg_catalog.pg_settings") ||
-               (virtualPgStatActivity &&
-                qualifier == "pg_catalog.pg_stat_activity");
+        if (reference.table.empty()) return reference.schema.empty();
+        if (!sourceAlias.empty())
+            return reference.schema.empty() && reference.table == sourceAlias;
+        CatalogManager::QualifiedName source;
+        if (!CatalogManager::parseQualifiedName(sourceName, source, true)) return false;
+        if (reference.table != source.name && reference.table != relation) return false;
+        if (reference.schema.empty()) return true;
+        return reference.schema == source.schema ||
+               (source.schema.empty() && reference.schema == "public") ||
+               ((virtualPgClass || virtualPgSettings || virtualPgStatActivity) &&
+                reference.schema == "pg_catalog");
     };
     for (const auto& item : *projections) {
         if (!item.expr) return false;
@@ -1720,8 +1729,7 @@ bool describePreparedResult(const std::string& sql, Session& session,
             if (!qualifierMatches(*reference)) return false;
             bool found = false;
             for (size_t i = 0; i < schema.len; ++i) {
-                if (lowerProtocolText(schema.cols[i].dataName) !=
-                    lowerProtocolText(reference->column)) continue;
+                if (schema.cols[i].dataName != reference->column) continue;
                 shape.columns.push_back(schema.cols[i].dataName);
                 shape.columnTypes.push_back(schema.cols[i].dataType);
                 outputNames.push_back(item.alias.empty() ? reference->column
@@ -1743,8 +1751,8 @@ bool describePreparedResult(const std::string& sql, Session& session,
         const std::string inferredType =
             literal && !literal->typeName.empty()
                 ? ExprHelper::canonicalResultTypeName(literal->typeName)
-                : ExprHelper::inferResultType(expression, typeHints,
-                                            session.currentDB, &g_engine);
+                : ExprHelper::inferParsedResultType(item.expr.get(), typeHints,
+                                                  session.currentDB, &g_engine);
         shape.columnTypes.push_back(inferredType);
         std::string outputName = item.alias.empty() ? std::string{} : outputAlias(item.alias);
         if (outputName.empty() && virtualPgClass) {

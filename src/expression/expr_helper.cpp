@@ -156,6 +156,8 @@ std::string inferAstResultType(
     const std::map<std::string, std::string>& typeHints,
     const std::map<const Expr*, std::string>* routineTypes = nullptr) {
     if (!expression) return "text";
+    if (const auto* parameter = dynamic_cast<const ParameterExpr*>(expression))
+        return protocolTypeName(parameter->declaredType);
     if (const auto* literal = dynamic_cast<const LiteralExpr*>(expression)) {
         if (!literal->typeName.empty())
             return protocolTypeName(literal->typeName);
@@ -181,6 +183,13 @@ std::string inferAstResultType(
             auto found = typeHints.find(key);
             if (found != typeHints.end())
                 return protocolTypeName(found->second);
+        }
+        if (column->schema.empty() && column->table.empty()) {
+            if (column->column == "current_user" || column->column == "session_user" ||
+                column->column == "user") return "name";
+            if (column->column == "current_date") return "date";
+            if (column->column == "current_timestamp") return "timestamptz";
+            if (column->column == "localtimestamp") return "timestamp";
         }
         return "text";
     }
@@ -227,6 +236,8 @@ std::string inferAstResultType(
         if (booleanOperators.count(op)) return "boolean";
         const std::string left = inferAstResultType(binary->left.get(), typeHints, routineTypes);
         const std::string right = inferAstResultType(binary->right.get(), typeHints, routineTypes);
+        if (op == "->>" || op == "#>>") return "text";
+        if (op == "->" || op == "#>") return left;
         if (op == "||") {
             if ((left == "bit" || left == "bit varying") &&
                 (right == "bit" || right == "bit varying")) {
@@ -435,6 +446,48 @@ std::string inferAstResultType(
         return "text";
     }
     return "text";
+}
+
+// Keep routine result metadata associated with the exact live AST node, not
+// with strings which could collide with user column names. This walk resolves
+// declarations only: it does not bind callbacks or execute any expression.
+std::map<const Expr*, std::string> collectRoutineResultTypes(
+    const Expr* expression, const std::string& currentDB,
+    StorageEngine* functionEngine) {
+    std::map<const Expr*, std::string> routineTypes;
+    if (currentDB.empty()) return routineTypes;
+    ExprEvaluator evaluator;
+    evaluator.setCurrentDB(currentDB);
+    std::function<void(const Expr*)> inspect = [&](const Expr* node) {
+        if (!node) return;
+        if (const auto* call = dynamic_cast<const FunctionCallExpr*>(node)) {
+            if (evaluator.hasScalarFunction(call, functionEngine)) {
+                const std::string type = evaluator.scalarFunctionResultType(call, functionEngine);
+                if (!type.empty()) routineTypes[call] = type;
+            }
+            for (const auto& arg : call->args) inspect(arg.get());
+            for (const auto& arg : call->namedArgs) inspect(arg.value.get());
+        } else if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(node)) {
+            inspect(unary->operand.get());
+        } else if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(node)) {
+            inspect(binary->left.get());
+            if (binary->op != "::") inspect(binary->right.get());
+        } else if (const auto* cast = dynamic_cast<const CastExpr*>(node)) {
+            inspect(cast->operand.get());
+        } else if (const auto* conditional = dynamic_cast<const CaseExpr*>(node)) {
+            inspect(conditional->switchExpr.get());
+            for (const auto& arm : conditional->whenClauses) {
+                inspect(arm.first.get()); inspect(arm.second.get());
+            }
+            inspect(conditional->elseExpr.get());
+        } else if (const auto* array = dynamic_cast<const ArrayExpr*>(node)) {
+            for (const auto& item : array->elements) inspect(item.get());
+        } else if (const auto* row = dynamic_cast<const RowExpr*>(node)) {
+            for (const auto& item : row->elements) inspect(item.get());
+        }
+    };
+    inspect(expression);
+    return routineTypes;
 }
 
 bool countParsedColumnReferences(
@@ -1089,6 +1142,16 @@ std::string ExprHelper::scalarExpressionIdentity(
     return key(select->selectList.front().expr.get());
 }
 
+std::string ExprHelper::inferParsedResultType(
+    const Expr* expression,
+    const std::map<std::string, std::string>& typeHints,
+    const std::string& currentDB,
+    StorageEngine* functionEngine) {
+    const auto routineTypes = collectRoutineResultTypes(expression, currentDB, functionEngine);
+    const std::string type = protocolTypeName(inferAstResultType(expression, typeHints, &routineTypes));
+    return type.empty() || type == "unknown" ? "text" : type;
+}
+
 std::string ExprHelper::inferResultType(
     const std::string& exprSql,
     const std::map<std::string, std::string>& typeHints,
@@ -1106,41 +1169,9 @@ std::string ExprHelper::inferResultType(
         auto parsed = parser.parse("SELECT " + trimmed);
         const auto* select = parsed.success ? dynamic_cast<const SelectStmt*>(parsed.stmt.get()) : nullptr;
         if (select && select->selectList.size() == 1) {
-            std::map<const Expr*, std::string> routineTypes;
-            ExprEvaluator evaluator;
-            evaluator.setCurrentDB(currentDB);
-            bool stored = false;
-            std::function<void(const Expr*)> inspect = [&](const Expr* node) {
-                if (!node) return;
-                if (const auto* call = dynamic_cast<const FunctionCallExpr*>(node)) {
-                    if (evaluator.hasScalarFunction(call, functionEngine)) {
-                        const std::string type = evaluator.scalarFunctionResultType(call, functionEngine);
-                        if (!type.empty()) {
-                            routineTypes[call] = type;
-                            stored = true;
-                        }
-                    }
-                    for (const auto& arg : call->args) inspect(arg.get());
-                    for (const auto& arg : call->namedArgs) inspect(arg.value.get());
-                } else if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(node)) inspect(unary->operand.get());
-                else if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(node)) {
-                    inspect(binary->left.get());
-                    if (binary->op != "::") inspect(binary->right.get());
-                } else if (const auto* cast = dynamic_cast<const CastExpr*>(node)) inspect(cast->operand.get());
-                else if (const auto* conditional = dynamic_cast<const CaseExpr*>(node)) {
-                    inspect(conditional->switchExpr.get());
-                    for (const auto& arm : conditional->whenClauses) {
-                        inspect(arm.first.get()); inspect(arm.second.get());
-                    }
-                    inspect(conditional->elseExpr.get());
-                } else if (const auto* array = dynamic_cast<const ArrayExpr*>(node)) {
-                    for (const auto& item : array->elements) inspect(item.get());
-                } else if (const auto* row = dynamic_cast<const RowExpr*>(node)) {
-                    for (const auto& item : row->elements) inspect(item.get());
-                }
-            };
-            inspect(select->selectList.front().expr.get());
-            if (stored) {
+            const auto routineTypes = collectRoutineResultTypes(
+                select->selectList.front().expr.get(), currentDB, functionEngine);
+            if (!routineTypes.empty()) {
                 const std::string type = inferAstResultType(
                     select->selectList.front().expr.get(), typeHints, &routineTypes);
                 return type.empty() || type == "unknown" ? "text" : type;

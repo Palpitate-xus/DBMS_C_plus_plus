@@ -9,6 +9,7 @@
 
 namespace dbms {
 class StorageEngine;
+class Expr;
 struct ColumnRefExpr;
 
 // ----------------------------------------------------------------------------
@@ -43,6 +44,14 @@ public:
     // literals resolve to text only at the outer expression boundary.
     static std::string inferResultType(
         const std::string& exprSql,
+        const std::map<std::string, std::string>& typeHints = {},
+        const std::string& currentDB = "",
+        StorageEngine* functionEngine = nullptr);
+    // Metadata-only inference on the caller's live AST. Never serialize and
+    // reparse canonical identifiers, and never evaluate stored functions.
+    // Prepared parameter cells retain their declared type even when NULL.
+    static std::string inferParsedResultType(
+        const Expr* expression,
         const std::map<std::string, std::string>& typeHints = {},
         const std::string& currentDB = "",
         StorageEngine* functionEngine = nullptr);
