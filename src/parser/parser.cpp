@@ -2958,6 +2958,24 @@ static bool dmlSourceJoinConditionsPresent(const FromItem* item) {
            dmlSourceJoinConditionsPresent(item->right.get());
 }
 
+// Comma has lower precedence than an explicit JOIN. Preserve that grammar
+// as an actual CROSS node, rather than dropping all but the first source or
+// making an ON clause incorrectly see the preceding comma sibling.
+static std::unique_ptr<FromItem> parseDmlSourceList(const std::vector<std::string>& tokens,size_t& pos) {
+    auto source=parseFromItem(tokens,pos);
+    if(!source)return nullptr;
+    while(pos<tokens.size() && tokens[pos]==",") {
+        ++pos;
+        if(pos>=tokens.size() || tokens[pos]==";" || SQLParser::toLower(tokens[pos])=="where" ||
+            SQLParser::toLower(tokens[pos])=="returning")return nullptr;
+        auto right=parseFromItem(tokens,pos);
+        if(!right)return nullptr;
+        auto cross=std::make_unique<FromItem>();cross->type=FromItem::Type::Join;cross->joinType="CROSS";
+        cross->left=std::move(source);cross->right=std::move(right);source=std::move(cross);
+    }
+    return source;
+}
+
 ParseResult SQLParser::parseSelect(const std::string& sql) {
     ParseResult r;
     auto tokens = tokenize(sql);
@@ -3793,7 +3811,7 @@ ParseResult SQLParser::parseUpdate(const std::string& sql) {
     // FROM clause
     if (pos < tokens.size() && toLower(tokens[pos]) == "from") {
         ++pos;
-        stmt->fromClause = parseFromItem(tokens, pos);
+        stmt->fromClause = parseDmlSourceList(tokens, pos);
         if (!stmt->fromClause) {
             r.error = "UPDATE FROM requires a valid relation or JOIN";
             return r;
@@ -3888,7 +3906,7 @@ ParseResult SQLParser::parseDelete(const std::string& sql) {
     // USING
     if (pos < tokens.size() && toLower(tokens[pos]) == "using") {
         ++pos;
-        stmt->usingClause = parseFromItem(tokens, pos);
+        stmt->usingClause = parseDmlSourceList(tokens, pos);
         if (!stmt->usingClause) {
             r.error = "DELETE USING requires a valid relation or JOIN";
             return r;
