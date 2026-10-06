@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <charconv>
 #include "types/numeric.h"
 #include "types/money.h"
 #include <chrono>
@@ -43,6 +44,7 @@
 #include "Session.h"
 #include "expression/expr_helper.h"
 #include "expression/ExprEvaluator.h"
+#include "expression/ExpressionVolatility.h"
 #include "common/DateType.h"
 #include "common/TimeZoneRules.h"
 #include <fcntl.h>
@@ -189,6 +191,60 @@ static thread_local unsigned storedFunctionHostDepth = 0;
 // normally accepts results only from depth 1; this scoped depth is the one
 // internal metadata-consumer exception.
 static thread_local unsigned metadataCaptureDepth = 0;
+
+// A demand belongs to exactly one executed SQL statement. Derived queries,
+// CTE bodies and nested function commands execute at a different depth and
+// must not inherit a caller's cap on delivered result rows.
+struct QueryRowDemandFrame {
+    unsigned depth;
+    size_t maxRows;
+};
+static thread_local vector<QueryRowDemandFrame> queryRowDemandFrames;
+class QueryRowDemandScope {
+public:
+    explicit QueryRowDemandScope(size_t maxRows) {
+        queryRowDemandFrames.push_back({executeDepth + 1, maxRows});
+    }
+    ~QueryRowDemandScope() { queryRowDemandFrames.pop_back(); }
+    QueryRowDemandScope(const QueryRowDemandScope&) = delete;
+    QueryRowDemandScope& operator=(const QueryRowDemandScope&) = delete;
+};
+static size_t currentQueryRowDemand() {
+    for (auto frame = queryRowDemandFrames.rbegin();
+         frame != queryRowDemandFrames.rend(); ++frame) {
+        if (frame->depth == executeDepth) return frame->maxRows;
+    }
+    return 0;
+}
+
+// Receiver placement uses the already parsed ORDER expression, including
+// output-alias/ordinal precedence. A same-spelled physical column does not
+// make an ORDER BY volatile output alias a physical-key sort.
+static const dbms::ColumnRefExpr* queryDemandPhysicalOrderColumn(
+    const dbms::SelectStmt& select, const dbms::SelectStmt::OrderByElem& order) {
+    const dbms::Expr* expression = order.expr.get();
+    if (const auto* ordinal = dynamic_cast<const dbms::LiteralExpr*>(expression)) {
+        size_t position = 0;
+        const auto parsed = std::from_chars(ordinal->value.data(),
+            ordinal->value.data() + ordinal->value.size(), position);
+        if (parsed.ec != errc{} || parsed.ptr != ordinal->value.data() + ordinal->value.size() ||
+            position == 0 || position > select.selectList.size()) return nullptr;
+        expression = select.selectList[position - 1].expr.get();
+    } else if (const auto* reference = dynamic_cast<const dbms::ColumnRefExpr*>(expression);
+               reference && reference->table.empty() && reference->schema.empty()) {
+        const dbms::Expr* aliasExpression = nullptr;
+        for (const auto& item : select.selectList) {
+            if (item.alias.empty()) continue;
+            dbms::CatalogManager::QualifiedName alias;
+            if (!dbms::CatalogManager::parseQualifiedName(item.alias, alias, true) ||
+                !alias.schema.empty() || alias.name != reference->column) continue;
+            if (aliasExpression) return nullptr;
+            aliasExpression = item.expr.get();
+        }
+        if (aliasExpression) expression = aliasExpression;
+    }
+    return dynamic_cast<const dbms::ColumnRefExpr*>(expression);
+}
 
 static bool shouldPublishQueryMetadata() {
     return executeDepth == 1 ||
@@ -12524,7 +12580,7 @@ static std::vector<std::string> runDerivedSubQueryFull(
     bool* outStructuredAvailable = nullptr,
     bool* outExecutionFailed = nullptr,
     std::string* outFailureText = nullptr,
-    bool inheritCtes = true) {
+    bool inheritCtes = true, size_t maxRows = 0) {
     outColNames.clear();
     if (outColTypes) outColTypes->clear();
     if (outStructuredRows) outStructuredRows->clear();
@@ -12533,6 +12589,7 @@ static std::vector<std::string> runDerivedSubQueryFull(
     if (outExecutionFailed) *outExecutionFailed = false;
     if (outFailureText) outFailureText->clear();
     std::stringstream captured;
+    QueryRowDemandScope demandScope(maxRows);
     const unsigned previousCaptureDepth = metadataCaptureDepth;
     metadataCaptureDepth = executeDepth + 1;
     dbms::clearLastDmlResult();
@@ -13317,6 +13374,34 @@ static std::string processDerivedTables(const std::string& sql, Session& s,
     int derivedCount = 0;
     size_t searchFrom = 0;
     failed = false;
+    size_t transparentInputDemand = 0;
+    if (currentQueryRowDemand()) {
+        dbms::SQLParser parser;
+        const auto parsed = parser.parse(sql);
+        const auto* select = parsed.success
+            ? dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()) : nullptr;
+        // A projection-only outer query preserves its single producer's row
+        // demand. Never push a receiver cap through qualification, sorting,
+        // grouping, joins or set operations: they may need later input rows.
+        if (select && select->fromClause &&
+            select->fromClause->type == dbms::FromItem::Type::Subquery &&
+            !select->whereClause && select->groupBy.empty() &&
+            select->groupByElems.empty() && !select->having &&
+            select->orderBy.empty() && !select->distinct &&
+            select->distinctOn.empty() && select->setOp == dbms::SetOp::None &&
+            all_of(select->selectList.begin(), select->selectList.end(),
+                [](const auto& item) {
+                    return dynamic_cast<const dbms::ColumnRefExpr*>(item.expr.get()) != nullptr;
+                })) {
+            const size_t requested = select->limit
+                ? min(currentQueryRowDemand(), *select->limit) : currentQueryRowDemand();
+            if (requested) {
+                const size_t skipped = select->offset.value_or(0);
+                transparentInputDemand = skipped > numeric_limits<size_t>::max() - requested
+                    ? numeric_limits<size_t>::max() : skipped + requested;
+            }
+        }
+    }
 
     auto findDerivedStart = [](const std::string& text, size_t start = 0) {
         const size_t selectAt = findTextOutsideQuotes(text, "(select", start);
@@ -13434,7 +13519,7 @@ static std::string processDerivedTables(const std::string& sql, Session& s,
         auto rows = runDerivedSubQueryFull(
             innerSelect, s, colNames, &colTypes,
             &structuredRows, &structuredNulls, &structuredAvailable,
-            &innerFailed, &innerFailure);
+            &innerFailed, &innerFailure, true, transparentInputDemand);
         if (innerFailed) {
             reportNestedQueryFailure(innerFailure);
             failed = true;
@@ -19290,6 +19375,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             const unsigned previousCaptureDepth = metadataCaptureDepth;
             metadataCaptureDepth = executeDepth + 1;
             dbms::clearLastDmlResult();
+            QueryRowDemandScope demandScope(currentQueryRowDemand());
             try {
                 const bool failed = executeQueryChild(unwrappedQuery, s);
                 metadataCaptureDepth = previousCaptureDepth;
@@ -29091,6 +29177,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         materialized + " as " + visibleAlias + " " + sql.substr(tnameEnd);
                     const unsigned previousCaptureDepth = metadataCaptureDepth;
                     metadataCaptureDepth = executeDepth + 1;
+                    QueryRowDemandScope demandScope(currentQueryRowDemand());
                     try {
                         const bool failed = executeQueryChild(expanded, s);
                         metadataCaptureDepth = previousCaptureDepth;
@@ -30993,8 +31080,36 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 if (!branches.empty()) ctx.conds = std::move(branches.front());
                 plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
             }
-            auto execution = dbms::QueryPlanner::executePlanChecked(
-                std::move(plan));
+            size_t receiverRows = 0;
+            bool emptyReceiver = false;
+            if (currentQueryRowDemand()) {
+                dbms::SQLParser demandParser;
+                const auto parsedDemand = demandParser.parse(sql);
+                const auto* selectDemand = parsedDemand.success
+                    ? dynamic_cast<const dbms::SelectStmt*>(parsedDemand.stmt.get()) : nullptr;
+                if (selectDemand) {
+                    const size_t requested = selectDemand->limit
+                        ? min(currentQueryRowDemand(), *selectDemand->limit)
+                        : currentQueryRowDemand();
+                    emptyReceiver = requested == 0;
+                    // This plan's physical Sort precedes the receiver. A
+                    // projected alias/expression may still require the
+                    // dispatcher's later sort, so it cannot be truncated here.
+                    const auto* physicalKey = selectDemand->orderBy.size() == 1
+                        ? queryDemandPhysicalOrderColumn(*selectDemand, selectDemand->orderBy.front())
+                        : nullptr;
+                    if (selectDemand->orderBy.empty() ||
+                        (physicalKey && physicalKey->column == ctx.orderByCol)) {
+                        const size_t skipped = selectDemand->offset.value_or(0);
+                        receiverRows = skipped > numeric_limits<size_t>::max() - requested
+                            ? numeric_limits<size_t>::max() : skipped + requested;
+                    }
+                }
+            }
+            dbms::PlanExecutionResult execution;
+            if (emptyReceiver) execution.structuredRowsAvailable = true;
+            else execution = dbms::QueryPlanner::executePlanChecked(
+                std::move(plan), receiverRows);
             if (!execution.ok) {
                 volcanoExecutionError = true;
                 cout << "ERROR: " << execution.error << endl;
@@ -33716,6 +33831,47 @@ static bool executeInternal(const string& rawSql, Session& s) {
             if (canSortScalarProjected)
                 scalarSortExprs.insert(scalarSortExprs.end(),
                     scalarSortHiddenExprs.begin(), scalarSortHiddenExprs.end());
+            StorageEngine::QueryExprExecutionOptions scalarExecutionOptions;
+            vector<StorageEngine::OrderBySpec> scalarReceiverOrder = orderBySpecs;
+            dbms::SQLParser demandParser;
+            const auto demandParsed = currentQueryRowDemand()
+                ? demandParser.parse(sql) : dbms::ParseResult{};
+            const auto* demandSelect = demandParsed.success
+                ? dynamic_cast<const dbms::SelectStmt*>(demandParsed.stmt.get()) : nullptr;
+            if (demandSelect && demandSelect->limit && *demandSelect->limit == 0)
+                scalarExecutionOptions.maxProjectionRows = 0;
+            else if (currentQueryRowDemand() && !isDistinct && distinctOnCols.empty() &&
+                     exprOrderBySpecs.empty() && !queryFetchWithTies) {
+                bool physicalSortKeys = demandSelect &&
+                    demandSelect->orderBy.size() == orderBySpecs.size();
+                for (size_t key = 0; physicalSortKeys && key < orderBySpecs.size(); ++key) {
+                    const auto* column = queryDemandPhysicalOrderColumn(
+                        *demandSelect, demandSelect->orderBy[key]);
+                    physicalSortKeys = column &&
+                        any_of(tbl.cols, tbl.cols + tbl.len,
+                            [&](const auto& physical) { return physical.dataName == column->column; });
+                    if (physicalSortKeys) scalarReceiverOrder[key].colName = column->column;
+                }
+                if (physicalSortKeys && demandSelect &&
+                    demandSelect->selectList.size() == selectExprs.size()) {
+                    size_t requested = currentQueryRowDemand();
+                    if (demandSelect->limit) requested = min(requested, *demandSelect->limit);
+                    const size_t skipped = demandSelect->offset.value_or(0);
+                    scalarExecutionOptions.maxProjectionRows = requested == 0 ? 0 :
+                        skipped > numeric_limits<size_t>::max() - requested
+                            ? numeric_limits<size_t>::max() : skipped + requested;
+                    dbms::ExprEvaluator volatilityEvaluator;
+                    volatilityEvaluator.setCurrentDB(queryDb);
+                    for (size_t col = 0; col < demandSelect->selectList.size(); ++col) {
+                        if (dbms::expressionContainsVolatileFunction(
+                                demandSelect->selectList[col].expr.get(),
+                                volatilityEvaluator, &g_engine))
+                            scalarExecutionOptions.deferredSortProjections.insert(col);
+                    }
+                }
+            }
+            const auto& scalarDemandOrder = scalarExecutionOptions.maxProjectionRows
+                ? scalarReceiverOrder : orderBySpecs;
             const bool captureStructuredScalar =
                 shouldPublishQueryMetadata() &&
                 !structuredScalar && !hasSetReturningScalar &&
@@ -33727,13 +33883,13 @@ static bool executeInternal(const string& rawSql, Session& s) {
             if (condTokens.empty()) {
                 if (captureStructuredScalar) {
                     answers = g_engine.queryExpr(
-                        queryDb, tname, {}, scalarSortExprs, orderBySpecs,
+                        queryDb, tname, {}, scalarSortExprs, scalarDemandOrder,
                         &structuredScalarResult.rows,
-                        &structuredScalarResult.nulls);
+                        &structuredScalarResult.nulls, nullptr, scalarExecutionOptions);
                     structuredScalarRows = true;
                 } else {
                     answers = g_engine.queryExpr(
-                        queryDb, tname, {}, selectExprs, orderBySpecs);
+                        queryDb, tname, {}, selectExprs, scalarDemandOrder, scalarExecutionOptions);
                 }
             } else {
                 condTokens.insert(condTokens.begin(), "(");
@@ -33776,8 +33932,15 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     answers = g_engine.queryExpr(
                         queryDb, tname, groups.front(),
                         canSortScalarProjected ? mergeExprs : selectExprs,
-                        orderBySpecs, &structuredScalarResult.rows,
-                        &structuredScalarResult.nulls);
+                        scalarDemandOrder, &structuredScalarResult.rows,
+                        &structuredScalarResult.nulls, nullptr, scalarExecutionOptions);
+                    structuredScalarRows = true;
+                } else if (captureStructuredScalar && !groups.empty() &&
+                           scalarExecutionOptions.maxProjectionRows && !hasMixedOrderKeys) {
+                    scalarExecutionOptions.conditionAlternatives = groups;
+                    answers = g_engine.queryExpr(queryDb, tname, groups.front(),
+                        mergeExprs, scalarDemandOrder, &structuredScalarResult.rows,
+                        &structuredScalarResult.nulls, nullptr, scalarExecutionOptions);
                     structuredScalarRows = true;
                 } else if (captureStructuredScalar && !groups.empty() &&
                            !hasMixedOrderKeys) {
@@ -35442,7 +35605,8 @@ int main(int argc, char* argv[]) {
     // but executes in the calling backend's transaction/session. Retain
     // exact cells/NULL bits; never reconstruct values from CLI display text.
     g_engine.setPlpgsqlQueryExecutor([](const std::string& dbname,
-                                      const std::string& querySql) {
+                                      const std::string& querySql,
+                                      const dbms::PlPgsqlQueryOptions& options) {
         dbms::PlPgsqlQueryResult result;
         Session* activeSession = dbms::currentSession();
         if (!activeSession || activeSession->currentDB != dbname) {
@@ -35461,7 +35625,8 @@ int main(int argc, char* argv[]) {
         string failureText;
         try {
             (void)runDerivedSubQueryFull(querySql, *activeSession, names, &types,
-                &rows, &nulls, &structured, &failed, &failureText, false);
+                &rows, &nulls, &structured, &failed, &failureText, false,
+                options.maxRows);
         } catch (const dbms::DbError& error) {
             result.sqlState = error.sqlState();
             result.message = error.message();
@@ -35518,7 +35683,8 @@ int main(int argc, char* argv[]) {
         result.ok = true;
         result.columnCount = names.size();
         result.columnTypes = std::move(types);
-        result.rowCount = rows.size();
+        result.rowCount = options.maxRows
+            ? std::min(rows.size(), options.maxRows) : rows.size();
         if (!rows.empty()) {
             for (size_t i = 0; i < result.columnCount; ++i)
                 result.firstRow.push_back(nulls.front()[i]

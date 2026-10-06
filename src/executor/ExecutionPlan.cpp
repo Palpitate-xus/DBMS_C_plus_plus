@@ -5902,7 +5902,7 @@ std::string QueryPlanner::explainJson(OpPtr& plan, StorageEngine* engine,
     return explainJsonDocument(plan.get(), engine, dbname, opts, &execution);
 }
 
-PlanExecutionResult QueryPlanner::executePlanChecked(OpPtr plan) {
+PlanExecutionResult QueryPlanner::executePlanChecked(OpPtr plan, size_t maxRows) {
     PlanExecutionResult result;
     if (!plan) {
         result.ok = false;
@@ -5920,7 +5920,7 @@ PlanExecutionResult QueryPlanner::executePlanChecked(OpPtr plan) {
             return result;
         }
         std::string row;
-        while (plan->next(row)) {
+        while ((!maxRows || result.rows.size() < maxRows) && plan->next(row)) {
             checkForQueryInterrupt();
             result.rows.push_back(row);
             if (result.structuredRowsAvailable) {

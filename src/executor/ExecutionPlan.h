@@ -1247,7 +1247,7 @@ public:
                                    const ExplainExecutionStats& execution);
 
     // Checked production entry point: EOF and execution failure are distinct.
-    static PlanExecutionResult executePlanChecked(OpPtr plan);
+    static PlanExecutionResult executePlanChecked(OpPtr plan, size_t maxRows = 0);
 
     // Parallel query support: number of worker threads (0 = disabled).
     static int parallelWorkers() { return parallelWorkers_; }

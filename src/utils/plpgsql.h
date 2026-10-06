@@ -44,6 +44,13 @@ struct PlPgsqlQueryResult {
     std::string message;
 };
 
+// Executor demand, not a SQL LIMIT rewrite or a cap on scanned input rows.
+// Zero runs to completion; INTO needs one row, INTO STRICT needs two rows
+// so that a second result can be distinguished from an exactly-one result.
+struct PlPgsqlQueryOptions {
+    size_t maxRows = 0;
+};
+
 // Callbacks the interpreter needs from the host.
 struct PlPgsqlHost {
     // Evaluate a scalar SQL expression text with the current variable
@@ -62,7 +69,8 @@ struct PlPgsqlHost {
                       std::map<std::string, std::string>& vars)> selectInto;
     // Preferred SELECT INTO boundary: receives the whole SELECT with only
     // the procedural INTO target list removed and variables substituted.
-    std::function<PlPgsqlQueryResult(const std::string& sql)> query;
+    std::function<PlPgsqlQueryResult(const std::string& sql,
+                                    const PlPgsqlQueryOptions& options)> query;
     // Preferred scalar-expression boundary. Expressions and bindings remain
     // separate, so text that looks numeric never acquires a numeric type.
     // A successful result contains exactly one nullable row/column cell.

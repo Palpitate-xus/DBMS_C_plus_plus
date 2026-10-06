@@ -47,8 +47,10 @@ int main() {
     // or an INTO target contaminated by FROM/WHERE/ORDER BY.
     Result result = rows(1, {"99"});
     int calls = 0;
-    host.query = [&](const std::string& sql) {
+    size_t rowDemand = 0;
+    host.query = [&](const std::string& sql, const dbms::PlPgsqlQueryOptions& options) {
         seen = sql;
+        rowDemand = options.maxRows;
         ++calls;
         return result;
     };
@@ -60,6 +62,7 @@ int main() {
     assert(run("DECLARE n INT; BEGIN SELECT id INTO n FROM ranges WHERE id=2 ORDER BY id; RETURN n; END;"));
     assert(seen == "SELECT id FROM ranges WHERE id=2 ORDER BY id");
     assert(value == "99" && !isNull && state.empty());
+    assert(rowDemand == 1);
     assert(run("DECLARE n INT; BEGIN SELECT INTO n 99; RETURN n; END;"));
     assert(seen == "SELECT 99");
     assert(run("DECLARE n INT; BEGIN SELECT id FROM ranges WHERE id=2 INTO n; RETURN n; END;"));
@@ -68,6 +71,7 @@ int main() {
     assert(seen == "WITH c AS (SELECT 99 AS id) SELECT id FROM c");
     assert(run("DECLARE n INT; BEGIN SELECT id\nINTO\nSTRICT\nn\nFROM ranges; RETURN n; END;"));
     assert(seen == "SELECT id\nFROM ranges");
+    assert(rowDemand == 2);
 
     // NULL state is independent of textual spelling, and switches in both
     // directions when a previously-NULL variable receives a row.

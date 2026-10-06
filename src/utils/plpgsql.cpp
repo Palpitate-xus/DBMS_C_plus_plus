@@ -1321,7 +1321,8 @@ struct Interp {
                 }
                 const std::string query = substitute(trimCopy(prefix + suffix), true);
                 if (host.query) {
-                    const PlPgsqlQueryResult result = host.query(query);
+                    const PlPgsqlQueryResult result = host.query(
+                        query, PlPgsqlQueryOptions{strict ? size_t{2} : size_t{1}});
                     if (!result.ok) {
                         return fail(result.message.empty() ? "SELECT INTO failed" : result.message,
                                     result.sqlState);

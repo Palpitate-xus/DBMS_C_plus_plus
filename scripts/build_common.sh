@@ -40,6 +40,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/cte_duplicate_name_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/cte_stored_query_namespace_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/plpgsql_select_into_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/plpgsql_select_into_execution_demand_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/plpgsql_quoted_scalar_binding_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/plpgsql_collation_label_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/plpgsql_timezone_operand_protocol_e2e_test.py)

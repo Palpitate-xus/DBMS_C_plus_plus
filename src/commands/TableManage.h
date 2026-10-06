@@ -398,12 +398,14 @@ public:
     // values/NULLs rather than formatted CLI text. Native users without a
     // dispatcher retain the checked standalone SELECT subset.
     using PlPgsqlQueryExecutor = std::function<PlPgsqlQueryResult(
-        const std::string& dbname, const std::string& sql)>;
+        const std::string& dbname, const std::string& sql,
+        const PlPgsqlQueryOptions& options)>;
     void setPlpgsqlQueryExecutor(PlPgsqlQueryExecutor executor) {
         plpgsqlQueryExecutor_ = std::move(executor);
     }
     PlPgsqlQueryResult plpgsqlQuery(const std::string& dbname,
-                                   const std::string& sql) const;
+                                   const std::string& sql,
+                                   const PlPgsqlQueryOptions& options = {}) const;
     std::vector<std::string> getUDFNames(const std::string& dbname) const;
 
     // Table-valued functions (return a result set)
@@ -670,11 +672,24 @@ public:
         std::string colName;
         std::string sessionUser; // filled for current_user / session_user pseudo-functions
     };
+    struct QueryExprExecutionOptions {
+        // Result projection demand, after qualification and required sorts.
+        // nullopt means unbounded; zero means no execution is demanded.
+        std::optional<size_t> maxProjectionRows;
+        // Volatile expressions which must remain above a physical-key Sort.
+        // Other result expressions may be evaluated below Sort and their
+        // errors must not disappear just because the receiver stops early.
+        std::set<size_t> deferredSortProjections;
+        // OR alternatives are matched/deduplicated before projection so a
+        // receiver cap does not accidentally apply separately per branch.
+        std::vector<std::vector<std::string>> conditionAlternatives;
+    };
     std::vector<std::string> queryExpr(const std::string& dbname,
                                         const std::string& tablename,
                                         const std::vector<std::string>& conditions,
                                         const std::vector<SelectExpr>& exprs,
-                                        const std::vector<OrderBySpec>& orderBy = {});
+                                        const std::vector<OrderBySpec>& orderBy = {},
+                                        const QueryExprExecutionOptions& options = {});
     // Structured counterpart for queryExpr.  It preserves exact scalar
     // cells and carries SQL NULL independently from the display value.
     std::vector<std::string> queryExpr(
@@ -684,7 +699,8 @@ public:
         const std::vector<OrderBySpec>& orderBy,
         std::vector<std::vector<std::string>>* structuredRows,
         std::vector<std::vector<bool>>* structuredNulls,
-        std::vector<int64_t>* structuredRowIds = nullptr);
+        std::vector<int64_t>* structuredRowIds = nullptr,
+        const QueryExprExecutionOptions& options = {});
 
     // information_schema virtual tables
     std::vector<std::string> queryInformationSchema(
@@ -1855,7 +1871,8 @@ private:
     TriggerExecutor triggerExecutor_;
     PlPgsqlQueryExecutor plpgsqlQueryExecutor_;
     PlPgsqlQueryResult plpgsqlQueryNative(const std::string& dbname,
-                                         const std::string& sql) const;
+                                         const std::string& sql,
+                                         const PlPgsqlQueryOptions& options) const;
     mutable TriggerCtx execFunctionCtx_;
     WhenConditionEvaluator whenEvaluator_;
 

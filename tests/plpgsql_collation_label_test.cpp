@@ -5,7 +5,7 @@
 int main() {
     dbms::PlPgsqlHost host;
     std::string sql;
-    host.query = [&](const std::string& query) {
+    host.query = [&](const std::string& query, const dbms::PlPgsqlQueryOptions&) {
         sql = query;
         dbms::PlPgsqlQueryResult result;
         result.ok = true;

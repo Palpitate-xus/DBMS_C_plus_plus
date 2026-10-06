@@ -22,6 +22,7 @@
 #include "catalog/CatalogService.h"
 #include "expression/expr_helper.h"
 #include "expression/ExprEvaluator.h"
+#include "expression/ExpressionVolatility.h"
 #include "permissions.h"
 #include "utils/Session.h"
 #include "common/TimeZoneRules.h"
@@ -31357,7 +31358,8 @@ bool storedFunctionReadOnlyQuery(const std::string& sql) {
 } // namespace
 
 PlPgsqlQueryResult StorageEngine::plpgsqlQuery(const std::string& dbname,
-                                             const std::string& sql) const {
+                                             const std::string& sql,
+                                             const PlPgsqlQueryOptions& options) const {
     const bool functionBody = !storedFunctionFrames.empty() &&
         storedFunctionFrames.back().engine == this &&
         storedFunctionFrames.back().database == dbname &&
@@ -31418,7 +31420,7 @@ PlPgsqlQueryResult StorageEngine::plpgsqlQuery(const std::string& dbname,
         context.readView.currentCommandId = context.currentCommandId;
         context.readView.commandIdVisibility = true;
     }
-    if (plpgsqlQueryExecutor_) return plpgsqlQueryExecutor_(dbname, sql);
+    if (plpgsqlQueryExecutor_) return plpgsqlQueryExecutor_(dbname, sql, options);
     if (command == SqlCommand::Insert || command == SqlCommand::Update ||
         command == SqlCommand::Delete) {
         const auto executed = nativePlpgsqlExecSql(
@@ -31432,7 +31434,7 @@ PlPgsqlQueryResult StorageEngine::plpgsqlQuery(const std::string& dbname,
         }
         return result;
     }
-    return plpgsqlQueryNative(dbname, sql);
+    return plpgsqlQueryNative(dbname, sql, options);
 }
 
 static PlPgsqlQueryResult plpgsqlScalarResult(const ExprEvalResult& value) {
@@ -31849,8 +31851,9 @@ static bool evalUDFBody(const StorageEngine::UDFInfo& udf,
                               result.message);
             return true;
         };
-        host.query = [engine, &dbname](const std::string& sql) {
-            return engine->plpgsqlQuery(dbname, sql);
+        host.query = [engine, &dbname](const std::string& sql,
+                                     const PlPgsqlQueryOptions& options) {
+            return engine->plpgsqlQuery(dbname, sql, options);
         };
         std::string rv, err, sqlState, plpgsqlReturnType;
         bool plpgsqlIsNull = false;
@@ -35684,9 +35687,10 @@ std::vector<std::string> StorageEngine::queryExpr(const std::string& dbname,
                                                    const std::string& tablename,
                                                    const std::vector<std::string>& conditions,
                                                    const std::vector<SelectExpr>& exprs,
-                                                   const std::vector<OrderBySpec>& orderBy) {
+                                                   const std::vector<OrderBySpec>& orderBy,
+                                                   const QueryExprExecutionOptions& options) {
     return queryExpr(dbname, tablename, conditions, exprs, orderBy,
-                     nullptr, nullptr, nullptr);
+                     nullptr, nullptr, nullptr, options);
 }
 
 std::vector<std::string> StorageEngine::queryExpr(
@@ -35696,7 +35700,8 @@ std::vector<std::string> StorageEngine::queryExpr(
     const std::vector<OrderBySpec>& orderBy,
     std::vector<std::vector<std::string>>* structuredRows,
     std::vector<std::vector<bool>>* structuredNulls,
-    std::vector<int64_t>* structuredRowIds) {
+    std::vector<int64_t>* structuredRowIds,
+    const QueryExprExecutionOptions& options) {
     std::vector<std::string> result;
     if (structuredRows) structuredRows->clear();
     if (structuredNulls) structuredNulls->clear();
@@ -35718,18 +35723,45 @@ std::vector<std::string> StorageEngine::queryExpr(
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     PageAllocator* pa = getPageAllocator(dbname, tablename);
+    if (options.maxProjectionRows && *options.maxProjectionRows == 0) return result;
 
     auto conds = parseConditions(conditions);
+    // With no blocking sort, qualification and projection belong to the
+    // same demand-driven row receiver. Do not first evaluate WHERE on later
+    // rows: those expressions can themselves be volatile or fail.
+    const bool streamingQualification = options.maxProjectionRows &&
+        orderBy.empty() && !conds.empty();
+    std::vector<std::vector<Condition>> qualificationBranches;
+    if (streamingQualification) {
+        if (options.conditionAlternatives.empty()) qualificationBranches.push_back(conds);
+        else for (const auto& branch : options.conditionAlternatives)
+            qualificationBranches.push_back(parseConditions(branch));
+    }
     std::vector<std::pair<int64_t, std::string>> matchRows;
     bool scanFailed = false;
     bool indexReadFailed = false;
-    if (conds.empty()) {
+    if (conds.empty() || streamingQualification) {
         if (!forEachRow(dbname, tablename, [&](uint32_t pid, uint16_t sid, const char* data, size_t len) {
             matchRows.emplace_back(encodeRid(pid, sid), std::string(data, len));
         })) scanFailed = true;
     } else {
-        auto ids = filterRows(dbname, tablename, conds, nullptr, &scanFailed,
-                              &indexReadFailed);
+        std::vector<int64_t> ids;
+        if (options.conditionAlternatives.empty()) {
+            const auto filtered = filterRows(dbname, tablename, conds, nullptr,
+                                            &scanFailed, &indexReadFailed);
+            ids.assign(filtered.begin(), filtered.end());
+        } else {
+            std::set<int64_t> seen;
+            for (const auto& branch : options.conditionAlternatives) {
+                const auto branchConditions = parseConditions(branch);
+                auto branchIds = filterRows(dbname, tablename, branchConditions,
+                    nullptr, &scanFailed, &indexReadFailed);
+                if (scanFailed) break;
+                for (int64_t rid : branchIds)
+                    if (seen.insert(rid).second) ids.push_back(rid);
+            }
+            ids.assign(seen.begin(), seen.end());
+        }
         for (int64_t rid : ids) {
             std::string row;
             if (readRowByRid(pa, rid, row, tbl)) {
@@ -35745,17 +35777,21 @@ std::vector<std::string> StorageEngine::queryExpr(
         return result;
     }
 
+    // Keep a permutation, not RID identity: partitioned inputs can reuse a
+    // page/slot RID. It also lets below-Sort projections retain input order.
+    std::vector<size_t> sortedInputPositions;
     // ORDER BY (multi-column)
     if (!orderBy.empty()) {
         struct SortKey {
-            int64_t rid;
+            size_t inputPosition;
             std::vector<
                 std::tuple<std::string, int64_t, double, Date, Numeric>> vals;
             std::vector<bool> isNulls;
         };
         std::vector<SortKey> keys;
-        for (auto& mr : matchRows) {
-            SortKey k{mr.first, {}, {}};
+        for (size_t input = 0; input < matchRows.size(); ++input) {
+            auto& mr = matchRows[input];
+            SortKey k{input, {}, {}};
             NullRowBinding nbS(this, dbname, tbl.tablename, mr.first, tbl.len);
             for (const auto& spec : orderBy) {
                 size_t sortIdx = tbl.len;
@@ -35862,10 +35898,11 @@ std::vector<std::string> StorageEngine::queryExpr(
             return false;
         });
         std::vector<std::pair<int64_t, std::string>> sorted;
+        sorted.reserve(matchRows.size());
+        sortedInputPositions.reserve(matchRows.size());
         for (const auto& k : keys) {
-            for (auto& mr : matchRows) {
-                if (mr.first == k.rid) { sorted.push_back(std::move(mr)); break; }
-            }
+            sortedInputPositions.push_back(k.inputPosition);
+            sorted.push_back(std::move(matchRows[k.inputPosition]));
         }
         matchRows = std::move(sorted);
     }
@@ -35905,9 +35942,96 @@ std::vector<std::string> StorageEngine::queryExpr(
     }
     if (allAggArith && matchRows.size() > 1)
         matchRows.resize(1);
-    for (auto& mr : matchRows) {
+    const auto evaluateCell = [&](const SelectExpr& expr,
+                                  const std::pair<int64_t, std::string>& mr) {
+        std::string val;
+        bool valueIsNull = false;
+        if (expr.isScalar) {
+            std::optional<bool> knownNull;
+            val = applyScalarFunc(expr, mr.second, tbl, this, dbname, &knownNull);
+            if (knownNull.has_value()) valueIsNull = *knownNull;
+            if (!knownNull.has_value() && val == "NULL") {
+                std::map<std::string, std::string> rowContext;
+                std::map<std::string, std::string> typeHints;
+                std::set<std::string> nullColumns;
+                for (size_t i = 0; i < tbl.len; ++i) {
+                    bool columnIsNull = false;
+                    const std::string value = extractColumnValue(
+                        mr.second, tbl, i, dbname, true, &columnIsNull);
+                    rowContext[tbl.cols[i].dataName] = value;
+                    typeHints[tbl.cols[i].dataName] = tbl.cols[i].dataType;
+                    if (columnIsNull) nullColumns.insert(tbl.cols[i].dataName);
+                }
+                std::string expression;
+                if (expr.funcName == "expreval") {
+                    if (!expr.funcArgs.empty()) expression = expr.funcArgs.front();
+                } else if (expr.funcName == "arith") {
+                    for (size_t i = 0; i < expr.funcArgs.size(); ++i) {
+                        if (i) expression += ' ';
+                        expression += expr.funcArgs[i];
+                    }
+                } else if (expr.funcName == "cast" && expr.funcArgs.size() >= 2) {
+                    expression = "cast(" + expr.funcArgs[0] + " as " + expr.funcArgs[1] + ")";
+                } else if (!expr.funcName.empty()) {
+                    expression = expr.funcName + "(";
+                    for (size_t i = 0; i < expr.funcArgs.size(); ++i) {
+                        if (i) expression += ',';
+                        expression += expr.funcArgs[i];
+                    }
+                    expression += ')';
+                }
+                if (!expression.empty()) {
+                    const auto evaluated = ExprHelper::evalStringWithNulls(
+                        expression, rowContext, nullColumns, typeHints,
+                        dbname, expr.sessionUser, this);
+                    valueIsNull = evaluated.ok ? evaluated.isNull : true;
+                } else valueIsNull = true;
+            }
+        } else {
+            for (size_t i = 0; i < tbl.len; ++i) {
+                if (tbl.cols[i].dataName != expr.colName) continue;
+                val = extractColumnValue(mr.second, tbl, i, dbname, true, &valueIsNull);
+                if (valueIsNull || (val.empty() && tbl.cols[i].generatedKind != 'v' &&
+                    isColumnNullByRid(dbname, tbl.tablename, mr.first, i))) val = "NULL";
+                break;
+            }
+        }
+        return std::make_pair(std::move(val), valueIsNull);
+    };
+    using CachedCell = std::optional<std::pair<std::string, bool>>;
+    std::vector<std::vector<CachedCell>> earlySortProjection;
+    if (options.maxProjectionRows && !orderBy.empty() && !hasUnnest) {
+        // Preserve expressions placed below Sort, including their errors,
+        // while keeping volatile non-key expressions above it. Cache each
+        // early value so a delivered row never evaluates it a second time.
+        earlySortProjection.assign(matchRows.size(), std::vector<CachedCell>(exprs.size()));
+        std::vector<size_t> inputToSorted(sortedInputPositions.size(),
+                                        std::numeric_limits<size_t>::max());
+        for (size_t row = 0; row < matchRows.size(); ++row)
+            inputToSorted[sortedInputPositions[row]] = row;
+        for (size_t row : inputToSorted) {
+            if (row == std::numeric_limits<size_t>::max()) continue;
+            NullRowBinding binding(this, dbname, tbl.tablename,
+                                   matchRows[row].first, tbl.len);
+            for (size_t col = 0; col < exprs.size(); ++col) {
+                if (!options.deferredSortProjections.count(col))
+                    earlySortProjection[row][col] = evaluateCell(exprs[col], matchRows[row]);
+            }
+        }
+    }
+    for (size_t rowIndex = 0; rowIndex < matchRows.size(); ++rowIndex) {
+        if (options.maxProjectionRows && result.size() >= *options.maxProjectionRows) break;
+        auto& mr = matchRows[rowIndex];
         // Bind stored-NULL visibility for the row being projected.
         NullRowBinding nbP(this, dbname, tbl.tablename, mr.first, tbl.len);
+        if (streamingQualification && !std::any_of(
+                qualificationBranches.begin(), qualificationBranches.end(),
+                [&](const auto& branch) {
+                    return std::all_of(branch.begin(), branch.end(),
+                        [&](const auto& condition) {
+                            return evalConditionOnRow(condition, mr.second, tbl);
+                        });
+                })) continue;
         if (hasUnnest) {
             // Compute all column values first
             std::vector<std::string> vals;
@@ -35960,6 +36084,7 @@ std::vector<std::string> StorageEngine::queryExpr(
             }
             if (elems.empty()) elems.push_back("");
             for (const auto& elem : elems) {
+                if (options.maxProjectionRows && result.size() >= *options.maxProjectionRows) break;
                 std::string rowStr;
                 std::vector<std::string> cells;
                 std::vector<bool> nulls;
@@ -35980,79 +36105,11 @@ std::vector<std::string> StorageEngine::queryExpr(
             std::string rowStr;
             std::vector<std::string> cells;
             std::vector<bool> nulls;
-            for (const auto& expr : exprs) {
-                std::string val;
-                bool valueIsNull = false;
-                if (expr.isScalar) {
-                    std::optional<bool> knownNull;
-                    val = applyScalarFunc(expr, mr.second, tbl, this, dbname,
-                                          &knownNull);
-                    if (knownNull.has_value()) valueIsNull = *knownNull;
-                    if (!knownNull.has_value() && val == "NULL") {
-                        std::map<std::string, std::string> rowContext;
-                        std::map<std::string, std::string> typeHints;
-                        std::set<std::string> nullColumns;
-                        for (size_t i = 0; i < tbl.len; ++i) {
-                            bool columnIsNull = false;
-                            const std::string value = extractColumnValue(
-                                mr.second, tbl, i, dbname, true,
-                                &columnIsNull);
-                            rowContext[tbl.cols[i].dataName] = value;
-                            typeHints[tbl.cols[i].dataName] =
-                                tbl.cols[i].dataType;
-                            if (columnIsNull)
-                                nullColumns.insert(tbl.cols[i].dataName);
-                        }
-                        std::string expression;
-                        if (expr.funcName == "expreval") {
-                            if (!expr.funcArgs.empty())
-                                expression = expr.funcArgs.front();
-                        } else if (expr.funcName == "arith") {
-                            for (size_t i = 0; i < expr.funcArgs.size(); ++i) {
-                                if (i) expression += ' ';
-                                expression += expr.funcArgs[i];
-                            }
-                        } else if (expr.funcName == "cast" &&
-                                   expr.funcArgs.size() >= 2) {
-                            expression = "cast(" + expr.funcArgs[0] +
-                                " as " + expr.funcArgs[1] + ")";
-                        } else if (!expr.funcName.empty()) {
-                            expression = expr.funcName + "(";
-                            for (size_t i = 0; i < expr.funcArgs.size(); ++i) {
-                                if (i) expression += ',';
-                                expression += expr.funcArgs[i];
-                            }
-                            expression += ')';
-                        }
-                        if (!expression.empty()) {
-                            const auto evaluated =
-                                dbms::ExprHelper::evalStringWithNulls(
-                                    expression, rowContext, nullColumns,
-                                    typeHints, dbname, expr.sessionUser, this);
-                            valueIsNull = evaluated.ok
-                                ? evaluated.isNull
-                                : true;
-                        } else {
-                            valueIsNull = true;
-                        }
-                    }
-                } else {
-                    for (size_t i = 0; i < tbl.len; ++i) {
-                        if (tbl.cols[i].dataName == expr.colName) {
-                            val = extractColumnValue(
-                                mr.second, tbl, i, dbname, true,
-                                &valueIsNull);
-                            if (valueIsNull ||
-                                (val.empty() &&
-                                 tbl.cols[i].generatedKind != 'v' &&
-                                 isColumnNullByRid(
-                                     dbname, tbl.tablename, mr.first, i))) {
-                                val = "NULL";
-                            }
-                            break;
-                        }
-                    }
-                }
+            for (size_t col = 0; col < exprs.size(); ++col) {
+                const auto cell = !earlySortProjection.empty() && earlySortProjection[rowIndex][col]
+                    ? *earlySortProjection[rowIndex][col] : evaluateCell(exprs[col], mr);
+                const std::string& val = cell.first;
+                const bool valueIsNull = cell.second;
                 rowStr += val + ' ';
                 cells.push_back(valueIsNull ? std::string{} : val);
                 nulls.push_back(valueIsNull);
@@ -50399,7 +50456,8 @@ static std::pair<bool, size_t> nativePlpgsqlExecSql(
 // hosts use the registered full SQL dispatcher instead; unsupported shapes
 // here must fail, never discard a query clause and return a plausible row.
 PlPgsqlQueryResult StorageEngine::plpgsqlQueryNative(
-    const std::string& dbname, const std::string& sql) const {
+    const std::string& dbname, const std::string& sql,
+    const PlPgsqlQueryOptions& options) const {
     PlPgsqlQueryResult result;
     const auto fail = [&](const std::string& state, const std::string& message) {
         result.sqlState = state;
@@ -50785,6 +50843,16 @@ PlPgsqlQueryResult StorageEngine::plpgsqlQueryNative(
             orderExpressions.push_back(boundOrder);
         }
 
+        std::optional<size_t> requestedRows = select->limit;
+        if (options.maxRows)
+            requestedRows = requestedRows
+                ? std::min(*requestedRows, options.maxRows) : options.maxRows;
+        // LIMIT 0 still prepares names and types, but never opens the row
+        // producer (including WHERE and sort-key expressions).
+        if (requestedRows && *requestedRows == 0) {
+            result.ok = true;
+            return result;
+        }
         std::vector<std::vector<std::string>> rows;
         std::vector<std::vector<bool>> nulls;
         if (select->fromClause) {
@@ -50809,9 +50877,17 @@ PlPgsqlQueryResult StorageEngine::plpgsqlQueryNative(
         struct Candidate {
             size_t rowIndex;
             std::vector<ExprValue> orderKeys;
+            std::vector<std::optional<ExprValue>> earlyProjection;
         };
         std::vector<Candidate> candidates;
+        const size_t requestedOffset = select->offset.value_or(0);
         for (size_t i = 0; i < rows.size(); ++i) {
+            // Only a streaming (unsorted) query may stop asking for another
+            // qualifying row. Sorting still consumes every required key.
+            if (select->orderBy.empty() && requestedRows &&
+                (*requestedRows == 0 ||
+                 (candidates.size() >= requestedOffset &&
+                  candidates.size() - requestedOffset >= *requestedRows))) break;
             const RowContext row = context(i);
             if (select->whereClause) {
                 const ExprValue predicate = evaluator.eval(select->whereClause.get(), row);
@@ -50820,12 +50896,39 @@ PlPgsqlQueryResult StorageEngine::plpgsqlQueryNative(
                     return fail("42804", "WHERE condition must have type boolean");
                 if (predicate.isNull || !predicate.asBool()) continue;
             }
-            Candidate candidate{i, {}};
+            Candidate candidate{i, {}, {}};
+            if (select->orderBy.empty()) {
+                // A streaming producer evaluates each qualifying projection
+                // before asking WHERE for another input. OFFSET discards a
+                // delivered value, not its evaluation or side effects.
+                candidate.earlyProjection.resize(projection.size());
+                for (size_t col = 0; col < projection.size(); ++col) {
+                    ExprValue value = evaluator.eval(projection[col].expr.get(), row);
+                    if (value.isUnknown()) return fail("0A000", "unsupported SELECT expression");
+                    candidate.earlyProjection[col] = std::move(value);
+                }
+            }
             for (const auto* expression : orderExpressions) {
                 ExprValue value = evaluator.eval(expression, row);
                 if (value.isUnknown())
                     return fail("0A000", "unsupported ORDER BY expression");
                 candidate.orderKeys.push_back(std::move(value));
+            }
+            if (!select->orderBy.empty() && requestedRows) {
+                candidate.earlyProjection.resize(projection.size());
+                for (size_t col = 0; col < projection.size(); ++col) {
+                    const Expr* expression = projection[col].expr.get();
+                    const auto key = std::find(orderExpressions.begin(), orderExpressions.end(), expression);
+                    if (key != orderExpressions.end()) {
+                        candidate.earlyProjection[col] = candidate.orderKeys[
+                            static_cast<size_t>(key - orderExpressions.begin())];
+                    } else if (!expressionContainsVolatileFunction(expression, evaluator,
+                               const_cast<StorageEngine*>(this))) {
+                        ExprValue value = evaluator.eval(expression, row);
+                        if (value.isUnknown()) return fail("0A000", "unsupported SELECT expression");
+                        candidate.earlyProjection[col] = std::move(value);
+                    }
+                }
             }
             candidates.push_back(std::move(candidate));
         }
@@ -50865,14 +50968,22 @@ PlPgsqlQueryResult StorageEngine::plpgsqlQueryNative(
         const size_t offset = std::min(select->offset.value_or(0), candidates.size());
         result.rowCount = candidates.size() - offset;
         if (select->limit) result.rowCount = std::min(result.rowCount, *select->limit);
-        if (result.rowCount) {
-            const RowContext first = context(candidates[offset].rowIndex);
-            for (const auto& item : projection) {
-                const ExprValue value = evaluator.eval(item.expr.get(), first);
+        if (options.maxRows) result.rowCount = std::min(result.rowCount, options.maxRows);
+        for (size_t row = 0; row < offset + result.rowCount; ++row) {
+            const RowContext projected = context(candidates[row].rowIndex);
+            for (size_t col = 0; col < projection.size(); ++col) {
+                const auto& candidate = candidates[row];
+                const auto key = std::find(orderExpressions.begin(), orderExpressions.end(), projection[col].expr.get());
+                const ExprValue value = !candidate.earlyProjection.empty() && candidate.earlyProjection[col]
+                    ? *candidate.earlyProjection[col]
+                    : key != orderExpressions.end()
+                        ? candidate.orderKeys[static_cast<size_t>(key - orderExpressions.begin())]
+                        : evaluator.eval(projection[col].expr.get(), projected);
                 if (value.isUnknown())
                     return fail("0A000", "unsupported SELECT expression");
-                result.firstRow.push_back(value.isNull
-                    ? std::optional<std::string>{} : value.value);
+                if (row == offset)
+                    result.firstRow.push_back(value.isNull
+                        ? std::optional<std::string>{} : value.value);
             }
         }
         result.ok = true;
@@ -50901,7 +51012,7 @@ int StorageEngine::plpgsqlSelectInto(
     std::string sql = "SELECT " + selectList;
     if (!trim(fromClause).empty()) sql += " FROM " + fromClause;
     if (!trim(whereClause).empty()) sql += " WHERE " + whereClause;
-    const auto result = plpgsqlQuery(dbname, sql);
+    const auto result = plpgsqlQuery(dbname, sql, PlPgsqlQueryOptions{1});
     if (!result.ok || (result.rowCount && result.firstRow.size() != result.columnCount))
         return 2;
     for (size_t i = 0; i < intoVars.size(); ++i) {

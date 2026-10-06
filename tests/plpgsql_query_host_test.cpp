@@ -39,6 +39,39 @@ int main() {
     assert(query.ok && query.rowCount == 2 && query.columnCount == 2);
     assert(query.firstRow == (std::vector<std::optional<std::string>>{"4", ""}));
     assert(query.columnTypes == (std::vector<std::string>{"integer", "text"}));
+
+    assert(!ddl.executeSql("CREATE TABLE demand_rows(id INT,payload TEXT)", session));
+    for (const auto& row : std::vector<std::pair<std::string, std::string>>{
+             {"1", "11"}, {"2", "22"}, {"3", "bad"}})
+        assert(g_engine.insertRow(db, "demand_rows", {{"id", row.first},
+            {"payload", row.second}}) == dbms::DBStatus::OK);
+    // The native receiver also stops before evaluating an unrequested row,
+    // but must evaluate row two before a STRICT caller diagnoses P0003.
+    for (size_t demand : {size_t{1}, size_t{2}}) {
+        query = g_engine.plpgsqlQuery(db, "SELECT CAST(payload AS INT) FROM demand_rows;",
+                                     dbms::PlPgsqlQueryOptions{demand});
+        assert(query.ok && query.rowCount == demand && query.firstRow[0] == "11");
+    }
+    query = g_engine.plpgsqlQuery(db, "SELECT CAST(payload AS INT) FROM demand_rows;");
+    assert(!query.ok && query.sqlState == "22P02");
+    query = g_engine.plpgsqlQuery(db,
+        "SELECT 12/(id-2) FROM demand_rows;", dbms::PlPgsqlQueryOptions{1});
+    assert(query.ok && query.rowCount == 1 && query.firstRow[0] == "-12");
+    query = g_engine.plpgsqlQuery(db,
+        "SELECT 12/(id-2) FROM demand_rows;", dbms::PlPgsqlQueryOptions{2});
+    assert(!query.ok && query.sqlState == "22012");
+    query = g_engine.plpgsqlQuery(db,
+        "SELECT CAST(payload AS INT) FROM demand_rows ORDER BY id;",
+        dbms::PlPgsqlQueryOptions{1});
+    assert(!query.ok && query.sqlState == "22P02");
+    query = g_engine.plpgsqlQuery(db,
+        "SELECT 1/(id-id) FROM demand_rows WHERE 1/0>0 ORDER BY 1/0 LIMIT 0;",
+        dbms::PlPgsqlQueryOptions{1});
+    assert(query.ok && query.rowCount == 0 && query.columnTypes ==
+           std::vector<std::string>{"integer"});
+    query = g_engine.plpgsqlQuery(db,
+        "SELECT missing FROM demand_rows LIMIT 0;", dbms::PlPgsqlQueryOptions{1});
+    assert(!query.ok && query.sqlState == "42703");
     query = g_engine.plpgsqlQuery(db,
         "SELECT payload FROM into_rows WHERE payload IS NULL ORDER BY id;");
     assert(query.ok && query.rowCount == 1 && query.firstRow[0] == std::nullopt);
@@ -160,6 +193,9 @@ int main() {
     assert(variables["n"] == "1");
     assert(g_engine.plpgsqlSelectInto(db, "1", "", "", {"n", "v"}, variables,
         &variableNulls) == 0 && variables["n"] == "1" && variableNulls.count("v"));
+    assert(g_engine.plpgsqlSelectInto(db, "CAST(payload AS INT)", "demand_rows", "",
+        {"n"}, variables, &variableNulls) == 0 && variables["n"] == "11" &&
+        !variableNulls.count("n"));
 
     assert(g_engine.dropDatabase(db) == dbms::DBStatus::OK);
     cleanupTestDb(name);
