@@ -2325,10 +2325,21 @@ def main():
             [b"1", b"expression-x"], [b"5", b"five"]], excluded_expr_upsert
         assert any(kind == b"C" and body == b"INSERT 0 2\0"
                    for kind, body in excluded_expr_upsert), excluded_expr_upsert
-        conflict_where = simple_query(
+        ambiguous_conflict_where = simple_query(
             sock, "INSERT INTO dml_conflict VALUES (1, 'where-update'), (6, 'six') "
             "ON CONFLICT (id) DO UPDATE SET name = excluded.name "
             "WHERE name = 'expression-x' RETURNING id, name")
+        assert any(kind == b"E" and b"C42702\x00" in body
+                   for kind, body in ambiguous_conflict_where), ambiguous_conflict_where
+        assert not data_row_values(ambiguous_conflict_where), ambiguous_conflict_where
+        assert not any(kind == b"C" for kind, _ in ambiguous_conflict_where), ambiguous_conflict_where
+        assert data_row_values(simple_query(
+            sock, "SELECT id, name FROM dml_conflict WHERE id IN (1, 6) ORDER BY id")) == [
+                [b"1", b"expression-x"]]
+        conflict_where = simple_query(
+            sock, "INSERT INTO dml_conflict VALUES (1, 'where-update'), (6, 'six') "
+            "ON CONFLICT (id) DO UPDATE SET name = excluded.name "
+            "WHERE dml_conflict.name = 'expression-x' RETURNING id, name")
         assert data_row_values(conflict_where) == [
             [b"1", b"where-update"], [b"6", b"six"]], conflict_where
         assert any(kind == b"C" and body == b"INSERT 0 2\0"
