@@ -29,6 +29,8 @@ def main():
             'INSERT INTO sub_outer VALUES(1),(2),(3),(4);','INSERT INTO sub_inner VALUES(2,1),(3,1);',
             'INSERT INTO sub_inner(enabled) VALUES(1);','CREATE TEMP TABLE sub_text(id INT,value TEXT);',
             "INSERT INTO sub_text VALUES(1,NULL),(2,''),(3,'NULL'),(4,NULL);",
+            'CREATE TEMP TABLE sub_typed(id INT,wide BIGINT,nums INT[],flag BOOL,"Case" INT);',
+            'INSERT INTO sub_typed VALUES(1,2147483648,ARRAY[1,2],true,99);',
         ):ok(sql)
         # The first query is the exact original full-protocol SQL at line2504;
         # both NULL rows and non-NULL rows count toward scalar cardinality.
@@ -52,6 +54,27 @@ def main():
             result=ok('SELECT id, ('+child+') FROM sub_outer')
             assert result[0]==[[str(i),value] for i in range(1,5)],(child,result)
             assert result[5]==[23,23 if 'FROM sub_inner' in child else 25],(child,result)
+        for sql,rows,oids in (
+            ('SELECT id,(SELECT wide FROM sub_typed WHERE id=1) FROM sub_outer',[[str(i),'2147483648'] for i in range(1,5)],[23,20]),
+            ('SELECT id,(SELECT wide FROM sub_typed WHERE id=99) FROM sub_outer',[[str(i),None] for i in range(1,5)],[23,20]),
+            ('SELECT id,(SELECT nums FROM sub_typed WHERE id=1) FROM sub_outer',[[str(i),'{1,2}'] for i in range(1,5)],[23,1007]),
+            ('SELECT id,(SELECT flag FROM sub_typed WHERE id=1) FROM sub_outer',[[str(i),'t'] for i in range(1,5)],[23,16]),
+            ('SELECT (SELECT wide AS chosen FROM sub_typed WHERE id=1) AS value,id FROM sub_outer',[["2147483648",str(i)] for i in range(1,5)],[20,23]),
+            ('SELECT id,(SELECT "Case" FROM sub_typed WHERE id=1) FROM sub_outer',[[str(i),'99'] for i in range(1,5)],[23,23]),
+            ('SELECT id,(SELECT wide FROM sub_typed WHERE id=1) FROM sub_outer WHERE id=99',[],[23,20]),
+        ):
+            result=ok(sql);assert result[0]==rows and result[5]==oids,(sql,result,rows,oids)
+        # Pure output analysis must also discover a missing child column before
+        # any sibling writer, not infer types from its first returned value.
+        ok('CREATE TEMP SEQUENCE scalar_metadata_calls')
+        routine=('pg_temp.' if args.reference18 else '')+'scalar_metadata_writer'
+        ok('CREATE FUNCTION '+routine+"() RETURNS INT LANGUAGE plpgsql AS $$ BEGIN PERFORM nextval('scalar_metadata_calls'); RETURN 1; END; $$;")
+        ok("SELECT nextval('scalar_metadata_calls')")
+        ok('SAVEPOINT scalar_control')
+        result=query('SELECT '+routine+'(),(SELECT missing FROM sub_typed) FROM sub_outer')
+        assert result[1]=='42703' and result[0]==[] and result[4] is None,result
+        ok('ROLLBACK TO scalar_control');ok('RELEASE scalar_control')
+        assert ok("SELECT currval('scalar_metadata_calls')")[0]==[['1']]
         ok('ROLLBACK;')
         # Autocommit rejection must also recover, without lowering a failed
         # transaction to success or disguising SQL NULL as empty text.

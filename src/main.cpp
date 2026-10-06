@@ -34822,6 +34822,22 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             [](const string& target) {
                                 return trim(target) == "*";
                             })) {
+                    // A scalar SQL child has a declared output even with no
+                    // rows (or an all-NULL result). Consume whole-query pure
+                    // binding, rather than asking the scalar-expression
+                    // helper to infer a type from opaque SELECT text.
+                    vector<string> preparedScalarTypes;
+                    const bool scalarChildProjection = structuredScalar ||
+                        any_of(selectExprs.begin(), selectExprs.end(), [](const auto& expression) {
+                            return expression.isScalar && expression.funcName == "subquery";
+                        });
+                    if (scalarChildProjection) {
+                        const auto prepared = g_engine.prepareBoundQuery(queryDb, effectiveRawSql);
+                        if (prepared.output.size() != rawTargets.size())
+                            throw dbms::DbError("XX000", "scalar projection lost its prepared output descriptor");
+                        for (const auto& column : prepared.output)
+                            preparedScalarTypes.push_back(column.type);
+                    }
                     map<string, string> typeHints;
                     for (size_t ci = 0; ci < tbl.len; ++ci) {
                         const string& name = tbl.cols[ci].dataName;
@@ -34858,10 +34874,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     metadata.metadataOnly = true;
                     for (size_t i = 0; i < rawTargets.size(); ++i) {
                         metadata.columns.push_back(selectExprs[i].displayName);
-                        string resultType = dbms::ExprHelper::inferResultType(
-                            withoutAlias(rawTargets[i]), typeHints, s.currentDB,
-                            &g_engine);
-                        if (selectExprs[i].isScalar &&
+                        string resultType = preparedScalarTypes.empty()
+                            ? dbms::ExprHelper::inferResultType(
+                                withoutAlias(rawTargets[i]), typeHints, s.currentDB, &g_engine)
+                            : preparedScalarTypes[i];
+                        if (preparedScalarTypes.empty() && selectExprs[i].isScalar &&
                             !selectExprs[i].funcName.empty()) {
                             const auto udf = g_engine.getUDF(
                                 s.currentDB, selectExprs[i].funcName);
