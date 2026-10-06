@@ -85,6 +85,31 @@ PostgreSQL 18 的 [volatility 文档](https://www.postgresql.org/docs/18/xfunc-v
 [SPI primary source](https://raw.githubusercontent.com/postgres/postgres/REL_18_STABLE/src/backend/executor/spi.c)
 说明 read-only command 检查及 non-read-only command CID 推进。本次只落实已测试的窄项。
 
+## ROOT 组合正式复验
+
+独立 source/test commit `3d6f88d3` 已整合为 ROOT `5411a7aa`，前置四个
+lexical/source-comparison commits 各自保留。共享正式 O2 构建正常结束；五个变更
+CPP fresh 编译，其余50对象经当前 source/header/flags 签名验证后复用。
+normal/repeat build、55/55 object signatures 与 binary stamp 均 exit0。
+冻结 artifact `/tmp/dbms-plpgsql-combination.D4U50YDA/dbms_main.frozen` SHA256
+`c911593edbec82aaf96e5b67879b74bfe5c0ea955d605166b770f17a019c21f5`。
+
+最终 fresh matching O2 的14项native（终端75177）与25个专项/相邻协议（71868）
+全部exit0，含新atomicity native/wire、真实SQL namespace/NULL/volatility、typed
+INTO、CTE内部visibility、cold recovery、deferred/RETURNING commit错误及锁边界。
+exact测试及构建组合见
+[`issue-plpgsql-lexical-and-source-comparisons.md`](issue-plpgsql-lexical-and-source-comparisons.md)。
+相同冻结正式binary的 known-gap 43009 全部9项仍red、exit1，不将 undefined或
+不执行函数当作原子性成功。额外 boolean_literal_boundary 协议18039也exit0（最终
+26个focused/adjacent entry points）；完整默认protocol29960 exit1，2374处真实
+pg_stat_tables idx_scan/idx_tup_fetch为0，未通过原断言。filterRows 的任何active
+transaction都禁用索引，而新implicit query owner使孤立read也触发该守卫；索引路径
+独立修复继续，不改计数或削弱断言冒充通过，详细日志保留在组合报告。
+
+另真实复现 non-STRICT/STRICT INTO 过度执行后续VOLATILE projection、产生多余
+sequence effects并改变错误优先级。这是独立输出需求 bug，不是回滚修复已经完成；见
+[`issue-plpgsql-select-into-execution-demand.md`](issue-plpgsql-select-into-execution-demand.md)。
+
 ## 必须继续修复的失败 gate
 
 `tests/stored_function_clause_execution_known_gap.py` 是 checked-in diagnostic，
