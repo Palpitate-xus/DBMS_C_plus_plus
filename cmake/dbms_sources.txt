@@ -54,3 +54,4 @@ src/storage/LargeObject.cpp
 src/types/numeric.cpp
 src/types/xml.cpp
 src/utils/plpgsql.cpp
+src/utils/interval.cpp
