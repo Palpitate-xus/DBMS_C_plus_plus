@@ -3444,38 +3444,49 @@ ParseResult SQLParser::parseInsert(const std::string& sql) {
     // VALUES or SELECT
     if (pos < tokens.size() && toLower(tokens[pos]) == "values") {
         ++pos;
-        while (pos < tokens.size()) {
-            if (tokens[pos] == "(") {
-                ++pos;
-                std::vector<ExprPtr> row;
-                while (pos < tokens.size() && tokens[pos] != ")") {
-                    if (toLower(tokens[pos]) == "default") {
-                        // DEFAULT is a value expression, not the statement-level
-                        // DEFAULT VALUES form.  Keeping it in the row preserves
-                        // positional information for mixed rows such as
-                        // VALUES (DEFAULT, 1).
-                        auto defaultExpr = std::make_unique<LiteralExpr>();
-                        defaultExpr->value = "default";
-                        row.push_back(std::move(defaultExpr));
-                        ++pos;
-                    } else {
-                        auto expr = parseSimpleExpr(tokens, pos);
-                        if (expr) row.push_back(std::move(expr));
-                    }
-                    if (pos < tokens.size() && tokens[pos] == ",") ++pos;
-                }
-                if (pos < tokens.size() && tokens[pos] == ")") ++pos;
-                stmt->values.push_back(std::move(row));
+        while (true) {
+            if (pos >= tokens.size() || tokens[pos] != "(") {
+                r.error = "VALUES requires a parenthesized row";
+                return r;
             }
+            ++pos;
+            std::vector<ExprPtr> row;
+            while (true) {
+                if (pos >= tokens.size() || tokens[pos] == ")" || tokens[pos] == ",") {
+                    r.error = "VALUES requires an expression";
+                    return r;
+                }
+                if (toLower(tokens[pos]) == "default") {
+                    // DEFAULT retains its own positional value slot.
+                    auto defaultExpr = std::make_unique<LiteralExpr>();
+                    defaultExpr->value = "default";
+                    row.push_back(std::move(defaultExpr));
+                    ++pos;
+                } else {
+                    auto expr = parseSimpleExpr(tokens, pos);
+                    const auto* literal = dynamic_cast<const LiteralExpr*>(expr.get());
+                    if (!expr || (literal && literal->value == "*")) {
+                        r.error = "VALUES requires a valid expression";
+                        return r;
+                    }
+                    row.push_back(std::move(expr));
+                }
+                if (pos < tokens.size() && tokens[pos] == ",") { ++pos; continue; }
+                if (pos >= tokens.size() || tokens[pos] != ")") {
+                    r.error = "VALUES expressions require commas and a closing parenthesis";
+                    return r;
+                }
+                ++pos;
+                break;
+            }
+            stmt->values.push_back(std::move(row));
             if (pos < tokens.size() && tokens[pos] == ",") {
                 ++pos;
                 continue;
             }
-            if (pos < tokens.size() && toLower(tokens[pos]) == "on") break;
-            if (pos < tokens.size() && toLower(tokens[pos]) == "returning") break;
-            if (pos < tokens.size() && tokens[pos] == ";") break;
-            // If next is not '(', break (e.g. started a new clause)
-            if (pos < tokens.size() && tokens[pos] != "(") break;
+            // Row width is contextual analysis, not raw grammar. Preserve
+            // source-order input coercion before a later row-width error.
+            break;
         }
     } else if (pos < tokens.size() && toLower(tokens[pos]) == "default") {
         ++pos;
