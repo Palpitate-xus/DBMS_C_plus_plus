@@ -87,7 +87,7 @@ false-result SQLSTATE and cleared partial outputs are additionally asserted.
 Both fresh matching ROOT58 natives77069 exit0. This does not relabel the
 original96-native failure as a terminal success or require new production ABI.
 
-## Next independent integrations and pending optimized combination
+## Next independent integrations and actual optimized combination
 
 After both focused handles finished, these five source issues were integrated
 as five independent local ROOT commits:
@@ -113,10 +113,18 @@ do not imply complete respective requirement-family closure.
 Current source **d7c1f0a8** inventory is **534 native tests /271 registered
 Python entry points /58 production TUs**. Public UPDATE vector AST and
 ExprHelper callback headers changed, so actual new whole58 normal-O2 build
-**69854** is live with source/headers/tests/registry frozen. Artifact:
+**69854 exited0**, with exactly58 compile entries. Repeat and all58 object
+signatures/binary stamp audit **22267 exited0**. Artifact:
 `/tmp/dbms-next-query-integration.Hv7QYyMM/build-full-O2.log`.
-The source combination has not yet been tested. No new combined/full-suite
-green claim, old-header object reuse or all-sanitizer claim is made.
+Frozen server SHA256 is
+`a8130de0f4eec4fcc48674415a9cb80ab1c5bec4a2dcbee1a264232c6dbb32da`.
+Matching freshly compiled **101 native tests96252 all passed/exit0**;
+**86 wire entry points42926 exited1:85 passed/1 failed**, exactly the original
+four WITH input/sequence assertions above. The strong duplicate32case gate,
+sort56case gate, both INSERT SELECT gates and both window gates now actually
+pass together. This resolves the private duplicate matrix's window dependency
+in this combination, not the whole UPDATE/window families. No new complete
+canonical/full-suite green or all-sanitizer claim is made.
 
 Private checked-result donor final V2 had a true fresh57 normal-O2 build
 76658/exit0, 21 natives41097/exit0 and 14 wire65999/exit0, retaining the original
@@ -139,7 +147,43 @@ passed. Source/runtime binding, INSERT SELECT input, WITH execution,
 SubLink sort identity, quantified lowering and broader type/query/transaction
 families remain ongoing.
 
-All PostgreSQL17.2 references here are diagnostics, not a PostgreSQL18 oracle.
+## Further independent integrations and current verification
+
+After86-wire42926 actually finished, these changes were committed separately:
+
+| ROOT commit | Independent change / donor |
+| --- | --- |
+| 86779990 | Original VALUES expression transformation precedes contextual width errors;25882473. |
+| 6b161f76 | Qualify the intended target in three old ON CONFLICT predicates proven ambiguous in PostgreSQL;7d4e4611. All old values/NULL/tags/effects remain, with new42702 negative controls in the next independent source issue. |
+| 706806ae | Actual typed WITH-primary-DML source/cache/consumer and one atomic fixed command view;ed5ac648. Original WITH4red plus47controls,14native and12adjacent wires pass privately on matching fresh58O0; actual failures/intermediate dependency profiles retained. |
+| 7d159891 | Demand-driven typed child cursors, primary error/close contract and typed DISTINCT collation cache;dfa20dea. Eleven native and seven adjacent wires pass on audited fresh58O0 private group. Original quantified parser/EXPLAIN is not switched or declared fixed. |
+| f6cbc8d6 | Pure ON CONFLICT EXCLUDED logical namespace, unqualified ambiguity42702 and RETURNING scope isolation;a5c9e6fc. Source/header audits, native, wire and partial ASan pass privately; original seven wire failures retained. |
+| 6d39bf0f | Explicit strict180006 reference mode and genuine PG18.6 reference results, separately from retained strict170002 diagnostic mode. |
+
+The WITH donor's older two checked-native wrapper hunks conflicted with
+ROOT06ef197d. ROOT retained its stronger false-result SQLSTATE/cleared-output
+assertions and original throwIfFailed. No original demand/error/site/NULL
+assertion was removed. Main's existing precise checked consumer also remains.
+
+Current inventory is **539 native tests /274 registered Python entry points /
+58 production TUs**. Public DML/prepared cursor/operator-vtable headers changed,
+so source combination f6cbc8d6 plus test-only6d39bf0f is undergoing a **new
+complete normal-O2 build96836** with sources/headers frozen. Artifacts:
+`/tmp/dbms-with-cursor-integration.xOfpugBC/build-full-O2.log`.
+No new matching native/wire/full-suite gate has started yet. Private O0 results
+are not substituted for this new optimized proof and no old ABI is reused.
+
+The isolated official PostgreSQL18.6 build and actual180006 wire reference
+are recorded in `docs/issue-pg18-reference-bootstrap.md`. Six focused original
+matrices plus the original56 sort controls actually pass on18.6; the six old
+17.2 modes also remain passing. Missing XML/TLS/LZ4/ZSTD reference capabilities
+are explicit, not treated as broad18 compatibility proof. Original quantifier
+EXPLAIN/compact syntax, unused unknown-input CAST preparation, CASE common
+types, OLD/NEW RETURNING namespaces and all wider requirement families remain
+open and are being independently repaired.
+
+All PostgreSQL17.2 references here remain diagnostics, not a PostgreSQL18
+oracle. Only the explicitly version-checked18.6 results above are18 evidence.
 273 audit requirements remain **22 complete / 166 partial / 70 unverified /
 15 deferred by user**. No requirement-family closure is inferred from these
 individual changes or green narrow checks. Actions remain disabled; no push
