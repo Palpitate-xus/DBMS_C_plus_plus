@@ -3579,17 +3579,17 @@ static const char* integerCastTypeName(IntegerCastTarget target) {
 }
 
 [[noreturn]] static void throwIntegerCastRangeError(IntegerCastTarget target) {
-    throw std::runtime_error(
+    throw DbError("22003",
         std::string(integerCastTypeName(target)) +
-        " out of range (SQLSTATE 22003)");
+        " out of range");
 }
 
 [[noreturn]] static void throwIntegerCastSyntaxError(
     IntegerCastTarget target, const std::string& value) {
-    throw std::runtime_error(
+    throw DbError("22P02",
         "invalid input syntax for type " +
         std::string(integerCastTypeName(target)) + ": '" + value +
-        "' (SQLSTATE 22P02)");
+        "'");
 }
 
 enum class SignedIntegerParseResult { Ok, Invalid, OutOfRange };
@@ -3634,9 +3634,8 @@ static ExprValue castToInteger(const ExprValue& value,
         const size_t width = target == IntegerCastTarget::SmallInt ? 2U :
                              target == IntegerCastTarget::Integer ? 4U : 8U;
         if (bytes.size() > width) {
-            throw std::runtime_error(
-                "invalid byte sequence for encoding integer "
-                "(SQLSTATE 22003)");
+            throw DbError("22003",
+                "invalid byte sequence for encoding integer");
         }
         uint64_t bits = 0;
         for (const unsigned char byte : bytes)
@@ -3662,10 +3661,9 @@ static ExprValue castToInteger(const ExprValue& value,
 
     if (sourceType == "boolean" || sourceType == "bool") {
         if (target != IntegerCastTarget::Integer) {
-            throw std::runtime_error(
+            throw DbError("42846",
                 "cannot cast type boolean to " +
-                std::string(integerCastTypeName(target)) +
-                " (SQLSTATE 42846)");
+                std::string(integerCastTypeName(target)));
         }
         return ExprValue("integer", value.asBool() ? "1" : "0", false);
     }
@@ -3760,33 +3758,31 @@ static ExprValue castToBytea(const ExprValue& value) {
 
     ByteaValue bytes;
     if (!ByteaValue::parse(value.value, bytes)) {
-        throw std::runtime_error(
-            "invalid input syntax for type bytea (SQLSTATE 22P02)");
+        throw DbError("22P02",
+            "invalid input syntax for type bytea");
     }
     return ExprValue("bytea", bytes.toString(), false);
 }
 
 [[noreturn]] static void throwFloatingCastSyntaxError(
     const std::string& targetType, const std::string& value) {
-    throw std::runtime_error(
+    throw DbError("22P02",
         "invalid input syntax for type " + targetType + ": '" + value +
-        "' (SQLSTATE 22P02)");
+        "'");
 }
 
 [[noreturn]] static void throwFloatingCastRangeError(
     const std::string& targetType) {
-    throw std::runtime_error(
-        "value out of range for type " + targetType +
-        " (SQLSTATE 22003)");
+    throw DbError("22003",
+        "value out of range for type " + targetType);
 }
 
 static void rejectBooleanFloatingCast(const ExprValue& value,
                                       const std::string& targetType) {
     const std::string sourceType = toLower(value.typeName);
     if (sourceType == "boolean" || sourceType == "bool") {
-        throw std::runtime_error(
-            "cannot cast type boolean to " + targetType +
-            " (SQLSTATE 42846)");
+        throw DbError("42846",
+            "cannot cast type boolean to " + targetType);
     }
 }
 
@@ -3857,19 +3853,20 @@ struct NumericCastSpec {
 
 [[noreturn]] static void throwNumericCastSyntaxError(
     const std::string& value) {
-    throw std::runtime_error(
+    throw DbError("22P02",
         "invalid input syntax for type numeric: '" + value +
-        "' (SQLSTATE 22P02)");
+        "'");
 }
 
 [[noreturn]] static void throwNumericCastOverflow() {
-    throw std::runtime_error(
-        "numeric field overflow (SQLSTATE 22003)");
+    throw DbError("22003",
+        "numeric field overflow");
 }
 
 [[noreturn]] static void throwNumericTypmodError(
     const std::string& message) {
-    throw std::runtime_error(message + " (SQLSTATE 22023)");
+    throw DbError("22023",
+        message);
 }
 
 static int parseNumericTypmodInteger(const std::string& text,
@@ -3955,8 +3952,8 @@ static ExprValue castToNumeric(const ExprValue& value,
                                const NumericCastSpec& spec) {
     const std::string sourceType = toLower(value.typeName);
     if (sourceType == "boolean" || sourceType == "bool") {
-        throw std::runtime_error(
-            "cannot cast type boolean to numeric (SQLSTATE 42846)");
+        throw DbError("42846",
+            "cannot cast type boolean to numeric");
     }
     std::optional<Numeric> numeric;
     if (sourceType == "money") {
@@ -4003,8 +4000,8 @@ static bool isTextCastSourceType(const std::string& sourceType);
 static ExprValue castToMoney(const ExprValue& value) {
     const std::string sourceType = toLower(value.typeName);
     if (sourceType == "boolean" || sourceType == "bool") {
-        throw std::runtime_error(
-            "cannot cast type boolean to money (SQLSTATE 42846)");
+        throw DbError("42846",
+            "cannot cast type boolean to money");
     }
     const bool textual = isTextCastSourceType(sourceType);
     const bool numeric = isNumericTypeName(sourceType) ||
@@ -4012,9 +4009,9 @@ static ExprValue castToMoney(const ExprValue& value) {
         sourceType == "float4" || sourceType == "float8" ||
         sourceType == "double" || sourceType == "double precision";
     if (sourceType != "money" && !textual && !numeric) {
-        throw std::runtime_error(
+        throw DbError("42846",
             "cannot cast type " + sourceType +
-            " to money (SQLSTATE 42846)");
+            " to money");
     }
     std::string input = value.value;
     if (numeric) {
@@ -4023,9 +4020,9 @@ static ExprValue castToMoney(const ExprValue& value) {
             if (!normalized.isFinite()) throw std::invalid_argument("non-finite");
             input = normalized.toString();
         } catch (const std::invalid_argument&) {
-            throw std::runtime_error(
+            throw DbError("22P02",
                 "invalid input syntax for type money: '" +
-                trimStr(value.value) + "' (SQLSTATE 22P02)");
+                trimStr(value.value) + "'");
         }
     }
     Money money;
@@ -4034,9 +4031,9 @@ static ExprValue castToMoney(const ExprValue& value) {
         ? Money::parse(input, money, locale)
         : Money::parseDecimal(input, money, locale);
     if (!parsed) {
-        throw std::runtime_error(
+        throw DbError("22P02",
             "invalid input syntax for type money: '" +
-            trimStr(value.value) + "' (SQLSTATE 22P02)");
+            trimStr(value.value) + "'");
     }
     return ExprValue("money", money.format(locale), false);
 }
@@ -4068,23 +4065,23 @@ static ExprValue castToBoolean(const ExprValue& value) {
         if (parsed == SignedIntegerParseResult::OutOfRange)
             throwIntegerCastRangeError(IntegerCastTarget::Integer);
         if (parsed != SignedIntegerParseResult::Ok) {
-            throw std::runtime_error(
+            throw DbError("22P02",
                 "invalid input syntax for type integer: '" +
-                trimStr(value.value) + "' (SQLSTATE 22P02)");
+                trimStr(value.value) + "'");
         }
         return ExprValue("boolean", integer == 0 ? "f" : "t", false);
     }
 
     if (!booleanSource && !textSource) {
-        throw std::runtime_error(
+        throw DbError("42846",
             "cannot cast type " + sourceType +
-            " to boolean (SQLSTATE 42846)");
+            " to boolean");
     }
     const auto parsed = parseBooleanCastText(value.value);
     if (!parsed) {
-        throw std::runtime_error(
+        throw DbError("22P02",
             "invalid input syntax for type boolean: '" +
-            trimStr(value.value) + "' (SQLSTATE 22P02)");
+            trimStr(value.value) + "'");
     }
     return ExprValue("boolean", *parsed ? "t" : "f", false);
 }
@@ -4102,15 +4099,15 @@ static bool isTextCastSourceType(const std::string& sourceType) {
 static ExprValue castToUuid(const ExprValue& value) {
     const std::string sourceType = toLower(value.typeName);
     if (sourceType != "uuid" && !isTextCastSourceType(sourceType)) {
-        throw std::runtime_error(
+        throw DbError("42846",
             "cannot cast type " + sourceType +
-            " to uuid (SQLSTATE 42846)");
+            " to uuid");
     }
     UuidValue uuid;
     if (!UuidValue::parse(value.value, uuid)) {
-        throw std::runtime_error(
+        throw DbError("22P02",
             "invalid input syntax for type uuid: '" +
-            trimStr(value.value) + "' (SQLSTATE 22P02)");
+            trimStr(value.value) + "'");
     }
     return ExprValue("uuid", uuid.toString(), false);
 }
@@ -4140,20 +4137,19 @@ static bool resemblesTemporalFieldText(const std::string& text) {
 [[noreturn]] static void throwTemporalCastError(
     const std::string& targetType, const std::string& value) {
     if (resemblesTemporalFieldText(value)) {
-        throw std::runtime_error(
+        throw DbError("22008",
             "date/time field value out of range: '" + value +
-            "' (SQLSTATE 22008)");
+            "'");
     }
-    throw std::runtime_error(
+    throw DbError("22007",
         "invalid input syntax for type " + targetType + ": '" + value +
-        "' (SQLSTATE 22007)");
+        "'");
 }
 
 [[noreturn]] static void throwUnsupportedTemporalCast(
     const std::string& sourceType, const std::string& targetType) {
-    throw std::runtime_error(
-        "cannot cast type " + sourceType + " to " + targetType +
-        " (SQLSTATE 42846)");
+    throw DbError("42846",
+        "cannot cast type " + sourceType + " to " + targetType);
 }
 
 static ExprValue castToDate(const ExprValue& value) {
@@ -4307,7 +4303,8 @@ struct CharacterCastSpec {
 
 [[noreturn]] static void throwCharacterTypmodError(
     const std::string& message) {
-    throw std::runtime_error(message + " (SQLSTATE 22023)");
+    throw DbError("22023",
+        message);
 }
 
 static CharacterCastSpec parseCharacterCastSpec(const std::string& target) {
@@ -4317,8 +4314,8 @@ static CharacterCastSpec parseCharacterCastSpec(const std::string& target) {
         return spec;
     }
     if (target.rfind("text(", 0) == 0) {
-        throw std::runtime_error(
-            "type modifier is not allowed for type text (SQLSTATE 42601)");
+        throw DbError("42601",
+            "type modifier is not allowed for type text");
     }
 
     std::string base;
