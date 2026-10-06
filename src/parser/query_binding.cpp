@@ -434,16 +434,16 @@ public:
         }
         Range merged;
         for (const auto& key : keys) {
-            size_t leftCount = 0, rightCount = 0; std::string type;
+            size_t leftCount = 0, rightCount = 0; std::string leftType,rightType;
             for (auto& range : left) for (const auto& col : range.columns)
-                if (col.name == key && !range.hiddenUnqualified.count(key)) { ++leftCount; type = col.type; }
+                if (col.name == key && !range.hiddenUnqualified.count(key)) { ++leftCount; leftType = col.type; }
             for (auto& range : right) for (const auto& col : range.columns)
-                if (col.name == key && !range.hiddenUnqualified.count(key)) ++rightCount;
+                if (col.name == key && !range.hiddenUnqualified.count(key)) { ++rightCount; rightType = col.type; }
             if (!leftCount || !rightCount) throw DbError("42703", "column \"" + key + "\" specified in USING does not exist");
             if (leftCount > 1 || rightCount > 1) throw DbError("42702", "USING column is ambiguous");
             for (auto& range : left) range.hiddenUnqualified.insert(key);
             for (auto& range : right) range.hiddenUnqualified.insert(key);
-            merged.columns.push_back({key, type});
+            merged.columns.push_back({key, selectCommonType({leftType,rightType},"JOIN/USING")});
         }
         left.insert(left.end(), right.begin(), right.end());
         auto scopes = outer; scopes.insert(scopes.begin(), left);
