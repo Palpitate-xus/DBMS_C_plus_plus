@@ -1678,6 +1678,7 @@ bool describePreparedResult(const std::string& sql, Session& session,
     QueryResult shape;
     std::vector<std::string> outputNames;
     std::vector<uint32_t> directParameterOids;
+    std::vector<int32_t> projectionTypeModifiers;
     const auto outputAlias = [](const std::string& token) {
         CatalogManager::QualifiedName name;
         if (CatalogManager::parseQualifiedName(token, name, true) && name.schema.empty()) {
@@ -1691,6 +1692,7 @@ bool describePreparedResult(const std::string& sql, Session& session,
             shape.columnTypes.push_back(schema.cols[i].dataType);
             outputNames.push_back(schema.cols[i].dataName);
             directParameterOids.push_back(0);
+            projectionTypeModifiers.push_back(-1);
         }
     };
     const auto qualifierMatches = [&](const ColumnRefExpr& reference) {
@@ -1725,6 +1727,7 @@ bool describePreparedResult(const std::string& sql, Session& session,
                 outputNames.push_back(item.alias.empty() ? reference->column
                                                           : outputAlias(item.alias));
                 directParameterOids.push_back(0);
+                projectionTypeModifiers.push_back(-1);
                 found = true;
                 break;
             }
@@ -1804,6 +1807,9 @@ bool describePreparedResult(const std::string& sql, Session& session,
                 parameterOid = parameterOids[index - 1];
         }
         directParameterOids.push_back(parameterOid);
+        // The physical-descriptor adapter below uses SELECT * and cannot
+        // retain a projection cast. Read typmods from the original live AST.
+        projectionTypeModifiers.push_back(protocolCharacterCastModifier(item.expr.get()));
     }
     if (shape.columns.empty()) return false;
     const std::string descriptionSql =
@@ -1814,6 +1820,9 @@ bool describePreparedResult(const std::string& sql, Session& session,
                                       descriptionSql, session);
     for (size_t i = 0; i < columns.size(); ++i) {
         columns[i].name = outputNames[i];
+        if ((columns[i].typeOid == 1042 || columns[i].typeOid == 1043) &&
+            projectionTypeModifiers[i] >= 0)
+            columns[i].typeModifier = projectionTypeModifiers[i];
         if (directParameterOids[i] != 0) {
             columns[i].typeOid = directParameterOids[i];
             columns[i].typeSize = protocolTypeSize(columns[i].typeOid, Column{});
