@@ -2893,8 +2893,8 @@ static bool handleBeginTransaction(const string& sql, Session& s) {
     s.isolationLevel = static_cast<int>(txn->isolation);
     auto res = g_engine.beginTransaction(s.currentDB);
     if (res != DBStatus::OK) {
-        cout << "Begin transaction failed" << endl;
-        return true;
+        throw dbms::DbError(dbms::sqlstateForDBStatus(res),
+                           "Begin transaction failed");
     }
     if (!hadTransaction) {
         s.transactionChainOrigin = false;
@@ -35865,11 +35865,22 @@ static bool executeWithCteInheritance(const std::string& inputSql, Session& s,
         !managesNotificationTransaction(rawSql);
 
     ++executeDepth;
-    if (statementTransaction &&
-        g_engine.beginTransaction(s.currentDB) != dbms::DBStatus::OK) {
-        --executeDepth;
-        std::cout << "ERROR: could not start statement transaction" << std::endl;
-        return true;
+    if (statementTransaction) {
+        dbms::DBStatus beginStatus;
+        try {
+            beginStatus = g_engine.beginTransaction(s.currentDB);
+        } catch (...) {
+            --executeDepth;
+            throw;
+        }
+        if (beginStatus != dbms::DBStatus::OK) {
+            // BEGIN has not acquired statement ownership. Preserve its exact
+            // failure without inventing a transaction to roll back or a
+            // bare diagnostic that the wire can only classify as XX000.
+            --executeDepth;
+            throw dbms::DbError(dbms::sqlstateForDBStatus(beginStatus),
+                               "could not start statement transaction");
+        }
     }
     if (statementTransaction) {
         dbms::advisoryLockManager().beginTransaction(advisoryOwner(s));
