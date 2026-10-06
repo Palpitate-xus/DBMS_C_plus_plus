@@ -19,8 +19,14 @@ int main() {
         assert(owner.insertRow(db,"source",std::map<std::string,std::optional<std::string>>{
             {"id",std::to_string(id)},{"ID",std::to_string(2147483647LL+id)},{"payload",payload}}) == DBStatus::OK);
     const auto run = [&](const std::string& sql, size_t demand=0) {
-        return QueryPlanner::executePlanChecked(QueryPlanner::buildPreparedSelectPlan(
+        auto result=QueryPlanner::executePlanChecked(QueryPlanner::buildPreparedSelectPlan(
             &owner,db,"source",owner.prepareBoundQuery(db,sql)),demand);
+        if (!result.ok) {
+            assert(!result.errorSqlState.empty());
+            assert(result.rows.empty() && result.structuredRows.empty() && result.structuredNulls.empty());
+        }
+        result.throwIfFailed();
+        return result;
     };
     auto result=run("SELECT d.id,d.\"ID\" FROM source d WHERE(SELECT d.\"ID\")=2147483649");
     assert(result.ok && result.structuredRowsAvailable);
