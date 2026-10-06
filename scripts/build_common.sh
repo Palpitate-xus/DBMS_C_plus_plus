@@ -133,6 +133,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/unique_update_batch_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/returning_old_new_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/check_add_validation_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/insert_omitted_null_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/function_result_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/procedure_replace_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/gap_progress_test.py tests/pg_diff_runner_test.py)

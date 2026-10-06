@@ -24230,6 +24230,16 @@ DBStatus StorageEngine::insertInternal(
         }
     }
 
+    // Defaults and BEFORE triggers have now had their chance to supply
+    // omitted fields. Build a complete typed NEW image: absence at the SQL
+    // input boundary means SQL NULL, not an unbound column in a generated
+    // expression or CHECK. Do not replace a supplied empty text value.
+    for (size_t i = 0; i < tbl.len; ++i) {
+        const auto& column = tbl.cols[i];
+        if (actualValues.emplace(column.dataName, std::string{}).second)
+            actualNullColumns.insert(column.dataName);
+    }
+
     // BEFORE INSERT triggers own the final NEW values of base columns.
     // Compute stored generated columns only after every such trigger has run,
     // so heap data, constraints, RETURNING, and every index derive from the
