@@ -1,4 +1,5 @@
 #include "ExprEvaluator.h"
+#include "arithmetic_type.h"
 #include "expr_helper.h"
 #include "commands/TableManage.h"
 #include "catalog/collation.h"
@@ -2231,25 +2232,12 @@ static std::string formatFloatingCastValue(Floating value);
 ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
                                          const ExprValue& l,
                                          const ExprValue& r) {
-    const auto integerWidth = [](const std::string& type) {
-        const std::string name = toLower(type);
-        if (name == "smallint" || name == "int2") return 1;
-        if (name == "integer" || name == "int" || name == "int4") return 2;
-        if (name == "bigint" || name == "int8") return 3;
-        return 0;
-    };
+    const auto integerWidth = arithmetic_detail::integerWidth;
     const int leftIntegerWidth = integerWidth(l.typeName);
     const int rightIntegerWidth = integerWidth(r.typeName);
     const int resultIntegerWidth = std::max(leftIntegerWidth, rightIntegerWidth);
-    const auto integerType = [](int width) {
-        return width == 1 ? "smallint" : width == 3 ? "bigint" : "integer";
-    };
-    const auto floatingWidth = [](const std::string& type) {
-        const std::string name = toLower(type);
-        if (name == "real" || name == "float4" || name == "float") return 1;
-        if (name == "double precision" || name == "float8" || name == "double") return 2;
-        return 0;
-    };
+    const auto integerType = arithmetic_detail::integerTypeName;
+    const auto floatingWidth = arithmetic_detail::floatingWidth;
     const auto unknownFloatingOperand = [](const std::string& type) {
         const std::string name = toLower(type);
         return name.empty() || name == "unknown" || name == "character varying";
@@ -2263,21 +2251,12 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
     const int rightFloatingWidth = floatingWidth(r.typeName);
     const bool floatingOperands = (leftFloatingWidth || rightFloatingWidth) &&
         numericFloatingOperand(l.typeName) && numericFloatingOperand(r.typeName);
-    const bool singlePrecision = floatingOperands && op != "^" &&
-        (leftFloatingWidth == 1 || unknownFloatingOperand(l.typeName)) &&
-        (rightFloatingWidth == 1 || unknownFloatingOperand(r.typeName));
+    const auto numericResultType = arithmetic_detail::resultType(op, l.typeName, r.typeName, true);
+    const bool singlePrecision = numericResultType && *numericResultType == "real";
     if ((leftFloatingWidth || rightFloatingWidth) && op == "%")
         throw std::runtime_error("operator does not exist for floating operands (SQLSTATE 42883)");
     if (l.isNull || r.isNull) {
-        if (floatingOperands &&
-            (op == "+" || op == "-" || op == "*" || op == "/" || op == "^"))
-            return ExprValue(singlePrecision ? "real" : "double precision", "", true);
-        const bool unknownLeft = l.typeName.empty() || toLower(l.typeName) == "unknown";
-        const bool unknownRight = r.typeName.empty() || toLower(r.typeName) == "unknown";
-        if ((op == "+" || op == "-" || op == "*" || op == "/" || op == "%") &&
-            ((leftIntegerWidth && rightIntegerWidth) ||
-             (leftIntegerWidth && unknownRight) || (rightIntegerWidth && unknownLeft)))
-            return ExprValue(integerType(resultIntegerWidth), "", true);
+        if (numericResultType) return ExprValue(*numericResultType, "", true);
         return ExprValue(l.typeName, "", true);
     }
 

@@ -1,4 +1,5 @@
 #include "expr_helper.h"
+#include "arithmetic_type.h"
 #include "ExprEvaluator.h"
 #include "parser/parser.h"
 #include "parser/ast.h"
@@ -92,9 +93,9 @@ std::string protocolTypeName(std::string type) {
     if (type == "int2" || type == "smallserial") return "smallint";
     if (type == "int8" || type == "bigserial") return "bigint";
     if (type == "decimal") return "numeric";
-    if (type == "float8" || type == "double" || type == "float")
+    if (type == "float8" || type == "double")
         return "double precision";
-    if (type == "float4") return "real";
+    if (type == "float" || type == "float4") return "real";
     if (type == "bool") return "boolean";
     if (type == "character varying") return "varchar";
     if (type == "character") return "bpchar";
@@ -219,7 +220,7 @@ std::string inferAstResultType(
             "like", "not like", "ilike", "not ilike", "in", "not in",
             "between", "not between", "is distinct from",
             "is not distinct from", "similar to", "not similar to",
-            "<<=", ">>=", "&&"
+            "<<=", ">>=", "&&", "@>", "<@", "~", "~*", "!~", "!~*"
         };
         if (booleanOperators.count(op)) return "boolean";
         const std::string left = inferAstResultType(binary->left.get(), typeHints);
@@ -258,6 +259,8 @@ std::string inferAstResultType(
         }
         if (op == "/" && left == "money" && numericProtocolType(right))
             return "money";
+        if (const auto type = arithmetic_detail::resultType(op, left, right))
+            return *type;
         return mergeProtocolTypes(left, right);
     }
     if (const auto* array = dynamic_cast<const ArrayExpr*>(expression)) {
@@ -1001,6 +1004,23 @@ std::string ExprHelper::inferResultType(
     if (lower == "current_date") return "date";
     if (lower == "current_timestamp") return "timestamptz";
     if (lower == "localtimestamp") return "timestamp";
+
+    // Compound roots must be typed as a whole. Textual cast/function
+    // shortcuts below can otherwise mistake an operand's type for a boolean
+    // comparison or for a mixed-width arithmetic operator's result.
+    ParseResult structuralParse;
+    if (const Expr* structural = parseStoredExpression(trimmed, structuralParse)) {
+        const auto* binary = dynamic_cast<const BinaryOpExpr*>(structural);
+        const std::string type = inferAstResultType(structural, typeHints);
+        const bool numericOperator = binary && arithmetic_detail::resultType(
+            toLower(binary->op), inferAstResultType(binary->left.get(), typeHints),
+            inferAstResultType(binary->right.get(), typeHints)).has_value();
+        if (dynamic_cast<const UnaryOpExpr*>(structural) ||
+            (binary && (type == "boolean" || binary->op == "::" ||
+                        binary->op == "||" || numericOperator))) {
+            return type.empty() || type == "unknown" ? "text" : type;
+        }
+    }
 
     // JSON extraction operators preserve the JSON container type; their
     // text variants deliberately return text.  Handle these before looking
