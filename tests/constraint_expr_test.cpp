@@ -238,6 +238,12 @@ int main() {
                "wall AT TIME ZONE 'America/New_York'", resultTypes) ==
            "timestamptz");
     assert(dbms::ExprHelper::inferResultType("i + 1", resultTypes) == "integer");
+    assert(dbms::ExprHelper::inferResultType(
+               "CASE WHEN i IS NULL THEN NULL ELSE i + 10 END", resultTypes) == "integer");
+    assert(dbms::ExprHelper::inferResultType(
+               "CASE i WHEN 1 THEN NULL ELSE n END", resultTypes) == "numeric");
+    assert(dbms::ExprHelper::inferResultType(
+               "CASE WHEN true THEN NULL ELSE NULL END", resultTypes) == "text");
     assert(dbms::ExprHelper::inferResultType("n * 2", resultTypes) == "numeric");
     assert(dbms::ExprHelper::inferResultType("i BETWEEN 1 AND 2", resultTypes) == "boolean");
     assert(dbms::ExprHelper::inferResultType("i IS DISTINCT FROM n", resultTypes) == "boolean");

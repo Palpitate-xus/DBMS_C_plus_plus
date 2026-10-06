@@ -975,6 +975,27 @@ std::string ExprHelper::inferResultType(
     }();
     const std::string lower = toLower(trimmed);
 
+    // CASE result types come from value arms, not predicates or an untyped
+    // NULL's standalone text fallback. Use the parsed CASE before textual
+    // heuristics inspect operators/functions inside individual arms.
+    size_t caseBegin = 0;
+    while (caseBegin < lower.size() && (lower[caseBegin] == '(' ||
+           std::isspace(static_cast<unsigned char>(lower[caseBegin])))) ++caseBegin;
+    if (lower.compare(caseBegin, 4, "case") == 0 &&
+        (caseBegin + 4 == lower.size() ||
+         !std::isalnum(static_cast<unsigned char>(lower[caseBegin + 4])))) {
+        SQLParser caseParser;
+        const auto parsedCase = caseParser.parse("SELECT " + trimmed);
+        const auto* caseSelect = parsedCase.success
+            ? dynamic_cast<const SelectStmt*>(parsedCase.stmt.get()) : nullptr;
+        if (caseSelect && caseSelect->selectList.size() == 1 &&
+            dynamic_cast<const CaseExpr*>(caseSelect->selectList.front().expr.get())) {
+            const std::string type = inferAstResultType(
+                caseSelect->selectList.front().expr.get(), typeHints);
+            return type.empty() || type == "unknown" ? "text" : type;
+        }
+    }
+
     if (lower == "current_user" || lower == "session_user" ||
         lower == "user") return "name";
     if (lower == "current_date") return "date";

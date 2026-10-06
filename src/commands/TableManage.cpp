@@ -32123,6 +32123,29 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             if (valueIsNull || (!engine && v.empty()))
                 nullColumns.insert(tbl.cols[i].dataName);
         }
+        // CASE may contain IS NULL, AND or OR inside an arm. Those tokens
+        // are not top-level boolean atoms; evaluate the complete CASE AST
+        // before applying the legacy predicate shortcuts below.
+        const std::string caseText = SQLParser::toLower(expr.funcArgs[0]);
+        size_t caseBegin = 0;
+        while (caseBegin < caseText.size() && (caseText[caseBegin] == '(' ||
+               std::isspace(static_cast<unsigned char>(caseText[caseBegin])))) ++caseBegin;
+        if (caseText.compare(caseBegin, 4, "case") == 0 &&
+            (caseBegin + 4 == caseText.size() ||
+             !std::isalnum(static_cast<unsigned char>(caseText[caseBegin + 4])))) {
+            SQLParser caseParser;
+            const auto parsedCase = caseParser.parse("SELECT " + expr.funcArgs[0]);
+            const auto* caseSelect = parsedCase.success
+                ? dynamic_cast<const SelectStmt*>(parsedCase.stmt.get()) : nullptr;
+            if (caseSelect && caseSelect->selectList.size() == 1 &&
+                dynamic_cast<const CaseExpr*>(caseSelect->selectList.front().expr.get())) {
+                const auto result = ExprHelper::evalStringWithNulls(
+                    expr.funcArgs[0], rowCtx, nullColumns, typeHints, dbname, expr.sessionUser);
+                if (!result.ok) throw std::runtime_error(result.error);
+                if (knownNull) *knownNull = result.isNull;
+                return result.isNull ? "NULL" : result.value;
+            }
+        }
         // Strip redundant outer parens once, up front: "(a = b)" evaluates
         // like "a = b".
         std::string evalSrc = expr.funcArgs[0];

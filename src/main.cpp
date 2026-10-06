@@ -677,16 +677,14 @@ static string sqlProcessor(string raw, bool /*normalizeBooleanLiterals*/ = false
             break;
         }
     }
-    // JOIN projections are evaluated from the CASE AST.  The legacy
+    // Table-backed projections are evaluated from the CASE AST. The legacy
     // case_when rewrite encodes comparisons as evaluator-only pseudo-tokens
     // (for example >a.id 0), which are invalid column references to the
-    // JOIN projection binder.  Keep the SELECT list intact while retaining
+    // projection binder. Keep the SELECT list intact while retaining
     // the legacy rewrite for ON/WHERE clauses after FROM.
-    const size_t joinKeyword = findTopLevelKeyword(raw, "join", 0);
     const size_t fromKeyword = findTopLevelKeyword(raw, "from", 0);
     if (toLower(raw).rfind("select ", 0) == 0 &&
-        joinKeyword != string::npos && fromKeyword != string::npos &&
-        fromKeyword < joinKeyword) {
+        fromKeyword != string::npos) {
         raw = raw.substr(0, fromKeyword) +
             preprocessCaseWhen(raw.substr(fromKeyword));
     } else {
@@ -28980,7 +28978,33 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     continue;
                 }
                 WindowFunc wf;
-                if (parseWindowFunc(item, wf, namedWindows)) {
+                if (startsWithKeyword(item, "case")) {
+                    dbms::SQLParser caseParser;
+                    const auto parsedCase = caseParser.parse("SELECT " + item);
+                    const auto* caseSelect = parsedCase.success
+                        ? dynamic_cast<const dbms::SelectStmt*>(parsedCase.stmt.get()) : nullptr;
+                    if (!caseSelect || caseSelect->selectList.size() != 1 ||
+                        !dynamic_cast<const dbms::CaseExpr*>(caseSelect->selectList.front().expr.get()))
+                        throw dbms::DbError("42601", "invalid CASE projection");
+                    string error, state;
+                    if (!validateFromlessColumnBindings(
+                            item, error, state, tableAlias.empty() ? tnameOrig : tableAlias,
+                            &visibleColumns))
+                        throw dbms::DbError(state, error);
+                    dbms::StorageEngine::SelectExpr expr;
+                    expr.displayName = itemAlias.empty() ? "case" : itemAlias;
+                    expr.isScalar = true;
+                    expr.funcName = "expreval";
+                    expr.funcArgs.push_back(item);
+                    selectExprs.push_back(std::move(expr));
+                    hasScalar = true;
+                    exprTypes.push_back(3);
+                    for (size_t ci = 0; ci < tbl.len; ++ci) {
+                        const auto referenced = dbms::ExprHelper::referencesColumn(
+                            item, tbl.cols[ci].dataName);
+                        if (!referenced || *referenced) selectCols.insert(tbl.cols[ci].dataName);
+                    }
+                } else if (parseWindowFunc(item, wf, namedWindows)) {
                     windowFuncs.push_back(wf);
                     hasWindow = true;
                     exprTypes.push_back(2);
