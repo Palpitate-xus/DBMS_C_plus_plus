@@ -2372,7 +2372,7 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
     const auto numericResultType = arithmetic_detail::resultType(op, l.typeName, r.typeName, true);
     const bool singlePrecision = numericResultType && *numericResultType == "real";
     if ((leftFloatingWidth || rightFloatingWidth) && op == "%")
-        throw std::runtime_error("operator does not exist for floating operands (SQLSTATE 42883)");
+        throw DbError("42883", "operator does not exist for floating operands");
     if (l.isNull || r.isNull) {
         if (numericResultType) return ExprValue(*numericResultType, "", true);
         return ExprValue(l.typeName, "", true);
@@ -2489,8 +2489,8 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
             }
             if (!iv.ok) return ExprValue("interval", "", true);
             if (op == "/" && k == 0)
-                throw std::runtime_error(
-                    "division by zero (SQLSTATE 22012)");
+                throw DbError("22012",
+                    "division by zero");
             const long double scale = op == "*"
                 ? static_cast<long double>(k)
                 : 1.0L / static_cast<long double>(k);
@@ -2545,13 +2545,12 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
                tl == "varchar" || tl.rfind("character", 0) == 0 || tl == "text";
     };
     if (isTextyType(l.typeName) && isTextyType(r.typeName)) {
-        throw std::runtime_error("operator is not unique: unknown " + op +
-                                 " unknown (SQLSTATE 42725)");
+        throw DbError("42725", "operator is not unique: unknown " + op +
+                                 " unknown");
     }
     auto strictIntErr = [](const std::string& v) {
-        throw std::runtime_error(std::string("invalid input syntax for type integer: ") +
-                                 std::string(1, 34) + v + std::string(1, 34) +
-                                 " (SQLSTATE 22P02)");
+        throw DbError("22P02", std::string("invalid input syntax for type integer: ") +
+                                 std::string(1, 34) + v + std::string(1, 34));
     };
     auto isIntTyped = [](const std::string& t) {
         std::string tl = toLower(t);
@@ -2599,8 +2598,8 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
         const auto rightCash = rightMoney ? tryParseMoney(r.value)
                                           : std::optional<Money>{};
         if ((leftMoney && !leftCash) || (rightMoney && !rightCash)) {
-            throw std::runtime_error(
-                "invalid input syntax for type money (SQLSTATE 22P02)");
+            throw DbError("22P02",
+                "invalid input syntax for type money");
         }
         const std::string locale = StorageEngine::getMoneyLocale();
         if ((op == "+" || op == "-") && leftMoney && rightMoney) {
@@ -2611,8 +2610,8 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
                       rightCash->minorUnits();
             if (result < std::numeric_limits<int64_t>::min() ||
                 result > std::numeric_limits<int64_t>::max()) {
-                throw std::runtime_error(
-                    "money out of range (SQLSTATE 22003)");
+                throw DbError("22003",
+                    "money out of range");
             }
             return ExprValue(
                 "money", Money(static_cast<int64_t>(result)).format(locale),
@@ -2620,8 +2619,8 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
         }
         if (op == "/" && leftMoney && rightMoney) {
             if (rightCash->minorUnits() == 0) {
-                throw std::runtime_error(
-                    "division by zero (SQLSTATE 22012)");
+                throw DbError("22012",
+                    "division by zero");
             }
             const double quotient =
                 static_cast<double>(leftCash->minorUnits()) /
@@ -2631,8 +2630,8 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
                 text, text + sizeof(text), quotient,
                 std::chars_format::general);
             if (converted.ec != std::errc()) {
-                throw std::runtime_error(
-                    "money division failed (SQLSTATE XX000)");
+                throw DbError("XX000",
+                    "money division failed");
             }
             return ExprValue(
                 "double precision", std::string(text, converted.ptr), false);
@@ -2642,12 +2641,12 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
             const ExprValue& numericOperand = leftMoney ? r : l;
             auto numeric = tryParseNumeric(numericOperand.value);
             if (!numeric) {
-                throw std::runtime_error(
-                    "invalid input syntax for type numeric (SQLSTATE 22P02)");
+                throw DbError("22P02",
+                    "invalid input syntax for type numeric");
             }
             if (op == "/" && numeric->isFinite() && numeric->sign() == 0) {
-                throw std::runtime_error(
-                    "division by zero (SQLSTATE 22012)");
+                throw DbError("22012",
+                    "division by zero");
             }
             Numeric cashValue(
                 (leftMoney ? *leftCash : *rightCash).decimalString(locale));
@@ -2656,18 +2655,18 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
             Money rounded;
             if (!result.isFinite() ||
                 !Money::parseDecimal(result.toString(), rounded, locale)) {
-                throw std::runtime_error(
-                    "money out of range (SQLSTATE 22003)");
+                throw DbError("22003",
+                    "money out of range");
             }
             return ExprValue("money", rounded.format(locale), false);
         }
-        throw std::runtime_error(
-            "operator does not exist for money operands (SQLSTATE 42883)");
+        throw DbError("42883",
+            "operator does not exist for money operands");
     }
     if ((leftFloatingWidth || rightFloatingWidth) &&
         (op == "+" || op == "-" || op == "*" || op == "/")) {
         if (!floatingOperands)
-            throw std::runtime_error("operator does not exist for floating operands (SQLSTATE 42883)");
+            throw DbError("42883", "operator does not exist for floating operands");
         // REAL+REAL uses float4. Mixed REAL with integer/numeric selects
         // float8, but first restore each REAL's binary float4 datum before
         // widening; its shortest decimal text is not the same double value.
@@ -2679,13 +2678,13 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
             else if (op == "*") result = a * b;
             else {
                 if (b == 0)
-                    throw std::runtime_error("division by zero (SQLSTATE 22012)");
+                    throw DbError("22012", "division by zero");
                 result = a / b;
             }
             if ((std::isinf(result) && std::isfinite(a) && std::isfinite(b)) ||
                 ((op == "*" || op == "/") && result == 0 && a != 0 && b != 0 &&
                  std::isfinite(a) && std::isfinite(b)))
-                throw std::runtime_error("floating value out of range (SQLSTATE 22003)");
+                throw DbError("22003", "floating value out of range");
             return ExprValue(singlePrecision ? "real" : "double precision",
                              formatFloatingCastValue(result), false);
         };
@@ -2710,14 +2709,14 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
             else if (op == "*") res = *nl * *nr;
             else if (op == "/") {
                 if (nr->isFinite() && nr->sign() == 0)
-                    throw std::runtime_error("division by zero (SQLSTATE 22012)");
+                    throw DbError("22012", "division by zero");
                 res = *nl / *nr;
             }
             else if (op == "%") {
                 if (nl->isNaN() || nr->isNaN()) {
                     res = Numeric::nan();
                 } else if (nr->isFinite() && nr->sign() == 0) {
-                    throw std::runtime_error("division by zero (SQLSTATE 22012)");
+                    throw DbError("22012", "division by zero");
                 } else if (nl->isInfinite()) {
                     res = Numeric::nan();
                 } else if (nr->isInfinite()) {
@@ -2770,7 +2769,7 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
             else if (op == "*") res = *nl2 * *nr2;
             else if (op == "/") {
                 if (nr2->isFinite() && nr2->sign() == 0)
-                    throw std::runtime_error("division by zero (SQLSTATE 22012)");
+                    throw DbError("22012", "division by zero");
                 res = *nl2 / *nr2;
             } else return ExprValue("numeric", "", true);
             return ExprValue("numeric", res.toString(), false);
@@ -2790,29 +2789,29 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
         else if (op == "-") res = a - b;
         else if (op == "*") res = a * b;
         else if (op == "/") {
-            if (b == 0) throw std::runtime_error("division by zero (SQLSTATE 22012)");
+            if (b == 0) throw DbError("22012", "division by zero");
             res = a / b;
         }
         else if (op == "%") {
             if (b == 0)
-                throw std::runtime_error(
-                    "division by zero (SQLSTATE 22012)");
+                throw DbError("22012",
+                    "division by zero");
             res = std::fmod(a, b);
         }
         else if (op == "^") {
             if ((a == 0 && b < 0) ||
                 (a < 0 && std::isfinite(b) && std::trunc(b) != b)) {
-                throw std::runtime_error(
-                    "invalid argument for power function (SQLSTATE 2201F)");
+                throw DbError("2201F",
+                    "invalid argument for power function");
             }
             res = std::pow(a, b);
             if (std::isnan(res) && std::isfinite(a) && std::isfinite(b)) {
-                throw std::runtime_error(
-                    "invalid argument for power function (SQLSTATE 2201F)");
+                throw DbError("2201F",
+                    "invalid argument for power function");
             }
             if (std::isinf(res) && std::isfinite(a) && std::isfinite(b)) {
-                throw std::runtime_error(
-                    "numeric value out of range (SQLSTATE 22003)");
+                throw DbError("22003",
+                    "numeric value out of range");
             }
         }
         // PostgreSQL float8 output: shortest decimal string that round-trips
@@ -2853,11 +2852,11 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
         return true;
     };
     if (!cleanInt(l.value))
-        throw std::runtime_error(std::string("invalid input syntax for type integer: \"") + l.value + "\" (SQLSTATE 22P02)");
+        throw DbError("22P02", std::string("invalid input syntax for type integer: \"") + l.value + "\"");
     if (!cleanInt(r.value))
-        throw std::runtime_error(std::string("invalid input syntax for type integer: \"") + r.value + "\" (SQLSTATE 22P02)");
+        throw DbError("22P02", std::string("invalid input syntax for type integer: \"") + r.value + "\"");
     auto integerOutOfRange = []() {
-        throw std::runtime_error("integer out of range (SQLSTATE 22003)");
+        throw DbError("22003", "integer out of range");
     };
     long long a = 0;
     long long b = 0;
@@ -2897,7 +2896,7 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
         res = static_cast<int64_t>(wide);
     }
     else if (op == "/") {
-        if (b == 0) throw std::runtime_error("division by zero (SQLSTATE 22012)");
+        if (b == 0) throw DbError("22012", "division by zero");
         if (a == std::numeric_limits<int64_t>::lowest() && b == -1)
             integerOutOfRange();
         res = a / b;
@@ -2905,7 +2904,7 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
     }
     else if (op == "%") {
         if (b == 0)
-            throw std::runtime_error("division by zero (SQLSTATE 22012)");
+            throw DbError("22012", "division by zero");
         res = (a == std::numeric_limits<int64_t>::lowest() && b == -1)
             ? 0 : a % b;
     }
