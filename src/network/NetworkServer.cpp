@@ -1940,16 +1940,13 @@ std::string commandTagFor(const std::string& sql, const std::vector<std::string>
 }
 
 namespace {
-// PG 42883 pre-check: an unknown function referenced in a WHERE
-// clause is an immediate error ("function nosuchfn(integer) does
-// not exist").  Scans the statement's WHERE region for fn(...) -
-// shaped tokens; when the name is not a known scalar/aggregate and
-// not a column of the FROM table, the first argument's type is
-// resolved from the table schema (int -> integer, text/varchar ->
-// text, else unknown) and PG's exact message is returned.  Empty
-// string means no violation found.
+// Analyze actual WHERE expressions, including on empty inputs. A substring
+// from the first WHERE to end-of-statement crosses CTE/derived query scopes
+// and mistakes a following LATERAL (...) for an undefined function. Shared
+// SQL tokens retain quoted/dollar literals and discard comments; parenthesis
+// depth bounds each predicate before its expression AST is inspected.
 std::string whereUnknownFunctionError(const std::string& sql,
-                                       const std::string& dbname) {
+                                       Session& session) {
     static const char* known[] = {
         "length", "char_length", "character_length", "octet_length",
         "bit_length", "upper", "lower", "initcap", "btrim", "ltrim",
@@ -1978,100 +1975,105 @@ std::string whereUnknownFunctionError(const std::string& sql,
         "xml_is_well_formed_document", "xml_is_document", "xmlconcat",
         "xmlcomment"
     };
-    std::string low;
-    for (char c : sql) low += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    std::vector<bool> quoted(sql.size(), false);
-    char activeQuote = '\0';
-    for (size_t i = 0; i < sql.size(); ++i) {
-        const char c = sql[i];
-        if (activeQuote != '\0') {
-            quoted[i] = true;
-            if (c == activeQuote) {
-                if (i + 1 < sql.size() && sql[i + 1] == activeQuote) {
-                    quoted[++i] = true;
-                } else {
-                    activeQuote = '\0';
+    const auto tokens = SQLParser::tokenize(sql);
+    std::vector<int> depths;
+    int depth = 0;
+    for (const auto& token : tokens) {
+        depths.push_back(depth);
+        if (token == "(") ++depth;
+        else if (token == ")") --depth;
+    }
+    for (size_t where = 0; where < tokens.size(); ++where) {
+        if (SQLParser::toLower(tokens[where]) != "where") continue;
+        const int ownerDepth = depths[where];
+        size_t end = where + 1;
+        for (; end < tokens.size(); ++end) {
+            if (depths[end] < ownerDepth ||
+                (tokens[end] == ")" && depths[end] == ownerDepth)) break;
+            if (depths[end] != ownerDepth) continue;
+            const auto word = SQLParser::toLower(tokens[end]);
+            if (word == ";" || word == "group" || word == "order" ||
+                word == "having" || word == "limit" || word == "offset" ||
+                word == "fetch" || word == "for" || word == "window" ||
+                word == "union" || word == "intersect" || word == "except" ||
+                word == "returning") break;
+        }
+        std::string predicate = "select 1 where ";
+        for (size_t i = where + 1; i < end; ++i) predicate += tokens[i] + " ";
+        SQLParser parser;
+        const auto parsed = parser.parse(predicate);
+        const auto* select = parsed.success
+            ? dynamic_cast<const SelectStmt*>(parsed.stmt.get()) : nullptr;
+        if (!select || !select->whereClause) continue; // execution owns syntax errors
+
+        const FunctionCallExpr* missing = nullptr;
+        std::function<void(const Expr*)> visit = [&](const Expr* expr) {
+            if (!expr || missing) return;
+            if (const auto* call = dynamic_cast<const FunctionCallExpr*>(expr)) {
+                const auto name = SQLParser::toLower(call->funcName);
+                bool supported = name == "exists" || name == "in" ||
+                    name == "not in" || name == "between" || name == "not between" ||
+                    name == "any" || name == "all";
+                for (const auto* builtin : known) supported |= name == builtin;
+                if (!supported) { missing = call; return; }
+                for (const auto& arg : call->args) visit(arg.get());
+                for (const auto& arg : call->namedArgs) visit(arg.value.get());
+                visit(call->filter.get());
+            } else if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(expr)) {
+                visit(unary->operand.get());
+            } else if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(expr)) {
+                visit(binary->left.get()); visit(binary->right.get());
+            } else if (const auto* cast = dynamic_cast<const CastExpr*>(expr)) {
+                visit(cast->operand.get());
+            } else if (const auto* conditional = dynamic_cast<const CaseExpr*>(expr)) {
+                visit(conditional->switchExpr.get());
+                for (const auto& arm : conditional->whenClauses) {
+                    visit(arm.first.get()); visit(arm.second.get());
                 }
+                visit(conditional->elseExpr.get());
+            } else if (const auto* array = dynamic_cast<const ArrayExpr*>(expr)) {
+                for (const auto& element : array->elements) visit(element.get());
+            } else if (const auto* row = dynamic_cast<const RowExpr*>(expr)) {
+                for (const auto& element : row->elements) visit(element.get());
             }
-        } else if (c == '\'' || c == '"') {
-            activeQuote = c;
-            quoted[i] = true;
+        };
+        visit(select->whereClause.get());
+        if (!missing) continue;
+
+        // Preserve the existing first-argument diagnostic for a simple FROM
+        // relation, without treating quoted identifiers or literals as names.
+        std::string table;
+        for (size_t i = where; i-- > 0;) {
+            if (depths[i] != ownerDepth) continue;
+            const auto word = SQLParser::toLower(tokens[i]);
+            if (word == "select" || word == ";") break;
+            if ((word == "from" || word == "update") && i + 1 < where) {
+                table = tokens[i + 1];
+                break;
+            }
         }
-    }
-    size_t wpos = low.find(" where ");
-    if (wpos == std::string::npos) return "";
-    size_t wend = low.size();
-    for (size_t kw = wpos; kw + 1 < low.size(); ++kw) {
-        if (low.compare(kw, 8, " group b") == 0 ||
-            low.compare(kw, 8, " order b") == 0 ||
-            low.compare(kw, 7, " limit ") == 0 ||
-            low.compare(kw, 11, " returning ") == 0)
-            { wend = kw; break; }
-    }
-    // FROM table for type resolution (first table after ' from ').
-    std::string table;
-    {
-        size_t fpos = low.find(" from ");
-        if (fpos != std::string::npos && fpos < wpos) {
-            size_t rest = fpos + 6;
-            while (rest < low.size() && std::isspace(static_cast<unsigned char>(low[rest]))) ++rest;
-            size_t tend = rest;
-            while (tend < low.size() &&
-                   (std::isalnum(static_cast<unsigned char>(low[tend])) || low[tend] == '_')) ++tend;
-            table = sql.substr(rest, tend - rest);
-        }
-    }
-    for (size_t p = wpos + 7; p < wend; ++p) {
-        if (quoted[p]) continue;
-        if (!std::isalpha(static_cast<unsigned char>(low[p])) && low[p] != '_') continue;
-        size_t start = p;
-        while (p < wend && (std::isalnum(static_cast<unsigned char>(low[p])) || low[p] == '_')) ++p;
-        size_t np = p;
-        while (np < wend && std::isspace(static_cast<unsigned char>(low[np]))) ++np;
-        if (np >= wend || low[np] != '(') continue;
-        std::string fn = low.substr(start, p - start);
-        // IN / EXISTS / ANY / ALL are predicate keywords, not calls.
-        static const char* kw47[] = { "in", "not", "and", "or", "exists",
-                                      "any", "all", "between", "like",
-                                      "isnull", "notnull", "case", "when",
-                                      "then", "else", "end", "null", "true",
-                                      "false", "cast", "interval" };
-        bool isKw = false;
-        for (const char* k : kw47)
-            if (fn == k) { isKw = true; break; }
-        if (isKw) continue;
-        bool isKnown = false;
-        for (const char* k : known)
-            if (fn == k) { isKnown = true; break; }
-        if (isKnown) continue;
-        // Unknown name called as a function: resolve first arg type.
-        size_t argStart = np + 1;
-        while (argStart < wend && std::isspace(static_cast<unsigned char>(low[argStart]))) ++argStart;
-        size_t argEnd = argStart;
-        while (argEnd < wend &&
-               (std::isalnum(static_cast<unsigned char>(low[argEnd])) || low[argEnd] == '_')) ++argEnd;
-        std::string arg = low.substr(argStart, argEnd - argStart);
         std::string type = "unknown";
-        if (!arg.empty() && !table.empty()) {
-            dbms::StorageEngine& eng = g_engine;
-            dbms::TableSchema sch = eng.getTableSchema(dbname, table);
-            for (size_t ci = 0; ci < sch.len; ++ci) {
-                if (sch.cols[ci].dataName != arg) continue;
-                std::string dt = sch.cols[ci].dataType;
-                for (auto& ch : dt) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        const auto* arg = missing->args.empty() ? nullptr
+            : dynamic_cast<const ColumnRefExpr*>(missing->args.front().get());
+        if (arg && !table.empty() && table != "(") {
+            const TableSchema schema = g_engine.getTableSchema(
+                session.currentDB, ::resolveTableName(session, table));
+            for (size_t i = 0; i < schema.len; ++i) {
+                if (schema.cols[i].dataName != arg->column) continue;
+                const auto dt = SQLParser::toLower(schema.cols[i].dataType);
                 if (dt.find("int") != std::string::npos) type = "integer";
                 else if (dt.find("varchar") != std::string::npos ||
                          dt.find("character varying") != std::string::npos)
                     type = "character varying";
-                else if (dt.find("char") != std::string::npos)
-                    type = "character";
+                else if (dt.find("char") != std::string::npos) type = "character";
                 else if (dt.find("text") != std::string::npos) type = "text";
-                else if (dt.find("numeric") != std::string::npos || dt.find("decimal") != std::string::npos)
-                    type = "numeric";
+                else if (dt.find("numeric") != std::string::npos ||
+                         dt.find("decimal") != std::string::npos) type = "numeric";
                 break;
             }
         }
-        return "function " + fn + "(" + type + ") does not exist";
+        return "function " + SQLParser::toLower(missing->funcName) +
+            "(" + type + ") does not exist";
     }
     return "";
 }
@@ -3234,7 +3236,7 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
     std::string outputText;
     // PG 42883: unknown function in WHERE fails before execution.
     {
-        std::string ufErr = whereUnknownFunctionError(sql, session.currentDB);
+        std::string ufErr = whereUnknownFunctionError(sql, session);
         if (!ufErr.empty()) {
             result.error = true;
             result.errorMessage = ufErr;
