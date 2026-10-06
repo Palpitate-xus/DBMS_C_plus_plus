@@ -19453,14 +19453,22 @@ static pair<bool, bool> scalarQueryRoles(const dbms::Expr* expression, bool scal
     return result;
 }
 
-static bool handlePreparedScalarWhere(const string& rawSql, Session& session, bool& handled) {
+static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bool& handled) {
     handled = false;
     dbms::SQLParser parser;
     auto parsed = parser.parseForBinding(rawSql);
     const auto* candidate = parsed.success ? dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()) : nullptr;
     if (!candidate || !dbms::QueryPlanner::supportsPreparedSelectPlan(*candidate)) return false;
     const auto roles = scalarQueryRoles(candidate->whereClause.get());
-    if (!roles.first || roles.second) return false;
+    bool scalarOrder = false;
+    for (const auto& item : candidate->orderBy)
+        scalarOrder = scalarOrder || scalarQueryRoles(item.expr.get()).first;
+    // Alias/ordinal ordering borrows a projected scalar site's real target
+    // slot; it must not fall back to the old eager string projection path.
+    if (!candidate->orderBy.empty())
+        for (const auto& item : candidate->selectList)
+            scalarOrder = scalarOrder || scalarQueryRoles(item.expr.get()).first;
+    if ((!roles.first && !scalarOrder) || roles.second) return false;
     // Additional multirow roles in targets/order also need their own lowering;
     // never reinterpret a set-valued child as a scalar expression.
     for (const auto& item : candidate->selectList) if (scalarQueryRoles(item.expr.get()).second) return false;
@@ -19544,10 +19552,27 @@ static bool handlePreparedScalarWhere(const string& rawSql, Session& session, bo
             vector<string>(used.begin(), used.end())))
             throw dbms::DbError("42501", "permission denied for selected source columns");
     }
-    const string predicateType = dbms::ExprHelper::inferParsedResultType(
-        select->whereClause.get(), {}, session.currentDB, &g_engine);
-    if (predicateType != "boolean" && predicateType != "bool")
-        throw dbms::DbError("42804", "argument of WHERE must be type boolean");
+    if (select->whereClause) {
+        // Bare unknown literals acquire the SQL WHERE boolean context;
+        // explicitly typed NULL/text must still fail a boolean type check.
+        if (const auto* literal = dynamic_cast<const dbms::LiteralExpr*>(select->whereClause.get());
+            literal && literal->typeName.empty() && !literal->preparedSubquery &&
+            (dbms::SQLParser::toLower(literal->value) == "null" ||
+             (!literal->value.empty() && literal->value.front() == '\''))) {
+            auto cast = std::make_unique<dbms::CastExpr>();
+            cast->typeName = "boolean";
+            cast->operand = std::move(select->whereClause);
+            // Pure input conversion, never routine execution or a source
+            // read, gives invalid literal input its preparation-time error.
+            dbms::ExprEvaluator inputEvaluator;
+            (void)inputEvaluator.eval(cast.get(), dbms::RowContext{});
+            select->whereClause = std::move(cast);
+        }
+        const string predicateType = dbms::ExprHelper::inferParsedResultType(
+            select->whereClause.get(), {}, session.currentDB, &g_engine);
+        if (predicateType != "boolean" && predicateType != "bool")
+            throw dbms::DbError("42804", "argument of WHERE must be type boolean");
+    }
     vector<string> columns, types;
     for (const auto& column : prepared.output) { columns.push_back(column.name); types.push_back(column.type); }
     if (select->selectList.size() == types.size()) {
@@ -24334,7 +24359,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
         if (!checkDB(s)) return true;
 
         bool preparedWhereHandled = false;
-        const bool preparedWhereFailed = handlePreparedScalarWhere(effectiveRawSql, s, preparedWhereHandled);
+        const bool preparedWhereFailed = handlePreparedScalarQuery(effectiveRawSql, s, preparedWhereHandled);
         if (preparedWhereHandled) return preparedWhereFailed;
 
         // A nested SELECT may consume CTE/derived tables owned by its parent.
