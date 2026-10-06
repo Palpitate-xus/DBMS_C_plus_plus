@@ -31497,6 +31497,51 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
             if (CatalogManager::parseQualifiedName(spelling, routine, true) &&
                 (routine.schema.empty() || routine.schema == "pg_catalog")) {
                 if (routine.name == "exists") return std::string("boolean");
+                // Window functions have query-host metadata, not scalar
+                // evaluator callbacks. Resolve only their real builtin
+                // namespace/signatures; never execute one to obtain a type.
+                const auto& name = routine.name;
+                const bool zeroArgument = name == "row_number" || name == "rank" ||
+                    name == "dense_rank" || name == "percent_rank" || name == "cume_dist";
+                const bool shiftedValue = name == "lag" || name == "lead";
+                const bool singleValue = name == "first_value" || name == "last_value";
+                const auto integerArgument = [&](size_t index) {
+                    const auto* argument = function->args[index].get();
+                    if (const auto* literal = dynamic_cast<const LiteralExpr*>(argument)) {
+                        if (literal->typeName.empty() && !literal->preparedSubquery &&
+                            (literal->value == "null" || (!literal->value.empty() &&
+                             literal->value.front() == '\''))) return true;
+                    }
+                    const auto type = ExprHelper::canonicalResultTypeName(
+                        ExprHelper::inferParsedResultType(argument, {}, dbname,
+                                                         const_cast<StorageEngine*>(this)));
+                    return type == "smallint" || type == "integer";
+                };
+                const auto count = function->args.size();
+                const bool windowSignature = function->namedArgs.empty() &&
+                    ((zeroArgument && count == 0) ||
+                     (shiftedValue && count >= 1 && count <= 3 &&
+                      (count < 2 || integerArgument(1))) ||
+                     (singleValue && count == 1) ||
+                     (name == "nth_value" && count == 2 && integerArgument(1)) ||
+                     (name == "ntile" && count == 1 && integerArgument(0)));
+                if (windowSignature) {
+                    if (!function->hasOver)
+                        throw DbError("42809", "window function " + name + " requires an OVER clause");
+                    if (function->filter)
+                        throw DbError("0A000", "FILTER is not implemented for non-aggregate window functions");
+                    if (function->distinct)
+                        throw DbError("0A000", "DISTINCT is not implemented for window functions");
+                    // Use the resolved canonical routine identity. The
+                    // raw quoted spelling is not an evaluator registry key.
+                    if (zeroArgument)
+                        return name == "percent_rank" || name == "cume_dist"
+                            ? std::string("double precision") : std::string("bigint");
+                    if (name == "ntile") return std::string("integer");
+                    return ExprHelper::canonicalResultTypeName(
+                        ExprHelper::inferParsedResultType(function->args.front().get(), {}, dbname,
+                                                         const_cast<StorageEngine*>(this)));
+                }
                 if (routine.name == "count") return std::string("bigint");
                 if (routine.name == "sum" || routine.name == "avg" ||
                     routine.name == "min" || routine.name == "max") return std::string();
