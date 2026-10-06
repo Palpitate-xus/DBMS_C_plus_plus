@@ -45,7 +45,8 @@ formal O2 compilation and matching tests. Build `96406` completed, and repeat
 build plus 55/55 object/binary-stamp audit passed. Final matching groups then
 passed 39 native and 36 protocol entry points, including the new 42-control
 receiver regression. The unchanged clause diagnostic still fails seven
-controls; a complete default protocol is running, not yet a passing gate.
+controls; complete default protocol80673 then passed with its original10s
+timeout on the same frozen binary. This is not all registered tests/routines.
 Complete general query preparation, all DML RETURNING demand semantics,
 aggregate/window/record/cursor execution and the broader routine families
 remain independent work. The historical diagnostic text below describes the

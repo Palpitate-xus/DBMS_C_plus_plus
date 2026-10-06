@@ -106,8 +106,8 @@ was independently rebuilt in 96406 with all55 fresh formalO2 objects; repeat
 build and55/55 signatures/stamp passed. Frozen a38da2abc3fb62270eedd988d67e66135a5a5f3a446f535c7e7ef92cb4a02b9c
 then passed39 fresh matching native49782 and36 wire96112 entry points, including
 this native/wire regression. See `docs/issue-engine-owner-receiver-numeric-followups.md`.
-The unchanged known-gap diagnostic still fails7 cases. A new complete default
-protocol80673 is running, not a completed passing gate. No
+The unchanged known-gap diagnostic still fails7 cases. Complete default
+protocol80673 then exited0 on this same frozen binary/original10s timeout. No
 full registered suite, TLS runtime, PG18.6 differential or full-program
 sanitizer claim. Earlier full-gate failures/I/O amplification remain recorded.
 No push or Actions enablement; user-deferred security/TDE remains deferred.

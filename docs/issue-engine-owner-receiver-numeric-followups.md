@@ -43,10 +43,13 @@ Fresh matching 39 native entry points (`49782`) and 36 protocol entry points
 exact arrays, fresh-stub/TU compile flags, signature checks and separate native
 working directories are in that artifact directory's `verify.sh`.
 The retained clause diagnostic (`88256`) exited 1 with the same seven genuine
-ORDER/subquery/EXPLAIN/typed-UPDATE failures. A new complete default protocol
-(`80673`) is running against this frozen binary with its original 10-second
-socket timeout; no completion or timeout relaxation is claimed.
-Full default protocol/registered suite/PG18.6 differential are not newly green.
+ORDER/subquery/EXPLAIN/typed-UPDATE failures. The complete default protocol
+(`80673`) subsequently exited 0 against this frozen binary with its original
+10-second socket timeout, validating SSLRequest/plaintext negotiation,
+startup/auth/simple/extended execution and error recovery/ReadyForQuery.
+This is 37 passing protocol entry points including the focused36 plus full1,
+not a full registered suite, TLS runtime or PG18.6 differential. Its exact log
+is `full-default-protocol.log` in the frozen combination directory.
 Previous full failures and statement-image I/O amplification remain recorded.
 
 Actual remaining defects include ordinary function ORDER dispatch, subquery

@@ -119,5 +119,6 @@ verified separately. See `docs/issue-index-residual-execution-once.md` for preci
 scope and retained failures. The ROOT owner/receiver/numeric combination freshly
 rebuilt all 55 objects in terminal 96406; repeat build and all-signature/binary
 stamp audit passed. Matching 39 native and 36 wire entry points passed, including
-the residual regression. Seven unchanged clause failures and the running
-complete default gate remain distinct, not a full-engine completion claim.
+the residual regression. Complete default protocol80673 then passed with its
+original10s timeout on that same frozen binary. Seven unchanged clause failures
+remain distinct, not a full-engine completion claim or a repaired I/O cause.
