@@ -1,5 +1,16 @@
 # QRY-03 — Multi-table join chain order and WHERE filtering
 
+2026-10-06 follow-up: `bac2595a` decodes quoted JOIN projection bindings and
+labels; `3fa5c71c` retains LATERAL physical leaf and SQL-visible schemas across
+materialization. Bounded outer bare/qualified targets, visible and qualified
+stars, FULL merged versus qualified keys, ambiguity/hidden-alias diagnostics,
+consecutive LATERAL items and following simple ordinary JOINs now have dedicated
+protocol coverage. Shared scalar-order and CASE fixes are independent commits
+`38d6b32c` and `f933bf38`. Exact intermediate failures, verification and remaining
+scope are recorded in `docs/issue-query-projection-binding-and-lateral-scope.md`.
+This supersedes earlier statements below that all LATERAL outer bare/star
+projections were unimplemented; arbitrary query scopes/trees are still partial.
+
 Status: partial. The source/test fixes are local commits `4534b971`,
 `b87d4a19`, `858d6da9`, `0a57fee1`, `e042360b`, `856fe079`
 (ON-conjunction fix, 2026-10-05), `65718c2b` (RIGHT/FULL residual coverage,
