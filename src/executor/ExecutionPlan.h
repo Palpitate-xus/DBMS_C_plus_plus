@@ -44,6 +44,12 @@ public:
     // This keeps SQL NULL distinct from text "NULL" and preserves embedded
     // whitespace for protocol consumers.
     virtual bool supportsStructuredRows() const { return false; }
+    // Prepared expression operators can preserve the complete typed cells,
+    // including collation, without reconstructing them from display text.
+    virtual bool lastStructuredValues(std::vector<ExprValue>& values) const {
+        (void)values;
+        return false;
+    }
     virtual bool lastStructuredRow(std::vector<std::string>& cells,
                                    std::vector<bool>& nulls) const {
         (void)cells;
@@ -109,6 +115,10 @@ public:
     bool next(std::string& row) override;
     void close() override;
     bool supportsStructuredRows() const override { return true; }
+    bool lastStructuredValues(std::vector<ExprValue>& values) const override {
+        values = row_;
+        return values.size() == descriptor_.size();
+    }
     bool lastStructuredRow(std::vector<std::string>& cells, std::vector<bool>& nulls) const override;
     bool lastColumnIsNull(size_t ordinal) const override;
     std::string preparedPlanNodeName() const override { return "CTEScan"; }
@@ -780,6 +790,9 @@ public:
     bool supportsStructuredRows() const override {
         return child_->supportsStructuredRows();
     }
+    bool lastStructuredValues(std::vector<ExprValue>& values) const override {
+        return child_->lastStructuredValues(values);
+    }
     bool lastStructuredRow(std::vector<std::string>& cells,
                            std::vector<bool>& nulls) const override {
         return child_->lastStructuredRow(cells, nulls);
@@ -808,6 +821,9 @@ public:
     bool supportsStructuredRows() const override {
         return child_->supportsStructuredRows();
     }
+    bool lastStructuredValues(std::vector<ExprValue>& values) const override {
+        return child_->lastStructuredValues(values);
+    }
     bool lastStructuredRow(std::vector<std::string>& cells,
                            std::vector<bool>& nulls) const override {
         return child_->lastStructuredRow(cells, nulls);
@@ -833,6 +849,9 @@ public:
     bool next(std::string& outRow) override;
     bool supportsStructuredRows() const override {
         return child_->supportsStructuredRows();
+    }
+    bool lastStructuredValues(std::vector<ExprValue>& values) const override {
+        return child_->lastStructuredValues(values);
     }
     bool lastStructuredRow(std::vector<std::string>& cells,
                            std::vector<bool>& nulls) const override {
@@ -1308,6 +1327,10 @@ public:
 
     // Checked production entry point: EOF and execution failure are distinct.
     static PlanExecutionResult executePlanChecked(OpPtr plan, size_t maxRows = 0);
+    // A demand-driven receiver over the same retained typed operator graph.
+    // No SQL rewriting, pre-execution, transaction or snapshot reset occurs.
+    static std::unique_ptr<PreparedQueryCursor> makePreparedCursor(
+        OpPtr plan, QueryRowDescriptor descriptor);
 
     // Parallel query support: number of worker threads (0 = disabled).
     static int parallelWorkers() { return parallelWorkers_; }

@@ -1,4 +1,5 @@
 #include "prepared_query_execution.h"
+#include <exception>
 #include "commands/TableManage.h"
 #include "common/DbError.h"
 #include "expression/expr_helper.h"
@@ -224,6 +225,11 @@ void PreparedQueryExecution::setQueryExecutor(PreparedChildExecutor executor) {
     queryExecutor_ = std::move(executor);
 }
 
+void PreparedQueryExecution::setChildCursorFactory(PreparedChildCursorFactory factory) {
+    memo_.clear();
+    childCursorFactory_ = std::move(factory);
+}
+
 ExprValue PreparedQueryExecution::evaluate(const Expr* expression, const RowContext& row) const {
     if (!expression || !prepared_.count(expression))
         throw DbError("XX000", "prepared expression was not registered before execution");
@@ -243,6 +249,41 @@ ExprValue PreparedQueryExecution::executeChild(const Expr* expression, const Row
     if (child.correlations.empty()) {
         const auto cached = memo_.find(expression);
         if (cached != memo_.end()) return cached->second;
+    }
+    if (childCursorFactory_) {
+        const Stmt* statement = expression->preparedSubquery.get();
+        const auto output = query_->statementOutputs.find(statement);
+        if (output == query_->statementOutputs.end() || output->second.size() != 1)
+            throw DbError("42601", "subquery must return only one column");
+        auto cursor = childCursorFactory_(statement, row);
+        if (!cursor) throw DbError("XX000", "prepared child cursor factory returned no cursor");
+        try {
+            const auto& descriptor = cursor->descriptor();
+            if (descriptor.size() != 1 ||
+                ExprHelper::canonicalResultTypeName(descriptor.front().type) !=
+                    ExprHelper::canonicalResultTypeName(output->second.front().type))
+                throw DbError("XX000", "prepared child cursor lost its declared descriptor");
+            std::vector<ExprValue> values;
+            ExprValue result(output->second.front().type, "", true);
+            if (cursor->next(values)) {
+                if (values.size() != 1 ||
+                    ExprHelper::canonicalResultTypeName(values.front().typeName) !=
+                        ExprHelper::canonicalResultTypeName(descriptor.front().type))
+                    throw DbError("XX000", "prepared child cursor lost its structured width or type");
+                result = values.front();
+                if (cursor->next(values))
+                    throw DbError("21000", "more than one row returned by a subquery used as an expression");
+            }
+            cursor->close();
+            if (child.correlations.empty()) memo_.emplace(expression, result);
+            return result;
+        } catch (...) {
+            // A close failure cannot replace the actual scalar/cardinality
+            // failure. The factory's cursor must make close idempotent.
+            const auto failure = std::current_exception();
+            try { cursor->close(); } catch (...) {}
+            std::rethrow_exception(failure);
+        }
     }
     if (queryExecutor_) {
         const Stmt* statement = expression->preparedSubquery.get();

@@ -368,6 +368,10 @@ public:
         instrumentation.emitted = true; return true;
     }
     bool supportsStructuredRows() const override { return true; }
+    bool lastStructuredValues(std::vector<ExprValue>& values) const override {
+        values = values_;
+        return true;
+    }
     bool lastStructuredRow(std::vector<std::string>& cells, std::vector<bool>& nulls) const override {
         cells.clear(); nulls.clear();
         for (const auto& value : values_) { cells.push_back(value.value); nulls.push_back(value.isNull); }
@@ -403,7 +407,12 @@ public:
 
 class PreparedDistinctOp final : public Operator {
     OpPtr child_;
-    struct Row { std::string text; std::vector<std::string> cells; std::vector<bool> nulls; };
+    struct Row {
+        std::string text;
+        std::vector<std::string> cells;
+        std::vector<bool> nulls;
+        std::vector<ExprValue> values;
+    };
     std::vector<Row> rows_;
     size_t position_ = 0;
 public:
@@ -416,7 +425,8 @@ public:
         auto* project = dynamic_cast<PreparedProjectOp*>(child_.get());
         Row row;
         while (child_->next(row.text)) {
-            if (!project || !child_->lastStructuredRow(row.cells, row.nulls))
+            if (!project || !child_->lastStructuredRow(row.cells, row.nulls) ||
+                !child_->lastStructuredValues(row.values))
                 throw DbError("XX000", "prepared DISTINCT lost typed projection");
             if (seen.insert(project->typedKey()).second) rows_.push_back(row);
         }
@@ -429,6 +439,11 @@ public:
         row = rows_[position_++].text; instrumentation.emitted = true; return true;
     }
     bool supportsStructuredRows() const override { return true; }
+    bool lastStructuredValues(std::vector<ExprValue>& values) const override {
+        if (!position_ || position_ > rows_.size()) return false;
+        values = rows_[position_ - 1].values;
+        return true;
+    }
     bool lastStructuredRow(std::vector<std::string>& cells, std::vector<bool>& nulls) const override {
         if (!position_ || position_ > rows_.size()) return false;
         cells = rows_[position_ - 1].cells; nulls = rows_[position_ - 1].nulls; return true;
@@ -6451,6 +6466,86 @@ std::string QueryPlanner::explainJson(OpPtr& plan, StorageEngine* engine,
                                       const ExplainOptions& opts,
                                       const ExplainExecutionStats& execution) {
     return explainJsonDocument(plan.get(), engine, dbname, opts, &execution);
+}
+
+namespace {
+class PreparedOperatorCursor final : public PreparedQueryCursor {
+    OpPtr plan_;
+    QueryRowDescriptor descriptor_;
+    bool opened_ = false, closed_ = false, eof_ = false;
+public:
+    PreparedOperatorCursor(OpPtr plan, QueryRowDescriptor descriptor)
+        : plan_(std::move(plan)), descriptor_(std::move(descriptor)) {
+        if (!plan_) throw DbError("XX000", "prepared cursor received a null plan");
+    }
+    ~PreparedOperatorCursor() override {
+        try { close(); } catch (...) {}
+    }
+    const QueryRowDescriptor& descriptor() const override { return descriptor_; }
+    Operator* plan() const override { return plan_.get(); }
+    void close() override {
+        if (closed_) return;
+        closed_ = true; // Even a throwing close is attempted only once.
+        plan_->close();
+    }
+    bool next(std::vector<ExprValue>& row) override {
+        row.clear();
+        if (eof_) return false;
+        if (closed_) throw DbError("XX000", "prepared cursor has already been closed");
+        try {
+            checkForQueryInterrupt();
+            if (!opened_) {
+                opened_ = true;
+                for (const auto& column : descriptor_)
+                    if (column.type.empty() || ExprHelper::canonicalResultTypeName(column.type) == "unknown")
+                        throw DbError("XX000", "prepared cursor requires a declared output type");
+                if (!plan_->supportsStructuredRows())
+                    throw DbError("0A000", "prepared cursor requires a typed structured plan");
+                if (!plan_->open())
+                    throw DbError("XX000", plan_->errorMessage().empty()
+                        ? "failed to open prepared cursor plan" : plan_->errorMessage());
+            }
+            std::string raw;
+            if (!plan_->next(raw)) {
+                if (plan_->hasError())
+                    throw DbError("XX000", plan_->errorMessage().empty()
+                        ? "failed while reading prepared cursor plan" : plan_->errorMessage());
+                close();
+                eof_ = true;
+                return false;
+            }
+            checkForQueryInterrupt();
+            if (plan_->lastStructuredValues(row)) {
+                if (row.size() != descriptor_.size())
+                    throw DbError("XX000", "prepared cursor plan lost its typed descriptor width");
+                for (size_t i = 0; i < row.size(); ++i)
+                    if (ExprHelper::canonicalResultTypeName(row[i].typeName) !=
+                        ExprHelper::canonicalResultTypeName(descriptor_[i].type))
+                        throw DbError("XX000", "prepared cursor plan changed its declared output type");
+                return true;
+            }
+            std::vector<std::string> cells;
+            std::vector<bool> nulls;
+            if (!plan_->lastStructuredRow(cells, nulls) ||
+                cells.size() != descriptor_.size() || nulls.size() != cells.size())
+                throw DbError("XX000", "prepared cursor plan lost its structured descriptor");
+            for (size_t i = 0; i < cells.size(); ++i)
+                row.emplace_back(ExprHelper::canonicalResultTypeName(descriptor_[i].type),
+                    std::move(cells[i]), nulls[i]);
+            return true;
+        } catch (...) {
+            row.clear();
+            const auto failure = std::current_exception();
+            try { close(); } catch (...) {}
+            std::rethrow_exception(failure);
+        }
+    }
+};
+}
+
+std::unique_ptr<PreparedQueryCursor> QueryPlanner::makePreparedCursor(
+    OpPtr plan, QueryRowDescriptor descriptor) {
+    return std::make_unique<PreparedOperatorCursor>(std::move(plan), std::move(descriptor));
 }
 
 PlanExecutionResult QueryPlanner::executePlanChecked(OpPtr plan, size_t maxRows) {
