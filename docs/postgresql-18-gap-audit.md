@@ -425,7 +425,7 @@
 - [ ] **FUNC-03** 实现 user-defined operator、commutator/negator、selectivity function、hash/merge 标记和 dependency。
 - [ ] **FUNC-04** volatility/strict/leakproof/parallel safety/security definer/cost/rows/SET 属性必须真正影响 planner 和 executor。
 - [ ] **FUNC-05** 实现 SQL function inlining、support functions、polymorphism、variadic/default/named arguments 和重载。
-- [ ] **FUNC-06** PL/pgSQL 补 records/rowtype、exceptions、diagnostics、dynamic SQL、cursors、trigger variables、subtransactions、packages of statements、plan cache 和 dependency invalidation。
+- [ ] **FUNC-06** PL/pgSQL 补 records/rowtype、exceptions、diagnostics、dynamic SQL、cursors、trigger variables、subtransactions、packages of statements、plan cache 和 dependency invalidation。（SELECT INTO及scalar identity局部修复不等于完整statement binder：变量/源列歧义、函数限定参数、writing CTE前准备及COLLATE/timezone/DISTINCT值角色仍已复现，见 `docs/issue-plpgsql-query-binding-preflight.md`。）
 
 ## 9. 约束和数据完整性
 

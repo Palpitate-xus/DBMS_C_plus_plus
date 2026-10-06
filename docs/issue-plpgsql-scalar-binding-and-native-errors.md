@@ -67,6 +67,10 @@ separate TEXT-width limitation: the new array regression uses explicit integer
 casts and does not pretend that limitation was repaired here. The independent
 stored-query variable-versus-source-column ambiguity and function transaction
 issues are not solved by positional scalar binding.
+Actual query-level ambiguity, qualification and lexical-role probes are recorded
+in [the open preparation report](issue-plpgsql-query-binding-preflight.md),
+including a sequence control that distinguishes pre-execution rejection from
+rollback after execution.
 
 ## Retained failures and verification
 
