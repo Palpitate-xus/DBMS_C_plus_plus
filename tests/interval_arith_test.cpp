@@ -238,16 +238,17 @@ static void test_interval_ops() {
     auto addOverflow = eval(
         "'9223372036854775807 microseconds'::interval + "
         "'1 microsecond'::interval");
-    assert(addOverflow.ok && addOverflow.isNull);
+    assert(!addOverflow.ok && addOverflow.sqlState == "22008");
 
     auto subtractOverflow = eval(
         "'-9223372036854775807 microseconds'::interval - "
         "'1 microsecond'::interval");
-    assert(subtractOverflow.ok && subtractOverflow.isNull);
+    assert(subtractOverflow.ok && !subtractOverflow.isNull &&
+           subtractOverflow.value == "-2562047788:00:54.775808");
 
     auto scaleOverflow = eval(
         "'3000000000 microseconds'::interval * 4000000000");
-    assert(scaleOverflow.ok && scaleOverflow.isNull);
+    assert(!scaleOverflow.ok && scaleOverflow.sqlState == "22008");
 
     auto safeScale = eval(
         "'4000000000 microseconds'::interval * 2");

@@ -630,12 +630,16 @@ struct IntervalParts {
 };
 
 static bool combineIntervalField(long long left, long long right,
-                                 bool subtract, long long& result) {
+                                 bool subtract, long long& result,
+                                 bool calendarField = false) {
     const __int128 total = static_cast<__int128>(left) +
         (subtract ? -static_cast<__int128>(right)
                   : static_cast<__int128>(right));
-    if (total <= std::numeric_limits<long long>::lowest() ||
-        total > std::numeric_limits<long long>::max()) {
+    const __int128 lower = calendarField ? std::numeric_limits<int32_t>::lowest()
+        : std::numeric_limits<int64_t>::lowest();
+    const __int128 upper = calendarField ? std::numeric_limits<int32_t>::max()
+        : std::numeric_limits<int64_t>::max();
+    if (total < lower || total > upper) {
         return false;
     }
     result = static_cast<long long>(total);
@@ -854,13 +858,15 @@ static std::optional<ExtractTimeParts> parseTimeForExtract(
 }
 
 static bool scaleIntervalField(long long value, long double scale,
-                               long long& result) {
+                               long long& result, bool calendarField = false) {
     const long double scaled = static_cast<long double>(value) * scale;
+    const long double lower = calendarField ? std::numeric_limits<int32_t>::lowest()
+        : static_cast<long double>(std::numeric_limits<int64_t>::lowest());
+    const long double upperExclusive = calendarField
+        ? static_cast<long double>(std::numeric_limits<int32_t>::max()) + 1.0L
+        : -static_cast<long double>(std::numeric_limits<int64_t>::lowest());
     if (!std::isfinite(scaled) ||
-        scaled <= static_cast<long double>(
-                      std::numeric_limits<long long>::lowest()) ||
-        scaled > static_cast<long double>(
-                     std::numeric_limits<long long>::max())) {
+        scaled < lower || scaled >= upperExclusive) {
         return false;
     }
     result = static_cast<long long>(scaled);
@@ -2497,10 +2503,10 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
             long long months = 0;
             long long days = 0;
             long long micros = 0;
-            if (!scaleIntervalField(iv.months, scale, months) ||
-                !scaleIntervalField(iv.days, scale, days) ||
+            if (!scaleIntervalField(iv.months, scale, months, true) ||
+                !scaleIntervalField(iv.days, scale, days, true) ||
                 !scaleIntervalField(iv.micros, scale, micros)) {
-                return ExprValue("interval", "", true);
+                throw DbError("22008", "interval out of range");
             }
             return ExprValue("interval",
                              intervalToText(months, days, micros), false);
@@ -2513,10 +2519,10 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
             long long mm = 0;
             long long dd = 0;
             long long us = 0;
-            if (!combineIntervalField(a.months, b.months, subtract, mm) ||
-                !combineIntervalField(a.days, b.days, subtract, dd) ||
+            if (!combineIntervalField(a.months, b.months, subtract, mm, true) ||
+                !combineIntervalField(a.days, b.days, subtract, dd, true) ||
                 !combineIntervalField(a.micros, b.micros, subtract, us)) {
-                return ExprValue("interval", "", true);
+                throw DbError("22008", "interval out of range");
             }
             return ExprValue("interval", intervalToText(mm, dd, us), false);
         }
