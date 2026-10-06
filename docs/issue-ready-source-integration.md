@@ -61,12 +61,18 @@ Source revision **75f586b8** has **58 production translation units**,
 public checked-result, transaction, AST, binding and source-provider headers
 require a complete fresh optimized object group, not private O0 objects or
 old 57-unit ABI objects. Actual normal `scripts/build.sh` session **27360**
-is running with source/headers/tests/registry frozen. Artifacts:
+exited0 with exactly58 production compile entries. Normal repeat and all58
+object signatures/binary configuration stamp audit **96036 exited0**.
+The combined frozen server SHA256 is
+`9bc92255dae633976ab0fd289a1e8478db4a539fba54f14d3bee2b06ce00fed3`.
+Source/headers/tests/registry remain frozen while focused native **9480**
+and wire **35806** are actually running. Artifacts:
 `/tmp/dbms-ready-integration.n9mTFFAn/build-full-O2.log`.
-The matching verifier will audit every production signature and binary stamp,
-freshly compile/link 96 selected native tests and run 80 selected wire entry
-points, including the real remaining WITH red gate. Those are planned checks,
-not results. No new combined/full-suite green claim is made.
+The matching verifier audited every production signature and binary stamp
+before beginning to freshly compile/link96 selected native tests and run80
+selected wire entry points, including the real remaining WITH red gate.
+Those focused handles are live, not terminal passing results. No new
+combined/full-suite green claim is made.
 
 Private checked-result donor final V2 had a true fresh57 normal-O2 build
 76658/exit0, 21 natives41097/exit0 and 14 wire65999/exit0, retaining the original
