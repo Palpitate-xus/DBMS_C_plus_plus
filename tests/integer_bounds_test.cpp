@@ -1,5 +1,6 @@
 #include "catalog/type_registry.h"
 #include "commands/TableManage.h"
+#include "common/DbError.h"
 #include "test_utils.h"
 
 #include <cassert>
@@ -118,9 +119,14 @@ int main() {
     overflowDivision.funcName = "arith";
     overflowDivision.funcArgs = {
         "-9223372036854775808", "/", "-1"};
-    assert(g_engine.queryExpr(database, "utiny_values", {},
-                              {overflowDivision}) ==
-           std::vector<std::string>{" "});
+    bool preciseOverflow = false;
+    try {
+        (void)g_engine.queryExpr(database, "utiny_values", {},
+                                 {overflowDivision});
+    } catch (const dbms::DbError& error) {
+        preciseOverflow = error.sqlState() == "22003";
+    }
+    assert(preciseOverflow);
 
     dbms::StorageEngine::SelectExpr minimumModulo = overflowDivision;
     minimumModulo.funcArgs[1] = "%";
