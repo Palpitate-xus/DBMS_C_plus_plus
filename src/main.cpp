@@ -8930,6 +8930,17 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
                 (innerLow.size() == 6 ||
                  (!isalnum(static_cast<unsigned char>(innerLow[6])) &&
                   innerLow[6] != '_' && innerLow[6] != '$'));
+            if (startsWithKeyword(innerLow, "with")) {
+                // A WITH envelope is a query, not text literal data. Validate
+                // its whole retained scope before a writing CTE can execute,
+                // then reuse the ordinary structured child receiver (two
+                // rows, same caller transaction/snapshot, exact typed NULL).
+                (void)g_engine.prepareBoundQuery(s.currentDB, "SELECT " + expr);
+                const auto value = g_engine.executeScalarSubquery(s.currentDB, inner);
+                headers.push_back(disp == item ? "?column?" : disp);
+                appendValue(value.value, value.isNull, value.typeName);
+                continue;
+            }
             if (selectKeyword) {
                 // The nested SELECT has its own structured-result boundary.
                 // Never reconstruct a scalar value from rendered text: NULL,

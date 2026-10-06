@@ -180,3 +180,53 @@ remain in the final green native test. The first native/protocol harnesses
 also had incorrect test filenames (`94307`, exit 1; `42410`, exit 2), corrected
 before the complete final runs. Earlier partial passes are not substituted
 for the final source proof.
+
+## Parenthesized WITH query envelope follow-up
+
+The separately committed query-envelope fix recognizes `WITH` as well as
+`SELECT` at the parser's parenthesized scalar-query entry. It retains the
+existing structured child preparation and original byte spans; it does not
+reinterpret WITH names as columns or broaden IN/EXISTS into scalar values.
+In the existing FROM-less standalone projection, a WITH envelope is prepared
+before its own CTE effects and executed through the ordinary structured
+scalar child helper, not returned as literal text. The existing SELECT
+projection path is unchanged. Other ordinary clause consumers still need
+their separate execution bridge.
+
+This grammar is supported by PostgreSQL's [scalar subquery
+definition](https://www.postgresql.org/docs/18/sql-expressions.html#SQL-SYNTAX-SCALAR-SUBQUERIES)
+and the optional WITH prefix in [SELECT
+syntax](https://www.postgresql.org/docs/18/sql-select.html). Isolated reference
+diagnostics used PostgreSQL **17.2**, not the required 18.6 parity gate:
+BEGIN, temporary objects/functions and final ROLLBACK verified scalar WITH
+constant 7, nested CTE scope, zero-row NULL, multi-row 21000, missing column
+42703, width 42601, and a PL BIGINT local yielding 2147483648/OID 20. An
+initial reference fixture incorrectly rolled back CREATE FUNCTION before
+calling it (42883); the corrected same-transaction create/call/rollback
+verified the BIGINT positive result.
+
+Retained actual baselines against the prior matching carrier binary:
+native `94870` exit 134 at `parsed.isValid()` and real protocol `45357`
+exit 1 with 42601 at AS. Parser-only `11363` made five native tests green
+(`88785`) but real protocol `42529` exposed the second SELECT-only consumer:
+the WITH text was assigned to BIGINT and raised 22P02. The first projection
+candidate `79835` also retained that failure (`10852`) because keyword
+checking must use its case-folded keyword view, not raw upper-case SQL.
+
+Final immutable artifacts: `/tmp/dbms-with-scalar-parser.kJ8VIuCE`.
+Fresh main and parser objects (`96850`, `11363`, terminal 0) link with the
+other **55** immutable matching objects from the final 57-object carrier
+group. All origin source hashes, unchanged headers and final input hashes
+were audited. Final development binary SHA-256:
+`6cbae76a78ad444e44b714dc72edc04ea3939e12a2d966914c8a84472813b9ea`.
+Five matching native tests passed (`88785`): new WITH parser, prepared
+execution, prepared scalar context, query binding and pure AST types.
+
+The new real protocol regression passed (`81191`, terminal 0), preserving
+BIGINT/OID, empty/text-null/spaces/apostrophes/actual NULL, table-backed CTE
+read and zero-row NULL, multi-row 21000 and width 42601. Its invalid nested
+column control returns 42703 before the writing CTE/nextval: sink remains
+empty, currval is still 55000 and nextval is 1. Seven unchanged adjacent
+protocol scripts passed (`63495`, terminal 0). The original full clause
+diagnostic remains exactly five failures (`10182`, terminal 1). General
+WHERE/ORDER scalar evaluation and broad query/type coverage remain partial.

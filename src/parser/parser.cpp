@@ -2339,7 +2339,9 @@ static ExprPtr parsePrimaryExprImpl(const std::vector<std::string>& tokens, size
     if (tokens[pos] == "(") {
         ++pos;
         // Check for subquery
-        if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "select") {
+        if (pos < tokens.size() &&
+            (SQLParser::toLower(tokens[pos]) == "select" ||
+             SQLParser::toLower(tokens[pos]) == "with")) {
             std::string subq;
             int depth = 1;
             while (pos < tokens.size() && depth > 0) {
