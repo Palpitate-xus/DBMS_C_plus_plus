@@ -285,6 +285,13 @@ current full-suite pass is claimed yet; the preceding1db6 frozen evidence
 cannot certify this new layout. ARRAY/concat and source-runtime public
 contract integration will likewise require a complete fresh normal58 build.
 
+Actual locale-focused handle52999 exited0: ten original C-profile differing
+case files all givecases=1/failed=0 under explicit en_US.utf8/libc, using the
+same immutablefd runner and frozen23a binary. The original C-profile full
+handle2071 and original canonical23633 remain live and separate. This
+focused replay does not repair or hide the locale-independent ARRAY OID
+defect and is not current-master or full matched differential evidence.
+
 The isolated official PostgreSQL18.6 build and actual180006 wire reference
 are recorded in `docs/issue-pg18-reference-bootstrap.md`. Six focused original
 matrices plus the original56 sort controls actually pass on18.6; the six old

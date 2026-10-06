@@ -110,3 +110,23 @@ through PGREF_DATABASE for matched full differential verification. The
 original C-profile run remains live and will retain its own terminal evidence;
 matched full replay is not yet completed or calledgreen. No existing database
 locale was changed, dropped or recreated.
+
+An exact-profile focused replay subsequently completed with actual session
+52999/exit0. The immutable b353/fd runner and the same frozen23a binary ran
+the original ten differing case files against that explicitly selected
+en_US database: cast_expression_header, collate_cast_propagation,
+collate_concat_propagation, collate_expression_comparison,
+collate_lower_function, default_text_order_locale,
+default_text_predicate_locale, explicit_default_collation,
+null_empty_distinction and order_by_function_collation_override. Each has
+its own `cases=1 failed=0`; all ten are retained in
+`/tmp/dbms-canonical-input-cursor.4U3gkfUf/locale-profile-focused.log`, with
+the exact reproduction script `verify-locale-profile.sh` next to it.
+
+No SQL, expected row, OID, tag or timeout was changed. This verifies those
+specific prior differences under the matched locale, not the whole465
+suite, all collation providers, or current master after public layout
+changes. The original C-profile handle2071 remains independent and live;
+its eventual full terminal result will not be replaced by this ten-case
+replay. Full matched replay awaits that terminal result to avoid parallel
+full-suite global object interference on the reference cluster.
