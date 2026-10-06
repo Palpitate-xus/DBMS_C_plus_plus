@@ -8331,8 +8331,10 @@ bool DdlExecutor::executeAlterSequence(const AlterObjectStmt* stmt, Session& s) 
     }
 
     txn.markSnapshotDirty();
-    if (g_engine.alterSequence(s.currentDB, seqname, info) != DBStatus::OK) {
-        std::cout << "ALTER SEQUENCE failed" << std::endl;
+    const DBStatus alterStatus = g_engine.alterSequence(s.currentDB, seqname, info);
+    if (alterStatus != DBStatus::OK) {
+        std::cout << "ALTER SEQUENCE failed (SQLSTATE "
+                  << sqlstateForDBStatus(alterStatus) << ")" << std::endl;
         return true;
     }
 
