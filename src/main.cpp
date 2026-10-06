@@ -13009,24 +13009,11 @@ static std::string processCTEs(const std::string& sql, Session& s, bool& failed)
         }
         } // end if (!isDmlCte)
 
-        // Replace CTE name references in the rest of the SQL.  Both loops
-        // need word-boundary checks: a CTE named "c" must not rewrite the
-        // 'c' inside "select".
+        // Preserve qualified references, including c.* and c."MixedId".
+        // Removing the qualifier broadens a star to every later FROM item
+        // and makes otherwise unambiguous columns collide after LATERAL.
+        // Word-boundary checks keep a CTE named "c" out of "select".
         size_t replacePos = parenEnd + 1;
-        while ((replacePos = findTextOutsideQuotes(
-                    result, cteName + ".", replacePos)) != std::string::npos) {
-            bool leftOk = (replacePos == 0) ||
-                          !(isalnum(static_cast<unsigned char>(result[replacePos - 1])) ||
-                            result[replacePos - 1] == '_');
-            bool rightOk = (replacePos + cteName.size() < result.size()) &&
-                           !isalnum(static_cast<unsigned char>(result[replacePos + cteName.size() + 1]));
-            if (leftOk && rightOk) {
-                result = result.substr(0, replacePos) + result.substr(replacePos + cteName.size() + 1);
-            } else {
-                replacePos += cteName.size() + 1;
-            }
-        }
-        replacePos = parenEnd + 1;
         while ((replacePos = findTextOutsideQuotes(
                     result, cteName, replacePos)) != std::string::npos) {
             bool leftOk = (replacePos == 0) ||
@@ -13224,29 +13211,11 @@ static std::string processDerivedTables(const std::string& sql, Session& s,
         if (tmpName.empty()) break;
         derivedCount = counter;
 
-        // Replace alias references with bare column names.  Occurrences
-        // before the subquery shift the recorded positions, so adjust
-        // parenStart / aliasExprStart for each removal.
-        std::string aliasDot = alias + ".";
-        size_t pos = 0;
-        while ((pos = findTextOutsideQuotes(result, aliasDot, pos)) !=
-               std::string::npos) {
-            if (pos > 0 &&
-                (isalnum(static_cast<unsigned char>(result[pos - 1])) ||
-                 result[pos - 1] == '_')) {
-                pos += aliasDot.size();
-                continue;
-            }
-            result = result.substr(0, pos) + result.substr(pos + aliasDot.size());
-            if (pos < parenStart) {
-                parenStart -= aliasDot.size();
-                parenEnd -= aliasDot.size();
-                aliasExprStart -= aliasDot.size();
-            }
-        }
-
-        // Replace the derived table definition with temp table name
-        result = result.substr(0, parenStart) + tmpName + result.substr(aliasExprStart);
+        // Materialize the relation, not its SQL-visible namespace. Keeping
+        // the alias lets the ordinary and LATERAL binders distinguish d.id
+        // from a same-name right column and expand d.* only over d's leaves.
+        result = result.substr(0, parenStart) + tmpName + " as " + alias +
+            result.substr(aliasExprStart);
         searchFrom = 0;
     }
 
