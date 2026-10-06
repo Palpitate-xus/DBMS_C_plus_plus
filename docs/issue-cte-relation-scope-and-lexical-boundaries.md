@@ -114,7 +114,7 @@ not include this failed complete protocol run.
 
 ## Remaining work
 
-General nested/correlated relation identity, multirow same-source/self joins,
+General nested/correlated relation identity,
 views as arbitrary JOIN sources, complete function/type/operator resolution,
 late analysis, all DML CTE target/visibility combinations, parameterized plans,
 SEARCH/CYCLE, MATERIALIZED/NOT MATERIALIZED, full recursive evaluation and
@@ -135,5 +135,7 @@ analysis must precede writing CTE execution; self joins require independent
 range identities rather than storage-table names as shared result keys.
 Duplicate-name preflight is now addressed separately by `b6856ad4`; see
 `issue-cte-duplicate-name-preflight.md` for actual native/protocol verification.
-The multirow self-join defect remains open.
+The multirow repeated-source defect is subsequently addressed by the separate
+source/test commit `d3fcfc0b`; `issue-join-range-identity.md` records its actual
+verification scope. General binding and complete JOIN semantics remain open.
 The installed PostgreSQL reference is 17.2, not an 18.6 runtime oracle.

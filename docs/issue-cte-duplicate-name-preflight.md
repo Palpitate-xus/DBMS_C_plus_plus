@@ -86,12 +86,15 @@ PostgreSQL 18.6 runtime differential result is claimed.
 ## Remaining requirements
 
 The full audit remains incomplete: 22 complete / 166 partial / 70 unverified /
-15 deferred_by_user. Multirow same-source JOIN identity is still broken;
+15 deferred_by_user. A follow-up probe showed multirow same-source JOIN identity was broken;
 an ordinary two-row table crossed with itself repeats diagonal pairs, and
 `WHERE a.id=1 AND b.id=2` returns no row rather than `(1,2)`. The main
 normalizer lowers both aliases to the same physical key; the storage JOIN
 column map also overwrites equal physical qualifiers. Fixing projection
-offsets alone would leave filtering wrong. An independent writing-CTE/later
+offsets alone would leave filtering wrong. This separate defect is now addressed
+by source/test commit `d3fcfc0b`; see `issue-join-range-identity.md` for the
+verification scope, without treating the entire JOIN/CTE families as complete.
+An independent writing-CTE/later
 missing-column probe reported 42703 and rolled back the new row, confirming
 that bounded atomicity control, not all CTE snapshot/visibility requirements.
 PL/pgSQL SELECT INTO partitioning and typed NULL assignment still need repair.
