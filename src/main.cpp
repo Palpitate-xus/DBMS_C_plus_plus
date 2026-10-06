@@ -13331,7 +13331,9 @@ static void substituteLateralBareScalarTargets(
         size_t found = leftSchema.len;
         for (size_t ci = 0; ci < leftSchema.len; ++ci) {
             if (leftSchema.cols[ci].dataName != name) continue;
-            if (found != leftSchema.len) return leftSchema.len;
+            if (found != leftSchema.len)
+                throw dbms::DbError("42702", "column reference \"" + name +
+                    "\" is ambiguous");
             found = ci;
         }
         return found;
@@ -14041,62 +14043,510 @@ static std::pair<std::string, bool> lateralLeftJoinKind(
     return {type, false};
 }
 
+struct LateralVisibleColumn {
+    dbms::Column column;
+    std::vector<size_t> leafIndices;
+};
+
+struct LateralMaterializedScope {
+    std::vector<std::string> physicalNames;
+    std::vector<dbms::Column> physicalColumns;
+    std::vector<std::vector<std::string>> qualifiers;
+    std::vector<LateralVisibleColumn> visibleColumns;
+};
+
+static std::string rewriteLateralOuterFrame(
+    const std::string& sql, const LateralMaterializedScope& scope) {
+    dbms::SQLParser frameParser;
+    const auto frame = frameParser.parse(sql);
+    const auto* select = frame.success
+        ? dynamic_cast<const dbms::SelectStmt*>(frame.stmt.get()) : nullptr;
+    if (!select || !select->fromClause ||
+        select->fromClause->type != dbms::FromItem::Type::Table) {
+        throw dbms::DbError("0A000",
+            "LATERAL output namespace across a following FROM item is not yet bound");
+    }
+    auto quoteIdentifier = [](const std::string& name) {
+        std::string quoted = "\"";
+        for (char c : name) {
+            if (c == '"') quoted += "\"\"";
+            else quoted += c;
+        }
+        return quoted + '"';
+    };
+    auto visibleExpression = [&](const LateralVisibleColumn& column) {
+        std::string expression;
+        for (size_t index : column.leafIndices) {
+            if (index >= scope.physicalNames.size())
+                throw dbms::DbError("XX000", "invalid LATERAL visible column map");
+            if (!expression.empty()) expression += ", ";
+            expression += scope.physicalNames[index];
+        }
+        if (column.leafIndices.size() > 1)
+            expression = "coalesce(" + expression + ")";
+        return expression;
+    };
+    auto qualifierMatches = [&](size_t index,
+                                const std::vector<std::string>& path) {
+        for (const std::string& raw : scope.qualifiers.at(index)) {
+            if (lateralIdentifierPath(raw) == path) return true;
+        }
+        return false;
+    };
+    auto resolveReference = [&](const std::vector<std::string>& path) {
+        std::string expression;
+        size_t matches = 0;
+        if (path.size() == 1) {
+            for (const LateralVisibleColumn& column : scope.visibleColumns) {
+                if (column.column.dataName != path.back()) continue;
+                expression = visibleExpression(column);
+                ++matches;
+            }
+        } else {
+            const std::vector<std::string> qualifier(path.begin(), path.end() - 1);
+            bool relationFound = false;
+            for (size_t ci = 0; ci < scope.physicalColumns.size(); ++ci) {
+                if (!qualifierMatches(ci, qualifier)) continue;
+                relationFound = true;
+                if (scope.physicalColumns[ci].dataName != path.back()) continue;
+                expression = scope.physicalNames.at(ci);
+                ++matches;
+            }
+            if (!relationFound)
+                throw dbms::DbError("42P01", "missing FROM-clause entry for table \"" +
+                    path[path.size() - 2] + "\"");
+        }
+        if (matches > 1)
+            throw dbms::DbError("42702", "column reference \"" + path.back() +
+                "\" is ambiguous");
+        if (matches == 0)
+            throw dbms::DbError("42703", "column \"" + path.back() + "\" does not exist");
+        return expression;
+    };
+
+    std::map<std::string, size_t> outputAliases;
+    std::map<std::string, std::string> outputExpressions;
+    auto rewriteExpression = [&](const std::string& expression,
+                                 bool orderAliasPriority) {
+        dbms::SQLParser parser;
+        const auto parsed = parser.parse("SELECT " + expression);
+        const auto* parsedSelect = parsed.success
+            ? dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()) : nullptr;
+        if (!parsedSelect || parsedSelect->selectList.size() != 1 ||
+            !parsedSelect->selectList.front().expr) return expression;
+        const dbms::Expr* root = parsedSelect->selectList.front().expr.get();
+        if (orderAliasPriority) {
+            const auto* ref = dynamic_cast<const dbms::ColumnRefExpr*>(root);
+            if (ref && ref->schema.empty() && ref->table.empty()) {
+                const auto found = outputAliases.find(ref->column);
+                if (found != outputAliases.end()) {
+                    if (found->second > 1)
+                        throw dbms::DbError("42702", "ORDER BY \"" + ref->column +
+                            "\" is ambiguous");
+                    return outputExpressions.at(ref->column);
+                }
+            }
+        }
+        std::set<std::vector<std::string>> references;
+        std::function<void(const dbms::Expr*)> collect = [&](const dbms::Expr* node) {
+            if (!node) return;
+            switch (node->type) {
+                case dbms::ExprType::ColumnRef: {
+                    const auto* ref = static_cast<const dbms::ColumnRefExpr*>(node);
+                    if (ref->column == "*") return;
+                    std::vector<std::string> path;
+                    if (!ref->schema.empty()) path.push_back(ref->schema);
+                    if (!ref->table.empty()) path.push_back(ref->table);
+                    path.push_back(ref->column);
+                    references.insert(std::move(path));
+                    return;
+                }
+                case dbms::ExprType::UnaryOp:
+                    collect(static_cast<const dbms::UnaryOpExpr*>(node)->operand.get());
+                    return;
+                case dbms::ExprType::BinaryOp: {
+                    const auto* binary = static_cast<const dbms::BinaryOpExpr*>(node);
+                    collect(binary->left.get());
+                    if (binary->op != "::") collect(binary->right.get());
+                    return;
+                }
+                case dbms::ExprType::CastExpr:
+                    collect(static_cast<const dbms::CastExpr*>(node)->operand.get());
+                    return;
+                case dbms::ExprType::CaseExpr: {
+                    const auto* value = static_cast<const dbms::CaseExpr*>(node);
+                    collect(value->switchExpr.get());
+                    for (const auto& arm : value->whenClauses) {
+                        collect(arm.first.get()); collect(arm.second.get());
+                    }
+                    collect(value->elseExpr.get());
+                    return;
+                }
+                case dbms::ExprType::FunctionCall: {
+                    const auto* call = static_cast<const dbms::FunctionCallExpr*>(node);
+                    for (size_t i = 0; i < call->args.size(); ++i) {
+                        if (toLower(call->funcName) == "extract" && i == 0) continue;
+                        collect(call->args[i].get());
+                    }
+                    for (const auto& arg : call->namedArgs) collect(arg.value.get());
+                    collect(call->filter.get());
+                    if (!call->orderBy.empty()) {
+                        dbms::SQLParser orderParser;
+                        const auto order = orderParser.parse(
+                            "select 1 order by " + call->orderBy);
+                        const auto* orderSelect = order.success
+                            ? dynamic_cast<const dbms::SelectStmt*>(order.stmt.get()) : nullptr;
+                        if (orderSelect) {
+                            for (const auto& key : orderSelect->orderBy)
+                                collect(key.expr.get());
+                        }
+                    }
+                    if (call->hasOver) {
+                        for (const auto& arg : call->over.partitionBy) collect(arg.get());
+                        for (const auto& arg : call->over.orderBy) collect(arg.first.get());
+                        collect(call->over.frameStart.get()); collect(call->over.frameEnd.get());
+                    }
+                    return;
+                }
+                case dbms::ExprType::ArrayExpr:
+                    for (const auto& arg : static_cast<const dbms::ArrayExpr*>(node)->elements)
+                        collect(arg.get());
+                    return;
+                case dbms::ExprType::RowExpr:
+                    for (const auto& arg : static_cast<const dbms::RowExpr*>(node)->elements)
+                        collect(arg.get());
+                    return;
+                case dbms::ExprType::Literal:
+                case dbms::ExprType::Subquery:
+                case dbms::ExprType::Parameter:
+                case dbms::ExprType::A_Star:
+                    return;
+            }
+        };
+        collect(root);
+        static const std::set<std::string> specialValues = {
+            "current_catalog", "current_date", "current_role", "current_schema",
+            "current_time", "current_timestamp", "current_user", "localtime",
+            "localtimestamp", "session_user", "user"};
+        std::string rewritten;
+        std::string previousWord;
+        for (size_t pos = 0; pos < expression.size();) {
+            size_t end = pos;
+            bool comment = false;
+            if (expression[pos] == '\'') end = skipLateralString(expression, pos);
+            else if (expression[pos] == '$') {
+                const size_t skipped = skipLateralDollarString(expression, pos);
+                if (skipped != pos + 1) end = skipped;
+            } else if ((expression[pos] == '-' && pos + 1 < expression.size() &&
+                        expression[pos + 1] == '-') ||
+                       (expression[pos] == '/' && pos + 1 < expression.size() &&
+                        expression[pos + 1] == '*')) {
+                end = skipLateralTrivia(expression, pos);
+                comment = true;
+            } else if (expression[pos] == '(') {
+                const size_t inner = skipLateralTrivia(expression, pos + 1);
+                size_t tokenEnd = inner;
+                std::string word;
+                if (readLateralIdentifier(expression, tokenEnd, word) && word == "select") {
+                    const size_t close = findMatchingParen(expression, pos);
+                    if (close != std::string::npos) end = close + 1;
+                }
+            }
+            if (end != pos) {
+                if (comment) rewritten += ' ';
+                else rewritten.append(expression, pos, end - pos);
+                pos = end;
+                continue;
+            }
+            std::string first;
+            const bool validBoundary = pos == 0 ||
+                !(std::isalnum(static_cast<unsigned char>(expression[pos - 1])) ||
+                  expression[pos - 1] == '_' || expression[pos - 1] == '$');
+            if (!validBoundary || !readLateralIdentifier(expression, end, first)) {
+                if (!std::isspace(static_cast<unsigned char>(expression[pos])))
+                    previousWord.clear();
+                rewritten += expression[pos++];
+                continue;
+            }
+            std::vector<std::string> path = {first};
+            while (true) {
+                const size_t dot = skipLateralTrivia(expression, end);
+                if (dot >= expression.size() || expression[dot] != '.') break;
+                size_t next = skipLateralTrivia(expression, dot + 1);
+                std::string part;
+                if (!readLateralIdentifier(expression, next, part)) break;
+                path.push_back(part);
+                end = next;
+            }
+            size_t previous = pos;
+            while (previous > 0 && std::isspace(
+                       static_cast<unsigned char>(expression[previous - 1]))) --previous;
+            const size_t next = skipLateralTrivia(expression, end);
+            const bool typeOrFunction = previousWord == "as" ||
+                (previous > 0 && expression[previous - 1] == ':') ||
+                (next < expression.size() && expression[next] == '(');
+            bool special = path.size() == 1 && expression[pos] != '"' &&
+                specialValues.count(path.front());
+            if (special) {
+                for (const auto& column : scope.visibleColumns)
+                    if (column.column.dataName == path.front()) special = false;
+            }
+            if (!typeOrFunction && !special && references.count(path))
+                rewritten += resolveReference(path);
+            else rewritten.append(expression, pos, end - pos);
+            previousWord = path.back();
+            pos = end;
+        }
+        return rewritten;
+    };
+
+    const size_t selectPos = findTopLevelKeyword(sql, "select");
+    const size_t fromPos = findTopLevelKeyword(sql, "from");
+    if (selectPos == std::string::npos || fromPos == std::string::npos ||
+        fromPos <= selectPos + 6)
+        throw dbms::DbError("42601", "invalid LATERAL SELECT frame");
+    size_t listBegin = skipLateralTrivia(sql, selectPos + 6);
+    if (listBegin >= fromPos)
+        throw dbms::DbError("42601", "empty LATERAL SELECT list");
+    size_t prefixEnd = listBegin;
+    std::string modifier;
+    if (sql[listBegin] != '"' && readLateralIdentifier(sql, prefixEnd, modifier) &&
+        (modifier == "all" || modifier == "distinct")) {
+        listBegin = skipLateralTrivia(sql, prefixEnd);
+        if (modifier == "distinct") {
+            size_t onEnd = listBegin;
+            std::string on;
+            if (readLateralIdentifier(sql, onEnd, on) && on == "on") {
+                const size_t open = skipLateralTrivia(sql, onEnd);
+                const size_t close = findMatchingParen(sql, open);
+                if (close != std::string::npos) listBegin = skipLateralTrivia(sql, close + 1);
+            }
+        }
+    }
+    std::string prefix = sql.substr(0, listBegin);
+    const size_t onOpen = prefix.find('(');
+    if (modifier == "distinct" && onOpen != std::string::npos) {
+        const size_t close = findMatchingParen(prefix, onOpen);
+        if (close != std::string::npos) {
+            std::string expressions;
+            for (const auto& key : splitSelectColumns(prefix.substr(onOpen + 1, close - onOpen - 1))) {
+                if (!expressions.empty()) expressions += ", ";
+                expressions += rewriteExpression(key, false);
+            }
+            prefix = prefix.substr(0, onOpen + 1) + expressions + prefix.substr(close);
+        }
+    }
+    std::vector<std::string> targets;
+    for (const std::string& rawTarget : splitSelectColumns(sql.substr(listBegin, fromPos - listBegin))) {
+        const std::string target = trim(rawTarget);
+        const auto tokens = dbms::SQLParser::tokenize(target);
+        bool starTarget = !tokens.empty() && tokens.back() == "*" &&
+                          tokens.size() % 2 == 1;
+        for (size_t i = 1; starTarget && i < tokens.size(); i += 2)
+            starTarget = tokens[i] == ".";
+        if (starTarget) {
+            std::vector<std::string> qualifier;
+            for (size_t i = 0; i + 1 < tokens.size(); i += 2)
+                qualifier.push_back(normalizeLateralIdentifier(tokens[i]));
+            bool expanded = false;
+            if (qualifier.empty()) {
+                for (const auto& column : scope.visibleColumns) {
+                    const std::string expression = visibleExpression(column);
+                    targets.push_back(expression + " as " + quoteIdentifier(column.column.dataName));
+                    ++outputAliases[column.column.dataName];
+                    outputExpressions[column.column.dataName] = expression;
+                    expanded = true;
+                }
+            } else {
+                for (size_t ci = 0; ci < scope.physicalColumns.size(); ++ci) {
+                    if (!qualifierMatches(ci, qualifier)) continue;
+                    const std::string& name = scope.physicalColumns[ci].dataName;
+                    targets.push_back(scope.physicalNames[ci] + " as " + quoteIdentifier(name));
+                    ++outputAliases[name];
+                    outputExpressions[name] = scope.physicalNames[ci];
+                    expanded = true;
+                }
+            }
+            if (!expanded) throw dbms::DbError("42P01", "missing FROM-clause entry for star qualifier");
+            continue;
+        }
+        dbms::SQLParser parser;
+        const auto parsed = parser.parse("SELECT " + target);
+        const auto* parsedSelect = parsed.success
+            ? dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()) : nullptr;
+        std::string expression = target;
+        std::string aliasSuffix;
+        const size_t asPos = findTopLevelKeyword(target, "as");
+        if (asPos != std::string::npos) {
+            expression = trim(target.substr(0, asPos));
+            aliasSuffix = " " + target.substr(asPos);
+        } else if (parsedSelect && !parsedSelect->selectList.empty() &&
+                   !parsedSelect->selectList.front().alias.empty()) {
+            const std::string& alias = parsedSelect->selectList.front().alias;
+            if (target.size() > alias.size() &&
+                target.compare(target.size() - alias.size(), alias.size(), alias) == 0) {
+                const size_t end = target.size() - alias.size();
+                expression = trim(target.substr(0, end));
+                aliasSuffix = " " + target.substr(end);
+            }
+        }
+        std::string rewritten = rewriteExpression(expression, false);
+        if (parsedSelect && !parsedSelect->selectList.empty()) {
+            const auto& item = parsedSelect->selectList.front();
+            const auto* ref = dynamic_cast<const dbms::ColumnRefExpr*>(item.expr.get());
+            if (!item.alias.empty()) {
+                const std::string alias = normalizeLateralIdentifier(item.alias);
+                ++outputAliases[alias];
+                outputExpressions[alias] = rewritten;
+            }
+            else if (ref) {
+                outputExpressions[ref->column] = rewritten;
+                rewritten += " as " + quoteIdentifier(ref->column);
+                ++outputAliases[ref->column];
+            } else if (const auto* call = dynamic_cast<const dbms::FunctionCallExpr*>(item.expr.get())) {
+                std::string label = call->funcName;
+                const size_t dot = label.rfind('.');
+                if (dot != std::string::npos) label.erase(0, dot + 1);
+                ++outputAliases[label];
+                outputExpressions[label] = rewritten;
+            }
+        }
+        targets.push_back(rewritten + aliasSuffix);
+    }
+    std::string result = prefix;
+    for (size_t i = 0; i < targets.size(); ++i) {
+        if (i) result += ", ";
+        result += targets[i];
+    }
+    result += " " + sql.substr(fromPos);
+    struct Clause {
+        size_t start;
+        size_t expression;
+        bool list;
+        bool order;
+        std::string keyword;
+    };
+    std::vector<Clause> clauses;
+    const size_t newFrom = findTopLevelKeyword(result, "from");
+    for (const char* rawKeyword : {"where", "group", "having", "order", "limit", "offset", "fetch", "for", "window"}) {
+        const std::string keyword = rawKeyword;
+        const size_t pos = findTopLevelKeyword(result, keyword, newFrom + 4);
+        if (pos == std::string::npos) continue;
+        size_t expr = skipLateralTrivia(result, pos + keyword.size());
+        if (keyword == "group" || keyword == "order") {
+            std::string by;
+            if (!readLateralIdentifier(result, expr, by) || by != "by") continue;
+            expr = skipLateralTrivia(result, expr);
+        }
+        clauses.push_back({pos, expr, keyword == "group" || keyword == "order",
+                           keyword == "order", keyword});
+    }
+    std::sort(clauses.begin(), clauses.end(), [](const Clause& a, const Clause& b) { return a.start < b.start; });
+    for (size_t i = clauses.size(); i-- > 0;) {
+        const std::string& keyword = clauses[i].keyword;
+        if (keyword != "where" && keyword != "group" && keyword != "having" && keyword != "order") continue;
+        const size_t end = i + 1 < clauses.size() ? clauses[i + 1].start : result.size();
+        const std::string raw = result.substr(clauses[i].expression, end - clauses[i].expression);
+        std::string expressions;
+        const auto keys = clauses[i].list ? splitSelectColumns(raw) : std::vector<std::string>{raw};
+        for (const std::string& key : keys) {
+            size_t expressionEnd = key.size();
+            if (clauses[i].order) {
+                for (const char* word : {"asc", "desc", "nulls"}) {
+                    const size_t pos = findTopLevelKeyword(key, word);
+                    if (pos != std::string::npos) expressionEnd = std::min(expressionEnd, pos);
+                }
+            }
+            if (!expressions.empty()) expressions += ", ";
+            expressions += rewriteExpression(key.substr(0, expressionEnd), clauses[i].order);
+            if (expressionEnd < key.size()) expressions += " " + key.substr(expressionEnd);
+        }
+        result.replace(clauses[i].expression, end - clauses[i].expression, expressions + " ");
+    }
+    return result;
+}
+
 static std::string processLateralJoins(const std::string& sql, Session& s,
                                       bool& failed) {
     failed = false;
     std::string result = sql;
     int lateralCount = 0;
-    std::set<std::string> lateralTempNames;
+    std::map<std::string, LateralMaterializedScope> materializedScopes;
+    std::string finalScopeName;
 
     while (true) {
         size_t latPos = findKeywordOutsideQuotes(result, "lateral");
-        if (latPos == std::string::npos) break;
-        size_t parenStart = findTextOutsideQuotes(result, "(select", latPos);
-        if (parenStart == std::string::npos) break;
-        size_t parenEnd = findMatchingParen(result, parenStart);
-        if (parenEnd == std::string::npos) break;
+        const bool foldingTail = latPos == std::string::npos &&
+                                 !finalScopeName.empty();
+        if (latPos == std::string::npos && !foldingTail) break;
+        const size_t fromPos = findTopLevelKeyword(result, "from");
+        if (fromPos == std::string::npos) break;
+        size_t aliasEnd = 0;
+        std::string alias;
+        std::string innerSelect;
+        if (foldingTail) {
+            // Ordinary JOINs after the last LATERAL still belong to this
+            // namespace. Materialize their leaf cells before the final bind,
+            // just as we do for JOINs between two LATERAL items.
+            latPos = result.size();
+            for (const char* keyword : {"where", "group", "having", "order",
+                                       "limit", "offset", "fetch", "for",
+                                       "window", "union", "intersect", "except"}) {
+                const size_t position = findTopLevelKeyword(result, keyword, fromPos + 4);
+                if (position != std::string::npos) latPos = std::min(latPos, position);
+            }
+            if (latPos == result.size() && !result.empty() && result.back() == ';')
+                --latPos;
+            aliasEnd = latPos;
+        } else {
+            const size_t parenStart = findTextOutsideQuotes(result, "(select", latPos);
+            if (parenStart == std::string::npos) break;
+            const size_t parenEnd = findMatchingParen(result, parenStart);
+            if (parenEnd == std::string::npos) break;
 
-        // Parse the required derived-table alias and retain its exact end so
-        // the lateral FROM item can be replaced without consuming WHERE /
-        // ORDER BY or a following join.
-        size_t aliasStart = parenEnd + 1;
-        while (aliasStart < result.size() &&
-               isspace(static_cast<unsigned char>(result[aliasStart]))) {
-            ++aliasStart;
-        }
-        if (aliasStart + 2 < result.size() &&
-            result.compare(aliasStart, 2, "as") == 0 &&
-            isspace(static_cast<unsigned char>(result[aliasStart + 2]))) {
-            aliasStart += 2;
+            // Parse the required derived-table alias and retain its exact end so
+            // the lateral FROM item can be replaced without consuming WHERE /
+            // ORDER BY or a following join.
+            size_t aliasStart = parenEnd + 1;
             while (aliasStart < result.size() &&
                    isspace(static_cast<unsigned char>(result[aliasStart]))) {
                 ++aliasStart;
             }
-        }
-        size_t aliasEnd = aliasStart;
-        while (aliasEnd < result.size() &&
-               (isalnum(static_cast<unsigned char>(result[aliasEnd])) ||
-                result[aliasEnd] == '_')) {
-            ++aliasEnd;
-        }
-        std::string alias = result.substr(aliasStart, aliasEnd - aliasStart);
-        if (alias.empty()) break;
+            if (aliasStart + 2 < result.size() &&
+                result.compare(aliasStart, 2, "as") == 0 &&
+                isspace(static_cast<unsigned char>(result[aliasStart + 2]))) {
+                aliasStart += 2;
+                while (aliasStart < result.size() &&
+                       isspace(static_cast<unsigned char>(result[aliasStart]))) {
+                    ++aliasStart;
+                }
+            }
+            aliasEnd = aliasStart;
+            while (aliasEnd < result.size() &&
+                   (isalnum(static_cast<unsigned char>(result[aliasEnd])) ||
+                    result[aliasEnd] == '_')) {
+                ++aliasEnd;
+            }
+            alias = result.substr(aliasStart, aliasEnd - aliasStart);
+            if (alias.empty()) break;
 
-        // Extract the inner SELECT
-        std::string innerSelect = trim(result.substr(parenStart + 1, parenEnd - parenStart - 1));
+            // Extract the inner SELECT
+            innerSelect = trim(result.substr(parenStart + 1, parenEnd - parenStart - 1));
+        }
 
         // This materializer handles simple base-table CROSS inputs followed
         // by CROSS/INNER/LEFT JOIN LATERAL or comma LATERAL. The previous
         // last-"join" split accidentally made "cross" part of the alias.
-        size_t fromPos = findTopLevelKeyword(result, "from");
-        if (fromPos == std::string::npos || fromPos >= latPos) break;
+        if (fromPos >= latPos) break;
         std::string leftFactor = trim(
             result.substr(fromPos + 4, latPos - fromPos - 4));
         bool leftOuterJoin = false;
         bool joinRequiresOn = false;
         std::string joinCondition;
         size_t replacementEnd = aliasEnd;
-        if (!leftFactor.empty() && leftFactor.back() == ',') {
+        if (foldingTail) {
+            // There is no additional lateral relation to strip or execute.
+        } else if (!leftFactor.empty() && leftFactor.back() == ',') {
             leftFactor = trim(leftFactor.substr(0, leftFactor.size() - 1));
         } else {
             const std::string lowerLeftFactor = toLower(leftFactor);
@@ -14192,10 +14642,12 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
         const auto* parsedFromSelect = parsedFrom.success
             ? dynamic_cast<const dbms::SelectStmt*>(parsedFrom.stmt.get())
             : nullptr;
+        if (foldingTail && parsedFromSelect && parsedFromSelect->fromClause &&
+            parsedFromSelect->fromClause->type == dbms::FromItem::Type::Table)
+            break;
         bool supportedLeftScope = parsedFromSelect &&
                                   parsedFromSelect->fromClause;
         bool materializeLeftJoinTree = false;
-        bool leftTreeHasMergedJoin = false;
         std::function<void(const dbms::FromItem*)> collectLeftRelations =
             [&](const dbms::FromItem* item) {
             if (!item || !supportedLeftScope) {
@@ -14223,7 +14675,6 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
                     return;
                 }
                 materializeLeftJoinTree = true;
-                leftTreeHasMergedJoin = true;
             } else if (joinType == "cross") {
                 if (item->joinCondition || !item->usingCols.empty()) {
                     supportedLeftScope = false;
@@ -14236,7 +14687,6 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
                         supportedLeftScope = false;
                         return;
                     }
-                    leftTreeHasMergedJoin = true;
                 } else if (!item->joinCondition) {
                     supportedLeftScope = false;
                     return;
@@ -14255,6 +14705,7 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
 
         TableSchema leftTbl;
         leftTbl.tablename = "__lateral_outer";
+        bool hasMaterializedLeftRelation = false;
         std::vector<std::vector<std::string>> leftColumnQualifiers;
         for (LateralLeftRelation& relation : leftRelations) {
             relation.resolvedName = resolveTableName(s, relation.tableName);
@@ -14275,9 +14726,29 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
                 return result;
             }
             for (size_t ci = 0; ci < relation.schema.len; ++ci) {
+                const auto cached = materializedScopes.find(relation.tableName);
+                if (cached != materializedScopes.end()) {
+                    hasMaterializedLeftRelation = true;
+                    leftTbl.cols[leftTbl.len++] =
+                        cached->second.physicalColumns.at(ci);
+                    leftColumnQualifiers.push_back(
+                        cached->second.qualifiers.at(ci));
+                    continue;
+                }
                 leftTbl.cols[leftTbl.len++] = relation.schema.cols[ci];
-                std::vector<std::string> qualifiers = {
-                    relation.prefix, relation.tableName, relation.resolvedName};
+                std::vector<std::string> qualifiers = {relation.prefix};
+                if (relation.alias.empty()) {
+                    const auto path = lateralIdentifierPath(relation.tableName);
+                    if (path.size() > 1) {
+                        std::string unqualified = "\"";
+                        for (char c : path.back()) {
+                            if (c == '"') unqualified += "\"\"";
+                            else unqualified += c;
+                        }
+                        unqualified += '"';
+                        qualifiers.push_back(unqualified);
+                    }
+                }
                 std::sort(qualifiers.begin(), qualifiers.end());
                 qualifiers.erase(std::unique(qualifiers.begin(),
                                               qualifiers.end()),
@@ -14287,11 +14758,59 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
         }
         if (!supportedLeftScope) break;
 
-        struct LateralVisibleColumn {
-            dbms::Column column;
-            // FULL USING is COALESCE of the two visible keys. Keeping the
-            // source indices also preserves each qualified leaf independently.
-            std::vector<size_t> leafIndices;
+        auto quoteLeafIdentifier = [](const std::string& name) {
+            std::string quoted = "\"";
+            for (char c : name) {
+                if (c == '"') quoted += "\"\"";
+                else quoted += c;
+            }
+            return quoted + '"';
+        };
+        LateralMaterializedScope leftBindingScope;
+        leftBindingScope.qualifiers = leftColumnQualifiers;
+        for (const LateralLeftRelation& relation : leftRelations) {
+            for (size_t ci = 0; ci < relation.schema.len; ++ci) {
+                leftBindingScope.physicalNames.push_back(
+                    relation.prefix + "." +
+                    quoteLeafIdentifier(relation.schema.cols[ci].dataName));
+                leftBindingScope.physicalColumns.push_back(
+                    leftTbl.cols[relation.columnOffset + ci]);
+            }
+        }
+        // These parser-supported FROM trees contain table atoms, not grouped
+        // JOIN factors. Preserve the original ON expression text (including
+        // quoting and precedence), assigning predicates in source/in-order.
+        std::vector<std::string> leftPredicates;
+        size_t predicateSearch = 0;
+        while (true) {
+            const size_t on = findTopLevelKeyword(leftFactor, "on", predicateSearch);
+            if (on == std::string::npos) break;
+            size_t end = leftFactor.size();
+            for (const char* word : {"join", "inner", "left", "right", "full", "cross", "natural"}) {
+                const size_t next = findTopLevelKeyword(leftFactor, word, on + 2);
+                if (next != std::string::npos) end = std::min(end, next);
+            }
+            const auto protectedBytes = dbms::sqlProtectedBytes(leftFactor);
+            size_t depth = 0;
+            for (size_t pos = on + 2; pos < end; ++pos) {
+                if (protectedBytes[pos]) continue;
+                if (leftFactor[pos] == '(') ++depth;
+                else if (leftFactor[pos] == ')' && depth > 0) --depth;
+                else if (leftFactor[pos] == ',' && depth == 0) { end = pos; break; }
+            }
+            leftPredicates.push_back(trim(leftFactor.substr(on + 2, end - on - 2)));
+            predicateSearch = end;
+        }
+        size_t nextLeftPredicate = 0;
+        std::map<const dbms::FromItem*, std::string> leftFromSql;
+        auto leafExpression = [&](const LateralVisibleColumn& column) {
+            std::string expression;
+            for (size_t index : column.leafIndices) {
+                if (!expression.empty()) expression += ", ";
+                expression += leftBindingScope.physicalNames.at(index);
+            }
+            return column.leafIndices.size() > 1
+                ? "coalesce(" + expression + ")" : expression;
         };
         size_t nextLeftRelation = 0;
         std::function<std::vector<LateralVisibleColumn>(
@@ -14309,6 +14828,17 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
                 }
                 const LateralLeftRelation& relation =
                     leftRelations[nextLeftRelation++];
+                leftFromSql[item] = relation.tableName +
+                    (relation.alias.empty() ? "" : " as " + relation.alias);
+                const auto cached = materializedScopes.find(relation.tableName);
+                if (cached != materializedScopes.end()) {
+                    columns = cached->second.visibleColumns;
+                    for (LateralVisibleColumn& column : columns) {
+                        for (size_t& index : column.leafIndices)
+                            index += relation.columnOffset;
+                    }
+                    return columns;
+                }
                 for (size_t ci = 0; ci < relation.schema.len; ++ci) {
                     LateralVisibleColumn visible;
                     visible.column = relation.schema.cols[ci];
@@ -14330,6 +14860,21 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
 
             const auto [joinType, natural] =
                 lateralLeftJoinKind(item->joinType);
+            const std::string joinSql = leftFromSql.at(item->left.get()) +
+                " " + joinType + " join " + leftFromSql.at(item->right.get());
+            std::string predicate;
+            if (item->joinCondition) {
+                if (nextLeftPredicate >= leftPredicates.size())
+                    throw dbms::DbError("42601", "missing LATERAL input JOIN predicate");
+                leftBindingScope.visibleColumns = left;
+                leftBindingScope.visibleColumns.insert(
+                    leftBindingScope.visibleColumns.end(), right.begin(), right.end());
+                const std::string bound = rewriteLateralOuterFrame(
+                    "select 1 from __lateral_bind where " +
+                    leftPredicates[nextLeftPredicate++], leftBindingScope);
+                const size_t where = findTopLevelKeyword(bound, "where");
+                predicate = trim(bound.substr(where + 5));
+            }
             std::vector<std::string> usingColumns;
             if (natural) {
                 for (const LateralVisibleColumn& leftColumn : left) {
@@ -14351,6 +14896,9 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
                     usingColumns.push_back(normalizeLateralIdentifier(rawName));
             }
             if (usingColumns.empty()) {
+                leftFromSql[item] = joinSql +
+                    (joinType == "cross" ? "" : " on " +
+                     (natural ? std::string("true") : predicate));
                 columns = std::move(left);
                 columns.insert(columns.end(), right.begin(), right.end());
                 return columns;
@@ -14373,9 +14921,13 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
                         rightMatches.push_back(ci);
                 }
                 if (leftMatches.size() != 1 || rightMatches.size() != 1) {
-                    supportedLeftScope = false;
-                    return std::vector<LateralVisibleColumn>{};
+                    throw dbms::DbError(
+                        leftMatches.size() > 1 || rightMatches.size() > 1 ? "42702" : "42703",
+                        "LATERAL input USING column \"" + name + "\" is missing or ambiguous");
                 }
+                if (!predicate.empty()) predicate += " and ";
+                predicate += leafExpression(left[leftMatches.front()]) + " = " +
+                             leafExpression(right[rightMatches.front()]);
                 const bool takeRight = joinType == "right";
                 LateralVisibleColumn merged = takeRight
                     ? right[rightMatches.front()] : left[leftMatches.front()];
@@ -14396,12 +14948,21 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
                 if (!mergedNames.count(column.column.dataName))
                     columns.push_back(std::move(column));
             }
+            leftFromSql[item] = joinSql + " on " + predicate;
             return columns;
         };
         std::vector<LateralVisibleColumn> leftVisibleColumns =
             buildLeftVisibleColumns(parsedFromSelect->fromClause.get());
         if (!supportedLeftScope ||
             nextLeftRelation != leftRelations.size()) break;
+        if (nextLeftPredicate != leftPredicates.size())
+            throw dbms::DbError("42601", "unbound LATERAL input JOIN predicate");
+        // Original table USING/NATURAL trees already bind their merged keys
+        // in the join executor. Only cached materializations need physical
+        // reference lowering; lowering an original chained FULL USING key to
+        // coalesce(...) in ON would exceed that executor's predicate subset.
+        if (materializeLeftJoinTree && hasMaterializedLeftRelation)
+            leftFactor = leftFromSql.at(parsedFromSelect->fromClause.get());
         TableSchema leftVisibleTbl;
         leftVisibleTbl.tablename = "__lateral_visible";
         if (leftVisibleColumns.size() > dbms::MAX_COLUMNS) {
@@ -14429,7 +14990,7 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
             bool leftExecutionFailed = false;
             std::string leftFailureText;
             std::string leftQuery = "SELECT * FROM " + leftFactor;
-            if (leftTreeHasMergedJoin) {
+            {
                 auto quoteIdentifier = [](const std::string& identifier) {
                     std::string quoted = "\"";
                     for (char c : identifier) {
@@ -14576,7 +15137,14 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
         bool allRowsStructured = true;
         std::vector<std::string> rightColNames;
         std::vector<std::string> rightColTypes;
+        if (foldingTail) {
+            for (const auto& row : leftRows) {
+                allStructuredRows.push_back(row.values);
+                allStructuredNulls.push_back(row.nulls);
+            }
+        }
         for (const auto& leftRow : leftRows) {
+            if (foldingTail) break;
             std::string replacedSql = innerSelect;
             if (leftRow.values.size() != leftTbl.len ||
                 leftRow.nulls.size() != leftTbl.len) {
@@ -14588,25 +15156,22 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
             const std::vector<std::string>& outerValues = leftRow.values;
             const std::vector<bool>& outerNulls = leftRow.nulls;
             // Replace left table column references with literal values
-            for (const LateralLeftRelation& relation : leftRelations) {
-                for (size_t ci = 0; ci < relation.schema.len; ++ci) {
-                    const size_t combinedIndex = relation.columnOffset + ci;
-                    const std::string& val = outerValues[combinedIndex];
-                    std::string escVal;
-                    for (char c : val) {
-                        if (c == '\'') escVal += "''";
-                        else escVal += c;
-                    }
-                    const bool isNull = outerNulls[combinedIndex];
-                    const bool isNum = relation.schema.cols[ci].dataType != "char" &&
-                                       !relation.schema.cols[ci].isVariableLength;
-                    const std::string lit = isNull
-                        ? "null" : (isNum ? escVal : "'" + escVal + "'");
-
-                    replaceLateralQualifiedColumn(
-                        replacedSql, leftColumnQualifiers[combinedIndex],
-                        relation.schema.cols[ci].dataName, lit);
+            for (size_t ci = 0; ci < leftTbl.len; ++ci) {
+                const dbms::Column& column = leftTbl.cols[ci];
+                const std::string& val = outerValues[ci];
+                std::string escVal;
+                for (char c : val) {
+                    if (c == '\'') escVal += "''";
+                    else escVal += c;
                 }
+                const bool isNull = outerNulls[ci];
+                const bool isNum = column.dataType != "char" &&
+                                   !column.isVariableLength;
+                const std::string lit = isNull
+                    ? "null" : (isNum ? escVal : "'" + escVal + "'");
+
+                replaceLateralQualifiedColumn(
+                    replacedSql, leftColumnQualifiers[ci], column.dataName, lit);
             }
             substituteLateralBareScalarTargets(
                 replacedSql, s, leftVisibleTbl,
@@ -14795,17 +15360,14 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
         // to obtain its columns/types so we can materialize an empty combined
         // relation instead of leaving raw LATERAL syntax for the legacy FROM
         // parser to misread as a relation name.
-        if (leftRows.empty()) {
+        if (leftRows.empty() && !foldingTail) {
             std::string probeSql = innerSelect;
             std::vector<std::string> nullVisibleValues(leftVisibleTbl.len);
             std::vector<bool> nullVisibleColumns(leftVisibleTbl.len, true);
-            for (const LateralLeftRelation& relation : leftRelations) {
-                for (size_t ci = 0; ci < relation.schema.len; ++ci) {
-                    const size_t combinedIndex = relation.columnOffset + ci;
-                    replaceLateralQualifiedColumn(
-                        probeSql, leftColumnQualifiers[combinedIndex],
-                        relation.schema.cols[ci].dataName, "null");
-                }
+            for (size_t ci = 0; ci < leftTbl.len; ++ci) {
+                replaceLateralQualifiedColumn(
+                    probeSql, leftColumnQualifiers[ci],
+                    leftTbl.cols[ci].dataName, "null");
             }
             substituteLateralBareScalarTargets(
                 probeSql, s, leftVisibleTbl, nullVisibleValues,
@@ -14819,7 +15381,7 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
             allRowsStructured = probeStructured;
         }
 
-        if (rightColNames.empty()) break;
+        if (rightColNames.empty() && !foldingTail) break;
 
         std::vector<std::string> combinedColNames;
         std::vector<std::string> combinedColTypes;
@@ -14839,7 +15401,6 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
             allRowsStructured ? &allStructuredRows : nullptr,
             allRowsStructured ? &allStructuredNulls : nullptr);
         if (tmpName.empty()) break;
-        lateralTempNames.insert(tmpName);
         lateralCount = counter;
 
         // The temporary relation already contains the correctly paired left
@@ -14852,96 +15413,36 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
             suffix.insert(suffix.begin(), ' ');
         }
         result = result.substr(0, fromPos + 4) + " " + tmpName + suffix;
-        // A preceding LATERAL item has already rewritten its alias-qualified
-        // references to synthetic column names. When that materialized row
-        // becomes the left input of another LATERAL item, carry those names
-        // forward to this item's new combined schema instead of accidentally
-        // resolving (for example) the old `__lat_r_0` as the new right value.
-        for (const LateralLeftRelation& relation : leftRelations) {
-            if (!lateralTempNames.count(relation.tableName)) continue;
-            for (size_t ci = 0; ci < relation.schema.len; ++ci) {
-                const size_t combinedIndex = relation.columnOffset + ci;
-                const std::string& oldName = relation.schema.cols[ci].dataName;
-                if (oldName.rfind("__lat_", 0) != 0) continue;
-                size_t pos = 0;
-                while ((pos = findTextOutsideQuotes(result, oldName, pos)) !=
-                       std::string::npos) {
-                    const size_t after = pos + oldName.size();
-                    const bool validLeftBoundary = pos == 0 ||
-                        (!isalnum(static_cast<unsigned char>(result[pos - 1])) &&
-                         result[pos - 1] != '_' && result[pos - 1] != '.');
-                    const bool validRightBoundary = after == result.size() ||
-                        (!isalnum(static_cast<unsigned char>(result[after])) &&
-                         result[after] != '_' && result[after] != '.');
-                    if (!validLeftBoundary || !validRightBoundary) {
-                        pos = after;
-                        continue;
-                    }
-                    result.replace(pos, oldName.size(),
-                                   combinedColNames[combinedIndex]);
-                    pos += combinedColNames[combinedIndex].size();
-                }
-            }
-        }
-        auto replaceQualified = [&](const std::string& qualifier,
-                                    const std::string& column,
-                                    const std::string& replacement) {
-            if (qualifier.empty()) return;
-            replaceLateralQualifiedColumn(result, {qualifier}, column,
-                                          replacement);
-        };
-        for (const LateralLeftRelation& relation : leftRelations) {
-            for (size_t ci = 0; ci < relation.schema.len; ++ci) {
-                const size_t combinedIndex = relation.columnOffset + ci;
-                const std::string& column = relation.schema.cols[ci].dataName;
-                for (const std::string& qualifier :
-                     leftColumnQualifiers[combinedIndex]) {
-                    replaceQualified(qualifier, column,
-                                     combinedColNames[combinedIndex]);
-                }
-            }
+        // Retain SQL-visible names and qualified leaves across the whole
+        // chain; physical storage names are introduced only in the final frame.
+        LateralMaterializedScope combinedScope;
+        combinedScope.physicalNames = combinedColNames;
+        combinedScope.qualifiers = leftColumnQualifiers;
+        combinedScope.visibleColumns = leftVisibleColumns;
+        for (size_t ci = 0; ci < leftTbl.len; ++ci)
+            combinedScope.physicalColumns.push_back(leftTbl.cols[ci]);
+        const TableSchema physicalSchema =
+            g_engine.getTableSchema(s.currentDB, tempTablePrefix(s, tmpName));
+        if (physicalSchema.len != combinedColNames.size()) {
+            throw dbms::DbError("54011", "LATERAL materialized input has too many columns");
         }
         for (size_t ci = 0; ci < rightColNames.size(); ++ci) {
-            replaceQualified(alias, rightColNames[ci],
-                             combinedColNames[leftTbl.len + ci]);
+            dbms::Column column = physicalSchema.cols[leftTbl.len + ci];
+            column.dataName = rightColNames[ci];
+            combinedScope.physicalColumns.push_back(column);
+            combinedScope.qualifiers.push_back({alias});
+            combinedScope.visibleColumns.push_back(
+                {column, {leftTbl.len + ci}});
         }
-
-        // Internal synthetic names are necessary when left and right expose
-        // duplicate column names, but a direct qualified projection must
-        // still report the PostgreSQL column label rather than the synthetic
-        // storage name.
-        const size_t rewrittenFrom = findTopLevelKeyword(result, "from");
-        if (rewrittenFrom != std::string::npos && rewrittenFrom >= 6) {
-            std::vector<std::string> targets = splitSelectColumns(
-                trim(result.substr(6, rewrittenFrom - 6)));
-            bool changedTargets = false;
-            for (std::string& target : targets) {
-                const std::string clean = trim(target);
-                for (size_t ci = 0; ci < leftTbl.len; ++ci) {
-                    if (clean == combinedColNames[ci]) {
-                        target = clean + " as " + leftTbl.cols[ci].dataName;
-                        changedTargets = true;
-                    }
-                }
-                for (size_t ci = 0; ci < rightColNames.size(); ++ci) {
-                    if (clean == combinedColNames[leftTbl.len + ci]) {
-                        target = clean + " as " + rightColNames[ci];
-                        changedTargets = true;
-                    }
-                }
-            }
-            if (changedTargets) {
-                std::string targetList;
-                for (size_t ti = 0; ti < targets.size(); ++ti) {
-                    if (ti > 0) targetList += ", ";
-                    targetList += trim(targets[ti]);
-                }
-                result = "select " + targetList + " " +
-                         result.substr(rewrittenFrom);
-            }
-        }
+        materializedScopes[tmpName] = std::move(combinedScope);
+        finalScopeName = tmpName;
     }
 
+    if (!finalScopeName.empty() &&
+        findKeywordOutsideQuotes(result, "lateral") == std::string::npos) {
+        result = rewriteLateralOuterFrame(
+            result, materializedScopes.at(finalScopeName));
+    }
     return result;
 }
 
