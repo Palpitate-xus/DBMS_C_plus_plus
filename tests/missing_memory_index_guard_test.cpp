@@ -37,8 +37,11 @@ static void expectRejected(const std::string& database) {
             } else {
                 result = bitmap(database, "items");
             }
-            std::cerr << "invalid memory index incorrectly returned "
-                      << result.rows.size() << " rows, ok=" << result.ok << '\n';
+            assert(!result.ok && result.errorSqlState == "XX001");
+            assert(result.errorException && !result.errorMessage.empty());
+            assert(result.rows.empty() && result.structuredRows.empty() &&
+                   result.structuredNulls.empty());
+            result.throwIfFailed();
         } catch (const dbms::DbError& error) {
             assert(error.sqlState() == "XX001");
             rejected = true;
