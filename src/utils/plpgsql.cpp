@@ -11,6 +11,7 @@
 
 #include "utils/plpgsql.h"
 #include "common/SqlSyntax.h"
+#include "parser/parser.h"
 
 #include <cctype>
 #include <cmath>
@@ -119,6 +120,308 @@ size_t protectedUnitEnd(const std::string& text, size_t start) {
         }
     }
     return start + 1;
+}
+
+
+// PostgreSQL 18 condition names (error entries with PL/pgSQL labels).
+// Facts from src/backend/utils/errcodes.txt; duplicate labels resolve to the
+// first entry, matching plpgsql_recognize_err_condition. Keep data case-sensitive.
+std::string raiseConditionSqlState(const std::string& condition) {
+    if (condition.size() == 5 && condition.find_first_not_of(
+            "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ") == std::string::npos) return condition;
+    static const std::map<std::string, std::string> codes = {
+        {"sql_statement_not_yet_complete", "03000"},
+        {"connection_exception", "08000"},
+        {"connection_does_not_exist", "08003"},
+        {"connection_failure", "08006"},
+        {"sqlclient_unable_to_establish_sqlconnection", "08001"},
+        {"sqlserver_rejected_establishment_of_sqlconnection", "08004"},
+        {"transaction_resolution_unknown", "08007"},
+        {"protocol_violation", "08P01"},
+        {"triggered_action_exception", "09000"},
+        {"feature_not_supported", "0A000"},
+        {"invalid_transaction_initiation", "0B000"},
+        {"locator_exception", "0F000"},
+        {"invalid_locator_specification", "0F001"},
+        {"invalid_grantor", "0L000"},
+        {"invalid_grant_operation", "0LP01"},
+        {"invalid_role_specification", "0P000"},
+        {"diagnostics_exception", "0Z000"},
+        {"stacked_diagnostics_accessed_without_active_handler", "0Z002"},
+        {"invalid_argument_for_xquery", "10608"},
+        {"case_not_found", "20000"},
+        {"cardinality_violation", "21000"},
+        {"data_exception", "22000"},
+        {"array_subscript_error", "2202E"},
+        {"character_not_in_repertoire", "22021"},
+        {"datetime_field_overflow", "22008"},
+        {"division_by_zero", "22012"},
+        {"error_in_assignment", "22005"},
+        {"escape_character_conflict", "2200B"},
+        {"indicator_overflow", "22022"},
+        {"interval_field_overflow", "22015"},
+        {"invalid_argument_for_logarithm", "2201E"},
+        {"invalid_argument_for_ntile_function", "22014"},
+        {"invalid_argument_for_nth_value_function", "22016"},
+        {"invalid_argument_for_power_function", "2201F"},
+        {"invalid_argument_for_width_bucket_function", "2201G"},
+        {"invalid_character_value_for_cast", "22018"},
+        {"invalid_datetime_format", "22007"},
+        {"invalid_escape_character", "22019"},
+        {"invalid_escape_octet", "2200D"},
+        {"invalid_escape_sequence", "22025"},
+        {"nonstandard_use_of_escape_character", "22P06"},
+        {"invalid_indicator_parameter_value", "22010"},
+        {"invalid_parameter_value", "22023"},
+        {"invalid_preceding_or_following_size", "22013"},
+        {"invalid_regular_expression", "2201B"},
+        {"invalid_row_count_in_limit_clause", "2201W"},
+        {"invalid_row_count_in_result_offset_clause", "2201X"},
+        {"invalid_tablesample_argument", "2202H"},
+        {"invalid_tablesample_repeat", "2202G"},
+        {"invalid_time_zone_displacement_value", "22009"},
+        {"invalid_use_of_escape_character", "2200C"},
+        {"most_specific_type_mismatch", "2200G"},
+        {"null_value_not_allowed", "22004"},
+        {"null_value_no_indicator_parameter", "22002"},
+        {"numeric_value_out_of_range", "22003"},
+        {"sequence_generator_limit_exceeded", "2200H"},
+        {"string_data_length_mismatch", "22026"},
+        {"string_data_right_truncation", "22001"},
+        {"substring_error", "22011"},
+        {"trim_error", "22027"},
+        {"unterminated_c_string", "22024"},
+        {"zero_length_character_string", "2200F"},
+        {"floating_point_exception", "22P01"},
+        {"invalid_text_representation", "22P02"},
+        {"invalid_binary_representation", "22P03"},
+        {"bad_copy_file_format", "22P04"},
+        {"untranslatable_character", "22P05"},
+        {"not_an_xml_document", "2200L"},
+        {"invalid_xml_document", "2200M"},
+        {"invalid_xml_content", "2200N"},
+        {"invalid_xml_comment", "2200S"},
+        {"invalid_xml_processing_instruction", "2200T"},
+        {"duplicate_json_object_key_value", "22030"},
+        {"invalid_argument_for_sql_json_datetime_function", "22031"},
+        {"invalid_json_text", "22032"},
+        {"invalid_sql_json_subscript", "22033"},
+        {"more_than_one_sql_json_item", "22034"},
+        {"no_sql_json_item", "22035"},
+        {"non_numeric_sql_json_item", "22036"},
+        {"non_unique_keys_in_a_json_object", "22037"},
+        {"singleton_sql_json_item_required", "22038"},
+        {"sql_json_array_not_found", "22039"},
+        {"sql_json_member_not_found", "2203A"},
+        {"sql_json_number_not_found", "2203B"},
+        {"sql_json_object_not_found", "2203C"},
+        {"too_many_json_array_elements", "2203D"},
+        {"too_many_json_object_members", "2203E"},
+        {"sql_json_scalar_required", "2203F"},
+        {"sql_json_item_cannot_be_cast_to_target_type", "2203G"},
+        {"integrity_constraint_violation", "23000"},
+        {"restrict_violation", "23001"},
+        {"not_null_violation", "23502"},
+        {"foreign_key_violation", "23503"},
+        {"unique_violation", "23505"},
+        {"check_violation", "23514"},
+        {"exclusion_violation", "23P01"},
+        {"invalid_cursor_state", "24000"},
+        {"invalid_transaction_state", "25000"},
+        {"active_sql_transaction", "25001"},
+        {"branch_transaction_already_active", "25002"},
+        {"held_cursor_requires_same_isolation_level", "25008"},
+        {"inappropriate_access_mode_for_branch_transaction", "25003"},
+        {"inappropriate_isolation_level_for_branch_transaction", "25004"},
+        {"no_active_sql_transaction_for_branch_transaction", "25005"},
+        {"read_only_sql_transaction", "25006"},
+        {"schema_and_data_statement_mixing_not_supported", "25007"},
+        {"no_active_sql_transaction", "25P01"},
+        {"in_failed_sql_transaction", "25P02"},
+        {"idle_in_transaction_session_timeout", "25P03"},
+        {"transaction_timeout", "25P04"},
+        {"invalid_sql_statement_name", "26000"},
+        {"triggered_data_change_violation", "27000"},
+        {"invalid_authorization_specification", "28000"},
+        {"invalid_password", "28P01"},
+        {"dependent_privilege_descriptors_still_exist", "2B000"},
+        {"dependent_objects_still_exist", "2BP01"},
+        {"invalid_transaction_termination", "2D000"},
+        {"sql_routine_exception", "2F000"},
+        {"function_executed_no_return_statement", "2F005"},
+        {"modifying_sql_data_not_permitted", "2F002"},
+        {"prohibited_sql_statement_attempted", "2F003"},
+        {"reading_sql_data_not_permitted", "2F004"},
+        {"invalid_cursor_name", "34000"},
+        {"external_routine_exception", "38000"},
+        {"containing_sql_not_permitted", "38001"},
+        {"external_routine_invocation_exception", "39000"},
+        {"invalid_sqlstate_returned", "39001"},
+        {"trigger_protocol_violated", "39P01"},
+        {"srf_protocol_violated", "39P02"},
+        {"event_trigger_protocol_violated", "39P03"},
+        {"savepoint_exception", "3B000"},
+        {"invalid_savepoint_specification", "3B001"},
+        {"invalid_catalog_name", "3D000"},
+        {"invalid_schema_name", "3F000"},
+        {"transaction_rollback", "40000"},
+        {"transaction_integrity_constraint_violation", "40002"},
+        {"serialization_failure", "40001"},
+        {"statement_completion_unknown", "40003"},
+        {"deadlock_detected", "40P01"},
+        {"syntax_error_or_access_rule_violation", "42000"},
+        {"syntax_error", "42601"},
+        {"insufficient_privilege", "42501"},
+        {"cannot_coerce", "42846"},
+        {"grouping_error", "42803"},
+        {"windowing_error", "42P20"},
+        {"invalid_recursion", "42P19"},
+        {"invalid_foreign_key", "42830"},
+        {"invalid_name", "42602"},
+        {"name_too_long", "42622"},
+        {"reserved_name", "42939"},
+        {"datatype_mismatch", "42804"},
+        {"indeterminate_datatype", "42P18"},
+        {"collation_mismatch", "42P21"},
+        {"indeterminate_collation", "42P22"},
+        {"wrong_object_type", "42809"},
+        {"generated_always", "428C9"},
+        {"undefined_column", "42703"},
+        {"undefined_function", "42883"},
+        {"undefined_table", "42P01"},
+        {"undefined_parameter", "42P02"},
+        {"undefined_object", "42704"},
+        {"duplicate_column", "42701"},
+        {"duplicate_cursor", "42P03"},
+        {"duplicate_database", "42P04"},
+        {"duplicate_function", "42723"},
+        {"duplicate_prepared_statement", "42P05"},
+        {"duplicate_schema", "42P06"},
+        {"duplicate_table", "42P07"},
+        {"duplicate_alias", "42712"},
+        {"duplicate_object", "42710"},
+        {"ambiguous_column", "42702"},
+        {"ambiguous_function", "42725"},
+        {"ambiguous_parameter", "42P08"},
+        {"ambiguous_alias", "42P09"},
+        {"invalid_column_reference", "42P10"},
+        {"invalid_column_definition", "42611"},
+        {"invalid_cursor_definition", "42P11"},
+        {"invalid_database_definition", "42P12"},
+        {"invalid_function_definition", "42P13"},
+        {"invalid_prepared_statement_definition", "42P14"},
+        {"invalid_schema_definition", "42P15"},
+        {"invalid_table_definition", "42P16"},
+        {"invalid_object_definition", "42P17"},
+        {"with_check_option_violation", "44000"},
+        {"insufficient_resources", "53000"},
+        {"disk_full", "53100"},
+        {"out_of_memory", "53200"},
+        {"too_many_connections", "53300"},
+        {"configuration_limit_exceeded", "53400"},
+        {"program_limit_exceeded", "54000"},
+        {"statement_too_complex", "54001"},
+        {"too_many_columns", "54011"},
+        {"too_many_arguments", "54023"},
+        {"object_not_in_prerequisite_state", "55000"},
+        {"object_in_use", "55006"},
+        {"cant_change_runtime_param", "55P02"},
+        {"lock_not_available", "55P03"},
+        {"unsafe_new_enum_value_usage", "55P04"},
+        {"operator_intervention", "57000"},
+        {"query_canceled", "57014"},
+        {"admin_shutdown", "57P01"},
+        {"crash_shutdown", "57P02"},
+        {"cannot_connect_now", "57P03"},
+        {"database_dropped", "57P04"},
+        {"idle_session_timeout", "57P05"},
+        {"system_error", "58000"},
+        {"io_error", "58030"},
+        {"undefined_file", "58P01"},
+        {"duplicate_file", "58P02"},
+        {"file_name_too_long", "58P03"},
+        {"config_file_error", "F0000"},
+        {"lock_file_exists", "F0001"},
+        {"fdw_error", "HV000"},
+        {"fdw_column_name_not_found", "HV005"},
+        {"fdw_dynamic_parameter_value_needed", "HV002"},
+        {"fdw_function_sequence_error", "HV010"},
+        {"fdw_inconsistent_descriptor_information", "HV021"},
+        {"fdw_invalid_attribute_value", "HV024"},
+        {"fdw_invalid_column_name", "HV007"},
+        {"fdw_invalid_column_number", "HV008"},
+        {"fdw_invalid_data_type", "HV004"},
+        {"fdw_invalid_data_type_descriptors", "HV006"},
+        {"fdw_invalid_descriptor_field_identifier", "HV091"},
+        {"fdw_invalid_handle", "HV00B"},
+        {"fdw_invalid_option_index", "HV00C"},
+        {"fdw_invalid_option_name", "HV00D"},
+        {"fdw_invalid_string_length_or_buffer_length", "HV090"},
+        {"fdw_invalid_string_format", "HV00A"},
+        {"fdw_invalid_use_of_null_pointer", "HV009"},
+        {"fdw_too_many_handles", "HV014"},
+        {"fdw_out_of_memory", "HV001"},
+        {"fdw_no_schemas", "HV00P"},
+        {"fdw_option_name_not_found", "HV00J"},
+        {"fdw_reply_handle", "HV00K"},
+        {"fdw_schema_not_found", "HV00Q"},
+        {"fdw_table_not_found", "HV00R"},
+        {"fdw_unable_to_create_execution", "HV00L"},
+        {"fdw_unable_to_create_reply", "HV00M"},
+        {"fdw_unable_to_establish_connection", "HV00N"},
+        {"plpgsql_error", "P0000"},
+        {"raise_exception", "P0001"},
+        {"no_data_found", "P0002"},
+        {"too_many_rows", "P0003"},
+        {"assert_failure", "P0004"},
+        {"internal_error", "XX000"},
+        {"data_corrupted", "XX001"},
+        {"index_corrupted", "XX002"},
+    };
+    const auto found = codes.find(condition);
+    return found == codes.end() ? std::string() : found->second;
+}
+
+// Reuse the SQL lexical decoder, without evaluating an expression or calling
+// any host. The raw endpoint is retained to parse subsequent arguments/options.
+bool readRaiseString(const std::string& text, size_t start,
+                     std::string& value, size_t& end) {
+    start = skipLeadingSqlTrivia(text, start);
+    if (start == std::string::npos || start >= text.size()) return false;
+    size_t unit = start;
+    if ((text[start] == 'e' || text[start] == 'E') &&
+        start + 1 < text.size() && text[start + 1] == '\'') ++unit;
+    if (text[unit] != '\'' && text[unit] != '$') return false;
+    end = protectedUnitEnd(text, unit);
+    const auto raw = text.substr(start, end - start);
+    if (!SQLParser::lexicalError(raw).empty()) return false;
+    const auto tokens = SQLParser::tokenize(raw);
+    if (tokens.size() != 1 || tokens[0].size() < 2 ||
+        tokens[0].front() != '\'' || tokens[0].back() != '\'') return false;
+    value.clear();
+    for (size_t i = 1; i + 1 < tokens[0].size(); ++i) {
+        value += tokens[0][i];
+        if (tokens[0][i] == '\'' && i + 2 < tokens[0].size() && tokens[0][i+1] == '\'') ++i;
+    }
+    return true;
+}
+
+bool splitRaiseList(const std::string& text, std::vector<std::string>& items) {
+    const auto protectedBytes = sqlProtectedBytes(text);
+    size_t begin = 0, depth = 0;
+    for (size_t i = 0; i < text.size(); ++i) {
+        if (protectedBytes[i]) continue;
+        if (text[i] == '(' || text[i] == '[') ++depth;
+        else if (text[i] == ')' || text[i] == ']') { if (!depth) return false; --depth; }
+        else if (text[i] == ',' && !depth) {
+            items.push_back(trimCopy(text.substr(begin, i - begin))); begin = i + 1;
+        }
+    }
+    if (depth) return false;
+    items.push_back(trimCopy(text.substr(begin)));
+    for (const auto& item : items)
+        if (skipLeadingSqlTrivia(item) >= item.size()) return false;
+    return true;
 }
 
 // Character-level scanner with string/comment skipping.
@@ -255,9 +558,14 @@ struct ExitStmt : Stmt {
     std::string cond;
 };
 struct RaiseStmt : Stmt {
-    std::string level;
+    std::string level = "exception";
+    bool rethrow = false;
+    bool hasFormat = false;
     std::string fmt;
+    std::string condition;
+    std::string sqlState;
     std::vector<std::string> args;
+    std::vector<std::pair<std::string, std::string>> options;
 };
 struct IfStmt : Stmt {
     struct Branch { std::string cond; bool hasCond; CompoundStmt body; };
@@ -290,11 +598,12 @@ struct BlockStmt : Stmt {
 struct Parser {
     Scanner sc;
     std::string error;
+    std::string errorSqlState = "42601";
 
     explicit Parser(const std::string& body) : sc(body) {}
 
-    bool fail(const std::string& m) {
-        if (error.empty()) error = m;
+    bool fail(const std::string& m, const std::string& state = "42601") {
+        if (error.empty()) { error = m; errorSqlState = state; }
         return false;
     }
 
@@ -404,44 +713,90 @@ struct Parser {
 
     StmtPtr parseRaise() {
         auto s = std::make_unique<RaiseStmt>();
-        s->level = "notice";
         std::string kw = sc.peekKeyword();
+        bool explicitLevel = false;
         if (kw == "notice" || kw == "warning" || kw == "error" || kw == "exception" ||
             kw == "log" || kw == "info" || kw == "debug") {
+            explicitLevel = true;
             s->level = kw;
             sc.matchKeyword(kw.c_str());
         }
-        std::string text = readUntilSemicolon(sc);
-        size_t p = 0;
-        if (p < text.size() && text[p] == '\'') {
-            ++p;
-            while (p < text.size()) {
-                if (text[p] == '\'') {
-                    if (p + 1 < text.size() && text[p + 1] == '\'') { s->fmt += '\''; p += 2; }
-                    else { ++p; break; }
-                } else s->fmt += text[p++];
-            }
-        } else {
-            s->fmt = text;
+        const std::string text = readUntilSemicolon(sc);
+        const auto lexicalError = SQLParser::lexicalError(text);
+        if (!lexicalError.empty()) { fail(lexicalError); return nullptr; }
+        if (skipLeadingSqlTrivia(text) >= text.size()) {
+            if (explicitLevel) { fail("RAISE severity requires a message or condition"); return nullptr; }
+            s->rethrow = true;
+            return s;
         }
-        std::string rest = text.substr(p);
-        size_t comma = rest.find(',');
-        std::string argText = comma == std::string::npos ? "" : rest.substr(comma + 1);
-        if (!trimCopy(argText).empty()) {
-            std::string cur;
-            int depth = 0; bool inS = false;
-            for (char c : argText) {
-                if (inS) { cur += c; if (c == '\'') inS = false; continue; }
-                if (c == '\'') { inS = true; cur += c; continue; }
-                if (c == '(') ++depth;
-                if (c == ')') --depth;
-                if (c == ',' && depth == 0) {
-                    if (!trimCopy(cur).empty()) s->args.push_back(trimCopy(cur));
-                    cur.clear(); continue;
+        const size_t usingPos = findTopLevelSqlKeyword(text, "using");
+        const std::string prefix = text.substr(0, usingPos);
+        size_t cursor = skipLeadingSqlTrivia(prefix), end = cursor;
+        if (cursor < prefix.size() && readRaiseString(prefix, cursor, s->fmt, end)) {
+            s->hasFormat = true;
+            cursor = skipLeadingSqlTrivia(prefix, end);
+            if (cursor < prefix.size()) {
+                if (prefix[cursor] != ',' || !splitRaiseList(prefix.substr(cursor + 1), s->args)) {
+                    fail("invalid RAISE argument list"); return nullptr;
                 }
-                cur += c;
             }
-            if (!trimCopy(cur).empty()) s->args.push_back(trimCopy(cur));
+            size_t expected = 0;
+            for (size_t i = 0; i < s->fmt.size(); ++i) if (s->fmt[i] == '%') {
+                if (i + 1 < s->fmt.size() && s->fmt[i+1] == '%') ++i;
+                else ++expected;
+            }
+            if (expected != s->args.size()) {
+                fail(expected > s->args.size() ? "too few parameters specified for RAISE" :
+                                               "too many parameters specified for RAISE");
+                return nullptr;
+            }
+        } else if (cursor < prefix.size()) {
+            std::string condition;
+            if (!readIdentifier(prefix, cursor, condition, end)) {
+                fail("RAISE requires a string literal or condition"); return nullptr;
+            }
+            if (condition == "sqlstate" && prefix[cursor] != '"') {
+                if (!readRaiseString(prefix, end, s->condition, cursor) ||
+                    s->condition.size() != 5 || s->condition.find_first_not_of(
+                        "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ") != std::string::npos) {
+                    fail("invalid SQLSTATE code"); return nullptr;
+                }
+                end = cursor;
+                s->sqlState = s->condition;
+            } else {
+                s->condition = condition;
+                s->sqlState = raiseConditionSqlState(condition);
+                if (s->sqlState.empty()) {
+                    fail("unrecognized exception condition: " + condition, "42704"); return nullptr;
+                }
+            }
+            if (skipLeadingSqlTrivia(prefix, end) < prefix.size()) {
+                fail("unexpected text after RAISE condition"); return nullptr;
+            }
+        } else if (usingPos == std::string::npos) {
+            fail("invalid RAISE statement"); return nullptr;
+        }
+        if (usingPos != std::string::npos) {
+            std::vector<std::string> options;
+            if (!splitRaiseList(text.substr(usingPos + 5), options)) {
+                fail("invalid RAISE USING option list"); return nullptr;
+            }
+            for (const auto& option : options) {
+                std::string name;
+                if (!readIdentifier(option, skipLeadingSqlTrivia(option), name, end) ||
+                    (name != "errcode" && name != "message" && name != "detail" &&
+                     name != "hint" && name != "column" && name != "constraint" &&
+                     name != "datatype" && name != "table" && name != "schema")) {
+                    fail("unrecognized RAISE option"); return nullptr;
+                }
+                cursor = skipLeadingSqlTrivia(option, end);
+                if (option.compare(cursor, 2, ":=") == 0) cursor += 2;
+                else if (cursor < option.size() && option[cursor] == '=') ++cursor;
+                else { fail("RAISE option requires = or :="); return nullptr; }
+                cursor = skipLeadingSqlTrivia(option, cursor);
+                if (cursor >= option.size()) { fail("RAISE option requires an expression"); return nullptr; }
+                s->options.emplace_back(name, trimCopy(option.substr(cursor)));
+            }
         }
         return s;
     }
@@ -1290,14 +1645,15 @@ struct Interp {
             return true;
         }
         if (auto* rs = dynamic_cast<const RaiseStmt*>(&s)) {
+            if (rs->rethrow) {
+                return fail("RAISE without parameters cannot be used outside an exception handler", "0Z002");
+            }
             std::vector<std::string> vals;
             for (const auto& a : rs->args) {
-                if (a.size() >= 2 && a.front() == '\'' && a.back() == '\'') {
-                    vals.push_back(a.substr(1, a.size() - 2));
-                } else {
-                    auto v = eval(a);
-                    vals.push_back(v ? *v : std::string());
-                }
+                bool isNull = false;
+                const auto value = eval(a, &isNull);
+                if (!value || !error.empty()) return false;
+                vals.push_back(isNull ? "<NULL>" : *value);
             }
             // PG RAISE formats: % = next arg (any type), %% = literal %.
             std::string msg;
@@ -1312,10 +1668,40 @@ struct Interp {
                     msg += rs->fmt[i];
                 }
             }
-            if (notice) notice(rs->level, msg);
-            if (rs->level == "error" || rs->level == "exception") {
-                return fail("PL/pgSQL exception: " + msg);
+            const bool fatal = rs->level == "error" || rs->level == "exception";
+            bool hasMessage = rs->hasFormat;
+            std::string code = rs->sqlState;
+            std::string condition = rs->condition;
+            std::set<std::string> diagnostics;
+            for (const auto& [name, expression] : rs->options) {
+                bool isNull = false;
+                const auto value = eval(expression, &isNull);
+                if (!value || !error.empty()) return false;
+                if (isNull) return fail("RAISE statement option cannot be null", "22004");
+                if (name == "errcode") {
+                    if (!code.empty() && code != "00000")
+                        return fail("RAISE option already specified: ERRCODE", "42601");
+                    code = raiseConditionSqlState(*value);
+                    if (code.empty()) return fail("unrecognized exception condition: " + *value, "42704");
+                    condition = *value;
+                } else if (name == "message") {
+                    if (hasMessage) return fail("RAISE option already specified: MESSAGE", "42601");
+                    hasMessage = true; msg = *value;
+                } else {
+                    if (!diagnostics.insert(name).second)
+                        return fail("RAISE option already specified: " + name, "42601");
+                    // The current host error/notice contract has no diagnostic
+                    // fields. Never silently discard requested DETAIL/HINT or
+                    // object-name diagnostics and report successful support.
+                    return fail("RAISE diagnostic option is not supported: " + name, "0A000");
+                }
             }
+            if (code.empty() || code == "00000") code = fatal ? "P0001" : "00000";
+            if (!hasMessage) msg = condition.empty() ? code : condition;
+            if (fatal) {
+                return fail("PL/pgSQL exception: " + msg, code);
+            }
+            if (notice) notice(rs->level, msg);
             return true;
         }
         if (auto* i = dynamic_cast<const IfStmt*>(&s)) {
@@ -1536,13 +1922,13 @@ bool PlPgsql::run(const std::string& body,
     parser.sc.matchKeyword("declare");  // optional leading DECLARE section
     if (!parser.parseDeclares(defaults)) {
         error = parser.error.empty() ? "DECLARE parse failed" : parser.error;
-        if (errorSqlState) *errorSqlState = "42601";
+        if (errorSqlState) *errorSqlState = parser.errorSqlState;
         return false;
     }
     CompoundStmt program;
     if (!parser.parseCompoundInto(program)) {
         error = parser.error.empty() ? "body parse failed" : parser.error;
-        if (errorSqlState) *errorSqlState = "42601";
+        if (errorSqlState) *errorSqlState = parser.errorSqlState;
         return false;
     }
     // trailing END (of BEGIN block): tolerate optional "end;" / "end;"
