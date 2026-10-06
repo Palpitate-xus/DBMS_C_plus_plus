@@ -12,6 +12,7 @@
 #include "executor.h"
 #include "parser/query_binding.h"
 #include "common/DbError.h"
+#include "expression/prepared_query_execution.h"
 
 namespace dbms {
 
@@ -94,6 +95,28 @@ protected:
 private:
     bool error_ = false;
     std::string errorMessage_;
+};
+
+// A logical relation has typed ordinal cells, not a storage schema keyed by
+// output labels. Reading index N is demand driven; independent scans can
+// share a statement-owned CTE cache without reevaluating earlier rows.
+class PreparedSourceRowsOp final : public Operator {
+public:
+    using Reader = std::function<bool(size_t, std::vector<ExprValue>&)>;
+    PreparedSourceRowsOp(QueryRowDescriptor descriptor, Reader reader)
+        : descriptor_(std::move(descriptor)), reader_(std::move(reader)) {}
+    bool open() override;
+    bool next(std::string& row) override;
+    void close() override;
+    bool supportsStructuredRows() const override { return true; }
+    bool lastStructuredRow(std::vector<std::string>& cells, std::vector<bool>& nulls) const override;
+    bool lastColumnIsNull(size_t ordinal) const override;
+    std::string preparedPlanNodeName() const override { return "CTEScan"; }
+private:
+    QueryRowDescriptor descriptor_;
+    Reader reader_;
+    size_t position_ = 0;
+    std::vector<ExprValue> row_;
 };
 
 using OpPtr = std::unique_ptr<Operator>;
@@ -1213,6 +1236,14 @@ public:
     static OpPtr buildPreparedSelectPlan(StorageEngine* engine,
         const std::string& dbname, const std::string& tablename,
         PreparedQuery prepared);
+    // A retained SELECT inside a wholly prepared statement may consume a
+    // real typed logical source (CTE/derived rows). It owns neither another
+    // SQL namespace nor a temporary physical relation. The descriptor and
+    // source ordinal remain those of the original binder.
+    static OpPtr buildPreparedSelectPlan(StorageEngine* engine,
+        const std::string& dbname, std::shared_ptr<PreparedQuery> prepared,
+        SelectStmt* select, const TableSchema& sourceSchema, OpPtr source,
+        const RowContext& outerRow = {}, PreparedChildExecutor childExecutor = {});
     // Build operator tree for SELECT * FROM t WHERE ... ORDER BY ... LIMIT ...
     static OpPtr buildSelectPlan(StorageEngine* engine, const PlanContext& ctx);
 

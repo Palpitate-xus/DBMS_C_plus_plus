@@ -6,6 +6,8 @@
 #include <set>
 
 namespace dbms {
+using PreparedQueryRows = std::vector<std::vector<ExprValue>>;
+using PreparedChildExecutor = std::function<PreparedQueryRows(const Stmt*, const RowContext&, size_t)>;
 
 // One execution of one wholly prepared statement. The caller must create a
 // new carrier for each execution; initplan values never outlive that execution.
@@ -27,6 +29,10 @@ public:
     // Call on every executable expression before opening sources/evaluating
     // any expression. Routine registration and collation checks are pure.
     void prepareExpression(Expr* expression);
+    // A projection star may produce an execution-owned positional column.
+    // Its true owner/range must still be validated; no SQL name lookup.
+    void prepareProjectionColumn(ColumnRefExpr* column, const Stmt* owner);
+    void setQueryExecutor(PreparedChildExecutor executor);
     ExprValue evaluate(const Expr* expression, const RowContext& row) const;
 
 private:
@@ -46,6 +52,7 @@ private:
     std::map<const Expr*, ExprPtr> compiled_;
     std::map<const Expr*, const Expr*> originalSites_;
     mutable std::map<const Expr*, ExprValue> memo_;
+    PreparedChildExecutor queryExecutor_;
 
     void indexStatement(const Stmt* statement, const Stmt* parent);
     void indexExpression(const Expr* expression, const Stmt* owner);

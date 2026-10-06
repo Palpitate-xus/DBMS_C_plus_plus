@@ -7,7 +7,11 @@
 
 namespace dbms {
 
-struct QueryOutputColumn { std::string name, type; };
+struct QueryOutputColumn {
+    std::string name, type;
+    bool generated = false;
+    char identity = 0;
+};
 using QueryRowDescriptor = std::vector<QueryOutputColumn>;
 struct QueryRelationMetadata {
     std::string schema, name;
@@ -25,6 +29,10 @@ struct QueryBindingMetadata {
     // Must return a copied, metadata-only descriptor, never execute a query.
     std::function<QueryRelationMetadata(const std::string&)> relation;
     std::function<std::string(const FunctionCallExpr*)> functionType;
+    // Optional pure assignment-context validation. Never execute a routine,
+    // query or source row to infer its type/value. source is null when the
+    // descriptor has no direct value-expression leaf (star/set/derived).
+    std::function<void(const QueryOutputColumn&, const Expr*, const std::string&)> assignmentInput;
 };
 struct PreparedQuery {
     struct Use { size_t begin, end, slot; };
@@ -35,6 +43,11 @@ struct PreparedQuery {
         std::string schema, name;
         QueryRowDescriptor columns;
         bool mergedUsing;
+        // The physical identity is independent of the visible SQL alias.
+        std::string relationSchema, relationName;
+        // A logical CTE is a prepared statement, never a physical table
+        // found by reinterpreting its spelling at execution time.
+        const Stmt* cteStatement = nullptr;
     };
     std::string source;
     StmtPtr ast;
@@ -45,6 +58,7 @@ struct PreparedQuery {
     // Source pointers belong to ast; their identities survive AST ownership
     // moves. Ordinals are unique in this prepared query, not SQL text keys.
     std::vector<SourceRange> sourceRanges;
+    std::map<const Stmt*, QueryRowDescriptor> statementOutputs;
     // Transitional adapter for dispatchers that still parse SQL strings.
     // Encoding is permitted only after whole-tree preparation has succeeded.
     std::string legacySql() const;

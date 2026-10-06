@@ -205,6 +205,25 @@ void PreparedQueryExecution::prepareExpression(Expr* expression) {
     prepared_.insert(expression);
 }
 
+void PreparedQueryExecution::prepareProjectionColumn(ColumnRefExpr* column, const Stmt* owner) {
+    if (!column || !column->binding || !parents_.count(owner))
+        throw DbError("XX000", "synthetic projection requires a genuine prepared owner");
+    const auto& binding = *column->binding;
+    const auto& range = sourceRange(binding.sourceOrdinal);
+    if (range.owner != owner || binding.scopeDepth || binding.mergedUsing != range.mergedUsing ||
+        binding.columnOrdinal >= range.columns.size() ||
+        ExprHelper::canonicalResultTypeName(binding.declaredType) !=
+            ExprHelper::canonicalResultTypeName(range.columns[binding.columnOrdinal].type))
+        throw DbError("XX000", "synthetic projection column has an invalid positional binding");
+    owners_.emplace(column, owner);
+    prepareExpression(column);
+}
+
+void PreparedQueryExecution::setQueryExecutor(PreparedChildExecutor executor) {
+    memo_.clear();
+    queryExecutor_ = std::move(executor);
+}
+
 ExprValue PreparedQueryExecution::evaluate(const Expr* expression, const RowContext& row) const {
     if (!expression || !prepared_.count(expression))
         throw DbError("XX000", "prepared expression was not registered before execution");
@@ -224,6 +243,22 @@ ExprValue PreparedQueryExecution::executeChild(const Expr* expression, const Row
     if (child.correlations.empty()) {
         const auto cached = memo_.find(expression);
         if (cached != memo_.end()) return cached->second;
+    }
+    if (queryExecutor_) {
+        const Stmt* statement = expression->preparedSubquery.get();
+        const auto output = query_->statementOutputs.find(statement);
+        if (output == query_->statementOutputs.end() || output->second.size() != 1)
+            throw DbError("42601", "subquery must return only one column");
+        const auto rows = queryExecutor_(statement, row, 2);
+        if (rows.size() > 1)
+            throw DbError("21000", "more than one row returned by a subquery used as an expression");
+        ExprValue result(output->second.front().type, "", true);
+        if (!rows.empty()) {
+            if (rows.front().size() != 1) throw DbError("XX000", "scalar child lost its structured width");
+            result = rows.front().front();
+        }
+        if (child.correlations.empty()) memo_.emplace(expression, result);
+        return result;
     }
     PreparedQuery adapter;
     adapter.source = query_->source.substr(child.begin, child.end - child.begin);
@@ -301,7 +336,10 @@ void PreparedQueryExecution::indexStatement(const Stmt* statement, const Stmt* p
         indexStatement(item->subquery.get(), statement); value(item->joinCondition);
         from(item->left.get()); from(item->right.get());
     };
-    if (const auto* node = dynamic_cast<const SelectStmt*>(statement)) {
+    if (const auto* node = dynamic_cast<const WithStmt*>(statement)) {
+        for (const auto& cte : node->ctes) indexStatement(cte.query.get(), statement);
+        indexStatement(node->statement.get(), statement);
+    } else if (const auto* node = dynamic_cast<const SelectStmt*>(statement)) {
         for (const auto& cte : node->ctes) indexStatement(cte.query.get(), statement);
         indexStatement(node->setOpLhs.get(), statement); indexStatement(node->setOpRhs.get(), statement);
         items(node->selectList); from(node->fromClause.get()); value(node->whereClause); value(node->having);

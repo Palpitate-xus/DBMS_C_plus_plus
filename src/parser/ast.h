@@ -704,6 +704,10 @@ struct SelectStmt : public Stmt {
         StmtPtr query;
         bool recursive = false;
         bool materialized = true;  // MATERIALIZED / NOT MATERIALIZED
+        // Original body bytes, excluding the AS parentheses. Valid when
+        // parsed for binding; execution must never rediscover this boundary.
+        size_t queryBegin = std::string::npos;
+        size_t queryEnd = std::string::npos;
     };
     std::vector<CTE> ctes;
 
@@ -716,6 +720,18 @@ struct SelectStmt : public Stmt {
 
     SelectStmt() : Stmt(SqlCommand::Select) {}
     std::string toString() const override { return "SELECT"; }
+};
+
+// A WITH envelope whose primary statement is DML. SELECT retains its
+// existing CTE field for compatibility; both representations own genuine
+// child statements, not an SQL suffix masquerading as a SELECT expression.
+struct WithStmt : public Stmt {
+    std::vector<SelectStmt::CTE> ctes;
+    StmtPtr statement;
+    size_t statementBegin = std::string::npos;
+    size_t statementEnd = std::string::npos;
+    explicit WithStmt(SqlCommand primary) : Stmt(primary) {}
+    std::string toString() const override { return "WITH"; }
 };
 
 // ============================================================================

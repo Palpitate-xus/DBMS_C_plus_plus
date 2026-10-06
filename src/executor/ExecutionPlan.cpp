@@ -75,6 +75,28 @@ void MaterializedRowsOp::close() {
     pos_ = 0;
 }
 
+bool PreparedSourceRowsOp::open() { clearError(); position_ = 0; row_.clear(); return true; }
+bool PreparedSourceRowsOp::next(std::string& text) {
+    NextInstrument instrumentation(this);
+    if (!reader_(position_, row_)) { row_.clear(); return false; }
+    if (row_.size() != descriptor_.size()) throw DbError("XX000", "logical source row width differs from descriptor");
+    text.clear();
+    for (size_t i = 0; i < row_.size(); ++i) {
+        if (ExprHelper::canonicalResultTypeName(row_[i].typeName) != ExprHelper::canonicalResultTypeName(descriptor_[i].type))
+            throw DbError("XX000", "logical source cell type differs from descriptor");
+        text += row_[i].isNull ? "NULL " : row_[i].value + " ";
+    }
+    ++position_; instrumentation.emitted = true; return true;
+}
+void PreparedSourceRowsOp::close() { row_.clear(); position_ = 0; }
+bool PreparedSourceRowsOp::lastStructuredRow(std::vector<std::string>& cells, std::vector<bool>& nulls) const {
+    if (!position_ || row_.size() != descriptor_.size()) return false;
+    cells.clear(); nulls.clear();
+    for (const auto& value : row_) { cells.push_back(value.value); nulls.push_back(value.isNull); }
+    return true;
+}
+bool PreparedSourceRowsOp::lastColumnIsNull(size_t ordinal) const { return ordinal < row_.size() && row_[ordinal].isNull; }
+
 namespace {
 
 // A prepared plan owns its AST and the evaluator's metadata-only routine
@@ -85,15 +107,20 @@ struct PreparedSelectState {
     std::string dbname;
     TableSchema schema;
     std::shared_ptr<PreparedQuery> query;
+    SelectStmt* statement = nullptr;
+    QueryRowDescriptor output;
+    RowContext outerRow;
+    PreparedChildExecutor childExecutor;
     std::unique_ptr<PreparedQueryExecution> execution;
     ExprEvaluator evaluator;
     std::vector<Expr*> targets;
+    std::vector<ExprPtr> starTargets;
     std::vector<bool> targetsBeforeSort;
     struct SortKey { Expr* expression; size_t target; bool asc, nullsFirst; };
     std::vector<SortKey> keys;
     static constexpr size_t noTarget = std::numeric_limits<size_t>::max();
     size_t sourceOrdinal = noTarget;
-    SelectStmt& select() const { return *static_cast<SelectStmt*>(query->ast.get()); }
+    SelectStmt& select() const { return *statement; }
     size_t columnOrdinal(const ColumnRefExpr& column) const {
         if (!column.binding) throw DbError("XX000", "prepared source reference has no binding");
         const auto& binding = *column.binding;
@@ -105,6 +132,10 @@ struct PreparedSelectState {
     }
     std::string identity(const Expr* expression) const {
         return ExprHelper::scalarExpressionIdentity(expression, [&](const ColumnRefExpr& column) {
+            if (column.binding && column.binding->scopeDepth) {
+                const auto& binding = *column.binding;
+                return std::to_string(binding.sourceOrdinal) + ":" + std::to_string(binding.columnOrdinal) + ":" + binding.declaredType;
+            }
             const auto ordinal = columnOrdinal(column);
             const auto& physical = schema.cols[ordinal];
             return std::to_string(sourceOrdinal) + ":" + std::to_string(ordinal) + ":" +
@@ -129,7 +160,8 @@ struct PreparedSelectState {
         return values;
     }
     RowContext context(const std::vector<ExprValue>& values) const {
-        auto row = execution->context();
+        auto row = outerRow;
+        row.setParameters(query->parameters);
         if (sourceOrdinal != noTarget) execution->setSourceRow(row, sourceOrdinal, values);
         return row;
     }
@@ -140,6 +172,9 @@ struct PreparedSelectState {
     }
     void beginExecution() {
         execution = std::make_unique<PreparedQueryExecution>(query, engine, dbname);
+        execution->setQueryExecutor(childExecutor);
+        for (auto& target : starTargets)
+            execution->prepareProjectionColumn(static_cast<ColumnRefExpr*>(target.get()), statement);
         for (auto* target : targets) execution->prepareExpression(target);
         execution->prepareExpression(select().whereClause.get());
         for (const auto& key : keys)
@@ -202,6 +237,10 @@ public:
     }
     void close() override { child_->close(); }
     bool lastColumnIsNull(size_t ordinal) const override { return child_->lastColumnIsNull(ordinal); }
+    bool supportsStructuredRows() const override { return child_->supportsStructuredRows(); }
+    bool lastStructuredRow(std::vector<std::string>& cells, std::vector<bool>& nulls) const override {
+        return child_->lastStructuredRow(cells, nulls);
+    }
     ScanOrigin scanOrigin() const override { return child_->scanOrigin(); }
     std::string preparedPlanNodeName() const override { return "TypedFilter"; }
     std::vector<Operator*> preparedPlanChildren() const override { return {child_.get()}; }
@@ -396,8 +435,8 @@ public:
 };
 } // namespace
 
-bool QueryPlanner::supportsPreparedSelectPlan(const SelectStmt& select) {
-    if (select.command != SqlCommand::Select || !select.ctes.empty() ||
+static bool supportsPreparedSelectShape(const SelectStmt& select, bool allowCtes) {
+    if (select.command != SqlCommand::Select || (!allowCtes && !select.ctes.empty()) ||
         select.setOp != SetOp::None || select.setOpLhs || select.setOpRhs ||
         !select.groupBy.empty() || !select.groupByElems.empty() || select.having ||
         !select.windowDefs.empty() || !select.distinctOn.empty() ||
@@ -429,17 +468,39 @@ bool QueryPlanner::supportsPreparedSelectPlan(const SelectStmt& select) {
     return scalar(select.whereClause.get());
 }
 
+bool QueryPlanner::supportsPreparedSelectPlan(const SelectStmt& select) {
+    return supportsPreparedSelectShape(select, false);
+}
+
 OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
     const std::string& dbname, const std::string& tablename, PreparedQuery prepared) {
     auto* select = dynamic_cast<SelectStmt*>(prepared.ast.get());
     if (!select || !supportsPreparedSelectPlan(*select))
         throw DbError("0A000", "query requires an additional prepared plan lowering");
+    const auto schema = select->fromClause ? engine->getTableSchema(dbname, tablename) : TableSchema{};
+    OpPtr source = select->fromClause ? OpPtr(std::make_unique<TableScanOp>(engine, dbname, tablename))
+        : OpPtr(std::make_unique<PreparedResultOp>());
+    return buildPreparedSelectPlan(engine, dbname, std::make_shared<PreparedQuery>(std::move(prepared)),
+        select, schema, std::move(source));
+}
+
+OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
+    const std::string& dbname, std::shared_ptr<PreparedQuery> prepared,
+    SelectStmt* select, const TableSchema& sourceSchema, OpPtr source,
+    const RowContext& outerRow, PreparedChildExecutor childExecutor) {
+    if (!prepared || !select || !supportsPreparedSelectShape(*select, true) || !source)
+        throw DbError("0A000", "query requires an additional prepared plan lowering");
+    const auto output = prepared->statementOutputs.find(select);
+    if (output == prepared->statementOutputs.end())
+        throw DbError("XX000", "borrowed SELECT has no prepared output descriptor");
     auto state = std::make_shared<PreparedSelectState>();
     state->engine = engine; state->dbname = dbname;
-    state->query = std::make_shared<PreparedQuery>(std::move(prepared));
+    state->query = std::move(prepared); state->statement = select;
+    state->output = output->second; state->outerRow = outerRow;
+    state->childExecutor = std::move(childExecutor);
     state->evaluator.setCurrentDB(dbname);
     if (select->fromClause) {
-        state->schema = engine->getTableSchema(dbname, tablename);
+        state->schema = sourceSchema;
         for (const auto& range : state->query->sourceRanges) {
             if (range.owner != select || range.source != select->fromClause.get() || range.mergedUsing) continue;
             state->sourceOrdinal = range.ordinal;
@@ -453,7 +514,6 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
         if (state->sourceOrdinal == PreparedSelectState::noTarget)
             throw DbError("XX000", "prepared physical source has no range identity");
     }
-    std::vector<SelectItem> expanded;
     for (auto& target : select->selectList) {
         const auto* reference = dynamic_cast<const ColumnRefExpr*>(target.expr.get());
         const auto* literal = dynamic_cast<const LiteralExpr*>(target.expr.get());
@@ -466,21 +526,19 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
                 expression->binding = QueryColumnBinding{0, state->sourceOrdinal, i,
                     ExprHelper::canonicalResultTypeName(state->schema.cols[i].dataType +
                         (state->schema.cols[i].isArray ? "[]" : "")), false};
-                SelectItem item; item.expr = std::move(expression);
-                expanded.push_back(std::move(item));
+                state->targets.push_back(expression.get());
+                state->starTargets.push_back(std::move(expression));
             }
-        } else expanded.push_back(std::move(target));
+        } else state->targets.push_back(target.expr.get());
     }
-    select->selectList = std::move(expanded);
-    for (auto& target : select->selectList) state->targets.push_back(target.expr.get());
     std::vector<std::string> identities;
     for (const auto* target : state->targets) identities.push_back(state->identity(target));
     for (auto& order : select->orderBy) {
         size_t target = PreparedSelectState::noTarget;
         if (auto* ref = dynamic_cast<ColumnRefExpr*>(order.expr.get())) {
             if (ref->schema.empty() && ref->table.empty()) {
-                for (size_t i = 0; i < state->query->output.size(); ++i) {
-                    if (state->query->output[i].name != ref->column) continue;
+                for (size_t i = 0; i < state->output.size(); ++i) {
+                    if (state->output[i].name != ref->column) continue;
                     if (target != PreparedSelectState::noTarget && identities[target] != identities[i])
                         throw DbError("42702", "ORDER BY name is ambiguous");
                     target = i;
@@ -508,8 +566,7 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
         state->targetsBeforeSort.push_back(!state->containsVolatile(target));
     }
     state->beginExecution();
-    OpPtr root = select->fromClause ? OpPtr(std::make_unique<TableScanOp>(engine, dbname, tablename))
-        : OpPtr(std::make_unique<PreparedResultOp>());
+    OpPtr root = std::move(source);
     if (select->whereClause) root = std::make_unique<PreparedFilterOp>(std::move(root), state);
     if (!state->keys.empty()) root = std::make_unique<PreparedSortOp>(std::move(root), state);
     root = std::make_unique<PreparedProjectOp>(std::move(root), state);

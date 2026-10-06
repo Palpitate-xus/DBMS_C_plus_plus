@@ -38,6 +38,15 @@ void markSource(Expr* expression, const std::vector<std::string>& tokens,
     expression->sourceBegin = found->second.spans[begin].first;
     expression->sourceEnd = found->second.spans[end - 1].second;
 }
+std::pair<size_t, size_t> statementSource(const std::vector<std::string>& tokens,
+                                        size_t begin, size_t end) {
+    if (bindingParse && begin < end) {
+        const auto found = bindingParse->tokens.find(tokens.data());
+        if (found != bindingParse->tokens.end() && end <= found->second.spans.size())
+            return {found->second.spans[begin].first, found->second.spans[end - 1].second};
+    }
+    return {std::string::npos, std::string::npos};
+}
 }
 
 // Reassemble a lexer token stream back into SQL text.  Qualified references
@@ -1123,8 +1132,8 @@ SqlCommand SQLParser::classify(const std::string& sql) {
     // DQL
     if (lsql.substr(0, 6) == "select") return SqlCommand::Select;
     if (lsql.substr(0, 6) == "values") return SqlCommand::Values;
-    // WITH query bodies already have a typed SELECT parser. Classify only a
-    // top-level SELECT, not SELECT inside a CTE or an unsupported WITH DML.
+    // The primary command follows the complete WITH envelope, never a
+    // SELECT/DML keyword inside an auxiliary query or a quoted identifier.
     if (lsql.compare(0, 4, "with") == 0) {
         const auto queryTokens = tokenize(sql.substr(offset));
         if (queryTokens.empty() || toLower(queryTokens.front()) != "with")
@@ -1136,8 +1145,10 @@ SqlCommand SQLParser::classify(const std::string& sql) {
             if (depth != 0) continue;
             const std::string word = toLower(queryTokens[index]);
             if (word == "select") return SqlCommand::Select;
-            if (word == "insert" || word == "update" || word == "delete" ||
-                word == "merge") break;
+            if (word == "insert") return SqlCommand::Insert;
+            if (word == "update") return SqlCommand::Update;
+            if (word == "delete") return SqlCommand::Delete;
+            if (word == "merge") return SqlCommand::Merge;
         }
     }
 
@@ -1470,6 +1481,12 @@ ParseResult SQLParser::parse(const std::string& inputSql) {
     }
 
     SqlCommand cmd = classify(sql);
+
+    // parseSelect owns the WITH grammar head and delegates a genuine DML
+    // primary statement to its own parser after retaining exact byte spans.
+    const auto leadingTokens = tokenize(sql);
+    if (!leadingTokens.empty() && toLower(leadingTokens.front()) == "with")
+        return parseSelect(sql);
 
     switch (cmd) {
         case SqlCommand::Select:
@@ -3061,6 +3078,9 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
                     }
                 }
                 const size_t childEnd = pos;
+                const auto span = statementSource(tokens, childBegin, childEnd);
+                cte.queryBegin = span.first;
+                cte.queryEnd = span.second;
                 if (pos < tokens.size() && tokens[pos] == ")") ++pos;
                 if (bindingParse) {
                     subq = joinParserTokens(tokens, childBegin, childEnd);
@@ -3070,7 +3090,7 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
                         return r;
                     }
                     cte.query = std::move(child.stmt);
-                } else cte.query = parseSelect(subq).stmt;
+                } else cte.query = parse(subq).stmt;
             }
             if (bindingParse && !cte.query) { r.error = "WITH requires AS (query)"; return r; }
             stmt->ctes.push_back(std::move(cte));
@@ -3079,6 +3099,26 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
                 continue;
             }
             break;
+        }
+    }
+
+    if (pos < tokens.size()) {
+        const std::string primary = toLower(tokens[pos]);
+        if (primary == "insert" || primary == "update" || primary == "delete" || primary == "merge") {
+            const auto span = statementSource(tokens, pos, tokens.size());
+            auto child = parse(joinParserTokens(tokens, pos, tokens.size()));
+            if (!child.isValid()) {
+                r.error = child.error.empty() ? "invalid WITH primary statement" : child.error;
+                return r;
+            }
+            auto envelope = std::make_unique<WithStmt>(child.stmt->command);
+            envelope->ctes = std::move(stmt->ctes);
+            envelope->statement = std::move(child.stmt);
+            envelope->statementBegin = span.first;
+            envelope->statementEnd = span.second;
+            r.stmt = std::move(envelope);
+            r.success = true;
+            return r;
         }
     }
 

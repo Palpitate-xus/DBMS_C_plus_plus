@@ -21,9 +21,12 @@ struct Range {
     std::set<std::string> hiddenUnqualified;
     size_t occurrence = 0;
     bool mergedUsing = false;
+    std::string relationSchema, relationName;
+    const Stmt* cteStatement = nullptr;
 };
 using Namespace = std::vector<Range>;
-using Ctes = std::map<std::string, QueryRowDescriptor>;
+struct CteDescription { QueryRowDescriptor columns; const Stmt* statement = nullptr; };
+using Ctes = std::map<std::string, CteDescription>;
 
 class Binder {
 public:
@@ -35,6 +38,7 @@ public:
     size_t nextSourceOccurrence = 0;
     std::vector<const Stmt*> statementOwners;
     std::vector<const Ctes*> cteScopes;
+    std::map<const Stmt*, std::vector<const Expr*>> projectionLeaves;
     Binder(const std::string& sql, const std::vector<QueryBindingDatum>& values,
            const QueryBindingMetadata& descriptions) : datums(values), metadata(descriptions) {
         result.source = sql;
@@ -44,7 +48,8 @@ public:
         range.occurrence = nextSourceOccurrence++;
         result.sourceRanges.push_back({range.occurrence,
             statementOwners.empty() ? nullptr : statementOwners.back(), source,
-            range.schema, range.name, range.columns, range.mergedUsing});
+            range.schema, range.name, range.columns, range.mergedUsing,
+            range.relationSchema, range.relationName, range.cteStatement});
         return range;
     }
 
@@ -124,7 +129,10 @@ public:
         }
         case ExprType::Literal: {
             auto* literal = static_cast<LiteralExpr*>(node.get());
-            if (!literal->typeName.empty()) return literal->typeName;
+            if (!literal->typeName.empty()) {
+                if (metadata.assignmentInput) metadata.assignmentInput({"", literal->typeName}, literal, literal->typeName);
+                return literal->typeName;
+            }
             if (literal->value == "*") return "record";
             const auto tokens = SQLParser::tokenize(literal->value);
             if (tokens.empty()) return "unknown";
@@ -140,7 +148,9 @@ public:
         }
         case ExprType::CastExpr: {
             auto* cast = static_cast<CastExpr*>(node.get());
-            expression(cast->operand, scopes); return cast->typeName;
+            expression(cast->operand, scopes);
+            if (metadata.assignmentInput) metadata.assignmentInput({"", cast->typeName}, cast, cast->typeName);
+            return cast->typeName;
         }
         case ExprType::UnaryOp: {
             auto* unary = static_cast<UnaryOpExpr*>(node.get());
@@ -151,6 +161,12 @@ public:
         case ExprType::BinaryOp: {
             auto* binary = static_cast<BinaryOpExpr*>(node.get());
             const auto left = expression(binary->left, scopes);
+            if (binary->op == "::") {
+                const auto* type = dynamic_cast<const LiteralExpr*>(binary->right.get());
+                if (!type) throw DbError("42601", "cast requires a type name");
+                if (metadata.assignmentInput) metadata.assignmentInput({"", type->value}, binary, type->value);
+                return type->value; // grammar type, not a SQL value namespace
+            }
             expression(binary->right, scopes);
             static const std::set<std::string> predicates = {"=", "<>", "!=", "<", ">", "<=", ">=",
                 "AND", "OR", "LIKE", "ILIKE", "IN", "NOT IN", "IS DISTINCT FROM", "IS NOT DISTINCT FROM"};
@@ -210,6 +226,8 @@ public:
         SQLParser parser;
         auto parsed = parser.parseForBinding(result.source.substr(begin, end - begin));
         if (!parsed.isValid()) throw DbError("42601", parsed.error);
+        if (parsed.stmt->command != SqlCommand::Select && parsed.stmt->command != SqlCommand::Values)
+            throw DbError("42601", "subquery requires a SELECT or VALUES primary statement");
         // Child coordinate rebasing is structural, not identifier matching.
         rebase(*parsed.stmt, begin);
         const auto columns = statement(*parsed.stmt, scopes, cteScopes.empty() ? Ctes{} : *cteScopes.back());
@@ -223,7 +241,8 @@ public:
         for (auto& field : value.orderBy) expression(field.first, scopes);
         expression(value.frameStart, scopes); expression(value.frameEnd, scopes);
     }
-    QueryRowDescriptor project(std::vector<SelectItem>& items, const std::vector<Namespace>& scopes) {
+    QueryRowDescriptor project(std::vector<SelectItem>& items, const std::vector<Namespace>& scopes,
+                               std::vector<const Expr*>* leaves = nullptr) {
         QueryRowDescriptor columns;
         for (auto& item : items) {
             if (!item.expr) throw DbError("42601", "query projection has no expression");
@@ -232,7 +251,10 @@ public:
                 if (scopes.empty()) throw DbError("42601", "SELECT * has no source");
                 for (const auto& range : scopes.front())
                     for (const auto& column : range.columns)
-                        if (!range.hiddenUnqualified.count(column.name)) columns.push_back(column);
+                        if (!range.hiddenUnqualified.count(column.name)) {
+                            columns.push_back(column);
+                            if (leaves) leaves->push_back(nullptr);
+                        }
                 continue;
             }
             if (const auto* star = dynamic_cast<ColumnRefExpr*>(item.expr.get()); star && star->column == "*") {
@@ -240,6 +262,7 @@ public:
                 if (!scopes.empty()) for (const auto& range : scopes.front()) {
                     if (range.name != star->table || (!star->schema.empty() && range.schema != star->schema)) continue;
                     found = true; columns.insert(columns.end(), range.columns.begin(), range.columns.end());
+                    if (leaves) leaves->insert(leaves->end(), range.columns.size(), nullptr);
                 }
                 if (!found) throw DbError("42P01", "missing FROM-clause entry for qualified star");
                 continue;
@@ -263,6 +286,7 @@ public:
                 result.projectionAliases.emplace_back(item.sourceExpressionEnd, quoted);
             }
             columns.push_back({name, type});
+            if (leaves) leaves->push_back(item.expr.get());
         }
         return columns;
     }
@@ -272,11 +296,20 @@ public:
             throw DbError("42601", "invalid relation name");
         if (name.schema.empty()) {
             const auto cte = ctes.find(name.name);
-            if (cte != ctes.end()) return {"", alias.empty() ? name.name : identifier(alias), cte->second};
+            if (cte != ctes.end()) {
+                if (cte->second.columns.empty())
+                    throw DbError("0A000", "WITH query does not have a RETURNING clause: " + name.name);
+                Range range{"", alias.empty() ? name.name : identifier(alias), cte->second.columns};
+                range.cteStatement = cte->second.statement;
+                return range;
+            }
         }
         if (!metadata.relation) throw DbError("42P01", "relation does not exist: " + source);
         const auto description = metadata.relation(source);
-        return {alias.empty() ? description.schema : "", alias.empty() ? description.name : identifier(alias), description.columns};
+        Range range{alias.empty() ? description.schema : "", alias.empty() ? description.name : identifier(alias), description.columns};
+        range.relationSchema = description.schema;
+        range.relationName = description.name;
+        return range;
     }
     Namespace from(FromItem* item, const std::vector<Namespace>& outer, const Ctes& ctes) {
         if (!item) return {};
@@ -289,6 +322,7 @@ public:
             // but its lexical level still counts for ancestor provenance.
             derivedOuter.insert(derivedOuter.begin(), Namespace{});
             auto columns = statement(*item->subquery, derivedOuter, ctes);
+            for (auto& column : columns) if (column.type == "unknown") column.type = "text";
             return {registerSource({"", item->alias.empty() ? "" : identifier(item->alias), std::move(columns)}, item)};
         }
         if (item->type != FromItem::Type::Join) throw DbError("0A000", "source requires structured preparation");
@@ -334,18 +368,23 @@ public:
         return left;
     }
     QueryRowDescriptor statement(Stmt& node, const std::vector<Namespace>& outer, Ctes ctes) {
+        auto columns = statementImpl(node, outer, std::move(ctes));
+        result.statementOutputs[&node] = columns;
+        return columns;
+    }
+    QueryRowDescriptor statementImpl(Stmt& node, const std::vector<Namespace>& outer, Ctes ctes) {
         if (++depth > 128) throw DbError("54001", "query binding nesting limit exceeded");
         struct Depth { size_t& value; ~Depth() { --value; } } guard{depth};
         statementOwners.push_back(&node);
         struct OwnerScope { std::vector<const Stmt*>& owners; ~OwnerScope() { owners.pop_back(); } } ownerScope{statementOwners};
         cteScopes.push_back(&ctes);
         struct CteScope { std::vector<const Ctes*>& stack; ~CteScope() { stack.pop_back(); } } cteScope{cteScopes};
-        if (auto* select = dynamic_cast<SelectStmt*>(&node)) {
+        const auto bindDefinitions = [&](std::vector<SelectStmt::CTE>& definitions) {
             // WITH definitions cannot see sibling FROM ranges of this SQL
             // level. Retain its empty lexical frame for ancestor provenance.
             auto cteOuter = outer;
             cteOuter.insert(cteOuter.begin(), Namespace{});
-            for (auto& cte : select->ctes) {
+            for (auto& cte : definitions) {
                 if (!cte.query) throw DbError("42601", "WITH query is missing");
                 const std::string name = identifier(cte.name);
                 QueryRowDescriptor columns;
@@ -356,14 +395,28 @@ public:
                     columns = statement(*recursive, cteOuter, ctes);
                     recursive->setOpRhs = std::move(tail);
                     applyNames(columns, cte.columnNames);
-                    auto inner = ctes; inner[name] = columns;
+                    auto inner = ctes; inner[name] = {columns, cte.query.get()};
                     if (recursive->setOpRhs) {
                         auto rhs = statement(*recursive->setOpRhs, cteOuter, inner);
                         if (rhs.size() != columns.size()) throw DbError("42601", "recursive query column count mismatch");
                     }
                 } else columns = statement(*cte.query, cteOuter, ctes);
-                applyNames(columns, cte.columnNames); ctes[name] = std::move(columns);
+                applyNames(columns, cte.columnNames);
+                // A relation's unknown output is finalized as text. Only a
+                // direct INSERT SELECT literal retains assignment context;
+                // equal bytes from a derived/CTE TEXT cell cannot gain it.
+                for (auto& column : columns) if (column.type == "unknown") column.type = "text";
+                result.statementOutputs[cte.query.get()] = columns;
+                ctes[name] = {std::move(columns), cte.query.get()};
             }
+        };
+        if (auto* envelope = dynamic_cast<WithStmt*>(&node)) {
+            if (!envelope->statement) throw DbError("42601", "WITH primary statement is missing");
+            bindDefinitions(envelope->ctes);
+            return statement(*envelope->statement, outer, ctes);
+        }
+        if (auto* select = dynamic_cast<SelectStmt*>(&node)) {
+            bindDefinitions(select->ctes);
             if (select->setOpLhs) {
                 auto columns = statement(*select->setOpLhs, outer, ctes);
                 if (select->setOpRhs && statement(*select->setOpRhs, outer, ctes).size() != columns.size())
@@ -372,7 +425,7 @@ public:
             }
             auto scopes = outer;
             scopes.insert(scopes.begin(), from(select->fromClause.get(), outer, ctes));
-            auto columns = project(select->selectList, scopes);
+            auto columns = project(select->selectList, scopes, &projectionLeaves[select]);
             if (select->command == SqlCommand::Values && !select->valuesRows.empty()) {
                 columns.clear();
                 for (size_t i = 0; i < select->valuesRows.front().size(); ++i)
@@ -396,9 +449,63 @@ public:
             return columns;
         }
         if (auto* insert = dynamic_cast<InsertStmt*>(&node)) {
-            auto target = registerSource(relation(insert->tableName, "", ctes));
-            for (auto& row : insert->values) for (auto& value : row) expression(value, outer);
-            if (insert->selectSource) statement(*insert->selectSource, outer, ctes);
+            auto target = registerSource(relation(insert->tableName, "", {}));
+            QueryRowDescriptor assignments;
+            std::set<std::string> assignedNames;
+            if (insert->columns.empty()) assignments = target.columns;
+            else for (const auto& spelling : insert->columns) {
+                const std::string name = identifier(spelling);
+                if (!assignedNames.insert(name).second)
+                    throw DbError("42701", "INSERT column specified more than once: " + name);
+                const auto found = std::find_if(target.columns.begin(), target.columns.end(),
+                    [&](const auto& column) { return column.name == name; });
+                if (found == target.columns.end()) throw DbError("42703", "INSERT target column does not exist: " + name);
+                assignments.push_back(*found);
+            }
+            const auto validateWidth = [&](size_t width) {
+                if (width > assignments.size() || (!insert->columns.empty() && width != assignments.size()))
+                    throw DbError("42601", "INSERT target column count does not match expressions");
+            };
+            for (auto& row : insert->values) {
+                std::vector<std::string> types;
+                for (auto& value : row) {
+                    const auto* literal = dynamic_cast<const LiteralExpr*>(value.get());
+                    const bool defaultValue = literal && !literal->preparedSubquery && literal->typeName.empty() &&
+                        SQLParser::toLower(literal->value) == "default";
+                    types.push_back(defaultValue ? "default" : expression(value, outer));
+                }
+                // Expression transformation (unknown names and typed input
+                // literals) precedes target-width validation. Contextual
+                // conversion of a bare unknown string follows that check.
+                validateWidth(row.size());
+                if (row.size() != insert->values.front().size())
+                    throw DbError("42601", "VALUES rows have different widths");
+                // Bind all siblings before contextual input conversion,
+                // then process the next row. A later row cannot supersede
+                // this row's malformed constant input or cause side effects.
+                for (size_t i = 0; i < row.size(); ++i)
+                    if (types[i] != "default") {
+                            if (assignments[i].generated || (assignments[i].identity == 'a' && insert->override_.empty()))
+                                throw DbError("428C9", "cannot insert a non-DEFAULT value into column " + assignments[i].name);
+                            if (metadata.assignmentInput) metadata.assignmentInput(assignments[i],row[i].get(),types[i]);
+                    }
+            }
+            if (insert->selectSource) {
+                const auto inputs = statement(*insert->selectSource, outer, ctes);
+                validateWidth(inputs.size());
+                const auto* direct = dynamic_cast<const SelectStmt*>(insert->selectSource.get());
+                const auto leaves = projectionLeaves.find(direct);
+                const bool directValues = direct && direct->setOp == SetOp::None && !direct->setOpLhs &&
+                    leaves != projectionLeaves.end() && leaves->second.size() == inputs.size();
+                for (size_t i = 0; i < inputs.size(); ++i)
+                    if (assignments[i].generated || (assignments[i].identity == 'a' && insert->override_.empty()))
+                        throw DbError("428C9", "cannot insert a non-DEFAULT value into column " + assignments[i].name);
+                if (metadata.assignmentInput)
+                    for (size_t i = 0; i < inputs.size(); ++i) {
+                        const Expr* leaf = directValues ? leaves->second[i] : nullptr;
+                        metadata.assignmentInput(assignments[i],leaf,inputs[i].type);
+                    }
+            }
             auto scopes = outer; scopes.insert(scopes.begin(), {target});
             for (auto& value : insert->conflictUpdateSet) expression(value.second, scopes);
             expression(insert->conflictWhere, scopes);
@@ -406,14 +513,20 @@ public:
         }
         if (auto* update = dynamic_cast<UpdateStmt*>(&node)) {
             auto ranges = from(update->fromClause.get(), outer, ctes);
-            ranges.insert(ranges.begin(), registerSource(relation(update->tableName, update->alias, ctes)));
+            ranges.insert(ranges.begin(), registerSource(relation(update->tableName, update->alias, {})));
             auto scopes = outer; scopes.insert(scopes.begin(), std::move(ranges));
-            for (auto& value : update->setClauses) expression(value.second, scopes);
+            for (auto& value : update->setClauses) {
+                const auto name = identifier(value.first);
+                const auto& target = scopes.front().front().columns;
+                if (std::none_of(target.begin(), target.end(), [&](const auto& column) { return column.name == name; }))
+                    throw DbError("42703", "UPDATE target column does not exist: " + name);
+                expression(value.second, scopes);
+            }
             expression(update->whereClause, scopes); return project(update->returning, scopes);
         }
         if (auto* remove = dynamic_cast<DeleteStmt*>(&node)) {
             auto ranges = from(remove->usingClause.get(), outer, ctes);
-            ranges.insert(ranges.begin(), registerSource(relation(remove->tableName, remove->alias, ctes)));
+            ranges.insert(ranges.begin(), registerSource(relation(remove->tableName, remove->alias, {})));
             auto scopes = outer; scopes.insert(scopes.begin(), std::move(ranges));
             expression(remove->whereClause, scopes); return project(remove->returning, scopes);
         }
@@ -473,8 +586,20 @@ void Binder::rebase(Stmt& root, size_t offset) {
         if (source->subquery) stmt(*source->subquery);
     };
     stmt = [&](Stmt& statement) {
-        if (auto* select = dynamic_cast<SelectStmt*>(&statement)) {
-            for (auto& cte : select->ctes) if (cte.query) stmt(*cte.query);
+        const auto definitions = [&](std::vector<SelectStmt::CTE>& list) {
+            for (auto& cte : list) {
+                if (cte.queryBegin != std::string::npos) cte.queryBegin += offset;
+                if (cte.queryEnd != std::string::npos) cte.queryEnd += offset;
+                if (cte.query) stmt(*cte.query);
+            }
+        };
+        if (auto* envelope = dynamic_cast<WithStmt*>(&statement)) {
+            definitions(envelope->ctes);
+            if (envelope->statementBegin != std::string::npos) envelope->statementBegin += offset;
+            if (envelope->statementEnd != std::string::npos) envelope->statementEnd += offset;
+            if (envelope->statement) stmt(*envelope->statement);
+        } else if (auto* select = dynamic_cast<SelectStmt*>(&statement)) {
+            definitions(select->ctes);
             if (select->setOpLhs) stmt(*select->setOpLhs);
             if (select->setOpRhs) stmt(*select->setOpRhs);
             items(select->selectList); from(select->fromClause.get()); expr(select->whereClause);

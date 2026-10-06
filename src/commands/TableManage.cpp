@@ -23,6 +23,7 @@
 #include "catalog/CatalogService.h"
 #include "common/SqlSyntax.h"
 #include "expression/expr_helper.h"
+#include "expression/assignment_input.h"
 #include "expression/ExprEvaluator.h"
 #include "expression/ExpressionVolatility.h"
 #include "permissions.h"
@@ -31451,7 +31452,8 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
                         // Normalize the element before appending []; the
                         // scalar alias registry does not fold "int4[]".
                         typeName = ExprHelper::canonicalResultTypeName(typeName) + (arrayType ? "[]" : "");
-                        description.columns.push_back({attribute.attname, typeName});
+                        description.columns.push_back({attribute.attname, typeName,
+                            attribute.attgenerated != '\0', attribute.attidentity});
                     }
                     if (!description.columns.empty()) return description;
                 }
@@ -31463,7 +31465,8 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
                     const auto table = readSchema(input, physical);
                     for (size_t i = 0; i < table.len; ++i)
                         description.columns.push_back({table.cols[i].dataName,
-                            ExprHelper::canonicalResultTypeName(table.cols[i].dataType + (table.cols[i].isArray ? "[]" : ""))});
+                            ExprHelper::canonicalResultTypeName(table.cols[i].dataType + (table.cols[i].isArray ? "[]" : "")),
+                            !table.cols[i].generatedExpr.empty(), table.cols[i].identityKind});
                     if (!description.columns.empty()) return description;
                 }
                 auto view = getViewSQL(dbname, schema == "public" ? requested.name : schema + "." + requested.name);
@@ -31500,8 +31503,15 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
             }
             if (!evaluator.hasScalarFunction(function, const_cast<StorageEngine*>(this)))
                 throw DbError("42883", "function does not exist: " + function->funcName);
-            return evaluator.scalarFunctionResultType(function, const_cast<StorageEngine*>(this));
+            auto type = evaluator.scalarFunctionResultType(function, const_cast<StorageEngine*>(this));
+            // Builtin metadata can depend on already-bound argument types.
+            // Infer from the actual AST, never execute a routine or inspect
+            // a row value to choose its return descriptor.
+            if (type.empty()) type = ExprHelper::inferParsedResultType(function, {}, dbname,
+                const_cast<StorageEngine*>(this));
+            return type;
         };
+        metadata.assignmentInput = validateAssignmentInput;
         return prepareQuery(sql, bindings, metadata);
 }
 
