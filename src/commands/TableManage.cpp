@@ -34031,32 +34031,43 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             expr.funcName + "()", {}, {}, dbname, expr.sessionUser, engine);
         return evaluated.ok && !evaluated.isNull ? evaluated.value : "";
     }
-    if (expr.funcName == "extract" && expr.funcArgs.size() >= 2) {
-        std::string val = getVal(expr.funcArgs[1]);
-        if (scalarValueIsNull(expr.funcArgs[1], val))
-            return "NULL";
-        if (val.empty() || val == "NULL" || val == "null") return "";
-        std::string field = getVal(expr.funcArgs[0]);
-        if (field.empty() ||
-            field.find_first_not_of(
-                "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_") !=
-                std::string::npos) {
-            return "";
+    if (expr.funcName == "extract") {
+        // The frontend supplies complete SQL. Keep the public native helper's
+        // historical {field, operand} form, but treat field as grammar rather
+        // than getVal(field): a column named year must not change EXTRACT.
+        std::string expression;
+        if (expr.funcArgs.size() == 1) expression = expr.funcArgs.front();
+        else if (expr.funcArgs.size() == 2)
+            expression = "EXTRACT(" + expr.funcArgs[0] + " FROM " + expr.funcArgs[1] + ")";
+        else throw DbError("42601", "invalid EXTRACT expression");
+        SQLParser parser;
+        const auto parsed = parser.parse("SELECT " + expression);
+        const auto* select = parsed.success
+            ? dynamic_cast<const SelectStmt*>(parsed.stmt.get()) : nullptr;
+        const auto* call = select && select->selectList.size() == 1
+            ? dynamic_cast<const FunctionCallExpr*>(select->selectList.front().expr.get()) : nullptr;
+        if (!call || !call->schema.empty() || SQLParser::toLower(call->funcName) != "extract")
+            throw DbError("42601", "invalid EXTRACT expression");
+        std::map<std::string, std::string> values, types;
+        std::set<std::string> nulls;
+        for (size_t column = 0; column < tbl.len; ++column) {
+            bool isNull = false;
+            const auto value = engine && !dbname.empty()
+                ? engine->extractColumnValue(rowBuffer, tbl, column, dbname, true, &isNull)
+                : StorageEngine::extractColumnValueStatic(rowBuffer, tbl, column);
+            const auto& name = tbl.cols[column].dataName;
+            values[name] = value;
+            types[name] = tbl.cols[column].dataType + (tbl.cols[column].isArray ? "[]" : "");
+            if (isNull || (!engine && value.empty())) nulls.insert(name);
         }
-        std::string sourceType = "text";
-        for (size_t i = 0; i < tbl.len; ++i) {
-            if (tbl.cols[i].dataName == expr.funcArgs[1]) {
-                sourceType = tbl.cols[i].dataType;
-                break;
-            }
+        const auto result = ExprHelper::evalStringWithNulls(
+            expression, values, nulls, types, dbname, expr.sessionUser, engine);
+        if (!result.ok) {
+            const auto failure = plpgsqlScalarResult(result);
+            throw DbError(failure.sqlState, failure.message);
         }
-        const auto evaluated = dbms::ExprHelper::evalString(
-            "extract(" + field + " from __extract_value)",
-            {{"__extract_value", val}},
-            {{"__extract_value", sourceType}}, dbname,
-            expr.sessionUser, engine);
-        if (!evaluated.ok || evaluated.isNull) return "";
-        return evaluated.value;
+        if (knownNull) *knownNull = result.isNull;
+        return result.isNull ? "NULL" : result.value;
     }
     // YEAR / MONTH / DAY - date extraction functions
     if ((expr.funcName == "year" || expr.funcName == "month" || expr.funcName == "day") && !expr.funcArgs.empty()) {

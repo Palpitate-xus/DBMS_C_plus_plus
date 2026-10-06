@@ -1582,67 +1582,10 @@ static ExprEvalResult evalStringImpl(
     const std::string& currentUser,
     StorageEngine* functionEngine = nullptr) {
 
-    std::string extractFixed;
-    // extract(field FROM expr) -> date_part('field', expr): PG-equivalent,
-    // and the parser has no special EXTRACT grammar.
-    {
-        std::string low;
-        low.reserve(exprSql.size());
-        bool inS = false;
-        for (char c : exprSql) {
-            if (c == 39) inS = !inS;
-            low += (inS ? c : static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
-        }
-        size_t ep = low.find("extract(");
-        (void)ep;
-        if (ep != std::string::npos) {
-            std::string out;
-            out.reserve(exprSql.size());
-            size_t i = 0;
-            bool q = false;
-            while (i < exprSql.size()) {
-                bool hit = false;
-                if (exprSql[i] == 39) q = !q;
-                if (!q && exprSql.size() >= i + 8 &&
-                    low.compare(i, 8, "extract(") == 0) {
-                    size_t lp = i + 7;
-                    int depth = 0; size_t rp = std::string::npos;
-                    for (size_t k = lp; k < exprSql.size(); ++k) {
-                        if (exprSql[k] == '(') ++depth;
-                        else if (exprSql[k] == ')') { --depth; if (depth == 0) { rp = k; break; } }
-                    }
-                    if (rp != std::string::npos) {
-                        std::string inner = exprSql.substr(lp + 1, rp - lp - 1);
-                        std::string innerLow;
-                        bool q2 = false;
-                        for (char c : inner) {
-                            if (c == 39) q2 = !q2;
-                            innerLow += (q2 ? c : static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
-                        }
-                        size_t fp = innerLow.find(" from ");
-                        if (fp != std::string::npos) {
-                            auto trimS = [](const std::string& s2) {
-                                size_t a2 = s2.find_first_not_of(" 	");
-                                size_t b2 = s2.find_last_not_of(" 	");
-                                return (a2 == std::string::npos) ? std::string() : s2.substr(a2, b2 - a2 + 1);
-                            };
-                            std::string field = trimS(inner.substr(0, fp));
-                            std::string src = trimS(inner.substr(fp + 6));
-                            out += "date_part(" + std::string(1, 39) + field + std::string(1, 39) + ", " + src + ")";
-                            i = rp + 1;
-                            hit = true;
-                        }
-                    }
-                }
-                if (!hit) out += exprSql[i++];
-            }
-            extractFixed = out;
-        }
-    }
-
-
     // Unwrap typed literals before parsing: date '2026-08-15' -> '2026-08-15'.
-    std::string sql = extractFixed.empty() ? exprSql : extractFixed;
+    // EXTRACT retains its actual parser node; its field label is protected
+    // by the value-reference walker, not rewritten as a date_part SQL string.
+    std::string sql = exprSql;
     {
         static const std::string kws[] = {"date ", "timestamp ", "timestamptz ", "interval ", "boolean ", "time ", "numeric ", "int ", "text "};
         std::string out;
@@ -1730,9 +1673,9 @@ static ExprEvalResult evalStringImpl(
             visitValueReferences(conditional->elseExpr.get());
         } else if (auto* call = dynamic_cast<FunctionCallExpr*>(expression)) {
             for (size_t i = 0; i < call->args.size(); ++i) {
-                // EXTRACT's bare field is grammar, unlike date_part's value.
-                // Most EXTRACT nodes were normalized above, but whitespace
-                // before '(' can leave the parser's original field node.
+                // EXTRACT's bare field is grammar, unlike date_part's value
+                // or a schema-qualified extract() argument. Preserve that
+                // parser role for every whitespace/quoted spelling.
                 if (i == 0 && call->schema.empty() &&
                     toLower(call->funcName) == "extract") {
                     const auto* field = dynamic_cast<ColumnRefExpr*>(call->args[i].get());

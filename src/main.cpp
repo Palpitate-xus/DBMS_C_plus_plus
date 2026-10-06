@@ -30043,7 +30043,27 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     continue;
                 }
                 WindowFunc wf;
-                if (hasNullSafeComparison(item)) {
+                dbms::SQLParser extractParser;
+                const auto parsedExtract = extractParser.parse("SELECT " + item);
+                const auto* extractSelect = parsedExtract.success
+                    ? dynamic_cast<const dbms::SelectStmt*>(parsedExtract.stmt.get()) : nullptr;
+                const auto* extractCall = extractSelect && extractSelect->selectList.size() == 1
+                    ? dynamic_cast<const dbms::FunctionCallExpr*>(extractSelect->selectList.front().expr.get()) : nullptr;
+                if (extractCall && extractCall->schema.empty() &&
+                    dbms::SQLParser::toLower(extractCall->funcName) == "extract") {
+                    dbms::StorageEngine::SelectExpr expression;
+                    expression.displayName = itemAlias.empty() ? "extract" : itemAlias;
+                    expression.isScalar = true;
+                    expression.funcName = "extract";
+                    expression.funcArgs = {item};
+                    selectExprs.push_back(std::move(expression));
+                    hasScalar = true;
+                    exprTypes.push_back(3);
+                    for (size_t column = 0; column < tbl.len; ++column) {
+                        const auto referenced = dbms::ExprHelper::referencesColumn(item, tbl.cols[column].dataName);
+                        if (!referenced || *referenced) selectCols.insert(tbl.cols[column].dataName);
+                    }
+                } else if (hasNullSafeComparison(item)) {
                     string error, state;
                     if (!validateFromlessColumnBindings(
                             item, error, state, &sourceRange,
@@ -30507,20 +30527,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                     }
                                 }
                             }
-                            // EXTRACT(field FROM col): splitFuncArgs only
-                            // splits commas, so rewrite the field FROM col
-                            // form into two positional arguments.
-                            if (func == "extract" && expr.funcArgs.size() == 1) {
-                                const string& one = expr.funcArgs[0];
-                                size_t sp2 = one.find(" from ");
-                                if (sp2 == string::npos)
-                                    sp2 = one.find(" FROM ");
-                                if (sp2 != string::npos) {
-                                    string fld = trim(one.substr(0, sp2));
-                                    string col = trim(one.substr(sp2 + 6));
-                                    for (auto& fc : fld) fc = static_cast<char>(tolower(static_cast<unsigned char>(fc)));
-                                    expr.funcArgs = {fld, col};
-                                }
+                            // Keep the parser's field/value roles and complete
+                            // source expression (quotes, nesting and FROM
+                            // spelling) instead of inventing two string values.
+                            if (func == "extract") {
+                                expr.funcArgs = {item};
                             }
                             if (func == "overlay" && expr.funcArgs.size() == 1) {
                                 // OVERLAY(s PLACING r FROM start [FOR n]) ->
