@@ -24,6 +24,10 @@ using explicit `INNER`/`LEFT`/`RIGHT`/`FULL OUTER JOIN ... ON` edges, and
 `63b772e2` fixes ordinary single-join dispatch for the equivalent `FULL JOIN`
 spelling without `OUTER`. Test-only follow-up `710671ef` covers a left-joined
 outer tree followed by `LEFT JOIN LATERAL ... ON true`.
+`069889d3` adds bounded USING/NATURAL left-input binding: the materialized
+query retains qualified leaf columns, while a separate visible-column map
+selects the left or right USING key, or coalesces FULL keys from their NULL
+bitmaps. Ordinary NATURAL INNER joins also use the merged visible schema.
 
 ## Reproduced behavior
 
@@ -128,9 +132,12 @@ outer tree followed by `LEFT JOIN LATERAL ... ON true`.
   or a simple base-table join tree with comma/CROSS or explicit
   `INNER`/`LEFT`/`RIGHT`/`FULL [OUTER] JOIN ... ON` edges. Join-tree inputs are
   materialized through the full dispatcher into aligned structured values and
-  NULL bitmaps before per-row LATERAL evaluation. `USING`/`NATURAL` left trees
-  remain unsupported because their merged output columns do not match the
-  flattened leaf-schema map. A simple quoted relation alias followed by an
+  NULL bitmaps before per-row LATERAL evaluation. Bounded USING/NATURAL input
+  trees now use explicit qualified leaf projections and a separate visible
+  column map. USING keys retain left values for INNER/LEFT, right values for
+  RIGHT, and coalesced sources for FULL. Bare references inside the lateral
+  target/WHERE and ON use that visible map; qualified references continue
+  using the original leaf cells and NULL flags. A simple quoted relation alias followed by an
   unquoted or mixed-case quoted column is token-aware and regression-tested.
   More complex quoted/schema-qualified names and arbitrary nested correlations
   remain unsupported or unverified.
@@ -139,9 +146,9 @@ outer tree followed by `LEFT JOIN LATERAL ... ON true`.
   row, evaluate a supported boolean `ON` expression against typed, NULL-aware
   values from all left inputs and the lateral result, and apply LEFT NULL
   extension when no right row passes the condition. The left tree must use
-  supported explicit `ON` edges or CROSS/comma joins; it requires aligned
-  structured rows from the lateral subquery and does not implement `USING`/
-  `NATURAL` left trees, unknown FROM scopes, complex or nested lateral chains,
+  supported explicit `ON`/`USING` edges, ordinary NATURAL INNER joins or
+  CROSS/comma joins; it requires aligned structured rows from the lateral
+  subquery and does not implement unknown FROM scopes, complex or nested lateral chains,
   or table functions. Regression covers INNER/LEFT/RIGHT/FULL OUTER inputs,
   fan-out, null extension, empty left input and a two-step FROM-less scalar
   LATERAL chain. A LEFT-joined left tree followed by `LEFT JOIN LATERAL ...
@@ -339,6 +346,18 @@ outer tree followed by `LEFT JOIN LATERAL ... ON true`.
   (`180006`); the case did not execute against that reference.
 - The full registered suite and PostgreSQL 18.6 differential were not run.
 
+- After `069889d3`, the production build, derived-type protocol E2E,
+  SQL-literal E2E and multijoin E2E passed. New cases cover qualified and
+  bare USING/NATURAL correlations, composite keys, LEFT/RIGHT/FULL preserved
+  rows, NULL keys, chained FULL USING, a bare merged key in LEFT LATERAL ON,
+  an empty left input with integer metadata, local-column precedence, and a
+  USING input followed by a CROSS relation with the same column name.
+  The added ordinary no-alias USING regression in join-type E2E still failed
+  with 42601 and is being repaired separately. Additional live probes with
+  aliases confirmed that an outer bare SELECT id still returns 42703, outer
+  SELECT * exposes synthetic names and duplicate leaf keys, and NATURAL LEFT
+  JOIN before LATERAL is rejected with 42601. Those are unresolved gaps.
+
 This does not complete QRY-03 or OPT-02. General target-list expressions
 (including SRFs, aggregates, and window expressions; only simple CASE and
 evaluator-supported scalar calls are handled), general row expansion beyond
@@ -354,7 +373,10 @@ The regression-tested two-step FROM-less scalar LATERAL chain also works;
 longer or more complex correlated chains remain unsupported/unverified.
 Bare outer references in evaluator-supported scalar targets and WHERE are now
 also bound when that LATERAL SELECT has no own FROM or uses a local base-table
-scope with known columns. `USING`/`NATURAL` left trees remain unsupported.
+scope with known columns. Bounded USING and ordinary NATURAL INNER left inputs
+now have a logical visible-column map. Outer unqualified projections and star
+expansion after LATERAL, NATURAL outer inputs, and no-alias USING dispatch
+remain open; the probes above prevent treating this as complete join support.
 Unknown CTE/derived/function FROM scopes, complex quoted/schema-qualified
 references, arbitrary correlated expressions/subqueries, complex lateral
 chains, table functions, and general parameterized or nested join semantics
