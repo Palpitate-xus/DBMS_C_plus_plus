@@ -31686,11 +31686,16 @@ std::string preparedPrimitiveInputType(const std::string& spelling) {
 }
 
 void validatePreparedPrimitiveInput(const QueryOutputColumn& target, const Expr* source) {
-    // A nonempty name denotes contextual assignment to a real output column.
-    // The existing assignment validator retains that distinct contract.
-    if (!target.name.empty() || !source || source->preparedSubquery) return;
+    if (!source || source->preparedSubquery) return;
     const LiteralExpr* input = nullptr;
-    if (const auto* literal = dynamic_cast<const LiteralExpr*>(source)) {
+    if (!target.name.empty()) {
+        // A real assignment column contributes input context only to its
+        // direct, untyped SQL string leaf. Typed constants, parameters,
+        // routines and child results must not be evaluated/reinterpreted as
+        // unknown input, even when their current bytes happen to be equal.
+        input = dynamic_cast<const LiteralExpr*>(source);
+        if (input && !input->typeName.empty()) input = nullptr;
+    } else if (const auto* literal = dynamic_cast<const LiteralExpr*>(source)) {
         if (!literal->typeName.empty()) input = literal;
     } else if (const auto* cast = dynamic_cast<const CastExpr*>(source)) {
         input = dynamic_cast<const LiteralExpr*>(cast->operand.get());

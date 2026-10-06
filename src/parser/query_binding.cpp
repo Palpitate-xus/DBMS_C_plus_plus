@@ -868,15 +868,33 @@ public:
             checkRangeConflicts({target}, ranges);
             ranges.insert(ranges.begin(), target);
             auto scopes = outer; scopes.insert(scopes.begin(), std::move(ranges));
+            std::vector<std::string> assignmentTypes;
             for (auto& value : update->setClauses) {
                 const auto name = identifier(value.first);
                 const auto& target = scopes.front().front().columns;
                 if (std::none_of(target.begin(), target.end(), [&](const auto& column) { return column.name == name; }))
                     throw DbError("42703", "UPDATE target column does not exist: " + name);
-                expression(value.second, scopes);
+                assignmentTypes.push_back(expression(value.second, scopes));
             }
-            expression(update->whereClause, scopes);
-            return returning(update->returning,update->returningOptions,scopes.front().front(),scopes);
+            const auto condition = expression(update->whereClause, scopes);
+            if (update->whereClause) {
+                const auto type = common_type_detail::canonical(condition);
+                if (type != "unknown" && type != "boolean")
+                    throw DbError("42804","argument of WHERE must be type boolean");
+                // WHERE transformation precedes RETURNING and contextual SET
+                // assignment coercion. This creates a genuine boolean AST
+                // cast and uses the existing pure unknown-input hook.
+                coerceCaseInput(update->whereClause,condition,"boolean");
+            }
+            auto output = returning(update->returning,update->returningOptions,scopes.front().front(),scopes);
+            if (metadata.assignmentInput)
+                for (size_t i=0;i<update->setClauses.size();++i) {
+                    const auto name = identifier(update->setClauses[i].first);
+                    const auto column = std::find_if(target.columns.begin(),target.columns.end(),
+                        [&](const auto& candidate) { return candidate.name == name; });
+                    metadata.assignmentInput(*column,update->setClauses[i].second.get(),assignmentTypes[i]);
+                }
+            return output;
         }
         if (auto* remove = dynamic_cast<DeleteStmt*>(&node)) {
             auto ranges = from(remove->usingClause.get(), outer, ctes);
