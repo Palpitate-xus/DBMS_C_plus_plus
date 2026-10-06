@@ -38127,6 +38127,16 @@ static bool isJoinComparisonOperator(const std::string& op) {
 struct JoinCondition : StorageEngine::Condition {
     bool valueIsLiteral = false;
     bool valueIsNull = false;
+    struct Binding {
+        bool isLeft;
+        size_t column;
+        std::string key;
+        std::string type;
+    };
+    std::shared_ptr<Stmt> expressionOwner;
+    Expr* expression = nullptr;
+    std::shared_ptr<ExprEvaluator> evaluator;
+    std::vector<Binding> bindings;
 };
 
 static std::vector<JoinCondition> parseJoinConditions(
@@ -38137,6 +38147,17 @@ static std::vector<JoinCondition> parseJoinConditions(
         for (auto& condition : conditions) {
             JoinCondition parsed;
             static_cast<StorageEngine::Condition&>(parsed) = std::move(condition);
+            if (parsed.op == "typedexpr") {
+                SQLParser parser;
+                auto expression = parser.parse("SELECT " + parsed.value);
+                auto* select = expression.success
+                    ? dynamic_cast<SelectStmt*>(expression.stmt.get()) : nullptr;
+                if (!select || select->selectList.size() != 1 || select->fromClause ||
+                    !select->selectList.front().expr)
+                    throw DbError("42601", "invalid typed JOIN predicate");
+                parsed.expression = select->selectList.front().expr.get();
+                parsed.expressionOwner = std::move(expression.stmt);
+            }
             if (isJoinComparisonOperator(parsed.op)) {
                 const bool apiValue = raw.rfind("apicond ", 0) == 0;
                 const std::string input = apiValue ? raw.substr(8) : raw;
@@ -38161,6 +38182,137 @@ static std::vector<JoinCondition> parseJoinConditions(
     }
     return result;
 }
+
+// Prepare value references once, before any row pair is evaluated.  The
+// carrier contains resolved range identities; positional keys prevent the
+// evaluator's legacy case folding from merging id/"ID" or repeated ranges.
+static void prepareJoinExpressions(
+    std::vector<JoinCondition>& conditions,
+    const TableSchema& left, const TableSchema& right,
+    const std::string& leftRange, const std::string& rightRange,
+    bool encoded, const std::string& database, StorageEngine* engine) {
+    for (auto& condition : conditions) {
+        if (condition.op != "typedexpr") continue;
+        condition.evaluator = std::make_shared<ExprEvaluator>();
+        condition.evaluator->setCurrentDB(database);
+        const std::string username = currentSession() ? currentSession()->username : "";
+        condition.evaluator->registerFunction("current_user", [username](const std::vector<ExprValue>&) {
+            return ExprValue("name", username, username.empty());
+        }, 's');
+        condition.evaluator->registerFunction("session_user", [username](const std::vector<ExprValue>&) {
+            return ExprValue("name", username, username.empty());
+        }, 's');
+        std::function<void(Expr*)> bind = [&](Expr* expression) {
+            if (!expression) throw DbError("42601", "missing JOIN predicate operand");
+            if (auto* reference = dynamic_cast<ColumnRefExpr*>(expression)) {
+                if (!reference->schema.empty())
+                    throw DbError("42P01", "missing FROM-clause entry for table " + reference->table);
+                size_t matches = 0, index = 0;
+                bool isLeft = false;
+                for (int side = 0; side < 2; ++side) {
+                    const auto& table = side == 0 ? left : right;
+                    const auto& range = side == 0 ? leftRange : rightRange;
+                    for (size_t column = 0; column < table.len; ++column) {
+                        const auto& name = table.cols[column].dataName;
+                        const bool resolvedCarrier = reference->table.empty() &&
+                            reference->column == StorageEngine::joinRangeColumnKey(range, name, encoded);
+                        const bool sourceReference = (reference->table.empty() || reference->table == range) &&
+                            reference->column == name;
+                        if (resolvedCarrier || sourceReference) {
+                            ++matches;
+                            isLeft = side == 0;
+                            index = column;
+                        }
+                    }
+                }
+                if (matches > 1) throw DbError("42702", "column reference is ambiguous: " + reference->column);
+                if (matches == 0) {
+                    if (!reference->table.empty() && reference->table != leftRange && reference->table != rightRange)
+                        throw DbError("42P01", "missing FROM-clause entry for table " + reference->table);
+                    throw DbError("42703", "column does not exist: " + reference->column);
+                }
+                const auto& column = (isLeft ? left : right).cols[index];
+                const std::string key = "__dbms_join_value_" + std::to_string(condition.bindings.size());
+                condition.bindings.push_back({isLeft, index, key,
+                    ExprHelper::canonicalResultTypeName(column.dataType + (column.isArray ? "[]" : ""))});
+                reference->column = key;
+                reference->table.clear();
+                reference->schema.clear();
+            } else if (auto* unary = dynamic_cast<UnaryOpExpr*>(expression)) {
+                bind(unary->operand.get());
+            } else if (auto* binary = dynamic_cast<BinaryOpExpr*>(expression)) {
+                bind(binary->left.get());
+                if (binary->op != "::" && binary->op != "COLLATE") bind(binary->right.get());
+            } else if (auto* cast = dynamic_cast<CastExpr*>(expression)) {
+                bind(cast->operand.get());
+            } else if (auto* conditional = dynamic_cast<CaseExpr*>(expression)) {
+                if (conditional->switchExpr) bind(conditional->switchExpr.get());
+                for (auto& arm : conditional->whenClauses) {
+                    bind(arm.first.get());
+                    bind(arm.second.get());
+                }
+                if (conditional->elseExpr) bind(conditional->elseExpr.get());
+            } else if (auto* call = dynamic_cast<FunctionCallExpr*>(expression)) {
+                if (call->hasOver || call->distinct || call->filter ||
+                    !call->orderBy.empty() || !call->namedArgs.empty())
+                    throw DbError("0A000", "JOIN predicate requires a scalar function");
+                static const std::set<std::string> syntaxFunctions = {"coalesce", "nullif", "greatest", "least"};
+                if (!condition.evaluator->hasScalarFunction(call, engine) && !syntaxFunctions.count(call->funcName))
+                    throw DbError("42883", "function does not exist: " + call->funcName);
+                for (auto& argument : call->args) bind(argument.get());
+            } else if (expression->type != ExprType::Literal) {
+                throw DbError("0A000", "unsupported typed JOIN expression");
+            }
+        };
+        bind(condition.expression);
+        condition.evaluator->bindScalarFunctions(condition.expression, engine);
+        ExprEvaluator::analyzeExplicitResultCollation(condition.expression);
+    }
+}
+
+template <typename ValueGetter>
+static bool evaluateJoinExpression(const JoinCondition& condition, ValueGetter valueAt) {
+    RowContext row;
+    for (const auto& binding : condition.bindings) {
+        bool isNull = false;
+        const std::string value = valueAt(binding.isLeft, binding.column, isNull);
+        row.set(binding.key, ExprValue(binding.type, value, isNull));
+    }
+    if (const Session* session = currentSession()) {
+        row.set("current_user", ExprValue("name", session->username, false));
+        row.set("session_user", ExprValue("name", session->username, false));
+    }
+    ExprValue result;
+    try {
+        result = condition.evaluator->eval(condition.expression, row);
+    } catch (const DbError&) {
+        throw;
+    } catch (const std::exception& error) {
+        ExprEvalResult failure;
+        failure.error = error.what();
+        const auto mapped = plpgsqlScalarResult(failure);
+        std::string message = mapped.message;
+        if (mapped.sqlState != "XX000") message.erase(message.rfind("(SQLSTATE "));
+        throw DbError(mapped.sqlState, trim(message));
+    }
+    if (ExprHelper::canonicalResultTypeName(result.typeName) != "boolean")
+        throw DbError("42804", "JOIN ON expression must be type boolean");
+    return !result.isNull && result.asBool();
+}
+
+// Legacy JOIN exits explicitly release their table locks. Typed predicates
+// additionally propagate evaluator exceptions; release those locks on stack
+// unwinding too, without changing the existing normal-return lock protocol.
+class JoinExceptionLockRelease {
+    std::function<void()> release_;
+    int exceptionCount_ = std::uncaught_exceptions();
+public:
+    explicit JoinExceptionLockRelease(std::function<void()> release)
+        : release_(std::move(release)) {}
+    ~JoinExceptionLockRelease() {
+        if (std::uncaught_exceptions() > exceptionCount_) release_();
+    }
+};
 
 static bool joinValuePredicateMatches(
     const StorageEngine::Condition& condition, const Column& column,
@@ -38251,6 +38403,7 @@ static std::vector<JoinCondition> parseJoinOnConditions(
     std::vector<std::string> ordinary;
     std::vector<JoinCondition> constants;
     for (const auto& condition : onConditions) {
+        if (condition == "__join_full_once__") continue;
         if (condition == "__join_on_true__" ||
             condition == "__join_on_false__") {
             JoinCondition parsed;
@@ -38311,6 +38464,10 @@ std::vector<std::string> StorageEngine::join(
         }
     }
 
+    JoinExceptionLockRelease exceptionLocks([&] {
+        lockManager_.unlock(leftTable);
+        lockManager_.unlock(rightTable);
+    });
     TableSchema leftTbl = getTableSchema(dbname, leftTable);
     TableSchema rightTbl = getTableSchema(dbname, rightTable);
 
@@ -38376,6 +38533,11 @@ std::vector<std::string> StorageEngine::join(
     // Evaluate a condition on left/right row pair
     auto evalCond = [&](const JoinCondition& c, const JoinRow& leftRow,
                         const JoinRow& rightRow) -> bool {
+        if (c.op == "typedexpr")
+            return evaluateJoinExpression(c, [&](bool isLeft, size_t index, bool& isNull) {
+                return logicalValue(isLeft ? leftRow : rightRow,
+                    isLeft ? leftTbl : rightTbl, isLeft ? leftTable : rightTable, index, &isNull);
+            });
         if (c.op == "jointrue" || c.op == "joinfalse")
             return c.op == "jointrue";
         auto it = colMap.find(c.colName);
@@ -38409,7 +38571,11 @@ std::vector<std::string> StorageEngine::join(
     };
 
     auto conds = parseJoinConditions(conditions);
-    const auto extraOnConds = parseJoinOnConditions(onConditions);
+    auto extraOnConds = parseJoinOnConditions(onConditions);
+    prepareJoinExpressions(conds, leftTbl, rightTbl, leftRange, rightRange,
+                           rangeNames.encodeColumns, dbname, this);
+    prepareJoinExpressions(extraOnConds, leftTbl, rightTbl, leftRange, rightRange,
+                           rangeNames.encodeColumns, dbname, this);
     conds.insert(conds.end(), extraOnConds.begin(), extraOnConds.end());
 
     // Predicate pushdown: classify conditions by which table they reference
@@ -38598,6 +38764,10 @@ std::vector<std::string> StorageEngine::leftJoin(
         }
     }
 
+    JoinExceptionLockRelease exceptionLocks([&] {
+        lockManager_.unlock(leftTable);
+        lockManager_.unlock(rightTable);
+    });
     TableSchema leftTbl = getTableSchema(dbname, leftTable);
     TableSchema rightTbl = getTableSchema(dbname, rightTable);
 
@@ -38653,6 +38823,13 @@ std::vector<std::string> StorageEngine::leftJoin(
 
     auto evalCond = [&](const JoinCondition& c, const JoinRow* leftRow,
                         const JoinRow* rightRow) -> bool {
+        if (c.op == "typedexpr")
+            return evaluateJoinExpression(c, [&](bool isLeft, size_t index, bool& isNull) {
+                const JoinRow* row = isLeft ? leftRow : rightRow;
+                if (!row) { isNull = true; return std::string{}; }
+                return logicalValue(*row, isLeft ? leftTbl : rightTbl,
+                    isLeft ? leftTable : rightTable, index, &isNull);
+            });
         if (c.op == "jointrue" || c.op == "joinfalse")
             return c.op == "jointrue";
         auto it = colMap.find(c.colName);
@@ -38693,7 +38870,11 @@ std::vector<std::string> StorageEngine::leftJoin(
     };
 
     auto conds = parseJoinConditions(conditions);
-    const auto onConds = parseJoinOnConditions(onConditions);
+    auto onConds = parseJoinOnConditions(onConditions);
+    prepareJoinExpressions(conds, leftTbl, rightTbl, leftRange, rightRange,
+                           rangeNames.encodeColumns, dbname, this);
+    prepareJoinExpressions(onConds, leftTbl, rightTbl, leftRange, rightRange,
+                           rangeNames.encodeColumns, dbname, this);
 
     size_t leftColIdx = leftTbl.len;
     for (size_t i = 0; i < leftTbl.len; ++i) {
@@ -38719,7 +38900,10 @@ std::vector<std::string> StorageEngine::leftJoin(
         }
     }
 
-    auto formatRow = [&](const JoinRow& lr, const JoinRow* rr,
+    const bool preserveRight = std::find(onConditions.begin(), onConditions.end(),
+        "__join_full_once__") != onConditions.end();
+    std::vector<bool> rightMatched(preserveRight ? rightRows.size() : 0, false);
+    auto formatRow = [&](const JoinRow* lr, const JoinRow* rr,
                          bool rightNull, std::vector<std::string>& cells,
                          std::vector<bool>& nulls) -> std::string {
         std::string rowStr;
@@ -38727,9 +38911,15 @@ std::vector<std::string> StorageEngine::leftJoin(
             std::string fullName = joinRangeColumnKey(leftRange, leftTbl.cols[i].dataName, rangeNames.encodeColumns);
             bool include = selectCols.empty() || selectCols.find(leftTbl.cols[i].dataName) != selectCols.end() || selectCols.find(fullName) != selectCols.end();
             if (!include) continue;
+            if (!lr) {
+                rowStr += "NULL ";
+                cells.emplace_back();
+                nulls.push_back(true);
+                continue;
+            }
             bool valueIsNull = false;
             std::string val = logicalValue(
-                lr, leftTbl, leftTable, i, &valueIsNull);
+                *lr, leftTbl, leftTable, i, &valueIsNull);
             if (valueIsNull) rowStr += "NULL ";
             else rowStr += val + ' ';
             cells.push_back(valueIsNull ? std::string{} : val);
@@ -38773,6 +38963,9 @@ std::vector<std::string> StorageEngine::leftJoin(
             }
             if (!matchesOn) continue;
             hasOnMatch = true;
+            // Preserve match identity by input occurrence, before WHERE.
+            // Equal-valued duplicate rows are separate FULL JOIN inputs.
+            if (preserveRight) rightMatched[static_cast<size_t>(&rr - rightRows.data())] = true;
             bool whereMatch = true;
             for (const auto& c : conds) {
                 if (!evalCond(c, &lr, &rr)) {
@@ -38783,7 +38976,7 @@ std::vector<std::string> StorageEngine::leftJoin(
             if (!whereMatch) continue;
             std::vector<std::string> cells;
             std::vector<bool> nulls;
-            std::string rowStr = formatRow(lr, &rr, false, cells, nulls);
+            std::string rowStr = formatRow(&lr, &rr, false, cells, nulls);
             if (!rowStr.empty()) {
                 result.push_back(std::move(rowStr));
                 if (structuredRows) structuredRows->push_back(std::move(cells));
@@ -38801,7 +38994,29 @@ std::vector<std::string> StorageEngine::leftJoin(
             if (!whereMatch) continue;
             std::vector<std::string> cells;
             std::vector<bool> nulls;
-            std::string rowStr = formatRow(lr, nullptr, true, cells, nulls);
+            std::string rowStr = formatRow(&lr, nullptr, true, cells, nulls);
+            if (!rowStr.empty()) {
+                result.push_back(std::move(rowStr));
+                if (structuredRows) structuredRows->push_back(std::move(cells));
+                if (structuredNulls) structuredNulls->push_back(std::move(nulls));
+            }
+        }
+    }
+    if (preserveRight) {
+        for (size_t i = 0; i < rightRows.size(); ++i) {
+            if (rightMatched[i]) continue;
+            const auto& row = rightRows[i];
+            bool whereMatch = true;
+            for (const auto& condition : conds) {
+                if (!evalCond(condition, nullptr, &row)) {
+                    whereMatch = false;
+                    break;
+                }
+            }
+            if (!whereMatch) continue;
+            std::vector<std::string> cells;
+            std::vector<bool> nulls;
+            std::string rowStr = formatRow(nullptr, &row, false, cells, nulls);
             if (!rowStr.empty()) {
                 result.push_back(std::move(rowStr));
                 if (structuredRows) structuredRows->push_back(std::move(cells));
@@ -38851,6 +39066,10 @@ std::vector<std::string> StorageEngine::rightJoin(
         }
     }
 
+    JoinExceptionLockRelease exceptionLocks([&] {
+        lockManager_.unlock(leftTable);
+        lockManager_.unlock(rightTable);
+    });
     TableSchema leftTbl = getTableSchema(dbname, leftTable);
     TableSchema rightTbl = getTableSchema(dbname, rightTable);
 
@@ -38906,6 +39125,13 @@ std::vector<std::string> StorageEngine::rightJoin(
 
     auto evalCond = [&](const JoinCondition& c, const JoinRow* leftRow,
                         const JoinRow* rightRow) -> bool {
+        if (c.op == "typedexpr")
+            return evaluateJoinExpression(c, [&](bool isLeft, size_t index, bool& isNull) {
+                const JoinRow* row = isLeft ? leftRow : rightRow;
+                if (!row) { isNull = true; return std::string{}; }
+                return logicalValue(*row, isLeft ? leftTbl : rightTbl,
+                    isLeft ? leftTable : rightTable, index, &isNull);
+            });
         if (c.op == "jointrue" || c.op == "joinfalse")
             return c.op == "jointrue";
         auto it = colMap.find(c.colName);
@@ -38946,7 +39172,11 @@ std::vector<std::string> StorageEngine::rightJoin(
     };
 
     auto conds = parseJoinConditions(conditions);
-    const auto onConds = parseJoinOnConditions(onConditions);
+    auto onConds = parseJoinOnConditions(onConditions);
+    prepareJoinExpressions(conds, leftTbl, rightTbl, leftRange, rightRange,
+                           rangeNames.encodeColumns, dbname, this);
+    prepareJoinExpressions(onConds, leftTbl, rightTbl, leftRange, rightRange,
+                           rangeNames.encodeColumns, dbname, this);
 
     size_t leftColIdx = leftTbl.len;
     for (size_t i = 0; i < leftTbl.len; ++i) {
@@ -39079,50 +39309,16 @@ std::vector<std::string> StorageEngine::fullOuterJoin(
     std::vector<std::vector<bool>>* structuredNulls,
     const std::vector<std::string>& onConditions,
     const JoinRangeNames& rangeNames) {
-    // FULL OUTER JOIN uses bag semantics.  LEFT and RIGHT each contain the
-    // matched rows, so subtract exactly the INNER multiplicity from RIGHT
-    // before appending it.  Use the structured identity: display text can
-    // collide for values containing spaces, empty strings, or literal NULL.
-    std::vector<std::vector<std::string>> leftCells, rightCells, innerCells;
-    std::vector<std::vector<bool>> leftNulls, rightNulls, innerNulls;
-    auto leftResult = leftJoin(
+    // Reuse the outer-join matcher in FULL mode. A second/third pass would
+    // reevaluate VOLATILE ON operands and could disagree about which input
+    // occurrences matched. The private carrier flag adds unmatched rights
+    // from the same materialized inputs and ON decisions, with no public API
+    // or thread-local mode that could leak into a nested stored-function query.
+    auto fullConditions = onConditions;
+    fullConditions.push_back("__join_full_once__");
+    return leftJoin(
         dbname, leftTable, rightTable, leftCol, rightCol, conditions, selectCols,
-        &leftCells, &leftNulls, onConditions, rangeNames);
-    auto rightResult = rightJoin(
-        dbname, leftTable, rightTable, leftCol, rightCol, conditions, selectCols,
-        &rightCells, &rightNulls, onConditions, rangeNames);
-    join(
-        dbname, leftTable, rightTable, leftCol, rightCol, conditions, selectCols,
-        &innerCells, &innerNulls, onConditions, rangeNames);
-    auto rowIdentity = [](const std::vector<std::string>& cells,
-                          const std::vector<bool>& nulls) {
-        std::string key;
-        for (size_t i = 0; i < cells.size(); ++i) {
-            const bool isNull = i < nulls.size() && nulls[i];
-            key.push_back(isNull ? 'N' : 'V');
-            key += std::to_string(cells[i].size());
-            key.push_back(':');
-            key += cells[i];
-        }
-        return key;
-    };
-    std::unordered_map<std::string, size_t> innerCounts;
-    for (size_t i = 0; i < innerCells.size(); ++i)
-        ++innerCounts[rowIdentity(innerCells[i], innerNulls[i])];
-    for (size_t i = 0; i < rightResult.size(); ++i) {
-        const std::string key = rowIdentity(rightCells[i], rightNulls[i]);
-        auto it = innerCounts.find(key);
-        if (it != innerCounts.end() && it->second > 0) {
-            --it->second;
-        } else {
-            leftResult.push_back(std::move(rightResult[i]));
-            leftCells.push_back(std::move(rightCells[i]));
-            leftNulls.push_back(std::move(rightNulls[i]));
-        }
-    }
-    if (structuredRows) *structuredRows = std::move(leftCells);
-    if (structuredNulls) *structuredNulls = std::move(leftNulls);
-    return leftResult;
+        structuredRows, structuredNulls, fullConditions, rangeNames);
 }
 
 std::vector<std::string> StorageEngine::crossJoin(
@@ -39155,6 +39351,10 @@ std::vector<std::string> StorageEngine::crossJoin(
         }
     }
 
+    JoinExceptionLockRelease exceptionLocks([&] {
+        lockManager_.unlock(leftTable);
+        lockManager_.unlock(rightTable);
+    });
     TableSchema leftTbl = getTableSchema(dbname, leftTable);
     TableSchema rightTbl = getTableSchema(dbname, rightTable);
 
@@ -39197,6 +39397,8 @@ std::vector<std::string> StorageEngine::crossJoin(
     auto conds = parseJoinConditions(conditions);
 
     struct ColInfo { bool isLeft; size_t colIdx; };
+    prepareJoinExpressions(conds, leftTbl, rightTbl, leftRange, rightRange,
+                           rangeNames.encodeColumns, dbname, this);
     std::map<std::string, ColInfo> colMap;
     for (size_t i = 0; i < leftTbl.len; ++i) {
         colMap[leftTbl.cols[i].dataName] = {true, i};
@@ -39210,6 +39412,11 @@ std::vector<std::string> StorageEngine::crossJoin(
 
     auto evalCond = [&](const JoinCondition& c, const JoinRow& leftRow,
                         const JoinRow& rightRow) -> bool {
+        if (c.op == "typedexpr")
+            return evaluateJoinExpression(c, [&](bool isLeft, size_t index, bool& isNull) {
+                return logicalValue(isLeft ? leftRow : rightRow,
+                    isLeft ? leftTbl : rightTbl, isLeft ? leftTable : rightTable, index, &isNull);
+            });
         if (c.op == "jointrue" || c.op == "joinfalse")
             return c.op == "jointrue";
         auto it = colMap.find(c.colName);

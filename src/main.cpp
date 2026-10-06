@@ -1851,6 +1851,117 @@ static std::string quoteDumpIdentifier(const std::string& identifier) {
     return result;
 }
 
+// JOIN predicates travel through the existing private condition carrier.
+// Serialize the parsed tree, not Expr::toString() (which loses parentheses
+// and CASE arms), and resolve only value ColumnRefs before doing so.
+static bool renderJoinExpression(
+    const dbms::Expr* expression,
+    const function<bool(const dbms::ColumnRefExpr*, string&)>& bindColumn,
+    string& result) {
+    if (!expression) return false;
+    if (const auto* literal = dynamic_cast<const dbms::LiteralExpr*>(expression)) {
+        result = literal->value;
+        return true;
+    }
+    if (const auto* column = dynamic_cast<const dbms::ColumnRefExpr*>(expression)) {
+        string key;
+        if (!bindColumn(column, key)) return false;
+        result = quoteDumpIdentifier(key);
+        return true;
+    }
+    if (const auto* unary = dynamic_cast<const dbms::UnaryOpExpr*>(expression)) {
+        string operand;
+        if (!renderJoinExpression(unary->operand.get(), bindColumn, operand)) return false;
+        const bool postfix = unary->op.rfind("IS ", 0) == 0;
+        result = postfix ? "(" + operand + " " + unary->op + ")"
+                         : "(" + unary->op + " " + operand + ")";
+        return true;
+    }
+    if (const auto* binary = dynamic_cast<const dbms::BinaryOpExpr*>(expression)) {
+        string left, right;
+        if (!renderJoinExpression(binary->left.get(), bindColumn, left)) return false;
+        // Type and collation labels are grammar, not row-bound values.
+        if (binary->op == "::" || binary->op == "COLLATE")
+            right = binary->right ? binary->right->toString() : string{};
+        else if (!renderJoinExpression(binary->right.get(), bindColumn, right)) return false;
+        if (right.empty()) return false;
+        result = "(" + left + " " + binary->op + " " + right + ")";
+        return true;
+    }
+    if (const auto* cast = dynamic_cast<const dbms::CastExpr*>(expression)) {
+        string operand;
+        if (!renderJoinExpression(cast->operand.get(), bindColumn, operand)) return false;
+        result = "CAST(" + operand + " AS " + cast->typeName;
+        if (!cast->typeMods.empty()) {
+            result += "(";
+            for (size_t i = 0; i < cast->typeMods.size(); ++i) {
+                if (i) result += ",";
+                result += cast->typeMods[i];
+            }
+            result += ")";
+        }
+        result += ")";
+        return true;
+    }
+    if (const auto* conditional = dynamic_cast<const dbms::CaseExpr*>(expression)) {
+        result = "CASE";
+        string part;
+        if (conditional->switchExpr) {
+            if (!renderJoinExpression(conditional->switchExpr.get(), bindColumn, part)) return false;
+            result += " " + part;
+        }
+        for (const auto& arm : conditional->whenClauses) {
+            if (!renderJoinExpression(arm.first.get(), bindColumn, part)) return false;
+            result += " WHEN " + part;
+            if (!renderJoinExpression(arm.second.get(), bindColumn, part)) return false;
+            result += " THEN " + part;
+        }
+        if (conditional->elseExpr) {
+            if (!renderJoinExpression(conditional->elseExpr.get(), bindColumn, part)) return false;
+            result += " ELSE " + part;
+        }
+        result += " END";
+        return true;
+    }
+    if (const auto* call = dynamic_cast<const dbms::FunctionCallExpr*>(expression)) {
+        if (call->hasOver || call->distinct || call->filter ||
+            !call->orderBy.empty() || !call->namedArgs.empty()) return false;
+        result = (call->schema.empty() ? string{} : call->schema + ".") + call->funcName + "(";
+        for (size_t i = 0; i < call->args.size(); ++i) {
+            string argument;
+            if (!renderJoinExpression(call->args[i].get(), bindColumn, argument)) return false;
+            if (i) result += ",";
+            result += argument;
+        }
+        result += ")";
+        return true;
+    }
+    return false;
+}
+
+static bool joinHasNullSafeComparison(const dbms::Expr* expression) {
+    // Walking through the same complete operand shapes prevents the collector
+    // from rejecting a parenthesized OR/CASE that contains the operator.
+    function<bool(const dbms::Expr*)> visit = [&](const dbms::Expr* node) {
+        if (!node) return false;
+        if (const auto* binary = dynamic_cast<const dbms::BinaryOpExpr*>(node))
+            return binary->op == "IS DISTINCT FROM" || binary->op == "IS NOT DISTINCT FROM" ||
+                visit(binary->left.get()) || visit(binary->right.get());
+        if (const auto* unary = dynamic_cast<const dbms::UnaryOpExpr*>(node)) return visit(unary->operand.get());
+        if (const auto* cast = dynamic_cast<const dbms::CastExpr*>(node)) return visit(cast->operand.get());
+        if (const auto* call = dynamic_cast<const dbms::FunctionCallExpr*>(node)) {
+            for (const auto& argument : call->args) if (visit(argument.get())) return true;
+        }
+        if (const auto* conditional = dynamic_cast<const dbms::CaseExpr*>(node)) {
+            if (visit(conditional->switchExpr.get()) || visit(conditional->elseExpr.get())) return true;
+            for (const auto& arm : conditional->whenClauses)
+                if (visit(arm.first.get()) || visit(arm.second.get())) return true;
+        }
+        return false;
+    };
+    return visit(expression);
+}
+
 static std::string quoteDumpLiteral(const std::string& value) {
     std::string result = "'";
     for (char c : value) {
@@ -24906,7 +25017,15 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             const dbms::UnaryOpExpr*>(expression);
                         bool validShape = false;
                         vector<const dbms::ColumnRefExpr*> references;
-                        if (comparison &&
+                        if (joinHasNullSafeComparison(expression)) {
+                            string ignored;
+                            validShape = renderJoinExpression(expression,
+                                [&](const dbms::ColumnRefExpr* ref, string& key) {
+                                    references.push_back(ref);
+                                    key = "__join_unbound__";
+                                    return true;
+                                }, ignored);
+                        } else if (comparison &&
                             (comparison->op == "=" || comparison->op == "<>" ||
                              comparison->op == "!=" || comparison->op == "<" ||
                              comparison->op == ">" || comparison->op == "<=" ||
@@ -25046,7 +25165,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     std::all_of(pj.joins.begin(), pj.joins.end(),
                         [](const JoinLink& link) {
                             return link.type == "cross" ||
-                                (link.natural && link.usingColumns.empty());
+                                (link.natural && link.usingColumns.empty()) ||
+                                (link.hasOn && !link.onResiduals.empty());
                         });
                 if (pj.tables.size() < 2 ||
                     (preds.empty() && !onlyNoKeyJoins)) {
@@ -25061,7 +25181,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 const bool preserveJoinOrder = hasUsingJoin || std::any_of(
                     pj.joins.begin(), pj.joins.end(), [](const JoinLink& link) {
                         return link.type == "left" || link.type == "right" ||
-                               link.type == "full";
+                               link.type == "full" ||
+                               (link.hasOn && link.onLeft.empty() &&
+                                !link.onResiduals.empty());
                     });
 
                 // Pick the starting pair greedily for inner-only chains;
@@ -25076,7 +25198,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 } else if (preserveJoinOrder && !pj.joins.empty() &&
                     (pj.joins.front().type == "cross" ||
                      (pj.joins.front().natural &&
-                      pj.joins.front().usingColumns.empty()))) {
+                      pj.joins.front().usingColumns.empty()) ||
+                     (pj.joins.front().hasOn && pj.joins.front().onLeft.empty() &&
+                      !pj.joins.front().onResiduals.empty()))) {
                     bestRows = static_cast<double>(rowCount(pending[0].name)) *
                                static_cast<double>(rowCount(pending[1].name));
                 } else if (preserveJoinOrder) {
@@ -25124,6 +25248,12 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         return g_engine.rightJoin(
                             s.currentDB, lt, rt, lc, rc, {}, {}, cells, nulls,
                             onConditions, stageRanges);
+                    if (type == "full" && (lc.empty() || rc.empty()) &&
+                        std::any_of(onConditions.begin(), onConditions.end(),
+                            [](const string& condition) {
+                                return condition != "__join_on_true__" && condition != "__join_on_false__";
+                            }))
+                        throw dbms::DbError("0A000", "FULL JOIN is only supported with merge-joinable or hash-joinable join conditions");
                     if (type == "full")
                         return g_engine.fullOuterJoin(
                             s.currentDB, lt, rt, lc, rc, {}, {}, cells, nulls,
@@ -25275,6 +25405,18 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         }
                         return true;
                     };
+                    if (joinHasNullSafeComparison(expression)) {
+                        string sqlExpression;
+                        if (!renderJoinExpression(expression, qualifyColumn, sqlExpression)) {
+                            if (error.empty()) {
+                                error = "unsupported multi-table JOIN ON expression";
+                                sqlState = "0A000";
+                            }
+                            return false;
+                        }
+                        condition = "typedexpr " + sqlExpression;
+                        return true;
+                    }
                     const auto* comparison = dynamic_cast<const
                         dbms::BinaryOpExpr*>(expression);
                     if (!comparison) {
@@ -25500,6 +25642,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                        pj.joins[joinIndex].usingColumns.empty()) {
                                 pickLCol.clear();
                                 pickRCol.clear();
+                                pickEst = interEstRows * static_cast<double>(
+                                    rowCount(pending[t].name));
+                            } else if (pj.joins[joinIndex].hasOn &&
+                                       pj.joins[joinIndex].onLeft.empty() &&
+                                       !pj.joins[joinIndex].onResiduals.empty()) {
                                 pickEst = interEstRows * static_cast<double>(
                                     rowCount(pending[t].name));
                             } else if (!pj.joins[joinIndex]
@@ -27458,12 +27605,21 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         onPredicates.push_back(literal);
                         return true;
                     }
+                    if (joinHasNullSafeComparison(expression) &&
+                        !dynamic_cast<const dbms::BinaryOpExpr*>(expression)) {
+                        onPredicates.push_back(expression);
+                        return true;
+                    }
                     const auto* binary = dynamic_cast<
                         const dbms::BinaryOpExpr*>(expression);
                     if (binary) {
                         if (binary->op == "AND")
                             return collectOnComparisons(binary->left.get()) &&
                                 collectOnComparisons(binary->right.get());
+                        if (joinHasNullSafeComparison(binary)) {
+                            onPredicates.push_back(binary);
+                            return true;
+                        }
                         if (binary->op != "=" && binary->op != "<>" &&
                             binary->op != "!=" && binary->op != "<" &&
                             binary->op != ">" && binary->op != "<=" &&
@@ -27550,6 +27706,25 @@ static bool executeInternal(const string& rawSql, Session& s) {
                          << "\" does not exist (SQLSTATE 42703)" << endl;
                 };
                 for (const auto* predicate : onPredicates) {
+                    if (joinHasNullSafeComparison(predicate)) {
+                        string sqlExpression;
+                        bool bindingError = false;
+                        const auto bindColumn = [&](const dbms::ColumnRefExpr* ref, string& key) {
+                            int side = -1;
+                            string name;
+                            if (resolveOnColumn(ref, -1, side, name, key)) return true;
+                            reportOnBindingError(ref);
+                            bindingError = true;
+                            return false;
+                        };
+                        if (!renderJoinExpression(predicate, bindColumn, sqlExpression)) {
+                            if (!bindingError)
+                                cout << "ERROR: unsupported JOIN ON expression (SQLSTATE 0A000)" << endl;
+                            return true;
+                        }
+                        onConditions.push_back("typedexpr " + sqlExpression);
+                        continue;
+                    }
                     if (const auto* literal = dynamic_cast<
                             const dbms::LiteralExpr*>(predicate)) {
                         onConditions.push_back(literal->value == "true"
