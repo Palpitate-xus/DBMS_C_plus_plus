@@ -1189,6 +1189,9 @@ public:
         std::string op;  // "<", ">", "=", "<=", ">=", "!=", "like"
         std::string colName;
         std::string value;
+        // Native compact read API values are decoded data, even when a
+        // scalar function is the left operand. SQL expressions stay untagged.
+        bool decodedLiteralRhs = false;
     };
     enum class PredicateTruth { False, True, Unknown };
     // Compare two already decoded values using the column's PostgreSQL-like

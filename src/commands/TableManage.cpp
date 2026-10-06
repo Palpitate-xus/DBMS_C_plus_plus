@@ -22221,6 +22221,17 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
     if (cond.colName == "__true__") return true;
     if (cond.colName == "__false__") return false;
 
+    StorageEngine* valueEngine = nullptr;
+    std::string valueDb;
+    const bool buffered = g_bufferedConditionSchema == &tbl && g_bufferedConditionNulls;
+    if (g_condNullEngine && tbl.tablename == g_condNullTable) {
+        valueEngine = const_cast<StorageEngine*>(g_condNullEngine);
+        valueDb = g_condNullDb;
+    } else if (g_nullRowEngine && tbl.tablename == g_nullRowTable) {
+        valueEngine = const_cast<StorageEngine*>(g_nullRowEngine);
+        valueDb = g_nullRowDb;
+    }
+
     if (cond.op.rfind("typedrhs ", 0) == 0) {
         const Column* column = nullptr;
         for (size_t i = 0; i < tbl.len; ++i) {
@@ -22229,17 +22240,28 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
                 break;
             }
         }
-        const bool numericColumn = column && !column->isArray &&
+        bool numericColumn = column && !column->isArray &&
             (isIntegerStorageType(column->dataType) ||
              column->dataType == "numeric" || column->dataType == "decimal" ||
              column->dataType == "float" || column->dataType == "double");
+        if (!column && cond.colName.find('(') != std::string::npos) {
+            // A scalar result has a declared type too. Disambiguate API
+            // arithmetic-looking data without evaluating a volatile routine.
+            const auto type = ExprHelper::canonicalResultTypeName(
+                ExprHelper::inferResultType(cond.colName, buildTypeHints(tbl),
+                                           valueDb, valueEngine));
+            numericColumn = type == "smallint" || type == "integer" ||
+                type == "bigint" || type == "numeric" || type == "real" ||
+                type == "double precision";
+        }
         Condition bound = cond;
         const std::string comparison = cond.op.substr(9);
-        if (column && !numericColumn) {
+        if (!numericColumn && (column || cond.colName.find('(') != std::string::npos)) {
             // Compact API values have historically been decoded literals.
             // Text "1+2" and date "2024-01-01" must not become arithmetic.
             bound.op = comparison;
             bound.value = decodeSqlLiteral(cond.value);
+            bound.decodedLiteralRhs = true;
         } else {
             std::string left = cond.colName;
             if (column) {
@@ -22266,21 +22288,22 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
         Condition scalarCondition;
         scalarCondition.op = "scalarexpr";
         scalarCondition.colName = cond.colName;
+        std::string right = cond.value;
+        if (cond.decodedLiteralRhs) {
+            // Re-encode only a proven API datum, not an arbitrary SQL name.
+            // Preserve quotes, empty text and the text NULL as literal data.
+            right = "'";
+            for (const char ch : cond.value) {
+                if (ch == '\'') right += '\'';
+                right += ch;
+            }
+            right += '\'';
+        }
         scalarCondition.value = cond.op == "isnull" ? "IS NULL" :
-            cond.op == "isnotnull" ? "IS NOT NULL" : cond.op + " " + cond.value;
+            cond.op == "isnotnull" ? "IS NOT NULL" : cond.op + " " + right;
         return evalConditionOnRow(scalarCondition, rowBuffer, tbl);
     }
 
-    StorageEngine* valueEngine = nullptr;
-    std::string valueDb;
-    const bool buffered = g_bufferedConditionSchema == &tbl && g_bufferedConditionNulls;
-    if (g_condNullEngine && tbl.tablename == g_condNullTable) {
-        valueEngine = const_cast<StorageEngine*>(g_condNullEngine);
-        valueDb = g_condNullDb;
-    } else if (g_nullRowEngine && tbl.tablename == g_nullRowTable) {
-        valueEngine = const_cast<StorageEngine*>(g_nullRowEngine);
-        valueDb = g_nullRowDb;
-    }
     const auto extractValue = [&](size_t columnIndex,
                                   bool* valueIsNull = nullptr) {
         if (buffered && valueIsNull)
@@ -22389,7 +22412,7 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
     // Column-vs-column predicate ("a = b", produced by the IS [NOT]
     // DISTINCT FROM rewrite): resolve the right side against this row too;
     // a physically-NULL right column makes the comparison UNKNOWN.
-    {
+    if (!cond.decodedLiteralRhs) {
         size_t rci = 0;
         for (; rci < tbl.len && tbl.cols[rci].dataName != cond.value; ++rci) {}
         if (rci < tbl.len) {
@@ -25523,6 +25546,7 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
             continue;
         }
         c.value = decodeSqlLiteral(s.substr(sp + 1));
+        c.decodedLiteralRhs = apiCondition;
         conds.push_back(c);
     }
     for (auto& condition : conds) {
