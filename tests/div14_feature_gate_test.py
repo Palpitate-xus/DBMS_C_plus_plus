@@ -519,7 +519,19 @@ def main():
         missing_reload = simple_query(sock, "SELECT pg_reload_conf()")
         assert data_row_values(missing_reload) == [[b"f"]], missing_reload
         # Plain SET on the same parameter remains valid PostgreSQL syntax.
+        original_timeout = setting_value(simple_query(
+            sock, "SELECT name, setting, unit FROM pg_settings"),
+            "statement_timeout")
         expect_command_tag(sock, "SET statement_timeout = 1234", "plain SET")
+        assert setting_value(simple_query(
+            sock, "SELECT name, setting, unit FROM pg_settings"),
+            "statement_timeout") == b"1234"
+        # This case checks SET syntax, not statement timing. Do not leave its
+        # 1234 ms deadline on later maintenance, restore and ALTER TABLE cases.
+        expect_command_tag(sock, "RESET statement_timeout", "plain SET cleanup")
+        assert setting_value(simple_query(
+            sock, "SELECT name, setting, unit FROM pg_settings"),
+            "statement_timeout") == original_timeout
 
         # The transaction stays usable after a gated failure (error aborts
         # only the statement, matching PostgreSQL statement semantics).
