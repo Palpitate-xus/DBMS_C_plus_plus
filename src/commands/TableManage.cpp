@@ -30704,6 +30704,7 @@ std::vector<std::string> StorageEngine::query(
     PageAllocator* pa = getPageAllocator(dbname, tablename);
 
     ReadView autocommitView;
+    ReadView commandInternalView;
     const ReadView* queryView = nullptr;
     if (transactionContext().inTransaction &&
         transactionContext().txnDB == dbname) {
@@ -30718,6 +30719,18 @@ std::vector<std::string> StorageEngine::query(
         autocommitView.subTxnIds.clear();
         autocommitView.commitLog = getCommitLog(dbname);
         queryView = &autocommitView;
+    }
+    // The final RID fetch must use the same visibility rule as the scan.
+    // CTE/derived materializations belong to this SQL command and are
+    // explicitly registered as internal; applying its caller's CID again
+    // here would discard every just-materialized row when WHERE is present.
+    // This exception never applies to a user's ordinary or TEMP relations.
+    if (queryView->commandIdVisibility && transactionContext().inTransaction &&
+        transactionContext().txnDB == dbname &&
+        transactionContext().commandInternalRelations.count(tablename)) {
+        commandInternalView = *queryView;
+        commandInternalView.commandIdVisibility = false;
+        queryView = &commandInternalView;
     }
 
     // RLS policies are expression ASTs, not legacy index-condition strings.
@@ -31353,9 +31366,132 @@ std::vector<std::string> StorageEngine::query(
 // Shared UDF-body executor: evaluates a stored UDF (SQL or PL/pgSQL) with
 // literal argument values.  Used by scalar-function dispatch and by
 // StorageEngine::callUDF (trigger EXECUTE FUNCTION actions).
+static std::pair<bool, size_t> nativePlpgsqlExecSql(
+    StorageEngine& engine, const std::string& dbname, const std::string& sql);
+namespace {
+struct StoredFunctionFrame {
+    const StorageEngine* engine;
+    std::string database;
+    const Session* session;
+    char volatility;
+};
+thread_local std::vector<StoredFunctionFrame> storedFunctionFrames;
+
+bool storedFunctionTransactionControl(SqlCommand command) {
+    switch (command) {
+        case SqlCommand::Begin: case SqlCommand::StartTransaction:
+        case SqlCommand::Commit: case SqlCommand::Rollback:
+        case SqlCommand::Abort: case SqlCommand::End:
+        case SqlCommand::Savepoint: case SqlCommand::ReleaseSavepoint:
+        case SqlCommand::RollbackToSavepoint: case SqlCommand::PrepareTransaction:
+        case SqlCommand::CommitPrepared: case SqlCommand::RollbackPrepared:
+            return true;
+        default: return false;
+    }
+}
+
+bool storedFunctionReadOnlyQuery(const std::string& sql) {
+    const auto command = SQLParser::classify(sql);
+    if (command != SqlCommand::Select && command != SqlCommand::Values)
+        return false;
+    // Token boundaries distinguish command keywords from text and quoted
+    // identifiers. SELECT classification alone does not catch a write CTE
+    // or row-locking SELECT. Nested VOLATILE calls are deliberately allowed:
+    // their own function frame establishes their write/snapshot policy.
+    const auto tokens = SQLParser::tokenize(sql);
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        const std::string word = SQLParser::toLower(tokens[i]);
+        if (tokens[i] == "(" && i + 1 < tokens.size()) {
+            const auto next = SQLParser::toLower(tokens[i + 1]);
+            if (next == "insert" || next == "update" || next == "delete" ||
+                next == "merge" || next == "replace") return false;
+        }
+        if (word == "for" && i + 1 < tokens.size()) {
+            const auto next = SQLParser::toLower(tokens[i + 1]);
+            if (next == "update" || next == "share" || next == "no" ||
+                next == "key") return false;
+        }
+    }
+    return true;
+}
+} // namespace
+
 PlPgsqlQueryResult StorageEngine::plpgsqlQuery(const std::string& dbname,
                                              const std::string& sql) const {
+    const bool functionBody = !storedFunctionFrames.empty() &&
+        storedFunctionFrames.back().engine == this &&
+        storedFunctionFrames.back().database == dbname &&
+        storedFunctionFrames.back().session == currentSession();
+    const bool readOnlyBody = functionBody &&
+        storedFunctionFrames.back().volatility != 'v';
+    const auto failure = [](const std::string& state, const std::string& message) {
+        PlPgsqlQueryResult result;
+        result.sqlState = state;
+        result.message = message;
+        return result;
+    };
+    const auto command = SQLParser::classify(sql);
+    if (storedFunctionTransactionControl(command))
+        return failure("2D000", "transaction control is not allowed in a stored-function body");
+    if (readOnlyBody && !storedFunctionReadOnlyQuery(sql))
+        return failure("0A000", "non-read-only SQL is not allowed in a non-volatile function");
+
+    auto& context = transactionContext();
+    const bool active = context.inTransaction && context.txnDB == dbname;
+    const uint64_t transactionId = active ? context.currentTxnId : 0;
+    ReadView callerView = context.readView;
+    // Reacquire the context at exit: a failed nested command can abort the
+    // transaction or restore a DDL backup and evict its CLOG/cache objects.
+    // Never retain a context/CLOG pointer across execution or resurrect an
+    // ended/replaced transaction. Combo CIDs are transaction-wide and must
+    // survive restoration of the caller's fixed command snapshot.
+    const auto restore = [&]() noexcept {
+        if (!active) return;
+        try {
+            auto& current = transactionContext();
+            if (!current.inTransaction || current.currentTxnId != transactionId ||
+                current.txnDB != dbname) return;
+            // Inspect the current cache without allocating during unwind.
+            // A DDL restore can destroy the pointer captured on entry.
+            std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+            const auto log = commitLogs_.find(dbname);
+            callerView.commitLog = log == commitLogs_.end()
+                ? nullptr : log->second.get();
+            callerView.comboCommandIds.swap(current.readView.comboCommandIds);
+            current.readView = std::move(callerView);
+            if (!current.readView.commitLog) current.snapshotAcquired = false;
+        } catch (...) {
+            // Do not mask the body's original failure during unwinding.
+        }
+    };
+    struct ViewScope {
+        const decltype(restore)& callback;
+        ~ViewScope() { callback(); }
+    } viewScope{restore};
+    if (active && !readOnlyBody) {
+        auto* mutableEngine = const_cast<StorageEngine*>(this);
+        if (!mutableEngine->advanceSqlCommandCounter())
+            return failure("54000", "stored-function command ID limit exceeded");
+        if (context.txnIsolationLevel == IsolationLevel::READ_COMMITTED ||
+            context.txnIsolationLevel == IsolationLevel::READ_UNCOMMITTED)
+            refreshReadView();
+        context.readView.currentCommandId = context.currentCommandId;
+        context.readView.commandIdVisibility = true;
+    }
     if (plpgsqlQueryExecutor_) return plpgsqlQueryExecutor_(dbname, sql);
+    if (command == SqlCommand::Insert || command == SqlCommand::Update ||
+        command == SqlCommand::Delete) {
+        const auto executed = nativePlpgsqlExecSql(
+            *const_cast<StorageEngine*>(this), dbname, sql);
+        PlPgsqlQueryResult result;
+        result.ok = executed.first;
+        result.rowCount = executed.second;
+        if (!result.ok) {
+            result.sqlState = "0A000";
+            result.message = "native body command requires a full SQL execution host";
+        }
+        return result;
+    }
     return plpgsqlQueryNative(dbname, sql);
 }
 
@@ -31389,7 +31525,8 @@ static PlPgsqlQueryResult plpgsqlEvalBoundExpression(
     const std::map<std::string, std::string>& variables,
     const std::set<std::string>& nullVariables,
     const std::map<std::string, std::string>& types,
-    const std::string& dbname, const std::string& username) {
+    const std::string& dbname, const std::string& username,
+    StorageEngine* sqlFunctionEngine = nullptr) {
     try {
         SQLParser parser;
         auto parsed = parser.parse("SELECT " + expression);
@@ -31444,6 +31581,7 @@ static PlPgsqlQueryResult plpgsqlEvalBoundExpression(
         };
         evaluator.registerFunction("current_user", userValue, 's');
         evaluator.registerFunction("session_user", userValue, 's');
+        size_t functionPosition = 0;
         std::function<void(Expr*)> bind;
         bind = [&](Expr* node) {
             if (!node) throw DbError("42601", "missing scalar expression");
@@ -31503,20 +31641,56 @@ static PlPgsqlQueryResult plpgsqlEvalBoundExpression(
                 if (!syntaxFunctions.count(name)) {
                     CatalogManager::QualifiedName decoded;
                     if (!CatalogManager::parseQualifiedName(function->funcName, decoded, true) ||
-                        !decoded.schema.empty() || decoded.name != SQLParser::toLower(decoded.name))
+                        !decoded.schema.empty())
                         throw DbError("42883", "function does not exist: " + function->funcName);
                     name = decoded.name;
                 }
+                std::string schemaName;
                 if (!function->schema.empty()) {
                     CatalogManager::QualifiedName schema;
                     if (!CatalogManager::parseQualifiedName(function->schema, schema, true) ||
-                        !schema.schema.empty() || schema.name != "pg_catalog" ||
-                        !evaluator.hasFunction(name))
+                        !schema.schema.empty())
                         throw DbError("42883", "function does not exist: " + function->schema + "." + name);
+                    schemaName = schema.name;
                 }
-                if (!evaluator.hasFunction(name) && !syntaxFunctions.count(name))
+                const bool builtin = name == SQLParser::toLower(name) &&
+                    (schemaName.empty() || schemaName == "pg_catalog") &&
+                    (evaluator.hasFunction(name) || syntaxFunctions.count(name));
+                std::string evaluatorName = name;
+                bool stored = false;
+                if (!builtin && sqlFunctionEngine &&
+                    (schemaName.empty() || schemaName == "public")) {
+                    const auto nested = sqlFunctionEngine->getUDF(dbname, name);
+                    if (!nested.expression.empty()) {
+                        if (!function->namedArgs.empty())
+                            throw DbError("0A000", "named SQL-function arguments are not supported");
+                        // ExprEvaluator folds registry names. Canonical
+                        // quoted Foo/foo and schema-bound calls must never
+                        // share such a key; bind each actual AST call to a
+                        // private slot without invoking it during preparation.
+                        evaluatorName = "__dbms_sql_function_" + std::to_string(functionPosition++);
+                        evaluator.registerFunction(evaluatorName,
+                            [sqlFunctionEngine, dbname, name, nested](const std::vector<ExprValue>& arguments) {
+                            std::vector<std::string> values;
+                            std::vector<bool> nulls;
+                            for (const auto& argument : arguments) {
+                                values.push_back(argument.value);
+                                nulls.push_back(argument.isNull);
+                            }
+                            std::string value;
+                            bool isNull = false;
+                            if (!sqlFunctionEngine->callUDF(dbname, name, values, value, &isNull, &nulls))
+                                throw DbError("22023", "nested SQL-function evaluation failed: " + name);
+                            return ExprValue(ExprHelper::canonicalResultTypeName(nested.returnType),
+                                             value, isNull);
+                        }, nested.provolatile);
+                        stored = true;
+                    }
+                }
+                if (!builtin && !stored)
                     throw DbError("42883", "function does not exist: " + function->funcName);
-                function->funcName = name;
+                function->funcName = evaluatorName;
+                function->schema.clear();
                 // SQL EXTRACT's field is syntax, not a procedural variable.
                 // The shared parser represents it as the first argument.
                 if (name == "extract" && !function->args.empty()) {
@@ -31593,6 +31767,39 @@ static bool evalUDFBody(const StorageEngine::UDFInfo& udf,
         }
         ~CallScope() { if (!--budget.depth) budget.origin = 0; }
     } callScope(budget, position);
+    struct FunctionScope {
+        FunctionScope(const StorageEngine* engine, const std::string& database,
+                      char volatility) {
+            storedFunctionFrames.push_back({engine, database, currentSession(), volatility});
+        }
+        ~FunctionScope() { storedFunctionFrames.pop_back(); }
+    } functionScope(engine, dbname, udf.provolatile);
+    // Native callers have no SQL dispatcher to supply the outer statement
+    // boundary. Own one function-call transaction only in that case; a
+    // server query/trigger/nested function always reuses its caller's owner.
+    const bool ownsTransaction = engine && !engine->inTransaction();
+    if (ownsTransaction) {
+        const auto status = engine->beginTransaction(dbname);
+        if (status != DBStatus::OK)
+            throw DbError(sqlstateForDBStatus(status), "could not start function transaction");
+        if (!engine->beginSqlCommand()) {
+            engine->rollbackTransaction();
+            throw DbError("XX000", "could not start function command");
+        }
+    }
+    struct TransactionScope {
+        StorageEngine* engine;
+        bool owned;
+        ~TransactionScope() noexcept {
+            // The body/commit has already failed. Rollback helpers can
+            // allocate or restore files; never replace that original error
+            // with terminate() if their cleanup throws while unwinding.
+            try {
+                if (owned && engine->inTransaction()) engine->rollbackTransaction();
+            } catch (...) {}
+        }
+    } transactionScope{engine, ownsTransaction};
+    const auto body = [&]() -> bool {
     (void)funcName;
     if (returnIsNull) *returnIsNull = false;
     std::vector<std::string> funcArgs = argValues;
@@ -31695,8 +31902,11 @@ static bool evalUDFBody(const StorageEngine::UDFInfo& udf,
         };
         host.execStmt = [engine, &dbname](const std::string& sql,
                                           const std::map<std::string, std::string>&) {
-            auto rc = engine->plpgsqlExecSql(dbname, sql, nullptr);
-            return rc.first;
+            const auto result = engine->plpgsqlQuery(dbname, sql);
+            if (!result.ok)
+                throw DbError(result.sqlState.empty() ? "XX000" : result.sqlState,
+                              result.message);
+            return true;
         };
         host.query = [engine, &dbname](const std::string& sql) {
             return engine->plpgsqlQuery(dbname, sql);
@@ -31768,11 +31978,40 @@ static bool evalUDFBody(const StorageEngine::UDFInfo& udf,
             nullParams.insert(name);
         }
     }
-    const auto evaluated = ExprHelper::evalStringWithNulls(
-        expression, params, nullParams, typeHints, dbname);
-    if (!evaluated.ok) return false;
-    return coerceReturn(evaluated.value, evaluated.isNull,
-                        evaluated.typeName);
+    // SQL functions retain their own parameter namespace (no implicit
+    // PL/pgSQL FOUND) and the existing FROM-less scalar shape. Bind actual
+    // AST references through the quoted positional helper. Stored-call
+    // callbacks use the same function entry/transaction owner as ordinary
+    // SQL; no SQL text substitution or second query dispatcher is needed.
+    const Session* session = currentSession();
+    const auto evaluated = plpgsqlEvalBoundExpression(expression, params,
+        nullParams, typeHints, dbname, session ? session->username : std::string{}, engine);
+    if (!evaluated.ok)
+        throw DbError(evaluated.sqlState.empty() ? "XX000" : evaluated.sqlState, evaluated.message);
+    if (evaluated.rowCount != 1 || evaluated.columnCount != 1 || evaluated.firstRow.size() != 1)
+        throw DbError("XX000", "SQL-function scalar host returned an invalid result shape");
+    return coerceReturn(evaluated.firstRow.front().value_or(""),
+        !evaluated.firstRow.front(), evaluated.columnTypes.empty() ? "text" : evaluated.columnTypes.front());
+    };
+    const bool succeeded = body();
+    if (ownsTransaction && !succeeded) {
+        const auto rolledBack = engine->rollbackTransaction();
+        if (rolledBack != DBStatus::OK)
+            throw DbError(sqlstateForDBStatus(rolledBack), "function transaction rollback failed");
+        transactionScope.owned = false;
+    }
+    if (ownsTransaction && succeeded) {
+        if (!engine->inTransaction() || !engine->finishSqlCommand())
+            throw DbError("XX000", "function transaction ended unexpectedly");
+        const auto constraints = engine->validateImmediateForeignKeyChecks();
+        if (constraints != DBStatus::OK)
+            throw DbError(sqlstateForDBStatus(constraints), "function constraint validation failed");
+        const auto committed = engine->commitTransaction();
+        if (committed != DBStatus::OK)
+            throw DbError(sqlstateForDBStatus(committed), "function transaction commit failed");
+        transactionScope.owned = false;
+    }
+    return succeeded;
 }
 
 struct ParsedProjectionSubquery {
@@ -49884,27 +50123,91 @@ namespace dbms {
 std::pair<bool, size_t> StorageEngine::plpgsqlExecSql(
     const std::string& dbname, const std::string& sql, Session* session) {
     (void)session;
+    const auto result = plpgsqlQuery(dbname, sql);
+    if (!result.ok)
+        throw DbError(result.sqlState.empty() ? "XX000" : result.sqlState,
+                      result.message);
+    return {true, result.rowCount};
+}
+
+static std::pair<bool, size_t> nativePlpgsqlExecSql(
+    StorageEngine& engine, const std::string& dbname, const std::string& sql) {
     SQLParser parser;
     auto r = parser.parse(sql);
-    if (!r.success || !r.stmt) return {false, 0};
+    if (!r.success || !r.stmt)
+        throw DbError("42601", r.error.empty() ? "invalid native function command" : r.error);
     if (auto* ins = dynamic_cast<const InsertStmt*>(r.stmt.get())) {
+        if (ins->selectSource || ins->defaultValues || !ins->conflictAction.empty() ||
+            !ins->returning.empty() || !ins->override_.empty())
+            return {false, 0};
         if (!ins->tableName.empty()) {
-            TableSchema tbl = getTableSchema(dbname, ins->tableName);
-            for (const auto& rowVals : ins->values) {
-                std::map<std::string, std::string> values;
-                for (size_t i = 0; i < rowVals.size() && i < tbl.len; ++i) {
-                    // VALUES items are expression ASTs; use their literal
-                    // text (PL bodies passing variables already substituted
-                    // numeric/quoted literals above).  String literals'
-                    // toString() keeps the surrounding quotes; the engine's
-                    // value layer is unquoted, so strip one pair.
-                    std::string v = rowVals[i] ? rowVals[i]->toString() : "";
-                    if (v.size() >= 2 && v.front() == '\'' && v.back() == '\'') {
-                        v = v.substr(1, v.size() - 2);
-                    }
-                    values[tbl.cols[i].dataName] = v;
+            TableSchema tbl = engine.getTableSchema(dbname, ins->tableName);
+            if (tbl.len == 0)
+                throw DbError("42P01", "native function INSERT table does not exist");
+            std::vector<std::string> columns;
+            if (ins->columns.empty()) {
+                for (size_t i = 0; i < tbl.len; ++i) columns.push_back(tbl.cols[i].dataName);
+            } else {
+                std::set<std::string> seen;
+                for (const auto& raw : ins->columns) {
+                    CatalogManager::QualifiedName name;
+                    if (!CatalogManager::parseQualifiedName(raw, name, true) || !name.schema.empty())
+                        throw DbError("42601", "invalid native INSERT column");
+                    if (!seen.insert(name.name).second)
+                        throw DbError("42701", "native INSERT column specified more than once");
+                    if (std::none_of(tbl.cols, tbl.cols + tbl.len, [&](const Column& column) {
+                            return column.dataName == name.name;
+                        })) throw DbError("42703", "native INSERT column does not exist: " + name.name);
+                    columns.push_back(name.name);
                 }
-                if (insert(dbname, ins->tableName, values) != DBStatus::OK) return {false, 0};
+            }
+            for (const auto& row : ins->values)
+                if (row.size() != columns.size())
+                    throw DbError("42601", "native INSERT target/value width mismatch");
+            ExprEvaluator evaluator;
+            evaluator.setCurrentDB(dbname);
+            RowContext bindings;
+            std::function<void(const Expr*)> check;
+            check = [&](const Expr* expression) {
+                if (!expression) throw DbError("42601", "missing native INSERT value");
+                if (const auto* column = dynamic_cast<const ColumnRefExpr*>(expression))
+                    throw DbError("42703", "native INSERT value has no column binding: " + column->toString());
+                if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(expression)) {
+                    check(unary->operand.get());
+                } else if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(expression)) {
+                    check(binary->left.get());
+                    if (binary->op != "::") check(binary->right.get());
+                } else if (const auto* cast = dynamic_cast<const CastExpr*>(expression)) {
+                    check(cast->operand.get());
+                } else if (const auto* conditional = dynamic_cast<const CaseExpr*>(expression)) {
+                    if (conditional->switchExpr) check(conditional->switchExpr.get());
+                    for (const auto& branch : conditional->whenClauses) {
+                        check(branch.first.get());
+                        check(branch.second.get());
+                    }
+                    if (conditional->elseExpr) check(conditional->elseExpr.get());
+                } else if (expression->type != ExprType::Literal ||
+                           expression->toString() == "default") {
+                    throw DbError("0A000", "native INSERT expression requires a full SQL host");
+                }
+            };
+            std::vector<StorageEngine::SqlRow> rows;
+            for (const auto& rowVals : ins->values) {
+                StorageEngine::SqlRow values;
+                for (size_t i = 0; i < rowVals.size(); ++i) {
+                    check(rowVals[i].get());
+                    const auto value = evaluator.eval(rowVals[i].get(), bindings);
+                    if (value.isUnknown())
+                        throw DbError("0A000", "native INSERT expression requires a full SQL host");
+                    values[columns[i]] = value.isNull ? std::nullopt
+                        : std::optional<std::string>{value.value};
+                }
+                rows.push_back(std::move(values));
+            }
+            for (const auto& values : rows) {
+                const auto status = engine.insertRow(dbname, ins->tableName, values);
+                if (status != DBStatus::OK)
+                    throw DbError(sqlstateForDBStatus(status), "native function INSERT failed");
             }
             return {true, ins->values.size()};
         }

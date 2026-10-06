@@ -181,6 +181,9 @@ StorageEngine g_engine;
 // results must only be published by the outer statement, never by a nested
 // subquery that happens to use the same execution path.
 static thread_local unsigned executeDepth = 0;
+// Only the procedural host sets this scope. Ordinary recursive execution
+// (including a top-level procedure/DO block) is not a function-body marker.
+static thread_local unsigned storedFunctionHostDepth = 0;
 // A derived table executes recursively, but still needs the inner query's
 // typed column descriptor to build its temporary relation. The protocol
 // normally accepts results only from depth 1; this scoped depth is the one
@@ -35014,7 +35017,9 @@ bool managesNotificationTransaction(const std::string& sql) {
 
 // PostgreSQL statements are atomic even outside an explicit BEGIN block.  The
 // storage engine's undo log and row locks are transaction-scoped, so give
-// each top-level DML or locking SELECT statement an internal transaction.
+// each top-level query an internal transaction. A read-shaped query can call
+// a writing function in its projection, predicate, ordering or query child;
+// the whole calling statement, not each body command, owns the boundary.
 // Recursive execution stays inside the same boundary.
 static bool executeWithCteInheritance(const std::string& inputSql, Session& s,
                                      bool inheritCtes) {
@@ -35024,6 +35029,11 @@ static bool executeWithCteInheritance(const std::string& inputSql, Session& s,
     }
     const std::string rawSql = inputSql.substr(commandOffset);
     if (rawSql.empty()) return false;
+    // A body can indirectly EXECUTE/CALL another stored command. Reject
+    // transaction control at every recursive dispatcher entry, not merely
+    // at the direct PL/pgSQL adapter, before it can commit the outer owner.
+    if (storedFunctionHostDepth != 0 && managesNotificationTransaction(rawSql))
+        throw dbms::DbError("2D000", "transaction control is not allowed in a nested SQL command");
     // Stored view/function/procedure/prepared SQL starts an independent
     // namespace. Only explicitly identified lexical query children inherit
     // the parent's CTE bindings, including set-operation operands and CTE bodies.
@@ -35035,10 +35045,14 @@ static bool executeWithCteInheritance(const std::string& inputSql, Session& s,
     PlanCacheChangeGuard planCacheChange(
         changesPlanCache(dbms::SQLParser::classify(rawSql)));
     const bool outermost = executeDepth == 0;
+    const auto command = dbms::SQLParser::classify(rawSql);
     const bool statementTransaction = outermost &&
         !g_engine.inTransaction() &&
         g_engine.databaseExists(s.currentDB) &&
-        (isTopLevelDml(rawSql) || isTopLevelLockingSelect(rawSql));
+        (dbms::SQLParser::requiresQuerySnapshot(rawSql) ||
+         isTopLevelDml(rawSql) || isTopLevelLockingSelect(rawSql) ||
+         command == dbms::SqlCommand::Execute ||
+         command == dbms::SqlCommand::Explain);
     const bool notificationStatementTransaction = outermost &&
         !statementTransaction && !g_engine.inTransaction() &&
         !dbms::notificationManager().inTransaction(s.pid) &&
@@ -35242,6 +35256,10 @@ int main(int argc, char* argv[]) {
             result.message = "stored-function query requires its active database session";
             return result;
         }
+        struct HostScope {
+            HostScope() { ++storedFunctionHostDepth; }
+            ~HostScope() { --storedFunctionHostDepth; }
+        } hostScope;
         vector<string> names, types;
         vector<vector<string>> rows;
         vector<vector<bool>> nulls;
@@ -35274,6 +35292,28 @@ int main(int argc, char* argv[]) {
                 if (state.find_first_not_of("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ") == string::npos)
                     result.sqlState = state;
             }
+            return result;
+        }
+        // A successful body DML/DDL command without RETURNING has no row
+        // descriptor. It must still reach the shared dispatcher (and undo
+        // log), rather than falling back to the literal INSERT-only host.
+        const auto command = dbms::SQLParser::classify(querySql);
+        bool expectsRows = command == dbms::SqlCommand::Select ||
+            command == dbms::SqlCommand::Values;
+        if (!expectsRows) {
+            dbms::SQLParser parser;
+            const auto parsed = parser.parse(querySql);
+            if (const auto* insert = dynamic_cast<const dbms::InsertStmt*>(parsed.stmt.get()))
+                expectsRows = !insert->returning.empty();
+            if (const auto* update = dynamic_cast<const dbms::UpdateStmt*>(parsed.stmt.get()))
+                expectsRows = !update->returning.empty();
+            if (const auto* remove = dynamic_cast<const dbms::DeleteStmt*>(parsed.stmt.get()))
+                expectsRows = !remove->returning.empty();
+        }
+        // Legacy success diagnostics can look like a "header" to the
+        // display fallback. They are not data or a real row descriptor.
+        if (!expectsRows && !structured) {
+            result.ok = true;
             return result;
         }
         if (!structured || names.empty()) {
