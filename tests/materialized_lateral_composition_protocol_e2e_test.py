@@ -78,6 +78,30 @@ def main():
         expect("WITH c AS (SELECT 1 AS id) SELECT c.id,t.keep FROM c CROSS JOIN __cte_0 t;",
                [["1", "public stays"]], ["id", "keep"], [23, 25])
         expect("SELECT keep FROM __cte_0;", [["public stays"]], ["keep"], [25])
+        assert query("DROP TABLE __cte_0;")[1] is None
+        for sql in (
+                "CREATE MATERIALIZED VIEW __cte_0 AS SELECT id,txt FROM mat_lat_source WITH NO DATA;",
+                "CREATE MATERIALIZED VIEW __cte_1 AS SELECT id,txt FROM mat_lat_source;"):
+            assert query(sql)[1] is None, sql
+        expect("WITH c AS (SELECT 1 AS id) SELECT c.id,x.n FROM c "
+               "CROSS JOIN LATERAL (SELECT c.id+1 AS n) x;",
+               [["1", "2"]], ["id", "n"], [23, 23])
+        unpopulated = query("SELECT id FROM __cte_0;")
+        assert unpopulated[1] == "55000" and unpopulated[4] is None, unpopulated
+        expect("SELECT id,txt FROM __cte_1 ORDER BY id;",
+               [row[:2] for row in expected], ["id", "txt"], [23, 25])
+        # The same collision check must respect a non-public search path.
+        for sql in (
+                "CREATE SCHEMA mat_scope;",
+                "CREATE MATERIALIZED VIEW mat_scope.__cte_0 AS "
+                "SELECT id,txt FROM mat_lat_source WITH NO DATA;",
+                "SET search_path TO mat_scope,public;"):
+            assert query(sql)[1] is None, sql
+        expect("WITH c AS (SELECT 1 AS id) SELECT c.id,x.n FROM c "
+               "CROSS JOIN LATERAL (SELECT c.id+1 AS n) x;",
+               [["1", "2"]], ["id", "n"], [23, 23])
+        unpopulated = query("SELECT id FROM mat_scope.__cte_0;")
+        assert unpopulated[1] == "55000" and unpopulated[4] is None, unpopulated
         expect("SELECT id,txt FROM mat_lat_source ORDER BY id;",
                [row[:2] for row in expected], ["id", "txt"], [23, 25])
         print("[MATERIALIZED LATERAL COMPOSITION PROTOCOL E2E] passed")

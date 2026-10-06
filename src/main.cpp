@@ -12452,7 +12452,15 @@ static std::string createTempTableFromRows(Session& s,
         if (s.tempTables.count(tmpName) || s.transientTempTables.count(tmpName) ||
             g_engine.tableExists(s.currentDB, actualName) ||
             g_engine.viewExists(s.currentDB, actualName)) continue;
-        const std::string visibleName = resolveTableName(s, tmpName, true);
+        std::string visibleName;
+        try {
+            visibleName = resolveTableName(s, tmpName, true);
+        } catch (const dbms::DbError& error) {
+            // Resolving an unpopulated materialized view is forbidden for a
+            // query, but here it simply proves this candidate name is taken.
+            if (error.sqlState() == "55000") continue;
+            throw;
+        }
         if (g_engine.tableExists(s.currentDB, visibleName) ||
             g_engine.viewExists(s.currentDB, visibleName) ||
             g_engine.isMaterializedView(s.currentDB, visibleName)) continue;
