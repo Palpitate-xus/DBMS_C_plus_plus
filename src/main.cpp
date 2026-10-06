@@ -12622,7 +12622,7 @@ static std::vector<std::string> runDerivedSubQuery(const std::string& rawSql, Se
         }
         auto plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
         auto execution = dbms::QueryPlanner::executePlanChecked(std::move(plan));
-        if (!execution.ok) return {};
+        execution.throwIfFailed();
         answers = std::move(execution.rows);
     }
 
@@ -31253,6 +31253,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         if (!branchPlan) return false;
                         auto branchRun = dbms::QueryPlanner::executePlanChecked(
                             std::move(branchPlan));
+                        branchRun.throwIfFailed();
                         if (!branchRun.ok) {
                             volcanoExecutionError = true;
                             cout << "ERROR: " << branchRun.error << endl;
@@ -31272,6 +31273,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             ctx.hasExplicitOrderNulls);
                         auto sortedRun = dbms::QueryPlanner::executePlanChecked(
                             std::move(sortPlan));
+                        sortedRun.throwIfFailed();
                         if (!sortedRun.ok) {
                             volcanoExecutionError = true;
                             cout << "ERROR: " << sortedRun.error << endl;
@@ -31318,6 +31320,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             if (emptyReceiver) execution.structuredRowsAvailable = true;
             else execution = dbms::QueryPlanner::executePlanChecked(
                 std::move(plan), receiverRows);
+            execution.throwIfFailed();
             if (!execution.ok) {
                 volcanoExecutionError = true;
                 cout << "ERROR: " << execution.error << endl;
@@ -31722,6 +31725,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         dbms::QueryPlanner::executePlanChecked(
                             dbms::QueryPlanner::buildSelectPlan(
                                 &g_engine, context));
+                    execution.throwIfFailed();
                     if (!execution.ok) {
                         cout << "ERROR: " << execution.error << endl;
                         return true;
@@ -32164,6 +32168,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 }
                 auto plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
                 auto execution = dbms::QueryPlanner::executePlanChecked(std::move(plan));
+                execution.throwIfFailed();
                 if (!execution.ok) {
                     cout << "ERROR: " << execution.error << endl;
                     return true;
@@ -32964,6 +32969,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 }
                 auto execution = dbms::QueryPlanner::executePlanChecked(
                     dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx));
+                execution.throwIfFailed();
                 if (!execution.ok) {
                     cout << "ERROR: " << execution.error << endl;
                     return true;
@@ -33160,6 +33166,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 auto execution = finiteWindowLimit && windowLimit == 0
                     ? dbms::PlanExecutionResult{}
                     : dbms::QueryPlanner::executePlanChecked(std::move(plan));
+                execution.throwIfFailed();
                 if (!execution.ok) {
                     cout << "ERROR: " << execution.error << endl;
                     return true;

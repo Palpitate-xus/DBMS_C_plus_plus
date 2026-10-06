@@ -83,6 +83,9 @@ int main() {
         const auto failed = run({"array_agg", "1 / (id - 1)", {}, {}}, parallel);
         assert(!failed.ok);
         assert(failed.error.find("SQLSTATE 22012") != std::string::npos);
+        assert(failed.errorSqlState == "22012");
+        assert(failed.rows.empty() && failed.structuredRows.empty() &&
+               failed.structuredNulls.empty());
     }
 
     // Engage real grouping workers, then compare ordered collection results.

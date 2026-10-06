@@ -79,7 +79,11 @@ int main() {
                     {"=", column, key}, {"=", otherColumn, otherKey}});
         }
         try {
-            (void)dbms::QueryPlanner::executePlanChecked(std::move(plan));
+            const auto failure = dbms::QueryPlanner::executePlanChecked(std::move(plan));
+            assert(!failure.ok && failure.errorSqlState == "XX001");
+            assert(failure.rows.empty() && failure.structuredRows.empty() &&
+                   failure.structuredNulls.empty());
+            failure.throwIfFailed();
         } catch (const dbms::DbError& error) {
             assert(error.sqlState() == "XX001");
             ++rejected;
@@ -101,10 +105,14 @@ int main() {
     for (const std::string column : {"id", "value"}) {
         bool failed = false;
         try {
-            (void)dbms::QueryPlanner::executePlanChecked(
+            const auto failure = dbms::QueryPlanner::executePlanChecked(
                 std::make_unique<dbms::IndexScanOp>(
                     &g_engine, database, "items", column,
                     column == "id" ? "1" : "7"));
+            assert(!failure.ok && failure.errorSqlState == "XX001");
+            assert(failure.rows.empty() && failure.structuredRows.empty() &&
+                   failure.structuredNulls.empty());
+            failure.throwIfFailed();
         } catch (const dbms::DbError& error) {
             assert(error.sqlState() == "XX001");
             failed = true;

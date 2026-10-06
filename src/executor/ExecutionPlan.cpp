@@ -20,6 +20,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include <exception>
 #include <iterator>
 #include <iomanip>
 #include <limits>
@@ -3953,7 +3954,7 @@ catch (const DbError&) {
     rows_.clear();
     structuredRows_.clear();
     structuredNulls_.clear();
-    child_->close();
+    try { child_->close(); } catch (...) {}
     throw;
 }
 catch (const std::exception& error) {
@@ -4726,7 +4727,7 @@ catch (const DbError&) {
     rows_.clear();
     structuredRows_.clear();
     structuredNulls_.clear();
-    child_->close();
+    try { child_->close(); } catch (...) {}
     throw;
 }
 catch (const std::exception& error) {
@@ -6383,16 +6384,30 @@ PlanExecutionResult QueryPlanner::executePlanChecked(OpPtr plan, size_t maxRows)
     if (!plan) {
         result.ok = false;
         result.error = "executor received a null plan";
+        result.errorSqlState = "XX000";
+        result.errorMessage = result.error;
         return result;
     }
-    checkForQueryInterrupt();
-    result.structuredRowsAvailable = plan->supportsStructuredRows();
+    bool closeAttempted = false;
+    const auto closePlan = [&] {
+        if (!closeAttempted) {
+            closeAttempted = true;
+            plan->close();
+        }
+    };
     try {
+        checkForQueryInterrupt();
+        result.structuredRowsAvailable = plan->supportsStructuredRows();
         if (!plan->open()) {
             result.ok = false;
             result.error = plan->errorMessage();
             if (result.error.empty()) result.error = "executor failed to open plan";
-            plan->close();
+            result.errorSqlState = "XX000";
+            result.errorMessage = result.error;
+            result.structuredRowsAvailable = false;
+            // Preserve the failure that caused cleanup, including when an
+            // operator's close itself fails.
+            try { closePlan(); } catch (...) {}
             return result;
         }
         std::string row;
@@ -6413,16 +6428,36 @@ PlanExecutionResult QueryPlanner::executePlanChecked(OpPtr plan, size_t maxRows)
                 }
             }
         }
-    } catch (...) {
-        plan->close();
-        throw;
-    }
-    if (plan->hasError()) {
+        if (plan->hasError()) {
+            result.ok = false;
+            result.error = plan->errorMessage();
+            if (result.error.empty()) result.error = "executor failed while reading plan";
+            result.errorSqlState = "XX000";
+            result.errorMessage = result.error;
+            try { closePlan(); } catch (...) {}
+        } else {
+            closePlan();
+        }
+    } catch (const DbError& error) {
         result.ok = false;
-        result.error = plan->errorMessage();
-        if (result.error.empty()) result.error = "executor failed while reading plan";
+        result.error = error.what();
+        result.errorSqlState = error.sqlState();
+        result.errorMessage = error.message();
+        result.errorException = std::current_exception();
+        try { closePlan(); } catch (...) {}
+    } catch (...) {
+        // Non-SQL exceptions keep their original type and identity. Cleanup
+        // is attempted once and cannot replace the primary exception.
+        const auto failure = std::current_exception();
+        try { closePlan(); } catch (...) {}
+        std::rethrow_exception(failure);
     }
-    plan->close();
+    if (!result.ok) {
+        result.rows.clear();
+        result.structuredRows.clear();
+        result.structuredNulls.clear();
+        result.structuredRowsAvailable = false;
+    }
     return result;
 }
 

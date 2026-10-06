@@ -10,6 +10,12 @@
 `PlanExecutionResult::ok/error`；`next()` 返回 `false` 只表示没有更多行，调用方还
 必须检查 `hasError()`。旧的空结果兼容执行入口已删除，避免执行失败被误用为空结果。
 
+`executePlanChecked()` 将 SQL 执行异常作为 `ok=false` 返回，并分别保留
+`errorSqlState`、原始 `errorMessage` 和显示诊断 `error`；失败不返回部分行。
+SQL dispatcher 必须调用结果的 `throwIfFailed()`，把精确错误元数据交给宿主边界，
+不能把失败转换为空子查询或从显示文本猜错误码。非 SQL 的 C++ 异常仍以原始类型
+传播。所有路径都会尝试关闭计划，清理错误不能覆盖首个执行错误。
+
 ## 未来迁移计划
 
 `QueryPlanner::buildSelectPlan()` 负责生成当前结构化计划；启用 RLS 的关系统一

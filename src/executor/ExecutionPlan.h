@@ -1,5 +1,6 @@
 #pragma once
 
+#include <exception>
 #include <memory>
 #include <set>
 #include <string>
@@ -10,6 +11,7 @@
 #include "TableManage.h"
 #include "executor.h"
 #include "parser/query_binding.h"
+#include "common/DbError.h"
 
 namespace dbms {
 
@@ -103,6 +105,19 @@ struct PlanExecutionResult {
     bool structuredRowsAvailable = false;
     bool ok = true;
     std::string error;
+    // The diagnostic is for display; SQL hosts use the original metadata,
+    // never an SQLSTATE recovered from diagnostic text.
+    std::string errorSqlState;
+    std::string errorMessage;
+    std::exception_ptr errorException;
+
+    void throwIfFailed() const {
+        if (!ok) {
+            if (errorException) std::rethrow_exception(errorException);
+            throw DbError(errorSqlState.empty() ? "XX000" : errorSqlState,
+                          errorMessage.empty() ? error : errorMessage);
+        }
+    }
 };
 
 // MaterializedRows: adapter for result rows produced by a legacy or external

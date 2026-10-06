@@ -72,6 +72,9 @@ int main() {
         const auto error = run({"1 / (id - 1)"}, {}, parallel,
                               {"count", "*", {}, {}});
         assert(!error.ok && error.error.find("SQLSTATE 22012") != std::string::npos);
+        assert(error.errorSqlState == "22012");
+        assert(error.rows.empty() && error.structuredRows.empty() &&
+               error.structuredNulls.empty());
     }
     cleanupTestDb(name);
     finalCleanupTestData();
