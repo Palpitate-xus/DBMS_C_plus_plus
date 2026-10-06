@@ -2,6 +2,21 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Independent USING, ARRAY, nullable source and versioned row-image repairs; actual full gate failures retained",
+      "gap_ids": ["SQL-04", "SQL-07", "SQL-08", "DML-01", "DML-03", "QRY-01", "QRY-03", "TXN-01"],
+      "status": "partial",
+      "commits": ["24e3a5fd", "9e0076a9", "0f7bf12e", "7ecb6de4", "4975a81f", "4cf76fdd"],
+      "evidence": ["docs/issue-ready-source-integration.md", "docs/issue-array-concat-typed-execution.md", "docs/issue-with-multisource-dml-runtime.md", "docs/issue-versioned-update-typed-binding.md", "docs/issue-returning-array-declared-metadata.md", "docs/issue-pg18-reference-bootstrap.md"],
+      "tests": ["tests/join_using_common_type_test.cpp", "tests/array_concat_type_test.cpp", "tests/array_concat_typed_protocol_e2e_test.py", "tests/with_multisource_dml_test.cpp", "tests/with_multisource_dml_protocol_e2e_test.py", "tests/with_multisource_dml_boundary_protocol_e2e_test.py", "tests/versioned_update_binding_protocol_e2e_test.py", "tests/returning_array_metadata_protocol_e2e_test.py"],
+      "verification": {
+        "reproduction": "Original typed-array metadata/value red, true nullable source and zero-input volatile ON red, quoted versioned UPDATE five wrong-value/effect assertions, and six RETURNING array controls preserved alongside strict180006 references. Original full gates and intermediate failures are not rewritten as green.",
+        "fix": "Six separate ROOT commits preserve declared USING/ARRAY types, real array AST and copies, original invalid ARRAY negative cases, true nullable source/RID mutation channels, typed versioned UPDATE OLD-row bindings and zero-input effects, and static RETURNING metadata. No broad family closure or first-row metadata inference.",
+        "focused_tests": "Current ROOT4cf all58 fresh normalO2 build97256 and normal repeat/all58 signature/binary-stamp29030 terminal0; frozen385b18577f94f449f8a4d4bc5af72f2ca40c43f05f990411b6aa5b36585b06c0. Matching65fresh natives75787 and31wire40643 live, runtime not yet claimed. Prior immutable4897 CASE45native33627 terminal0;21wire2051 terminal1=20pass/1fail original invalid ONCONFLICT unqualifiedname42702. Exact original-negative and target-qualified-positive strict18 reference0; private complete protocol21174 still Quant2444 red.",
+        "full_suite": "Latest inventory549native/285registered/58production, frozen ROOT source/header/tests/registry. Original immutablefd540native275registered23633 still live with3native failures and original full protocol failure observed. C-profile full465 XML18 differential2071 terminal1 after332OK/13DIFF then15s SERIALNULLALTER timeout,119 later cases unexecuted. Matched enUS full86503 terminal1 after38OK/1DIFF then15s validmultiADDCOLUMN timeout,425 later cases unexecuted. Timed-out cases incomplete; no465 complete summary.",
+        "scope": "Samefd/23a ten original locale files52999 pass on explicit enUS/libc with unchanged SQL/goldens/OIDs/tags/timeouts; not current-master or full465 proof. Simple CASE equality/constant-NULL demand and pure AddColumn dirty repairs queued; sequence generation/ALTER position and genuine quantified AST remain under repair. Totals27322complete166partial70unverified15deferred unchanged. No push, Actions remain disabled, user-deferred security/TDE not resumed. Earlier recent_updates preserve historical then-live checkpoints."
+      }
+    },
+    {
       "issue": "Separate CASE common-type and INSERT prepared-consumer repairs; DML comma-source grammar; completed transition gate",
       "gap_ids": ["SQL-01", "SQL-03", "SQL-04", "SQL-07", "SQL-08", "DML-01", "DML-03", "QRY-01"],
       "status": "partial",

@@ -107,8 +107,8 @@ datctype are bothen_US.utf8 and datlocprovider islibc/c; server_version_num is
 180006. `runtime-en-us.log` records the observations and the original
 `'apple' COLLATE "default" < 'Zoo'` returningtrue. Choose this explicit database
 through PGREF_DATABASE for matched full differential verification. The
-original C-profile run remains live and will retain its own terminal evidence;
-matched full replay is not yet completed or calledgreen. No existing database
+original C-profile run was live at this checkpoint; its subsequent independent
+terminal failure is recorded below. No existing database
 locale was changed, dropped or recreated.
 
 An exact-profile focused replay subsequently completed with actual session
@@ -126,7 +126,29 @@ the exact reproduction script `verify-locale-profile.sh` next to it.
 No SQL, expected row, OID, tag or timeout was changed. This verifies those
 specific prior differences under the matched locale, not the whole465
 suite, all collation providers, or current master after public layout
-changes. The original C-profile handle2071 remains independent and live;
-its eventual full terminal result will not be replaced by this ten-case
-replay. Full matched replay awaits that terminal result to avoid parallel
-full-suite global object interference on the reference cluster.
+changes. The original C-profile handle2071 was independent and live at that
+checkpoint; its subsequent failure is not replaced by this ten-case replay.
+
+## Actual full differential failures
+
+The original C-profile handle2071 actually exited1 before finishing465.
+Its unchanged fd/23a runner printed332OK and13DIFF (345 completed cases),
+then local socket15s timeout aborted serial_explicit_null_conflict at
+`ALTER TABLE diff_serial_null_alter ADD COLUMN id SERIAL NULL`. The119
+subsequent cases were not executed. There is no complete465-case summary.
+The retained full-pg18-differential.log has the actual original traceback.
+
+Only after2071's actual terminal result did ROOT start the complete matched
+en_US/libc replay86503, with the same immutable runner and frozen23a binary,
+unchanged case files and15s deadlines. That handle also actually exited1:
+38OK/1DIFF (39 completed cases), then a local socket timeout on the valid
+check_add_validation multi-ADD statement. The remaining425 subsequent
+cases were not executed. The log is full-pg18-en-us-differential.log and
+the exact script is verify-full-en-us.sh, both under the canonical-input-
+cursor artifact directory. This is not matched full green.
+
+The original serial case and repetitions in isolated diagnostics pass the
+unchanged strictPG18 controls and15s deadlines. A physical restore after
+a pure invalid ADD has its own reproduced hotspot and independent repair;
+it is not asserted to explain either whole-run timeout. Both full failures,
+ARRAY OID differences and unreached cases remain outstanding verification.

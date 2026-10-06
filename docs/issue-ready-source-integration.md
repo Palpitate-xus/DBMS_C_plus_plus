@@ -1,5 +1,61 @@
 # Independent source integrations after canonical 75090
 
+## Latest ROOT checkpoint: typed ARRAY, sources and row images
+
+The following are independent local commits, not one combined repair:
+
+| ROOT commit | Scope |
+| --- | --- |
+| 24e3a5fd | Shared declared common types for JOIN USING. |
+| 9e0076a9 | Real ARRAY AST, typed concatenation, execution and metadata. |
+| 0f7bf12e | Keep original invalid ARRAY SQL as precise error controls; add valid positive cases. |
+| 7ecb6de4 | Nullable multi-source UPDATE/DELETE through real target RIDs and logical source channels. |
+| 4975a81f | Versioned target-only UPDATE preserves quoted typed OLD-row bindings and zero-row effect demand. |
+| 4cf76fdd | RETURNING expression copies, stored-array stars and array operators preserve declared types. |
+
+Current inventory is549 native fixtures,285 registered Python entry points,
+and58 production translation units. Fresh normal optimized build97256 and
+normal repeat/all58 signature/binary-stamp audit29030 both actually exit0.
+Frozen `/tmp/dbms-array-source-integration.XsuuhG42/dbms_main.array-source.frozen`
+has SHA256 `385b18577f94f449f8a4d4bc5af72f2ca40c43f05f990411b6aa5b36585b06c0`.
+Matching65 fresh native fixtures75787 and31 complete protocol scripts40643
+are live; no combined runtime success is claimed yet. Logs are
+`array-source-combination-native.log` and `array-source-combination-wire.log`
+in that artifact directory. Source/header/test/registry remain frozen.
+The harness preflight initially named a nonexistent deferred-query wire file;
+that nonexecuted preflight exit2 is retained. The corrected inventory names
+the actual `extended_literal_transaction_demand_protocol_e2e_test.py`;
+all65/31 files exist and are distinct. No SQL/assertion was removed.
+
+The separate immutable4897 CASE/comma snapshot completed all58 normal
+optimized compilation/signature checks and45 fresh native fixtures with exit0.
+Its21-wire gate2051 actually exits1:20 pass, original full protocol fails at
+line2332 because `ON CONFLICT ... WHERE name` is ambiguous, SQLSTATE42702.
+Strict180006 accepts the target-qualified positive statement but rejects the
+exact original unqualified SQL without partial mutation. The private fixture
+keeps both strong controls. Its complete original protocol21174 still exits1
+at quantified EXPLAIN line2444; later assertions were not reached. Neither
+result is relabeled as a full protocol pass.
+
+The original immutablefd/23a canonical540/275 gate23633 is still live. Its
+three native failures and original full protocol failure remain retained.
+The original465-case XML18 C-profile gate2071 exits1 after332 OK and13 DIFF,
+then a15-second SERIAL NULL ALTER timeout;119 subsequent cases are unexecuted.
+The unchanged full matched en_US/libc gate86503 exits1 after38 OK and1 DIFF,
+then a15-second valid multi-ADD COLUMN timeout;425 subsequent cases are
+unexecuted. Each timed-out case itself is also incomplete. Ten matched
+locale-focused files pass independently52999; that is not a full465 proof.
+
+Ready simple-CASE equality, constant-NULL planning and pure AddColumn dirty
+repairs remain queued until this ROOT gate ends; sequence allocation and
+quantified execution have separate actual red controls under repair. No
+family is marked complete from these focused fixes. Audit counts remain
+273:22 complete/166 partial/70 unverified/15 user-deferred. No push, active
+Actions workflow or resumption of deferred security/TDE work occurred.
+
+Everything below records historical checkpoints, including their then-live
+handles; the latest terminal/live results above take precedence.
+
 ## Authoritative terminal full gate
 
 The original unchanged `scripts/build_tests.sh` session **75090 exited 1**.
