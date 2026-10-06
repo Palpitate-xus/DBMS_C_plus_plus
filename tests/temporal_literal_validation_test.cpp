@@ -1,4 +1,5 @@
 #include "catalog/type_registry.h"
+#include "common/DbError.h"
 #include "commands/TableManage.h"
 #include "test_utils.h"
 
@@ -83,20 +84,24 @@ int main() {
     largeMonthShift.funcArgs = {
         "date_value", "+",
         "INTERVAL '9223372036854775807 months'"};
-    assert(g_engine.queryExpr(database, "events", {}, {largeMonthShift}) ==
-           std::vector<std::string>{" "});
+    const auto intervalRangeError = [&](const dbms::StorageEngine::SelectExpr& expression) {
+        bool rejected = false;
+        try { g_engine.queryExpr(database, "events", {}, {expression}); }
+        catch (const dbms::DbError& failure) { rejected = failure.sqlState() == "22015"; }
+        assert(rejected);
+        assert(g_engine.getLockManager().captureCheckpoint().tableCounts.empty());
+    };
+    intervalRangeError(largeMonthShift);
 
     dbms::StorageEngine::SelectExpr largeYearShift = largeMonthShift;
     largeYearShift.funcArgs[2] =
         "INTERVAL '9223372036854775807 years'";
-    assert(g_engine.queryExpr(database, "events", {}, {largeYearShift}) ==
-           std::vector<std::string>{" "});
+    intervalRangeError(largeYearShift);
 
     dbms::StorageEngine::SelectExpr largeWeekShift = largeMonthShift;
     largeWeekShift.funcArgs[2] =
         "INTERVAL '9223372036854775807 weeks'";
-    assert(g_engine.queryExpr(database, "events", {}, {largeWeekShift}) ==
-           std::vector<std::string>{" "});
+    intervalRangeError(largeWeekShift);
 
     const std::vector<std::pair<std::string, std::string>> invalidValues = {
         {"date_value", "2024-00-01"},

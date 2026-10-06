@@ -177,7 +177,7 @@ static void test_add_sub() {
     auto dayOverflow = eval(
         "'2024-03-10 00:00:00'::timestamp + "
         "'9223372036854775807 days'::interval");
-    assert(dayOverflow.ok && dayOverflow.isNull);
+    assert(!dayOverflow.ok && dayOverflow.sqlState == "22015");
 
     auto timestampDomainOverflow = eval(
         "'2024-03-10 00:00:00'::timestamp + "
@@ -187,7 +187,7 @@ static void test_add_sub() {
     auto monthOverflow = eval(
         "'2024-03-10 00:00:00'::timestamp + "
         "'9223372036854775807 months'::interval");
-    assert(monthOverflow.ok && monthOverflow.isNull);
+    assert(!monthOverflow.ok && monthOverflow.sqlState == "22015");
 
     auto upperBoundary = eval(
         "'9999-12-31 23:59:59'::timestamp + '1 second'::interval");
@@ -262,23 +262,22 @@ static void test_justify_ops() {
 
     auto largeDays = eval(
         "justify_interval('9223372036854775807 days'::interval)");
-    assert(largeDays.ok &&
-           largeDays.value == "25620477880152155 years 7 days");
+    assert(!largeDays.ok && largeDays.sqlState == "22015");
 
     auto hoursOverflow = eval(
         "justify_hours("
         "'9223372036854775807 days 24 hours'::interval)");
-    assert(hoursOverflow.ok && hoursOverflow.isNull);
+    assert(!hoursOverflow.ok && hoursOverflow.sqlState == "22015");
 
     auto daysOverflow = eval(
         "justify_days("
         "'9223372036854775807 months 30 days'::interval)");
-    assert(daysOverflow.ok && daysOverflow.isNull);
+    assert(!daysOverflow.ok && daysOverflow.sqlState == "22015");
 
     auto intervalOverflow = eval(
         "justify_interval("
         "'9223372036854775807 months 30 days'::interval)");
-    assert(intervalOverflow.ok && intervalOverflow.isNull);
+    assert(!intervalOverflow.ok && intervalOverflow.sqlState == "22015");
 
     std::cout << "[IV] justify interval bounds OK" << std::endl;
 }

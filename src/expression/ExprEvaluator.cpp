@@ -612,6 +612,9 @@ struct IntervalParts {
     long long days = 0;
     long long micros = 0;
     bool ok = false;
+    bool outOfRange = false;
+    bool combinedOutOfRange = false;
+    bool numericFieldTooLong = false;
 };
 
 static bool combineIntervalField(long long left, long long right,
@@ -878,9 +881,48 @@ static std::string formatMicrosNumeric(__int128 value) {
 // "14 months", "90 minutes", "1-2", "04:05:06", "1.5 days").
 static IntervalParts parseIntervalText(const std::string& in) {
     IntervalParts r;
+    long long years = 0;
     std::string s = trimStr(in);
     if (s.size() >= 2 && s.front() == '\'' && s.back() == '\'') s = trimStr(s.substr(1, s.size() - 2));
+    if (!s.empty() && s.front() == '@') s = trimStr(s.substr(1));
     if (s.empty()) return r;
+    // ISO designators select the same bounded calendar/time fields as the
+    // verbose input form; retain the quantity spelling until checked parsing.
+    if (s.front() == 'P' || s.front() == 'p') {
+        std::string verbose;
+        bool timePart = false, any = false;
+        size_t position = 1;
+        while (position < s.size()) {
+            if (s[position] == 'T' || s[position] == 't') {
+                if (timePart) return r;
+                timePart = true; ++position; continue;
+            }
+            const size_t begin = position;
+            if (s[position] == '+' || s[position] == '-') ++position;
+            bool digits = false;
+            while (position < s.size() && (std::isdigit(static_cast<unsigned char>(s[position])) || s[position] == '.')) {
+                digits = digits || std::isdigit(static_cast<unsigned char>(s[position]));
+                ++position;
+            }
+            if (!digits || position == s.size()) return r;
+            const auto quantity = s.substr(begin, position - begin);
+            const char unit = static_cast<char>(std::toupper(static_cast<unsigned char>(s[position++])));
+            std::string name;
+            if (!timePart && unit == 'Y') name = "years";
+            else if (!timePart && unit == 'M') name = "months";
+            else if (!timePart && unit == 'W') name = "weeks";
+            else if (!timePart && unit == 'D') name = "days";
+            else if (timePart && unit == 'H') name = "hours";
+            else if (timePart && unit == 'M') name = "minutes";
+            else if (timePart && unit == 'S') name = "seconds";
+            else return r;
+            if (!verbose.empty()) verbose += ' ';
+            verbose += quantity + ' ' + name;
+            any = true;
+        }
+        if (!any) return r;
+        s = std::move(verbose);
+    }
     bool negate = false;
     std::string low;
     for (char c : s) low += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -888,43 +930,63 @@ static IntervalParts parseIntervalText(const std::string& in) {
         negate = true;
         s = trimStr(s.substr(0, s.size() - 4));
     }
-    auto parseInteger = [](const std::string& text, long long& value) {
+    auto parseInteger = [&](const std::string& text, long long& value) {
+        // A single field this long cannot fit PostgreSQL interval input's
+        // 256-byte token workspace, irrespective of its numeric value.
+        if (text.size() >= 255) {
+            r.numericFieldTooLong = true;
+            return false;
+        }
         try {
             size_t consumed = 0;
             value = std::stoll(text, &consumed);
             return consumed == text.size();
+        } catch (const std::out_of_range&) {
+            r.outOfRange = true;
+            return false;
         } catch (...) {
             return false;
         }
     };
-    auto addScaled = [](long long& target, long long value,
+    auto addScaled = [&](long long& target, long long value,
                         long long scale) {
         const __int128 total = static_cast<__int128>(target) +
             static_cast<__int128>(value) * scale;
-        // LLONG_MIN cannot be safely negated by the canonical formatter or
-        // by a trailing "ago", so it is outside this text representation.
-        if (total <= std::numeric_limits<long long>::lowest() ||
-            total > std::numeric_limits<long long>::max()) {
+        const bool calendarField = &target == &years || &target == &r.months || &target == &r.days;
+        const __int128 lower = calendarField ? std::numeric_limits<int32_t>::lowest()
+            : std::numeric_limits<int64_t>::lowest();
+        const __int128 upper = calendarField ? std::numeric_limits<int32_t>::max()
+            : std::numeric_limits<int64_t>::max();
+        if (total < lower || total > upper) {
+            r.outOfRange = true;
             return false;
         }
         target = static_cast<long long>(total);
         return true;
     };
-    auto parseDecimal = [](const std::string& text, long double& value) {
+    auto parseDecimal = [&](const std::string& text, long double& value) {
+        if (text.size() >= 255) {
+            r.numericFieldTooLong = true;
+            return false;
+        }
         try {
             size_t consumed = 0;
             value = std::stold(text, &consumed);
             return consumed == text.size() && std::isfinite(value);
+        } catch (const std::out_of_range&) {
+            r.outOfRange = true;
+            return false;
         } catch (...) {
             return false;
         }
     };
-    auto truncateToInteger = [](long double value, long long& result) {
+    auto truncateToInteger = [&](long double value, long long& result) {
         if (!std::isfinite(value) ||
-            value <= static_cast<long double>(
+            value < static_cast<long double>(
                          std::numeric_limits<long long>::lowest()) ||
             value > static_cast<long double>(
                         std::numeric_limits<long long>::max())) {
+            r.outOfRange = true;
             return false;
         }
         result = static_cast<long long>(value);
@@ -936,6 +998,32 @@ static IntervalParts parseIntervalText(const std::string& in) {
         return truncateToInteger(std::nearbyint(value * scale), delta) &&
                addScaled(target, delta, 1);
     };
+    auto finish = [&]() {
+        if (!r.ok) return r;
+        if (negate) {
+            if (years == std::numeric_limits<int32_t>::lowest() ||
+                r.months == std::numeric_limits<int32_t>::lowest() ||
+                r.days == std::numeric_limits<int32_t>::lowest() ||
+                r.micros == std::numeric_limits<int64_t>::lowest()) {
+                r.outOfRange = true;
+                r.ok = false;
+                return r;
+            }
+            years = -years;
+            r.months = -r.months;
+            r.days = -r.days;
+            r.micros = -r.micros;
+        }
+        const __int128 months = static_cast<__int128>(years) * 12 + r.months;
+        if (months < std::numeric_limits<int32_t>::lowest() ||
+            months > std::numeric_limits<int32_t>::max()) {
+            r.combinedOutOfRange = true;
+            r.ok = false;
+        } else {
+            r.months = static_cast<long long>(months);
+        }
+        return r;
+    };
     // SQL year-month shorthand "N-M"
     {
         bool shorthand = true;
@@ -946,17 +1034,16 @@ static IntervalParts parseIntervalText(const std::string& in) {
             else if (!std::isdigit(static_cast<unsigned char>(c))) { shorthand = false; break; }
         }
         if (shorthand && dash != std::string::npos && dash > 0 && dash + 1 < s.size()) {
-            long long years = 0;
+            long long yearPart = 0;
             long long months = 0;
-            if (!parseInteger(s.substr(0, dash), years) ||
+            if (!parseInteger(s.substr(0, dash), yearPart) ||
                 !parseInteger(s.substr(dash + 1), months) ||
-                !addScaled(r.months, years, 12) ||
+                !addScaled(years, yearPart, 1) ||
                 !addScaled(r.months, months, 1)) {
-                return IntervalParts{};
+                return r;
             }
-            if (negate) r.months = -r.months;
             r.ok = true;
-            return r;
+            return finish();
         }
     }
     r.ok = true;
@@ -971,8 +1058,9 @@ static IntervalParts parseIntervalText(const std::string& in) {
              seconds) * 1000000 + fraction;
         if (negative) delta = -delta;
         const __int128 total = static_cast<__int128>(r.micros) + delta;
-        if (total <= std::numeric_limits<long long>::lowest() ||
+        if (total < std::numeric_limits<long long>::lowest() ||
             total > std::numeric_limits<long long>::max()) {
+            r.outOfRange = true;
             return false;
         }
         r.micros = static_cast<long long>(total);
@@ -1047,7 +1135,7 @@ static IntervalParts parseIntervalText(const std::string& in) {
         std::string u;
         for (char c : unit) u += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         if (u == "year" || u == "years" || u == "y")
-            return addScaled(r.months, n, 12);
+            return addScaled(years, n, 1);
         if (u == "mon" || u == "mons" || u == "month" || u == "months")
             return addScaled(r.months, n, 1);
         if (u == "week" || u == "weeks" || u == "w")
@@ -1060,9 +1148,9 @@ static IntervalParts parseIntervalText(const std::string& in) {
             return addScaled(r.micros, n, 60000000LL);
         if (u == "sec" || u == "secs" || u == "second" || u == "seconds" || u == "s")
             return addScaled(r.micros, n, 1000000LL);
-        if (u == "millisec" || u == "millisecs" || u == "milliseconds")
+        if (u == "millisec" || u == "millisecs" || u == "millisecond" || u == "milliseconds")
             return addScaled(r.micros, n, 1000LL);
-        if (u == "microsec" || u == "microsecs" || u == "microseconds")
+        if (u == "microsec" || u == "microsecs" || u == "microsecond" || u == "microseconds")
             return addScaled(r.micros, n, 1);
         return false;
     };
@@ -1162,12 +1250,17 @@ static IntervalParts parseIntervalText(const std::string& in) {
         }
         if (!r.ok) break;
     }
-    if (r.ok && negate) {
-        r.months = -r.months;
-        r.days = -r.days;
-        r.micros = -r.micros;
-    }
-    return r;
+    return finish();
+}
+
+static void validateTypedIntervalRange(const std::string& value) {
+    const auto parsed = parseIntervalText(value);
+    if (parsed.numericFieldTooLong)
+        throw DbError("22007", "invalid input syntax for type interval");
+    if (parsed.outOfRange)
+        throw DbError("22015", "interval field value out of range");
+    if (parsed.combinedOutOfRange)
+        throw DbError("22008", "interval out of range");
 }
 
 // Render (months, days, micros) back to canonical PG text.
@@ -1188,10 +1281,12 @@ static std::string intervalToText(long long months, long long days, long long mi
     if (micros || out.empty()) {
         if (!out.empty()) out += " ";
         const bool negative = micros < 0;
-        long long us = negative ? -micros : micros;
-        long long hh = us / 3600000000LL; us %= 3600000000LL;
-        long long mm = us / 60000000LL; us %= 60000000LL;
-        long long ss = us / 1000000LL; long long frac = us % 1000000LL;
+        uint64_t us = negative ? static_cast<uint64_t>(-(micros + 1)) + 1
+            : static_cast<uint64_t>(micros);
+        const long long hh = static_cast<long long>(us / 3600000000ULL); us %= 3600000000ULL;
+        const long long mm = static_cast<long long>(us / 60000000ULL); us %= 60000000ULL;
+        const long long ss = static_cast<long long>(us / 1000000ULL);
+        const long long frac = static_cast<long long>(us % 1000000ULL);
         char buf[64];
         if (frac) {
             std::snprintf(buf, sizeof(buf), "%s%02lld:%02lld:%02lld.%06lld",
@@ -1655,6 +1750,7 @@ ExprValue ExprEvaluator::evalLiteral(const LiteralExpr* e) const {
     }
 
     if (!e->typeName.empty()) {
+        if (toLower(e->typeName) == "interval") validateTypedIntervalRange(unquote(raw));
         if (toLower(e->typeName) == "xml") {
             const std::string value = unquote(raw);
             const auto validation = validateXml(value, XmlParseMode::Content);
@@ -4570,6 +4666,10 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
     const NumericCastSpec numericSpec = parseNumericCastSpec(target);
     if (numericSpec.matches) return castToNumeric(v, numericSpec);
     if (target == "money") return castToMoney(v);
+    if (target == "interval") {
+        validateTypedIntervalRange(v.value);
+        return ExprValue("interval", v.value, false);
+    }
     if (target == "uuid") return castToUuid(v);
     if (target == "bytea" || target == "blob") return castToBytea(v);
     if (target == "inet" || target == "cidr") {

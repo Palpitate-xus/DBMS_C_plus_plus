@@ -8,6 +8,7 @@
 
 #include "expression/ExprEvaluator.h"
 #include "expression/expr_helper.h"
+#include "common/DbError.h"
 #include "parser/ast.h"
 #include <cassert>
 #include <cstdio>
@@ -264,13 +265,14 @@ static void test_epoch() {
                   {F("epoch"), TS("-infinity")}).value == "-Infinity");
     assert(callFn(eval, "extract", {F("epoch"), IV("3 days")}).value ==
            "259200.000000");
-    assert(callFn(eval, "extract",
-                  {F("epoch"),
-                   IV("9223372036854775807 months")}).value ==
-           "23906980319527578891744000.000000");
-    assert(callFn(eval, "extract",
-                  {F("epoch"),
-                   IV(std::string(400, '9') + " months")}).isNull);
+    for (const auto& input : std::vector<std::pair<std::string, std::string>>{
+             {"9223372036854775807 months", "22015"},
+             {std::string(400, '9') + " months", "22007"}}) {
+        bool rejected = false;
+        try { (void)callFn(eval, "extract", {F("epoch"), IV(input.first)}); }
+        catch (const dbms::DbError& error) { rejected = error.sqlState() == input.second; }
+        assert(rejected);
+    }
     std::cout << "[DATEFN] epoch OK" << std::endl;
 }
 
