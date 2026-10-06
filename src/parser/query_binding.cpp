@@ -437,7 +437,10 @@ public:
         }
         if(const auto* unary=dynamic_cast<const UnaryOpExpr*>(expression);
             unary&&SQLParser::toLower(unary->op).rfind("collate ",0)==0)return projectionLabel(unary->operand.get());
-        if(dynamic_cast<const CaseExpr*>(expression))return {"case",1};
+        if(const auto* conditional=dynamic_cast<const CaseExpr*>(expression)) {
+            const auto label=projectionLabel(conditional->elseExpr.get());
+            return label.second>1?label:std::make_pair(std::string("case"),1);
+        }
         if(dynamic_cast<const ArrayExpr*>(expression))return {"array",1};
         if(dynamic_cast<const RowExpr*>(expression))return {"row",1};
         if(const auto* literal=dynamic_cast<const LiteralExpr*>(expression);literal&&!literal->typeName.empty())
