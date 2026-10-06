@@ -399,13 +399,14 @@ std::string inferAstResultType(
             const std::string input = argType(0);
             if (input == "smallint" || input == "integer") return "bigint";
             if (input == "bigint" || input == "numeric") return "numeric";
-            if (input == "real" || input == "double precision")
-                return "double precision";
+            if (input == "real" || input == "double precision" ||
+                input == "money" || input == "interval") return input;
         }
         if (name == "avg" || name == "stddev" || name == "stddev_samp" ||
             name == "stddev_pop" || name == "variance" || name == "var_samp" ||
             name == "var_pop") {
             const std::string input = argType(0);
+            if (name == "avg" && input == "interval") return "interval";
             return input == "real" || input == "double precision"
                 ? "double precision" : "numeric";
         }
