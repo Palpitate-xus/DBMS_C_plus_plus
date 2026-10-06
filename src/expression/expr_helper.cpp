@@ -55,13 +55,13 @@ std::string inferType(const std::string& value) {
 
 std::string canonicalTypeName(const std::string& storageType) {
     std::string t = toLower(storageType);
-    if (t == "int2" || t == "int4" || t == "int8" ||
-        t == "smallint" || t == "integer" || t == "bigint" ||
-        t == "serial" || t == "bigserial") {
-        return "integer";
-    }
-    if (t == "float4" || t == "real") return "real";
-    if (t == "float8" || t == "double precision") return "double precision";
+    // Storage aliases must retain the datum's actual width.  In particular,
+    // labeling BIGINT as integer changes arithmetic overflow and return casts.
+    if (t == "int2" || t == "smallint" || t == "smallserial") return "smallint";
+    if (t == "int" || t == "int4" || t == "integer" || t == "serial") return "integer";
+    if (t == "int8" || t == "bigint" || t == "bigserial") return "bigint";
+    if (t == "float" || t == "float4" || t == "real") return "real";
+    if (t == "double" || t == "float8" || t == "double precision") return "double precision";
     if (t == "numeric" || t == "decimal") return "numeric";
     if (t == "char" || t == "character" || t == "bpchar") {
         return "bpchar";
