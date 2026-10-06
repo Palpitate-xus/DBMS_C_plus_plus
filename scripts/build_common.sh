@@ -245,6 +245,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/case_common_type_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/simple_case_equality_prepared_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/simple_case_null_constant_demand_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/values_common_type_binding_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/interval_with_dml_input_sqlstate_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/with_primary_dml_execution_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/with_dml_range_namespace_protocol_e2e_test.py)

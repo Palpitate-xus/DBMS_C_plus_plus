@@ -573,8 +573,25 @@ public:
             auto columns = project(select->selectList, scopes, &projectionLeaves[select]);
             if (select->command == SqlCommand::Values && !select->valuesRows.empty()) {
                 columns.clear();
-                for (size_t i = 0; i < select->valuesRows.front().size(); ++i)
-                    columns.push_back({"column" + std::to_string(i + 1), expression(select->valuesRows.front()[i], scopes)});
+                const size_t width=select->valuesRows.front().size();
+                std::vector<std::vector<std::string>> inputs;
+                // VALUES transforms every row before choosing a column's
+                // common type. A late routine/name error cannot be hidden by
+                // premature conversion of an earlier UNKNOWN string.
+                for(auto& row:select->valuesRows) {
+                    std::vector<std::string> types;
+                    for(auto& value:row)types.push_back(expression(value,scopes));
+                    if(row.size()!=width)throw DbError("42601","VALUES lists must all be the same length");
+                    inputs.push_back(std::move(types));
+                }
+                for(size_t column=0;column<width;++column) {
+                    std::vector<std::string> types;
+                    for(const auto& row:inputs)types.push_back(row[column]);
+                    const auto common=selectCommonType(types,"VALUES");
+                    columns.push_back({"column"+std::to_string(column+1),common});
+                    for(size_t row=0;row<inputs.size();++row)
+                        coerceCaseInput(select->valuesRows[row][column],inputs[row][column],common);
+                }
             }
             expression(select->whereClause, scopes);
             for (auto& value : select->distinctOn) expression(value, scopes);
@@ -588,7 +605,8 @@ public:
                     std::any_of(columns.begin(), columns.end(), [&](const auto& col) { return col.name == ref->column; });
                 if (!outputAlias) expression(order.expr, scopes);
             }
-            for (auto& row : select->valuesRows) for (auto& value : row) expression(value, scopes);
+            if(select->command!=SqlCommand::Values)
+                for (auto& row : select->valuesRows) for (auto& value : row) expression(value, scopes);
             if (select->setOpRhs && statement(*select->setOpRhs, outer, ctes).size() != columns.size())
                 throw DbError("42601", "set query column count mismatch");
             return columns;
