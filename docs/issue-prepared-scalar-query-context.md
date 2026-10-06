@@ -98,3 +98,85 @@ the already-supported derived-WITH syntax; direct WITH scalar parsing is
 still a separate open issue. This prerequisite does not complete correlation
 runtime, generic query support, aggregate typing, or the ROOT optimized
 combination. Broad review families remain partial.
+
+## Shared per-execution scalar carrier
+
+The independent follow-up adds `PreparedQueryExecution` in
+`src/expression/prepared_query_execution.h/.cpp`. It owns a shared prepared
+query, the actual engine/database, execution-private expression copies, and
+one execution's initplan results. Its public methods are `context()`,
+`sourceRange(ordinal)`, `setSourceRow(row, ordinal, typedCells)`,
+`prepareExpression(expr)`, and `evaluate(expr, row)`. Every executable
+expression must be prepared before opening a source or evaluating another
+expression. A new carrier is required for each execution.
+
+`RowContext::setBoundColumn(sourceOrdinal, columnOrdinal, cell)` and
+`boundColumn(...)` retain real typed/NULL cells separately from the legacy
+case-insensitive string map. Bound ColumnRef evaluation consumes only these
+cells; a missing cell is XX000, not a string-name lookup or NULL. The pure
+AST type helper consumes a bound column's declared type before text hints.
+Source rows are checked against their copied descriptor width and types.
+
+Construction checks actual AST owner/ancestor relationships, local versus
+outer scope, descriptor ordinals/types and merged-USING identity. A unique
+range number cannot grant access to a sibling's namespace. For a child,
+outer references are those whose source owner lies outside that child's
+owned statement subtree. Internal grandchild correlation therefore does not
+make the containing child correlated with its outer caller.
+
+Reached scalar children clip/rebase the original raw byte spans and existing
+typed parameter uses. Bound outer column references become runtime typed
+parameters from their true occurrence/ordinal cells; they are not invented
+PL variables. Bare projected correlated columns retain canonical output
+labels. The ordinary child helper preserves the calling transaction,
+command ID and snapshot. Correlated children use each calling row's cells;
+uncorrelated results are cached by original Expr site within this execution,
+not raw SQL or across executions. Errors propagate unchanged and clear
+existing memo values. Execution-private callback/grammar lowering does not
+mutate the shared prepared AST. EXTRACT grammar fields are lowered only in
+those copies, separately from ordinary qualified function arguments.
+
+This carrier is not yet connected to ordinary SELECT, UPDATE or EXPLAIN
+consumers. EXISTS/IN/ANY multi-row subqueries are not scalar-value semantics
+and are not declared supported by this interface. General correlated query
+execution and the broad signature/type families remain partial.
+
+### Follow-up evidence
+
+Final immutable development artifacts:
+`/tmp/dbms-prepared-query-execution-final.FYIzFBJ6`.
+The RowContext layout changes and new translation unit require fresh objects.
+All **57** objects plus stubs freshly rebuilt (`36620`, terminal 0).
+After the EXTRACT-field strengthening, only the carrier translation unit
+rebuilt/relinked (`63486`, terminal 0), with unchanged-header and final-source
+audits. Final matching binary SHA-256:
+`700c2624e9d086691aa1afaad599a331ccd1585934e4f2967f27e965ff9c0fe1`.
+This is development O0 evidence, not ROOT's optimized combination.
+
+Nine matching native tests passed (`94891`, terminal 0): prepared execution,
+prepared scalar context, query binding, pure AST result types, metadata
+namespace, ORDER metadata, scalar resolver, constraint expressions and
+function atomicity. The new regression verifies independent-engine native
+correlation, exact empty/text-null/spaces/apostrophes and actual NULL, typed
+parameters and BIGINT, zero-row typed NULL, real three-row 21000, native
+22P02, duplicate SQL site separation and per-execution memo isolation,
+shared AST immutability/repeated stored function execution, JOIN USING and
+quoted occurrence cells, and rejection of forged sibling bindings. Its
+isolated fake host separately verifies ordinary-purpose/two-row demand,
+unchanged XID/CID/ReadView, lazy invocation, inherited CTE span/label
+adaptation, internal-versus-outer correlation classification and original
+P0002 propagation. That fake-host proof is not full query execution proof.
+
+Seven focused protocol scripts passed (`96451`, terminal 0): PL binding
+(43 cases plus two sequence controls), function atomicity, stored ORDER,
+aggregate ORDER role, quoted source/range scope, SELECT INTO, and quoted
+arithmetic Describe. The unchanged clause diagnostic remains exactly five
+red controls (`29335`, terminal 1). None was removed or weakened.
+
+Retained intermediate evidence is explicit: the first carrier's shared-AST
+mutation failed the immutable-name assertion (`3411`, exit 134), and a later
+EXTRACT grammar-field control failed (`22454`, exit 134); both assertions
+remain in the final green native test. The first native/protocol harnesses
+also had incorrect test filenames (`94307`, exit 1; `42410`, exit 2), corrected
+before the complete final runs. Earlier partial passes are not substituted
+for the final source proof.

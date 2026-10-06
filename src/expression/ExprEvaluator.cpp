@@ -496,6 +496,13 @@ const ExprValue& RowContext::parameter(size_t slot) const {
     return parameters_[slot];
 }
 
+const ExprValue& RowContext::boundColumn(size_t sourceOrdinal, size_t columnOrdinal) const {
+    const auto found = boundColumns_.find({sourceOrdinal, columnOrdinal});
+    if (found == boundColumns_.end())
+        throw DbError("XX000", "prepared source column has no runtime cell");
+    return found->second;
+}
+
 // ============================================================================
 // ExprEvaluator
 // ============================================================================
@@ -1788,6 +1795,8 @@ ExprValue ExprEvaluator::evalLiteral(const LiteralExpr* e) const {
 
 ExprValue ExprEvaluator::evalColumnRef(const ColumnRefExpr* e, const RowContext& ctx) const {
     if (!e) return ExprValue{};
+    if (e->binding)
+        return ctx.boundColumn(e->binding->sourceOrdinal, e->binding->columnOrdinal);
     // A qualified reference must win over an unqualified value with the same
     // column name. This is essential for joins and UPDATE ... FROM, where
     // the target and source relations commonly share column names.

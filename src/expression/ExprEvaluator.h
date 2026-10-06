@@ -64,10 +64,17 @@ public:
     bool has(const std::string& name) const { return get(name).has_value(); }
     void setParameters(std::vector<ExprValue> cells) { parameters_ = std::move(cells); }
     const ExprValue& parameter(size_t slot) const;
+    // Prepared SQL uses query-owned occurrence/descriptor identities, never
+    // RowContext's case-insensitive legacy identifier map.
+    void setBoundColumn(size_t sourceOrdinal, size_t columnOrdinal, ExprValue cell) {
+        boundColumns_[{sourceOrdinal, columnOrdinal}] = std::move(cell);
+    }
+    const ExprValue& boundColumn(size_t sourceOrdinal, size_t columnOrdinal) const;
 
 private:
     std::map<std::string, ExprValue> values_;
     std::vector<ExprValue> parameters_;
+    std::map<std::pair<size_t, size_t>, ExprValue> boundColumns_;
     static std::string normalize(const std::string& s);
 };
 

@@ -178,6 +178,7 @@ std::string inferAstResultType(
         return "unknown";
     }
     if (const auto* column = dynamic_cast<const ColumnRefExpr*>(expression)) {
+        if (column->binding) return protocolTypeName(column->binding->declaredType);
         for (const std::string& key : {
                  column->toString(), column->column}) {
             auto found = typeHints.find(key);
