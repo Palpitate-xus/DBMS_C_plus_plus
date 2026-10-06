@@ -25913,7 +25913,8 @@ DBStatus StorageEngine::removeRows(
     const std::vector<std::string>& conditions,
     std::vector<SqlRow>* deletedRows,
     const SqlDeleteMatcher& deleteMatcher,
-    size_t* affectedRows) {
+    size_t* affectedRows,
+    const SqlMutationCallbacks* mutationCallbacks) {
     const auto ownershipStatus = ensureDatabaseTransactionOwnership();
     if (ownershipStatus != DBStatus::OK) return ownershipStatus;
     if (affectedRows) *affectedRows = 0;
@@ -25951,7 +25952,7 @@ DBStatus StorageEngine::removeRows(
     ReferentialActionContext referentialContext;
     const DBStatus deleteStatus = removeInternal(
         dbname, tablename, conditions, deletedRows, deleteMatcher, nullptr,
-        referentialContext, affectedRows);
+        referentialContext, affectedRows, mutationCallbacks);
     if (deleteStatus != DBStatus::OK) {
         DBStatus rollbackStatus = DBStatus::OK;
         if (ownsTransaction && transactionContext().inTransaction) {
@@ -25996,7 +25997,8 @@ DBStatus StorageEngine::removeInternal(
     const SqlDeleteMatcher& deleteMatcher,
     const std::set<int64_t>* exactRids,
     ReferentialActionContext& referentialContext,
-    size_t* affectedRows) {
+    size_t* affectedRows,
+    const SqlMutationCallbacks* mutationCallbacks) {
     if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
         if ((transactionContext().txnIsolationLevel == IsolationLevel::READ_COMMITTED ||
              transactionContext().txnIsolationLevel == IsolationLevel::READ_UNCOMMITTED) &&
@@ -26069,7 +26071,7 @@ DBStatus StorageEngine::removeInternal(
     // storage operation.  Keep the final target-row selection inside the
     // storage boundary so RLS, row locks, FK actions, indexes and RETURNING
     // continue to use the same delete path as ordinary DELETE.
-    if (!exactRids && deleteMatcher && !toDelete.empty()) {
+    if (!exactRids && (deleteMatcher || (mutationCallbacks && mutationCallbacks->matches)) && !toDelete.empty()) {
         std::set<int64_t> filteredIds;
         for (int64_t rid : toDelete) {
             std::string row;
@@ -26089,7 +26091,9 @@ DBStatus StorageEngine::removeInternal(
                         extractColumnValue(row, tbl, i, dbname, true);
                 }
             }
-            if (deleteMatcher(rowValues)) filteredIds.insert(rid);
+            if (mutationCallbacks && mutationCallbacks->matches
+                    ? mutationCallbacks->matches(rid, rowValues)
+                    : deleteMatcher(rowValues)) filteredIds.insert(rid);
         }
         toDelete.swap(filteredIds);
     }
@@ -26510,8 +26514,8 @@ DBStatus StorageEngine::removeInternal(
     // DELETE RETURNING observes the target OLD rows before tombstones are
     // installed.  BEFORE DELETE triggers cannot mutate OLD, so capture maps
     // here and never re-query a row after DELETE.
-    if (deletedRows) {
-        deletedRows->clear();
+    if (deletedRows || (mutationCallbacks && mutationCallbacks->observed)) {
+        if (deletedRows) deletedRows->clear();
         for (size_t rowIndex = 0;
              rowIndex < logicalRowsToDelete.size(); ++rowIndex) {
             const auto& row = logicalRowsToDelete[rowIndex];
@@ -26530,7 +26534,9 @@ DBStatus StorageEngine::removeInternal(
                         deletedColumnValue(rowIndex, i, true);
                 }
             }
-            deletedRows->push_back(std::move(values));
+            if (mutationCallbacks && mutationCallbacks->observed)
+                mutationCallbacks->observed(rowRids[rowIndex], values, {});
+            if (deletedRows) deletedRows->push_back(std::move(values));
         }
     }
 
@@ -27135,7 +27141,8 @@ DBStatus StorageEngine::updateRows(
     const SqlUpdateResolver& updateResolver,
     const SqlUpdateMatcher& updateMatcher,
     size_t* affectedRows,
-    std::vector<UpdateRowImage>* rowImages) {
+    std::vector<UpdateRowImage>* rowImages,
+    const SqlMutationCallbacks* mutationCallbacks) {
     if (affectedRows) *affectedRows = 0;
     std::map<std::string, std::string> updates;
     std::set<std::string> updateNullColumns;
@@ -27172,7 +27179,7 @@ DBStatus StorageEngine::updateRows(
     const DBStatus updateStatus = updateInternal(
         dbname, tablename, updates, updateNullColumns, conditions,
         updatedRows, updateResolver, updateMatcher, nullptr,
-        referentialContext, affectedRows, rowImages);
+        referentialContext, affectedRows, rowImages, mutationCallbacks);
     if (updateStatus != DBStatus::OK) {
         DBStatus rollbackStatus = DBStatus::OK;
         if (ownsTransaction && transactionContext().inTransaction) {
@@ -27227,7 +27234,8 @@ DBStatus StorageEngine::updateInternal(
     const std::set<int64_t>* exactRids,
     ReferentialActionContext& referentialContext,
     size_t* affectedRows,
-    std::vector<UpdateRowImage>* rowImages) {
+    std::vector<UpdateRowImage>* rowImages,
+    const SqlMutationCallbacks* mutationCallbacks) {
     if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
         if ((transactionContext().txnIsolationLevel == IsolationLevel::READ_COMMITTED ||
              transactionContext().txnIsolationLevel == IsolationLevel::READ_UNCOMMITTED) &&
@@ -27558,7 +27566,7 @@ DBStatus StorageEngine::updateInternal(
         }
     }
 
-    if (!exactRids && updateMatcher && !matchIds.empty()) {
+    if (!exactRids && (updateMatcher || (mutationCallbacks && mutationCallbacks->matches)) && !matchIds.empty()) {
         std::set<int64_t> filteredIds;
         for (const int64_t rid : matchIds) {
             std::string row;
@@ -27578,7 +27586,9 @@ DBStatus StorageEngine::updateInternal(
                         extractColumnValue(row, tbl, i, dbname, true);
                 }
             }
-            if (updateMatcher(rowValues)) filteredIds.insert(rid);
+            if (mutationCallbacks && mutationCallbacks->matches
+                    ? mutationCallbacks->matches(rid, rowValues)
+                    : updateMatcher(rowValues)) filteredIds.insert(rid);
         }
         matchIds.swap(filteredIds);
     }
@@ -27696,7 +27706,7 @@ DBStatus StorageEngine::updateInternal(
 
         // Rebuild row buffer with updates
         std::map<std::string, std::string> rowValues = oldLogicalValues;
-        if (updateResolver) {
+        if (updateResolver || (mutationCallbacks && mutationCallbacks->resolve)) {
             SqlRow resolverValues;
             for (size_t i = 0; i < tbl.len; ++i) {
                 if (i < oldNullColumns.size() && oldNullColumns[i]) {
@@ -27708,7 +27718,9 @@ DBStatus StorageEngine::updateInternal(
             }
             SqlRow effectiveSqlUpdates =
                 joinSqlRow(updates, updateNullColumns);
-            if (!updateResolver(resolverValues, effectiveSqlUpdates)) {
+            if (!(mutationCallbacks && mutationCallbacks->resolve
+                    ? mutationCallbacks->resolve(rid, resolverValues, effectiveSqlUpdates)
+                    : updateResolver(resolverValues, effectiveSqlUpdates))) {
                 lockManager_.unlock(tablename);
                 return DBStatus::INVALID_VALUE;
             }
@@ -29740,7 +29752,7 @@ DBStatus StorageEngine::updateInternal(
         // value PostgreSQL exposes through UPDATE ... RETURNING: after the
         // row has been rebuilt and generated columns/BEFORE triggers applied,
         // without a second predicate query that could select a different row.
-        if (updatedRows || rowImages) {
+        if (updatedRows || rowImages || (mutationCallbacks && mutationCallbacks->observed)) {
             SqlRow oldValues;
             SqlRow newValues;
             for (size_t i = 0; i < tbl.len; ++i) {
@@ -29761,6 +29773,8 @@ DBStatus StorageEngine::updateInternal(
                 }
             }
             if (updatedRows) updatedRows->push_back(newValues);
+            if (mutationCallbacks && mutationCallbacks->observed)
+                mutationCallbacks->observed(rid, oldValues, newValues);
             if (rowImages) {
                 rowImages->push_back(
                     {std::move(oldValues), std::move(newValues)});

@@ -74,7 +74,8 @@ public:
         result.sourceRanges.push_back({range.occurrence,
             statementOwners.empty() ? nullptr : statementOwners.back(), source,
             range.schema, range.name, range.columns, range.mergedUsing,
-            range.relationSchema, range.relationName, range.cteStatement});
+            range.relationSchema, range.relationName, range.cteStatement,
+            range.hiddenUnqualified});
         return range;
     }
 
@@ -488,8 +489,15 @@ public:
                 if (col.name == key && !range.hiddenUnqualified.count(key)) { ++rightCount; rightType = col.type; }
             if (!leftCount || !rightCount) throw DbError("42703", "column \"" + key + "\" specified in USING does not exist");
             if (leftCount > 1 || rightCount > 1) throw DbError("42702", "USING column is ambiguous");
-            for (auto& range : left) range.hiddenUnqualified.insert(key);
-            for (auto& range : right) range.hiddenUnqualified.insert(key);
+            const auto hide = [&](Range& range) {
+                range.hiddenUnqualified.insert(key);
+                const auto found = std::find_if(result.sourceRanges.begin(), result.sourceRanges.end(),
+                    [&](const auto& source) { return source.ordinal == range.occurrence; });
+                if (found == result.sourceRanges.end()) throw DbError("XX000", "JOIN lost its source occurrence");
+                found->hiddenUnqualified = range.hiddenUnqualified;
+            };
+            for (auto& range : left) hide(range);
+            for (auto& range : right) hide(range);
             merged.columns.push_back({key, selectCommonType({leftType,rightType},"JOIN/USING")});
         }
         left.insert(left.end(), right.begin(), right.end());

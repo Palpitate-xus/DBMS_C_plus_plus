@@ -5230,11 +5230,31 @@ class BoundDmlExecution {
     PreparedQueryExecution execution_;
     const std::vector<SelectItem>* returning_ = nullptr;
     std::vector<std::pair<const PreparedQuery::SourceRange*,ReturningProjection::Source>> transitionSources_;
-    std::map<const Expr*,size_t> returningStarSources_;
+    std::map<const Expr*,std::vector<std::pair<size_t,size_t>>> returningStarCells_;
+    PreparedDmlSourceRows source_;
+    bool hasSource_ = false;
 
     static bool defaultValue(const Expr* expr) {
         const auto* literal = dynamic_cast<const LiteralExpr*>(expr);
         return literal && !literal->preparedSubquery && literal->typeName.empty() && lower(literal->value)=="default";
+    }
+    static bool rowIndependentPredicate(const Expr* value) {
+        if(!value || value->preparedSubquery)return false;
+        if(dynamic_cast<const LiteralExpr*>(value) || dynamic_cast<const ParameterExpr*>(value))return true;
+        if(const auto* unary=dynamic_cast<const UnaryOpExpr*>(value))return rowIndependentPredicate(unary->operand.get());
+        if(const auto* cast=dynamic_cast<const CastExpr*>(value))return rowIndependentPredicate(cast->operand.get());
+        if(const auto* binary=dynamic_cast<const BinaryOpExpr*>(value))
+            return rowIndependentPredicate(binary->left.get()) && rowIndependentPredicate(binary->right.get());
+        if(const auto* conditional=dynamic_cast<const CaseExpr*>(value)) {
+            if(conditional->switchExpr && !rowIndependentPredicate(conditional->switchExpr.get()))return false;
+            if(conditional->elseExpr && !rowIndependentPredicate(conditional->elseExpr.get()))return false;
+            for(const auto& arm:conditional->whenClauses)
+                if(!rowIndependentPredicate(arm.first.get()) || !rowIndependentPredicate(arm.second.get()))return false;
+            return true;
+        }
+        // Functions and child queries are never executed as a preparation
+        // shortcut, even when metadata calls them immutable/stable.
+        return false;
     }
     void expression(Expr* value) {
         if(value && !isStarProjection(value) && !defaultValue(value)) execution_.prepareExpression(value);
@@ -5253,8 +5273,8 @@ class BoundDmlExecution {
             ExprEvaluator evaluator;(void)evaluator.eval(&cast,RowContext{});
         }
     }
-    RowContext context(const SqlRow& values) const {
-        auto row=execution_.context();std::vector<ExprValue> cells;
+    RowContext context(const SqlRow& values,const RowContext* source=nullptr) const {
+        auto row=source?*source:execution_.context();std::vector<ExprValue> cells;
         for(const auto& column:target_->columns) {
             const auto found=values.find(column.name);
             if(found==values.end())throw DbError("XX000","DML row has no bound target column: "+column.name);
@@ -5266,8 +5286,8 @@ class BoundDmlExecution {
         const auto* column=dynamic_cast<const ColumnRefExpr*>(value);
         return isStarProjection(value) || (column && column->column=="*");
     }
-    RowContext returningContext(const ReturningRowImage& image) const {
-        auto row=context(returningSourceRow(image,ReturningProjection::Source::Default));
+    RowContext returningContext(const ReturningRowImage& image,const RowContext* source=nullptr) const {
+        auto row=context(returningSourceRow(image,ReturningProjection::Source::Default),source);
         for(const auto& channel:transitionSources_) {
             const auto& source=*channel.first;
             const auto& values=returningSourceRow(image,channel.second);
@@ -5290,7 +5310,8 @@ class BoundDmlExecution {
         const auto value=execution_.evaluate(where,context(values));
         return !value.isNull && value.asBool();
     }
-    DmlResult result(const std::vector<ReturningRowImage>& rows,const std::string& command,size_t count) {
+    DmlResult result(const std::vector<ReturningRowImage>& rows,const std::string& command,size_t count,
+                     const std::vector<RowContext>* sources=nullptr) {
         DmlResult output;output.available=true;
         output.commandTag=command=="INSERT"?"INSERT 0 "+std::to_string(count):command+" "+std::to_string(count);
         const auto& descriptor=query_->statementOutputs.at(statement_);
@@ -5298,13 +5319,13 @@ class BoundDmlExecution {
             output.columns.push_back(column.name);
             output.columnTypes.push_back(column.type=="unknown"?"text":ExprHelper::canonicalResultTypeName(column.type));
         }
-        for(const auto& image:rows) {
-            auto row=returningContext(image);std::vector<ExprValue> values;
+        if(sources && sources->size()!=rows.size())throw DbError("XX000","mutation images lost their physical source provenance");
+        for(size_t rowIndex=0;rowIndex<rows.size();++rowIndex) {
+            auto row=returningContext(rows[rowIndex],sources?&sources->at(rowIndex):nullptr);std::vector<ExprValue> values;
             for(const auto& item:*returning_) {
                 if(returningStar(item.expr.get())) {
-                    const size_t ordinal=returningStarSources_.at(item.expr.get());
-                    const auto& source=execution_.sourceRange(ordinal);
-                    for(size_t i=0;i<source.columns.size();++i) values.push_back(row.boundColumn(ordinal,i));
+                    for(const auto& cell:returningStarCells_.at(item.expr.get()))
+                        values.push_back(row.boundColumn(cell.first,cell.second));
                 } else values.push_back(execution_.evaluate(item.expr.get(),row));
             }
             if(values.size()!=descriptor.size())throw DbError("XX000","DML RETURNING width differs from prepared descriptor");
@@ -5315,7 +5336,8 @@ class BoundDmlExecution {
         return output;
     }
 public:
-    BoundDmlExecution(Stmt* statement,Session& session,std::shared_ptr<PreparedQuery> query)
+    BoundDmlExecution(Stmt* statement,Session& session,std::shared_ptr<PreparedQuery> query,
+                      PreparedDmlSourceFactory sourceFactory = {})
         :statement_(statement),session_(session),query_(std::move(query)),execution_(query_,&g_engine,session.currentDB) {
         for(const auto& range:query_->sourceRanges)if(range.owner==statement_ && !range.source && !range.mergedUsing && !range.relationName.empty()) {
             if(target_)throw DbError("XX000","prepared DML has multiple target occurrences");
@@ -5343,7 +5365,11 @@ public:
         } else if(auto* update=dynamic_cast<UpdateStmt*>(statement_)) {
             privilege=StorageEngine::TablePrivilege::Update;returning_=&update->returning;
             options=&update->returningOptions;returningRelation=update->tableName;returningAlias=update->alias;
-            if(update->fromClause || !update->whereCurrentOf.empty())throw DbError("0A000","prepared WITH UPDATE FROM requires additional range lowering");
+            if(!update->whereCurrentOf.empty())throw DbError("0A000","prepared WITH UPDATE cursor requires additional lowering");
+            if(update->fromClause) {
+                if(!sourceFactory)throw DbError("0A000","prepared WITH UPDATE FROM requires an actual source provider");
+                source_=sourceFactory(statement_,update->fromClause.get(),execution_.context());hasSource_=true;
+            }
             predicate(update->whereClause.get());
             for(auto& assignment:update->setClauses) {
                 if(defaultValue(assignment.second.get()))throw DbError("0A000","prepared WITH UPDATE DEFAULT requires assignment lowering");
@@ -5352,7 +5378,11 @@ public:
         } else if(auto* remove=dynamic_cast<DeleteStmt*>(statement_)) {
             privilege=StorageEngine::TablePrivilege::Delete;returning_=&remove->returning;
             options=&remove->returningOptions;returningRelation=remove->tableName;returningAlias=remove->alias;
-            if(remove->usingClause || !remove->whereCurrentOf.empty())throw DbError("0A000","prepared WITH DELETE USING requires additional range lowering");
+            if(!remove->whereCurrentOf.empty())throw DbError("0A000","prepared WITH DELETE cursor requires additional lowering");
+            if(remove->usingClause) {
+                if(!sourceFactory)throw DbError("0A000","prepared WITH DELETE USING requires an actual source provider");
+                source_=sourceFactory(statement_,remove->usingClause.get(),execution_.context());hasSource_=true;
+            }
             predicate(remove->whereClause.get());
         } else throw DbError("0A000","prepared WITH primary DML is not lowered");
         if(!temporary && !checkTablePrivilege(session_,physical_,privilege))throw DbError("42501","permission denied for DML target");
@@ -5384,7 +5414,15 @@ public:
                     source=&range;
                 }
             if(!source)throw DbError("XX000","RETURNING star lost its prepared occurrence");
-            returningStarSources_.emplace(item.expr.get(),source->ordinal);
+            std::vector<std::pair<size_t,size_t>> cells;
+            const auto append=[&](const PreparedQuery::SourceRange& range,bool qualified) {
+                for(size_t i=0;i<range.columns.size();++i)
+                    if(qualified || !range.hiddenUnqualified.count(range.columns[i].name))cells.emplace_back(range.ordinal,i);
+            };
+            append(*source,star!=nullptr);
+            if(!star && hasSource_)for(const auto ordinal:source_.occurrences)
+                append(execution_.sourceRange(ordinal),false);
+            returningStarCells_.emplace(item.expr.get(),std::move(cells));
         }
         // Keep original assignments until metadata has checked every value,
         // WHERE and RETURNING expression. The AST now also preserves exact
@@ -5436,6 +5474,58 @@ public:
             return result(insertedReturningImages(images),"INSERT",count);
         }
         std::vector<SqlRow> images;size_t count=0;
+        if(hasSource_) {
+            if(!source_.read)throw DbError("XX000","prepared mutation source has no reader");
+            struct Match {RowContext row;SqlRow updates;};
+            std::map<int64_t,Match> chosen;
+            std::vector<ReturningRowImage> changes;
+            std::vector<RowContext> provenance;
+            auto* update=dynamic_cast<UpdateStmt*>(statement_);
+            auto* remove=dynamic_cast<DeleteStmt*>(statement_);
+            const Expr* where=update?update->whereClause.get():remove->whereClause.get();
+            const bool oneTimeQualification=where && rowIndependentPredicate(where);
+            StorageEngine::SqlMutationCallbacks callbacks;
+            callbacks.matches=[&](int64_t rid,const SqlRow& old) {
+                if(oneTimeQualification) {
+                    const auto value=execution_.evaluate(where,context(old));
+                    if(value.isNull || !value.asBool())return false;
+                }
+                bool matched=false;
+                RowContext source;
+                for(size_t i=0;source_.read(i,source);++i) {
+                    auto row=context(old,&source);
+                    if(where && !oneTimeQualification) {const auto condition=execution_.evaluate(where,row);if(condition.isNull || !condition.asBool())continue;}
+                    SqlRow values;
+                    if(update)for(const auto& assignment:update->setClauses) {
+                        const auto value=execution_.evaluate(assignment.second.get(),row);
+                        values[identifier(assignment.first)]=value.isNull?SqlCell{}:SqlCell{value.value};
+                    }
+                    // Multiple eligible join tuples still evaluate their
+                    // projections/errors. The executor modifies each real
+                    // target RID once and retains one eligible row version;
+                    // SQL does not specify which of those versions wins.
+                    if(!matched)chosen.emplace(rid,Match{std::move(row),std::move(values)});
+                    matched=true;
+                }
+                return matched;
+            };
+            callbacks.resolve=[&](int64_t rid,const SqlRow&,SqlRow& values) {
+                const auto found=chosen.find(rid);
+                if(found==chosen.end())throw DbError("XX000","UPDATE target lost its matched physical occurrence");
+                values=found->second.updates;return true;
+            };
+            if(!returning_->empty())callbacks.observed=[&](int64_t rid,const SqlRow& old,const SqlRow& values) {
+                const auto found=chosen.find(rid);
+                if(found==chosen.end())throw DbError("XX000","RETURNING target lost its matched physical occurrence");
+                changes.push_back({old,values,update?ReturningProjection::Source::New:ReturningProjection::Source::Old,{}});
+                provenance.push_back(found->second.row);
+            };
+            const auto status=update
+                ?g_engine.updateRows(session_.currentDB,physical_,{}, {},nullptr,{}, {},&count,nullptr,&callbacks)
+                :g_engine.removeRows(session_.currentDB,physical_,{},nullptr,{},&count,&callbacks);
+            if(status!=DBStatus::OK)throw DbError(sqlstateForDBStatus(status),"WITH multi-source mutation failed");
+            return result(changes,update?"UPDATE":"DELETE",count,&provenance);
+        }
         if(auto* update=dynamic_cast<UpdateStmt*>(statement_)) {
             std::vector<StorageEngine::UpdateRowImage> changes;
             const auto matcher=[&](const SqlRow& old){return matches(update->whereClause.get(),old);};
@@ -5461,11 +5551,11 @@ public:
 };
 } // namespace
 
-void prepareBoundDml(Stmt* statement,Session& session,const std::shared_ptr<PreparedQuery>& query) {
-    (void)BoundDmlExecution(statement,session,query);
+void prepareBoundDml(Stmt* statement,Session& session,const std::shared_ptr<PreparedQuery>& query,PreparedDmlSourceFactory sourceFactory) {
+    (void)BoundDmlExecution(statement,session,query,std::move(sourceFactory));
 }
-DmlResult executeBoundDml(Stmt* statement,Session& session,const std::shared_ptr<PreparedQuery>& query,PreparedChildExecutor reader) {
-    return BoundDmlExecution(statement,session,query).run(std::move(reader));
+DmlResult executeBoundDml(Stmt* statement,Session& session,const std::shared_ptr<PreparedQuery>& query,PreparedChildExecutor reader,PreparedDmlSourceFactory sourceFactory) {
+    return BoundDmlExecution(statement,session,query,std::move(sourceFactory)).run(std::move(reader));
 }
 DmlResult executeAtomicDmlUnit(Session& session,const std::function<DmlResult()>& command) {
     bool ownsCommand=false;

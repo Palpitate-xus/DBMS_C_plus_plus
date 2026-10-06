@@ -4,6 +4,7 @@
 #include "expression/ExprEvaluator.h"
 #include <functional>
 #include <optional>
+#include <set>
 
 namespace dbms {
 
@@ -48,6 +49,10 @@ struct PreparedQuery {
         // A logical CTE is a prepared statement, never a physical table
         // found by reinterpreting its spelling at execution time.
         const Stmt* cteStatement = nullptr;
+        // Actual namespace visibility after JOIN USING/NATURAL merging or
+        // RETURNING transition registration. Qualified references still
+        // retain every original column; unqualified stars must skip these.
+        std::set<std::string> hiddenUnqualified;
     };
     std::string source;
     StmtPtr ast;

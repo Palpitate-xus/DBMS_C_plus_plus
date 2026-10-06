@@ -547,6 +547,15 @@ public:
         const SqlRow&, SqlRow&)>;
     using SqlUpdateMatcher = std::function<bool(const SqlRow&)>;
     using SqlDeleteMatcher = std::function<bool(const SqlRow&)>;
+    // The physical target occurrence remains distinct even when two tuples
+    // have identical nullable values. Optional callbacks preserve the legacy
+    // mutation path (RLS/FKs/triggers/locks/indexes) and are never inherited by
+    // referential actions on other relations.
+    struct SqlMutationCallbacks {
+        std::function<bool(int64_t, const SqlRow&)> matches;
+        std::function<bool(int64_t, const SqlRow&, SqlRow&)> resolve;
+        std::function<void(int64_t, const SqlRow&, const SqlRow&)> observed;
+    };
 
     using UpdateResolver = std::function<bool(
         const std::map<std::string, std::string>&,
@@ -615,7 +624,8 @@ public:
         const SqlUpdateResolver& updateResolver,
         const SqlUpdateMatcher& updateMatcher,
         size_t* affectedRows,
-        std::vector<UpdateRowImage>* rowImages);
+        std::vector<UpdateRowImage>* rowImages,
+        const SqlMutationCallbacks* mutationCallbacks = nullptr);
     DBStatus remove(
         const std::string& dbname, const std::string& tablename,
         const std::vector<std::string>& conditions,
@@ -637,7 +647,8 @@ public:
         const std::vector<std::string>& conditions,
         std::vector<SqlRow>* deletedRows,
         const SqlDeleteMatcher& deleteMatcher,
-        size_t* affectedRows);
+        size_t* affectedRows,
+        const SqlMutationCallbacks* mutationCallbacks = nullptr);
     struct OrderBySpec {
         std::string colName;
         bool ascending = true;
@@ -2020,7 +2031,8 @@ private:
         const SqlDeleteMatcher& deleteMatcher,
         const std::set<int64_t>* exactRids,
         ReferentialActionContext& referentialContext,
-        size_t* affectedRows = nullptr);
+        size_t* affectedRows = nullptr,
+        const SqlMutationCallbacks* mutationCallbacks = nullptr);
     DBStatus updateInternal(
         const std::string& dbname, const std::string& tablename,
         const std::map<std::string, std::string>& updates,
@@ -2032,7 +2044,8 @@ private:
         const std::set<int64_t>* exactRids,
         ReferentialActionContext& referentialContext,
         size_t* affectedRows = nullptr,
-        std::vector<UpdateRowImage>* rowImages = nullptr);
+        std::vector<UpdateRowImage>* rowImages = nullptr,
+        const SqlMutationCallbacks* mutationCallbacks = nullptr);
 
 
 private:

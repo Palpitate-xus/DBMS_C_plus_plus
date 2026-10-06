@@ -19644,7 +19644,7 @@ class PreparedWithDmlRuntime {
     dbms::WithStmt* root_;
     dbms::PreparedQueryExecution validation_;
 
-    vector<string> selectedColumns(const dbms::SelectStmt* select,
+    vector<string> selectedColumns(const dbms::Stmt* root,
                                    const dbms::PreparedQuery::SourceRange& source) const {
         set<string> names;
         function<void(const dbms::Stmt*)> statement;
@@ -19672,6 +19672,17 @@ class PreparedWithDmlRuntime {
             }
         };
         statement = [&](const dbms::Stmt* value) {
+            if(const auto* update=dynamic_cast<const dbms::UpdateStmt*>(value)) {
+                for(const auto& assignment:update->setClauses)expression(assignment.second.get());
+                expression(update->whereClause.get());
+                for(const auto& item:update->returning)expression(item.expr.get());
+                return;
+            }
+            if(const auto* remove=dynamic_cast<const dbms::DeleteStmt*>(value)) {
+                expression(remove->whereClause.get());
+                for(const auto& item:remove->returning)expression(item.expr.get());
+                return;
+            }
             const auto* child=dynamic_cast<const dbms::SelectStmt*>(value);
             if (!child) return;
             for (const auto& cte:child->ctes) statement(cte.query.get());
@@ -19680,8 +19691,12 @@ class PreparedWithDmlRuntime {
             for (const auto& order:child->orderBy) expression(order.expr.get());
             for (const auto& group:child->groupBy) expression(group.get());
         };
-        statement(select);
-        for (const auto& target:select->selectList) {
+        statement(root);
+        const vector<dbms::SelectItem>* targets=nullptr;
+        if(const auto* select=dynamic_cast<const dbms::SelectStmt*>(root))targets=&select->selectList;
+        else if(const auto* update=dynamic_cast<const dbms::UpdateStmt*>(root))targets=&update->returning;
+        else if(const auto* remove=dynamic_cast<const dbms::DeleteStmt*>(root))targets=&remove->returning;
+        if(targets)for (const auto& target:*targets) {
             const auto* literal=dynamic_cast<const dbms::LiteralExpr*>(target.expr.get());
             const auto* column=dynamic_cast<const dbms::ColumnRefExpr*>(target.expr.get());
             if ((target.expr && target.expr->type==dbms::ExprType::A_Star) ||
@@ -19735,7 +19750,7 @@ class PreparedWithDmlRuntime {
             if(cache->writing)throw dbms::DbError("0A000","recursive data-modifying WITH producer is not supported");
             if(statement->command!=dbms::SqlCommand::Select && statement->command!=dbms::SqlCommand::Values) {
                 cache->writing=true;
-                const auto result=dbms::executeBoundDml(const_cast<dbms::Stmt*>(statement),session_,query_,reader(frames));
+                const auto result=dbms::executeBoundDml(const_cast<dbms::Stmt*>(statement),session_,query_,reader(frames),mutationSourceFactory(frames));
                 cache->rows=typed(result,output(statement));cache->complete=true;cache->writing=false;
             } else cache->plan=selectPlan(const_cast<dbms::SelectStmt*>(static_cast<const dbms::SelectStmt*>(statement)),frame->outer,frames);
         }
@@ -19778,6 +19793,212 @@ class PreparedWithDmlRuntime {
             for(size_t i=0;i<result.structuredRows.size();++i)
                 values.push_back(typedRow(result.structuredRows[i],result.structuredNulls[i],output(statement)));
             return values;
+        };
+    }
+    struct DmlSourceNode {
+        using Cell=pair<size_t,size_t>;
+        vector<size_t> occurrences;
+        vector<pair<string,Cell>> visible;
+        vector<dbms::RowContext> rows;
+        function<void(DmlSourceNode&)> load;
+        bool loaded=false;
+        void ensure(){if(!loaded){load(*this);loaded=true;}}
+    };
+    const dbms::PreparedQuery::SourceRange& sourceRange(const dbms::Stmt* owner,
+        const dbms::FromItem* source,bool merged=false) const {
+        const auto found=find_if(query_->sourceRanges.begin(),query_->sourceRanges.end(),[&](const auto& range){
+            return range.owner==owner && range.source==source && range.mergedUsing==merged;
+        });
+        if(found==query_->sourceRanges.end())throw dbms::DbError("XX000","mutation source lost its actual prepared occurrence");
+        return *found;
+    }
+    shared_ptr<DmlSourceNode> sourceNode(const dbms::Stmt* owner,const dbms::FromItem* item,
+                                        const dbms::RowContext& outer,const Frames& frames) {
+        if(!item)throw dbms::DbError("XX000","mutation source has no retained FROM tree");
+        auto node=make_shared<DmlSourceNode>();
+        auto execution=make_shared<dbms::PreparedQueryExecution>(query_,&g_engine,session_.currentDB);
+        execution->setQueryExecutor(reader(frames));
+        if(item->type!=dbms::FromItem::Type::Join) {
+            const auto& range=sourceRange(owner,item);
+            node->occurrences.push_back(range.ordinal);
+            for(size_t i=0;i<range.columns.size();++i)node->visible.push_back({range.columns[i].name,{range.ordinal,i}});
+            shared_ptr<dbms::PreparedQueryCursor> cursor;
+            shared_ptr<dbms::TableScanOp> scan;
+            dbms::TableSchema scanSchema;
+            if(item->type==dbms::FromItem::Type::Subquery) {
+                auto* select=dynamic_cast<dbms::SelectStmt*>(item->subquery.get());
+                if(!select)throw dbms::DbError("0A000","mutation derived source requires a SELECT/VALUES plan");
+                cursor=dbms::QueryPlanner::makePreparedCursor(selectPlan(select,outer,frames),output(select));
+            } else if(item->type==dbms::FromItem::Type::Table && !range.cteStatement) {
+                if(range.relationName.empty())throw dbms::DbError("XX000","mutation base source has no physical identity");
+                const auto table=physical(range,session_);
+                if(!checkTablePermission(session_,table,dbms::StorageEngine::TablePrivilege::Select))
+                    throw dbms::DbError("42501","permission denied for mutation source");
+                if(!sessionIsAdmin(session_)) {
+                    const auto columns=selectedColumns(owner,range);
+                    if(!columns.empty() && !g_engine.hasColumnPermission(session_.currentDB,table,
+                        effectiveSessionRole(session_),dbms::StorageEngine::TablePrivilege::Select,columns))
+                        throw dbms::DbError("42501","permission denied for selected mutation source columns");
+                }
+                scanSchema=g_engine.getTableSchema(session_.currentDB,table);
+                if(scanSchema.len!=range.columns.size())throw dbms::DbError("XX000","mutation source descriptor differs from physical relation");
+                scan=make_shared<dbms::TableScanOp>(&g_engine,session_.currentDB,table);
+            } else if(item->type!=dbms::FromItem::Type::Table || !range.cteStatement)
+                throw dbms::DbError("0A000","mutation source requires additional function-range lowering");
+            node->load=[this,execution,outer,frames,rangePointer=&range,cursor,scan,scanSchema](DmlSourceNode& state) {
+                vector<dbms::ExprValue> cells;
+                try {
+                    if(scan && !scan->open())throw dbms::DbError("XX000",scan->errorMessage());
+                    const auto next=[&](size_t index) {
+                        if(cursor)return cursor->next(cells);
+                        if(!scan)return readCte(rangePointer->cteStatement,index,cells,frames);
+                        string raw;
+                        if(!scan->next(raw)) {
+                            if(scan->hasError())throw dbms::DbError("XX000",scan->errorMessage());
+                            return false;
+                        }
+                        cells.clear();
+                        for(size_t i=0;i<scanSchema.len;++i) {
+                            bool computedNull=false;
+                            const auto value=g_engine.extractColumnValue(raw,scanSchema,i,session_.currentDB,true,&computedNull);
+                            cells.emplace_back(rangePointer->columns[i].type,value,computedNull ||
+                                (scanSchema.cols[i].generatedKind!='v' && scan->lastColumnIsNull(i)));
+                            cells.back().collation=scanSchema.cols[i].collation;
+                        }
+                        return true;
+                    };
+                    for(size_t i=0;next(i);++i) {
+                        auto row=outer;
+                        execution->setSourceRow(row,rangePointer->ordinal,cells);
+                        state.rows.push_back(std::move(row));
+                    }
+                    if(cursor)cursor->close();
+                    if(scan)scan->close();
+                } catch(...) {
+                    const auto error=current_exception();
+                    if(cursor)try{cursor->close();}catch(...){}
+                    if(scan)try{scan->close();}catch(...){}
+                    rethrow_exception(error);
+                }
+            };
+            return node;
+        }
+        auto left=sourceNode(owner,item->left.get(),outer,frames);
+        auto right=sourceNode(owner,item->right.get(),outer,frames);
+        const auto joinType=toLower(item->joinType);
+        const bool leftJoin=joinType.find("left")!=string::npos || joinType.find("full")!=string::npos;
+        const bool rightJoin=joinType.find("right")!=string::npos || joinType.find("full")!=string::npos;
+        const dbms::PreparedQuery::SourceRange* merged=nullptr;
+        for(const auto& range:query_->sourceRanges)
+            if(range.owner==owner && range.source==item && range.mergedUsing)merged=&range;
+        vector<pair<DmlSourceNode::Cell,DmlSourceNode::Cell>> keys;
+        if(merged) {
+            node->occurrences.push_back(merged->ordinal);
+            for(size_t i=0;i<merged->columns.size();++i) {
+                const auto& name=merged->columns[i].name;
+                const auto findKey=[&](const shared_ptr<DmlSourceNode>& side) {
+                    vector<DmlSourceNode::Cell> found;
+                    for(const auto& cell:side->visible)if(cell.first==name)found.push_back(cell.second);
+                    if(found.size()!=1)throw dbms::DbError("XX000","prepared USING key lost its visible occurrence");
+                    return found.front();
+                };
+                keys.emplace_back(findKey(left),findKey(right));
+                node->visible.push_back({name,{merged->ordinal,i}});
+            }
+        }
+        node->occurrences.insert(node->occurrences.end(),left->occurrences.begin(),left->occurrences.end());
+        node->occurrences.insert(node->occurrences.end(),right->occurrences.begin(),right->occurrences.end());
+        const auto addVisible=[&](const shared_ptr<DmlSourceNode>& side) {
+            for(const auto& cell:side->visible)
+                if(!merged || none_of(merged->columns.begin(),merged->columns.end(),[&](const auto& key){return key.name==cell.first;}))
+                    node->visible.push_back(cell);
+        };
+        addVisible(left);addVisible(right);
+        if(item->joinCondition) {
+            const auto type=dbms::ExprHelper::canonicalResultTypeName(dbms::ExprHelper::inferParsedResultType(item->joinCondition.get(),{},session_.currentDB,&g_engine));
+            const auto* literal=dynamic_cast<const dbms::LiteralExpr*>(item->joinCondition.get());
+            const bool contextual=literal && !literal->preparedSubquery && literal->typeName.empty() &&
+                (toLower(literal->value)=="null" || (!literal->value.empty() && literal->value.front()=='\''));
+            if(type!="boolean" && !contextual)throw dbms::DbError("42804","argument of JOIN/ON must be type boolean");
+            if(contextual && toLower(literal->value)!="null") {
+                dbms::CastExpr cast;cast.typeName="boolean";cast.operand=make_unique<dbms::LiteralExpr>(*literal);
+                dbms::ExprEvaluator evaluator;(void)evaluator.eval(&cast,dbms::RowContext{});
+            }
+            execution->prepareExpression(item->joinCondition.get());
+        }
+        auto comparisons=make_shared<vector<dbms::ExprPtr>>();
+        for(size_t keyIndex=0;keyIndex<keys.size();++keyIndex) {
+            const auto& key=keys[keyIndex];
+            auto comparison=make_unique<dbms::BinaryOpExpr>();comparison->op="=";
+            const auto operand=[&](DmlSourceNode::Cell cell)->dbms::ExprPtr {
+                auto column=make_unique<dbms::ColumnRefExpr>();
+                const auto& range=execution->sourceRange(cell.first);
+                column->column=range.columns.at(cell.second).name;
+                column->binding=dbms::QueryColumnBinding{0,cell.first,cell.second,range.columns.at(cell.second).type,range.mergedUsing};
+                if(dbms::ExprHelper::canonicalResultTypeName(range.columns.at(cell.second).type)!=
+                    dbms::ExprHelper::canonicalResultTypeName(merged->columns[keyIndex].type)) {
+                    auto cast=make_unique<dbms::CastExpr>();cast->typeName=merged->columns[keyIndex].type;cast->implicit=true;
+                    cast->operand=std::move(column);return cast;
+                }
+                return column;
+            };
+            comparison->left=operand(key.first);comparison->right=operand(key.second);
+            comparisons->push_back(std::move(comparison));
+        }
+        node->load=[execution,outer,left,right,leftJoin,rightJoin,merged,item,keys,comparisons](DmlSourceNode& state) {
+            left->ensure();right->ensure();vector<bool> rightMatched(right->rows.size(),false);
+            dbms::ExprEvaluator comparator;
+            const auto combine=[&](const dbms::RowContext* a,const dbms::RowContext* b) {
+                auto row=outer;
+                const auto fill=[&](const shared_ptr<DmlSourceNode>& side,const dbms::RowContext* input) {
+                    for(const auto ordinal:side->occurrences) {
+                        const auto& range=execution->sourceRange(ordinal);
+                        vector<dbms::ExprValue> cells;
+                        for(size_t i=0;i<range.columns.size();++i)
+                            cells.push_back(input?input->boundColumn(ordinal,i):dbms::ExprValue(range.columns[i].type,"",true));
+                        execution->setSourceRow(row,ordinal,cells);
+                    }
+                };
+                fill(left,a);fill(right,b);
+                if(merged) {
+                    vector<dbms::ExprValue> cells;
+                    for(size_t i=0;i<keys.size();++i) {
+                        const auto& key=keys[i];
+                        const auto& l=row.boundColumn(key.first.first,key.first.second);
+                        const auto* operands=static_cast<const dbms::BinaryOpExpr*>(comparisons->at(i).get());
+                        cells.push_back(comparator.eval(l.isNull?operands->right.get():operands->left.get(),row));
+                    }
+                    execution->setSourceRow(row,merged->ordinal,cells);
+                }
+                return row;
+            };
+            for(const auto& a:left->rows) {
+                bool matched=false;
+                for(size_t i=0;i<right->rows.size();++i) {
+                    auto row=combine(&a,&right->rows[i]);bool valid=true;
+                    for(const auto& comparison:*comparisons) {
+                        const auto value=comparator.eval(comparison.get(),row);
+                        if(value.isNull || !value.asBool()){valid=false;break;}
+                    }
+                    if(valid && item->joinCondition) {
+                        const auto value=execution->evaluate(item->joinCondition.get(),row);
+                        valid=!value.isNull && value.asBool();
+                    }
+                    if(valid){state.rows.push_back(std::move(row));matched=true;rightMatched[i]=true;}
+                }
+                if(!matched && leftJoin)state.rows.push_back(combine(&a,nullptr));
+            }
+            if(rightJoin)for(size_t i=0;i<right->rows.size();++i)
+                if(!rightMatched[i])state.rows.push_back(combine(nullptr,&right->rows[i]));
+        };
+        return node;
+    }
+    dbms::PreparedDmlSourceFactory mutationSourceFactory(const Frames& frames) {
+        return [this,frames](const dbms::Stmt* owner,const dbms::FromItem* source,const dbms::RowContext& outer) {
+            auto node=sourceNode(owner,source,outer,frames);
+            dbms::PreparedDmlSourceRows rows;rows.occurrences=node->occurrences;
+            rows.read=[node](size_t index,dbms::RowContext& row){node->ensure();if(index>=node->rows.size())return false;row=node->rows[index];return true;};
+            return rows;
         };
     }
     dbms::OpPtr selectPlan(dbms::SelectStmt* select,const dbms::RowContext& outer,Frames frames) {
@@ -19852,7 +20073,7 @@ class PreparedWithDmlRuntime {
             }
             (void)selectPlan(select,validation_.context(),frames);
         } else {
-            dbms::prepareBoundDml(statement,session_,query_);
+            dbms::prepareBoundDml(statement,session_,query_,mutationSourceFactory(frames));
             if(auto* insert=dynamic_cast<dbms::InsertStmt*>(statement);insert && insert->selectSource)
                 validate(insert->selectSource.get(),frames);
         }
@@ -19882,7 +20103,7 @@ public:
             // their RETURNING rows. Only after that command succeeds do we
             // finish unused writers: an immediate primary error must not
             // execute a not-yet-started sequence/volatile producer.
-            auto result=dbms::executeBoundDml(root_->statement.get(),session_,query_,reader(frames));
+            auto result=dbms::executeBoundDml(root_->statement.get(),session_,query_,reader(frames),mutationSourceFactory(frames));
             // A successful data-modifying CTE runs once and to completion,
             // even when its RETURNING output was not consumed (LIMIT 0).
             for(auto& cte:root_->ctes)if(cte.query->command!=dbms::SqlCommand::Select && cte.query->command!=dbms::SqlCommand::Values) {

@@ -61,10 +61,20 @@ void publishLastDmlResult(DmlResult result);
 // evaluate rows/routines; runtime values retain their NULL bits and original
 // statement/column identities. The reader executes prepared SELECT children
 // in the calling statement's transaction/snapshot, not a new SPI command.
+struct PreparedDmlSourceRows {
+    // Namespace order, including genuine merged USING occurrences. Every
+    // row supplies exact source/column ordinal cells, including NULL extension.
+    std::vector<size_t> occurrences;
+    std::function<bool(size_t, RowContext&)> read;
+};
+using PreparedDmlSourceFactory = std::function<PreparedDmlSourceRows(
+    const Stmt*, const FromItem*, const RowContext&)>;
 void prepareBoundDml(Stmt* statement, Session& session,
-                     const std::shared_ptr<PreparedQuery>& query);
+                     const std::shared_ptr<PreparedQuery>& query,
+                     PreparedDmlSourceFactory sourceFactory = {});
 DmlResult executeBoundDml(Stmt* statement, Session& session,
-    const std::shared_ptr<PreparedQuery>& query, PreparedChildExecutor reader);
+    const std::shared_ptr<PreparedQuery>& query, PreparedChildExecutor reader,
+    PreparedDmlSourceFactory sourceFactory = {});
 DmlResult executeAtomicDmlUnit(Session& session,
     const std::function<DmlResult()>& command);
 
