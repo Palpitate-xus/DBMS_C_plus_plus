@@ -9646,6 +9646,15 @@ void StorageEngine::unbindNullRow() {
     g_nullRowNatts = 0; g_nullRowTable.clear(); g_nullRowDb.clear();
 }
 
+StorageEngine::NullRowBindingState StorageEngine::captureNullRowBinding() {
+    return {g_nullRowEngine, g_nullRowDb, g_nullRowTable, g_nullRowRid, g_nullRowNatts};
+}
+
+void StorageEngine::restoreNullRowBinding(NullRowBindingState&& state) noexcept {
+    g_nullRowEngine = state.engine; g_nullRowRid = state.rid; g_nullRowNatts = state.natts;
+    g_nullRowDb.swap(state.database); g_nullRowTable.swap(state.table);
+}
+
 class NullRowBinding {
 public:
     NullRowBinding(const StorageEngine* eng, const std::string& db,

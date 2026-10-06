@@ -3246,8 +3246,15 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
         }
     }
 
-    // LIMIT / OFFSET / FETCH
-    if (pos < tokens.size() && toLower(tokens[pos]) == "limit") {
+    // LIMIT and OFFSET may appear in either order. Keep their independent
+    // grammar state (including LIMIT ALL) rather than silently leaving a
+    // legal trailing LIMIT unparsed after OFFSET.
+    bool sawLimit = false, sawOffset = false;
+    while (pos < tokens.size()) {
+    const auto rowClause = toLower(tokens[pos]);
+    if (rowClause == "limit") {
+        if (sawLimit) { r.error = "multiple LIMIT/FETCH clauses"; return r; }
+        sawLimit = true;
         ++pos;
         if (pos >= tokens.size()) {
             r.error = "LIMIT requires a non-negative integer or ALL";
@@ -3269,8 +3276,11 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
                 stmt->withTies = true; ++pos;
             }
         }
+        continue;
     }
-    if (pos < tokens.size() && toLower(tokens[pos]) == "offset") {
+    if (rowClause == "offset") {
+        if (sawOffset) { r.error = "multiple OFFSET clauses"; return r; }
+        sawOffset = true;
         ++pos;
         if (pos >= tokens.size()) {
             r.error = "OFFSET requires a non-negative integer";
@@ -3284,9 +3294,12 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
         stmt->offset = offset;
         if (pos < tokens.size() &&
             (toLower(tokens[pos]) == "row" || toLower(tokens[pos]) == "rows")) ++pos;
+        continue;
     }
     // FETCH { FIRST | NEXT } [ count ] { ROW | ROWS } { ONLY | WITH TIES }
-    if (pos < tokens.size() && toLower(tokens[pos]) == "fetch") {
+    if (rowClause == "fetch") {
+        if (sawLimit) { r.error = "multiple LIMIT/FETCH clauses"; return r; }
+        sawLimit = true;
         ++pos;
         if (pos >= tokens.size() || (toLower(tokens[pos]) != "first" && toLower(tokens[pos]) != "next")) {
             r.error = "FETCH requires FIRST or NEXT";
@@ -3323,6 +3336,9 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
             r.error = "FETCH requires ONLY or WITH TIES";
             return r;
         }
+        continue;
+    }
+    break;
     }
 
     // FOR UPDATE / FOR SHARE

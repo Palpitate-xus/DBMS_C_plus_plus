@@ -1243,6 +1243,14 @@ public:
     static void bindNullRow(const StorageEngine* eng, const std::string& db,
                             const std::string& table, int64_t rid, size_t natts);
     static void unbindNullRow();
+    struct NullRowBindingState {
+        const StorageEngine* engine = nullptr;
+        std::string database, table;
+        int64_t rid = -1;
+        size_t natts = 0;
+    };
+    static NullRowBindingState captureNullRowBinding();
+    static void restoreNullRowBinding(NullRowBindingState&& state) noexcept;
 
     // MVCC ReadView
     struct ReadView {

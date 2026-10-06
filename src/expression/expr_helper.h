@@ -39,6 +39,13 @@ public:
         const std::function<std::string(const ColumnRefExpr&)>& columnIdentity,
         const std::string& currentDB = "",
         StorageEngine* functionEngine = nullptr);
+    // Retained prepared AST consumer: no rendering/reparsing and no routine
+    // execution. Parameters retain stable typed slots; child sites are unique.
+    static std::string scalarExpressionIdentity(
+        const Expr* expression,
+        const std::function<std::string(const ColumnRefExpr&)>& columnIdentity,
+        const std::string& currentDB = "",
+        StorageEngine* functionEngine = nullptr);
     // Infer the PostgreSQL-visible result type of an expression without
     // evaluating it. Column types are supplied by the caller; unknown string
     // literals resolve to text only at the outer expression boundary.

@@ -49,9 +49,13 @@ def main():
         query('SET search_path TO public;')
         # WHERE ends before GROUP BY/HAVING, not at ORDER BY alone.
         analyze('SELECT v,count(*) FROM plan_rel.items WHERE id=5 GROUP BY v;', 1)
+        # The typed single-range executor now supports legal aliases; retain
+        # the hidden original relation and missing-column error controls.
+        analyze('SELECT id FROM plan_rel.items AS p;', 2)
+        analyze('SELECT p.id FROM plan_rel.items p;', 2)
         for sql, expected in (("EXPLAIN (FORMAT JSON) SELECT id FROM plan_missing;", "42P01"),
-                              ("EXPLAIN ANALYZE SELECT id FROM plan_rel.items AS p;", "0A000"),
-                              ("EXPLAIN ANALYZE SELECT id FROM plan_rel.items p;", "0A000")):
+                              ("EXPLAIN ANALYZE SELECT items.id FROM plan_rel.items AS p;", "42P01"),
+                              ("EXPLAIN ANALYZE SELECT p.missing FROM plan_rel.items p;", "42703")):
             rows, state, message, _, _ = runner.decode_wire_result(
                 client.simple_query(server["sock"], sql))
             assert state == expected and not rows, (sql, state, rows, message)

@@ -60,6 +60,18 @@ public:
     }
 
 protected:
+    // Startup work (materialization, sorting, OFFSET) is real execution.
+    // It contributes time without inventing a next() call or emitted row.
+    struct OpenInstrument {
+        IOperator* self;
+        std::chrono::steady_clock::time_point tick;
+        explicit OpenInstrument(IOperator* op) : self(op), tick(std::chrono::steady_clock::now()) {}
+        ~OpenInstrument() {
+            self->runtimeMs_ += std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - tick).count();
+        }
+    };
+
     // RAII helper: construct at the top of next(); on ANY return it stops
     // the clock, counts one loop and, when `emitted` was assigned true,
     // one output row.

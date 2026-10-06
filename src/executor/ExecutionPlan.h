@@ -9,6 +9,7 @@
 
 #include "TableManage.h"
 #include "executor.h"
+#include "parser/query_binding.h"
 
 namespace dbms {
 
@@ -58,6 +59,11 @@ public:
         int64_t rid = 0;
     };
     virtual ScanOrigin scanOrigin() const { return ScanOrigin{}; }
+
+    // Prepared expression nodes expose the same children that they execute.
+    // EXPLAIN must not substitute a separately built display-only tree.
+    virtual std::string preparedPlanNodeName() const { return {}; }
+    virtual std::vector<Operator*> preparedPlanChildren() const { return {}; }
 
     bool hasError() const override { return error_; }
     std::string errorMessage() const override { return errorMessage_; }
@@ -749,6 +755,7 @@ private:
     OpPtr child_;
     size_t limit_;
     size_t count_ = 0;
+    bool childOpened_ = false;
 };
 
 // ========================================================================
@@ -1184,6 +1191,13 @@ struct PathKey {
 
 class QueryPlanner {
 public:
+    // Generic scalar SELECT plan over a single physical relation or the
+    // one-row, zero-column Result source. Preparation has already validated
+    // the complete query namespace; this consumes its retained typed AST.
+    static bool supportsPreparedSelectPlan(const SelectStmt& select);
+    static OpPtr buildPreparedSelectPlan(StorageEngine* engine,
+        const std::string& dbname, const std::string& tablename,
+        PreparedQuery prepared);
     // Build operator tree for SELECT * FROM t WHERE ... ORDER BY ... LIMIT ...
     static OpPtr buildSelectPlan(StorageEngine* engine, const PlanContext& ctx);
 

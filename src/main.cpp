@@ -183,6 +183,8 @@ StorageEngine g_engine;
 // results must only be published by the outer statement, never by a nested
 // subquery that happens to use the same execution path.
 static thread_local unsigned executeDepth = 0;
+static thread_local string* pendingExplainOutput = nullptr;
+static thread_local unsigned pendingExplainDepth = 0;
 // Only the procedural host sets this scope. Ordinary recursive execution
 // (including a top-level procedure/DO block) is not a function-body marker.
 static thread_local unsigned storedFunctionHostDepth = 0;
@@ -5125,11 +5127,124 @@ static bool handleDeallocate(const string& sql, Session& s) {
     return false;
 }
 
+// Build once, execute once, and render that exact tree only after success.
+// Cached text is a plain-EXPLAIN optimization, never an ANALYZE result.
+static bool publishExplainPlan(dbms::OpPtr plan, const string& inner,
+    Session& s, const dbms::QueryPlanner::ExplainOptions& opts, bool isJson,
+    const string& relationIdentity = {}) {
+    const bool usePlanCache = !opts.analyze && g_config.enableQueryPlanCache &&
+                             g_config.queryPlanCacheSize > 0;
+    string cacheKey = s.currentDB + "::" + inner;
+    cacheKey += ":R" + std::to_string(relationIdentity.size()) + ":" + relationIdentity;
+    if (opts.buffers) cacheKey += ":B";
+    if (opts.verbose) cacheKey += ":V";
+    if (isJson) cacheKey += ":J";
+    if (opts.timing) cacheKey += ":T";
+    if (opts.costs) cacheKey += ":C";
+    if (opts.settings) cacheKey += ":S";
+    cacheKey += ":P" + std::to_string(dbms::QueryPlanner::parallelWorkers());
+    cacheKey += planCacheSettingsKey();
+    string output;
+    bool cacheHit = false;
+    dbms::PlanCacheEpoch::Token cacheEpoch = 0;
+    if (usePlanCache) {
+        std::lock_guard<std::mutex> lock(g_planCacheMutex);
+        cacheEpoch = g_planCacheEpoch.token();
+        const auto found = g_queryPlanCache.find(cacheKey);
+        if (g_planCacheEpoch.stable() && found != g_queryPlanCache.end() &&
+            found->second.dbname == s.currentDB) {
+            output = found->second.planText;
+            found->second.cachedAt = std::chrono::steady_clock::now();
+            cacheHit = true; ++g_planCacheHits;
+        } else ++g_planCacheMisses;
+    }
+    if (opts.analyze) {
+        const auto before = g_engine.getBufferPoolStats();
+        const auto start = std::chrono::steady_clock::now();
+        size_t rows = 0;
+        string row;
+        try {
+            if (!plan->open()) throw dbms::DbError("XX000", plan->errorMessage().empty()
+                ? "executor failed to open analyzed plan" : plan->errorMessage());
+            while (plan->next(row)) ++rows;
+            if (plan->hasError()) throw dbms::DbError("XX000", plan->errorMessage().empty()
+                ? "executor failed while reading analyzed plan" : plan->errorMessage());
+        } catch (...) {
+            plan->close();
+            throw;
+        }
+        plan->close();
+        const double milliseconds = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - start).count();
+        const auto after = g_engine.getBufferPoolStats();
+        dbms::QueryPlanner::ExplainExecutionStats execution;
+        execution.actualRows = rows; execution.executionTimeMs = milliseconds;
+        execution.sharedHits = after.totalHits >= before.totalHits ? after.totalHits - before.totalHits : 0;
+        execution.sharedReads = after.totalMisses >= before.totalMisses ? after.totalMisses - before.totalMisses : 0;
+        if (isJson) output = dbms::QueryPlanner::explainJson(plan, &g_engine, s.currentDB, opts, execution);
+        else {
+            std::ostringstream text;
+            text << "--- ANALYZE ---\n" << dbms::QueryPlanner::explain(plan, &g_engine, s.currentDB, opts);
+            if (opts.timing) text << "Total runtime: " << std::fixed << std::setprecision(3) << milliseconds << " ms\n";
+            text << "Actual rows: " << rows << "\n";
+            if (opts.buffers) text << "Buffers: shared hit=" << execution.sharedHits
+                << " read=" << execution.sharedReads << ", hit rate=" << std::fixed
+                << std::setprecision(2) << after.hitRate << "\n";
+            output = text.str();
+        }
+    } else if (!cacheHit) {
+        output = isJson ? dbms::QueryPlanner::explainJson(plan, &g_engine, s.currentDB, opts)
+                        : dbms::QueryPlanner::explain(plan, &g_engine, s.currentDB, opts);
+        if (usePlanCache) {
+            std::lock_guard<std::mutex> lock(g_planCacheMutex);
+            if (g_planCacheEpoch.accepts(cacheEpoch)) {
+                trimPlanCacheLocked();
+                if (g_queryPlanCache.size() >= g_config.queryPlanCacheSize) {
+                    auto oldest = g_queryPlanCache.begin();
+                    for (auto candidate = g_queryPlanCache.begin(); candidate != g_queryPlanCache.end(); ++candidate)
+                        if (candidate->second.cachedAt < oldest->second.cachedAt) oldest = candidate;
+                    g_queryPlanCache.erase(oldest);
+                }
+                g_queryPlanCache[cacheKey] = {output, s.currentDB, std::chrono::steady_clock::now()};
+            }
+        }
+    }
+    if (cacheHit && !isJson) output += "\n[plan cache hit]";
+    if (pendingExplainOutput && executeDepth == pendingExplainDepth)
+        *pendingExplainOutput += output;
+    else cout << output;
+    return false;
+}
+
+static bool explainNeedsTypedPlan(const dbms::SelectStmt& select) {
+    if (!select.fromClause || !select.fromClause->alias.empty() || select.offset ||
+        (select.limit && !*select.limit) || select.orderBy.size() > 1) return true;
+    std::function<bool(const dbms::Expr*)> typed = [&](const dbms::Expr* expression) {
+        if (!expression) return false;
+        if (expression->preparedSubquery || expression->type == dbms::ExprType::Subquery ||
+            expression->type == dbms::ExprType::FunctionCall || expression->type == dbms::ExprType::CastExpr ||
+            expression->type == dbms::ExprType::CaseExpr || expression->type == dbms::ExprType::Parameter) return true;
+        if (auto* unary = dynamic_cast<const dbms::UnaryOpExpr*>(expression)) return typed(unary->operand.get());
+        if (auto* binary = dynamic_cast<const dbms::BinaryOpExpr*>(expression)) {
+            if (binary->op == "::" || binary->op == "COLLATE" || binary->op == "+" ||
+                binary->op == "-" || binary->op == "*" || binary->op == "/" || binary->op == "%") return true;
+            return typed(binary->left.get()) || typed(binary->right.get());
+        }
+        return false;
+    };
+    for (const auto& target : select.selectList)
+        if (!target.alias.empty() || typed(target.expr.get())) return true;
+    for (const auto& key : select.orderBy)
+        if (typed(key.expr.get()) || dynamic_cast<const dbms::LiteralExpr*>(key.expr.get())) return true;
+    return typed(select.whereClause.get());
+}
+
 static bool handleExplain(const string& sql, Session& s) {
     if (!checkDB(s)) return true;
     dbms::QueryPlanner::ExplainOptions opts;
     bool isJson = false;
-    string rest = trim(sql.substr(7));
+    const size_t commandBegin = dbms::skipLeadingSqlTrivia(sql);
+    string rest = trim(sql.substr(commandBegin + 7));
     if (!rest.empty() && rest.front() == '(') {
         size_t closeParen = rest.find(')');
         if (closeParen != string::npos) {
@@ -5140,8 +5255,8 @@ static bool handleExplain(const string& sql, Session& s) {
             while (getline(oss, opt, ',')) {
                 string o = trim(opt);
                 size_t sp = o.find(' ');
-                string name = (sp == string::npos) ? o : trim(o.substr(0, sp));
-                string val = (sp == string::npos) ? "true" : trim(o.substr(sp + 1));
+                string name = toLower((sp == string::npos) ? o : trim(o.substr(0, sp)));
+                string val = toLower((sp == string::npos) ? "true" : trim(o.substr(sp + 1)));
                 bool on = (val != "false" && val != "0" && val != "off");
                 if (name == "analyze") opts.analyze = on;
                 else if (name == "buffers") opts.buffers = on;
@@ -5153,24 +5268,43 @@ static bool handleExplain(const string& sql, Session& s) {
             }
         }
     } else {
-        if (rest.size() >= 8 && rest.substr(0, 8) == "analyze ") {
+        if (rest.size() >= 8 && toLower(rest.substr(0, 8)) == "analyze ") {
             opts.analyze = true;
             rest = trim(rest.substr(8));
         }
-        if (rest.size() >= 8 && rest.substr(0, 8) == "buffers ") {
+        if (rest.size() >= 8 && toLower(rest.substr(0, 8)) == "buffers ") {
             opts.buffers = true;
             rest = trim(rest.substr(8));
         }
-        if (rest.size() >= 8 && rest.substr(0, 8) == "verbose ") {
+        if (rest.size() >= 8 && toLower(rest.substr(0, 8)) == "verbose ") {
             opts.verbose = true;
             rest = trim(rest.substr(8));
         }
-        if (rest.size() >= 11 && rest.substr(0, 11) == "format json") {
+        if (rest.size() >= 11 && toLower(rest.substr(0, 11)) == "format json") {
             isJson = true;
             rest = trim(rest.substr(11));
         }
     }
     string inner = rest;
+    dbms::SQLParser explainParser;
+    auto explained = explainParser.parseForBinding(inner);
+    auto* explainedSelect = explained.success ? dynamic_cast<dbms::SelectStmt*>(explained.stmt.get()) : nullptr;
+    if (explainedSelect && dbms::QueryPlanner::supportsPreparedSelectPlan(*explainedSelect)) {
+        // Pure preparation must precede any source startup or writer call,
+        // including queries that yield no rows and plain EXPLAIN cache hits.
+        auto prepared = g_engine.prepareBoundQuery(s.currentDB, inner);
+        auto* select = static_cast<dbms::SelectStmt*>(prepared.ast.get());
+        // Scalar query children acquire their AST role during pure binding;
+        // do not mistake their parser envelope literal for a physical target.
+        if (explainNeedsTypedPlan(*select)) {
+            const string table = select->fromClause ? resolveTableName(s, select->fromClause->tableName) : string{};
+            auto plan = dbms::QueryPlanner::buildPreparedSelectPlan(&g_engine, s.currentDB, table, std::move(prepared));
+            return publishExplainPlan(std::move(plan), inner, s, opts, isJson, table);
+        }
+    }
+    // The retained legacy physical/index/aggregate planner consumes its
+    // compatibility copy only after genuine SQL grammar has been prepared.
+    inner = sqlProcessor(inner);
     if (inner.size() < 6 || inner.substr(0, 6) != "select") {
         cout << "EXPLAIN only supports SELECT" << endl;
         return true;
@@ -5564,127 +5698,11 @@ static bool handleExplain(const string& sql, Session& s) {
         return dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
     };
 
-    const bool jsonAnalyze = isJson && opts.analyze;
-    // Executed JSON contains this run's counters and cannot be cached as
-    // display text. Build and emit it only after execution has succeeded.
-    const bool usePlanCache = !jsonAnalyze && g_config.enableQueryPlanCache &&
-                              g_config.queryPlanCacheSize > 0;
-    string cacheKey = s.currentDB + "::" + inner;
-    if (explainJoin)
-        cacheKey += ":JL" + std::to_string(joinLeftTable.size()) + ":" + joinLeftTable +
-                    ":JR" + std::to_string(joinRightTable.size()) + ":" + joinRightTable;
-    if (opts.buffers) cacheKey += ":B";
-    if (opts.verbose) cacheKey += ":V";
-    if (isJson) cacheKey += ":J";
-    if (opts.analyze) cacheKey += ":A";
-    if (opts.timing) cacheKey += ":T";
-    if (opts.costs) cacheKey += ":C";
-    if (opts.settings) cacheKey += ":S";
-    cacheKey += ":P" + std::to_string(dbms::QueryPlanner::parallelWorkers());
-    cacheKey += planCacheSettingsKey();
-    string planOutput;
-    bool cacheHit = false;
-    dbms::PlanCacheEpoch::Token cacheEpoch = 0;
-    if (usePlanCache) {
-        std::lock_guard<std::mutex> lock(g_planCacheMutex);
-        cacheEpoch = g_planCacheEpoch.token();
-        auto it = g_queryPlanCache.find(cacheKey);
-        if (g_planCacheEpoch.stable() &&
-            it != g_queryPlanCache.end() && it->second.dbname == s.currentDB) {
-            planOutput = it->second.planText;
-            it->second.cachedAt = std::chrono::steady_clock::now();
-            cacheHit = true;
-            ++g_planCacheHits;
-        } else {
-            ++g_planCacheMisses;
-        }
-    }
-
-    if (!cacheHit && !jsonAnalyze) {
-        auto plan = buildExplainPlan();
-        if (isJson) {
-            planOutput = dbms::QueryPlanner::explainJson(plan, &g_engine, s.currentDB, opts);
-        } else {
-            planOutput = dbms::QueryPlanner::explain(plan, &g_engine, s.currentDB, opts);
-        }
-        if (usePlanCache) {
-            std::lock_guard<std::mutex> lock(g_planCacheMutex);
-            if (g_planCacheEpoch.accepts(cacheEpoch)) {
-                trimPlanCacheLocked();
-                if (g_queryPlanCache.size() >= g_config.queryPlanCacheSize) {
-                    auto oldest = g_queryPlanCache.begin();
-                    for (auto it = g_queryPlanCache.begin(); it != g_queryPlanCache.end(); ++it) {
-                        if (it->second.cachedAt < oldest->second.cachedAt) oldest = it;
-                    }
-                    g_queryPlanCache.erase(oldest);
-                }
-                g_queryPlanCache[cacheKey] = {planOutput, s.currentDB, std::chrono::steady_clock::now()};
-            }
-        }
-    }
-
-    if (!jsonAnalyze) cout << planOutput;
-    // A FORMAT JSON result is one JSON document, including cache hits. The
-    // text-mode diagnostic is not a JSON field and would corrupt its framing.
-    if (cacheHit && !isJson) cout << "\n[plan cache hit]";
-
-    if (opts.analyze) {
-        // Rebuild plan for actual execution (the cached one was used for
-        // display) and run it with per-node instrumentation.
-        auto execPlan = buildExplainPlan();
-        // Buffer deltas: compare shared-buffer counters across the query.
-        const auto bufBefore = g_engine.getBufferPoolStats();
-        auto execStart = std::chrono::steady_clock::now();
-        size_t actualRows = 0;
-        std::string row;
-        try {
-            if (!execPlan->open()) {
-                throw dbms::DbError("XX000", execPlan->errorMessage().empty() ?
-                    "executor failed to open analyzed plan" : execPlan->errorMessage());
-            }
-            while (execPlan->next(row)) ++actualRows;
-            if (execPlan->hasError()) {
-                throw dbms::DbError("XX000", execPlan->errorMessage().empty() ?
-                    "executor failed while reading analyzed plan" : execPlan->errorMessage());
-            }
-        } catch (...) {
-            execPlan->close();
-            throw;
-        }
-        execPlan->close();
-        auto execEnd = std::chrono::steady_clock::now();
-        double execMs = std::chrono::duration<double, std::milli>(execEnd - execStart).count();
-        const auto bufAfter = g_engine.getBufferPoolStats();
-        if (jsonAnalyze) {
-            dbms::QueryPlanner::ExplainExecutionStats execution;
-            execution.actualRows = actualRows;
-            execution.executionTimeMs = execMs;
-            // The counters are global and cache eviction can decrease them.
-            // Do not turn such a reset into an unsigned, enormous delta.
-            execution.sharedHits = bufAfter.totalHits >= bufBefore.totalHits ?
-                bufAfter.totalHits - bufBefore.totalHits : 0;
-            execution.sharedReads = bufAfter.totalMisses >= bufBefore.totalMisses ?
-                bufAfter.totalMisses - bufBefore.totalMisses : 0;
-            cout << dbms::QueryPlanner::explainJson(execPlan, &g_engine,
-                                                   s.currentDB, opts, execution);
-            return false;
-        }
-        // Re-explain the executed tree: instrumented nodes now carry their
-        // actual time/loops/rows and print PG-style per-node actuals.
-        cout << "\n--- ANALYZE ---\n";
-        cout << dbms::QueryPlanner::explain(execPlan, &g_engine, s.currentDB, opts);
-        if (opts.timing) {
-            cout << "Total runtime: " << std::fixed << std::setprecision(3) << execMs << " ms\n";
-        }
-        cout << "Actual rows: " << actualRows << "\n";
-        if (opts.buffers) {
-            cout << "Buffers: shared hit=" << (bufAfter.totalHits - bufBefore.totalHits)
-                 << " read=" << (bufAfter.totalMisses - bufBefore.totalMisses)
-                 << ", hit rate=" << std::fixed << std::setprecision(2)
-                 << bufAfter.hitRate << "\n";
-        }
-    }
-    return false;
+    const string relationIdentity = explainJoin
+        ? "L" + std::to_string(joinLeftTable.size()) + ":" + joinLeftTable +
+          "R" + std::to_string(joinRightTable.size()) + ":" + joinRightTable
+        : tname;
+    return publishExplainPlan(buildExplainPlan(), inner, s, opts, isJson, relationIdentity);
 }
 
 // ========================================================================
@@ -20036,7 +20054,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             return handleDeallocate(sql, s);
 
         case dbms::SqlCommand::Explain:
-            return handleExplain(sql, s);
+            return handleExplain(effectiveRawSql, s);
 
         default:
             break;
@@ -35622,6 +35640,22 @@ static bool executeWithCteInheritance(const std::string& inputSql, Session& s,
         changesPlanCache(dbms::SQLParser::classify(rawSql)));
     const bool outermost = executeDepth == 0;
     const auto command = dbms::SQLParser::classify(rawSql);
+    // A successfully consumed tree is not yet a successful calling statement:
+    // immediate FK validation or durable commit can still fail. Defer only
+    // this public EXPLAIN result; nested SPI captures keep their own output.
+    string explainPublication;
+    struct ExplainPublicationScope {
+        string* previousOutput = pendingExplainOutput;
+        unsigned previousDepth = pendingExplainDepth;
+        ~ExplainPublicationScope() {
+            pendingExplainOutput = previousOutput;
+            pendingExplainDepth = previousDepth;
+        }
+    } explainPublicationScope;
+    if (outermost && (command == dbms::SqlCommand::Explain || command == dbms::SqlCommand::Execute)) {
+        pendingExplainOutput = &explainPublication;
+        pendingExplainDepth = executeDepth + (command == dbms::SqlCommand::Execute ? 2 : 1);
+    }
     const bool statementTransaction = outermost &&
         !g_engine.inTransaction() &&
         g_engine.databaseExists(s.currentDB) &&
@@ -35754,6 +35788,7 @@ static bool executeWithCteInheritance(const std::string& inputSql, Session& s,
         throw dbms::StatementCommitError(dbms::sqlstateForDBStatus(statementCommitStatus),
                                         "statement transaction commit failed");
     }
+    if (!error && !explainPublication.empty()) cout << explainPublication;
     return error;
 }
 

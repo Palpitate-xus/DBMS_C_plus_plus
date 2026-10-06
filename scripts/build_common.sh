@@ -191,6 +191,8 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/analyze_native_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/legacy_forced_analyze_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/explain_relation_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/explain_typed_execution_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/explain_publication_cli_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/analyze_null_statistics_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/analyze_typed_statistics_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/quoted_from_comma_protocol_e2e_test.py)

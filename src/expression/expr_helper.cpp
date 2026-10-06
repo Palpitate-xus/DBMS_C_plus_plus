@@ -1048,6 +1048,15 @@ std::string ExprHelper::scalarExpressionIdentity(
     const auto* select = parsed.success ? dynamic_cast<const SelectStmt*>(parsed.stmt.get()) : nullptr;
     if (!select || select->selectList.size() != 1)
         throw DbError("42601", "invalid scalar expression identity");
+    return scalarExpressionIdentity(select->selectList.front().expr.get(),
+        columnIdentity, currentDB, functionEngine);
+}
+
+std::string ExprHelper::scalarExpressionIdentity(
+    const Expr* expression,
+    const std::function<std::string(const ColumnRefExpr&)>& columnIdentity,
+    const std::string& currentDB,
+    StorageEngine* functionEngine) {
     ExprEvaluator evaluator;
     evaluator.setCurrentDB(currentDB);
     const auto field = [](const std::string& value) {
@@ -1055,6 +1064,12 @@ std::string ExprHelper::scalarExpressionIdentity(
     };
     std::function<std::string(const Expr*)> key = [&](const Expr* node) -> std::string {
         if (!node) return "absent";
+        if (node->preparedSubquery)
+            return "prepared-child-site" + field(std::to_string(reinterpret_cast<uintptr_t>(node)));
+        if (const auto* parameter = dynamic_cast<const ParameterExpr*>(node)) {
+            if (parameter->declaredType.empty()) throw DbError("0A000", "parameter identity requires a prepared typed slot");
+            return "parameter" + field(std::to_string(parameter->slot)) + field(parameter->declaredType);
+        }
         if (const auto* column = dynamic_cast<const ColumnRefExpr*>(node))
             return "column" + field(columnIdentity(*column));
         if (const auto* literal = dynamic_cast<const LiteralExpr*>(node)) {
@@ -1129,7 +1144,7 @@ std::string ExprHelper::scalarExpressionIdentity(
             std::string result = "function" + field(routine);
             for (size_t i = 0; i < function->args.size(); ++i) {
                 const auto* fieldName = dynamic_cast<const ColumnRefExpr*>(function->args[i].get());
-                if (i == 0 && routine.rfind("builtin", 0) == 0 &&
+                if (i == 0 && function->schema.empty() && routine.rfind("builtin", 0) == 0 &&
                     toLower(function->funcName) == "extract" && fieldName &&
                     fieldName->schema.empty() && fieldName->table.empty())
                     result += field("extract-field" + field(toLower(fieldName->column)));
@@ -1151,7 +1166,7 @@ std::string ExprHelper::scalarExpressionIdentity(
         }
         throw DbError("0A000", "expression identity requires a prepared query scope");
     };
-    return key(select->selectList.front().expr.get());
+    return key(expression);
 }
 
 std::string ExprHelper::inferParsedResultType(
