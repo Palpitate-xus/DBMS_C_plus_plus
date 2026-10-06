@@ -284,6 +284,8 @@ std::string inferAstResultType(
         return result;
     }
     if (const auto* call = dynamic_cast<const FunctionCallExpr*>(expression)) {
+        const auto routine = typeHints.find("\x01routine:" + call->schema + "." + call->funcName);
+        if (routine != typeHints.end()) return protocolTypeName(routine->second);
         const std::string name = toLower(call->funcName);
         auto argType = [&](size_t index) {
             return index < call->args.size()
@@ -968,9 +970,127 @@ std::string ExprHelper::analyzeExplicitResultCollation(
         select->selectList[0].expr.get());
 }
 
+std::string ExprHelper::scalarExpressionIdentity(
+    const std::string& exprSql,
+    const std::function<std::string(const ColumnRefExpr&)>& columnIdentity,
+    const std::string& currentDB,
+    StorageEngine* functionEngine) {
+    SQLParser parser;
+    auto parsed = parser.parse("SELECT " + exprSql);
+    const auto* select = parsed.success ? dynamic_cast<const SelectStmt*>(parsed.stmt.get()) : nullptr;
+    if (!select || select->selectList.size() != 1)
+        throw DbError("42601", "invalid scalar expression identity");
+    ExprEvaluator evaluator;
+    evaluator.setCurrentDB(currentDB);
+    const auto field = [](const std::string& value) {
+        return std::to_string(value.size()) + ":" + value;
+    };
+    std::function<std::string(const Expr*)> key = [&](const Expr* node) -> std::string {
+        if (!node) return "absent";
+        if (const auto* column = dynamic_cast<const ColumnRefExpr*>(node))
+            return "column" + field(columnIdentity(*column));
+        if (const auto* literal = dynamic_cast<const LiteralExpr*>(node)) {
+            std::string value = literal->value;
+            const std::string type = inferAstResultType(literal, {});
+            const bool sqlNull = toLower(value) == "null";
+            // Parsing an integer token is not expression evaluation. The
+            // canonical AST datum must not depend on spelling 1 versus 01.
+            if (type == "integer" || type == "bigint" || type == "smallint") {
+                try {
+                    size_t consumed = 0;
+                    const auto number = std::stoll(value, &consumed);
+                    if (consumed == value.size()) value = std::to_string(number);
+                } catch (...) {}
+            } else if (value.size() >= 2 && value.front() == '\'' && value.back() == '\'') {
+                std::string decoded;
+                for (size_t i = 1; i + 1 < value.size(); ++i) {
+                    decoded += value[i];
+                    if (value[i] == '\'' && i + 2 < value.size() && value[i + 1] == '\'') ++i;
+                }
+                value = std::move(decoded);
+            }
+            return "literal" + field(sqlNull ? "sql-null" : "non-null") + field(type) + field(value);
+        }
+        if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(node)) {
+            const std::string lower = toLower(unary->op);
+            // Grammar labels are not values or case-folded identifiers.
+            // Quoted collation names and time-zone literals keep their bytes.
+            const auto labelStart = lower.rfind("collate ", 0) == 0 ? 8u :
+                lower.rfind("at time zone ", 0) == 0 ? 13u : 0u;
+            const std::string op = labelStart
+                ? lower.substr(0, labelStart) + unary->op.substr(labelStart) : lower;
+            return "unary" + field(op) + field(key(unary->operand.get()));
+        }
+        if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(node)) {
+            if (binary->op == "::") {
+                const std::string rawType = binary->right->toString();
+                std::string type = canonicalResultTypeName(rawType);
+                const auto modifierStart = rawType.find('(');
+                if (modifierStart != std::string::npos) {
+                    const auto modifierEnd = rawType.find(')', modifierStart);
+                    std::string modifier;
+                    for (const auto& token : SQLParser::tokenize(rawType.substr(
+                            modifierStart + 1, modifierEnd - modifierStart - 1))) {
+                        if (token == ",") { type += field(modifier); modifier.clear(); }
+                        else modifier += token;
+                    }
+                    type += field(modifier);
+                }
+                return "cast" + field(type) + field(key(binary->left.get()));
+            }
+            if (toLower(binary->op) == "collate")
+                return "collate" + field(binary->right->toString()) + field(key(binary->left.get()));
+            return "binary" + field(toLower(binary->op)) + field(key(binary->left.get())) +
+                field(key(binary->right.get()));
+        }
+        if (const auto* cast = dynamic_cast<const CastExpr*>(node)) {
+            std::string type = canonicalResultTypeName(cast->typeName);
+            for (const auto& modifier : cast->typeMods) type += field(modifier);
+            return "cast" + field(type) + field(key(cast->operand.get()));
+        }
+        if (const auto* conditional = dynamic_cast<const CaseExpr*>(node)) {
+            std::string result = "case" + field(key(conditional->switchExpr.get()));
+            for (const auto& arm : conditional->whenClauses)
+                result += field(key(arm.first.get())) + field(key(arm.second.get()));
+            return result + field(key(conditional->elseExpr.get()));
+        }
+        if (const auto* function = dynamic_cast<const FunctionCallExpr*>(node)) {
+            if (function->hasOver || function->filter || function->distinct || !function->orderBy.empty())
+                throw DbError("0A000", "aggregate/window identity requires a prepared query");
+            const std::string routine = evaluator.scalarFunctionIdentity(function, functionEngine);
+            std::string result = "function" + field(routine);
+            for (size_t i = 0; i < function->args.size(); ++i) {
+                const auto* fieldName = dynamic_cast<const ColumnRefExpr*>(function->args[i].get());
+                if (i == 0 && routine.rfind("builtin", 0) == 0 &&
+                    toLower(function->funcName) == "extract" && fieldName &&
+                    fieldName->schema.empty() && fieldName->table.empty())
+                    result += field("extract-field" + field(toLower(fieldName->column)));
+                else result += field(key(function->args[i].get()));
+            }
+            for (const auto& argument : function->namedArgs)
+                result += field(argument.name) + field(key(argument.value.get()));
+            return result;
+        }
+        if (const auto* array = dynamic_cast<const ArrayExpr*>(node)) {
+            std::string result = "array";
+            for (const auto& value : array->elements) result += field(key(value.get()));
+            return result;
+        }
+        if (const auto* row = dynamic_cast<const RowExpr*>(node)) {
+            std::string result = "row";
+            for (const auto& value : row->elements) result += field(key(value.get()));
+            return result;
+        }
+        throw DbError("0A000", "expression identity requires a prepared query scope");
+    };
+    return key(select->selectList.front().expr.get());
+}
+
 std::string ExprHelper::inferResultType(
     const std::string& exprSql,
-    const std::map<std::string, std::string>& typeHints) {
+    const std::map<std::string, std::string>& typeHints,
+    const std::string& currentDB,
+    StorageEngine* functionEngine) {
     const std::string trimmed = [&] {
         size_t first = exprSql.find_first_not_of(" \t\r\n");
         if (first == std::string::npos) return std::string{};
@@ -978,6 +1098,51 @@ std::string ExprHelper::inferResultType(
         return exprSql.substr(first, last - first + 1);
     }();
     const std::string lower = toLower(trimmed);
+    if (!currentDB.empty()) {
+        SQLParser parser;
+        auto parsed = parser.parse("SELECT " + trimmed);
+        const auto* select = parsed.success ? dynamic_cast<const SelectStmt*>(parsed.stmt.get()) : nullptr;
+        if (select && select->selectList.size() == 1) {
+            auto hints = typeHints;
+            ExprEvaluator evaluator;
+            evaluator.setCurrentDB(currentDB);
+            bool stored = false;
+            std::function<void(const Expr*)> inspect = [&](const Expr* node) {
+                if (!node) return;
+                if (const auto* call = dynamic_cast<const FunctionCallExpr*>(node)) {
+                    if (evaluator.hasScalarFunction(call, functionEngine)) {
+                        const std::string type = evaluator.scalarFunctionResultType(call, functionEngine);
+                        if (!type.empty()) {
+                            hints["\x01routine:" + call->schema + "." + call->funcName] = type;
+                            stored = true;
+                        }
+                    }
+                    for (const auto& arg : call->args) inspect(arg.get());
+                    for (const auto& arg : call->namedArgs) inspect(arg.value.get());
+                } else if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(node)) inspect(unary->operand.get());
+                else if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(node)) {
+                    inspect(binary->left.get());
+                    if (binary->op != "::") inspect(binary->right.get());
+                } else if (const auto* cast = dynamic_cast<const CastExpr*>(node)) inspect(cast->operand.get());
+                else if (const auto* conditional = dynamic_cast<const CaseExpr*>(node)) {
+                    inspect(conditional->switchExpr.get());
+                    for (const auto& arm : conditional->whenClauses) {
+                        inspect(arm.first.get()); inspect(arm.second.get());
+                    }
+                    inspect(conditional->elseExpr.get());
+                } else if (const auto* array = dynamic_cast<const ArrayExpr*>(node)) {
+                    for (const auto& item : array->elements) inspect(item.get());
+                } else if (const auto* row = dynamic_cast<const RowExpr*>(node)) {
+                    for (const auto& item : row->elements) inspect(item.get());
+                }
+            };
+            inspect(select->selectList.front().expr.get());
+            if (stored) {
+                const std::string type = inferAstResultType(select->selectList.front().expr.get(), hints);
+                return type.empty() || type == "unknown" ? "text" : type;
+            }
+        }
+    }
 
     // CASE result types come from value arms, not predicates or an untyped
     // NULL's standalone text fallback. Use the parsed CASE before textual
@@ -1680,6 +1845,10 @@ static ExprEvalResult evalStringImpl(
         }
         evaluator.bindScalarFunctions(select->selectList[0].expr.get(), functionEngine);
         v = evaluator.eval(select->selectList[0].expr.get(), ctx);
+    } catch (const DbError& e) {
+        res.error = e.what();
+        res.sqlState = e.sqlState();
+        return res;
     } catch (const std::exception& e) {
         // Runtime expression errors (division by zero, invalid cast input)
         // surface as evaluation failures carrying the engine message.

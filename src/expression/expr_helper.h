@@ -1,6 +1,7 @@
 #pragma once
 
 #include <map>
+#include <functional>
 #include <optional>
 #include <set>
 #include <string>
@@ -8,6 +9,7 @@
 
 namespace dbms {
 class StorageEngine;
+struct ColumnRefExpr;
 
 // ----------------------------------------------------------------------------
 // Expression evaluation helper
@@ -24,16 +26,26 @@ struct ExprEvalResult {
     bool isNull = false; // true if expression evaluated to NULL
     bool ok = false;     // true if parse + eval succeeded
     std::string error;   // set when ok == false
+    std::string sqlState; // structured DbError code; error retains legacy diagnostics
 };
 
 class ExprHelper {
 public:
+    // Metadata-only structural identity. The consumer supplies already
+    // validated source occurrence/column ordinal/type/collation identities.
+    static std::string scalarExpressionIdentity(
+        const std::string& exprSql,
+        const std::function<std::string(const ColumnRefExpr&)>& columnIdentity,
+        const std::string& currentDB = "",
+        StorageEngine* functionEngine = nullptr);
     // Infer the PostgreSQL-visible result type of an expression without
     // evaluating it. Column types are supplied by the caller; unknown string
     // literals resolve to text only at the outer expression boundary.
     static std::string inferResultType(
         const std::string& exprSql,
-        const std::map<std::string, std::string>& typeHints = {});
+        const std::map<std::string, std::string>& typeHints = {},
+        const std::string& currentDB = "",
+        StorageEngine* functionEngine = nullptr);
 
     // Parse-only collation analysis; does not evaluate row-dependent or
     // volatile functions. Raises DbError for syntax/collation errors.

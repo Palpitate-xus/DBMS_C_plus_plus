@@ -4648,6 +4648,29 @@ struct ResolvedScalarFunction {
     StorageEngine::UDFInfo routine;
 };
 
+// A named callable keeps declaration metadata available after an AST call
+// has been rebound to its private key. Reading its type never invokes it.
+struct BoundScalarRoutine {
+    StorageEngine* engine;
+    std::string database;
+    ResolvedScalarFunction resolved;
+
+    ExprValue operator()(const std::vector<ExprValue>& args) const {
+        std::vector<std::string> values;
+        std::vector<bool> nulls;
+        for (const auto& arg : args) {
+            values.push_back(arg.value);
+            nulls.push_back(arg.isNull);
+        }
+        std::string value;
+        bool isNull = false;
+        if (!engine->callUDF(database, resolved.name, values, value, &isNull, &nulls))
+            throw DbError("22023", "stored-function evaluation failed: " + resolved.name);
+        return ExprValue(ExprHelper::canonicalResultTypeName(resolved.routine.returnType),
+                         value, isNull);
+    }
+};
+
 ResolvedScalarFunction resolveScalarFunction(
     const ExprEvaluator& evaluator, const FunctionCallExpr* call,
     const std::string& database, StorageEngine* engine) {
@@ -4729,6 +4752,55 @@ char ExprEvaluator::scalarFunctionVolatility(const FunctionCallExpr* call,
     return hasFunction(resolved.name) ? volatility(resolved.name) : 'i';
 }
 
+std::string ExprEvaluator::scalarFunctionResultType(const FunctionCallExpr* call,
+                                                   StorageEngine* engine) const {
+    const auto resolved = resolveScalarFunction(*this, call, currentDB_, engine);
+    if (!resolved.found)
+        throw DbError("42883", "function does not exist: " +
+            (call ? call->funcName : std::string{}));
+    if (resolved.stored)
+        return ExprHelper::canonicalResultTypeName(resolved.routine.returnType);
+    const auto callback = functions_.find(toLower(resolved.name));
+    if (callback != functions_.end()) {
+        if (const auto* bound = callback->second.target<BoundScalarRoutine>())
+            return ExprHelper::canonicalResultTypeName(bound->resolved.routine.returnType);
+    }
+    return {};
+}
+
+std::string ExprEvaluator::scalarFunctionIdentity(const FunctionCallExpr* call,
+                                                 StorageEngine* engine) const {
+    auto resolved = resolveScalarFunction(*this, call, currentDB_, engine);
+    if (!resolved.found)
+        throw DbError("42883", "function does not exist: " +
+            (call ? call->funcName : std::string{}));
+    std::string database = currentDB_;
+    engine = engine ? engine : &g_engine;
+    if (!resolved.stored) {
+        const auto callback = functions_.find(toLower(resolved.name));
+        if (callback != functions_.end()) {
+            if (const auto* bound = callback->second.target<BoundScalarRoutine>()) {
+                resolved = bound->resolved;
+                database = bound->database;
+                engine = bound->engine;
+            }
+        }
+    }
+    const auto field = [](const std::string& value) {
+        return std::to_string(value.size()) + ":" + value;
+    };
+    std::string key = resolved.stored ? "stored" : "builtin";
+    key += field(std::to_string(reinterpret_cast<uintptr_t>(engine)));
+    key += field(database) + field(resolved.name);
+    key += field(std::to_string(call->args.size())) + field(std::to_string(call->namedArgs.size()));
+    if (resolved.stored) {
+        for (const auto& type : resolved.routine.paramTypes)
+            key += field(ExprHelper::canonicalResultTypeName(type));
+        key += field(ExprHelper::canonicalResultTypeName(resolved.routine.returnType));
+    }
+    return key;
+}
+
 void ExprEvaluator::bindScalarFunctions(Expr* expression, StorageEngine* engine) {
     engine = engine ? engine : &g_engine;
     std::function<void(Expr*)> visit = [&](Expr* node) {
@@ -4743,22 +4815,8 @@ void ExprEvaluator::bindScalarFunctions(Expr* expression, StorageEngine* engine)
                     throw DbError("0A000", "scalar routine used as an aggregate or window function");
                 std::string key = "__dbms_bound_routine_" + std::to_string(functions_.size());
                 while (hasFunction(key)) key += '_';
-                const std::string database = currentDB_;
-                registerFunction(key,
-                    [engine, database, resolved](const std::vector<ExprValue>& args) {
-                    std::vector<std::string> values;
-                    std::vector<bool> nulls;
-                    for (const auto& arg : args) {
-                        values.push_back(arg.value);
-                        nulls.push_back(arg.isNull);
-                    }
-                    std::string value;
-                    bool isNull = false;
-                    if (!engine->callUDF(database, resolved.name, values, value, &isNull, &nulls))
-                        throw DbError("22023", "stored-function evaluation failed: " + resolved.name);
-                    return ExprValue(ExprHelper::canonicalResultTypeName(resolved.routine.returnType),
-                                     value, isNull);
-                }, resolved.routine.provolatile);
+                registerFunction(key, BoundScalarRoutine{engine, currentDB_, resolved},
+                                 resolved.routine.provolatile);
                 function->funcName = key;
             } else {
                 function->funcName = resolved.name;

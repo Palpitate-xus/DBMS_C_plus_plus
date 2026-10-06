@@ -794,7 +794,8 @@ static string sqlProcessor(string raw, bool /*normalizeBooleanLiterals*/ = false
     // projection binder. Keep WHERE and following clauses intact too: an
     // evaluator-only case_when call cannot preserve lazy stored-function arms.
     const size_t fromKeyword = findTopLevelKeyword(raw, "from", 0);
-    const size_t predicateKeyword = findTopLevelKeyword(raw, "where", 0);
+    const size_t predicateKeyword = std::min(findTopLevelKeyword(raw, "where", 0),
+                                           findTopLevelKeyword(raw, "order", 0));
     const auto caseCommand = dbms::SQLParser::classify(raw);
     if (hasNullSafeComparison(raw, true)) {
         // Null-safe comparison operands stay genuine expressions, including
@@ -29207,6 +29208,30 @@ static bool executeInternal(const string& rawSql, Session& s) {
             orderVisibleColumns.insert(alias);
         }
 
+        // This query path has one source occurrence. Qualification has been
+        // validated in this namespace before fingerprinting; id and d.id
+        // therefore identify the same descriptor ordinal, not two SQL texts.
+        const auto scalarOrderIdentity = [&](const string& expression) {
+            string error, state;
+            const string& qualifier = tableAlias.empty() ? tnameOrig : tableAlias;
+            if (!validateFromlessColumnBindings(expression, error, state,
+                    qualifier, &visibleColumns))
+                throw dbms::DbError(state, error);
+            return dbms::ExprHelper::scalarExpressionIdentity(expression,
+                [&](const dbms::ColumnRefExpr& column) -> string {
+                    for (size_t i = 0; i < tbl.len; ++i) {
+                        if (tbl.cols[i].dataName != column.column) continue;
+                        const auto field = [](const string& value) {
+                            return to_string(value.size()) + ":" + value;
+                        };
+                        return "source0" + field(queryDb) + field(tname) +
+                            field(to_string(i)) + field(tbl.cols[i].dataType) +
+                            field(to_string(tbl.cols[i].dsize)) + field(tbl.cols[i].collation);
+                    }
+                    throw dbms::DbError("42703", "column does not exist: " + column.column);
+                }, queryDb, &g_engine);
+        };
+
         vector<dbms::StorageEngine::OrderBySpec> orderBySpecs;
         vector<dbms::StorageEngine::OrderBySpec> exprOrderBySpecs; // expressions sorted post-query
         vector<pair<bool, size_t>> orderKeyRefs; // expression flag, index; preserve SQL key order
@@ -29299,6 +29324,45 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 }
                 size_t lp = sortItem.find('(');
                 size_t rp = sortItem.rfind(')');
+                // A scalar SQL expression is not a physical column merely
+                // because its routine name is absent from a builtin list.
+                // Prepare every key without executing any volatile branch.
+                {
+                    dbms::SQLParser parser;
+                    auto parsed = parser.parse("SELECT " + sortItem);
+                    auto* select = parsed.success
+                        ? dynamic_cast<dbms::SelectStmt*>(parsed.stmt.get()) : nullptr;
+                    auto* expression = select && select->selectList.size() == 1
+                        ? select->selectList.front().expr.get() : nullptr;
+                    const auto* call = dynamic_cast<const dbms::FunctionCallExpr*>(expression);
+                    const bool legacyBuiltin = call && call->schema.empty() &&
+                        isScalarFunc(toLower(call->funcName));
+                    if (expression && !legacyBuiltin &&
+                        expression->type != dbms::ExprType::ColumnRef &&
+                        expression->type != dbms::ExprType::Literal &&
+                        expression->type != dbms::ExprType::Subquery) {
+                        string bindingError, bindingSqlState;
+                        const string& visibleQualifier = tableAlias.empty() ? tnameOrig : tableAlias;
+                        if (!validateFromlessColumnBindings(sortItem, bindingError, bindingSqlState,
+                                visibleQualifier, &visibleColumns))
+                            throw dbms::DbError(bindingSqlState, bindingError);
+                        dbms::ExprEvaluator evaluator;
+                        evaluator.setCurrentDB(queryDb);
+                        evaluator.bindScalarFunctions(expression, &g_engine);
+                        dbms::StorageEngine::OrderBySpec spec;
+                        spec.isExpression = true;
+                        spec.exprFunc = "expreval";
+                        spec.expressionSql = sortItem;
+                        spec.expressionIdentity = scalarOrderIdentity(sortItem);
+                        spec.ascending = asc;
+                        spec.nullsFirst = nullsFirst;
+                        spec.hasExplicitNullOrder = nullsSpecified;
+                        spec.collation = collation;
+                        exprOrderBySpecs.push_back(std::move(spec));
+                        orderKeyRefs.emplace_back(true, exprOrderBySpecs.size() - 1);
+                        continue;
+                    }
+                }
                 if (lp != string::npos && rp != string::npos && rp > lp) {
                     // Expression: func(arg)
                     string func = toLower(trim(sortItem.substr(0, lp)));
@@ -30927,7 +30991,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 whereClause = expandSubqueries(whereClause, s);
                 bool immutableConstant = false;
                 bool unknownNullPredicate = false;
-                if (hasComputedPredicate(whereClause, &immutableConstant, &unknownNullPredicate)) {
+                if (hasComputedPredicate(whereClause, &immutableConstant, &unknownNullPredicate) ||
+                    !exprOrderBySpecs.empty()) {
                     if (immutableConstant) {
                         // PostgreSQL checks immutable constant expressions even
                         // when no rows exist. Bind the boolean result first.
@@ -31404,6 +31469,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
         dbms::DmlResult structuredScalarResult;
         bool structuredScalarRows = false;
         bool structuredScalarExprOrderHandled = false;
+        bool nativePlainExprOrderHandled = false;
         dbms::DmlResult structuredAggregateResult;
         bool structuredAggregateRows = false;
         vector<size_t> groupProjectionSources;
@@ -33739,6 +33805,15 @@ static bool executeInternal(const string& rawSql, Session& s) {
             vector<pair<size_t, const dbms::StorageEngine::OrderBySpec*>>
                 scalarProjectedSortKeys;
             vector<dbms::StorageEngine::SelectExpr> scalarSortHiddenExprs;
+            vector<string> scalarSortTypes = structuredScalarResult.columnTypes;
+            scalarSortTypes.resize(selectExprs.size(), "text");
+            map<string, string> scalarSortTypeHints;
+            for (size_t i = 0; i < tbl.len; ++i) {
+                scalarSortTypeHints[tbl.cols[i].dataName] = tbl.cols[i].dataType;
+                if (!tableAlias.empty())
+                    scalarSortTypeHints[tableAlias + "." + tbl.cols[i].dataName] = tbl.cols[i].dataType;
+                scalarSortTypeHints[tnameOrig + "." + tbl.cols[i].dataName] = tbl.cols[i].dataType;
+            }
             bool canSortScalarProjected = !exprOrderBySpecs.empty();
             if (canSortScalarProjected) {
                 const auto scalarTargets = splitSelectColumns(columns);
@@ -33769,19 +33844,32 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                 else sortSql = spec.exprFunc + "(" + spec.exprArg +
                                     (spec.exprArg2.empty() ? "" : ", " + spec.exprArg2) + ")";
                             }
-                            const auto sortTokens = dbms::SQLParser::tokenize(sortSql);
+                            const auto sortIdentity = scalarOrderIdentity(sortSql);
                             for (size_t i = 0; i < scalarTargets.size(); ++i) {
                                 const size_t alias = findTopLevelKeyword(scalarTargets[i], "as");
-                                if (dbms::SQLParser::tokenize(trim(scalarTargets[i].substr(0, alias))) != sortTokens)
+                                if (scalarOrderIdentity(trim(scalarTargets[i].substr(0, alias))) != sortIdentity)
                                     continue;
                                 match = i;
                                 mapped = true;
                                 break;
                             }
                             if (!mapped) {
+                                for (size_t i = 0; i < scalarSortHiddenExprs.size(); ++i) {
+                                    const auto& hidden = scalarSortHiddenExprs[i];
+                                    if (hidden.funcName != "expreval" || hidden.funcArgs.empty() ||
+                                        scalarOrderIdentity(hidden.funcArgs.front()) != sortIdentity)
+                                        continue;
+                                    match = selectExprs.size() + i;
+                                    mapped = true;
+                                    break;
+                                }
+                            }
+                            if (!mapped) {
                                 dbms::StorageEngine::SelectExpr hidden;
                                 hidden.isScalar = true;
                                 hidden.funcName = "expreval";
+                                scalarSortTypes.push_back(dbms::ExprHelper::inferResultType(
+                                    sortSql, scalarSortTypeHints, queryDb));
                                 hidden.funcArgs.push_back(std::move(sortSql));
                                 match = selectExprs.size() + scalarSortHiddenExprs.size();
                                 scalarSortHiddenExprs.push_back(std::move(hidden));
@@ -33813,6 +33901,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                     dbms::StorageEngine::SelectExpr hidden;
                                     hidden.displayName = spec.colName;
                                     hidden.colName = spec.colName;
+                                    scalarSortTypes.push_back(scalarSortTypeHints[spec.colName]);
                                     match = selectExprs.size() + scalarSortHiddenExprs.size();
                                     scalarSortHiddenExprs.push_back(std::move(hidden));
                                     mapped = true;
@@ -34079,17 +34168,21 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             if (aNull) continue;
                             const string& left = structuredScalarResult.rows[a][index];
                             const string& right = structuredScalarResult.rows[b][index];
-                            int comparison = 0;
-                            try {
-                                const dbms::Numeric leftNumber(left);
-                                const dbms::Numeric rightNumber(right);
-                                comparison = leftNumber < rightNumber ? -1 :
-                                    (rightNumber < leftNumber ? 1 : 0);
-                            } catch (...) {
-                                comparison = ciTextCompare(left, right);
-                            }
-                            if (comparison != 0)
-                                return spec.ascending ? comparison < 0 : comparison > 0;
+                            Column column;
+                            const string type = dbms::ExprHelper::canonicalResultTypeName(scalarSortTypes[index]);
+                            column.dataType = type == "integer" || type == "bigint" || type == "smallint"
+                                ? "int" : type == "real" ? "float" :
+                                  type == "double precision" ? "double" : type;
+                            column.isVariableLength = type == "text" || type == "character varying" ||
+                                type == "character" || type == "numeric" || type == "name";
+                            column.collation = spec.collation;
+                            const auto less = StorageEngine::compareValues(column, left, false, right, false, "<");
+                            const auto greater = StorageEngine::compareValues(column, left, false, right, false, ">");
+                            if (less == StorageEngine::PredicateTruth::Unknown ||
+                                greater == StorageEngine::PredicateTruth::Unknown)
+                                throw dbms::DbError("0A000", "unsupported scalar ORDER BY comparison");
+                            if (less == StorageEngine::PredicateTruth::True) return spec.ascending;
+                            if (greater == StorageEngine::PredicateTruth::True) return !spec.ascending;
                         }
                         return false;
                     });
@@ -34285,7 +34378,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             bool volcanoUsed = corrAggHandled;
             if (corrAggHandled) {
                 // answers already filled by the correlated scalar filter.
-            } else if (captureStructuredPlain) {
+            } else if (captureStructuredPlain || !exprOrderBySpecs.empty()) {
                 // Deliberately enter the StorageEngine fallback below.
             } else if (condTokens.empty()) {
                 volcanoUsed = executeVolcanoSelect(tname, selectCols, {},
@@ -34348,7 +34441,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         structuredPlainRows = true;
                     } else {
                         answers = g_engine.query(
-                            queryDb, tname, {}, selectCols, orderBySpecs,
+                            queryDb, tname, {}, selectCols, structuredPlainOrderSpecs,
                             forUpdate, noWait, skipLocked,
                             s.timezoneOffsetMinutes, distinctOnCols);
                     }
@@ -34443,7 +34536,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         set<string> seen;
                         for (const auto& g : groups) {
                             auto part = g_engine.query(
-                                queryDb, tname, g, selectCols, orderBySpecs,
+                                queryDb, tname, g, selectCols, structuredPlainOrderSpecs,
                                 forUpdate, noWait, skipLocked,
                                 s.timezoneOffsetMinutes, distinctOnCols);
                             for (const auto& row : part) {
@@ -34453,6 +34546,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         }
                     }
                 }
+                nativePlainExprOrderHandled = !exprOrderBySpecs.empty();
                 // Inheritance: UNION rows from child tables
                 // (SELECT ... FROM ONLY suppresses this — Session::onlyNext)
                 if (!corrAggHandled &&
@@ -34498,7 +34592,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
         }
         // Post-query expression sorting
         if (!exprOrderBySpecs.empty() && !structuredPlainRows &&
-            !structuredScalarExprOrderHandled) {
+            !structuredScalarExprOrderHandled && !nativePlainExprOrderHandled) {
             answers = g_engine.sortByExpression(s.currentDB, tname, std::move(answers), exprOrderBySpecs);
         }
         // Plain-path ORDER BY on output aliases or ordinals ("ORDER BY c",

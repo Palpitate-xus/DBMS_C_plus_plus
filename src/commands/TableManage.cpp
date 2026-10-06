@@ -30622,6 +30622,45 @@ std::vector<std::string> StorageEngine::query(
 
     ReadView autocommitView;
     ReadView commandInternalView;
+    std::map<std::string, std::string> sortExpressionIdentities;
+    // Preparation covers all keys before qualification or volatile calls,
+    // including zero-row inputs. Never invoke a routine just to bind it.
+    try {
+        ExprEvaluator evaluator;
+        evaluator.setCurrentDB(dbname);
+        for (const auto& order : orderBy) {
+            if (order.expressionSql.empty()) continue;
+            SQLParser parser;
+            auto parsed = parser.parse("SELECT " + order.expressionSql);
+            auto* select = parsed.success ? dynamic_cast<SelectStmt*>(parsed.stmt.get()) : nullptr;
+            if (!select || select->selectList.size() != 1)
+                throw DbError("42601", "invalid ORDER BY expression");
+            evaluator.bindScalarFunctions(select->selectList.front().expr.get(), this);
+            if (!order.expressionIdentity.empty()) {
+                sortExpressionIdentities[order.expressionSql] = order.expressionIdentity;
+            } else if (order.exprFunc == "expreval") {
+                sortExpressionIdentities[order.expressionSql] = ExprHelper::scalarExpressionIdentity(
+                    order.expressionSql, [&](const ColumnRefExpr& column) {
+                        if ((!column.schema.empty() && column.schema != "public") ||
+                            (!column.table.empty() && column.table != tablename))
+                            throw DbError("42P01", "missing FROM-clause entry: " + column.table);
+                        for (size_t i = 0; i < tbl.len; ++i) {
+                            if (column.column != tbl.cols[i].dataName) continue;
+                            const auto field = [](const std::string& value) {
+                                return std::to_string(value.size()) + ":" + value;
+                            };
+                            return "source0" + field(dbname) + field(tablename) +
+                                field(std::to_string(i)) + field(tbl.cols[i].dataType) +
+                                field(std::to_string(tbl.cols[i].dsize)) + field(tbl.cols[i].collation);
+                        }
+                        throw DbError("42703", "column does not exist: " + column.column);
+                    }, dbname, this);
+            } else sortExpressionIdentities[order.expressionSql] = order.expressionSql;
+        }
+    } catch (...) {
+        lockManager_.unlock(tablename);
+        throw;
+    }
     const ReadView* queryView = nullptr;
     if (transactionContext().inTransaction &&
         transactionContext().txnDB == dbname) {
@@ -31068,6 +31107,7 @@ std::vector<std::string> StorageEngine::query(
                          dbname, tbl.tablename, matchRows[ri].first, ci));
             }
             size_t expressionIndex = 0;
+            std::map<std::string, ExprEvalResult> expressionValues;
             for (const auto& spec : orderBy) {
                 const size_t keyIndex = expressionIndex++;
                 if (!spec.isExpression) {
@@ -31089,17 +31129,35 @@ std::vector<std::string> StorageEngine::query(
                     std::set<std::string> nullColumns;
                     for (const auto& [name, isNull] : rowNulls)
                         if (isNull) nullColumns.insert(name);
-                    const auto evaluated = ExprHelper::evalStringWithNulls(
-                        spec.expressionSql, rowData, nullColumns,
-                        expressionTypeHints, dbname, "", this);
+                    const auto& expressionIdentity = sortExpressionIdentities.at(spec.expressionSql);
+                    auto found = expressionValues.find(expressionIdentity);
+                    if (found == expressionValues.end())
+                        found = expressionValues.emplace(expressionIdentity,
+                            ExprHelper::evalStringWithNulls(spec.expressionSql,
+                                rowData, nullColumns, expressionTypeHints, dbname,
+                                "", this)).first;
+                    const auto& evaluated = found->second;
                     if (!evaluated.ok) {
                         lockManager_.unlock(tablename);
-                        throw DbError("0A000", "cannot evaluate ORDER BY expression: " +
-                                             evaluated.error);
+                        if (!evaluated.sqlState.empty())
+                            throw DbError(evaluated.sqlState, evaluated.error);
+                        throw std::runtime_error(evaluated.error.empty()
+                            ? "unsupported ORDER BY expression (SQLSTATE 0A000)"
+                            : evaluated.error);
                     }
                     ev = evaluated.value;
                     expressionIsNull = evaluated.isNull;
                     evaluatedGeneralExpression = true;
+                    if (spec.exprFunc == "expreval") {
+                        auto& column = expressionComparisonColumns[keyIndex];
+                        setPolymorphicSortType(column,
+                            ExprHelper::canonicalResultTypeName(evaluated.typeName));
+                        const std::string type = ExprHelper::canonicalResultTypeName(evaluated.typeName);
+                        if (type == "boolean" || type == "time" || type == "money" || type == "uuid") {
+                            column.dataType = type;
+                            column.isVariableLength = false;
+                        }
+                    }
                     if (spec.collation.empty() &&
                         !evaluated.collation.empty()) {
                         auto& comparisonColumn =
@@ -31416,10 +31474,10 @@ PlPgsqlQueryResult StorageEngine::plpgsqlQuery(const std::string& dbname,
 static PlPgsqlQueryResult plpgsqlScalarResult(const ExprEvalResult& value) {
     PlPgsqlQueryResult result;
     if (!value.ok) {
-        result.sqlState = "XX000";
+        result.sqlState = value.sqlState.empty() ? "XX000" : value.sqlState;
         result.message = value.error;
         const size_t marker = value.error.rfind("(SQLSTATE ");
-        if (marker != std::string::npos && marker + 16 == value.error.size() &&
+        if (value.sqlState.empty() && marker != std::string::npos && marker + 16 == value.error.size() &&
             value.error.back() == ')') {
             const std::string state = value.error.substr(marker + 10, 5);
             if (state.find_first_not_of("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ") == std::string::npos)
@@ -38042,9 +38100,13 @@ std::vector<std::string> StorageEngine::sortByExpression(
                 const auto evaluated = ExprHelper::evalStringWithNulls(
                     spec.expressionSql, rowData, {}, expressionTypeHints,
                     dbname, "", const_cast<StorageEngine*>(this));
-                if (!evaluated.ok)
-                    throw DbError("0A000", "cannot evaluate ORDER BY expression: " +
-                                         evaluated.error);
+                if (!evaluated.ok) {
+                    if (!evaluated.sqlState.empty())
+                        throw DbError(evaluated.sqlState, evaluated.error);
+                    throw std::runtime_error(evaluated.error.empty()
+                        ? "unsupported ORDER BY expression (SQLSTATE 0A000)"
+                        : evaluated.error);
+                }
                 ev = evaluated.value;
                 expressionIsNull = evaluated.isNull;
                 if (spec.collation.empty() &&

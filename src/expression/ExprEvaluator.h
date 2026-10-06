@@ -102,6 +102,12 @@ public:
                            StorageEngine* engine = nullptr) const;
     char scalarFunctionVolatility(const FunctionCallExpr* call,
                                   StorageEngine* engine = nullptr) const;
+    // Empty for builtins whose result type is inferred from their operands.
+    std::string scalarFunctionResultType(const FunctionCallExpr* call,
+                                         StorageEngine* engine = nullptr) const;
+    // Internal metadata identity, not a SQL name or an evaluated datum.
+    std::string scalarFunctionIdentity(const FunctionCallExpr* call,
+                                       StorageEngine* engine = nullptr) const;
     void bindScalarFunctions(Expr* expression, StorageEngine* engine = nullptr);
 
     // 设置当前数据库，供 nextval/currval/lastval 等内置函数使用

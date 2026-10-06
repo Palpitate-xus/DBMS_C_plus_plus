@@ -634,6 +634,8 @@ public:
         std::string exprArg = "";    // e.g., "name"
         std::string exprArg2 = "";   // second operand for arithmetic (e.g., "1" for age + 1)
         std::string expressionSql; // Parsed SQL for supported general scalar sort keys
+        // Prepared source/routine/operand identity; never an evaluated value.
+        std::string expressionIdentity;
         bool isExpression = false;
         bool nullsFirst = false;  // NULLS FIRST / NULLS LAST
         bool hasExplicitNullOrder = false;
