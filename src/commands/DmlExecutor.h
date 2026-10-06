@@ -12,6 +12,7 @@
 
 #include "parser/ast.h"
 #include "Session.h"
+#include "expression/prepared_query_execution.h"
 #include <map>
 #include <string>
 #include <vector>
@@ -55,6 +56,17 @@ void clearLastDmlResult();
 // Publish a structured DML result (used by paths outside this executor,
 // e.g. INSTEAD OF view triggers emitting RETURNING rows).
 void publishLastDmlResult(DmlResult result);
+
+// Genuine children of a wholly prepared WITH statement. Static checks never
+// evaluate rows/routines; runtime values retain their NULL bits and original
+// statement/column identities. The reader executes prepared SELECT children
+// in the calling statement's transaction/snapshot, not a new SPI command.
+void prepareBoundDml(Stmt* statement, Session& session,
+                     const std::shared_ptr<PreparedQuery>& query);
+DmlResult executeBoundDml(Stmt* statement, Session& session,
+    const std::shared_ptr<PreparedQuery>& query, PreparedChildExecutor reader);
+DmlResult executeAtomicDmlUnit(Session& session,
+    const std::function<DmlResult()>& command);
 
 // Record real TEMP relation access during preparation, without executing any
 // expression or modifying rows. Shared by SQL PREPARE and wire Parse.

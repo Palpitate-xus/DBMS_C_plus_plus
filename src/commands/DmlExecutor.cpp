@@ -5111,7 +5111,227 @@ bool executeDelete(const DeleteStmt& stmt, Session& s, bool& fallback) {
     return false;
 }
 
+// WITH primary DML consumes the original prepared tree. No temporary table,
+// invented routine datum, or re-parsed target spelling supplies its rows.
+class BoundDmlExecution {
+    Stmt* statement_;
+    Session& session_;
+    std::shared_ptr<PreparedQuery> query_;
+    const PreparedQuery::SourceRange* target_ = nullptr;
+    TableSchema table_;
+    std::string physical_;
+    PreparedQueryExecution execution_;
+    const std::vector<SelectItem>* returning_ = nullptr;
+
+    static bool defaultValue(const Expr* expr) {
+        const auto* literal = dynamic_cast<const LiteralExpr*>(expr);
+        return literal && !literal->preparedSubquery && literal->typeName.empty() && lower(literal->value)=="default";
+    }
+    void expression(Expr* value) {
+        if(value && !isStarProjection(value) && !defaultValue(value)) execution_.prepareExpression(value);
+    }
+    void predicate(Expr* value) {
+        if(!value)return;
+        const auto type=ExprHelper::canonicalResultTypeName(ExprHelper::inferParsedResultType(value,{},session_.currentDB,&g_engine));
+        const auto* literal=dynamic_cast<const LiteralExpr*>(value);
+        const bool contextual=literal && !literal->preparedSubquery && literal->typeName.empty() &&
+            (lower(literal->value)=="null" || (!literal->value.empty() && literal->value.front()=='\''));
+        if(type!="boolean" && !contextual)throw DbError("42804","argument of WHERE must be type boolean");
+        expression(value);
+        if(contextual && lower(literal->value)!="null") {
+            // Pure boolean input conversion only; no function/source folding.
+            CastExpr cast;cast.typeName="boolean";cast.operand=std::make_unique<LiteralExpr>(*literal);
+            ExprEvaluator evaluator;(void)evaluator.eval(&cast,RowContext{});
+        }
+    }
+    RowContext context(const SqlRow& values) const {
+        auto row=execution_.context();std::vector<ExprValue> cells;
+        for(const auto& column:target_->columns) {
+            const auto found=values.find(column.name);
+            if(found==values.end())throw DbError("XX000","DML row has no bound target column: "+column.name);
+            cells.emplace_back(column.type,found->second.value_or(""),!found->second);
+        }
+        execution_.setSourceRow(row,target_->ordinal,cells);return row;
+    }
+    bool matches(const Expr* where,const SqlRow& values) const {
+        if(!where)return true;
+        const auto value=execution_.evaluate(where,context(values));
+        return !value.isNull && value.asBool();
+    }
+    DmlResult result(const std::vector<SqlRow>& rows,const std::string& command,size_t count) {
+        DmlResult output;output.available=true;
+        output.commandTag=command=="INSERT"?"INSERT 0 "+std::to_string(count):command+" "+std::to_string(count);
+        const auto& descriptor=query_->statementOutputs.at(statement_);
+        for(const auto& column:descriptor) {
+            output.columns.push_back(column.name);
+            output.columnTypes.push_back(column.type=="unknown"?"text":ExprHelper::canonicalResultTypeName(column.type));
+        }
+        for(const auto& image:rows) {
+            auto row=context(image);std::vector<ExprValue> values;
+            for(const auto& item:*returning_) {
+                if(isStarProjection(item.expr.get())) {
+                    for(size_t i=0;i<target_->columns.size();++i) values.push_back(row.boundColumn(target_->ordinal,i));
+                } else values.push_back(execution_.evaluate(item.expr.get(),row));
+            }
+            if(values.size()!=descriptor.size())throw DbError("XX000","DML RETURNING width differs from prepared descriptor");
+            std::vector<std::string> cells;std::vector<bool> nulls;
+            for(const auto& value:values){cells.push_back(value.value);nulls.push_back(value.isNull);}
+            output.rows.push_back(std::move(cells));output.nulls.push_back(std::move(nulls));
+        }
+        return output;
+    }
+public:
+    BoundDmlExecution(Stmt* statement,Session& session,std::shared_ptr<PreparedQuery> query)
+        :statement_(statement),session_(session),query_(std::move(query)),execution_(query_,&g_engine,session.currentDB) {
+        for(const auto& range:query_->sourceRanges)if(range.owner==statement_ && !range.source && !range.mergedUsing) {
+            if(target_)throw DbError("XX000","prepared DML has multiple target occurrences");
+            target_=&range;
+        }
+        if(!target_ || target_->cteStatement || target_->relationName.empty())
+            throw DbError("XX000","prepared DML has no physical target identity");
+        const auto& name=target_->relationName;
+        const bool temporary=target_->relationSchema==sessionTempSchemaName(session_) || target_->relationSchema=="pg_temp";
+        physical_=temporary?tempTablePrefix(session_,name):target_->relationSchema=="public"?name:target_->relationSchema+"__"+name;
+        if(temporary)g_engine.noteTemporaryRelationAccess(session_.currentDB,physical_);
+        if(g_engine.isReadOnly() && !temporary)throw DbError("25006","cannot execute DML in a read-only transaction");
+        table_=g_engine.getTableSchema(session_.currentDB,physical_);
+        if(!table_.len || table_.len!=target_->columns.size())throw DbError("0A000","prepared DML target requires additional view/virtual lowering");
+        for(size_t i=0;i<table_.len;++i)if(table_.cols[i].dataName!=target_->columns[i].name)
+            throw DbError("XX000","physical DML target differs from its prepared descriptor");
+        StorageEngine::TablePrivilege privilege;
+        if(auto* insert=dynamic_cast<InsertStmt*>(statement_)) {
+            privilege=StorageEngine::TablePrivilege::Insert;returning_=&insert->returning;
+            if(!insert->conflictAction.empty())throw DbError("0A000","prepared WITH conflict action requires additional lowering");
+            for(auto& values:insert->values)for(auto& value:values)expression(value.get());
+        } else if(auto* update=dynamic_cast<UpdateStmt*>(statement_)) {
+            privilege=StorageEngine::TablePrivilege::Update;returning_=&update->returning;
+            if(update->fromClause || !update->whereCurrentOf.empty())throw DbError("0A000","prepared WITH UPDATE FROM requires additional range lowering");
+            predicate(update->whereClause.get());
+            for(auto& assignment:update->setClauses) {
+                if(defaultValue(assignment.second.get()))throw DbError("0A000","prepared WITH UPDATE DEFAULT requires assignment lowering");
+                expression(assignment.second.get());
+            }
+        } else if(auto* remove=dynamic_cast<DeleteStmt*>(statement_)) {
+            privilege=StorageEngine::TablePrivilege::Delete;returning_=&remove->returning;
+            if(remove->usingClause || !remove->whereCurrentOf.empty())throw DbError("0A000","prepared WITH DELETE USING requires additional range lowering");
+            predicate(remove->whereClause.get());
+        } else throw DbError("0A000","prepared WITH primary DML is not lowered");
+        if(!temporary && !checkTablePrivilege(session_,physical_,privilege))throw DbError("42501","permission denied for DML target");
+        for(const auto& item:*returning_)expression(item.expr.get());
+        // Keep original assignments until metadata has checked every value,
+        // WHERE and RETURNING expression. The AST now also preserves exact
+        // duplicate spellings; canonical a and "a" are the same target even
+        // on older map-backed ASTs. Never let runtime's SqlRow overwrite one.
+        if(const auto* update=dynamic_cast<const UpdateStmt*>(statement_)) {
+            std::set<std::string> targets;
+            for(const auto& assignment:update->setClauses) {
+                const auto name=identifier(assignment.first);
+                if(!targets.insert(name).second)
+                    throw DbError("42601","multiple assignments to column \""+name+"\"");
+            }
+        }
+    }
+    DmlResult run(PreparedChildExecutor reader) {
+        execution_.setQueryExecutor(reader);
+        if(auto* insert=dynamic_cast<InsertStmt*>(statement_)) {
+            std::vector<std::string> columns;
+            if(insert->columns.empty())for(const auto& column:target_->columns)columns.push_back(column.name);
+            else for(const auto& column:insert->columns)columns.push_back(identifier(column));
+            StorageEngine::IdentityOverride override=StorageEngine::IdentityOverride::None;
+            if(lower(insert->override_)=="system")override=StorageEngine::IdentityOverride::System;
+            if(lower(insert->override_)=="user")override=StorageEngine::IdentityOverride::User;
+            std::vector<SqlRow> images;size_t count=0;
+            const auto write=[&](const SqlRow& row) {
+                const auto status=g_engine.insertRow(session_.currentDB,physical_,row,returning_->empty()?nullptr:&images,override);
+                if(status!=DBStatus::OK)throw DbError(sqlstateForDBStatus(status),"WITH INSERT failed");
+                ++count;
+            };
+            if(insert->defaultValues)write({});
+            for(const auto& expressions:insert->values) {
+                SqlRow row;
+                for(size_t i=0;i<expressions.size();++i) {
+                    if(defaultValue(expressions[i].get()))continue;
+                    const auto value=execution_.evaluate(expressions[i].get(),execution_.context());
+                    row[columns.at(i)]=value.isNull?SqlCell{}:SqlCell{value.value};
+                }
+                write(row);
+            }
+            if(insert->selectSource) {
+                const auto rows=reader(insert->selectSource.get(),execution_.context(),0);
+                for(const auto& values:rows) {
+                    if(values.size()>columns.size())throw DbError("XX000","INSERT SELECT lost its prepared width");
+                    SqlRow row;
+                    for(size_t i=0;i<values.size();++i)row[columns[i]]=values[i].isNull?SqlCell{}:SqlCell{values[i].value};
+                    write(row);
+                }
+            }
+            return result(images,"INSERT",count);
+        }
+        std::vector<SqlRow> images;size_t count=0;
+        if(auto* update=dynamic_cast<UpdateStmt*>(statement_)) {
+            std::vector<StorageEngine::UpdateRowImage> changes;
+            const auto matcher=[&](const SqlRow& old){return matches(update->whereClause.get(),old);};
+            const auto resolver=[&](const SqlRow& old,SqlRow& values) {
+                const auto row=context(old);
+                for(const auto& assignment:update->setClauses) {
+                    const auto value=execution_.evaluate(assignment.second.get(),row);
+                    values[identifier(assignment.first)]=value.isNull?SqlCell{}:SqlCell{value.value};
+                }
+                return true;
+            };
+            const auto status=g_engine.updateRows(session_.currentDB,physical_,{}, {},returning_->empty()?nullptr:&images,
+                resolver,matcher,&count,returning_->empty()?nullptr:&changes);
+            if(status!=DBStatus::OK)throw DbError(sqlstateForDBStatus(status),"WITH UPDATE failed");
+            return result(images,"UPDATE",count);
+        }
+        auto* remove=static_cast<DeleteStmt*>(statement_);
+        const auto matcher=[&](const SqlRow& old){return matches(remove->whereClause.get(),old);};
+        const auto status=g_engine.removeRows(session_.currentDB,physical_,{},returning_->empty()?nullptr:&images,matcher,&count);
+        if(status!=DBStatus::OK)throw DbError(sqlstateForDBStatus(status),"WITH DELETE failed");
+        return result(images,"DELETE",count);
+    }
+};
 } // namespace
+
+void prepareBoundDml(Stmt* statement,Session& session,const std::shared_ptr<PreparedQuery>& query) {
+    (void)BoundDmlExecution(statement,session,query);
+}
+DmlResult executeBoundDml(Stmt* statement,Session& session,const std::shared_ptr<PreparedQuery>& query,PreparedChildExecutor reader) {
+    return BoundDmlExecution(statement,session,query).run(std::move(reader));
+}
+DmlResult executeAtomicDmlUnit(Session& session,const std::function<DmlResult()>& command) {
+    bool ownsCommand=false;
+    uint64_t transactionId=0;
+    const auto finishCommand=[&] {
+        if(!ownsCommand)return true;
+        ownsCommand=false;
+        if(!g_engine.inTransaction() || g_engine.currentTxnId()!=transactionId)return false;
+        return g_engine.finishSqlCommand();
+    };
+    // Construct before the DML boundary: error unwind first restores/undoes
+    // the statement savepoint, then closes only this native command. Never
+    // touch a caller's active view or a replaced/ended transaction.
+    struct CommandScope {
+        const decltype(finishCommand)& finish;
+        ~CommandScope(){try{(void)finish();}catch(...) {}}
+    } commandScope{finishCommand};
+    DmlStatementScope boundary(g_engine,session.currentDB);
+    if(!boundary.ready())throw DbError("58030","WITH could not establish an atomic statement boundary");
+    const auto* view=g_engine.getCurrentReadView();
+    if(!view || !view->commandIdVisibility) {
+        // Native APIs do not necessarily have main's beginSqlCommand owner.
+        // Consume one boundary for earlier native writes before taking the
+        // fixed view. There are no counter changes between CTE siblings or
+        // the primary statement; ordinary server callers already own it.
+        if(!g_engine.advanceSqlCommandCounter())throw DbError("54000","WITH command ID limit exceeded");
+        if(!g_engine.beginSqlCommand())throw DbError("58030","WITH could not establish a command view");
+        transactionId=g_engine.currentTxnId();ownsCommand=true;
+    }
+    auto result=command();
+    if(!finishCommand())throw DbError("54000","WITH command view could not finish");
+    if(!boundary.finish())throw DbError("58030","WITH transaction finish failed");
+    return result;
+}
 
 void notePreparedTemporaryObjectAccess(const std::string& sql, Session& session) {
     if (!g_engine.inTransaction()) return;

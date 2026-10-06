@@ -19594,6 +19594,302 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
     return false;
 }
 
+namespace {
+// One WITH execution owns its descriptors, logical producers and original
+// AST identities. Read producers are driven by next(); write producers are
+// completed once regardless of whether their RETURNING output is consumed.
+class PreparedWithDmlRuntime {
+    struct Cache {
+        dbms::OpPtr plan;
+        dbms::PreparedQueryRows rows;
+        bool opened=false,complete=false,writing=false;
+    };
+    struct Frame {
+        map<const dbms::Stmt*,shared_ptr<Cache>> producers;
+        dbms::RowContext outer;
+    };
+    using Frames=vector<shared_ptr<Frame>>;
+    Session& session_;
+    shared_ptr<dbms::PreparedQuery> query_;
+    vector<shared_ptr<Frame>> frames_;
+    dbms::WithStmt* root_;
+    dbms::PreparedQueryExecution validation_;
+
+    vector<string> selectedColumns(const dbms::SelectStmt* select,
+                                   const dbms::PreparedQuery::SourceRange& source) const {
+        set<string> names;
+        function<void(const dbms::Stmt*)> statement;
+        function<void(const dbms::Expr*)> expression = [&](const dbms::Expr* value) {
+            if (!value) return;
+            if (value->preparedSubquery) statement(value->preparedSubquery.get());
+            if (const auto* column=dynamic_cast<const dbms::ColumnRefExpr*>(value)) {
+                if (column->binding && column->binding->sourceOrdinal==source.ordinal)
+                    names.insert(source.columns.at(column->binding->columnOrdinal).name);
+            } else if (const auto* binary=dynamic_cast<const dbms::BinaryOpExpr*>(value)) {
+                expression(binary->left.get()); expression(binary->right.get());
+            } else if (const auto* unary=dynamic_cast<const dbms::UnaryOpExpr*>(value)) expression(unary->operand.get());
+            else if (const auto* cast=dynamic_cast<const dbms::CastExpr*>(value)) expression(cast->operand.get());
+            else if (const auto* call=dynamic_cast<const dbms::FunctionCallExpr*>(value)) {
+                for (const auto& arg:call->args) expression(arg.get());
+                for (const auto& arg:call->namedArgs) expression(arg.value.get());
+                expression(call->filter.get());
+            } else if (const auto* conditional=dynamic_cast<const dbms::CaseExpr*>(value)) {
+                expression(conditional->switchExpr.get()); expression(conditional->elseExpr.get());
+                for (const auto& arm:conditional->whenClauses) { expression(arm.first.get()); expression(arm.second.get()); }
+            } else if (const auto* array=dynamic_cast<const dbms::ArrayExpr*>(value)) {
+                for (const auto& cell:array->elements) expression(cell.get());
+            } else if (const auto* row=dynamic_cast<const dbms::RowExpr*>(value)) {
+                for (const auto& cell:row->elements) expression(cell.get());
+            }
+        };
+        statement = [&](const dbms::Stmt* value) {
+            const auto* child=dynamic_cast<const dbms::SelectStmt*>(value);
+            if (!child) return;
+            for (const auto& cte:child->ctes) statement(cte.query.get());
+            for (const auto& target:child->selectList) expression(target.expr.get());
+            expression(child->whereClause.get()); expression(child->having.get());
+            for (const auto& order:child->orderBy) expression(order.expr.get());
+            for (const auto& group:child->groupBy) expression(group.get());
+        };
+        statement(select);
+        for (const auto& target:select->selectList) {
+            const auto* literal=dynamic_cast<const dbms::LiteralExpr*>(target.expr.get());
+            const auto* column=dynamic_cast<const dbms::ColumnRefExpr*>(target.expr.get());
+            if ((target.expr && target.expr->type==dbms::ExprType::A_Star) ||
+                (literal && literal->value=="*") || (column && column->column=="*"))
+                for (const auto& cell:source.columns) names.insert(cell.name);
+        }
+        return {names.begin(),names.end()};
+    }
+
+    const dbms::QueryRowDescriptor& output(const dbms::Stmt* statement) const {
+        const auto found=query_->statementOutputs.find(statement);
+        if(found==query_->statementOutputs.end())throw dbms::DbError("XX000","WITH child has no prepared descriptor");
+        return found->second;
+    }
+    shared_ptr<Frame> definitions(const vector<dbms::SelectStmt::CTE>& ctes,const dbms::RowContext& outer) {
+        auto frame=make_shared<Frame>();frame->outer=outer;
+        for(const auto& cte:ctes)frame->producers.emplace(cte.query.get(),make_shared<Cache>());
+        frames_.push_back(frame);return frame;
+    }
+    static string physical(const dbms::PreparedQuery::SourceRange& range,const Session& session) {
+        if(range.relationSchema==sessionTempSchemaName(session) || range.relationSchema=="pg_temp")
+            return tempTablePrefix(session,range.relationName);
+        return range.relationSchema=="public"?range.relationName:range.relationSchema+"__"+range.relationName;
+    }
+    dbms::TableSchema logicalSchema(const dbms::QueryRowDescriptor& descriptor) const {
+        dbms::TableSchema schema;
+        for(const auto& column:descriptor) {
+            dbms::Column cell;cell.dataName=column.name;
+            const auto error=dbms::TypeRegistry::instance().resolveColumnType(cell,column.type,{},false);
+            if(!error.empty())throw dbms::DbError("0A000","WITH source type is not lowered: "+column.type);
+            schema.append(cell);
+        }
+        if(schema.len!=descriptor.size())throw dbms::DbError("54011","WITH source has too many columns");
+        return schema;
+    }
+    const dbms::PreparedQuery::SourceRange& range(const dbms::SelectStmt* select) const {
+        const auto found=find_if(query_->sourceRanges.begin(),query_->sourceRanges.end(),[&](const auto& source){
+            return source.owner==select && source.source==select->fromClause.get() && !source.mergedUsing;
+        });
+        if(found==query_->sourceRanges.end())throw dbms::DbError("XX000","WITH SELECT has no bound source occurrence");
+        return *found;
+    }
+    bool readCte(const dbms::Stmt* statement,size_t index,vector<dbms::ExprValue>& row,const Frames& frames) {
+        shared_ptr<Cache> cache;shared_ptr<Frame> frame;
+        for(auto it=frames.rbegin();it!=frames.rend();++it) {
+            const auto found=(*it)->producers.find(statement);
+            if(found!=(*it)->producers.end()){cache=found->second;frame=*it;break;}
+        }
+        if(!cache)throw dbms::DbError("XX000","bound CTE has no lexical runtime producer");
+        if(!cache->complete && !cache->plan) {
+            if(cache->writing)throw dbms::DbError("0A000","recursive data-modifying WITH producer is not supported");
+            if(statement->command!=dbms::SqlCommand::Select && statement->command!=dbms::SqlCommand::Values) {
+                cache->writing=true;
+                const auto result=dbms::executeBoundDml(const_cast<dbms::Stmt*>(statement),session_,query_,reader(frames));
+                cache->rows=typed(result,output(statement));cache->complete=true;cache->writing=false;
+            } else cache->plan=selectPlan(const_cast<dbms::SelectStmt*>(static_cast<const dbms::SelectStmt*>(statement)),frame->outer,frames);
+        }
+        while(!cache->complete && cache->rows.size()<=index) {
+            if(!cache->opened){cache->opened=true;if(!cache->plan->open())throw dbms::DbError("XX000",cache->plan->errorMessage());}
+            string display;
+            if(!cache->plan->next(display)) {
+                if(cache->plan->hasError())throw dbms::DbError("XX000",cache->plan->errorMessage());
+                cache->plan->close();cache->opened=false;cache->plan.reset();cache->complete=true;break;
+            }
+            vector<string> cells;vector<bool> nulls;
+            if(!cache->plan->lastStructuredRow(cells,nulls))throw dbms::DbError("XX000","WITH producer lost structured cells");
+            cache->rows.push_back(typedRow(cells,nulls,output(statement)));
+        }
+        if(index>=cache->rows.size())return false;
+        row=cache->rows[index];return true;
+    }
+    static vector<dbms::ExprValue> typedRow(const vector<string>& cells,const vector<bool>& nulls,const dbms::QueryRowDescriptor& descriptor) {
+        if(cells.size()!=descriptor.size() || nulls.size()!=descriptor.size())throw dbms::DbError("XX000","WITH result width differs from metadata");
+        vector<dbms::ExprValue> row;
+        for(size_t i=0;i<cells.size();++i)row.emplace_back(descriptor[i].type=="unknown"?"text":descriptor[i].type,cells[i],nulls[i]);
+        return row;
+    }
+    static dbms::PreparedQueryRows typed(const dbms::DmlResult& result,const dbms::QueryRowDescriptor& descriptor) {
+        if(!result.available || result.metadataOnly || result.rows.size()!=result.nulls.size())
+            throw dbms::DbError("XX000","WITH DML has no structured result");
+        dbms::PreparedQueryRows rows;
+        for(size_t i=0;i<result.rows.size();++i)rows.push_back(typedRow(result.rows[i],result.nulls[i],descriptor));
+        return rows;
+    }
+    dbms::PreparedChildExecutor reader(const Frames& frames) {
+        return [this,frames](const dbms::Stmt* statement,const dbms::RowContext& row,size_t demand){
+            auto* select=dynamic_cast<const dbms::SelectStmt*>(statement);
+            if(!select)throw dbms::DbError("42601","prepared query reader requires SELECT/VALUES");
+            auto plan=selectPlan(const_cast<dbms::SelectStmt*>(select),row,frames);
+            auto result=dbms::QueryPlanner::executePlanChecked(std::move(plan),demand);
+            result.throwIfFailed();
+            if(!result.structuredRowsAvailable)throw dbms::DbError("XX000","WITH query reader lost typed rows");
+            dbms::PreparedQueryRows values;
+            for(size_t i=0;i<result.structuredRows.size();++i)
+                values.push_back(typedRow(result.structuredRows[i],result.structuredNulls[i],output(statement)));
+            return values;
+        };
+    }
+    dbms::OpPtr selectPlan(dbms::SelectStmt* select,const dbms::RowContext& outer,Frames frames) {
+        if(!select->ctes.empty())frames.push_back(definitions(select->ctes,outer));
+        if(select->command==dbms::SqlCommand::Values) {
+            if(!select->orderBy.empty() || select->whereClause || select->setOp!=dbms::SetOp::None)
+                throw dbms::DbError("0A000","WITH VALUES requires additional clause lowering");
+            auto execution=make_shared<dbms::PreparedQueryExecution>(query_,&g_engine,session_.currentDB);
+            execution->setQueryExecutor(reader(frames));
+            for(auto& row:select->valuesRows)for(auto& value:row)execution->prepareExpression(value.get());
+            const auto descriptor=output(select);
+            auto source=make_unique<dbms::PreparedSourceRowsOp>(descriptor,[select,execution,outer,descriptor](size_t index,vector<dbms::ExprValue>& cells){
+                if(index>=select->valuesRows.size())return false;
+                const auto& expressions=select->valuesRows[index];
+                if(expressions.size()!=descriptor.size())throw dbms::DbError("42601","VALUES rows have different widths");
+                cells.clear();
+                for(size_t i=0;i<expressions.size();++i) {
+                    auto cell=execution->evaluate(expressions[i].get(),outer);
+                    // The descriptor supplies the output type, including
+                    // contextual unknown literals and genuine SQL NULL.
+                    cell.typeName=descriptor[i].type=="unknown"?"text":descriptor[i].type;
+                    cells.push_back(std::move(cell));
+                }
+                return true;
+            });
+            return source;
+        }
+        dbms::TableSchema schema;dbms::OpPtr source;
+        if(!select->fromClause) {
+            source=make_unique<dbms::PreparedSourceRowsOp>(dbms::QueryRowDescriptor{},[](size_t index,vector<dbms::ExprValue>& row){row.clear();return index==0;});
+        } else {
+            const auto& binding=range(select);
+            if(binding.cteStatement) {
+                schema=logicalSchema(binding.columns);
+                source=make_unique<dbms::PreparedSourceRowsOp>(binding.columns,[this,statement=binding.cteStatement,frames](size_t index,vector<dbms::ExprValue>& row){
+                    return readCte(statement,index,row,frames);
+                });
+            } else {
+                const string table=physical(binding,session_);
+                if(binding.relationName.empty())throw dbms::DbError("0A000","WITH derived source requires additional lowering");
+                schema=g_engine.getTableSchema(session_.currentDB,table);
+                if(!checkTablePermission(session_,table,dbms::StorageEngine::TablePrivilege::Select))
+                    throw dbms::DbError("42501","permission denied for WITH source");
+                if(!sessionIsAdmin(session_)) {
+                    const auto columns=selectedColumns(select,binding);
+                    if(!columns.empty() && !g_engine.hasColumnPermission(session_.currentDB,table,
+                        effectiveSessionRole(session_),dbms::StorageEngine::TablePrivilege::Select,columns))
+                        throw dbms::DbError("42501","permission denied for selected WITH source columns");
+                }
+                source=make_unique<dbms::TableScanOp>(&g_engine,session_.currentDB,table);
+            }
+        }
+        if(select->whereClause) {
+            const auto type=dbms::ExprHelper::inferParsedResultType(select->whereClause.get(),{},session_.currentDB,&g_engine);
+            const auto* literal=dynamic_cast<const dbms::LiteralExpr*>(select->whereClause.get());
+            const bool unknown=literal && !literal->preparedSubquery && literal->typeName.empty() &&
+                (toLower(literal->value)=="null" || (!literal->value.empty() && literal->value.front()=='\''));
+            if(type!="boolean" && !unknown)throw dbms::DbError("42804","argument of WHERE must be type boolean");
+            if(unknown && toLower(literal->value)!="null") {
+                dbms::CastExpr cast;cast.typeName="boolean";cast.operand=make_unique<dbms::LiteralExpr>(*literal);
+                dbms::ExprEvaluator evaluator;(void)evaluator.eval(&cast,dbms::RowContext{});
+            }
+        }
+        return dbms::QueryPlanner::buildPreparedSelectPlan(&g_engine,session_.currentDB,query_,select,schema,std::move(source),outer,reader(frames));
+    }
+    void validate(dbms::Stmt* statement,const Frames& frames) {
+        if(auto* select=dynamic_cast<dbms::SelectStmt*>(statement)) {
+            for(auto& cte:select->ctes) {
+                if(cte.query->command!=dbms::SqlCommand::Select && cte.query->command!=dbms::SqlCommand::Values)
+                    throw dbms::DbError("0A000","WITH containing a data-modifying statement must be at the top level");
+                validate(cte.query.get(),frames);
+            }
+            (void)selectPlan(select,validation_.context(),frames);
+        } else {
+            dbms::prepareBoundDml(statement,session_,query_);
+            if(auto* insert=dynamic_cast<dbms::InsertStmt*>(statement);insert && insert->selectSource)
+                validate(insert->selectSource.get(),frames);
+        }
+    }
+public:
+    PreparedWithDmlRuntime(Session& session,shared_ptr<dbms::PreparedQuery> query)
+        :session_(session),query_(std::move(query)),root_(dynamic_cast<dbms::WithStmt*>(query_->ast.get())),validation_(query_,&g_engine,session.currentDB) {
+        if(!root_)throw dbms::DbError("XX000","WITH runtime requires a genuine DML envelope");
+    }
+    ~PreparedWithDmlRuntime() {
+        for(auto& frame:frames_)for(auto& entry:frame->producers) {
+            try{if(entry.second->opened)entry.second->plan->close();}catch(...){}
+            entry.second->plan.reset();
+        }
+        for(auto& frame:frames_)frame->producers.clear();
+    }
+    dbms::DmlResult run() {
+        Frames frames{definitions(root_->ctes,validation_.context())};
+        for(auto& cte:root_->ctes) {
+            const bool writer=cte.query->command!=dbms::SqlCommand::Select && cte.query->command!=dbms::SqlCommand::Values;
+            const bool referenced=any_of(query_->sourceRanges.begin(),query_->sourceRanges.end(),[&](const auto& range){return range.cteStatement==cte.query.get();});
+            if(writer || referenced)validate(cte.query.get(),frames);
+        }
+        validate(root_->statement.get(),frames);
+        return dbms::executeAtomicDmlUnit(session_,[&]{
+            // Referenced producers run when the primary command demands
+            // their RETURNING rows. Only after that command succeeds do we
+            // finish unused writers: an immediate primary error must not
+            // execute a not-yet-started sequence/volatile producer.
+            auto result=dbms::executeBoundDml(root_->statement.get(),session_,query_,reader(frames));
+            // A successful data-modifying CTE runs once and to completion,
+            // even when its RETURNING output was not consumed (LIMIT 0).
+            for(auto& cte:root_->ctes)if(cte.query->command!=dbms::SqlCommand::Select && cte.query->command!=dbms::SqlCommand::Values) {
+                vector<dbms::ExprValue> ignored;size_t index=0;
+                while(readCte(cte.query.get(),index++,ignored,frames)){}
+            }
+            for(auto& frame:frames_)for(auto& entry:frame->producers)if(entry.second->opened) {
+                entry.second->plan->close();entry.second->opened=false;entry.second->plan.reset();
+            }
+            return result;
+        });
+    }
+};
+}
+
+static bool handlePreparedWithDml(const string& rawSql,Session& session,bool& handled) {
+    handled=false;
+    const size_t begin=dbms::skipLeadingSqlTrivia(rawSql);
+    if(begin==string::npos || dbms::SQLParser::toLower(rawSql.substr(begin,4))!="with" ||
+        (begin+4<rawSql.size() && isSqlIdentChar(rawSql[begin+4])))return false;
+    dbms::SQLParser parser;auto parsed=parser.parseForBinding(rawSql);
+    if(!parsed.isValid() || !dynamic_cast<dbms::WithStmt*>(parsed.stmt.get()))return false;
+    auto query=make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(session.currentDB,rawSql));
+    PreparedWithDmlRuntime runtime(session,std::move(query));auto result=runtime.run();
+    handled=true;
+    if(!result.columns.empty()) {
+        for(const auto& name:result.columns)cout<<name<<' ';
+        cout<<'\n';
+        for(size_t i=0;i<result.rows.size();++i) {
+            for(size_t j=0;j<result.rows[i].size();++j)cout<<(result.nulls[i][j]?"NULL":result.rows[i][j])<<' ';
+            cout<<'\n';
+        }
+    } else cout<<result.commandTag<<'\n';
+    dbms::publishLastDmlResult(std::move(result));return false;
+}
+
 static bool executeInternal(const string& rawSql, Session& s) {
     // Check for pg_terminate_backend / pg_cancel_backend flags
     if (s.terminateRequested) {
@@ -20246,6 +20542,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
     }
 
     // Phase 4 Wave 0.4: DML AST bridge — try AST-driven execution before legacy string dispatch.
+    {
+        bool handled=false;
+        const bool error=handlePreparedWithDml(effectiveRawSql,s,handled);
+        if(handled)return error;
+    }
     {
         bool handled = false;
         bool err = dbms::tryDmlBridge(
