@@ -1,5 +1,12 @@
 # Integrated typed-query, EXPLAIN and UPDATE verification
 
+Subsequent authoritative checkpoint: canonical75090 actually finished with
+exit1, 515/517 native tests and 254/257 registered Python labels passed.
+Its five retained failures and the later 16 independent ROOT integrations
+are recorded in `docs/issue-ready-source-integration.md`. The sections below
+retain the earlier frozen-source observations; any running/private-pending
+statement below describes that historical checkpoint, not a live handle now.
+
 The independent source/test integrations listed in
 `docs/issue-full-registered-canonical-1e0a8c5a.md` now additionally include
 ROOT `3bc45e3b` (private `c09f9d5b`), the ordinary bound typed UPDATE

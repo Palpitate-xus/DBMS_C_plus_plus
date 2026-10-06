@@ -2,6 +2,21 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Canonical75090 terminal five failures retained; sixteen independent ROOT integrations and fresh58 optimized verification pending",
+      "gap_ids": ["SQL-03", "SQL-04", "TYPE-01", "TYPE-02", "FUNC-05", "FUNC-06", "QRY-01", "QRY-03", "PROTO-04", "TXN-01"],
+      "status": "partial",
+      "commits": ["35594bc0", "33bfda17", "87a8fbaa", "06b3794f", "cae1f9bf", "bf1e53c7", "cc2a7abf", "3200fc6e", "28a621af", "7e10a85c", "2090fdc7", "bafb163c", "8b220342", "dc30853e", "4a8aa1a3", "75f586b8"],
+      "evidence": ["docs/issue-ready-source-integration.md", "docs/issue-checked-plan-structured-sqlstate.md", "docs/issue-update-canonical-quoted-target.md", "docs/issue-extended-literal-transaction-demand.md", "docs/issue-with-primary-dml-preparation.md"],
+      "tests": ["tests/checked_plan_sqlstate_test.cpp", "tests/group_collection_aggregate_test.cpp", "tests/grouping_expression_metadata_test.cpp", "tests/update_quoted_target_protocol_e2e_test.py", "tests/interval_input_sqlstate_protocol_e2e_test.py", "tests/interval_with_dml_input_sqlstate_protocol_e2e_test.py", "tests/ordinary_scalar_where_protocol_e2e_test.py", "tests/ordinary_scalar_order_protocol_e2e_test.py", "tests/extended_literal_transaction_demand_protocol_e2e_test.py", "tests/table_lock_timeout_protocol_e2e_test.py", "tests/statement_timeout_cli_e2e_test.py"],
+      "verification": {
+        "reproduction": "Canonical75090 authoritative terminal1 on original09121 frozen source3bc:515/517native and254/257registeredPythonlabels passed; intentionalTLSstubskip notTLSruntime. ExactlytwoGROUPcheckedcontractfailures, quantifiedEXPLAIN42703, tablelocktimeout andCLI100msSELECT1recoveryfail retained. Subsequentsettingsnotreachednotclaimedfixed.",
+        "fix": "Sixteen independent localROOTcommits afterfullterminal, includingpermanentstillredWITHtest andpureprovider/inputfoundationswhicharenotruntimeclosure. Conflicts preserveEXPLAINpublication andprovenconstantowner, bothpublicchecked/sourceinterfaces, eachregistration. Newscalarconsumer callsoriginaltypedthrowIfFailed insteadXX000.",
+        "focused_tests": "Privatecheckedfinalfresh57O276658/21native41097/14wire65999 allterminal0;quoted25native88195/12wire46194/finalPG17.2referenceall0. Original100ms/15secCLI ona933frozen6738session29791exit0 independentrepeatnotoriginalgateoverwrite. Expanded32case duplicatePG17reference0, V3sevennewreds and V5sixfixedplusrealrow_numbermetadatared retained; noallpassclaim.",
+        "full_suite": "NewROOTsource75f586b8 inventory58productionTU/530native/267registered. Changedpublicheadersrequireall58freshnormalO2; actualbuild27360 live /tmp/dbms-ready-integration.n9mTFFAn source/header/test/registryfrozen. Matching96native/80wireplannednotresults; WITHredgateincludednormally. Oldcanonicalfailed; nonewcombined/fullgreenclaim.",
+        "scope": "273=22complete166partial70unverified15deferred unchanged. WITHactualruntime, INSERTSELECTconsumer/coercion/CASE/widthpriority, SubLinksortsiteidentity, quantifierparser/binder/lowering, readI/O andwholefamilies continue. PG17diagnosticsnot18oracle; nopush/Actionsenablement/deferredsecurityTDErestart."
+      }
+    },
+    {
       "issue": "Typed UPDATE independently integrated; combined optimized proof and retained canonical GROUP/quantified-EXPLAIN failures",
       "gap_ids": [
         "SQL-03",
