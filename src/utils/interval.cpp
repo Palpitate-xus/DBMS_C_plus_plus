@@ -425,14 +425,19 @@ IntervalInputParts parseIntervalInput(const std::string& in) {
 std::string formatIntervalInput(long long months, long long days, long long micros,
                                 bool trimFractionZeros) {
     std::string out;
+    bool previousNegative = false;
     auto appendPart = [&](long long value, const char* singular,
                           const char* plural) {
         if (value == 0) return;
         if (!out.empty()) out += " ";
+        if (previousNegative && value > 0) out += "+";
         out += std::to_string(value);
         // PostgreSQL pluralizes negative interval fields: -1 days, -1 mons,
         // and -1 years.  Only the positive value one uses the singular form.
         out += (value == 1) ? singular : plural;
+        // PostgreSQL's postgres-style output carries the sign of the last
+        // nonzero calendar field, not the sign of the whole interval.
+        previousNegative = value < 0;
     };
     appendPart(months / 12, " year", " years");
     appendPart(months % 12, " mon", " mons");
@@ -440,6 +445,7 @@ std::string formatIntervalInput(long long months, long long days, long long micr
     if (micros || out.empty()) {
         if (!out.empty()) out += " ";
         const bool negative = micros < 0;
+        const char* sign = negative ? "-" : previousNegative ? "+" : "";
         uint64_t us = negative ? static_cast<uint64_t>(-(micros + 1)) + 1
             : static_cast<uint64_t>(micros);
         const long long hh = static_cast<long long>(us / 3600000000ULL); us %= 3600000000ULL;
@@ -449,10 +455,10 @@ std::string formatIntervalInput(long long months, long long days, long long micr
         char buf[64];
         if (frac) {
             std::snprintf(buf, sizeof(buf), "%s%02lld:%02lld:%02lld.%06lld",
-                          negative ? "-" : "", hh, mm, ss, frac);
+                          sign, hh, mm, ss, frac);
         } else {
             std::snprintf(buf, sizeof(buf), "%s%02lld:%02lld:%02lld",
-                          negative ? "-" : "", hh, mm, ss);
+                          sign, hh, mm, ss);
         }
         std::string clock = buf;
         if (trimFractionZeros && frac) {
