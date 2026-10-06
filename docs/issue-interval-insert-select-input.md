@@ -1,9 +1,8 @@
 # INTERVAL INSERT SELECT input analysis
 
-Status: source consumer implemented against the independent WITH/DML metadata
-callback (`f92acb26`). Matching 58-object validation passes five native tests;
-the complete protocol matrix retains two frontend error-priority failures for
-the independent Network preflight fix. No whole-family completion is claimed.
+Status: source consumer `2e07810c` and independent Network preflight correction
+are combined and validated against the WITH/DML metadata callback (`f92acb26`).
+Matching 58-object tests pass; no whole-family completion is claimed.
 
 ## Actual old failures
 
@@ -32,6 +31,12 @@ Evidence is private at `/tmp/dbms-assignment-input.gZVw19Xo/`:
 | `wire.reference.star.log` | All original controls plus mixed multi-column star/literal, exit 0 |
 | `wire.baseline.star.log` | Matching old source, 37 failed assertions |
 | `verification.consumer.V1.log`, execution 64910 | Five natives pass, complete wire retains two frontend priority failures |
+| `wire.network.reference.log` | Dedicated PostgreSQL 17.2 priority/adjacent reference, exit 0 |
+| `wire.network.baseline.log`, execution 15457 | Frozen source consumer alone, three frontend priority assertions fail |
+| `verification.network.V3.final.log`, execution 32450 | Dedicated preflight/full INSERT SELECT/input/WHERE/ORDER protocols, all five pass |
+| `original_update.native.final.log`, execution 17765 | All 24 original adjacent native tests pass |
+| `original_update.wire.final.log`, execution 35014 | All 11 original adjacent protocol tests pass |
+| `verification.consumer.asan.log`, execution 25219 | Three fresh ASan/UBSan native controls pass |
 
 The accumulating protocol test records every unexpected write before cleanup
 isolates the next case. These are assertion counts, not counts of independent
@@ -75,9 +80,29 @@ transaction checks. It is not skipped or counted as fixed by this adapter.
 Other target types, INTERVAL arrays/infinity/typmods, and general static type or
 planning-time coercion are not closed by this scalar INTERVAL change.
 
-The remaining two protocol failures occur before this consumer is entered:
+The original two protocol failures occurred before this consumer was entered:
 Network's isolated WHERE-function scan reports 42883 before a typed projection
 input error can be analyzed. The fix must defer only a strictly parsed direct
 INSERT SELECT to its whole-statement DML preparation, without changing database,
 permissions, transaction phases, or raw WITH handling. The full original matrix
 and both typed-priority assertions remain mandatory for combined validation.
+
+The independent frontend correction recognizes only a strict, direct
+InsertStmt with a SELECT source and defers its thin WHERE scan to the already
+whole-prepared DML entry. It neither prepares metadata before database/permission/
+transaction checks nor exempts raw WITH or other statements. The final test
+preserves direct unknown input plus missing WHERE function as 42883, typed
+INTERVAL/CAST input errors as 22007/22015, SELECT/UPDATE/DELETE/VALUES/raw WITH
+adjacent checks, command tags, values/types, and aborted transaction behavior.
+
+Public layouts, all source manifests, all headers, and compile flags were checked
+against the immutable fresh-58 O0 foundation group. The matching 55 unchanged
+objects were copied; DML, parser, Network, and stubs were freshly compiled for
+their own source. This is matching private development proof, not the eventual
+ROOT formal optimized integration. An interrupted first Network probe is kept
+as `verification.network.V2.log` and is not counted as a pass; both owned test
+servers were cleaned up before serial final validation.
+ASan/UBSan instruments the owned DML/parser translation units, inline adapter,
+tests, and stubs; the other 55 non-main production objects are not instrumented.
+Leak checking is disabled. This is targeted instrumentation, not a claim of
+whole-engine sanitizer coverage.

@@ -3357,8 +3357,23 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
             // Catalog/type analysis can itself throw a structured error.
             // Keep it inside the same protocol exception boundary as execution
             // so a metadata failure never terminates the client connection.
-            const auto functionError = whereUnknownFunctionError(sql, session);
-            if (!functionError.empty()) throw DbError("42883", functionError);
+            // A direct INSERT SELECT has a whole-statement metadata consumer
+            // in DmlExecutor. Its projection input conversions can precede
+            // WHERE name analysis; scanning WHERE in isolation here changes
+            // the first error. Identify this grammar by strict AST only, and
+            // leave raw WITH envelopes and all other statements unchanged.
+            bool typedInsertSelect = false;
+            if (SQLParser::classify(sql) == SqlCommand::Insert) {
+                SQLParser parser;
+                const auto parsed = parser.parseForBinding(sql);
+                const auto* insert = parsed.success
+                    ? dynamic_cast<const InsertStmt*>(parsed.stmt.get()) : nullptr;
+                typedInsertSelect = insert && insert->selectSource;
+            }
+            if (!typedInsertSelect) {
+                const auto functionError = whereUnknownFunctionError(sql, session);
+                if (!functionError.empty()) throw DbError("42883", functionError);
+            }
             executionError = execute(sql, session);
         } catch (const dbms::StatementCommitError& e) {
             executionError = true;
