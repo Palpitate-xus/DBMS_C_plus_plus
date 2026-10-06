@@ -2855,8 +2855,15 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
     ExprEvaluator literalEvaluator;
     for (size_t rowIndex = 0; rowIndex < stmt.values.size(); ++rowIndex) {
         const auto& row = stmt.values[rowIndex];
-        if (row.size() != columns.size())
+        if (row.size() != columns.size()) {
+            // Transform this complete original row before its contextual
+            // width error. Typed unknown-input casts and unresolved names
+            // belong to analysis; do not fold arithmetic/numeric narrowing or
+            // let a later row steal an earlier row's input error.
+            (void)g_engine.prepareBoundQuery(s.currentDB,
+                insertValuesPrefix(originalSql, rowIndex, stmt.values.size()));
             throw DbError("42601", "INSERT expression count does not match target columns");
+        }
         for (size_t i = 0; i < row.size(); ++i) {
             if (isDefaultValue(row[i])) continue;
             if (generatedTargets[i]) return rejectGeneratedValue(i);
