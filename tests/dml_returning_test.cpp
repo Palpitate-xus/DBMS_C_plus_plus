@@ -1,5 +1,6 @@
 #include "commands/DmlExecutor.h"
 #include "commands/TableManage.h"
+#include "common/DbError.h"
 #include "catalog/type_registry.h"
 #include "parser/parser.h"
 #include "Session.h"
@@ -336,9 +337,15 @@ int main() {
 
     // Renaming OLD hides its default name. The typed executor owns the new
     // syntax and must fail closed before changing the row.
-    assert(runDml(
-        "UPDATE empty_returning SET required_text = 'must-not-stick' "
-        "WHERE id = 3 RETURNING WITH (OLD AS before_row) old.id", session));
+    bool hiddenOldRejected = false;
+    try {
+        (void)runDml(
+            "UPDATE empty_returning SET required_text = 'must-not-stick' "
+            "WHERE id = 3 RETURNING WITH (OLD AS before_row) old.id", session);
+    } catch (const dbms::DbError& error) {
+        hiddenOldRejected = error.sqlState() == "42P01";
+    }
+    assert(hiddenOldRejected);
     assert(!runDml(
         "UPDATE empty_returning SET required_text = required_text WHERE id = 3 "
         "RETURNING required_text", session));

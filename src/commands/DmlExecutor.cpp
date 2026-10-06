@@ -3992,6 +3992,17 @@ bool executePreparedUpdate(const UpdateStmt& stmt, Session& s, bool& fallback,
         return true;
     }
 
+    // Prepare the original whole statement, not a stringified predicate or
+    // fictitious routine variables. Every column has an owner/source/ordinal
+    // and all names/routine signatures are checked before any SET is run or
+    // a legacy RETURNING capability check can silently choose a fallback.
+    // Unknown RETURNING names are SQL errors, not unsupported syntax.
+    auto prepared = std::make_shared<PreparedQuery>(
+        g_engine.prepareBoundQuery(s.currentDB, originalSql));
+    auto* update = dynamic_cast<UpdateStmt*>(prepared->ast.get());
+    if (!update || update->fromClause || !update->whereCurrentOf.empty())
+        throw DbError("XX000", "prepared UPDATE shape differs from dispatch");
+
     const ReturningBinding binding = returningBinding(
         stmt.returningOptions, requestedTable, stmt.alias);
     std::vector<ReturningProjection> projections;
@@ -4000,15 +4011,6 @@ bool executePreparedUpdate(const UpdateStmt& stmt, Session& s, bool& fallback,
         fallback = true;
         return false;
     }
-
-    // Prepare the original whole statement, not a stringified predicate or
-    // fictitious routine variables. Every column has an owner/source/ordinal
-    // and all names/routine signatures are checked before any SET is run.
-    auto prepared = std::make_shared<PreparedQuery>(
-        g_engine.prepareBoundQuery(s.currentDB, originalSql));
-    auto* update = dynamic_cast<UpdateStmt*>(prepared->ast.get());
-    if (!update || update->fromClause || !update->whereCurrentOf.empty())
-        throw DbError("XX000", "prepared UPDATE shape differs from dispatch");
     // Bare unknown strings and NULL acquire the boolean WHERE context. Typed
     // text/numeric expressions must not pass just because they return NULL.
     if (auto* literal = dynamic_cast<LiteralExpr*>(update->whereClause.get())) {
