@@ -19,6 +19,11 @@ targets and WHERE, 2026-10-05; QRY-02/QRY-03), and `e63e4e1e`
 and `2080a994` (quoted outer relation-alias binding, 2026-10-05; QRY-02/QRY-03).
 The follow-up regression commit `1a2e42b3` also verifies one mixed-case
 quoted-column path without changing source.
+`cf317cd1` extends LATERAL left inputs to structured base-table join trees
+using explicit `INNER`/`LEFT`/`RIGHT`/`FULL OUTER JOIN ... ON` edges, and
+`63b772e2` fixes ordinary single-join dispatch for the equivalent `FULL JOIN`
+spelling without `OUTER`. Test-only follow-up `710671ef` covers a left-joined
+outer tree followed by `LEFT JOIN LATERAL ... ON true`.
 
 ## Reproduced behavior
 
@@ -59,6 +64,9 @@ quoted-column path without changing source.
 - Join execution used raw display strings as hash keys. A `NUMERIC` pair
   containing `1.0` and `1.00` therefore produced no match in both `USING` and
   explicit `ON`, even though the numeric values compare equal.
+- A simple `FULL JOIN` without the optional `OUTER` keyword was routed through
+  the single-join INNER path and failed with SQLSTATE `42P01`, although the
+  equivalent `FULL OUTER JOIN` form was recognized.
 - `LEFT JOIN LATERAL (...) x ON ...` was not recognized by the lateral
   materializer and fell through to a missing-relation error; it also had no
   per-left-row ON filtering or SQL NULL-extension behavior.
@@ -73,6 +81,12 @@ quoted-column path without changing source.
 - A quoted outer relation alias in a qualified LATERAL reference, such as
   `"OuterAlias".id`, was skipped by the previous text replacer and failed
   with SQLSTATE `42P01` even when the matching relation was in scope.
+- A supported outer-join result used as the left input to LATERAL failed
+  parsing with SQLSTATE `42601`; left-side rows, including NULL-extended
+  columns, were not being materialized for per-row evaluation.
+- A simple `FULL JOIN` without the optional `OUTER` keyword was routed through
+  the single-join INNER path and failed with SQLSTATE `42P01`, although the
+  equivalent `FULL OUTER JOIN` form was recognized.
 
 ## Fixes
 
@@ -111,20 +125,28 @@ quoted-column path without changing source.
   bare name absent locally may bind to a unique visible left input column.
   Unknown local scopes (CTE, derived subquery, or table function) are left
   untouched rather than guessed. The visible left input may be one base table
-  or a simple comma/CROSS chain of base tables. A simple quoted relation alias
-  followed by an unquoted or mixed-case quoted column is token-aware and
-  regression-tested. More complex quoted/schema-qualified names and other join
-  trees or arbitrary nested correlations remain unsupported or unverified.
-- For one simple left base relation or a comma/CROSS chain of base relations,
-  materialize `JOIN`/`INNER JOIN LATERAL` and `LEFT [OUTER] JOIN LATERAL` per
-  combined left row, evaluate a supported boolean `ON` expression against
-  typed, NULL-aware values from all left inputs and the lateral result, and
-  apply LEFT NULL extension when no right row passes the condition. The left
-  input chain must consist only of base tables joined with CROSS/comma and
-  have no `ON`/`USING`; this path requires aligned structured rows from the
-  lateral subquery and does not implement arbitrary join trees, complex or
-  nested lateral chains, or table functions. A two-step FROM-less scalar
-  LATERAL chain is covered by regression.
+  or a simple base-table join tree with comma/CROSS or explicit
+  `INNER`/`LEFT`/`RIGHT`/`FULL [OUTER] JOIN ... ON` edges. Join-tree inputs are
+  materialized through the full dispatcher into aligned structured values and
+  NULL bitmaps before per-row LATERAL evaluation. `USING`/`NATURAL` left trees
+  remain unsupported because their merged output columns do not match the
+  flattened leaf-schema map. A simple quoted relation alias followed by an
+  unquoted or mixed-case quoted column is token-aware and regression-tested.
+  More complex quoted/schema-qualified names and arbitrary nested correlations
+  remain unsupported or unverified.
+- For a supported base-table left relation/join tree, materialize
+  `JOIN`/`INNER JOIN LATERAL` and `LEFT [OUTER] JOIN LATERAL` per combined left
+  row, evaluate a supported boolean `ON` expression against typed, NULL-aware
+  values from all left inputs and the lateral result, and apply LEFT NULL
+  extension when no right row passes the condition. The left tree must use
+  supported explicit `ON` edges or CROSS/comma joins; it requires aligned
+  structured rows from the lateral subquery and does not implement `USING`/
+  `NATURAL` left trees, unknown FROM scopes, complex or nested lateral chains,
+  or table functions. Regression covers INNER/LEFT/RIGHT/FULL OUTER inputs,
+  fan-out, null extension, empty left input and a two-step FROM-less scalar
+  LATERAL chain. A LEFT-joined left tree followed by `LEFT JOIN LATERAL ...
+  ON true` is also covered; general lateral ON filtering across arbitrary
+  pre-joined trees remains unverified.
 - Sort supported column-reference or output-position keys with ASC/DESC and
   NULLS FIRST/LAST, then apply LIMIT/OFFSET. Unsupported projections, sort
   expressions, DISTINCT/GROUP/WINDOW forms fail explicitly rather than being
@@ -285,6 +307,32 @@ quoted-column path without changing source.
   `python3 -m py_compile tests/derived_type_protocol_e2e_test.py` and
   `tests/derived_type_protocol_e2e_test.py` passed. This is bounded test
   coverage, not general quoted-name or schema-qualified correlation support.
+- After `cf317cd1`, a simple base-table `LEFT`/`RIGHT`/`FULL OUTER`/`INNER`
+  join tree with explicit `ON` can feed a LATERAL item. The old LEFT JOIN left
+  input failed with `42601`; the materializer now executes the complete left
+  tree, carries typed structured cells and NULL bitmaps, then binds each leaf
+  relation’s qualified columns for per-row LATERAL execution. Protocol tests
+  cover matched-row fan-out, unmatched left/right rows, NULL extension and an
+  empty left tree with a typed zero-row result. `bash scripts/build.sh`,
+  `tests/derived_type_protocol_e2e_test.py`,
+  `tests/sql_literal_preservation_e2e_test.py`,
+  `tests/join_type_protocol_e2e_test.py`, and `tests/multijoin_e2e_test.py`
+  passed. The left-tree scope excludes `USING`/`NATURAL`, whose merged output
+  columns do not match the flattened leaf schema.
+- Test-only commit `710671ef` also verifies a LEFT-joined input tree followed
+  by `LEFT JOIN LATERAL ... ON true`; the left join’s NULL-extended text value
+  remains SQL NULL while the lateral scalar result is bound correctly. The
+  derived-type protocol E2E and Python syntax check passed against the binary
+  built from the preceding source commits; this does not verify arbitrary ON
+  filtering across such a tree.
+- After `63b772e2`, the ordinary single-join route recognizes both `FULL JOIN`
+  and `FULL OUTER JOIN`. Before the fix, the bare `FULL JOIN` spelling returned
+  `42P01`; the regression verifies a matched row plus unmatched left and right
+  rows with the correct NULL bitmap and integer OIDs. The formal build and
+  `tests/join_type_protocol_e2e_test.py`,
+  `tests/derived_type_protocol_e2e_test.py`, and
+  `tests/sql_literal_preservation_e2e_test.py` passed. The full suite and
+  PostgreSQL 18.6 differential were not run.
 - `tests/compat/cases/multijoin_projection_filter.sql` was added, but the
   differential runner refused preflight because the configured reference
   server reports PostgreSQL 17.2 (`170002`) while the runner requires 18.6
@@ -298,16 +346,19 @@ simple `alias.*`, DISTINCT/GROUP/HAVING/WINDOW, collation-aware and arbitrary-
 expression ordering, and arbitrary nested/lateral join semantics remain open.
 The FROM-less LATERAL direct-column target case is only a bounded QRY-02 fix;
 simple INNER/LEFT LATERAL `ON` evaluation works with either one simple left
-relation or a simple base-table comma/CROSS chain before the LATERAL item.
+relation or a simple base-table comma/CROSS chain before the LATERAL item. A
+simple base-table outer-join tree can now also feed LATERAL; only `ON true` is
+verified when that tree is followed by `LEFT JOIN LATERAL`, so general ON
+filtering across a pre-joined tree remains unverified.
 The regression-tested two-step FROM-less scalar LATERAL chain also works;
 longer or more complex correlated chains remain unsupported/unverified.
 Bare outer references in evaluator-supported scalar targets and WHERE are now
 also bound when that LATERAL SELECT has no own FROM or uses a local base-table
-scope with known columns. Other left join trees remain unsupported. Unknown
-CTE/derived/function FROM scopes, complex quoted/schema-qualified references, arbitrary correlated
-expressions/subqueries, complex lateral chains, table functions, and general
-parameterized or nested join semantics remain unsupported or unverified. A
-simple quoted outer relation alias with an unquoted or one mixed-case quoted
-column is covered by regression tests.
+scope with known columns. `USING`/`NATURAL` left trees remain unsupported.
+Unknown CTE/derived/function FROM scopes, complex quoted/schema-qualified
+references, arbitrary correlated expressions/subqueries, complex lateral
+chains, table functions, and general parameterized or nested join semantics
+remain unsupported or unverified. A simple quoted outer relation alias with an
+unquoted or one mixed-case quoted column is covered by regression tests.
 OPT-02's DP/exhaustive join search, GEQO threshold, semi/anti constraints, and
 bushy plans remain unimplemented.
