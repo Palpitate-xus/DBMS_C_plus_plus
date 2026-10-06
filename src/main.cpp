@@ -35015,6 +35015,9 @@ static bool executeWithCteInheritance(const std::string& inputSql, Session& s,
     try {
         const std::string lexicalError = dbms::SQLParser::lexicalError(rawSql);
         if (!lexicalError.empty()) throw dbms::DbError("42601", lexicalError);
+        if (const auto duplicate = dbms::SQLParser::duplicateCteName(rawSql))
+            throw dbms::DbError("42712", "WITH query name \"" + *duplicate +
+                               "\" specified more than once");
         if (dbms::SQLParser::requiresQuerySnapshot(rawSql)) {
             g_engine.noteQuerySnapshot();
         }

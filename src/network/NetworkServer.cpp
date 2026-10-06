@@ -5058,6 +5058,16 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 !prepareExtendedQuerySnapshot()) {
                 continue;
             }
+            if (const auto duplicate = SQLParser::duplicateCteName(sql)) {
+                if (transactionFailed) {
+                    const auto aborted = transactionAbortedResult();
+                    sendExtendedProtocolError(aborted.sqlState, aborted.errorMessage);
+                } else {
+                    sendExtendedProtocolError("42712", "WITH query name \"" +
+                        *duplicate + "\" specified more than once");
+                }
+                continue;
+            }
             try {
                 notePreparedTemporaryObjectAccess(sql, session);
             } catch (const DbError& error) {

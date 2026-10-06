@@ -533,6 +533,58 @@ std::string SQLParser::lexicalError(const std::string& sql) {
     return error;
 }
 
+std::optional<std::string> SQLParser::duplicateCteName(const std::string& sql) {
+    std::string lexicalError;
+    const auto tokens = tokenizeImpl(sql, &lexicalError);
+    if (!lexicalError.empty()) return std::nullopt;
+    // Build matching parentheses once: skipping nested CTE/query bodies must
+    // not repeatedly traverse them for every enclosing WITH scope.
+    std::vector<size_t> closes(tokens.size(), std::string::npos), opens;
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        if (tokens[i] == "(") opens.push_back(i);
+        else if (tokens[i] == ")" && !opens.empty()) {
+            closes[opens.back()] = i;
+            opens.pop_back();
+        }
+    }
+    const auto isIdentifier = [](const std::string& token) {
+        if (token.size() >= 2 && token.front() == '"' && token.back() == '"')
+            return token.size() > 2;
+        if (token.empty()) return false;
+        const unsigned char first = static_cast<unsigned char>(token.front());
+        if (!std::isalpha(first) && first != '_' && first < 0x80) return false;
+        for (unsigned char ch : token)
+            if (!std::isalnum(ch) && ch != '_' && ch != '$' && ch < 0x80) return false;
+        return true;
+    };
+    for (size_t with = 0; with < tokens.size(); ++with) {
+        if (toLower(tokens[with]) != "with") continue;
+        size_t pos = with + 1;
+        if (pos < tokens.size() && toLower(tokens[pos]) == "recursive") ++pos;
+        std::set<std::string> names;
+        while (pos < tokens.size() && isIdentifier(tokens[pos])) {
+            const std::string name = parseRoutineIdentifier(tokens[pos++]);
+            if (pos < tokens.size() && tokens[pos] == "(") {
+                if (closes[pos] == std::string::npos) break;
+                pos = closes[pos] + 1;
+            }
+            if (pos == tokens.size() || toLower(tokens[pos]) != "as") break;
+            ++pos;
+            if (pos < tokens.size() && toLower(tokens[pos]) == "not") {
+                if (pos + 1 == tokens.size() || toLower(tokens[pos + 1]) != "materialized") break;
+                pos += 2;
+            } else if (pos < tokens.size() && toLower(tokens[pos]) == "materialized") ++pos;
+            if (pos == tokens.size() || tokens[pos] != "(" ||
+                closes[pos] == std::string::npos) break;
+            pos = closes[pos] + 1;
+            if (!names.insert(name).second) return name;
+            if (pos == tokens.size() || tokens[pos] != ",") break;
+            ++pos;
+        }
+    }
+    return std::nullopt;
+}
+
 std::vector<std::string> SQLParser::tokenizeImpl(const std::string& sql, std::string* error) {
     std::vector<std::string> tokens;
     std::string cur;
@@ -1295,6 +1347,11 @@ ParseResult SQLParser::parse(const std::string& inputSql) {
     const std::string sql = inputSql.substr(offset);
     result.error = lexicalError(sql);
     if (!result.error.empty()) return result;
+    if (const auto duplicate = duplicateCteName(sql)) {
+        result.error = "WITH query name \"" + *duplicate +
+            "\" specified more than once (SQLSTATE 42712)";
+        return result;
+    }
 
     std::string lsql = toLower(trim(sql));
     if (lsql.empty()) {

@@ -34,6 +34,9 @@ public:
     static bool requiresQuerySnapshot(const std::string& sql);
     static bool isSetTransactionStatement(const std::string& sql);
     static std::string lexicalError(const std::string& sql);
+    // Analysis preflight: independent WITH lists may shadow outer names,
+    // but siblings must be distinct before any query/CTE executes.
+    static std::optional<std::string> duplicateCteName(const std::string& sql);
 
     // 工具函数
     static std::string toLower(const std::string& s);
