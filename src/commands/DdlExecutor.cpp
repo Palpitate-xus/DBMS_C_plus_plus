@@ -1948,7 +1948,11 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
     }
 
     for (const auto& sub : stmt->subCommands) {
-        txn.markSnapshotDirty();
+        // ADD COLUMN declaration conversion is pure. A rejected declaration
+        // must not turn a clean snapshot into a database-wide physical
+        // restore; successful earlier actions still keep the snapshot dirty.
+        if (sub.action != AlterTableStmt::Action::AddColumn)
+            txn.markSnapshotDirty();
         DBStatus status = DBStatus::OK;
         switch (sub.action) {
             case AlterTableStmt::Action::AddColumn: {
@@ -1963,6 +1967,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     std::cout << "Invalid column type: " << typeError << std::endl;
                     return true;
                 }
+                txn.markSnapshotDirty();
                 status = g_engine.alterTableAddColumn(s.currentDB, tableName, column);
                 if (status == DBStatus::TABLE_ALREADY_EXISTS && sub.ifNotExists) {
                     std::cout << "NOTICE: column already exists, skipping" << std::endl;
