@@ -31630,8 +31630,13 @@ static PlPgsqlQueryResult plpgsqlEvalBoundExpression(
                         stored = true;
                     }
                 }
-                if (!builtin && !stored)
+                if (!builtin && !stored) {
+                    // Preserve typed preparation diagnostics (for example
+                    // SUM/AVG's unknown-literal overload ambiguity), rather
+                    // than relabeling every unresolved callback as 42883.
+                    evaluator.hasScalarFunction(function, sqlFunctionEngine);
                     throw DbError("42883", "function does not exist: " + function->funcName);
+                }
                 function->funcName = evaluatorName;
                 function->schema.clear();
                 // SQL EXTRACT's field is syntax, not a procedural variable.

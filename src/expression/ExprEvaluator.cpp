@@ -4633,14 +4633,30 @@ ResolvedScalarFunction resolveScalarFunction(
     }
     // Stored scalar routines currently belong to the database's public
     // namespace. An explicit different schema must not fall back to public.
-    if (database.empty() || (!schema.empty() && schema != "public")) return result;
-    engine = engine ? engine : &g_engine;
-    result.routine = engine->getUDF(database, result.name);
-    if (result.routine.expression.empty()) return result;
-    size_t arity = result.routine.paramNames.size();
-    if (arity == 1 && result.routine.paramNames.front().empty()) arity = 0;
-    if (!call->namedArgs.empty() || call->args.size() != arity) return result;
-    result.found = result.stored = true;
+    if (!database.empty() && (schema.empty() || schema == "public")) {
+        engine = engine ? engine : &g_engine;
+        result.routine = engine->getUDF(database, result.name);
+        if (!result.routine.expression.empty()) {
+            size_t arity = result.routine.paramNames.size();
+            if (arity == 1 && result.routine.paramNames.front().empty()) arity = 0;
+            if (call->namedArgs.empty() && call->args.size() == arity) {
+                result.found = result.stored = true;
+                return result;
+            }
+        }
+    }
+    // SUM/AVG's existing evaluator diagnostic concerns aggregate overload
+    // resolution, not a missing scalar callback. Keep it at preparation so
+    // an unused COALESCE/CASE arm still fails without evaluating any routine.
+    // Quoted mixed-case names and explicit non-catalog schemas are distinct.
+    if ((schema.empty() || schema == "pg_catalog") &&
+        (result.name == "sum" || result.name == "avg") &&
+        call->namedArgs.empty() && call->args.size() == 1) {
+        const auto* literal = dynamic_cast<const LiteralExpr*>(call->args.front().get());
+        if (literal && literal->typeName.empty() &&
+            (isQuotedString(literal->value) || toLower(literal->value) == "null"))
+            throw DbError("42725", "function " + result.name + "(unknown) is not unique");
+    }
     return result;
 }
 } // namespace
