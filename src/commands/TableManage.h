@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include "replication/LogicalDecoder.h"
+#include "utils/plpgsql.h"
 #include <filesystem>
 #include <functional>
 #include <map>
@@ -392,6 +393,17 @@ public:
                         std::string& returnValue,
                         bool* returnIsNull = nullptr,
                         const std::vector<bool>* argNulls = nullptr) const;
+    // Installed before backend threads start. Stored-function SQL executes
+    // through the embedding dispatcher's query boundary, with structured
+    // values/NULLs rather than formatted CLI text. Native users without a
+    // dispatcher retain the checked standalone SELECT subset.
+    using PlPgsqlQueryExecutor = std::function<PlPgsqlQueryResult(
+        const std::string& dbname, const std::string& sql)>;
+    void setPlpgsqlQueryExecutor(PlPgsqlQueryExecutor executor) {
+        plpgsqlQueryExecutor_ = std::move(executor);
+    }
+    PlPgsqlQueryResult plpgsqlQuery(const std::string& dbname,
+                                   const std::string& sql) const;
     std::vector<std::string> getUDFNames(const std::string& dbname) const;
 
     // Table-valued functions (return a result set)
@@ -470,7 +482,8 @@ public:
                           const std::string& fromClause,
                           const std::string& whereClause,
                           const std::vector<std::string>& intoVars,
-                          std::map<std::string, std::string>& vars);
+                          std::map<std::string, std::string>& vars,
+                          std::set<std::string>* nullVars = nullptr);
     bool analyzeMultiColumn(const std::string& dbname, const std::string& tablename,
                             const std::vector<std::string>& colnames);
     // Functional dependency degrees for CREATE STATISTICS (dependencies kind).
@@ -1840,6 +1853,9 @@ private:
     DBStatus persistTriggers(const std::string& dbname,
                              const std::vector<Trigger>& triggers) const;
     TriggerExecutor triggerExecutor_;
+    PlPgsqlQueryExecutor plpgsqlQueryExecutor_;
+    PlPgsqlQueryResult plpgsqlQueryNative(const std::string& dbname,
+                                         const std::string& sql) const;
     mutable TriggerCtx execFunctionCtx_;
     WhenConditionEvaluator whenEvaluator_;
 

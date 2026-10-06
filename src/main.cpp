@@ -35218,6 +35218,70 @@ int main(int argc, char* argv[]) {
         return 2;
     }
 
+    // Stored PL/pgSQL SELECT INTO uses the same complete SELECT dispatcher
+    // as ordinary SQL. Its body has an independent lexical CTE namespace,
+    // but executes in the calling backend's transaction/session. Retain
+    // exact cells/NULL bits; never reconstruct values from CLI display text.
+    g_engine.setPlpgsqlQueryExecutor([](const std::string& dbname,
+                                      const std::string& querySql) {
+        dbms::PlPgsqlQueryResult result;
+        Session* activeSession = dbms::currentSession();
+        if (!activeSession || activeSession->currentDB != dbname) {
+            result.sqlState = "0A000";
+            result.message = "stored-function query requires its active database session";
+            return result;
+        }
+        vector<string> names, types;
+        vector<vector<string>> rows;
+        vector<vector<bool>> nulls;
+        bool structured = false, failed = false;
+        string failureText;
+        try {
+            (void)runDerivedSubQueryFull(querySql, *activeSession, names, &types,
+                &rows, &nulls, &structured, &failed, &failureText, false);
+        } catch (const dbms::DbError& error) {
+            result.sqlState = error.sqlState();
+            result.message = error.message();
+            return result;
+        }
+        if (failed) {
+            result.sqlState = "XX000";
+            result.message = "stored-function SELECT failed";
+            // The legacy dispatcher still prints some errors. Consume only
+            // its generated ERROR diagnostic and terminal SQLSTATE marker,
+            // not an arbitrary token in user data or quoted identifiers.
+            std::istringstream lines(failureText);
+            string line;
+            while (std::getline(lines, line)) {
+                line = trim(line);
+                if (line.rfind("ERROR:", 0) != 0) continue;
+                result.message = line.substr(6);
+                const size_t marker = line.rfind("(SQLSTATE ");
+                if (marker == string::npos || marker + 16 != line.size() ||
+                    line.back() != ')') continue;
+                const string state = line.substr(marker + 10, 5);
+                if (state.find_first_not_of("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ") == string::npos)
+                    result.sqlState = state;
+            }
+            return result;
+        }
+        if (!structured || names.empty()) {
+            result.sqlState = "0A000";
+            result.message = "stored-function SELECT needs structured result metadata";
+            return result;
+        }
+        result.ok = true;
+        result.columnCount = names.size();
+        result.columnTypes = std::move(types);
+        result.rowCount = rows.size();
+        if (!rows.empty()) {
+            for (size_t i = 0; i < result.columnCount; ++i)
+                result.firstRow.push_back(nulls.front()[i]
+                    ? std::nullopt : std::optional<string>{rows.front()[i]});
+        }
+        return result;
+    });
+
     // Trigger actions run in the session that is currently executing SQL.
     // Install this before entering server mode; the old registration lived
     // after the server-mode early return, making triggers silently no-op for

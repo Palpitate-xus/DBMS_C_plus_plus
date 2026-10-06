@@ -10,6 +10,7 @@
 // ============================================================================
 
 #include "utils/plpgsql.h"
+#include "common/SqlSyntax.h"
 
 #include <cctype>
 #include <cmath>
@@ -39,29 +40,78 @@ std::string lowerCopy(const std::string& s) {
     return out;
 }
 
+// Decode one SQL identifier, preserving delimited case and doubled quotes.
+bool readIdentifier(const std::string& text, size_t start,
+                    std::string& name, size_t& end) {
+    name.clear();
+    if (start >= text.size()) return false;
+    if (text[start] == '"') {
+        for (end = start + 1; end < text.size();) {
+            if (text[end] == '"') {
+                ++end;
+                if (end < text.size() && text[end] == '"') {
+                    name += '"';
+                    ++end;
+                } else {
+                    return !name.empty();
+                }
+            } else {
+                name += text[end++];
+            }
+        }
+        return false;
+    }
+    const unsigned char first = static_cast<unsigned char>(text[start]);
+    if (!std::isalpha(first) && first != '_' && first < 0x80) return false;
+    end = start + 1;
+    while (end < text.size() &&
+           sqlIdentifierContinuation(static_cast<unsigned char>(text[end]))) ++end;
+    name = lowerCopy(text.substr(start, end - start));
+    return true;
+}
+
+size_t protectedUnitEnd(const std::string& text, size_t start) {
+    if (text.compare(start, 2, "--") == 0 || text.compare(start, 2, "/*") == 0) {
+        const size_t end = skipLeadingSqlTrivia(text, start);
+        return end == std::string::npos ? text.size() : end;
+    }
+    if (text[start] == '\'' || text[start] == '"') {
+        const char quote = text[start];
+        const bool escaped = quote == '\'' && start &&
+            (text[start - 1] == 'e' || text[start - 1] == 'E') &&
+            (start < 2 || !sqlIdentifierContinuation(static_cast<unsigned char>(text[start - 2])));
+        for (size_t end = start + 1; end < text.size();) {
+            if (escaped && text[end] == '\\') {
+                end += std::min<size_t>(2, text.size() - end);
+            } else if (text[end] == quote) {
+                ++end;
+                if (end < text.size() && text[end] == quote) ++end;
+                else return end;
+            } else ++end;
+        }
+        return text.size();
+    }
+    if (text[start] == '$') {
+        const size_t delimiterEnd = text.find('$', start + 1);
+        if (delimiterEnd != std::string::npos) {
+            const std::string delimiter = text.substr(start, delimiterEnd - start + 1);
+            const size_t close = text.find(delimiter, delimiterEnd + 1);
+            return close == std::string::npos ? text.size() : close + delimiter.size();
+        }
+    }
+    return start + 1;
+}
+
 // Character-level scanner with string/comment skipping.
 struct Scanner {
     std::string src;
+    std::vector<bool> protectedBytes;
     size_t pos = 0;
-    explicit Scanner(std::string s) : src(std::move(s)) {}
+    explicit Scanner(std::string s) : src(std::move(s)), protectedBytes(sqlProtectedBytes(src)) {}
 
     void skipWs() {
-        while (pos < src.size()) {
-            char c = src[pos];
-            if (std::isspace(static_cast<unsigned char>(c))) { ++pos; continue; }
-            if (c == '-' && pos + 1 < src.size() && src[pos + 1] == '-') {
-                while (pos < src.size() && src[pos] != '\n') ++pos;
-                continue;
-            }
-            if (c == '/' && pos + 1 < src.size() && src[pos + 1] == '*') {
-                pos += 2;
-                while (pos + 1 < src.size() &&
-                       !(src[pos] == '*' && src[pos + 1] == '/')) ++pos;
-                pos = std::min(pos + 2, src.size());
-                continue;
-            }
-            break;
-        }
+        const size_t after = skipLeadingSqlTrivia(src, pos);
+        pos = after == std::string::npos ? src.size() : after;
     }
     bool eof() { skipWs(); return pos >= src.size(); }
 
@@ -70,7 +120,7 @@ struct Scanner {
         if (at) *at = pos;
         size_t p = pos;
         while (p < src.size() &&
-               (std::isalnum(static_cast<unsigned char>(src[p])) || src[p] == '_')) ++p;
+               sqlIdentifierContinuation(static_cast<unsigned char>(src[p]))) ++p;
         return src.substr(pos, p - pos);
     }
     std::string peekKeyword(size_t* at = nullptr) {
@@ -84,19 +134,11 @@ struct Scanner {
     }
     std::string ident() {
         skipWs();
-        if (pos < src.size() && src[pos] == '"') {
-            size_t p = ++pos;
-            std::string out;
-            while (p < src.size() && src[p] != '"') out += src[p++];
-            pos = p < src.size() ? p + 1 : p;
-            return out;
-        }
-        size_t p = pos;
-        while (p < src.size() &&
-               (std::isalnum(static_cast<unsigned char>(src[p])) || src[p] == '_')) ++p;
-        std::string out = src.substr(pos, p - pos);
-        pos = p;
-        return lowerCopy(out);
+        size_t after;
+        std::string out;
+        if (!readIdentifier(src, pos, out, after)) return {};
+        pos = after;
+        return out;
     }
     char peekChar() { skipWs(); return pos < src.size() ? src[pos] : '\0'; }
     bool matchOp(const char* op) {
@@ -111,24 +153,16 @@ struct Scanner {
 std::string readUntilSemicolon(Scanner& sc) {
     sc.skipWs();
     size_t start = sc.pos;
-    bool inS = false, inD = false;
     int depth = 0;
     while (sc.pos < sc.src.size()) {
         char c = sc.src[sc.pos];
-        if (inS) {
-            if (c == '\'') {
-                if (sc.pos + 1 < sc.src.size() && sc.src[sc.pos + 1] == '\'') ++sc.pos;
-                else inS = false;
-            }
-        } else if (inD) {
-            if (c == '"') inD = false;
-        } else if (c == '\'') {
-            inS = true;
-        } else if (c == '"') {
-            inD = true;
-        } else if (c == '(') {
+        if (sc.protectedBytes[sc.pos]) {
+            ++sc.pos;
+            continue;
+        }
+        if (c == '(' || c == '[') {
             ++depth;
-        } else if (c == ')') {
+        } else if (c == ')' || c == ']') {
             --depth;
         } else if (c == ';' && depth == 0) {
             break;
@@ -145,35 +179,25 @@ std::string readUntilSemicolon(Scanner& sc) {
 bool readUntilKeyword(Scanner& sc, const char* kw, std::string& out) {
     sc.skipWs();
     size_t start = sc.pos;
-    bool inS = false, inD = false;
     int depth = 0;
-    const size_t klen = std::strlen(kw);
     while (sc.pos < sc.src.size()) {
         char c = sc.src[sc.pos];
-        if (inS) {
-            if (c == '\'') {
-                if (sc.pos + 1 < sc.src.size() && sc.src[sc.pos + 1] == '\'') ++sc.pos;
-                else inS = false;
-            }
-        } else if (inD) {
-            if (c == '"') inD = false;
-        } else if (c == '\'') {
-            inS = true;
-        } else if (c == '"') {
-            inD = true;
-        } else if (c == '(') {
+        if (sc.protectedBytes[sc.pos]) {
+            ++sc.pos;
+            continue;
+        }
+        if (c == '(' || c == '[') {
             ++depth;
-        } else if (c == ')') {
+        } else if (c == ')' || c == ']') {
             --depth;
         } else if (depth == 0 &&
                    std::isalpha(static_cast<unsigned char>(c)) &&
                    (sc.pos == start ||
-                    (!std::isalnum(static_cast<unsigned char>(sc.src[sc.pos - 1])) &&
-                     sc.src[sc.pos - 1] != '_'))) {
+                    !sqlIdentifierContinuation(static_cast<unsigned char>(sc.src[sc.pos - 1])))) {
             // word start: compare keyword
             size_t e = sc.pos;
             while (e < sc.src.size() &&
-                   (std::isalnum(static_cast<unsigned char>(sc.src[e])) || sc.src[e] == '_')) ++e;
+                   sqlIdentifierContinuation(static_cast<unsigned char>(sc.src[e]))) ++e;
             if (lowerCopy(sc.src.substr(sc.pos, e - sc.pos)) == kw) {
                 out = trimCopy(sc.src.substr(start, sc.pos - start));
                 sc.pos = e;
@@ -230,6 +254,11 @@ struct ForStmt : Stmt {
     std::string from, to;
     CompoundStmt body;
 };
+struct Declaration {
+    std::string name;
+    std::string type;
+    std::string defaultExpr;
+};
 
 // ---------------------------------------------------------------------------
 // parser
@@ -246,27 +275,33 @@ struct Parser {
     }
 
     // Parse DECLARE var [type] [:= expr]; blocks until BEGIN.
-    bool parseDeclares(std::map<std::string, std::string>& defaults) {
+    bool parseDeclares(std::vector<Declaration>& defaults) {
         while (true) {
             if (sc.matchKeyword("begin")) return true;
             std::string name = sc.ident();
             if (name.empty()) return fail("DECLARE: expected variable name");
             // optional type words until := or ';'
             std::string tail = readUntilSemicolon(sc);
-            std::string low = lowerCopy(tail);
             size_t assignPos = std::string::npos;
             // find ":=" outside quotes
             {
-                bool inS = false;
+                const auto protectedBytes = sqlProtectedBytes(tail);
                 for (size_t i = 0; i + 1 < tail.size(); ++i) {
-                    if (inS) { if (tail[i] == '\'') inS = false; continue; }
-                    if (tail[i] == '\'') { inS = true; continue; }
+                    if (protectedBytes[i] || protectedBytes[i + 1]) continue;
                     if (tail[i] == ':' && tail[i + 1] == '=') { assignPos = i; break; }
                 }
             }
-            if (assignPos != std::string::npos) {
-                defaults[name] = trimCopy(tail.substr(assignPos + 2));
+            size_t assignLength = 2;
+            const size_t defaultPos = findTopLevelSqlKeyword(tail, "default");
+            if (defaultPos != std::string::npos &&
+                (assignPos == std::string::npos || defaultPos < assignPos)) {
+                assignPos = defaultPos;
+                assignLength = 7;
             }
+            defaults.push_back({name,
+                trimCopy(tail.substr(0, assignPos)),
+                assignPos == std::string::npos ? std::string() :
+                    trimCopy(tail.substr(assignPos + assignLength))});
         }
     }
 
@@ -307,7 +342,8 @@ struct Parser {
             return s;
         }
         // assignment: ident := expr;
-        if (!kw.empty() && std::isalpha(static_cast<unsigned char>(kw[0]))) {
+        if ((!kw.empty() && (std::isalpha(static_cast<unsigned char>(kw[0])) || kw[0] == '_')) ||
+            sc.peekChar() == '"') {
             // lookahead for ":=" after the identifier
             size_t save = sc.pos;
             std::string name = sc.ident();
@@ -474,21 +510,30 @@ struct Interp {
     const PlPgsqlHost& host;
     std::map<std::string, std::string> vars;
     std::set<std::string> nullVars;
+    std::map<std::string, std::string> variableTypes;
     std::string returnValue;
+    std::string returnType = "unknown";
     bool returnIsNull = false;
     bool hasReturn = false;
     bool exitLoop = false;
     std::string error;
+    std::string errorSqlState;
     std::function<void(const std::string&, const std::string&)> notice;
     int steps = 0;
     static constexpr int kMaxSteps = 200000;  // runaway guard
 
     Interp(const PlPgsqlHost& h, const std::map<std::string, std::string>& params,
            std::function<void(const std::string&, const std::string&)> n)
-        : host(h), vars(params), notice(std::move(n)) {}
+        : host(h), vars(params), variableTypes(h.parameterTypes), notice(std::move(n)) {
+        vars["found"] = "f";
+        variableTypes["found"] = "boolean";
+    }
 
-    bool fail(const std::string& m) {
-        if (error.empty()) error = m;
+    bool fail(const std::string& m, const std::string& sqlState = "XX000") {
+        if (error.empty()) {
+            error = m;
+            errorSqlState = sqlState.empty() ? "XX000" : sqlState;
+        }
         return false;
     }
     bool budget() {
@@ -496,78 +541,258 @@ struct Interp {
         return true;
     }
 
-    // Substitute bound identifiers with literal values.
-    std::string substitute(const std::string& expr) const {
+    // Substitution retains the NULL bitmap and SQL quoting. Qualified SQL
+    // references are indivisible: an unrelated scalar variable named `id`
+    // must not rewrite `source.id`. Explicit trigger bindings (NEW.id) remain
+    // available as complete dotted variable keys.
+    std::string substitute(const std::string& expr, bool sqlStatement = false) const {
         std::string out;
+        const auto protectedBytes = sqlProtectedBytes(expr);
+        struct SqlRole {
+            bool selectList = false;
+            bool projectionMayEnd = false;
+            bool distinctOnExpected = false;
+            bool projectionModifierExpected = false;
+            bool projectionModifier = false;
+            bool fromClause = false;
+            bool relationExpected = false;
+            bool aliasExpected = false;
+            bool explicitAliasExpected = false;
+            bool cteList = false;
+            bool cteNameExpected = false;
+            bool cteColumnsExpected = false;
+            bool columnLabelsExpected = false;
+            bool identifiersAreLabels = false;
+            bool castFunctionExpected = false;
+            bool castFunction = false;
+            bool typeNameExpected = false;
+            bool typeClause = false;
+        };
+        std::vector<SqlRole> roles(1);
         size_t i = 0;
         while (i < expr.size()) {
-            if (expr[i] == '\'') {
-                out += expr[i];
-                size_t j = i + 1;
-                while (j < expr.size()) {
-                    out += expr[j];
-                    if (expr[j] == '\'') {
-                        if (j + 1 < expr.size() && expr[j + 1] == '\'') out += expr[++j];
-                        ++j;
-                        break;
-                    }
-                    ++j;
-                }
-                i = j;
+            if ((expr[i] == 'e' || expr[i] == 'E') && i + 1 < expr.size() &&
+                expr[i + 1] == '\'' && protectedBytes[i + 1] &&
+                (i == 0 || !sqlIdentifierContinuation(static_cast<unsigned char>(expr[i - 1])))) {
+                const size_t end = protectedUnitEnd(expr, i + 1);
+                out += expr.substr(i, end - i);
+                roles.back().projectionMayEnd = true;
+                i = end;
                 continue;
             }
-            if (std::isalpha(static_cast<unsigned char>(expr[i])) || expr[i] == '_') {
-                size_t j = i;
-                while (j < expr.size() &&
-                       (std::isalnum(static_cast<unsigned char>(expr[j])) || expr[j] == '_')) ++j;
-                std::string word = expr.substr(i, j - i);
-                // Dotted references (NEW.col / OLD.col / TG_OP style trigger
-                // variables): try progressively longer dotted keys so the
-                // whole reference resolves to one substitution.
-                size_t ext = j;
-                auto tryDotted = [&](size_t endPos) -> bool {
-                    std::string dotted = lowerCopy(expr.substr(i, endPos - i));
-                    auto dit = vars.find(dotted);
-                    if (dit == vars.end()) return false;
-                    const std::string& v = dit->second;
-                    bool numeric = !v.empty() &&
-                        v.find_first_not_of("0123456789.-") == std::string::npos;
-                    bool nullv = lowerCopy(v) == "null" || v.empty();
-                    if (nullv) out += "NULL";
-                    else if (numeric) out += v;
-                    else out += "'" + v + "'";
-                    return true;
-                };
-                bool matchedDotted = false;
-                while (ext + 1 < expr.size() && expr[ext] == '.' &&
-                       (std::isalpha(static_cast<unsigned char>(expr[ext + 1])) ||
-                        expr[ext + 1] == '_')) {
-                    size_t k = ext + 1;
-                    while (k < expr.size() &&
-                           (std::isalnum(static_cast<unsigned char>(expr[k])) ||
-                            expr[k] == '_')) ++k;
-                    if (tryDotted(k)) {
-                        matchedDotted = true;
-                        i = k;
+            if (protectedBytes[i] && expr[i] != '"') {
+                const size_t end = protectedUnitEnd(expr, i);
+                out += expr.substr(i, end - i);
+                if (expr[i] == '\'' || expr[i] == '$')
+                    roles.back().projectionMayEnd = true;
+                i = end;
+                continue;
+            }
+            std::string name;
+            size_t end;
+            if (readIdentifier(expr, i, name, end)) {
+                const bool quoted = expr[i] == '"';
+                size_t next = skipLeadingSqlTrivia(expr, end);
+                while (next != std::string::npos && next < expr.size() && expr[next] == '.') {
+                    const size_t component = skipLeadingSqlTrivia(expr, next + 1);
+                    std::string field;
+                    size_t fieldEnd;
+                    if (component == std::string::npos ||
+                        !readIdentifier(expr, component, field, fieldEnd)) {
+                        // Also protect source.* from a scalar named source.
+                        if (component < expr.size() && expr[component] == '*') {
+                            end = component + 1;
+                            name += ".*";
+                        }
                         break;
                     }
-                    ext = k;
+                    name += "." + field;
+                    end = fieldEnd;
+                    next = skipLeadingSqlTrivia(expr, end);
                 }
-                if (matchedDotted) continue;
-                auto it = vars.find(lowerCopy(word));
-                if (it != vars.end()) {
-                    const std::string& v = it->second;
-                    bool numeric = !v.empty() &&
-                        v.find_first_not_of("0123456789.-") == std::string::npos;
-                    bool nullv = lowerCopy(v) == "null" || v.empty();
-                    if (nullv) out += "NULL";
-                    else if (numeric) out += v;
-                    else out += "'" + v + "'";
+                const auto variable = vars.find(name);
+                const bool functionCall = next != std::string::npos &&
+                    next < expr.size() && expr[next] == '(';
+                bool sqlRole = false;
+                SqlRole& role = roles.back();
+                static const std::set<std::string> typeQualifiers = {
+                    "precision", "varying", "with", "without", "time", "zone",
+                    "character"
+                };
+                if (role.typeNameExpected) {
+                    role.typeNameExpected = false;
+                    role.typeClause = true;
+                    sqlRole = true;
+                } else if (role.typeClause && !quoted && typeQualifiers.count(name)) {
+                    sqlRole = true;
                 } else {
-                    out += word;
+                    role.typeClause = false;
                 }
-                i = j;
+                if (!quoted && name == "as" && role.castFunction) {
+                    role.typeNameExpected = true;
+                    sqlRole = true;
+                }
+                if (sqlStatement && !sqlRole) {
+                    if (role.identifiersAreLabels) {
+                        sqlRole = true;
+                    } else if (!quoted && name == "with") {
+                        role.cteList = true;
+                        role.cteNameExpected = true;
+                        sqlRole = true;
+                    } else if (role.cteNameExpected) {
+                        sqlRole = true;
+                        if (quoted || name != "recursive") {
+                            role.cteNameExpected = false;
+                            role.cteColumnsExpected = true;
+                        }
+                    } else if (!quoted && (name == "from" || name == "join")) {
+                        role.selectList = false;
+                        role.fromClause = true;
+                        role.relationExpected = true;
+                        role.aliasExpected = false;
+                        role.explicitAliasExpected = false;
+                        sqlRole = true;
+                    } else if (!quoted && (name == "select" || name == "where" ||
+                               name == "group" || name == "having" || name == "order" ||
+                               name == "limit" || name == "offset" || name == "union" ||
+                               name == "intersect" || name == "except" || name == "window")) {
+                        role = {};
+                        role.selectList = name == "select";
+                        sqlRole = true;
+                    } else if (!quoted && name == "as") {
+                        role.explicitAliasExpected = true;
+                        role.cteColumnsExpected = false;
+                        sqlRole = true;
+                    } else if (!quoted && (name == "on" || name == "using" ||
+                               name == "inner" || name == "left" || name == "right" ||
+                               name == "full" || name == "outer" || name == "cross" ||
+                               name == "natural")) {
+                        role.aliasExpected = false;
+                        role.columnLabelsExpected = name == "using";
+                        sqlRole = true;
+                    } else if (role.explicitAliasExpected) {
+                        // NOT MATERIALIZED belongs to CTE syntax, not to
+                        // the variable namespace or an output alias.
+                        if (!role.cteList || quoted || name != "not")
+                            role.explicitAliasExpected = false;
+                        role.aliasExpected = false;
+                        sqlRole = true;
+                    } else if (role.relationExpected) {
+                        sqlRole = true;
+                        if (quoted || (name != "lateral" && name != "only")) {
+                            role.relationExpected = false;
+                            role.aliasExpected = true;
+                        }
+                    } else if (role.aliasExpected) {
+                        role.aliasExpected = false;
+                        sqlRole = true;
+                    } else if (role.selectList && role.projectionMayEnd &&
+                               name.find('.') == std::string::npos) {
+                        // An optional projection alias follows a completed
+                        // expression and is immediately followed by the list
+                        // delimiter or a SELECT clause. Do not interpret an
+                        // operand after an operator as an alias.
+                        bool aliasEnd = next == std::string::npos || next == expr.size() ||
+                            (next < expr.size() && (expr[next] == ',' || expr[next] == ';' ||
+                                                  expr[next] == ')'));
+                        if (!aliasEnd) {
+                            std::string following;
+                            size_t followingEnd;
+                            if (next < expr.size() && expr[next] != '"' &&
+                                readIdentifier(expr, next, following, followingEnd)) {
+                                static const std::set<std::string> clauses = {
+                                    "from", "where", "group", "having", "order", "limit",
+                                    "offset", "union", "intersect", "except", "window", "fetch", "for"
+                                };
+                                aliasEnd = clauses.count(following) != 0;
+                            }
+                        }
+                        sqlRole = aliasEnd;
+                    }
+                }
+                if (functionCall && !quoted && name == "cast")
+                    role.castFunctionExpected = true;
+                if (sqlStatement && role.selectList && !quoted && name == "distinct") {
+                    role.distinctOnExpected = true;
+                } else if (sqlStatement && role.selectList && !quoted && name == "on" &&
+                           role.distinctOnExpected) {
+                    role.projectionModifierExpected = true;
+                    role.distinctOnExpected = false;
+                } else if (role.distinctOnExpected) {
+                    role.distinctOnExpected = false;
+                }
+                if (variable == vars.end() || functionCall || sqlRole) {
+                    out += expr.substr(i, end - i);
+                } else {
+                    std::string literal;
+                    if (nullVars.count(name)) {
+                        literal = "NULL";
+                    } else {
+                        literal += '\'';
+                        for (const char c : variable->second) {
+                            literal += c;
+                            if (c == '\'') literal += c;
+                        }
+                        literal += '\'';
+                    }
+                    const auto type = variableTypes.find(name);
+                    if (sqlStatement && type != variableTypes.end() &&
+                        !type->second.empty() && lowerCopy(type->second) != "unknown")
+                        out += "CAST(" + literal + " AS " + type->second + ")";
+                    else out += literal;
+                }
+                static const std::set<std::string> incompleteExpressionWords = {
+                    "select", "as", "case", "when", "then", "else", "is", "not",
+                    "and", "or", "between", "like", "ilike", "in", "collate",
+                    "distinct", "all", "on"
+                };
+                role.projectionMayEnd = quoted || !incompleteExpressionWords.count(name);
+                i = end;
                 continue;
+            }
+            if (expr[i] == ':' && i + 1 < expr.size() && expr[i + 1] == ':') {
+                roles.back().typeNameExpected = true;
+                roles.back().projectionMayEnd = false;
+                out += "::";
+                i += 2;
+                continue;
+            }
+            if (expr[i] == '(') {
+                const bool labels = roles.back().cteColumnsExpected ||
+                    roles.back().columnLabelsExpected || roles.back().typeClause;
+                const bool castFunction = roles.back().castFunctionExpected;
+                const bool projectionModifier = roles.back().projectionModifierExpected;
+                roles.back().castFunctionExpected = false;
+                roles.back().projectionModifierExpected = false;
+                roles.back().columnLabelsExpected = false;
+                if (sqlStatement && roles.back().relationExpected) {
+                    roles.back().relationExpected = false;
+                    roles.back().aliasExpected = true;
+                }
+                roles.emplace_back();
+                roles.back().identifiersAreLabels = labels;
+                roles.back().castFunction = castFunction;
+                roles.back().projectionModifier = projectionModifier;
+            } else if (expr[i] == ')' && roles.size() > 1) {
+                const bool modifier = roles.back().projectionModifier;
+                roles.pop_back();
+                roles.back().projectionMayEnd = !modifier;
+            } else if (expr[i] == ',') {
+                roles.back().projectionMayEnd = false;
+                roles.back().typeClause = false;
+                if (sqlStatement && roles.back().cteList) {
+                    roles.back().cteNameExpected = true;
+                    roles.back().cteColumnsExpected = false;
+                    roles.back().explicitAliasExpected = false;
+                } else if (sqlStatement && roles.back().fromClause) {
+                    roles.back().relationExpected = true;
+                    roles.back().aliasExpected = false;
+                }
+            } else if (std::isdigit(static_cast<unsigned char>(expr[i])) || expr[i] == ']') {
+                roles.back().projectionMayEnd = true;
+            } else if (!std::isspace(static_cast<unsigned char>(expr[i]))) {
+                roles.back().projectionMayEnd = false;
+                if (expr[i] != '[') roles.back().typeClause = false;
             }
             out += expr[i++];
         }
@@ -578,39 +803,79 @@ struct Interp {
     // native evaluator understands are computed locally; anything else
     // (function calls, ||, column expressions) defers to the host.
     std::optional<std::string> eval(const std::string& raw,
-                                    bool* valueIsNull = nullptr) {
+                                    bool* valueIsNull = nullptr,
+                                    std::string* valueType = nullptr) {
         if (valueIsNull) *valueIsNull = false;
+        if (valueType) *valueType = "unknown";
         std::string expr = trimCopy(raw);
         if (expr.empty()) {
             if (valueIsNull) *valueIsNull = true;
             return std::string("null");
         }
         std::string low = lowerCopy(expr);
-        if (low == "true") return std::string("t");
-        if (low == "false") return std::string("f");
+        if (low == "true" || low == "false") {
+            if (valueType) *valueType = "boolean";
+            return std::string(low == "true" ? "t" : "f");
+        }
         if (low == "null") {
             if (valueIsNull) *valueIsNull = true;
             return std::string("null");
         }
         // numeric literal
         if (expr.find_first_not_of("0123456789.-") == std::string::npos && !expr.empty()) {
+            if (valueType) {
+                *valueType = expr.find('.') == std::string::npos ? "integer" : "numeric";
+                if (*valueType == "integer") {
+                    try {
+                        const auto number = std::stoll(expr);
+                        if (number < -2147483648LL || number > 2147483647LL)
+                            *valueType = "bigint";
+                    } catch (...) { *valueType = "numeric"; }
+                }
+            }
             return expr;
         }
         // quoted literal
-        if (expr.size() >= 2 && expr.front() == '\'' && expr.back() == '\'') {
-            return expr.substr(1, expr.size() - 2);
+        if (expr.size() >= 2 && expr.front() == '\'' && expr.back() == '\'' &&
+            protectedUnitEnd(expr, 0) == expr.size()) {
+            if (valueType) *valueType = "text";
+            std::string literal;
+            for (size_t i = 1; i + 1 < expr.size(); ++i) {
+                literal += expr[i];
+                if (expr[i] == '\'' && i + 2 < expr.size() && expr[i + 1] == '\'') ++i;
+            }
+            return literal;
         }
         // Preserve NULL identity for variables instead of confusing it with
         // the perfectly valid text value "null".
-        if (expr.find_first_not_of(
-                "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_") ==
-            std::string::npos) {
-            const std::string name = lowerCopy(expr);
+        std::string name;
+        size_t nameEnd;
+        if (readIdentifier(expr, 0, name, nameEnd) && nameEnd == expr.size()) {
             auto variable = vars.find(name);
             if (variable != vars.end()) {
                 if (valueIsNull) *valueIsNull = nullVars.count(name) != 0;
+                if (valueType) {
+                    const auto type = variableTypes.find(name);
+                    if (type != variableTypes.end()) *valueType = type->second;
+                }
                 return variable->second;
             }
+        }
+        if (host.evalExprTyped) {
+            const auto result = host.evalExprTyped(expr, vars, nullVars, variableTypes);
+            if (!result.ok) {
+                fail(result.message.empty() ? "expression evaluation failed" : result.message,
+                     result.sqlState);
+                return std::nullopt;
+            }
+            if (result.rowCount != 1 || result.columnCount != 1 || result.firstRow.size() != 1) {
+                fail("expression evaluator returned invalid scalar metadata");
+                return std::nullopt;
+            }
+            if (valueIsNull) *valueIsNull = !result.firstRow.front();
+            if (valueType && result.columnTypes.size() == 1)
+                *valueType = result.columnTypes.front();
+            return result.firstRow.front().value_or("null");
         }
         auto native = nativeEval(expr);
         if (native) return native;
@@ -619,6 +884,29 @@ struct Interp {
             if (v) return *v;
         }
         return std::nullopt;
+    }
+
+    bool assignValue(const std::string& name,
+                     std::optional<std::string> value,
+                     const std::string& sourceType) {
+        const auto target = variableTypes.find(name);
+        if (host.coerceValueTyped && target != variableTypes.end() &&
+            !target->second.empty() && lowerCopy(target->second) != "unknown") {
+            const auto coerced = host.coerceValueTyped(value, sourceType, target->second);
+            if (!coerced.ok)
+                return fail(coerced.message.empty() ? "variable assignment failed" : coerced.message,
+                            coerced.sqlState);
+            if (coerced.rowCount != 1 || coerced.columnCount != 1 ||
+                coerced.firstRow.size() != 1)
+                return fail("variable coercion returned invalid scalar metadata");
+            value = coerced.firstRow.front();
+        }
+        vars[name] = value.value_or("null");
+        if (value) nullVars.erase(name);
+        else nullVars.insert(name);
+        if (target == variableTypes.end() && !sourceType.empty())
+            variableTypes[name] = sourceType;
+        return true;
     }
 
     // Tiny fallback evaluator: AND/OR/NOT + numeric comparisons + +-*/ on
@@ -791,7 +1079,7 @@ struct Interp {
     bool execCompound(const CompoundStmt& c) {
         for (const auto& s : c.body) {
             if (!budget()) return false;
-            if (!exec(*s)) return false;
+            if (!exec(*s) || !error.empty()) return false;
             if (hasReturn || exitLoop) return true;
         }
         return true;
@@ -800,16 +1088,14 @@ struct Interp {
     bool exec(const Stmt& s) {
         if (auto* a = dynamic_cast<const AssignStmt*>(&s)) {
             bool valueIsNull = false;
-            auto v = eval(a->expr, &valueIsNull);
+            std::string valueType;
+            auto v = eval(a->expr, &valueIsNull, &valueType);
             if (!v) return fail("assignment evaluation failed: " + a->expr.substr(0, 40));
-            vars[a->var] = *v;
-            if (valueIsNull) nullVars.insert(a->var);
-            else nullVars.erase(a->var);
-            return true;
+            return assignValue(a->var, valueIsNull ? std::nullopt : v, valueType);
         }
         if (auto* r = dynamic_cast<const ReturnStmt*>(&s)) {
             if (r->hasExpr) {
-                auto v = eval(r->expr, &returnIsNull);
+                auto v = eval(r->expr, &returnIsNull, &returnType);
                 if (!v) return fail("RETURN evaluation failed: " + r->expr.substr(0, 40));
                 returnValue = *v;
             } else {
@@ -884,10 +1170,39 @@ struct Interp {
                 return fail("FOR range not numeric");
             }
             long long a = std::stoll(*fromV), b = std::stoll(*toV);
+            // Integer FOR declares an iterator local to this loop. Its
+            // numeric value must not inherit a same-named outer NULL bit,
+            // and nested loops/RETURN/errors restore that outer binding.
+            struct IteratorScope {
+                std::map<std::string, std::string>& values;
+                std::set<std::string>& nulls;
+                std::map<std::string, std::string>& types;
+                std::string name;
+                std::optional<std::string> previous;
+                bool previousIsNull;
+                std::optional<std::string> previousType;
+                ~IteratorScope() {
+                    if (previous) values[name] = *previous;
+                    else values.erase(name);
+                    if (previousIsNull) nulls.insert(name);
+                    else nulls.erase(name);
+                    if (previousType) types[name] = *previousType;
+                    else types.erase(name);
+                }
+            };
+            const auto previous = vars.find(f->var);
+            const auto previousType = variableTypes.find(f->var);
+            IteratorScope iteratorScope{vars, nullVars, variableTypes, f->var,
+                previous == vars.end() ? std::nullopt : std::optional<std::string>{previous->second},
+                nullVars.count(f->var) != 0,
+                previousType == variableTypes.end() ? std::nullopt :
+                    std::optional<std::string>{previousType->second}};
+            variableTypes[f->var] = "integer";
             if (!f->reverse) {
                 for (long long i = a; i <= b; ++i) {
                     if (!budget()) return false;
                     vars[f->var] = std::to_string(i);
+                    nullVars.erase(f->var);
                     exitLoop = false;
                     if (!execCompound(f->body)) return false;
                     if (hasReturn) return true;
@@ -897,6 +1212,7 @@ struct Interp {
                 for (long long i = a; i >= b; --i) {
                     if (!budget()) return false;
                     vars[f->var] = std::to_string(i);
+                    nullVars.erase(f->var);
                     exitLoop = false;
                     if (!execCompound(f->body)) return false;
                     if (hasReturn) return true;
@@ -914,45 +1230,87 @@ struct Interp {
     bool execSql(const std::string& stmtText) {
         std::string sql = trimCopy(stmtText);
         if (sql.empty()) return true;
-        std::string low = lowerCopy(sql);
-        if (low.compare(0, 6, "select") == 0) {
-            // top-level " into " detection
-            bool inS = false; int depth = 0;
-            size_t intoPos = std::string::npos;
-            for (size_t i = 0; i + 5 <= sql.size(); ++i) {
-                char c = sql[i];
-                if (inS) { if (c == '\'') inS = false; continue; }
-                if (c == '\'') { inS = true; continue; }
-                if (c == '(') { ++depth; continue; }
-                if (c == ')') { --depth; continue; }
-                if (depth == 0 && lowerCopy(sql.substr(i, 5)) == " into" &&
-                    (i + 5 == sql.size() ||
-                     std::isspace(static_cast<unsigned char>(sql[i + 5])))) {
-                    intoPos = i;
-                    break;
-                }
-            }
+        const size_t selectPos = findTopLevelSqlKeyword(sql, "select");
+        const size_t first = skipLeadingSqlTrivia(sql);
+        const bool selectStatement = selectPos == first ||
+            findTopLevelSqlKeyword(sql, "with") == first;
+        if (selectStatement && selectPos != std::string::npos) {
+            const size_t intoPos = findTopLevelSqlKeyword(sql, "into");
             if (intoPos != std::string::npos) {
-                std::string selectPart = trimCopy(sql.substr(0, intoPos));
-                std::string intoPart = trimCopy(sql.substr(intoPos + 5));
+                Scanner targets(sql);
+                targets.pos = intoPos + 4;
+                const bool strict = targets.matchKeyword("strict");
                 std::vector<std::string> intoVars;
-                std::string cur;
-                for (char c : intoPart) {
-                    if (c == ',') { intoVars.push_back(lowerCopy(trimCopy(cur))); cur.clear(); }
-                    else cur += c;
+                size_t targetEnd = targets.pos;
+                while (true) {
+                    const std::string name = targets.ident();
+                    if (name.empty()) return fail("SELECT INTO: expected target variable", "42601");
+                    if (!vars.count(name)) {
+                        return fail("SELECT INTO: unknown target variable " + name, "42601");
+                    }
+                    intoVars.push_back(name);
+                    targetEnd = targets.pos;
+                    if (!targets.matchOp(",")) break;
                 }
-                intoVars.push_back(lowerCopy(trimCopy(cur)));
+                // Keep every SQL clause and protected byte outside INTO.
+                // A space prevents concatenating SELECT/target expressions
+                // when INTO has no surrounding whitespace (e.g. INTO "n").
+                std::string prefix = sql.substr(0, intoPos);
+                std::string suffix = sql.substr(targetEnd);
+                if (!prefix.empty() && !suffix.empty() &&
+                    std::isspace(static_cast<unsigned char>(prefix.back())) &&
+                    std::isspace(static_cast<unsigned char>(suffix.front()))) {
+                    suffix.erase(0, 1);
+                } else if (!prefix.empty() && !suffix.empty() &&
+                           !std::isspace(static_cast<unsigned char>(prefix.back())) &&
+                           !std::isspace(static_cast<unsigned char>(suffix.front()))) {
+                    prefix += ' ';
+                }
+                const std::string query = substitute(trimCopy(prefix + suffix), true);
+                if (host.query) {
+                    const PlPgsqlQueryResult result = host.query(query);
+                    if (!result.ok) {
+                        return fail(result.message.empty() ? "SELECT INTO failed" : result.message,
+                                    result.sqlState);
+                    }
+                    if (result.rowCount && result.firstRow.size() != result.columnCount) {
+                        return fail("SELECT INTO: invalid host result shape");
+                    }
+                    if (strict && !result.rowCount) return fail("query returned no rows", "P0002");
+                    if (strict && result.rowCount > 1) return fail("query returned more than one row", "P0003");
+                    for (size_t i = 0; i < intoVars.size(); ++i) {
+                        const auto value = result.rowCount && i < result.firstRow.size()
+                            ? result.firstRow[i] : std::nullopt;
+                        const std::string sourceType = i < result.columnTypes.size()
+                            ? result.columnTypes[i] : "unknown";
+                        if (!assignValue(intoVars[i], value, sourceType)) return false;
+                    }
+                    vars["found"] = result.rowCount ? "t" : "f";
+                    nullVars.erase("found");
+                    return true;
+                }
                 if (!host.selectInto) return fail("SELECT INTO unsupported by host");
-                int rc = host.selectInto(substitute(selectPart), intoVars, vars);
-                if (rc == 2) return fail("SELECT INTO failed");
-                if (rc == 1) {
-                    for (const auto& v : intoVars) vars[v] = "null";
+                if (strict) return fail("SELECT INTO STRICT requires a row-count-aware host", "0A000");
+                // Compatibility adapter: the historical callback accepts
+                // SELECT-rest, not the whole SELECT. It cannot represent a
+                // per-cell NULL bitmap or count multiple rows.
+                const size_t querySelect = findTopLevelSqlKeyword(query, "select");
+                if (querySelect != skipLeadingSqlTrivia(query)) {
+                    return fail("CTE SELECT INTO requires a complete-query host", "0A000");
                 }
+                const int rc = host.selectInto(trimCopy(query.substr(querySelect + 6)), intoVars, vars);
+                if (rc != 0 && rc != 1) return fail("SELECT INTO failed");
+                for (const auto& v : intoVars) {
+                    if (rc == 1) { vars[v] = "null"; nullVars.insert(v); }
+                    else nullVars.erase(v);
+                }
+                vars["found"] = rc ? "f" : "t";
+                nullVars.erase("found");
                 return true;
             }
         }
         if (!host.execStmt) return fail("SQL execution unsupported by host");
-        if (!host.execStmt(substitute(sql), vars)) {
+        if (!host.execStmt(substitute(sql, true), vars)) {
             return fail("SQL failed: " + sql.substr(0, 60));
         }
         return true;
@@ -971,22 +1329,28 @@ bool PlPgsql::run(const std::string& body,
                   std::string& error,
                   NoticeSink notice,
                   bool* returnIsNull,
-                  const std::set<std::string>* nullParams) {
+                  const std::set<std::string>* nullParams,
+                  std::string* errorSqlState,
+                  std::string* returnType) {
     using namespace plpgsql_impl;
     returnValue.clear();
     error.clear();
+    if (errorSqlState) errorSqlState->clear();
+    if (returnType) *returnType = "unknown";
     if (returnIsNull) *returnIsNull = false;
 
     Parser parser(body);
-    std::map<std::string, std::string> defaults;
+    std::vector<Declaration> defaults;
     parser.sc.matchKeyword("declare");  // optional leading DECLARE section
     if (!parser.parseDeclares(defaults)) {
         error = parser.error.empty() ? "DECLARE parse failed" : parser.error;
+        if (errorSqlState) *errorSqlState = "42601";
         return false;
     }
     CompoundStmt program;
     if (!parser.parseCompoundInto(program)) {
         error = parser.error.empty() ? "body parse failed" : parser.error;
+        if (errorSqlState) *errorSqlState = "42601";
         return false;
     }
     // trailing END (of BEGIN block): tolerate optional "end;" / "end;"
@@ -1005,26 +1369,42 @@ bool PlPgsql::run(const std::string& body,
     Interp interp(host, params, sink);
     if (nullParams) interp.nullVars.insert(nullParams->begin(), nullParams->end());
     for (const auto& d : defaults) {
-        if (interp.vars.count(d.first)) continue;
-        if (trimCopy(d.second).empty()) {
-            interp.vars[d.first] = "null";
-            interp.nullVars.insert(d.first);
+        if (interp.vars.count(d.name)) continue;
+        if (!d.type.empty()) interp.variableTypes[d.name] = d.type;
+        if (trimCopy(d.defaultExpr).empty()) {
+            if (!interp.assignValue(d.name, std::nullopt, "unknown")) {
+                error = interp.error;
+                if (errorSqlState) *errorSqlState = interp.errorSqlState;
+                return false;
+            }
             continue;
         }
         // Evaluate the default expression in an environment holding only
         // previously declared defaults (PL/pgSQL allows earlier vars).
         bool valueIsNull = false;
-        auto v = interp.eval(d.second, &valueIsNull);
-        interp.vars[d.first] = v ? *v : d.second;
-        if (valueIsNull) interp.nullVars.insert(d.first);
+        std::string valueType;
+        auto v = interp.eval(d.defaultExpr, &valueIsNull, &valueType);
+        if (!interp.error.empty()) {
+            error = interp.error;
+            if (errorSqlState) *errorSqlState = interp.errorSqlState;
+            return false;
+        }
+        if (!interp.assignValue(d.name, valueIsNull ? std::nullopt :
+                std::optional<std::string>{v.value_or(d.defaultExpr)}, valueType)) {
+            error = interp.error;
+            if (errorSqlState) *errorSqlState = interp.errorSqlState;
+            return false;
+        }
     }
     if (!interp.execCompound(program)) {
         error = interp.error.empty() ? "runtime error" : interp.error;
+        if (errorSqlState) *errorSqlState = interp.errorSqlState.empty() ? "XX000" : interp.errorSqlState;
         return false;
     }
     if (interp.hasReturn) {
         returnValue = interp.returnValue;
         if (returnIsNull) *returnIsNull = interp.returnIsNull;
+        if (returnType) *returnType = interp.returnType;
         return true;
     }
     // no RETURN: function body ends (NULL for functions)

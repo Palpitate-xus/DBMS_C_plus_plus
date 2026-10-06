@@ -22,6 +22,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <functional>
 #include <map>
 #include <optional>
@@ -30,6 +31,18 @@
 #include <vector>
 
 namespace dbms {
+
+// SQL NULL has its own bit: empty text and the text "null" are ordinary
+// values. Hosts must retain row/column counts even when no first row exists.
+struct PlPgsqlQueryResult {
+    bool ok = false;
+    size_t columnCount = 0;
+    size_t rowCount = 0;
+    std::vector<std::string> columnTypes;
+    std::vector<std::optional<std::string>> firstRow;
+    std::string sqlState;
+    std::string message;
+};
 
 // Callbacks the interpreter needs from the host.
 struct PlPgsqlHost {
@@ -47,6 +60,24 @@ struct PlPgsqlHost {
     std::function<int(const std::string& selectRest,
                       const std::vector<std::string>& intoVars,
                       std::map<std::string, std::string>& vars)> selectInto;
+    // Preferred SELECT INTO boundary: receives the whole SELECT with only
+    // the procedural INTO target list removed and variables substituted.
+    std::function<PlPgsqlQueryResult(const std::string& sql)> query;
+    // Preferred scalar-expression boundary. Expressions and bindings remain
+    // separate, so text that looks numeric never acquires a numeric type.
+    // A successful result contains exactly one nullable row/column cell.
+    std::function<PlPgsqlQueryResult(const std::string& expr,
+                                    const std::map<std::string, std::string>& vars,
+                                    const std::set<std::string>& nullVars,
+                                    const std::map<std::string, std::string>& variableTypes)>
+        evalExprTyped;
+    std::map<std::string, std::string> parameterTypes;
+    // Assignment/default/INTO coercion uses the source SQL type, not the
+    // textual spelling of a value. The result has the same scalar shape.
+    std::function<PlPgsqlQueryResult(const std::optional<std::string>& value,
+                                    const std::string& sourceType,
+                                    const std::string& targetType)>
+        coerceValueTyped;
 };
 
 class PlPgsql {
@@ -63,7 +94,9 @@ public:
                     std::string& error,
                     NoticeSink notice = nullptr,
                     bool* returnIsNull = nullptr,
-                    const std::set<std::string>* nullParams = nullptr);
+                    const std::set<std::string>* nullParams = nullptr,
+                    std::string* errorSqlState = nullptr,
+                    std::string* returnType = nullptr);
 };
 
 }  // namespace dbms

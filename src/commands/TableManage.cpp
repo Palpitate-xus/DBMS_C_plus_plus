@@ -31353,6 +31353,34 @@ std::vector<std::string> StorageEngine::query(
 // Shared UDF-body executor: evaluates a stored UDF (SQL or PL/pgSQL) with
 // literal argument values.  Used by scalar-function dispatch and by
 // StorageEngine::callUDF (trigger EXECUTE FUNCTION actions).
+PlPgsqlQueryResult StorageEngine::plpgsqlQuery(const std::string& dbname,
+                                             const std::string& sql) const {
+    if (plpgsqlQueryExecutor_) return plpgsqlQueryExecutor_(dbname, sql);
+    return plpgsqlQueryNative(dbname, sql);
+}
+
+static PlPgsqlQueryResult plpgsqlScalarResult(const ExprEvalResult& value) {
+    PlPgsqlQueryResult result;
+    if (!value.ok) {
+        result.sqlState = "XX000";
+        result.message = value.error;
+        const size_t marker = value.error.rfind("(SQLSTATE ");
+        if (marker != std::string::npos && marker + 16 == value.error.size() &&
+            value.error.back() == ')') {
+            const std::string state = value.error.substr(marker + 10, 5);
+            if (state.find_first_not_of("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ") == std::string::npos)
+                result.sqlState = state;
+        }
+        return result;
+    }
+    result.ok = true;
+    result.columnCount = result.rowCount = 1;
+    result.columnTypes = {value.typeName};
+    result.firstRow = {value.isNull ? std::nullopt
+        : std::optional<std::string>{value.value}};
+    return result;
+}
+
 static bool evalUDFBody(const StorageEngine::UDFInfo& udf,
                         const std::string& funcName,
                         const std::vector<std::string>& argValues,
@@ -31362,6 +31390,29 @@ static bool evalUDFBody(const StorageEngine::UDFInfo& udf,
                         const std::map<std::string, std::string>* extraVars,
                         bool* returnIsNull,
                         const std::vector<bool>* argNulls) {
+    // SQL dispatched by a stored body can invoke that body again. Each
+    // interpreter owns a separate step budget, so also bound the native
+    // call stack and restore the counter on every error/return. The stack
+    // watermark handles the much larger full-query dispatcher frames.
+    struct CallBudget {
+        unsigned depth = 0;
+        uintptr_t origin = 0;
+    };
+    static thread_local CallBudget budget;
+    const char stackMarker = 0;
+    const uintptr_t position = reinterpret_cast<uintptr_t>(&stackMarker);
+    const uintptr_t stackUsed = budget.origin > position
+        ? budget.origin - position : position - budget.origin;
+    if (budget.depth >= 128 || (budget.depth && stackUsed > 2 * 1024 * 1024))
+        throw DbError("54001", "stored-function call stack limit exceeded");
+    struct CallScope {
+        CallBudget& budget;
+        CallScope(CallBudget& state, uintptr_t position) : budget(state) {
+            if (!budget.depth) budget.origin = position;
+            ++budget.depth;
+        }
+        ~CallScope() { if (!--budget.depth) budget.origin = 0; }
+    } callScope(budget, position);
     (void)funcName;
     if (returnIsNull) *returnIsNull = false;
     std::vector<std::string> funcArgs = argValues;
@@ -31389,12 +31440,15 @@ static bool evalUDFBody(const StorageEngine::UDFInfo& udf,
         std::map<std::string, std::string> row{{binding, value}};
         std::map<std::string, std::string> hints{
             {binding, sourceType.empty() ? "text" : sourceType}};
-        const auto converted = ExprHelper::evalString(
+        const auto converted = ExprHelper::evalStringWithNulls(
             "CAST(" + binding + " AS " + udf.returnType + ")",
-            row, hints, dbname);
-        if (!converted.ok || converted.isNull) return false;
-        returnValue = converted.value;
-        if (returnIsNull) *returnIsNull = false;
+            row, {}, hints, dbname);
+        if (!converted.ok) {
+            const auto failure = plpgsqlScalarResult(converted);
+            throw DbError(failure.sqlState, failure.message);
+        }
+        returnValue = converted.isNull ? std::string{} : converted.value;
+        if (returnIsNull) *returnIsNull = converted.isNull;
         return true;
     };
     if (udf.language == "plpgsql") {
@@ -31414,6 +31468,45 @@ static bool evalUDFBody(const StorageEngine::UDFInfo& udf,
             }
         }
         PlPgsqlHost host;
+        for (size_t i = 0; i < udf.paramNames.size() && i < udf.paramTypes.size(); ++i)
+            host.parameterTypes[udf.paramNames[i]] = udf.paramTypes[i];
+        host.evalExprTyped = [&dbname](const std::string& expression,
+                                      const std::map<std::string, std::string>& variables,
+                                      const std::set<std::string>& nullVariables,
+                                      const std::map<std::string, std::string>& types) {
+            try {
+                const Session* session = currentSession();
+                return plpgsqlScalarResult(ExprHelper::evalStringWithNulls(
+                    expression, variables, nullVariables, types, dbname,
+                    session ? session->username : std::string{}));
+            } catch (const DbError& error) {
+                PlPgsqlQueryResult result;
+                result.sqlState = error.sqlState();
+                result.message = error.message();
+                return result;
+            }
+        };
+        host.coerceValueTyped = [&dbname](const std::optional<std::string>& value,
+                                         const std::string& sourceType,
+                                         const std::string& targetType) {
+            const std::string key = "__plpgsql_assignment";
+            const std::map<std::string, std::string> values{{key, value.value_or("")}};
+            const std::set<std::string> nulls = value
+                ? std::set<std::string>{} : std::set<std::string>{key};
+            const std::map<std::string, std::string> types{
+                {key, sourceType.empty() ? "text" : sourceType}};
+            try {
+                const Session* session = currentSession();
+                return plpgsqlScalarResult(ExprHelper::evalStringWithNulls(
+                    "CAST(" + key + " AS " + targetType + ")", values,
+                    nulls, types, dbname, session ? session->username : std::string{}));
+            } catch (const DbError& error) {
+                PlPgsqlQueryResult result;
+                result.sqlState = error.sqlState();
+                result.message = error.message();
+                return result;
+            }
+        };
         host.evalExpr = [](const std::string& e,
                            const std::map<std::string, std::string>&) {
             auto r = ExprHelper::evalString(e, {});
@@ -31425,28 +31518,17 @@ static bool evalUDFBody(const StorageEngine::UDFInfo& udf,
             auto rc = engine->plpgsqlExecSql(dbname, sql, nullptr);
             return rc.first;
         };
-        host.selectInto = [engine, &dbname](const std::string& selectRest,
-                                            const std::vector<std::string>& intoVars,
-                                            std::map<std::string, std::string>& vars) {
-            std::string low;
-            for (char ch : selectRest)
-                low += static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-            size_t fpos = low.find(" from ");
-            std::string list = fpos == std::string::npos ? selectRest : selectRest.substr(0, fpos);
-            std::string from = fpos == std::string::npos ? "" : selectRest.substr(fpos + 6);
-            size_t wpos = low.find(" where ");
-            if (wpos != std::string::npos) {
-                return 2;
-            }
-            return engine->plpgsqlSelectInto(dbname, list, from, "", intoVars, vars);
+        host.query = [engine, &dbname](const std::string& sql) {
+            return engine->plpgsqlQuery(dbname, sql);
         };
-        std::string rv, err;
+        std::string rv, err, sqlState, plpgsqlReturnType;
         bool plpgsqlIsNull = false;
         if (!PlPgsql::run(udf.expression, params, host, rv, err, nullptr,
-                          &plpgsqlIsNull, &nullParams)) {
+                          &plpgsqlIsNull, &nullParams, &sqlState, &plpgsqlReturnType)) {
+            if (!sqlState.empty()) throw DbError(sqlState, err);
             return false;
         }
-        return coerceReturn(rv, plpgsqlIsNull, "text");
+        return coerceReturn(rv, plpgsqlIsNull, plpgsqlReturnType);
     }
 
     // SQL scalar functions in this engine are deliberately limited to one
@@ -49659,73 +49741,519 @@ std::pair<bool, size_t> StorageEngine::plpgsqlExecSql(
     return {false, 0};
 }
 
+// The native host is deliberately a single-table/scalar executor. Session
+// hosts use the registered full SQL dispatcher instead; unsupported shapes
+// here must fail, never discard a query clause and return a plausible row.
+PlPgsqlQueryResult StorageEngine::plpgsqlQueryNative(
+    const std::string& dbname, const std::string& sql) const {
+    PlPgsqlQueryResult result;
+    const auto fail = [&](const std::string& state, const std::string& message) {
+        result.sqlState = state;
+        result.message = message;
+        return result;
+    };
+    try {
+        const auto tokens = SQLParser::tokenize(sql);
+        if (tokens.empty()) return fail("42601", "empty PL/pgSQL query");
+        for (size_t i = 0; i < tokens.size(); ++i) {
+            if (tokens[i] == ";" && i + 1 != tokens.size())
+                return fail("42601", "native PL/pgSQL query requires one statement");
+            const std::string keyword = SQLParser::toLower(tokens[i]);
+            if (keyword == "window" || keyword == "tablesample" ||
+                keyword == "lateral" || keyword == "into")
+                return fail("0A000", "query requires a full SQL execution host");
+        }
+        SQLParser parser;
+        auto parsed = parser.parse(sql);
+        if (!parsed.success || !parsed.stmt)
+            return fail("42601", parsed.error.empty()
+                ? "invalid PL/pgSQL query" : parsed.error);
+        auto* select = dynamic_cast<SelectStmt*>(parsed.stmt.get());
+        if (!select || parsed.stmt->command != SqlCommand::Select ||
+            !select->ctes.empty() || select->setOp != SetOp::None ||
+            select->setOpLhs || select->setOpRhs || select->distinct ||
+            !select->distinctOn.empty() || !select->groupBy.empty() ||
+            !select->groupByElems.empty() || select->having ||
+            !select->windowDefs.empty() || !select->locking.empty() ||
+            !select->valuesRows.empty() || select->withTies ||
+            (select->fromClause &&
+             select->fromClause->type != FromItem::Type::Table))
+            return fail("0A000", "query requires a full SQL execution host");
+        if (select->selectList.empty())
+            return fail("42601", "SELECT requires a projection");
+
+        // parseSelect is transitional and can leave trailing tokens behind.
+        // Check the native subset's clause boundaries rather than silently
+        // accepting an ignored relation suffix or LIMIT/OFFSET tail.
+        size_t fromBegin = tokens.size(), fromEnd = tokens.size();
+        size_t whereBegin = tokens.size(), whereEnd = tokens.size();
+        size_t pageBegin = tokens.size();
+        int depth = 0;
+        for (size_t i = 1; i < tokens.size(); ++i) {
+            if (tokens[i] == "(" || tokens[i] == "[") { ++depth; continue; }
+            if (tokens[i] == ")" || tokens[i] == "]") { --depth; continue; }
+            if (depth) continue;
+            const std::string keyword = SQLParser::toLower(tokens[i]);
+            const bool clause = keyword == "from" || keyword == "where" ||
+                keyword == "order" || keyword == "limit" || keyword == "offset" ||
+                keyword == "fetch" || tokens[i] == ";";
+            if (clause) {
+                if (fromBegin < i && fromEnd == tokens.size()) fromEnd = i;
+                if (whereBegin < i && whereEnd == tokens.size()) whereEnd = i;
+            }
+            if (keyword == "from") fromBegin = i;
+            if (keyword == "where") whereBegin = i;
+            if ((keyword == "limit" || keyword == "offset") && pageBegin == tokens.size())
+                pageBegin = i;
+        }
+        if (select->fetchFirst)
+            return fail("0A000", "FETCH requires a full SQL execution host");
+        if (fromBegin < tokens.size()) {
+            size_t pos = fromBegin + 1;
+            if (pos >= fromEnd) return fail("42601", "FROM requires a relation");
+            ++pos;
+            if (pos < fromEnd && tokens[pos] == ".") pos += 2;
+            if (pos < fromEnd && SQLParser::toLower(tokens[pos]) == "as") ++pos;
+            if (pos < fromEnd) ++pos; // optional relation alias
+            if (pos != fromEnd)
+                return fail("42601", "unexpected tokens in native FROM clause");
+        }
+        if (whereBegin < tokens.size()) {
+            std::string predicate = "SELECT";
+            for (size_t i = whereBegin + 1; i < whereEnd; ++i) predicate += " " + tokens[i];
+            auto check = parser.parse(predicate);
+            const auto* single = check.stmt
+                ? dynamic_cast<const SelectStmt*>(check.stmt.get()) : nullptr;
+            if (!check.success || !single || single->selectList.size() != 1 ||
+                !single->selectList[0].alias.empty() || !single->selectList[0].expr)
+                return fail("42601", "invalid native WHERE expression");
+        }
+        if (pageBegin < tokens.size()) {
+            const size_t end = tokens.back() == ";" ? tokens.size() - 1 : tokens.size();
+            size_t pos = pageBegin;
+            if (SQLParser::toLower(tokens[pos]) == "limit") {
+                ++pos;
+                if (pos < end && tokens[pos] == "+") ++pos;
+                if (pos < end) ++pos;
+            }
+            if (pos < end && SQLParser::toLower(tokens[pos]) == "offset") {
+                ++pos;
+                if (pos < end && tokens[pos] == "+") ++pos;
+                if (pos < end) ++pos;
+                if (pos < end && (SQLParser::toLower(tokens[pos]) == "row" ||
+                                  SQLParser::toLower(tokens[pos]) == "rows")) ++pos;
+            }
+            if (pos != end)
+                return fail("42601", "unexpected tokens after LIMIT/OFFSET");
+        }
+
+        const auto identifier = [](const std::string& name) {
+            CatalogManager::QualifiedName decoded;
+            if (!CatalogManager::parseQualifiedName(name, decoded, true) ||
+                !decoded.schema.empty())
+                throw DbError("42601", "invalid SQL identifier: " + name);
+            return decoded.name;
+        };
+        CatalogManager::QualifiedName relation;
+        std::string table, visibleRange;
+        TableSchema schema;
+        std::map<std::string, size_t> columnPositions;
+        std::map<std::string, std::string> typeHints;
+        std::map<std::string, Column> comparisonColumns;
+        std::vector<std::string> columnKeys;
+        if (select->fromClause) {
+            const auto& from = *select->fromClause;
+            if (!CatalogManager::parseQualifiedName(from.tableName, relation, true))
+                return fail("42601", "invalid relation name");
+            table = relation.schema.empty() || relation.schema == "public"
+                ? relation.name : relation.schema + "__" + relation.name;
+            if (!tableExists(dbname, table))
+                return fail("42P01", "relation does not exist: " + from.tableName);
+            schema = getTableSchema(dbname, table);
+            visibleRange = from.alias.empty() ? relation.name : identifier(from.alias);
+            for (size_t i = 0; i < schema.len; ++i) {
+                columnPositions.emplace(schema.cols[i].dataName, i);
+                const std::string key = "__dbms_plpgsql_col_" + std::to_string(i);
+                columnKeys.push_back(key);
+                typeHints[key] = schema.cols[i].dataType +
+                    (schema.cols[i].isArray ? "[]" : "");
+                comparisonColumns.emplace(key, schema.cols[i]);
+            }
+        }
+
+        ExprEvaluator evaluator;
+        evaluator.setCurrentDB(dbname);
+        const auto validRange = [&](const ColumnRefExpr& column) {
+            if (!select->fromClause) return false;
+            if (!column.table.empty() && column.table != visibleRange)
+                return false;
+            if (!column.schema.empty()) {
+                if (!select->fromClause->alias.empty()) return false;
+                const std::string sourceSchema = relation.schema.empty()
+                    ? "public" : relation.schema;
+                if (column.schema != sourceSchema) return false;
+            }
+            return true;
+        };
+        std::function<void(Expr*)> bind;
+        bind = [&](Expr* expression) {
+            if (!expression) throw DbError("42601", "missing SELECT expression");
+            if (auto* column = dynamic_cast<ColumnRefExpr*>(expression)) {
+                if ((!column->table.empty() || !column->schema.empty()) &&
+                    !validRange(*column))
+                    throw DbError("42P01", "missing FROM-clause entry for table " + column->table);
+                // ColumnRefExpr fields were decoded and case-folded exactly
+                // once by the parser. Only raw FROM/AS token spellings need
+                // identifier(); applying it again changes "ID" to id and
+                // misinterprets a delimited column containing a dot.
+                const auto position = columnPositions.find(column->column);
+                if (position == columnPositions.end())
+                    throw DbError("42703", "column does not exist: " + column->toString());
+                // Positional keys avoid RowContext's case folding collapsing
+                // distinct delimited columns such as id and "ID".
+                column->column = columnKeys[position->second];
+                column->table.clear();
+                column->schema.clear();
+            } else if (auto* unary = dynamic_cast<UnaryOpExpr*>(expression)) {
+                bind(unary->operand.get());
+            } else if (auto* binary = dynamic_cast<BinaryOpExpr*>(expression)) {
+                bind(binary->left.get());
+                // :: stores the type spelling, not a value expression.
+                if (binary->op != "::") {
+                    auto* list = dynamic_cast<RowExpr*>(binary->right.get());
+                    const std::string op = SQLParser::toLower(binary->op);
+                    if (list && (op == "in" || op == "not in")) {
+                        for (auto& item : list->elements) bind(item.get());
+                    } else bind(binary->right.get());
+                }
+            } else if (auto* cast = dynamic_cast<CastExpr*>(expression)) {
+                bind(cast->operand.get());
+            } else if (auto* conditional = dynamic_cast<CaseExpr*>(expression)) {
+                if (conditional->switchExpr) bind(conditional->switchExpr.get());
+                for (auto& arm : conditional->whenClauses) {
+                    bind(arm.first.get());
+                    bind(arm.second.get());
+                }
+                if (conditional->elseExpr) bind(conditional->elseExpr.get());
+            } else if (auto* function = dynamic_cast<FunctionCallExpr*>(expression)) {
+                static const std::set<std::string> aggregates = {
+                    "count", "sum", "avg", "min", "max", "bool_and", "bool_or",
+                    "every", "array_agg", "string_agg", "json_agg", "jsonb_agg",
+                    "json_object_agg", "jsonb_object_agg", "bit_and", "bit_or",
+                    "bit_xor", "stddev", "stddev_pop", "stddev_samp", "variance",
+                    "var_pop", "var_samp", "corr", "covar_pop", "covar_samp",
+                    "percentile_cont", "percentile_disc", "mode"
+                };
+                const std::string name = identifier(function->funcName);
+                if (name == "row" || function->hasOver || function->filter || function->distinct ||
+                    !function->orderBy.empty() || !function->namedArgs.empty() ||
+                    aggregates.count(name) || (!function->schema.empty() &&
+                    identifier(function->schema) != "pg_catalog"))
+                    throw DbError("0A000", "expression requires a full SQL execution host");
+                static const std::set<std::string> syntaxFunctions = {
+                    "coalesce", "nullif", "greatest", "least", "make_interval",
+                    "between", "not between", "like escape", "not like escape",
+                    "ilike escape", "not ilike escape", "similar to escape",
+                    "not similar to escape"
+                };
+                if (name != SQLParser::toLower(name) ||
+                    (!evaluator.hasFunction(name) && !syntaxFunctions.count(name)))
+                    throw DbError("42883", "function does not exist: " + function->funcName);
+                function->funcName = name;
+                for (auto& argument : function->args) bind(argument.get());
+            } else if (expression->type != ExprType::Literal) {
+                throw DbError("0A000", "expression requires a full SQL execution host");
+            }
+        };
+
+        std::vector<SelectItem> projection;
+        for (auto& item : select->selectList) {
+            const auto* column = dynamic_cast<const ColumnRefExpr*>(item.expr.get());
+            const bool star = item.expr && (item.expr->type == ExprType::A_Star ||
+                (column && column->column == "*"));
+            if (star) {
+                if (!item.alias.empty()) return fail("42601", "star cannot have an alias");
+                if (!select->fromClause) return fail("42601", "SELECT * requires a relation");
+                if (column && !validRange(*column))
+                    return fail("42P01", "missing FROM-clause entry for star qualifier");
+                for (size_t i = 0; i < schema.len; ++i) {
+                    SelectItem expanded;
+                    auto reference = std::make_unique<ColumnRefExpr>();
+                    reference->column = columnKeys[i];
+                    expanded.expr = std::move(reference);
+                    expanded.alias = "\"";
+                    for (char c : schema.cols[i].dataName) {
+                        expanded.alias += c;
+                        if (c == '"') expanded.alias += c;
+                    }
+                    expanded.alias += "\"";
+                    projection.push_back(std::move(expanded));
+                }
+            } else {
+                bind(item.expr.get());
+                projection.push_back(std::move(item));
+            }
+        }
+        if (select->whereClause) bind(select->whereClause.get());
+
+        // Serialize only for parse-only type inference. Execution uses the
+        // original tree so parentheses, CASE, IS NULL and empty text survive.
+        std::function<std::string(const Expr*)> expressionSql;
+        expressionSql = [&](const Expr* expression) -> std::string {
+            if (!expression) return "NULL";
+            if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(expression)) {
+                const std::string op = SQLParser::toLower(unary->op);
+                if (op.rfind("is ", 0) == 0 || op.rfind("collate ", 0) == 0)
+                    return "(" + expressionSql(unary->operand.get()) + " " + unary->op + ")";
+                if (op.rfind("at time zone ", 0) == 0) {
+                    std::string zone = unary->op.substr(13), quoted = "'";
+                    for (char c : zone) { quoted += c; if (c == '\'') quoted += c; }
+                    return "(" + expressionSql(unary->operand.get()) + " AT TIME ZONE " + quoted + "')";
+                }
+                return "(" + unary->op + " " + expressionSql(unary->operand.get()) + ")";
+            }
+            if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(expression)) {
+                if (binary->op == "[]" || binary->op == "[:]")
+                    return "(" + expressionSql(binary->left.get()) + ")[" +
+                        expressionSql(binary->right.get()) + "]";
+                return "(" + expressionSql(binary->left.get()) + " " + binary->op +
+                    " " + expressionSql(binary->right.get()) + ")";
+            }
+            if (const auto* function = dynamic_cast<const FunctionCallExpr*>(expression)) {
+                const std::string name = SQLParser::toLower(function->funcName);
+                if (name == "between" || name == "not between" ||
+                    name == "like escape" || name == "not like escape" ||
+                    name == "ilike escape" || name == "not ilike escape" ||
+                    name == "similar to escape" || name == "not similar to escape")
+                    return "TRUE"; // type-only spelling for parser-internal operators
+                std::string rendered = function->funcName + "(";
+                for (size_t i = 0; i < function->args.size(); ++i) {
+                    if (i) rendered += ",";
+                    rendered += expressionSql(function->args[i].get());
+                }
+                return rendered + ")";
+            }
+            if (const auto* cast = dynamic_cast<const CastExpr*>(expression)) {
+                std::string rendered = "CAST(" + expressionSql(cast->operand.get()) +
+                    " AS " + cast->typeName;
+                if (!cast->typeMods.empty()) {
+                    rendered += "(";
+                    for (size_t i = 0; i < cast->typeMods.size(); ++i) {
+                        if (i) rendered += ",";
+                        rendered += cast->typeMods[i];
+                    }
+                    rendered += ")";
+                }
+                return rendered + ")";
+            }
+            if (const auto* conditional = dynamic_cast<const CaseExpr*>(expression)) {
+                std::string rendered = "CASE";
+                if (conditional->switchExpr) rendered += " " + expressionSql(conditional->switchExpr.get());
+                for (const auto& arm : conditional->whenClauses)
+                    rendered += " WHEN " + expressionSql(arm.first.get()) +
+                        " THEN " + expressionSql(arm.second.get());
+                if (conditional->elseExpr) rendered += " ELSE " + expressionSql(conditional->elseExpr.get());
+                return rendered + " END";
+            }
+            if (const auto* array = dynamic_cast<const ArrayExpr*>(expression)) {
+                std::string rendered = "ARRAY[";
+                for (size_t i = 0; i < array->elements.size(); ++i) {
+                    if (i) rendered += ",";
+                    rendered += expressionSql(array->elements[i].get());
+                }
+                return rendered + "]";
+            }
+            if (const auto* row = dynamic_cast<const RowExpr*>(expression)) {
+                std::string rendered = "ROW(";
+                for (size_t i = 0; i < row->elements.size(); ++i) {
+                    if (i) rendered += ",";
+                    rendered += expressionSql(row->elements[i].get());
+                }
+                return rendered + ")";
+            }
+            return expression->toString();
+        };
+        result.columnCount = projection.size();
+        for (const auto& item : projection) {
+            ExprEvaluator::analyzeExplicitResultCollation(item.expr.get());
+            result.columnTypes.push_back(ExprHelper::inferResultType(
+                expressionSql(item.expr.get()), typeHints));
+        }
+
+        std::vector<const Expr*> orderExpressions;
+        for (auto& order : select->orderBy) {
+            if (!order.usingOp.empty())
+                return fail("0A000", "ORDER BY USING requires a full SQL execution host");
+            const Expr* boundOrder = nullptr;
+            if (const auto* ordinal = dynamic_cast<const LiteralExpr*>(order.expr.get())) {
+                size_t position = 0;
+                const auto parsedOrdinal = std::from_chars(ordinal->value.data(),
+                    ordinal->value.data() + ordinal->value.size(), position);
+                if (parsedOrdinal.ec == std::errc{} &&
+                    parsedOrdinal.ptr == ordinal->value.data() + ordinal->value.size()) {
+                    if (position == 0 || position > projection.size())
+                        return fail("42P10", "ORDER BY position is not in select list");
+                    boundOrder = projection[position - 1].expr.get();
+                } else return fail("42601", "non-integer constant in ORDER BY");
+            } else if (const auto* sign = dynamic_cast<const UnaryOpExpr*>(order.expr.get());
+                       sign && sign->op == "-" &&
+                       dynamic_cast<const LiteralExpr*>(sign->operand.get())) {
+                return fail("42P10", "ORDER BY position is not in select list");
+            }
+            if (!boundOrder) {
+                if (const auto* alias = dynamic_cast<const ColumnRefExpr*>(order.expr.get());
+                    alias && alias->table.empty() && alias->schema.empty()) {
+                    const std::string& name = alias->column;
+                    for (const auto& item : projection) {
+                        if (!item.alias.empty() && identifier(item.alias) == name) {
+                            if (boundOrder) return fail("42702", "ORDER BY alias is ambiguous");
+                            boundOrder = item.expr.get();
+                        }
+                    }
+                }
+            }
+            if (!boundOrder) {
+                bind(order.expr.get());
+                boundOrder = order.expr.get();
+            }
+            static const std::set<std::string> sortableTypes = {
+                "smallint", "integer", "bigint", "numeric", "real", "double precision",
+                "text", "character varying", "character", "name", "boolean",
+                "date", "timestamp", "timestamptz", "time", "money", "uuid"
+            };
+            const auto* directColumn = dynamic_cast<const ColumnRefExpr*>(boundOrder);
+            const bool enumOrder = directColumn &&
+                !comparisonColumns.at(directColumn->column).enumValues.empty();
+            const std::string orderType = ExprHelper::inferResultType(
+                expressionSql(boundOrder), typeHints);
+            if (!enumOrder && !sortableTypes.count(orderType))
+                return fail("0A000", "ORDER BY type requires a full SQL execution host");
+            orderExpressions.push_back(boundOrder);
+        }
+
+        std::vector<std::vector<std::string>> rows;
+        std::vector<std::vector<bool>> nulls;
+        if (select->fromClause) {
+            const_cast<StorageEngine*>(this)->query(dbname, table, {}, {}, {},
+                false, false, false, 0, {}, &rows, &nulls);
+            if (rows.size() != nulls.size())
+                return fail("XX000", "native query lost SQL NULL metadata");
+        } else {
+            rows.emplace_back();
+            nulls.emplace_back();
+        }
+        const auto context = [&](size_t rowIndex) {
+            RowContext row;
+            if (rows[rowIndex].size() != columnKeys.size() ||
+                nulls[rowIndex].size() != columnKeys.size())
+                throw DbError("XX000", "native query row width does not match schema");
+            for (size_t i = 0; i < columnKeys.size(); ++i)
+                row.set(columnKeys[i], ExprValue(typeHints.at(columnKeys[i]),
+                    rows[rowIndex][i], nulls[rowIndex][i]));
+            return row;
+        };
+        struct Candidate {
+            size_t rowIndex;
+            std::vector<ExprValue> orderKeys;
+        };
+        std::vector<Candidate> candidates;
+        for (size_t i = 0; i < rows.size(); ++i) {
+            const RowContext row = context(i);
+            if (select->whereClause) {
+                const ExprValue predicate = evaluator.eval(select->whereClause.get(), row);
+                if (!predicate.isNull &&
+                    ExprHelper::canonicalResultTypeName(predicate.typeName) != "boolean")
+                    return fail("42804", "WHERE condition must have type boolean");
+                if (predicate.isNull || !predicate.asBool()) continue;
+            }
+            Candidate candidate{i, {}};
+            for (const auto* expression : orderExpressions) {
+                ExprValue value = evaluator.eval(expression, row);
+                if (value.isUnknown())
+                    return fail("0A000", "unsupported ORDER BY expression");
+                candidate.orderKeys.push_back(std::move(value));
+            }
+            candidates.push_back(std::move(candidate));
+        }
+        std::stable_sort(candidates.begin(), candidates.end(),
+            [&](const Candidate& left, const Candidate& right) {
+                for (size_t i = 0; i < orderExpressions.size(); ++i) {
+                    const auto& spec = select->orderBy[i];
+                    const ExprValue& l = left.orderKeys[i];
+                    const ExprValue& r = right.orderKeys[i];
+                    if (l.isNull && r.isNull) continue;
+                    if (l.isNull) return spec.nullsFirst;
+                    if (r.isNull) return !spec.nullsFirst;
+                    Column column;
+                    if (const auto* reference = dynamic_cast<const ColumnRefExpr*>(orderExpressions[i]))
+                        column = comparisonColumns.at(reference->column);
+                    else {
+                        const std::string type = ExprHelper::canonicalResultTypeName(l.typeName);
+                        column.dataType = "text";
+                        column.isVariableLength = true;
+                        setPolymorphicSortType(column, type);
+                        if (type == "boolean" || type == "time" || type == "uuid" ||
+                            type == "money") {
+                            column.dataType = type;
+                            column.isVariableLength = false;
+                        }
+                        column.collation = l.collation;
+                    }
+                    const auto less = compareValues(column, l.value, false, r.value, false, "<");
+                    const auto greater = compareValues(column, l.value, false, r.value, false, ">");
+                    if (less == PredicateTruth::Unknown || greater == PredicateTruth::Unknown)
+                        throw DbError("0A000", "unsupported ORDER BY comparison");
+                    if (less == PredicateTruth::True) return spec.asc;
+                    if (greater == PredicateTruth::True) return !spec.asc;
+                }
+                return false;
+            });
+        const size_t offset = std::min(select->offset.value_or(0), candidates.size());
+        result.rowCount = candidates.size() - offset;
+        if (select->limit) result.rowCount = std::min(result.rowCount, *select->limit);
+        if (result.rowCount) {
+            const RowContext first = context(candidates[offset].rowIndex);
+            for (const auto& item : projection) {
+                const ExprValue value = evaluator.eval(item.expr.get(), first);
+                if (value.isUnknown())
+                    return fail("0A000", "unsupported SELECT expression");
+                result.firstRow.push_back(value.isNull
+                    ? std::optional<std::string>{} : value.value);
+            }
+        }
+        result.ok = true;
+        return result;
+    } catch (const DbError& error) {
+        return fail(error.sqlState(), error.message());
+    } catch (const std::exception& error) {
+        return fail("XX000", error.what());
+    }
+}
+
 int StorageEngine::plpgsqlSelectInto(
     const std::string& dbname,
     const std::string& selectList,
     const std::string& fromClause,
     const std::string& whereClause,
     const std::vector<std::string>& intoVars,
-    std::map<std::string, std::string>& vars) {
-    std::vector<std::pair<std::string, std::string>> items;
-    // Parse "tbl [WHERE ...]" from fromClause
-    std::string table = fromClause;
-    std::vector<std::string> conds;
-    std::string low;
-    for (char c : fromClause) low += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    size_t wpos = low.find(" where ");
-    if (wpos != std::string::npos) {
-        table = trim(fromClause.substr(0, wpos));
-        // engine conditions are "<op><col> <value>" strings; approximate by
-        // reusing parseConditions on the raw expression is not possible —
-        // restrict to no WHERE here (host callers pre-filter).
-        conds = {};
-    }
-    table = trim(table);
-    if (table.empty()) return 2;
-    if (!tableExists(dbname, table)) return 2;
-    auto rows = query(dbname, table, {}, {}, {});
-    if (rows.empty()) return 1;
-    // Evaluate each select item as a scalar on the first row via the
-    // expression evaluator on a MaterializedRows-shaped context.
-    TableSchema tbl = getTableSchema(dbname, table);
-    // Evaluate each select item via ExprHelper over a column-valued context.
-    std::map<std::string, ExprEvalResult> ctx;
-    for (size_t c = 0; c < tbl.len; ++c) {
-        std::string v = extractColumnValueStatic(rows.front(), tbl, c);
-        (void)ctx;
-        // ExprHelper::evalString has no row context; for plain column
-        // references bind directly, otherwise evaluate as constant.
-        items.push_back({tbl.cols[c].dataName, v});
-    }
-    // split the select list by top-level commas
-    std::vector<std::string> listItems;
-    {
-        std::string cur;
-        int depth = 0; bool inS = false;
-        for (char ch : selectList) {
-            if (inS) { cur += ch; if (ch == '\'') inS = false; continue; }
-            if (ch == '\'') { inS = true; cur += ch; continue; }
-            if (ch == '(') ++depth;
-            if (ch == ')') --depth;
-            if (ch == ',' && depth == 0) { listItems.push_back(trim(cur)); cur.clear(); continue; }
-            cur += ch;
+    std::map<std::string, std::string>& vars,
+    std::set<std::string>* nullVars) {
+    std::string sql = "SELECT " + selectList;
+    if (!trim(fromClause).empty()) sql += " FROM " + fromClause;
+    if (!trim(whereClause).empty()) sql += " WHERE " + whereClause;
+    const auto result = plpgsqlQuery(dbname, sql);
+    if (!result.ok || (result.rowCount && result.firstRow.size() != result.columnCount))
+        return 2;
+    for (size_t i = 0; i < intoVars.size(); ++i) {
+        const bool isNull = !result.rowCount || i >= result.firstRow.size() ||
+            !result.firstRow[i];
+        vars[intoVars[i]] = isNull ? "null" : *result.firstRow[i];
+        if (nullVars) {
+            if (isNull) nullVars->insert(intoVars[i]);
+            else nullVars->erase(intoVars[i]);
         }
-        if (!trim(cur).empty()) listItems.push_back(trim(cur));
     }
-    for (size_t i = 0; i < intoVars.size() && i < listItems.size(); ++i) {
-        const std::string& item = trim(listItems[i]);
-        std::string low;
-        for (char ch : item) low += static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-        bool bound = false;
-        for (const auto& kv : items) {
-            if (low == kv.first) { vars[intoVars[i]] = kv.second; bound = true; break; }
-        }
-        if (bound) continue;
-        // constant/expression item
-        auto r = ExprHelper::evalString(item, {});
-        vars[intoVars[i]] = (r.ok && !r.isNull) ? r.value : "null";
-    }
-    return 0;
+    return result.rowCount ? 0 : 1;
 }
 
 // Public wrapper for expression evaluation (to_tsvector) and INSERT
