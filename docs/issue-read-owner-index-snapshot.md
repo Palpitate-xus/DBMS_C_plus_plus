@@ -78,7 +78,30 @@ plpgsql_select_into, query_snapshot_characteristics, transaction_isolation,
 index_scan_full_value, legacy_index_prefix_recheck, self_join_range_identity,
 dml_cte, commit_failure_recovery and cold_start_transaction_backup (its four
 scenarios count as one entry point). All use the same optimized candidate.
-The new complete-default protocol remains in progress; no result is claimed
-until actual termination. No full-suite/PG18.6/TLS
+The new complete-default protocol 46761 exited 1 with a socket TimeoutError at
+main3431 / prepared_transaction_error_boundaries1197, ALTER TABLE t ADD COLUMN
+prepared_note TEXT. The earlier statistics assertion was passed; the timeout
+does not refute that narrow fix or establish a complete-protocol pass.
+Log: `/tmp/dbms-read-owner-index.vlzK7jrJ/full-default-protocol.log`.
+No live owned candidate server remained after the runner's cleanup. This is
+the same statement location as one earlier failed full gate, not proof of a
+common cause. Statement-image I/O amplification remains independent open work.
+
+The private source/test/doc commit `1e96cbe7` was integrated as ROOT `d184d8a1`,
+after independent WHERE resolver commit `aa149ca8` (private `7353cd9d`). The new
+shared resolver header was freshly built into all 55 optimized ROOT objects
+in terminal 69618, exit 0. The subsequent JOIN combination 6460a246 passed
+30 wire scripts and 23 of 24 fresh matching natives; constraint_expr failed
+its retained SUM('abc') 42725 assertion. These actual combination results are
+recorded in `docs/issue-where-index-null-safe-join-combination.md`.
+The initial source review did not identify a defect, but a later independent
+fresh formal native (16308, exit 134) actually reproduced duplicate residual
+writes: one indexed input row caused two calls instead of one. A residual
+writer invalidates owner state, so the post-expression heap fallback repeats
+its effect. The unchanged expected-one assertion and failed artifact are
+retained. Physical candidate materialization/fence validation must precede
+expression execution; the independent follow-up is in progress. Earlier
+simple physical-column passes do not establish safety for arbitrary residuals.
+No full-suite/PG18.6/TLS
 runtime or whole-engine sanitizer claim. No push or Actions enablement; skipped
 security/TDE work remains deferred.
