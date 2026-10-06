@@ -1,4 +1,5 @@
 #include "expr_helper.h"
+#include "expression/common_type.h"
 #include "arithmetic_type.h"
 #include "ExprEvaluator.h"
 #include "parser/parser.h"
@@ -289,14 +290,12 @@ std::string inferAstResultType(
     }
     if (dynamic_cast<const RowExpr*>(expression)) return "record";
     if (const auto* caseExpression = dynamic_cast<const CaseExpr*>(expression)) {
-        std::string result = "unknown";
+        std::vector<std::string> types{
+            caseExpression->elseExpr ? inferAstResultType(caseExpression->elseExpr.get(),typeHints,routineTypes)
+                                     : "unknown"};
         for (const auto& clause : caseExpression->whenClauses)
-            result = mergeProtocolTypes(
-                result, inferAstResultType(clause.second.get(), typeHints, routineTypes));
-        if (caseExpression->elseExpr)
-            result = mergeProtocolTypes(
-                result, inferAstResultType(caseExpression->elseExpr.get(), typeHints, routineTypes));
-        return result;
+            types.push_back(inferAstResultType(clause.second.get(),typeHints,routineTypes));
+        return selectCommonType(types,"CASE");
     }
     if (const auto* call = dynamic_cast<const FunctionCallExpr*>(expression)) {
         if (routineTypes) {
@@ -1125,6 +1124,7 @@ std::string ExprHelper::scalarExpressionIdentity(
                     }
                     type += field(modifier);
                 }
+                type += field("explicit");
                 return "cast" + field(type) + field(key(binary->left.get()));
             }
             if (toLower(binary->op) == "collate")
@@ -1135,6 +1135,7 @@ std::string ExprHelper::scalarExpressionIdentity(
         if (const auto* cast = dynamic_cast<const CastExpr*>(node)) {
             std::string type = canonicalResultTypeName(cast->typeName);
             for (const auto& modifier : cast->typeMods) type += field(modifier);
+            type += field(cast->implicit ? "implicit" : "explicit");
             return "cast" + field(type) + field(key(cast->operand.get()));
         }
         if (const auto* conditional = dynamic_cast<const CaseExpr*>(node)) {

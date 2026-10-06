@@ -38,6 +38,7 @@ ExprPtr copyExpression(const Expr* source, std::map<const Expr*, const Expr*>& s
         target->left = copy(node->left); target->right = copy(node->right); result = std::move(target);
     } else if (const auto* node = dynamic_cast<const CastExpr*>(source)) {
         auto target = std::make_unique<CastExpr>(); target->typeName = node->typeName;
+        target->implicit = node->implicit;
         target->typeMods = node->typeMods; target->operand = copy(node->operand); result = std::move(target);
     } else if (const auto* node = dynamic_cast<const CaseExpr*>(source)) {
         auto target = std::make_unique<CaseExpr>();

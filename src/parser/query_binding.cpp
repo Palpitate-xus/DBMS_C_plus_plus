@@ -2,6 +2,7 @@
 #include "parser/parser.h"
 #include "catalog/catalog.h"
 #include "common/DbError.h"
+#include "expression/common_type.h"
 #include <algorithm>
 #include <map>
 #include <set>
@@ -77,6 +78,37 @@ public:
         bound->sourceBegin = node->sourceBegin; bound->sourceEnd = node->sourceEnd;
         result.uses.push_back({bound->sourceBegin, bound->sourceEnd, bound->slot});
         node = std::move(bound); return datum.type;
+    }
+
+    void coerceCaseInput(ExprPtr& input, const std::string& sourceType,
+                         const std::string& targetType) {
+        if (!input) {
+            auto null = std::make_unique<LiteralExpr>();
+            null->value = "null";
+            input = std::move(null);
+        }
+        if (common_type_detail::canonical(sourceType) == targetType) return;
+        auto cast = std::make_unique<CastExpr>();
+        cast->typeName = targetType;
+        cast->implicit = true;
+        cast->sourceBegin = input->sourceBegin; cast->sourceEnd = input->sourceEnd;
+        cast->operand = std::move(input);
+        // Only conversion of an actual UNKNOWN string/NULL literal belongs
+        // to transformation. No function, parameter, row, arithmetic or
+        // already-typed CAST is executed to prepare a CASE expression.
+        const auto* literal = dynamic_cast<const LiteralExpr*>(cast->operand.get());
+        if (common_type_detail::canonical(sourceType) == "unknown" && literal &&
+            !literal->preparedSubquery && literal->typeName.empty()) {
+            const auto tokens = SQLParser::tokenize(literal->value);
+            if (tokens.size() == 1 && (SQLParser::toLower(tokens.front()) == "null" ||
+                (!tokens.front().empty() && tokens.front().front() == '\''))) {
+                if (metadata.assignmentInput)
+                    metadata.assignmentInput({"",targetType},literal,"unknown");
+                ExprEvaluator evaluator;
+                (void)evaluator.eval(cast.get(),RowContext{});
+            }
+        }
+        input = std::move(cast);
     }
 
     std::string expression(ExprPtr& node, const std::vector<Namespace>& scopes) {
@@ -210,12 +242,33 @@ public:
         }
         case ExprType::CaseExpr: {
             auto* conditional = static_cast<CaseExpr*>(node.get());
-            expression(conditional->switchExpr, scopes);
-            std::string type = expression(conditional->elseExpr, scopes);
+            const auto switchType = expression(conditional->switchExpr, scopes);
+            if (conditional->switchExpr && switchType == "unknown")
+                coerceCaseInput(conditional->switchExpr,switchType,"text");
+            std::vector<std::string> thenTypes;
             for (auto& clause : conditional->whenClauses) {
-                expression(clause.first, scopes); const auto arm = expression(clause.second, scopes);
-                if (type == "unknown") type = arm;
+                const auto conditionType = expression(clause.first, scopes);
+                if (!conditional->switchExpr) {
+                    if (common_type_detail::canonical(conditionType) != "unknown" &&
+                        common_type_detail::canonical(conditionType) != "boolean")
+                        throw DbError("42804","argument of CASE/WHEN must be type boolean");
+                    coerceCaseInput(clause.first,conditionType,"boolean");
+                } else if (conditionType == "unknown") {
+                    coerceCaseInput(clause.first,conditionType,
+                        common_type_detail::canonical(switchType) == "unknown" ? "text"
+                        : common_type_detail::canonical(switchType));
+                }
+                thenTypes.push_back(expression(clause.second,scopes));
             }
+            // Transform source WHEN/THEN clauses before ELSE; choose the
+            // common result type and perform input conversions ELSE first.
+            const auto elseType = expression(conditional->elseExpr,scopes);
+            std::vector<std::string> resultTypes{elseType};
+            resultTypes.insert(resultTypes.end(),thenTypes.begin(),thenTypes.end());
+            const auto type = selectCommonType(resultTypes,"CASE");
+            coerceCaseInput(conditional->elseExpr,elseType,type);
+            for (size_t i=0;i<thenTypes.size();++i)
+                coerceCaseInput(conditional->whenClauses[i].second,thenTypes[i],type);
             return type;
         }
         case ExprType::ArrayExpr:

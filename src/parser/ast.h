@@ -386,6 +386,9 @@ struct CastExpr : public Expr {
     ExprPtr operand;
     std::string typeName;
     std::vector<std::string> typeMods;
+    // Binder-inserted common-type coercions do not acquire the explicit
+    // CHAR/BIT default length of one or truncate an unconstrained datum.
+    bool implicit = false;
     CastExpr() { type = ExprType::CastExpr; }
     std::string toString() const override {
         return "CAST(" + (operand ? operand->toString() : "?") + " AS " + typeName + ")";

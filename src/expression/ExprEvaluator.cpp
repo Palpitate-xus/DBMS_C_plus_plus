@@ -4105,6 +4105,16 @@ static ExprValue castToCharacter(const ExprValue& value,
 ExprValue ExprEvaluator::evalCast(const CastExpr* e, const RowContext& ctx) const {
     if (e) {
         ExprValue v = eval(e->operand.get(), ctx);
+        if (e->implicit && e->typeMods.empty()) {
+            const auto target = ExprHelper::canonicalResultTypeName(e->typeName);
+            if (target == "character" || target == "bpchar" || target == "bit") {
+                if (target == "bit" && !v.isNull &&
+                    std::any_of(v.value.begin(),v.value.end(),[](char c){return c!='0' && c!='1';}))
+                    throw DbError("22P02","invalid input syntax for type bit");
+                v.typeName = target;
+                return v;
+            }
+        }
         std::string fullT = e->typeName;
         if (!e->typeMods.empty()) {
             std::vector<std::string> modifiers;
