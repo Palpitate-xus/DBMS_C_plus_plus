@@ -38,9 +38,15 @@ def main():
                 "UPDATE source_dml_target SET val = id + 100 FROM;",
                 "UPDATE source_dml_target SET val = id + 100 "
                 "FROM source_dml_source JOIN;",
+                "UPDATE source_dml_target dst SET val = dst.val + 100 "
+                "FROM source_dml_source a JOIN source_dml_source b;",
                 "DELETE FROM source_dml_target USING;",
                 "DELETE FROM source_dml_target "
-                "USING source_dml_source LEFT JOIN;"):
+                "USING source_dml_source LEFT JOIN;",
+                "DELETE FROM source_dml_target "
+                "USING source_dml_source a JOIN source_dml_source b;",
+                "DELETE FROM source_dml_target USING source_dml_source a "
+                "JOIN source_dml_source b CROSS JOIN source_dml_source c;"):
             _, state, message, _, command_tag, _ = query(malformed_sql)
             assert state == "42601", (malformed_sql, state, message)
             assert command_tag is None, (malformed_sql, command_tag)

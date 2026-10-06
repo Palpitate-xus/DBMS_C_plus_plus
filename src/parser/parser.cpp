@@ -2731,6 +2731,21 @@ static std::unique_ptr<FromItem> parseFromItem(const std::vector<std::string>& t
     return item;
 }
 
+// The structured DML executor must never interpret an ordinary JOIN without
+// its required condition as CROSS JOIN. SELECT still has additional legacy
+// FROM forms; validate the DML source tree before publishing its AST.
+static bool dmlSourceJoinConditionsPresent(const FromItem* item) {
+    if (!item) return false;
+    if (item->type != FromItem::Type::Join) return true;
+    const std::string type = SQLParser::toLower(item->joinType);
+    const bool implicitKeys = type == "cross" || type == "natural" ||
+        type.rfind("natural ", 0) == 0;
+    if (!implicitKeys && !item->joinCondition && item->usingCols.empty())
+        return false;
+    return dmlSourceJoinConditionsPresent(item->left.get()) &&
+           dmlSourceJoinConditionsPresent(item->right.get());
+}
+
 ParseResult SQLParser::parseSelect(const std::string& sql) {
     ParseResult r;
     auto tokens = tokenize(sql);
@@ -3476,6 +3491,10 @@ ParseResult SQLParser::parseUpdate(const std::string& sql) {
             r.error = "UPDATE FROM requires a valid relation or JOIN";
             return r;
         }
+        if (!dmlSourceJoinConditionsPresent(stmt->fromClause.get())) {
+            r.error = "UPDATE FROM JOIN requires ON or USING";
+            return r;
+        }
     }
 
     // WHERE
@@ -3565,6 +3584,10 @@ ParseResult SQLParser::parseDelete(const std::string& sql) {
         stmt->usingClause = parseFromItem(tokens, pos);
         if (!stmt->usingClause) {
             r.error = "DELETE USING requires a valid relation or JOIN";
+            return r;
+        }
+        if (!dmlSourceJoinConditionsPresent(stmt->usingClause.get())) {
+            r.error = "DELETE USING JOIN requires ON or USING";
             return r;
         }
     }
