@@ -19582,7 +19582,7 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
     for (auto& type : types) if (type == "unknown") type = "text";
     auto plan = dbms::QueryPlanner::buildPreparedSelectPlan(&g_engine, session.currentDB, physical, std::move(prepared));
     auto result = dbms::QueryPlanner::executePlanChecked(std::move(plan), currentQueryRowDemand());
-    if (!result.ok) throw dbms::DbError("XX000", result.error);
+    result.throwIfFailed();
     if (!result.structuredRowsAvailable) throw dbms::DbError("XX000", "prepared query lost typed rows");
     for (const auto& column : columns) cout << column << ' ';
     cout << '\n';
