@@ -1644,11 +1644,24 @@ static std::optional<ComparableTimestamp> parseComparableTimestamp(
     return ComparableTimestamp{0, seconds * 1000000LL + micros};
 }
 
+static __int128 preparedIntervalValue(const ExprValue& value) {
+    const auto parsed=parseIntervalInput(value.value);
+    const auto state=intervalInputSqlState(parsed);
+    if(!state.empty())throw DbError(state,"invalid input for interval comparison");
+    // PostgreSQL's interval ordering treats a month as thirty days. The
+    // valid int32 month/day fields can overflow int64 once expressed in us.
+    return (static_cast<__int128>(parsed.months)*30+parsed.days)*86400000000LL+parsed.micros;
+}
+
 int ExprEvaluator::compareValues(const ExprValue& a, const ExprValue& b) {
     if (a.isNull || b.isNull) return 0; // caller handles NULL
 
     std::string ta = toLower(a.typeName);
     std::string tb = toLower(b.typeName);
+    if(ta=="interval" && tb=="interval") {
+        const auto left=preparedIntervalValue(a),right=preparedIntervalValue(b);
+        return (left>right)-(left<right);
+    }
 
     // Boolean columns are commonly supplied by storage as "true"/"false",
     // while SQL boolean literals are represented internally as "t"/"f".
