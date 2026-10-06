@@ -130,6 +130,16 @@ reproductions, not fixed by this range-identity commit. Conversely, with an
 explicit `DECLARE n INT := NULL`, a successful callback writes 99 but
 `RETURN n` still reports `returnIsNull=true`. Both assignment directions need
 typed NULL synchronization, not just target-list partition repair.
+Follow-up `7bc76204` independently repairs the reproduced SELECT INTO partition
+and nullable-assignment defects; see
+[the typed procedural-query report](issue-plpgsql-select-into-typed-query.md).
+This does not change the range-identity commit's historical verification scope
+or close the broader procedural-language family. Quoted compound-variable
+identity and autocommit function-write atomicity were subsequently reproduced
+and need separate fixes. Cold restart `615f2c54` and the distinct I/O investigation
+are recorded in
+[the lock-registry report](issue-cold-start-transaction-lock-registry.md);
+neither proves that the two complete-protocol timeouts above are solved.
 Full registered-suite and PostgreSQL 18.6 differential gates remain open.
 The total ledger is still 273: 22 complete / 166 partial / 70 unverified /
 15 deferred_by_user.
