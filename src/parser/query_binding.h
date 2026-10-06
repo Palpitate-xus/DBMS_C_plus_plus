@@ -28,12 +28,23 @@ struct QueryBindingMetadata {
 };
 struct PreparedQuery {
     struct Use { size_t begin, end, slot; };
+    struct SourceRange {
+        size_t ordinal;
+        const Stmt* owner;
+        const FromItem* source;
+        std::string schema, name;
+        QueryRowDescriptor columns;
+        bool mergedUsing;
+    };
     std::string source;
     StmtPtr ast;
     std::vector<ExprValue> parameters;
     std::vector<Use> uses;
     std::vector<std::pair<size_t, std::string>> projectionAliases;
     QueryRowDescriptor output;
+    // Source pointers belong to ast; their identities survive AST ownership
+    // moves. Ordinals are unique in this prepared query, not SQL text keys.
+    std::vector<SourceRange> sourceRanges;
     // Transitional adapter for dispatchers that still parse SQL strings.
     // Encoding is permitted only after whole-tree preparation has succeeded.
     std::string legacySql() const;

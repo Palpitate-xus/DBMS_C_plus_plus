@@ -31471,28 +31471,10 @@ PlPgsqlQueryResult StorageEngine::plpgsqlQuery(const std::string& dbname,
     return plpgsqlQueryNative(dbname, sql, options);
 }
 
-PlPgsqlQueryResult StorageEngine::plpgsqlQueryPrepared(const std::string& dbname,
-    const std::string& sql, const std::vector<QueryBindingDatum>& bindings,
-    const PlPgsqlQueryOptions& options) const {
-    try {
-        const auto command = SQLParser::classify(sql);
-        if (storedFunctionTransactionControl(command))
-            throw DbError("2D000", "transaction control is not allowed in a stored-function body");
-        const bool functionBody = !storedFunctionFrames.empty() &&
-            storedFunctionFrames.back().engine == this &&
-            storedFunctionFrames.back().database == dbname &&
-            storedFunctionFrames.back().session == currentSession();
-        if (functionBody && storedFunctionFrames.back().volatility != 'v' &&
-            !storedFunctionReadOnlyQuery(sql))
-            throw DbError("0A000", "non-read-only SQL is not allowed in a non-volatile function");
-        if (command != SqlCommand::Select && command != SqlCommand::Values &&
-            command != SqlCommand::Insert && command != SqlCommand::Update && command != SqlCommand::Delete &&
-            command != SqlCommand::Explain && command != SqlCommand::CreateTable)
-            return plpgsqlQuery(dbname, sql, options);
-        // The caller's statement transaction owns the database DDL fence.
+PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
+    const std::string& sql, const std::vector<QueryBindingDatum>& bindings) const {
         // Catalog rows are copied under one lock; schema/view loads only read.
-        PreparedQuery prepared;
-        {
+        // The lock is released on return, before any prepared AST executes.
         std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
         const auto catalog = catalogService_->metadataSnapshot(dbname);
         QueryBindingMetadata metadata;
@@ -31572,21 +31554,69 @@ PlPgsqlQueryResult StorageEngine::plpgsqlQueryPrepared(const std::string& dbname
         };
         ExprEvaluator evaluator; evaluator.setCurrentDB(dbname);
         metadata.functionType = [&](const FunctionCallExpr* function) {
-            const auto name = SQLParser::toLower(function->funcName);
-            if (name == "exists") return std::string("boolean");
-            if (name == "count") return std::string("bigint");
-            if (name == "sum" || name == "avg" || name == "min" || name == "max") return std::string();
+            CatalogManager::QualifiedName routine;
+            const std::string spelling = function->schema.empty() ? function->funcName
+                : function->schema + "." + function->funcName;
+            if (CatalogManager::parseQualifiedName(spelling, routine, true) &&
+                (routine.schema.empty() || routine.schema == "pg_catalog")) {
+                if (routine.name == "exists") return std::string("boolean");
+                if (routine.name == "count") return std::string("bigint");
+                if (routine.name == "sum" || routine.name == "avg" ||
+                    routine.name == "min" || routine.name == "max") return std::string();
+            }
             if (!evaluator.hasScalarFunction(function, const_cast<StorageEngine*>(this)))
                 throw DbError("42883", "function does not exist: " + function->funcName);
-            CatalogManager::QualifiedName routine;
-            if (CatalogManager::parseQualifiedName(function->funcName, routine, true)) {
-                const auto udf = getUDF(dbname, routine.name);
-                if (!udf.expression.empty()) return ExprHelper::canonicalResultTypeName(udf.returnType);
-            }
-            return std::string();
+            return evaluator.scalarFunctionResultType(function, const_cast<StorageEngine*>(this));
         };
-        prepared = prepareQuery(sql, bindings, metadata);
-        }
+        return prepareQuery(sql, bindings, metadata);
+}
+
+ExprValue StorageEngine::executeScalarSubquery(const std::string& dbname,
+    const std::string& sql) const {
+    const auto command = SQLParser::classify(sql);
+    if (command != SqlCommand::Select && command != SqlCommand::Values)
+        throw DbError("42601", "scalar subquery must be a SELECT or VALUES query");
+    PlPgsqlQueryOptions options;
+    options.maxRows = 2;
+    options.purpose = PlPgsqlQueryOptions::Purpose::OrdinarySubquery;
+    // Ordinary children inherit their caller's snapshot/CTE context. They
+    // must not enter the PL/SPI command-counter and ReadView-refresh wrapper.
+    const auto result = plpgsqlQueryExecutor_
+        ? plpgsqlQueryExecutor_(dbname, sql, options)
+        : plpgsqlQueryNative(dbname, sql, options);
+    if (!result.ok)
+        throw DbError(result.sqlState.empty() ? "XX000" : result.sqlState,
+            result.message.empty() ? "scalar subquery execution failed" : result.message);
+    if (result.columnCount != 1)
+        throw DbError("42601", "subquery must return only one column");
+    if (result.rowCount > 1)
+        throw DbError("21000", "more than one row returned by a subquery used as an expression");
+    const auto type = result.columnTypes.empty() ? std::string("unknown") : result.columnTypes.front();
+    if (result.rowCount == 0) return ExprValue(type, "", true);
+    if (result.firstRow.size() != 1)
+        throw DbError("XX000", "scalar subquery has no structured first row");
+    return ExprValue(type, result.firstRow.front().value_or(""), !result.firstRow.front().has_value());
+}
+
+PlPgsqlQueryResult StorageEngine::plpgsqlQueryPrepared(const std::string& dbname,
+    const std::string& sql, const std::vector<QueryBindingDatum>& bindings,
+    const PlPgsqlQueryOptions& options) const {
+    try {
+        const auto command = SQLParser::classify(sql);
+        if (storedFunctionTransactionControl(command))
+            throw DbError("2D000", "transaction control is not allowed in a stored-function body");
+        const bool functionBody = !storedFunctionFrames.empty() &&
+            storedFunctionFrames.back().engine == this &&
+            storedFunctionFrames.back().database == dbname &&
+            storedFunctionFrames.back().session == currentSession();
+        if (functionBody && storedFunctionFrames.back().volatility != 'v' &&
+            !storedFunctionReadOnlyQuery(sql))
+            throw DbError("0A000", "non-read-only SQL is not allowed in a non-volatile function");
+        if (command != SqlCommand::Select && command != SqlCommand::Values &&
+            command != SqlCommand::Insert && command != SqlCommand::Update && command != SqlCommand::Delete &&
+            command != SqlCommand::Explain && command != SqlCommand::CreateTable)
+            return plpgsqlQuery(dbname, sql, options);
+        const auto prepared = prepareBoundQuery(dbname, sql, bindings);
         // No catalog/cache mutex is retained while SQL or a called routine
         // executes. A nested DDL command can upgrade the transaction fence.
         return plpgsqlQuery(dbname, prepared.legacySql(), options);

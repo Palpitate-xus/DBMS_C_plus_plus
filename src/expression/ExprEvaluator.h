@@ -75,6 +75,7 @@ private:
 // 函数回调签名
 // ----------------------------------------------------------------------------
 using ScalarFunction = std::function<ExprValue(const std::vector<ExprValue>&)>;
+using ScalarSubqueryExecutor = std::function<ExprValue(const Expr*, const RowContext&)>;
 
 // ----------------------------------------------------------------------------
 // 表达式求值器
@@ -115,11 +116,17 @@ public:
 
     // 设置当前数据库，供 nextval/currval/lastval 等内置函数使用
     void setCurrentDB(const std::string& db) { currentDB_ = db; }
+    // The caller owns the prepared statement/query context. This callback is
+    // invoked only when evaluation reaches that prepared child expression.
+    void setScalarSubqueryExecutor(ScalarSubqueryExecutor executor) {
+        scalarSubqueryExecutor_ = std::move(executor);
+    }
 
 private:
     std::map<std::string, ScalarFunction, std::less<>> functions_;
     std::map<std::string, char, std::less<>> volatility_;
     std::string currentDB_;
+    ScalarSubqueryExecutor scalarSubqueryExecutor_;
 
     void registerBuiltins();
 

@@ -35823,9 +35823,10 @@ int main(int argc, char* argv[]) {
             return result;
         }
         struct HostScope {
-            HostScope() { ++storedFunctionHostDepth; }
-            ~HostScope() { --storedFunctionHostDepth; }
-        } hostScope;
+            bool routine;
+            explicit HostScope(bool body) : routine(body) { if (routine) ++storedFunctionHostDepth; }
+            ~HostScope() { if (routine) --storedFunctionHostDepth; }
+        } hostScope(options.purpose == dbms::PlPgsqlQueryOptions::Purpose::StoredFunction);
         vector<string> names, types;
         vector<vector<string>> rows;
         vector<vector<bool>> nulls;
@@ -35833,7 +35834,8 @@ int main(int argc, char* argv[]) {
         string failureText;
         try {
             (void)runDerivedSubQueryFull(querySql, *activeSession, names, &types,
-                &rows, &nulls, &structured, &failed, &failureText, false,
+                &rows, &nulls, &structured, &failed, &failureText,
+                options.purpose == dbms::PlPgsqlQueryOptions::Purpose::OrdinarySubquery,
                 options.maxRows);
         } catch (const dbms::DbError& error) {
             result.sqlState = error.sqlState();

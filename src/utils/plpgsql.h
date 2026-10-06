@@ -50,6 +50,8 @@ struct PlPgsqlQueryResult {
 // so that a second result can be distinguished from an exactly-one result.
 struct PlPgsqlQueryOptions {
     size_t maxRows = 0;
+    enum class Purpose { StoredFunction, OrdinarySubquery };
+    Purpose purpose = Purpose::StoredFunction;
 };
 
 // Callbacks the interpreter needs from the host.

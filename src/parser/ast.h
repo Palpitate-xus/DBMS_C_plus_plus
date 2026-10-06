@@ -308,10 +308,18 @@ struct LiteralExpr : public Expr {
 };
 
 // 列引用
+struct QueryColumnBinding {
+    size_t scopeDepth = 0;
+    size_t sourceOrdinal = 0; // actual range occurrence within the prepared query
+    size_t columnOrdinal = 0; // descriptor ordinal, physical for a base table
+    std::string declaredType;
+    bool mergedUsing = false;
+};
 struct ColumnRefExpr : public Expr {
     std::string schema;    // 可为空（无 schema 限定）
     std::string table;     // 可为空（无表限定）
     std::string column;
+    std::optional<QueryColumnBinding> binding;
     ColumnRefExpr() { type = ExprType::ColumnRef; }
     std::string toString() const override {
         if (!schema.empty()) return schema + "." + table + "." + column;

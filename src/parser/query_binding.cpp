@@ -19,6 +19,8 @@ struct Range {
     std::string schema, name;
     QueryRowDescriptor columns;
     std::set<std::string> hiddenUnqualified;
+    size_t occurrence = 0;
+    bool mergedUsing = false;
 };
 using Namespace = std::vector<Range>;
 using Ctes = std::map<std::string, QueryRowDescriptor>;
@@ -30,10 +32,20 @@ public:
     const QueryBindingMetadata& metadata;
     std::map<std::string, size_t> slots;
     size_t depth = 0;
+    size_t nextSourceOccurrence = 0;
+    std::vector<const Stmt*> statementOwners;
     std::vector<const Ctes*> cteScopes;
     Binder(const std::string& sql, const std::vector<QueryBindingDatum>& values,
            const QueryBindingMetadata& descriptions) : datums(values), metadata(descriptions) {
         result.source = sql;
+    }
+
+    Range registerSource(Range range, const FromItem* source = nullptr) {
+        range.occurrence = nextSourceOccurrence++;
+        result.sourceRanges.push_back({range.occurrence,
+            statementOwners.empty() ? nullptr : statementOwners.back(), source,
+            range.schema, range.name, range.columns, range.mergedUsing});
+        return range;
     }
 
     std::string parameter(ExprPtr& node, const QueryBindingDatum& datum) {
@@ -63,7 +75,7 @@ public:
             return value->declaredType;
         }
         case ExprType::ColumnRef: {
-            const auto* column = static_cast<ColumnRefExpr*>(node.get());
+            auto* column = static_cast<ColumnRefExpr*>(node.get());
             if (column->column == "*") return "record";
             const QueryBindingDatum* datum = nullptr;
             for (const auto& candidate : datums) {
@@ -80,21 +92,29 @@ public:
             size_t matches = 0;
             bool rangeFound = false;
             std::string sourceType;
-            for (const auto& scope : scopes) {
+            QueryColumnBinding resolved;
+            for (size_t scopeDepth = 0; scopeDepth < scopes.size(); ++scopeDepth) {
+                const auto& scope = scopes[scopeDepth];
                 for (const auto& range : scope) {
                     if (!column->table.empty() && column->table != range.name) continue;
                     if (!column->schema.empty() && column->schema != range.schema) continue;
                     if (!column->table.empty()) rangeFound = true;
-                    for (const auto& field : range.columns) if (field.name == column->column) {
+                    for (size_t ordinal = 0; ordinal < range.columns.size(); ++ordinal) {
+                        const auto& field = range.columns[ordinal];
+                        if (field.name != column->column) continue;
                         if (column->table.empty() && range.hiddenUnqualified.count(field.name)) continue;
                         ++matches; sourceType = field.type;
+                        resolved = {scopeDepth, range.occurrence, ordinal, field.type, range.mergedUsing};
                     }
                 }
                 if (matches || rangeFound) break; // nearest SQL level wins
             }
             if (matches > 1 || (matches && datum))
                 throw DbError("42702", "column reference \"" + column->toString() + "\" is ambiguous");
-            if (matches) return sourceType;
+            if (matches) {
+                column->binding = std::move(resolved);
+                return sourceType;
+            }
             if (datum) {
                 return parameter(node, *datum);
             }
@@ -195,7 +215,8 @@ public:
         const auto columns = statement(*parsed.stmt, scopes, cteScopes.empty() ? Ctes{} : *cteScopes.back());
         literal.preparedSubquery = std::move(parsed.stmt);
         if (scalar && columns.size() != 1) throw DbError("42601", "subquery must return only one column");
-        return scalar ? columns.front().type : "boolean";
+        literal.typeName = scalar ? columns.front().type : "boolean";
+        return literal.typeName;
     }
     void window(WindowDef& value, const std::vector<Namespace>& scopes) {
         for (auto& field : value.partitionBy) expression(field, scopes);
@@ -259,11 +280,16 @@ public:
     }
     Namespace from(FromItem* item, const std::vector<Namespace>& outer, const Ctes& ctes) {
         if (!item) return {};
-        if (item->type == FromItem::Type::Table) return {relation(item->tableName, item->alias, ctes)};
+        if (item->type == FromItem::Type::Table)
+            return {registerSource(relation(item->tableName, item->alias, ctes), item)};
         if (item->type == FromItem::Type::Subquery) {
             if (!item->subquery) throw DbError("42601", "derived query is missing");
-            auto columns = statement(*item->subquery, outer, ctes); // ancestors, not implicitly LATERAL siblings
-            return {{"", item->alias.empty() ? "" : identifier(item->alias), std::move(columns)}};
+            auto derivedOuter = outer;
+            // A non-LATERAL source cannot see this SQL level's siblings,
+            // but its lexical level still counts for ancestor provenance.
+            derivedOuter.insert(derivedOuter.begin(), Namespace{});
+            auto columns = statement(*item->subquery, derivedOuter, ctes);
+            return {registerSource({"", item->alias.empty() ? "" : identifier(item->alias), std::move(columns)}, item)};
         }
         if (item->type != FromItem::Type::Join) throw DbError("0A000", "source requires structured preparation");
         auto left = from(item->left.get(), outer, ctes);
@@ -301,15 +327,24 @@ public:
         left.insert(left.end(), right.begin(), right.end());
         auto scopes = outer; scopes.insert(scopes.begin(), left);
         expression(item->joinCondition, scopes);
-        if (!merged.columns.empty()) left.insert(left.begin(), std::move(merged));
+        if (!merged.columns.empty()) {
+            merged.mergedUsing = true;
+            left.insert(left.begin(), registerSource(std::move(merged), item));
+        }
         return left;
     }
     QueryRowDescriptor statement(Stmt& node, const std::vector<Namespace>& outer, Ctes ctes) {
         if (++depth > 128) throw DbError("54001", "query binding nesting limit exceeded");
         struct Depth { size_t& value; ~Depth() { --value; } } guard{depth};
+        statementOwners.push_back(&node);
+        struct OwnerScope { std::vector<const Stmt*>& owners; ~OwnerScope() { owners.pop_back(); } } ownerScope{statementOwners};
         cteScopes.push_back(&ctes);
         struct CteScope { std::vector<const Ctes*>& stack; ~CteScope() { stack.pop_back(); } } cteScope{cteScopes};
         if (auto* select = dynamic_cast<SelectStmt*>(&node)) {
+            // WITH definitions cannot see sibling FROM ranges of this SQL
+            // level. Retain its empty lexical frame for ancestor provenance.
+            auto cteOuter = outer;
+            cteOuter.insert(cteOuter.begin(), Namespace{});
             for (auto& cte : select->ctes) {
                 if (!cte.query) throw DbError("42601", "WITH query is missing");
                 const std::string name = identifier(cte.name);
@@ -318,15 +353,15 @@ public:
                 if (cte.recursive && recursive && recursive->setOp != SetOp::None) {
                     // Seed only from the non-recursive term; never execute it.
                     StmtPtr tail = std::move(recursive->setOpRhs);
-                    columns = statement(*recursive, outer, ctes);
+                    columns = statement(*recursive, cteOuter, ctes);
                     recursive->setOpRhs = std::move(tail);
                     applyNames(columns, cte.columnNames);
                     auto inner = ctes; inner[name] = columns;
                     if (recursive->setOpRhs) {
-                        auto rhs = statement(*recursive->setOpRhs, outer, inner);
+                        auto rhs = statement(*recursive->setOpRhs, cteOuter, inner);
                         if (rhs.size() != columns.size()) throw DbError("42601", "recursive query column count mismatch");
                     }
-                } else columns = statement(*cte.query, outer, ctes);
+                } else columns = statement(*cte.query, cteOuter, ctes);
                 applyNames(columns, cte.columnNames); ctes[name] = std::move(columns);
             }
             if (select->setOpLhs) {
@@ -361,7 +396,7 @@ public:
             return columns;
         }
         if (auto* insert = dynamic_cast<InsertStmt*>(&node)) {
-            auto target = relation(insert->tableName, "", ctes);
+            auto target = registerSource(relation(insert->tableName, "", ctes));
             for (auto& row : insert->values) for (auto& value : row) expression(value, outer);
             if (insert->selectSource) statement(*insert->selectSource, outer, ctes);
             auto scopes = outer; scopes.insert(scopes.begin(), {target});
@@ -371,14 +406,14 @@ public:
         }
         if (auto* update = dynamic_cast<UpdateStmt*>(&node)) {
             auto ranges = from(update->fromClause.get(), outer, ctes);
-            ranges.insert(ranges.begin(), relation(update->tableName, update->alias, ctes));
+            ranges.insert(ranges.begin(), registerSource(relation(update->tableName, update->alias, ctes)));
             auto scopes = outer; scopes.insert(scopes.begin(), std::move(ranges));
             for (auto& value : update->setClauses) expression(value.second, scopes);
             expression(update->whereClause, scopes); return project(update->returning, scopes);
         }
         if (auto* remove = dynamic_cast<DeleteStmt*>(&node)) {
             auto ranges = from(remove->usingClause.get(), outer, ctes);
-            ranges.insert(ranges.begin(), relation(remove->tableName, remove->alias, ctes));
+            ranges.insert(ranges.begin(), registerSource(relation(remove->tableName, remove->alias, ctes)));
             auto scopes = outer; scopes.insert(scopes.begin(), std::move(ranges));
             expression(remove->whereClause, scopes); return project(remove->returning, scopes);
         }

@@ -506,6 +506,11 @@ ExprEvaluator::ExprEvaluator() {
 
 ExprValue ExprEvaluator::eval(const Expr* expr, const RowContext& ctx) const {
     if (!expr) return ExprValue{};
+    if (expr->preparedSubquery) {
+        if (!scalarSubqueryExecutor_)
+            throw DbError("0A000", "prepared subqueries require a query execution context");
+        return scalarSubqueryExecutor_(expr, ctx);
+    }
     switch (expr->type) {
         case ExprType::Literal:      return evalLiteral(static_cast<const LiteralExpr*>(expr));
         case ExprType::ColumnRef:    return evalColumnRef(static_cast<const ColumnRefExpr*>(expr), ctx);

@@ -409,6 +409,15 @@ public:
     PlPgsqlQueryResult plpgsqlQueryPrepared(const std::string& dbname,
         const std::string& sql, const std::vector<QueryBindingDatum>& bindings,
         const PlPgsqlQueryOptions& options = {}) const;
+    // Metadata-only preparation shared by ordinary queries and routine SPI.
+    // This never executes SQL, changes command IDs, or refreshes ReadView.
+    PreparedQuery prepareBoundQuery(const std::string& dbname,
+        const std::string& sql,
+        const std::vector<QueryBindingDatum>& bindings = {}) const;
+    // Execute a prepared ordinary child under the caller's statement/view,
+    // not routine SPI. Cardinality, exact SQL NULL, and errors stay typed.
+    ExprValue executeScalarSubquery(const std::string& dbname,
+        const std::string& sql) const;
     std::vector<std::string> getUDFNames(const std::string& dbname) const;
 
     // Table-valued functions (return a result set)
