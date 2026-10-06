@@ -23788,7 +23788,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         // optional AS alias / bare alias (word not a keyword)
                         static const char* kws[] = {"join", "inner", "left", "right",
                                                     "full", "outer", "cross", "on",
-                                                    "natural"};
+                                                    "natural", "using"};
                         size_t save = p;
                         if (p + 3 <= seg.size() && seg.substr(p, 2) == "as") {
                             p += 2; skipWs(p);

@@ -157,6 +157,12 @@ def main():
               "WHERE l.id = 1 ORDER BY r.label;"),
              [["1", "right one", "2"], ["1", "right uno", "2"]],
              [23, 25, 23]),
+            (("SELECT typed_lateral_left.id, x.next_id "
+              "FROM typed_lateral_left "
+              "JOIN typed_lateral_right USING (id) "
+              "CROSS JOIN LATERAL (SELECT id + 1 AS next_id) x "
+              "WHERE typed_lateral_left.id = 1;"),
+             [["1", "2"], ["1", "2"]], [23, 23]),
             (("SELECT l.id, r.label, x.next_id "
               "FROM typed_lateral_left AS l "
               "NATURAL JOIN typed_lateral_right AS r "

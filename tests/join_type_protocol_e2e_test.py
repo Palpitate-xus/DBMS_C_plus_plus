@@ -470,6 +470,29 @@ def main():
         assert type_oids == [23, 23, 23], type_oids
         assert command_tag == "SELECT 2", command_tag
 
+        for no_alias_sql, expected_rows, expected_headers in (
+                ("SELECT * FROM join_conj_chain_a "
+                 "JOIN join_conj_chain_b USING (id) ORDER BY id;",
+                 [["1", "1", "0"], ["2", "1", "1"]],
+                 ["id", "a_id", "val"]),
+                ("SELECT * FROM join_conj_chain_a "
+                 "FULL OUTER JOIN join_conj_chain_b USING (id) ORDER BY id;",
+                 [["1", "1", "0"], ["2", "1", "1"], ["3", "2", "1"]],
+                 ["id", "a_id", "val"]),
+                ("SELECT * FROM join_conj_chain_a "
+                 "JOIN join_conj_chain_b USING (id) "
+                 "JOIN join_conj_chain_c USING (id) WHERE id = 2;",
+                 [["2", "1", "1", "2"]], ["id", "a_id", "val", "b_id"])):
+            rows, state, message, headers, command_tag, type_oids = (
+                runner.decode_wire_result(
+                    client.simple_query(server["sock"], no_alias_sql),
+                    include_types=True))
+            assert state is None, (no_alias_sql, state, message)
+            assert rows == expected_rows, (no_alias_sql, rows)
+            assert headers == expected_headers, (no_alias_sql, headers)
+            assert type_oids == [23] * len(expected_headers), type_oids
+            assert command_tag == f"SELECT {len(expected_rows)}", command_tag
+
         merged_and_qualified_using_sql = (
             "SELECT id, a.id, b.id FROM join_conj_chain_a a "
             "FULL OUTER JOIN join_conj_chain_b b USING (id) "
