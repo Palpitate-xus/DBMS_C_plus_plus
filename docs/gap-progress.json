@@ -2,6 +2,21 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Actual107native/90of91wire terminal results retained; PL query destination and range namespaces independently integrated; genuine XML18 and locale-aware full gates",
+      "gap_ids": ["SQL-04", "DML-01", "DML-03", "TYPE-13", "TYPE-14", "FUNC-05", "FUNC-06", "QRY-01", "QRY-03", "TXN-01"],
+      "status": "partial",
+      "commits": ["84e988d2", "95b89c25", "d3f54e97", "bab862de", "b4bb3962"],
+      "evidence": ["docs/issue-ready-source-integration.md", "docs/issue-plpgsql-query-destination.md", "docs/issue-with-dml-range-namespace.md", "docs/issue-pg18-reference-bootstrap.md", "docs/issue-returning-transition-namespaces.md"],
+      "tests": ["tests/plpgsql_query_destination_test.cpp", "tests/plpgsql_query_destination_protocol_e2e_test.py", "tests/query_range_occurrence_test.cpp", "tests/with_dml_range_namespace_protocol_e2e_test.py"],
+      "verification": {
+        "reproduction": "Frozenfd23a107native97739terminal0/allpass;91wire19966terminal1=90pass1fail onlyoriginalfullprotocol2433quantifiedEXPLAINempty. OriginalWITH4/input/no-seq,EXCLUDED,sort/window/duplicate allcombinedpass. Laterpg_settingsnotreachednotfixed. Earlieroriginalfull/focusedfailedgates retained.",
+        "fix": "PLmissingdestination84e11lineprivateutilitysource preservesSPI-before42601/PERFORM/INTO/originalerrors. Range namespace95b independentpurebinding sharedphysical/schema/aliasidentity, notfirst-match rewriting or FROMUSINGexecutionclosure. NewRETURNINGprivate donor withheld until genuineWITHconsumer activation preserves47originalcontrols andOLDNEWtypedchannels.",
+        "focused_tests": "84e matchingnormalsoleutility89636terminal0exact1CPP/repeat58signatures39969terminal0 frozen1e6aa2a5;11native83658/12wire25611/reference18 all0. ROOT95 namespace solebinder16341/repeat58sign91250 all0,8native98410/10wire65605 all0. Namespaceprivateold6assert18868red retained. RETURNING activation true134/old47wireXX000 retained thenprivate3CPP15639/8native3854/4wire19610/partialASan8811 all0. SeparateROOTd3f/bab/b4 commits preserve bothnamespaceguards;normal3CPP63840/repeat58sign58730 all0,frozen1db6b18d,18freshnative49693 actual0/12wire60365live. Both18en_UStransitionsreference0,privateO2/partialASan scopesnotfullfamilyproof.",
+        "full_suite": "Immutablefd code+docs b353 worktree /tmp/dbms-canonical-input-cursor.4U3gkfUf/repo canonical540native275registered23633 actuallive/fullfreshproduction;465case strictXML18 C.UTF8 differential2071 actuallive on23afrozen. Doesnotprove newmaster542native277registered. Current source/test freeze gates independently tracked; nofull terminal green.",
+        "scope": "Twoowned genuine18.6instances unchangedexisting17. XMLmake84312/install75069/initdb77181 all0,ownPID763952:15487/strict180006/TCP11XMLcontrols0. Coreprofile15486ICU/noXML preserved. Expliciten_US.utf8/libc ownedreferenceDB verifiedversion/locale/defaultstringorder; originalC-runactualdefaultlocale differences requirematched recheck, arrayconcat OID1007/1009vs25 genuine red beingindependentlyfixed. No changedgoldens/timeouts/names/tags. 27322complete166partial70unverified15deferred unchanged. No push/Actionsenablement/deferredsecurityTDErestart; CASE/WITHFROMUSING/Quant/RETURNING/fullfamilies continue."
+      }
+    },
+    {
       "issue": "D7 optimized101native pass and85of86wire terminal failure retained; independent WITH runtime/cursor/width/EXCLUDED integrations and genuine18.6 reference",
       "gap_ids": ["SQL-03", "SQL-04", "DML-01", "TYPE-01", "TYPE-02", "FUNC-05", "FUNC-06", "QRY-01", "QRY-03", "TXN-01"],
       "status": "partial",

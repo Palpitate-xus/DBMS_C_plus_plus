@@ -186,11 +186,73 @@ all58 signatures/binary stamp audit **21543 exited0**. Current inventory is
 **540 native tests /275 registered Python entry points /58 production TUs**.
 Frozen combined SHA256 is
 `23a0f0c631a1aa837e02396726a426e0f4faf628e6a2a89b1714af3b4eff0acc`.
-**107 fresh matching native97739 and91 wire19966 are now actually live**;
-the latter includes the original complete postgres_protocol test, not a skip
-of its still-unfixed quantified EXPLAIN. Sources/headers/tests/registry remain
-frozen. No new terminal/full canonical green result is asserted. Private O0
-results are not substituted for this optimized combination; no old ABI reuse.
+**107 fresh matching native97739 exited0/all passed**; **91 wire19966 exited1:
+90 passed/1 failed**, exactly the original complete postgres_protocol test's
+line2433 QuantifiedSubqueryFilter empty result. Original WITH4, duplicate32,
+window/sort, EXCLUDED and unknown-input gates all pass in the combination.
+Later pg_settings assertions were not reached and are not declared fixed.
+Private O0 results were not substituted for this optimized proof; no old ABI
+reuse or full canonical green is asserted.
+
+After both handles finished, ROOT independently integrated **84e988d2**
+(258f41ca): plain PL query results require a destination after SPI execution;
+PERFORM explicitly discards them, INTO and original execution errors remain.
+One utility CPP normal-O2 build89636 exits0, repeat/all58 signatures39969 exits0.
+Frozen SHA256 is
+`1e6aa2a53d42eb78cbcb4bfa1e102089b7aee01f495975e1ce313a59e1b78420`.
+Eleven freshly compiled matching native83658 and twelve wire25611 both exit0.
+Strict actual18.6 reference also passes. Current master has541 native/276
+registered scripts. After this gate's actual terminal result, the source
+freeze ended. Independent range namespace donor c3ff0ac8 is integrated as
+**95b89c25**: canonical same-alias/same-physical occurrence errors42712,
+while different-schema unaliased physical same-basename ranges remain distinct
+and legal. Its fresh58O0 private eight native/ten wire/actual18 reference
+results are retained in `docs/issue-with-dml-range-namespace.md`. No public
+header changes. Normal changed-binder build16341 exits0/exactly1CPP; repeat/
+all58 signatures91250 exit0. Frozen SHA is
+`deeac91d837c4f13d6574f69f3f67fa58f8ce70cfe919c3dbdc915d2bdf16fe7`.
+Fresh eight native98410 and ten wire65605 both exit0; each expected entry
+and final summary was actually verified. Strict18 en_US reference also exits0.
+This source revision has542native/277registered.
+
+The prior fd source/tests/registry are independently frozen in detached
+worktree `/tmp/dbms-canonical-input-cursor.4U3gkfUf/repo`, revision b353fe8b.
+Its original `scripts/build_tests.sh` full540native/275registered23633 is
+actually live with fresh production objects, not borrowed private ABI.
+Its complete465-case strict18.6 differential2071 is live against frozen23a.
+Neither full gate is terminal or evidence for the newer master. Initial
+reference uses C.UTF-8; true default-collation differences must be distinguished
+from the actual array-concat OID1007/1009 versus25 defect. A separate owned
+en_US.utf8/libc reference database was created and verified; matched-profile
+reverification remains pending the original run's terminal result.
+
+The RETURNING namespace donor was withheld until its independently repaired
+newer WITH consumer actually preserved the original47 controls and genuine
+bound transition images. The activation baseline native43960 aborts134 and
+unchanged original47wire48076 fails with multiple-target XX000; this regression
+is not dismissed as optional scope. Final private normal matching58 ROOT84
+basis plus3changedCPP15639,8native3854, four wire19610 (new19/old47/old4/legacy)
+and selected3CPP ASan8811 actually pass. Scope and retained originals are in
+`docs/issue-returning-transition-namespaces.md`.
+
+ROOT then separately commits **d3f54e97** (6b268130) namespace+legacy consumer,
+**bab862de** (ed02ea32) valid default-alias masking grammar fixture, and
+**b4bb3962** (d0cb36ca) genuine typed WITH transition channels. The range
+namespace guards and new returning namespaces both remain in the merge.
+Physical target selection excludes logical rows, and actual UpdateRowImage,
+sourceOrdinal/descriptor/NULL channels distinguish INSERT OLD NULL, DELETE
+NEW NULL, quoted aliases and qualified stars without string-key rebuilding.
+
+No public header/layout changes: normal3CPP build63840 and repeat/all58
+signatures58730 actually exit0. Combined frozen SHA256 is
+`1db6b18d51701efb91a9757e18d797188b016822d11686e1c9ca65fb97859b82`.
+Current inventory is544native/279registered/58TUs. Eighteen fresh matching
+native49693 actually exit0; twelve wire60365 are live. Both strict18 en_US
+transition matrices repeat/exit0. Sources/headers/tests/registry are frozen.
+No latest full-suite/terminal-wire/all-ASan green is claimed. Full captured
+fd gates remain separate; new CASE, ARRAY/concat and FROM/USING public headers
+require complete fresh58 combination builds when their independent fixes
+are verified and integrated, not splicing these old-layout objects.
 
 The isolated official PostgreSQL18.6 build and actual180006 wire reference
 are recorded in `docs/issue-pg18-reference-bootstrap.md`. Six focused original

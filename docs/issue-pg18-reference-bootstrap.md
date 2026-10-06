@@ -79,6 +79,34 @@ The first dev download57204 exited28 (SSL connection timeout); the separately
 logged repeat67626 and runtime package3313 actually exited0. Package SHA checks
 and local extraction pass. Configure40083 exited0 using isolated headers,
 library path, runtime rpath and an owned xml2-config adapter. Its generated
-pg_config.h enables USE_LIBXML and USE_ICU. Actual source make84312 exited0;
-there is no cluster/version/XML runtime proof for this new profile yet.
+pg_config.h enables USE_LIBXML and USE_ICU. Actual source make84312,
+install75069 and initdb77181 exited0. Owned server PID763952 listens on
+127.0.0.1:15487. TCP/SCRAM and strict180006 pass. Actual ldd resolves libxml2
+to the verified isolated runtime library, not an unverified alternate library.
+`runtime-xml.log` has eleven passing controls for document/content, NULL,
+XML OID142, XMLSERIALIZE, XMLTABLE and namespace/UTF8 output. This proves the
+reference profile, not the DBMS's entire TYPE-14 implementation. The
+[PostgreSQL XML type documentation](https://www.postgresql.org/docs/18/datatype-xml.html)
+specifies the required libxml build; wider functions are described in the
+[XML functions documentation](https://www.postgresql.org/docs/18/functions-xml.html).
 Missing TLS/LZ4/ZSTD remain explicit; no skipped security/TDE audit starts.
+
+## Locale must also match the comparison
+
+The first full465-case differential2071 uses this instance's initial C.UTF-8
+postgres database. Project collation.cpp explicitly maps `default` to
+en_US.UTF-8; historical full compatibility evidence also used en_US.utf8.
+Several actual default-string-order differences in that first run therefore
+require matched-profile rechecking, not changed rows/goldens or an assumed
+production regression. Actual array concat output OID1007/1009 versus25 is
+independent of locale and remains a genuine recorded source defect.
+
+A separate owned database `dbms_oracle_en_us_20261006` was created from
+template0 on the same XML-enabled instance. Actual pg_database datcollate and
+datctype are bothen_US.utf8 and datlocprovider islibc/c; server_version_num is
+180006. `runtime-en-us.log` records the observations and the original
+`'apple' COLLATE "default" < 'Zoo'` returningtrue. Choose this explicit database
+through PGREF_DATABASE for matched full differential verification. The
+original C-profile run remains live and will retain its own terminal evidence;
+matched full replay is not yet completed or calledgreen. No existing database
+locale was changed, dropped or recreated.
