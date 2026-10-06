@@ -95,7 +95,15 @@ int main() {
     assert(bindingAfter.engine == &owner && bindingAfter.database == db &&
         bindingAfter.table == "caller_null" && bindingAfter.rid == callerRid);
     assert(StorageEngine::extractColumnValueStatic(callerRaw, callerSchema, 0).empty());
-    auto fail = plan("SELECT explain_native_writer(id),CAST('bad' AS INT) FROM source");
+    bool inputError = false;
+    try { (void)plan("SELECT explain_native_writer(id),CAST('bad' AS INT) FROM source"); }
+    catch (const DbError& error) { inputError = error.sqlState() == "22P02"; }
+    assert(inputError && !owner.inTransaction());
+    assert(owner.plpgsqlQuery(db, "SELECT id FROM sink").rowCount == 0);
+    // Keep the operator/error/null-binding unwind control with a genuinely
+    // runtime conversion: an already typed parameter is not an unknown Const.
+    auto fail = plan("SELECT explain_native_writer(id),CAST($1 AS INT) FROM source",
+        {{"bad:p","p","text",{},true,"bad",1}});
     assert(owner.beginTransaction(db) == DBStatus::OK); assert(owner.beginSqlCommand());
     bool castError = false;
     try { (void)execute(fail); }

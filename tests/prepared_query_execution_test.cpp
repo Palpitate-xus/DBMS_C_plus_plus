@@ -132,14 +132,18 @@ int main() {
     try { (void)cardinality.evaluate(multiple, cardinality.context()); }
     catch (const DbError& error) { rejected = error.sqlState() == "21000"; }
     assert(rejected);
+    rejected = false;
+    try { (void)engine.prepareBoundQuery(db,"SELECT(SELECT CAST('bad' AS INTEGER))"); }
+    catch (const DbError& error) { rejected = error.sqlState() == "22P02"; }
+    assert(rejected); // unknown input conversion is an analysis-phase error
     auto badCast = std::make_shared<PreparedQuery>(engine.prepareBoundQuery(db,
-        "SELECT(SELECT CAST('bad' AS INTEGER))"));
+        "SELECT(SELECT CAST($1 AS INTEGER))", {{"p","p","text",{},true,"bad",1}}));
     auto* badCastExpr = static_cast<SelectStmt*>(badCast->ast.get())->selectList[0].expr.get();
     PreparedQueryExecution conversion(badCast,&engine,db); conversion.prepareExpression(badCastExpr);
     rejected = false;
     try { (void)conversion.evaluate(badCastExpr,conversion.context()); }
     catch (const DbError& error) { rejected = error.sqlState() == "22P02"; }
-    assert(rejected);
+    assert(rejected); // an already typed parameter is still converted at runtime
 
     assert(engine.beginTransaction(db) == DBStatus::OK);
     assert(engine.beginSqlCommand());

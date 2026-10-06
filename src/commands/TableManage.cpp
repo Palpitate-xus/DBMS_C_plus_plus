@@ -31393,6 +31393,80 @@ PlPgsqlQueryResult StorageEngine::plpgsqlQuery(const std::string& dbname,
     return plpgsqlQueryNative(dbname, sql, options);
 }
 
+namespace {
+// Analysis invokes a type's input function for an actual unknown SQL string.
+// It must not fold a cast of an already typed value (including arithmetic,
+// numeric narrowing, parameters, and nested queries). Ordinary typmods belong
+// to the later coercion step, not this input conversion.
+std::string preparedPrimitiveInputType(const std::string& spelling) {
+    const auto tokens = SQLParser::tokenize(spelling);
+    std::vector<std::string> base;
+    for (const auto& token : tokens) {
+        if (token == "[" || token == "]") return {}; // array inputs are separate
+        if (token == "(" || token == ")" || token == "," || token == "+" || token == "-" ||
+            (!token.empty() && std::all_of(token.begin(), token.end(), [](unsigned char c) {
+                return std::isdigit(c);
+            }))) break;
+        base.push_back(token);
+    }
+    if (base.empty()) return {};
+    if (base.size() == 2 && SQLParser::toLower(base[0]) == "double" &&
+        SQLParser::toLower(base[1]) == "precision") return "double precision";
+    std::string name;
+    for (const auto& token : base) name += token;
+    CatalogManager::QualifiedName resolved;
+    if (!CatalogManager::parseQualifiedName(name, resolved, true) ||
+        (!resolved.schema.empty() && resolved.schema != "pg_catalog")) return {};
+    static const std::map<std::string, std::string> inputTypes = {
+        {"smallint","smallint"}, {"int2","smallint"},
+        {"integer","integer"}, {"int","integer"}, {"int4","integer"},
+        {"bigint","bigint"}, {"int8","bigint"},
+        {"boolean","boolean"}, {"bool","boolean"},
+        {"numeric","numeric"}, {"decimal","numeric"},
+        {"real","real"}, {"float4","real"},
+        {"float8","double precision"}, {"uuid","uuid"}
+    };
+    // Quoted SQL aliases are not pg_catalog type names. Preserve case and
+    // namespace rather than converting a custom quoted type to a builtin.
+    static const std::set<std::string> catalogNames = {
+        "int2","int4","int8","bool","numeric","float4","float8","uuid"
+    };
+    if (base.back().front() == '"' && !catalogNames.count(resolved.name)) return {};
+    const auto found = inputTypes.find(resolved.name);
+    return found == inputTypes.end() ? std::string{} : found->second;
+}
+
+void validatePreparedPrimitiveInput(const QueryOutputColumn& target, const Expr* source) {
+    // A nonempty name denotes contextual assignment to a real output column.
+    // The existing assignment validator retains that distinct contract.
+    if (!target.name.empty() || !source || source->preparedSubquery) return;
+    const LiteralExpr* input = nullptr;
+    if (const auto* literal = dynamic_cast<const LiteralExpr*>(source)) {
+        if (!literal->typeName.empty()) input = literal;
+    } else if (const auto* cast = dynamic_cast<const CastExpr*>(source)) {
+        input = dynamic_cast<const LiteralExpr*>(cast->operand.get());
+        if (input && !input->typeName.empty()) input = nullptr;
+    } else if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(source);
+               binary && binary->op == "::") {
+        input = dynamic_cast<const LiteralExpr*>(binary->left.get());
+        if (input && !input->typeName.empty()) input = nullptr;
+    }
+    if (!input || input->preparedSubquery) return;
+    const auto literalTokens = SQLParser::tokenize(input->value);
+    if (literalTokens.size() != 1 || literalTokens.front().size() < 2 ||
+        literalTokens.front().front() != '\'' || literalTokens.front().back() != '\'') return;
+    const auto type = preparedPrimitiveInputType(target.type);
+    if (type.empty()) return;
+    CastExpr conversion;
+    auto literal = std::make_unique<LiteralExpr>();
+    literal->value = input->value; // exactly one raw SQL string, no typed operand
+    conversion.operand = std::move(literal);
+    conversion.typeName = type; // deliberately no ordinary typmod
+    ExprEvaluator evaluator;
+    (void)evaluator.eval(&conversion, RowContext{});
+}
+} // namespace
+
 PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
     const std::string& sql, const std::vector<QueryBindingDatum>& bindings) const {
         // Catalog rows are copied under one lock; schema/view loads only read.
@@ -31556,7 +31630,11 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
                 const_cast<StorageEngine*>(this));
             return type;
         };
-        metadata.assignmentInput = validateAssignmentInput;
+        metadata.assignmentInput = [](const QueryOutputColumn& target,
+                                      const Expr* source, const std::string& sourceType) {
+            validateAssignmentInput(target, source, sourceType);
+            validatePreparedPrimitiveInput(target, source);
+        };
         return prepareQuery(sql, bindings, metadata);
 }
 

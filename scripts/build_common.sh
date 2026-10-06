@@ -238,6 +238,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/insert_conflict_binding_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/interval_with_dml_input_sqlstate_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/with_primary_dml_execution_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/prepared_unknown_input_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/arithmetic_predicate_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/cast_child_header_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/unique_prefix_collision_protocol_e2e_test.py)
