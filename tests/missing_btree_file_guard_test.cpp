@@ -17,9 +17,14 @@ static bool rejectsIndexScan(const std::string& database,
                              const std::string& column,
                              const std::string& key) {
     try {
-        (void)dbms::QueryPlanner::executePlanChecked(
+        const auto result = dbms::QueryPlanner::executePlanChecked(
             std::make_unique<dbms::IndexScanOp>(
                 &g_engine, database, "items", column, key));
+        assert(!result.ok && result.errorSqlState == "XX001");
+        assert(result.errorException && !result.errorMessage.empty());
+        assert(result.rows.empty() && result.structuredRows.empty() &&
+               result.structuredNulls.empty());
+        result.throwIfFailed();
     } catch (const dbms::DbError& error) {
         return error.sqlState() == "XX001";
     }
@@ -29,11 +34,16 @@ static bool rejectsIndexScan(const std::string& database,
 static bool rejectsBitmapScan(const std::string& database,
                               const std::string& primaryKey) {
     try {
-        (void)dbms::QueryPlanner::executePlanChecked(
+        const auto result = dbms::QueryPlanner::executePlanChecked(
             std::make_unique<dbms::BitmapHeapScanOp>(
                 &g_engine, database, "items",
                 std::vector<dbms::StorageEngine::Condition>{
                     {"=", "id", primaryKey}, {"=", "value", "7"}}));
+        assert(!result.ok && result.errorSqlState == "XX001");
+        assert(result.errorException && !result.errorMessage.empty());
+        assert(result.rows.empty() && result.structuredRows.empty() &&
+               result.structuredNulls.empty());
+        result.throwIfFailed();
     } catch (const dbms::DbError& error) {
         return error.sqlState() == "XX001";
     }
