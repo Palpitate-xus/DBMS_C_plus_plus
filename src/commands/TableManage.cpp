@@ -432,7 +432,8 @@ static bool evaluateRlsPolicies(
     const std::map<std::string, std::string>& typeHints,
     const std::string& dbname,
     const std::string& user,
-    bool& evaluationError) {
+    bool& evaluationError,
+    StorageEngine* functionEngine) {
     bool hasPermissive = false;
     bool permissivePassed = false;
 
@@ -451,7 +452,7 @@ static bool evaluateRlsPolicies(
         if (!expression.empty()) {
             std::string error;
             passed = ExprHelper::evalBool(expression, values, typeHints, &error,
-                                          dbname, user);
+                                          dbname, user, functionEngine);
             if (!error.empty()) {
                 evaluationError = true;
                 return false;
@@ -488,7 +489,8 @@ static bool rowPassesRLS(const StorageEngine* engine,
 
     bool evaluationError = false;
     return evaluateRlsPolicies(policies, withCheck, values, typeHints,
-                               dbname, user, evaluationError) &&
+                               dbname, user, evaluationError,
+                               const_cast<StorageEngine*>(engine)) &&
            !evaluationError;
 }
 
@@ -1085,15 +1087,16 @@ static bool evalExpressionSqlValue(
     const std::string& currentDB,
     std::string& value,
     bool& isNull,
-    const std::set<std::string>* nullColumns = nullptr) {
+    const std::set<std::string>* nullColumns = nullptr,
+    StorageEngine* functionEngine = nullptr) {
     value.clear();
     isNull = false;
     if (exprSql.empty()) return false;
     const auto result = nullColumns
         ? dbms::ExprHelper::evalStringWithNulls(
-              exprSql, row, *nullColumns, typeHints, currentDB)
+              exprSql, row, *nullColumns, typeHints, currentDB, "", functionEngine)
         : dbms::ExprHelper::evalString(
-              exprSql, row, typeHints, currentDB);
+              exprSql, row, typeHints, currentDB, "", functionEngine);
     if (!result.ok) return false;
     isNull = result.isNull;
     if (!isNull) value = result.value;
@@ -2074,13 +2077,14 @@ StorageEngine::StorageEngine()
     // engine must not silently treat every WHEN clause as true when that
     // callback has not been registered yet.
     setWhenConditionEvaluator(
-        [](const std::string& condition,
+        [this](const std::string& condition,
            const std::map<std::string, std::string>& newValues,
            const std::map<std::string, std::string>& oldValues) -> bool {
             std::map<std::string, std::string> values = oldValues;
             values.insert(newValues.begin(), newValues.end());
             std::string error;
-            return ExprHelper::evalBool(condition, values, {}, &error);
+            return ExprHelper::evalBool(condition, values, {}, &error,
+                transactionContext().txnDB, "", this);
         });
     lastBackgroundCheckpoint_ = std::chrono::steady_clock::now();
     startBackgroundWorker();
@@ -7534,7 +7538,8 @@ bool StorageEngine::forEachVisibleRow(
         }
 
         const bool allowed = evaluateRlsPolicies(
-            policies, false, values, typeHints, dbname, user, evaluationError);
+            policies, false, values, typeHints, dbname, user, evaluationError,
+            const_cast<StorageEngine*>(this));
         if (allowed) visible.push_back({pageId, slotId, row});
     }, readView, targetPartitions)) return false;
 
@@ -9954,7 +9959,7 @@ std::string StorageEngine::extractColumnValue(const std::string& rowBuffer,
             bool computedIsNull = false;
             const bool ok = evalExpressionSqlValue(
                 vc.generatedExpr, rowValues, typeHints, valueDb,
-                computed, computedIsNull, &nullColumns);
+                computed, computedIsNull, &nullColumns, const_cast<StorageEngine*>(this));
             if (ok) {
                 rowValues[vc.dataName] = computed;
                 if (computedIsNull) nullColumns.insert(vc.dataName);
@@ -10739,7 +10744,7 @@ bool StorageEngine::checkExclusionConflict(const std::string& dbname, const std:
     // If the new row doesn't satisfy the partial predicate, no conflict.
     if (!ec.wherePredicate.empty()) {
         std::string err;
-        if (!dbms::ExprHelper::evalBool(ec.wherePredicate, newValues, buildTypeHints(tbl), &err, dbname)) {
+        if (!dbms::ExprHelper::evalBool(ec.wherePredicate, newValues, buildTypeHints(tbl), &err, dbname, "", const_cast<StorageEngine*>(this))) {
             return false;
         }
     }
@@ -10767,7 +10772,7 @@ bool StorageEngine::checkExclusionConflict(const std::string& dbname, const std:
         }
         if (!ec.wherePredicate.empty()) {
             std::string err;
-            if (!dbms::ExprHelper::evalBool(ec.wherePredicate, oldValues, buildTypeHints(tbl), &err, dbname)) {
+            if (!dbms::ExprHelper::evalBool(ec.wherePredicate, oldValues, buildTypeHints(tbl), &err, dbname, "", const_cast<StorageEngine*>(this))) {
                 return;
             }
         }
@@ -11145,7 +11150,8 @@ bool StorageEngine::runDeferredCheck(const DeferredCheck& dc) const {
     }
     std::string err;
     return dbms::ExprHelper::evalCheck(
-        expression, rowValues, buildTypeHints(tbl), &err, dc.dbname);
+        expression, rowValues, buildTypeHints(tbl), &err, dc.dbname, "",
+        const_cast<StorageEngine*>(this));
 }
 
 // TableSchema PK helpers (defined here because they use StorageEngine::extractColumnValue)
@@ -11262,13 +11268,15 @@ static bool partialIndexIncludes(
     const TableSchema& table,
     const std::map<std::string, std::string>& values,
     const std::string& dbname,
-    bool& included) {
+    bool& included,
+    StorageEngine* functionEngine) {
     included = true;
     if (predicate.empty()) return true;
 
     std::string error;
     included = dbms::ExprHelper::evalBool(
-        predicate, values, buildTypeHints(table), &error, dbname);
+        predicate, values, buildTypeHints(table), &error, dbname, "",
+        functionEngine);
     return error.empty();
 }
 
@@ -11278,7 +11286,8 @@ static bool expressionIndexEntry(
     const std::map<std::string, std::string>& values,
     const std::string& dbname,
     bool& included,
-    std::string& key) {
+    std::string& key,
+    StorageEngine* functionEngine) {
     included = false;
     key.clear();
     if (!metadata.isExpression) return false;
@@ -11309,7 +11318,7 @@ static bool expressionIndexEntry(
     if (!columnExists) return false;
 
     if (!partialIndexIncludes(metadata.whereCondition, table, values,
-                              dbname, included)) return false;
+                              dbname, included, functionEngine)) return false;
     if (!included) return true;
 
     const std::string value = valueFromRowMap(values, columnName);
@@ -11326,12 +11335,13 @@ static bool secondaryIndexEntry(
     const TableSchema& table,
     const std::map<std::string, std::string>& values,
     const std::string& dbname,
-    EvaluatedIndexEntry& entry) {
+    EvaluatedIndexEntry& entry,
+    StorageEngine* functionEngine) {
     entry = {};
     entry.name = metadata.name;
     if (metadata.isExpression) {
         return expressionIndexEntry(metadata, table, values, dbname,
-                                    entry.included, entry.key);
+                                    entry.included, entry.key, functionEngine);
     }
 
     const Column* column = nullptr;
@@ -11343,7 +11353,7 @@ static bool secondaryIndexEntry(
     }
     if (!column ||
         !partialIndexIncludes(metadata.whereCondition, table, values,
-                              dbname, entry.included)) {
+                              dbname, entry.included, functionEngine)) {
         return false;
     }
     if (!entry.included) return true;
@@ -11358,11 +11368,12 @@ static bool compositeIndexEntry(
     const TableSchema& table,
     const std::map<std::string, std::string>& values,
     const std::string& dbname,
-    EvaluatedIndexEntry& entry) {
+    EvaluatedIndexEntry& entry,
+    StorageEngine* functionEngine) {
     entry = {};
     entry.name = metadata.name;
     if (!partialIndexIncludes(metadata.whereCondition, table, values,
-                              dbname, entry.included)) {
+                              dbname, entry.included, functionEngine)) {
         return false;
     }
     if (!entry.included) return true;
@@ -11394,7 +11405,7 @@ static bool secondaryIndexEntryFromBuffer(
     const auto values = indexRowValuesFromBuffer(
         engine, table, rowBuffer, dbname);
     return secondaryIndexEntry(
-        metadata, table, values, dbname, entry);
+        metadata, table, values, dbname, entry, &engine);
 }
 
 static bool compositeIndexEntryFromBuffer(
@@ -11407,7 +11418,7 @@ static bool compositeIndexEntryFromBuffer(
     const auto values = indexRowValuesFromBuffer(
         engine, table, rowBuffer, dbname);
     return compositeIndexEntry(
-        metadata, table, values, dbname, entry);
+        metadata, table, values, dbname, entry, &engine);
 }
 
 DBStatus StorageEngine::createIndex(const std::string& dbname, const std::string& tablename,
@@ -11491,7 +11502,7 @@ DBStatus StorageEngine::createIndex(const std::string& dbname, const std::string
     }
     bool ignoredMembership = false;
     if (!partialIndexIncludes(whereCondition, tbl, nullValues, dbname,
-                              ignoredMembership)) {
+                              ignoredMembership, this)) {
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
     }
@@ -11802,7 +11813,7 @@ DBStatus StorageEngine::createCompositeIndex(const std::string& dbname,
     }
     bool ignoredMembership = false;
     if (!partialIndexIncludes(whereCondition, tbl, nullValues, dbname,
-                              ignoredMembership)) {
+                              ignoredMembership, this)) {
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
     }
@@ -19444,7 +19455,8 @@ DBStatus StorageEngine::alterTableAddCheckConstraint(const std::string& dbname,
             }
             std::string evaluationError;
             if (!dbms::ExprHelper::evalCheck(
-                    expr, rowValues, typeHints, &evaluationError, dbname)) {
+                    expr, rowValues, typeHints, &evaluationError, dbname,
+                    "", this)) {
                 // Distinguish a valid predicate that rejects an existing row
                 // from a malformed or otherwise unevaluable expression,
                 // just as the INSERT/UPDATE CHECK paths do.
@@ -22290,7 +22302,7 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
             if (isNull) nullColumns.insert(tbl.cols[i].dataName);
         }
         const auto evaluated = ExprHelper::evalStringWithNulls(
-            cond.value, rowValues, nullColumns, buildTypeHints(tbl), valueDb);
+            cond.value, rowValues, nullColumns, buildTypeHints(tbl), valueDb, "", valueEngine);
         if (!evaluated.ok)
             throw std::runtime_error(evaluated.error.empty()
                 ? "failed to evaluate typed predicate" : evaluated.error);
@@ -23536,7 +23548,7 @@ DBStatus StorageEngine::insertInternal(
             bool computedNull = false;
             if (evalExpressionSqlValue(col.defaultValue, actualValues,
                                        typeHints, dbname, computed,
-                                       computedNull)) {
+                                       computedNull, nullptr, this)) {
                 actualValues[col.dataName] = computed;
                 if (computedNull) actualNullColumns.insert(col.dataName);
                 else actualNullColumns.erase(col.dataName);
@@ -24193,7 +24205,7 @@ DBStatus StorageEngine::insertInternal(
                     bool evaluatedNull = false;
                     const bool evaluated = evalExpressionSqlValue(
                         rawVal, actualValues, typeHints, dbname, val,
-                        evaluatedNull);
+                        evaluatedNull, nullptr, this);
                     // Strip surrounding quotes
                     if (!evaluated && val.size() >= 2 &&
                         ((val.front() == '\'' && val.back() == '\'') ||
@@ -24228,7 +24240,7 @@ DBStatus StorageEngine::insertInternal(
         bool computedNull = false;
         if (!evalExpressionSqlValue(col.generatedExpr, actualValues,
                                     typeHints, dbname, computed,
-                                    computedNull)) {
+                                    computedNull, nullptr, this)) {
             lockManager_.unlock(tablename);
             return DBStatus::INVALID_VALUE;
         }
@@ -24278,7 +24290,7 @@ DBStatus StorageEngine::insertInternal(
     for (const auto& metadata : secondaryIndexMetadata) {
         EvaluatedIndexEntry entry;
         if (!secondaryIndexEntry(
-                metadata, tbl, actualValues, dbname, entry)) {
+                metadata, tbl, actualValues, dbname, entry, this)) {
             lockManager_.unlock(tablename);
             return DBStatus::CORRUPTED_DATA;
         }
@@ -24288,7 +24300,7 @@ DBStatus StorageEngine::insertInternal(
     for (const auto& metadata : compositeIndexMetadata) {
         EvaluatedIndexEntry entry;
         if (!compositeIndexEntry(
-                metadata, tbl, actualValues, dbname, entry)) {
+                metadata, tbl, actualValues, dbname, entry, this)) {
             lockManager_.unlock(tablename);
             return DBStatus::CORRUPTED_DATA;
         }
@@ -24310,7 +24322,7 @@ DBStatus StorageEngine::insertInternal(
         }
         std::string err;
         if (!dbms::ExprHelper::evalCheck(
-                col.checkExpr, actualValues, typeHints, &err, dbname)) {
+                col.checkExpr, actualValues, typeHints, &err, dbname, "", this)) {
             lockManager_.unlock(tablename);
             return err.empty() ? DBStatus::CHECK_VIOLATION
                                : DBStatus::INVALID_VALUE;
@@ -24328,7 +24340,7 @@ DBStatus StorageEngine::insertInternal(
         }
         std::string err;
         if (!dbms::ExprHelper::evalCheck(
-                check.expression, actualValues, typeHints, &err, dbname)) {
+                check.expression, actualValues, typeHints, &err, dbname, "", this)) {
             lockManager_.unlock(tablename);
             return err.empty() ? DBStatus::CHECK_VIOLATION
                                : DBStatus::INVALID_VALUE;
@@ -27823,7 +27835,7 @@ DBStatus StorageEngine::updateInternal(
             bool assignsNull = false;
             if (!evalExpressionSqlValue(
                     col.generatedExpr, rowValues, updateTypeHints, dbname,
-                    computed, assignsNull)) {
+                    computed, assignsNull, nullptr, this)) {
                 lockManager_.unlock(tablename);
                 return DBStatus::INVALID_VALUE;
             }
@@ -27951,7 +27963,7 @@ DBStatus StorageEngine::updateInternal(
                         bool evaluatedNull = false;
                         const bool evaluated = evalExpressionSqlValue(
                             rawVal, rowValues, updateTypeHints, dbname, val,
-                            evaluatedNull);
+                            evaluatedNull, nullptr, this);
                         if (!evaluated && val.size() >= 2 &&
                             ((val.front() == '\'' && val.back() == '\'') ||
                              (val.front() == '"' && val.back() == '"'))) {
@@ -27984,7 +27996,7 @@ DBStatus StorageEngine::updateInternal(
                 bool assignsNull = false;
                 if (!evalExpressionSqlValue(
                         col.generatedExpr, rowValues, updateTypeHints2,
-                        dbname, computed, assignsNull)) {
+                        dbname, computed, assignsNull, nullptr, this)) {
                     lockManager_.unlock(tablename);
                     return DBStatus::INVALID_VALUE;
                 }
@@ -28209,7 +28221,7 @@ DBStatus StorageEngine::updateInternal(
                 bool computedNull = false;
                 if (!evalExpressionSqlValue(
                         column.generatedExpr, rowValues, updateTypeHints,
-                        dbname, computed, computedNull)) {
+                        dbname, computed, computedNull, nullptr, this)) {
                     lockManager_.unlock(tablename);
                     return DBStatus::INVALID_VALUE;
                 }
@@ -28302,10 +28314,10 @@ DBStatus StorageEngine::updateInternal(
             IndexTransition transition;
             if (!secondaryIndexEntry(
                     metadata, tbl, oldLogicalValues, dbname,
-                    transition.oldEntry) ||
+                    transition.oldEntry, this) ||
                 !secondaryIndexEntry(
                     metadata, tbl, rowValues, dbname,
-                    transition.newEntry)) {
+                    transition.newEntry, this)) {
                 lockManager_.unlock(tablename);
                 return DBStatus::CORRUPTED_DATA;
             }
@@ -28316,10 +28328,10 @@ DBStatus StorageEngine::updateInternal(
             IndexTransition transition;
             if (!compositeIndexEntry(
                     metadata, tbl, oldLogicalValues, dbname,
-                    transition.oldEntry) ||
+                    transition.oldEntry, this) ||
                 !compositeIndexEntry(
                     metadata, tbl, rowValues, dbname,
-                    transition.newEntry)) {
+                    transition.newEntry, this)) {
                 lockManager_.unlock(tablename);
                 return DBStatus::CORRUPTED_DATA;
             }
@@ -28369,7 +28381,8 @@ DBStatus StorageEngine::updateInternal(
             }
             std::string err;
             if (!dbms::ExprHelper::evalCheck(
-                    col.checkExpr, rowValues, updateTypeHints, &err, dbname)) {
+                    col.checkExpr, rowValues, updateTypeHints, &err, dbname,
+                    "", this)) {
                 lockManager_.unlock(tablename);
                 return err.empty() ? DBStatus::CHECK_VIOLATION
                                    : DBStatus::INVALID_VALUE;
@@ -28403,7 +28416,7 @@ DBStatus StorageEngine::updateInternal(
             std::string err;
             if (!dbms::ExprHelper::evalCheck(
                     storedCheck.expression, rowValues, updateTypeHints, &err,
-                    dbname)) {
+                    dbname, "", this)) {
                 lockManager_.unlock(tablename);
                 return err.empty() ? DBStatus::CHECK_VIOLATION
                                    : DBStatus::INVALID_VALUE;
@@ -31101,7 +31114,7 @@ std::vector<std::string> StorageEngine::query(
                         if (isNull) nullColumns.insert(name);
                     const auto evaluated = ExprHelper::evalStringWithNulls(
                         spec.expressionSql, rowData, nullColumns,
-                        expressionTypeHints, dbname);
+                        expressionTypeHints, dbname, "", this);
                     if (!evaluated.ok) {
                         lockManager_.unlock(tablename);
                         throw DbError("0A000", "cannot evaluate ORDER BY expression: " +
@@ -31488,7 +31501,7 @@ static PlPgsqlQueryResult plpgsqlEvalBoundExpression(
                 const auto value = ExprHelper::evalStringWithNulls(key,
                     {{key, variable.second}}, nullVariables.count(variable.first)
                         ? std::set<std::string>{key} : std::set<std::string>{},
-                    {}, dbname, username);
+                    {}, dbname, username, sqlFunctionEngine);
                 if (!value.ok) return plpgsqlScalarResult(value);
                 context.set(key, ExprValue(value.typeName, value.value, value.isNull));
             }
@@ -31522,7 +31535,8 @@ static PlPgsqlQueryResult plpgsqlEvalBoundExpression(
                         throw DbError("42703", "variable does not exist: " + name);
                     if (!context.has(name)) {
                         const auto value = ExprHelper::evalStringWithNulls(
-                            name, {}, {}, {}, dbname, username);
+                            name, {}, {}, {}, dbname, username,
+                            sqlFunctionEngine);
                         if (!value.ok) {
                             const auto failure = plpgsqlScalarResult(value);
                             throw DbError(failure.sqlState, failure.message);
@@ -31756,7 +31770,7 @@ static bool evalUDFBody(const StorageEngine::UDFInfo& udf,
             {binding, sourceType.empty() ? "text" : sourceType}};
         const auto converted = ExprHelper::evalStringWithNulls(
             "CAST(" + binding + " AS " + udf.returnType + ")",
-            row, {}, hints, dbname);
+            row, {}, hints, dbname, "", engine);
         if (!converted.ok) {
             const auto failure = plpgsqlScalarResult(converted);
             throw DbError(failure.sqlState, failure.message);
@@ -31784,7 +31798,7 @@ static bool evalUDFBody(const StorageEngine::UDFInfo& udf,
         PlPgsqlHost host;
         for (size_t i = 0; i < udf.paramNames.size() && i < udf.paramTypes.size(); ++i)
             host.parameterTypes[udf.paramNames[i]] = udf.paramTypes[i];
-        host.evalExprTyped = [&dbname](const std::string& expression,
+        host.evalExprTyped = [engine, &dbname](const std::string& expression,
                                       const std::map<std::string, std::string>& variables,
                                       const std::set<std::string>& nullVariables,
                                       const std::map<std::string, std::string>& types) {
@@ -31792,7 +31806,7 @@ static bool evalUDFBody(const StorageEngine::UDFInfo& udf,
                 const Session* session = currentSession();
                 return plpgsqlEvalBoundExpression(expression, variables,
                     nullVariables, types, dbname,
-                    session ? session->username : std::string{});
+                    session ? session->username : std::string{}, engine);
             } catch (const DbError& error) {
                 PlPgsqlQueryResult result;
                 result.sqlState = error.sqlState();
@@ -31800,7 +31814,7 @@ static bool evalUDFBody(const StorageEngine::UDFInfo& udf,
                 return result;
             }
         };
-        host.coerceValueTyped = [&dbname](const std::optional<std::string>& value,
+        host.coerceValueTyped = [engine, &dbname](const std::optional<std::string>& value,
                                          const std::string& sourceType,
                                          const std::string& targetType) {
             const std::string key = "__plpgsql_assignment";
@@ -31813,7 +31827,7 @@ static bool evalUDFBody(const StorageEngine::UDFInfo& udf,
                 const Session* session = currentSession();
                 return plpgsqlScalarResult(ExprHelper::evalStringWithNulls(
                     "CAST(" + key + " AS " + targetType + ")", values,
-                    nulls, types, dbname, session ? session->username : std::string{}));
+                    nulls, types, dbname, session ? session->username : std::string{}, engine));
             } catch (const DbError& error) {
                 PlPgsqlQueryResult result;
                 result.sqlState = error.sqlState();
@@ -31821,9 +31835,9 @@ static bool evalUDFBody(const StorageEngine::UDFInfo& udf,
                 return result;
             }
         };
-        host.evalExpr = [](const std::string& e,
+        host.evalExpr = [engine, &dbname](const std::string& e,
                            const std::map<std::string, std::string>&) {
-            auto r = ExprHelper::evalString(e, {});
+            auto r = ExprHelper::evalString(e, {}, {}, dbname, "", engine);
             if (!r.ok) return std::optional<std::string>{};
             return std::optional<std::string>{r.isNull ? "null" : r.value};
         };
@@ -32268,7 +32282,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         }
         const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
             normalizedArg, rowContext, nullColumns, typeHints, dbname,
-            expr.sessionUser);
+            expr.sessionUser, engine);
         return evaluated.ok ? evaluated.isNull : true;
     };
     auto stringSearchPosition = [](const std::string& haystack,
@@ -32419,7 +32433,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             }
             const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
                 whereSql, rowContext, nullColumns, typeHints, dbname,
-                expr.sessionUser);
+                expr.sessionUser, engine);
             if (!evaluated.ok) {
                 evaluationError = evaluated.error.empty()
                     ? "failed to evaluate EXISTS predicate"
@@ -32478,7 +32492,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             "(" + expr.funcArgs[0] + ")" + operation +
                 "(" + expr.funcArgs[1] + ")",
             rowContext, nullColumns, typeHints, dbname,
-            expr.sessionUser);
+            expr.sessionUser, engine);
         if (!evaluated.ok) {
             throw std::runtime_error(
                 evaluated.error.empty()
@@ -32523,7 +32537,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         expressionSql += ")";
         auto res = dbms::ExprHelper::evalStringWithNulls(
             expressionSql, rowContext, nullColumns, typeHints, dbname,
-            expr.sessionUser);
+            expr.sessionUser, engine);
         if (res.ok) return res.isNull ? "NULL" : res.value;
         throw std::runtime_error(
             res.error.empty() ? "failed to evaluate math function"
@@ -32568,7 +32582,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             if (caseSelect && caseSelect->selectList.size() == 1 &&
                 dynamic_cast<const CaseExpr*>(caseSelect->selectList.front().expr.get())) {
                 const auto result = ExprHelper::evalStringWithNulls(
-                    expr.funcArgs[0], rowCtx, nullColumns, typeHints, dbname, expr.sessionUser);
+                    expr.funcArgs[0], rowCtx, nullColumns, typeHints, dbname, expr.sessionUser, engine);
                 if (!result.ok) throw std::runtime_error(result.error);
                 if (knownNull) *knownNull = result.isNull;
                 return result.isNull ? "NULL" : result.value;
@@ -32715,7 +32729,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                     }
                     auto r3 = dbms::ExprHelper::evalStringWithNulls(
                         a2, rowCtx, nullColumns, typeHints, dbname,
-                        expr.sessionUser);
+                        expr.sessionUser, engine);
                     if (!r3.ok) { anyNull = true; continue; }
                     if (r3.isNull) { anyNull = true; continue; }
                     const std::string& v = r3.value;
@@ -32759,7 +32773,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         }
         auto r2 = dbms::ExprHelper::evalStringWithNulls(
             evalSrc, rowCtx, nullColumns, typeHints, dbname,
-            expr.sessionUser);
+            expr.sessionUser, engine);
         if (!r2.ok) {
             // PG aborts the statement when a projection expression
             // errors (e.g. undefined function 42883); surface the
@@ -33072,7 +33086,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             }
             const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
                 expressionSql, rowContext, nullColumns, typeHints, dbname,
-                expr.sessionUser);
+                expr.sessionUser, engine);
             if (!evaluated.ok) {
                 throw std::runtime_error(
                     evaluated.error.empty()
@@ -33332,7 +33346,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
             expr.funcName + "(" + expr.funcArgs[0] + ")",
             rowContext, nullColumns, typeHints, dbname,
-            expr.sessionUser);
+            expr.sessionUser, engine);
         if (!evaluated.ok) {
             throw std::runtime_error(
                 evaluated.error.empty()
@@ -33387,7 +33401,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
                 expr.funcName + "(" + expr.funcArgs[0] + ")",
                 rowContext, nullColumns, typeHints, dbname,
-                expr.sessionUser);
+                expr.sessionUser, engine);
             if (!evaluated.ok) {
                 throw std::runtime_error(
                     evaluated.error.empty()
@@ -33431,7 +33445,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         }
         const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
             "initcap(" + expr.funcArgs[0] + ")", rowContext,
-            nullColumns, typeHints, dbname, expr.sessionUser);
+            nullColumns, typeHints, dbname, expr.sessionUser, engine);
         if (!evaluated.ok) {
             throw std::runtime_error(
                 evaluated.error.empty()
@@ -33466,7 +33480,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         expressionSql += ')';
         const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
             expressionSql, rowContext, nullColumns, typeHints, dbname,
-            expr.sessionUser);
+            expr.sessionUser, engine);
         if (!evaluated.ok) {
             throw std::runtime_error(
                 evaluated.error.empty()
@@ -33500,7 +33514,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         expressionSql += ')';
         const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
             expressionSql, rowContext, nullColumns, typeHints, dbname,
-            expr.sessionUser);
+            expr.sessionUser, engine);
         if (!evaluated.ok) {
             throw std::runtime_error(
                 evaluated.error.empty()
@@ -33533,7 +33547,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         expressionSql += ')';
         const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
             expressionSql, rowContext, nullColumns, typeHints, dbname,
-            expr.sessionUser);
+            expr.sessionUser, engine);
         if (!evaluated.ok) {
             throw std::runtime_error(
                 evaluated.error.empty()
@@ -33623,7 +33637,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             "translate(" + expr.funcArgs[0] + "," +
                 expr.funcArgs[1] + "," + expr.funcArgs[2] + ")",
             rowContext, nullColumns, typeHints, dbname,
-            expr.sessionUser);
+            expr.sessionUser, engine);
         if (!evaluated.ok) {
             throw std::runtime_error(
                 evaluated.error.empty()
@@ -33666,7 +33680,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         expressionSql += ')';
         const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
             expressionSql, rowContext, nullColumns, typeHints, dbname,
-            expr.sessionUser);
+            expr.sessionUser, engine);
         if (!evaluated.ok) {
             throw std::runtime_error(
                 evaluated.error.empty()
@@ -33696,7 +33710,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             expr.funcName + "(" + expr.funcArgs[0] + "," +
                 expr.funcArgs[1] + ")",
             rowContext, nullColumns, typeHints, dbname,
-            expr.sessionUser);
+            expr.sessionUser, engine);
         if (!evaluated.ok) {
             throw std::runtime_error(
                 evaluated.error.empty()
@@ -33724,7 +33738,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
             "repeat(" + expr.funcArgs[0] + "," + expr.funcArgs[1] + ")",
             rowContext, nullColumns, typeHints, dbname,
-            expr.sessionUser);
+            expr.sessionUser, engine);
         if (!evaluated.ok) {
             throw std::runtime_error(
                 evaluated.error.empty()
@@ -33754,7 +33768,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             expr.funcName + "(" + expr.funcArgs[0] + "," +
                 expr.funcArgs[1] + ")",
             rowContext, nullColumns, typeHints, dbname,
-            expr.sessionUser);
+            expr.sessionUser, engine);
         if (!evaluated.ok) {
             throw std::runtime_error(
                 evaluated.error.empty()
@@ -33839,7 +33853,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     }
     if (expr.funcName == "now" || expr.funcName == "current_timestamp") {
         const auto evaluated = ExprHelper::evalString(
-            expr.funcName + "()", {}, {}, dbname);
+            expr.funcName + "()", {}, {}, dbname, expr.sessionUser, engine);
         return evaluated.ok && !evaluated.isNull ? evaluated.value : "";
     }
     if (expr.funcName == "extract" && expr.funcArgs.size() >= 2) {
@@ -33865,7 +33879,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             "extract(" + field + " from __extract_value)",
             {{"__extract_value", val}},
             {{"__extract_value", sourceType}}, dbname,
-            expr.sessionUser);
+            expr.sessionUser, engine);
         if (!evaluated.ok || evaluated.isNull) return "";
         return evaluated.value;
     }
@@ -33905,7 +33919,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 " from __date_component_value)",
             {{"__date_component_value", val}},
             {{"__date_component_value", sourceType}}, dbname,
-            expr.sessionUser);
+            expr.sessionUser, engine);
         if (!evaluated.ok || evaluated.isNull) return "";
         return evaluated.value;
     }
@@ -34066,7 +34080,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
 
         const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
             "cast(" + expr.funcArgs[0] + " as " + targetType + ")",
-            rowContext, nullColumns, typeHints, dbname, expr.sessionUser);
+            rowContext, nullColumns, typeHints, dbname, expr.sessionUser, engine);
         if (!evaluated.ok) {
             throw std::runtime_error(
                 evaluated.error.empty() ? "failed to evaluate cast"
@@ -34309,7 +34323,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         expression += ")";
         const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
             expression, rowContext, nullColumns, typeHints, dbname,
-            expr.sessionUser);
+            expr.sessionUser, engine);
         if (!evaluated.ok) {
             throw std::runtime_error(
                 evaluated.error.empty()
@@ -34338,7 +34352,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             "nullif(" + expr.funcArgs[0] + "," +
                 expr.funcArgs[1] + ")",
             rowContext, nullColumns, typeHints, dbname,
-            expr.sessionUser);
+            expr.sessionUser, engine);
         if (!evaluated.ok) {
             throw std::runtime_error(
                 evaluated.error.empty() ? "failed to evaluate nullif"
@@ -34401,7 +34415,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         expressionSql += ')';
         const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
             expressionSql, rowContext, nullColumns, typeHints, dbname,
-            expr.sessionUser);
+            expr.sessionUser, engine);
         if (!evaluated.ok) {
             throw std::runtime_error(
                 evaluated.error.empty() ? "failed to evaluate padding"
@@ -34452,7 +34466,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         expressionSql += ')';
         const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
             expressionSql, rowContext, nullColumns, typeHints, dbname,
-            expr.sessionUser);
+            expr.sessionUser, engine);
         if (!evaluated.ok) {
             throw std::runtime_error(
                 evaluated.error.empty()
@@ -34482,7 +34496,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             expr.funcName + "(" + expr.funcArgs[0] + "," +
                 expr.funcArgs[1] + "," + expr.funcArgs[2] + ")",
             rowContext, nullColumns, typeHints, dbname,
-            expr.sessionUser);
+            expr.sessionUser, engine);
         if (!evaluated.ok) {
             throw std::runtime_error(
                 evaluated.error.empty()
@@ -34581,7 +34595,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             "split_part(" + expr.funcArgs[0] + "," +
                 expr.funcArgs[1] + "," + expr.funcArgs[2] + ")",
             rowContext, nullColumns, typeHints, dbname,
-            expr.sessionUser);
+            expr.sessionUser, engine);
         if (!evaluated.ok) {
             throw std::runtime_error(
                 evaluated.error.empty() ? "failed to evaluate split_part"
@@ -34616,7 +34630,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         expressionSql += ")";
         const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
             expressionSql, rowContext, nullColumns, typeHints, dbname,
-            expr.sessionUser);
+            expr.sessionUser, engine);
         if (!evaluated.ok) {
             throw std::runtime_error(
                 evaluated.error.empty()
@@ -35274,7 +35288,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                         const auto predicate =
                             dbms::ExprHelper::evalStringWithNulls(
                                 whereSql, rowContext, nullColumns, typeHints,
-                                dbname, expr.sessionUser);
+                                dbname, expr.sessionUser, engine);
                         if (!predicate.ok) {
                             evaluationError = predicate.error.empty()
                                 ? "failed to evaluate scalar subquery predicate"
@@ -35377,7 +35391,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 }
                 const auto selected = dbms::ExprHelper::evalStringWithNulls(
                     colsStr, candidate.values, candidate.nulls, candidate.types,
-                    dbname, expr.sessionUser);
+                    dbname, expr.sessionUser, engine);
                 if (!selected.ok)
                     throw std::runtime_error(selected.error.empty()
                         ? "failed to evaluate scalar subquery projection" : selected.error);
@@ -35447,7 +35461,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         expressionSql += ")";
         const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
             expressionSql, rowContext, nullColumns, typeHints, dbname,
-            expr.sessionUser);
+            expr.sessionUser, engine);
         if (!evaluated.ok) {
             throw std::runtime_error(
                 evaluated.error.empty()
@@ -35508,7 +35522,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         expressionSql += ")";
         const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
             expressionSql, rowContext, nullColumns, typeHints, dbname,
-            expr.sessionUser);
+            expr.sessionUser, engine);
         if (!evaluated.ok) {
             throw std::runtime_error(
                 evaluated.error.empty()
@@ -35566,7 +35580,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         for (const auto& argument : expr.funcArgs) {
             auto evaluated = ExprHelper::evalStringWithNulls(
                 argument, rowContext, nullColumns, typeHints, dbname,
-                expr.sessionUser);
+                expr.sessionUser, engine);
             if (!evaluated.ok) {
                 throw std::runtime_error(evaluated.error);
             }
@@ -36014,7 +36028,7 @@ std::vector<std::string> StorageEngine::queryExpr(
                             const auto evaluated =
                                 dbms::ExprHelper::evalStringWithNulls(
                                     expression, rowContext, nullColumns,
-                                    typeHints, dbname, expr.sessionUser);
+                                    typeHints, dbname, expr.sessionUser, this);
                             valueIsNull = evaluated.ok
                                 ? evaluated.isNull
                                 : true;
@@ -37989,7 +38003,7 @@ std::vector<std::string> StorageEngine::sortByExpression(
             if (!spec.expressionSql.empty()) {
                 const auto evaluated = ExprHelper::evalStringWithNulls(
                     spec.expressionSql, rowData, {}, expressionTypeHints,
-                    dbname);
+                    dbname, "", const_cast<StorageEngine*>(this));
                 if (!evaluated.ok)
                     throw DbError("0A000", "cannot evaluate ORDER BY expression: " +
                                          evaluated.error);

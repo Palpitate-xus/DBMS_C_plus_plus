@@ -7,6 +7,7 @@
 #include <vector>
 
 namespace dbms {
+class StorageEngine;
 
 // ----------------------------------------------------------------------------
 // Expression evaluation helper
@@ -54,12 +55,16 @@ public:
     // `typeHints`: column name -> canonical type name (e.g. "integer",
     //              "character varying"). Columns without a hint are treated as
     //              "text".
+    // `functionEngine`: owner of stored-function metadata and transactions.
+    // A null pointer preserves the frontend's global-engine convention;
+    // independent StorageEngine callers must pass their actual instance.
     static ExprEvalResult evalString(
         const std::string& exprSql,
         const std::map<std::string, std::string>& row,
         const std::map<std::string, std::string>& typeHints = {},
         const std::string& currentDB = "",
-        const std::string& currentUser = "");
+        const std::string& currentUser = "",
+        StorageEngine* functionEngine = nullptr);
 
     // Variant for callers that retain SQL NULL metadata separately from the
     // textual value.  This preserves a real empty string as distinct from
@@ -70,7 +75,8 @@ public:
         const std::set<std::string>& nullColumns,
         const std::map<std::string, std::string>& typeHints = {},
         const std::string& currentDB = "",
-        const std::string& currentUser = "");
+        const std::string& currentUser = "",
+        StorageEngine* functionEngine = nullptr);
 
     // Convenience: evaluate a boolean expression. NULL is treated as false.
     // Returns false and writes the error message to `error` (if non-null) on
@@ -81,7 +87,8 @@ public:
         const std::map<std::string, std::string>& typeHints = {},
         std::string* error = nullptr,
         const std::string& currentDB = "",
-        const std::string& currentUser = "");
+        const std::string& currentUser = "",
+        StorageEngine* functionEngine = nullptr);
 
     // CHECK constraints reject only FALSE. SQL UNKNOWN/NULL satisfies the
     // constraint, while parse and evaluation errors still fail closed.
@@ -91,7 +98,8 @@ public:
         const std::map<std::string, std::string>& typeHints = {},
         std::string* error = nullptr,
         const std::string& currentDB = "",
-        const std::string& currentUser = "");
+        const std::string& currentUser = "",
+        StorageEngine* functionEngine = nullptr);
 
     // Parse an expression and report whether it references a logical column.
     // nullopt means the stored expression could not be parsed safely.

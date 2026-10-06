@@ -1389,7 +1389,8 @@ static ExprEvalResult evalStringImpl(
     const std::map<std::string, std::string>& typeHints,
     const std::set<std::string>* nullColumns,
     const std::string& currentDB,
-    const std::string& currentUser) {
+    const std::string& currentUser,
+    StorageEngine* functionEngine = nullptr) {
 
     std::string extractFixed;
     // extract(field FROM expr) -> date_part('field', expr): PG-equivalent,
@@ -1559,7 +1560,7 @@ static ExprEvalResult evalStringImpl(
     }, 's');
     ExprValue v;
     try {
-        evaluator.bindScalarFunctions(select->selectList[0].expr.get());
+        evaluator.bindScalarFunctions(select->selectList[0].expr.get(), functionEngine);
         v = evaluator.eval(select->selectList[0].expr.get(), ctx);
     } catch (const std::exception& e) {
         // Runtime expression errors (division by zero, invalid cast input)
@@ -1586,9 +1587,10 @@ ExprEvalResult ExprHelper::evalString(
     const std::map<std::string, std::string>& row,
     const std::map<std::string, std::string>& typeHints,
     const std::string& currentDB,
-    const std::string& currentUser) {
+    const std::string& currentUser,
+    StorageEngine* functionEngine) {
     return evalStringImpl(
-        exprSql, row, typeHints, nullptr, currentDB, currentUser);
+        exprSql, row, typeHints, nullptr, currentDB, currentUser, functionEngine);
 }
 
 ExprEvalResult ExprHelper::evalStringWithNulls(
@@ -1597,9 +1599,10 @@ ExprEvalResult ExprHelper::evalStringWithNulls(
     const std::set<std::string>& nullColumns,
     const std::map<std::string, std::string>& typeHints,
     const std::string& currentDB,
-    const std::string& currentUser) {
+    const std::string& currentUser,
+    StorageEngine* functionEngine) {
     return evalStringImpl(
-        exprSql, row, typeHints, &nullColumns, currentDB, currentUser);
+        exprSql, row, typeHints, &nullColumns, currentDB, currentUser, functionEngine);
 }
 
 bool ExprHelper::evalBool(
@@ -1608,9 +1611,10 @@ bool ExprHelper::evalBool(
     const std::map<std::string, std::string>& typeHints,
     std::string* error,
     const std::string& currentDB,
-    const std::string& currentUser) {
+    const std::string& currentUser,
+    StorageEngine* functionEngine) {
 
-    ExprEvalResult r = evalString(exprSql, row, typeHints, currentDB, currentUser);
+    ExprEvalResult r = evalString(exprSql, row, typeHints, currentDB, currentUser, functionEngine);
     if (!r.ok) {
         if (error) *error = r.error;
         return false;
@@ -1628,10 +1632,11 @@ bool ExprHelper::evalCheck(
     const std::map<std::string, std::string>& typeHints,
     std::string* error,
     const std::string& currentDB,
-    const std::string& currentUser) {
+    const std::string& currentUser,
+    StorageEngine* functionEngine) {
 
     ExprEvalResult r = evalString(
-        exprSql, row, typeHints, currentDB, currentUser);
+        exprSql, row, typeHints, currentDB, currentUser, functionEngine);
     if (!r.ok) {
         if (error) *error = r.error;
         return false;
