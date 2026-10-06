@@ -153,7 +153,8 @@ std::string mergeProtocolTypes(const std::string& leftRaw,
 
 std::string inferAstResultType(
     const Expr* expression,
-    const std::map<std::string, std::string>& typeHints) {
+    const std::map<std::string, std::string>& typeHints,
+    const std::map<const Expr*, std::string>* routineTypes = nullptr) {
     if (!expression) return "text";
     if (const auto* literal = dynamic_cast<const LiteralExpr*>(expression)) {
         if (!literal->typeName.empty())
@@ -190,7 +191,7 @@ std::string inferAstResultType(
         if (op == "not" || op.find("is ") == 0) return "boolean";
         if (op.rfind("at time zone", 0) == 0) {
             const std::string input = inferAstResultType(
-                unary->operand.get(), typeHints);
+                unary->operand.get(), typeHints, routineTypes);
             return input == "timestamptz" ? "timestamp" : "timestamptz";
         }
         if (op == "-") {
@@ -203,7 +204,7 @@ std::string inferAstResultType(
                     "-" + literal->value);
             }
         }
-        return inferAstResultType(unary->operand.get(), typeHints);
+        return inferAstResultType(unary->operand.get(), typeHints, routineTypes);
     }
     if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(expression)) {
         const std::string op = toLower(binary->op);
@@ -224,8 +225,8 @@ std::string inferAstResultType(
             "<<=", ">>=", "&&", "@>", "<@", "~", "~*", "!~", "!~*"
         };
         if (booleanOperators.count(op)) return "boolean";
-        const std::string left = inferAstResultType(binary->left.get(), typeHints);
-        const std::string right = inferAstResultType(binary->right.get(), typeHints);
+        const std::string left = inferAstResultType(binary->left.get(), typeHints, routineTypes);
+        const std::string right = inferAstResultType(binary->right.get(), typeHints, routineTypes);
         if (op == "||") {
             if ((left == "bit" || left == "bit varying") &&
                 (right == "bit" || right == "bit varying")) {
@@ -268,7 +269,7 @@ std::string inferAstResultType(
         std::string element = "unknown";
         for (const auto& value : array->elements)
             element = mergeProtocolTypes(
-                element, inferAstResultType(value.get(), typeHints));
+                element, inferAstResultType(value.get(), typeHints, routineTypes));
         if (element.empty() || element == "unknown") element = "text";
         return element + "[]";
     }
@@ -277,19 +278,21 @@ std::string inferAstResultType(
         std::string result = "unknown";
         for (const auto& clause : caseExpression->whenClauses)
             result = mergeProtocolTypes(
-                result, inferAstResultType(clause.second.get(), typeHints));
+                result, inferAstResultType(clause.second.get(), typeHints, routineTypes));
         if (caseExpression->elseExpr)
             result = mergeProtocolTypes(
-                result, inferAstResultType(caseExpression->elseExpr.get(), typeHints));
+                result, inferAstResultType(caseExpression->elseExpr.get(), typeHints, routineTypes));
         return result;
     }
     if (const auto* call = dynamic_cast<const FunctionCallExpr*>(expression)) {
-        const auto routine = typeHints.find("\x01routine:" + call->schema + "." + call->funcName);
-        if (routine != typeHints.end()) return protocolTypeName(routine->second);
+        if (routineTypes) {
+            const auto routine = routineTypes->find(call);
+            if (routine != routineTypes->end()) return protocolTypeName(routine->second);
+        }
         const std::string name = toLower(call->funcName);
         auto argType = [&](size_t index) {
             return index < call->args.size()
-                ? inferAstResultType(call->args[index].get(), typeHints)
+                ? inferAstResultType(call->args[index].get(), typeHints, routineTypes)
                 : std::string("unknown");
         };
         if (name == "cast" && call->args.size() >= 2) {
@@ -1103,7 +1106,7 @@ std::string ExprHelper::inferResultType(
         auto parsed = parser.parse("SELECT " + trimmed);
         const auto* select = parsed.success ? dynamic_cast<const SelectStmt*>(parsed.stmt.get()) : nullptr;
         if (select && select->selectList.size() == 1) {
-            auto hints = typeHints;
+            std::map<const Expr*, std::string> routineTypes;
             ExprEvaluator evaluator;
             evaluator.setCurrentDB(currentDB);
             bool stored = false;
@@ -1113,7 +1116,7 @@ std::string ExprHelper::inferResultType(
                     if (evaluator.hasScalarFunction(call, functionEngine)) {
                         const std::string type = evaluator.scalarFunctionResultType(call, functionEngine);
                         if (!type.empty()) {
-                            hints["\x01routine:" + call->schema + "." + call->funcName] = type;
+                            routineTypes[call] = type;
                             stored = true;
                         }
                     }
@@ -1138,7 +1141,8 @@ std::string ExprHelper::inferResultType(
             };
             inspect(select->selectList.front().expr.get());
             if (stored) {
-                const std::string type = inferAstResultType(select->selectList.front().expr.get(), hints);
+                const std::string type = inferAstResultType(
+                    select->selectList.front().expr.get(), typeHints, &routineTypes);
                 return type.empty() || type == "unknown" ? "text" : type;
             }
         }
