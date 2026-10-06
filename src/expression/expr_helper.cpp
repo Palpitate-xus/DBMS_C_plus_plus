@@ -10,6 +10,7 @@
 #include <cctype>
 #include <ctime>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <sstream>
 #include <vector>
@@ -1533,8 +1534,78 @@ static ExprEvalResult evalStringImpl(
         return res;
     }
 
-    // Build row context.
+    // RowContext retains its legacy case-insensitive keys.  Parser column
+    // components, however, already contain canonical SQL identities: quoted
+    // "F" is not f. Bind this local AST to private datum positions instead of
+    // asking RowContext to resolve user identifiers a second time.
+    std::vector<ColumnRefExpr*> references;
+    std::function<void(Expr*)> visitValueReferences = [&](Expr* expression) {
+        if (!expression) return;
+        if (auto* column = dynamic_cast<ColumnRefExpr*>(expression)) {
+            references.push_back(column);
+        } else if (auto* unary = dynamic_cast<UnaryOpExpr*>(expression)) {
+            visitValueReferences(unary->operand.get());
+        } else if (auto* binary = dynamic_cast<BinaryOpExpr*>(expression)) {
+            visitValueReferences(binary->left.get());
+            // These right-hand nodes are type/collation labels, not values.
+            if (binary->op != "::" && binary->op != "COLLATE")
+                visitValueReferences(binary->right.get());
+        } else if (auto* cast = dynamic_cast<CastExpr*>(expression)) {
+            visitValueReferences(cast->operand.get());
+        } else if (auto* conditional = dynamic_cast<CaseExpr*>(expression)) {
+            visitValueReferences(conditional->switchExpr.get());
+            for (auto& arm : conditional->whenClauses) {
+                visitValueReferences(arm.first.get());
+                visitValueReferences(arm.second.get());
+            }
+            visitValueReferences(conditional->elseExpr.get());
+        } else if (auto* call = dynamic_cast<FunctionCallExpr*>(expression)) {
+            for (size_t i = 0; i < call->args.size(); ++i) {
+                // EXTRACT's bare field is grammar, unlike date_part's value.
+                // Most EXTRACT nodes were normalized above, but whitespace
+                // before '(' can leave the parser's original field node.
+                if (i == 0 && call->schema.empty() &&
+                    toLower(call->funcName) == "extract") {
+                    const auto* field = dynamic_cast<ColumnRefExpr*>(call->args[i].get());
+                    if (field && field->schema.empty() && field->table.empty()) {
+                        auto literal = std::make_unique<LiteralExpr>();
+                        literal->typeName = "text";
+                        literal->value = "'";
+                        for (const char character : field->column) {
+                            literal->value += character;
+                            if (character == '\'') literal->value += character;
+                        }
+                        literal->value += "'";
+                        call->args[i] = std::move(literal);
+                        continue;
+                    }
+                }
+                visitValueReferences(call->args[i].get());
+            }
+            for (auto& argument : call->namedArgs)
+                visitValueReferences(argument.value.get());
+            visitValueReferences(call->filter.get());
+            for (auto& item : call->over.partitionBy) visitValueReferences(item.get());
+            for (auto& item : call->over.orderBy) visitValueReferences(item.first.get());
+            visitValueReferences(call->over.frameStart.get());
+            visitValueReferences(call->over.frameEnd.get());
+        } else if (auto* array = dynamic_cast<ArrayExpr*>(expression)) {
+            for (auto& item : array->elements) visitValueReferences(item.get());
+        } else if (auto* tuple = dynamic_cast<RowExpr*>(expression)) {
+            for (auto& item : tuple->elements) visitValueReferences(item.get());
+        }
+    };
+    visitValueReferences(select->selectList[0].expr.get());
+    std::set<std::string> occupiedKeys;
+    for (const auto* reference : references) {
+        occupiedKeys.insert(toLower(reference->column));
+        occupiedKeys.insert(toLower(reference->toString()));
+    }
+    for (const auto& entry : row) occupiedKeys.insert(toLower(entry.first));
+
     RowContext ctx;
+    std::map<std::string, std::string> bindings;
+    size_t nextPosition = 0;
     for (const auto& [name, value] : row) {
         std::string typeName = inferType(value);
         auto it = typeHints.find(name);
@@ -1544,7 +1615,12 @@ static ExprEvalResult evalStringImpl(
         const bool isNull = nullColumns
             ? nullColumns->count(name) != 0
             : value.empty();
-        ctx.set(name, ExprValue(typeName, value, isNull));
+        std::string key;
+        do {
+            key = "\x01helper_value_" + std::to_string(nextPosition++);
+        } while (!occupiedKeys.insert(key).second);
+        ctx.set(key, ExprValue(typeName, value, isNull));
+        bindings.emplace(name, key);
     }
     // PostgreSQL exposes these as special session-value expressions. The
     // parser accepts both the function-like AST form and the bare identifier
@@ -1580,6 +1656,28 @@ static ExprEvalResult evalStringImpl(
     }, 's');
     ExprValue v;
     try {
+        for (auto* reference : references) {
+            auto binding = bindings.find(reference->toString());
+            // A scalar caller can provide a single prevalidated relation as
+            // bare column keys. Preserve that existing qualifier fallback,
+            // but never fold the column identity or an explicit qualified key.
+            if (binding == bindings.end() && !reference->schema.empty())
+                binding = bindings.find(reference->table + "." + reference->column);
+            if (binding == bindings.end() && !reference->table.empty())
+                binding = bindings.find(reference->column);
+            if (binding == bindings.end()) {
+                static const std::set<std::string> sessionValues = {
+                    "current_user", "session_user", "current_date",
+                    "current_timestamp", "localtimestamp"
+                };
+                if (reference->schema.empty() && reference->table.empty() &&
+                    sessionValues.count(reference->column)) continue;
+                throw DbError("42703", "column does not exist: " + reference->toString());
+            }
+            reference->column = binding->second;
+            reference->table.clear();
+            reference->schema.clear();
+        }
         evaluator.bindScalarFunctions(select->selectList[0].expr.get(), functionEngine);
         v = evaluator.eval(select->selectList[0].expr.get(), ctx);
     } catch (const std::exception& e) {
