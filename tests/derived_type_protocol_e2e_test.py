@@ -129,6 +129,12 @@ def main():
               "CROSS JOIN LATERAL (SELECT l.id + 1 AS next_id) x "
               "WHERE l.id = 6;"),
              [["6", None, "7"]], [23, 25, 23]),
+            (("SELECT l.id, r.label, x.next_id "
+              "FROM typed_lateral_left AS l "
+              "LEFT JOIN typed_lateral_right AS r ON r.id = l.id "
+              "LEFT JOIN LATERAL (SELECT l.id + 1 AS next_id) x ON true "
+              "WHERE l.id = 6;"),
+             [["6", None, "7"]], [23, 25, 23]),
             (("SELECT l.id, r.id, x.next_id "
               "FROM typed_lateral_left AS l "
               "INNER JOIN typed_lateral_right AS r ON r.id = l.id "
