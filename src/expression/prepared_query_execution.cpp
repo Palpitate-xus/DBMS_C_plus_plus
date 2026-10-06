@@ -43,6 +43,7 @@ ExprPtr copyExpression(const Expr* source, std::map<const Expr*, const Expr*>& s
         target->typeMods = node->typeMods; target->operand = copy(node->operand); result = std::move(target);
     } else if (const auto* node = dynamic_cast<const CaseExpr*>(source)) {
         auto target = std::make_unique<CaseExpr>();
+        target->simpleComparisonTypes = node->simpleComparisonTypes;
         target->switchExpr = copy(node->switchExpr); target->elseExpr = copy(node->elseExpr);
         for (const auto& arm : node->whenClauses) target->whenClauses.emplace_back(copy(arm.first),copy(arm.second));
         result = std::move(target);

@@ -1148,6 +1148,8 @@ std::string ExprHelper::scalarExpressionIdentity(
         }
         if (const auto* conditional = dynamic_cast<const CaseExpr*>(node)) {
             std::string result = "case" + field(key(conditional->switchExpr.get()));
+            for (const auto& types : conditional->simpleComparisonTypes)
+                result += field(types.first) + field(types.second);
             for (const auto& arm : conditional->whenClauses)
                 result += field(key(arm.first.get())) + field(key(arm.second.get()));
             return result + field(key(conditional->elseExpr.get()));

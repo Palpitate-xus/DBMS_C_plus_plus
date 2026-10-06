@@ -3,6 +3,7 @@
 #include "catalog/catalog.h"
 #include "common/DbError.h"
 #include "expression/common_type.h"
+#include "expression/equality_type.h"
 #include "expression/expr_helper.h"
 #include "expression/array_type.h"
 #include <algorithm>
@@ -270,6 +271,7 @@ public:
             const auto switchType = expression(conditional->switchExpr, scopes);
             if (conditional->switchExpr && switchType == "unknown")
                 coerceCaseInput(conditional->switchExpr,switchType,"text");
+            conditional->simpleComparisonTypes.clear();
             std::vector<std::string> thenTypes;
             for (auto& clause : conditional->whenClauses) {
                 const auto conditionType = expression(clause.first, scopes);
@@ -278,10 +280,11 @@ public:
                         common_type_detail::canonical(conditionType) != "boolean")
                         throw DbError("42804","argument of CASE/WHEN must be type boolean");
                     coerceCaseInput(clause.first,conditionType,"boolean");
-                } else if (conditionType == "unknown") {
-                    coerceCaseInput(clause.first,conditionType,
-                        common_type_detail::canonical(switchType) == "unknown" ? "text"
-                        : common_type_detail::canonical(switchType));
+                } else {
+                    const auto equality=resolveBuiltinEquality(
+                        switchType=="unknown"?"text":switchType,conditionType);
+                    conditional->simpleComparisonTypes.push_back(equality);
+                    coerceCaseInput(clause.first,conditionType,equality.second);
                 }
                 thenTypes.push_back(expression(clause.second,scopes));
             }

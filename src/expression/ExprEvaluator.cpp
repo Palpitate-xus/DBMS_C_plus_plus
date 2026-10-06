@@ -3308,17 +3308,48 @@ ExprValue ExprEvaluator::evalCase(const CaseExpr* e, const RowContext& ctx) cons
     const bool simpleCase = static_cast<bool>(e->switchExpr);
     const ExprValue switchValue = simpleCase
         ? eval(e->switchExpr.get(), ctx) : ExprValue{};
+    size_t clauseIndex = 0;
     for (const auto& wc : e->whenClauses) {
         bool match = false;
         if (simpleCase) {
-            const ExprValue condition = eval(wc.first.get(), ctx);
-            const ExprValue equal =
-                applyComparison("=", switchValue, condition);
+            ExprValue condition = eval(wc.first.get(), ctx);
+            ExprValue left = switchValue;
+            ExprValue equal;
+            if (!e->simpleComparisonTypes.empty()) {
+                if (e->simpleComparisonTypes.size() != e->whenClauses.size())
+                    throw DbError("XX000", "simple CASE has incomplete operator bindings");
+                const auto& types = e->simpleComparisonTypes[clauseIndex];
+                const auto coerce = [&](const ExprValue& value, const std::string& target) {
+                    if (ExprHelper::canonicalResultTypeName(value.typeName) == target) return value;
+                    if (target == "bpchar" || target == "bit") {
+                        // An implicit unconstrained binary cast must not use
+                        // explicit CHAR/BIT's default typmod of one.
+                        ExprValue result = value; result.typeName = target;
+                        return result;
+                    }
+                    return evalCast(nullptr, ctx, value, target);
+                };
+                left = coerce(left, types.first);
+                condition = coerce(condition, types.second);
+                const bool floating = types.first == "real" || types.first == "double precision";
+                if (floating && (types.second == "real" || types.second == "double precision") &&
+                    !left.isNull && !condition.isNull) {
+                    // REAL's shortest round-trip text represents a float4,
+                    // not an independently parsed float8. PostgreSQL's cross
+                    // float operator promotes the already-rounded float4.
+                    const double a = types.first == "real"
+                        ? static_cast<double>(parseRealCastValue(left)) : parseDoubleCastValue(left);
+                    const double b = types.second == "real"
+                        ? static_cast<double>(parseRealCastValue(condition)) : parseDoubleCastValue(condition);
+                    equal = ExprValue("boolean", (a == b || (std::isnan(a) && std::isnan(b))) ? "t" : "f", false);
+                } else equal = applyComparison("=", left, condition);
+            } else equal = applyComparison("=", left, condition);
             match = !equal.isNull && equal.asBool();
         } else {
             match = eval(wc.first.get(), ctx).asBool();
         }
         if (match) return withResultCollation(eval(wc.second.get(), ctx));
+        ++clauseIndex;
     }
     if (e->elseExpr)
         return withResultCollation(eval(e->elseExpr.get(), ctx));

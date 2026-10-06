@@ -406,6 +406,10 @@ struct CaseExpr : public Expr {
     ExprPtr switchExpr;                     // 简单 CASE 的判别式；搜索 CASE 为空
     std::vector<std::pair<ExprPtr, ExprPtr>> whenClauses; // (condition, result)
     ExprPtr elseExpr;
+    // Purely resolved '=' operand types, one per simple WHEN. The switch
+    // datum is evaluated once; each operator can coerce that cached datum
+    // differently without duplicating the switch expression/effects.
+    std::vector<std::pair<std::string,std::string>> simpleComparisonTypes;
     CaseExpr() { type = ExprType::CaseExpr; }
     std::string toString() const override { return "CASE"; }
 };
