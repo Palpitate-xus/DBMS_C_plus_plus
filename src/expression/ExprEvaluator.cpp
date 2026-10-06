@@ -3082,7 +3082,9 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
         if (l.isNull || r.isNull) {
             distinct = (l.isNull != r.isNull);
         } else {
-            distinct = applyComparison("<>", l, r).asBool();
+            // DISTINCT selects '=' and negates its Boolean result. '<>' is
+            // neither guaranteed to exist nor its inverse for geometric NaN.
+            distinct = !applyComparison("=", l, r).asBool();
         }
         if (op == "is not distinct from") distinct = !distinct;
         return ExprValue("boolean", distinct ? "t" : "f", false);
