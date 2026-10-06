@@ -489,10 +489,13 @@ bool checkDatabase(const Session& s) {
 }
 
 std::string resolveTable(Session& s, const std::string& name,
-                         bool foldUnquoted = false) {
+                         bool foldUnquoted = false,
+                         bool* viewTarget = nullptr) {
+    if (viewTarget) *viewTarget = false;
     const auto temporaryPhysicalName = [&](const std::string& table) {
         const std::string physical = tempTablePrefix(s, table);
         g_engine.noteTemporaryRelationAccess(s.currentDB, physical);
+        if (viewTarget) *viewTarget = g_engine.viewExists(s.currentDB, physical);
         return physical;
     };
     CatalogManager::QualifiedName qualified;
@@ -508,8 +511,21 @@ std::string resolveTable(Session& s, const std::string& name,
         if (g_engine.schemaExists(s.currentDB, schema)) {
             std::string physical = schema == "public"
                 ? table : schema + "__" + table;
+            // CREATE VIEW's metadata uses logical schema.name, unlike heap
+            // tables' schema__name. Resolve that real identity before the
+            // physical-table spelling, including quoted relation names.
+            const std::string viewName = schema == "public"
+                ? table : schema + "." + table;
+            if (g_engine.viewExists(s.currentDB, viewName)) {
+                if (viewTarget) *viewTarget = true;
+                return viewName;
+            }
             if (const auto materialized = g_engine.resolveMaterializedView(
                     s.currentDB, schema, table)) {
+                if (viewTarget) {
+                    *viewTarget = true;
+                    return materialized->backingTable;
+                }
                 if (!materialized->populated) {
                     throw DbError(
                         "55000", "materialized view \"" + schema + "." +
@@ -528,8 +544,10 @@ std::string resolveTable(Session& s, const std::string& name,
                 physical = legacyPublic;
             }
             if (g_engine.isMaterializedView(s.currentDB, physical)) {
+                if (viewTarget) *viewTarget = true;
                 return StorageEngine::materializedViewPrefix(physical);
             }
+            if (viewTarget) *viewTarget = g_engine.viewExists(s.currentDB, physical);
             return physical;
         }
         return name;
@@ -553,8 +571,18 @@ std::string resolveTable(Session& s, const std::string& name,
         }
         std::string physical = schema == "public"
             ? table : schema + "__" + table;
+        const std::string viewName = schema == "public"
+            ? table : schema + "." + table;
+        if (g_engine.viewExists(s.currentDB, viewName)) {
+            if (viewTarget) *viewTarget = true;
+            return viewName;
+        }
         if (const auto materialized = g_engine.resolveMaterializedView(
                 s.currentDB, schema, table)) {
+            if (viewTarget) {
+                *viewTarget = true;
+                return materialized->backingTable;
+            }
             if (!materialized->populated) {
                 throw DbError(
                     "55000", "materialized view \"" + schema + "." +
@@ -574,10 +602,12 @@ std::string resolveTable(Session& s, const std::string& name,
         }
         if (firstCandidate.empty()) firstCandidate = physical;
         if (g_engine.isMaterializedView(s.currentDB, physical)) {
+            if (viewTarget) *viewTarget = true;
             return StorageEngine::materializedViewPrefix(physical);
         }
         if (g_engine.tableExists(s.currentDB, physical) ||
             g_engine.viewExists(s.currentDB, physical)) {
+            if (viewTarget) *viewTarget = g_engine.viewExists(s.currentDB, physical);
             return physical;
         }
     }
@@ -2769,12 +2799,12 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
     if (!checkDatabase(s)) return true;
 
     const std::string requestedTable = identifier(stmt.tableName);
-    const std::string resolvedTable = resolveTable(s, stmt.tableName, true);
+    bool viewTarget = false;
+    const std::string resolvedTable = resolveTable(s, stmt.tableName, true, &viewTarget);
 
     // Views and materialized views have separate rewrite/trigger semantics in
     // main.cpp.  Do not bypass those semantics while this bridge is partial.
-    if (g_engine.viewExists(s.currentDB, requestedTable) ||
-        g_engine.isMaterializedView(s.currentDB, requestedTable)) {
+    if (viewTarget) {
         fallback = true;
         return false;
     }
@@ -3392,9 +3422,9 @@ bool executeUpdateFromJoin(const UpdateStmt& stmt, Session& s, bool& fallback) {
     if (!checkDatabase(s)) return true;
 
     const std::string requestedTable = identifier(stmt.tableName);
-    const std::string resolvedTable = resolveTable(s, stmt.tableName, true);
-    if (g_engine.viewExists(s.currentDB, requestedTable) ||
-        g_engine.isMaterializedView(s.currentDB, requestedTable)) {
+    bool viewTarget = false;
+    const std::string resolvedTable = resolveTable(s, stmt.tableName, true, &viewTarget);
+    if (viewTarget) {
         fallback = true;
         return false;
     }
@@ -3587,9 +3617,9 @@ bool executeUpdateFrom(const UpdateStmt& stmt, Session& s, bool& fallback) {
     if (!checkDatabase(s)) return true;
 
     const std::string requestedTable = identifier(stmt.tableName);
-    const std::string resolvedTable = resolveTable(s, stmt.tableName, true);
-    if (g_engine.viewExists(s.currentDB, requestedTable) ||
-        g_engine.isMaterializedView(s.currentDB, requestedTable)) {
+    bool viewTarget = false;
+    const std::string resolvedTable = resolveTable(s, stmt.tableName, true, &viewTarget);
+    if (viewTarget) {
         fallback = true;
         return false;
     }
@@ -3932,9 +3962,9 @@ bool executePreparedUpdate(const UpdateStmt& stmt, Session& s, bool& fallback,
     fallback = false;
     if (!checkDatabase(s)) return true;
     const std::string requestedTable = identifier(stmt.tableName);
-    const std::string resolvedTable = resolveTable(s, stmt.tableName, true);
-    if (g_engine.viewExists(s.currentDB, requestedTable) ||
-        g_engine.isMaterializedView(s.currentDB, requestedTable)) {
+    bool viewTarget = false;
+    const std::string resolvedTable = resolveTable(s, stmt.tableName, true, &viewTarget);
+    if (viewTarget) {
         fallback = true;
         return false;
     }
@@ -4142,9 +4172,9 @@ bool executeUpdate(const UpdateStmt& stmt, Session& s, bool& fallback) {
     if (stmt.fromClause) return executeUpdateFrom(stmt, s, fallback);
     if (!checkDatabase(s)) return true;
     const std::string requestedTable = identifier(stmt.tableName);
-    const std::string resolvedTable = resolveTable(s, stmt.tableName, true);
-    if (g_engine.viewExists(s.currentDB, requestedTable) ||
-        g_engine.isMaterializedView(s.currentDB, requestedTable)) {
+    bool viewTarget = false;
+    const std::string resolvedTable = resolveTable(s, stmt.tableName, true, &viewTarget);
+    if (viewTarget) {
         fallback = true;
         return false;
     }
@@ -4290,10 +4320,10 @@ bool executeMerge(const MergeStmt& stmt, Session& s, bool& fallback) {
     }
 
     const std::string requestedTarget = identifier(stmt.targetTable);
-    const std::string targetTable = resolveTable(s, requestedTarget);
+    bool viewTarget = false;
+    const std::string targetTable = resolveTable(s, stmt.targetTable, true, &viewTarget);
     if (requestedTarget.empty()) return unsupported("target table is required");
-    if (g_engine.viewExists(s.currentDB, requestedTarget) ||
-        g_engine.isMaterializedView(s.currentDB, requestedTarget)) {
+    if (viewTarget) {
         return unsupported("views are not writable through MERGE");
     }
     if (!g_engine.tableExists(s.currentDB, targetTable)) {
@@ -4807,9 +4837,9 @@ bool executeDeleteUsingJoin(const DeleteStmt& stmt, Session& s, bool& fallback) 
     if (!checkDatabase(s)) return true;
 
     const std::string requestedTable = identifier(stmt.tableName);
-    const std::string resolvedTable = resolveTable(s, stmt.tableName, true);
-    if (g_engine.viewExists(s.currentDB, requestedTable) ||
-        g_engine.isMaterializedView(s.currentDB, requestedTable)) {
+    bool viewTarget = false;
+    const std::string resolvedTable = resolveTable(s, stmt.tableName, true, &viewTarget);
+    if (viewTarget) {
         fallback = true;
         return false;
     }
@@ -4936,9 +4966,9 @@ bool executeDeleteUsing(const DeleteStmt& stmt, Session& s, bool& fallback) {
     if (!checkDatabase(s)) return true;
 
     const std::string requestedTable = identifier(stmt.tableName);
-    const std::string resolvedTable = resolveTable(s, stmt.tableName, true);
-    if (g_engine.viewExists(s.currentDB, requestedTable) ||
-        g_engine.isMaterializedView(s.currentDB, requestedTable)) {
+    bool viewTarget = false;
+    const std::string resolvedTable = resolveTable(s, stmt.tableName, true, &viewTarget);
+    if (viewTarget) {
         fallback = true;
         return false;
     }
@@ -5085,9 +5115,9 @@ bool executeDelete(const DeleteStmt& stmt, Session& s, bool& fallback) {
     if (stmt.usingClause) return executeDeleteUsing(stmt, s, fallback);
     if (!checkDatabase(s)) return true;
     const std::string requestedTable = identifier(stmt.tableName);
-    const std::string resolvedTable = resolveTable(s, stmt.tableName, true);
-    if (g_engine.viewExists(s.currentDB, requestedTable) ||
-        g_engine.isMaterializedView(s.currentDB, requestedTable)) {
+    bool viewTarget = false;
+    const std::string resolvedTable = resolveTable(s, stmt.tableName, true, &viewTarget);
+    if (viewTarget) {
         fallback = true;
         return false;
     }
