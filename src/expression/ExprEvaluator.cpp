@@ -1858,6 +1858,74 @@ int ExprEvaluator::compareValues(const ExprValue& a, const ExprValue& b) {
     return a.value < b.value ? -1 : (a.value > b.value ? 1 : 0);
 }
 
+static double geometricFloatOperation(double left, double right, bool divide = false) {
+    if (divide && right == 0.0) throw DbError("22012", "division by zero");
+    const double result = divide ? left / right : left * right;
+    if (std::isinf(result) && std::isfinite(left) && std::isfinite(right))
+        throw DbError("22003", "value out of range: overflow");
+    if (result == 0.0 && left != 0.0 && (divide ? !std::isinf(right) : right != 0.0))
+        throw DbError("22003", "value out of range: underflow");
+    return result;
+}
+
+// PostgreSQL's geometric '=' operators are not display-string equality or
+// a generic ordering equivalence. In particular LSEG ordering is by length
+// but equality is by the two ordered endpoints, and PATH '=' counts points.
+static std::optional<bool> compareGeometricEquality(const std::string& op,
+                                                    const ExprValue& left,
+                                                    const ExprValue& right) {
+    const auto type = toLower(left.typeName);
+    if (type != toLower(right.typeName) ||
+        (type != "path" && type != "circle" && type != "line" && type != "lseg"))
+        return std::nullopt;
+    if (op != "=" && !(op == "<>" && (type == "circle" || type == "lseg")))
+        return std::nullopt;
+    GeometryValue a, b;
+    if (!parseGeometryValue(left.value, type, a) || !parseGeometryValue(right.value, type, b))
+        throw DbError("22P02", "invalid input syntax for type " + type);
+    const auto fuzzyEqual = [](double x, double y) {
+        return x == y || std::fabs(x-y) <= 1.0e-6;
+    };
+    const auto exactEqual = [](double x, double y) {
+        return x == y || (std::isnan(x) && std::isnan(y));
+    };
+    if (type == "path") return a.coordinates.size() == b.coordinates.size();
+    if (type == "circle") {
+        const auto area = [](double radius) {
+            return geometricFloatOperation(geometricFloatOperation(radius, radius), std::acos(-1.0));
+        };
+        const double x=area(a.coordinates[2]), y=area(b.coordinates[2]);
+        // FPne is deliberately not !FPeq for NaN, matching circle_ne.
+        return op == "=" ? fuzzyEqual(x,y) : x != y && std::fabs(x-y) > 1.0e-6;
+    }
+    bool equal = true;
+    if (type == "line") {
+        const bool nan = std::any_of(a.coordinates.begin(),a.coordinates.end(),[](double v){return std::isnan(v);}) ||
+                         std::any_of(b.coordinates.begin(),b.coordinates.end(),[](double v){return std::isnan(v);});
+        if (nan) {
+            for (size_t i=0;i<3;++i) equal = equal && exactEqual(a.coordinates[i],b.coordinates[i]);
+        } else {
+            double ratio=1.0;
+            for (size_t i=0;i<3;++i) {
+                if (std::fabs(b.coordinates[i]) > 1.0e-6) {
+                    ratio=geometricFloatOperation(a.coordinates[i],b.coordinates[i],true);break;
+                }
+            }
+            for (size_t i=0;i<3;++i)
+                equal = equal && fuzzyEqual(a.coordinates[i],geometricFloatOperation(ratio,b.coordinates[i]));
+        }
+    } else {
+        for (size_t offset : {size_t(0),size_t(2)}) {
+            const bool nan=std::isnan(a.coordinates[offset]) || std::isnan(a.coordinates[offset+1]) ||
+                           std::isnan(b.coordinates[offset]) || std::isnan(b.coordinates[offset+1]);
+            for (size_t i=offset;i<offset+2;++i)
+                equal = equal && (nan ? exactEqual(a.coordinates[i],b.coordinates[i]) :
+                                         fuzzyEqual(a.coordinates[i],b.coordinates[i]));
+        }
+    }
+    return op == "=" ? equal : !equal;
+}
+
 ExprValue ExprEvaluator::applyComparison(const std::string& op,
                                          const ExprValue& l,
                                          const ExprValue& r) {
@@ -1865,6 +1933,8 @@ ExprValue ExprEvaluator::applyComparison(const std::string& op,
 
     std::string cmp = op;
     if (cmp == "!=") cmp = "<>";
+    if (const auto equal = compareGeometricEquality(cmp,l,r))
+        return ExprValue("boolean", *equal ? "t" : "f", false);
 
     int c = compareValues(l, r);
     bool result = false;
@@ -5002,7 +5072,7 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
         first.collation = mergeExplicitCollations(first.collation,
                                                    args[1].collation);
         if (first.isNull || args[1].isNull) return first;
-        if (compareValues(first, args[1]) == 0) {
+        if (applyComparison("=", first, args[1]).asBool()) {
             first.value.clear();
             first.isNull = true;
         }
