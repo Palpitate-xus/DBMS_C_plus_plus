@@ -2,6 +2,21 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Actual optimized65/31 terminal failures retained; eight independently committed next repairs and fresh CASE-layout build",
+      "gap_ids": ["SQL-04", "SQL-07", "SQL-08", "DML-01", "DML-03", "QRY-01", "QRY-03", "TXN-01"],
+      "status": "partial",
+      "commits": ["8ac621c8", "284b4e5c", "c38ad83c", "e5d79650", "d66158cf", "ee64515e", "b190df7d", "07803aef"],
+      "evidence": ["docs/issue-ready-source-integration.md", "docs/issue-btree-checked-fixture-contract.md", "docs/issue-memory-index-checked-fixture-contract.md", "docs/issue-native-dml-session-scope.md", "docs/issue-conflict-where-ambiguous-fixture.md", "docs/issue-add-column-clean-validation-rollback.md", "docs/issue-simple-case-equality-binding.md", "docs/issue-simple-case-constant-demand.md", "docs/issue-values-common-type-binding.md", "docs/issue-qualified-view-target-dispatch-open.md"],
+      "tests": ["tests/missing_btree_file_guard_test.cpp", "tests/missing_memory_index_guard_test.cpp", "tests/matview_test.cpp", "tests/postgres_protocol_test.py", "tests/ddl_add_column_clean_rollback_test.cpp", "tests/simple_case_equality_binding_test.cpp", "tests/simple_case_equality_prepared_protocol_e2e_test.py", "tests/simple_case_constant_demand_test.cpp", "tests/simple_case_null_constant_demand_protocol_e2e_test.py", "tests/values_common_type_binding_test.cpp", "tests/values_common_type_binding_protocol_e2e_test.py"],
+      "verification": {
+        "reproduction": "Original4cf frozen385b65-native75787 terminal1=62pass3fail;31wire40643 terminal1=30pass1fail originalunqualifiedONCONFLICT42702. Matview actual42P01 sink from incorrect ambient session, bothindexfixture failure results legitimatelyXX001; precise original failures retained. Later qualifiedview fallback positive independentlyred andopen.",
+        "fix": "Eight separate ROOT commits: two originalcheckedAPI testreceivers retainXX001/originalexception/no partialrows/lock/reindex; scoped passedSession preparation; preserve originalinvalidSQL negative plusqualifiedpositive; AddColumn puredirty boundary; simpleCASE signature; constantNULL planning; wholeVALUES commoncolumn/coercion. No golden/timeouts/effect assertions lowered.",
+        "focused_tests": "c38private normalO2 solefreshDML/57unchangedsources/all58donorsignatures/allheadersmatching:7native18668 and6wire2941 terminal0, strict180006 namespace/no-effects reference0; earliercompile-macro/qualifiedview failures retained. CASE/VALUES private expanded strong references/native/wire/scoped sanitizer scopes documented perissue, not current ROOT proof. Previous4cf complete30otherwire pass inclnewRETURNING/UPDATE6controls and47source+5boundaries.",
+        "full_suite": "CurrentROOT078 inventory553native288registered58TUs; publicCASElayout requires freshnormalall58, build73985 live /tmp/dbms-case-demand-integration.viBXB9hC; source/header/tests/registry frozen. Next69native/34wire not yet started. Oldimmutablefd540/275 canonical23633 stilllive; Cfull4652071 andmatchedenUS86503 bothterminal1 aborted15s, retained332OK13DIFF/38OK1DIFF notfullgreen. Tenmatchedlocale52999 true0 notfull/currentROOTproof.",
+        "scope": "Actualoperator inventory verifies geometry '=' anddatecross signatures, rejects mixedINT/BIGINT array; doesnotfix opentypedLiteral/PATH/CIRCLE/LINE/interval runtimevalues. Sequencegeneration/ALTERposition, Quant/SRF, ordinaryCASE50fail andqualifiedviewtarget remainindependentopen. Totals27322complete166partial70unverified15deferred unchanged; no push, Actions disabled, userdeferredsecurityTDE notresumed. Earlier updates retained historical checkpoint labels."
+      }
+    },
+    {
       "issue": "Independent USING, ARRAY, nullable source and versioned row-image repairs; actual full gate failures retained",
       "gap_ids": ["SQL-04", "SQL-07", "SQL-08", "DML-01", "DML-03", "QRY-01", "QRY-03", "TXN-01"],
       "status": "partial",

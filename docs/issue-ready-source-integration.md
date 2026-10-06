@@ -2,6 +2,54 @@
 
 ## Latest ROOT checkpoint: typed ARRAY, sources and row images
 
+### Actual terminal results and eight next independent integrations
+
+The4cf frozen385b optimized combination actually ends with native75787
+exit1:62 passed/3 failed out of65, and wire40643 exit1:30 passed/1 failed
+out of31. The native failures are the original materialized-view55000 gate
+(actual42P01 because preparation uses a different ambient session) and both
+original missing-index fixtures expecting throws instead of checked failure
+results. The full wire failure is the original ambiguous ON CONFLICT WHERE
+name42702 at2332. All other30 complete scripts actually pass, including
+array concatenation, both new6-control RETURNING/UPDATE matrices,47 nullable
+source controls plus5 boundaries, stored-function atomicity, literal demand,
+sort-slot and lock-timeout gates. Both complete failed logs remain retained.
+
+Only after both handles' actual terminal results did ROOT lift that source
+freeze and independently commit the following:
+
+| ROOT commit | Separate correction / actual private evidence |
+| --- | --- |
+| 8ac621c8 | B-tree fixture checks preservedXX001 result, exception and empty partial outputs, retaining all original storage/lock/reindex controls. |
+| 284b4e5c | Hash/Bloom fixture uses the same checked-result contract, with all original precise guards retained. |
+| c38ad83c | Native tryDmlBridge scopes pure preparation to passed Session and restores the prior caller. Matching normalO2 one fresh CPP plus57 audited unchanged sources/all headers;7 distinct native and6 complete wire scripts exit0, strict180006 reference0. Qualified-view dispatch remains separately open. |
+| e5d79650 | Original ambiguous conflict SQL remains42702/no-effects negative control; qualified positive retains original rows/tag. Strict18 reference0; private full protocol still Quant2444 red. |
+| d66158cf | AddColumn pure declaration rejection does not unnecessarily mark a clean physical backup dirty; prior actions/real rollback remain guarded. Private5native/3wire/strict18 focused checks pass, not a whole465 timeout repair. |
+| ee64515e | Simple CASE resolves actual builtin equality signatures, operand conversions and float4/float8 comparison roles before effects. |
+| b190df7d | Execution-owned CASE planning folds pure WHEN conditions before strict constantNULL pruning and retains planner22012/22003 errors without discarded THEN/routine effects. |
+| 07803aef | Genuine VALUES columns resolve common types across every transformed row and retain real implicit coercion ASTs; private6native/complete wire/strict18 and scoped sanitizer controls pass. |
+
+New inventory is553 native fixtures,288 registered Python entries,58
+production units. Because CASE changes a public AST layout, fresh normal
+all58 compilation73985 is live in
+`/tmp/dbms-case-demand-integration.viBXB9hC/build-full-O2.log`; the next
+matching69 fresh-native/34 full-wire gates have not started. Source/header/
+test/registry freeze is active. Normal repeat, all58 signatures/stamp and a
+new immutable binary must be verified before those gates. Prior private or
+4cf results are not new078 combination evidence.
+
+Remaining actual red controls include sequence SAVEPOINT allocation reuse
+and ALTER increment positioning; genuine quantified child/SRF execution;
+ordinary CASE's50-failure consumer matrix; geometry typed-literal grammar
+and same-type PATH/CIRCLE/LINE comparators; interval1month=30days semantics;
+and qualified view target fallback. PG18 actual operator inventory confirms
+the declared geometry/date signatures and rejects mixed INT/BIGINT arrays;
+that signature proof does not close the independently wrong runtime values.
+Counts27322complete166partial70unverified15deferred remain unchanged.
+
+The earlier paragraphs below describe the then-live4cf checkpoint. Their
+live labels are superseded by the terminal results in this subsection.
+
 The following are independent local commits, not one combined repair:
 
 | ROOT commit | Scope |
