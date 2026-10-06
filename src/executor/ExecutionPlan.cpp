@@ -116,7 +116,7 @@ struct PreparedSelectState {
     std::vector<Expr*> targets;
     std::vector<ExprPtr> starTargets;
     std::vector<bool> targetsBeforeSort;
-    struct SortKey { Expr* expression; size_t target; bool asc, nullsFirst; };
+    struct SortKey { Expr* expression; size_t target, priorKey; bool asc, nullsFirst; };
     std::vector<SortKey> keys;
     static constexpr size_t noTarget = std::numeric_limits<size_t>::max();
     size_t sourceOrdinal = noTarget;
@@ -131,7 +131,7 @@ struct PreparedSelectState {
         return binding.columnOrdinal;
     }
     std::string identity(const Expr* expression) const {
-        return ExprHelper::scalarExpressionIdentity(expression, [&](const ColumnRefExpr& column) {
+        return ExprHelper::preparedSortExpressionIdentity(expression, *query, [&](const ColumnRefExpr& column) {
             if (column.binding && column.binding->scopeDepth) {
                 const auto& binding = *column.binding;
                 return std::to_string(binding.sourceOrdinal) + ":" + std::to_string(binding.columnOrdinal) + ":" + binding.declaredType;
@@ -275,6 +275,10 @@ public:
                 if (state_->targetsBeforeSort[i])
                     row.targets[i] = state_->evaluate(state_->targets[i], context);
             for (const auto& key : state_->keys) {
+                if (key.priorKey != PreparedSelectState::noTarget) {
+                    row.keys.push_back(row.keys.at(key.priorKey));
+                    continue;
+                }
                 if (key.target != PreparedSelectState::noTarget) {
                     if (!row.targets[key.target])
                         row.targets[key.target] = state_->evaluate(state_->targets[key.target], context);
@@ -533,6 +537,7 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
     }
     std::vector<std::string> identities;
     for (const auto* target : state->targets) identities.push_back(state->identity(target));
+    std::vector<std::string> keyIdentities;
     for (auto& order : select->orderBy) {
         size_t target = PreparedSelectState::noTarget;
         if (auto* ref = dynamic_cast<ColumnRefExpr*>(order.expr.get())) {
@@ -551,13 +556,25 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
                 target = static_cast<size_t>(ordinal - 1);
             }
         }
+        std::string identity;
         if (target == PreparedSelectState::noTarget) {
-            const auto identity = state->identity(order.expr.get());
+            identity = state->identity(order.expr.get());
             for (size_t i = 0; i < identities.size(); ++i) if (identities[i] == identity) { target = i; break; }
         }
         if (select->distinct && target == PreparedSelectState::noTarget)
             throw DbError("42P10", "for SELECT DISTINCT, ORDER BY expressions must appear in select list");
-        state->keys.push_back({order.expr.get(), target, order.asc, order.nullsFirst});
+        // Reuse an actual sort-input value, not only a fingerprint. Explicit
+        // references to two genuine SELECT sites remain different targets.
+        size_t priorKey = PreparedSelectState::noTarget;
+        for (size_t i = 0; i < state->keys.size(); ++i) {
+            if (target != PreparedSelectState::noTarget) {
+                if (state->keys[i].target == target) { priorKey = i; break; }
+            } else if (state->keys[i].target == PreparedSelectState::noTarget && keyIdentities[i] == identity) {
+                priorKey = i; break;
+            }
+        }
+        keyIdentities.push_back(std::move(identity));
+        state->keys.push_back({order.expr.get(), target, priorKey, order.asc, order.nullsFirst});
     }
     // All bindings and collation checks precede opening any source or
     // evaluating a volatile expression. The retained parameter cells remain

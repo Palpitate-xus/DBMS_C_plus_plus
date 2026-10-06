@@ -3,6 +3,8 @@
 #include "ExprEvaluator.h"
 #include "parser/parser.h"
 #include "parser/ast.h"
+#include "parser/query_binding.h"
+#include "catalog/catalog.h"
 #include "catalog/type_registry.h"
 #include "common/DbError.h"
 
@@ -1056,7 +1058,8 @@ std::string ExprHelper::scalarExpressionIdentity(
     const Expr* expression,
     const std::function<std::string(const ColumnRefExpr&)>& columnIdentity,
     const std::string& currentDB,
-    StorageEngine* functionEngine) {
+    StorageEngine* functionEngine,
+    const std::function<std::optional<std::string>(const Expr*)>& preparedIdentity) {
     ExprEvaluator evaluator;
     evaluator.setCurrentDB(currentDB);
     const auto field = [](const std::string& value) {
@@ -1064,6 +1067,9 @@ std::string ExprHelper::scalarExpressionIdentity(
     };
     std::function<std::string(const Expr*)> key = [&](const Expr* node) -> std::string {
         if (!node) return "absent";
+        if (preparedIdentity) {
+            if (const auto prepared = preparedIdentity(node)) return *prepared;
+        }
         if (node->preparedSubquery)
             return "prepared-child-site" + field(std::to_string(reinterpret_cast<uintptr_t>(node)));
         if (const auto* parameter = dynamic_cast<const ParameterExpr*>(node)) {
@@ -1167,6 +1173,267 @@ std::string ExprHelper::scalarExpressionIdentity(
         throw DbError("0A000", "expression identity requires a prepared query scope");
     };
     return key(expression);
+}
+
+std::string ExprHelper::preparedSortExpressionIdentity(
+    const Expr* expression, const PreparedQuery& query,
+    const std::function<std::string(const ColumnRefExpr&)>& columnIdentity,
+    const std::string& currentDB, StorageEngine* functionEngine) {
+    const auto field = [](const std::string& value) {
+        return std::to_string(value.size()) + ":" + value;
+    };
+    const auto site = [&](const Expr* node) {
+        return "prepared-child-site" + field(std::to_string(reinterpret_cast<uintptr_t>(node)));
+    };
+    ExprEvaluator evaluator;
+    evaluator.setCurrentDB(currentDB);
+    std::function<std::string(const Expr*)> childKey;
+    childKey = [&](const Expr* child) -> std::string {
+        if (!child || !child->preparedSubquery) throw DbError("XX000", "missing prepared SQL child");
+        // Normalize only ranges *inside* this retained child. True caller
+        // ranges and parameter slots stay in the parent's prepared namespace.
+        std::map<const Stmt*, size_t> statements;
+        std::map<const ColumnRefExpr*, std::string> outputAliases;
+        std::function<void(const Stmt*)> gatherStatement;
+        std::function<void(const Expr*)> gatherExpression;
+        std::function<void(const FromItem*)> gatherFrom;
+        gatherExpression = [&](const Expr* node) {
+            if (!node) return;
+            if (node->preparedSubquery) { gatherStatement(node->preparedSubquery.get()); return; }
+            if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(node)) gatherExpression(unary->operand.get());
+            else if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(node)) {
+                gatherExpression(binary->left.get()); gatherExpression(binary->right.get());
+            } else if (const auto* cast = dynamic_cast<const CastExpr*>(node)) gatherExpression(cast->operand.get());
+            else if (const auto* conditional = dynamic_cast<const CaseExpr*>(node)) {
+                gatherExpression(conditional->switchExpr.get()); gatherExpression(conditional->elseExpr.get());
+                for (const auto& arm : conditional->whenClauses) { gatherExpression(arm.first.get()); gatherExpression(arm.second.get()); }
+            } else if (const auto* call = dynamic_cast<const FunctionCallExpr*>(node)) {
+                for (const auto& argument : call->args) gatherExpression(argument.get());
+                for (const auto& argument : call->namedArgs) gatherExpression(argument.value.get());
+                gatherExpression(call->filter.get());
+                for (const auto& value : call->over.partitionBy) gatherExpression(value.get());
+                for (const auto& value : call->over.orderBy) gatherExpression(value.first.get());
+                gatherExpression(call->over.frameStart.get()); gatherExpression(call->over.frameEnd.get());
+            } else if (const auto* array = dynamic_cast<const ArrayExpr*>(node)) {
+                for (const auto& value : array->elements) gatherExpression(value.get());
+            } else if (const auto* row = dynamic_cast<const RowExpr*>(node)) {
+                for (const auto& value : row->elements) gatherExpression(value.get());
+            }
+        };
+        gatherFrom = [&](const FromItem* from) {
+            if (!from) return;
+            gatherStatement(from->subquery.get()); gatherFrom(from->left.get()); gatherFrom(from->right.get());
+            gatherExpression(from->joinCondition.get());
+        };
+        const auto gatherItems = [&](const std::vector<SelectItem>& items) {
+            for (const auto& item : items) gatherExpression(item.expr.get());
+        };
+        gatherStatement = [&](const Stmt* statement) {
+            if (!statement || !statements.emplace(statement, statements.size()).second) return;
+            if (const auto* select = dynamic_cast<const SelectStmt*>(statement)) {
+                for (const auto& cte : select->ctes) gatherStatement(cte.query.get());
+                gatherStatement(select->setOpLhs.get()); gatherStatement(select->setOpRhs.get());
+                gatherFrom(select->fromClause.get()); gatherItems(select->selectList);
+                gatherExpression(select->whereClause.get()); gatherExpression(select->having.get());
+                for (const auto& value : select->groupBy) gatherExpression(value.get());
+                for (const auto& group : select->groupByElems) for (const auto& value : group.exprs) gatherExpression(value.get());
+                for (const auto& order : select->orderBy) {
+                    gatherExpression(order.expr.get());
+                    const auto* alias = dynamic_cast<const ColumnRefExpr*>(order.expr.get());
+                    const auto output = query.statementOutputs.find(statement);
+                    if (!alias || alias->binding || !alias->schema.empty() || !alias->table.empty() || output == query.statementOutputs.end()) continue;
+                    size_t matches = 0, ordinal = 0;
+                    for (size_t i = 0; i < output->second.size(); ++i)
+                        if (output->second[i].name == alias->column) { ++matches; ordinal = i; }
+                    if (matches == 1) outputAliases.emplace(alias, field(alias->column) + field(std::to_string(ordinal)) + field(output->second[ordinal].type));
+                }
+                for (const auto& value : select->distinctOn) gatherExpression(value.get());
+                for (const auto& row : select->valuesRows) for (const auto& value : row) gatherExpression(value.get());
+                for (const auto& window : select->windowDefs) {
+                    for (const auto& value : window.partitionBy) gatherExpression(value.get());
+                    for (const auto& order : window.orderBy) gatherExpression(order.first.get());
+                    gatherExpression(window.frameStart.get()); gatherExpression(window.frameEnd.get());
+                }
+            } else if (const auto* with = dynamic_cast<const WithStmt*>(statement)) {
+                for (const auto& cte : with->ctes) gatherStatement(cte.query.get());
+                gatherStatement(with->statement.get());
+            } else if (const auto* insert = dynamic_cast<const InsertStmt*>(statement)) {
+                gatherStatement(insert->selectSource.get()); gatherItems(insert->returning);
+                for (const auto& row : insert->values) for (const auto& value : row) gatherExpression(value.get());
+                for (const auto& set : insert->conflictUpdateSet) gatherExpression(set.second.get());
+                gatherExpression(insert->conflictWhere.get());
+            } else if (const auto* update = dynamic_cast<const UpdateStmt*>(statement)) {
+                gatherFrom(update->fromClause.get()); gatherItems(update->returning); gatherExpression(update->whereClause.get());
+                for (const auto& set : update->setClauses) gatherExpression(set.second.get());
+            } else if (const auto* remove = dynamic_cast<const DeleteStmt*>(statement)) {
+                gatherFrom(remove->usingClause.get()); gatherItems(remove->returning); gatherExpression(remove->whereClause.get());
+            } else throw DbError("0A000", "SQL child identity requires a structured query statement");
+        };
+        gatherStatement(child->preparedSubquery.get());
+        std::map<size_t, size_t> ranges;
+        for (const auto& range : query.sourceRanges)
+            if (statements.count(range.owner)) ranges.emplace(range.ordinal, ranges.size());
+        const auto descriptorKey = [&](const QueryRowDescriptor& descriptor) {
+            std::string key;
+            for (const auto& column : descriptor)
+                key += field(column.name) + field(canonicalResultTypeName(column.type)) +
+                    field(column.generated ? "generated" : "ordinary") + field(std::to_string(column.identity));
+            return key;
+        };
+        std::function<std::string(const Stmt*)> statementKey;
+        std::function<std::string(const Expr*)> expressionKey;
+        std::function<std::string(const FromItem*)> fromKey;
+        const auto boundColumn = [&](const ColumnRefExpr& column) {
+            if (!column.binding) {
+                const auto alias = outputAliases.find(&column);
+                if (alias != outputAliases.end()) return "output-alias" + field(alias->second);
+                throw DbError("0A000", "SQL child identity requires bound column provenance");
+            }
+            const auto& binding = *column.binding;
+            const auto local = ranges.find(binding.sourceOrdinal);
+            return field(local == ranges.end() ? "caller-range" : "child-range") +
+                field(std::to_string(local == ranges.end() ? binding.sourceOrdinal : local->second)) +
+                field(std::to_string(binding.scopeDepth)) + field(std::to_string(binding.columnOrdinal)) +
+                field(canonicalResultTypeName(binding.declaredType)) + field(binding.mergedUsing ? "merged" : "ordinary");
+        };
+        const auto windowKey = [&](const WindowDef& window) {
+            std::string key = field(window.name) + field(toLower(window.frameMode)) + field(toLower(window.frameExclusion));
+            for (const auto& value : window.partitionBy) key += field(expressionKey(value.get()));
+            key += field("order");
+            for (const auto& order : window.orderBy) key += field(expressionKey(order.first.get())) + field(order.second ? "asc" : "desc");
+            return key + field(expressionKey(window.frameStart.get())) + field(expressionKey(window.frameEnd.get()));
+        };
+        const auto itemsKey = [&](const std::vector<SelectItem>& items) {
+            std::string key;
+            for (const auto& item : items) key += field(item.alias) + field(expressionKey(item.expr.get()));
+            return key;
+        };
+        expressionKey = [&](const Expr* node) {
+            return scalarExpressionIdentity(node, boundColumn, currentDB, functionEngine,
+                [&](const Expr* nested) -> std::optional<std::string> {
+                    if (nested->preparedSubquery) return statementKey(nested->preparedSubquery.get());
+                    const auto* call = dynamic_cast<const FunctionCallExpr*>(nested);
+                    if (!call) return {};
+                    if (!call->orderBy.empty()) throw DbError("0A000", "aggregate ORDER identity requires structured order nodes");
+                    CatalogManager::QualifiedName name;
+                    const auto spelling = call->schema.empty() ? call->funcName : call->schema + "." + call->funcName;
+                    if (!CatalogManager::parseQualifiedName(spelling, name, true)) throw DbError("0A000", "function identity requires a canonical name");
+                    std::string routine;
+                    if (evaluator.hasScalarFunction(call, functionEngine)) routine = evaluator.scalarFunctionIdentity(call, functionEngine);
+                    else if ((name.schema.empty() || name.schema == "pg_catalog") &&
+                        (name.name == "count" || name.name == "sum" || name.name == "avg" || name.name == "min" || name.name == "max"))
+                        routine = "builtin-aggregate" + field(name.name);
+                    else throw DbError("0A000", "SQL child identity requires resolved function metadata");
+                    std::string key = "function" + field(routine) + field(call->distinct ? "distinct" : "all") +
+                        field(expressionKey(call->filter.get())) + field(call->hasOver ? windowKey(call->over) : "no-window");
+                    for (size_t i = 0; i < call->args.size(); ++i) {
+                        const auto* grammarField = dynamic_cast<const ColumnRefExpr*>(call->args[i].get());
+                        if (i == 0 && name.schema.empty() && name.name == "extract" && routine.rfind("builtin", 0) == 0 && grammarField &&
+                            grammarField->schema.empty() && grammarField->table.empty()) key += field("extract-field" + field(toLower(grammarField->column)));
+                        else if (call->args[i]->type == ExprType::A_Star) key += field("star");
+                        else key += field(expressionKey(call->args[i].get()));
+                    }
+                    for (const auto& argument : call->namedArgs) key += field(argument.name) + field(expressionKey(argument.value.get()));
+                    return key;
+                });
+        };
+        fromKey = [&](const FromItem* from) -> std::string {
+            if (!from) return "no-source";
+            if (from->type == FromItem::Type::Function) throw DbError("0A000", "SQL child function source identity requires a structured value AST");
+            std::string key = field(std::to_string(static_cast<int>(from->type))) + field(from->alias) +
+                field(toLower(from->joinType)) + field(fromKey(from->left.get())) + field(fromKey(from->right.get())) +
+                field(expressionKey(from->joinCondition.get())) + field(statementKey(from->subquery.get()));
+            for (const auto& column : from->usingCols) key += field(column);
+            return key;
+        };
+        const auto ctesKey = [&](const std::vector<SelectStmt::CTE>& ctes) {
+            std::string key;
+            for (const auto& cte : ctes) {
+                key += field(cte.name) + field(cte.recursive ? "recursive" : "ordinary") + field(cte.materialized ? "materialized" : "inline");
+                for (const auto& column : cte.columnNames) key += field(column);
+                key += field(statementKey(cte.query.get()));
+            }
+            return key;
+        };
+        const auto returningKey = [&](const ReturningOptions& returning) {
+            return field(returning.oldAliased ? returning.oldAlias : "no-old-alias") + field(returning.newAliased ? returning.newAlias : "no-new-alias");
+        };
+        statementKey = [&](const Stmt* statement) -> std::string {
+            if (!statement) return "no-statement";
+            std::string key = field(std::to_string(static_cast<int>(statement->command)));
+            const auto output = query.statementOutputs.find(statement);
+            if (output != query.statementOutputs.end()) key += field(descriptorKey(output->second));
+            for (const auto& range : query.sourceRanges) {
+                if (range.owner != statement) continue;
+                key += field(std::to_string(ranges.at(range.ordinal))) + field(range.schema) + field(range.name) +
+                    field(range.relationSchema) + field(range.relationName) + field(descriptorKey(range.columns)) +
+                    field(range.mergedUsing ? "merged" : "ordinary");
+                if (range.cteStatement) {
+                    const auto local = statements.find(range.cteStatement);
+                    key += field(local == statements.end() ? "caller-cte" : "child-cte") +
+                        field(std::to_string(local == statements.end() ? reinterpret_cast<uintptr_t>(range.cteStatement) : local->second));
+                } else key += field("no-cte");
+            }
+            if (const auto* select = dynamic_cast<const SelectStmt*>(statement)) {
+                key += field(ctesKey(select->ctes)) + field(statementKey(select->setOpLhs.get())) + field(statementKey(select->setOpRhs.get())) +
+                    field(std::to_string(static_cast<int>(select->setOp))) + field(select->setOpAll ? "all" : "distinct") +
+                    field(fromKey(select->fromClause.get())) + field(itemsKey(select->selectList)) + field(expressionKey(select->whereClause.get())) +
+                    field(expressionKey(select->having.get())) + field(select->distinct ? "distinct" : "all");
+                for (const auto& value : select->distinctOn) key += field(expressionKey(value.get()));
+                key += field("group");
+                for (const auto& value : select->groupBy) key += field(expressionKey(value.get()));
+                for (const auto& group : select->groupByElems) {
+                    key += field(std::to_string(static_cast<int>(group.kind)));
+                    for (const auto& value : group.exprs) key += field(expressionKey(value.get()));
+                }
+                key += field("order");
+                for (const auto& order : select->orderBy) key += field(expressionKey(order.expr.get())) + field(order.asc ? "asc" : "desc") +
+                    field(order.nullsFirst ? "nulls-first" : "nulls-last") + field(order.usingOp);
+                key += field(select->limit ? std::to_string(*select->limit) : "no-limit") + field(select->offset ? std::to_string(*select->offset) : "no-offset") +
+                    field(select->withTies ? "ties" : "no-ties") + field(select->fetchFirst ? "fetch" : "no-fetch");
+                for (const auto& row : select->valuesRows) { std::string values; for (const auto& value : row) values += field(expressionKey(value.get())); key += field(values); }
+                for (const auto& window : select->windowDefs) key += field(windowKey(window));
+                for (const auto& lock : select->locking) {
+                    key += field(lock.strength) + field(lock.noWait ? "nowait" : "wait") + field(lock.skipLocked ? "skip" : "no-skip");
+                    for (const auto& table : lock.tables) key += field(table);
+                }
+            } else if (const auto* with = dynamic_cast<const WithStmt*>(statement)) {
+                key += field(ctesKey(with->ctes)) + field(statementKey(with->statement.get()));
+            } else if (const auto* insert = dynamic_cast<const InsertStmt*>(statement)) {
+                for (const auto& column : insert->columns) key += field(column);
+                for (const auto& row : insert->values) { std::string values; for (const auto& value : row) values += field(expressionKey(value.get())); key += field(values); }
+                key += field(statementKey(insert->selectSource.get())) + field(insert->conflictAction) + field(insert->conflictConstraint) +
+                    field(expressionKey(insert->conflictWhere.get())) + field(insert->defaultValues ? "defaults" : "values") + field(insert->override_) +
+                    field(itemsKey(insert->returning)) + field(returningKey(insert->returningOptions));
+                for (const auto& column : insert->conflictTarget) key += field(column);
+                for (const auto& set : insert->conflictUpdateSet) key += field(set.first) + field(expressionKey(set.second.get()));
+            } else if (const auto* update = dynamic_cast<const UpdateStmt*>(statement)) {
+                if (!update->whereCurrentOf.empty()) throw DbError("0A000", "cursor identity requires prepared cursor provenance");
+                key += field(update->alias) + field(update->only ? "only" : "inherited") + field(fromKey(update->fromClause.get())) +
+                    field(expressionKey(update->whereClause.get())) + field(itemsKey(update->returning)) + field(returningKey(update->returningOptions));
+                for (const auto& set : update->setClauses) key += field(set.first) + field(expressionKey(set.second.get()));
+            } else if (const auto* remove = dynamic_cast<const DeleteStmt*>(statement)) {
+                if (!remove->whereCurrentOf.empty()) throw DbError("0A000", "cursor identity requires prepared cursor provenance");
+                key += field(remove->alias) + field(remove->only ? "only" : "inherited") + field(fromKey(remove->usingClause.get())) +
+                    field(expressionKey(remove->whereClause.get())) + field(itemsKey(remove->returning)) + field(returningKey(remove->returningOptions));
+            } else throw DbError("0A000", "SQL child identity requires a structured query statement");
+            return key;
+        };
+        return "prepared-child" + field(child->type == ExprType::Subquery ? "subquery" : "retained-child") +
+            field(statementKey(child->preparedSubquery.get()));
+    };
+    return scalarExpressionIdentity(expression, columnIdentity, currentDB, functionEngine,
+        [&](const Expr* node) -> std::optional<std::string> {
+            if (!node->preparedSubquery) return {};
+            try { return childKey(node); }
+            catch (const DbError& error) {
+                // Opaque unsupported grammar stays a distinct slot. This
+                // conservative no-sharing path does not reject execution or
+                // falsely equate text; genuine preparation errors still pass.
+                if (error.sqlState() != "0A000") throw;
+                return site(node);
+            }
+        });
 }
 
 std::string ExprHelper::inferParsedResultType(

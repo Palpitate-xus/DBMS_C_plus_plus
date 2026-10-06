@@ -11,6 +11,7 @@ namespace dbms {
 class StorageEngine;
 class Expr;
 struct ColumnRefExpr;
+struct PreparedQuery;
 
 // ----------------------------------------------------------------------------
 // Expression evaluation helper
@@ -39,13 +40,22 @@ public:
         const std::function<std::string(const ColumnRefExpr&)>& columnIdentity,
         const std::string& currentDB = "",
         StorageEngine* functionEngine = nullptr);
+    // Sort-slot equivalence only: a retained SQL child is compared using its
+    // prepared tree/ranges/typed slots, never SQL spelling or runtime values.
+    // This does not merge distinct evaluation sites in the execution carrier.
+    static std::string preparedSortExpressionIdentity(
+        const Expr* expression, const PreparedQuery& query,
+        const std::function<std::string(const ColumnRefExpr&)>& columnIdentity,
+        const std::string& currentDB = "",
+        StorageEngine* functionEngine = nullptr);
     // Retained prepared AST consumer: no rendering/reparsing and no routine
     // execution. Parameters retain stable typed slots; child sites are unique.
     static std::string scalarExpressionIdentity(
         const Expr* expression,
         const std::function<std::string(const ColumnRefExpr&)>& columnIdentity,
         const std::string& currentDB = "",
-        StorageEngine* functionEngine = nullptr);
+        StorageEngine* functionEngine = nullptr,
+        const std::function<std::optional<std::string>(const Expr*)>& preparedIdentity = {});
     // Infer the PostgreSQL-visible result type of an expression without
     // evaluating it. Column types are supplied by the caller; unknown string
     // literals resolve to text only at the outer expression boundary.
