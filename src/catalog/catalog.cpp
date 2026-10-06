@@ -194,7 +194,21 @@ CatalogManager::CatalogManager(const std::string& dbPath)
 }
 
 CatalogManager::~CatalogManager() {
-    (void)persistAll();
+    if (oidGen_) (void)persistAll();
+}
+
+CatalogManager::CatalogManager(const std::string& dbPath, ReadOnlyTag) : dbPath_(dbPath) {
+    loadAll();
+}
+
+CatalogManager::MetadataSnapshot CatalogManager::metadataSnapshot() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return {namespaces_, classes_, attributes_, types_, procs_};
+}
+
+CatalogManager::MetadataSnapshot CatalogManager::readMetadataSnapshot(const std::string& path) {
+    CatalogManager catalog(path, ReadOnlyTag{});
+    return catalog.metadataSnapshot();
 }
 
 // ============================================================================

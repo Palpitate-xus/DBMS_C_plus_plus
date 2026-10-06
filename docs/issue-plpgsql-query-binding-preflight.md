@@ -1,7 +1,9 @@
 # Open PL/pgSQL SQL-statement binding and preparation gaps
 
-Date: 2026-10-06. Status: the general preparation/namespace bugs remain open.
-SQL-04/FUNC-06 remain partial. The recorded local candidate includes the native
+Date: 2026-10-06. Status: the seven recorded namespace/pre-effect defects now
+have a scoped prepared-query implementation and matching focused proof below.
+The broader preparation/type/record family and SQL-04/FUNC-06 remain partial.
+The original recorded local candidate includes the native
 SQLSTATE and quoted scalar fixes; its SQL-statement path is separate from the
 scalar-expression binder. This report is not a completion claim.
 
@@ -13,7 +15,8 @@ combined formal verification is recorded in
 [`issue-plpgsql-lexical-and-source-comparisons.md`](issue-plpgsql-lexical-and-source-comparisons.md):
 14 matching optimized natives and 26 focused/adjacent protocol entry points
 passed, while the fresh full-default protocol failed its index-scan statistics
-assertion. The seven general namespace/pre-effect observations remain open. Atomicity
+assertion. The seven namespace/pre-effect observations were still open at that
+earlier stage; the independent implementation below supersedes that status. Atomicity
 commit `5411a7aa` owns supported function writes with the caller, but rollback
 does not establish rejection before nontransactional sequence effects.
 
@@ -99,11 +102,12 @@ database, search_path, temporary namespace and type changes must invalidate the
 appropriate plan. A result-width check or broad keyword whitelist is not this
 binder.
 
-## Implementation sequence still required
+## Original implementation sequence
 
 Preparation must be a distinct side-effect-free operation returning a bound
 query/descriptor, followed by execution with current typed datum values. The
-following dependency order is still unimplemented; it is not a passed checklist.
+following dependency order defined the required work at the original diagnostic
+stage. The implementation below covers a useful subset, not every item here.
 
 1. Add copied, lock-consistent metadata snapshots for relations, attributes,
    types, procedures and namespace visibility. Existing CatalogService::get
@@ -163,3 +167,180 @@ metadata preparation and function rollback; see
 No new full registered suite or PostgreSQL 18.6 differential was run for this
 diagnostic. Earlier complete-protocol timeout failures and I/O amplification
 remain open. No git push, Actions enablement or user-deferred security/TDE work.
+
+## Reached-statement prepared-query implementation
+
+The independent source parent is `c78ea073229ed91a008a2a33c2c30e7f005d0bb1`.
+`src/parser/query_binding.h/.cpp` introduces `prepareQuery`, a shared operation
+that accepts raw SQL, canonical procedural datums and copied metadata callbacks.
+It returns an owned AST, output descriptor, stable typed/null parameter cells
+and original-byte provenance. It has no query-execution callback. Names and
+declared types are resolved without consulting datum values or produced rows.
+
+The implementation separates parameter/function-label and nested block-label
+frames from SQL range namespaces. Quoted identifier components remain distinct:
+`"scope.dot".id` is not `scope.dot.id`. A value matching both namespaces reports
+`42702`; absent qualified ranges report `42P01`. Source aliases hide original
+names. Explicit positional aliases use the original function parameter order,
+not the first occupied internal slot: `SELECT local_value,$1` cannot bind `$1`
+to `local_value` accidentally.
+
+Source descriptors are obtained without running ordinary/temp tables, views,
+CTEs, derived queries or scalar/EXISTS children. Generic CTE bodies include DML
+RETURNING metadata. The walker prepares their expressions before the outer query
+can run, including empty sources and WHERE FALSE. Correlated SQL ancestors pass
+through nested queries and their WITH terms; non-LATERAL derived siblings are
+not made visible. JOIN USING/NATURAL expose merged unqualified keys while
+retaining qualified physical columns. The supported SELECT/DML trees also walk
+JOIN ON, WHERE, GROUP/HAVING, ORDER, DISTINCT, function FILTER/windows and
+RETURNING. Reached statements alone enter this path: an unreached procedural
+branch is not prepared as an executable command.
+
+Variable values are represented by genuine `ParameterExpr(slot, declaredType)`
+nodes and `ExprValue` cells with a separate NULL flag. `RowContext::setParameters`
+and the evaluator consume those bound nodes directly, including typed NULLs.
+Raw SQL `$n` nodes are distinguishable from internally bound nodes and resolve
+stable datum identity before receiving an internal slot. Projection labels are
+preserved when an unaliased variable becomes a parameter, so nested
+`WITH q AS(SELECT wanted) SELECT q.wanted FROM q` retains its descriptor.
+
+The current production SQL dispatcher still receives a transitional
+`PreparedQuery::legacySql()` adapter, not the bound AST itself. This adapter runs
+only after whole-tree namespace preparation succeeds; it uses immutable original
+byte spans and declared-type CAST encoding, never AST rendering or identifier
+text matching. It does not expose unresolved PL names to the legacy dispatcher.
+Original relation/alias/type/collation labels, literals and comments are retained.
+Direct query execution of an attached prepared scalar child without a real query
+evaluation context reports `0A000`, rather than treating SQL text as a datum.
+The ordinary scalar-subquery runtime bridge is a separate, still-open task.
+
+`CatalogManager::metadataSnapshot` copies namespace/relation/attribute/type/
+procedure rows under one mutex. `CatalogService::metadataSnapshot` does not call
+the catalog bootstrap/migration/persistence path. A cold read-only manager does
+not create directories, allocate OIDs or persist in its destructor. Engine schema
+and view descriptor fallback only reads files. The engine releases its metadata
+cache mutex before executing the query; nested SQL/DDL can then use the existing
+transaction owner, command IDs, snapshots and SELECT INTO output-demand options.
+There is no prepared-plan cache: each reached statement takes fresh metadata.
+
+## Actual red/green evidence for this implementation
+
+Artifacts are retained under `/tmp/dbms-plpgsql-query-binder.e0u6jPqT`; these
+paths describe local evidence, not files needed by installed executables.
+
+- The actual red baseline is ROOT `86ddccf9`, not an allegedly matched `c78`
+  executable. Its official fresh-55 optimized binary was
+  `/tmp/dbms-owner-receiver-numeric-combination.SSCXIETb/dbms_main.frozen`, SHA256
+  `a38da2abc3fb62270eedd988d67e66135a5a5f3a446f535c7e7ef92cb4a02b9c`.
+  It differs from the source parent by subsequent numeric/SUM/index CPP/test
+  fixes, not the new binder headers. `baseline-86dd-red.log` records terminal
+  exit 1 and the seven original wrong results/errors. Its writing CTE inserted
+  one row, currval returned 1 and the following nextval returned 2: the defect
+  occurred before an irreversible sequence effect, not just before rollback.
+- The first optimized candidate passed the initial 23 cases and sequence
+  negative control (`candidate-v1.log`, terminal exit 0). Its expanded test
+  subsequently exposed eight more failures (`candidate-v1-expanded-red.log`,
+  terminal exit 1), including positional parameters, output labels, scalar CTE
+  visibility and USING keys. Those failures were retained and fixed; the
+  occupied-slot concern was a source-level risk, not an observed return of 99
+  in that expanded runtime test, which actually reported `42P02`.
+- The second candidate's all-56 fresh optimized build and signature-compatible
+  native objects passed 38 cases plus the sequence control and nine natives
+  (`candidate-v2.log`, `native-v2.log`, both terminal exit 0).
+- The third optimized candidate passed all 40 cases plus sequence pre-effect,
+  12 native entry points and 11 serial adjacent protocol entry points
+  (`candidate-v3.log`, `native-v3.log`, `adjacent-v3.log`, terminal exit 0).
+  Adjacent coverage includes the 42 SELECT INTO demand controls, ordinary INTO,
+  quoted scalar, COLLATE, AT TIME ZONE, DISTINCT, stored-function atomicity,
+  stored-function WHERE, writing CTE and two extended-protocol error/alias tests.
+- Final pure-preparation review additionally produced a real legal-ancestor
+  CTE failure in the third candidate (`cte-ancestor-v3-red.log`, terminal exit
+  1). PostgreSQL 17.2 returned 1 for the ancestor case and `42P01` for the
+  non-LATERAL sibling (`pg17-cte-ancestor-reference.log`, final rollback
+  `00000`). WITH definitions now preserve ancestors, with both native controls.
+- Peer review then exposed a schema-qualified EXTRACT role mistake. The frozen
+  fourth candidate's expanded 42-case run actually returned NULL for the valid
+  ordinary function call and for its unknown-field variant, inserting row 2
+  and advancing currval to 2 / following nextval to 3
+  (`candidate-v4-expanded42-red.log`, terminal exit 1). Only unqualified grammar
+  EXTRACT skips its field identifier now; ordinary schema-qualified arguments
+  are value nodes. The fifth optimized candidate passed all 43 cases, including
+  INSERT SELECT returning 44, qualified EXTRACT returning 2026, and unknown field
+  `42703` before either the target or sequence changed (`candidate-v5.log`,
+  terminal exit 0). Its 12 native entry points also passed (`native-v5.log`).
+- JOIN output-order review produced an actual fifth-candidate metadata failure:
+  USING and NATURAL descriptors were sorted `ID,id`, and repeated USING keys
+  were silently accepted (`using-order-v5-red.log`, terminal exit 1).
+  PostgreSQL 17.2 gdesc returned `id integer, ID text`, and duplicate USING
+  reported `42701` (`pg17-using-order-reference.log`). The sixth candidate's
+  corresponding pure metadata probe passed both ordered descriptors and the
+  duplicate rejection (`using-order-v6-green.log`, terminal exit 0), alongside
+  the final native regression controls.
+- Final sixth-candidate verification: official optimized production compilation
+  succeeded; repeating `scripts/build.sh` reported up to date. All 56 object
+  source/header/compiler signatures and the production stamp matched. The
+  all-56 fresh header-compatible build was performed in the second round;
+  subsequent CPP-only rounds rebuilt every changed TU and relinked through the
+  official build, without using ROOT or another agent's objects. The frozen final
+  executable is `dbms_main.binder-v6.o2`, SHA256
+  `fd4b423f7b188abd830bd8c668250a9fe5e66590a76c9f9eaeb6d97594882000`.
+  `candidate-v6.log` passed all 43 cases and both nontransactional sequence
+  controls, `native-v6.log` passed 12 native entry points, and `adjacent-v6.log`
+  passed all 11 adjacent protocol entry points; each process reached terminal
+  exit 0. No full protocol suite was run in this independent worktree.
+  The final committed test source was rerun in `candidate-v6-final.log`
+  (registered status 0). Its optional 44-case open-namespace diagnostic was
+  separately rerun in `candidate-v6-open44.log`: all 43 closed cases and both
+  sequence controls still passed, and only schema-qualified routine CREATE
+  failed, giving the deliberately retained diagnostic status 1.
+- Reference `pg17-reference-expanded40.log` records server version 170002,
+  `variable_conflict=error`, all 40 expected outcomes and final rollback
+  `00000`. Private temporary objects and per-case savepoints were used. Its
+  writing-CTE rejection left the target empty and sequence `is_called=false`.
+  The candidate independently checks empty target, currval `55000`, then
+  nextval 1; rollback cannot manufacture that result.
+  `pg17-reference-expanded43.log` additionally verifies the INSERT SELECT and
+  qualified EXTRACT controls, with a second empty-target/is_called=false
+  negative control and final rollback `00000`.
+
+## Explicit remaining boundaries
+
+This closes the seven recorded namespace/pre-effect defects, not the complete
+SQL-04/FUNC-06 family or every item in the original implementation sequence.
+The prepared AST is not yet the dispatcher contract for every query path.
+Utility commands outside SELECT/VALUES/INSERT/UPDATE/DELETE/EXPLAIN/CREATE TABLE
+still use the existing engine path, and dynamic EXECUTE needs its own parameter
+contract. General table-function/LATERAL/MERGE, record/polymorphic/trigger
+descriptor semantics and additional catalog virtual-table descriptors are not
+claimed complete. The current explicitly typed virtual descriptors cover
+pg_class, pg_settings and pg_stat_activity only.
+
+Static type analysis is still partial: general operator/function coercion,
+CASE/set/recursive common types, full aggregate signature resolution and
+constant/type/collation validation before effects need further work. Unsupported
+opaque expressions, including some aggregate-order/slice shapes, fail explicitly
+with `0A000` rather than silently bypassing preparation. Strict SELECT child
+parsing is improved, but the whole grammar is not certified strict. Catalog
+type dependency invalidation and an eventual plan cache remain future work.
+In particular, full INSERT target-column/duplicate/width validation and UPDATE
+target-name preparation are not supplied by the current expression walker;
+LIMIT/OFFSET AST fields currently represent constant integers, not general bound
+parameter expressions. Those broader metadata/pre-effect boundaries remain
+explicitly open, rather than being inferred from the seven namespace greens.
+
+A separate schema-qualified routine creation smoke test was actually red before
+it could reach this binder: `CREATE FUNCTION binding_private_schema...` returned
+`42601` (`candidate-v6-schema44.log`, terminal exit 1), while the PostgreSQL 17.2
+implicit-function-label reference returned 99
+(`pg17-reference-expanded44.log`). Routine CREATE/parser and non-public routine
+resolution need independent work. The original 43 closed regression cases are
+preserved; `OPEN_NAMESPACE_CASES` in the same test retains this unclosed diagnostic
+and can be run with `--include-open-namespace`. It is not a final-candidate
+44-case pass. Quoted public routine names containing a dot must
+not be mistaken for schema paths when that later support is implemented.
+
+The normal stored-body caller supplies the existing database transaction/DDL
+fence; these focused checks do not establish a new general public metadata
+prepare/execute race guarantee outside that ownership contract. No full suite,
+PostgreSQL 18.6 differential, concurrency-DDL proof, push, Actions enablement or
+deferred security/TDE work is claimed by this commit.

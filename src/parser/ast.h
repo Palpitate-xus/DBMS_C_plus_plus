@@ -276,13 +276,28 @@ enum class ExprType {
     A_Star,       // SELECT *
 };
 
+class Stmt;
 class Expr : public ASTNode {
 public:
     ExprType type;
+    // Immutable byte provenance in the original reached SQL statement.
+    // Semantic token normalization must never change these coordinates.
+    size_t sourceBegin = std::string::npos;
+    size_t sourceEnd = std::string::npos;
+    std::shared_ptr<Stmt> preparedSubquery; // retained structured legacy SQL child
     virtual ~Expr() = default;
 };
 
 using ExprPtr = std::unique_ptr<Expr>;
+
+// Prepared parameters are typed cells, not identifier strings or literals.
+// Slots are zero based and retain their declared type even for SQL NULL.
+struct ParameterExpr : Expr {
+    size_t slot = 0;
+    std::string declaredType;
+    ParameterExpr() { type = ExprType::Parameter; }
+    std::string toString() const override { return "$" + std::to_string(slot + 1); }
+};
 
 // 字面量
 struct LiteralExpr : public Expr {
@@ -604,6 +619,7 @@ using StmtPtr = std::unique_ptr<Stmt>;
 struct SelectItem {
     ExprPtr expr;
     std::string alias;         // AS alias
+    size_t sourceExpressionEnd = std::string::npos;
 };
 
 struct ReturningOptions {
@@ -863,6 +879,7 @@ struct CreateTableStmt : public Stmt {
     std::string partitionOf;                   // PARTITION OF parent_table
     std::string partitionBoundSpec;            // FOR VALUES ... / DEFAULT
     std::string asSelect;                      // CREATE TABLE ... AS SELECT ...
+    StmtPtr preparedAsQuery;                  // structured reached CTAS query
     bool withData = true;                      // CTAS WITH [NO] DATA (default WITH DATA)
 
     CreateTableStmt() : Stmt(SqlCommand::CreateTable) {}

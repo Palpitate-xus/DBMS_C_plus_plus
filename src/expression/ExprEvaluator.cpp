@@ -490,6 +490,12 @@ std::optional<ExprValue> RowContext::get(const std::string& name) const {
     return std::nullopt;
 }
 
+const ExprValue& RowContext::parameter(size_t slot) const {
+    if (slot >= parameters_.size())
+        throw DbError("42P02", "there is no parameter $" + std::to_string(slot + 1));
+    return parameters_[slot];
+}
+
 // ============================================================================
 // ExprEvaluator
 // ============================================================================
@@ -511,7 +517,7 @@ ExprValue ExprEvaluator::eval(const Expr* expr, const RowContext& ctx) const {
         case ExprType::ArrayExpr:    return evalArrayExpr(static_cast<const ArrayExpr*>(expr), ctx);
         case ExprType::RowExpr:      return evalRowExpr(static_cast<const RowExpr*>(expr), ctx);
         case ExprType::Subquery:     return ExprValue{}; // not supported in Wave 0
-        case ExprType::Parameter:    return ExprValue{};
+        case ExprType::Parameter:    return ctx.parameter(static_cast<const ParameterExpr*>(expr)->slot);
         case ExprType::A_Star:       return ExprValue{};
     }
     return ExprValue{};
@@ -1629,6 +1635,8 @@ static bool isNumericLiteral(const std::string& s) {
 
 ExprValue ExprEvaluator::evalLiteral(const LiteralExpr* e) const {
     if (!e) return ExprValue{};
+    if (e->preparedSubquery)
+        throw DbError("0A000", "prepared subqueries require a query execution context");
     const std::string& raw = e->value;
     std::string low = toLower(raw);
 

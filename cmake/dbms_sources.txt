@@ -25,6 +25,7 @@ src/common/DataDirectory.cpp
 src/common/FeatureGate.cpp
 src/common/GeometryValue.cpp
 src/parser/parser.cpp
+src/parser/query_binding.cpp
 src/catalog/catalog.cpp
 src/catalog/oid.cpp
 src/catalog/systables.cpp

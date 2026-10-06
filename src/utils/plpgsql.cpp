@@ -278,6 +278,11 @@ struct Declaration {
     std::string type;
     std::string defaultExpr;
 };
+struct BlockStmt : Stmt {
+    std::string label;
+    std::vector<Declaration> declarations;
+    CompoundStmt body;
+};
 
 // ---------------------------------------------------------------------------
 // parser
@@ -325,6 +330,22 @@ struct Parser {
     }
 
     StmtPtr parseStatement() {
+        if (sc.peekChar() == '<' || sc.peekKeyword() == "begin" || sc.peekKeyword() == "declare") {
+            auto block = std::make_unique<BlockStmt>();
+            if (sc.matchOp("<<")) {
+                block->label = sc.ident();
+                if (block->label.empty() || !sc.matchOp(">>")) { fail("invalid block label"); return nullptr; }
+            }
+            if (sc.matchKeyword("declare")) {
+                if (!parseDeclares(block->declarations)) return nullptr;
+            } else if (!sc.matchKeyword("begin")) { fail("block requires BEGIN"); return nullptr; }
+            if (!parseCompoundInto(block->body) || !sc.matchKeyword("end")) return nullptr;
+            if (!block->label.empty() && sc.peekChar() != ';') {
+                if (sc.ident() != block->label) { fail("END label does not match block"); return nullptr; }
+            }
+            if (!sc.matchOp(";")) { fail("missing ';' after END"); return nullptr; }
+            return block;
+        }
         size_t at;
         std::string kw = sc.peekKeyword(&at);
         if (kw == "if") return parseIf();
@@ -530,6 +551,53 @@ struct Interp {
     std::map<std::string, std::string> vars;
     std::set<std::string> nullVars;
     std::map<std::string, std::string> variableTypes;
+    struct ScopeFrame { std::string label; std::map<std::string, QueryBindingDatum> datums; };
+    std::vector<ScopeFrame> scopes;
+    size_t scopeIdentity = 0;
+
+    std::vector<QueryBindingDatum> bindings() {
+        std::set<std::string> seen;
+        std::vector<QueryBindingDatum> result;
+        for (auto scope = scopes.rbegin(); scope != scopes.rend(); ++scope) {
+            for (auto& [name, datum] : scope->datums) {
+                datum.visible = seen.insert(name).second && datum.name == name;
+                if (datum.visible) {
+                    datum.value = nullVars.count(name) ? std::nullopt : std::optional<std::string>(vars[name]);
+                    const auto type = variableTypes.find(name);
+                    if (type != variableTypes.end()) datum.type = type->second;
+                }
+                result.push_back(datum);
+            }
+        }
+        // Trigger record fields are already canonical explicit dotted names.
+        for (const auto& [name, value] : vars) {
+            if (seen.count(name)) continue;
+            const auto dot = name.find('.');
+            QueryBindingDatum datum;
+            datum.identity = "implicit:" + name;
+            datum.name = dot == std::string::npos ? name : name.substr(dot + 1);
+            if (dot != std::string::npos) datum.qualifiers.push_back(name.substr(0, dot));
+            datum.visible = dot == std::string::npos;
+            datum.type = variableTypes.count(name) ? variableTypes[name] : "text";
+            datum.value = nullVars.count(name) ? std::nullopt : std::optional<std::string>(value);
+            result.push_back(std::move(datum));
+        }
+        return result;
+    }
+
+    void pushScope(const std::string& label, const std::vector<Declaration>& declarations) {
+        (void)bindings(); // capture outer values before a shadowing declaration
+        ScopeFrame frame{label, {}};
+        const auto identity = std::to_string(++scopeIdentity);
+        for (const auto& declaration : declarations) {
+            QueryBindingDatum datum;
+            datum.identity = identity + ":" + declaration.name;
+            datum.name = declaration.name; datum.type = declaration.type;
+            if (!label.empty()) datum.qualifiers.push_back(label);
+            frame.datums.emplace(declaration.name, std::move(datum));
+        }
+        scopes.push_back(std::move(frame));
+    }
     std::string returnValue;
     std::string returnType = "unknown";
     bool returnIsNull = false;
@@ -546,6 +614,22 @@ struct Interp {
         : host(h), vars(params), variableTypes(h.parameterTypes), notice(std::move(n)) {
         vars["found"] = "f";
         variableTypes["found"] = "boolean";
+        ScopeFrame parameters{host.functionLabel, {}};
+        for (const auto& [name, value] : params) {
+            QueryBindingDatum datum;
+            datum.identity = "parameter:" + name; datum.name = name;
+            datum.type = variableTypes.count(name) ? variableTypes[name] : "text";
+            datum.value = value;
+            if (!host.functionLabel.empty()) datum.qualifiers.push_back(host.functionLabel);
+            const auto position = std::find(host.parameterOrder.begin(), host.parameterOrder.end(), name);
+            if (position != host.parameterOrder.end()) datum.position = position - host.parameterOrder.begin() + 1;
+            else if (!host.parameterTypes.count(name) &&
+                     (name.rfind("new.", 0) == 0 || name.rfind("old.", 0) == 0)) {
+                datum.name = name.substr(4); datum.qualifiers = {name.substr(0, 3)}; datum.visible = false;
+            }
+            parameters.datums.emplace(name, std::move(datum));
+        }
+        scopes.push_back(std::move(parameters));
     }
 
     bool fail(const std::string& m, const std::string& sqlState = "XX000") {
@@ -915,7 +999,15 @@ struct Interp {
             }
         }
         if (host.evalExprTyped) {
-            const auto result = host.evalExprTyped(expr, vars, nullVars, variableTypes);
+            auto values = vars;
+            auto nulls = nullVars;
+            auto types = variableTypes;
+            for (const auto& datum : bindings()) for (const auto& qualifier : datum.qualifiers) {
+                const std::string name = qualifier + "." + datum.name;
+                values[name] = datum.value.value_or(""); types[name] = datum.type;
+                if (!datum.value) nulls.insert(name); else nulls.erase(name);
+            }
+            const auto result = host.evalExprTyped(expr, values, nulls, types);
             if (!result.ok) {
                 fail(result.message.empty() ? "expression evaluation failed" : result.message,
                      result.sqlState);
@@ -1139,6 +1231,38 @@ struct Interp {
     }
 
     bool exec(const Stmt& s) {
+        if (const auto* block = dynamic_cast<const BlockStmt*>(&s)) {
+            auto savedVars = vars; auto savedNulls = nullVars; auto savedTypes = variableTypes;
+            pushScope(block->label, block->declarations);
+            const auto restore = [&]() {
+                // Keep assignments to unshadowed outer variables, while
+                // restoring each shadowed declaration's previous datum.
+                for (const auto& declaration : block->declarations) {
+                    const auto found = savedVars.find(declaration.name);
+                    if (found == savedVars.end()) vars.erase(declaration.name);
+                    else vars[declaration.name] = found->second;
+                    if (savedNulls.count(declaration.name)) nullVars.insert(declaration.name);
+                    else nullVars.erase(declaration.name);
+                    const auto type = savedTypes.find(declaration.name);
+                    if (type == savedTypes.end()) variableTypes.erase(declaration.name);
+                    else variableTypes[declaration.name] = type->second;
+                }
+                scopes.pop_back();
+            };
+            struct Restore { const decltype(restore)& action; ~Restore() { action(); } } guard{restore};
+            for (const auto& declaration : block->declarations) {
+                variableTypes[declaration.name] = declaration.type;
+                vars[declaration.name] = "null"; nullVars.insert(declaration.name);
+                if (declaration.defaultExpr.empty()) {
+                    if (!assignValue(declaration.name, std::nullopt, "unknown")) return false;
+                } else {
+                    bool isNull = false; std::string type;
+                    auto value = eval(declaration.defaultExpr, &isNull, &type);
+                    if (!value || !assignValue(declaration.name, isNull ? std::nullopt : value, type)) return false;
+                }
+            }
+            return execCompound(block->body);
+        }
         if (auto* a = dynamic_cast<const AssignStmt*>(&s)) {
             bool valueIsNull = false;
             std::string valueType;
@@ -1319,10 +1443,12 @@ struct Interp {
                            !std::isspace(static_cast<unsigned char>(suffix.front()))) {
                     prefix += ' ';
                 }
-                const std::string query = substitute(trimCopy(prefix + suffix), true);
-                if (host.query) {
-                    const PlPgsqlQueryResult result = host.query(
-                        query, PlPgsqlQueryOptions{strict ? size_t{2} : size_t{1}});
+                const std::string rawQuery = trimCopy(prefix + suffix);
+                const std::string query = host.queryPrepared ? rawQuery : substitute(rawQuery, true);
+                if (host.queryPrepared || host.query) {
+                    const auto options = PlPgsqlQueryOptions{strict ? size_t{2} : size_t{1}};
+                    const PlPgsqlQueryResult result = host.queryPrepared
+                        ? host.queryPrepared(rawQuery, bindings(), options) : host.query(query, options);
                     if (!result.ok) {
                         return fail(result.message.empty() ? "SELECT INTO failed" : result.message,
                                     result.sqlState);
@@ -1363,6 +1489,11 @@ struct Interp {
                 return true;
             }
         }
+        if (host.queryPrepared) {
+            const auto result = host.queryPrepared(sql, bindings(), {});
+            if (!result.ok) return fail(result.message, result.sqlState);
+            return true;
+        }
         if (!host.execStmt) return fail("SQL execution unsupported by host");
         if (!host.execStmt(substitute(sql, true), vars)) {
             return fail("SQL failed: " + sql.substr(0, 60));
@@ -1395,6 +1526,13 @@ bool PlPgsql::run(const std::string& body,
 
     Parser parser(body);
     std::vector<Declaration> defaults;
+    std::string rootLabel;
+    if (parser.sc.matchOp("<<")) {
+        rootLabel = parser.sc.ident();
+        if (rootLabel.empty() || !parser.sc.matchOp(">>")) {
+            error = "invalid block label"; if (errorSqlState) *errorSqlState = "42601"; return false;
+        }
+    }
     parser.sc.matchKeyword("declare");  // optional leading DECLARE section
     if (!parser.parseDeclares(defaults)) {
         error = parser.error.empty() ? "DECLARE parse failed" : parser.error;
@@ -1409,6 +1547,11 @@ bool PlPgsql::run(const std::string& body,
     }
     // trailing END (of BEGIN block): tolerate optional "end;" / "end;"
     parser.sc.matchKeyword("end");
+    if (!rootLabel.empty() && parser.sc.peekChar() != ';' && !parser.sc.eof()) {
+        if (parser.sc.ident() != rootLabel) {
+            error = "END label does not match block"; if (errorSqlState) *errorSqlState = "42601"; return false;
+        }
+    }
     parser.sc.matchOp(";");
     if (!parser.sc.eof() && !trimCopy(parser.sc.src.substr(parser.sc.pos)).empty()) {
         // tolerate trailing whitespace only
@@ -1422,9 +1565,10 @@ bool PlPgsql::run(const std::string& body,
     std::function<void(const std::string&, const std::string&)> sink = notice;
     Interp interp(host, params, sink);
     if (nullParams) interp.nullVars.insert(nullParams->begin(), nullParams->end());
+    interp.pushScope(rootLabel, defaults);
     for (const auto& d : defaults) {
-        if (interp.vars.count(d.name)) continue;
         if (!d.type.empty()) interp.variableTypes[d.name] = d.type;
+        interp.vars[d.name] = "null"; interp.nullVars.insert(d.name);
         if (trimCopy(d.defaultExpr).empty()) {
             if (!interp.assignValue(d.name, std::nullopt, "unknown")) {
                 error = interp.error;

@@ -33,6 +33,18 @@ public:
     // dbPath: 数据库数据目录（如 data/base/mydb/）
     explicit CatalogManager(const std::string& dbPath);
     ~CatalogManager();
+    struct MetadataSnapshot {
+        std::vector<PgNamespaceRow> namespaces;
+        std::vector<PgClassRow> relations;
+        std::vector<PgAttributeRow> attributes;
+        std::vector<PgTypeRow> types;
+        std::vector<PgProcRow> routines;
+    };
+    // A single-lock copy: callers never retain catalog-owned row pointers.
+    MetadataSnapshot metadataSnapshot() const;
+    // Cold metadata reads do not bootstrap, allocate OIDs, migrate files,
+    // create directories or persist on destruction.
+    static MetadataSnapshot readMetadataSnapshot(const std::string& dbPath);
 
     // 禁止拷贝
     CatalogManager(const CatalogManager&) = delete;
@@ -225,6 +237,8 @@ public:
     Oid allocateOid();
 
 private:
+    struct ReadOnlyTag {};
+    CatalogManager(const std::string& dbPath, ReadOnlyTag);
     std::string dbPath_;
     std::unique_ptr<OidGenerator> oidGen_;
     mutable std::mutex mutex_;

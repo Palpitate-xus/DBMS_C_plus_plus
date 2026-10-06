@@ -25,6 +25,9 @@ public:
 
     // 主入口：解析 SQL 字符串，返回 AST
     ParseResult parse(const std::string& sql);
+    // Strict reached-statement parsing with raw-byte expression provenance.
+    // This has no catalog, planner, evaluator or execution dependency.
+    ParseResult parseForBinding(const std::string& sql);
 
     // 快速命令分类（不构建完整 AST）
     // 用于 execute() 迁移期：先替换分类逻辑

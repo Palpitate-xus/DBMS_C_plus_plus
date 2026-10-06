@@ -150,6 +150,13 @@ bool CatalogService::has(const std::string& dbname) const {
     return cache_.find(dbname) != cache_.end();
 }
 
+CatalogManager::MetadataSnapshot CatalogService::metadataSnapshot(const std::string& dbname) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = cache_.find(dbname);
+    if (found != cache_.end()) return found->second->metadataSnapshot();
+    return CatalogManager::readMetadataSnapshot(catalogDirForDb(engine_, dbname).string());
+}
+
 CatalogManager::QualifiedName CatalogService::logicalName(const std::string& physical) {
     CatalogManager::QualifiedName qn;
     qn.schema.clear();

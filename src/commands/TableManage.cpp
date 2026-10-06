@@ -20,6 +20,7 @@
 #include "types/xml.h"
 #include "catalog/collation.h"
 #include "catalog/CatalogService.h"
+#include "common/SqlSyntax.h"
 #include "expression/expr_helper.h"
 #include "expression/ExprEvaluator.h"
 #include "expression/ExpressionVolatility.h"
@@ -31471,6 +31472,130 @@ PlPgsqlQueryResult StorageEngine::plpgsqlQuery(const std::string& dbname,
     return plpgsqlQueryNative(dbname, sql, options);
 }
 
+PlPgsqlQueryResult StorageEngine::plpgsqlQueryPrepared(const std::string& dbname,
+    const std::string& sql, const std::vector<QueryBindingDatum>& bindings,
+    const PlPgsqlQueryOptions& options) const {
+    try {
+        const auto command = SQLParser::classify(sql);
+        if (storedFunctionTransactionControl(command))
+            throw DbError("2D000", "transaction control is not allowed in a stored-function body");
+        const bool functionBody = !storedFunctionFrames.empty() &&
+            storedFunctionFrames.back().engine == this &&
+            storedFunctionFrames.back().database == dbname &&
+            storedFunctionFrames.back().session == currentSession();
+        if (functionBody && storedFunctionFrames.back().volatility != 'v' &&
+            !storedFunctionReadOnlyQuery(sql))
+            throw DbError("0A000", "non-read-only SQL is not allowed in a non-volatile function");
+        if (command != SqlCommand::Select && command != SqlCommand::Values &&
+            command != SqlCommand::Insert && command != SqlCommand::Update && command != SqlCommand::Delete &&
+            command != SqlCommand::Explain && command != SqlCommand::CreateTable)
+            return plpgsqlQuery(dbname, sql, options);
+        // The caller's statement transaction owns the database DDL fence.
+        // Catalog rows are copied under one lock; schema/view loads only read.
+        PreparedQuery prepared;
+        {
+        std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+        const auto catalog = catalogService_->metadataSnapshot(dbname);
+        QueryBindingMetadata metadata;
+        size_t viewDepth = 0;
+        metadata.relation = [&](const std::string& spelling) -> QueryRelationMetadata {
+            CatalogManager::QualifiedName requested;
+            if (!CatalogManager::parseQualifiedName(spelling, requested, true))
+                throw DbError("42601", "invalid relation name");
+            std::vector<std::string> schemas;
+            const Session* session = currentSession();
+            if (!requested.schema.empty()) schemas.push_back(requested.schema);
+            else {
+                if (session) schemas.push_back(sessionTempSchemaName(*session));
+                schemas.push_back("pg_catalog");
+                std::string canonical; std::vector<std::string> path;
+                if (session && parseSessionSearchPath(session->searchPath, path, canonical)) {
+                    for (const auto& entry : path) schemas.push_back(expandSessionSearchPathEntry(entry, session->username));
+                } else schemas.push_back("public");
+            }
+            for (auto schema : schemas) {
+                if (schema == "pg_temp" && session) schema = sessionTempSchemaName(*session);
+                QueryRelationMetadata description{schema, requested.name, {}, {}};
+                if (schema == "pg_catalog") {
+                    static const std::map<std::string, QueryRowDescriptor> virtualTables = {
+                        {"pg_class", {{"oid","oid"},{"relname","name"},{"relnamespace","oid"},
+                            {"relkind","\"char\""},{"relnatts","smallint"},{"relpersistence","\"char\""},{"relowner","oid"}}},
+                        {"pg_settings", {{"name","text"},{"setting","text"},{"unit","text"}}},
+                        {"pg_stat_activity", {{"pid","integer"},{"datname","name"},{"usename","name"},{"state","text"},{"query","text"}}}
+                    };
+                    const auto found = virtualTables.find(requested.name);
+                    if (found != virtualTables.end()) { description.columns = found->second; return description; }
+                }
+                Oid namespaceId = INVALID_OID;
+                for (const auto& ns : catalog.namespaces) if (ns.nspname == schema) namespaceId = ns.oid;
+                for (const auto& relation : catalog.relations) {
+                    if (relation.relnamespace != namespaceId || relation.relname != requested.name) continue;
+                    auto attributes = catalog.attributes;
+                    std::sort(attributes.begin(), attributes.end(), [](const auto& a, const auto& b) { return a.attnum < b.attnum; });
+                    for (const auto& attribute : attributes) {
+                        if (attribute.attrelid != relation.oid || attribute.attnum <= 0 || attribute.attisdropped) continue;
+                        std::string typeName = "unknown";
+                        for (const auto& type : catalog.types) if (type.oid == attribute.atttypid) typeName = type.typname;
+                        description.columns.push_back({attribute.attname, typeName});
+                    }
+                    if (!description.columns.empty()) return description;
+                }
+                const bool temporary = session && schema == sessionTempSchemaName(*session);
+                const std::string physical = temporary ? tempTablePrefix(*session, requested.name)
+                    : schema == "public" ? requested.name : schema + "__" + requested.name;
+                std::ifstream input(schemaPath(dbname, physical), std::ios::binary);
+                if (input) {
+                    const auto table = readSchema(input, physical);
+                    for (size_t i = 0; i < table.len; ++i)
+                        description.columns.push_back({table.cols[i].dataName,
+                            ExprHelper::canonicalResultTypeName(table.cols[i].dataType + (table.cols[i].isArray ? "[]" : ""))});
+                    if (!description.columns.empty()) return description;
+                }
+                auto view = getViewSQL(dbname, schema == "public" ? requested.name : schema + "." + requested.name);
+                if (!view.empty()) {
+                    const auto protectedBytes = sqlProtectedBytes(view);
+                    size_t envelope = view.size();
+                    for (const auto& marker : {std::string("\nBASE_TABLE:"), std::string("\nWITH_CHECK_OPTION:")}) {
+                        size_t at = view.find(marker);
+                        while (at != std::string::npos) {
+                            if (!protectedBytes[at + 1]) { envelope = std::min(envelope, at); break; }
+                            at = view.find(marker, at + marker.size());
+                        }
+                    }
+                    view.resize(envelope);
+                    if (++viewDepth > 64) throw DbError("54001", "view binding nesting limit exceeded");
+                    struct Depth { size_t& value; ~Depth() { --value; } } depth{viewDepth};
+                    description.columns = prepareQuery(view, {}, metadata).output;
+                    return description;
+                }
+            }
+            throw DbError("42P01", "relation \"" + spelling + "\" does not exist");
+        };
+        ExprEvaluator evaluator; evaluator.setCurrentDB(dbname);
+        metadata.functionType = [&](const FunctionCallExpr* function) {
+            const auto name = SQLParser::toLower(function->funcName);
+            if (name == "exists") return std::string("boolean");
+            if (name == "count") return std::string("bigint");
+            if (name == "sum" || name == "avg" || name == "min" || name == "max") return std::string();
+            if (!evaluator.hasScalarFunction(function, const_cast<StorageEngine*>(this)))
+                throw DbError("42883", "function does not exist: " + function->funcName);
+            CatalogManager::QualifiedName routine;
+            if (CatalogManager::parseQualifiedName(function->funcName, routine, true)) {
+                const auto udf = getUDF(dbname, routine.name);
+                if (!udf.expression.empty()) return ExprHelper::canonicalResultTypeName(udf.returnType);
+            }
+            return std::string();
+        };
+        prepared = prepareQuery(sql, bindings, metadata);
+        }
+        // No catalog/cache mutex is retained while SQL or a called routine
+        // executes. A nested DDL command can upgrade the transaction fence.
+        return plpgsqlQuery(dbname, prepared.legacySql(), options);
+    } catch (const DbError& error) {
+        PlPgsqlQueryResult result; result.sqlState = error.sqlState(); result.message = error.message(); return result;
+    }
+}
+
 static PlPgsqlQueryResult plpgsqlScalarResult(const ExprEvalResult& value) {
     PlPgsqlQueryResult result;
     if (!value.ok) {
@@ -31837,6 +31962,9 @@ static bool evalUDFBody(const StorageEngine::UDFInfo& udf,
             }
         }
         PlPgsqlHost host;
+        host.functionLabel = udf.name;
+        host.parameterOrder = udf.paramNames;
+        if (host.parameterOrder.size() == 1 && host.parameterOrder.front().empty()) host.parameterOrder.clear();
         for (size_t i = 0; i < udf.paramNames.size() && i < udf.paramTypes.size(); ++i)
             host.parameterTypes[udf.paramNames[i]] = udf.paramTypes[i];
         host.evalExprTyped = [engine, &dbname](const std::string& expression,
@@ -31893,6 +32021,10 @@ static bool evalUDFBody(const StorageEngine::UDFInfo& udf,
         host.query = [engine, &dbname](const std::string& sql,
                                      const PlPgsqlQueryOptions& options) {
             return engine->plpgsqlQuery(dbname, sql, options);
+        };
+        host.queryPrepared = [engine, &dbname](const std::string& sql,
+            const std::vector<QueryBindingDatum>& bindings, const PlPgsqlQueryOptions& options) {
+            return engine->plpgsqlQueryPrepared(dbname, sql, bindings, options);
         };
         std::string rv, err, sqlState, plpgsqlReturnType;
         bool plpgsqlIsNull = false;

@@ -46,6 +46,7 @@ public:
 
     // Test/debug: is `dbname` currently cached?
     bool has(const std::string& dbname) const;
+    CatalogManager::MetadataSnapshot metadataSnapshot(const std::string& dbname) const;
 
     // Convert a physical storage name (schema__table or plain_table) to a
     // logical qualified name. This is the inverse of main.cpp's

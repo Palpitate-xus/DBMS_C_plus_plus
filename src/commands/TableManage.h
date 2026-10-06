@@ -406,6 +406,9 @@ public:
     PlPgsqlQueryResult plpgsqlQuery(const std::string& dbname,
                                    const std::string& sql,
                                    const PlPgsqlQueryOptions& options = {}) const;
+    PlPgsqlQueryResult plpgsqlQueryPrepared(const std::string& dbname,
+        const std::string& sql, const std::vector<QueryBindingDatum>& bindings,
+        const PlPgsqlQueryOptions& options = {}) const;
     std::vector<std::string> getUDFNames(const std::string& dbname) const;
 
     // Table-valued functions (return a result set)

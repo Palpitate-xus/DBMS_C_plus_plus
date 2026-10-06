@@ -62,9 +62,12 @@ public:
     void set(const std::string& name, ExprValue val) { values_[normalize(name)] = std::move(val); }
     std::optional<ExprValue> get(const std::string& name) const;
     bool has(const std::string& name) const { return get(name).has_value(); }
+    void setParameters(std::vector<ExprValue> cells) { parameters_ = std::move(cells); }
+    const ExprValue& parameter(size_t slot) const;
 
 private:
     std::map<std::string, ExprValue> values_;
+    std::vector<ExprValue> parameters_;
     static std::string normalize(const std::string& s);
 };
 

@@ -29,6 +29,7 @@
 #include <set>
 #include <string>
 #include <vector>
+#include "parser/query_binding.h"
 
 namespace dbms {
 
@@ -71,6 +72,13 @@ struct PlPgsqlHost {
     // the procedural INTO target list removed and variables substituted.
     std::function<PlPgsqlQueryResult(const std::string& sql,
                                     const PlPgsqlQueryOptions& options)> query;
+    // Reached statements retain their raw SQL and canonical namespaces.
+    // The host must prepare the whole tree before invoking any executor.
+    std::function<PlPgsqlQueryResult(const std::string& sql,
+                                    const std::vector<QueryBindingDatum>& bindings,
+                                    const PlPgsqlQueryOptions& options)> queryPrepared;
+    std::string functionLabel;
+    std::vector<std::string> parameterOrder;
     // Preferred scalar-expression boundary. Expressions and bindings remain
     // separate, so text that looks numeric never acquires a numeric type.
     // A successful result contains exactly one nullable row/column cell.

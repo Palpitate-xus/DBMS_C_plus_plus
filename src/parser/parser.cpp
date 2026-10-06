@@ -8,8 +8,37 @@
 #include <limits>
 #include <set>
 #include <sstream>
+#include <unordered_map>
 
 namespace dbms {
+
+namespace {
+struct TokenProvenance { std::vector<std::pair<size_t, size_t>> spans; };
+struct BindingParseContext {
+    const std::string& source;
+    size_t base = 0;
+    size_t pendingBase = 0;
+    std::unordered_map<const std::string*, TokenProvenance> tokens;
+};
+thread_local BindingParseContext* bindingParse = nullptr;
+struct BindingSourceScope {
+    size_t oldBase = 0;
+    explicit BindingSourceScope(size_t leading) {
+        if (!bindingParse) return;
+        oldBase = bindingParse->base;
+        bindingParse->base = bindingParse->pendingBase + leading;
+    }
+    ~BindingSourceScope() { if (bindingParse) bindingParse->base = oldBase; }
+};
+void markSource(Expr* expression, const std::vector<std::string>& tokens,
+                size_t begin, size_t end) {
+    if (!bindingParse || !expression || begin >= end) return;
+    const auto found = bindingParse->tokens.find(tokens.data());
+    if (found == bindingParse->tokens.end() || end > found->second.spans.size()) return;
+    expression->sourceBegin = found->second.spans[begin].first;
+    expression->sourceEnd = found->second.spans[end - 1].second;
+}
+}
 
 // Reassemble a lexer token stream back into SQL text.  Qualified references
 // arrive as three tokens ("jb", ".", "bid") because '.' is its own token
@@ -322,6 +351,15 @@ static bool findTopLevelSetOperator(const std::vector<std::string>& tokens,
 
 static std::string joinParserTokens(const std::vector<std::string>& tokens,
                                     size_t begin, size_t end) {
+    if (bindingParse && begin < end) {
+        const auto found = bindingParse->tokens.find(tokens.data());
+        if (found != bindingParse->tokens.end() && end <= found->second.spans.size()) {
+            const size_t first = found->second.spans[begin].first;
+            const size_t last = found->second.spans[end - 1].second;
+            bindingParse->pendingBase = first;
+            return bindingParse->source.substr(first, last - first);
+        }
+    }
     std::string result;
     for (size_t i = begin; i < end; ++i) {
         if (!result.empty()) result += ' ';
@@ -587,7 +625,17 @@ std::optional<std::string> SQLParser::duplicateCteName(const std::string& sql) {
 
 std::vector<std::string> SQLParser::tokenizeImpl(const std::string& sql, std::string* error) {
     std::vector<std::string> tokens;
+    std::vector<std::pair<size_t, size_t>> spans;
     std::string cur;
+    size_t curBegin = 0;
+    const auto emit = [&](std::string value, size_t begin, size_t end) {
+        tokens.push_back(std::move(value));
+        spans.emplace_back(begin + (bindingParse ? bindingParse->base : 0),
+                           end + (bindingParse ? bindingParse->base : 0));
+    };
+    const auto flush = [&](size_t end) {
+        if (!cur.empty()) { emit(cur, curBegin, end); cur.clear(); }
+    };
     bool inString = false;
     bool inEscapeString = false;
     char stringChar = 0;
@@ -626,8 +674,7 @@ std::vector<std::string> SQLParser::tokenizeImpl(const std::string& sql, std::st
                 const size_t close = sql.find(delim, bodyStart);
                 if (close != std::string::npos) {
                     if (!cur.empty()) {
-                        tokens.push_back(cur);
-                        cur.clear();
+                        flush(i);
                     }
                     // Emit as a single-quoted string token so downstream
                     // string handling (stripQuotes, literals) treats it as a
@@ -640,7 +687,7 @@ std::vector<std::string> SQLParser::tokenizeImpl(const std::string& sql, std::st
                         if (bc == '\'') quoted += '\''; // double-up escapes
                     }
                     quoted += '\'';
-                    tokens.push_back(quoted);
+                    emit(quoted, i, close + delim.size());
                     i = close + delim.size() - 1; // continue after closer
                     continue;
                 }
@@ -674,8 +721,7 @@ std::vector<std::string> SQLParser::tokenizeImpl(const std::string& sql, std::st
                     continue;
                 }
                 inString = false;
-                tokens.push_back(inEscapeString
-                    ? normalizeEscapeStringToken(cur) : cur);
+                emit(inEscapeString ? normalizeEscapeStringToken(cur) : cur, curBegin, i + 1);
                 cur.clear();
                 inEscapeString = false;
             }
@@ -689,7 +735,7 @@ std::vector<std::string> SQLParser::tokenizeImpl(const std::string& sql, std::st
                     continue;
                 }
                 inIdentifier = false;
-                tokens.push_back(cur);
+                emit(cur, curBegin, i + 1);
                 cur.clear();
             }
             continue;
@@ -715,8 +761,7 @@ std::vector<std::string> SQLParser::tokenizeImpl(const std::string& sql, std::st
                 continue;
             }
             if (!cur.empty()) {
-                tokens.push_back(cur);
-                cur.clear();
+                flush(i);
             }
             if (c == '\'') {
                 inString = true;
@@ -725,13 +770,13 @@ std::vector<std::string> SQLParser::tokenizeImpl(const std::string& sql, std::st
             } else {
                 inIdentifier = true;
             }
+            if (cur.empty()) curBegin = i;
             cur += c;
             continue;
         }
         if (std::isspace(static_cast<unsigned char>(c))) {
             if (!cur.empty()) {
-                tokens.push_back(cur);
-                cur.clear();
+                flush(i);
             }
             continue;
         }
@@ -753,6 +798,7 @@ std::vector<std::string> SQLParser::tokenizeImpl(const std::string& sql, std::st
                  sql[i + 1] == 'e' || sql[i + 1] == 'E' ||
                  terminatesTrailingDecimal(sql[i + 1]));
             if (startsLeadingDecimal || continuesDecimal) {
+                if (cur.empty()) curBegin = i;
                 cur += c;
                 continue;
             }
@@ -765,8 +811,7 @@ std::vector<std::string> SQLParser::tokenizeImpl(const std::string& sql, std::st
                 continue;
             }
             if (!cur.empty()) {
-                tokens.push_back(cur);
-                cur.clear();
+                flush(i);
             }
             // multi-char operators
             if (i + 1 < sql.size()) {
@@ -774,7 +819,7 @@ std::vector<std::string> SQLParser::tokenizeImpl(const std::string& sql, std::st
                 std::string two = std::string(1, c) + next;
                 if (i + 2 < sql.size() &&
                     ((two == "<<" || two == ">>") && sql[i + 2] == '=')) {
-                    tokens.push_back(two + "=");
+                    emit(two + "=", i, i + 3);
                     i += 2;
                     continue;
                 }
@@ -788,16 +833,16 @@ std::vector<std::string> SQLParser::tokenizeImpl(const std::string& sql, std::st
                     if (i + 2 < sql.size() && ((two == "->" && sql[i + 2] == '>') ||
                                                (two == "#>" && sql[i + 2] == '>') ||
                                                (two == "!~" && sql[i + 2] == '*'))) {
-                        tokens.push_back(two + (sql[i + 2] == '*' ? '*' : '>'));
+                        emit(two + (sql[i + 2] == '*' ? '*' : '>'), i, i + 3);
                         i += 2;
                         continue;
                     }
-                    tokens.push_back(two);
+                    emit(two, i, i + 2);
                     ++i;
                     continue;
                 }
                 if (two == "<@") {
-                    tokens.push_back(two);
+                    emit(two, i, i + 2);
                     ++i;
                     continue;
                 }
@@ -813,9 +858,10 @@ std::vector<std::string> SQLParser::tokenizeImpl(const std::string& sql, std::st
                     continue;
                 }
             }
-            tokens.push_back(std::string(1, c));
+            emit(std::string(1, c), i, i + 1);
             continue;
         }
+        if (cur.empty()) curBegin = i;
         cur += c;
     }
     if (error && (inString || inIdentifier)) {
@@ -823,7 +869,7 @@ std::vector<std::string> SQLParser::tokenizeImpl(const std::string& sql, std::st
         return tokens;
     }
     if (!cur.empty()) {
-        tokens.push_back(cur);
+        emit(cur, curBegin, sql.size());
     }
     // PostgreSQL POSITION(needle IN haystack): rewrite the IN token to a
     // comma when it appears inside a position()/strpos() argument list, so
@@ -892,20 +938,24 @@ std::vector<std::string> SQLParser::tokenizeImpl(const std::string& sql, std::st
             if (topLevelComma(ls + 1, i - 2) != 1) continue;
             if (topLevelComma(ge + 1, re - 1) != 1) continue;
             std::vector<std::string> out;
+            std::vector<std::pair<size_t, size_t>> reordered;
+            const auto append = [&](const std::string& value, size_t origin) {
+                out.push_back(value); reordered.push_back(spans[origin]);
+            };
             out.reserve(tokens.size());
-            for (size_t j = 0; j < ls; ++j) out.push_back(tokens[j]);
-            out.push_back("overlaps");
-            out.push_back("(");
-            for (size_t j = ls + 1; j <= i - 2; ++j) out.push_back(tokens[j]);
-            out.push_back(",");
-            for (size_t j = ge + 1; j <= re - 1; ++j) out.push_back(tokens[j]);
-            out.push_back(")");
-            for (size_t j = re + 1; j < tokens.size(); ++j) out.push_back(tokens[j]);
-            tokens = out;
+            for (size_t j = 0; j < ls; ++j) append(tokens[j], j);
+            append("overlaps", i); append("(", ls);
+            for (size_t j = ls + 1; j <= i - 2; ++j) append(tokens[j], j);
+            append(",", i);
+            for (size_t j = ge + 1; j <= re - 1; ++j) append(tokens[j], j);
+            append(")", re);
+            for (size_t j = re + 1; j < tokens.size(); ++j) append(tokens[j], j);
+            tokens = std::move(out); spans = std::move(reordered);
             break;
         }
     }
 
+    if (bindingParse) bindingParse->tokens[tokens.data()] = {std::move(spans)};
     return tokens;
 }
 
@@ -1345,6 +1395,7 @@ ParseResult SQLParser::parse(const std::string& inputSql) {
         return result;
     }
     const std::string sql = inputSql.substr(offset);
+    BindingSourceScope sourceScope(offset);
     result.error = lexicalError(sql);
     if (!result.error.empty()) return result;
     if (const auto duplicate = duplicateCteName(sql)) {
@@ -1549,6 +1600,14 @@ ParseResult SQLParser::parse(const std::string& inputSql) {
             result.error = "unknown or unsupported SQL command";
             return result;
     }
+}
+
+ParseResult SQLParser::parseForBinding(const std::string& sql) {
+    BindingParseContext context{sql};
+    auto* saved = bindingParse;
+    bindingParse = &context;
+    struct Restore { BindingParseContext* saved; ~Restore() { bindingParse = saved; } } restore{saved};
+    return parse(sql);
 }
 
 // ============================================================================
@@ -2138,7 +2197,7 @@ static ExprPtr parsePostfixExpr(const std::vector<std::string>& tokens, size_t& 
 }
 
 // Primary: literals, column refs, function calls, parenthesized exprs, subqueries, CASE
-static ExprPtr parsePrimaryExpr(const std::vector<std::string>& tokens, size_t& pos) {
+static ExprPtr parsePrimaryExprImpl(const std::vector<std::string>& tokens, size_t& pos) {
     if (pos >= tokens.size()) return nullptr;
 
     // CAST(expr AS type [mods]): prefix form of the :: cast operator.
@@ -2250,6 +2309,7 @@ static ExprPtr parsePrimaryExpr(const std::vector<std::string>& tokens, size_t& 
     if (SQLParser::toLower(tokens[pos]) == "exists") {
         ++pos;
         if (pos < tokens.size() && tokens[pos] == "(") {
+            const size_t queryBegin = pos;
             ++pos;
             std::string subq;
             int depth = 1;
@@ -2266,6 +2326,7 @@ static ExprPtr parsePrimaryExpr(const std::vector<std::string>& tokens, size_t& 
             func->funcName = "EXISTS";
             auto lit = std::make_unique<LiteralExpr>();
             lit->value = "(" + subq + ")";
+            markSource(lit.get(), tokens, queryBegin, pos);
             func->args.push_back(std::move(lit));
             return func;
         }
@@ -2309,6 +2370,14 @@ static ExprPtr parsePrimaryExpr(const std::vector<std::string>& tokens, size_t& 
 
     std::string first = tokens[pos];
     ++pos;
+    if (first.size() > 1 && first.front() == '$' &&
+        std::all_of(first.begin() + 1, first.end(), [](unsigned char c) { return std::isdigit(c); })) {
+        size_t number = 0;
+        if (!parseNonNegativeInteger(first.substr(1), number) || number == 0) return nullptr;
+        auto parameter = std::make_unique<ParameterExpr>();
+        parameter->slot = number - 1;
+        return parameter;
+    }
 
     // Literals: quoted strings, numbers, and boolean/null constants.
     if (isStringLiteralToken(first) || isBitStringLiteralToken(first) ||
@@ -2322,6 +2391,18 @@ static ExprPtr parsePrimaryExpr(const std::vector<std::string>& tokens, size_t& 
         auto lit = std::make_unique<LiteralExpr>();
         lit->value = firstLower;
         return lit;
+    }
+    // SQL value-function keywords are grammar, unlike their quoted spelling.
+    // Model them structurally during preparation; no clock/session callback
+    // is invoked to discover the expression's namespace.
+    static const std::set<std::string> valueFunctions = {
+        "current_date", "current_time", "current_timestamp", "localtime", "localtimestamp",
+        "current_catalog", "current_schema", "current_user", "session_user", "current_role"
+    };
+    if (bindingParse && valueFunctions.count(firstLower) &&
+        (pos == tokens.size() || tokens[pos] != "(")) {
+        auto value = std::make_unique<FunctionCallExpr>();
+        value->schema = "pg_catalog"; value->funcName = firstLower; return value;
     }
 
     // Collect possible qualified name parts before deciding function vs column.
@@ -2550,6 +2631,15 @@ static ExprPtr parsePrimaryExpr(const std::vector<std::string>& tokens, size_t& 
     return colRef;
 }
 
+static ExprPtr parsePrimaryExpr(const std::vector<std::string>& tokens, size_t& pos) {
+    const size_t begin = pos;
+    auto result = parsePrimaryExprImpl(tokens, pos);
+    // Do not widen an already tagged inner expression across parentheses.
+    if (result && result->sourceBegin == std::string::npos)
+        markSource(result.get(), tokens, begin, pos);
+    return result;
+}
+
 // Backward-compatible wrapper: delegates to full precedence parser
 static ExprPtr parseSimpleExpr(const std::vector<std::string>& tokens, size_t& pos) {
     return parseExpr(tokens, pos);
@@ -2559,6 +2649,11 @@ static ExprPtr parseSimpleExpr(const std::vector<std::string>& tokens, size_t& p
 static SelectItem parseSelectItem(const std::vector<std::string>& tokens, size_t& pos) {
     SelectItem item;
     item.expr = parseSimpleExpr(tokens, pos);
+    if (bindingParse && pos > 0) {
+        const auto found = bindingParse->tokens.find(tokens.data());
+        if (found != bindingParse->tokens.end() && pos <= found->second.spans.size())
+            item.sourceExpressionEnd = found->second.spans[pos - 1].second;
+    }
     if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "as") {
         ++pos;
         if (pos < tokens.size()) item.alias = tokens[pos++];
@@ -2822,12 +2917,14 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
             return r;
         }
 
-        ParseResult left = parseSelect(joinParserTokens(tokens, 0, setLocation.position));
+        const auto leftSql = joinParserTokens(tokens, 0, setLocation.position);
+        ParseResult left = bindingParse ? parse(leftSql) : parseSelect(leftSql);
         if (!left.success || !left.stmt) {
             r.error = left.error.empty() ? "invalid left set-operation operand" : left.error;
             return r;
         }
-        ParseResult right = parseSelect(joinParserTokens(tokens, rhsBegin, tokens.size()));
+        const auto rightSql = joinParserTokens(tokens, rhsBegin, tokens.size());
+        ParseResult right = bindingParse ? parse(rightSql) : parseSelect(rightSql);
         if (!right.success || !right.stmt) {
             r.error = right.error.empty() ? "invalid right set-operation operand" : right.error;
             return r;
@@ -2891,6 +2988,7 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
             }
             if (pos < tokens.size() && tokens[pos] == "(") {
                 ++pos;
+                const size_t childBegin = pos;
                 std::string subq;
                 int depth = 1;
                 while (pos < tokens.size() && depth > 0) {
@@ -2901,9 +2999,19 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
                         subq += tokens[pos++];
                     }
                 }
+                const size_t childEnd = pos;
                 if (pos < tokens.size() && tokens[pos] == ")") ++pos;
-                cte.query = parseSelect(subq).stmt;
+                if (bindingParse) {
+                    subq = joinParserTokens(tokens, childBegin, childEnd);
+                    auto child = parse(subq);
+                    if (!child.isValid()) {
+                        r.error = child.error.empty() ? "invalid WITH query" : child.error;
+                        return r;
+                    }
+                    cte.query = std::move(child.stmt);
+                } else cte.query = parseSelect(subq).stmt;
             }
+            if (bindingParse && !cte.query) { r.error = "WITH requires AS (query)"; return r; }
             stmt->ctes.push_back(std::move(cte));
             if (pos < tokens.size() && tokens[pos] == ",") {
                 ++pos;
@@ -2916,7 +3024,7 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
     // Skip SELECT
     if (pos < tokens.size() && toLower(tokens[pos]) == "select") {
         ++pos;
-    }
+    } else if (bindingParse) { r.error = "WITH requires a SELECT body"; return r; }
 
     // DISTINCT / DISTINCT ON (...)
     if (pos < tokens.size() && toLower(tokens[pos]) == "distinct") {
@@ -2946,11 +3054,17 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
             || toLower(tokens[pos]) == "for" || toLower(tokens[pos]) == "fetch") {
             break;
         }
-        stmt->selectList.push_back(parseSelectItem(tokens, pos));
+        auto item = parseSelectItem(tokens, pos);
+        if (bindingParse && !item.expr) { r.error = "SELECT requires an expression"; return r; }
+        stmt->selectList.push_back(std::move(item));
         if (pos < tokens.size() && tokens[pos] == ",") {
             ++pos;
             continue;
         }
+        if (bindingParse) break;
+    }
+    if (bindingParse && (stmt->selectList.empty() || (pos && tokens[pos - 1] == ","))) {
+        r.error = "SELECT requires an expression"; return r;
     }
 
     // FROM (supports comma join and explicit JOINs)
@@ -3024,6 +3138,7 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
     if (pos < tokens.size() && toLower(tokens[pos]) == "where") {
         ++pos;
         stmt->whereClause = parseSimpleExpr(tokens, pos);
+        if (bindingParse && !stmt->whereClause) { r.error = "WHERE requires an expression"; return r; }
     }
 
     // GROUP BY (with ROLLUP / CUBE / GROUPING SETS support)
@@ -3095,6 +3210,7 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
     if (pos < tokens.size() && toLower(tokens[pos]) == "having") {
         ++pos;
         stmt->having = parseSimpleExpr(tokens, pos);
+        if (bindingParse && !stmt->having) { r.error = "HAVING requires an expression"; return r; }
     }
 
     // ORDER BY
@@ -3107,6 +3223,7 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
                 || w == "intersect" || w == "except" || w == "for" || w == "fetch"
                 || w == ";") break;
             auto expr = parseSimpleExpr(tokens, pos);
+            if (bindingParse && !expr) { r.error = "ORDER BY requires an expression"; return r; }
             bool asc = true;
             if (pos < tokens.size() && toLower(tokens[pos]) == "asc") { asc = true; ++pos; }
             else if (pos < tokens.size() && toLower(tokens[pos]) == "desc") { asc = false; ++pos; }
@@ -3120,6 +3237,10 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
                 }
             }
             if (pos < tokens.size() && tokens[pos] == ",") { ++pos; continue; }
+            if (bindingParse) break;
+        }
+        if (bindingParse && (stmt->orderBy.empty() || (pos && tokens[pos - 1] == ","))) {
+            r.error = "ORDER BY requires an expression"; return r;
         }
     }
 
@@ -3246,6 +3367,14 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
         stmt->locking.push_back(std::move(lc));
     }
 
+    if (bindingParse) {
+        while (pos < tokens.size() && tokens[pos] == ";") ++pos;
+        if (pos != tokens.size()) {
+            r.error = "unexpected token in SELECT statement: " + tokens[pos];
+            return r;
+        }
+    }
+
     r.success = true;
     r.stmt = std::move(stmt);
     return r;
@@ -3355,7 +3484,8 @@ ParseResult SQLParser::parseInsert(const std::string& sql) {
             if (!selectSql.empty()) selectSql += " ";
             selectSql += tokens[i];
         }
-        ParseResult source = parseSelect(selectSql);
+        if (bindingParse) selectSql = joinParserTokens(tokens, pos, returningPos);
+        ParseResult source = bindingParse ? parse(selectSql) : parseSelect(selectSql);
         if (!source.success || !source.stmt) {
             r.error = source.error.empty() ? "invalid INSERT SELECT source" : source.error;
             return r;
@@ -5161,7 +5291,10 @@ ParseResult SQLParser::parseExplain(const std::string& sql) {
         innerSql += tokens[i];
     }
     if (!innerSql.empty()) {
-        stmt->query = parse(innerSql).stmt;
+        if (bindingParse) innerSql = joinParserTokens(tokens, pos, tokens.size());
+        auto inner = parse(innerSql);
+        if (bindingParse && !inner.isValid()) { r.error = inner.error; return r; }
+        stmt->query = std::move(inner.stmt);
     }
 
     r.success = true;
@@ -5762,6 +5895,7 @@ ParseResult SQLParser::parseImportForeignSchema(const std::string&) {
 // 从当前位置解析到匹配的 ')'，返回包含在内的 token 列表（不含外层括号）
 static std::vector<std::string> collectParenthesized(const std::vector<std::string>& tokens, size_t& pos) {
     std::vector<std::string> inner;
+    const size_t begin = pos + 1;
     if (pos < tokens.size() && tokens[pos] == "(") {
         ++pos; // skip '('
         int depth = 1;
@@ -5770,6 +5904,15 @@ static std::vector<std::string> collectParenthesized(const std::vector<std::stri
             else if (tokens[pos] == ")") --depth;
             if (depth > 0) inner.push_back(tokens[pos]);
             ++pos;
+        }
+    }
+    if (bindingParse && !inner.empty()) {
+        const auto found = bindingParse->tokens.find(tokens.data());
+        if (found != bindingParse->tokens.end() && begin + inner.size() <= found->second.spans.size()) {
+            TokenProvenance child;
+            child.spans.assign(found->second.spans.begin() + begin,
+                               found->second.spans.begin() + begin + inner.size());
+            bindingParse->tokens[inner.data()] = std::move(child);
         }
     }
     return inner;
@@ -6036,7 +6179,10 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
     }
 
     // CREATE TABLE ... AS SELECT ...
-    if (pos + 1 < tokens.size() && toLower(tokens[pos]) == "as" && toLower(tokens[pos + 1]) == "select") {
+    if (pos + 1 < tokens.size() && toLower(tokens[pos]) == "as" &&
+        (toLower(tokens[pos + 1]) == "select" ||
+         (bindingParse && toLower(tokens[pos + 1]) == "with"))) {
+        const size_t queryBegin = pos + 1;
         pos += 2;
         std::vector<std::string> sel;
         while (pos < tokens.size() && tokens[pos] != ";") {
@@ -6056,6 +6202,15 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
         std::string selectSql = "SELECT";
         for (const auto& t : sel) selectSql += " " + t;
         stmt->asSelect = selectSql;
+        if (bindingParse) {
+            const size_t queryEnd = queryBegin + 1 + sel.size();
+            selectSql = joinParserTokens(tokens, queryBegin, queryEnd);
+            SQLParser parser;
+            auto parsed = parser.parse(selectSql);
+            if (!parsed.isValid()) return nullptr;
+            stmt->asSelect = selectSql;
+            stmt->preparedAsQuery = std::move(parsed.stmt);
+        }
         return stmt;
     }
 
