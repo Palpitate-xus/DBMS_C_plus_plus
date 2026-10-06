@@ -32878,35 +32878,36 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     }
 
     if (expr.funcName == "arith") {
-        bool hasOperandCast = false;
+        // Ordinary column arithmetic needs the same typed AST path as casts,
+        // constraints and JOIN predicates. A double/string accumulator loses
+        // integer width, REAL rounding, SQL NULL and arithmetic error states.
+        std::map<std::string, std::string> values;
+        std::map<std::string, std::string> types;
+        std::set<std::string> nulls;
+        for (size_t column = 0; column < tbl.len; ++column) {
+            bool isNull = false;
+            const auto value = engine && !dbname.empty()
+                ? engine->extractColumnValue(rowBuffer, tbl, column, dbname, true, &isNull)
+                : StorageEngine::extractColumnValueStatic(rowBuffer, tbl, column);
+            const auto& name = tbl.cols[column].dataName;
+            values[name] = value;
+            types[name] = tbl.cols[column].dataType +
+                (tbl.cols[column].isArray ? "[]" : "");
+            if (isNull || (!engine && value.empty())) nulls.insert(name);
+        }
+        std::string expression;
         for (const auto& argument : expr.funcArgs) {
-            SQLParser parser;
-            const auto parsed = parser.parse("SELECT " + argument);
-            const auto* select = parsed.success
-                ? dynamic_cast<const SelectStmt*>(parsed.stmt.get()) : nullptr;
-            if (!select || select->selectList.size() != 1) continue;
-            const auto* operand = select->selectList.front().expr.get();
-            const auto* binary = dynamic_cast<const BinaryOpExpr*>(operand);
-            if (dynamic_cast<const CastExpr*>(operand) ||
-                (binary && binary->op == "::")) {
-                hasOperandCast = true;
-                break;
-            }
+            if (!expression.empty()) expression += ' ';
+            expression += argument;
         }
-        if (hasOperandCast) {
-            // Integer-shaped cast results do not make numeric arithmetic
-            // integer arithmetic. Keep the actual cast type and let the
-            // typed evaluator choose division/coercion before any shortcut.
-            StorageEngine::SelectExpr typed = expr;
-            typed.funcName = "expreval";
-            std::string expression;
-            for (const auto& argument : expr.funcArgs) {
-                if (!expression.empty()) expression += ' ';
-                expression += argument;
-            }
-            typed.funcArgs = {std::move(expression)};
-            return applyScalarFunc(typed, rowBuffer, tbl, engine, dbname, knownNull);
+        const auto result = ExprHelper::evalStringWithNulls(
+            expression, values, nulls, types, dbname, expr.sessionUser, engine);
+        if (!result.ok) {
+            const auto error = plpgsqlScalarResult(result);
+            throw DbError(error.sqlState, error.message);
         }
+        if (knownNull) *knownNull = result.isNull;
+        return result.isNull ? "NULL" : result.value;
     }
 
     if (expr.funcName == "arith" && expr.funcArgs.size() == 3) {

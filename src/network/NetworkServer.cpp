@@ -1740,7 +1740,8 @@ bool describePreparedResult(const std::string& sql, Session& session,
         const std::string inferredType =
             literal && !literal->typeName.empty()
                 ? ExprHelper::canonicalResultTypeName(literal->typeName)
-                : ExprHelper::inferResultType(expression, typeHints);
+                : ExprHelper::inferResultType(expression, typeHints,
+                                            session.currentDB, &g_engine);
         shape.columnTypes.push_back(inferredType);
         std::string outputName = item.alias.empty() ? std::string{} : outputAlias(item.alias);
         if (outputName.empty() && virtualPgClass) {

@@ -33672,7 +33672,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     for (size_t i = 0; i < rawTargets.size(); ++i) {
                         metadata.columns.push_back(selectExprs[i].displayName);
                         string resultType = dbms::ExprHelper::inferResultType(
-                            withoutAlias(rawTargets[i]), typeHints);
+                            withoutAlias(rawTargets[i]), typeHints, s.currentDB,
+                            &g_engine);
                         if (selectExprs[i].isScalar &&
                             !selectExprs[i].funcName.empty()) {
                             const auto udf = g_engine.getUDF(
