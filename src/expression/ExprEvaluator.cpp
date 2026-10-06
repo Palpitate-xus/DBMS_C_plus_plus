@@ -1478,8 +1478,7 @@ ExprValue ExprEvaluator::evalUnaryOp(const UnaryOpExpr* e, const RowContext& ctx
             const auto money = tryParseMoney(v.value);
             if (!money || money->minorUnits() ==
                               std::numeric_limits<int64_t>::min()) {
-                throw std::runtime_error(
-                    "money out of range (SQLSTATE 22003)");
+                throw DbError("22003", "money out of range");
             }
             return ExprValue(
                 "money", Money(-money->minorUnits()).format(
@@ -1489,8 +1488,7 @@ ExprValue ExprEvaluator::evalUnaryOp(const UnaryOpExpr* e, const RowContext& ctx
             long long integer = 0;
             if (!parseInt64Exact(v.value, integer) ||
                 integer == std::numeric_limits<int64_t>::lowest()) {
-                throw std::runtime_error(
-                    "integer out of range (SQLSTATE 22003)");
+                throw DbError("22003", "integer out of range");
             }
             const std::string type = toLower(v.typeName);
             const bool narrowOverflow = (type == "smallint" || type == "int2")
@@ -1500,7 +1498,7 @@ ExprValue ExprEvaluator::evalUnaryOp(const UnaryOpExpr* e, const RowContext& ctx
                     (-integer < std::numeric_limits<int32_t>::lowest() ||
                      -integer > std::numeric_limits<int32_t>::max());
             if (narrowOverflow)
-                throw std::runtime_error("integer out of range (SQLSTATE 22003)");
+                throw DbError("22003", "integer out of range");
             return ExprValue(v.typeName, std::to_string(-integer), false);
         }
         if (isNumericTypeName(v.typeName)) {

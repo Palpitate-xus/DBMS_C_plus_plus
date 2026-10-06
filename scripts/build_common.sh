@@ -52,6 +52,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/join_collation_role_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/join_extract_field_role_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/integer_arithmetic_width_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/unary_overflow_sqlstate_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/floating_arithmetic_width_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/arithmetic_result_type_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/expression_quoted_row_binding_protocol_e2e_test.py)
