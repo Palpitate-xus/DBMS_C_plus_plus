@@ -2,6 +2,21 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Actual sequence-label-view85/42 terminal gates expose FROM-less projection demand",
+      "gap_ids": ["SQL-04", "SQL-07", "QRY-01", "QRY-03", "TXN-01"],
+      "status": "partial",
+      "commits": ["0ffe1798", "ade264ad", "a5102a58", "eb131e68", "a2a8291b", "fa193704"],
+      "evidence": ["docs/issue-ready-source-integration.md"],
+      "tests": ["tests/plpgsql_query_destination_protocol_e2e_test.py", "tests/postgres_protocol_test.py"],
+      "verification": {
+        "reproduction": "Exact original PL destination strict180006 passes0; instrumented original eight cases shows next currval1 both, next_empty PG1 vsROOT2. Actual WHEREfalse still evaluates volatile projection, not fixture error. New OFFSET draft contradicted by reference retained; real PG skipped projection does execute.",
+        "fix": "Independent FROM-less typed execution-demand repair in private worktree in progress, original assertion retained. Two private ordinary source-context/CASE commits READY not yetROOT integrated. No production correction or fullfamily claim for this newly observed failure.",
+        "focused_tests": "ImmutableROOTfa frozenf7ad6b4a39fbd7dd6c1974f27e2c8fb756b511bd1175569a7fa0f0c773ff8ffa: actual85 freshnative62258 pass0; complete42wire83830 terminal1=40pass2fail PLdestination andoriginalfullQuant2444. Exact logs retained; source/header/test/registryfreeze ended onlyafterbothterminal.",
+        "full_suite": "Current559native291registered58; focused85/42 is notallregistered. Originalfull540/275 andboth465 differential failures retained ontheir exactolderrevisions, not relabelledcurrentmaster.",
+        "scope": "273requirements remain22complete166partial70unverified15deferred. Quant/NAME/INTERVAL andMVreadonly/errorpriority continue. No push, Actions remain disabled, deferredsecurityTDE notresumed."
+      }
+    },
+    {
       "issue": "CASE69 native passes and34-wire33/1 terminal failure; six independent sequence-label-view integrations and matching85/42 gates",
       "gap_ids": ["SQL-04", "SQL-07", "SQL-08", "DML-01", "DML-03", "QRY-01", "QRY-03", "TXN-01"],
       "status": "partial",

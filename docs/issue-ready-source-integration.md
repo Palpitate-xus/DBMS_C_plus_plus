@@ -1,5 +1,37 @@
 # Independent source integrations after canonical 75090
 
+## Actual sequence/label/view gate terminal and newly exposed demand bug
+
+ROOT source `fa193704`, documentation checkpoint `dfee8662`, normal optimized
+binary `f7ad6b4a39fbd7dd6c1974f27e2c8fb756b511bd1175569a7fa0f0c773ff8ffa`:
+all85 fresh native entries in handle62258 passed, actual terminal0. The
+complete42 wire entries in handle83830 finished with40pass/2fail, terminal1.
+The unchanged failures are `plpgsql_query_destination_protocol_e2e_test.py`
+and the original full `postgres_protocol_test.py` at Quantified EXPLAIN2444.
+Logs remain under `/tmp/dbms-sequence-label-integration.NQDV0FHY`.
+This is a focused combination, not the entire559/291 registered suite.
+
+The original destination script independently passed on actual PostgreSQL
+18.6, strict180006. Observing its exact original eight cases shows both
+servers at sequence1 after `destination_next`, but the WHERE-false
+`destination_next_empty` leaves PostgreSQL at1 and ROOT at2. The old
+FROM-less dispatcher suppressed the outgoing row but still evaluated its
+volatile projection. Correct nontransactional sequence generations exposed
+this previously masked execution-demand bug. A dedicated repair preserves
+the original assertion; no counter reset or weaker expectation is used.
+Artifacts are `/tmp/dbms-pl-destination-demand.mSZvTtPA`, including the
+original-script instrumented baseline/reference logs. Initial new OFFSET
+draft expectations were contradicted by the strict reference: PostgreSQL
+does evaluate this skipped FROM-less projection; those draft logs are
+retained, and the permanent controls use the verified behavior.
+
+The production/header/test/registry freeze ended only after both actual
+terminal results. Source-context `1e6693ab` and ordinary CASE activation
+`faca8954` are independently committed private READY work, not yet ROOT
+integration evidence. Public source-context/layout changes require a new
+fresh full58 ROOT build. Quantified/NAME/INTERVAL, MV read-only/error priority,
+strong ELSE labels and the remaining273-item ledger are still open.
+
 ## Latest ROOT checkpoint: typed ARRAY, sources and row images
 
 ### Actual terminal results and eight next independent integrations
