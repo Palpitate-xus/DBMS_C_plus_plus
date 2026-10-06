@@ -44,9 +44,21 @@ int main() {
         {"CAST('2026-10-06 00:00:00' AS TEXT) AT TIME ZONE tz", "42883"},
         {stamp + " AT TIME ZONE INTERVAL '1 day'", "22023"}
     }) {
-        const auto result = dbms::ExprHelper::evalString(item.first, {});
+        // These are type/error controls with a declared text zone, not tests
+        // of an unresolved column. PostgreSQL rejects a missing tz first.
+        const auto result = dbms::ExprHelper::evalStringWithNulls(
+            item.first, {{"tz", "UTC"}}, {}, {{"tz", "text"}});
         if (result.ok || result.error.find("SQLSTATE " + item.second) == std::string::npos) {
             std::cerr << item.first << " expected " << item.second << " got " << result.error << '\n';
+            ++failures;
+        }
+    }
+    for (const std::string expression : {
+             "CAST(NULL AS INT) AT TIME ZONE tz",
+             "CAST('2026-10-06 00:00:00' AS TEXT) AT TIME ZONE tz"}) {
+        const auto result = dbms::ExprHelper::evalString(expression, {});
+        if (result.ok || result.error.find("SQLSTATE 42703") == std::string::npos) {
+            std::cerr << expression << " expected missing-column 42703 got " << result.error << '\n';
             ++failures;
         }
     }
