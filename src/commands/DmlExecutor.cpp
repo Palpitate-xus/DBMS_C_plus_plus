@@ -4865,7 +4865,7 @@ bool tryDmlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         std::cout << "SQL syntax error: "
                   << (parsed.error.empty() ? std::string("invalid ") + statementName + " statement"
                                             : parsed.error)
-                  << std::endl;
+                  << " (SQLSTATE 42601)" << std::endl;
         return true;
     }
 

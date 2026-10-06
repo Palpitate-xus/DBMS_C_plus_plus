@@ -3438,6 +3438,10 @@ ParseResult SQLParser::parseUpdate(const std::string& sql) {
     if (pos < tokens.size() && toLower(tokens[pos]) == "from") {
         ++pos;
         stmt->fromClause = parseFromItem(tokens, pos);
+        if (!stmt->fromClause) {
+            r.error = "UPDATE FROM requires a valid relation or JOIN";
+            return r;
+        }
     }
 
     // WHERE
@@ -3525,6 +3529,10 @@ ParseResult SQLParser::parseDelete(const std::string& sql) {
     if (pos < tokens.size() && toLower(tokens[pos]) == "using") {
         ++pos;
         stmt->usingClause = parseFromItem(tokens, pos);
+        if (!stmt->usingClause) {
+            r.error = "DELETE USING requires a valid relation or JOIN";
+            return r;
+        }
     }
 
     // WHERE

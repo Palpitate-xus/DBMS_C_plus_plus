@@ -32,6 +32,26 @@ def main():
             _, state, message, _, _, _ = query(sql)
             assert state is None, (sql, state, message)
 
+        # A FROM/USING keyword with no valid source must never disappear
+        # from the AST and turn a malformed statement into target-only DML.
+        for malformed_sql in (
+                "UPDATE source_dml_target SET val = id + 100 FROM;",
+                "UPDATE source_dml_target SET val = id + 100 "
+                "FROM source_dml_source JOIN;",
+                "DELETE FROM source_dml_target USING;",
+                "DELETE FROM source_dml_target "
+                "USING source_dml_source LEFT JOIN;"):
+            _, state, message, _, command_tag, _ = query(malformed_sql)
+            assert state == "42601", (malformed_sql, state, message)
+            assert command_tag is None, (malformed_sql, command_tag)
+            rows, state, message, headers, command_tag, type_oids = query(
+                "SELECT id, val FROM source_dml_target ORDER BY id;")
+            assert state is None, (state, message)
+            assert rows == [["1", "10"], ["2", "20"], ["3", "30"]], rows
+            assert headers == ["id", "val"] and type_oids == [23, 23], (
+                headers, type_oids)
+            assert command_tag == "SELECT 3", command_tag
+
         rows, state, message, headers, command_tag, type_oids = query(
             "UPDATE source_dml_target AS dst SET val = src.val "
             "FROM source_dml_source AS src WHERE dst.id = src.id "
