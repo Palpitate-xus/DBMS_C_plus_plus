@@ -133,4 +133,7 @@ two-row CTE crossed with itself returns `(1,1),(1,1),(2,2),(2,2)` instead of
 Neither bug is closed by the four commits in this record. Duplicate-name
 analysis must precede writing CTE execution; self joins require independent
 range identities rather than storage-table names as shared result keys.
+Duplicate-name preflight is now addressed separately by `b6856ad4`; see
+`issue-cte-duplicate-name-preflight.md` for actual native/protocol verification.
+The multirow self-join defect remains open.
 The installed PostgreSQL reference is 17.2, not an 18.6 runtime oracle.

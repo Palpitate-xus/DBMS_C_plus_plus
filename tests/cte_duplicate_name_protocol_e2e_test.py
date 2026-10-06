@@ -18,17 +18,17 @@ def main():
         messages = client.simple_query(sock, sql)
         return runner.decode_wire_result(messages, include_types=True), messages
 
-    def invalid(sql, parse_only, ready):
+    def invalid(sql, parse_only, ready, state="42712"):
         if parse_only:
             sock.sendall(client.typed(b"P", b"\0" + sql.encode() + b"\0\0\0") + client.typed(b"H", b""))
             kind, payload = client.read_message(sock)
             assert kind == b"E", (sql, kind, payload)
-            assert client.diagnostic_fields(payload).get(b"C") == b"42712", (sql, payload)
+            assert client.diagnostic_fields(payload).get(b"C") == state.encode(), (sql, payload)
             sock.sendall(client.typed(b"S", b""))
             assert client.read_until_ready(sock) == [(b"Z", ready)], sql
         else:
             result, messages = query(sql)
-            assert result[1] == "42712" and result[0] == [] and result[4] is None, (sql, result)
+            assert result[1] == state and result[0] == [] and result[4] is None, (sql, result)
             assert not any(kind in (b"C", b"D") for kind, _ in messages), (sql, messages)
             assert messages[-1] == (b"Z", ready), (sql, messages[-1])
 
@@ -57,6 +57,7 @@ def main():
             assert query("BEGIN;")[1][-1] == (b"Z", b"T")
             assert query("INSERT INTO duplicate_cte_rows VALUES(7);")[0][1] is None
             invalid(bad[6], parse_only, b"E")
+            invalid(bad[6], parse_only, b"E", "25P02")
             assert query("SELECT 1;")[0][1] == "25P02"
             assert query("ROLLBACK;")[1][-1] == (b"Z", b"I")
             assert query("SELECT id FROM duplicate_cte_rows;")[0][0] == []
