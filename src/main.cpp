@@ -1865,6 +1865,7 @@ static bool executeValuesStatement(const string& sql, const Session& session) {
 bool checkAdmin(const Session& s);
 bool checkDB(const Session& s);
 bool execute(const std::string& rawSql, Session& s);
+static bool executeQueryChild(const std::string& rawSql, Session& s);
 string resolveTableName(Session& s, const string& name);
 string resolveTableName(Session& s, const string& name, bool foldUnquoted);
 static bool checkTablePermission(Session& s, const string& tname,
@@ -5955,13 +5956,14 @@ struct QueryCteFrame {
     const Session* session;
     string database;
     map<string, string> relations;
+    bool inheritPrevious;
 };
 static thread_local vector<QueryCteFrame> queryCteFrames;
 
 class QueryCteScope {
 public:
-    explicit QueryCteScope(const Session& session) {
-        queryCteFrames.push_back({&session, session.currentDB, {}});
+    explicit QueryCteScope(const Session& session, bool inheritPrevious = true) {
+        queryCteFrames.push_back({&session, session.currentDB, {}, inheritPrevious});
     }
     ~QueryCteScope() { queryCteFrames.pop_back(); }
     QueryCteScope(const QueryCteScope&) = delete;
@@ -5996,6 +5998,7 @@ string resolveTableName(Session& s, const string& name, bool foldUnquoted) {
             if (frame->session != &s || frame->database != s.currentDB) continue;
             const auto found = frame->relations.find(qualified.name);
             if (found != frame->relations.end()) return temporaryPhysicalName(found->second);
+            if (!frame->inheritPrevious) break;
         }
     }
     if (!qualified.schema.empty()) {
@@ -6666,7 +6669,7 @@ static bool captureSetOperand(const string& sql, Session& s,
     {
         dbms::ScopedOutputCapture capture(captured);
         try {
-            failed = execute(operandSql, s);
+            failed = executeQueryChild(operandSql, s);
         } catch (const dbms::DbError& e) {
             failed = true;
             captured << "ERROR: " << e.message() << " (SQLSTATE "
@@ -12395,7 +12398,8 @@ static std::vector<std::string> runDerivedSubQueryFull(
     std::vector<std::vector<bool>>* outStructuredNulls = nullptr,
     bool* outStructuredAvailable = nullptr,
     bool* outExecutionFailed = nullptr,
-    std::string* outFailureText = nullptr) {
+    std::string* outFailureText = nullptr,
+    bool inheritCtes = true) {
     outColNames.clear();
     if (outColTypes) outColTypes->clear();
     if (outStructuredRows) outStructuredRows->clear();
@@ -12411,7 +12415,7 @@ static std::vector<std::string> runDerivedSubQueryFull(
     {
         dbms::ScopedOutputCapture cap(captured);
         try {
-            failed = execute(rawSql, s);
+            failed = inheritCtes ? executeQueryChild(rawSql, s) : execute(rawSql, s);
         } catch (...) {
             metadataCaptureDepth = previousCaptureDepth;
             throw;
@@ -19097,7 +19101,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             metadataCaptureDepth = executeDepth + 1;
             dbms::clearLastDmlResult();
             try {
-                const bool failed = execute(unwrappedQuery, s);
+                const bool failed = executeQueryChild(unwrappedQuery, s);
                 metadataCaptureDepth = previousCaptureDepth;
                 return failed;
             } catch (...) {
@@ -23812,7 +23816,6 @@ static bool executeInternal(const string& rawSql, Session& s) {
 
     if (sql.substr(0, 6) == "select" || sql.substr(0, 5) == "with ") {
         if (!checkDB(s)) return true;
-        QueryCteScope cteScope(s);
 
         // A nested SELECT may consume CTE/derived tables owned by its parent.
         // Only discard transient relations created by this invocation; clearing
@@ -28796,48 +28799,57 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     string expandedSql = viewSql;
                     size_t btPos = expandedSql.find("\nBASE_TABLE:");
                     if (btPos != string::npos) expandedSql = expandedSql.substr(0, btPos);
-                    // View expansion: replace view reference with derived table
-                    // Replace FROM viewname with FROM (view_sql) AS __view_name
-                    string expanded = effectiveRawSql;
-                    // Case-insensitive FROM match: queries commonly spell
-                    // FROM in upper case, which the literal lowercase pattern
-                    // silently missed; the view then fell through to the
-                    // standalone-execution fallback and lost the outer
-                    // projection (columns after the first went missing).
-                    string lowerRaw = toLower(effectiveRawSql);
-                    string pattern = "from " + toLower(tnameOrig);
-                    // Join views: derived-table expansion cannot yet resolve
-                    // qualified projection columns from the inner join
-                    // ("SELECT bid" vs subquery output "jb.bid"), and the
-                    // standalone-execution fallback handles them correctly.
-                    // Keep expansion for single-table views only.
-                    if (lowerRaw.find(" join ") != std::string::npos ||
-                        expandedSql.find(" join ") != std::string::npos) {
-                        pattern.clear();
+                    // A stored view is not a lexical child of its caller.
+                    // Execute its body independently, then apply the caller's
+                    // projection/filter to the typed result. Re-expanding raw
+                    // WITH SQL would both leak CTE names and repeat DML CTEs.
+                    vector<string> viewColumns, viewTypes;
+                    vector<vector<string>> viewRows;
+                    vector<vector<bool>> viewNulls;
+                    bool structured = false, viewFailed = false;
+                    string viewFailure;
+                    auto displayRows = runDerivedSubQueryFull(
+                        expandedSql, s, viewColumns, &viewTypes, &viewRows,
+                        &viewNulls, &structured, &viewFailed, &viewFailure, false);
+                    if (viewFailed) {
+                        reportNestedQueryFailure(viewFailure);
+                        return true;
                     }
-                    size_t fp = pattern.empty() ? std::string::npos : lowerRaw.find(pattern);
-                    if (fp != string::npos) {
-                        const string internalAlias =
-                            "__view_expanded_" + std::to_string(executeDepth);
-                        string subq = "from (" + expandedSql + ") as " +
-                            internalAlias;
-                        expanded = expanded.substr(0, fp) + subq + expanded.substr(fp + pattern.size());
-                        const unsigned previousCaptureDepth = metadataCaptureDepth;
-                        metadataCaptureDepth = executeDepth + 1;
-                        try {
-                            const bool failed = execute(expanded, s);
-                            metadataCaptureDepth = previousCaptureDepth;
-                            return failed;
-                        } catch (...) {
-                            metadataCaptureDepth = previousCaptureDepth;
-                            throw;
+                    if (viewColumns.empty())
+                        throw dbms::DbError("0A000", "view query has no result columns");
+                    int viewCounter = 0;
+                    const string materialized = createTempTableFromRows(
+                        s, displayRows, viewColumns, viewCounter, viewTypes,
+                        structured ? &viewRows : nullptr,
+                        structured ? &viewNulls : nullptr);
+                    if (materialized.empty())
+                        throw dbms::DbError("XX000", "could not materialize view query");
+                    string visibleAlias = tableAlias;
+                    if (visibleAlias.empty()) {
+                        dbms::CatalogManager::QualifiedName name;
+                        if (!dbms::CatalogManager::parseQualifiedName(tnameOrig, name, true))
+                            throw dbms::DbError("42601", "invalid view identifier");
+                        visibleAlias = name.name;
+                        const bool simple = !visibleAlias.empty() &&
+                            visibleAlias.find_first_not_of(
+                                "abcdefghijklmnopqrstuvwxyz0123456789_$") == string::npos &&
+                            (visibleAlias.front() == '_' ||
+                             (visibleAlias.front() >= 'a' && visibleAlias.front() <= 'z'));
+                        if (!simple) {
+                            visibleAlias = "\"";
+                            for (char ch : name.name) {
+                                if (ch == '"') visibleAlias += '"';
+                                visibleAlias += ch;
+                            }
+                            visibleAlias += '"';
                         }
                     }
-                    // Fallback: execute view standalone
+                    const string expanded = sql.substr(0, fromPos + 4) + " " +
+                        materialized + " as " + visibleAlias + " " + sql.substr(tnameEnd);
                     const unsigned previousCaptureDepth = metadataCaptureDepth;
                     metadataCaptureDepth = executeDepth + 1;
                     try {
-                        const bool failed = execute(expandedSql, s);
+                        const bool failed = executeQueryChild(expanded, s);
                         metadataCaptureDepth = previousCaptureDepth;
                         return failed;
                     } catch (...) {
@@ -34939,13 +34951,18 @@ bool managesNotificationTransaction(const std::string& sql) {
 // storage engine's undo log and row locks are transaction-scoped, so give
 // each top-level DML or locking SELECT statement an internal transaction.
 // Recursive execution stays inside the same boundary.
-bool execute(const std::string& inputSql, Session& s) {
+static bool executeWithCteInheritance(const std::string& inputSql, Session& s,
+                                     bool inheritCtes) {
     const size_t commandOffset = dbms::skipLeadingSqlTrivia(inputSql);
     if (commandOffset == std::string::npos) {
         throw dbms::DbError("42601", "unterminated block comment");
     }
     const std::string rawSql = inputSql.substr(commandOffset);
     if (rawSql.empty()) return false;
+    // Stored view/function/procedure/prepared SQL starts an independent
+    // namespace. Only explicitly identified lexical query children inherit
+    // the parent's CTE bindings, including set-operation operands and CTE bodies.
+    QueryCteScope cteScope(s, inheritCtes);
     // This scope includes statement commit/rollback and exceptions, not just
     // executeInternal's DDL dispatch. Recursive SQL inherits an outer writer
     // scope or registers its own, so an inner command cannot reenable cache
@@ -35085,6 +35102,14 @@ bool execute(const std::string& inputSql, Session& s) {
 // ========================================================================
 // Main
 // ========================================================================
+bool execute(const std::string& inputSql, Session& s) {
+    return executeWithCteInheritance(inputSql, s, false);
+}
+
+static bool executeQueryChild(const std::string& inputSql, Session& s) {
+    return executeWithCteInheritance(inputSql, s, true);
+}
+
 int main(int argc, char* argv[]) {
     // Set locale for Unicode support
     std::setlocale(LC_CTYPE, "");
