@@ -2223,6 +2223,11 @@ static ExprValue evaluateNumericPowerOperator(const ExprValue& left,
     }
 }
 
+static float parseRealCastValue(const ExprValue& value);
+static double parseDoubleCastValue(const ExprValue& value);
+template <typename Floating>
+static std::string formatFloatingCastValue(Floating value);
+
 ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
                                          const ExprValue& l,
                                          const ExprValue& r) {
@@ -2239,7 +2244,34 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
     const auto integerType = [](int width) {
         return width == 1 ? "smallint" : width == 3 ? "bigint" : "integer";
     };
+    const auto floatingWidth = [](const std::string& type) {
+        const std::string name = toLower(type);
+        if (name == "real" || name == "float4" || name == "float") return 1;
+        if (name == "double precision" || name == "float8" || name == "double") return 2;
+        return 0;
+    };
+    const auto unknownFloatingOperand = [](const std::string& type) {
+        const std::string name = toLower(type);
+        return name.empty() || name == "unknown" || name == "character varying";
+    };
+    const auto numericFloatingOperand = [&](const std::string& type) {
+        const std::string name = toLower(type);
+        return floatingWidth(type) || integerWidth(type) ||
+            name == "numeric" || name == "decimal" || unknownFloatingOperand(type);
+    };
+    const int leftFloatingWidth = floatingWidth(l.typeName);
+    const int rightFloatingWidth = floatingWidth(r.typeName);
+    const bool floatingOperands = (leftFloatingWidth || rightFloatingWidth) &&
+        numericFloatingOperand(l.typeName) && numericFloatingOperand(r.typeName);
+    const bool singlePrecision = floatingOperands && op != "^" &&
+        (leftFloatingWidth == 1 || unknownFloatingOperand(l.typeName)) &&
+        (rightFloatingWidth == 1 || unknownFloatingOperand(r.typeName));
+    if ((leftFloatingWidth || rightFloatingWidth) && op == "%")
+        throw std::runtime_error("operator does not exist for floating operands (SQLSTATE 42883)");
     if (l.isNull || r.isNull) {
+        if (floatingOperands &&
+            (op == "+" || op == "-" || op == "*" || op == "/" || op == "^"))
+            return ExprValue(singlePrecision ? "real" : "double precision", "", true);
         const bool unknownLeft = l.typeName.empty() || toLower(l.typeName) == "unknown";
         const bool unknownRight = r.typeName.empty() || toLower(r.typeName) == "unknown";
         if ((op == "+" || op == "-" || op == "*" || op == "/" || op == "%") &&
@@ -2456,7 +2488,7 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
     auto isFloatingTyped = [](const std::string& type) {
         const std::string lowered = toLower(type);
         return lowered == "double precision" || lowered == "float" ||
-               lowered == "float8" || lowered == "real" ||
+               lowered == "double" || lowered == "float8" || lowered == "real" ||
                lowered == "float4";
     };
     const bool floatingPower =
@@ -2535,6 +2567,40 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
         throw std::runtime_error(
             "operator does not exist for money operands (SQLSTATE 42883)");
     }
+    if ((leftFloatingWidth || rightFloatingWidth) &&
+        (op == "+" || op == "-" || op == "*" || op == "/")) {
+        if (!floatingOperands)
+            throw std::runtime_error("operator does not exist for floating operands (SQLSTATE 42883)");
+        // REAL+REAL uses float4. Mixed REAL with integer/numeric selects
+        // float8, but first restore each REAL's binary float4 datum before
+        // widening; its shortest decimal text is not the same double value.
+        const auto applyFloating = [&](auto a, auto b) -> ExprValue {
+            using Floating = decltype(a);
+            Floating result = 0;
+            if (op == "+") result = a + b;
+            else if (op == "-") result = a - b;
+            else if (op == "*") result = a * b;
+            else {
+                if (b == 0)
+                    throw std::runtime_error("division by zero (SQLSTATE 22012)");
+                result = a / b;
+            }
+            if ((std::isinf(result) && std::isfinite(a) && std::isfinite(b)) ||
+                ((op == "*" || op == "/") && result == 0 && a != 0 && b != 0 &&
+                 std::isfinite(a) && std::isfinite(b)))
+                throw std::runtime_error("floating value out of range (SQLSTATE 22003)");
+            return ExprValue(singlePrecision ? "real" : "double precision",
+                             formatFloatingCastValue(result), false);
+        };
+        if (singlePrecision)
+            return applyFloating(parseRealCastValue(l), parseRealCastValue(r));
+        const auto doubleOperand = [&](const ExprValue& value) {
+            return floatingWidth(value.typeName) == 1
+                ? static_cast<double>(parseRealCastValue(value))
+                : parseDoubleCastValue(value);
+        };
+        return applyFloating(doubleOperand(l), doubleOperand(r));
+    }
     if ((isDecimalTyped(l.typeName) || isDecimalTyped(r.typeName)) &&
         !floatingPower) {
         auto nl = tryParseNumeric(l.value);
@@ -2590,8 +2656,7 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
 
     bool floatResult = l.value.find('.') != std::string::npos ||
                        r.value.find('.') != std::string::npos ||
-                       toLower(l.typeName) == "double precision" ||
-                       toLower(l.typeName) == "real" ||
+                       isFloatingTyped(l.typeName) || isFloatingTyped(r.typeName) ||
                        toLower(l.typeName) == "numeric" || op == "^";
 
     // A bare decimal literal ("1.5") is NUMERIC in PG even when untyped
@@ -2616,7 +2681,14 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
     }
 
     if (floatResult) {
-        double a = l.asDouble(), b = r.asDouble(), res = 0;
+        const auto powerOperand = [&](const ExprValue& value) {
+            return floatingWidth(value.typeName) == 1
+                ? static_cast<double>(parseRealCastValue(value))
+                : parseDoubleCastValue(value);
+        };
+        double a = floatingOperands ? powerOperand(l) : l.asDouble();
+        double b = floatingOperands ? powerOperand(r) : r.asDouble();
+        double res = 0;
         if (op == "+") res = a + b;
         else if (op == "-") res = a - b;
         else if (op == "*") res = a * b;
