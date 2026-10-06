@@ -31381,6 +31381,186 @@ static PlPgsqlQueryResult plpgsqlScalarResult(const ExprEvalResult& value) {
     return result;
 }
 
+// Interpreter variable names are already decoded/canonical identifiers.
+// RowContext itself folds keys, so bind real expression references to private
+// positional keys before evaluation instead of collapsing "X" into x.
+static PlPgsqlQueryResult plpgsqlEvalBoundExpression(
+    const std::string& expression,
+    const std::map<std::string, std::string>& variables,
+    const std::set<std::string>& nullVariables,
+    const std::map<std::string, std::string>& types,
+    const std::string& dbname, const std::string& username) {
+    try {
+        SQLParser parser;
+        auto parsed = parser.parse("SELECT " + expression);
+        auto* select = parsed.stmt
+            ? dynamic_cast<SelectStmt*>(parsed.stmt.get()) : nullptr;
+        if (!parsed.success || !select || select->selectList.size() != 1 ||
+            !select->selectList.front().expr || !select->selectList.front().alias.empty())
+            throw DbError("42601", parsed.error.empty()
+                ? "invalid scalar PL/pgSQL expression" : parsed.error);
+        if (select->fromClause || select->whereClause || !select->ctes.empty() ||
+            select->setOp != SetOp::None || select->distinct || !select->distinctOn.empty() ||
+            !select->groupBy.empty() || !select->orderBy.empty() || select->having ||
+            select->limit || select->offset || !select->windowDefs.empty() ||
+            !select->locking.empty() || !select->valuesRows.empty())
+            throw DbError("0A000", "query clauses require the PL/pgSQL query host");
+
+        RowContext context;
+        std::map<std::string, std::string> bindings;
+        size_t position = 0;
+        for (const auto& variable : variables) {
+            const std::string key = "__plpgsql_variable_" + std::to_string(position++);
+            const auto type = types.find(variable.first);
+            if (type != types.end() && !type->second.empty()) {
+                // Preserve actual SQL widths (especially BIGINT), rather
+                // than the legacy row helper's integer-family narrowing.
+                context.set(key, ExprValue(ExprHelper::canonicalResultTypeName(type->second),
+                    variable.second, nullVariables.count(variable.first) != 0));
+            } else {
+                // Trigger-context values historically have no type metadata.
+                // Keep their existing interpretation on one collision-free
+                // value, without treating its datum as SQL text.
+                const auto value = ExprHelper::evalStringWithNulls(key,
+                    {{key, variable.second}}, nullVariables.count(variable.first)
+                        ? std::set<std::string>{key} : std::set<std::string>{},
+                    {}, dbname, username);
+                if (!value.ok) return plpgsqlScalarResult(value);
+                context.set(key, ExprValue(value.typeName, value.value, value.isNull));
+            }
+            bindings.emplace(variable.first, key);
+        }
+        // Preserve the scalar host's session values independently of local
+        // variables of the same spelling; only actual variable references
+        // are rebound to the private keys above.
+        static const std::set<std::string> sessionValues = {
+            "current_user", "session_user", "current_date",
+            "current_timestamp", "localtimestamp"
+        };
+        ExprEvaluator evaluator;
+        evaluator.setCurrentDB(dbname);
+        const auto userValue = [username](const std::vector<ExprValue>&) {
+            return ExprValue("name", username, username.empty());
+        };
+        evaluator.registerFunction("current_user", userValue, 's');
+        evaluator.registerFunction("session_user", userValue, 's');
+        std::function<void(Expr*)> bind;
+        bind = [&](Expr* node) {
+            if (!node) throw DbError("42601", "missing scalar expression");
+            if (auto* column = dynamic_cast<ColumnRefExpr*>(node)) {
+                const std::string name = column->toString();
+                const auto binding = bindings.find(name);
+                if (binding == bindings.end()) {
+                    if (!column->table.empty() || !column->schema.empty())
+                        throw DbError("42P01", "missing variable record " + column->table);
+                    if (!sessionValues.count(name))
+                        throw DbError("42703", "variable does not exist: " + name);
+                    if (!context.has(name)) {
+                        const auto value = ExprHelper::evalStringWithNulls(
+                            name, {}, {}, {}, dbname, username);
+                        if (!value.ok) {
+                            const auto failure = plpgsqlScalarResult(value);
+                            throw DbError(failure.sqlState, failure.message);
+                        }
+                        context.set(name, ExprValue(value.typeName, value.value, value.isNull));
+                    }
+                    return;
+                }
+                column->column = binding->second;
+                column->table.clear();
+                column->schema.clear();
+            } else if (auto* unary = dynamic_cast<UnaryOpExpr*>(node)) {
+                bind(unary->operand.get());
+            } else if (auto* binary = dynamic_cast<BinaryOpExpr*>(node)) {
+                bind(binary->left.get());
+                if (binary->op != "::") {
+                    const auto operation = SQLParser::toLower(binary->op);
+                    auto* list = dynamic_cast<RowExpr*>(binary->right.get());
+                    if (list && (operation == "in" || operation == "not in")) {
+                        for (auto& item : list->elements) bind(item.get());
+                    } else bind(binary->right.get());
+                }
+            } else if (auto* cast = dynamic_cast<CastExpr*>(node)) {
+                bind(cast->operand.get());
+            } else if (auto* conditional = dynamic_cast<CaseExpr*>(node)) {
+                if (conditional->switchExpr) bind(conditional->switchExpr.get());
+                for (auto& arm : conditional->whenClauses) {
+                    bind(arm.first.get());
+                    bind(arm.second.get());
+                }
+                if (conditional->elseExpr) bind(conditional->elseExpr.get());
+            } else if (auto* function = dynamic_cast<FunctionCallExpr*>(node)) {
+                if (function->hasOver || function->filter || function->distinct ||
+                    !function->orderBy.empty())
+                    throw DbError("0A000", "aggregate/window expression requires a query host");
+                static const std::set<std::string> syntaxFunctions = {
+                    "coalesce", "nullif", "greatest", "least", "make_interval",
+                    "between", "not between", "like escape", "not like escape",
+                    "ilike escape", "not ilike escape", "similar to escape",
+                    "not similar to escape"
+                };
+                std::string name = SQLParser::toLower(function->funcName);
+                if (!syntaxFunctions.count(name)) {
+                    CatalogManager::QualifiedName decoded;
+                    if (!CatalogManager::parseQualifiedName(function->funcName, decoded, true) ||
+                        !decoded.schema.empty() || decoded.name != SQLParser::toLower(decoded.name))
+                        throw DbError("42883", "function does not exist: " + function->funcName);
+                    name = decoded.name;
+                }
+                if (!function->schema.empty()) {
+                    CatalogManager::QualifiedName schema;
+                    if (!CatalogManager::parseQualifiedName(function->schema, schema, true) ||
+                        !schema.schema.empty() || schema.name != "pg_catalog" ||
+                        !evaluator.hasFunction(name))
+                        throw DbError("42883", "function does not exist: " + function->schema + "." + name);
+                }
+                if (!evaluator.hasFunction(name) && !syntaxFunctions.count(name))
+                    throw DbError("42883", "function does not exist: " + function->funcName);
+                function->funcName = name;
+                // SQL EXTRACT's field is syntax, not a procedural variable.
+                // The shared parser represents it as the first argument.
+                if (name == "extract" && !function->args.empty()) {
+                    if (const auto* field = dynamic_cast<ColumnRefExpr*>(function->args.front().get());
+                        field && field->table.empty() && field->schema.empty()) {
+                        auto literal = std::make_unique<LiteralExpr>();
+                        literal->typeName = "text";
+                        literal->value = "'";
+                        for (char c : field->column) {
+                            literal->value += c;
+                            if (c == '\'') literal->value += c;
+                        }
+                        literal->value += "'";
+                        function->args.front() = std::move(literal);
+                    }
+                }
+                for (auto& argument : function->args) bind(argument.get());
+                for (auto& argument : function->namedArgs) bind(argument.value.get());
+            } else if (node->type != ExprType::Literal) {
+                throw DbError("0A000", "unsupported scalar PL/pgSQL expression");
+            }
+        };
+        bind(select->selectList.front().expr.get());
+        const ExprValue value = evaluator.eval(select->selectList.front().expr.get(), context);
+        ExprEvalResult evaluated;
+        evaluated.ok = !value.isUnknown();
+        evaluated.value = value.value;
+        evaluated.isNull = value.isNull;
+        evaluated.typeName = value.typeName;
+        evaluated.collation = value.collation;
+        if (!evaluated.ok) evaluated.error = "unsupported scalar PL/pgSQL expression (SQLSTATE 0A000)";
+        return plpgsqlScalarResult(evaluated);
+    } catch (const DbError& error) {
+        PlPgsqlQueryResult result;
+        result.sqlState = error.sqlState();
+        result.message = error.message();
+        return result;
+    } catch (const std::exception& error) {
+        ExprEvalResult failure;
+        failure.error = error.what();
+        return plpgsqlScalarResult(failure);
+    }
+}
+
 static bool evalUDFBody(const StorageEngine::UDFInfo& udf,
                         const std::string& funcName,
                         const std::vector<std::string>& argValues,
@@ -31476,9 +31656,9 @@ static bool evalUDFBody(const StorageEngine::UDFInfo& udf,
                                       const std::map<std::string, std::string>& types) {
             try {
                 const Session* session = currentSession();
-                return plpgsqlScalarResult(ExprHelper::evalStringWithNulls(
-                    expression, variables, nullVariables, types, dbname,
-                    session ? session->username : std::string{}));
+                return plpgsqlEvalBoundExpression(expression, variables,
+                    nullVariables, types, dbname,
+                    session ? session->username : std::string{});
             } catch (const DbError& error) {
                 PlPgsqlQueryResult result;
                 result.sqlState = error.sqlState();
