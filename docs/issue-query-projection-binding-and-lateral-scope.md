@@ -113,5 +113,8 @@ The next open scope issue was reproduced separately on the final binary:
 (SELECT c.id+1 AS n) x` returned 42P01, as did the equivalent derived-table
 left input. Ordinary CTE/derived-table projections with the same qualified
 `c.id` succeed and return integer 1, so this is a LATERAL composition failure,
-not proof that CTEs themselves are unsupported. This failure is not closed by
-the four commits above; its cause and fix remain the next work item.
+not proof that CTEs themselves are unsupported. This failure was not closed by
+the four commits above. Follow-up `98f9c978` fixes its materialization-name
+collision; separate WHERE-analysis and alias/star composition errors are
+recorded with their own commits and verification boundaries in
+`docs/issue-materialized-query-composition.md`. The query families remain partial.
