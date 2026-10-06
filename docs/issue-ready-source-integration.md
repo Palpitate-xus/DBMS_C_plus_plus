@@ -4,6 +4,14 @@
 
 ### Actual terminal results and eight next independent integrations
 
+Original immutablefd/23a canonical23633 has now actually exited1 after
+all540 native fixtures (537pass/3fail) and275 registered entries
+(274PASSED/1fail). TLS-stub intentional skip is one PASSED label, not TLS
+runtime evidence. Exact four failures/commit mapping are recorded in
+`docs/issue-full-registered-canonical-b353fe8b.md`; all complete failed logs
+remain. Later historical23633-live labels below are superseded by this
+actual terminal result, not interpreted as current pending work.
+
 The4cf frozen385b optimized combination actually ends with native75787
 exit1:62 passed/3 failed out of65, and wire40643 exit1:30 passed/1 failed
 out of31. The native failures are the original materialized-view55000 gate
