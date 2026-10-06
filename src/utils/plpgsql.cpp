@@ -548,6 +548,7 @@ struct AssignStmt : Stmt {
 };
 struct SqlStmt : Stmt {
     std::string text;               // SQL passthrough (incl. SELECT INTO)
+    bool discardResult = false;     // PERFORM is explicit, not plain SELECT
 };
 struct ReturnStmt : Stmt {
     bool hasExpr = false;
@@ -688,6 +689,7 @@ struct Parser {
             sc.pos = at + kw.size();
             auto s = std::make_unique<SqlStmt>();
             s->text = "SELECT " + readUntilSemicolon(sc);
+            s->discardResult = true;
             return s;
         }
         // assignment: ident := expr;
@@ -1785,12 +1787,12 @@ struct Interp {
             return true;
         }
         if (auto* q = dynamic_cast<const SqlStmt*>(&s)) {
-            return execSql(q->text);
+            return execSql(q->text,q->discardResult);
         }
         return fail("unknown statement");
     }
 
-    bool execSql(const std::string& stmtText) {
+    bool execSql(const std::string& stmtText,bool discardResult = false) {
         std::string sql = trimCopy(stmtText);
         if (sql.empty()) return true;
         const size_t selectPos = findTopLevelSqlKeyword(sql, "select");
@@ -1878,6 +1880,11 @@ struct Interp {
         if (host.queryPrepared) {
             const auto result = host.queryPrepared(sql, bindings(), {});
             if (!result.ok) return fail(result.message, result.sqlState);
+            // SPI executes before reporting a missing destination: volatile
+            // sequence effects are not suppressed, and execution errors keep
+            // their original SQLSTATE. Empty results still have a descriptor.
+            if (result.columnCount && !discardResult)
+                return fail("query has no destination for result data","42601");
             return true;
         }
         if (!host.execStmt) return fail("SQL execution unsupported by host");
