@@ -4564,6 +4564,16 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
     std::vector<ExprValue> args;
     for (const auto& a : e->args) args.push_back(eval(a.get(), ctx));
 
+    if (name == "timezone" && args.size() == 2) {
+        // Unknown SQL literals select the preferred timestamptz overload;
+        // an explicitly typed TEXT value must not gain that implicit cast.
+        const auto* literal = dynamic_cast<const LiteralExpr*>(e->args[1].get());
+        const bool unknownLiteral = literal && literal->typeName.empty() &&
+            (isQuotedString(literal->value) || toLower(literal->value) == "null");
+        if (unknownLiteral || toLower(args[1].typeName) == "date")
+            args[1] = evalCast(nullptr, ctx, args[1], "timestamptz");
+    }
+
     // SUM and AVG have several numeric overloads.  PostgreSQL cannot select
     // one when their sole argument is an untyped string or NULL literal; a
     // cast makes the call unambiguous (and may then produce 42883 for an
@@ -7124,16 +7134,41 @@ void ExprEvaluator::registerBuiltins() {
     };
 
     functions_["timezone"] = [](const std::vector<ExprValue>& a) {
-        if (a.size() != 2 || a[0].isNull || a[1].isNull) return ExprValue("timestamp", "", true);
+        if (a.size() != 2)
+            throw DbError("42883", "timezone requires two arguments");
         const std::string inTn = toLower(a[1].typeName);
         const bool timestampIn = inTn == "timestamp" ||
                                  inTn == "timestamp without time zone";
-        const long long offMin = timezoneOffsetAt(
-            a[0].value, a[1].value, timestampIn);
+        const bool timestamptzIn = inTn == "timestamptz" ||
+                                  inTn == "timestamp with time zone";
+        const std::string zoneType = toLower(a[0].typeName);
+        const bool intervalZone = zoneType == "interval";
+        const bool textZone = zoneType == "text" || zoneType == "varchar" ||
+            zoneType == "character varying" || zoneType == "char" ||
+            zoneType == "character" || zoneType == "bpchar" ||
+            zoneType == "name" || zoneType == "unknown";
+        if ((!timestampIn && !timestamptzIn) || (!textZone && !intervalZone))
+            throw DbError("42883", "function timezone(" + zoneType + ", " + inTn + ") does not exist");
+        const std::string resultType = timestampIn ? "timestamptz" : "timestamp";
+        // Resolve the overload before NULL propagation, so NULL::integer is
+        // still a type error instead of a successful NULL timestamp.
+        if (a[0].isNull || a[1].isNull) return ExprValue(resultType, "", true);
         IntervalParts shift;
-        shift.micros = (timestampIn ? -offMin : offMin) * 60000000LL;
+        if (intervalZone) {
+            shift = parseIntervalText(a[0].value);
+            if (!shift.ok || shift.months || shift.days)
+                throw DbError("22023", "time zone interval must not include months or days");
+            if (timestampIn) {
+                if (shift.micros == std::numeric_limits<long long>::lowest())
+                    throw DbError("22015", "time zone interval is out of range");
+                shift.micros = -shift.micros;
+            }
+        } else {
+            const long long offMin = timezoneOffsetAt(a[0].value, a[1].value, timestampIn);
+            shift.micros = (timestampIn ? -offMin : offMin) * 60000000LL;
+        }
         std::string out = timestampShift(a[1].value, shift, true);
-        if (out.empty()) return ExprValue("timestamp", "", true);
+        if (out.empty()) return ExprValue(resultType, "", true);
         // PG: timezone(zone, timestamptz) -> timestamp (local wall time);
         //     timezone(zone, timestamp)  -> timestamptz (UTC instant).
         // Untyped literals resolve to the timestamptz overload here, as in

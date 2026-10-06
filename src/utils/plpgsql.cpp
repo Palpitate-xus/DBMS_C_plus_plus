@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <initializer_list>
 #include <memory>
 #include <set>
 #include <sstream>
@@ -68,6 +69,24 @@ bool readIdentifier(const std::string& text, size_t start,
            sqlIdentifierContinuation(static_cast<unsigned char>(text[end]))) ++end;
     name = lowerCopy(text.substr(start, end - start));
     return true;
+}
+
+// Match a grammar unit, not individual keywords: quoted identifiers never
+// participate and comments are whitespace. The operand after the unit is
+// deliberately left for the ordinary typed data-variable substitution.
+size_t sqlKeywordUnitEnd(const std::string& text, size_t start,
+                         std::initializer_list<const char*> words) {
+    size_t cursor = start;
+    for (const char* word : words) {
+        cursor = skipLeadingSqlTrivia(text, cursor);
+        std::string identifier;
+        size_t end;
+        if (cursor == std::string::npos || cursor >= text.size() ||
+            text[cursor] == '"' || !readIdentifier(text, cursor, identifier, end) ||
+            identifier != word) return std::string::npos;
+        cursor = end;
+    }
+    return cursor;
 }
 
 size_t protectedUnitEnd(const std::string& text, size_t start) {
@@ -610,6 +629,15 @@ struct Interp {
                     name += "." + field;
                     end = fieldEnd;
                     next = skipLeadingSqlTrivia(expr, end);
+                }
+                if (sqlStatement && !quoted && name == "at") {
+                    const size_t operatorEnd = sqlKeywordUnitEnd(expr, i, {"at", "time", "zone"});
+                    if (operatorEnd != std::string::npos) {
+                        out += expr.substr(i, operatorEnd - i);
+                        roles.back().projectionMayEnd = false;
+                        i = operatorEnd;
+                        continue;
+                    }
                 }
                 const auto variable = vars.find(name);
                 const bool functionCall = next != std::string::npos &&

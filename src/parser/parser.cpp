@@ -1577,6 +1577,7 @@ static ExprPtr parseConcatExpr(const std::vector<std::string>& tokens, size_t& p
 static ExprPtr parseAddSubExpr(const std::vector<std::string>& tokens, size_t& pos);
 static ExprPtr parseMulDivModExpr(const std::vector<std::string>& tokens, size_t& pos);
 static ExprPtr parsePowerExpr(const std::vector<std::string>& tokens, size_t& pos);
+static ExprPtr parseAtTimeZoneExpr(const std::vector<std::string>& tokens, size_t& pos);
 static ExprPtr parseUnaryExpr(const std::vector<std::string>& tokens, size_t& pos);
 static ExprPtr parseCastExpr(const std::vector<std::string>& tokens, size_t& pos);
 static ExprPtr parsePostfixExpr(const std::vector<std::string>& tokens, size_t& pos);
@@ -1941,13 +1942,13 @@ static ExprPtr parseMulDivModExpr(const std::vector<std::string>& tokens, size_t
 
 // ^ (power, left-associative in PG)
 static ExprPtr parsePowerExpr(const std::vector<std::string>& tokens, size_t& pos) {
-    auto left = parseUnaryExpr(tokens, pos);
+    auto left = parseAtTimeZoneExpr(tokens, pos);
     while (pos < tokens.size() && tokens[pos] == "^") {
         ++pos;
         auto bin = std::make_unique<BinaryOpExpr>();
         bin->op = "^";
         bin->left = std::move(left);
-        bin->right = parseUnaryExpr(tokens, pos);
+        bin->right = parseAtTimeZoneExpr(tokens, pos);
         left = std::move(bin);
     }
     return left;
@@ -1976,21 +1977,26 @@ static bool isAtTimeZone(const std::vector<std::string>& tokens, size_t pos) {
         && SQLParser::toLower(tokens[pos + 2]) == "zone";
 }
 
-static ExprPtr parseCastExpr(const std::vector<std::string>& tokens, size_t& pos) {
-    auto left = parsePostfixExpr(tokens, pos);
-    // Postfix AT TIME ZONE 'zone' binds at the cast level so both
-    // `ts AT TIME ZONE 'z'` and `ts::timestamp AT TIME ZONE 'z'` work.
+// AT has lower precedence than casts/unary expressions and higher precedence
+// than exponentiation. Keep both operands as AST values; embedding the zone
+// token in a unary operator loses bindings, NULLs and compound expressions.
+static ExprPtr parseAtTimeZoneExpr(const std::vector<std::string>& tokens, size_t& pos) {
+    auto left = parseUnaryExpr(tokens, pos);
     while (pos < tokens.size() && isAtTimeZone(tokens, pos)) {
         pos += 3;
-        if (pos < tokens.size()) {
-            std::string z = tokens[pos++];
-            if (z.size() >= 2 && z.front() == '\'' && z.back() == '\'') z = z.substr(1, z.size() - 2);
-            auto unary = std::make_unique<UnaryOpExpr>();
-            unary->op = "AT TIME ZONE " + z;
-            unary->operand = std::move(left);
-            left = std::move(unary);
-        }
+        auto zone = parseUnaryExpr(tokens, pos);
+        if (!left || !zone) return nullptr;
+        auto timezone = std::make_unique<FunctionCallExpr>();
+        timezone->funcName = "timezone";
+        timezone->args.push_back(std::move(zone));
+        timezone->args.push_back(std::move(left));
+        left = std::move(timezone);
     }
+    return left;
+}
+
+static ExprPtr parseCastExpr(const std::vector<std::string>& tokens, size_t& pos) {
+    auto left = parsePostfixExpr(tokens, pos);
     while (pos < tokens.size() && tokens[pos] == "::") {
         ++pos;
         auto bin = std::make_unique<BinaryOpExpr>();
@@ -2052,18 +2058,6 @@ static ExprPtr parseCastExpr(const std::vector<std::string>& tokens, size_t& pos
         right->value = typeName;
         bin->right = std::move(right);
         left = std::move(bin);
-        // Chained postfix AT TIME ZONE after a cast.
-        while (pos < tokens.size() && isAtTimeZone(tokens, pos)) {
-            pos += 3;
-            if (pos < tokens.size()) {
-                std::string z = tokens[pos++];
-                if (z.size() >= 2 && z.front() == '\'' && z.back() == '\'') z = z.substr(1, z.size() - 2);
-                auto unary = std::make_unique<UnaryOpExpr>();
-                unary->op = "AT TIME ZONE " + z;
-                unary->operand = std::move(left);
-                left = std::move(unary);
-            }
-        }
     }
     while (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "collate") {
         ++pos;
