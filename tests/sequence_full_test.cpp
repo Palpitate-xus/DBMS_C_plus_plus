@@ -1057,9 +1057,16 @@ static void test_sequence_bound_defaults_and_file_upgrade() {
         "INCREMENT -2 NO MINVALUE NO MAXVALUE", s));
     assert(g_engine.nextval(db, "descending_default") == -1);
     assert(g_engine.nextval(db, "descending_default") == -3);
-    assert(!ddl.executeSql(
+    assert(ddl.executeSql(
         "ALTER SEQUENCE descending_default "
         "INCREMENT 2 START 1 RESTART", s));
+    // INCREMENT alone preserves MAXVALUE -1. Keep the original statement
+    // as a failure/no-change control, then explicitly request ascending
+    // default bounds for the positive restart case (PostgreSQL 18.6).
+    assert(g_engine.nextval(db, "descending_default") == -5);
+    assert(!ddl.executeSql(
+        "ALTER SEQUENCE descending_default "
+        "INCREMENT 2 NO MINVALUE NO MAXVALUE START 1 RESTART", s));
     assert(g_engine.nextval(db, "descending_default") == 1);
     assert(g_engine.nextval(db, "descending_default") == 3);
 
@@ -1068,15 +1075,21 @@ static void test_sequence_bound_defaults_and_file_upgrade() {
         "MINVALUE 10 MAXVALUE 30", s));
     assert(g_engine.nextval(db, "bounded") == 10);
     assert(!ddl.executeSql("ALTER SEQUENCE bounded INCREMENT -2", s));
-    assert(g_engine.nextval(db, "bounded") == 12);
-    assert(g_engine.nextval(db, "bounded") == 10);
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        bool exhausted = false;
+        try { (void)g_engine.nextval(db, "bounded"); }
+        catch (const dbms::DbError& error) {
+            exhausted = error.sqlState() == "2200H";
+        }
+        assert(exhausted);
+    }
 
     const fs::path boundedPath = fs::path(db) / "bounded.seq";
     {
         std::ifstream input(boundedPath);
         std::string magic;
         assert(input >> magic);
-        assert(magic == "DBMSSEQ3");
+        assert(magic == "DBMSSEQ5");
     }
 
     assert(!ddl.executeSql(
@@ -1099,14 +1112,14 @@ static void test_sequence_bound_defaults_and_file_upgrade() {
         std::ifstream input(legacyPath);
         std::string magic;
         assert(input >> magic);
-        assert(magic == "DBMSSEQ3");
+        assert(magic == "DBMSSEQ5");
     }
     dbms::SequenceInfo legacyAlter;
     legacyAlter.increment = -1;
     legacyAlter.incrementSpecified = true;
     assert(g_engine.alterSequence(db, "legacy", legacyAlter) ==
            dbms::DBStatus::OK);
-    assert(g_engine.nextval(db, "legacy") == 6);
+    assert(g_engine.nextval(db, "legacy") == 4);
 
     dbms::StorageEngine restarted;
     assert(restarted.nextval(db, "bounded") == -5);
@@ -1294,7 +1307,7 @@ static void test_quoted_space_owner_metadata_roundtrip() {
     std::ifstream file(path);
     std::string version;
     assert(file >> version);
-    assert(version == "DBMSSEQ4");
+    assert(version == "DBMSSEQ5");
     file.close();
     dbms::SequenceInfo info;
     assert(g_engine.getSequenceInfo(db, storageName, info) ==
@@ -1356,7 +1369,7 @@ static void test_escaped_quote_owner_metadata_roundtrip() {
     std::ifstream file(path);
     std::string version;
     assert(file >> version);
-    assert(version == "DBMSSEQ4");
+    assert(version == "DBMSSEQ5");
     dbms::SequenceInfo info;
     assert(g_engine.getSequenceInfo(db, storageName, info) ==
            dbms::DBStatus::OK);
