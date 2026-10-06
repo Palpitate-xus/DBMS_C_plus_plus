@@ -25,6 +25,19 @@ struct Range {
     const Stmt* cteStatement = nullptr;
 };
 using Namespace = std::vector<Range>;
+void checkRangeConflicts(const Namespace& left, const Namespace& right) {
+    for (const auto& a : left) for (const auto& b : right) {
+        if (a.name.empty() || a.name != b.name) continue;
+        // PostgreSQL permits distinct unaliased physical relations with the
+        // same basename, because their real schema qualifiers disambiguate
+        // them. An alias (schema hidden), CTE or repeated physical occurrence
+        // does not gain that exception.
+        if (!a.schema.empty() && !b.schema.empty() &&
+            !a.relationName.empty() && !b.relationName.empty() &&
+            (a.relationSchema != b.relationSchema || a.relationName != b.relationName)) continue;
+        throw DbError("42712", "table name \"" + a.name + "\" specified more than once");
+    }
+}
 struct CteDescription { QueryRowDescriptor columns; const Stmt* statement = nullptr; };
 using Ctes = std::map<std::string, CteDescription>;
 
@@ -328,9 +341,7 @@ public:
         if (item->type != FromItem::Type::Join) throw DbError("0A000", "source requires structured preparation");
         auto left = from(item->left.get(), outer, ctes);
         auto right = from(item->right.get(), outer, ctes);
-        for (const auto& a : left) for (const auto& b : right)
-            if (!a.name.empty() && a.name == b.name)
-                throw DbError("42712", "table name \"" + a.name + "\" specified more than once");
+        checkRangeConflicts(left, right);
         std::vector<std::string> keys;
         std::set<std::string> seenKeys;
         for (const auto& spelling : item->usingCols) {
@@ -521,7 +532,9 @@ public:
         }
         if (auto* update = dynamic_cast<UpdateStmt*>(&node)) {
             auto ranges = from(update->fromClause.get(), outer, ctes);
-            ranges.insert(ranges.begin(), registerSource(relation(update->tableName, update->alias, {})));
+            const auto target = registerSource(relation(update->tableName, update->alias, {}));
+            checkRangeConflicts({target}, ranges);
+            ranges.insert(ranges.begin(), target);
             auto scopes = outer; scopes.insert(scopes.begin(), std::move(ranges));
             for (auto& value : update->setClauses) {
                 const auto name = identifier(value.first);
@@ -534,7 +547,9 @@ public:
         }
         if (auto* remove = dynamic_cast<DeleteStmt*>(&node)) {
             auto ranges = from(remove->usingClause.get(), outer, ctes);
-            ranges.insert(ranges.begin(), registerSource(relation(remove->tableName, remove->alias, {})));
+            const auto target = registerSource(relation(remove->tableName, remove->alias, {}));
+            checkRangeConflicts({target}, ranges);
+            ranges.insert(ranges.begin(), target);
             auto scopes = outer; scopes.insert(scopes.begin(), std::move(ranges));
             expression(remove->whereClause, scopes); return project(remove->returning, scopes);
         }
