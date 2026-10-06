@@ -34038,8 +34038,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             StorageEngine::QueryExprExecutionOptions scalarExecutionOptions;
             vector<StorageEngine::OrderBySpec> scalarReceiverOrder = orderBySpecs;
             dbms::SQLParser demandParser;
-            const auto demandParsed = currentQueryRowDemand()
-                ? demandParser.parse(sql) : dbms::ParseResult{};
+            const auto demandParsed = demandParser.parse(sql);
             const auto* demandSelect = demandParsed.success
                 ? dynamic_cast<const dbms::SelectStmt*>(demandParsed.stmt.get()) : nullptr;
             if (demandSelect && demandSelect->limit && *demandSelect->limit == 0)
