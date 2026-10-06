@@ -8,7 +8,8 @@ def main():
     root=Path(__file__).resolve().parent.parent
     spec=importlib.util.spec_from_file_location('conflict_runner',root/'tests/compat/pg_diff_runner.py')
     runner=importlib.util.module_from_spec(spec); spec.loader.exec_module(runner)
-    client=runner.load_protocol_client(); reference='--reference' in sys.argv[1:]
+    client=runner.load_protocol_client(); reference18='--reference18' in sys.argv[1:]
+    reference=reference18 or '--reference' in sys.argv[1:]
     if reference:
         host,port,user,database,password=runner._reference_connection_settings()
         sock=socket.create_connection((host,port),timeout=120)
@@ -23,7 +24,8 @@ def main():
     def setup(sql):
         result=query(sql); assert result[1] is None,(sql,result)
     try:
-        if reference: assert query('SHOW server_version_num;')[0]==[['170002']]
+        if reference18: runner.verify_reference_version(client,sock)
+        elif reference: assert query('SHOW server_version_num;')[0]==[['170002']]
         setup('BEGIN;')
         setup('CREATE TEMP TABLE conflict_rows(id INT PRIMARY KEY,v INT);')
         setup('CREATE TEMP SEQUENCE conflict_sequence;')
@@ -61,7 +63,7 @@ def main():
             setup('RELEASE SAVEPOINT conflict_returning;')
         setup('ROLLBACK;')
         assert not failures,'%d conflict binding assertions failed: %r'%(len(failures),failures)
-        print('[INSERT CONFLICT BINDING '+('PG17.2 DIAGNOSTIC' if reference else 'PROTOCOL E2E')+'] passed')
+        print('[INSERT CONFLICT BINDING '+('PG18.6 REFERENCE' if reference18 else 'PG17.2 DIAGNOSTIC' if reference else 'PROTOCOL E2E')+'] passed')
     finally:
         if reference: sock.close()
         else: runner.stop_ours(server)

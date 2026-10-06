@@ -51,3 +51,12 @@ by the upcoming CASE/prepared-expression change. PostgreSQL 18 RETURNING
 OLD/NEW namespace preparation, domains/custom casts and full conflict grammar
 remain separately tracked. This commit does not execute metadata queries or
 claim the complete DML family is finished.
+
+## Additional verified PostgreSQL 18.6 reference
+
+The independent test-only followup adds explicit `--reference18`; it uses
+`verify_reference_version` to require `180006` before test SQL. The older
+`--reference` remains an explicitly checked PostgreSQL 17.2 diagnostic. On
+the separately built official PostgreSQL 18.6 reference, the unchanged final
+matrix passes in `conflict.reference18.log`, terminal 0. This new run does not
+retroactively relabel the earlier PostgreSQL 17 logs.
