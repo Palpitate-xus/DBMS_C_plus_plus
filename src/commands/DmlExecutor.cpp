@@ -11,12 +11,14 @@
 #include "catalog/type_registry.h"
 #include "commands/TableManage.h"
 #include "common/DbError.h"
+#include "common/SqlSyntax.h"
 #include "expression/ExprEvaluator.h"
 #include "expression/expr_helper.h"
 #include "expression/prepared_query_execution.h"
 #include "parser/parser.h"
 #include "permissions.h"
 #include "types/numeric.h"
+#include "utils/interval.h"
 
 #include <algorithm>
 #include <atomic>
@@ -658,6 +660,83 @@ bool findTableColumn(const TableSchema& table, const std::string& column) {
         if (table.cols[i].dataName == column) return true;
     }
     return false;
+}
+
+// Storage's public primitive API deliberately reports INVALID_VALUE. SQL
+// input errors retain the pure parser's structured classification instead of
+// converting that status (or parsing a rendered diagnostic) after mutation.
+std::string intervalTargetInputState(const TableSchema& table,
+                                    const std::string& column,
+                                    const SqlCell& value) {
+    if (!value) return {};
+    for (size_t i = 0; i < table.len; ++i) {
+        const auto& target = table.cols[i];
+        if (target.dataName == column && !target.isArray &&
+            canonicalSetType(target.dataType) == "interval")
+            return intervalInputSqlState(parseIntervalInput(*value));
+    }
+    return {};
+}
+
+[[noreturn]] void rejectIntervalInput(const std::string& state) {
+    throw DbError(state, state == "22007"
+        ? "invalid input syntax for type interval" : "interval value out of range");
+}
+
+void validateIntervalTargetInputs(const TableSchema& table, const SqlRow& values) {
+    for (const auto& value : values) {
+        const auto state = intervalTargetInputState(table, value.first, value.second);
+        if (!state.empty()) rejectIntervalInput(state);
+    }
+}
+
+// INSERT transforms and coerces each complete VALUES row in source order.
+// A later row's unresolved name must not supersede an earlier row's invalid
+// target input, but all siblings in the failing row still bind first. Keep
+// original bytes rather than rendering/reparsing canonical expression names.
+std::string insertValuesPrefix(const std::string& sql, size_t rowIndex,
+                               size_t expectedRows) {
+    SQLParser parser;
+    const auto parsed = parser.parseForBinding(sql);
+    const auto* insert = dynamic_cast<const InsertStmt*>(parsed.stmt.get());
+    if (!parsed.success)
+        throw DbError("42601", parsed.error.empty() ? "invalid INSERT syntax" : parsed.error);
+    if (!insert || insert->values.size() != expectedRows || rowIndex >= expectedRows)
+        throw DbError("XX000", "INSERT VALUES provenance does not match the original statement");
+    const auto keyword = findTopLevelSqlKeyword(sql, "values");
+    if (keyword == std::string::npos)
+        throw DbError("XX000", "INSERT VALUES has no original grammar boundary");
+    const auto protectedBytes = sqlProtectedBytes(sql);
+    size_t position = keyword + 6;
+    for (size_t index = 0; index <= rowIndex; ++index) {
+        position = skipLeadingSqlTrivia(sql, position);
+        if (position == std::string::npos || position >= sql.size() || sql[position] != '(')
+            throw DbError("XX000", "INSERT VALUES has an invalid row boundary");
+        const size_t begin = position;
+        size_t depth = 0;
+        for (; position < sql.size(); ++position) {
+            if (protectedBytes[position]) continue;
+            if (sql[position] == '(') ++depth;
+            else if (sql[position] == ')' && --depth == 0) break;
+        }
+        if (position == sql.size())
+            throw DbError("XX000", "INSERT VALUES has no closing row boundary");
+        // The strict AST and protected grammar must agree on every known
+        // expression span; parenthesized expressions need not span brackets.
+        for (const auto& expression : insert->values[index]) {
+            if (expression && expression->sourceBegin != std::string::npos &&
+                (expression->sourceBegin <= begin || expression->sourceEnd > position ||
+                 expression->sourceEnd <= expression->sourceBegin))
+                throw DbError("XX000", "INSERT VALUES expression escaped its original row");
+        }
+        ++position;
+        if (index == rowIndex) return sql.substr(0, position);
+        position = skipLeadingSqlTrivia(sql, position);
+        if (position == std::string::npos || position >= sql.size() || sql[position] != ',')
+            throw DbError("XX000", "INSERT VALUES has no row separator");
+        ++position;
+    }
+    throw DbError("XX000", "INSERT VALUES has no requested row");
 }
 
 // Conflict expressions are evaluated once for each conflicting input row.
@@ -2667,7 +2746,8 @@ bool loadConflictTargetRow(const std::string& currentDB,
     return found;
 }
 
-bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
+bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
+                   const std::string& originalSql) {
     fallback = false;
     if (!checkDatabase(s)) return true;
 
@@ -2768,6 +2848,44 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
                   << std::endl;
         return true;
     };
+
+    // Unknown literal input is converted during preparation, including a
+    // failed statement whose RETURNING/conflict form needs the legacy host.
+    // Inspect only actual literals before any volatile VALUES execution.
+    ExprEvaluator literalEvaluator;
+    for (size_t rowIndex = 0; rowIndex < stmt.values.size(); ++rowIndex) {
+        const auto& row = stmt.values[rowIndex];
+        if (row.size() != columns.size())
+            throw DbError("42601", "INSERT expression count does not match target columns");
+        for (size_t i = 0; i < row.size(); ++i) {
+            if (isDefaultValue(row[i])) continue;
+            if (generatedTargets[i]) return rejectGeneratedValue(i);
+            if (identityTargets[i] != 0 &&
+                identityOverride == StorageEngine::IdentityOverride::User) continue;
+            if (identityTargets[i] == 'a' &&
+                identityOverride != StorageEngine::IdentityOverride::System)
+                return rejectAlwaysIdentityValue(i);
+            const auto* literal = dynamic_cast<const LiteralExpr*>(row[i].get());
+            if (!literal || literal->preparedSubquery || !literal->typeName.empty() ||
+                literal->value.size() < 2 || literal->value.front() != '\'' ||
+                literal->value.back() != '\'') continue;
+            const auto datum = literalEvaluator.eval(literal, RowContext{});
+            const auto state = intervalTargetInputState(table, columns[i],
+                datum.isNull ? SqlCell{} : SqlCell{datum.value});
+            if (!state.empty()) {
+                // Bind siblings in this original row, not later rows or
+                // RETURNING/conflict expressions. Full raw grammar was
+                // checked before extracting the protected original prefix.
+                (void)g_engine.prepareBoundQuery(s.currentDB,
+                    insertValuesPrefix(originalSql, rowIndex, stmt.values.size()));
+                rejectIntervalInput(state);
+            }
+        }
+    }
+    if (!supportsInsert(stmt)) {
+        fallback = true;
+        return false;
+    }
 
     const ReturningBinding insertReturningBinding = returningBinding(
         stmt.returningOptions, requestedTable, "");
@@ -2884,6 +3002,8 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
                 }
             }
         }
+        for (const auto& values : pendingRows)
+            validateIntervalTargetInputs(table, values);
 
         DmlStatementScope statementScope(g_engine, s.currentDB);
         if (!statementScope.ready()) {
@@ -3019,6 +3139,8 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback) {
         }
         pendingRows.push_back(std::move(values));
     }
+    for (const auto& values : pendingRows)
+        validateIntervalTargetInputs(table, values);
 
     if (conflictUpdate || (ignoreDuplicate && !conflictTarget.empty())) {
         // The narrow plan needs the inferred target value before the insert
@@ -3752,6 +3874,7 @@ bool executePreparedUpdate(const UpdateStmt& stmt, Session& s, bool& fallback,
             if (!value.isNull) constantUpdates[identifier(assignment.first)] = value.value;
         }
     }
+    validateIntervalTargetInputs(table, constantUpdates);
     for (auto& item : update->returning) {
         // RETURNING stars are expanded by the existing projection descriptor.
         if (item.expr && !isStarProjection(item.expr.get()))
@@ -3788,6 +3911,7 @@ bool executePreparedUpdate(const UpdateStmt& stmt, Session& s, bool& fallback,
                 effectiveUpdates[identifier(assignment.first)] = value.isNull
                     ? SqlCell{} : SqlCell{value.value};
             }
+            validateIntervalTargetInputs(table, effectiveUpdates);
             return true;
         };
     DmlStatementScope statementScope(g_engine, s.currentDB);
@@ -5103,8 +5227,8 @@ bool tryDmlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
     bool error = false;
     if (parsedCmd == SqlCommand::Insert) {
         const auto* stmt = dynamic_cast<const InsertStmt*>(parsed.stmt.get());
-        if (!stmt || !supportsInsert(*stmt)) return false;
-        error = executeInsert(*stmt, s, fallback);
+        if (!stmt) return false;
+        error = executeInsert(*stmt, s, fallback, rawSql.empty() ? sql : rawSql);
     } else if (parsedCmd == SqlCommand::Update) {
         const auto* stmt = dynamic_cast<const UpdateStmt*>(parsed.stmt.get());
         if (!stmt) return false;

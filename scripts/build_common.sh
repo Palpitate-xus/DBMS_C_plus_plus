@@ -225,6 +225,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/typed_interval_range_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/interval_arithmetic_range_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/interval_storage_input_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/interval_input_sqlstate_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/arithmetic_predicate_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/cast_child_header_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/unique_prefix_collision_protocol_e2e_test.py)
