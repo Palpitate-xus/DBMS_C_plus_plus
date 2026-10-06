@@ -2339,7 +2339,8 @@ static ExprPtr parsePrimaryExprImpl(const std::vector<std::string>& tokens, size
     const std::string typedLiteralName = SQLParser::toLower(tokens[pos]);
     static const std::set<std::string> typedLiteralNames = {
         "boolean", "date", "interval", "numeric", "time",
-        "timestamp", "timestamptz", "xml"
+        "timestamp", "timestamptz", "xml", "point", "line", "lseg",
+        "box", "path", "polygon", "circle"
     };
     if (typedLiteralNames.count(typedLiteralName) &&
         pos + 1 < tokens.size() && tokens[pos + 1].size() >= 2 &&

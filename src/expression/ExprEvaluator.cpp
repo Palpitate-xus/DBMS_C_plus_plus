@@ -9,6 +9,7 @@
 #include "common/DateType.h"
 #include "common/BooleanCodec.h"
 #include "common/NetworkValue.h"
+#include "common/GeometryValue.h"
 #include "common/DbError.h"
 #include "common/NotificationManager.h"
 #include "common/sha256.h"
@@ -1380,6 +1381,12 @@ ExprValue ExprEvaluator::evalLiteral(const LiteralExpr* e) const {
     }
 
     if (!e->typeName.empty()) {
+        if (isGeometryTypeName(e->typeName)) {
+            std::string value;
+            if (!normalizeGeometryText(unquote(raw), e->typeName, value))
+                throw DbError("22P02", "invalid input syntax for type " + e->typeName);
+            return ExprValue(e->typeName, std::move(value), false);
+        }
         if (toLower(e->typeName) == "interval") validateTypedIntervalRange(unquote(raw));
         if (toLower(e->typeName) == "xml") {
             const std::string value = unquote(raw);

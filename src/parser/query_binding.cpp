@@ -1,4 +1,5 @@
 #include "query_binding.h"
+#include "common/GeometryValue.h"
 #include "parser/parser.h"
 #include "catalog/catalog.h"
 #include "common/DbError.h"
@@ -200,6 +201,11 @@ public:
         case ExprType::Literal: {
             auto* literal = static_cast<LiteralExpr*>(node.get());
             if (!literal->typeName.empty()) {
+                if (isGeometryTypeName(literal->typeName)) {
+                    GeometryValue value;
+                    if (!parseGeometryValue(literal->value, literal->typeName, value))
+                        throw DbError("22P02", "invalid input syntax for type " + literal->typeName);
+                }
                 if (metadata.assignmentInput) metadata.assignmentInput({"", literal->typeName}, literal, literal->typeName);
                 return literal->typeName;
             }
