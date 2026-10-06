@@ -1245,38 +1245,25 @@ bool startsWithSqlPhrase(const std::string& sql, const std::string& phrase) {
 }
 
 std::string protocolRelationFromQuery(const std::string& sql) {
-    const std::string lower = lowerProtocolText(sql);
-    size_t from = lower.find(" from ");
-    if (from == std::string::npos) return {};
-    size_t begin = from + 6;
-    while (begin < sql.size() && std::isspace(static_cast<unsigned char>(sql[begin]))) ++begin;
-    if (begin >= sql.size() || sql[begin] == '(') return {};
-    size_t end = begin;
-    if (sql[end] == '"') {
-        ++end;
-        while (end < sql.size()) {
-            if (sql[end] == '"' && end + 1 < sql.size() && sql[end + 1] == '"') {
-                end += 2;
-                continue;
-            }
-            if (sql[end++] == '"') break;
-        }
-    } else {
-        while (end < sql.size() && !std::isspace(static_cast<unsigned char>(sql[end])) &&
-               sql[end] != ',' && sql[end] != ';' && sql[end] != ')') {
-            ++end;
+    SQLParser parser;
+    const auto parsed = parser.parseForBinding(sql);
+    const auto* select = parsed.success && parsed.stmt
+        ? dynamic_cast<const SelectStmt*>(parsed.stmt.get()) : nullptr;
+    if (!select || select->setOp != SetOp::None || !select->fromClause ||
+        select->fromClause->type != FromItem::Type::Table) return {};
+    // String/comment data and expression grammar (e.g. EXTRACT ... FROM)
+    // never introduce a relation. Only the parser's actual range source can
+    // request physical table-origin metadata for this legacy descriptor.
+    CatalogManager::QualifiedName source;
+    if (!CatalogManager::parseQualifiedName(select->fromClause->tableName, source, true)) return {};
+    if (source.schema.empty()) {
+        for (const auto& cte : select->ctes) {
+            CatalogManager::QualifiedName name;
+            if (CatalogManager::parseQualifiedName(cte.name, name, true) && name.name == source.name)
+                return {};
         }
     }
-    if (end <= begin) return {};
-    std::string relation = trimText(sql.substr(begin, end - begin));
-    if (relation.size() >= 2 && relation.front() == '"' && relation.back() == '"') {
-        relation = relation.substr(1, relation.size() - 2);
-    }
-    const size_t dot = relation.rfind('.');
-    if (dot != std::string::npos && dot + 1 < relation.size()) {
-        relation = relation.substr(dot + 1);
-    }
-    return relation;
+    return source.name;
 }
 
 int16_t protocolTypeSize(uint32_t typeOid, const Column& column) {
