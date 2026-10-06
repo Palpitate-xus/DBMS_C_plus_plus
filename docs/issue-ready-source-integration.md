@@ -246,22 +246,53 @@ NEW NULL, quoted aliases and qualified stars without string-key rebuilding.
 No public header/layout changes: normal3CPP build63840 and repeat/all58
 signatures58730 actually exit0. Combined frozen SHA256 is
 `1db6b18d51701efb91a9757e18d797188b016822d11686e1c9ca65fb97859b82`.
-Current inventory is544native/279registered/58TUs. Eighteen fresh matching
-native49693 actually exit0; twelve wire60365 are live. Both strict18 en_US
-transition matrices repeat/exit0. Sources/headers/tests/registry are frozen.
-No latest full-suite/terminal-wire/all-ASan green is claimed. Full captured
+This checkpoint's inventory is544native/279registered/58TUs. Eighteen fresh
+matching native49693 and all twelve wire60365 actually exit0; both retained
+logs contain their final full selected-set summaries. Both strict18 en_US
+transition matrices repeat/exit0. The source freeze ended after60365's real
+terminal result. No latest full-suite/all-ASan green is claimed. Full captured
 fd gates remain separate; new CASE, ARRAY/concat and FROM/USING public headers
 require complete fresh58 combination builds when their independent fixes
 are verified and integrated, not splicing these old-layout objects.
+
+## CASE and comma-source integrations after the transition gate
+
+| ROOT commit | Independent repair / private donor |
+| --- | --- |
+| b9a3c1ce | Pure builtin CASE common-type selection, static UNKNOWN input/boolean-condition checks, actual implicit coercion nodes and public CastExpr flag; 8e2c2076. |
+| 9ca12bef | Direct INSERT VALUES invokes preparation; VALUES and supported SELECT execute retained prepared coercions and typed source occurrences; bb447a38. |
+| 306facb4 | UPDATE FROM / DELETE USING comma lists become genuine CROSS AST nodes with explicit JOIN precedence; e1194fa7. |
+
+The first two causes have an exact strict PostgreSQL18.6 reference matrix.
+Their optimized immutable prior84 baseline62587 has36 failed assertions;
+the matching new-layout common-type-only matrix76462 still has20 failures,
+not four or zero. Final private fresh all58 development objects46617,
+32native executions across30distinct fixtures and11protocol entry points,
+plus four freshly instrumented native tests using six instrumented production
+units, actually pass. Source/header audits and the uninstrumented remainder
+are explicit in `docs/issue-case-common-types-and-insert-consumers.md`.
+
+The separate comma grammar fixture preserves the actual previous parser
+assertion failure134 and the PostgreSQL47-control matrix, including its
+original comma-source late-cast SQL. It is not FROM/USING runtime closure;
+that candidate has independently reproduced WHERE-false/NULL ON side effects
+and FULL-USING INTEGER/BIGINT merged-key overflow under further repair.
+See `docs/issue-dml-comma-source-grammar.md`.
+
+Current ROOT inventory after these commits is546native/280registered/58TUs.
+CastExpr's public layout changed. No normal fresh ROOT combination build or
+current full-suite pass is claimed yet; the preceding1db6 frozen evidence
+cannot certify this new layout. ARRAY/concat and source-runtime public
+contract integration will likewise require a complete fresh normal58 build.
 
 The isolated official PostgreSQL18.6 build and actual180006 wire reference
 are recorded in `docs/issue-pg18-reference-bootstrap.md`. Six focused original
 matrices plus the original56 sort controls actually pass on18.6; the six old
 17.2 modes also remain passing. Missing XML/TLS/LZ4/ZSTD reference capabilities
 are explicit, not treated as broad18 compatibility proof. Original quantifier
-EXPLAIN/compact syntax, the remaining input/type families, CASE common types,
-OLD/NEW RETURNING namespaces, genuine WITH UPDATE FROM/DELETE USING and wider
-families remain open and are being independently repaired. EXCLUDED and
+EXPLAIN/compact syntax, the remaining input/type families, general CASE
+operator/catalog rules, expanded OLD/NEW RETURNING coverage, genuine WITH
+UPDATE FROM/DELETE USING and wider families remain open. EXCLUDED and
 unknown-input matrices also actually repeat/exit0 on18.6 from ROOT; see
 reference-excluded-pg18.log and reference-unknown-input-pg18.log.
 
