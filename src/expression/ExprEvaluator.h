@@ -100,6 +100,17 @@ public:
     // Analyze collation-bearing result arms without executing the expression.
     // Conflicting explicit collations raise SQLSTATE 42P21 even for zero rows.
     static std::string analyzeExplicitResultCollation(const Expr* expr);
+    static QueryComparisonBinding resolveComparison(const std::string& op,
+        const std::string& leftType, const std::string& rightType);
+    static std::vector<ExprValue> arrayElements(const ExprValue& array);
+    ExprValue comparePrepared(const QueryComparisonBinding& binding,
+        const ExprValue& left, const ExprValue& right) const;
+    ExprValue coerceComparison(const QueryComparisonBinding& binding,
+        const ExprValue& value, bool left) const;
+    static std::string comparisonHashKey(const QueryComparisonBinding& binding,
+        const ExprValue& value, bool left);
+    using QuantifiedExecutor = std::function<ExprValue(const QuantifiedComparisonExpr*,const RowContext&)>;
+    void setQuantifiedExecutor(QuantifiedExecutor executor) { quantifiedExecutor_ = std::move(executor); }
 
     // 注册 / 查找标量函数
     void registerFunction(const std::string& name, ScalarFunction fn);
@@ -134,6 +145,7 @@ private:
     std::map<std::string, char, std::less<>> volatility_;
     std::string currentDB_;
     ScalarSubqueryExecutor scalarSubqueryExecutor_;
+    QuantifiedExecutor quantifiedExecutor_;
 
     void registerBuiltins();
 
@@ -147,6 +159,7 @@ private:
                        const ExprValue& v, const std::string& targetTypeName) const;
     ExprValue evalFunctionCall(const FunctionCallExpr* e, const RowContext& ctx) const;
     ExprValue evalArrayExpr(const ArrayExpr* e, const RowContext& ctx) const;
+    ExprValue evalQuantified(const QuantifiedComparisonExpr* e, const RowContext& ctx) const;
     ExprValue evalRowExpr(const RowExpr* e, const RowContext& ctx) const;
 
     // 辅助

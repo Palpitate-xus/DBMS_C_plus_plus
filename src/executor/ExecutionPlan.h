@@ -80,6 +80,8 @@ public:
     // EXPLAIN must not substitute a separately built display-only tree.
     virtual std::string preparedPlanNodeName() const { return {}; }
     virtual std::vector<Operator*> preparedPlanChildren() const { return {}; }
+    virtual bool supportsPreparedOuterRow() const { return false; }
+    virtual bool bindPreparedOuterRow(const RowContext&) { return false; }
 
     bool hasError() const override { return error_; }
     std::string errorMessage() const override { return errorMessage_; }
@@ -141,23 +143,46 @@ using OpPtr = std::unique_ptr<Operator>;
 class PreparedSourceContextsOp final : public Operator {
 public:
     using Reader = std::function<bool(size_t, RowContext&)>;
-    explicit PreparedSourceContextsOp(Reader reader) : reader_(std::move(reader)) {}
-    bool open() override { clearError(); position_ = 0; row_ = RowContext{}; return true; }
+    using Closer = std::function<void()>;
+    using Rebinder = std::function<void(const RowContext&)>;
+    explicit PreparedSourceContextsOp(Reader reader, Closer closer = {}, Rebinder rebinder = {})
+        : reader_(std::move(reader)), closer_(std::move(closer)), rebinder_(std::move(rebinder)) {}
+    bool open() override {
+        clearError(); position_ = 0; row_ = RowContext{};
+        if (closed_) throw DbError("XX000", "prepared context source must rebind before reopening");
+        return true;
+    }
     bool next(std::string& row) override {
+        if (closed_) throw DbError("XX000", "prepared context source has already been closed");
         if (!reader_(position_, row_)) return false;
         ++position_; row.clear(); return true;
     }
-    void close() override { position_ = 0; row_ = RowContext{}; }
+    void close() override {
+        position_ = 0; row_ = RowContext{};
+        if (closed_) return;
+        closed_ = true; // A throwing close must not execute a second time.
+        if (closer_) closer_();
+    }
     bool supportsPreparedContexts() const override { return true; }
     bool lastPreparedContext(RowContext& row) const override {
         if (!position_) return false;
         row = row_; return true;
     }
     std::string preparedPlanNodeName() const override { return "TypedSource"; }
+    bool supportsPreparedOuterRow() const override { return static_cast<bool>(rebinder_); }
+    bool bindPreparedOuterRow(const RowContext& row) override {
+        if (!rebinder_) return false;
+        close();
+        rebinder_(row); // Purely rebuild the actual source, without next().
+        closed_ = false; return true;
+    }
 private:
     Reader reader_;
+    Closer closer_;
+    Rebinder rebinder_;
     size_t position_ = 0;
     RowContext row_;
+    bool closed_ = false;
 };
 
 struct PlanExecutionResult {
@@ -828,6 +853,8 @@ public:
     }
     void close() override;
     Operator* child() const { return child_.get(); }
+    bool supportsPreparedOuterRow() const override { return child_->supportsPreparedOuterRow(); }
+    bool bindPreparedOuterRow(const RowContext& row) override { return child_->bindPreparedOuterRow(row); }
     size_t limit() const { return limit_; }
     ScanOrigin scanOrigin() const override { return child_->scanOrigin(); }
 
@@ -859,6 +886,8 @@ public:
     }
     void close() override;
     Operator* child() const { return child_.get(); }
+    bool supportsPreparedOuterRow() const override { return child_->supportsPreparedOuterRow(); }
+    bool bindPreparedOuterRow(const RowContext& row) override { return child_->bindPreparedOuterRow(row); }
     size_t offset() const { return offset_; }
 
 private:
@@ -888,6 +917,8 @@ public:
     }
     void close() override;
     Operator* child() const { return child_.get(); }
+    bool supportsPreparedOuterRow() const override { return child_->supportsPreparedOuterRow(); }
+    bool bindPreparedOuterRow(const RowContext& row) override { return child_->bindPreparedOuterRow(row); }
 
 private:
     OpPtr child_;
@@ -1292,7 +1323,17 @@ public:
     static OpPtr buildPreparedSelectPlan(StorageEngine* engine,
         const std::string& dbname, std::shared_ptr<PreparedQuery> prepared,
         SelectStmt* select, const TableSchema& sourceSchema, OpPtr source,
-        const RowContext& outerRow = {}, PreparedChildExecutor childExecutor = {});
+        const RowContext& outerRow = {}, PreparedChildExecutor childExecutor = {},
+        PreparedChildCursorFactory childCursorFactory = {});
+    // Compile a retained SELECT/VALUES child; no SQL is rendered/reparsed and
+    // source execution is driven only by the returned plan's next().
+    static OpPtr buildPreparedQueryPlan(StorageEngine*,const std::string&,
+        std::shared_ptr<PreparedQuery>,const Stmt*,const RowContext& = {});
+    // Query-host set returning roles consume typed datums and emit actual
+    // rows. Returns null when the SELECT has no direct set-returning target.
+    static OpPtr buildPreparedSetReturningPlan(StorageEngine*,const std::string&,
+        std::shared_ptr<PreparedQuery>,SelectStmt*,const RowContext& = {},
+        PreparedChildExecutor = {},PreparedChildCursorFactory = {});
     // Build operator tree for SELECT * FROM t WHERE ... ORDER BY ... LIMIT ...
     static OpPtr buildSelectPlan(StorageEngine* engine, const PlanContext& ctx);
 

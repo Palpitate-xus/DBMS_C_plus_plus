@@ -34,6 +34,10 @@ struct QueryBindingMetadata {
     // query or source row to infer its type/value. source is null when the
     // descriptor has no direct value-expression leaf (star/set/derived).
     std::function<void(const QueryOutputColumn&, const Expr*, const std::string&)> assignmentInput;
+    // Canonical query-host role/signature metadata, not a scalar callback.
+    // A stored routine with the same spelling must never inherit this role.
+    // Appended so existing aggregate initialization keeps its callback roles.
+    std::function<std::optional<QuerySetReturningBinding>(const FunctionCallExpr*)> setReturning;
 };
 struct PreparedQuery {
     struct Use { size_t begin, end, slot; };

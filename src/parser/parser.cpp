@@ -1840,6 +1840,23 @@ static ExprPtr parseComparisonExpr(const std::vector<std::string>& tokens, size_
         };
         if (cmpOps.count(op) == 0) break;
         ++pos;
+        if (pos + 1 < tokens.size() && tokens[pos + 1] == "(") {
+            const auto word = SQLParser::toLower(tokens[pos]);
+            if (word == "any" || word == "some" || word == "all") {
+                ++pos;
+                auto quantified = std::make_unique<QuantifiedComparisonExpr>();
+                quantified->op = op;
+                quantified->quantifier = word == "all" ? QuantifiedComparisonExpr::Quantifier::All
+                    : QuantifiedComparisonExpr::Quantifier::Any;
+                quantified->left = std::move(left);
+                quantified->right = parseRangeExpr(tokens, pos);
+                if (!quantified->left || !quantified->right) return nullptr;
+                quantified->sourceBegin = quantified->left->sourceBegin;
+                quantified->sourceEnd = quantified->right->sourceEnd;
+                left = std::move(quantified);
+                continue;
+            }
+        }
         auto bin = std::make_unique<BinaryOpExpr>();
         bin->op = op;
         bin->left = std::move(left);
@@ -2858,6 +2875,18 @@ static std::unique_ptr<FromItem> parseFromAtom(const std::vector<std::string>& t
     } else if (pos < tokens.size() && !SQLParser::isKeyword(tokens[pos])
                && tokens[pos] != "," && tokens[pos] != ")") {
         item->alias = tokens[pos++];
+    }
+
+    if(!item->alias.empty() && pos<tokens.size() && tokens[pos]=="(") {
+        ++pos;
+        while(pos<tokens.size() && tokens[pos]!=")") {
+            if(tokens[pos]=="," || tokens[pos]=="(" || tokens[pos]==";" || SQLParser::isKeyword(tokens[pos]))return nullptr;
+            item->columnAliases.push_back(tokens[pos++]);
+            if(pos<tokens.size() && tokens[pos]==","){++pos;if(pos>=tokens.size() || tokens[pos]==")")return nullptr;}
+            else break;
+        }
+        if(item->columnAliases.empty() || pos>=tokens.size() || tokens[pos]!=")")return nullptr;
+        ++pos;
     }
 
     return item;

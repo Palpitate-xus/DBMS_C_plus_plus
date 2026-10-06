@@ -2043,6 +2043,8 @@ std::string whereUnknownFunctionError(const std::string& sql,
                 visit(unary->operand.get());
             } else if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(expr)) {
                 visit(binary->left.get()); visit(binary->right.get());
+            } else if (const auto* quantified = dynamic_cast<const QuantifiedComparisonExpr*>(expr)) {
+                visit(quantified->left.get()); visit(quantified->right.get());
             } else if (const auto* cast = dynamic_cast<const CastExpr*>(expr)) {
                 visit(cast->operand.get());
             } else if (const auto* conditional = dynamic_cast<const CaseExpr*>(expr)) {
@@ -3585,6 +3587,13 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
             result.sqlState = "54000";
         } else {
             result.sqlState = "XX000";
+        }
+        if(structuredError && structuredDml.available && structuredDml.metadataOnly &&
+            structuredDml.runtimeErrorMetadata && !structuredDml.columns.empty()) {
+            result.resultSet=true;
+            result.columns=structuredDml.columns;result.columnTypes=structuredDml.columnTypes;
+            result.rows.clear();result.nulls.clear();result.commandTag.clear();
+            result.columnDescriptions=describeProtocolColumns(result,sql,session);
         }
         if (statementCommitError && structuredDml.available &&
             !structuredDml.metadataOnly) {

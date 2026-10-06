@@ -38,6 +38,10 @@ ExprPtr copyExpression(const Expr* source, std::map<const Expr*, const Expr*>& s
         auto target = std::make_unique<BinaryOpExpr>(); target->op = node->op;
         target->arrayConcat = node->arrayConcat;
         target->left = copy(node->left); target->right = copy(node->right); result = std::move(target);
+    } else if (const auto* node = dynamic_cast<const QuantifiedComparisonExpr*>(source)) {
+        auto target = std::make_unique<QuantifiedComparisonExpr>();
+        target->op=node->op;target->quantifier=node->quantifier;target->comparison=node->comparison;
+        target->left=copy(node->left);target->right=copy(node->right);result=std::move(target);
     } else if (const auto* node = dynamic_cast<const CastExpr*>(source)) {
         auto target = std::make_unique<CastExpr>(); target->typeName = node->typeName;
         target->implicit = node->implicit;
@@ -51,6 +55,7 @@ ExprPtr copyExpression(const Expr* source, std::map<const Expr*, const Expr*>& s
     } else if (const auto* node = dynamic_cast<const FunctionCallExpr*>(source)) {
         auto target = std::make_unique<FunctionCallExpr>();
         target->schema = node->schema; target->funcName = node->funcName;
+        target->setReturning = node->setReturning;
         target->distinct = node->distinct; target->orderBy = node->orderBy; target->hasOver = node->hasOver;
         for (const auto& arg : node->args) target->args.push_back(copy(arg));
         // The binder deliberately leaves EXTRACT's unqualified grammar field
@@ -186,6 +191,12 @@ std::optional<ExprValue> simplifyCaseConstants(ExprPtr& expression,
         const auto right = binary->op=="::" ? std::optional<ExprValue>(ExprValue{})
             : simplifyCaseConstants(binary->right,evaluator);
         constant = left.has_value() && right.has_value();
+    } else if (auto* quantified=dynamic_cast<QuantifiedComparisonExpr*>(expression.get())) {
+        simplifyCaseConstants(quantified->left,evaluator);
+        // A prepared SQL child has its own planning boundary, never execute
+        // or fold its result as an outer expression's constant datum.
+        simplifyCaseConstants(quantified->right,evaluator);
+        return std::nullopt;
     } else if (auto* call = dynamic_cast<FunctionCallExpr*>(expression.get())) {
         // Constant arguments can have planning errors even under a volatile
         // routine. The routine itself is never evaluated by this simplifier.
@@ -214,6 +225,9 @@ void planCaseConstants(ExprPtr& expression, const ExprEvaluator& evaluator) {
     else if (auto* binary=dynamic_cast<BinaryOpExpr*>(expression.get())) {
         planCaseConstants(binary->left,evaluator);
         if(binary->op!="::")planCaseConstants(binary->right,evaluator);
+    } else if(auto* quantified=dynamic_cast<QuantifiedComparisonExpr*>(expression.get())) {
+        planCaseConstants(quantified->left,evaluator);
+        planCaseConstants(quantified->right,evaluator);
     } else if (auto* call=dynamic_cast<FunctionCallExpr*>(expression.get())) {
         for(auto& arg:call->args)planCaseConstants(arg,evaluator);
         for(auto& arg:call->namedArgs)planCaseConstants(arg.value,evaluator);
@@ -299,6 +313,9 @@ PreparedQueryExecution::PreparedQueryExecution(std::shared_ptr<PreparedQuery> qu
         if (found == originalSites_.end()) throw DbError("XX000", "compiled child has no prepared site");
         return executeChild(found->second, row);
     });
+    evaluator_.setQuantifiedExecutor([this](const QuantifiedComparisonExpr* expression,const RowContext& row) {
+        return executeQuantified(expression,row);
+    });
 }
 
 bool PreparedQueryExecution::isAncestor(const Stmt* ancestor, const Stmt* descendant) const {
@@ -350,6 +367,10 @@ void PreparedQueryExecution::prepareExpression(Expr* expression) {
     planCaseConstants(compiled,evaluator_);
     evaluator_.bindScalarFunctions(compiled.get(), engine_);
     for (const auto& site : sites) originalSites_[site.first] = site.second;
+    for (const auto& site : sites)
+        if (const auto* quantified=dynamic_cast<const QuantifiedComparisonExpr*>(site.second);
+            quantified && quantified->right && quantified->right->preparedSubquery)
+            quantifiedSites_.insert(quantified);
     compiled_.emplace(expression,std::move(compiled));
     prepared_.insert(expression);
 }
@@ -374,6 +395,8 @@ void PreparedQueryExecution::setQueryExecutor(PreparedChildExecutor executor) {
 }
 
 void PreparedQueryExecution::setChildCursorFactory(PreparedChildCursorFactory factory) {
+    closeChildCursors();
+    quantified_.clear();
     memo_.clear();
     childCursorFactory_ = std::move(factory);
 }
@@ -386,8 +409,133 @@ ExprValue PreparedQueryExecution::evaluate(const Expr* expression, const RowCont
         // A failed child may restore storage caches or abort the statement.
         // Previously successful initplans cannot leak past that boundary.
         memo_.clear();
-        throw;
+        const auto failure=std::current_exception();
+        try {const_cast<PreparedQueryExecution*>(this)->closeChildCursors();} catch (...) {}
+        quantified_.clear();
+        std::rethrow_exception(failure);
     }
+}
+
+PreparedQueryExecution::QuantifiedState& PreparedQueryExecution::quantifiedState(
+    const QuantifiedComparisonExpr* original,const RowContext& row) const {
+    const auto* child=original->right.get();
+    const auto found=children_.find(child);
+    if (found==children_.end() || !original->comparison || !childCursorFactory_)
+        throw DbError("0A000","quantified SQL requires its original prepared child cursor");
+    auto [position,inserted]=quantified_.try_emplace(child);
+    auto& state=position->second;
+    if (inserted || !state.cursor) {
+        state.cursor=childCursorFactory_(child->preparedSubquery.get(),row);
+        if (!state.cursor) throw DbError("XX000","quantified factory returned no child cursor");
+        const auto output=query_->statementOutputs.find(child->preparedSubquery.get());
+        const auto& descriptor=state.cursor->descriptor();
+        if (output==query_->statementOutputs.end() || output->second.size()!=1 || descriptor.size()!=1 ||
+            ExprHelper::canonicalResultTypeName(descriptor.front().type)!=
+                ExprHelper::canonicalResultTypeName(output->second.front().type))
+            throw DbError("XX000","quantified cursor lost its declared descriptor");
+        if (!found->second.correlations.empty() && !state.cursor->supportsRestart())
+            throw DbError("0A000","correlated query source requires a parameterized cursor provider");
+    }
+    return state;
+}
+
+void PreparedQueryExecution::prepareChildCursors() {
+    for (const auto* site:quantifiedSites_) (void)quantifiedState(site,context());
+}
+void PreparedQueryExecution::closeChildCursors() {
+    std::exception_ptr failure;
+    for (auto& site:quantified_) if (site.second.cursor)
+        try {site.second.cursor->close();}catch(...){if(!failure)failure=std::current_exception();}
+    if(failure)std::rethrow_exception(failure);
+}
+std::vector<Operator*> PreparedQueryExecution::childPlans(const Expr* scope) const {
+    std::set<const Expr*> sites;
+    std::function<void(const Expr*)> gather=[&](const Expr* node) {
+        if(!node || node->preparedSubquery)return;
+        if(const auto* quantified=dynamic_cast<const QuantifiedComparisonExpr*>(node)) {
+            if(quantified->right && quantified->right->preparedSubquery)sites.insert(quantified->right.get());
+            gather(quantified->left.get());gather(quantified->right.get());
+        } else if(const auto* binary=dynamic_cast<const BinaryOpExpr*>(node)) {gather(binary->left.get());gather(binary->right.get());}
+        else if(const auto* unary=dynamic_cast<const UnaryOpExpr*>(node))gather(unary->operand.get());
+        else if(const auto* cast=dynamic_cast<const CastExpr*>(node))gather(cast->operand.get());
+        else if(const auto* conditional=dynamic_cast<const CaseExpr*>(node)) {
+            gather(conditional->switchExpr.get());gather(conditional->elseExpr.get());
+            for(const auto& arm:conditional->whenClauses){gather(arm.first.get());gather(arm.second.get());}
+        } else if(const auto* call=dynamic_cast<const FunctionCallExpr*>(node)) {
+            for(const auto& arg:call->args)gather(arg.get());for(const auto& arg:call->namedArgs)gather(arg.value.get());
+        } else if(const auto* array=dynamic_cast<const ArrayExpr*>(node))for(const auto& value:array->elements)gather(value.get());
+    };
+    gather(scope);
+    std::vector<Operator*> plans;
+    for (const auto& site:quantified_) if((!scope || sites.count(site.first)) && site.second.cursor && site.second.cursor->plan())
+        plans.push_back(site.second.cursor->plan());
+    return plans;
+}
+
+ExprValue PreparedQueryExecution::executeQuantified(const QuantifiedComparisonExpr* compiled,
+    const RowContext& row) const {
+    const auto mapped=originalSites_.find(compiled);
+    const auto* original=mapped==originalSites_.end()?nullptr:dynamic_cast<const QuantifiedComparisonExpr*>(mapped->second);
+    if(!original || !compiled->comparison)throw DbError("XX000","quantified expression has no original prepared site");
+    const auto* child=original->right.get();
+    const auto description=children_.find(child);
+    if(description==children_.end())throw DbError("XX000","quantified child belongs to another execution");
+    auto& state=quantifiedState(original,row);
+    const bool correlated=!description->second.correlations.empty();
+    if(correlated) {
+        state.cursor->close();state.cursor->restart(row);
+        state.values.clear();state.hash.clear();state.eof=false;state.hasNull=false;state.hashBuilt=false;
+    }
+    const auto& binding=*compiled->comparison;
+    const bool all=compiled->quantifier==QuantifiedComparisonExpr::Quantifier::All;
+    const auto at=[&](size_t ordinal)->const ExprValue* {
+        if(ordinal<state.values.size())return &state.values[ordinal];
+        if(state.eof)return nullptr;
+        std::vector<ExprValue> cells;
+        if(!state.cursor->next(cells)) {state.cursor->close();state.eof=true;return nullptr;}
+        if(cells.size()!=1 || ExprHelper::canonicalResultTypeName(cells.front().typeName)!=
+            ExprHelper::canonicalResultTypeName(state.cursor->descriptor().front().type))
+            throw DbError("XX000","quantified cursor lost its typed output cell");
+        state.values.push_back(evaluator_.coerceComparison(binding,cells.front(),false));
+        return &state.values.back();
+    };
+    ExprValue answer("boolean",all?"t":"f");
+    if(!all && !correlated && binding.strict && binding.hashable) {
+        if(!state.hashBuilt) {
+            for(size_t i=0;;++i) {
+                const auto* value=at(i);if(!value)break;
+                if(value->isNull)state.hasNull=true;
+                else state.hash.emplace(ExprEvaluator::comparisonHashKey(binding,*value,false),i);
+            }
+            state.hashBuilt=true;
+        }
+        // Empty hashed SQL RHS also skips the left expression altogether.
+        if(state.values.empty())return answer;
+        const auto left=evaluator_.coerceComparison(binding,evaluator_.eval(compiled->left.get(),row),true);
+        if(left.isNull)return ExprValue("boolean","",true);
+        const auto range=state.hash.equal_range(ExprEvaluator::comparisonHashKey(binding,left,true));
+        for(auto item=range.first;item!=range.second;++item) {
+            const auto match=evaluator_.comparePrepared(binding,left,state.values[item->second]);
+            if(!match.isNull && match.asBool())return ExprValue("boolean","t");
+        }
+        // The resolved strict builtin comparator remains authoritative for
+        // mixed representations. This fallback never reexecutes a RHS row.
+        for(const auto& value:state.values)if(!value.isNull && evaluator_.comparePrepared(binding,left,value).asBool())
+            return ExprValue("boolean","t");
+        return state.hasNull?ExprValue("boolean","",true):answer;
+    }
+    bool unknown=false;
+    for(size_t i=0;;++i) {
+        const auto* right=at(i);if(!right)break;
+        // Scan-mode PostgreSQL evaluates its left test expression per RHS
+        // tuple, including cached tuples; an empty child never evaluates it.
+        const auto left=evaluator_.eval(compiled->left.get(),row);
+        const auto truth=evaluator_.comparePrepared(binding,left,*right);
+        if(truth.isNull)unknown=true;
+        else if(truth.asBool()!=all) {answer=ExprValue("boolean",all?"f":"t");unknown=false;break;}
+    }
+    if(correlated)state.cursor->close();
+    return unknown?ExprValue("boolean","",true):answer;
 }
 
 ExprValue PreparedQueryExecution::executeChild(const Expr* expression, const RowContext& row) const {
@@ -494,6 +642,7 @@ void PreparedQueryExecution::indexExpression(const Expr* expression, const Stmt*
     const auto value = [&](const ExprPtr& node) { indexExpression(node.get(), owner); };
     if (const auto* node = dynamic_cast<const UnaryOpExpr*>(expression)) value(node->operand);
     else if (const auto* node = dynamic_cast<const BinaryOpExpr*>(expression)) { value(node->left); value(node->right); }
+    else if (const auto* node = dynamic_cast<const QuantifiedComparisonExpr*>(expression)) { value(node->left); value(node->right); }
     else if (const auto* node = dynamic_cast<const CastExpr*>(expression)) value(node->operand);
     else if (const auto* node = dynamic_cast<const CaseExpr*>(expression)) {
         value(node->switchExpr); value(node->elseExpr);

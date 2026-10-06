@@ -1,5 +1,6 @@
 #include "ExprEvaluator.h"
 #include "arithmetic_type.h"
+#include "equality_type.h"
 #include "expr_helper.h"
 #include "utils/interval.h"
 #include "commands/TableManage.h"
@@ -48,6 +49,12 @@
 extern dbms::StorageEngine g_engine;
 
 namespace dbms {
+static bool parseArrayElements(const std::string&, std::vector<std::string>&);
+static std::string arrayElemUnquote(const std::string&);
+static float parseRealCastValue(const ExprValue& value);
+static double parseDoubleCastValue(const ExprValue& value);
+template <typename Floating>
+static std::string formatFloatingCastValue(Floating value);
 
 // ============================================================================
 // ExprValue helpers
@@ -127,9 +134,24 @@ static std::string explicitResultCollation(const Expr* expression,
         }
         case ExprType::CastExpr: {
             const auto* cast = static_cast<const CastExpr*>(expression);
-            return isCollatableCastTarget(cast->typeName)
+            std::string target=cast->typeName;
+            if(target.size()>=2 && target.compare(target.size()-2,2,"[]")==0)target.resize(target.size()-2);
+            return isCollatableCastTarget(target)
                 ? explicitResultCollation(cast->operand.get(), validateName)
                 : std::string{};
+        }
+        case ExprType::ArrayExpr: {
+            std::string result;
+            for(const auto& item:static_cast<const ArrayExpr*>(expression)->elements)
+                result=mergeExplicitCollations(result,explicitResultCollation(item.get(),validateName));
+            return result;
+        }
+        case ExprType::Literal: {
+            // A SQL sublink carries its actual prepared child, not a scalar
+            // datum or a token whose spelling can supply a collation.
+            const auto* select=dynamic_cast<const SelectStmt*>(expression->preparedSubquery.get());
+            if(!select || select->selectList.size()!=1)return {};
+            return explicitResultCollation(select->selectList.front().expr.get(),validateName);
         }
         case ExprType::BinaryOp: {
             const auto* binary = static_cast<const BinaryOpExpr*>(expression);
@@ -531,6 +553,7 @@ ExprValue ExprEvaluator::eval(const Expr* expr, const RowContext& ctx) const {
         case ExprType::RowExpr:      return evalRowExpr(static_cast<const RowExpr*>(expr), ctx);
         case ExprType::Subquery:     return ExprValue{}; // not supported in Wave 0
         case ExprType::Parameter:    return ctx.parameter(static_cast<const ParameterExpr*>(expr)->slot);
+        case ExprType::QuantifiedComparison: return evalQuantified(static_cast<const QuantifiedComparisonExpr*>(expr),ctx);
         case ExprType::A_Star:       return ExprValue{};
     }
     return ExprValue{};
@@ -1846,6 +1869,95 @@ ExprValue ExprEvaluator::applyComparison(const std::string& op,
     else if (cmp == ">=") result = c >= 0;
 
     return ExprValue("boolean", result ? "t" : "f", false);
+}
+
+QueryComparisonBinding ExprEvaluator::resolveComparison(const std::string& rawOp,
+    const std::string& rawLeft, const std::string& rawRight) {
+    QueryComparisonBinding binding;
+    binding.op = rawOp == "!=" ? "<>" : rawOp;
+    const auto types=resolveBuiltinEquality(rawLeft,rawRight);
+    binding.leftType=types.first;binding.rightType=types.second;
+    static const std::set<std::string> operations={"=","<>","<",">","<=",">="};
+    static const std::set<std::string> numeric={"smallint","integer","bigint","real","double precision","numeric"};
+    static const std::set<std::string> textual={"text","bpchar","name"};
+    static const std::set<std::string> temporal={"date","timestamp","timestamptz"};
+    const bool numbers=numeric.count(binding.leftType) && numeric.count(binding.rightType);
+    const bool strings=textual.count(binding.leftType) && textual.count(binding.rightType);
+    const bool timestamps=temporal.count(binding.leftType) && temporal.count(binding.rightType);
+    const bool same=binding.leftType==binding.rightType &&
+        (binding.leftType=="boolean" || binding.leftType=="uuid" || binding.leftType=="bytea" ||
+         binding.leftType=="time" || binding.leftType=="interval");
+    if (!operations.count(binding.op) || (!numbers && !strings && !timestamps && !same))
+        throw DbError("42883","operator does not exist: " + binding.leftType + " " + rawOp + " " + binding.rightType);
+    binding.identity="builtin-comparison:"+binding.op+"("+binding.leftType+","+binding.rightType+")";
+    binding.strict=true;
+    // Capability is attached to the resolved typed implementation. Unknown
+    // operators/custom datatypes never reach an equality/hash fallback.
+    binding.hashable=binding.op=="=" && (numbers || strings || binding.leftType=="boolean" || binding.leftType=="interval");
+    return binding;
+}
+
+ExprValue ExprEvaluator::coerceComparison(const QueryComparisonBinding& binding,
+    const ExprValue& value, bool left) const {
+    if (binding.identity.empty() || !binding.strict) throw DbError("XX000","comparison has no prepared implementation");
+    const auto& target=left?binding.leftType:binding.rightType;
+    ExprValue result=value;
+    const auto source=common_type_detail::canonical(value.typeName);
+    if(source!=target) {
+        if(value.isNull)result=ExprValue(target,"",true);
+        else if(source=="real" && target=="double precision")
+            result=ExprValue(target,formatFloatingCastValue(static_cast<double>(parseRealCastValue(value))));
+        else if(target=="bpchar")result.typeName=target; // implicit, unconstrained CHAR
+        else result=evalCast(nullptr,RowContext{},value,target);
+    }
+    result.typeName=target;
+    if (!binding.collation.empty()) result.collation=binding.collation;
+    return result;
+}
+ExprValue ExprEvaluator::comparePrepared(const QueryComparisonBinding& binding,
+    const ExprValue& left, const ExprValue& right) const {
+    const auto a=coerceComparison(binding,left,true),b=coerceComparison(binding,right,false);
+    if(a.isNull || b.isNull)return ExprValue("boolean","",true);
+    const auto floating=[](const std::string& type){return type=="real" || type=="double precision";};
+    if(floating(binding.leftType) && floating(binding.rightType)) {
+        const double x=binding.leftType=="real"?static_cast<double>(parseRealCastValue(a)):parseDoubleCastValue(a);
+        const double y=binding.rightType=="real"?static_cast<double>(parseRealCastValue(b)):parseDoubleCastValue(b);
+        // PostgreSQL orders NaN above non-NaN and treats two NaNs as equal.
+        const int comparison=std::isnan(x)?(std::isnan(y)?0:1):std::isnan(y)?-1:(x>y)-(x<y);
+        const bool truth=binding.op=="="?comparison==0:binding.op=="<>"?comparison!=0:
+            binding.op=="<"?comparison<0:binding.op==">"?comparison>0:
+            binding.op=="<="?comparison<=0:comparison>=0;
+        return ExprValue("boolean",truth?"t":"f");
+    }
+    return applyComparison(binding.op,a,b);
+}
+std::string ExprEvaluator::comparisonHashKey(const QueryComparisonBinding& binding,
+    const ExprValue& value, bool left) {
+    if (!binding.hashable || !binding.strict || binding.identity.empty() || value.isNull)
+        throw DbError("XX000","comparison has no non-NULL hash implementation");
+    const auto type=common_type_detail::canonical(value.typeName);
+    if (type!=(left?binding.leftType:binding.rightType)) throw DbError("XX000","comparison hash received an uncoerced cell");
+    static const std::set<std::string> numeric={"smallint","integer","bigint","real","double precision","numeric"};
+    if(type=="real" || type=="double precision") {
+        double number=type=="real"?static_cast<double>(parseRealCastValue(value)):parseDoubleCastValue(value);
+        if(number==0)number=0; // signed zeros are operator-equal
+        return "float:"+formatFloatingCastValue(number);
+    }
+    if(type=="interval") {
+        __int128 number=preparedIntervalValue(value);
+        const bool negative=number<0;if(negative)number=-number;
+        std::string key;
+        do{key.push_back('0'+number%10);number/=10;}while(number);
+        if(negative)key.push_back('-');std::reverse(key.begin(),key.end());return "interval:"+key;
+    }
+    Column column;
+    const auto hashType=numeric.count(type)?"numeric":type=="boolean"?"boolean":"text";
+    const auto error=TypeRegistry::instance().resolveColumnType(column,hashType,{},false);
+    if (!error.empty()) throw DbError("XX000",error);
+    column.collation=binding.collation.empty()?value.collation:binding.collation;
+    std::string text=value.value;
+    if(type=="bpchar")while(!text.empty() && text.back()==' ')text.pop_back();
+    return StorageEngine::groupingValueKey(column,text,false);
 }
 
 // ----------------------------------------------------------------------------
@@ -4659,7 +4771,7 @@ void ExprEvaluator::bindScalarFunctions(Expr* expression, StorageEngine* engine)
         if (!node) return;
         if (auto* function = dynamic_cast<FunctionCallExpr*>(node)) {
             const auto resolved = resolveScalarFunction(*this, function, currentDB_, engine);
-            if (!resolved.found)
+            if (!resolved.found && !function->setReturning)
                 throw DbError("42883", "function does not exist: " + function->funcName);
             if (resolved.stored) {
                 if (function->hasOver || function->distinct || function->filter ||
@@ -4670,10 +4782,10 @@ void ExprEvaluator::bindScalarFunctions(Expr* expression, StorageEngine* engine)
                 registerFunction(key, BoundScalarRoutine{engine, currentDB_, resolved},
                                  resolved.routine.provolatile);
                 function->funcName = key;
-            } else {
+            } else if(!function->setReturning) {
                 function->funcName = resolved.name;
             }
-            function->schema.clear();
+            if(!function->setReturning)function->schema.clear();
             for (auto& arg : function->args) visit(arg.get());
             for (auto& arg : function->namedArgs) visit(arg.value.get());
             visit(function->filter.get());
@@ -4686,6 +4798,8 @@ void ExprEvaluator::bindScalarFunctions(Expr* expression, StorageEngine* engine)
         } else if (auto* binary = dynamic_cast<BinaryOpExpr*>(node)) {
             visit(binary->left.get());
             if (binary->op != "::") visit(binary->right.get());
+        } else if (auto* quantified = dynamic_cast<QuantifiedComparisonExpr*>(node)) {
+            visit(quantified->left.get()); visit(quantified->right.get());
         } else if (auto* cast = dynamic_cast<CastExpr*>(node)) {
             visit(cast->operand.get());
         } else if (auto* conditional = dynamic_cast<CaseExpr*>(node)) {
@@ -4707,6 +4821,7 @@ void ExprEvaluator::bindScalarFunctions(Expr* expression, StorageEngine* engine)
 
 ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowContext& ctx) const {
     if (!e) return ExprValue{};
+    if(e->setReturning)throw DbError("0A000","set-returning routine requires its query-host receiver");
     std::string name = toLower(e->funcName);
     // Keep polymorphic array builtin results typed at the same boundary as
     // ARRAY constructors. The descriptor is read before any argument runs;
@@ -4993,9 +5108,69 @@ ExprValue ExprEvaluator::evalArrayExpr(const ArrayExpr* array, const RowContext&
             nestedWidth=elements.size();output+=value.value;
         }else{value=evalCast(nullptr,row,value,elementType);output+=value.isNull?"NULL":arrayElemQuote(value.value);}
     }
-    if(nested && nestedWidth==0)return ExprValue(elementType+"[]","{}",false);
+    const auto result=[&](std::string value){ExprValue cell(elementType+"[]",std::move(value));cell.collation=explicitResultCollation(array);return cell;};
+    if(nested && nestedWidth==0)return result("{}");
     if(!arrayShapeOf(output+'}'))throw DbError("2202E","multidimensional arrays must have matching dimensions");
-    return ExprValue(elementType+"[]",output+'}',false);
+    return result(output+'}');
+}
+
+ExprValue ExprEvaluator::evalQuantified(const QuantifiedComparisonExpr* expression,const RowContext& row) const {
+    if (!expression || !expression->comparison) throw DbError("XX000","quantified comparison was not prepared");
+    if (expression->right && expression->right->preparedSubquery) {
+        if (!quantifiedExecutor_) throw DbError("0A000","quantified SQL requires its prepared query cursor");
+        return quantifiedExecutor_(expression,row);
+    }
+    // Scalar-array arguments are evaluated once, completely, in their
+    // ordinary left-to-right order before element comparison may stop.
+    const auto left=eval(expression->left.get(),row);
+    const auto array=eval(expression->right.get(),row);
+    if (array.isNull) return ExprValue("boolean","",true);
+    std::vector<std::string> elements;
+    std::function<void(const std::string&)> flatten=[&](const std::string& input) {
+        std::vector<std::string> fields;
+        if(!parseArrayElements(input,fields))throw DbError("22P02","malformed array literal");
+        for(const auto& field:fields) {
+            if(!field.empty() && field.front()=='{')flatten(field);
+            else elements.push_back(field);
+        }
+    };
+    flatten(array.value);
+    const bool all=expression->quantifier==QuantifiedComparisonExpr::Quantifier::All;
+    bool unknown=false;
+    for (const auto& token:elements) {
+        const auto text=trimStr(token);
+        const bool quoted=text.size()>=2 && text.front()=='"' && text.back()=='"';
+        const std::string arrayType=common_type_detail::canonical(array.typeName);
+        if(!common_type_detail::array(arrayType))throw DbError("XX000","quantified ARRAY lost its typed datum");
+        ExprValue right(arrayType.substr(0,arrayType.size()-2),arrayElemUnquote(text),!quoted && toLower(text)=="null");
+        right.collation=array.collation;
+        const auto truth=comparePrepared(*expression->comparison,left,right);
+        if (truth.isNull) unknown=true;
+        else if (truth.asBool()!=all) return ExprValue("boolean",all?"f":"t");
+    }
+    return unknown?ExprValue("boolean","",true):ExprValue("boolean",all?"t":"f");
+}
+
+std::vector<ExprValue> ExprEvaluator::arrayElements(const ExprValue& array) {
+    const std::string type=common_type_detail::canonical(array.typeName);
+    if(!common_type_detail::array(type))throw DbError("42809","array receiver requires a declared array datum");
+    std::vector<ExprValue> elements;
+    if(array.isNull)return elements;
+    const auto elementType=type.substr(0,type.size()-2);
+    std::function<void(const std::string&)> flatten=[&](const std::string& input) {
+        std::vector<std::string> fields;
+        if(!parseArrayElements(input,fields))throw DbError("22P02","malformed array literal");
+        for(const auto& field:fields) {
+            if(!field.empty() && field.front()=='{')flatten(field);
+            else {
+                const auto text=trimStr(field);
+                const bool quoted=text.size()>=2 && text.front()=='"' && text.back()=='"';
+                ExprValue value(elementType,arrayElemUnquote(text),!quoted && toLower(text)=="null");
+                value.collation=array.collation;elements.push_back(std::move(value));
+            }
+        }
+    };
+    flatten(array.value);return elements;
 }
 
 ExprValue ExprEvaluator::evalRowExpr(const RowExpr*, const RowContext&) const {

@@ -283,6 +283,7 @@ std::string inferAstResultType(
             return *type;
         return mergeProtocolTypes(left, right);
     }
+    if (dynamic_cast<const QuantifiedComparisonExpr*>(expression)) return "boolean";
     if (const auto* array = dynamic_cast<const ArrayExpr*>(expression)) {
         if (!array->elementType.empty()) return array->elementType + "[]";
         std::vector<std::string> types;
@@ -299,6 +300,7 @@ std::string inferAstResultType(
         return selectCommonType(types,"CASE");
     }
     if (const auto* call = dynamic_cast<const FunctionCallExpr*>(expression)) {
+        if(call->setReturning)return call->setReturning->elementType;
         if (routineTypes) {
             const auto routine = routineTypes->find(call);
             if (routine != routineTypes->end()) return protocolTypeName(routine->second);
@@ -483,6 +485,8 @@ std::map<const Expr*, std::string> collectRoutineResultTypes(
         } else if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(node)) {
             inspect(binary->left.get());
             if (binary->op != "::") inspect(binary->right.get());
+        } else if (const auto* quantified = dynamic_cast<const QuantifiedComparisonExpr*>(node)) {
+            inspect(quantified->left.get()); inspect(quantified->right.get());
         } else if (const auto* cast = dynamic_cast<const CastExpr*>(node)) {
             inspect(cast->operand.get());
         } else if (const auto* conditional = dynamic_cast<const CaseExpr*>(node)) {
@@ -530,6 +534,11 @@ bool countParsedColumnReferences(
                     binary->left.get(), columnName, count) &&
                 countParsedColumnReferences(
                     binary->right.get(), columnName, count);
+        }
+        case ExprType::QuantifiedComparison: {
+            const auto* quantified = static_cast<const QuantifiedComparisonExpr*>(expression);
+            return countParsedColumnReferences(quantified->left.get(),columnName,count) &&
+                countParsedColumnReferences(quantified->right.get(),columnName,count);
         }
         case ExprType::FunctionCall: {
             const auto* function =
@@ -1140,6 +1149,12 @@ std::string ExprHelper::scalarExpressionIdentity(
             return "binary" + field(toLower(binary->op)) + field(key(binary->left.get())) +
                 field(key(binary->right.get()));
         }
+        if (const auto* quantified = dynamic_cast<const QuantifiedComparisonExpr*>(node)) {
+            return "quantified" + field(quantified->op) +
+                field(quantified->quantifier==QuantifiedComparisonExpr::Quantifier::All?"all":"any") +
+                field(quantified->comparison?quantified->comparison->identity:std::string("unprepared")) +
+                field(key(quantified->left.get())) + field(key(quantified->right.get()));
+        }
         if (const auto* cast = dynamic_cast<const CastExpr*>(node)) {
             std::string type = canonicalResultTypeName(cast->typeName);
             for (const auto& modifier : cast->typeMods) type += field(modifier);
@@ -1157,7 +1172,8 @@ std::string ExprHelper::scalarExpressionIdentity(
         if (const auto* function = dynamic_cast<const FunctionCallExpr*>(node)) {
             if (function->hasOver || function->filter || function->distinct || !function->orderBy.empty())
                 throw DbError("0A000", "aggregate/window identity requires a prepared query");
-            const std::string routine = evaluator.scalarFunctionIdentity(function, functionEngine);
+            const std::string routine = function->setReturning?function->setReturning->identity:
+                evaluator.scalarFunctionIdentity(function, functionEngine);
             std::string result = "function" + field(routine);
             for (size_t i = 0; i < function->args.size(); ++i) {
                 const auto* fieldName = dynamic_cast<const ColumnRefExpr*>(function->args[i].get());
@@ -1215,6 +1231,8 @@ std::string ExprHelper::preparedSortExpressionIdentity(
             if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(node)) gatherExpression(unary->operand.get());
             else if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(node)) {
                 gatherExpression(binary->left.get()); gatherExpression(binary->right.get());
+            } else if (const auto* quantified = dynamic_cast<const QuantifiedComparisonExpr*>(node)) {
+                gatherExpression(quantified->left.get()); gatherExpression(quantified->right.get());
             } else if (const auto* cast = dynamic_cast<const CastExpr*>(node)) gatherExpression(cast->operand.get());
             else if (const auto* conditional = dynamic_cast<const CaseExpr*>(node)) {
                 gatherExpression(conditional->switchExpr.get()); gatherExpression(conditional->elseExpr.get());
@@ -1356,6 +1374,7 @@ std::string ExprHelper::preparedSortExpressionIdentity(
                 field(toLower(from->joinType)) + field(fromKey(from->left.get())) + field(fromKey(from->right.get())) +
                 field(expressionKey(from->joinCondition.get())) + field(statementKey(from->subquery.get()));
             for (const auto& column : from->usingCols) key += field(column);
+            for (const auto& column : from->columnAliases) key += field(column);
             return key;
         };
         const auto ctesKey = [&](const std::vector<SelectStmt::CTE>& ctes) {
@@ -1501,6 +1520,20 @@ void ExprHelper::prepareArrayTypes(Expr* expression,
     };
     std::function<void(Expr*,std::string)> visit = [&](Expr* node,std::string context) {
         if (!node || node->preparedSubquery) return;
+        if (auto* quantified = dynamic_cast<QuantifiedComparisonExpr*>(node)) {
+            visit(quantified->left.get(),{}); visit(quantified->right.get(),{});
+            if (!quantified->right || !quantified->left)
+                throw DbError("42601","quantified comparison requires two operands");
+            if (!quantified->right->preparedSubquery) {
+                const auto arrayType=type(quantified->right.get());
+                if (!array_detail::isArray(arrayType))
+                    throw DbError("42809","op ANY/ALL (array) requires array on right side");
+                quantified->comparison=ExprEvaluator::resolveComparison(
+                    quantified->op,type(quantified->left.get()),array_detail::elementType(arrayType));
+                validateConst(quantified->left.get(),quantified->comparison->leftType);
+            }
+            return;
+        }
         if (auto* cast = dynamic_cast<CastExpr*>(node)) { visit(cast->operand.get(),cast->typeName); return; }
         if (auto* binary = dynamic_cast<BinaryOpExpr*>(node)) {
             if (binary->op=="::") {
@@ -2089,6 +2122,8 @@ static ExprEvalResult evalStringImpl(
             // These right-hand nodes are type/collation labels, not values.
             if (binary->op != "::" && binary->op != "COLLATE")
                 visitValueReferences(binary->right.get());
+        } else if (auto* quantified = dynamic_cast<QuantifiedComparisonExpr*>(expression)) {
+            visitValueReferences(quantified->left.get()); visitValueReferences(quantified->right.get());
         } else if (auto* cast = dynamic_cast<CastExpr*>(expression)) {
             visitValueReferences(cast->operand.get());
         } else if (auto* conditional = dynamic_cast<CaseExpr*>(expression)) {

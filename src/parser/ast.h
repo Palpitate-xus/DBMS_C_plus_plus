@@ -273,6 +273,7 @@ enum class ExprType {
     ArrayExpr,
     RowExpr,
     Parameter,
+    QuantifiedComparison,
     A_Star,       // SELECT *
 };
 
@@ -355,6 +356,28 @@ struct BinaryOpExpr : public Expr {
     }
 };
 
+// Pure operator preparation metadata. It records the resolved operand signatures,
+// not evaluated datum spellings; hash capability belongs to this resolved
+// implementation, never to the raw '=' token alone.
+struct QueryComparisonBinding {
+    std::string identity, op, leftType, rightType, collation;
+    bool strict = false;
+    bool hashable = false;
+};
+struct QuantifiedComparisonExpr : public Expr {
+    enum class Quantifier { Any, All };
+    ExprPtr left, right;
+    std::string op;
+    Quantifier quantifier = Quantifier::Any; // SOME canonicalizes to ANY.
+    std::optional<QueryComparisonBinding> comparison;
+    QuantifiedComparisonExpr() { type = ExprType::QuantifiedComparison; }
+    std::string toString() const override {
+        return (left ? left->toString() : "?") + " " + op +
+            (quantifier == Quantifier::Any ? " ANY(" : " ALL(") +
+            (right ? right->toString() : "?") + ")";
+    }
+};
+
 // 窗口函数定义（ also used by FunctionCallExpr for OVER clauses）
 struct WindowDef {
     std::string name;
@@ -367,6 +390,11 @@ struct WindowDef {
 };
 
 // 函数调用
+struct QuerySetReturningBinding {
+    enum class Kind { Unnest };
+    Kind kind = Kind::Unnest;
+    std::string identity, elementType;
+};
 struct FunctionCallExpr : public Expr {
     std::string schema;          // schema-qualified function (pg_catalog.now())
     std::string funcName;
@@ -382,6 +410,7 @@ struct FunctionCallExpr : public Expr {
     std::vector<NamedArg> namedArgs; // func(a => 1, b => 2)
     WindowDef over;              // window specification for row_number() OVER (...)
     bool hasOver = false;        // true if OVER clause was parsed
+    std::optional<QuerySetReturningBinding> setReturning;
 
     FunctionCallExpr() { type = ExprType::FunctionCall; }
     std::string toString() const override;
@@ -664,6 +693,9 @@ struct FromItem {
     Type type = Type::Table;
     std::string tableName;
     std::string alias;
+    // Canonical SQL source-column aliases are metadata, not expressions.
+    // Preserve the list rather than leaving its '(' as ignored tail tokens.
+    std::vector<std::string> columnAliases;
     StmtPtr subquery;          // 子查询 (type == Subquery)
     std::string joinType;      // INNER, LEFT, RIGHT, FULL, CROSS
     std::unique_ptr<FromItem> left;

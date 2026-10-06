@@ -83,6 +83,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/ordinary_scalar_where_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/stored_function_order_execution_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/ordinary_scalar_order_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/quantified_query_demand_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/scalar_subquery_sort_slot_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/aggregate_order_role_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/with_scalar_subquery_protocol_e2e_test.py)

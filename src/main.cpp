@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cctype>
 #include <cmath>
+#include <exception>
 #include <filesystem>
 #include <functional>
 #include <future>
@@ -1660,6 +1661,11 @@ static bool validateValuesExpression(const string& expression,
                     inspect(binary->right.get());
                     return;
                 }
+                case dbms::ExprType::QuantifiedComparison:
+                    // Standalone legacy VALUES has no prepared query-child
+                    // owner. Do not silently classify this new role as a datum.
+                    unsupported = true;
+                    return;
                 case dbms::ExprType::FunctionCall: {
                     const auto* call =
                         static_cast<const dbms::FunctionCallExpr*>(node);
@@ -5216,8 +5222,42 @@ static bool publishExplainPlan(dbms::OpPtr plan, const string& inner,
     return false;
 }
 
+static bool containsPreparedQuantifier(const dbms::Expr* value) {
+    if(!value)return false;
+    if(dynamic_cast<const dbms::QuantifiedComparisonExpr*>(value))return true;
+    if(const auto* binary=dynamic_cast<const dbms::BinaryOpExpr*>(value))
+        return containsPreparedQuantifier(binary->left.get()) || containsPreparedQuantifier(binary->right.get());
+    if(const auto* unary=dynamic_cast<const dbms::UnaryOpExpr*>(value))return containsPreparedQuantifier(unary->operand.get());
+    if(const auto* cast=dynamic_cast<const dbms::CastExpr*>(value))return containsPreparedQuantifier(cast->operand.get());
+    if(const auto* call=dynamic_cast<const dbms::FunctionCallExpr*>(value)){
+        for(const auto& arg:call->args)if(containsPreparedQuantifier(arg.get()))return true;
+        for(const auto& arg:call->namedArgs)if(containsPreparedQuantifier(arg.value.get()))return true;
+    }
+    if(const auto* conditional=dynamic_cast<const dbms::CaseExpr*>(value)){
+        if(containsPreparedQuantifier(conditional->switchExpr.get()) || containsPreparedQuantifier(conditional->elseExpr.get()))return true;
+        for(const auto& arm:conditional->whenClauses)
+            if(containsPreparedQuantifier(arm.first.get()) || containsPreparedQuantifier(arm.second.get()))return true;
+    }
+    if(const auto* array=dynamic_cast<const dbms::ArrayExpr*>(value))
+        for(const auto& arg:array->elements)if(containsPreparedQuantifier(arg.get()))return true;
+    if(const auto* row=dynamic_cast<const dbms::RowExpr*>(value))
+        for(const auto& arg:row->elements)if(containsPreparedQuantifier(arg.get()))return true;
+    return false;
+}
+static bool containsPreparedQuantifier(const dbms::SelectStmt& select) {
+    if(containsPreparedQuantifier(select.whereClause.get()))return true;
+    for(const auto& item:select.selectList)if(containsPreparedQuantifier(item.expr.get()))return true;
+    for(const auto& item:select.orderBy)if(containsPreparedQuantifier(item.expr.get()))return true;
+    for(const auto& row:select.valuesRows)for(const auto& item:row)if(containsPreparedQuantifier(item.get()))return true;
+    return false;
+}
+// The later statement-owned provider keeps lexical CTE producers alive while
+// this exact tree is analyzed, and completes write CTEs only after success.
+static bool explainPreparedQuantifiedQuery(Session&,const string&,
+    const dbms::QueryPlanner::ExplainOptions&,bool);
+
 static bool explainNeedsTypedPlan(const dbms::SelectStmt& select) {
-    if (!select.fromClause || !select.fromClause->alias.empty() || select.offset ||
+    if (containsPreparedQuantifier(select) || !select.fromClause || !select.fromClause->alias.empty() || select.offset ||
         (select.limit && !*select.limit) || select.orderBy.size() > 1) return true;
     std::function<bool(const dbms::Expr*)> typed = [&](const dbms::Expr* expression) {
         if (!expression) return false;
@@ -5289,6 +5329,8 @@ static bool handleExplain(const string& sql, Session& s) {
     dbms::SQLParser explainParser;
     auto explained = explainParser.parseForBinding(inner);
     auto* explainedSelect = explained.success ? dynamic_cast<dbms::SelectStmt*>(explained.stmt.get()) : nullptr;
+    if(explainedSelect && containsPreparedQuantifier(*explainedSelect))
+        return explainPreparedQuantifiedQuery(s,inner,opts,isJson);
     if (explainedSelect && dbms::QueryPlanner::supportsPreparedSelectPlan(*explainedSelect)) {
         // Pure preparation must precede any source startup or writer call,
         // including queries that yield no rows and plain EXPLAIN cache hits.
@@ -8201,6 +8243,11 @@ static bool validateFromlessColumnBindings(const string& expression,
                     inspect(binary->right.get());
                     return;
                 }
+                case dbms::ExprType::QuantifiedComparison: {
+                    const auto* quantified = static_cast<const dbms::QuantifiedComparisonExpr*>(node);
+                    inspect(quantified->left.get()); inspect(quantified->right.get());
+                    return;
+                }
                 case dbms::ExprType::FunctionCall: {
                     const auto* call =
                         static_cast<const dbms::FunctionCallExpr*>(node);
@@ -8318,6 +8365,11 @@ static string ungroupedProjectionColumn(
                         static_cast<const dbms::BinaryOpExpr*>(node);
                     inspect(binary->left.get());
                     inspect(binary->right.get());
+                    return;
+                }
+                case dbms::ExprType::QuantifiedComparison: {
+                    const auto* quantified = static_cast<const dbms::QuantifiedComparisonExpr*>(node);
+                    inspect(quantified->left.get()); inspect(quantified->right.get());
                     return;
                 }
                 case dbms::ExprType::FunctionCall: {
@@ -13915,6 +13967,7 @@ static void substituteLateralBareScalarTargets(
                         collect(element.get());
                     return;
                 case dbms::ExprType::Subquery:
+                case dbms::ExprType::QuantifiedComparison:
                 case dbms::ExprType::Parameter:
                 case dbms::ExprType::A_Star:
                     unsupported = true;
@@ -14578,6 +14631,10 @@ static std::string rewriteLateralOuterFrame(
                     collect(binary->left.get());
                     if (binary->op != "::") collect(binary->right.get());
                     return;
+                }
+                case dbms::ExprType::QuantifiedComparison: {
+                    const auto* quantified=static_cast<const dbms::QuantifiedComparisonExpr*>(node);
+                    collect(quantified->left.get());collect(quantified->right.get());return;
                 }
                 case dbms::ExprType::CastExpr:
                     collect(static_cast<const dbms::CastExpr*>(node)->operand.get());
@@ -19638,6 +19695,7 @@ class PreparedWithDmlRuntime {
     dbms::WithStmt* root_;
     dbms::SelectStmt* readRoot_;
     dbms::PreparedQueryExecution validation_;
+    Frames queryFrames_;
 
     vector<string> selectedColumns(const dbms::Stmt* root,
                                    const dbms::PreparedQuery::SourceRange& source) const {
@@ -19648,9 +19706,12 @@ class PreparedWithDmlRuntime {
             if (value->preparedSubquery) statement(value->preparedSubquery.get());
             if (const auto* column=dynamic_cast<const dbms::ColumnRefExpr*>(value)) {
                 if (column->binding && column->binding->sourceOrdinal==source.ordinal)
-                    names.insert(source.columns.at(column->binding->columnOrdinal).name);
+                    names.insert(source.relationName.empty() ? source.columns.at(column->binding->columnOrdinal).name :
+                        g_engine.getTableSchema(session_.currentDB,physical(source,session_)).cols[column->binding->columnOrdinal].dataName);
             } else if (const auto* binary=dynamic_cast<const dbms::BinaryOpExpr*>(value)) {
                 expression(binary->left.get()); expression(binary->right.get());
+            } else if (const auto* quantified=dynamic_cast<const dbms::QuantifiedComparisonExpr*>(value)) {
+                expression(quantified->left.get());expression(quantified->right.get());
             } else if (const auto* unary=dynamic_cast<const dbms::UnaryOpExpr*>(value)) expression(unary->operand.get());
             else if (const auto* cast=dynamic_cast<const dbms::CastExpr*>(value)) expression(cast->operand.get());
             else if (const auto* call=dynamic_cast<const dbms::FunctionCallExpr*>(value)) {
@@ -19696,7 +19757,9 @@ class PreparedWithDmlRuntime {
             const auto* column=dynamic_cast<const dbms::ColumnRefExpr*>(target.expr.get());
             if ((target.expr && target.expr->type==dbms::ExprType::A_Star) ||
                 (literal && literal->value=="*") || (column && column->column=="*"))
-                for (const auto& cell:source.columns) names.insert(cell.name);
+                for(size_t i=0;i<source.columns.size();++i)
+                    names.insert(source.relationName.empty() ? source.columns[i].name :
+                        g_engine.getTableSchema(session_.currentDB,physical(source,session_)).cols[i].dataName);
         }
         return {names.begin(),names.end()};
     }
@@ -19798,17 +19861,22 @@ class PreparedWithDmlRuntime {
         function<void(DmlSourceNode&)> load;
         function<bool(size_t,dbms::RowContext&)> read;
         function<void()> close;
-        bool loaded=false;
+        bool loaded=false,closed=false;
+        void closeSource() {
+            if(closed)return;
+            closed=true;
+            if(close)close();
+        }
         bool readAt(size_t index,dbms::RowContext& row) {
             if(index<rows.size()){row=rows[index];return true;}
             if(loaded)return false;
             if(!read){load(*this);loaded=true;return readAt(index,row);}
             if(index!=rows.size())throw dbms::DbError("XX000","logical source read skipped its demand ordinal");
-            if(!read(index,row)){loaded=true;if(close)close();return false;}
+            if(!read(index,row)){loaded=true;closeSource();return false;}
             rows.push_back(row);return true;
         }
         void ensure(){dbms::RowContext ignored;while(readAt(rows.size(),ignored)) {}}
-        ~DmlSourceNode(){try{if(close)close();}catch(...) {}}
+        ~DmlSourceNode(){try{closeSource();}catch(...) {}}
     };
     const dbms::PreparedQuery::SourceRange& sourceRange(const dbms::Stmt* owner,
         const dbms::FromItem* source,bool merged=false) const {
@@ -19824,6 +19892,7 @@ class PreparedWithDmlRuntime {
         auto node=make_shared<DmlSourceNode>();
         auto execution=make_shared<dbms::PreparedQueryExecution>(query_,&g_engine,session_.currentDB);
         execution->setQueryExecutor(reader(frames));
+        execution->setChildCursorFactory(cursorFactory(frames));
         if(item->type!=dbms::FromItem::Type::Join) {
             const auto& range=sourceRange(owner,item);
             node->occurrences.push_back(range.ordinal);
@@ -19896,6 +19965,12 @@ class PreparedWithDmlRuntime {
         }
         auto left=sourceNode(owner,item->left.get(),outer,frames);
         auto right=sourceNode(owner,item->right.get(),outer,frames);
+        node->close=[left,right] {
+            std::exception_ptr failure;
+            try{left->closeSource();}catch(...){failure=std::current_exception();}
+            try{right->closeSource();}catch(...){if(!failure)failure=std::current_exception();}
+            if(failure)std::rethrow_exception(failure);
+        };
         const auto joinType=toLower(item->joinType);
         const bool leftJoin=joinType.find("left")!=string::npos || joinType.find("full")!=string::npos;
         const bool rightJoin=joinType.find("right")!=string::npos || joinType.find("full")!=string::npos;
@@ -20032,13 +20107,19 @@ class PreparedWithDmlRuntime {
         };
     }
     dbms::OpPtr selectPlan(dbms::SelectStmt* select,const dbms::RowContext& outer,Frames frames,bool rootDefinitionsProvided=false) {
-        if(!rootDefinitionsProvided && !select->ctes.empty())frames.push_back(definitions(select->ctes,outer));
+        if(!rootDefinitionsProvided && !select->ctes.empty() && (frames.empty() ||
+            !frames.back()->producers.count(select->ctes.front().query.get())))
+            frames.push_back(definitions(select->ctes,outer));
+        if(auto set=dbms::QueryPlanner::buildPreparedSetReturningPlan(&g_engine,session_.currentDB,
+            query_,select,outer,reader(frames),cursorFactory(frames)))return set;
         if(select->command==dbms::SqlCommand::Values) {
             if(!select->orderBy.empty() || select->whereClause || select->setOp!=dbms::SetOp::None)
                 throw dbms::DbError("0A000","WITH VALUES requires additional clause lowering");
             auto execution=make_shared<dbms::PreparedQueryExecution>(query_,&g_engine,session_.currentDB);
             execution->setQueryExecutor(reader(frames));
+            execution->setChildCursorFactory(cursorFactory(frames));
             for(auto& row:select->valuesRows)for(auto& value:row)execution->prepareExpression(value.get());
+            execution->prepareChildCursors();
             const auto descriptor=output(select);
             auto source=make_unique<dbms::PreparedSourceRowsOp>(descriptor,[select,execution,outer,descriptor](size_t index,vector<dbms::ExprValue>& cells){
                 if(index>=select->valuesRows.size())return false;
@@ -20058,12 +20139,25 @@ class PreparedWithDmlRuntime {
         }
         dbms::TableSchema schema;dbms::OpPtr source;
         if(!select->fromClause) {
-            source=make_unique<dbms::PreparedSourceContextsOp>([outer](size_t index,dbms::RowContext& row){row=outer;return index==0;});
+            // The state owns the current outer row; an empty input datum
+            // must not capture the first correlated invocation forever.
+            source=make_unique<dbms::PreparedSourceRowsOp>(dbms::QueryRowDescriptor{},
+                [](size_t index,vector<dbms::ExprValue>& row){row.clear();return index==0;});
         } else {
-            auto node=sourceNode(select,select->fromClause.get(),outer,frames);
-            source=make_unique<dbms::PreparedSourceContextsOp>([node](size_t index,dbms::RowContext& row){
-                return node->readAt(index,row);
-            });
+            auto holder=make_shared<shared_ptr<DmlSourceNode>>(
+                sourceNode(select,select->fromClause.get(),outer,frames));
+            dbms::PreparedSourceContextsOp::Rebinder rebind;
+            if(frames.empty() && select->ctes.empty()) {
+                // Rebuild the real provider and its lazy cursor/cache for
+                // each correlated invocation. Captured CTE frames are not
+                // falsely advertised as restartable by changing only a row.
+                rebind=[this,holder,select,frames](const dbms::RowContext& row) {
+                    *holder=sourceNode(select,select->fromClause.get(),row,frames);
+                };
+            }
+            source=make_unique<dbms::PreparedSourceContextsOp>(
+                [holder](size_t index,dbms::RowContext& row){return (*holder)->readAt(index,row);},
+                [holder]{(*holder)->closeSource();},std::move(rebind));
         }
         if(select->whereClause) {
             const auto type=dbms::ExprHelper::inferParsedResultType(select->whereClause.get(),{},session_.currentDB,&g_engine);
@@ -20076,7 +20170,15 @@ class PreparedWithDmlRuntime {
                 dbms::ExprEvaluator evaluator;(void)evaluator.eval(&cast,dbms::RowContext{});
             }
         }
-        return dbms::QueryPlanner::buildPreparedSelectPlan(&g_engine,session_.currentDB,query_,select,schema,std::move(source),outer,reader(frames));
+        return dbms::QueryPlanner::buildPreparedSelectPlan(&g_engine,session_.currentDB,query_,select,schema,std::move(source),outer,reader(frames),cursorFactory(frames));
+    }
+    dbms::PreparedChildCursorFactory cursorFactory(const Frames& frames) {
+        return [this,frames](const dbms::Stmt* statement,const dbms::RowContext& outer){
+            const auto* select=dynamic_cast<const dbms::SelectStmt*>(statement);
+            if(!select)throw dbms::DbError("42601","quantified child requires SELECT/VALUES");
+            return dbms::QueryPlanner::makePreparedCursor(
+                selectPlan(const_cast<dbms::SelectStmt*>(select),outer,frames),output(statement));
+        };
     }
     void validate(dbms::Stmt* statement,const Frames& frames) {
         if(auto* select=dynamic_cast<dbms::SelectStmt*>(statement)) {
@@ -20104,6 +20206,29 @@ public:
             entry.second->plan.reset();
         }
         for(auto& frame:frames_)frame->producers.clear();
+    }
+    dbms::OpPtr queryPlan() {
+        auto* select=dynamic_cast<dbms::SelectStmt*>(query_->ast.get());
+        if(!select)throw dbms::DbError("42601","prepared query runtime requires SELECT/VALUES");
+        queryFrames_.clear();
+        if(!select->ctes.empty())queryFrames_.push_back(definitions(select->ctes,validation_.context()));
+        // All CTEs are bound already; runtime lowering also finishes pure
+        // validation before any producer is opened, even for LIMIT 0.
+        for(auto& cte:select->ctes) {
+            const bool writer=cte.query->command!=dbms::SqlCommand::Select && cte.query->command!=dbms::SqlCommand::Values;
+            const bool referenced=any_of(query_->sourceRanges.begin(),query_->sourceRanges.end(),[&](const auto& range){return range.cteStatement==cte.query.get();});
+            if(writer || referenced)validate(cte.query.get(),queryFrames_);
+        }
+        return selectPlan(select,validation_.context(),queryFrames_,true);
+    }
+    void finishQueryWrites() {
+        const auto* select=dynamic_cast<const dbms::SelectStmt*>(query_->ast.get());
+        if(!select)return;
+        for(const auto& cte:select->ctes)
+            if(cte.query->command!=dbms::SqlCommand::Select && cte.query->command!=dbms::SqlCommand::Values) {
+                vector<dbms::ExprValue> row;size_t index=0;
+                while(readCte(cte.query.get(),index++,row,queryFrames_)){}
+            }
     }
     dbms::DmlResult run() {
         if(!root_)throw dbms::DbError("XX000","DML runtime requires a genuine DML envelope");
@@ -20216,6 +20341,49 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
         cout<<'\n';
     }
     dbms::publishLastDmlResult(std::move(result));handled=true;return false;
+}
+
+static bool explainPreparedQuantifiedQuery(Session& session,const string& raw,
+    const dbms::QueryPlanner::ExplainOptions& options,bool json) {
+    auto query=make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(session.currentDB,raw));
+    PreparedWithDmlRuntime runtime(session,query);
+    auto plan=runtime.queryPlan();
+    // Writer completion is part of the exact successful statement. The
+    // publication sink remains outer-commit gated by execute().
+    const auto error=publishExplainPlan(std::move(plan),raw,session,options,json);
+    if(options.analyze && !error)runtime.finishQueryWrites();
+    return error;
+}
+
+static bool handlePreparedQuantifiedQuery(const string& raw,Session& session,bool& handled) {
+    handled=false;
+    dbms::SQLParser parser;const auto parsed=parser.parseForBinding(raw);
+    const auto* select=parsed.success?dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()):nullptr;
+    if(!select || !containsPreparedQuantifier(*select))return false;
+    auto query=make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(session.currentDB,raw));
+    PreparedWithDmlRuntime runtime(session,query);
+    auto plan=runtime.queryPlan();
+    dbms::DmlResult descriptor;descriptor.available=true;descriptor.metadataOnly=true;descriptor.runtimeErrorMetadata=true;
+    for(const auto& column:query->output){descriptor.columns.push_back(column.name);descriptor.columnTypes.push_back(column.type);}
+    dbms::PlanExecutionResult result;
+    try {
+        result=dbms::QueryPlanner::executePlanChecked(std::move(plan),currentQueryRowDemand());
+        result.throwIfFailed();
+        runtime.finishQueryWrites();
+    } catch(...) {
+        // Nested SPI captures cannot overwrite the reached outer receiver's
+        // descriptor. Publication here follows failed actual execution only.
+        dbms::publishLastDmlResult(std::move(descriptor));throw;
+    }
+    if(!result.structuredRowsAvailable)throw dbms::DbError("XX000","quantified query lost its typed rows");
+    vector<string> columns,types;
+    for(const auto& column:query->output){columns.push_back(column.name);types.push_back(column.type);}
+    for(const auto& column:columns)cout<<column<<' ';
+    cout<<'\n';
+    for(const auto& row:result.rows)cout<<row<<'\n';
+    publishStructuredUtilityResult(std::move(columns),std::move(types),
+        std::move(result.structuredRows),std::move(result.structuredNulls),"SELECT "+to_string(result.rows.size()));
+    handled=true;return false;
 }
 
 static bool handlePreparedWithDml(const string& rawSql,Session& session,bool& handled) {
@@ -25011,6 +25179,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
 
     if (sql.substr(0, 6) == "select" || sql.substr(0, 5) == "with ") {
         if (!checkDB(s)) return true;
+
+        bool quantifiedHandled=false;
+        const bool quantifiedFailed=handlePreparedQuantifiedQuery(effectiveRawSql,s,quantifiedHandled);
+        if(quantifiedHandled)return quantifiedFailed;
 
         bool preparedCaseHandled=false;
         const bool preparedCaseFailed=handlePreparedCaseQuery(effectiveRawSql,s,preparedCaseHandled);

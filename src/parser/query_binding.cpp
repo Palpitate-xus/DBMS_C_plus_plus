@@ -125,7 +125,13 @@ public:
         input = std::move(cast);
     }
 
-    std::string expression(ExprPtr& node, const std::vector<Namespace>& scopes, const std::string& arrayContext = {}) {
+    static std::string arrayElement(const std::string& type) {
+        auto canonical = ExprHelper::canonicalResultTypeName(type);
+        if (canonical.size() < 2 || canonical.compare(canonical.size()-2,2,"[]") != 0) return {};
+        canonical.resize(canonical.size()-2); return canonical;
+    }
+    std::string expression(ExprPtr& node, const std::vector<Namespace>& scopes,
+                           const std::string& arrayContext = {},bool allowSetReturning=false) {
         if (!node) return "unknown";
         switch (node->type) {
         case ExprType::Parameter: {
@@ -203,7 +209,7 @@ public:
             const auto low = SQLParser::toLower(tokens.front());
             if (low == "true" || low == "false") return "boolean";
             if (low == "null" || tokens.front().front() == '\'') return "unknown";
-            return tokens.front().find_first_of(".eE") == std::string::npos ? "integer" : "numeric";
+            return ExprHelper::inferValuesResultType(literal->value);
         }
         case ExprType::CastExpr: {
             auto* cast = static_cast<CastExpr*>(node.get());
@@ -244,6 +250,44 @@ public:
                 "AND", "OR", "LIKE", "ILIKE", "IN", "NOT IN", "IS DISTINCT FROM", "IS NOT DISTINCT FROM"};
             return predicates.count(binary->op) ? "boolean" : left;
         }
+        case ExprType::QuantifiedComparison: {
+            auto* quantified = static_cast<QuantifiedComparisonExpr*>(node.get());
+            const auto left = expression(quantified->left, scopes);
+            auto right = expression(quantified->right, scopes);
+            const bool query = quantified->right && quantified->right->preparedSubquery;
+            if(query && right=="unknown") {
+                // A SELECT output finalizes UNKNOWN as TEXT before resolving
+                // the outer operator (unlike an ARRAY's context argument).
+                right="text";
+                auto* child=dynamic_cast<SelectStmt*>(quantified->right->preparedSubquery.get());
+                if(!child)throw DbError("42601","quantified child requires SELECT/VALUES");
+                if(child->command==SqlCommand::Values) {
+                    for(auto& row:child->valuesRows) {
+                        if(row.size()!=1)throw DbError("42601","subquery must return only one column");
+                        coerceCaseInput(row.front(),"unknown",right);
+                    }
+                } else {
+                    if(child->selectList.size()!=1)throw DbError("42601","subquery must return only one column");
+                    coerceCaseInput(child->selectList.front().expr,"unknown",right);
+                }
+                result.statementOutputs.at(child).front().type=right;
+                static_cast<LiteralExpr*>(quantified->right.get())->typeName=right;
+            }
+            const auto element = query ? right : arrayElement(right);
+            if (element.empty()) throw DbError("42809", "op ANY/ALL (array) requires array on right side");
+            quantified->comparison = ExprEvaluator::resolveComparison(quantified->op,left,element);
+            const auto lcollation = ExprEvaluator::analyzeExplicitResultCollation(quantified->left.get());
+            const auto rcollation = ExprEvaluator::analyzeExplicitResultCollation(quantified->right.get());
+            if (!lcollation.empty() && !rcollation.empty() && lcollation != rcollation)
+                throw DbError("42P21", "collation mismatch between explicit collations");
+            quantified->comparison->collation = lcollation.empty() ? rcollation : lcollation;
+            if (metadata.assignmentInput) {
+                metadata.assignmentInput({"",quantified->comparison->leftType},quantified->left.get(),left);
+                // A child SQL output is already prepared at its own boundary.
+                if (!query) metadata.assignmentInput({"",right},quantified->right.get(),right);
+            }
+            return "boolean";
+        }
         case ExprType::FunctionCall: {
             auto* call = static_cast<FunctionCallExpr*>(node.get());
             std::string first = "unknown";
@@ -264,6 +308,12 @@ public:
             }
             for (auto& arg : call->namedArgs) expression(arg.value, scopes);
             expression(call->filter, scopes); window(call->over, scopes);
+            call->setReturning=metadata.setReturning?metadata.setReturning(call):std::nullopt;
+            if(call->setReturning) {
+                if(!allowSetReturning)throw DbError("0A000","set-returning functions are not allowed in this expression context");
+                call->setReturning->elementType=ExprHelper::canonicalResultTypeName(call->setReturning->elementType);
+                return call->setReturning->elementType;
+            }
             const auto type = metadata.functionType ? metadata.functionType(call) : std::string();
             return type.empty() ? first : type;
         }
@@ -424,7 +474,8 @@ public:
             const bool columnLabel = dynamic_cast<ColumnRefExpr*>(item.expr.get());
             if (!item.alias.empty()) name = identifier(item.alias);
             else if(const auto label=projectionLabel(item.expr.get());label.second)name=label.first;
-            const auto type = expression(item.expr, scopes);
+            const bool queryTarget=!statementOwners.empty() && statementOwners.back()->command==SqlCommand::Select;
+            const auto type = expression(item.expr, scopes,{},queryTarget);
             if (columnLabel && item.alias.empty() && item.expr->type == ExprType::Parameter) {
                 if (item.sourceExpressionEnd == std::string::npos)
                     throw DbError("XX000", "projection has no source provenance");
@@ -520,8 +571,14 @@ public:
     }
     Namespace from(FromItem* item, const std::vector<Namespace>& outer, const Ctes& ctes) {
         if (!item) return {};
+        const auto aliases=[&](Range range) {
+            if(item->columnAliases.size()>range.columns.size())
+                throw DbError("42P10","source alias has more column names than its relation");
+            for(size_t i=0;i<item->columnAliases.size();++i)range.columns[i].name=identifier(item->columnAliases[i]);
+            return registerSource(std::move(range),item);
+        };
         if (item->type == FromItem::Type::Table)
-            return {registerSource(relation(item->tableName, item->alias, ctes), item)};
+            return {aliases(relation(item->tableName, item->alias, ctes))};
         if (item->type == FromItem::Type::Subquery) {
             if (!item->subquery) throw DbError("42601", "derived query is missing");
             auto derivedOuter = outer;
@@ -530,7 +587,7 @@ public:
             derivedOuter.insert(derivedOuter.begin(), Namespace{});
             auto columns = statement(*item->subquery, derivedOuter, ctes);
             for (auto& column : columns) if (column.type == "unknown") column.type = "text";
-            return {registerSource({"", item->alias.empty() ? "" : identifier(item->alias), std::move(columns)}, item)};
+            return {aliases({"", item->alias.empty() ? "" : identifier(item->alias), std::move(columns)})};
         }
         if (item->type != FromItem::Type::Join) throw DbError("0A000", "source requires structured preparation");
         auto left = from(item->left.get(), outer, ctes);
@@ -813,6 +870,7 @@ void Binder::rebase(Stmt& root, size_t offset) {
         if (value->sourceEnd != std::string::npos) value->sourceEnd += offset;
         if (auto* e = dynamic_cast<UnaryOpExpr*>(value.get())) expr(e->operand);
         else if (auto* e = dynamic_cast<BinaryOpExpr*>(value.get())) { expr(e->left); expr(e->right); }
+        else if (auto* e = dynamic_cast<QuantifiedComparisonExpr*>(value.get())) { expr(e->left); expr(e->right); }
         else if (auto* e = dynamic_cast<CastExpr*>(value.get())) expr(e->operand);
         else if (auto* e = dynamic_cast<FunctionCallExpr*>(value.get())) {
             for (auto& arg : e->args) expr(arg);

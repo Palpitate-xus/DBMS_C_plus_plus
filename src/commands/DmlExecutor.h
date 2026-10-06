@@ -24,6 +24,10 @@ struct DmlResult {
     // Incremental SELECT migration may publish exact RowDescription metadata
     // while rows still come from the legacy text executor.
     bool metadataOnly = false;
+    // A wholly prepared query whose actual executor has started may expose
+    // its descriptor before a runtime error. Never publish partial rows or
+    // a success tag, and never set this for failed preparation.
+    bool runtimeErrorMetadata = false;
     std::vector<std::string> columns;
     // PostgreSQL type names for structured RETURNING columns.  Empty means
     // that the protocol layer should infer metadata from the relation/name.

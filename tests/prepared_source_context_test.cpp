@@ -74,5 +74,56 @@ int main() {
         {"","2","2"},{"9007199254740993","1","1"}}));
     assert((result.structuredNulls == std::vector<std::vector<bool>>{
         {true,false,false},{false,false,false}}));
-    std::cout << "prepared source contexts preserve source identity, NULL, width and view isolation\n";
+    // A logical correlated provider must rebuild its real input/cache with
+    // the next caller row, not merely update a projection's outer context.
+    auto correlated = std::make_shared<PreparedQuery>(prepareQuery(
+        "SELECT id FROM base_rows",{},metadata));
+    auto* correlatedSelect = dynamic_cast<SelectStmt*>(correlated->ast.get());
+    PreparedQueryExecution correlatedBinding(correlated,&engine,"");
+    const auto sourceOrdinal = correlated->sourceRanges.front().ordinal;
+    size_t reads = 0, closes = 0, rebuilds = 0;
+    std::string id = "1";
+    auto correlatedSource = std::make_unique<PreparedSourceContextsOp>(
+        [&](size_t index,RowContext& row) {
+            ++reads;
+            if (index) return false;
+            row = RowContext{};
+            correlatedBinding.setSourceRow(row,sourceOrdinal,
+                {ExprValue("integer",id),ExprValue("bigint","2147483648"),ExprValue("integer","7")});
+            return true;
+        },[&]{++closes;},[&](const RowContext& row) {
+            ++rebuilds;
+            const auto value = row.get("caller_id");
+            assert(value && value->typeName == "integer");
+            id = value->value;
+        });
+    auto correlatedCursor = QueryPlanner::makePreparedCursor(
+        QueryPlanner::buildPreparedSelectPlan(&engine,"",correlated,correlatedSelect,
+            TableSchema{},std::move(correlatedSource)),correlated->output);
+    assert(correlatedCursor->supportsRestart());
+    std::vector<ExprValue> cells;
+    assert(correlatedCursor->next(cells) && cells.front().value == "1");
+    correlatedCursor->close();
+    assert(reads == 1 && closes == 1);
+    RowContext nextCaller; nextCaller.set("caller_id",ExprValue("integer","2"));
+    correlatedCursor->restart(nextCaller);
+    assert(reads == 1 && closes == 1 && rebuilds == 1); // Pure restart.
+    assert(correlatedCursor->next(cells) && cells.front().value == "2");
+    assert(!correlatedCursor->next(cells));
+    correlatedCursor->close();
+    assert(reads == 3 && closes == 2);
+
+    size_t failedCloses = 0;
+    PreparedSourceContextsOp throwingClose(
+        [](size_t,RowContext&){return false;},[&] {
+            ++failedCloses; throw DbError("58030","owned source close failure");
+        });
+    assert(throwingClose.open());
+    rejected = false;
+    try {throwingClose.close();}
+    catch (const DbError& error) {rejected = error.sqlState() == "58030";}
+    assert(rejected);
+    throwingClose.close();
+    assert(failedCloses == 1 && !throwingClose.supportsPreparedOuterRow());
+    std::cout << "prepared source contexts preserve identity, NULL, width, view isolation and real correlated restart\n";
 }

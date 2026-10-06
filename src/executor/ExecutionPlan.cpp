@@ -12,6 +12,7 @@
 #include "expression/ExprEvaluator.h"
 #include "expression/prepared_query_execution.h"
 #include "parser/parser.h"
+#include "Session.h"
 
 #include <algorithm>
 #include <atomic>
@@ -111,7 +112,9 @@ struct PreparedSelectState {
     QueryRowDescriptor output;
     RowContext outerRow;
     PreparedChildExecutor childExecutor;
+    PreparedChildCursorFactory childCursorFactory;
     std::unique_ptr<PreparedQueryExecution> execution;
+    bool executionStarted = false;
     ExprEvaluator evaluator;
     std::vector<Expr*> targets;
     std::vector<ExprPtr> starTargets;
@@ -121,6 +124,7 @@ struct PreparedSelectState {
     static constexpr size_t noTarget = std::numeric_limits<size_t>::max();
     size_t sourceOrdinal = noTarget;
     bool sourceContexts = false;
+    Operator* logicalSource = nullptr; // Owned by the actual operator graph.
     std::vector<const PreparedQuery::SourceRange*> visibleRanges;
     SelectStmt& select() const { return *statement; }
     size_t columnOrdinal(const ColumnRefExpr& column) const {
@@ -191,19 +195,40 @@ struct PreparedSelectState {
         if (value.isUnknown()) throw DbError("0A000", "unsupported prepared expression value");
         return value;
     }
-    void beginExecution() {
+    void prepareExecution() {
+        if (execution) return;
         execution = std::make_unique<PreparedQueryExecution>(query, engine, dbname);
         execution->setQueryExecutor(childExecutor);
+        execution->setChildCursorFactory(childCursorFactory);
         for (auto& target : starTargets)
             execution->prepareProjectionColumn(static_cast<ColumnRefExpr*>(target.get()), statement);
         for (auto* target : targets) execution->prepareExpression(target);
         execution->prepareExpression(select().whereClause.get());
         for (const auto& key : keys)
             if (key.target == noTarget) execution->prepareExpression(key.expression);
+        execution->prepareChildCursors();
+    }
+    void beginExecution() {
+        if (executionStarted) execution.reset();
+        prepareExecution(); executionStarted = true;
+    }
+    bool parameterized() const {
+        // Updating this state alone cannot rebind captured provider cells.
+        // A logical graph advertises restart only through its real factory.
+        if (sourceContexts) return logicalSource && logicalSource->supportsPreparedOuterRow();
+        if (!select().ctes.empty()) return false;
+        if (!select().fromClause) return true;
+        if (select().fromClause->type != FromItem::Type::Table) return false;
+        for (const auto& range:query->sourceRanges)
+            if (range.owner==statement && range.source==select().fromClause.get())
+                return !range.cteStatement;
+        return false;
     }
     bool containsVolatile(const Expr* expression) const {
         if (!expression) return false;
         if (expression->preparedSubquery) return true;
+        if (const auto* quantified=dynamic_cast<const QuantifiedComparisonExpr*>(expression))
+            return containsVolatile(quantified->left.get()) || containsVolatile(quantified->right.get());
         if (auto* call = dynamic_cast<const FunctionCallExpr*>(expression)) {
             if (evaluator.scalarFunctionVolatility(call, engine) == 'v') return true;
             for (const auto& argument : call->args) if (containsVolatile(argument.get())) return true;
@@ -296,8 +321,14 @@ public:
         return child_->lastStructuredRow(cells, nulls);
     }
     ScanOrigin scanOrigin() const override { return child_->scanOrigin(); }
-    std::string preparedPlanNodeName() const override { return "TypedFilter"; }
-    std::vector<Operator*> preparedPlanChildren() const override { return {child_.get()}; }
+    std::string preparedPlanNodeName() const override {
+        const auto children=state_->execution?state_->execution->childPlans(state_->select().whereClause.get()):std::vector<Operator*>{};
+        return children.empty()?"TypedFilter":"QuantifiedSubqueryFilter";
+    }
+    std::vector<Operator*> preparedPlanChildren() const override {
+        auto plans=state_->execution?state_->execution->childPlans(state_->select().whereClause.get()):std::vector<Operator*>{};
+        plans.insert(plans.begin(),child_.get());return plans;
+    }
 };
 
 class PreparedSortOp final : public Operator {
@@ -456,14 +487,34 @@ public:
                 callerNullBinding_.reset();
             }
         };
-        values_.clear();
+        values_.clear();std::exception_ptr failure;
+        // A never-opened metadata graph owns no live child execution. Do
+        // not consume its freshly prepared cursor before the first restart.
+        if(childOpened_ && state_->execution)
+            try {state_->execution->closeChildCursors();}catch(...){failure=std::current_exception();}
         try { if (childOpened_) child_->close(); }
-        catch (...) { childOpened_ = false; restore(); throw; }
+        catch (...) {if(!failure)failure=std::current_exception();}
         childOpened_ = false;
         restore();
+        if(failure)std::rethrow_exception(failure);
     }
     std::string preparedPlanNodeName() const override { return "TypedProject"; }
-    std::vector<Operator*> preparedPlanChildren() const override { return {child_.get()}; }
+    std::vector<Operator*> preparedPlanChildren() const override {
+        // WHERE already exposes these actual child graphs at its filter.
+        std::vector<Operator*> plans;
+        if(state_->execution)for(const auto* target:state_->targets) {
+            auto children=state_->execution->childPlans(target);
+            plans.insert(plans.end(),children.begin(),children.end());
+        }
+        plans.insert(plans.begin(),child_.get());return plans;
+    }
+    bool supportsPreparedOuterRow() const override { return state_->parameterized(); }
+    bool bindPreparedOuterRow(const RowContext& row) override {
+        if (!supportsPreparedOuterRow()) return false;
+        if (state_->sourceContexts && (!state_->logicalSource ||
+            !state_->logicalSource->bindPreparedOuterRow(row))) return false;
+        state_->outerRow=row;return true;
+    }
 };
 
 class PreparedDistinctOp final : public Operator {
@@ -512,8 +563,94 @@ public:
     void close() override { rows_.clear(); position_ = 0; child_->close(); }
     std::string preparedPlanNodeName() const override { return "TypedDistinct"; }
     std::vector<Operator*> preparedPlanChildren() const override { return {child_.get()}; }
+    bool supportsPreparedOuterRow() const override { return child_->supportsPreparedOuterRow(); }
+    bool bindPreparedOuterRow(const RowContext& row) override { return child_->bindPreparedOuterRow(row); }
 };
 } // namespace
+
+namespace {
+// This is an actual ProjectSet execution node. Array expressions are evaluated
+// once on the qualifying input, then their declared cells are emitted lazily.
+// No SQL is rendered/reexecuted to obtain a row or an output descriptor.
+class PreparedSetReturningOp final : public Operator {
+    std::shared_ptr<PreparedQuery> query_;
+    SelectStmt* select_;
+    const FunctionCallExpr* call_;
+    PreparedQueryExecution execution_;
+    RowContext outer_;
+    std::vector<ExprValue> values_;
+    size_t position_=0;
+    bool evaluated_=false,opened_=false;
+    std::optional<StorageEngine::NullRowBindingState> callerNullBinding_;
+public:
+    PreparedSetReturningOp(StorageEngine* engine,const std::string& database,
+        std::shared_ptr<PreparedQuery> query,SelectStmt* select,const RowContext& outer,
+        PreparedChildExecutor reader,PreparedChildCursorFactory cursor)
+        :query_(std::move(query)),select_(select),
+         call_(static_cast<const FunctionCallExpr*>(select->selectList.front().expr.get())),
+         execution_(query_,engine,database),outer_(outer) {
+        execution_.setQueryExecutor(std::move(reader));
+        execution_.setChildCursorFactory(std::move(cursor));
+        execution_.prepareExpression(call_->args.front().get());
+        execution_.prepareExpression(select_->whereClause.get());
+        execution_.prepareChildCursors();
+    }
+    bool open() override {
+        OpenInstrument instrument(this);values_.clear();position_=0;
+        callerNullBinding_=StorageEngine::captureNullRowBinding();
+        evaluated_=false;opened_=true;return true;
+    }
+    bool next(std::string& display) override {
+        NextInstrument instrument(this);
+        checkForQueryInterrupt();
+        if(!evaluated_) {
+            evaluated_=true;auto context=outer_;context.setParameters(query_->parameters);
+            if(select_->whereClause) {
+                const auto filter=execution_.evaluate(select_->whereClause.get(),context);
+                if(filter.isNull || !filter.asBool())return false;
+            }
+            const auto array=execution_.evaluate(call_->args.front().get(),context);
+            values_=ExprEvaluator::arrayElements(array);
+            for(const auto& cell:values_)
+                if(ExprHelper::canonicalResultTypeName(cell.typeName)!=
+                    ExprHelper::canonicalResultTypeName(call_->setReturning->elementType))
+                    throw DbError("XX000","set-returning receiver lost its declared element type");
+        }
+        if(position_==values_.size())return false;
+        const auto& value=values_[position_++];
+        display=value.isNull?"NULL ":value.value+" ";instrument.emitted=true;return true;
+    }
+    bool supportsStructuredRows() const override {return true;}
+    bool lastStructuredValues(std::vector<ExprValue>& row) const override {
+        if(!position_ || position_>values_.size())return false;
+        row={values_[position_-1]};return true;
+    }
+    bool lastStructuredRow(std::vector<std::string>& cells,std::vector<bool>& nulls) const override {
+        if(!position_ || position_>values_.size())return false;
+        const auto& value=values_[position_-1];cells={value.value};nulls={value.isNull};return true;
+    }
+    void close() override {
+        values_.clear();position_=0;evaluated_=false;
+        std::exception_ptr failure;
+        if(opened_){opened_=false;try{execution_.closeChildCursors();}catch(...){failure=std::current_exception();}}
+        if(callerNullBinding_) {
+            StorageEngine::restoreNullRowBinding(std::move(*callerNullBinding_));
+            callerNullBinding_.reset();
+        }
+        if(failure)std::rethrow_exception(failure);
+    }
+    std::string preparedPlanNodeName() const override {return "ProjectSet";}
+    std::vector<Operator*> preparedPlanChildren() const override {
+        auto plans=execution_.childPlans(call_->args.front().get());
+        auto filters=execution_.childPlans(select_->whereClause.get());
+        plans.insert(plans.end(),filters.begin(),filters.end());return plans;
+    }
+    bool supportsPreparedOuterRow() const override {return select_->ctes.empty();}
+    bool bindPreparedOuterRow(const RowContext& row) override {
+        if(!supportsPreparedOuterRow())return false;outer_=row;return true;
+    }
+};
+}
 
 static bool supportsPreparedSelectShape(const SelectStmt& select, bool allowCtes, bool sourceContexts = false) {
     if (select.command != SqlCommand::Select || (!allowCtes && !select.ctes.empty()) ||
@@ -521,10 +658,12 @@ static bool supportsPreparedSelectShape(const SelectStmt& select, bool allowCtes
         !select.groupBy.empty() || !select.groupByElems.empty() || select.having ||
         !select.windowDefs.empty() || !select.distinctOn.empty() ||
         !select.locking.empty() || select.withTies) return false;
-    if (!sourceContexts && select.fromClause && select.fromClause->type != FromItem::Type::Table) return false;
+    if (!sourceContexts && select.fromClause && select.fromClause->type != FromItem::Type::Table &&
+        select.fromClause->type != FromItem::Type::Subquery) return false;
     std::function<bool(const Expr*)> scalar = [&](const Expr* expr) {
         if (!expr) return true;
         if (auto* call = dynamic_cast<const FunctionCallExpr*>(expr)) {
+            if(call->setReturning)return false;
             static const std::set<std::string> aggregates = {"count", "sum", "avg", "min", "max", "string_agg", "array_agg", "bool_and", "bool_or", "every", "bit_and", "bit_or", "bit_xor", "json_agg", "jsonb_agg", "json_object_agg", "jsonb_object_agg", "xmlagg", "mode", "percentile_cont", "percentile_disc", "stddev", "stddev_pop", "stddev_samp", "variance", "var_pop", "var_samp", "corr", "covar_pop", "covar_samp"};
             CatalogManager::QualifiedName routine;
             const auto spelling = call->schema.empty() ? call->funcName : call->schema + "." + call->funcName;
@@ -560,6 +699,8 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
     auto* select = dynamic_cast<SelectStmt*>(prepared.ast.get());
     if (!select || !supportsPreparedSelectPlan(*select))
         throw DbError("0A000", "query requires an additional prepared plan lowering");
+    if (select->fromClause && select->fromClause->type!=FromItem::Type::Table)
+        return buildPreparedQueryPlan(engine,dbname,std::make_shared<PreparedQuery>(std::move(prepared)),select);
     const auto schema = select->fromClause ? engine->getTableSchema(dbname, tablename) : TableSchema{};
     OpPtr source = select->fromClause ? OpPtr(std::make_unique<TableScanOp>(engine, dbname, tablename))
         : OpPtr(std::make_unique<PreparedResultOp>());
@@ -570,7 +711,8 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
 OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
     const std::string& dbname, std::shared_ptr<PreparedQuery> prepared,
     SelectStmt* select, const TableSchema& sourceSchema, OpPtr source,
-    const RowContext& outerRow, PreparedChildExecutor childExecutor) {
+    const RowContext& outerRow, PreparedChildExecutor childExecutor,
+    PreparedChildCursorFactory childCursorFactory) {
     if (!prepared || !select || !source || !supportsPreparedSelectShape(*select, true, source->supportsPreparedContexts()))
         throw DbError("0A000", "query requires an additional prepared plan lowering");
     const auto output = prepared->statementOutputs.find(select);
@@ -581,8 +723,20 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
     state->query = std::move(prepared); state->statement = select;
     state->output = output->second; state->outerRow = outerRow;
     state->childExecutor = std::move(childExecutor);
+    // An explicit legacy full-row reader is an execution contract, not a
+    // fallback for our physical-source cursor. Keep it unless its owner also
+    // supplies the cursor belonging to the same logical source graph.
+    state->childCursorFactory = childCursorFactory ? std::move(childCursorFactory) :
+        state->childExecutor ? PreparedChildCursorFactory{} :
+        PreparedChildCursorFactory([engine,dbname,query=state->query](const Stmt* child,const RowContext& row) {
+            auto plan=QueryPlanner::buildPreparedQueryPlan(engine,dbname,query,child,row);
+            const auto descriptor=query->statementOutputs.find(child);
+            if(descriptor==query->statementOutputs.end())throw DbError("XX000","prepared child has no output descriptor");
+            return QueryPlanner::makePreparedCursor(std::move(plan),descriptor->second);
+        });
     state->evaluator.setCurrentDB(dbname);
     state->sourceContexts = source->supportsPreparedContexts();
+    if (state->sourceContexts) state->logicalSource = source.get();
     if (state->sourceContexts && select->fromClause) {
         std::function<void(const FromItem*)> ranges = [&](const FromItem* item) {
             for (const auto& range : state->query->sourceRanges)
@@ -598,7 +752,8 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
             if (range.columns.size() != state->schema.len)
                 throw DbError("0A000", "prepared plan requires a virtual or view source lowering");
             for (size_t i = 0; i < range.columns.size(); ++i)
-                if (range.columns[i].name != state->schema.cols[i].dataName)
+                if (range.columns[i].name != state->schema.cols[i].dataName &&
+                    i>=select->fromClause->columnAliases.size())
                     throw DbError("XX000", "prepared and physical source descriptors differ");
             break;
         }
@@ -683,7 +838,7 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
     for (auto* target : state->targets) {
         state->targetsBeforeSort.push_back(!state->containsVolatile(target));
     }
-    state->beginExecution();
+    state->prepareExecution();
     OpPtr root = std::move(source);
     if (select->whereClause) root = std::make_unique<PreparedFilterOp>(std::move(root), state);
     if (!state->keys.empty()) root = std::make_unique<PreparedSortOp>(std::move(root), state);
@@ -692,6 +847,141 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
     if (select->offset && *select->offset) root = std::make_unique<OffsetOp>(std::move(root), *select->offset);
     if (select->limit) root = std::make_unique<LimitOp>(std::move(root), *select->limit);
     return root;
+}
+
+OpPtr QueryPlanner::buildPreparedSetReturningPlan(StorageEngine* engine,const std::string& database,
+    std::shared_ptr<PreparedQuery> query,SelectStmt* select,const RowContext& outer,
+    PreparedChildExecutor reader,PreparedChildCursorFactory cursor) {
+    if(!select || select->selectList.size()!=1)return {};
+    const auto* call=dynamic_cast<const FunctionCallExpr*>(select->selectList.front().expr.get());
+    if(!call || !call->setReturning)return {};
+    if(select->command!=SqlCommand::Select || select->fromClause || select->setOp!=SetOp::None ||
+        select->setOpLhs || select->setOpRhs || !select->groupBy.empty() || !select->groupByElems.empty() ||
+        select->having || select->distinct || !select->distinctOn.empty() || !select->orderBy.empty() ||
+        !select->windowDefs.empty() || !select->locking.empty() || select->withTies)
+        throw DbError("0A000","set-returning SELECT requires additional relational lowering");
+    if(!query || call->setReturning->identity!="builtin:pg_catalog.unnest(anyarray)" ||
+        call->setReturning->kind!=QuerySetReturningBinding::Kind::Unnest || call->args.size()!=1)
+        throw DbError("XX000","set-returning SELECT has no prepared query-host implementation");
+    // Captured CTE frames and query children need an explicit restart owner.
+    // Never pretend that updating outer cells resets those logical producers.
+    std::function<bool(const Expr*)> child=[](const Expr* value){return value && value->preparedSubquery;};
+    std::function<bool(const Expr*)> hiddenChild=[&](const Expr* value) {
+        if(!value)return false;if(child(value))return true;
+        if(const auto* node=dynamic_cast<const FunctionCallExpr*>(value)) {
+            for(const auto& arg:node->args)if(hiddenChild(arg.get()))return true;
+            for(const auto& arg:node->namedArgs)if(hiddenChild(arg.value.get()))return true;
+        } else if(const auto* node=dynamic_cast<const ArrayExpr*>(value)) {
+            for(const auto& arg:node->elements)if(hiddenChild(arg.get()))return true;
+        } else if(const auto* node=dynamic_cast<const UnaryOpExpr*>(value))return hiddenChild(node->operand.get());
+        else if(const auto* node=dynamic_cast<const CastExpr*>(value))return hiddenChild(node->operand.get());
+        else if(const auto* node=dynamic_cast<const BinaryOpExpr*>(value))return hiddenChild(node->left.get())||hiddenChild(node->right.get());
+        else if(const auto* node=dynamic_cast<const QuantifiedComparisonExpr*>(value))return hiddenChild(node->left.get())||hiddenChild(node->right.get());
+        else if(const auto* node=dynamic_cast<const CaseExpr*>(value)) {
+            if(hiddenChild(node->switchExpr.get())||hiddenChild(node->elseExpr.get()))return true;
+            for(const auto& arm:node->whenClauses)if(hiddenChild(arm.first.get())||hiddenChild(arm.second.get()))return true;
+        }
+        return false;
+    };
+    if(hiddenChild(call->args.front().get())||hiddenChild(select->whereClause.get()))
+        throw DbError("0A000","set-returning child queries require additional restart lowering");
+    if(select->whereClause) {
+        const auto type=ExprHelper::inferParsedResultType(select->whereClause.get(),{},database,engine);
+        if(type!="boolean" && type!="unknown")
+            throw DbError("42804","argument of WHERE must be type boolean");
+        if(type=="unknown") {
+            const auto* literal=dynamic_cast<const LiteralExpr*>(select->whereClause.get());
+            if(!literal)throw DbError("42804","argument of WHERE must be type boolean");
+            CastExpr cast;cast.typeName="boolean";cast.operand=std::make_unique<LiteralExpr>(*literal);
+            ExprEvaluator pure;(void)pure.eval(&cast,RowContext{});
+        }
+    }
+    OpPtr plan=std::make_unique<PreparedSetReturningOp>(engine,database,std::move(query),select,outer,
+        std::move(reader),std::move(cursor));
+    if(select->offset)plan=std::make_unique<OffsetOp>(std::move(plan),*select->offset);
+    if(select->limit)plan=std::make_unique<LimitOp>(std::move(plan),*select->limit);
+    return plan;
+}
+
+OpPtr QueryPlanner::buildPreparedQueryPlan(StorageEngine* engine,const std::string& database,
+    std::shared_ptr<PreparedQuery> query,const Stmt* original,const RowContext& outer) {
+    auto* select=const_cast<SelectStmt*>(dynamic_cast<const SelectStmt*>(original));
+    if(!engine || !query || !select)throw DbError("42601","prepared query plan requires SELECT/VALUES");
+    const auto output=query->statementOutputs.find(select);
+    if(output==query->statementOutputs.end())throw DbError("XX000","prepared query has no output descriptor");
+    const PreparedChildCursorFactory childFactory=[engine,database,query](const Stmt* child,const RowContext& row) {
+        auto plan=buildPreparedQueryPlan(engine,database,query,child,row);
+        return makePreparedCursor(std::move(plan),query->statementOutputs.at(child));
+    };
+    if(auto set=buildPreparedSetReturningPlan(engine,database,query,select,outer,{},childFactory))return set;
+    if(select->command==SqlCommand::Values) {
+        if(!select->orderBy.empty() || select->setOp!=SetOp::None)
+            throw DbError("0A000","prepared VALUES requires additional clause lowering");
+        auto execution=std::make_shared<PreparedQueryExecution>(query,engine,database);
+        execution->setChildCursorFactory(childFactory);
+        for(auto& row:select->valuesRows)for(auto& cell:row)execution->prepareExpression(cell.get());
+        execution->prepareChildCursors();
+        auto cells=outer;cells.setParameters(query->parameters);
+        auto descriptor=output->second;
+        return std::make_unique<PreparedSourceRowsOp>(descriptor,
+            [select,execution,cells,descriptor](size_t index,std::vector<ExprValue>& row) {
+                if(index>=select->valuesRows.size())return false;
+                row.clear();
+                for(size_t i=0;i<select->valuesRows[index].size();++i) {
+                    auto value=execution->evaluate(select->valuesRows[index][i].get(),cells);
+                    value.typeName=descriptor.at(i).type;row.push_back(std::move(value));
+                }
+                return true;
+            });
+    }
+    if(!supportsPreparedSelectShape(*select,true))
+        throw DbError("0A000","prepared query requires additional relational lowering");
+    TableSchema schema;OpPtr source;
+    if(!select->fromClause)source=std::make_unique<PreparedResultOp>();
+    else {
+        const auto found=std::find_if(query->sourceRanges.begin(),query->sourceRanges.end(),
+            [&](const auto& range){return range.owner==select && range.source==select->fromClause.get() && !range.mergedUsing;});
+        if(found==query->sourceRanges.end())throw DbError("XX000","prepared source has no range descriptor");
+        if(found->cteStatement || select->fromClause->type==FromItem::Type::Subquery) {
+            const auto* statement=found->cteStatement?found->cteStatement:select->fromClause->subquery.get();
+            if(!dynamic_cast<const SelectStmt*>(statement))
+                throw DbError("0A000","writing CTE requires the statement-owned source provider");
+            for(const auto& output:found->columns) {
+                Column column;column.dataName=output.name;
+                const auto error=TypeRegistry::instance().resolveColumnType(column,output.type,{},false);
+                if(!error.empty())throw DbError("42704",error);schema.append(column);
+            }
+            struct Cache {
+                std::unique_ptr<PreparedQueryCursor> cursor;
+                std::vector<std::vector<ExprValue>> rows;
+                bool eof=false;
+            };
+            auto cache=std::make_shared<Cache>();
+            source=std::make_unique<PreparedSourceRowsOp>(found->columns,
+                [cache,statement,outer,childFactory](size_t index,std::vector<ExprValue>& row) {
+                    if(index<cache->rows.size()){row=cache->rows[index];return true;}
+                    if(cache->eof)return false;
+                    if(!cache->cursor)cache->cursor=childFactory(statement,outer);
+                    if(!cache->cursor->next(row)){cache->cursor->close();cache->eof=true;return false;}
+                    cache->rows.push_back(row);return true;
+                });
+        } else {
+            if(found->relationName.empty())
+                throw DbError("0A000","prepared source requires a logical source provider");
+            // These are canonical binder metadata, not SQL spelling. Storage
+            // takes the physical identifier; quoting or parsing a rendered
+            // qualified name here loses public/custom/temp relation forks.
+            const auto* session=currentSession();
+            const bool temporary=session &&
+                (found->relationSchema==sessionTempSchemaName(*session) || found->relationSchema=="pg_temp");
+            const auto table=temporary?tempTablePrefix(*session,found->relationName):
+                found->relationSchema.empty() || found->relationSchema=="public"?found->relationName:
+                found->relationSchema+"__"+found->relationName;
+            schema=engine->getTableSchema(database,table);
+            source=std::make_unique<TableScanOp>(engine,database,table);
+        }
+    }
+    return buildPreparedSelectPlan(engine,database,std::move(query),select,schema,std::move(source),outer,{},childFactory);
 }
 
 TableScanOp::TableScanOp(StorageEngine* engine, const std::string& dbname,
@@ -6569,6 +6859,13 @@ public:
     }
     const QueryRowDescriptor& descriptor() const override { return descriptor_; }
     Operator* plan() const override { return plan_.get(); }
+    bool supportsRestart() const override { return plan_->supportsPreparedOuterRow(); }
+    void restart(const RowContext& row) override {
+        if(!supportsRestart())throw DbError("0A000","prepared cursor source cannot rebind its caller row");
+        close();
+        if(!plan_->bindPreparedOuterRow(row))throw DbError("XX000","prepared cursor failed to bind its caller row");
+        opened_=closed_=eof_=false;
+    }
     void close() override {
         if (closed_) return;
         closed_ = true; // Even a throwing close is attempted only once.

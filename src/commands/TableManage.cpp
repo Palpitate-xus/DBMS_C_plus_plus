@@ -31825,6 +31825,25 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
             throw DbError("42P01", "relation \"" + spelling + "\" does not exist");
         };
         ExprEvaluator evaluator; evaluator.setCurrentDB(dbname);
+        metadata.setReturning = [&](const FunctionCallExpr* function) -> std::optional<QuerySetReturningBinding> {
+            // Existing scalar/stored resolution wins over query-host builtins,
+            // including an actual public routine named unnest.
+            if(evaluator.hasScalarFunction(function,const_cast<StorageEngine*>(this)))return std::nullopt;
+            CatalogManager::QualifiedName routine;
+            const auto spelling=function->schema.empty()?function->funcName:function->schema+"."+function->funcName;
+            if(!CatalogManager::parseQualifiedName(spelling,routine,true) ||
+                (!routine.schema.empty() && routine.schema!="pg_catalog") || routine.name!="unnest")return std::nullopt;
+            if(function->args.size()!=1 || !function->namedArgs.empty() || function->hasOver ||
+                function->filter || function->distinct || !function->orderBy.empty())
+                throw DbError("42883","function does not exist: "+spelling);
+            const auto input=ExprHelper::canonicalResultTypeName(ExprHelper::inferParsedResultType(
+                function->args.front().get(),{},dbname,const_cast<StorageEngine*>(this)));
+            if(input=="unknown")throw DbError("42725","function unnest(unknown) is not unique");
+            if(input.size()<2 || input.compare(input.size()-2,2,"[]")!=0)
+                throw DbError("42883","function unnest("+input+") does not exist");
+            return QuerySetReturningBinding{QuerySetReturningBinding::Kind::Unnest,
+                "builtin:pg_catalog.unnest(anyarray)",input.substr(0,input.size()-2)};
+        };
         metadata.functionType = [&](const FunctionCallExpr* function) {
             CatalogManager::QualifiedName routine;
             const std::string spelling = function->schema.empty() ? function->funcName

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "parser/query_binding.h"
+#include "common/DbError.h"
 #include <map>
 #include <memory>
 #include <set>
@@ -18,6 +19,10 @@ public:
     virtual void close() = 0;
     // A plan-backed cursor reports the same graph it actually executes.
     virtual Operator* plan() const { return nullptr; }
+    virtual bool supportsRestart() const { return false; }
+    // Rebind one original correlated query site without replacing its actual
+    // operator graph. The prior invocation must have been closed first.
+    virtual void restart(const RowContext&) { throw DbError("0A000","prepared cursor cannot rebind its caller row"); }
 };
 using PreparedQueryRows = std::vector<std::vector<ExprValue>>;
 using PreparedChildExecutor = std::function<PreparedQueryRows(const Stmt*, const RowContext&, size_t)>;
@@ -50,6 +55,9 @@ public:
     // When present, this typed stream takes priority over the full-row
     // compatibility callback. An empty factory restores that callback.
     void setChildCursorFactory(PreparedChildCursorFactory factory);
+    void prepareChildCursors(); // pure graph construction, no open/evaluation
+    void closeChildCursors();   // explicit normal cleanup; primary errors preserved
+    std::vector<Operator*> childPlans(const Expr* scope = nullptr) const;
     ExprValue evaluate(const Expr* expression, const RowContext& row) const;
 
 private:
@@ -71,10 +79,20 @@ private:
     mutable std::map<const Expr*, ExprValue> memo_;
     PreparedChildExecutor queryExecutor_;
     PreparedChildCursorFactory childCursorFactory_;
+    struct QuantifiedState {
+        std::unique_ptr<PreparedQueryCursor> cursor;
+        std::vector<ExprValue> values;
+        std::multimap<std::string,size_t> hash;
+        bool eof = false, hasNull = false, hashBuilt = false;
+    };
+    std::set<const QuantifiedComparisonExpr*> quantifiedSites_;
+    mutable std::map<const Expr*,QuantifiedState> quantified_;
 
     void indexStatement(const Stmt* statement, const Stmt* parent);
     void indexExpression(const Expr* expression, const Stmt* owner);
     bool isAncestor(const Stmt* ancestor, const Stmt* descendant) const;
     ExprValue executeChild(const Expr* expression, const RowContext& row) const;
+    QuantifiedState& quantifiedState(const QuantifiedComparisonExpr*,const RowContext&) const;
+    ExprValue executeQuantified(const QuantifiedComparisonExpr*,const RowContext&) const;
 };
 } // namespace dbms
