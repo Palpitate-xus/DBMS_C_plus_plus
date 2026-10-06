@@ -38254,6 +38254,13 @@ static void prepareJoinExpressions(
                 reference->schema.clear();
             } else if (auto* unary = dynamic_cast<UnaryOpExpr*>(expression)) {
                 bind(unary->operand.get());
+                // A COLLATE label must be valid during preparation, including
+                // zero-row joins; boolean result analysis may not visit it.
+                if (unary->op.rfind("COLLATE ", 0) == 0) {
+                    const auto name = ExprEvaluator::analyzeExplicitResultCollation(unary);
+                    if (!collation::isValid(name))
+                        throw DbError("42704", "collation does not exist: " + name);
+                }
             } else if (auto* binary = dynamic_cast<BinaryOpExpr*>(expression)) {
                 bind(binary->left.get());
                 if (binary->op != "::" && binary->op != "COLLATE") bind(binary->right.get());

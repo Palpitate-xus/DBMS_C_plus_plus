@@ -1872,7 +1872,8 @@ static bool renderJoinExpression(
     if (const auto* unary = dynamic_cast<const dbms::UnaryOpExpr*>(expression)) {
         string operand;
         if (!renderJoinExpression(unary->operand.get(), bindColumn, operand)) return false;
-        const bool postfix = unary->op.rfind("IS ", 0) == 0;
+        const bool postfix = unary->op.rfind("IS ", 0) == 0 ||
+                             unary->op.rfind("COLLATE ", 0) == 0;
         result = postfix ? "(" + operand + " " + unary->op + ")"
                          : "(" + unary->op + " " + operand + ")";
         return true;

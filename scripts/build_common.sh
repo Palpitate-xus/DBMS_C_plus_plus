@@ -46,6 +46,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/plpgsql_distinct_operand_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/distinct_source_query_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/null_safe_join_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/join_collation_role_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/fetch_clause_boundary_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/subquery_sqlstate_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/composite_not_in_null_semantics_protocol_e2e_test.py)
