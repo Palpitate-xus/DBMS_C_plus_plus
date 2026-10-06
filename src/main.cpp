@@ -8084,11 +8084,28 @@ static std::string inferSubQueryResultType(
 // The expression evaluator uses NULL for a missing row value.  With no FROM
 // clause there is no row namespace at all, so reject column references at
 // binding time instead of allowing them to become NULL (or COALESCE defaults).
+struct SingleSourceRange {
+    size_t occurrence = 0;
+    string schema;
+    string relation;
+    string range;
+    bool aliased = false;
+    map<string, size_t> columns;
+
+    bool contains(const dbms::ColumnRefExpr& column) const {
+        if (column.table.empty()) return column.schema.empty();
+        return column.table == range && (column.schema.empty() ||
+            (!aliased && column.schema == schema));
+    }
+};
+
 static bool validateFromlessColumnBindings(const string& expression,
                                            string& error, string& sqlState,
-                                           const string& visibleQualifier = "",
+                                           const SingleSourceRange* source = nullptr,
                                            const set<string>* visibleColumns = nullptr,
-                                           string* unboundColumn = nullptr) {
+                                           string* unboundColumn = nullptr,
+                                           bool* qualifiedSourceColumn = nullptr,
+                                           bool* queryChild = nullptr) {
     dbms::SQLParser parser;
     const auto parsed = parser.parse("SELECT " + expression);
     const auto* select = parsed.success
@@ -8116,14 +8133,16 @@ static bool validateFromlessColumnBindings(const string& expression,
                     };
                     if (column->schema.empty() && column->table.empty() &&
                         pseudoColumns.count(name)) return;
-                    if (!visibleQualifier.empty()) {
-                        const bool qualifierVisible = column->table.empty() ||
-                            (column->schema.empty() &&
-                             toLower(column->table) ==
-                                 toLower(visibleQualifier));
+                    if (source) {
+                        const bool qualifierVisible = source->contains(*column);
                         if (qualifierVisible &&
-                            (!visibleColumns ||
-                             visibleColumns->count(column->column))) return;
+                            (column->table.empty()
+                                ? (!visibleColumns || visibleColumns->count(column->column))
+                                : source->columns.count(column->column))) {
+                            if (qualifiedSourceColumn && !column->table.empty())
+                                *qualifiedSourceColumn = true;
+                            return;
+                        }
                         unbound = column;
                         return;
                     }
@@ -8194,7 +8213,16 @@ static bool validateFromlessColumnBindings(const string& expression,
                     }
                     return;
                 case dbms::ExprType::Subquery:
-                case dbms::ExprType::Literal:
+                    if (queryChild) *queryChild = true;
+                    return;
+                case dbms::ExprType::Literal: {
+                    const auto* literal = static_cast<const dbms::LiteralExpr*>(node);
+                    // The current parser retains SELECT children as a
+                    // parenthesized Literal, unlike quoted SQL string data.
+                    if (queryChild && !literal->value.empty() && literal->value.front() == '(')
+                        *queryChild = true;
+                    return;
+                }
                 case dbms::ExprType::Parameter:
                 case dbms::ExprType::A_Star:
                     return;
@@ -8204,8 +8232,7 @@ static bool validateFromlessColumnBindings(const string& expression,
     if (!unbound) return true;
     if (unboundColumn) *unboundColumn = unbound->column;
     if (!unbound->table.empty() &&
-        (visibleQualifier.empty() || !unbound->schema.empty() ||
-         toLower(unbound->table) != toLower(visibleQualifier))) {
+        (!source || !source->contains(*unbound))) {
         error = "missing FROM-clause entry for table \"" +
                 unbound->table + "\"";
         sqlState = "42P01";
@@ -8316,7 +8343,7 @@ static bool evaluateQueryRowCount(const string& expression, Session& s,
     const string text = trim(expression);
     if (text.empty()) return false;
     if (!validateFromlessColumnBindings(
-            text, error, sqlState, "", nullptr,
+            text, error, sqlState, nullptr, nullptr,
             unboundColumn)) return false;
     if (toLower(text) == "null") {
         value = 0;
@@ -28694,13 +28721,14 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 if (second.size() > 3 && second.substr(0, 3) == "as ") {
                     tableAlias = trim(second.substr(3));
                     secondIsAlias = true;
-                } else if (!second.empty() &&
-                           second.find_first_of(" ,()[;") == string::npos) {
+                } else if (!second.empty()) {
                     tableAlias = second;
                     secondIsAlias = true;
                 }
+                dbms::CatalogManager::QualifiedName alias;
                 if (secondIsAlias && !tableAlias.empty() &&
-                    tableAlias.find_first_of(" ,()[;") == string::npos) {
+                    dbms::CatalogManager::parseQualifiedName(tableAlias, alias, true) &&
+                    alias.schema.empty()) {
                     tnameOrig = rest;
                 } else {
                     tableAlias.clear();
@@ -29199,9 +29227,79 @@ static bool executeInternal(const string& rawSql, Session& s) {
             !isTempTable(s, tnameOrig) && !checkSelectColumnPermission(s, tnameOrig, columns)) return true;
 
         TableSchema tbl = g_engine.getTableSchema(queryDb, tname);
+        // Decode the raw FROM tokens exactly once. Expr column components
+        // are already canonical and must never be normalized a second time.
+        dbms::CatalogManager::QualifiedName relationName, aliasName;
+        if (!dbms::CatalogManager::parseQualifiedName(tnameOrig, relationName, true) ||
+            (!tableAlias.empty() &&
+             (!dbms::CatalogManager::parseQualifiedName(tableAlias, aliasName, true) ||
+              !aliasName.schema.empty())))
+            throw dbms::DbError("42601", "invalid source range identifier");
+        SingleSourceRange sourceRange;
+        sourceRange.relation = relationName.name;
+        sourceRange.schema = relationName.schema.empty() &&
+            (queryDb == "pg_catalog" || queryDb == "information_schema")
+                ? queryDb : relationName.schema;
+        sourceRange.aliased = !tableAlias.empty();
+        sourceRange.range = sourceRange.aliased ? aliasName.name : relationName.name;
+        if (sourceRange.schema.empty()) {
+            if (isTempTable(s, tnameOrig)) sourceRange.schema = sessionTempSchemaName(s);
+            else if (tname == relationName.name || tname == "public__" + relationName.name)
+                sourceRange.schema = "public";
+            else {
+                for (const auto& schemaName : g_engine.getSchemaNames(queryDb)) {
+                    const string physical = schemaName == "public" ? relationName.name
+                        : schemaName + "__" + relationName.name;
+                    if (physical == tname || (schemaName == "public" &&
+                            tname == "public__" + relationName.name)) {
+                        sourceRange.schema = schemaName;
+                        break;
+                    }
+                }
+            }
+        }
         set<string> visibleColumns;
-        for (size_t i = 0; i < tbl.len; ++i)
+        for (size_t i = 0; i < tbl.len; ++i) {
             visibleColumns.insert(tbl.cols[i].dataName);
+            sourceRange.columns.emplace(tbl.cols[i].dataName, i);
+        }
+        const auto sourceColumnName = [&](const string& expression) {
+            dbms::SQLParser parser;
+            const auto parsed = parser.parse("SELECT " + expression);
+            const auto* select = parsed.success
+                ? dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()) : nullptr;
+            const auto* column = select && select->selectList.size() == 1
+                ? dynamic_cast<const dbms::ColumnRefExpr*>(select->selectList.front().expr.get()) : nullptr;
+            return column && sourceRange.contains(*column) && sourceRange.columns.count(column->column)
+                ? column->column : expression;
+        };
+        // The legacy comparison operator accepts physical column names.
+        // Lower only a structurally bound column/literal comparison; raw
+        // prefix deletion cannot distinguish quotes, schema, or string data.
+        const auto lowerSourceComparison = [&](const string& expression) {
+            dbms::SQLParser parser;
+            const auto parsed = parser.parse("SELECT " + expression);
+            const auto* select = parsed.success
+                ? dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()) : nullptr;
+            const auto* binary = select && select->selectList.size() == 1
+                ? dynamic_cast<const dbms::BinaryOpExpr*>(select->selectList.front().expr.get()) : nullptr;
+            if (!binary || (binary->op != "=" && binary->op != "<>" &&
+                    binary->op != "!=" && binary->op != "<" && binary->op != ">" &&
+                    binary->op != "<=" && binary->op != ">=")) return expression;
+            const auto* column = dynamic_cast<const dbms::ColumnRefExpr*>(binary->left.get());
+            const auto* literal = dynamic_cast<const dbms::LiteralExpr*>(binary->right.get());
+            if (!column || !literal || !sourceRange.contains(*column) ||
+                    !sourceRange.columns.count(column->column)) return expression;
+            return column->column + binary->op + literal->value;
+        };
+        // Targets and their lazy branches share this source namespace too.
+        // Validate before any row or writing target function is evaluated.
+        for (const auto& item : splitSelectColumns(columns)) {
+            string error, state;
+            if (!validateFromlessColumnBindings(item, error, state,
+                    &sourceRange, &visibleColumns))
+                throw dbms::DbError(state, error);
+        }
         set<string> orderVisibleColumns = visibleColumns;
         for (const auto& [alias, expression] : selectAliasMap) {
             (void)expression;
@@ -29213,9 +29311,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
         // therefore identify the same descriptor ordinal, not two SQL texts.
         const auto scalarOrderIdentity = [&](const string& expression) {
             string error, state;
-            const string& qualifier = tableAlias.empty() ? tnameOrig : tableAlias;
             if (!validateFromlessColumnBindings(expression, error, state,
-                    qualifier, &visibleColumns))
+                    &sourceRange, &visibleColumns))
                 throw dbms::DbError(state, error);
             return dbms::ExprHelper::scalarExpressionIdentity(expression,
                 [&](const dbms::ColumnRefExpr& column) -> string {
@@ -29224,7 +29321,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         const auto field = [](const string& value) {
                             return to_string(value.size()) + ":" + value;
                         };
-                        return "source0" + field(queryDb) + field(tname) +
+                        return "source" + field(to_string(sourceRange.occurrence)) + field(queryDb) + field(tname) +
                             field(to_string(i)) + field(tbl.cols[i].dataType) +
                             field(to_string(tbl.cols[i].dsize)) + field(tbl.cols[i].collation);
                     }
@@ -29310,11 +29407,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     sortItem.find_first_of("()+-*/%, ") == string::npos;
                 {
                     string bindingError, bindingSqlState;
-                    const string& visibleQualifier = tableAlias.empty()
-                        ? tnameOrig : tableAlias;
                     if (!validateFromlessColumnBindings(
                             sortItem, bindingError, bindingSqlState,
-                            visibleQualifier,
+                            &sourceRange,
                             collatedBareName ? &visibleColumns
                                              : &orderVisibleColumns)) {
                         cout << "ERROR: " << bindingError << " (SQLSTATE "
@@ -29342,9 +29437,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         expression->type != dbms::ExprType::Literal &&
                         expression->type != dbms::ExprType::Subquery) {
                         string bindingError, bindingSqlState;
-                        const string& visibleQualifier = tableAlias.empty() ? tnameOrig : tableAlias;
                         if (!validateFromlessColumnBindings(sortItem, bindingError, bindingSqlState,
-                                visibleQualifier, &visibleColumns))
+                                &sourceRange, &visibleColumns))
                             throw dbms::DbError(bindingSqlState, bindingError);
                         dbms::ExprEvaluator evaluator;
                         evaluator.setCurrentDB(queryDb);
@@ -29477,13 +29571,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         auto amIt = selectAliasMap.find(sortItem);
                         if (amIt != selectAliasMap.end()) sortItem = amIt->second;
                     }
-                    const string& visibleQualifier = tableAlias.empty()
-                        ? tnameOrig : tableAlias;
-                    const string prefix = visibleQualifier + ".";
-                    if (sortItem.rfind(prefix, 0) == 0 &&
-                        visibleColumns.count(sortItem.substr(prefix.size()))) {
-                        sortItem.erase(0, prefix.size());
-                    }
+                    sortItem = sourceColumnName(sortItem);
                 }
                 dbms::StorageEngine::OrderBySpec spec;
                 spec.colName = sortItem;
@@ -29687,11 +29775,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
 
         for (const auto& groupColumn : groupByCols) {
             string bindingError, bindingSqlState;
-            const string& visibleQualifier = tableAlias.empty()
-                ? tnameOrig : tableAlias;
             if (!validateFromlessColumnBindings(
                     groupColumn, bindingError, bindingSqlState,
-                    visibleQualifier, &visibleColumns)) {
+                    &sourceRange, &visibleColumns)) {
                 cout << "ERROR: " << bindingError << " (SQLSTATE "
                      << bindingSqlState << ")" << endl;
                 return true;
@@ -29700,14 +29786,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
         // The binder above checks the SQL-visible qualifier.  The storage
         // group operator uses physical column names, so lower a simple
         // qualified grouping key only after that scope check succeeds.
-        const string& groupQualifier = tableAlias.empty()
-            ? tnameOrig : tableAlias;
         auto lowerGroupKey = [&](string& key) {
-            const string prefix = groupQualifier + ".";
-            if (key.rfind(prefix, 0) == 0 &&
-                visibleColumns.count(key.substr(prefix.size()))) {
-                key.erase(0, prefix.size());
-            }
+            key = sourceColumnName(key);
         };
         for (auto& key : groupByCols) lowerGroupKey(key);
         for (auto& groupingSet : groupingSets)
@@ -29774,32 +29854,14 @@ static bool executeInternal(const string& rawSql, Session& s) {
             implicitHavingClause = rawHavingClause;
             {
                 string bindingError, bindingSqlState;
-                const string& visibleQualifier = tableAlias.empty()
-                    ? tnameOrig : tableAlias;
                 if (!validateFromlessColumnBindings(
                         rawHavingClause, bindingError, bindingSqlState,
-                        visibleQualifier, &visibleColumns)) {
+                        &sourceRange, &visibleColumns)) {
                     cout << "ERROR: " << bindingError << " (SQLSTATE "
                          << bindingSqlState << ")" << endl;
                     return true;
                 }
-                // A simple grouped-column predicate is evaluated by the
-                // single-table storage path against bare schema column names.
-                if (havingClause.find('(') == string::npos) {
-                    const string prefix = visibleQualifier + ".";
-                    size_t at = 0;
-                    while ((at = findTextOutsideQuotes(
-                                havingClause, prefix, at)) != string::npos) {
-                        if (at > 0 &&
-                            (isalnum(static_cast<unsigned char>(
-                                havingClause[at - 1])) ||
-                             havingClause[at - 1] == '_')) {
-                            at += prefix.size();
-                            continue;
-                        }
-                        havingClause.erase(at, prefix.size());
-                    }
-                }
+                havingClause = normalizeConditionStr(lowerSourceComparison(rawHavingClause));
             }
             size_t pos = 0;
             while (pos < havingClause.size()) {
@@ -29948,7 +30010,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 if (hasNullSafeComparison(item)) {
                     string error, state;
                     if (!validateFromlessColumnBindings(
-                            item, error, state, tableAlias.empty() ? tnameOrig : tableAlias,
+                            item, error, state, &sourceRange,
                             &visibleColumns))
                         throw dbms::DbError(state, error);
                     dbms::StorageEngine::SelectExpr expression;
@@ -29974,7 +30036,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         throw dbms::DbError("42601", "invalid CASE projection");
                     string error, state;
                     if (!validateFromlessColumnBindings(
-                            item, error, state, tableAlias.empty() ? tnameOrig : tableAlias,
+                            item, error, state, &sourceRange,
                             &visibleColumns))
                         throw dbms::DbError(state, error);
                     dbms::StorageEngine::SelectExpr expr;
@@ -30850,13 +30912,14 @@ static bool executeInternal(const string& rawSql, Session& s) {
                            : (limitPos != string::npos) ? limitPos
                            : (offsetPos != string::npos) ? offsetPos : sql.size();
             string whereClause = trim(sql.substr(wherePos + 5, condEnd - wherePos - 5));
+            bool qualifiedSourceColumn = false;
+            bool queryChild = false;
             {
                 string bindingError, bindingSqlState;
-                const string& visibleQualifier = tableAlias.empty()
-                    ? tnameOrig : tableAlias;
                 if (!validateFromlessColumnBindings(
                         whereClause, bindingError, bindingSqlState,
-                        visibleQualifier, &visibleColumns)) {
+                        &sourceRange, &visibleColumns, nullptr,
+                        &qualifiedSourceColumn, &queryChild)) {
                     cout << "ERROR: " << bindingError << " (SQLSTATE "
                          << bindingSqlState << ")" << endl;
                     return true;
@@ -30870,7 +30933,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             // inside a subquery the alias qualifies an OUTER reference
             // (correlation), which must survive for the structured
             // existence/semi-join parsers to see.
-            {
+            if (queryChild) {
                 auto stripOutsideParens = [](const string& text, const string& pre) {
                     string out;
                     int depth = 0;
@@ -30891,6 +30954,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     whereClause = stripOutsideParens(whereClause, prefix);
                 }
             }
+            const string loweredSourceComparison = lowerSourceComparison(whereClause);
+            const bool typedQualifiedPredicate = qualifiedSourceColumn &&
+                loweredSourceComparison == whereClause;
+            whereClause = loweredSourceComparison;
             rawWhereClause = whereClause;
             dbms::SemiJoinSpec semiJoin;
             dbms::ExistenceSpec existence;
@@ -30992,7 +31059,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 bool immutableConstant = false;
                 bool unknownNullPredicate = false;
                 if (hasComputedPredicate(whereClause, &immutableConstant, &unknownNullPredicate) ||
-                    !exprOrderBySpecs.empty()) {
+                    !exprOrderBySpecs.empty() || typedQualifiedPredicate) {
                     if (immutableConstant) {
                         // PostgreSQL checks immutable constant expressions even
                         // when no rows exist. Bind the boolean result first.

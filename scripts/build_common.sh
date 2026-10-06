@@ -72,6 +72,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/where_function_scope_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/stored_function_where_execution_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/stored_function_order_execution_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/stored_function_quoted_range_scope_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/materialized_alias_scope_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/materialized_factor_boundary_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/window_type_protocol_e2e_test.py)
