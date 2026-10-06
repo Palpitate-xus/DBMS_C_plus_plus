@@ -1,6 +1,84 @@
 # Independent source integrations after canonical 75090
 
-## Five independent ROOT source integrations and new public-layout gate
+## Latest checkpoint: eight independent follow-ups after source 4f23
+
+| Independent repair | Private commit | ROOT commit |
+| --- | --- | --- |
+| Strong CASE ELSE projection names | `404931c4` | `d9510426` |
+| Genuine wide decimal literal types | `95d99a6b` | `3018cb7b` |
+| Geometric typed literal grammar/input | `8f4e913c` | `82a05110` |
+| Geometric equality value semantics | `bc3207a3` | `e13e72b0` |
+| Execution-owned pure constant planning | `b5c17324` | `484db51d` |
+| Explicit scalar host/cursor ownership | `c5e94063` | `ae8fbd0e` |
+| DISTINCT selects actual equality | `483c6b5e` | `94da5b04` |
+| Creation-site structured unary overflow | `237eb54b` | `1a443094` |
+
+Each is a separate local source/test/documentation commit. ROOT retains the
+whole-query metadata, typed source contexts, actual correlated restart and
+existing strong tests. The planning integration updates UNKNOWN VIEW output
+metadata to its genuine new implicit-cast root and asserts that identity.
+Public layouts changed: ROOT's current572native/299registered/58TU normal-O2
+combination has not been built or run yet. Independent private validation is
+not a substitute for that new matching ROOT combination.
+
+### Actual previous normal58 / 90-native / 44-wire terminal results
+
+Immutable source4f23f997's normal O2 all58 build45716 and its repeat/all58
+signatures/configuration stamp22528 actually exit0. Frozen SHA256 is
+`a7a2c010135595ab8ce176e73c8aba2e37d039018ade470857d5168da776451e`.
+Fresh90native session8023 exits1:88pass/2 original scalar WHERE/ORDER host
+assertions fail. All five newly added native entry points, including real
+source-context restart/cleanup, pass. Complete44wire session88182 exits1:
+42pass/2fail, the original PL destination counter and original full protocol
+scalar-multiple-row SQLSTATE at line2504 (XX000 instead of21000). The original
+84 quantified controls, ordinary receiver and12 real TEXT/JSON plan/demand
+checks pass on that same normal frozen binary. Logs are retained under
+`/tmp/dbms-case-quant-integration.g8OmOcrc`. The source freeze ended only after
+both actual terminal results; neither failed group is relabelled green.
+
+The untouched original564-native/293-registered full runner continues in the
+immutable4f23 snapshot `/tmp/dbms-canonical-case-quant.IqZfi3a6/repo`, live
+session15248. Its 58 normal donor objects/source/header/flags were audited
+before being copied; path-addressed cache receipts alone were readdressed.
+Every native test and stubs are fresh. This is not a private fresh58 claim,
+a new ROOT572/299 full-suite result or TLS runtime proof.
+
+### Genuine execution-root demand and newly retained defects
+
+The original FROM-less baseline eagerly calls a volatile projection under
+WHERE false. Its first candidate fixes that original PL script but retains
+three pure-constant/child planning errors in the complete24-control matrix.
+The new `/tmp/dbms-fromless-root-planning.eCYBCrM3/repo` candidate explicitly
+plans only the execution root using its own carrier before runtime binding;
+child factories default false and cannot reacquire discarded output demand.
+All58 development-O0 objects, repeat, signatures and stamp passed. The full24
+protocol controls and original PL destination script pass. One helper used
+the nonexistent name `prepared_child_cursor_test.cpp`; that compilation
+failure remains in the log, and a fresh complete13-native repeat uses the
+actual `prepared_query_cursor_test.cpp`. The complete13-native and8-wire
+results are still being collected; this repair is not yet ROOT-integrated.
+
+Unary overflow's final nine matching normal-O2 native entries and integer
+protocol/strict180006 reference pass independently. An early MONEY reference
+draft was disproved by actual42883: PG has no unary MONEY SQL operator. The
+final native control tests only its lower-level evaluator error branch; the
+pure SQL unary-signature gap remains active. Geometric CAST bad input and
+legacy scalar child metadata OID25-versus23 are separately reproduced active
+defects, not waived by the adjacent geometry/cardinality passes. MV target
+read-only/input priorities remain open.
+
+The oldfa/f7 original465 full differential is now terminal1:190 complete cases
+(188 match,2 DIFF), then case191's final21/21 multiDROP hits the original15s
+socket deadline;275 cases remain incomplete. Both isolated original ADD cases
+match C/enUS under the original disk deadline, without proving the full-run
+timeout cause. See `issue-original-465-add-column-timeout-observations.md`.
+
+The complete273-item scope is unchanged:22complete/166partial/70unverified/
+15user-deferred. No push, active Actions or resumed security/TDE audit.
+The following sections preserve their exact historical checkpoints; earlier
+`live` statements do not describe current process state.
+
+## Historical 6178 checkpoint: five source integrations and public-layout gate
 
 | Independent change | Private commit | ROOT commit |
 | --- | --- | --- |
