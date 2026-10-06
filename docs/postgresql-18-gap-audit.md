@@ -1,3 +1,5 @@
+2026-10-06 SQL-01/DML-03 follow-up source/test commit `9357d433`：两侧来源可解析但普通 JOIN 缺少 ON/USING 时，旧 AST 仍有效，隔离库实测 UPDATE 2 改值、DELETE 2 清空。现在 UPDATE/DELETE 发布 AST 前递归检查来源 JOIN 条件；CROSS/NATURAL 保留隐式连接语义，普通 JOIN 必须有 ON 或非空 USING。旧生产 parser object 的新增 native case 在 `FROM a JOIN b` 上失败；正式构建、与新生产 parser object 链接的 missing-source/P1 原生测试、UPDATE/DELETE 来源和 DML CTE 协议 E2E 通过。包括外层 CROSS 中隐藏的无条件 JOIN，逐错误验证 42601、无成功 command tag、全部目标行不变。此前 dml_semantics 原生套件在 ea7/208 组合通过，本 follow-up 未重跑该整项或完整注册套件/PG18.6 differential。完整语法、表达式分析及复杂来源仍缺，SQL-01/DML-03 仍 partial；总账273保持22 complete、166 partial、70 unverified、15 deferred_by_user。不 push。
+
 2026-10-06 QRY-02/QRY-03 source/test commit `208f34d8`：FROM 的两处解析现保留 NATURAL INNER/LEFT/RIGHT/FULL 类型及可选 OUTER，LATERAL 左输入按实际保留侧/合并键映射。旧 NATURAL LEFT 输入返回 42601，旧解析器的新增 AST 类型断言失败；重建后的 parser_phase1 原生测试、正式构建、derived-type、join-type、SQL-literal 与 MERGE 协议 E2E 通过。覆盖 INNER、LEFT/RIGHT 保留行、FULL 的左右键独立 NULL 与裸键 coalesce、无公共列且一侧为空的 outer 形式及 typed 空输出；另验 UPDATE/DELETE 的 AST 类型、MERGE 外层 ON 保留与非法 NATURAL 语法控制。完整套件与 PG18.6 differential 未跑，任意 scope 和 LATERAL 外层裸列/star 等仍缺，QRY-02/QRY-03 保持 partial。
 
 2026-10-06 SQL-01/DML-03 独立 source/test commit `ea7e46d9`：缺失/解析失败的 FROM/USING 来源曾被丢弃，语句退化为 target-only DML；隔离库旧版本的 `UPDATE ... FROM;` 实测 UPDATE 2 并改值，`DELETE ... USING;` 实测 DELETE 2 并清空。现拒绝发布缺失来源的 AST，DML bridge 显式声明 42601；第一次候选拒绝写入但 wire 为 XX000 的结果亦已修正。dml_missing_source_parser 原生、UPDATE/DELETE 来源协议与 DML CTE 协议、正式构建通过，协议逐错误验证全部目标行和值不变、无成功 command tag、后续合法 DML 正常。见 `docs/issue-dml-03-missing-source-parser.md`。完整 FROM grammar、任意 DML join tree、全套件和 PG18.6 differential 仍缺；SQL-01/DML-03 保持 partial。总账273仍22 complete、166 partial、70 unverified、15 deferred_by_user；不 push，Actions关闭，用户跳过项不重启。
@@ -428,7 +430,7 @@
 
 - [ ] **DML-01** 删除 DML 双入口；复杂 `INSERT ... SELECT`、view/CTE/partition target 全部使用结构化 ModifyTable。
 - [ ] **DML-02** `ON CONFLICT` 补 index inference、partial/expression index、constraint target、复杂 expression/subquery、并发 speculative insertion。
-- [ ] **DML-03** `UPDATE ... FROM`/`DELETE ... USING` 补任意 join tree、outer/lateral/subquery、重复 source row 和 `WHERE CURRENT OF`。（缺失/无法解析的 FROM/USING 来源已在发布 AST 前拒绝，协议返回 42601 并验证目标行不变；这不等于完整 FROM grammar/任意来源执行已完成。见 `docs/issue-dml-03-missing-source-parser.md`。）
+- [ ] **DML-03** `UPDATE ... FROM`/`DELETE ... USING` 补任意 join tree、outer/lateral/subquery、重复 source row 和 `WHERE CURRENT OF`。（缺失/无法解析的 FROM/USING 来源，以及无 ON/USING 的普通来源 JOIN（递归检查）已在发布 AST 前拒绝，协议返回 42601 并验证目标行不变；这不等于完整 FROM grammar/任意来源执行已完成。见 `docs/issue-dml-03-missing-source-parser.md`。）
 - [ ] **DML-04** `MERGE` 补多个 WHEN、MATCHED DELETE、NOT MATCHED BY SOURCE/TARGET、DO NOTHING、复杂 source、RETURNING 和并发规则。
 - [ ] **DML-05** PostgreSQL 18 `RETURNING WITH (OLD/NEW AS ...)`、任意表达式、subquery/window、trigger 后值和协议 metadata。
 - [ ] **DML-06** `COPY` 补 protocol STDIN/STDOUT、binary、PROGRAM、FREEZE、ON_ERROR、REJECT_LIMIT、HEADER MATCH、encoding 和权限。
