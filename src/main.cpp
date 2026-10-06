@@ -634,7 +634,58 @@ static size_t findKeywordOutsideQuotes(const string& sql,
                                        const string& keyword,
                                        size_t from = 0);
 static size_t findMatchingParen(const string& sql, size_t start);
+// The AST lexer understands comments and dollar literals; legacy statement
+// dispatch and predicate atoms understand ordinary quoted literals only. Give
+// them a lossless lexical copy, never interpreting comment markers inside a
+// datum/identifier or merging the tokens on opposite sides of a comment.
+static string legacySqlLexicalCopy(const string& sql) {
+    string out;
+    out.reserve(sql.size());
+    const auto protectedBytes = dbms::sqlProtectedBytes(sql);
+    for (size_t i = 0; i < sql.size();) {
+        if (sql.compare(i, 2, "--") == 0 || sql.compare(i, 2, "/*") == 0) {
+            const size_t after = dbms::skipLeadingSqlTrivia(sql, i);
+            if (after == string::npos) return sql; // syntax validation owns this
+            out += ' ';
+            i = after;
+        } else if (sql[i] == '\'' || sql[i] == '"') {
+            const size_t begin = i++;
+            const char quote = sql[begin];
+            const bool escaped = quote == '\'' && begin > 0 &&
+                (sql[begin - 1] == 'e' || sql[begin - 1] == 'E') &&
+                (begin < 2 || !dbms::sqlIdentifierContinuation(
+                    static_cast<unsigned char>(sql[begin - 2])));
+            while (i < sql.size()) {
+                if (escaped && sql[i] == '\\') {
+                    i += std::min<size_t>(2, sql.size() - i);
+                } else if (sql[i++] == quote) {
+                    if (i < sql.size() && sql[i] == quote) ++i;
+                    else break;
+                }
+            }
+            out.append(sql, begin, i - begin);
+        } else if (sql[i] == '$' && protectedBytes[i]) {
+            const size_t tagEnd = sql.find('$', i + 1);
+            if (tagEnd == string::npos) return sql;
+            const string delimiter = sql.substr(i, tagEnd - i + 1);
+            const size_t close = sql.find(delimiter, tagEnd + 1);
+            if (close == string::npos) return sql;
+            out += '\'';
+            for (size_t body = tagEnd + 1; body < close; ++body) {
+                out += sql[body];
+                if (sql[body] == '\'') out += '\'';
+            }
+            out += '\'';
+            i = close + delimiter.size();
+        } else {
+            out += sql[i++];
+        }
+    }
+    return out;
+}
+
 static string sqlProcessor(string raw, bool /*normalizeBooleanLiterals*/ = false) {
+    raw = legacySqlLexicalCopy(raw);
     raw = toLowerSql(raw);
     // Whitespace separates SQL tokens; deleting it joins keywords and names.
     // Normalize runs only outside quotes. Whitespace inside a literal or a
