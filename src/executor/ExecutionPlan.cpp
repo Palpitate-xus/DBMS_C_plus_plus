@@ -2502,27 +2502,42 @@ bool ScalarSubqueryProjectOp::open() {
         setError("scalar subquery column does not exist");
         return false;
     }
-    if (!inner_->open()) return false;
-
-    std::string row;
-    if (inner_->next(row)) {
-        scalarIsNull_ = inner_->lastColumnIsNull(innerIdx);
-        if (!scalarIsNull_) {
-            scalarValue_ = StorageEngine::extractColumnValueStatic(
-                row, innerTbl_, innerIdx);
-        }
-        if (inner_->next(row)) {
+    bool innerCloseAttempted = false;
+    const auto closeInner = [&] {
+        if (!innerCloseAttempted) {
+            innerCloseAttempted = true;
             inner_->close();
-            setError("more than one row returned by a subquery used as an expression");
-            return false;
+        }
+    };
+    try {
+        if (!inner_->open()) {
+            try { closeInner(); } catch (...) {}
+            return propagateChildError(inner_.get(), "scalar subquery failed to open");
+        }
+        std::string row;
+        if (inner_->next(row)) {
+            scalarIsNull_ = inner_->lastColumnIsNull(innerIdx);
+            if (!scalarIsNull_) {
+                scalarValue_ = StorageEngine::extractColumnValueStatic(
+                    row, innerTbl_, innerIdx);
+            }
+            if (inner_->next(row))
+                throw DbError("21000", "more than one row returned by a subquery used as an expression");
         }
         if (inner_->hasError()) {
-            inner_->close();
+            try { closeInner(); } catch (...) {}
             return propagateChildError(inner_.get(), "scalar subquery failed");
         }
+        closeInner();
+        if (inner_->hasError()) return propagateChildError(inner_.get(), "scalar subquery failed");
+    } catch (...) {
+        // Cardinality/read failures retain their structured SQL identity even
+        // if close also fails. Attempt inner cleanup once, before the checked
+        // executor independently closes the outer plan.
+        const auto failure = std::current_exception();
+        try { closeInner(); } catch (...) {}
+        std::rethrow_exception(failure);
     }
-    inner_->close();
-    if (inner_->hasError()) return propagateChildError(inner_.get(), "scalar subquery failed");
     return outer_->open();
 }
 
