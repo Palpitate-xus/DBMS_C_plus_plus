@@ -41,9 +41,11 @@ static void test_construct() {
     auto e = eval("ARRAY[1+1,2*3]");
     assert(e.ok && e.value == "{2,6}");
 
-    // empty array
+    // An untyped empty constructor has no element descriptor (PG18.6).
     auto z = eval("ARRAY[]");
-    assert(z.ok);
+    assert(!z.ok && z.sqlState == "42P18");
+    auto typedEmpty = eval("ARRAY[]::INT[]");
+    assert(typedEmpty.ok && typedEmpty.value == "{}" && typedEmpty.typeName == "integer[]");
 
     std::cout << "[ARRAY] ARRAY[] constructor OK" << std::endl;
 }
@@ -123,9 +125,12 @@ static void test_contains() {
     auto t5 = eval("ARRAY[2] <@ ARRAY[1,2,3]");
     assert(t5.ok && t5.value == "t");
 
-    // nested arrays match by canonical text
+    // Preserve the original illegal mixed scalar/array SQL as a strong
+    // preparation error; use a rectangular array for the containment control.
     auto t6 = eval("ARRAY[ARRAY[1,2],3] @> ARRAY[ARRAY[1,2]]");
-    assert(t6.ok && t6.value == "t");
+    assert(!t6.ok && t6.sqlState == "42804");
+    auto rectangular = eval("ARRAY[ARRAY[1,2],ARRAY[3,4]] @> ARRAY[ARRAY[1,2]]");
+    assert(rectangular.ok && rectangular.value == "t");
 
     std::cout << "[ARRAY] @> / <@ OK" << std::endl;
 }
