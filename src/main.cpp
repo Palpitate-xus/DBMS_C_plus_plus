@@ -20321,24 +20321,28 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
     dbms::SQLParser parser;auto parsed=parser.parseForBinding(rawSql);
     auto* select=parsed.isValid()?dynamic_cast<dbms::SelectStmt*>(parsed.stmt.get()):nullptr;
     if(!select)return false;
-    function<bool(const dbms::Expr*)> hasCase=[&](const dbms::Expr* value) {
+    // Scalar SQL children and typed unary operators must consume this same
+    // retained whole-query AST, not a later legacy parser with another TEMP
+    // namespace or a discarded preparation-time operand coercion.
+    function<bool(const dbms::Expr*)> requiresPreparedValue=[&](const dbms::Expr* value) {
         if(!value)return false;
         if(dynamic_cast<const dbms::CaseExpr*>(value))return true;
-        if(const auto* binary=dynamic_cast<const dbms::BinaryOpExpr*>(value))return hasCase(binary->left.get()) || (binary->op!="::" && hasCase(binary->right.get()));
-        if(const auto* unary=dynamic_cast<const dbms::UnaryOpExpr*>(value))return hasCase(unary->operand.get());
-        if(const auto* cast=dynamic_cast<const dbms::CastExpr*>(value))return hasCase(cast->operand.get());
+        if(scalarQueryRoles(value).first)return true;
+        if(const auto* binary=dynamic_cast<const dbms::BinaryOpExpr*>(value))return requiresPreparedValue(binary->left.get()) || (binary->op!="::" && requiresPreparedValue(binary->right.get()));
+        if(const auto* unary=dynamic_cast<const dbms::UnaryOpExpr*>(value))return unary->op=="+" || unary->op=="-" || requiresPreparedValue(unary->operand.get());
+        if(const auto* cast=dynamic_cast<const dbms::CastExpr*>(value))return requiresPreparedValue(cast->operand.get());
         if(const auto* call=dynamic_cast<const dbms::FunctionCallExpr*>(value)) {
-            for(const auto& arg:call->args)if(hasCase(arg.get()))return true;
-            for(const auto& arg:call->namedArgs)if(hasCase(arg.value.get()))return true;
+            for(const auto& arg:call->args)if(requiresPreparedValue(arg.get()))return true;
+            for(const auto& arg:call->namedArgs)if(requiresPreparedValue(arg.value.get()))return true;
         }
-        if(const auto* array=dynamic_cast<const dbms::ArrayExpr*>(value))for(const auto& element:array->elements)if(hasCase(element.get()))return true;
-        if(const auto* row=dynamic_cast<const dbms::RowExpr*>(value))for(const auto& element:row->elements)if(hasCase(element.get()))return true;
+        if(const auto* array=dynamic_cast<const dbms::ArrayExpr*>(value))for(const auto& element:array->elements)if(requiresPreparedValue(element.get()))return true;
+        if(const auto* row=dynamic_cast<const dbms::RowExpr*>(value))for(const auto& element:row->elements)if(requiresPreparedValue(element.get()))return true;
         return false;
     };
-    bool required=hasCase(select->whereClause.get());
-    for(const auto& item:select->selectList)required=required || hasCase(item.expr.get());
-    for(const auto& item:select->orderBy)required=required || hasCase(item.expr.get());
-    for(const auto& row:select->valuesRows)for(const auto& value:row)required=required || hasCase(value.get());
+    bool required=requiresPreparedValue(select->whereClause.get());
+    for(const auto& item:select->selectList)required=required || requiresPreparedValue(item.expr.get());
+    for(const auto& item:select->orderBy)required=required || requiresPreparedValue(item.expr.get());
+    for(const auto& row:select->valuesRows)for(const auto& value:row)required=required || requiresPreparedValue(value.get());
     if(!required)return false;
     if(select->command==dbms::SqlCommand::Values) {
         if(!select->ctes.empty() || !select->orderBy.empty() || select->whereClause || select->limit || select->offset || select->setOp!=dbms::SetOp::None)return false;

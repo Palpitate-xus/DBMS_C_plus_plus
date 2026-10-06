@@ -64,6 +64,13 @@ def main():
             ('SELECT id,(SELECT wide FROM sub_typed WHERE id=1) FROM sub_outer WHERE id=99',[],[23,20]),
         ):
             result=ok(sql);assert result[0]==rows and result[5]==oids,(sql,result,rows,oids)
+        ok('CREATE VIEW scalar_scope_view AS SELECT id,wide FROM sub_typed')
+        for sql,rows,oids in (
+            ('SELECT wide,(SELECT wide FROM sub_typed WHERE id=v.id) FROM scalar_scope_view v',[["2147483648","2147483648"]],[20,20]),
+            ('SELECT a.id,b.wide,(SELECT a.id) FROM sub_outer a JOIN sub_typed b ON a.id=b.id',[["1","2147483648","1"]],[23,20,23]),
+            ('WITH q AS(SELECT id,wide FROM sub_typed) SELECT wide,(SELECT wide FROM sub_typed WHERE id=q.id) FROM q',[["2147483648","2147483648"]],[20,20]),
+        ):
+            result=ok(sql);assert result[0]==rows and result[5]==oids,(sql,result,rows,oids)
         # Pure output analysis must also discover a missing child column before
         # any sibling writer, not infer types from its first returned value.
         ok('CREATE TEMP SEQUENCE scalar_metadata_calls')
