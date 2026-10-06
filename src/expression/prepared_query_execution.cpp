@@ -119,15 +119,20 @@ ExprPtr constantExpression(const ExprValue& value, const Expr* source) {
 // structural constants in its strict equality tests only after whole-query
 // binding. Never infer that a nullable column/parameter is a constant NULL,
 // and never execute a routine or a child query to obtain a planning value.
+struct ConstantPlanningRoles {
+    std::function<bool(const FunctionCallExpr*)> coalesce;
+    std::function<std::string(const FunctionCallExpr*)> resultType;
+};
+
 std::optional<ExprValue> simplifyCaseConstants(ExprPtr& expression,
-                                               const ExprEvaluator& evaluator) {
+    const ExprEvaluator& evaluator, const ConstantPlanningRoles* roles = nullptr) {
     if (!expression || expression->preparedSubquery) return std::nullopt;
     if (const auto* literal = dynamic_cast<const LiteralExpr*>(expression.get())) {
         if (literal->value == "*") return std::nullopt;
         return evaluator.eval(literal, RowContext{});
     }
     if (auto* conditional = dynamic_cast<CaseExpr*>(expression.get())) {
-        const auto switchValue = simplifyCaseConstants(conditional->switchExpr, evaluator);
+        const auto switchValue = simplifyCaseConstants(conditional->switchExpr, evaluator, roles);
         std::vector<std::pair<ExprPtr,ExprPtr>> remaining;
         std::vector<std::pair<std::string,std::string>> comparisons;
         bool definiteMatch = false;
@@ -135,7 +140,7 @@ std::optional<ExprValue> simplifyCaseConstants(ExprPtr& expression,
             auto& arm = conditional->whenClauses[i];
             // Fold pure condition subexpressions before applying strict NULL:
             // NULL = (1/0) still reports the planner's division-by-zero error.
-            const auto conditionValue = simplifyCaseConstants(arm.first, evaluator);
+            const auto conditionValue = simplifyCaseConstants(arm.first, evaluator, roles);
             std::optional<bool> matches;
             if (conditional->switchExpr) {
                 if ((switchValue && switchValue->isNull) ||
@@ -153,7 +158,7 @@ std::optional<ExprValue> simplifyCaseConstants(ExprPtr& expression,
                 }
             } else if (conditionValue) matches = !conditionValue->isNull && conditionValue->asBool();
             if (matches && !*matches) continue; // Do not plan the discarded THEN.
-            simplifyCaseConstants(arm.second,evaluator);
+            simplifyCaseConstants(arm.second,evaluator,roles);
             if (matches && *matches) {
                 conditional->elseExpr = std::move(arm.second);
                 definiteMatch = true;
@@ -163,24 +168,24 @@ std::optional<ExprValue> simplifyCaseConstants(ExprPtr& expression,
             if (!conditional->simpleComparisonTypes.empty())
                 comparisons.push_back(conditional->simpleComparisonTypes.at(i));
         }
-        if (!definiteMatch) simplifyCaseConstants(conditional->elseExpr,evaluator);
+        if (!definiteMatch) simplifyCaseConstants(conditional->elseExpr,evaluator,roles);
         conditional->whenClauses = std::move(remaining);
         conditional->simpleComparisonTypes = std::move(comparisons);
         if (conditional->whenClauses.empty()) {
             auto fallback = std::move(conditional->elseExpr);
             if (!fallback) fallback = constantExpression(ExprValue("unknown","",true),conditional);
             expression = std::move(fallback);
-            return simplifyCaseConstants(expression,evaluator);
+            return simplifyCaseConstants(expression,evaluator,roles);
         }
         return std::nullopt;
     }
     bool constant = false;
     if (auto* unary = dynamic_cast<UnaryOpExpr*>(expression.get()))
-        constant = simplifyCaseConstants(unary->operand,evaluator).has_value();
+        constant = simplifyCaseConstants(unary->operand,evaluator,roles).has_value();
     else if (auto* cast = dynamic_cast<CastExpr*>(expression.get()))
-        constant = simplifyCaseConstants(cast->operand,evaluator).has_value();
+        constant = simplifyCaseConstants(cast->operand,evaluator,roles).has_value();
     else if (auto* binary = dynamic_cast<BinaryOpExpr*>(expression.get())) {
-        const auto left = simplifyCaseConstants(binary->left,evaluator);
+        const auto left = simplifyCaseConstants(binary->left,evaluator,roles);
         const auto op = SQLParser::toLower(binary->op);
         // Match boolean constant demand rather than folding a dead right arm.
         if (left && !left->isNull &&
@@ -189,25 +194,59 @@ std::optional<ExprValue> simplifyCaseConstants(ExprPtr& expression,
             expression = constantExpression(result,expression.get()); return result;
         }
         const auto right = binary->op=="::" ? std::optional<ExprValue>(ExprValue{})
-            : simplifyCaseConstants(binary->right,evaluator);
+            : simplifyCaseConstants(binary->right,evaluator,roles);
         constant = left.has_value() && right.has_value();
     } else if (auto* quantified=dynamic_cast<QuantifiedComparisonExpr*>(expression.get())) {
-        simplifyCaseConstants(quantified->left,evaluator);
+        simplifyCaseConstants(quantified->left,evaluator,roles);
         // A prepared SQL child has its own planning boundary, never execute
         // or fold its result as an outer expression's constant datum.
-        simplifyCaseConstants(quantified->right,evaluator);
+        simplifyCaseConstants(quantified->right,evaluator,roles);
         return std::nullopt;
     } else if (auto* call = dynamic_cast<FunctionCallExpr*>(expression.get())) {
+        // COALESCE is a SQL demand construct, not a user routine. Resolve
+        // its real builtin identity before applying this rule; a quoted or
+        // qualified stored function must retain ordinary argument demand.
+        if (roles && roles->coalesce(call)) {
+            const auto type = roles->resultType(call); // full, unpruned metadata
+            bool knownPrefix = true;
+            for (size_t i = 0; i < call->args.size(); ++i) {
+                const auto value = simplifyCaseConstants(call->args[i],evaluator,roles);
+                if (!value) knownPrefix = false;
+                if (!value || value->isNull) continue;
+                if (knownPrefix) {
+                    auto datum = *value;
+                    if (ExprHelper::canonicalResultTypeName(datum.typeName) != type) {
+                        CastExpr conversion; conversion.typeName = type; conversion.implicit = true;
+                        conversion.operand = constantExpression(datum,nullptr);
+                        datum = evaluator.eval(&conversion,RowContext{});
+                    }
+                    expression = constantExpression(datum,expression.get());
+                    return datum;
+                }
+                call->args.resize(i + 1); // later arguments are unreachable
+                // Retain the full expression's type even after demand pruning.
+                for (auto& argument : call->args) {
+                    auto cast = std::make_unique<CastExpr>(); cast->typeName = type; cast->implicit = true;
+                    cast->operand = std::move(argument); argument = std::move(cast);
+                }
+                return std::nullopt;
+            }
+            if (knownPrefix) {
+                const ExprValue result(type,"",true);
+                expression = constantExpression(result,expression.get()); return result;
+            }
+            return std::nullopt;
+        }
         // Constant arguments can have planning errors even under a volatile
         // routine. The routine itself is never evaluated by this simplifier.
-        for (auto& arg : call->args) simplifyCaseConstants(arg,evaluator);
-        for (auto& arg : call->namedArgs) simplifyCaseConstants(arg.value,evaluator);
+        for (auto& arg : call->args) simplifyCaseConstants(arg,evaluator,roles);
+        for (auto& arg : call->namedArgs) simplifyCaseConstants(arg.value,evaluator,roles);
         return std::nullopt;
     } else if (auto* array = dynamic_cast<ArrayExpr*>(expression.get())) {
-        for (auto& element : array->elements) simplifyCaseConstants(element,evaluator);
+        for (auto& element : array->elements) simplifyCaseConstants(element,evaluator,roles);
         return std::nullopt;
     } else if (auto* row = dynamic_cast<RowExpr*>(expression.get())) {
-        for (auto& element : row->elements) simplifyCaseConstants(element,evaluator);
+        for (auto& element : row->elements) simplifyCaseConstants(element,evaluator,roles);
         return std::nullopt;
     }
     if (!constant) return std::nullopt;
@@ -237,6 +276,36 @@ void planCaseConstants(ExprPtr& expression, const ExprEvaluator& evaluator) {
         for(auto& element:row->elements)planCaseConstants(element,evaluator);
     }
 }
+
+// Value roles only; no statement/range crossing and no :: type-label role.
+void visitStructuredValue(const Expr* expression,
+    const std::function<void(const Expr*)>& visitor) {
+    if (!expression) return;
+    visitor(expression);
+    if (expression->preparedSubquery) return;
+    const auto value = [&](const ExprPtr& child) { visitStructuredValue(child.get(), visitor); };
+    if (const auto* node = dynamic_cast<const UnaryOpExpr*>(expression)) value(node->operand);
+    else if (const auto* node = dynamic_cast<const CastExpr*>(expression)) value(node->operand);
+    else if (const auto* node = dynamic_cast<const BinaryOpExpr*>(expression)) {
+        value(node->left); if (node->op != "::") value(node->right);
+    } else if (const auto* node = dynamic_cast<const QuantifiedComparisonExpr*>(expression)) {
+        value(node->left); value(node->right);
+    } else if (const auto* node = dynamic_cast<const CaseExpr*>(expression)) {
+        value(node->switchExpr); value(node->elseExpr);
+        for (const auto& arm : node->whenClauses) { value(arm.first); value(arm.second); }
+    } else if (const auto* node = dynamic_cast<const FunctionCallExpr*>(expression)) {
+        for (const auto& arg : node->args) value(arg);
+        for (const auto& arg : node->namedArgs) value(arg.value);
+        value(node->filter);
+        for (const auto& arg : node->over.partitionBy) value(arg);
+        for (const auto& arg : node->over.orderBy) value(arg.first);
+        value(node->over.frameStart); value(node->over.frameEnd);
+    } else if (const auto* node = dynamic_cast<const ArrayExpr*>(expression)) {
+        for (const auto& arg : node->elements) value(arg);
+    } else if (const auto* node = dynamic_cast<const RowExpr*>(expression)) {
+        for (const auto& arg : node->elements) value(arg);
+    }
+}
 }
 
 PreparedQueryExecution::PreparedQueryExecution(std::shared_ptr<PreparedQuery> query,
@@ -259,6 +328,24 @@ PreparedQueryExecution::PreparedQueryExecution(std::shared_ptr<PreparedQuery> qu
             ExprHelper::canonicalResultTypeName(binding.declaredType) !=
                 ExprHelper::canonicalResultTypeName(range.columns[binding.columnOrdinal].type))
             throw DbError("XX000", "prepared column binding does not belong to its SQL scope");
+    }
+    for (const auto& projection : query_->projectionBindings) {
+        if (!parents_.count(projection.first))
+            throw DbError("XX000", "projection metadata has no genuine prepared owner");
+        for (const auto& output : projection.second) {
+            const auto owner = owners_.find(output.expression);
+            if (owner == owners_.end() || owner->second != projection.first)
+                throw DbError("XX000", "projection metadata has no original expression site");
+            if (!output.column) continue;
+            const auto& binding = *output.column;
+            const auto& source = sourceRange(binding.sourceOrdinal);
+            if (!isAncestor(source.owner,projection.first) ||
+                (source.owner==projection.first)!=(binding.scopeDepth==0) ||
+                binding.columnOrdinal>=source.columns.size() || binding.mergedUsing!=source.mergedUsing ||
+                ExprHelper::canonicalResultTypeName(binding.declaredType)!=
+                    ExprHelper::canonicalResultTypeName(source.columns[binding.columnOrdinal].type))
+                throw DbError("XX000", "projection metadata does not belong to its SQL source occurrence");
+        }
     }
     // Classify correlation structurally from range owners. An internally
     // correlated grandchild does not make its containing initplan correlated
@@ -361,6 +448,14 @@ void PreparedQueryExecution::prepareExpression(Expr* expression) {
     if (!owners_.count(expression))
         throw DbError("XX000", "expression does not belong to this prepared execution");
     ExprEvaluator::analyzeExplicitResultCollation(expression);
+    if (const auto planned = compiled_.find(expression); planned != compiled_.end()) {
+        // Explicit pure planning does not bind runtime callbacks or give an
+        // aggregate/window/SRF a scalar execution role. The actual consumer
+        // still performs its normal preparation before evaluation.
+        evaluator_.bindScalarFunctions(planned->second.get(), engine_);
+        prepared_.insert(expression);
+        return;
+    }
     std::map<const Expr*, const Expr*> sites;
     auto compiled = copyExpression(expression,sites);
     ExprHelper::prepareArrayTypes(compiled.get(), {}, database_, engine_);
@@ -373,6 +468,276 @@ void PreparedQueryExecution::prepareExpression(Expr* expression) {
             quantifiedSites_.insert(quantified);
     compiled_.emplace(expression,std::move(compiled));
     prepared_.insert(expression);
+}
+
+void PreparedQueryExecution::planExpressionConstants(Expr* expression) {
+    std::set<const Stmt*> visited;
+    planExpressionConstants(expression, visited);
+}
+
+void PreparedQueryExecution::planStatementConstants(const Stmt* statement) {
+    std::set<const Stmt*> visited;
+    planStatementConstants(statement, visited);
+}
+
+void PreparedQueryExecution::planExpressionConstants(Expr* expression,
+    std::set<const Stmt*>& visited) {
+    if (!expression) return;
+    if (!owners_.count(expression))
+        throw DbError("XX000", "constant planning requires a genuine prepared expression owner");
+    if (!compiled_.count(expression)) {
+        ExprEvaluator::analyzeExplicitResultCollation(expression);
+        std::map<const Expr*, const Expr*> sites;
+        auto compiled = copyExpression(expression, sites);
+        ExprHelper::prepareArrayTypes(compiled.get(), {}, database_, engine_);
+        for (const auto& site : sites) originalSites_[site.first] = site.second;
+        for (const auto& site : sites)
+            if (const auto* quantified = dynamic_cast<const QuantifiedComparisonExpr*>(site.second);
+                quantified && quantified->right && quantified->right->preparedSubquery)
+                quantifiedSites_.insert(quantified);
+        compiled_.emplace(expression, std::move(compiled));
+    }
+    planCompiledConstants(compiled_.at(expression), visited);
+}
+
+void PreparedQueryExecution::planCompiledConstants(ExprPtr& expression,
+    std::set<const Stmt*>& visited) {
+    if (!expression) return;
+    // Simplify demand first. A child in a discarded CASE/boolean arm must
+    // not be planned, although the whole binder already checked its names
+    // and analysis-phase input conversions. Neither simplification nor this
+    // visitor obtains a child's result or invokes a registered routine.
+    const ConstantPlanningRoles roles{
+        [&](const FunctionCallExpr* call) {
+            if (!call->schema.empty() || SQLParser::toLower(call->funcName) != "coalesce" ||
+                !call->namedArgs.empty() || call->hasOver || call->filter || call->distinct ||
+                !call->orderBy.empty() || !evaluator_.hasScalarFunction(call,engine_)) return false;
+            FunctionCallExpr builtin; builtin.funcName = "coalesce";
+            for (size_t i=0;i<call->args.size();++i) {
+                auto null = std::make_unique<LiteralExpr>(); null->value = "NULL";
+                builtin.args.push_back(std::move(null));
+            }
+            return evaluator_.scalarFunctionIdentity(call,engine_) ==
+                evaluator_.scalarFunctionIdentity(&builtin,engine_);
+        },
+        [&](const FunctionCallExpr* call) {
+            return ExprHelper::canonicalResultTypeName(ExprHelper::inferParsedResultType(call,{},database_,engine_));
+        }
+    };
+    simplifyCaseConstants(expression, evaluator_, &roles);
+    if (expression->preparedSubquery) {
+        planStatementConstants(expression->preparedSubquery.get(), visited);
+        return;
+    }
+    const auto value = [&](ExprPtr& child) { planCompiledConstants(child, visited); };
+    const auto window = [&](WindowDef& definition) {
+        for (auto& item : definition.partitionBy) value(item);
+        for (auto& item : definition.orderBy) value(item.first);
+        value(definition.frameStart); value(definition.frameEnd);
+    };
+    if (auto* node = dynamic_cast<UnaryOpExpr*>(expression.get())) value(node->operand);
+    else if (auto* node = dynamic_cast<CastExpr*>(expression.get())) value(node->operand);
+    else if (auto* node = dynamic_cast<BinaryOpExpr*>(expression.get())) {
+        value(node->left);
+        if (node->op != "::") value(node->right); // RHS is a type grammar role.
+    } else if (auto* node = dynamic_cast<QuantifiedComparisonExpr*>(expression.get())) {
+        value(node->left); value(node->right);
+    } else if (auto* node = dynamic_cast<CaseExpr*>(expression.get())) {
+        value(node->switchExpr);
+        for (auto& arm : node->whenClauses) { value(arm.first); value(arm.second); }
+        value(node->elseExpr);
+    } else if (auto* node = dynamic_cast<FunctionCallExpr*>(expression.get())) {
+        for (auto& item : node->args) value(item);
+        for (auto& item : node->namedArgs) value(item.value);
+        value(node->filter); window(node->over);
+    } else if (auto* node = dynamic_cast<ArrayExpr*>(expression.get())) {
+        for (auto& item : node->elements) value(item);
+    } else if (auto* node = dynamic_cast<RowExpr*>(expression.get())) {
+        for (auto& item : node->elements) value(item);
+    }
+}
+
+void PreparedQueryExecution::planStatementConstants(const Stmt* statement,
+    std::set<const Stmt*>& visited, const std::set<size_t>* outputDemand) {
+    if (!statement) return;
+    if (!parents_.count(statement))
+        throw DbError("XX000", "constant planning requires a genuine prepared statement owner");
+    const bool firstVisit = visited.insert(statement).second;
+    if (!firstVisit && !dynamic_cast<const SelectStmt*>(statement)) return;
+    std::set<size_t> plannedOutputs;
+    const auto value = [&](const ExprPtr& expression) {
+        planExpressionConstants(expression.get(), visited);
+    };
+    const auto items = [&](const std::vector<SelectItem>& list) {
+        for (const auto& item : list) value(item.expr);
+    };
+    const auto window = [&](const WindowDef& definition) {
+        for (const auto& item : definition.partitionBy) value(item);
+        for (const auto& item : definition.orderBy) value(item.first);
+        value(definition.frameStart); value(definition.frameEnd);
+    };
+    const auto writers = [&](const std::vector<SelectStmt::CTE>& ctes) {
+        for (const auto& cte : ctes)
+            if (cte.query && (cte.query->command == SqlCommand::Insert ||
+                cte.query->command == SqlCommand::Update || cte.query->command == SqlCommand::Delete))
+                planStatementConstants(cte.query.get(), visited);
+    };
+    // A logical read CTE is reachable by its bound statement identity, not
+    // text/name matching. Unreferenced SELECT CTEs receive analysis checks
+    // from the binder but are not planned/executed merely because they exist.
+    const auto retainedTarget = [&](const Expr* expression) {
+        bool retained = false;
+        visitStructuredValue(expression, [&](const Expr* value) {
+            if (const auto* call = dynamic_cast<const FunctionCallExpr*>(value)) {
+                if (call->setReturning || (evaluator_.hasScalarFunction(call, engine_) &&
+                    evaluator_.scalarFunctionVolatility(call, engine_) == 'v')) retained = true;
+            }
+        });
+        return retained;
+    };
+    const auto sourceDemand = [&](const PreparedQuery::SourceRange& source) {
+        std::set<size_t> columns;
+        // USING/NATURAL equality consumes its input key columns even when
+        // the merged output is not projected. These canonical names belong
+        // to this exact bound occurrence, not a global identifier cache.
+        if (source.source)
+            for (size_t i=0;i<source.columns.size();++i)
+                if (source.hiddenUnqualified.count(source.columns[i].name)) columns.insert(i);
+        if (const auto* select = dynamic_cast<const SelectStmt*>(statement)) {
+            const auto projected = query_->projectionBindings.find(select);
+            if (projected != query_->projectionBindings.end())
+                for (size_t i : plannedOutputs) {
+                    const auto& output = projected->second.at(i);
+                    if (output.column && output.column->sourceOrdinal == source.ordinal)
+                        columns.insert(output.column->columnOrdinal);
+                }
+        }
+        for (const auto& compiled : compiled_) {
+            if (!isAncestor(statement,owners_.at(compiled.first))) continue;
+            visitStructuredValue(compiled.second.get(), [&](const Expr* value) {
+                if (const auto* column = dynamic_cast<const ColumnRefExpr*>(value)) {
+                    if (column->binding && column->binding->sourceOrdinal == source.ordinal)
+                        columns.insert(column->binding->columnOrdinal);
+                }
+            });
+        }
+        return columns;
+    };
+    const auto cteBarrier = [&](const Stmt* child) {
+        for (const auto& parent : parents_) {
+            const std::vector<SelectStmt::CTE>* definitions = nullptr;
+            if (const auto* select = dynamic_cast<const SelectStmt*>(parent.first)) definitions = &select->ctes;
+            else if (const auto* with = dynamic_cast<const WithStmt*>(parent.first)) definitions = &with->ctes;
+            if (!definitions) continue;
+            for (const auto& cte : *definitions) if (cte.query.get() == child) {
+                if (cte.recursive || (cte.materializationSpecified && cte.materialized)) return true;
+                const auto references = std::count_if(query_->sourceRanges.begin(),query_->sourceRanges.end(),
+                    [&](const auto& source) { return source.cteStatement == child; });
+                if (references > 1 && !cte.materializationSpecified) return true;
+                if (const auto* select = dynamic_cast<const SelectStmt*>(child))
+                    for (const auto& target : select->selectList) if (retainedTarget(target.expr.get())) return true;
+            }
+        }
+        return false;
+    };
+    const auto sources = [&] {
+        for (const auto& range : query_->sourceRanges) {
+            if (range.owner != statement || !range.cteStatement) continue;
+            const auto demand = sourceDemand(range);
+            planStatementConstants(range.cteStatement, visited, cteBarrier(range.cteStatement) ? nullptr : &demand);
+        }
+    };
+    std::function<void(const FromItem*)> from = [&](const FromItem* item) {
+        if (!item) return;
+        if (item->subquery) {
+            const auto range = std::find_if(query_->sourceRanges.begin(),query_->sourceRanges.end(),
+                [&](const auto& source) { return source.owner == statement && source.source == item; });
+            if (range == query_->sourceRanges.end())
+                throw DbError("XX000", "derived planning source has no bound occurrence");
+            const auto demand = sourceDemand(*range);
+            planStatementConstants(item->subquery.get(), visited, &demand);
+        }
+        from(item->left.get()); from(item->right.get());
+    };
+    std::function<void(const FromItem*)> qualifications = [&](const FromItem* source) {
+        if (!source) return;
+        qualifications(source->left.get()); qualifications(source->right.get()); value(source->joinCondition);
+    };
+    if (const auto* node = dynamic_cast<const WithStmt*>(statement)) {
+        writers(node->ctes);
+        planStatementConstants(node->statement.get(), visited);
+    } else if (const auto* node = dynamic_cast<const SelectStmt*>(statement)) {
+        writers(node->ctes);
+        planStatementConstants(node->setOpLhs.get(), visited);
+        planStatementConstants(node->setOpRhs.get(), visited);
+        // The caller may discard unused derived/default-inline CTE outputs.
+        // DISTINCT/set operations retain their complete row identity; ORDER
+        // aliases/ordinals and volatile/SRF targets retain their actual slots.
+        auto demanded = outputDemand ? *outputDemand : std::set<size_t>{};
+        const bool all = !outputDemand || node->distinct || !node->distinctOn.empty() || node->setOp != SetOp::None;
+        const auto output = query_->statementOutputs.find(statement);
+        for (const auto& order : node->orderBy) {
+            if (const auto* column = dynamic_cast<const ColumnRefExpr*>(order.expr.get()); column && !column->binding &&
+                column->table.empty() && column->schema.empty() && output != query_->statementOutputs.end()) {
+                for (size_t i = 0; i < output->second.size(); ++i)
+                    if (output->second[i].name == column->column) demanded.insert(i);
+            } else if (const auto* literal = dynamic_cast<const LiteralExpr*>(order.expr.get()); literal &&
+                !literal->value.empty() && std::all_of(literal->value.begin(), literal->value.end(),
+                    [](unsigned char c) { return c >= '0' && c <= '9'; })) {
+                size_t ordinal = 0;
+                for (char c : literal->value) { if (ordinal > node->selectList.size()) break; ordinal = ordinal * 10 + size_t(c-'0'); }
+                if (ordinal) demanded.insert(ordinal - 1);
+            }
+        }
+        const auto projected = query_->projectionBindings.find(node);
+        if (projected == query_->projectionBindings.end() && !node->selectList.empty())
+            throw DbError("XX000", "SELECT constant planning requires bound projection ordinals");
+        std::set<const Expr*> usedExpressions;
+        auto& previousOutputs = plannedOutputOrdinals_[node];
+        for (const auto& target : node->selectList) {
+            const bool forced = all || retainedTarget(target.expr.get());
+            if (projected != query_->projectionBindings.end())
+                for (size_t i=0;i<projected->second.size();++i)
+                    if (projected->second[i].expression == target.expr.get() && (forced || demanded.count(i) || previousOutputs.count(i))) {
+                        usedExpressions.insert(target.expr.get()); plannedOutputs.insert(i);
+                    }
+        }
+        const bool additional = std::any_of(plannedOutputs.begin(),plannedOutputs.end(),
+            [&](size_t ordinal) { return !previousOutputs.count(ordinal); });
+        if (!firstVisit && !additional) return;
+        previousOutputs.insert(plannedOutputs.begin(),plannedOutputs.end());
+        for (const auto& target : node->selectList) {
+            if (usedExpressions.count(target.expr.get())) value(target.expr);
+        }
+        value(node->whereClause);
+        for (const auto& item : node->groupBy) value(item);
+        for (const auto& element : node->groupByElems)
+            for (const auto& item : element.exprs) value(item);
+        value(node->having);
+        for (const auto& item : node->distinctOn) value(item);
+        for (const auto& item : node->orderBy) value(item.expr);
+        for (const auto& row : node->valuesRows) for (const auto& item : row) value(item);
+        for (const auto& definition : node->windowDefs) window(definition);
+        qualifications(node->fromClause.get()); sources(); from(node->fromClause.get());
+    } else if (const auto* node = dynamic_cast<const InsertStmt*>(statement)) {
+        for (const auto& row : node->values) for (const auto& item : row) value(item);
+        planStatementConstants(node->selectSource.get(), visited);
+        for (const auto& item : node->conflictUpdateSet) value(item.second);
+        value(node->conflictWhere); items(node->returning);
+        sources();
+    } else if (const auto* node = dynamic_cast<const UpdateStmt*>(statement)) {
+        for (const auto& item : node->setClauses) value(item.second);
+        value(node->whereClause); items(node->returning);
+        qualifications(node->fromClause.get()); sources(); from(node->fromClause.get());
+    } else if (const auto* node = dynamic_cast<const DeleteStmt*>(statement)) {
+        value(node->whereClause); items(node->returning);
+        qualifications(node->usingClause.get()); sources(); from(node->usingClause.get());
+    } else if (const auto* node = dynamic_cast<const ExplainStmt*>(statement)) {
+        planStatementConstants(node->query.get(), visited);
+    } else if (const auto* node = dynamic_cast<const CreateTableStmt*>(statement)) {
+        planStatementConstants(node->preparedAsQuery.get(), visited);
+        for (const auto& column : node->columns) value(column.defaultValue);
+    } else throw DbError("0A000", "constant planning requires a supported structured query statement");
 }
 
 void PreparedQueryExecution::prepareProjectionColumn(ColumnRefExpr* column, const Stmt* owner) {

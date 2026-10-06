@@ -40,6 +40,12 @@ int main() {
     viewSelect = dynamic_cast<const SelectStmt*>(view.sourceRanges.front().viewQuery->ast.get());
     assert(dynamic_cast<const CastExpr*>(viewSelect->selectList[0].expr.get()));
     assert(dynamic_cast<const CastExpr*>(viewSelect->selectList[1].expr.get()));
+    const auto& viewProjections = view.sourceRanges.front().viewQuery->projectionBindings.at(viewSelect);
+    assert(viewProjections.size() == 2);
+    for (size_t i = 0; i < viewProjections.size(); ++i) {
+        assert(viewProjections[i].expression == viewSelect->selectList[i].expr.get());
+        assert(!viewProjections[i].column);
+    }
 
     auto query = std::make_shared<PreparedQuery>(prepareQuery(
         "SELECT a.\"V\",b.v,CASE a.\"V\" WHEN CAST(9007199254740992 AS DOUBLE PRECISION) "

@@ -72,6 +72,15 @@ struct PreparedQuery {
     // moves. Ordinals are unique in this prepared query, not SQL text keys.
     std::vector<SourceRange> sourceRanges;
     std::map<const Stmt*, QueryRowDescriptor> statementOutputs;
+    struct ProjectionBinding {
+        // Original, live value-expression site, including a star that expands
+        // to several output ordinals. Never reconstructed from column names.
+        const Expr* expression = nullptr;
+        std::optional<QueryColumnBinding> column;
+    };
+    // SELECT expanded output ordinal -> genuine expression/source binding.
+    // Compound/parameter outputs retain their expression with no source cell.
+    std::map<const SelectStmt*, std::vector<ProjectionBinding>> projectionBindings;
     // Transitional adapter for dispatchers that still parse SQL strings.
     // Encoding is permitted only after whole-tree preparation has succeeded.
     std::string legacySql() const;

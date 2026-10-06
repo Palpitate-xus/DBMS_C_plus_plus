@@ -1381,6 +1381,7 @@ std::string ExprHelper::preparedSortExpressionIdentity(
             std::string key;
             for (const auto& cte : ctes) {
                 key += field(cte.name) + field(cte.recursive ? "recursive" : "ordinary") + field(cte.materialized ? "materialized" : "inline");
+                key += field(cte.materializationSpecified ? "explicit" : "default");
                 for (const auto& column : cte.columnNames) key += field(column);
                 key += field(statementKey(cte.query.get()));
             }

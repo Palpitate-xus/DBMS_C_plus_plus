@@ -762,6 +762,10 @@ struct SelectStmt : public Stmt {
         // parsed for binding; execution must never rediscover this boundary.
         size_t queryBegin = std::string::npos;
         size_t queryEnd = std::string::npos;
+        // Preserve DEFAULT vs explicit AS [NOT] MATERIALIZED. The legacy
+        // materialized flag alone defaults true and cannot express that
+        // planning distinction.
+        bool materializationSpecified = false;
     };
     std::vector<CTE> ctes;
 

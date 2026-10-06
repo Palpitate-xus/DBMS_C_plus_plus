@@ -3094,9 +3094,11 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
             if (pos + 1 < tokens.size() && toLower(tokens[pos]) == "not"
                 && toLower(tokens[pos + 1]) == "materialized") {
                 cte.materialized = false;
+                cte.materializationSpecified = true;
                 pos += 2;
             } else if (pos < tokens.size() && toLower(tokens[pos]) == "materialized") {
                 cte.materialized = true;
+                cte.materializationSpecified = true;
                 ++pos;
             }
             if (pos < tokens.size() && tokens[pos] == "(") {

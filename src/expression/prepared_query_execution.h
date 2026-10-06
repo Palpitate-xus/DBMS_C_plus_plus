@@ -48,6 +48,12 @@ public:
     // Call on every executable expression before opening sources/evaluating
     // any expression. Routine registration and collation checks are pure.
     void prepareExpression(Expr* expression);
+    // Explicit planning phase, after whole-query binding and before any
+    // source/child is opened. Fold only structural constants in execution-
+    // owned copies; routines and query results are never planning datums.
+    // Default prepareExpression() timing/behaviour is unchanged.
+    void planExpressionConstants(Expr* expression);
+    void planStatementConstants(const Stmt* statement);
     // A projection star may produce an execution-owned positional column.
     // Its true owner/range must still be validated; no SQL name lookup.
     void prepareProjectionColumn(ColumnRefExpr* column, const Stmt* owner);
@@ -75,6 +81,7 @@ private:
     std::map<const Expr*, Child> children_;
     std::set<const Expr*> prepared_;
     std::map<const Expr*, ExprPtr> compiled_;
+    std::map<const SelectStmt*, std::set<size_t>> plannedOutputOrdinals_;
     std::map<const Expr*, const Expr*> originalSites_;
     mutable std::map<const Expr*, ExprValue> memo_;
     PreparedChildExecutor queryExecutor_;
@@ -90,6 +97,10 @@ private:
 
     void indexStatement(const Stmt* statement, const Stmt* parent);
     void indexExpression(const Expr* expression, const Stmt* owner);
+    void planExpressionConstants(Expr* expression, std::set<const Stmt*>& visited);
+    void planStatementConstants(const Stmt* statement, std::set<const Stmt*>& visited,
+                                const std::set<size_t>* outputDemand = nullptr);
+    void planCompiledConstants(ExprPtr& expression, std::set<const Stmt*>& visited);
     bool isAncestor(const Stmt* ancestor, const Stmt* descendant) const;
     ExprValue executeChild(const Expr* expression, const RowContext& row) const;
     QuantifiedState& quantifiedState(const QuantifiedComparisonExpr*,const RowContext&) const;

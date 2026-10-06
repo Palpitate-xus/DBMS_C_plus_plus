@@ -481,7 +481,8 @@ public:
         return {"",0};
     }
     QueryRowDescriptor project(std::vector<SelectItem>& items, const std::vector<Namespace>& scopes,
-                               std::vector<const Expr*>* leaves = nullptr) {
+                              std::vector<const Expr*>* leaves = nullptr,
+                              std::vector<PreparedQuery::ProjectionBinding>* bindings = nullptr) {
         QueryRowDescriptor columns;
         for (auto& item : items) {
             if (!item.expr) throw DbError("42601", "query projection has no expression");
@@ -489,11 +490,15 @@ public:
                 static_cast<LiteralExpr*>(item.expr.get())->value == "*") {
                 if (scopes.empty()) throw DbError("42601", "SELECT * has no source");
                 for (const auto& range : scopes.front())
-                    for (const auto& column : range.columns)
+                    for (size_t i = 0; i < range.columns.size(); ++i) {
+                        const auto& column = range.columns[i];
                         if (!range.hiddenUnqualified.count(column.name)) {
                             columns.push_back(column);
                             if (leaves) leaves->push_back(nullptr);
+                            if (bindings) bindings->push_back({item.expr.get(),
+                                QueryColumnBinding{0,range.occurrence,i,column.type,range.mergedUsing}});
                         }
+                    }
                 continue;
             }
             if (const auto* star = dynamic_cast<ColumnRefExpr*>(item.expr.get()); star && star->column == "*") {
@@ -502,6 +507,10 @@ public:
                     if (range.name != star->table || (!star->schema.empty() && range.schema != star->schema)) continue;
                     found = true; columns.insert(columns.end(), range.columns.begin(), range.columns.end());
                     if (leaves) leaves->insert(leaves->end(), range.columns.size(), nullptr);
+                    if (bindings)
+                        for (size_t i=0;i<range.columns.size();++i)
+                            bindings->push_back({item.expr.get(),
+                                QueryColumnBinding{0,range.occurrence,i,range.columns[i].type,range.mergedUsing}});
                 }
                 if (!found) throw DbError("42P01", "missing FROM-clause entry for qualified star");
                 continue;
@@ -523,6 +532,10 @@ public:
             }
             columns.push_back({name, type});
             if (leaves) leaves->push_back(item.expr.get());
+            if (bindings) {
+                const auto* column = dynamic_cast<const ColumnRefExpr*>(item.expr.get());
+                bindings->push_back({item.expr.get(),column ? column->binding : std::nullopt});
+            }
         }
         return columns;
     }
@@ -593,8 +606,14 @@ public:
                 };
                 if (viewSelect && viewSelect->command == SqlCommand::Values) {
                     for (auto& row : viewSelect->valuesRows) castOutput(row.at(i));
-                } else if (viewSelect && viewSelect->selectList.size() == range.viewQuery->output.size())
+                } else if (viewSelect && viewSelect->selectList.size() == range.viewQuery->output.size()) {
                     castOutput(viewSelect->selectList[i].expr);
+                    // The retained projection must refer to its actual new
+                    // root, not the still-live operand of this implicit cast.
+                    auto& projected = range.viewQuery->projectionBindings.at(viewSelect).at(i);
+                    projected.expression = viewSelect->selectList[i].expr.get();
+                    projected.column.reset();
+                }
                 else throw DbError("0A000", "view UNKNOWN output requires additional projection lowering");
                 column.type = "text";
             }
@@ -730,7 +749,8 @@ public:
             }
             auto scopes = outer;
             scopes.insert(scopes.begin(), from(select->fromClause.get(), outer, ctes));
-            auto columns = project(select->selectList, scopes, &projectionLeaves[select]);
+            auto& projected = result.projectionBindings[select]; projected.clear();
+            auto columns = project(select->selectList, scopes, &projectionLeaves[select], &projected);
             if (select->command == SqlCommand::Values && !select->valuesRows.empty()) {
                 columns.clear();
                 const size_t width=select->valuesRows.front().size();
