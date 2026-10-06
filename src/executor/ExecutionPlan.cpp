@@ -120,6 +120,8 @@ struct PreparedSelectState {
     std::vector<SortKey> keys;
     static constexpr size_t noTarget = std::numeric_limits<size_t>::max();
     size_t sourceOrdinal = noTarget;
+    bool sourceContexts = false;
+    std::vector<const PreparedQuery::SourceRange*> visibleRanges;
     SelectStmt& select() const { return *statement; }
     size_t columnOrdinal(const ColumnRefExpr& column) const {
         if (!column.binding) throw DbError("XX000", "prepared source reference has no binding");
@@ -135,6 +137,16 @@ struct PreparedSelectState {
             if (column.binding && column.binding->scopeDepth) {
                 const auto& binding = *column.binding;
                 return std::to_string(binding.sourceOrdinal) + ":" + std::to_string(binding.columnOrdinal) + ":" + binding.declaredType;
+            }
+            if (sourceContexts) {
+                if (!column.binding) throw DbError("XX000", "prepared expression has no source identity");
+                const auto& binding = *column.binding;
+                for (const auto& range : query->sourceRanges)
+                    if (range.owner == statement && range.ordinal == binding.sourceOrdinal &&
+                        binding.columnOrdinal < range.columns.size())
+                        return std::to_string(binding.sourceOrdinal) + ":" +
+                            std::to_string(binding.columnOrdinal) + ":" + binding.declaredType;
+                throw DbError("XX000", "prepared expression references an absent source occurrence");
             }
             const auto ordinal = columnOrdinal(column);
             const auto& physical = schema.cols[ordinal];
@@ -164,6 +176,15 @@ struct PreparedSelectState {
         row.setParameters(query->parameters);
         if (sourceOrdinal != noTarget) execution->setSourceRow(row, sourceOrdinal, values);
         return row;
+    }
+    RowContext context(Operator& source, const std::string& raw) const {
+        RowContext row;
+        if (source.supportsPreparedContexts() && source.lastPreparedContext(row)) {
+            row.setParameters(query->parameters);
+            return row;
+        }
+        if (sourceContexts) throw DbError("XX000", "logical source lost its bound row context");
+        return context(cells(source, raw));
     }
     ExprValue evaluate(const Expr* expression, const RowContext& row) const {
         ExprValue value = execution->evaluate(expression, row);
@@ -203,6 +224,24 @@ struct PreparedSelectState {
         }
         return false;
     }
+    static bool rowIndependent(const Expr* expression) {
+        if (!expression || expression->preparedSubquery) return !expression;
+        if (dynamic_cast<const LiteralExpr*>(expression) || dynamic_cast<const ParameterExpr*>(expression)) return true;
+        if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(expression)) return rowIndependent(unary->operand.get());
+        if (const auto* cast = dynamic_cast<const CastExpr*>(expression)) return rowIndependent(cast->operand.get());
+        if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(expression))
+            return rowIndependent(binary->left.get()) &&
+                ((binary->op == "::" || binary->op == "COLLATE") || rowIndependent(binary->right.get()));
+        if (const auto* conditional = dynamic_cast<const CaseExpr*>(expression)) {
+            if (!rowIndependent(conditional->switchExpr.get()) || !rowIndependent(conditional->elseExpr.get())) return false;
+            for (const auto& arm : conditional->whenClauses)
+                if (!rowIndependent(arm.first.get()) || !rowIndependent(arm.second.get())) return false;
+            return true;
+        }
+        // A routine, source column or lazy query child is not a planning
+        // constant, even when its text or current datum happens to be NULL.
+        return false;
+    }
 };
 
 class PreparedResultOp final : public Operator {
@@ -221,23 +260,38 @@ public:
 class PreparedFilterOp final : public Operator {
     OpPtr child_;
     std::shared_ptr<PreparedSelectState> state_;
+    bool childOpened_ = false, empty_ = false;
 public:
     PreparedFilterOp(OpPtr child, std::shared_ptr<PreparedSelectState> state)
         : child_(std::move(child)), state_(std::move(state)) {}
-    bool open() override { OpenInstrument startup(this); clearError(); return child_->open(); }
+    bool open() override {
+        OpenInstrument startup(this); clearError(); childOpened_ = false; empty_ = false;
+        if (PreparedSelectState::rowIndependent(state_->select().whereClause.get())) {
+            auto row = state_->outerRow; row.setParameters(state_->query->parameters);
+            const auto value = state_->evaluate(state_->select().whereClause.get(), row);
+            if (value.isNull || !value.asBool()) { empty_ = true; return true; }
+        }
+        childOpened_ = true; return child_->open();
+    }
     bool next(std::string& row) override {
         NextInstrument instrumentation(this);
+        if (empty_) return false;
         while (child_->next(row)) {
             const auto value = state_->evaluate(state_->select().whereClause.get(),
-                state_->context(state_->cells(*child_, row)));
+                state_->context(*child_, row));
             if (!value.isNull && value.asBool()) { instrumentation.emitted = true; return true; }
         }
         if (child_->hasError()) return propagateChildError(child_.get(), "prepared filter child failed");
         return false;
     }
-    void close() override { child_->close(); }
+    void close() override {
+        if (childOpened_) { childOpened_ = false; child_->close(); }
+        empty_ = false;
+    }
     bool lastColumnIsNull(size_t ordinal) const override { return child_->lastColumnIsNull(ordinal); }
     bool supportsStructuredRows() const override { return child_->supportsStructuredRows(); }
+    bool supportsPreparedContexts() const override { return child_->supportsPreparedContexts(); }
+    bool lastPreparedContext(RowContext& row) const override { return child_->lastPreparedContext(row); }
     bool lastStructuredRow(std::vector<std::string>& cells, std::vector<bool>& nulls) const override {
         return child_->lastStructuredRow(cells, nulls);
     }
@@ -250,6 +304,7 @@ class PreparedSortOp final : public Operator {
     struct Row {
         std::string raw;
         std::vector<ExprValue> cells, keys;
+        RowContext context;
         std::vector<std::optional<ExprValue>> targets;
     };
     OpPtr child_;
@@ -265,9 +320,10 @@ public:
         if (!child_->open()) return false;
         std::string raw;
         while (child_->next(raw)) {
-            Row row; row.raw = raw; row.cells = state_->cells(*child_, raw);
+            Row row; row.raw = raw; row.context = state_->context(*child_, raw);
+            if (!state_->sourceContexts) row.cells = state_->cells(*child_, raw);
             row.targets.resize(state_->targets.size());
-            const auto context = state_->context(row.cells);
+            const auto& context = row.context;
             // Non-volatile targets are part of the sort input projection.
             // Volatile non-key targets remain above Sort/LIMIT demand; sort
             // keys, aliases and structurally identical targets share slots.
@@ -317,6 +373,11 @@ public:
         row = rows_[position_++].raw; instrumentation.emitted = true; return true;
     }
     const std::vector<std::optional<ExprValue>>& targets() const { return rows_.at(position_ - 1).targets; }
+    bool supportsPreparedContexts() const override { return true; }
+    bool lastPreparedContext(RowContext& row) const override {
+        if (!position_ || position_ > rows_.size()) return false;
+        row = rows_[position_ - 1].context; return true;
+    }
     bool supportsStructuredRows() const override { return true; }
     bool lastStructuredRow(std::vector<std::string>& cells, std::vector<bool>& nulls) const override {
         if (!position_ || position_ > rows_.size()) return false;
@@ -354,7 +415,7 @@ public:
             if (child_->hasError()) return propagateChildError(child_.get(), "prepared projection child failed");
             return false;
         }
-        const auto context = state_->context(state_->cells(*child_, raw));
+        const auto context = state_->context(*child_, raw);
         const auto* sorted = dynamic_cast<const PreparedSortOp*>(child_.get());
         values_.clear(); row.clear();
         for (size_t i = 0; i < state_->targets.size(); ++i) {
@@ -454,13 +515,13 @@ public:
 };
 } // namespace
 
-static bool supportsPreparedSelectShape(const SelectStmt& select, bool allowCtes) {
+static bool supportsPreparedSelectShape(const SelectStmt& select, bool allowCtes, bool sourceContexts = false) {
     if (select.command != SqlCommand::Select || (!allowCtes && !select.ctes.empty()) ||
         select.setOp != SetOp::None || select.setOpLhs || select.setOpRhs ||
         !select.groupBy.empty() || !select.groupByElems.empty() || select.having ||
         !select.windowDefs.empty() || !select.distinctOn.empty() ||
         !select.locking.empty() || select.withTies) return false;
-    if (select.fromClause && select.fromClause->type != FromItem::Type::Table) return false;
+    if (!sourceContexts && select.fromClause && select.fromClause->type != FromItem::Type::Table) return false;
     std::function<bool(const Expr*)> scalar = [&](const Expr* expr) {
         if (!expr) return true;
         if (auto* call = dynamic_cast<const FunctionCallExpr*>(expr)) {
@@ -490,6 +551,9 @@ static bool supportsPreparedSelectShape(const SelectStmt& select, bool allowCtes
 bool QueryPlanner::supportsPreparedSelectPlan(const SelectStmt& select) {
     return supportsPreparedSelectShape(select, false);
 }
+bool QueryPlanner::supportsPreparedSourceSelectPlan(const SelectStmt& select) {
+    return supportsPreparedSelectShape(select, true, true);
+}
 
 OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
     const std::string& dbname, const std::string& tablename, PreparedQuery prepared) {
@@ -507,7 +571,7 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
     const std::string& dbname, std::shared_ptr<PreparedQuery> prepared,
     SelectStmt* select, const TableSchema& sourceSchema, OpPtr source,
     const RowContext& outerRow, PreparedChildExecutor childExecutor) {
-    if (!prepared || !select || !supportsPreparedSelectShape(*select, true) || !source)
+    if (!prepared || !select || !source || !supportsPreparedSelectShape(*select, true, source->supportsPreparedContexts()))
         throw DbError("0A000", "query requires an additional prepared plan lowering");
     const auto output = prepared->statementOutputs.find(select);
     if (output == prepared->statementOutputs.end())
@@ -518,7 +582,15 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
     state->output = output->second; state->outerRow = outerRow;
     state->childExecutor = std::move(childExecutor);
     state->evaluator.setCurrentDB(dbname);
-    if (select->fromClause) {
+    state->sourceContexts = source->supportsPreparedContexts();
+    if (state->sourceContexts && select->fromClause) {
+        std::function<void(const FromItem*)> ranges = [&](const FromItem* item) {
+            for (const auto& range : state->query->sourceRanges)
+                if (range.owner == select && range.source == item) state->visibleRanges.push_back(&range);
+            if (item->type == FromItem::Type::Join) { ranges(item->left.get()); ranges(item->right.get()); }
+        };
+        ranges(select->fromClause.get());
+    } else if (select->fromClause) {
         state->schema = sourceSchema;
         for (const auto& range : state->query->sourceRanges) {
             if (range.owner != select || range.source != select->fromClause.get() || range.mergedUsing) continue;
@@ -539,7 +611,21 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
         if (target.expr && (target.expr->type == ExprType::A_Star ||
             (reference && reference->column == "*") || (literal && literal->value == "*"))) {
             if (!select->fromClause) throw DbError("42601", "SELECT * requires a FROM source");
-            for (size_t i = 0; i < state->schema.len; ++i) {
+            if (state->sourceContexts) {
+                for (const auto* range : state->visibleRanges) {
+                    const bool qualified = reference && !reference->table.empty();
+                    if (qualified && (range->mergedUsing || reference->table != range->name ||
+                        (!reference->schema.empty() && reference->schema != range->schema))) continue;
+                    for (size_t i = 0; i < range->columns.size(); ++i) {
+                        if (!qualified && range->hiddenUnqualified.count(range->columns[i].name)) continue;
+                        auto expression = std::make_unique<ColumnRefExpr>();
+                        expression->column = range->columns[i].name;
+                        expression->binding = QueryColumnBinding{0, range->ordinal, i, range->columns[i].type, range->mergedUsing};
+                        state->targets.push_back(expression.get());
+                        state->starTargets.push_back(std::move(expression));
+                    }
+                }
+            } else for (size_t i = 0; i < state->schema.len; ++i) {
                 auto expression = std::make_unique<ColumnRefExpr>();
                 expression->column = state->schema.cols[i].dataName;
                 expression->binding = QueryColumnBinding{0, state->sourceOrdinal, i,

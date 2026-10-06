@@ -18680,6 +18680,57 @@ static bool executePgStatActivityQuery(const string& rawSql,
 // seventeen columns; this server currently has reliable values only for the
 // first three.  Do not let the legacy text renderer silently ignore the
 // caller's projection or predicate.
+static dbms::PreparedQueryRows preparedPgSettingsRows(const Session& session) {
+    dbms::PreparedQueryRows rows;
+    const auto add = [&](string name,string value,string unit = string{}) {
+        const bool nullUnit = unit.empty();
+        rows.push_back({dbms::ExprValue("text",std::move(name),false),
+            dbms::ExprValue("text",std::move(value),false),dbms::ExprValue("text",std::move(unit),nullUnit)});
+    };
+    const auto& cost = dbms::QueryPlanner::costModel();
+    const auto number = [](double value) {
+        std::ostringstream formatted;
+        formatted << value;
+        return formatted.str();
+    };
+    add("max_connections", to_string(g_config.maxConnections));
+    add("shared_buffers", to_string(g_config.bufferPoolFrames), "8kB");
+    add("work_mem", to_string(g_config.workMemKb), "kB");
+    add("max_notify_queue_pages",
+               to_string(dbms::notificationManager().queueCapacityBytes() / 8192));
+    add("checkpoint_timeout", to_string(g_config.checkpointInterval), "s");
+    add("statement_timeout", to_string(session.statementTimeoutMs), "ms");
+    add("lock_timeout", to_string(session.lockTimeoutMs), "ms");
+    add("deadlock_timeout", to_string(session.deadlockTimeoutMs), "ms");
+    add("lc_monetary", session.lcMonetary);
+    add("slow_query_threshold_ms", to_string(g_config.slowQueryThresholdMs), "ms");
+    add("enable_seq_scan", g_config.enableSeqScan ? "on" : "off");
+    add("enable_hash_join", g_config.enableHashJoin ? "on" : "off");
+    add("enable_merge_join", g_config.enableMergeJoin ? "on" : "off");
+    add("max_parallel_workers_per_gather",
+               to_string(g_config.maxParallelWorkersPerGather));
+    add("seq_page_cost", number(cost.seqPageCost));
+    add("random_page_cost", number(cost.randomPageCost));
+    add("cpu_tuple_cost", number(cost.cpuTupleCost));
+    add("cpu_index_tuple_cost", number(cost.cpuIndexTupleCost));
+    add("cpu_operator_cost", number(cost.cpuOperatorCost));
+    add("enable_nestloop", cost.enableNestloop ? "on" : "off");
+    add("auto_explain", g_config.autoExplainEnabled ? "on" : "off");
+    add("auto_explain.log_min_duration",
+               to_string(g_config.autoExplainThresholdMs), "ms");
+    add("auto_vacuum", g_config.autoVacuumEnabled ? "on" : "off");
+    add("auto_analyze", g_config.autoAnalyzeEnabled ? "on" : "off");
+    add("password_policy_level", to_string(g_config.passwordPolicyLevel));
+    add("audit_level", to_string(g_config.auditLevel));
+    if (dbms::isExtendedCompatMode(session.compatibilityMode)) {
+        const auto poolStats = dbms::ConnectionPool::instance().stats();
+        add("pool_mode", poolStats.mode);
+        add("pool_size", to_string(poolStats.poolSize));
+        add("max_client_conn", to_string(poolStats.maxClientConnections));
+    }
+    return rows;
+}
+
 static bool executePgSettingsQuery(const string& rawSql,
                                    const Session& session) {
     dbms::SQLParser parser;
@@ -18777,69 +18828,12 @@ static bool executePgSettingsQuery(const string& rawSql,
             throw dbms::DbError("42804", "argument of WHERE must be type boolean");
     }
 
-    struct SettingRow {
-        string name;
-        string setting;
-        string unit;
-        bool unitNull;
-    };
-    vector<SettingRow> settings;
-    const auto addSetting = [&](string name, string value,
-                                string unit = string{}) {
-        const bool unitNull = unit.empty();
-        settings.push_back({std::move(name), std::move(value),
-                            std::move(unit), unitNull});
-    };
-    const auto& cost = dbms::QueryPlanner::costModel();
-    const auto number = [](double value) {
-        std::ostringstream formatted;
-        formatted << value;
-        return formatted.str();
-    };
-    addSetting("max_connections", to_string(g_config.maxConnections));
-    addSetting("shared_buffers", to_string(g_config.bufferPoolFrames), "8kB");
-    addSetting("work_mem", to_string(g_config.workMemKb), "kB");
-    addSetting("max_notify_queue_pages",
-               to_string(dbms::notificationManager().queueCapacityBytes() / 8192));
-    addSetting("checkpoint_timeout", to_string(g_config.checkpointInterval), "s");
-    addSetting("statement_timeout", to_string(session.statementTimeoutMs), "ms");
-    addSetting("lock_timeout", to_string(session.lockTimeoutMs), "ms");
-    addSetting("deadlock_timeout", to_string(session.deadlockTimeoutMs), "ms");
-    addSetting("lc_monetary", session.lcMonetary);
-    addSetting("slow_query_threshold_ms", to_string(g_config.slowQueryThresholdMs), "ms");
-    addSetting("enable_seq_scan", g_config.enableSeqScan ? "on" : "off");
-    addSetting("enable_hash_join", g_config.enableHashJoin ? "on" : "off");
-    addSetting("enable_merge_join", g_config.enableMergeJoin ? "on" : "off");
-    addSetting("max_parallel_workers_per_gather",
-               to_string(g_config.maxParallelWorkersPerGather));
-    addSetting("seq_page_cost", number(cost.seqPageCost));
-    addSetting("random_page_cost", number(cost.randomPageCost));
-    addSetting("cpu_tuple_cost", number(cost.cpuTupleCost));
-    addSetting("cpu_index_tuple_cost", number(cost.cpuIndexTupleCost));
-    addSetting("cpu_operator_cost", number(cost.cpuOperatorCost));
-    addSetting("enable_nestloop", cost.enableNestloop ? "on" : "off");
-    addSetting("auto_explain", g_config.autoExplainEnabled ? "on" : "off");
-    addSetting("auto_explain.log_min_duration",
-               to_string(g_config.autoExplainThresholdMs), "ms");
-    addSetting("auto_vacuum", g_config.autoVacuumEnabled ? "on" : "off");
-    addSetting("auto_analyze", g_config.autoAnalyzeEnabled ? "on" : "off");
-    addSetting("password_policy_level", to_string(g_config.passwordPolicyLevel));
-    addSetting("audit_level", to_string(g_config.auditLevel));
-    if (dbms::isExtendedCompatMode(session.compatibilityMode)) {
-        const auto poolStats = dbms::ConnectionPool::instance().stats();
-        addSetting("pool_mode", poolStats.mode);
-        addSetting("pool_size", to_string(poolStats.poolSize));
-        addSetting("max_client_conn", to_string(poolStats.maxClientConnections));
-    }
+    const auto settings = preparedPgSettingsRows(session);
     dbms::ExprEvaluator evaluator;
     evaluator.setCurrentDB(session.currentDB);
     vector<vector<dbms::ExprValue>> results;
-    for (const auto& setting : settings) {
+    for (const auto& values : settings) {
         dbms::RowContext context;
-        const vector<dbms::ExprValue> values = {
-            dbms::ExprValue("text", setting.name, false),
-            dbms::ExprValue("text", setting.setting, false),
-            dbms::ExprValue("text", setting.unit, setting.unitNull)};
         for (size_t i = 0; i < supported.size(); ++i) {
             context.set(supported[i], values[i]);
             context.set(qualifier + "." + supported[i], values[i]);
@@ -19642,6 +19636,7 @@ class PreparedWithDmlRuntime {
     shared_ptr<dbms::PreparedQuery> query_;
     vector<shared_ptr<Frame>> frames_;
     dbms::WithStmt* root_;
+    dbms::SelectStmt* readRoot_;
     dbms::PreparedQueryExecution validation_;
 
     vector<string> selectedColumns(const dbms::Stmt* root,
@@ -19801,8 +19796,19 @@ class PreparedWithDmlRuntime {
         vector<pair<string,Cell>> visible;
         vector<dbms::RowContext> rows;
         function<void(DmlSourceNode&)> load;
+        function<bool(size_t,dbms::RowContext&)> read;
+        function<void()> close;
         bool loaded=false;
-        void ensure(){if(!loaded){load(*this);loaded=true;}}
+        bool readAt(size_t index,dbms::RowContext& row) {
+            if(index<rows.size()){row=rows[index];return true;}
+            if(loaded)return false;
+            if(!read){load(*this);loaded=true;return readAt(index,row);}
+            if(index!=rows.size())throw dbms::DbError("XX000","logical source read skipped its demand ordinal");
+            if(!read(index,row)){loaded=true;if(close)close();return false;}
+            rows.push_back(row);return true;
+        }
+        void ensure(){dbms::RowContext ignored;while(readAt(rows.size(),ignored)) {}}
+        ~DmlSourceNode(){try{if(close)close();}catch(...) {}}
     };
     const dbms::PreparedQuery::SourceRange& sourceRange(const dbms::Stmt* owner,
         const dbms::FromItem* source,bool merged=false) const {
@@ -19824,11 +19830,22 @@ class PreparedWithDmlRuntime {
             for(size_t i=0;i<range.columns.size();++i)node->visible.push_back({range.columns[i].name,{range.ordinal,i}});
             shared_ptr<dbms::PreparedQueryCursor> cursor;
             shared_ptr<dbms::TableScanOp> scan;
+            shared_ptr<PreparedWithDmlRuntime> viewRuntime;
+            shared_ptr<dbms::PreparedQueryRows> virtualRows;
             dbms::TableSchema scanSchema;
             if(item->type==dbms::FromItem::Type::Subquery) {
                 auto* select=dynamic_cast<dbms::SelectStmt*>(item->subquery.get());
                 if(!select)throw dbms::DbError("0A000","mutation derived source requires a SELECT/VALUES plan");
                 cursor=dbms::QueryPlanner::makePreparedCursor(selectPlan(select,outer,frames),output(select));
+            } else if(range.viewQuery) {
+                if(!checkTablePermission(session_,physical(range,session_),dbms::StorageEngine::TablePrivilege::Select))
+                    throw dbms::DbError("42501","permission denied for view source");
+                viewRuntime=make_shared<PreparedWithDmlRuntime>(session_,range.viewQuery);
+                auto* select=dynamic_cast<dbms::SelectStmt*>(range.viewQuery->ast.get());
+                if(!select)throw dbms::DbError("0A000","view source requires a genuine SELECT/VALUES plan");
+                cursor=dbms::QueryPlanner::makePreparedCursor(viewRuntime->selectPlan(select,dbms::RowContext{},{}),range.columns);
+            } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_settings") {
+                virtualRows=make_shared<dbms::PreparedQueryRows>(preparedPgSettingsRows(session_));
             } else if(item->type==dbms::FromItem::Type::Table && !range.cteStatement) {
                 if(range.relationName.empty())throw dbms::DbError("XX000","mutation base source has no physical identity");
                 const auto table=physical(range,session_);
@@ -19845,41 +19862,35 @@ class PreparedWithDmlRuntime {
                 scan=make_shared<dbms::TableScanOp>(&g_engine,session_.currentDB,table);
             } else if(item->type!=dbms::FromItem::Type::Table || !range.cteStatement)
                 throw dbms::DbError("0A000","mutation source requires additional function-range lowering");
-            node->load=[this,execution,outer,frames,rangePointer=&range,cursor,scan,scanSchema](DmlSourceNode& state) {
+            auto scanOpened=make_shared<bool>(false);
+            node->close=[cursor,scan,scanOpened,viewRuntime] {
+                if(cursor)cursor->close();
+                if(scan && *scanOpened){*scanOpened=false;scan->close();}
+            };
+            node->read=[this,execution,outer,frames,rangePointer=&range,cursor,scan,scanSchema,virtualRows,scanOpened]
+                (size_t index,dbms::RowContext& row) {
                 vector<dbms::ExprValue> cells;
-                try {
-                    if(scan && !scan->open())throw dbms::DbError("XX000",scan->errorMessage());
-                    const auto next=[&](size_t index) {
-                        if(cursor)return cursor->next(cells);
-                        if(!scan)return readCte(rangePointer->cteStatement,index,cells,frames);
-                        string raw;
-                        if(!scan->next(raw)) {
-                            if(scan->hasError())throw dbms::DbError("XX000",scan->errorMessage());
-                            return false;
-                        }
-                        cells.clear();
-                        for(size_t i=0;i<scanSchema.len;++i) {
-                            bool computedNull=false;
-                            const auto value=g_engine.extractColumnValue(raw,scanSchema,i,session_.currentDB,true,&computedNull);
-                            cells.emplace_back(rangePointer->columns[i].type,value,computedNull ||
-                                (scanSchema.cols[i].generatedKind!='v' && scan->lastColumnIsNull(i)));
-                            cells.back().collation=scanSchema.cols[i].collation;
-                        }
-                        return true;
-                    };
-                    for(size_t i=0;next(i);++i) {
-                        auto row=outer;
-                        execution->setSourceRow(row,rangePointer->ordinal,cells);
-                        state.rows.push_back(std::move(row));
+                bool found=false;
+                if(cursor)found=cursor->next(cells);
+                else if(virtualRows) {
+                    if(index<virtualRows->size()){cells=virtualRows->at(index);found=true;}
+                } else if(!scan)found=readCte(rangePointer->cteStatement,index,cells,frames);
+                else {
+                    if(!*scanOpened){*scanOpened=true;if(!scan->open())throw dbms::DbError("XX000",scan->errorMessage());}
+                    string raw;
+                    found=scan->next(raw);
+                    if(!found && scan->hasError())throw dbms::DbError("XX000",scan->errorMessage());
+                    if(found)for(size_t i=0;i<scanSchema.len;++i) {
+                        bool computedNull=false;
+                        const auto value=g_engine.extractColumnValue(raw,scanSchema,i,session_.currentDB,true,&computedNull);
+                        cells.emplace_back(rangePointer->columns[i].type,value,computedNull ||
+                            (scanSchema.cols[i].generatedKind!='v' && scan->lastColumnIsNull(i)));
+                        cells.back().collation=scanSchema.cols[i].collation;
                     }
-                    if(cursor)cursor->close();
-                    if(scan)scan->close();
-                } catch(...) {
-                    const auto error=current_exception();
-                    if(cursor)try{cursor->close();}catch(...){}
-                    if(scan)try{scan->close();}catch(...){}
-                    rethrow_exception(error);
                 }
+                if(!found)return false;
+                row=outer;execution->setSourceRow(row,rangePointer->ordinal,cells);
+                return true;
             };
             return node;
         }
@@ -19945,8 +19956,14 @@ class PreparedWithDmlRuntime {
             comparison->left=operand(key.first);comparison->right=operand(key.second);
             comparisons->push_back(std::move(comparison));
         }
-        node->load=[execution,outer,left,right,leftJoin,rightJoin,merged,item,keys,comparisons](DmlSourceNode& state) {
-            left->ensure();right->ensure();vector<bool> rightMatched(right->rows.size(),false);
+        struct JoinPosition {
+            size_t left=0,right=0,unmatchedRight=0;
+            bool matched=false,leftComplete=false;
+            vector<bool> rightMatched;
+        };
+        auto position=make_shared<JoinPosition>();
+        node->read=[execution,outer,left,right,leftJoin,rightJoin,merged,item,keys,comparisons,position]
+            (size_t,dbms::RowContext& output) {
             dbms::ExprEvaluator comparator;
             const auto combine=[&](const dbms::RowContext* a,const dbms::RowContext* b) {
                 auto row=outer;
@@ -19972,10 +19989,13 @@ class PreparedWithDmlRuntime {
                 }
                 return row;
             };
-            for(const auto& a:left->rows) {
-                bool matched=false;
-                for(size_t i=0;i<right->rows.size();++i) {
-                    auto row=combine(&a,&right->rows[i]);bool valid=true;
+            dbms::RowContext a,b;
+            while(!position->leftComplete) {
+                if(!left->readAt(position->left,a)){position->leftComplete=true;break;}
+                while(right->readAt(position->right,b)) {
+                    const auto occurrence=position->right++;
+                    if(position->rightMatched.size()<=occurrence)position->rightMatched.resize(occurrence+1,false);
+                    auto row=combine(&a,&b);bool valid=true;
                     for(const auto& comparison:*comparisons) {
                         const auto value=comparator.eval(comparison.get(),row);
                         if(value.isNull || !value.asBool()){valid=false;break;}
@@ -19984,12 +20004,22 @@ class PreparedWithDmlRuntime {
                         const auto value=execution->evaluate(item->joinCondition.get(),row);
                         valid=!value.isNull && value.asBool();
                     }
-                    if(valid){state.rows.push_back(std::move(row));matched=true;rightMatched[i]=true;}
+                    if(valid) {
+                        position->matched=true;position->rightMatched[occurrence]=true;
+                        output=std::move(row);return true;
+                    }
                 }
-                if(!matched && leftJoin)state.rows.push_back(combine(&a,nullptr));
+                const bool unmatched=!position->matched && leftJoin;
+                ++position->left;position->right=0;position->matched=false;
+                if(unmatched){output=combine(&a,nullptr);return true;}
             }
-            if(rightJoin)for(size_t i=0;i<right->rows.size();++i)
-                if(!rightMatched[i])state.rows.push_back(combine(nullptr,&right->rows[i]));
+            if(rightJoin)while(right->readAt(position->unmatchedRight,b)) {
+                const auto occurrence=position->unmatchedRight++;
+                if(occurrence>=position->rightMatched.size() || !position->rightMatched[occurrence]) {
+                    output=combine(nullptr,&b);return true;
+                }
+            }
+            return false;
         };
         return node;
     }
@@ -20001,8 +20031,8 @@ class PreparedWithDmlRuntime {
             return rows;
         };
     }
-    dbms::OpPtr selectPlan(dbms::SelectStmt* select,const dbms::RowContext& outer,Frames frames) {
-        if(!select->ctes.empty())frames.push_back(definitions(select->ctes,outer));
+    dbms::OpPtr selectPlan(dbms::SelectStmt* select,const dbms::RowContext& outer,Frames frames,bool rootDefinitionsProvided=false) {
+        if(!rootDefinitionsProvided && !select->ctes.empty())frames.push_back(definitions(select->ctes,outer));
         if(select->command==dbms::SqlCommand::Values) {
             if(!select->orderBy.empty() || select->whereClause || select->setOp!=dbms::SetOp::None)
                 throw dbms::DbError("0A000","WITH VALUES requires additional clause lowering");
@@ -20028,28 +20058,12 @@ class PreparedWithDmlRuntime {
         }
         dbms::TableSchema schema;dbms::OpPtr source;
         if(!select->fromClause) {
-            source=make_unique<dbms::PreparedSourceRowsOp>(dbms::QueryRowDescriptor{},[](size_t index,vector<dbms::ExprValue>& row){row.clear();return index==0;});
+            source=make_unique<dbms::PreparedSourceContextsOp>([outer](size_t index,dbms::RowContext& row){row=outer;return index==0;});
         } else {
-            const auto& binding=range(select);
-            if(binding.cteStatement) {
-                schema=logicalSchema(binding.columns);
-                source=make_unique<dbms::PreparedSourceRowsOp>(binding.columns,[this,statement=binding.cteStatement,frames](size_t index,vector<dbms::ExprValue>& row){
-                    return readCte(statement,index,row,frames);
-                });
-            } else {
-                const string table=physical(binding,session_);
-                if(binding.relationName.empty())throw dbms::DbError("0A000","WITH derived source requires additional lowering");
-                schema=g_engine.getTableSchema(session_.currentDB,table);
-                if(!checkTablePermission(session_,table,dbms::StorageEngine::TablePrivilege::Select))
-                    throw dbms::DbError("42501","permission denied for WITH source");
-                if(!sessionIsAdmin(session_)) {
-                    const auto columns=selectedColumns(select,binding);
-                    if(!columns.empty() && !g_engine.hasColumnPermission(session_.currentDB,table,
-                        effectiveSessionRole(session_),dbms::StorageEngine::TablePrivilege::Select,columns))
-                        throw dbms::DbError("42501","permission denied for selected WITH source columns");
-                }
-                source=make_unique<dbms::TableScanOp>(&g_engine,session_.currentDB,table);
-            }
+            auto node=sourceNode(select,select->fromClause.get(),outer,frames);
+            source=make_unique<dbms::PreparedSourceContextsOp>([node](size_t index,dbms::RowContext& row){
+                return node->readAt(index,row);
+            });
         }
         if(select->whereClause) {
             const auto type=dbms::ExprHelper::inferParsedResultType(select->whereClause.get(),{},session_.currentDB,&g_engine);
@@ -20080,8 +20094,9 @@ class PreparedWithDmlRuntime {
     }
 public:
     PreparedWithDmlRuntime(Session& session,shared_ptr<dbms::PreparedQuery> query)
-        :session_(session),query_(std::move(query)),root_(dynamic_cast<dbms::WithStmt*>(query_->ast.get())),validation_(query_,&g_engine,session.currentDB) {
-        if(!root_)throw dbms::DbError("XX000","WITH runtime requires a genuine DML envelope");
+        :session_(session),query_(std::move(query)),root_(dynamic_cast<dbms::WithStmt*>(query_->ast.get())),
+         readRoot_(dynamic_cast<dbms::SelectStmt*>(query_->ast.get())),validation_(query_,&g_engine,session.currentDB) {
+        if(!root_ && !readRoot_)throw dbms::DbError("XX000","prepared runtime requires a genuine query envelope");
     }
     ~PreparedWithDmlRuntime() {
         for(auto& frame:frames_)for(auto& entry:frame->producers) {
@@ -20091,6 +20106,7 @@ public:
         for(auto& frame:frames_)frame->producers.clear();
     }
     dbms::DmlResult run() {
+        if(!root_)throw dbms::DbError("XX000","DML runtime requires a genuine DML envelope");
         Frames frames{definitions(root_->ctes,validation_.context())};
         for(auto& cte:root_->ctes) {
             const bool writer=cte.query->command!=dbms::SqlCommand::Select && cte.query->command!=dbms::SqlCommand::Values;
@@ -20115,6 +20131,44 @@ public:
             }
             return result;
         });
+    }
+    dbms::DmlResult runRead() {
+        if(!readRoot_)throw dbms::DbError("XX000","read runtime requires a genuine SELECT/VALUES");
+        Frames frames{definitions(readRoot_->ctes,validation_.context())};
+        bool hasWriter=false;
+        for(auto& cte:readRoot_->ctes) {
+            const bool writer=cte.query->command!=dbms::SqlCommand::Select && cte.query->command!=dbms::SqlCommand::Values;
+            hasWriter=hasWriter || writer;
+            const bool referenced=any_of(query_->sourceRanges.begin(),query_->sourceRanges.end(),[&](const auto& range){return range.cteStatement==cte.query.get();});
+            if(writer || referenced)validate(cte.query.get(),frames);
+        }
+        // Plan every root expression before opening a producer or evaluating
+        // a target. Top-level writing CTEs are legal; nested ones still fail
+        // through validate(). Do not install the root definitions twice.
+        auto plan=selectPlan(readRoot_,validation_.context(),frames,true);
+        const auto command=[&] {
+            auto evaluated=dbms::QueryPlanner::executePlanChecked(std::move(plan),currentQueryRowDemand());
+            evaluated.throwIfFailed();
+            if(!evaluated.structuredRowsAvailable)throw dbms::DbError("XX000","prepared CASE query lost typed rows");
+            dbms::DmlResult result;result.available=true;
+            for(const auto& column:output(readRoot_)) {
+                result.columns.push_back(column.name);
+                result.columnTypes.push_back(column.type=="unknown"?"text":column.type);
+            }
+            result.rows=std::move(evaluated.structuredRows);result.nulls=std::move(evaluated.structuredNulls);
+            result.commandTag="SELECT "+std::to_string(result.rows.size());
+            for(auto& cte:readRoot_->ctes)if(cte.query->command!=dbms::SqlCommand::Select && cte.query->command!=dbms::SqlCommand::Values) {
+                vector<dbms::ExprValue> ignored;size_t index=0;
+                while(readCte(cte.query.get(),index++,ignored,frames)){}
+            }
+            for(auto& frame:frames_)for(auto& entry:frame->producers)if(entry.second->opened) {
+                entry.second->plan->close();entry.second->opened=false;entry.second->plan.reset();
+            }
+            return result;
+        };
+        // Pure SELECTs borrow main's existing query owner. They must not open
+        // a DML savepoint/physical transaction merely to evaluate constants.
+        return hasWriter?dbms::executeAtomicDmlUnit(session_,command):command();
     }
 };
 }

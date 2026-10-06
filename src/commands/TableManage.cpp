@@ -31721,13 +31721,32 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
         // Catalog rows are copied under one lock; schema/view loads only read.
         // The lock is released on return, before any prepared AST executes.
         std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
-        const auto catalog = catalogService_->metadataSnapshot(dbname);
+        std::optional<CatalogManager::MetadataSnapshot> catalogSnapshot;
         QueryBindingMetadata metadata;
-        size_t viewDepth = 0;
+        const auto viewSource = [&](const std::string& name) {
+            auto view = getViewSQL(dbname, name);
+            if (view.empty()) return view;
+            const auto protectedBytes = sqlProtectedBytes(view);
+            size_t envelope = view.size();
+            for (const auto& marker : {std::string("\nBASE_TABLE:"), std::string("\nWITH_CHECK_OPTION:")}) {
+                size_t at = view.find(marker);
+                while (at != std::string::npos) {
+                    if (!protectedBytes[at + 1]) { envelope = std::min(envelope, at); break; }
+                    at = view.find(marker, at + marker.size());
+                }
+            }
+            view.resize(envelope);
+            return view;
+        };
         metadata.relation = [&](const std::string& spelling) -> QueryRelationMetadata {
             CatalogManager::QualifiedName requested;
             if (!CatalogManager::parseQualifiedName(spelling, requested, true))
                 throw DbError("42601", "invalid relation name");
+            // A source-free prepared value does not require a storage read.
+            // In particular, preparing CASE must not promote a deferred
+            // query transaction just to copy a catalog it will never use.
+            if (!catalogSnapshot) catalogSnapshot = catalogService_->metadataSnapshot(dbname);
+            const auto& catalog = *catalogSnapshot;
             std::vector<std::string> schemas;
             const Session* session = currentSession();
             if (!requested.schema.empty()) schemas.push_back(requested.schema);
@@ -31778,6 +31797,11 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
                         description.columns.push_back({attribute.attname, typeName,
                             attribute.attgenerated != '\0', attribute.attidentity});
                     }
+                    if (relation.relkind == 'v') {
+                        description.viewSql = viewSource(schema == "public" ? requested.name : schema + "." + requested.name);
+                        if (description.viewSql.empty()) throw DbError("XX000", "view has no stored query");
+                        return description;
+                    }
                     if (!description.columns.empty()) return description;
                 }
                 const bool temporary = session && schema == sessionTempSchemaName(*session);
@@ -31792,21 +31816,9 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
                             !table.cols[i].generatedExpr.empty(), table.cols[i].identityKind});
                     if (!description.columns.empty()) return description;
                 }
-                auto view = getViewSQL(dbname, schema == "public" ? requested.name : schema + "." + requested.name);
+                auto view = viewSource(schema == "public" ? requested.name : schema + "." + requested.name);
                 if (!view.empty()) {
-                    const auto protectedBytes = sqlProtectedBytes(view);
-                    size_t envelope = view.size();
-                    for (const auto& marker : {std::string("\nBASE_TABLE:"), std::string("\nWITH_CHECK_OPTION:")}) {
-                        size_t at = view.find(marker);
-                        while (at != std::string::npos) {
-                            if (!protectedBytes[at + 1]) { envelope = std::min(envelope, at); break; }
-                            at = view.find(marker, at + marker.size());
-                        }
-                    }
-                    view.resize(envelope);
-                    if (++viewDepth > 64) throw DbError("54001", "view binding nesting limit exceeded");
-                    struct Depth { size_t& value; ~Depth() { --value; } } depth{viewDepth};
-                    description.columns = prepareQuery(view, {}, metadata).output;
+                    description.viewSql = std::move(view);
                     return description;
                 }
             }

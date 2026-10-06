@@ -53,6 +53,10 @@ struct PreparedQuery {
         // RETURNING transition registration. Qualified references still
         // retain every original column; unqualified stars must skip these.
         std::set<std::string> hiddenUnqualified;
+        // A view keeps its independently prepared query and namespace. Its
+        // output cells are rebound only to this occurrence, never flattened
+        // into the caller's textual SQL or procedural parameter namespace.
+        std::shared_ptr<PreparedQuery> viewQuery;
     };
     std::string source;
     StmtPtr ast;

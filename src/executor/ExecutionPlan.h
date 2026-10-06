@@ -44,6 +44,13 @@ public:
     // This keeps SQL NULL distinct from text "NULL" and preserves embedded
     // whitespace for protocol consumers.
     virtual bool supportsStructuredRows() const { return false; }
+    // A genuine logical FROM tree can carry several independently bound
+    // source occurrences. Preserve that context through filter and buffering
+    // operators rather than inventing a flattened physical schema.
+    virtual bool supportsPreparedContexts() const { return false; }
+    virtual bool lastPreparedContext(RowContext& row) const {
+        (void)row; return false;
+    }
     // Prepared expression operators can preserve the complete typed cells,
     // including collation, without reconstructing them from display text.
     virtual bool lastStructuredValues(std::vector<ExprValue>& values) const {
@@ -130,6 +137,28 @@ private:
 };
 
 using OpPtr = std::unique_ptr<Operator>;
+
+class PreparedSourceContextsOp final : public Operator {
+public:
+    using Reader = std::function<bool(size_t, RowContext&)>;
+    explicit PreparedSourceContextsOp(Reader reader) : reader_(std::move(reader)) {}
+    bool open() override { clearError(); position_ = 0; row_ = RowContext{}; return true; }
+    bool next(std::string& row) override {
+        if (!reader_(position_, row_)) return false;
+        ++position_; row.clear(); return true;
+    }
+    void close() override { position_ = 0; row_ = RowContext{}; }
+    bool supportsPreparedContexts() const override { return true; }
+    bool lastPreparedContext(RowContext& row) const override {
+        if (!position_) return false;
+        row = row_; return true;
+    }
+    std::string preparedPlanNodeName() const override { return "TypedSource"; }
+private:
+    Reader reader_;
+    size_t position_ = 0;
+    RowContext row_;
+};
 
 struct PlanExecutionResult {
     std::vector<std::string> rows;
@@ -1252,6 +1281,7 @@ public:
     // one-row, zero-column Result source. Preparation has already validated
     // the complete query namespace; this consumes its retained typed AST.
     static bool supportsPreparedSelectPlan(const SelectStmt& select);
+    static bool supportsPreparedSourceSelectPlan(const SelectStmt& select);
     static OpPtr buildPreparedSelectPlan(StorageEngine* engine,
         const std::string& dbname, const std::string& tablename,
         PreparedQuery prepared);

@@ -27,6 +27,7 @@ struct Range {
     bool mergedUsing = false;
     std::string relationSchema, relationName;
     const Stmt* cteStatement = nullptr;
+    std::shared_ptr<PreparedQuery> viewQuery;
 };
 using Namespace = std::vector<Range>;
 void checkRangeConflicts(const Namespace& left, const Namespace& right) {
@@ -76,7 +77,7 @@ public:
             statementOwners.empty() ? nullptr : statementOwners.back(), source,
             range.schema, range.name, range.columns, range.mergedUsing,
             range.relationSchema, range.relationName, range.cteStatement,
-            range.hiddenUnqualified});
+            range.hiddenUnqualified, range.viewQuery});
         return range;
     }
 
@@ -480,6 +481,41 @@ public:
         Range range{alias.empty() ? description.schema : "", alias.empty() ? description.name : identifier(alias), description.columns};
         range.relationSchema = description.schema;
         range.relationName = description.name;
+        if (!description.viewSql.empty()) {
+            // Preparing a view does not inherit the caller's PL datums or
+            // SQL ranges. The retained child owns all of its AST identities.
+            static thread_local size_t viewDepth = 0;
+            if (++viewDepth > 64) {
+                --viewDepth;
+                throw DbError("54001", "view binding nesting limit exceeded");
+            }
+            struct ViewDepth { size_t& depth; ~ViewDepth() { --depth; } } guard{viewDepth};
+            range.viewQuery = std::make_shared<PreparedQuery>(prepareQuery(description.viewSql, {}, metadata));
+            // UNKNOWN strings/NULL finalize to text at the view relation
+            // boundary, just as for a derived/CTE source. This is static
+            // metadata; never execute a first row to discover the type.
+            auto* viewSelect = dynamic_cast<SelectStmt*>(range.viewQuery->ast.get());
+            for (size_t i = 0; i < range.viewQuery->output.size(); ++i) {
+                auto& column = range.viewQuery->output[i];
+                if (column.type != "unknown") continue;
+                const auto castOutput = [](ExprPtr& expression) {
+                    auto cast = std::make_unique<CastExpr>();
+                    cast->typeName = "text"; cast->implicit = true;
+                    cast->sourceBegin = expression->sourceBegin; cast->sourceEnd = expression->sourceEnd;
+                    cast->operand = std::move(expression); expression = std::move(cast);
+                };
+                if (viewSelect && viewSelect->command == SqlCommand::Values) {
+                    for (auto& row : viewSelect->valuesRows) castOutput(row.at(i));
+                } else if (viewSelect && viewSelect->selectList.size() == range.viewQuery->output.size())
+                    castOutput(viewSelect->selectList[i].expr);
+                else throw DbError("0A000", "view UNKNOWN output requires additional projection lowering");
+                column.type = "text";
+            }
+            range.viewQuery->statementOutputs[range.viewQuery->ast.get()] = range.viewQuery->output;
+            if (range.columns.empty()) range.columns = range.viewQuery->output;
+            if (range.columns.size() != range.viewQuery->output.size())
+                throw DbError("XX000", "view output width differs from its catalog descriptor");
+        }
         return range;
     }
     Namespace from(FromItem* item, const std::vector<Namespace>& outer, const Ctes& ctes) {
