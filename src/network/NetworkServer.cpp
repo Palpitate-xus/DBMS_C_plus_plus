@@ -2049,6 +2049,8 @@ std::string whereUnknownFunctionError(const std::string& sql,
             if (word == "select" || word == ";") break;
             if ((word == "from" || word == "update") && i + 1 < where) {
                 table = tokens[i + 1];
+                for (size_t part = i + 2; part + 1 < where && tokens[part] == "."; part += 2)
+                    table += "." + tokens[part + 1];
                 break;
             }
         }
@@ -2056,8 +2058,34 @@ std::string whereUnknownFunctionError(const std::string& sql,
         const auto* arg = missing->args.empty() ? nullptr
             : dynamic_cast<const ColumnRefExpr*>(missing->args.front().get());
         if (arg && !table.empty() && table != "(") {
-            const TableSchema schema = g_engine.getTableSchema(
-                session.currentDB, ::resolveTableName(session, table));
+            std::string physical;
+            try {
+                physical = ::resolveTableName(session, table);
+            } catch (const DbError& error) {
+                if (error.sqlState() != "55000") throw;
+                // Analysis needs a materialized view's column types, not
+                // permission to scan it. Undefined functions must be rejected
+                // before the executor's unpopulated-view access gate.
+                CatalogManager::QualifiedName name;
+                if (!CatalogManager::parseQualifiedName(table, name, true)) throw;
+                std::vector<std::string> schemas;
+                if (!name.schema.empty()) schemas.push_back(name.schema);
+                else {
+                    std::string canonical;
+                    if (!parseSessionSearchPath(session.searchPath, schemas, canonical))
+                        schemas = {"public"};
+                }
+                for (const auto& entry : schemas) {
+                    const auto schemaName = expandSessionSearchPathEntry(entry, session.username);
+                    if (const auto view = g_engine.resolveMaterializedView(
+                            session.currentDB, schemaName, name.name)) {
+                        physical = view->backingTable;
+                        break;
+                    }
+                }
+                if (physical.empty()) throw;
+            }
+            const TableSchema schema = g_engine.getTableSchema(session.currentDB, physical);
             for (size_t i = 0; i < schema.len; ++i) {
                 if (schema.cols[i].dataName != arg->column) continue;
                 const auto dt = SQLParser::toLower(schema.cols[i].dataType);
@@ -3234,16 +3262,6 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
     bool structuredError = false;
     bool statementCommitError = false;
     std::string outputText;
-    // PG 42883: unknown function in WHERE fails before execution.
-    {
-        std::string ufErr = whereUnknownFunctionError(sql, session);
-        if (!ufErr.empty()) {
-            result.error = true;
-            result.errorMessage = ufErr;
-            result.sqlState = "42883";
-            return result;
-        }
-    }
     auto start = std::chrono::steady_clock::now();
     struct QueryInterruptGuard {
         std::shared_ptr<SessionInterruptState> state;
@@ -3316,6 +3334,11 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
         std::ostringstream output;
         dbms::ScopedOutputCapture capture(output);
         try {
+            // Catalog/type analysis can itself throw a structured error.
+            // Keep it inside the same protocol exception boundary as execution
+            // so a metadata failure never terminates the client connection.
+            const auto functionError = whereUnknownFunctionError(sql, session);
+            if (!functionError.empty()) throw DbError("42883", functionError);
             executionError = execute(sql, session);
         } catch (const dbms::StatementCommitError& e) {
             executionError = true;

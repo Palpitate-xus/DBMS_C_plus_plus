@@ -59,6 +59,21 @@ def main():
             unchanged = query("SELECT id,txt FROM where_scope_source ORDER BY id;")
             assert unchanged[1] is None and unchanged[0] == [
                 ["1", "a b"], ["2", None], ["3", "NULL"], ["4", ""]], unchanged
+        for sql in (
+                "CREATE MATERIALIZED VIEW where_scope_mv AS SELECT id FROM where_scope_source WITH NO DATA;",
+                "CREATE SCHEMA where_scope_ns;",
+                "CREATE MATERIALIZED VIEW where_scope_ns.mv AS SELECT id FROM where_scope_source WITH NO DATA;"):
+            assert query(sql)[1] is None, sql
+        for relation in ("where_scope_mv", "public.where_scope_mv", "where_scope_ns.mv"):
+            result = query(f"SELECT id FROM {relation} WHERE nosuchfn(id)>0;")
+            assert result[1] == "42883" and result[4] is None, (relation, result)
+            assert "nosuchfn(integer)" in result[2], (relation, result)
+            # The real unpopulated-view access gate remains in effect, and
+            # neither error may disconnect or poison an autocommit session.
+            result = query(f"SELECT id FROM {relation};")
+            assert result[1] == "55000" and result[4] is None, (relation, result)
+            alive = query("SELECT 1 AS alive;")
+            assert alive[1] is None and alive[0] == [["1"]], alive
         print("[WHERE FUNCTION SCOPE PROTOCOL E2E] passed")
     finally:
         runner.stop_ours(server)
