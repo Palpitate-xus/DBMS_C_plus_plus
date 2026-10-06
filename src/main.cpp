@@ -5895,6 +5895,42 @@ void cleanupSessionTempTables(Session& s) {
     (void)cleanupSessionTempTables(s, false);
 }
 
+// Materialization changes a relation's storage, not SQL identifiers. Bind CTE
+// relation names in query-local scopes; columns, output aliases and nested
+// definitions keep their original spelling. Scopes are execution-thread local
+// and session/database keyed, so nested SELECTs inherit outer bindings without
+// leaking them into the next statement or another connection.
+struct QueryCteFrame {
+    const Session* session;
+    string database;
+    map<string, string> relations;
+};
+static thread_local vector<QueryCteFrame> queryCteFrames;
+
+class QueryCteScope {
+public:
+    explicit QueryCteScope(const Session& session) {
+        queryCteFrames.push_back({&session, session.currentDB, {}});
+    }
+    ~QueryCteScope() { queryCteFrames.pop_back(); }
+    QueryCteScope(const QueryCteScope&) = delete;
+    QueryCteScope& operator=(const QueryCteScope&) = delete;
+};
+
+static void bindQueryCte(Session& session, const string& name,
+                         const string& materializedName) {
+    dbms::CatalogManager::QualifiedName parsed;
+    if (!dbms::CatalogManager::parseQualifiedName(name, parsed, true) ||
+        !parsed.schema.empty())
+        throw dbms::DbError("42601", "invalid CTE relation name");
+    for (auto frame = queryCteFrames.rbegin(); frame != queryCteFrames.rend(); ++frame) {
+        if (frame->session != &session || frame->database != session.currentDB) continue;
+        frame->relations[parsed.name] = materializedName;
+        return;
+    }
+    throw dbms::DbError("XX000", "CTE binding has no query scope");
+}
+
 string resolveTableName(Session& s, const string& name, bool foldUnquoted) {
     const auto temporaryPhysicalName = [&](const string& table) {
         const string physical = tempTablePrefix(s, table);
@@ -5904,6 +5940,13 @@ string resolveTableName(Session& s, const string& name, bool foldUnquoted) {
     dbms::CatalogManager::QualifiedName qualified;
     if (!dbms::CatalogManager::parseQualifiedName(name, qualified,
                                                    foldUnquoted)) return name;
+    if (qualified.schema.empty()) {
+        for (auto frame = queryCteFrames.rbegin(); frame != queryCteFrames.rend(); ++frame) {
+            if (frame->session != &s || frame->database != s.currentDB) continue;
+            const auto found = frame->relations.find(qualified.name);
+            if (found != frame->relations.end()) return temporaryPhysicalName(found->second);
+        }
+    }
     if (!qualified.schema.empty()) {
         const string& schema = qualified.schema;
         const string& table = qualified.name;
@@ -12589,24 +12632,6 @@ static std::string recursiveRowKey(const std::vector<std::string>& row,
     return key;
 }
 
-static bool containsSqlIdentifier(const std::string& sql,
-                                  const std::string& identifier) {
-    size_t position = 0;
-    while ((position = findTextOutsideQuotes(
-                sql, identifier, position)) != std::string::npos) {
-        const bool leftOk = position == 0 ||
-            !(isalnum(static_cast<unsigned char>(sql[position - 1])) ||
-              sql[position - 1] == '_');
-        const size_t after = position + identifier.size();
-        const bool rightOk = after == sql.size() ||
-            !(isalnum(static_cast<unsigned char>(sql[after])) ||
-              sql[after] == '_');
-        if (leftOk && rightOk) return true;
-        position += identifier.size();
-    }
-    return false;
-}
-
 static std::string materializeRecursiveCte(
     Session& s, const std::string& innerSelect,
     const std::string& cteName,
@@ -12696,26 +12721,9 @@ static std::string materializeRecursiveCte(
     const int maxIterations = 1000;
     for (int iteration = 0;
          !exhausted && iteration < maxIterations; ++iteration) {
-        std::string iterationSql = recursiveSql;
-        const std::string workActual = tempTablePrefix(s, workName);
-        size_t replaceAt = 0;
-        while ((replaceAt = findTextOutsideQuotes(
-                    iterationSql, cteName, replaceAt)) != std::string::npos) {
-            const bool leftOk = replaceAt == 0 ||
-                !(isalnum(static_cast<unsigned char>(
-                      iterationSql[replaceAt - 1])) ||
-                  iterationSql[replaceAt - 1] == '_');
-            const size_t after = replaceAt + cteName.size();
-            const bool rightOk = after == iterationSql.size() ||
-                !(isalnum(static_cast<unsigned char>(iterationSql[after])) ||
-                  iterationSql[after] == '_');
-            if (leftOk && rightOk) {
-                iterationSql.replace(replaceAt, cteName.size(), workActual);
-                replaceAt += workActual.size();
-            } else {
-                replaceAt += cteName.size();
-            }
-        }
+        const std::string& iterationSql = recursiveSql;
+        QueryCteScope iterationScope(s);
+        bindQueryCte(s, cteName, workName);
 
         std::vector<std::string> recursiveNames;
         std::vector<std::string> recursiveTypes;
@@ -12868,9 +12876,34 @@ static std::string processCTEs(const std::string& sql, Session& s, bool& failed)
 
         std::string innerSelect = trim(result.substr(parenStart + 1, parenEnd - parenStart - 1));
 
-        // Without RECURSIVE, this CTE's name is not visible inside its own
-        // body.  A real relation of the same name remains visible there.
+        // Detect a recursive relation, not a same-spelled target column. An
+        // unbound non-recursive body uses normal lookup (outer CTEs, real
+        // tables or a declared relation error), including nested WITH scopes.
         auto hasSelfRelationReference = [&](const std::string& body) {
+            dbms::SQLParser parser;
+            const auto parsed = parser.parse(body);
+            const auto* select = parsed.success
+                ? dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()) : nullptr;
+            if (select) {
+                dbms::CatalogManager::QualifiedName cte;
+                dbms::CatalogManager::parseQualifiedName(cteName, cte, true);
+                std::function<bool(const dbms::FromItem*)> references =
+                    [&](const dbms::FromItem* item) {
+                    if (!item) return false;
+                    if (item->type == dbms::FromItem::Type::Table) {
+                        dbms::CatalogManager::QualifiedName relation;
+                        return dbms::CatalogManager::parseQualifiedName(
+                                   item->tableName, relation, true) &&
+                               relation.schema.empty() && relation.name == cte.name;
+                    }
+                    if (item->type == dbms::FromItem::Type::Join)
+                        return references(item->left.get()) || references(item->right.get());
+                    if (const auto* nested = dynamic_cast<const dbms::SelectStmt*>(item->subquery.get()))
+                        return references(nested->fromClause.get());
+                    return false;
+                };
+                return references(select->fromClause.get());
+            }
             for (const char* keyword : {"from ", "join "}) {
                 const std::string needle = std::string(keyword) + cteName;
                 size_t found = 0;
@@ -12885,14 +12918,6 @@ static std::string processCTEs(const std::string& sql, Session& s, bool& failed)
             }
             return false;
         };
-        if (!recursiveMode &&
-            !g_engine.tableExists(s.currentDB, resolveTableName(s, cteName)) &&
-            hasSelfRelationReference(innerSelect)) {
-            cout << "ERROR: relation \"" << cteName
-                 << "\" does not exist (SQLSTATE 42P01)" << endl;
-            failed = true;
-            return {};
-        }
 
         std::string tmpName;
         std::vector<std::string> colNames;
@@ -12962,8 +12987,7 @@ static std::string processCTEs(const std::string& sql, Session& s, bool& failed)
             const size_t recursiveStart = unionPos == std::string::npos
                 ? std::string::npos : unionPos + (unionAll ? 9 : 5);
             const bool selfRecursive = recursiveStart != std::string::npos &&
-                containsSqlIdentifier(
-                    innerSelect.substr(recursiveStart), cteName);
+                hasSelfRelationReference(innerSelect.substr(recursiveStart));
             if (recursiveMode && unionPos != std::string::npos &&
                 selfRecursive) {
                 tmpName = materializeRecursiveCte(
@@ -13017,27 +13041,7 @@ static std::string processCTEs(const std::string& sql, Session& s, bool& failed)
         }
         } // end if (!isDmlCte)
 
-        // Preserve qualified references, including c.* and c."MixedId".
-        // Removing the qualifier broadens a star to every later FROM item
-        // and makes otherwise unambiguous columns collide after LATERAL.
-        // Word-boundary checks keep a CTE named "c" out of "select".
-        size_t replacePos = parenEnd + 1;
-        while ((replacePos = findTextOutsideQuotes(
-                    result, cteName, replacePos)) != std::string::npos) {
-            bool leftOk = (replacePos == 0) ||
-                          !(isalnum(static_cast<unsigned char>(result[replacePos - 1])) ||
-                            result[replacePos - 1] == '_');
-            bool rightOk = (replacePos + cteName.size() == result.size()) ||
-                           !(isalnum(static_cast<unsigned char>(
-                                 result[replacePos + cteName.size()])) ||
-                             result[replacePos + cteName.size()] == '_');
-            if (leftOk && rightOk) {
-                result = result.substr(0, replacePos) + tmpName + result.substr(replacePos + cteName.size());
-                replacePos += tmpName.size();
-            } else {
-                replacePos += cteName.size();
-            }
-        }
+        bindQueryCte(s, cteName, tmpName);
 
         // Move past this CTE definition
         pos = parenEnd + 1;
@@ -22222,7 +22226,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
     // Set operations share one execution path so errors, precedence and
     // duplicate-row semantics are consistent across UNION/INTERSECT/EXCEPT.
     bool setOperationHandled = false;
-    if (executeSetOperation(sql, s, setOperationHandled)) return true;
+    // A leading WITH must bind its CTEs once, for every set-operation branch.
+    if (!startsWithKeyword(sql, "with") &&
+        executeSetOperation(sql, s, setOperationHandled)) return true;
     if (setOperationHandled) return false;
 
     // Lower ordinary SELECT FETCH WITH TIES only after set operations have had
@@ -23754,6 +23760,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
 
     if (sql.substr(0, 6) == "select" || sql.substr(0, 5) == "with ") {
         if (!checkDB(s)) return true;
+        QueryCteScope cteScope(s);
 
         // A nested SELECT may consume CTE/derived tables owned by its parent.
         // Only discard transient relations created by this invocation; clearing
@@ -23793,6 +23800,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
         if (hasLeadingCte &&
             findTopLevelKeyword(sql, "from") != string::npos) {
             sql = sqlProcessor(sql);
+        }
+        if (hasLeadingCte) {
+            bool cteSetHandled = false;
+            if (executeSetOperation(sql, s, cteSetHandled)) return true;
+            if (cteSetHandled) return false;
         }
 
         // Process derived tables: (SELECT ...) AS alias
@@ -27106,10 +27118,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 whereClause = expandSubqueries(whereClause, s);
                 // Resolve JOIN aliases to physical relation names.  Dropping
                 // the qualifier makes same-named columns bind to the left side.
-                if (!leftAlias.empty() || !rightAlias.empty()) {
+                if (leftTableName != leftTable || rightTableName != rightTable ||
+                    !leftAlias.empty() || !rightAlias.empty()) {
                     for (const auto& mapping : {
-                             pair<string, string>{leftAlias, leftTable},
-                             pair<string, string>{rightAlias, rightTable}}) {
+                             pair<string, string>{leftAlias.empty() ? leftTableName : leftAlias, leftTable},
+                             pair<string, string>{rightAlias.empty() ? rightTableName : rightAlias, rightTable}}) {
                         const auto& alias = mapping.first;
                         if (alias.empty()) continue;
                         string prefix = alias + ".";
@@ -27238,23 +27251,23 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 }
             }
             map<string, string> joinTypeHints;
+            map<string, string> joinPhysicalTypeHints;
             auto addJoinTypeHints = [&](const TableSchema& table,
-                                        const string& tableName,
                                         const string& prefix,
                                         const string& physicalName) {
                 for (size_t i = 0; i < table.len; ++i) {
                     const string& name = table.cols[i].dataName;
                     const string& type = table.cols[i].dataType;
-                    if (joinBareNameCounts[name] == 1)
+                    if (joinBareNameCounts[name] == 1) {
                         joinTypeHints[name] = type;
-                    for (const auto& qualifier : {tableName, prefix, physicalName}) {
-                        if (!qualifier.empty())
-                            joinTypeHints[qualifier + "." + name] = type;
+                        joinPhysicalTypeHints[name] = type;
                     }
+                    joinTypeHints[prefix + "." + name] = type;
+                    joinPhysicalTypeHints[physicalName + "." + name] = type;
                 }
             };
-            addJoinTypeHints(leftTbl, leftTableName, leftPrefix, leftTable);
-            addJoinTypeHints(rightTbl, rightTableName, rightPrefix, rightTable);
+            addJoinTypeHints(leftTbl, leftPrefix, leftTable);
+            addJoinTypeHints(rightTbl, rightPrefix, rightTable);
             auto joinOperandSide = [&](const string& qualifier,
                                        const string& column) {
                 if (!qualifier.empty()) {
@@ -27524,8 +27537,14 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 if (col.find('.') != string::npos) {
                     string tbl = col.substr(0, col.find('.'));
                     string name = col.substr(col.find('.') + 1);
-                    const TableSchema& ts = (tbl == leftTable || tbl == leftPrefix) ? leftTbl : rightTbl;
-                    bool isLeft = (tbl == leftTable || tbl == leftPrefix);
+                    // These keys have already been lowered to physical source
+                    // names. A right physical name can equal the left SQL CTE
+                    // qualifier; do not bind it to that left logical prefix.
+                    const bool isLeft = tbl == leftTable ||
+                        (tbl != rightTable && tbl == leftPrefix);
+                    if (!isLeft && tbl != rightTable && tbl != rightPrefix)
+                        return {-1, -1};
+                    const TableSchema& ts = isLeft ? leftTbl : rightTbl;
                     for (size_t i = 0; i < ts.len; ++i)
                         if (ts.cols[i].dataName == name) return {isLeft ? 0 : 1, (int)i};
                     return {-1, -1};
@@ -27687,7 +27706,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         joinProtocolResult.columnTypes.push_back(
                             dbms::ExprHelper::inferResultType(
                                 aggregate.func + "(" + aggregate.arg + ")",
-                                joinTypeHints));
+                                joinPhysicalTypeHints));
                     }
                 } else if (selectAll) {
                     for (size_t i = 0; i < leftTbl.len; ++i) {
@@ -27948,9 +27967,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     };
                     auto addTableValues = [&](const TableSchema& table,
                                               size_t offset,
-                                              const string& tableName,
-                                              const string& prefix,
-                                              const string& physicalName) {
+                                              const string& prefix) {
                         for (size_t columnIndex = 0;
                              columnIndex < table.len; ++columnIndex) {
                             const string& name =
@@ -27958,18 +27975,14 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             const size_t at = offset + columnIndex;
                             if (joinBareNameCounts[name] == 1)
                                 addExpressionValue(name, at);
-                            for (const auto& qualifier : {
-                                     tableName, prefix, physicalName}) {
-                                if (!qualifier.empty())
-                                    addExpressionValue(
-                                        qualifier + "." + name, at);
-                            }
+                            // Expression SQL is still in the logical namespace.
+                            // Adding storage names here could overwrite a CTE's
+                            // visible c.id with the unrelated public.c.id cell.
+                            addExpressionValue(prefix + "." + name, at);
                         }
                     };
-                    addTableValues(leftTbl, 0, leftTableName,
-                                   leftPrefix, leftTable);
-                    addTableValues(rightTbl, leftTbl.len, rightTableName,
-                                   rightPrefix, rightTable);
+                    addTableValues(leftTbl, 0, leftPrefix);
+                    addTableValues(rightTbl, leftTbl.len, rightPrefix);
                 }
                 vector<string> cells;
                 vector<bool> nulls;
@@ -28781,8 +28794,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     }
                 }
             }
-            cout << "Table " << tnameOrig << " not exist" << endl;
-            return true;
+            // Nested CTE/derived execution must retain the declared relation
+            // error rather than degrading a legacy stdout diagnostic to XX000.
+            throw dbms::DbError("42P01", "relation \"" + tnameOrig + "\" does not exist");
         }
         if (queryDb != "pg_catalog" && queryDb != "information_schema" &&
             !isTempTable(s, tnameOrig) && !checkTablePermission(s, tnameOrig, dbms::StorageEngine::TablePrivilege::Select)) return true;

@@ -36,6 +36,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS=(tests/postgres_protocol_test.py tests/window_e2e_test.py tests/inherit_only_e2e_test.py tests/explain_analyze_e2e_test.py tests/unnest_e2e_test.py tests/timestamptz_e2e_test.py tests/multijoin_e2e_test.py tests/div14_feature_gate_test.py)
     DBMS_E2E_TESTS+=(tests/review_sql_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/cte_clause_boundary_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/cte_relation_scope_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/fetch_clause_boundary_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/subquery_sqlstate_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/composite_not_in_null_semantics_protocol_e2e_test.py)
