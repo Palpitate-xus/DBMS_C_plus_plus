@@ -19547,7 +19547,12 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
     if (!candidate->orderBy.empty())
         for (const auto& item : candidate->selectList)
             scalarOrder = scalarOrder || scalarQueryRoles(item.expr.get()).first;
-    if ((!roles.first && !scalarOrder && !possibleArray) || roles.second) return false;
+    // Qualifications and LIMIT control genuine projection demand even
+    // without FROM. Suppressing an already evaluated output is too late
+    // for volatile routines and nontransactional sequence allocation.
+    const bool fromlessDemand = !candidate->fromClause &&
+        (candidate->whereClause || candidate->limit || candidate->offset);
+    if ((!roles.first && !scalarOrder && !possibleArray && !fromlessDemand) || roles.second) return false;
     // Additional multirow roles in targets/order also need their own lowering;
     // never reinterpret a set-valued child as a scalar expression.
     for (const auto& item : candidate->selectList) if (scalarQueryRoles(item.expr.get()).second) return false;
@@ -19575,7 +19580,7 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
     // discarded before the whole immutable query has passed preparation.
     auto prepared = g_engine.prepareBoundQuery(session.currentDB, rawSql);
     auto* select = static_cast<dbms::SelectStmt*>(prepared.ast.get());
-    if(!roles.first && !scalarOrder && !queryArrays(select,true))return false;
+    if(!roles.first && !scalarOrder && !queryArrays(select,true) && !fromlessDemand)return false;
     // Preserve column grants on precisely the bound source cells used by
     // this query (including correlated child references), not SELECT *.
     if (select->fromClause && !sessionIsAdmin(session)) {
@@ -19660,7 +19665,20 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
             types[i] = dbms::ExprHelper::inferParsedResultType(select->selectList[i].expr.get(), {}, session.currentDB, &g_engine);
     }
     for (auto& type : types) if (type == "unknown") type = "text";
-    auto plan = dbms::QueryPlanner::buildPreparedSelectPlan(&g_engine, session.currentDB, physical, std::move(prepared));
+    dbms::OpPtr plan;
+    if (fromlessDemand) {
+        // This execution root owns a genuine one-row, zero-column input.
+        // Request planning on its actual carrier, never on a discarded
+        // preflight or on every recursively constructed child graph.
+        auto query = make_shared<dbms::PreparedQuery>(std::move(prepared));
+        auto source = make_unique<dbms::PreparedSourceRowsOp>(dbms::QueryRowDescriptor{},
+            [](size_t index,vector<dbms::ExprValue>& row) {row.clear();return index==0;});
+        plan = dbms::QueryPlanner::buildPreparedSelectPlan(&g_engine,session.currentDB,
+            std::move(query),select,dbms::TableSchema{},std::move(source),{},{},{},true,true);
+    } else {
+        plan = dbms::QueryPlanner::buildPreparedSelectPlan(&g_engine,session.currentDB,
+            physical,std::move(prepared));
+    }
     auto result = dbms::QueryPlanner::executePlanChecked(std::move(plan), currentQueryRowDemand());
     result.throwIfFailed();
     if (!result.structuredRowsAvailable) throw dbms::DbError("XX000", "prepared query lost typed rows");

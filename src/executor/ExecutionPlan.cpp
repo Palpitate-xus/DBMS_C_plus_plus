@@ -114,6 +114,7 @@ struct PreparedSelectState {
     PreparedChildExecutor childExecutor;
     PreparedChildCursorFactory childCursorFactory;
     bool cursorOwnsScalarChildren = true;
+    bool planRootConstants = false;
     std::unique_ptr<PreparedQueryExecution> execution;
     bool executionStarted = false;
     ExprEvaluator evaluator;
@@ -201,6 +202,10 @@ struct PreparedSelectState {
         execution = std::make_unique<PreparedQueryExecution>(query, engine, dbname);
         execution->setQueryExecutor(childExecutor);
         execution->setChildCursorFactory(childCursorFactory, cursorOwnsScalarChildren);
+        // Only the execution root opts into whole-query planning. Child
+        // graph construction must not reacquire outputs that root demand
+        // already pruned, or plan a child in a discarded CASE arm.
+        if (planRootConstants) execution->planStatementConstants(statement);
         for (auto& target : starTargets)
             execution->prepareProjectionColumn(static_cast<ColumnRefExpr*>(target.get()), statement);
         for (auto* target : targets) execution->prepareExpression(target);
@@ -713,7 +718,8 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
     const std::string& dbname, std::shared_ptr<PreparedQuery> prepared,
     SelectStmt* select, const TableSchema& sourceSchema, OpPtr source,
     const RowContext& outerRow, PreparedChildExecutor childExecutor,
-    PreparedChildCursorFactory childCursorFactory, bool cursorOwnsScalarChildren) {
+    PreparedChildCursorFactory childCursorFactory, bool cursorOwnsScalarChildren,
+    bool planRootConstants) {
     if (!prepared || !select || !source || !supportsPreparedSelectShape(*select, true, source->supportsPreparedContexts()))
         throw DbError("0A000", "query requires an additional prepared plan lowering");
     const auto output = prepared->statementOutputs.find(select);
@@ -724,6 +730,7 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
     state->query = std::move(prepared); state->statement = select;
     state->output = output->second; state->outerRow = outerRow;
     state->childExecutor = std::move(childExecutor);
+    state->planRootConstants = planRootConstants;
     // Keep explicit scalar readers/engine hosts, while quantified children
     // still require a real typed stream. Only a cursor deliberately supplied
     // by the same execution owner may supersede those scalar contracts.

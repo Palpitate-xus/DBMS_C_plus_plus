@@ -253,6 +253,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/values_common_type_binding_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/prepared_projection_label_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/ordinary_case_prepared_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/fromless_select_execution_demand_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/case_else_projection_label_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/case_integer_literal_binding_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/geometric_typed_literal_protocol_e2e_test.py)
