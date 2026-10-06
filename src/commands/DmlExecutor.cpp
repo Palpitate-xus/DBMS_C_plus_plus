@@ -1637,7 +1637,7 @@ enum class InsertSelectBuildResult { Success, Unsupported, Error };
 InsertSelectBuildResult buildInsertSelectRows(
     const SelectStmt& select, Session& s,
     const std::vector<std::string>& targetColumns,
-    std::vector<SqlRow>& pendingRows) {
+    std::vector<SqlRow>& pendingRows, PreparedQueryExecution& execution) {
     if (!select.ctes.empty() || !select.groupBy.empty() ||
         !select.groupByElems.empty() || select.having || !select.orderBy.empty() ||
         select.limit || select.offset || select.withTies || select.fetchFirst ||
@@ -1726,16 +1726,31 @@ InsertSelectBuildResult buildInsertSelectRows(
         return InsertSelectBuildResult::Error;
     }
 
+    const PreparedQuery::SourceRange* sourceRange = nullptr;
+    if (hasSource) {
+        for (const auto& range : execution.query().sourceRanges)
+            if (range.owner == &select && range.source == select.fromClause.get()) {
+                sourceRange = &range; break;
+            }
+        if (!sourceRange || sourceRange->columns.size() != sourceTable.len)
+            throw DbError("XX000","INSERT SELECT source descriptor does not match its prepared range");
+    }
+    for (const auto& projection : projections)
+        if (projection.expr) execution.prepareExpression(const_cast<Expr*>(projection.expr));
+    execution.prepareExpression(select.whereClause.get());
+
     bool evaluationFailed = false;
     auto appendRow = [&](const std::string& row) {
-        RowContext context;
+        RowContext context = execution.context();
         if (hasSource) {
+            std::vector<ExprValue> sourceCells;
             for (size_t i = 0; i < sourceTable.len; ++i) {
                 const auto& column = sourceTable.cols[i];
                 bool isNull = false;
                 const std::string value = g_engine.extractColumnValue(
                     row, sourceTable, i, s.currentDB, true, &isNull);
                 ExprValue expressionValue(column.dataType, value, isNull);
+                sourceCells.emplace_back(sourceRange->columns[i].type,value,isNull);
                 context.set(column.dataName, expressionValue);
                 if (!sourceAlias.empty()) {
                     context.set(sourceAlias + "." + column.dataName,
@@ -1744,9 +1759,10 @@ InsertSelectBuildResult buildInsertSelectRows(
                 context.set(sourceName + "." + column.dataName,
                             expressionValue);
             }
+            execution.setSourceRow(context,sourceRange->ordinal,sourceCells);
         }
         if (select.whereClause) {
-            const ExprValue predicate = evaluator.eval(select.whereClause, context);
+            const ExprValue predicate = execution.evaluate(select.whereClause.get(), context);
             if (predicate.isUnknown() || predicate.typeName == "unknown") {
                 evaluationFailed = true;
                 return;
@@ -1768,10 +1784,17 @@ InsertSelectBuildResult buildInsertSelectRows(
                     row, sourceTable, projections[i].sourceIndex, s.currentDB, true,
                     &isNull);
                 value = isNull ? SqlCell{} : SqlCell{std::move(extracted)};
-            } else if (!evaluateSourceExpression(projections[i].expr, context,
-                                                 evaluator, value)) {
-                evaluationFailed = true;
-                return;
+            } else {
+                const auto result = execution.evaluate(projections[i].expr,context);
+                if (result.isUnknown()) { evaluationFailed = true; return; }
+                if (!result.isNull) {
+                    auto text = result.value;
+                    if (result.typeName == "boolean") {
+                        if (text == "t") text = "1";
+                        else if (text == "f") text = "0";
+                    }
+                    value = std::move(text);
+                }
             }
             values[targetColumns[i]] = std::move(value);
         }
@@ -1859,7 +1882,8 @@ ExprPtr copyReturningExpression(const Expr* expression, const TableSchema& table
         target->left = copy(node->left); target->right = copy(node->right); result = std::move(target);
     } else if (const auto* node = dynamic_cast<const CastExpr*>(expression)) {
         auto target = std::make_unique<CastExpr>(); target->typeName = node->typeName;
-        target->typeMods = node->typeMods; target->operand = copy(node->operand); result = std::move(target);
+        target->typeMods = node->typeMods; target->implicit = node->implicit;
+        target->operand = copy(node->operand); result = std::move(target);
     } else if (const auto* node = dynamic_cast<const CaseExpr*>(expression)) {
         auto target = std::make_unique<CaseExpr>();
         target->switchExpr = copy(node->switchExpr); target->elseExpr = copy(node->elseExpr);
@@ -2951,12 +2975,14 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
             }
         }
     }
-    if (stmt.selectSource) {
+    std::shared_ptr<PreparedQuery> preparedInsert;
+    if (stmt.selectSource || !stmt.values.empty()) {
         // Prepare actual source descriptors and contextual target input before
         // opening a source, testing WHERE, or evaluating any volatile target.
         // The shared metadata callback distinguishes a direct unknown literal
         // from TEXT in a table/derived output; no first-row/value type guessing.
-        (void)g_engine.prepareBoundQuery(s.currentDB, originalSql);
+        preparedInsert = std::make_shared<PreparedQuery>(
+            g_engine.prepareBoundQuery(s.currentDB, originalSql));
     }
     if (!supportsInsert(stmt)) {
         fallback = true;
@@ -3058,14 +3084,17 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
                 return rejectAlwaysIdentityValue(i);
             }
         }
-        const auto* select = dynamic_cast<const SelectStmt*>(stmt.selectSource.get());
+        const auto* typedInsert = dynamic_cast<const InsertStmt*>(preparedInsert->ast.get());
+        const auto* select = typedInsert
+            ? dynamic_cast<const SelectStmt*>(typedInsert->selectSource.get()) : nullptr;
         if (!select) {
             fallback = true;
             return false;
         }
         std::vector<SqlRow> pendingRows;
+        PreparedQueryExecution execution(preparedInsert,&g_engine,s.currentDB);
         const InsertSelectBuildResult buildResult = buildInsertSelectRows(
-            *select, s, columns, pendingRows);
+            *select, s, columns, pendingRows, execution);
         if (buildResult == InsertSelectBuildResult::Unsupported) {
             fallback = true;
             return false;
@@ -3185,8 +3214,15 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
     // prefix.
     std::vector<SqlRow> pendingRows;
     std::vector<SqlRow> sqlInsertedRows;
+    const auto* typedInsert = preparedInsert
+        ? dynamic_cast<const InsertStmt*>(preparedInsert->ast.get()) : nullptr;
+    if (!typedInsert) throw DbError("XX000","INSERT VALUES has no prepared statement");
+    PreparedQueryExecution execution(preparedInsert,&g_engine,s.currentDB);
+    for (const auto& row : typedInsert->values)
+        for (const auto& value : row)
+            if (!isDefaultValue(value)) execution.prepareExpression(value.get());
     pendingRows.reserve(stmt.values.size());
-    for (const auto& row : stmt.values) {
+    for (const auto& row : typedInsert->values) {
         if (row.size() != columns.size()) {
             std::cout << "SQL syntax error: column count mismatch" << std::endl;
             return true;
@@ -3205,11 +3241,20 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
                 return rejectAlwaysIdentityValue(i);
             }
             SqlCell value;
-            if (!evaluateValue(row[i], s.currentDB, value)) {
+            const auto result = execution.evaluate(row[i].get(),execution.context());
+            if (result.isUnknown()) {
                 // Returning false lets the legacy path retain ownership of
                 // expression forms not yet supported by ExprEvaluator.
                 fallback = true;
                 return false;
+            }
+            if (!result.isNull) {
+                auto text = result.value;
+                if (result.typeName == "boolean") {
+                    if (text == "t") text = "1";
+                    else if (text == "f") text = "0";
+                }
+                value = std::move(text);
             }
             values[columns[i]] = std::move(value);
         }
