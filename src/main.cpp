@@ -12439,8 +12439,25 @@ static std::string createTempTableFromRows(Session& s,
             }
         }
     }
-    std::string tmpName = "__cte_" + std::to_string(counter++);
-    std::string actualName = tempTablePrefix(s, tmpName);
+    // CTE, derived-table, join and LATERAL materializers have independent
+    // local counters but share one session's live relations. Nested queries
+    // must not reuse an inherited materialization or a user's visible name.
+    std::string tmpName;
+    std::string actualName;
+    while (true) {
+        if (counter < 0 || counter == std::numeric_limits<int>::max())
+            throw dbms::DbError("54000", "query materialization name limit exceeded");
+        tmpName = "__cte_" + std::to_string(counter++);
+        actualName = tempTablePrefix(s, tmpName);
+        if (s.tempTables.count(tmpName) || s.transientTempTables.count(tmpName) ||
+            g_engine.tableExists(s.currentDB, actualName) ||
+            g_engine.viewExists(s.currentDB, actualName)) continue;
+        const std::string visibleName = resolveTableName(s, tmpName, true);
+        if (g_engine.tableExists(s.currentDB, visibleName) ||
+            g_engine.viewExists(s.currentDB, visibleName) ||
+            g_engine.isMaterializedView(s.currentDB, visibleName)) continue;
+        break;
+    }
     TableSchema tmpTbl;
     tmpTbl.tablename = actualName;
     tmpTbl.isTemporary = true;
