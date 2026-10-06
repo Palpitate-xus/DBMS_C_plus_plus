@@ -28,6 +28,8 @@ outer tree followed by `LEFT JOIN LATERAL ... ON true`.
 query retains qualified leaf columns, while a separate visible-column map
 selects the left or right USING key, or coalesces FULL keys from their NULL
 bitmaps. Ordinary NATURAL INNER joins also use the merged visible schema.
+`b42e4405` separately fixes no-alias USING dispatch: the FROM-chain reader
+keeps USING as a keyword instead of consuming it as a right-relation alias.
 
 ## Reproduced behavior
 
@@ -352,11 +354,21 @@ bitmaps. Ordinary NATURAL INNER joins also use the merged visible schema.
   rows, NULL keys, chained FULL USING, a bare merged key in LEFT LATERAL ON,
   an empty left input with integer metadata, local-column precedence, and a
   USING input followed by a CROSS relation with the same column name.
-  The added ordinary no-alias USING regression in join-type E2E still failed
-  with 42601 and is being repaired separately. Additional live probes with
+  At that commit, the added ordinary no-alias USING regression in join-type
+  E2E failed with 42601, independently of the LATERAL visibility fix.
+  Additional live probes with
   aliases confirmed that an outer bare SELECT id still returns 42703, outer
   SELECT * exposes synthetic names and duplicate leaf keys, and NATURAL LEFT
   JOIN before LATERAL is rejected with 42601. Those are unresolved gaps.
+
+- After `b42e4405`, the same no-alias USING regression passed. The FROM-chain
+  reader had accepted USING as an implicit right-table alias and then failed
+  to parse its column list as a JOIN condition. The final production build,
+  join-type protocol E2E, derived-type protocol E2E and multijoin E2E passed;
+  the added cases cover no-alias INNER, FULL and chained USING output, as
+  well as a no-alias USING input correlated from LATERAL. Rows, merged column
+  order, labels, integer OIDs and command tags are asserted. Full registered
+  suite and PostgreSQL 18.6 differential were not run.
 
 This does not complete QRY-03 or OPT-02. General target-list expressions
 (including SRFs, aggregates, and window expressions; only simple CASE and
@@ -375,7 +387,7 @@ Bare outer references in evaluator-supported scalar targets and WHERE are now
 also bound when that LATERAL SELECT has no own FROM or uses a local base-table
 scope with known columns. Bounded USING and ordinary NATURAL INNER left inputs
 now have a logical visible-column map. Outer unqualified projections and star
-expansion after LATERAL, NATURAL outer inputs, and no-alias USING dispatch
+expansion after LATERAL and NATURAL outer inputs
 remain open; the probes above prevent treating this as complete join support.
 Unknown CTE/derived/function FROM scopes, complex quoted/schema-qualified
 references, arbitrary correlated expressions/subqueries, complex lateral
