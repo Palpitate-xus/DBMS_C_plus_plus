@@ -639,6 +639,21 @@ struct Interp {
                         continue;
                     }
                 }
+                if (sqlStatement && !quoted && name == "is") {
+                    size_t operatorEnd = sqlKeywordUnitEnd(expr, i,
+                        {"is", "distinct", "from"});
+                    if (operatorEnd == std::string::npos)
+                        operatorEnd = sqlKeywordUnitEnd(expr, i,
+                            {"is", "not", "distinct", "from"});
+                    if (operatorEnd != std::string::npos) {
+                        // This FROM belongs to a null-safe comparison, not
+                        // the range table. Its right side remains a value.
+                        out += expr.substr(i, operatorEnd - i);
+                        roles.back().projectionMayEnd = false;
+                        i = operatorEnd;
+                        continue;
+                    }
+                }
                 const auto variable = vars.find(name);
                 const bool functionCall = next != std::string::npos &&
                     next < expr.size() && expr[next] == '(';
