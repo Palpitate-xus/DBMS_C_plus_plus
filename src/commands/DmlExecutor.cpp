@@ -2882,6 +2882,13 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
             }
         }
     }
+    if (stmt.selectSource) {
+        // Prepare actual source descriptors and contextual target input before
+        // opening a source, testing WHERE, or evaluating any volatile target.
+        // The shared metadata callback distinguishes a direct unknown literal
+        // from TEXT in a table/derived output; no first-row/value type guessing.
+        (void)g_engine.prepareBoundQuery(s.currentDB, originalSql);
+    }
     if (!supportsInsert(stmt)) {
         fallback = true;
         return false;
