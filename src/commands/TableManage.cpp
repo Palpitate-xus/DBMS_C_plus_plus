@@ -43958,12 +43958,26 @@ static void rollbackSessionTempTables(StorageEngine& engine,
 
 namespace {
 
-std::mutex g_databaseTxnLocksMutex;
-std::map<std::string, std::shared_ptr<std::shared_mutex>> g_databaseTxnLocks;
+struct DatabaseTransactionLockRegistry {
+    std::mutex mutex;
+    std::map<std::string, std::shared_ptr<std::shared_mutex>> locks;
+};
+
+DatabaseTransactionLockRegistry& databaseTransactionLockRegistry() {
+    // The global StorageEngine can restore transaction images from its
+    // constructor, before this translation unit's dynamic initializers run.
+    // Initialize the mutex and map together on first use, thread-safely.
+    // Keep the registry alive through global-engine/background-worker teardown
+    // as well: a function-local object first used after main starts would
+    // otherwise be destroyed before that global engine stops its workers.
+    static auto* const registry = new DatabaseTransactionLockRegistry;
+    return *registry;
+}
 
 std::shared_ptr<std::shared_mutex> databaseTxnLockFor(const std::string& dbname) {
-    std::lock_guard<std::mutex> guard(g_databaseTxnLocksMutex);
-    auto& lock = g_databaseTxnLocks[dbname];
+    auto& registry = databaseTransactionLockRegistry();
+    std::lock_guard<std::mutex> guard(registry.mutex);
+    auto& lock = registry.locks[dbname];
     if (!lock) lock = std::make_shared<std::shared_mutex>();
     return lock;
 }
