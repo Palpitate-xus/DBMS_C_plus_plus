@@ -72,6 +72,46 @@ exited 0, but its object reuse is not claimed as the runner's actual path;
 the runner's fresh objects and original output remain authoritative. No
 process was restarted to hide this extra compilation or any test result.
 
+### Later observed canonical progress (not its terminal result)
+
+The native portion actually finished: **515/517 passed, two failed**.
+`group_collection_aggregate_test` and `grouping_expression_metadata_test`
+both terminate with uncaught structured `DbError`/22012 where their original
+checked-result assertions require `ok=false` and a 22012 diagnostic. The
+focused 81 did not cover those two API consumers. The old five native failures
+passed, but this does not make the new native/full gate green.
+
+The protocol portion then failed the unchanged `postgres_protocol_test.py`
+at line 2433: its quantified EXPLAIN returned no data rows. A fresh diagnostic
+on the exact same frozen binary confirmed the original spaced SELECT with
+`id > ANY (SELECT id FROM sub_inner WHERE enabled = 1)` returns rows 3 and 4,
+while spaced EXPLAIN raises **42703: column "select" does not exist**.
+The compact `ANY(...)` SELECT also raises 42703, a separate spelling-path
+defect. This is not justification to remove the original expected plan node.
+Actual terminal diagnostic sessions 95011 and 49661 exited 0 as tracing
+scripts; their displayed SQL errors are retained failures, not passing SQL
+assertions. Logs: `quantified-explain-diagnostic.log` and
+`quantified-explain-spaced-diagnostic.log`. The older settings test later in
+the full protocol script was not reached and is not claimed fixed.
+
+Canonical 75090 remains live. ROOT source, headers, tests and registry stay
+frozen. A separate checked-result API candidate in
+`/tmp/dbms-checked-plan-error.tDFiKQMd` has a real fresh 57-unit O2 build
+80141/exit 0; its tests are still running, including a retained newly added
+test namespace compilation error. Neither that candidate nor the quoted
+UPDATE and expanded duplicate-UPDATE candidates have yet been integrated.
+
+Quoted UPDATE/RETURNING now has an independent private local commit
+`3fbdb4e9`: final normal O2 changed-DML build 37899/exit 0, matching original
+56 other ROOT production units and unchanged public headers/manifest;
+25-native 88195 and 12-wire 46194 both exit 0, strengthened final wire
+1603 and exact PostgreSQL 17.2 diagnostic reference both exit 0. The true
+uppercase-only old-ROOT failure and intermediate RETURNING failure remain
+retained. It is READY, not integrated during the ROOT freeze; legacy quoted
+RowContext collisions, native uppercase projection and whole DML families
+are not claimed closed. Its evidence is recorded in the private commit's
+`docs/issue-update-canonical-quoted-target.md`.
+
 Logs: `build-full-O2.log`, `build-full-O2-repeat.log`,
 `audit-preupdate.log`, `known-gap-preupdate.log`,
 `build-typed-update-O2.log`, `build-combined-repeat.log`,
@@ -106,8 +146,12 @@ actual PostgreSQL 17.2 reference preserves RHS binding/conversion error
 priority before duplicate rejection and does not execute that writer.
 Artifacts and the uncommitted ordered-site candidate remain in
 `/tmp/dbms-update-duplicate-target.2pS2rLEP`; its full fresh 57-source O2
-build 5450 is running against the changed AST layout. This is not yet a
-verified fix, and legacy UPDATE variants still need complete coverage.
+build 5450 exited 0 against the changed AST layout. Its first ordinary-only
+26-native/12-wire group passed, but stronger actual PostgreSQL 17.2 controls
+then exposed DEFAULT/FROM/RETURNING and error-priority failures. The 24-case
+permanent reference matrix exits 0; V2's normal O2 CPP rebuild 44497 exits 0,
+but the expanded native/wire tests remain running. The candidate is not yet
+READY, and broader versioned-RETURNING/unsupported paths remain open.
 
 All affected total-checklist families remain partial. The ledger still has
 273 items: 22 complete, 166 partial, 70 unverified, 15 deferred_by_user.
