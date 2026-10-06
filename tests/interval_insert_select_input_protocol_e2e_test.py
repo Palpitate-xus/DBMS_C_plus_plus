@@ -11,7 +11,10 @@ def main():
     spec = importlib.util.spec_from_file_location('interval_select_runner', root/'tests/compat/pg_diff_runner.py')
     runner = importlib.util.module_from_spec(spec); spec.loader.exec_module(runner)
     client = runner.load_protocol_client()
-    reference = '--reference' in sys.argv[1:]
+    reference18 = '--reference18' in sys.argv[1:]
+    if reference18 and '--reference' in sys.argv[1:]:
+        raise ValueError('choose PostgreSQL18.6 reference or PG17.2 diagnostic, not both')
+    reference = reference18 or '--reference' in sys.argv[1:]
     if reference:
         host, port, user, database, password = runner._reference_connection_settings()
         sock = socket.create_connection((host, port), timeout=120)
@@ -31,7 +34,10 @@ def main():
     def setup(sql):
         result = query(sql); assert result[1] is None, (sql, result)
     try:
-        if reference: assert query('SHOW server_version_num;')[0] == [['170002']]
+        if reference18:
+            runner.verify_reference_version(client, sock)
+        elif reference:
+            assert query('SHOW server_version_num;')[0] == [['170002']]
         setup('CREATE TEMP TABLE interval_select_rows(id INT PRIMARY KEY,v INTERVAL);')
         setup('CREATE TEMP TABLE interval_select_text(id INT,v TEXT);')
         setup("INSERT INTO interval_select_text VALUES(1,'1 day'),(2,NULL);")
@@ -116,7 +122,7 @@ def main():
         setup('ROLLBACK;')
         check('rollback-preserves-original-count', query('SELECT count(*) FROM interval_select_rows;')[0], [['4']])
         assert not failures, '%d INSERT SELECT input assertions failed: %r' % (len(failures), failures)
-        print('[INTERVAL INSERT SELECT INPUT '+('PG17.2 DIAGNOSTIC' if reference else 'PROTOCOL E2E')+'] passed')
+        print('[INTERVAL INSERT SELECT INPUT '+('PG18.6 REFERENCE' if reference18 else 'PG17.2 DIAGNOSTIC' if reference else 'PROTOCOL E2E')+'] passed')
     finally:
         if reference: sock.close()
         else: runner.stop_ours(server)

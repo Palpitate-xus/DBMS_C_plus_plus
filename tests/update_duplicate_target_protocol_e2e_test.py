@@ -13,15 +13,22 @@ def main():
     runner = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(runner)
     client = runner.load_protocol_client()
-    reference = '--reference' in sys.argv[1:]
+    reference18 = '--reference18' in sys.argv[1:]
+    if reference18 and '--reference' in sys.argv[1:]:
+        raise ValueError('choose PostgreSQL18.6 reference or PG17.2 diagnostic, not both')
+    reference = reference18 or '--reference' in sys.argv[1:]
     if reference:
         host, port, user, database, password = runner._reference_connection_settings()
         sock = socket.create_connection((host, port), timeout=120)
         try:
             client.startup_reference(sock, user, database, password)
-            version = runner.decode_wire_result(client.simple_query(sock, 'SHOW server_version_num;'))
-            assert version[1] is None and version[0] == [['170002']], version
-            print('Actual PG17.2 diagnostic reference', version[0], flush=True)
+            if reference18:
+                runner.verify_reference_version(client, sock)
+                print('Actual PG18.6 reference 180006', flush=True)
+            else:
+                version = runner.decode_wire_result(client.simple_query(sock, 'SHOW server_version_num;'))
+                assert version[1] is None and version[0] == [['170002']], version
+                print('Actual PG17.2 diagnostic reference', version[0], flush=True)
             assert runner.decode_wire_result(client.simple_query(sock, 'BEGIN;'))[1] is None
             namespace = 'duplicate_update_ref_' + uuid.uuid4().hex
             assert runner.decode_wire_result(client.simple_query(sock, 'CREATE SCHEMA ' + namespace + ';'))[1] is None

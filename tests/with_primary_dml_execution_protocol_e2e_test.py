@@ -11,7 +11,10 @@ def main():
     spec = importlib.util.spec_from_file_location('with_dml_runner', root/'tests/compat/pg_diff_runner.py')
     runner = importlib.util.module_from_spec(spec); spec.loader.exec_module(runner)
     client = runner.load_protocol_client()
-    reference = '--reference' in sys.argv[1:]
+    reference18 = '--reference18' in sys.argv[1:]
+    if reference18 and '--reference' in sys.argv[1:]:
+        raise ValueError('choose PostgreSQL18.6 reference or PG17.2 diagnostic, not both')
+    reference = reference18 or '--reference' in sys.argv[1:]
     if reference:
         host, port, user, database, password = runner._reference_connection_settings()
         sock = socket.create_connection((host, port), timeout=120)
@@ -44,7 +47,10 @@ def main():
         result = query(sql); assert result[1] is None, (sql, result)
 
     try:
-        if reference: assert query('SHOW server_version_num;')[0] == [['170002']]
+        if reference18:
+            runner.verify_reference_version(client, sock)
+        elif reference:
+            assert query('SHOW server_version_num;')[0] == [['170002']]
         for sql in (
             'CREATE TEMP TABLE with_source(id INT PRIMARY KEY,t TEXT);',
             "INSERT INTO with_source VALUES(1,'old');",
@@ -138,7 +144,7 @@ def main():
         setup('ROLLBACK;')
         check('outer-user-rollback', 'SELECT id FROM with_target WHERE id=90;', [])
         assert not failures, failures
-        print('[WITH PRIMARY DML '+('PG17.2 DIAGNOSTIC' if reference else 'PROTOCOL E2E')+'] passed')
+        print('[WITH PRIMARY DML '+('PG18.6 REFERENCE' if reference18 else 'PG17.2 DIAGNOSTIC' if reference else 'PROTOCOL E2E')+'] passed')
     finally:
         if reference: sock.close()
         else: runner.stop_ours(server)
