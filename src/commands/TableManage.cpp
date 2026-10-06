@@ -4,6 +4,7 @@
 #include "common/BooleanCodec.h"
 #include "common/NetworkValue.h"
 #include "common/GeometryValue.h"
+#include "expression/geometric_input.h"
 #include "common/NotificationManager.h"
 #include "common/sha256.h"
 #include "utils/plpgsql.h"
@@ -31648,6 +31649,8 @@ namespace {
 // numeric narrowing, parameters, and nested queries). Ordinary typmods belong
 // to the later coercion step, not this input conversion.
 std::string preparedPrimitiveInputType(const std::string& spelling) {
+    if(const auto geometry=geometric_input_detail::builtinType(spelling);!geometry.empty())
+        return geometry;
     const auto tokens = SQLParser::tokenize(spelling);
     std::vector<std::string> base;
     for (const auto& token : tokens) {

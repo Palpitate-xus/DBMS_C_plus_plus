@@ -10,6 +10,7 @@
 #include "common/BooleanCodec.h"
 #include "common/NetworkValue.h"
 #include "common/GeometryValue.h"
+#include "expression/geometric_input.h"
 #include "common/DbError.h"
 #include "common/NotificationManager.h"
 #include "common/sha256.h"
@@ -4580,6 +4581,18 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
                 target = base + "(" + modifiers + ")";
             }
         }
+    }
+    const auto geometryTarget=geometric_input_detail::builtinType(targetTypeName);
+    const auto sourceType=ExprHelper::canonicalResultTypeName(v.typeName);
+    if(!geometryTarget.empty() &&
+        (v.isNull || sourceType==geometryTarget || sourceType=="unknown" || sourceType=="text" ||
+         sourceType=="character varying" || sourceType=="varchar" || sourceType=="character" ||
+         sourceType=="bpchar" || sourceType=="name")) {
+        if(v.isNull)return ExprValue(geometryTarget,"",true);
+        std::string normalized;
+        if(!normalizeGeometryText(v.value,geometryTarget,normalized))
+            throw DbError("22P02","invalid input syntax for type "+geometryTarget);
+        return ExprValue(geometryTarget,std::move(normalized),false);
     }
     if (v.isNull) {
         ExprValue result(targetTypeName, "", true);

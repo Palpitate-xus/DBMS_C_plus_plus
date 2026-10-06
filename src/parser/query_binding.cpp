@@ -8,6 +8,7 @@
 #include "expression/equality_type.h"
 #include "expression/expr_helper.h"
 #include "expression/array_type.h"
+#include "expression/geometric_input.h"
 #include <algorithm>
 #include <map>
 #include <set>
@@ -228,6 +229,7 @@ public:
         case ExprType::CastExpr: {
             auto* cast = static_cast<CastExpr*>(node.get());
             expression(cast->operand, scopes, cast->typeName);
+            geometric_input_detail::validateUnknownInput(cast->operand.get(),cast->typeName);
             if (metadata.assignmentInput) metadata.assignmentInput({"", cast->typeName}, cast, cast->typeName);
             return cast->typeName;
         }
@@ -269,6 +271,7 @@ public:
             if (binary->op == "::") {
                 const auto* type = dynamic_cast<const LiteralExpr*>(binary->right.get());
                 if (!type) throw DbError("42601", "cast requires a type name");
+                geometric_input_detail::validateUnknownInput(binary->left.get(),type->value);
                 if (metadata.assignmentInput) metadata.assignmentInput({"", type->value}, binary, type->value);
                 return type->value; // grammar type, not a SQL value namespace
             }
