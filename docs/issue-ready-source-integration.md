@@ -1,6 +1,64 @@
 # Independent source integrations after canonical 75090
 
-## Latest checkpoint: eight independent follow-ups after source 4f23
+## Latest a7d checkpoint: seventeen independent source integrations
+
+The eight changes recorded below are now followed by nine more independent
+local commits, each preserving the original strong assertions and scoped proof:
+
+| Independent repair | Private commit | ROOT commit |
+| --- | --- | --- |
+| Pure contextual primitive assignment input | `ad801881` | `e0103407` |
+| UPDATE whole RETURNING binding before fallback | `32653f11` | `c1e78bc1` |
+| Genuine SELECT WHERE boolean context | `2c0d0570` | `bcf3c052` |
+| FROM-less real root source/owned constant demand | `6236961f` | `3b4c4937` |
+| Actual thirteen builtin unary +/- signatures | `46ea40b5` | `043ffa7c` |
+| Scalar cardinality structured creation/close once | `8770ba41` | `ab979470` |
+| Genuine static scalar-child output descriptor | `0709d889` | `569377fb` |
+| Retained scalar projection/unary AST consumer | `7965d970` | `75d1bbf8` |
+| INTERVAL mixed-sign output | `b5b8f0e1` | `a7d460c7` |
+
+Current source is `a7d460c7`,580native/304registered/58productionTUs. New formal
+normal-O2 all58 build20514 is actually live under
+`/tmp/dbms-root-planning-unary-combination.vEs0SthA`. Source, headers, tests and
+registry remain frozen until actual new combination terminals. The prepared
+106-fresh-native/55-wire helpers are syntax checked but have not run; detached
+unchanged full580/304 snapshot `/tmp/dbms-canonical-planning-unary.HwYttEKu/repo`
+is prepared, not started. No normal build or full-suite success is predeclared.
+
+The ordinary input three-commit private candidate passes the entire formerly
+failing unsplit wire matrix, strict180006, eleven matching native entries and
+four adjacent scripts. The diagnostic is renamed/registered without skipping
+either UPDATE or INSERT SELECT failure. FROM-less private623 passes an all58
+freshO0 rebuild, all13 native/eight wire entries10404=0, including every24
+strong demand control. Its prior wrapper misspelling/12-pass-plus-failure and
+corrected thirteen-native repeat27367=0 are retained, not overwritten.
+
+Scalar three-commit private proof retains original21000/OID23, aliases/TEMP/
+quoted/ARRAY/BOOL/NULL/zero-row/no-effect and VIEW/JOIN/read-CTE controls in the
+same unsplit matrix; full strict18 and candidate matrices and twelve adjacent
+scripts pass. Cardinality-only original full protocol40930 actually exits1:
+the old2504 check passes, then joined-view UPDATE2764 fails. It is not fullPASS.
+Pure unary native/engine binding and the unchanged strict18 matrix pass; its
+binding-only37 assertion failures remain. Adding the genuine consumer makes
+the complete unary matrix pass on the separate stage1 artifact.
+
+Most importantly, a new independently fresh58O0 candidate has byte-identical
+currenta7 production, headers, tests, registry and build inputs (only historical
+commit mapping differs). Its seventeen-native group55632 passes. Its four-wire
+group95535 exits1: full scalar, full unary and original PL destination pass,
+but the unchanged24 FROM-less matrix retains exactly two state/tag failures
+for `(SELECT 1/0) WHERE false`. The newly activated generic runtime root still
+leaves its owned-carrier root-planning option false. This is a real combination
+regression, not a changed expectation or whole matrix pass; an independent
+root-owner fix is queued. The existing normal build must still finish/run on
+its exact source before further source changes are integrated.
+
+Finite interval component-wise negation/range errors, geometry CAST input and
+qualified builtin type descriptors, joined-view mutation and MV target read-only
+semantics remain active separate tasks. All273 ledger states are unchanged and
+the completion gate still fails. No push/Actions/user-deferred security restart.
+
+## Historical 1dca checkpoint: eight independent follow-ups after source 4f23
 
 | Independent repair | Private commit | ROOT commit |
 | --- | --- | --- |
