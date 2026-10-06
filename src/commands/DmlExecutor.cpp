@@ -1287,98 +1287,20 @@ bool returningBindingIsValid(const ReturningBinding& binding) {
            binding.defaultQualifiers.count(binding.newName) == 0;
 }
 
-std::string tableColumnType(const TableSchema& table, const std::string& name) {
-    const std::string& column = name;
-    for (size_t i = 0; i < table.len; ++i) {
-        if (table.cols[i].dataName == column) return table.cols[i].dataType;
-    }
-    return "text";
-}
+ExprPtr copyReturningExpression(const Expr* expression, const TableSchema& table,
+                                const ReturningBinding& binding);
 
-std::string inferReturningType(const Expr* expr, const TableSchema& table) {
-    if (!expr) return "text";
-    if (const auto* literal = dynamic_cast<const LiteralExpr*>(expr)) {
-        if (!literal->typeName.empty()) return literal->typeName;
-        if (literal->value.size() >= 2 && literal->value.front() == '\'' &&
-            literal->value.back() == '\'') {
-            return "text";
-        }
-        const std::string value = lower(literal->value);
-        if (value == "true" || value == "false") return "boolean";
-        if (value == "null") return "text";
-        if (value.find('.') != std::string::npos) return "double precision";
-        bool numeric = !value.empty();
-        const size_t start = !value.empty() &&
-                             (value.front() == '-' || value.front() == '+') ? 1 : 0;
-        for (size_t i = start; i < value.size(); ++i) {
-            if (!std::isdigit(static_cast<unsigned char>(value[i]))) {
-                numeric = false;
-                break;
-            }
-        }
-        return numeric ? "integer" : "text";
-    }
-    if (const auto* ref = dynamic_cast<const ColumnRefExpr*>(expr)) {
-        return tableColumnType(table, ref->column);
-    }
-    if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(expr)) {
-        const std::string op = lower(unary->op);
-        if (op == "not" || op.find("is ") == 0) return "boolean";
-        return inferReturningType(unary->operand.get(), table);
-    }
-    if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(expr)) {
-        const std::string op = lower(binary->op);
-        if (op == "and" || op == "or" || op == "=" || op == "<>" || op == "!=" ||
-            op == "<" || op == ">" || op == "<=" || op == ">=" || op == "like" ||
-            op == "not like" || op == "ilike" || op == "not ilike" || op == "in") {
-            return "boolean";
-        }
-        if (op == "||") return "text";
-        if (op == "::") {
-            if (const auto* castType = dynamic_cast<const LiteralExpr*>(binary->right.get())) {
-                return lower(castType->value);
-            }
-        }
-        const std::string left = lower(inferReturningType(binary->left.get(), table));
-        const std::string right = lower(inferReturningType(binary->right.get(), table));
-        if (left == "numeric" || right == "numeric" ||
-            left == "double precision" || right == "double precision" ||
-            left == "real" || right == "real") {
-            return left == "numeric" || right == "numeric" ? "numeric" : "double precision";
-        }
-        return "integer";
-    }
-    if (const auto* call = dynamic_cast<const FunctionCallExpr*>(expr)) {
-        const std::string name = lower(call->funcName);
-        static const std::set<std::string> textFunctions = {
-            "lower", "upper", "initcap", "concat", "concat_ws", "substring",
-            "substr", "left", "right", "trim", "ltrim", "rtrim", "reverse",
-            "replace", "translate", "format", "quote_literal", "quote_nullable"
-        };
-        static const std::set<std::string> integerFunctions = {
-            "length", "char_length", "character_length", "bit_length", "strpos",
-            "position", "ascii"
-        };
-        if (textFunctions.count(name)) return "text";
-        if (integerFunctions.count(name)) return "integer";
-        if (name == "coalesce" || name == "nullif" || name == "greatest" ||
-            name == "least") {
-            return call->args.empty() ? "text" : inferReturningType(call->args.front().get(), table);
-        }
-        if (name == "now" || name == "current_timestamp") return "timestamp";
-        if (name == "current_date") return "date";
-        return "text";
-    }
-    if (const auto* cast = dynamic_cast<const CastExpr*>(expr)) return lower(cast->typeName);
-    if (const auto* caseExpr = dynamic_cast<const CaseExpr*>(expr)) {
-        if (!caseExpr->whenClauses.empty()) {
-            return inferReturningType(caseExpr->whenClauses.front().second.get(), table);
-        }
-        return caseExpr->elseExpr ? inferReturningType(caseExpr->elseExpr.get(), table) : "text";
-    }
-    if (dynamic_cast<const ArrayExpr*>(expr)) return "text";
-    if (dynamic_cast<const RowExpr*>(expr)) return "record";
-    return "text";
+std::string inferReturningType(const Expr* expression, const TableSchema& table,
+                               const ReturningBinding& binding,
+                               const std::string& currentDB) {
+    // Bind canonical row-image identities before pure inference. ARRAY/CASE,
+    // declared widths and builtin/routine metadata use the same resolver as
+    // prepared SELECT; no first returned row or separate type-name whitelist.
+    auto compiled = copyReturningExpression(expression, table, binding);
+    ExprHelper::prepareArrayTypes(compiled.get(), {}, currentDB, &g_engine);
+    const auto type = ExprHelper::inferParsedResultType(
+        compiled.get(), {}, currentDB, &g_engine);
+    return type.empty() || type == "unknown" ? "text" : type;
 }
 
 bool supportsReturningExpression(const Expr* expr, const TableSchema& table,
@@ -1475,7 +1397,8 @@ bool supportsReturningExpression(const Expr* expr, const TableSchema& table,
 bool buildReturningProjections(const std::vector<SelectItem>& returning,
                                const TableSchema& table,
                                const ReturningBinding& binding,
-                               std::vector<ReturningProjection>& projections) {
+                               std::vector<ReturningProjection>& projections,
+                               const std::string& currentDB) {
     projections.clear();
     if (!returningBindingIsValid(binding)) return false;
     ExprEvaluator evaluator;
@@ -1487,7 +1410,7 @@ bool buildReturningProjections(const std::vector<SelectItem>& returning,
             for (size_t i = 0; i < table.len; ++i) {
                 projections.push_back({nullptr, table.cols[i].dataName,
                                        table.cols[i].dataName,
-                                       table.cols[i].dataType,
+                                       table.cols[i].dataType + (table.cols[i].isArray ? "[]" : ""),
                                        ReturningProjection::Source::Default});
             }
             continue;
@@ -1500,7 +1423,7 @@ bool buildReturningProjections(const std::vector<SelectItem>& returning,
             for (size_t i = 0; i < table.len; ++i) {
                 projections.push_back({nullptr, table.cols[i].dataName,
                                        table.cols[i].dataName,
-                                       table.cols[i].dataType, *source});
+                                       table.cols[i].dataType + (table.cols[i].isArray ? "[]" : ""), *source});
             }
             continue;
         }
@@ -1523,7 +1446,7 @@ bool buildReturningProjections(const std::vector<SelectItem>& returning,
         projections.push_back({mergeAction ? nullptr : item.expr.get(), {},
                                name.empty() ? "?column?" : name,
                                mergeAction ? "text" :
-                                   inferReturningType(item.expr.get(), table),
+                                   inferReturningType(item.expr.get(), table, binding, currentDB),
                                mergeAction
                                    ? ReturningProjection::Source::Action
                                    : ReturningProjection::Source::Default});
@@ -1879,6 +1802,7 @@ ExprPtr copyReturningExpression(const Expr* expression, const TableSchema& table
         target->operand = copy(node->operand); result = std::move(target);
     } else if (const auto* node = dynamic_cast<const BinaryOpExpr*>(expression)) {
         auto target = std::make_unique<BinaryOpExpr>(); target->op = node->op;
+        target->arrayConcat = node->arrayConcat;
         target->left = copy(node->left); target->right = copy(node->right); result = std::move(target);
     } else if (const auto* node = dynamic_cast<const CastExpr*>(expression)) {
         auto target = std::make_unique<CastExpr>(); target->typeName = node->typeName;
@@ -1899,6 +1823,8 @@ ExprPtr copyReturningExpression(const Expr* expression, const TableSchema& table
         result = std::move(target);
     } else if (const auto* node = dynamic_cast<const ArrayExpr*>(expression)) {
         auto target = std::make_unique<ArrayExpr>();
+        target->elementType = node->elementType;
+        target->nestedElements = node->nestedElements;
         for (const auto& item : node->elements) target->elements.push_back(copy(item));
         result = std::move(target);
     } else if (const auto* node = dynamic_cast<const RowExpr*>(expression)) {
@@ -2437,6 +2363,10 @@ bool evaluateReturningExpression(const Expr* expression,
     ExprEvaluator evaluator;
     evaluator.setCurrentDB(currentDB);
     auto compiled = copyReturningExpression(expression, table, binding);
+    // Raw legacy RETURNING ASTs may not carry preparation metadata yet.
+    // Annotate only the execution-owned, ordinal-bound copy, without executing
+    // row values or routines during metadata analysis.
+    ExprHelper::prepareArrayTypes(compiled.get(), {}, currentDB, &g_engine);
     const ExprValue result = evaluator.eval(
         compiled.get(), returningContext(image, table));
     if (!result.isNull &&
@@ -2995,7 +2925,7 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
     if (!stmt.returning.empty() &&
         !buildReturningProjections(stmt.returning, table,
                                    insertReturningBinding,
-                                   returningProjections)) {
+                                   returningProjections, s.currentDB)) {
         fallback = true;
         return false;
     }
@@ -3594,7 +3524,7 @@ bool executeUpdateFromJoin(const UpdateStmt& stmt, Session& s, bool& fallback) {
     if (!stmt.returning.empty() &&
         !buildReturningProjections(stmt.returning, targetSchema,
                                    updateReturningBinding,
-                                   returningProjections)) {
+                                   returningProjections, s.currentDB)) {
         fallback = true;
         return false;
     }
@@ -3805,7 +3735,7 @@ bool executeUpdateFrom(const UpdateStmt& stmt, Session& s, bool& fallback) {
     if (!stmt.returning.empty() &&
         !buildReturningProjections(stmt.returning, targetSchema,
                                    updateReturningBinding,
-                                   returningProjections)) {
+                                   returningProjections, s.currentDB)) {
         fallback = true;
         return false;
     }
@@ -4034,7 +3964,7 @@ bool executePreparedUpdate(const UpdateStmt& stmt, Session& s, bool& fallback,
         stmt.returningOptions, requestedTable, stmt.alias);
     std::vector<ReturningProjection> projections;
     if (!stmt.returning.empty() &&
-        !buildReturningProjections(stmt.returning, table, binding, projections)) {
+        !buildReturningProjections(stmt.returning, table, binding, projections, s.currentDB)) {
         fallback = true;
         return false;
     }
@@ -4280,7 +4210,7 @@ bool executeUpdate(const UpdateStmt& stmt, Session& s, bool& fallback) {
     if (!stmt.returning.empty() &&
         !buildReturningProjections(stmt.returning, table,
                                    updateReturningBinding,
-                                   returningProjections)) {
+                                   returningProjections, s.currentDB)) {
         fallback = true;
         return false;
     }
@@ -4601,7 +4531,7 @@ bool executeMerge(const MergeStmt& stmt, Session& s, bool& fallback) {
         }
         if (!buildReturningProjections(stmt.returning, targetSchema,
                                        mergeReturningBinding,
-                                       returningProjections)) {
+                                       returningProjections, s.currentDB)) {
             return unsupported(
                 "RETURNING supports target columns and bounded scalar expressions only");
         }
@@ -4955,7 +4885,7 @@ bool executeDeleteUsingJoin(const DeleteStmt& stmt, Session& s, bool& fallback) 
     if (!stmt.returning.empty() &&
         !buildReturningProjections(stmt.returning, targetSchema,
                                    deleteReturningBinding,
-                                   returningProjections)) {
+                                   returningProjections, s.currentDB)) {
         fallback = true;
         return false;
     }
@@ -5106,7 +5036,7 @@ bool executeDeleteUsing(const DeleteStmt& stmt, Session& s, bool& fallback) {
     if (!stmt.returning.empty() &&
         !buildReturningProjections(stmt.returning, targetSchema,
                                    deleteReturningBinding,
-                                   returningProjections)) {
+                                   returningProjections, s.currentDB)) {
         fallback = true;
         return false;
     }
@@ -5179,7 +5109,7 @@ bool executeDelete(const DeleteStmt& stmt, Session& s, bool& fallback) {
     if (!stmt.returning.empty() &&
         !buildReturningProjections(stmt.returning, table,
                                    deleteReturningBinding,
-                                   returningProjections)) {
+                                   returningProjections, s.currentDB)) {
         fallback = true;
         return false;
     }
