@@ -4,6 +4,67 @@
 
 ### Actual terminal results and eight next independent integrations
 
+### Latest terminal CASE gate and independent sequence/label/view commits
+
+ROOT078's complete58 fresh normalO2 build73985, normal repeat/all58 signature
+and binary-stamp57649 actually exit0. Frozen source SHA256 is
+`069687807be7fb311425caec3e42362a6693955adc8c8da81073b8dedb7886a6`.
+Matching69 fresh native fixtures59310 all pass/exit0. Complete34-script
+wire gate21618 exits1:33 pass/1 original complete protocol failure at
+Quant2444; the corrected exact ambiguous-ON-CONFLICT negative and qualified
+positive both pass before it. No complete protocol pass is claimed.
+Artifacts/logs: `/tmp/dbms-case-demand-integration.viBXB9hC/`,
+case-demand-combination-native.log and case-demand-combination-wire.log.
+
+After that source freeze ended, ROOT separately committed:
+
+| ROOT commit | Independent scope / private donor |
+| --- | --- |
+| 0ffe1798 | Sequence allocation storage generations survive SQL DDL rollback without overriding explicit physical restore;2d454ec9. |
+| ade264ad | Persistent last_value/is_called, true altered direction/cache/uncalled state and guarded orphan-generation cleanup;4610f2d5. |
+| a5102a58 | ALTER storage status retains shared SQLSTATE instead of genericXX000;fbbe35b3. |
+| eb131e68 | Keep exact original now-invalid SQL as negative/no-change controls; preserve repeated2200H, quoted/SEQ2/3/4/legacy and explicit physical restore;487b7caf. |
+| a2a8291b | Pure CASE/CAST/COLLATE projection labels and genuine CTE label scope;45eb0991. ELSE strong-name inheritance remains a newly reproduced separate follow-up. |
+| fa193704 | Resolved target namespace/actualschema.name VIEW metadata, quoted spelling and public-view versus real search_path/temp table shadowing;f0757cb2. |
+
+Sequence private source basis is complete58 freshO0 on4cf, not borrowed
+mutable ROOT CASE objects.14 distinct native fixtures,9 serial wire scripts,
+strict180006 matrices and4 scoped instrumented native fixtures actually pass;
+TMPDIR=/dev/shm/original15-second deadlines are explicit for final wire
+controls, while a final disk-based core matrix also passes. Original disk
+startup/CREATE timeouts and all wrong-value/state baselines remain. Public
+headers/API unchanged; not full sequence/cross-backend-cache/DDL-I/O closure.
+
+View namespace private normalO2 uses one fresh DML CPP plus57 unchanged
+current078 sources/all58 audited donor signatures/every header.38 namespace
+controls and7 matching native fixtures pass. Six-wire group9721 remains
+exit1:five pass plus one original materialized-view setup timeout; exact
+same frozen3b847fe7/original script/deadline repeat4091 exits0. Six distinct
+scripts eventually pass, not one all-green group. Unknown timing cause is
+not relabeled a production code fix. Existing unsupported view FROM/USING
+retains exact0A000/no-effects boundary, not broad writable-view closure.
+
+Current559 native/291 registered entries/58 production units. Normal
+three-CPP build39774, sole-DML build98243, repeat/all58 signatures/stamp83628
+actually exit0. Frozen
+`/tmp/dbms-sequence-label-integration.NQDV0FHY/dbms_main.sequence-label.frozen`
+SHA256 is `f7ad6b4a39fbd7dd6c1974f27e2c8fb756b511bd1175569a7fa0f0c773ff8ffa`.
+Matching85 fresh natives62258 and42 complete wire scripts83830 are live;
+source/header/test/registry freeze is active. Their runtime outcome is not
+claimed from private or previous green results.
+
+New strict18 diagnostics retain a genuine qualified materialized-view
+INSERT wrongly accepted by the current server, and WITH targets0A000 instead
+of42809. Pure-name/input errors and planned22012 must precede writability
+where actual18 requires it; no function/sequence/CTE/child effects are allowed.
+Separate readonly-target work is underway, not closed by fa193. Genuine
+Quant/SRF/NAME comparator and physical-child routing, ordinaryCASE true
+VIEW/virtual/CTE-JOIN lazy-demand/UNKNOWN metadata, ELSE strong labels,
+wide literal and geometric operator/literal gaps remain independently open.
+All older then-live labels below are historical; audit counts remain273:
+22 complete/166 partial/70 unverified/15 user-deferred. No push, active Actions
+or restart of skipped security/TDE work.
+
 Original immutablefd/23a canonical23633 has now actually exited1 after
 all540 native fixtures (537pass/3fail) and275 registered entries
 (274PASSED/1fail). TLS-stub intentional skip is one PASSED label, not TLS

@@ -2,6 +2,21 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "CASE69 native passes and34-wire33/1 terminal failure; six independent sequence-label-view integrations and matching85/42 gates",
+      "gap_ids": ["SQL-04", "SQL-07", "SQL-08", "DML-01", "DML-03", "QRY-01", "QRY-03", "TXN-01"],
+      "status": "partial",
+      "commits": ["0ffe1798", "ade264ad", "a5102a58", "eb131e68", "a2a8291b", "fa193704"],
+      "evidence": ["docs/issue-ready-source-integration.md", "docs/issue-sequence-ddl-rollback-generations.md", "docs/issue-sequence-alter-allocation-position.md", "docs/issue-alter-sequence-storage-sqlstate.md", "docs/issue-sequence-format-test-adaptation.md", "docs/issue-prepared-projection-labels.md", "docs/issue-dml-view-target-namespace.md"],
+      "tests": ["tests/sequence_ddl_rollback_generation_test.cpp", "tests/sequence_alter_position_test.cpp", "tests/sequence_alter_sqlstate_test.cpp", "tests/sequence_legacy_generation_migration_test.cpp", "tests/sequence_full_test.cpp", "tests/sequence_ddl_rollback_protocol_e2e_test.py", "tests/sequence_alter_sqlstate_protocol_e2e_test.py", "tests/prepared_projection_label_test.cpp", "tests/prepared_projection_label_protocol_e2e_test.py", "tests/dml_view_target_namespace_test.cpp"],
+      "verification": {
+        "reproduction": "Root078 normal58fresh73985/repeat58signatures57649 terminal0 frozen0696878;matching69native59310 allpass0 and34wire21618 terminal1=33pass1onlyoriginalfullQuant2444. Exactoriginalambiguous42702negative/qualifiedpositive nowbothpass. Sequence oldcounter2vs4/ALTERposition3vs1/storageXX000 and view14wrongdispatches retained actualred, not fakecounts from firstdraftunsupported expectations.",
+        "fix": "Six separate ROOT commits: nontransactional sequencegeneration; persistentcallstate/realALTER/cache; sharedALTERSQLSTATE; independentnativePG18/magic5/legacy fixtureadaptation; pureprojectionlabels; resolvedviewtargetnamespace/type. No broadsequence/view/CASE/operatorfamily closure, safetydeferredsecurityTDE unchanged.",
+        "focused_tests": "SEQown58freshO0/56identicalobjects/all100headers flags audits0;14native/9serialwire/strict180006/4scopedASan actual0, tmpfs deadline15s explicit plusfinaldiskmatrix0 andoldIO failretained. VIEW38controls/7normalO2native0 on onefreshDML+57 matching078sources/allheaders;6wiregroup9721 fails1setup timeout,5pass, unchanged frozen3b847 originalmatview repeat4091 true0. Sixdistincteventuallypass not oneallgreen group.",
+        "full_suite": "Currentfa193559native291registered58. Normal3CPP39774+1CPP98243/repeat/all58signaturesstamp83628 actual0; frozenf7ad6b4a39fbd7dd6c1974f27e2c8fb756b511bd1175569a7fa0f0c773ff8ffa. Matching85freshnative62258/42wire83830 live, source/header/tests/registryfreeze. Original540/275 full23633 terminal1=537/3native and274/1registered withTLSskip;465 C/enUS timeoutfailures retained not currentproof.",
+        "scope": "GenuinequalifiedMVINSERT accepted vsPG42809 and WITH MV0A000 remainindependentreadonly/errorpriority/noeffects task; PGUPDATE1/0 gives22012before42809. Quant75/SRF/NAME/physicalchild regression, genuineordinaryCASEVIEW/virtual/CTEJOIN demand/unknown, ELSEstronglabels,wideLiteral/geometry remainopen. Totals27322complete166partial70unverified15deferred unchanged; no push/Actions activation/deferredsecurityTDErestart."
+      }
+    },
+    {
       "issue": "Original full540/275 canonical23633 completes with exactly four retained failures",
       "gap_ids": ["SQL-04", "QRY-01", "QRY-03", "DML-01", "TXN-01"],
       "status": "partial",
