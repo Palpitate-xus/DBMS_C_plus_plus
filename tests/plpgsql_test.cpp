@@ -12,6 +12,7 @@
 #include "commands/TableManage.h"
 #include "Session.h"
 #include "catalog/type_registry.h"
+#include "expression/expr_helper.h"
 
 #include <cassert>
 #include <filesystem>
@@ -33,12 +34,16 @@ static void cleanupDb(const std::string& db) {
     std::filesystem::remove_all(db, ec);
 }
 
-// Host with only the native evaluator (no SQL execution needed for the
-// core control-flow cases).
+// No SQL statements are needed for these control-flow cases. Unsupported
+// scalar forms still need an actual evaluator: echoing expression text is
+// not evaluation, and repeated quoting can grow that text exponentially.
 static PlPgsqlHost nativeHost() {
     PlPgsqlHost h;
-    h.evalExpr = [](const std::string& e, const std::map<std::string, std::string>&) {
-        return std::optional<std::string>{e};  // echo: native path handles it
+    h.evalExpr = [](const std::string& e,
+                    const std::map<std::string, std::string>& vars) {
+        const auto result = ExprHelper::evalStringWithNulls(e, vars, {});
+        if (!result.ok) return std::optional<std::string>{};
+        return std::optional<std::string>{result.isNull ? "null" : result.value};
     };
     return h;
 }
@@ -142,14 +147,13 @@ int main() {
     std::cout << "[PLPGSQL] parameter binding OK" << std::endl;
 
     // 9. String literals in expressions and RETURN
-    assert(run("BEGIN RETURN 'hello' || ' ' || 'world'; END;") == "hello world"
-           || true);  // || supported natively? fallback: concatenation may be
-                      // host-side; accept both
+    assert(run("BEGIN RETURN 'hello' || ' ' || 'world'; END;") == "hello world");
     std::cout << "[PLPGSQL] literals OK" << std::endl;
 
     // 10. Runaway guard
-    assert(!runErr("BEGIN WHILE TRUE LOOP i := i + 1; END LOOP; END;")
-                .empty());
+    const auto runaway = runErr(
+        "DECLARE i INT := 0; BEGIN WHILE TRUE LOOP i := i + 1; END LOOP; END;");
+    assert(runaway.find("step budget exceeded") != std::string::npos);
     std::cout << "[PLPGSQL] step budget guard OK" << std::endl;
 
     // ------------------------------------------------------------------
