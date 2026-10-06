@@ -25528,8 +25528,10 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
     if (usedIndex) *usedIndex = false;
     if (scanFailed) *scanFailed = false;
     if (indexReadFailed) *indexReadFailed = false;
+    bool scanFailureDetected = false;
     auto failScan = [&]() {
         ids.clear();
+        scanFailureDetected = true;
         if (scanFailed) *scanFailed = true;
         return ids;
     };
@@ -25558,17 +25560,34 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
             dbname, tablename, condition, tbl) || hasSsiIndexPredicate;
     }
 
-    // During an overlapping transaction an index contains only the current
-    // version's RID, while an older snapshot may need the superseded heap
-    // version.  Use the heap until every transaction on this database has
-    // finished; after that, the current-version indexes are complete again.
+    // Current-version indexes cannot supply superseded heap versions for an
+    // old snapshot, an overlapping writer or our own earlier command image.
+    // An otherwise isolated, unmodified current read owner is different:
+    // ordinary SELECT now has an implicit transaction, so treating that
+    // owner as an overlap would disable every useful index probe.
+    // The allocation high-water is monotonic even for aborted transactions;
+    // fence the candidate lookup as well as checking the snapshot on entry.
+    const auto& readContext = transactionContext();
+    const uint64_t indexOwnerXid = readContext.currentTxnId;
+    const bool currentReadOwner = readContext.inTransaction &&
+        readContext.txnDB == dbname && readContext.currentTxnId != 0 &&
+        readContext.snapshotAcquired && !readContext.hasWrite &&
+        readContext.txnLog.empty() && readContext.ddlUndoActions.empty() &&
+        !readContext.transactionBackupDirty &&
+        readContext.readView.activeTxnIds.empty();
+    uint64_t indexAllocationFence = 0;
     bool indexesAreSnapshotComplete = true;
     {
         std::lock_guard<std::mutex> lock(globalTxnMutex());
+        indexAllocationFence = TxnIdGenerator::instance().maxCommittedTxId();
+        if (readContext.inTransaction &&
+            (!currentReadOwner ||
+             readContext.readView.lowLimitId != indexAllocationFence + 1))
+            indexesAreSnapshotComplete = false;
         for (const auto& [transactionId, activeDatabase] :
              activeTransactionDatabases()) {
-            (void)transactionId;
-            if (activeDatabase == dbname) {
+            if (activeDatabase == dbname &&
+                !(currentReadOwner && transactionId == readContext.currentTxnId)) {
                 indexesAreSnapshotComplete = false;
                 break;
             }
@@ -25623,6 +25642,7 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
     };
 
     if (indexesAreSnapshotComplete) {
+    const auto indexedCandidates = [&]() -> std::optional<std::set<int64_t>> {
     // Try full-text index for CONTAINS conditions
     for (const auto& c : conds) {
         if (c.op == "contains") {
@@ -25840,6 +25860,31 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
         }
     }
 
+        return std::nullopt;
+    }();
+    if (indexedCandidates) {
+        // Index corruption still fails closed. Do not hide a checked read
+        // error merely because concurrent transaction allocation changed.
+        if (scanFailureDetected) return *indexedCandidates;
+        if (!currentReadOwner) return *indexedCandidates;
+        // Reacquire the owner state: evaluating a generated/residual value
+        // can itself reach a stored routine. A same-XID write does not
+        // allocate another transaction ID, but also invalidates this proof.
+        const auto& current = transactionContext();
+        if (current.inTransaction && current.currentTxnId == indexOwnerXid &&
+            current.txnDB == dbname && !current.hasWrite &&
+            current.txnLog.empty() && current.ddlUndoActions.empty() &&
+            !current.transactionBackupDirty && current.snapshotAcquired &&
+            current.readView.activeTxnIds.empty() &&
+            current.readView.lowLimitId == indexAllocationFence + 1 &&
+            TxnIdGenerator::instance().maxCommittedTxId() == indexAllocationFence)
+            return *indexedCandidates;
+    }
+    // A new transaction may have begun, written and even rolled back before
+    // the lookup completed. Discard its possibly incomplete current-index
+    // candidates and retain the original command snapshot in the heap scan.
+    ids.clear();
+    if (usedIndex) *usedIndex = false;
     }
 
     // Full table scan via page iterator.

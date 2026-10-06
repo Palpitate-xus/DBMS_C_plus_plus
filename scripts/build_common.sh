@@ -241,6 +241,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/commit_failure_recovery_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/cold_start_transaction_backup_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/stored_function_atomicity_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/read_owner_index_snapshot_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/autocommit_deferred_constraint_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/autocommit_returning_deferred_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/foreign_key_empty_text_protocol_e2e_test.py)
