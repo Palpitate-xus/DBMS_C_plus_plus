@@ -1458,6 +1458,30 @@ ExprValue ExprEvaluator::evalUnaryOp(const UnaryOpExpr* e, const RowContext& ctx
     if (op == "+") return v;
     if (op == "-") {
         if (v.isNull) return v;
+        if (toLower(v.typeName) == "interval") {
+            const auto interval = parseIntervalInput(v.value);
+            const auto state = intervalInputSqlState(interval);
+            if (!state.empty())
+                throw DbError(state, state == "22007"
+                    ? "invalid input syntax for type interval"
+                    : "interval out of range");
+            // Calendar months/days are signed int32; time is signed int64
+            // microseconds. Check each minimum before integer negation.
+            if (interval.months == std::numeric_limits<int32_t>::lowest() ||
+                interval.days == std::numeric_limits<int32_t>::lowest() ||
+                interval.micros == std::numeric_limits<int64_t>::lowest())
+                throw DbError("22008", "interval out of range");
+            const auto months = -interval.months;
+            const auto days = -interval.days;
+            const auto micros = -interval.micros;
+            // PostgreSQL reserves this triple for positive infinity. A
+            // finite negation must not manufacture that representation.
+            if (months == std::numeric_limits<int32_t>::max() &&
+                days == std::numeric_limits<int32_t>::max() &&
+                micros == std::numeric_limits<int64_t>::max())
+                throw DbError("22008", "interval out of range");
+            return ExprValue("interval", formatIntervalInput(months, days, micros, true), false);
+        }
         if (v.value.empty()) return ExprValue(v.typeName, "0", false);
         // The positive spelling of INT_MIN needs a wider type, but the
         // negative literal itself fits int4/int8. Resolve the signed token
