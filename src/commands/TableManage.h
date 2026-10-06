@@ -18,6 +18,7 @@
 #include <shared_mutex>
 #include <thread>
 #include <tuple>
+#include <utility>
 
 #include "DateType.h"
 #include "table_schema.h"
@@ -722,6 +723,21 @@ public:
         std::vector<std::string> rows,
         const std::vector<OrderBySpec>& exprSpecs) const;
 
+    // Labels identify FROM occurrences independently of physical storage.
+    // Empty labels preserve the legacy table-qualified native API.
+    struct JoinRangeNames {
+        std::string first;
+        std::string second;
+        bool encodeColumns;
+        JoinRangeNames(std::string left = {}, std::string right = {}, bool encoded = false)
+            : first(std::move(left)), second(std::move(right)), encodeColumns(encoded) {}
+    };
+    // Encoded keys are injective and contain no SQL delimiters, including
+    // for delimited columns with spaces, quotes or dots.
+    static std::string joinRangeColumnKey(const std::string& range,
+                                          const std::string& column,
+                                          bool encoded);
+
     // JOIN query: INNER JOIN two tables on leftCol = rightCol
     std::vector<std::string> join(const std::string& dbname,
                                    const std::string& leftTable,
@@ -732,7 +748,8 @@ public:
                                    const std::set<std::string>& selectCols,
                                    std::vector<std::vector<std::string>>* structuredRows = nullptr,
                                    std::vector<std::vector<bool>>* structuredNulls = nullptr,
-                                   const std::vector<std::string>& onConditions = {});
+                                   const std::vector<std::string>& onConditions = {},
+                                   const JoinRangeNames& rangeNames = {});
 
     // LEFT JOIN: preserve all left rows, fill NULL for non-matching right
     std::vector<std::string> leftJoin(const std::string& dbname,
@@ -744,7 +761,8 @@ public:
                                        const std::set<std::string>& selectCols,
                                        std::vector<std::vector<std::string>>* structuredRows = nullptr,
                                        std::vector<std::vector<bool>>* structuredNulls = nullptr,
-                                       const std::vector<std::string>& onConditions = {});
+                                       const std::vector<std::string>& onConditions = {},
+                                       const JoinRangeNames& rangeNames = {});
 
     // RIGHT JOIN: preserve all right rows, fill NULL for non-matching left
     std::vector<std::string> rightJoin(const std::string& dbname,
@@ -756,7 +774,8 @@ public:
                                         const std::set<std::string>& selectCols,
                                         std::vector<std::vector<std::string>>* structuredRows = nullptr,
                                         std::vector<std::vector<bool>>* structuredNulls = nullptr,
-                                        const std::vector<std::string>& onConditions = {});
+                                        const std::vector<std::string>& onConditions = {},
+                                        const JoinRangeNames& rangeNames = {});
 
     // FULL OUTER JOIN: union of LEFT and RIGHT JOIN
     std::vector<std::string> fullOuterJoin(const std::string& dbname,
@@ -768,7 +787,8 @@ public:
                                             const std::set<std::string>& selectCols,
                                             std::vector<std::vector<std::string>>* structuredRows = nullptr,
                                             std::vector<std::vector<bool>>* structuredNulls = nullptr,
-                                            const std::vector<std::string>& onConditions = {});
+                                            const std::vector<std::string>& onConditions = {},
+                                            const JoinRangeNames& rangeNames = {});
 
     // CROSS JOIN: cartesian product
     std::vector<std::string> crossJoin(const std::string& dbname,
@@ -777,7 +797,8 @@ public:
                                         const std::vector<std::string>& conditions,
                                         const std::set<std::string>& selectCols,
                                         std::vector<std::vector<std::string>>* structuredRows = nullptr,
-                                        std::vector<std::vector<bool>>* structuredNulls = nullptr);
+                                        std::vector<std::vector<bool>>* structuredNulls = nullptr,
+                                        const JoinRangeNames& rangeNames = {});
 
     // Transaction operations
     bool inTransaction() const { return transactionContext().inTransaction; }

@@ -37675,9 +37675,63 @@ std::vector<std::string> StorageEngine::sortByExpression(
 // JOIN implementation
 // ========================================================================
 
+std::string StorageEngine::joinRangeColumnKey(const std::string& range,
+                                              const std::string& column,
+                                              bool encoded) {
+    if (!encoded) return range + "." + column;
+    static constexpr char hex[] = "0123456789abcdef";
+    std::string key = range + "._";
+    for (unsigned char byte : column) {
+        key += hex[byte >> 4];
+        key += hex[byte & 15];
+    }
+    return key;
+}
+
 static bool isJoinComparisonOperator(const std::string& op) {
     return op == "=" || op == "!=" || op == "<>" || op == "<" ||
            op == ">" || op == "<=" || op == ">=";
+}
+
+// Preserve RHS identity before the legacy decoder removes literal quotes.
+// A datum equal to a range-qualified key is still a datum, not a column.
+// Keep this carrier private: the ordinary Condition/native API stays intact.
+struct JoinCondition : StorageEngine::Condition {
+    bool valueIsLiteral = false;
+    bool valueIsNull = false;
+};
+
+static std::vector<JoinCondition> parseJoinConditions(
+    const std::vector<std::string>& inputs) {
+    std::vector<JoinCondition> result;
+    for (const auto& raw : inputs) {
+        auto conditions = StorageEngine::parseConditions({raw});
+        for (auto& condition : conditions) {
+            JoinCondition parsed;
+            static_cast<StorageEngine::Condition&>(parsed) = std::move(condition);
+            if (isJoinComparisonOperator(parsed.op)) {
+                const bool apiValue = raw.rfind("apicond ", 0) == 0;
+                const std::string input = apiValue ? raw.substr(8) : raw;
+                const size_t space = input.find(' ');
+                if (space != std::string::npos) {
+                    SQLParser parser;
+                    const auto rhs = parser.parse("SELECT " + trim(input.substr(space + 1)));
+                    const auto* select = rhs.success
+                        ? dynamic_cast<const SelectStmt*>(rhs.stmt.get()) : nullptr;
+                    const Expr* operand = select && select->selectList.size() == 1
+                        ? select->selectList[0].expr.get() : nullptr;
+                    if (const auto* sign = dynamic_cast<const UnaryOpExpr*>(operand)) {
+                        if (sign->op == "+" || sign->op == "-") operand = sign->operand.get();
+                    }
+                    const auto* literal = dynamic_cast<const LiteralExpr*>(operand);
+                    parsed.valueIsLiteral = apiValue || literal;
+                    parsed.valueIsNull = !apiValue && literal && literal->value == "null";
+                }
+            }
+            result.push_back(std::move(parsed));
+        }
+    }
+    return result;
 }
 
 static bool joinValuePredicateMatches(
@@ -37764,14 +37818,14 @@ static bool joinValuePredicateMatches(
     return false;
 }
 
-static std::vector<StorageEngine::Condition> parseJoinOnConditions(
+static std::vector<JoinCondition> parseJoinOnConditions(
     const std::vector<std::string>& onConditions) {
     std::vector<std::string> ordinary;
-    std::vector<StorageEngine::Condition> constants;
+    std::vector<JoinCondition> constants;
     for (const auto& condition : onConditions) {
         if (condition == "__join_on_true__" ||
             condition == "__join_on_false__") {
-            StorageEngine::Condition parsed;
+            JoinCondition parsed;
             parsed.op = condition == "__join_on_true__"
                 ? "jointrue" : "joinfalse";
             constants.push_back(std::move(parsed));
@@ -37779,7 +37833,7 @@ static std::vector<StorageEngine::Condition> parseJoinOnConditions(
             ordinary.push_back(condition);
         }
     }
-    auto parsed = StorageEngine::parseConditions(ordinary);
+    auto parsed = parseJoinConditions(ordinary);
     parsed.insert(parsed.end(), constants.begin(), constants.end());
     return parsed;
 }
@@ -37794,7 +37848,10 @@ std::vector<std::string> StorageEngine::join(
     const std::set<std::string>& selectCols,
     std::vector<std::vector<std::string>>* structuredRows,
     std::vector<std::vector<bool>>* structuredNulls,
-    const std::vector<std::string>& onConditions) {
+    const std::vector<std::string>& onConditions,
+    const JoinRangeNames& rangeNames) {
+    const std::string& leftRange = rangeNames.first.empty() ? leftTable : rangeNames.first;
+    const std::string& rightRange = rangeNames.second.empty() ? rightTable : rangeNames.second;
     std::vector<std::string> result;
     if (structuredRows) structuredRows->clear();
     if (structuredNulls) structuredNulls->clear();
@@ -37808,7 +37865,7 @@ std::vector<std::string> StorageEngine::join(
         }
         filters.insert(filters.end(), conditions.begin(), conditions.end());
         return crossJoin(dbname, leftTable, rightTable, filters, selectCols,
-                         structuredRows, structuredNulls);
+                         structuredRows, structuredNulls, rangeNames);
     }
 
     // Lock both tables in alphabetical order to avoid deadlock
@@ -37878,18 +37935,18 @@ std::vector<std::string> StorageEngine::join(
     std::map<std::string, ColInfo> colMap;
     for (size_t i = 0; i < leftTbl.len; ++i) {
         colMap[leftTbl.cols[i].dataName] = {true, i};
-        colMap[leftTable + "." + leftTbl.cols[i].dataName] = {true, i};
+        colMap[joinRangeColumnKey(leftRange, leftTbl.cols[i].dataName, rangeNames.encodeColumns)] = {true, i};
     }
     for (size_t i = 0; i < rightTbl.len; ++i) {
         std::string simple = rightTbl.cols[i].dataName;
         if (colMap.find(simple) == colMap.end()) {
             colMap[simple] = {false, i};
         }
-        colMap[rightTable + "." + simple] = {false, i};
+        colMap[joinRangeColumnKey(rightRange, simple, rangeNames.encodeColumns)] = {false, i};
     }
 
     // Evaluate a condition on left/right row pair
-    auto evalCond = [&](const Condition& c, const JoinRow& leftRow,
+    auto evalCond = [&](const JoinCondition& c, const JoinRow& leftRow,
                         const JoinRow& rightRow) -> bool {
         if (c.op == "jointrue" || c.op == "joinfalse")
             return c.op == "jointrue";
@@ -37904,8 +37961,8 @@ std::vector<std::string> StorageEngine::join(
             row, tbl, tableName, it->second.colIdx, &valueIsNull);
         const Column& col = tbl.cols[it->second.colIdx];
         std::string comparisonValue = c.value;
-        bool comparisonIsNull = false;
-        if (isJoinComparisonOperator(c.op)) {
+        bool comparisonIsNull = c.valueIsNull;
+        if (isJoinComparisonOperator(c.op) && !c.valueIsLiteral) {
             auto comparison = colMap.find(c.value);
             if (comparison != colMap.end()) {
                 const TableSchema& comparisonTable =
@@ -37923,12 +37980,12 @@ std::vector<std::string> StorageEngine::join(
             c, col, val, valueIsNull, comparisonValue, comparisonIsNull);
     };
 
-    auto conds = parseConditions(conditions);
+    auto conds = parseJoinConditions(conditions);
     const auto extraOnConds = parseJoinOnConditions(onConditions);
     conds.insert(conds.end(), extraOnConds.begin(), extraOnConds.end());
 
     // Predicate pushdown: classify conditions by which table they reference
-    std::vector<Condition> leftConds, rightConds, joinConds;
+    std::vector<JoinCondition> leftConds, rightConds, joinConds;
     for (const auto& c : conds) {
         bool onLeft = (colMap.find(c.colName) != colMap.end() && colMap.at(c.colName).isLeft);
         bool onRight = false;
@@ -37937,14 +37994,14 @@ std::vector<std::string> StorageEngine::join(
         // Check if value references a column from the other table
         bool valIsCol = false;
         auto vit = colMap.find(c.value);
-        if (vit != colMap.end()) valIsCol = true;
+        if (!c.valueIsLiteral && vit != colMap.end()) valIsCol = true;
         if (onLeft && !valIsCol) leftConds.push_back(c);
         else if (onRight && !valIsCol) rightConds.push_back(c);
         else joinConds.push_back(c);
     }
 
     // Apply predicate pushdown: filter rows before JOIN
-    auto evalSingleCond = [&](const Condition& c, const JoinRow& row,
+    auto evalSingleCond = [&](const JoinCondition& c, const JoinRow& row,
                                const TableSchema& tbl,
                                const std::string& tableName) -> bool {
         auto it = colMap.find(c.colName);
@@ -37954,7 +38011,7 @@ std::vector<std::string> StorageEngine::join(
             row, tbl, tableName, it->second.colIdx, &valueIsNull);
         const Column& col = tbl.cols[it->second.colIdx];
         return joinValuePredicateMatches(
-            c, col, val, valueIsNull, c.value);
+            c, col, val, valueIsNull, c.value, c.valueIsNull);
     };
 
     if (!leftConds.empty()) {
@@ -38033,7 +38090,7 @@ std::vector<std::string> StorageEngine::join(
             std::vector<std::string> cells;
             std::vector<bool> nulls;
             for (size_t i = 0; i < leftTbl.len; ++i) {
-                std::string fullName = leftTable + "." + leftTbl.cols[i].dataName;
+                std::string fullName = joinRangeColumnKey(leftRange, leftTbl.cols[i].dataName, rangeNames.encodeColumns);
                 bool include = selectCols.empty();
                 if (!include) {
                     if (selectCols.find(leftTbl.cols[i].dataName) != selectCols.end() ||
@@ -38049,7 +38106,7 @@ std::vector<std::string> StorageEngine::join(
                 nulls.push_back(valueIsNull);
             }
             for (size_t i = 0; i < rightTbl.len; ++i) {
-                std::string fullName = rightTable + "." + rightTbl.cols[i].dataName;
+                std::string fullName = joinRangeColumnKey(rightRange, rightTbl.cols[i].dataName, rangeNames.encodeColumns);
                 bool include = selectCols.empty();
                 if (!include) {
                     if (selectCols.find(rightTbl.cols[i].dataName) != selectCols.end() ||
@@ -38090,7 +38147,10 @@ std::vector<std::string> StorageEngine::leftJoin(
     const std::set<std::string>& selectCols,
     std::vector<std::vector<std::string>>* structuredRows,
     std::vector<std::vector<bool>>* structuredNulls,
-    const std::vector<std::string>& onConditions) {
+    const std::vector<std::string>& onConditions,
+    const JoinRangeNames& rangeNames) {
+    const std::string& leftRange = rangeNames.first.empty() ? leftTable : rangeNames.first;
+    const std::string& rightRange = rangeNames.second.empty() ? rightTable : rangeNames.second;
     std::vector<std::string> result;
     if (structuredRows) structuredRows->clear();
     if (structuredNulls) structuredNulls->clear();
@@ -38155,15 +38215,15 @@ std::vector<std::string> StorageEngine::leftJoin(
     std::map<std::string, ColInfo> colMap;
     for (size_t i = 0; i < leftTbl.len; ++i) {
         colMap[leftTbl.cols[i].dataName] = {true, i};
-        colMap[leftTable + "." + leftTbl.cols[i].dataName] = {true, i};
+        colMap[joinRangeColumnKey(leftRange, leftTbl.cols[i].dataName, rangeNames.encodeColumns)] = {true, i};
     }
     for (size_t i = 0; i < rightTbl.len; ++i) {
         std::string simple = rightTbl.cols[i].dataName;
         if (colMap.find(simple) == colMap.end()) colMap[simple] = {false, i};
-        colMap[rightTable + "." + simple] = {false, i};
+        colMap[joinRangeColumnKey(rightRange, simple, rangeNames.encodeColumns)] = {false, i};
     }
 
-    auto evalCond = [&](const Condition& c, const JoinRow* leftRow,
+    auto evalCond = [&](const JoinCondition& c, const JoinRow* leftRow,
                         const JoinRow* rightRow) -> bool {
         if (c.op == "jointrue" || c.op == "joinfalse")
             return c.op == "jointrue";
@@ -38173,7 +38233,7 @@ std::vector<std::string> StorageEngine::leftJoin(
         const JoinRow* row = it->second.isLeft ? leftRow : rightRow;
         const Column& col = tbl.cols[it->second.colIdx];
         if (!row) {
-            return joinValuePredicateMatches(c, col, {}, true, c.value);
+            return joinValuePredicateMatches(c, col, {}, true, c.value, c.valueIsNull);
         }
         const std::string& tableName =
             it->second.isLeft ? leftTable : rightTable;
@@ -38181,8 +38241,8 @@ std::vector<std::string> StorageEngine::leftJoin(
         std::string val = logicalValue(
             *row, tbl, tableName, it->second.colIdx, &valueIsNull);
         std::string comparisonValue = c.value;
-        bool comparisonIsNull = false;
-        if (isJoinComparisonOperator(c.op)) {
+        bool comparisonIsNull = c.valueIsNull;
+        if (isJoinComparisonOperator(c.op) && !c.valueIsLiteral) {
             auto comparison = colMap.find(c.value);
             if (comparison != colMap.end()) {
                 const JoinRow* comparisonRow = comparison->second.isLeft
@@ -38204,7 +38264,7 @@ std::vector<std::string> StorageEngine::leftJoin(
             c, col, val, valueIsNull, comparisonValue, comparisonIsNull);
     };
 
-    auto conds = parseConditions(conditions);
+    auto conds = parseJoinConditions(conditions);
     const auto onConds = parseJoinOnConditions(onConditions);
 
     size_t leftColIdx = leftTbl.len;
@@ -38236,7 +38296,7 @@ std::vector<std::string> StorageEngine::leftJoin(
                          std::vector<bool>& nulls) -> std::string {
         std::string rowStr;
         for (size_t i = 0; i < leftTbl.len; ++i) {
-            std::string fullName = leftTable + "." + leftTbl.cols[i].dataName;
+            std::string fullName = joinRangeColumnKey(leftRange, leftTbl.cols[i].dataName, rangeNames.encodeColumns);
             bool include = selectCols.empty() || selectCols.find(leftTbl.cols[i].dataName) != selectCols.end() || selectCols.find(fullName) != selectCols.end();
             if (!include) continue;
             bool valueIsNull = false;
@@ -38248,7 +38308,7 @@ std::vector<std::string> StorageEngine::leftJoin(
             nulls.push_back(valueIsNull);
         }
         for (size_t i = 0; i < rightTbl.len; ++i) {
-            std::string fullName = rightTable + "." + rightTbl.cols[i].dataName;
+            std::string fullName = joinRangeColumnKey(rightRange, rightTbl.cols[i].dataName, rangeNames.encodeColumns);
             bool include = selectCols.empty() || selectCols.find(rightTbl.cols[i].dataName) != selectCols.end() || selectCols.find(fullName) != selectCols.end();
             if (!include) continue;
             if (rightNull) {
@@ -38340,7 +38400,10 @@ std::vector<std::string> StorageEngine::rightJoin(
     const std::set<std::string>& selectCols,
     std::vector<std::vector<std::string>>* structuredRows,
     std::vector<std::vector<bool>>* structuredNulls,
-    const std::vector<std::string>& onConditions) {
+    const std::vector<std::string>& onConditions,
+    const JoinRangeNames& rangeNames) {
+    const std::string& leftRange = rangeNames.first.empty() ? leftTable : rangeNames.first;
+    const std::string& rightRange = rangeNames.second.empty() ? rightTable : rangeNames.second;
     std::vector<std::string> result;
     if (structuredRows) structuredRows->clear();
     if (structuredNulls) structuredNulls->clear();
@@ -38405,15 +38468,15 @@ std::vector<std::string> StorageEngine::rightJoin(
     std::map<std::string, ColInfo> colMap;
     for (size_t i = 0; i < leftTbl.len; ++i) {
         colMap[leftTbl.cols[i].dataName] = {true, i};
-        colMap[leftTable + "." + leftTbl.cols[i].dataName] = {true, i};
+        colMap[joinRangeColumnKey(leftRange, leftTbl.cols[i].dataName, rangeNames.encodeColumns)] = {true, i};
     }
     for (size_t i = 0; i < rightTbl.len; ++i) {
         std::string simple = rightTbl.cols[i].dataName;
         if (colMap.find(simple) == colMap.end()) colMap[simple] = {false, i};
-        colMap[rightTable + "." + simple] = {false, i};
+        colMap[joinRangeColumnKey(rightRange, simple, rangeNames.encodeColumns)] = {false, i};
     }
 
-    auto evalCond = [&](const Condition& c, const JoinRow* leftRow,
+    auto evalCond = [&](const JoinCondition& c, const JoinRow* leftRow,
                         const JoinRow* rightRow) -> bool {
         if (c.op == "jointrue" || c.op == "joinfalse")
             return c.op == "jointrue";
@@ -38423,7 +38486,7 @@ std::vector<std::string> StorageEngine::rightJoin(
         const JoinRow* row = it->second.isLeft ? leftRow : rightRow;
         const Column& col = tbl.cols[it->second.colIdx];
         if (!row) {
-            return joinValuePredicateMatches(c, col, {}, true, c.value);
+            return joinValuePredicateMatches(c, col, {}, true, c.value, c.valueIsNull);
         }
         const std::string& tableName =
             it->second.isLeft ? leftTable : rightTable;
@@ -38431,8 +38494,8 @@ std::vector<std::string> StorageEngine::rightJoin(
         std::string val = logicalValue(
             *row, tbl, tableName, it->second.colIdx, &valueIsNull);
         std::string comparisonValue = c.value;
-        bool comparisonIsNull = false;
-        if (isJoinComparisonOperator(c.op)) {
+        bool comparisonIsNull = c.valueIsNull;
+        if (isJoinComparisonOperator(c.op) && !c.valueIsLiteral) {
             auto comparison = colMap.find(c.value);
             if (comparison != colMap.end()) {
                 const JoinRow* comparisonRow = comparison->second.isLeft
@@ -38454,7 +38517,7 @@ std::vector<std::string> StorageEngine::rightJoin(
             c, col, val, valueIsNull, comparisonValue, comparisonIsNull);
     };
 
-    auto conds = parseConditions(conditions);
+    auto conds = parseJoinConditions(conditions);
     const auto onConds = parseJoinOnConditions(onConditions);
 
     size_t leftColIdx = leftTbl.len;
@@ -38486,7 +38549,7 @@ std::vector<std::string> StorageEngine::rightJoin(
                          std::vector<bool>& nulls) -> std::string {
         std::string rowStr;
         for (size_t i = 0; i < leftTbl.len; ++i) {
-            std::string fullName = leftTable + "." + leftTbl.cols[i].dataName;
+            std::string fullName = joinRangeColumnKey(leftRange, leftTbl.cols[i].dataName, rangeNames.encodeColumns);
             bool include = selectCols.empty() || selectCols.find(leftTbl.cols[i].dataName) != selectCols.end() || selectCols.find(fullName) != selectCols.end();
             if (!include) continue;
             if (leftNull) {
@@ -38504,7 +38567,7 @@ std::vector<std::string> StorageEngine::rightJoin(
             nulls.push_back(valueIsNull);
         }
         for (size_t i = 0; i < rightTbl.len; ++i) {
-            std::string fullName = rightTable + "." + rightTbl.cols[i].dataName;
+            std::string fullName = joinRangeColumnKey(rightRange, rightTbl.cols[i].dataName, rangeNames.encodeColumns);
             bool include = selectCols.empty() || selectCols.find(rightTbl.cols[i].dataName) != selectCols.end() || selectCols.find(fullName) != selectCols.end();
             if (!include) continue;
             bool valueIsNull = false;
@@ -38586,7 +38649,8 @@ std::vector<std::string> StorageEngine::fullOuterJoin(
     const std::set<std::string>& selectCols,
     std::vector<std::vector<std::string>>* structuredRows,
     std::vector<std::vector<bool>>* structuredNulls,
-    const std::vector<std::string>& onConditions) {
+    const std::vector<std::string>& onConditions,
+    const JoinRangeNames& rangeNames) {
     // FULL OUTER JOIN uses bag semantics.  LEFT and RIGHT each contain the
     // matched rows, so subtract exactly the INNER multiplicity from RIGHT
     // before appending it.  Use the structured identity: display text can
@@ -38595,13 +38659,13 @@ std::vector<std::string> StorageEngine::fullOuterJoin(
     std::vector<std::vector<bool>> leftNulls, rightNulls, innerNulls;
     auto leftResult = leftJoin(
         dbname, leftTable, rightTable, leftCol, rightCol, conditions, selectCols,
-        &leftCells, &leftNulls, onConditions);
+        &leftCells, &leftNulls, onConditions, rangeNames);
     auto rightResult = rightJoin(
         dbname, leftTable, rightTable, leftCol, rightCol, conditions, selectCols,
-        &rightCells, &rightNulls, onConditions);
+        &rightCells, &rightNulls, onConditions, rangeNames);
     join(
         dbname, leftTable, rightTable, leftCol, rightCol, conditions, selectCols,
-        &innerCells, &innerNulls, onConditions);
+        &innerCells, &innerNulls, onConditions, rangeNames);
     auto rowIdentity = [](const std::vector<std::string>& cells,
                           const std::vector<bool>& nulls) {
         std::string key;
@@ -38640,7 +38704,10 @@ std::vector<std::string> StorageEngine::crossJoin(
     const std::vector<std::string>& conditions,
     const std::set<std::string>& selectCols,
     std::vector<std::vector<std::string>>* structuredRows,
-    std::vector<std::vector<bool>>* structuredNulls) {
+    std::vector<std::vector<bool>>* structuredNulls,
+    const JoinRangeNames& rangeNames) {
+    const std::string& leftRange = rangeNames.first.empty() ? leftTable : rangeNames.first;
+    const std::string& rightRange = rangeNames.second.empty() ? rightTable : rangeNames.second;
     std::vector<std::string> result;
     if (structuredRows) structuredRows->clear();
     if (structuredNulls) structuredNulls->clear();
@@ -38699,21 +38766,21 @@ std::vector<std::string> StorageEngine::crossJoin(
             row.data, table, columnIndex, dbname, true, valueIsNull);
     };
 
-    auto conds = parseConditions(conditions);
+    auto conds = parseJoinConditions(conditions);
 
     struct ColInfo { bool isLeft; size_t colIdx; };
     std::map<std::string, ColInfo> colMap;
     for (size_t i = 0; i < leftTbl.len; ++i) {
         colMap[leftTbl.cols[i].dataName] = {true, i};
-        colMap[leftTable + "." + leftTbl.cols[i].dataName] = {true, i};
+        colMap[joinRangeColumnKey(leftRange, leftTbl.cols[i].dataName, rangeNames.encodeColumns)] = {true, i};
     }
     for (size_t i = 0; i < rightTbl.len; ++i) {
         std::string simple = rightTbl.cols[i].dataName;
         if (colMap.find(simple) == colMap.end()) colMap[simple] = {false, i};
-        colMap[rightTable + "." + simple] = {false, i};
+        colMap[joinRangeColumnKey(rightRange, simple, rangeNames.encodeColumns)] = {false, i};
     }
 
-    auto evalCond = [&](const Condition& c, const JoinRow& leftRow,
+    auto evalCond = [&](const JoinCondition& c, const JoinRow& leftRow,
                         const JoinRow& rightRow) -> bool {
         if (c.op == "jointrue" || c.op == "joinfalse")
             return c.op == "jointrue";
@@ -38728,8 +38795,8 @@ std::vector<std::string> StorageEngine::crossJoin(
             row, tbl, tableName, it->second.colIdx, &valueIsNull);
         const Column& col = tbl.cols[it->second.colIdx];
         std::string comparisonValue = c.value;
-        bool comparisonIsNull = false;
-        if (isJoinComparisonOperator(c.op)) {
+        bool comparisonIsNull = c.valueIsNull;
+        if (isJoinComparisonOperator(c.op) && !c.valueIsLiteral) {
             auto comparison = colMap.find(c.value);
             if (comparison != colMap.end()) {
                 const TableSchema& comparisonTable =
@@ -38758,7 +38825,7 @@ std::vector<std::string> StorageEngine::crossJoin(
             std::vector<std::string> cells;
             std::vector<bool> nulls;
             for (size_t i = 0; i < leftTbl.len; ++i) {
-                std::string fullName = leftTable + "." + leftTbl.cols[i].dataName;
+                std::string fullName = joinRangeColumnKey(leftRange, leftTbl.cols[i].dataName, rangeNames.encodeColumns);
                 bool include = selectCols.empty() || selectCols.find(leftTbl.cols[i].dataName) != selectCols.end() || selectCols.find(fullName) != selectCols.end();
                 if (!include) continue;
                 bool valueIsNull = false;
@@ -38770,7 +38837,7 @@ std::vector<std::string> StorageEngine::crossJoin(
                 nulls.push_back(valueIsNull);
             }
             for (size_t i = 0; i < rightTbl.len; ++i) {
-                std::string fullName = rightTable + "." + rightTbl.cols[i].dataName;
+                std::string fullName = joinRangeColumnKey(rightRange, rightTbl.cols[i].dataName, rangeNames.encodeColumns);
                 bool include = selectCols.empty() || selectCols.find(rightTbl.cols[i].dataName) != selectCols.end() || selectCols.find(fullName) != selectCols.end();
                 if (!include) continue;
                 bool valueIsNull = false;

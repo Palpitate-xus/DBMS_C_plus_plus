@@ -9938,7 +9938,7 @@ static string modifyLogic(const string& logic) {
         for (const char* p : mergedPfx) {
             size_t pl = strlen(p);
             if (logic.size() > pl + 1 && logic.compare(0, pl, p) == 0 &&
-                logic[pl] != ' ' && isalnum(static_cast<unsigned char>(logic[pl]))) {
+                logic[pl] != ' ' && dbms::sqlIdentifierContinuation(static_cast<unsigned char>(logic[pl]))) {
                 return logic;
             }
         }
@@ -12875,8 +12875,73 @@ static std::string materializeRecursiveCte(
 // Forward declaration for CTE DML support
 bool execute(const std::string& rawSql, Session& s);
 
-// Process CTEs (WITH clause): WITH cte AS (SELECT ...) [, ...] SELECT ...
-// Returns modified SQL with CTE references replaced by temp table names.
+// Bind qualified predicate references in one pass over the original SQL.
+// Replacements must not be rescanned: a user's alias may equal an internal
+// range label. Quoted identifiers are names, quoted values remain values.
+static string rewriteJoinQualifierKeys(const string& sql,
+                                       const map<string, string>& labels,
+                                       bool encodeColumns) {
+    const auto protectedBytes = dbms::sqlProtectedBytes(sql);
+    const auto identifierStart = [](unsigned char ch) {
+        return isalpha(ch) || ch == '_' || ch >= 0x80;
+    };
+    const auto identifierEnd = [&](size_t start) {
+        size_t end = start;
+        if (sql[start] == '"') {
+            ++end;
+            while (end < sql.size()) {
+                if (sql[end++] != '"') continue;
+                if (end < sql.size() && sql[end] == '"') ++end;
+                else break;
+            }
+        } else {
+            while (end < sql.size() && dbms::sqlIdentifierContinuation(
+                       static_cast<unsigned char>(sql[end]))) ++end;
+        }
+        return end;
+    };
+    const auto afterSpace = [&](size_t at) {
+        while (at < sql.size() && isspace(static_cast<unsigned char>(sql[at]))) ++at;
+        return at;
+    };
+    string result;
+    size_t copied = 0;
+    for (size_t at = 0; at < sql.size();) {
+        if (protectedBytes[at] && sql[at] != '"') {
+            do { ++at; } while (at < sql.size() && protectedBytes[at]);
+            continue;
+        }
+        if (sql[at] != '"' && !identifierStart(static_cast<unsigned char>(sql[at]))) {
+            ++at;
+            continue;
+        }
+        const size_t end = identifierEnd(at);
+        const size_t dot = afterSpace(end);
+        const size_t column = dot < sql.size() && sql[dot] == '.'
+            ? afterSpace(dot + 1) : sql.size();
+        size_t previous = at;
+        while (previous && isspace(static_cast<unsigned char>(sql[previous - 1]))) --previous;
+        if ((!previous || sql[previous - 1] != '.') && column < sql.size() &&
+            (sql[column] == '"' || identifierStart(static_cast<unsigned char>(sql[column])))) {
+            const size_t columnEnd = identifierEnd(column);
+            const size_t afterColumn = afterSpace(columnEnd);
+            const auto label = labels.find(decodeQuotedIdentifier(sql.substr(at, end - at)));
+            // Qualified function names are not range-column references.
+            if (label != labels.end() && (afterColumn == sql.size() || sql[afterColumn] != '(')) {
+                result.append(sql, copied, at - copied);
+                result += dbms::StorageEngine::joinRangeColumnKey(label->second,
+                    decodeQuotedIdentifier(sql.substr(column, columnEnd - column)), encodeColumns);
+                copied = columnEnd;
+            }
+        }
+        at = end;
+    }
+    result.append(sql, copied, sql.size() - copied);
+    return result;
+}
+
+// Materialize leading WITH definitions and bind their logical relations in
+// the current query frame. Return the main query with WITH removed.
 static std::string processCTEs(const std::string& sql, Session& s, bool& failed) {
     failed = false;
     std::string result = sql;
@@ -25035,6 +25100,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 // Remember original ON column per pending index for naming.
                 // Intermediate table columns: concatenation of source columns.
                 // Build initial join result.
+                const dbms::StorageEngine::JoinRangeNames stageRanges{
+                    "__join_left", "__join_right", true};
                 auto doJoin = [&](const string& lt, const string& rt,
                                   const string& lc, const string& rc,
                                   const string& type,
@@ -25044,21 +25111,22 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     if (type == "left")
                         return g_engine.leftJoin(
                             s.currentDB, lt, rt, lc, rc, {}, {}, cells, nulls,
-                            onConditions);
+                            onConditions, stageRanges);
                     if (type == "right")
                         return g_engine.rightJoin(
                             s.currentDB, lt, rt, lc, rc, {}, {}, cells, nulls,
-                            onConditions);
+                            onConditions, stageRanges);
                     if (type == "full")
                         return g_engine.fullOuterJoin(
                             s.currentDB, lt, rt, lc, rc, {}, {}, cells, nulls,
-                            onConditions);
+                            onConditions, stageRanges);
                     if (type == "cross")
                         return g_engine.crossJoin(
-                            s.currentDB, lt, rt, onConditions, {}, cells, nulls);
+                            s.currentDB, lt, rt, onConditions, {}, cells, nulls,
+                            stageRanges);
                     return g_engine.join(
                         s.currentDB, lt, rt, lc, rc, {}, {}, cells, nulls,
-                        onConditions);
+                        onConditions, stageRanges);
                 };
                 // column names of the first pair's result (left cols + right cols)
                 std::vector<string> interCols;
@@ -25164,7 +25232,12 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         if (!resolveMultiOnColumn(ref, relation, column,
                                                   error, sqlState)) return false;
                         if (relation == rightSource) {
-                            qualified = rightInputName + "." + column;
+                            if (pending[relation].name != rightInputName) {
+                                error = "JOIN ON column is not available in its right input";
+                                sqlState = "0A000";
+                                return false;
+                            }
+                            qualified = dbms::StorageEngine::joinRangeColumnKey(stageRanges.second, column, true);
                             return true;
                         }
                         if (std::find(leftSources.begin(), leftSources.end(),
@@ -25182,7 +25255,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                 sqlState = "0A000";
                                 return false;
                             }
-                            qualified = leftInputName + "." + mapped->second;
+                            qualified = dbms::StorageEngine::joinRangeColumnKey(stageRanges.first, mapped->second, true);
                         } else {
                             if (pending[relation].name != leftInputName) {
                                 error = "JOIN ON column is not available in its "
@@ -25190,7 +25263,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                 sqlState = "0A000";
                                 return false;
                             }
-                            qualified = leftInputName + "." + column;
+                            qualified = dbms::StorageEngine::joinRangeColumnKey(stageRanges.first, column, true);
                         }
                         return true;
                     };
@@ -25322,8 +25395,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             leftColumn = previousOutput->physicalName;
                         }
                         conditions.push_back(
-                            "=" + leftInputName + "." + leftColumn + " " +
-                            rightInputName + "." + name);
+                            "=" + dbms::StorageEngine::joinRangeColumnKey(leftInputName, leftColumn, true) + " " +
+                            dbms::StorageEngine::joinRangeColumnKey(rightInputName, name, true));
                     }
                     return true;
                 };
@@ -25342,7 +25415,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         firstOnConditions)) return true;
                 if (hasUsingJoin &&
                     !appendUsingResidualConditions(
-                        0, pending[bestI].name, pending[bestJ].name,
+                        0, stageRanges.first, stageRanges.second,
                         firstOnConditions)) {
                     cout << "ERROR: invalid composite JOIN USING key "
                             "(SQLSTATE XX000)" << endl;
@@ -25588,8 +25661,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             extraOnConditions)) return true;
                     if (hasUsingJoin &&
                         !appendUsingResidualConditions(
-                            stageJoinIndex, interActual,
-                            pending[pickIdx].name, extraOnConditions)) {
+                            stageJoinIndex, stageRanges.first,
+                            stageRanges.second, extraOnConditions)) {
                         cout << "ERROR: invalid composite JOIN USING key "
                                 "(SQLSTATE XX000)" << endl;
                         return true;
@@ -26950,6 +27023,22 @@ static bool executeInternal(const string& rawSql, Session& s) {
             if (!isTempTable(s, leftTableName) && !checkSelectColumnPermission(s, leftTableName, columns)) return true;
             if (!isTempTable(s, rightTableName) && !checkSelectColumnPermission(s, rightTableName, columns)) return true;
 
+            auto visibleRangeName = [](const string& table, const string& alias) {
+                if (!alias.empty()) return decodeQuotedIdentifier(alias);
+                dbms::CatalogManager::QualifiedName parsed;
+                return dbms::CatalogManager::parseQualifiedName(table, parsed, true)
+                    ? parsed.name : table;
+            };
+            const string leftPrefix = visibleRangeName(leftTableName, leftAlias);
+            const string rightPrefix = visibleRangeName(rightTableName, rightAlias);
+            if (leftPrefix == rightPrefix)
+                throw dbms::DbError("42712", "table name \"" + leftPrefix + "\" specified more than once");
+            const dbms::StorageEngine::JoinRangeNames rangeNames{"__join_left", "__join_right", true};
+            const string& leftRange = rangeNames.first;
+            const string& rightRange = rangeNames.second;
+            TableSchema leftTbl = g_engine.getTableSchema(s.currentDB, leftTable);
+            TableSchema rightTbl = g_engine.getTableSchema(s.currentDB, rightTable);
+
             bool selectAll = (columns == "*");
             auto normalizeJoinColumn = [&](string column) {
                 column = trim(column);
@@ -26965,12 +27054,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 if (ref->table.empty()) return ref->column;
                 const string& qualifier = ref->table;
                 const string& name = ref->column;
-                if ((!leftAlias.empty() && qualifier == leftAlias) ||
-                    (leftAlias.empty() && qualifier == leftTableName))
-                    return leftTable + "." + name;
-                if ((!rightAlias.empty() && qualifier == rightAlias) ||
-                    (rightAlias.empty() && qualifier == rightTableName))
-                    return rightTable + "." + name;
+                if (qualifier == leftPrefix) return dbms::StorageEngine::joinRangeColumnKey(leftRange, name, true);
+                if (qualifier == rightPrefix) return dbms::StorageEngine::joinRangeColumnKey(rightRange, name, true);
                 return column;
             };
             vector<string> requestedCols;
@@ -26998,6 +27083,43 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         outputName = decodeQuotedIdentifier(
                             trim(expression.substr(asPos + 2)));
                         expression = trim(expression.substr(0, asPos));
+                    }
+                    dbms::SQLParser starParser;
+                    const auto starParsed = starParser.parse("SELECT " + expression);
+                    const auto* starSelect = starParsed.success
+                        ? dynamic_cast<const dbms::SelectStmt*>(starParsed.stmt.get()) : nullptr;
+                    const auto* star = starSelect && starSelect->selectList.size() == 1
+                        ? dynamic_cast<const dbms::ColumnRefExpr*>(starSelect->selectList[0].expr.get()) : nullptr;
+                    if (expression == "*" || (star && star->column == "*")) {
+                        if (!outputName.empty())
+                            throw dbms::DbError("42601", "JOIN star expansion cannot have a column alias");
+                        if (star && !star->schema.empty())
+                            throw dbms::DbError("0A000", "schema-qualified JOIN star is not supported");
+                        auto quoteIdentifier = [](const string& name) {
+                            string quoted = "\"";
+                            for (char ch : name) {
+                                if (ch == '"') quoted += '"';
+                                quoted += ch;
+                            }
+                            return quoted + '"';
+                        };
+                        auto appendRangeStar = [&](const TableSchema& table,
+                                                   const string& prefix,
+                                                   const string& range) {
+                            for (size_t i = 0; i < table.len; ++i) {
+                                const string& name = table.cols[i].dataName;
+                                requestedCols.push_back(dbms::StorageEngine::joinRangeColumnKey(range, name, true));
+                                requestedHeaders.push_back(name);
+                                requestedExpressions.push_back(quoteIdentifier(prefix) + "." + quoteIdentifier(name));
+                            }
+                        };
+                        if (expression == "*" || star->table == leftPrefix)
+                            appendRangeStar(leftTbl, leftPrefix, leftRange);
+                        if (expression == "*" || star->table == rightPrefix)
+                            appendRangeStar(rightTbl, rightPrefix, rightRange);
+                        if (expression != "*" && star->table != leftPrefix && star->table != rightPrefix)
+                            throw dbms::DbError("42P01", "missing FROM-clause entry for table \"" + star->table + "\"");
+                        continue;
                     }
                     string source = normalizeJoinColumn(expression);
                     if (outputName.empty()) {
@@ -27171,31 +27293,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 string whereClause = trim(sql.substr(wherePos + 5, condEnd - wherePos - 5));
                 if (rejectHiddenJoinQualifier(whereClause)) return true;
                 whereClause = expandSubqueries(whereClause, s);
-                // Resolve JOIN aliases to physical relation names.  Dropping
-                // the qualifier makes same-named columns bind to the left side.
-                if (leftTableName != leftTable || rightTableName != rightTable ||
-                    !leftAlias.empty() || !rightAlias.empty()) {
-                    for (const auto& mapping : {
-                             pair<string, string>{leftAlias.empty() ? leftTableName : leftAlias, leftTable},
-                             pair<string, string>{rightAlias.empty() ? rightTableName : rightAlias, rightTable}}) {
-                        const auto& alias = mapping.first;
-                        if (alias.empty()) continue;
-                        string prefix = alias + ".";
-                        string replacement = mapping.second + ".";
-                        size_t pos = 0;
-                        while ((pos = findTextOutsideQuotes(
-                                    whereClause, prefix, pos)) != string::npos) {
-                            if (pos > 0 &&
-                                (isalnum(static_cast<unsigned char>(whereClause[pos - 1])) ||
-                                 whereClause[pos - 1] == '_')) {
-                                pos += prefix.size();
-                                continue;
-                            }
-                            whereClause.replace(pos, prefix.size(), replacement);
-                            pos += replacement.size();
-                        }
-                    }
-                }
+                whereClause = rewriteJoinQualifierKeys(whereClause,
+                    {{leftPrefix, leftRange}, {rightPrefix, rightRange}}, true);
                 string condStr = normalizeConditionStr(whereClause);
                 condStr = compactInLists(condStr);
                 condTokens = mergeNegPredTokens(tokenize(condStr));
@@ -27203,10 +27302,6 @@ static bool executeInternal(const string& rawSql, Session& s) {
 
             if (forUpdate) { cout << "FOR UPDATE not supported with JOIN" << endl; return true; }
 
-            TableSchema leftTbl = g_engine.getTableSchema(s.currentDB, leftTable);
-            TableSchema rightTbl = g_engine.getTableSchema(s.currentDB, rightTable);
-            string leftPrefix = leftAlias.empty() ? leftTableName : leftAlias;
-            string rightPrefix = rightAlias.empty() ? rightTableName : rightAlias;
             map<string, size_t> joinBareNameCounts;
             for (size_t i = 0; i < leftTbl.len; ++i)
                 ++joinBareNameCounts[leftTbl.cols[i].dataName];
@@ -27263,12 +27358,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                             "\" is ambiguous", "42702");
                                 if (inLeft || inRight) return true;
                             } else {
-                                const bool leftVisible =
-                                    ref->table == leftPrefix ||
-                                    (leftAlias.empty() && ref->table == leftTable);
-                                const bool rightVisible =
-                                    ref->table == rightPrefix ||
-                                    (rightAlias.empty() && ref->table == rightTable);
+                                const bool leftVisible = ref->table == leftPrefix;
+                                const bool rightVisible = ref->table == rightPrefix;
                                 if (!leftVisible && !rightVisible)
                                     return failWhereBinding(
                                         "missing FROM-clause entry for table \"" +
@@ -27318,22 +27409,16 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         joinPhysicalTypeHints[name] = type;
                     }
                     joinTypeHints[prefix + "." + name] = type;
-                    joinPhysicalTypeHints[physicalName + "." + name] = type;
+                    joinPhysicalTypeHints[dbms::StorageEngine::joinRangeColumnKey(physicalName, name, true)] = type;
                 }
             };
-            addJoinTypeHints(leftTbl, leftPrefix, leftTable);
-            addJoinTypeHints(rightTbl, rightPrefix, rightTable);
+            addJoinTypeHints(leftTbl, leftPrefix, leftRange);
+            addJoinTypeHints(rightTbl, rightPrefix, rightRange);
             auto joinOperandSide = [&](const string& qualifier,
                                        const string& column) {
                 if (!qualifier.empty()) {
-                    if ((!leftAlias.empty() && qualifier == leftAlias) ||
-                        (leftAlias.empty() &&
-                         (qualifier == leftTableName || qualifier == leftTable)))
-                        return 0;
-                    if ((!rightAlias.empty() && qualifier == rightAlias) ||
-                        (rightAlias.empty() &&
-                         (qualifier == rightTableName || qualifier == rightTable)))
-                        return 1;
+                    if (qualifier == leftPrefix) return 0;
+                    if (qualifier == rightPrefix) return 1;
                     return -1;
                 }
                 bool inLeft = false;
@@ -27421,8 +27506,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         found = found || table.cols[index].dataName == ref->column;
                     if (!found) return false;
                     name = ref->column;
-                    qualified = (side == 0 ? leftTable : rightTable) +
-                        "." + name;
+                    qualified = dbms::StorageEngine::joinRangeColumnKey(side == 0 ? leftRange : rightRange, name, true);
                     return true;
                 };
                 auto reportOnBindingError = [&](const dbms::Expr* expression) {
@@ -27587,22 +27671,16 @@ static bool executeInternal(const string& rawSql, Session& s) {
             // Requested column -> position in the engine's row layout.
             // Qualified names resolve to their table; bare names prefer
             // the left table (the engine's colMap does the same).
+            map<string, pair<int, int>> rangePositions;
+            for (size_t i = 0; i < leftTbl.len; ++i)
+                rangePositions[dbms::StorageEngine::joinRangeColumnKey(leftRange, leftTbl.cols[i].dataName, true)] = {0, static_cast<int>(i)};
+            for (size_t i = 0; i < rightTbl.len; ++i)
+                rangePositions[dbms::StorageEngine::joinRangeColumnKey(rightRange, rightTbl.cols[i].dataName, true)] = {1, static_cast<int>(i)};
             auto enginePos = [&](const string& col) -> pair<int,int> {
                 // returns {which: 0 left/1 right, idx}; {-1,-1} unknown
                 if (col.find('.') != string::npos) {
-                    string tbl = col.substr(0, col.find('.'));
-                    string name = col.substr(col.find('.') + 1);
-                    // These keys have already been lowered to physical source
-                    // names. A right physical name can equal the left SQL CTE
-                    // qualifier; do not bind it to that left logical prefix.
-                    const bool isLeft = tbl == leftTable ||
-                        (tbl != rightTable && tbl == leftPrefix);
-                    if (!isLeft && tbl != rightTable && tbl != rightPrefix)
-                        return {-1, -1};
-                    const TableSchema& ts = isLeft ? leftTbl : rightTbl;
-                    for (size_t i = 0; i < ts.len; ++i)
-                        if (ts.cols[i].dataName == name) return {isLeft ? 0 : 1, (int)i};
-                    return {-1, -1};
+                    const auto found = rangePositions.find(col);
+                    return found == rangePositions.end() ? pair<int,int>{-1, -1} : found->second;
                 }
                 for (size_t i = 0; i < leftTbl.len; ++i)
                     if (leftTbl.cols[i].dataName == col) return {0, (int)i};
@@ -27652,16 +27730,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                 "column \"" + ref->column +
                                     "\" does not exist", "42703");
                         }
-                        const bool leftQualifier =
-                            ref->table == leftPrefix ||
-                            (leftAlias.empty() &&
-                             (ref->table == leftTableName ||
-                              ref->table == leftTable));
-                        const bool rightQualifier =
-                            ref->table == rightPrefix ||
-                            (rightAlias.empty() &&
-                             (ref->table == rightTableName ||
-                              ref->table == rightTable));
+                        const bool leftQualifier = ref->table == leftPrefix;
+                        const bool rightQualifier = ref->table == rightPrefix;
                         if (leftQualifier && rightQualifier)
                             return rejectJoinReference(
                                 "table reference \"" + ref->table +
@@ -27798,22 +27868,6 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 }
             }
 
-            // Preserve source qualification in parsed JOIN predicates.
-            if (!condTokens.empty() && (!leftAlias.empty() || !rightAlias.empty())) {
-                for (auto& tok : condTokens) {
-                    for (const auto& mapping : {
-                             pair<string, string>{leftAlias, leftTable},
-                             pair<string, string>{rightAlias, rightTable}}) {
-                        const auto& alias = mapping.first;
-                        if (alias.empty()) continue;
-                        string prefix = alias + ".";
-                        if (tok.size() > prefix.size() && tok.substr(0, prefix.size()) == prefix) {
-                            tok = mapping.second + "." + tok.substr(prefix.size());
-                        }
-                    }
-                }
-            }
-
             vector<string> answers;
             vector<vector<string>> joinRows;
             vector<vector<bool>> joinNulls;
@@ -27824,22 +27878,22 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 if (jt == JoinType::Left) {
                     return g_engine.leftJoin(s.currentDB, leftTable, rightTable,
                                               leftOnCol, rightOnCol, conds, allJoinColumns,
-                                              rows, nulls, onConditions);
+                                              rows, nulls, onConditions, rangeNames);
                 } else if (jt == JoinType::Right) {
                     return g_engine.rightJoin(s.currentDB, leftTable, rightTable,
                                                leftOnCol, rightOnCol, conds, allJoinColumns,
-                                               rows, nulls, onConditions);
+                                               rows, nulls, onConditions, rangeNames);
                 } else if (jt == JoinType::FullOuter) {
                     return g_engine.fullOuterJoin(s.currentDB, leftTable, rightTable,
                                                    leftOnCol, rightOnCol, conds, allJoinColumns,
-                                                   rows, nulls, onConditions);
+                                                   rows, nulls, onConditions, rangeNames);
                 } else if (jt == JoinType::Cross) {
                     return g_engine.crossJoin(s.currentDB, leftTable, rightTable,
-                                              conds, allJoinColumns, rows, nulls);
+                                              conds, allJoinColumns, rows, nulls, rangeNames);
                 } else {
                     return g_engine.join(s.currentDB, leftTable, rightTable,
                                           leftOnCol, rightOnCol, conds, allJoinColumns,
-                                          rows, nulls, onConditions);
+                                          rows, nulls, onConditions, rangeNames);
                 }
             };
             auto joinRowIdentity = [](const vector<string>& cells,
