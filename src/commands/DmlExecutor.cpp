@@ -651,8 +651,9 @@ bool evaluateValue(const ExprPtr& expr, const std::string& currentDB,
                    std::string& value);
 bool referencesColumn(const Expr* expr);
 
-bool findTableColumn(const TableSchema& table, const std::string& name) {
-    const std::string column = identifier(name);
+bool findTableColumn(const TableSchema& table, const std::string& column) {
+    // Callers already pass the canonical column identity. Folding it again
+    // would make a quoted uppercase target resolve to a different SQL name.
     for (size_t i = 0; i < table.len; ++i) {
         if (table.cols[i].dataName == column) return true;
     }
@@ -673,7 +674,7 @@ bool validateConflictExpression(const Expr* expr, const TableSchema& table,
     }
     if (const auto* ref = dynamic_cast<const ColumnRefExpr*>(expr)) {
         if (!ref->schema.empty()) return false;
-        const std::string sourceColumn = identifier(ref->column);
+        const std::string& sourceColumn = ref->column;
         if (!findTableColumn(table, sourceColumn)) return false;
         if (lower(ref->table) == "excluded") {
             sourceColumns.insert(sourceColumn);
@@ -1045,7 +1046,7 @@ void appendColumnCondition(const ColumnRefExpr& column,
                            const std::string& storageOperator,
                            const std::string& value,
                            std::vector<std::string>& conditions) {
-    const std::string name = identifier(column.column);
+    const std::string& name = column.column;
     const bool compactSafe = !name.empty() &&
         (std::isalpha(static_cast<unsigned char>(name.front())) || name.front() == '_') &&
         std::all_of(name.begin(), name.end(), [](unsigned char ch) {
@@ -1180,7 +1181,8 @@ ReturningBinding returningBinding(const ReturningOptions& options,
 std::optional<ReturningProjection::Source> returningSourceForQualifier(
     const std::string& rawQualifier, const ReturningBinding& binding) {
     if (rawQualifier.empty()) return ReturningProjection::Source::Default;
-    const std::string qualifier = identifier(rawQualifier);
+    // ColumnRefExpr qualifiers have already been decoded by the parser.
+    const std::string& qualifier = rawQualifier;
     if (qualifier == binding.oldName) return ReturningProjection::Source::Old;
     if (qualifier == binding.newName) return ReturningProjection::Source::New;
     if (binding.defaultQualifiers.count(qualifier) != 0) {
@@ -1199,7 +1201,7 @@ bool returningBindingIsValid(const ReturningBinding& binding) {
 }
 
 std::string tableColumnType(const TableSchema& table, const std::string& name) {
-    const std::string column = identifier(name);
+    const std::string& column = name;
     for (size_t i = 0; i < table.len; ++i) {
         if (table.cols[i].dataName == column) return table.cols[i].dataType;
     }
@@ -1300,7 +1302,7 @@ bool supportsReturningExpression(const Expr* expr, const TableSchema& table,
     if (const auto* ref = dynamic_cast<const ColumnRefExpr*>(expr)) {
         if (!ref->schema.empty() ||
             !returningSourceForQualifier(ref->table, binding)) return false;
-        const std::string column = identifier(ref->column);
+        const std::string& column = ref->column;
         for (size_t i = 0; i < table.len; ++i) {
             if (table.cols[i].dataName == column) return true;
         }
@@ -1404,7 +1406,7 @@ bool buildReturningProjections(const std::vector<SelectItem>& returning,
             continue;
         }
         const auto* ref = dynamic_cast<const ColumnRefExpr*>(item.expr.get());
-        if (ref && identifier(ref->column) == "*") {
+        if (ref && ref->column == "*") {
             if (!item.alias.empty()) return false;
             const auto source = returningSourceForQualifier(ref->table, binding);
             if (!ref->schema.empty() || !source) return false;
@@ -1416,7 +1418,7 @@ bool buildReturningProjections(const std::vector<SelectItem>& returning,
             continue;
         }
         const std::string name = item.alias.empty()
-            ? (ref ? identifier(ref->column) : item.expr->toString())
+            ? (ref ? ref->column : item.expr->toString())
             : identifier(item.alias);
         const auto* call = dynamic_cast<const FunctionCallExpr*>(item.expr.get());
         const bool mergeAction = call &&
@@ -1456,7 +1458,7 @@ bool collectSourceColumns(const Expr* expr, const TableSchema& table,
             (alias.empty() || identifier(ref->table) != identifier(alias))) {
             return false;
         }
-        const std::string column = identifier(ref->column);
+        const std::string& column = ref->column;
         for (size_t i = 0; i < table.len; ++i) {
             if (table.cols[i].dataName == column) {
                 columns.insert(column);
@@ -1860,8 +1862,8 @@ bool validateStructuredExpression(
     }
     if (const auto* ref = dynamic_cast<const ColumnRefExpr*>(expr)) {
         if (!ref->schema.empty()) return false;
-        const std::string column = identifier(ref->column);
-        const std::string qualifier = identifier(ref->table);
+        const std::string& column = ref->column;
+        const std::string& qualifier = ref->table;
         if (qualifier.empty()) return findTableColumn(targetTable, column);
         if (qualifier == identifier(targetQualifier) ||
             qualifier == unqualifiedRelationName(targetQualifier)) {

@@ -232,6 +232,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/compact_rhs_sql_boundary_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/update_computed_predicate_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/update_typed_predicate_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/update_quoted_target_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/update_typed_execution_matrix_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/signed_dml_predicate_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/drop_table_list_syntax_protocol_e2e_test.py)
