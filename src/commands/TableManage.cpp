@@ -30623,8 +30623,8 @@ std::vector<std::string> StorageEngine::query(
                 tablename + "\"");
         }
     }
+    ResourceUnlockGuard tableLockGuard(lockManager_, tablename);
     if (!tableExists(dbname, tablename)) {
-        lockManager_.unlock(tablename);
         return result;
     }
 
@@ -30669,7 +30669,6 @@ std::vector<std::string> StorageEngine::query(
             } else sortExpressionIdentities[order.expressionSql] = order.expressionSql;
         }
     } catch (...) {
-        lockManager_.unlock(tablename);
         throw;
     }
     const ReadView* queryView = nullptr;
@@ -30750,7 +30749,6 @@ std::vector<std::string> StorageEngine::query(
         }
     }
     if (scanFailed) {
-        lockManager_.unlock(tablename);
         if (indexReadFailed) {
             throw DbError("XX001", "B-tree index read failed for relation \"" +
                 tablename + "\"");
@@ -30765,7 +30763,6 @@ std::vector<std::string> StorageEngine::query(
         std::string resolved = resolveToastValues(
             dbname, tablename, mr.second, tbl, &toastOk);
         if (!toastOk) {
-            lockManager_.unlock(tablename);
             return result;
         }
         mr.second = std::move(resolved);
@@ -30838,7 +30835,6 @@ std::vector<std::string> StorageEngine::query(
             collationProbe.cols[0] = comparisonColumn;
             if (resolveTableCollations(
                     *this, dbname, collationProbe) != DBStatus::OK) {
-                lockManager_.unlock(tablename);
                 return result;
             }
             comparisonColumn = std::move(collationProbe.cols[0]);
@@ -30984,7 +30980,6 @@ std::vector<std::string> StorageEngine::query(
                 (orderBy[i].exprFunc == "left" ||
                  orderBy[i].exprFunc == "right") &&
                 !parseTextSortCount(orderBy[i].exprArg2, sliceCounts[i])) {
-                lockManager_.unlock(tablename);
                 throw DbError("0A000", "non-constant text slice count in ORDER BY");
             }
         }
@@ -31053,7 +31048,6 @@ std::vector<std::string> StorageEngine::query(
                 collationProbe.cols[0] = comparisonColumn;
                 if (resolveTableCollations(
                         *this, dbname, collationProbe) != DBStatus::OK) {
-                    lockManager_.unlock(tablename);
                     return result;
                 }
                 comparisonColumn = std::move(collationProbe.cols[0]);
@@ -31084,7 +31078,6 @@ std::vector<std::string> StorageEngine::query(
                 resultCollation = ExprHelper::analyzeExplicitResultCollation(
                     spec.expressionSql);
             } catch (...) {
-                lockManager_.unlock(tablename);
                 throw;
             }
             if (!spec.collation.empty() || resultCollation.empty()) continue;
@@ -31095,7 +31088,6 @@ std::vector<std::string> StorageEngine::query(
             collationProbe.cols[0] = comparisonColumn;
             if (resolveTableCollations(*this, dbname, collationProbe) !=
                 DBStatus::OK) {
-                lockManager_.unlock(tablename);
                 return result;
             }
             comparisonColumn = std::move(collationProbe.cols[0]);
@@ -31149,7 +31141,6 @@ std::vector<std::string> StorageEngine::query(
                                 "", this)).first;
                     const auto& evaluated = found->second;
                     if (!evaluated.ok) {
-                        lockManager_.unlock(tablename);
                         if (!evaluated.sqlState.empty())
                             throw DbError(evaluated.sqlState, evaluated.error);
                         throw std::runtime_error(evaluated.error.empty()
@@ -31182,7 +31173,6 @@ std::vector<std::string> StorageEngine::query(
                             if (resolveTableCollations(
                                     *this, dbname, collationProbe) !=
                                 DBStatus::OK) {
-                                lockManager_.unlock(tablename);
                                 return result;
                             }
                             comparisonColumn =
@@ -31341,7 +31331,6 @@ std::vector<std::string> StorageEngine::query(
             structuredNulls->push_back(std::move(structuredNullRow));
         if (structuredRowIds) structuredRowIds->push_back(mr.first);
     }
-    lockManager_.unlock(tablename);
     dbms::recordTableScan(dbname, tablename, matchRows.size(), usedIndex, conds.empty());
     return result;
 }
