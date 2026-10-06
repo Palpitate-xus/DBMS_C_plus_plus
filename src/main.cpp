@@ -19409,6 +19409,166 @@ static bool executePgClassQuery(const string& rawSql, Session& session,
     return false;
 }
 
+// This is a grammar-role detector, not an executor or a result fingerprint.
+// The parser's legacy Literal child envelope becomes preparedSubquery during
+// whole-query binding. IN/ANY/ALL/EXISTS retain their multirow consumers.
+static pair<bool, bool> scalarQueryRoles(const dbms::Expr* expression, bool scalar = true) {
+    if (!expression) return {};
+    if (const auto* literal = dynamic_cast<const dbms::LiteralExpr*>(expression)) {
+        const auto tokens = dbms::SQLParser::tokenize(literal->value);
+        const bool query = expression->preparedSubquery ||
+            (tokens.size() > 1 && tokens[0] == "(" &&
+             (dbms::SQLParser::toLower(tokens[1]) == "select" ||
+              dbms::SQLParser::toLower(tokens[1]) == "with"));
+        return {query && scalar, query && !scalar};
+    }
+    pair<bool, bool> result{};
+    const auto add = [&](const dbms::Expr* child, bool role = true) {
+        const auto uses = scalarQueryRoles(child, role);
+        result.first = result.first || uses.first;
+        result.second = result.second || uses.second;
+    };
+    if (const auto* binary = dynamic_cast<const dbms::BinaryOpExpr*>(expression)) {
+        add(binary->left.get());
+        const string op = dbms::SQLParser::toLower(binary->op);
+        add(binary->right.get(), op != "in" && op != "not in");
+    } else if (const auto* unary = dynamic_cast<const dbms::UnaryOpExpr*>(expression)) add(unary->operand.get());
+    else if (const auto* cast = dynamic_cast<const dbms::CastExpr*>(expression)) add(cast->operand.get());
+    else if (const auto* call = dynamic_cast<const dbms::FunctionCallExpr*>(expression)) {
+        dbms::CatalogManager::QualifiedName routine;
+        const bool special = dbms::CatalogManager::parseQualifiedName(
+            call->schema.empty() ? call->funcName : call->schema + "." + call->funcName, routine, true) &&
+            (routine.schema.empty() || routine.schema == "pg_catalog") &&
+            (routine.name == "exists" || routine.name == "any" || routine.name == "all");
+        for (const auto& argument : call->args) add(argument.get(), !special);
+        for (const auto& argument : call->namedArgs) add(argument.value.get(), !special);
+    } else if (const auto* conditional = dynamic_cast<const dbms::CaseExpr*>(expression)) {
+        add(conditional->switchExpr.get()); add(conditional->elseExpr.get());
+        for (const auto& arm : conditional->whenClauses) { add(arm.first.get()); add(arm.second.get()); }
+    } else if (const auto* array = dynamic_cast<const dbms::ArrayExpr*>(expression)) {
+        for (const auto& value : array->elements) add(value.get());
+    } else if (const auto* row = dynamic_cast<const dbms::RowExpr*>(expression)) {
+        for (const auto& value : row->elements) add(value.get());
+    }
+    return result;
+}
+
+static bool handlePreparedScalarWhere(const string& rawSql, Session& session, bool& handled) {
+    handled = false;
+    dbms::SQLParser parser;
+    auto parsed = parser.parseForBinding(rawSql);
+    const auto* candidate = parsed.success ? dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()) : nullptr;
+    if (!candidate || !dbms::QueryPlanner::supportsPreparedSelectPlan(*candidate)) return false;
+    const auto roles = scalarQueryRoles(candidate->whereClause.get());
+    if (!roles.first || roles.second) return false;
+    // Additional multirow roles in targets/order also need their own lowering;
+    // never reinterpret a set-valued child as a scalar expression.
+    for (const auto& item : candidate->selectList) if (scalarQueryRoles(item.expr.get()).second) return false;
+    for (const auto& item : candidate->orderBy) if (scalarQueryRoles(item.expr.get()).second) return false;
+    string physical;
+    if (candidate->fromClause) {
+        const string& spelling = candidate->fromClause->tableName;
+        physical = resolveTableName(session, spelling, true);
+        // Virtual catalogs, unlowered views and inherited materialized CTE
+        // aliases retain their established consumers. This plan lowers a
+        // single actual base range; no alternate namespace is fabricated.
+        if (!g_engine.tableExists(session.currentDB, physical)) return false;
+        dbms::CatalogManager::QualifiedName name;
+        if (!dbms::CatalogManager::parseQualifiedName(spelling, name, true)) return false;
+        for (auto frame = queryCteFrames.rbegin(); frame != queryCteFrames.rend(); ++frame) {
+            if (frame->session == &session && frame->database == session.currentDB &&
+                name.schema.empty() && frame->relations.count(name.name)) return false;
+        }
+        if (!isTempTable(session, name.name) &&
+            !checkTablePermission(session, physical, dbms::StorageEngine::TablePrivilege::Select)) {
+            handled = true; return true;
+        }
+    }
+    // No source is opened, no function is called, and no byte provenance is
+    // discarded before the whole immutable query has passed preparation.
+    auto prepared = g_engine.prepareBoundQuery(session.currentDB, rawSql);
+    auto* select = static_cast<dbms::SelectStmt*>(prepared.ast.get());
+    // Preserve column grants on precisely the bound source cells used by
+    // this query (including correlated child references), not SELECT *.
+    if (select->fromClause && !sessionIsAdmin(session)) {
+        size_t occurrence = numeric_limits<size_t>::max();
+        vector<string> sourceColumns;
+        for (const auto& range : prepared.sourceRanges)
+            if (range.owner == select && range.source == select->fromClause.get() && !range.mergedUsing) {
+                occurrence = range.ordinal;
+                for (const auto& column : range.columns) sourceColumns.push_back(column.name);
+            }
+        set<string> used;
+        function<void(const dbms::Stmt*)> statement;
+        function<void(const dbms::Expr*)> expression = [&](const dbms::Expr* value) {
+            if (!value) return;
+            if (value->preparedSubquery) statement(value->preparedSubquery.get());
+            if (const auto* column = dynamic_cast<const dbms::ColumnRefExpr*>(value)) {
+                if (column->binding && column->binding->sourceOrdinal == occurrence)
+                    used.insert(sourceColumns.at(column->binding->columnOrdinal));
+            } else if (const auto* binary = dynamic_cast<const dbms::BinaryOpExpr*>(value)) {
+                expression(binary->left.get()); expression(binary->right.get());
+            } else if (const auto* unary = dynamic_cast<const dbms::UnaryOpExpr*>(value)) expression(unary->operand.get());
+            else if (const auto* cast = dynamic_cast<const dbms::CastExpr*>(value)) expression(cast->operand.get());
+            else if (const auto* call = dynamic_cast<const dbms::FunctionCallExpr*>(value)) {
+                for (const auto& arg : call->args) expression(arg.get());
+                for (const auto& arg : call->namedArgs) expression(arg.value.get());
+            } else if (const auto* conditional = dynamic_cast<const dbms::CaseExpr*>(value)) {
+                expression(conditional->switchExpr.get()); expression(conditional->elseExpr.get());
+                for (const auto& arm : conditional->whenClauses) { expression(arm.first.get()); expression(arm.second.get()); }
+            } else if (const auto* array = dynamic_cast<const dbms::ArrayExpr*>(value)) {
+                for (const auto& cell : array->elements) expression(cell.get());
+            } else if (const auto* row = dynamic_cast<const dbms::RowExpr*>(value)) {
+                for (const auto& cell : row->elements) expression(cell.get());
+            }
+        };
+        statement = [&](const dbms::Stmt* value) {
+            const auto* query = dynamic_cast<const dbms::SelectStmt*>(value);
+            if (!query) return;
+            for (const auto& cte : query->ctes) statement(cte.query.get());
+            for (const auto& target : query->selectList) expression(target.expr.get());
+            expression(query->whereClause.get()); expression(query->having.get());
+            for (const auto& key : query->orderBy) expression(key.expr.get());
+            for (const auto& key : query->groupBy) expression(key.get());
+        };
+        statement(select);
+        for (const auto& target : select->selectList) {
+            const auto* literal = dynamic_cast<const dbms::LiteralExpr*>(target.expr.get());
+            const auto* column = dynamic_cast<const dbms::ColumnRefExpr*>(target.expr.get());
+            if ((target.expr && target.expr->type == dbms::ExprType::A_Star) ||
+                (literal && literal->value == "*") || (column && column->column == "*"))
+                used.insert(sourceColumns.begin(), sourceColumns.end());
+        }
+        if (!used.empty() && !g_engine.hasColumnPermission(session.currentDB, physical,
+            effectiveSessionRole(session), dbms::StorageEngine::TablePrivilege::Select,
+            vector<string>(used.begin(), used.end())))
+            throw dbms::DbError("42501", "permission denied for selected source columns");
+    }
+    const string predicateType = dbms::ExprHelper::inferParsedResultType(
+        select->whereClause.get(), {}, session.currentDB, &g_engine);
+    if (predicateType != "boolean" && predicateType != "bool")
+        throw dbms::DbError("42804", "argument of WHERE must be type boolean");
+    vector<string> columns, types;
+    for (const auto& column : prepared.output) { columns.push_back(column.name); types.push_back(column.type); }
+    if (select->selectList.size() == types.size()) {
+        for (size_t i = 0; i < types.size(); ++i)
+            types[i] = dbms::ExprHelper::inferParsedResultType(select->selectList[i].expr.get(), {}, session.currentDB, &g_engine);
+    }
+    for (auto& type : types) if (type == "unknown") type = "text";
+    auto plan = dbms::QueryPlanner::buildPreparedSelectPlan(&g_engine, session.currentDB, physical, std::move(prepared));
+    auto result = dbms::QueryPlanner::executePlanChecked(std::move(plan), currentQueryRowDemand());
+    if (!result.ok) throw dbms::DbError("XX000", result.error);
+    if (!result.structuredRowsAvailable) throw dbms::DbError("XX000", "prepared query lost typed rows");
+    for (const auto& column : columns) cout << column << ' ';
+    cout << '\n';
+    for (const auto& row : result.rows) cout << row << '\n';
+    publishStructuredUtilityResult(std::move(columns), std::move(types),
+        std::move(result.structuredRows), std::move(result.structuredNulls),
+        "SELECT " + std::to_string(result.rows.size()));
+    handled = true;
+    return false;
+}
+
 static bool executeInternal(const string& rawSql, Session& s) {
     // Check for pg_terminate_backend / pg_cancel_backend flags
     if (s.terminateRequested) {
@@ -24172,6 +24332,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
 
     if (sql.substr(0, 6) == "select" || sql.substr(0, 5) == "with ") {
         if (!checkDB(s)) return true;
+
+        bool preparedWhereHandled = false;
+        const bool preparedWhereFailed = handlePreparedScalarWhere(effectiveRawSql, s, preparedWhereHandled);
+        if (preparedWhereHandled) return preparedWhereFailed;
 
         // A nested SELECT may consume CTE/derived tables owned by its parent.
         // Only discard transient relations created by this invocation; clearing
