@@ -58,9 +58,12 @@ public:
     // Its true owner/range must still be validated; no SQL name lookup.
     void prepareProjectionColumn(ColumnRefExpr* column, const Stmt* owner);
     void setQueryExecutor(PreparedChildExecutor executor);
-    // When present, this typed stream takes priority over the full-row
-    // compatibility callback. An empty factory restores that callback.
-    void setChildCursorFactory(PreparedChildCursorFactory factory);
+    // An explicit paired cursor owns both scalar and quantified children.
+    // A physical fallback (ownsScalarChildren=false) always streams quantified
+    // children, but yields scalar children to an explicit row reader or the
+    // engine's installed ordinary-query host. No SQL-shape guessing is used.
+    void setChildCursorFactory(PreparedChildCursorFactory factory,
+                               bool ownsScalarChildren = true);
     void prepareChildCursors(); // pure graph construction, no open/evaluation
     void closeChildCursors();   // explicit normal cleanup; primary errors preserved
     std::vector<Operator*> childPlans(const Expr* scope = nullptr) const;
@@ -86,6 +89,7 @@ private:
     mutable std::map<const Expr*, ExprValue> memo_;
     PreparedChildExecutor queryExecutor_;
     PreparedChildCursorFactory childCursorFactory_;
+    bool cursorOwnsScalarChildren_ = true;
     struct QuantifiedState {
         std::unique_ptr<PreparedQueryCursor> cursor;
         std::vector<ExprValue> values;

@@ -113,6 +113,7 @@ struct PreparedSelectState {
     RowContext outerRow;
     PreparedChildExecutor childExecutor;
     PreparedChildCursorFactory childCursorFactory;
+    bool cursorOwnsScalarChildren = true;
     std::unique_ptr<PreparedQueryExecution> execution;
     bool executionStarted = false;
     ExprEvaluator evaluator;
@@ -199,7 +200,7 @@ struct PreparedSelectState {
         if (execution) return;
         execution = std::make_unique<PreparedQueryExecution>(query, engine, dbname);
         execution->setQueryExecutor(childExecutor);
-        execution->setChildCursorFactory(childCursorFactory);
+        execution->setChildCursorFactory(childCursorFactory, cursorOwnsScalarChildren);
         for (auto& target : starTargets)
             execution->prepareProjectionColumn(static_cast<ColumnRefExpr*>(target.get()), statement);
         for (auto* target : targets) execution->prepareExpression(target);
@@ -712,7 +713,7 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
     const std::string& dbname, std::shared_ptr<PreparedQuery> prepared,
     SelectStmt* select, const TableSchema& sourceSchema, OpPtr source,
     const RowContext& outerRow, PreparedChildExecutor childExecutor,
-    PreparedChildCursorFactory childCursorFactory) {
+    PreparedChildCursorFactory childCursorFactory, bool cursorOwnsScalarChildren) {
     if (!prepared || !select || !source || !supportsPreparedSelectShape(*select, true, source->supportsPreparedContexts()))
         throw DbError("0A000", "query requires an additional prepared plan lowering");
     const auto output = prepared->statementOutputs.find(select);
@@ -723,11 +724,11 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
     state->query = std::move(prepared); state->statement = select;
     state->output = output->second; state->outerRow = outerRow;
     state->childExecutor = std::move(childExecutor);
-    // An explicit legacy full-row reader is an execution contract, not a
-    // fallback for our physical-source cursor. Keep it unless its owner also
-    // supplies the cursor belonging to the same logical source graph.
+    // Keep explicit scalar readers/engine hosts, while quantified children
+    // still require a real typed stream. Only a cursor deliberately supplied
+    // by the same execution owner may supersede those scalar contracts.
+    state->cursorOwnsScalarChildren = childCursorFactory && cursorOwnsScalarChildren;
     state->childCursorFactory = childCursorFactory ? std::move(childCursorFactory) :
-        state->childExecutor ? PreparedChildCursorFactory{} :
         PreparedChildCursorFactory([engine,dbname,query=state->query](const Stmt* child,const RowContext& row) {
             auto plan=QueryPlanner::buildPreparedQueryPlan(engine,dbname,query,child,row);
             const auto descriptor=query->statementOutputs.find(child);
@@ -918,7 +919,7 @@ OpPtr QueryPlanner::buildPreparedQueryPlan(StorageEngine* engine,const std::stri
         if(!select->orderBy.empty() || select->setOp!=SetOp::None)
             throw DbError("0A000","prepared VALUES requires additional clause lowering");
         auto execution=std::make_shared<PreparedQueryExecution>(query,engine,database);
-        execution->setChildCursorFactory(childFactory);
+        execution->setChildCursorFactory(childFactory, false);
         for(auto& row:select->valuesRows)for(auto& cell:row)execution->prepareExpression(cell.get());
         execution->prepareChildCursors();
         auto cells=outer;cells.setParameters(query->parameters);
@@ -981,7 +982,7 @@ OpPtr QueryPlanner::buildPreparedQueryPlan(StorageEngine* engine,const std::stri
             source=std::make_unique<TableScanOp>(engine,database,table);
         }
     }
-    return buildPreparedSelectPlan(engine,database,std::move(query),select,schema,std::move(source),outer,{},childFactory);
+    return buildPreparedSelectPlan(engine,database,std::move(query),select,schema,std::move(source),outer,{},childFactory,false);
 }
 
 TableScanOp::TableScanOp(StorageEngine* engine, const std::string& dbname,

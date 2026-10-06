@@ -1324,7 +1324,8 @@ public:
         const std::string& dbname, std::shared_ptr<PreparedQuery> prepared,
         SelectStmt* select, const TableSchema& sourceSchema, OpPtr source,
         const RowContext& outerRow = {}, PreparedChildExecutor childExecutor = {},
-        PreparedChildCursorFactory childCursorFactory = {});
+        PreparedChildCursorFactory childCursorFactory = {},
+        bool cursorOwnsScalarChildren = true);
     // Compile a retained SELECT/VALUES child; no SQL is rendered/reparsed and
     // source execution is driven only by the returned plan's next().
     static OpPtr buildPreparedQueryPlan(StorageEngine*,const std::string&,

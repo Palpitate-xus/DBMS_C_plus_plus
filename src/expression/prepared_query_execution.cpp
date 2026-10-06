@@ -759,11 +759,13 @@ void PreparedQueryExecution::setQueryExecutor(PreparedChildExecutor executor) {
     queryExecutor_ = std::move(executor);
 }
 
-void PreparedQueryExecution::setChildCursorFactory(PreparedChildCursorFactory factory) {
+void PreparedQueryExecution::setChildCursorFactory(PreparedChildCursorFactory factory,
+    bool ownsScalarChildren) {
     closeChildCursors();
     quantified_.clear();
     memo_.clear();
     childCursorFactory_ = std::move(factory);
+    cursorOwnsScalarChildren_ = ownsScalarChildren;
 }
 
 ExprValue PreparedQueryExecution::evaluate(const Expr* expression, const RowContext& row) const {
@@ -911,7 +913,8 @@ ExprValue PreparedQueryExecution::executeChild(const Expr* expression, const Row
         const auto cached = memo_.find(expression);
         if (cached != memo_.end()) return cached->second;
     }
-    if (childCursorFactory_) {
+    if (childCursorFactory_ && (cursorOwnsScalarChildren_ ||
+        (!queryExecutor_ && !engine_->hasPlpgsqlQueryExecutor()))) {
         const Stmt* statement = expression->preparedSubquery.get();
         const auto output = query_->statementOutputs.find(statement);
         if (output == query_->statementOutputs.end() || output->second.size() != 1)

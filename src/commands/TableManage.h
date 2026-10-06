@@ -403,6 +403,12 @@ public:
     void setPlpgsqlQueryExecutor(PlPgsqlQueryExecutor executor) {
         plpgsqlQueryExecutor_ = std::move(executor);
     }
+    // Native embeddings may own ordinary scalar-query execution as well as
+    // routine SPI. A physical prepared-cursor fallback must not replace that
+    // explicitly installed host. Installation still precedes backend threads.
+    bool hasPlpgsqlQueryExecutor() const noexcept {
+        return static_cast<bool>(plpgsqlQueryExecutor_);
+    }
     PlPgsqlQueryResult plpgsqlQuery(const std::string& dbname,
                                    const std::string& sql,
                                    const PlPgsqlQueryOptions& options = {}) const;
