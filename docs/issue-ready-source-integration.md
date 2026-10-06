@@ -165,22 +165,43 @@ ROOT06ef197d. ROOT retained its stronger false-result SQLSTATE/cleared-output
 assertions and original throwIfFailed. No original demand/error/site/NULL
 assertion was removed. Main's existing precise checked consumer also remains.
 
-Current inventory is **539 native tests /274 registered Python entry points /
-58 production TUs**. Public DML/prepared cursor/operator-vtable headers changed,
-so source combination f6cbc8d6 plus test-only6d39bf0f is undergoing a **new
-complete normal-O2 build96836** with sources/headers frozen. Artifacts:
+Source combination f6cbc8d6 plus test-only6d39bf0f had539 native tests /274
+registered Python entry points /58 production TUs. Public DML/prepared cursor/
+operator-vtable headers changed, so actual **complete normal-O2 build96836
+exited0**, exactly58 production compile entries. Artifacts:
 `/tmp/dbms-with-cursor-integration.xOfpugBC/build-full-O2.log`.
-No new matching native/wire/full-suite gate has started yet. Private O0 results
-are not substituted for this new optimized proof and no old ABI is reused.
+After this build finished, two further independent commits were integrated:
+**ea857141** (7f51f576) explicitly verifies the conflict matrix against18.6;
+**fd183ec3** (30c1ccfa) validates primitive unknown string input during whole
+preparation. Sixteen literal/lexical native errors plus typed parameter,
+unused arithmetic/narrowing/typmod/routine controls preserve actual analysis
+versus runtime phases. The two old static22P02 fixtures are explicitly tested
+at preparation, with dynamic typed-parameter22P02 controls retained. Cursor's
+data-dependent CASE/late22P02/close/cardinality fixture is unchanged.
+
+This issue changes only TableManage.cpp, no public header or layout. Exact
+other57 original optimized object signatures were audited/exit0; normal build
+**75194 exited0 with exactly one CPP compile entry**. Normal repeat and
+all58 signatures/binary stamp audit **21543 exited0**. Current inventory is
+**540 native tests /275 registered Python entry points /58 production TUs**.
+Frozen combined SHA256 is
+`23a0f0c631a1aa837e02396726a426e0f4faf628e6a2a89b1714af3b4eff0acc`.
+**107 fresh matching native97739 and91 wire19966 are now actually live**;
+the latter includes the original complete postgres_protocol test, not a skip
+of its still-unfixed quantified EXPLAIN. Sources/headers/tests/registry remain
+frozen. No new terminal/full canonical green result is asserted. Private O0
+results are not substituted for this optimized combination; no old ABI reuse.
 
 The isolated official PostgreSQL18.6 build and actual180006 wire reference
 are recorded in `docs/issue-pg18-reference-bootstrap.md`. Six focused original
 matrices plus the original56 sort controls actually pass on18.6; the six old
 17.2 modes also remain passing. Missing XML/TLS/LZ4/ZSTD reference capabilities
 are explicit, not treated as broad18 compatibility proof. Original quantifier
-EXPLAIN/compact syntax, unused unknown-input CAST preparation, CASE common
-types, OLD/NEW RETURNING namespaces and all wider requirement families remain
-open and are being independently repaired.
+EXPLAIN/compact syntax, the remaining input/type families, CASE common types,
+OLD/NEW RETURNING namespaces, genuine WITH UPDATE FROM/DELETE USING and wider
+families remain open and are being independently repaired. EXCLUDED and
+unknown-input matrices also actually repeat/exit0 on18.6 from ROOT; see
+reference-excluded-pg18.log and reference-unknown-input-pg18.log.
 
 All PostgreSQL17.2 references here remain diagnostics, not a PostgreSQL18
 oracle. Only the explicitly version-checked18.6 results above are18 evidence.

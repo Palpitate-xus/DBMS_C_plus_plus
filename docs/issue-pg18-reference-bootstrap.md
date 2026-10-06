@@ -56,3 +56,29 @@ PGREF_PASSWORD; credentials are loaded from the owned private file, never
 embedded in committed commands. These are reference results, not proof that
 the new ROOT source combination has passed its own gates or that all273 audit
 requirements are complete. Canonical full-suite failures remain retained.
+
+The independently committed EXCLUDED reference mode ea857141 and primitive
+unknown-input source fd183ec3 add two further ROOT strict180006 matrices;
+reference-excluded-pg18.log and reference-unknown-input-pg18.log actually
+exit0. This is now eight selected18 reference matrices plus56 sort controls,
+not a canonical full465-case differential run or broad feature-family closure.
+
+## Separate XML-enabled profile
+
+To avoid using an XML-disabled oracle for TYPE-14, a second official18.6
+source tree/install is isolated in `/tmp/dbms-pg18-xml-reference.ZWQBlsZ4`.
+Nothing in the first running cluster, installed system packages or existing
+Docker reference is changed. The same publisher-verified archive supplies
+its source. libxml2-dev/libxml2 version2.9.14+dfsg-1.3ubuntu3.9 packages were
+downloaded from Ubuntu and individually checked against its package metadata:
+
+- libxml2-dev SHA256 `0884308f010b2401e2c819542f95edc2cc7fd81c25c68d12f750dfb69cfd9ede`.
+- libxml2 SHA256 `6e578bc383096718c9eea8a76a3edfacfea06e525e1aa7a187ee41906436d94e`.
+
+The first dev download57204 exited28 (SSL connection timeout); the separately
+logged repeat67626 and runtime package3313 actually exited0. Package SHA checks
+and local extraction pass. Configure40083 exited0 using isolated headers,
+library path, runtime rpath and an owned xml2-config adapter. Its generated
+pg_config.h enables USE_LIBXML and USE_ICU. Actual source make84312 exited0;
+there is no cluster/version/XML runtime proof for this new profile yet.
+Missing TLS/LZ4/ZSTD remain explicit; no skipped security/TDE audit starts.
