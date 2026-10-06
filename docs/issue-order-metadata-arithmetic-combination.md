@@ -40,10 +40,14 @@ Log and planned verifier are under
 `/tmp/dbms-order-metadata-arithmetic-combination.zJLGTGV3`.
 `verify.sh` checks object signatures and the binary stamp before compiling
 44 matching native tests or running 44 focused protocol scripts. Native
-`16836`, protocol `33559` and unchanged diagnostic `24208` are live at this
-checkpoint; none is presented as terminal success. Frozen binary SHA-256 is
+`16836` and protocol `33559` both exited 0: all 44 entries in each group
+passed. Logs are `native.log` and `protocol.log`. Unchanged diagnostic
+`24208` exited 1 with exactly five remaining genuine failures, preserving
+the original SQLSTATE/rows/writes expectations. The two direct ORDER failures
+are repaired, not removed from that diagnostic. Frozen binary SHA-256 is
 `f30d15ff4ae72e1ab2bfbf66c8cf5a3f069d4640151861d29ed76378eb0e2ad5`.
-This revision's full-default protocol has not yet run.
+This revision's full-default protocol is now running with its original
+10-second socket timeout; no terminal result is claimed at this checkpoint.
 The previous frozen `666bf0d1` production binary's 41 native/38 focused/full
 default passes are recorded separately and are not reused as this revision's
 proof. The previous unchanged diagnostic still had seven genuine failures;
