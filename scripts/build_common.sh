@@ -52,6 +52,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/materialized_lateral_composition_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/where_function_scope_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/materialized_alias_scope_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/materialized_factor_boundary_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/window_type_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/join_type_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/join_quoted_projection_protocol_e2e_test.py)

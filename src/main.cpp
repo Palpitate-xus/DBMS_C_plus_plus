@@ -12850,8 +12850,9 @@ static std::string processCTEs(const std::string& sql, Session& s, bool& failed)
         while (pos < result.size() && isspace((unsigned char)result[pos])) ++pos;
         if (pos >= result.size()) break;
 
-        // Find " as (" to split name and subquery
-        size_t asPos = result.find(" as ", pos);
+        // AS is a keyword, not a whitespace-delimited substring. AS( is
+        // legal, while "as" inside a quoted CTE name is part of that name.
+        size_t asPos = findKeywordOutsideQuotes(result, "as", pos);
         if (asPos == std::string::npos) break;
         const std::string cteBinding = trim(result.substr(pos, asPos - pos));
         std::string cteName = cteBinding;
@@ -12869,7 +12870,7 @@ static std::string processCTEs(const std::string& sql, Session& s, bool& failed)
         if (cteName.empty()) break;
 
         // Find opening paren of subquery
-        size_t parenStart = result.find('(', asPos + 4);
+        size_t parenStart = result.find('(', asPos + 2);
         if (parenStart == std::string::npos) break;
         size_t parenEnd = findMatchingParen(result, parenStart);
         if (parenEnd == std::string::npos) break;
@@ -13226,8 +13227,8 @@ static std::string processDerivedTables(const std::string& sql, Session& s,
         // Materialize the relation, not its SQL-visible namespace. Keeping
         // the alias lets the ordinary and LATERAL binders distinguish d.id
         // from a same-name right column and expand d.* only over d's leaves.
-        result = result.substr(0, parenStart) + tmpName + " as " + alias +
-            result.substr(aliasExprStart);
+        result = result.substr(0, parenStart) + " " + tmpName + " as " + alias +
+            " " + result.substr(aliasExprStart);
         searchFrom = 0;
     }
 
