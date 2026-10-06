@@ -1,5 +1,6 @@
 #include "query_binding.h"
 #include "common/GeometryValue.h"
+#include "expression/unary_type.h"
 #include "parser/parser.h"
 #include "catalog/catalog.h"
 #include "common/DbError.h"
@@ -253,6 +254,11 @@ public:
                 signedLiteral->sourceBegin = node->sourceBegin; signedLiteral->sourceEnd = node->sourceEnd;
                 const auto signedType = ExprHelper::inferValuesResultType(signedLiteral->value);
                 node = std::move(signedLiteral); return signedType;
+            }
+            if(op=="+" || op=="-") {
+                const auto target=resolveBuiltinUnary(op,type);
+                coerceCaseInput(unary->operand,type,target);
+                return target;
             }
             return op == "not" || op.rfind("is ", 0) == 0 ? "boolean" : type;
         }
