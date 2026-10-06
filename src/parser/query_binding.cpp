@@ -507,8 +507,16 @@ public:
                     }
             }
             auto scopes = outer; scopes.insert(scopes.begin(), {target});
-            for (auto& value : insert->conflictUpdateSet) expression(value.second, scopes);
-            expression(insert->conflictWhere, scopes);
+            auto conflictScopes = scopes;
+            if (SQLParser::toLower(insert->conflictAction) == "do update") {
+                // EXCLUDED is a logical transition row with the complete
+                // target descriptor, not another physical table. Its columns
+                // participate in value namespaces (including unqualified
+                // ambiguity), but the row is not visible in RETURNING.
+                conflictScopes.front().push_back(registerSource({"","excluded",target.columns}));
+            }
+            for (auto& value : insert->conflictUpdateSet) expression(value.second, conflictScopes);
+            expression(insert->conflictWhere, conflictScopes);
             return project(insert->returning, scopes);
         }
         if (auto* update = dynamic_cast<UpdateStmt*>(&node)) {
