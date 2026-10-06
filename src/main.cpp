@@ -26393,10 +26393,18 @@ static bool executeInternal(const string& rawSql, Session& s) {
             bool selectAll = (columns == "*");
             auto normalizeJoinColumn = [&](string column) {
                 column = trim(column);
-                const size_t dot = column.find('.');
-                if (dot == string::npos) return column;
-                const string qualifier = column.substr(0, dot);
-                const string name = column.substr(dot + 1);
+                dbms::SQLParser columnParser;
+                const auto parsedColumn = columnParser.parse("SELECT " + column);
+                const auto* select = parsedColumn.success
+                    ? dynamic_cast<const dbms::SelectStmt*>(parsedColumn.stmt.get()) : nullptr;
+                const auto* ref = select && select->selectList.size() == 1 &&
+                    select->selectList.front().alias.empty()
+                        ? dynamic_cast<const dbms::ColumnRefExpr*>(
+                              select->selectList.front().expr.get()) : nullptr;
+                if (!ref || !ref->schema.empty()) return column;
+                if (ref->table.empty()) return ref->column;
+                const string& qualifier = ref->table;
+                const string& name = ref->column;
                 if ((!leftAlias.empty() && qualifier == leftAlias) ||
                     (leftAlias.empty() && qualifier == leftTableName))
                     return leftTable + "." + name;
@@ -26495,7 +26503,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                 const auto* call = dynamic_cast<
                                     const dbms::FunctionCallExpr*>(
                                         selectName->selectList.front().expr.get());
-                                if (call) {
+                                if (const auto* ref = dynamic_cast<const dbms::ColumnRefExpr*>(
+                                        selectName->selectList.front().expr.get())) {
+                                    expressionName = ref->column;
+                                } else if (call) {
                                     functionName = toLower(call->funcName);
                                     const size_t qualifier = functionName.rfind('.');
                                     if (qualifier != string::npos)

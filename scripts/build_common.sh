@@ -49,6 +49,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/derived_type_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/window_type_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/join_type_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/join_quoted_projection_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/dml_command_tag_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/dml_cte_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/transaction_isolation_protocol_e2e_test.py)
