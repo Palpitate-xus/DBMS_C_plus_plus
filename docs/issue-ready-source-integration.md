@@ -54,7 +54,7 @@ and proven-constant owner demand, both checked-result metadata and borrowed
 typed-source interfaces, and each distinct E2E registration. No old SQLSTATE,
 effect/rollback, corruption, or empty-input assertion was deleted to merge.
 
-## Current combined verification is pending
+## First combined verification: actual terminal results
 
 Source revision **75f586b8** has **58 production translation units**,
 **530 native tests** and **267 registered Python entry points**. Changed
@@ -65,14 +65,58 @@ exited0 with exactly58 production compile entries. Normal repeat and all58
 object signatures/binary configuration stamp audit **96036 exited0**.
 The combined frozen server SHA256 is
 `9bc92255dae633976ab0fd289a1e8478db4a539fba54f14d3bee2b06ce00fed3`.
-Source/headers/tests/registry remain frozen while focused native **9480**
-and wire **35806** are actually running. Artifacts:
+Focused native **9480 exited1:94/96 passed**, with exactly two new fixture
+wrapper failures in ordinary_scalar_where_plan and ordinary_scalar_order_plan.
+Focused wire **35806 exited1:79/80 passed**, with exactly the permanent
+interval_with_dml_input_sqlstate gate's four original assertions still red:
+three bad inputs give42703 instead22015, and writable CTE advances its
+sequence before error instead of leaving currval55000. Artifacts:
 `/tmp/dbms-ready-integration.n9mTFFAn/build-full-O2.log`.
 The matching verifier audited every production signature and binary stamp
 before beginning to freshly compile/link96 selected native tests and run80
 selected wire entry points, including the real remaining WITH red gate.
-Those focused handles are live, not terminal passing results. No new
-combined/full-suite green claim is made.
+Both focused handles are terminal failures, not still live or fully passing.
+Original GROUP22012, corrupt-indexXX001, table-lock55P03/recovery and the exact
+CLI100ms/15sec cancellation/recovery controls all passed in this combination.
+No complete canonical/full-suite green claim follows from focused coverage.
+
+ROOT06ef197d (private726affc6) independently adapts the newer WHERE/ORDER test
+run wrappers to false-result metadata plus original throwIfFailed. All old
+P0001/22P02/21000, NULL/ordering/demand/site assertions remain unchanged;
+false-result SQLSTATE and cleared partial outputs are additionally asserted.
+Both fresh matching ROOT58 natives77069 exit0. This does not relabel the
+original96-native failure as a terminal success or require new production ABI.
+
+## Next independent integrations and pending optimized combination
+
+After both focused handles finished, these five source issues were integrated
+as five independent local ROOT commits:
+
+| ROOT commit | Independent issue / donor |
+| --- | --- |
+| a0940bb4 | Standard window metadata/signatures/canonical quoted identity;0314ce63. New13positive/10error native55227, ten adjacent53916 and three wire9337 actually exit0 on matching ROOT58 basis plus one changed normal-O2 CPP. |
+| 926f8856 | Ordered original duplicate UPDATE assignment sites and pre-effect semantic validation;c657e9f8. Private26native passes,12wire11pass/1separatewindowmetadata red retained; its combined32case final proof is still required. |
+| c9a16ed9 | INSERT SELECT interval target input analysis before source demand;2e07810c. |
+| 207ddbd4 | Direct INSERT SELECT WHERE diagnostics delegated to whole analysis, preserving other statements and transaction/privilege phases;14685eec. |
+| d7c1f0a8 | Actual prepared SQL-child sort value slots and structural identity;20e69063. |
+
+INSERT SELECT donors preserve all26static-error/four-sequence/no-effect,
+multi-star/NULL/type/OID/quote/transaction controls; final5native/5wire plus
+24native/11wire and limited instrumented3native actual passes are recorded
+with O0/partial instrumentation boundaries in their own issue document.
+Sort donor actual56case PG17reference and candidate matrix, nine natives,
+seven adjacent wires and unchanged1/2/1-site controls pass on its fresh58O0
+basis; this is not optimized ROOT proof. All intermediate candidate/fixture
+failures remain retained. Window, sort, INSERT SELECT and duplicate repairs
+do not imply complete respective requirement-family closure.
+
+Current source **d7c1f0a8** inventory is **534 native tests /271 registered
+Python entry points /58 production TUs**. Public UPDATE vector AST and
+ExprHelper callback headers changed, so actual new whole58 normal-O2 build
+**69854** is live with source/headers/tests/registry frozen. Artifact:
+`/tmp/dbms-next-query-integration.Hv7QYyMM/build-full-O2.log`.
+The source combination has not yet been tested. No new combined/full-suite
+green claim, old-header object reuse or all-sanitizer claim is made.
 
 Private checked-result donor final V2 had a true fresh57 normal-O2 build
 76658/exit0, 21 natives41097/exit0 and 14 wire65999/exit0, retaining the original

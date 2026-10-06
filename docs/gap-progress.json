@@ -2,6 +2,21 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "First optimized combination terminal failures retained; precise test consumers and five further independent source integrations",
+      "gap_ids": ["SQL-03", "SQL-04", "TYPE-01", "TYPE-02", "FUNC-05", "FUNC-06", "QRY-01", "QRY-03", "PROTO-04", "TXN-01"],
+      "status": "partial",
+      "commits": ["06ef197d", "a0940bb4", "926f8856", "c9a16ed9", "207ddbd4", "d7c1f0a8"],
+      "evidence": ["docs/issue-ready-source-integration.md", "docs/issue-prepared-scalar-checked-consumers.md", "docs/issue-window-query-metadata.md", "docs/issue-update-duplicate-target.md", "docs/issue-interval-insert-select-input.md", "docs/issue-scalar-subquery-sort-slots.md"],
+      "tests": ["tests/ordinary_scalar_where_plan_test.cpp", "tests/ordinary_scalar_order_plan_test.cpp", "tests/window_query_metadata_test.cpp", "tests/update_duplicate_target_protocol_e2e_test.py", "tests/interval_insert_select_input_protocol_e2e_test.py", "tests/insert_select_preflight_priority_protocol_e2e_test.py", "tests/scalar_subquery_sort_slot_protocol_e2e_test.py", "tests/interval_with_dml_input_sqlstate_protocol_e2e_test.py"],
+      "verification": {
+        "reproduction": "MatchingROOT75f58O2 frozen9bc:96native9480terminal1=94pass2newWHEREORDERcheckedwrapperfails;80wire35806terminal1=79pass1permanentWITHexact4input/seqassertsred. OriginalGROUP22012/corruptXX001/tablelock55P03recovery/CLI100ms15sec cancelandrecover pass. Thesearefocusednotfullcanonicalclosure.",
+        "fix": "Precisecheckedtestconsumer06ef keepsalloriginalP0001/22P02/21000/NULL/demand/siteassertions plusfalsemetadata/clearedpartialoutputs. FivefurtherindependentROOTsourcecommits windowmetadata/orderedduplicateUPDATE/INSERTSELECTstaticinput/wholeNetworkpriority/actualSQLchildsortslots; conflictkeepsbothquotedandduplicateregistrations. NeitherWITHruntime norwholefamilies claimedcomplete.",
+        "focused_tests": "TwofixtureadaptersfreshmatchingROOT58 natives77069exit0. Windowprivatebaseline52486exit134/firstquotedtypecandidate1869&23516failretained; normalCPP28674/candidate55227/10adj53916/3wire9337all0onROOTfresh58basis+changedCPP. Sort56PG17reference/candidate43392/9native33507/7wire1399all0fresh58O0. INSERTSELECT5native64910/5wire32450/24native17765/11wire35014/selected3ASAN25219all0limitedscope. Duplicate26native0/12wire11pass1windowredretained andcombinedproofpending.",
+        "full_suite": "CurrentROOTd7c1f0a8 534native271registered58production. ChangedASTvector/ExprHelperpublicheaders requirefreshwhole58normalO2; actualbuild69854live /tmp/dbms-next-query-integration.Hv7QYyMM source/header/test/registryfrozen. Nextmatchingfocusedandfullgatesnotyetrun. Old75090fivefailurecanonical,first96/80focusedterminalfailuresretainednotgreen.",
+        "scope": "27322complete166partial70unverified15deferred unchanged. TrueWITHruntime plusunusedCASTinput, CASEcommontypes/VALUESwidthpriority, typedquantifiercursor/hash/demand andfullfamiliescontinue; actualPG17diagnosticsnotPG18oracle. Nopush/Actionsenablement/deferredsecurityTDErestart."
+      }
+    },
+    {
       "issue": "Canonical75090 terminal five failures retained; sixteen independent ROOT integrations and fresh58 optimized verification pending",
       "gap_ids": ["SQL-03", "SQL-04", "TYPE-01", "TYPE-02", "FUNC-05", "FUNC-06", "QRY-01", "QRY-03", "PROTO-04", "TXN-01"],
       "status": "partial",
