@@ -22305,133 +22305,15 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
     // as op="scalarexpr"): evaluate the function on this row and compare.
     // A NULL result is Unknown in three-valued logic, so the row drops.
     if (cond.op == "scalarexpr") {
-        const std::string& fnText = cond.colName;
-        size_t lp = fnText.find('(');
-        size_t rp = fnText.rfind(')');
-        if (lp == std::string::npos || rp == std::string::npos || rp < lp) return false;
-        StorageEngine::SelectExpr expr;
-        expr.funcName = fnText.substr(0, lp);
-        for (char& ch : expr.funcName)
-            ch = static_cast<char>(tolower(static_cast<unsigned char>(ch)));
-        std::string argRaw = fnText.substr(lp + 1, rp - lp - 1);
-        size_t depth = 0, start = 0;
-        for (size_t i = 0; i <= argRaw.size(); ++i) {
-            if (i == argRaw.size() || (argRaw[i] == ',' && depth == 0)) {
-                std::string one = argRaw.substr(start, i - start);
-                size_t a = 0, b = one.size();
-                while (a < b && isspace(static_cast<unsigned char>(one[a]))) ++a;
-                while (b > a && isspace(static_cast<unsigned char>(one[b - 1]))) --b;
-                if (a < b) expr.funcArgs.push_back(one.substr(a, b - a));
-                start = i + 1;
-            } else if (argRaw[i] == '(') ++depth;
-            else if (argRaw[i] == ')') --depth;
-        }
-        if (expr.funcName == "coalesce" || expr.funcName == "nullif" ||
-            expr.funcName == "greatest" || expr.funcName == "least" ||
-            cond.value == "IS NULL" || cond.value == "IS NOT NULL") {
-            // These functions have their own NULL rules, not an all-args
-            // strict gate. Keep empty strings and NULL-looking text as data.
-            std::map<std::string, std::string> rowValues;
-            std::set<std::string> nullColumns;
-            for (size_t i = 0; i < tbl.len; ++i) {
-                bool isNull = false;
-                std::string value = extractValue(i, &isNull);
-                if (!buffered && !valueEngine && !tbl.cols[i].isVariableLength &&
-                    tbl.cols[i].isNull && value.empty()) isNull = true;
-                rowValues[tbl.cols[i].dataName] = std::move(value);
-                if (isNull) nullColumns.insert(tbl.cols[i].dataName);
-            }
-            const auto evaluated = ExprHelper::evalStringWithNulls(
-                fnText + " " + cond.value, rowValues, nullColumns,
-                buildTypeHints(tbl), valueDb);
-            if (!evaluated.ok)
-                throw std::runtime_error(evaluated.error.empty()
-                    ? "failed to evaluate non-strict predicate" : evaluated.error);
-            if (evaluated.isNull) return false;
-            if (evaluated.typeName != "boolean")
-                throw std::runtime_error("non-strict predicate did not return boolean");
-            return ExprValue("boolean", evaluated.value, false).asBool();
-        }
-        // Strict-gate replication: a column argument that is physically
-        // NULL makes the function result NULL (three-valued Unknown).
-        if (buffered) {
-            for (const auto& arg : expr.funcArgs) {
-                if (arg.empty() || arg.front() == 0x27) continue;
-                for (size_t i = 0; i < tbl.len; ++i)
-                    if (tbl.cols[i].dataName == arg &&
-                        (*g_bufferedConditionNulls)[i]) return false;
-            }
-        }
-        if (!buffered && g_condNullEngine && g_condNullRid >= 0 &&
-            tbl.tablename == g_condNullTable) {
-            for (const auto& arg : expr.funcArgs) {
-                if (arg.empty() || arg.front() == 0x27) continue;
-                for (size_t i = 0; i < tbl.len; ++i) {
-                    if (tbl.cols[i].dataName != arg) continue;
-                    if (tbl.cols[i].generatedKind != 'v' &&
-                        g_condNullEngine->isColumnNullByRid(
-                            g_condNullDb, tbl.tablename, g_condNullRid, i)) {
-                        return false;
-                    }
-                }
-            }
-        }
-        // Extraction-scope NullRowBinding (rid-keyed loops in queryExpr): the
-        // condition runs after the scan, so the scan-time g_condNull* context
-        // is gone but the binding still carries the null bitmap.
-        if (!buffered && g_nullRowEngine && g_nullRowRid >= 0 &&
-            tbl.tablename == g_nullRowTable) {
-            for (const auto& arg : expr.funcArgs) {
-                if (arg.empty() || arg.front() == 0x27) continue;
-                for (size_t i = 0; i < tbl.len; ++i) {
-                    if (tbl.cols[i].dataName != arg) continue;
-                    if (tbl.cols[i].generatedKind != 'v' &&
-                        i < g_nullRowNatts &&
-                        g_nullRowEngine->isColumnNullByRid(
-                            g_nullRowDb, tbl.tablename, g_nullRowRid, i)) {
-                        return false;
-                    }
-                }
-            }
-        }
-        std::string v = applyScalarFunc(expr, rowBuffer, tbl, valueEngine, valueDb);
-        if (v.empty() || v == "NULL" || v == "null") return false;
-        std::string rhs = cond.value;
-        size_t opLen = 0;
-        while (opLen < rhs.size() &&
-               (rhs[opLen] == '<' || rhs[opLen] == '>' ||
-                rhs[opLen] == '=' || rhs[opLen] == '!')) ++opLen;
-        if (opLen == 0) return false;
-        std::string op = rhs.substr(0, opLen);
-        if (op == "<>") op = "!=";
-        std::string lit = rhs.substr(opLen);
-        size_t a = 0, b = lit.size();
-        while (a < b && isspace(static_cast<unsigned char>(lit[a]))) ++a;
-        while (b > a && isspace(static_cast<unsigned char>(lit[b - 1]))) --b;
-        lit = lit.substr(a, b - a);
-        if (lit.size() >= 2 && lit.front() == 0x27 && lit.back() == 0x27)
-            lit = lit.substr(1, lit.size() - 2);
-        bool numOk = true;
-        double lv = 0, rv = 0;
-        try { lv = std::stod(v); rv = std::stod(lit); } catch (...) { numOk = false; }
-        if (numOk) {
-            if (op == "=") return lv == rv;
-            if (op == "!=") return lv != rv;
-            if (op == "<") return lv < rv;
-            if (op == ">") return lv > rv;
-            if (op == "<=") return lv <= rv;
-            if (op == ">=") return lv >= rv;
-            return false;
-        }
-        if (op == "=") return v == lit;
-        if (op == "!=") return v != lit;
-        if (op == "<") return v < lit;
-        if (op == ">") return v > lit;
-        if (op == "<=") return v <= lit;
-        if (op == ">=") return v >= lit;
-        return false;
+        // Scalar routines have their own strict/non-strict NULL contract.
+        // Evaluate the complete typed predicate instead of the old manual
+        // argument splitter/all-column-NULL gate (which also folded quotes).
+        Condition typed = cond;
+        typed.op = "typedexpr";
+        typed.value = cond.colName + " " + cond.value;
+        typed.colName.clear();
+        return evalConditionOnRow(typed, rowBuffer, tbl);
     }
-
     // Handle OVERLAPS operator: overlaps:s1,e1,s2,e2
     if (cond.op == "overlaps") {
         std::string expr = cond.colName;

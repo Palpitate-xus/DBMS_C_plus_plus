@@ -32,6 +32,7 @@
 #include "Config.h"
 #include "parser/parser.h"
 #include "expression/expr_helper.h"
+#include "expression/ExprEvaluator.h"
 #include <netinet/tcp.h>
 
 #include <algorithm>
@@ -1975,6 +1976,8 @@ std::string whereUnknownFunctionError(const std::string& sql,
         "xml_is_well_formed_document", "xml_is_document", "xmlconcat",
         "xmlcomment"
     };
+    ExprEvaluator functionResolver;
+    functionResolver.setCurrentDB(session.currentDB);
     const auto tokens = SQLParser::tokenize(sql);
     std::vector<int> depths;
     int depth = 0;
@@ -2015,6 +2018,7 @@ std::string whereUnknownFunctionError(const std::string& sql,
                     name == "not in" || name == "between" || name == "not between" ||
                     name == "any" || name == "all";
                 for (const auto* builtin : known) supported |= name == builtin;
+                supported |= functionResolver.hasScalarFunction(call);
                 if (!supported) { missing = call; return; }
                 for (const auto& arg : call->args) visit(arg.get());
                 for (const auto& arg : call->namedArgs) visit(arg.value.get());

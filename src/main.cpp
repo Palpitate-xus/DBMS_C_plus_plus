@@ -732,15 +732,27 @@ static string sqlProcessor(string raw, bool /*normalizeBooleanLiterals*/ = false
             break;
         }
     }
-    // Table-backed projections are evaluated from the CASE AST. The legacy
+    // Table-backed projections and typed predicates use the CASE AST. The legacy
     // case_when rewrite encodes comparisons as evaluator-only pseudo-tokens
     // (for example >a.id 0), which are invalid column references to the
-    // projection binder. Keep the SELECT list intact while retaining
-    // the legacy rewrite for ON/WHERE clauses after FROM.
+    // projection binder. Keep WHERE and following clauses intact too: an
+    // evaluator-only case_when call cannot preserve lazy stored-function arms.
     const size_t fromKeyword = findTopLevelKeyword(raw, "from", 0);
+    const size_t predicateKeyword = findTopLevelKeyword(raw, "where", 0);
+    const auto caseCommand = dbms::SQLParser::classify(raw);
     if (hasNullSafeComparison(raw, true)) {
         // Null-safe comparison operands stay genuine expressions, including
         // CASE in WHERE/ON. Evaluator-only CASE pseudo-tokens lose their AST.
+    } else if (predicateKeyword != string::npos &&
+               (caseCommand == dbms::SqlCommand::Select ||
+                caseCommand == dbms::SqlCommand::Update ||
+                caseCommand == dbms::SqlCommand::Delete)) {
+        string prefix = raw.substr(0, predicateKeyword);
+        if (caseCommand == dbms::SqlCommand::Select && fromKeyword != string::npos)
+            prefix = prefix.substr(0, fromKeyword) +
+                preprocessCaseWhen(prefix.substr(fromKeyword));
+        else prefix = preprocessCaseWhen(prefix);
+        raw = prefix + raw.substr(predicateKeyword);
     } else if (toLower(raw).rfind("select ", 0) == 0 &&
         fromKeyword != string::npos) {
         raw = raw.substr(0, fromKeyword) +
@@ -9334,6 +9346,7 @@ static bool hasComputedPredicate(const string& sql, bool* immutableConstant = nu
         } else if (const auto* function = dynamic_cast<const dbms::FunctionCallExpr*>(node)) {
             // Only these built-in conditional forms are safe to fold here.
             // Never execute sequences, volatile or user functions on an empty scan.
+            computed = true;
             const string name = toLower(function->funcName);
             if (!function->schema.empty() ||
                 (name != "coalesce" && name != "nullif" &&

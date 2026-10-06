@@ -96,6 +96,14 @@ public:
     bool hasFunction(const std::string& name) const;
     char volatility(const std::string& name) const;
 
+    // Resolve canonical SQL function names from metadata only. Preparation
+    // binds stored calls to private registry slots; it never executes them.
+    bool hasScalarFunction(const FunctionCallExpr* call,
+                           StorageEngine* engine = nullptr) const;
+    char scalarFunctionVolatility(const FunctionCallExpr* call,
+                                  StorageEngine* engine = nullptr) const;
+    void bindScalarFunctions(Expr* expression, StorageEngine* engine = nullptr);
+
     // 设置当前数据库，供 nextval/currval/lastval 等内置函数使用
     void setCurrentDB(const std::string& db) { currentDB_ = db; }
 

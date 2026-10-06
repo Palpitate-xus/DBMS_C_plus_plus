@@ -1559,6 +1559,7 @@ static ExprEvalResult evalStringImpl(
     }, 's');
     ExprValue v;
     try {
+        evaluator.bindScalarFunctions(select->selectList[0].expr.get());
         v = evaluator.eval(select->selectList[0].expr.get(), ctx);
     } catch (const std::exception& e) {
         // Runtime expression errors (division by zero, invalid cast input)

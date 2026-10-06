@@ -2,6 +2,7 @@
 #include "expr_helper.h"
 #include "commands/TableManage.h"
 #include "catalog/collation.h"
+#include "catalog/catalog.h"
 #include "common/DateType.h"
 #include "common/BooleanCodec.h"
 #include "common/NetworkValue.h"
@@ -4538,6 +4539,145 @@ bool ExprEvaluator::hasFunction(const std::string& name) const {
 char ExprEvaluator::volatility(const std::string& name) const {
     auto it = volatility_.find(toLower(name));
     return it != volatility_.end() ? it->second : 'v';
+}
+
+namespace {
+struct ResolvedScalarFunction {
+    bool found = false;
+    bool stored = false;
+    std::string name;
+    StorageEngine::UDFInfo routine;
+};
+
+ResolvedScalarFunction resolveScalarFunction(
+    const ExprEvaluator& evaluator, const FunctionCallExpr* call,
+    const std::string& database, StorageEngine* engine) {
+    if (!call) return {};
+    static const std::set<std::string> syntaxFunctions = {
+        "coalesce", "nullif", "greatest", "least", "make_interval",
+        "between", "not between", "like escape", "not like escape",
+        "ilike escape", "not ilike escape", "similar to escape",
+        "not similar to escape"
+    };
+    ResolvedScalarFunction result;
+    // SQL syntax wrappers have spaces and are not routine identifiers.
+    const std::string syntax = toLower(call->funcName);
+    if (call->schema.empty() && syntaxFunctions.count(syntax)) {
+        result.found = true;
+        result.name = syntax;
+        return result;
+    }
+    CatalogManager::QualifiedName name;
+    if (!CatalogManager::parseQualifiedName(call->funcName, name, true) ||
+        !name.schema.empty()) return result;
+    std::string schema;
+    if (!call->schema.empty()) {
+        CatalogManager::QualifiedName decoded;
+        if (!CatalogManager::parseQualifiedName(call->schema, decoded, true) ||
+            !decoded.schema.empty()) return result;
+        schema = decoded.name;
+    }
+    result.name = name.name;
+    if ((schema.empty() || schema == "pg_catalog") &&
+        result.name == toLower(result.name) && evaluator.hasFunction(result.name)) {
+        result.found = true;
+        return result;
+    }
+    // Stored scalar routines currently belong to the database's public
+    // namespace. An explicit different schema must not fall back to public.
+    if (database.empty() || (!schema.empty() && schema != "public")) return result;
+    engine = engine ? engine : &g_engine;
+    result.routine = engine->getUDF(database, result.name);
+    if (result.routine.expression.empty()) return result;
+    size_t arity = result.routine.paramNames.size();
+    if (arity == 1 && result.routine.paramNames.front().empty()) arity = 0;
+    if (!call->namedArgs.empty() || call->args.size() != arity) return result;
+    result.found = result.stored = true;
+    return result;
+}
+} // namespace
+
+bool ExprEvaluator::hasScalarFunction(const FunctionCallExpr* call,
+                                      StorageEngine* engine) const {
+    return resolveScalarFunction(*this, call, currentDB_, engine).found;
+}
+
+char ExprEvaluator::scalarFunctionVolatility(const FunctionCallExpr* call,
+                                             StorageEngine* engine) const {
+    const auto resolved = resolveScalarFunction(*this, call, currentDB_, engine);
+    if (!resolved.found)
+        throw DbError("42883", "function does not exist: " +
+            (call ? call->funcName : std::string{}));
+    if (resolved.stored) return resolved.routine.provolatile;
+    // Syntax wrappers have no callback of their own; their volatility is
+    // entirely that of their operand expressions, analyzed by the caller.
+    return hasFunction(resolved.name) ? volatility(resolved.name) : 'i';
+}
+
+void ExprEvaluator::bindScalarFunctions(Expr* expression, StorageEngine* engine) {
+    engine = engine ? engine : &g_engine;
+    std::function<void(Expr*)> visit = [&](Expr* node) {
+        if (!node) return;
+        if (auto* function = dynamic_cast<FunctionCallExpr*>(node)) {
+            const auto resolved = resolveScalarFunction(*this, function, currentDB_, engine);
+            if (!resolved.found)
+                throw DbError("42883", "function does not exist: " + function->funcName);
+            if (resolved.stored) {
+                if (function->hasOver || function->distinct || function->filter ||
+                    !function->orderBy.empty())
+                    throw DbError("0A000", "scalar routine used as an aggregate or window function");
+                std::string key = "__dbms_bound_routine_" + std::to_string(functions_.size());
+                while (hasFunction(key)) key += '_';
+                const std::string database = currentDB_;
+                registerFunction(key,
+                    [engine, database, resolved](const std::vector<ExprValue>& args) {
+                    std::vector<std::string> values;
+                    std::vector<bool> nulls;
+                    for (const auto& arg : args) {
+                        values.push_back(arg.value);
+                        nulls.push_back(arg.isNull);
+                    }
+                    std::string value;
+                    bool isNull = false;
+                    if (!engine->callUDF(database, resolved.name, values, value, &isNull, &nulls))
+                        throw DbError("22023", "stored-function evaluation failed: " + resolved.name);
+                    return ExprValue(ExprHelper::canonicalResultTypeName(resolved.routine.returnType),
+                                     value, isNull);
+                }, resolved.routine.provolatile);
+                function->funcName = key;
+            } else {
+                function->funcName = resolved.name;
+            }
+            function->schema.clear();
+            for (auto& arg : function->args) visit(arg.get());
+            for (auto& arg : function->namedArgs) visit(arg.value.get());
+            visit(function->filter.get());
+            for (auto& item : function->over.partitionBy) visit(item.get());
+            for (auto& item : function->over.orderBy) visit(item.first.get());
+            visit(function->over.frameStart.get());
+            visit(function->over.frameEnd.get());
+        } else if (auto* unary = dynamic_cast<UnaryOpExpr*>(node)) {
+            visit(unary->operand.get());
+        } else if (auto* binary = dynamic_cast<BinaryOpExpr*>(node)) {
+            visit(binary->left.get());
+            if (binary->op != "::") visit(binary->right.get());
+        } else if (auto* cast = dynamic_cast<CastExpr*>(node)) {
+            visit(cast->operand.get());
+        } else if (auto* conditional = dynamic_cast<CaseExpr*>(node)) {
+            visit(conditional->switchExpr.get());
+            for (auto& arm : conditional->whenClauses) {
+                visit(arm.first.get()); visit(arm.second.get());
+            }
+            visit(conditional->elseExpr.get());
+        } else if (auto* array = dynamic_cast<ArrayExpr*>(node)) {
+            for (auto& item : array->elements) visit(item.get());
+        } else if (auto* row = dynamic_cast<RowExpr*>(node)) {
+            for (auto& item : row->elements) visit(item.get());
+        }
+        // Subquery expressions have an independent query namespace and are
+        // prepared by the query host, never evaluated as scalar AST nodes.
+    };
+    visit(expression);
 }
 
 ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowContext& ctx) const {
