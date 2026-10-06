@@ -42,9 +42,10 @@ ROOT combined this interface with the independently verified actual-engine
 owner fix `8fc7eeda`; the three-way conflict explicitly retained `this` in the
 new projection NULL fallback. The resulting ROOT headers require fresh all-55
 formal O2 compilation and matching tests. Build `96406` completed, and repeat
-build plus 55/55 object/binary-stamp audit passed. Matching native/protocol
-groups are still running at this checkpoint; the private V4 passes do not
-prove that new combination.
+build plus 55/55 object/binary-stamp audit passed. Final matching groups then
+passed 39 native and 36 protocol entry points, including the new 42-control
+receiver regression. The unchanged clause diagnostic still fails seven
+controls; a complete default protocol is running, not yet a passing gate.
 Complete general query preparation, all DML RETURNING demand semantics,
 aggregate/window/record/cursor execution and the broader routine families
 remain independent work. The historical diagnostic text below describes the

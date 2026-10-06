@@ -39,10 +39,13 @@ repaired, but the final matching constraint_expr test must still be rerun.
 Frozen binary is `/tmp/dbms-owner-receiver-numeric-combination.SSCXIETb/dbms_main.frozen`,
 SHA256 `a38da2abc3fb62270eedd988d67e66135a5a5f3a446f535c7e7ef92cb4a02b9c`.
 Fresh matching 39 native entry points (`49782`) and 36 protocol entry points
-(`96112`) are running; neither is called a completed passing group yet. The
+(`96112`) both exited 0. The
 exact arrays, fresh-stub/TU compile flags, signature checks and separate native
 working directories are in that artifact directory's `verify.sh`.
-The retained clause diagnostic and complete gates remain next verification.
+The retained clause diagnostic (`88256`) exited 1 with the same seven genuine
+ORDER/subquery/EXPLAIN/typed-UPDATE failures. A new complete default protocol
+(`80673`) is running against this frozen binary with its original 10-second
+socket timeout; no completion or timeout relaxation is claimed.
 Full default protocol/registered suite/PG18.6 differential are not newly green.
 Previous full failures and statement-image I/O amplification remain recorded.
 
