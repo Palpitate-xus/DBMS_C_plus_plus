@@ -134,7 +134,7 @@ int main() {
 
     assert(!runDml("INSERT INTO conflict_t VALUES (1, 'where-update'), (6, 'six') "
                    "ON CONFLICT (id) DO UPDATE SET name = excluded.name "
-                   "WHERE name = 'expression-x' RETURNING id, name", session));
+                   "WHERE conflict_t.name = 'expression-x' RETURNING id, name", session));
     result = dbms::takeLastDmlResult();
     assert(result.available);
     assert(result.commandTag == "INSERT 0 2");
@@ -143,7 +143,7 @@ int main() {
 
     assert(!runDml("INSERT INTO conflict_t VALUES (1, 'skipped'), (7, 'seven') "
                    "ON CONFLICT (id) DO UPDATE SET name = excluded.name "
-                   "WHERE name = 'does-not-match' RETURNING id, name", session));
+                   "WHERE conflict_t.name = 'does-not-match' RETURNING id, name", session));
     result = dbms::takeLastDmlResult();
     assert(result.available);
     assert(result.commandTag == "INSERT 0 1");
@@ -159,7 +159,7 @@ int main() {
                            {{"id", "1"}, {"name", "old"}}) == dbms::DBStatus::OK);
     assert(!runDml("INSERT INTO composite_conflict VALUES (1, 'old') "
                    "ON CONFLICT (name, id) DO UPDATE SET name = 'updated' "
-                   "WHERE name = 'old' "
+                   "WHERE composite_conflict.name = 'old' "
                    "RETURNING id, name", session));
     result = dbms::takeLastDmlResult();
     assert(result.available);
