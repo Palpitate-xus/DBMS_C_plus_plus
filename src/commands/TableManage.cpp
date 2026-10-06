@@ -21017,6 +21017,12 @@ static constexpr const char* SEQUENCE_FILE_V4 = "DBMSSEQ4";
 static constexpr const char* SEQUENCE_FILE_V5 = "DBMSSEQ5";
 static constexpr const char* SEQUENCE_RUNTIME_DIRECTORY = ".sequence_runtime";
 
+struct SequenceCallState {
+    int64_t lastValue = 0; // persistent reservation high-water, like pg_sequence_data
+    bool called = false;
+    bool known = false;
+};
+
 static bool validSequenceGeneration(const std::string& generation) {
     UuidValue parsed;
     return generation.size() == 36 && UuidValue::parse(generation, parsed) &&
@@ -21030,7 +21036,7 @@ static std::filesystem::path sequenceRuntimePath(
 
 static bool readSequenceRuntime(const std::filesystem::path& path,
     const std::string& generation, int64_t& next, int64_t& allocated,
-    bool& exhausted) {
+    bool& exhausted, SequenceCallState* callState = nullptr) {
     if (!validSequenceGeneration(generation)) return false;
     std::error_code error;
     const auto status = std::filesystem::symlink_status(path, error);
@@ -21039,26 +21045,37 @@ static bool readSequenceRuntime(const std::filesystem::path& path,
     std::string magic, storedGeneration, trailing;
     int exhaustedFlag = 0;
     if (!(input >> magic >> storedGeneration >> next >> allocated >> exhaustedFlag) ||
-        magic != "DBMSSEQR1" || storedGeneration != generation ||
-        (exhaustedFlag != 0 && exhaustedFlag != 1) || (input >> trailing)) {
+        (magic != "DBMSSEQR1" && magic != "DBMSSEQR2") || storedGeneration != generation ||
+        (exhaustedFlag != 0 && exhaustedFlag != 1)) {
         return false;
     }
+    SequenceCallState state;
+    if (magic == "DBMSSEQR2") {
+        int called = 0;
+        if (!(input >> state.lastValue >> called) || (called != 0 && called != 1)) return false;
+        state.called = called != 0;
+        state.known = true;
+    }
+    if (input >> trailing) return false;
     if (!input.eof() || input.bad()) return false;
     exhausted = exhaustedFlag != 0;
+    if (callState) *callState = state;
     return true;
 }
 
 static bool writeSequenceRuntime(const std::filesystem::path& declaration,
     const std::string& generation, int64_t next, int64_t allocated,
-    bool exhausted) {
+    bool exhausted, const SequenceCallState* callState = nullptr) {
     if (!validSequenceGeneration(generation)) return false;
     const auto path = sequenceRuntimePath(declaration, generation);
     std::error_code error;
     std::filesystem::create_directories(path.parent_path(), error);
     if (error || std::filesystem::is_symlink(path.parent_path())) return false;
     std::ostringstream serialized;
-    serialized << "DBMSSEQR1 " << generation << ' ' << next << ' '
-               << allocated << ' ' << (exhausted ? 1 : 0) << '\n';
+    serialized << (callState ? "DBMSSEQR2 " : "DBMSSEQR1 ") << generation << ' '
+               << next << ' ' << allocated << ' ' << (exhausted ? 1 : 0);
+    if (callState) serialized << ' ' << callState->lastValue << ' ' << (callState->called ? 1 : 0);
+    serialized << '\n';
     return index_file::writeAtomically(path, serialized.str());
 }
 
@@ -21091,9 +21108,10 @@ static bool preserveSequenceRuntimeForks(const std::filesystem::path& live,
         const auto generation = entry.path().filename().string();
         int64_t next = 0, allocated = 0;
         bool exhausted = false;
-        if (!readSequenceRuntime(entry.path(), generation, next, allocated, exhausted) ||
+        SequenceCallState state;
+        if (!readSequenceRuntime(entry.path(), generation, next, allocated, exhausted, &state) ||
             !writeSequenceRuntime(staged / "declaration", generation,
-                                  next, allocated, exhausted)) return false;
+                                  next, allocated, exhausted, state.known ? &state : nullptr)) return false;
     }
     return true;
 }
@@ -21153,7 +21171,8 @@ static bool readSequenceFile(const std::filesystem::path& path,
                              int64_t& nextValue,
                              int64_t& lastAllocated,
                              bool* exhaustedOut = nullptr,
-                             std::string* generationOut = nullptr) {
+                             std::string* generationOut = nullptr,
+                             SequenceCallState* callStateOut = nullptr) {
     std::ifstream ifs(path);
     if (!ifs) return false;
     std::string firstToken;
@@ -21274,10 +21293,11 @@ static bool readSequenceFile(const std::filesystem::path& path,
     std::string extra;
     if (ifs >> extra) return false;
 
+    SequenceCallState callState;
     if (version5) {
         bool exhausted = false;
         if (!readSequenceRuntime(sequenceRuntimePath(path, generation), generation,
-                                 next, last, exhausted)) return false;
+                                 next, last, exhausted, &callState)) return false;
         exhaustedFlag = exhausted ? 1 : 0;
     }
 
@@ -21292,7 +21312,9 @@ static bool readSequenceFile(const std::filesystem::path& path,
         if (!checkedSub(start, increment, initialPredecessor)) {
             initialPredecessor = start;
         }
-        if (last != initialPredecessor) return false;
+        int64_t nextPredecessor = 0;
+        sequencePredecessor(next, increment, nextPredecessor);
+        if (last != initialPredecessor && (!version5 || last != nextPredecessor)) return false;
     }
 
     if (!version2 && !version3 && !version4 && !version5) {
@@ -21317,8 +21339,19 @@ static bool readSequenceFile(const std::filesystem::path& path,
     info.ownedByColumn = std::move(ownedColumn);
     nextValue = next;
     lastAllocated = last;
+    if (!callState.known) {
+        // Old declarations encoded an unallocated predecessor rather than
+        // is_called. Preserve their exact next cursor while migrating; new
+        // allocations thereafter persist both independent fields.
+        callState.called = exhaustedFlag != 0 || (last >= minValue && last <= maxValue);
+        callState.lastValue = callState.called ? last : next;
+        callState.known = true;
+    }
+    if (version5 && callState.lastValue < minValue) return false;
+    if (version5 && callState.lastValue > maxValue) return false;
     if (exhaustedOut) *exhaustedOut = exhaustedFlag != 0;
     if (generationOut) *generationOut = std::move(generation);
+    if (callStateOut) *callStateOut = callState;
     return true;
 }
 
@@ -21327,9 +21360,17 @@ static bool writeSequenceFile(const std::filesystem::path& path,
                               int64_t nextValue,
                               int64_t lastAllocated,
                               bool exhausted = false,
-                              std::string generation = {}) {
+                              std::string generation = {},
+                              const SequenceCallState* suppliedCallState = nullptr) {
     if (generation.empty()) generation = UuidValue::generateV4().toString();
-    if (!writeSequenceRuntime(path, generation, nextValue, lastAllocated, exhausted))
+    SequenceCallState initial;
+    if (!suppliedCallState) {
+        initial.called = false;
+        initial.lastValue = nextValue;
+        initial.known = true;
+        suppliedCallState = &initial;
+    }
+    if (!writeSequenceRuntime(path, generation, nextValue, lastAllocated, exhausted, suppliedCallState))
         return false;
     std::ostringstream serialized;
     serialized << SEQUENCE_FILE_V5 << " "
@@ -21360,7 +21401,8 @@ static bool ensureSequenceGenerationsForBackup(const std::string& dbname) {
         int64_t next = 0, allocated = 0;
         bool exhausted = false;
         std::string generation;
-        if (!readSequenceFile(entry.path(), info, next, allocated, &exhausted, &generation)) {
+        SequenceCallState callState;
+        if (!readSequenceFile(entry.path(), info, next, allocated, &exhausted, &generation, &callState)) {
             // The unrelated legacy per-table AUTO_INCREMENT sidecar also
             // has extension .seq, but its first token is a column name.
             std::ifstream input(entry.path());
@@ -21370,7 +21412,7 @@ static bool ensureSequenceGenerationsForBackup(const std::string& dbname) {
             continue;
         }
         if (generation.empty() && !writeSequenceFile(entry.path(), info,
-                next, allocated, exhausted)) return false;
+                next, allocated, exhausted, {}, &callState)) return false;
     }
     return true;
 }
@@ -21478,13 +21520,14 @@ DBStatus StorageEngine::alterSequence(const std::string& dbname,
         return DBStatus::INVALID_ARGUMENT;
     }
     auto path = sequencePath(dbname, seqname);
-    std::lock_guard<std::mutex> lock(g_sequenceMutex);
+    std::unique_lock<std::mutex> lock(g_sequenceMutex);
     if (!std::filesystem::exists(path)) return DBStatus::TABLE_NOT_FOUND;
     dbms::SequenceInfo old;
     int64_t nextValue, lastAllocated;
     bool exhausted = false;
     std::string generation;
-    if (!readSequenceFile(path, old, nextValue, lastAllocated, &exhausted, &generation))
+    SequenceCallState callState;
+    if (!readSequenceFile(path, old, nextValue, lastAllocated, &exhausted, &generation, &callState))
         return DBStatus::INVALID_VALUE;
 
     dbms::SequenceInfo merged = old;
@@ -21494,16 +21537,17 @@ DBStatus StorageEngine::alterSequence(const std::string& dbname,
     if (info.incrementSpecified) {
         merged.increment = info.increment;
         if (merged.increment == 0) return DBStatus::INVALID_VALUE;
-        // Direction-dependent defaults are recomputed below, while explicit
-        // bounds loaded from the versioned file remain unchanged.
-        merged.applyDefaults();
-        sequencePredecessor(nextValue, merged.increment, lastAllocated);
-        exhausted = false;
     }
     if (info.hasMinValue) { merged.minValue = info.minValue; merged.hasMinValue = true; merged.noMinValue = false; }
-    if (info.noMinValue) { merged.noMinValue = true; merged.hasMinValue = false; }
+    if (info.noMinValue) {
+        merged.noMinValue = true; merged.hasMinValue = false;
+        merged.minValue = merged.increment > 0 ? 1 : -std::numeric_limits<int64_t>::max();
+    }
     if (info.hasMaxValue) { merged.maxValue = info.maxValue; merged.hasMaxValue = true; merged.noMaxValue = false; }
-    if (info.noMaxValue) { merged.noMaxValue = true; merged.hasMaxValue = false; }
+    if (info.noMaxValue) {
+        merged.noMaxValue = true; merged.hasMaxValue = false;
+        merged.maxValue = merged.increment > 0 ? std::numeric_limits<int64_t>::max() : -1;
+    }
     if (info.cacheSpecified) merged.cache = info.cache;
     if (info.cycleSpecified) merged.cycle = info.cycle;
     if (info.ownedBySpecified) {
@@ -21511,7 +21555,6 @@ DBStatus StorageEngine::alterSequence(const std::string& dbname,
         merged.ownedByColumn = info.ownedByColumn;
     }
 
-    merged.applyDefaults();
     if (merged.minValue > merged.maxValue) return DBStatus::INVALID_VALUE;
     if (merged.start < merged.minValue || merged.start > merged.maxValue) {
         return DBStatus::INVALID_VALUE;
@@ -21525,23 +21568,27 @@ DBStatus StorageEngine::alterSequence(const std::string& dbname,
         nextValue = restartValue;
         sequencePredecessor(nextValue, merged.increment, lastAllocated);
         exhausted = false;
-    } else if (nextValue < merged.minValue || nextValue > merged.maxValue) {
-        // PG adjusts nextValue to be within bounds when ALTER changes bounds.
-        if (merged.increment > 0) nextValue = merged.minValue;
-        else nextValue = merged.maxValue;
-        sequencePredecessor(nextValue, merged.increment, lastAllocated);
+        callState = {restartValue, false, true};
+    } else {
+        if (callState.lastValue < merged.minValue || callState.lastValue > merged.maxValue)
+            return DBStatus::INVALID_VALUE;
+        // ALTER discards the backend's preallocated cache. The new stream
+        // advances from persistent last_value using the NEW increment, not
+        // from the old stream's already-computed next cursor.
         exhausted = false;
-    }
-    if (exhausted) {
-        int64_t successor = 0;
-        if (checkedAdd(nextValue, merged.increment, successor) &&
-            successor >= merged.minValue && successor <= merged.maxValue) {
-            // Expanding the active bound makes an exhausted sequence usable
-            // again.  nextValue stores the last returned boundary value while
-            // exhausted, so advance once before the next allocation.
-            nextValue = successor;
-            exhausted = false;
-        }
+        nextValue = callState.lastValue;
+        if (callState.called) {
+            int64_t advanced = 0;
+            const bool fits = checkedAdd(callState.lastValue, merged.increment, advanced);
+            if (!fits || advanced < merged.minValue || advanced > merged.maxValue) {
+                if (merged.cycle)
+                    nextValue = merged.increment > 0 ? merged.minValue : merged.maxValue;
+                else exhausted = true;
+            } else nextValue = advanced;
+            lastAllocated = callState.lastValue;
+            if (merged.cycle && (!fits || advanced < merged.minValue || advanced > merged.maxValue))
+                sequencePredecessor(nextValue, merged.increment, lastAllocated);
+        } else sequencePredecessor(nextValue, merged.increment, lastAllocated);
     }
     if (merged.cache < 1) return DBStatus::INVALID_VALUE;
     // PG replaces storage for every option affecting future generation,
@@ -21551,8 +21598,18 @@ DBStatus StorageEngine::alterSequence(const std::string& dbname,
         info.hasMaxValue || info.noMaxValue || info.cacheSpecified || info.cycleSpecified;
     if (!writeSequenceFile(
             path, merged, nextValue, lastAllocated, exhausted,
-            rewrite ? std::string{} : generation))
+            rewrite ? std::string{} : generation, &callState))
         return DBStatus::IO_ERROR;
+    lock.unlock();
+    if (!transactionContext().inTransaction) {
+        // Native callers need not open a SQL owner. Do not accumulate
+        // retired forks, but never reclaim a generation while another
+        // backend can still own its rollback image.
+        std::lock_guard<std::mutex> activeLock(globalTxnMutex());
+        if (std::none_of(activeTransactionDatabases().begin(), activeTransactionDatabases().end(),
+                [&](const auto& entry) { return entry.second == dbname; }))
+            pruneSequenceRuntimeForks(dbname);
+    }
     return DBStatus::OK;
 }
 
@@ -21597,7 +21654,7 @@ DBStatus StorageEngine::dropSequence(const std::string& dbname,
         return DBStatus::INVALID_ARGUMENT;
     }
     auto path = sequencePath(dbname, seqname);
-    std::lock_guard<std::mutex> lock(g_sequenceMutex);
+    std::unique_lock<std::mutex> lock(g_sequenceMutex);
     std::error_code ec;
     const auto fileStatus = std::filesystem::symlink_status(path, ec);
     if (ec) return DBStatus::IO_ERROR;
@@ -21615,6 +21672,13 @@ DBStatus StorageEngine::dropSequence(const std::string& dbname,
     if (!index_file::syncDirectory(path.parent_path())) {
         (void)index_file::writeAtomicallyNoReplace(path, originalBytes);
         return DBStatus::IO_ERROR;
+    }
+    lock.unlock();
+    if (!transactionContext().inTransaction) {
+        std::lock_guard<std::mutex> activeLock(globalTxnMutex());
+        if (std::none_of(activeTransactionDatabases().begin(), activeTransactionDatabases().end(),
+                [&](const auto& entry) { return entry.second == dbname; }))
+            pruneSequenceRuntimeForks(dbname);
     }
     return DBStatus::OK;
 }
@@ -21655,8 +21719,9 @@ int64_t StorageEngine::nextval(const std::string& dbname,
     int64_t nextValue, lastAllocated;
     bool exhausted = false;
     std::string generation;
+    SequenceCallState callState;
     if (!readSequenceFile(
-            path, info, nextValue, lastAllocated, &exhausted, &generation)) {
+            path, info, nextValue, lastAllocated, &exhausted, &generation, &callState)) {
         throwSequenceReadError(path, resolved.displayName);
     }
     if (exhausted) {
@@ -21702,6 +21767,7 @@ int64_t StorageEngine::nextval(const std::string& dbname,
         lastAllocated = *end;
     }
 
+    callState = {lastAllocated, true, true};
     int64_t result = nextValue;
     int64_t advanced = 0;
     if (!checkedAdd(nextValue, info.increment, advanced)) {
@@ -21733,8 +21799,8 @@ int64_t StorageEngine::nextval(const std::string& dbname,
     }
 
     if (!(generation.empty()
-            ? writeSequenceFile(path, info, nextValue, lastAllocated, exhausted)
-            : writeSequenceRuntime(path, generation, nextValue, lastAllocated, exhausted))) {
+            ? writeSequenceFile(path, info, nextValue, lastAllocated, exhausted, {}, &callState)
+            : writeSequenceRuntime(path, generation, nextValue, lastAllocated, exhausted, &callState))) {
         throw DbError("58030",
                       "could not write sequence \"" +
                           resolved.displayName + "\"");
@@ -21864,9 +21930,10 @@ int64_t StorageEngine::setval(const std::string& dbname,
         nextValue = value;
     }
     sequencePredecessor(nextValue, info.increment, lastAllocated);
+    const SequenceCallState callState{value, isCalled, true};
     if (!(generation.empty()
-            ? writeSequenceFile(path, info, nextValue, lastAllocated, exhausted)
-            : writeSequenceRuntime(path, generation, nextValue, lastAllocated, exhausted))) {
+            ? writeSequenceFile(path, info, nextValue, lastAllocated, exhausted, {}, &callState)
+            : writeSequenceRuntime(path, generation, nextValue, lastAllocated, exhausted, &callState))) {
         throw DbError("58030",
                       "could not write sequence \"" +
                           resolved.displayName + "\"");

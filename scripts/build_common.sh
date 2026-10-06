@@ -124,6 +124,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/values_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/set_operation_structured_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/sequence_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/sequence_ddl_rollback_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/bit_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/network_types_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/geometric_protocol_e2e_test.py)
