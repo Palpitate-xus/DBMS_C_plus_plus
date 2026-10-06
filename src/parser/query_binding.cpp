@@ -358,6 +358,41 @@ public:
         for (auto& field : value.orderBy) expression(field.first, scopes);
         expression(value.frameStart, scopes); expression(value.frameEnd, scopes);
     }
+    static std::string projectionTypeLabel(const std::string& spelling) {
+        auto type=common_type_detail::canonical(spelling);
+        if(common_type_detail::array(type))type.resize(type.size()-2);
+        static const std::map<std::string,std::string> catalogNames={
+            {"boolean","bool"},{"smallint","int2"},{"integer","int4"},{"bigint","int8"},
+            {"real","float4"},{"double precision","float8"},{"bit varying","varbit"}};
+        if(const auto found=catalogNames.find(type);found!=catalogNames.end())return found->second;
+        if(TypeRegistry::instance().findType(type))return type;
+        CatalogManager::QualifiedName name;
+        return CatalogManager::parseQualifiedName(spelling,name,true)?name.name:type;
+    }
+    static std::pair<std::string,int> projectionLabel(const Expr* expression) {
+        if(!expression)return {"",0};
+        if(const auto* column=dynamic_cast<const ColumnRefExpr*>(expression))return {column->column,2};
+        if(const auto* call=dynamic_cast<const FunctionCallExpr*>(expression))
+            return call->funcName.find(' ')==std::string::npos?std::make_pair(identifier(call->funcName),2):std::make_pair(std::string(),0);
+        const Expr* operand=nullptr;std::string castType;
+        if(const auto* cast=dynamic_cast<const CastExpr*>(expression)){operand=cast->operand.get();castType=cast->typeName;}
+        else if(const auto* binary=dynamic_cast<const BinaryOpExpr*>(expression);binary&&binary->op=="::") {
+            operand=binary->left.get();
+            if(const auto* target=dynamic_cast<const LiteralExpr*>(binary->right.get()))castType=target->value;
+        }
+        if(!castType.empty()) {
+            const auto label=projectionLabel(operand);
+            return label.second==2?label:std::make_pair(projectionTypeLabel(castType),1);
+        }
+        if(const auto* unary=dynamic_cast<const UnaryOpExpr*>(expression);
+            unary&&SQLParser::toLower(unary->op).rfind("collate ",0)==0)return projectionLabel(unary->operand.get());
+        if(dynamic_cast<const CaseExpr*>(expression))return {"case",1};
+        if(dynamic_cast<const ArrayExpr*>(expression))return {"array",1};
+        if(dynamic_cast<const RowExpr*>(expression))return {"row",1};
+        if(const auto* literal=dynamic_cast<const LiteralExpr*>(expression);literal&&!literal->typeName.empty())
+            return {projectionTypeLabel(literal->typeName),1};
+        return {"",0};
+    }
     QueryRowDescriptor project(std::vector<SelectItem>& items, const std::vector<Namespace>& scopes,
                                std::vector<const Expr*>* leaves = nullptr) {
         QueryRowDescriptor columns;
@@ -387,11 +422,7 @@ public:
             std::string name = "?column?";
             const bool columnLabel = dynamic_cast<ColumnRefExpr*>(item.expr.get());
             if (!item.alias.empty()) name = identifier(item.alias);
-            else if (item.expr && item.expr->type == ExprType::ColumnRef)
-                name = static_cast<ColumnRefExpr*>(item.expr.get())->column;
-            else if (item.expr && item.expr->type == ExprType::FunctionCall)
-                if (static_cast<FunctionCallExpr*>(item.expr.get())->funcName.find(' ') == std::string::npos)
-                    name = identifier(static_cast<FunctionCallExpr*>(item.expr.get())->funcName);
+            else if(const auto label=projectionLabel(item.expr.get());label.second)name=label.first;
             const auto type = expression(item.expr, scopes);
             if (columnLabel && item.alias.empty() && item.expr->type == ExprType::Parameter) {
                 if (item.sourceExpressionEnd == std::string::npos)
