@@ -13,6 +13,7 @@
 #include "common/DbError.h"
 #include "expression/ExprEvaluator.h"
 #include "expression/expr_helper.h"
+#include "expression/prepared_query_execution.h"
 #include "parser/parser.h"
 #include "permissions.h"
 #include "types/numeric.h"
@@ -3609,6 +3610,209 @@ bool executeUpdateFrom(const UpdateStmt& stmt, Session& s, bool& fallback) {
     return false;
 }
 
+bool executePreparedUpdate(const UpdateStmt& stmt, Session& s, bool& fallback,
+                           const std::string& originalSql) {
+    fallback = false;
+    if (!checkDatabase(s)) return true;
+    const std::string requestedTable = identifier(stmt.tableName);
+    const std::string resolvedTable = resolveTable(s, stmt.tableName, true);
+    if (g_engine.viewExists(s.currentDB, requestedTable) ||
+        g_engine.isMaterializedView(s.currentDB, requestedTable)) {
+        fallback = true;
+        return false;
+    }
+    if (!g_engine.tableExists(s.currentDB, resolvedTable))
+        throw DbError("42P01", "relation does not exist: " + requestedTable);
+    if (!checkTablePrivilege(s, requestedTable,
+                             StorageEngine::TablePrivilege::Update)) return true;
+    const TableSchema table = g_engine.getTableSchema(s.currentDB, resolvedTable);
+    std::vector<std::string> columns;
+    for (const auto& assignment : stmt.setClauses) {
+        const auto column = identifier(assignment.first);
+        if (!findTableColumn(table, column))
+            throw DbError("42703", "column does not exist: " + column);
+        if (std::find(columns.begin(), columns.end(), column) != columns.end())
+            throw DbError("42601", "multiple assignments to column " + column);
+        columns.push_back(column);
+    }
+    if (columns.empty()) throw DbError("42601", "empty UPDATE SET clause");
+    if (!sessionIsAdmin(s) && !isTempTable(s, requestedTable) &&
+        !g_engine.hasColumnPermission(s.currentDB, requestedTable,
+            effectiveSessionRole(s), StorageEngine::TablePrivilege::Update, columns)) {
+        std::cout << "permission denied: UPDATE on restricted columns of table "
+                  << requestedTable << std::endl;
+        return true;
+    }
+
+    const ReturningBinding binding = returningBinding(
+        stmt.returningOptions, requestedTable, stmt.alias);
+    std::vector<ReturningProjection> projections;
+    if (!stmt.returning.empty() &&
+        !buildReturningProjections(stmt.returning, table, binding, projections)) {
+        fallback = true;
+        return false;
+    }
+
+    // Prepare the original whole statement, not a stringified predicate or
+    // fictitious routine variables. Every column has an owner/source/ordinal
+    // and all names/routine signatures are checked before any SET is run.
+    auto prepared = std::make_shared<PreparedQuery>(
+        g_engine.prepareBoundQuery(s.currentDB, originalSql));
+    auto* update = dynamic_cast<UpdateStmt*>(prepared->ast.get());
+    if (!update || update->fromClause || !update->whereCurrentOf.empty())
+        throw DbError("XX000", "prepared UPDATE shape differs from dispatch");
+    // Bare unknown strings and NULL acquire the boolean WHERE context. Typed
+    // text/numeric expressions must not pass just because they return NULL.
+    if (auto* literal = dynamic_cast<LiteralExpr*>(update->whereClause.get())) {
+        if (literal->typeName.empty() &&
+            (literal->value == "null" || (!literal->value.empty() &&
+                                         literal->value.front() == '\''))) {
+            auto cast = std::make_unique<CastExpr>();
+            cast->typeName = "boolean";
+            cast->operand = std::move(update->whereClause);
+            update->whereClause = std::move(cast);
+        }
+    }
+    size_t targetOrdinal = static_cast<size_t>(-1);
+    const PreparedQuery::SourceRange* targetRange = nullptr;
+    for (const auto& source : prepared->sourceRanges) {
+        if (source.owner == update) {
+            if (targetOrdinal != static_cast<size_t>(-1))
+                throw DbError("XX000", "ordinary UPDATE has multiple target ranges");
+            targetOrdinal = source.ordinal;
+            targetRange = &source;
+        }
+    }
+    if (targetOrdinal == static_cast<size_t>(-1))
+        throw DbError("XX000", "prepared UPDATE has no target range");
+    for (auto& assignment : update->setClauses) {
+        const auto* literal = dynamic_cast<LiteralExpr*>(assignment.second.get());
+        if (!literal || !literal->typeName.empty() || literal->value.empty() ||
+            literal->value.front() != '\'') continue;
+        const auto column = std::find_if(targetRange->columns.begin(), targetRange->columns.end(),
+            [&](const auto& candidate) { return candidate.name == identifier(assignment.first); });
+        if (column == targetRange->columns.end())
+            throw DbError("XX000", "UPDATE target descriptor has no assigned column");
+        const auto type = ExprHelper::canonicalResultTypeName(column->type);
+        // Unknown string literals acquire the assignment context. Keep
+        // character lengths/arrays in storage validation, not explicit CAST
+        // truncation rules. This conversion is pure and precedes empty input.
+        static const std::set<std::string> contextual = {
+            "smallint", "integer", "bigint", "numeric", "real", "double precision",
+            "boolean", "date", "time", "timestamp", "timestamptz", "uuid", "money"
+        };
+        if (!contextual.count(type)) continue;
+        auto cast = std::make_unique<CastExpr>();
+        cast->typeName = type;
+        cast->operand = std::move(assignment.second);
+        assignment.second = std::move(cast);
+    }
+    PreparedQueryExecution execution(prepared, &g_engine, s.currentDB);
+    if (update->whereClause) {
+        const auto type = ExprHelper::canonicalResultTypeName(
+            ExprHelper::inferParsedResultType(update->whereClause.get(), {},
+                                             s.currentDB, &g_engine));
+        if (type != "boolean")
+            throw DbError("42804", "argument of WHERE must be type boolean");
+        execution.prepareExpression(update->whereClause.get());
+    }
+    std::function<bool(const Expr*)> constantExpression = [&](const Expr* expression) {
+        if (!expression) return true;
+        // A scalar child uses a literal wrapper but is an executable query,
+        // possibly correlated. Never fold it without the current OLD row.
+        if (expression->preparedSubquery) return false;
+        if (dynamic_cast<const LiteralExpr*>(expression)) return true;
+        if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(expression))
+            return constantExpression(unary->operand.get());
+        if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(expression))
+            return constantExpression(binary->left.get()) && constantExpression(binary->right.get());
+        if (const auto* cast = dynamic_cast<const CastExpr*>(expression))
+            return constantExpression(cast->operand.get());
+        if (const auto* conditional = dynamic_cast<const CaseExpr*>(expression)) {
+            if (!constantExpression(conditional->switchExpr.get()) ||
+                !constantExpression(conditional->elseExpr.get())) return false;
+            for (const auto& arm : conditional->whenClauses)
+                if (!constantExpression(arm.first.get()) || !constantExpression(arm.second.get())) return false;
+            return true;
+        }
+        // Never fold a function, source column, parameter or scalar child.
+        return false;
+    };
+    if (update->whereClause && constantExpression(update->whereClause.get()))
+        (void)execution.evaluate(update->whereClause.get(), execution.context());
+    SqlRow constantUpdates;
+    for (auto& assignment : update->setClauses) {
+        execution.prepareExpression(assignment.second.get());
+        if (constantExpression(assignment.second.get())) {
+            const auto value = execution.evaluate(assignment.second.get(), execution.context());
+            // Physical input validation also runs for zero matches. NULL is
+            // a row-level NOT NULL check, not an error on an empty UPDATE.
+            if (!value.isNull) constantUpdates[identifier(assignment.first)] = value.value;
+        }
+    }
+    for (auto& item : update->returning) {
+        // RETURNING stars are expanded by the existing projection descriptor.
+        if (item.expr && !isStarProjection(item.expr.get()))
+            execution.prepareExpression(item.expr.get());
+    }
+    const auto context = [&](const SqlRow& oldValues) {
+        RowContext row = execution.context();
+        const auto& descriptor = execution.sourceRange(targetOrdinal).columns;
+        std::vector<ExprValue> cells;
+        cells.reserve(descriptor.size());
+        for (const auto& column : descriptor) {
+            const auto found = oldValues.find(column.name);
+            if (found == oldValues.end())
+                throw DbError("XX000", "UPDATE OLD row has an absent bound column");
+            cells.emplace_back(column.type, found->second.value_or(""), !found->second);
+        }
+        execution.setSourceRow(row, targetOrdinal, cells);
+        return row;
+    };
+    const StorageEngine::SqlUpdateMatcher matcher = [&](const SqlRow& oldValues) {
+        if (!update->whereClause) return true;
+        const auto result = execution.evaluate(update->whereClause.get(), context(oldValues));
+        if (ExprHelper::canonicalResultTypeName(result.typeName) != "boolean")
+            throw DbError("42804", "argument of WHERE must be type boolean");
+        return !result.isNull && result.asBool();
+    };
+    const StorageEngine::SqlUpdateResolver resolver =
+        [&](const SqlRow& oldValues, SqlRow& effectiveUpdates) {
+            const RowContext row = context(oldValues);
+            // Every assignment reads the same OLD image; constants and
+            // volatile writers are evaluated once for each matching row.
+            for (const auto& assignment : update->setClauses) {
+                const auto value = execution.evaluate(assignment.second.get(), row);
+                effectiveUpdates[identifier(assignment.first)] = value.isNull
+                    ? SqlCell{} : SqlCell{value.value};
+            }
+            return true;
+        };
+    DmlStatementScope statementScope(g_engine, s.currentDB);
+    if (!statementScope.ready())
+        throw DbError("58030", "UPDATE could not establish an atomic statement boundary");
+    std::vector<SqlRow> updatedRows;
+    std::vector<StorageEngine::UpdateRowImage> images;
+    size_t affectedRows = 0;
+    const DBStatus status = g_engine.updateRows(
+        s.currentDB, resolvedTable, constantUpdates, {},
+        stmt.returning.empty() ? nullptr : &updatedRows, resolver, matcher,
+        &affectedRows, stmt.returning.empty() ? nullptr : &images);
+    if (status != DBStatus::OK)
+        throw DbError(sqlstateForDBStatus(status), "UPDATE failed");
+    if (!stmt.returning.empty() &&
+        !publishReturning(projections, table, binding, s.currentDB,
+                          updatedReturningImages(images), "UPDATE")) return true;
+    if (!statementScope.finish()) {
+        clearLastDmlResult();
+        throw DbError("58030", "UPDATE transaction finish failed");
+    }
+    std::cout << "Update done" << std::endl;
+    if (!stmt.returning.empty()) printReturningRows(g_lastDmlResult);
+    else publishMutationCount("UPDATE", affectedRows);
+    return false;
+}
+
 bool executeUpdate(const UpdateStmt& stmt, Session& s, bool& fallback) {
     fallback = false;
     if (!stmt.whereCurrentOf.empty()) {
@@ -4902,7 +5106,12 @@ bool tryDmlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
     } else if (parsedCmd == SqlCommand::Update) {
         const auto* stmt = dynamic_cast<const UpdateStmt*>(parsed.stmt.get());
         if (!stmt) return false;
-        error = executeUpdate(*stmt, s, fallback);
+        const bool hasDefault = std::any_of(stmt->setClauses.begin(), stmt->setClauses.end(),
+            [](const auto& assignment) { return isDefaultValue(assignment.second); });
+        if (!stmt->fromClause && stmt->whereCurrentOf.empty() && !hasDefault &&
+            !usesVersionedReturning(stmt->returning, stmt->returningOptions))
+            error = executePreparedUpdate(*stmt, s, fallback, rawSql.empty() ? sql : rawSql);
+        else error = executeUpdate(*stmt, s, fallback);
     } else if (parsedCmd == SqlCommand::Delete) {
         const auto* stmt = dynamic_cast<const DeleteStmt*>(parsed.stmt.get());
         if (!stmt || stmt->only) return false;
