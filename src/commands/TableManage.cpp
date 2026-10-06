@@ -38280,6 +38280,22 @@ static void prepareJoinExpressions(
                 static const std::set<std::string> syntaxFunctions = {"coalesce", "nullif", "greatest", "least"};
                 if (!condition.evaluator->hasScalarFunction(call, engine) && !syntaxFunctions.count(call->funcName))
                     throw DbError("42883", "function does not exist: " + call->funcName);
+                // The parser stores SQL EXTRACT's field as argument zero.
+                // It is a label, unlike date_part's ordinary value argument.
+                if (call->schema.empty() && SQLParser::toLower(call->funcName) == "extract" && !call->args.empty()) {
+                    if (const auto* field = dynamic_cast<ColumnRefExpr*>(call->args.front().get());
+                        field && field->table.empty() && field->schema.empty()) {
+                        auto literal = std::make_unique<LiteralExpr>();
+                        literal->typeName = "text";
+                        literal->value = "'";
+                        for (char c : field->column) {
+                            literal->value += c;
+                            if (c == '\'') literal->value += c;
+                        }
+                        literal->value += "'";
+                        call->args.front() = std::move(literal);
+                    }
+                }
                 for (auto& argument : call->args) bind(argument.get());
             } else if (expression->type != ExprType::Literal) {
                 throw DbError("0A000", "unsupported typed JOIN expression");

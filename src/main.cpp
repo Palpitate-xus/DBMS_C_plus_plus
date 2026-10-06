@@ -1854,6 +1854,7 @@ static std::string quoteDumpIdentifier(const std::string& identifier) {
 // JOIN predicates travel through the existing private condition carrier.
 // Serialize the parsed tree, not Expr::toString() (which loses parentheses
 // and CASE arms), and resolve only value ColumnRefs before doing so.
+static std::string quoteDumpLiteral(const std::string& value);
 static bool renderJoinExpression(
     const dbms::Expr* expression,
     const function<bool(const dbms::ColumnRefExpr*, string&)>& bindColumn,
@@ -1930,7 +1931,11 @@ static bool renderJoinExpression(
         result = (call->schema.empty() ? string{} : call->schema + ".") + call->funcName + "(";
         for (size_t i = 0; i < call->args.size(); ++i) {
             string argument;
-            if (!renderJoinExpression(call->args[i].get(), bindColumn, argument)) return false;
+            const auto* field = i == 0 && call->schema.empty() && dbms::SQLParser::toLower(call->funcName) == "extract"
+                ? dynamic_cast<const dbms::ColumnRefExpr*>(call->args[i].get()) : nullptr;
+            if (field && field->table.empty() && field->schema.empty())
+                argument = quoteDumpLiteral(field->column);
+            else if (!renderJoinExpression(call->args[i].get(), bindColumn, argument)) return false;
             if (i) result += ",";
             result += argument;
         }
