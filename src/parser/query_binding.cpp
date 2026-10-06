@@ -45,6 +45,11 @@ void checkRangeConflicts(const Namespace& left, const Namespace& right) {
 }
 struct CteDescription { QueryRowDescriptor columns; const Stmt* statement = nullptr; };
 using Ctes = std::map<std::string, CteDescription>;
+bool decimalIntegerConstant(const std::string& value) {
+    size_t begin = !value.empty() && (value.front() == '+' || value.front() == '-') ? 1 : 0;
+    return begin < value.size() && std::all_of(value.begin() + begin, value.end(),
+        [](unsigned char character) { return character >= '0' && character <= '9'; });
+}
 void validateArrayConstant(const Expr* source, const std::string& type) {
     const auto* literal = dynamic_cast<const LiteralExpr*>(source);
     if (!literal || literal->preparedSubquery || !literal->typeName.empty()) return;
@@ -199,6 +204,8 @@ public:
                 return literal->typeName;
             }
             if (literal->value == "*") return "record";
+            if (decimalIntegerConstant(literal->value))
+                return ExprHelper::inferValuesResultType(literal->value);
             const auto tokens = SQLParser::tokenize(literal->value);
             if (tokens.empty()) return "unknown";
             if (tokens.front() == "(" && tokens.size() > 1 &&
@@ -221,6 +228,26 @@ public:
             auto* unary = static_cast<UnaryOpExpr*>(node.get());
             const auto type = expression(unary->operand, scopes);
             const auto op = SQLParser::toLower(unary->op);
+            const auto* literal = dynamic_cast<const LiteralExpr*>(unary->operand.get());
+            if ((op == "-" || op == "+") && literal && literal->typeName.empty() &&
+                !literal->preparedSubquery && decimalIntegerConstant(literal->value)) {
+                // PostgreSQL absorbs an integer constant's lexical sign
+                // before choosing INT/BIGINT/NUMERIC. This is not arithmetic
+                // folding: casts, parameters and routines retain runtime
+                // overflow and demand semantics.
+                auto signedLiteral = std::make_unique<LiteralExpr>();
+                signedLiteral->value = literal->value;
+                if (op == "-") {
+                    if (signedLiteral->value.front() == '-') signedLiteral->value.erase(0,1);
+                    else {
+                        if (signedLiteral->value.front() == '+') signedLiteral->value.erase(0,1);
+                        signedLiteral->value.insert(signedLiteral->value.begin(),'-');
+                    }
+                }
+                signedLiteral->sourceBegin = node->sourceBegin; signedLiteral->sourceEnd = node->sourceEnd;
+                const auto signedType = ExprHelper::inferValuesResultType(signedLiteral->value);
+                node = std::move(signedLiteral); return signedType;
+            }
             return op == "not" || op.rfind("is ", 0) == 0 ? "boolean" : type;
         }
         case ExprType::BinaryOp: {
