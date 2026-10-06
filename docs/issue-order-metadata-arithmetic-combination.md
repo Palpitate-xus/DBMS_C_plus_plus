@@ -1,8 +1,9 @@
 # Stored ORDER, routine metadata and typed table arithmetic
 
 Date: 2026-10-06. Three independent local source/test commits are integrated.
-Their new optimized ROOT combination has not yet been verified. This does not
-complete the overall audit or any of the broader mapped families.
+Their optimized ROOT combination passed the 44 focused native and protocol
+entry points below, but its full-default protocol failed during startup. This
+does not complete the overall audit or any of the broader mapped families.
 
 | Actual defect | Independent ROOT commit | Retained repair evidence |
 | --- | --- | --- |
@@ -46,8 +47,13 @@ passed. Logs are `native.log` and `protocol.log`. Unchanged diagnostic
 the original SQLSTATE/rows/writes expectations. The two direct ORDER failures
 are repaired, not removed from that diagnostic. Frozen binary SHA-256 is
 `f30d15ff4ae72e1ab2bfbf66c8cf5a3f069d4640151861d29ed76378eb0e2ad5`.
-This revision's full-default protocol is now running with its original
-10-second socket timeout; no terminal result is claimed at this checkpoint.
+This revision's full-default protocol `56926` reached terminal exit 1 with its
+original 10-second socket timeout. It failed at the initial socket connect
+(`tests/postgres_protocol_test.py:1330`, ConnectionAbortedError/errno 103),
+before negotiation or any SQL assertion. The fixture discarded server output,
+so the startup cause is not established. This is neither a full pass nor an
+observed SQL semantic failure; the original log is retained as
+`full-default-protocol.log`. Captured startup diagnosis is separate work.
 The previous frozen `666bf0d1` production binary's 41 native/38 focused/full
 default passes are recorded separately and are not reused as this revision's
 proof. The previous unchanged diagnostic still had seven genuine failures;
@@ -71,6 +77,15 @@ instead of a singleton 0/NULL; all-NULL SUM+1 returned 1 instead of NULL;
 filtered SUM+1 ignored the filter; CAST(SUM(...) AS BIGINT)+1 returned 42883.
 These are not supported green aggregate-scope claims and remain independent
 work with their original singleton/NULL/filter/cast expectations.
+
+A separate unchanged registered `typed_group_key` gate actually passed on
+the old formal `666bf0d1`/b418 binary (`25836`, exit 0) and failed on the new
+formal `a00d147a`/f30 binary (`35286`, exit 1): ORDER BY count(*) reported
+42883. Unlike the 26-query comparison above, this establishes an introduced
+aggregate-role regression. Independent repair is now ROOT `3983dccb`; its
+private fresh-56 development build passed the original gate and expanded
+controls. New ROOT optimized combination verification is recorded separately
+in `docs/issue-prepared-and-projection-combination.md`, not attributed to f30.
 
 Further actual quoted-range diagnostic `79860` on the private metadata
 binary rejected legal `AS "M" ... fn("M".id)` and `AS "m" ... fn(m.id)`
