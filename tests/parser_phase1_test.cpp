@@ -55,6 +55,64 @@ static const FunctionCallExpr* asFuncCall(const ExprPtr& expr) {
 int main() {
     SQLParser parser;
 
+    // NATURAL is a key-selection modifier, not the row-preservation kind.
+    for (const auto& entry : std::vector<std::pair<std::string, std::string>>{
+             {"NATURAL JOIN", "NATURAL"},
+             {"NATURAL INNER JOIN", "NATURAL INNER"},
+             {"NATURAL LEFT JOIN", "NATURAL LEFT"},
+             {"NATURAL LEFT OUTER JOIN", "NATURAL LEFT"},
+             {"NATURAL RIGHT JOIN", "NATURAL RIGHT"},
+             {"NATURAL RIGHT OUTER JOIN", "NATURAL RIGHT"},
+             {"NATURAL FULL JOIN", "NATURAL FULL"},
+             {"NATURAL FULL OUTER JOIN", "NATURAL FULL"}}) {
+        const auto parsed = parser.parse(
+            "SELECT a.id FROM natural_a a " + entry.first +
+            " natural_b b WHERE a.id = 1 ORDER BY a.id");
+        assert(parsed.success);
+        const auto* select = asSelect(parsed.stmt);
+        assert(select && select->fromClause && select->whereClause &&
+               select->orderBy.size() == 1);
+        const auto* join = select->fromClause.get();
+        assert(join->type == FromItem::Type::Join);
+        assert(join->joinType == entry.second);
+        assert(join->left && join->right);
+        assert(join->left->tableName == "natural_a");
+        assert(join->right->tableName == "natural_b");
+        assert(join->left->alias == "a" && join->right->alias == "b");
+        assert(!join->joinCondition && join->usingCols.empty());
+    }
+    for (const char* sql : {
+             "SELECT * FROM a NATURAL CROSS JOIN b",
+             "SELECT * FROM a NATURAL LEFT b",
+             "SELECT * FROM a NATURAL FULL OUTER JOIN",
+             "SELECT * FROM a NATURAL JOIN b ON a.id = b.id",
+             "SELECT * FROM a NATURAL JOIN b USING (id)"}) {
+        assert(!parser.parse(sql).success);
+    }
+    {
+        const auto update = parser.parse(
+            "UPDATE t SET v = a.v FROM natural_a a NATURAL LEFT JOIN natural_b b "
+            "WHERE t.id = a.id");
+        assert(update.success);
+        const auto* stmt = dynamic_cast<const UpdateStmt*>(update.stmt.get());
+        assert(stmt && stmt->fromClause && stmt->whereClause);
+        assert(stmt->fromClause->joinType == "NATURAL LEFT");
+        const auto deletion = parser.parse(
+            "DELETE FROM t USING natural_a a NATURAL FULL OUTER JOIN natural_b b "
+            "WHERE t.id = b.id");
+        assert(deletion.success);
+        const auto* del = dynamic_cast<const DeleteStmt*>(deletion.stmt.get());
+        assert(del && del->usingClause && del->whereClause);
+        assert(del->usingClause->joinType == "NATURAL FULL");
+        const auto merge = parser.parse(
+            "MERGE INTO t USING natural_a a NATURAL JOIN natural_b b "
+            "ON t.id = a.id WHEN MATCHED THEN DO NOTHING");
+        assert(merge.success);
+        const auto* m = dynamic_cast<const MergeStmt*>(merge.stmt.get());
+        assert(m && m->source && m->joinCondition);
+        assert(m->source->joinType == "NATURAL" && !m->source->joinCondition);
+    }
+
     {
         const auto parsed = parser.parse(
             "DROP FUNCTION IF EXISTS pgdiff_drop_fn()");

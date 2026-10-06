@@ -14035,6 +14035,14 @@ static bool lateralJoinPredicateMatches(
     return false;
 }
 
+static std::pair<std::string, bool> lateralLeftJoinKind(
+    const std::string& rawType) {
+    const std::string type = toLower(rawType);
+    if (type == "natural") return {"inner", true};
+    if (type.rfind("natural ", 0) == 0) return {type.substr(8), true};
+    return {type, false};
+}
+
 static std::string processLateralJoins(const std::string& sql, Session& s,
                                       bool& failed) {
     failed = false;
@@ -14207,19 +14215,22 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
                 supportedLeftScope = false;
                 return;
             }
-            const std::string joinType = toLower(item->joinType);
-            if (joinType == "cross") {
-                if (item->joinCondition || !item->usingCols.empty()) {
-                    supportedLeftScope = false;
-                    return;
-                }
-            } else if (joinType == "natural") {
-                if (item->joinCondition || !item->usingCols.empty()) {
+            const auto [joinType, natural] =
+                lateralLeftJoinKind(item->joinType);
+            if (natural) {
+                if ((joinType != "inner" && joinType != "left" &&
+                     joinType != "right" && joinType != "full") ||
+                    item->joinCondition || !item->usingCols.empty()) {
                     supportedLeftScope = false;
                     return;
                 }
                 materializeLeftJoinTree = true;
                 leftTreeHasMergedJoin = true;
+            } else if (joinType == "cross") {
+                if (item->joinCondition || !item->usingCols.empty()) {
+                    supportedLeftScope = false;
+                    return;
+                }
             } else if (joinType == "inner" || joinType == "left" ||
                        joinType == "right" || joinType == "full") {
                 if (!item->usingCols.empty()) {
@@ -14319,9 +14330,10 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
                 buildLeftVisibleColumns(item->right.get());
             if (!supportedLeftScope) return columns;
 
-            const std::string joinType = toLower(item->joinType);
+            const auto [joinType, natural] =
+                lateralLeftJoinKind(item->joinType);
             std::vector<std::string> usingColumns;
-            if (joinType == "natural") {
+            if (natural) {
                 for (const LateralVisibleColumn& leftColumn : left) {
                     const size_t rightMatches = static_cast<size_t>(
                         std::count_if(right.begin(), right.end(),

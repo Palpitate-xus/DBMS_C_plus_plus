@@ -29,6 +29,7 @@ def main():
             'CREATE TABLE typed_lateral_quoted_left ("MixedId" INT);',
             "INSERT INTO typed_lateral_quoted_left VALUES (1), (2);",
             "CREATE TABLE typed_lateral_empty (id INT);",
+            "CREATE TABLE typed_lateral_natural_empty (label TEXT);",
             "CREATE TABLE typed_lateral_aux (delta INT);",
             "INSERT INTO typed_lateral_aux VALUES (10);",
             "CREATE TABLE typed_lateral_third (id INT, marker TEXT);",
@@ -166,6 +167,56 @@ def main():
             (("SELECT l.id, r.label, x.next_id "
               "FROM typed_lateral_left AS l "
               "NATURAL JOIN typed_lateral_right AS r "
+              "CROSS JOIN LATERAL (SELECT id + 1 AS next_id) x "
+              "WHERE l.id = 1 ORDER BY r.label;"),
+             [["1", "right one", "2"], ["1", "right uno", "2"]],
+             [23, 25, 23]),
+            (("SELECT l.id, r.label, x.next_id "
+              "FROM typed_lateral_left AS l "
+              "NATURAL LEFT JOIN typed_lateral_right AS r "
+              "CROSS JOIN LATERAL (SELECT id + 1 AS next_id) x "
+              "WHERE l.id = 6;"),
+             [["6", None, "7"]], [23, 25, 23]),
+            (("SELECT l.payload, r.id, x.next_id "
+              "FROM typed_lateral_left AS l "
+              "NATURAL RIGHT JOIN typed_lateral_right AS r "
+              "CROSS JOIN LATERAL (SELECT id + 1 AS next_id) x "
+              "WHERE r.id = 3;"),
+             [[None, "3", "4"]], [25, 23, 23]),
+            (("SELECT l.id, r.id, x.next_id "
+              "FROM typed_lateral_left AS l "
+              "NATURAL FULL OUTER JOIN typed_lateral_right AS r "
+              "CROSS JOIN LATERAL (SELECT id + 1 AS next_id) x "
+              "WHERE l.id = 6 OR r.id = 3 "
+              "ORDER BY l.id NULLS LAST, r.id;"),
+             [["6", None, "7"], [None, "3", "4"]], [23, 23, 23]),
+            (("SELECT l.id, r.label, x.next_id "
+              "FROM typed_lateral_left AS l "
+              "NATURAL FULL JOIN typed_lateral_right AS r "
+              "CROSS JOIN LATERAL (SELECT id + 1 AS next_id) x "
+              "WHERE l.id = 6 OR r.id = 3 "
+              "ORDER BY l.id NULLS LAST, r.id;"),
+             [["6", None, "7"], [None, "unused", "4"]], [23, 25, 23]),
+            (("SELECT l.id, r.label, x.next_id "
+              "FROM typed_lateral_left AS l "
+              "NATURAL LEFT JOIN typed_lateral_natural_empty AS r "
+              "CROSS JOIN LATERAL (SELECT id + 1 AS next_id) x "
+              "WHERE l.id = 6;"),
+             [["6", None, "7"]], [23, 25, 23]),
+            (("SELECT l.id, r.label, x.next_id "
+              "FROM typed_lateral_left AS l "
+              "NATURAL FULL JOIN typed_lateral_natural_empty AS r "
+              "CROSS JOIN LATERAL (SELECT id + 1 AS next_id) x "
+              "WHERE l.id = 6;"),
+             [["6", None, "7"]], [23, 25, 23]),
+            (("SELECT l.id, r.label, x.next_id "
+              "FROM typed_lateral_left AS l "
+              "NATURAL RIGHT JOIN typed_lateral_natural_empty AS r "
+              "CROSS JOIN LATERAL (SELECT id + 1 AS next_id) x;"),
+             [], [23, 25, 23]),
+            (("SELECT l.id, r.label, x.next_id "
+              "FROM typed_lateral_left AS l "
+              "NATURAL INNER JOIN typed_lateral_right AS r "
               "CROSS JOIN LATERAL (SELECT id + 1 AS next_id) x "
               "WHERE l.id = 1 ORDER BY r.label;"),
              [["1", "right one", "2"], ["1", "right uno", "2"]],

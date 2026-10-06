@@ -2652,7 +2652,39 @@ static std::unique_ptr<FromItem> parseFromAtom(const std::vector<std::string>& t
     return item;
 }
 
-// 解析 FROM 项（简化版：支持表名、别名、JOIN）
+// Preserve the NATURAL modifier independently of the row-preservation kind
+// in the existing string representation (e.g. NATURAL LEFT / NATURAL FULL).
+// Plain NATURAL JOIN retains its original NATURAL spelling for callers.
+static bool parseFromJoinType(const std::vector<std::string>& tokens,
+                              size_t& pos, std::string& joinType) {
+    if (pos >= tokens.size()) return false;
+    const bool natural = SQLParser::toLower(tokens[pos]) == "natural";
+    if (natural) ++pos;
+    if (pos >= tokens.size()) return false;
+    const std::string word = SQLParser::toLower(tokens[pos]);
+    std::string kind = "INNER";
+    const bool explicitKind = word == "inner" || word == "left" ||
+        word == "right" || word == "full" || word == "cross";
+    if (explicitKind) {
+        kind = word;
+        std::transform(kind.begin(), kind.end(), kind.begin(),
+            [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+        ++pos;
+        if (word == "left" || word == "right" || word == "full") {
+            if (pos < tokens.size() &&
+                SQLParser::toLower(tokens[pos]) == "outer") ++pos;
+        }
+    }
+    if (natural && kind == "CROSS") return false;
+    if (pos >= tokens.size() ||
+        SQLParser::toLower(tokens[pos]) != "join") return false;
+    ++pos;
+    joinType = natural ? (explicitKind ? "NATURAL " + kind : "NATURAL")
+                       : kind;
+    return true;
+}
+
+// 解析 FROM 项（支持表名、别名、JOIN）
 static std::unique_ptr<FromItem> parseFromItem(const std::vector<std::string>& tokens, size_t& pos) {
     auto item = parseFromAtom(tokens, pos);
     if (!item) return nullptr;
@@ -2661,16 +2693,8 @@ static std::unique_ptr<FromItem> parseFromItem(const std::vector<std::string>& t
         std::string jkw = SQLParser::toLower(tokens[pos]);
         if (jkw == "join" || jkw == "inner" || jkw == "left" || jkw == "right"
             || jkw == "full" || jkw == "cross" || jkw == "natural") {
-            std::string joinType = "INNER";
-            if (jkw == "left") { joinType = "LEFT"; ++pos; if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "outer") ++pos; }
-            else if (jkw == "right") { joinType = "RIGHT"; ++pos; if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "outer") ++pos; }
-            else if (jkw == "full") { joinType = "FULL"; ++pos; if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "outer") ++pos; }
-            else if (jkw == "cross") { joinType = "CROSS"; ++pos; }
-            else if (jkw == "natural") { joinType = "NATURAL"; ++pos; if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "join") ++pos; }
-            else if (jkw == "inner") { joinType = "INNER"; ++pos; }
-            else if (jkw == "join") { ++pos; }
-
-            if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "join") ++pos;
+            std::string joinType;
+            if (!parseFromJoinType(tokens, pos, joinType)) return nullptr;
 
             auto rightItem = parseFromAtom(tokens, pos);
             if (!rightItem) return nullptr;
@@ -2681,10 +2705,15 @@ static std::unique_ptr<FromItem> parseFromItem(const std::vector<std::string>& t
             joinNode->left = std::move(item);
             joinNode->right = std::move(rightItem);
 
-            if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "on") {
+            const bool natural = joinType.rfind("NATURAL", 0) == 0;
+            // A following ON can belong to the enclosing MERGE statement,
+            // not to this NATURAL source join. Leave it to the caller.
+            if (!natural && pos < tokens.size() &&
+                SQLParser::toLower(tokens[pos]) == "on") {
                 ++pos;
                 joinNode->joinCondition = parseSimpleExpr(tokens, pos);
-            } else if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "using") {
+            } else if (!natural && pos < tokens.size() &&
+                       SQLParser::toLower(tokens[pos]) == "using") {
                 ++pos;
                 if (pos < tokens.size() && tokens[pos] == "(") {
                     auto cols = collectParenthesized(tokens, pos);
@@ -2862,6 +2891,10 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
     if (pos < tokens.size() && toLower(tokens[pos]) == "from") {
         ++pos;
         auto firstItem = parseFromItem(tokens, pos);
+        if (!firstItem) {
+            r.error = "invalid relation or JOIN in FROM clause";
+            return r;
+        }
         if (firstItem) {
             while (pos < tokens.size()) {
                 std::string w = toLower(tokens[pos]);
@@ -2871,41 +2904,36 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
                     || w == ")" || w == ";") {
                     break;
                 }
-                auto joinItem = std::make_unique<FromItem>();
-                joinItem->type = FromItem::Type::Join;
-                joinItem->left = std::move(firstItem);
+                std::string joinType;
                 if (tokens[pos] == ",") {
                     ++pos;
-                    joinItem->joinType = "CROSS";
-                } else if (w == "cross") {
-                    ++pos;
-                    if (pos < tokens.size() && toLower(tokens[pos]) == "join") ++pos;
-                    joinItem->joinType = "CROSS";
-                } else if (w == "natural") {
-                    ++pos;
-                    if (pos < tokens.size() && toLower(tokens[pos]) == "join") ++pos;
-                    joinItem->joinType = "NATURAL";
-                } else if (w == "inner") {
-                    ++pos;
-                    if (pos < tokens.size() && toLower(tokens[pos]) == "join") ++pos;
-                    joinItem->joinType = "INNER";
-                } else if (w == "join") {
-                    ++pos;
-                    joinItem->joinType = "INNER";
-                } else if (w == "left" || w == "right" || w == "full") {
-                    std::string jt = w;
-                    ++pos;
-                    if (pos < tokens.size() && toLower(tokens[pos]) == "outer") ++pos;
-                    if (pos < tokens.size() && toLower(tokens[pos]) == "join") ++pos;
-                    joinItem->joinType = jt;
+                    joinType = "CROSS";
+                } else if (w == "join" || w == "inner" || w == "left" ||
+                           w == "right" || w == "full" || w == "cross" ||
+                           w == "natural") {
+                    if (!parseFromJoinType(tokens, pos, joinType)) {
+                        r.error = "invalid JOIN type in FROM clause";
+                        return r;
+                    }
                 } else {
                     break;
                 }
+                auto joinItem = std::make_unique<FromItem>();
+                joinItem->type = FromItem::Type::Join;
+                joinItem->joinType = joinType;
+                joinItem->left = std::move(firstItem);
                 joinItem->right = parseFromItem(tokens, pos);
-                if (pos < tokens.size() && toLower(tokens[pos]) == "on") {
+                if (!joinItem->right) {
+                    r.error = "invalid right relation in FROM clause";
+                    return r;
+                }
+                const bool natural = joinType.rfind("NATURAL", 0) == 0;
+                if (!natural && pos < tokens.size() &&
+                    toLower(tokens[pos]) == "on") {
                     ++pos;
                     joinItem->joinCondition = parseExpr(tokens, pos);
-                } else if (pos < tokens.size() && toLower(tokens[pos]) == "using") {
+                } else if (!natural && pos < tokens.size() &&
+                           toLower(tokens[pos]) == "using") {
                     ++pos;
                     if (pos < tokens.size() && tokens[pos] == "(") {
                         auto cols = collectParenthesized(tokens, pos);
@@ -2915,6 +2943,12 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
                     }
                 }
                 firstItem = std::move(joinItem);
+            }
+            if (pos < tokens.size() &&
+                (toLower(tokens[pos]) == "on" ||
+                 toLower(tokens[pos]) == "using")) {
+                r.error = "unexpected JOIN condition in FROM clause";
+                return r;
             }
             stmt->fromClause = std::move(firstItem);
         }
