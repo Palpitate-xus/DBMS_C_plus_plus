@@ -126,7 +126,7 @@ production timeout defect. Fixture-only commit: `ff693582`; all capability,
 maintenance and DDL success/error assertions were retained. The real timeout behavior remains covered by the
 default protocol test and unchanged timeout-specific tests.
 
-Additional reproduced open issues: a compact `FROM(SELECT ...) d` factor can
+Historical follow-up evidence (at the five-commit combination): a compact `FROM(SELECT ...) d` factor can
 fuse the generated table name with FROM; ordinary `WHERE id=1 /* comment */`
 returned both stored rows, and a dollar-quoted RHS comparison also returned
 both rows instead of filtering. CTE binding still globally rewrites matching
@@ -138,7 +138,12 @@ combination: `WITH id AS (SELECT 1 AS id) SELECT id FROM id` and
 `WITH c AS (SELECT 1 AS c) SELECT c FROM c` both report 42703 for column
 `__cte_0`, although a CTE with a distinct name and qualified id works. An
 unrelated output alias `AS c` was also renamed to `__cte_0`. This needs
-relation/scope binding, not another blanket identifier replacement.
+relation/scope binding, not another blanket identifier replacement. These
+specific global-name, compact-factor and comment/dollar-RHS defects have since
+been addressed in independent commits `8dd62c09`, `b0487280` and `77849804`.
+The introduced stored-view namespace regression was separately corrected by
+`5163f0b5`; see `issue-cte-relation-scope-and-lexical-boundaries.md` for the
+actual verification and remaining general scope requirements.
 
 General nested/correlated binding, parameterized planning, all function/VALUES
 LATERAL syntax, arbitrary JOIN conditions, aggregate/window/locking combinations
