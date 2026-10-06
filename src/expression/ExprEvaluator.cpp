@@ -1748,6 +1748,15 @@ ExprValue ExprEvaluator::evalUnaryOp(const UnaryOpExpr* e, const RowContext& ctx
                 throw std::runtime_error(
                     "integer out of range (SQLSTATE 22003)");
             }
+            const std::string type = toLower(v.typeName);
+            const bool narrowOverflow = (type == "smallint" || type == "int2")
+                ? -integer < std::numeric_limits<int16_t>::lowest() ||
+                    -integer > std::numeric_limits<int16_t>::max()
+                : (type == "integer" || type == "int" || type == "int4") &&
+                    (-integer < std::numeric_limits<int32_t>::lowest() ||
+                     -integer > std::numeric_limits<int32_t>::max());
+            if (narrowOverflow)
+                throw std::runtime_error("integer out of range (SQLSTATE 22003)");
             return ExprValue(v.typeName, std::to_string(-integer), false);
         }
         if (isNumericTypeName(v.typeName)) {
@@ -2217,7 +2226,28 @@ static ExprValue evaluateNumericPowerOperator(const ExprValue& left,
 ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
                                          const ExprValue& l,
                                          const ExprValue& r) {
-    if (l.isNull || r.isNull) return ExprValue(l.typeName, "", true);
+    const auto integerWidth = [](const std::string& type) {
+        const std::string name = toLower(type);
+        if (name == "smallint" || name == "int2") return 1;
+        if (name == "integer" || name == "int" || name == "int4") return 2;
+        if (name == "bigint" || name == "int8") return 3;
+        return 0;
+    };
+    const int leftIntegerWidth = integerWidth(l.typeName);
+    const int rightIntegerWidth = integerWidth(r.typeName);
+    const int resultIntegerWidth = std::max(leftIntegerWidth, rightIntegerWidth);
+    const auto integerType = [](int width) {
+        return width == 1 ? "smallint" : width == 3 ? "bigint" : "integer";
+    };
+    if (l.isNull || r.isNull) {
+        const bool unknownLeft = l.typeName.empty() || toLower(l.typeName) == "unknown";
+        const bool unknownRight = r.typeName.empty() || toLower(r.typeName) == "unknown";
+        if ((op == "+" || op == "-" || op == "*" || op == "/" || op == "%") &&
+            ((leftIntegerWidth && rightIntegerWidth) ||
+             (leftIntegerWidth && unknownRight) || (rightIntegerWidth && unknownLeft)))
+            return ExprValue(integerType(resultIntegerWidth), "", true);
+        return ExprValue(l.typeName, "", true);
+    }
 
     // Interval arithmetic (PostgreSQL semantics):
     //   timestamp/date ± interval -> timestamp/date (months/days calendar-wise)
@@ -2665,6 +2695,24 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
     if (!parseInt64Exact(l.value, a) || !parseInt64Exact(r.value, b))
         integerOutOfRange();
 
+    // PostgreSQL selects an int2/int4/int8 operator from the declared operand
+    // types. Mixed integer widths widen, but same-width arithmetic must not
+    // silently gain int8 range just because our textual carrier uses int64_t.
+    const int resolvedWidth = resultIntegerWidth ? resultIntegerWidth : 2;
+    const auto withinIntegerWidth = [](const __int128 value, int width) {
+        if (width == 1)
+            return value >= std::numeric_limits<int16_t>::lowest() &&
+                   value <= std::numeric_limits<int16_t>::max();
+        if (width == 2)
+            return value >= std::numeric_limits<int32_t>::lowest() &&
+                   value <= std::numeric_limits<int32_t>::max();
+        return value >= std::numeric_limits<int64_t>::lowest() &&
+               value <= std::numeric_limits<int64_t>::max();
+    };
+    if (!withinIntegerWidth(a, leftIntegerWidth ? leftIntegerWidth : resolvedWidth) ||
+        !withinIntegerWidth(b, rightIntegerWidth ? rightIntegerWidth : resolvedWidth))
+        integerOutOfRange();
+
     int64_t res = 0;
     if (op == "+" || op == "-" || op == "*") {
         __int128 wide = 0;
@@ -2674,8 +2722,7 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
             wide = static_cast<__int128>(a) - b;
         else
             wide = static_cast<__int128>(a) * b;
-        if (wide < std::numeric_limits<int64_t>::lowest() ||
-            wide > std::numeric_limits<int64_t>::max()) {
+        if (!withinIntegerWidth(wide, resolvedWidth)) {
             integerOutOfRange();
         }
         res = static_cast<int64_t>(wide);
@@ -2685,6 +2732,7 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
         if (a == std::numeric_limits<int64_t>::lowest() && b == -1)
             integerOutOfRange();
         res = a / b;
+        if (!withinIntegerWidth(res, resolvedWidth)) integerOutOfRange();
     }
     else if (op == "%") {
         if (b == 0)
@@ -2692,7 +2740,7 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
         res = (a == std::numeric_limits<int64_t>::lowest() && b == -1)
             ? 0 : a % b;
     }
-    return ExprValue("integer", std::to_string(res), false);
+    return ExprValue(integerType(resolvedWidth), std::to_string(res), false);
 }
 
 // ----------------------------------------------------------------------------
