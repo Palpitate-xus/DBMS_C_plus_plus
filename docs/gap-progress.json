@@ -2,6 +2,46 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Typed UPDATE independently integrated; combined ROOT optimized native verification passes while wire and full gates remain live",
+      "gap_ids": [
+        "SQL-03",
+        "SQL-04",
+        "TYPE-01",
+        "TYPE-02",
+        "FUNC-05",
+        "FUNC-06",
+        "QRY-01",
+        "QRY-03",
+        "PROTO-04",
+        "TXN-01"
+      ],
+      "status": "partial",
+      "commits": [
+        "3bc45e3b"
+      ],
+      "evidence": [
+        "docs/issue-update-typed-predicate-execution.md",
+        "docs/issue-typed-query-explain-update-combination.md",
+        "docs/issue-full-registered-canonical-1e0a8c5a.md",
+        "src/commands/DmlExecutor.cpp",
+        "src/expression/prepared_query_execution.cpp"
+      ],
+      "tests": [
+        "tests/update_typed_predicate_test.cpp",
+        "tests/update_typed_predicate_protocol_e2e_test.py",
+        "tests/update_typed_execution_matrix_protocol_e2e_test.py",
+        "tests/prepared_query_execution_test.cpp",
+        "tests/stored_function_clause_execution_known_gap.py"
+      ],
+      "verification": {
+        "reproduction": "OriginaloldROOT398UPDATE sixcontrols93170 exit1/12asserts retained. CandidateV1 actual CASTnativeunstructured22P02 andlateRAISEXX000 independentdependenciesfixed; V2 scalar-child-as-Literal purefoldregression retained; originals successfulV1correlationnotmisidentifiedascarrierrace.",
+        "fix": "Privatec09f9d5b→ROOT3bc45e3b executesoriginalwhollypreparedUPDATEagainstactualboundtypednullableOLDrows; Boolean/contextualinput/staticbindings precedeSET; allSETsameOLDoncepermatchedrow; purefoldexcludesfunctions/columns/parameters/preparedchildren. DmlStatementScope/storematcher/resolver preserveatomicconstraints/index/RETURNING,oldFROM/DEFAULT/CURRENTOF/versionedroutes kept.",
+        "focused_tests": "Private full57normalO2basis+changedCPP/signaturestamp; finalnative23192=24/24,wire78100=11/11,finalfixture54086=matrix0; actualPG17.2unique-schema/savepoint/finalROLLBACKsamefinalmatrix0/not18oracle. FinalprivatefrozenSHAf75c467c2645b00e5eb4d62512b3c4b96b9ce7d937f1b906f163d0a66ff17199.",
+        "full_suite": "ROOTfreshall57normalO2compileentries86360 terminal0,repeatuptodate/all57signatures/stamp0; preupdateefc+docs57d frozenSHA dd3ea2e known3935 actual3red(EXPLAIN2fixedindependently). ROOT3bcCPP-onlyDML83522 terminal0,exact1CPP; other56source/headerunchangedfreshbasis; repeat/all57signatures/stamp0. CombinedSHA09121ee818a71dc1f34309ce4a0a827dcf257885f80964f59f7733b60700b5a6 /tmp/dbms-native-explain-prepared-combination.64xbTwJu: 81freshmatchingnative81137 terminal0. 68wire53215 terminal1=67/68PASSED;oneinitialTCPconnecterrno103beforeSQL/causeunknown,originalretainedandcapturedrepeat15821 terminal0 unchangeddeadline/alloriginalcontrols;ownedPID4091312exit0,111/103alternationbeforeconnectsuccess,nooriginalcausalfixclaim;unchangedclause8388 actual2redWHEREP0002/ORDER22P02,typedUPDATE+EXPLAIN2nowpass,canonical517native/257registered75090 live. Warm80470 terminal0 butcanonicalcomputedinvalidbeforestamp,soactualfresh56nomainrecompilation,notreusedcacheclaim. src/header/tests/registryremainfrozen.",
+        "scope": "Totals273=22complete166partial70unverified15deferred. OrdinaryWHERE/ORDER,EXPLAINSubLinkslot,readI/O,lock-demand,completehandlers/type/coercionsremain. Independentprivateparser4afb/querybegin2f85 READYnotROOT. NewrealduplicateUPDATEsite-loss baseline82218 exit134/wire99078 exit1 12asserts onexactROOT09121 frozen,PG17priorityandzerowritereference; uncommittedASTlayoutcandidatefull57O25450 live,notREADY/closed. No push/Actionsenablement/userdeferredsecurity-TDE."
+      }
+    },
+    {
       "issue": "Canonical full gate terminal failure and 18 independent local ROOT integrations; fresh combined verification",
       "gap_ids": [
         "SQL-03",

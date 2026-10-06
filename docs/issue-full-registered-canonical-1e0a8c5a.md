@@ -54,15 +54,21 @@ These are source/test commits, not proof that a later combined build passes.
 | 735e1baa | PL/pgSQL RAISE severity and SQLSTATE | 57407b59 |
 | 912894e1 | Prepared array element declarations | e00fb9bd |
 | efc501b9 | Actual typed EXPLAIN tree and publication | a9e8fc53 |
+| 3bc45e3b | Ordinary bound typed UPDATE and OLD-row execution demand | c09f9d5b |
 
 The shared typed carrier introduces the 57th production translation unit.
 The Condition layout and typed-plan public interfaces require a fresh
 complete ROOT build, not reuse of the older 56-source/header object layer.
-At source revision efc501b9, all 57 production units are being rebuilt at
-normal O2 by session 86360. Source, header, tests and registry are frozen
-during that build. Artifacts: `/tmp/dbms-native-explain-prepared-combination.64xbTwJu`.
-The current source inventory is 516 native tests and 255 registered E2E
-entry points; neither count is a claim that they have run or passed.
+At source revision efc501b9, all 57 production units were freshly rebuilt at
+normal O2 by session 86360, terminal 0. The independently integrated UPDATE
+3bc45e3b then required one changed DML CPP rebuild 83522, terminal 0;
+normal repeats and all 57 signatures/binary stamps match. The same frozen
+combined binary has passed all 81 fresh matching natives (81137, exit 0).
+Its focused wire 53215 exited 1 (67/68 passed; one initial connect errno103
+before SQL). Its full canonical 517 natives/257 registered E2E (75090) is
+live; ROOT source/header/tests/registry remain frozen for it. See
+`docs/issue-typed-query-explain-update-combination.md`
+for exact provenance and remaining failures, not a full-suite pass claim.
 
 ## Retained red-green evidence and remaining scope
 
