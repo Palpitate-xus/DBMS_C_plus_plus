@@ -148,13 +148,16 @@ and the separate statement-image I/O amplification follow-up.
   `"X"=1` and `x=2` produced 4 for `"X"+x` instead of 3. With `"X"` NULL,
   `coalesce("X",9)+x` also produced 4 instead of 11. Direct quoted-variable
   returns and the native SELECT column binder do not prove compound variable
-  binding. This needs an independent canonical positional-variable fix.
+  binding. Independent follow-up `8cd860e7` now repairs the reproduced scalar
+  collision; see [the positional-binding report](issue-plpgsql-scalar-binding-and-native-errors.md).
 - Another real protocol follow-up reproduced failed autocommit function writes
   surviving P0002/22P02: a writing CTE executed inside SELECT INTO committed its
   INSERT before the outer `SELECT function()` reported an assignment/STRICT
   error. Outer stored-function statement atomicity needs an independent fix.
-- Native fallback generic exception handling still needs independent verification
-  of expression-error SQLSTATE propagation, beyond explicit DbError paths.
+- Native fallback expression-error SQLSTATE loss was subsequently reproduced in
+  seven real native cases and repaired independently by `b6683521`; the same
+  [follow-up report](issue-plpgsql-scalar-binding-and-native-errors.md) records
+  baseline failures and matching development/optimized verification.
 - General bare-variable versus source-column ambiguity, CREATE-time procedural
   compilation, arbitrary multiword SQL identifier roles, complete records/rowtype,
   exceptions/diagnostics, dynamic SQL, cursors, trigger variables, subtransactions,

@@ -135,8 +135,9 @@ and nullable-assignment defects; see
 [the typed procedural-query report](issue-plpgsql-select-into-typed-query.md).
 This does not change the range-identity commit's historical verification scope
 or close the broader procedural-language family. Quoted compound-variable
-identity and autocommit function-write atomicity were subsequently reproduced
-and need separate fixes. Cold restart `615f2c54` and the distinct I/O investigation
+identity and autocommit function-write atomicity were subsequently reproduced.
+Scalar identity was separately repaired by `8cd860e7`; autocommit function-write
+atomicity remains open. Cold restart `615f2c54` and the distinct I/O investigation
 are recorded in
 [the lock-registry report](issue-cold-start-transaction-lock-registry.md);
 neither proves that the two complete-protocol timeouts above are solved.
