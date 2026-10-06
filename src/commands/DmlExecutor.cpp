@@ -5869,8 +5869,11 @@ bool tryDmlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
             return true;
         const bool hasDefault = std::any_of(stmt->setClauses.begin(), stmt->setClauses.end(),
             [](const auto& assignment) { return isDefaultValue(assignment.second); });
-        if (!stmt->fromClause && stmt->whereCurrentOf.empty() && !hasDefault &&
-            !usesVersionedReturning(stmt->returning, stmt->returningOptions))
+        // OLD/NEW output namespaces do not change SET's physical OLD-row
+        // bindings. Keep target-only mutations on the typed consumer: the
+        // legacy value-name context folds distinct quoted columns together
+        // and may run a volatile SET before a false WHERE excludes the row.
+        if (!stmt->fromClause && stmt->whereCurrentOf.empty() && !hasDefault)
             error = executePreparedUpdate(*stmt, s, fallback, rawSql.empty() ? sql : rawSql);
         else error = executeUpdate(*stmt, s, fallback);
     } else if (parsedCmd == SqlCommand::Delete) {

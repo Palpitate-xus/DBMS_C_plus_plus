@@ -239,6 +239,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/insert_conflict_binding_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/plpgsql_query_destination_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/returning_transition_binding_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/versioned_update_binding_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/with_returning_transition_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/case_common_type_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/interval_with_dml_input_sqlstate_protocol_e2e_test.py)
