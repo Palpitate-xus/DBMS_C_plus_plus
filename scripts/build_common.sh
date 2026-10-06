@@ -59,6 +59,8 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/table_character_cast_describe_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/quoted_arithmetic_describe_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/scalar_limit_zero_effects_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/aggregate_arithmetic_scope_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/aggregate_expression_scope_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/fetch_clause_boundary_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/subquery_sqlstate_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/composite_not_in_null_semantics_protocol_e2e_test.py)
