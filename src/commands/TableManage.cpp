@@ -21014,6 +21014,89 @@ static void sequencePredecessor(int64_t value, int64_t increment,
 static constexpr const char* SEQUENCE_FILE_V2 = "DBMSSEQ2";
 static constexpr const char* SEQUENCE_FILE_V3 = "DBMSSEQ3";
 static constexpr const char* SEQUENCE_FILE_V4 = "DBMSSEQ4";
+static constexpr const char* SEQUENCE_FILE_V5 = "DBMSSEQ5";
+static constexpr const char* SEQUENCE_RUNTIME_DIRECTORY = ".sequence_runtime";
+
+static bool validSequenceGeneration(const std::string& generation) {
+    UuidValue parsed;
+    return generation.size() == 36 && UuidValue::parse(generation, parsed) &&
+           parsed.toString() == generation;
+}
+
+static std::filesystem::path sequenceRuntimePath(
+    const std::filesystem::path& declaration, const std::string& generation) {
+    return declaration.parent_path() / SEQUENCE_RUNTIME_DIRECTORY / generation;
+}
+
+static bool readSequenceRuntime(const std::filesystem::path& path,
+    const std::string& generation, int64_t& next, int64_t& allocated,
+    bool& exhausted) {
+    if (!validSequenceGeneration(generation)) return false;
+    std::error_code error;
+    const auto status = std::filesystem::symlink_status(path, error);
+    if (error || !std::filesystem::is_regular_file(status)) return false;
+    std::ifstream input(path);
+    std::string magic, storedGeneration, trailing;
+    int exhaustedFlag = 0;
+    if (!(input >> magic >> storedGeneration >> next >> allocated >> exhaustedFlag) ||
+        magic != "DBMSSEQR1" || storedGeneration != generation ||
+        (exhaustedFlag != 0 && exhaustedFlag != 1) || (input >> trailing)) {
+        return false;
+    }
+    if (!input.eof() || input.bad()) return false;
+    exhausted = exhaustedFlag != 0;
+    return true;
+}
+
+static bool writeSequenceRuntime(const std::filesystem::path& declaration,
+    const std::string& generation, int64_t next, int64_t allocated,
+    bool exhausted) {
+    if (!validSequenceGeneration(generation)) return false;
+    const auto path = sequenceRuntimePath(declaration, generation);
+    std::error_code error;
+    std::filesystem::create_directories(path.parent_path(), error);
+    if (error || std::filesystem::is_symlink(path.parent_path())) return false;
+    std::ostringstream serialized;
+    serialized << "DBMSSEQR1 " << generation << ' ' << next << ' '
+               << allocated << ' ' << (exhausted ? 1 : 0) << '\n';
+    return index_file::writeAtomically(path, serialized.str());
+}
+
+// Only SQL rollback restores keep nontransactional allocations. Explicit
+// physical restore must continue to restore the exact backed-up counters.
+static thread_local const std::string* sequenceRollbackDatabase = nullptr;
+class SequenceRollbackRestoreScope {
+    const std::string* previous_;
+public:
+    explicit SequenceRollbackRestoreScope(const std::string& database)
+        : previous_(sequenceRollbackDatabase) {
+        sequenceRollbackDatabase = &database;
+    }
+    ~SequenceRollbackRestoreScope() { sequenceRollbackDatabase = previous_; }
+};
+
+static bool preserveSequenceRuntimeForks(const std::filesystem::path& live,
+    const std::filesystem::path& staged) {
+    std::lock_guard<std::mutex> lock(g_sequenceMutex);
+    const auto source = live / SEQUENCE_RUNTIME_DIRECTORY;
+    std::error_code error;
+    const auto status = std::filesystem::symlink_status(source, error);
+    if (error == std::errc::no_such_file_or_directory ||
+        (!error && !std::filesystem::exists(status))) return true;
+    if (error || !std::filesystem::is_directory(status)) return false;
+    const auto destination = staged / SEQUENCE_RUNTIME_DIRECTORY;
+    std::filesystem::create_directories(destination, error);
+    if (error || std::filesystem::is_symlink(destination)) return false;
+    for (const auto& entry : std::filesystem::directory_iterator(source)) {
+        const auto generation = entry.path().filename().string();
+        int64_t next = 0, allocated = 0;
+        bool exhausted = false;
+        if (!readSequenceRuntime(entry.path(), generation, next, allocated, exhausted) ||
+            !writeSequenceRuntime(staged / "declaration", generation,
+                                  next, allocated, exhausted)) return false;
+    }
+    return true;
+}
 
 static std::string encodeSequenceOwnedField(const std::string& value) {
     if (value.empty()) return "-";
@@ -21063,18 +21146,22 @@ static bool parseSequenceInt64(const std::string& token, int64_t& value) {
 // on-disk boundary value cannot distinguish "not returned yet" from "already
 // returned", which made non-cycling sequences repeat their final value.
 // V4 encodes ownership strings so quoted whitespace cannot shift token
-// boundaries. V2, V3, and legacy unversioned files remain readable.
+// boundaries. V5 separates the transactional declaration/storage generation
+// from its nontransactional allocation fork. Older files remain readable.
 static bool readSequenceFile(const std::filesystem::path& path,
                              dbms::SequenceInfo& info,
                              int64_t& nextValue,
                              int64_t& lastAllocated,
-                             bool* exhaustedOut = nullptr) {
+                             bool* exhaustedOut = nullptr,
+                             std::string* generationOut = nullptr) {
     std::ifstream ifs(path);
     if (!ifs) return false;
     std::string firstToken;
     if (!(ifs >> firstToken)) return false;
 
     const bool version4 = firstToken == SEQUENCE_FILE_V4;
+    const bool version5 = firstToken == SEQUENCE_FILE_V5;
+    std::string generation;
     const bool version3 = firstToken == SEQUENCE_FILE_V3;
     const bool version2 = firstToken == SEQUENCE_FILE_V2;
     int64_t start = 1;
@@ -21088,7 +21175,7 @@ static bool readSequenceFile(const std::filesystem::path& path,
     int64_t minExplicit = 0;
     int64_t maxExplicit = 0;
     int64_t exhaustedFlag = 0;
-    if (version4 || version3) {
+    if (version5 || version4 || version3) {
         if (!(ifs >> start >> increment >> minValue >> maxValue >> cache >>
               cycleFlag >> next >> last >> minExplicit >> maxExplicit >>
               exhaustedFlag)) {
@@ -21118,7 +21205,9 @@ static bool readSequenceFile(const std::filesystem::path& path,
 
     std::string ownedTable;
     std::string ownedColumn;
-    if (version4) {
+    if (version5 && (!(ifs >> generation) || !validSequenceGeneration(generation)))
+        return false;
+    if (version5 || version4) {
         std::string tableToken;
         std::string columnToken;
         if (!(ifs >> tableToken >> columnToken) ||
@@ -21185,6 +21274,13 @@ static bool readSequenceFile(const std::filesystem::path& path,
     std::string extra;
     if (ifs >> extra) return false;
 
+    if (version5) {
+        bool exhausted = false;
+        if (!readSequenceRuntime(sequenceRuntimePath(path, generation), generation,
+                                 next, last, exhausted)) return false;
+        exhaustedFlag = exhausted ? 1 : 0;
+    }
+
     if (cycleFlag != 0 && cycleFlag != 1) return false;
     if (increment == 0 || minValue > maxValue ||
         start < minValue || start > maxValue || cache < 1 ||
@@ -21199,7 +21295,7 @@ static bool readSequenceFile(const std::filesystem::path& path,
         if (last != initialPredecessor) return false;
     }
 
-    if (!version2 && !version3 && !version4) {
+    if (!version2 && !version3 && !version4 && !version5) {
         const int64_t defaultMinimum = increment > 0
             ? 1 : -std::numeric_limits<int64_t>::max();
         const int64_t defaultMaximum = increment > 0
@@ -21222,6 +21318,7 @@ static bool readSequenceFile(const std::filesystem::path& path,
     nextValue = next;
     lastAllocated = last;
     if (exhaustedOut) *exhaustedOut = exhaustedFlag != 0;
+    if (generationOut) *generationOut = std::move(generation);
     return true;
 }
 
@@ -21229,18 +21326,13 @@ static bool writeSequenceFile(const std::filesystem::path& path,
                               const dbms::SequenceInfo& info,
                               int64_t nextValue,
                               int64_t lastAllocated,
-                              bool exhausted = false) {
+                              bool exhausted = false,
+                              std::string generation = {}) {
+    if (generation.empty()) generation = UuidValue::generateV4().toString();
+    if (!writeSequenceRuntime(path, generation, nextValue, lastAllocated, exhausted))
+        return false;
     std::ostringstream serialized;
-    const auto needsEncoding = [](unsigned char ch) {
-        return std::isspace(ch) != 0 || ch == '"';
-    };
-    const bool version4 = std::any_of(
-        info.ownedByTable.begin(), info.ownedByTable.end(),
-        needsEncoding) ||
-        std::any_of(
-            info.ownedByColumn.begin(), info.ownedByColumn.end(),
-            needsEncoding);
-    serialized << (version4 ? SEQUENCE_FILE_V4 : SEQUENCE_FILE_V3) << " "
+    serialized << SEQUENCE_FILE_V5 << " "
                << info.start << " "
                << info.increment << " "
                << info.minValue << " "
@@ -21252,11 +21344,76 @@ static bool writeSequenceFile(const std::filesystem::path& path,
                << (info.hasMinValue ? 1 : 0) << " "
                << (info.hasMaxValue ? 1 : 0) << " "
                << (exhausted ? 1 : 0) << " "
-               << (version4 ? encodeSequenceOwnedField(info.ownedByTable)
-                            : info.ownedByTable) << " "
-               << (version4 ? encodeSequenceOwnedField(info.ownedByColumn)
-                            : info.ownedByColumn) << "\n";
+               << generation << " "
+               << encodeSequenceOwnedField(info.ownedByTable) << " "
+               << encodeSequenceOwnedField(info.ownedByColumn) << "\n";
     return index_file::writeAtomically(path, serialized.str());
+}
+
+static bool ensureSequenceGenerationsForBackup(const std::string& dbname) {
+    std::lock_guard<std::mutex> lock(g_sequenceMutex);
+    for (const auto& entry : std::filesystem::directory_iterator(dbname)) {
+        const auto extension = entry.path().extension();
+        if (!entry.is_regular_file() || (extension != ".seq" && extension != ".seqv2"))
+            continue;
+        SequenceInfo info;
+        int64_t next = 0, allocated = 0;
+        bool exhausted = false;
+        std::string generation;
+        if (!readSequenceFile(entry.path(), info, next, allocated, &exhausted, &generation)) {
+            // The unrelated legacy per-table AUTO_INCREMENT sidecar also
+            // has extension .seq, but its first token is a column name.
+            std::ifstream input(entry.path());
+            std::string magic;
+            if (extension == ".seqv2" ||
+                ((input >> magic) && magic.rfind("DBMSSEQ", 0) == 0)) return false;
+            continue;
+        }
+        if (generation.empty() && !writeSequenceFile(entry.path(), info,
+                next, allocated, exhausted)) return false;
+    }
+    return true;
+}
+
+// Retired generations are necessary while any transaction image/savepoint
+// can restore their declarations. Reclaim only after the owner has finished
+// and discarded its rollback images, never at DROP or RESTART inside it.
+static void pruneSequenceRuntimeForks(const std::string& dbname) {
+    std::lock_guard<std::mutex> lock(g_sequenceMutex);
+    try {
+        const auto runtime = std::filesystem::path(dbname) / SEQUENCE_RUNTIME_DIRECTORY;
+        if (!std::filesystem::exists(runtime) || std::filesystem::is_symlink(runtime)) return;
+        std::set<std::string> active;
+        for (const auto& entry : std::filesystem::directory_iterator(dbname)) {
+            const auto extension = entry.path().extension();
+            if (!entry.is_regular_file() || (extension != ".seq" && extension != ".seqv2"))
+                continue;
+            SequenceInfo info;
+            int64_t next = 0, allocated = 0;
+            std::string generation;
+            if (!readSequenceFile(entry.path(), info, next, allocated, nullptr, &generation)) {
+                std::ifstream input(entry.path());
+                std::string magic;
+                if (extension == ".seqv2" ||
+                    ((input >> magic) && magic.rfind("DBMSSEQ", 0) == 0)) return;
+                continue;
+            }
+            if (!generation.empty()) active.insert(generation);
+        }
+        for (const auto& entry : std::filesystem::directory_iterator(runtime)) {
+            const auto generation = entry.path().filename().string();
+            if (!validSequenceGeneration(generation) || !entry.is_regular_file() ||
+                entry.is_symlink()) return;
+            if (!active.count(generation)) {
+                std::error_code error;
+                std::filesystem::remove(entry.path(), error);
+                if (error) return; // orphan retention cannot fail a committed transaction
+            }
+        }
+        (void)index_file::syncDirectory(runtime);
+    } catch (...) {
+        // Keep recoverable orphan files on an ordinary cleanup failure.
+    }
 }
 
 DBStatus StorageEngine::createSequence(const std::string& dbname,
@@ -21326,7 +21483,8 @@ DBStatus StorageEngine::alterSequence(const std::string& dbname,
     dbms::SequenceInfo old;
     int64_t nextValue, lastAllocated;
     bool exhausted = false;
-    if (!readSequenceFile(path, old, nextValue, lastAllocated, &exhausted))
+    std::string generation;
+    if (!readSequenceFile(path, old, nextValue, lastAllocated, &exhausted, &generation))
         return DBStatus::INVALID_VALUE;
 
     dbms::SequenceInfo merged = old;
@@ -21386,8 +21544,14 @@ DBStatus StorageEngine::alterSequence(const std::string& dbname,
         }
     }
     if (merged.cache < 1) return DBStatus::INVALID_VALUE;
+    // PG replaces storage for every option affecting future generation,
+    // even if its value is unchanged. OWNED BY changes only metadata.
+    const bool rewrite = info.startSpecified || info.restartSpecified ||
+        info.incrementSpecified || info.hasMinValue || info.noMinValue ||
+        info.hasMaxValue || info.noMaxValue || info.cacheSpecified || info.cycleSpecified;
     if (!writeSequenceFile(
-            path, merged, nextValue, lastAllocated, exhausted))
+            path, merged, nextValue, lastAllocated, exhausted,
+            rewrite ? std::string{} : generation))
         return DBStatus::IO_ERROR;
     return DBStatus::OK;
 }
@@ -21490,8 +21654,9 @@ int64_t StorageEngine::nextval(const std::string& dbname,
     dbms::SequenceInfo info;
     int64_t nextValue, lastAllocated;
     bool exhausted = false;
+    std::string generation;
     if (!readSequenceFile(
-            path, info, nextValue, lastAllocated, &exhausted)) {
+            path, info, nextValue, lastAllocated, &exhausted, &generation)) {
         throwSequenceReadError(path, resolved.displayName);
     }
     if (exhausted) {
@@ -21567,8 +21732,9 @@ int64_t StorageEngine::nextval(const std::string& dbname,
         }
     }
 
-    if (!writeSequenceFile(
-            path, info, nextValue, lastAllocated, exhausted)) {
+    if (!(generation.empty()
+            ? writeSequenceFile(path, info, nextValue, lastAllocated, exhausted)
+            : writeSequenceRuntime(path, generation, nextValue, lastAllocated, exhausted))) {
         throw DbError("58030",
                       "could not write sequence \"" +
                           resolved.displayName + "\"");
@@ -21666,7 +21832,8 @@ int64_t StorageEngine::setval(const std::string& dbname,
     std::lock_guard<std::mutex> lock(g_sequenceMutex);
     dbms::SequenceInfo info;
     int64_t nextValue, lastAllocated;
-    if (!readSequenceFile(path, info, nextValue, lastAllocated)) {
+    std::string generation;
+    if (!readSequenceFile(path, info, nextValue, lastAllocated, nullptr, &generation)) {
         throwSequenceReadError(path, resolved.displayName);
     }
     if (value < info.minValue || value > info.maxValue) {
@@ -21697,8 +21864,9 @@ int64_t StorageEngine::setval(const std::string& dbname,
         nextValue = value;
     }
     sequencePredecessor(nextValue, info.increment, lastAllocated);
-    if (!writeSequenceFile(
-            path, info, nextValue, lastAllocated, exhausted)) {
+    if (!(generation.empty()
+            ? writeSequenceFile(path, info, nextValue, lastAllocated, exhausted)
+            : writeSequenceRuntime(path, generation, nextValue, lastAllocated, exhausted))) {
         throw DbError("58030",
                       "could not write sequence \"" +
                           resolved.displayName + "\"");
@@ -43594,6 +43762,11 @@ bool StorageEngine::physicalRestoreLocked(
                 return false;
             }
         }
+        if (sequenceRollbackDatabase && *sequenceRollbackDatabase == dbname &&
+            !preserveSequenceRuntimeForks(dst, stagedDatabase)) {
+            discardStagedDatabase();
+            return false;
+        }
         if (!syncPhysicalBackupTree(stagedDatabase)) {
             discardStagedDatabase();
             return false;
@@ -45903,7 +46076,7 @@ bool StorageEngine::createTransactionBackup() {
     // The exclusive database lock is acquired by beginTransaction(..., true)
     // before this copy starts. This prevents a physical restore from erasing
     // another backend's committed changes.
-    if (!flushDatabaseCaches(dbname)) return false;
+    if (!flushDatabaseCaches(dbname) || !ensureSequenceGenerationsForBackup(dbname)) return false;
 
     const auto backup = transactionBackupPath(dbname, context.currentTxnId);
     // Transaction rollback needs an exact image, including UNLOGGED main
@@ -45933,7 +46106,8 @@ bool StorageEngine::createDdlStatementBackup(std::string& backupPath) {
         return false;
     }
     if (catalogService_ && !catalogService_->persistAll()) return false;
-    if (!flushDatabaseCaches(context.txnDB)) return false;
+    if (!flushDatabaseCaches(context.txnDB) ||
+        !ensureSequenceGenerationsForBackup(context.txnDB)) return false;
 
     const auto backup = ddlStatementBackupPath(
         context.txnDB, context.currentTxnId);
@@ -45964,6 +46138,7 @@ bool StorageEngine::restoreDdlStatementBackup(
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (catalogService_) catalogService_->evict(context.txnDB);
     closeDatabaseCaches(context.txnDB);
+    SequenceRollbackRestoreScope sequenceScope(context.txnDB);
     const bool restored =
         physicalRestoreLocked(context.txnDB, backupPath);
     if (!restored) return false;
@@ -46501,6 +46676,9 @@ DBStatus StorageEngine::commitTransaction() {
         session && session->currentDB == transactionContext().txnDB) {
         applySessionTempTableCommitActions(*this, *session, transactionContext().txnDB);
     }
+    if (committingContext.databaseExclusiveLock &&
+        committingContext.databaseExclusiveLock->owns_lock())
+        pruneSequenceRuntimeForks(committingDb);
     transactionContext().constraintMode.clear();
     transactionContext().deferredChecks.erase(transactionContext().currentTxnId);
     transactionContext().currentTxnId = 0;
@@ -47614,6 +47792,12 @@ DBStatus StorageEngine::rollbackTransaction() {
 
     if (!preserveBackup) discardTransactionBackup(rollbackDb);
 
+    if (!preserveBackup && snapshotRestoreOk && rowUndoOk && ddlUndoOk &&
+        specializedUndoOk && undoFlushOk && clogOk && abortWalOk &&
+        transactionContext().databaseExclusiveLock &&
+        transactionContext().databaseExclusiveLock->owns_lock())
+        pruneSequenceRuntimeForks(rollbackDb);
+
     transactionContext().currentTxnId = 0;
     transactionContext().inTransaction = false;
     transactionContext().readOnly = false;
@@ -47671,6 +47855,7 @@ bool StorageEngine::restoreTransactionBackup(const std::string& dbname) {
     // replacing the directory so no stale file handles survive the restore.
     if (catalogService_) catalogService_->evict(dbname);
     closeDatabaseCaches(dbname);
+    SequenceRollbackRestoreScope sequenceScope(dbname);
     const bool restored = physicalRestoreLocked(dbname, backup.string());
     if (restored) {
         if (context.inTransaction) {
