@@ -855,6 +855,16 @@ std::string ExprHelper::canonicalResultTypeName(std::string typeName) {
     if (first == std::string::npos) return {};
     const size_t last = typeName.find_last_not_of(" \t\r\n");
     typeName = typeName.substr(first, last - first + 1);
+    // SQL array dimensions do not define distinct element/array types. Fold
+    // the base alias before attaching the array marker: normalizing int4[]
+    // as an opaque scalar spelling would disagree with integer[] metadata.
+    bool array = false;
+    while (typeName.size() >= 2 && typeName.compare(typeName.size() - 2, 2, "[]") == 0) {
+        array = true; typeName.resize(typeName.size() - 2);
+        const auto baseEnd = typeName.find_last_not_of(" \t\r\n");
+        if (baseEnd == std::string::npos) return {};
+        typeName.resize(baseEnd + 1);
+    }
     const size_t modifier = typeName.find('(');
     if (modifier != std::string::npos) {
         typeName.resize(modifier);
@@ -865,7 +875,7 @@ std::string ExprHelper::canonicalResultTypeName(std::string typeName) {
     }
     std::string canonical =
         TypeRegistry::instance().normalizeTypeName(typeName);
-    return canonical.empty() ? toLower(typeName) : canonical;
+    return (canonical.empty() ? toLower(typeName) : canonical) + (array ? "[]" : "");
 }
 
 std::string ExprHelper::inferValuesResultType(const std::string& exprSql) {

@@ -31540,7 +31540,20 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
                     for (const auto& attribute : attributes) {
                         if (attribute.attrelid != relation.oid || attribute.attnum <= 0 || attribute.attisdropped) continue;
                         std::string typeName = "unknown";
-                        for (const auto& type : catalog.types) if (type.oid == attribute.atttypid) typeName = type.typname;
+                        bool arrayType = attribute.attndims > 0;
+                        for (const auto& type : catalog.types) {
+                            if (type.oid != attribute.atttypid) continue;
+                            typeName = type.typname;
+                            if (type.typcategory == 'A' && type.typelem != INVALID_OID) {
+                                arrayType = true;
+                                for (const auto& element : catalog.types)
+                                    if (element.oid == type.typelem) { typeName = element.typname; break; }
+                            }
+                            break;
+                        }
+                        // Normalize the element before appending []; the
+                        // scalar alias registry does not fold "int4[]".
+                        typeName = ExprHelper::canonicalResultTypeName(typeName) + (arrayType ? "[]" : "");
                         description.columns.push_back({attribute.attname, typeName});
                     }
                     if (!description.columns.empty()) return description;
