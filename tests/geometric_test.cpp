@@ -12,6 +12,7 @@
 #include "catalog/type_registry.h"
 #include "catalog/systables.h"
 #include "common/GeometryValue.h"
+#include "access/SPGiSTIndexFormat.h"
 #include <cassert>
 #include <filesystem>
 #include <fstream>
@@ -247,24 +248,63 @@ static void test_point_still_works() {
     assert(input);
     const std::string validSidecar{
         std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
-    assert(validSidecar.find(p1) != std::string::npos);
-    assert(validSidecar.find(p2) != std::string::npos);
+    // V2 stores checksummed IEEE-754 coordinates, not decimal text. Check
+    // exact bits and each physical RID, so adjacent doubles cannot collapse.
+    std::vector<dbms::spgist_index_format::Entry> entries;
+    assert(dbms::spgist_index_format::decodeV2(validSidecar, entries));
+    assert(entries.size() == 3);
+    uint64_t rid1 = 0, rid2 = 0;
+    const auto schema = g_engine.getTableSchema(db, "g");
+    assert(g_engine.forEachRow(db, "g",
+        [&](uint32_t page, uint16_t slot, const char* data, size_t length) {
+            const auto id = g_engine.extractColumnValue(std::string(data, length), schema, 0, db);
+            const uint64_t rid = (static_cast<uint64_t>(page) << 32) | slot;
+            if (id == "1") rid1 = rid;
+            if (id == "2") rid2 = rid;
+        }));
+    assert(rid1 && rid2 && rid1 != rid2);
+    bool found1 = false, found2 = false;
+    for (const auto& entry : entries) {
+        using dbms::spgist_index_format::doubleBits;
+        if (entry.rid == rid1) {
+            assert(doubleBits(entry.x) == doubleBits(1.0000000000000002));
+            assert(doubleBits(entry.y) == doubleBits(2.0000000000000004));
+            found1 = true;
+        }
+        if (entry.rid == rid2) {
+            assert(doubleBits(entry.x) == doubleBits(1.0000000000000004));
+            assert(doubleBits(entry.y) == doubleBits(2.000000000000001));
+            found2 = true;
+        }
+    }
+    assert(found1 && found2);
 
-    // A malformed sidecar is rejected and, crucially, is not cached as an
-    // empty valid tree; restoring the file makes the next lookup succeed.
+    // Malformed sidecars use the documented safe heap fallback, never an
+    // empty cached index. Fresh owners prove reload rather than a warm cache.
     {
         std::ofstream broken(sidecar, std::ios::binary | std::ios::trunc);
         broken << "not-a-rid not-a-point\n";
     }
-    assert(g_engine.spGiSTSearch(db, "g", "p", "=", p1).empty());
+    {
+        dbms::StorageEngine observer;
+        assert(observer.spGiSTSearch(db, "g", "p", "=", p1) ==
+               std::vector<int64_t>{static_cast<int64_t>(rid1)});
+        assert(observer.spGiSTSearch(db, "g", "p", "=", p2) ==
+               std::vector<int64_t>{static_cast<int64_t>(rid2)});
+    }
     {
         std::ofstream restored(sidecar, std::ios::binary | std::ios::trunc);
         restored.write(validSidecar.data(),
                        static_cast<std::streamsize>(validSidecar.size()));
         assert(restored);
     }
-    assert(g_engine.spGiSTSearch(db, "g", "p", "=", p1).size() == 1);
-    assert(g_engine.spGiSTSearch(db, "g", "p", "=", p2).size() == 1);
+    {
+        dbms::StorageEngine observer;
+        assert(observer.spGiSTSearch(db, "g", "p", "=", p1) ==
+               std::vector<int64_t>{static_cast<int64_t>(rid1)});
+        assert(observer.spGiSTSearch(db, "g", "p", "=", p2) ==
+               std::vector<int64_t>{static_cast<int64_t>(rid2)});
+    }
     // Invalid predicates must not be interpreted as the origin.
     assert(g_engine.spGiSTSearch(db, "g", "p", "=", "not-a-point").empty());
     assert(g_engine.spGiSTSearch(db, "g", "p", "=", "0,0 trailing").empty());
