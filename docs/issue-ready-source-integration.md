@@ -1,4 +1,87 @@
-# Latest 82bf checkpoint: 70 independently committed source/test repairs
+# Latest 9f7d checkpoint: 73 independently committed source/test repairs
+
+Production/test source `9f7d55cc` has **684 auto-native plus one actual
+frontend native /347 registered tests /58 production TUs**. Three further
+issues are independently committed; the full original273 objective is unchanged.
+
+| Issue | Private commit(s) | ROOT commit | Verified issue scope |
+| --- | --- | --- | --- |
+| Forked base backup's selected archive stream | `660381cf` | `d661ca4b` | Real timeline2 lost-row134; populated/empty fork and old timeline1 histories, selected overlap, rows/indexes/CLOG/cold restart |
+| Original DOMAIN declaration fixture contract | `6f045f7e` | `7504b801` | Original SQL retained; exact quoted namespace identity, semantic VARCHAR(12), real catalog/base/modifier/drop controls |
+| Exact thread-owned table-list publication fault | `55473551` + `ba3ee8b4` | `9f7d55cc` | Original early physical-ID fault retained negative; real tlist rename/EIO/retry and forced competing-thread controls |
+
+PITR's private18-native group is **17pass/one fail** and final23 group is
+**21pass/two fail**, not all green. Unchanged TRUNCATE and stale-temp recovery
+fixtures also abort134 against exact old82bf; their causes remain independent.
+Final three-history/ten original backup/PITR controls and the original complete
+four-case cold-backup wire pass. The malformed/reserved foreign filenames are
+explicit controls, not invented valid history. Independent read-only review
+confirms this selected-stream scope, not missing/corrupt selector recovery,
+multi-sealed-segment/padding replay, a history chain or atomic online PITR.
+The actual public-WAL reopen xl_prev and switched multi-segment lost-row
+counterexamples stay OPEN. See the issue's retained complete logs.
+
+Root exactd661 normal **10753 exits0**, fresh sole TableManage plus57 fully
+source/header/actual-flag/original58-receipt/object-byte-proved82bf donors.
+Repeat/current58 receipts/stamp/freeze pass; **not fresh58**. SHA256
+`29f59b89b4ff3a0ea7de901285891da6d37a90e0fa667f3aa6da15348d989675`.
+Root d661 **15 entire natives plus actual frontend43615 exit0** and complete
+original cold-backup wire21760 exit0. The primary driver includes real
+populated/empty/ordinary histories and current original array/snapshot controls.
+
+DOMAIN's unchanged whole current fixture aborts134 with actual fields
+`"public"."route_text"` and `VARCHAR ( 12 )`. Only the two stale metadata
+expectations change; original complete SQL/routing/values/negative controls
+remain. Eleven complete matching native74316 exit0; final strengthened whole
+target93426 exit0 with actual base varchar/typmod16/modifier12/current catalog
+lookup after DROP. Strict180006 permanent reference0 verifies SQL semantics
+in one owned rolled-back schema, not PostgreSQL C++ field spelling. Initial
+external donor-manifest preflight errors are retained and not production bugs.
+
+The first table-list candidate's positive was rejected by Root review: its
+global injected token could be consumed by another thread. Actual old554
+forced-other-thread whole22995 exits0 despite the target never observing the
+error, proving a false-green test. The final positive uses no global token:
+target rename sets TLS stage, real exact-directory first fsync returnsEIO,
+and the next actual successful syscall alone counts as retry. CREATE and DROP
+each first join another thread's successful same-directory sync, which cannot
+consume the pending error. Original failAfter(1) now correctly targets the
+physical-ID highwater and is retained as an actual negative/no-effects/retry.
+Final whole ten-native57325/six unchanged whole24824/three target repeats47366/
+postcommit88210 exit0. Old wrapper2 after live-helper rewriting and old weak
+greens remain explicitly rejected as fault proof. The final test SHA256 is
+`e4f3e44913600c2e65f10e4e49f0fc2b895c78a2f7f01e1d6745750132fdc2db`.
+Both private stages form one Root issue commit, after final verification.
+
+Root 7504 test-only epoch migration **38219 exits0**: zero fresh production
+CPPs, all58 exact d661 normal objects/current receipts/stamp/repeat/frozen
+proved; original-full57 same-flags production layer also proved, no driver/
+stub seeded. Exact7504 original **684 plus frontend/347 full6359 is live**.
+This is not a new fresh58/57 compilation, current9f7d full or any full PASS.
+`git diff d661ca4b 9f7d55cc -- src scripts cmake` is actually empty: the latest
+two commits are test/docs-only. Their complete targeted proofs do not replace
+an exact current full-suite terminal.
+
+Previous82bf native105 plus frontend39059 exits0, original three-native45204
+and genuine fault68439 exit0. Its49 whole86895 actually exits1: **41pass/eight
+fail**, all49 labels complete. The failures are view error-path connection
+closure, six explicit timeouts, and initial stored-function-order connect103;
+original SQL/deadlines remain. Exact82bf original683+frontend/347 full48181 is
+still live. Older full33648/56028/97347 now actually end1, with full terminal
+logs retained; old48518/27869/93414/64688 remain individually confirmed live.
+No observation expiry triggers a kill/restart or success claim.
+
+CREATE's real persistence failures currently lose their I/O category in native
+failCreate, and ordinary DDL prints no structured cause; separate exact-cause
+native and frontend repairs are being verified. Traced trigger/session cleanup,
+full native namespace/shared-engine committed catalog views/domain-column
+CASCADE, WITH-DML/all EXPLAIN options/formats/instrumentation, all catalog WAL/
+MVCC/maps/types/query/storage/recovery/operations and every original unclosed
+requirement remain OPEN. No unverified private source is imported.
+Original273 stays **22complete/166partial/70unverified/15deferred**; completion
+gate must reject. No push, Actions activation or deferred security/TDE restart.
+
+# Historical 82bf checkpoint: 70 independently committed source/test repairs
 
 Production/test source `82bf3739` has **683 auto-discovered native tests plus
 one actual frontend native driver /347 registered tests /58 production TUs**.

@@ -1,4 +1,35 @@
-# 2026-10-07 最新82bf总清单 checkpoint
+# 2026-10-07 最新9f7d总清单 checkpoint
+
+生产/测试source `9f7d55cc`：**684auto-native+1真实frontend/347registered/
+58TU**，73项独立source/test commit。PITR恢复选中timeline `d661ca4b`、
+DOMAIN原metadata测试契约 `7504b801`、指定线程表名单发布故障 `9f7d55cc`
+各独立提交。前者真timeline2丢行134已修；后两者保原SQL/故障/所有原控制。
+表名单初候选被Root拒绝：另一线程可消费globaltoken而原fixture仍绿，真实
+falsegreen22995日志保留；最终TLS指定inode/线程第一fsync故障和实际retry，
+强先行竞争线程控制、10native/6whole/3重复/审计均0，不把弱绿当fault证明。
+
+正式d661正常O2 10753为0：fresh soleTM+57逐源/头/flags/原58receipt/byte
+proved82bf donors，repeat/all58/stamp/freeze0，不冒fresh58；15native+实际
+frontend43615、原四case冷backup whole21760均0。DOMAIN完整11native74316/
+最终强化原target93426/strict180006为0。PITR私有18组17pass1fail、23组
+21pass2fail；原TRUNCATE/stale-temp在未改82bf同样134，不算整组绿或family闭合。
+
+精确7504 test-only epoch零CPP fresh/全部58当前donor证明迁移38219为0，
+原684+frontend/347full6359实际live，非当前9f7d full或fresh58/57。
+最新9f7d production/scripts/cmake与d661逐字相同，只有tests/docs变化。
+82bf native105+frontend39059为0，49whole86895已1=41pass8fail（一个view
+错误后connection closed、六timeouts、一次初始connect103），完整失败保留；
+其原full48181仍live。旧33648/56028/97347已1，另四旧full仍逐个live；
+不因观察超时kill/restart。所有原SQL/值/OID/NULL/默认期限保留。
+
+CREATE实际IO分类/native+DDL诊断两独立问题继续验证；多segment padding/
+记录链、stale-temp、trigger生命周期、完整namespace/共享engine已提交目录/
+domain外列CASCADE、WITH-DML/所有EXPLAIN格式/options/真实指标及全部其它
+原273未闭环要求不缩小。总账仍**22complete/166partial/70unverified/
+15deferred**，require-complete继续拒绝；不push、不启用Actions，不重开
+用户跳过安全/TDE。源码映射、完整证据范围和剩余边界见integration。
+
+# 2026-10-07 历史82bf总清单 checkpoint
 
 生产/测试source `82bf3739`：**683 auto-native+1实际frontend native/
 347registered/58TU**，累计70项独立source/test commit。新增数组物理element

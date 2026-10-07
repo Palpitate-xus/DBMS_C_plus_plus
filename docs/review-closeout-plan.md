@@ -4,7 +4,26 @@
 
 # 工作区与复查清单收尾计划
 
-## 2026-10-07 当前完整273目标计划（82bf；以下较早记录均历史）
+## 2026-10-07 当前完整273目标计划（9f7d；以下较早记录均历史）
+
+source `9f7d55cc`：684auto+1frontend/347registered/58TU，73项独立source/
+test commit。新增真PITR选中stream修复及两原测试契约分别commit，未缩原273。
+
+| 阶段 | 必须验收的原范围 | 当前证据 / 下一动作 |
+| --- | --- | --- |
+| 独立修复 | 真反例/完整控制/每问题commit | 三新Root映射见integration；weak fault候选先拒绝、最终线程归属实证后才单项合入 |
+| 当前生产输入 | 全58 actual源/头/flags/receipts/repeat/freeze | d66110753正常0、fresh soleTM+57proved donors；9f7d生产逐字同d661，7504零CPP/all58迁移38219为0，不冒fresh58 |
+| 原完整回归 | 当前全部684+frontend/347、磁盘/default期限、完整终态 | exact7504 full6359与82bf full48181 live，不冒9f7d full；105+front0，旧49whole41pass8fail如实保留 |
+| 新强专项 | PITR三历史/原备份、DOMAIN全原driver、精确目录故障线程 | Root15+frontend/原冷backup0；DOMAIN11+强化target/strict18为0；tablelist10native6whole3重复0 |
+| CREATE错误分类 | 真native IO与semantic区分、普通DDL原因/SQLSTATE/无effects/retry | 两层实际混淆已确认，分别真实注入/独立源码提交，不全换IO、不删原控制 |
+| 目录/查询/恢复/所有family | 全部原namespace/MVCC/WAL/map/EXPLAIN/类型/运维要求 | 现有多段WAL、stale-temp、trigger、shared-engine目录与其它未闭环项不替代/不缩小 |
+| 总账闭合 | 每原条目完整证据/状态/checkbox/commit/验收一致 | 22complete166partial70unverified15deferred，require-complete仍拒绝 |
+
+旧full33648/56028/97347已实际1，另外四旧full仍live；每旧红在当前源核实，
+不把失败数当bug数。新helpers冻结不改，过去作者EOF/offset/cache-preflight
+失败全保，未计PASS。无push、Actions禁用、deferred安全/TDE不恢复。
+
+## 2026-10-07 历史完整273目标计划（82bf）
 
 当前source `82bf3739`：683auto-native+1实际frontend/347registered/58TU，
 70项独立source/test commit。数组native物理类型、snapshot exporter传输可见性、
