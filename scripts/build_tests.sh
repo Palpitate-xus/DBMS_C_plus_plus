@@ -123,6 +123,15 @@ for test_file in tests/*_test.cpp; do
     echo
 done
 
+# This driver includes the actual main.cpp frontend TU and deliberately links
+# without test stubs; it cannot enter the ordinary standalone-test loop above.
+if bash scripts/test_explain_primary_error_cleanup.sh; then
+    echo "[test-build] explain_primary_error_cleanup PASSED"
+else
+    echo "[test-build] explain_primary_error_cleanup FAILED"
+    FAILED=1
+fi
+
 for e2e_test in "${DBMS_E2E_TESTS[@]}"; do
     echo "[test-build] Running ${e2e_test} ..."
     if python3 "${e2e_test}"; then

@@ -5244,8 +5244,9 @@ static bool publishExplainPlan(dbms::OpPtr plan, const string& inner,
             if (plan->hasError()) throw dbms::DbError("XX000", plan->errorMessage().empty()
                 ? "executor failed while reading analyzed plan" : plan->errorMessage());
         } catch (...) {
-            plan->close();
-            throw;
+            const auto failure = std::current_exception();
+            try { plan->close(); } catch (...) {}
+            std::rethrow_exception(failure);
         }
         plan->close();
         const double milliseconds = std::chrono::duration<double, std::milli>(
