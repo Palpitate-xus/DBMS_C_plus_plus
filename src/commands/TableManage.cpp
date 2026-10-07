@@ -15129,7 +15129,10 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
         if (in && enumCount > 0 && enumCount <= 1000) {
             for (uint16_t ei = 0; ei < enumCount; ++ei) {
                 std::string ev = readFixedString(in, MAX_COL_NAME_LEN);
-                if (!ev.empty()) tbl.cols[i].enumValues.push_back(ev);
+                // A zero-byte string is a legal enum label, not padding or
+                // an absent entry. Keep every counted label in declaration
+                // order, including empty labels, across schema reloads.
+                tbl.cols[i].enumValues.push_back(std::move(ev));
             }
         }
         uint8_t arrFlag = 0;
