@@ -66,6 +66,8 @@ constexpr uint8_t XLOG_HEAP_PAGE_AFTER  = 0x11; // full-page image after modific
 // SMGR info flags
 constexpr uint8_t XLOG_SMGR_CREATE     = 0x00;
 constexpr uint8_t XLOG_SMGR_TRUNCATE   = 0x01;
+constexpr uint8_t XLOG_SMGR_RELATION_CREATE = 0x20;
+constexpr uint8_t XLOG_SMGR_RELATION_RETIRE = 0x21;
 
 // CHECKPOINT info flags
 constexpr uint8_t XLOG_CHECKPOINT_SHUTDOWN = 0x00;

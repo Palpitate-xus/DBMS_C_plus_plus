@@ -157,6 +157,10 @@ struct TableSchema {
     // Tablespace: physical location for data files (default = "pg_default")
     std::string tablespace = "pg_default";
 
+    // Durable physical relation generation, independent of SQL names and
+    // preserved by a rename. Zero denotes a legacy name-only schema.
+    uint64_t physicalRelationId = 0;
+
     void append(const Column& ncol);
     void appendFK(const ForeignKey& fk);
     void print() const;

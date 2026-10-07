@@ -47,6 +47,7 @@
 #include "VisibilityMap.h"
 #include "CommitLog.h"
 #include "WAL.h"
+#include "storage/HeapWalIdentity.h"
 #include "HashIndex.h"
 #include "BloomIndex.h"
 #include "SPGiSTIndex.h"
@@ -2876,22 +2877,10 @@ TruncateStateRead readTruncateState(const StorageEngine& engine,
 }
 
 bool decodeTruncateWalPayload(const std::vector<char>& data,
-                              std::string& tablename) {
-    tablename.clear();
-    if (data.size() < sizeof(uint32_t)) return false;
-    uint32_t length = 0;
-    std::memcpy(&length, data.data(), sizeof(length));
-    if (length == 0 || length >= MAX_TABLE_NAME_LEN ||
-        length > data.size() - sizeof(length)) {
-        return false;
-    }
-    tablename.assign(data.data() + sizeof(length), length);
-    if (!validStoredIdentifier(tablename, MAX_TABLE_NAME_LEN)) return false;
-    const size_t consumed = sizeof(length) + length;
-    if (data.size() - consumed > 7) return false;
-    return std::all_of(
-        data.begin() + static_cast<std::ptrdiff_t>(consumed), data.end(),
-        [](char byte) { return byte == 0; });
+                              std::string& tablename,
+                              std::optional<uint64_t>& relationId) {
+    return heap_wal_identity::nameIdentity(data, tablename, relationId) &&
+        validStoredIdentifier(tablename, MAX_TABLE_NAME_LEN);
 }
 
 bool decodeHeapWalTableName(const XLogRecord& record,
@@ -14535,6 +14524,8 @@ DBStatus StorageEngine::renameDatabase(const std::string& oldName,
 }
 
 constexpr int32_t SCHEMA_FORMAT_VERSION = 0x44420009;  // "DB" + 64-byte identifier fields
+constexpr int32_t SCHEMA_PHYSICAL_ID_FORMAT_VERSION = 0x4442000A;
+constexpr uint32_t SCHEMA_PHYSICAL_ID_MAGIC = 0x31444952;  // "RID1"
 constexpr int32_t MAX_PERSISTED_COLUMN_SIZE = 65535;
 constexpr uint32_t SCHEMA_ADDITIONAL_CHECK_MAGIC = 0x324B4843;  // "CHK2"
 constexpr uint32_t SCHEMA_IDENTITY_KIND_MAGIC = 0x314E4449;     // "IDN1"
@@ -14583,7 +14574,9 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
         }
     }
     // Write format version marker
-    out.write(reinterpret_cast<const char*>(&SCHEMA_FORMAT_VERSION), 4);
+    const int32_t schemaFormat = tbl.physicalRelationId == 0
+        ? SCHEMA_FORMAT_VERSION : SCHEMA_PHYSICAL_ID_FORMAT_VERSION;
+    out.write(reinterpret_cast<const char*>(&schemaFormat), sizeof(schemaFormat));
     int32_t len = static_cast<int32_t>(tbl.len);
     out.write(reinterpret_cast<const char*>(&len), 4);
     for (size_t i = 0; i < tbl.len; ++i) {
@@ -14800,7 +14793,7 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
     uint16_t longDefaultCount = 0;
     for (size_t i = 0; i < tbl.len; ++i)
         if (tbl.cols[i].defaultValue.size() > MAX_COL_NAME_LEN) ++longDefaultCount;
-    if (longDefaultCount != 0 || !tbl.rangePartitions.empty()) {
+    if (longDefaultCount != 0 || !tbl.rangePartitions.empty() || tbl.physicalRelationId != 0) {
         out.write(reinterpret_cast<const char*>(&SCHEMA_LONG_DEFAULT_MAGIC),
                   sizeof(SCHEMA_LONG_DEFAULT_MAGIC));
         out.write(reinterpret_cast<const char*>(&longDefaultCount),
@@ -14817,7 +14810,7 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
 
     // Persist lower endpoints without changing the legacy schema prefix. Old
     // schemas infer them as MINVALUE followed by the preceding upper bound.
-    if (!tbl.rangePartitions.empty()) {
+    if (!tbl.rangePartitions.empty() || tbl.physicalRelationId != 0) {
         out.write(reinterpret_cast<const char*>(&SCHEMA_RANGE_LOWER_BOUNDS_MAGIC),
                   sizeof(SCHEMA_RANGE_LOWER_BOUNDS_MAGIC));
         const int32_t lowerBoundCount =
@@ -14832,6 +14825,12 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
             writeFixedString(out, lower, MAX_COL_NAME_LEN);
         }
     }
+    if (tbl.physicalRelationId != 0) {
+        out.write(reinterpret_cast<const char*>(&SCHEMA_PHYSICAL_ID_MAGIC),
+                  sizeof(SCHEMA_PHYSICAL_ID_MAGIC));
+        out.write(reinterpret_cast<const char*>(&tbl.physicalRelationId),
+                  sizeof(tbl.physicalRelationId));
+    }
 }
 
 TableSchema StorageEngine::readSchema(std::istream& in, const std::string& tablename) const {
@@ -14841,7 +14840,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     in.read(reinterpret_cast<char*>(&firstInt), 4);
     if (!in) return {};
 
-    if (firstInt != SCHEMA_FORMAT_VERSION) {
+    if (firstInt != SCHEMA_FORMAT_VERSION && firstInt != SCHEMA_PHYSICAL_ID_FORMAT_VERSION) {
         std::cerr << "[catalog] unsupported schema format for table " << tablename
                   << "; recreate the database with the current binary" << std::endl;
         return {};
@@ -15147,6 +15146,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     if (!in) return {};
     if (in.peek() == std::char_traits<char>::eof()) {
         if (!in.eof()) return {};
+        if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION) return {};
         in.clear();
         return tbl;
     }
@@ -15192,6 +15192,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     // them as SERIAL-like auto-increment columns (identityKind == 0).
     if (in.peek() == std::char_traits<char>::eof()) {
         if (!in.eof()) return {};
+        if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION) return {};
         in.clear();
         return tbl;
     }
@@ -15212,6 +15213,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     }
     if (in.peek() == std::char_traits<char>::eof()) {
         if (!in.eof()) return {};
+        if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION) return {};
         in.clear();
         return tbl;
     }
@@ -15239,6 +15241,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     }
     if (in.peek() == std::char_traits<char>::eof()) {
         if (!in.eof()) return {};
+        if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION) return {};
         // A zero-entry DFT1 block is emitted only with the new RANGE-bound
         // extension; an EOF here therefore means a truncated new schema.
         if (defaultCount == 0 && !tbl.rangePartitions.empty()) return {};
@@ -15275,6 +15278,13 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
             }
         }
         persistedLowerBounds.push_back(std::move(lower));
+    }
+    if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION) {
+        uint32_t physicalIdMagic = 0;
+        in.read(reinterpret_cast<char*>(&physicalIdMagic), sizeof(physicalIdMagic));
+        in.read(reinterpret_cast<char*>(&tbl.physicalRelationId), sizeof(tbl.physicalRelationId));
+        if (!in || physicalIdMagic != SCHEMA_PHYSICAL_ID_MAGIC || tbl.physicalRelationId == 0)
+            return {};
     }
     if (in.peek() != std::char_traits<char>::eof() || !in.eof()) return {};
     tbl.rangePartitionLowerBounds = std::move(persistedLowerBounds);
@@ -15429,6 +15439,70 @@ static bool persistToastCounter(const std::filesystem::path& path,
     const uint64_t checksum = toastCounterChecksum(bytes.data(), bytes.size());
     appendToastCounter(bytes, checksum);
     return index_file::writeAtomically(path, bytes);
+}
+
+constexpr uint32_t PHYSICAL_RELATION_COUNTER_MAGIC = 0x31444947u;  // GID1
+
+static bool readPhysicalRelationCounter(const std::filesystem::path& path,
+                                        uint64_t& nextId) {
+    nextId = 1;
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec)) return !ec;
+    std::ifstream input(path, std::ios::binary);
+    std::string bytes((std::istreambuf_iterator<char>(input)), {});
+    if (!input || bytes.size() != TOAST_COUNTER_SIZE) return false;
+    uint32_t magic = 0, version = 0;
+    uint64_t checksum = 0;
+    std::memcpy(&magic, bytes.data(), sizeof(magic));
+    std::memcpy(&version, bytes.data() + sizeof(magic), sizeof(version));
+    std::memcpy(&nextId, bytes.data() + sizeof(magic) + sizeof(version), sizeof(nextId));
+    std::memcpy(&checksum, bytes.data() + TOAST_COUNTER_PAYLOAD_SIZE, sizeof(checksum));
+    return magic == PHYSICAL_RELATION_COUNTER_MAGIC && version == 1 && nextId != 0 &&
+        checksum == toastCounterChecksum(bytes.data(), TOAST_COUNTER_PAYLOAD_SIZE);
+}
+
+static bool persistPhysicalRelationCounter(const std::filesystem::path& path,
+                                           uint64_t nextId) {
+    if (nextId == 0) return false;
+    std::string bytes;
+    appendToastCounter(bytes, PHYSICAL_RELATION_COUNTER_MAGIC);
+    appendToastCounter(bytes, uint32_t{1});
+    appendToastCounter(bytes, nextId);
+    appendToastCounter(bytes, toastCounterChecksum(bytes.data(), bytes.size()));
+    return index_file::writeAtomically(path, bytes);
+}
+
+static bool allocatePhysicalRelationId(StorageEngine& engine,
+                                       const std::string& dbname,
+                                       uint64_t& relationId) {
+    // This file is outside database snapshots and is never rolled back.
+    // Burn IDs before publishing any schema. The backed-up database floors
+    // also prevent reuse when an older cluster counter accompanies a restore.
+    const std::filesystem::path counter = ".physical_relation_ids";
+    ToastCounterFileLock lock(counter);
+    if (!lock.ok()) return false;
+    uint64_t nextId = 0;
+    if (!readPhysicalRelationCounter(counter, nextId)) return false;
+    for (const auto& database : engine.getDatabaseNames()) {
+        uint64_t floor = 0;
+        if (!readPhysicalRelationCounter(
+                engine.dbPath(database) / ".physical_relation_id_highwater", floor))
+            return false;
+        nextId = std::max(nextId, floor);
+        for (const auto& tableName : engine.getTableNames(database)) {
+            const auto table = engine.getTableSchema(database, tableName);
+            if (table.tablename != tableName ||
+                table.physicalRelationId == std::numeric_limits<uint64_t>::max()) return false;
+            nextId = std::max(nextId, table.physicalRelationId + 1);
+        }
+    }
+    if (nextId == std::numeric_limits<uint64_t>::max() ||
+        !persistPhysicalRelationCounter(counter, nextId + 1) ||
+        !persistPhysicalRelationCounter(
+            engine.dbPath(dbname) / ".physical_relation_id_highwater", nextId + 1))
+        return false;
+    relationId = nextId;
+    return true;
 }
 
 static std::string compressToastPayload(const std::string& data, uint8_t& flags) {
@@ -16479,6 +16553,19 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
     }
 
     {
+        if (!allocatePhysicalRelationId(*this, dbname, tblWithVersion.physicalRelationId))
+            return failCreate("could not allocate durable physical relation identity");
+        if (!tblWithVersion.isUnlogged) {
+            WALManager* wal = getWAL(dbname);
+            const auto payload = heap_wal_identity::event(
+                tblWithVersion.physicalRelationId, tblWithVersion.tablename);
+            const uint64_t xid = transactionContext().inTransaction
+                ? transactionContext().currentTxnId : 0;
+            const Lsn birthLsn = wal ? wal->XLogInsert(
+                RM_SMGR_ID, XLOG_SMGR_RELATION_CREATE, xid, payload) : INVALID_LSN;
+            if (!wal || birthLsn == INVALID_LSN || !wal->XLogFlush(birthLsn))
+                return failCreate("could not persist relation creation identity");
+        }
         std::ofstream out(schemaPath(dbname, tblWithVersion.tablename), std::ios::binary);
         if (!out) return failCreate("could not create table schema");
         writeSchema(out, tblWithVersion);
@@ -16913,6 +17000,21 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
                   << publicationError << std::endl;
         lockManager_.unlock(tablename);
         return DBStatus::IO_ERROR;
+    }
+
+    const TableSchema retiringSchema = getTableSchema(dbname, tablename);
+    if (retiringSchema.physicalRelationId != 0 && !retiringSchema.isUnlogged) {
+        WALManager* wal = getWAL(dbname);
+        const auto payload = heap_wal_identity::event(
+            retiringSchema.physicalRelationId, tablename);
+        const uint64_t xid = transactionContext().inTransaction
+            ? transactionContext().currentTxnId : 0;
+        const Lsn retirementLsn = wal ? wal->XLogInsert(
+            RM_SMGR_ID, XLOG_SMGR_RELATION_RETIRE, xid, payload) : INVALID_LSN;
+        if (!wal || retirementLsn == INVALID_LSN || !wal->XLogFlush(retirementLsn)) {
+            lockManager_.unlock(tablename);
+            return DBStatus::IO_ERROR;
+        }
     }
 
     // From this point onward DROP removes relation files irreversibly.  Keep
@@ -40815,6 +40917,7 @@ Lsn StorageEngine::walPageImage(const std::string& dbname, const std::string& ta
     payload.insert(payload.end(), reinterpret_cast<const char*>(&pageLen),
                    reinterpret_cast<const char*>(&pageLen) + sizeof(pageLen));
     payload.insert(payload.end(), pageBuf, pageBuf + pageSize);
+    heap_wal_identity::appendImage(payload, table.physicalRelationId);
     uint8_t info = beforeImage ? XLOG_HEAP_PAGE_BEFORE : XLOG_HEAP_PAGE_AFTER;
     const Lsn lsn = wal->XLogInsert(RM_HEAP_ID, info, xid, payload);
     // Do not suppress a retry after a failed insert: only a WAL record that
@@ -40966,6 +41069,7 @@ Lsn StorageEngine::walSmgrTruncate(const std::string& dbname,
     payload.insert(payload.end(), reinterpret_cast<const char*>(&length),
                    reinterpret_cast<const char*>(&length) + sizeof(length));
     payload.insert(payload.end(), tablename.begin(), tablename.end());
+    heap_wal_identity::appendImage(payload, getTableSchema(dbname, tablename).physicalRelationId);
     // TRUNCATE is currently an immediate storage operation (the SQL DDL
     // bridge commits first), so its redo boundary is non-transactional.
     return wal->XLogInsert(
@@ -42294,6 +42398,7 @@ bool StorageEngine::recoverAllDatabases() {
         std::set<uint64_t> committedXids = committedXidsByDb[dbname];
         std::vector<Lsn> redoRecordLsns;
         std::map<std::string, Lsn> latestTruncateLsns;
+        std::map<uint64_t, Lsn> latestIdentityTruncateLsns;
         bool needsIndexRebuild = false;
         {
             Lsn lsn = redoLsn;
@@ -42341,14 +42446,16 @@ bool StorageEngine::recoverAllDatabases() {
                 } else if (rmid == RM_SMGR_ID &&
                            info == XLOG_SMGR_TRUNCATE) {
                     std::string tableName;
+                    std::optional<uint64_t> identity;
                     if (rec.header.xl_xid != 0 ||
-                        !decodeTruncateWalPayload(rec.data, tableName)) {
+                        !decodeTruncateWalPayload(rec.data, tableName, identity)) {
                         std::cerr
                             << "[recovery] malformed TRUNCATE WAL record in "
                             << dbname << " at LSN " << lsn << std::endl;
                         return false;
                     }
-                    latestTruncateLsns[tableName] = lsn;
+                    if (identity) latestIdentityTruncateLsns[*identity] = lsn;
+                    else latestTruncateLsns[tableName] = lsn;
                     needsIndexRebuild = true;
                 }
                 if (rec.header.xl_xid != 0 &&
@@ -42370,6 +42477,83 @@ bool StorageEngine::recoverAllDatabases() {
             std::cerr << "[recovery] failed to persist CLOG for database "
                       << dbname << std::endl;
             return false;
+        }
+
+        // Relation names are mutable and can be reused. Resolve new images
+        // through the current durable schema identity, never through a
+        // guessed old basename. Retained lifecycle WAL is the only authority
+        // for discarding images whose physical generation no longer exists.
+        std::map<uint64_t, std::string> physicalRelations;
+        for (const auto& name : getTableNames(dbname)) {
+            const TableSchema schema = getTableSchema(dbname, name);
+            if (schema.tablename != name) return false;
+            if (schema.physicalRelationId != 0 &&
+                !physicalRelations.emplace(schema.physicalRelationId, name).second) {
+                std::cerr << "[recovery] duplicate physical relation identity in "
+                          << dbname << '\n';
+                return false;
+            }
+        }
+        std::map<uint64_t, std::pair<uint64_t, Lsn>> relationBirths;
+        std::map<uint64_t, Lsn> committedRetirements;
+        uint64_t relationHighwater = 1;
+        for (const auto& [identity, name] : physicalRelations) {
+            (void)name;
+            if (identity == std::numeric_limits<uint64_t>::max()) return false;
+            relationHighwater = std::max(relationHighwater, identity + 1);
+        }
+        for (Lsn historyLsn = wal->earliestAvailableLsn();;) {
+            auto record = wal->ReadRecord(historyLsn);
+            if (!record || record->header.xl_tot_len == 0) break;
+            if (record->rmid() == RM_SMGR_ID &&
+                (record->info() == XLOG_SMGR_RELATION_CREATE ||
+                 record->info() == XLOG_SMGR_RELATION_RETIRE)) {
+                heap_wal_identity::Event event;
+                if (!heap_wal_identity::event(*record, event) ||
+                    !validStoredIdentifier(event.name, MAX_TABLE_NAME_LEN) ||
+                    event.relationId == std::numeric_limits<uint64_t>::max()) {
+                    std::cerr << "[recovery] invalid relation identity event in "
+                              << dbname << " at LSN " << historyLsn << '\n';
+                    return false;
+                }
+                relationHighwater = std::max(relationHighwater, event.relationId + 1);
+                if (record->info() == XLOG_SMGR_RELATION_CREATE) {
+                    if (!relationBirths.emplace(event.relationId,
+                            std::make_pair(record->header.xl_xid, historyLsn)).second)
+                        return false;
+                } else if (record->header.xl_xid == 0 ||
+                           committedXids.count(record->header.xl_xid)) {
+                    committedRetirements[event.relationId] = historyLsn;
+                }
+            }
+            historyLsn += record->header.xl_tot_len;
+        }
+        if (relationHighwater > 1) {
+            const std::filesystem::path counter = ".physical_relation_ids";
+            ToastCounterFileLock identityLock(counter);
+            uint64_t clusterFloor = 0, databaseFloor = 0;
+            const auto databaseCounter = dbPath(dbname) / ".physical_relation_id_highwater";
+            if (!identityLock.ok() || !readPhysicalRelationCounter(counter, clusterFloor) ||
+                !readPhysicalRelationCounter(databaseCounter, databaseFloor) ||
+                (relationHighwater > clusterFloor &&
+                 !persistPhysicalRelationCounter(counter, relationHighwater)) ||
+                (relationHighwater > databaseFloor &&
+                !persistPhysicalRelationCounter(databaseCounter, relationHighwater))) return false;
+        }
+        for (const auto& [name, boundary] : latestTruncateLsns) {
+            (void)boundary;
+            if (getTableSchema(dbname, name).physicalRelationId != 0) return false;
+        }
+        for (const auto& [identity, truncateLsn] : latestIdentityTruncateLsns) {
+            const auto live = physicalRelations.find(identity);
+            if (live != physicalRelations.end()) {
+                auto& boundary = latestTruncateLsns[live->second];
+                boundary = std::max(boundary, truncateLsn);
+            } else {
+                const auto retirement = committedRetirements.find(identity);
+                if (retirement == committedRetirements.end() ||
+                    retirement->second <= truncateLsn) return false;
+            }
         }
 
         // A truncate record is write-ahead of the multi-file reset.  The
@@ -42410,6 +42594,7 @@ bool StorageEngine::recoverAllDatabases() {
             const uint8_t rmid = rec.rmid();
             const uint8_t info = rec.info();
             const uint64_t recXid = rec.header.xl_xid;
+            std::string resolvedHeapName;
             if (rmid == RM_HEAP_ID) {
                 std::string tableName;
                 if (!decodeHeapWalTableName(rec, tableName)) {
@@ -42418,7 +42603,34 @@ bool StorageEngine::recoverAllDatabases() {
                               << ": malformed heap relation name\n";
                     return false;
                 }
-                const auto truncate = latestTruncateLsns.find(tableName);
+                resolvedHeapName = tableName;
+                if (info == XLOG_HEAP_PAGE_BEFORE || info == XLOG_HEAP_PAGE_AFTER) {
+                    std::optional<uint64_t> identity;
+                    if (!heap_wal_identity::image(rec, identity)) return false;
+                    if (identity) {
+                        const auto live = physicalRelations.find(*identity);
+                        if (live != physicalRelations.end()) {
+                            resolvedHeapName = live->second;
+                        } else {
+                            const auto retirement = committedRetirements.find(*identity);
+                            if (retirement != committedRetirements.end() &&
+                                recordLsn < retirement->second) return true;
+                            const auto birth = relationBirths.find(*identity);
+                            if (birth != relationBirths.end() && birth->second.first != 0 &&
+                                birth->second.first == recXid && birth->second.second < recordLsn &&
+                                !committedXids.count(recXid) &&
+                                !inDoubtPreparedXids.count({dbname, recXid})) return true;
+                            std::cerr << "[recovery] missing live physical relation identity "
+                                      << *identity << " in " << dbname << '\n';
+                            return false;
+                        }
+                    } else if (getTableSchema(dbname, tableName).physicalRelationId != 0) {
+                        // A name-only image cannot be safely assigned to a
+                        // later generation which happens to reuse its name.
+                        return false;
+                    }
+                }
+                const auto truncate = latestTruncateLsns.find(resolvedHeapName);
                 if (truncate != latestTruncateLsns.end() &&
                     recordLsn <= truncate->second) {
                     return true;
@@ -42555,7 +42767,9 @@ bool StorageEngine::recoverAllDatabases() {
                 [&, force, recordLsn](const std::string& tableName, uint32_t blockNum,
                                       uint32_t forkNum, const char* pageData,
                                       size_t pageLen) {
-                    return redoPageImage(dbname, tableName, blockNum, pageData,
+                    return redoPageImage(dbname,
+                                         resolvedHeapName.empty() ? tableName : resolvedHeapName,
+                                         blockNum, pageData,
                                          pageLen, recordLsn, force, forkNum);
                 },
                 [](const std::string&, uint32_t, uint32_t, uint16_t,
