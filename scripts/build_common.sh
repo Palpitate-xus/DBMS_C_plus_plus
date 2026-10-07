@@ -45,6 +45,8 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/domain_ancestry_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/domain_default_lifecycle_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/domain_default_transaction_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/update_domain_default_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/update_domain_default_transaction_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/domain_foreign_key_base_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/plpgsql_query_binding_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/plpgsql_select_into_execution_demand_protocol_e2e_test.py)

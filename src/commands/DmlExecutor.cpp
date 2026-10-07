@@ -4065,6 +4065,13 @@ bool executePreparedUpdate(const UpdateStmt& stmt, Session& s, bool& fallback,
         assignment.second = std::move(cast);
     }
     PreparedQueryExecution execution(prepared, &g_engine, s.currentDB);
+    // A lowered DEFAULT remains this execution's actual value root. Plan its
+    // structural constants before row demand, including arguments of a
+    // volatile default, without invoking that routine. Non-DEFAULT legacy
+    // consumers keep their existing planning entry in this narrow change.
+    for (size_t i=0;i<stmt.setClauses.size();++i)
+        if (isDefaultValue(stmt.setClauses[i].second))
+            execution.planExpressionConstants(update->setClauses[i].second.get());
     if (update->whereClause) {
         const auto type = ExprHelper::canonicalResultTypeName(
             ExprHelper::inferParsedResultType(update->whereClause.get(), {},
@@ -5386,7 +5393,7 @@ public:
             }
             predicate(update->whereClause.get());
             for(auto& assignment:update->setClauses) {
-                if(defaultValue(assignment.second.get()))throw DbError("0A000","prepared WITH UPDATE DEFAULT requires assignment lowering");
+                if(defaultValue(assignment.second.get()))throw DbError("XX000","prepared UPDATE default was not lowered by target metadata");
                 expression(assignment.second.get());
             }
         } else if(auto* remove=dynamic_cast<DeleteStmt*>(statement_)) {
@@ -5934,13 +5941,11 @@ bool tryDmlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
     } else if (parsedCmd == SqlCommand::Update) {
         const auto* stmt = dynamic_cast<const UpdateStmt*>(parsed.stmt.get());
         if (!stmt) return false;
-        const bool hasDefault = std::any_of(stmt->setClauses.begin(), stmt->setClauses.end(),
-            [](const auto& assignment) { return isDefaultValue(assignment.second); });
         // OLD/NEW output namespaces do not change SET's physical OLD-row
         // bindings. Keep target-only mutations on the typed consumer: the
         // legacy value-name context folds distinct quoted columns together
         // and may run a volatile SET before a false WHERE excludes the row.
-        if (!stmt->fromClause && stmt->whereCurrentOf.empty() && !hasDefault)
+        if (!stmt->fromClause && stmt->whereCurrentOf.empty())
             error = executePreparedUpdate(*stmt, s, fallback, rawSql.empty() ? sql : rawSql);
         else error = executeUpdate(*stmt, s, fallback);
     } else if (parsedCmd == SqlCommand::Delete) {
