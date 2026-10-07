@@ -2940,10 +2940,17 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
     if ((op == "in" || op == "not in") &&
         dynamic_cast<const RowExpr*>(e->right.get())) {
         const auto* list = static_cast<const RowExpr*>(e->right.get());
+        const auto* literal=dynamic_cast<const LiteralExpr*>(e->left.get());
+        const bool unknownLiteral=literal && literal->typeName.empty() && !literal->preparedSubquery &&
+            (toLower(literal->value)=="null" || (!literal->value.empty() && literal->value.front()=='\''));
         bool sawUnknown = l.isNull;
         for (const auto& element : list->elements) {
             const ExprValue candidate = eval(element.get(), ctx);
-            const ExprValue equal = applyComparison("=", l, candidate);
+            ExprValue left=l;
+            if(unknownLiteral && isBitStringTypeName(candidate.typeName))left.typeName="unknown";
+            const ExprValue equal = isBitStringTypeName(left.typeName) || isBitStringTypeName(candidate.typeName)
+                ? comparePrepared(resolveComparison("=",left.typeName,candidate.typeName),left,candidate)
+                : applyComparison("=",left,candidate);
             if (!equal.isNull && equal.asBool()) {
                 return ExprValue("boolean", op == "in" ? "t" : "f", false);
             }

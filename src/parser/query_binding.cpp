@@ -503,12 +503,43 @@ public:
             const auto operation=SQLParser::toLower(binary->op);
             if((operation=="in" || operation=="not in") && dynamic_cast<RowExpr*>(binary->right.get())) {
                 auto* list=static_cast<RowExpr*>(binary->right.get());
+                std::string listLeftType=leftBase;
+                std::string bitMemberType;
+                bool mixedKnownTypes=false;
+                for(const auto& member:list->elements) {
+                    const auto memberType=ExprHelper::canonicalResultTypeName(ExprHelper::inferParsedInputType(member.get(),{}));
+                    if(memberType=="bit" || memberType=="bit varying")bitMemberType=memberType;
+                    else if(memberType!="unknown")mixedKnownTypes=true;
+                }
+                if(listLeftType=="unknown" && !bitMemberType.empty() && mixedKnownTypes &&
+                   dynamic_cast<ParameterExpr*>(binary->left.get())) {
+                    for(const auto& member:list->elements) {
+                        const auto memberType=ExprHelper::canonicalResultTypeName(ExprHelper::inferParsedInputType(member.get(),{}));
+                        if(memberType=="unknown")continue;
+                        const auto target=ExprEvaluator::resolveComparison("=","unknown",memberType).leftType;
+                        if(target!="bit" && target!="bit varying")
+                            throw DbError("42P08","inconsistent types deduced for parameter");
+                    }
+                }
+                if(listLeftType=="unknown" && !bitMemberType.empty() && !mixedKnownTypes) {
+                    const auto comparison=ExprEvaluator::resolveComparison("=",listLeftType,bitMemberType);
+                    coerceCaseInput(binary->left,listLeftType,comparison.leftType);
+                    listLeftType=comparison.leftType;
+                }
                 for(auto& member:list->elements) {
                     const auto memberType=ExprHelper::canonicalResultTypeName(ExprHelper::inferParsedInputType(member.get(),{}));
-                    if(leftBase!="bit" && leftBase!="bit varying" &&
+                    if(!(listLeftType=="unknown" && !bitMemberType.empty()) &&
+                       listLeftType!="bit" && listLeftType!="bit varying" &&
                        memberType!="bit" && memberType!="bit varying")continue;
-                    const auto comparison=ExprEvaluator::resolveComparison("=",left,memberType);
-                    coerceCaseInput(binary->left,left,comparison.leftType);
+                    const auto comparison=ExprEvaluator::resolveComparison("=",listLeftType,memberType);
+                    if(listLeftType=="unknown") {
+                        if(const auto* literal=dynamic_cast<const LiteralExpr*>(binary->left.get());
+                           literal && literal->typeName.empty() && !literal->preparedSubquery) {
+                            CastExpr conversion;conversion.typeName=comparison.leftType;conversion.implicit=true;
+                            conversion.operand=std::make_unique<LiteralExpr>(*literal);
+                            ExprEvaluator pure;(void)pure.eval(&conversion,RowContext{});
+                        }
+                    }
                     coerceCaseInput(member,memberType,comparison.rightType);
                 }
             }
