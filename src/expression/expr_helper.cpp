@@ -1712,11 +1712,40 @@ void ExprHelper::prepareArrayTypes(Expr* expression,
             for (auto& arg : call->args) visit(arg.get(),{});
             if (call->schema.empty() && call->args.size() == 3 &&
                 (operation == "between" || operation == "not between")) {
+                const auto unknownInput = [&](ExprPtr& operand, const std::string& source,
+                                              const std::string& target) {
+                    if (source != "unknown") return;
+                    auto conversion = std::make_unique<CastExpr>();
+                    conversion->typeName = target; conversion->implicit = true;
+                    conversion->sourceBegin = operand->sourceBegin;
+                    conversion->sourceEnd = operand->sourceEnd;
+                    conversion->operand = std::move(operand);
+                    if (const auto* literal = dynamic_cast<const LiteralExpr*>(conversion->operand.get());
+                        literal && literal->typeName.empty() && !literal->preparedSubquery) {
+                        ExprEvaluator pure; (void)pure.eval(conversion.get(), RowContext{});
+                    }
+                    operand = std::move(conversion);
+                };
+                bool bitRange = false;
+                for (const auto& argument : call->args) {
+                    const auto input = canonicalResultTypeName(type(argument.get()));
+                    bitRange = bitRange || input == "bit" || input == "bit varying";
+                }
                 for (size_t i = 1; i < 3; ++i) {
+                    if (!bitRange) continue;
                     const auto lhs = canonicalResultTypeName(type(call->args[0].get()));
                     const auto rhs = canonicalResultTypeName(type(call->args[i].get()));
-                    if (lhs == "bit" || lhs == "bit varying" || rhs == "bit" || rhs == "bit varying")
-                        (void)ExprEvaluator::resolveComparison(i == 1 ? ">=" : "<=", lhs, rhs);
+                    const auto comparison = ExprEvaluator::resolveComparison(i == 1 ? ">=" : "<=", lhs, rhs);
+                    if (lhs == "unknown") {
+                        if (dynamic_cast<ParameterExpr*>(call->args[0].get()))
+                            unknownInput(call->args[0], lhs, comparison.leftType);
+                        else if (const auto* literal = dynamic_cast<const LiteralExpr*>(call->args[0].get());
+                                 literal && literal->typeName.empty() && !literal->preparedSubquery) {
+                            ExprPtr input = std::make_unique<LiteralExpr>(*literal);
+                            unknownInput(input, "unknown", comparison.leftType);
+                        }
+                    }
+                    unknownInput(call->args[i], rhs, comparison.rightType);
                 }
             }
             for (auto& arg : call->namedArgs) visit(arg.value.get(),{});

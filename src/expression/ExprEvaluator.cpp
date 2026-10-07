@@ -5177,8 +5177,24 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
     }
     if (name == "between" || name == "not between") {
         if (args.size() != 3) return ExprValue("boolean", "f", false);
-        const ExprValue lower = applyComparison(">=", args[0], args[1]);
-        const ExprValue upper = applyComparison("<=", args[0], args[2]);
+        const auto input = [&](size_t position) {
+            ExprValue value = args[position];
+            const auto* literal = dynamic_cast<const LiteralExpr*>(e->args[position].get());
+            if (literal && literal->typeName.empty() && !literal->preparedSubquery &&
+                (isQuotedString(literal->value) || toLower(literal->value) == "null"))
+                value.typeName = "unknown";
+            return value;
+        };
+        const bool bitRange = std::any_of(args.begin(), args.end(), [](const auto& value) {
+            return isBitStringTypeName(value.typeName);
+        });
+        const auto comparison = [&](const std::string& operation, size_t bound) {
+            const auto left = input(0), right = input(bound);
+            return bitRange ? comparePrepared(resolveComparison(operation, left.typeName, right.typeName), left, right)
+                            : applyComparison(operation, left, right);
+        };
+        const ExprValue lower = comparison(">=", 1);
+        const ExprValue upper = comparison("<=", 2);
         ExprValue result;
         if ((!lower.isNull && !lower.asBool()) ||
             (!upper.isNull && !upper.asBool())) {

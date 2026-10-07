@@ -22963,6 +22963,38 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                                     StorageEngine* engine,
                                     const std::string& dbname,
                                     std::optional<bool>* knownNull = nullptr);
+
+static bool containsBetweenExpression(const Expr* expression) {
+    if (!expression || expression->preparedSubquery) return false;
+    if (const auto* call = dynamic_cast<const FunctionCallExpr*>(expression)) {
+        const auto name = SQLParser::toLower(call->funcName);
+        if (call->schema.empty() && call->args.size() == 3 &&
+            (name == "between" || name == "not between")) return true;
+        for (const auto& argument : call->args)
+            if (containsBetweenExpression(argument.get())) return true;
+        for (const auto& argument : call->namedArgs)
+            if (containsBetweenExpression(argument.value.get())) return true;
+    } else if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(expression)) {
+        return containsBetweenExpression(binary->left.get()) ||
+               (binary->op != "::" && containsBetweenExpression(binary->right.get()));
+    } else if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(expression)) {
+        return containsBetweenExpression(unary->operand.get());
+    } else if (const auto* cast = dynamic_cast<const CastExpr*>(expression)) {
+        return containsBetweenExpression(cast->operand.get());
+    } else if (const auto* conditional = dynamic_cast<const CaseExpr*>(expression)) {
+        if (containsBetweenExpression(conditional->switchExpr.get()) ||
+            containsBetweenExpression(conditional->elseExpr.get())) return true;
+        for (const auto& arm : conditional->whenClauses)
+            if (containsBetweenExpression(arm.first.get()) || containsBetweenExpression(arm.second.get())) return true;
+    } else if (const auto* array = dynamic_cast<const ArrayExpr*>(expression)) {
+        for (const auto& element : array->elements)
+            if (containsBetweenExpression(element.get())) return true;
+    } else if (const auto* row = dynamic_cast<const RowExpr*>(expression)) {
+        for (const auto& element : row->elements)
+            if (containsBetweenExpression(element.get())) return true;
+    }
+    return false;
+}
 bool StorageEngine::evalConditionOnRow(const Condition& cond,
                                       const std::string& rowBuffer,
                                       const TableSchema& tbl,
@@ -34227,6 +34259,23 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             if (valueIsNull || (!engine && v.empty()))
                 nullColumns.insert(tbl.cols[i].dataName);
         }
+        SQLParser betweenParser;
+        const auto parsedBetween = betweenParser.parse("SELECT " + expr.funcArgs[0]);
+        const auto* betweenSelect = parsedBetween.success
+            ? dynamic_cast<const SelectStmt*>(parsedBetween.stmt.get()) : nullptr;
+        if (betweenSelect && betweenSelect->selectList.size() == 1 &&
+            containsBetweenExpression(betweenSelect->selectList.front().expr.get())) {
+            // BETWEEN's AND is grammar, not a separately rendered boolean
+            // arm. Keep the complete typed AST and UNKNOWN input provenance.
+            const auto value = ExprHelper::evalStringWithNulls(expr.funcArgs[0],
+                rowCtx, nullColumns, typeHints, dbname, expr.sessionUser, engine);
+            if (!value.ok) {
+                const auto failure = plpgsqlScalarResult(value);
+                throw DbError(failure.sqlState, failure.message);
+            }
+            if (knownNull) *knownNull = value.isNull;
+            return value.isNull ? "NULL" : value.value;
+        }
         // CASE may contain IS NULL, AND or OR inside an arm. Those tokens
         // are not top-level boolean atoms; evaluate the complete CASE AST
         // before applying the legacy predicate shortcuts below.
@@ -37686,6 +37735,9 @@ std::vector<std::string> StorageEngine::queryExpr(
         AggregateExpressionProjection projection;
         if (parsed.success) projection.select = dynamic_cast<SelectStmt*>(parsed.stmt.get());
         if (projection.select && projection.select->selectList.size() == 1 && !projection.select->fromClause) {
+            if (containsBetweenExpression(projection.select->selectList.front().expr.get()))
+                ExprHelper::prepareArrayTypes(projection.select->selectList.front().expr.get(),
+                    buildTypeHints(tbl), dbname, this);
             projection.hasAggregate = containsAggregateExpression(projection.select->selectList.front().expr.get());
             aggregateProjection = aggregateProjection || projection.hasAggregate;
         } else projection.select = nullptr;

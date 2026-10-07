@@ -1817,9 +1817,142 @@ void validatePreparedIntegerInputs(const std::string& sql,Session& session,
     (void)g_engine.prepareBoundQuery(session.currentDB,sql,parameters);
 }
 
+// The retained ordinary parameter path renders Bind values as SQL. A BIT
+// BETWEEN must first infer its shared parameter cells, not turn each rendered
+// occurrence into a separately typed UNKNOWN literal. This finite owner is a
+// single fromless grammar range; other statement shapes retain their owners.
+bool prepareProtocolBitBetween(const std::string& sql, Session& session,
+                               std::vector<uint32_t>& parameterOids,
+                               std::vector<PgColumnDescription>* columns = nullptr) {
+    SQLParser parser;
+    auto parsed = parser.parseForBinding(sql);
+    const auto* select = parsed.success ? dynamic_cast<const SelectStmt*>(parsed.stmt.get()) : nullptr;
+    if (!select || select->fromClause || !select->ctes.empty() || select->setOpRhs ||
+        select->selectList.size() != 1) return false;
+    const auto* range = dynamic_cast<const FunctionCallExpr*>(select->selectList.front().expr.get());
+    if (!range || !range->schema.empty() || range->args.size() != 3) return false;
+    const auto name = SQLParser::toLower(range->funcName);
+    if (name != "between" && name != "not between") return false;
+    bool bitRange = false;
+    for (const auto& input : range->args) {
+        const auto type = ExprHelper::canonicalResultTypeName(ExprHelper::inferParsedInputType(input.get(), {}));
+        bitRange = bitRange || type == "bit" || type == "bit varying";
+    }
+    for (const auto oid : parameterOids) bitRange = bitRange || oid == 1560 || oid == 1562;
+    if (!bitRange) return false;
+    std::vector<QueryBindingDatum> parameters;
+    for (size_t i = 0; i < parameterOids.size(); ++i) {
+        QueryBindingDatum input;
+        input.identity = "bit-range-protocol-parameter-" + std::to_string(i + 1);
+        input.position = i + 1;
+        if (parameterOids[i] == 1560) input.type = "bit";
+        else if (parameterOids[i] == 1562) input.type = "bit varying";
+        else if (const auto* type = valuesParameterCastType(parameterOids[i])) input.type = type;
+        else if (!parameterOids[i]) input.type = "unknown";
+        else return false;
+        parameters.push_back(std::move(input));
+    }
+    auto* previous = currentSession(); setCurrentSession(&session);
+    struct Restore {Session* previous; ~Restore() {setCurrentSession(previous);}} restore{previous};
+    const auto prepared = g_engine.prepareBoundQuery(session.currentDB, sql, parameters);
+    const auto* boundSelect = dynamic_cast<const SelectStmt*>(prepared.ast.get());
+    const auto* boundRange = dynamic_cast<const FunctionCallExpr*>(boundSelect->selectList.front().expr.get());
+    const auto inferCastParameter = [&](const Expr* operand, const std::string& target) {
+        if (const auto* parameter = dynamic_cast<const ParameterExpr*>(operand)) {
+            // Binder cell slots follow occurrence order. The wire slot is
+            // SQL $n, retained by this actual parameter's source provenance.
+            const auto use = std::find_if(prepared.uses.begin(), prepared.uses.end(), [&](const auto& use) {
+                return use.slot == parameter->slot && use.begin == parameter->sourceBegin && use.end == parameter->sourceEnd;
+            });
+            if (use == prepared.uses.end()) throw DbError("XX000", "range parameter has no source provenance");
+            const auto spelling = prepared.source.substr(use->begin, use->end - use->begin);
+            if (spelling.size() < 2 || spelling.front() != '$' ||
+                !std::all_of(spelling.begin() + 1, spelling.end(), [](unsigned char c) {return std::isdigit(c);}))
+                throw DbError("XX000", "invalid range parameter provenance");
+            const size_t position = std::stoul(spelling.substr(1));
+            if (!position || position > parameterOids.size()) throw DbError("42P02", "invalid range parameter");
+            const auto oid = mapBuiltinTypeNameToOid(ExprHelper::canonicalResultTypeName(target));
+            if (!parameterOids[position - 1] && oid != INVALID_OID) parameterOids[position - 1] = oid;
+        }
+    };
+    std::function<void(const Expr*)> inferParameters = [&](const Expr* input) {
+        if (!input || input->preparedSubquery) return;
+        if (const auto* conversion = dynamic_cast<const CastExpr*>(input)) {
+            // Inner explicit input casts precede the surrounding operator
+            // conversion. Infer only from actual parameter/cast sites.
+            inferParameters(conversion->operand.get());
+            inferCastParameter(conversion->operand.get(), conversion->typeName);
+        } else if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(input)) {
+            inferParameters(binary->left.get());
+            if (binary->op == "::") {
+                if (const auto* target = dynamic_cast<const LiteralExpr*>(binary->right.get()))
+                    inferCastParameter(binary->left.get(), target->value);
+            } else inferParameters(binary->right.get());
+        } else if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(input)) {
+            inferParameters(unary->operand.get());
+        } else if (const auto* call = dynamic_cast<const FunctionCallExpr*>(input)) {
+            for (const auto& argument : call->args) inferParameters(argument.get());
+        }
+    };
+    for (const auto& argument : boundRange->args) inferParameters(argument.get());
+    if (std::find(parameterOids.begin(), parameterOids.end(), 0) != parameterOids.end())
+        throw DbError("42P18", "could not determine data type of range parameter");
+    if (columns) {
+        QueryResult shape;
+        for (const auto& field : prepared.output) {shape.columns.push_back(field.name); shape.columnTypes.push_back(field.type);}
+        *columns = describeProtocolColumns(shape, std::string{}, session);
+    }
+    return true;
+}
+
+bool protocolConstantBitBetween(const Stmt& statement) {
+    const auto* select = dynamic_cast<const SelectStmt*>(&statement);
+    if (!select || select->command != SqlCommand::Select || select->fromClause ||
+        !select->ctes.empty() || select->setOpLhs || select->setOpRhs || select->setOp != SetOp::None ||
+        !select->valuesRows.empty() || !select->groupBy.empty() || !select->groupByElems.empty() ||
+        select->whereClause || select->having || !select->orderBy.empty() || !select->distinctOn.empty() ||
+        !select->windowDefs.empty() || !select->locking.empty() || select->withTies || select->limit || select->offset ||
+        select->selectList.size() != 1) return false;
+    const auto* range = dynamic_cast<const FunctionCallExpr*>(select->selectList.front().expr.get());
+    if (!range || !range->schema.empty() || range->args.size() != 3 || range->hasOver || range->filter ||
+        !range->namedArgs.empty() || range->distinct) return false;
+    const auto name = SQLParser::toLower(range->funcName);
+    if (name != "between" && name != "not between") return false;
+    const auto primitiveType = [](const std::string& type) {
+        static const std::set<std::string> types = {"bit", "bit varying", "text", "boolean", "smallint", "integer", "bigint"};
+        if (type.find('"') != std::string::npos || type.find('.') != std::string::npos) return size_t(0);
+        return types.count(ExprHelper::canonicalResultTypeName(type));
+    };
+    std::function<bool(const Expr*)> primitive = [&](const Expr* input) {
+        if (!input || input->preparedSubquery) return false;
+        if (const auto* literal = dynamic_cast<const LiteralExpr*>(input)) {
+            if (!literal->typeName.empty() || !SQLParser::lexicalError(literal->value).empty()) return false;
+            const auto tokens = SQLParser::tokenize(literal->value);
+            if (tokens.size() != 1) return false;
+            const auto value = SQLParser::toLower(tokens.front());
+            return value == "null" || value == "true" || value == "false" ||
+                (!value.empty() && (value.front() == '\'' ||
+                 (value.size() > 2 && (value.front() == 'b' || value.front() == 'x') && value[1] == '\''))) ||
+                (!value.empty() && value.find_first_not_of("0123456789.+-") == std::string::npos);
+        }
+        if (const auto* cast = dynamic_cast<const CastExpr*>(input))
+            return primitiveType(cast->typeName) && primitive(cast->operand.get());
+        if (const auto* cast = dynamic_cast<const BinaryOpExpr*>(input); cast && cast->op == "::") {
+            const auto* target = dynamic_cast<const LiteralExpr*>(cast->right.get());
+            return target && primitiveType(target->value) && primitive(cast->left.get());
+        }
+        // No parameters, functions, columns, operators or SQL children are
+        // evaluated merely to admit this finite primitive constant receiver.
+        return false;
+    };
+    return std::all_of(range->args.begin(), range->args.end(), [&](const auto& input) {return primitive(input.get());});
+}
+
 bool describePreparedResult(const std::string& sql, Session& session,
                             std::vector<PgColumnDescription>& columns,
                             const std::vector<uint32_t>& parameterOids = {}) {
+    auto betweenParameterOids = parameterOids;
+    if (prepareProtocolBitBetween(sql, session, betweenParameterOids, &columns)) return true;
     if(describePreparedExplainResult(sql,session,columns,parameterOids))return true;
     if (parameterOids.empty() && describePreparedSetResult(sql, session, columns))
         return true;
@@ -5515,6 +5648,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 validatePreparedIntegerInputs(sql,session,parameterTypes);
                 std::vector<PgColumnDescription> explainDescriptor;
                 (void)describePreparedExplainResult(sql,session,explainDescriptor,parameterTypes);
+                (void)prepareProtocolBitBetween(sql, session, parameterTypes);
                 if(parameterTypes.empty()) {
                     // Whole provider analysis precedes publishing a prepared
                     // statement. A failed call never leaves a named object
@@ -5565,6 +5699,14 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             const std::string& preparedSql = statementIt->second;
             const std::vector<uint32_t>& preparedParameterTypes = oidIt->second;
             const bool bareValues = firstSqlKeyword(preparedSql) == "values";
+            auto betweenParameterTypes = preparedParameterTypes;
+            bool bitBetween = false;
+            try {bitBetween = prepareProtocolBitBetween(preparedSql, session, betweenParameterTypes);}
+            catch (const DbError& error) {
+                sendExtendedProtocolError(error.sqlState(), error.message());
+                extendedQueryError = true;
+                continue;
+            }
             if (offset + 2 > message.payload.size()) {
                 sendExtendedProtocolError("08P01", "malformed Bind message");
                 extendedQueryError = true;
@@ -5658,11 +5800,15 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                     }
                     literals.push_back(std::move(literal));
                 }
-                if (bareValues) {
+                if (bareValues || bitBetween) {
                     if (const char* castType =
                             valuesParameterCastType(preparedParameterTypes[i])) {
                         literals.back() = "CAST(" + literals.back() +
                             " AS " + castType + ")";
+                    } else if (bitBetween && (preparedParameterTypes[i] == 1562 || valueLength == -1)) {
+                        if (preparedParameterTypes[i] == 1560 || preparedParameterTypes[i] == 1562)
+                            literals.back() = "CAST(" + literals.back() + " AS " +
+                                (preparedParameterTypes[i] == 1560 ? "bit" : "varbit") + ")";
                     }
                 }
             }
@@ -5713,7 +5859,8 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 SQLParser parser;
                 auto parsed = parser.parseForBinding(expandedSql);
                 if (parsed.success && parsed.stmt &&
-                    SQLParser::isDatabaseIndependentQuery(*parsed.stmt)) {
+                    (SQLParser::isDatabaseIndependentQuery(*parsed.stmt) ||
+                     (bitBetween && protocolConstantBitBetween(*parsed.stmt)))) {
                     const auto& select = static_cast<const SelectStmt&>(*parsed.stmt);
                     ExprEvaluator evaluator;
                     RowContext row;

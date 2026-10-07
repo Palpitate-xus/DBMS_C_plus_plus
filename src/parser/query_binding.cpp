@@ -591,10 +591,29 @@ public:
                 std::vector<std::string> types;
                 for (auto& arg : call->args)
                     types.push_back(ExprHelper::canonicalResultTypeName(expression(arg, scopes)));
+                const bool bitRange = std::any_of(types.begin(), types.end(), [](const auto& type) {
+                    return type == "bit" || type == "bit varying";
+                });
                 for (size_t i = 1; i < types.size(); ++i) {
-                    if (types[0] == "bit" || types[0] == "bit varying" ||
-                        types[i] == "bit" || types[i] == "bit varying")
-                        (void)ExprEvaluator::resolveComparison(i == 1 ? ">=" : "<=", types[0], types[i]);
+                    if (!bitRange) continue;
+                    const auto comparison = ExprEvaluator::resolveComparison(
+                        i == 1 ? ">=" : "<=", types[0], types[i]);
+                    if (types[0] == "unknown") {
+                        if (dynamic_cast<ParameterExpr*>(call->args[0].get())) {
+                            // A shared parameter is inferred by the first comparison,
+                            // then the second comparison sees that resolved input.
+                            coerceCaseInput(call->args[0], types[0], comparison.leftType);
+                            types[0] = comparison.leftType;
+                        } else if (const auto* literal = dynamic_cast<const LiteralExpr*>(call->args[0].get());
+                                   literal && literal->typeName.empty() && !literal->preparedSubquery) {
+                            // BETWEEN repeats a literal in two independently typed
+                            // comparisons. Validate each input without assigning one
+                            // comparison's type to the other occurrence.
+                            ExprPtr input = std::make_unique<LiteralExpr>(*literal);
+                            coerceCaseInput(input, "unknown", comparison.leftType);
+                        }
+                    }
+                    coerceCaseInput(call->args[i], types[i], comparison.rightType);
                 }
                 call->resolvedResultType = "boolean";
                 return "boolean";
