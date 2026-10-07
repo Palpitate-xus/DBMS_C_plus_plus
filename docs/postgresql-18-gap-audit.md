@@ -1,4 +1,29 @@
-# 2026-10-07 最新fd46总清单 checkpoint
+# 2026-10-07 最新7df9总清单 checkpoint
+
+当前source `7df9f84a`：693auto-native+实际frontend1/357registered/58TU，
+85项独立source/test修复commit。独立修复comparison/CASE准备误把真实继承CTE
+work table当catalog关系：只79行Main真实FROM/child/session/db/继承/shadow
+角色guard，不按列/函数名或RECURSIVE关键词猜。Root所有既有修复和公共头保留。
+
+原current84 baseline62109实际1/6whole均红；原recursive id42P01，derived
+全72有2强红、expanded15强红。修复后完整25native97349及31whole61761全部
+实际0，默认磁盘/期限，原所有十CTE native/十四whole与当前aggregate/window/
+enum/BIT/range/19DDL/4TRUNCATE完整保留；actual nextval3次与独立SPI scope
+真验证。postcommit三个完整原/inherited/factor67205实际0；strict180006
+原factor/derived72/inherited/expanded各完整0。normal85939 soleMain fresh+
+57当前fd46逐源/头/flags/原58receipt/bytes证明正常donors，repeat/all58/stamp/
+inputhash0，非新fresh58/SAN，SHA/全证据见integration和独立CTE issue。
+
+单独OPEN整gate84431仍实际1，原derived全72只余旧COUNT0A000、clause旧UNKNOWN
+XX000、expanded9强旧红；registered仍真正失败，不混入31绿或削旧assert。
+11 omitted-role实际查询三旧/当前二进制逐条同红、strict0，不冒所有role覆盖。
+原Source80 full42496终1/all1043非当前85结论，新85 full未启动。integer673a
+源/test/doc全读待合成，BIT1c/5bb/e53及BETWEEN真实参数/PG需求、FETCH signed/
+其它消费者、enum arg/FILTER rank及MIN/MAX、matview58030、所有原未闭环继续。
+QRY05/TYPE08等仍partial，原273保持22complete166partial70unverified15deferred，
+完成gate拒绝，无push/Actions启用或用户deferred安全/TDE重启。
+
+# 2026-10-07 历史fd46总清单 checkpoint
 
 当前source `fd46f1a7`：693auto-native+实际frontend1/355registered/58TU，
 84项独立source/test修复commit。独立修复generic aggregate expression参数

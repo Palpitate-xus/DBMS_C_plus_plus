@@ -1,4 +1,48 @@
-# Latest fd46 checkpoint: 84 independently committed source/test repairs
+# Latest 7df9 checkpoint: 85 independently committed source/test repairs
+
+Current source `7df9f84a`: **693 auto-native plus one actual frontend /
+357 registered /58 production TUs**. The introduced inherited-materialized
+CTE comparison preparation regression is independently repaired and committed.
+Only the actual79-line Main source-role guard and additive fixtures are merged;
+Root aggregate/window/enum/BIT/hash/range/TRUNCATE increments remain intact.
+
+Exact current84 baseline62109 ends1: all six invoked whole files fail, including
+the original recursive id42P01, factor and true inherited-target. Exhaustive
+original derived72 has two strong failures, clause one, expanded fifteen.
+After repair, **25 complete native97349 and31 complete whole61761 end0** on
+default disk/deadlines; all original ten CTE natives/fourteen CTE whole files
+and current aggregate/window/enum/BIT/range/DDL19/TRUNCATE4 neighbours remain.
+Actual recursive nextval is called three times; stored SPI gets its independent
+physical table, not the caller's CTE. Postcommit all3 original/inherited/factor
+whole67205 end0. Strict180006 original factor/derived72/inherited/expanded all0.
+
+Normal85939 actually ends0: sole Main fresh plus57 exact currentfd46 source/
+header/actual-flags/manifest/original58-receipt/object-byte-proved normal donors;
+not new fresh58. Repeat/all58 current receipts/stamp/frozen input hash pass.
+SHA `ec7114882be31c02af16f91f33fab94b636d7f5554a7128f008712538153be3f`.
+See `docs/issue-cte-inherited-preparation-owner.md` and
+`/tmp/dbms-root-cte-owner-current.pYaBHYvo/` for full original failure evidence.
+
+The separate whole OPEN gate84431 truly ends1: all original72 derived queries
+execute, keeping only older scalarCOUNT0A000; clause keeps UNKNOWN childXX000;
+expanded keeps nine strong older CASE/writer/SQL-reader failures. Its failed
+registered wrapper remains failed. No green31-file group masks these three
+actual red files. Root review's11 omitted-role queries are identical old
+failures across actualc6/7504/82bf; strict0, no new introduced counterexample.
+That is not coverage or completion of every CTE/AST role.
+
+Current85 original full has not started. Original80 full42496 remains actual1/
+all1043 receipts, not current85 verdict or14 independent bugs. All previous
+failure classifications remain below; no restart or source relabel. Integer
+673a chain is now fully source/test/doc reviewed but not yet current-root
+integrated. BIT1c/5bb/e53 remain private, with ordinary UNKNOWN BETWEEN input/
+parameter identity and real PG evaluation-demand work continuing separately.
+FETCH positive and signed descriptor consumers, enum arg/FILTER rank and
+MIN/MAX, matview58030, all original unclosed families remain open/partial.
+Original273: **22complete/166partial/70unverified/15deferred**, completion gate
+rejects. No push, Actions activation or user-deferred security/TDE restart.
+
+# Historical fd46 checkpoint: 84 independently committed source/test repairs
 
 Current source `fd46f1a7`: **693 auto-native plus one actual frontend /
 355 registered /58 production TUs**. The generic aggregate argument dispatch

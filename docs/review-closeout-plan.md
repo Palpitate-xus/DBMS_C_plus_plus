@@ -4,7 +4,26 @@
 
 # 工作区与复查清单收尾计划
 
-## 2026-10-07 当前完整273目标计划（fd46；以下较早记录均历史）
+## 2026-10-07 当前完整273目标计划（7df9；以下较早记录均历史）
+
+当前source `7df9f84a`：693auto+frontend/357registered/58TU，85项独立
+source/test修复commit；原273总范围和所有未闭环要求不缩。
+
+| 阶段 | 原要求 / 下一动作 | 当前实际证据 |
+| --- | --- | --- |
+| 每根因版本管理 | 真复现/强SQL/独立commit，用户push | 新7df9 inheritedCTE owner已Root正式独立commit，current84原六invocations红保留 |
+| 当前ABI/完整组合 | 真public头/source/flags/receipt/stamp/defaultdisk | soleMain normal85939+57当期fd46逐对象proof，25native97349/31whole61761/post原3whole67205全部实际0，非新fresh58/SAN |
+| 全CTE强原验收 | 实际递归/类型/NULL/effects/namespace，不抽原cases | 原21/factor/真nextval3/SPI/全部原CTE neighbours全0；derived全72及expanded完整执行仍各1/9旧强红，clauseUNKNOWN仍1，OPEN单gate84431实际1不混绿色 |
+| 接续根因 | 所有旧COUNT/UNKNOWN/nestedCASE/SQLreader/routine消费者 | 这些实际旧红不删不降为known-pass；FETCH/signed、enum arg/FILTER rank/MINMAX各独立真实owner继续 |
+| 下一source合成 | integer/quoted各问题commit与BIT有限全type/owner/pair/demand | integer673a已全文源/tests/docs复查，待当期Root合成；BIT1c/5bb/e53源/docs已审大部，全部fixture全审/当期proof继续，UNKNOWNBETWEEN原1296/12真实effects矩阵不缩 |
+| 当前原full/所有family | 原discovery/registry真实全终态和完整273证据 | 原80full42496真实1/all1043精确multiset，14receipt非14bugs/85 verdict，新85full未启动；matview及所有其它原query/catalog/storage/recovery/ops仍OPEN |
+| 最终验收与约束 | 每原checkbox/状态/证据/commit符合全scope | 273=22complete166partial70unverified15deferred，完成gate拒绝，无push/Actions启用/安全TDE恢复 |
+
+下一动作：当期Root精准集成整数/quoted五有限issue、逐commit验证；BIT full
+fixtures再全读并组合已修compact绕过项；接收真实fresh58 enum/signed descriptor
+变化时独立当期ABI全重编；随后继续确切当前原full及所有原未闭环要求。
+
+## 2026-10-07 历史完整273目标计划（fd46）
 
 当前source `fd46f1a7`：693auto+frontend/355registered/58TU，84项独立
 source/test修复commit；原273总范围不缩，全部未闭环问题继续。

@@ -2,6 +2,21 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "85 independent ROOT source/test repairs through7df9: actual inherited materialized CTE source ownership before catalog comparison preparation",
+      "gap_ids": ["QRY-05", "TYPE-08"],
+      "status": "partial",
+      "commits": ["7df9f84a"],
+      "evidence": ["docs/issue-ready-source-integration.md", "docs/issue-cte-inherited-preparation-owner.md"],
+      "tests": ["tests/cte_relation_scope_protocol_e2e_test.py", "tests/cte_inherited_comparison_owner_protocol_e2e_test.py", "tests/cte_prepared_owner_protocol_e2e_test.py", "tests/materialized_factor_boundary_protocol_e2e_test.py", "tests/derived_type_protocol_e2e_test.py", "tests/cte_clause_boundary_e2e_test.py"],
+      "verification": {
+        "reproduction": "Exactcurrent84 baseline62109 actual1/all6wholeinvocationsfail. Original21 genuine recursive id42P01; inherited/factororiginalrecursivequeriesfail. Exhaustiveoriginalderived72twoerrors, clauseone, expanded15strongfailures. Strictactual180006matchedowned enUS sameoriginalfactor/derived72/inherited/expanded all0. Older7504/82bf completeoriginal21PASS receipts preserved; no private13 substitutedforcurrent15.",
+        "fix": "Precise79lineMain actualsource-role guarduses visiblequeryCteFrames session/database/inheritPrevious/local WITH sequential-recursive-shadow boundaries, nocolumn/function-spelling/RECURSIVEblanket matching. Additive original collectors/reference adapters retainoriginalSQL andallstrongassert/defaults. Existingfd46aggregate/windowNULLGROUPS/newABI/enumAST/BITconstructor/HashNULL/BETWEENBOOL/TRUNCATEallretained; no publicheaderchange.",
+        "focused_tests": "Normal85939 actual0 freshsoleMain+57currentfd46 source/header/actualflags/manifest/original58receipt/objectbyte-proved normaldonors, notfresh58; repeat/all58currentreceipts/stamp/inputhash0 SHAec7114882be31c02af16f91f33fab94b636d7f5554a7128f008712538153be3f. Complete25native97349/31whole61761/postcommitcomplete3whole67205all0/defaultdisk/deadlines; all10originalCTEnatives/all14whole+currentaggregate/window/enum/BIT/range/DDL19/TRUNCATE4. Realnextval3calls/independentSPI/physicalconflict/scopingerrors checks retained. Omitted-rolefull11 actualc6/7504/82bf decodedfailures identical/strict180006all0, actualparser/admissionprobe0; no newintroducedcounterexample, noallASTcoverageclaim.",
+        "full_suite": "Current7df9 693auto+actualfrontend357registered58TU/85independentRootrepairs. SeparatefullOPENprofile84431 actual1/all3invocations, derivedall72 keepsonlyoldscalarCOUNT0A000, clauseoldUNKNOWNXX000, expanded9olderstrongfailures; registeredOPENwrapperstillfails, nothidden31PASS. OriginalSource80full42496actual1/all1043expectedmultiset, PASS687auto+frontend1+341registered FAIL3auto+11registered; not14independentbugs/current85verdict. Current85originalfullnotstarted.",
+        "scope": "Original273unchanged22complete166partial70unverified15deferred/completiongaterejects. QRY05/TYPE08/alleveryoriginalunclosedfamilyremainpartial/open: oldCOUNT/UNKNOWN/nestedCASE/SQLreader/recursivewriter, enumargFILTERrank/MINMAX/customOID/ALTER, FETCHpositive/signedotherconsumers, matview58030/allothercatalogquerystoragerecoveryops. Integer673a fullsource/test/docreviewdonebutcurrentRootcompositionpending. FiniteBIT1c/5bb/e53private/notRootapproval; originalBETWEEN1296/12 strongPGtypedinput/parameteridentity/effectdemandworkcontinues, notblanketLHSalwaysonce. Nopush/Actionsactivation/deferredsecurityTDErestart/unverifiedimport/overallcompletion."
+      }
+    },
+    {
       "issue": "84 independent ROOT source/test repairs throughfd46: retain actual typed aggregate expression arguments and reduce Boolean input union once",
       "gap_ids": ["QRY-07", "TYPE-08"],
       "status": "partial",
