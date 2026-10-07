@@ -5945,7 +5945,26 @@ bool tryDmlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
     } else if (parsedCmd == SqlCommand::Delete) {
         const auto* stmt = dynamic_cast<const DeleteStmt*>(parsed.stmt.get());
         if (!stmt || stmt->only) return false;
-        error = executeDelete(*stmt, s, fallback);
+        const auto* literal = dynamic_cast<const LiteralExpr*>(stmt->whereClause.get());
+        const bool booleanLiteral = literal && !literal->preparedSubquery &&
+            (lower(literal->value) == "true" || lower(literal->value) == "false");
+        if (booleanLiteral && !stmt->usingClause && !stmt->returning.empty()) {
+            // The thin condition-string adapter cannot own this predicate.
+            // Retain the whole bound mutation and its output descriptor even
+            // when no row qualifies; do not fabricate RETURNING metadata from
+            // a successful legacy command tag or execute its expressions early.
+            auto query = std::make_shared<PreparedQuery>(g_engine.prepareBoundQuery(
+                s.currentDB, rawSql.empty() ? sql : rawSql));
+            auto* deletion = dynamic_cast<DeleteStmt*>(query->ast.get());
+            if (!deletion) throw DbError("XX000", "DELETE lost its prepared statement identity");
+            prepareBoundDml(deletion, s, query);
+            auto result = executeAtomicDmlUnit(s, [&]() {
+                return executeBoundDml(deletion, s, query, {});
+            });
+            publishLastDmlResult(std::move(result));
+            std::cout << "Delete done" << std::endl;
+            printReturningRows(g_lastDmlResult);
+        } else error = executeDelete(*stmt, s, fallback);
     } else {
         const auto* stmt = dynamic_cast<const MergeStmt*>(parsed.stmt.get());
         if (!stmt) {
