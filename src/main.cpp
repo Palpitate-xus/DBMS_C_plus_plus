@@ -30987,7 +30987,13 @@ static bool executeInternal(const string& rawSql, Session& s) {
             const auto* literal = dynamic_cast<const dbms::LiteralExpr*>(binary->right.get());
             if (!column || !literal || !sourceRange.contains(*column) ||
                     !sourceRange.columns.count(column->column)) return expression;
-            return column->column + binary->op + literal->value;
+            string physicalName="\"";
+            for(const char character:column->column) {
+                physicalName+=character;
+                if(character=='"')physicalName+='"';
+            }
+            physicalName+='"';
+            return physicalName + binary->op + literal->value;
         };
         // Targets and their lazy branches share this source namespace too.
         // Validate before any row or writing target function is evaluated.
