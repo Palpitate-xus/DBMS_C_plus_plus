@@ -58,7 +58,7 @@ Source `5ca4278e` 已逐项本地提交，618 native / 319 registered / 58 TU；
 
 不push，不启用Actions，用户跳过安全/TDE专项保持deferred且不虚报完成。
 
-## 2026-10-07 当前完整目标执行计划（c465；前文是历史）
+## 2026-10-07 历史完整目标执行计划（c465）
 
 生产/测试source `c465f898`：648native/334registered/58TU。c061后27项独立
 source/test commit，最新八项已分别合入。完整273目标没有缩小。
@@ -75,3 +75,22 @@ source/test commit，最新八项已分别合入。完整273目标没有缩小�
 
 不push，不启用Actions，用户跳过安全/TDE保持deferred。任何尚在运行或仅准备
 的 gate 都不写为通过；历史失败不因新候选专项成功而改绿。
+
+## 2026-10-07 当前完整目标计划（6320；前文均历史）
+
+source6320：658native/338registered/58TU，c061后39项独立source/test提交，
+最新12项逐项映射见integration；目标始终是原273完整要求，不借旧小范围关闭。
+
+| 下一阶段 | 验收 | 当前证据与动作 |
+| --- | --- | --- |
+| 已验证独立修复 | 原失败、真实consumer、原assert/deadline、每问题commit | cold/domain五项/模式三项/map/no-effect两项/creation均已分别commit |
+| 新公共头组合 | 全58 fresh正常O2/repeat/source/header/flags/object/stamp/冻结 | 精确9772 657/337 build12522 live；首个错误计数guard编译前失败保留；69native/28wire/full仅准备 |
+| 原完整回归 | 不改原648/334及旧全量矩阵、实际终态 | c465正常58/native58已0；wire25=16pass/9fail；full79042与七旧full逐个核实live |
+| 最新CPP验证 | 6320创建路径同头新对象、完整原whole/冷启动/撤销 | private core/冷启动/八邻接0；原DDL独立58030失败、V2wire7两实际timeout不删；ROOT新组合待验证 |
+| 新已证实问题 | UPDATE DEFAULT/DELETE owner与实际RETURNING/nested aliases/域IO | 三个独立owner继续各自复现、修复、原强验证、独立commit；ROOT域IO保原bool断言 |
+| 剩余family | 每个原273完整实现与证据 | generaltypes/catalog/queries/storage/recovery/operations仍继续，专项不能替代 |
+| 总账验收 | checkbox/状态/证据/commit和每条需求一致 | 22complete/166partial/70unverified/15deferred；require-complete仍拒绝 |
+
+domain旧来源不猜/不迁移、schemaB/D3旧reader拒绝；必要写入恢复Append53.705秒
+原15期限失败仍保留，不因no-effect专项绿就关全部延迟。无push/Actions激活或
+用户跳过安全/TDE重启；各私有O0/局部SAN/单CPP增量不冒充最新全量正式通过。

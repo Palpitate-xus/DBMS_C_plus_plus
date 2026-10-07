@@ -1,6 +1,94 @@
+# Latest 6320 checkpoint: 39 independently committed source/test repairs
+
+Production/test source `6320afc3` has **658 native / 338 registered / 58 TU**.
+Twelve source/test commits after the historical c465 checkpoint are mapped below.
+They are distinct issue fixes and oracle corrections, not twelve completed
+PostgreSQL families. The ROOT worktree is clean and eleven new commits are ahead
+of the last observed origin/master; no push was performed.
+
+| Independent repair or oracle correction | Private commit | ROOT commit |
+| --- | --- | --- |
+| Actual namespace facts for cold routine declaration | `81cb1a3f` | `2a1b29ad` |
+| Domain creation-time inherited-default snapshot/barrier | `def18926` | `694fcddc` |
+| Strict DROP DOMAIN DEFAULT native oracle, legacy control retained | `8c97eaa3` | `7dff351a` |
+| Durable default origin and actual live domain/table default consumer | `3180f744` | `adb1ca40` |
+| Validated schema9 parser fixture versus real schema10/RID1 | `4fe44cc8` | `67d4ab63` |
+| Actual long-default footer corruption fixture | `bfbb5470` | `de932283` |
+| C.utf8 binary-order/Unicode-pattern builtin alias | `e443a449` | `f0eb7b77` |
+| Typed storage/native SQL pattern consumers, NULL/type/ESCAPE/collation | `5fdbd231` | `9e90f605` |
+| Actual legacy SQL/JOIN ON pattern grammar carrier | `a7a53e31` | `e17815f5` |
+| Derived-map actual owner and failed durable-flush state | `b350d073` | `03df9f50` |
+| Full no-effect savepoint image proof, real mutation fallback | `1a8336db` | `977289f6` |
+| Unqualified scalar routine actual session creation namespace | `6911a960` | `6320afc3` |
+
+## Current evidence and remaining gates
+
+Domain private `/tmp/dbms-domain-default-origin.TFPrh6Es` retains its original
+11-assertion whole failure, initial wrong reference expectations, three candidate
+rollback regressions and both original incorrect-format native failures.
+Final expanded12 whole scripts, native8 and scoped3-production-TU sanitizer groups
+are actual0; frozen O0/source-header-matched final SHA256
+`282db4e70d4f52f6b3733830a6d0f189af1dacdfde714618f7bcc554f25c70fd`.
+New D3/schemaB preserve own-default/provenance, full default bytes and RID1.
+Older readers reject new records; old schema9/10 ambiguous defaults remain frozen,
+never guessed from equal values or automatically rewritten.
+
+Legacy pattern private `/tmp/dbms-legacy-sql-pattern.j2twXvZX` retains original
+native134, C.utf8/JOIN ON whole failures and the genuine typed RHS control-byte
+candidate failure. Final native11, complete whole14 and scoped3-TU sanitizer are0;
+all58 source/header/object receipts are audited. Frozen SHA256
+`f943cd1e81da92fb19ef2373f6aa3438215c29bcc9f5388697be33ce06c544c4`.
+This does not invent a forced SQL consumer switch or a pg_collation OID.
+
+Storage/savepoint private `/tmp/dbms-savepoint-image-demand.9gzfRDln` retains
+actual retired-map-owner and unchanged-inode native failures. Final strong native,
+13 adjacent native, checked-fsync fault/retry and scoped4-TU sanitizer are0.
+The complete original Domain/FK and six original default15/disk wire repetitions
+are0. Frozen matching58 O0 plus final TM/repeat/audits SHA256
+`0ec757238dc32f555640fa5c4f8b2c2c0fbba0f24da6b04ae7fab67f9c6cf609`.
+The complete original typed Append remains **exit1** at a necessary restore after
+real writing UPDATE (53.705s versus original15 deadline). Nested duplicate-image
+creation is independently red; no-effect proof cannot skip actual changes.
+
+Creation-path private `/tmp/dbms-routine-creation-path.1pbTosJh` retains original
+c465 native13 assertions/qualified42883 plus aborted cascades and cold134.
+Final creation/cold plus eight native neighbors are0; the whole eleven-driver
+group remains1 because original ddl_ast_bridge later throws58030 at its
+corrupt-domain bool-error assertion. V2 whole7 is **5 pass /2 fail**:
+creation ROLLBACK TO and qualified-frontend's next rejected SELECT exceed original
+disk/default15. Strict180006 original whole and the earlier path-only core/whole
+are0; no failing log is erased. Fresh sole O2 DDL/proven57 parent, not all58,
+has SHA256 `eee0466aed18ab0d6bbba32bbf5b9688aaf1308a32f13deea9acfec56edbe015`.
+
+Exact c465's fresh all58 O2/repeat/audit/freeze **28366 exits0**, SHA256
+`2d2b79897af41ba7d0e5ec8c1763ab323dddd316efbb6b96c81d659b355d9b36`.
+Matching native58 **10199 exits0**; unchanged whole25 **1081 exits1:
+16 pass /9 fail**. Eight entry points explicitly time out; Domain/FK becomes
+tag-shifted after an unprinted bad-value request, with a finally-masked timeout
+only an inference. Extra cleanup traces are not extra independently proved bugs.
+The complete original648/334 **79042 remains live**. The seven older full handles
+**96468/16482/36568/33648/56028/48518/27869** are individually re-polled live.
+
+Exact9772 detached `/tmp/dbms-canonical-default-pattern-image.3WZIBvE9` is
+**657/337/58**, now a genuinely fresh normal O2 all58 build **12522 live**.
+The first helper exits1 at its mistaken655 count guard, before compiling; it is
+retained separately. Corrected657 guard starts the real build. Matching69 native,
+whole28 and original657/337 helpers are prepared, **not started**.
+Latest6320 adds a CPP-only creation-path change/test/registration, without changing
+9772 headers; it still needs matching optimized combination verification.
+
+UPDATE DEFAULT, typed DELETE exception ownership and actual RETURNING consumer,
+nested image reuse, corrupt-domain bool-error handling, lazy temporary routine
+creation, arbitrary overload signatures, full regex/collation/domain casts and
+revalidation, other set operations, storage/recovery/operations and every remaining
+original family requirement stay open. All273 states remain **22 complete /
+166 partial /70 unverified /15 deferred_by_user**; completion gate must reject.
+No push, Actions activation, user-deferred security/TDE restart or full-suite/TLS
+runtime approval is implied.
+
 # Independent source integrations after canonical 75090
 
-## Current c465 checkpoint: 27 independent source/test commits, fresh combination gate running
+## Historical c465 checkpoint: 27 independent source/test commits
 
 Production/test source `c465f898` has **648 native / 334 registered / 58 TU**.
 The nineteen earlier integrations are mapped in the historical 2894 section.
@@ -65,13 +153,14 @@ PostgreSQL family merely because its focused controls pass.
   Unchanged original full sessions **96468 / 16482 / 36568 / 33648 / 56028 /
   48518 / 27869** were individually re-polled live on 2026-10-07.
 - Exactc465 detached `/tmp/dbms-canonical-namespace-pattern-catalog.KsnB2d5B`
-  begins a genuinely fresh all58 **normal O2** epoch, build **28366 live**.
-  New Session/CreateFunction/CatalogManager/public API headers must all match.
-  Native58, whole wire25 and original648/334 helpers are prepared, **not
-  started**. No combined build/freeze, focused PASS or full PASS is claimed.
+  fresh all58 **normal O2** build28366/repeat/audit/freeze exits0; SHA256
+  `2d2b79897af41ba7d0e5ec8c1763ab323dddd316efbb6b96c81d659b355d9b36`.
+  Matching native58 10199 exits0. Whole25 1081 exits1:16 pass/9 fail.
+  Original648/334 full79042 is live. Detailed actual failures remain above;
+  no full-suite approval is claimed.
 
-The actual legacy/native pattern consumers still use older matchers and remain
-a separate required repair. Unqualified routine creation path, arbitrary
+At this historical checkpoint, legacy/native pattern consumers still used
+older matchers. Later independent repairs are mapped above. Arbitrary
 overloads/default/named signatures, general regex/ARE/collations, domain ALTER
 defaults/casts/revalidation, full-image savepoint demand, other set operations,
 WAL rewrite/PITR and all remaining family requirements are still open.

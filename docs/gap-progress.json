@@ -2,6 +2,73 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "39 independently committed ROOT source/test repairs through6320; domain defaults, real legacy pattern consumers, map ownership and proven no-effect images integrated; new matching normal58 gate running",
+      "gap_ids": [
+        "TYPE-04",
+        "TYPE-19",
+        "SQL-05",
+        "FUNC-05",
+        "STO-04",
+        "TXN-05",
+        "TXN-07",
+        "CAT-07"
+      ],
+      "status": "partial",
+      "commits": [
+        "2a1b29ad",
+        "694fcddc",
+        "7dff351a",
+        "adb1ca40",
+        "67d4ab63",
+        "de932283",
+        "f0eb7b77",
+        "9e90f605",
+        "e17815f5",
+        "03df9f50",
+        "977289f6",
+        "6320afc3"
+      ],
+      "evidence": [
+        "docs/issue-ready-source-integration.md",
+        "docs/issue-cold-routine-creation-namespace.md",
+        "docs/issue-domain-default-snapshot.md",
+        "docs/issue-domain-default-native-oracle.md",
+        "docs/issue-domain-default-origin.md",
+        "docs/issue-schema-format-parser-fixtures.md",
+        "docs/issue-long-default-parser-fixture.md",
+        "docs/issue-c-utf8-pattern-alias.md",
+        "docs/issue-native-sql-pattern-consumers.md",
+        "docs/issue-derived-map-snapshot-ownership.md",
+        "docs/issue-savepoint-no-effect-image.md",
+        "docs/issue-routine-creation-search-path.md"
+      ],
+      "tests": [
+        "tests/routine_namespace_cold_creation_test.cpp",
+        "tests/domain_default_snapshot_test.cpp",
+        "tests/domain_default_origin_test.cpp",
+        "tests/domain_default_lifecycle_protocol_e2e_test.py",
+        "tests/domain_default_transaction_protocol_e2e_test.py",
+        "tests/schema_format_test.cpp",
+        "tests/long_default_format_test.cpp",
+        "tests/c_utf8_pattern_alias_test.cpp",
+        "tests/legacy_sql_pattern_native_test.cpp",
+        "tests/legacy_sql_pattern_consumers_protocol_e2e_test.py",
+        "tests/derived_map_owner_test.cpp",
+        "tests/derived_map_snapshot_test.cpp",
+        "tests/buffer_pool_snapshot_quiescence_test.cpp",
+        "tests/savepoint_no_effect_image_test.cpp",
+        "tests/routine_creation_path_test.cpp",
+        "tests/routine_creation_path_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "reproduction": "Actual domain whole11assertions/native wrong-oracle/schema-footer failures, legacy16native/C.utf8/JOIN ON/typed control-byte candidate failures, retired-map owner and unchanged savepoint inode failures, cold3F000/native creation13assertions/first42883 followed by aborted cascades all retained; not independent-bug counts. True-write original Append restore53.705s/default15 failure retained.",
+        "fix": "Twelve independent ROOT source/test commits after historicalc465. Actual marker/catalog namespace facts, creation-time domain snapshot/barrier, durable Column/Domain/LegacyFrozen provenance with live default metadata, separate strict oracle/footer corrections, real typed storage+legacy JOIN pattern consumers, actual derived-map owner/durable dirty-state checks, complete image/catalog/cache/WAL receipt with conservative mutation fallback, session creation path through replacement/undo. No inferred migration of ambiguous legacy defaults.",
+        "focused_tests": "Domain12whole/8native/scopedSAN actual0 SHA282db4e70d4f52f6b3733830a6d0f189af1dacdfde714618f7bcc554f25c70fd; legacy14whole/11native/scoped3TU SAN/all58audits actual0 SHAf943cd1e81da92fb19ef2373f6aa3438215c29bcc9f5388697be33ce06c544c4; no-effect strongnative/13adj/faultretry/scoped4TU SAN/originaldomain+sixdiskwhole actual0 SHA0ec757238dc32f555640fa5c4f8b2c2c0fbba0f24da6b04ae7fab67f9c6cf609. Private O0/header-matched or scoped proofs are not latest ROOT fullO2/SAN. CreationV2 freshsoleDDL/proven57 SHAeee0466aed18ab0d6bbba32bbf5b9688aaf1308a32f13deea9acfec56edbe015; core/cold/eightneighbors0, whole11nativegroup1 at separate58030boolerror; originalwhole7=5pass2fail actualcreationrollback/frontendrejectedSELECT default15disk timeouts.",
+        "full_suite": "Exactc465648/334/58 freshnormal58/repeat/audit/freeze28366actual0 SHA2d2b79897af41ba7d0e5ec8c1763ab323dddd316efbb6b96c81d659b355d9b36; matchingnative5810199actual0; whole251081actual1=16pass9fail, eight explicit failed-entry timeouts, FK tag-shift/finally masking only inference. Originalfull79042 and seven olderhandles96468/16482/36568/33648/56028/48518/27869 individuallyre-polledlive. Exact9772657/337/58 /tmp/dbms-canonical-default-pattern-image.3WZIBvE9 newfreshnormal58 build12522live; firsthelperwrong655countguard exits1beforecompile, retained. Matching69native/28whole/originalfullpreparednotstarted. Latest6320658/338 sameheaders CPP-onlycreation test/registration still requires matchinglatestcombination. No latestfull/TLSruntimePASS.",
+        "scope": "Original273 unchanged22complete166partial70unverified15deferred. UPDATE DEFAULT, DELETE exceptionowner/actualRETURNING, nestedimagealias, corruptdomain58030boolerror, lazytemp routines/arbitraryoverloads, generalregexcollations/domaincasts/revalidation/other sets/fullstorage/recovery/operations andremainingfamilies required. NewD3/schemaB olderreadersreject; old ambiguousdefault sources retainfrozenbytes without guessed rewrites. No push/Actionsactivation/securityrestart."
+      }
+    },
+    {
       "issue": "27 independent ROOT source/test commits; Unicode/namespace/catalog fixes integrated; new c465 normal58 running and actual older combination failures retained",
       "gap_ids": [
         "TYPE-04",

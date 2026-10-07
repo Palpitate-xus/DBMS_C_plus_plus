@@ -1,4 +1,35 @@
-# 2026-10-07 最新总清单 checkpoint
+# 2026-10-07 最新6320总清单 checkpoint
+
+最新生产/测试source `6320afc3`，**658 native /338 registered /58 TU**。
+c061后累计39项独立source/test commit；本轮新增cold声明、domain五项、
+legacy模式三项、derived-map/no-effect SAVEPOINT两项及函数creation path。
+每问题和错误旧oracle分别本地commit，映射与实际边界见integration文档。
+
+domain最终12whole/8native/scopedSAN、legacy14whole/11native/scopedSAN、
+无变化镜像强native/13相邻/原FK及六个磁盘原wire均实际0；各原失败保留。
+D3/schemaB老reader拒绝，旧default来源不猜测、不自动改写。真正写入后的
+Append完整原fixture仍15秒超时，no-effect不能豁免真实变化。
+
+精确c465全58正常O2/repeat/audit/freeze28366已0，matching58native10199已0；
+whole25实际1081 exit1=16pass/9fail，保留8入口明确timeout与FK tag错位
+（finally掩盖timeout仅推断，不能数成五个FK缺陷）。原648/334 full79042 live；
+七个更早full句柄亦逐个核实live，不宣full PASS。
+
+精确9772（657/337/58）在
+`/tmp/dbms-canonical-default-pattern-image.3WZIBvE9` 新全58正常O2 build12522 live；
+第一次helper错误655计数guard在编译前exit1已保留，修为实际657后真启动。
+69matching native/28whole/原full仅准备未执行。6320创建路径只变CPP/fixture/注册、
+公共头同9772，仍需最新匹配组合验证；不能继承private绿。
+
+新creation/cold及八相邻native0，但完整DDL后续corrupt-domain逃逸58030仍失败；
+V2完整7wire为5pass/2fail（creation ROLLBACK TO及frontend拒绝SELECT默认磁盘timeout）。
+UPDATE DEFAULT、DELETE异常owner/真实RETURNING、嵌套镜像alias、域IO bool错误、
+临时routine创建/任意overloads和其它原273要求继续，不删或放宽原SQL/断言/期限。
+总账仍 **22 complete /166 partial /70 unverified /15 deferred_by_user**；
+完成gate必须拒绝。不push、不启用Actions、不恢复用户跳过安全/TDE。
+以下checkpoint的“当前/live”仅记录历史时点，最新证据以本节为准。
+
+# 2026-10-07 历史c465总清单 checkpoint
 
 最新生产/测试 source `c465f898`，**648 native / 334 registered / 58 TU**。
 c061 checkpoint 后累计27项独立 source/test commit；本轮新增8项为 Unicode
