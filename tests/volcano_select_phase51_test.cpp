@@ -7,6 +7,7 @@
 // match exactly for the volcano path to be considered equivalent.
 
 #include "executor/ExecutionPlan.h"
+#include "common/DbError.h"
 #include "commands/DdlExecutor.h"
 #include "commands/TableManage.h"
 #include "Session.h"
@@ -45,6 +46,28 @@ public:
     }
     bool next(std::string&) override { return false; }
     void close() override {}
+};
+
+struct ScalarScanTrace {
+    size_t opens = 0;
+    size_t nexts = 0;
+    size_t closes = 0;
+};
+
+// Count the real physical scan calls, without replacing its rows/NULL state
+// or making cleanup idempotent on behalf of the scalar operator under test.
+class TracedScalarScan final : public dbms::TableScanOp {
+    ScalarScanTrace& trace_;
+public:
+    TracedScalarScan(const std::string& db, const std::string& table,
+                     ScalarScanTrace& trace)
+        : dbms::TableScanOp(&g_engine, db, table), trace_(trace) {}
+    bool open() override { ++trace_.opens; return dbms::TableScanOp::open(); }
+    bool next(std::string& row) override {
+        ++trace_.nexts;
+        return dbms::TableScanOp::next(row);
+    }
+    void close() override { ++trace_.closes; dbms::TableScanOp::close(); }
 };
 
 static void test_checked_execution_failure() {
@@ -838,8 +861,59 @@ static void test_semi_and_anti_join() {
         dbms::StorageEngine::parseConditions({"=enabled 1"});
     auto multiScalarPlan = dbms::QueryPlanner::buildSelectPlan(&g_engine, scalarCtx);
     auto* multiScalar = dynamic_cast<dbms::ScalarSubqueryProjectOp*>(multiScalarPlan.get());
-    assert(multiScalar && !multiScalar->open());
-    assert(multiScalar->errorMessage().find("more than one row") != std::string::npos);
+    assert(multiScalar);
+    bool cardinalityCaught = false;
+    try {
+        (void)multiScalar->open(); // Keep the original physical plan/open call.
+    } catch (const dbms::DbError& error) {
+        assert(error.sqlState() == "21000");
+        assert(error.message() ==
+               "more than one row returned by a subquery used as an expression");
+        cardinalityCaught = true;
+    }
+    assert(cardinalityCaught);
+    std::vector<std::string> failedCells;
+    std::vector<bool> failedNulls;
+    assert(!multiScalar->lastStructuredRow(failedCells, failedNulls));
+    assert(failedCells.empty() && failedNulls.empty());
+    assert(multiScalar->runtimeRows() == 0);
+    assert(multiScalar->outerChild()->runtimeLoops() == 0);
+    assert(multiScalar->outerChild()->runtimeRows() == 0);
+    multiScalar->close();
+
+    const auto checkedMulti = dbms::QueryPlanner::executePlanChecked(
+        dbms::QueryPlanner::buildSelectPlan(&g_engine, scalarCtx));
+    assert(!checkedMulti.ok && checkedMulti.errorSqlState == "21000");
+    assert(checkedMulti.errorMessage ==
+           "more than one row returned by a subquery used as an expression");
+    assert(checkedMulti.rows.empty() && checkedMulti.structuredRows.empty() &&
+           checkedMulti.structuredNulls.empty());
+
+    // Preserve the original planner control above, then instrument the same
+    // physical TableScan -> Filter inner graph to measure cleanup directly.
+    ScalarScanTrace outerTrace, innerTrace;
+    const auto outerSchema = g_engine.getTableSchema(db, "outer_t");
+    const auto innerSchema = g_engine.getTableSchema(db, "inner_t");
+    auto tracedInner = std::make_unique<dbms::FilterOp>(
+        std::make_unique<TracedScalarScan>(db, "inner_t", innerTrace),
+        innerSchema, scalarCtx.scalarSubquery.innerConds);
+    auto tracedScalar = std::make_unique<dbms::ScalarSubqueryProjectOp>(
+        std::make_unique<TracedScalarScan>(db, "outer_t", outerTrace),
+        std::move(tracedInner), outerSchema, innerSchema,
+        scalarCtx.projectionTargets, scalarCtx.scalarSubquery.column);
+    bool tracedCaught = false;
+    try { (void)tracedScalar->open(); }
+    catch (const dbms::DbError& error) {
+        assert(error.sqlState() == "21000");
+        tracedCaught = true;
+    }
+    assert(tracedCaught && innerTrace.opens == 1 && innerTrace.nexts == 2 &&
+           innerTrace.closes == 1);
+    assert(outerTrace.opens == 0 && outerTrace.nexts == 0 && outerTrace.closes == 0);
+    tracedScalar->close();
+    assert(innerTrace.closes == 1 && outerTrace.closes == 1);
+    assert((g_engine.query(db, "outer_t", {}, {"id", "payload"}) ==
+            std::vector<std::string>{"1 10 ", "2 20 ", "3 30 ", "4 40 "}));
 
     cleanup(db);
     std::cout << "[VOLCANO-5.1] SemiJoin/AntiJoin, ExistenceFilter and ANY/ALL semantics OK" << std::endl;
