@@ -58,6 +58,27 @@ int main() {
             reader.setIsolationLevel(IsolationLevel::REPEATABLE_READ);
             assert(reader.beginTransaction(database) == DBStatus::OK);
 
+            // REPEATABLE READ acquires its snapshot on the first data read,
+            // not on BEGIN. Establish the old snapshot before the writer.
+            size_t initialRows = 0;
+            assert(reader.forEachRow(
+                database, "documents",
+                [&](uint32_t, uint16_t, const char* data, size_t length) {
+                    const std::string row(data, length);
+                    const std::string id = reader.extractColumnValue(
+                        row, table, 0, database, true);
+                    assert(id == "1" || id == "2");
+                    assert(reader.extractColumnValue(
+                               row, table, 1, database, true) ==
+                           (id == "1" ? livePayload : deletedPayload));
+                    ++initialRows;
+                }));
+            assert(initialRows == 2);
+
+            StorageEngine lazyReader;
+            lazyReader.setIsolationLevel(IsolationLevel::REPEATABLE_READ);
+            assert(lazyReader.beginTransaction(database) == DBStatus::OK);
+
             assert(writer.beginTransaction(database) == DBStatus::OK);
             assert(writer.update(database, "documents",
                                  {{"payload", updatedPayload}}, {"=id 1"}) ==
@@ -65,6 +86,23 @@ int main() {
             assert(writer.remove(database, "documents", {"=id 2"}) ==
                    DBStatus::OK);
             assert(writer.commitTransaction() == DBStatus::OK);
+
+            // BEGIN alone does not establish an older snapshot. A distinct
+            // first reader after COMMIT sees the current row and TOAST value.
+            size_t lazyRows = 0;
+            assert(lazyReader.forEachRow(
+                database, "documents",
+                [&](uint32_t, uint16_t, const char* data, size_t length) {
+                    const std::string row(data, length);
+                    assert(lazyReader.extractColumnValue(
+                               row, table, 0, database, true) == "1");
+                    assert(lazyReader.extractColumnValue(
+                               row, table, 1, database, true) ==
+                           updatedPayload);
+                    ++lazyRows;
+                }));
+            assert(lazyRows == 1);
+            assert(lazyReader.commitTransaction() == DBStatus::OK);
 
             // The reader's older snapshot still sees both superseded tuples
             // and must dereference their old external values after COMMIT.
