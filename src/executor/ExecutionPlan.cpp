@@ -3157,11 +3157,14 @@ static std::string renderWindowArrayElement(const std::string& value,
 WindowOp::WindowOp(OpPtr child, const TableSchema& tbl,
                    const std::vector<WindowTarget>& targets,
                    const std::vector<WindowFunctionSpec>& functions,
-                   const std::string& finalOrderBy,
-                   bool finalOrderAscending)
+                    const std::string& finalOrderBy,
+                    bool finalOrderAscending,
+                    bool finalOrderNullsFirst,
+                    bool hasExplicitFinalNullOrder)
     : child_(std::move(child)), tbl_(tbl), targets_(targets),
       functions_(functions), finalOrderBy_(finalOrderBy),
-      finalOrderAscending_(finalOrderAscending) {}
+      finalOrderAscending_(finalOrderAscending),
+      finalOrderNullsFirst_(hasExplicitFinalNullOrder ? finalOrderNullsFirst : !finalOrderAscending) {}
 
 bool WindowOp::open() {
     rows_.clear();
@@ -3229,10 +3232,16 @@ bool WindowOp::open() {
                 if (cmp != 0) return cmp < 0;
             }
             if (orderColumn < tbl_.len) {
+                const bool leftNull=leftRow.nulls[orderColumn];
+                const bool rightNull=rightRow.nulls[orderColumn];
+                if (leftNull!=rightNull) {
+                    const bool nullsFirst=function.hasExplicitOrderNulls
+                        ? function.orderByNullsFirst : !function.orderAscending;
+                    return leftNull==nullsFirst;
+                }
                 const int cmp = compareWindowCell(
                     leftRow.values[orderColumn], leftRow.nulls[orderColumn],
-                    rightRow.values[orderColumn], rightRow.nulls[orderColumn],
-                    function.orderAscending);
+                    rightRow.values[orderColumn], rightRow.nulls[orderColumn]);
                 if (cmp != 0) return function.orderAscending ? cmp < 0 : cmp > 0;
             }
             return left < right;
@@ -3657,6 +3666,8 @@ bool WindowOp::open() {
         if (!functions_.front().orderBy.empty()) {
             finalOrderColumn = windowColumnIndex(tbl_, functions_.front().orderBy);
             finalAsc = functions_.front().orderAscending;
+            finalOrderNullsFirst_=functions_.front().hasExplicitOrderNulls
+                ? functions_.front().orderByNullsFirst : !finalAsc;
         }
     } else if (!finalOrderBy_.empty()) {
         finalOrderColumn = windowColumnIndex(tbl_, finalOrderBy_);
@@ -3709,10 +3720,11 @@ bool WindowOp::open() {
                 if (cmp != 0) return cmp < 0;
             }
             if (finalOrderColumn >= tbl_.len) return false;
+            if (left.sortKeyNull!=right.sortKeyNull)
+                return left.sortKeyNull==finalOrderNullsFirst_;
             const int cmp = compareWindowCell(
                 left.sortKey, left.sortKeyNull,
-                right.sortKey, right.sortKeyNull,
-                finalOrderAscending_);
+                right.sortKey, right.sortKeyNull);
             return finalOrderAscending_ ? cmp < 0 : cmp > 0;
         });
     }
@@ -5860,7 +5872,8 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ct
         TableSchema tbl = engine->getTableSchema(ctx.dbname, ctx.tablename);
         root = std::make_unique<WindowOp>(std::move(root), tbl,
                                           ctx.windowTargets, ctx.windowFunctions,
-                                          ctx.orderByCol, ctx.orderByAsc);
+                                          ctx.orderByCol, ctx.orderByAsc,
+                                          ctx.orderByNullsFirst,ctx.hasExplicitOrderNulls);
     } else {
         // Add Sort if ORDER BY.  WindowOp sorts each window internally and
         // applies the final query ordering after it computes the values.

@@ -5834,6 +5834,8 @@ struct WindowFunc {
     string arg;
     string orderByCol;
     bool orderByAsc;
+    bool orderByNullsFirst = false;
+    bool hasExplicitOrderNulls = false;
     vector<string> partitionByCols;
     bool isAggregate = false;
     // Frame type: ROWS (default), RANGE, GROUPS
@@ -5995,6 +5997,15 @@ static bool parseWindowFunc(const string& item, WindowFunc& wf, const map<string
             wf.orderByCol = ot[0];
             wf.orderByAsc = true;
             if (ot.size() > 1 && toLower(ot[1]) == "desc") wf.orderByAsc = false;
+            size_t nullOrder=1;
+            if (ot.size()>1 && (toLower(ot[1])=="asc" || toLower(ot[1])=="desc")) ++nullOrder;
+            if (ot.size()>nullOrder+1 && toLower(ot[nullOrder])=="nulls") {
+                const string placement=toLower(ot[nullOrder+1]);
+                if (placement=="first" || placement=="last") {
+                    wf.orderByNullsFirst=placement=="first";
+                    wf.hasExplicitOrderNulls=true;
+                }
+            }
         }
     } else {
         // ORDER BY absent: the hoisted frame (if any) still applies, e.g.
@@ -6091,6 +6102,8 @@ static bool convertToVolcanoWindowSpec(const WindowFunc& wf,
     spec.name = wf.name;
     spec.orderBy = wf.orderByCol;
     spec.orderAscending = wf.orderByAsc;
+    spec.orderByNullsFirst = wf.orderByNullsFirst;
+    spec.hasExplicitOrderNulls = wf.hasExplicitOrderNulls;
     spec.hasFrame = wf.hasFrame;
     if (wf.frameType == WindowFunc::FrameType::RANGE) {
         spec.frameType = dbms::WindowFunctionSpec::FrameType::RANGE;
@@ -34674,7 +34687,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             }
             if (canUseVolcanoWindow && !orderBySpecs.empty()) {
                 const auto& spec = orderBySpecs.front();
-                canUseVolcanoWindow = !spec.isExpression && !spec.nullsFirst &&
+                canUseVolcanoWindow = !spec.isExpression &&
                                       spec.collation.empty();
                 if (canUseVolcanoWindow) {
                     bool found = false;

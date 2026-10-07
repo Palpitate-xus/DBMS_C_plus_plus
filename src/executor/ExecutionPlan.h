@@ -760,6 +760,8 @@ struct WindowFunctionSpec {
     int frameStartOffset = -1; // -1 = UNBOUNDED PRECEDING
     int frameEndOffset = 0;    // -1 = UNBOUNDED FOLLOWING
     std::string frameExclusion; // current row, group, ties, no others
+    bool orderByNullsFirst = false;
+    bool hasExplicitOrderNulls = false;
 };
 
 struct WindowTarget {
@@ -779,7 +781,9 @@ public:
              const std::vector<WindowTarget>& targets,
              const std::vector<WindowFunctionSpec>& functions,
              const std::string& finalOrderBy = "",
-             bool finalOrderAscending = true);
+             bool finalOrderAscending = true,
+             bool finalOrderNullsFirst = false,
+             bool hasExplicitFinalNullOrder = false);
 
     bool open() override;
     bool next(std::string& outRow) override;
@@ -797,6 +801,7 @@ private:
     std::vector<WindowFunctionSpec> functions_;
     std::string finalOrderBy_;
     bool finalOrderAscending_;
+    bool finalOrderNullsFirst_;
     std::vector<std::string> rows_;
     std::vector<std::vector<std::string>> structuredRows_;
     std::vector<std::vector<bool>> structuredNulls_;
