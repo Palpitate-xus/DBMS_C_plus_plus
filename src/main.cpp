@@ -16327,10 +16327,12 @@ static bool handleAlterDomain(const string& sql, Session& s) {
             cout << "SQL syntax error: ALTER DOMAIN name SET DEFAULT value" << endl;
             return true;
         }
-        info.defaultValue = stripQuotes(defaultValue);
+        info.defaultValue = defaultValue;
+        info.hasDefault = true;
         message = "Domain " + domainName + " default set";
     } else if (startsWithKeyword(action, "drop default")) {
         info.defaultValue.clear();
+        info.hasDefault = false;
         message = "Domain " + domainName + " default dropped";
     } else if (startsWithKeyword(action, "add constraint") || startsWithKeyword(action, "add check")) {
         size_t checkPos = findTopLevelSqlKeyword(action, "check");

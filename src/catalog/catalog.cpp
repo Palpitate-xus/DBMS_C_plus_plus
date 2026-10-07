@@ -1,4 +1,5 @@
 #include "catalog.h"
+#include "common/DbError.h"
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -209,6 +210,37 @@ CatalogManager::MetadataSnapshot CatalogManager::metadataSnapshot() const {
 CatalogManager::MetadataSnapshot CatalogManager::readMetadataSnapshot(const std::string& path) {
     CatalogManager catalog(path, ReadOnlyTag{});
     return catalog.metadataSnapshot();
+}
+
+std::map<std::string, std::string> CatalogManager::domainColumns(
+    const std::string& schema, const std::string& relation) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::map<std::string, std::string> result;
+    const auto ns = nsByName_.find(schema);
+    if (ns == nsByName_.end()) return result;
+    const auto table = classByName_.find(classNameKey(ns->second, relation));
+    if (table == classByName_.end() || table->second >= classes_.size()) return result;
+    const Oid relationOid = classes_[table->second].oid;
+    const auto quote = [](const std::string& name) {
+        std::string value = "\"";
+        for (char c : name) { value += c; if (c == '"') value += c; }
+        return value + '"';
+    };
+    for (const auto& attribute : attributes_) {
+        if (attribute.attrelid != relationOid || attribute.attnum <= 0 || attribute.attisdropped) continue;
+        const auto* type = findTypeUnlocked(attribute.atttypid);
+        if (!type || type->typtype != 'd') continue;
+        const auto* domainNamespace = findNamespaceUnlocked(type->typnamespace);
+        if (!domainNamespace) throw DbError("XX001", "domain catalog namespace is missing");
+        result.emplace(attribute.attname, quote(domainNamespace->nspname) + "." + quote(type->typname));
+    }
+    return result;
+}
+
+std::map<std::string, std::string> CatalogManager::readDomainColumns(
+    const std::string& path, const std::string& schema, const std::string& relation) {
+    CatalogManager catalog(path, ReadOnlyTag{});
+    return catalog.domainColumns(schema, relation);
 }
 
 // ============================================================================
@@ -1654,6 +1686,10 @@ bool CatalogManager::persistAll() {
             out << r.typcategory << ',';
             writeOid(out, r.typelem); out << ',';
             writeOid(out, r.typarray);
+            // Optional, backwards-readable logical domain metadata. PgTypeRow
+            // already owns these fields; no binary storage format changes.
+            out << ",D2," << r.typbasetype << ',' << (r.typnotnull ? 1 : 0)
+                << ',' << r.typtypmod << ',' << r.typndims;
             out << '\n';
         }
     });
@@ -1913,6 +1949,23 @@ void CatalogManager::loadAll() {
             iss >> r.typcategory; iss.ignore(1);
             iss >> r.typelem; iss.ignore(1);
             iss >> r.typarray;
+            if (!iss) throw DbError("XX001", "invalid pg_type catalog record");
+            iss >> std::ws;
+            if (!iss.eof()) {
+                char delimiter = 0;
+                std::string version;
+                int notNull = 0;
+                if (!iss.get(delimiter) || delimiter != ',' ||
+                    !std::getline(iss, version, ',') || version != "D2" ||
+                    !readCatalogCsvField(iss, r.typbasetype) ||
+                    !readCatalogCsvField(iss, notNull) ||
+                    !readCatalogCsvField(iss, r.typtypmod) ||
+                    !readCatalogCsvLastField(iss, r.typndims) ||
+                    (notNull != 0 && notNull != 1) || r.typndims < 0 ||
+                    (r.typtype == 'd' && r.typbasetype == INVALID_OID))
+                    throw DbError("XX001", "invalid pg_type domain metadata suffix");
+                r.typnotnull = notNull == 1;
+            }
             types_.push_back(r);
         }
     }

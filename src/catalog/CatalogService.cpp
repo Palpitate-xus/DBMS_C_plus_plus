@@ -157,6 +157,16 @@ CatalogManager::MetadataSnapshot CatalogService::metadataSnapshot(const std::str
     return CatalogManager::readMetadataSnapshot(catalogDirForDb(engine_, dbname).string());
 }
 
+std::map<std::string, std::string> CatalogService::domainColumns(
+    const std::string& dbname, const std::string& physicalTable) const {
+    const auto logical = logicalName(physicalTable);
+    const auto schema = logical.schema.empty() ? "public" : logical.schema;
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = cache_.find(dbname);
+    if (found != cache_.end()) return found->second->domainColumns(schema, logical.name);
+    return CatalogManager::readDomainColumns(catalogDirForDb(engine_, dbname).string(), schema, logical.name);
+}
+
 CatalogManager::QualifiedName CatalogService::logicalName(const std::string& physical) {
     CatalogManager::QualifiedName qn;
     qn.schema.clear();

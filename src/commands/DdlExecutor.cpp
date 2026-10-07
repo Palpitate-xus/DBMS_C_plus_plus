@@ -16,6 +16,7 @@
 #include "common/DbError.h"
 #include "common/GeometryValue.h"
 #include "common/scram_sha256.h"
+#include "expression/expr_helper.h"
 #include "network/NetworkServer.h"
 #include "permissions.h"
 #include <algorithm>
@@ -54,6 +55,33 @@ std::string trim(const std::string& s) {
     size_t b = s.size();
     while (b > a && std::isspace(static_cast<unsigned char>(s[b - 1]))) --b;
     return s.substr(a, b - a);
+}
+
+std::string domainQuotedIdentifier(const std::string& name) {
+    std::string quoted = "\"";
+    for (char c : name) { quoted += c; if (c == '"') quoted += c; }
+    return quoted + '"';
+}
+
+std::string bindDomainCheck(const std::string& db, const std::string& check,
+                            const std::string& baseType, const std::string& column) {
+    const std::string prefix = "SELECT ";
+    QueryBindingDatum value;
+    value.identity = "domain-value";
+    value.name = "value";
+    value.type = baseType;
+    const auto prepared = g_engine.prepareBoundQuery(db, prefix + check, {value});
+    if (prepared.output.size() != 1 ||
+        ExprHelper::canonicalResultTypeName(prepared.output[0].type) != "boolean")
+        throw DbError("42804", "domain CHECK expression must be boolean");
+    std::string rewritten = check;
+    for (auto use = prepared.uses.rbegin(); use != prepared.uses.rend(); ++use) {
+        if (use->begin < prefix.size() || use->end > prefix.size() + check.size())
+            throw DbError("XX000", "invalid domain CHECK binding provenance");
+        rewritten.replace(use->begin - prefix.size(), use->end - use->begin,
+                          domainQuotedIdentifier(column));
+    }
+    return rewritten;
 }
 
 bool rejectMalformedDdlAst() {
@@ -902,6 +930,16 @@ static PgAttributeRow catalogAttributeForColumn(
     attribute.attnum = static_cast<int16_t>(columnIndex + 1);
     attribute.attname = column.dataName;
     attribute.atttypid = ensureTypeInCatalog(cat, namespaceOid, column);
+    if (!column.domainName.empty()) {
+        CatalogManager::QualifiedName domain;
+        if (!CatalogManager::parseQualifiedName(column.domainName, domain))
+            throw DbError("XX001", "invalid persisted domain identity");
+        const auto* ns = cat.findNamespaceByName(domain.schema.empty() ? "public" : domain.schema);
+        const auto* type = ns ? cat.findTypeByName(domain.name, ns->oid) : nullptr;
+        if (!type || type->typtype != 'd')
+            throw DbError("XX001", "domain has no catalog identity");
+        attribute.atttypid = type->oid;
+    }
     const bool postgresVarlenaNetwork =
         column.dataType == "inet" || column.dataType == "cidr";
     const int16_t postgresGeometryLength =
@@ -943,6 +981,7 @@ static PgAttributeRow catalogAttributeForColumn(
         // physical width. An explicit new declaration overrides this below.
         attribute.atttypmod = previous->atttypmod;
     }
+    if (!column.domainName.empty()) attribute.atttypmod = -1;
     attribute.attnotnull = !column.isNull;
     attribute.atthasdef = !column.defaultValue.empty();
     attribute.attstorage = column.isVariableLength ? 'x' : 'p';
@@ -4177,25 +4216,44 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
         return false;
     }
     std::string domainName;
-    std::string domainCheck;
+    StorageEngine::DomainAncestry domain;
     std::vector<std::string> domainTypeMods;
     std::string enumTypeName;
     std::vector<std::string> enumValues;
     if (!dbname.empty()) {
-        auto dom = g_engine.getDomain(dbname, baseType);
-        if (!dom.name.empty()) {
-            domainName = baseType;
-            domainCheck = dom.checkExpr;
-            if (col.defaultValue.empty() && !dom.defaultValue.empty()) {
-                col.defaultValue = dom.defaultValue;
+        domain = g_engine.resolveDomainAncestry(dbname, cd.typeName);
+        if (!domain.name.empty()) {
+            if (!cd.typeMods.empty() || cd.isArray) {
+                error = "domain modifiers/arrays are not supported (SQLSTATE 0A000)";
+                return false;
             }
-            // Domain base types may carry modifiers (for example VARCHAR(50)).
-            // Normalize that specification before applying the normal typed
-            // column mapping; otherwise a valid domain would be mistaken for
-            // an unknown type.
-            ColumnDef domainType = columnDefFromAlterType("", dom.baseType);
+            domainName = domain.name;
+            ColumnDef domainType = SQLParser::parseTypeSpecification(domain.baseType);
+            if (domainType.isArray) {
+                error = "domain over array is not supported (SQLSTATE 0A000)";
+                return false;
+            }
             baseType = toLower(domainType.typeName);
             domainTypeMods = std::move(domainType.typeMods);
+        }
+        // Qualified/quoted built-in identities are resolved from copied
+        // pg_catalog metadata, never by removing quotes from arbitrary types.
+        CatalogManager::QualifiedName baseName;
+        const std::string rawBase = domain.name.empty() ? cd.typeName :
+            SQLParser::parseTypeSpecification(domain.baseType).typeName;
+        if (CatalogManager::parseQualifiedName(rawBase, baseName, true) &&
+            ((!baseName.schema.empty() && baseName.schema == "pg_catalog") ||
+             (baseName.schema.empty() && !rawBase.empty() && rawBase.front() == '"'))) {
+            const auto snapshot = g_engine.catalogService().metadataSnapshot(dbname);
+            Oid catalogNamespace = INVALID_OID;
+            for (const auto& ns : snapshot.namespaces)
+                if (ns.nspname == "pg_catalog") catalogNamespace = ns.oid;
+            for (const auto& type : snapshot.types)
+                if (type.typnamespace == catalogNamespace && type.typname == baseName.name &&
+                    type.typtype == 'b') {
+                    baseType = ExprHelper::canonicalResultTypeName(type.typname);
+                    break;
+                }
         }
         auto et = g_engine.getEnumType(dbname, baseType);
         if (!et.name.empty()) {
@@ -4429,7 +4487,7 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
     }
 
     if (!knownType) {
-        error = "unknown type '" + cd.typeName + "'";
+        error = "unknown type '" + cd.typeName + "' (SQLSTATE 42704)";
         return false;
     }
 
@@ -4461,37 +4519,21 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
     if (!enumTypeName.empty()) col.dataType = enumTypeName;
     if (!domainName.empty()) {
         col.domainName = domainName;
-        // Re-apply domain default if column has no explicit default.
-        if (col.defaultValue.empty()) {
-            auto dom = g_engine.getDomain(dbname, domainName);
-            if (!dom.defaultValue.empty()) col.defaultValue = dom.defaultValue;
-        }
-        // Merge domain check with column check. PG domain checks use VALUE pseudo-variable.
-        if (!domainCheck.empty()) {
-            std::string rewritten = domainCheck;
-            // Replace case-insensitive VALUE with the actual column name.
-            for (size_t i = 0; i + 5 <= rewritten.size(); ) {
-                bool isValue = true;
-                for (int j = 0; j < 5; ++j) {
-                    if (std::tolower(static_cast<unsigned char>(rewritten[i + j])) != "value"[j]) {
-                        isValue = false; break;
-                    }
-                }
-                if (isValue) {
-                    rewritten.replace(i, 5, cd.name);
-                    i += cd.name.size();
-                } else {
-                    ++i;
-                }
-            }
+        if (!cd.defaultValue && domain.hasDefault) col.defaultValue = domain.defaultValue;
+        for (const auto& ancestor : domain.domains) {
+            if (ancestor.checkExpr.empty()) continue;
+            const auto rewritten = bindDomainCheck(dbname, ancestor.checkExpr,
+                                                    baseType, cd.name);
             if (!col.checkExpr.empty()) col.checkExpr = "(" + col.checkExpr + ") AND (" + rewritten + ")";
             else col.checkExpr = rewritten;
         }
     }
 
     // Apply check constraints from column definition
-    if (!cd.checkExprs.empty()) {
-        col.checkExpr = cd.checkExprs.front()->toString();
+    for (const auto& check : cd.checkExprs) {
+        const auto expression = check->toString();
+        col.checkExpr = col.checkExpr.empty() ? expression :
+            "(" + col.checkExpr + ") AND (" + expression + ")";
     }
     if (!cd.checkNames.empty()) {
         col.checkConstraintName = cd.checkNames.front();
@@ -8657,22 +8699,69 @@ bool DdlExecutor::executeCreateDomain(const CreateObjectStmt* stmt, Session& s) 
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
 
-    DdlTransaction txn(s);
-    if (!txn.begin()) {
-        std::cout << "DDL transaction begin failed" << std::endl;
-        return true;
-    }
-
     StorageEngine::DomainInfo info;
-    info.name = stmt->objectName;
+    CatalogManager::QualifiedName declared;
+    const auto rawName = stmt->schema.empty() ? stmt->objectName : stmt->schema + "." + stmt->objectName;
+    if (!CatalogManager::parseQualifiedName(rawName, declared, true))
+        throw DbError("42601", "invalid domain name");
+    if (declared.schema.empty()) {
+        std::vector<std::string> path;
+        std::string canonical;
+        if (!parseSessionSearchPath(s.searchPath, path, canonical)) path = {"public"};
+        for (const auto& entry : path) {
+            const auto schema = expandSessionSearchPathEntry(entry, s.username);
+            if (schema != "pg_catalog" && schema != "pg_temp" && g_engine.schemaExists(s.currentDB, schema)) {
+                declared.schema = schema;
+                break;
+            }
+        }
+        if (declared.schema.empty()) throw DbError("3F000", "no schema has been selected to create in");
+    }
+    if (!g_engine.schemaExists(s.currentDB, declared.schema))
+        throw DbError("3F000", "schema does not exist: " + declared.schema);
+    info.name = domainQuotedIdentifier(declared.schema) + "." + domainQuotedIdentifier(declared.name);
     auto it = stmt->options.find("base_type");
     if (it != stmt->options.end()) info.baseType = it->second;
     it = stmt->options.find("default");
-    if (it != stmt->options.end()) info.defaultValue = stripQuotes(it->second);
+    info.hasDefault = it != stmt->options.end();
+    if (info.hasDefault) info.defaultValue = it->second;
+    info.notNull = stmt->options.count("not_null") != 0;
     it = stmt->options.find("check");
     if (it != stmt->options.end()) info.checkExpr = it->second;
     it = stmt->options.find("constraint_name");
     if (it != stmt->options.end()) info.constraintName = it->second;
+    ColumnDef baseDefinition = SQLParser::parseTypeSpecification(info.baseType);
+    // Bind the immediate parent's real identity now, not against a future
+    // search_path. Quoted type spellings remain distinct throughout ancestry.
+    const auto parent = g_engine.resolveDomainAncestry(s.currentDB, baseDefinition.typeName);
+    if (!parent.name.empty()) {
+        if (parent.domains.size() >= 64)
+            throw DbError("54001", "domain ancestry exceeds the supported depth of 64");
+        if (baseDefinition.isArray || !baseDefinition.typeMods.empty())
+            throw DbError("42601", "domain parent cannot have modifiers or array suffix");
+        info.baseType = parent.name;
+    }
+    baseDefinition.name = "value";
+    Column physical;
+    std::string error;
+    if (!columnDefToColumn(baseDefinition, s.currentDB, physical, error, s.compatibilityMode))
+        throw DbError("42704", error);
+    if (!info.checkExpr.empty())
+        (void)bindDomainCheck(s.currentDB, info.checkExpr, physical.dataType, "value");
+
+    DdlTransaction txn(s);
+    txn.enableSnapshotRollback();
+    if (!txn.begin()) {
+        std::cout << "DDL transaction begin failed" << std::endl;
+        return true;
+    }
+    auto& catalog = g_engine.catalogService().get(s.currentDB);
+    const auto* ns = catalog.findNamespaceByName(declared.schema);
+    if (!ns) throw DbError("3F000", "domain schema has no catalog identity");
+    const Oid namespaceOid = ns->oid;
+    if (catalog.findTypeByName(declared.name, namespaceOid))
+        throw DbError("42710", "type already exists: " + info.name);
+    txn.markSnapshotDirty();
     DBStatus res = g_engine.createDomain(s.currentDB, info);
     if (res == DBStatus::TABLE_ALREADY_EXISTS) {
         std::cout << "Domain " << info.name << " already exists" << std::endl;
@@ -8683,6 +8772,31 @@ bool DdlExecutor::executeCreateDomain(const CreateObjectStmt* stmt, Session& s) 
                   << sqlstateForDBStatus(res) << ")" << std::endl;
         return true;
     }
+    Oid baseOid = INVALID_OID;
+    if (!parent.name.empty()) {
+        CatalogManager::QualifiedName parentName;
+        CatalogManager::parseQualifiedName(parent.name, parentName);
+        const auto* parentNs = catalog.findNamespaceByName(parentName.schema.empty() ? "public" : parentName.schema);
+        const auto* parentType = parentNs ? catalog.findTypeByName(parentName.name, parentNs->oid) : nullptr;
+        if (!parentType || parentType->typtype != 'd')
+            throw DbError("XX001", "parent domain has no catalog identity");
+        baseOid = parentType->oid;
+    } else baseOid = ensureTypeInCatalog(catalog, namespaceOid, physical);
+    const auto* base = catalog.findType(baseOid);
+    if (!base) throw DbError("XX001", "domain base has no catalog identity");
+    PgTypeRow type = *base;
+    type.oid = INVALID_OID;
+    type.typname = declared.name;
+    type.typnamespace = namespaceOid;
+    type.typtype = 'd';
+    type.typispreferred = false;
+    type.typbasetype = baseOid;
+    type.typnotnull = info.notNull;
+    type.typarray = INVALID_OID;
+    type.typtypmod = -1;
+    (void)declaredColumnTypeMod(baseDefinition, type.typtypmod);
+    catalog.createType(type);
+    if (!catalog.persistAll()) throw DbError("58030", "could not persist domain catalog identity");
     txn.recordCreate(DdlObjectKind::Domain, info.name);
     if (!txn.commit()) return true;
     std::cout << "CREATE DOMAIN succeeded" << std::endl;
@@ -8869,6 +8983,30 @@ bool DdlExecutor::executeDropDomain(const DropStmt* stmt, Session& s) {
         return true;
     }
     std::string name = stmt->objectNames.front();
+    const auto info = g_engine.getDomain(s.currentDB, name);
+    if (info.name.empty()) {
+        if (stmt->ifExists) {
+            if (!txn.commit()) return true;
+            std::cout << "NOTICE: domain does not exist, skipping" << std::endl;
+            return false;
+        }
+        throw DbError("42704", "domain does not exist: " + name);
+    }
+    CatalogManager::QualifiedName declared;
+    CatalogManager::parseQualifiedName(info.name, declared, true);
+    auto& catalog = g_engine.catalogService().get(s.currentDB);
+    const auto* ns = catalog.findNamespaceByName(declared.schema.empty() ? "public" : declared.schema);
+    const auto* type = ns ? catalog.findTypeByName(declared.name, ns->oid) : nullptr;
+    const Oid domainOid = type ? type->oid : INVALID_OID;
+    if (domainOid != INVALID_OID) {
+        const auto snapshot = catalog.metadataSnapshot();
+        bool dependent = false;
+        for (const auto& child : snapshot.types) dependent = dependent || child.typbasetype == domainOid;
+        for (const auto& attribute : snapshot.attributes)
+            dependent = dependent || (!attribute.attisdropped && attribute.atttypid == domainOid);
+        if (dependent) throw DbError(stmt->cascade ? "0A000" : "2BP01",
+            stmt->cascade ? "dependent domain CASCADE is not supported" : "cannot drop domain because objects depend on it");
+    }
     txn.markSnapshotDirty();
     txn.recordDrop(DdlObjectKind::Domain, name);
     DBStatus res = g_engine.dropDomain(s.currentDB, name);
@@ -8876,6 +9014,8 @@ bool DdlExecutor::executeDropDomain(const DropStmt* stmt, Session& s) {
         std::cout << "DROP DOMAIN failed" << std::endl;
         return true;
     }
+    if (domainOid != INVALID_OID && (!catalog.dropType(domainOid) || !catalog.persistAll()))
+        throw DbError("58030", "could not remove domain catalog identity");
     if (!txn.commit()) return true;
     std::cout << "DROP DOMAIN succeeded" << std::endl;
     return false;

@@ -22280,16 +22280,31 @@ TableSchema StorageEngine::getTableSchema(const std::string& dbname,
         tablename.empty() || !validStoredIdentifier(tablename, MAX_TABLE_NAME_LEN)) {
         return {};
     }
+    const auto withDomainIdentity = [&](TableSchema schema) {
+        // domainName was never serialized by the binary schema format. Its
+        // durable identity is the real pg_attribute domain OID; reconstruct
+        // only this logical field from copied catalog metadata on every path,
+        // including a schema cache hit, without modifying physical bytes.
+        if (schema.len == 0 || !catalogService_) return schema;
+        const auto domains = catalogService_->domainColumns(dbname, tablename);
+        for (size_t i = 0; i < schema.len; ++i) {
+            const auto domain = domains.find(schema.cols[i].dataName);
+            if (domain != domains.end()) schema.cols[i].domainName = domain->second;
+        }
+        return schema;
+    };
+    std::optional<TableSchema> transactionSchema;
     {
         std::lock_guard<std::mutex> lock(catalogSnapshotMutex_);
         if (transactionContext().catalogSnapshot) {
             auto key = std::make_pair(dbname, tablename);
             auto it = transactionContext().catalogSnapshot->schemas.find(key);
             if (it != transactionContext().catalogSnapshot->schemas.end()) {
-                return it->second;
+                transactionSchema = it->second;
             }
         }
     }
+    if (transactionSchema) return withDomainIdentity(std::move(*transactionSchema));
 
     // Parsed-schema cache: DML reads the schema several times per row
     // (row encode, index lookups, WAL page images). Only the first read
@@ -22297,11 +22312,12 @@ TableSchema StorageEngine::getTableSchema(const std::string& dbname,
     // transaction's catalog snapshot: later DDL by another engine instance
     // is masked by that snapshot for the rest of this transaction.
     if (auto cached = getCachedSchema(dbname, tablename)) {
+        TableSchema result = withDomainIdentity(*cached);
         std::lock_guard<std::mutex> lock(catalogSnapshotMutex_);
         if (transactionContext().catalogSnapshot) {
-            transactionContext().catalogSnapshot->schemas[std::make_pair(dbname, tablename)] = *cached;
+            transactionContext().catalogSnapshot->schemas[std::make_pair(dbname, tablename)] = result;
         }
-        return *cached;
+        return result;
     }
 
     std::ifstream in(schemaPath(dbname, tablename), std::ios::binary);
@@ -22369,6 +22385,7 @@ TableSchema StorageEngine::getTableSchema(const std::string& dbname,
         schemaCache_[dbname + "/" + tablename] = std::move(entry);
     }
 
+    tbl = withDomainIdentity(std::move(tbl));
     {
         std::lock_guard<std::mutex> lock(catalogSnapshotMutex_);
         if (transactionContext().catalogSnapshot) {
@@ -23883,11 +23900,26 @@ DBStatus StorageEngine::insertInternal(
     // FSM / VM internal mutexes, mirroring how UPDATE already sequences.
     if (!lockManager_.lockIntentExclusive(tablename)) return DBStatus::LOCK_CONFLICT;
 
-    TableSchema tbl = getTableSchema(dbname, tablename);
+    TableSchema tbl;
+    try { tbl = getTableSchema(dbname, tablename); }
+    catch (...) { lockManager_.unlock(tablename); throw; }
     const auto secondaryIndexMetadata =
         getIndexMetadata(dbname, tablename);
     const auto compositeIndexMetadata =
         getCompositeIndexes(dbname, tablename);
+    std::vector<bool> domainRequired(tbl.len, false);
+    try {
+        for (size_t i = 0; i < tbl.len; ++i)
+            if (!tbl.cols[i].domainName.empty())
+                {
+                    const auto domain = resolveDomainAncestry(dbname, tbl.cols[i].domainName);
+                    if (domain.name.empty()) throw DbError("XX001", "column domain metadata is missing");
+                    domainRequired[i] = domain.notNull;
+                }
+    } catch (...) {
+        lockManager_.unlock(tablename);
+        throw;
+    }
     // A partition-local tuple locator is not represented in TxnLogEntry yet:
     // every partition starts at page 1/slot 0, so transaction rollback would
     // address the empty parent heap (or an unrelated partition row).  Reject
@@ -24298,7 +24330,7 @@ DBStatus StorageEngine::insertInternal(
         const bool isNullMarker = hasValue &&
             actualNullColumns.count(col.dataName) != 0;
         std::string val = hasValue ? it->second : "";
-        if (enforceNotNull && !col.isNull &&
+        if (enforceNotNull && (!col.isNull || domainRequired[i]) &&
             (!hasValue || isNullMarker)) {
             lockManager_.unlock(tablename);
             return DBStatus::NULL_NOT_ALLOWED;
@@ -27749,6 +27781,14 @@ DBStatus StorageEngine::updateInternal(
     if (tbl.partitionType != TableSchema::PartitionType::None) {
         return DBStatus::INVALID_VALUE;
     }
+    std::vector<bool> domainRequired(tbl.len, false);
+    for (size_t i = 0; i < tbl.len; ++i)
+        if (!tbl.cols[i].domainName.empty())
+            {
+                const auto domain = resolveDomainAncestry(dbname, tbl.cols[i].domainName);
+                if (domain.name.empty()) throw DbError("XX001", "column domain metadata is missing");
+                domainRequired[i] = domain.notNull;
+            }
 
     // Validate columns and pre-check values. The same preparation function is
     // reused for row-dependent UPDATE expressions so all update entry points
@@ -27774,7 +27814,7 @@ DBStatus StorageEngine::updateInternal(
                     }
                     const bool isNullMarker =
                         sourceNullColumns.count(kv.first) != 0;
-                    if (!col.isNull && isNullMarker) {
+                    if ((!col.isNull || domainRequired[i]) && isNullMarker) {
                         return DBStatus::NULL_NOT_ALLOWED;
                     }
                     if (isNullMarker) {
@@ -32069,8 +32109,20 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
                         if (attribute.attrelid != relation.oid || attribute.attnum <= 0 || attribute.attisdropped) continue;
                         std::string typeName = "unknown";
                         bool arrayType = attribute.attndims > 0;
+                        Oid valueType = attribute.atttypid;
+                        std::set<Oid> domainTypes;
+                        for (;;) {
+                            const PgTypeRow* domain = nullptr;
+                            for (const auto& type : catalog.types)
+                                if (type.oid == valueType && type.typtype == 'd') { domain = &type; break; }
+                            if (!domain) break;
+                            if (domainTypes.size() >= 64 || !domainTypes.insert(valueType).second ||
+                                domain->typbasetype == INVALID_OID)
+                                throw DbError("XX001", "invalid domain catalog ancestry");
+                            valueType = domain->typbasetype;
+                        }
                         for (const auto& type : catalog.types) {
-                            if (type.oid != attribute.atttypid) continue;
+                            if (type.oid != valueType) continue;
                             typeName = type.typname;
                             if (type.typcategory == 'A' && type.typelem != INVALID_OID) {
                                 arrayType = true;
@@ -50598,13 +50650,90 @@ static std::filesystem::path domainPath(const std::string& dbname) {
     return std::filesystem::path(dbname) / ".domains";
 }
 
+static std::string domainHex(const std::string& value) {
+    static constexpr char digits[] = "0123456789abcdef";
+    std::string out;
+    for (unsigned char byte : value) {
+        out += digits[byte >> 4]; out += digits[byte & 15];
+    }
+    return out;
+}
+
+static bool domainUnhex(const std::string& value, std::string& out) {
+    if (value.size() % 2) return false;
+    const auto digit = [](char c) {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        return -1;
+    };
+    out.clear();
+    for (size_t i = 0; i < value.size(); i += 2) {
+        const int a = digit(value[i]), b = digit(value[i + 1]);
+        if (a < 0 || b < 0) return false;
+        out += static_cast<char>((a << 4) | b);
+    }
+    return true;
+}
+
+static bool parseDomainRecord(const std::string& line, StorageEngine::DomainInfo& info) {
+    std::vector<std::string> fields;
+    size_t start = 0;
+    for (;;) {
+        const auto end = line.find('|', start);
+        fields.push_back(line.substr(start, end == std::string::npos ? end : end - start));
+        if (end == std::string::npos) break;
+        start = end + 1;
+    }
+    info = {};
+    if (fields[0] == "@D2") {
+        if (fields.size() != 8 || (fields[6] != "0" && fields[6] != "1") ||
+            (fields[7] != "0" && fields[7] != "1")) return false;
+        if (!domainUnhex(fields[1], info.name) || !domainUnhex(fields[2], info.baseType) ||
+            !domainUnhex(fields[3], info.defaultValue) || !domainUnhex(fields[4], info.checkExpr) ||
+            !domainUnhex(fields[5], info.constraintName)) return false;
+        info.hasDefault = fields[6] == "1";
+        info.notNull = fields[7] == "1";
+        if ((!info.hasDefault && !info.defaultValue.empty()) ||
+            (info.hasDefault && info.defaultValue.empty())) return false;
+    } else {
+        // Original five-field metadata remains readable, without guessing
+        // NOT NULL from a CHECK expression or rewriting unrelated records.
+        if (fields.size() != 5) return false;
+        info.name = fields[0]; info.baseType = fields[1]; info.defaultValue = fields[2];
+        info.checkExpr = fields[3]; info.constraintName = fields[4];
+        info.hasDefault = !info.defaultValue.empty();
+    }
+    CatalogManager::QualifiedName name;
+    return !info.name.empty() && !info.baseType.empty() &&
+        info.name.find('\0') == std::string::npos && info.baseType.find('\0') == std::string::npos &&
+        info.defaultValue.find('\0') == std::string::npos && info.checkExpr.find('\0') == std::string::npos &&
+        info.constraintName.find('\0') == std::string::npos &&
+        CatalogManager::parseQualifiedName(info.name, name, true) && !name.name.empty();
+}
+
+static std::string serializeDomainRecord(const StorageEngine::DomainInfo& info) {
+    return "@D2|" + domainHex(info.name) + "|" + domainHex(info.baseType) + "|" +
+        domainHex(info.defaultValue) + "|" + domainHex(info.checkExpr) + "|" +
+        domainHex(info.constraintName) + "|" + (info.hasDefault || !info.defaultValue.empty() ? "1" : "0") +
+        "|" + (info.notNull ? "1" : "0");
+}
+
+static std::pair<std::string, std::string> domainIdentity(const std::string& raw) {
+    CatalogManager::QualifiedName name;
+    if (!CatalogManager::parseQualifiedName(raw, name, true) || name.name.empty())
+        throw DbError("42601", "invalid domain name: " + raw);
+    return {name.schema.empty() ? "public" : name.schema, name.name};
+}
+
 DBStatus StorageEngine::createDomain(const std::string& dbname, const DomainInfo& info) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
-    if (info.name.empty() || !validStoredIdentifier(info.name, MAX_TABLE_NAME_LEN) ||
-        info.name.find('|') != std::string::npos) {
+    DomainInfo checked;
+    if (!parseDomainRecord(serializeDomainRecord(info), checked)) {
         return DBStatus::INVALID_ARGUMENT;
     }
     auto path = domainPath(dbname);
+    if (std::filesystem::exists(path) && !std::filesystem::is_regular_file(path))
+        return DBStatus::IO_ERROR;
     auto existing = getDomain(dbname, info.name);
     if (!existing.name.empty()) return DBStatus::TABLE_ALREADY_EXISTS;
 
@@ -50618,8 +50747,7 @@ DBStatus StorageEngine::createDomain(const std::string& dbname, const DomainInfo
     }
     std::ostringstream serialized;
     for (const auto& line : lines) serialized << line << '\n';
-    serialized << info.name << "|" << info.baseType << "|" << info.defaultValue << "|"
-               << info.checkExpr << "|" << info.constraintName << '\n';
+    serialized << serializeDomainRecord(info) << '\n';
     return index_file::writeAtomically(path, serialized.str())
         ? DBStatus::OK : DBStatus::IO_ERROR;
 }
@@ -50629,44 +50757,34 @@ DBStatus StorageEngine::alterDomain(const std::string& dbname, const std::string
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     auto path = domainPath(dbname);
     if (!std::filesystem::exists(path)) return DBStatus::TABLE_NOT_FOUND;
-    if (info.name != name && !getDomain(dbname, info.name).name.empty()) {
+    if (!std::filesystem::is_regular_file(path)) return DBStatus::IO_ERROR;
+    const auto requested = getDomain(dbname, name);
+    if (requested.name.empty()) return DBStatus::TABLE_NOT_FOUND;
+    if (domainIdentity(info.name) != domainIdentity(requested.name) && !getDomain(dbname, info.name).name.empty()) {
         return DBStatus::TABLE_ALREADY_EXISTS;
     }
     std::ifstream ifs(path);
     if (!ifs) return DBStatus::IO_ERROR;
-    std::vector<DomainInfo> domains;
+    std::vector<std::string> domains;
     std::string line;
     bool found = false;
     while (std::getline(ifs, line)) {
-        size_t sp1 = line.find('|');
-        if (sp1 == std::string::npos) return DBStatus::INVALID_VALUE;
-        size_t sp2 = line.find('|', sp1 + 1);
-        size_t sp3 = (sp2 == std::string::npos) ? std::string::npos : line.find('|', sp2 + 1);
-        size_t sp4 = (sp3 == std::string::npos) ? std::string::npos : line.find('|', sp3 + 1);
         DomainInfo current;
-        current.name = line.substr(0, sp1);
-        current.baseType = (sp2 == std::string::npos) ? "" : line.substr(sp1 + 1, sp2 - sp1 - 1);
-        current.defaultValue = (sp2 == std::string::npos)
-            ? ""
-            : ((sp3 == std::string::npos) ? line.substr(sp2 + 1) : line.substr(sp2 + 1, sp3 - sp2 - 1));
-        current.checkExpr = (sp3 == std::string::npos)
-            ? ""
-            : ((sp4 == std::string::npos) ? line.substr(sp3 + 1) : line.substr(sp3 + 1, sp4 - sp3 - 1));
-        if (sp4 != std::string::npos) current.constraintName = line.substr(sp4 + 1);
-        if (current.name == name) {
-            domains.push_back(info);
+        if (!parseDomainRecord(line, current)) return DBStatus::INVALID_VALUE;
+        if (domainIdentity(current.name) == domainIdentity(requested.name)) {
+            DomainInfo checked;
+            if (!parseDomainRecord(serializeDomainRecord(info), checked)) return DBStatus::INVALID_ARGUMENT;
+            domains.push_back(serializeDomainRecord(info));
             found = true;
         } else {
-            domains.push_back(current);
+            domains.push_back(line);
         }
     }
     if (ifs.bad()) return DBStatus::IO_ERROR;
     if (!found) return DBStatus::TABLE_NOT_FOUND;
     std::ostringstream serialized;
     for (const auto& d : domains) {
-        serialized << d.name << "|" << d.baseType << "|"
-                   << d.defaultValue << "|" << d.checkExpr << "|"
-                   << d.constraintName << "\n";
+        serialized << d << '\n';
     }
     return index_file::writeAtomically(path, serialized.str())
         ? DBStatus::OK : DBStatus::IO_ERROR;
@@ -50676,14 +50794,18 @@ DBStatus StorageEngine::dropDomain(const std::string& dbname, const std::string&
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     auto path = domainPath(dbname);
     if (!std::filesystem::exists(path)) return DBStatus::TABLE_NOT_FOUND;
+    if (!std::filesystem::is_regular_file(path)) return DBStatus::IO_ERROR;
+    const auto requested = getDomain(dbname, name);
+    if (requested.name.empty()) return DBStatus::TABLE_NOT_FOUND;
     std::ifstream ifs(path);
     if (!ifs) return DBStatus::IO_ERROR;
     std::vector<std::string> lines;
     std::string line;
     bool found = false;
     while (std::getline(ifs, line)) {
-        size_t sp = line.find('|');
-        if (sp != std::string::npos && line.substr(0, sp) == name) {
+        DomainInfo current;
+        if (!parseDomainRecord(line, current)) return DBStatus::INVALID_VALUE;
+        if (!requested.name.empty() && domainIdentity(current.name) == domainIdentity(requested.name)) {
             found = true;
         } else {
             lines.push_back(line);
@@ -50702,25 +50824,29 @@ StorageEngine::DomainInfo StorageEngine::getDomain(const std::string& dbname, co
     auto path = domainPath(dbname);
     if (!std::filesystem::exists(path)) return result;
     std::ifstream ifs(path);
+    if (!ifs) throw DbError("58030", "could not read domain metadata");
+    CatalogManager::QualifiedName requested;
+    if (!CatalogManager::parseQualifiedName(name, requested, true) || requested.name.empty()) return result;
+    std::vector<std::string> schemas;
+    if (!requested.schema.empty()) schemas.push_back(requested.schema);
+    else {
+        const Session* session = currentSession();
+        std::string canonical;
+        if (!session || !parseSessionSearchPath(session->searchPath, schemas, canonical)) schemas = {"public"};
+        for (auto& schema : schemas)
+            schema = expandSessionSearchPathEntry(schema, session ? session->username : "");
+    }
+    std::vector<DomainInfo> candidates;
     std::string line;
     while (std::getline(ifs, line)) {
-        size_t sp1 = line.find('|');
-        if (sp1 == std::string::npos) continue;
-        if (line.substr(0, sp1) != name) continue;
-        size_t sp2 = line.find('|', sp1 + 1);
-        size_t sp3 = (sp2 == std::string::npos) ? std::string::npos : line.find('|', sp2 + 1);
-        size_t sp4 = (sp3 == std::string::npos) ? std::string::npos : line.find('|', sp3 + 1);
-        result.name = name;
-        result.baseType = (sp2 == std::string::npos) ? "" : line.substr(sp1 + 1, sp2 - sp1 - 1);
-        result.defaultValue = (sp2 == std::string::npos)
-            ? ""
-            : ((sp3 == std::string::npos) ? line.substr(sp2 + 1) : line.substr(sp2 + 1, sp3 - sp2 - 1));
-        result.checkExpr = (sp3 == std::string::npos)
-            ? ""
-            : ((sp4 == std::string::npos) ? line.substr(sp3 + 1) : line.substr(sp3 + 1, sp4 - sp3 - 1));
-        if (sp4 != std::string::npos) result.constraintName = line.substr(sp4 + 1);
-        break;
+        DomainInfo candidate;
+        if (!parseDomainRecord(line, candidate)) throw DbError("XX001", "invalid domain metadata record");
+        if (domainIdentity(candidate.name).second == requested.name) candidates.push_back(std::move(candidate));
     }
+    if (ifs.bad()) throw DbError("58030", "could not read domain metadata");
+    for (const auto& schema : schemas)
+        for (const auto& candidate : candidates)
+            if (domainIdentity(candidate.name).first == schema) return candidate;
     return result;
 }
 
@@ -50731,10 +50857,41 @@ std::vector<std::string> StorageEngine::getDomainNames(const std::string& dbname
     std::ifstream ifs(path);
     std::string line;
     while (std::getline(ifs, line)) {
-        size_t sp = line.find('|');
-        if (sp != std::string::npos) result.push_back(line.substr(0, sp));
+        DomainInfo info;
+        if (!parseDomainRecord(line, info)) throw DbError("XX001", "invalid domain metadata record");
+        result.push_back(info.name);
     }
     return result;
+}
+
+StorageEngine::DomainAncestry StorageEngine::resolveDomainAncestry(
+    const std::string& dbname, const std::string& name) const {
+    DomainAncestry result;
+    DomainInfo current = getDomain(dbname, name);
+    if (current.name.empty()) return result;
+    result.name = current.name;
+    std::set<std::pair<std::string, std::string>> visited;
+    for (;;) {
+        if (result.domains.size() >= 64)
+            throw DbError("54001", "domain ancestry exceeds the supported depth of 64");
+        if (!visited.insert(domainIdentity(current.name)).second)
+            throw DbError("XX001", "cyclic domain ancestry");
+        result.notNull = result.notNull || current.notNull;
+        if (!result.hasDefault && (current.hasDefault || !current.defaultValue.empty())) {
+            result.hasDefault = true;
+            result.defaultValue = current.defaultValue;
+        }
+        result.domains.push_back(current);
+        const auto base = SQLParser::parseTypeSpecification(current.baseType);
+        DomainInfo parent = getDomain(dbname, base.typeName);
+        if (parent.name.empty()) {
+            result.baseType = current.baseType;
+            return result;
+        }
+        if (!base.typeMods.empty() || base.isArray)
+            throw DbError("42601", "domain parent cannot have modifiers or array suffix");
+        current = std::move(parent);
+    }
 }
 
 // ========================================================================

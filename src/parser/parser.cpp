@@ -1,5 +1,6 @@
 #include "parser.h"
 #include "common/SqlTrivia.h"
+#include "common/DbError.h"
 #include <charconv>
 #include <cctype>
 #include <algorithm>
@@ -139,6 +140,87 @@ static std::string parseRoutineIdentifier(const std::string& token) {
                        return static_cast<char>(std::tolower(value));
                    });
     return identifier;
+}
+
+static ColumnDef consumeDeclaredType(const std::vector<std::string>& tokens,
+                                     size_t& pos) {
+    ColumnDef definition;
+    const auto identifier = [](const std::string& token) {
+        return !token.empty() && (token.front() == '"' ||
+            std::isalpha(static_cast<unsigned char>(token.front())) || token.front() == '_');
+    };
+    if (pos >= tokens.size() || !identifier(tokens[pos]))
+        throw DbError("42601", "type name is required");
+    definition.typeName = tokens[pos++];
+    bool qualified = false;
+    if (pos < tokens.size() && tokens[pos] == ".") {
+        qualified = true;
+        ++pos;
+        if (pos >= tokens.size() || !identifier(tokens[pos]))
+            throw DbError("42601", "qualified type name is incomplete");
+        definition.typeName += "." + tokens[pos++];
+    }
+    const bool quoted = definition.typeName.front() == '"';
+    const std::string initial = SQLParser::toLower(definition.typeName);
+    if (!qualified && !quoted && pos < tokens.size()) {
+        const std::string next = SQLParser::toLower(tokens[pos]);
+        if (((initial == "bit" || initial == "character") && next == "varying") ||
+            (initial == "double" && next == "precision"))
+            definition.typeName += " " + tokens[pos++];
+    }
+    if (pos < tokens.size() && tokens[pos] == "(") {
+        ++pos;
+        bool needsValue = true;
+        while (pos < tokens.size() && tokens[pos] != ")") {
+            if (needsValue) {
+                std::string value;
+                if (tokens[pos] == "+" || tokens[pos] == "-") value = tokens[pos++];
+                if (pos >= tokens.size() || tokens[pos] == "," || tokens[pos] == ")")
+                    throw DbError("42601", "invalid type modifier");
+                value += tokens[pos++];
+                definition.typeMods.push_back(value);
+            } else if (tokens[pos++] != ",") {
+                throw DbError("42601", "invalid type modifier separator");
+            }
+            needsValue = !needsValue;
+        }
+        if (pos >= tokens.size() || needsValue)
+            throw DbError("42601", "invalid type modifier list");
+        ++pos;
+    }
+    if (!qualified && !quoted && (initial == "time" || initial == "timestamp") &&
+        pos + 2 < tokens.size()) {
+        const std::string zone = SQLParser::toLower(tokens[pos]);
+        if ((zone == "with" || zone == "without") &&
+            SQLParser::toLower(tokens[pos + 1]) == "time" &&
+            SQLParser::toLower(tokens[pos + 2]) == "zone") {
+            definition.typeName = initial + (zone == "with" ? "tz" : "");
+            pos += 3;
+        }
+    }
+    while (pos < tokens.size() && tokens[pos] == "[") {
+        ++pos;
+        if (pos < tokens.size() && tokens[pos] != "]") {
+            size_t ignored = 0;
+            const auto& bound = tokens[pos++];
+            const auto parsed = std::from_chars(bound.data(), bound.data() + bound.size(), ignored);
+            if (parsed.ec != std::errc() || parsed.ptr != bound.data() + bound.size())
+                throw DbError("42601", "invalid array type bound");
+        }
+        if (pos >= tokens.size() || tokens[pos++] != "]")
+            throw DbError("42601", "array type suffix is incomplete");
+        definition.isArray = true;
+    }
+    return definition;
+}
+
+ColumnDef SQLParser::parseTypeSpecification(const std::string& sql) {
+    const auto tokens = tokenize(sql);
+    size_t pos = 0;
+    auto definition = consumeDeclaredType(tokens, pos);
+    if (pos != tokens.size())
+        throw DbError("42601", "unexpected tokens in type specification");
+    return definition;
 }
 
 static bool parseNonNegativeInteger(const std::string& token, size_t& value) {
@@ -6569,32 +6651,10 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
                 ColumnDef col;
                 col.name = parseRoutineIdentifier(tokens[pos++]);
                 if (pos < tokens.size()) {
-                    col.typeName = tokens[pos++];
-                    // Multi-word type names: "bit varying", "character varying",
-                    // "double precision" — fold the second word in before (n).
-                    if (pos < tokens.size()) {
-                        std::string t0 = toLower(col.typeName);
-                        std::string t1 = toLower(tokens[pos]);
-                        if (((t0 == "bit" || t0 == "character") && t1 == "varying") ||
-                            (t0 == "double" && t1 == "precision")) {
-                            col.typeName += " " + tokens[pos++];
-                        }
-                    }
-                    // Type may have parameters: VARCHAR(255), NUMERIC(10,2)
-                    if (pos < tokens.size() && tokens[pos] == "(") {
-                        ++pos; // skip '('
-                        while (pos < tokens.size() && tokens[pos] != ")") {
-                            if (tokens[pos] != ",") col.typeMods.push_back(tokens[pos]);
-                            ++pos;
-                        }
-                        if (pos < tokens.size() && tokens[pos] == ")") ++pos; // skip ')'
-                    }
-                    // Array type: TYPE[]
-                    if (pos < tokens.size() && tokens[pos] == "[") {
-                        ++pos;
-                        if (pos < tokens.size() && tokens[pos] == "]") ++pos;
-                        col.isArray = true;
-                    }
+                    const auto type = consumeDeclaredType(tokens, pos);
+                    col.typeName = type.typeName;
+                    col.typeMods = type.typeMods;
+                    col.isArray = type.isArray;
                 }
                 // Column constraints
                 std::string pendingCheckName;
@@ -7362,27 +7422,15 @@ StmtPtr SQLParser::parseCreateDomain(const std::vector<std::string>& tokens, siz
     // AS base_type
     if (pos < tokens.size() && toLower(tokens[pos]) == "as") {
         ++pos;
-        if (pos < tokens.size()) {
-            stmt->options["base_type"] = tokens[pos++];
-            // Capture optional type modifiers like numeric(10,2)
-            if (pos < tokens.size() && tokens[pos] == "(") {
-                std::string mods = "(";
-                ++pos;
-                while (pos < tokens.size() && tokens[pos] != ")") {
-                    mods += tokens[pos++];
-                    if (pos < tokens.size() && tokens[pos] == ",") {
-                        mods += ",";
-                        ++pos;
-                    }
-                }
-                if (pos < tokens.size() && tokens[pos] == ")") {
-                    mods += ")";
-                    ++pos;
-                }
-                stmt->options["base_type"] += mods;
-            }
-        }
     }
+    const size_t typeBegin = pos;
+    consumeDeclaredType(tokens, pos);
+    std::string declaredType;
+    for (size_t i = typeBegin; i < pos; ++i) {
+        if (!declaredType.empty()) declaredType += ' ';
+        declaredType += tokens[i];
+    }
+    stmt->options["base_type"] = declaredType;
 
     auto lower = [&](const std::string& s) { return toLower(s); };
     std::string constraintName;
@@ -7391,12 +7439,27 @@ StmtPtr SQLParser::parseCreateDomain(const std::vector<std::string>& tokens, siz
         if (tok == "default") {
             ++pos;
             std::string expr;
+            int depth = 0;
             while (pos < tokens.size() && tokens[pos] != ";" &&
-                   lower(tokens[pos]) != "constraint" && lower(tokens[pos]) != "check") {
+                   !(depth == 0 && !expr.empty() &&
+                     (lower(tokens[pos]) == "constraint" || lower(tokens[pos]) == "check" ||
+                      lower(tokens[pos]) == "not" || lower(tokens[pos]) == "null"))) {
+                if (tokens[pos] == "(") ++depth;
+                if (tokens[pos] == ")") --depth;
                 if (!expr.empty()) expr += " ";
                 expr += tokens[pos++];
             }
+            if (expr.empty() || depth != 0 || stmt->options.count("default"))
+                throw DbError("42601", "invalid or duplicate domain DEFAULT");
             stmt->options["default"] = expr;
+        } else if (tok == "not" && pos + 1 < tokens.size() && lower(tokens[pos + 1]) == "null") {
+            if (stmt->options.count("nullable")) throw DbError("42601", "conflicting domain NULL declarations");
+            stmt->options["not_null"] = "true";
+            pos += 2;
+        } else if (tok == "null") {
+            if (stmt->options.count("not_null")) throw DbError("42601", "conflicting domain NULL declarations");
+            stmt->options["nullable"] = "true";
+            ++pos;
         } else if (tok == "constraint") {
             ++pos;
             if (pos < tokens.size()) {
@@ -7416,6 +7479,8 @@ StmtPtr SQLParser::parseCreateDomain(const std::vector<std::string>& tokens, siz
                     }
                     ++pos;
                 }
+                if (depth != 0 || expr.empty())
+                    throw DbError("42601", "invalid domain CHECK expression");
                 // Combine multiple CHECK constraints with AND.
                 auto it = stmt->options.find("check");
                 if (it != stmt->options.end() && !it->second.empty()) {
@@ -7433,10 +7498,10 @@ StmtPtr SQLParser::parseCreateDomain(const std::vector<std::string>& tokens, siz
                     constraintName.clear();
                 }
             } else {
-                ++pos;
+                throw DbError("42601", "domain CHECK requires parentheses");
             }
         } else {
-            ++pos;
+            throw DbError("42601", "unexpected domain declaration token: " + tokens[pos]);
         }
     }
     return stmt;
@@ -9490,24 +9555,10 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
                 sub.colDef.name = parseRoutineIdentifier(tokens[pos++]);
             }
             if (pos < tokens.size()) {
-                sub.colDef.typeName = tokens[pos++];
-                std::string type = toLower(sub.colDef.typeName);
-                if ((type == "double" || type == "character" || type == "timestamp") &&
-                    pos < tokens.size() && toLower(tokens[pos]) == "precision") {
-                    sub.colDef.typeName += " " + tokens[pos++];
-                } else if (type == "character" && pos < tokens.size() &&
-                           toLower(tokens[pos]) == "varying") {
-                    sub.colDef.typeName += " " + tokens[pos++];
-                }
-                if (pos < tokens.size() && tokens[pos] == "(") {
-                    auto mods = collectParenthesized(tokens, pos);
-                    for (const auto& mod : mods) if (mod != ",") sub.colDef.typeMods.push_back(mod);
-                }
-                if (pos + 1 < tokens.size() && tokens[pos] == "[" &&
-                    tokens[pos + 1] == "]") {
-                    sub.colDef.isArray = true;
-                    pos += 2;
-                }
+                const auto type = consumeDeclaredType(tokens, pos);
+                sub.colDef.typeName = type.typeName;
+                sub.colDef.typeMods = type.typeMods;
+                sub.colDef.isArray = type.isArray;
             }
             // Preserve every column modifier the storage layer supports.  An
             // unknown modifier must fail the parse: reporting success after

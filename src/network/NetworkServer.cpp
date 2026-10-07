@@ -1347,8 +1347,23 @@ ProtocolPhysicalSource protocolPhysicalSourceFromQuery(const std::string& sql,
             result.table = g_engine.getTableSchema(session.currentDB, physical);
             result.relationOid = relation.oid; actualSchema = schema;
             for (const auto& attribute : catalog.attributes)
-                if (attribute.attrelid == relation.oid && attribute.attnum > 0 && !attribute.attisdropped)
-                    result.attributes.push_back(attribute);
+                if (attribute.attrelid == relation.oid && attribute.attnum > 0 && !attribute.attisdropped) {
+                    auto valueAttribute = attribute;
+                    std::set<Oid> ancestry;
+                    for (;;) {
+                        const PgTypeRow* type = nullptr;
+                        for (const auto& candidate : catalog.types)
+                            if (candidate.oid == valueAttribute.atttypid) { type = &candidate; break; }
+                        if (!type || type->typtype != 'd') break;
+                        if (ancestry.size() >= 64 || !ancestry.insert(type->oid).second ||
+                            type->typbasetype == INVALID_OID)
+                            throw DbError("XX001", "invalid domain catalog ancestry");
+                        if (valueAttribute.atttypmod < 0 && type->typtypmod >= 0)
+                            valueAttribute.atttypmod = type->typtypmod;
+                        valueAttribute.atttypid = type->typbasetype;
+                    }
+                    result.attributes.push_back(valueAttribute);
+                }
             break;
         }
         if (result.relationOid != INVALID_OID) break;
@@ -1520,7 +1535,7 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
             const std::string physicalTypeName =
                 lowerProtocolText(protocolPhysicalTypeName(column));
             const bool structuredMatchesPhysical = hasStructuredType &&
-                (column.isArray || physicalTypeName == "bit" ||
+                (!column.domainName.empty() || column.isArray || physicalTypeName == "bit" ||
                  physicalTypeName == "bit varying" ||
                  physicalTypeName == "character" ||
                  physicalTypeName == "char" ||
@@ -1530,7 +1545,7 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
                  physicalTypeName == "macaddr" ||
                  physicalTypeName == "macaddr8" ||
                  isGeometryTypeName(physicalTypeName)) &&
-                (column.isArray
+                (column.isArray || !column.domainName.empty()
                     ? ExprHelper::canonicalResultTypeName(result.columnTypes[columnIndex]) ==
                         ExprHelper::canonicalResultTypeName(physicalTypeName)
                     : lowerProtocolText(result.columnTypes[columnIndex]) == physicalTypeName);

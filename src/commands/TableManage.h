@@ -298,12 +298,26 @@ public:
         std::string defaultValue;
         std::string checkExpr;
         std::string constraintName;
+        // Logical declaration flags; the physical Column format is unchanged.
+        bool hasDefault = false;
+        bool notNull = false;
+    };
+    struct DomainAncestry {
+        std::string name;
+        std::string baseType;
+        std::string defaultValue;
+        bool hasDefault = false;
+        bool notNull = false;
+        std::vector<DomainInfo> domains; // outermost -> innermost
     };
     DBStatus createDomain(const std::string& dbname, const DomainInfo& info);
     DBStatus alterDomain(const std::string& dbname, const std::string& name,
                          const DomainInfo& info);
     DBStatus dropDomain(const std::string& dbname, const std::string& name);
     DomainInfo getDomain(const std::string& dbname, const std::string& name) const;
+    // Pure, bounded metadata lookup. No catalog allocation or query execution.
+    DomainAncestry resolveDomainAncestry(const std::string& dbname,
+                                        const std::string& name) const;
     std::vector<std::string> getDomainNames(const std::string& dbname) const;
 
     // Composite types (ROW types)

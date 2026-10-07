@@ -49,6 +49,8 @@ public:
     static std::string toLower(const std::string& s);
     static std::string trim(const std::string& s);
     static std::vector<std::string> tokenize(const std::string& sql);
+    // Complete SQL type envelope, retaining quoted/qualified type identities.
+    static ColumnDef parseTypeSpecification(const std::string& sql);
     static bool isKeyword(const std::string& s);
 
 private:

@@ -3,6 +3,7 @@
 #include "oid.h"
 #include "systables.h"
 #include <memory>
+#include <map>
 #include <vector>
 #include <unordered_map>
 #include <mutex>
@@ -45,6 +46,11 @@ public:
     // Cold metadata reads do not bootstrap, allocate OIDs, migrate files,
     // create directories or persist on destruction.
     static MetadataSnapshot readMetadataSnapshot(const std::string& dbPath);
+    // Narrow, single-lock logical identity copy for schema-cache reads.
+    std::map<std::string, std::string> domainColumns(const std::string& schema,
+                                                    const std::string& relation) const;
+    static std::map<std::string, std::string> readDomainColumns(
+        const std::string& dbPath, const std::string& schema, const std::string& relation);
 
     // 禁止拷贝
     CatalogManager(const CatalogManager&) = delete;
