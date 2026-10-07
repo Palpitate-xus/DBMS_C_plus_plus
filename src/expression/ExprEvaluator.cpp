@@ -5206,7 +5206,8 @@ ExprValue ExprEvaluator::evalArrayExpr(const ArrayExpr* array, const RowContext&
         if(i)output+=',';
         if(nested){
             if(value.isNull)throw DbError("2202E","multidimensional arrays must have matching dimensions");
-            value=evalCast(nullptr,row,value,elementType+"[]");
+            if (elementType != "bit" || value.typeName != "bit[]")
+                value=evalCast(nullptr,row,value,elementType+"[]");
             std::vector<std::string> elements;
             if(!parseArrayElements(value.value,elements))throw DbError("22P02","malformed array literal");
             if(i && nestedWidth!=elements.size())throw DbError("2202E","multidimensional arrays must have matching dimensions");
@@ -5214,7 +5215,18 @@ ExprValue ExprEvaluator::evalArrayExpr(const ArrayExpr* array, const RowContext&
             if(i && child.dimensions!=childDimensions)throw DbError("2202E","multidimensional arrays must have matching dimensions");
             childDimensions=child.dimensions;
             nestedWidth=elements.size();output+=child.body;
-        }else{value=evalCast(nullptr,row,value,elementType);output+=value.isNull?"NULL":arrayElemQuote(value.value);}
+        } else {
+            if (elementType == "bit") {
+                // ARRAY chooses a common element type without a typmod.
+                // The scalar explicit ::bit cast instead defaults to bit(1)
+                // and must not truncate already typed constructor elements.
+                value=evalCast(nullptr,row,value,"bit varying");
+                value.typeName="bit";
+            } else {
+                value=evalCast(nullptr,row,value,elementType);
+            }
+            output+=value.isNull?"NULL":arrayElemQuote(value.value);
+        }
     }
     const auto result=[&](std::string value){ExprValue cell(elementType+"[]",std::move(value));cell.collation=explicitResultCollation(array);return cell;};
     if(nested && nestedWidth==0)return result("{}");
