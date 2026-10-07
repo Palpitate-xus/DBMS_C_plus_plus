@@ -276,6 +276,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/with_multisource_dml_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/with_multisource_dml_boundary_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/ordinary_quantified_dml_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/with_physical_child_restart_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/prepared_unknown_input_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/arithmetic_predicate_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/cast_child_header_protocol_e2e_test.py)

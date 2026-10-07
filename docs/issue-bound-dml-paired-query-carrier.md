@@ -115,3 +115,37 @@ retain its remaining correlated WITH-frame, UNION ALL and local-Var ANY
 preplanning failures, including every cumulative counter expectation.
 No narrow consumer result closes those source/planner roots or the full
 DML/query families.
+
+## Physical child restart under ancestor WITH
+
+A separate source-consumer fix removes the blanket `frames.empty()` guard.
+Restart eligibility is now metadata-only: the child has no local CTE
+definitions and each leaf is an actual physical occurrence belonging to that
+exact child/source AST, with neither a CTE producer nor a VIEW query.
+Each invocation rebuilds the real source node and its scan/join cursor with
+the new nullable caller row. It does not change a project row while retaining
+a stale parameterized producer. Derived/local CTE/VIEW producer restart
+continues to require its own explicit lifetime contract.
+
+The whole 13-query `with_physical_child_restart_protocol_e2e_test.py` passes
+strict 180006 (`physical-restart-reference18.log`). The old ordinary binary
+fails it (`candidate-correlated-v2/restart.baseline.log`); the source candidate
+passes it and seven complete serial adjacents
+(`candidate-correlated-v2-adjacents.log`, terminal 0). Controls include quoted
+caller aliases, multiple physical join leaves, scalar/ANY/ALL/NULL children,
+two different caller rows, an unused writer after successful primary,
+rollback after late 22P02/21000, static errors before effects and RETURNING
+reading the caller's unchanged command snapshot.
+
+Fresh main plus exact other-56/DML/header guards pass; SHA256 is
+`1d527d8bd7d745ee0980eb5d76429041009ea40fc8726de8211e733beebd585c`.
+This is the same all-58-new-API O0 epoch, not ROOT's formal O2 combination.
+The first source compile rejected a mistyped AST field (`isJoin`); its log is
+retained under `candidate-correlated`, not counted as a runtime failure.
+The corrected V2 source has no public-header change.
+
+All original 31 and expanded 34 queries remain in the now-37-query diagnostic.
+`reference18-restart-expanded.log` passes strict 180006; the complete source
+candidate log still fails the genuine UNION ALL child and local-Var ANY
+preplanning controls, including their original cumulative sequence values.
+Those are the next independent roots, not exclusions from a passing full gate.

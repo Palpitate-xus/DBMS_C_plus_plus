@@ -20042,10 +20042,21 @@ class PreparedWithDmlRuntime {
             auto holder=make_shared<shared_ptr<DmlSourceNode>>(
                 sourceNode(select,select->fromClause.get(),outer,frames));
             dbms::PreparedSourceContextsOp::Rebinder rebind;
-            if(frames.empty() && select->ctes.empty()) {
+            const function<bool(const dbms::FromItem*)> physicalSources=[&](const dbms::FromItem* item) {
+                if(!item)return false;
+                if(item->type==dbms::FromItem::Type::Join)return physicalSources(item->left.get()) && physicalSources(item->right.get());
+                for(const auto& range:query_->sourceRanges)
+                    if(range.owner==select && range.source==item && !range.mergedUsing)
+                        return !range.relationName.empty() && !range.cteStatement && !range.viewQuery;
+                return false;
+            };
+            if(select->ctes.empty() && physicalSources(select->fromClause.get())) {
                 // Rebuild the real provider and its lazy cursor/cache for
-                // each correlated invocation. Captured CTE frames are not
-                // falsely advertised as restartable by changing only a row.
+                // each correlated invocation. Ancestor WITH definitions do
+                // not prevent a physical scan from receiving its new caller
+                // row. Local/derived/logical producer frames are NOT rebound
+                // by changing only the project state: they need a separate
+                // parameterized producer-lifetime contract.
                 rebind=[this,holder,select,frames](const dbms::RowContext& row) {
                     *holder=sourceNode(select,select->fromClause.get(),row,frames);
                 };
