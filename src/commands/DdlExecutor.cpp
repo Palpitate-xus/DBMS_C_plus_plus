@@ -835,6 +835,12 @@ static DBStatus anyTypeExists(const std::string& dbname,
 // ----------------------------------------------------------------------------
 
 static Oid ensureTypeInCatalog(CatalogManager& cat, Oid nspOid, const Column& col) {
+    // Storage's four-byte factory retains its legacy "float" codec spelling.
+    // Do not confuse that physical REAL element with bare SQL FLOAT/float8.
+    // This is declared layout metadata, equally available for empty/NULL
+    // arrays; changing the codec spelling itself would break scalar storage.
+    if (col.dataType == "float" && col.dsize == sizeof(float)) return 700;
+    if (col.dataType == "double" && col.dsize == sizeof(double)) return 701;
     Oid typid = mapBuiltinTypeNameToOid(col.dataType);
     if (typid != INVALID_OID) return typid;
 
