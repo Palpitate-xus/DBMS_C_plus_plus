@@ -1,11 +1,47 @@
-# 2026-10-07 最新d4cad总清单 checkpoint
+# 2026-10-07 最新8f69总清单 checkpoint
+
+生产/测试source `8f69ffa8`：**669native/341registered/58TU**，累计52个独立
+source/test commit。实际ModifyTable同carrier primitive `c7a4d029` 与独立
+terminal-provider释放 `8f69ffa8` 分别提交；两项在未open close弱owner实证134
+修好后一起合入。真实typed source NULL/once/atomic/target/counters/native0；
+closure全58privateO0/增强native37289/七相邻50274/七whole85299/局部SAN37780均0，
+实际close后同graph pointer/counters与weak callback释放并存，不造display tree。
+最新全58fresh正常O2 61223在 `/tmp/dbms-canonical-mutation-plan-close.NWHhcrcB`
+实际live，无donors；84native/42whole/原669341full/强GNU pwrite fault准备未启动。
+前一a1b7 fresh58正常92141仍live；d4cad正式58已0且82native/42whole/full均live。
+SQL EXPLAIN frontend仍SELECT-only，完整33×4真实DML消费和额外DEFAULT/descriptor/
+phase/read-only要求继续；不把primitive/私有绿当OPT-16或所有DML闭合。
+DELETE、UPDATE FROM namespace/实际carrier、native DROP完整owner、map clean-peer/
+durability及所有原273继续；总账22complete/166partial/70unverified/15deferred。
+逐项本地commit，不push、不启用Actions、不重开user-deferred安全/TDE。
+
+# 2026-10-07 历史a1b7总清单 checkpoint
+
+生产/测试source `a1b7d497`：**668native/341registered/58TU**，累计50个独立
+source/test commit。失败close后最后owner丢FSM/VM pending原134修复独立提交；
+实际fd pin/last-destructor/reopen/GC/fault40954、13native29189、局部faultSAN57878、
+两个原15s savepoint whole76149/37176均0；原80448最后DROP timeout不抹除。
+最新全58fresh正常O2 build92141在 `/tmp/dbms-canonical-map-close.5isdUxZD` live，
+83native/42whole/原668/341full/真正pwrite fault helpers已核查，尚未启动。
+前一d4cad全58/repeat/audit/freeze62553已0，82native74573/42wire59900/
+原667/341full93414已启动/live；a53516native0、whole11=7pass/4fail；
+b69b76native0、32whole=23pass/9fail，不冒全量绿。
+ROOT新强baseline17634真1=17失败断言：loaded native namespace DROP留下catalog/
+声明，以及public RESTRICT/CASCADE漏实际relation，尚未修复、不算17bugs。
+新prepared DML foundation因review复现未open source close provider残留134暂未合入。
+实际DELETE consumer、clean-peer map receipt/backup、真实DML EXPLAIN、一般namespace/
+catalog及所有原families仍继续；总账仍22complete/166partial/70unverified/15deferred。
+不push、不启用Actions、不重开用户跳过安全/TDE；完整映射/hash/边界见integration。
+
+# 2026-10-07 历史d4cad总清单 checkpoint
 
 生产/测试source `d4cad5b3`：**667native/341registered/58TU**；c061后49项
 独立source/test commit。本轮冷DOMAIN namespace事实 `a5356cd7`、实际文件
 FSM/VM pending共享 `8ed2a177`、2D原生oracle `a75ebf4a`、显式数组下界
 实际消费 `d4cad5b3` 分别提交；map终态文档另commit `d13fe51d`。
 DOMAIN原10断言失败→14native0、whole9为8pass/1原ancestry超时；Root精确a535
-正常soleDDL+57逐字证明b69b对象0，16native32650/11wire84804仍live。
+正常soleDDL+57逐字证明b69b对象0，16native32650实际0；11wire84804实际1=
+7pass/4fail（三原timeout、一lifecycle初始connect103），原SQL/assert/期限保留。
 Map实际已提交堆页92→86/VM false、pending线程/独立exec、fault/SAN/两个原wire
 及额外五原storage组43614均0；失败close丢pending与cleanpeer flush/backup
 实证134仍独立修复，不把首因专项当全部STO-05完成。
@@ -13,11 +49,12 @@ Map实际已提交堆页92→86/VM false、pending线程/独立exec、fault/SAN/
 局部5TU SAN74005/committed receipts35021均0；原SQL/seed/NULL/OID/期限保留。
 原2Dhelper裸grammar在PG为42601，标准等价单index NULL；oracle和runtime分别commit。
 
-最新全新全58正常O2组合62553实际live，无donors，位于
-`/tmp/dbms-canonical-namespace-map-array.69WAKtSc`；82native/42whole/原667/341
-full helpers已核查路径/计数，尚未启动，不继承旧公共头/私有绿。
-前一b69b全58/repeat/audit/freeze23520已0，76native92718实际0；32wire18051/
-原full97347仍live。9772原69native0，28wire26177为23pass/5入口明确timeout。
+最新全新全58正常O2/repeat/audit/stamp/freeze62553实际0，无donors，位于
+`/tmp/dbms-canonical-namespace-map-array.69WAKtSc`，SHA cf766684ad82b5cbe564a66e4f3d920e7813553021b0d591e471c6296506682c；
+82native74573/42whole59900/原667/341 full93414已真正启动/live，不借旧公共头绿。
+前一b69b全58/repeat/audit/freeze23520已0，76native92718实际0；32wire18051
+实际1=23pass/9fail（DELETE六原断言、另外八失败入口明确timeout）；原full97347 live。
+9772原69native0，28wire26177为23pass/5入口明确timeout。
 旧d2原590/312 full96468已真正exit1：589native/247registered pass，
 1native/65registered fail；旧失败全保留，不算66独立bugs或当前source证明。
 另七原full16482/36568/33648/56028/48518/27869/79042逐个复核live。

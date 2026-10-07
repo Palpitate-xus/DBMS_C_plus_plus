@@ -114,16 +114,16 @@ sourceb69b：663native/340registered/58TU，c061后45项source/test独立commit�
 UPDATE纯prepare EXPLAIN零effects不冒实际plan consumer。新D3/schemaB旧reader拒绝，
 旧模糊default来源不猜测/不自动迁移。无push、Actions启用、安全/TDE跳过项重启。
 
-## 2026-10-07 当前完整目标计划（d4cad；前文均历史）
+## 2026-10-07 历史完整目标计划（d4cad）
 
 source `d4cad5b3`：667native/341registered/58TU，累计49项source/test独立commit。
 新DOMAIN facts、map peer、array oracle/runtime四项分别commit，完整proof/映射见integration。
 
 | 阶段 | 完整验收要求 | 当前实际状态与下一动作 |
 | --- | --- | --- |
-| 新组合公共头 | 当前全58正常O2/repeat/source/head/flags/object/stamp/freeze | 62553 live无donors；82native/42whole/原667/341 helpers准备未启动 |
-| CPP-only DOMAIN整合 | 保留ALTER source identity并匹配当前callback头/全部旧对象证据 | a535正常soleDDL+57 proven b69b对象76324实际0；16native/11wire live，不借私有旧ABI绿 |
-| 原组合门禁 | 各revision对应全部原SQL/assert/期限 | b69b58/76native0，32wire18051/full97347 live；9772原69native0、28wire23pass/5timeout |
+| 新组合公共头 | 当前全58正常O2/repeat/source/head/flags/object/stamp/freeze | 62553实际0无donors/SHA cf766684；82native74573/42whole59900/原full93414已启动/live |
+| CPP-only DOMAIN整合 | 保留ALTER source identity并匹配当前callback头/全部旧对象证据 | a535正常soleDDL+57 proven b69b对象76324实际0；16native0、11wire7pass/4fail原样保留 |
+| 原组合门禁 | 各revision对应全部原SQL/assert/期限 | b69b58/76native0，32wire23pass/9fail（DELETE原红+八入口timeout）/full97347 live；9772原69native0、28wire23pass/5timeout |
 | 原full终态 | 每条失败原样留存并与当前修复对应复核 | d2 full96468实际1，589native/247registered pass、1/65fail；其余七旧full逐个live，无全量PASS |
 | 独立继续修复 | 真实producer/consumer与所有原seed、NULL/OID/owner/effects | map close134与cleanpeer backup134、实际DELETE RETURNING、DML EXPLAIN分别owner继续 |
 | 全部原families | 每条273完整功能/强证据/提交，不以局部兼容替代 | 原namespace/catalog/types/arraygrammar/query/storage/recovery/operations等继续OPEN |
@@ -131,3 +131,34 @@ source `d4cad5b3`：667native/341registered/58TU，累计49项source/test独立c
 
 源码修复和错误oracle独立提交，原红/trace/不trace/deadline不删除。私有O0、
 单CPP O2或局部SAN不当最新完整source gate。不push、Actions启用或重开用户deferred专项。
+
+## 2026-10-07 历史完整目标计划（a1b7）
+
+sourcea1b7：668native/341registered/58TU，50项source/test分别commit。
+
+| 阶段 | 完整验收 | 当前证据与下一动作 |
+| --- | --- | --- |
+| 当前完整优化编译 | exacta1b7全部58/head/flags/objects/stamp/repeat/freeze一致 | 92141 fresh正常O2 live无donors；83native/42whole/原full668341/强pwrite fault准备未启动 |
+| 前一组合终态 | 原SQL/assert/时间期限，失败不覆写 | d4cad58正常0，82native/42wire/full各live；a53516native0/whole11为7pass4fail；b69b76native0/whole32为23pass9fail |
+| 完整namespace owner | cold/warm DROP、dependency/catalog/存储、原所有路径一致 | 新强baseline17assert真1，保旧compile/test作者错误；须真正修复loaded stale及public RESTRICT/CASCADE，不能只改declaration fallback |
+| DML真实消费和资源 | 同一实际plan graph/counters/lifetime/null/owner，原完整wire | DELETE consumer/歧义oracle分别处理；prepared DML foundation因真实未open close provider134暂不合入，实际EXPLAIN仍须实现 |
+| Map合作peer与全存储 | 实际合作发布/正确durability/restore/失败边界，不接受任意raw VM | close pending独立已commit并私有强proof0；cleanpeer backup134第三因继续，原raw-edit negatives不弱化 |
+| 全273闭合 | 每条原scope/功能/真实proof/commit/全量gate完整 | 22complete/166partial/70unverified/15deferred，完成gate仍拒绝；所有原family继续 |
+
+无push、Actions启用、user-deferred安全/TDE重启。每项真实源码/错误oracle分别commit；
+正常省略fault宏的普通native绿不冒真正pwrite注入证明，最新whole/full无提前PASS。
+
+## 2026-10-07 当前完整目标计划（8f69；前文均历史）
+
+source8f69：669native/341registered/58TU，52项独立source/test commit。
+
+| 阶段 | 完整验收要求 | 实际证据与下一动作 |
+| --- | --- | --- |
+| 最新公共API epoch | 全58当前DML/Operator/PCE/map/array/default头和flags/source/对象一致 | exact8f69 fresh正常O2 61223 live无donors；84native/42whole/full/真fault准备未启动 |
+| 最新primitive资源边界 | 同一个真实graph/counter和provider关闭、无二次effects | 两项分别commit；原未open close134保留、强native/七相邻/七whole/scopedSAN0，不借私有绿当Root完整证明 |
+| 真正SQL EXPLAIN消费 | 原33×4及额外default/descriptor/Parse+Describe/readonly阶段强控 | 前端仍SELECT-only，consumer独立继续；plain metadata不当ANALYZE真实执行 |
+| 其它真实DML消费 | DELETE/UPDATE FROM完整AST/source/namespace/NULL/owner和原矩阵 | 原歧义SQL保42702/no-effects负控、限定target正控；oracle/runtime/UPDATE carrier分别提交，LEFT/CURRENT未实现仍OPEN |
+| namespace与map owner | 全真实DROP/依赖/catalog/physical及合作durability/restore/fault | nativeDROP原强17assert基线红继续；cleanpeer backup第三因原134、raw negatives不弱化 |
+| 所有原scope与总账 | 每条原273完整功能/proof/commit/gate齐全 | 22complete/166partial/70unverified/15deferred不变，完成gate仍必须拒绝 |
+
+每个源码/错误oracle独立commit；不push，不启用Actions，不重开用户跳过安全/TDE。

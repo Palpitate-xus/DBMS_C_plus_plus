@@ -47,6 +47,20 @@ transaction, routine creation/search_path/SRF-path/qualified frontend and array
 signature scripts pass. No timeout, SQL or assertion was weakened. The earlier
 failure is retained and no full-suite approval is inferred.
 
+## ROOT combination extension
+
+ROOT source `a5356cd7` preserves the later ALTER DEFAULT source-identity scope.
+`/tmp/dbms-canonical-domain-namespace.DvPMe4p2` recompiles sole DDL O2 against
+the current b69b callback headers, checks all relative headers/actual flags/
+unchanged 57 sources/original 58 normal receipts, and relinks with those proven
+objects. Build 76324 exits 0; frozen SHA256 is
+`27c0213c0eaec1f1bd98ce43809f930b47fe1aff71ef0541e761cecc969a014c`.
+This remains incremental matching-normal proof, not another fresh all-58 epoch.
+Complete 16 natives 32650 exit 0, including both actual UPDATE DEFAULT drivers.
+Complete whole11 84804 exits 1: seven pass; ancestry, FK and UPDATE-domain-default
+time out at original default15; domain-default lifecycle has initial connect103
+before SQL. The full failed trace is preserved; no latest full-family approval.
+
 ## Remaining boundaries
 
 This fixes cold declaration validation, not the general native DROP/catalog

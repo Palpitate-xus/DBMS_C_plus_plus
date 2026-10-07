@@ -1,4 +1,94 @@
-# Latest d4cad checkpoint: 49 independently committed source/test repairs
+# Latest 8f69 checkpoint: 52 independently committed source/test repairs
+
+Production/test source `8f69ffa8` is **669 native /341 registered /58 TU**.
+The actual prepared mutation operator foundation `b23bf83d` maps to ROOT
+`c7a4d029`; its independent terminal provider-release repair `684c4188` maps to
+ROOT `8f69ffa8`. They are separately committed and integrated together only
+after the independently reproduced never-opened close134 is fixed.
+
+The real ModifyTable node retains the BoundDmlExecution/PCE it actually drives,
+real nullable source contexts, actual target identity and source/child counters.
+First next performs one atomic mutation; prepare/describe never opens a source
+or calls a routine. No fake target scan or separately executed display graph is
+constructed. Close releases undemanded source, row/cursor/finish/extra callbacks,
+including failure cleanup; genuine owned graph nodes/counters remain safe to
+render. Terminal callback release is not a correlated restart.
+
+Foundation fresh58 privateO0 then source/header-matched sole-DML0, original
+metric134 retained; native23210/seven adjacent68223/seven whole33677 all0.
+Frozen SHA256 `0d283ba03cd6b3185e05e7f4605178be1d6b3d61fee37eb65471727cb92d0387`.
+The stronger ROOT review's actual weak-provider baseline **68199 exits134**,
+retained. Closure second fresh58/new-header O0 **76185**, enhanced native
+**37289**, seven adjacent **50274**, seven whole **85299**, scoped DML/PCE/native/
+stubs SAN **37780** all0. SHA256
+`76e4f1bd5388f18c1a1d6ed683336cc3de29f3f30b024ed7211b719cd379caec`.
+The enhanced actual checked-executor close preserves the identical producer
+pointer/two-row counters and target metadata while weak callback owners expire.
+
+Latest exact8f69 `/tmp/dbms-canonical-mutation-plan-close.NWHhcrcB/repo` begins
+a genuinely fresh all58 normal O2 epoch **61223 live**, no donors. Public DML/
+Operator/PCE revisions must be consistent with the existing UPDATE callback,
+array header and map layouts. **84 native/42 whole/original669/341 full/actual
+GNU pwrite fault helpers are path/count checked and prepared, not started**.
+No latest optimized/focused/full/SAN approval is transferred from private builds.
+
+The SQL frontend still has SELECT-only EXPLAIN: actual DML EXPLAIN integration
+and its intact strict180006-green33-by-four matrix remain required. Stronger
+strict180006 phase/default/descriptor/read-only controls expose further real
+requirements; the foundation is not OPT-16 completion. Ordinary DELETE consumer,
+UPDATE FROM pure namespace plus actual carrier, native namespace/drop owner,
+clean-peer map receipts/backup, and all other original families continue.
+All273 remain22complete/166partial/70unverified/15deferred; no push, Actions
+enablement, user-deferred security/TDE restart or completion claim.
+
+# Historical a1b7 checkpoint: 50 independently committed source/test repairs
+
+Production/test source `a1b7d497` is **668 native /341 registered /58 TU**.
+The independent failed-close repair `726eb7e1` maps to ROOT `a1b7d497`, after
+the four source/test commits at d4cad. Every issue remains separately committed.
+
+Last map owner destruction after failed pwrite formerly lost pending FSM/VM
+updates (original134). Failed-only registry entries now transfer the already
+opened actual fd and retain pending masks; normal entries remain weak. Successful
+checked publication releases the pin; only actual fstat unlink proof can retire
+a still-failed entry. Missing name/rename/intent/epoch does not discard it.
+Private new58 O0/repeat/receipts/stamp0, SHA256
+`bc04902a11157bb768a4e723538c42eab54921eb1a50179b4f1aa19999137c4a`;
+13 native29189, O2 genuine pwrite/lastdestructor/reopen/fd-count/old-inode/unlink
+fault40954 and scoped two-map fault SAN57878 all0. Original default15 whole
+savepoint repetitions76149/37176 both0; prior final-DROP timeout80448 staysfailed.
+This is pending-state preservation, not durability success on failed fsync or
+all performance/storage closure. Third clean-peer physicalBackup134 staysopen.
+
+Newest exacta1b7 `/tmp/dbms-canonical-map-close.5isdUxZD/repo` starts another
+fresh all58 normal O2 build **92141 live**, no donor objects. **83 native/42
+whole/original668/341 full and explicit GNU pwrite fault helpers are prepared
+and path/count checked, not started**. The new helper header is not borrowed
+from the previous compiled epoch. Current full-suite approval remains absent.
+
+The completed d4cad fresh all58 normal O2/repeat/audit/stamp/freeze62553 has SHA
+`cf766684ad82b5cbe564a66e4f3d920e7813553021b0d591e471c6296506682c`;
+82native74573/42whole59900/full667/34193414 remain individually live. The a535
+matching16 native now exit0; whole11 is7pass/4fail. b69b's whole32 actually exits1,
+23pass/9fail (one actual DELETE six-assert failure, eight explicit failed-entry
+timeouts); all original traces remain. Exact old d2 full96468 actually exits1,
+589native/247registered pass,1native/65registered fail; not66 diagnosed bugs.
+
+New ROOT diagnostic `/tmp/dbms-native-schema-namespace.Q4L3xDfj` reuses only
+proved exacta535 source/header/normal objects and a fresh driver. Its strengthened
+baseline **17634 exits1 with17 failed assertions**, not17 bugs: loaded native
+namespace DROP leaves catalog/declarations stale and public RESTRICT/CASCADE
+miss actual public relations. The earlier test-author member-name compile error
+and weaker15-assert baseline remain. No production fix or closure is claimed yet.
+Actual prepared DML plan foundation is not imported: review independently
+reproduced explicit never-opened close retaining a provider134, now being fixed
+with actual graph/counter/lifetime controls. Real EXPLAIN consumer staysopen.
+
+All original273 remain **22 complete /166 partial /70 unverified /15 deferred**.
+Each remaining original requirement continues; no push, Actions enablement or
+user-deferred security/TDE restart. Source integration is not whole-family closure.
+
+# Historical d4cad checkpoint: 49 independently committed source/test repairs
 
 Production/test source `d4cad5b3` is **667 native /341 registered /58 TU**.
 Four more independent source/test commits follow b69b; the map terminal extension
@@ -18,7 +108,9 @@ default15 timeout**. Frozen sole-DDL O2/proved57 exact11d7 donor SHA256
 The ROOT merge preserves the newer ALTER source-identity scope. Exacta535's
 fresh sole O2 DDL/proved57 b69b normal objects **76324 exits0**, SHA256
 `27c0213c0eaec1f1bd98ce43809f930b47fe1aff71ef0541e761cecc969a014c`.
-Matching16 native **32650** and whole11 **84804** are live, not approved. General
+Matching16 native **32650 exits0**; whole11 **84804 exits1:7 pass/4 fail**:
+ancestry/FK/UPDATE-domain-default time out; domain-default lifecycle fails its
+initial connection103 before SQL. Original SQL/assert/deadline remain. General
 native DROP/loaded stale catalog and namespace architecture remain open.
 
 Map peer baseline retains separate immediate/durable FSM/VM and real committed
@@ -46,15 +138,21 @@ projection mistakes and scoped assertion134 are retained; no eight-bug claim.
 ## Current optimized combination and original full gates
 
 Latest exactd4cad `/tmp/dbms-canonical-namespace-map-array.69WAKtSc/repo` starts
-a genuinely fresh all58 normal O2 epoch **62553 live**, no donor objects. New
+a genuinely fresh all58 normal O2 epoch **62553 exits0**, no donor objects. New
 map public layouts and array helper must be consistent with the existing UPDATE
-callback. **82 native/42 whole/original667/341 full helpers are prepared and
-path/count checked, not started**. No latest combined/focused/full/SAN approval.
+callback. Repeat/all58 source/header/flags/object/stamp receipts match; frozen
+SHA256 `cf766684ad82b5cbe564a66e4f3d920e7813553021b0d591e471c6296506682c`.
+Matching **82 native74573 /42 whole59900 /original667/341 full93414** are actually
+started and individually live. No focused/full/whole-source SAN approval.
 
 Exactb69b freshnormal58/repeat/receipts/stamp/freeze **23520 exits0**, SHA256
 `8b61c67ce3506e3376f749b98c957e131ecc4251695a4c87031ff4e273d0e566`.
-Matching **76 native92718 exits0**; original whole32 **18051** and full663/340
-**97347** remain individually verified live. Exact9772 native69 **55621 exits0**;
+Matching **76 native92718 exits0**; original whole32 **18051 exits1:23 pass/9
+fail**. One script retains six genuine DELETE frontend assertions; eight failed
+entrypoints explicitly time out: domain-default lifecycle, bound DML children,
+ordinary quantified DML, ancestry, patterns, pattern priority, ALTER array and
+SRF search_path. Extra cleanup traces are not extra bugs. Full663/340 **97347**
+remains individually verified live. Exact9772 native69 **55621 exits0**;
 whole28 **26177 exits1:23 pass/5 explicit original timeouts**, at legacy pattern
 consumers, prepared UNION ALL, bound DML query children, pattern predicates and
 ALTER array envelope. No failure, deadline or failed SQL was removed.
