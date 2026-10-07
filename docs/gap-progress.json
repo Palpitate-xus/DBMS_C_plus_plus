@@ -2,6 +2,21 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "76 independent ROOT source/test repairs through84e1: counted empty ENUM labels and actual empty hash keys separated from SQL NULL",
+      "gap_ids": ["TYPE-08", "IDX-05", "IDX-15", "WAL-08"],
+      "status": "partial",
+      "commits": ["75b2546e", "84e16a74"],
+      "evidence": ["docs/issue-ready-source-integration.md", "docs/issue-enum-empty-label-schema.md", "docs/issue-enum-empty-hash-key.md", "docs/issue-enum-empty-hash-null-scan.md"],
+      "tests": ["tests/enum_empty_label_schema_test.cpp", "tests/enum_empty_hash_key_test.cpp", "tests/enum_empty_label_protocol_e2e_test.py", "tests/enum_empty_hash_protocol_e2e_test.py", "tests/enum_test.cpp", "tests/enum_alter_test.cpp", "tests/stale_temp_startup_recovery_test.cpp"],
+      "verification": {
+        "reproduction": "Actual five-label physical schema becomes four/native134 and wholeINSERT22023; schema-only exact new rawHash search-empty still134/zeroRIDs. Root source review found NULL OLD bytes triggering unrelated real empty-bucket scan; no measured benchmark claim. Exact current84e unchanged original stale-temp native93895 actual134 with all58 current receipts/flags/frozen verified, original-stale-current-84e.log underfinalRootartifact. Previous exact21b real-exec original-and-cold baseline98126 actual1/both134 retained; not current window closure.",
+        "fix": "Private89ea4d11 toRoot75b2546e retains every counted empty enum label/order with no header/format change. Private4724583a plus105e9c73 become ONE Root hash-issue84e16a74: real NULL bitmap, OLD rename keys, build/write/undo/rebuild/vacuum/cold maintenance; historical missing empty fallback and nonempty failure guards retained. NULL OLD search short-circuited, permanent65 real emptyRIDs/16NULL semantic guard. No master-history rewrite or changed original SQL/assertion/deadline.",
+        "focused_tests": "Final exact84e normal37842=0;20 complete native82125=0;4 complete defaultdisk whole4946=0 including actual BTREE/HASH cold process/rollback and BIT constructor/originalBIT. Both permanent strict180006 BTREE/HASH reference modes0, owned unique schema/ROLLBACK. Root prefix db230 normal73395/20native5933=0; first4whole3611=1 threePASS+BTREE CREATE originaltimeout, complete unchanged repeat35895=0; failed logs retained. Private original18-native tmpfs scope separate. Final current-source proof /tmp/dbms-canonical-enum-empty-final.1VJXdIIT; notall58SAN/family/fullclosure.",
+        "full_suite": "Current687auto-native+actualfrontend350registered58TU; freshsoleTM+57 exact source/header/actualflags/original58receipt/objectbyte-proved current21b normaldonors, repeat/current58receipts/stamp/freeze37842=0; notfresh58. SHA8b5debc0afdd93417922916fad51907f4ce4d770c04220e805f5f3fdb0d500b1. Current687+frontend350 originalfull NOTSTARTED. Old8694full64688 actual1/all1014labels 662native294registeredPASS/10native48registeredFAIL, not58newbugs; exact82bf48181/exact75046359 individuallyLIVE. No expiry kill/restart/latestfull orTLSruntimePASS.",
+        "scope": "Original273 unchanged22complete166partial70unverified15deferred; completiongate1. TYPE08 projection/rank/quotedTYPEidentity/OIDs/ALTERtransactions and actualaggregate gaps OPEN. TYPE11 literal/comparison private candidates held after independentreview and strict actual newTEXT/INTEGER-vs-BIT false matches; old11native/4whole passing not operand-typing approval. Real temp WAL/REINDEX/CLOG ordinarylive-owner and durable retry WIP remainsunverified/unimported; currentWAL08 historical-pass wording corrected. CREATE IO/uncheckedflush/frontend/background, allunclosedcatalog/query/storage/recovery/operations requirements continue. No push/Actions/deferredsecurityTDErestart/overallcompletion."
+      }
+    },
+    {
       "issue": "74 independent ROOT source/test repairs through21b1: implicit BIT ARRAY constructor retains complete element values without explicit bit(1) truncation",
       "gap_ids": ["TYPE-11", "TYPE-16"],
       "status": "partial",

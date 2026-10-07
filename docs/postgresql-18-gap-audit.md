@@ -1,4 +1,28 @@
-# 2026-10-07 最新21b1总清单 checkpoint
+# 2026-10-07 最新84e1总清单 checkpoint
+
+生产/测试source `84e16a74`：**687auto-native+1实际frontend/350registered/
+58TU**，76项独立source/test commit。空enum标签schema冷读 `75b2546e` 与
+真实empty hash键/NULL维护 `84e16a74` 分别提交；hash私有两阶段在Root合为
+同一issue，含审查发现的NULL无谓桶扫描修复，原rawRID/rollback/vacuum/cold/
+rename/旧empty omission/非empty缺映射失败不弱化。不改头/格式/原SQL。
+
+ROOT exact84e正常O2/repeat/all58receipt/stamp/freeze37842实际0：fresh sole
+TM+57逐源/头/flags/原58receipt/objectbyte证明的当前21b donors，不冒fresh58
+或SAN。最终20完整native82125、4完整whole4946均0；严格180006 BTREE/HASH
+两个永久矩阵0，原磁盘/default期限不变。当前687+frontend/350原full未启动。
+前一db230首4whole3611为3pass1原CREATE timeout，原样repeat35895为0，所有
+失败保留；private18 tmpfs不冒Root defaultdisk。旧8694full64688已实际1，
+1014原完整标签保留，不算58新bug；82bf48181/75046359仍逐个live。
+
+exact当前84e原stale-temp93895实际134，历史索引consumer修复不能冒后续identity/WAL/REINDEX
+闭合。实际temp/loserCLOG/ordinary live-owner重试边界WIP不导入；BIT候选因
+新TEXT/INTEGER-versus-BIT假匹配被暂缓，旧窄绿不掩typed operand新红。
+ENUM投影/排序/quoted TYPE身份/OID/ALTER、CREATE错误/flush/frontend/后台
+异常与所有其它原未闭环要求继续。总账**22complete166partial70unverified
+15deferred**不变；require-complete拒绝，不push、不启用Actions，用户跳过
+安全/TDE保持deferred。完整映射/证据及剩余范围见integration。
+
+# 2026-10-07 历史21b1总清单 checkpoint
 
 生产/测试source `21b105dd`：**685auto-native+1实际frontend/348registered/
 58TU**，74项独立source/test commit。新BIT数组隐式common-element转换不再
@@ -882,7 +906,7 @@ revalidation、其它sets、WALrewrite/PITR及所有剩余273内容继续。总�
 - [ ] **WAL-05** recovery 必须是 redo-based 状态机；当前额外 before-image undo 模型需证明与 steal/no-force、并发 checkpoint 的所有 crash window 一致。（修复启动恢复遍历未初始化活动事务集合导致的 SIGSEGV；真实 `SIGKILL` 矩阵12/12通过。undo/replay与redo状态机、并发checkpoint及所有崩溃窗口仍未证明，见 `docs/issue-wal-05-startup-recovery-crash-matrix.md`。）
 - [ ] **WAL-06** 数据页、所有索引和元数据 checksum；补离线/在线启停与 `pg_checksums`/verify 工具等价物。（heap页及B+Tree子集已有自定义checksum；新B+Tree `0xC552` 将block number纳入CRC，旧 `0xC551` 需REINDEX才具备此保护；Hash/Bloom/GIN/BRIN/GiST/SP-GiST 新格式有自定义checksum、旧版明确列为unchecked；离线 verifier 扫描 `.idx`/`.idx_*`、`.hidx`、`.bidx`、`.gin`、`.brin`、`.gist`、`.spgist` 并单列 legacy 未校验数量，但不解析B+Tree拓扑、GIN postings或BRIN/GiST/SP-GiST entries语义；全部metadata仍缺统一checksum，也无enable/disable/rewrite/progress workflow，见 `docs/issue-wal-06-index-checksum-coverage.md`。）
 - [ ] **WAL-07** 目录/fsync/rename/link/unlink 顺序覆盖 ext4/XFS、跨设备表空间、磁盘满、partial write、torn write 和 power-loss。（补 `CREATE/DROP SCHEMA` 标记失败恢复与持久化、`CREATE/DROP/RENAME DATABASE` 集群父目录同步、`RENAME/DROP SEQUENCE` fsync 失败回滚、`tlist.lst` 原子固定记录发布，以及 LargeObject 目录/空对象创建耐久性；启动清理失败会 fail-closed，相关故障注入回归通过。LOB object file 访问现拒绝符号链接；write/truncate fsync 内容，DROP 先同步 canonical-name 删除，目录 fsync 失败则尝试恢复并同步原名，`large_object_drop_durability_test` 覆盖两种 barrier 结果。持续 EIO 下的 rollback 仍可能是 indeterminate，且事务/WAL 边界未接入。DROP/RENAME 表在目录持久化失败后的多文件 DDL 仍可能是 indeterminate，调用方须重查。ext4/XFS、跨设备全流程、ENOSPC、partial/torn write 与真实 power-loss 仍未覆盖，见 `docs/issue-wal-07-no-replace-schema-marker-durability.md`。）
-- [ ] **WAL-08** unlogged/temp relation、2PC、sequence、DDL、logical slot 在 crash 后的专门恢复规则。（修复 startup recovery 在清理前尝试重建缺失 schema 的 session-temp relation 索引、导致服务启动失败的问题；`stale_temp_startup_recovery_test` 与 TEMP DDL/owned-sequence 回归通过。仅覆盖该临时关系残留窗口；2PC、temp WAL、sequence/DDL、logical slot 的 crash 状态机仍缺，见 `docs/issue-wal-08-stale-temp-startup-recovery.md`。）
+- [ ] **WAL-08** unlogged/temp relation、2PC、sequence、DDL、logical slot 在 crash 后的专门恢复规则。（历史专项修复清理前的 session-temp specialized-index 枚举，证据见 `docs/issue-wal-08-stale-temp-startup-recovery.md`；后续 physical-identity 枚举引入后，当前完整原 `stale_temp_startup_recovery_test` 又实际 abort134。真正 temp PAGE WAL、REINDEX 残留、loser CLOG 与 ordinary live-owner 边界继续核实，不能将历史通过当当前窗口闭合。2PC、temp WAL、sequence/DDL、logical slot 的完整 crash 状态机仍缺，最新证据见 `docs/issue-ready-source-integration.md`。）
 - [ ] **STO-07** 大对象补 catalog、ACL、事务、64-bit offset、lo_* API、protocol/libpq 和 vacuum。（存储文件访问现拒绝 object-file 符号链接、拒绝初始化时的 `.lobjects` symlink，并为读写/截断使用验证过的普通文件描述符；该窄项有 `large_object_symlink_guard_test` 覆盖。目录描述符未被 manager 全生命周期固定，父目录并发替换不在覆盖范围内；catalog/ACL、WAL/事务、完整 64-bit/API/protocol/libpq 与 vacuum 仍缺，见 `docs/issue-sto-07-large-object-path-integrity.md`。）
 - [ ] **STO-08** TDE 使用成熟密码库和审计过的 AEAD/KMS 方案；补索引/WAL/temp/backup 全覆盖、密钥轮换、per-database key 和灾难恢复。自研 SHA-256-CTR+EtM 不应直接作为生产加密承诺。
 

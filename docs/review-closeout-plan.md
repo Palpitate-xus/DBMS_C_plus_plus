@@ -4,7 +4,26 @@
 
 # 工作区与复查清单收尾计划
 
-## 2026-10-07 当前完整273目标计划（21b1；以下较早记录均历史）
+## 2026-10-07 当前完整273目标计划（84e1；以下较早记录均历史）
+
+source `84e16a74`：687auto+1frontend/350registered/58TU，76项独立source/
+test commit。空enum schema与empty hash/NULL各一个Root issue commit；原273未缩。
+
+| 阶段 | 必须验收的原范围 | 当前证据 / 下一动作 |
+| --- | --- | --- |
+| 独立修复 | 真反例/完整控制/每问题commit | 89ea→75b；472+105→84e，同issue先补NULL扫描边界再合入，不改master历史 |
+| 当前生产输入 | 全58源/头/flags/receipts/repeat/freeze | normal37842=0，fresh soleTM+57当前21b完整证明normal donors；不冒fresh58/SAN |
+| 原完整回归 | 当前687+frontend/350、磁盘/default期限、完整终态 | 当前full未启动；final20native82125/4whole4946/两strict18为0，prefix首wire1及repeat0完整保留 |
+| TYPE08剩余 | 所有rank/投影/排序/quoted TYPE/OID/ALTER事务要求 | scalar native绿不代实际wire，quoted控制原样留，两个根因独立再组合全部矩阵 |
+| TYPE11剩余 | 全typed operands/unknown/IN/CAST/descriptor/binary要求 | literal候选新TEXT/INT假命中暂缓导入，补强前不借原11/4窄绿批准；constructor已Root单项修复 |
+| 恢复/CREATE | 原stale-temp+真实WAL/REINDEX/普通owner/CLOG、所有IO层 | 真exec强反例及普通后台栈已记录；未证WIP不导入，不吞错误/弱化old guard |
+| 其它family/总账 | 每原条目完整证据/状态/checkbox/commit/验收一致 | 全部目录/查询/存储/恢复/运维继续，22complete166partial70unverified15deferred，require-complete拒绝 |
+
+旧8694full64688已终1/all1014标签完整，不以失败数量当bug数；82bf48181、
+75046359原full逐个live。helpers冻结、原deadline不变，无push/Actions启用/
+用户deferred安全TDE恢复。完整source映射与范围见integration。
+
+## 2026-10-07 历史完整273目标计划（21b1）
 
 source `21b105dd`：685auto+1frontend/348registered/58TU，74项独立source/
 test commit。BIT ARRAY constructor 隐式无typmod保全独立提交，原273未缩。

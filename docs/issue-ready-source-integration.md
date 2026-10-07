@@ -1,4 +1,65 @@
-# Latest 21b1 checkpoint: 74 independently committed source/test repairs
+# Latest 84e1 checkpoint: 76 independently committed source/test repairs
+
+Production/test source `84e16a74` has **687 auto-native plus one actual
+frontend native /350 registered tests /58 production TUs**. Two additional
+ordinary enum/hash root causes are independently committed; TYPE-08 and the
+full original273 objective remain partial/open.
+
+| Issue | Private commit(s) | ROOT commit | Verified issue scope |
+| --- | --- | --- | --- |
+| Physical schema discards counted empty enum labels | `89ea4d11` | `75b2546e` | Actual five labels become four/native134 and SQL22023; counted order/identity, empty versus textNULL/SQLNULL, sole-empty type and cold reload |
+| Empty hash keys confused with SQL NULL | `4724583a` + `105e9c73` | `84e16a74` | Raw empty-key RID134; real build/write/undo/rebuild/vacuum/rename/cold controls and no unrelated NULL bucket scan |
+
+The schema reader retains every counted declaration label without changing
+format/header/width. Hash maintenance uses the actual NULL bitmap, preserves
+OLD enum keys during rename and retains historical omitted-empty-key fallback.
+Root review additionally found unconditional NULL OLD-key bucket searches;
+the final code short-circuits them. Its permanent semantic guard has65 real
+empty RIDs and16 NULL rows; this is not a timing benchmark. Both private hash
+stages are combined into one Root issue commit before master integration;
+no master history was rewritten. The schema repair remains a separate commit.
+
+Final exact84e1 `/tmp/dbms-canonical-enum-empty-final.1VJXdIIT/repo` normal O2
+**37842 actually exits0**, fresh sole TableManage plus57 exact source/header/
+actual-flag/original58-receipt/object-byte-proved current21b1 normal donors.
+Repeat/all58 current receipts/stamp/frozen comparison pass; **not fresh58**.
+Frozen SHA256
+`8b5debc0afdd93417922916fad51907f4ce4d770c04220e805f5f3fdb0d500b1`.
+Final **20 complete native82125 exit0** include both new full drivers, all
+original enum/ALTER/lock/type/text drivers, generated/empty/NULL indexes,
+INSERT/UPDATE/DELETE index-fault controls, resolved/legacy arrays, schema
+format/atomic-write, current BIT constructor and exact table-list fault.
+Final **four complete whole4946 exit0** include actual BTREE/HASH cold-process
+reopen and rollback, current BIT constructor and unchanged BIT protocol.
+Both complete strict180006 BTREE/HASH reference modes also exit0 in owned
+rolled-back schemas. Original SQL/assertions/deadlines and default disk remain.
+
+The earlier exactdb230 prefix has normal73395/20native5933 exit0. Its first
+four-whole3611 actually ends1 (three pass, BTREE-mode CREATE TABLE timeout at
+the original deadline); unchanged complete repeat35895 ends0. Both retained
+logs remain distinct. Private18-native tmpfs evidence is explicitly tmpfs,
+not the default-disk Root20 or a whole-suite PASS. The exact current original
+687+frontend/350 full has **not been started**; no all-58 sanitizer/TLS-runtime
+or full-suite PASS is claimed. Old8694 full64688 now actually ends1 with all
+1014 labels (662native/294registered pass;10native/48registered fail), not58
+new bugs. Exact82bf full48181 and exact7504 full6359 are confirmed live.
+
+The exact current84e unchanged original stale-temp startup native **93895
+actually ends134**, in `original-stale-current-84e.log` under the final Root
+artifact directory. Its historical specialized-index repair does not cover
+the later identity/WAL/REINDEX paths.
+Stronger real-exec/temp-producer and loser-CLOG counterexamples remain private
+WIP, including ordinary live-owner and durable retry boundaries. No candidate
+is imported on narrow prepared-owner proof. BIT literal/comparison candidates
+are also held after independent review found newly introduced TEXT/INTEGER
+versus BIT false matches; old passing matrices are retained, not approval of
+uncovered operand typing. Enum projection/rank/custom OID/quoted TYPE identity/
+ALTER transactions, CREATE failure/flush/frontend/background boundaries and
+all original unclosed catalog/query/storage/recovery/operations remain OPEN.
+Original273 stays **22complete/166partial/70unverified/15deferred**, completion
+gate rejects. No push, Actions activation or deferred security/TDE restart.
+
+# Historical 21b1 checkpoint: 74 independently committed source/test repairs
 
 Production/test source `21b105dd` has **685 auto-native plus one actual
 frontend native /348 registered tests /58 production TUs**. One additional
