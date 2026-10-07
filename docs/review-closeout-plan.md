@@ -4,7 +4,21 @@
 
 # 工作区与复查清单收尾计划
 
-## 2026-10-07 当前完整273目标计划（84e1；以下较早记录均历史）
+## 2026-10-07 当前完整273目标计划（7ecf；以下较早记录均历史）
+
+当前test/source `7ecfd8eb`：687auto+1frontend/350registered/58TU，77项独立
+source/test commit。DDL fixture错误游标单项修复，不改任何生产源/头/格式。
+
+| 阶段 | 原要求 / 下一动作 | 当前真实证据 |
+| --- | --- | --- |
+| 每问题独立提交 | 不弱化原SQL/19节/断言 | 7ecfd8eb；旧原native134，正确扫描+实际CREATE及同XID COMMIT，完整target30243/邻接十项17482为0 |
+| 当前匹配生产 | 全58源头flags/receipts/stamp/freeze | 生产逐字同84e；fresh drivers/stubs+57 proved matching正常objects，非新fresh58/SAN |
+| 原全量验收 | 当前687+frontend/350全部完整终态 | 当前full未启动；旧82bf48181实际1/1031标签，75046359仍逐个LIVE；不以旧红批准当前 |
+| BIT / ENUM | 完整真实类型、literal/IN/NULL/ORDER、rank/quoted生命周期/OID/ALTER | 2828缺依赖，真实当前33wire32个42883；held literal/Main与ENUM组合继续，不弱化quoted矩阵 |
+| 恢复/CREATE/所有family | 原完整owner/retry/IO和全部273要求 | temp/CLOG普通owner、CREATE与其它所有原未闭环继续；不以测试false-negative修正冒恢复闭合 |
+| 总账 | 每原条目完整证据/checkbox/commit一致 | 22complete166partial70unverified15deferred；require-complete拒绝，无push/Actions/deferred安全恢复 |
+
+## 2026-10-07 历史完整273目标计划（84e1）
 
 source `84e16a74`：687auto+1frontend/350registered/58TU，76项独立source/
 test commit。空enum schema与empty hash/NULL各一个Root issue commit；原273未缩。

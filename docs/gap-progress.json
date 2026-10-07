@@ -2,6 +2,21 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "77 independent ROOT source/test repairs through7ecf: correct original DDL catalog-WAL fixture cursor without production changes",
+      "gap_ids": ["CAT-01", "TXN-05"],
+      "status": "partial",
+      "commits": ["7ecfd8eb"],
+      "evidence": ["docs/issue-ready-source-integration.md", "docs/issue-ddl-catalog-wal-test-cursor.md"],
+      "tests": ["tests/ddl_transaction_skeleton_test.cpp", "tests/ddl_bridge_routing_test.cpp", "tests/wal_basic_test.cpp", "tests/heap_wal_table_identity_guard_test.cpp", "tests/sequence_ddl_rollback_generation_test.cpp"],
+      "verification": {
+        "reproduction": "Exact unchanged current84e full DDL native92825 wrapper1/body134 atfound; ReadNextRecord skips its input record but fixture advanced position asReadRecord, so realcatalogrecord omitted. Original SQL/nineteenfixturesections retained. Not production WAL loss.",
+        "fix": "Root7ecfd8eb test-only exact-position ReadRecord fromearliestAvailableLsn; originalfound plusactual CREATE/table/wal_tbl payload/nonzeroXID/latermatchingCOMMIT and forward length assertions. No src/scripts/cmake/header/format/guard change; notcatalog WALMVCC/crashrepair.",
+        "focused_tests": "Entiretarget30243andcompletepostcommitrepeat1734actual0/all19sections; ten unchangedcomplete adjacent17482actual0/defaultdisk. Immutablehelper under/tmp/dbms-ddl-wal-cursor.ZMu3A0ka verifiesall58originalcurrent84e normalreceipts/source/header/actualflags/manifest/stamp/frozen, freshdrivers/stubs linkmatching57nonmainnormalobjects. No fresh58/newSAN claim. Genuine3WAL records/CREATE/XID14observed/matchingCOMMIT, nohardcodedXID.",
+        "full_suite": "Current687auto+actualfrontend350registered58TU; production byteidentical84e/SHA8b5debc0afdd93417922916fad51907f4ce4d770c04220e805f5f3fdb0d500b1. Currentfull NOTSTARTED. Older82bf48181 actual1/all1031labels677native331registeredactualfrontend1PASS,6native16registeredFAIL; not22bugs/latestverdict. Older75046359actualhandleLIVE, noexpiryrestart.",
+        "scope": "Original273 remains22complete166partial70unverified15deferred/requirecomplete1. IndependentcurrentSource76 unchangedBITUNKNOWN33wire57684actual1/32reject42883 proves2828missingresolvedBITdependency; heldtypedliteral/MainINORDERNULL repairscontinue. ENUM6593prefix/quotedTYPElifecycle/currentcomposition stillprivate; aggregate/customOIDs/ALTER/tempCLOGordinaryowner/retry/CREATE/allunclosedrequirementsOPEN. No push/Actions/deferredsecurityTDErestart/overallcompletion."
+      }
+    },
+    {
       "issue": "76 independent ROOT source/test repairs through84e1: counted empty ENUM labels and actual empty hash keys separated from SQL NULL",
       "gap_ids": ["TYPE-08", "IDX-05", "IDX-15", "WAL-08"],
       "status": "partial",

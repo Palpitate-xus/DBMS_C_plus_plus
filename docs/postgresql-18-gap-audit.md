@@ -1,4 +1,25 @@
-# 2026-10-07 最新84e1总清单 checkpoint
+# 2026-10-07 最新7ecf总清单 checkpoint
+
+当前test/source `7ecfd8eb`：687auto-native+1实际frontend/350registered/58TU，
+77项独立source/test commit。`7ecfd8eb` 修正原DDL回归错误的WAL游标；原完整
+current84e native134真实复现，改用当前位置读取并保原found断言/SQL/19节，
+补真实CREATE table=wal_tbl载荷、非零XID及同XID COMMIT断言。完整target30243
+及十个原完整邻接17482实际0，默认磁盘/flags不改。只改fixture，生产/scripts/
+cmake逐字同84e；不冒目录WAL/MVCC或恢复修复，不冒新fresh58/SAN。每次用
+原58receipts/全部源头flags/stamp/frozen证明匹配的57正常生产objects。
+
+旧82bf原full48181已真正终1，1031完整标签：677native331registered加实际
+frontend1项PASS，6native16registered FAIL；不算22新bug或当前源结论。
+7504 full6359逐个handle仍LIVE；当前687+frontend/350 full未启动。
+Root独立真实Source76完整BIT UNKNOWN33wire57684为1/32个42883，说明六行
+private2828缺resolved BIT capability依赖，不能单独合入。literal新错配与
+Main IN/ORDER/NULL继续；ENUM投影/quoted TYPE完整lifecycle组合仍私有审查。
+实际aggregate/custom OID/ALTER、temp/CLOG普通owner与retry、CREATE和所有
+其它原273未闭环项不缩小。总账22complete166partial70unverified15deferred
+不变，completion gate拒绝；不push、不启用Actions、安全/TDE跳过项保持
+deferred。源映射及完整证据见integration和issue-ddl-catalog-wal-test-cursor。
+
+# 2026-10-07 历史84e1总清单 checkpoint
 
 生产/测试source `84e16a74`：**687auto-native+1实际frontend/350registered/
 58TU**，76项独立source/test commit。空enum标签schema冷读 `75b2546e` 与

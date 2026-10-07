@@ -1,4 +1,46 @@
-# Latest 84e1 checkpoint: 76 independently committed source/test repairs
+# Latest 7ecf checkpoint: 77 independently committed source/test repairs
+
+Current test/source `7ecfd8eb` keeps **687 auto-native plus one actual frontend
+native /350 registered /58 production TUs**. One independent test-contract
+repair is committed; production/scripts/cmake are byte-identical to `84e16a74`.
+
+| Issue | ROOT commit | Verified issue scope |
+| --- | --- | --- |
+| DDL fixture skips actual catalog WAL | `7ecfd8eb` | Exact current original native134; exact-position scan plus genuine CREATE payload/nonzero XID/matching COMMIT, all19 fixture sections |
+
+`/tmp/dbms-ddl-wal-cursor.ZMu3A0ka/` holds the immutable helper and complete logs.
+Baseline92825 actually ends1/native134; candidate30243 and complete postcommit
+repeat1734 end0, and ten complete
+unchanged adjacent natives17482 end0, all on default disk. Fresh drivers/stubs
+link57 unchanged current84e normal production objects after all58 original
+receipts/header/source/actual-flags/manifest/stamp/frozen proof. No new fresh58
+or sanitizer compilation is claimed. Frozen production SHA remains
+`8b5debc0afdd93417922916fad51907f4ce4d770c04220e805f5f3fdb0d500b1`.
+The actual WAL contains3 scanned records with genuine table=wal_tbl CREATE and
+its same-XID COMMIT. This fixes a false-negative fixture, not catalog WAL/MVCC
+or crash recovery. Original SQL, nineteen sections and `found` assertion remain.
+See `docs/issue-ddl-catalog-wal-test-cursor.md`.
+
+Older exact82bf original full48181 now actually ends1: all1031 labels,
+677native/331registered/one actual frontend PASS,6native/16registered FAIL.
+This is not22 independent bugs or a current-source verdict. Exact7504 full6359
+is individually confirmed live; no observation expiry triggers restart.
+The exact current687+frontend/350 full has not been started.
+
+Independent review of private2828 shows the six-line UNKNOWN-to-BIT conversion
+cannot be imported alone: unchanged complete33 wire against actual Source76
+frozen production57684 ends1,32 reject42883 at the unresolved BIT capability,
+only explicit BIT(1) preservation passes. Held literal/comparison typing and
+Main IN/ORDER/NULL repairs continue. ENUM6593 projection prefix and ordinary
+quoted TYPE identity remain private until complete lifecycle/composition proof;
+Root review caught an incorrectly targeted DROP COLLATION edit, which its owner
+removed before the actual DROP TYPE candidate. Original quoted SQL remains.
+Actual aggregate SUM/BOOL_AND, custom OIDs/ALTER transactions, temp/loser-CLOG
+ordinary owner/retry, CREATE and all original unclosed requirements remain OPEN.
+Original273 remains **22complete/166partial/70unverified/15deferred**;
+completion gate rejects. No push, Actions activation or deferred security/TDE.
+
+# Historical 84e1 checkpoint: 76 independently committed source/test repairs
 
 Production/test source `84e16a74` has **687 auto-native plus one actual
 frontend native /350 registered tests /58 production TUs**. Two additional
