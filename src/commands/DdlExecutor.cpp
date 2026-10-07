@@ -9308,7 +9308,7 @@ bool DdlExecutor::executeDropType(const DropStmt* stmt, Session& s) {
     }
     CatalogManager::QualifiedName qualifiedName;
     if (!CatalogManager::parseQualifiedName(
-            stmt->objectNames.front(), qualifiedName) ||
+            stmt->objectNames.front(), qualifiedName, true) ||
         qualifiedName.name.empty()) {
         std::cout << "DROP TYPE has an invalid name" << std::endl;
         return true;

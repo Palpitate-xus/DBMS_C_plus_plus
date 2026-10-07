@@ -86,6 +86,13 @@ def main():
         query('CREATE TYPE "MixedRank" AS ENUM (\'zeta\',\'\',\'alpha\')')
         query('SELECT \'zeta\'::"MixedRank" < \'alpha\',CASE \'\'::"MixedRank" WHEN \'\' THEN 1 ELSE 2 END', [["t","1"]], [16,23])
         query('SELECT (CASE WHEN true THEN \'zeta\'::"MixedRank" ELSE \'alpha\' END) < \'alpha\'', [["t"]], [16])
+        query("CREATE TYPE UPPER_RANK AS ENUM ('zeta','alpha')")
+        query("SELECT 'zeta'::UPPER_RANK < 'alpha'", [["t"]], [16])
+        query("DROP TYPE UPPER_RANK")
+        query("CREATE TYPE mixedrank AS ENUM ('alpha','','zeta')")
+        query('SELECT \'zeta\'::"MixedRank" < \'alpha\',\'zeta\'::mixedrank < \'alpha\'', [["t","f"]], [16,16])
+        query("DROP TYPE mixedrank")
+        query('SELECT \'zeta\'::"MixedRank" < \'alpha\'', [["t"]], [16])
         other_schema=schema+"_other"
         query('CREATE SCHEMA "'+other_schema+'"')
         query('CREATE TYPE "'+other_schema+'".rank_type AS ENUM (\'alpha\',\'\',\'zeta\',\'aa\',\'NULL\',\'it\'\'s\',\'longlonglong\')')

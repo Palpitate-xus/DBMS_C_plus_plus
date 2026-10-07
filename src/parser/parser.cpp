@@ -7663,12 +7663,12 @@ StmtPtr SQLParser::parseCreateType(const std::vector<std::string>& tokens, size_
         stmt->ifNotExists = true; pos += 3;
     }
     if (pos < tokens.size()) {
-        stmt->objectName = tokens[pos++];
+        stmt->objectName = parseRoutineIdentifier(tokens[pos++]);
         if (pos < tokens.size() && tokens[pos] == ".") {
             ++pos;
             if (pos < tokens.size()) {
                 stmt->schema = stmt->objectName;
-                stmt->objectName = tokens[pos++];
+                stmt->objectName = parseRoutineIdentifier(tokens[pos++]);
             }
         }
     }
