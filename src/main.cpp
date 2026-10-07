@@ -20124,7 +20124,8 @@ class PreparedWithDmlRuntime {
             return rows;
         };
     }
-    dbms::OpPtr selectPlan(dbms::SelectStmt* select,const dbms::RowContext& outer,Frames frames,bool rootDefinitionsProvided=false) {
+    dbms::OpPtr selectPlan(dbms::SelectStmt* select,const dbms::RowContext& outer,Frames frames,
+                          bool rootDefinitionsProvided=false,bool planRootConstants=false) {
         if(!rootDefinitionsProvided && !select->ctes.empty() && (frames.empty() ||
             !frames.back()->producers.count(select->ctes.front().query.get())))
             frames.push_back(definitions(select->ctes,outer));
@@ -20136,6 +20137,7 @@ class PreparedWithDmlRuntime {
             auto execution=make_shared<dbms::PreparedQueryExecution>(query_,&g_engine,session_.currentDB);
             execution->setQueryExecutor(reader(frames));
             execution->setChildCursorFactory(cursorFactory(frames));
+            if(planRootConstants)execution->planStatementConstants(select);
             for(auto& row:select->valuesRows)for(auto& value:row)execution->prepareExpression(value.get());
             execution->prepareChildCursors();
             const auto descriptor=output(select);
@@ -20188,7 +20190,8 @@ class PreparedWithDmlRuntime {
                 dbms::ExprEvaluator evaluator;(void)evaluator.eval(&cast,dbms::RowContext{});
             }
         }
-        return dbms::QueryPlanner::buildPreparedSelectPlan(&g_engine,session_.currentDB,query_,select,schema,std::move(source),outer,reader(frames),cursorFactory(frames));
+        return dbms::QueryPlanner::buildPreparedSelectPlan(&g_engine,session_.currentDB,query_,select,schema,
+            std::move(source),outer,reader(frames),cursorFactory(frames),true,planRootConstants);
     }
     dbms::PreparedChildCursorFactory cursorFactory(const Frames& frames) {
         return [this,frames](const dbms::Stmt* statement,const dbms::RowContext& outer){
@@ -20237,7 +20240,9 @@ public:
             const bool referenced=any_of(query_->sourceRanges.begin(),query_->sourceRanges.end(),[&](const auto& range){return range.cteStatement==cte.query.get();});
             if(writer || referenced)validate(cte.query.get(),queryFrames_);
         }
-        return selectPlan(select,validation_.context(),queryFrames_,true);
+        // This is the actual execution/EXPLAIN root. Child factories retain
+        // the false default so pruning is not undone by child construction.
+        return selectPlan(select,validation_.context(),queryFrames_,true,true);
     }
     void finishQueryWrites() {
         const auto* select=dynamic_cast<const dbms::SelectStmt*>(query_->ast.get());
@@ -20288,7 +20293,7 @@ public:
         // Plan every root expression before opening a producer or evaluating
         // a target. Top-level writing CTEs are legal; nested ones still fail
         // through validate(). Do not install the root definitions twice.
-        auto plan=selectPlan(readRoot_,validation_.context(),frames,true);
+        auto plan=selectPlan(readRoot_,validation_.context(),frames,true,true);
         const auto command=[&] {
             auto evaluated=dbms::QueryPlanner::executePlanChecked(std::move(plan),currentQueryRowDemand());
             evaluated.throwIfFailed();
