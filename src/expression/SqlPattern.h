@@ -147,7 +147,12 @@ using Pattern = std::shared_ptr<Node>;
 // are SQL wildcards, and bracket classes/groups/alternation/repetition own
 // their grammar. No ECMAScript or byte-regex interpretation is involved.
 class SimilarParser {
-    struct Symbol { Character character; bool escaped; };
+    struct Symbol {
+        Character character;
+        bool escaped;
+        bool quoteSeparator = false;
+        bool regexSpecial = false;
+    };
     std::vector<Symbol> symbols_;
     size_t position_ = 0;
     bool captureClosed_ = false;
@@ -157,8 +162,7 @@ class SimilarParser {
                symbols_[position_].character == character;
     }
     bool separator() const {
-        return position_ < symbols_.size() && symbols_[position_].escaped &&
-               symbols_[position_].character == '"';
+        return position_ < symbols_.size() && symbols_[position_].quoteSeparator;
     }
     Pattern node(Node::Kind kind) { auto result = std::make_shared<Node>(); result->kind = kind; return result; }
     ClassPart escapePart(Character character) {
@@ -239,10 +243,26 @@ class SimilarParser {
         return {symbol.character,symbol.character,{},false};
     }
     Pattern characterClass() {
+        // PostgreSQL's ARE word constraints have bracket spellings too. They
+        // are constraints, not a one-character POSIX category.
+        if (position_ + 5 < symbols_.size()) {
+            const Character boundary = symbols_[position_+2].character;
+            if ((boundary == '<' || boundary == '>') && at('[') &&
+                symbols_[position_+1].character == ':' && symbols_[position_+3].character == ':' &&
+                symbols_[position_+4].character == ']' && symbols_[position_+5].character == ']' &&
+                std::none_of(symbols_.begin()+position_,symbols_.begin()+position_+6,
+                             [](const Symbol& symbol) { return symbol.escaped; })) {
+                position_ += 6; auto result = node(Node::Assertion);
+                result->character = boundary == '<' ? 'm' : 'M'; return result;
+            }
+        }
         auto result = node(Node::Class);
         if (at('^')) { result->complement = true; ++position_; }
         bool first = true;
         while (position_ < symbols_.size() && (first || !at(']'))) {
+            if (!first && at('-') && position_+1 < symbols_.size() &&
+                (symbols_[position_+1].escaped || symbols_[position_+1].character != ']'))
+                invalidRegex(); // a range endpoint cannot start another range
             auto member = classPart(); first = false;
             if (at('-') && position_+1 < symbols_.size() &&
                 (symbols_[position_+1].escaped || symbols_[position_+1].character != ']')) {
@@ -302,7 +322,11 @@ class SimilarParser {
             if (!at(')')) invalidRegex();
             ++position_;
         } else if (symbol.character == '[') result = characterClass();
-        else if (symbol.character == '_' || symbol.character == '%') result = node(Node::Any);
+        else if (symbol.character == '_' || symbol.character == '%' ||
+                 (symbol.regexSpecial && symbol.character == '.')) result = node(Node::Any);
+        else if (symbol.regexSpecial && (symbol.character == '^' || symbol.character == '$')) {
+            result = node(Node::Assertion); result->character = symbol.character == '^' ? 'A' : 'Z';
+        }
         else { result = node(Node::Literal); result->character = symbol.character; }
         bool quantified = !symbol.escaped && symbol.character == '%';
         size_t minimum = 0, maximum = unbounded;
@@ -344,11 +368,26 @@ public:
     SimilarParser(const std::string& pattern, const std::string& escape) {
         const auto source = characters(pattern), escapes = characters(escape);
         if (escapes.size() > 1) throw DbError("22025", "invalid escape string");
+        // Keep SQL conversion's lexical bracket depth separate from the ARE
+        // bracket parser. A literal nested '[' still affects that conversion:
+        // following %/_ remain literals even after the ARE class has closed.
+        size_t bracketDepth = 0, classPosition = 0;
         for (size_t i = 0; i < source.size(); ++i) {
             if (!escapes.empty() && source[i] == escapes[0]) {
                 if (++i == source.size()) break; // SIMILAR's trailing SQL escape is omitted
-                symbols_.push_back({source[i],true});
-            } else symbols_.push_back({source[i],false});
+                symbols_.push_back({source[i],true,source[i] == '"' && bracketDepth == 0});
+                classPosition = 3;
+            } else {
+                const Character character = source[i];
+                symbols_.push_back({character,bracketDepth > 0 && (character == '_' || character == '%'),
+                    false,bracketDepth > 0 && (character == '.' || character == '^' || character == '$')});
+                if (bracketDepth > 0) {
+                    if (character == ']' && classPosition > 2) --bracketDepth;
+                    else if (character == '[') { ++bracketDepth; classPosition = 3; }
+                    else if (character == '^') ++classPosition;
+                    else classPosition = 3;
+                } else if (character == '[') { bracketDepth = 1; classPosition = 1; }
+            }
         }
     }
     Pattern parse() {

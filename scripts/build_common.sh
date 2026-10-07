@@ -92,6 +92,8 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/table_lexical_predicate_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/pattern_predicate_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/pattern_predicate_priority_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/pattern_unicode_known_gap.py)
+    DBMS_E2E_TESTS+=(tests/pattern_unicode_adjacent_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/boolean_literal_boundary_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/limit_offset_boundary_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/sql_whitespace_boundary_e2e_test.py)

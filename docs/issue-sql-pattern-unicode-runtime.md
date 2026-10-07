@@ -30,8 +30,15 @@ quote-separator SQLSTATE discrepancy (2200B instead of 2200C); that independent
 contract correction and final matching-header production verification follow in
 a separate commit. Native expectation correction is also independent.
 
-Evidence is retained under `/tmp/dbms-pattern-unicode.pJ1dBcP2`: original baseline
-and V1 full logs, strict 180006 reference logs, exact native oracle and its old
+Evidence is retained under `/tmp/dbms-pattern-unicode.pJ1dBcP2`: V1 full logs,
+strict 180006 reference logs, exact native oracle and its old
 134, fresh58 V1 build receipts, helper sanitizer, and differential probe logs.
 The first 4,080-case differential found quantified assertions incorrectly
 accepted; its failure log remains. After rejecting them, the same matrix passed.
+
+The original 13-case failure is additionally reproduced with the root-owned,
+completed 0fdb fresh58 normal frozen binary (SHA c6d2ab03f0a4a34b4abe322e5f88d1e7b7251b42eb96b69529c2fba60ea7f4fb):
+`baseline-original13-0fdb-fresh58-frozen.log` has genuine terminal 1 and the same
+11 mismatches. No root source, object or artifact was changed. The older
+GQk4jrVC matching-candidate failure log is retained separately; it is not
+described as this independently reproduced 0fdb normal epoch.

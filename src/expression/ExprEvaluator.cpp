@@ -4888,9 +4888,8 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
     // SIMILAR TO ... ESCAPE / NOT SIMILAR TO ... ESCAPE (parser wraps the
     // three-operand form into a FunctionCallExpr, mirroring LIKE ESCAPE).
     // LIKE ... ESCAPE / NOT LIKE ... ESCAPE (parser wraps the three-operand
-    // form into a FunctionCallExpr).  esc + wildcard denotes the literal
-    // character; the pattern is normalized into 0x01<char> markers that
-    // likeMatchEscaped handles as exact literals.
+    // form into a FunctionCallExpr). The shared SQL matcher preserves explicit
+    // escape literals and determines trailing-escape demand during matching.
     if (name == "like escape" || name == "not like escape" ||
         name == "ilike escape" || name == "not ilike escape") {
         if (args.size() < 3 || args[1].isNull || args[2].isNull) {

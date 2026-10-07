@@ -27,11 +27,20 @@ int main() {
     assert(!similar("ab","#\"a|b#\"#1","#"));
     assert(similar("éé","#\"é#\"#1","#"));
     assert(!similar("é","[[:alpha:]]","\\",true));
+    assert(similar("a_","[a[b]_"));
+    assert(!similar("aa","[a[b]_"));
+    assert(similar("a%","[a[b]%"));
+    assert(!similar("a","[a[b]%"));
+    assert(similar("ab","[a[b]."));
+    assert(similar("a","[a[b]$"));
+    assert(similar("a\"","[a[b]#\"","#"));
+    assert(similar("a","[[:<:]]a[[:>:]]"));
+    assert(similar("中","[[:<:]]中[[:>:]]"));
     bool separatorsRejected = false;
     try { (void)similar("a","#\"#\"#\"","#"); }
     catch (const dbms::DbError& error) { separatorsRejected = error.sqlState() == "2200C"; }
     assert(separatorsRejected);
-    for (const std::string pattern : {"[","(","[z-a]","a{3,2}","a{256}","a{1x}","a++","\\q","(a)\\1","\\m*","\\A?"}) {
+    for (const std::string pattern : {"[","(","[z-a]","[a-b-c]","a{3,2}","a{256}","a{1x}","a++","\\q","(a)\\1","\\m*","\\A?"}) {
         bool rejected = false;
         try { (void)similar("a",pattern); }
         catch (const dbms::DbError& error) { rejected = error.sqlState() == "2201B"; }
