@@ -4,7 +4,26 @@
 
 # 工作区与复查清单收尾计划
 
-## 2026-10-07 当前完整273目标计划（4796；以下较早记录均历史）
+## 2026-10-07 当前完整273目标计划（fd46；以下较早记录均历史）
+
+当前source `fd46f1a7`：693auto+frontend/355registered/58TU，84项独立
+source/test修复commit；原273总范围不缩，全部未闭环问题继续。
+
+| 阶段 | 原要求 / 下一动作 | 当前实际证据 |
+| --- | --- | --- |
+| 每根因版本管理 | 真复现、保强SQL、独立commit、用户push | 新fd46 generic dispatch已Root独立commit；原61强红、strict0；两窗口前序独立commits保留 |
+| 当前ABI/全对象 | 真源/头/flags/manifest/receipt/stamp/freeze | normal69161 soleMain fresh+57当期4796逐对象证明正常donors，全58当前签名/输入hash/repeat0，非新fresh58/SAN |
+| 完整组合验证 | 每整个driver、默认磁盘/期限、pure/NULL/once/type | 52完整native90205/18完整whole39351/post native14714/全18whole63651全0，旧41native真默认磁盘，窗口144/72及wire195/147均保全 |
+| 原全量scope | 每原discovery/registry、完整真实终态、保全部旧红 | 原Source80 full42496终1/all1043精确multiset，14失败逐项分类，不14bug/84 verdict；新current84full未启动 |
+| 接续CTE/BIT/integer | 真实当前Root全文审/合成，不借private绿审批 | c6bd guard scopedREADY含旧9扩展/COUNT红；integer673a独立链待审；BIT compact member84/284继续；original FETCH scalar-child已另独立owner |
+| 全部其它原family | 每原frame/query/catalog/type/storage/recovery/ops要求 | enum aggregate rank/matview58030/所有原未闭环不跳，QRY07/TYPE08等仍partial，不以单dispatch修复冒关闭 |
+| 总账交付 | 原273证据/checkbox/commit/未完成gate一致 | 22complete166partial70unverified15deferred，完成gate拒绝；无push/Actions启用/安全TDE恢复 |
+
+下一步先审实证inherited CTE guard所有实际source roles并在当前ABI隔离合成；
+integer/quoted真实owner逐commit合入，BIT有限bundle须完整审/compact准入全证，
+FETCH与enum rank各独立补齐；再开展确切当前原full，保其它原未闭环要求。
+
+## 2026-10-07 历史完整273目标计划（4796）
 
 当前source `479675f1`：692auto+frontend/354registered/58TU，83项独立
 source/test修复commit；原273目标及所有未闭环范围不缩小。

@@ -1,4 +1,30 @@
-# 2026-10-07 最新4796总清单 checkpoint
+# 2026-10-07 最新fd46总清单 checkpoint
+
+当前source `fd46f1a7`：693auto-native+实际frontend1/355registered/58TU，
+84项独立source/test修复commit。独立修复generic aggregate expression参数
+被legacy调度丢失：SUM(CASE)原0/TEXT25，BOOL/NULL/writer真实效应错误；完整
+current82基线52048及current83基线8420均实际1/61强红，同owned matched
+enUS/strict180006全原driver实际0。保真实typed AST/FILTER/alias/metadata，
+按实际物理RID union一次reduction，保0/1/4/8效应及Parse/Describe纯准备。
+
+当前组合normal69161实际0，soleMain fresh+57当期4796全部源/头/flags/manifest/
+原58receipts/bytes证明正常donors，非新fresh58。完整52native90205、18whole
+39351、postcommit native14714及全18whole63651全部实际0，默认磁盘/期限；
+原private41native不以tmpfs代当前默认磁盘，当前窗口NULL/GROUPS、enum/BIT/
+BETWEEN、原19DDL/4TRUNCATE全部保留全测。repeat/all58/stamp/frozen-input
+hash通过，正式SHA与精准5文件合并证据见integration及独立aggregate issue。
+只在独立树rebase跨doc-only commits；源测试hash逐字未变，master仅FF。
+
+原Source80 full42496真实终1/all1043 receipts完整匹配原清单，687auto+
+frontend1+341registered PASS，3auto+11registered FAIL，非14独立bugs或
+current84结论，当前84 full未启动。原全部失败表保留；CTE guardc6bd、integer
+673a、BIT1c/5bb/compact-members仍私有待Root证明。guard完整derived还有旧
+COUNT0A000、全扩展9强红仍OPEN；FETCH scalar-child另按真实owner修。Matview
+58030、enum aggregate rank及全部其它原scope不缩。QRY07/TYPE08和原273仍
+22complete166partial70unverified15deferred，完成gate拒绝，无push/Actions
+启用或用户deferred安全/TDE重启。
+
+# 2026-10-07 历史4796总清单 checkpoint
 
 当前source `479675f1`：692auto-native+1实际frontend/354registered/58TU，
 83项独立source/test修复commit。`10989d96` 独立修复窗口默认/显式NULL排序

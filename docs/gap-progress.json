@@ -2,6 +2,21 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "84 independent ROOT source/test repairs throughfd46: retain actual typed aggregate expression arguments and reduce Boolean input union once",
+      "gap_ids": ["QRY-07", "TYPE-08"],
+      "status": "partial",
+      "commits": ["fd46f1a7"],
+      "evidence": ["docs/issue-ready-source-integration.md", "docs/issue-aggregate-argument-expression-dispatch.md"],
+      "tests": ["tests/aggregate_argument_expression_test.cpp", "tests/aggregate_argument_expression_protocol_e2e_test.py"],
+      "verification": {
+        "reproduction": "Actualcurrent82 completepermanentdriver52048 ends1/61strongfailures; independentlycurrent83 complete8420 also1/61, alloldSQL/NULL/row/type/header/error/effectcontrols reached. SUMCASEwrong0/TEXT25, BOOLtextNULL/writer effectsfail. IdenticalownedmatchedenUS strict180006driver0; actualfinalstrictrepeat0, noCvsenUSsubstitution/globalchange.",
+        "fix": "Precise232lineMainargumentdispatch+oneactualregistration appliedoncurrent83, nooldwholeCPP/headeroverwrite. Preserveoriginalargument/FILTER ASTintervals/aliases/declarationtypes andpureDescribe; actualBooleanAST DNF/typedleaves/CASTmods, qualifyingphysicalRIDuniononcebeforereduction, noORbranch sentinel-RIDdedup/repeatedeffects. Genuinebuiltin/scope/roleadmissionretainsotheractualowners. WindowNULL/GROUPS/newABI/enumAST/HashNULL/BITconstructor/BETWEENBOOL/TRUNCATEallretained.",
+        "focused_tests": "Normal69161/repeat actual0 freshsoleMain+57exactcurrent4796source/header/flags/manifest/original58receipt/objectbyte-provednormaldonors, notnewfresh58. All58currentreceipts/stamp0 SHA d0c81357d73eea52f52388bea0cb684b82ff9408f5f811ebc343fa8a6d864da3. Complete52native90205 and18whole39351 actual0/defaultdisk/deadlines; originalprivate41native nowdefaultdisk nottmpfssubstitution, all12whole+current6whole, allRootwindow144/72/nativeand195/147/wire/enum/BIT/BETWEEN/DDL19/TRUNCATE4strongoriginalcontrols. PostcommitcompleteNative14714 andall18whole63651 actual0. Source/script/test/manifestfrozenhashunchangedbefore/aftertwointerveningdoc-onlycommitrebase; masterFFverifiedissueonly/no masterhistoryrewrite.",
+        "full_suite": "Currentfd46 693auto+actualfrontend355registered58TU/84independentsourcetestrepairs. OriginalSource80full42496actualterminal1/all1043expectedmultisetreceipts, PASS687auto+frontend1+341registered, FAIL3auto+11registered; literalbackslash-n receiptincluded, not14independentbugs/current84verdict. Allfirstfailuretable retainedinpriorcheckpoint/currentintegration. Current84originalfullnotstarted, nofullgreen/SAN/TLSruntimeclaim.",
+        "scope": "Original273unchanged22complete166partial70unverified15deferred/completiongaterejects. QRY07/TYPE08/alloriginalunclosedfamiliesremainpartial/open; trueenumaggregate rank/customOID/ALTER/nestedCTE/SQLchildCOUNTUNKNOWN/matview58030/othercatalogquerystoragerecoveryopscontinue. CTEc6bdscopedprivateREADY hasoldCOUNTderived/full9expandedstrongredsOPEN; Rootsource-rolefullreviewrequired. Integer673aprivatechainfullysource/testreadbutdocs/currentcompositionpending. BIT1c/5bb/compactmember84and284 proofprivate/notRootimport; FETCHscalar-child separatelyassigned. Nopush/Actionsactivation/deferredsecurityTDErestart/unverifiedimport/overallcompletion."
+      }
+    },
+    {
       "issue": "83 independent ROOT source/test repairs through4796: actual window NULL placement and GROUPS unbounded partition bounds",
       "gap_ids": ["QRY-08", "QRY-10"],
       "status": "partial",

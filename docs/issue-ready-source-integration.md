@@ -1,4 +1,50 @@
-# Latest 4796 checkpoint: 83 independently committed source/test repairs
+# Latest fd46 checkpoint: 84 independently committed source/test repairs
+
+Current source `fd46f1a7`: **693 auto-native plus one actual frontend /
+355 registered /58 production TUs**. The generic aggregate argument dispatch
+defect is independently repaired and committed; this does not close QRY-07,
+TYPE-08 or any other original unclosed family.
+
+The original complete permanent aggregate driver against actual current82
+production52048 and independently current83 production8420 both end1 with61
+strong failures: SUM(CASE) wrong0/TEXT25, real Boolean/NULL and lost writer
+effects. The identical owned matched en_US strict180006 driver ends0. The new
+Main boundary retains actual argument/FILTER source ASTs, aliases and typed
+input metadata; Boolean input alternatives come from real nodes and reduce
+the union of physical RIDs once. No raw row-data SQL interpolation, fake
+descriptor, extra effect invocation or whole-old-Main overwrite.
+
+Exact `/tmp/dbms-root-aggregate-current.Yfb196kC/` normal69161/repeat/all58
+receipts/stamp/input hash actually end0: fresh sole Main plus57 exact current
+4796 source/header/flags/manifest/original58-receipt/object-byte-proved normal
+donors, not new fresh58. **All52 complete native90205 and18 complete whole
+protocol39351 end0 on default disk/deadlines**, including all41 original
+private native neighbours (not substituted tmpfs) and all12 original protocol
+neighbours plus current window/enum/BIT/BETWEEN/DDL/TRUNCATE composition.
+Postcommit complete native14714 and all18 complete whole63651 also end0.
+Final permanent strict reference repeats0; all strong old/new assertions remain.
+Frozen SHA `d0c81357d73eea52f52388bea0cb684b82ff9408f5f811ebc343fa8a6d864da3`.
+The issue was staged in a separate tree; after terminal gates its commit was
+rebased over two intervening **documentation-only** commits. The full frozen
+source/script/test/manifest hash is unchanged and postcommit gates then pass.
+Master only fast-forwards the verified independent issue; no published/master
+history rewrite. See `docs/issue-aggregate-argument-expression-dispatch.md`.
+
+Original Source80 full42496 actually ends1/all1043 expected receipts, with
+687auto-native+frontend1+341registered PASS and3auto-native+11registered FAIL.
+The complete failure table in the historical4796 checkpoint below remains
+actionable, not14 independent bugs or a current84 verdict. Current84 full has
+not started. Inherited-frame guardc6bd, integer673a chain and BIT1c/5bb/compact
+member admission remain private, requiring actual current-root review/build/
+composition. The guard's complete original derived file still has the older
+COUNT child0A000; its new nine-error expanded gate also remains OPEN. Ordinary
+FETCH-with-ties scalar-child lowering is separately assigned, not waived.
+Matview58030, enum aggregate rank and every original unclosed catalog/query/
+storage/recovery/operations requirement remain open/partial. Original273:
+**22complete/166partial/70unverified/15deferred**, completion gate rejects.
+No push, Actions activation or user-deferred security/TDE restart.
+
+# Historical 4796 checkpoint: 83 independently committed source/test repairs
 
 Current source `479675f1`: **692 auto-native plus one actual frontend /
 354 registered /58 production TUs**. Two independent structured-window
