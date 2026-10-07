@@ -5407,6 +5407,7 @@ static bool handleExplain(const string& sql, Session& s) {
     auto* explainedSelect = explained.success ? dynamic_cast<dbms::SelectStmt*>(explained.stmt.get()) : nullptr;
     if(explainedSelect && containsPreparedQuantifier(*explainedSelect))
         return explainPreparedReadQuery(s,inner,opts,isJson);
+    map<string,string> boundIntegerAtoms;
     if (explainedSelect && dbms::QueryPlanner::supportsPreparedSourceSelectPlan(*explainedSelect)) {
         // Pure preparation must precede any source startup or writer call,
         // including queries that yield no rows and plain EXPLAIN cache hits.
@@ -5416,6 +5417,45 @@ static bool handleExplain(const string& sql, Session& s) {
         // do not mistake their parser envelope literal for a physical target.
         const auto* directCall = select->selectList.size()==1 ?
             dynamic_cast<const dbms::FunctionCallExpr*>(select->selectList.front().expr.get()) : nullptr;
+        // The legacy index receiver needs column/literal orientation, while
+        // input validation belongs to the whole bound AST above. Derive only
+        // genuine integer source comparisons, retaining original literal
+        // bytes and exact source occurrence/ordinal instead of reparsing a
+        // column name or forcing this query onto a different typed graph.
+        function<void(const dbms::Expr*)> captureInteger=[&](const dbms::Expr* value) {
+            const auto* binary=dynamic_cast<const dbms::BinaryOpExpr*>(value);
+            if(!binary)return;
+            if(binary->op=="AND" || binary->op=="OR") {
+                captureInteger(binary->left.get());captureInteger(binary->right.get());return;
+            }
+            static const set<string> comparisons={"=","<>","!=","<",">","<=",">="};
+            if(!comparisons.count(binary->op))return;
+            const auto* column=dynamic_cast<const dbms::ColumnRefExpr*>(binary->left.get());
+            const auto* literal=dynamic_cast<const dbms::LiteralExpr*>(binary->right.get());
+            const bool reversed=!column || !literal;
+            if(reversed) {column=dynamic_cast<const dbms::ColumnRefExpr*>(binary->right.get());literal=dynamic_cast<const dbms::LiteralExpr*>(binary->left.get());}
+            if(!column || !column->binding || column->binding->scopeDepth || !literal || literal->preparedSubquery ||
+               literal->sourceBegin==string::npos || literal->sourceEnd>inner.size() ||
+               binary->sourceBegin==string::npos || binary->sourceEnd>inner.size())return;
+            const auto type=dbms::ExprHelper::canonicalResultTypeName(column->binding->declaredType);
+            if(type!="smallint" && type!="integer" && type!="bigint")return;
+            bool owns=false;
+            for(const auto& range:prepared->sourceRanges)
+                owns=owns || (range.owner==select && range.source==select->fromClause.get() &&
+                              range.ordinal==column->binding->sourceOrdinal && !range.relationName.empty());
+            if(!owns)return;
+            const string rawLiteral=inner.substr(literal->sourceBegin,literal->sourceEnd-literal->sourceBegin);
+            if(dbms::ExprHelper::inferValuesResultType(rawLiteral)!="unknown")return;
+            string operation=binary->op;
+            if(reversed) {
+                if(operation=="<")operation=">";else if(operation==">")operation="<";
+                else if(operation=="<=")operation=">=";else if(operation==">=")operation="<=";
+            }
+            string name="\"";for(char ch:column->column){name+=ch;if(ch=='"')name+='"';}name+='"';
+            boundIntegerAtoms.emplace(normalizeConditionStr(sqlProcessor(inner.substr(binary->sourceBegin,binary->sourceEnd-binary->sourceBegin))),
+                name+operation+rawLiteral);
+        };
+        captureInteger(select->whereClause.get());
         if (!select->ctes.empty() || explainNeedsTypedPlan(*select) ||
             (directCall && directCall->setReturning))
             // Consume the same owned, bound query on the real execution
@@ -5696,8 +5736,10 @@ static bool handleExplain(const string& sql, Session& s) {
                     for (const auto& atom : group) {
                         if (atom.compare(0, 4, "not ") == 0)
                             throw dbms::DbError("0A000", "unsupported EXPLAIN unary NOT predicate");
-                        const auto merged = mergeNegPredTokens(tokenize(atom));
-                        const string mc = modifyLogic(merged.size() == 1 ? merged.front() : atom);
+                        const auto bound=boundIntegerAtoms.find(atom);
+                        const string& physicalAtom=bound==boundIntegerAtoms.end()?atom:bound->second;
+                        const auto merged = mergeNegPredTokens(tokenize(physicalAtom));
+                        const string mc = modifyLogic(merged.size() == 1 ? merged.front() : physicalAtom);
                         const auto parsed = dbms::StorageEngine::parseConditions({mc});
                         if (parsed.size() != 1 || parsed.front().colName.empty())
                             throw dbms::DbError("0A000", "unsupported EXPLAIN predicate: " + atom);
@@ -30985,6 +31027,25 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     binary->op != "<=" && binary->op != ">=")) return expression;
             const auto* column = dynamic_cast<const dbms::ColumnRefExpr*>(binary->left.get());
             const auto* literal = dynamic_cast<const dbms::LiteralExpr*>(binary->right.get());
+            string operation=binary->op;
+            if(!column || !literal) {
+                column=dynamic_cast<const dbms::ColumnRefExpr*>(binary->right.get());
+                literal=dynamic_cast<const dbms::LiteralExpr*>(binary->left.get());
+                if(!column || !literal || !sourceRange.contains(*column) ||
+                   !sourceRange.columns.count(column->column) || !literal->typeName.empty() ||
+                   literal->preparedSubquery || dbms::ExprHelper::inferValuesResultType(literal->value)!="unknown")
+                    return expression;
+                const auto& descriptor=tbl.cols[sourceRange.columns.at(column->column)];
+                const auto type=dbms::ExprHelper::canonicalResultTypeName(descriptor.dataType);
+                if(descriptor.isArray || (type!="smallint" && type!="integer" && type!="bigint"))return expression;
+                // This receiver stores physical-column/literal predicates.
+                // Commuting a genuine integer comparison retains that same
+                // index/NULL owner, not a string-rewritten SQL namespace.
+                if(operation=="<")operation=">";
+                else if(operation==">")operation="<";
+                else if(operation=="<=")operation=">=";
+                else if(operation==">=")operation="<=";
+            }
             if (!column || !literal || !sourceRange.contains(*column) ||
                     !sourceRange.columns.count(column->column)) return expression;
             string physicalName="\"";
@@ -30993,7 +31054,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 if(character=='"')physicalName+='"';
             }
             physicalName+='"';
-            return physicalName + binary->op + literal->value;
+            return physicalName + operation + literal->value;
         };
         // Targets and their lazy branches share this source namespace too.
         // Validate before any row or writing target function is evaluated.
