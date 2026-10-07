@@ -31720,6 +31720,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
         vector<string> typedAggregateTargets;
         vector<string> typedAggregateHeaders;
         vector<vector<string>> typedAggregateConditions;
+        string typedAggregateSourceAlias;
         if (groupPos == string::npos && havingPos == string::npos &&
             windowPos == string::npos) {
             dbms::SQLParser aggregateParser;
@@ -31901,6 +31902,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 if (typedAggregateConditions.empty()) supported = false;
             }
             if (!supported || !expressionArgument) typedAggregateTargets.clear();
+            else if (sourceRange.aliased || usesInheritedQueryCteSource(*aggregateSelect, s))
+                typedAggregateSourceAlias = sourceRange.range;
         }
         {
             for (const auto& itemRaw : splitSelectColumns(columns)) {
@@ -36067,6 +36070,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 scalarSortExprs.insert(scalarSortExprs.end(),
                     scalarSortHiddenExprs.begin(), scalarSortHiddenExprs.end());
             StorageEngine::QueryExprExecutionOptions scalarExecutionOptions;
+            if (!typedAggregateTargets.empty())
+                scalarExecutionOptions.aggregateSourceAlias = typedAggregateSourceAlias;
             vector<StorageEngine::OrderBySpec> scalarReceiverOrder = orderBySpecs;
             dbms::SQLParser demandParser;
             const auto demandParsed = demandParser.parse(sql);

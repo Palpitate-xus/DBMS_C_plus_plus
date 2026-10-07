@@ -744,6 +744,10 @@ public:
         // OR alternatives are matched/deduplicated before projection so a
         // receiver cap does not accidentally apply separately per branch.
         std::vector<std::vector<std::string>> conditionAlternatives;
+        // Actual decoded visible range for aggregate argument preparation:
+        // an explicit SQL alias, or an execution-owned inherited CTE alias.
+        // Empty retains the physical relation's ordinary visible identity.
+        std::string aggregateSourceAlias;
     };
     std::vector<std::string> queryExpr(const std::string& dbname,
                                         const std::string& tablename,

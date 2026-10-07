@@ -37419,6 +37419,7 @@ struct AggregateExpressionProjection {
     StmtPtr owner;
     SelectStmt* select = nullptr;
     bool hasAggregate = false;
+    std::string source;
 };
 
 std::string aggregateExpressionName(const FunctionCallExpr* call) {
@@ -37543,9 +37544,28 @@ ExprValue coerceAggregateValue(ExprEvaluator& evaluator, const ExprValue& value,
 
 // Scalar AST roots retain aggregate result cells. Input datum slots and
 // aggregate slots are disjoint, and carry declared types independently of NULL.
+// Bind a genuine input-expression root before lowering its columns to datum
+// slots. Its physical catalog OIDs and copied operator/CASE bindings must not
+// be rediscovered from a rendered type name or from an evaluated label.
+void bindAggregateInputExpression(ExprPtr& expression,
+    const std::string& source, const std::string& relationSql,
+    StorageEngine* engine, const std::string& database) {
+    if (!expression || expression->sourceBegin == std::string::npos ||
+        expression->sourceBegin > expression->sourceEnd || expression->sourceEnd > source.size())
+        throw DbError("XX000", "aggregate input has no original source provenance");
+    auto prepared = engine->prepareBoundQuery(database,
+        "SELECT " + source.substr(expression->sourceBegin,
+            expression->sourceEnd - expression->sourceBegin) + " FROM " + relationSql);
+    auto* select = dynamic_cast<SelectStmt*>(prepared.ast.get());
+    if (!select || select->selectList.size() != 1 || !select->selectList.front().expr)
+        throw DbError("XX000", "aggregate input has no bound expression root");
+    expression = std::move(select->selectList.front().expr);
+}
+
 void prepareAggregateExpression(ExprPtr& expression, bool input,
     const TableSchema& table, std::vector<AggregateExpressionState>& states,
-    ExprEvaluator& evaluator, StorageEngine* engine, const std::string& database) {
+    ExprEvaluator& evaluator, StorageEngine* engine, const std::string& database,
+    const std::string& source, const std::string& relationSql) {
     if (!expression) return;
     if (const auto* parameter = dynamic_cast<const ParameterExpr*>(expression.get()))
         throw DbError("42P02", "there is no parameter $" + std::to_string(parameter->slot + 1));
@@ -37575,8 +37595,15 @@ void prepareAggregateExpression(ExprPtr& expression, bool input,
             if (star && call->distinct) throw DbError("42601", "DISTINCT * is not supported");
             if ((aggregate == "sum" || aggregate == "avg") && aggregateUnknownLiteral(call->args.front().get()))
                 throw DbError("42725", "aggregate function is not unique for type unknown");
-            if (!star) prepareAggregateExpression(call->args.front(), true, table, states, evaluator, engine, database);
-            if (call->filter) prepareAggregateExpression(call->filter, true, table, states, evaluator, engine, database);
+            // Nested reductions keep their existing aggregate-analysis error
+            // owner; whole scalar argument binding never resolves SUM/BOOL
+            // overloads or invents their result descriptor.
+            if (!star && !containsAggregateExpression(call->args.front().get()))
+                bindAggregateInputExpression(call->args.front(), source, relationSql, engine, database);
+            if (call->filter && !containsAggregateExpression(call->filter.get()))
+                bindAggregateInputExpression(call->filter, source, relationSql, engine, database);
+            if (!star) prepareAggregateExpression(call->args.front(), true, table, states, evaluator, engine, database, source, relationSql);
+            if (call->filter) prepareAggregateExpression(call->filter, true, table, states, evaluator, engine, database, source, relationSql);
             if (call->filter) {
                 if (aggregateUnknownLiteral(call->filter.get())) {
                     auto coerced = std::make_unique<CastExpr>();
@@ -37617,26 +37644,26 @@ void prepareAggregateExpression(ExprPtr& expression, bool input,
                     call->args.front() = std::move(literal);
                 }
             }
-            for (auto& argument : call->args) prepareAggregateExpression(argument, input, table, states, evaluator, engine, database);
-            for (auto& argument : call->namedArgs) prepareAggregateExpression(argument.value, input, table, states, evaluator, engine, database);
+            for (auto& argument : call->args) prepareAggregateExpression(argument, input, table, states, evaluator, engine, database, source, relationSql);
+            for (auto& argument : call->namedArgs) prepareAggregateExpression(argument.value, input, table, states, evaluator, engine, database, source, relationSql);
         }
     } else if (auto* unary = dynamic_cast<UnaryOpExpr*>(expression.get())) {
-        prepareAggregateExpression(unary->operand, input, table, states, evaluator, engine, database);
+        prepareAggregateExpression(unary->operand, input, table, states, evaluator, engine, database, source, relationSql);
     } else if (auto* binary = dynamic_cast<BinaryOpExpr*>(expression.get())) {
-        prepareAggregateExpression(binary->left, input, table, states, evaluator, engine, database);
+        prepareAggregateExpression(binary->left, input, table, states, evaluator, engine, database, source, relationSql);
         if (binary->op != "::" && SQLParser::toLower(binary->op) != "collate")
-            prepareAggregateExpression(binary->right, input, table, states, evaluator, engine, database);
+            prepareAggregateExpression(binary->right, input, table, states, evaluator, engine, database, source, relationSql);
     } else if (auto* cast = dynamic_cast<CastExpr*>(expression.get())) {
-        prepareAggregateExpression(cast->operand, input, table, states, evaluator, engine, database);
+        prepareAggregateExpression(cast->operand, input, table, states, evaluator, engine, database, source, relationSql);
     } else if (auto* conditional = dynamic_cast<CaseExpr*>(expression.get())) {
-        prepareAggregateExpression(conditional->switchExpr, input, table, states, evaluator, engine, database);
+        prepareAggregateExpression(conditional->switchExpr, input, table, states, evaluator, engine, database, source, relationSql);
         for (auto& arm : conditional->whenClauses) {
-            prepareAggregateExpression(arm.first, input, table, states, evaluator, engine, database);
-            prepareAggregateExpression(arm.second, input, table, states, evaluator, engine, database);
+            prepareAggregateExpression(arm.first, input, table, states, evaluator, engine, database, source, relationSql);
+            prepareAggregateExpression(arm.second, input, table, states, evaluator, engine, database, source, relationSql);
         }
-        prepareAggregateExpression(conditional->elseExpr, input, table, states, evaluator, engine, database);
+        prepareAggregateExpression(conditional->elseExpr, input, table, states, evaluator, engine, database, source, relationSql);
     } else if (auto* array = dynamic_cast<ArrayExpr*>(expression.get())) {
-        for (auto& value : array->elements) prepareAggregateExpression(value, input, table, states, evaluator, engine, database);
+        for (auto& value : array->elements) prepareAggregateExpression(value, input, table, states, evaluator, engine, database, source, relationSql);
     }
 }
 
@@ -37731,8 +37758,10 @@ std::vector<std::string> StorageEngine::queryExpr(
     bool aggregateProjection = false;
     for (const auto& expression : exprs) {
         SQLParser parser;
-        auto parsed = parser.parse("SELECT " + projectionExpressionSql(expression));
+        const std::string projectionSql = "SELECT " + projectionExpressionSql(expression);
+        auto parsed = parser.parseForBinding(projectionSql);
         AggregateExpressionProjection projection;
+        projection.source = projectionSql;
         if (parsed.success) projection.select = dynamic_cast<SelectStmt*>(parsed.stmt.get());
         if (projection.select && projection.select->selectList.size() == 1 && !projection.select->fromClause) {
             if (containsBetweenExpression(projection.select->selectList.front().expr.get()))
@@ -37756,10 +37785,20 @@ std::vector<std::string> StorageEngine::queryExpr(
     std::vector<AggregateExpressionState> aggregateStates;
     std::set<size_t> aggregateInputSlots;
     if (aggregateProjection) {
+        const auto quoted = [](const std::string& name) {
+            std::string result = "\"";
+            for (char ch : name) { result += ch; if (ch == '"') result += ch; }
+            return result + '"';
+        };
+        const auto logical = CatalogService::logicalName(tablename);
+        const std::string relationSql = quoted(logical.schema.empty() ? "public" : logical.schema) +
+            "." + quoted(logical.name) + (options.aggregateSourceAlias.empty() ? "" :
+                " AS " + quoted(options.aggregateSourceAlias));
         for (auto& projection : aggregateProjections) {
             if (!projection.select) throw DbError("42601", "invalid aggregate projection");
             auto& root = projection.select->selectList.front().expr;
-            prepareAggregateExpression(root, false, tbl, aggregateStates, aggregateEvaluator, this, dbname);
+            prepareAggregateExpression(root, false, tbl, aggregateStates, aggregateEvaluator, this, dbname,
+                projection.source, relationSql);
             aggregateEvaluator.bindScalarFunctions(root.get(), this);
             ExprEvaluator::analyzeExplicitResultCollation(root.get());
         }
