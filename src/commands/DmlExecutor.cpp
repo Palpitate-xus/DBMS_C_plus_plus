@@ -5766,6 +5766,8 @@ public:
         for(const auto& source:sources_)plans.push_back(source->plan.get());
         const auto children=extraChildren_?extraChildren_():retainedChildren_;
         for(const auto& child:children)plans.push_back(child.get());
+        std::set<Operator*> seen;
+        plans.erase(std::remove_if(plans.begin(),plans.end(),[&](Operator* plan){return !seen.insert(plan).second;}),plans.end());
         return plans;
     }
 };

@@ -5324,6 +5324,8 @@ static bool containsPreparedQuantifier(const dbms::SelectStmt& select) {
 static bool explainPreparedReadQuery(Session&,const string&,
     const dbms::QueryPlanner::ExplainOptions&,bool,
     shared_ptr<dbms::PreparedQuery> = {});
+static bool explainPreparedDmlQuery(Session&,const string&,
+    const dbms::QueryPlanner::ExplainOptions&,bool);
 
 static bool explainNeedsTypedPlan(const dbms::SelectStmt& select) {
     if (containsPreparedQuantifier(select) || !select.fromClause || !select.fromClause->alias.empty() || select.offset ||
@@ -5398,6 +5400,9 @@ static bool handleExplain(const string& sql, Session& s) {
     string inner = rest;
     dbms::SQLParser explainParser;
     auto explained = explainParser.parseForBinding(inner);
+    if(explained.success && (dynamic_cast<dbms::InsertStmt*>(explained.stmt.get()) ||
+       dynamic_cast<dbms::UpdateStmt*>(explained.stmt.get()) || dynamic_cast<dbms::DeleteStmt*>(explained.stmt.get())))
+        return explainPreparedDmlQuery(s,inner,opts,isJson);
     auto* explainedSelect = explained.success ? dynamic_cast<dbms::SelectStmt*>(explained.stmt.get()) : nullptr;
     if(explainedSelect && containsPreparedQuantifier(*explainedSelect))
         return explainPreparedReadQuery(s,inner,opts,isJson);
@@ -19647,6 +19652,17 @@ namespace {
 // AST identities. Read producers are driven by next(); write producers are
 // completed once regardless of whether their RETURNING output is consumed.
 class PreparedWithDmlRuntime {
+    class RetainedCursor final : public dbms::PreparedQueryCursor {
+        shared_ptr<dbms::PreparedQueryCursor> cursor_;
+    public:
+        explicit RetainedCursor(shared_ptr<dbms::PreparedQueryCursor> cursor):cursor_(std::move(cursor)) {}
+        const dbms::QueryRowDescriptor& descriptor() const override {return cursor_->descriptor();}
+        bool next(vector<dbms::ExprValue>& row) override {return cursor_->next(row);}
+        void close() override {cursor_->close();}
+        dbms::Operator* plan() const override {return cursor_->plan();}
+        bool supportsRestart() const override {return cursor_->supportsRestart();}
+        void restart(const dbms::RowContext& row) override {cursor_->restart(row);}
+    };
     struct Cache {
         dbms::OpPtr plan;
         dbms::PreparedQueryRows rows;
@@ -19664,6 +19680,8 @@ class PreparedWithDmlRuntime {
     dbms::SelectStmt* readRoot_;
     dbms::PreparedQueryExecution validation_;
     Frames queryFrames_;
+    vector<shared_ptr<dbms::PreparedQueryCursor>> mutationCursors_;
+    vector<shared_ptr<dbms::Operator>> mutationReadPlans_;
 
     vector<string> selectedColumns(const dbms::Stmt* root,
                                    const dbms::PreparedQuery::SourceRange& source) const {
@@ -19855,12 +19873,16 @@ class PreparedWithDmlRuntime {
         return *found;
     }
     shared_ptr<DmlSourceNode> sourceNode(const dbms::Stmt* owner,const dbms::FromItem* item,
-                                        const dbms::RowContext& outer,const Frames& frames) {
+                                        const dbms::RowContext& outer,const Frames& frames,
+                                        dbms::QueryPlanner::PreparedExecutionProvider provider={}) {
         if(!item)throw dbms::DbError("XX000","mutation source has no retained FROM tree");
         auto node=make_shared<DmlSourceNode>();
-        auto execution=make_shared<dbms::PreparedQueryExecution>(query_,&g_engine,session_.currentDB);
-        execution->setQueryExecutor(reader(frames));
-        execution->setChildCursorFactory(cursorFactory(frames));
+        auto execution=provider?provider():make_shared<dbms::PreparedQueryExecution>(query_,&g_engine,session_.currentDB);
+        if(!execution)throw dbms::DbError("XX000","mutation source lost its execution owner");
+        if(!provider) {
+            execution->setQueryExecutor(reader(frames));
+            execution->setChildCursorFactory(cursorFactory(frames));
+        }
         if(item->type!=dbms::FromItem::Type::Join) {
             const auto& range=sourceRange(owner,item);
             node->occurrences.push_back(range.ordinal);
@@ -19873,7 +19895,7 @@ class PreparedWithDmlRuntime {
             if(item->type==dbms::FromItem::Type::Subquery) {
                 auto* select=dynamic_cast<dbms::SelectStmt*>(item->subquery.get());
                 if(!select)throw dbms::DbError("0A000","mutation derived source requires a SELECT/VALUES plan");
-                cursor=dbms::QueryPlanner::makePreparedCursor(selectPlan(select,outer,frames),output(select));
+                cursor=dbms::QueryPlanner::makePreparedCursor(selectPlan(select,outer,frames,false,false,provider),output(select));
             } else if(range.viewQuery) {
                 if(!checkTablePermission(session_,physical(range,session_),dbms::StorageEngine::TablePrivilege::Select))
                     throw dbms::DbError("42501","permission denied for view source");
@@ -19931,8 +19953,8 @@ class PreparedWithDmlRuntime {
             };
             return node;
         }
-        auto left=sourceNode(owner,item->left.get(),outer,frames);
-        auto right=sourceNode(owner,item->right.get(),outer,frames);
+        auto left=sourceNode(owner,item->left.get(),outer,frames,provider);
+        auto right=sourceNode(owner,item->right.get(),outer,frames,provider);
         node->close=[left,right] {
             std::exception_ptr failure;
             try{left->closeSource();}catch(...){failure=std::current_exception();}
@@ -20066,9 +20088,10 @@ class PreparedWithDmlRuntime {
         };
         return node;
     }
-    dbms::PreparedDmlSourceFactory mutationSourceFactory(const Frames& frames) {
-        return [this,frames](const dbms::Stmt* owner,const dbms::FromItem* source,const dbms::RowContext& outer) {
-            auto node=sourceNode(owner,source,outer,frames);
+    dbms::PreparedDmlSourceFactory mutationSourceFactory(const Frames& frames,
+        dbms::QueryPlanner::PreparedExecutionProvider provider={}) {
+        return [this,frames,provider](const dbms::Stmt* owner,const dbms::FromItem* source,const dbms::RowContext& outer) {
+            auto node=sourceNode(owner,source,outer,frames,provider);
             dbms::PreparedDmlSourceRows rows;rows.occurrences=node->occurrences;
             rows.read=[node](size_t index,dbms::RowContext& row){node->ensure();if(index>=node->rows.size())return false;row=node->rows[index];return true;};
             return rows;
@@ -20125,7 +20148,7 @@ class PreparedWithDmlRuntime {
                 [](size_t index,vector<dbms::ExprValue>& row){row.clear();return index==0;});
         } else {
             auto holder=make_shared<shared_ptr<DmlSourceNode>>(
-                sourceNode(select,select->fromClause.get(),outer,frames));
+                sourceNode(select,select->fromClause.get(),outer,frames,executionProvider));
             dbms::PreparedSourceContextsOp::Rebinder rebind;
             const function<bool(const dbms::FromItem*)> physicalSources=[&](const dbms::FromItem* item) {
                 if(!item)return false;
@@ -20142,8 +20165,8 @@ class PreparedWithDmlRuntime {
                 // row. Local/derived/logical producer frames are NOT rebound
                 // by changing only the project state: they need a separate
                 // parameterized producer-lifetime contract.
-                rebind=[this,holder,select,frames](const dbms::RowContext& row) {
-                    *holder=sourceNode(select,select->fromClause.get(),row,frames);
+                rebind=[this,holder,select,frames,executionProvider](const dbms::RowContext& row) {
+                    *holder=sourceNode(select,select->fromClause.get(),row,frames,executionProvider);
                 };
             }
             source=make_unique<dbms::PreparedSourceContextsOp>(
@@ -20196,6 +20219,8 @@ public:
             throw dbms::DbError("XX000","prepared runtime requires a genuine query envelope");
     }
     ~PreparedWithDmlRuntime() {
+        for(auto& plan:mutationReadPlans_)try{plan->close();}catch(...){}
+        for(auto& cursor:mutationCursors_)try{cursor->close();}catch(...){}
         for(auto& frame:frames_)for(auto& entry:frame->producers) {
             try{if(entry.second->opened)entry.second->plan->close();}catch(...){}
             entry.second->plan.reset();
@@ -20217,6 +20242,65 @@ public:
         // This is the actual execution/EXPLAIN root. Child factories retain
         // the false default so pruning is not undone by child construction.
         return selectPlan(select,validation_.context(),queryFrames_,true,true);
+    }
+    dbms::OpPtr mutationPlan() {
+        auto* statement=query_->ast.get();
+        if(!dynamic_cast<dbms::InsertStmt*>(statement) && !dynamic_cast<dbms::UpdateStmt*>(statement) &&
+           !dynamic_cast<dbms::DeleteStmt*>(statement))
+            throw dbms::DbError("0A000","mutation EXPLAIN requires additional envelope lowering");
+        const Frames frames;
+        dbms::PreparedDmlPlanHooks hooks;
+        hooks.sources=[this,frames](weak_ptr<dbms::PreparedQueryExecution> owner) {
+            return mutationSourceFactory(frames,[owner] {
+                auto execution=owner.lock();
+                if(!execution)throw dbms::DbError("XX000","mutation source lost its compiled owner");
+                return execution;
+            });
+        };
+        hooks.reader=[this,frames,statement](weak_ptr<dbms::PreparedQueryExecution> owner) {
+            const auto* insert=dynamic_cast<const dbms::InsertStmt*>(statement);
+            if(!insert || !insert->selectSource)return reader(frames);
+            const auto execution=owner.lock();
+            if(!execution)throw dbms::DbError("XX000","INSERT source lost its compiled owner");
+            const auto* source=dynamic_cast<const dbms::SelectStmt*>(insert->selectSource.get());
+            if(!source)throw dbms::DbError("0A000","INSERT source requires a genuine SELECT/VALUES plan");
+            shared_ptr<dbms::Operator> plan=selectPlan(const_cast<dbms::SelectStmt*>(source),execution->context(),frames,false,false,
+                [owner]{auto value=owner.lock();if(!value)throw dbms::DbError("XX000","INSERT source lost its compiled owner");return value;});
+            const size_t ordinal=mutationReadPlans_.size();mutationReadPlans_.push_back(std::move(plan));
+            // The callback holds a runtime index, not its own carrier/plan.
+            // The runtime outlives publication of this exact mutation tree.
+            return dbms::PreparedChildExecutor([this,frames,source,ordinal](const dbms::Stmt* child,const dbms::RowContext& row,size_t demand) {
+                if(child!=source)return reader(frames)(child,row,demand);
+                auto& plan=mutationReadPlans_.at(ordinal);dbms::PreparedQueryRows rows;
+                try {
+                    if(!plan->open())throw dbms::DbError("XX000","INSERT source plan failed to open");
+                    string display;vector<dbms::ExprValue> cells;
+                    while((!demand || rows.size()<demand) && plan->next(display)) {
+                        if(!plan->lastStructuredValues(cells))throw dbms::DbError("XX000","INSERT source plan lost its typed cells");
+                        rows.push_back(cells);
+                    }
+                    if(plan->hasError())throw dbms::DbError("XX000",plan->errorMessage());
+                    plan->close();
+                } catch(...) {
+                    const auto primary=std::current_exception();try{plan->close();}catch(...){}
+                    std::rethrow_exception(primary);
+                }
+                return rows;
+            });
+        };
+        hooks.extraChildren=[this] {
+            vector<shared_ptr<dbms::Operator>> children=mutationReadPlans_;
+            for(const auto& cursor:mutationCursors_)if(cursor->plan())
+                children.emplace_back(cursor,cursor->plan());
+            return children;
+        };
+        const dbms::PreparedChildCursorFactory children=[this,frames](const dbms::Stmt* child,const dbms::RowContext& row) {
+            auto actual=cursorFactory(frames)(child,row);
+            shared_ptr<dbms::PreparedQueryCursor> retained(std::move(actual));
+            mutationCursors_.push_back(retained);
+            return make_unique<RetainedCursor>(std::move(retained));
+        };
+        return dbms::buildBoundDmlPlan(statement,session_,query_,{}, {},children,true,true,std::move(hooks));
     }
     void finishQueryWrites() {
         const auto* select=dynamic_cast<const dbms::SelectStmt*>(query_->ast.get());
@@ -20709,6 +20793,14 @@ static bool explainPreparedReadQuery(Session& session,const string& raw,
     const auto error=publishExplainPlan(std::move(plan),raw,session,options,json);
     if(options.analyze && !error)runtime.finishQueryWrites();
     return error;
+}
+
+static bool explainPreparedDmlQuery(Session& session,const string& raw,
+    const dbms::QueryPlanner::ExplainOptions& options,bool json) {
+    auto query=make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(session.currentDB,raw));
+    PreparedWithDmlRuntime runtime(session,std::move(query));
+    auto plan=runtime.mutationPlan();
+    return publishExplainPlan(std::move(plan),raw,session,options,json);
 }
 
 static bool handlePreparedMultirowQuery(const string& raw,Session& session,bool& handled) {

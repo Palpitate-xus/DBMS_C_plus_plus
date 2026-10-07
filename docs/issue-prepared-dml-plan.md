@@ -72,3 +72,53 @@ ASan/UBSan `37780` all finished with exit 0. This is two instrumented production
 TUs with the other matching normal objects, not all-58 sanitizer coverage.
 Frozen close epoch server SHA-256:
 `76e4f1bd5388f18c1a1d6ed683336cc3de29f3f30b024ed7211b719cd379caec`.
+
+## Ordinary I/U/D EXPLAIN consumer
+
+The frontend now selects the actual bound INSERT/UPDATE/DELETE statement
+before legacy SQL normalization. Plain EXPLAIN builds/describes without open;
+ANALYZE drives the same retained `ModifyTable` once and renders only after
+success. The operator's real RETURNING rows supply its actual row counter;
+without RETURNING, affected rows are not fabricated as emitted plan rows.
+
+Source/derived JOIN expression lowering borrows the root's compiled carrier.
+INSERT SELECT retains its actual source operator and typed cells with that
+same owner; its full-row input is not coerced through scalar/quantified cursor
+metadata rules. The first whole candidate failed two INSERT SELECT shapes in
+both ANALYZE formats because their legitimate unknown input literal was sent
+through the strict value-child cursor. That failure and its cumulative counter
+drift are preserved. Scalar and quantified value children still use genuine
+paired typed cursors, and their real graph owners remain alive for rendering.
+The instrumented mutation source facade measures its emitted contexts; these
+counts do not independently prove every physical provider's internal metrics.
+
+The permanent unfiltered matrix has 33 controls across TEXT/JSON and
+plain/ANALYZE: real volatile/default row demand, zero/false predicates,
+nullable FROM/USING, correlated scalar and multirow ANY/ALL, precise static
+and runtime errors, late unique failure rollback, dead CASE, real RETURNING
+counts, and cumulative nontransactional sequence sentinel 33. Strict PG
+180006 `71542` and corrected consumer whole `83666` finished with exit 0;
+initial consumer `44907` finished with exit 1. Nine complete serial scripts
+`22756` passed, including that whole matrix and all retained EXPLAIN,
+WITH/source, quantified, DEFAULT, MV and input-priority adjacent controls.
+
+Four further complete originals `54204` (WITH multisource and its boundary,
+ordinary quantified DML and original Quant84) finished with exit 0. All ten
+matching native drivers `83583` finished with exit 0; initial native wrapper
+`5524` exited 1 only for a nonexistent last filename after nine PASS results,
+and that wrapper failure remains recorded. Scoped DML/PCE ASan/UBSan server
+whole `21137` finished with exit 0; its other 56 production TUs (including
+main) are matching normal O0 objects, not sanitizer coverage. Actual consumer
+epoch started from the fresh-58 close build and rebuilt only changed main and
+DML CPPs; all source/header/object/stub/flag imports were audited. Frozen
+normal consumer SHA-256:
+`40470eea598ce875b5878e2ffeba86f66e1bfc76f758ee8b88c80dc9d7635c42`.
+
+This is not all-DML EXPLAIN completion. WITH-final-DML envelopes, view
+mutation/trigger plans, conflict actions, cursor/inheritance lowering, and
+MERGE are not claimed. Additional strict-18 phase evidence independently
+retains known next roots: omitted/explicit INSERT DEFAULT constants must be
+planned even for empty input; JSON descriptors need OID 114 in Simple/P-D;
+Parse is analysis-only for 1/0 but rejects bad unknown CAST input. Read-only
+plain EXPLAIN succeeds while ANALYZE rejects physical writes. Those stronger
+phase/default controls were not removed or replaced by a known-gap green mode.
