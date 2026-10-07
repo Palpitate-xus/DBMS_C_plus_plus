@@ -6141,22 +6141,33 @@ bool tryDmlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
     } else if (parsedCmd == SqlCommand::Delete) {
         const auto* stmt = dynamic_cast<const DeleteStmt*>(parsed.stmt.get());
         if (!stmt || stmt->only) return false;
-        const auto* literal = dynamic_cast<const LiteralExpr*>(stmt->whereClause.get());
-        const bool booleanLiteral = literal && !literal->preparedSubquery &&
-            (lower(literal->value) == "true" || lower(literal->value) == "false");
-        if (booleanLiteral && !stmt->usingClause && !stmt->returning.empty()) {
-            // The thin condition-string adapter cannot own this predicate.
-            // Retain the whole bound mutation and its output descriptor even
-            // when no row qualifies; do not fabricate RETURNING metadata from
-            // a successful legacy command tag or execute its expressions early.
+        bool viewTarget = false;
+        if (!stmt->usingClause && stmt->whereCurrentOf.empty()) {
+            if (!checkDatabase(s)) { handled = true; return true; }
+            (void)resolveTable(s, stmt->tableName, true, &viewTarget);
+        }
+        if (!stmt->usingClause && stmt->whereCurrentOf.empty() && !viewTarget) {
+            // Direct native bridge callers need the same retained target-only
+            // carrier as the SQL frontend: qualify exact typed OLD rows and
+            // evaluate RETURNING inside the atomic mutation boundary. Keep
+            // metadata even for zero matches; never retry a partially owned
+            // expression through the legacy string adapter.
             auto query = std::make_shared<PreparedQuery>(g_engine.prepareBoundQuery(
                 s.currentDB, rawSql.empty() ? sql : rawSql));
             auto* deletion = dynamic_cast<DeleteStmt*>(query->ast.get());
             if (!deletion) throw DbError("XX000", "DELETE lost its prepared statement identity");
-            prepareBoundDml(deletion, s, query);
+            prepareBoundDml(deletion, s, query, {}, {}, true);
             auto result = executeAtomicDmlUnit(s, [&]() {
-                return executeBoundDml(deletion, s, query, {});
+                return executeBoundDml(deletion, s, query, {}, {}, {}, true);
             });
+            // This public legacy bridge historically spells NULL payloads
+            // as "NULL" alongside their authoritative bitmap. Preserve that
+            // representation only at publication; the bound runtime still
+            // consumes typed cells and never mistakes text "NULL" for NULL.
+            for (size_t row = 0; row < result.rows.size(); ++row)
+                for (size_t column = 0; column < result.rows[row].size(); ++column)
+                    if (result.nulls.at(row).at(column))
+                        result.rows[row][column] = "NULL";
             publishLastDmlResult(std::move(result));
             std::cout << "Delete done" << std::endl;
             printReturningRows(g_lastDmlResult);

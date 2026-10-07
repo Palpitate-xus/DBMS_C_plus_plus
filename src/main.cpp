@@ -20612,12 +20612,11 @@ static bool containsPreparedPattern(const dbms::Expr* value) {
     return false;
 }
 
-static bool handlePreparedPatternDelete(const string& rawSql,Session& session,bool& handled) {
+static bool handlePreparedDelete(const string& rawSql,Session& session,bool& handled) {
     handled=false;
     dbms::SQLParser parser;auto parsed=parser.parseForBinding(rawSql);
     const auto* remove=parsed.isValid()?dynamic_cast<const dbms::DeleteStmt*>(parsed.stmt.get()):nullptr;
-    if(!remove || remove->only || remove->usingClause || !remove->whereCurrentOf.empty() ||
-       !containsPreparedPattern(remove->whereClause.get()))return false;
+    if(!remove || remove->only || !remove->whereCurrentOf.empty())return false;
     if(!checkDB(session)){handled=true;return true;}
     auto query=make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(session.currentDB,rawSql));
     for(const auto& range:query->sourceRanges)
@@ -21590,7 +21589,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
     // Phase 4 Wave 0.4: DML AST bridge — try AST-driven execution before legacy string dispatch.
     if(parsedCmd==dbms::SqlCommand::Delete) {
         bool handled=false;
-        const bool error=handlePreparedPatternDelete(effectiveRawSql,s,handled);
+        // Ordinary DELETE owns its genuine whole AST, including the WHERE
+        // qualification, USING sources and RETURNING expressions. A thin
+        // projection/condition adapter must not hand a partially understood
+        // mutation to the legacy token path and lose either consumer.
+        const bool error=handlePreparedDelete(effectiveRawSql,s,handled);
         if(handled)return error;
     }
     {
