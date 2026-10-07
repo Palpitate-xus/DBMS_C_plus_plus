@@ -32761,6 +32761,27 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
             validateAssignmentInput(target, source, sourceType);
             validatePreparedPrimitiveInput(target, source);
         };
+        metadata.updateDefault = [&](const std::string& schema,const std::string& name,
+                                     const std::string& column)->std::optional<std::string> {
+            // A genuine materialized target has no column-default storage.
+            // Bind DEFAULT as the assignment's typed NULL, then let the
+            // existing whole-bind/constant-plan target-role check report
+            // 42809. Do not try its backing heap or open a no-data reader.
+            if (const_cast<StorageEngine*>(this)->resolveMaterializedView(dbname,schema,name))
+                return std::nullopt;
+            const Session* session=currentSession();
+            const bool temporary=session && (schema==sessionTempSchemaName(*session) || schema=="pg_temp");
+            const auto physical=temporary?tempTablePrefix(*session,name):schema=="public"?name:schema+"__"+name;
+            // getTableSchema retains explicit/frozen column defaults and
+            // resolves only a proven Domain origin to the direct domain's
+            // current own default. The definition is copied before runtime.
+            const auto table=getTableSchema(dbname,physical);
+            for(size_t i=0;i<table.len;++i)if(table.cols[i].dataName==column) {
+                if(table.cols[i].defaultValue.empty())return std::nullopt;
+                return table.cols[i].defaultValue;
+            }
+            throw DbError("XX001","UPDATE default target has no physical column metadata");
+        };
         return prepareQuery(sql, bindings, metadata);
 }
 

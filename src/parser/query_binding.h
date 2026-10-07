@@ -42,6 +42,11 @@ struct QueryBindingMetadata {
     // Pure operator type lookup. A physical catalog OID wins over a rendered
     // alias/name; domains resolve to their actual base without reading rows.
     std::function<std::string(const std::string&, uint32_t)> baseType;
+    // UPDATE DEFAULT is a stored value expression of the resolved physical
+    // target, not a source/PL variable. nullopt means no default (typed NULL
+    // at assignment); lookup never evaluates the expression or scans rows.
+    std::function<std::optional<std::string>(const std::string&,
+        const std::string&, const std::string&)> updateDefault;
 };
 struct PreparedQuery {
     struct Use { size_t begin, end, slot; };
