@@ -4,7 +4,27 @@
 
 # 工作区与复查清单收尾计划
 
-## 2026-10-07 当前完整273目标计划（7f77；以下较早记录均历史）
+## 2026-10-07 当前完整273目标计划（f323；以下较早记录均历史）
+
+当前source `f32327cd`：708auto+frontend/379registered/58TU，100项独立
+source/test修复commit；原273全部范围及每个未闭环要求不缩。
+
+| 阶段 | 原要求 / 下一动作 | 当前实际证据 |
+| --- | --- | --- |
+| 逐项版本管理 | 每真实根因独立commit，用户push | 新f323 BETWEEN实际输入/参数精确五CPP独立commit并FF，当前基线全2008及四完整whole真红保留 |
+| 当前完整组合 | 真ABI/inputs/receipts/defaultdisk/deadline | normal41819真5fresh+53当前7f证明donors，50native7432/61whole71725/post25whole27937全0；非fresh58/SAN |
+| 主目录可用binary | 正常build/repeat/逐对象proof/实际完整复测 | publication75748真58证明迁移/重链0，实际./dbms_main同bf33SHA；直接25whole3212全0，旧source99 binary可恢复 |
+| 每原强红保留 | 不删SQL/assert/注册红，不冒族关闭 | OPEN3whole42220同旧11红；原7矩阵132=0、384=1/23、1296=1/26、250/40/50=0、writer12=1/6 |
+| 接续actual inputs/demand | INTEGER ranges、VARBIT真正type identity与原效应 | 非BIT26、typedVARBIT16/physicalprefix7、真实writer6继续；真实strict证明search_path domain VARBIT非内置BIT |
+| 接续新ABI/消费者 | enum rank/SUM metadata、positive/signedFETCH全部Root组合 | 四独立commit只在新current100私树；两公共头真fresh58 normal92632 live，四完整当前基线红/strict全0；之后完整默认磁盘邻居和OPEN原强gate |
+| 原full和全部family | 原发现/注册真实终态，每原273证据 | 原80full42496真1/all1043非当前100，新100full未启动；所有原catalog/query/storage/recovery/ops未闭环范围保留 |
+| 最终总账与约束 | 原checkbox/证据/commit全scope一致 | 273=22complete166partial70unverified15deferred，完成gate拒绝；无assistantpush/Actions启用/安全TDE恢复 |
+
+下一动作：完成当期新公共头全58正常构建和四issue完整强验证，保旧FETCH18/
+DISTINCT/CTE11；继续真实INTEGER/VARBIT输入owner与BETWEEN需求、MINMAX
+custom结果和所有原未闭环项，逐根因独立commit。完整出处见BETWEEN组合文档。
+
+## 2026-10-07 历史完整273目标计划（7f77）
 
 当前source `7f778476`：707auto+frontend/375registered/58TU，99项独立
 source/test修复commit；原273全部范围及每个未闭环要求不缩。

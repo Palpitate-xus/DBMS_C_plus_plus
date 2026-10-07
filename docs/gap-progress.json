@@ -2,6 +2,21 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "100 independent ROOT source/test repairs throughf323: actual BETWEEN input and original parameter occurrence ownership",
+      "gap_ids": ["TYPE-11", "TYPE-02", "SQL-05"],
+      "status": "partial",
+      "commits": ["f32327cd"],
+      "evidence": ["docs/issue-ready-source-integration.md", "docs/issue-bit-between-current-root-composition.md", "docs/issue-bit-between-input-preparation.md"],
+      "tests": ["tests/bit_between_input_test.cpp", "tests/bit_between_input_protocol_e2e_test.py", "tests/bit_between_parameter_protocol_e2e_test.py", "tests/bit_between_parameter_position_protocol_e2e_test.py", "tests/bit_between_cast_parameter_protocol_e2e_test.py"],
+      "verification": {
+        "reproduction": "Actualcurrent99 complete2008native31172=1/1421fail. Correctedactual4wholebaseline4393=1/all1192,250,40,90 collected with792,365,73,136 strong/phase failures notbugcounts. Earlier51194 fourFileNotFound wrongexternalpath is preservedauthoredrunnerfailure, notproductionevidence. SameactualownedstrictPG18.6/180006 complete18whole52603=0, originalSQL/assertions/deadlines/NULL/OID/position/earlyphase/effectsretained.",
+        "fix": "OneindependentRootf323 fiveCPP/noexistingpublichead/Main. Ordered realBIT range input withindependent pureUNKNOWN literalpairs andtruefirst-owner Parameter identity; originalSQL$n provenance fromactual uses insteadinternaloccurrence slot; nested actualCAST inputs, unused42P18, typedBind retention/pureprimitive planning beforeRowDescription. Tableprojection retainswholeBETWEENgrammarAND AST andpureinput beforeempty/NULL/index/OR/cap0or1/firsthit. AllcurrentRootintegerParseguard/BITBindcodec/windowNULLGROUPS/enumASTOID/aggregate/CTE/quoted/index/array/hash/TRUNCATEpreserved; nooldwholeCPP/ABI substitution.",
+        "focused_tests": "Normal41819=0 exactly5freshCPP+53current7f source/header/actualflags/manifest/original58receipt/objectbyte-provednormaldonors; NOTfresh58. Repeat/all58cache/frozeninputs0 SHAbf33c203acd55a4196ad10ac3001aacda1ef2ef90ea443726f13e8d72761bf5a. Complete50freshnative7432/61whole71725/postdoconlyrebase25whole27937 all0/defaultdisk/deadline, oldwhole49/57neighboursretained. MasterFFonly. Actualmain publication75748 all58currentproofmigration/relink/ownpath-sensitive receipts normal/repeat0 zeroCPPcompile, notfresh58; actual./dbms_main sameSHA; direct25actualmainwhole3212=0/source-script-test-manifest-binary unchanged, previoussource99binaryrecoverablybackedup.",
+        "full_suite": "Currentf323 actual708auto+frontend1/379registered/58TU/100independentRootrepairs. SeparateOPEN3whole42220=1/sameCOUNT1UNKNOWN1expandedCTE9. Originalsevencomplete differential76317=1:132=0,384=1/23,1296=1/26,25040and50=0,writer12=1/6. NotfamilyPASS. OriginalSource80full42496terminal1/all1043not14bugs/current100verdict; new100originalfullnotstarted.",
+        "scope": "Original273unchanged22complete166partial70unverified15deferred/completiongaterejects. TYPE11/TYPE02/SQL05/alloriginalunclosedfamiliespartial/open. Actualremaining26nonBITINTEGERrangeUNKNOWN,16typedVARBITparser+7ordinaryphysicalprefix,6logicalwriter demand. Actualstrict type-literal discovery provesfullbareBIT versusexplicittypmods andownedsearch_pathdomainvarbit TEXT/OID25 versusbuiltinBITVARYING1562; futureparseractualtypeownerrequired/notcurrentfix. FourreviewedindependentenumrankFILTER/aggregate-result/positive-scalarFETCH/signedFETCH commitsonlynewcurrent100private tree, twoheaders genuinelyfresh58normal92632 live;4completecurrentbaselinesred/sameownedstrict180006green, notmasterapproval/oldprivateABI. MINMAXcustomOID/otherFETCHCOUNTUNKNOWNCASEreaders/allcatalogquerystoragerecoveryopscontinue. Noassistantpush/Actionsactivation/deferredsecurityTDErestart/unverifiedmasterimport/overallcompletion."
+      }
+    },
+    {
       "issue": "99 independent ROOT source/test repairs through7f77: current BIT comparison, input and actual receiver owners",
       "gap_ids": ["TYPE-11", "SQL-05"],
       "status": "partial",

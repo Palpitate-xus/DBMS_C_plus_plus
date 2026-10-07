@@ -1,4 +1,30 @@
-# 2026-10-07 最新7f77总清单 checkpoint
+# 2026-10-07 最新f323总清单 checkpoint
+
+当前source `f32327cd`：708auto-native+实际frontend1/379registered/58TU，
+100项独立source/test修复commit。独立修复BIT BETWEEN纯输入/真实参数来源，
+精确五CPP/no公共头/Main，保全部当前修复与integer真实Parse hook/完整BIT Bind。
+当前99完整native基线31172真1/all2008/1421fail；正确四whole基线4393真1，
+all1192/250/40/90，各792/365/73/136强或阶段失败；strict180006完整18whole
+52603全0。作者初版路径FileNotFound另留日志，不算DBMS基线或控制执行。
+
+normal41819真5CPP fresh+53当前7f逐源/头/flags/manifest/原58receipt/byte证明
+正常donors，repeat/all58/stamp/frozeninput0，非fresh58/SAN。完整50native7432/
+61whole71725/跨仅doc提交后完整25whole27937全部0，默认磁盘/期限。
+实际主目录publication75748真58当期对象证明迁移/重链、normal/repeat和自身
+receipts全0，./dbms_main同bf33 frozenSHA；直接该binary完整25whole3212全0/
+输入未变，旧source99 binary可恢复备份。完整证据见BETWEEN current-root文档。
+
+OPEN3whole42220真1/same旧COUNT1/UNKNOWN1/expanded9。原七完整差分76317真1：
+132全0、384仍23、1296仍26、250/40/50全0、writer12仍6；不冒族关闭。
+VARBIT typedliteral必须保实际TypeName/search_path/domain身份，INTEGER range纯
+输入及logical demand各独立继续。四项enum rank/FILTER、aggregate result、
+positive/signed FETCH已全文审查并精确逐commit到新current100私树；两公共头
+真实fresh58 normal92632 live，四完整当前基线均真1/strict全0，未主分支批准。
+MINMAX/customOID/其它FETCH消费者及所有原未闭环范围保留。旧80原full42496
+终1/all1043非当前100结论，新100原full未启动。原273仍22complete166partial
+70unverified15deferred，完成gate拒绝，无assistantpush/Actions启用/安全TDE重启。
+
+# 2026-10-07 历史7f77总清单 checkpoint
 
 当前source `7f778476`：707auto-native+实际frontend1/375registered/58TU，
 99项独立source/test修复commit。BIT九有限issue各独立提交，精确保留当前

@@ -1,4 +1,47 @@
-# Latest 7f77 checkpoint: 99 independently committed source/test repairs
+# Latest f323 checkpoint: 100 independently committed source/test repairs
+
+Current source `f32327cd`: **708 auto-native plus one actual frontend /
+379 registered /58 production TUs**. One independently committed finite
+BETWEEN input/actual parameter owner; five precise CPP deltas, no public
+header or Main delta. Both current integer Parse hook and BIT Bind codec,
+all current Window/enum/aggregate/CTE/quoted/index/hash/array increments remain.
+
+Current99 complete2008 native31172 ends1/1421fail; corrected complete four
+wire4393 ends1, all1192/250/40/90 with792/365/73/136 strong or phase failures.
+An earlier external FileNotFound path51194 is preserved author-runner failure,
+not product evidence. Actual strict180006 complete18 whole52603 ends0.
+**Normal41819, complete50 fresh native7432, complete61 whole71725 and
+postcommit25 whole27937 all end0**, default disk/deadlines. Five fresh CPP
+plus53 current7f individually source/header/actual-flags/manifest/original58-
+receipt/object-byte-proved normal donors; not fresh58. All58/repeat/cache/
+frozen inputs pass. SHA
+`bf33c203acd55a4196ad10ac3001aacda1ef2ef90ea443726f13e8d72761bf5a`.
+
+Master only fast-forwards. Actual main publication75748 ends0,58 matching
+objects proved/migrated with own receipts, normal/repeat relink zero new CPP,
+not fresh58; actual./dbms_main sameSHA. Direct complete25 main-binary whole3212
+ends0 with all inputs unchanged; previous source99 binary recoverably copied.
+Full issue mapping/logs/scopes: `docs/issue-bit-between-current-root-composition.md`.
+
+Separate OPEN3 whole42220 ends1 retaining exact old COUNT1/UNKNOWN1/CTE9.
+Original seven full differential matrices76317 end1:132=0,384=1/23,1296=1/26,
+250/40/50=0,writer12=1/6. No red status is disguised by the passing61 group;
+TYPE-11, INTEGER range input, typed VARBIT parser/actual domain owner, logical
+demand and every original unclosed family remain partial/open.
+
+Four reviewed independent enum argument/rank, aggregate result metadata,
+positive scalar FETCH and signed FETCH commits now exist only in a new
+current100 private composition tree. Two public headers require genuine
+fresh58, actually live92632; four full current100 baselines fail and the same
+owned matched-enUS strict180006 full matrices pass. No old-ABI donor or private
+proof substitutes for current composition/master approval. MIN/MAX custom
+results, all FETCH/COUNT/UNKNOWN/CASE/readers and all catalog/query/storage/
+recovery/operations requirements continue. Old Source80 full42496 remains1/
+all1043, not current100 or14 bugs; new current100 original full not started.
+Original273 unchanged **22complete/166partial/70unverified/15deferred**,
+completion gate rejects. No assistant push/Actions/skipped security/TDE work.
+
+# Historical 7f77 checkpoint: 99 independently committed source/test repairs
 
 Current source `7f778476`: **707 auto-native plus one actual frontend /
 375 registered /58 production TUs**. Nine BIT issues are independently
