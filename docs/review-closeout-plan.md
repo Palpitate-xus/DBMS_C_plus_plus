@@ -4,7 +4,30 @@
 
 # 工作区与复查清单收尾计划
 
-## 2026-10-07 当前完整273目标计划（1d25；以下较早记录均历史）
+## 2026-10-07 当前完整273目标计划（82bf；以下较早记录均历史）
+
+当前source `82bf3739`：683auto-native+1实际frontend/347registered/58TU，
+70项独立source/test commit。数组native物理类型、snapshot exporter传输可见性、
+原routine canonical oracle各独立提交；原273目标和所有未闭环要求没有缩小。
+
+| 阶段 | 必须验收的原范围 | 当前证据 / 下一动作 |
+| --- | --- | --- |
+| 独立修复 | 真反例、完整原控制、每问题commit | 新三项映射/原失败见integration；原snapshot/array不改，routine原SQL/calls全部保留 |
+| 最新组合构建 | 全部生产输入一致、normalO2/repeat/58receipts/freeze | exact82bf97039为0；fresh soleTM+57proved90fe donors，不冒fresh58 |
+| 原完整回归 | 原683auto+1frontend/347registered、磁盘/default期限、完整终态 | full48181已运行live，105+1native39059/49whole86895 live；三原完整native45204及真实故障68439为0 |
+| 原view触发器错误后复用 | 保原23514/行/NULL/OID与下一SQL原15秒期限 | 实际trace定位未恢复outer session的析构指针；异常安全清理/真正完整wire继续 |
+| namespace与目录 | 完整物理/dependency/peer/parent/savepoint/old refs | 私有原组与更强domain外列/descendant/NULL/quoted/rollback矩阵继续，未READY、不以单consumer代CAT01/09 |
+| 备份/恢复 | timeline fork后的真实backup+archive/PITR/cold restart | 真timeline2新行漏恢复134已复现；按实际stream owner独立修复，不冒WAL family完成 |
+| 完整DML/OPT16及所有family | WITH同图/phase/atomic、所有格式/options/真实指标、目录WALMVCC/存储/类型/查询/运维 | 全部原未闭环条目继续，不以当前专项替代原要求 |
+| 总账闭合 | 每条原状态/checkbox/证据/commit/全验收一致 | 22complete/166partial/70unverified/15deferred；require-complete继续拒绝 |
+
+上一1d25 focused入口全部完成但wrapper实际127（运行中改外部helper产生Bash
+读offset错误），保留99native98pass/1arrayseed和frontend0、48whole39pass/
+9timeouts，不算整组绿。新helpers冻结启动后不改。旧36568/79042 full已1，
+另七full实际live；每个旧红必须在最新源确认，不能算独立bug数量或当前批准。
+不push、Actions保持禁用、安全/TDE deferred；只有总账真实闭合才报告完成。
+
+## 2026-10-07 历史完整273目标计划（1d25）
 
 当前source `1d25a253`：680 auto-native+1实际frontend native/347registered/
 58TU，67项独立source/test commit。六source-DML、两INSERT default/source、

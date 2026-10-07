@@ -1,4 +1,85 @@
-# Latest 1d25 checkpoint: 67 independently committed source/test repairs
+# Latest 82bf checkpoint: 70 independently committed source/test repairs
+
+Production/test source `82bf3739` has **683 auto-discovered native tests plus
+one actual frontend native driver /347 registered tests /58 production TUs**.
+Three additional issues are independently committed, without changing the
+original 273-item objective or declaring their entire families complete.
+
+| Issue | Private commit | ROOT commit | Verified issue scope |
+| --- | --- | --- | --- |
+| Native resolved-array physical element boundary | `24b715e8` | `90feab59` | Original EXPLAIN array seed/assertion retained; canonical scalar storage, old persisted schema and full values/NULL/bounds controls |
+| Snapshot exporter's in-progress XID in transferred view | `df4021b3` | `319bfe89` | Transfer copy only; original seven-section fixture, INSERT/DELETE/UPDATE/commit/rollback/CID/re-export controls |
+| Original routine fixture's canonical SQL type identity | `183541e8` | `82bf3739` | Three stale metadata expectations only; original SQL/calls/5 and42 assertions and all ten sections retained |
+
+Array evidence is in `docs/issues/issue-native-resolved-array-storage.md`:
+23 complete native fixtures and four scoped two-CPP sanitizer natives pass.
+The actual old schema bytes have independently checked SHA256
+`4a6cafda8173e17f943607c1e643a9287c5ccceb38b603b79ee356fc0cdfa6c6`.
+The complete 16-whole group is **15 pass/one fail**, not all green. The original
+view-trigger script returns the correct23514, then its next SELECT times out
+at its original15-second deadline. Exact-old6aec reproduces that whole failure;
+strict180006 passes. No deadline/SQL/assertion is changed. Its separate current
+trace now shows a session-lifetime failure; the repair is still private WIP.
+
+Snapshot evidence is in `docs/issue-snapshot-exporter-xid-visibility.md`:
+20 complete natives,12 entire protocols and four scoped TableManage/driver
+sanitizer natives pass. The original snapshot fixture is completely unchanged,
+SHA256 `c7f56d9010ad28e34e870bdcabde316229e66eb32bdf7cd4ff06223d400b8846`.
+Strict180006 uses four real connections and actual pg_export_snapshot/import
+SQL; the permanent script is explicitly **reference-only**, not a newly
+implemented frontend snapshot command or a registered project protocol test.
+The live ReadView, CID/combocid, v2 transfer format and admission rules stay.
+
+Routine evidence is in `docs/issue-function-procedure-canonical-type-oracle.md`:
+all nine complete matching normal-native fixtures and strict180006 pass.
+SQL DDL's existing producer stores `integer`, including replacement identity;
+the test now asserts that exact identity and aliases, not either spelling.
+PostgreSQL rejects the original project expression-body extension as42601;
+its separate standard SELECT-body positive checks actual catalog/call semantics.
+No production source or input SQL is changed by this test-only repair.
+
+ROOT's exact90fe normal O2 gate **35980 exits0**, fresh two changed CPPs plus
+56 fully proved1d25 normal donors; repeat/all58 receipts/stamp/freeze pass.
+SHA256 `af651bb8481396d2c098d6a5802b206c4bd6f174cca3ec64ee06747efcf59486`.
+Latest exact82bf `/tmp/dbms-canonical-snapshot-routine.XMMmVyYb/repo` normal
+O2 **97039 exits0**, fresh sole TableManage plus57 source/header/actual-flags/
+original58-receipt/object-byte-proved90fe normal donors, **not fresh58**.
+Repeat/all58 current receipts/stamp/freeze pass; SHA256
+`d1e0e3d442957f661d12414e589048ddd3d49fe8bc7ed8b0306db4515b63c5e1`.
+Latest original whole function/snapshot/vacuum_full gate **45204 exits0**,
+all three complete fixtures with actual current57 non-main normal objects.
+The previous1d25 function/snapshot134 failures are retained, not retroactively
+changed. Latest real GNU map-fault pair **68439 exits0**.
+
+The immutable, path/count/uniqueness-checked new helper has **105 native plus
+one frontend driver39059 /49 whole86895 live**. The original full **683 plus
+one frontend/347 gate48181 is actually live**, in its separate clean worktree
+`full-repo`, with unchanged original `scripts/build_tests.sh` and disk/default
+deadlines. All58 normal and57 production test-layer objects are migrated only
+after exact input/flag/receipt/byte checks; every original driver/stub is handled
+by the original runner. This is not fresh58/fresh57 compilation or a full PASS.
+
+The previous1d25 focused runners both actually end127 after all labels finish:
+99 regular natives=98pass/one original array-seed134, actual frontend passes;
+48 whole=39pass/nine entrypoint timeouts. The external helper was rewritten
+while Bash read it, leaving a final `_tests.sh: command not found` offset;
+that harness-author error is not a production failure or successful wrapper.
+All failed logs remain. New running helpers are left immutable.
+Old full36568 and79042 now actually end1; their logs remain for current-source
+triage, not current approval. Other old full33648/56028/48518/27869/97347/93414/
+64688 are individually confirmed live. No process is killed/restarted merely
+because observation expired.
+
+Current private ordinary-database work includes the traced trigger cleanup,
+actual native namespace/committed-clean peers and cross-namespace domain-column
+CASCADE/rollback, and a real timeline2 backup/archive restore counterexample.
+WITH-final-DML/EXPLAIN formats/options/full instrumentation, catalog WAL/MVCC,
+full FSM/VM rebuild/coherence, all types/query/recovery/operations and every
+unclosed original requirement remain in scope. The original273 states stay
+**22complete/166partial/70unverified/15deferred**; require-complete must reject.
+No push, Actions activation, deferred security/TDE restart or overall completion.
+
+# Historical 1d25 checkpoint: 67 independently committed source/test repairs
 
 Production/test source `1d25a253` has **680 auto-discovered native tests plus
 one real frontend native driver /347 registered tests /58 production TUs**.

@@ -1,4 +1,39 @@
-# 2026-10-07 最新1d25总清单 checkpoint
+# 2026-10-07 最新82bf总清单 checkpoint
+
+生产/测试source `82bf3739`：**683 auto-native+1实际frontend native/
+347registered/58TU**，累计70项独立source/test commit。新增数组物理element
+边界 `90feab59`、导出snapshot的实际exporter XID `319bfe89`、原函数canonical
+类型测试契约 `82bf3739` 分别提交。原数组seed和snapshot完整fixture不改；
+函数原SQL/调用结果/负例与全部原十节保留，只纠正三项旧metadata期待。
+
+精确90fe正常O2/repeat/all58receipts/freeze35980为0；最新82bf正常O2
+97039为0，fresh soleTableManage+57逐源/头/实际flags/原58receipts/bytes
+证明的90fe donors，不冒fresh58。冻结SHA及映射见integration。当前完整原
+function/snapshot/vacuum_full45204为0，真GNU map-fault两项68439为0。
+105native+1frontend39059/49whole86895及原683+1frontend/347full48181
+均已实际运行live，最新full没有PASS。full独立工作树的58normal/57production
+test层仅从严格当前输入证明objects迁移，未虚报fresh编译。
+
+私有数组23native和4scopedSAN为0，16whole为15pass/1原view-trigger超时；
+旧同脚本失败、strict180006完整绿保留。当前trace证实trigger抛23514后未
+恢复outer session，下一条SQL访问已析构local session；独立修复仍WIP。
+Snapshot20native/12whole/4scopedSAN和严格四连接PG18真实export/import为0；
+reference-only不计project协议实现。Routine九完整native/strict18为0，PG
+拒绝原project表达式body42601与独立标准SELECT-body positive分别保留。
+
+旧1d25 focused两wrapper终态127，已完成99native为98pass/1arrayseed失败，
+实际frontend0；48whole为39pass/9原deadline timeouts。外部helper运行中被
+改写引发末尾读offset `_tests.sh` 错误，日志保留，非production失败或全绿。
+新helpers启动后冻结不改。旧full36568/79042终态1；另外七full实际handle
+still live，详细见integration，不因观察时间到而kill/restart。
+
+namespace完整owner/committed-clean peer/domain外列保行CASCADE、真实timeline2
+备份archive恢复与trigger清理继续；WITH-DML和OPT-16所有原options/formats/
+instrumentation、catalog WAL/MVCC、存储/类型/查询/恢复/运维等原273未闭环
+要求没有缩小。总账仍**22complete/166partial/70unverified/15deferred**；
+完成gate继续拒绝。不push、不启用Actions、不恢复用户跳过安全/TDE。
+
+# 2026-10-07 历史1d25总清单 checkpoint
 
 生产/测试source `1d25a253`：**680 auto-native +1真实frontend native /
 347registered/58TU**，累计67项独立source/test commit。glob之外的同main-TU
