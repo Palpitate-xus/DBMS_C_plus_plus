@@ -15891,7 +15891,9 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
 }
 
 // Expand IN (...) / EXISTS (...) / ANY / ALL subqueries into plain conditions
-static std::string expandSubqueries(std::string sql, Session& s) {
+static std::string expandSubqueries(std::string sql, Session& s,
+                                   bool retainLiteralLists = false,
+                                   bool* retainedLiteralList = nullptr) {
     // ---------- SCALAR (single-value) ----------
     // "v > (SELECT min(v) FROM t)": execute the inner query once and
     // substitute its first row's first cell as a literal.  Numeric output
@@ -16049,9 +16051,10 @@ static std::string expandSubqueries(std::string sql, Session& s) {
     }
 
     // ---------- IN / NOT IN ----------
+    size_t listSearch = 0;
     while (true) {
         auto findListPredicate = [&](const std::string& key) {
-            size_t from = 0;
+            size_t from = listSearch;
             while (true) {
                 size_t p = findKeywordOutsideQuotes(sql, key, from);
                 if (p == string::npos) return p;
@@ -16093,6 +16096,13 @@ static std::string expandSubqueries(std::string sql, Session& s) {
 
         std::string inner = trim(sql.substr(parenStart + 1, parenEnd - parenStart - 1));
         std::vector<std::string> values;
+        if(retainLiteralLists && !(inner.size()>=6 && inner.substr(0,6)=="select")) {
+            // Literal IN is one typed SQL expression, not independent scan
+            // branches. Keep member type/NULL/empty data and one global sort.
+            if(retainedLiteralList)*retainedLiteralList=true;
+            listSearch=parenEnd+1;
+            continue;
+        }
         if (inner.size() >= 6 && inner.substr(0, 6) == "select") {
             values = runSubQuery(inner, s);
         } else {
@@ -33066,11 +33076,12 @@ static bool executeInternal(const string& rawSql, Session& s) {
             } else if (structuredQuantified) {
                 quantifiedSubqueries.push_back(std::move(quantified));
             } else {
-                whereClause = expandSubqueries(whereClause, s);
+                bool retainedLiteralList=false;
+                whereClause = expandSubqueries(whereClause, s, true, &retainedLiteralList);
                 bool immutableConstant = false;
                 bool unknownNullPredicate = false;
                 if (hasComputedPredicate(whereClause, &immutableConstant, &unknownNullPredicate) ||
-                    !exprOrderBySpecs.empty() || typedQualifiedPredicate) {
+                    !exprOrderBySpecs.empty() || typedQualifiedPredicate || retainedLiteralList) {
                     if (immutableConstant) {
                         // PostgreSQL checks immutable constant expressions even
                         // when no rows exist. Bind the boolean result first.
@@ -33086,6 +33097,19 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         if (unknownNullPredicate && !result.isNull)
                             throw std::runtime_error(
                                 "argument of WHERE must be type boolean (SQLSTATE 42804)");
+                    }
+                    if(retainedLiteralList) {
+                        // Resolve the original typed list before opening a
+                        // cursor: invalid signatures also reject empty scans.
+                        dbms::SQLParser parser;
+                        auto prepared=parser.parse("SELECT "+whereClause);
+                        auto* select=prepared.success?dynamic_cast<dbms::SelectStmt*>(prepared.stmt.get()):nullptr;
+                        if(!select || select->selectList.size()!=1 || select->fromClause)
+                            throw dbms::DbError("42601","invalid literal IN predicate");
+                        map<string,string> hints;
+                        for(size_t i=0;i<tbl.len;++i)
+                            hints[tbl.cols[i].dataName]=tbl.cols[i].dataType+(tbl.cols[i].isArray?"[]":"");
+                        dbms::ExprHelper::prepareArrayTypes(select->selectList.front().expr.get(),hints,queryDb,&g_engine);
                     }
                     // Keep grouping, quoted RHS values and lazy branches as
                     // one typed predicate instead of legacy per-token atoms.

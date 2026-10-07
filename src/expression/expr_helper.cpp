@@ -1610,22 +1610,33 @@ void ExprHelper::prepareArrayTypes(Expr* expression,
             const bool bitOperand=leftType=="bit" || leftType=="bit varying" ||
                                   rightType=="bit" || rightType=="bit varying";
             static const std::set<std::string> comparisons={"=","<>","!=","<",">","<=",">="};
+            const auto unknownInput=[&](ExprPtr& operand,const std::string& source,const std::string& target) {
+                if(source!="unknown")return;
+                auto conversion=std::make_unique<CastExpr>();
+                conversion->typeName=target;conversion->implicit=true;
+                conversion->sourceBegin=operand->sourceBegin;conversion->sourceEnd=operand->sourceEnd;
+                conversion->operand=std::move(operand);
+                if(const auto* literal=dynamic_cast<const LiteralExpr*>(conversion->operand.get());
+                   literal && literal->typeName.empty() && !literal->preparedSubquery) {
+                    ExprEvaluator pure;(void)pure.eval(conversion.get(),RowContext{});
+                }
+                operand=std::move(conversion);
+            };
             if(bitOperand && comparisons.count(operation)) {
                 const auto comparison=ExprEvaluator::resolveComparison(operation,leftType,rightType);
-                const auto unknownInput=[&](ExprPtr& operand,const std::string& source,const std::string& target) {
-                    if(source!="unknown")return;
-                    auto conversion=std::make_unique<CastExpr>();
-                    conversion->typeName=target;conversion->implicit=true;
-                    conversion->sourceBegin=operand->sourceBegin;conversion->sourceEnd=operand->sourceEnd;
-                    conversion->operand=std::move(operand);
-                    if(const auto* literal=dynamic_cast<const LiteralExpr*>(conversion->operand.get());
-                       literal && literal->typeName.empty() && !literal->preparedSubquery) {
-                        ExprEvaluator pure;(void)pure.eval(conversion.get(),RowContext{});
-                    }
-                    operand=std::move(conversion);
-                };
                 unknownInput(binary->left,leftType,comparison.leftType);
                 unknownInput(binary->right,rightType,comparison.rightType);
+            }
+            if((operation=="in" || operation=="not in") && dynamic_cast<RowExpr*>(binary->right.get())) {
+                auto* list=static_cast<RowExpr*>(binary->right.get());
+                for(auto& member:list->elements) {
+                    const auto memberType=canonicalResultTypeName(type(member.get()));
+                    if(leftType!="bit" && leftType!="bit varying" &&
+                       memberType!="bit" && memberType!="bit varying")continue;
+                    const auto comparison=ExprEvaluator::resolveComparison("=",leftType,memberType);
+                    unknownInput(binary->left,leftType,comparison.leftType);
+                    unknownInput(member,memberType,comparison.rightType);
+                }
             }
             if (operation=="like" || operation=="not like" || operation=="ilike" ||
                 operation=="not ilike" || operation=="similar to" || operation=="not similar to")

@@ -500,6 +500,18 @@ public:
                 coerceCaseInput(binary->left,left,comparison.leftType);
                 coerceCaseInput(binary->right,right,comparison.rightType);
             }
+            const auto operation=SQLParser::toLower(binary->op);
+            if((operation=="in" || operation=="not in") && dynamic_cast<RowExpr*>(binary->right.get())) {
+                auto* list=static_cast<RowExpr*>(binary->right.get());
+                for(auto& member:list->elements) {
+                    const auto memberType=ExprHelper::canonicalResultTypeName(ExprHelper::inferParsedInputType(member.get(),{}));
+                    if(leftBase!="bit" && leftBase!="bit varying" &&
+                       memberType!="bit" && memberType!="bit varying")continue;
+                    const auto comparison=ExprEvaluator::resolveComparison("=",left,memberType);
+                    coerceCaseInput(binary->left,left,comparison.leftType);
+                    coerceCaseInput(member,memberType,comparison.rightType);
+                }
+            }
             return predicates.count(binary->op) ? "boolean" : left;
         }
         case ExprType::QuantifiedComparison: {
