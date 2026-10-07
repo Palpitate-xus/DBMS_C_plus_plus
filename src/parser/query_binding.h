@@ -93,6 +93,10 @@ struct PreparedQuery {
     // Inline-left and wrapped set queries retain their original AST shape.
     // An executor must not invent a replacement SELECT by rendering SQL.
     std::map<const SelectStmt*, SetOperationInputs> setOperationInputs;
+    // Global set ORDER keys refer to genuine expanded output ordinals, not
+    // branch source columns or an invented SQL range. The vector follows the
+    // actual root's retained orderBy entries and is bound before execution.
+    std::map<const SelectStmt*, std::vector<size_t>> setOrderColumns;
     // Transitional adapter for dispatchers that still parse SQL strings.
     // Encoding is permitted only after whole-tree preparation has succeeded.
     std::string legacySql() const;

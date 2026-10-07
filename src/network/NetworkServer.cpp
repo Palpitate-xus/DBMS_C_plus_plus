@@ -1612,11 +1612,56 @@ bool describePreparedSetResult(const std::string& sql, Session& session,
                                std::vector<PgColumnDescription>& columns) {
     SQLParser parser;
     const auto probe = parser.parseForBinding(sql);
+    if(!probe.isValid()) {
+        int depth=0;
+        for(const auto& token:SQLParser::tokenize(sql)) {
+            if(token=="("){++depth;continue;}if(token==")"){--depth;continue;}
+            const auto word=SQLParser::toLower(token);
+            if(!depth && (word=="union" || word=="intersect" || word=="except"))
+                throw DbError("42601",probe.error);
+        }
+    }
     const Stmt* statement = probe.isValid() ? probe.stmt.get() : nullptr;
     if (const auto* with = dynamic_cast<const WithStmt*>(statement))
         statement = with->statement.get();
     const auto* select = dynamic_cast<const SelectStmt*>(statement);
-    if (!select || select->setOp == SetOp::None) return false;
+    if (!select) return false;
+    std::function<bool(const SelectStmt*)> setQuery;
+    std::function<bool(const Expr*)> setValue = [&](const Expr* value) {
+        if (!value) return false;
+        if (const auto* child = dynamic_cast<const SelectStmt*>(value->preparedSubquery.get()))
+            return setQuery(child);
+        if (const auto* literal = dynamic_cast<const LiteralExpr*>(value)) {
+            // This is the parser's SQL-child grammar envelope, not arbitrary
+            // string data or a search for UNION in rendered expression text.
+            const auto origin = SQLParser::tokenize(literal->value);
+            if (origin.size()>1 && origin.front()=="(" &&
+                (SQLParser::toLower(origin[1])=="select" || SQLParser::toLower(origin[1])=="with")) {
+                const auto parsedChild=parser.parseForBinding(literal->value);
+                return parsedChild.isValid() && setQuery(dynamic_cast<const SelectStmt*>(parsedChild.stmt.get()));
+            }
+        } else if (const auto* binary=dynamic_cast<const BinaryOpExpr*>(value))return setValue(binary->left.get()) || (binary->op!="::" && setValue(binary->right.get()));
+        else if (const auto* quantified=dynamic_cast<const QuantifiedComparisonExpr*>(value))return setValue(quantified->left.get()) || setValue(quantified->right.get());
+        else if (const auto* unary=dynamic_cast<const UnaryOpExpr*>(value))return setValue(unary->operand.get());
+        else if (const auto* cast=dynamic_cast<const CastExpr*>(value))return setValue(cast->operand.get());
+        else if (const auto* call=dynamic_cast<const FunctionCallExpr*>(value)) {
+            for (const auto& arg:call->args)if(setValue(arg.get()))return true;
+            for (const auto& arg:call->namedArgs)if(setValue(arg.value.get()))return true;
+        } else if (const auto* conditional=dynamic_cast<const CaseExpr*>(value)) {
+            if(setValue(conditional->switchExpr.get()) || setValue(conditional->elseExpr.get()))return true;
+            for(const auto& arm:conditional->whenClauses)if(setValue(arm.first.get()) || setValue(arm.second.get()))return true;
+        } else if(const auto* array=dynamic_cast<const ArrayExpr*>(value)) {
+            for(const auto& cell:array->elements)if(setValue(cell.get()))return true;
+        }
+        return false;
+    };
+    setQuery = [&](const SelectStmt* query) {
+        if(!query)return false;
+        if(query->setOp!=SetOp::None)return true;
+        for(const auto& item:query->selectList)if(setValue(item.expr.get()))return true;
+        return setValue(query->whereClause.get());
+    };
+    if(!setQuery(select))return false;
     // The completed whole-tree binder owns common output types, UNKNOWN
     // input conversion and every branch namespace. Neither a left target
     // nor a source row is an authoritative set-query descriptor.

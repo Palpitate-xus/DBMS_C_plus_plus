@@ -74,6 +74,7 @@ public:
     std::vector<const Stmt*> statementOwners;
     std::vector<const Ctes*> cteScopes;
     std::map<const Stmt*, std::vector<const Expr*>> projectionLeaves;
+    const QueryRowDescriptor* setOrderScope = nullptr;
     Binder(const std::string& sql, const std::vector<QueryBindingDatum>& values,
            const QueryBindingMetadata& descriptions) : datums(values), metadata(descriptions) {
         result.source = sql;
@@ -207,6 +208,17 @@ public:
         case ExprType::ColumnRef: {
             auto* column = static_cast<ColumnRefExpr*>(node.get());
             if (column->column == "*") return "record";
+            if (setOrderScope) {
+                if (!column->table.empty() || !column->schema.empty())
+                    throw DbError("42P01", "set ORDER BY has no branch FROM namespace");
+                const QueryOutputColumn* found = nullptr;
+                for (const auto& output : *setOrderScope) if (output.name == column->column) {
+                    if (found) throw DbError("42702", "ORDER BY name is ambiguous");
+                    found = &output;
+                }
+                if (!found) throw DbError("42703", "ORDER BY column does not exist: " + column->column);
+                return found->type;
+            }
             const QueryBindingDatum* datum = nullptr;
             for (const auto& candidate : datums) {
                 if (candidate.name != column->column) continue;
@@ -616,6 +628,11 @@ public:
             else if(const auto label=projectionLabel(item.expr.get());label.second)name=label.first;
             const bool queryTarget=!statementOwners.empty() && statementOwners.back()->command==SqlCommand::Select;
             const auto type = expression(item.expr, scopes,{},queryTarget);
+            if(item.alias.empty() && item.expr->preparedSubquery) {
+                const auto child=result.statementOutputs.find(item.expr->preparedSubquery.get());
+                if(child!=result.statementOutputs.end() && child->second.size()==1)
+                    name=child->second.front().name;
+            }
             if (columnLabel && item.alias.empty() && item.expr->type == ExprType::Parameter) {
                 if (item.sourceExpressionEnd == std::string::npos)
                     throw DbError("XX000", "projection has no source provenance");
@@ -836,6 +853,43 @@ public:
             output[i].type=common;
         }
         result.setOperationInputs[&select]={std::move(left),std::move(right)};
+        if(select.withTies && select.orderBy.empty())throw DbError("42601","WITH TIES cannot be specified without ORDER BY");
+        auto& keys = result.setOrderColumns[&select];
+        for (auto& order : select.orderBy) {
+            // Transform names, routine signatures and analysis-time inputs
+            // before rejecting an additional expression as a set sort key.
+            // This scope is the genuine set output descriptor; no physical
+            // source occurrence or executable datum is fabricated.
+            const auto previous=setOrderScope;setOrderScope=&output;
+            struct RestoreOrderScope { const QueryRowDescriptor*& slot;const QueryRowDescriptor* previous;~RestoreOrderScope(){slot=previous;} } guard{setOrderScope,previous};
+            expression(order.expr,{});
+            const auto* column = dynamic_cast<const ColumnRefExpr*>(order.expr.get());
+            const auto* literal = dynamic_cast<const LiteralExpr*>(order.expr.get());
+            size_t ordinal = output.size();
+            if (column) {
+                if (!column->schema.empty() || !column->table.empty())
+                    throw DbError("42P01", "set ORDER BY has no branch FROM namespace");
+                for (size_t i=0;i<output.size();++i) if (output[i].name == column->column) {
+                    if (ordinal != output.size()) throw DbError("42702", "ORDER BY name is ambiguous");
+                    ordinal = i;
+                }
+                if (ordinal == output.size()) throw DbError("42703", "ORDER BY column does not exist: " + column->column);
+            } else if (literal && literal->typeName.empty() && !literal->preparedSubquery &&
+                       !literal->value.empty() && std::all_of(literal->value.begin(),literal->value.end(),
+                           [](unsigned char value){return value>='0' && value<='9';})) {
+                size_t position = 0;
+                for (const auto value : literal->value) {
+                    if (position > output.size()) break;
+                    position = position * 10 + size_t(value-'0');
+                }
+                if (!position || position > output.size()) throw DbError("42P10", "ORDER BY position is not in select list");
+                ordinal = position-1;
+            } else if (literal && !literal->preparedSubquery && literal->typeName.empty()) {
+                if(decimalIntegerConstant(literal->value))throw DbError("42P10","ORDER BY position is not in select list");
+                throw DbError("42601","non-integer constant in ORDER BY");
+            } else throw DbError("0A000", "invalid UNION/INTERSECT/EXCEPT ORDER BY clause");
+            keys.push_back(ordinal);
+        }
         return output;
     }
     QueryRowDescriptor statementImpl(Stmt& node, const std::vector<Namespace>& outer, Ctes ctes) {

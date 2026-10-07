@@ -3089,6 +3089,78 @@ static std::unique_ptr<FromItem> parseDmlSourceList(const std::vector<std::strin
     return source;
 }
 
+// Clauses outside a parenthesized query or after a complete set expression
+// belong to that query root, not the rightmost SELECT body. This helper
+// consumes the original token stream so expression byte provenance survives.
+static std::string parseQueryRootClauses(const std::vector<std::string>& tokens,
+                                        size_t& pos, SelectStmt& statement) {
+    const auto word = [&](size_t index) { return index < tokens.size() ? SQLParser::toLower(tokens[index]) : std::string{}; };
+    if (word(pos) == "order") {
+        if (!statement.orderBy.empty()) return "multiple ORDER BY clauses";
+        ++pos;
+        if (word(pos) != "by") return "ORDER requires BY";
+        ++pos;
+        while (pos < tokens.size()) {
+            const auto next = word(pos);
+            if (next == "limit" || next == "offset" || next == "fetch" || next == "for" || tokens[pos] == ";") break;
+            auto expression = parseSimpleExpr(tokens, pos);
+            if (!expression) return "ORDER BY requires an expression";
+            bool ascending = true;
+            if (word(pos) == "asc") ++pos;
+            else if (word(pos) == "desc") { ascending = false; ++pos; }
+            statement.orderBy.push_back({std::move(expression), ascending, !ascending, ""});
+            if (word(pos) == "nulls") {
+                ++pos;
+                if (word(pos) == "first") { statement.orderBy.back().nullsFirst = true; ++pos; }
+                else if (word(pos) == "last") { statement.orderBy.back().nullsFirst = false; ++pos; }
+                else return "NULLS requires FIRST or LAST";
+            }
+            if (pos < tokens.size() && tokens[pos] == ",") { ++pos; continue; }
+            break;
+        }
+        if (statement.orderBy.empty() || (pos && tokens[pos - 1] == ",")) return "ORDER BY requires an expression";
+    }
+    bool sawLimit = statement.limit.has_value(), sawOffset = statement.offset.has_value();
+    while (pos < tokens.size()) {
+        const auto clause = word(pos);
+        if (clause == "limit") {
+            if (sawLimit) return "multiple LIMIT/FETCH clauses";
+            sawLimit = true; ++pos;
+            if (word(pos) == "all") ++pos;
+            else {
+                size_t count = 0;
+                if (!parseNonNegativeInteger(tokens, pos, count)) return "LIMIT requires a non-negative integer or ALL";
+                statement.limit = count;
+            }
+        } else if (clause == "offset") {
+            if (sawOffset) return "multiple OFFSET clauses";
+            sawOffset = true; ++pos;
+            size_t count = 0;
+            if (!parseNonNegativeInteger(tokens, pos, count)) return "OFFSET requires a non-negative integer";
+            statement.offset = count;
+            if (word(pos) == "row" || word(pos) == "rows") ++pos;
+        } else if (clause == "fetch") {
+            if (sawLimit) return "multiple LIMIT/FETCH clauses";
+            sawLimit = true; ++pos;
+            if (word(pos) != "first" && word(pos) != "next") return "FETCH requires FIRST or NEXT";
+            ++pos; statement.fetchFirst = true;
+            if (word(pos) == "row" || word(pos) == "rows") statement.limit = 1;
+            else {
+                size_t count = 0;
+                if (!parseNonNegativeInteger(tokens, pos, count)) return "FETCH requires a non-negative integer count";
+                statement.limit = count;
+            }
+            if (word(pos) != "row" && word(pos) != "rows") return "FETCH count must be followed by ROW or ROWS";
+            ++pos;
+            if (word(pos) == "only") ++pos;
+            else if (word(pos) == "with" && word(pos + 1) == "ties") { statement.withTies = true; pos += 2; }
+            else return "FETCH requires ONLY or WITH TIES";
+        } else break;
+    }
+    while (pos < tokens.size() && tokens[pos] == ";") ++pos;
+    return pos == tokens.size() ? std::string{} : "unexpected token after query expression: " + tokens[pos];
+}
+
 ParseResult SQLParser::parseSelect(const std::string& sql) {
     ParseResult r;
     auto tokens = tokenize(sql);
@@ -3114,13 +3186,21 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
             return r;
         }
 
+        size_t tail = tokens.size();
+        int tailDepth = 0;
+        for (size_t index = rhsBegin; index < tokens.size(); ++index) {
+            if (tokens[index] == "(") { ++tailDepth; continue; }
+            if (tokens[index] == ")") { --tailDepth; continue; }
+            const auto word = toLower(tokens[index]);
+            if (!tailDepth && (word == "order" || word == "limit" || word == "offset" || word == "fetch" || word == "for")) { tail = index; break; }
+        }
         const auto leftSql = joinParserTokens(tokens, 0, setLocation.position);
         ParseResult left = bindingParse ? parse(leftSql) : parseSelect(leftSql);
         if (!left.success || !left.stmt) {
             r.error = left.error.empty() ? "invalid left set-operation operand" : left.error;
             return r;
         }
-        const auto rightSql = joinParserTokens(tokens, rhsBegin, tokens.size());
+        const auto rightSql = joinParserTokens(tokens, rhsBegin, tail);
         ParseResult right = bindingParse ? parse(rightSql) : parseSelect(rightSql);
         if (!right.success || !right.stmt) {
             r.error = right.error.empty() ? "invalid right set-operation operand" : right.error;
@@ -3131,7 +3211,12 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
             r.error = "set operation operand must be SELECT";
             return r;
         }
-        if (leftSelect->setOp == SetOp::None && !leftSelect->setOpLhs) {
+        if (tokens.front() != "(" && (!leftSelect->orderBy.empty() || leftSelect->limit || leftSelect->offset || !leftSelect->locking.empty())) {
+            r.error = "set operand with ORDER/LIMIT requires parentheses";
+            return r;
+        }
+        if (tail == tokens.size() && leftSelect->setOp == SetOp::None && !leftSelect->setOpLhs &&
+            leftSelect->orderBy.empty() && !leftSelect->limit && !leftSelect->offset && leftSelect->locking.empty()) {
             leftSelect->setOp = setLocation.op;
             leftSelect->setOpAll = setLocation.all;
             leftSelect->setOpRhs = std::move(right.stmt);
@@ -3144,11 +3229,33 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
         auto wrapper = std::make_unique<SelectStmt>();
         wrapper->setOp = setLocation.op;
         wrapper->setOpAll = setLocation.all;
+        wrapper->ctes = std::move(leftSelect->ctes);
         wrapper->setOpLhs = std::move(left.stmt);
         wrapper->setOpRhs = std::move(right.stmt);
+        if (tail < tokens.size()) {
+            size_t position = tail;
+            r.error = parseQueryRootClauses(tokens, position, *wrapper);
+            if (!r.error.empty()) return r;
+        }
         r.success = true;
         r.stmt = std::move(wrapper);
         return r;
+    }
+
+    if (tokens.front() == "(") {
+        size_t closing = 0; int nesting = 0;
+        for (; closing < tokens.size(); ++closing) {
+            if (tokens[closing] == "(") ++nesting;
+            else if (tokens[closing] == ")" && --nesting == 0) break;
+        }
+        if (closing == tokens.size()) { r.error = "unterminated parenthesized query"; return r; }
+        auto child = parse(joinParserTokens(tokens, 1, closing));
+        auto* query = child.isValid() ? dynamic_cast<SelectStmt*>(child.stmt.get()) : nullptr;
+        if (!query) { r.error = child.error.empty() ? "parenthesized query requires SELECT/VALUES" : child.error; return r; }
+        size_t position = closing + 1;
+        r.error = parseQueryRootClauses(tokens, position, *query);
+        if (!r.error.empty()) return r;
+        return child;
     }
 
     auto stmt = std::make_unique<SelectStmt>();
