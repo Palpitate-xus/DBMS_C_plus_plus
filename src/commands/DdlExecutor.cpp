@@ -43,6 +43,17 @@ namespace dbms {
 
 namespace {
 
+struct DdlSourceIdentity {
+    const Stmt* statement = nullptr;
+    const std::string* source = nullptr;
+};
+thread_local DdlSourceIdentity ddlSourceIdentity;
+struct DdlSourceScope {
+    DdlSourceIdentity prior = ddlSourceIdentity;
+    DdlSourceScope(const Stmt* statement,const std::string& source) { ddlSourceIdentity={statement,&source}; }
+    ~DdlSourceScope() { ddlSourceIdentity=prior; }
+};
+
 std::string toLower(std::string s) {
     std::transform(s.begin(), s.end(), s.begin(),
                    [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
@@ -1710,13 +1721,15 @@ bool DdlExecutor::execute(const StmtPtr& stmt, Session& s) {
 
 bool DdlExecutor::executeSql(const std::string& sql, Session& s) {
     SQLParser parser;
-    ParseResult r = parser.parse(sql);
+    ParseResult r = SQLParser::classify(sql)==SqlCommand::AlterTable
+        ? parser.parseForBinding(sql) : parser.parse(sql);
     if (!r.success || !r.stmt) {
         std::cout << "SQL syntax error";
         if (!r.error.empty()) std::cout << ": " << r.error;
         std::cout << " (SQLSTATE 42601)" << std::endl;
         return true;
     }
+    DdlSourceScope sourceScope(r.stmt.get(),sql);
     return execute(r.stmt, s);
 }
 
@@ -1791,11 +1804,13 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         parsedCmd == dbms::SqlCommand::DropFunction ||
         parsedCmd == dbms::SqlCommand::CreateProcedure ||
         parsedCmd == dbms::SqlCommand::DropProcedure ||
-        parsedCmd == dbms::SqlCommand::DropRoutine;
+        parsedCmd == dbms::SqlCommand::DropRoutine ||
+        parsedCmd == dbms::SqlCommand::AlterTable;
     const std::string& parseInput = preservesLiteralText && !rawSql.empty()
         ? rawSql : sql;
     dbms::SQLParser parser;
-    dbms::ParseResult r = parser.parse(parseInput);
+    dbms::ParseResult r = parsedCmd==dbms::SqlCommand::AlterTable
+        ? parser.parseForBinding(parseInput) : parser.parse(parseInput);
     if (!r.success || !r.stmt) {
         // A bridge-owned command must fail closed. Falling back after a parse
         // error can execute a different legacy interpretation.
@@ -1857,6 +1872,7 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         }
     }
     dbms::DdlExecutor ddlExec;
+    DdlSourceScope sourceScope(r.stmt.get(),parseInput);
     return ddlExec.execute(r.stmt, s); // false=success, true=error
 }
 
@@ -2390,8 +2406,18 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                         sub.identityAction, sub.identityKind,
                         sub.identityIfExists);
                 } else if (sub.defaultValue) {
+                    std::string definition=sub.defaultValue->toString();
+                    if(ddlSourceIdentity.statement==stmt && ddlSourceIdentity.source) {
+                        const auto begin=sub.defaultValue->sourceBegin,end=sub.defaultValue->sourceEnd;
+                        if(begin==std::string::npos || begin>=end || end>ddlSourceIdentity.source->size())
+                            throw DbError("XX000","ALTER DEFAULT lost its original value-expression span");
+                        // Preserve the actual SQL components/modifiers. The
+                        // old pretty printer discards a nested routine's
+                        // schema; it is not a persistent expression codec.
+                        definition=ddlSourceIdentity.source->substr(begin,end-begin);
+                    }
                     status = g_engine.alterTableSetDefault(s.currentDB, tableName,
-                                                            sub.name, sub.defaultValue->toString());
+                                                            sub.name, definition);
                 } else if (sub.dropDefault) {
                     status = g_engine.alterTableDropDefault(s.currentDB, tableName, sub.name);
                 } else if (sub.setNotNull) {
