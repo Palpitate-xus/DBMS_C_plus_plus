@@ -355,7 +355,7 @@ public:
         auto result = node(Node::Sequence); result->children.push_back(alternative());
         size_t separators = 0;
         while (separator()) {
-            if (++separators > 2) throw DbError("2200B", "too many SQL pattern quote separators");
+            if (++separators > 2) throw DbError("2200C", "too many SQL pattern quote separators");
             ++position_;
             if (separators == 1) {
                 auto captured = node(Node::Capture); captured->children.push_back(alternative());
