@@ -587,16 +587,13 @@ static bool isInetTypeName(const std::string& typeName) {
     return type == "inet" || type == "cidr";
 }
 
-static bool decodeBitStringLiteral(const std::string& input,
-                                   std::string& bits) {
-    if (input.size() < 3 || input[1] != '\'' || input.back() != '\'' ||
-        (input[0] != 'B' && input[0] != 'b' &&
-         input[0] != 'X' && input[0] != 'x')) {
-        return false;
-    }
-    const std::string body = input.substr(2, input.size() - 3);
+static bool decodeBitStringInput(const std::string& input,
+                                 std::string& bits) {
+    const bool hexadecimal = !input.empty() && (input.front() == 'x' || input.front() == 'X');
+    const bool prefixed = hexadecimal || (!input.empty() && (input.front() == 'b' || input.front() == 'B'));
+    const std::string body = input.substr(prefixed ? 1 : 0);
     bits.clear();
-    if (input[0] == 'B' || input[0] == 'b') {
+    if (!hexadecimal) {
         if (body.size() > kMaxSupportedBitStringLength) return false;
         for (char bit : body) {
             if (bit != '0' && bit != '1') return false;
@@ -617,6 +614,14 @@ static bool decodeBitStringLiteral(const std::string& input,
         }
     }
     return true;
+}
+
+static bool decodeBitStringLiteral(const std::string& input,
+                                   std::string& bits) {
+    if (input.size() < 3 || input[1] != '\'' || input.back() != '\'' ||
+        (input[0] != 'B' && input[0] != 'b' &&
+         input[0] != 'X' && input[0] != 'x')) return false;
+    return decodeBitStringInput(input.substr(0,1) + input.substr(2,input.size()-3),bits);
 }
 
 static std::string unquote(const std::string& s) {
@@ -4399,9 +4404,8 @@ ExprValue ExprEvaluator::evalCast(const CastExpr* e, const RowContext& ctx) cons
         if (e->implicit && e->typeMods.empty()) {
             const auto target = ExprHelper::canonicalResultTypeName(e->typeName);
             if (target == "character" || target == "bpchar" || target == "bit") {
-                if (target == "bit" && !v.isNull &&
-                    std::any_of(v.value.begin(),v.value.end(),[](char c){return c!='0' && c!='1';}))
-                    throw DbError("22P02","invalid input syntax for type bit");
+                if (target == "bit")
+                    v = evalCast(nullptr,ctx,v,"bit varying");
                 v.typeName = target;
                 return v;
             }
@@ -4505,7 +4509,9 @@ static ExprValue castToBitString(const ExprValue& value,
             bits.push_back(one ? '1' : '0');
         }
     } else {
-        bits = value.value;
+        if (isBitStringTypeName(value.typeName)) bits = value.value;
+        else if (!decodeBitStringInput(value.value,bits))
+            throw DbError("22P02", "invalid input syntax for type bit");
         if (bits.size() > kMaxSupportedBitStringLength ||
             std::any_of(bits.begin(), bits.end(),
                         [](char bit) { return bit != '0' && bit != '1'; })) {

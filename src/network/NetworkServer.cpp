@@ -918,8 +918,11 @@ std::string protocolParameterLiteral(uint32_t typeOid,
         return value;
     }
     if (typeOid == 1560 || typeOid == 1562) {
-        if (std::any_of(value.begin(), value.end(),
-                        [](char bit) { return bit != '0' && bit != '1'; })) {
+        try {
+            ExprEvaluator codec;
+            const auto binding=ExprEvaluator::resolveComparison("=","unknown","bit");
+            value=codec.coerceComparison(binding,ExprValue("unknown",value),true).value;
+        } catch (const DbError&) {
             error = "invalid input syntax for type bit";
             return {};
         }

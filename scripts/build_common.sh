@@ -55,6 +55,8 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/bit_unknown_mixed_list_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/bit_mixed_list_admission_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/bit_unknown_mixed_list_length_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/bit_text_input_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/bit_text_parameter_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/prepared_primitive_assignment_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/cte_clause_boundary_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/cte_relation_scope_protocol_e2e_test.py)
