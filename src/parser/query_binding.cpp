@@ -927,7 +927,15 @@ public:
             checkRangeConflicts({target}, ranges);
             ranges.insert(ranges.begin(), target);
             auto scopes = outer; scopes.insert(scopes.begin(), std::move(ranges));
-            expression(remove->whereClause, scopes);
+            const auto condition=expression(remove->whereClause,scopes);
+            if(remove->whereClause) {
+                const auto type=common_type_detail::canonical(condition);
+                if(type!="unknown" && type!="boolean")
+                    throw DbError("42804","argument of WHERE must be type boolean");
+                // DELETE has the same analysis-time predicate context as
+                // SELECT/UPDATE, before RETURNING names or target execution.
+                coerceCaseInput(remove->whereClause,condition,"boolean");
+            }
             return returning(remove->returning,remove->returningOptions,scopes.front().front(),scopes);
         }
         if (auto* explain = dynamic_cast<ExplainStmt*>(&node)) {
