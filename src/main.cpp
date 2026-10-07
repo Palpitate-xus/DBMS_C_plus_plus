@@ -20014,29 +20014,39 @@ class PreparedWithDmlRuntime {
         };
     }
     dbms::OpPtr selectPlan(dbms::SelectStmt* select,const dbms::RowContext& outer,Frames frames,
-                          bool rootDefinitionsProvided=false,bool planRootConstants=false) {
+                          bool rootDefinitionsProvided=false,bool planRootConstants=false,
+                          dbms::QueryPlanner::PreparedExecutionProvider executionProvider={},bool selectBodyOnly=false) {
         if(!rootDefinitionsProvided && !select->ctes.empty() && (frames.empty() ||
             !frames.back()->producers.count(select->ctes.front().query.get())))
             frames.push_back(definitions(select->ctes,outer));
-        if(auto set=dbms::QueryPlanner::buildPreparedSetReturningPlan(&g_engine,session_.currentDB,
+        if(!selectBodyOnly && select->setOp!=dbms::SetOp::None)
+            return dbms::QueryPlanner::buildPreparedUnionAllPlan(&g_engine,session_.currentDB,query_,select,
+                [this,outer,frames](dbms::SelectStmt* branch,bool body,dbms::QueryPlanner::PreparedExecutionProvider owner) {
+                    return selectPlan(branch,outer,frames,false,false,std::move(owner),body);
+                },reader(frames),cursorFactory(frames),true,planRootConstants,std::move(executionProvider));
+        if(!selectBodyOnly)if(auto set=dbms::QueryPlanner::buildPreparedSetReturningPlan(&g_engine,session_.currentDB,
             query_,select,outer,reader(frames),cursorFactory(frames),planRootConstants))return set;
         if(select->command==dbms::SqlCommand::Values) {
-            if(!select->orderBy.empty() || select->whereClause || select->setOp!=dbms::SetOp::None)
+            if(!select->orderBy.empty() || select->whereClause || (!selectBodyOnly && select->setOp!=dbms::SetOp::None))
                 throw dbms::DbError("0A000","WITH VALUES requires additional clause lowering");
-            auto execution=make_shared<dbms::PreparedQueryExecution>(query_,&g_engine,session_.currentDB);
-            execution->setQueryExecutor(reader(frames));
-            execution->setChildCursorFactory(cursorFactory(frames));
-            if(planRootConstants)execution->planStatementConstants(select);
+            auto execution=executionProvider?executionProvider():make_shared<dbms::PreparedQueryExecution>(query_,&g_engine,session_.currentDB);
+            if(!executionProvider) {
+                execution->setQueryExecutor(reader(frames));
+                execution->setChildCursorFactory(cursorFactory(frames));
+            }
+            if(planRootConstants && !executionProvider)execution->planStatementConstants(select);
             for(auto& row:select->valuesRows)for(auto& value:row)execution->prepareExpression(value.get());
             execution->prepareChildCursors();
-            const auto descriptor=output(select);
-            auto source=make_unique<dbms::PreparedSourceRowsOp>(descriptor,[select,execution,outer,descriptor](size_t index,vector<dbms::ExprValue>& cells){
+            const auto descriptor=selectBodyOnly?query_->setOperationInputs.at(select).left:output(select);
+            auto source=make_unique<dbms::PreparedSourceRowsOp>(descriptor,[select,execution,executionProvider,outer,descriptor](size_t index,vector<dbms::ExprValue>& cells){
                 if(index>=select->valuesRows.size())return false;
                 const auto& expressions=select->valuesRows[index];
                 if(expressions.size()!=descriptor.size())throw dbms::DbError("42601","VALUES rows have different widths");
                 cells.clear();
+                const auto actual=executionProvider?executionProvider():execution;
                 for(size_t i=0;i<expressions.size();++i) {
-                    auto cell=execution->evaluate(expressions[i].get(),outer);
+                    actual->prepareExpression(expressions[i].get());
+                    auto cell=actual->evaluate(expressions[i].get(),outer);
                     // The descriptor supplies the output type, including
                     // contextual unknown literals and genuine SQL NULL.
                     cell.typeName=descriptor[i].type=="unknown"?"text":descriptor[i].type;
@@ -20091,7 +20101,8 @@ class PreparedWithDmlRuntime {
             }
         }
         return dbms::QueryPlanner::buildPreparedSelectPlan(&g_engine,session_.currentDB,query_,select,schema,
-            std::move(source),outer,reader(frames),cursorFactory(frames),true,planRootConstants);
+            std::move(source),outer,reader(frames),cursorFactory(frames),true,planRootConstants,
+            std::move(executionProvider),selectBodyOnly);
     }
     dbms::PreparedChildCursorFactory cursorFactory(const Frames& frames) {
         return [this,frames](const dbms::Stmt* statement,const dbms::RowContext& outer){

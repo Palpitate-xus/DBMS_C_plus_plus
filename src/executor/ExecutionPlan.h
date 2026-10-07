@@ -1308,6 +1308,8 @@ struct PathKey {
 
 class QueryPlanner {
 public:
+    using PreparedExecutionProvider = std::function<std::shared_ptr<PreparedQueryExecution>()>;
+    using PreparedSetBranchFactory = std::function<OpPtr(SelectStmt*, bool, PreparedExecutionProvider)>;
     // Generic scalar SELECT plan over a single physical relation or the
     // one-row, zero-column Result source. Preparation has already validated
     // the complete query namespace; this consumes its retained typed AST.
@@ -1326,11 +1328,22 @@ public:
         const RowContext& outerRow = {}, PreparedChildExecutor childExecutor = {},
         PreparedChildCursorFactory childCursorFactory = {},
         bool cursorOwnsScalarChildren = true,
-        bool planRootConstants = false);
+        bool planRootConstants = false,
+        PreparedExecutionProvider executionProvider = {},
+        bool selectBodyOnly = false);
+    // A typed, lazy UNION ALL over real retained branch/body identities.
+    // Branches borrow one execution-owned carrier, including its planned
+    // copies, original child sites, parameters and per-execution memo.
+    static OpPtr buildPreparedUnionAllPlan(StorageEngine*, const std::string&,
+        std::shared_ptr<PreparedQuery>, SelectStmt*, PreparedSetBranchFactory,
+        PreparedChildExecutor = {}, PreparedChildCursorFactory = {},
+        bool cursorOwnsScalarChildren = true, bool planRootConstants = false,
+        PreparedExecutionProvider executionProvider = {});
     // Compile a retained SELECT/VALUES child; no SQL is rendered/reparsed and
     // source execution is driven only by the returned plan's next().
     static OpPtr buildPreparedQueryPlan(StorageEngine*,const std::string&,
-        std::shared_ptr<PreparedQuery>,const Stmt*,const RowContext& = {});
+        std::shared_ptr<PreparedQuery>,const Stmt*,const RowContext& = {},
+        PreparedExecutionProvider executionProvider = {}, bool selectBodyOnly = false);
     // Query-host set returning roles consume typed datums and emit actual
     // rows. Returns null when the SELECT has no direct set-returning target.
     static OpPtr buildPreparedSetReturningPlan(StorageEngine*,const std::string&,

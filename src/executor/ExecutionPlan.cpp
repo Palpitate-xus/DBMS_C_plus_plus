@@ -115,7 +115,8 @@ struct PreparedSelectState {
     PreparedChildCursorFactory childCursorFactory;
     bool cursorOwnsScalarChildren = true;
     bool planRootConstants = false;
-    std::unique_ptr<PreparedQueryExecution> execution;
+    std::shared_ptr<PreparedQueryExecution> execution;
+    QueryPlanner::PreparedExecutionProvider executionProvider;
     bool executionStarted = false;
     ExprEvaluator evaluator;
     std::vector<Expr*> targets;
@@ -198,14 +199,18 @@ struct PreparedSelectState {
         return value;
     }
     void prepareExecution() {
-        if (execution) return;
-        execution = std::make_unique<PreparedQueryExecution>(query, engine, dbname);
-        execution->setQueryExecutor(childExecutor);
-        execution->setChildCursorFactory(childCursorFactory, cursorOwnsScalarChildren);
+        auto provided = executionProvider ? executionProvider() : nullptr;
+        if (execution && (!executionProvider || execution == provided)) return;
+        if (executionProvider && !provided) throw DbError("XX000","prepared branch lost its execution owner");
+        execution = provided ? std::move(provided) : std::make_shared<PreparedQueryExecution>(query, engine, dbname);
+        if (!executionProvider) {
+            execution->setQueryExecutor(childExecutor);
+            execution->setChildCursorFactory(childCursorFactory, cursorOwnsScalarChildren);
+        }
         // Only the execution root opts into whole-query planning. Child
         // graph construction must not reacquire outputs that root demand
         // already pruned, or plan a child in a discarded CASE arm.
-        if (planRootConstants) execution->planStatementConstants(statement);
+        if (planRootConstants && !executionProvider) execution->planStatementConstants(statement);
         for (auto& target : starTargets)
             execution->prepareProjectionColumn(static_cast<ColumnRefExpr*>(target.get()), statement);
         for (auto* target : targets) execution->prepareExpression(target);
@@ -215,7 +220,7 @@ struct PreparedSelectState {
         execution->prepareChildCursors();
     }
     void beginExecution() {
-        if (executionStarted) execution.reset();
+        if (executionStarted && !executionProvider) execution.reset();
         prepareExecution(); executionStarted = true;
     }
     bool parameterized() const {
@@ -496,7 +501,7 @@ public:
         values_.clear();std::exception_ptr failure;
         // A never-opened metadata graph owns no live child execution. Do
         // not consume its freshly prepared cursor before the first restart.
-        if(childOpened_ && state_->execution)
+        if(childOpened_ && state_->execution && !state_->executionProvider)
             try {state_->execution->closeChildCursors();}catch(...){failure=std::current_exception();}
         try { if (childOpened_) child_->close(); }
         catch (...) {if(!failure)failure=std::current_exception();}
@@ -664,9 +669,11 @@ public:
 };
 }
 
-static bool supportsPreparedSelectShape(const SelectStmt& select, bool allowCtes, bool sourceContexts = false) {
+static bool supportsPreparedSelectShape(const SelectStmt& select, bool allowCtes, bool sourceContexts = false,
+                                       bool selectBodyOnly = false) {
     if (select.command != SqlCommand::Select || (!allowCtes && !select.ctes.empty()) ||
-        select.setOp != SetOp::None || select.setOpLhs || select.setOpRhs ||
+        (!selectBodyOnly && (select.setOp != SetOp::None || select.setOpLhs || select.setOpRhs)) ||
+        (selectBodyOnly && (select.setOp != SetOp::Union || !select.setOpAll || select.setOpLhs || !select.setOpRhs)) ||
         !select.groupBy.empty() || !select.groupByElems.empty() || select.having ||
         !select.windowDefs.empty() || !select.distinctOn.empty() ||
         !select.locking.empty() || select.withTies) return false;
@@ -725,8 +732,8 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
     SelectStmt* select, const TableSchema& sourceSchema, OpPtr source,
     const RowContext& outerRow, PreparedChildExecutor childExecutor,
     PreparedChildCursorFactory childCursorFactory, bool cursorOwnsScalarChildren,
-    bool planRootConstants) {
-    if (!prepared || !select || !source || !supportsPreparedSelectShape(*select, true, source->supportsPreparedContexts()))
+    bool planRootConstants, PreparedExecutionProvider executionProvider, bool selectBodyOnly) {
+    if (!prepared || !select || !source || !supportsPreparedSelectShape(*select, true, source->supportsPreparedContexts(),selectBodyOnly))
         throw DbError("0A000", "query requires an additional prepared plan lowering");
     const auto output = prepared->statementOutputs.find(select);
     if (output == prepared->statementOutputs.end())
@@ -735,6 +742,12 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
     state->engine = engine; state->dbname = dbname;
     state->query = std::move(prepared); state->statement = select;
     state->output = output->second; state->outerRow = outerRow;
+    if (selectBodyOnly) {
+        const auto inputs=state->query->setOperationInputs.find(select);
+        if(inputs==state->query->setOperationInputs.end())throw DbError("XX000","set body has no bound input descriptor");
+        state->output=inputs->second.left;
+    }
+    state->executionProvider=std::move(executionProvider);
     state->childExecutor = std::move(childExecutor);
     state->planRootConstants = planRootConstants;
     // Keep explicit scalar readers/engine hosts, while quantified children
@@ -859,6 +872,144 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
     return root;
 }
 
+namespace {
+class PreparedAppendOp final : public Operator {
+    OpPtr branches_[2];
+    QueryRowDescriptor inputs_[2], output_;
+    std::function<void()> begin_, finish_;
+    std::vector<ExprValue> values_;
+    size_t branch_=0;
+    bool opened_[2]={false,false}, ownerActive_=false;
+    ExprEvaluator evaluator_;
+    void closeBranch(size_t index) {
+        if(!opened_[index])return;
+        opened_[index]=false;branches_[index]->close();
+    }
+public:
+    PreparedAppendOp(OpPtr left,OpPtr right,QueryRowDescriptor leftInput,
+        QueryRowDescriptor rightInput,QueryRowDescriptor output,
+        std::function<void()> begin,std::function<void()> finish)
+        :output_(std::move(output)),begin_(std::move(begin)),finish_(std::move(finish)) {
+        branches_[0]=std::move(left);branches_[1]=std::move(right);
+        inputs_[0]=std::move(leftInput);inputs_[1]=std::move(rightInput);
+    }
+    ~PreparedAppendOp() override {try{close();}catch(...) {}}
+    bool open() override {
+        OpenInstrument instrument(this);clearError();values_.clear();branch_=0;
+        ownerActive_=true;if(begin_)begin_();
+        opened_[0]=true;
+        if(!branches_[0]->open())return propagateChildError(branches_[0].get(),"typed append left open failed");
+        return true;
+    }
+    bool next(std::string& display) override {
+        NextInstrument instrument(this);checkForQueryInterrupt();
+        while(branch_<2) {
+            std::string ignored;
+            if(branches_[branch_]->next(ignored)) {
+                if(!branches_[branch_]->lastStructuredValues(values_) || values_.size()!=output_.size())
+                    throw DbError("XX000","typed append child lost its declared row");
+                display.clear();
+                for(size_t i=0;i<values_.size();++i) {
+                    const auto source=ExprHelper::canonicalResultTypeName(inputs_[branch_].at(i).type);
+                    const auto target=ExprHelper::canonicalResultTypeName(output_[i].type);
+                    if(ExprHelper::canonicalResultTypeName(values_[i].typeName)!=source)
+                        throw DbError("XX000","typed append child cell differs from its bound input type");
+                    if(source!=target) {
+                        // Convert the genuine typed datum, never its rendered
+                        // row/SQL spelling. NULL and text 'NULL' stay distinct.
+                        CastExpr cast;cast.typeName=target;cast.implicit=true;
+                        auto parameter=std::make_unique<ParameterExpr>();
+                        parameter->slot=0;parameter->declaredType=source;cast.operand=std::move(parameter);
+                        RowContext row;row.setParameters({values_[i]});
+                        values_[i]=evaluator_.eval(&cast,row);
+                    }
+                    if(ExprHelper::canonicalResultTypeName(values_[i].typeName)!=target)
+                        throw DbError("XX000","typed append coercion lost its common output type");
+                    display+=values_[i].isNull?"NULL ":values_[i].value+" ";
+                }
+                instrument.emitted=true;return true;
+            }
+            if(branches_[branch_]->hasError())return propagateChildError(branches_[branch_].get(),"typed append child failed");
+            closeBranch(branch_++);
+            if(branch_<2) {
+                opened_[branch_]=true;
+                if(!branches_[branch_]->open())return propagateChildError(branches_[branch_].get(),"typed append right open failed");
+            }
+        }
+        values_.clear();return false;
+    }
+    void close() override {
+        std::exception_ptr primary;
+        for(size_t i=0;i<2;++i)try{closeBranch(i);}catch(...){if(!primary)primary=std::current_exception();}
+        if(ownerActive_) {
+            ownerActive_=false;
+            try{if(finish_)finish_();}catch(...){if(!primary)primary=std::current_exception();}
+        }
+        values_.clear();branch_=0;
+        if(primary)std::rethrow_exception(primary);
+    }
+    bool supportsStructuredRows() const override {return true;}
+    bool lastStructuredValues(std::vector<ExprValue>& row) const override {row=values_;return !values_.empty();}
+    bool lastStructuredRow(std::vector<std::string>& cells,std::vector<bool>& nulls) const override {
+        cells.clear();nulls.clear();for(const auto& value:values_){cells.push_back(value.value);nulls.push_back(value.isNull);}return !values_.empty();
+    }
+    std::string preparedPlanNodeName() const override {return "Append";}
+    std::vector<Operator*> preparedPlanChildren() const override {return {branches_[0].get(),branches_[1].get()};}
+    bool supportsPreparedOuterRow() const override {
+        return branches_[0]->supportsPreparedOuterRow() && branches_[1]->supportsPreparedOuterRow();
+    }
+    bool bindPreparedOuterRow(const RowContext& row) override {
+        return supportsPreparedOuterRow() && branches_[0]->bindPreparedOuterRow(row) && branches_[1]->bindPreparedOuterRow(row);
+    }
+};
+}
+
+OpPtr QueryPlanner::buildPreparedUnionAllPlan(StorageEngine* engine,const std::string& database,
+    std::shared_ptr<PreparedQuery> query,SelectStmt* select,PreparedSetBranchFactory branchFactory,
+    PreparedChildExecutor reader,PreparedChildCursorFactory cursor,bool ownsScalarChildren,
+    bool planRootConstants,PreparedExecutionProvider executionProvider) {
+    if(!engine || !query || !select || !branchFactory || select->setOp!=SetOp::Union ||
+        !select->setOpAll || !select->setOpRhs)
+        throw DbError("0A000","typed set plan currently requires genuine UNION ALL operands");
+    const auto inputs=query->setOperationInputs.find(select);
+    const auto output=query->statementOutputs.find(select);
+    if(inputs==query->setOperationInputs.end() || output==query->statementOutputs.end() ||
+        inputs->second.left.size()!=output->second.size() || inputs->second.right.size()!=output->second.size())
+        throw DbError("XX000","typed set plan has no complete bound branch descriptors");
+    std::function<void()> begin,finish;
+    if(!executionProvider) {
+        if(!cursor) {
+            cursor=[engine,database,query](const Stmt* child,const RowContext& row) {
+                auto graph=buildPreparedQueryPlan(engine,database,query,child,row);
+                return makePreparedCursor(std::move(graph),query->statementOutputs.at(child));
+            };
+            ownsScalarChildren=false; // physical fallback, not an explicit paired SQL host
+        }
+        // All bodies borrow this live slot. Reopening/rebinding the same
+        // actual tree creates a fresh carrier; no initplan datum crosses an
+        // execution and neither branch prematurely closes sibling cursors.
+        auto slot=std::make_shared<std::shared_ptr<PreparedQueryExecution>>();
+        auto started=std::make_shared<bool>(false);
+        const auto prepare=[slot,engine,database,query,select,reader,cursor,ownsScalarChildren,planRootConstants] {
+            *slot=std::make_shared<PreparedQueryExecution>(query,engine,database);
+            (*slot)->setQueryExecutor(reader);(*slot)->setChildCursorFactory(cursor,ownsScalarChildren);
+            if(planRootConstants)(*slot)->planStatementConstants(select);
+        };
+        prepare();
+        executionProvider=[slot]{return *slot;};
+        begin=[started,prepare]{if(*started)prepare();*started=true;};
+        finish=[slot]{if(*slot)(*slot)->closeChildCursors();};
+    }
+    auto* left=select->setOpLhs?dynamic_cast<SelectStmt*>(select->setOpLhs.get()):select;
+    auto* right=dynamic_cast<SelectStmt*>(select->setOpRhs.get());
+    if(!left || !right)throw DbError("42601","UNION ALL operands must be retained query statements");
+    auto leftPlan=branchFactory(left,!select->setOpLhs,executionProvider);
+    auto rightPlan=branchFactory(right,false,executionProvider);
+    if(!leftPlan || !rightPlan)throw DbError("XX000","typed set branch factory returned no actual graph");
+    return std::make_unique<PreparedAppendOp>(std::move(leftPlan),std::move(rightPlan),
+        inputs->second.left,inputs->second.right,output->second,std::move(begin),std::move(finish));
+}
+
 OpPtr QueryPlanner::buildPreparedSetReturningPlan(StorageEngine* engine,const std::string& database,
     std::shared_ptr<PreparedQuery> query,SelectStmt* select,const RowContext& outer,
     PreparedChildExecutor reader,PreparedChildCursorFactory cursor,bool planRootConstants) {
@@ -895,7 +1046,8 @@ OpPtr QueryPlanner::buildPreparedSetReturningPlan(StorageEngine* engine,const st
 }
 
 OpPtr QueryPlanner::buildPreparedQueryPlan(StorageEngine* engine,const std::string& database,
-    std::shared_ptr<PreparedQuery> query,const Stmt* original,const RowContext& outer) {
+    std::shared_ptr<PreparedQuery> query,const Stmt* original,const RowContext& outer,
+    PreparedExecutionProvider executionProvider,bool selectBodyOnly) {
     auto* select=const_cast<SelectStmt*>(dynamic_cast<const SelectStmt*>(original));
     if(!engine || !query || !select)throw DbError("42601","prepared query plan requires SELECT/VALUES");
     const auto output=query->statementOutputs.find(select);
@@ -904,28 +1056,35 @@ OpPtr QueryPlanner::buildPreparedQueryPlan(StorageEngine* engine,const std::stri
         auto plan=buildPreparedQueryPlan(engine,database,query,child,row);
         return makePreparedCursor(std::move(plan),query->statementOutputs.at(child));
     };
-    if(auto set=buildPreparedSetReturningPlan(engine,database,query,select,outer,{},childFactory))return set;
+    if(!selectBodyOnly && select->setOp!=SetOp::None)
+        return buildPreparedUnionAllPlan(engine,database,query,select,
+            [engine,database,query,outer](SelectStmt* branch,bool body,PreparedExecutionProvider owner) {
+                return buildPreparedQueryPlan(engine,database,query,branch,outer,std::move(owner),body);
+            },{},childFactory,false,false,std::move(executionProvider));
+    if(!selectBodyOnly)if(auto set=buildPreparedSetReturningPlan(engine,database,query,select,outer,{},childFactory))return set;
     if(select->command==SqlCommand::Values) {
-        if(!select->orderBy.empty() || select->setOp!=SetOp::None)
+        if(!select->orderBy.empty() || (!selectBodyOnly && select->setOp!=SetOp::None))
             throw DbError("0A000","prepared VALUES requires additional clause lowering");
-        auto execution=std::make_shared<PreparedQueryExecution>(query,engine,database);
-        execution->setChildCursorFactory(childFactory, false);
+        auto execution=executionProvider?executionProvider():std::make_shared<PreparedQueryExecution>(query,engine,database);
+        if(!executionProvider)execution->setChildCursorFactory(childFactory, false);
         for(auto& row:select->valuesRows)for(auto& cell:row)execution->prepareExpression(cell.get());
         execution->prepareChildCursors();
         auto cells=outer;cells.setParameters(query->parameters);
-        auto descriptor=output->second;
+        auto descriptor=selectBodyOnly?query->setOperationInputs.at(select).left:output->second;
         return std::make_unique<PreparedSourceRowsOp>(descriptor,
-            [select,execution,cells,descriptor](size_t index,std::vector<ExprValue>& row) {
+            [select,execution,executionProvider,cells,descriptor](size_t index,std::vector<ExprValue>& row) {
                 if(index>=select->valuesRows.size())return false;
                 row.clear();
+                const auto actual=executionProvider?executionProvider():execution;
                 for(size_t i=0;i<select->valuesRows[index].size();++i) {
-                    auto value=execution->evaluate(select->valuesRows[index][i].get(),cells);
+                    actual->prepareExpression(select->valuesRows[index][i].get());
+                    auto value=actual->evaluate(select->valuesRows[index][i].get(),cells);
                     value.typeName=descriptor.at(i).type;row.push_back(std::move(value));
                 }
                 return true;
             });
     }
-    if(!supportsPreparedSelectShape(*select,true))
+    if(!supportsPreparedSelectShape(*select,true,false,selectBodyOnly))
         throw DbError("0A000","prepared query requires additional relational lowering");
     TableSchema schema;OpPtr source;
     if(!select->fromClause)source=std::make_unique<PreparedResultOp>();
@@ -972,7 +1131,8 @@ OpPtr QueryPlanner::buildPreparedQueryPlan(StorageEngine* engine,const std::stri
             source=std::make_unique<TableScanOp>(engine,database,table);
         }
     }
-    return buildPreparedSelectPlan(engine,database,std::move(query),select,schema,std::move(source),outer,{},childFactory,false);
+    return buildPreparedSelectPlan(engine,database,std::move(query),select,schema,std::move(source),outer,{},childFactory,false,false,
+        std::move(executionProvider),selectBodyOnly);
 }
 
 TableScanOp::TableScanOp(StorageEngine* engine, const std::string& dbname,
