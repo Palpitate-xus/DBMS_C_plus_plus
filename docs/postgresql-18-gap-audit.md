@@ -1,4 +1,32 @@
-# 2026-10-07 最新b69b总清单 checkpoint
+# 2026-10-07 最新d4cad总清单 checkpoint
+
+生产/测试source `d4cad5b3`：**667native/341registered/58TU**；c061后49项
+独立source/test commit。本轮冷DOMAIN namespace事实 `a5356cd7`、实际文件
+FSM/VM pending共享 `8ed2a177`、2D原生oracle `a75ebf4a`、显式数组下界
+实际消费 `d4cad5b3` 分别提交；map终态文档另commit `d13fe51d`。
+DOMAIN原10断言失败→14native0、whole9为8pass/1原ancestry超时；Root精确a535
+正常soleDDL+57逐字证明b69b对象0，16native32650/11wire84804仍live。
+Map实际已提交堆页92→86/VM false、pending线程/独立exec、fault/SAN/两个原wire
+及额外五原storage组43614均0；失败close丢pending与cleanpeer flush/backup
+实证134仍独立修复，不把首因专项当全部STO-05完成。
+数组strict180006新整套、15whole80782/额外10whole93864/19native17570/
+局部5TU SAN74005/committed receipts35021均0；原SQL/seed/NULL/OID/期限保留。
+原2Dhelper裸grammar在PG为42601，标准等价单index NULL；oracle和runtime分别commit。
+
+最新全新全58正常O2组合62553实际live，无donors，位于
+`/tmp/dbms-canonical-namespace-map-array.69WAKtSc`；82native/42whole/原667/341
+full helpers已核查路径/计数，尚未启动，不继承旧公共头/私有绿。
+前一b69b全58/repeat/audit/freeze23520已0，76native92718实际0；32wire18051/
+原full97347仍live。9772原69native0，28wire26177为23pass/5入口明确timeout。
+旧d2原590/312 full96468已真正exit1：589native/247registered pass，
+1native/65registered fail；旧失败全保留，不算66独立bugs或当前source证明。
+另七原full16482/36568/33648/56028/48518/27869/79042逐个复核live。
+真实DELETE RETURNING、map failed-close/clean-peer、DML EXPLAIN、一般namespace/
+catalog、fulltypes/arraygrammar/storage/recovery/operations等原273仍继续。
+总账 **22complete/166partial/70unverified/15deferred_by_user**，完成gate必须拒绝。
+不push、不启用Actions，不重开用户跳过安全/TDE。详细hash/映射/边界见integration。
+
+# 2026-10-07 历史b69b总清单 checkpoint
 
 最新生产/测试source `b69bd1fc`，**663native/340registered/58TU**。
 c061后45项独立source/test commit。继历史6320后又分别commit：
@@ -12,12 +40,13 @@ FK及六原磁盘wire0；早前necessary-write53.705秒超时仍失败不覆盖�
 一个初始connect errno103）。UPDATE DEFAULT完整14wire/额外array两组/12native/
 局部4TU五驱动SAN均0，旧numeric/planning/qualified/MV红保留；不冒全family通过。
 
-精确9772 fresh58正常O2/repeat/audit/freeze12522已0；69native55621/28whole26177 live。
+精确9772 fresh58正常O2/repeat/audit/freeze12522已0；69native55621实际0；
+28whole26177实际1=23pass/5原timeout。
 精确11d7匹配normal87774已0（二fresh CPP+56逐字来源/头/flags/原receipt证明
 donors，非再fresh58），74native/30whole/full仅准备。
-最新b69b新增publiccallback头必须再全58fresh O2，无donors；build23520在
-`/tmp/dbms-canonical-default-owner-image.6lNOWCkb` 实际live；
-76native/32whole/原663/340 full只准备，不能继承private或旧ABI绿。
+b69b新增publiccallback头全58fresh O2/repeat/audit/freeze23520已0，无donors；
+`/tmp/dbms-canonical-default-owner-image.6lNOWCkb` matching76native92718实际0；
+32whole18051/原663/340 full97347已实际启动/live，不冒全量PASS。
 
 原c465全58/native58已0、wire25=16pass/9fail，原648/334及七旧full记录真实live；
 无全量PASS。真正DELETEconsumer、explicitarraybound22P02、跨owner map/failed

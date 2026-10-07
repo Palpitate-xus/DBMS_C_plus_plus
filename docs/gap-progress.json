@@ -2,6 +2,34 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "49 independently committed source/test ROOT repairs throughd4cad; cold DOMAIN facts, actual-file map peers, separate 2D oracle and explicit array bounds integrated; latest full58 normal epoch running",
+      "gap_ids": ["SQL-05", "CAT-09", "TYPE-19", "TYPE-16", "STO-04", "STO-05", "TXN-05"],
+      "status": "partial",
+      "commits": ["a5356cd7", "8ed2a177", "d13fe51d", "a75ebf4a", "d4cad5b3"],
+      "evidence": [
+        "docs/issue-ready-source-integration.md",
+        "docs/issue-domain-namespace-facts.md",
+        "docs/issue-derived-map-peer-coherence.md",
+        "docs/issue-array-subscript-native-oracle.md",
+        "docs/issue-explicit-array-bounds.md"
+      ],
+      "tests": [
+        "tests/domain_namespace_facts_test.cpp",
+        "tests/derived_map_peer_coherence_test.cpp",
+        "tests/derived_map_engine_coherence_test.cpp",
+        "tests/array_expr_test.cpp",
+        "tests/explicit_array_bounds_test.cpp",
+        "tests/explicit_array_bounds_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "reproduction": "Cold native DROPpublic still permits unqualified/explicit DOMAIN and invalid Session path fallsbackpublic; ten baseline assertions1, positive controls0, not tenbugs. Map separate immediate/durable FSM/VM and actual committed-page92to86/old92VMtrue134 retained. Explicitbounds oldmatrix1; V1three trueprotocol gaps, original2Dhelperexpect134, test-authorBIGINTscale4/projection eightassert+SAN134 retained andnot eightproductionbugs. Separatefailedclose134 andcleanpeer mapflush134/actualphysicalBackup134 remain OPEN.",
+        "fix": "Four separate source/test commits; d13 docs-only terminal extension. Read-only existing namespace facts before declaration no bootstrap, malformednativepath22023/missing3F000; preserve newestALTER source-scope. Actualdev/inode/kind shared pendingFSMcells/VMbits, mutex+checkedflock/read/merge/pwrite/fsync/bytes, stale read refresh; raw edit snapshot negatives retained. Exactoriginal2Dhelperinput stays, standardPGsingleindexNULL/double4/slice{{3,4}} separateoracle. Shared actualarrayenvelope dims/lower/NULL/shape/int32 controls through real cast/storage/index/ALTER consumers plus postfix chain planning and typmod metadata.",
+        "focused_tests": "DOMAIN14native37463actual0/whole969919actual1=8pass1ancestrydefault15timeout SHA4d2b7cc760981d906b75f611188240eefb035b2526b7b38d59927dd810e09301 soleDDL/proven57exact11d7normal. ROOTa535samecurrentcallbackheads/actualflags/unchanged57b69sources/original58receipts76324normal0 SHA27c0213c0eaec1f1bd98ce43809f930b47fe1aff71ef0541e761cecc969a014c;16native32650/11whole84804live. Mapfresh58privateO0/repeat/receipt0 SHA86db5361cfb52cd2ae5abf92e00b7c671d1d48690264d6a4742030f2f4b97d58;9native+5originalstorage43614actual0, strongcommitted/rollback/freshexec/O2peer/thread/hardlink/process/fsyncnegative/scoped2-mapSAN/twooriginaldefault15wire0. Arrayprivatefresh58normalnewheader+V2threeCPPmatched55/header/flags/audit0 SHA0b4edc53d01faee2dcb104dbe3e0b70254654796e8b7111a803500ea9386d620;strict180006whole/final15wire80782/extra10wire93864/native1917570/scoped5CPPdriverstubsSANplus52matchingnormal74005/committedaudit35021actual0. No latestcombined/whole-sourceSAN approval.",
+        "full_suite": "Latestd4cad667native341registered58TU /tmp/dbms-canonical-namespace-map-array.69WAKtSc exactfreshnormalO2all58/nodonors62553live;82native/42whole/original667341fullhelperspathandcountcheckedpreparedNOTstarted. Exactb69bfresh58normal/repeat/audit/stamp/freeze23520actual0 SHA8b61c67ce3506e3376f749b98c957e131ecc4251695a4c87031ff4e273d0e566;matching76native92718actual0;whole3218051/original663340full97347 individuallyverifiedlive. Exact977269native55621actual0;whole2826177actual1=23pass5explicitoriginaltimeouts legacyconsumers/preparedUNIONALL/boundDMLchildren/patternpredicates/ALTERarrayenvelope;original657337fullpreparednotstarted. Exactd2original590312full96468actual1=589native247registeredpass/1native65registeredfail, wholelogpreserved, not66diagnosedbugs/currentfixapproval. Otheroriginalfull16482/36568/33648/56028/48518/27869/79042individuallyre-polledlive. No full/TLSruntimePASS.",
+        "scope": "Original273 unchanged22complete166partial70unverified15deferred. ActualDELETE RETURNING, failedclose/cleanpeer mapowner consumers, realDML EXPLAIN, generalnativeDROP/catalog/namespacebootstrap, customarrayelements/delimiters/fullslicegrammar, identity/generated/VIEW/defaultstoredidentity andalloriginaltypes/query/catalog/storage/recovery/operationsrequirements continue. No push/Actionsactivation/userdeferredsecurityTDE restart."
+      }
+    },
+    {
       "issue": "45 independent ROOT source/test repairs throughb69b; native DELETE owner, savepoint image aliases, domain bool I/O and three UPDATE DEFAULT roots integrated; new callback ABI fresh normal58 running",
       "gap_ids": [
         "DML-04",

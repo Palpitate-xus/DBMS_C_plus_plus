@@ -1,4 +1,79 @@
-# Latest b69b checkpoint: 45 independently committed source/test repairs
+# Latest d4cad checkpoint: 49 independently committed source/test repairs
+
+Production/test source `d4cad5b3` is **667 native /341 registered /58 TU**.
+Four more independent source/test commits follow b69b; the map terminal extension
+is documentation only. These are issue repairs, not four completed families.
+
+| Independent repair or oracle correction | Private commit | ROOT commit |
+| --- | --- | --- |
+| Cold CREATE DOMAIN existing namespace facts/no validation bootstrap | `98cacd88` | `a5356cd7` |
+| Actual-file FSM/VM shared pending-cell/bit coherence | `6f62ac73` | `8ed2a177` |
+| Original 2D native subscript oracle, exact helper input retained | `e48f0a67` | `a75ebf4a` |
+| Explicit array bounds through actual casts/storage/index/ALTER consumers | `506daa80` | `d4cad5b3` |
+
+Domain namespace baseline exits1 with ten failed assertions, not ten bugs. Final
+14 native **37463 exits0**; whole9 **69919 exits1:8 pass/1 unchanged ancestry
+default15 timeout**. Frozen sole-DDL O2/proved57 exact11d7 donor SHA256
+`4d2b7cc760981d906b75f611188240eefb035b2526b7b38d59927dd810e09301`.
+The ROOT merge preserves the newer ALTER source-identity scope. Exacta535's
+fresh sole O2 DDL/proved57 b69b normal objects **76324 exits0**, SHA256
+`27c0213c0eaec1f1bd98ce43809f930b47fe1aff71ef0541e761cecc969a014c`.
+Matching16 native **32650** and whole11 **84804** are live, not approved. General
+native DROP/loaded stale catalog and namespace architecture remain open.
+
+Map peer baseline retains separate immediate/durable FSM/VM and real committed
+heap failures134, including actual free percent92 to86 while the reader stays92
+and AllVisible. Its independent fresh58 privateO0 build/repeat/audit0 has SHA256
+`86db5361cfb52cd2ae5abf92e00b7c671d1d48690264d6a4742030f2f4b97d58`.
+Native9 plus five original storage neighbors **43614 actually exits0**; strong
+committed/rollback/fresh-exec, O2 peer/thread/hard-link/independent-exec, original
+fsync/raw-edit negative, scoped two-map sanitizer and two original default15
+savepoint wire controls0. ROOT `d13fe51d` maps terminal docs-only `e0853101`.
+Last failed-close pending loss134 and independently reproduced clean-peer
+flush134/real physicalBackup134 remain separate issues, not repaired here.
+
+Array bounds final matching private all58-new-header O2 plus three source-matched
+CPP rebuilds0 has SHA256
+`0b4edc53d01faee2dcb104dbe3e0b70254654796e8b7111a803500ea9386d620`.
+Strict180006 complete new matrix, final15 whole **80782**, extra10 **93864**,
+native19 **17570**, scoped five-TU/native/stubs SAN plus52 matching normal objects
+**74005**, and committed receipt audit **35021** all exit0. Exact original helper
+input remains; PG rejects its bare grammar42601, while standard parenthesized
+2D one-index fetch is NULL, double fetch4 and slice{{3,4}}. The correction is
+separate from runtime. Original baseline, three real V1 gaps, test-author BIGINT/
+projection mistakes and scoped assertion134 are retained; no eight-bug claim.
+
+## Current optimized combination and original full gates
+
+Latest exactd4cad `/tmp/dbms-canonical-namespace-map-array.69WAKtSc/repo` starts
+a genuinely fresh all58 normal O2 epoch **62553 live**, no donor objects. New
+map public layouts and array helper must be consistent with the existing UPDATE
+callback. **82 native/42 whole/original667/341 full helpers are prepared and
+path/count checked, not started**. No latest combined/focused/full/SAN approval.
+
+Exactb69b freshnormal58/repeat/receipts/stamp/freeze **23520 exits0**, SHA256
+`8b61c67ce3506e3376f749b98c957e131ecc4251695a4c87031ff4e273d0e566`.
+Matching **76 native92718 exits0**; original whole32 **18051** and full663/340
+**97347** remain individually verified live. Exact9772 native69 **55621 exits0**;
+whole28 **26177 exits1:23 pass/5 explicit original timeouts**, at legacy pattern
+consumers, prepared UNION ALL, bound DML query children, pattern predicates and
+ALTER array envelope. No failure, deadline or failed SQL was removed.
+
+Older exactd2 original590/312 **96468 now actually exits1**: **589/590 native
+and247/312 registered pass**. One native volcano_select_phase51 and65 registered
+entrypoints fail. Complete log stays at
+`/tmp/dbms-canonical-array-view-explain.GUwiSQnC/full-original-590-312.log`.
+These include timeouts, initial connect103 and assertion failures; this is not
+66 independently diagnosed bugs or current-source failure proof. Original
+16482/36568/33648/56028/48518/27869/79042 are individually re-polled live.
+
+Actual DELETE RETURNING, failed-close and clean-peer map consumers, real DML
+EXPLAIN, general native DROP/catalog namespaces, full custom/multidimensional
+array grammar and all remaining original requirements continue. All273 remain
+**22 complete /166 partial /70 unverified /15 deferred**. No push, Actions
+enablement, user-deferred security/TDE restart or completion claim.
+
+# Historical b69b checkpoint: 45 independently committed source/test repairs
 
 Production/test source `b69bd1fc` is **663 native /340 registered /58 TU**.
 The six latest independent commits below follow the twelve mapped at the
@@ -60,7 +135,7 @@ Exact9772 `/tmp/dbms-canonical-default-pattern-image.3WZIBvE9`,657/337/58,
 freshnormal58/repeat/audit/freeze **12522 exits0**, SHA256
 `8f782944b4b13f31f7122c30bb7de8c052508b2245ef678a4b5f8a5342932bf7`.
 The first incorrect655 guard exited1 before compiling and remains. Matching69
-native **55621** and whole28 **26177** are individually re-polled live;
+native **55621 exits0** and whole28 **26177 exits1:23 pass/5 original timeouts**;
 original657/337 full remains prepared/not started.
 
 Exact11d7 `/tmp/dbms-canonical-creation-owner-alias.r49mNiN9`,661/338/58,
@@ -72,9 +147,10 @@ Its74 native/30 whole/originalfull helpers are prepared, not started.
 The later public callback cannot borrow this old ABI.
 
 Latest exactb69b `/tmp/dbms-canonical-default-owner-image.6lNOWCkb`,663/340/58,
-starts a genuinely fresh normal O2 **all58 build23520 live**, with no donors.
-Matching76 native,whole32 and original663/340 helpers are prepared/not started.
-No current combined freeze/focused/full/TLS-runtime PASS is claimed.
+fresh normal O2 **all58 build23520 exits0**, with no donors, frozen SHA256
+`8b61c67ce3506e3376f749b98c957e131ecc4251695a4c87031ff4e273d0e566`.
+Matching76 native92718 exits0; whole32 18051 and original663/340 97347 are live.
+No originalfull/TLS-runtime PASS is claimed.
 c465 normal58/native58 remain terminal0; whole25 remains16pass/9fail; full79042
 and seven older full handles remain recorded live at their last individual poll.
 

@@ -95,7 +95,7 @@ domain旧来源不猜/不迁移、schemaB/D3旧reader拒绝；必要写入恢复
 原15期限失败仍保留，不因no-effect专项绿就关全部延迟。无push/Actions激活或
 用户跳过安全/TDE重启；各私有O0/局部SAN/单CPP增量不冒充最新全量正式通过。
 
-## 2026-10-07 当前完整目标计划（b69b；前文均历史）
+## 2026-10-07 历史完整目标计划（b69b）
 
 sourceb69b：663native/340registered/58TU，c061后45项source/test独立commit。
 最新六项映射和完整实际日志见integration；总273目标不缩小。
@@ -113,3 +113,21 @@ sourceb69b：663native/340registered/58TU，c061后45项source/test独立commit�
 旧必要恢复timeout保持红；alias原Append两轮绿不等于所有延迟闭合。
 UPDATE纯prepare EXPLAIN零effects不冒实际plan consumer。新D3/schemaB旧reader拒绝，
 旧模糊default来源不猜测/不自动迁移。无push、Actions启用、安全/TDE跳过项重启。
+
+## 2026-10-07 当前完整目标计划（d4cad；前文均历史）
+
+source `d4cad5b3`：667native/341registered/58TU，累计49项source/test独立commit。
+新DOMAIN facts、map peer、array oracle/runtime四项分别commit，完整proof/映射见integration。
+
+| 阶段 | 完整验收要求 | 当前实际状态与下一动作 |
+| --- | --- | --- |
+| 新组合公共头 | 当前全58正常O2/repeat/source/head/flags/object/stamp/freeze | 62553 live无donors；82native/42whole/原667/341 helpers准备未启动 |
+| CPP-only DOMAIN整合 | 保留ALTER source identity并匹配当前callback头/全部旧对象证据 | a535正常soleDDL+57 proven b69b对象76324实际0；16native/11wire live，不借私有旧ABI绿 |
+| 原组合门禁 | 各revision对应全部原SQL/assert/期限 | b69b58/76native0，32wire18051/full97347 live；9772原69native0、28wire23pass/5timeout |
+| 原full终态 | 每条失败原样留存并与当前修复对应复核 | d2 full96468实际1，589native/247registered pass、1/65fail；其余七旧full逐个live，无全量PASS |
+| 独立继续修复 | 真实producer/consumer与所有原seed、NULL/OID/owner/effects | map close134与cleanpeer backup134、实际DELETE RETURNING、DML EXPLAIN分别owner继续 |
+| 全部原families | 每条273完整功能/强证据/提交，不以局部兼容替代 | 原namespace/catalog/types/arraygrammar/query/storage/recovery/operations等继续OPEN |
+| 总账完成审计 | checkbox/状态/证据/commit范围与逐条原需求全部一致 | 22complete/166partial/70unverified/15deferred，require-complete仍拒绝 |
+
+源码修复和错误oracle独立提交，原红/trace/不trace/deadline不删除。私有O0、
+单CPP O2或局部SAN不当最新完整source gate。不push、Actions启用或重开用户deferred专项。
