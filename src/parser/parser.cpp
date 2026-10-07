@@ -9425,6 +9425,38 @@ StmtPtr SQLParser::parseDropLargeObject(const std::vector<std::string>& tokens, 
 
 StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_t& pos) {
     auto stmt = std::make_unique<AlterTableStmt>();
+    const auto columnType = [&](std::string& type) {
+        if (pos >= tokens.size() || tokens[pos] == ";" || tokens[pos] == ",") return false;
+        type = tokens[pos++];
+        if (pos + 1 < tokens.size() && tokens[pos] == ".") {
+            type += "." + tokens[pos + 1];
+            pos += 2;
+        }
+        const auto base = toLower(type);
+        if (pos < tokens.size() &&
+            ((base == "double" && toLower(tokens[pos]) == "precision") ||
+             (base == "character" && toLower(tokens[pos]) == "varying") ||
+             (base == "bit" && toLower(tokens[pos]) == "varying")))
+            type += " " + tokens[pos++];
+        if (pos < tokens.size() && tokens[pos] == "(") {
+            type += tokens[pos++];
+            while (pos < tokens.size() && tokens[pos] != ")" && tokens[pos] != ";")
+                type += tokens[pos++];
+            if (pos >= tokens.size() || tokens[pos] != ")") return false;
+            type += tokens[pos++];
+        }
+        if ((base == "time" || base == "timestamp") && pos + 2 < tokens.size() &&
+            (toLower(tokens[pos]) == "with" || toLower(tokens[pos]) == "without") &&
+            toLower(tokens[pos + 1]) == "time" && toLower(tokens[pos + 2]) == "zone") {
+            for (int i = 0; i < 3; ++i) type += " " + tokens[pos++];
+        }
+        while (pos < tokens.size() && tokens[pos] == "[") {
+            if (pos + 1 >= tokens.size() || tokens[pos + 1] != "]") return false;
+            type += "[]";
+            pos += 2;
+        }
+        return true;
+    };
     if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
         stmt->ifExists = true; pos += 2;
     }
@@ -9721,31 +9753,9 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
                     pos += 2; // NOT NULL
                     sub.setNotNull = true;
                 } else if (pos < tokens.size() && toLower(tokens[pos]) == "data") {
-                    pos += 2; // DATA TYPE
-                    if (pos < tokens.size()) {
-                        sub.dataType = tokens[pos++];
-                        if ((toLower(sub.dataType) == "double" ||
-                             toLower(sub.dataType) == "character" ||
-                             toLower(sub.dataType) == "timestamp") &&
-                            pos < tokens.size() && toLower(tokens[pos]) == "precision") {
-                            sub.dataType += " " + tokens[pos++];
-                        } else if (toLower(sub.dataType) == "character" &&
-                                   pos < tokens.size() && toLower(tokens[pos]) == "varying") {
-                            sub.dataType += " " + tokens[pos++];
-                        }
-                        if (pos < tokens.size() && tokens[pos] == "(") {
-                            sub.dataType += "(";
-                            ++pos;
-                            while (pos < tokens.size() && tokens[pos] != ")") {
-                                if (tokens[pos] != ",") sub.dataType += tokens[pos];
-                                ++pos;
-                            }
-                            if (pos < tokens.size() && tokens[pos] == ")") {
-                                sub.dataType += ")";
-                                ++pos;
-                            }
-                        }
-                    }
+                    if (pos + 1 >= tokens.size() || toLower(tokens[pos + 1]) != "type") return nullptr;
+                    pos += 2;
+                    if (!columnType(sub.dataType)) return nullptr;
                 } else if (pos < tokens.size() && toLower(tokens[pos]) == "statistics") {
                     ++pos;
                     sub.action = AlterTableStmt::Action::SetStatistics;
@@ -9822,7 +9832,7 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
                 }
             } else if (pos < tokens.size() && toLower(tokens[pos]) == "type") {
                 ++pos;
-                if (pos < tokens.size()) sub.dataType = tokens[pos++];
+                if (!columnType(sub.dataType)) return nullptr;
             }
         } else if (kw == "rename") {
             ++pos;

@@ -1818,11 +1818,20 @@ bool DdlExecutor::checkDatabaseCommandOutsideTransaction(Session& s) {
 // same Column representation used by CREATE TABLE, so ALTER COLUMN TYPE does
 // not have a second, subtly different type mapping.
 static ColumnDef columnDefFromAlterType(const std::string& name,
-                                        const std::string& typeSpec) {
+                                        const std::string& typeSpec,
+                                        bool allowArraySuffix = false) {
     ColumnDef cd;
     cd.name = name;
     cd.isNull = true;
     std::string spec = trim(typeSpec);
+    // Array declarations are owned by explicit callers. Domain and other
+    // existing callers must not silently discard an unsupported suffix.
+    while (allowArraySuffix && !spec.empty() && spec.back() == ']') {
+        const size_t open = spec.find_last_not_of(" \t\r\n", spec.size() - 2);
+        if (open == std::string::npos || spec[open] != '[') break;
+        cd.isArray = true;
+        spec = trim(spec.substr(0, open));
+    }
     size_t lp = spec.find('(');
     if (lp == std::string::npos) {
         cd.typeName = trim(spec);
@@ -2329,7 +2338,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                 } else if (sub.dropNotNull) {
                     status = g_engine.alterTableDropNotNull(s.currentDB, tableName, sub.name);
                 } else if (!sub.dataType.empty()) {
-                    ColumnDef cd = columnDefFromAlterType(sub.name, sub.dataType);
+                    ColumnDef cd = columnDefFromAlterType(sub.name, sub.dataType, true);
                     Column column;
                     std::string error;
                     if (!columnDefToColumn(cd, s.currentDB, column, error,
