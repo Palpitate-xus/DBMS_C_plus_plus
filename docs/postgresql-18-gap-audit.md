@@ -14,8 +14,13 @@ donors；normal24221、16完整native66161、7完整whole1484、postcommit42105
 全部实际0，默认磁盘/期限；两轮repeat/all58/stamp/frozen-input hash通过。
 准确SHA和证据路径见integration及两独立issue，不冒新SAN或全suite绿。
 
-原Source80 full42496本轮实际poll仍LIVE，原输入冻结不改不重启；非当前83
-全量。原递归CTE现独立确认是inherited frame preparation introduced回归，
+原Source80 full42496本轮先实际poll LIVE、随后真实终1。原1043 receipts与
+原discovery/registry multiset精确一致：687auto-native+实际frontend1+
+341registered PASS，3auto-native+11registered FAIL；包含literal\\n旁receipt。
+这不是14独立bug或当前83全量结论，原输入冻结不改不重启。原TRUNCATE旧fixture
+已7b22独立修复；全部原失败分类见integration。原递归CTE独立确认是inherited
+frame preparation introduced回归，两个额外原derived/materialized完整文件
+也需真实同owner合成验证；
 原7504/82bf完整同driver PASS证据保留，真实source-role修复仍私有。原matview
 后台catalog58030仍OPEN未修。generic全强矩阵current82 baseline52048为1/
 61失败、同owned strict18/enUS为0；generic/BIT finite bundle及新b/x codec/

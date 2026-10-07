@@ -28,12 +28,40 @@ windows/metadata, enum/BIT/BETWEEN, all19 DDL sections and all4 TRUNCATE section
 See `docs/issue-window-null-order-policy.md`,
 `docs/issue-window-groups-unbounded-boundary.md` and their retained artifacts.
 
-Original frozen Source80 full42496 is actually polled LIVE this turn, not a
-current83 input run or PASS; it is not restarted to hide the old TRUNCATE red.
-Its newly failing original recursive CTE case is a genuine inherited-frame
+Original frozen Source80 full42496 was polled LIVE and subsequently actually
+terminated1 this turn: all1043 original receipts match the original discovery/
+registry multiset. PASS:687 auto-native, one actual frontend,341 registered;
+FAIL:3 auto-native,11 registered. One literal-backslash-n receipt is included,
+not silently lost by line anchoring. This is not a current83 input verdict or
+14 independent bugs; see the exact failure table below. The old TRUNCATE red
+uses its original fixture, already independently repaired in7b22. No restart.
+Its newly failing original recursive CTE cases are genuine inherited-frame
 preparation regression relative to both older original full PASS receipts.
 The independent owner is repairing the actual source role; no unverified fix
 is imported. Original matview/background58030 remains OPEN and unfixed.
+
+| Source80 original failing receipt | Actual first failure / next scope |
+| --- | --- |
+| stale_temp_startup_recovery_test | WAL crash recovery startup aborted; original recovery scope still OPEN |
+| table_owner_atomicity_test | alterTableOwner returns non-OK at original105; real owner/catalog atomicity OPEN |
+| truncate_recovery_test | Original name-only/current-generation fixture startup134; Root7b22 complete repair verified, no new full83 claim |
+| review_sql_e2e_test.py | Scalar child FETCH WITH TIES returns0A000, missing prepared lowering |
+| cte_clause_boundary_e2e_test.py | Scalar UNKNOWN text child lacks declared output type, XX000 |
+| cte_relation_scope_protocol_e2e_test.py | Original recursive id scope42P01; inherited-frame owner repair private |
+| view_trigger_typed_values_protocol_e2e_test.py | Actual connection closes; no root-cause guess or PASS |
+| fetch_clause_boundary_e2e_test.py | Ordered scalar child FETCH WITH TIES returns0A000 |
+| subquery_sqlstate_e2e_test.py | Unordered FETCH WITH TIES returns0A000 instead of42601 |
+| derived_type_protocol_e2e_test.py | Original recursive edges real types/NULL scope fails; complete frame-guard follow-up required |
+| materialized_factor_boundary_protocol_e2e_test.py | Original recursive id42P01; complete frame-guard follow-up required |
+| explain_join_protocol_e2e_test.py | EXPLAIN ANALYZE OFFSET1 succeeds against old expected error; classify semantic/fixture contract before changing |
+| pg_stat_activity_protocol_e2e_test.py | System relation INSERT returnsXX001 instead of expected state; real catalog-write boundary OPEN |
+| pg_catalog_unavailable_sqlstate_protocol_e2e_test.py | pg_catalog.pg_database lookup42P01; catalog SQL namespace OPEN |
+
+Terminal log and1043 extracted receipts remain under
+`/tmp/dbms-canonical-between-type.zwBrZgUc/`. The full invocation uses frozen
+3ffbb516 inputs, original runner/disk/deadlines, previously proved58 normal/
+57 test-production object migration and fresh original drivers/stubs. It is
+not fresh58/57 compilation. Current83 original full has not been started.
 
 Generic aggregate012f is fully source-reviewed, but not imported: the current
 Source82 full permanent baseline52048 actually ends1 with61 strong failures;
