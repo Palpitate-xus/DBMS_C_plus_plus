@@ -2310,6 +2310,7 @@ static ExprPtr parseCastExpr(const std::vector<std::string>& tokens, size_t& pos
 // Postfix: array subscript [ ], IS NULL/NOT NULL (as postfix)
 static ExprPtr parsePostfixExpr(const std::vector<std::string>& tokens, size_t& pos) {
     auto left = parsePrimaryExpr(tokens, pos);
+    if (!left) return {};
 
     // Array subscript: expr[expr] (index) or expr[lower:upper] (slice).
     // Index  -> BinaryOpExpr op "[]"  right = index expression
@@ -2373,9 +2374,37 @@ static ExprPtr parsePostfixExpr(const std::vector<std::string>& tokens, size_t& 
     return left;
 }
 
+// The bracket shorthand is valid only inside an ARRAY constructor. Keep it
+// recursive here rather than accepting a bare '[' as a general expression.
+static ExprPtr parseArrayConstructorContents(const std::vector<std::string>& tokens,
+                                              size_t& pos) {
+    if (pos >= tokens.size() || tokens[pos] != "[") return {};
+    ++pos;
+    auto array = std::make_unique<ArrayExpr>();
+    if (pos < tokens.size() && tokens[pos] == "]") {
+        ++pos;
+        return array;
+    }
+    while (pos < tokens.size()) {
+        auto element = tokens[pos] == "["
+            ? parseArrayConstructorContents(tokens, pos) : parseExpr(tokens, pos);
+        if (!element) return {};
+        array->elements.push_back(std::move(element));
+        if (pos < tokens.size() && tokens[pos] == "]") {
+            ++pos;
+            return array;
+        }
+        if (pos >= tokens.size() || tokens[pos] != ",") return {};
+        ++pos;
+        if (pos >= tokens.size() || tokens[pos] == "]") return {};
+    }
+    return {};
+}
+
 // Primary: literals, column refs, function calls, parenthesized exprs, subqueries, CASE
 static ExprPtr parsePrimaryExprImpl(const std::vector<std::string>& tokens, size_t& pos) {
     if (pos >= tokens.size()) return nullptr;
+    if (tokens[pos] == "[" || tokens[pos] == "]") return nullptr;
 
     // CAST(expr AS type [mods]): prefix form of the :: cast operator.
     if (SQLParser::toLower(tokens[pos]) == "cast" && pos + 1 < tokens.size()
@@ -2441,17 +2470,8 @@ static ExprPtr parsePrimaryExprImpl(const std::vector<std::string>& tokens, size
     // value children so pure preparation can choose a fixed element type.
     if (SQLParser::toLower(tokens[pos]) == "array" && pos + 1 < tokens.size()
         && tokens[pos + 1] == "[") {
-        pos += 2;
-        auto array = std::make_unique<ArrayExpr>();
-        while (pos < tokens.size() && tokens[pos] != "]") {
-            auto elem = parseExpr(tokens, pos);
-            if (elem) array->elements.push_back(std::move(elem));
-            if (pos < tokens.size() && tokens[pos] == ",") ++pos;
-            else break;
-        }
-        if (pos >= tokens.size() || tokens[pos] != "]") return {};
         ++pos;
-        return array;
+        return parseArrayConstructorContents(tokens, pos);
     }
 
     // CASE expression
