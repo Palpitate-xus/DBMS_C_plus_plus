@@ -12,6 +12,7 @@
 #include "catalog/systables.h"
 #include "access/BPTree.h"
 #include "storage/WAL.h"
+#include <algorithm>
 #include <cassert>
 #include <filesystem>
 #include <fstream>
@@ -356,18 +357,46 @@ static void test_wal_catalog_record() {
     assert(wal != nullptr);
 
     bool found = false;
-    dbms::Lsn lsn = 0;
+    uint64_t catalogXid = 0;
+    bool committed = false;
+    size_t records = 0;
+    // This is an exact-position scan. ReadNextRecord skips the record at
+    // a nonzero position, so advancing that position by the returned length
+    // can skip the catalog record and eventually read inside a record.
+    dbms::Lsn lsn = wal->earliestAvailableLsn();
     while (true) {
-        auto rec = wal->ReadNextRecord(lsn);
+        auto rec = wal->ReadRecord(lsn);
         if (!rec) break;
+        ++records;
         if (rec->rmid() == dbms::RM_CATALOG_ID) {
+            // Keep the original real SQL producer and verify its actual
+            // operation, table name and transaction, not any catalog record.
+            assert(rec->info() == dbms::XLOG_CATALOG_CREATE);
+            const std::string type = "table";
+            const std::string name = "wal_tbl";
+            std::vector<char> expected{static_cast<char>(type.size())};
+            expected.insert(expected.end(), type.begin(), type.end());
+            expected.push_back(static_cast<char>(name.size()));
+            expected.insert(expected.end(), name.begin(), name.end());
+            assert(rec->data.size() >= expected.size());
+            assert(std::equal(expected.begin(), expected.end(), rec->data.begin()));
+            assert(rec->header.xl_xid != 0);
+            catalogXid = rec->header.xl_xid;
             found = true;
-            break;
         }
+        if (rec->rmid() == dbms::RM_XACT_ID &&
+            rec->info() == dbms::XLOG_XACT_COMMIT &&
+            catalogXid != 0 && rec->header.xl_xid == catalogXid) committed = true;
+        assert(rec->header.xl_tot_len >= sizeof(dbms::XLogRecHeader));
+        assert(lsn + rec->header.xl_tot_len > lsn);
         lsn += rec->header.xl_tot_len;
     }
 
     assert(found);
+    assert(committed);
+    std::cout << "[DDL-TXN WAL] scanned=" << records
+              << " actual CREATE table=wal_tbl xid=" << catalogXid
+              << " matching COMMIT=" << committed << std::endl;
 
     cleanup(db);
     std::cout << "[DDL-TXN] WAL catalog record OK" << std::endl;
