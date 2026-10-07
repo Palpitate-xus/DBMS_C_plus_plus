@@ -3,6 +3,7 @@
 #include "commands/DdlExecutor.h"
 #include "commands/DmlExecutor.h"
 #include "commands/TableManage.h"
+#include "common/DbError.h"
 #include "parser/parser.h"
 #include "test_utils.h"
 
@@ -68,10 +69,34 @@ void test_single_column_index(dbms::DdlExecutor& ddl, Session& session,
                database, "unique_single",
                {{"id", "3"}, {"key_value", ""}, {"payload", ""}}) ==
            DBStatus::OK);
+    // Both the target and EXCLUDED expose payload in the action namespace.
+    // PostgreSQL rejects the unqualified predicate before any row changes.
+    bool ambiguousPredicateRejected = false;
+    try {
+        runDml(
+            "INSERT INTO unique_single VALUES (4, '', 'must-not-stick') "
+            "ON CONFLICT (key_value) DO UPDATE "
+            "SET payload = excluded.payload WHERE payload = '' "
+            "RETURNING id, key_value, payload", session);
+    } catch (const dbms::DbError& error) {
+        assert(error.sqlState() == "42702");
+        ambiguousPredicateRejected = true;
+    }
+    assert(ambiguousPredicateRejected);
+    assert(g_engine.query(database, "unique_single", {"=id 4"}, {"id"}).empty());
+    std::vector<std::vector<std::string>> unchangedEmptyKey;
+    std::vector<std::vector<bool>> unchangedNulls;
+    g_engine.query(database, "unique_single", {"=id 3"},
+                   {"id", "key_value", "payload"}, {}, false, false, false,
+                   0, {}, &unchangedEmptyKey, &unchangedNulls);
+    assert((unchangedEmptyKey ==
+            std::vector<std::vector<std::string>>{{"3", "", ""}}));
+    assert((unchangedNulls ==
+            std::vector<std::vector<bool>>{{false, false, false}}));
     assert(!runDml(
         "INSERT INTO unique_single VALUES (4, '', 'filled') "
         "ON CONFLICT (key_value) DO UPDATE "
-        "SET payload = excluded.payload WHERE payload = '' "
+        "SET payload = excluded.payload WHERE unique_single.payload = '' "
         "RETURNING id, key_value, payload",
         session));
     expectReturning("INSERT 0 1", {{"3", "", "filled"}});
