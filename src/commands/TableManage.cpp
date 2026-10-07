@@ -7014,6 +7014,15 @@ void StorageEngine::closeDatabaseCaches(const std::string& dbname) {
 
     commitLogs_.erase(dbname);
     walManagers_.erase(dbname);
+    auto& context = transactionContext();
+    if (context.inTransaction && context.txnDB == dbname &&
+        context.databaseExclusiveLock && context.databaseExclusiveLock->owns_lock()) {
+        // Controlled DDL/physical restore can replace the entire WAL inode.
+        // It explicitly closes this backend's generation before publishing
+        // the replacement; a background pruner must not release another
+        // backend's transaction-owned manager.
+        context.transactionWalOwner.reset();
+    }
     lastCheckpointLsns_.erase(dbname);
 
     // These maps are also read/written by connection threads under their
@@ -40885,6 +40894,18 @@ std::vector<std::string> StorageEngine::crossJoin(
 WALManager* StorageEngine::getWAL(const std::string& dbname) const {
     requireDatabaseTransactionOwnership();
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+    auto& context = transactionContext();
+    const bool ownsDatabaseLock =
+        (context.databaseExclusiveLock && context.databaseExclusiveLock->owns_lock()) ||
+        (context.databaseSharedLock && context.databaseSharedLock->owns_lock());
+    if (context.inTransaction && context.txnDB == dbname && ownsDatabaseLock &&
+        context.transactionWalOwner) {
+        // Public namespace validity gates new ownership, not the terminal
+        // work of an owner whose open physical directory is unchanged.
+        // Reject a different inode rather than redirecting this xid to it.
+        return context.transactionWalOwner->isOpen()
+            ? context.transactionWalOwner.get() : nullptr;
+    }
     // A peer's cached background work can outlive DROP DATABASE. It must
     // not recreate that database merely to initialize a WAL directory.
     if (!databaseExists(dbname)) return nullptr;
@@ -40911,6 +40932,8 @@ WALManager* StorageEngine::getWAL(const std::string& dbname) const {
         slot->owner = wal;
     }
     WALManager* ptr = wal.get();
+    if (context.inTransaction && context.txnDB == dbname && ownsDatabaseLock)
+        context.transactionWalOwner = wal;
     walManagers_[dbname] = std::move(wal);
     return ptr;
 }
@@ -46228,9 +46251,16 @@ DBStatus StorageEngine::ensureDatabaseTransactionOwnership() const {
     if (catalogService_ && !catalogService_->persistAll()) return DBStatus::IO_ERROR;
     auto* commitLog = getCommitLog(context.txnDB);
     if (!commitLog) return DBStatus::IO_ERROR;
+    std::shared_ptr<WALManager> transactionWal;
+    {
+        std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+        if (!getWAL(context.txnDB)) return DBStatus::IO_ERROR;
+        transactionWal = walManagers_.at(context.txnDB);
+    }
     context.databaseTxnMutex = std::move(mutex);
     context.databaseSharedLock = std::move(lock);
     context.readView.commitLog = commitLog;
+    context.transactionWalOwner = std::move(transactionWal);
     context.databaseOwnershipDeferred = false;
     return DBStatus::OK;
 }
@@ -46498,6 +46528,7 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnap
         return DBStatus::OK;
     }
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
+    context.transactionWalOwner.reset();
     bool deferOwnership = context.deferDatabaseBeginRequested && !ddlSnapshot;
     if (Session* session = currentSession()) {
         if (!session->tempTablesCreatedInTransaction.empty()) deferOwnership = false;
@@ -46569,6 +46600,16 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnap
         context.databaseTxnMutex.reset();
         return DBStatus::IO_ERROR;
     }
+    {
+        std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+        if (!getWAL(dbname)) {
+            context.databaseExclusiveLock.reset();
+            context.databaseSharedLock.reset();
+            context.databaseTxnMutex.reset();
+            return DBStatus::IO_ERROR;
+        }
+        context.transactionWalOwner = walManagers_.at(dbname);
+    }
     }
     if (Session* session = currentSession(); session && session->currentDB == dbname) {
         context.tempNamespaceAtTransactionStart = session->tempNamespaceCreated;
@@ -46585,6 +46626,7 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnap
     // Assign transaction ID and create ReadView (if needed).
     transactionContext().currentTxnId = TxnIdGenerator::instance().nextTxId();
     if (transactionContext().currentTxnId == 0) {
+        context.transactionWalOwner.reset();
         context.databaseExclusiveLock.reset();
         context.databaseSharedLock.reset();
         context.databaseTxnMutex.reset();
@@ -47287,6 +47329,7 @@ DBStatus StorageEngine::commitTransaction() {
     transactionContext().deferredChecks.erase(transactionContext().currentTxnId);
     transactionContext().currentTxnId = 0;
     transactionContext().inTransaction = false;
+    transactionContext().transactionWalOwner.reset();
     transactionContext().querySnapshotUsed = false;
     transactionContext().readOnly = false;
     transactionContext().preserveBackupOnRollback = false;
@@ -48404,6 +48447,7 @@ DBStatus StorageEngine::rollbackTransaction() {
 
     transactionContext().currentTxnId = 0;
     transactionContext().inTransaction = false;
+    transactionContext().transactionWalOwner.reset();
     transactionContext().readOnly = false;
     transactionContext().transactionBackupDirty = false;
     transactionContext().restoreBackupBeforeRowUndo = false;
@@ -49046,6 +49090,7 @@ DBStatus StorageEngine::prepareTransaction(const std::string& xid) {
 
     transactionContext().currentTxnId = 0;
     transactionContext().inTransaction = false;
+    transactionContext().transactionWalOwner.reset();
     transactionContext().readOnly = false;
     // The database transaction mutex is a backend-local implementation lock;
     // it cannot be unlocked safely by COMMIT/ROLLBACK PREPARED on another
@@ -49149,6 +49194,7 @@ DBStatus StorageEngine::commitPrepared(const std::string& xid) {
     completionContext.txnIsolationLevel = savedIsolation;
     completionContext.currentTxnId = 0;
     completionContext.inTransaction = false;
+    completionContext.transactionWalOwner.reset();
     completionContext.hasRead = false;
     completionContext.hasWrite = false;
     completionContext.txnDB.clear();
@@ -49219,6 +49265,7 @@ DBStatus StorageEngine::commitPrepared(const std::string& xid) {
     lockManager_.releasePreparedLocks(savedTxnId);
     transactionContext().currentTxnId = 0;
     transactionContext().inTransaction = false;
+    transactionContext().transactionWalOwner.reset();
     transactionContext().readOnly = false;
     transactionContext().txnBackupPath.clear();
     transactionContext().txnDB.clear();

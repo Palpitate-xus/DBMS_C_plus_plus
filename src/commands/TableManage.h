@@ -2238,6 +2238,9 @@ private:
         bool readOnly = false;
         bool preserveBackupOnRollback = false;
         std::string txnDB;
+        // Pinned under physical BEGIN/promotion ownership and retained until
+        // terminal WAL I/O completes, independently of the public name cache.
+        std::shared_ptr<WALManager> transactionWalOwner;
         bool snapshotImported = false;
         bool snapshotAcquired = false;
         // Like PostgreSQL's FirstSnapshotSet: once used, a user subabort
