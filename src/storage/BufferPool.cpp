@@ -79,6 +79,27 @@ bool BufferPool::refersToCurrentFiles() const {
         tdeFd_, filename_ + ".tde");
 }
 
+bool BufferPool::hasCleanRetiredMainFile(const std::string& currentFilename) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!orphanedPins_.empty() || !loadingPages_.empty()) return false;
+    for (const auto& frame : frames_) {
+        if (frame.dirty || frame.pinCount != 0 || frame.pageId == kOrphanedPage)
+            return false;
+    }
+    struct stat opened {}, oldLocation {}, current {};
+    if (fd_ < 0 || ::fstat(fd_, &opened) != 0 || !S_ISREG(opened.st_mode))
+        return false;
+    if (::lstat(filename_.c_str(), &oldLocation) == 0 &&
+        S_ISREG(oldLocation.st_mode) && opened.st_dev == oldLocation.st_dev &&
+        opened.st_ino == oldLocation.st_ino) {
+        // The main is still current. Do not suppress a missing/replaced TDE
+        // sidecar, a closed descriptor or an unrelated writeback failure.
+        return false;
+    }
+    const auto& path = currentFilename.empty() ? filename_ : currentFilename;
+    return ::lstat(path.c_str(), &current) == 0 && S_ISREG(current.st_mode);
+}
+
 // Read one sidecar record.  Returns an all-zero record for pageIds beyond
 // the sidecar EOF (plaintext pages of a database not yet encrypted).
 bool BufferPool::readTdeRecord(uint32_t pageId,

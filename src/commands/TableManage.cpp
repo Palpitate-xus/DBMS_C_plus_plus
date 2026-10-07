@@ -2275,6 +2275,12 @@ void StorageEngine::backgroundWorkerLoop() {
 
 static std::filesystem::path archiveDestinationFromConfig();
 
+static bool cleanRetiredHeap(PageAllocator* allocator,
+                             const std::string& currentPath = "") {
+    return allocator && allocator->isOpen() &&
+        allocator->bufferPool()->hasCleanRetiredMainFile(currentPath);
+}
+
 void StorageEngine::backgroundArchiveWAL() {
     // Archiver: drain .ready segments into the configured destination.
     // Failures keep the .ready marker, so the next loop retries (matching
@@ -2341,6 +2347,7 @@ void StorageEngine::backgroundWalFlush() {
     // walwriter: fsync all WAL managers up to their current write LSN.
     for (auto& kv : walManagers_) {
         WALManager* wal = kv.second.get();
+        if (wal && !wal->refersToCurrentDirectory()) wal = getWAL(kv.first);
         if (wal) {
             if (!wal->XLogFlush(wal->currentWriteLsn())) {
                 std::cerr << "[background] WAL flush failed for " << kv.first << std::endl;
@@ -2360,6 +2367,11 @@ void StorageEngine::backgroundBufferFlush() {
         const size_t separator = kv.first.find('/');
         if (!pa || separator == std::string::npos || separator == 0) continue;
         const std::string dbname = kv.first.substr(0, separator);
+        const std::string tableName = kv.first.substr(separator + 1);
+        const std::string currentPath = tableName.find('#') == std::string::npos &&
+            tableName.find('/') == std::string::npos
+            ? dataPath(dbname, tableName).string() : std::string{};
+        if (cleanRetiredHeap(pa, currentPath)) continue;
         WALManager* wal = getWAL(dbname);
         if (!wal || !pa->flushDirtyUnpinned([wal]() {
                 return wal->XLogFlush(wal->currentWriteLsn());
@@ -6876,6 +6888,17 @@ bool StorageEngine::flushSelectedCaches(
     };
     if (heapPages) {
         for (const auto& [key, allocator] : pageAllocators_) {
+            if (slashKeySelected(key) && allocator) {
+                const std::string tableName = key.substr(tablePrefix.size());
+                const std::string currentPath = tableName.find('#') == std::string::npos &&
+                    tableName.find('/') == std::string::npos
+                    ? dataPath(dbname, tableName).string() : std::string{};
+                // Retain the old object for raw callers; it has no changes
+                // to publish. Backup copies the real catalog-resolved files,
+                // not these obsolete clean buffers. Dirty/closed/missing
+                // owner failures remain fail-closed.
+                if (cleanRetiredHeap(allocator.get(), currentPath)) continue;
+            }
             if (slashKeySelected(key) && allocator && !allocator->flush()) {
                 ok = false;
             }
@@ -6911,6 +6934,10 @@ bool StorageEngine::flushSelectedCaches(
     }
     if (heapPages) {
         for (const auto& [key, allocator] : toastPageAllocators_) {
+            if (toastKeySelected(key) && allocator &&
+                cleanRetiredHeap(allocator.get(),
+                    toastDataPath(dbname, key.substr(toastPrefix.size())).string()))
+                continue;
             if (toastKeySelected(key) && allocator && !allocator->flush()) {
                 ok = false;
             }

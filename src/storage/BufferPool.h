@@ -58,6 +58,10 @@ public:
     // objects as their paths. Atomic index replacement changes the inode even
     // though the pathname is unchanged.
     bool refersToCurrentFiles() const;
+    // Under one pool lock, prove that the replaced regular main is idle:
+    // no dirty frames, ordinary/orphan pins or in-flight loads. A closed or
+    // missing main and sidecar-only mismatch never satisfy this predicate.
+    bool hasCleanRetiredMainFile(const std::string& currentFilename = "") const;
 
     // Install (or clear) the on-load page validator. Must be called before
     // open() or with no pages cached. Returning false rejects the page: the
