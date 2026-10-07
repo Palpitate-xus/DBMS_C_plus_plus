@@ -8706,7 +8706,7 @@ bool DdlExecutor::executeDropSequence(const DropStmt* stmt, Session& s) {
 // CREATE / DROP DOMAIN
 // ----------------------------------------------------------------------------
 
-bool DdlExecutor::executeCreateDomain(const CreateObjectStmt* stmt, Session& s) {
+bool DdlExecutor::executeCreateDomain(const CreateObjectStmt* stmt, Session& s) try {
     if (!stmt) return rejectMalformedDdlAst();
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
@@ -8813,6 +8813,14 @@ bool DdlExecutor::executeCreateDomain(const CreateObjectStmt* stmt, Session& s) 
     if (!txn.commit()) return true;
     std::cout << "CREATE DOMAIN succeeded" << std::endl;
     return false;
+} catch (const DbError& error) {
+    // Storage I/O is an error result at this native DDL boundary, just like
+    // createDomain's non-OK DBStatus. Keep its structured SQLSTATE in the
+    // existing diagnostic bridge. Semantic/cancellation exceptions retain
+    // their original typed propagation and transactional RAII unwinding.
+    if (error.sqlState() != "58030") throw;
+    std::cout << "ERROR: " << error.what() << std::endl;
+    return true;
 }
 
 bool DdlExecutor::executeCreateCollation(const CreateObjectStmt* stmt, Session& s) {
