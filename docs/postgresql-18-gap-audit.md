@@ -1,31 +1,29 @@
 # 2026-10-07 最新总清单 checkpoint
 
-最新生产/测试 source `679d5543`，**640 native / 329 registered / 58 TU**。
-c061 checkpoint 后累计17项独立source/test commit，映射及逐版本证据见
-`docs/issue-ready-source-integration.md`。最新七项为集合单元格canonical类型、
-真实ORDER/LIMIT子句归属、typed Append/Sort/Limit入口、二维ARRAY简写、
-逐元素数组ALTER及modifiers、唯一索引23505、LOGGED→UNLOGGED后DROP代际完成凭据。
-既有domain全祖先、WAL identity/完成协议、INSERT异常owner、真实session SRF与
-模式绑定均已逐项合入；不能据此勾选整个family完成。
+最新生产/测试 source `28940634`，**642 native / 330 registered / 58 TU**。
+c061 checkpoint后累计19项独立source/test commit，逐项映射见
+`docs/issue-ready-source-integration.md`。本轮新九项：set三项、array三项、
+UNLOGGED退休、域外键基础比较、stale-clean缓存原子idle判定（含orphan-pin）。
+缓存V2的whole15/SAN4绿没有豁免新增真红；V3fresh58O0/whole18/scopedSAN4均实际0
+后才独立合入。域FK原6组/strict180006、ROOT6native/6完整邻接及匹配audit全部0。
+既有domain祖先/WAL identity/完成协议/owner/SRF/pattern binding均已分别commit，
+但对应完整family仍未完成。
 
-25ee与42bd精确全58正常O2/repeat/audit/freeze分别50723/70365实际0；
-c061 matching12native实际0、原whole9wire实际1=4pass/5fail（含两项原磁盘deadline）；
-1cc matching normal6native实际0，但57对象为逐字核实的复用，不冒fresh58。
-模式原whole11/完整domain优先级48及匹配11native在私有O0组合全部通过；
-新增Unicode原13参照全0、候选11差异仍待修复。新集合43控制/原metadata18/
-12完整serialwire、数组whole54/8native/4邻接协议、UNLOGGED退休normal19/scopedSAN3
-各有真实完整终态0；不能继承成当前主分支全量通过。原失败日志及SQL/assert/deadline保留。
+25ee/42bd/0fdb/ed82精确正常O2全58/repeat/audit/freeze全部实际0，SHA见integration。
+0fdb matching27native57574已实际0；原full635/32756028和whole13wire60110已真启动，
+原磁盘UNKNOWN及Append setup deadline失败保留；ed82原full639/32948518已启动。
+最新2894新公共BufferPool头要求再次fresh58，60362在
+`/tmp/dbms-canonical-retired-fk.kDFH8VC7`实际live；35native/15wholewire及642/330原full
+仅准备，尚未启动，不继承旧版或private绿。旧d2/5ca/c061/42bd原full亦live。
+新模式Unicode13/扩展controls的参照绿、真实旧fixture错误与候选差异仍独立验证，
+不因原模式11/优先级48专项绿宣全Unicode/collation完成。
 
-精确0fdb635/327和ed82639/329两组公共头fresh58正常O2构建47811/25658实际live；
-最新679d另加TableManage修复及一native，后续必须匹配再验收。原d2/5ca/c061/42bd
-完整runner96468/16482/36568/33648已重新核实live，无全量PASS声明。
-tablespace缓存V2原whole15/SAN4绿后，新增orphan-pin强负例真实红，V3仍独立修，
-未合入。explicit search_path、Unicode运行时、domain ALTER与任意cast/revalidation、
-其余集合运算、WAL rewrite/PITR及全部剩余总账继续。
-
-总273仍**22 complete / 166 partial / 70 unverified / 15 deferred_by_user**，
-完成gate拒绝；只本地commit，不push、不启用Actions、不恢复用户跳过专项。
-以下 checkpoint 的“当前/live”均指其记录当时，不替代本节最新证据。
+原SQL/assert/counters/default deadlines及失败日志保留。Unicode、explicit search_path
+及其真实SET LOCAL/qualified CREATE依赖、磁盘timeout实际原因、domain ALTER/casts/
+revalidation、其它sets、WALrewrite/PITR及所有剩余273内容继续。总账仍
+**22 complete / 166 partial / 70 unverified / 15 deferred_by_user**，完成gate拒绝。
+只本地commit，不push、不启用Actions、不恢复用户跳过专项。
+以下 checkpoint 的“当前/live”均指记录当时，不替代本节最新证据。
 
 2026-10-07 当前f6 checkpoint：九项独立修复/fixture已逐项ROOT commit（映射见docs/issue-ready-source-integration.md），最新source f6d1476b；586native/308registered/58TU。旧a7正式108native16908 terminal1=107pass/1旧歧义fixture、56wire84684 terminal1=52pass/4fail（旧RETURNING隐藏namespace、scalar恒定planning、UNNEST无FROM、joined-view UPDATE2764）；断言/SQL/deadline及失败日志保留。新全58正式O2 build51258在/tmp/dbms-root-storage-mv-root-combination.26UiCBTM实际live，ROOT源码/头/测试/registry冻结到build/repeat及逐字节/flags/签名核实后的不可变复制完成；116native/60wire及完整586/308尚未执行，不继承private绿。PA sharedfile/liveowner强native8+SSI10轮及定向ASan2均0，但更强freshreader探针3/3证明两commit成功只剩id100，真正跨engine heap/cache/WAL丢行仍OPEN并独立修；不能靠commit-only smoke宣SSI完成。geometry输入/qualifieddescriptor、finiteINTERVAL/readroot、DELETE BOOL、MV IUD42809均各自有强PG18.6与候选proof，整合后正式联测待实际终态；joinedVIEW/ARRAYmetadata/plainEXPLAIN/ProjectSet等继续。旧4f完整564/29315248 registered阶段仍live（native560/4），未报fullPASS。总273仍22complete/166partial/70unverified/15deferred，不push、不启用Actions、不恢复用户跳过专项；下方为历史checkpoint。
 

@@ -42,17 +42,17 @@ Source `5ca4278e` 已逐项本地提交，618 native / 319 registered / 58 TU；
 
 ## 2026-10-07 当前完整目标执行计划（最新；前文是历史）
 
-生产/测试source `679d5543`，640native/329registered/58TU。最新七项修复
-已逐项commit，c061 checkpoint后累计17项；详见integration映射与原始证据。
+生产/测试source `28940634`，642native/330registered/58TU。最新九项修复
+已逐项commit，c061 checkpoint后累计19项；详见integration映射与原始证据。
 完整273目标未缩小，旧2026-09“本次范围完成”不等于总账完成。
 
 | 阶段 | 必须通过的验收 | 当前证据 / 下一动作 |
 | --- | --- | --- |
-| 独立修复 | 真复现、保持原SQL/断言、每问题独立commit | set三项/array三项/UNLOGGED退休一项均已分别ROOT commit |
-| 组合正式构建 | 公共头全58 fresh正常O2，repeat及source/header/flags/object/stamp，冻结同binary | 25ee/42bd已实际0；0fdb47811、ed8225658 live；最新679d须重新匹配变更TableManage |
-| 完整原回归 | 原全部native/registered，默认期限和完整矩阵，不删失败 | d2/5ca/c061/42bd原full96468/16482/36568/33648已核实live；无全量PASS |
+| 独立修复 | 真复现、保持原SQL/断言、每问题独立commit | set三项/array三项/退休/域FK/cache原子guard均已分别ROOT commit |
+| 组合正式构建 | 公共头全58 fresh正常O2，repeat及source/header/flags/object/stamp，冻结同binary | 25ee/42bd/0fdb/ed82全部实际0；最新2894公共头fresh58 60362 live，35native/15wire仅准备 |
+| 完整原回归 | 原全部native/registered，默认期限和完整矩阵，不删失败 | d2/5ca/c061/42bd原full96468/16482/36568/33648及新0fdb56028/ed8248518 live；无全量PASS |
 | 组合专项 | 新头匹配native、whole protocol、严格180006原强fixtures | 私有set43/18/12wire、array54/8native/4wire、retire19/3SAN、pattern11/48均有实际0；新ROOT尚待正式结果 |
-| 已证实剩余缺陷 | Unicode模式、explicit search_path、retired-cache orphan pins | Unicode13参照0/候选11差异；cache强负例实际红/V3修复中；均不因中间绿而豁免 |
+| 已证实剩余缺陷 | Unicode模式、explicit search_path/SET LOCAL、真实磁盘timeout原因 | Unicode/runtime与错误旧fixture独立核实，search-path dependencies强矩阵在修；cache V3原强whole18/scopedSAN4已0并独立合入 |
 | 剩余family | 逐项核实和实现全部尚未达到要求的273项 | domain ALTER/casts/revalidation、其它sets、完整类型/存储/查询/运维等仍OPEN，继续逐项修复 |
 | 总账闭合 | 每条checkbox/状态/证据/提交/验收范围一致，完成审计实证 | 22complete/166partial/70unverified/15deferred；require-complete仍应拒绝 |
 

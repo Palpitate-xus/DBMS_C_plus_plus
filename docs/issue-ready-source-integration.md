@@ -1,8 +1,8 @@
 # Independent source integrations after canonical 75090
 
-## Current 679d checkpoint: 17 independently committed repairs, combination verification pending
+## Current 2894 checkpoint: 19 independently committed repairs, combination verification pending
 
-Production/test source `679d5543` has **640 native / 329 registered / 58 TU**.
+Production/test source `28940634` has **642 native / 330 registered / 58 TU**.
 These are source integrations, not completion of the PostgreSQL families.
 
 | Independent repair | Private commit | ROOT commit |
@@ -24,6 +24,8 @@ These are source integrations, not completion of the PostgreSQL families.
 | Actual ALTER array element conversion and retained modifiers | `313f51c7` | `3a95ebd7` |
 | Unique index rebuild conflict retains SQLSTATE 23505 | `e230ac45` | `ed82e868` |
 | DROP retires an identity after LOGGED-to-UNLOGGED changes | `5205a9f6` | `679d5543` |
+| Domain foreign keys compare resolved physical base types | `c0ef74e5` | `be34e546` |
+| Atomic idle/retired cache proof includes orphan pins and loads | `bd46573e` | `28940634` |
 
 ### Actual evidence, by source epoch
 
@@ -76,12 +78,21 @@ These are source integrations, not completion of the PostgreSQL families.
   the original CREATE/full-text-index zero-WAL test is unchanged.
   This is matched incremental O0/scoped instrumentation, not all58 O2.
 
-Exact `0fdb5314` **635/327/58** new fresh normal O2 epoch **47811** is live
-under `/tmp/dbms-canonical-pattern-owner.AR5UGRVA`. Exact `ed82e868`
-**639/329/58** new fresh normal O2 epoch **25658** is live under
-`/tmp/dbms-canonical-array-set.2aIsy0eH`. No latest build/freeze/full PASS
-is claimed. Latest `679d5543` additionally changes TableManage and adds one
-native; those older epochs cannot prove this latest combination unchanged.
+Exact `0fdb5314` **635/327/58** fresh normal O2 build/repeat/audit/freeze
+**47811 exits0**, under `/tmp/dbms-canonical-pattern-owner.AR5UGRVA`, SHA256
+`c6d2ab03f0a4a34b4abe322e5f88d1e7b7251b42eb96b69529c2fba60ea7f4fb`.
+Its matching native27 **57574 exits0: 27/27 pass**. The unchanged original
+full **56028** and whole wire13 **60110** are live. The wire run retains disk-backed
+UNKNOWN and typed-Append setup timeouts; not a focused or full PASS.
+Exact `ed82e868` **639/329/58** fresh normal O2 build/repeat/audit/freeze
+**25658 exits0**, under `/tmp/dbms-canonical-array-set.2aIsy0eH`, SHA256
+`b935fecca904adabfbade6f59afb419a14442a00e14f3aefef9746ae37963694`.
+Its unchanged original full **48518** is live, not a full PASS.
+Latest `28940634` adds retirement/FK/cache repairs and a public BufferPool
+API: **60362** is a genuinely new fresh normal58 epoch in
+`/tmp/dbms-canonical-retired-fk.kDFH8VC7`, actually live. Matching native35,
+whole wire15 and original642/330 runner are prepared, **not started**.
+No latest build/freeze/full PASS is claimed; older epochs cannot prove it.
 Public query/type/OID/WAL/API headers are not mixed with earlier ABI objects.
 
 As re-polled on 2026-10-07, unchanged original full runners are live:
@@ -99,11 +110,18 @@ ordering/operator/collation semantics and explicit provider search_path remain
 open. Domain ALTER/casts/array/composite/revalidation and broad array codecs
 remain open. WAL physical rewrite epochs/general crash/PITR remain open.
 
-The independent stale-clean tablespace cache candidate passes its original
-entire15 normal and four scoped sanitizer group, but a stronger retained
-orphan-pin negative actually fails: backup incorrectly succeeds. Its V3 guard
-is being rebuilt and is **not imported**. A green intermediate group is not
-used to waive that original owner/pin invariant.
+The cache's V2 whole15/SAN4 success did not waive the real orphan-pin failure.
+V3 subsequently passes fresh58 O0, strengthened whole18 and scoped4 SAN,
+all actual0, including the entire original tablespace/backup test and dirty,
+ordinary/orphan-pin, closed/missing guards. The separately committed V3 is now
+ROOT `28940634`; its public API is included in the new formal58 epoch.
+See `issue-clean-retired-heap-backup.md`; broad storage/TDE/SSI remains open.
+
+Domain FK base compatibility is independently ROOT `be34e546`. ROOT reran
+its original whole6 and strict180006, six matching natives and six complete
+adjacent scripts, all actual0, plus the all58 source/header/object audit of
+57 byte-identical archived O0 objects and fresh TableManage. No all-O2/current
+ROOT/full-family claim; see `issue-domain-foreign-key-base.md`.
 
 All273 item states stay **22 complete / 166 partial / 70 unverified /
 15 deferred_by_user**. The completion gate is still expected to reject.

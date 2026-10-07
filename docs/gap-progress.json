@@ -2,6 +2,41 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "19 separately committed ROOT repairs; domain FK and orphan-pin-safe retired cache integrated; exact0fdb/ed82 formal58 verified, latest2894 formal58 running",
+      "gap_ids": [
+        "TYPE-16",
+        "TYPE-19",
+        "CAT-10",
+        "QRY-06",
+        "STO-04",
+        "WAL-05",
+        "TXN-07"
+      ],
+      "status": "partial",
+      "commits": [
+        "be34e546",
+        "28940634"
+      ],
+      "evidence": [
+        "docs/issue-ready-source-integration.md",
+        "docs/issue-domain-foreign-key-base.md",
+        "docs/issue-clean-retired-heap-backup.md"
+      ],
+      "tests": [
+        "tests/domain_foreign_key_base_test.cpp",
+        "tests/domain_foreign_key_base_protocol_e2e_test.py",
+        "tests/clean_retired_heap_backup_test.cpp",
+        "tests/alter_table_only_test.cpp"
+      ],
+      "verification": {
+        "reproduction": "Original valid base/domain/nested/composite FK declarations five red andnative134 versusstrict180006; V2 idle-cache orphan-pin actualbackup1 falsepositive afterwhole15/SAN4 green. No original asserts removed.",
+        "fix": "Domain physical-base comparison keeps identity/constraints/array/enum guards; one pool-locked idle-retired cache proof includes real orphan/loading maps, retains rawowners anddirty/closed/missing failures.",
+        "focused_tests": "ROOT domainFK originalwhole6/reference/sixmatchingnatives/sixcompleteadjacents/all58matchingreceipt actual0, incrementalO0 57byteproved archivedobjects/freshTM notall58O2. Cache V3 fresh58O0/sourceheaderobjectaudits0 SHAe2891b42693488aa0e0fb31982594a333b80edc2f514eb9d060548319a83ea84; originalstrengthened18native andscopedTM/BP/PA4SAN0, notfullcoreSAN.",
+        "full_suite": "Latest28940634 exact642native330registered58TU publicBufferPool headerfreshnormal58 60362 live /tmp/dbms-canonical-retired-fk.kDFH8VC7; native35/wire15/originalfull onlypreparednotstarted. Exact0fdb635/32758 build/repeat/audit/freeze47811 actual0 SHAc6d2ab03f0a4a34b4abe322e5f88d1e7b7251b42eb96b69529c2fba60ea7f4fb; full56028/wire1360110 live; matchingnative27 57574 actual0, originaldisksetuptimeouts retained. Exacted82639/32958 build25658 actual0 SHAb935fecca904adabfbade6f59afb419a14442a00e14f3aefef9746ae37963694; originalfull48518 live. Older originalfull d296468/5ca16482/c06136568/42bd33648 remainlive. No latestformal/full/TLSruntimePASS.",
+        "scope": "All273 unchanged22complete166partial70unverified15deferred. Unicode, genuineSETLOCAL/qualifiedCREATE/providersearchpath, diskdeadlinecause, domainALTER/revalidation/generalcasts, other sets/storage/recovery andremainingfamilies required. No push/Actionsactivation/securityrestart."
+      }
+    },
+    {
       "issue": "17 independent ROOT integrations through 679d; genuine set clauses/array values/retirement repaired, latest whole combination still pending",
       "gap_ids": [
         "TYPE-04",
