@@ -1,4 +1,32 @@
-# 2026-10-07 最新6320总清单 checkpoint
+# 2026-10-07 最新b69b总清单 checkpoint
+
+最新生产/测试source `b69bd1fc`，**663native/340registered/58TU**。
+c061后45项独立source/test commit。继历史6320后又分别commit：
+DELETE异常owner、嵌套镜像alias、域IO bool错误、UPDATE DEFAULT纯绑定、
+ALTER原表达式span、实际UPDATE DEFAULT carrier。所有映射和proof见integration。
+
+DELETE强native/14相邻/scopedSAN0，但原新wire真实DELETE5/noRETURNING六断言红
+仍保留。Alias强native/13相邻/prepared/scopedSAN及原Append traced/不trace两轮、
+FK及六原磁盘wire0；早前necessary-write53.705秒超时仍失败不覆盖。
+域IO原bool断言134→0，完整12native58907实际0；whole9=6pass/3fail（两个timeout、
+一个初始connect errno103）。UPDATE DEFAULT完整14wire/额外array两组/12native/
+局部4TU五驱动SAN均0，旧numeric/planning/qualified/MV红保留；不冒全family通过。
+
+精确9772 fresh58正常O2/repeat/audit/freeze12522已0；69native55621/28whole26177 live。
+精确11d7匹配normal87774已0（二fresh CPP+56逐字来源/头/flags/原receipt证明
+donors，非再fresh58），74native/30whole/full仅准备。
+最新b69b新增publiccallback头必须再全58fresh O2，无donors；build23520在
+`/tmp/dbms-canonical-default-owner-image.6lNOWCkb` 实际live；
+76native/32whole/原663/340 full只准备，不能继承private或旧ABI绿。
+
+原c465全58/native58已0、wire25=16pass/9fail，原648/334及七旧full记录真实live；
+无全量PASS。真正DELETEconsumer、explicitarraybound22P02、跨owner map/failed
+close、真实DML EXPLAIN、identity/generated/VIEW/default冻结及其它原273继续。
+总账 **22complete/166partial/70unverified/15deferred_by_user**，完成gate必须拒绝。
+每项本地commit、不push、不启用Actions、不恢复用户跳过安全/TDE。
+下面checkpoint只记录对应历史时点，不替代最新状态。
+
+# 2026-10-07 历史6320总清单 checkpoint
 
 最新生产/测试source `6320afc3`，**658 native /338 registered /58 TU**。
 c061后累计39项独立source/test commit；本轮新增cold声明、domain五项、

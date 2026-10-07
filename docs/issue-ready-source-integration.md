@@ -1,4 +1,92 @@
-# Latest 6320 checkpoint: 39 independently committed source/test repairs
+# Latest b69b checkpoint: 45 independently committed source/test repairs
+
+Production/test source `b69bd1fc` is **663 native /340 registered /58 TU**.
+The six latest independent commits below follow the twelve mapped at the
+historical6320 checkpoint; c061 onward now has45 source/test commits. This is not
+45 completed PostgreSQL families. No push was performed.
+
+| Independent repair | Private commit | ROOT commit |
+| --- | --- | --- |
+| Native DELETE exception statement owner/output/audit rollback | `5d1254c0` | `4873e725` |
+| Complete-proof nested savepoint image reuse/last-reference collection | `236d9269` | `6ec77f02` |
+| CREATE DOMAIN native bool I/O error, original58030 diagnostic | `cfa96119` | `11d7f82f` |
+| Pure actual UPDATE target default AST/implicit assignment binding | `d5edd20c` | `d1249e13` |
+| ALTER DEFAULT original expression span and qualified identity | `ef415393` | `4b85cc62` |
+| Actual typed UPDATE DEFAULT carrier and constant planning | `6957d2ab` | `b69bd1fc` |
+
+## Latest scoped evidence
+
+DELETE owner private `/tmp/dbms-native-delete-owner.lXFKajuO`: original native
+134 with9 owner/output/audit failed assertions, not observed target-row loss;
+final full native,14 adjacent and sole-TM scoped sanitizer0. Frozen SHA256
+`231879c6ae7d9c806b310d49d463cc197cb9cba55fc4c7efc4168effd544e30a`.
+Whole15 is **exit1**:14 original neighbors pass; the intact new strict180006-green
+wire contract retains6 red assertions at real DELETE5/no RETURNING frontend.
+It is carried forward unfiltered/unregistered, not counted passing.
+
+Alias private `/tmp/dbms-savepoint-image-alias.EI8b3LsW`: original duplicate-image
+134, expanded alias/13 adjacent/prepared native/scoped4-TU sanitizer0.
+Original Domain/FK, traced and nontraced complete original Append and six ordinary
+disk/default15 wire repetitions0; all owned servers/tracers terminal0/gone.
+Frozen SHA256 `96c5f76e58a673cb13a633cd740e596f87455ef7deec0e3cd784b011b0809b12`.
+Equal log counters alone never license reuse; actual payload/cache/catalog/WAL
+receipt and independent frame state/reference-aware collection are required.
+Earlier no-effect-only necessary-writing restore53.705s timeout remains failed.
+Successful repetitions are not controlled throughput or all-latency closure.
+
+Domain I/O private `/tmp/dbms-routine-creation-path.1pbTosJh`: exact unchanged
+original isolated assert134 on c465 becomes0 on matching candidate. Complete
+native12 **58907 exits0**, including unchanged full ddl_ast_bridge. Whole9
+**24417 exits1:6 pass/3 fail** (ancestry/SRF-path default15 timeout; FK initial
+connect errno103 before SQL). Complete creation-path and qualified-frontend0
+in this later run; earlier V2 timeouts stay failed. The sole new O2 DDL/proven57
+normal donor SHA is `93891e9f3c7039a9feff085f4eb40c92d5adc2caac3a7e88a8f91ca285a3f695`.
+Only58030 converts to the existing native bool result; semantic/cancellation
+exceptions remain typed. No latest combined/all-domain approval follows.
+
+UPDATE DEFAULT private `/tmp/dbms-domain-update-default.eBHK9e56`: final14
+complete scripts, two extra original array matrices,12 native and scoped4-TU
+sanitizer/five drivers all0; strict180006 ordinary/current/transaction/backend
+reopen/qualified/numeric/planning/MV controls0. Numeric22023, false-demand wrong
+success, lost-schema42883 and MV XX001 actual failures remain. Frozen SHA256
+`18d3742b292b7124831c13603650247b8191f98140f5a113d9f9abc65426c519`.
+Fresh58 privateO0 plus source-matched CPP rebuilds are not ROOT normal O2 or
+whole-source SAN. QueryBindingMetadata's new public callback requires a full
+consistent58 rebuild. Pure prepare EXPLAIN0 calls is **not actual DML EXPLAIN**.
+
+## Actual optimized combination gates
+
+Exact9772 `/tmp/dbms-canonical-default-pattern-image.3WZIBvE9`,657/337/58,
+freshnormal58/repeat/audit/freeze **12522 exits0**, SHA256
+`8f782944b4b13f31f7122c30bb7de8c052508b2245ef678a4b5f8a5342932bf7`.
+The first incorrect655 guard exited1 before compiling and remains. Matching69
+native **55621** and whole28 **26177** are individually re-polled live;
+original657/337 full remains prepared/not started.
+
+Exact11d7 `/tmp/dbms-canonical-creation-owner-alias.r49mNiN9`,661/338/58,
+normal **87774 exits0**:two newly compiled CPPs plus56 explicitly proved normal
+donors, all58 original receipts/current signatures/header/flags/object bytes/
+repeat/stamp. Explicit relocation is not another freshly compiled all58 epoch.
+Frozen SHA256 `56a0165184b5801ebec53927470096ee7ac0488e1ce370f3c0e619069f6643c7`.
+Its74 native/30 whole/originalfull helpers are prepared, not started.
+The later public callback cannot borrow this old ABI.
+
+Latest exactb69b `/tmp/dbms-canonical-default-owner-image.6lNOWCkb`,663/340/58,
+starts a genuinely fresh normal O2 **all58 build23520 live**, with no donors.
+Matching76 native,whole32 and original663/340 helpers are prepared/not started.
+No current combined freeze/focused/full/TLS-runtime PASS is claimed.
+c465 normal58/native58 remain terminal0; whole25 remains16pass/9fail; full79042
+and seven older full handles remain recorded live at their last individual poll.
+
+Actual DELETE RETURNING, explicit array lower-bound input22P02 versus strict18,
+cross-engine FSM/VM coherence/failed-close pending state, real DML EXPLAIN,
+generated/identity/VIEW/default stored-identity, lazy temporary routines/arbitrary
+overloads, general casts/collations/revalidation/sets/storage/recovery/operations
+and every remaining original family requirement stay open.
+All273 states remain **22 complete /166 partial /70 unverified /15 deferred**.
+Completion gate must reject; no push, Actions activation or security/TDE restart.
+
+# Historical 6320 checkpoint: 39 independently committed source/test repairs
 
 Production/test source `6320afc3` has **658 native / 338 registered / 58 TU**.
 Twelve source/test commits after the historical c465 checkpoint are mapped below.
@@ -70,10 +158,10 @@ The complete original648/334 **79042 remains live**. The seven older full handle
 **96468/16482/36568/33648/56028/48518/27869** are individually re-polled live.
 
 Exact9772 detached `/tmp/dbms-canonical-default-pattern-image.3WZIBvE9` is
-**657/337/58**, now a genuinely fresh normal O2 all58 build **12522 live**.
+**657/337/58**, fresh normal O2 all58 build **12522 exits0**.
 The first helper exits1 at its mistaken655 count guard, before compiling; it is
-retained separately. Corrected657 guard starts the real build. Matching69 native,
-whole28 and original657/337 helpers are prepared, **not started**.
+retained separately. Corrected657 guard starts the real build. Matching69 native55621
+and whole28 26177 are live; original657/337 remains prepared/not started.
 Latest6320 adds a CPP-only creation-path change/test/registration, without changing
 9772 headers; it still needs matching optimized combination verification.
 

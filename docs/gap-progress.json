@@ -2,6 +2,53 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "45 independent ROOT source/test repairs throughb69b; native DELETE owner, savepoint image aliases, domain bool I/O and three UPDATE DEFAULT roots integrated; new callback ABI fresh normal58 running",
+      "gap_ids": [
+        "DML-04",
+        "DML-03",
+        "TXN-05",
+        "TXN-07",
+        "STO-04",
+        "TYPE-19",
+        "FUNC-05"
+      ],
+      "status": "partial",
+      "commits": [
+        "4873e725",
+        "6ec77f02",
+        "11d7f82f",
+        "d1249e13",
+        "4b85cc62",
+        "b69bd1fc"
+      ],
+      "evidence": [
+        "docs/issue-ready-source-integration.md",
+        "docs/issue-delete-exception-owner.md",
+        "docs/issue-savepoint-image-alias.md",
+        "docs/issue-domain-ddl-io-error-result.md",
+        "docs/issue-update-default-binding.md",
+        "docs/issue-alter-default-source-span.md",
+        "docs/issue-update-default-consumer.md"
+      ],
+      "tests": [
+        "tests/delete_exception_owner_test.cpp",
+        "tests/delete_exception_owner_protocol_e2e_test.py",
+        "tests/savepoint_image_alias_test.cpp",
+        "tests/domain_ddl_io_error_test.cpp",
+        "tests/update_default_binding_test.cpp",
+        "tests/update_domain_default_test.cpp",
+        "tests/update_domain_default_protocol_e2e_test.py",
+        "tests/update_domain_default_transaction_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "reproduction": "DELETE implicit/parent owner/output/audit9assertions baseline134, no observed target-row loss. Duplicate physical image baseline134. Original corrupt-domain bool assertion unchanged isolated matchingc465134. UPDATE numeric22023/false-demandwrongsuccess/lostschema42883/MVXX001 retained; source-harness corrections separately strict180006-verified. All old original failures/cascades/deadlines retained.",
+        "fix": "Six independent ROOT commits. NativeDELETE same status rollback then original typed rethrow. Alias complete preimage proof plus independent frame state/reference-aware GC. CREATE DOMAIN only58030 nativebool conversion with originalSQLSTATE. Public pure updateDefault callback resolvedschema/relation/column actualstored AST in empty namespace+implicit target assignment; ALTER true source-span statement/thread-owned RAII; actualtypedUPDATE DEFAULT samecarrier constants/runtime, not discarded preflight. No routine/row effects for metadata.",
+        "focused_tests": "DELETE whole native/14adj/scopedsoleTMSAN0 SHA231879c6ae7d9c806b310d49d463cc197cb9cba55fc4c7efc4168effd544e30a, whole15=14pass1newscript6red at separateDELETE5/noRETURNING, strict1800060, unfilteredunregistered. Alias expandednative/13adj/prepared/scoped4TUSAN/originalDomainFK/traced+nontracedAppend/sixdiskdefault15whole0 SHA96c5f76e58a673cb13a633cd740e596f87455ef7deec0e3cd784b011b0809b12; earlierwritingAppend53.705s/default15 stillfailed. DomainIO originalassert0 andwhole12native58907actual0; whole924417=6pass3fail(two originaltimeouts plusinitialFKconnecterrno103beforeSQL), soleDDL/proven57normal SHA93891e9f3c7039a9feff085f4eb40c92d5adc2caac3a7e88a8f91ca285a3f695. UPDATE final14whole/twoextraARRAY/12native/scoped4TUfive-driverSAN actual0 SHA18d3742b292b7124831c13603650247b8191f98140f5a113d9f9abc65426c519; fresh58privateO0+matchingCPP/header/objectaudit, notROOTformal/fullSAN.",
+        "full_suite": "Exact9772657/337/58 freshnormal58/repeat/audit/freeze12522actual0 SHA8f782944b4b13f31f7122c30bb7de8c052508b2245ef678a4b5f8a5342932bf7; firstincorrect655countguard1beforecompile retained. Matching69native55621/whole2826177 re-polledlive; original657/337fullpreparednotstarted. Exact11d7661/338/58 normal87774actual0 twofreshCPPs+56source/header/actualflag/original58receipt/objectbyteproveddonors/readdressedreceiptsnotfresh58claim SHA56a0165184b5801ebec53927470096ee7ac0488e1ce370f3c0e619069f6643c7;74native/30wire/originalfullpreparednotstarted. Latestb69b663/340/58 /tmp/dbms-canonical-default-owner-image.6lNOWCkb newpubliccallbackABI genuinelyfreshnormal58/no donors build23520live;76native/whole32/original663340preparednotstarted. c465normal/native58actual0/wire25=16pass9fail/full79042 andsevenolderfull lastindividuallyverifiedlive. No currentcombined/focused/full/TLSruntimePASS.",
+        "scope": "Original273 unchanged22complete166partial70unverified15deferred. ActualDML EXPLAIN purepreparezeroeffects notconsumer approval; actualDELETERETURNING, ordinaryexplicitarraybound22P02 versusstrict18, crossengineFSMVM/failedclosependingstate, identity/generated/VIEW/defaultstoredidentity/arbitraryoverloads/generaltypes/casts/revalidation/other sets/fullstorage/recovery/operations remainrequired. No push/Actionsactivation/usersecurityTDE restart."
+      }
+    },
+    {
       "issue": "39 independently committed ROOT source/test repairs through6320; domain defaults, real legacy pattern consumers, map ownership and proven no-effect images integrated; new matching normal58 gate running",
       "gap_ids": [
         "TYPE-04",

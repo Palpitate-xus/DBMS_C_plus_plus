@@ -76,7 +76,7 @@ source/test commit，最新八项已分别合入。完整273目标没有缩小�
 不push，不启用Actions，用户跳过安全/TDE保持deferred。任何尚在运行或仅准备
 的 gate 都不写为通过；历史失败不因新候选专项成功而改绿。
 
-## 2026-10-07 当前完整目标计划（6320；前文均历史）
+## 2026-10-07 历史完整目标计划（6320）
 
 source6320：658native/338registered/58TU，c061后39项独立source/test提交，
 最新12项逐项映射见integration；目标始终是原273完整要求，不借旧小范围关闭。
@@ -94,3 +94,22 @@ source6320：658native/338registered/58TU，c061后39项独立source/test提交�
 domain旧来源不猜/不迁移、schemaB/D3旧reader拒绝；必要写入恢复Append53.705秒
 原15期限失败仍保留，不因no-effect专项绿就关全部延迟。无push/Actions激活或
 用户跳过安全/TDE重启；各私有O0/局部SAN/单CPP增量不冒充最新全量正式通过。
+
+## 2026-10-07 当前完整目标计划（b69b；前文均历史）
+
+sourceb69b：663native/340registered/58TU，c061后45项source/test独立commit。
+最新六项映射和完整实际日志见integration；总273目标不缩小。
+
+| 阶段 | 必须满足的验收 | 实际状态与下一动作 |
+| --- | --- | --- |
+| 独立问题版本管理 | 原复现/原assert/deadline/真实consumer，每问题commit | 新owner/alias/域IO/UPDATE三项分别本地commit；原失败不删除 |
+| 新public callback ABI | 全58fresh正常O2/repeat/source/header/flags/object/stamp/freeze | exactb69b23520 live，无donors；76native/32wire/原663/340只准备 |
+| 原组合比较 | 对应revision一致，不借旧ABI/私有O0 | 9772 fresh58已0，69native/28wire live；11d7两CPP+56证明donors匹配normal0，其helpers未启动 |
+| 原全量回归 | 原所有native/registered及已知未注册红，期限不改 | c465原full和七旧full实证live；c465wire25=16pass/9fail；无全量PASS |
+| 已证实继续问题 | 真实DML EXPLAIN/DELETE RETURNING/explicit array bounds/跨owner maps | 三个owner各独立tree修复，强fixture原seed不删、不把cascade数成独立bugs |
+| 原剩余families | 每条完整功能/实际证据/提交/原gate都满足 | types/query/catalog/storage/recovery/operations等仍OPEN |
+| 总账闭合 | 每项状态/checkbox/证据/commit范围一致且完整验收 | 22complete/166partial/70unverified/15deferred；require-complete仍必须拒绝 |
+
+旧必要恢复timeout保持红；alias原Append两轮绿不等于所有延迟闭合。
+UPDATE纯prepare EXPLAIN零effects不冒实际plan consumer。新D3/schemaB旧reader拒绝，
+旧模糊default来源不猜测/不自动迁移。无push、Actions启用、安全/TDE跳过项重启。

@@ -22,8 +22,8 @@ The new permanent native checks the bool result and exact58030 diagnostic,
 no leaked transaction or modified corrupt-directory payload, successful real
 domain creation after repair, and unchanged3F000 semantic exception propagation.
 Its matching O2 run and ten creation/cold/namespace/provider/catalog/FK neighbors
-terminate0. The complete original ddl_ast_bridge is still running after advancing
-beyond its previously failed domain case; no entire twelve-driver PASS is claimed.
+terminate0. The unchanged complete original ddl_ast_bridge later also terminates0.
+The entire twelve-driver group58907 finishes0 with no original assertion changed.
 
 Evidence under `/tmp/dbms-routine-creation-path.1pbTosJh`:
 
@@ -32,8 +32,8 @@ Evidence under `/tmp/dbms-routine-creation-path.1pbTosJh`:
   donor receipts; not a fresh all58 production epoch.
 - `dbms_main.domain-io-v1-namespace.frozen` SHA256:
   `93891e9f3c7039a9feff085f4eb40c92d5adc2caac3a7e88a8f91ca285a3f695`.
-- `domain-io-v1-native-twelve.log`:11 drivers terminal0; whole original DDL live.
-- `domain-io-v1-whole-nine.log`: unchanged serial wire group still running.
+- `domain-io-v1-native-twelve.log`:all12 drivers terminate0, including original DDL.
+- `domain-io-v1-whole-nine.log`:whole9 24417 exits1:6 pass/3 fail.
   Domain ancestry already exceeds original15 deadline; Domain/FK initial connect
   fails errno103 before SQL; SRF path has timeout/cleanup failures. Those failures
   remain, not inferred to be domain I/O semantic regressions. The unchanged
