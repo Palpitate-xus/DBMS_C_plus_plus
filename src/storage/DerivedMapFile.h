@@ -87,8 +87,42 @@ struct Cache {
     std::vector<uint8_t> bytes;
     std::map<size_t, uint8_t> pendingMasks;
     bool dirty = false;
+    uint8_t kind = 0;
     struct stat generation{};
 };
+
+using CacheKey = std::tuple<uint64_t, uint64_t, uint8_t>;
+struct CacheEntry {
+    std::weak_ptr<Cache> observed;
+    std::shared_ptr<Cache> pending;
+    int pendingFd = -1;
+    CacheEntry() = default;
+    CacheEntry(const CacheEntry&) = delete;
+    CacheEntry& operator=(const CacheEntry&) = delete;
+    ~CacheEntry() { if (pendingFd >= 0) ::close(pendingFd); }
+    void clearPending() {
+        if (pendingFd >= 0) ::close(pendingFd);
+        pendingFd = -1;
+        pending.reset();
+    }
+};
+struct CacheRegistry {
+    std::mutex mutex;
+    std::map<CacheKey, CacheEntry> entries;
+    size_t lookups = 0;
+};
+
+inline CacheRegistry& cacheRegistry() {
+    // Global engines may close maps after normal function-static destruction.
+    // The process-owned registry has explicit per-entry cleanup instead.
+    static auto* registry = new CacheRegistry;
+    return *registry;
+}
+
+inline CacheKey cacheKey(const Cache& state) {
+    return {static_cast<uint64_t>(state.generation.st_dev),
+            static_cast<uint64_t>(state.generation.st_ino), state.kind};
+}
 
 inline bool sameGeneration(const struct stat& left, const struct stat& right) {
     return left.st_dev == right.st_dev && left.st_ino == right.st_ino &&
@@ -103,23 +137,60 @@ inline std::shared_ptr<Cache> sharedCache(int fd, const std::string& filename,
                                         uint8_t kind, std::vector<uint8_t> initial) {
     struct stat generation{};
     if (!read(fd, filename, initial, &generation)) return {};
-    using Key = std::tuple<uint64_t, uint64_t, uint8_t>;
-    static std::mutex registryMutex;
-    static std::map<Key, std::weak_ptr<Cache>> registry;
-    static size_t lookups = 0;
-    std::lock_guard<std::mutex> guard(registryMutex);
-    if (++lookups % 64 == 0) {
-        for (auto it = registry.begin(); it != registry.end();)
-            if (it->second.expired()) it = registry.erase(it); else ++it;
+    auto& registry = cacheRegistry();
+    std::lock_guard<std::mutex> guard(registry.mutex);
+    if (++registry.lookups % 64 == 0) {
+        for (auto it = registry.entries.begin(); it != registry.entries.end();) {
+            if (it->second.pending && it->second.pendingFd >= 0) {
+                struct stat pinned{};
+                // A completed physical unlink retires this exact inode. An
+                // intent, missing pathname, IO error, or rename is not proof.
+                if (::fstat(it->second.pendingFd, &pinned) == 0 && pinned.st_nlink == 0)
+                    it->second.clearPending();
+            }
+            if (it->second.observed.expired()) it = registry.entries.erase(it);
+            else ++it;
+        }
     }
-    auto& entry = registry[{static_cast<uint64_t>(generation.st_dev),
-                            static_cast<uint64_t>(generation.st_ino), kind}];
-    if (auto existing = entry.lock()) return existing;
+    auto& entry = registry.entries[{static_cast<uint64_t>(generation.st_dev),
+                                    static_cast<uint64_t>(generation.st_ino), kind}];
+    if (auto existing = entry.observed.lock()) return existing;
     auto state = std::make_shared<Cache>();
     state->bytes = std::move(initial);
     state->generation = generation;
-    entry = state;
+    state->kind = kind;
+    entry.observed = state;
     return state;
+}
+
+// Caller holds the cache mutex. Failed close transfers the actual fd rather
+// than needing another fd/allocation; a new opener can retry the same pending
+// inode even after the last old map object has been destroyed.
+inline bool retainPending(const std::shared_ptr<Cache>& state, int& fd) {
+    struct stat opened{};
+    if (fd < 0 || ::fstat(fd, &opened) != 0 || !S_ISREG(opened.st_mode) ||
+        opened.st_dev != state->generation.st_dev ||
+        opened.st_ino != state->generation.st_ino) return false;
+    auto& registry = cacheRegistry();
+    std::lock_guard<std::mutex> guard(registry.mutex);
+    const auto found = registry.entries.find(cacheKey(*state));
+    if (found == registry.entries.end() ||
+        found->second.observed.lock().get() != state.get()) return false;
+    auto& entry = found->second;
+    entry.pending = state;
+    if (entry.pendingFd < 0) {
+        entry.pendingFd = fd;
+        fd = -1;
+    }
+    return true;
+}
+
+inline void releasePending(const Cache& state) {
+    auto& registry = cacheRegistry();
+    std::lock_guard<std::mutex> guard(registry.mutex);
+    const auto found = registry.entries.find(cacheKey(state));
+    if (found != registry.entries.end() && found->second.pending.get() == &state)
+        found->second.clearPending();
 }
 
 inline void overlayPending(const Cache& state, std::vector<uint8_t>& actual,
@@ -162,6 +233,7 @@ inline bool publish(int fd, const std::string& filename, Cache& state,
     state.bytes.swap(actual);
     state.pendingMasks.clear();
     state.dirty = false;
+    releasePending(state);
     return true;
 }
 

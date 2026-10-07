@@ -4,7 +4,10 @@
 namespace dbms {
 
 VisibilityMap::VisibilityMap(const std::string& filename) : filename_(filename) {}
-VisibilityMap::~VisibilityMap() { flush(); close(); }
+VisibilityMap::~VisibilityMap() {
+    flush(); close();
+    if (fd_ >= 0) ::close(fd_);
+}
 
 bool VisibilityMap::open() {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -21,8 +24,9 @@ void VisibilityMap::close() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (fd_ >= 0) {
         std::lock_guard<std::mutex> sharedLock(cache_->mutex);
-        if (cache_->dirty) (void)derived_map_file::publish(fd_, filename_, *cache_, 0);
-        ::close(fd_);
+        if (cache_->dirty && !derived_map_file::publish(fd_, filename_, *cache_, 0) &&
+            !derived_map_file::retainPending(cache_, fd_)) return;
+        if (fd_ >= 0) ::close(fd_);
         fd_ = -1;
     }
     cache_.reset();
