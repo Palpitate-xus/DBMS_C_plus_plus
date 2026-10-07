@@ -20490,6 +20490,79 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
     dbms::publishLastDmlResult(std::move(result));handled=true;return false;
 }
 
+static bool handlePreparedUnionAllQuery(const string& rawSql,Session& session,bool& handled) {
+    handled=false;
+    dbms::SQLParser parser;auto parsed=parser.parseForBinding(rawSql);
+    const auto* root=parsed.isValid()?dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()):nullptr;
+    if(!root || root->setOp!=dbms::SetOp::Union || !root->setOpAll)return false;
+    // A metadata-only shape probe preserves other existing aggregate/window/
+    // backend-local SRF contracts. It never renders an inline-left body or
+    // opens a source to discover eligibility. Whole binding below retains all
+    // source/child namespaces and validates names before any routine runs.
+    dbms::ExprEvaluator metadata;metadata.setCurrentDB(session.currentDB);
+    function<bool(const dbms::Expr*)> scalar;
+    function<bool(const dbms::SelectStmt*)> supported;
+    function<bool(const dbms::FromItem*)> source=[&](const dbms::FromItem* item) {
+        if(!item)return true;
+        if(item->type==dbms::FromItem::Type::Join)
+            return source(item->left.get()) && source(item->right.get()) && scalar(item->joinCondition.get());
+        if(item->type==dbms::FromItem::Type::Subquery)
+            return supported(dynamic_cast<const dbms::SelectStmt*>(item->subquery.get()));
+        return item->type==dbms::FromItem::Type::Table;
+    };
+    scalar=[&](const dbms::Expr* value) {
+        if(!value)return true;
+        if(value->preparedSubquery)return supported(dynamic_cast<const dbms::SelectStmt*>(value->preparedSubquery.get()));
+        if(const auto* call=dynamic_cast<const dbms::FunctionCallExpr*>(value)) {
+            if(call->setReturning || call->hasOver || call->distinct || call->filter || !call->orderBy.empty() ||
+                !metadata.hasScalarFunction(call,&g_engine))return false;
+            for(const auto& arg:call->args)if(!scalar(arg.get()))return false;
+            for(const auto& arg:call->namedArgs)if(!scalar(arg.value.get()))return false;
+        } else if(const auto* node=dynamic_cast<const dbms::BinaryOpExpr*>(value)) {
+            return scalar(node->left.get()) && (node->op=="::" || scalar(node->right.get()));
+        } else if(const auto* node=dynamic_cast<const dbms::QuantifiedComparisonExpr*>(value)) {
+            return scalar(node->left.get()) && scalar(node->right.get());
+        } else if(const auto* node=dynamic_cast<const dbms::UnaryOpExpr*>(value))return scalar(node->operand.get());
+        else if(const auto* node=dynamic_cast<const dbms::CastExpr*>(value))return scalar(node->operand.get());
+        else if(const auto* node=dynamic_cast<const dbms::CaseExpr*>(value)) {
+            if(!scalar(node->switchExpr.get()) || !scalar(node->elseExpr.get()))return false;
+            for(const auto& arm:node->whenClauses)if(!scalar(arm.first.get()) || !scalar(arm.second.get()))return false;
+        } else if(const auto* node=dynamic_cast<const dbms::ArrayExpr*>(value)) {
+            for(const auto& element:node->elements)if(!scalar(element.get()))return false;
+        } else if(const auto* node=dynamic_cast<const dbms::RowExpr*>(value)) {
+            for(const auto& element:node->elements)if(!scalar(element.get()))return false;
+        }
+        return true;
+    };
+    supported=[&](const dbms::SelectStmt* select) {
+        if(!select || (select->command!=dbms::SqlCommand::Select && select->command!=dbms::SqlCommand::Values) ||
+            !select->groupBy.empty() || !select->groupByElems.empty() || select->having ||
+            !select->windowDefs.empty() || !select->distinctOn.empty() || !select->locking.empty() || select->withTies)
+            return false;
+        // Current parser branches do not yet retain global versus local
+        // set ORDER/LIMIT ownership. Preserve their existing ordinary entry
+        // rather than treating a RHS clause as an invented local scope.
+        if(!select->orderBy.empty() || select->limit || select->offset)return false;
+        if(select->setOp!=dbms::SetOp::None && (select->setOp!=dbms::SetOp::Union || !select->setOpAll || !select->setOpRhs))return false;
+        if(select->setOpLhs && !supported(dynamic_cast<const dbms::SelectStmt*>(select->setOpLhs.get())))return false;
+        if(select->setOpRhs && !supported(dynamic_cast<const dbms::SelectStmt*>(select->setOpRhs.get())))return false;
+        for(const auto& target:select->selectList)if(!scalar(target.expr.get()))return false;
+        for(const auto& row:select->valuesRows)for(const auto& value:row)if(!scalar(value.get()))return false;
+        for(const auto& key:select->orderBy)if(!key.usingOp.empty() || !scalar(key.expr.get()))return false;
+        return scalar(select->whereClause.get()) && source(select->fromClause.get());
+    };
+    if(!supported(root))return false;
+    auto query=make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(session.currentDB,rawSql));
+    if(!supported(static_cast<const dbms::SelectStmt*>(query->ast.get())))return false;
+    PreparedWithDmlRuntime runtime(session,std::move(query));auto result=runtime.runRead();
+    for(const auto& name:result.columns)cout<<name<<' ';cout<<'\n';
+    for(size_t i=0;i<result.rows.size();++i) {
+        for(size_t j=0;j<result.rows[i].size();++j)cout<<(result.nulls[i][j]?"NULL":result.rows[i][j])<<' ';
+        cout<<'\n';
+    }
+    dbms::publishLastDmlResult(std::move(result));handled=true;return false;
+}
+
 static bool explainPreparedReadQuery(Session& session,const string& raw,
     const dbms::QueryPlanner::ExplainOptions& options,bool json,
     shared_ptr<dbms::PreparedQuery> query) {
@@ -25364,6 +25437,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
 
     if (sql.substr(0, 6) == "select" || sql.substr(0, 5) == "with ") {
         if (!checkDB(s)) return true;
+
+        bool preparedUnionHandled=false;
+        const bool preparedUnionFailed=handlePreparedUnionAllQuery(effectiveRawSql,s,preparedUnionHandled);
+        if(preparedUnionHandled)return preparedUnionFailed;
 
         bool quantifiedHandled=false;
         const bool quantifiedFailed=handlePreparedMultirowQuery(effectiveRawSql,s,quantifiedHandled);
