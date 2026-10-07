@@ -2412,7 +2412,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                         declaredVarcharMods[sub.name] = varcharModifier;
                     }
                     status = g_engine.alterTableAlterColumnType(
-                        s.currentDB, tableName, sub.name, column);
+                        s.currentDB, tableName, sub.name, column, cd.typeMods);
                 } else {
                     std::cout << "ALTER COLUMN subcommand is unsupported" << std::endl;
                     return true;

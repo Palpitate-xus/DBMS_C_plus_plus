@@ -145,7 +145,8 @@ public:
     // re-encoding each row's value. Pre-validates convertibility and aborts
     // (INVALID_VALUE) before touching any files if a value cannot be represented.
     DBStatus alterTableAlterColumnType(const std::string& dbname, const std::string& tablename,
-                                        const std::string& colName, const Column& newCol);
+                                        const std::string& colName, const Column& newCol,
+                                        const std::vector<std::string>& typeMods = {});
     // ALTER TABLE ... SET LOGGED | SET UNLOGGED: flip the table's WAL persistence
     // flag (metadata; existing data is kept). logged=true -> LOGGED.
     DBStatus alterTableSetLogged(const std::string& dbname, const std::string& tablename,

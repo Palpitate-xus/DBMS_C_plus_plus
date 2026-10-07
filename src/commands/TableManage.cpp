@@ -9184,9 +9184,12 @@ static bool validateArrayScalar(const std::string& tok, const std::string& elemT
 struct ArrayParser {
     const std::string& s;
     const std::string& elemType;
+    std::function<std::string(const std::string&)> convertScalar;
     size_t i = 0;
     bool ok = true;
-    explicit ArrayParser(const std::string& str, const std::string& et) : s(str), elemType(et) {}
+    explicit ArrayParser(const std::string& str, const std::string& et,
+                         std::function<std::string(const std::string&)> converter = {})
+        : s(str), elemType(et), convertScalar(std::move(converter)) {}
     void skipWs() { while (i < s.size() && std::isspace(static_cast<unsigned char>(s[i]))) ++i; }
 
     // Returns nesting depth (0 = scalar, >=1 = array) and, for arrays, the child
@@ -9219,9 +9222,15 @@ struct ArrayParser {
             if (up == "NULL") { out += "NULL"; return 0; }
             if (tok.empty()) { ok = false; return -1; }  // bare empty element is invalid
         }
-        if (!validateArrayScalar(tok, elemType)) { ok = false; return -1; }
+        if (convertScalar) {
+            tok = convertScalar(tok);
+            quoted = false;
+        } else if (!validateArrayScalar(tok, elemType)) { ok = false; return -1; }
         bool needQuote = quoted || tok.empty() ||
                          tok.find_first_of(" ,{}\"\\") != std::string::npos;
+        std::string lower;
+        for (unsigned char ch : tok) lower += static_cast<char>(std::tolower(ch));
+        needQuote = needQuote || lower == "null";
         if (needQuote) {
             std::string q = "\"";
             for (char c : tok) { if (c == '"' || c == '\\') q += '\\'; q += c; }
@@ -17838,7 +17847,8 @@ static bool valueConvertibleToType(const std::string& raw, const std::string& ta
 DBStatus StorageEngine::alterTableAlterColumnType(const std::string& dbname,
                                                   const std::string& tablename,
                                                   const std::string& colName,
-                                                  const Column& newCol) {
+                                                  const Column& newCol,
+                                                  const std::vector<std::string>& typeMods) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (!lockManager_.lockExclusive(tablename)) return DBStatus::LOCK_CONFLICT;
@@ -17852,6 +17862,29 @@ DBStatus StorageEngine::alterTableAlterColumnType(const std::string& dbname,
     if (colIdx >= tbl.len) {
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
+    }
+    Column target = newCol;
+    if (!TypeRegistry::instance().validateColumn(target).empty()) {
+        lockManager_.unlock(tablename);
+        return DBStatus::INVALID_VALUE;
+    }
+    if (tbl.cols[colIdx].isArray || target.isArray) {
+        const auto sourceType = ExprHelper::canonicalResultTypeName(tbl.cols[colIdx].dataType);
+        const auto targetType = ExprHelper::canonicalResultTypeName(target.dataType);
+        const auto* sourceEntry = TypeRegistry::instance().findType(sourceType);
+        const auto* targetEntry = TypeRegistry::instance().findType(targetType);
+        const bool numericCast = sourceEntry && targetEntry &&
+            sourceEntry->category == TypeCategory::Numeric &&
+            targetEntry->category == TypeCategory::Numeric;
+        const bool stringTarget = targetType == "text" || targetType == "character varying" ||
+                                  targetType == "character";
+        if (!tbl.cols[colIdx].isArray || !target.isArray ||
+            (sourceType != targetType && !numericCast && !stringTarget)) {
+            lockManager_.unlock(tablename);
+            throw DbError("42804", "column \"" + colName +
+                "\" cannot be cast automatically to type " + targetType +
+                (target.isArray ? "[]" : ""));
+        }
     }
 
     // 1. Collect all live rows BEFORE mutating the schema.
@@ -17878,10 +17911,55 @@ DBStatus StorageEngine::alterTableAlterColumnType(const std::string& dbname,
 
     // 2. Pre-validate convertibility — abort before touching any files if a
     //    value cannot be represented in the new type (no data loss on failure).
-    for (const auto& values : rows) {
+    ExprEvaluator arrayEvaluator;
+    CastExpr elementCast;
+    elementCast.typeName = ExprHelper::canonicalResultTypeName(target.dataType);
+    elementCast.typeMods = typeMods;
+    auto elementParameter = std::make_unique<ParameterExpr>();
+    elementParameter->declaredType = ExprHelper::canonicalResultTypeName(tbl.cols[colIdx].dataType);
+    elementCast.operand = std::move(elementParameter);
+    // Native callers have a character width in Column rather than a parsed
+    // modifier list. Arrays always retain that element width during a rewrite.
+    if (elementCast.typeMods.empty() &&
+        (target.dataType == "varchar" || target.dataType == "char")) {
+        elementCast.typeMods = {std::to_string(target.dsize)};
+    }
+    for (auto& values : rows) {
         auto it = values.find(colName);
-        if (it != values.end() && it->second &&
-            !valueConvertibleToType(*it->second, newCol.dataType)) {
+        if (it == values.end() || !it->second) continue;
+        if (target.isArray) {
+            try {
+                const auto convertElement = [&](const std::string& input) {
+                    std::string value = input;
+                    if ((target.dataType == "varchar" || target.dataType == "char") &&
+                        !truncateCharacterValue(value, target.dsize)) {
+                        throw DbError("22001", "value too long for type " +
+                            elementCast.typeName + "(" + std::to_string(target.dsize) + ")");
+                    }
+                    RowContext context;
+                    context.setParameters({ExprValue(
+                        ExprHelper::canonicalResultTypeName(tbl.cols[colIdx].dataType),
+                        std::move(value), false)});
+                    return arrayEvaluator.eval(&elementCast, context).value;
+                };
+                ArrayParser parser(*it->second, target.dataType, convertElement);
+                std::string converted;
+                size_t count = 0;
+                parser.skipWs();
+                if (parser.i >= parser.s.size() || parser.s[parser.i] != '{')
+                    parser.ok = false;
+                else parser.parseValue(converted, count);
+                parser.skipWs();
+                if (!parser.ok || parser.i != parser.s.size())
+                    throw DbError("22P02", "malformed array literal: " + *it->second);
+                if (converted.size() > 1024)
+                    throw DbError("22001", "array value exceeds supported storage length");
+                it->second = std::move(converted);
+            } catch (...) {
+                lockManager_.unlock(tablename);
+                throw;
+            }
+        } else if (!valueConvertibleToType(*it->second, target.dataType)) {
             lockManager_.unlock(tablename);
             return DBStatus::INVALID_VALUE;
         }
@@ -17892,17 +17970,19 @@ DBStatus StorageEngine::alterTableAlterColumnType(const std::string& dbname,
         tbl.cols, tbl.cols + tbl.len,
         [](const Column& column) { return column.isVariableLength; });
     Column updated = tbl.cols[colIdx];
-    updated.dataType = newCol.dataType;
-    updated.dsize = newCol.dsize;
-    updated.isVariableLength = newCol.isVariableLength;
-    updated.isArray = newCol.isArray;
-    updated.isUnsigned = newCol.isUnsigned;
-    updated.enumValues = newCol.enumValues;
+    updated.dataType = target.dataType;
+    updated.dsize = target.dsize;
+    updated.isVariableLength = target.isVariableLength;
+    updated.isArray = target.isArray;
+    updated.isUnsigned = target.isUnsigned;
+    updated.enumValues = target.enumValues;
     tbl.cols[colIdx] = updated;
 
     std::string key = dbname + "/" + tablename;
     // Evict caches so new files are created with the new row layout.
     pageAllocators_.erase(key);
+    fsmCache_.erase(key);
+    vmCache_.erase(key);
     pkIndexCache_.erase(key);
     secondaryIndexCache_.erase(key);
     hashIndexCache_.erase(key);
@@ -24352,6 +24432,19 @@ DBStatus StorageEngine::insertInternal(
         // The NULL marker encodes SQL NULL; type validations below must not
         // try to parse it as a value.
         if (isNullMarker) val.clear();
+        // An array's dataType names its element. Scalar validators must not
+        // parse the whole brace literal as NUMERIC, UUID, MONEY, etc.
+        if (col.isArray) {
+            if (!val.empty()) {
+                std::string canonical;
+                if (!normalizeArray(val, col.dataType, canonical)) {
+                    lockManager_.unlock(tablename);
+                    return DBStatus::INVALID_VALUE;
+                }
+                actualValues[col.dataName] = std::move(canonical);
+            }
+            continue;
+        }
         if (!col.isVariableLength && col.dataType == "date" && !val.empty()) {
             Date d(val.c_str());
             if (d.year == 0) {
