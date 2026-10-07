@@ -34,7 +34,13 @@ int main() {
     assert(reloaded.getDomain(db, "outer").hasDefault);
     outer.hasDefault = false; outer.defaultValue.clear();
     assert(engine.alterDomain(db, "outer", outer) == dbms::DBStatus::OK);
-    assert(engine.resolveDomainAncestry(db, "outer").defaultValue == "'base'");
+    // D3 has its own resolved default. DROP does not revert to a live parent.
+    assert(!engine.resolveDomainAncestry(db, "outer").hasDefault);
+    // Only actual old metadata retains the historical live fallback. A new
+    // caller struct with its defaultResolved flag unset cannot downgrade D3.
+    { std::ofstream legacyChild(path,std::ios::app);
+      legacyChild << "legacy_outer|\"public\".\"inner\"|||\n"; }
+    assert(engine.resolveDomainAncestry(db,"legacy_outer").defaultValue=="'base'");
     const auto quoted = dbms::SQLParser::parseTypeSpecification("\"S\" . \"Mixed\"");
     assert(quoted.typeName == "\"S\".\"Mixed\"");
     const auto numeric = dbms::SQLParser::parseTypeSpecification("NUMERIC(8,2)");
