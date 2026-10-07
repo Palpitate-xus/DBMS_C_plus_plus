@@ -5253,8 +5253,9 @@ static bool containsPreparedQuantifier(const dbms::SelectStmt& select) {
 }
 // The later statement-owned provider keeps lexical CTE producers alive while
 // this exact tree is analyzed, and completes write CTEs only after success.
-static bool explainPreparedQuantifiedQuery(Session&,const string&,
-    const dbms::QueryPlanner::ExplainOptions&,bool);
+static bool explainPreparedReadQuery(Session&,const string&,
+    const dbms::QueryPlanner::ExplainOptions&,bool,
+    shared_ptr<dbms::PreparedQuery> = {});
 
 static bool explainNeedsTypedPlan(const dbms::SelectStmt& select) {
     if (containsPreparedQuantifier(select) || !select.fromClause || !select.fromClause->alias.empty() || select.offset ||
@@ -5264,7 +5265,8 @@ static bool explainNeedsTypedPlan(const dbms::SelectStmt& select) {
         if (expression->preparedSubquery || expression->type == dbms::ExprType::Subquery ||
             expression->type == dbms::ExprType::FunctionCall || expression->type == dbms::ExprType::CastExpr ||
             expression->type == dbms::ExprType::CaseExpr || expression->type == dbms::ExprType::Parameter) return true;
-        if (auto* unary = dynamic_cast<const dbms::UnaryOpExpr*>(expression)) return typed(unary->operand.get());
+        if (auto* unary = dynamic_cast<const dbms::UnaryOpExpr*>(expression))
+            return unary->op=="+" || unary->op=="-" || typed(unary->operand.get());
         if (auto* binary = dynamic_cast<const dbms::BinaryOpExpr*>(expression)) {
             if (binary->op == "::" || binary->op == "COLLATE" || binary->op == "+" ||
                 binary->op == "-" || binary->op == "*" || binary->op == "/" || binary->op == "%") return true;
@@ -5330,19 +5332,19 @@ static bool handleExplain(const string& sql, Session& s) {
     auto explained = explainParser.parseForBinding(inner);
     auto* explainedSelect = explained.success ? dynamic_cast<dbms::SelectStmt*>(explained.stmt.get()) : nullptr;
     if(explainedSelect && containsPreparedQuantifier(*explainedSelect))
-        return explainPreparedQuantifiedQuery(s,inner,opts,isJson);
-    if (explainedSelect && dbms::QueryPlanner::supportsPreparedSelectPlan(*explainedSelect)) {
+        return explainPreparedReadQuery(s,inner,opts,isJson);
+    if (explainedSelect && dbms::QueryPlanner::supportsPreparedSourceSelectPlan(*explainedSelect)) {
         // Pure preparation must precede any source startup or writer call,
         // including queries that yield no rows and plain EXPLAIN cache hits.
-        auto prepared = g_engine.prepareBoundQuery(s.currentDB, inner);
-        auto* select = static_cast<dbms::SelectStmt*>(prepared.ast.get());
+        auto prepared = make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(s.currentDB, inner));
+        auto* select = static_cast<dbms::SelectStmt*>(prepared->ast.get());
         // Scalar query children acquire their AST role during pure binding;
         // do not mistake their parser envelope literal for a physical target.
-        if (explainNeedsTypedPlan(*select)) {
-            const string table = select->fromClause ? resolveTableName(s, select->fromClause->tableName) : string{};
-            auto plan = dbms::QueryPlanner::buildPreparedSelectPlan(&g_engine, s.currentDB, table, std::move(prepared));
-            return publishExplainPlan(std::move(plan), inner, s, opts, isJson, table);
-        }
+        if (!select->ctes.empty() || explainNeedsTypedPlan(*select))
+            // Consume the same owned, bound query on the real execution
+            // root, including its source/demand contexts and pure planning.
+            // Child/VIEW/CTE graph construction keeps the false default.
+            return explainPreparedReadQuery(s,inner,opts,isJson,std::move(prepared));
     }
     // The retained legacy physical/index/aggregate planner consumes its
     // compatibility copy only after genuine SQL grammar has been prepared.
@@ -20436,9 +20438,10 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
     dbms::publishLastDmlResult(std::move(result));handled=true;return false;
 }
 
-static bool explainPreparedQuantifiedQuery(Session& session,const string& raw,
-    const dbms::QueryPlanner::ExplainOptions& options,bool json) {
-    auto query=make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(session.currentDB,raw));
+static bool explainPreparedReadQuery(Session& session,const string& raw,
+    const dbms::QueryPlanner::ExplainOptions& options,bool json,
+    shared_ptr<dbms::PreparedQuery> query) {
+    if(!query)query=make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(session.currentDB,raw));
     PreparedWithDmlRuntime runtime(session,query);
     auto plan=runtime.queryPlan();
     // Writer completion is part of the exact successful statement. The
