@@ -4,7 +4,26 @@
 
 # 工作区与复查清单收尾计划
 
-## 2026-10-07 当前完整273目标计划（9f7d；以下较早记录均历史）
+## 2026-10-07 当前完整273目标计划（21b1；以下较早记录均历史）
+
+source `21b105dd`：685auto+1frontend/348registered/58TU，74项独立source/
+test commit。BIT ARRAY constructor 隐式无typmod保全独立提交，原273未缩。
+
+| 阶段 | 必须验收的原范围 | 当前证据 / 下一动作 |
+| --- | --- | --- |
+| 独立修复 | 真反例/完整控制/每问题commit | private9cdb→Root21b1；完整值/空/NULL/nested/OID及原显式BIT默认保持 |
+| 当前生产输入 | 全58源/头/flags/receipts/repeat/freeze | normal71286=0，fresh soleExprEvaluator+57proved d661 normal donors；不冒fresh58/SAN |
+| 原完整回归 | 当前685+frontend/348、磁盘/default期限、完整终态 | 当前full未启动，Root11native82410/3whole57467/strict180006为0；旧full不能当当前绿 |
+| CREATE三层 | 精确native类别、已有flush结果、真实DDL cause/SQLSTATE | 四点native错分类/七点false success/普通wire XX000均实际确认，各独立commit，最终组合未READY |
+| BIT与ENUM | 原全部值/存储/NULL/operator/OID/extended/DDL事务消费者 | 比较/存储literal/descriptor和空enum schema/hash/投影等继续；不以第一项绿代family |
+| 目录/查询/恢复/所有family | 所有原namespace/MVCC/WAL/map/EXPLAIN/存储/运维要求 | 原未闭环要求继续，未证私树不导入；所有旧红保留当前源核实 |
+| 总账闭合 | 每原条目完整证据/状态/checkbox/commit/验收一致 | 22complete166partial70unverified15deferred，require-complete继续拒绝 |
+
+旧full48518/93414/27869实际终1、完整标签保留；旧8694full64688、82bf48181、
+75046359仍逐个live，不因观察时间kill/restart。新helpers冻结、不改单次deadline，
+无push、Actions禁用，用户跳过安全/TDE deferred。完整映射见integration。
+
+## 2026-10-07 历史完整273目标计划（9f7d）
 
 source `9f7d55cc`：684auto+1frontend/347registered/58TU，73项独立source/
 test commit。新增真PITR选中stream修复及两原测试契约分别commit，未缩原273。

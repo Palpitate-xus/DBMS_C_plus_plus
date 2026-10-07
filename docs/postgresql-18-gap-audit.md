@@ -1,4 +1,24 @@
-# 2026-10-07 最新9f7d总清单 checkpoint
+# 2026-10-07 最新21b1总清单 checkpoint
+
+生产/测试source `21b105dd`：**685auto-native+1实际frontend/348registered/
+58TU**，74项独立source/test commit。新BIT数组隐式common-element转换不再
+套用显式`::bit`的默认长度1；真实原`{0,0,0,NULL}`/134保留，值/空元素/NULL/
+嵌套数组/OID/显式长度控制通过。private9cdb→ROOT21b1，原fixture与公开头不改。
+
+ROOT exact21b1正常O2/repeat/all58receipt/stamp/freeze71286实际0：fresh sole
+ExprEvaluator+57逐源/头/flags/原58receipt/objectbyte证明的d661正常donors，
+不冒fresh58或SAN。冻结SHA见integration。十一完整native82410、三完整whole
+57467及严格180006永久六控制均0，原bounds/BIT/default磁盘期限保持。
+当前685+frontend/348原full未启动；专项绿不替代全量终态或TYPE-11闭合。
+
+旧full48518/93414/27869已实际1且全部标签完整保留，不算bug数量；旧8694
+64688、82bf48181、75046359仍逐个live，不杀/重启或冒当前full PASS。
+CREATE三层、BIT比较/存储literal/descriptor/cast/binary、ENUM空标签schema/
+hash/投影rank/OID/事务ALTER和所有其它原未闭环要求继续。总账仍**22complete/
+166partial/70unverified/15deferred**；完成gate拒绝，不push、Actions禁用，
+用户跳过安全/TDE保持deferred。独立映射及完整证据边界见integration。
+
+# 2026-10-07 历史9f7d总清单 checkpoint
 
 生产/测试source `9f7d55cc`：**684auto-native+1真实frontend/347registered/
 58TU**，73项独立source/test commit。PITR恢复选中timeline `d661ca4b`、

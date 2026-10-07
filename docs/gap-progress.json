@@ -2,6 +2,21 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "74 independent ROOT source/test repairs through21b1: implicit BIT ARRAY constructor retains complete element values without explicit bit(1) truncation",
+      "gap_ids": ["TYPE-11", "TYPE-16"],
+      "status": "partial",
+      "commits": ["21b105dd"],
+      "evidence": ["docs/issue-ready-source-integration.md", "docs/issue-bit-array-constructor-typmod.md"],
+      "tests": ["tests/bit_array_constructor_value_test.cpp", "tests/bit_array_constructor_protocol_e2e_test.py", "tests/bit_test.cpp", "tests/bit_protocol_e2e_test.py", "tests/explicit_array_bounds_test.cpp", "tests/explicit_array_bounds_protocol_e2e_test.py"],
+      "verification": {
+        "reproduction": "Exactdbd productionequald661 new complete native134 at ARRAY[B'01',B'001',B'',NULL] actual{0,0,0,NULL}; originalnormalSHA29f59b89b4ff3a0ea7de901285891da6d37a90e0fa667f3aa6da15348d989675. Strict180006 complete6value/OID/NULL/explicittypmodcontrols0. Baseline helper cache-preflight rejection retained, notproductionbug.",
+        "fix": "Private9cdb518c toRoot21b105dd independentissuecommit. Implicit constructor commonBITwithouttypmod validates unconstrainedbitstring/retainsBITidentity; alreadyBITtypednestedarraysretainvalues. ExistingNULL/shape/lowerbounds and explicit::bit default1 remain; nooriginalfixture/SQL/assert/header/flags/storageformatchange.",
+        "focused_tests": "Privatefourentirenatives/complete new+unchangedBIT whole0. Rootexact21b1 11entirenatives82410actual0; threeentirewhole57467actual0(newconstructor/originalBIT/explicitbounds), originaldisk/defaultdeadlines. Permanentstrict180006 sixcontrols referenceactual0. Logs /tmp/dbms-canonical-bit-array.nNQOBzgs; source/test/inputsfrozen. Notfamily/full/all58SANclosure.",
+        "full_suite": "Current685auto-native+actualfrontend348registered58TU. Rootnormal71286actual0 freshsoleExprEvaluator+57exactsource/header/actualflags/original58receipt/objectbyteprovedd661normaldonors, repeat/all58currentreceipt/stamp/frozen0; NOTfresh58. SHAcd01638250ce099dd611e61e01ad9486fe7b6eec1c7fed20b929cf0885dae174. Current685+frontend348originalfullNOTSTARTED. Old48518/93414/27869actual1 complete968/1008/972labels respectively626native268registeredpass13native61registeredfail,656/319pass11/22fail,631/262pass11/68fail; notbugcounts/currentapproval. Old8694full64688/exact82bf48181/exact75046359individuallyLIVE; noexpiry-kill/restart/PASS.",
+        "scope": "Original273unchanged22complete166partial70unverified15deferred; requirecomplete1. CREATE preciseclassification/sevenuncheckedflushfalse-success/ordinaryDDLXX000andlostcause remainprivateindependentcombinedWIP. BITcomparison/storageliteral/descriptor/casts/binary and ENUMemptyschema/hashconsumers/projectionrank/OID/transactionALTER remainOPEN, asalleveryoriginalunclosedcatalog/query/storage/recovery/operationsrequirement. No unverifiedimport/push/Actionsactivation/deferredsecurityTDErestart/overallcompletion."
+      }
+    },
+    {
       "issue": "73 independent ROOT source/test repairs through9f7d: actual forked-backup archive stream, original DOMAIN identity oracle and exact thread-owned table-list fault",
       "gap_ids": ["WAL-04", "WAL-05", "WAL-07", "WAL-08", "CAT-01", "CAT-09", "TYPE-19", "SQL-05", "STO-05"],
       "status": "partial",

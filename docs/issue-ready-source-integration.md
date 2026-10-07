@@ -1,4 +1,55 @@
-# Latest 9f7d checkpoint: 73 independently committed source/test repairs
+# Latest 21b1 checkpoint: 74 independently committed source/test repairs
+
+Production/test source `21b105dd` has **685 auto-native plus one actual
+frontend native /348 registered tests /58 production TUs**. One additional
+ordinary BIT constructor root cause is independently committed; this does not
+close TYPE-11 or change the original273 acceptance scope.
+
+| Issue | Private commit | ROOT commit | Verified issue scope |
+| --- | --- | --- | --- |
+| Implicit BIT array elements lose their length | `9cdb518c` | `21b105dd` | Exact `{0,0,0,NULL}` native134; full values, empty versus NULL, nested arrays, OIDs and retained explicit BIT typmods |
+
+The constructor had reused the explicit scalar `::bit` default length1.
+Its implicit common element type has no typmod. The fix validates BIT elements
+without that default and retains declared BIT identity; already typed nested
+BIT arrays keep their elements. Existing shape, NULL, lower-bound checks and
+explicit scalar-cast behavior remain. Original fixtures/SQL/assertions/flags/
+public headers/storage format are unchanged. See
+`docs/issue-bit-array-constructor-typmod.md` for baseline and private evidence.
+
+Root exact21b1 `/tmp/dbms-canonical-bit-array.nNQOBzgs/repo` normal O2 **71286
+actually exits0**: fresh sole ExprEvaluator plus57 exact source/header/actual
+flags/original58-receipt/object-byte-proved d661 normal donors. Repeat build,
+all58 current receipts, stamp and frozen-byte comparison pass; **not fresh58**.
+Frozen production SHA256
+`cd01638250ce099dd611e61e01ad9486fe7b6eec1c7fed20b929cf0885dae174`.
+Root **11 entire native82410 exit0** include the new constructor, original
+BIT/type registry, concat/array-expression/nested/prepared metadata, explicit
+bounds, current resolved/legacy storage and quantified qualification controls.
+Root **three entire whole57467 exit0** are the new constructor, unchanged
+BIT and explicit-bounds protocols, with original disk/default deadlines.
+Strict180006 runs the complete permanent six-control reference mode and exits0.
+This is issue-scoped proof, not an all-58 sanitizer or a current full-suite PASS.
+The exact current original685+frontend/348 full has **not been started**.
+
+Older original full48518/93414/27869 now actually end1. Their complete labels
+are respectively 968 (626native/268registered pass;13native/61registered fail),
+1008 (656/319pass;11/22fail) and972 (631/262pass;11/68fail). These old source
+failures are retained, not independent bug counts or current-source approval.
+Old8694 full64688, exact82bf full48181 and exact7504 full6359 are individually
+confirmed live. No observation expiry causes a kill/restart or success claim.
+
+Current private CREATE work has three distinct actual defects: precise native
+failure category, seven unchecked initialization flushes returning success,
+and ordinary DDL dropping the cause/returningXX000 despite nativeIO_ERROR.
+The native classification candidate is not imported before combined controls.
+BIT comparison/storage-literal/descriptor/cast/binary semantics, empty ENUM
+schema/hash consumers/rank/descriptors/ALTER transactions and every original
+unclosed catalog/query/storage/recovery/operations requirement remain OPEN.
+Original273 stays **22complete/166partial/70unverified/15deferred**; completion
+gate must still reject. No push, Actions activation or deferred security/TDE.
+
+# Historical 9f7d checkpoint: 73 independently committed source/test repairs
 
 Production/test source `9f7d55cc` has **684 auto-native plus one actual
 frontend native /347 registered tests /58 production TUs**. Three further
