@@ -1434,6 +1434,7 @@ int16_t protocolTypeSize(uint32_t typeOid, const Column& column) {
         case 20: return 8;   // int8
         case 21: return 2;   // int2
         case 23: return 4;   // int4
+        case 25: return -1;  // text (builtin variable-width identity)
         case 24: case 26: case 28: case 29: case 2206: return 4;
         case 27: return 6;   // tid
         case 700: return 4;  // float4
