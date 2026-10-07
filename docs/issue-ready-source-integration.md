@@ -12,9 +12,13 @@ Current ROOT `c061a38a`: **622 native / 320 registered / 58 TU**, clean.
 | Durable cross-process XID allocation and fresh snapshot horizon | `02896e3b` | `c061a38a` |
 
 The new FunctionCall layout and public Append API require a fresh ABI epoch.
-Exact clean detached normal all58 O2 build/repeat/audit/freeze **90776** is
-running in `/tmp/dbms-canonical-bound-function-append.6mp6wGea`. Its original
-622/320 runner is prepared, not started; no latest formal/full PASS is claimed.
+Exact clean detached normal all58 O2 build/repeat/audit/freeze **90776 exits0**
+in `/tmp/dbms-canonical-bound-function-append.6mp6wGea`, frozen SHA256
+`b4d9de1dc5141d6529efd3221384256a87423170b2e9ba626e0f24f985637070`.
+The unchanged original **622/320 runner 36568**, fresh matching native12
+**35605**, and complete whole wire9 **48073** are actually running. The wire
+run already reproduces qualified-public unnest wrong-success and listening
+channel LIMIT0 preflight; no latest full or focused PASS is claimed.
 
 UNKNOWN input private full58 V2 plus matching clone-CPP V3 passes native8 and
 nine complete serial adjacent scripts. The whole strict180006 fixture passes;
@@ -42,11 +46,25 @@ identity source must still pass its unchanged same-parent crash loop with
 this dependency; no early identity completion is claimed. See
 `issue-cross-process-transaction-id-state.md`.
 
-Earlier exact5ca native156 **6042**, full618/319 **16482** and exactd2
-full590/312 **96468** remain live. Finished5ca wire75 stays70pass/5fail;
-normal5ca58 stays exit0, with its frozen SHA below. Neither proves c061.
+Earlier exact5ca native156 **6042 exits1: 154 pass / 2 fail**, retaining original
+parent-table rename/FK and the old first-read vacuum fixture failures. Full
+618/319 **16482** and exactd2 full590/312 **96468** remain live. The original
+5ca full runner additionally reproduces `alter_table_only_test.cpp:136`
+SET TABLESPACE/reopen physicalBackup failure and
+`begin_transaction_database_drop_race_test.cpp:56` active owner COMMIT failure.
+Both exact original tests also fail in the independent physical-identity/XID
+candidate; they remain separate required repairs, not waived controls.
+Finished5ca wire75 stays70pass/5fail; normal5ca58 stays exit0, with its frozen
+SHA below. Neither proves c061.
 Domain ancestry and physical WAL generation are separate private candidates
 under strong whole tests; no ROOT import or completed-family claim yet.
+The separate current-base pattern worktree
+`/tmp/dbms-pattern-current-integration.GQk4jrVC/repo` keeps only unique pattern
+changes, preserving ROOT's actual DML carrier, FunctionCall static type and
+typed Append contracts. New physical array-envelope rejection controls pass
+the complete strict180006 reference fixture. Fresh all58 private O0 build
+47334 is running; its original strong domain-chain setup remains intact and
+is not registered as a passing gate. No pattern source import is claimed.
 All273 states remain22/166/70/15; no push, Actions activation or user-skipped
 security/TDE restart.
 

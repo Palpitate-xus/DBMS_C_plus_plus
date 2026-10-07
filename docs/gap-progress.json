@@ -2,7 +2,7 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
-      "issue": "Independent UNKNOWN/static function type, lazy typed Append/ordinary consumer and cross-process XID commits; fresh c061 formal58 running",
+      "issue": "Independent UNKNOWN/static function type, lazy typed Append/ordinary consumer and cross-process XID commits; exact c061 formal58 verified and original full started",
       "gap_ids": ["TYPE-16", "QRY-01", "QRY-02", "DML-02", "DML-05", "TXN-07", "WAL-05"],
       "status": "partial",
       "commits": ["931c5370", "548168c2", "d62af4ca", "c061a38a"],
@@ -12,7 +12,7 @@
         "reproduction": "UNKNOWNleaf wrongly42883 and contextualNULLIF misinferred; qualifiedpublicunnest wronglysuccess remainswholeknown-gap. Originalwhole37 UNIONALL child0A000 plusallcumulativecounters andnewwhole21 originalroute/extraVOLcall retained redbeforefix. XIDoldchild1/horizon0/parent1 andcoldexternalreader0rows actual134.",
         "fix": "Independent staticASTinput/output separation andrealfunctiondeclaration/copiedroots; actualtypedlazyAppend withsinglecarrier andordinaryrootconsumer; crossprocesslocked/reloadedchecksummedXIDstate withoutchangingacquiredRRview. New FunctionCall/ExecutionPlan publicABI requiresnew58epoch.",
         "focused_tests": "Input matchingprivatefull58V2/matchingcloneV3 native8/adjwire9 pass, strictwhole1800060; wholecandidatequalifiedfrontend remainsred/unregistered. Append/consumer originalwhole37/newwhole21/native9/nineadj wireall0 inmatchingprivateepoch, noreset. XID72sixprocessallocations/oldbounds/corruption/scoped sanitizer/nine matchingnatives0; scoped O2objects/matchingO0restnotallO2, notfullcrossprocessMVCCclosure.",
-        "full_suite": "ROOTc061a38a622native320registered58TU clean; exactfreshnormalO2 build/repeat/audit/freeze90776 actuallyrunning /tmp/dbms-canonical-bound-function-append.6mp6wGea, original622/320runnernotstarted. Earlier5ca normal58exit0/75wire70pass5fail unchanged; matchingnative1566042/full61831916482 andd2 originalfull59031296468 live. No latestformal/fullPASS or TLSruntime claim.",
+        "full_suite": "ROOTc061a38a622native320registered58TU; exactfreshnormalO2 build/repeat/audit/freeze90776 actual0 /tmp/dbms-canonical-bound-function-append.6mp6wGea SHAb4d9de1dc5141d6529efd3221384256a87423170b2e9ba626e0f24f985637070. Originalunchanged622/320runner36568 andmatchingnative1235605/wholewire948073 actuallyrunning; qualifiedpublicunnest/listeningLIMIT0 redalreadyretained. Earlier5ca normal58exit0/75wire70pass5fail unchanged; native1566042 terminal1=154pass2fail oldFKrename/firstreadfixture, full61831916482 andd2 originalfull59031296468 live. Original5cafull additionallyretainsSETTABLESPACEphysicalBackup136/activeBEGINdropCOMMIT56 failures, bothalsofailmatchingphysicalidentitycandidate andremainrequired. No fullPASS or TLSruntime claim.",
         "scope": "Original273 unchanged22complete166partial70unverified15deferred. Qualifiedfrontend/sessionSRF, domainancestry, heapWALgenerations/originalsameparentcrash, patternwholepriority, setP/D andclauses remainrequired; no earlyprivatecandidateimport/fakegreen. No push/Actionsactivation/securityrestart."
       }
     },
