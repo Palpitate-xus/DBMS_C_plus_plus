@@ -16135,10 +16135,9 @@ bool sameColumnSet(std::vector<size_t> left, std::vector<size_t> right) {
 bool foreignKeyColumnTypesCompatible(const Column& local,
                                      const Column& referenced) {
     if (local.isArray != referenced.isArray) return false;
-    if (!local.domainName.empty() || !referenced.domainName.empty()) {
-        return !local.domainName.empty() &&
-               local.domainName == referenced.domainName;
-    }
+    // A domain's declared identity/constraints remain on the column, but FK
+    // equality resolves against its already-resolved physical base type.
+    // Distinct domain names must not reject compatible base comparisons.
     if (!local.enumValues.empty() || !referenced.enumValues.empty()) {
         // Named enums are assignment-compatible only with the same enum
         // type.  The labels are not their identity: PostgreSQL treats two
