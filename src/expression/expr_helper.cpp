@@ -1471,7 +1471,8 @@ std::string ExprHelper::preparedSortExpressionIdentity(
                 for (const auto& order : select->orderBy) key += field(expressionKey(order.expr.get())) + field(order.asc ? "asc" : "desc") +
                     field(order.nullsFirst ? "nulls-first" : "nulls-last") + field(order.usingOp);
                 key += field(select->limit ? std::to_string(*select->limit) : "no-limit") + field(select->offset ? std::to_string(*select->offset) : "no-offset") +
-                    field(select->withTies ? "ties" : "no-ties") + field(select->fetchFirst ? "fetch" : "no-fetch");
+                    field(select->withTies ? "ties" : "no-ties") + field(select->fetchFirst ? "fetch" : "no-fetch") +
+                    field(select->signedFetchCount ? std::to_string(*select->signedFetchCount) : "no-signed-fetch");
                 for (const auto& row : select->valuesRows) { std::string values; for (const auto& value : row) values += field(expressionKey(value.get())); key += field(values); }
                 for (const auto& window : select->windowDefs) key += field(windowKey(window));
                 for (const auto& lock : select->locking) {

@@ -256,7 +256,7 @@ public:
         if (!select || select->selectList.size()!=1 || !select->selectList.front().expr ||
             !select->selectList.front().alias.empty() || select->fromClause || select->whereClause ||
             select->having || !select->groupBy.empty() || !select->orderBy.empty() ||
-            !select->ctes.empty() || select->setOpRhs || select->limit || select->offset)
+            !select->ctes.empty() || select->setOpRhs || select->limit || select->offset || select->signedFetchCount)
             throw DbError("XX001","invalid stored target default expression");
         auto value=std::move(select->selectList.front().expr);
         const std::vector<QueryBindingDatum> noDatums;

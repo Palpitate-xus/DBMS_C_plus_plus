@@ -34049,6 +34049,8 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         }
         TableSchema innerSch = engine->getTableSchema(dbname, innerTbl);
         const bool negate = expr.funcArgs.size() > 1 && expr.funcArgs[1] == "not";
+        if(select->signedFetchCount && *select->signedFetchCount<0)
+            throw DbError("2201W","FETCH count must not be negative");
         if (select->limit && *select->limit == 0) return negate ? "t" : "f";
         size_t remainingOffset = select->offset.value_or(0);
 
@@ -36943,6 +36945,8 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 }
                 orderExpressions.push_back(key);
             }
+            if(projection->signedFetchCount && *projection->signedFetchCount<0)
+                throw DbError("2201W","FETCH count must not be negative");
             if (projection->limit && *projection->limit == 0) {
                 if (knownNull) *knownNull = true;
                 return "NULL";

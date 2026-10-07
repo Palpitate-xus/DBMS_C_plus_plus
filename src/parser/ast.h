@@ -790,6 +790,11 @@ struct SelectStmt : public Stmt {
     // Window functions
     std::vector<WindowDef> windowDefs;
 
+    // Genuine signed FETCH integer input, distinct from a non-negative
+    // executable row cap. A negative value is valid grammar and fails only
+    // when this query's real Limit is demanded; no size_t sentinel is used.
+    std::optional<int64_t> signedFetchCount;
+
     SelectStmt() : Stmt(SqlCommand::Select) {}
     std::string toString() const override { return "SELECT"; }
 };

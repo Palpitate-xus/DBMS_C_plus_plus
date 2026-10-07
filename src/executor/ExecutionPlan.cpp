@@ -598,6 +598,23 @@ public:
     std::vector<Operator*> preparedPlanChildren() const override {return {child_.get()};}
 };
 
+// A negative FETCH input is syntactically and statically typed valid. Keep
+// its actual Limit demand site: constructing/describing a graph is pure,
+// and an outer zero/false/dead branch never opens this child.
+class PreparedNegativeFetchOp final : public Operator {
+    OpPtr child_;
+public:
+    explicit PreparedNegativeFetchOp(OpPtr child):child_(std::move(child)) {}
+    bool open() override {throw DbError("2201W","FETCH count must not be negative");}
+    bool next(std::string&) override {throw DbError("2201W","FETCH count must not be negative");}
+    void close() override {}
+    bool supportsStructuredRows() const override {return child_->supportsStructuredRows();}
+    bool supportsPreparedOuterRow() const override {return child_->supportsPreparedOuterRow();}
+    bool bindPreparedOuterRow(const RowContext& row) override {return child_->bindPreparedOuterRow(row);}
+    std::string preparedPlanNodeName() const override {return "Limit";}
+    std::vector<Operator*> preparedPlanChildren() const override {return {child_.get()};}
+};
+
 class PreparedDistinctOp final : public Operator {
     OpPtr child_;
     struct Row {
@@ -981,7 +998,9 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
     root = std::make_unique<PreparedProjectOp>(std::move(root), state);
     if (select->distinct) root = std::make_unique<PreparedDistinctOp>(std::move(root));
     if (select->offset && *select->offset) root = std::make_unique<OffsetOp>(std::move(root), *select->offset);
-    if(select->limit) {
+    if(select->signedFetchCount && *select->signedFetchCount<0)
+        root=std::make_unique<PreparedNegativeFetchOp>(std::move(root));
+    else if(select->limit) {
         if(select->withTies)root=std::make_unique<PreparedTiesLimitOp>(std::move(root),tiesSort,*select->limit);
         else root=std::make_unique<LimitOp>(std::move(root),*select->limit);
     }
@@ -1257,7 +1276,9 @@ OpPtr QueryPlanner::buildPreparedUnionAllPlan(StorageEngine* engine,const std::s
         root=std::make_unique<PreparedSetSortOp>(std::move(root),keys->second,select->orderBy);
     }
     if(select->offset && *select->offset)root=std::make_unique<OffsetOp>(std::move(root),*select->offset);
-    if(select->limit) {
+    if(select->signedFetchCount && *select->signedFetchCount<0)
+        root=std::make_unique<PreparedNegativeFetchOp>(std::move(root));
+    else if(select->limit) {
         if(select->withTies)root=std::make_unique<PreparedSetTiesLimitOp>(std::move(root),*select->limit,query->setOrderColumns.at(select));
         else root=std::make_unique<LimitOp>(std::move(root),*select->limit);
     }
@@ -1297,7 +1318,9 @@ OpPtr QueryPlanner::buildPreparedSetReturningPlan(StorageEngine* engine,const st
     OpPtr plan=std::make_unique<PreparedSetReturningOp>(engine,database,std::move(query),select,outer,
         std::move(reader),std::move(cursor),planRootConstants,std::move(providerReader));
     if(select->offset)plan=std::make_unique<OffsetOp>(std::move(plan),*select->offset);
-    if(select->limit)plan=std::make_unique<LimitOp>(std::move(plan),*select->limit);
+    if(select->signedFetchCount && *select->signedFetchCount<0)
+        plan=std::make_unique<PreparedNegativeFetchOp>(std::move(plan));
+    else if(select->limit)plan=std::make_unique<LimitOp>(std::move(plan),*select->limit);
     return plan;
 }
 

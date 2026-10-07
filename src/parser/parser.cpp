@@ -321,6 +321,16 @@ static bool parseInt64Token(const std::string& token, int64_t& value) {
     return result.ec == std::errc{} && result.ptr == end;
 }
 
+static bool parseFetchInteger(const std::vector<std::string>& tokens,size_t& position,int64_t& value) {
+    if(position>=tokens.size())return false;
+    std::string token=tokens[position];size_t consumed=1;
+    if((token=="+" || token=="-") && position+1<tokens.size()) {
+        token+=tokens[position+1];consumed=2;
+    }
+    if(!parseInt64Token(token,value))return false;
+    position+=consumed;return true;
+}
+
 static bool parsePositiveDouble(const std::string& token, double& value) {
     try {
         size_t consumed = 0;
@@ -3171,7 +3181,7 @@ static std::string parseQueryRootClauses(const std::vector<std::string>& tokens,
         }
         if (statement.orderBy.empty() || (pos && tokens[pos - 1] == ",")) return "ORDER BY requires an expression";
     }
-    bool sawLimit = statement.limit.has_value(), sawOffset = statement.offset.has_value();
+    bool sawLimit = statement.limit.has_value() || statement.signedFetchCount.has_value(), sawOffset = statement.offset.has_value();
     while (pos < tokens.size()) {
         const auto clause = word(pos);
         if (clause == "limit") {
@@ -3195,11 +3205,12 @@ static std::string parseQueryRootClauses(const std::vector<std::string>& tokens,
             sawLimit = true; ++pos;
             if (word(pos) != "first" && word(pos) != "next") return "FETCH requires FIRST or NEXT";
             ++pos; statement.fetchFirst = true;
-            if (word(pos) == "row" || word(pos) == "rows") statement.limit = 1;
+            if (word(pos) == "row" || word(pos) == "rows") {statement.limit = 1;statement.signedFetchCount=1;}
             else {
-                size_t count = 0;
-                if (!parseNonNegativeInteger(tokens, pos, count)) return "FETCH requires a non-negative integer count";
-                statement.limit = count;
+                int64_t count=0;
+                if(!parseFetchInteger(tokens,pos,count))return "FETCH requires a signed integer count";
+                statement.signedFetchCount=count;
+                if(count>=0)statement.limit=static_cast<size_t>(count);else statement.limit.reset();
             }
             if (word(pos) != "row" && word(pos) != "rows") return "FETCH count must be followed by ROW or ROWS";
             ++pos;
@@ -3687,18 +3698,19 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
         stmt->fetchFirst = true;
 
         if (pos < tokens.size() && (toLower(tokens[pos]) == "row" || toLower(tokens[pos]) == "rows")) {
-            stmt->limit = 1;
+            stmt->limit = 1;stmt->signedFetchCount=1;
         } else {
             if (pos >= tokens.size()) {
-                r.error = "FETCH requires a non-negative integer count";
+                r.error = "FETCH requires a signed integer count";
                 return r;
             }
-            size_t limit = 0;
-            if (!parseNonNegativeInteger(tokens, pos, limit)) {
-                r.error = "FETCH requires a non-negative integer count";
+            int64_t count=0;
+            if(!parseFetchInteger(tokens,pos,count)) {
+                r.error = "FETCH requires a signed integer count";
                 return r;
             }
-            stmt->limit = limit;
+            stmt->signedFetchCount=count;
+            if(count>=0)stmt->limit=static_cast<size_t>(count);else stmt->limit.reset();
         }
 
         if (pos >= tokens.size() || (toLower(tokens[pos]) != "row" && toLower(tokens[pos]) != "rows")) {

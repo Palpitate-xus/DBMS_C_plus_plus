@@ -20810,6 +20810,8 @@ static bool usesInheritedQueryCteSource(const dbms::SelectStmt& root,
 static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& handled) {
     handled=false;
     dbms::SQLParser parser;auto parsed=parser.parseForBinding(rawSql);
+    if(!parsed.isValid() && parsed.error=="WITH TIES cannot be specified without ORDER BY clause")
+        throw dbms::DbError("42601",parsed.error);
     auto* select=parsed.isValid()?dynamic_cast<dbms::SelectStmt*>(parsed.stmt.get()):nullptr;
     if(!select)return false;
     if(usesInheritedQueryCteSource(*select,session))return false;
@@ -20854,7 +20856,19 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
         if(const auto* row=dynamic_cast<const dbms::RowExpr*>(value))for(const auto& element:row->elements)if(requiresPreparedValue(element.get()))return true;
         return false;
     };
-    bool required=requiresPreparedValue(select->whereClause.get());
+    // Only the genuine top-level FETCH grammar owner supplies this signed
+    // admission. Keep ordinary unsigned FETCH on its existing physical/index
+    // consumer; quoted strings, comments and child clauses are not owners.
+    bool explicitSignedFetch=false;
+    if(select->signedFetchCount) {
+        const size_t fetch=findTopLevelKeyword(toLower(rawSql),"fetch",0);
+        if(fetch!=string::npos) {
+            const auto tail=dbms::SQLParser::tokenize(rawSql.substr(fetch));
+            explicitSignedFetch=tail.size()>2 && (tail[2]=="+" || tail[2]=="-");
+        }
+    }
+    bool required=explicitSignedFetch || (select->signedFetchCount && *select->signedFetchCount<0) ||
+        requiresPreparedValue(select->whereClause.get());
     for(const auto& item:select->selectList)required=required || requiresPreparedValue(item.expr.get());
     for(const auto& item:select->orderBy)required=required || requiresPreparedValue(item.expr.get());
     for(const auto& row:select->valuesRows)for(const auto& value:row)required=required || requiresPreparedValue(value.get());
