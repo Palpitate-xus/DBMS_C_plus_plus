@@ -10708,7 +10708,7 @@ bool DdlExecutor::executeCreateFunction(const CreateFunctionStmt* stmt, Session&
         return true;
     }
 
-    const std::string functionSchema=stmt->schema.empty()?"public":stmt->schema;
+    std::string functionSchema=stmt->schema;
     const auto namespaces=g_engine.catalogService().metadataSnapshot(s.currentDB).namespaces;
     const auto storedNamespaces=g_engine.getSchemaNames(s.currentDB);
     const auto namespaceExists=[&](const std::string& schema) {
@@ -10716,6 +10716,24 @@ bool DdlExecutor::executeCreateFunction(const CreateFunctionStmt* stmt, Session&
                    [&](const auto& entry){return entry.nspname==schema;}) ||
                std::find(storedNamespaces.begin(),storedNamespaces.end(),schema)!=storedNamespaces.end();
     };
+    if(functionSchema.empty()) {
+        std::vector<std::string> path;
+        std::string canonical;
+        if(!parseSessionSearchPath(s.searchPath,path,canonical))
+            throw DbError("22023","invalid search_path");
+        // Creation follows the declared path, not callable lookup's
+        // implicit pg_catalog. Keep the decoded namespace through actual
+        // storage, replacement and the namespace-aware undo record.
+        for(const auto& entry:path) {
+            const auto candidate=expandSessionSearchPathEntry(entry,s.username);
+            if(namespaceExists(candidate)) {
+                functionSchema=candidate;
+                break;
+            }
+        }
+        if(functionSchema.empty())
+            throw DbError("3F000","no schema has been selected to create in");
+    }
     // A native database can have real schema markers before catalog
     // bootstrap. Read those actual facts without inventing public after
     // DROP or initializing a new catalog merely to validate a declaration.
