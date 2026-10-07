@@ -2371,6 +2371,38 @@ void BitmapOrHeapScanOp::close() {
 // FilterOp
 // ========================================================================
 
+static void validatePredicateTypes(const TableSchema& table,
+        const std::vector<StorageEngine::Condition>& conditions,
+        const std::string& database = {}, StorageEngine* owner = nullptr) {
+    for (const auto& condition : conditions) {
+        if (condition.op == "typedexpr") {
+            SQLParser parser;
+            auto parsed = parser.parse("SELECT " + condition.value);
+            auto* select = parsed.success ? dynamic_cast<SelectStmt*>(parsed.stmt.get()) : nullptr;
+            if (!select || select->selectList.size() != 1 || select->fromClause)
+                throw DbError("42601", "invalid typed filter predicate");
+            std::map<std::string, std::string> hints;
+            for (size_t i = 0; i < table.len; ++i)
+                hints[table.cols[i].dataName] = table.cols[i].dataType +
+                    (table.cols[i].isArray ? "[]" : "");
+            ExprHelper::prepareArrayTypes(select->selectList.front().expr.get(),
+                hints, database, owner);
+            continue;
+        }
+        if (condition.patternType != "bit") continue;
+        static const std::set<std::string> comparisons = {
+            "=", "<>", "!=", "<", ">", "<=", ">=", "in", "notin", "between", "notbetween"};
+        if (!comparisons.count(condition.op)) continue;
+        for (size_t i = 0; i < table.len; ++i) {
+            if (table.cols[i].dataName != condition.colName) continue;
+            const auto& column = table.cols[i];
+            (void)ExprEvaluator::resolveComparison("=", column.dataType +
+                (column.isArray ? "[]" : ""), "bit");
+            break;
+        }
+    }
+}
+
 FilterOp::FilterOp(OpPtr child, const TableSchema& tbl,
                     const std::vector<StorageEngine::Condition>& conds)
     : child_(std::move(child)), tbl_(tbl), conds_(conds) {}
@@ -2381,6 +2413,8 @@ FilterOp::FilterOp(
     : child_(std::move(child)), tbl_(tbl), branches_(branches) {}
 
 bool FilterOp::open() {
+    validatePredicateTypes(tbl_, conds_);
+    for (const auto& branch : branches_) validatePredicateTypes(tbl_, branch);
     return child_->open();
 }
 
@@ -5678,6 +5712,10 @@ static bool canUseBitmapOrScan(
 }
 
 OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ctx) {
+    const auto table = engine->getTableSchema(ctx.dbname, ctx.tablename);
+    validatePredicateTypes(table, ctx.conds, ctx.dbname, engine);
+    for (const auto& branch : ctx.disjunctiveConds)
+        validatePredicateTypes(table, branch, ctx.dbname, engine);
     OpPtr root;
 
     // Choose between the protected IndexScan and TableScan paths.
@@ -6009,6 +6047,9 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ct
 OpPtr QueryPlanner::buildDisjunctiveSelectPlan(
     StorageEngine* engine, const PlanContext& ctx,
     const std::vector<std::vector<StorageEngine::Condition>>& branches) {
+    const auto table = engine->getTableSchema(ctx.dbname, ctx.tablename);
+    for (const auto& branch : branches)
+        validatePredicateTypes(table, branch, ctx.dbname, engine);
     if (engine->rlsAppliesTo(ctx.dbname, ctx.tablename) ||
         !canUseBitmapOrScan(engine, ctx, branches)) return nullptr;
 

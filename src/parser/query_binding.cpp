@@ -554,6 +554,20 @@ public:
         }
         case ExprType::FunctionCall: {
             auto* call = static_cast<FunctionCallExpr*>(node.get());
+            const auto grammarOperation = SQLParser::toLower(call->funcName);
+            if (call->schema.empty() && call->args.size() == 3 &&
+                (grammarOperation == "between" || grammarOperation == "not between")) {
+                std::vector<std::string> types;
+                for (auto& arg : call->args)
+                    types.push_back(ExprHelper::canonicalResultTypeName(expression(arg, scopes)));
+                for (size_t i = 1; i < types.size(); ++i) {
+                    if (types[0] == "bit" || types[0] == "bit varying" ||
+                        types[i] == "bit" || types[i] == "bit varying")
+                        (void)ExprEvaluator::resolveComparison(i == 1 ? ">=" : "<=", types[0], types[i]);
+                }
+                call->resolvedResultType = "boolean";
+                return "boolean";
+            }
             const std::string escapeSuffix=" ESCAPE";
             if(call->schema.empty() && call->funcName.size()>escapeSuffix.size() &&
                call->funcName.compare(call->funcName.size()-escapeSuffix.size(),escapeSuffix.size(),escapeSuffix)==0 &&

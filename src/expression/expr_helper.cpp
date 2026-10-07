@@ -1676,6 +1676,15 @@ void ExprHelper::prepareArrayTypes(Expr* expression,
                  operation=="not ilike escape" || operation=="similar to escape" || operation=="not similar to escape"))
                 patternType(operation,{call->args[0].get(),call->args[1].get(),call->args[2].get()});
             for (auto& arg : call->args) visit(arg.get(),{});
+            if (call->schema.empty() && call->args.size() == 3 &&
+                (operation == "between" || operation == "not between")) {
+                for (size_t i = 1; i < 3; ++i) {
+                    const auto lhs = canonicalResultTypeName(type(call->args[0].get()));
+                    const auto rhs = canonicalResultTypeName(type(call->args[i].get()));
+                    if (lhs == "bit" || lhs == "bit varying" || rhs == "bit" || rhs == "bit varying")
+                        (void)ExprEvaluator::resolveComparison(i == 1 ? ">=" : "<=", lhs, rhs);
+                }
+            }
             for (auto& arg : call->namedArgs) visit(arg.value.get(),{});
             visit(call->filter.get(),{});
             for (auto& arg : call->over.partitionBy) visit(arg.get(),{});
