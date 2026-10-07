@@ -490,8 +490,10 @@ bool checkDatabase(const Session& s) {
 
 std::string resolveTable(Session& s, const std::string& name,
                          bool foldUnquoted = false,
-                         bool* viewTarget = nullptr) {
+                         bool* viewTarget = nullptr,
+                         bool* materializedTarget = nullptr) {
     if (viewTarget) *viewTarget = false;
+    if (materializedTarget) *materializedTarget = false;
     const auto temporaryPhysicalName = [&](const std::string& table) {
         const std::string physical = tempTablePrefix(s, table);
         g_engine.noteTemporaryRelationAccess(s.currentDB, physical);
@@ -522,6 +524,7 @@ std::string resolveTable(Session& s, const std::string& name,
             }
             if (const auto materialized = g_engine.resolveMaterializedView(
                     s.currentDB, schema, table)) {
+                if (materializedTarget) *materializedTarget = true;
                 if (viewTarget) {
                     *viewTarget = true;
                     return materialized->backingTable;
@@ -544,6 +547,7 @@ std::string resolveTable(Session& s, const std::string& name,
                 physical = legacyPublic;
             }
             if (g_engine.isMaterializedView(s.currentDB, physical)) {
+                if (materializedTarget) *materializedTarget = true;
                 if (viewTarget) *viewTarget = true;
                 return StorageEngine::materializedViewPrefix(physical);
             }
@@ -579,6 +583,7 @@ std::string resolveTable(Session& s, const std::string& name,
         }
         if (const auto materialized = g_engine.resolveMaterializedView(
                 s.currentDB, schema, table)) {
+            if (materializedTarget) *materializedTarget = true;
             if (viewTarget) {
                 *viewTarget = true;
                 return materialized->backingTable;
@@ -602,6 +607,7 @@ std::string resolveTable(Session& s, const std::string& name,
         }
         if (firstCandidate.empty()) firstCandidate = physical;
         if (g_engine.isMaterializedView(s.currentDB, physical)) {
+            if (materializedTarget) *materializedTarget = true;
             if (viewTarget) *viewTarget = true;
             return StorageEngine::materializedViewPrefix(physical);
         }
@@ -5184,6 +5190,42 @@ bool executeDelete(const DeleteStmt& stmt, Session& s, bool& fallback) {
 
 // WITH primary DML consumes the original prepared tree. No temporary table,
 // invented routine datum, or re-parsed target spelling supplies its rows.
+// Whole binding has already checked names and unknown input. Planning uses
+// the execution-owned graph and never opens a routine, source or child. A
+// materialized target is rejected only after those legitimate earlier errors,
+// but before its backing heap/no-data reader or any writer is opened.
+void rejectPreparedMaterializedTarget(Stmt* statement, Session& session,
+    const std::shared_ptr<PreparedQuery>& query) {
+    const PreparedQuery::SourceRange* target=nullptr;
+    for(const auto& range:query->sourceRanges)
+        if(range.owner==statement && !range.source && !range.mergedUsing && !range.relationName.empty()) {
+            if(target)throw DbError("XX000","prepared DML has multiple target occurrences");
+            target=&range;
+        }
+    if(!target || !g_engine.resolveMaterializedView(session.currentDB,
+            target->relationSchema,target->relationName))return;
+    StorageEngine::TablePrivilege privilege;
+    std::string spelling;
+    if(const auto* insert=dynamic_cast<const InsertStmt*>(statement)) {
+        privilege=StorageEngine::TablePrivilege::Insert;spelling=insert->tableName;
+    } else if(const auto* update=dynamic_cast<const UpdateStmt*>(statement)) {
+        privilege=StorageEngine::TablePrivilege::Update;spelling=update->tableName;
+        std::set<std::string> assigned;
+        for(const auto& assignment:update->setClauses) {
+            const auto name=identifier(assignment.first);
+            if(!assigned.insert(name).second)
+                throw DbError("42601","multiple assignments to column \""+name+"\"");
+        }
+    } else if(const auto* remove=dynamic_cast<const DeleteStmt*>(statement)) {
+        privilege=StorageEngine::TablePrivilege::Delete;spelling=remove->tableName;
+    } else return; // MERGE is not part of this consumer's supported contract.
+    if(!checkTablePrivilege(session,identifier(spelling),privilege))
+        throw DbError("42501","permission denied for materialized view target");
+    PreparedQueryExecution planning(query,&g_engine,session.currentDB);
+    planning.planStatementConstants(query->ast.get());
+    throw DbError("42809","cannot change materialized view \""+target->relationName+"\"");
+}
+
 class BoundDmlExecution {
     Stmt* statement_;
     Session& session_;
@@ -5314,6 +5356,7 @@ public:
         physical_=temporary?tempTablePrefix(session_,name):target_->relationSchema=="public"?name:target_->relationSchema+"__"+name;
         if(temporary)g_engine.noteTemporaryRelationAccess(session_.currentDB,physical_);
         if(g_engine.isReadOnly() && !temporary)throw DbError("25006","cannot execute DML in a read-only transaction");
+        rejectPreparedMaterializedTarget(statement_,session_,query_);
         table_=g_engine.getTableSchema(session_.currentDB,physical_);
         if(!table_.len || table_.len!=target_->columns.size())throw DbError("0A000","prepared DML target requires additional view/virtual lowering");
         for(size_t i=0;i<table_.len;++i)if(table_.cols[i].dataName!=target_->columns[i].name)
@@ -5829,6 +5872,29 @@ bool tryDmlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         }
     }
 
+    // Keep UPDATE's duplicate-target analysis before any constant planning,
+    // including materialized targets; 1/0 is not an analysis-time input cast.
+    if(parsedCmd==SqlCommand::Update) {
+        const auto* update=dynamic_cast<const UpdateStmt*>(parsed.stmt.get());
+        if(update && rejectDuplicateUpdateAssignments(*update,s,
+                rawSql.empty()?sql:rawSql,handled))return true;
+    }
+    const std::string* targetSpelling=nullptr;
+    if(const auto* insert=dynamic_cast<const InsertStmt*>(parsed.stmt.get()))targetSpelling=&insert->tableName;
+    else if(const auto* update=dynamic_cast<const UpdateStmt*>(parsed.stmt.get()))targetSpelling=&update->tableName;
+    else if(const auto* remove=dynamic_cast<const DeleteStmt*>(parsed.stmt.get()))targetSpelling=&remove->tableName;
+    if(targetSpelling) {
+        bool viewTarget=false,materializedTarget=false;
+        (void)resolveTable(s,*targetSpelling,true,&viewTarget,&materializedTarget);
+        if(materializedTarget) {
+            if(!checkDatabase(s)){handled=true;return true;}
+            auto prepared=std::make_shared<PreparedQuery>(
+                g_engine.prepareBoundQuery(s.currentDB,rawSql.empty()?sql:rawSql));
+            rejectPreparedMaterializedTarget(prepared->ast.get(),s,prepared);
+            throw DbError("XX000","materialized target lost its prepared identity");
+        }
+    }
+
     bool fallback = false;
     bool error = false;
     if (parsedCmd == SqlCommand::Insert) {
@@ -5838,8 +5904,6 @@ bool tryDmlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
     } else if (parsedCmd == SqlCommand::Update) {
         const auto* stmt = dynamic_cast<const UpdateStmt*>(parsed.stmt.get());
         if (!stmt) return false;
-        if (rejectDuplicateUpdateAssignments(*stmt, s, rawSql.empty() ? sql : rawSql, handled))
-            return true;
         const bool hasDefault = std::any_of(stmt->setClauses.begin(), stmt->setClauses.end(),
             [](const auto& assignment) { return isDefaultValue(assignment.second); });
         // OLD/NEW output namespaces do not change SET's physical OLD-row
