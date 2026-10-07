@@ -1005,6 +1005,132 @@ public:
         return supportsPreparedOuterRow() && branches_[0]->bindPreparedOuterRow(row) && branches_[1]->bindPreparedOuterRow(row);
     }
 };
+
+// Sort the genuine common-typed Append output. Global set keys are bound
+// output ordinals, not re-evaluated branch expressions or display strings.
+class PreparedSetSortOp final : public Operator {
+    OpPtr child_;
+    std::vector<size_t> columns_;
+    std::vector<std::pair<bool,bool>> directions_;
+    std::vector<std::vector<ExprValue>> rows_;
+    std::vector<ExprValue> current_;
+    ExprEvaluator evaluator_;
+    size_t position_=0;
+    bool opened_=false, loaded_=false;
+    bool less(const std::vector<ExprValue>& left,const std::vector<ExprValue>& right) {
+        for(size_t key=0;key<columns_.size();++key) {
+            const auto& a=left.at(columns_[key]); const auto& b=right.at(columns_[key]);
+            if(a.isNull || b.isNull) {
+                if(a.isNull!=b.isNull)return a.isNull==directions_[key].second;
+                continue;
+            }
+            BinaryOpExpr comparison; comparison.op=directions_[key].first?"<":">";
+            auto first=std::make_unique<ParameterExpr>();first->slot=0;first->declaredType=a.typeName;
+            auto second=std::make_unique<ParameterExpr>();second->slot=1;second->declaredType=b.typeName;
+            comparison.left=std::move(first);comparison.right=std::move(second);
+            RowContext context;context.setParameters({a,b});
+            const auto before=evaluator_.eval(&comparison,context);
+            if(!before.isNull && (before.value=="t" || before.value=="true"))return true;
+            comparison.op=directions_[key].first?">":"<";
+            const auto after=evaluator_.eval(&comparison,context);
+            if(!after.isNull && (after.value=="t" || after.value=="true"))return false;
+        }
+        return false;
+    }
+public:
+    PreparedSetSortOp(OpPtr child,std::vector<size_t> columns,const std::vector<SelectStmt::OrderByElem>& order)
+        :child_(std::move(child)),columns_(std::move(columns)) {
+        if(columns_.size()!=order.size())throw DbError("XX000","set sort has no complete bound output keys");
+        for(const auto& key:order)directions_.push_back({key.asc,key.nullsFirst});
+    }
+    ~PreparedSetSortOp() override {try{close();}catch(...) {}}
+    bool open() override {
+        OpenInstrument instrument(this);clearError();rows_.clear();current_.clear();position_=0;loaded_=false;
+        opened_=true;
+        return child_->open() || propagateChildError(child_.get(),"set sort child open failed");
+    }
+    bool next(std::string& display) override {
+        NextInstrument instrument(this);checkForQueryInterrupt();
+        if(!loaded_) {
+            std::string ignored;
+            while(child_->next(ignored)) {
+                std::vector<ExprValue> cells;
+                if(!child_->lastStructuredValues(cells))throw DbError("XX000","set sort child lost typed output");
+                rows_.push_back(std::move(cells));
+            }
+            if(child_->hasError())return propagateChildError(child_.get(),"set sort child failed");
+            std::stable_sort(rows_.begin(),rows_.end(),[&](const auto& a,const auto& b){return less(a,b);});
+            loaded_=true;
+        }
+        if(position_>=rows_.size()){current_.clear();return false;}
+        current_=rows_[position_++];display.clear();
+        for(const auto& cell:current_)display+=cell.isNull?"NULL ":cell.value+" ";
+        instrument.emitted=true;return true;
+    }
+    void close() override {if(opened_){opened_=false;child_->close();}rows_.clear();current_.clear();loaded_=false;position_=0;}
+    bool supportsStructuredRows() const override {return true;}
+    bool lastStructuredValues(std::vector<ExprValue>& row) const override {row=current_;return !current_.empty();}
+    bool lastStructuredRow(std::vector<std::string>& cells,std::vector<bool>& nulls) const override {
+        cells.clear();nulls.clear();for(const auto& cell:current_){cells.push_back(cell.value);nulls.push_back(cell.isNull);}return !current_.empty();
+    }
+    std::string preparedPlanNodeName() const override {return "Sort";}
+    std::vector<Operator*> preparedPlanChildren() const override {return {child_.get()};}
+    bool supportsPreparedOuterRow() const override {return child_->supportsPreparedOuterRow();}
+    bool bindPreparedOuterRow(const RowContext& row) override {return child_->bindPreparedOuterRow(row);}
+};
+class PreparedSetTiesLimitOp final : public Operator {
+    OpPtr child_;
+    size_t limit_, emitted_=0;
+    std::vector<size_t> keys_;
+    std::vector<ExprValue> current_, boundary_;
+    bool opened_=false, done_=false;
+    ExprEvaluator evaluator_;
+    bool tied() {
+        for(const auto key:keys_) {
+            const auto& a=current_.at(key);const auto& b=boundary_.at(key);
+            if(a.isNull || b.isNull){if(a.isNull!=b.isNull)return false;continue;}
+            BinaryOpExpr equality;equality.op="=";
+            auto left=std::make_unique<ParameterExpr>();left->slot=0;left->declaredType=a.typeName;
+            auto right=std::make_unique<ParameterExpr>();right->slot=1;right->declaredType=b.typeName;
+            equality.left=std::move(left);equality.right=std::move(right);
+            RowContext context;context.setParameters({a,b});
+            const auto equal=evaluator_.eval(&equality,context);
+            if(equal.isNull || (equal.value!="t" && equal.value!="true"))return false;
+        }
+        return true;
+    }
+public:
+    PreparedSetTiesLimitOp(OpPtr child,size_t limit,std::vector<size_t> keys)
+        :child_(std::move(child)),limit_(limit),keys_(std::move(keys)) {}
+    ~PreparedSetTiesLimitOp() override {try{close();}catch(...) {}}
+    bool open() override {
+        OpenInstrument instrument(this);clearError();emitted_=0;current_.clear();boundary_.clear();done_=!limit_;
+        if(done_)return true;
+        opened_=true;return child_->open() || propagateChildError(child_.get(),"set ties child open failed");
+    }
+    bool next(std::string& display) override {
+        NextInstrument instrument(this);checkForQueryInterrupt();
+        if(done_){current_.clear();return false;}
+        if(!child_->next(display)) {
+            done_=true;current_.clear();
+            return child_->hasError()?propagateChildError(child_.get(),"set ties child failed"):false;
+        }
+        if(!child_->lastStructuredValues(current_))throw DbError("XX000","set ties lost typed output");
+        if(emitted_>=limit_ && !tied()){done_=true;current_.clear();return false;}
+        if(++emitted_==limit_)boundary_=current_;
+        instrument.emitted=true;return true;
+    }
+    void close() override {if(opened_){opened_=false;child_->close();}current_.clear();boundary_.clear();done_=false;emitted_=0;}
+    bool supportsStructuredRows() const override {return true;}
+    bool lastStructuredValues(std::vector<ExprValue>& row) const override {row=current_;return !current_.empty();}
+    bool lastStructuredRow(std::vector<std::string>& cells,std::vector<bool>& nulls) const override {
+        cells.clear();nulls.clear();for(const auto& cell:current_){cells.push_back(cell.value);nulls.push_back(cell.isNull);}return !current_.empty();
+    }
+    std::string preparedPlanNodeName() const override {return "Limit";}
+    std::vector<Operator*> preparedPlanChildren() const override {return {child_.get()};}
+    bool supportsPreparedOuterRow() const override {return child_->supportsPreparedOuterRow();}
+    bool bindPreparedOuterRow(const RowContext& row) override {return child_->bindPreparedOuterRow(row);}
+};
 }
 
 OpPtr QueryPlanner::buildPreparedUnionAllPlan(StorageEngine* engine,const std::string& database,
@@ -1049,8 +1175,19 @@ OpPtr QueryPlanner::buildPreparedUnionAllPlan(StorageEngine* engine,const std::s
     auto leftPlan=branchFactory(left,!select->setOpLhs,executionProvider);
     auto rightPlan=branchFactory(right,false,executionProvider);
     if(!leftPlan || !rightPlan)throw DbError("XX000","typed set branch factory returned no actual graph");
-    return std::make_unique<PreparedAppendOp>(std::move(leftPlan),std::move(rightPlan),
+    OpPtr root=std::make_unique<PreparedAppendOp>(std::move(leftPlan),std::move(rightPlan),
         inputs->second.left,inputs->second.right,output->second,std::move(begin),std::move(finish));
+    if(!select->orderBy.empty()) {
+        const auto keys=query->setOrderColumns.find(select);
+        if(keys==query->setOrderColumns.end())throw DbError("XX000","set sort has no bound output ordinals");
+        root=std::make_unique<PreparedSetSortOp>(std::move(root),keys->second,select->orderBy);
+    }
+    if(select->offset && *select->offset)root=std::make_unique<OffsetOp>(std::move(root),*select->offset);
+    if(select->limit) {
+        if(select->withTies)root=std::make_unique<PreparedSetTiesLimitOp>(std::move(root),*select->limit,query->setOrderColumns.at(select));
+        else root=std::make_unique<LimitOp>(std::move(root),*select->limit);
+    }
+    return root;
 }
 
 OpPtr QueryPlanner::buildPreparedSetReturningPlan(StorageEngine* engine,const std::string& database,

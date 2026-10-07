@@ -20558,6 +20558,15 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
 static bool handlePreparedUnionAllQuery(const string& rawSql,Session& session,bool& handled) {
     handled=false;
     dbms::SQLParser parser;auto parsed=parser.parseForBinding(rawSql);
+    if(!parsed.isValid()) {
+        int depth=0;
+        for(const auto& token:dbms::SQLParser::tokenize(rawSql)) {
+            if(token=="("){++depth;continue;}if(token==")"){--depth;continue;}
+            const auto word=dbms::SQLParser::toLower(token);
+            if(!depth && (word=="union" || word=="intersect" || word=="except"))
+                throw dbms::DbError("42601",parsed.error);
+        }
+    }
     const auto* root=parsed.isValid()?dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()):nullptr;
     if(!root || root->setOp!=dbms::SetOp::Union || !root->setOpAll)return false;
     // A metadata-only shape probe preserves other existing aggregate/window/
@@ -20602,12 +20611,11 @@ static bool handlePreparedUnionAllQuery(const string& rawSql,Session& session,bo
     supported=[&](const dbms::SelectStmt* select) {
         if(!select || (select->command!=dbms::SqlCommand::Select && select->command!=dbms::SqlCommand::Values) ||
             !select->groupBy.empty() || !select->groupByElems.empty() || select->having ||
-            !select->windowDefs.empty() || !select->distinctOn.empty() || !select->locking.empty() || select->withTies)
+            !select->windowDefs.empty() || !select->distinctOn.empty() || !select->locking.empty() ||
+            (select->withTies && select->setOp==dbms::SetOp::None))
             return false;
-        // Current parser branches do not yet retain global versus local
-        // set ORDER/LIMIT ownership. Preserve their existing ordinary entry
-        // rather than treating a RHS clause as an invented local scope.
-        if(!select->orderBy.empty() || select->limit || select->offset)return false;
+        // Query clauses belong to their retained SelectStmt: a set wrapper
+        // owns global clauses; parenthesized branch bodies own local ones.
         if(select->setOp!=dbms::SetOp::None && (select->setOp!=dbms::SetOp::Union || !select->setOpAll || !select->setOpRhs))return false;
         if(select->setOpLhs && !supported(dynamic_cast<const dbms::SelectStmt*>(select->setOpLhs.get())))return false;
         if(select->setOpRhs && !supported(dynamic_cast<const dbms::SelectStmt*>(select->setOpRhs.get())))return false;
@@ -20616,7 +20624,7 @@ static bool handlePreparedUnionAllQuery(const string& rawSql,Session& session,bo
         for(const auto& key:select->orderBy)if(!key.usingOp.empty() || !scalar(key.expr.get()))return false;
         return scalar(select->whereClause.get()) && source(select->fromClause.get());
     };
-    if(!supported(root))return false;
+    if(!checkDB(session)){handled=true;return true;}
     auto query=make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(session.currentDB,rawSql));
     if(!supported(static_cast<const dbms::SelectStmt*>(query->ast.get())))return false;
     PreparedWithDmlRuntime runtime(session,std::move(query));auto result=runtime.runRead();
@@ -20805,6 +20813,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
     const size_t leadingStatement = dbms::skipLeadingSqlTrivia(sql);
     if (leadingStatement != string::npos &&
         leadingStatement < sql.size() && sql[leadingStatement] == '(') {
+        bool preparedUnionHandled=false;
+        const bool preparedUnionFailed=handlePreparedUnionAllQuery(effectiveRawSql,s,preparedUnionHandled);
+        if(preparedUnionHandled)return preparedUnionFailed;
         bool setOperationHandled = false;
         if (executeSetOperation(sql, s, setOperationHandled)) return true;
         if (setOperationHandled) return false;
@@ -23974,6 +23985,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
 
     // Set operations share one execution path so errors, precedence and
     // duplicate-row semantics are consistent across UNION/INTERSECT/EXCEPT.
+    if(dbms::SQLParser::classify(effectiveRawSql)==dbms::SqlCommand::Select) {
+        bool preparedUnionHandled=false;
+        const bool preparedUnionFailed=handlePreparedUnionAllQuery(effectiveRawSql,s,preparedUnionHandled);
+        if(preparedUnionHandled)return preparedUnionFailed;
+    }
     bool setOperationHandled = false;
     // A leading WITH must bind its CTEs once, for every set-operation branch.
     if (!startsWithKeyword(sql, "with") &&
@@ -25509,10 +25525,6 @@ static bool executeInternal(const string& rawSql, Session& s) {
 
     if (sql.substr(0, 6) == "select" || sql.substr(0, 5) == "with ") {
         if (!checkDB(s)) return true;
-
-        bool preparedUnionHandled=false;
-        const bool preparedUnionFailed=handlePreparedUnionAllQuery(effectiveRawSql,s,preparedUnionHandled);
-        if(preparedUnionHandled)return preparedUnionFailed;
 
         bool quantifiedHandled=false;
         const bool quantifiedFailed=handlePreparedMultirowQuery(effectiveRawSql,s,quantifiedHandled);

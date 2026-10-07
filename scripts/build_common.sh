@@ -146,6 +146,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/values_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/set_operation_structured_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/set_operation_type_metadata_known_gap.py)
+    DBMS_E2E_TESTS+=(tests/set_operation_clause_ownership_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/sequence_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/sequence_ddl_rollback_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/sequence_alter_sqlstate_protocol_e2e_test.py)
