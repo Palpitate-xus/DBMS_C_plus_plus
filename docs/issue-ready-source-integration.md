@@ -17,13 +17,32 @@ local commits, each preserving the original strong assertions and scoped proof:
 | Retained scalar projection/unary AST consumer | `7965d970` | `75d1bbf8` |
 | INTERVAL mixed-sign output | `b5b8f0e1` | `a7d460c7` |
 
-Current source is `a7d460c7`,580native/304registered/58productionTUs. New formal
-normal-O2 all58 build20514 is actually live under
-`/tmp/dbms-root-planning-unary-combination.vEs0SthA`. Source, headers, tests and
-registry remain frozen until actual new combination terminals. The prepared
-106-fresh-native/55-wire helpers are syntax checked but have not run; detached
-unchanged full580/304 snapshot `/tmp/dbms-canonical-planning-unary.HwYttEKu/repo`
-is prepared, not started. No normal build or full-suite success is predeclared.
+Current source is `a7d460c7`,580native/304registered/58productionTUs. Formal
+normal-O2 all58 build20514 and repeat/signature/stamp check79514 actually exit0
+under `/tmp/dbms-root-planning-unary-combination.vEs0SthA`. Frozen binary SHA256:
+`b38f83e0e570d250840e4cf361213e9cb55464e9c6cc1db27cde355f5ce33225`.
+At 2026-10-07 00:10 UTC, fresh108-native16908 and unchanged56-wire84684 remain
+live. The helpers additionally retain the original ON CONFLICT unique-index,
+phase5 SSI and UNNEST failures found by the older full runner. Source, headers,
+tests and registry remain frozen until both actual terminals. Detached unchanged
+full580/304 snapshot `/tmp/dbms-canonical-planning-unary.HwYttEKu/repo` is prepared,
+not started. A successful build is not a full-suite pass.
+
+The original4f full564/293 runner15248 has completed the native stage:
+560pass/4fail (scalar WHERE/ORDER hosts, unique-index conflict's ambiguous
+unqualified `payload`, and disjoint empty indexed SSI commit). Its registered
+protocol stage remains live. The newer byte-identical currenta7 independent-O0
+original full protocol74497 actually exits1 at the unchanged joined-view
+UPDATE2764 (`42703`, `v2` interpreted as a column); the old scalar2504 and
+quantified checks pass. Original deadlines, SQL and assertions are preserved.
+
+Strict180006 local oracle independently confirms that ON CONFLICT's
+unqualified `WHERE payload=''` is ambiguous (`42702`), while the qualified
+target predicate updates the empty key and returns its original id. The two
+OLD/target-name hiding controls in `returning_old_new_protocol_e2e_test.py`
+also produce `42P01`, not its obsolete `0A000` expectations. These fixture
+repairs are separate from real production defects; no candidate test or source
+has yet changed under the running ROOT freeze.
 
 The ordinary input three-commit private candidate passes the entire formerly
 failing unsplit wire matrix, strict180006, eleven matching native entries and
@@ -50,8 +69,8 @@ but the unchanged24 FROM-less matrix retains exactly two state/tag failures
 for `(SELECT 1/0) WHERE false`. The newly activated generic runtime root still
 leaves its owned-carrier root-planning option false. This is a real combination
 regression, not a changed expectation or whole matrix pass; an independent
-root-owner fix is queued. The existing normal build must still finish/run on
-its exact source before further source changes are integrated.
+root-owner fix is queued. The matching normal108/56 combination must still
+reach both actual terminals before further source changes are integrated.
 
 Finite interval component-wise negation/range errors, geometry CAST input and
 qualified builtin type descriptors, joined-view mutation and MV target read-only

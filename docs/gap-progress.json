@@ -2,7 +2,7 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
-      "issue": "Seventeen independent ROOT source fixes and live580/304 normal58 rebuild with genuine root-planning combination regression",
+      "issue": "Seventeen independent ROOT source fixes, actual normal58 build/repeat0 and live108/56 gates with retained root-planning regression",
       "gap_ids": [
         "SQL-04",
         "SQL-07",
@@ -65,7 +65,7 @@
         "reproduction": "All independent native/wire failures retained. New byte-identical currenta7 fresh58O0 four-wire95535 terminal1: scalar/unary/PL0 but original24 fromless scalarconstantfalse2state/tag failures, genuine runRead rootflag notpassed. Nooriginalassert weakened.",
         "fix": "17 independent ROOT SOURCE commits preserve actual AST/type/namespace/providers. Primitive/UPDATE/WHERE three-phase metadata+consumer fixes; FROMless sameownedroot carrier; pure13Unarysig; cardinality creation21000/closeonce, staticchilddescriptor, realheldAST scalar/unary runtime; mixedsign intervalformat. Newrootflag combination regression andfiniteinterval/geometryCAST/MV/viewtasks remainopen.",
         "focused_tests": "Perissue privateproofs scoped. Ordinaryinput fullunsplit/strict180006/11native4adj0; FROMless10404 full58O0+13native8wire/24controls0; scalarunsplit expandedaliases/source/strict18 and12adj0; strictUnary fullstage10; formatter6native9wire/scoped0. Byteidentical currenta7 17native556320, fourwiregroup1 preservesnewred, notROOTformalproof.",
-        "full_suite": "Current580native304registered58; all58formalO2build20514 live/sourceheaders/testsregistryfrozen. Planned106native55wire notrun; fulla7 immutable580/304 preparednotstarted. Original4f full564/29315248 stilllive; oldnormal90/44 failuresretained. Cardinality-only originalfull40930 terminal1 atjoinedview2764 after2504pass.",
+        "full_suite": "Current580native304registered58; all58formalO2build20514 and repeat/signatures/stamp79514 terminal0; frozen SHA b38f83e0e570d250840e4cf361213e9cb55464e9c6cc1db27cde355f5ce33225. Actual108native16908 and56wire84684 live2026-10-07 00:10 UTC/sourceheaders/testsregistryfrozen. Fulla7 immutable580/304 preparednotstarted. Original4f full564/29315248 native560pass4fail, registeredstage stilllive. Byteidentical currenta7 independentO0 originalfull74497 terminal1 atjoinedview2764 after2504/Qpass; no fullPASS. Strict180006 separately confirms conflict unqualifiedpayload42702 and returning hiddenOLD/target42P01; fixture fixes queued, not weakened.",
         "scope": "273 unchanged22complete166partial70unverified15deferred. Rootconstantplanning/producers, intervalnegation, geometryCAST+qualifiedtypedesc, joinedviewUPDATE/MVreadonly andotherfamilies continue. No push/Actions/deferredsecurityrestart."
       }
     },
