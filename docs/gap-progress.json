@@ -2,6 +2,63 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Nine independent ROOT integrations; previous107/1native and52/4wire terminal failures retained; new586/308 normal58 build live",
+      "gap_ids": [
+        "SQL-04",
+        "TYPE-06",
+        "TYPE-09",
+        "QRY-01",
+        "DML-02",
+        "DML-05",
+        "TXN-09"
+      ],
+      "status": "partial",
+      "commits": [
+        "4a60dd5e",
+        "ab7972eb",
+        "af9679e5",
+        "9533b9c7",
+        "8fa8ea19",
+        "e3995a18",
+        "b4f87aa3",
+        "d9a1f3fa",
+        "f6d1476b"
+      ],
+      "evidence": [
+        "docs/issue-ready-source-integration.md",
+        "docs/issue-conflict-unique-index-namespace-fixture.md",
+        "docs/issue-returning-hidden-range-fixture.md",
+        "docs/issue-unary-interval-component-values.md",
+        "docs/issue-prepared-read-root-planning.md",
+        "docs/issue-geometric-cast-input.md",
+        "docs/issue-geometric-qualified-result-type.md",
+        "docs/issue-delete-where-boolean-context.md",
+        "docs/issue-materialized-view-dml-target.md",
+        "docs/issue-shared-heap-extent-publication.md"
+      ],
+      "tests": [
+        "tests/on_conflict_unique_index_test.cpp",
+        "tests/returning_old_new_protocol_e2e_test.py",
+        "tests/unary_interval_value_test.cpp",
+        "tests/unary_interval_value_protocol_e2e_test.py",
+        "tests/prepared_read_root_planning_protocol_e2e_test.py",
+        "tests/geometric_cast_input_test.cpp",
+        "tests/geometric_cast_input_protocol_e2e_test.py",
+        "tests/geometric_cast_result_type_test.cpp",
+        "tests/delete_where_boolean_context_test.cpp",
+        "tests/materialized_view_dml_target_test.cpp",
+        "tests/materialized_view_dml_target_protocol_e2e_test.py",
+        "tests/page_allocator_shared_extent_test.cpp"
+      ],
+      "verification": {
+        "reproduction": "Exacta7 108native16908 terminal1=107pass1oldconflictfixture;56wire84684 terminal1=52pass4fail: returninghiddenrangefixture/fromlessconstantplanning/unnest/fulljoinedview2764. OriginalSQL/assertions/deadlines preserved. UnchangednormalSSI tenrepeat sixpass4fail; statusdiagnostic two58030 not40001. Deterministic foreignliveextent134; firstcandidate failedowneropen134. Strong freshreader threeofthree bothcommits00000/00000 butonlyrow100, actualOPENsilentdataloss.",
+        "fix": "Nine independentROOT commits: genuinePG fixturestates/qualifiedpredicate withnegative+unchangedrows; finiteINTERVAL checkedfields; actualprimaryreadrootplanning; geometryinput/qualifiedtype; DELETEBOOL; MV IUD42809 afterwholebind/pureplanbeforeeffect; samefilepublication with persistentfailedliveowner. PA hasnoheader/layoutchange, geometryaddsheader requiringall58compile.",
+        "focused_tests": "Only independent scopedproofs: correctedconflict native+binding0; entireRETURNING candidate/strict1800060inclMERGE; interval/readroot strongmatrices/native/ref0; geometry66controls13native/ref0; DELETE15nativecontexts0; MV71targets+2source13distinctnative8serialwire/ref0. PA V2 normal8native+tenSSI28444 terminal0 and scopedPA/BP/testASan two66019 terminal0. Firstcandidate negative and separatelostrow remainred.",
+        "full_suite": "Current586native308registered58 SOURCEf6d1476b. Freshall58formalO2build51258 live /tmp/dbms-root-storage-mv-root-combination.26UiCBTM, ROOTsrc/head/tests/registryfrozen throughbuild/repeat/auditedimmutablecopy. Exactsource snapshotprepared;116native60wire/originalfull586/308 NOTRUN. Normaldonorcopy onlyafterbyte/header/flags/signatures, notprivatefresh58. Originalimmutable4f full564/29315248 registeredstagestillliveafter560/4native, nofullPASS.",
+        "scope": "273 unchanged22complete166partial70unverified15deferred. Coherentmulti-engineheap/WAL/allocationdata-loss, joinedVIEW/ARRAYmetadata/plainEXPLAIN/ProjectSet/otherfamilies remainactive. No push/Actionsenablement/deferredsecurityrestart."
+      }
+    },
+    {
       "issue": "Seventeen independent ROOT source fixes, actual normal58 build/repeat0 and live108/56 gates with retained root-planning regression",
       "gap_ids": [
         "SQL-04",

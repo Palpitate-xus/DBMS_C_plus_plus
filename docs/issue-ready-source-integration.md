@@ -1,5 +1,56 @@
 # Independent source integrations after canonical 75090
 
+## Latest f6 checkpoint: nine further independently committed integrations
+
+| Independent repair | Private commit | ROOT commit |
+| --- | --- | --- |
+| ON CONFLICT qualified predicate + ambiguity negative | `c03e4116` | `4a60dd5e` |
+| RETURNING hidden range genuine42P01 fixture | `d04c4ae4` | `ab7972eb` |
+| Checked INTERVAL component-wise unary negation | `b01a7658` | `af9679e5` |
+| Genuine primary read/VALUES/quantified EXPLAIN root planning | `b3d93cfc` | `9533b9c7` |
+| Geometric unknown CAST input | `482f0958` | `8fa8ea19` |
+| Qualified builtin geometry descriptor | `5a6387d5` | `e3995a18` |
+| DELETE WHERE pure boolean context | `a0b3825b` | `b4f87aa3` |
+| Materialized target I/U/D pure-analysis denial | `8dbf6a25` | `d9a1f3fa` |
+| Same-file extent publication and failed live owner | `6c418739` | `f6d1476b` |
+
+All nine independent ROOT commits follow both actual previous combination
+terminals. Source is f6d1476b,586native/308registered/58production. Formal all58
+O2 build51258 is live under
+`/tmp/dbms-root-storage-mv-root-combination.26UiCBTM`. ROOT source/header/test/
+registry input is frozen through build/repeat/audited immutable copy. Exact-
+source detached snapshot is prepared, not tested. The116native/60wire helpers
+are syntax checked, not run; original full586/308 also has not run. No old
+private matrix or successful compile substitutes for a matching whole suite.
+
+After all58 build/signatures, every source/header/test/manifest and flags must
+match before copying normal objects to the immutable snapshot; only path-
+addressed receipts change. This preserves the original full runner while
+allowing later ROOT fixes after the verified copy. Results remain labelledf6,
+not proof of a newer HEAD.
+
+Previous exacta7 normal108native16908 exits1:107pass/1 obsolete ON CONFLICT
+ambiguity fixture. Exact56wire84684 exits1:52pass/4fail (old RETURNING hidden
+range state, constant-child FROM-less planning, UNNEST no-FROM and original
+joined-view UPDATE2764). Original strong scripts/deadlines/logs are retained.
+Both freezes ended only after actual terminals.
+
+PA V2 normal eightnatives/tenSSI28444 and scoped two ASan+UBSan66019 exit0.
+The first candidate's failed-live-owner134 remains. A stronger fresh-reader
+probe still loses id99 despite two successful commits, threeofthree attempts;
+independent exacta7 baseline reproduces the same data loss. This is OPEN, not
+corrected by the mutex or commit-only smoke. Coherent physical heap/cache/
+allocation/WAL ownership is assigned independently. See
+`issue-shared-heap-extent-publication.md` for58030-versus40001 and proof scope.
+
+Materialized I/U/D keeps all71target+two source controls, strict180006, thirteen
+distinct native and eight serial adjacent scripts; not MERGE/allDML/wholeMV.
+Qualified geometry labels, plain non-quantified EXPLAIN, ProjectSet+quantified
+sources and floating NaN rendering remain separately recorded. Joined-view
+typed OLD/NEW and physical array OIDs/Describe are being independently fixed.
+All273 states stay22/166/70/15; no push, Actions enablement or deferred-security
+restart.
+
 ## Latest a7d checkpoint: seventeen independent source integrations
 
 The eight changes recorded below are now followed by nine more independent
