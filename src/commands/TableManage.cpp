@@ -32005,6 +32005,21 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
             const std::string spelling = function->schema.empty() ? function->funcName
                 : function->schema + "." + function->funcName;
             if (CatalogManager::parseQualifiedName(spelling, routine, true) &&
+                !routine.schema.empty() && routine.schema != "pg_catalog" && routine.schema != "public") {
+                // Namespace identity is resolved after the actual argument
+                // transforms, before any execution. Quoted case is not a
+                // catalog alias: an absent namespace is 3F000, whereas an
+                // absent routine in an existing namespace is 42883.
+                if (!catalogSnapshot) catalogSnapshot = catalogService_->metadataSnapshot(dbname);
+                auto schema = routine.schema;
+                if (schema == "pg_temp" && currentSession())
+                    schema = sessionTempSchemaName(*currentSession());
+                const auto& namespaces = catalogSnapshot->namespaces;
+                if (std::none_of(namespaces.begin(), namespaces.end(),
+                    [&](const auto& entry) { return entry.nspname == schema; }))
+                    throw DbError("3F000", "schema \"" + routine.schema + "\" does not exist");
+            }
+            if (CatalogManager::parseQualifiedName(spelling, routine, true) &&
                 (routine.schema.empty() || routine.schema == "pg_catalog")) {
                 if (routine.name == "exists") return std::string("boolean");
                 // Window functions have query-host metadata, not scalar

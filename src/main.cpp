@@ -20457,6 +20457,19 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
         if(const auto* unary=dynamic_cast<const dbms::UnaryOpExpr*>(value))return unary->op=="+" || unary->op=="-" || requiresPreparedValue(unary->operand.get());
         if(const auto* cast=dynamic_cast<const dbms::CastExpr*>(value))return requiresPreparedValue(cast->operand.get());
         if(const auto* call=dynamic_cast<const dbms::FunctionCallExpr*>(value)) {
+            // An explicit routine namespace is executable identity, not a
+            // spelling the legacy FROM-less string dispatch may discard.
+            // Bind the complete source-free projection before evaluating
+            // any target, predicate or row-count expression.
+            if(!select->fromClause && !call->schema.empty() &&
+                call->sourceBegin!=string::npos && call->sourceEnd<=rawSql.size()) {
+                const auto origin=dbms::SQLParser::tokenize(rawSql.substr(
+                    call->sourceBegin,call->sourceEnd-call->sourceBegin));
+                // parseForBinding also represents SQL value keywords as
+                // implicit pg_catalog calls. Only a genuine qualified-call
+                // grammar origin requests this new routine entry.
+                if(origin.size()>=3 && origin[1]==".")return true;
+            }
             for(const auto& arg:call->args)if(requiresPreparedValue(arg.get()))return true;
             for(const auto& arg:call->namedArgs)if(requiresPreparedValue(arg.value.get()))return true;
         }
@@ -25595,37 +25608,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
         if (fromPos == string::npos) {
             // FROM-less SELECT: PostgreSQL computes a single-row projection
             // of constant expressions (literals, arithmetic, pseudo
-            // functions, UDF calls).  unnest(<array>) keeps its dedicated
-            // expansion path.
-            string cols = trim(sql.substr(6));
-            string colslow;
-            for (auto& c : cols) colslow += static_cast<char>(tolower(static_cast<unsigned char>(c)));
-            size_t up = colslow.find("unnest(");
-            if (up != string::npos) {
-                size_t lp = cols.find('(', up);
-                size_t rp = cols.rfind(')');
-                if (lp == string::npos || rp == string::npos || rp <= lp) {
-                    cout << "SQL syntax error" << endl;
-                    return true;
-                }
-                string arrVal;
-                const string& fromlessSql =
-                    hasLeadingCte ? sql : effectiveRawSql;
-                if (!extractUnnestLiteral(fromlessSql, arrVal)) {
-                    cout << "SQL syntax error" << endl;
-                    return true;
-                }
-                dbms::UnnestOp op(arrVal, "unnest");
-                op.open();
-                string row;
-                cout << "unnest " << endl;
-                while (op.next(row)) {
-                    cout << trim(row) << endl;
-                    log(s.username, trim(row), getTime());
-                }
-                op.close();
-                return false;
-            }
+            // functions, UDF calls). Real SRFs are selected by their
+            // canonical prepared provider above, never by a substring of
+            // the projection (which also matched public.unnest and data).
             return handleFromlessSelect(
                 hasLeadingCte ? sql : effectiveRawSql, s);
         }
