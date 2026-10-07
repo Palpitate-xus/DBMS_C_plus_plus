@@ -10702,7 +10702,16 @@ bool DdlExecutor::executeCreateFunction(const CreateFunctionStmt* stmt, Session&
 
     const std::string functionSchema=stmt->schema.empty()?"public":stmt->schema;
     const auto namespaces=g_engine.catalogService().metadataSnapshot(s.currentDB).namespaces;
-    if(std::none_of(namespaces.begin(),namespaces.end(),[&](const auto& entry){return entry.nspname==functionSchema;})) {
+    const auto storedNamespaces=g_engine.getSchemaNames(s.currentDB);
+    const auto namespaceExists=[&](const std::string& schema) {
+        return std::any_of(namespaces.begin(),namespaces.end(),
+                   [&](const auto& entry){return entry.nspname==schema;}) ||
+               std::find(storedNamespaces.begin(),storedNamespaces.end(),schema)!=storedNamespaces.end();
+    };
+    // A native database can have real schema markers before catalog
+    // bootstrap. Read those actual facts without inventing public after
+    // DROP or initializing a new catalog merely to validate a declaration.
+    if(!namespaceExists(functionSchema)) {
         throw DbError("3F000","schema \""+functionSchema+"\" does not exist");
     }
 
