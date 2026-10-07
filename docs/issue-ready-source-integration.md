@@ -1,4 +1,46 @@
-# Latest 7df9 checkpoint: 85 independently committed source/test repairs
+# Latest 5661 checkpoint: 90 independently committed source/test repairs
+
+Current source `56610199`: **695 auto-native plus one actual frontend /
+361 registered /58 production TUs**. Five integer/quoted-column issues are
+independently committed: `2a2eeab1`, `63ed2ce3`, `ff7c0db4`, `0944b303`,
+`56610199`. They retain actual physical identifier/projection/index owners
+and transform only genuine UNKNOWN integer literals during pure preparation,
+including real Parse; no public headers or existing current repairs are lost.
+
+Exact current85 baselines17416/36850 both end1: two full native invocations
+fail; all three whole matrices collect projection65/46 failure records,
+reverse121/34 and input348/379. Same strict180006 full84/122/881 all0.
+**Normal69518, complete30 native36806, complete40 whole33521 and postcommit
+complete7 whole70931 all end0**, default disk/deadlines. Exactly four fresh
+CPP units plus54 current7df fully source/header/actual-flags/manifest/original
+receipt/object-byte-proved normal donors, not fresh58. All58 receipts/stamp/
+repeat/source-script-test-manifest freeze pass; SHA
+`8e601e3f663e5addbd2b2155a885411877d3f3d5b99abb5ba5c1edef8a705f10`.
+
+Master only fast-forwards. Actual main-workspace publication36125 migrates
+all58 individually proved current objects, derives path-sensitive receipts
+and runs normal/repeat relink; not fresh58. Actual `./dbms_main` matches that
+same SHA; complete seven whole wrappers78242 directly using it end0 with all
+frozen inputs unchanged. Prior generated binary is backed up. Full per-issue
+mapping, precise logs and build scopes:
+`docs/issue-integer-current-root-composition.md`.
+
+Separate OPEN profile41652 genuinely ends1: derived full72 keeps old COUNT1,
+clause UNKNOWN1, expanded CTE9; BIT26 keeps first missing-capability failure,
+no later controls claimed executed. Private BIT99 has now received full source/
+doc/fixture review and its own current90 baselines, strict14, normal25764,
+complete49native67270/57whole41612 all0; OPEN3 whole53438 truly1/same older
+CTE11 errors. Postcommit approval remains pending, not master approval. Further BETWEEN input true
+parameter provenance and logical demand remain separate. Enum arg/FILTER rank
+and SUM metadata/private fresh58, signed/other FETCH consumers, MIN/MAX and
+every other unclosed original requirement still require current composition.
+
+Current90 original full has not started; old Source80 full42496 is actual1/
+all1043 receipts, not current90 or14 independent bugs. Original273 remains
+**22complete/166partial/70unverified/15deferred**, completion gate rejects.
+No push, Actions activation or user-deferred security/TDE restart.
+
+# Historical 7df9 checkpoint: 85 independently committed source/test repairs
 
 Current source `7df9f84a`: **693 auto-native plus one actual frontend /
 357 registered /58 production TUs**. The introduced inherited-materialized

@@ -2,6 +2,45 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "90 independent ROOT source/test repairs through5661: actual quoted physical owners and pure integer UNKNOWN preparation",
+      "gap_ids": [
+        "TYPE-02",
+        "SQL-05"
+      ],
+      "status": "partial",
+      "commits": [
+        "2a2eeab1",
+        "63ed2ce3",
+        "ff7c0db4",
+        "0944b303",
+        "56610199"
+      ],
+      "evidence": [
+        "docs/issue-ready-source-integration.md",
+        "docs/issue-integer-current-root-composition.md",
+        "docs/issue-quoted-bit-column-predicate.md",
+        "docs/issue-compact-quoted-comparison-column.md",
+        "docs/issue-quoted-range-column-projection.md",
+        "docs/issue-integer-reverse-physical-comparison.md",
+        "docs/issue-integer-unknown-comparison-preparation.md"
+      ],
+      "tests": [
+        "tests/compact_quoted_comparison_column_test.cpp",
+        "tests/integer_unknown_comparison_preparation_test.cpp",
+        "tests/quoted_range_column_projection_protocol_e2e_test.py",
+        "tests/integer_reverse_comparison_protocol_e2e_test.py",
+        "tests/integer_unknown_comparison_preparation_protocol_e2e_test.py",
+        "tests/quoted_bit_column_predicate_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "reproduction": "Actualcurrent85 native17416 ends1/bothfullinvocationsfail(native134); whole36850 ends1/allthreecomplete, projection65/46 failure records reverse121/34 input348/379, not independent bug counts. OwnedstrictPG18.6 actual180006 complete84/122/881 all0; genuine error/NULL/row/OID/width/origin/Parse/Describe/writer/index assertions unchanged.",
+        "fix": "Five precise independent ROOT commits retain actual decoded quoted column identities, protected-byte compact delimiter, source-bound qualified projections, literal-left integer physical/index owner and pure UNKNOWN integer typedLiteral/Const input before row demand/actualParse. Parameters/routines/typedCAST/querychildren not constant-rewritten; exactBIGINT>2^53/NULL versusemptyTEXT/textNULL/sourcecoordinates preserved. No public header or oldwholeCPP import; currentWindowNULLGROUPS/enumASTOID/aggregate/CTEguard/BITconstructor/HashNULL/BETWEENBOOL/TRUNCATE increments intact.",
+        "focused_tests": "Normal69518 actual0 exactly4freshCPP+54current7df source/header/actualflags/manifest/original58receipt/objectbyte-proved normaldonors; NOTfresh58. All58current receipts/cache/repeat/frozeninputs0 SHA8e601e3f663e5addbd2b2155a885411877d3f3d5b99abb5ba5c1edef8a705f10. Complete30freshnative36806/40whole33521/postcommit7whole70931 all0/defaultdisk/deadlines, full11native/12wholeinteger plusallcurrent25native/31wholeunion. MasterFFonly. Actualmain-workspace publication36125 current58proved normalobjectmigration/relink/repeat0 withpath-sensitive ownreceipts/stamp/bytes; NOTfresh58. Actual./dbms_main sameSHA; complete7actualRootbinarywhole78242 all0/inputhashunchanged. Previousgeneratedbinaryrecoverablybackedupinrootintegerartifactdir.",
+        "full_suite": "Current5661 695auto+actualfrontend361registered58TU/90independentRootrepairs. SeparatecompleteOPEN4whole41652 actual1: originalderived72 keepsoldCOUNT1, clauseUNKNOWN1, expandedCTE9; heldBIT26firstfailure andnolatercontrolsclaimedexecuted. OriginalSource80full42496 actual1/all1043precisemultiset; PASS687auto+frontend1+341registered FAIL3auto+11registered, not14independentbugs/current90verdict. Current90originalfullnotstarted.",
+        "scope": "Original273unchanged22complete166partial70unverified15deferred/completiongaterejects; TYPE02/SQL05/alloriginalunclosedfamiliesremainpartial/open. BIT99 allsource/docs/fixturesreviewed/current90baseline12native1(10fail2honestPASS)/15whole1(14fail1honestPASS), strict14whole0; normal25764 actual0/fresh7CPP+51current566provednormaldonors, complete49native67270/57whole41612 both0/defaultdisk/deadlines; separateOPEN3whole53438actual1/sameolderCTE11errors, postcommitapprovalpending/notmasterapproval. SeparateBETWEENinputtrueparameterprovenance/demand, enumrank/SUMmetadata/MINMAX/customOID, signed/otherFETCH/COUNTUNKNOWNCASEreaders andeveryothercatalogquerystoragerecoveryops continue. Futurepublicheadchangesneedactualcurrentfresh58, noprivateoldABI substitution. No push/Actionsactivation/deferredsecurityTDErestart/unverifiedimport/overallcompletion."
+      }
+    },
+    {
       "issue": "85 independent ROOT source/test repairs through7df9: actual inherited materialized CTE source ownership before catalog comparison preparation",
       "gap_ids": ["QRY-05", "TYPE-08"],
       "status": "partial",

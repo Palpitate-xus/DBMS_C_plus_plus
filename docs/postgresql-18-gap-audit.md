@@ -1,4 +1,31 @@
-# 2026-10-07 最新7df9总清单 checkpoint
+# 2026-10-07 最新5661总清单 checkpoint
+
+当前source `56610199`：695auto-native+实际frontend1/361registered/58TU，
+90项独立source/test修复commit。五有限issue分别commit：2a2 quoted物理identifier，
+63ed compact引号内空白边界，ff7c真实限定/quoted物理projection，0944整数反向
+comparison/index owner，5661真实UNKNOWN整数纯准备/Parse输入，不改公共头或
+丢既有Window/enum/CTE/aggregate/BIT/hash/TRUNCATE修复。
+
+精确current85两个完整native baseline17416均134，三完整wire36850真正1，
+projection65/46、reverse121/34、input348/379完整收集。同strict180006
+全84/122/881各0。normal69518真正4CPP fresh+54当前7df逐源/头/flags/manifest/
+原58receipt/byte证明正常donors，完整30native36806/40whole33521/post7whole
+70931全部0，默认磁盘/期限；all58/repeat/stamp/frozeninput通过，非fresh58/SAN。
+主分支只FF五独立commit；实际主目录normal/repeat publication36125全部0，
+58当期正常对象证明迁移/重链，实际./dbms_main与8e601 frozenSHA相同，直接
+该binary完整7whole78242全0/输入未变。旧生成binary另备份，详情见integration
+及 `docs/issue-integer-current-root-composition.md`。
+
+另OPEN4whole41652真正1：derived全72余COUNT1，clause UNKNOWN1，expanded9
+旧强红，BIT26首个缺能力红不称后续执行。BIT99全源码/docs/fixture审查完，
+当期基线保留，strict14/normal25764/完整49native67270/57whole41612全0，
+OPEN3 53438真1/same CTE11，提交后审批继续，不借私有绿审批；BETWEEN
+真实参数/需求、FETCH全部消费者、enum rank/SUM/MINMAX/custom结果身份仍继续。
+旧Source80原full42496终1/all1043不等当前90，新90原full未启动，所有原未闭环
+catalog/query/storage/recovery/ops不缩。原273仍22complete166partial70unverified
+15deferred，完成gate拒绝，无push/Actions启用/用户跳过安全TDE重启。
+
+# 2026-10-07 历史7df9总清单 checkpoint
 
 当前source `7df9f84a`：693auto-native+实际frontend1/357registered/58TU，
 85项独立source/test修复commit。独立修复comparison/CASE准备误把真实继承CTE

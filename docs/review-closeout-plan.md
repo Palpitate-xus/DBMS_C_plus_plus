@@ -4,7 +4,27 @@
 
 # 工作区与复查清单收尾计划
 
-## 2026-10-07 当前完整273目标计划（7df9；以下较早记录均历史）
+## 2026-10-07 当前完整273目标计划（5661；以下较早记录均历史）
+
+当前source `56610199`：695auto+frontend/361registered/58TU，90项独立
+source/test修复commit；原273全部范围及每个未闭环要求不缩。
+
+| 阶段 | 原要求 / 下一动作 | 当前实际证据 |
+| --- | --- | --- |
+| 每根因版本管理 | 实际复现/独立commit/用户push | quoted/compact/projection/reverse/input五issue各commit并FF主分支，当前85完整基线均红保留 |
+| 当前完整组合 | 真ABI/source/flags/receipt/defaultdisk/deadline | normal69518真4fresh+54当前7df证明donors，30native36806/40whole33521/post7whole70931全0，非fresh58/SAN |
+| 主目录可用binary | 真正常build/repeat/全部对象proof/actual executable | publication36125全58证明迁移/重链0，实际./dbms_main同8e601SHA；直接其7whole78242全0，旧binary可恢复备份 |
+| 保留全部旧失败 | 不抽强SQL/不把注册红隐藏在绿组 | OPEN4whole41652真1：COUNT1/UNKNOWN1/expanded9，BIT26首缺能力红不称后续执行 |
+| 接续BIT/实际参数/需求 | 全文审/精确当前合成/完整数据与effects | BIT99全部source/docs/fixtures亲审，当期baseline保留/strict14、normal25764、49native67270/57whole41612全0，OPEN3 53438真1/same CTE11；提交后审批继续，进一步BETWEEN trueparameter/demand分别处理 |
+| 接续公共头/全部消费者 | enum rank/SUM/MINMAX、signed/other FETCH实际owner | private alias/signed新头需要当期真正fresh58；所有旧COUNT/UNKNOWN/CASE/reader/descriptor/index/需求消费者逐根因继续 |
+| 原full与全部families | 原发现/注册真实全终态和每原273证据 | 原80full42496真1/all1043非当前90结论，新90 full未启动；所有原未闭环catalog/query/storage/recovery/ops保范围 |
+| 最终总账与约束 | 每原checkbox/证据/commit全scope吻合 | 273=22complete166partial70unverified15deferred，完成gate拒绝，无push/Actions启用/安全TDE恢复 |
+
+下一动作：完成BIT当前49/57/OPEN整gate和提交后验收后才Root合入；全文审
+独立BETWEEN输入/实际参数、enum rank/SUM和FETCH修复，公共头变化当期全58
+真实正常重编；继续确切最新原full、全部原未闭环与逐根因独立commit。
+
+## 2026-10-07 历史完整273目标计划（7df9）
 
 当前source `7df9f84a`：693auto+frontend/357registered/58TU，85项独立
 source/test修复commit；原273总范围和所有未闭环要求不缩。
