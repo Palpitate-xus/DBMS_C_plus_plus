@@ -6324,6 +6324,12 @@ static bool isTempTable(Session& s, const string& name) {
 // INSTEAD OF trigger helper: execute trigger action on view
 // Returns true if an INSTEAD OF trigger was executed, false otherwise
 // ========================================================================
+using TypedViewTriggerRow = map<string, dbms::ExprValue>;
+static bool executePreparedViewUpdate(Session& session, const string& viewname,
+    const vector<dbms::StorageEngine::Trigger>& triggers, const string& originalSql);
+static bool executePreparedViewDelete(Session& session, const string& viewname,
+    const vector<dbms::StorageEngine::Trigger>& triggers, const string& whereClause);
+
 static void replaceTriggerReference(string& sql, const string& prefix,
                                     const string& column, const string& value) {
     if (prefix.empty() || column.empty()) return;
@@ -6360,142 +6366,6 @@ static void replaceTriggerReference(string& sql, const string& prefix,
     }
 }
 
-static vector<map<string, string>> collectViewRows(Session& s,
-                                                    const string& viewname,
-                                                    const string& whereClause) {
-    vector<map<string, string>> rows;
-    const string baseTable = g_engine.getViewBaseTable(s.currentDB, viewname);
-
-    // Join/aggregate views have no single BASE_TABLE: evaluate the stored
-    // view SELECT (rewritten with the DML's WHERE) through the normal
-    // executor and parse the emitted rows.  Single-table views keep the
-    // direct scan path below — it also carries the WHERE evaluation.
-    if (baseTable.empty()) {
-        string viewSql = g_engine.getViewSQL(s.currentDB, viewname);
-        size_t btPos = viewSql.find("\nBASE_TABLE:");
-        if (btPos != string::npos) viewSql = viewSql.substr(0, btPos);
-        viewSql = trim(viewSql);
-        if (viewSql.empty()) return rows;
-        // Fold the DML predicate into the view query.  A WHERE already in
-        // the view is combined with AND; otherwise one is appended.
-        string filtered = viewSql;
-        const string normWhere = trim(whereClause);
-        if (!normWhere.empty()) {
-            string lower = toLower(filtered);
-            size_t wPos = lower.find(" where ");
-            size_t gPos = lower.find(" group by ");
-            size_t oPos = lower.find(" order by ");
-            size_t lPos = lower.find(" limit ");
-            size_t insertAt = std::min({wPos == string::npos ? filtered.size() : wPos,
-                                        gPos == string::npos ? filtered.size() : gPos,
-                                        oPos == string::npos ? filtered.size() : oPos,
-                                        lPos == string::npos ? filtered.size() : lPos});
-            if (wPos == string::npos) {
-                filtered = filtered.substr(0, insertAt) + " where " + normWhere +
-                           filtered.substr(insertAt);
-            } else {
-                // view has its own WHERE: AND it (parens around the DML one)
-                filtered = filtered.substr(0, insertAt) + " and (" + normWhere + ")" +
-                           filtered.substr(insertAt);
-            }
-        }
-        stringstream captured;
-        bool failed = false;
-        {
-            dbms::ScopedOutputCapture capture(captured);
-            try {
-                failed = execute(filtered, s);
-            } catch (...) {
-                failed = true;
-            }
-        }
-        if (failed) return rows;
-        vector<string> lines;
-        {
-            string line;
-            while (getline(captured, line)) lines.push_back(line);
-        }
-        if (lines.empty()) return rows;
-        // First line is the column header; each following line is a row of
-        // space-separated display values in header order.
-        vector<string> cols;
-        {
-            stringstream hs(lines[0]);
-            string c;
-            while (hs >> c) cols.push_back(c);
-        }
-        for (size_t i = 1; i < lines.size(); ++i) {
-            if (lines[i].rfind("ERROR", 0) == 0) return vector<map<string, string>>{};
-            vector<string> vals;
-            {
-                stringstream vs(lines[i]);
-                string v;
-                while (vs >> v) vals.push_back(v);
-            }
-            if (vals.size() != cols.size()) continue;
-            map<string, string> values;
-            for (size_t c = 0; c < cols.size(); ++c) {
-                // Headers may be qualified (jb8.bid): trigger actions
-                // reference bare NEW.bid / OLD.bid, so store the bare name
-                // (keeping the qualified form as a secondary key when the
-                // bare name would collide).
-                string name = cols[c];
-                size_t dot = name.rfind('.');
-                if (dot != string::npos && dot + 1 < name.size()) {
-                    string bare = name.substr(dot + 1);
-                    if (values.find(bare) == values.end()) values[bare] = vals[c];
-                }
-                values[name] = vals[c];
-            }
-            rows.push_back(std::move(values));
-        }
-        return rows;
-    }
-    if (!g_engine.tableExists(s.currentDB, baseTable)) return rows;
-
-    const TableSchema table = g_engine.getTableSchema(s.currentDB, baseTable);
-    vector<vector<dbms::StorageEngine::Condition>> groups;
-    const string normalizedWhere = trim(whereClause);
-    if (normalizedWhere.empty()) {
-        groups.push_back({});
-    } else {
-        vector<string> tokens = tokenize(normalizeConditionStr(normalizedWhere));
-        tokens.insert(tokens.begin(), "(");
-        tokens.push_back(")");
-        for (auto& token : tokens) token = modifyLogic(token);
-        for (const auto& group : breakDownConditions(tokens)) {
-            groups.push_back(dbms::StorageEngine::parseConditions(group));
-        }
-    }
-
-    g_engine.forEachRow(s.currentDB, baseTable,
-        [&](uint32_t, uint16_t, const char* data, size_t len) {
-            const string rowBuffer(data, len);
-            bool matches = false;
-            for (const auto& group : groups) {
-                bool groupMatches = true;
-                for (const auto& condition : group) {
-                    if (!dbms::StorageEngine::evalConditionOnRow(condition, rowBuffer, table)) {
-                        groupMatches = false;
-                        break;
-                    }
-                }
-                if (groupMatches) {
-                    matches = true;
-                    break;
-                }
-            }
-            if (!matches) return;
-
-            map<string, string> values;
-            for (size_t i = 0; i < table.len; ++i) {
-                values[table.cols[i].dataName] =
-                    dbms::StorageEngine::extractColumnValueStatic(rowBuffer, table, i);
-            }
-            rows.push_back(std::move(values));
-        });
-    return rows;
-}
 
 static bool executeInsteadOfTrigger(Session& s, const string& viewname,
                                      const vector<dbms::StorageEngine::Trigger>& triggers,
@@ -20321,6 +20191,202 @@ public:
 };
 }
 
+// The view trigger boundary carries SQL values, not strings from display
+// output or fragments stripped of their literal quotes. A nested SELECT is
+// prepared once and consumed by its actual typed source graph, in the caller's
+// statement/read view. Pure unsupported graph lowering may use the established
+// full dispatcher, but there is never a retry after a source/effect was opened.
+static optional<vector<TypedViewTriggerRow>> collectTypedViewTriggerRows(
+        Session& session, const string& viewname, const string& whereClause,
+        const string& alias = {}) {
+    string query = "SELECT * FROM " + viewname;
+    if (!alias.empty()) query += " AS " + quoteDumpIdentifier(alias);
+    if (!trim(whereClause).empty()) query += " WHERE " + whereClause;
+    auto prepared = make_shared<dbms::PreparedQuery>(
+        g_engine.prepareBoundQuery(session.currentDB, query));
+    PreparedWithDmlRuntime runtime(session, prepared);
+    dbms::OpPtr plan;
+    try {
+        plan = runtime.queryPlan();
+    } catch (const dbms::DbError& error) {
+        if (error.sqlState() != "0A000") throw;
+    }
+    vector<vector<string>> values;
+    vector<vector<bool>> nulls;
+    if (plan) {
+        auto result = dbms::QueryPlanner::executePlanChecked(std::move(plan));
+        result.throwIfFailed();
+        if (!result.structuredRowsAvailable)
+            throw dbms::DbError("XX000", "view trigger source lost typed rows");
+        values = std::move(result.structuredRows);
+        nulls = std::move(result.structuredNulls);
+    } else {
+        vector<string> names, types;
+        bool available = false, failed = false;
+        string failure;
+        (void)runDerivedSubQueryFull(query, session, names, &types, &values,
+            &nulls, &available, &failed, &failure, true, 0);
+        if (failed) {
+            // Preserve the legacy boundary's diagnostic, not a replacement
+            // XX000 or a success with zero rows. Genuine DbErrors propagate.
+            reportNestedQueryFailure(failure);
+            return nullopt;
+        }
+        if (!available || names.size() != prepared->output.size() ||
+            types.size() != prepared->output.size())
+            throw dbms::DbError("XX000", "view trigger source has no exact descriptor");
+        for (size_t i = 0; i < names.size(); ++i)
+            if (names[i] != prepared->output[i].name ||
+                dbms::ExprHelper::canonicalResultTypeName(types[i]) !=
+                dbms::ExprHelper::canonicalResultTypeName(prepared->output[i].type))
+                throw dbms::DbError("XX000", "view trigger source descriptor changed");
+    }
+    if (values.size() != nulls.size())
+        throw dbms::DbError("XX000", "view trigger source lost NULL bitmap");
+    vector<TypedViewTriggerRow> rows;
+    for (size_t r = 0; r < values.size(); ++r) {
+        if (values[r].size() != prepared->output.size() || nulls[r].size() != prepared->output.size())
+            throw dbms::DbError("XX000", "view trigger source width changed");
+        TypedViewTriggerRow row;
+        for (size_t c = 0; c < prepared->output.size(); ++c) {
+            const auto& column = prepared->output[c];
+            if (!row.emplace(column.name, dbms::ExprValue(
+                    column.type, values[r][c], nulls[r][c])).second)
+                throw dbms::DbError("42701", "duplicate view trigger column: " + column.name);
+        }
+        rows.push_back(std::move(row));
+    }
+    return rows;
+}
+
+static bool executeTypedViewTriggers(Session& session, const string& viewname,
+        const vector<dbms::StorageEngine::Trigger>& triggers,
+        const TypedViewTriggerRow& newValues, const TypedViewTriggerRow& oldValues) {
+    vector<dbms::QueryBindingDatum> bindings;
+    const auto append = [&](const string& prefix, const TypedViewTriggerRow& row) {
+        for (const auto& [name, cell] : row)
+            bindings.push_back({"view-trigger." + prefix + "." + name, name,
+                cell.typeName, {prefix}, false, cell.isNull ? optional<string>{}
+                    : optional<string>{cell.value}, 0});
+    };
+    append("new", newValues); append("old", oldValues);
+    for (const auto& trigger : triggers) {
+        if (!trigger.whenCondition.empty()) {
+            auto condition = make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(
+                session.currentDB, "SELECT (" + trigger.whenCondition + ")", bindings));
+            auto* select = dynamic_cast<dbms::SelectStmt*>(condition->ast.get());
+            if (!select || select->selectList.size() != 1 ||
+                dbms::ExprHelper::canonicalResultTypeName(condition->output.at(0).type) != "boolean")
+                throw dbms::DbError("42804", "trigger WHEN condition must be boolean");
+            dbms::PreparedQueryExecution evaluation(condition, &g_engine, session.currentDB);
+            auto* expression = select->selectList.front().expr.get();
+            evaluation.prepareExpression(expression);
+            const auto value = evaluation.evaluate(expression, evaluation.context());
+            if (value.isNull || !value.asBool()) continue;
+        }
+        dbms::SQLParser parser;
+        auto parsed = parser.parseForBinding(trigger.action);
+        const bool sqlAction = parsed.isValid() &&
+            (dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()) ||
+             dynamic_cast<const dbms::InsertStmt*>(parsed.stmt.get()) ||
+             dynamic_cast<const dbms::UpdateStmt*>(parsed.stmt.get()) ||
+             dynamic_cast<const dbms::DeleteStmt*>(parsed.stmt.get()) ||
+             dynamic_cast<const dbms::MergeStmt*>(parsed.stmt.get()) ||
+             dynamic_cast<const dbms::WithStmt*>(parsed.stmt.get()));
+        if (sqlAction) {
+            // Bind real OLD/NEW ColumnRefs before execution; literal strings
+            // containing those spellings are data and have no parameter use.
+            auto action = g_engine.prepareBoundQuery(session.currentDB, trigger.action, bindings);
+            if (g_engine.executeTriggerAction(action.legacySql())) return true;
+        } else {
+            // Existing function/utility actions retain their legacy datum
+            // interface, not CAST SQL fragments: the function dispatcher
+            // consumes literal argument bytes itself. Their wider argument
+            // preparation/NULL family is not claimed by this SQL-action fix.
+            map<string, string> newSql, oldSql;
+            for (const auto& [name, cell] : newValues) newSql[name] = cell.isNull ? "NULL" : cell.value;
+            for (const auto& [name, cell] : oldValues) oldSql[name] = cell.isNull ? "NULL" : cell.value;
+            auto plain = trigger;
+            plain.whenCondition.clear();
+            bool failed = false;
+            executeInsteadOfTrigger(session, viewname, {plain}, newSql, oldSql, &failed);
+            if (failed) return true;
+        }
+    }
+    return false;
+}
+
+static bool executePreparedViewUpdate(Session& session, const string& viewname,
+        const vector<dbms::StorageEngine::Trigger>& triggers, const string& originalSql) {
+    auto prepared = make_shared<dbms::PreparedQuery>(
+        g_engine.prepareBoundQuery(session.currentDB, originalSql));
+    auto* update = dynamic_cast<dbms::UpdateStmt*>(prepared->ast.get());
+    if (!update || update->fromClause)
+        throw dbms::DbError("0A000", "view trigger UPDATE FROM requires additional lowering");
+    const dbms::PreparedQuery::SourceRange* target = nullptr;
+    for (const auto& range : prepared->sourceRanges)
+        if (range.owner == update && !range.source) target = &range;
+    if (!target) throw dbms::DbError("XX000", "view trigger UPDATE has no target descriptor");
+    string predicate;
+    if (update->whereClause) {
+        // The parser retains value-leaf spans, but not every compound root
+        // owns an envelope span. After genuine whole UPDATE preparation,
+        // clip its original lexical WHERE envelope without rendering values
+        // or rebinding column names by text. Quotes/comments keep byte offsets.
+        const auto begin = dbms::findTopLevelSqlKeyword(prepared->source, "where");
+        const auto returning = dbms::findTopLevelSqlKeyword(prepared->source, "returning");
+        const auto end = returning == string::npos ? prepared->source.size() : returning;
+        if (begin == string::npos || end <= begin + 5)
+            throw dbms::DbError("XX000", "view trigger WHERE has no original provenance");
+        predicate = prepared->source.substr(begin + 5, end - begin - 5);
+    }
+    for (auto& [name, expression] : update->setClauses) {
+        const auto column = find_if(target->columns.begin(), target->columns.end(),
+            [&](const auto& field) { return field.name == normalizeLateralIdentifier(name); });
+        if (column == target->columns.end()) throw dbms::DbError("42703", "view update column does not exist: " + name);
+        auto cast = make_unique<dbms::CastExpr>();
+        cast->typeName = column->type; cast->implicit = true;
+        cast->sourceBegin = expression->sourceBegin; cast->sourceEnd = expression->sourceEnd;
+        cast->operand = std::move(expression); expression = std::move(cast);
+    }
+    dbms::PreparedQueryExecution evaluation(prepared, &g_engine, session.currentDB);
+    for (auto& assignment : update->setClauses) evaluation.prepareExpression(assignment.second.get());
+    const auto sourceRows = collectTypedViewTriggerRows(session, viewname, predicate,
+        normalizeLateralIdentifier(update->alias));
+    if (!sourceRows) return true;
+    const auto& rows = *sourceRows;
+    for (const auto& oldValues : rows) {
+        vector<dbms::ExprValue> cells;
+        for (const auto& column : target->columns) cells.push_back(oldValues.at(column.name));
+        auto row = evaluation.context(); evaluation.setSourceRow(row, target->ordinal, cells);
+        auto newValues = oldValues;
+        // Every SET reads the same OLD row. A value expression is evaluated
+        // once, before trigger actions, rather than replayed in the base SQL.
+        for (const auto& [name, expression] : update->setClauses)
+            newValues[normalizeLateralIdentifier(name)] = evaluation.evaluate(expression.get(), row);
+        if (executeTypedViewTriggers(session, viewname, triggers, newValues, oldValues)) return true;
+    }
+    dbms::DmlResult result; result.available = true;
+    result.commandTag = "UPDATE " + to_string(rows.size());
+    dbms::publishLastDmlResult(std::move(result));
+    cout << "INSTEAD OF UPDATE trigger executed on view " << viewname << " (" << rows.size() << " row(s))" << endl;
+    return false;
+}
+
+static bool executePreparedViewDelete(Session& session, const string& viewname,
+        const vector<dbms::StorageEngine::Trigger>& triggers, const string& whereClause) {
+    const auto sourceRows = collectTypedViewTriggerRows(session, viewname, whereClause);
+    if (!sourceRows) return true;
+    const auto& rows = *sourceRows;
+    for (const auto& oldValues : rows)
+        if (executeTypedViewTriggers(session, viewname, triggers, {}, oldValues)) return true;
+    dbms::DmlResult result; result.available = true;
+    result.commandTag = "DELETE " + to_string(rows.size());
+    dbms::publishLastDmlResult(std::move(result));
+    cout << "INSTEAD OF DELETE trigger executed on view " << viewname << " (" << rows.size() << " row(s))" << endl;
+    return false;
+}
+
 static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& handled) {
     handled=false;
     dbms::SQLParser parser;auto parsed=parser.parseForBinding(rawSql);
@@ -22620,21 +22686,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 if (wherePos != string::npos) {
                     whereClause = trim(delRest.substr(wherePos + 5));
                 }
-                auto oldRows = collectViewRows(s, ioTname, whereClause);
-                bool triggerFailed = false;
-                for (const auto& oldValues : oldRows) {
-                    executeInsteadOfTrigger(s, ioTname, viewTriggers,
-                                            {}, oldValues, &triggerFailed);
-                    if (triggerFailed) {
-                        cout << "INSTEAD OF DELETE trigger action failed" << endl;
-                        return true;
-                    }
-                }
-                if (!viewTriggers.empty()) {
-                    cout << "INSTEAD OF DELETE trigger executed on view " << ioTname
-                         << " (" << oldRows.size() << " row(s))" << endl;
-                    return false;
-                }
+                if (!viewTriggers.empty())
+                    return executePreparedViewDelete(s, ioTname, viewTriggers, whereClause);
             }
         }
         if (usingPos != string::npos) {
@@ -22905,35 +22958,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     cout << "Trigger metadata is corrupt or unreadable" << endl;
                     return true;
                 }
-                size_t wherePos = findTopLevelKeyword(sql, "where", setPos);
-                size_t fromPos = findTopLevelKeyword(sql, "from", setPos);
-                size_t setEnd = sql.size();
-                if (wherePos != string::npos) setEnd = wherePos;
-                if (fromPos != string::npos && fromPos < setEnd) setEnd = fromPos;
-                auto updates = parseSetClause(sql, setPos + 3, setEnd);
-                string whereClause;
-                if (wherePos != string::npos) {
-                    size_t whereEnd = (fromPos != string::npos && fromPos > wherePos)
-                        ? fromPos : sql.size();
-                    whereClause = trim(sql.substr(wherePos + 5, whereEnd - wherePos - 5));
-                }
-                auto oldRows = collectViewRows(s, tname, whereClause);
-                bool triggerFailed = false;
-                for (const auto& oldRow : oldRows) {
-                    map<string, string> newValues = oldRow;
-                    for (const auto& kv : updates) newValues[kv.first] = kv.second;
-                    executeInsteadOfTrigger(s, tname, viewTriggers,
-                                            newValues, oldRow, &triggerFailed);
-                    if (triggerFailed) {
-                        cout << "INSTEAD OF UPDATE trigger action failed" << endl;
-                        return true;
-                    }
-                }
-                if (!viewTriggers.empty()) {
-                    cout << "INSTEAD OF UPDATE trigger executed on view " << tname
-                         << " (" << oldRows.size() << " row(s))" << endl;
-                    return false;
-                }
+                if (!viewTriggers.empty())
+                    return executePreparedViewUpdate(s, tname, viewTriggers, effectiveRawSql);
             }
         }
         size_t fromPos = findTopLevelKeyword(sql, "from", setPos);
