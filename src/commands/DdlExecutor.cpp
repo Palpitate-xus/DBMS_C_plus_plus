@@ -2413,6 +2413,10 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     }
                     status = g_engine.alterTableAlterColumnType(
                         s.currentDB, tableName, sub.name, column, cd.typeMods);
+                    if (status == DBStatus::DUPLICATE_KEY) {
+                        throw DbError("23505", "could not rebuild unique index after altering column \"" +
+                            sub.name + "\"");
+                    }
                 } else {
                     std::cout << "ALTER COLUMN subcommand is unsupported" << std::endl;
                     return true;

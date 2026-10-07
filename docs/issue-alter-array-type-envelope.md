@@ -73,3 +73,13 @@ temporary catalog ALTER, and type-alias native tests pass. Evidence is under
 logs, and audited build/frozen binary records. Tmpfs protocol data is semantic
 evidence only. Crash/restart rewrite-generation validation remains with its
 separate storage/recovery owner.
+
+Candidate V5 also reports unique-index collisions from the rewrite as 23505.
+The full original and expanded array ALTER fixture now passes with every SQL,
+value, NULL, OID, element-modifier, dimension, index, and rollback assertion
+retained. It is registered in the ordinary protocol regression suite only
+after this complete pass. The complete strict PostgreSQL 18.6 fixture passes
+the same matrix. The unchanged array concatenation, physical array descriptor,
+element typmod, and temporary ALTER catalog protocol fixtures pass too, in one
+serial wrapper with normal test-owned server cleanup. The preserved earlier
+failures remain under the same evidence directory.
