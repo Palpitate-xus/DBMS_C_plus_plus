@@ -3,6 +3,8 @@
 #include "equality_type.h"
 #include "expr_helper.h"
 #include "SqlPattern.h"
+#include "function_namespace.h"
+#include "common/QueryHostProvider.h"
 #include "utils/interval.h"
 #include "commands/TableManage.h"
 #include "catalog/collation.h"
@@ -4618,6 +4620,8 @@ struct ResolvedScalarFunction {
     bool found = false;
     bool stored = false;
     std::string name;
+    std::string schema;
+    const QueryHostSetReturningProvider* provider=nullptr;
     StorageEngine::UDFInfo routine;
 };
 
@@ -4627,6 +4631,7 @@ struct BoundScalarRoutine {
     StorageEngine* engine;
     std::string database;
     ResolvedScalarFunction resolved;
+    const FunctionCallExpr* site;
 
     ExprValue operator()(const std::vector<ExprValue>& args) const {
         std::vector<std::string> values;
@@ -4637,7 +4642,7 @@ struct BoundScalarRoutine {
         }
         std::string value;
         bool isNull = false;
-        if (!engine->callUDF(database, resolved.name, values, value, &isNull, &nulls))
+        if (!engine->callUDF(database, resolved.name, values, value, &isNull, &nulls,resolved.schema))
             throw DbError("22023", "stored-function evaluation failed: " + resolved.name);
         return ExprValue(ExprHelper::canonicalResultTypeName(resolved.routine.returnType),
                          value, isNull);
@@ -4646,8 +4651,20 @@ struct BoundScalarRoutine {
 
 ResolvedScalarFunction resolveScalarFunction(
     const ExprEvaluator& evaluator, const FunctionCallExpr* call,
-    const std::string& database, StorageEngine* engine) {
+    const std::string& database, StorageEngine* engine,
+    const std::map<std::string,ScalarFunction,std::less<>>& registry) {
     if (!call) return {};
+    // A bound callback is owned by this actual AST occurrence, not by an
+    // SQL-visible name. Rebinding the same site preserves its engine/routine
+    // metadata; another legal SQL routine with that spelling remains distinct.
+    const auto registered=registry.find(toLower(call->funcName));
+    if(call->schema.empty() && registered!=registry.end()) {
+        const auto* bound=registered->second.target<BoundScalarRoutine>();
+        if(bound && bound->site==call) {
+            ResolvedScalarFunction owned;owned.found=true;
+            owned.name=registered->first;owned.schema="pg_catalog";return owned;
+        }
+    }
     static const std::set<std::string> syntaxFunctions = {
         "coalesce", "nullif", "greatest", "least", "make_interval",
         "between", "not between", "like escape", "not like escape",
@@ -4673,25 +4690,54 @@ ResolvedScalarFunction resolveScalarFunction(
         schema = decoded.name;
     }
     result.name = name.name;
-    if ((schema.empty() || schema == "pg_catalog") &&
-        result.name == toLower(result.name) && evaluator.hasFunction(result.name)) {
-        result.found = true;
-        return result;
-    }
-    // Stored scalar routines currently belong to the database's public
-    // namespace. An explicit different schema must not fall back to public.
-    if (!database.empty() && (schema.empty() || schema == "public")) {
-        engine = engine ? engine : &g_engine;
-        result.routine = engine->getUDF(database, result.name);
-        if (!result.routine.expression.empty()) {
-            size_t arity = result.routine.paramNames.size();
-            if (arity == 1 && result.routine.paramNames.front().empty()) arity = 0;
+    engine = engine ? engine : &g_engine;
+    const auto path=functionNamespaceSearchPath(*engine,database,schema);
+    const QueryHostSetReturningProvider* provider=nullptr;
+    for(const auto& candidateSchema:path) {
+        if(candidateSchema=="pg_catalog") {
+            const auto callback=registry.find(toLower(result.name));
+            const bool internalCallback=callback!=registry.end() && callback->second.target<BoundScalarRoutine>();
+            if(result.name==toLower(result.name) && evaluator.hasFunction(result.name) && !internalCallback) {
+                result.found=true;result.schema=candidateSchema;return result;
+            }
+            provider=queryHostSetReturningProvider(result.name);
+            if(provider && provider->fixedSignature && call->args.size()==provider->arity && call->namedArgs.empty()) {
+                result.provider=provider;result.schema=candidateSchema;return result;
+            }
+            continue;
+        }
+        if(database.empty())continue;
+        auto routine=engine->getUDF(database,result.name,candidateSchema);
+        if (!routine.expression.empty()) {
+            size_t arity = routine.paramNames.size();
+            if (arity == 1 && routine.paramNames.front().empty()) arity = 0;
             if (call->namedArgs.empty() && call->args.size() == arity) {
-                result.found = result.stored = true;
-                return result;
+                // The registered array SRF has a polymorphic candidate.
+                // An actual typed scalar overload is a better exact match
+                // even when catalog occurs first. UNKNOWN chooses a string
+                // category candidate when present; an array-only unknown
+                // remains ambiguous. Never inspect an evaluated datum.
+                const auto* polymorphic=queryHostSetReturningProvider(result.name);
+                bool matches=true;
+                if(schema.empty() && polymorphic && !polymorphic->fixedSignature) {
+                    for(size_t i=0;i<call->args.size();++i) {
+                        const auto type=ExprHelper::canonicalResultTypeName(ExprHelper::inferParsedInputType(
+                            call->args[i].get(),{},database,engine));
+                        const auto declared=i<routine.paramTypes.size()
+                            ?ExprHelper::canonicalResultTypeName(routine.paramTypes[i]):std::string{};
+                        const auto* entry=TypeRegistry::instance().findType(declared);
+                        const bool unknownString=type=="unknown" && entry && entry->category==TypeCategory::String;
+                        if(!unknownString && type!=declared)matches=false;
+                    }
+                }
+                if(matches) {
+                    result.routine=std::move(routine);result.schema=candidateSchema;
+                    result.found = result.stored = true;return result;
+                }
             }
         }
     }
+    result.provider=provider;
     // SUM/AVG's existing evaluator diagnostic concerns aggregate overload
     // resolution, not a missing scalar callback. Keep it at preparation so
     // an unused COALESCE/CASE arm still fails without evaluating any routine.
@@ -4710,12 +4756,17 @@ ResolvedScalarFunction resolveScalarFunction(
 
 bool ExprEvaluator::hasScalarFunction(const FunctionCallExpr* call,
                                       StorageEngine* engine) const {
-    return resolveScalarFunction(*this, call, currentDB_, engine).found;
+    return resolveScalarFunction(*this, call, currentDB_, engine,functions_).found;
+}
+
+const QueryHostSetReturningProvider* ExprEvaluator::queryHostSetReturningRole(
+    const FunctionCallExpr* call,StorageEngine* engine) const {
+    return resolveScalarFunction(*this,call,currentDB_,engine,functions_).provider;
 }
 
 char ExprEvaluator::scalarFunctionVolatility(const FunctionCallExpr* call,
                                              StorageEngine* engine) const {
-    const auto resolved = resolveScalarFunction(*this, call, currentDB_, engine);
+    const auto resolved = resolveScalarFunction(*this, call, currentDB_, engine,functions_);
     if (!resolved.found)
         throw DbError("42883", "function does not exist: " +
             (call ? call->funcName : std::string{}));
@@ -4727,7 +4778,7 @@ char ExprEvaluator::scalarFunctionVolatility(const FunctionCallExpr* call,
 
 std::string ExprEvaluator::scalarFunctionResultType(const FunctionCallExpr* call,
                                                    StorageEngine* engine) const {
-    const auto resolved = resolveScalarFunction(*this, call, currentDB_, engine);
+    const auto resolved = resolveScalarFunction(*this, call, currentDB_, engine,functions_);
     if (!resolved.found)
         throw DbError("42883", "function does not exist: " +
             (call ? call->funcName : std::string{}));
@@ -4743,7 +4794,7 @@ std::string ExprEvaluator::scalarFunctionResultType(const FunctionCallExpr* call
 
 std::string ExprEvaluator::scalarFunctionIdentity(const FunctionCallExpr* call,
                                                  StorageEngine* engine) const {
-    auto resolved = resolveScalarFunction(*this, call, currentDB_, engine);
+    auto resolved = resolveScalarFunction(*this, call, currentDB_, engine,functions_);
     if (!resolved.found)
         throw DbError("42883", "function does not exist: " +
             (call ? call->funcName : std::string{}));
@@ -4764,7 +4815,7 @@ std::string ExprEvaluator::scalarFunctionIdentity(const FunctionCallExpr* call,
     };
     std::string key = resolved.stored ? "stored" : "builtin";
     key += field(std::to_string(reinterpret_cast<uintptr_t>(engine)));
-    key += field(database) + field(resolved.name);
+    key += field(database) + field(resolved.schema) + field(resolved.name);
     key += field(std::to_string(call->args.size())) + field(std::to_string(call->namedArgs.size()));
     if (resolved.stored) {
         for (const auto& type : resolved.routine.paramTypes)
@@ -4779,7 +4830,7 @@ void ExprEvaluator::bindScalarFunctions(Expr* expression, StorageEngine* engine)
     std::function<void(Expr*)> visit = [&](Expr* node) {
         if (!node) return;
         if (auto* function = dynamic_cast<FunctionCallExpr*>(node)) {
-            const auto resolved = resolveScalarFunction(*this, function, currentDB_, engine);
+            const auto resolved = resolveScalarFunction(*this, function, currentDB_, engine,functions_);
             if (!resolved.found && !function->setReturning)
                 throw DbError("42883", "function does not exist: " + function->funcName);
             if (resolved.stored) {
@@ -4788,7 +4839,7 @@ void ExprEvaluator::bindScalarFunctions(Expr* expression, StorageEngine* engine)
                     throw DbError("0A000", "scalar routine used as an aggregate or window function");
                 std::string key = "__dbms_bound_routine_" + std::to_string(functions_.size());
                 while (hasFunction(key)) key += '_';
-                registerFunction(key, BoundScalarRoutine{engine, currentDB_, resolved},
+                registerFunction(key, BoundScalarRoutine{engine, currentDB_, resolved,function},
                                  resolved.routine.provolatile);
                 function->funcName = key;
             } else if(!function->setReturning) {

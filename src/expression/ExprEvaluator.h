@@ -25,6 +25,7 @@
 #include <vector>
 
 namespace dbms {
+struct QueryHostSetReturningProvider;
 
 // Forward declaration so sequence builtins can delegate to the engine.
 class StorageEngine;
@@ -125,6 +126,8 @@ public:
     // binds stored calls to private registry slots; it never executes them.
     bool hasScalarFunction(const FunctionCallExpr* call,
                            StorageEngine* engine = nullptr) const;
+    const QueryHostSetReturningProvider* queryHostSetReturningRole(
+        const FunctionCallExpr* call,StorageEngine* engine = nullptr) const;
     char scalarFunctionVolatility(const FunctionCallExpr* call,
                                   StorageEngine* engine = nullptr) const;
     // Empty for builtins whose result type is inferred from their operands.

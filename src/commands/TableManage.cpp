@@ -32163,20 +32163,7 @@ void validatePreparedPrimitiveInput(const QueryOutputColumn& target, const Expr*
 static const QueryHostSetReturningProvider* preparedSetReturningRole(
     const ExprEvaluator& evaluator,const FunctionCallExpr* function,
     const StorageEngine* engine) {
-    if(!function)return nullptr;
-    CatalogManager::QualifiedName routine;
-    const auto spelling=function->schema.empty()?function->funcName:function->schema+"."+function->funcName;
-    if(!CatalogManager::parseQualifiedName(spelling,routine,true) ||
-       (!routine.schema.empty() && routine.schema!="pg_catalog"))return nullptr;
-    const auto* provider=queryHostSetReturningProvider(routine.name);
-    if(!provider)return nullptr;
-    // The exact fixed builtin signature in implicit pg_catalog wins over a
-    // same-arity public shadow. Explicit public calls are scalar resolution.
-    // Polymorphic provider inputs retain existing scalar overload resolution.
-    if(provider->fixedSignature && function->args.size()==provider->arity && function->namedArgs.empty())
-        return provider;
-    if(evaluator.hasScalarFunction(function,const_cast<StorageEngine*>(engine)))return nullptr;
-    return provider;
+    return evaluator.queryHostSetReturningRole(function,const_cast<StorageEngine*>(engine));
 }
 
 bool StorageEngine::ownsPreparedSetReturningCall(const std::string& dbname,

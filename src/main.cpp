@@ -20521,6 +20521,7 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
     // Scalar SQL children and typed unary operators must consume this same
     // retained whole-query AST, not a later legacy parser with another TEMP
     // namespace or a discarded preparation-time operand coercion.
+    dbms::ExprEvaluator routineMetadata;routineMetadata.setCurrentDB(session.currentDB);
     function<bool(const dbms::Expr*)> requiresPreparedValue=[&](const dbms::Expr* value) {
         if(!value)return false;
         if(containsPreparedPattern(value))return true;
@@ -20530,6 +20531,8 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
         if(const auto* unary=dynamic_cast<const dbms::UnaryOpExpr*>(value))return unary->op=="+" || unary->op=="-" || requiresPreparedValue(unary->operand.get());
         if(const auto* cast=dynamic_cast<const dbms::CastExpr*>(value))return requiresPreparedValue(cast->operand.get());
         if(const auto* call=dynamic_cast<const dbms::FunctionCallExpr*>(value)) {
+            if(routineMetadata.hasScalarFunction(call,&g_engine) &&
+               routineMetadata.scalarFunctionIdentity(call,&g_engine).rfind("stored",0)==0)return true;
             // An explicit routine namespace is executable identity, not a
             // spelling the legacy FROM-less string dispatch may discard.
             // Bind the complete source-free projection before evaluating

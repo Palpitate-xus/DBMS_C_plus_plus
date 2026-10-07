@@ -75,6 +75,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/prepared_srf_unknown_input_known_gap.py)
     DBMS_E2E_TESTS+=(tests/prepared_srf_host_ownership_known_gap.py)
     DBMS_E2E_TESTS+=(tests/search_path_transaction_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/prepared_srf_search_path_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/physical_column_origin_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/view_trigger_typed_values_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/table_extract_quoted_operand_protocol_e2e_test.py)
