@@ -1255,26 +1255,145 @@ bool startsWithSqlPhrase(const std::string& sql, const std::string& phrase) {
              (sql[position] == '/' && sql[position + 1] == '*')));
 }
 
-std::string protocolRelationFromQuery(const std::string& sql) {
+struct ProtocolPhysicalSource {
+    TableSchema table;
+    Oid relationOid = INVALID_OID;
+    std::vector<PgAttributeRow> attributes;
+    std::vector<std::optional<std::string>> projections;
+};
+
+ProtocolPhysicalSource protocolPhysicalSourceFromQuery(const std::string& sql,
+                                                      const Session& session) {
+    ProtocolPhysicalSource result;
     SQLParser parser;
     const auto parsed = parser.parseForBinding(sql);
-    const auto* select = parsed.success && parsed.stmt
-        ? dynamic_cast<const SelectStmt*>(parsed.stmt.get()) : nullptr;
-    if (!select || select->setOp != SetOp::None || !select->fromClause ||
-        select->fromClause->type != FromItem::Type::Table) return {};
+    if (!parsed.success || !parsed.stmt) return result;
+    const Stmt* statement = parsed.stmt.get();
+    const auto* with = dynamic_cast<const WithStmt*>(statement);
+    if (with)
+        statement = with->statement.get();
+    const auto* select = dynamic_cast<const SelectStmt*>(statement);
+    const std::vector<SelectItem>* projections = nullptr;
+    std::string sourceName, sourceAlias;
+    const ReturningOptions* images = nullptr;
+    if (select) {
+        if (select->setOp != SetOp::None || !select->fromClause ||
+            select->fromClause->type != FromItem::Type::Table) return result;
+        sourceName = select->fromClause->tableName;
+        sourceAlias = select->fromClause->alias;
+        projections = &select->selectList;
+    } else if (const auto* insert = dynamic_cast<const InsertStmt*>(statement)) {
+        sourceName = insert->tableName; projections = &insert->returning;
+        images = &insert->returningOptions;
+    } else if (const auto* update = dynamic_cast<const UpdateStmt*>(statement)) {
+        sourceName = update->tableName; sourceAlias = update->alias;
+        projections = &update->returning; images = &update->returningOptions;
+    } else if (const auto* deletion = dynamic_cast<const DeleteStmt*>(statement)) {
+        sourceName = deletion->tableName; sourceAlias = deletion->alias;
+        projections = &deletion->returning; images = &deletion->returningOptions;
+    } else if (const auto* merge = dynamic_cast<const MergeStmt*>(statement)) {
+        sourceName = merge->targetTable; sourceAlias = merge->targetAlias;
+        projections = &merge->returning; images = &merge->returningOptions;
+    }
+    if (!projections || projections->empty()) return result;
     // String/comment data and expression grammar (e.g. EXTRACT ... FROM)
     // never introduce a relation. Only the parser's actual range source can
     // request physical table-origin metadata for this legacy descriptor.
     CatalogManager::QualifiedName source;
-    if (!CatalogManager::parseQualifiedName(select->fromClause->tableName, source, true)) return {};
-    if (source.schema.empty()) {
-        for (const auto& cte : select->ctes) {
-            CatalogManager::QualifiedName name;
-            if (CatalogManager::parseQualifiedName(cte.name, name, true) && name.name == source.name)
-                return {};
-        }
+    if (!CatalogManager::parseQualifiedName(sourceName, source, true)) return result;
+    if (select && source.schema.empty()) {
+        const auto shadowsPhysical = [&](const std::vector<SelectStmt::CTE>& definitions) {
+            for (const auto& cte : definitions) {
+                CatalogManager::QualifiedName name;
+                if (CatalogManager::parseQualifiedName(cte.name, name, true) && name.name == source.name)
+                    return true;
+            }
+            return false;
+        };
+        if (shadowsPhysical(select->ctes) || (with && shadowsPhysical(with->ctes))) return result;
     }
-    return source.name;
+    // Resolve the actual SQL range from copied metadata, not a physical
+    // temp filename, a result label, or a data scan. In particular do not
+    // call the execution resolver: it notes temporary-relation access.
+    const auto catalog = g_engine.catalogService().metadataSnapshot(session.currentDB);
+    std::vector<std::string> schemas;
+    if (!source.schema.empty()) {
+        schemas.push_back(source.schema == "pg_temp"
+            ? sessionTempSchemaName(session) : source.schema);
+    } else {
+        schemas.push_back(sessionTempSchemaName(session));
+        schemas.push_back("pg_catalog");
+        std::vector<std::string> entries; std::string canonical;
+        if (!parseSessionSearchPath(session.searchPath, entries, canonical)) entries = {"public"};
+        for (const auto& entry : entries)
+            schemas.push_back(expandSessionSearchPathEntry(entry, session.username));
+    }
+    std::string actualSchema;
+    for (auto schema : schemas) {
+        if (schema == "pg_temp") schema = sessionTempSchemaName(session);
+        Oid namespaceOid = INVALID_OID;
+        for (const auto& name : catalog.namespaces)
+            if (name.nspname == schema) { namespaceOid = name.oid; break; }
+        if (namespaceOid == INVALID_OID) continue;
+        for (const auto& relation : catalog.relations) {
+            if (relation.relnamespace != namespaceOid || relation.relname != source.name) continue;
+            // A nearer view/virtual relation shadows a farther physical
+            // table; metadata lookup must follow the same namespace order.
+            if (relation.relkind != 'r') return result;
+            const auto physical = schema == sessionTempSchemaName(session)
+                ? tempTablePrefix(session, source.name)
+                : schema == "public" ? source.name : schema + "__" + source.name;
+            if (!g_engine.tableExists(session.currentDB, physical)) return result;
+            result.table = g_engine.getTableSchema(session.currentDB, physical);
+            result.relationOid = relation.oid; actualSchema = schema;
+            for (const auto& attribute : catalog.attributes)
+                if (attribute.attrelid == relation.oid && attribute.attnum > 0 && !attribute.attisdropped)
+                    result.attributes.push_back(attribute);
+            break;
+        }
+        if (result.relationOid != INVALID_OID) break;
+    }
+    // Native/legacy physical relations may lack catalog registration. They
+    // can still provide type metadata, but never a fabricated relation OID.
+    if (result.table.len == 0 && source.schema.empty() &&
+        g_engine.tableExists(session.currentDB, source.name))
+        result.table = g_engine.getTableSchema(session.currentDB, source.name);
+    if (result.table.len == 0) return result;
+    std::string alias;
+    CatalogManager::QualifiedName parsedAlias;
+    if (CatalogManager::parseQualifiedName(sourceAlias, parsedAlias, true)) alias = parsedAlias.name;
+    const auto imageAlias = [](bool aliased, const std::string& token, const char* fallback) {
+        if (!aliased) return std::string(fallback);
+        CatalogManager::QualifiedName decoded;
+        return CatalogManager::parseQualifiedName(token, decoded, true)
+            ? decoded.name : std::string{};
+    };
+    const auto ownsReference = [&](const ColumnRefExpr& reference) {
+        if (reference.table.empty()) return reference.schema.empty();
+        if (images && reference.schema.empty() &&
+            (reference.table == imageAlias(images->oldAliased, images->oldAlias, "old") ||
+             reference.table == imageAlias(images->newAliased, images->newAlias, "new"))) return true;
+        if (!alias.empty()) return reference.schema.empty() && reference.table == alias;
+        return reference.table == source.name &&
+            (reference.schema.empty() || reference.schema == source.schema ||
+             reference.schema == actualSchema ||
+             (reference.schema == "pg_temp" && actualSchema == sessionTempSchemaName(session)));
+    };
+    // Projection provenance is positional. Output aliases, including aliases
+    // colliding with another physical column, do not change a ColumnRef's
+    // source. Computed expressions must not inherit that column's typmod/OID.
+    for (const auto& item : *projections) {
+        const auto* literal = dynamic_cast<const LiteralExpr*>(item.expr.get());
+        const auto* column = dynamic_cast<const ColumnRefExpr*>(item.expr.get());
+        if ((literal && literal->value == "*") ||
+            (column && column->column == "*" && ownsReference(*column))) {
+            for (size_t i = 0; i < result.table.len; ++i)
+                result.projections.push_back(result.table.cols[i].dataName);
+        } else if (column && ownsReference(*column)) {
+            result.projections.push_back(column->column);
+        } else result.projections.push_back(std::nullopt);
+    }
+    return result;
 }
 
 std::string protocolPhysicalTypeName(const Column& column) {
@@ -1365,30 +1484,19 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
     std::vector<PgColumnDescription> descriptions;
     descriptions.reserve(result.columns.size());
 
-    const std::string relationName = protocolRelationFromQuery(sql);
-    TableSchema table;
-    if (!relationName.empty() && g_engine.tableExists(session.currentDB, relationName)) {
-        table = g_engine.getTableSchema(session.currentDB, relationName);
-    }
-
-    Oid relationOid = INVALID_OID;
-    std::vector<PgAttributeRow> catalogAttributes;
-    if (!relationName.empty()) {
-        auto& catalog = g_engine.catalogService().get(session.currentDB);
-        for (const auto& relation : catalog.listClasses()) {
-            if (relation.relname == relationName) {
-                relationOid = relation.oid;
-                catalogAttributes = catalog.findAttributes(relation.oid);
-                break;
-            }
-        }
-    }
+    const auto source = protocolPhysicalSourceFromQuery(sql, session);
+    const auto& table = source.table;
+    const auto relationOid = source.relationOid;
+    const auto& catalogAttributes = source.attributes;
 
     for (const auto& name : result.columns) {
         PgColumnDescription description;
         description.name = name;
         description.moneyLocale = session.lcMonetary;
         const size_t columnIndex = descriptions.size();
+        const std::optional<std::string> physicalColumn =
+            source.projections.size() == result.columns.size()
+                ? source.projections[columnIndex] : std::nullopt;
         const bool hasStructuredType =
             columnIndex < result.columnTypes.size() &&
             !result.columnTypes[columnIndex].empty();
@@ -1408,7 +1516,7 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
             const Column& column = table.cols[i];
             // Schema/output names are already canonical SQL identities. A
             // delimited F and an unquoted f are different physical columns.
-            if (column.dataName != name) continue;
+            if (!physicalColumn || column.dataName != *physicalColumn) continue;
             const std::string physicalTypeName =
                 lowerProtocolText(protocolPhysicalTypeName(column));
             const bool structuredMatchesPhysical = hasStructuredType &&
@@ -1838,7 +1946,7 @@ bool describePreparedResult(const std::string& sql, Session& session,
     const std::string descriptionSql =
         (virtualPgSettings || virtualPgStatActivity)
             ? "SELECT 1"
-            : relation.empty() ? sql : "SELECT * FROM " + relation;
+            : sql;
     columns = describeProtocolColumns(shape,
                                       descriptionSql, session);
     for (size_t i = 0; i < columns.size(); ++i) {
