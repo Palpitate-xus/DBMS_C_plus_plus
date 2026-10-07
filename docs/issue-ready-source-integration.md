@@ -1,6 +1,94 @@
 # Independent source integrations after canonical 75090
 
-## Latest e6 checkpoint: physical heap ownership and paired DML consumers
+## Current 5ca checkpoint: retained array consumers, source identity, storage and planning
+
+Current source `5ca4278e` has **618 native / 319 registered / 58 TU**.
+Every repair below is an independent local commit; no squash or push.
+
+| Independent repair | ROOT commit |
+| --- | --- |
+| Physical SQL child restart with captured WITH frames | `8c1277c6` |
+| Postfix CAST stops at real pattern/predicate operators | `d3d87aaf` |
+| Canonical bpchar spelling | `29609faa` |
+| ALTER array envelope with explicitly opted-in helper | `7ed338a2` |
+| Physical array element modifier metadata | `c103b392` |
+| True physical origins, projection ordinals and TEMP schemas | `cce26790` |
+| TIMETZ array builtin identity | `07a5ef4b` |
+| Declared array routine signatures and replacement errors | `963c0d22` |
+| Genuine JSON/XML scalar and array catalog identities | `478f0976` |
+| Requested versus canonical source namespace identity | `63e9dd28` |
+| Star projection consumes actual retained source bindings | `fa0370a3` |
+| Common set output and actual left/right descriptors | `6ec8a11b` |
+| Shared physical BTree owners and closed-generation pin | `b8bffbf1` |
+| Pure typed SRF provider ownership before whole binding | `75039dd0` |
+| Physical REAL/DOUBLE catalog identities, unchanged codecs | `1a7ce3ec` |
+| Canonical RETURNING array element modifiers | `b72e27aa` |
+| Actual zero-row boolean DELETE RETURNING descriptors | `c8e9a83b` |
+| Physical array query executes its actual prepared output | `b140ac13` |
+| Eligible parent-local ANY qualification planning before pruning | `5ca4278e` |
+
+The exact clean detached snapshot is
+`/tmp/dbms-canonical-storage-set-srf.OBaWSkrC/repo`. Fresh normal O2 build,
+repeat, all58 source/header/flags/stamp audit and immutable freeze are actually
+running in session **36316**, with no donor objects. The appended public
+set-operation descriptors, BTree layout and SRF ownership method cannot use
+the older e6 objects. The original unchanged **618/319** runner is prepared
+but has **not started**; neither build nor full-suite PASS is claimed.
+
+The complete private array source chain passes normal O2/all58 audit, fifteen
+fresh natives and twelve complete serial wire fixtures (including unsplit
+24-base/12-shape and physical-origin matrices). Both strict180006 full
+reference fixtures pass. Artifacts:
+`/tmp/dbms-physical-array-source-consumer.PkJ5r6tY`; frozen SHA256
+`4fc50a6a94ad488d783a0e06b2d113cc94639c2a50d6bab1a1de629429b6e64d`.
+These are private-chain scoped proofs, not the new ROOT combination. ARRAY
+belongs to **TYPE-16**, not historical TYPE-09 mislabels. Non-NULL ALTER array
+storage conversion, arbitrary codecs/modifier enforcement and binary formats
+remain open. The new ANY planning whole19 reference/candidate, eight distinct
+natives and nine serial wire gates pass; retained whole37 still fails for real
+UNION ALL child lowering and cumulative effects. Common set descriptors do
+not claim a lazy typed append implementation.
+
+## Completed e6 and d2 scoped runs; full d2 still live
+
+The e6 fresh all58 normal O2 build/repeat/audit/freeze **68192 exits0**;
+SHA256 `30cef5671953f96ac8ababbf1facec6ab3cff83190990eee9c70047ce88bd47f`.
+Its matching native137 **79137 exits1: 135 pass / 2 fail**. The unchanged
+foreign_key_action_dml fails recovery after **parent table rename**, and
+vacuum_toast fails the original line73 live-payload extraction assertion.
+The latter also fails on the newer private BTree candidate: that repair does
+not close it. Matching wire65 **83623 exits1: 64 pass / 1 fail** at original
+full protocol line2006 (missing listening-channel RowDescription). Evidence:
+`/tmp/dbms-canonical-heap-dml.nRR9aUXB/combination-{native-137,wire-65}.log`.
+
+The exact d2 fresh native120 **37724 exits0**. Complete wire64 **25527 exits1:
+60 pass / 4 fail**: unchanged truncate-owned-sequence, ordinary CASE and unary
+INTERVAL fixtures time out; full protocol loses listening-channel metadata at
+line2006. Original deadlines/assertions remain unchanged. The unchanged full
+**590 native / 312 registered** runner **96468 remains live**, under
+`/tmp/dbms-canonical-array-view-explain.GUwiSQnC/full-original-590-312.log`.
+Do not transfer later fixes to these older results or call a running full
+suite green. Default TLS stub skip and memory-backed scoped wire data are not
+TLS runtime or disk-performance evidence.
+
+The SRF ownership fix has matching private fresh58, native7 and adjacent wire8
+passes; its unfiltered known-gap fixture retains LIMIT0 backend preflight and
+UNKNOWN unnest input errors. Its unchanged original full protocol advances to
+NOT LIKE UPDATE line2867 and still exits1. Root-owned pattern V4 fresh58 O0
+**88215 exits0**, SHA256
+`aa36a497a7bab57c697e9ecc4926066312a2c14ffec7731153c9e0bae8c9e59f`;
+the stronger unsplit domain/type/error-priority fixture passes strict180006
+but fails setup in the candidate at a real domain-on-domain table column.
+It is not dropped or replaced with a green-only subset. No pattern commit or
+whole-domain completion is claimed. Stable WAL relation-generation recovery,
+VACUUM/TOAST visibility, TYPE-19 domain ancestry, typed lazy UNION ALL and the
+two SRF gaps are being fixed independently.
+
+All273 states stay **22 complete / 166 partial / 70 unverified / 15 deferred**.
+The completion gate still fails. No push, Actions activation or user-skipped
+security/TDE restart.
+
+## Historical e6 checkpoint: physical heap ownership and paired DML consumers
 
 | Independent repair | Private commit | ROOT commit |
 | --- | --- | --- |

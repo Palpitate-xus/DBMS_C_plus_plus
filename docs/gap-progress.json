@@ -2,6 +2,21 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "5ca independent array/source/storage/planner integrations; exact fresh normal58 running; old scoped failures retained",
+      "gap_ids": ["TYPE-16", "TYPE-19", "SQL-04", "QRY-01", "QRY-02", "DML-02", "DML-05", "STO-04", "WAL-01", "WAL-05", "TXN-07"],
+      "status": "partial",
+      "commits": ["8c1277c6", "d3d87aaf", "29609faa", "7ed338a2", "c103b392", "cce26790", "07a5ef4b", "963c0d22", "478f0976", "63e9dd28", "fa0370a3", "6ec8a11b", "b8bffbf1", "75039dd0", "1a7ce3ec", "b72e27aa", "c8e9a83b", "b140ac13", "5ca4278e"],
+      "evidence": ["docs/issue-ready-source-integration.md", "docs/issue-physical-array-prepared-consumer.md", "docs/issue-quantified-qualification-planning.md", "docs/issue-prepared-srf-host-ownership.md"],
+      "tests": ["tests/physical_column_origin_protocol_e2e_test.py", "tests/real_array_physical_identity_test.cpp", "tests/delete_boolean_returning_descriptor_test.cpp", "tests/quantified_qualification_planning_test.cpp", "tests/quantified_qualification_planning_protocol_e2e_test.py", "tests/prepared_srf_host_ownership_known_gap.py", "tests/vacuum_toast_test.cpp"],
+      "verification": {
+        "reproduction": "Physical array source chain retained original whole v1/v2/v3 descriptor failures; eligible local ANY baseline19 has nine wrong-success queries/18 failed assertions. Strong domain-on-domain setup still fails XX000, SRF LIMIT0 and UNKNOWN input remain named gaps. e6 original foreign_key_action_dml/vacuum_toast remain red; BTree private repair does not close them.",
+        "fix": "Independent actual physical origins/namespace/star, canonical array and builtin identities/modifiers/routine declarations, retained prepared consumer, BTree ownership/generation, set branch metadata, pure SRF ownership and genuine owner-local ANY planning; every ROOT source commit separate.",
+        "focused_tests": "Private array final normal58 audit, fifteen fresh natives, twelve complete serial wire scripts and two whole strict180006 reference fixtures all0. ANY whole19/reference, eight distinct natives and nine serial wire gates0. SRF private fresh58/native7/adjacentwire8 pass, full known-gap retains two failures and original protocol still fails NOTLIKE2867. Pattern V4 fresh58O0 exits0 but unchanged stronger domain/type whole setup fails; no pattern commit or fakegreen.",
+        "full_suite": "Exact5ca4278e clean snapshot /tmp/dbms-canonical-storage-set-srf.OBaWSkrC has618native319registered58TU; fresh normalO2 build/repeat/audit/freeze36316 live, original618/319 runner notstarted. e6 normal58 68192 actual0; native137 79137 terminal1=135pass2fail; wire65 83623 terminal1=64pass1fail. d2 native12037724 actual0; wire6425527 terminal1=60pass4fail (three unchanged deadlines, originalprotocol2006); originalfull590/31296468 stilllive. No latest/fullPASS or TLSruntime claim.",
+        "scope": "Original273 unchanged22complete166partial70unverified15deferred. ARRAY isTYPE16, nothistoricalTYPE09 typo. StableWALrelationidentity, VACUUMTOAST, TYPE19ancestry, typedlazyUNIONALL, twoSRFgaps and fullpattern controls remain required. No push, Actionsenablement, deadline/assertion reduction or user-skipped security restart."
+      }
+    },
+    {
       "issue": "Three independent heap/WAL ownership and paired/ordinary DML ROOT commits; fresh e6 normal58 running; d2 original full590/312 actually started",
       "gap_ids": ["STO-04", "WAL-01", "WAL-05", "TXN-07", "QRY-01", "DML-02", "DML-05"],
       "status": "partial",
