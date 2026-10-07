@@ -2,6 +2,10 @@
 """Derived tables, CTEs, and views retain inner PostgreSQL result types."""
 
 import importlib.util
+import socket
+import sys
+import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -12,8 +16,35 @@ def main():
     runner = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(runner)
     client = runner.load_protocol_client()
-    server = runner.start_ours(client)
+    reference = "--reference18" in sys.argv
+    if reference:
+        host, port, user, database, password = runner._reference_connection_settings()
+        sock = socket.create_connection((host, port), timeout=runner.wire_timeout())
+        client.startup_reference(sock, user, database, password)
+        runner.verify_reference_version(client, sock)
+        server = {"sock": sock}
+    else:
+        server = runner.start_ours(client)
+    collect_errors = "--collect-errors" in sys.argv
+    failures = []
+
+    @contextmanager
+    def assertions(sql):
+        try:
+            yield
+        except AssertionError as failure:
+            if not collect_errors:
+                raise
+            failures.append(failure.args)
+            print("DERIVED_TYPE_STRONG_FAILURE", sql, failure.args, flush=True)
+
     try:
+        if reference:
+            schema = "derived_type_" + uuid.uuid4().hex[:18]
+            for sql in ("BEGIN", 'CREATE SCHEMA "' + schema + '"',
+                        'SET LOCAL search_path TO "' + schema + '",pg_catalog'):
+                result = runner.decode_wire_result(client.simple_query(sock, sql), include_types=True)
+                assert result[1] is None, (sql, result)
         setup = [
             "CREATE TABLE typed_src (grp VARCHAR(4), v INT);",
             "INSERT INTO typed_src VALUES ('a', 1), ('a', 2), ('b', 4);",
@@ -445,49 +476,52 @@ def main():
              [["1"], ["2"]], [23]),
         ]
         for sql, expected_rows, expected_types in cases:
+            if collect_errors:
+                print("DERIVED_TYPE_ORIGINAL_SQL", sql, flush=True)
             decoded = runner.decode_wire_result(
                 client.simple_query(server["sock"], sql), include_types=True)
             rows, state, message, headers, command_tag, type_oids = decoded
-            assert state is None, (sql, state, message)
-            assert rows == expected_rows, (sql, rows, expected_rows)
-            assert len(headers) == len(expected_types), (sql, headers)
-            assert type_oids == expected_types, (sql, type_oids, expected_types)
-            if "lateral" in sql.lower():
-                if "outer_id" in sql:
-                    expected_headers = ["id", "outer_id"]
-                elif "outer_payload" in sql:
-                    expected_headers = ["id", "outer_payload"]
-                elif "x.out" in sql:
-                    expected_headers = ["id", "out"]
-                elif "x.ok" in sql:
-                    expected_headers = ["id", "ok"]
-                elif "x.total" in sql:
-                    expected_headers = ["id", "delta", "total"]
-                elif "x.value" in sql:
-                    expected_headers = ["id", "delta", "value"]
-                elif "x.first" in sql:
-                    expected_headers = ["id", "first", "second"]
-                elif "\"MixedId\"" in sql:
-                    expected_headers = ["MixedId", "next_id"]
-                elif "x.next_id" in sql and "r.label" in sql:
-                    expected_headers = ["id", "label", "next_id"]
-                elif "RIGHT JOIN" in sql:
-                    expected_headers = ["payload", "id", "next_id"]
-                elif "FULL OUTER JOIN" in sql:
-                    expected_headers = ["id", "id", "next_id"]
-                elif "INNER JOIN typed_lateral_right" in sql:
-                    expected_headers = ["id", "id", "next_id"]
-                elif "x.next_id" in sql:
-                    expected_headers = ["id", "next_id"]
-                elif "l.payload" in sql:
-                    expected_headers = ["id", "payload", "label"]
-                elif "x.label" in sql:
-                    expected_headers = ["id", "label"]
-                else:
-                    expected_headers = ["id", "label"]
-                assert headers == expected_headers, (sql, headers)
-            assert command_tag == "SELECT %d" % len(expected_rows), (
-                sql, command_tag)
+            with assertions(sql):
+                assert state is None, (sql, state, message)
+                assert rows == expected_rows, (sql, rows, expected_rows)
+                assert len(headers) == len(expected_types), (sql, headers)
+                assert type_oids == expected_types, (sql, type_oids, expected_types)
+                if "lateral" in sql.lower():
+                    if "outer_id" in sql:
+                        expected_headers = ["id", "outer_id"]
+                    elif "outer_payload" in sql:
+                        expected_headers = ["id", "outer_payload"]
+                    elif "x.out" in sql:
+                        expected_headers = ["id", "out"]
+                    elif "x.ok" in sql:
+                        expected_headers = ["id", "ok"]
+                    elif "x.total" in sql:
+                        expected_headers = ["id", "delta", "total"]
+                    elif "x.value" in sql:
+                        expected_headers = ["id", "delta", "value"]
+                    elif "x.first" in sql:
+                        expected_headers = ["id", "first", "second"]
+                    elif "\"MixedId\"" in sql:
+                        expected_headers = ["MixedId", "next_id"]
+                    elif "x.next_id" in sql and "r.label" in sql:
+                        expected_headers = ["id", "label", "next_id"]
+                    elif "RIGHT JOIN" in sql:
+                        expected_headers = ["payload", "id", "next_id"]
+                    elif "FULL OUTER JOIN" in sql:
+                        expected_headers = ["id", "id", "next_id"]
+                    elif "INNER JOIN typed_lateral_right" in sql:
+                        expected_headers = ["id", "id", "next_id"]
+                    elif "x.next_id" in sql:
+                        expected_headers = ["id", "next_id"]
+                    elif "l.payload" in sql:
+                        expected_headers = ["id", "payload", "label"]
+                    elif "x.label" in sql:
+                        expected_headers = ["id", "label"]
+                    else:
+                        expected_headers = ["id", "label"]
+                    assert headers == expected_headers, (sql, headers)
+                assert command_tag == "SELECT %d" % len(expected_rows), (
+                    sql, command_tag)
 
         scalar_cases = [
             ("SELECT (SELECT count(*) FROM typed_src) AS c;", [20], 1),
@@ -503,18 +537,28 @@ def main():
              [1043, 1700], 2),
         ]
         for sql, expected_types, expected_row_count in scalar_cases:
+            if collect_errors:
+                print("DERIVED_TYPE_ORIGINAL_SQL", sql, flush=True)
             decoded = runner.decode_wire_result(
                 client.simple_query(server["sock"], sql), include_types=True)
             rows, state, message, headers, command_tag, type_oids = decoded
-            assert state is None, (sql, state, message)
-            assert len(rows) == expected_row_count, (sql, rows)
-            assert len(headers) == len(expected_types), (sql, headers)
-            assert type_oids == expected_types, (sql, type_oids, expected_types)
-            assert command_tag == "SELECT %d" % expected_row_count, (
-                sql, command_tag)
+            with assertions(sql):
+                assert state is None, (sql, state, message)
+                assert len(rows) == expected_row_count, (sql, rows)
+                assert len(headers) == len(expected_types), (sql, headers)
+                assert type_oids == expected_types, (sql, type_oids, expected_types)
+                assert command_tag == "SELECT %d" % expected_row_count, (
+                    sql, command_tag)
+        assert not failures, ("complete original derived type matrix failed", failures)
         print("[DERIVED TYPE PROTOCOL E2E] passed")
     finally:
-        runner.stop_ours(server)
+        if reference:
+            try:
+                client.simple_query(sock, "ROLLBACK")
+            finally:
+                sock.close()
+        else:
+            runner.stop_ours(server)
 
 
 if __name__ == "__main__":

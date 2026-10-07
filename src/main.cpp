@@ -20677,11 +20677,90 @@ static bool handlePreparedSourceUpdate(const string& rawSql,Session& session,boo
     dbms::publishLastDmlResult(std::move(result));handled=true;return false;
 }
 
+// Materialized query children already have an execution-owned relation scope.
+// Whole catalog preparation cannot resolve those inherited logical names. Walk
+// actual relation roles (never column/function spellings) and retain that owner;
+// local WITH declarations still belong to the retained SQL binding graph.
+static bool usesInheritedQueryCteSource(const dbms::SelectStmt& root,
+                                      const Session& session) {
+    using Names = set<string>;
+    function<bool(const dbms::Stmt*, const Names&)> statement;
+    function<bool(const dbms::Expr*, const Names&)> expression;
+    function<bool(const dbms::FromItem*, const Names&)> source;
+    const auto inherited = [&](const string& spelling, const Names& local) {
+        dbms::CatalogManager::QualifiedName name;
+        if (!dbms::CatalogManager::parseQualifiedName(spelling, name, true) ||
+            !name.schema.empty() || local.count(name.name)) return false;
+        for (auto frame = queryCteFrames.rbegin(); frame != queryCteFrames.rend(); ++frame) {
+            if (frame->session != &session || frame->database != session.currentDB) continue;
+            if (frame->relations.count(name.name)) return true;
+            if (!frame->inheritPrevious) break;
+        }
+        return false;
+    };
+    expression = [&](const dbms::Expr* value, const Names& local) {
+        if (!value) return false;
+        if (value->preparedSubquery && statement(value->preparedSubquery.get(), local)) return true;
+        if (const auto* binary = dynamic_cast<const dbms::BinaryOpExpr*>(value))
+            return expression(binary->left.get(), local) || expression(binary->right.get(), local);
+        if (const auto* unary = dynamic_cast<const dbms::UnaryOpExpr*>(value))
+            return expression(unary->operand.get(), local);
+        if (const auto* cast = dynamic_cast<const dbms::CastExpr*>(value))
+            return expression(cast->operand.get(), local);
+        if (const auto* call = dynamic_cast<const dbms::FunctionCallExpr*>(value)) {
+            for (const auto& arg : call->args) if (expression(arg.get(), local)) return true;
+            for (const auto& arg : call->namedArgs) if (expression(arg.value.get(), local)) return true;
+        } else if (const auto* conditional = dynamic_cast<const dbms::CaseExpr*>(value)) {
+            if (expression(conditional->switchExpr.get(), local) || expression(conditional->elseExpr.get(), local)) return true;
+            for (const auto& arm : conditional->whenClauses)
+                if (expression(arm.first.get(), local) || expression(arm.second.get(), local)) return true;
+        } else if (const auto* array = dynamic_cast<const dbms::ArrayExpr*>(value)) {
+            for (const auto& cell : array->elements) if (expression(cell.get(), local)) return true;
+        } else if (const auto* row = dynamic_cast<const dbms::RowExpr*>(value)) {
+            for (const auto& cell : row->elements) if (expression(cell.get(), local)) return true;
+        }
+        return false;
+    };
+    source = [&](const dbms::FromItem* item, const Names& local) {
+        if (!item) return false;
+        if (item->type == dbms::FromItem::Type::Table) return inherited(item->tableName, local);
+        if (item->type == dbms::FromItem::Type::Subquery) return statement(item->subquery.get(), local);
+        if (item->type == dbms::FromItem::Type::Join)
+            return source(item->left.get(), local) || source(item->right.get(), local) ||
+                expression(item->joinCondition.get(), local);
+        return false;
+    };
+    statement = [&](const dbms::Stmt* value, const Names& outer) {
+        const auto* select = dynamic_cast<const dbms::SelectStmt*>(value);
+        if (!select) return false;
+        Names local = outer;
+        for (const auto& cte : select->ctes) {
+            dbms::CatalogManager::QualifiedName name;
+            if (!dbms::CatalogManager::parseQualifiedName(cte.name, name, true) || !name.schema.empty()) return false;
+            Names body = local;
+            if (cte.recursive) body.insert(name.name);
+            if (statement(cte.query.get(), body)) return true;
+            local.insert(name.name);
+        }
+        if (source(select->fromClause.get(), local) || expression(select->whereClause.get(), local) ||
+            expression(select->having.get(), local) || statement(select->setOpLhs.get(), local) ||
+            statement(select->setOpRhs.get(), local)) return true;
+        for (const auto& item : select->selectList) if (expression(item.expr.get(), local)) return true;
+        for (const auto& item : select->orderBy) if (expression(item.expr.get(), local)) return true;
+        for (const auto& item : select->groupBy) if (expression(item.get(), local)) return true;
+        for (const auto& row : select->valuesRows)
+            for (const auto& cell : row) if (expression(cell.get(), local)) return true;
+        return false;
+    };
+    return statement(&root, {});
+}
+
 static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& handled) {
     handled=false;
     dbms::SQLParser parser;auto parsed=parser.parseForBinding(rawSql);
     auto* select=parsed.isValid()?dynamic_cast<dbms::SelectStmt*>(parsed.stmt.get()):nullptr;
     if(!select)return false;
+    if(usesInheritedQueryCteSource(*select,session))return false;
     // Scalar SQL children and typed unary operators must consume this same
     // retained whole-query AST, not a later legacy parser with another TEMP
     // namespace or a discarded preparation-time operand coercion.

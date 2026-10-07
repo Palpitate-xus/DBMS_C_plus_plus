@@ -2,6 +2,9 @@
 """Materialized FROM factors and CTE AS use lexical, not whitespace boundaries."""
 
 import importlib.util
+import socket
+import sys
+import uuid
 from pathlib import Path
 
 
@@ -11,8 +14,22 @@ def main():
     runner = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(runner)
     client = runner.load_protocol_client()
-    server = runner.start_ours(client)
+    reference = "--reference18" in sys.argv
+    if reference:
+        host, port, user, database, password = runner._reference_connection_settings()
+        sock = socket.create_connection((host, port), timeout=runner.wire_timeout())
+        client.startup_reference(sock, user, database, password)
+        runner.verify_reference_version(client, sock)
+        server = {"sock": sock}
+    else:
+        server = runner.start_ours(client)
     try:
+        if reference:
+            schema = "factor_boundary_" + uuid.uuid4().hex[:18]
+            for sql in ("BEGIN", 'CREATE SCHEMA "' + schema + '"',
+                        'SET LOCAL search_path TO "' + schema + '",pg_catalog'):
+                result = runner.decode_wire_result(client.simple_query(sock, sql), include_types=True)
+                assert result[1] is None, (sql, result)
         cases = (
             ("SELECT d.id FROM(SELECT 1 AS id)d WHERE d.id=1;", [["1"]], ["id"], [23]),
             ("SELECT d.* FROM(SELECT 1 AS id)d;", [["1"]], ["id"], [23]),
@@ -37,7 +54,13 @@ def main():
             assert result[4] == f"SELECT {len(rows)}", (sql, result)
         print("[MATERIALIZED FACTOR BOUNDARY PROTOCOL E2E] passed")
     finally:
-        runner.stop_ours(server)
+        if reference:
+            try:
+                client.simple_query(sock, "ROLLBACK")
+            finally:
+                sock.close()
+        else:
+            runner.stop_ours(server)
 
 
 if __name__ == "__main__":

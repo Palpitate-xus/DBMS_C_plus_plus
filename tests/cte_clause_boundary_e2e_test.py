@@ -2,6 +2,7 @@
 """WITH inside a value or subquery must not enter top-level CTE rewriting."""
 
 import importlib.util
+import sys
 from pathlib import Path
 
 
@@ -12,6 +13,8 @@ def main():
     spec.loader.exec_module(runner)
     client = runner.load_protocol_client()
     server = runner.start_ours(client)
+    collect_errors = "--collect-errors" in sys.argv
+    failures = []
     try:
         for statement in ("CREATE TABLE cte_boundary_rows (id INT);",
                           "INSERT INTO cte_boundary_rows VALUES (1);"):
@@ -30,9 +33,17 @@ def main():
             (("WITH unused AS (SELECT id FROM cte_boundary_rows) "
               "SELECT unnest(ARRAY[1, 2]);"), [["1"], ["2"]]),
         ]:
+            if collect_errors:
+                print("CTE_CLAUSE_BOUNDARY_ORIGINAL_SQL", statement, flush=True)
             rows, state, message, _ = runner.ours_query(client, server["sock"], statement)
-            assert state is None, (statement, state, message)
-            assert rows == expected, (statement, rows, expected)
+            try:
+                assert state is None, (statement, state, message)
+                assert rows == expected, (statement, rows, expected)
+            except AssertionError as failure:
+                if not collect_errors:
+                    raise
+                failures.append(failure.args)
+                print("CTE_CLAUSE_BOUNDARY_STRONG_FAILURE", failure.args, flush=True)
 
         decoded = runner.decode_wire_result(
             client.simple_query(
@@ -46,6 +57,7 @@ def main():
         assert headers == ["flag"], headers
         assert command_tag == "SELECT 1", command_tag
         assert type_oids == [16], type_oids
+        assert not failures, ("complete original CTE clause boundary matrix failed", failures)
         print("[CTE CLAUSE BOUNDARY E2E] passed")
     finally:
         runner.stop_ours(server)
