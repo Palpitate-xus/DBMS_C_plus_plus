@@ -1839,8 +1839,9 @@ static ColumnDef columnDefFromAlterType(const std::string& name,
     cd.name = name;
     cd.isNull = true;
     std::string spec = trim(typeSpec);
-    // Array declarations are owned by explicit callers. Domain and other
-    // existing callers must not silently discard an unsupported suffix.
+    // Only callers owning array declarations opt in. Other existing callers
+    // (e.g. domains) must not accidentally discard an unsupported suffix.
+    // Routine type envelopes retain lexer spacing: INT [ ] is still INT[].
     while (allowArraySuffix && !spec.empty() && spec.back() == ']') {
         const size_t open = spec.find_last_not_of(" \t\r\n", spec.size() - 2);
         if (open == std::string::npos || spec[open] != '[') break;
@@ -10566,7 +10567,7 @@ bool DdlExecutor::executeCreateFunction(const CreateFunctionStmt* stmt, Session&
     const auto validateFunctionType = [&](const std::string& typeSpec,
                                           bool returnType) {
         if (trim(typeSpec).empty()) return false;
-        ColumnDef definition = columnDefFromAlterType("value", typeSpec);
+        ColumnDef definition = columnDefFromAlterType("value", typeSpec, true);
         const std::string base = toLower(trim(definition.typeName));
         const std::string canonical =
             TypeRegistry::instance().normalizeTypeName(base);
@@ -10575,18 +10576,19 @@ bool DdlExecutor::executeCreateFunction(const CreateFunctionStmt* stmt, Session&
                 TypeRegistry::instance().findType(canonical);
             if (!entry) return false;
             if (entry->category == TypeCategory::Pseudo) {
-                return returnType && canonical == "void";
+                return returnType && !definition.isArray && canonical == "void";
             }
             Column column;
             return TypeRegistry::instance().resolveColumnType(
-                       column, canonical, definition.typeMods, false).empty();
+                       column, canonical, definition.typeMods, definition.isArray).empty();
         }
+        if (definition.isArray) return false; // no user-type array codec yet
         if (!g_engine.getDomain(s.currentDB, base).name.empty()) return true;
         if (!g_engine.getEnumType(s.currentDB, base).name.empty()) return true;
         return g_engine.isCompositeType(s.currentDB, base);
     };
     const auto canonicalFunctionType = [&](const std::string& typeSpec) {
-        ColumnDef definition = columnDefFromAlterType("value", typeSpec);
+        ColumnDef definition = columnDefFromAlterType("value", typeSpec, true);
         std::string base = toLower(trim(definition.typeName));
         const std::string canonical =
             TypeRegistry::instance().normalizeTypeName(base);
@@ -10599,7 +10601,7 @@ bool DdlExecutor::executeCreateFunction(const CreateFunctionStmt* stmt, Session&
             }
             base += ')';
         }
-        return base;
+        return base + (definition.isArray ? "[]" : "");
     };
 
     for (const auto& parameter : stmt->params) {
@@ -10651,21 +10653,21 @@ bool DdlExecutor::executeCreateFunction(const CreateFunctionStmt* stmt, Session&
         }
         if (stmt->params.size() <= 1) {
             std::string singleParam = stmt->params.empty() ? "" : stmt->params.front().first;
-            std::string singleType = stmt->params.empty() ? "" : stmt->params.front().second;
+            std::string singleType = stmt->params.empty() ? "" : canonicalFunctionType(stmt->params.front().second);
             res = g_engine.createUDF(s.currentDB, stmt->funcName, singleParam,
                                      stmt->body, provolatile, lang,
-                                     stmt->returnType, singleType,
+                                     canonicalFunctionType(stmt->returnType), singleType,
                                      stmt->strict, stmt->replace);
         } else {
             std::vector<std::string> params;
             std::vector<std::string> types;
             for (const auto& p : stmt->params) {
                 params.push_back(p.first);
-                types.push_back(p.second);
+                types.push_back(canonicalFunctionType(p.second));
             }
             res = g_engine.createUDF(s.currentDB, stmt->funcName, params, types,
                                      stmt->body, provolatile, lang,
-                                     stmt->returnType, stmt->strict,
+                                     canonicalFunctionType(stmt->returnType), stmt->strict,
                                      stmt->replace);
         }
     }
