@@ -1,4 +1,32 @@
-# 2026-10-07 最新7b22总清单 checkpoint
+# 2026-10-07 最新4796总清单 checkpoint
+
+当前source `479675f1`：692auto-native+1实际frontend/354registered/58TU，
+83项独立source/test修复commit。`10989d96` 独立修复窗口默认/显式NULL排序
+政策；`479675f1` 独立修复GROUPS无界端点误留当前peer group。原195矩阵
+baseline1282实际1/62差异，修复后strict198和本地195均完整0；GROUPS在
+已修NULL的Source82独立native39274为1/134、147完整wire41844为1/40差异，
+同SQL strict150完整0，修复后147完整0。原SQL/NULL/类型/强断言不削弱。
+
+窗口NULL公共头/构造布局变更的normal25277真正fresh全58，无donor；完整
+15native68690、6whole51617、postcommit78942全部实际0。GROUPS只改Exec
+实现，soleExec fresh+57当期109全部源/头/flags/原receipt/bytes证明正常
+donors；normal24221、16完整native66161、7完整whole1484、postcommit42105
+全部实际0，默认磁盘/期限；两轮repeat/all58/stamp/frozen-input hash通过。
+准确SHA和证据路径见integration及两独立issue，不冒新SAN或全suite绿。
+
+原Source80 full42496本轮实际poll仍LIVE，原输入冻结不改不重启；非当前83
+全量。原递归CTE现独立确认是inherited frame preparation introduced回归，
+原7504/82bf完整同driver PASS证据保留，真实source-role修复仍私有。原matview
+后台catalog58030仍OPEN未修。generic全强矩阵current82 baseline52048为1/
+61失败、同owned strict18/enUS为0；generic/BIT finite bundle及新b/x codec/
+integer UNKNOWN左常量等均待当前Root集成完整证明，不借private绿冒当前批准。
+Root审查另实证native compact IN/BETWEEN全84控制19162实际1/68失败，firsthit/
+空表/NULL漏成员42883/22P02；独立prevalidation继续，Main typed-IN绿不覆盖它。
+QRY08/10及原全部未闭环family仍partial/open；原273保持22complete、166partial、
+70unverified、15deferred，完成gate拒绝。不push、不启用Actions，用户安全/
+TDE跳过项保持deferred。
+
+# 2026-10-07 历史7b22总清单 checkpoint
 
 当前test/source `7b2223cf`：690auto-native+1实际frontend/352registered/
 58TU，81项独立source/test commit；生产/scripts/cmake逐字同3ffbb516。

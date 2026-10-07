@@ -4,7 +4,26 @@
 
 # 工作区与复查清单收尾计划
 
-## 2026-10-07 当前完整273目标计划（7b22；以下较早记录均历史）
+## 2026-10-07 当前完整273目标计划（4796；以下较早记录均历史）
+
+当前source `479675f1`：692auto+frontend/354registered/58TU，83项独立
+source/test修复commit；原273目标及所有未闭环范围不缩小。
+
+| 阶段 | 原要求 / 下一动作 | 当前实际证据 |
+| --- | --- | --- |
+| 独立窗口修复 | 原强矩阵、完整consumer、每根因commit | 10989d96 NULL195和479675f1 GROUPS147由真实62/40红变全0，strict198/150全0，原生144/72和完整相邻/提交后gate全0 |
+| 当前生产输入 | 实际公共头ABI、全58 receipts/flags/stamp/inputs | NULL normal25277真fresh58；GROUPS normal24221 soleExec+57当前109逐对象证明donors，不冒第二次fresh58/SAN |
+| 全量原验收 | 所有原注册/自动native、真实终态、保全部原红 | Source80 full42496本轮实际poll LIVE；非83 inputepoch全量，不重启删除旧TRUNCATE失败 |
+| 递归CTE introduced回归 | 实际可继承frame/session/db/source-role owner | 当前原第17条42P01，旧7504/82bf同完整driver PASS；独立owner已定位guard，强原21/副作用/隔离证明待完成，不import WIP |
+| generic/BIT/integer | 完整参数类型、metadata、NULL、once、physical/index owner | generic current82全矩阵61真红、matched严格18同矩阵0；finite BIT及codec私有READY；Root新compact native84控制19162实际1/68红，两个真实owner全member准入继续；UNKNOWN/quoted/index其它边界继续 |
+| 其它全部原family | 每原目录/query/storage/recovery/IO/DDL/operations要求 | matview后台58030仍OPEN未修；不以两窗口根因修复冒frame/spill/collation或任何更大family关闭 |
+| 总账与版本管理 | 每原条目证据/状态/checkbox/commit一致，用户push | 原273=22complete166partial70unverified15deferred，完成gate拒绝；本地独立commit，无push/Actions启用/安全TDE恢复 |
+
+完整证明见integration与两窗口issue。下一步完成generic当前Root隔离导入/正式
+正常构建及全强矩阵合成，接收已实证CTE owner修复并逐问题验证提交，复查有限
+BIT bundle及其它原问题；不把 private READY 当 master 已完成。
+
+## 2026-10-07 历史完整273目标计划（7b22）
 
 当前test/source `7b2223cf`：690auto+frontend/352registered/58TU，81项
 独立source/test commit；生产逐字同3ffbb516。原273目标/所有未闭环范围不缩。

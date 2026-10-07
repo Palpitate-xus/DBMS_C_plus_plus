@@ -1,4 +1,55 @@
-# Latest 7b22 checkpoint: 81 independently committed source/test repairs
+# Latest 4796 checkpoint: 83 independently committed source/test repairs
+
+Current source `479675f1`: **692 auto-native plus one actual frontend /
+354 registered /58 production TUs**. Two independent structured-window
+repairs are locally committed; neither QRY-08 nor QRY-10 is declared complete.
+
+| Issue | ROOT commit | Actual complete evidence |
+| --- | --- | --- |
+| Default/explicit window input and output NULL order | `10989d96` | Original195-statement baseline1282 ends1/62 differences; strict198/0; genuine fresh58 normal25277/15 native68690/6 whole51617/postcommit78942 all0 |
+| GROUPS UNBOUNDED incorrectly stays at current peer group | `479675f1` | Exact Source82 original native39274 ends1/134 and full147 wire41844 ends1/40 differences; strict150/0; normal24221/16 native66161/7 whole1484/postcommit42105 all0 |
+
+NULL policy retains actual bitmap placement independently of DESC reversal,
+including existing final-order flags and explicit window NULLS FIRST/LAST.
+Its appended public flags/constructor layout are covered by genuinely fresh
+all58 normal O2 production compilation, without donors. All58 source/header/
+actual-flag/manifest receipts, stamp, immediate repeat and frozen input hash
+pass. Frozen SHA `072b80be8667f8eed9a28536e39de9ddd362afbc035eeed181664a9833ab6b50`.
+
+GROUPS changes only its actual negative-sentinel partition start/end branch,
+retaining bounded peers and exclusions. Its build freshly compiles sole
+ExecutionPlan plus57 exact current109 source/header/flags/original58-receipt/
+object-byte-proved normal donors; not another fresh58. Repeat/all58 current
+receipts/stamp/frozen source inputs pass. Frozen SHA
+`0054bcc5f94840604c916280eeee5495c318aaa08ff8a9a9e1c292a63cd8c8c1`.
+Both final native/whole gates use default disk/deadlines and fresh drivers/
+stubs; GROUPS includes the complete144 NULL and72 GROUPS matrices, original
+windows/metadata, enum/BIT/BETWEEN, all19 DDL sections and all4 TRUNCATE sections.
+See `docs/issue-window-null-order-policy.md`,
+`docs/issue-window-groups-unbounded-boundary.md` and their retained artifacts.
+
+Original frozen Source80 full42496 is actually polled LIVE this turn, not a
+current83 input run or PASS; it is not restarted to hide the old TRUNCATE red.
+Its newly failing original recursive CTE case is a genuine inherited-frame
+preparation regression relative to both older original full PASS receipts.
+The independent owner is repairing the actual source role; no unverified fix
+is imported. Original matview/background58030 remains OPEN and unfixed.
+
+Generic aggregate012f is fully source-reviewed, but not imported: the current
+Source82 full permanent baseline52048 actually ends1 with61 strong failures;
+the identical owned strict180006/en_US matrix ends0. Current-root integration
+and full composition gates remain required. Finite BIT1c and separate b/x
+codec5bb are private READY evidence, not current-root approvals. Root review
+now reproduces native compact list admission: whole84 controls19162 ends1,
+68 failures in actual queryExpr/QueryPlanner, including first-hit/empty/NULL
+missing42883/22P02. Its independent owner is repairing all-member prevalidation;
+existing Main typed-IN successes do not cover it. Integer UNKNOWN/literal-
+left/quoted-space/index-owner work also remains private until complete proof.
+Original273 remains **22complete/166partial/70unverified/15deferred**. All
+original unclosed requirements remain open/partial. No push, Actions activation,
+unverified import or user-deferred security/TDE restart.
+
+# Historical 7b22 checkpoint: 81 independently committed source/test repairs
 
 Current test source `7b2223cf` retains **690 auto-native plus one actual
 frontend /352 registered /58 production TUs**. Production/scripts/cmake
