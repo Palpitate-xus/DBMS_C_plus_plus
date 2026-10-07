@@ -75,10 +75,14 @@ using PreparedDmlSourceFactory = std::function<PreparedDmlSourceRows(
     const Stmt*, const FromItem*, const RowContext&)>;
 void prepareBoundDml(Stmt* statement, Session& session,
                      const std::shared_ptr<PreparedQuery>& query,
-                     PreparedDmlSourceFactory sourceFactory = {});
+                     PreparedDmlSourceFactory sourceFactory = {},
+                     PreparedChildCursorFactory childCursorFactory = {},
+                     bool planRootConstants = false);
 DmlResult executeBoundDml(Stmt* statement, Session& session,
     const std::shared_ptr<PreparedQuery>& query, PreparedChildExecutor reader,
-    PreparedDmlSourceFactory sourceFactory = {});
+    PreparedDmlSourceFactory sourceFactory = {},
+    PreparedChildCursorFactory childCursorFactory = {},
+    bool planRootConstants = false);
 DmlResult executeAtomicDmlUnit(Session& session,
     const std::function<DmlResult()>& command);
 

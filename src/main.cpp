@@ -19701,7 +19701,7 @@ class PreparedWithDmlRuntime {
             if(cache->writing)throw dbms::DbError("0A000","recursive data-modifying WITH producer is not supported");
             if(statement->command!=dbms::SqlCommand::Select && statement->command!=dbms::SqlCommand::Values) {
                 cache->writing=true;
-                const auto result=dbms::executeBoundDml(const_cast<dbms::Stmt*>(statement),session_,query_,reader(frames),mutationSourceFactory(frames));
+                const auto result=dbms::executeBoundDml(const_cast<dbms::Stmt*>(statement),session_,query_,reader(frames),mutationSourceFactory(frames),cursorFactory(frames));
                 cache->rows=typed(result,output(statement));cache->complete=true;cache->writing=false;
             } else cache->plan=selectPlan(const_cast<dbms::SelectStmt*>(static_cast<const dbms::SelectStmt*>(statement)),frame->outer,frames);
         }
@@ -20076,7 +20076,7 @@ class PreparedWithDmlRuntime {
                 selectPlan(const_cast<dbms::SelectStmt*>(select),outer,frames),output(statement));
         };
     }
-    void validate(dbms::Stmt* statement,const Frames& frames) {
+    void validate(dbms::Stmt* statement,const Frames& frames,bool planRootConstants=false) {
         if(auto* select=dynamic_cast<dbms::SelectStmt*>(statement)) {
             for(auto& cte:select->ctes) {
                 if(cte.query->command!=dbms::SqlCommand::Select && cte.query->command!=dbms::SqlCommand::Values)
@@ -20085,7 +20085,7 @@ class PreparedWithDmlRuntime {
             }
             (void)selectPlan(select,validation_.context(),frames);
         } else {
-            dbms::prepareBoundDml(statement,session_,query_,mutationSourceFactory(frames));
+            dbms::prepareBoundDml(statement,session_,query_,mutationSourceFactory(frames),cursorFactory(frames),planRootConstants);
             if(auto* insert=dynamic_cast<dbms::InsertStmt*>(statement);insert && insert->selectSource)
                 validate(insert->selectSource.get(),frames);
         }
@@ -20136,13 +20136,13 @@ public:
             const bool referenced=any_of(query_->sourceRanges.begin(),query_->sourceRanges.end(),[&](const auto& range){return range.cteStatement==cte.query.get();});
             if(writer || referenced)validate(cte.query.get(),frames);
         }
-        validate(root_->statement.get(),frames);
+        validate(root_->statement.get(),frames,true);
         return dbms::executeAtomicDmlUnit(session_,[&]{
             // Referenced producers run when the primary command demands
             // their RETURNING rows. Only after that command succeeds do we
             // finish unused writers: an immediate primary error must not
             // execute a not-yet-started sequence/volatile producer.
-            auto result=dbms::executeBoundDml(root_->statement.get(),session_,query_,reader(frames),mutationSourceFactory(frames));
+            auto result=dbms::executeBoundDml(root_->statement.get(),session_,query_,reader(frames),mutationSourceFactory(frames),cursorFactory(frames),true);
             // A successful data-modifying CTE runs once and to completion,
             // even when its RETURNING output was not consumed (LIMIT 0).
             for(auto& cte:root_->ctes)if(cte.query->command!=dbms::SqlCommand::Select && cte.query->command!=dbms::SqlCommand::Values) {

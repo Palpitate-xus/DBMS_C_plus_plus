@@ -5239,6 +5239,8 @@ class BoundDmlExecution {
     std::map<const Expr*,std::vector<std::pair<size_t,size_t>>> returningStarCells_;
     PreparedDmlSourceRows source_;
     bool hasSource_ = false;
+    bool ownsChildCursors_ = false;
+    std::vector<Expr*> expressions_;
 
     static bool defaultValue(const Expr* expr) {
         const auto* literal = dynamic_cast<const LiteralExpr*>(expr);
@@ -5263,7 +5265,7 @@ class BoundDmlExecution {
         return false;
     }
     void expression(Expr* value) {
-        if(value && !isStarProjection(value) && !defaultValue(value)) execution_.prepareExpression(value);
+        if(value && !isStarProjection(value) && !defaultValue(value)) expressions_.push_back(value);
     }
     void predicate(Expr* value) {
         if(!value)return;
@@ -5343,8 +5345,12 @@ class BoundDmlExecution {
     }
 public:
     BoundDmlExecution(Stmt* statement,Session& session,std::shared_ptr<PreparedQuery> query,
-                      PreparedDmlSourceFactory sourceFactory = {})
+                      PreparedDmlSourceFactory sourceFactory = {},
+                      PreparedChildCursorFactory childCursorFactory = {},
+                      bool planRootConstants = false)
         :statement_(statement),session_(session),query_(std::move(query)),execution_(query_,&g_engine,session.currentDB) {
+        ownsChildCursors_=static_cast<bool>(childCursorFactory);
+        execution_.setChildCursorFactory(std::move(childCursorFactory));
         for(const auto& range:query_->sourceRanges)if(range.owner==statement_ && !range.source && !range.mergedUsing && !range.relationName.empty()) {
             if(target_)throw DbError("XX000","prepared DML has multiple target occurrences");
             target_=&range;
@@ -5443,9 +5449,27 @@ public:
                     throw DbError("42601","multiple assignments to column \""+name+"\"");
             }
         }
+        // Whole metadata/privileges/duplicate targets precede pure planning.
+        // Plan this actual execution-owned carrier before callback binding
+        // rewrites routine identities, then consume these same compiled roots.
+        if(planRootConstants)execution_.planStatementConstants(statement_);
+        for(auto* value:expressions_)execution_.prepareExpression(value);
     }
     DmlResult run(PreparedChildExecutor reader) {
         execution_.setQueryExecutor(reader);
+        try {
+            if(ownsChildCursors_)execution_.prepareChildCursors();
+            auto output=executeRows(reader);
+            execution_.closeChildCursors();
+            return output;
+        } catch(...) {
+            const auto primary=std::current_exception();
+            try{execution_.closeChildCursors();}catch(...){}
+            std::rethrow_exception(primary);
+        }
+    }
+private:
+    DmlResult executeRows(const PreparedChildExecutor& reader) {
         if(auto* insert=dynamic_cast<InsertStmt*>(statement_)) {
             std::vector<std::string> columns;
             if(insert->columns.empty())for(const auto& column:target_->columns)columns.push_back(column.name);
@@ -5470,6 +5494,8 @@ public:
                 write(row);
             }
             if(insert->selectSource) {
+                // INSERT SELECT retains the full-row source contract; SQL
+                // scalar/quantified value children use the paired cursor.
                 const auto rows=reader(insert->selectSource.get(),execution_.context(),0);
                 for(const auto& values:rows) {
                     if(values.size()>columns.size())throw DbError("XX000","INSERT SELECT lost its prepared width");
@@ -5558,11 +5584,14 @@ public:
 };
 } // namespace
 
-void prepareBoundDml(Stmt* statement,Session& session,const std::shared_ptr<PreparedQuery>& query,PreparedDmlSourceFactory sourceFactory) {
-    (void)BoundDmlExecution(statement,session,query,std::move(sourceFactory));
+void prepareBoundDml(Stmt* statement,Session& session,const std::shared_ptr<PreparedQuery>& query,
+    PreparedDmlSourceFactory sourceFactory,PreparedChildCursorFactory childCursorFactory,bool planRootConstants) {
+    (void)BoundDmlExecution(statement,session,query,std::move(sourceFactory),std::move(childCursorFactory),planRootConstants);
 }
-DmlResult executeBoundDml(Stmt* statement,Session& session,const std::shared_ptr<PreparedQuery>& query,PreparedChildExecutor reader,PreparedDmlSourceFactory sourceFactory) {
-    return BoundDmlExecution(statement,session,query,std::move(sourceFactory)).run(std::move(reader));
+DmlResult executeBoundDml(Stmt* statement,Session& session,const std::shared_ptr<PreparedQuery>& query,
+    PreparedChildExecutor reader,PreparedDmlSourceFactory sourceFactory,
+    PreparedChildCursorFactory childCursorFactory,bool planRootConstants) {
+    return BoundDmlExecution(statement,session,query,std::move(sourceFactory),std::move(childCursorFactory),planRootConstants).run(std::move(reader));
 }
 DmlResult executeAtomicDmlUnit(Session& session,const std::function<DmlResult()>& command) {
     bool ownsCommand=false;
