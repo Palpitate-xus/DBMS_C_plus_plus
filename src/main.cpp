@@ -5340,7 +5340,10 @@ static bool handleExplain(const string& sql, Session& s) {
         auto* select = static_cast<dbms::SelectStmt*>(prepared->ast.get());
         // Scalar query children acquire their AST role during pure binding;
         // do not mistake their parser envelope literal for a physical target.
-        if (!select->ctes.empty() || explainNeedsTypedPlan(*select))
+        const auto* directCall = select->selectList.size()==1 ?
+            dynamic_cast<const dbms::FunctionCallExpr*>(select->selectList.front().expr.get()) : nullptr;
+        if (!select->ctes.empty() || explainNeedsTypedPlan(*select) ||
+            (directCall && directCall->setReturning))
             // Consume the same owned, bound query on the real execution
             // root, including its source/demand contexts and pure planning.
             // Child/VIEW/CTE graph construction keeps the false default.
@@ -20451,12 +20454,23 @@ static bool explainPreparedReadQuery(Session& session,const string& raw,
     return error;
 }
 
-static bool handlePreparedQuantifiedQuery(const string& raw,Session& session,bool& handled) {
+static bool handlePreparedMultirowQuery(const string& raw,Session& session,bool& handled) {
     handled=false;
     dbms::SQLParser parser;const auto parsed=parser.parseForBinding(raw);
     const auto* select=parsed.success?dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()):nullptr;
-    if(!select || !containsPreparedQuantifier(*select))return false;
+    if(!select)return false;
+    const bool quantified=containsPreparedQuantifier(*select);
+    // Probe the syntax shape, but choose the set-valued role only from whole
+    // metadata binding. A stored scalar routine named unnest is not an SRF.
+    const bool possibleSet=!select->fromClause && select->selectList.size()==1 &&
+        dynamic_cast<const dbms::FunctionCallExpr*>(select->selectList.front().expr.get());
+    if(!quantified && !possibleSet)return false;
     auto query=make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(session.currentDB,raw));
+    const auto* bound=static_cast<const dbms::SelectStmt*>(query->ast.get());
+    const auto* call=bound->selectList.size()==1 ?
+        dynamic_cast<const dbms::FunctionCallExpr*>(bound->selectList.front().expr.get()) : nullptr;
+    const bool setReturning=call && call->setReturning.has_value();
+    if(!quantified && !setReturning)return false;
     PreparedWithDmlRuntime runtime(session,query);
     auto plan=runtime.queryPlan();
     dbms::DmlResult descriptor;descriptor.available=true;descriptor.metadataOnly=true;descriptor.runtimeErrorMetadata=true;
@@ -20476,7 +20490,17 @@ static bool handlePreparedQuantifiedQuery(const string& raw,Session& session,boo
     for(const auto& column:query->output){columns.push_back(column.name);types.push_back(column.type);}
     for(const auto& column:columns)cout<<column<<' ';
     cout<<'\n';
-    for(const auto& row:result.rows)cout<<row<<'\n';
+    if(setReturning) {
+        // CLI separators belong between cells, never inside a datum. The
+        // structured NULL bitmap distinguishes NULL from text "NULL"/empty.
+        for(size_t i=0;i<result.structuredRows.size();++i) {
+            for(size_t j=0;j<result.structuredRows[i].size();++j) {
+                if(j)cout<<' ';
+                cout<<(result.structuredNulls[i][j]?"NULL":result.structuredRows[i][j]);
+            }
+            cout<<'\n';
+        }
+    } else for(const auto& row:result.rows)cout<<row<<'\n';
     publishStructuredUtilityResult(std::move(columns),std::move(types),
         std::move(result.structuredRows),std::move(result.structuredNulls),"SELECT "+to_string(result.rows.size()));
     handled=true;return false;
@@ -25237,7 +25261,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
         if (!checkDB(s)) return true;
 
         bool quantifiedHandled=false;
-        const bool quantifiedFailed=handlePreparedQuantifiedQuery(effectiveRawSql,s,quantifiedHandled);
+        const bool quantifiedFailed=handlePreparedMultirowQuery(effectiveRawSql,s,quantifiedHandled);
         if(quantifiedHandled)return quantifiedFailed;
 
         bool preparedCaseHandled=false;
