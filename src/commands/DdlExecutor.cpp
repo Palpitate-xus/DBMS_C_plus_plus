@@ -983,7 +983,7 @@ static PgAttributeRow catalogAttributeForColumn(
     }
     if (!column.domainName.empty()) attribute.atttypmod = -1;
     attribute.attnotnull = !column.isNull;
-    attribute.atthasdef = !column.defaultValue.empty();
+    attribute.atthasdef = !column.defaultValue.empty() && column.defaultOrigin != Column::DefaultOrigin::Domain;
     attribute.attstorage = column.isVariableLength ? 'x' : 'p';
     attribute.attidentity = column.identityKind;
     attribute.attgenerated = column.generatedExpr.empty()
@@ -4497,6 +4497,7 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
 
     // Factory functions replace the whole Column; restore metadata they don't set.
     col.defaultValue = cd.defaultValue ? cd.defaultValue->toString() : "";
+    col.defaultOrigin = cd.defaultValue ? Column::DefaultOrigin::Column : Column::DefaultOrigin::LegacyFrozen;
     col.generatedExpr = cd.generatedExpr;
     col.generatedKind = cd.generatedKind;
     col.isAutoIncrement = col.isAutoIncrement || cd.isGeneratedIdentity ||
@@ -4523,7 +4524,10 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
     if (!enumTypeName.empty()) col.dataType = enumTypeName;
     if (!domainName.empty()) {
         col.domainName = domainName;
-        if (!cd.defaultValue && domain.hasDefault) col.defaultValue = domain.defaultValue;
+        if (!cd.defaultValue) {
+            col.defaultOrigin = Column::DefaultOrigin::Domain;
+            col.defaultValue = domain.hasDefault ? domain.defaultValue : "";
+        }
         for (const auto& ancestor : domain.domains) {
             if (ancestor.checkExpr.empty()) continue;
             const auto rewritten = bindDomainCheck(dbname, ancestor.checkExpr,
@@ -5285,7 +5289,10 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
                 return true;
             }
             Column c = srcSchema.cols[i];
-            if (!lc.includingDefaults) c.defaultValue.clear();
+            if (!lc.includingDefaults && c.defaultOrigin != Column::DefaultOrigin::Domain) {
+                c.defaultValue.clear();
+                c.defaultOrigin = c.domainName.empty() ? Column::DefaultOrigin::LegacyFrozen : Column::DefaultOrigin::Domain;
+            }
             if (!lc.includingConstraints) {
                 c.checkExpr.clear();
                 c.checkConstraintName.clear();
@@ -5476,6 +5483,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             if (!incoming.defaultValue.empty()) {
                 if (localDeclaration || target.defaultValue.empty()) {
                     target.defaultValue = incoming.defaultValue;
+                    target.defaultOrigin = incoming.defaultOrigin;
                 } else if (target.defaultValue != incoming.defaultValue &&
                            localDefaultOverrides.count(
                                incoming.dataName) == 0) {

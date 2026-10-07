@@ -34,6 +34,10 @@ struct Column {
     std::string dataName;
     size_t dsize = 0;  // For VARCHAR: max length; for fixed: actual bytes
     std::string defaultValue;       // DEFAULT value
+    // Old schema9/10 has no reliable provenance for its copied defaults.
+    // Preserve those bytes as frozen; never infer origin from equal values.
+    enum class DefaultOrigin : uint8_t { LegacyFrozen = 0, Column = 1, Domain = 2 };
+    DefaultOrigin defaultOrigin = DefaultOrigin::LegacyFrozen;
     std::string checkExpr;          // CHECK constraint expression
     std::string checkConstraintName; // Name of the CHECK constraint
     bool deferrable = false;        // CHECK constraint is deferrable

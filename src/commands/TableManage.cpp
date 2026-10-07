@@ -14579,7 +14579,9 @@ DBStatus StorageEngine::renameDatabase(const std::string& oldName,
 
 constexpr int32_t SCHEMA_FORMAT_VERSION = 0x44420009;  // "DB" + 64-byte identifier fields
 constexpr int32_t SCHEMA_PHYSICAL_ID_FORMAT_VERSION = 0x4442000A;
+constexpr int32_t SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION = 0x4442000B;
 constexpr uint32_t SCHEMA_PHYSICAL_ID_MAGIC = 0x31444952;  // "RID1"
+constexpr uint32_t SCHEMA_DEFAULT_ORIGIN_MAGIC = 0x314F5344; // "DSO1"
 constexpr int32_t MAX_PERSISTED_COLUMN_SIZE = 65535;
 constexpr uint32_t SCHEMA_ADDITIONAL_CHECK_MAGIC = 0x324B4843;  // "CHK2"
 constexpr uint32_t SCHEMA_IDENTITY_KIND_MAGIC = 0x314E4449;     // "IDN1"
@@ -14588,6 +14590,9 @@ constexpr uint32_t SCHEMA_RANGE_LOWER_BOUNDS_MAGIC = 0x31424C52;  // "RLB1"
 constexpr int32_t MAX_ADDITIONAL_CHECK_CONSTRAINTS = 1024;
 constexpr uint32_t MAX_PERSISTED_CHECK_EXPRESSION = 1024 * 1024;
 constexpr uint32_t MAX_PERSISTED_DEFAULT_EXPRESSION = 1024 * 1024;
+// Physical restore uses the retained transaction layout while its directory
+// generation changes. Logical defaults are not inputs to that byte operation.
+static thread_local const StorageEngine* physicalSchemaReader = nullptr;
 
 void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
     if (tbl.len > MAX_COLUMNS) {
@@ -14627,8 +14632,24 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
             return;
         }
     }
-    // Write format version marker
-    const int32_t schemaFormat = tbl.physicalRelationId == 0
+    bool hasDefaultOrigins = false;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        const auto origin = tbl.cols[i].defaultOrigin;
+        if (origin != Column::DefaultOrigin::LegacyFrozen && origin != Column::DefaultOrigin::Column && origin != Column::DefaultOrigin::Domain) {
+            out.setstate(std::ios::failbit); return;
+        }
+        if (origin == Column::DefaultOrigin::Column && tbl.cols[i].defaultValue.empty()) {
+            out.setstate(std::ios::failbit); return;
+        }
+        if (origin == Column::DefaultOrigin::Domain && tbl.cols[i].domainName.empty()) {
+            out.setstate(std::ios::failbit); return;
+        }
+        hasDefaultOrigins = hasDefaultOrigins || origin == Column::DefaultOrigin::Domain ||
+            (origin == Column::DefaultOrigin::Column && !tbl.cols[i].domainName.empty());
+    }
+    // Old readers reject B before consuming it rather than treating an
+    // implicit domain default as a frozen SQL column expression.
+    const int32_t schemaFormat = hasDefaultOrigins ? SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION : tbl.physicalRelationId == 0
         ? SCHEMA_FORMAT_VERSION : SCHEMA_PHYSICAL_ID_FORMAT_VERSION;
     out.write(reinterpret_cast<const char*>(&schemaFormat), sizeof(schemaFormat));
     int32_t len = static_cast<int32_t>(tbl.len);
@@ -14847,7 +14868,7 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
     uint16_t longDefaultCount = 0;
     for (size_t i = 0; i < tbl.len; ++i)
         if (tbl.cols[i].defaultValue.size() > MAX_COL_NAME_LEN) ++longDefaultCount;
-    if (longDefaultCount != 0 || !tbl.rangePartitions.empty() || tbl.physicalRelationId != 0) {
+    if (longDefaultCount != 0 || !tbl.rangePartitions.empty() || tbl.physicalRelationId != 0 || hasDefaultOrigins) {
         out.write(reinterpret_cast<const char*>(&SCHEMA_LONG_DEFAULT_MAGIC),
                   sizeof(SCHEMA_LONG_DEFAULT_MAGIC));
         out.write(reinterpret_cast<const char*>(&longDefaultCount),
@@ -14864,7 +14885,7 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
 
     // Persist lower endpoints without changing the legacy schema prefix. Old
     // schemas infer them as MINVALUE followed by the preceding upper bound.
-    if (!tbl.rangePartitions.empty() || tbl.physicalRelationId != 0) {
+    if (!tbl.rangePartitions.empty() || tbl.physicalRelationId != 0 || hasDefaultOrigins) {
         out.write(reinterpret_cast<const char*>(&SCHEMA_RANGE_LOWER_BOUNDS_MAGIC),
                   sizeof(SCHEMA_RANGE_LOWER_BOUNDS_MAGIC));
         const int32_t lowerBoundCount =
@@ -14879,11 +14900,26 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
             writeFixedString(out, lower, MAX_COL_NAME_LEN);
         }
     }
-    if (tbl.physicalRelationId != 0) {
+    if (tbl.physicalRelationId != 0 || hasDefaultOrigins) {
         out.write(reinterpret_cast<const char*>(&SCHEMA_PHYSICAL_ID_MAGIC),
                   sizeof(SCHEMA_PHYSICAL_ID_MAGIC));
         out.write(reinterpret_cast<const char*>(&tbl.physicalRelationId),
                   sizeof(tbl.physicalRelationId));
+    }
+    if (hasDefaultOrigins) {
+        out.write(reinterpret_cast<const char*>(&SCHEMA_DEFAULT_ORIGIN_MAGIC),sizeof(SCHEMA_DEFAULT_ORIGIN_MAGIC));
+        const uint16_t count = static_cast<uint16_t>(tbl.len);
+        out.write(reinterpret_cast<const char*>(&count),sizeof(count));
+        for (size_t i = 0; i < tbl.len; ++i) {
+            const auto origin = static_cast<uint8_t>(tbl.cols[i].defaultOrigin);
+            const uint16_t length = static_cast<uint16_t>(tbl.cols[i].domainName.size());
+            if (tbl.cols[i].domainName.size() > 256 || tbl.cols[i].domainName.find('\0') != std::string::npos) {
+                out.setstate(std::ios::failbit); return;
+            }
+            out.write(reinterpret_cast<const char*>(&origin),sizeof(origin));
+            out.write(reinterpret_cast<const char*>(&length),sizeof(length));
+            out.write(tbl.cols[i].domainName.data(),length);
+        }
     }
 }
 
@@ -14894,7 +14930,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     in.read(reinterpret_cast<char*>(&firstInt), 4);
     if (!in) return {};
 
-    if (firstInt != SCHEMA_FORMAT_VERSION && firstInt != SCHEMA_PHYSICAL_ID_FORMAT_VERSION) {
+    if (firstInt != SCHEMA_FORMAT_VERSION && firstInt != SCHEMA_PHYSICAL_ID_FORMAT_VERSION && firstInt != SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION) {
         std::cerr << "[catalog] unsupported schema format for table " << tablename
                   << "; recreate the database with the current binary" << std::endl;
         return {};
@@ -15200,7 +15236,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     if (!in) return {};
     if (in.peek() == std::char_traits<char>::eof()) {
         if (!in.eof()) return {};
-        if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION) return {};
+        if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION || firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION) return {};
         in.clear();
         return tbl;
     }
@@ -15246,7 +15282,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     // them as SERIAL-like auto-increment columns (identityKind == 0).
     if (in.peek() == std::char_traits<char>::eof()) {
         if (!in.eof()) return {};
-        if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION) return {};
+        if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION || firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION) return {};
         in.clear();
         return tbl;
     }
@@ -15267,7 +15303,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     }
     if (in.peek() == std::char_traits<char>::eof()) {
         if (!in.eof()) return {};
-        if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION) return {};
+        if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION || firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION) return {};
         in.clear();
         return tbl;
     }
@@ -15295,7 +15331,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     }
     if (in.peek() == std::char_traits<char>::eof()) {
         if (!in.eof()) return {};
-        if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION) return {};
+        if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION || firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION) return {};
         // A zero-entry DFT1 block is emitted only with the new RANGE-bound
         // extension; an EOF here therefore means a truncated new schema.
         if (defaultCount == 0 && !tbl.rangePartitions.empty()) return {};
@@ -15333,12 +15369,35 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
         }
         persistedLowerBounds.push_back(std::move(lower));
     }
-    if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION) {
+    if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION || firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION) {
         uint32_t physicalIdMagic = 0;
         in.read(reinterpret_cast<char*>(&physicalIdMagic), sizeof(physicalIdMagic));
         in.read(reinterpret_cast<char*>(&tbl.physicalRelationId), sizeof(tbl.physicalRelationId));
-        if (!in || physicalIdMagic != SCHEMA_PHYSICAL_ID_MAGIC || tbl.physicalRelationId == 0)
+        if (!in || physicalIdMagic != SCHEMA_PHYSICAL_ID_MAGIC ||
+            (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION && tbl.physicalRelationId == 0))
             return {};
+    }
+    if (firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION) {
+        uint32_t magic = 0; uint16_t count = 0;
+        in.read(reinterpret_cast<char*>(&magic),sizeof(magic));
+        in.read(reinterpret_cast<char*>(&count),sizeof(count));
+        if (!in || magic != SCHEMA_DEFAULT_ORIGIN_MAGIC || count != tbl.len) return {};
+        for (size_t i = 0; i < tbl.len; ++i) {
+            uint8_t origin = 0; uint16_t length = 0;
+            in.read(reinterpret_cast<char*>(&origin),sizeof(origin));
+            in.read(reinterpret_cast<char*>(&length),sizeof(length));
+            if (!in || origin > static_cast<uint8_t>(Column::DefaultOrigin::Domain) || length > 256) return {};
+            tbl.cols[i].defaultOrigin = static_cast<Column::DefaultOrigin>(origin);
+            tbl.cols[i].domainName.resize(length);
+            in.read(tbl.cols[i].domainName.data(),length);
+            if (!in || tbl.cols[i].domainName.find('\0') != std::string::npos ||
+                (tbl.cols[i].defaultOrigin == Column::DefaultOrigin::Column && tbl.cols[i].defaultValue.empty()) ||
+                (tbl.cols[i].defaultOrigin == Column::DefaultOrigin::Domain && tbl.cols[i].domainName.empty())) return {};
+            if (!tbl.cols[i].domainName.empty()) {
+                CatalogManager::QualifiedName domain;
+                if (!CatalogManager::parseQualifiedName(tbl.cols[i].domainName,domain,true) || domain.name.empty()) return {};
+            }
+        }
     }
     if (in.peek() != std::char_traits<char>::eof() || !in.eof()) return {};
     tbl.rangePartitionLowerBounds = std::move(persistedLowerBounds);
@@ -19280,6 +19339,7 @@ DBStatus StorageEngine::alterTableSetDefault(const std::string& dbname,
     }
 
     tbl.cols[colIdx].defaultValue = defaultValue;
+    tbl.cols[colIdx].defaultOrigin = Column::DefaultOrigin::Column;
     if (!writeSchemaFile(dbname, tablename, tbl)) {
         lockManager_.unlock(tablename);
         return DBStatus::IO_ERROR;
@@ -19305,6 +19365,8 @@ DBStatus StorageEngine::alterTableDropDefault(const std::string& dbname,
     }
 
     tbl.cols[colIdx].defaultValue.clear();
+    tbl.cols[colIdx].defaultOrigin = tbl.cols[colIdx].domainName.empty()
+        ? Column::DefaultOrigin::LegacyFrozen : Column::DefaultOrigin::Domain;
     if (!writeSchemaFile(dbname, tablename, tbl)) {
         lockManager_.unlock(tablename);
         return DBStatus::IO_ERROR;
@@ -22418,6 +22480,11 @@ TableSchema StorageEngine::getTableSchema(const std::string& dbname,
         for (size_t i = 0; i < schema.len; ++i) {
             const auto domain = domains.find(schema.cols[i].dataName);
             if (domain != domains.end()) schema.cols[i].domainName = domain->second;
+            if (schema.cols[i].defaultOrigin == Column::DefaultOrigin::Domain && physicalSchemaReader != this) {
+                const auto ancestry = resolveDomainAncestry(dbname,schema.cols[i].domainName);
+                if (ancestry.name.empty()) throw DbError("XX001","column domain default metadata is missing");
+                schema.cols[i].defaultValue = ancestry.hasDefault ? ancestry.defaultValue : "";
+            }
         }
         return schema;
     };
@@ -44432,6 +44499,11 @@ bool StorageEngine::physicalRestore(const std::string& dbname,
 bool StorageEngine::physicalRestoreLocked(
     const std::string& dbname, const std::string& backupPath,
     const MaintenanceProgress& progress) {
+    struct PhysicalSchemaReadScope {
+        const StorageEngine* prior = physicalSchemaReader;
+        explicit PhysicalSchemaReadScope(const StorageEngine* owner) { physicalSchemaReader = owner; }
+        ~PhysicalSchemaReadScope() { physicalSchemaReader = prior; }
+    } physicalSchemas(this);
     auto src = std::filesystem::path(backupPath);
     auto dst = dbPath(dbname);
     std::filesystem::path stagedDatabase;

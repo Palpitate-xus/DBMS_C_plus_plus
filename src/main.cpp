@@ -16334,6 +16334,7 @@ static bool handleAlterDomain(const string& sql, Session& s) {
     }
 
     string message;
+    bool changesDefault = false;
     if (startsWithKeyword(action, "rename to")) {
         string newName = firstCompatNameToken(trim(action.substr(9)));
         if (newName.empty()) {
@@ -16351,11 +16352,13 @@ static bool handleAlterDomain(const string& sql, Session& s) {
         info.defaultValue = defaultValue;
         info.hasDefault = true;
         info.defaultResolved = true;
+        changesDefault = true;
         message = "Domain " + domainName + " default set";
     } else if (startsWithKeyword(action, "drop default")) {
         info.defaultValue.clear();
         info.hasDefault = false;
         info.defaultResolved = true;
+        changesDefault = true;
         message = "Domain " + domainName + " default dropped";
     } else if (startsWithKeyword(action, "add constraint") || startsWithKeyword(action, "add check")) {
         size_t checkPos = findTopLevelSqlKeyword(action, "check");
@@ -16413,6 +16416,15 @@ static bool handleAlterDomain(const string& sql, Session& s) {
         return handleAlterCompatObject(sql, s);
     }
 
+    // The domain file is outside row undo. Default changes participate in
+    // this same real transaction/savepoint snapshot, not a later table rewrite.
+    std::unique_ptr<dbms::DdlTransaction> defaultTransaction;
+    if (changesDefault) {
+        defaultTransaction = std::make_unique<dbms::DdlTransaction>(s);
+        defaultTransaction->enableSnapshotRollback();
+        if (!defaultTransaction->begin()) throw dbms::DbError("58030","could not start domain default transaction");
+        defaultTransaction->markSnapshotDirty();
+    }
     auto res = g_engine.alterDomain(s.currentDB, domainName, info);
     if (res == DBStatus::TABLE_ALREADY_EXISTS) {
         cout << "Domain " << info.name << " already exists" << endl;
@@ -16425,6 +16437,10 @@ static bool handleAlterDomain(const string& sql, Session& s) {
     if (res != DBStatus::OK) {
         cout << "Alter domain failed" << endl;
         return true;
+    }
+    if (defaultTransaction) {
+        defaultTransaction->recordUpdate(dbms::DdlObjectKind::Domain,info.name);
+        if (!defaultTransaction->commit()) return true;
     }
     cout << message << endl;
     return false;
