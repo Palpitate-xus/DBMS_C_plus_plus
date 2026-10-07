@@ -326,7 +326,7 @@ void TypeRegistry::registerNumericTypes() {
 
 void TypeRegistry::registerStringTypes() {
     registerType({"character", -1, 'c', 'p', TypeCategory::String, true, 1, 1005, false},
-                 {"char", "nchar"});
+                 {"char", "nchar", "bpchar"});
     registerType({"character varying", -1, 'c', 'p', TypeCategory::String, true, -1, 65535, false},
                  {"varchar", "nvarchar"});
     registerType({"text", -1, 'c', 'x', TypeCategory::String, false, -1, 65535, false});
