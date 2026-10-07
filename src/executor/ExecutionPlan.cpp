@@ -591,12 +591,18 @@ class PreparedSetReturningOp final : public Operator {
 public:
     PreparedSetReturningOp(StorageEngine* engine,const std::string& database,
         std::shared_ptr<PreparedQuery> query,SelectStmt* select,const RowContext& outer,
-        PreparedChildExecutor reader,PreparedChildCursorFactory cursor)
+        PreparedChildExecutor reader,PreparedChildCursorFactory cursor,bool planRootConstants)
         :query_(std::move(query)),select_(select),
          call_(static_cast<const FunctionCallExpr*>(select->selectList.front().expr.get())),
          execution_(query_,engine,database),outer_(outer) {
         execution_.setQueryExecutor(std::move(reader));
         execution_.setChildCursorFactory(std::move(cursor));
+        if(planRootConstants) {
+            execution_.planStatementConstants(select_);
+            // ProjectSet evaluates the actual array argument, not its scalar
+            // routine envelope. Retain its planned clone on this same carrier.
+            execution_.planExpressionConstants(call_->args.front().get());
+        }
         execution_.prepareExpression(call_->args.front().get());
         execution_.prepareExpression(select_->whereClause.get());
         execution_.prepareChildCursors();
@@ -859,7 +865,7 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
 
 OpPtr QueryPlanner::buildPreparedSetReturningPlan(StorageEngine* engine,const std::string& database,
     std::shared_ptr<PreparedQuery> query,SelectStmt* select,const RowContext& outer,
-    PreparedChildExecutor reader,PreparedChildCursorFactory cursor) {
+    PreparedChildExecutor reader,PreparedChildCursorFactory cursor,bool planRootConstants) {
     if(!select || select->selectList.size()!=1)return {};
     const auto* call=dynamic_cast<const FunctionCallExpr*>(select->selectList.front().expr.get());
     if(!call || !call->setReturning)return {};
@@ -871,28 +877,9 @@ OpPtr QueryPlanner::buildPreparedSetReturningPlan(StorageEngine* engine,const st
     if(!query || call->setReturning->identity!="builtin:pg_catalog.unnest(anyarray)" ||
         call->setReturning->kind!=QuerySetReturningBinding::Kind::Unnest || call->args.size()!=1)
         throw DbError("XX000","set-returning SELECT has no prepared query-host implementation");
-    // Captured CTE frames and query children need an explicit restart owner.
-    // Never pretend that updating outer cells resets those logical producers.
-    std::function<bool(const Expr*)> child=[](const Expr* value){return value && value->preparedSubquery;};
-    std::function<bool(const Expr*)> hiddenChild=[&](const Expr* value) {
-        if(!value)return false;if(child(value))return true;
-        if(const auto* node=dynamic_cast<const FunctionCallExpr*>(value)) {
-            for(const auto& arg:node->args)if(hiddenChild(arg.get()))return true;
-            for(const auto& arg:node->namedArgs)if(hiddenChild(arg.value.get()))return true;
-        } else if(const auto* node=dynamic_cast<const ArrayExpr*>(value)) {
-            for(const auto& arg:node->elements)if(hiddenChild(arg.get()))return true;
-        } else if(const auto* node=dynamic_cast<const UnaryOpExpr*>(value))return hiddenChild(node->operand.get());
-        else if(const auto* node=dynamic_cast<const CastExpr*>(value))return hiddenChild(node->operand.get());
-        else if(const auto* node=dynamic_cast<const BinaryOpExpr*>(value))return hiddenChild(node->left.get())||hiddenChild(node->right.get());
-        else if(const auto* node=dynamic_cast<const QuantifiedComparisonExpr*>(value))return hiddenChild(node->left.get())||hiddenChild(node->right.get());
-        else if(const auto* node=dynamic_cast<const CaseExpr*>(value)) {
-            if(hiddenChild(node->switchExpr.get())||hiddenChild(node->elseExpr.get()))return true;
-            for(const auto& arm:node->whenClauses)if(hiddenChild(arm.first.get())||hiddenChild(arm.second.get()))return true;
-        }
-        return false;
-    };
-    if(hiddenChild(call->args.front().get())||hiddenChild(select->whereClause.get()))
-        throw DbError("0A000","set-returning child queries require additional restart lowering");
+    // PreparedQueryExecution validates each original child descriptor and
+    // requires a real restartable provider for actual correlations. An
+    // uncorrelated SQL child is not an unsupported source merely by existing.
     if(select->whereClause) {
         const auto type=ExprHelper::inferParsedResultType(select->whereClause.get(),{},database,engine);
         if(type!="boolean" && type!="unknown")
@@ -905,7 +892,7 @@ OpPtr QueryPlanner::buildPreparedSetReturningPlan(StorageEngine* engine,const st
         }
     }
     OpPtr plan=std::make_unique<PreparedSetReturningOp>(engine,database,std::move(query),select,outer,
-        std::move(reader),std::move(cursor));
+        std::move(reader),std::move(cursor),planRootConstants);
     if(select->offset)plan=std::make_unique<OffsetOp>(std::move(plan),*select->offset);
     if(select->limit)plan=std::make_unique<LimitOp>(std::move(plan),*select->limit);
     return plan;

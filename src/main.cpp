@@ -20002,7 +20002,7 @@ class PreparedWithDmlRuntime {
             !frames.back()->producers.count(select->ctes.front().query.get())))
             frames.push_back(definitions(select->ctes,outer));
         if(auto set=dbms::QueryPlanner::buildPreparedSetReturningPlan(&g_engine,session_.currentDB,
-            query_,select,outer,reader(frames),cursorFactory(frames)))return set;
+            query_,select,outer,reader(frames),cursorFactory(frames),planRootConstants))return set;
         if(select->command==dbms::SqlCommand::Values) {
             if(!select->orderBy.empty() || select->whereClause || select->setOp!=dbms::SetOp::None)
                 throw dbms::DbError("0A000","WITH VALUES requires additional clause lowering");

@@ -1335,7 +1335,8 @@ public:
     // rows. Returns null when the SELECT has no direct set-returning target.
     static OpPtr buildPreparedSetReturningPlan(StorageEngine*,const std::string&,
         std::shared_ptr<PreparedQuery>,SelectStmt*,const RowContext& = {},
-        PreparedChildExecutor = {},PreparedChildCursorFactory = {});
+        PreparedChildExecutor = {},PreparedChildCursorFactory = {},
+        bool planRootConstants = false);
     // Build operator tree for SELECT * FROM t WHERE ... ORDER BY ... LIMIT ...
     static OpPtr buildSelectPlan(StorageEngine* engine, const PlanContext& ctx);
 
