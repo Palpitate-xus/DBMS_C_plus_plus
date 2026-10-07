@@ -158,6 +158,18 @@ BPTree::BPTree(const std::filesystem::path& indexFile)
 
 BPTree::~BPTree() {
     close();
+    if (generationFd_ >= 0) ::close(generationFd_);
+}
+
+bool BPTree::hasStaleFileGeneration() const {
+    std::shared_lock<std::shared_mutex> treeLock(treeMutex_);
+    if (bp_ && bp_->isOpen() && !bp_->refersToCurrentFiles()) return true;
+    if (generationFd_ < 0) return false;
+    struct stat opened{}, current{};
+    return ::fstat(generationFd_, &opened) != 0 ||
+           ::stat(filePath_.c_str(), &current) != 0 ||
+           !S_ISREG(current.st_mode) || opened.st_dev != current.st_dev ||
+           opened.st_ino != current.st_ino;
 }
 
 bool BPTree::open() {
@@ -205,6 +217,18 @@ bool BPTree::openInternal(bool createIfMissing) {
             return false;
         }
     }
+    const int generation = ::open(filePath_.c_str(), O_RDONLY | O_CLOEXEC);
+    struct stat opened{}, current{};
+    if (generation < 0 || ::fstat(generation, &opened) != 0 ||
+        ::stat(filePath_.c_str(), &current) != 0 ||
+        !S_ISREG(current.st_mode) || opened.st_dev != current.st_dev ||
+        opened.st_ino != current.st_ino || !bp_->refersToCurrentFiles()) {
+        if (generation >= 0) ::close(generation);
+        bp_->close();
+        return false;
+    }
+    if (generationFd_ >= 0) ::close(generationFd_);
+    generationFd_ = generation;
     return true;
 }
 

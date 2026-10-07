@@ -1824,16 +1824,16 @@ private:
     std::filesystem::path brinIndexPath(const std::string& dbname,
                                          const std::string& tablename,
                                          const std::string& colname) const;
-    mutable std::map<std::string, std::unique_ptr<BPTree>> pkIndexCache_;
+    mutable std::map<std::string, std::shared_ptr<BPTree>> pkIndexCache_;
     BPTree* loadBtreeIndex(
-        std::map<std::string, std::unique_ptr<BPTree>>& cache,
+        std::map<std::string, std::shared_ptr<BPTree>>& cache,
         const std::string& key, const std::filesystem::path& path,
         bool createIfMissing) const;
     void closeAllIndexes();
 
     // TOAST relation + index caches
     mutable std::map<std::string, std::shared_ptr<PageAllocator>> toastPageAllocators_;
-    mutable std::map<std::string, std::unique_ptr<BPTree>> toastIndexes_;
+    mutable std::map<std::string, std::shared_ptr<BPTree>> toastIndexes_;
     PageAllocator* getToastPageAllocator(const std::string& dbname, const std::string& tablename) const;
     BPTree* getToastIndex(const std::string& dbname, const std::string& tablename) const;
     void closeAllToast();
@@ -1844,7 +1844,7 @@ private:
                                               const std::string& colname) const;
     std::filesystem::path secondaryIndexMetaPath(const std::string& dbname,
                                                   const std::string& tablename) const;
-    mutable std::map<std::string, std::unique_ptr<BPTree>> secondaryIndexCache_;
+    mutable std::map<std::string, std::shared_ptr<BPTree>> secondaryIndexCache_;
 
     // Parsed .secidx lines, cached per table so per-row DML does not re-read
     // and re-parse the metadata file on every indexed-column lookup.

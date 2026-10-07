@@ -85,11 +85,7 @@ public:
         return bp_ != nullptr && bp_->isOpen();
     }
 
-    bool hasStaleFileGeneration() const {
-        std::shared_lock<std::shared_mutex> lock(treeMutex_);
-        return bp_ != nullptr && bp_->isOpen() &&
-               !bp_->refersToCurrentFiles();
-    }
+    bool hasStaleFileGeneration() const;
 
     const std::filesystem::path& filePath() const { return filePath_; }
     bool hasDirtyPages() const {
@@ -120,6 +116,10 @@ private:
     bool openInternal(bool createIfMissing);
     std::filesystem::path filePath_;
     std::unique_ptr<BufferPool> bp_;
+    // Retain the successfully opened file identity even after close(). A
+    // deliberately closed current owner remains an I/O failure, whereas a
+    // DROP/CREATE or REINDEX replacement must not inherit that closed owner.
+    int generationFd_ = -1;
 
     // Writers serialize whole nodes directly into buffer-pool frames, so
     // readers must not deserialize those frames concurrently. Shared tree

@@ -7983,25 +7983,36 @@ std::string StorageEngine::extractPKValue(const std::string& rowBuffer,
 }
 
 BPTree* StorageEngine::loadBtreeIndex(
-        std::map<std::string, std::unique_ptr<BPTree>>& cache,
+        std::map<std::string, std::shared_ptr<BPTree>>& cache,
         const std::string& key, const std::filesystem::path& path,
         bool createIfMissing) const {
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     auto it = cache.find(key);
     if (it != cache.end()) {
         if (it->second && !it->second->hasStaleFileGeneration()) {
+            // Explicit close is a failure state, not permission to hide a
+            // failed mutation by reopening it. Existing rollback repair
+            // reopens this same owner and retains its raw caller identity.
             return it->second.get();
         }
         cache.erase(it);
     }
 
-    auto tree = std::make_unique<BPTree>(path);
-    if (createIfMissing ? tree->open() : tree->openExisting()) {
-        BPTree* ptr = tree.get();
-        cache[key] = std::move(tree);
-        return ptr;
+    const auto slot = physicalStorageSlot<BPTree>(canonicalStoragePath(path));
+    std::lock_guard<std::mutex> ownerLock(slot->mutex);
+    auto tree = slot->owner.lock();
+    if (tree && tree->hasStaleFileGeneration()) tree.reset();
+    if (!tree) {
+        // Keep the established filePath spelling used by index WAL images
+        // and unlogged-relation metadata; only the ownership key canonicalizes.
+        tree = std::make_shared<BPTree>(path);
+        if (!(createIfMissing ? tree->open() : tree->openExisting()))
+            return nullptr;
+        slot->owner = tree;
     }
-    return nullptr;
+    BPTree* ptr = tree.get();
+    cache[key] = std::move(tree);
+    return ptr;
 }
 
 BPTree* StorageEngine::getPKIndex(const std::string& dbname, const std::string& tablename) const {
@@ -19689,7 +19700,7 @@ DBStatus StorageEngine::alterTableAddPrimaryKey(const std::string& dbname,
     {
         std::string pkKey = dbname + "/" + tablename;
         auto cit = pkIndexCache_.find(pkKey);
-        if (cit != pkIndexCache_.end()) { cit->second->close(); pkIndexCache_.erase(cit); }
+        if (cit != pkIndexCache_.end()) pkIndexCache_.erase(cit);
         std::filesystem::remove(indexPath(dbname, tablename));
         BPTree* pkIdx = loadBtreeIndex(pkIndexCache_, pkKey,
                                       indexPath(dbname, tablename), true);
@@ -19950,7 +19961,7 @@ DBStatus StorageEngine::alterTableDropConstraint(const std::string& dbname,
         for (size_t i = 0; i < tbl.len; ++i) tbl.cols[i].isPrimaryKey = false;
         std::string pkKey = dbname + "/" + tablename;
         auto cit = pkIndexCache_.find(pkKey);
-        if (cit != pkIndexCache_.end()) { cit->second->close(); pkIndexCache_.erase(cit); }
+        if (cit != pkIndexCache_.end()) pkIndexCache_.erase(cit);
         std::filesystem::remove(indexPath(dbname, tablename));
         found = true;
         droppedPrimaryKey = true;
@@ -41326,7 +41337,6 @@ bool StorageEngine::rebuildIndexesAfterRecovery(
             const std::string toastKey = dbname + ":" + tableName;
             if (auto cached = toastIndexes_.find(toastKey);
                 cached != toastIndexes_.end()) {
-                cached->second->close();
                 toastIndexes_.erase(cached);
             }
             std::filesystem::remove(toastIndexPath(dbname, tableName),
