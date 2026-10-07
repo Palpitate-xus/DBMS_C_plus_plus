@@ -2,6 +2,8 @@
 """Source-driven UPDATE/DELETE aliases, cardinality, and atomic failures."""
 
 import importlib.util
+import socket
+import sys
 from pathlib import Path
 
 
@@ -12,12 +14,25 @@ def main():
     runner = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(runner)
     client = runner.load_protocol_client()
-    server = runner.start_ours(client)
-    sock = server["sock"]
+    reference = sys.argv[1:] == ["--reference18"]
+    assert not sys.argv[1:] or reference
+    server = None
+    if reference:
+        host, port, user, database, password = runner._reference_connection_settings()
+        sock = socket.create_connection((host, port), timeout=runner.wire_timeout())
+        client.startup_reference(sock, user, database, password=password)
+        runner.verify_reference_version(client, sock)
+    else:
+        server = runner.start_ours(client)
+        sock = server["sock"]
 
     def query(sql):
-        return runner.decode_wire_result(
-            client.simple_query(sock, sql), include_types=True)
+        messages = client.simple_query(sock, sql)
+        statuses = [body for kind, body in messages if kind == b"Z"]
+        assert statuses == [b"I"], (sql, statuses)
+        decoded = runner.decode_wire_result(messages, include_types=True)
+        print("SOURCE_DML", sql, decoded, "READY", statuses, flush=True)
+        return decoded
 
     try:
         setup = [
@@ -62,6 +77,15 @@ def main():
             "UPDATE source_dml_target AS dst SET val = src.val "
             "FROM source_dml_source AS src WHERE dst.id = src.id "
             "RETURNING id, val;")
+        assert state == "42702" and command_tag is None, (state, message, command_tag)
+        rows, state, message, headers, command_tag, type_oids = query(
+            "SELECT id, val FROM source_dml_target ORDER BY id;")
+        assert state is None and rows == [["1", "10"], ["2", "20"], ["3", "30"]], (rows, state)
+        assert headers == ["id", "val"] and type_oids == [23, 23], (headers, type_oids)
+        rows, state, message, headers, command_tag, type_oids = query(
+            "UPDATE source_dml_target AS dst SET val = src.val "
+            "FROM source_dml_source AS src WHERE dst.id = src.id "
+            "RETURNING dst.id, dst.val;")
         assert state is None, (state, message)
         assert command_tag == "UPDATE 2", command_tag
         assert headers == ["id", "val"] and type_oids == [23, 23], (
@@ -75,6 +99,15 @@ def main():
             "DELETE FROM source_dml_target AS dst "
             "USING source_dml_source AS src "
             "WHERE dst.id = src.id AND dst.id = 2 RETURNING id, val;")
+        assert state == "42702" and command_tag is None, (state, message, command_tag)
+        unchanged, state, message, headers, _, type_oids = query(
+            "SELECT id, val FROM source_dml_target ORDER BY id;")
+        assert state is None and unchanged == [["1", values["1"]], ["2", "220"], ["3", "30"]], (unchanged, state)
+        assert headers == ["id", "val"] and type_oids == [23, 23], (headers, type_oids)
+        rows, state, message, _, command_tag, _ = query(
+            "DELETE FROM source_dml_target AS dst "
+            "USING source_dml_source AS src "
+            "WHERE dst.id = src.id AND dst.id = 2 RETURNING dst.id, dst.val;")
         assert state is None, (state, message)
         assert rows == [["2", "220"]], rows
         assert command_tag == "DELETE 1", command_tag
@@ -84,7 +117,10 @@ def main():
             "UPDATE source_dml_target AS dst SET val = src.val "
             "FROM source_dml_source AS src LEFT JOIN source_dml_source AS extra "
             "ON src.id = extra.id WHERE dst.id = src.id;")
-        assert state == "0A000", state
+        # The old bounded UPDATE source executor still rejects outer joins.
+        # PostgreSQL executes this legal source; this is an explicit OPEN
+        # capability boundary, not a claim that 0A000 matches PostgreSQL.
+        assert state == (None if reference else "0A000"), state
         rows, state, message, _, _, _ = query(
             "SELECT id, val FROM source_dml_target ORDER BY id;")
         assert state is None, (state, message)
@@ -95,10 +131,12 @@ def main():
         _, state, _, _, _, _ = query(
             "UPDATE source_dml_target SET val = 999 "
             "WHERE CURRENT OF missing_cursor;")
-        assert state == "0A000", state
+        # Missing named cursors have 34000 in PostgreSQL. The current project
+        # cursor-positioned mutation boundary is still explicitly unsupported.
+        assert state == ("34000" if reference else "0A000"), state
         _, state, _, _, _, _ = query(
             "DELETE FROM source_dml_target WHERE CURRENT OF missing_cursor;")
-        assert state == "0A000", state
+        assert state == ("34000" if reference else "0A000"), state
         rows, state, message, _, command_tag, _ = query(
             "SELECT id, val FROM source_dml_target ORDER BY id;")
         assert state is None, (state, message)
@@ -131,7 +169,14 @@ def main():
         assert command_tag == "UPDATE 1", command_tag
         print("[UPDATE/DELETE FROM PROTOCOL E2E] passed")
     finally:
-        runner.stop_ours(server)
+        if server:
+            runner.stop_ours(server)
+        else:
+            try:
+                for table in ("source_dml_target", "source_dml_source", "source_atomic_target", "source_atomic_source"):
+                    client.simple_query(sock, "DROP TABLE IF EXISTS " + table + ";")
+            finally:
+                sock.close()
 
 
 if __name__ == "__main__":
