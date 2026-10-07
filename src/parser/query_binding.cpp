@@ -490,6 +490,16 @@ public:
                 else if(!binary->comparison && integer(right) && left=="unknown" && unknownLiteral(binary->left.get()))
                     integerInput(binary->left,common_type_detail::canonical(right));
             }
+            const auto leftBase=ExprHelper::canonicalResultTypeName(left);
+            const auto rightBase=ExprHelper::canonicalResultTypeName(right);
+            const bool bitOperand=leftBase=="bit" || leftBase=="bit varying" ||
+                                  rightBase=="bit" || rightBase=="bit varying";
+            static const std::set<std::string> bitComparisons={"=","<>","!=","<",">","<=",">="};
+            if(bitOperand && bitComparisons.count(binary->op)) {
+                const auto comparison=ExprEvaluator::resolveComparison(binary->op,left,right);
+                coerceCaseInput(binary->left,left,comparison.leftType);
+                coerceCaseInput(binary->right,right,comparison.rightType);
+            }
             return predicates.count(binary->op) ? "boolean" : left;
         }
         case ExprType::QuantifiedComparison: {

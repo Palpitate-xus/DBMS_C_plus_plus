@@ -1203,7 +1203,18 @@ static StorageEngine::Condition bindStoredPatternTypes(
 
 static void validateStoredPatternConditions(
     const TableSchema& table, const std::vector<StorageEngine::Condition>& conditions) {
-    for (const auto& condition : conditions) (void)bindStoredPatternTypes(table,condition);
+    for (const auto& condition : conditions) {
+        (void)bindStoredPatternTypes(table,condition);
+        // The SQL literal adapter retains BIT operand type independently
+        // of its decoded bytes. The existing right-operand type slot also
+        // carries this metadata for non-pattern scalar/list predicates.
+        if (condition.patternType != "bit" || !storedPatternOperator(condition.op).empty()) continue;
+        for (size_t i=0;i<table.len;++i) if (table.cols[i].dataName==condition.colName) {
+            const auto& column=table.cols[i];
+            (void)ExprEvaluator::resolveComparison("=",column.dataType+(column.isArray?"[]":""),"bit");
+            break;
+        }
+    }
 }
 
 static StorageEngine::PredicateTruth storedPatternTruth(
@@ -22888,7 +22899,23 @@ StorageEngine::PredicateTruth StorageEngine::compareValues(
 // ========================================================================
 // Helper: evaluate a single condition against a row buffer (page-based)
 // ========================================================================
-static std::string decodeSqlLiteral(std::string value) {
+static std::optional<std::string> decodeBitPredicateLiteral(const std::string& raw) {
+    const auto text = trim(raw);
+    if (text.size() < 3 || text[1] != '\'' || text.back() != '\'' ||
+        (text.front() != 'B' && text.front() != 'b' &&
+         text.front() != 'X' && text.front() != 'x')) return {};
+    SQLParser parser;
+    auto parsed = parser.parse("SELECT " + text);
+    const auto* select = parsed.success ? dynamic_cast<const SelectStmt*>(parsed.stmt.get()) : nullptr;
+    const auto* literal = select && select->selectList.size() == 1
+        ? dynamic_cast<const LiteralExpr*>(select->selectList.front().expr.get()) : nullptr;
+    if (!literal) throw DbError("42601", "invalid bit string predicate literal");
+    return ExprEvaluator{}.eval(literal,{}).value;
+}
+
+static std::string decodeSqlLiteral(std::string value, bool decodeBitLiteral = false) {
+    if (decodeBitLiteral)
+        if (const auto bits = decodeBitPredicateLiteral(value)) return *bits;
     if (value.size() < 2 || value.front() != '\'' || value.back() != '\'')
         return value;
     std::string decoded;
@@ -23162,6 +23189,8 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
     }
     if (cond.op == "isnull") return physNull;
     if (cond.op == "isnotnull") return !physNull;
+    if (cond.patternType=="bit")
+        (void)ExprEvaluator::resolveComparison("=",col.dataType+(col.isArray?"[]":""),"bit");
     if (physNull) {
         // NULL never satisfies scalar comparisons (three-valued logic).
         return false;
@@ -23208,6 +23237,23 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
         }
     }
     if (cond.op == "in" || cond.op == "notin") {
+        if (cond.patternType=="bit") {
+            ExprEvaluator evaluator;
+            bool hit=false,sawNull=false;
+            for (const auto& token:SQLParser::tokenize(cond.value)) {
+                SQLParser parser;
+                auto parsed=parser.parse("SELECT "+token);
+                const auto* select=parsed.success?dynamic_cast<const SelectStmt*>(parsed.stmt.get()):nullptr;
+                if(!select || select->selectList.size()!=1)throw DbError("42601","invalid BIT list operand");
+                const auto* operand=select->selectList.front().expr.get();
+                auto candidate=evaluator.eval(operand,{});
+                candidate.typeName=ExprHelper::inferParsedInputType(operand,{});
+                const auto binding=ExprEvaluator::resolveComparison("=",col.dataType,candidate.typeName);
+                if(candidate.isNull){sawNull=true;continue;}
+                if(evaluator.comparePrepared(binding,ExprValue(col.dataType,val),candidate).asBool()){hit=true;break;}
+            }
+            return cond.op=="in"?hit:!hit&&!sawNull;
+        }
         // cond.value = space-joined literals (built by modifyLogic)
         if (val.empty()) return false;   // empty never matches IN literals
         bool hit = false;
@@ -23227,11 +23273,33 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
             eq.op = "=";
             eq.colName = cond.colName;
             eq.value = tok;
+            eq.decodedLiteralRhs = cond.decodedLiteralRhs;
             if (evalConditionOnRow(eq, rowBuffer, tbl)) { hit = true; break; }
         }
         if (cond.op == "in") return hit;
         if (sawNull && !hit) return false;  // UNKNOWN
         return !hit;
+    }
+
+    if ((cond.op=="between" || cond.op=="notbetween") && cond.patternType=="bit") {
+        const auto tokens=SQLParser::tokenize(cond.value);
+        if(tokens.size()!=2)throw DbError("42601","BIT BETWEEN requires two operands");
+        ExprEvaluator evaluator;
+        bool inRange=true,sawNull=false;
+        for(size_t i=0;i<2;++i) {
+            SQLParser parser;auto parsed=parser.parse("SELECT "+tokens[i]);
+            const auto* select=parsed.success?dynamic_cast<const SelectStmt*>(parsed.stmt.get()):nullptr;
+            if(!select || select->selectList.size()!=1)throw DbError("42601","invalid BIT BETWEEN operand");
+            const auto* operand=select->selectList.front().expr.get();
+            auto candidate=evaluator.eval(operand,{});
+            candidate.typeName=ExprHelper::inferParsedInputType(operand,{});
+            const auto binding=ExprEvaluator::resolveComparison(i==0?">=":"<=",col.dataType,candidate.typeName);
+            const auto comparison=evaluator.comparePrepared(binding,ExprValue(col.dataType,val),candidate);
+            if(comparison.isNull)sawNull=true;
+            else inRange=inRange&&comparison.asBool();
+        }
+        if(inRange&&sawNull)return false;
+        return cond.op=="between"?inRange:!inRange;
     }
 
     // Three-valued logic: NULL yields UNKNOWN (FALSE in WHERE) and is
@@ -26065,18 +26133,31 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
     };
     // Strip one level of single quotes from every space-separated token:
     // "betweenid 'b' 'c'" -> value "b c" (comparisons must not see quotes).
-    auto unquoteTokens = [&](const std::string& v) {
+    auto unquoteTokens = [&](const std::string& v, bool decodeBitLiteral) {
         std::string out;
         std::istringstream iss(v);
         std::string tok;
         bool first = true;
         while (iss >> tok) {
-            tok = decodeSqlLiteral(std::move(tok));
+            tok = decodeSqlLiteral(std::move(tok),decodeBitLiteral);
             if (!first) out += ' ';
             out += tok;
             first = false;
         }
         return out;
+    };
+    const auto listOperands = [&](const std::string& raw, bool apiCondition, Condition& condition) {
+        condition.decodedLiteralRhs=apiCondition;
+        if(!apiCondition)for(const auto& token:SQLParser::tokenize(raw))
+            if(decodeBitPredicateLiteral(token)) {
+                // Retain literal syntax/type, empty elements and SQL NULL.
+                // A whitespace-joined decoded string cannot represent them.
+                condition.patternType="bit";
+                condition.decodedLiteralRhs=true;
+                condition.value=raw;
+                return;
+            }
+        condition.value=unquoteTokens(raw,false);
     };
     for (const auto& input : cstr) {
         const bool apiCondition = input.rfind("apicond ", 0) == 0;
@@ -26177,7 +26258,7 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
             size_t sp = s.find(' ', off);
             if (sp != std::string::npos) {
                 c.colName = s.substr(off, sp - off);
-                c.value = unquoteTokens(s.substr(sp + 1));
+                c.value = unquoteTokens(s.substr(sp + 1),!apiCondition);
             }
             conds.push_back(c);
             continue;
@@ -26189,7 +26270,7 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
             size_t sp = s.find(' ', off);
             if (sp != std::string::npos) {
                 c.colName = s.substr(off, sp - off);
-                c.value = unquoteTokens(s.substr(sp + 1));
+                listOperands(s.substr(sp+1),apiCondition,c);
             }
             conds.push_back(c);
             continue;
@@ -26201,7 +26282,7 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
             size_t sp = s.find(' ', off);
             if (sp != std::string::npos) {
                 c.colName = s.substr(off, sp - off);
-                c.value = unquoteTokens(s.substr(sp + 1));
+                listOperands(s.substr(sp+1),apiCondition,c);
             }
             conds.push_back(c);
             continue;
@@ -26281,7 +26362,7 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
             if (sp != std::string::npos && sp > 5) {
                 c.op = "notin";
                 c.colName = s.substr(5, sp - 5);
-                c.value = unquoteTokens(s.substr(sp + 1));
+                listOperands(s.substr(sp+1),apiCondition,c);
                 conds.push_back(c);
                 continue;
             }
@@ -26291,7 +26372,7 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
             if (sp != std::string::npos && sp > 2) {
                 c.op = "in";
                 c.colName = s.substr(2, sp - 2);
-                c.value = unquoteTokens(s.substr(sp + 1));
+                listOperands(s.substr(sp+1),apiCondition,c);
                 conds.push_back(c);
                 continue;
             }
@@ -26447,8 +26528,19 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
             conds.push_back(std::move(c));
             continue;
         }
+        // A typed SQL bit/hex literal is not an ordinary quoted string.
+        // Decode the genuine literal AST once before scanning, retaining
+        // empty data and rejecting invalid digits even on an empty input.
+        const auto bits = apiCondition ? std::optional<std::string>{} : decodeBitPredicateLiteral(rawRight);
+        if (bits) {
+            c.value = *bits;
+            c.decodedLiteralRhs = true;
+            c.patternType = "bit";
+            conds.push_back(std::move(c));
+            continue;
+        }
         c.value = decodeSqlLiteral(s.substr(sp + 1));
-        c.decodedLiteralRhs = apiCondition;
+        c.decodedLiteralRhs = apiCondition || (!rawRight.empty() && rawRight.front()=='\'');
         conds.push_back(c);
     }
     for (auto& condition : conds) {

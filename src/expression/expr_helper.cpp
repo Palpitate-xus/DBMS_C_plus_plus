@@ -1605,6 +1605,28 @@ void ExprHelper::prepareArrayTypes(Expr* expression,
             }
             visit(binary->left.get(),{}); visit(binary->right.get(),{});
             const auto operation=toLower(binary->op);
+            const auto leftType=canonicalResultTypeName(type(binary->left.get()));
+            const auto rightType=canonicalResultTypeName(type(binary->right.get()));
+            const bool bitOperand=leftType=="bit" || leftType=="bit varying" ||
+                                  rightType=="bit" || rightType=="bit varying";
+            static const std::set<std::string> comparisons={"=","<>","!=","<",">","<=",">="};
+            if(bitOperand && comparisons.count(operation)) {
+                const auto comparison=ExprEvaluator::resolveComparison(operation,leftType,rightType);
+                const auto unknownInput=[&](ExprPtr& operand,const std::string& source,const std::string& target) {
+                    if(source!="unknown")return;
+                    auto conversion=std::make_unique<CastExpr>();
+                    conversion->typeName=target;conversion->implicit=true;
+                    conversion->sourceBegin=operand->sourceBegin;conversion->sourceEnd=operand->sourceEnd;
+                    conversion->operand=std::move(operand);
+                    if(const auto* literal=dynamic_cast<const LiteralExpr*>(conversion->operand.get());
+                       literal && literal->typeName.empty() && !literal->preparedSubquery) {
+                        ExprEvaluator pure;(void)pure.eval(conversion.get(),RowContext{});
+                    }
+                    operand=std::move(conversion);
+                };
+                unknownInput(binary->left,leftType,comparison.leftType);
+                unknownInput(binary->right,rightType,comparison.rightType);
+            }
             if (operation=="like" || operation=="not like" || operation=="ilike" ||
                 operation=="not ilike" || operation=="similar to" || operation=="not similar to")
                 patternType(operation,{binary->left.get(),binary->right.get()});

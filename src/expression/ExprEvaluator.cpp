@@ -1978,6 +1978,8 @@ static std::optional<bool> compareGeometricEquality(const std::string& op,
 ExprValue ExprEvaluator::applyComparison(const std::string& op,
                                          const ExprValue& l,
                                          const ExprValue& r) {
+    if(isBitStringTypeName(l.typeName) || isBitStringTypeName(r.typeName))
+        (void)resolveComparison(op,l.typeName,r.typeName);
     if (l.isNull || r.isNull) return ExprValue("boolean", "", true);
 
     std::string cmp = op;
