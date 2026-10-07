@@ -17024,7 +17024,11 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
     WALManager* retirementWal = nullptr;
     const uint64_t retirementXid = transactionContext().inTransaction
         ? transactionContext().currentTxnId : 0;
-    if (retiringSchema.physicalRelationId != 0 && !retiringSchema.isUnlogged) {
+    if (retiringSchema.physicalRelationId != 0) {
+        // Persistence can change during a relation's lifetime. An UNLOGGED
+        // relation may still have old LOGGED images bearing this identity,
+        // so its irreversible deletion needs the same intent/completion
+        // authority. This logs lifecycle metadata, never UNLOGGED row data.
         retirementWal = getWAL(dbname);
         const auto payload = heap_wal_identity::event(
             retiringSchema.physicalRelationId, tablename);
