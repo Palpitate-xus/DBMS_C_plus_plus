@@ -23636,6 +23636,7 @@ DBStatus StorageEngine::insertRow(const std::string& dbname,
 
         const DBStatus beginStatus = beginTransaction(dbname);
         if (beginStatus != DBStatus::OK) return beginStatus;
+        try {
         const DBStatus insertStatus = insertInternal(
             dbname, tablename, values, nullColumns, insertedRows,
             identityOverride);
@@ -23650,6 +23651,18 @@ DBStatus StorageEngine::insertRow(const std::string& dbname,
             insertedRows->resize(returnedRowStart);
         }
         return commitStatus;
+        } catch (...) {
+            // Embedded callers have no SQL wrapper to roll back the implicit
+            // transaction. Preserve the original typed exception even when
+            // cleanup itself fails, and never publish partial RETURNING rows.
+            const auto failure = std::current_exception();
+            try {
+                if (transactionContext().inTransaction)
+                    (void)rollbackTransaction();
+            } catch (...) {}
+            if (insertedRows) insertedRows->resize(returnedRowStart);
+            std::rethrow_exception(failure);
+        }
     }
 
     static std::atomic<uint64_t> statementSavepointSequence{0};
@@ -23663,6 +23676,7 @@ DBStatus StorageEngine::insertRow(const std::string& dbname,
     const bool hasStatementSavepoint =
         createStatementSavepoint(statementSavepoint) == DBStatus::OK;
 
+    try {
     const DBStatus insertStatus =
         insertInternal(dbname, tablename, values, nullColumns, insertedRows,
                        identityOverride);
@@ -23688,6 +23702,30 @@ DBStatus StorageEngine::insertRow(const std::string& dbname,
     const DBStatus rollbackStatus = rollbackTransaction();
     return rollbackStatus == DBStatus::OK
         ? releaseStatus : rollbackStatus;
+    } catch (...) {
+        const auto failure = std::current_exception();
+        try {
+            if (transactionContext().inTransaction) {
+                DBStatus status = DBStatus::INVALID_VALUE;
+                if (hasStatementSavepoint) {
+                    status = rollbackToSavepoint(statementSavepoint);
+                    if (status == DBStatus::OK)
+                        status = releaseSavepoint(statementSavepoint);
+                }
+                // A damaged statement backup must not leave partial changes
+                // available for a later commit of the caller's transaction.
+                if (status != DBStatus::OK && transactionContext().inTransaction)
+                    (void)rollbackTransaction();
+            }
+        } catch (...) {
+            try {
+                if (transactionContext().inTransaction)
+                    (void)rollbackTransaction();
+            } catch (...) {}
+        }
+        if (insertedRows) insertedRows->resize(returnedRowStart);
+        std::rethrow_exception(failure);
+    }
 }
 
 DBStatus StorageEngine::insertInternal(
