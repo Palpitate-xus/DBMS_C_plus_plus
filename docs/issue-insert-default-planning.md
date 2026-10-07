@@ -80,3 +80,22 @@ because the existing compound expression root has no original source span;
 `default-phase-candidate.log` remains terminal 1 vs strict18 terminal 0.
 That independent ALTER-span bug and JSON/other protocol descriptor phases
 remain open; the successful core matrix is not a whole phase-family claim.
+
+## Independent compound-expression provenance
+
+The expression parser now gives an untagged composite root its genuine lexer
+token interval. Already tagged inner/child sites keep their original span.
+This fixes storing actual arithmetic/unary defaults without a toString
+fallback or an invented span. Native baseline 95473 is 134 at the missing
+span; 33805 and scoped parser sanitizer 34011 are 0. V4's twelve natives 8742
+are 0, including binding/constant planner/ordinary WHERE and ORDER carriers.
+
+Stronger permanent protocol phase assertions exposed a separate existing
+frontend omission before the ALTER check: Describe EXPLAIN returns NoData
+instead of the actual QUERY PLAN/text descriptor. V4 final 25452 is terminal
+2: eleven original whole scripts pass, but the new phase whole fails both
+normal and scoped sanitizer. The frozen previous 588 phase also fails. All
+descriptor assertions are retained; the phase test is not registered until
+that independent descriptor/analysis producer is genuinely fixed. Strict
+`180006` entire permanent phase is terminal 0. No completed protocol-phase
+claim follows from the native span fix.

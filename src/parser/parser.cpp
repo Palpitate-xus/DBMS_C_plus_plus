@@ -1803,7 +1803,14 @@ static ExprPtr parsePrimaryExpr(const std::vector<std::string>& tokens, size_t& 
 
 // Entry point
 static ExprPtr parseExpr(const std::vector<std::string>& tokens, size_t& pos) {
-    return parseOrExpr(tokens, pos);
+    const size_t begin=pos;
+    auto result=parseOrExpr(tokens,pos);
+    // Composite roots are not returned through parsePrimaryExpr's source
+    // wrapper. Give them their real token interval as well; preserve an
+    // already tagged inner/child site rather than widening its identity.
+    if(result && result->sourceBegin==std::string::npos)
+        markSource(result.get(),tokens,begin,pos);
+    return result;
 }
 
 // OR (lowest precedence, left-associative)
