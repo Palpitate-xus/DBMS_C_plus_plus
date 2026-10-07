@@ -1698,9 +1698,60 @@ bool describePreparedQueryHostResult(const std::string& sql, Session& session,
 // Describe must not execute the statement: even a SELECT can call a function
 // with side effects. Resolve statically knowable SELECT/RETURNING projections
 // against the catalog and leave other query shapes to the execution path.
+bool describePreparedExplainResult(const std::string& sql, Session& session,
+        std::vector<PgColumnDescription>& columns,
+        const std::vector<uint32_t>& parameterOids = {}) {
+    if(SQLParser::classify(sql)!=SqlCommand::Explain)return false;
+    SQLParser parser;
+    const auto probe=parser.parseForBinding(sql);
+    if(!probe.isValid())throw DbError("42601",probe.error.empty()?"invalid EXPLAIN statement":probe.error);
+    const auto* explain=dynamic_cast<const ExplainStmt*>(probe.stmt.get());
+    // The retained plan publisher owns TEXT/JSON. XML/YAML renderers remain
+    // separate unsupported consumers, not text relabeled as those formats.
+    if(!explain || explain->xml || explain->yaml)return false;
+    // Genuine typed parameter sites, not substituted NULL SQL or a rendered
+    // statement. Binding describes the whole tree but never plans constants,
+    // invokes a routine, or constructs/opens its row providers.
+    std::vector<QueryBindingDatum> parameters;
+    std::optional<CatalogManager::MetadataSnapshot> catalog;
+    std::function<std::string(uint32_t,std::set<uint32_t>)> typeName;
+    typeName=[&](uint32_t oid,std::set<uint32_t> path)->std::string {
+        if(!oid)return "unknown";
+        if(const auto* builtin=valuesParameterCastType(oid))return builtin;
+        if(!path.insert(oid).second || path.size()>64)throw DbError("XX001","invalid prepared parameter type ancestry");
+        if(!catalog)catalog=g_engine.catalogService().metadataSnapshot(session.currentDB);
+        for(const auto& type:catalog->types)if(type.oid==oid) {
+            if(type.typelem && type.typcategory=='A' && type.typtype!='d')
+                return typeName(type.typelem,std::move(path))+"[]";
+            for(const auto& space:catalog->namespaces)if(space.oid==type.typnamespace) {
+                if(space.nspname=="pg_catalog")return ExprHelper::canonicalResultTypeName(type.typname);
+                const auto quote=[](const std::string& name) {
+                    std::string result="\"";for(char c:name){result+=c;if(c=='\"')result+=c;}return result+'\"';
+                };
+                return quote(space.nspname)+"."+quote(type.typname);
+            }
+        }
+        throw DbError("42704","prepared parameter type does not exist");
+    };
+    for(size_t i=0;i<parameterOids.size();++i) {
+        QueryBindingDatum datum;
+        datum.identity="protocol-parameter-"+std::to_string(i+1);
+        datum.type=typeName(parameterOids[i],{});datum.position=i+1;
+        parameters.push_back(std::move(datum));
+    }
+    auto* previous=currentSession();setCurrentSession(&session);
+    struct Restore {Session* previous;~Restore(){setCurrentSession(previous);}} restore{previous};
+    const auto prepared=g_engine.prepareBoundQuery(session.currentDB,sql,parameters);
+    QueryResult shape;
+    for(const auto& field:prepared.output){shape.columns.push_back(field.name);shape.columnTypes.push_back(field.type);}
+    columns=describeProtocolColumns(shape,std::string{},session);
+    return !columns.empty();
+}
+
 bool describePreparedResult(const std::string& sql, Session& session,
                             std::vector<PgColumnDescription>& columns,
                             const std::vector<uint32_t>& parameterOids = {}) {
+    if(describePreparedExplainResult(sql,session,columns,parameterOids))return true;
     if (parameterOids.empty() && describePreparedSetResult(sql, session, columns))
         return true;
     SQLParser parser;
@@ -3520,6 +3571,7 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
     }
 
     bool executionError = false;
+    std::vector<PgColumnDescription> explainColumns;
     bool structuredError = false;
     bool statementCommitError = false;
     std::string outputText;
@@ -3595,6 +3647,9 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
         std::ostringstream output;
         dbms::ScopedOutputCapture capture(output);
         try {
+            // Bind EXPLAIN's actual output and inner input types before any
+            // analyzed effects; keep this descriptor through execution.
+            const bool typedExplain=describePreparedExplainResult(sql,session,explainColumns);
             // Catalog/type analysis can itself throw a structured error.
             // Keep it inside the same protocol exception boundary as execution
             // so a metadata failure never terminates the client connection.
@@ -3611,7 +3666,7 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
                     ? dynamic_cast<const InsertStmt*>(parsed.stmt.get()) : nullptr;
                 typedInsertSelect = insert && insert->selectSource;
             }
-            if (!typedInsertSelect) {
+            if (!typedInsertSelect && !typedExplain) {
                 const auto functionError = whereUnknownFunctionError(sql, session);
                 if (!functionError.empty()) throw DbError("42883", functionError);
             }
@@ -3871,7 +3926,17 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
     if (result.resultSet && !lines.empty()) {
         if (keyword == "explain") {
             result.columns = {"QUERY PLAN"};
-            for (const auto& line : lines) result.rows.push_back({line});
+            if(!explainColumns.empty()) {
+                result.columnTypes={explainColumns.front().typeOid==114?"json":
+                    explainColumns.front().typeOid==142?"xml":"text"};
+            }
+            if(!explainColumns.empty() && explainColumns.front().typeOid==114) {
+                // JSON is one complete renderer-produced datum, not several
+                // CLI lines mislabeled as independent JSON values.
+                std::string document;
+                for(const auto& line:lines){if(!document.empty())document+='\n';document+=line;}
+                result.rows.push_back({std::move(document)});
+            } else for (const auto& line : lines) result.rows.push_back({line});
         } else {
             result.columns = splitProtocolFields(lines.front());
             if (structuredDml.available && structuredDml.metadataOnly) {
@@ -3925,7 +3990,8 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
                 }
             }
         }
-        result.columnDescriptions = describeProtocolColumns(result, sql, session);
+        result.columnDescriptions = !explainColumns.empty()
+            ? explainColumns : describeProtocolColumns(result, sql, session);
     }
     result.commandTag =
         structuredDml.available && structuredDml.metadataOnly &&
@@ -5377,6 +5443,8 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             }
             try {
                 notePreparedTemporaryObjectAccess(sql, session);
+                std::vector<PgColumnDescription> explainDescriptor;
+                (void)describePreparedExplainResult(sql,session,explainDescriptor,parameterTypes);
                 if(parameterTypes.empty()) {
                     // Whole provider analysis precedes publishing a prepared
                     // statement. A failed call never leaves a named object

@@ -99,3 +99,8 @@ descriptor assertions are retained; the phase test is not registered until
 that independent descriptor/analysis producer is genuinely fixed. Strict
 `180006` entire permanent phase is terminal 0. No completed protocol-phase
 claim follows from the native span fix.
+
+The separate descriptor/analysis producer now resolves that retained whole
+phase failure: see `issue-explain-prepared-descriptor.md` for the normal and
+scoped sanitizer complete matrices, strict18 reference, exact source epoch
+and remaining independent formatter/envelope boundaries.

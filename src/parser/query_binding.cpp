@@ -1208,7 +1208,9 @@ public:
         }
         if (auto* explain = dynamic_cast<ExplainStmt*>(&node)) {
             if (!explain->query) throw DbError("42601", "EXPLAIN query is missing");
-            statement(*explain->query, outer, ctes); return {{"QUERY PLAN","text"}};
+            statement(*explain->query, outer, ctes);
+            return {{"QUERY PLAN",explain->json?"json":explain->xml?"xml":"text",
+                false,0,explain->json?114u:explain->xml?142u:25u}};
         }
         if (auto* create = dynamic_cast<CreateTableStmt*>(&node)) {
             if (create->preparedAsQuery) return statement(*create->preparedAsQuery, outer, ctes);
