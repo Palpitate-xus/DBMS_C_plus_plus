@@ -731,6 +731,45 @@ public:
         result.statementOutputs[&node] = columns;
         return columns;
     }
+    void coerceSetUnknown(Stmt* statement,size_t ordinal,const std::string& targetType) {
+        auto* select=dynamic_cast<SelectStmt*>(statement);
+        if(!select)throw DbError("XX000","set operand lost its prepared SELECT");
+        auto bindings=result.projectionBindings.find(select);
+        if(bindings==result.projectionBindings.end() || ordinal>=bindings->second.size())
+            throw DbError("XX000","unknown set output has no projection provenance");
+        const auto* original=bindings->second[ordinal].expression;
+        auto item=std::find_if(select->selectList.begin(),select->selectList.end(),
+            [&](const auto& value){return value.expr.get()==original;});
+        if(item==select->selectList.end() || bindings->second[ordinal].column)
+            throw DbError("XX000","unknown set output has no direct value site");
+        coerceCaseInput(item->expr,"unknown",targetType);
+        // Replacing the genuine value root must preserve expanded-output
+        // identity. Source bytes/parameter uses and output labels stay put.
+        for(auto& binding:bindings->second)
+            if(binding.expression==original)binding.expression=item->expr.get();
+        auto& leaves=projectionLeaves[select];
+        for(auto& leaf:leaves)if(leaf==original)leaf=item->expr.get();
+        if(auto output=result.statementOutputs.find(statement);output!=result.statementOutputs.end())
+            output->second.at(ordinal).type=targetType;
+    }
+    QueryRowDescriptor setColumns(SelectStmt& select,QueryRowDescriptor left,QueryRowDescriptor right) {
+        if(left.size()!=right.size())throw DbError("42601","set query column count mismatch");
+        auto output=left;
+        for(size_t i=0;i<left.size();++i) {
+            const auto common=selectCommonType({left[i].type,right[i].type},"set query");
+            if(common_type_detail::canonical(left[i].type)=="unknown") {
+                coerceSetUnknown(select.setOpLhs?select.setOpLhs.get():&select,i,common);
+                left[i].type=common;
+            }
+            if(common_type_detail::canonical(right[i].type)=="unknown") {
+                coerceSetUnknown(select.setOpRhs.get(),i,common);
+                right[i].type=common;
+            }
+            output[i].type=common;
+        }
+        result.setOperationInputs[&select]={std::move(left),std::move(right)};
+        return output;
+    }
     QueryRowDescriptor statementImpl(Stmt& node, const std::vector<Namespace>& outer, Ctes ctes) {
         if (++depth > 128) throw DbError("54001", "query binding nesting limit exceeded");
         struct Depth { size_t& value; ~Depth() { --value; } } guard{depth};
@@ -778,9 +817,8 @@ public:
             bindDefinitions(select->ctes);
             if (select->setOpLhs) {
                 auto columns = statement(*select->setOpLhs, outer, ctes);
-                if (select->setOpRhs && statement(*select->setOpRhs, outer, ctes).size() != columns.size())
-                    throw DbError("42601", "set query column count mismatch");
-                return columns;
+                if(!select->setOpRhs)throw DbError("42601","set query right operand is missing");
+                return setColumns(*select,std::move(columns),statement(*select->setOpRhs,outer,ctes));
             }
             auto scopes = outer;
             scopes.insert(scopes.begin(), from(select->fromClause.get(), outer, ctes));
@@ -832,8 +870,8 @@ public:
             }
             if(select->command!=SqlCommand::Values)
                 for (auto& row : select->valuesRows) for (auto& value : row) expression(value, scopes);
-            if (select->setOpRhs && statement(*select->setOpRhs, outer, ctes).size() != columns.size())
-                throw DbError("42601", "set query column count mismatch");
+            if (select->setOpRhs)
+                return setColumns(*select,std::move(columns),statement(*select->setOpRhs,outer,ctes));
             return columns;
         }
         if (auto* insert = dynamic_cast<InsertStmt*>(&node)) {

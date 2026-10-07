@@ -81,6 +81,14 @@ struct PreparedQuery {
     // SELECT expanded output ordinal -> genuine expression/source binding.
     // Compound/parameter outputs retain their expression with no source cell.
     std::map<const SelectStmt*, std::vector<ProjectionBinding>> projectionBindings;
+    struct SetOperationInputs {
+        // Static output types of the real left SELECT body (or composed
+        // lhs) and right child, before execution's common-type conversion.
+        QueryRowDescriptor left, right;
+    };
+    // Inline-left and wrapped set queries retain their original AST shape.
+    // An executor must not invent a replacement SELECT by rendering SQL.
+    std::map<const SelectStmt*, SetOperationInputs> setOperationInputs;
     // Transitional adapter for dispatchers that still parse SQL strings.
     // Encoding is permitted only after whole-tree preparation has succeeded.
     std::string legacySql() const;
