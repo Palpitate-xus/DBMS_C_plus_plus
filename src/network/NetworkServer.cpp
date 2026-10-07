@@ -4573,6 +4573,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         if (recovery) {
             if (g_engine.rollbackToSavepoint(*recovery) != DBStatus::OK)
                 return false;
+            session.searchPathTransaction.rollback(*recovery,session.searchPath);
             (void)notificationManager().rollbackToSavepoint(
                 session.pid, *recovery);
             if (session.advisoryOwnerId != 0) {
@@ -4585,6 +4586,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             (void)g_engine.rollbackTransaction();
         }
         if (g_engine.inTransaction()) return false;
+        session.searchPathTransaction.finish(session.searchPath,false);
         notificationManager().rollbackTransaction(session.pid);
         if (session.advisoryOwnerId != 0) {
             advisoryLockManager().releaseTransaction(session.advisoryOwnerId);

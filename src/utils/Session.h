@@ -140,6 +140,39 @@ struct Session {
     std::string clientEncoding = "UTF8";
     std::string replicationMode = "false";
     std::string searchPath = "public";
+    struct SearchPathTransaction {
+        bool active=false;
+        std::string original,persistent;
+        struct Savepoint {std::string name,visible,persistent;};
+        std::vector<Savepoint> savepoints;
+        void begin(const std::string& visible) {
+            if(active)return;
+            active=true;original=persistent=visible;savepoints.clear();
+        }
+        void assign(std::string& visible,const std::string& value,bool local) {
+            if(active && !local)persistent=value;
+            visible=value;
+        }
+        void finish(std::string& visible,bool commit) {
+            if(!active)return;
+            visible=commit?persistent:original;
+            active=false;original.clear();persistent.clear();savepoints.clear();
+        }
+        void save(const std::string& name,const std::string& visible) {
+            begin(visible);savepoints.push_back({name,visible,persistent});
+        }
+        void rollback(const std::string& name,std::string& visible) {
+            for(size_t index=savepoints.size();index>0;--index)if(savepoints[index-1].name==name) {
+                visible=savepoints[index-1].visible;persistent=savepoints[index-1].persistent;
+                savepoints.resize(index);return;
+            }
+        }
+        void release(const std::string& name) {
+            for(size_t index=savepoints.size();index>0;--index)if(savepoints[index-1].name==name) {
+                savepoints.resize(index-1);return;
+            }
+        }
+    } searchPathTransaction;
     std::string timeZone = "UTC";
     std::string defaultApplicationName;
     std::string defaultClientEncoding = "UTF8";

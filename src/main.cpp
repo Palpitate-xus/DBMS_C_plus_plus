@@ -2904,6 +2904,7 @@ static bool handleBeginTransaction(const string& sql, Session& s) {
                            "Begin transaction failed");
     }
     if (!hadTransaction) {
+        s.searchPathTransaction.begin(s.searchPath);
         s.transactionChainOrigin = false;
         s.transactionChainReadOnly = false;
     }
@@ -2928,6 +2929,7 @@ static bool commitBeforeLegacyDdl(Session& s) {
 
     if (!prepareNotificationTransactionCommit(s)) {
         (void)g_engine.rollbackTransaction();
+        s.searchPathTransaction.finish(s.searchPath,false);
         rollbackNotificationTransaction(s);
         dbms::advisoryLockManager().releaseTransaction(advisoryOwner(s));
         return false;
@@ -2935,6 +2937,7 @@ static bool commitBeforeLegacyDdl(Session& s) {
 
     const DBStatus status = g_engine.commitTransaction();
     if (status != DBStatus::OK) {
+        if(!g_engine.inTransaction())s.searchPathTransaction.finish(s.searchPath,false);
         if (!g_engine.inTransaction())
             dbms::advisoryLockManager().releaseTransaction(advisoryOwner(s));
         if (!g_engine.inTransaction()) rollbackNotificationTransaction(s);
@@ -2942,6 +2945,7 @@ static bool commitBeforeLegacyDdl(Session& s) {
              << dbms::sqlstateForDBStatus(status) << ")" << endl;
         return false;
     }
+    s.searchPathTransaction.finish(s.searchPath,true);
     dbms::advisoryLockManager().releaseTransaction(advisoryOwner(s));
     if (!commitNotificationTransaction(s)) return false;
     cout << "Note: DDL caused implicit commit of open transaction" << endl;
@@ -2971,6 +2975,7 @@ static bool handleCommitTransaction(const string& sql, Session& s) {
     }
     if (hadTransaction && !prepareNotificationTransactionCommit(s)) {
         (void)g_engine.rollbackTransaction();
+        s.searchPathTransaction.finish(s.searchPath,false);
         rollbackNotificationTransaction(s);
         dbms::advisoryLockManager().releaseTransaction(advisoryOwner(s));
         return true;
@@ -2978,6 +2983,7 @@ static bool handleCommitTransaction(const string& sql, Session& s) {
     auto res = g_engine.commitTransaction();
     if (res != DBStatus::OK) {
         if (!g_engine.inTransaction()) {
+            s.searchPathTransaction.finish(s.searchPath,false);
             rollbackNotificationTransaction(s);
             dbms::advisoryLockManager().releaseTransaction(advisoryOwner(s));
         }
@@ -2985,6 +2991,7 @@ static bool handleCommitTransaction(const string& sql, Session& s) {
              << dbms::sqlstateForDBStatus(res) << ")" << endl;
         return true;
     }
+    s.searchPathTransaction.finish(s.searchPath,true);
     if (hadTransaction)
         dbms::advisoryLockManager().releaseTransaction(advisoryOwner(s));
     if (hadTransaction && !commitNotificationTransaction(s)) return true;
@@ -3050,6 +3057,7 @@ static bool handleRollbackTransaction(const string& sql, Session& s) {
         cout << "Rollback failed" << endl;
         return true;
     }
+    s.searchPathTransaction.finish(s.searchPath,false);
     if (hadTransaction) {
         rollbackNotificationTransaction(s);
         dbms::advisoryLockManager().releaseTransaction(advisoryOwner(s));
@@ -3127,6 +3135,7 @@ static bool handleSavepoint(const string& sql, Session& s) {
         (void)dbms::notificationManager().savepoint(s.pid, name);
     }
     dbms::advisoryLockManager().savepoint(advisoryOwner(s), name);
+    s.searchPathTransaction.save(name,s.searchPath);
     cout << "Savepoint " << name << " created" << endl;
     log(s.username, "savepoint " + name, getTime());
     return false;
@@ -3153,6 +3162,7 @@ static bool handleReleaseSavepoint(const string& sql, Session& s) {
     }
     (void)dbms::notificationManager().releaseSavepoint(s.pid, name);
     dbms::advisoryLockManager().releaseSavepoint(advisoryOwner(s), name);
+    s.searchPathTransaction.release(name);
     cout << "Savepoint " << name << " released" << endl;
     log(s.username, "release savepoint " + name, getTime());
     return false;
@@ -3180,6 +3190,7 @@ static bool handleRollbackToSavepoint(const string& sql, Session& s) {
     }
     (void)dbms::notificationManager().rollbackToSavepoint(s.pid, name);
     dbms::advisoryLockManager().rollbackToSavepoint(advisoryOwner(s), name);
+    s.searchPathTransaction.rollback(name,s.searchPath);
     cout << "Rolled back to savepoint " << name << endl;
     log(s.username, "rollback to savepoint " + name, getTime());
     return false;
@@ -3222,7 +3233,7 @@ static bool handleResetCommand(const string& sql, Session& s) {
         s.timezoneOffsetMinutes = 0;
         s.applicationName = s.defaultApplicationName;
         s.clientEncoding = s.defaultClientEncoding;
-        s.searchPath = s.defaultSearchPath;
+        s.searchPathTransaction.assign(s.searchPath,s.defaultSearchPath,false);
         s.timeZone = s.defaultTimeZone;
         s.lcMonetary = s.defaultLcMonetary;
         s.statementTimeoutMs = s.defaultStatementTimeoutMs;
@@ -3252,7 +3263,7 @@ static bool handleResetCommand(const string& sql, Session& s) {
         return false;
     }
     if (rest == "search_path") {
-        s.searchPath = s.defaultSearchPath;
+        s.searchPathTransaction.assign(s.searchPath,s.defaultSearchPath,false);
         cout << "RESET " << rest << endl;
         return false;
     }
@@ -3615,6 +3626,9 @@ static bool handleSetCommand(const string& sql, Session& s) {
     if (sql.substr(0, 3) == "set" && sql.size() > 3 && isspace(static_cast<unsigned char>(sql[3]))) {
         string rest = trim(sql.substr(3));
         bool isGlobal = false;
+        bool isLocal = false;
+        if(rest.rfind("local ",0)==0) {isLocal=true;rest=trim(rest.substr(6));}
+        else if(rest.rfind("session ",0)==0)rest=trim(rest.substr(8));
         if (rest.size() > 7 && rest.substr(0, 7) == "global ") {
             isGlobal = true;
             rest = trim(rest.substr(7));
@@ -3650,6 +3664,8 @@ static bool handleSetCommand(const string& sql, Session& s) {
         }
         string param = trim(rest.substr(0, separatorPos));
         string val = trim(rest.substr(separatorPos + separatorLength));
+        if(isLocal && param!="search_path")
+            throw dbms::DbError("0A000","transaction-local settings for this parameter are not supported");
         // User-defined variable: SET @var = value
         if (!param.empty() && param[0] == '@') {
             if (!dbms::isExtendedCompatMode(s.compatibilityMode)) {
@@ -3686,12 +3702,8 @@ static bool handleSetCommand(const string& sql, Session& s) {
                 val.pop_back();
                 val = trim(val);
             }
-            if (toLowerSql(val) == "default") {
-                s.searchPath = s.defaultSearchPath;
-                cout << "SET" << endl;
-                return false;
-            }
-            const string setting = stripQuotes(val);
+            const string setting = toLowerSql(val)=="default"?s.defaultSearchPath:
+                (!val.empty() && val.front()=='\''?stripQuotes(val):val);
             std::vector<std::string> entries;
             std::string canonical;
             if (!dbms::parseSessionSearchPath(
@@ -3700,7 +3712,12 @@ static bool handleSetCommand(const string& sql, Session& s) {
                         "(SQLSTATE 22023)" << endl;
                 return true;
             }
-            s.searchPath = std::move(canonical);
+            if(isLocal && !g_engine.inTransaction()) {
+                cout << "WARNING: SET LOCAL can only be used in transaction blocks (SQLSTATE 25P01)" << endl;
+            } else {
+                if(g_engine.inTransaction())s.searchPathTransaction.begin(s.searchPath);
+                s.searchPathTransaction.assign(s.searchPath,canonical,isLocal);
+            }
             cout << "SET" << endl;
             return false;
         }
@@ -4863,6 +4880,8 @@ static bool handlePrepare(const string& sql, Session& s) {
             return true;
         }
         auto res = g_engine.prepareTransaction(xid);
+        if(res!=DBStatus::OK && !g_engine.inTransaction())
+            s.searchPathTransaction.finish(s.searchPath,false);
         if (res == DBStatus::OK) {
             if (!dbms::advisoryLockManager().prepareTransaction(
                     advisoryOwner(s), xid)) {
@@ -4870,11 +4889,13 @@ static bool handlePrepare(const string& sql, Session& s) {
                 dbms::advisoryLockManager().releaseTransaction(
                     advisoryOwner(s));
                 rollbackNotificationTransaction(s);
+                s.searchPathTransaction.finish(s.searchPath,false);
                 cout << "ERROR: advisory lock ownership could not be "
                         "transferred to prepared transaction (SQLSTATE "
                         "XX000)" << endl;
                 return true;
             }
+            s.searchPathTransaction.finish(s.searchPath,true);
             rollbackNotificationTransaction(s);
             cout << "PREPARE TRANSACTION " << xid << endl;
             log(s.username, "prepare transaction " + xid, getTime());
