@@ -17,7 +17,7 @@ std::string toLower(std::string s) {
 
 bool isBinaryCollation(const std::string& name) {
     return name.empty() || name == "c" || name == "posix" ||
-           name == "ucs_basic";
+           name == "ucs_basic" || name == "c.utf8";
 }
 
 int caseInsensitiveCompare(const std::string& a, const std::string& b) {
@@ -69,7 +69,7 @@ std::string normalizeName(const std::string& name) {
 
 bool isValid(const std::string& name) {
     static const std::set<std::string> kBuiltins = {
-        "default", "c", "posix", "ucs_basic",
+        "default", "c", "posix", "ucs_basic", "c.utf8",
         "en_us.utf8", "en_us",
         "nocase", "reverse"};
     return kBuiltins.count(normalizeName(name)) > 0;
@@ -116,7 +116,7 @@ int compareLocale(const std::string& a, const std::string& b,
 }
 
 std::vector<std::string> listBuiltins() {
-    return {"default", "C", "POSIX", "ucs_basic", "en_US.utf8", "en_US", "nocase", "reverse"};
+    return {"default", "C", "POSIX", "ucs_basic", "en_US.utf8", "en_US", "nocase", "reverse", "C.utf8"};
 }
 
 } // namespace collation

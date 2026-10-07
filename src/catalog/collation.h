@@ -12,7 +12,8 @@ std::string normalizeName(const std::string& name);
 // Return true if `name` is a known built-in collation.
 bool isValid(const std::string& name);
 
-// Return true if `name` is a binary-equivalent collation (empty/C/POSIX/ucs_basic).
+// Return true for binary ordering (empty/C/POSIX/ucs_basic/C.utf8). C.utf8
+// retains Unicode character classification/case folding for SQL patterns.
 // The explicit SQL `default` collation follows the database locale.
 bool isBinary(const std::string& name);
 
