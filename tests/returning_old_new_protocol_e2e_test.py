@@ -49,12 +49,12 @@ def main():
         assert type_oids == [25, 25, 23], type_oids
         assert command_tag == "UPDATE 1", command_tag
 
-        # Renaming OLD hides the default OLD name. Unsupported versioned
-        # projections are typed-executor owned and fail before mutation.
+        # Renaming OLD hides the default OLD name. The now-bound namespace
+        # rejects the hidden range with PostgreSQL's 42P01 before mutation.
         _, state, _, _, _, _ = query(
             "UPDATE returning_images SET val = 'must-not-stick' WHERE id = 1 "
             "RETURNING WITH (OLD AS before_row) old.id;")
-        assert state == "0A000", state
+        assert state == "42P01", state
         rows, state, message, _, _, _ = query(
             "SELECT id, val FROM returning_images;")
         assert state is None, (state, message)
@@ -72,7 +72,7 @@ def main():
         _, state, _, _, _, _ = query(
             "UPDATE returning_images AS r SET val = 'alias-bad' WHERE id = 1 "
             "RETURNING returning_images.id;")
-        assert state == "0A000", state
+        assert state == "42P01", state
         rows, state, message, _, _, _ = query(
             "SELECT id, val FROM returning_images;")
         assert state is None, (state, message)
