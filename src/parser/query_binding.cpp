@@ -159,6 +159,37 @@ public:
         if (canonical.size() < 2 || canonical.compare(canonical.size()-2,2,"[]") != 0) return {};
         canonical.resize(canonical.size()-2); return canonical;
     }
+    static bool patternOperator(const std::string& op) {
+        return op=="LIKE" || op=="NOT LIKE" || op=="ILIKE" || op=="NOT ILIKE" ||
+               op=="SIMILAR TO" || op=="NOT SIMILAR TO";
+    }
+    static uint32_t expressionTypeOid(const Expr* node) {
+        const auto* column=dynamic_cast<const ColumnRefExpr*>(node);
+        if(column && column->binding)return column->binding->typeOid;
+        const auto* unary=dynamic_cast<const UnaryOpExpr*>(node);
+        return unary && unary->op.rfind("COLLATE ",0)==0
+            ? expressionTypeOid(unary->operand.get()) : 0;
+    }
+    std::string patternBaseType(const std::string& declared,const Expr* node) const {
+        return ExprHelper::canonicalResultTypeName(metadata.baseType
+            ? metadata.baseType(declared,expressionTypeOid(node)) : declared);
+    }
+    void resolvePattern(const std::string& op,ExprPtr& left,ExprPtr& right,
+                        const std::string& leftType,const std::string& rightType) {
+        const auto lhs=patternBaseType(leftType,left.get());
+        const auto rhs=patternBaseType(rightType,right.get());
+        const bool binary=(op=="LIKE" || op=="NOT LIKE") && (lhs=="bytea" || rhs=="bytea");
+        const auto textual=[](const std::string& type) {
+            return type=="unknown" || type=="text" || type=="character varying" ||
+                   type=="character" || type=="name";
+        };
+        if(binary ? ((lhs!="bytea" && lhs!="unknown") || (rhs!="bytea" && rhs!="unknown"))
+                  : (!textual(lhs) || !textual(rhs)))
+            throw DbError("42883","operator does not exist: "+leftType+" "+op+" "+rightType);
+        const std::string target=binary?"bytea":"text";
+        if(lhs=="unknown" || binary)coerceCaseInput(left,leftType,target);
+        coerceCaseInput(right,rightType,target);
+    }
     std::string expression(ExprPtr& node, const std::vector<Namespace>& scopes,
                            const std::string& arrayContext = {},bool allowSetReturning=false) {
         if (!node) return "unknown";
@@ -202,7 +233,7 @@ public:
                         if (field.name != column->column) continue;
                         if (column->table.empty() && range.hiddenUnqualified.count(field.name)) continue;
                         ++matches; sourceType = field.type;
-                        resolved = {scopeDepth, range.occurrence, ordinal, field.type, range.mergedUsing};
+                        resolved = {scopeDepth, range.occurrence, ordinal, field.type, range.mergedUsing, field.typeOid};
                     }
                 }
                 if (matches || rangeFound) break; // nearest SQL level wins
@@ -300,6 +331,10 @@ public:
                 return type->value; // grammar type, not a SQL value namespace
             }
             const auto right = expression(binary->right, scopes);
+            if(patternOperator(binary->op)) {
+                resolvePattern(binary->op,binary->left,binary->right,left,right);
+                return "boolean";
+            }
             if (binary->op=="||") {
                 binary->arrayConcat = ExprHelper::resolveArrayConcatTypes(left,right);
                 if (binary->arrayConcat) {
@@ -313,7 +348,8 @@ public:
                 }
             }
             static const std::set<std::string> predicates = {"=", "<>", "!=", "<", ">", "<=", ">=",
-                "AND", "OR", "LIKE", "ILIKE", "IN", "NOT IN", "IS DISTINCT FROM", "IS NOT DISTINCT FROM"};
+                "AND", "OR", "LIKE", "NOT LIKE", "ILIKE", "NOT ILIKE",
+                "SIMILAR TO", "NOT SIMILAR TO", "IN", "NOT IN", "IS DISTINCT FROM", "IS NOT DISTINCT FROM"};
             return predicates.count(binary->op) ? "boolean" : left;
         }
         case ExprType::QuantifiedComparison: {
@@ -356,6 +392,28 @@ public:
         }
         case ExprType::FunctionCall: {
             auto* call = static_cast<FunctionCallExpr*>(node.get());
+            const std::string escapeSuffix=" ESCAPE";
+            if(call->schema.empty() && call->funcName.size()>escapeSuffix.size() &&
+               call->funcName.compare(call->funcName.size()-escapeSuffix.size(),escapeSuffix.size(),escapeSuffix)==0 &&
+               patternOperator(call->funcName.substr(0,call->funcName.size()-escapeSuffix.size()))) {
+                if(call->args.size()!=3 || !call->namedArgs.empty() || call->hasOver || call->filter || call->distinct)
+                    throw DbError("42601","invalid pattern ESCAPE expression");
+                const auto lhs=expression(call->args[0],scopes);
+                const auto rhs=expression(call->args[1],scopes);
+                const auto escape=expression(call->args[2],scopes);
+                const auto op=call->funcName.substr(0,call->funcName.size()-escapeSuffix.size());
+                resolvePattern(op,call->args[0],call->args[1],lhs,rhs);
+                const auto target=patternBaseType(rhs,call->args[1].get())=="bytea" ||
+                    patternBaseType(lhs,call->args[0].get())=="bytea" ? "bytea" : "text";
+                const auto escapeBase=patternBaseType(escape,call->args[2].get());
+                const bool textEscape=escapeBase=="text" || escapeBase=="character varying" ||
+                    escapeBase=="character" || escapeBase=="name";
+                if(escapeBase!="unknown" && (target=="bytea" ? escapeBase!="bytea" : !textEscape))
+                    throw DbError("42883","pattern ESCAPE input has no matching operator: "+escape);
+                coerceCaseInput(call->args[2],escape,target);
+                call->resolvedResultType="boolean";
+                return "boolean";
+            }
             std::string first = "unknown";
             for (size_t i = 0; i < call->args.size(); ++i) {
                 if (i == 0 && call->schema.empty() && SQLParser::toLower(call->funcName) == "extract") {
@@ -533,7 +591,7 @@ public:
                             columns.push_back(column);
                             if (leaves) leaves->push_back(nullptr);
                             if (bindings) bindings->push_back({item.expr.get(),
-                                QueryColumnBinding{0,range.occurrence,i,column.type,range.mergedUsing}});
+                                QueryColumnBinding{0,range.occurrence,i,column.type,range.mergedUsing,column.typeOid}});
                         }
                     }
                 continue;
@@ -547,7 +605,7 @@ public:
                     if (bindings)
                         for (size_t i=0;i<range.columns.size();++i)
                             bindings->push_back({item.expr.get(),
-                                QueryColumnBinding{0,range.occurrence,i,range.columns[i].type,range.mergedUsing}});
+                                QueryColumnBinding{0,range.occurrence,i,range.columns[i].type,range.mergedUsing,range.columns[i].typeOid}});
                 }
                 if (!found) throw DbError("42P01", "missing FROM-clause entry for qualified star");
                 continue;
@@ -567,7 +625,7 @@ public:
                 item.alias = quoted;
                 result.projectionAliases.emplace_back(item.sourceExpressionEnd, quoted);
             }
-            columns.push_back({name, type});
+            columns.push_back({name, type, false, 0, expressionTypeOid(item.expr.get())});
             if (leaves) leaves->push_back(item.expr.get());
             if (bindings) {
                 const auto* column = dynamic_cast<const ColumnRefExpr*>(item.expr.get());
@@ -751,14 +809,22 @@ public:
             if(binding.expression==original)binding.expression=item->expr.get();
         auto& leaves=projectionLeaves[select];
         for(auto& leaf:leaves)if(leaf==original)leaf=item->expr.get();
-        if(auto output=result.statementOutputs.find(statement);output!=result.statementOutputs.end())
+        if(auto output=result.statementOutputs.find(statement);output!=result.statementOutputs.end()) {
             output->second.at(ordinal).type=targetType;
+            output->second.at(ordinal).typeOid=0;
+        }
     }
     QueryRowDescriptor setColumns(SelectStmt& select,QueryRowDescriptor left,QueryRowDescriptor right) {
         if(left.size()!=right.size())throw DbError("42601","set query column count mismatch");
         auto output=left;
         for(size_t i=0;i<left.size();++i) {
             const auto common=selectCommonType({left[i].type,right[i].type},"set query");
+            // A common result is not the left branch's physical type identity
+            // when coercion or a different catalog type produced its value.
+            if(!left[i].typeOid || left[i].typeOid!=right[i].typeOid ||
+               common_type_detail::canonical(left[i].type)!=common_type_detail::canonical(common) ||
+               common_type_detail::canonical(right[i].type)!=common_type_detail::canonical(common))
+                output[i].typeOid=0;
             if(common_type_detail::canonical(left[i].type)=="unknown") {
                 coerceSetUnknown(select.setOpLhs?select.setOpLhs.get():&select,i,common);
                 left[i].type=common;

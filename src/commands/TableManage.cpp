@@ -32144,7 +32144,7 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
                         // scalar alias registry does not fold "int4[]".
                         typeName = ExprHelper::canonicalResultTypeName(typeName) + (arrayType ? "[]" : "");
                         description.columns.push_back({attribute.attname, typeName,
-                            attribute.attgenerated != '\0', attribute.attidentity});
+                            attribute.attgenerated != '\0', attribute.attidentity, attribute.atttypid});
                     }
                     if (relation.relkind == 'v') {
                         description.viewSql = viewSource(schema == "public" ? requested.name : schema + "." + requested.name);
@@ -32172,6 +32172,62 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
                 }
             }
             throw DbError("42P01", "relation \"" + spelling + "\" does not exist");
+        };
+        metadata.baseType = [&](const std::string& spelling,uint32_t typeOid) {
+            if(!typeOid && TypeRegistry::instance().findType(spelling))
+                return ExprHelper::canonicalResultTypeName(spelling);
+            if(!typeOid && (spelling=="unknown" || spelling.size()>=2 &&
+                spelling.compare(spelling.size()-2,2,"[]")==0))return spelling;
+            if(!catalogSnapshot)catalogSnapshot=catalogService_->metadataSnapshot(dbname);
+            const auto& catalog=*catalogSnapshot;
+            const PgTypeRow* resolved=nullptr;
+            if(typeOid) {
+                for(const auto& type:catalog.types)if(type.oid==typeOid){resolved=&type;break;}
+            } else {
+                CatalogManager::QualifiedName requested;
+                if(CatalogManager::parseQualifiedName(spelling,requested,true)) {
+                    std::vector<std::string> schemas;
+                    if(!requested.schema.empty())schemas.push_back(requested.schema);
+                    else {
+                        const Session* session=currentSession();
+                        if(session)schemas.push_back(sessionTempSchemaName(*session));
+                        schemas.push_back("pg_catalog");
+                        std::string canonical;std::vector<std::string> path;
+                        if(session && parseSessionSearchPath(session->searchPath,path,canonical))
+                            for(const auto& entry:path)schemas.push_back(expandSessionSearchPathEntry(entry,session->username));
+                        else schemas.push_back("public");
+                    }
+                    for(auto schema:schemas) {
+                        if(schema=="pg_temp" && currentSession())schema=sessionTempSchemaName(*currentSession());
+                        Oid ns=INVALID_OID;
+                        for(const auto& name:catalog.namespaces)if(name.nspname==schema){ns=name.oid;break;}
+                        for(const auto& type:catalog.types)
+                            if(type.typnamespace==ns && type.typname==requested.name){resolved=&type;break;}
+                        if(resolved)break;
+                    }
+                }
+            }
+            if(!resolved) {
+                if(typeOid)throw DbError("XX000","operator input type metadata is missing");
+                return ExprHelper::canonicalResultTypeName(spelling);
+            }
+            std::set<Oid> visited;
+            while(resolved->typtype=='d') {
+                if(resolved->typbasetype==INVALID_OID)
+                    throw DbError("XX000","domain base type metadata is missing");
+                if(!visited.insert(resolved->oid).second)throw DbError("XX000","cyclic domain base type metadata");
+                const PgTypeRow* parent=nullptr;
+                for(const auto& type:catalog.types)if(type.oid==resolved->typbasetype){parent=&type;break;}
+                if(!parent)throw DbError("XX000","domain base type metadata is missing");
+                resolved=parent;
+            }
+            // Legacy physical array attributes retain their element OID and
+            // attndims. Never turn that declared array envelope into a scalar
+            // simply because the element's catalog row is TEXT or BYTEA.
+            if(resolved->typcategory=='A' || (spelling.size()>=2 &&
+                spelling.compare(spelling.size()-2,2,"[]")==0))
+                return ExprHelper::canonicalResultTypeName(spelling);
+            return ExprHelper::canonicalResultTypeName(resolved->typname);
         };
         ExprEvaluator evaluator; evaluator.setCurrentDB(dbname);
         metadata.setReturning = [&](const FunctionCallExpr* function) -> std::optional<QuerySetReturningBinding> {

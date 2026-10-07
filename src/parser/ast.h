@@ -315,6 +315,7 @@ struct QueryColumnBinding {
     size_t columnOrdinal = 0; // descriptor ordinal, physical for a base table
     std::string declaredType;
     bool mergedUsing = false;
+    uint32_t typeOid = 0; // exact catalog identity, including quoted domains
 };
 struct ColumnRefExpr : public Expr {
     std::string schema;    // 可为空（无 schema 限定）

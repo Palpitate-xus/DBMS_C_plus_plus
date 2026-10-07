@@ -312,6 +312,13 @@ std::string inferAstResultType(
             if (routine != routineTypes->end()) return protocolTypeName(routine->second);
         }
         const std::string name = toLower(call->funcName);
+        // These names are parser-owned three-operand grammar nodes, not
+        // ordinary scalar calls whose type can follow their first argument.
+        if (call->schema.empty() &&
+            (name == "like escape" || name == "not like escape" ||
+             name == "ilike escape" || name == "not ilike escape" ||
+             name == "similar to escape" || name == "not similar to escape"))
+            return "boolean";
         auto argType = [&](size_t index) {
             return index < call->args.size()
                 ? inferAstResultType(call->args[index].get(), typeHints, routineTypes)

@@ -123,6 +123,7 @@ ExprPtr constantExpression(const ExprValue& value, const Expr* source) {
 struct ConstantPlanningRoles {
     std::function<bool(const FunctionCallExpr*)> coalesce;
     std::function<std::string(const FunctionCallExpr*)> resultType;
+    std::function<bool(const FunctionCallExpr*)> patternEscape;
 };
 
 std::optional<ExprValue> simplifyCaseConstants(ExprPtr& expression,
@@ -204,6 +205,30 @@ std::optional<ExprValue> simplifyCaseConstants(ExprPtr& expression,
         simplifyCaseConstants(quantified->right,evaluator,roles);
         return std::nullopt;
     } else if (auto* call = dynamic_cast<FunctionCallExpr*>(expression.get())) {
+        if (roles && roles->patternEscape(call)) {
+            std::vector<std::optional<ExprValue>> inputs;
+            for (auto& argument : call->args)
+                inputs.push_back(simplifyCaseConstants(argument,evaluator,roles));
+            // The parser's strict normalizer consumes pattern/escape before
+            // the outer strict match consumes lhs. Never run a query or a
+            // routine to discover whether one of these inputs is NULL.
+            if ((inputs[1] && inputs[1]->isNull) ||
+                (inputs[2] && inputs[2]->isNull)) {
+                const ExprValue result("boolean","",true);
+                expression=constantExpression(result,expression.get());return result;
+            }
+            if (inputs[1] && inputs[2])
+                ExprEvaluator::validatePatternEscapeInput(*inputs[2]);
+            if (inputs[0] && inputs[0]->isNull) {
+                const ExprValue result("boolean","",true);
+                expression=constantExpression(result,expression.get());return result;
+            }
+            if (inputs[0] && inputs[1] && inputs[2]) {
+                const auto result=evaluator.eval(call,RowContext{});
+                expression=constantExpression(result,expression.get());return result;
+            }
+            return std::nullopt;
+        }
         // COALESCE is a SQL demand construct, not a user routine. Resolve
         // its real builtin identity before applying this rule; a quoted or
         // qualified stored function must retain ordinary argument demand.
@@ -523,6 +548,14 @@ void PreparedQueryExecution::planCompiledConstants(ExprPtr& expression,
         },
         [&](const FunctionCallExpr* call) {
             return ExprHelper::canonicalResultTypeName(ExprHelper::inferParsedResultType(call,{},database_,engine_));
+        },
+        [](const FunctionCallExpr* call) {
+            // Exact parser grammar roles, not a quoted/qualified user routine
+            // whose decoded name happens to look like a SQL operator.
+            static const std::set<std::string> names={"LIKE ESCAPE","NOT LIKE ESCAPE",
+                "ILIKE ESCAPE","NOT ILIKE ESCAPE","SIMILAR TO ESCAPE","NOT SIMILAR TO ESCAPE"};
+            return call->schema.empty() && names.count(call->funcName) && call->args.size()==3 &&
+                call->namedArgs.empty() && !call->hasOver && !call->filter && !call->distinct && call->orderBy.empty();
         }
     };
     simplifyCaseConstants(expression, evaluator_, &roles);

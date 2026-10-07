@@ -12,6 +12,7 @@ struct QueryOutputColumn {
     std::string name, type;
     bool generated = false;
     char identity = 0;
+    uint32_t typeOid = 0;
 };
 using QueryRowDescriptor = std::vector<QueryOutputColumn>;
 struct QueryRelationMetadata {
@@ -38,6 +39,9 @@ struct QueryBindingMetadata {
     // A stored routine with the same spelling must never inherit this role.
     // Appended so existing aggregate initialization keeps its callback roles.
     std::function<std::optional<QuerySetReturningBinding>(const FunctionCallExpr*)> setReturning;
+    // Pure operator type lookup. A physical catalog OID wins over a rendered
+    // alias/name; domains resolve to their actual base without reading rows.
+    std::function<std::string(const std::string&, uint32_t)> baseType;
 };
 struct PreparedQuery {
     struct Use { size_t begin, end, slot; };

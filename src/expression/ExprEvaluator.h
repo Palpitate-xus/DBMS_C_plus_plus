@@ -103,6 +103,9 @@ public:
     static QueryComparisonBinding resolveComparison(const std::string& op,
         const std::string& leftType, const std::string& rightType);
     static std::vector<ExprValue> arrayElements(const ExprValue& array);
+    // Validate only the ESCAPE input, without matching a pattern or invoking
+    // routines. Text admits one code point; bytea admits one decoded byte.
+    static void validatePatternEscapeInput(const ExprValue& escape);
     ExprValue comparePrepared(const QueryComparisonBinding& binding,
         const ExprValue& left, const ExprValue& right) const;
     ExprValue coerceComparison(const QueryComparisonBinding& binding,

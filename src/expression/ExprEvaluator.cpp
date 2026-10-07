@@ -2743,14 +2743,16 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
 static bool likeMatchWithEscape(const std::string& text,
                                 const std::string& pattern,
                                 const std::string& escape,
-                                bool foldCase = false) {
+                                bool foldCase = false,
+                                bool byteMode = false) {
     enum class TokenKind { Literal, AnyCharacter, AnySequence };
     struct Token {
         TokenKind kind;
         std::string literal;
     };
 
-    const auto codePointEnd = [](const std::string& value, size_t begin) {
+    const auto codePointEnd = [byteMode](const std::string& value, size_t begin) {
+        if (byteMode) return begin + 1;
         const unsigned char lead = static_cast<unsigned char>(value[begin]);
         const size_t width = lead < 0x80 ? 1
             : (lead & 0xE0) == 0xC0 ? 2
@@ -2874,12 +2876,13 @@ static bool similarToMatchEscape(const std::string& text, const std::string& pat
     }
 }
 
-static void validatePatternEscape(const ExprValue& escape) {
-    if (utf8CharCount(escape.value) > 1) {
-        throw std::runtime_error(
-            "invalid escape string: escape string must be empty or one "
-            "character (SQLSTATE 22025)");
-    }
+void ExprEvaluator::validatePatternEscapeInput(const ExprValue& escape) {
+    if (escape.isNull) return;
+    const bool bytes = ExprHelper::canonicalResultTypeName(escape.typeName) == "bytea";
+    const size_t length = bytes ? parseByteaOrThrow(escape).bytes().size()
+                                : utf8CharCount(escape.value);
+    if (length > 1)
+        throw DbError("22025", "invalid escape string: escape string must be empty or one character");
 }
 
 // ----------------------------------------------------------------------------
@@ -3415,7 +3418,10 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
         return ExprValue("boolean", "", true);
     }
     if (op == "like" || op == "not like") {
-        bool m = likeMatch(l.value, r.value);
+        const bool bytes = ExprHelper::canonicalResultTypeName(l.typeName) == "bytea";
+        bool m = bytes ? likeMatchWithEscape(parseByteaOrThrow(l).bytes(),
+            parseByteaOrThrow(r).bytes(), "\\", false, true)
+            : likeMatch(l.value, r.value);
         if (op == "not like") m = !m;
         return ExprValue("boolean", m ? "t" : "f", false);
     }
@@ -4998,25 +5004,27 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
     // likeMatchEscaped handles as exact literals.
     if (name == "like escape" || name == "not like escape" ||
         name == "ilike escape" || name == "not ilike escape") {
-        if (args.size() < 3 || args[0].isNull || args[1].isNull ||
-            args[2].isNull) {
+        if (args.size() < 3 || args[1].isNull || args[2].isNull) {
             return ExprValue("boolean", "", true);
         }
-        validatePatternEscape(args[2]);
+        validatePatternEscapeInput(args[2]);
+        if (args[0].isNull) return ExprValue("boolean", "", true);
         const bool foldCase = name == "ilike escape" ||
                               name == "not ilike escape";
-        bool m = likeMatchWithEscape(args[0].value, args[1].value,
-                                     args[2].value, foldCase);
+        const bool bytes = ExprHelper::canonicalResultTypeName(args[0].typeName) == "bytea";
+        bool m = bytes ? likeMatchWithEscape(parseByteaOrThrow(args[0]).bytes(),
+            parseByteaOrThrow(args[1]).bytes(), parseByteaOrThrow(args[2]).bytes(), false, true)
+            : likeMatchWithEscape(args[0].value, args[1].value, args[2].value, foldCase);
         if (name.rfind("not ", 0) == 0) m = !m;
         return ExprValue("boolean", m ? "t" : "f", false);
     }
 
     if (name == "similar to escape" || name == "not similar to escape") {
-        if (args.size() < 3 || args[0].isNull || args[1].isNull ||
-            args[2].isNull) {
+        if (args.size() < 3 || args[1].isNull || args[2].isNull) {
             return ExprValue("boolean", "", true);
         }
-        validatePatternEscape(args[2]);
+        validatePatternEscapeInput(args[2]);
+        if (args[0].isNull) return ExprValue("boolean", "", true);
         char esc = (!args[2].isNull && !args[2].value.empty()) ? args[2].value[0] : 92;
         bool m = similarToMatchEscape(args[0].value, args[1].value, esc);
         if (name[0] == 110) m = !m;  // "not ..."

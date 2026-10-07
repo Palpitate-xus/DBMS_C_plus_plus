@@ -20443,6 +20443,55 @@ static bool executePreparedViewDelete(Session& session, const string& viewname,
     return false;
 }
 
+static bool containsPreparedPattern(const dbms::Expr* value) {
+    if(!value)return false;
+    if(const auto* binary=dynamic_cast<const dbms::BinaryOpExpr*>(value)) {
+        const auto& op=binary->op;
+        if(op=="LIKE" || op=="NOT LIKE" || op=="ILIKE" || op=="NOT ILIKE" ||
+           op=="SIMILAR TO" || op=="NOT SIMILAR TO")return true;
+        return containsPreparedPattern(binary->left.get()) || containsPreparedPattern(binary->right.get());
+    }
+    if(const auto* unary=dynamic_cast<const dbms::UnaryOpExpr*>(value))return containsPreparedPattern(unary->operand.get());
+    if(const auto* cast=dynamic_cast<const dbms::CastExpr*>(value))return containsPreparedPattern(cast->operand.get());
+    if(const auto* call=dynamic_cast<const dbms::FunctionCallExpr*>(value)) {
+        const auto& op=call->funcName;
+        if(call->schema.empty() && (op=="LIKE ESCAPE" || op=="NOT LIKE ESCAPE" ||
+           op=="ILIKE ESCAPE" || op=="NOT ILIKE ESCAPE" ||
+           op=="SIMILAR TO ESCAPE" || op=="NOT SIMILAR TO ESCAPE"))return true;
+        for(const auto& argument:call->args)if(containsPreparedPattern(argument.get()))return true;
+        for(const auto& argument:call->namedArgs)if(containsPreparedPattern(argument.value.get()))return true;
+    }
+    if(const auto* conditional=dynamic_cast<const dbms::CaseExpr*>(value)) {
+        if(containsPreparedPattern(conditional->switchExpr.get()) || containsPreparedPattern(conditional->elseExpr.get()))return true;
+        for(const auto& arm:conditional->whenClauses)
+            if(containsPreparedPattern(arm.first.get()) || containsPreparedPattern(arm.second.get()))return true;
+    }
+    return false;
+}
+
+static bool handlePreparedPatternDelete(const string& rawSql,Session& session,bool& handled) {
+    handled=false;
+    dbms::SQLParser parser;auto parsed=parser.parseForBinding(rawSql);
+    const auto* remove=parsed.isValid()?dynamic_cast<const dbms::DeleteStmt*>(parsed.stmt.get()):nullptr;
+    if(!remove || remove->only || remove->usingClause || !remove->whereCurrentOf.empty() ||
+       !containsPreparedPattern(remove->whereClause.get()))return false;
+    if(!checkDB(session)){handled=true;return true;}
+    auto query=make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(session.currentDB,rawSql));
+    for(const auto& range:query->sourceRanges)
+        if(range.owner==query->ast.get() && !range.source && range.viewQuery)
+            return false; // The typed INSTEAD OF trigger boundary owns views.
+    PreparedWithDmlRuntime runtime(session,std::move(query));
+    auto result=runtime.runDml();
+    for(const auto& name:result.columns)cout<<name<<' ';
+    if(!result.columns.empty())cout<<'\n';
+    for(size_t i=0;i<result.rows.size();++i) {
+        for(size_t j=0;j<result.rows[i].size();++j)cout<<(result.nulls[i][j]?"NULL":result.rows[i][j])<<' ';
+        cout<<'\n';
+    }
+    cout<<"Delete done"<<endl;
+    dbms::publishLastDmlResult(std::move(result));handled=true;return false;
+}
+
 static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& handled) {
     handled=false;
     dbms::SQLParser parser;auto parsed=parser.parseForBinding(rawSql);
@@ -20453,6 +20502,7 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
     // namespace or a discarded preparation-time operand coercion.
     function<bool(const dbms::Expr*)> requiresPreparedValue=[&](const dbms::Expr* value) {
         if(!value)return false;
+        if(containsPreparedPattern(value))return true;
         if(dynamic_cast<const dbms::CaseExpr*>(value))return true;
         if(scalarQueryRoles(value).first)return true;
         if(const auto* binary=dynamic_cast<const dbms::BinaryOpExpr*>(value))return requiresPreparedValue(binary->left.get()) || (binary->op!="::" && requiresPreparedValue(binary->right.get()));
@@ -21373,6 +21423,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
     }
 
     // Phase 4 Wave 0.4: DML AST bridge — try AST-driven execution before legacy string dispatch.
+    if(parsedCmd==dbms::SqlCommand::Delete) {
+        bool handled=false;
+        const bool error=handlePreparedPatternDelete(effectiveRawSql,s,handled);
+        if(handled)return error;
+    }
     {
         bool handled=false;
         const bool error=handlePreparedWithDml(effectiveRawSql,s,handled);
