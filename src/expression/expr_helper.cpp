@@ -2,6 +2,7 @@
 #include "expression/common_type.h"
 #include "array_type.h"
 #include "arithmetic_type.h"
+#include "geometric_input.h"
 #include "ExprEvaluator.h"
 #include "parser/parser.h"
 #include "parser/ast.h"
@@ -60,6 +61,8 @@ std::string inferType(const std::string& value) {
 }
 
 std::string canonicalTypeName(const std::string& storageType) {
+    if(const auto geometry=geometric_input_detail::builtinType(storageType);!geometry.empty())
+        return geometry;
     std::string t = toLower(storageType);
     // Storage aliases must retain the datum's actual width.  In particular,
     // labeling BIGINT as integer changes arithmetic overflow and return casts.
@@ -89,6 +92,8 @@ std::string canonicalTypeName(const std::string& storageType) {
 }
 
 std::string protocolTypeName(std::string type) {
+    if(const auto geometry=geometric_input_detail::builtinType(type);!geometry.empty())
+        return geometry;
     type = toLower(type);
     const size_t modifier = type.find('(');
     if (modifier != std::string::npos) type.resize(modifier);
@@ -883,6 +888,8 @@ std::string ExprHelper::canonicalResultTypeName(std::string typeName) {
         if (baseEnd == std::string::npos) return {};
         typeName.resize(baseEnd + 1);
     }
+    if(const auto geometry=geometric_input_detail::builtinType(typeName);!geometry.empty())
+        return geometry+(array?"[]":"");
     const size_t modifier = typeName.find('(');
     if (modifier != std::string::npos) {
         typeName.resize(modifier);

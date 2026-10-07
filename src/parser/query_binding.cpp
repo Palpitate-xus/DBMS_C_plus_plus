@@ -231,6 +231,8 @@ public:
             expression(cast->operand, scopes, cast->typeName);
             geometric_input_detail::validateUnknownInput(cast->operand.get(),cast->typeName);
             if (metadata.assignmentInput) metadata.assignmentInput({"", cast->typeName}, cast, cast->typeName);
+            if(const auto geometry=geometric_input_detail::builtinType(cast->typeName);!geometry.empty())
+                return geometry;
             return cast->typeName;
         }
         case ExprType::UnaryOp: {
@@ -273,6 +275,8 @@ public:
                 if (!type) throw DbError("42601", "cast requires a type name");
                 geometric_input_detail::validateUnknownInput(binary->left.get(),type->value);
                 if (metadata.assignmentInput) metadata.assignmentInput({"", type->value}, binary, type->value);
+                if(const auto geometry=geometric_input_detail::builtinType(type->value);!geometry.empty())
+                    return geometry;
                 return type->value; // grammar type, not a SQL value namespace
             }
             const auto right = expression(binary->right, scopes);
@@ -452,6 +456,8 @@ public:
         expression(value.frameStart, scopes); expression(value.frameEnd, scopes);
     }
     static std::string projectionTypeLabel(const std::string& spelling) {
+        if(const auto geometry=geometric_input_detail::builtinType(spelling);!geometry.empty())
+            return geometry;
         auto type=common_type_detail::canonical(spelling);
         if(common_type_detail::array(type))type.resize(type.size()-2);
         static const std::map<std::string,std::string> catalogNames={
