@@ -1,6 +1,58 @@
 # Independent source integrations after canonical 75090
 
-## Latest d2 checkpoint: quantified demand and ProjectSet consumers
+## Latest e6 checkpoint: physical heap ownership and paired DML consumers
+
+| Independent repair | Private commit | ROOT commit |
+| --- | --- | --- |
+| Shared actual physical heap/cache/WAL owners and directory generations | `fa765bc1` | `0ccea0b3` |
+| Bound DML owns paired child cursors and its compiled root planning | `11b99bbc` | `253ed437` |
+| Ordinary quantified INSERT/UPDATE/DELETE reaches that typed carrier | `ccd8ca49` | `e6d5d5b8` |
+
+Current committed source e6d5d5b8 has **599 native / 313 registered / 58 TU**.
+The new public heap/WAL/DML headers require a wholly matching rebuild.
+The exact clean detached e6 snapshot in
+`/tmp/dbms-canonical-heap-dml.nRR9aUXB` is actually running fresh all58 normal
+O2 build/repeat/signature/freeze session **68192**, with no donor objects.
+An initial helper count regex failed before compilation; its empty failure log
+is retained separately. Corrected explicit counts are 599/313/58. This is not
+a production failure or an already-passing build.
+
+The previous exact d2 normal all58 build **49089** and repeat/audited immutable
+copy **80128** actually exit0. Frozen SHA256
+`0d2b347fd62d829cd98a83c7e9c350c635ecee5dac1d0aa3dd88224bfeb76b56`.
+Its 120 fresh native **37724** and 64 complete wire **25527** remain live;
+the unchanged original full **590 native / 312 registered** runner **96468**
+has now actually started in the exact d2 repository. These artifacts are under
+`/tmp/dbms-canonical-array-view-explain.GUwiSQnC`. They do not prove e6's new
+public-header combination or an already-passing full suite. Default TLS stub
+intentional skip is not TLS runtime evidence.
+
+Heap/WAL's strong two-successful-commit/fresh-reader row-loss, owner lifetime,
+missing physical file, directory replacement and real crash controls are in
+`issue-shared-engine-heap-cache-coherence.md`. Private fresh58, scoped optimized
+and sanitizer results cannot substitute for the new formal combination.
+Expanded primary/secondary/composite BTree and 10,000-byte TOAST index controls
+still expose separate failures. Original intentional index-close/IO_ERROR
+negatives also catch an intermediate auto-reopen regression; none are weakened.
+
+The paired DML primitive's seven distinct native/nine serial wire gates and
+ordinary mutation's whole23-case strict180006/serial adjacent gates pass in
+their matching private O0 epochs. The whole34 diagnostic remains genuinely
+red for captured-WITH physical restart, UNION ALL child lowering and
+local-variable ANY qualification planning. Its cumulative sequence and
+rollback assertions remain intact and it is not registered as a fake green.
+
+Root-owned pattern V3 adds pure operator/domain metadata and strict ESCAPE
+normalization/planning. Its expanded text/BYTEA/NULL/demand controls actually
+pass PostgreSQL 18.6/180006; the prior immutable V2 has 62 failed assertions.
+V3 public AST/binder/evaluator headers require fresh all58 private O0 build
+**68174**, currently live. No pattern commit or completion is claimed.
+Array ALTER/helper caller opt-in, modifiers/origins/TIMETZ, canonical bpchar
+array identity, quoted array consumers and routine array parameters remain
+separate tasks. All273 states remain22/166/70/15; no push, Actions enablement,
+or user-skipped security restart.
+
+## Prior d2 checkpoint: quantified demand and ProjectSet consumers
 
 | Independent repair | Private commit | ROOT commit |
 | --- | --- | --- |

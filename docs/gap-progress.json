@@ -2,6 +2,31 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Three independent heap/WAL ownership and paired/ordinary DML ROOT commits; fresh e6 normal58 running; d2 original full590/312 actually started",
+      "gap_ids": ["STO-04", "WAL-01", "WAL-05", "TXN-07", "QRY-01", "DML-02", "DML-05"],
+      "status": "partial",
+      "commits": ["0ccea0b3", "253ed437", "e6d5d5b8"],
+      "evidence": [
+        "docs/issue-ready-source-integration.md",
+        "docs/issue-shared-engine-heap-cache-coherence.md",
+        "docs/issue-bound-dml-paired-query-carrier.md"
+      ],
+      "tests": [
+        "tests/shared_heap_engine_rows_test.cpp",
+        "tests/shared_wal_stale_directory_test.cpp",
+        "tests/bound_dml_query_children_test.cpp",
+        "tests/bound_dml_query_children_protocol_e2e_test.py",
+        "tests/ordinary_quantified_dml_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "reproduction": "Original disjoint successful commits lose row99 in freshreader3/3; dropped/replaced WAL directory and missing heap/TOAST generations fail actual strong assertions. Old bound DML returns0A000 without paired cursor and ignores SET constant errors. Expanded pattern1800060 versus V2 actual62 failed assertions retained.",
+        "fix": "Independent actual shared physical allocator/cache/WAL owners; paired DML owns compiled roots and real child factory; genuine ordinary quantified I/U/D reaches typed carrier. Public heap/WAL/DML headers require full58 matching epoch, not old cache reuse.",
+        "focused_tests": "Private heap full58 plus scoped optimized/sanitizer/SSI/generation gates recorded precisely; pairedAPI7native9wire and ordinary23matrix/strict1800067adjacent gates0. Whole34 diagnostic remains red for physical restart with capturedWITH, UNIONALL child and localVarANY planning; not registered fakegreen. New e6 formal matching gates not yet run.",
+        "full_suite": "Current e6d5d5b8 exact599native313registered58TU fresh normalO2 all58 session68192 live in /tmp/dbms-canonical-heap-dml.nRR9aUXB. Prior d2 all58 build49089 and repeat/auditedcopy80128 terminal0; SHA0d2b347fd62d829cd98a83c7e9c350c635ecee5dac1d0aa3dd88224bfeb76b56. Exactd2 120native37724/64wire25527 live; unchanged original590/312 runner96468 actually started. No currentfullPASS or TLSruntime claim.",
+        "scope": "Original273 unchanged22complete166partial70unverified15deferred. BTree/TOAST and intentionalclosedindex negatives, DML remaining3roots, rootprivate pattern new publicABI all58O0 68174 live, safe ARRAY helper optin/modifier/origin/bpchar/quotedconsumer/routineparameters continue. No push, Actionsenablement or user-skipped security restart."
+      }
+    },
+    {
       "issue": "Three independent quantified-demand/ProjectSet ROOT commits; actual prior5+8 and8+5 gates0; freshABI58 buildlive; f6 formal116native0/60wire58pass2fail",
       "gap_ids": ["SQL-04", "QRY-01", "QRY-02", "QRY-05", "DML-02", "DML-05"],
       "status": "partial",
