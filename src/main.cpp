@@ -31877,6 +31877,24 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         source.find_first_of("()+-*/%, ") == string::npos)
                         item = source;
                 }
+                // A real ColumnRef already validated in this source scope
+                // is a physical field, including a quoted range qualifier.
+                // Do not depend on textual prefix deletion or reinterpret
+                // its decoded identifier as arithmetic/a scalar callback.
+                dbms::SQLParser columnParser;const auto columnParsed=columnParser.parse("SELECT "+item);
+                const auto* columnSelect=columnParsed.success?dynamic_cast<const dbms::SelectStmt*>(columnParsed.stmt.get()):nullptr;
+                const auto* physicalColumn=columnSelect && columnSelect->selectList.size()==1
+                    ? dynamic_cast<const dbms::ColumnRefExpr*>(columnSelect->selectList.front().expr.get()):nullptr;
+                if(physicalColumn && sourceRange.contains(*physicalColumn) && sourceRange.columns.count(physicalColumn->column)) {
+                    const string& name=physicalColumn->column;
+                    dbms::StorageEngine::AggItem aggregate;aggregate.func="";aggregate.arg=name;aggItems.push_back(std::move(aggregate));
+                    exprTypes.push_back(0);
+                    if(!selectAll)projectionOrder.push_back(itemAlias.empty()?name:itemAlias+"\x01"+name);
+                    dbms::StorageEngine::SelectExpr target;target.displayName=itemAlias.empty()?name:itemAlias;
+                    target.isScalar=false;target.colName=name;selectExprs.push_back(std::move(target));
+                    if(!selectAll)selectCols.insert(name);
+                    continue;
+                }
                 bool quotedPlainColumn = false;
                 if (item.size() >= 2 && item.front() == '"' &&
                     item.back() == '"') {

@@ -39,6 +39,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/between_predicate_type_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/window_null_order_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/window_groups_unbounded_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/quoted_range_column_projection_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/bit_array_constructor_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/quoted_bit_column_predicate_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/prepared_primitive_assignment_protocol_e2e_test.py)
