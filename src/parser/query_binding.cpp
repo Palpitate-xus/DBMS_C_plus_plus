@@ -89,6 +89,27 @@ public:
         return range;
     }
 
+    bool rangeMatches(const ColumnRefExpr& reference, const Range& range) const {
+        if (!reference.table.empty() && reference.table != range.name) return false;
+        if (reference.schema.empty() || reference.schema == range.schema) return true;
+        // The copied catalog descriptor owns the canonical physical identity.
+        // A requested namespace alias (e.g. pg_temp) may denote that same
+        // relation, but an SQL range alias deliberately hides its schema.
+        if (range.schema.empty() || range.relationName.empty() ||
+            range.name != range.relationName || reference.table.empty() || !metadata.relation)
+            return false;
+        const auto quoted = [](const std::string& name) {
+            std::string result = "\"";
+            for (const char character : name) {
+                result += character;
+                if (character == '"') result += character;
+            }
+            return result + '"';
+        };
+        const auto relation = metadata.relation(quoted(reference.schema) + "." + quoted(reference.table));
+        return relation.schema == range.relationSchema && relation.name == range.relationName;
+    }
+
     std::string parameter(ExprPtr& node, const QueryBindingDatum& datum) {
         if (node->sourceBegin == std::string::npos || node->sourceEnd > result.source.size())
             throw DbError("XX000", "parameter reference has no source provenance");
@@ -174,8 +195,7 @@ public:
             for (size_t scopeDepth = 0; scopeDepth < scopes.size(); ++scopeDepth) {
                 const auto& scope = scopes[scopeDepth];
                 for (const auto& range : scope) {
-                    if (!column->table.empty() && column->table != range.name) continue;
-                    if (!column->schema.empty() && column->schema != range.schema) continue;
+                    if (!rangeMatches(*column, range)) continue;
                     if (!column->table.empty()) rangeFound = true;
                     for (size_t ordinal = 0; ordinal < range.columns.size(); ++ordinal) {
                         const auto& field = range.columns[ordinal];
@@ -519,7 +539,7 @@ public:
             if (const auto* star = dynamic_cast<ColumnRefExpr*>(item.expr.get()); star && star->column == "*") {
                 bool found = false;
                 if (!scopes.empty()) for (const auto& range : scopes.front()) {
-                    if (range.name != star->table || (!star->schema.empty() && range.schema != star->schema)) continue;
+                    if (!rangeMatches(*star, range)) continue;
                     found = true; columns.insert(columns.end(), range.columns.begin(), range.columns.end());
                     if (leaves) leaves->insert(leaves->end(), range.columns.size(), nullptr);
                     if (bindings)
