@@ -47642,7 +47642,12 @@ bool StorageEngine::restoreDdlStatementBackup(
         physicalRestoreLocked(context.txnDB, backupPath);
     if (!restored) return false;
 
-    const bool discarded = discardOwnedPhysicalBackup(backup, context.txnDB);
+    // A restored image can have multiple live savepoint aliases. Keep it
+    // immutable until each frame has either been released or acquired its
+    // own replacement; restoring one frame must not consume another's data.
+    const bool retained = std::any_of(context.savepoints.begin(), context.savepoints.end(),
+        [&](const auto& savepoint) { return savepoint.ddlBackupPath == backupPath; });
+    const bool discarded = retained || discardOwnedPhysicalBackup(backup, context.txnDB);
     context.readView.commitLog = getCommitLog(context.txnDB);
     clearCatalogSnapshot();
     captureCatalogSnapshot();
@@ -47658,6 +47663,8 @@ void StorageEngine::discardDdlStatementBackup(
     if (backupPath.empty()) return;
     const auto& context = transactionContext();
     if (context.txnDB.empty() || context.currentTxnId == 0) return;
+    if (std::any_of(context.savepoints.begin(), context.savepoints.end(),
+        [&](const auto& savepoint) { return savepoint.ddlBackupPath == backupPath; })) return;
     const std::string prefix = context.txnDB + ".ddl_statement_backup." +
         std::to_string(context.currentTxnId) + ".";
     const auto backup = std::filesystem::path(backupPath);
@@ -48163,10 +48170,12 @@ DBStatus StorageEngine::commitTransaction() {
     transactionContext().txnLogSizeAtBackup = 0;
     transactionContext().ddlUndoSizeAtBackup = 0;
     discardTransactionBackup(transactionContext().txnDB);
+    std::set<std::string> savepointImages;
     for (const auto& savepoint : transactionContext().savepoints) {
-        discardDdlStatementBackup(savepoint.ddlBackupPath);
+        savepointImages.insert(savepoint.ddlBackupPath);
     }
     transactionContext().savepoints.clear();
+    for (const auto& image : savepointImages) discardDdlStatementBackup(image);
     transactionContext().txnSubTxnIds.clear();
     clearCatalogSnapshot();
     lockManager_.unlockAll();
@@ -49227,10 +49236,12 @@ DBStatus StorageEngine::rollbackTransaction() {
     transactionContext().querySnapshotUsed = false;
     transactionContext().hasRead = false;
     transactionContext().hasWrite = false;
+    std::set<std::string> savepointImages;
     for (const auto& savepoint : transactionContext().savepoints) {
-        discardDdlStatementBackup(savepoint.ddlBackupPath);
+        savepointImages.insert(savepoint.ddlBackupPath);
     }
     transactionContext().savepoints.clear();
+    for (const auto& image : savepointImages) discardDdlStatementBackup(image);
     transactionContext().txnSubTxnIds.clear();
     clearCatalogSnapshot();
     lockManager_.unlockAll();
@@ -50284,9 +50295,22 @@ DBStatus StorageEngine::createSavepoint(
     if (status != DBStatus::OK) return status;
     auto& context = transactionContext();
     std::string ddlBackupPath;
-    if (context.transactionBackupDirty &&
-        !createDdlStatementBackup(ddlBackupPath)) {
-        return DBStatus::IO_ERROR;
+    std::shared_ptr<SavepointImageReceipt> receipt;
+    if (context.transactionBackupDirty) {
+        for (auto it = context.savepoints.rbegin(); it != context.savepoints.rend(); ++it) {
+            if (it->ddlBackupPath.empty() || !it->imageReceipt ||
+                it->txnLogSize != context.txnLog.size() ||
+                it->ddlUndoSize != context.ddlUndoActions.size() ||
+                it->logicalChangeSize != context.txnLogicalChanges.size()) continue;
+            // Reuse is licensed by the same complete preimage proof used
+            // for no-effect rollback, not by matching log sizes alone.
+            if (!savepointImageUnchanged(it->ddlBackupPath, it->imageReceipt)) continue;
+            ddlBackupPath = it->ddlBackupPath;
+            receipt = it->imageReceipt;
+            break;
+        }
+        if (ddlBackupPath.empty() && !createDdlStatementBackup(ddlBackupPath))
+            return DBStatus::IO_ERROR;
     }
     const auto deferred = context.deferredChecks.find(context.currentTxnId);
     const size_t deferredCheckSize = deferred == context.deferredChecks.end()
@@ -50304,7 +50328,7 @@ DBStatus StorageEngine::createSavepoint(
         false, {}, {}, {}, internalStatement, context.readOnly, {}
     });
     if (!context.savepoints.back().ddlBackupPath.empty())
-        context.savepoints.back().imageReceipt =
+        context.savepoints.back().imageReceipt = receipt ? std::move(receipt) :
             sealSavepointImage(context.savepoints.back().ddlBackupPath);
     if (Session* session = currentSession();
         session && session->currentDB == context.txnDB) {
@@ -50908,12 +50932,13 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
         return DBStatus::IO_ERROR;
     }
 
+    std::set<std::string> retiredImages;
     for (size_t i = savepointIndex + 1;
          i < context.savepoints.size(); ++i) {
-        discardDdlStatementBackup(
-            context.savepoints[i].ddlBackupPath);
+        retiredImages.insert(context.savepoints[i].ddlBackupPath);
     }
     if (restoredSavepointImage) {
+        retiredImages.insert(context.savepoints[savepointIndex].ddlBackupPath);
         context.savepoints[savepointIndex].ddlBackupPath =
             std::move(replacementTargetBackup);
         context.savepoints[savepointIndex].imageReceipt =
@@ -50926,6 +50951,7 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
         context.savepoints.begin() +
             static_cast<std::ptrdiff_t>(savepointIndex + 1),
         context.savepoints.end());
+    for (const auto& image : retiredImages) discardDdlStatementBackup(image);
     if (Session* session = currentSession();
         session && session->currentDB == context.txnDB) {
         session->tempNamespaceCreated = target.tempNamespaceCreated;
@@ -50950,10 +50976,9 @@ DBStatus StorageEngine::releaseSavepoint(const std::string& name) {
     }
     const size_t savepointIndex = static_cast<size_t>(std::distance(
         context.savepoints.begin(), reverseIt.base()) - 1);
-    for (size_t i = savepointIndex; i < context.savepoints.size(); ++i) {
-        discardDdlStatementBackup(
-            context.savepoints[i].ddlBackupPath);
-    }
+    std::set<std::string> retiredImages;
+    for (size_t i = savepointIndex; i < context.savepoints.size(); ++i)
+        retiredImages.insert(context.savepoints[i].ddlBackupPath);
     // Like PostgreSQL's prevXactReadOnly, the parent's mode is restored on
     // successful subtransaction completion as well as abort.
     context.readOnly = context.savepoints[savepointIndex].readOnly;
@@ -50963,6 +50988,7 @@ DBStatus StorageEngine::releaseSavepoint(const std::string& name) {
         context.savepoints.begin() +
             static_cast<std::ptrdiff_t>(savepointIndex),
         context.savepoints.end());
+    for (const auto& image : retiredImages) discardDdlStatementBackup(image);
     return DBStatus::OK;
 }
 
