@@ -16350,10 +16350,12 @@ static bool handleAlterDomain(const string& sql, Session& s) {
         }
         info.defaultValue = defaultValue;
         info.hasDefault = true;
+        info.defaultResolved = true;
         message = "Domain " + domainName + " default set";
     } else if (startsWithKeyword(action, "drop default")) {
         info.defaultValue.clear();
         info.hasDefault = false;
+        info.defaultResolved = true;
         message = "Domain " + domainName + " default dropped";
     } else if (startsWithKeyword(action, "add constraint") || startsWithKeyword(action, "add check")) {
         size_t checkPos = findTopLevelSqlKeyword(action, "check");

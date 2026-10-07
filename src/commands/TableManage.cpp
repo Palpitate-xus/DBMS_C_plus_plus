@@ -50907,7 +50907,7 @@ static bool parseDomainRecord(const std::string& line, StorageEngine::DomainInfo
         start = end + 1;
     }
     info = {};
-    if (fields[0] == "@D2") {
+    if (fields[0] == "@D2" || fields[0] == "@D3") {
         if (fields.size() != 8 || (fields[6] != "0" && fields[6] != "1") ||
             (fields[7] != "0" && fields[7] != "1")) return false;
         if (!domainUnhex(fields[1], info.name) || !domainUnhex(fields[2], info.baseType) ||
@@ -50915,6 +50915,7 @@ static bool parseDomainRecord(const std::string& line, StorageEngine::DomainInfo
             !domainUnhex(fields[5], info.constraintName)) return false;
         info.hasDefault = fields[6] == "1";
         info.notNull = fields[7] == "1";
+        info.defaultResolved = fields[0] == "@D3";
         if ((!info.hasDefault && !info.defaultValue.empty()) ||
             (info.hasDefault && info.defaultValue.empty())) return false;
     } else {
@@ -50934,7 +50935,7 @@ static bool parseDomainRecord(const std::string& line, StorageEngine::DomainInfo
 }
 
 static std::string serializeDomainRecord(const StorageEngine::DomainInfo& info) {
-    return "@D2|" + domainHex(info.name) + "|" + domainHex(info.baseType) + "|" +
+    return std::string(info.defaultResolved ? "@D3|" : "@D2|") + domainHex(info.name) + "|" + domainHex(info.baseType) + "|" +
         domainHex(info.defaultValue) + "|" + domainHex(info.checkExpr) + "|" +
         domainHex(info.constraintName) + "|" + (info.hasDefault || !info.defaultValue.empty() ? "1" : "0") +
         "|" + (info.notNull ? "1" : "0");
@@ -50949,8 +50950,15 @@ static std::pair<std::string, std::string> domainIdentity(const std::string& raw
 
 DBStatus StorageEngine::createDomain(const std::string& dbname, const DomainInfo& info) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
+    DomainInfo declaration = info;
+    if (!declaration.hasDefault && declaration.defaultValue.empty()) {
+        const auto parent = resolveDomainAncestry(dbname,SQLParser::parseTypeSpecification(info.baseType).typeName);
+        declaration.hasDefault = parent.hasDefault;
+        declaration.defaultValue = parent.defaultValue;
+    }
+    declaration.defaultResolved = true;
     DomainInfo checked;
-    if (!parseDomainRecord(serializeDomainRecord(info), checked)) {
+    if (!parseDomainRecord(serializeDomainRecord(declaration), checked)) {
         return DBStatus::INVALID_ARGUMENT;
     }
     auto path = domainPath(dbname);
@@ -50969,7 +50977,7 @@ DBStatus StorageEngine::createDomain(const std::string& dbname, const DomainInfo
     }
     std::ostringstream serialized;
     for (const auto& line : lines) serialized << line << '\n';
-    serialized << serializeDomainRecord(info) << '\n';
+    serialized << serializeDomainRecord(declaration) << '\n';
     return index_file::writeAtomically(path, serialized.str())
         ? DBStatus::OK : DBStatus::IO_ERROR;
 }
@@ -50982,6 +50990,11 @@ DBStatus StorageEngine::alterDomain(const std::string& dbname, const std::string
     if (!std::filesystem::is_regular_file(path)) return DBStatus::IO_ERROR;
     const auto requested = getDomain(dbname, name);
     if (requested.name.empty()) return DBStatus::TABLE_NOT_FOUND;
+    DomainInfo replacement = info;
+    // A caller may retain its original pre-CREATE struct. That must not
+    // downgrade a durable D3 default barrier back to legacy parent fallback.
+    replacement.defaultResolved = replacement.defaultResolved || requested.defaultResolved ||
+        replacement.hasDefault != requested.hasDefault || replacement.defaultValue != requested.defaultValue;
     if (domainIdentity(info.name) != domainIdentity(requested.name) && !getDomain(dbname, info.name).name.empty()) {
         return DBStatus::TABLE_ALREADY_EXISTS;
     }
@@ -50995,8 +51008,8 @@ DBStatus StorageEngine::alterDomain(const std::string& dbname, const std::string
         if (!parseDomainRecord(line, current)) return DBStatus::INVALID_VALUE;
         if (domainIdentity(current.name) == domainIdentity(requested.name)) {
             DomainInfo checked;
-            if (!parseDomainRecord(serializeDomainRecord(info), checked)) return DBStatus::INVALID_ARGUMENT;
-            domains.push_back(serializeDomainRecord(info));
+            if (!parseDomainRecord(serializeDomainRecord(replacement), checked)) return DBStatus::INVALID_ARGUMENT;
+            domains.push_back(serializeDomainRecord(replacement));
             found = true;
         } else {
             domains.push_back(line);
@@ -51092,6 +51105,7 @@ StorageEngine::DomainAncestry StorageEngine::resolveDomainAncestry(
     DomainInfo current = getDomain(dbname, name);
     if (current.name.empty()) return result;
     result.name = current.name;
+    bool mayInheritDefault = true;
     std::set<std::pair<std::string, std::string>> visited;
     for (;;) {
         if (result.domains.size() >= 64)
@@ -51099,10 +51113,11 @@ StorageEngine::DomainAncestry StorageEngine::resolveDomainAncestry(
         if (!visited.insert(domainIdentity(current.name)).second)
             throw DbError("XX001", "cyclic domain ancestry");
         result.notNull = result.notNull || current.notNull;
-        if (!result.hasDefault && (current.hasDefault || !current.defaultValue.empty())) {
+        if (mayInheritDefault && !result.hasDefault && (current.hasDefault || !current.defaultValue.empty())) {
             result.hasDefault = true;
             result.defaultValue = current.defaultValue;
         }
+        if (current.defaultResolved) mayInheritDefault = false;
         result.domains.push_back(current);
         const auto base = SQLParser::parseTypeSpecification(current.baseType);
         DomainInfo parent = getDomain(dbname, base.typeName);

@@ -302,6 +302,10 @@ public:
         // Logical declaration flags; the physical Column format is unchanged.
         bool hasDefault = false;
         bool notNull = false;
+        // D3 stores the domain's own creation-time inherited default. An
+        // absent resolved default is a barrier, not live parent fallback.
+        // Legacy D2 records retain their historical ancestry behavior.
+        bool defaultResolved = false;
     };
     struct DomainAncestry {
         std::string name;
