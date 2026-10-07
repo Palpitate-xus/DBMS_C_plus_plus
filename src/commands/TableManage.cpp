@@ -9430,6 +9430,10 @@ static bool normalizeArray(const std::string& in, const std::string& elemType, s
         auto literal = sql_array_text::parse(in);
         ExprEvaluator evaluator;
         CastExpr cast;cast.typeName=ExprHelper::canonicalResultTypeName(elemType);
+        // Older embedded schemas persisted the public full array spelling.
+        // Their scalar elements still cast to the element, never to an array.
+        if (cast.typeName.size() >= 2 && cast.typeName.compare(cast.typeName.size()-2,2,"[]") == 0)
+            cast.typeName.resize(cast.typeName.size()-2);
         auto parameter=std::make_unique<ParameterExpr>();parameter->declaredType="unknown";
         cast.operand=std::move(parameter);
         const auto convert=[&](const std::string& value) {

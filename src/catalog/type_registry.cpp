@@ -270,6 +270,10 @@ std::string TypeRegistry::validateColumn(Column& col) const {
     }
 
     col.isArray = isArray;
+    // Physical columns carry the element type plus the independent array
+    // flag. resolveColumnType's public full type spelling remains unchanged,
+    // but must not be persisted as the type of each scalar array element.
+    if (isArray) col.dataType = baseType;
     return "";
 }
 

@@ -155,6 +155,7 @@ static void test_validate_column() {
     assert(col.dsize == 4);
     assert(col.isVariableLength);
     assert(col.isArray);
+    assert(col.dataType == "integer"); // physical element type, not integer[] elements
 
     col.dataType = "not_a_type";
     col.dsize = 0;
