@@ -4,6 +4,7 @@
 #include "access/BloomIndex.h"
 #include "access/HashIndex.h"
 #include "catalog/type_registry.h"
+#include "storage/HeapWalIdentity.h"
 #include "storage/WAL.h"
 
 #include <cassert>
@@ -12,6 +13,7 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -26,6 +28,7 @@ namespace {
 constexpr const char* kCompletedDatabase = "truncate_recovery_db";
 constexpr const char* kPendingDatabase = "truncate_pending_db";
 constexpr const char* kCorruptDatabase = "truncate_corrupt_state_db";
+constexpr const char* kNameOnlyDatabase = "truncate_name_only_state_db";
 
 std::string makePayload(size_t size) {
     static constexpr char alphabet[] =
@@ -94,13 +97,30 @@ void assertFreshState(StorageEngine& engine, const std::string& payload) {
     assert(bloom->search("old").empty());
 }
 
-std::vector<char> truncatePayload(const std::string& tableName) {
+std::vector<char> truncatePayload(const std::string& tableName,
+                                  uint64_t physicalRelationId) {
     const uint32_t length = static_cast<uint32_t>(tableName.size());
     std::vector<char> payload;
     payload.insert(payload.end(), reinterpret_cast<const char*>(&length),
                    reinterpret_cast<const char*>(&length) + sizeof(length));
     payload.insert(payload.end(), tableName.begin(), tableName.end());
+    // Match walSmgrTruncate: a current schema requires its actual generation.
+    heap_wal_identity::appendImage(payload, physicalRelationId);
     return payload;
+}
+
+void assertTruncateRecord(WALManager& wal, Lsn lsn,
+                          uint64_t physicalRelationId) {
+    const auto record = wal.ReadRecord(lsn);
+    assert(record && record->rmid() == RM_SMGR_ID);
+    assert(record->info() == XLOG_SMGR_TRUNCATE);
+    assert(record->header.xl_xid == 0);
+    std::string name;
+    std::optional<uint64_t> identity;
+    assert(heap_wal_identity::nameIdentity(record->data, name, identity));
+    assert(name == "items");
+    if (physicalRelationId == 0) assert(!identity);
+    else assert(identity && *identity == physicalRelationId);
 }
 
 void testCompletedTruncate() {
@@ -151,9 +171,13 @@ void testCompletedTruncate() {
 
 void testPendingTruncate() {
     fs::remove_all(kPendingDatabase);
+    uint64_t physicalRelationId = 0;
     {
         StorageEngine engine;
         createTable(engine, kPendingDatabase);
+        physicalRelationId =
+            engine.getTableSchema(kPendingDatabase, "items").physicalRelationId;
+        assert(physicalRelationId != 0);
         assert(engine.insert(
                    kPendingDatabase, "items",
                    {{"id", "1"}, {"payload", "stale"}, {"tag", "old"}}) ==
@@ -164,15 +188,19 @@ void testPendingTruncate() {
         WALManager* wal = engine.getWAL(kPendingDatabase);
         assert(wal);
         const Lsn truncateLsn = wal->XLogInsert(
-            RM_SMGR_ID, XLOG_SMGR_TRUNCATE, 0, truncatePayload("items"));
+            RM_SMGR_ID, XLOG_SMGR_TRUNCATE, 0,
+            truncatePayload("items", physicalRelationId));
         assert(truncateLsn != INVALID_LSN);
         assert(wal->XLogFlush(truncateLsn));
+        assertTruncateRecord(*wal, truncateLsn, physicalRelationId);
         assert(!fs::exists(
             fs::path(kPendingDatabase) / "items.truncate_state"));
     }
 
     {
         StorageEngine recovered;
+        assert(recovered.getTableSchema(kPendingDatabase, "items")
+                   .physicalRelationId == physicalRelationId);
         assert(rowCount(recovered, kPendingDatabase) == 0);
         int64_t rid = -1;
         assert(!recovered.getPKIndex(kPendingDatabase, "items")
@@ -190,9 +218,44 @@ void testPendingTruncate() {
     }
     {
         StorageEngine restarted;
+        assert(restarted.getTableSchema(kPendingDatabase, "items")
+                   .physicalRelationId == physicalRelationId);
         assert(rowCount(restarted, kPendingDatabase) == 0);
     }
     fs::remove_all(kPendingDatabase);
+}
+
+void testNameOnlyMarkerCannotTargetCurrentGeneration() {
+    fs::remove_all(kNameOnlyDatabase);
+    {
+        StorageEngine engine;
+        createTable(engine, kNameOnlyDatabase);
+        assert(engine.getTableSchema(kNameOnlyDatabase, "items")
+                   .physicalRelationId != 0);
+        assert(engine.insert(
+                   kNameOnlyDatabase, "items",
+                   {{"id", "1"}, {"payload", "retained"}, {"tag", "old"}}) ==
+               DBStatus::OK);
+        WALManager* wal = engine.getWAL(kNameOnlyDatabase);
+        assert(wal);
+        const Lsn truncateLsn = wal->XLogInsert(
+            RM_SMGR_ID, XLOG_SMGR_TRUNCATE, 0, truncatePayload("items", 0));
+        assert(truncateLsn != INVALID_LSN);
+        assert(wal->XLogFlush(truncateLsn));
+        assertTruncateRecord(*wal, truncateLsn, 0);
+        assert(rowCount(engine, kNameOnlyDatabase) == 1);
+        assert(!fs::exists(
+            fs::path(kNameOnlyDatabase) / "items.truncate_state"));
+    }
+    bool rejected = false;
+    try {
+        StorageEngine recovered;
+    } catch (const std::runtime_error&) {
+        rejected = true;
+    }
+    assert(rejected);
+    assert(!fs::exists(fs::path(kNameOnlyDatabase) / "items.truncate_state"));
+    fs::remove_all(kNameOnlyDatabase);
 }
 
 void testCorruptStateFailsClosed() {
@@ -233,6 +296,7 @@ int main() {
     fs::remove_all(kCompletedDatabase);
     fs::remove_all(kPendingDatabase);
     fs::remove_all(kCorruptDatabase);
+    fs::remove_all(kNameOnlyDatabase);
     fs::remove_all(".txnid");
 
     testCompletedTruncate();
@@ -241,10 +305,13 @@ int main() {
     std::cout << "[TRUNCATE RECOVERY] interrupted reset is completed OK\n";
     testCorruptStateFailsClosed();
     std::cout << "[TRUNCATE RECOVERY] corrupt state fails closed OK\n";
+    testNameOnlyMarkerCannotTargetCurrentGeneration();
+    std::cout << "[TRUNCATE RECOVERY] name-only marker rejects current generation OK\n";
 
     fs::remove_all(kCompletedDatabase);
     fs::remove_all(kPendingDatabase);
     fs::remove_all(kCorruptDatabase);
+    fs::remove_all(kNameOnlyDatabase);
     fs::remove_all(".txnid");
     std::cout << "[TRUNCATE RECOVERY] all passed\n";
     return 0;
