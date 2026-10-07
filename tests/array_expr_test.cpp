@@ -70,10 +70,18 @@ static void test_index() {
     auto d = eval("ARRAY[10,20][5]");
     assert(d.ok && d.isNull);
 
-    // nested array element
+    // The helper accepts constructor-postfix convenience grammar. A genuine
+    // 2D SQL array with only one subscript yields NULL, not a nested row.
     auto n = eval("ARRAY[ARRAY[1,2],ARRAY[3,4]][2]");
-    assert(n.ok);
-    assert(n.value == "{3,4}");
+    assert(n.ok && n.isNull && n.typeName == "integer");
+    auto full = eval("ARRAY[ARRAY[1,2],ARRAY[3,4]][2][2]");
+    assert(full.ok && !full.isNull && full.value == "4" && full.typeName == "integer");
+    auto rowSlice = eval("ARRAY[ARRAY[1,2],ARRAY[3,4]][2:2]");
+    assert(rowSlice.ok && !rowSlice.isNull && rowSlice.value == "{{3,4}}" && rowSlice.typeName == "integer[]");
+    auto dimensions = eval("array_dims(ARRAY[ARRAY[1,2],ARRAY[3,4]])");
+    assert(dimensions.ok && dimensions.value == "[1:2][1:2]");
+    auto nullCell = eval("ARRAY[ARRAY[1,NULL],ARRAY[3,4]][1][2]");
+    assert(nullCell.ok && nullCell.isNull && nullCell.typeName == "integer");
 
     std::cout << "[ARRAY] subscripting OK" << std::endl;
 }
