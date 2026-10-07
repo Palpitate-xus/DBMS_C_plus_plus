@@ -635,7 +635,19 @@ static void test_like_escape_semantics() {
     assert(evaluateCall("like escape", "'a_b'", "'a#_b'", "'#'"));
     assert(evaluateCall("ilike escape", "'A%B'", "'a#%b'", "'#'"));
     assert(evaluateCall("like escape", "'a_b'", "'a§_b'", "'§'"));
-    assert(!evaluateCall("like escape", "'a#'", "'a#'", "'#'"));
+    bool trailingEscapeRejected = false;
+    try { (void)evaluateCall("like escape", "'a#'", "'a#'", "'#'"); }
+    catch (const std::runtime_error& error) {
+        trailingEscapeRejected = std::string(error.what()).find("SQLSTATE 22025") != std::string::npos;
+    }
+    assert(trailingEscapeRejected);
+    assert(!evaluateCall("like escape", "'a'", "'a#'", "'#'"));
+    auto nullEscape = std::make_unique<FunctionCallExpr>();
+    nullEscape->funcName = "like escape";
+    nullEscape->args.push_back(makeLit("null"));
+    nullEscape->args.push_back(makeLit("'a#'"));
+    nullEscape->args.push_back(makeLit("'#'"));
+    assert(eval.eval(nullEscape.get(), {}).isNull);
 
     std::cout << "[EXPR] LIKE escape semantics OK" << std::endl;
 }
