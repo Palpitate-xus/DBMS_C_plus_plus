@@ -1277,7 +1277,17 @@ std::string protocolRelationFromQuery(const std::string& sql) {
     return source.name;
 }
 
+std::string protocolPhysicalTypeName(const Column& column) {
+    // Storage schemas retain the element name and a separate array flag.
+    // A protocol descriptor needs the declared array identity, independently
+    // of row count, NULL/value bytes, SQL alias, and number of dimensions.
+    return column.isArray
+        ? ExprHelper::canonicalResultTypeName(column.dataType + "[]")
+        : column.dataType;
+}
+
 int16_t protocolTypeSize(uint32_t typeOid, const Column& column) {
+    if (column.isArray) return -1;
     const int16_t geometryLength = geometryTypeLengthForOid(typeOid);
     if (geometryLength != 0) return geometryLength;
     switch (typeOid) {
@@ -1400,9 +1410,9 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
             // delimited F and an unquoted f are different physical columns.
             if (column.dataName != name) continue;
             const std::string physicalTypeName =
-                lowerProtocolText(column.dataType);
+                lowerProtocolText(protocolPhysicalTypeName(column));
             const bool structuredMatchesPhysical = hasStructuredType &&
-                (physicalTypeName == "bit" ||
+                (column.isArray || physicalTypeName == "bit" ||
                  physicalTypeName == "bit varying" ||
                  physicalTypeName == "character" ||
                  physicalTypeName == "char" ||
@@ -1424,7 +1434,7 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
                 const bool unconstrainedVarbit =
                     typeName == "bit varying" && column.dsize == 8388608;
                 description.typeModifier =
-                    column.isVariableLength && column.dsize > 0 &&
+                    !column.isArray && column.isVariableLength && column.dsize > 0 &&
                             !unconstrainedVarbit
                         ? static_cast<int32_t>(column.dsize + 4)
                         : -1;
@@ -1436,8 +1446,14 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
                     description.tableOid = relationOid;
                     description.attributeNumber = static_cast<uint16_t>(attribute.attnum);
                     if (!hasStructuredType || structuredMatchesPhysical) {
-                        if (attribute.atttypid != INVALID_OID) description.typeOid = attribute.atttypid;
-                        if (attribute.attlen != 0) description.typeSize = attribute.attlen;
+                        // Older/current project catalogs may publish the
+                        // element OID plus attndims. Do not overwrite an
+                        // authoritative schema array declaration with that
+                        // scalar OID or its fixed element length.
+                        if (!column.isArray && attribute.atttypid != INVALID_OID)
+                            description.typeOid = attribute.atttypid;
+                        if (!column.isArray && attribute.attlen != 0)
+                            description.typeSize = attribute.attlen;
                         description.typeModifier = attribute.atttypmod;
                     }
                     break;
@@ -1668,19 +1684,20 @@ bool describePreparedResult(const std::string& sql, Session& session,
         }
         for (size_t i = 0; i < schema.len; ++i) {
             const Column& column = schema.cols[i];
-            typeHints[column.dataName] = column.dataType;
-            typeHints[relation + "." + column.dataName] = column.dataType;
+            const auto declaredType = protocolPhysicalTypeName(column);
+            typeHints[column.dataName] = declaredType;
+            typeHints[relation + "." + column.dataName] = declaredType;
             if (virtualPgClass && sourceAlias.empty())
-                typeHints["pg_catalog.pg_class." + column.dataName] = column.dataType;
+                typeHints["pg_catalog.pg_class." + column.dataName] = declaredType;
             if (virtualPgSettings && sourceAlias.empty())
                 typeHints["pg_catalog.pg_settings." + column.dataName] =
-                    column.dataType;
+                    declaredType;
             if (virtualPgStatActivity && sourceAlias.empty())
                 typeHints["pg_catalog.pg_stat_activity." + column.dataName] =
-                    column.dataType;
+                    declaredType;
             if (!sourceAlias.empty()) {
                 typeHints[sourceAlias + "." + column.dataName] =
-                    column.dataType;
+                    declaredType;
             }
         }
     }
@@ -1692,7 +1709,7 @@ bool describePreparedResult(const std::string& sql, Session& session,
     const auto appendPhysicalColumns = [&]() {
         for (size_t i = 0; i < schema.len; ++i) {
             shape.columns.push_back(schema.cols[i].dataName);
-            shape.columnTypes.push_back(schema.cols[i].dataType);
+            shape.columnTypes.push_back(protocolPhysicalTypeName(schema.cols[i]));
             outputNames.push_back(schema.cols[i].dataName);
             directParameterOids.push_back(0);
             projectionTypeModifiers.push_back(-1);
@@ -1729,7 +1746,7 @@ bool describePreparedResult(const std::string& sql, Session& session,
             for (size_t i = 0; i < schema.len; ++i) {
                 if (schema.cols[i].dataName != reference->column) continue;
                 shape.columns.push_back(schema.cols[i].dataName);
-                shape.columnTypes.push_back(schema.cols[i].dataType);
+                shape.columnTypes.push_back(protocolPhysicalTypeName(schema.cols[i]));
                 outputNames.push_back(item.alias.empty() ? reference->column
                                                           : outputAlias(item.alias));
                 directParameterOids.push_back(0);

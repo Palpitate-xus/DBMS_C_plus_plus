@@ -34850,7 +34850,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     map<string, string> typeHints;
                     for (size_t ci = 0; ci < tbl.len; ++ci) {
                         const string& name = tbl.cols[ci].dataName;
-                        const string& type = tbl.cols[ci].dataType;
+                        const string type = tbl.cols[ci].isArray
+                            ? dbms::ExprHelper::canonicalResultTypeName(tbl.cols[ci].dataType + "[]")
+                            : tbl.cols[ci].dataType;
                         typeHints[name] = type;
                         if (!tnameOrig.empty()) typeHints[tnameOrig + "." + name] = type;
                         if (!tableAlias.empty()) typeHints[tableAlias + "." + name] = type;
@@ -35439,7 +35441,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     string type = "text";
                     for (size_t i = 0; i < tbl.len; ++i) {
                         if (tbl.cols[i].dataName == source) {
-                            type = tbl.cols[i].dataType;
+                            type = tbl.cols[i].isArray
+                                ? dbms::ExprHelper::canonicalResultTypeName(tbl.cols[i].dataType + "[]")
+                                : tbl.cols[i].dataType;
                             break;
                         }
                     }
@@ -35450,7 +35454,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 for (size_t i = 0; i < tbl.len; ++i) {
                     if (!selectAll && selectCols.find(tbl.cols[i].dataName) == selectCols.end()) continue;
                     protocolColumns.push_back(tbl.cols[i].dataName);
-                    protocolTypes.push_back(tbl.cols[i].dataType);
+                    protocolTypes.push_back(tbl.cols[i].isArray
+                        ? dbms::ExprHelper::canonicalResultTypeName(tbl.cols[i].dataType + "[]")
+                        : tbl.cols[i].dataType);
                     cout << tbl.cols[i].dataName << ' ';
                 }
             }

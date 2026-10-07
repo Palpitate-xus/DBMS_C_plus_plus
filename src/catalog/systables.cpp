@@ -7,6 +7,7 @@ namespace dbms {
 
 static const std::unordered_map<std::string, Oid> kBuiltinTypeMap = {
     {"bool", 16}, {"boolean", 16},
+    {"bool[]", 1000}, {"boolean[]", 1000},
     {"bytea", 17},
     {"bytea[]", 1001},
     // PostgreSQL's quoted internal catalog type is not SQL CHAR/bpchar.
