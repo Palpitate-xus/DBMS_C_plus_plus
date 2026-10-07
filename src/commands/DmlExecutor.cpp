@@ -5647,6 +5647,12 @@ public:
             options=&insert->returningOptions;returningRelation=insert->tableName;
             if(!insert->conflictAction.empty())throw DbError("0A000","prepared WITH conflict action requires additional lowering");
             for(auto& values:insert->values)for(auto& value:values)expression(value.get());
+            for(auto& value:insert->preparedDefaults) {
+                if(value.first>=target_->columns.size() || target_->columns[value.first].generated ||
+                   target_->columns[value.first].identity || !value.second)
+                    throw DbError("XX000","prepared INSERT default lost its physical target role");
+                expression(value.second.get());
+            }
         } else if(auto* update=dynamic_cast<UpdateStmt*>(statement_)) {
             privilege=StorageEngine::TablePrivilege::Update;returning_=&update->returning;
             options=&update->returningOptions;returningRelation=update->tableName;returningAlias=update->alias;
@@ -5763,7 +5769,13 @@ private:
             if(lower(insert->override_)=="system")override=StorageEngine::IdentityOverride::System;
             if(lower(insert->override_)=="user")override=StorageEngine::IdentityOverride::User;
             std::vector<SqlRow> images;size_t count=0;
-            const auto write=[&](const SqlRow& row) {
+            const auto write=[&](SqlRow row) {
+                for(const auto& value:insert->preparedDefaults) {
+                    const auto& column=target_->columns[value.first];
+                    if(row.find(column.name)!=row.end())continue;
+                    const auto cell=execution_->evaluate(value.second.get(),execution_->context());
+                    row[column.name]=cell.isNull?SqlCell{}:SqlCell{cell.value};
+                }
                 const auto status=g_engine.insertRow(session_.currentDB,physical_,row,returning_->empty()?nullptr:&images,override);
                 if(status!=DBStatus::OK)throw DbError(sqlstateForDBStatus(status),"WITH INSERT failed");
                 ++count;

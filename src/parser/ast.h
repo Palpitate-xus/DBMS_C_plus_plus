@@ -815,6 +815,11 @@ struct InsertStmt : public Stmt {
     ReturningOptions returningOptions;
     bool defaultValues = false;                // DEFAULT VALUES
     std::string override_;                     // OVERRIDING SYSTEM VALUE / USER VALUE
+    // Analysis-owned default expressions of this physical target, keyed by
+    // its real column ordinal. Only defaults demanded by an omitted/DEFAULT
+    // input are retained. Identity/generated storage mechanisms are not
+    // ordinary defaults. No expression is parsed or inferred from row data.
+    std::vector<std::pair<size_t, ExprPtr>> preparedDefaults;
 
     InsertStmt() : Stmt(SqlCommand::Insert) {}
     std::string toString() const override { return "INSERT"; }

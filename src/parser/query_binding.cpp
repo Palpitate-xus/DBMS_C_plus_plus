@@ -191,6 +191,32 @@ public:
         if(lhs=="unknown" || binary)coerceCaseInput(left,leftType,target);
         coerceCaseInput(right,rightType,target);
     }
+    ExprPtr targetDefault(const Range& range, const QueryOutputColumn& column) {
+        if (!metadata.updateDefault) return {};
+        const auto definition=metadata.updateDefault(range.relationSchema,range.relationName,column.name);
+        if (!definition) return {};
+        // Parse the genuine stored definition once, in an independent empty
+        // value namespace. SELECT is only the parser's expression envelope;
+        // no caller CTE/target/PL variable or query provider is inherited.
+        SQLParser parser;
+        auto parsed=parser.parseForBinding("SELECT "+*definition);
+        auto* select=parsed.success?dynamic_cast<SelectStmt*>(parsed.stmt.get()):nullptr;
+        if (!select || select->selectList.size()!=1 || !select->selectList.front().expr ||
+            !select->selectList.front().alias.empty() || select->fromClause || select->whereClause ||
+            select->having || !select->groupBy.empty() || !select->orderBy.empty() ||
+            !select->ctes.empty() || select->setOpRhs || select->limit || select->offset)
+            throw DbError("XX001","invalid stored target default expression");
+        auto value=std::move(select->selectList.front().expr);
+        const std::vector<QueryBindingDatum> noDatums;
+        Binder defaultBinder("",noDatums,metadata);
+        const auto type=defaultBinder.expression(value,{});
+        if (!defaultBinder.result.sourceRanges.empty() || !defaultBinder.result.parameters.empty())
+            throw DbError("0A000","stored target default cannot contain a query or parameter");
+        const auto targetType=ExprHelper::canonicalResultTypeName(column.type);
+        defaultBinder.coerceCaseInput(value,type,targetType);
+        return value;
+    }
+
     std::string expression(ExprPtr& node, const std::vector<Namespace>& scopes,
                            const std::string& arrayContext = {},bool allowSetReturning=false) {
         if (!node) return "unknown";
@@ -1079,7 +1105,39 @@ public:
             }
             for (auto& value : insert->conflictUpdateSet) expression(value.second, conflictScopes);
             expression(insert->conflictWhere, conflictScopes);
-            return returning(insert->returning,insert->returningOptions,target,std::move(scopes));
+            auto output=returning(insert->returning,insert->returningOptions,target,std::move(scopes));
+            // Analysis of every explicit input and RETURNING site precedes
+            // stored-default planning. Retain only actually omitted/DEFAULT
+            // physical columns; a fully supplied bad default is not reached.
+            insert->preparedDefaults.clear();
+            std::vector<bool> needsDefault(target.columns.size(),insert->defaultValues);
+            const auto inputOrdinal=[&](size_t physical)->std::optional<size_t> {
+                for(size_t i=0;i<assignments.size();++i)
+                    if(assignments[i].name==target.columns[physical].name)return i;
+                return std::nullopt;
+            };
+            for(size_t physical=0;physical<target.columns.size();++physical) {
+                const auto input=inputOrdinal(physical);
+                if(!input)needsDefault[physical]=true;
+                else {
+                    for(const auto& row:insert->values) {
+                        if(*input>=row.size()){needsDefault[physical]=true;continue;}
+                        const auto* literal=dynamic_cast<const LiteralExpr*>(row[*input].get());
+                        if(literal && !literal->preparedSubquery && literal->typeName.empty() &&
+                            SQLParser::toLower(literal->value)=="default")needsDefault[physical]=true;
+                    }
+                    if(insert->selectSource && *input>=result.statementOutputs.at(insert->selectSource.get()).size())
+                        needsDefault[physical]=true;
+                }
+                const auto& column=target.columns[physical];
+                // Sequences owned by IDENTITY and stored/generated values
+                // retain their existing storage demand/override contract.
+                if(needsDefault[physical] && !column.generated && !column.identity) {
+                    auto value=targetDefault(target,column);
+                    if(value)insert->preparedDefaults.emplace_back(physical,std::move(value));
+                }
+            }
+            return output;
         }
         if (auto* update = dynamic_cast<UpdateStmt*>(&node)) {
             auto ranges = from(update->fromClause.get(), outer, ctes);
@@ -1097,35 +1155,15 @@ public:
                 if (metadata.updateDefault && literal && !literal->preparedSubquery &&
                     literal->typeName.empty() && SQLParser::toLower(literal->value)=="default") {
                     const auto& range=scopes.front().front();
-                    const auto definition=metadata.updateDefault(range.relationSchema,range.relationName,name);
-                    // Parse the genuine stored expression, not a rendered
-                    // UPDATE or a runtime value. SELECT is only the parser's
-                    // value-expression envelope; no query is executed/bound.
-                    SQLParser parser;
-                    auto parsed=parser.parseForBinding("SELECT "+definition.value_or("NULL"));
-                    auto* select=parsed.success?dynamic_cast<SelectStmt*>(parsed.stmt.get()):nullptr;
-                    if (!select || select->selectList.size()!=1 || !select->selectList.front().expr ||
-                        !select->selectList.front().alias.empty() || select->fromClause || select->whereClause ||
-                        select->having || !select->groupBy.empty() || !select->orderBy.empty() ||
-                        !select->ctes.empty() || select->setOpRhs || select->limit || select->offset)
-                        throw DbError("XX001","invalid stored UPDATE default expression");
-                    value.second=std::move(select->selectList.front().expr);
-                    // A stored default cannot capture the caller's target,
-                    // CTE, PL datums or prepared parameters. Bind its actual
-                    // routines/types in an independent empty namespace and
-                    // retain that live AST as this assignment's value site.
-                    const std::vector<QueryBindingDatum> noDatums;
-                    Binder defaultBinder("",noDatums,metadata);
-                    const auto type=defaultBinder.expression(value.second,{});
-                    if (!defaultBinder.result.sourceRanges.empty() || !defaultBinder.result.parameters.empty())
-                        throw DbError("0A000","stored UPDATE default cannot contain a query or parameter");
                     const auto column=std::find_if(target.begin(),target.end(),
                         [&](const auto& item){return item.name==name;});
                     const auto targetType=ExprHelper::canonicalResultTypeName(column->type);
-                    // DEFAULT has the target's assignment context. Retain
-                    // an implicit typed AST conversion (including numeric
-                    // rounding), never cast a rendered runtime SQL value.
-                    defaultBinder.coerceCaseInput(value.second,type,targetType);
+                    value.second=targetDefault(range,*column);
+                    if(!value.second) {
+                        auto null=std::make_unique<LiteralExpr>();null->value="NULL";
+                        value.second=std::move(null);
+                        coerceCaseInput(value.second,"unknown",targetType);
+                    }
                     assignmentTypes.push_back(targetType);
                     continue;
                 }

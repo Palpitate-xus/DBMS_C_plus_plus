@@ -826,6 +826,7 @@ void PreparedQueryExecution::planStatementConstants(const Stmt* statement,
     } else if (const auto* node = dynamic_cast<const InsertStmt*>(statement)) {
         for (const auto& row : node->values) for (const auto& item : row) value(item);
         planStatementConstants(node->selectSource.get(), visited);
+        for (const auto& item : node->preparedDefaults) value(item.second);
         for (const auto& item : node->conflictUpdateSet) value(item.second);
         value(node->conflictWhere); items(node->returning);
         sources();
@@ -1181,6 +1182,7 @@ void PreparedQueryExecution::indexStatement(const Stmt* statement, const Stmt* p
     } else if (const auto* node = dynamic_cast<const InsertStmt*>(statement)) {
         for (const auto& row : node->values) for (const auto& expr : row) value(expr);
         indexStatement(node->selectSource.get(), statement);
+        for (const auto& expr : node->preparedDefaults) value(expr.second);
         for (const auto& expr : node->conflictUpdateSet) value(expr.second);
         value(node->conflictWhere); items(node->returning);
     } else if (const auto* node = dynamic_cast<const UpdateStmt*>(statement)) {
