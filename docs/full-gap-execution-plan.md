@@ -362,6 +362,12 @@
 6. IDX-03 / IDX-14 / OPT-15 / OPT-16：第 823 项 B-tree 加载／创建分离与第 824 项主键编码／复合成员规划已定向验证；上述最新整套仍有 VACUUM 夹具与超时失败，先处理并复跑。第 825 项缓存代际失效、第 826 项 Hash/Bloom Bitmap/DNF 失败检查、第 827 项 Bitmap EXPLAIN 节点、第 828 项 JSON 可选逗号、第 829 项 JSON cache-hit framing 均有旧版本失败与新版本定向通过证据，各隔离正式生产构建／正式专项协议已退出码 0；825／829 完整协议也退出码 0。第 830 项 JSON ANALYZE 单文档与真实计数的新增协议及 5 个 C++ 通过，相邻／完整协议与隔离正式构建进行中。下一步处理 VACUUM 夹具、文本 TIMING FALSE、缺失 ANALYZE 时的默认基数；整数条件 0001 在普通 SELECT 返回原行而 EXPLAIN ANALYZE 实际为零已复现，类型归一化需修复。继续 Hash/Bloom 运行时加载／显式构建和索引 rollback incomplete 的真实持久化状态。功能族均保持 partial，总清单未完成，用户跳过项不重新开启。
 # 2026-10-07 当前总清单执行计划
 
+最新 source `d2e8c0ac`，590 native / 312 registered / 58 TU。前三项 ARRAY/VIEW/plain EXPLAIN 的正式 matching 5native+8wire已0；pruned quantified cursor 的正式matching8native+5wire已0。新增两个 ProjectSet source 独立 ROOT commit `7484893b`/`d2e8c0ac`，公开接口改变后58正式O2 build49089实际运行，源/头/测试/registry冻结至repeat/auditedcopy；精确最新 full590/312 snapshot已准备，不提前运行旧ABI对象。前一f6 116native exit0、60wire exit1=58pass/2原UNNEST/fullVIEWfail，不反向用后续修复涂绿。
+
+当前顺序仍是：完成最新58正式构建/复制 → 同版本强整合和原full590/312 → 从真实剩余失败逐项修复、测试、独立commit → 推进原273项剩余要求并逐条验收。模式family核心11矩阵/9native private0不替代新增priority/SQLchild37红；Bound DML actual carrier/paired cursor、heap/WAL generation与独立BTree/TOAST、array ALTER/type modifier/projectionorigin/TIMETZ/routineARRAY参数均继续。总22/166/70/15未变；仅总scope真正完成后报告完成。
+
+下面表格为 c62 时点计划，含 live/未运行状态以当时为准。
+
 当前 source `c62d5579`，588 native / 311 registered / 58 TU。总清单仍为 273：22 complete、166 partial、70 unverified、15 deferred；下面历史报告不代表当前完成状态。
 
 | 顺序 | 实际工作与验收 | 当前状态 |

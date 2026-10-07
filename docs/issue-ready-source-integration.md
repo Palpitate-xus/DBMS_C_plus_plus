@@ -1,5 +1,57 @@
 # Independent source integrations after canonical 75090
 
+## Latest d2 checkpoint: quantified demand and ProjectSet consumers
+
+| Independent repair | Private commit | ROOT commit |
+| --- | --- | --- |
+| Acquire quantified cursors only from compiled reached roots | `15e333e4` | `d85bb738` |
+| ProjectSet actual prepared SQL children and primary root planning | `fc3740b0` | `7484893b` |
+| Ordinary metadata-bound SRF receiver and exact original CLI cells | `a9760e3e` | `d2e8c0ac` |
+
+The previous ARRAY/VIEW/plain-EXPLAIN c62 combination actually passes formal
+normal changed3CPP/all58signatures/repeat62464, five fresh matching native40815
+and eight complete serial wire49613. Frozen SHA
+`591064ad9090fa4b1cfa96ebacde591b8b38b8139d3da088c7abba39cf991cc1`.
+The next d85 normal PCE CPP build77884/repeat83937, eightfresh-native59485 and
+fivecomplete-wire71773 also actually exit0. Frozen SHA
+`1bddeebf86d103977f021d95a624e849bd996677cee58437ba048f63ec205a76`.
+Artifacts: `/tmp/dbms-root-array-view-explain.U4YC2FB5`.
+Memory-backed isolated wire semantic data is not disk-performance evidence.
+
+Current source d2e8c0ac has590native/312registered/58TU. The appended public
+ProjectSet root-planning parameter changes ABI; no previous-object assumption
+is accepted. Fresh all58 formal normalO2 build49089 is live in
+`/tmp/dbms-canonical-array-view-explain.GUwiSQnC`. ROOTsource/header/test/registry
+inputs are frozen until actual build/repeat/signatures/immutablecopy. The
+detached exact d2 full590/312 repository is prepared, not running. No current
+whole-suite PASS is claimed. The private whole28direct+28EXPLAIN strong matrix,
+actual180006, original unchangedUNNEST5/5, nine distinctnative and nine serial
+adjacent scripts are recorded in the new issue documents; private O0/fresh58
+cannot substitute for current ROOT formal O2 integration.
+
+The prior immutable f6 normal116fresh-native53646 actually exits0.
+Its complete60-wire93171 actually exits1:58pass/2fail, originalUNNEST no-FROM
+and originalfull joined-viewUPDATE2764. Those are historical f6 failures;
+later commits do not retroactively change their result. Original f6full586/308
+has not run and is superseded by the newer full-source snapshot, not a PASS.
+
+Root-owned pattern V2 has actual whole11-wire0 and nine matching native0;
+the new unchanged18input/ESCAPE-priority controls plus alias/trueSQLANY/ALL/
+rollback are strict1800060 but candidate37assertionsred. Undefined operands
+incorrectly succeed, NULL-left invalidESCAPE has wrong error priority, and
+actual boundDELETE has no paired SQL quantified cursor. No candidate commit or
+pattern-family completion is claimed. The first V2 wire launcher ran before
+its freeze finished and failed FileNotFoundError beforeSQL; that log is kept.
+The corrected full original matrix starts only after actual freeze30636=0,
+with binarySHA1d5d8daa51e08b4b2885945075829ec5626824c3af36e726390ebd3eb653a645.
+Bound-DML actualcarrier/cursor work is assigned independently; no fullRows or
+re-rendered SQL substitutes for a real SQLchild cursor.
+
+Heap/WAL dropped-directory generation and BTree/TOAST row loss remain genuinely
+red; array ALTER envelope, modifiers, physical origins/TIMETZ and routine array
+parameter declarations continue independently. All273states stay22/166/70/15;
+no push, Actions enablement or user-skipped security restart.
+
 ## Latest c62 checkpoint: three additional independent source commits
 
 | Independent repair | Private commit | ROOT commit |

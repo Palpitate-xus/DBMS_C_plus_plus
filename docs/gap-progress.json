@@ -2,6 +2,31 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Three independent quantified-demand/ProjectSet ROOT commits; actual prior5+8 and8+5 gates0; freshABI58 buildlive; f6 formal116native0/60wire58pass2fail",
+      "gap_ids": ["SQL-04", "QRY-01", "QRY-02", "QRY-05", "DML-02", "DML-05"],
+      "status": "partial",
+      "commits": ["d85bb738", "7484893b", "d2e8c0ac"],
+      "evidence": [
+        "docs/issue-ready-source-integration.md",
+        "docs/issue-prepared-quantified-cursor-demand.md",
+        "docs/issue-projectset-prepared-children.md",
+        "docs/issue-projectset-ordinary-receiver.md"
+      ],
+      "tests": [
+        "tests/prepared_quantified_cursor_demand_test.cpp",
+        "tests/prepared_projectset_query_execution_test.cpp",
+        "tests/projectset_quantified_execution_protocol_e2e_test.py",
+        "tests/unnest_e2e_test.py"
+      ],
+      "verification": {
+        "reproduction": "Pruned quantified child true native134 acquires CASE child22012; ProjectSet child0A000 and unchangedCLI noFROMUNNEST genuinefail retained. Pattern newpriority whole1800060 but exactcandidate37assertionsred: invalidoperand accepts/ESCAPEpriority/DELETE SQLchild0A000; not weakened or committedascomplete.",
+        "fix": "Independent compiledreached-sites cursor acquisition, actualProjectSet arrayargument/WHERE retainedPCE and realSQLchild provider, metadata-bound ordinarySRF receiver with exact original no-trailing-cell-blank CLI. New appended public QP parameter requires all58 fresh; no private green inherited toROOT.",
+        "focused_tests": "Prior formalc62 changed3CPP/all58/repeat62464, native5 40815 and completewire8 49613 all0. d85 PCE normalbuild77884/repeat83937/native8 59485/completewire5 71773 all0; SHA1bddeebf86d103977f021d95a624e849bd996677cee58437ba048f63ec205a76. Private newPSet whole28direct28EXPLAIN/actual180006/originalUNNEST5/native9/serialwire9 all0, scopednotformalROOTproof.",
+        "full_suite": "Currentd2e8c0ac 590native312registered58TU. Freshall58formalO2build49089 live /tmp/dbms-canonical-array-view-explain.GUwiSQnC; inputsfrozen, exactdetachedfullsnapshotprepared, notrun. Previousf6 immutable116native53646 terminal0/60wire93171 terminal1=58pass2fail originalUNNEST+fullVIEW2764; originalf6 full586/308notrun, supersedednotPASS. Older4f full564/29315248 actualterminal1 native560/4 and registered290/3.",
+        "scope": "273 unchanged22complete166partial70unverified15deferred. BoundDML cursor/actualcarrier, patternoperator/ESCAPEpriority, multi-engine heap/WAL directorygeneration/BTreeTOASTdataloss, arrayALTER/modifier/origin/TIMETZ/routineARRAYparameters and all remaining original familyrequirements continue. No push/Actionsenablement/deferredsecurityrestart."
+      }
+    },
+    {
       "issue": "Three independent ROOT ARRAY/typed VIEW/plain EXPLAIN commits; f6 formal58 and audited copy0; old original full4f terminal1",
       "gap_ids": ["SQL-04", "TYPE-09", "QRY-01", "DML-02", "DML-05"],
       "status": "partial",
