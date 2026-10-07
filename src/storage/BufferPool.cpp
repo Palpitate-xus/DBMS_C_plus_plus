@@ -100,6 +100,26 @@ bool BufferPool::hasCleanRetiredMainFile(const std::string& currentFilename) con
     return ::lstat(path.c_str(), &current) == 0 && S_ISREG(current.st_mode);
 }
 
+bool BufferPool::quiescentForSnapshot() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (fd_ < 0 || !orphanedPins_.empty() || !loadingPages_.empty()) return false;
+    for (const auto& frame : frames_)
+        if (frame.dirty || frame.pinCount != 0 || frame.pageId == kOrphanedPage)
+            return false;
+    struct stat opened{}, current{};
+    if (::fstat(fd_, &opened) != 0 || !S_ISREG(opened.st_mode) ||
+        ::lstat(filename_.c_str(), &current) != 0 || !S_ISREG(current.st_mode) ||
+        opened.st_dev != current.st_dev || opened.st_ino != current.st_ino)
+        return false;
+    if (tdeFd_ >= 0) {
+        if (::fstat(tdeFd_, &opened) != 0 ||
+            ::lstat((filename_ + ".tde").c_str(), &current) != 0 ||
+            opened.st_dev != current.st_dev || opened.st_ino != current.st_ino)
+            return false;
+    }
+    return true;
+}
+
 // Read one sidecar record.  Returns an all-zero record for pageIds beyond
 // the sidecar EOF (plaintext pages of a database not yet encrypted).
 bool BufferPool::readTdeRecord(uint32_t pageId,

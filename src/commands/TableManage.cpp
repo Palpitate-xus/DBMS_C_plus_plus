@@ -216,6 +216,7 @@ static constexpr const char* kPhysicalBackupManifest = ".dbms_backup_manifest";
 #include <string_view>
 #include <string>
 #include <sys/file.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 #include <vector>
@@ -6987,6 +6988,10 @@ bool StorageEngine::flushSelectedCaches(
         return true;
     };
     if (heapPages) {
+        for (const auto& [key, map] : fsmCache_)
+            if (slashKeySelected(key) && map && !map->flushChecked()) ok = false;
+        for (const auto& [key, map] : vmCache_)
+            if (slashKeySelected(key) && map && !map->flushChecked()) ok = false;
         for (const auto& [key, allocator] : pageAllocators_) {
             if (slashKeySelected(key) && allocator) {
                 const std::string tableName = key.substr(tablePrefix.size());
@@ -44337,6 +44342,206 @@ static bool validPhysicalBackupSource(const std::filesystem::path& source,
            expectedFiles == actualFiles;
 }
 
+struct SavepointImageGeneration {
+    dev_t device = 0;
+    ino_t inode = 0;
+    mode_t mode = 0;
+    off_t size = 0;
+    timespec modified{};
+    timespec changed{};
+    bool operator==(const SavepointImageGeneration& other) const {
+        return device == other.device && inode == other.inode &&
+            mode == other.mode && size == other.size &&
+            modified.tv_sec == other.modified.tv_sec &&
+            modified.tv_nsec == other.modified.tv_nsec &&
+            changed.tv_sec == other.changed.tv_sec &&
+            changed.tv_nsec == other.changed.tv_nsec;
+    }
+};
+
+struct SavepointImageReceipt {
+    using Generations = std::map<std::string, SavepointImageGeneration>;
+    std::string database;
+    std::string backup;
+    Generations sourceGenerations;
+    Generations backupGenerations;
+    PhysicalBackupFiles files;
+    CatalogManager::MetadataSnapshot catalog;
+    Lsn walLsn = INVALID_LSN;
+};
+
+// Exactly the runtime coordination names already omitted by physicalBackup.
+// Everything else, including unknown sidecars, participates in the proof.
+static bool savepointRuntimeCoordinationName(const std::string& name) {
+    return name == ".lockmgr" || name == ".runtime_stats.lock" ||
+        name == ".sql_stats.lock" || name.rfind(".runtime_stats.tmp.", 0) == 0 ||
+        name.rfind(".sql_stats.tmp.", 0) == 0;
+}
+
+static bool collectSavepointGenerations(
+    const std::filesystem::path& root,
+    SavepointImageReceipt::Generations& result, bool activeDatabase) {
+    result.clear();
+    const auto add = [&](const std::filesystem::path& path,
+                         const std::string& name) {
+        struct stat value{};
+        if (::lstat(path.c_str(), &value) != 0 ||
+            (!S_ISREG(value.st_mode) && !S_ISDIR(value.st_mode))) return false;
+        result.emplace(name, SavepointImageGeneration{
+            value.st_dev, value.st_ino, value.st_mode, value.st_size,
+            value.st_mtim, value.st_ctim});
+        return true;
+    };
+    if (!add(root, ".") || !S_ISDIR(result.at(".").mode)) return false;
+    std::error_code error;
+    std::filesystem::recursive_directory_iterator it(root, error), end;
+    if (error) return false;
+    for (; it != end; it.increment(error)) {
+        if (error) return false;
+        const auto relative = it->path().lexically_relative(root).generic_string();
+        if (!validBackupRelativePath(relative) &&
+            (activeDatabase ||
+             (relative != kPhysicalBackupMarker && relative != kPhysicalBackupManifest)))
+            return false;
+        if (activeDatabase && relative.find('/') == std::string::npos &&
+            savepointRuntimeCoordinationName(relative)) {
+            struct stat coordination{};
+            if (::lstat(it->path().c_str(), &coordination) != 0) return false;
+            if (relative == ".lockmgr" && S_ISDIR(coordination.st_mode)) {
+                // physicalBackup omits the whole runtime lock directory.
+                // Savepoint lock state is independently restored from its
+                // checkpoint; these files are not snapshot payload.
+                it.disable_recursion_pending();
+            } else if (!S_ISREG(coordination.st_mode)) return false;
+            continue;
+        }
+        if (!add(it->path(), relative)) return false;
+    }
+    return !error;
+}
+
+template<class Row, class Fields>
+static bool sameSavepointCatalogRows(const std::vector<Row>& first,
+                                    const std::vector<Row>& second,
+                                    const Fields& fields) {
+    if (first.size() != second.size()) return false;
+    for (size_t i = 0; i < first.size(); ++i)
+        if (fields(first[i]) != fields(second[i])) return false;
+    return true;
+}
+
+// Include fields not present in the current on-disk bootstrap prefix too.
+// A direct cached-row edit must invalidate the optimization, not disappear
+// just because its field does not have a persistence encoding yet.
+static bool sameSavepointCatalog(const CatalogManager::MetadataSnapshot& a,
+                                 const CatalogManager::MetadataSnapshot& b) {
+    return sameSavepointCatalogRows(a.namespaces, b.namespaces, [](const PgNamespaceRow& r) {
+        return std::tie(r.oid, r.nspname, r.nspowner);
+    }) && sameSavepointCatalogRows(a.relations, b.relations, [](const PgClassRow& r) {
+        return std::tie(r.oid, r.relname, r.relnamespace, r.reltype, r.reloftype,
+            r.relowner, r.relam, r.relfilenode, r.reltablespace, r.relpages,
+            r.reltuples, r.relallvisible, r.reltoastrelid, r.relhasindex,
+            r.relisshared, r.relpersistence, r.relkind, r.relnatts, r.relchecks,
+            r.relhasrules, r.relhastriggers, r.relhassubclass, r.relrowsecurity,
+            r.relforcerowsecurity, r.relispopulated, r.relreplident,
+            r.relispartition, r.relrewrite, r.relfrozenxid, r.relminmxid);
+    }) && sameSavepointCatalogRows(a.attributes, b.attributes, [](const PgAttributeRow& r) {
+        return std::tie(r.attrelid, r.attname, r.atttypid, r.attstattarget,
+            r.attlen, r.attnum, r.attndims, r.attcacheoff, r.atttypmod,
+            r.attbyval, r.attstorage, r.attalign, r.attnotnull, r.atthasdef,
+            r.attidentity, r.attgenerated, r.attisdropped, r.attislocal,
+            r.attinhcount, r.attcollation);
+    }) && sameSavepointCatalogRows(a.types, b.types, [](const PgTypeRow& r) {
+        return std::tie(r.oid, r.typname, r.typnamespace, r.typowner, r.typlen,
+            r.typbyval, r.typtype, r.typcategory, r.typispreferred, r.typisdefined,
+            r.typdelim, r.typrelid, r.typelem, r.typarray, r.typinput,
+            r.typoutput, r.typreceive, r.typsend, r.typmodin, r.typmodout,
+            r.typanalyze, r.typalign, r.typstorage, r.typnotnull, r.typbasetype,
+            r.typtypmod, r.typndims, r.typcollation);
+    }) && sameSavepointCatalogRows(a.routines, b.routines, [](const PgProcRow& r) {
+        return std::tie(r.oid, r.proname, r.pronamespace, r.proowner, r.prolang,
+            r.procost, r.prorows, r.provariadic, r.prokind, r.prosecdef,
+            r.proleakproof, r.proisstrict, r.proretset, r.provolatile,
+            r.proparallel, r.pronargs, r.pronargdefaults, r.prorettype,
+            r.proargtypes, r.proallargtypes, r.proargmodes, r.proargnames,
+            r.prosrc, r.probin);
+    });
+}
+
+static std::shared_ptr<SavepointImageReceipt> captureSavepointImageReceipt(
+    const std::string& database, const std::string& backup,
+    const std::filesystem::path& source,
+    const CatalogManager::MetadataSnapshot& catalog, Lsn walLsn) {
+    std::string imageDatabase;
+    if (std::filesystem::is_symlink(backup) ||
+        !validPhysicalBackupSource(backup, imageDatabase) || imageDatabase != database)
+        return {};
+    PhysicalBackupDirectories directories;
+    PhysicalBackupFiles files;
+    if (!readPhysicalBackupManifest(backup, imageDatabase, directories, files)) return {};
+    auto receipt = std::make_shared<SavepointImageReceipt>();
+    receipt->database = database;
+    receipt->backup = backup;
+    receipt->catalog = catalog;
+    receipt->walLsn = walLsn;
+    receipt->files = files;
+    if (!collectSavepointGenerations(source, receipt->sourceGenerations, true) ||
+        !collectSavepointGenerations(backup, receipt->backupGenerations, false)) return {};
+    PhysicalBackupDirectories sourceDirectories;
+    PhysicalBackupFiles sourceFiles;
+    for (const auto& [name, generation] : receipt->sourceGenerations) {
+        if (name == ".") continue;
+        if (S_ISDIR(generation.mode)) sourceDirectories.insert(name);
+        else {
+            PhysicalBackupFileEntry value;
+            if (!digestBackupFile(source / name, value)) return {};
+            sourceFiles.emplace(name, std::move(value));
+        }
+    }
+    // External tablespace/archive layouts are never approximated as local
+    // files: a non-identical layout simply retains the complete restore path.
+    if (sourceDirectories != directories || sourceFiles != files) return {};
+    SavepointImageReceipt::Generations sourceAfter, backupAfter;
+    if (!collectSavepointGenerations(source, sourceAfter, true) ||
+        !collectSavepointGenerations(backup, backupAfter, false) ||
+        sourceAfter != receipt->sourceGenerations ||
+        backupAfter != receipt->backupGenerations) return {};
+    return receipt;
+}
+
+static bool matchesSavepointImageReceipt(
+    const SavepointImageReceipt& receipt, const std::string& database,
+    const std::string& backup, const std::filesystem::path& source,
+    const CatalogManager::MetadataSnapshot& catalog, Lsn walLsn) {
+    if (receipt.database != database || receipt.backup != backup ||
+        receipt.walLsn != walLsn || !sameSavepointCatalog(receipt.catalog, catalog))
+        return false;
+    SavepointImageReceipt::Generations current, image;
+    if (!collectSavepointGenerations(source, current, true) ||
+        !collectSavepointGenerations(backup, image, false) ||
+        image != receipt.backupGenerations || current.size() != receipt.sourceGenerations.size())
+        return false;
+    for (const auto& [name, previous] : receipt.sourceGenerations) {
+        const auto now = current.find(name);
+        if (now == current.end()) return false;
+        if (now->second == previous) continue;
+        // OidGenerator currently rewrites its unchanged counter on persist.
+        // Require the same physical file and the actual complete preimage,
+        // not a value-shaped/epoch-based exemption for any other catalog file.
+        if (name != "pg_catalog/.oid_counter" ||
+            now->second.device != previous.device || now->second.inode != previous.inode ||
+            now->second.mode != previous.mode) return false;
+        const auto expected = receipt.files.find(name);
+        PhysicalBackupFileEntry bytes;
+        if (expected == receipt.files.end() || !digestBackupFile(source / name, bytes) ||
+            !(bytes == expected->second)) return false;
+    }
+    SavepointImageReceipt::Generations sourceAfter, imageAfter;
+    return collectSavepointGenerations(source, sourceAfter, true) &&
+        collectSavepointGenerations(backup, imageAfter, false) &&
+        sourceAfter == current && imageAfter == image;
+}
+
 static bool replaceablePhysicalBackupDestination(
     const std::filesystem::path& destination,
     const std::string& expectedDatabase) {
@@ -47297,6 +47502,102 @@ bool StorageEngine::createDdlStatementBackup(std::string& backupPath) {
     return true;
 }
 
+bool StorageEngine::savepointCachesQuiescent(const std::string& dbname) const {
+    const auto prefix = dbname + "/";
+    const auto checkHeap = [&](const auto& entries, const std::string& keyPrefix) {
+        for (const auto& [key, value] : entries) {
+            if (key.rfind(keyPrefix, 0) != 0 || !value) continue;
+            if (!value->isOpen() || value->hasDirtyAllocationState() ||
+                !value->bufferPool() || !value->bufferPool()->quiescentForSnapshot())
+                return false;
+        }
+        return true;
+    };
+    const auto checkTrees = [&](const auto& entries, const std::string& keyPrefix) {
+        for (const auto& [key, value] : entries)
+            if (key.rfind(keyPrefix, 0) == 0 && value &&
+                (!value->isOpen() || value->hasStaleFileGeneration() || value->hasDirtyPages()))
+                return false;
+        return true;
+    };
+    if (!checkHeap(pageAllocators_, prefix) ||
+        !checkHeap(toastPageAllocators_, dbname + ":") ||
+        !checkTrees(pkIndexCache_, prefix) || !checkTrees(secondaryIndexCache_, prefix) ||
+        !checkTrees(toastIndexes_, dbname + ":")) return false;
+    for (const auto& [key, value] : hashIndexCache_)
+        if (key.rfind(dbname + ".", 0) == 0 && value &&
+            (!value->isOpen() || value->hasStaleFileGeneration() || value->hasDirtyData())) return false;
+    for (const auto& [key, value] : bloomIndexCache_)
+        if (key.rfind(dbname + ".", 0) == 0 && value &&
+            (!value->isOpen() || value->hasStaleFileGeneration() || value->hasDirtyData())) return false;
+    for (const auto& [key, value] : fsmCache_)
+        if (key.rfind(prefix, 0) == 0 && value && !value->quiescentForSnapshot()) return false;
+    for (const auto& [key, value] : vmCache_)
+        if (key.rfind(prefix, 0) == 0 && value && !value->quiescentForSnapshot()) return false;
+    // These remaining cache APIs do not expose a complete durable-owner
+    // proof, so they conservatively retain the original physical restore.
+    {
+        std::lock_guard<std::mutex> lock(spGiSTMutex_);
+        for (const auto& [key, value] : spGiSTCache_)
+            if (key.rfind(prefix, 0) == 0 && value) return false;
+    }
+    {
+        std::lock_guard<std::mutex> lock(seqCacheMutex_);
+        for (const auto& [key, value] : seqFileCache_)
+            if (key.rfind(prefix, 0) == 0) return false;
+    }
+    return true;
+}
+
+std::shared_ptr<SavepointImageReceipt> StorageEngine::sealSavepointImage(
+    const std::string& backup) {
+    auto& context = transactionContext();
+    if (backup.empty() || !context.databaseExclusiveLock ||
+        !context.databaseExclusiveLock->owns_lock()) return {};
+    try {
+        std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+        auto* wal = getWAL(context.txnDB);
+        auto* clog = getCommitLog(context.txnDB);
+        if (!wal || !clog || !clog->flush() ||
+            !wal->XLogFlush(wal->currentWriteLsn()) ||
+            !savepointCachesQuiescent(context.txnDB)) return {};
+        const auto catalog = catalogService_
+            ? catalogService_->metadataSnapshot(context.txnDB)
+            : CatalogManager::MetadataSnapshot{};
+        return captureSavepointImageReceipt(context.txnDB, backup,
+            dbPath(context.txnDB), catalog, wal->currentWriteLsn());
+    } catch (const DbError& error) {
+        if (error.sqlState() == "57014") throw;
+        return {};
+    } catch (...) { return {}; }
+}
+
+bool StorageEngine::savepointImageUnchanged(
+    const std::string& backup, const std::shared_ptr<SavepointImageReceipt>& receipt) {
+    auto& context = transactionContext();
+    if (!receipt || backup.empty() || !context.databaseExclusiveLock ||
+        !context.databaseExclusiveLock->owns_lock()) return false;
+    try {
+        std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+        if (catalogService_ && !catalogService_->persistAll()) return false;
+        if (!flushDatabaseCaches(context.txnDB)) return false;
+        auto* wal = getWAL(context.txnDB);
+        auto* clog = getCommitLog(context.txnDB);
+        if (!wal || !clog || !clog->flush() ||
+            !wal->XLogFlush(wal->currentWriteLsn()) ||
+            !savepointCachesQuiescent(context.txnDB)) return false;
+        const auto catalog = catalogService_
+            ? catalogService_->metadataSnapshot(context.txnDB)
+            : CatalogManager::MetadataSnapshot{};
+        return matchesSavepointImageReceipt(*receipt, context.txnDB, backup,
+            dbPath(context.txnDB), catalog, wal->currentWriteLsn()) &&
+            savepointCachesQuiescent(context.txnDB);
+    } catch (const DbError& error) {
+        if (error.sqlState() == "57014") throw;
+        return false;
+    } catch (...) { return false; }
+}
+
 bool StorageEngine::restoreDdlStatementBackup(
     const std::string& backupPath) {
     auto& context = transactionContext();
@@ -49981,8 +50282,11 @@ DBStatus StorageEngine::createSavepoint(
         context.constraintMode,
         std::move(ddlBackupPath),
         lockManager_.captureCheckpoint(),
-        false, {}, {}, {}, internalStatement, context.readOnly
+        false, {}, {}, {}, internalStatement, context.readOnly, {}
     });
+    if (!context.savepoints.back().ddlBackupPath.empty())
+        context.savepoints.back().imageReceipt =
+            sealSavepointImage(context.savepoints.back().ddlBackupPath);
     if (Session* session = currentSession();
         session && session->currentDB == context.txnDB) {
         auto& savepoint = context.savepoints.back();
@@ -50031,7 +50335,11 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
     // log boundary back to the requested savepoint. Changes after either
     // image are already absent physically and must not be replayed again.
     bool restoredSavepointImage = false;
-    if (!target.ddlBackupPath.empty()) {
+    const bool unchangedImage = !target.ddlBackupPath.empty() &&
+        txnLogSpIdx == context.txnLog.size() && ddlSpIdx == context.ddlUndoActions.size() &&
+        logicalChangeSpIdx == context.txnLogicalChanges.size() &&
+        savepointImageUnchanged(target.ddlBackupPath, target.imageReceipt);
+    if (!target.ddlBackupPath.empty() && !unchangedImage) {
         if (!restoreDdlStatementBackup(target.ddlBackupPath)) {
             (void)rollbackTransaction();
             return DBStatus::IO_ERROR;
@@ -50039,7 +50347,7 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
         context.txnLog.resize(txnLogSpIdx);
         context.ddlUndoActions.resize(ddlSpIdx);
         restoredSavepointImage = true;
-    } else if (context.transactionBackupDirty) {
+    } else if (target.ddlBackupPath.empty() && context.transactionBackupDirty) {
         const size_t snapshotTxnLogSize = context.txnLogSizeAtBackup;
         const size_t snapshotDdlUndoSize = context.ddlUndoSizeAtBackup;
         if (txnLogSpIdx > snapshotTxnLogSize ||
@@ -50589,6 +50897,8 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
     if (restoredSavepointImage) {
         context.savepoints[savepointIndex].ddlBackupPath =
             std::move(replacementTargetBackup);
+        context.savepoints[savepointIndex].imageReceipt =
+            sealSavepointImage(context.savepoints[savepointIndex].ddlBackupPath);
     }
 
     // ROLLBACK TO retains the target but destroys every savepoint created

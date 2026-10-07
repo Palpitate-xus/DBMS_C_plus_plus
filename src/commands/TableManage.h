@@ -34,6 +34,7 @@ struct SessionInterruptState;
 namespace dbms {
 
 class CatalogService;
+struct SavepointImageReceipt;
 
 // Storage/index classes appear only as unique_ptr members in this header;
 // forward declarations keep ~100 dependent translation units from
@@ -1763,6 +1764,10 @@ private:
     bool flushSelectedCaches(const std::string& dbname,
                              const std::set<std::string>* tablenames,
                              bool heapPages);
+    bool savepointCachesQuiescent(const std::string& dbname) const;
+    std::shared_ptr<SavepointImageReceipt> sealSavepointImage(const std::string& backup);
+    bool savepointImageUnchanged(const std::string& backup,
+                                 const std::shared_ptr<SavepointImageReceipt>& receipt);
     void closeDatabaseCaches(const std::string& dbname);
     bool refreshPreparedTableCaches(const std::string& dbname,
                                     const std::string& tablename);
@@ -2304,6 +2309,9 @@ private:
             std::set<std::string> tempTablesCreatedInTransaction;
             bool internalStatement = false;
             bool readOnly = false;
+            // Proof of the actual physical and catalog image at this point,
+            // rather than an epoch/hasWrite assumption. Opaque and backend-local.
+            std::shared_ptr<SavepointImageReceipt> imageReceipt;
         };
         std::vector<SavepointState> savepoints;
         bool tempNamespaceAtTransactionStart = false;

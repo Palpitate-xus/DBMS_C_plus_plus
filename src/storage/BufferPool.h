@@ -140,6 +140,9 @@ public:
         bool valid;
     };
     std::vector<FrameInfo> getFrameInfo() const;
+    // A single-lock proof for snapshot optimizations. Orphaned/in-flight
+    // frames and invalid file owners cannot be inferred from getFrameInfo().
+    bool quiescentForSnapshot() const;
 
 private:
     bool openInternal(bool createIfMissing);
