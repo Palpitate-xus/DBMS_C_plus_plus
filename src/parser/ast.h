@@ -1396,6 +1396,7 @@ struct CommentStmt : public Stmt {
 
 struct CreateFunctionStmt : public Stmt {
     std::string funcName;
+    std::string schema; // canonical declared namespace; empty means creation path
     std::vector<std::pair<std::string, std::string>> params; // (name, type)
     std::string returnType;
     std::string language;      // sql, plpgsql, c, internal

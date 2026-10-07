@@ -359,11 +359,12 @@ bool DdlTransaction::undoCreate(StorageEngine& engine, const std::string& db,
         case DdlObjectKind::MaterializedView:
             return engine.dropMaterializedView(db, op.name) == DBStatus::OK;
         case DdlObjectKind::Function: {
-            const bool hadUdf = engine.udfExists(db, op.name);
-            const bool hadTvf = engine.tvfExists(db, op.name);
+            const auto schema=op.extra.empty()?"public":op.extra;
+            const bool hadUdf = engine.udfExists(db, op.name,schema);
+            const bool hadTvf = op.extra.empty() && engine.tvfExists(db, op.name);
             if (!hadUdf && !hadTvf) return false;
             bool removed = false;
-            if (hadUdf) removed = engine.dropUDF(db, op.name) == DBStatus::OK || removed;
+            if (hadUdf) removed = engine.dropUDF(db, op.name,schema) == DBStatus::OK || removed;
             if (hadTvf) removed = engine.dropTVF(db, op.name) == DBStatus::OK || removed;
             return removed;
         }

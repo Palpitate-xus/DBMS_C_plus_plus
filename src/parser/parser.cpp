@@ -1,4 +1,5 @@
 #include "parser.h"
+#include "catalog/catalog.h"
 #include "common/SqlTrivia.h"
 #include "common/DbError.h"
 #include <charconv>
@@ -7754,7 +7755,12 @@ StmtPtr SQLParser::parseCreateType(const std::vector<std::string>& tokens, size_
 StmtPtr SQLParser::parseCreateFunction(const std::vector<std::string>& tokens, size_t& pos) {
     auto stmt = std::make_unique<CreateFunctionStmt>();
     if (pos >= tokens.size()) return stmt;
-    stmt->funcName = parseRoutineIdentifier(tokens[pos++]);
+    std::string declared;
+    if (!parseQualifiedObjectName(tokens, pos, declared)) return nullptr;
+    CatalogManager::QualifiedName routine;
+    if (!CatalogManager::parseQualifiedName(declared, routine, true)) return nullptr;
+    stmt->schema = routine.schema;
+    stmt->funcName = routine.name;
 
     // Optional parameter list: (name type [, ...])
     if (pos < tokens.size() && tokens[pos] == "(") {

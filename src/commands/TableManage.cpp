@@ -5259,8 +5259,15 @@ static std::filesystem::path udfDir(const std::string& dbname) {
 }
 
 static std::filesystem::path udfPath(const std::string& dbname,
-                                     const std::string& funcname) {
-    return std::filesystem::path(dbname) / ".funcs" / (funcname + ".func");
+                                     const std::string& funcname,
+                                     const std::string& schema = "public") {
+    // Public's historical flat files remain byte-for-byte compatible. Other
+    // namespaces have separate directories; never concatenate decoded names
+    // into an ambiguous "schema.name" or "schema__name" storage identity.
+    if (schema == "public")
+        return std::filesystem::path(dbname) / ".funcs" / (funcname + ".func");
+    return std::filesystem::path(dbname) / ".funcs" / ".namespaces" /
+        schema / (funcname + ".func");
 }
 
 DBStatus StorageEngine::createUDF(const std::string& dbname,
@@ -5272,12 +5279,13 @@ DBStatus StorageEngine::createUDF(const std::string& dbname,
                                    const std::string& returnType,
                                    const std::string& paramType,
                                    bool strict,
-                                   bool replace) {
+                                   bool replace,
+                                   const std::string& schema) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
-    if (!validMetadataObjectName(funcname)) return DBStatus::INVALID_ARGUMENT;
-    auto fdir = udfDir(dbname);
+    if (!validMetadataObjectName(funcname) || !validMetadataObjectName(schema)) return DBStatus::INVALID_ARGUMENT;
+    auto fdir = udfPath(dbname,funcname,schema).parent_path();
     if (!ensureMetadataDirectory(fdir)) return DBStatus::IO_ERROR;
-    if (!replace && std::filesystem::exists(udfPath(dbname, funcname))) {
+    if (!replace && std::filesystem::exists(udfPath(dbname, funcname,schema))) {
         return DBStatus::TABLE_ALREADY_EXISTS;
     }
     std::ostringstream serialized;
@@ -5290,7 +5298,7 @@ DBStatus StorageEngine::createUDF(const std::string& dbname,
                << (language.empty() ? "sql" : language) << "\n"
                << "RETURNS:" << (returnType.empty() ? "text" : returnType) << "\n"
                << "STRICT:" << (strict ? '1' : '0') << "\n";
-    return persistMetadata(udfPath(dbname, funcname), serialized.str());
+    return persistMetadata(udfPath(dbname, funcname,schema), serialized.str());
 }
 
 DBStatus StorageEngine::createUDF(const std::string& dbname,
@@ -5302,12 +5310,13 @@ DBStatus StorageEngine::createUDF(const std::string& dbname,
                                    const std::string& language,
                                    const std::string& returnType,
                                    bool strict,
-                                   bool replace) {
+                                   bool replace,
+                                   const std::string& schema) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
-    if (!validMetadataObjectName(funcname)) return DBStatus::INVALID_ARGUMENT;
-    auto fdir = udfDir(dbname);
+    if (!validMetadataObjectName(funcname) || !validMetadataObjectName(schema)) return DBStatus::INVALID_ARGUMENT;
+    auto fdir = udfPath(dbname,funcname,schema).parent_path();
     if (!ensureMetadataDirectory(fdir)) return DBStatus::IO_ERROR;
-    if (!replace && std::filesystem::exists(udfPath(dbname, funcname))) {
+    if (!replace && std::filesystem::exists(udfPath(dbname, funcname,schema))) {
         return DBStatus::TABLE_ALREADY_EXISTS;
     }
     std::ostringstream serialized;
@@ -5321,14 +5330,14 @@ DBStatus StorageEngine::createUDF(const std::string& dbname,
                << (language.empty() ? "sql" : language) << "\n"
                << "RETURNS:" << (returnType.empty() ? "text" : returnType) << "\n"
                << "STRICT:" << (strict ? '1' : '0') << "\n";
-    return persistMetadata(udfPath(dbname, funcname), serialized.str());
+    return persistMetadata(udfPath(dbname, funcname,schema), serialized.str());
 }
 
 DBStatus StorageEngine::dropUDF(const std::string& dbname,
-                                 const std::string& funcname) {
+                                 const std::string& funcname,const std::string& schema) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
-    if (!validMetadataObjectName(funcname)) return DBStatus::INVALID_ARGUMENT;
-    auto path = udfPath(dbname, funcname);
+    if (!validMetadataObjectName(funcname) || !validMetadataObjectName(schema)) return DBStatus::INVALID_ARGUMENT;
+    auto path = udfPath(dbname, funcname,schema);
     if (!std::filesystem::exists(path)) return DBStatus::TABLE_NOT_FOUND;
     std::error_code error;
     if (!std::filesystem::remove(path, error) || error) return DBStatus::IO_ERROR;
@@ -5336,9 +5345,9 @@ DBStatus StorageEngine::dropUDF(const std::string& dbname,
 }
 
 bool StorageEngine::udfExists(const std::string& dbname,
-                              const std::string& funcname) const {
-    return databaseExists(dbname) && validMetadataObjectName(funcname) &&
-           std::filesystem::exists(udfPath(dbname, funcname));
+                              const std::string& funcname,const std::string& schema) const {
+    return databaseExists(dbname) && validMetadataObjectName(funcname) && validMetadataObjectName(schema) &&
+           std::filesystem::exists(udfPath(dbname, funcname,schema));
 }
 
 // Defined near applyScalarFunc; shared by scalar dispatch and callUDF.
@@ -5396,10 +5405,10 @@ eng.setExecFunctionCtx(std::move(ctx));
 
 
 StorageEngine::UDFInfo StorageEngine::getUDF(const std::string& dbname,
-                                              const std::string& funcname) const {
+                                              const std::string& funcname,const std::string& schema) const {
     UDFInfo info;
-    if (!databaseExists(dbname) || !validMetadataObjectName(funcname)) return info;
-    auto path = udfPath(dbname, funcname);
+    if (!databaseExists(dbname) || !validMetadataObjectName(funcname) || !validMetadataObjectName(schema)) return info;
+    auto path = udfPath(dbname, funcname,schema);
     std::ifstream ifs(path);
     if (!ifs) return info;
     std::string line;
@@ -5476,8 +5485,8 @@ bool StorageEngine::callUDF(const std::string& dbname, const std::string& funcna
                             const std::vector<std::string>& argValues,
                             std::string& returnValue,
                             bool* returnIsNull,
-                            const std::vector<bool>* argNulls) const {
-    auto udf = getUDF(dbname, funcname);
+                            const std::vector<bool>* argNulls,const std::string& schema) const {
+    auto udf = getUDF(dbname, funcname,schema);
     if (udf.expression.empty()) return false;
     return evalUDFBody(udf, funcname, argValues,
                        const_cast<StorageEngine*>(this), dbname, returnValue,

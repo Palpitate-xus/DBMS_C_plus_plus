@@ -10700,6 +10700,12 @@ bool DdlExecutor::executeCreateFunction(const CreateFunctionStmt* stmt, Session&
         return true;
     }
 
+    const std::string functionSchema=stmt->schema.empty()?"public":stmt->schema;
+    const auto namespaces=g_engine.catalogService().metadataSnapshot(s.currentDB).namespaces;
+    if(std::none_of(namespaces.begin(),namespaces.end(),[&](const auto& entry){return entry.nspname==functionSchema;})) {
+        throw DbError("3F000","schema \""+functionSchema+"\" does not exist");
+    }
+
     DBStatus res;
     char provolatile = 'v';
     if (stmt->immutable) provolatile = 'i';
@@ -10765,6 +10771,7 @@ bool DdlExecutor::executeCreateFunction(const CreateFunctionStmt* stmt, Session&
 
     bool replacedExisting = false;
     if (toLower(stmt->returnType) == "table") {
+        if(functionSchema!="public")throw DbError("0A000","namespaced table functions require a query host");
         if (lang != "sql") {
             std::cout << "ERROR: table-valued PL/pgSQL functions are not "
                          "supported (SQLSTATE 0A000)" << std::endl;
@@ -10778,7 +10785,7 @@ bool DdlExecutor::executeCreateFunction(const CreateFunctionStmt* stmt, Session&
                       << " is not supported (SQLSTATE 42704)" << std::endl;
             return true;
         }
-        const auto existing = g_engine.getUDF(s.currentDB, stmt->funcName);
+        const auto existing = g_engine.getUDF(s.currentDB, stmt->funcName,functionSchema);
         replacedExisting = stmt->replace && !existing.expression.empty();
         if (replacedExisting) {
             std::vector<std::string> requestedTypes;
@@ -10807,7 +10814,7 @@ bool DdlExecutor::executeCreateFunction(const CreateFunctionStmt* stmt, Session&
             res = g_engine.createUDF(s.currentDB, stmt->funcName, singleParam,
                                      stmt->body, provolatile, lang,
                                      canonicalFunctionType(stmt->returnType), singleType,
-                                     stmt->strict, stmt->replace);
+                                     stmt->strict, stmt->replace,functionSchema);
         } else {
             std::vector<std::string> params;
             std::vector<std::string> types;
@@ -10818,7 +10825,7 @@ bool DdlExecutor::executeCreateFunction(const CreateFunctionStmt* stmt, Session&
             res = g_engine.createUDF(s.currentDB, stmt->funcName, params, types,
                                      stmt->body, provolatile, lang,
                                      canonicalFunctionType(stmt->returnType), stmt->strict,
-                                     stmt->replace);
+                                     stmt->replace,functionSchema);
         }
     }
 
@@ -10830,9 +10837,10 @@ bool DdlExecutor::executeCreateFunction(const CreateFunctionStmt* stmt, Session&
 
     if (stmt->replace) txn.markSnapshotDirty();
     if (replacedExisting) {
-        txn.recordUpdate(DdlObjectKind::Function, stmt->funcName);
+        txn.recordUpdate(DdlObjectKind::Function, stmt->funcName,functionSchema);
     } else {
-        txn.recordCreate(DdlObjectKind::Function, stmt->funcName);
+        txn.recordCreate(DdlObjectKind::Function, stmt->funcName,
+                         toLower(stmt->returnType)=="table"?"":functionSchema);
     }
     if (!txn.commit()) return true;
     std::cout << "CREATE FUNCTION succeeded" << std::endl;

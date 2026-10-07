@@ -369,7 +369,8 @@ public:
                        const std::string& returnType = "text",
                        const std::string& paramType = "",
                        bool strict = false,
-                       bool replace = false);
+                       bool replace = false,
+                       const std::string& schema = "public");
     DBStatus createUDF(const std::string& dbname, const std::string& funcname,
                        const std::vector<std::string>& params,
                        const std::vector<std::string>& types,
@@ -378,10 +379,14 @@ public:
                        const std::string& language = "sql",
                        const std::string& returnType = "text",
                        bool strict = false,
-                       bool replace = false);
-    DBStatus dropUDF(const std::string& dbname, const std::string& funcname);
-    bool udfExists(const std::string& dbname, const std::string& funcname) const;
-    UDFInfo getUDF(const std::string& dbname, const std::string& funcname) const;
+                       bool replace = false,
+                       const std::string& schema = "public");
+    DBStatus dropUDF(const std::string& dbname, const std::string& funcname,
+                     const std::string& schema = "public");
+    bool udfExists(const std::string& dbname, const std::string& funcname,
+                    const std::string& schema = "public") const;
+    UDFInfo getUDF(const std::string& dbname, const std::string& funcname,
+                   const std::string& schema = "public") const;
     // Invoke a stored UDF with literal argument values.  Dispatches to the
     // PL/pgSQL interpreter or the SQL-expression evaluator; used by trigger
     // EXECUTE FUNCTION actions and any other host-side call sites.
@@ -390,7 +395,8 @@ public:
                  const std::vector<std::string>& argValues,
                  std::string& returnValue,
                  bool* returnIsNull = nullptr,
-                 const std::vector<bool>* argNulls = nullptr) const;
+                 const std::vector<bool>* argNulls = nullptr,
+                 const std::string& schema = "public") const;
     // Trigger context for EXECUTE FUNCTION actions: pre-bound interpreter
     // variables (NEW.col / OLD.col flattened to "new.col" style keys, plus
     // tg_name / tg_op / ... diagnostics).
