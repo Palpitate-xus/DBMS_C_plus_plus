@@ -1,4 +1,39 @@
-# 2026-10-07 最新8694总清单 checkpoint
+# 2026-10-07 最新1d25总清单 checkpoint
+
+生产/测试source `1d25a253`：**680 auto-native +1真实frontend native /
+347registered/58TU**，累计67项独立source/test commit。glob之外的同main-TU
+frontend driver由原build_tests真实调用，不伪算为第681个glob测试。
+六项source-DML/oracle/状态契约、INSERT默认值与CREATE真实source两项、
+EXPLAIN primary-cleanup、复合DEFAULT source、EXPLAIN分析/描述符分别提交；
+映射/原红/证据范围见integration。合并UPDATE FROM保留ROOT原target-only
+typed DEFAULT；当前exacte083 optimized merge10实际0。
+
+私有SourceDML40normal whole+8局部SAN whole、34native和状态测试均0；
+INSERT整29×4、完整新phase strict180006/14whole/13native/六CPP局部SAN均0，
+不将/dev/shm/O0私有证据写成最新ROOT disk/O2。原span-only NoData阶段失败、
+所有SQL/值/NULL/错误码/默认期限与旧失败日志保留。primary-cleanup实际同main
+TU/no-stub/同graph/512MiB streaming通过，原native array seed仍独立134。
+
+精确6aec **fresh全部58正常O2 21279已0**，exacte083 fresh58 28756已0；
+最新1d25正常O2 **73339已0**，四CPP fresh+54 source/header/flags/原58receipts/
+object-byte逐字证明donors，不宣最新fresh58；freeze/repeat/hash见integration。
+99native+1frontend91615/48whole12909已启动live，原680+1与347full仅准备。
+真正两个GNU fault38306为0；首次helper误用宏link1日志保留，不算生产回归。
+原typed-array seed143在最新native组真134，继续真实修复。另current original3
+native50319为1：routine字面int metadata134、导入快照在writer COMMIT后错误
+可见性134，原完整vacuum_full全部控制0，不以其绿消除旧full失败。
+上一8694 native89全0、whole43实际32pass/11fail（九入口timeout、DELETE六原
+断言、一次pattern初始connect103）；fault两项0、原672/342full64688仍live。
+旧5ca原618/319full16482已真正exit1：937标签完整，610native/243registered
+pass，8native/76registered fail；不算84独立bugs，不批准任何最新组合。
+另八更早full逐个live，不因观察超时kill/restart。完整hash/路径见integration。
+
+WITH-final-DML EXPLAIN、XML/YAML/options/全真实指标、native array元素边界、
+native schema完整owner/真实peer已提交目录刷新、catalog WAL/MVCC与所有原273
+未闭环项继续。总账仍22complete/166partial/70unverified/15deferred；不push、
+不启用Actions、不恢复用户跳过安全/TDE，不以专项绿宣总账完成。
+
+# 2026-10-07 历史8694总清单 checkpoint
 
 生产/测试source `8694f31e`：**672native/342registered/58TU**，累计56项
 独立source/test commit。新增map受检cooperative发布/实际backup `58c3d0a7`、

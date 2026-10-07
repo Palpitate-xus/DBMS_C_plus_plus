@@ -1,4 +1,115 @@
-# Latest 8694 checkpoint: 56 independently committed source/test repairs
+# Latest 1d25 checkpoint: 67 independently committed source/test repairs
+
+Production/test source `1d25a253` has **680 auto-discovered native tests plus
+one real frontend native driver /347 registered tests /58 production TUs**.
+The frontend driver is deliberately outside the `*_test.cpp` glob; it is
+actually called by `scripts/build_tests.sh`, not counted as another discovered
+standalone source. Eleven further issue-scoped source/test commits follow the
+historical 8694 checkpoint:
+
+| Issue | Private commit | ROOT commit | Verified issue scope |
+| --- | --- | --- | --- |
+| Original ambiguous source-DML RETURNING protocol oracle | `7c5dcbd7` | `a406e70a` | Original SQL retained as 42702/no-effects controls; qualified positives keep values/OIDs |
+| Ordinary DELETE qualification/RETURNING consumer | `b9b0c3d8` | `6688959a` | Genuine whole AST/typed runtime, once atomic; original six owner assertions repaired |
+| Native ambiguous/LEFT source-DML oracle | `3833b77e` | `c9fae6c1` | Original ambiguous and legal LEFT SQL retained; no assertion removed to hide USING failures |
+| Actual UPDATE FROM source carrier | `ef6beeb6` | `c29a1e22` | Real typed source/nullable joins/merged USING/duplicate target RID; existing ROOT target-only DEFAULT path preserved |
+| Native source writer status contract | `d83eb87c` | `c6bc8793` | Only returned DBStatus errors adapt to legacy bool after rollback; real expression DbError remains typed |
+| Native DELETE USING source owner | `678fc6da` | `e083da7f` | Original full dml_semantics and NULL/array/source/parent/effect controls actually finish green |
+| Required INSERT defaults in actual mutation carrier | `7ec284a8` | `abf9c20e` | Omitted/DEFAULT only, typed assignment and same PCE; full input/RETURNING analysis first |
+| Genuine CREATE TABLE default expression before rewriting | `58806e47` | `6aecdb04` | Actual CASE/source bytes/token provenance, bracket validation and no-effects controls |
+| EXPLAIN primary exception during secondary cleanup | `0e566be3` | `32257409` | Same actual main TU/real graphs; original exception object/SQLSTATE preserved, streaming not replayed |
+| Compound stored-default expression provenance | `4834441f` | `56060be1` | Real lexer interval for previously untagged roots; original ALTER default and late planning controls |
+| Actual EXPLAIN analysis and protocol descriptors | `24e5af4f` | `1d25a253` | Pure whole-tree/typed-parameter Parse before publication; TEXT25/JSON114, S/P descriptions and one complete JSON datum |
+
+The six source-DML commits are integrated together after all original native
+USING controls are repaired, not on the intermediate oracle-only green.
+Their private final 40 normal whole +8 scoped-main/DML whole group and 34 native
+plus the independent status fixture exit0; strict180006 keeps original SQL,
+no-effects and qualified positives. Scoped main/DML/native/stubs SAN is not
+all58 SAN. ROOT's exact e083 optimized merge ten-native gate **73736 exits0**,
+including the preserved target-only UPDATE DEFAULT and domain-default controls.
+
+Core INSERT default/CREATE repairs have complete private29-by-four strict18/
+normal/scoped-SAN evidence. Later compound-span baseline95473 is134; span-only
+V4 whole25452 stays failed at the independent NoData descriptor producer.
+The separate descriptor repair's complete private14 whole1775/13 native47520
+and scoped six-CPP/two-native57584/two entire whole4686 exit0; strict180006
+complete phase repeats0. That wire evidence uses `/dev/shm` and its recorded
+matching O0 epoch, not latest ROOT disk/O2 proof. Normal private SHA256 is
+`dec7778ad6ae036d2fa1b4980d681264427cb2426c4bac49709a4f48f6ff6a82`.
+
+The primary-cleanup driver tests actual same-main-TU behavior, no stubs, both
+TEXT/JSON/output paths, first/late execution failures, real exception identity,
+commit subtype, secondary close errors, successful close failures and a real
+8192-row/512MiB streaming producer. Its original152 failed checks are not152
+bugs. Normal and scoped-main/driver SAN are0; the neighboring original array
+seed in explain_typed_execution independently still fails134. That array API
+boundary is being repaired without changing the original seed/assertion.
+
+Latest exact1d25 `/tmp/dbms-canonical-explain-phase.Ecxfh2aQ/repo` normal O2
+**73339 exits0**, including repeat/all58 receipts/stamp/freeze, SHA256
+`b4b44ab6ced605655eb322de3510672a5dcc833ef18c2cbc42a9c8ad613485f1`.
+It freshly compiles the four changed main/parser/binder/
+network CPPs and uses **54 byte/source/header/actual-flag/original58-receipt
+proved normal objects** from exact6aec, not a fresh1d25 all58 claim.
+**99 native plus one frontend driver91615 /48 whole12909 are live**. The
+original680 plus one frontend/347 full helper remains prepared, not started.
+Two genuinely wrapped map-fault controls **38306 exit0**. The first fault-helper
+43029 link fails because its author used an undefined fixture macro/wrapper;
+that original log is retained. Corrected fixture-defined macros inject the real
+pwrite, xattr, fsync, write and renameat faults; no normal native is relabeled
+as fault coverage. Original typed-array seed143 fails in the live native group,
+also retained, not waived by earlier private subset success.
+
+Three exact-current, whole unchanged native reproductions of old full failures
+**50319 exit1**: function_procedure134 at its literal `int` metadata assertion,
+snapshot_export_import134 at imported-reader visibility after writer COMMIT,
+and complete vacuum_full0 (all heap/index/partition/rollback controls). The
+routine contract is being checked, and the snapshot isolation defect is a new
+actual current repair target; the passing vacuum group does not erase old5ca
+failure or approve every storage family. No private pass approves these current
+full-suite requirements.
+
+Authoritative late outcomes supersede historical live/prepared observations:
+
+- Exact6aec genuinely fresh all58 normal O2 **21279 exits0**, including repeat,
+  all receipts/stamp/freeze; SHA256
+  `a20a8ca29259ebf71fbf39d8f56af4f7d80bb7f6882fba89f91010ea2cc064f1`.
+  Its96 native/47 whole/original678/346 full helpers remain prepared, not run.
+- Exacte083 fresh all58 normal O2 **28756 exits0**, SHA256
+  `bfa8e7f960e2ef721a3bf09d8610135cde6515aa707c517b07051a1ed546b932`;
+  the independently matched ten-native merge73736 exits0. Its94/46/full676/345
+  helpers were prepared, not started, and cannot approve the later INSERT AST.
+- Exact8694 fresh all58 normal O2 **44782 exits0**, SHA256
+  `ed533a2975147579ea4848bb1b2c9811d84728a300984cb5c5daf4dc68b60995`.
+  **65688 exits0:89 native pass**. **96224 exits1:32 whole pass/11 fail**:
+  nine explicit failed-entry timeouts, original DELETE six assertions and
+  pattern-predicate initial connect103. Two genuinely wrapped map-fault controls
+  **66923 exit0**. Its original672/342 full **64688 is still live**.
+- Exact5ca original618/319 full **16482 now exits1**: all937 entry labels
+  finish, **610 native/243 registered pass, 8 native/76 registered fail**.
+  Full log `/tmp/dbms-canonical-storage-set-srf.OBaWSkrC/full-original-618-319.log`
+  remains intact. These are84 failed entries, not84 diagnosed/current bugs or
+  an approval of newer repairs. Other original full36568/33648/56028/48518/
+  27869/79042/97347/93414 are individually re-polled live; no observation
+  timeout is used to kill, restart or pronounce a runner stopped.
+
+Evidence documents include `issue-source-dml-returning-oracle.md`,
+`issue-delete-bound-returning-consumer.md`, `issue-native-source-dml-oracle.md`,
+`issue-update-source-bound-consumer.md`, `issue-native-source-status-contract.md`,
+`issue-native-delete-using-bound-consumer.md`, `issue-insert-default-planning.md`,
+`issue-explain-primary-error-cleanup.md` and
+`issue-explain-prepared-descriptor.md`.
+All original273 remain **22complete/166partial/70unverified/15deferred**.
+WITH-final-DML EXPLAIN graphs, XML/YAML/runtime options/full instrumentation,
+native array element validation, full native namespace/drop/cached-peer owner,
+catalog WAL/MVCC, full storage/recovery/operations and every remaining original
+requirement continue. Native namespace V1's introduced filesystem-status
+boundary and independent clean-peer catalog refresh are not yet ROOT fixes;
+the old unchanged skeleton failure stays separate. No push, Actions enablement,
+deferred security/TDE restart or completion claim.
+
+# Historical 8694 checkpoint: 56 independently committed source/test repairs
 
 Production/test source `8694f31e` is **672 native /342 registered /58 TU**.
 Four further repairs/corrections are individually committed, not four completed

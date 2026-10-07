@@ -4,7 +4,34 @@
 
 # 工作区与复查清单收尾计划
 
-## 2026-10-07 当前完整273目标计划（8694；以下较早记录均历史）
+## 2026-10-07 当前完整273目标计划（1d25；以下较早记录均历史）
+
+当前source `1d25a253`：680 auto-native+1实际frontend native/347registered/
+58TU，67项独立source/test commit。六source-DML、两INSERT default/source、
+primary-cleanup、compound source与EXPLAIN metadata各独立提交；完整273目标
+未缩小。SourceDML中间oracle单独绿不代替USING消费者；原UPDATE DEFAULT不回退。
+
+| 阶段 | 必须验收的原范围 | 当前证据 / 下一动作 |
+| --- | --- | --- |
+| 独立修复 | 真复现、保留完整原SQL/控制、逐问题commit | 十一新ROOT映射/原失败见integration；private最终整组而非选取子集 |
+| 最新组合构建 | 新AST/全部headers一致、正常O2/repeat/receipts/freeze | 6aec真正fresh58已0；1d25四CPP fresh+54逐字proved donor门73339已0，不冒fresh58 |
+| 原完整回归 | 原680 auto-native+1 frontend/347registered、默认磁盘期限、完整终态 | 最新99+1native91615/48whole12909 live，真实GNU fault38306为0，full仅准备；旧5ca618/319已1且937标签完整；其余九full含8694仍live |
+| 剩余DML/EXPLAIN | WITH-final writer/CTE同图/atomic/phase、所有格式/options/真实指标 | ordinary/source/default/descriptor专项不代替全部OPT-16和DML；严格34×4原envelope继续 |
+| 已复现native边界 | exact array seed/元素类型、namespace完整依赖/物理/目录/peer owner | 数组原assert不改；schema V1新异常修复和V2 committed-clean snapshot/旧refs/parent/rollback验证继续 |
+| 当前原full失败核实 | 每项在当前matching58/O2完整旧fixture重现，不以旧红代新红 | actual原三native50319=2fail/1pass：routine int metadata134、snapshot导入后COMMIT可见性134，vacuum_full所有控制0；导出snapshot外部writer身份继续修复 |
+| 目录/存储/全部family | catalog WAL-MVCC、完整FSM/VM重建/恢复、所有原273要求 | 每根因修复不代替CAT-01/CAT-09/STO-05架构验收；其它types/query/recovery/operations逐项继续 |
+| 总账闭合 | 每条原checkbox/状态/证据/commit/验收范围一致 | 22complete/166partial/70unverified/15deferred；require-complete仍必须拒绝 |
+
+8694 native89=0、whole43=32pass/11fail，GNU map fault两项0；原DELETE六断言、
+九入口timeout和初始connect103保持失败。e083正式fresh58/保DEFAULT的merge10
+实际0；6aec正式fresh58实际0；不借这些旧组合批准1d25。私有新phase完整14whole/
+13native/六CPP scopedSAN/strict180006均0，/dev/shm与O0范围明确。强cleanup
+正常/scoped-main同TU driver0，而原数组seed邻接仍134，继续真实修复。
+旧5ca full16482已1：610native/243registered pass，8native/76registered fail；
+不推断84bugs，原完整日志保留。另八旧full及8694原full逐个handle still live；
+不因观察时间结束而kill或restart。不push、Actions保持禁用、安全/TDE deferred。
+
+## 2026-10-07 历史完整273目标计划（8694）
 
 当前生产/测试source `8694f31e`：672native/342registered/58TU，56项独立
 source/test commit。map clean-peer、ordinary DML EXPLAIN、public bootstrap、
