@@ -1212,6 +1212,35 @@ static void validateStoredPatternConditions(
         for (size_t i=0;i<table.len;++i) if (table.cols[i].dataName==condition.colName) {
             const auto& column=table.cols[i];
             (void)ExprEvaluator::resolveComparison("=",column.dataType+(column.isArray?"[]":""),"bit");
+            if (condition.op=="in" || condition.op=="notin" ||
+                condition.op=="between" || condition.op=="notbetween") {
+                const auto tokens=SQLParser::tokenize(condition.value);
+                const bool range=condition.op=="between" || condition.op=="notbetween";
+                if(range && tokens.size()!=2)throw DbError("42601","BIT BETWEEN requires two operands");
+                const auto hints=buildTypeHints(table);
+                ExprEvaluator evaluator;
+                for(size_t member=0;member<tokens.size();++member) {
+                    SQLParser parser;auto parsed=parser.parse("SELECT "+tokens[member]);
+                    const auto* select=parsed.success ? dynamic_cast<const SelectStmt*>(parsed.stmt.get()) : nullptr;
+                    if(!select || select->selectList.size()!=1 || select->fromClause)
+                        throw DbError("42601","invalid compact BIT predicate operand");
+                    const auto* operand=select->selectList.front().expr.get();
+                    if(const auto* reference=dynamic_cast<const ColumnRefExpr*>(operand);
+                       reference && reference->table.empty() && !hints.count(reference->column))
+                        throw DbError("42703","compact predicate column does not exist: "+reference->column);
+                    const auto type=ExprHelper::inferParsedInputType(operand,hints);
+                    const auto binding=ExprEvaluator::resolveComparison(range ? (member==0?">=":"<=") : "=",
+                        column.dataType+(column.isArray?"[]":""),type);
+                    // Signature resolution is schema-owned and complete.
+                    // Only a real pure literal may be input-validated here;
+                    // row references, parameters and routines are not run.
+                    if(const auto* literal=dynamic_cast<const LiteralExpr*>(operand);
+                       literal && !literal->preparedSubquery) {
+                        auto value=evaluator.eval(operand,{});value.typeName=type;
+                        (void)evaluator.coerceComparison(binding,value,false);
+                    }
+                }
+            }
             break;
         }
     }
@@ -37685,9 +37714,14 @@ std::vector<std::string> StorageEngine::queryExpr(
         for (const auto& state : aggregateStates)
             collectAggregateInputSlots(state.call.get(), tbl.len, aggregateInputSlots);
     }
-    if (options.maxProjectionRows && *options.maxProjectionRows == 0) return result;
-
     auto conds = parseConditions(conditions);
+    // Receiver caps and OR alternatives constrain execution demand, not
+    // schema-owned signature/input admission. Validate before any index or
+    // streaming scan, even when zero rows will be requested.
+    validateStoredPatternConditions(tbl,conds);
+    for(const auto& branch:options.conditionAlternatives)
+        validateStoredPatternConditions(tbl,parseConditions(branch));
+    if (options.maxProjectionRows && *options.maxProjectionRows == 0) return result;
     // With no blocking sort, qualification and projection belong to the
     // same demand-driven row receiver. Do not first evaluate WHERE on later
     // rows: those expressions can themselves be volatile or fail.
