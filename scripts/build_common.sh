@@ -70,6 +70,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/insert_default_planning_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/insert_default_prepared_phase_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/enum_empty_label_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/enum_empty_hash_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/floating_arithmetic_width_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/arithmetic_result_type_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/expression_quoted_row_binding_protocol_e2e_test.py)

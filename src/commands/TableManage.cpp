@@ -1038,6 +1038,18 @@ static bool columnAcceptsEmptyValue(const Column& column) {
                     type->category == TypeCategory::XML);
 }
 
+// HashIndex supports zero-byte keys. Only SQL NULL (or a legacy empty
+// non-string sentinel) is absent, not a valid empty text/enum datum.
+static bool hashKeyIncluded(const Column& column, const std::string& value,
+                            bool isNull) {
+    // During RENAME VALUE the new schema no longer admits the old empty
+    // label, but its existing heap/index key must still be removed/undone.
+    // Validate new writes at the DML boundary, not when maintaining OLD keys.
+    const bool enumDatum = !column.isArray && !column.enumValues.empty();
+    return !isNull &&
+        (!value.empty() || enumDatum || columnAcceptsEmptyValue(column));
+}
+
 static std::string valueFromRowMap(
     const std::map<std::string, std::string>& values,
     const std::string& columnName) {
@@ -8425,10 +8437,11 @@ DBStatus StorageEngine::createHashIndex(const std::string& dbname,
         std::string row(data, len);
         for (size_t i = 0; i < tbl.len; ++i) {
             if (tbl.cols[i].dataName == colname) {
+                bool isNull = false;
                 std::string val = canonicalColumnKeyValue(
                     tbl.cols[i], extractColumnValue(
-                                     row, tbl, i, dbname, true));
-                if (!val.empty()) {
+                                     row, tbl, i, dbname, true, &isNull));
+                if (hashKeyIncluded(tbl.cols[i], val, isNull)) {
                     hidx->insert(val, encodeRid(pageId, slotId));
                 }
                 break;
@@ -25757,7 +25770,9 @@ DBStatus StorageEngine::insertInternal(
             if (HashIndex* idx = getHashIndex(dbname, tablename, colname); idx) {
                 const std::string val = canonicalKeyValueFromRowMap(
                     actualValues, tbl, colname);
-                if (!val.empty()) idx->remove(val, rid);
+                if (hashKeyIncluded(tbl.cols[colIdx], val,
+                        actualNullColumns.count(colname) != 0))
+                    idx->remove(val, rid);
             }
         }
         for (const auto& colname : getBloomIndexedColumns(dbname, tablename)) {
@@ -25880,7 +25895,9 @@ DBStatus StorageEngine::insertInternal(
             HashIndex* hidx = getHashIndex(dbname, tablename, colname);
             std::string val = canonicalKeyValueFromRowMap(
                 actualValues, tbl, colname);
-            if (!hidx || (!val.empty() && !hidx->insert(val, rid))) {
+            if (!hidx || (hashKeyIncluded(tbl.cols[colIdx], val,
+                    actualNullColumns.count(colname) != 0) &&
+                    !hidx->insert(val, rid))) {
                 return abortIndexUpdate();
             }
         }
@@ -27848,7 +27865,21 @@ DBStatus StorageEngine::removeInternal(
                     std::string val = canonicalColumnKeyValue(
                         tbl.cols[colIdx],
                         deletedColumnValue(hidx_i, colIdx));
-                    if (!val.empty() && !hidx->remove(val, rid)) {
+                    const bool isNull = hidx_i < nullColumnsToDelete.size() &&
+                        colIdx < nullColumnsToDelete[hidx_i].size() &&
+                        nullColumnsToDelete[hidx_i][colIdx];
+                    // Old builds intentionally omitted empty keys. Keep
+                    // their safe fallback readable while upgrading writes.
+                    const bool included = hashKeyIncluded(tbl.cols[colIdx], val, isNull);
+                    // SQL NULL has no index entry, even when its storage
+                    // bytes equal the real empty key's potentially large bucket.
+                    const auto indexedRids = included ? hidx->search(val)
+                        : std::vector<int64_t>{};
+                    const bool mapped = std::find(indexedRids.begin(),
+                        indexedRids.end(), rid) != indexedRids.end();
+                    if (included &&
+                        (!val.empty() || mapped) &&
+                        !hidx->remove(val, rid)) {
                         lockManager_.unlock(tablename);
                         return DBStatus::IO_ERROR;
                     }
@@ -30682,20 +30713,25 @@ DBStatus StorageEngine::updateInternal(
             // Generated columns and BEFORE triggers can change an indexed
             // value even when that column was absent from the user's SET
             // list. The logical OLD/NEW images are the source of truth.
-            if (oldVal != newVal) {
-                if (!oldVal.empty() &&
-                    (!containsIndexRid(hidx->search(oldVal), rid) ||
-                     !hidx->remove(oldVal, rid))) {
+            const bool oldIncluded = hashKeyIncluded(tbl.cols[colIdx], oldVal,
+                colIdx < oldNullColumns.size() && oldNullColumns[colIdx]);
+            const bool newIncluded = hashKeyIncluded(tbl.cols[colIdx], newVal,
+                newColumnIsNull(colIdx));
+            const bool oldMapped = oldIncluded &&
+                containsIndexRid(hidx->search(oldVal), rid);
+            if (oldVal != newVal || oldIncluded != newIncluded) {
+                if (oldIncluded && (oldMapped || !oldVal.empty()) &&
+                    (!oldMapped || !hidx->remove(oldVal, rid))) {
                     return indexMaintenanceFailure();
                 }
-                if (!newVal.empty() &&
+                if (newIncluded &&
                     (containsIndexRid(hidx->search(newVal), actualRid) ||
                      !hidx->insert(newVal, actualRid))) {
                     return indexMaintenanceFailure();
                 }
-            } else if (actualRid != rid && !newVal.empty()) {
-                if (!containsIndexRid(hidx->search(newVal), rid) ||
-                    !hidx->remove(newVal, rid) ||
+            } else if (actualRid != rid && newIncluded) {
+                if (((oldMapped || !oldVal.empty()) &&
+                     (!oldMapped || !hidx->remove(newVal, rid))) ||
                     containsIndexRid(hidx->search(newVal), actualRid) ||
                     !hidx->insert(newVal, actualRid)) {
                     return indexMaintenanceFailure();
@@ -42310,7 +42346,8 @@ bool StorageEngine::rebuildIndexesAfterRecovery(
                 return table.len;
             };
             const auto populate = [&](auto* index,
-                                      const std::string& columnName) {
+                                      const std::string& columnName,
+                                      bool includeEmptyHash = false) {
                 if (!index) return false;
                 const size_t columnIndex = findColumn(columnName);
                 if (columnIndex >= table.len) return false;
@@ -42322,10 +42359,13 @@ bool StorageEngine::rebuildIndexesAfterRecovery(
                         const char* data, size_t length) {
                         if (!indexValid) return;
                         const std::string row(data, length);
+                        bool isNull = false;
                         const std::string value = canonicalColumnKeyValue(
                             table.cols[columnIndex], extractColumnValue(
-                                row, table, columnIndex, dbname, true));
-                        if (!value.empty() &&
+                                row, table, columnIndex, dbname, true, &isNull));
+                        if ((includeEmptyHash
+                                ? hashKeyIncluded(table.cols[columnIndex], value, isNull)
+                                : !value.empty()) &&
                             !index->insert(value,
                                            encodeRid(pageId, slotId))) {
                             indexValid = false;
@@ -42336,7 +42376,7 @@ bool StorageEngine::rebuildIndexesAfterRecovery(
 
             for (const auto& columnName : hashColumns) {
                 if (!populate(getHashIndexForBuild(dbname, tableName, columnName),
-                              columnName)) {
+                              columnName, true)) {
                     return false;
                 }
             }
@@ -46434,10 +46474,11 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
                         auxiliaryValid = false;
                         return;
                     }
+                    bool isNull = false;
                     const std::string value = canonicalColumnKeyValue(
                         tbl.cols[columnIndex], extractColumnValue(
-                            row, tbl, columnIndex, dbname, true));
-                    if (!value.empty() &&
+                            row, tbl, columnIndex, dbname, true, &isNull));
+                    if (hashKeyIncluded(tbl.cols[columnIndex], value, isNull) &&
                         !index->insert(value, encodeRid(pageId, slotId))) {
                         auxiliaryValid = false;
                     }
@@ -46826,10 +46867,11 @@ bool StorageEngine::restoreDeletedRowIndexes(
             ok = false;
             continue;
         }
+        bool isNull = false;
         const std::string value = canonicalColumnKeyValue(
             tbl.cols[columnIndex], extractColumnValue(
-                rowData, tbl, columnIndex, dbname));
-        if (value.empty()) continue;
+                rowData, tbl, columnIndex, dbname, false, &isNull));
+        if (!hashKeyIncluded(tbl.cols[columnIndex], value, isNull)) continue;
         HashIndex* index = getHashIndex(dbname, tablename, columnName);
         if (!index) {
             ok = false;
@@ -48381,7 +48423,8 @@ bool StorageEngine::undoVersionedUpdate(const TxnLogEntry& entry) {
         }
         return tbl.len;
     };
-    std::map<std::string, std::pair<std::string, std::string>> hashValues;
+    std::map<std::string, std::pair<std::optional<std::string>,
+                                    std::optional<std::string>>> hashValues;
     for (const auto& columnName : getHashIndexedColumns(dbname, tablename)) {
         const size_t index = columnIndex(columnName);
         if (index >= tbl.len) {
@@ -48395,6 +48438,13 @@ bool StorageEngine::undoVersionedUpdate(const TxnLogEntry& entry) {
             canonicalColumnKeyValue(
                 tbl.cols[index], undoColumnValue(
                     entry.rowData, previousNullColumns, index))};
+        auto& values = hashValues[columnName];
+        if (!hashKeyIncluded(tbl.cols[index], *values.first,
+                index < currentNullColumns.size() && currentNullColumns[index]))
+            values.first.reset();
+        if (!hashKeyIncluded(tbl.cols[index], *values.second,
+                index < previousNullColumns.size() && previousNullColumns[index]))
+            values.second.reset();
     }
     std::map<std::string, std::pair<std::string, std::string>> bloomValues;
     for (const auto& columnName : getBloomIndexedColumns(dbname, tablename)) {
@@ -48619,17 +48669,17 @@ bool StorageEngine::undoVersionedUpdate(const TxnLogEntry& entry) {
             indexesOk = false;
             continue;
         }
-        if (!values.first.empty()) {
-            const auto currentRids = index->search(values.first);
+        if (values.first) {
+            const auto currentRids = index->search(*values.first);
             if (containsRid(currentRids, entry.rowIdx) &&
-                !index->remove(values.first, entry.rowIdx)) {
+                !index->remove(*values.first, entry.rowIdx)) {
                 indexesOk = false;
             }
         }
-        if (!values.second.empty()) {
-            const auto previousRids = index->search(values.second);
+        if (values.second) {
+            const auto previousRids = index->search(*values.second);
             if (!containsRid(previousRids, entry.previousRowIdx) &&
-                !index->insert(values.second, entry.previousRowIdx)) {
+                !index->insert(*values.second, entry.previousRowIdx)) {
                 indexesOk = false;
             }
         }
@@ -48795,11 +48845,13 @@ DBStatus StorageEngine::rollbackTransaction() {
                         }
                     }
                     if (colIdx < tbl.len) {
+                        bool isNull = false;
                         std::string value = canonicalColumnKeyValue(
                             tbl.cols[colIdx], extractColumnValue(
                                 insertedRow, tbl, colIdx,
-                                transactionContext().txnDB));
-                        if (!value.empty()) hashIdxVals[colname] = value;
+                                transactionContext().txnDB, false, &isNull));
+                        if (hashKeyIncluded(tbl.cols[colIdx], value, isNull))
+                            hashIdxVals[colname] = value;
                     } else {
                         rowUndoOk = false;
                     }
@@ -50627,13 +50679,14 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                     rowUndoOk = false;
                     continue;
                 }
+                bool isNull = false;
                 std::string value = canonicalColumnKeyValue(
                     tbl.cols[colIdx], extractColumnValue(
                         insertedRow, tbl, colIdx,
-                        transactionContext().txnDB));
+                        transactionContext().txnDB, false, &isNull));
                 HashIndex* hashIdx = getHashIndex(
                     transactionContext().txnDB, entry.tableName, colname);
-                if (!value.empty() &&
+                if (hashKeyIncluded(tbl.cols[colIdx], value, isNull) &&
                     !removeHashRid(hashIdx, value, entry.rowIdx)) {
                     rowUndoOk = false;
                 }

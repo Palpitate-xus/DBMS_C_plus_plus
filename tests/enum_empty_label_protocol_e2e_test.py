@@ -16,6 +16,7 @@ def main():
     spec.loader.exec_module(runner)
     client = runner.load_protocol_client()
     reference = "--reference18" in sys.argv
+    hash_index = "--hash" in sys.argv
     server = None
     schema = "enum_empty_" + uuid.uuid4().hex[:20]
     if reference:
@@ -59,7 +60,8 @@ def main():
         query("CREATE TABLE only_blank (id INT PRIMARY KEY, r blank_type)")
         query("INSERT INTO only_blank VALUES (1,''),(2,NULL)")
         check_values()
-        query("CREATE INDEX empty_rank_idx ON ranks(r)")
+        query("CREATE INDEX empty_rank_idx ON ranks USING HASH(r)" if hash_index else
+              "CREATE INDEX empty_rank_idx ON ranks(r)")
         check_values()
         query("SAVEPOINT empty_label_undo" if reference else "BEGIN")
         query("UPDATE ranks SET r = '' WHERE id = 1")
