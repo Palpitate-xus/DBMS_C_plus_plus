@@ -1732,7 +1732,8 @@ bool DdlExecutor::execute(const StmtPtr& stmt, Session& s) {
 
 bool DdlExecutor::executeSql(const std::string& sql, Session& s) {
     SQLParser parser;
-    ParseResult r = SQLParser::classify(sql)==SqlCommand::AlterTable
+    const auto command=SQLParser::classify(sql);
+    ParseResult r = command==SqlCommand::AlterTable || command==SqlCommand::CreateTable
         ? parser.parseForBinding(sql) : parser.parse(sql);
     if (!r.success || !r.stmt) {
         std::cout << "SQL syntax error";
@@ -1816,11 +1817,12 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         parsedCmd == dbms::SqlCommand::CreateProcedure ||
         parsedCmd == dbms::SqlCommand::DropProcedure ||
         parsedCmd == dbms::SqlCommand::DropRoutine ||
-        parsedCmd == dbms::SqlCommand::AlterTable;
+        parsedCmd == dbms::SqlCommand::AlterTable ||
+        parsedCmd == dbms::SqlCommand::CreateTable;
     const std::string& parseInput = preservesLiteralText && !rawSql.empty()
         ? rawSql : sql;
     dbms::SQLParser parser;
-    dbms::ParseResult r = parsedCmd==dbms::SqlCommand::AlterTable
+    dbms::ParseResult r = parsedCmd==dbms::SqlCommand::AlterTable || parsedCmd==dbms::SqlCommand::CreateTable
         ? parser.parseForBinding(parseInput) : parser.parse(parseInput);
     if (!r.success || !r.stmt) {
         // A bridge-owned command must fail closed. Falling back after a parse

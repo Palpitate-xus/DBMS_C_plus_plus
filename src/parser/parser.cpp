@@ -6818,13 +6818,15 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
                         col.constraints.push_back("UNSIGNED");
                     } else if (ckw == "default") {
                         ++pos;
+                        const size_t defaultBegin=pos;
                         std::string defVal;
                         // Collect default value (literal, expression, or function call).
                         // Respect parenthesis depth so that DEFAULT nextval('s') or
                         // DEFAULT (expr) does not terminate early at an inner ')'.
-                        int depth = 0;
+                        int depth = 0, caseDepth = 0;
+                        std::vector<std::string> delimiters;
                         while (pos < tokens.size()) {
-                            if (depth == 0 && !defVal.empty()) {
+                            if (depth == 0 && caseDepth == 0 && !defVal.empty()) {
                                 const std::string next = toLower(tokens[pos]);
                                 if (next == "not" || next == "null" ||
                                     next == "primary" || next == "unique" ||
@@ -6834,18 +6836,30 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
                                     break;
                                 }
                             }
-                            if (tokens[pos] == "(") {
+                            const auto word=toLower(tokens[pos]);
+                            if(word=="case")++caseDepth;
+                            else if(word=="end" && caseDepth)--caseDepth;
+                            if (tokens[pos] == "(" || tokens[pos] == "[") {
+                                delimiters.push_back(tokens[pos]);
                                 ++depth;
-                            } else if (tokens[pos] == ")") {
+                            } else if (tokens[pos] == ")" || tokens[pos] == "]") {
                                 if (depth == 0) break;
+                                if((tokens[pos]==")" && delimiters.back()!="(") ||
+                                   (tokens[pos]=="]" && delimiters.back()!="["))return nullptr;
+                                delimiters.pop_back();
                                 --depth;
-                            } else if (tokens[pos] == "," && depth == 0) {
+                            } else if (tokens[pos] == "," && depth == 0 && caseDepth == 0) {
                                 break;
                             }
                             if (!defVal.empty() && defVal.back() != '(') defVal += " ";
                             defVal += tokens[pos++];
                         }
+                        if(defVal.empty() || depth || caseDepth)return nullptr;
                         col.defaultValue = std::make_unique<LiteralExpr>();
+                        markSource(col.defaultValue.get(),tokens,defaultBegin,pos);
+                        if(bindingParse && col.defaultValue->sourceBegin!=std::string::npos)
+                            defVal=bindingParse->source.substr(col.defaultValue->sourceBegin,
+                                col.defaultValue->sourceEnd-col.defaultValue->sourceBegin);
                         static_cast<LiteralExpr*>(col.defaultValue.get())->value = defVal;
                     } else if (ckw == "check") {
                         ++pos;

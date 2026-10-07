@@ -43,3 +43,40 @@ Broader EXPLAIN descriptor/Parse/Describe phases, WITH primary envelopes,
 trigger/view mutation plans and full identity/generated planner lowering
 remain separate work. This implementation does not claim exact PostgreSQL
 costs, estimates or all physical child instrumentation.
+
+## Independent CREATE input preservation
+
+CREATE TABLE now uses the original DDL input, not main's rewritten CASE or
+array evaluator syntax. Its default collector respects true CASE boundaries
+and balanced parentheses/brackets, and preserves the original expression
+bytes using lexer token provenance. The DDL native entry and bridge both use
+the same provenance-aware parser. This does not make arbitrary subqueries,
+set-returning functions or all CREATE defaults legal.
+
+The original CREATE-source native fails against the first default carrier's
+matching objects: 67367 terminal 134 at the required source-span assertion.
+V2's values/NULL/array positives succeed but a new mismatched bracket negative
+fails (23589 terminal 134); V3 checks actual delimiter kinds and preserves the
+negative. The two changed CPPs and final parser correction are freshly
+compiled on the same new InsertStmt all-58 header epoch, with unchanged other
+56 source/object/flag and complete header audits.
+
+Final frozen normal binary SHA-256:
+`4cd7e162e261212bafd2eec9b33795bb4b2c04a1065c3f21c1329eb27a8704d5`.
+The expanded strict `180006` 29 by 4 whole matrix is terminal 0. Final serial
+98385 runs that full matrix plus twelve complete adjacent scripts, all 0
+(DML EXPLAIN, typed EXPLAIN, domain origin/ancestry/transaction, UPDATE DEFAULT,
+long defaults, bound children, original WITH source, MV target and Q84).
+Twelve native 87556 are all 0. Five changed production CPPs, test drivers and
+stubs are scoped ASan/UBSan, with the other 53 matching normal objects;
+41938's three native tests and 99951's entire 29 by 4 wire matrix are 0.
+Leak detection is disabled. This is not all-58 sanitizer or O2 evidence.
+
+The original native/wire failures remain intact. Additional strict18 stored
+default phase diagnostics prove Parse/Describe has no default calls and a
+named EXPLAIN ANALYZE uses the changed `nextval`, constant 22 and NULL defaults
+correctly. The unchanged next `ALTER ... SET DEFAULT 1/0` instead fails XX000
+because the existing compound expression root has no original source span;
+`default-phase-candidate.log` remains terminal 1 vs strict18 terminal 0.
+That independent ALTER-span bug and JSON/other protocol descriptor phases
+remain open; the successful core matrix is not a whole phase-family claim.

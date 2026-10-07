@@ -66,6 +66,8 @@ cases = [
     ('INSERT INTO idp_serial(v) VALUES(7),(8) RETURNING id,v', 0, 2, None, None),
     ('INSERT INTO idp_identity(v) VALUES(7),(8) RETURNING id,v', 0, 2, None, None),
     ('INSERT INTO idp_generated(id,v) VALUES(3,DEFAULT) RETURNING id,v', 0, 1, None, None),
+    ('INSERT INTO idp_nullcase DEFAULT VALUES RETURNING v', 0, 1, None, None),
+    ('INSERT INTO idp_array DEFAULT VALUES RETURNING v', 0, 1, None, None),
 ]
 
 try:
@@ -88,6 +90,8 @@ try:
         'CREATE TEMP TABLE idp_serial(id SERIAL,v INT)',
         'CREATE TEMP TABLE idp_identity(id INT GENERATED ALWAYS AS IDENTITY,v INT)',
         'CREATE TEMP TABLE idp_generated(id INT,v INT GENERATED ALWAYS AS(id+1) STORED)',
+        'CREATE TEMP TABLE idp_nullcase(v INT DEFAULT CASE WHEN false THEN 1/0 ELSE NULL END CHECK(v>0))',
+        'CREATE TEMP TABLE idp_array(v INT[] DEFAULT ARRAY[1,2])',
         "SELECT nextval('idp_calls')",
     ]
     for sql in setup:
@@ -124,6 +128,10 @@ try:
                         q('SELECT v FROM idp_round', [['2']])
                     if 'idp_generated' in sql:
                         q('SELECT id,v FROM idp_generated', [['3', '4']])
+                    if 'idp_nullcase' in sql:
+                        q('SELECT v FROM idp_nullcase', [[None]])
+                    if 'idp_array' in sql:
+                        q('SELECT v FROM idp_array', [['{1,2}']])
             q('ROLLBACK TO SAVEPOINT idp_case')
             q('RELEASE SAVEPOINT idp_case')
             if analyze and not static_error:
