@@ -807,7 +807,23 @@ PreparedQueryExecution::QuantifiedState& PreparedQueryExecution::quantifiedState
 }
 
 void PreparedQueryExecution::prepareChildCursors() {
-    for (const auto* site:quantifiedSites_) (void)quantifiedState(site,context());
+    // A cloned site registry describes every original expression, including
+    // branches removed by pure root planning. Only actual prepared runtime
+    // roots may acquire a child graph: constructing a discarded child's CASE
+    // target could otherwise raise an error the root deliberately pruned.
+    std::set<const QuantifiedComparisonExpr*> reached;
+    for(const auto* root:prepared_)
+        visitStructuredValue(compiled_.at(root).get(),[&](const Expr* value) {
+            const auto* quantified=dynamic_cast<const QuantifiedComparisonExpr*>(value);
+            if(!quantified || !quantified->right || !quantified->right->preparedSubquery)return;
+            const auto mapped=originalSites_.find(quantified);
+            const auto* original=mapped==originalSites_.end()?nullptr:
+                dynamic_cast<const QuantifiedComparisonExpr*>(mapped->second);
+            if(!original || !quantifiedSites_.count(original))
+                throw DbError("XX000","prepared quantified expression lost its original site");
+            reached.insert(original);
+        });
+    for(const auto* site:reached)(void)quantifiedState(site,context());
 }
 void PreparedQueryExecution::closeChildCursors() {
     std::exception_ptr failure;
