@@ -1,6 +1,5 @@
 #include "FreeSpaceMap.h"
-
-#include <iostream>
+#include "DerivedMapFile.h"
 
 namespace dbms {
 
@@ -13,27 +12,21 @@ FreeSpaceMap::~FreeSpaceMap() {
 
 bool FreeSpaceMap::open() {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (f_.is_open()) return true;
-    f_.open(filename_, std::ios::in | std::ios::out | std::ios::binary);
-    if (!f_.is_open()) {
-        // Try create
-        f_.open(filename_, std::ios::out | std::ios::binary);
-        if (f_.is_open()) {
-            f_.close();
-            f_.open(filename_, std::ios::in | std::ios::out | std::ios::binary);
-        }
+    if (fd_ >= 0) return derived_map_file::owned(fd_, filename_);
+    fd_ = derived_map_file::open(filename_, cache_);
+    if (fd_ >= 0) {
+        numPages_ = static_cast<uint32_t>(cache_.size());
+        dirty_ = false;
     }
-    if (f_.is_open()) {
-        loadFromDiskLocked();
-    }
-    return f_.is_open();
+    return fd_ >= 0;
 }
 
 void FreeSpaceMap::close() {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (f_.is_open()) {
-        writeToDiskLocked();
-        f_.close();
+    if (fd_ >= 0) {
+        if (dirty_) (void)writeToDiskLocked();
+        ::close(fd_);
+        fd_ = -1;
     }
     cache_.clear();
     numPages_ = 0;
@@ -42,27 +35,11 @@ void FreeSpaceMap::close() {
 
 bool FreeSpaceMap::isOpen() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return f_.is_open();
+    return fd_ >= 0;
 }
 
-void FreeSpaceMap::loadFromDiskLocked() const {
-    f_.seekg(0, std::ios::end);
-    auto size = f_.tellg();
-    if (size <= 0) {
-        numPages_ = 0;
-        return;
-    }
-    numPages_ = static_cast<uint32_t>(size);
-    cache_.resize(numPages_, 255);
-    f_.seekg(0, std::ios::beg);
-    f_.read(reinterpret_cast<char*>(cache_.data()), numPages_);
-}
-
-void FreeSpaceMap::writeToDiskLocked() const {
-    if (!f_.is_open() || cache_.empty()) return;
-    f_.seekp(0, std::ios::beg);
-    f_.write(reinterpret_cast<const char*>(cache_.data()), cache_.size());
-    f_.flush();
+bool FreeSpaceMap::writeToDiskLocked() const {
+    return derived_map_file::write(fd_, filename_, cache_);
 }
 
 void FreeSpaceMap::ensureSizeLocked(uint32_t pageId) {
@@ -104,11 +81,21 @@ uint32_t FreeSpaceMap::numPages() const {
 }
 
 void FreeSpaceMap::flush() {
+    (void)flushChecked();
+}
+
+bool FreeSpaceMap::flushChecked() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (dirty_) {
-        writeToDiskLocked();
+        if (!writeToDiskLocked()) return false;
         dirty_ = false;
     }
+    return derived_map_file::matches(fd_, filename_, cache_);
+}
+
+bool FreeSpaceMap::quiescentForSnapshot() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return !dirty_ && derived_map_file::matches(fd_, filename_, cache_);
 }
 
 } // namespace dbms

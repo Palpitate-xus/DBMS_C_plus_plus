@@ -2,8 +2,8 @@
 
 #include <cstdint>
 #include <cstring>
-#include <fstream>
 #include <mutex>
+#include <string>
 #include <vector>
 
 namespace dbms {
@@ -44,17 +44,18 @@ public:
 
     // 将内存缓存刷盘
     void flush();
+    bool flushChecked();
+    bool quiescentForSnapshot() const;
 
 private:
     std::string filename_;
-    mutable std::fstream f_;
+    int fd_ = -1;
     mutable std::vector<uint8_t> cache_;
     mutable bool dirty_ = false;
     mutable std::mutex mutex_;
 
     void ensureSizeLocked(uint32_t pageId);
-    void loadFromDiskLocked() const;
-    void writeToDiskLocked() const;
+    bool writeToDiskLocked() const;
 
     static size_t byteIndex(uint32_t pageId) { return pageId / 8; }
     static uint8_t bitMask(uint32_t pageId) { return static_cast<uint8_t>(1) << (pageId % 8); }

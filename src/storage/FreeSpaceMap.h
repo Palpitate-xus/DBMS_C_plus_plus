@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstdint>
-#include <fstream>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -44,18 +43,19 @@ public:
 
     // 将内存缓存刷盘
     void flush();
+    bool flushChecked();
+    bool quiescentForSnapshot() const;
 
 private:
     std::string filename_;
-    mutable std::fstream f_;
+    int fd_ = -1;
     mutable std::vector<uint8_t> cache_;
     mutable bool dirty_ = false;
     mutable uint32_t numPages_ = 0;
     mutable std::mutex mutex_;
 
     void ensureSizeLocked(uint32_t pageId);
-    void loadFromDiskLocked() const;
-    void writeToDiskLocked() const;
+    bool writeToDiskLocked() const;
 };
 
 } // namespace dbms
