@@ -2376,6 +2376,9 @@ static void validatePredicateTypes(const TableSchema& table,
         const std::string& database = {}, StorageEngine* owner = nullptr) {
     for (const auto& condition : conditions) {
         if (condition.op == "typedexpr") {
+            // Only the planner owns database/routine metadata. A filter's
+            // schema alone must not guess an already prepared UDF as TEXT.
+            if (!owner) continue;
             SQLParser parser;
             auto parsed = parser.parse("SELECT " + condition.value);
             auto* select = parsed.success ? dynamic_cast<SelectStmt*>(parsed.stmt.get()) : nullptr;
@@ -5811,6 +5814,7 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ct
             OpPtr inner = std::make_unique<TableScanOp>(
                 engine, innerDb, spec.tablename);
             if (!spec.innerConds.empty()) {
+                validatePredicateTypes(innerTbl, spec.innerConds, innerDb, engine);
                 inner = std::make_unique<FilterOp>(
                     std::move(inner), innerTbl, spec.innerConds);
             }
@@ -5837,6 +5841,7 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ct
             OpPtr inner = std::make_unique<TableScanOp>(
                 engine, innerDb, spec.tablename);
             if (!spec.innerConds.empty()) {
+                validatePredicateTypes(innerTbl, spec.innerConds, innerDb, engine);
                 inner = std::make_unique<FilterOp>(
                     std::move(inner), innerTbl, spec.innerConds);
             }
@@ -5873,6 +5878,7 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ct
             OpPtr inner = std::make_unique<TableScanOp>(
                 engine, innerDb, spec.tablename);
             if (!spec.innerConds.empty()) {
+                validatePredicateTypes(innerTbl, spec.innerConds, innerDb, engine);
                 inner = std::make_unique<FilterOp>(
                     std::move(inner), innerTbl, spec.innerConds);
             }
@@ -6012,6 +6018,7 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ct
             OpPtr inner = std::make_unique<TableScanOp>(
                 engine, innerDb, ctx.scalarSubquery.tablename);
             if (!ctx.scalarSubquery.innerConds.empty()) {
+                validatePredicateTypes(innerTbl, ctx.scalarSubquery.innerConds, innerDb, engine);
                 inner = std::make_unique<FilterOp>(
                     std::move(inner), innerTbl, ctx.scalarSubquery.innerConds);
             }
