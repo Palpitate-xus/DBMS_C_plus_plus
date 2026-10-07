@@ -40,7 +40,7 @@ Source `5ca4278e` 已逐项本地提交，618 native / 319 registered / 58 TU；
 
 不push，不启用Actions，不恢复用户跳过安全/TDE。旧e6全58正常构建实际0，但native137=135pass/2fail、wire65=64pass/1fail；旧d2 native120实际0、wire64=60pass/4fail。专项结果不替代新ROOT完整验收。
 
-## 2026-10-07 当前完整目标执行计划（最新；前文是历史）
+## 2026-10-07 历史2894完整目标执行计划（最新证据见文末）
 
 生产/测试source `28940634`，642native/330registered/58TU。最新九项修复
 已逐项commit，c061 checkpoint后累计19项；详见integration映射与原始证据。
@@ -57,3 +57,21 @@ Source `5ca4278e` 已逐项本地提交，618 native / 319 registered / 58 TU；
 | 总账闭合 | 每条checkbox/状态/证据/提交/验收范围一致，完成审计实证 | 22complete/166partial/70unverified/15deferred；require-complete仍应拒绝 |
 
 不push，不启用Actions，用户跳过安全/TDE专项保持deferred且不虚报完成。
+
+## 2026-10-07 当前完整目标执行计划（c465；前文是历史）
+
+生产/测试source `c465f898`：648native/334registered/58TU。c061后27项独立
+source/test commit，最新八项已分别合入。完整273目标没有缩小。
+
+| 阶段 | 必须通过的验收 | 当前证据 / 下一动作 |
+| --- | --- | --- |
+| 独立修复 | 真复现、保留原SQL/断言、每问题独立commit | Unicode四项、search_path、声明namespace、统一provider、catalog分别commit |
+| 组合正式构建 | 公共头全58 fresh正常O2、repeat/source/header/flags/object/stamp、同binary冻结 | 2894正常58/35native已0；c465新58 build28366实际live；58native/25wire仅准备 |
+| 原完整回归 | 原648native/334registered、不改默认期限/矩阵 | 新full仅准备；旧七个full均实际live；2894 wire15=8pass/7fail，0fdb wire13=3pass/10fail |
+| 组合专项 | 最新头匹配native、完整protocol、严格180006强fixtures | 私有Unicode13/90/8native/4200、namespace14wire/10native/4SAN、catalog12native/fault/磁盘whole通过，scope见integration |
+| 已证实剩余问题 | 实际消费者及物理需求修复，不靠兼容fallback掩盖 | legacy模式16个native断言真红；domain DEFAULT原whole11断言真红；无变化SAVEPOINT重建镜像诊断继续 |
+| 剩余family | 每个原273条目完整实现/核实/验证 | routine creation/overloads、完整types/catalog/query/storage/运维等继续，不用专项替代 |
+| 总账闭合 | 每条checkbox/状态/证据/commit/验收范围一致，完成审计实证 | 22complete/166partial/70unverified/15deferred；require-complete仍拒绝 |
+
+不push，不启用Actions，用户跳过安全/TDE保持deferred。任何尚在运行或仅准备
+的 gate 都不写为通过；历史失败不因新候选专项成功而改绿。

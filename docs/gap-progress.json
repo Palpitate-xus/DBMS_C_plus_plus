@@ -2,6 +2,59 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "27 independent ROOT source/test commits; Unicode/namespace/catalog fixes integrated; new c465 normal58 running and actual older combination failures retained",
+      "gap_ids": [
+        "TYPE-04",
+        "SQL-05",
+        "FUNC-05",
+        "CAT-01",
+        "CAT-07",
+        "CAT-09",
+        "TXN-05"
+      ],
+      "status": "partial",
+      "commits": [
+        "777a4c35",
+        "ca84d54a",
+        "ddcf54dd",
+        "feba0f76",
+        "afa7f551",
+        "feeab4fc",
+        "b173e2aa",
+        "c465f898"
+      ],
+      "evidence": [
+        "docs/issue-ready-source-integration.md",
+        "docs/issue-like-trailing-escape-native-expectation.md",
+        "docs/issue-sql-pattern-unicode-runtime.md",
+        "docs/issue-similar-quote-separator-state.md",
+        "docs/issue-similar-class-conversion.md",
+        "docs/issue-search-path-transaction-local.md",
+        "docs/issue-routine-namespace-declaration.md",
+        "docs/issue-srf-search-path-shadow.md",
+        "docs/issue-catalog-clean-publication.md"
+      ],
+      "tests": [
+        "tests/sql_pattern_unicode_test.cpp",
+        "tests/pattern_unicode_known_gap.py",
+        "tests/pattern_unicode_adjacent_protocol_e2e_test.py",
+        "tests/search_path_transaction_state_test.cpp",
+        "tests/search_path_transaction_protocol_e2e_test.py",
+        "tests/routine_namespace_declaration_test.cpp",
+        "tests/function_namespace_provider_test.cpp",
+        "tests/bound_routine_namespace_slot_test.cpp",
+        "tests/prepared_srf_search_path_protocol_e2e_test.py",
+        "tests/catalog_clean_publication_test.cpp"
+      ],
+      "verification": {
+        "reproduction": "Original Unicode13 strict180006 passes versus11 actual differences on0fdb; native trailing-escape expectation separately verified wrong. SETLOCAL46, qualifiedCREATE42601, bare provider shadow, unknown category and callback slot collisions retained. Unchanged catalog publication134 plus invalid peer reload134 retained. Old savepoint disk15s timeout not erased.",
+        "fix": "Eight separate ROOT source/test commits; direct SQL Unicode matcher/class grammar and2200C; realSession transaction path lifecycle; canonical stored routine namespace/undo andshared pure scalar/provider lookup; serialized actual-model durable generation receipts with atomic peer refresh andfail-closed unsaved conflicts. Only include merge conflict preserves both feature headers.",
+        "focused_tests": "Unicode freshnormal58/finalaudit frozen4d50671f7a55b80a12dd3cbee83797c07d76492606e7d31a7717501e9192374f; original13/expanded90/fivewhole/eightnative/4200reference controls0; whole semantic helper memoryTMPDIR/default15 notdisk proof, scoped evaluator/helperSAN notfull. Namespace matchingfresh58O0V5+soleCPPV6 cf9e8a6e211ce768e0a75d0c6ab74621bb40b23d5c1677cd310d21a540049e8a; fourteenwhole/tennative/fourparser-eval-DDLundoSAN actual0; strictoriginaltwoSRF/newtwo0. Catalog fresh58O0+solecatalogfinal/repeat/audits SHA27d7c57008485bc41b654bbf9d1212ba891e4e33c012746879183984062e6b75; native12/faultretry/scopedfourTUASAN0; originaldefault15diskUNKNOWNthree/FROMless/Append0, traced350to32catalogfsync notuniversalperformance.",
+        "full_suite": "Exactc465648native334registered58TU /tmp/dbms-canonical-namespace-pattern-catalog.KsnB2d5B freshnormal58 build28366 live; native58/wire25/originalfull helperspreparedNOTstarted. Exact2894642/33058 normal60362actual0 SHA80c8193024de0e5d221920120beb2120cefa958d606eabe9a6cc94ae797d0f9a; native3514203actual0; whole1580019terminal1=8pass7fail, entireoriginalfailedboundDML/Q/WITH/domain/pattern/array/FK retained; FK timeout maskedbyfinally inference notfiveprovenbugs. 0fdbwhole1360110terminal1=3pass10fail(nineTimeoutError plusoriginalarrayALTER). Individualoldfull96468/16482/36568/33648/56028/48518/27869 re-polledlive. No currentcombinedO2/focused/full/TLSruntimePASS.",
+        "scope": "Original273 unchanged22complete166partial70unverified15deferred. Actuallegacy/nativepattern16red, domainDEFAULTwhole11assertred, no-effectSAVEPOINTphysicalrestore plusunqualifiedroutinecreation/overloads/generalregexcollation/domaincasts/revalidation/other sets/storage/recovery/fullcatalog andallremainingfamilies required. No push/Actionsactivation/securityrestart."
+      }
+    },
+    {
       "issue": "19 separately committed ROOT repairs; domain FK and orphan-pin-safe retired cache integrated; exact0fdb/ed82 formal58 verified, latest2894 formal58 running",
       "gap_ids": [
         "TYPE-16",

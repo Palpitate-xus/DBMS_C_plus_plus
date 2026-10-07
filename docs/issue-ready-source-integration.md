@@ -1,6 +1,86 @@
 # Independent source integrations after canonical 75090
 
-## Current 2894 checkpoint: 19 independently committed repairs, combination verification pending
+## Current c465 checkpoint: 27 independent source/test commits, fresh combination gate running
+
+Production/test source `c465f898` has **648 native / 334 registered / 58 TU**.
+The nineteen earlier integrations are mapped in the historical 2894 section.
+Eight additional commits are separately recorded here; none closes a whole
+PostgreSQL family merely because its focused controls pass.
+
+| Independent repair or oracle correction | Private commit | ROOT commit |
+| --- | --- | --- |
+| Demand-dependent trailing LIKE escape native oracle | `e7d4421a` | `777a4c35` |
+| Direct SQL Unicode LIKE/ILIKE/SIMILAR runtime and strict demand | `13d72133` | `ca84d54a` |
+| SIMILAR quote separator error is 2200C | `51ffc09b` | `ddcf54dd` |
+| SIMILAR SQL class/range/word-boundary conversion | `99e33e92` | `feba0f76` |
+| Real transaction-local search_path lifecycle | `a73f8b68` | `afa7f551` |
+| Canonical scalar routine declaration, metadata and undo namespace | `c49ff227` | `feeab4fc` |
+| One pure scalar/provider path and actual callback-site identity | `65076ca9` | `b173e2aa` |
+| Unchanged durable catalog image publication and atomic peer reload | `30be2a43` | `c465f898` |
+
+### Actual evidence and open gates
+
+- Unicode private `/tmp/dbms-pattern-unicode.pJ1dBcP2` retains the original
+  thirteen controls and their eleven actual failures on frozen 0fdb. Final
+  source passes the original13, expanded90, five whole protocol scripts, eight
+  matching native drivers and 4,200 strict-reference differential controls.
+  Frozen normal58 SHA256:
+  `4d50671f7a55b80a12dd3cbee83797c07d76492606e7d31a7717501e9192374f`.
+  The serial semantic protocol helper uses **memory-backed TMPDIR**, with the
+  unchanged 15-second deadline; it does not prove disk-backed performance.
+  Scoped sanitizer coverage is evaluator/helper only, not all production.
+  Original trailing-escape expectations were corrected in a separate test
+  commit after strict180006 validation, not by weakening production errors.
+- Namespace private `/tmp/dbms-provider-search-path.tD6Q3AdD` retains SET LOCAL,
+  qualified CREATE, independent provider shadow, unknown string-category and
+  callback-collision failures. Final14 complete serial protocol scripts,
+  native10 and scoped parser/evaluator/DDL-undo sanitizer4 finish with exit0.
+  Strict180006 passes both new whole scripts and both original SRF diagnostics.
+  Final O0 matching58 V5 plus evaluator-only V6/audits has SHA256
+  `cf9e8a6e211ce768e0a75d0c6ab74621bb40b23d5c1677cd310d21a540049e8a`.
+  ROOT's sole merge conflict was includes; both Unicode and namespace includes
+  are retained. These private results are not a combined normal-O2/full gate.
+- Catalog private `/tmp/dbms-default-disk-wire.tucbZgUx` retains native134 for
+  unchanged-image replacement and the candidate invalid-peer reload134.
+  Fresh58 O0 plus final catalog-only rebuild/repeat/audits, native12, wrapped
+  directory-fsync fault/retry and four-TU scoped ASan/UBSan all finish with 0.
+  Frozen SHA256:
+  `27d7c57008485bc41b654bbf9d1212ba891e4e33c012746879183984062e6b75`.
+  Unchanged default15/disk UNKNOWN three repeats, original FROM-less and Append
+  whole fixtures finish with 0. Traced catalog-file fsync calls fall from350
+  to32; elapsed times under differing concurrent loads are not a throughput
+  benchmark. The genuine earlier Append timeout during full SAVEPOINT restore
+  remains recorded; this does not close all latency or catalog MVCC gaps.
+- Exact2894 **642/330/58** fresh normal O2/repeat/audit/freeze **60362 exits0**,
+  SHA256 `80c8193024de0e5d221920120beb2120cefa958d606eabe9a6cc94ae797d0f9a`,
+  under `/tmp/dbms-canonical-retired-fk.kDFH8VC7`. Matching native35
+  **14203 exits0**. Whole wire15 **80019 exits1: 8 pass / 7 fail**. Its failed
+  bound-DML/Q/WITH/domain/pattern/array/FK entry points and all original inputs
+  remain. The FK log loses synchronization after an unprinted invalid-value
+  request; a timeout masked by finally cleanup is an inference, not proof of
+  five new FK bugs. The original642/330 full **27869** is still live.
+- Exact0fdb normal58/native27 are terminal0; its whole wire13 **60110 exits1:
+  3 pass / 10 fail**, including nine actual default-deadline timeouts and the
+  old genuine non-NULL array ALTER error. Later repairs do not change that log.
+  Unchanged original full sessions **96468 / 16482 / 36568 / 33648 / 56028 /
+  48518 / 27869** were individually re-polled live on 2026-10-07.
+- Exactc465 detached `/tmp/dbms-canonical-namespace-pattern-catalog.KsnB2d5B`
+  begins a genuinely fresh all58 **normal O2** epoch, build **28366 live**.
+  New Session/CreateFunction/CatalogManager/public API headers must all match.
+  Native58, whole wire25 and original648/334 helpers are prepared, **not
+  started**. No combined build/freeze, focused PASS or full PASS is claimed.
+
+The actual legacy/native pattern consumers still use older matchers and remain
+a separate required repair. Unqualified routine creation path, arbitrary
+overloads/default/named signatures, general regex/ARE/collations, domain ALTER
+defaults/casts/revalidation, full-image savepoint demand, other set operations,
+WAL rewrite/PITR and all remaining family requirements are still open.
+
+All273 states remain **22 complete / 166 partial / 70 unverified /
+15 deferred_by_user**. The completion gate must still reject. No push,
+Actions activation or user-skipped security/TDE restart is authorized.
+
+## Historical 2894 checkpoint: 19 independently committed repairs, later evidence above
 
 Production/test source `28940634` has **642 native / 330 registered / 58 TU**.
 These are source integrations, not completion of the PostgreSQL families.

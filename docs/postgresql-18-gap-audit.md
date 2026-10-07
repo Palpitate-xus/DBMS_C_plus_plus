@@ -1,5 +1,35 @@
 # 2026-10-07 最新总清单 checkpoint
 
+最新生产/测试 source `c465f898`，**648 native / 334 registered / 58 TU**。
+c061 checkpoint 后累计27项独立 source/test commit；本轮新增8项为 Unicode
+模式四项（含单独 oracle 修正）、事务 search_path、函数声明 namespace、统一
+scalar/provider 路径和 catalog clean publication。逐项映射与证明见
+`docs/issue-ready-source-integration.md`，每项均已本地 commit。
+
+Unicode 原13/扩展90/8native/4200参照差分通过；其 whole semantic helper 使用
+memory-backed TMPDIR，不能当磁盘性能通过。Namespace 原两套 SRF、新两套完整
+strict180006、14whole/10native/4scoped SAN 通过；catalog 12native、fsync失败重试、
+原磁盘/default15 UNKNOWN三轮/FROM-less/Append通过。各私有正常/O0、增量与局部
+sanitizer边界明确，不继承成最新 ROOT 全量绿。
+
+精确2894正常58/repeat/audit/freeze60362已0，matching35native14203已0；whole15
+80019实际1=8pass/7fail，完整失败保留；原642/330 runner27869仍live。
+0fdb whole13原60110实际1=3pass/10fail，包含9个默认期限超时与旧array ALTER错误，
+不得以之后的修复覆盖旧日志。七个独立原full仍逐个核实live。
+最新c465的 Session/AST/CatalogManager公共头要求新全58正常O2，28366已真启动于
+`/tmp/dbms-canonical-namespace-pattern-catalog.KsnB2d5B`；58native/25whole和648/334
+原full只准备、尚未执行，不宣称最新构建或full PASS。
+
+原SQL/assert/counters/default deadlines及失败日志不放宽。真实legacy/native模式
+消费者、未限定函数CREATE路径、domain DEFAULT/ALTER/casts/revalidation、全镜像
+SAVEPOINT实际需求、其它sets、完整storage/recovery/运维等剩余273要求继续逐项。
+总账仍 **22 complete / 166 partial / 70 unverified / 15 deferred_by_user**；
+完成gate仍应拒绝，不把专项绿或旧小范围收尾当完整目标完成。
+只本地commit，不push、不启用Actions、不恢复用户跳过安全/TDE专项。
+以下 checkpoint 的“当前/live”均指记录当时，不替代本节最新证据。
+
+## Historical 2894 total-ledger checkpoint
+
 最新生产/测试 source `28940634`，**642 native / 330 registered / 58 TU**。
 c061 checkpoint后累计19项独立source/test commit，逐项映射见
 `docs/issue-ready-source-integration.md`。本轮新九项：set三项、array三项、
