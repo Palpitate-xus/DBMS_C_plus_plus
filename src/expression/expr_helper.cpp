@@ -167,6 +167,19 @@ std::string mergeProtocolTypes(const std::string& leftRaw,
     return left;
 }
 
+std::string builtinReductionName(const FunctionCallExpr* call) {
+    if (!call) return {};
+    CatalogManager::QualifiedName function, schema;
+    if (!CatalogManager::parseQualifiedName(call->funcName, function, true) ||
+        !function.schema.empty()) return {};
+    if (!call->schema.empty() &&
+        (!CatalogManager::parseQualifiedName(call->schema, schema, true) ||
+         !schema.schema.empty() || schema.name != "pg_catalog")) return {};
+    static const std::set<std::string> reductions = {
+        "sum", "avg", "count", "min", "max", "bool_and", "bool_or", "every"};
+    return reductions.count(function.name) ? function.name : std::string{};
+}
+
 std::string inferAstResultType(
     const Expr* expression,
     const std::map<std::string, std::string>& typeHints,
@@ -328,7 +341,8 @@ std::string inferAstResultType(
             const auto routine = routineTypes->find(call);
             if (routine != routineTypes->end()) return protocolTypeName(routine->second);
         }
-        const std::string name = toLower(call->funcName);
+        const std::string reduction = builtinReductionName(call);
+        const std::string name = reduction.empty() ? toLower(call->funcName) : reduction;
         // These names are parser-owned three-operand grammar nodes, not
         // ordinary scalar calls whose type can follow their first argument.
         if (call->schema.empty() &&
@@ -1812,7 +1826,7 @@ std::string ExprHelper::inferResultType(
     if (lower == "current_timestamp") return "timestamptz";
     if (lower == "localtimestamp") return "timestamp";
 
-    // Compound roots must be typed as a whole. Textual cast/function
+    // Compound and reduction roots must be typed as a whole. Textual cast/function
     // shortcuts below can otherwise mistake an operand's type for a boolean
     // comparison or for a mixed-width arithmetic operator's result.
     ParseResult structuralParse;
@@ -1822,7 +1836,11 @@ std::string ExprHelper::inferResultType(
         const bool numericOperator = binary && arithmetic_detail::resultType(
             toLower(binary->op), inferAstResultType(binary->left.get(), typeHints),
             inferAstResultType(binary->right.get(), typeHints)).has_value();
-        if (dynamic_cast<const UnaryOpExpr*>(structural) || dynamic_cast<const ArrayExpr*>(structural) ||
+        // A predicate inside an aggregate argument/FILTER (or a string value)
+        // cannot declare the aggregate's result boolean. Infer the actual
+        // outer reducer and its value-argument overload before textual scans.
+        if (!builtinReductionName(dynamic_cast<const FunctionCallExpr*>(structural)).empty() ||
+            dynamic_cast<const UnaryOpExpr*>(structural) || dynamic_cast<const ArrayExpr*>(structural) ||
             (binary && (type == "boolean" || binary->op == "::" ||
                         binary->op == "||" || numericOperator))) {
             return type.empty() || type == "unknown" ? "text" : type;
