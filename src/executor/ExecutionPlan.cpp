@@ -3306,13 +3306,17 @@ bool WindowOp::open() {
             if (function.frameType == WindowFunctionSpec::FrameType::GROUPS) {
                 size_t begin = groupStartAt[position];
                 size_t end = groupEndAt[position];
-                if (function.frameStartOffset >= 0) {
+                if (function.frameStartOffset < 0) {
+                    begin = partitionStart;
+                } else {
                     size_t groups = static_cast<size_t>(function.frameStartOffset);
                     while (groups-- > 0 && begin > partitionStart) {
                         begin = groupStartAt[begin - 1];
                     }
                 }
-                if (function.frameEndOffset >= 0) {
+                if (function.frameEndOffset < 0) {
+                    end = partitionEnd;
+                } else {
                     size_t groups = static_cast<size_t>(function.frameEndOffset);
                     while (groups-- > 0 && end < partitionEnd) {
                         end = groupEndAt[end];
