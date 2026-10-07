@@ -187,8 +187,26 @@ std::optional<ExprValue> simplifyCaseConstants(ExprPtr& expression,
     else if (auto* cast = dynamic_cast<CastExpr*>(expression.get()))
         constant = simplifyCaseConstants(cast->operand,evaluator,roles).has_value();
     else if (auto* binary = dynamic_cast<BinaryOpExpr*>(expression.get())) {
-        const auto left = simplifyCaseConstants(binary->left,evaluator,roles);
         const auto op = SQLParser::toLower(binary->op);
+        if(op=="[]" && dynamic_cast<BinaryOpExpr*>(binary->left.get()) &&
+           static_cast<BinaryOpExpr*>(binary->left.get())->op=="[]") {
+            // Scalar multidimensional fetch owns the whole postfix chain.
+            // Folding its inner single-index fetch independently would
+            // replace a valid N-index operation by an intermediate NULL.
+            ExprPtr* receiver=&binary->left;
+            std::vector<ExprPtr*> indexes{&binary->right};
+            while(auto* index=dynamic_cast<BinaryOpExpr*>(receiver->get())) {
+                if(index->op!="[]")break;
+                indexes.push_back(&index->right);receiver=&index->left;
+            }
+            constant=simplifyCaseConstants(*receiver,evaluator,roles).has_value();
+            for(auto index=indexes.rbegin();index!=indexes.rend();++index)
+                constant=simplifyCaseConstants(**index,evaluator,roles).has_value() && constant;
+            if(!constant)return std::nullopt;
+            const auto value=evaluator.eval(expression.get(),RowContext{});
+            expression=constantExpression(value,expression.get());return value;
+        }
+        const auto left = simplifyCaseConstants(binary->left,evaluator,roles);
         // Match boolean constant demand rather than folding a dead right arm.
         if (left && !left->isNull &&
             ((op=="and" && !left->asBool()) || (op=="or" && left->asBool()))) {

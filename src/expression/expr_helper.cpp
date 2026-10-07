@@ -92,6 +92,13 @@ std::string canonicalTypeName(const std::string& storageType) {
 }
 
 std::string protocolTypeName(std::string type) {
+    while(!type.empty() && std::isspace(static_cast<unsigned char>(type.back())))type.pop_back();
+    bool array=false;
+    while(type.size()>=2 && type.compare(type.size()-2,2,"[]")==0) {
+        array=true;type.resize(type.size()-2);
+        while(!type.empty() && std::isspace(static_cast<unsigned char>(type.back())))type.pop_back();
+    }
+    if(array)return protocolTypeName(type)+"[]";
     if(const auto geometry=geometric_input_detail::builtinType(type);!geometry.empty())
         return geometry;
     type = toLower(type);
@@ -246,6 +253,16 @@ std::string inferAstResultType(
         if (booleanOperators.count(op)) return "boolean";
         const std::string left = inferAstResultType(binary->left.get(), typeHints, routineTypes);
         const std::string right = inferAstResultType(binary->right.get(), typeHints, routineTypes);
+        if(op=="[]" || op=="[:]") {
+            const Expr* receiver=binary->left.get();
+            if(op=="[]")while(const auto* item=dynamic_cast<const BinaryOpExpr*>(receiver)) {
+                if(item->op!="[]")break;
+                receiver=item->left.get();
+            }
+            const auto type=ExprHelper::canonicalResultTypeName(inferAstResultType(receiver,typeHints,routineTypes));
+            return op=="[]" && type.size()>=2 && type.compare(type.size()-2,2,"[]")==0
+                ?type.substr(0,type.size()-2):type;
+        }
         if (op == "->>" || op == "#>>") return "text";
         if (op == "->" || op == "#>") return left;
         if (op == "||") {

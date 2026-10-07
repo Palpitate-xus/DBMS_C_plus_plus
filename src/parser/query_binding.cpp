@@ -342,7 +342,21 @@ public:
                     return geometry;
                 return type->value; // grammar type, not a SQL value namespace
             }
-            const auto right = expression(binary->right, scopes);
+            // Slice bounds are this parser's retained grammar envelope, not
+            // an opaque SQL value/name expression (analogous to ::'s label).
+            const auto right = binary->op=="[:]"?std::string("unknown"):expression(binary->right, scopes);
+            if(binary->op=="[]" || binary->op=="[:]") {
+                const Expr* receiver=binary->left.get();
+                if(binary->op=="[]")while(const auto* item=dynamic_cast<const BinaryOpExpr*>(receiver)) {
+                    if(item->op!="[]")break;
+                    receiver=item->left.get();
+                }
+                const auto type=ExprHelper::inferParsedResultType(receiver,{});
+                const auto element=arrayElement(type);
+                if(element.empty())throw DbError("42804","cannot subscript a non-array value");
+                if(binary->op=="[]")coerceCaseInput(binary->right,right,"integer");
+                return binary->op=="[]"?element:type;
+            }
             if(patternOperator(binary->op)) {
                 resolvePattern(binary->op,binary->left,binary->right,left,right);
                 return "boolean";

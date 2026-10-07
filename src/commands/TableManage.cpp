@@ -1,6 +1,7 @@
 #include "TableManage.h"
 #include "commands/SequenceStorageName.h"
 #include "common/DbError.h"
+#include "common/SqlArrayText.h"
 #include "common/BooleanCodec.h"
 #include "common/NetworkValue.h"
 #include "common/GeometryValue.h"
@@ -9406,17 +9407,23 @@ struct ArrayParser {
 };
 
 static bool normalizeArray(const std::string& in, const std::string& elemType, std::string& out) {
-    ArrayParser p(in, elemType);
-    std::string result;
-    size_t count = 0;
-    p.skipWs();
-    if (p.i >= in.size() || in[p.i] != '{') return false;  // must be an array literal
-    p.parseValue(result, count);
-    if (!p.ok) return false;
-    p.skipWs();
-    if (p.i != in.size()) return false;  // trailing garbage
-    out = result;
-    return true;
+    try {
+        auto literal = sql_array_text::parse(in);
+        ExprEvaluator evaluator;
+        CastExpr cast;cast.typeName=ExprHelper::canonicalResultTypeName(elemType);
+        auto parameter=std::make_unique<ParameterExpr>();parameter->declaredType="unknown";
+        cast.operand=std::move(parameter);
+        const auto convert=[&](const std::string& value) {
+            RowContext row;row.setParameters({ExprValue("unknown",value,false)});
+            return evaluator.eval(&cast,row).value;
+        };
+        ArrayParser parser(literal.body,elemType,convert);
+        std::string result;size_t count=0;
+        parser.parseValue(result,count);parser.skipWs();
+        if(!parser.ok || parser.i!=literal.body.size())return false;
+        literal.body=std::move(result);out=sql_array_text::render(literal);
+        return true;
+    } catch(const DbError&) {return false;}
 }
 
 // ========================================================================
@@ -18136,7 +18143,8 @@ DBStatus StorageEngine::alterTableAlterColumnType(const std::string& dbname,
                         std::move(value), false)});
                     return arrayEvaluator.eval(&elementCast, context).value;
                 };
-                ArrayParser parser(*it->second, target.dataType, convertElement);
+                auto literal = sql_array_text::parse(*it->second);
+                ArrayParser parser(literal.body, target.dataType, convertElement);
                 std::string converted;
                 size_t count = 0;
                 parser.skipWs();
@@ -18146,6 +18154,8 @@ DBStatus StorageEngine::alterTableAlterColumnType(const std::string& dbname,
                 parser.skipWs();
                 if (!parser.ok || parser.i != parser.s.size())
                     throw DbError("22P02", "malformed array literal: " + *it->second);
+                literal.body = std::move(converted);
+                converted = sql_array_text::render(literal);
                 if (converted.size() > 1024)
                     throw DbError("22001", "array value exceeds supported storage length");
                 it->second = std::move(converted);
