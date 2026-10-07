@@ -78,3 +78,40 @@ child lowering, and local-variable ANY qualification planning priority.
 This API commit is not a claim of that whole gate, ROOT formal combination,
 or complete DML/planner families passing. Those consumers remain required
 follow-up work.
+
+## Ordinary quantified-DML consumer
+
+The next independent consumer routes genuine parsed I/U/D quantifier roles
+through the existing retained-query runtime and its actual paired carrier.
+It leaves ordinary non-quantified `executePreparedUpdate` unchanged. VIEW
+targets are identified by their bound physical occurrence and `viewQuery`,
+and delegated to the existing typed trigger boundary. ONLY/current-cursor,
+UPDATE DEFAULT and INSERT conflict/override/default contracts remain on their
+established paths, not a fail-and-retry fallback after execution.
+
+`ordinary_quantified_dml_protocol_e2e_test.py` is a separate, whole 23-query
+consumer matrix. Strict 180006 reference and matching O0 candidate pass;
+`candidate-ordinary/ordinary.baseline.log` retains the original old-entry
+failures. It covers all three commands, SQL and array ANY/ALL, empty/NULL
+semantics, quoted physical correlation, nullable/empty/text-NULL RETURNING,
+two genuine scalar sites, exact static/cardinality/late-runtime errors and
+complete row rollback with non-reset sequence sentinels.
+
+`candidate-ordinary-build.log` records a fresh main object with the same
+all-58-new-API O0 epoch: other-56 source hashes, the V2 DML source hash and
+all public headers remain exact. Immutable SHA256 is
+`86a855ba6686951f5dd78ec644fb92d2b116e98699a571a308b53bc202c725e3`.
+`candidate-ordinary-adjacents.log` is authoritative terminal 0: the whole
+23-case matrix plus seven distinct complete adjacent scripts pass (typed
+UPDATE, duplicate priority, WITH primary/transition, MV target, typed VIEW
+trigger, quantified demand). This does not imply a whole formal O2 build.
+Seven matching native dependency binaries were rerun successfully in fresh
+isolated working directories; main is not part of those native binaries.
+
+The unchanged original 31 queries remain in the expanded 34-query whole
+diagnostic (`reference18-ordinary-expanded.log`, strict 180006 pass).
+`baseline-ordinary-expanded-wire.log` and `candidate-ordinary-wire.log`
+retain its remaining correlated WITH-frame, UNION ALL and local-Var ANY
+preplanning failures, including every cumulative counter expectation.
+No narrow consumer result closes those source/planner roots or the full
+DML/query families.

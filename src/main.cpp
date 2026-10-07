@@ -20094,7 +20094,9 @@ public:
     PreparedWithDmlRuntime(Session& session,shared_ptr<dbms::PreparedQuery> query)
         :session_(session),query_(std::move(query)),root_(dynamic_cast<dbms::WithStmt*>(query_->ast.get())),
          readRoot_(dynamic_cast<dbms::SelectStmt*>(query_->ast.get())),validation_(query_,&g_engine,session.currentDB) {
-        if(!root_ && !readRoot_)throw dbms::DbError("XX000","prepared runtime requires a genuine query envelope");
+        if(!root_ && !readRoot_ && !dynamic_cast<dbms::InsertStmt*>(query_->ast.get()) &&
+           !dynamic_cast<dbms::UpdateStmt*>(query_->ast.get()) && !dynamic_cast<dbms::DeleteStmt*>(query_->ast.get()))
+            throw dbms::DbError("XX000","prepared runtime requires a genuine query envelope");
     }
     ~PreparedWithDmlRuntime() {
         for(auto& frame:frames_)for(auto& entry:frame->producers) {
@@ -20127,6 +20129,17 @@ public:
                 vector<dbms::ExprValue> row;size_t index=0;
                 while(readCte(cte.query.get(),index++,row,queryFrames_)){}
             }
+    }
+    dbms::DmlResult runDml() {
+        auto* statement=query_->ast.get();
+        if(!dynamic_cast<dbms::InsertStmt*>(statement) && !dynamic_cast<dbms::UpdateStmt*>(statement) &&
+           !dynamic_cast<dbms::DeleteStmt*>(statement))
+            throw dbms::DbError("XX000","ordinary DML runtime requires a genuine mutation root");
+        const Frames frames;
+        validate(statement,frames,true);
+        return dbms::executeAtomicDmlUnit(session_,[&]{
+            return dbms::executeBoundDml(statement,session_,query_,reader(frames),mutationSourceFactory(frames),cursorFactory(frames),true);
+        });
     }
     dbms::DmlResult run() {
         if(!root_)throw dbms::DbError("XX000","DML runtime requires a genuine DML envelope");
@@ -20515,6 +20528,55 @@ static bool handlePreparedWithDml(const string& rawSql,Session& session,bool& ha
     if(!parsed.isValid() || !dynamic_cast<dbms::WithStmt*>(parsed.stmt.get()))return false;
     auto query=make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(session.currentDB,rawSql));
     PreparedWithDmlRuntime runtime(session,std::move(query));auto result=runtime.run();
+    handled=true;
+    if(!result.columns.empty()) {
+        for(const auto& name:result.columns)cout<<name<<' ';
+        cout<<'\n';
+        for(size_t i=0;i<result.rows.size();++i) {
+            for(size_t j=0;j<result.rows[i].size();++j)cout<<(result.nulls[i][j]?"NULL":result.rows[i][j])<<' ';
+            cout<<'\n';
+        }
+    } else cout<<result.commandTag<<'\n';
+    dbms::publishLastDmlResult(std::move(result));return false;
+}
+
+static bool handlePreparedQuantifiedDml(const string& rawSql,Session& session,bool& handled) {
+    handled=false;
+    dbms::SQLParser parser;auto parsed=parser.parseForBinding(rawSql);
+    if(!parsed.isValid())return false;
+    bool quantified=false;
+    const auto scan=[&](const auto& items) {
+        for(const auto& item:items)quantified=quantified || containsPreparedQuantifier(item.expr.get());
+    };
+    if(const auto* insert=dynamic_cast<const dbms::InsertStmt*>(parsed.stmt.get())) {
+        // Unsupported legacy conflict/override/default contracts remain on
+        // their established dispatcher; the new entry is not a retry path.
+        if(!insert->conflictAction.empty() || !insert->override_.empty() || insert->defaultValues)return false;
+        for(const auto& row:insert->values)for(const auto& cell:row)
+            quantified=quantified || containsPreparedQuantifier(cell.get());
+        if(const auto* source=dynamic_cast<const dbms::SelectStmt*>(insert->selectSource.get()))
+            quantified=quantified || containsPreparedQuantifier(*source);
+        scan(insert->returning);
+    } else if(const auto* update=dynamic_cast<const dbms::UpdateStmt*>(parsed.stmt.get())) {
+        if(update->only || !update->whereCurrentOf.empty())return false;
+        for(const auto& assignment:update->setClauses) {
+            const auto* value=dynamic_cast<const dbms::LiteralExpr*>(assignment.second.get());
+            if(value && !value->preparedSubquery && dbms::SQLParser::toLower(value->value)=="default")return false;
+            quantified=quantified || containsPreparedQuantifier(assignment.second.get());
+        }
+        quantified=quantified || containsPreparedQuantifier(update->whereClause.get());scan(update->returning);
+    } else if(const auto* remove=dynamic_cast<const dbms::DeleteStmt*>(parsed.stmt.get())) {
+        if(remove->only || !remove->whereCurrentOf.empty())return false;
+        quantified=containsPreparedQuantifier(remove->whereClause.get());scan(remove->returning);
+    } else return false;
+    if(!quantified)return false;
+    auto query=make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(session.currentDB,rawSql));
+    // Real VIEW mutations belong to the typed INSTEAD OF trigger boundary.
+    // This test uses the bound target occurrence, not a relation-name guess.
+    for(const auto& range:query->sourceRanges)
+        if(range.owner==query->ast.get() && !range.source && !range.mergedUsing &&
+           !range.relationName.empty() && range.viewQuery)return false;
+    PreparedWithDmlRuntime runtime(session,std::move(query));auto result=runtime.runDml();
     handled=true;
     if(!result.columns.empty()) {
         for(const auto& name:result.columns)cout<<name<<' ';
@@ -21186,6 +21248,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
     {
         bool handled=false;
         const bool error=handlePreparedWithDml(effectiveRawSql,s,handled);
+        if(handled)return error;
+    }
+    {
+        bool handled=false;
+        const bool error=handlePreparedQuantifiedDml(effectiveRawSql,s,handled);
         if(handled)return error;
     }
     {

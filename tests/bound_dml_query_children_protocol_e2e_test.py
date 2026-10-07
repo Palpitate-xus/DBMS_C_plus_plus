@@ -36,6 +36,9 @@ def main():
     cases = [
         ("UPDATE bd_target SET v=v+1 WHERE id=ANY(SELECT id FROM bd_source WHERE id IS NOT NULL) RETURNING id,v", None, [["2", "21"], ["3", "31"]], "UPDATE 2", [23, 23], 0),
         ("DELETE FROM bd_target WHERE id=ANY(SELECT 2) RETURNING id,t", None, [["2", "bob"]], "DELETE 1", [23, 25], 0),
+        ("UPDATE bd_target AS d SET v=(SELECT d.v+1) WHERE d.id=ANY(SELECT r.id FROM bd_source AS r WHERE r.id=d.id) RETURNING id,v", None, [["2", "21"], ["3", "31"]], "UPDATE 2", [23, 23], 0),
+        ("DELETE FROM bd_target WHERE id=ALL(SELECT id FROM bd_source WHERE false) RETURNING id", None, [["1"], ["2"], ["3"], ["4"]], "DELETE 4", [23], 0),
+        ("INSERT INTO bd_output VALUES(5,2=ANY(SELECT id FROM bd_source WHERE id IS NOT NULL)) RETURNING id,flag,1=ALL(SELECT id FROM bd_source WHERE false)", None, [["5", "t", "t"]], "INSERT 0 1", [23, 16, 16], 0),
         (hint + "UPDATE bd_target SET v=v+1 WHERE id=ANY(SELECT id FROM bd_source WHERE id IS NOT NULL) RETURNING id,v", None, [["2", "21"], ["3", "31"]], "UPDATE 2", [23, 23], 0),
         (hint + "DELETE FROM bd_target WHERE id=ANY(SELECT id FROM bd_source WHERE false) RETURNING id", None, [], "DELETE 0", [23], 0),
         (hint + "UPDATE bd_target SET v=9 WHERE id=ALL(SELECT id FROM bd_source WHERE false) RETURNING id,v", None, [["1", "9"], ["2", "9"], ["3", "9"], ["4", "9"]], "UPDATE 4", [23, 23], 0),
@@ -68,7 +71,7 @@ def main():
     ]
     initial = [["1", "10", "ann"], ["2", "20", "bob"], ["3", "30", "cat"], ["4", "40", None]]
     try:
-        for sql in ["BEGIN", "CREATE TEMP TABLE bd_target(id INT PRIMARY KEY,v INT,t TEXT)", "INSERT INTO bd_target VALUES(1,10,'ann'),(2,20,'bob'),(3,30,'cat'),(4,40,NULL)", "CREATE TEMP TABLE bd_source(id INT)", "INSERT INTO bd_source VALUES(2),(3),(NULL)", "CREATE TEMP TABLE bd_sink(id INT)", "CREATE TEMP SEQUENCE bd_calls", "CREATE FUNCTION bd_writer(p INT) RETURNS INT VOLATILE LANGUAGE plpgsql AS $$BEGIN PERFORM nextval('bd_calls'); INSERT INTO bd_sink VALUES(p); RETURN p; END$$"]:
+        for sql in ["BEGIN", "CREATE TEMP TABLE bd_target(id INT PRIMARY KEY,v INT,t TEXT)", "INSERT INTO bd_target VALUES(1,10,'ann'),(2,20,'bob'),(3,30,'cat'),(4,40,NULL)", "CREATE TEMP TABLE bd_source(id INT)", "INSERT INTO bd_source VALUES(2),(3),(NULL)", "CREATE TEMP TABLE bd_sink(id INT)", "CREATE TEMP TABLE bd_output(id INT,flag BOOL)", "CREATE TEMP SEQUENCE bd_calls", "CREATE FUNCTION bd_writer(p INT) RETURNS INT VOLATILE LANGUAGE plpgsql AS $$BEGIN PERFORM nextval('bd_calls'); INSERT INTO bd_sink VALUES(p); RETURN p; END$$"]:
             assert query(sql + ";")[1] is None
         expected = 0
         for sql, state, rows, tag, types, calls in cases:
@@ -77,6 +80,7 @@ def main():
             query("ROLLBACK TO bd_case;")
             query("SELECT id,v,t FROM bd_target ORDER BY id;", rows=initial, types=[23, 23, 25])
             query("SELECT id FROM bd_sink;", rows=[])
+            query("SELECT id,flag FROM bd_output;", rows=[], types=[23, 16])
             expected += calls + 1
             query("SELECT nextval('bd_calls');", rows=[[str(expected)]], types=[20])
         query("ROLLBACK;")
