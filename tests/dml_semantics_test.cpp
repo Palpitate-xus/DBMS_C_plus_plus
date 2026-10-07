@@ -4,6 +4,7 @@
 #include "parser/parser.h"
 #include "Session.h"
 #include "catalog/type_registry.h"
+#include "common/DbError.h"
 #include <cassert>
 #include <filesystem>
 #include <iostream>
@@ -15,6 +16,20 @@ namespace fs = std::filesystem;
 static void cleanup(const std::string& db) { if (std::filesystem::exists(db)) std::filesystem::remove_all(db); }
 static void setupSession(Session& s, const std::string& db) {
     s.username = "testuser"; s.permission = 1; s.currentDB = db;
+}
+
+static void assertAmbiguousSourceDml(const std::string& sql, dbms::SqlCommand command,
+                                     Session& session, const std::string& table) {
+    using Snapshot=std::pair<std::vector<std::vector<std::string>>,std::vector<std::vector<bool>>>;
+    const auto snapshot=[&]{Snapshot value;(void)g_engine.query(session.currentDB,table,{},
+        {"id","val"},{{"id",true}},false,false,false,0,{},&value.first,&value.second);return value;};
+    const auto before=snapshot();const bool parent=g_engine.inTransaction();
+    bool handled=false;std::string state;
+    try{(void)dbms::tryDmlBridge(sql,command,session,handled);}
+    catch(const dbms::DbError& error){state=error.sqlState();}
+    std::cout<<"[DML SOURCE NAME] "<<sql<<" STATE "<<state<<std::endl;
+    assert(state=="42702" && snapshot()==before && g_engine.inTransaction()==parent);
+    assert(!dbms::takeLastDmlResult().available);
 }
 
 // 5.14 Set operations: UNION/INTERSECT/EXCEPT parser
@@ -89,9 +104,13 @@ static void test_update_from_engine() {
     // alias and target/source column qualification must survive parsing and
     // evaluation without going through textual SELECT output.
     bool handled = false;
-    const bool error = dbms::tryDmlBridge(
+    assertAmbiguousSourceDml(
         "UPDATE target SET val = target.val + s.val FROM source AS s "
         "WHERE target.id = s.id RETURNING id, val",
+        dbms::SqlCommand::Update,s,"target");
+    const bool error = dbms::tryDmlBridge(
+        "UPDATE target SET val = target.val + s.val FROM source AS s "
+        "WHERE target.id = s.id RETURNING target.id, target.val",
         dbms::SqlCommand::Update, s, handled);
     assert(handled && !error);
     const dbms::DmlResult result = dbms::takeLastDmlResult();
@@ -104,9 +123,13 @@ static void test_update_from_engine() {
     // The target row without a matching source row must remain unchanged.
     assert(g_engine.insert(db, "target", {{"id","3"},{"val","30"}}) == dbms::DBStatus::OK);
     handled = false;
-    assert(!dbms::tryDmlBridge(
+    assertAmbiguousSourceDml(
         "UPDATE target SET val = target.val + s.val FROM source AS s "
         "WHERE target.id = s.id RETURNING id, val",
+        dbms::SqlCommand::Update,s,"target");
+    assert(!dbms::tryDmlBridge(
+        "UPDATE target SET val = target.val + s.val FROM source AS s "
+        "WHERE target.id = s.id RETURNING target.id, target.val",
         dbms::SqlCommand::Update, s, handled));
     assert(handled);
     const dbms::DmlResult second = dbms::takeLastDmlResult();
@@ -136,9 +159,13 @@ static void test_delete_using_engine() {
     assert(g_engine.insert(db, "source", {{"id", "3"}}) == dbms::DBStatus::OK);
 
     bool handled = false;
-    const bool error = dbms::tryDmlBridge(
+    assertAmbiguousSourceDml(
         "DELETE FROM target USING source AS s "
         "WHERE target.id = s.id RETURNING id, val",
+        dbms::SqlCommand::Delete,s,"target");
+    const bool error = dbms::tryDmlBridge(
+        "DELETE FROM target USING source AS s "
+        "WHERE target.id = s.id RETURNING target.id, target.val",
         dbms::SqlCommand::Delete, s, handled);
     assert(handled && !error);
     const dbms::DmlResult result = dbms::takeLastDmlResult();
@@ -178,10 +205,15 @@ static void test_join_dml_engine() {
     assert(g_engine.insert(db, "source_b", {{"grp","30"},{"delta","300"}}) == dbms::DBStatus::OK);
 
     bool handled = false;
-    assert(!dbms::tryDmlBridge(
+    assertAmbiguousSourceDml(
         "UPDATE target SET val = target.val + b.delta "
         "FROM source_a AS a JOIN source_b AS b ON a.grp = b.grp "
         "WHERE target.id = a.id RETURNING id, val",
+        dbms::SqlCommand::Update,s,"target");
+    assert(!dbms::tryDmlBridge(
+        "UPDATE target SET val = target.val + b.delta "
+        "FROM source_a AS a JOIN source_b AS b ON a.grp = b.grp "
+        "WHERE target.id = a.id RETURNING target.id, target.val",
         dbms::SqlCommand::Update, s, handled));
     assert(handled);
     const dbms::DmlResult updated = dbms::takeLastDmlResult();
@@ -191,25 +223,37 @@ static void test_join_dml_engine() {
     assert((updated.rows[2] == std::vector<std::string>{"3", "330"}));
 
     handled = false;
-    // Unsupported source shapes stay owned by the typed bridge and fail
-    // before mutation; they must never fall through to the legacy slicer.
-    assert(dbms::tryDmlBridge(
+    // The retained LEFT source executes the original legal PostgreSQL SQL.
+    assert(!dbms::tryDmlBridge(
         "UPDATE target SET val = b.delta FROM source_a AS a "
         "LEFT JOIN source_b AS b ON a.grp = b.grp WHERE target.id = a.id",
         dbms::SqlCommand::Update, s, handled));
     assert(handled);
+    std::vector<std::vector<std::string>> outerRows;std::vector<std::vector<bool>> outerNulls;
+    (void)g_engine.query(db,"target",{},{"id","val"},{{"id",true}},false,false,false,0,{},&outerRows,&outerNulls);
+    assert((outerRows==std::vector<std::vector<std::string>>{{"1","100"},{"2","200"},{"3","300"}}));
+    assert((outerNulls==std::vector<std::vector<bool>>{{false,false},{false,false},{false,false}}));
+    // Restore the prior image after validating this additional successful
+    // stage, so every original subsequent DELETE row expectation is kept.
+    for(const auto& value:std::vector<std::pair<std::string,std::string>>{{"1","110"},{"2","220"},{"3","330"}})
+        assert(g_engine.updateRows(db,"target",{{"val",value.second}},{"=id "+value.first})==dbms::DBStatus::OK);
 
     handled = false;
-    assert(dbms::tryDmlBridge(
+    assert(!dbms::tryDmlBridge(
         "DELETE FROM target USING source_a AS a "
         "LEFT JOIN source_b AS b ON a.grp = b.grp WHERE target.id = -1",
         dbms::SqlCommand::Delete, s, handled));
     assert(handled);
+    assert(dbms::takeLastDmlResult().commandTag=="DELETE 0");
 
     handled = false;
-    assert(!dbms::tryDmlBridge(
+    assertAmbiguousSourceDml(
         "DELETE FROM target USING source_a AS a JOIN source_b AS b ON a.grp = b.grp "
         "WHERE target.id = a.id AND b.delta > 150 RETURNING id, val",
+        dbms::SqlCommand::Delete,s,"target");
+    assert(!dbms::tryDmlBridge(
+        "DELETE FROM target USING source_a AS a JOIN source_b AS b ON a.grp = b.grp "
+        "WHERE target.id = a.id AND b.delta > 150 RETURNING target.id, target.val",
         dbms::SqlCommand::Delete, s, handled));
     assert(handled);
     const dbms::DmlResult deleted = dbms::takeLastDmlResult();
@@ -312,10 +356,14 @@ static void test_source_driven_dml_hardening() {
         {{"id", "1"}, {"delta", "7"}}) == dbms::DBStatus::OK);
 
     bool handled = false;
+    assertAmbiguousSourceDml(
+        "UPDATE duplicate_target AS dst SET val = src.delta "
+        "FROM duplicate_source AS src WHERE dst.id = src.id "
+        "RETURNING id, val",dbms::SqlCommand::Update,s,"duplicate_target");
     assert(!dbms::tryDmlBridge(
         "UPDATE duplicate_target AS dst SET val = src.delta "
         "FROM duplicate_source AS src WHERE dst.id = src.id "
-        "RETURNING id, val",
+        "RETURNING dst.id, dst.val",
         dbms::SqlCommand::Update, s, handled));
     assert(handled);
     const dbms::DmlResult updated = dbms::takeLastDmlResult();
@@ -332,9 +380,12 @@ static void test_source_driven_dml_hardening() {
     assert(g_engine.insert(db, "delete_target",
         {{"id", "2"}, {"val", "20"}}) == dbms::DBStatus::OK);
     handled = false;
+    assertAmbiguousSourceDml(
+        "DELETE FROM delete_target AS dst USING duplicate_source AS src "
+        "WHERE dst.id = src.id RETURNING id, val",dbms::SqlCommand::Delete,s,"delete_target");
     assert(!dbms::tryDmlBridge(
         "DELETE FROM delete_target AS dst USING duplicate_source AS src "
-        "WHERE dst.id = src.id RETURNING id, val",
+        "WHERE dst.id = src.id RETURNING dst.id, dst.val",
         dbms::SqlCommand::Delete, s, handled));
     assert(handled);
     const dbms::DmlResult deleted = dbms::takeLastDmlResult();
