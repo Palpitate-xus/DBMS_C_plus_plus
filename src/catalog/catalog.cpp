@@ -11,10 +11,107 @@
 #include <limits>
 #include <set>
 #include <functional>
+#include <cerrno>
+#include <tuple>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 namespace dbms {
+
+namespace {
+struct CatalogFileGeneration {
+    bool exists = false;
+    bool regular = false;
+    dev_t device = 0;
+    ino_t inode = 0;
+    off_t size = 0;
+    timespec modified{};
+    timespec changed{};
+    dev_t directoryDevice = 0;
+    ino_t directoryInode = 0;
+
+    bool operator==(const CatalogFileGeneration& other) const {
+        return exists == other.exists && regular == other.regular &&
+            device == other.device && inode == other.inode && size == other.size &&
+            modified.tv_sec == other.modified.tv_sec &&
+            modified.tv_nsec == other.modified.tv_nsec &&
+            changed.tv_sec == other.changed.tv_sec &&
+            changed.tv_nsec == other.changed.tv_nsec &&
+            directoryDevice == other.directoryDevice &&
+            directoryInode == other.directoryInode;
+    }
+};
+
+bool catalogGeneration(const std::filesystem::path& path,
+                       CatalogFileGeneration& result) {
+    result = {};
+    struct stat parent{};
+    if (::stat(path.parent_path().c_str(), &parent) != 0 ||
+        !S_ISDIR(parent.st_mode)) return false;
+    result.directoryDevice = parent.st_dev;
+    result.directoryInode = parent.st_ino;
+    struct stat file{};
+    if (::lstat(path.c_str(), &file) != 0) return errno == ENOENT;
+    result.exists = true;
+    result.regular = S_ISREG(file.st_mode);
+    result.device = file.st_dev;
+    result.inode = file.st_ino;
+    result.size = file.st_size;
+    result.modified = file.st_mtim;
+    result.changed = file.st_ctim;
+    return true;
+}
+
+struct CatalogPublicationState {
+    std::mutex mutex;
+    struct Receipt {
+        CatalogFileGeneration generation;
+        std::string bytes;
+    };
+    std::map<std::string, Receipt> durable;
+};
+
+std::shared_ptr<CatalogPublicationState> catalogPublicationState(
+    const std::string& directory) {
+    struct Registry {
+        std::mutex mutex;
+        std::map<std::string, std::weak_ptr<CatalogPublicationState>> entries;
+        unsigned int lookups = 0;
+    };
+    // Catalog destructors can publish after normal static destruction.
+    static Registry* registry = new Registry;
+    std::error_code error;
+    auto path = std::filesystem::weakly_canonical(directory, error);
+    if (error) path = std::filesystem::absolute(directory).lexically_normal();
+    std::lock_guard<std::mutex> lock(registry->mutex);
+    if (++registry->lookups % 64 == 0) {
+        for (auto it = registry->entries.begin(); it != registry->entries.end();)
+            if (it->second.expired()) it = registry->entries.erase(it);
+            else ++it;
+    }
+    auto& entry = registry->entries[path.string()];
+    auto state = entry.lock();
+    if (!state) { state = std::make_shared<CatalogPublicationState>(); entry = state; }
+    return state;
+}
+
+bool catalogFileEquals(const std::filesystem::path& path, const std::string& bytes) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) return false;
+    const std::string actual((std::istreambuf_iterator<char>(input)),
+                             std::istreambuf_iterator<char>());
+    return !input.bad() && actual == bytes;
+}
+} // namespace
+
+struct CatalogPersistenceState {
+    explicit CatalogPersistenceState(const std::string& path)
+        : publication(catalogPublicationState(path)) {}
+    std::shared_ptr<CatalogPublicationState> publication;
+    std::map<std::string, std::string> baseline;
+    std::map<std::string, CatalogFileGeneration> observed;
+};
 
 // ============================================================================
 // 辅助：CSV 风格持久化
@@ -188,7 +285,7 @@ static bool writeCatalogFileAtomically(
 // ============================================================================
 
 CatalogManager::CatalogManager(const std::string& dbPath)
-    : dbPath_(dbPath) {
+    : dbPath_(dbPath), persistence_(std::make_unique<CatalogPersistenceState>(dbPath)) {
     std::filesystem::create_directories(dbPath_);
     oidGen_ = std::make_unique<OidGenerator>(oidPath(dbPath));
     loadAll();
@@ -198,7 +295,8 @@ CatalogManager::~CatalogManager() {
     if (oidGen_) (void)persistAll();
 }
 
-CatalogManager::CatalogManager(const std::string& dbPath, ReadOnlyTag) : dbPath_(dbPath) {
+CatalogManager::CatalogManager(const std::string& dbPath, ReadOnlyTag)
+    : dbPath_(dbPath), persistence_(std::make_unique<CatalogPersistenceState>(dbPath)) {
     loadAll();
 }
 
@@ -1584,12 +1682,13 @@ std::string CatalogManager::catalogFilePath(const std::string& tablename) const 
     return dbPath_ + "/pg_" + tablename + ".cat";
 }
 
-bool CatalogManager::persistAll() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    bool ok = true;
+std::map<std::string, std::string> CatalogManager::serializeAllLocked() const {
+    std::map<std::string, std::string> images;
     auto persist = [&](const char* name,
                        const std::function<void(std::ostream&)>& writer) {
-        if (!writeCatalogFileAtomically(catalogFilePath(name), writer)) ok = false;
+        std::ostringstream image;
+        writer(image);
+        images.emplace(name, image.str());
     };
 
     // pg_namespace
@@ -1778,12 +1877,97 @@ bool CatalogManager::persistAll() {
         }
     });
 
-    if (!oidGen_->persist()) ok = false;
+    return images;
+}
+
+bool CatalogManager::persistAll() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> publicationLock(persistence_->publication->mutex);
+    auto images = serializeAllLocked();
+    std::map<std::string, CatalogFileGeneration> current;
+    bool peerChanged = false;
+    bool missingImage = false;
+    for (const auto& image : images) {
+        auto& generation = current[image.first];
+        if (!catalogGeneration(catalogFilePath(image.first), generation) ||
+            (generation.exists && !generation.regular)) return false;
+        missingImage = missingImage || !generation.exists;
+        const auto observed = persistence_->observed.find(image.first);
+        // A missing file is repaired, not treated as a new peer image.
+        if (generation.exists &&
+            (observed == persistence_->observed.end() ||
+             !(observed->second == generation))) peerChanged = true;
+    }
+    if (peerChanged) {
+        // No cross-cache merge is implied: retain unsaved local changes on a
+        // conflict, rather than silently publishing over newer peer metadata.
+        if (images != persistence_->baseline || missingImage) return false;
+        try { loadAllLocked(); }
+        catch (const std::exception&) { return false; }
+        images = serializeAllLocked();
+        current = persistence_->observed;
+    }
+
+    bool ok = true;
+    for (const auto& image : images) {
+        const auto known = persistence_->publication->durable.find(image.first);
+        if (known != persistence_->publication->durable.end() &&
+            current[image.first].exists &&
+            known->second.generation == current[image.first] &&
+            known->second.bytes == image.second) continue;
+
+        const auto target = catalogFilePath(image.first);
+        const bool written = writeCatalogFileAtomically(target,
+            [&](std::ostream& out) { out.write(image.second.data(), image.second.size()); });
+        CatalogFileGeneration after;
+        const bool inspected = catalogGeneration(target, after);
+        if (!written || !inspected || !after.exists || !after.regular) {
+            ok = false;
+            // Rename can succeed before directory fsync fails. Remember only
+            // the observed generation of our bytes, never a durable receipt;
+            // the next attempt must repeat the complete durable publication.
+            if (inspected && after.exists && after.regular &&
+                catalogFileEquals(target, image.second))
+                persistence_->observed[image.first] = after;
+            continue;
+        }
+        persistence_->publication->durable[image.first] = {after, image.second};
+        persistence_->observed[image.first] = after;
+        persistence_->baseline[image.first] = image.second;
+    }
+    if (oidGen_ && !oidGen_->persist()) ok = false;
     return ok;
 }
 
 void CatalogManager::loadAll() {
     std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> publicationLock(persistence_->publication->mutex);
+    loadAllLocked();
+}
+
+void CatalogManager::loadAllLocked() {
+    // Parse into a replacement model, retaining the old rows and indexes
+    // until every catalog has loaded successfully. In particular a failed
+    // peer refresh must not empty unrelated rows or throw from destruction.
+    auto priorRows = std::make_tuple(
+        std::move(namespaces_), std::move(classes_), std::move(attributes_),
+        std::move(types_), std::move(enums_), std::move(procs_),
+        std::move(depends_), std::move(authIds_), std::move(authMembers_),
+        std::move(descriptions_));
+    auto priorIndexes = std::make_tuple(
+        std::move(nsByOid_), std::move(classByOid_), std::move(typeByOid_),
+        std::move(procByOid_), std::move(authIdByOid_), std::move(authMemberByOid_),
+        std::move(nsByName_), std::move(authIdByName_), std::move(classByName_));
+    try {
+    namespaces_.clear(); classes_.clear(); attributes_.clear(); types_.clear();
+    enums_.clear(); procs_.clear(); depends_.clear(); authIds_.clear();
+    authMembers_.clear(); descriptions_.clear();
+    std::map<std::string, CatalogFileGeneration> before;
+    for (const auto& image : serializeAllLocked()) {
+        CatalogFileGeneration generation;
+        if (catalogGeneration(catalogFilePath(image.first), generation))
+            before.emplace(image.first, generation);
+    }
 
     // pg_namespace
     {
@@ -2099,6 +2283,27 @@ void CatalogManager::loadAll() {
     }
 
     rebuildIndexes();
+    auto images = serializeAllLocked();
+    std::map<std::string, CatalogFileGeneration> observed;
+    for (const auto& image : images) {
+        CatalogFileGeneration generation;
+        if (catalogGeneration(catalogFilePath(image.first), generation)) {
+            const auto original = before.find(image.first);
+            if (original == before.end() || !(original->second == generation))
+                throw DbError("58030", "catalog image changed while loading");
+            observed.emplace(image.first, generation);
+        }
+    }
+    persistence_->baseline = std::move(images);
+    persistence_->observed = std::move(observed);
+    } catch (...) {
+        std::tie(namespaces_, classes_, attributes_, types_, enums_, procs_,
+                 depends_, authIds_, authMembers_, descriptions_) = std::move(priorRows);
+        std::tie(nsByOid_, classByOid_, typeByOid_, procByOid_, authIdByOid_,
+                 authMemberByOid_, nsByName_, authIdByName_, classByName_) =
+            std::move(priorIndexes);
+        throw;
+    }
 }
 
 void CatalogManager::rebuildIndexes() {

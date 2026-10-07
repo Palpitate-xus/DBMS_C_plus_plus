@@ -12,6 +12,8 @@
 
 namespace dbms {
 
+struct CatalogPersistenceState;
+
 // ============================================================================
 // Catalog 管理器
 //
@@ -248,6 +250,9 @@ private:
     std::string dbPath_;
     std::unique_ptr<OidGenerator> oidGen_;
     mutable std::mutex mutex_;
+    // Serialized baselines and receipts, not setter-only dirty flags. The
+    // opaque state also serializes publishers sharing one catalog directory.
+    std::unique_ptr<CatalogPersistenceState> persistence_;
 
     // 内存存储
     std::vector<PgNamespaceRow> namespaces_;
@@ -276,6 +281,8 @@ private:
 
     // 辅助函数
     std::string catalogFilePath(const std::string& tablename) const;
+    std::map<std::string, std::string> serializeAllLocked() const;
+    void loadAllLocked();
     void rebuildIndexes();
     static std::string classNameKey(Oid nspOid, const std::string& relname);
 
