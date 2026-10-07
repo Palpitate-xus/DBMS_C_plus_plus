@@ -1608,6 +1608,30 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
 
 // Parse and Describe share the query host's genuine pure descriptor. Returning
 // false means another existing consumer owns the shape, not an analysis error.
+bool describePreparedSetResult(const std::string& sql, Session& session,
+                               std::vector<PgColumnDescription>& columns) {
+    SQLParser parser;
+    const auto probe = parser.parseForBinding(sql);
+    const Stmt* statement = probe.isValid() ? probe.stmt.get() : nullptr;
+    if (const auto* with = dynamic_cast<const WithStmt*>(statement))
+        statement = with->statement.get();
+    const auto* select = dynamic_cast<const SelectStmt*>(statement);
+    if (!select || select->setOp == SetOp::None) return false;
+    // The completed whole-tree binder owns common output types, UNKNOWN
+    // input conversion and every branch namespace. Neither a left target
+    // nor a source row is an authoritative set-query descriptor.
+    const auto prepared = g_engine.prepareBoundQuery(session.currentDB, sql);
+    QueryResult shape;
+    for (const auto& field : prepared.output) {
+        shape.columns.push_back(field.name);
+        shape.columnTypes.push_back(field.type);
+    }
+    // Set outputs have no physical table/attribute origin, even when their
+    // label happens to name the left branch's actual physical column.
+    columns = describeProtocolColumns(shape, std::string{}, session);
+    return !columns.empty();
+}
+
 bool describePreparedQueryHostResult(const std::string& sql, Session& session,
                                     std::vector<PgColumnDescription>& columns) {
     SQLParser parser;
@@ -1632,6 +1656,8 @@ bool describePreparedQueryHostResult(const std::string& sql, Session& session,
 bool describePreparedResult(const std::string& sql, Session& session,
                             std::vector<PgColumnDescription>& columns,
                             const std::vector<uint32_t>& parameterOids = {}) {
+    if (parameterOids.empty() && describePreparedSetResult(sql, session, columns))
+        return true;
     SQLParser parser;
     ParseResult parsed = parser.parse(sql);
     if (!parsed.isValid()) return false;
@@ -5309,7 +5335,8 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                     // statement. A failed call never leaves a named object
                     // behind or turns its next Parse into spurious 42P05.
                     std::vector<PgColumnDescription> staticColumns;
-                    (void)describePreparedQueryHostResult(sql,session,staticColumns);
+                    if (!describePreparedSetResult(sql,session,staticColumns))
+                        (void)describePreparedQueryHostResult(sql,session,staticColumns);
                 }
             } catch (const DbError& error) {
                 sendExtendedProtocolError(error.sqlState(), error.message());

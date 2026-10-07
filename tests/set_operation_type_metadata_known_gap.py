@@ -73,7 +73,27 @@ def main():
             if expected is not None and any(field[1] or field[2] for field in fields):
                 failures.append((sql, "set output must not inherit physical origin", fields))
             if any(kind in (b"D", b"C") for kind, _ in messages): failures.append((sql, "metadata executed a target"))
+            if state is not None and any(kind == b"1" for kind, _ in messages):
+                failures.append((sql, "failed analysis published a named statement"))
             assert simple("ROLLBACK TO set_meta_case;")[1] is None
+            if state is not None:
+                sock.sendall(c.typed(b"D", b"S" + name + b"\0") + c.typed(b"S"))
+                missing = r.decode_wire_result(c.read_until_ready(sock), include_types=True)
+                print("SET META FAILED NAME", sql, missing, flush=True)
+                if missing[1] != "26000": failures.append((sql, "failed prepared name exists", missing))
+                assert simple("ROLLBACK TO set_meta_case;")[1] is None
+            else:
+                portal = ("set_portal_" + str(index)).encode()
+                bind = portal + b"\0" + name + b"\0" + struct.pack("!HHH", 0, 0, 0)
+                sock.sendall(c.typed(b"B", bind) + c.typed(b"D", b"P" + portal + b"\0") + c.typed(b"S"))
+                portal_messages = c.read_until_ready(sock)
+                portal_result = r.decode_wire_result(portal_messages, include_types=True)
+                portal_fields = c.row_description_fields(portal_messages) if any(kind == b"T" for kind, _ in portal_messages) else []
+                print("SET META PORTAL", sql, portal_result, portal_fields, flush=True)
+                if portal_result[1] is not None: failures.append((sql, "portal analysis", portal_result))
+                if [field[3] for field in portal_fields] != expected: failures.append((sql, "portal types", portal_fields, expected))
+                if any(field[1] or field[2] for field in portal_fields): failures.append((sql, "portal physical origin", portal_fields))
+                if any(kind in (b"D", b"C") for kind, _ in portal_messages): failures.append((sql, "portal metadata executed a target"))
         assert simple("SAVEPOINT set_meta_noeffects;")[1] is None
         value = simple("SELECT currval('set_meta_calls');")
         if value[1] != "55000": failures.append(("metadata-only writer effect", value))
