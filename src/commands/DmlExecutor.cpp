@@ -5238,6 +5238,12 @@ void rejectPreparedMaterializedTarget(Stmt* statement, Session& session,
 // Public native source mutations consume the retained prepared occurrences.
 // Construction is pure; next() opens real typed scans/cursors in the mutation's
 // owner. No target/source datum is rendered back into SQL.
+class NativeMutationStatusError final : public DbError {
+public:
+    explicit NativeMutationStatusError(DBStatus status)
+        :DbError(sqlstateForDBStatus(status),"WITH multi-source mutation failed") {}
+};
+
 class NativeBoundDmlSources {
     Session& session_;
     std::shared_ptr<PreparedQuery> query_;
@@ -5835,7 +5841,7 @@ private:
             const auto status=update
                 ?g_engine.updateRows(session_.currentDB,physical_,{}, {},nullptr,{}, {},&count,nullptr,&callbacks)
                 :g_engine.removeRows(session_.currentDB,physical_,{},nullptr,{},&count,&callbacks);
-            if(status!=DBStatus::OK)throw DbError(sqlstateForDBStatus(status),"WITH multi-source mutation failed");
+            if(status!=DBStatus::OK)throw NativeMutationStatusError(status);
             return result(changes,update?"UPDATE":"DELETE",count,&provenance);
         }
         if(auto* update=dynamic_cast<UpdateStmt*>(statement_)) {
@@ -6400,9 +6406,18 @@ bool tryDmlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
             // The very graph checked by pure whole-query binding is consumed
             // by the actual writer. Build its execution carrier once inside
             // the owner, before any source is opened or SET is evaluated.
-            auto result=executeAtomicDmlUnit(s,[&] {
-                return executeBoundDml(update,s,query,{},sources.factory(),sources.cursorFactory(),true);
-            });
+            DmlResult result;
+            try {
+                result=executeAtomicDmlUnit(s,[&] {
+                    return executeBoundDml(update,s,query,{},sources.factory(),sources.cursorFactory(),true);
+                });
+            } catch(const NativeMutationStatusError& failure) {
+                // The public legacy bridge reports storage status failures
+                // through its bool contract. Expression/routine DbErrors keep
+                // their original exception identity and SQLSTATE instead.
+                std::cout<<"ERROR: "<<failure.what()<<std::endl;
+                handled=true;return true;
+            }
             for(size_t row=0;row<result.rows.size();++row)
                 for(size_t column=0;column<result.rows[row].size();++column)
                     if(result.nulls.at(row).at(column))result.rows[row][column]="NULL";
