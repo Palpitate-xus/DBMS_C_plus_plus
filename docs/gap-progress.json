@@ -2,6 +2,76 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "17 independent ROOT integrations through 679d; genuine set clauses/array values/retirement repaired, latest whole combination still pending",
+      "gap_ids": [
+        "TYPE-04",
+        "TYPE-16",
+        "TYPE-19",
+        "QRY-01",
+        "QRY-02",
+        "QRY-06",
+        "QRY-10",
+        "DML-02",
+        "DML-05",
+        "TXN-07",
+        "STO-04",
+        "WAL-05"
+      ],
+      "status": "partial",
+      "commits": [
+        "1cc2baf3",
+        "1ed9e09f",
+        "23241823",
+        "25ee2f25",
+        "2108c9c3",
+        "52edc038",
+        "91060c1b",
+        "42bd7168",
+        "ddf926dd",
+        "0fdb5314",
+        "4d9bd475",
+        "0138a5b7",
+        "0e641a1b",
+        "cc689844",
+        "3a95ebd7",
+        "ed82e868",
+        "679d5543"
+      ],
+      "evidence": [
+        "docs/issue-ready-source-integration.md",
+        "docs/issue-domain-ancestry-foundation.md",
+        "docs/issue-heap-wal-retirement-completion.md",
+        "docs/issue-transaction-wal-physical-owner.md",
+        "docs/issue-pattern-predicate-binding.md",
+        "docs/issue-set-clause-binding.md",
+        "docs/issue-set-clause-execution.md",
+        "docs/issue-alter-array-type-envelope.md",
+        "docs/issue-unlogged-relation-retirement.md"
+      ],
+      "tests": [
+        "tests/insert_exception_owner_test.cpp",
+        "tests/retained_wal_publication_owner_test.cpp",
+        "tests/pattern_predicate_binding_test.cpp",
+        "tests/pattern_predicate_protocol_e2e_test.py",
+        "tests/pattern_predicate_priority_protocol_e2e_test.py",
+        "tests/pattern_unicode_known_gap.py",
+        "tests/set_operation_clause_binding_test.cpp",
+        "tests/prepared_set_clause_execution_test.cpp",
+        "tests/set_operation_clause_ownership_protocol_e2e_test.py",
+        "tests/array_nested_brackets_test.cpp",
+        "tests/alter_array_values_test.cpp",
+        "tests/alter_array_type_envelope_protocol_e2e_test.py",
+        "tests/unlogged_relation_retirement_test.cpp"
+      ],
+      "verification": {
+        "reproduction": "Original exception owner, qualified/session SRF, domain chain, heap generation/intent, terminal WAL, NOT LIKE priority, set clause ownership, nonNULL array conversion, unique23505 and persistence-change missing-liveSID failures retained. Unicode13 strict180006 all0 versus11 candidate differences. Cache orphan-pin stronger negative fails after old15/4 green.",
+        "fix": "17 separate ROOT source/test commits. Genuine AST/output-order ordinals and typed set consumer; array element conversion/modifiers and atomic failure/index recovery; durable DROP completion despite currentUNLOGGED. Public type/OID/WAL/query/API layouts preserved and require matching fresh58 ABI.",
+        "focused_tests": "Private set whole43/reference/originalmetadata18/final12serialwire/native4/scopedSAN3 actual0. Array whole54/reference/native8/fouradjacent wire actual0, ownfresh58 normalO2/finalaudit SHA7fa6eac5af87376fdeabb6b44e73f7211aa03a1789b9ef6710f6aaeb622500d3. Retire normal19/scopedTM3SAN actual0. Pattern native11/whole11+array negatives/originalpriority48 actual0, intactdomainchain/defaultdeadline; memorybacked semantics not diskperformance. Failed/intermediate logs retained.",
+        "full_suite": "Latest679d5543 exact640native329registered58TU no formal combinedfullPASS. Exact25ee freshnormal58 50723 exits0 SHAced21bb02fc379c0741aacf542da33657e85ee6e4d0ef4ca9d3da00bc5abb621; exact42bd freshnormal58 70365 exits0 SHA06126abf42f7cccac24e643c1cf61bb49ce9e71651cdfa383a428b523d1f0599. 0fdb635/327 freshnormal58 47811 anded82639/329 25658 live; latestTM cannot inheritoldbinary. c061 native12 actual0/wire9 actual1=4pass5fail. 1cc sixnormalnatives0 but57objects provenreuse notfreshall58. Originalfull d296468/5ca16482/c06136568/42bd33648 re-polledlive; no TLSruntime/fullPASS.",
+        "scope": "Original273 unchanged22complete166partial70unverified15deferred; requirecomplete remains1. Providersearchpath, Unicode runtime, domainALTER/generalcasts/compositearray/revalidation, other sets, WALrewrite/PITR/generalcrash andremainingfamilies required. CacheV3 notimported whileorphanpinverificationpending. No push/Actionsactivation/securityrestart."
+      }
+    },
+    {
       "issue": "Independent UNKNOWN/static function type, lazy typed Append/ordinary consumer and cross-process XID commits; exact c061 formal58 verified and original full started",
       "gap_ids": ["TYPE-16", "QRY-01", "QRY-02", "DML-02", "DML-05", "TXN-07", "WAL-05"],
       "status": "partial",

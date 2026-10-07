@@ -1,6 +1,115 @@
 # Independent source integrations after canonical 75090
 
-## Current c061 checkpoint: input types, typed append and external XID state
+## Current 679d checkpoint: 17 independently committed repairs, combination verification pending
+
+Production/test source `679d5543` has **640 native / 329 registered / 58 TU**.
+These are source integrations, not completion of the PostgreSQL families.
+
+| Independent repair | Private commit | ROOT commit |
+| --- | --- | --- |
+| INSERT exception transaction owner and original error propagation | `c33c4413` | `1cc2baf3` |
+| Genuine qualified source-free routine dispatch | `ba510638` | `1ed9e09f` |
+| Cold public namespace existence and DROP error | `4b871d55` | `23241823` |
+| Real session SRF providers and pure Parse/Describe | `ee1a7ea2` | `25ee2f25` |
+| Durable heap WAL table-generation identity | `9fd5be11` | `2108c9c3` |
+| Retirement completion, not intent alone, authorizes replay | `18af7579` | `52edc038` |
+| Complete scalar domain ancestry and retained catalog identity | `0375935f` | `91060c1b` |
+| Whole set-query output metadata before publication | `d4ca4a88` | `42bd7168` |
+| Physical transaction WAL pin through terminal work | `62469fd8` | `ddf926dd` |
+| Typed pattern predicate binding and strict ESCAPE demand | ROOT-owned | `0fdb5314` |
+| Canonical common type on actual Append cells | `294d8d8d` | `4d9bd475` |
+| Genuine set-root clauses and bound output order ordinals | `891044ff` | `0138a5b7` |
+| Real typed Append/Sort/Offset/Limit/WITH TIES consumer | `f8930cfc` | `0e641a1b` |
+| Nested ARRAY bracket shorthand, with negative syntax controls | `d18f2402` | `cc689844` |
+| Actual ALTER array element conversion and retained modifiers | `313f51c7` | `3a95ebd7` |
+| Unique index rebuild conflict retains SQLSTATE 23505 | `e230ac45` | `ed82e868` |
+| DROP retires an identity after LOGGED-to-UNLOGGED changes | `5205a9f6` | `679d5543` |
+
+### Actual evidence, by source epoch
+
+- Exact `25ee2f25` **625/323/58** fresh normal O2/repeat/audit/freeze
+  **50723 exits0**, SHA256
+  `ced21bb02fc379c0741aacf542da33657e85ee6e4d0ef4ca9d3da00bc5abb621`;
+  `/tmp/dbms-canonical-session-srf.N6TMeDqh`. Its original full runner was
+  prepared but not started; no full-suite success is claimed.
+- Exact `42bd7168` **633/325/58** fresh normal O2/repeat/audit/freeze
+  **70365 exits0**, SHA256
+  `06126abf42f7cccac24e643c1cf61bb49ce9e71651cdfa383a428b523d1f0599`;
+  `/tmp/dbms-canonical-domain-wal-set.B0XVFTRv`. The unchanged original
+  full runner **33648** is live, not a full PASS.
+- Exact `1cc2baf3` normal matching group **9163 exits0**, six native tests
+  pass. This uses 57 byte-proven unchanged c061 normal objects plus fresh
+  TableManage and matching stubs/drivers, with explicit relocated-path
+  receipt proof; it is **not** a fresh all58 build.
+- Exact `c061a38a` matching native12 **35605 exits0**; whole wire9
+  **48073 exits1: 4 pass / 5 fail**. The retained failures are qualified
+  public routine dispatch, listening-channel LIMIT0, set Parse/Describe,
+  and original disk-backed ordinary quantified DML/WITH restart timeouts.
+  Original SQL, assertions and default deadlines remain unchanged.
+- Pattern private current-domain epoch
+  `/tmp/dbms-pattern-domain-current.2UlkbWAe` has fresh58 O0 and matching
+  native11, original whole pattern11 (with added array negatives), and
+  original whole priority48 all exit0. The priority fixture keeps its
+  complete domain-chain setup and cumulative effect assertions. Exact ROOT
+  fixtures also pass strict PostgreSQL 180006. Candidate semantic runs use
+  memory-backed TMPDIR with the **unchanged** 15-second deadline; they are
+  not evidence of disk-backed performance or a formal all-O2 ROOT pass.
+- Set-clause private `/tmp/dbms-set-clause-ownership.oSu5ps6G` passes strict
+  180006 whole43, original metadata18 with Portal/name controls, four matching
+  natives, twelve complete final serial wire scripts and three scoped
+  sanitizer drivers. The public PreparedQuery map required fresh58 O0;
+  matching V2 changed CPPs were rebuilt. Not all-core sanitizer/all-O2 proof.
+- Array private `/tmp/dbms-alter-array-values.yC5kFpDd` passes strict180006,
+  whole54 original/expanded SQL controls, four complete adjacent protocols
+  and eight natives. The changed public API has fresh58 normal O2 plus
+  final changed-CPP rebuilds/audits; frozen SHA256
+  `7fa6eac5af87376fdeabb6b44e73f7211aa03a1789b9ef6710f6aaeb622500d3`.
+  Values, NULL/empty/2D dimensions, modifiers, PK/array indexes, errors,
+  multi-action atomicity, transaction rollback and unique-collision recovery
+  are asserted. Historical failed logs are retained.
+- Persistence-change retirement private
+  `/tmp/dbms-unlogged-retirement.2ZTu0yg8` passes final normal19 **67907**
+  and scoped TableManage ASan3 **29641**, both actual exit0. Six scenarios
+  keep one warmed parent and real fork/exec crashes, committed/aborted reuse,
+  zero UNLOGGED value WAL and intent-only fail-closed controls.
+  The earlier added total-WAL fixture mistake is retained and explained;
+  the original CREATE/full-text-index zero-WAL test is unchanged.
+  This is matched incremental O0/scoped instrumentation, not all58 O2.
+
+Exact `0fdb5314` **635/327/58** new fresh normal O2 epoch **47811** is live
+under `/tmp/dbms-canonical-pattern-owner.AR5UGRVA`. Exact `ed82e868`
+**639/329/58** new fresh normal O2 epoch **25658** is live under
+`/tmp/dbms-canonical-array-set.2aIsy0eH`. No latest build/freeze/full PASS
+is claimed. Latest `679d5543` additionally changes TableManage and adds one
+native; those older epochs cannot prove this latest combination unchanged.
+Public query/type/OID/WAL/API headers are not mixed with earlier ABI objects.
+
+As re-polled on 2026-10-07, unchanged original full runners are live:
+`96468` (d2,590/312), `16482` (5ca,618/319), `36568` (c061,622/320),
+and `33648` (42bd,633/325). The old 5ca native156 remains154pass/2fail and
+wire75 remains70pass/5fail; later repairs do not turn those exact logs green.
+
+### Remaining real work
+
+The new original Unicode/SIMILAR/ILIKE/trailing-escape diagnostic has 13 strict
+180006 controls passing, while the earlier matching candidate retains eleven
+actual differences. It is unregistered and still required, not waived by the
+binding fix. Set parameters/dynamic limits, other set operations, wider
+ordering/operator/collation semantics and explicit provider search_path remain
+open. Domain ALTER/casts/array/composite/revalidation and broad array codecs
+remain open. WAL physical rewrite epochs/general crash/PITR remain open.
+
+The independent stale-clean tablespace cache candidate passes its original
+entire15 normal and four scoped sanitizer group, but a stronger retained
+orphan-pin negative actually fails: backup incorrectly succeeds. Its V3 guard
+is being rebuilt and is **not imported**. A green intermediate group is not
+used to waive that original owner/pin invariant.
+
+All273 item states stay **22 complete / 166 partial / 70 unverified /
+15 deferred_by_user**. The completion gate is still expected to reject.
+No push, Actions activation, or user-skipped security/TDE restart.
+
+## Historical c061 checkpoint: input types, typed append and external XID state
 
 Current ROOT `c061a38a`: **622 native / 320 registered / 58 TU**, clean.
 

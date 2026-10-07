@@ -24,7 +24,7 @@
 SQL 验证使用本次构建的 `build/dbms_review_main`，运行 `review_sql_e2e_test.py`（17 个查询）、`window_e2e_test.py`（13 项）和 `explain_analyze_e2e_test.py`（6 项），均在隔离目录中通过。当前环境使用 zlib 和 TLS stub；未验证 OpenSSL 分支，也未重开已排除的安全专项。Shell / Python 语法检查、`git diff --check` 和调试输出清理检查通过。
 
 全部阶段关闭，未遗留本次范围内待办。仓库 GitHub Actions 工作流保持禁用，不执行 push；历史全功能路线图和这里明确排除的功能不计入完成范围。
-## 2026-10-07 当前总清单执行计划（以上记录为历史）
+## 2026-10-07 历史5ca/c061执行计划
 
 最新执行版本 `c061a38a`（622native/320registered/58TU）：UNKNOWN输入、typed Append、普通UNION ALL入口及跨进程XID分别本地commit；private强矩阵scope见integration文档。新公共ABI的全58 fresh正常O2/repeat/audit/freeze90776实际0，冻结SHA见integration文档；原full622/32036568、matching12native35605及whole9wire48073已实际运行，未称full通过。下面表格记录前一精确5ca验收，不替代c061。5ca156native6042已实际1=154pass/2fail；5ca原full另外复现SETTABLESPACE后backup与BEGIN/drop活跃owner COMMIT两项原断言失败，均独立修复、不放宽。后续顺序：完成不改原断言的整合回归；验证并逐项合入domain/WAL代际、INSERT异常事务owner、限定函数/SRF候选；修复完整模式/domain优先级、集合P/D和剩余273项。原全文37/21与domain链setup强矩阵均保留；模式新增数组envelope拒绝在strict180006通过，当前基础候选全58 privateO047334运行，尚未ROOT合入。没有push、Actions启用或用户跳过专项恢复。
 
@@ -39,3 +39,21 @@ Source `5ca4278e` 已逐项本地提交，618 native / 319 registered / 58 TU；
 | 总账验收 | 全部原273逐项满足完整证据；用户跳过15保持deferred | 22complete/166partial/70unverified/15deferred；完成gate仍拒绝 |
 
 不push，不启用Actions，不恢复用户跳过安全/TDE。旧e6全58正常构建实际0，但native137=135pass/2fail、wire65=64pass/1fail；旧d2 native120实际0、wire64=60pass/4fail。专项结果不替代新ROOT完整验收。
+
+## 2026-10-07 当前完整目标执行计划（最新；前文是历史）
+
+生产/测试source `679d5543`，640native/329registered/58TU。最新七项修复
+已逐项commit，c061 checkpoint后累计17项；详见integration映射与原始证据。
+完整273目标未缩小，旧2026-09“本次范围完成”不等于总账完成。
+
+| 阶段 | 必须通过的验收 | 当前证据 / 下一动作 |
+| --- | --- | --- |
+| 独立修复 | 真复现、保持原SQL/断言、每问题独立commit | set三项/array三项/UNLOGGED退休一项均已分别ROOT commit |
+| 组合正式构建 | 公共头全58 fresh正常O2，repeat及source/header/flags/object/stamp，冻结同binary | 25ee/42bd已实际0；0fdb47811、ed8225658 live；最新679d须重新匹配变更TableManage |
+| 完整原回归 | 原全部native/registered，默认期限和完整矩阵，不删失败 | d2/5ca/c061/42bd原full96468/16482/36568/33648已核实live；无全量PASS |
+| 组合专项 | 新头匹配native、whole protocol、严格180006原强fixtures | 私有set43/18/12wire、array54/8native/4wire、retire19/3SAN、pattern11/48均有实际0；新ROOT尚待正式结果 |
+| 已证实剩余缺陷 | Unicode模式、explicit search_path、retired-cache orphan pins | Unicode13参照0/候选11差异；cache强负例实际红/V3修复中；均不因中间绿而豁免 |
+| 剩余family | 逐项核实和实现全部尚未达到要求的273项 | domain ALTER/casts/revalidation、其它sets、完整类型/存储/查询/运维等仍OPEN，继续逐项修复 |
+| 总账闭合 | 每条checkbox/状态/证据/提交/验收范围一致，完成审计实证 | 22complete/166partial/70unverified/15deferred；require-complete仍应拒绝 |
+
+不push，不启用Actions，用户跳过安全/TDE专项保持deferred且不虚报完成。

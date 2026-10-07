@@ -28,8 +28,10 @@ skip an older absent generation only with a later committed retirement, or
 a proven uncommitted birth belonging to that image's transaction. Duplicate
 current IDs, malformed extensions, and missing live heap files fail closed.
 Legacy name-only records cannot be redirected to a newer same-name table.
-UNLOGGED heap contents still produce no lifecycle/page WAL in the original
-zero-WAL control.
+UNLOGGED CREATE and heap/index contents retain the original zero-WAL control.
+The separately verified persistence-change follow-up publishes real DROP
+intent/completion metadata even for a currently UNLOGGED generation, because
+older LOGGED images may exist; see `issue-unlogged-relation-retirement.md`.
 
 ## Retained evidence and boundaries
 
