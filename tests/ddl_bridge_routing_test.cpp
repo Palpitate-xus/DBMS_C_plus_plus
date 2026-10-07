@@ -123,8 +123,32 @@ static void test_bridge_handles_domain_sequence_schema() {
 
     run("CREATE DOMAIN route_text AS VARCHAR(12) CHECK (length(VALUE) <= 12)");
     const auto domain = g_engine.getDomain(db, "route_text");
-    assert(domain.name == "route_text");
-    assert(domain.baseType == "VARCHAR(12)");
+    // SQL DDL retains the declaration's real quoted namespace identity.
+    // Keep the original unqualified SQL and lookup, not a different input.
+    assert(domain.name == "\"public\".\"route_text\"");
+    dbms::CatalogManager::QualifiedName identity;
+    assert(dbms::CatalogManager::parseQualifiedName(domain.name, identity));
+    assert(identity.schema == "public" && identity.name == "route_text");
+    assert(g_engine.getDomain(db, domain.name).name == domain.name);
+    // The stored source can contain token whitespace. Retain the complete
+    // original expected type and modifier semantics instead of print style.
+    const auto actualBase = dbms::SQLParser::parseTypeSpecification(domain.baseType);
+    const auto originalBase = dbms::SQLParser::parseTypeSpecification("VARCHAR(12)");
+    assert(actualBase.typeName == originalBase.typeName);
+    assert(actualBase.typeMods == originalBase.typeMods);
+    assert(actualBase.isArray == originalBase.isArray);
+    assert(actualBase.typeMods == std::vector<std::string>{"12"});
+    assert(!actualBase.isArray);
+    auto& catalog = g_engine.catalogService().get(db);
+    const auto* namespaceRow = catalog.findNamespaceByName(identity.schema);
+    assert(namespaceRow);
+    const dbms::Oid namespaceOid = namespaceRow->oid;
+    const auto* domainType = catalog.findTypeByName(identity.name, namespaceOid);
+    assert(domainType && domainType->typtype == 'd');
+    assert(domainType->typnamespace == namespaceOid);
+    assert(domainType->typtypmod == 16);
+    const auto* baseType = catalog.findType(domainType->typbasetype);
+    assert(baseType && baseType->typname == "varchar");
 
     assert(dbms::SQLParser::classify("CREATE SEQUENCE route_seq") ==
            dbms::SqlCommand::CreateSequence);
@@ -141,6 +165,9 @@ static void test_bridge_handles_domain_sequence_schema() {
     assert(g_engine.schemaExists(db, "route_schema"));
 
     run("DROP DOMAIN route_text");
+    assert(g_engine.getDomain(db, domain.name).name.empty());
+    assert(!g_engine.catalogService().get(db).findTypeByName(identity.name,
+                                                             namespaceOid));
     run("DROP SEQUENCE route_seq");
     run("DROP SCHEMA route_schema");
     assert(g_engine.getDomain(db, "route_text").name.empty());
