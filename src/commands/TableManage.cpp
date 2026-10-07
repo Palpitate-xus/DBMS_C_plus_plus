@@ -26903,11 +26903,7 @@ DBStatus StorageEngine::removeRows(
             createStatementSavepoint(statementSavepoint) == DBStatus::OK;
     }
 
-    ReferentialActionContext referentialContext;
-    const DBStatus deleteStatus = removeInternal(
-        dbname, tablename, conditions, deletedRows, deleteMatcher, nullptr,
-        referentialContext, affectedRows, mutationCallbacks);
-    if (deleteStatus != DBStatus::OK) {
+    const auto rollbackDeleteStatement = [&]() {
         DBStatus rollbackStatus = DBStatus::OK;
         if (ownsTransaction && transactionContext().inTransaction) {
             rollbackStatus = rollbackTransaction();
@@ -26922,6 +26918,29 @@ DBStatus StorageEngine::removeRows(
         }
         if (deletedRows) *deletedRows = originalDeletedRows;
         if (affectedRows) *affectedRows = 0;
+        return rollbackStatus;
+    };
+
+    ReferentialActionContext referentialContext;
+    DBStatus deleteStatus;
+    try {
+        deleteStatus = removeInternal(
+            dbname, tablename, conditions, deletedRows, deleteMatcher, nullptr,
+            referentialContext, affectedRows, mutationCallbacks);
+    } catch (...) {
+        // Predicates, typed RETURNING observations and trigger callbacks can
+        // throw after opening the same statement owner used by status errors.
+        // Restore that boundary, including output containers, before letting
+        // the original exception/SQLSTATE reach the native or SQL caller.
+        const auto error = std::current_exception();
+        const DBStatus rollbackStatus = rollbackDeleteStatement();
+        if (rollbackStatus != DBStatus::OK)
+            throw DbError(sqlstateForDBStatus(rollbackStatus),
+                          "could not roll back DELETE after an exception");
+        std::rethrow_exception(error);
+    }
+    if (deleteStatus != DBStatus::OK) {
+        const DBStatus rollbackStatus = rollbackDeleteStatement();
         return rollbackStatus == DBStatus::OK ? deleteStatus : rollbackStatus;
     }
 
