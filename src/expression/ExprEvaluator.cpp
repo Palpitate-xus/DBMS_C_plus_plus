@@ -1736,6 +1736,11 @@ int ExprEvaluator::compareValues(const ExprValue& a, const ExprValue& b) {
         const auto left=preparedIntervalValue(a),right=preparedIntervalValue(b);
         return (left>right)-(left<right);
     }
+    if (isBitStringTypeName(ta) && isBitStringTypeName(tb)) {
+        // Ordered bits compare lexicographically, then by length. Leading
+        // zeroes and empty values are significant, not decimal decoration.
+        return a.value < b.value ? -1 : (a.value > b.value ? 1 : 0);
+    }
 
     // Boolean columns are commonly supplied by storage as "true"/"false",
     // while SQL boolean literals are represented internally as "t"/"f".
@@ -2007,14 +2012,16 @@ QueryComparisonBinding ExprEvaluator::resolveComparison(const std::string& rawOp
     const bool timestamps=temporal.count(binding.leftType) && temporal.count(binding.rightType);
     const bool same=binding.leftType==binding.rightType &&
         (binding.leftType=="boolean" || binding.leftType=="uuid" || binding.leftType=="bytea" ||
-         binding.leftType=="time" || binding.leftType=="interval" || common_type_detail::array(binding.leftType));
+         binding.leftType=="time" || binding.leftType=="interval" ||
+         isBitStringTypeName(binding.leftType) || common_type_detail::array(binding.leftType));
     if (!operations.count(binding.op) || (!numbers && !strings && !timestamps && !same))
         throw DbError("42883","operator does not exist: " + binding.leftType + " " + rawOp + " " + binding.rightType);
     binding.identity="builtin-comparison:"+binding.op+"("+binding.leftType+","+binding.rightType+")";
     binding.strict=true;
     // Capability is attached to the resolved typed implementation. Unknown
     // operators/custom datatypes never reach an equality/hash fallback.
-    binding.hashable=binding.op=="=" && (numbers || strings || binding.leftType=="boolean" || binding.leftType=="interval");
+    binding.hashable=binding.op=="=" && (numbers || strings || binding.leftType=="boolean" ||
+        binding.leftType=="interval" || isBitStringTypeName(binding.leftType));
     return binding;
 }
 

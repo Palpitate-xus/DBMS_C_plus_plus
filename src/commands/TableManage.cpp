@@ -22809,6 +22809,8 @@ StorageEngine::PredicateTruth StorageEngine::compareValues(
             ? 0 : (leftUuid < rightUuid ? -1 : 1);
         return fromCompare(cmp);
     }
+    if (!col.isArray && (col.dataType=="bit" || col.dataType=="bit varying"))
+        return fromCompare((left>right)-(left<right));
     if (col.dataType == "char" ||
         (col.isVariableLength && col.dataType != "numeric")) {
         const int cmp = compareTextValues(col, left, right);
@@ -23185,6 +23187,10 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
             if (rightComputedNull) {
                 return false;
             }
+            if (!col.isArray && !tbl.cols[rci].isArray &&
+                (col.dataType=="bit" || col.dataType=="bit varying") &&
+                (tbl.cols[rci].dataType=="bit" || tbl.cols[rci].dataType=="bit varying"))
+                return compareValues(col,val,false,rval,false,cond.op)==PredicateTruth::True;
             bool num = true;
             double lv = 0, rv = 0;
             try { lv = std::stod(val); rv = std::stod(rval); } catch (...) { num = false; }

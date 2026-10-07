@@ -34696,6 +34696,13 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                         const string& bv =
                                             structuredAggregateResult.rows[b][key.first];
                                         int comparison = 0;
+                                        const auto& outputTypes = structuredAggregateResult.columnTypes.empty()
+                                            ? groupProtocolTypes : structuredAggregateResult.columnTypes;
+                                        const string outputType = key.first < outputTypes.size()
+                                            ? dbms::ExprHelper::canonicalResultTypeName(outputTypes[key.first]) : string();
+                                        if (outputType == "bit" || outputType == "bit varying") {
+                                            comparison = (av > bv) - (av < bv);
+                                        } else {
                                         dbms::Numeric an(0), bn(0);
                                         bool numericA = true, numericB = true;
                                         try { an = dbms::Numeric(av); }
@@ -34707,6 +34714,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                                 : (bn < an ? 1 : 0);
                                         } else {
                                             comparison = ciTextCompare(av, bv);
+                                        }
                                         }
                                         if (comparison != 0)
                                             return key.second->ascending
@@ -34757,12 +34765,20 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                     }
                                     if (na) continue;
                                     int cmp = 0;
+                                    const auto& outputTypes = structuredAggregateResult.columnTypes.empty()
+                                        ? groupProtocolTypes : structuredAggregateResult.columnTypes;
+                                    const string outputType = k.first < outputTypes.size()
+                                        ? dbms::ExprHelper::canonicalResultTypeName(outputTypes[k.first]) : string();
+                                    if (outputType == "bit" || outputType == "bit varying") {
+                                        cmp = (va > vb) - (va < vb);
+                                    } else {
                                     dbms::Numeric na_(0), nb_(0);
                                     bool numA = true, numB = true;
                                     try { na_ = dbms::Numeric(va); } catch (...) { numA = false; }
                                     try { nb_ = dbms::Numeric(vb); } catch (...) { numB = false; }
                                     if (numA && numB) cmp = na_ < nb_ ? -1 : (nb_ < na_ ? 1 : 0);
                                     else cmp = ciTextCompare(va, vb);
+                                    }
                                     if (cmp != 0) return k.second->ascending ? cmp < 0 : cmp > 0;
                                 }
                                 return false;
@@ -36817,6 +36833,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                 const string& right =
                                     structuredAggregateResult.rows[b][key.first];
                                 int comparison = 0;
+                                const string outputType = key.first < structuredAggregateResult.columnTypes.size()
+                                    ? dbms::ExprHelper::canonicalResultTypeName(structuredAggregateResult.columnTypes[key.first]) : string();
+                                if (outputType == "bit" || outputType == "bit varying") {
+                                    comparison = (left > right) - (left < right);
+                                } else {
                                 dbms::Numeric leftNumber(0), rightNumber(0);
                                 bool leftNumeric = true, rightNumeric = true;
                                 try { leftNumber = dbms::Numeric(left); }
@@ -36828,6 +36849,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                         ? -1 : (rightNumber < leftNumber ? 1 : 0);
                                 } else {
                                     comparison = ciTextCompare(left, right);
+                                }
                                 }
                                 if (comparison != 0)
                                     return key.second->ascending
