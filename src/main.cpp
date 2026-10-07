@@ -20634,6 +20634,35 @@ static bool handlePreparedDelete(const string& rawSql,Session& session,bool& han
     dbms::publishLastDmlResult(std::move(result));handled=true;return false;
 }
 
+static bool handlePreparedSourceUpdate(const string& rawSql,Session& session,bool& handled) {
+    handled=false;
+    dbms::SQLParser parser;auto parsed=parser.parseForBinding(rawSql);
+    const auto* update=parsed.isValid()?dynamic_cast<const dbms::UpdateStmt*>(parsed.stmt.get()):nullptr;
+    if(!update || !update->fromClause || update->only || !update->whereCurrentOf.empty())return false;
+    // DEFAULT remains at its existing target-metadata lowering boundary.
+    // Do not bypass that owner or synthesize a replacement RHS here.
+    for(const auto& assignment:update->setClauses) {
+        const auto* value=dynamic_cast<const dbms::LiteralExpr*>(assignment.second.get());
+        if(value && !value->preparedSubquery && dbms::SQLParser::toLower(value->value)=="default")return false;
+    }
+    if(!checkDB(session)){handled=true;return true;}
+    auto query=make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(session.currentDB,rawSql));
+    for(const auto& range:query->sourceRanges)
+        if(range.owner==query->ast.get() && !range.source && range.viewQuery)return false;
+    // The pure namespace graph is the execution graph. Source rows, nullable
+    // JOIN occurrences, OLD/NEW images and RETURNING all consume its genuine
+    // bindings inside the existing atomic mutation owner.
+    PreparedWithDmlRuntime runtime(session,std::move(query));auto result=runtime.runDml();
+    for(const auto& name:result.columns)cout<<name<<' ';
+    if(!result.columns.empty())cout<<'\n';
+    for(size_t i=0;i<result.rows.size();++i) {
+        for(size_t j=0;j<result.rows[i].size();++j)cout<<(result.nulls[i][j]?"NULL":result.rows[i][j])<<' ';
+        cout<<'\n';
+    }
+    cout<<"Update done"<<endl;
+    dbms::publishLastDmlResult(std::move(result));handled=true;return false;
+}
+
 static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& handled) {
     handled=false;
     dbms::SQLParser parser;auto parsed=parser.parseForBinding(rawSql);
@@ -21587,6 +21616,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
     }
 
     // Phase 4 Wave 0.4: DML AST bridge — try AST-driven execution before legacy string dispatch.
+    if(parsedCmd==dbms::SqlCommand::Update) {
+        bool handled=false;
+        const bool error=handlePreparedSourceUpdate(effectiveRawSql,s,handled);
+        if(handled)return error;
+    }
     if(parsedCmd==dbms::SqlCommand::Delete) {
         bool handled=false;
         // Ordinary DELETE owns its genuine whole AST, including the WHERE

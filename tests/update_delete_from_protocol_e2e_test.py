@@ -112,15 +112,12 @@ def main():
         assert rows == [["2", "220"]], rows
         assert command_tag == "DELETE 1", command_tag
 
-        # Valid SQL outside the bounded INNER/CROSS executor fails closed.
+        # The original legal LEFT source now consumes its genuine typed plan.
         _, state, _, _, _, _ = query(
             "UPDATE source_dml_target AS dst SET val = src.val "
             "FROM source_dml_source AS src LEFT JOIN source_dml_source AS extra "
             "ON src.id = extra.id WHERE dst.id = src.id;")
-        # The old bounded UPDATE source executor still rejects outer joins.
-        # PostgreSQL executes this legal source; this is an explicit OPEN
-        # capability boundary, not a claim that 0A000 matches PostgreSQL.
-        assert state == (None if reference else "0A000"), state
+        assert state is None, state
         rows, state, message, _, _, _ = query(
             "SELECT id, val FROM source_dml_target ORDER BY id;")
         assert state is None, (state, message)
