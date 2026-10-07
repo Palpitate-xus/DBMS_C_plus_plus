@@ -1,4 +1,5 @@
 #include "expr_helper.h"
+#include "between_input.h"
 #include "expression/common_type.h"
 #include "array_type.h"
 #include "arithmetic_type.h"
@@ -1720,6 +1721,9 @@ void ExprHelper::prepareArrayTypes(Expr* expression,
             for (auto& arm : conditional->whenClauses) { visit(arm.first.get(),{}); visit(arm.second.get(),{}); }
         } else if (auto* call = dynamic_cast<FunctionCallExpr*>(node)) {
             const auto operation=toLower(call->funcName);
+            if (call->schema.empty() && (call->funcName == "BETWEEN" || call->funcName == "NOT BETWEEN"))
+                for (const auto& argument : call->args)
+                    between_input_detail::validateLiteralCasts(argument.get());
             if (call->schema.empty() && call->args.size()==3 &&
                 (operation=="like escape" || operation=="not like escape" || operation=="ilike escape" ||
                  operation=="not ilike escape" || operation=="similar to escape" || operation=="not similar to escape"))

@@ -17,10 +17,12 @@ std::string quoteIdentifier(const std::string& name) {
 // Routine registration may lower names to execution-private callback keys.
 // Keep those edits in an expression copy owned by this execution, not in the
 // shared prepared AST used by metadata, another execution, or ORDER identity.
-ExprPtr copyExpression(const Expr* source, std::map<const Expr*, const Expr*>& sites) {
+ExprPtr copyExpression(const Expr* source, std::map<const Expr*, const Expr*>& sites,
+                       std::map<const Expr*, const Expr*>& independentChildren,
+                       bool independent = false) {
     if (!source) return {};
     ExprPtr result;
-    const auto copy = [&](const ExprPtr& node) { return copyExpression(node.get(), sites); };
+    const auto copy = [&](const ExprPtr& node) { return copyExpression(node.get(), sites, independentChildren, independent); };
     const auto window = [&](const WindowDef& source, WindowDef& target) {
         target.name = source.name; target.frameMode = source.frameMode;
         target.frameExclusion = source.frameExclusion;
@@ -61,6 +63,14 @@ ExprPtr copyExpression(const Expr* source, std::map<const Expr*, const Expr*>& s
         target->resolvedResultType = node->resolvedResultType;
         target->distinct = node->distinct; target->orderBy = node->orderBy; target->hasOver = node->hasOver;
         for (const auto& arg : node->args) target->args.push_back(copy(arg));
+        const auto operation = SQLParser::toLower(node->funcName);
+        if (node->schema.empty() && node->args.size() == 3 &&
+            (operation == "between" || operation == "not between")) {
+            // The second logical pair is a separate SQL occurrence. Its
+            // scalar children have independent InitPlan memo cells while
+            // retaining the real prepared child/column/parameter bindings.
+            target->args.push_back(copyExpression(node->args[0].get(), sites, independentChildren, true));
+        }
         // The binder deliberately leaves EXTRACT's unqualified grammar field
         // outside SQL value namespaces. Lower that one role in the execution
         // copy, not a qualified/stored function's ordinary value argument.
@@ -88,6 +98,8 @@ ExprPtr copyExpression(const Expr* source, std::map<const Expr*, const Expr*>& s
     } else throw DbError("0A000", "prepared execution requires a structured value expression");
     result->sourceBegin = source->sourceBegin; result->sourceEnd = source->sourceEnd;
     result->preparedSubquery = source->preparedSubquery;
+    if (independent && source->preparedSubquery)
+        independentChildren.emplace(result.get(), source);
     sites.emplace(result.get(),source);
     return result;
 }
@@ -231,6 +243,48 @@ std::optional<ExprValue> simplifyCaseConstants(ExprPtr& expression,
         simplifyCaseConstants(quantified->right,evaluator,roles);
         return std::nullopt;
     } else if (auto* call = dynamic_cast<FunctionCallExpr*>(expression.get())) {
+        if (call->schema.empty() && (call->funcName == "BETWEEN" || call->funcName == "NOT BETWEEN") &&
+            (call->args.size() == 3 || call->args.size() == 4)) {
+            const bool negate = call->funcName == "NOT BETWEEN";
+            const auto pair = [&](size_t bound) -> std::optional<ExprValue> {
+                auto& left = call->args[bound == 2 && call->args.size() == 4 ? 3 : 0];
+                auto& right = call->args[bound];
+                const auto leftType = ExprHelper::inferParsedInputType(left.get());
+                const auto rightType = ExprHelper::inferParsedInputType(right.get());
+                auto a = simplifyCaseConstants(left, evaluator, roles);
+                auto b = simplifyCaseConstants(right, evaluator, roles);
+                // Fold pure peers before strict NULL. Runtime routines and
+                // children are never called to discover a constant datum.
+                if ((a && a->isNull) || (b && b->isNull)) return ExprValue("boolean", "", true);
+                if (!a || !b) return std::nullopt;
+                if (leftType == "unknown") a->typeName = "unknown";
+                if (rightType == "unknown") b->typeName = "unknown";
+                const auto op = bound == 1 ? (negate ? "<" : ">=") : (negate ? ">" : "<=");
+                const auto bit = [](const std::string& input) {
+                    const auto type = ExprHelper::canonicalResultTypeName(input);
+                    return type == "bit" || type == "bit varying";
+                };
+                if (bit(a->typeName) || bit(b->typeName))
+                    return evaluator.comparePrepared(ExprEvaluator::resolveComparison(op, a->typeName, b->typeName), *a, *b);
+                BinaryOpExpr comparison; comparison.op = op;
+                comparison.left = constantExpression(*a, nullptr);
+                comparison.right = constantExpression(*b, nullptr);
+                return evaluator.eval(&comparison, RowContext{});
+            };
+            const auto lower = pair(1);
+            if (lower && !lower->isNull && lower->asBool() == negate) {
+                const ExprValue result("boolean", negate ? "t" : "f", false);
+                expression = constantExpression(result, expression.get()); return result;
+            }
+            const auto upper = pair(2);
+            if (lower && upper) {
+                const bool decisive = !upper->isNull && upper->asBool() == negate;
+                const ExprValue result("boolean", decisive ? (negate ? "t" : "f") : (negate ? "f" : "t"),
+                    !decisive && (lower->isNull || upper->isNull));
+                expression = constantExpression(result, expression.get()); return result;
+            }
+            return std::nullopt;
+        }
         if (roles && roles->patternEscape(call)) {
             std::vector<std::optional<ExprValue>> inputs;
             for (auto& argument : call->args)
@@ -509,7 +563,15 @@ void PreparedQueryExecution::prepareExpression(Expr* expression) {
         return;
     }
     std::map<const Expr*, const Expr*> sites;
-    auto compiled = copyExpression(expression,sites);
+    std::map<const Expr*, const Expr*> independentChildren;
+    auto compiled = copyExpression(expression,sites,independentChildren);
+    for (const auto& child : independentChildren) {
+        const auto source = children_.find(child.second);
+        if (source == children_.end()) throw DbError("XX000", "range child has no prepared owner");
+        children_[child.first] = source->second;
+        memo_.erase(child.first);
+        sites[child.first] = child.first;
+    }
     ExprHelper::prepareArrayTypes(compiled.get(), {}, database_, engine_);
     planCaseConstants(compiled,evaluator_);
     evaluator_.bindScalarFunctions(compiled.get(), engine_);
@@ -540,7 +602,15 @@ void PreparedQueryExecution::planExpressionConstants(Expr* expression,
     if (!compiled_.count(expression)) {
         ExprEvaluator::analyzeExplicitResultCollation(expression);
         std::map<const Expr*, const Expr*> sites;
-        auto compiled = copyExpression(expression, sites);
+        std::map<const Expr*, const Expr*> independentChildren;
+        auto compiled = copyExpression(expression, sites, independentChildren);
+        for (const auto& child : independentChildren) {
+            const auto source = children_.find(child.second);
+            if (source == children_.end()) throw DbError("XX000", "range child has no prepared owner");
+            children_[child.first] = source->second;
+            memo_.erase(child.first);
+            sites[child.first] = child.first;
+        }
         ExprHelper::prepareArrayTypes(compiled.get(), {}, database_, engine_);
         for (const auto& site : sites) originalSites_[site.first] = site.second;
         for (const auto& site : sites)

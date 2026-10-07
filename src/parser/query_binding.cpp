@@ -9,6 +9,7 @@
 #include "expression/expr_helper.h"
 #include "expression/array_type.h"
 #include "expression/geometric_input.h"
+#include "expression/between_input.h"
 #include <algorithm>
 #include <map>
 #include <set>
@@ -588,6 +589,8 @@ public:
             const auto grammarOperation = SQLParser::toLower(call->funcName);
             if (call->schema.empty() && call->args.size() == 3 &&
                 (grammarOperation == "between" || grammarOperation == "not between")) {
+                for (const auto& argument : call->args)
+                    between_input_detail::validateLiteralCasts(argument.get());
                 std::vector<std::string> types;
                 for (auto& arg : call->args)
                     types.push_back(ExprHelper::canonicalResultTypeName(expression(arg, scopes)));

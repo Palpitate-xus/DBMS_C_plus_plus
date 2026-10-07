@@ -14,6 +14,7 @@
 #include "common/NetworkValue.h"
 #include "common/GeometryValue.h"
 #include "expression/geometric_input.h"
+#include "expression/between_input.h"
 #include "common/DbError.h"
 #include "common/SqlArrayText.h"
 #include "common/NotificationManager.h"
@@ -4985,6 +4986,72 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
         return result;
     }
 
+    if (e->schema.empty() && (name == "between" || name == "not between") &&
+        functions_.find(name) == functions_.end()) {
+        if (e->args.size() != 3 && e->args.size() != 4) return ExprValue("boolean", "f", false);
+        const bool negate = name == "not between";
+        for (const auto& argument : e->args)
+            between_input_detail::validateLiteralCasts(argument.get());
+        const std::function<bool(const Expr*)> nullInput = [&](const Expr* expression) {
+            if (!expression || expression->preparedSubquery) return false;
+            if (between_input_detail::nullConstant(expression)) return true;
+            // Bound parameter cells are owned, immutable input datums, not a
+            // row/provider callback. Inspect only the NULL flag after Bind;
+            // never evaluate an expression to infer preparation-time NULL.
+            if (const auto* parameter = dynamic_cast<const ParameterExpr*>(expression))
+                return ctx.parameter(parameter->slot).isNull;
+            if (const auto* cast = dynamic_cast<const CastExpr*>(expression))
+                return cast->typeMods.empty() && between_input_detail::primitiveType(cast->typeName) &&
+                    nullInput(cast->operand.get());
+            if (const auto* cast = dynamic_cast<const BinaryOpExpr*>(expression); cast && cast->op == "::") {
+                const auto* target = dynamic_cast<const LiteralExpr*>(cast->right.get());
+                return target && between_input_detail::primitiveType(target->value) && nullInput(cast->left.get());
+            }
+            return false;
+        };
+        const auto input = [&](size_t position) {
+            ExprValue value = eval(e->args[position].get(), ctx);
+            const auto* literal = dynamic_cast<const LiteralExpr*>(e->args[position].get());
+            if (literal && literal->typeName.empty() && !literal->preparedSubquery &&
+                (isQuotedString(literal->value) || toLower(literal->value) == "null"))
+                value.typeName = "unknown";
+            return value;
+        };
+        const auto comparison = [&](const std::string& operation, size_t bound) {
+            // A genuine constant NULL makes a strict comparison NULL during
+            // planning. Do not invoke its otherwise volatile peer just to
+            // rediscover that fact; row/provider NULLs are not constants.
+            if (nullInput(e->args[0].get()) || nullInput(e->args[bound].get())) {
+                // Pure peers retain planning errors even under a strict NULL
+                // comparison. No row/parameter/routine/child is evaluated.
+                ExprEvaluator pure;
+                if (between_input_detail::constant(e->args[0].get()))
+                    (void)pure.eval(e->args[0].get(), RowContext{});
+                if (between_input_detail::constant(e->args[bound].get()))
+                    (void)pure.eval(e->args[bound].get(), RowContext{});
+                const auto leftType = arrayExpressionType(e->args[0].get(), ctx, currentDB_, this);
+                const auto rightType = arrayExpressionType(e->args[bound].get(), ctx, currentDB_, this);
+                if (isBitStringTypeName(leftType) || isBitStringTypeName(rightType))
+                    (void)resolveComparison(operation, leftType, rightType);
+                return ExprValue("boolean", "", true);
+            }
+            // Each logical comparison owns its actual left occurrence. A
+            // demanded second pair repeats the left expression, not its value.
+            const auto left = input(bound == 2 && e->args.size() == 4 ? 3 : 0), right = input(bound);
+            return isBitStringTypeName(left.typeName) || isBitStringTypeName(right.typeName)
+                ? comparePrepared(resolveComparison(operation, left.typeName, right.typeName), left, right)
+                : applyComparison(operation, left, right);
+        };
+        const auto lower = comparison(negate ? "<" : ">=", 1);
+        if (!lower.isNull && lower.asBool() == negate)
+            return ExprValue("boolean", negate ? "t" : "f", false);
+        const auto upper = comparison(negate ? ">" : "<=", 2);
+        if (!upper.isNull && upper.asBool() == negate)
+            return ExprValue("boolean", negate ? "t" : "f", false);
+        if (lower.isNull || upper.isNull) return ExprValue("boolean", "", true);
+        return ExprValue("boolean", negate ? "f" : "t", false);
+    }
+
     std::vector<ExprValue> args;
     for (const auto& a : e->args) args.push_back(eval(a.get(), ctx));
 
@@ -5175,41 +5242,6 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
         if (best.isNull) best.collation = resultCollation;
         return best;
     }
-    if (name == "between" || name == "not between") {
-        if (args.size() != 3) return ExprValue("boolean", "f", false);
-        const auto input = [&](size_t position) {
-            ExprValue value = args[position];
-            const auto* literal = dynamic_cast<const LiteralExpr*>(e->args[position].get());
-            if (literal && literal->typeName.empty() && !literal->preparedSubquery &&
-                (isQuotedString(literal->value) || toLower(literal->value) == "null"))
-                value.typeName = "unknown";
-            return value;
-        };
-        const bool bitRange = std::any_of(args.begin(), args.end(), [](const auto& value) {
-            return isBitStringTypeName(value.typeName);
-        });
-        const auto comparison = [&](const std::string& operation, size_t bound) {
-            const auto left = input(0), right = input(bound);
-            return bitRange ? comparePrepared(resolveComparison(operation, left.typeName, right.typeName), left, right)
-                            : applyComparison(operation, left, right);
-        };
-        const ExprValue lower = comparison(">=", 1);
-        const ExprValue upper = comparison("<=", 2);
-        ExprValue result;
-        if ((!lower.isNull && !lower.asBool()) ||
-            (!upper.isNull && !upper.asBool())) {
-            result = ExprValue("boolean", "f", false);
-        } else if (lower.isNull || upper.isNull) {
-            result = ExprValue("boolean", "", true);
-        } else {
-            result = ExprValue("boolean", "t", false);
-        }
-        if (name == "not between" && !result.isNull) {
-            result.value = result.asBool() ? "f" : "t";
-        }
-        return result;
-    }
-
     // PG 42883: function <name>(<argtypes>) does not exist.
     {
         auto pgTypeName = [](const ExprValue& v) -> std::string {
