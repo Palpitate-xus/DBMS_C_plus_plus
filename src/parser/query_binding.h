@@ -27,6 +27,11 @@ struct QueryBindingDatum {
     std::optional<std::string> value;
     size_t position = 0;                // $n alias of a function parameter
 };
+struct QueryEnumType {
+    std::string identity, typeName;
+    uint32_t typeOid = 0;
+    std::vector<std::string> labels;
+};
 struct QueryBindingMetadata {
     // Must return a copied, metadata-only descriptor, never execute a query.
     std::function<QueryRelationMetadata(const std::string&)> relation;
@@ -47,6 +52,9 @@ struct QueryBindingMetadata {
     // at assignment); lookup never evaluates the expression or scans rows.
     std::function<std::optional<std::string>(const std::string&,
         const std::string&, const std::string&)> updateDefault;
+    // Same-generation catalog type + ordered enum labels, copied once.
+    // An actual source OID wins over the current search_path spelling.
+    std::function<std::optional<QueryEnumType>(const std::string&, uint32_t)> enumType;
 };
 struct PreparedQuery {
     struct Use { size_t begin, end, slot; };

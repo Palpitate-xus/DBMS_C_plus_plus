@@ -344,12 +344,24 @@ struct ArrayConcatBinding {
     bool leftArray = false, rightArray = false;
 };
 
+// Immutable operator metadata, never inferred from an evaluated datum.
+// enumTypeOid identifies the copied catalog type; enumLabels retain its
+// declaration order, including empty and SQL-NULL-looking labels.
+struct QueryComparisonBinding {
+    std::string identity, op, leftType, rightType, collation;
+    bool strict = false;
+    bool hashable = false;
+    uint32_t enumTypeOid = 0;
+    std::vector<std::string> enumLabels;
+};
+
 // 二元操作符
 struct BinaryOpExpr : public Expr {
     std::string op;        // =, <>, <, >, <=, >=, +, -, *, /, %, AND, OR, LIKE, ILIKE, IN, BETWEEN
     ExprPtr left;
     ExprPtr right;
     std::optional<ArrayConcatBinding> arrayConcat;
+    std::optional<QueryComparisonBinding> comparison;
     BinaryOpExpr() { type = ExprType::BinaryOp; }
     std::string toString() const override {
         return (left ? left->toString() : "?") + " " + op + " " +
@@ -360,11 +372,6 @@ struct BinaryOpExpr : public Expr {
 // Pure operator preparation metadata. It records the resolved operand signatures,
 // not evaluated datum spellings; hash capability belongs to this resolved
 // implementation, never to the raw '=' token alone.
-struct QueryComparisonBinding {
-    std::string identity, op, leftType, rightType, collation;
-    bool strict = false;
-    bool hashable = false;
-};
 struct QuantifiedComparisonExpr : public Expr {
     enum class Quantifier { Any, All };
     ExprPtr left, right;
@@ -444,6 +451,7 @@ struct CaseExpr : public Expr {
     // datum is evaluated once; each operator can coerce that cached datum
     // differently without duplicating the switch expression/effects.
     std::vector<std::pair<std::string,std::string>> simpleComparisonTypes;
+    std::vector<std::optional<QueryComparisonBinding>> simpleEnumComparisons;
     CaseExpr() { type = ExprType::CaseExpr; }
     std::string toString() const override { return "CASE"; }
 };
@@ -732,6 +740,7 @@ struct SelectStmt : public Stmt {
         bool asc = true;
         bool nullsFirst = false;   // NULLS FIRST / LAST (per column)
         std::string usingOp;       // ORDER BY col USING operator
+        std::optional<QueryComparisonBinding> enumComparison;
     };
     std::vector<OrderByElem> orderBy;
     bool nullsFirst = false;       // legacy single flag

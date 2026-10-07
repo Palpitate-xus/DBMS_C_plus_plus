@@ -32673,11 +32673,7 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
             }
             throw DbError("42P01", "relation \"" + spelling + "\" does not exist");
         };
-        metadata.baseType = [&](const std::string& spelling,uint32_t typeOid) {
-            if(!typeOid && TypeRegistry::instance().findType(spelling))
-                return ExprHelper::canonicalResultTypeName(spelling);
-            if(!typeOid && (spelling=="unknown" || spelling.size()>=2 &&
-                spelling.compare(spelling.size()-2,2,"[]")==0))return spelling;
+        const auto resolveOperatorType = [&](const std::string& spelling,uint32_t typeOid) -> const PgTypeRow* {
             if(!catalogSnapshot)catalogSnapshot=catalogService_->metadataSnapshot(dbname);
             const auto& catalog=*catalogSnapshot;
             const PgTypeRow* resolved=nullptr;
@@ -32685,7 +32681,11 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
                 for(const auto& type:catalog.types)if(type.oid==typeOid){resolved=&type;break;}
             } else {
                 CatalogManager::QualifiedName requested;
-                if(CatalogManager::parseQualifiedName(spelling,requested,true)) {
+                // CAST grammar may retain spaces around a qualified dot.
+                // Parse its declared type envelope before catalog identity
+                // lookup; quoted identifier contents remain case-sensitive.
+                const auto declared=SQLParser::parseTypeSpecification(spelling);
+                if(CatalogManager::parseQualifiedName(declared.typeName,requested,true)) {
                     std::vector<std::string> schemas;
                     if(!requested.schema.empty())schemas.push_back(requested.schema);
                     else {
@@ -32709,7 +32709,7 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
             }
             if(!resolved) {
                 if(typeOid)throw DbError("XX000","operator input type metadata is missing");
-                return ExprHelper::canonicalResultTypeName(spelling);
+                return nullptr;
             }
             std::set<Oid> visited;
             while(resolved->typtype=='d') {
@@ -32721,6 +32721,15 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
                 if(!parent)throw DbError("XX000","domain base type metadata is missing");
                 resolved=parent;
             }
+            return resolved;
+        };
+        metadata.baseType = [&](const std::string& spelling,uint32_t typeOid) {
+            if(!typeOid && TypeRegistry::instance().findType(spelling))
+                return ExprHelper::canonicalResultTypeName(spelling);
+            if(!typeOid && (spelling=="unknown" || (spelling.size()>=2 &&
+                spelling.compare(spelling.size()-2,2,"[]")==0)))return spelling;
+            const auto* resolved=resolveOperatorType(spelling,typeOid);
+            if(!resolved)return ExprHelper::canonicalResultTypeName(spelling);
             // Legacy physical array attributes retain their element OID and
             // attndims. Never turn that declared array envelope into a scalar
             // simply because the element's catalog row is TEXT or BYTEA.
@@ -32728,6 +32737,33 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
                 spelling.compare(spelling.size()-2,2,"[]")==0))
                 return ExprHelper::canonicalResultTypeName(spelling);
             return ExprHelper::canonicalResultTypeName(resolved->typname);
+        };
+        metadata.enumType = [&](const std::string& spelling,uint32_t typeOid) -> std::optional<QueryEnumType> {
+            if(spelling=="unknown" || (spelling.size()>=2 && spelling.compare(spelling.size()-2,2,"[]")==0) ||
+                (!typeOid && TypeRegistry::instance().findType(spelling)))return std::nullopt;
+            const auto* resolved=resolveOperatorType(spelling,typeOid);
+            if(!resolved || resolved->typtype!='e')return std::nullopt;
+            const auto& catalog=*catalogSnapshot;
+            std::string schema;
+            for(const auto& ns:catalog.namespaces)if(ns.oid==resolved->typnamespace){schema=ns.nspname;break;}
+            if(schema.empty())throw DbError("XX001","enum type namespace metadata is missing");
+            const auto quoted=[](const std::string& input) {
+                std::string out="\"";
+                for(char c:input){out+=c;if(c=='\"')out+=c;}
+                return out+'\"';
+            };
+            QueryEnumType description;
+            description.typeOid=resolved->oid;
+            description.typeName=quoted(schema)+"."+quoted(resolved->typname);
+            description.identity="enum:"+dbname+":"+std::to_string(resolved->oid);
+            std::vector<PgEnumRow> labels;
+            for(const auto& label:catalog.enumLabels)if(label.enumtypid==resolved->oid)labels.push_back(label);
+            std::sort(labels.begin(),labels.end(),[](const auto& a,const auto& b){return a.enumsortorder<b.enumsortorder;});
+            for(const auto& label:labels) {
+                description.labels.push_back(label.enumlabel);
+                description.identity+=":"+std::to_string(label.enumlabel.size())+":"+label.enumlabel;
+            }
+            return description;
         };
         ExprEvaluator evaluator; evaluator.setCurrentDB(dbname);
         metadata.setReturning = [&](const FunctionCallExpr* function) -> std::optional<QuerySetReturningBinding> {

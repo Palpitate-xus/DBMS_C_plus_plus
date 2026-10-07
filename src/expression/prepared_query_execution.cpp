@@ -37,6 +37,7 @@ ExprPtr copyExpression(const Expr* source, std::map<const Expr*, const Expr*>& s
     } else if (const auto* node = dynamic_cast<const BinaryOpExpr*>(source)) {
         auto target = std::make_unique<BinaryOpExpr>(); target->op = node->op;
         target->arrayConcat = node->arrayConcat;
+        target->comparison = node->comparison;
         target->left = copy(node->left); target->right = copy(node->right); result = std::move(target);
     } else if (const auto* node = dynamic_cast<const QuantifiedComparisonExpr*>(source)) {
         auto target = std::make_unique<QuantifiedComparisonExpr>();
@@ -49,6 +50,7 @@ ExprPtr copyExpression(const Expr* source, std::map<const Expr*, const Expr*>& s
     } else if (const auto* node = dynamic_cast<const CaseExpr*>(source)) {
         auto target = std::make_unique<CaseExpr>();
         target->simpleComparisonTypes = node->simpleComparisonTypes;
+        target->simpleEnumComparisons = node->simpleEnumComparisons;
         target->switchExpr = copy(node->switchExpr); target->elseExpr = copy(node->elseExpr);
         for (const auto& arm : node->whenClauses) target->whenClauses.emplace_back(copy(arm.first),copy(arm.second));
         result = std::move(target);
@@ -137,6 +139,7 @@ std::optional<ExprValue> simplifyCaseConstants(ExprPtr& expression,
         const auto switchValue = simplifyCaseConstants(conditional->switchExpr, evaluator, roles);
         std::vector<std::pair<ExprPtr,ExprPtr>> remaining;
         std::vector<std::pair<std::string,std::string>> comparisons;
+        std::vector<std::optional<QueryComparisonBinding>> enumComparisons;
         bool definiteMatch = false;
         for (size_t i=0; i<conditional->whenClauses.size(); ++i) {
             auto& arm = conditional->whenClauses[i];
@@ -152,6 +155,8 @@ std::optional<ExprValue> simplifyCaseConstants(ExprPtr& expression,
                     CaseExpr comparison;
                     comparison.switchExpr = constantExpression(*switchValue, nullptr);
                     comparison.simpleComparisonTypes.push_back(conditional->simpleComparisonTypes[i]);
+                    if(!conditional->simpleEnumComparisons.empty())
+                        comparison.simpleEnumComparisons.push_back(conditional->simpleEnumComparisons.at(i));
                     auto yes = std::make_unique<LiteralExpr>(); yes->value = "true";
                     auto no = std::make_unique<LiteralExpr>(); no->value = "false";
                     comparison.whenClauses.emplace_back(constantExpression(*conditionValue,nullptr),std::move(yes));
@@ -169,10 +174,13 @@ std::optional<ExprValue> simplifyCaseConstants(ExprPtr& expression,
             remaining.emplace_back(std::move(arm.first),std::move(arm.second));
             if (!conditional->simpleComparisonTypes.empty())
                 comparisons.push_back(conditional->simpleComparisonTypes.at(i));
+            if (!conditional->simpleEnumComparisons.empty())
+                enumComparisons.push_back(conditional->simpleEnumComparisons.at(i));
         }
         if (!definiteMatch) simplifyCaseConstants(conditional->elseExpr,evaluator,roles);
         conditional->whenClauses = std::move(remaining);
         conditional->simpleComparisonTypes = std::move(comparisons);
+        conditional->simpleEnumComparisons = std::move(enumComparisons);
         if (conditional->whenClauses.empty()) {
             auto fallback = std::move(conditional->elseExpr);
             if (!fallback) fallback = constantExpression(ExprValue("unknown","",true),conditional);

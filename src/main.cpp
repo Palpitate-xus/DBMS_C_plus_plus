@@ -20673,12 +20673,18 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
     // retained whole-query AST, not a later legacy parser with another TEMP
     // namespace or a discarded preparation-time operand coercion.
     dbms::ExprEvaluator routineMetadata;routineMetadata.setCurrentDB(session.currentDB);
+    bool comparisonCandidate=false;
     function<bool(const dbms::Expr*)> requiresPreparedValue=[&](const dbms::Expr* value) {
         if(!value)return false;
         if(containsPreparedPattern(value))return true;
         if(dynamic_cast<const dbms::CaseExpr*>(value))return true;
         if(scalarQueryRoles(value).first)return true;
-        if(const auto* binary=dynamic_cast<const dbms::BinaryOpExpr*>(value))return requiresPreparedValue(binary->left.get()) || (binary->op!="::" && requiresPreparedValue(binary->right.get()));
+        if(const auto* binary=dynamic_cast<const dbms::BinaryOpExpr*>(value)) {
+            static const set<string> operators={"=","<>","!=","<",">","<=",">=","IS DISTINCT FROM","IS NOT DISTINCT FROM"};
+            comparisonCandidate=comparisonCandidate || operators.count(binary->op);
+            if(binary->comparison && binary->comparison->enumTypeOid)return true;
+            return requiresPreparedValue(binary->left.get()) || (binary->op!="::" && requiresPreparedValue(binary->right.get()));
+        }
         if(const auto* unary=dynamic_cast<const dbms::UnaryOpExpr*>(value))return unary->op=="+" || unary->op=="-" || requiresPreparedValue(unary->operand.get());
         if(const auto* cast=dynamic_cast<const dbms::CastExpr*>(value))return requiresPreparedValue(cast->operand.get());
         if(const auto* call=dynamic_cast<const dbms::FunctionCallExpr*>(value)) {
@@ -20708,7 +20714,7 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
     for(const auto& item:select->selectList)required=required || requiresPreparedValue(item.expr.get());
     for(const auto& item:select->orderBy)required=required || requiresPreparedValue(item.expr.get());
     for(const auto& row:select->valuesRows)for(const auto& value:row)required=required || requiresPreparedValue(value.get());
-    if(!required)return false;
+    if(!required && !comparisonCandidate)return false;
     if(select->command==dbms::SqlCommand::Values) {
         if(!select->ctes.empty() || !select->orderBy.empty() || select->whereClause || select->limit || select->offset || select->setOp!=dbms::SetOp::None)return false;
     } else {
@@ -20721,6 +20727,18 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
         if(!supported)return false;
     }
     auto query=make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(session.currentDB,rawSql));
+    if(!required) {
+        // The parser only probes a shape. Actual copied type/operator metadata
+        // owns this receiver; ordinary builtin comparisons keep their existing
+        // consumer. Never discover enum identity from evaluated datum strings.
+        const auto* bound=static_cast<const dbms::SelectStmt*>(query->ast.get());
+        // WHERE-only enum predicates already use the physical schema's
+        // ranked/index consumer. Retain that path after pure validation.
+        bool enumRequired=false;
+        for(const auto& item:bound->selectList)enumRequired=enumRequired || requiresPreparedValue(item.expr.get());
+        for(const auto& item:bound->orderBy)enumRequired=enumRequired || requiresPreparedValue(item.expr.get());
+        if(!enumRequired)return false;
+    }
     PreparedWithDmlRuntime runtime(session,std::move(query));auto result=runtime.runRead();
     for(const auto& name:result.columns)cout<<name<<' ';cout<<'\n';
     for(size_t i=0;i<result.rows.size();++i) {

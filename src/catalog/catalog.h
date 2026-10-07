@@ -42,6 +42,7 @@ public:
         std::vector<PgAttributeRow> attributes;
         std::vector<PgTypeRow> types;
         std::vector<PgProcRow> routines;
+        std::vector<PgEnumRow> enumLabels;
     };
     // A single-lock copy: callers never retain catalog-owned row pointers.
     MetadataSnapshot metadataSnapshot() const;

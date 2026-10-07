@@ -2039,6 +2039,18 @@ ExprValue ExprEvaluator::comparePrepared(const QueryComparisonBinding& binding,
     const ExprValue& left, const ExprValue& right) const {
     const auto a=coerceComparison(binding,left,true),b=coerceComparison(binding,right,false);
     if(a.isNull || b.isNull)return ExprValue("boolean","",true);
+    if(binding.enumTypeOid) {
+        const auto rank=[&](const ExprValue& value) {
+            const auto found=std::find(binding.enumLabels.begin(),binding.enumLabels.end(),value.value);
+            if(found==binding.enumLabels.end())
+                throw DbError("22P02","invalid input value for enum "+binding.leftType+": "+value.value);
+            return found-binding.enumLabels.begin();
+        };
+        const auto x=rank(a),y=rank(b);
+        const bool truth=binding.op=="="?x==y:binding.op=="<>"?x!=y:
+            binding.op=="<"?x<y:binding.op==">"?x>y:binding.op=="<="?x<=y:x>=y;
+        return ExprValue("boolean",truth?"t":"f");
+    }
     const auto floating=[](const std::string& type){return type=="real" || type=="double precision";};
     if(floating(binding.leftType) && floating(binding.rightType)) {
         const double x=binding.leftType=="real"?static_cast<double>(parseRealCastValue(a)):parseDoubleCastValue(a);
@@ -3046,7 +3058,7 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
         } else {
             // DISTINCT selects '=' and negates its Boolean result. '<>' is
             // neither guaranteed to exist nor its inverse for geometric NaN.
-            distinct = !applyComparison("=", l, r).asBool();
+            distinct = !(e->comparison?comparePrepared(*e->comparison,l,r):applyComparison("=",l,r)).asBool();
         }
         if (op == "is not distinct from") distinct = !distinct;
         return ExprValue("boolean", distinct ? "t" : "f", false);
@@ -3067,7 +3079,7 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
         return ExprValue("boolean", m ? "t" : "f", false);
     }
     static const std::set<std::string> cmpOps = {"=", "<>", "!=", "<", ">", "<=", ">="};
-    if (cmpOps.count(op)) return applyComparison(op, l, r);
+    if (cmpOps.count(op)) return e->comparison?comparePrepared(*e->comparison,l,r):applyComparison(op,l,r);
 
     // Arithmetic
     static const std::set<std::string> arithOps = {"+", "-", "*", "/", "%", "^"};
@@ -3463,6 +3475,8 @@ ExprValue ExprEvaluator::evalCase(const CaseExpr* e, const RowContext& ctx) cons
         return value;
     };
     const bool simpleCase = static_cast<bool>(e->switchExpr);
+    if(!e->simpleEnumComparisons.empty() && e->simpleEnumComparisons.size()!=e->whenClauses.size())
+        throw DbError("XX000","simple CASE has incomplete enum operator bindings");
     const ExprValue switchValue = simpleCase
         ? eval(e->switchExpr.get(), ctx) : ExprValue{};
     size_t clauseIndex = 0;
@@ -3472,7 +3486,9 @@ ExprValue ExprEvaluator::evalCase(const CaseExpr* e, const RowContext& ctx) cons
             ExprValue condition = eval(wc.first.get(), ctx);
             ExprValue left = switchValue;
             ExprValue equal;
-            if (!e->simpleComparisonTypes.empty()) {
+            if (!e->simpleEnumComparisons.empty() && e->simpleEnumComparisons.at(clauseIndex)) {
+                equal=comparePrepared(*e->simpleEnumComparisons[clauseIndex],left,condition);
+            } else if (!e->simpleComparisonTypes.empty()) {
                 if (e->simpleComparisonTypes.size() != e->whenClauses.size())
                     throw DbError("XX000", "simple CASE has incomplete operator bindings");
                 const auto& types = e->simpleComparisonTypes[clauseIndex];

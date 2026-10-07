@@ -303,7 +303,7 @@ CatalogManager::CatalogManager(const std::string& dbPath, ReadOnlyTag)
 
 CatalogManager::MetadataSnapshot CatalogManager::metadataSnapshot() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return {namespaces_, classes_, attributes_, types_, procs_};
+    return {namespaces_, classes_, attributes_, types_, procs_, enums_};
 }
 
 CatalogManager::MetadataSnapshot CatalogManager::readMetadataSnapshot(const std::string& path) {

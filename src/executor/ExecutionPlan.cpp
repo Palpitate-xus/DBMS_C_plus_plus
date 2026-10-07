@@ -122,7 +122,7 @@ struct PreparedSelectState {
     std::vector<Expr*> targets;
     std::vector<ExprPtr> starTargets;
     std::vector<bool> targetsBeforeSort;
-    struct SortKey { Expr* expression; size_t target, priorKey; bool asc, nullsFirst; };
+    struct SortKey { Expr* expression; size_t target, priorKey; bool asc, nullsFirst; std::optional<QueryComparisonBinding> enumComparison; };
     std::vector<SortKey> keys;
     static constexpr size_t noTarget = std::numeric_limits<size_t>::max();
     size_t sourceOrdinal = noTarget;
@@ -393,6 +393,11 @@ public:
                 if (a.isNull || b.isNull) {
                     if (a.isNull == b.isNull) continue;
                     return a.isNull == key.nullsFirst;
+                }
+                if(key.enumComparison) {
+                    if(state_->evaluator.comparePrepared(*key.enumComparison,a,b).asBool())return key.asc;
+                    if(state_->evaluator.comparePrepared(*key.enumComparison,b,a).asBool())return !key.asc;
+                    continue;
                 }
                 Column column;
                 const auto error = TypeRegistry::instance().resolveColumnType(column, a.typeName, {}, false);
@@ -895,7 +900,7 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
             }
         }
         keyIdentities.push_back(std::move(identity));
-        state->keys.push_back({order.expr.get(), target, priorKey, order.asc, order.nullsFirst});
+        state->keys.push_back({order.expr.get(), target, priorKey, order.asc, order.nullsFirst,order.enumComparison});
     }
     // All bindings and collation checks precede opening any source or
     // evaluating a volatile expression. The retained parameter cells remain

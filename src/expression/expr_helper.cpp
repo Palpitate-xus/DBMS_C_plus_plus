@@ -1178,7 +1178,7 @@ std::string ExprHelper::scalarExpressionIdentity(
             }
             if (toLower(binary->op) == "collate")
                 return "collate" + field(binary->right->toString()) + field(key(binary->left.get()));
-            return "binary" + field(toLower(binary->op)) + field(key(binary->left.get())) +
+            return "binary" + field(toLower(binary->op)) + field(binary->comparison?binary->comparison->identity:"") + field(key(binary->left.get())) +
                 field(key(binary->right.get()));
         }
         if (const auto* quantified = dynamic_cast<const QuantifiedComparisonExpr*>(node)) {
@@ -1197,6 +1197,8 @@ std::string ExprHelper::scalarExpressionIdentity(
             std::string result = "case" + field(key(conditional->switchExpr.get()));
             for (const auto& types : conditional->simpleComparisonTypes)
                 result += field(types.first) + field(types.second);
+            for(const auto& binding:conditional->simpleEnumComparisons)
+                result+=field(binding?binding->identity:"");
             for (const auto& arm : conditional->whenClauses)
                 result += field(key(arm.first.get())) + field(key(arm.second.get()));
             return result + field(key(conditional->elseExpr.get()));

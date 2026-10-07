@@ -74,6 +74,7 @@ public:
     std::vector<const Stmt*> statementOwners;
     std::vector<const Ctes*> cteScopes;
     std::map<const Stmt*, std::vector<const Expr*>> projectionLeaves;
+    std::map<const Expr*,uint32_t> valueTypeOids;
     const QueryRowDescriptor* setOrderScope = nullptr;
     Binder(const std::string& sql, const std::vector<QueryBindingDatum>& values,
            const QueryBindingMetadata& descriptions) : datums(values), metadata(descriptions) {
@@ -164,12 +165,63 @@ public:
         return op=="LIKE" || op=="NOT LIKE" || op=="ILIKE" || op=="NOT ILIKE" ||
                op=="SIMILAR TO" || op=="NOT SIMILAR TO";
     }
-    static uint32_t expressionTypeOid(const Expr* node) {
+    uint32_t expressionTypeOid(const Expr* node) const {
+        const auto resolved=valueTypeOids.find(node);
+        if(resolved!=valueTypeOids.end())return resolved->second;
         const auto* column=dynamic_cast<const ColumnRefExpr*>(node);
         if(column && column->binding)return column->binding->typeOid;
         const auto* unary=dynamic_cast<const UnaryOpExpr*>(node);
         return unary && unary->op.rfind("COLLATE ",0)==0
             ? expressionTypeOid(unary->operand.get()) : 0;
+    }
+    std::optional<QueryEnumType> enumType(const std::string& spelling,const Expr* node) const {
+        return metadata.enumType?metadata.enumType(spelling,expressionTypeOid(node)):std::nullopt;
+    }
+    static void validateEnumLiteral(const Expr* input,const QueryEnumType& type) {
+        const auto* literal=dynamic_cast<const LiteralExpr*>(input);
+        if(!literal || literal->preparedSubquery || !literal->typeName.empty())return;
+        // Only the parser's genuine UNKNOWN literal is transformed. Never
+        // evaluate a function, parameter, subquery or row to discover a type.
+        if(ExprHelper::inferValuesResultType(literal->value)!="unknown")return;
+        ExprEvaluator pure;
+        const auto value=pure.eval(literal,RowContext{});
+        if(!value.isNull && std::find(type.labels.begin(),type.labels.end(),value.value)==type.labels.end())
+            throw DbError("22P02","invalid input value for enum "+type.typeName+": "+value.value);
+    }
+    void bindEnumCast(const Expr* expression,const Expr* input,const std::string& spelling) {
+        if(const auto type=enumType(spelling,nullptr)) {
+            validateEnumLiteral(input,*type);
+            valueTypeOids[expression]=type->typeOid;
+        }
+    }
+    std::optional<QueryComparisonBinding> enumComparison(const std::string& rawOp,
+        ExprPtr& left,ExprPtr& right,const std::string& leftType,const std::string& rightType) {
+        const auto lhs=enumType(leftType,left.get()),rhs=enumType(rightType,right.get());
+        if(!lhs && !rhs)return std::nullopt;
+        const auto& type=lhs?*lhs:*rhs;
+        if((lhs && rhs && lhs->typeOid!=rhs->typeOid) ||
+           (!lhs && common_type_detail::canonical(leftType)!="unknown") ||
+           (!rhs && common_type_detail::canonical(rightType)!="unknown"))
+            throw DbError("42883","operator does not exist: "+leftType+" "+rawOp+" "+rightType);
+        if(!lhs)validateEnumLiteral(left.get(),type);
+        if(!rhs)validateEnumLiteral(right.get(),type);
+        if(!lhs)coerceCaseInput(left,leftType,type.typeName);
+        if(!rhs)coerceCaseInput(right,rightType,type.typeName);
+        QueryComparisonBinding binding;
+        binding.op=(rawOp=="IS DISTINCT FROM" || rawOp=="IS NOT DISTINCT FROM")?"=":rawOp=="!="?"<>":rawOp;
+        binding.leftType=type.typeName;binding.rightType=type.typeName;
+        binding.strict=true;binding.enumTypeOid=type.typeOid;binding.enumLabels=type.labels;
+        binding.identity=type.identity+":"+binding.op;
+        return binding;
+    }
+    std::optional<QueryComparisonBinding> enumSortComparison(const std::string& spelling,uint32_t typeOid) const {
+        const auto type=metadata.enumType?metadata.enumType(spelling,typeOid):std::nullopt;
+        if(!type)return std::nullopt;
+        QueryComparisonBinding binding;
+        binding.op="<";binding.leftType=type->typeName;binding.rightType=type->typeName;
+        binding.strict=true;binding.enumTypeOid=type->typeOid;binding.enumLabels=type->labels;
+        binding.identity=type->identity+":<";
+        return binding;
     }
     std::string patternBaseType(const std::string& declared,const Expr* node) const {
         return ExprHelper::canonicalResultTypeName(metadata.baseType
@@ -320,6 +372,7 @@ public:
             expression(cast->operand, scopes, cast->typeName);
             geometric_input_detail::validateUnknownInput(cast->operand.get(),cast->typeName);
             if (metadata.assignmentInput) metadata.assignmentInput({"", cast->typeName}, cast, cast->typeName);
+            bindEnumCast(cast,cast->operand.get(),cast->typeName);
             if(const auto geometry=geometric_input_detail::builtinType(cast->typeName);!geometry.empty())
                 return geometry;
             return cast->typeName;
@@ -364,6 +417,7 @@ public:
                 if (!type) throw DbError("42601", "cast requires a type name");
                 geometric_input_detail::validateUnknownInput(binary->left.get(),type->value);
                 if (metadata.assignmentInput) metadata.assignmentInput({"", type->value}, binary, type->value);
+                bindEnumCast(binary,binary->left.get(),type->value);
                 if(const auto geometry=geometric_input_detail::builtinType(type->value);!geometry.empty())
                     return geometry;
                 return type->value; // grammar type, not a SQL value namespace
@@ -402,6 +456,8 @@ public:
             static const std::set<std::string> predicates = {"=", "<>", "!=", "<", ">", "<=", ">=",
                 "AND", "OR", "LIKE", "NOT LIKE", "ILIKE", "NOT ILIKE",
                 "SIMILAR TO", "NOT SIMILAR TO", "IN", "NOT IN", "IS DISTINCT FROM", "IS NOT DISTINCT FROM"};
+            static const std::set<std::string> comparisons={"=","<>","!=","<",">","<=",">=","IS DISTINCT FROM","IS NOT DISTINCT FROM"};
+            if(comparisons.count(binary->op))binary->comparison=enumComparison(binary->op,binary->left,binary->right,left,right);
             return predicates.count(binary->op) ? "boolean" : left;
         }
         case ExprType::QuantifiedComparison: {
@@ -501,6 +557,7 @@ public:
             if (conditional->switchExpr && switchType == "unknown")
                 coerceCaseInput(conditional->switchExpr,switchType,"text");
             conditional->simpleComparisonTypes.clear();
+            conditional->simpleEnumComparisons.clear();
             std::vector<std::string> thenTypes;
             for (auto& clause : conditional->whenClauses) {
                 const auto conditionType = expression(clause.first, scopes);
@@ -510,10 +567,13 @@ public:
                         throw DbError("42804","argument of CASE/WHEN must be type boolean");
                     coerceCaseInput(clause.first,conditionType,"boolean");
                 } else {
-                    const auto equality=resolveBuiltinEquality(
+                    const auto bound=enumComparison("=",conditional->switchExpr,clause.first,
+                        switchType=="unknown"?"text":switchType,conditionType);
+                    const auto equality=bound?std::make_pair(bound->leftType,bound->rightType):resolveBuiltinEquality(
                         switchType=="unknown"?"text":switchType,conditionType);
                     conditional->simpleComparisonTypes.push_back(equality);
-                    coerceCaseInput(clause.first,conditionType,equality.second);
+                    if(bound)conditional->simpleEnumComparisons.push_back(bound);
+                    else coerceCaseInput(clause.first,conditionType,equality.second);
                 }
                 thenTypes.push_back(expression(clause.second,scopes));
             }
@@ -522,7 +582,27 @@ public:
             const auto elseType = expression(conditional->elseExpr,scopes);
             std::vector<std::string> resultTypes{elseType};
             resultTypes.insert(resultTypes.end(),thenTypes.begin(),thenTypes.end());
+            std::optional<QueryEnumType> resultEnum;
+            std::vector<bool> enumInputs(resultTypes.size(),false);
+            const auto collectEnum=[&](const Expr* value,const std::string& spelling,size_t position) {
+                if(const auto candidate=enumType(spelling,value)) {
+                    if(resultEnum && resultEnum->typeOid!=candidate->typeOid)
+                        throw DbError("42846","CASE cannot convert between distinct enum types");
+                    resultEnum=candidate;
+                    enumInputs[position]=true;
+                }
+            };
+            collectEnum(conditional->elseExpr.get(),elseType,0);
+            for(size_t i=0;i<thenTypes.size();++i)collectEnum(conditional->whenClauses[i].second.get(),thenTypes[i],i+1);
+            if(resultEnum)for(size_t i=0;i<resultTypes.size();++i)
+                if(enumInputs[i])resultTypes[i]=resultEnum->typeName;
             const auto type = selectCommonType(resultTypes,"CASE");
+            if(resultEnum) {
+                if(elseType=="unknown")validateEnumLiteral(conditional->elseExpr.get(),*resultEnum);
+                for(size_t i=0;i<thenTypes.size();++i)if(thenTypes[i]=="unknown")
+                    validateEnumLiteral(conditional->whenClauses[i].second.get(),*resultEnum);
+                valueTypeOids[conditional]=resultEnum->typeOid;
+            }
             coerceCaseInput(conditional->elseExpr,elseType,type);
             for (size_t i=0;i<thenTypes.size();++i)
                 coerceCaseInput(conditional->whenClauses[i].second,thenTypes[i],type);
@@ -580,6 +660,7 @@ public:
         literal.preparedSubquery = std::move(parsed.stmt);
         if (scalar && columns.size() != 1) throw DbError("42601", "subquery must return only one column");
         literal.typeName = scalar ? columns.front().type : "boolean";
+        if(scalar)valueTypeOids[&literal]=columns.front().typeOid;
         return literal.typeName;
     }
     void window(WindowDef& value, const std::vector<Namespace>& scopes) {
@@ -1028,7 +1109,25 @@ public:
                 const auto* ref = dynamic_cast<ColumnRefExpr*>(order.expr.get());
                 const bool outputAlias = ref && ref->table.empty() && ref->schema.empty() &&
                     std::any_of(columns.begin(), columns.end(), [&](const auto& col) { return col.name == ref->column; });
-                if (!outputAlias) expression(order.expr, scopes);
+                std::string orderType;
+                uint32_t orderOid=0;
+                if(outputAlias) {
+                    const auto output=std::find_if(columns.begin(),columns.end(),[&](const auto& col){return col.name==ref->column;});
+                    orderType=output->type;orderOid=output->typeOid;
+                } else {
+                    orderType=expression(order.expr,scopes);
+                    orderOid=expressionTypeOid(order.expr.get());
+                    const auto* literal=dynamic_cast<const LiteralExpr*>(order.expr.get());
+                    if(literal && !literal->value.empty() && std::all_of(literal->value.begin(),literal->value.end(),
+                        [](unsigned char c){return c>='0' && c<='9';})) {
+                        size_t ordinal=0;
+                        for(char c:literal->value){if(ordinal>columns.size())break;ordinal=ordinal*10+size_t(c-'0');}
+                        if(ordinal && ordinal<=columns.size()) {
+                            orderType=columns[ordinal-1].type;orderOid=columns[ordinal-1].typeOid;
+                        }
+                    }
+                }
+                order.enumComparison=enumSortComparison(orderType,orderOid);
             }
             if(select->command!=SqlCommand::Values)
                 for (auto& row : select->valuesRows) for (auto& value : row) expression(value, scopes);
