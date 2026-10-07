@@ -31815,6 +31815,27 @@ void validatePreparedPrimitiveInput(const QueryOutputColumn& target, const Expr*
 }
 } // namespace
 
+static std::optional<QuerySetReturningBinding::Kind> preparedSetReturningRole(
+    const ExprEvaluator& evaluator,const FunctionCallExpr* function,
+    const StorageEngine* engine) {
+    if(!function || evaluator.hasScalarFunction(function,const_cast<StorageEngine*>(engine)))
+        return std::nullopt;
+    CatalogManager::QualifiedName routine;
+    const auto spelling=function->schema.empty()?function->funcName:function->schema+"."+function->funcName;
+    if(!CatalogManager::parseQualifiedName(spelling,routine,true) ||
+       (!routine.schema.empty() && routine.schema!="pg_catalog"))return std::nullopt;
+    // This is the real typed provider registry shared with binding, not a
+    // query spelling or a list of functions to bypass after an exception.
+    if(routine.name=="unnest")return QuerySetReturningBinding::Kind::Unnest;
+    return std::nullopt;
+}
+
+bool StorageEngine::ownsPreparedSetReturningCall(const std::string& dbname,
+    const FunctionCallExpr* function) const {
+    ExprEvaluator evaluator;evaluator.setCurrentDB(dbname);
+    return preparedSetReturningRole(evaluator,function,this).has_value();
+}
+
 PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
     const std::string& sql, const std::vector<QueryBindingDatum>& bindings) const {
         // Catalog rows are copied under one lock; schema/view loads only read.
@@ -31927,11 +31948,9 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
         metadata.setReturning = [&](const FunctionCallExpr* function) -> std::optional<QuerySetReturningBinding> {
             // Existing scalar/stored resolution wins over query-host builtins,
             // including an actual public routine named unnest.
-            if(evaluator.hasScalarFunction(function,const_cast<StorageEngine*>(this)))return std::nullopt;
-            CatalogManager::QualifiedName routine;
+            const auto role=preparedSetReturningRole(evaluator,function,this);
+            if(!role)return std::nullopt;
             const auto spelling=function->schema.empty()?function->funcName:function->schema+"."+function->funcName;
-            if(!CatalogManager::parseQualifiedName(spelling,routine,true) ||
-                (!routine.schema.empty() && routine.schema!="pg_catalog") || routine.name!="unnest")return std::nullopt;
             if(function->args.size()!=1 || !function->namedArgs.empty() || function->hasOver ||
                 function->filter || function->distinct || !function->orderBy.empty())
                 throw DbError("42883","function does not exist: "+spelling);
@@ -31940,7 +31959,7 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
             if(input=="unknown")throw DbError("42725","function unnest(unknown) is not unique");
             if(input.size()<2 || input.compare(input.size()-2,2,"[]")!=0)
                 throw DbError("42883","function unnest("+input+") does not exist");
-            return QuerySetReturningBinding{QuerySetReturningBinding::Kind::Unnest,
+            return QuerySetReturningBinding{*role,
                 "builtin:pg_catalog.unnest(anyarray)",input.substr(0,input.size()-2)};
         };
         metadata.functionType = [&](const FunctionCallExpr* function) {

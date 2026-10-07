@@ -420,6 +420,10 @@ public:
     PreparedQuery prepareBoundQuery(const std::string& dbname,
         const std::string& sql,
         const std::vector<QueryBindingDatum>& bindings = {}) const;
+    // Pure provider ownership probe. It resolves routine identity only;
+    // argument binding/errors remain at the whole-query analysis boundary.
+    bool ownsPreparedSetReturningCall(const std::string& dbname,
+        const FunctionCallExpr* function) const;
     // Execute a prepared ordinary child under the caller's statement/view,
     // not routine SPI. Cardinality, exact SQL NULL, and errors stay typed.
     ExprValue executeScalarSubquery(const std::string& dbname,

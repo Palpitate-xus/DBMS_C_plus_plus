@@ -20484,10 +20484,12 @@ static bool handlePreparedMultirowQuery(const string& raw,Session& session,bool&
     const auto* select=parsed.success?dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()):nullptr;
     if(!select)return false;
     const bool quantified=containsPreparedQuantifier(*select);
-    // Probe the syntax shape, but choose the set-valued role only from whole
-    // metadata binding. A stored scalar routine named unnest is not an SRF.
-    const bool possibleSet=!select->fromClause && select->selectList.size()==1 &&
-        dynamic_cast<const dbms::FunctionCallExpr*>(select->selectList.front().expr.get());
+    // Only a provider actually owned by this receiver may request whole
+    // binding here. Other scalar/session host functions retain their own
+    // consumer; no analysis exception is swallowed to discover ownership.
+    const auto* candidate=!select->fromClause && select->selectList.size()==1
+        ? dynamic_cast<const dbms::FunctionCallExpr*>(select->selectList.front().expr.get()) : nullptr;
+    const bool possibleSet=candidate && g_engine.ownsPreparedSetReturningCall(session.currentDB,candidate);
     if(!quantified && !possibleSet)return false;
     auto query=make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(session.currentDB,raw));
     const auto* bound=static_cast<const dbms::SelectStmt*>(query->ast.get());
