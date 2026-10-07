@@ -5,6 +5,7 @@
 #include <cassert>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -49,28 +50,50 @@ int main() {
     constexpr size_t checkExtensionSize =
         sizeof(uint32_t) + sizeof(int32_t);
     assert(validSchema.size() >= identityExtensionSize + checkExtensionSize);
+    // This actual current file has RID1, preceded by empty DFT1/RLB1. Make
+    // an explicit legacy-9 parser image using that validated version layout;
+    // never pretend that its last seven bytes are the old IDN1 extension.
+    auto legacySchema = validSchema;
+    int32_t currentVersion = 0;
+    std::memcpy(&currentVersion,validSchema.data(),sizeof(currentVersion));
+    if(currentVersion==0x4442000A) {
+        constexpr size_t suffix=6+8+12; // DFT1(0), RLB1(0), RID1(identity)
+        assert(validSchema.size()>=suffix+identityExtensionSize+checkExtensionSize);
+        const auto offset=validSchema.size()-suffix;
+        uint32_t magic=0;uint16_t defaults=1;int32_t ranges=1;uint64_t relationId=0;
+        std::memcpy(&magic,validSchema.data()+offset,4);assert(magic==0x31544644);
+        std::memcpy(&defaults,validSchema.data()+offset+4,2);assert(defaults==0);
+        std::memcpy(&magic,validSchema.data()+offset+6,4);assert(magic==0x31424C52);
+        std::memcpy(&ranges,validSchema.data()+offset+10,4);assert(ranges==0);
+        std::memcpy(&magic,validSchema.data()+offset+14,4);assert(magic==0x31444952);
+        std::memcpy(&relationId,validSchema.data()+offset+18,8);assert(relationId!=0);
+        legacySchema.resize(offset);
+        const int32_t legacyVersion=0x44420009;
+        std::memcpy(legacySchema.data(),&legacyVersion,4);
+    } else assert(currentVersion==0x44420009);
+    // Already-open owner tests the parser directly. A cold owner now also
+    // validates every recovery schema before the caller can request one.
+    StorageEngine parserOwner;
     {
         std::ofstream out(schemaPath, std::ios::binary | std::ios::trunc);
-        out.write(validSchema.data(), static_cast<std::streamsize>(
-                                          validSchema.size() -
+        out.write(legacySchema.data(), static_cast<std::streamsize>(
+                                          legacySchema.size() -
                                           identityExtensionSize));
         assert(out);
     }
     {
-        StorageEngine engine;
-        assert(engine.getTableSchema(dbname, "t").len == 1);
+        assert(parserOwner.getTableSchema(dbname, "t").len == 1);
     }
     {
         std::ofstream out(schemaPath, std::ios::binary | std::ios::trunc);
-        out.write(validSchema.data(), static_cast<std::streamsize>(
-                                          validSchema.size() -
+        out.write(legacySchema.data(), static_cast<std::streamsize>(
+                                          legacySchema.size() -
                                           identityExtensionSize -
                                           checkExtensionSize));
         assert(out);
     }
     {
-        StorageEngine engine;
-        assert(engine.getTableSchema(dbname, "t").len == 1);
+        assert(parserOwner.getTableSchema(dbname, "t").len == 1);
     }
     int corruptionVersion = 0;
     const auto writeCorruptDsize = [&](int32_t dsize) {
@@ -97,24 +120,21 @@ int main() {
 
     writeCorruptDsize(-1);
     {
-        StorageEngine engine;
         // A negative on-disk width must not wrap to SIZE_MAX.
-        assert(engine.getTableSchema(dbname, "t").len == 0);
+        assert(parserOwner.getTableSchema(dbname, "t").len == 0);
     }
 
     writeCorruptDsize(65536);
     {
-        StorageEngine engine;
         // Current column types never persist widths above the format limit.
-        assert(engine.getTableSchema(dbname, "t").len == 0);
+        assert(parserOwner.getTableSchema(dbname, "t").len == 0);
     }
 
     std::filesystem::resize_file(schemaPath, 8);
     {
-        StorageEngine engine;
         // A truncated current-format schema must not become a partially parsed
         // schema that callers could accidentally use for writes.
-        assert(engine.getTableSchema(dbname, "t").len == 0);
+        assert(parserOwner.getTableSchema(dbname, "t").len == 0);
     }
 
     {
@@ -123,9 +143,14 @@ int main() {
         out.write(reinterpret_cast<const char*>(&unsupportedMagic), sizeof(unsupportedMagic));
     }
     {
-        StorageEngine engine;
-        assert(engine.getTableSchema(dbname, "t").len == 0);
+        assert(parserOwner.getTableSchema(dbname, "t").len == 0);
     }
+    bool coldRejected=false;
+    try { StorageEngine cold; }
+    catch(const std::runtime_error&) { coldRejected=true; }
+    assert(coldRejected);
+    {std::ofstream restored(schemaPath,std::ios::binary|std::ios::trunc);
+     restored.write(validSchema.data(),validSchema.size());assert(restored);}
 
     std::filesystem::remove_all(dbname);
     std::filesystem::remove_all(dbname + ".txn_backup");
