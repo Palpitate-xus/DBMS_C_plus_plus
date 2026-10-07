@@ -595,6 +595,58 @@ void PreparedQueryExecution::planStatementConstants(const Stmt* statement,
         });
         return retained;
     };
+    // Top-level nonvolatile ANY tests with a real local source reference
+    // become a semi-join qualification before boolean simplification. Its
+    // child is consequently planned even if another AND arm is constant
+    // false. ALL, OR/CASE arms, constant tests and volatile tests remain
+    // ordinary lazy SubPlans. Follow true query owners for references inside
+    // scalar test operands; a child-local or higher-ancestor Var is not a
+    // reference to this qualification's local relation set.
+    const auto localNonvolatileTest = [&](const Expr* expression) {
+        bool local = false, volatileTest = false;
+        std::set<const Expr*> seen;
+        std::function<void(const Expr*)> inspect = [&](const Expr* root) {
+            visitStructuredValue(root, [&](const Expr* value) {
+                if (!seen.insert(value).second) return;
+                if (const auto* column = dynamic_cast<const ColumnRefExpr*>(value);
+                    column && column->binding && sourceRange(column->binding->sourceOrdinal).owner == statement)
+                    local = true;
+                if (const auto* call = dynamic_cast<const FunctionCallExpr*>(value);
+                    call && evaluator_.hasScalarFunction(call, engine_) &&
+                    evaluator_.scalarFunctionVolatility(call, engine_) == 'v')
+                    volatileTest = true;
+                if (value->preparedSubquery) {
+                    const Stmt* child = value->preparedSubquery.get();
+                    for (const auto& owned : owners_)
+                        if (isAncestor(child, owned.second)) inspect(owned.first);
+                    // Expanded stars may carry a genuine correlated source
+                    // binding in projection metadata rather than their '*'
+                    // syntax node. Do not rediscover that binding by name.
+                    for (const auto& projection : query_->projectionBindings)
+                        if (isAncestor(child, projection.first))
+                            for (const auto& output : projection.second)
+                                if (output.column && sourceRange(output.column->sourceOrdinal).owner == statement)
+                                    local = true;
+                }
+            });
+        };
+        inspect(expression);
+        return local && !volatileTest;
+    };
+    const auto qualification = [&](const ExprPtr& expression) {
+        std::function<void(const Expr*)> pulledChildren = [&](const Expr* root) {
+            if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(root);
+                binary && SQLParser::toLower(binary->op) == "and") {
+                pulledChildren(binary->left.get()); pulledChildren(binary->right.get());
+            } else if (const auto* any = dynamic_cast<const QuantifiedComparisonExpr*>(root);
+                any && any->quantifier == QuantifiedComparisonExpr::Quantifier::Any &&
+                any->right && any->right->preparedSubquery && localNonvolatileTest(any->left.get())) {
+                planStatementConstants(any->right->preparedSubquery.get(), visited);
+            }
+        };
+        pulledChildren(expression.get());
+        value(expression);
+    };
     const auto sourceDemand = [&](const PreparedQuery::SourceRange& source) {
         std::set<size_t> columns;
         // USING/NATURAL equality consumes its input key columns even when
@@ -709,7 +761,7 @@ void PreparedQueryExecution::planStatementConstants(const Stmt* statement,
         for (const auto& target : node->selectList) {
             if (usedExpressions.count(target.expr.get())) value(target.expr);
         }
-        value(node->whereClause);
+        qualification(node->whereClause);
         for (const auto& item : node->groupBy) value(item);
         for (const auto& element : node->groupByElems)
             for (const auto& item : element.exprs) value(item);
@@ -727,10 +779,10 @@ void PreparedQueryExecution::planStatementConstants(const Stmt* statement,
         sources();
     } else if (const auto* node = dynamic_cast<const UpdateStmt*>(statement)) {
         for (const auto& item : node->setClauses) value(item.second);
-        value(node->whereClause); items(node->returning);
+        qualification(node->whereClause); items(node->returning);
         qualifications(node->fromClause.get()); sources(); from(node->fromClause.get());
     } else if (const auto* node = dynamic_cast<const DeleteStmt*>(statement)) {
-        value(node->whereClause); items(node->returning);
+        qualification(node->whereClause); items(node->returning);
         qualifications(node->usingClause.get()); sources(); from(node->usingClause.get());
     } else if (const auto* node = dynamic_cast<const ExplainStmt*>(statement)) {
         planStatementConstants(node->query.get(), visited);
