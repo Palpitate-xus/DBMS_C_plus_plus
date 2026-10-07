@@ -62,23 +62,34 @@ bool rejectMalformedDdlAst() {
     return true;
 }
 
-bool declaredVarcharTypeMod(const ColumnDef& definition, int32_t& modifier) {
+bool declaredColumnTypeMod(const ColumnDef& definition, int32_t& modifier) {
     const std::string type = toLower(trim(definition.typeName));
-    if (definition.isArray ||
-        (type != "varchar" && type != "character varying")) return false;
+    const bool varying = type == "varchar" || type == "character varying";
+    const bool fixed = type == "char" || type == "character" || type == "bpchar";
+    const bool numeric = type == "numeric" || type == "decimal";
+    if (!varying && !fixed && !numeric) return false;
     if (definition.typeMods.empty()) {
-        modifier = -1;
+        modifier = fixed ? 5 : -1;
         return true;
     }
-    if (definition.typeMods.size() != 1) return false;
-    const std::string& length = definition.typeMods.front();
-    int32_t parsed = 0;
-    const auto result = std::from_chars(
-        length.data(), length.data() + length.size(), parsed);
-    if (result.ec != std::errc() ||
-        result.ptr != length.data() + length.size() ||
-        parsed <= 0 || parsed > 65535) return false;
-    modifier = parsed + 4;
+    const auto integer = [](const std::string& text, int32_t& value) {
+        const auto parsed = std::from_chars(text.data(), text.data() + text.size(), value);
+        return parsed.ec == std::errc() && parsed.ptr == text.data() + text.size();
+    };
+    int32_t first = 0;
+    if (!integer(definition.typeMods.front(), first)) return false;
+    if (numeric) {
+        int32_t scale = 0;
+        if (definition.typeMods.size() > 2 || first < 1 || first > 1000 ||
+            (definition.typeMods.size() == 2 && !integer(definition.typeMods[1], scale)) ||
+            scale < -1000 || scale > 1000) return false;
+        // PostgreSQL numeric typmod is a packed precision/11-bit signed
+        // scale plus VARHDRSZ. The physical numeric width contains neither.
+        modifier = static_cast<int32_t>(((first << 16) | (scale & 0x7ff)) + 4);
+    } else {
+        if (definition.typeMods.size() != 1 || first <= 0 || first > 65535) return false;
+        modifier = first + 4;
+    }
     return true;
 }
 
@@ -907,19 +918,23 @@ static PgAttributeRow catalogAttributeForColumn(
     } else if (!column.isArray && column.dataType == "bit varying" &&
                column.dsize != 8388608) {
         attribute.atttypmod = static_cast<int32_t>(column.dsize + 4);
-    } else if (!column.isArray &&
+    } else if (
                (column.dataType == "character" || column.dataType == "char" ||
                 column.dataType == "bpchar") && column.dsize > 0) {
         attribute.atttypmod = static_cast<int32_t>(column.dsize + 4);
-    } else if (!column.isArray && column.dataType == "varchar" &&
+    } else if (column.dataType == "varchar" &&
                column.dsize > 0 && column.dsize != 65535) {
         attribute.atttypmod = static_cast<int32_t>(column.dsize + 4);
     }
     if (previous && attribute.atttypid == previous->atttypid &&
-        attribute.atttypid == 1043 && previous->atttypmod >= 4 &&
-        static_cast<size_t>(previous->atttypmod - 4) == column.dsize) {
+        (previous->attndims > 0) == column.isArray &&
+        ((attribute.atttypid == 1043 && previous->atttypmod >= 4 &&
+          static_cast<size_t>(previous->atttypmod - 4) == column.dsize) ||
+         attribute.atttypid == 1700)) {
         // A catalog-backed VARCHAR bound can equal the physical capacity.
         // Preserve it across unrelated ALTER TABLE catalog synchronizations.
+        // Numeric modifiers also live only in the durable attribute, not the
+        // physical width. An explicit new declaration overrides this below.
         attribute.atttypmod = previous->atttypmod;
     }
     attribute.attnotnull = !column.isNull;
@@ -1992,7 +2007,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                 if (!alterStatusOk(status, "Column")) return true;
                 std::map<std::string, int32_t> declaredVarcharMods;
                 int32_t varcharModifier = -1;
-                if (declaredVarcharTypeMod(sub.colDef, varcharModifier)) {
+                if (declaredColumnTypeMod(sub.colDef, varcharModifier)) {
                     declaredVarcharMods[sub.colDef.name] = varcharModifier;
                 }
                 if (!synchronizeTableAttributesInCatalog(
@@ -2347,7 +2362,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                         return true;
                     }
                     int32_t varcharModifier = -1;
-                    if (declaredVarcharTypeMod(cd, varcharModifier)) {
+                    if (declaredColumnTypeMod(cd, varcharModifier)) {
                         declaredVarcharMods[sub.name] = varcharModifier;
                     }
                     status = g_engine.alterTableAlterColumnType(
@@ -2357,8 +2372,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     return true;
                 }
                 if (!alterStatusOk(status, "Column")) return true;
-                if (!tableIsTemporary &&
-                    !synchronizeTableAttributesInCatalog(
+                if (!synchronizeTableAttributesInCatalog(
                         s.currentDB, tableName, &declaredVarcharMods)) {
                     std::cout << "ALTER COLUMN catalog update failed"
                               << std::endl;
@@ -5946,7 +5960,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             std::map<std::string, int32_t> declaredVarcharMods;
             for (const auto& definition : stmt->columns) {
                 int32_t modifier = -1;
-                if (declaredVarcharTypeMod(definition, modifier)) {
+                if (declaredColumnTypeMod(definition, modifier)) {
                     declaredVarcharMods[definition.name] = modifier;
                 }
             }

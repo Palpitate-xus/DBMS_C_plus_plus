@@ -65,6 +65,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/table_arithmetic_typed_bridge_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/array_concat_typed_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/physical_array_protocol_descriptor_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/array_element_typmod_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/view_trigger_typed_values_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/table_extract_quoted_operand_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/table_character_cast_describe_protocol_e2e_test.py)
