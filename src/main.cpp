@@ -44,6 +44,7 @@
 #include "common/scram_sha256.h"
 #include "Session.h"
 #include "expression/expr_helper.h"
+#include "expression/array_type.h"
 #include "expression/ExprEvaluator.h"
 #include "expression/ExpressionVolatility.h"
 #include "common/DateType.h"
@@ -19390,6 +19391,9 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
     function<bool(const dbms::Expr*,bool)> arrayExpression = [&](const dbms::Expr* value,bool prepared) {
         if(!value)return false;
         if(dynamic_cast<const dbms::ArrayExpr*>(value))return true;
+        if (const auto* column = dynamic_cast<const dbms::ColumnRefExpr*>(value))
+            return prepared && column->binding &&
+                dbms::array_detail::isArray(column->binding->declaredType);
         if(const auto* binary=dynamic_cast<const dbms::BinaryOpExpr*>(value))
             return (binary->op=="||" && (!prepared || binary->arrayConcat.has_value())) ||
                 arrayExpression(binary->left.get(),prepared) || (binary->op!="::" && arrayExpression(binary->right.get(),prepared));
@@ -19427,7 +19431,10 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
     // for volatile routines and nontransactional sequence allocation.
     const bool fromlessDemand = !candidate->fromClause &&
         (candidate->whereClause || candidate->limit || candidate->offset);
-    if ((!roles.first && !scalarOrder && !possibleArray && !fromlessDemand) || roles.second) return false;
+    const bool physicalColumnCandidate = candidate->fromClause &&
+        candidate->fromClause->type == dbms::FromItem::Type::Table;
+    if ((!roles.first && !scalarOrder && !possibleArray && !fromlessDemand &&
+         !physicalColumnCandidate) || roles.second) return false;
     // Additional multirow roles in targets/order also need their own lowering;
     // never reinterpret a set-valued child as a scalar expression.
     for (const auto& item : candidate->selectList) if (scalarQueryRoles(item.expr.get()).second) return false;
@@ -19440,6 +19447,11 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
         // aliases retain their established consumers. This plan lowers a
         // single actual base range; no alternate namespace is fabricated.
         if (!g_engine.tableExists(session.currentDB, physical)) return false;
+        if (!roles.first && !scalarOrder && !possibleArray && !fromlessDemand) {
+            const auto schema = g_engine.getTableSchema(session.currentDB, physical);
+            if (none_of(schema.cols, schema.cols + schema.len,
+                        [](const dbms::Column& column) { return column.isArray; })) return false;
+        }
         dbms::CatalogManager::QualifiedName name;
         if (!dbms::CatalogManager::parseQualifiedName(spelling, name, true)) return false;
         for (auto frame = queryCteFrames.rbegin(); frame != queryCteFrames.rend(); ++frame) {
@@ -19455,7 +19467,9 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
     // discarded before the whole immutable query has passed preparation.
     auto prepared = g_engine.prepareBoundQuery(session.currentDB, rawSql);
     auto* select = static_cast<dbms::SelectStmt*>(prepared.ast.get());
-    if(!roles.first && !scalarOrder && !queryArrays(select,true) && !fromlessDemand)return false;
+    const bool arrayOutput = any_of(prepared.output.begin(), prepared.output.end(),
+        [](const dbms::QueryOutputColumn& column) { return dbms::array_detail::isArray(column.type); });
+    if(!roles.first && !scalarOrder && !queryArrays(select,true) && !arrayOutput && !fromlessDemand)return false;
     // Preserve column grants on precisely the bound source cells used by
     // this query (including correlated child references), not SELECT *.
     if (select->fromClause && !sessionIsAdmin(session)) {
