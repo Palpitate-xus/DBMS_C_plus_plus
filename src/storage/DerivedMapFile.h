@@ -1,5 +1,8 @@
 #pragma once
 
+#include "DerivedMapPublication.h"
+
+#include <algorithm>
 #include <cerrno>
 #include <climits>
 #include <cstdint>
@@ -60,20 +63,37 @@ inline int open(const std::string& filename, std::vector<uint8_t>& data) {
     return fd;
 }
 
-inline bool write(int fd, const std::string& filename, const std::vector<uint8_t>& data) {
+inline bool write(int fd, const std::string& filename, const std::vector<uint8_t>& data,
+                  uint8_t kind, std::vector<uint8_t> expectedBefore,
+                  std::string& acceptedProgress) {
     if (!owned(fd, filename)) return false;
+    // An interrupted local publication still has to be retryable. Only exact
+    // bytes produced by our acknowledged base plus successful writes qualify;
+    // this is not a durability acknowledgement or permission for raw edits.
+    const auto failed = [&]() {
+        std::vector<uint8_t> actual;
+        if (read(fd, filename, actual) && actual == expectedBefore)
+            acceptedProgress = derived_map_publication::digest(actual);
+        return false;
+    };
     size_t offset = 0;
     while (offset < data.size()) {
         const auto count = ::pwrite(fd, data.data() + offset, data.size() - offset,
                                     static_cast<off_t>(offset));
         if (count < 0 && errno == EINTR) continue;
-        if (count <= 0) return false;
+        if (count <= 0) return failed();
+        if (expectedBefore.size() < offset + static_cast<size_t>(count))
+            expectedBefore.resize(offset + static_cast<size_t>(count), 0);
+        std::copy(data.begin() + offset, data.begin() + offset + count,
+                  expectedBefore.begin() + offset);
         offset += static_cast<size_t>(count);
     }
-    if (::ftruncate(fd, static_cast<off_t>(data.size())) != 0) return false;
+    if (::ftruncate(fd, static_cast<off_t>(data.size())) != 0) return failed();
+    expectedBefore.resize(data.size());
+    if (!derived_map_publication::stamp(fd, filename, kind, data)) return failed();
     int synced;
     do { synced = ::fsync(fd); } while (synced != 0 && errno == EINTR);
-    return synced == 0 && owned(fd, filename);
+    return (synced == 0 && owned(fd, filename)) || failed();
 }
 
 inline bool matches(int fd, const std::string& filename, const std::vector<uint8_t>& data) {
@@ -88,6 +108,7 @@ struct Cache {
     std::map<size_t, uint8_t> pendingMasks;
     bool dirty = false;
     uint8_t kind = 0;
+    std::string acknowledgedDigest;
     struct stat generation{};
 };
 
@@ -157,6 +178,7 @@ inline std::shared_ptr<Cache> sharedCache(int fd, const std::string& filename,
     if (auto existing = entry.observed.lock()) return existing;
     auto state = std::make_shared<Cache>();
     state->bytes = std::move(initial);
+    state->acknowledgedDigest = derived_map_publication::digest(state->bytes);
     state->generation = generation;
     state->kind = kind;
     entry.observed = state;
@@ -204,17 +226,44 @@ inline void overlayPending(const Cache& state, std::vector<uint8_t>& actual,
     }
 }
 
+// Caller owns the actual source's flock. Matching a candidate is not enough:
+// independently sync and recheck both its complete bytes and receipt.
+inline bool readPublishedLocked(int fd, const std::string& filename, uint8_t kind,
+                                std::vector<uint8_t>& actual, struct stat& generation) {
+    struct stat before{}, after{};
+    if (!read(fd, filename, actual, &before) ||
+        !derived_map_publication::matches(fd, filename, kind, before, actual, true) ||
+        !derived_map_publication::sync(fd)) return false;
+    std::vector<uint8_t> verified;
+    if (!read(fd, filename, verified, &after) || !sameGeneration(before, after) ||
+        verified != actual ||
+        !derived_map_publication::matches(fd, filename, kind, after, verified, false)) return false;
+    actual.swap(verified);
+    generation = after;
+    return true;
+}
+
 // Caller holds the shared cache mutex; actual bytes are loaded before overlay.
 inline bool refresh(int fd, const std::string& filename, Cache& state,
                     uint8_t emptyByte) {
     struct stat observed{};
     if (!owned(fd, filename, &observed)) return false;
     if (sameGeneration(observed, state.generation)) return true;
+    int locked;
+    do { locked = ::flock(fd, LOCK_SH); } while (locked != 0 && errno == EINTR);
+    if (locked != 0) return false;
+    struct Unlock { int fd; ~Unlock() { (void)::flock(fd, LOCK_UN); } } unlock{fd};
     std::vector<uint8_t> actual;
     if (!read(fd, filename, actual, &observed)) return false;
+    auto digest = derived_map_publication::digest(actual);
+    if (digest != state.acknowledgedDigest) {
+        if (!readPublishedLocked(fd, filename, state.kind, actual, observed)) return false;
+        digest = derived_map_publication::digest(actual);
+    }
     overlayPending(state, actual, emptyByte);
     state.bytes.swap(actual);
     state.generation = observed;
+    state.acknowledgedDigest = std::move(digest);
     return true;
 }
 
@@ -227,13 +276,42 @@ inline bool publish(int fd, const std::string& filename, Cache& state,
     struct Unlock { int fd; ~Unlock() { (void)::flock(fd, LOCK_UN); } } unlock{fd};
     std::vector<uint8_t> actual;
     if (!read(fd, filename, actual)) return false;
+    struct stat observed{};
+    if (derived_map_publication::digest(actual) != state.acknowledgedDigest &&
+        (!owned(fd, filename, &observed) ||
+         !derived_map_publication::matches(fd, filename, state.kind, observed, actual, false)))
+        return false;
+    auto acceptedBase = actual;
     overlayPending(state, actual, emptyByte);
-    if (!write(fd, filename, actual) || !matches(fd, filename, actual) ||
+    std::string acceptedProgress;
+    if (!write(fd, filename, actual, state.kind, std::move(acceptedBase), acceptedProgress)) {
+        if (!acceptedProgress.empty()) state.acknowledgedDigest = std::move(acceptedProgress);
+        return false;
+    }
+    if (!matches(fd, filename, actual) ||
         !owned(fd, filename, &state.generation)) return false;
     state.bytes.swap(actual);
+    state.acknowledgedDigest = derived_map_publication::digest(state.bytes);
     state.pendingMasks.clear();
     state.dirty = false;
     releasePending(state);
+    return true;
+}
+
+// Explicit engine-owned reconciliation; generic flush/snapshot remains strict.
+// A publication candidate alone is never an fsync/durability acknowledgement.
+inline bool refreshPublished(int fd, const std::string& filename, Cache& state) {
+    if (state.dirty || !owned(fd, filename)) return false;
+    int locked;
+    do { locked = ::flock(fd, LOCK_SH); } while (locked != 0 && errno == EINTR);
+    if (locked != 0) return false;
+    struct Unlock { int fd; ~Unlock() { (void)::flock(fd, LOCK_UN); } } unlock{fd};
+    std::vector<uint8_t> actual;
+    struct stat generation{};
+    if (!readPublishedLocked(fd, filename, state.kind, actual, generation)) return false;
+    state.bytes.swap(actual);
+    state.acknowledgedDigest = derived_map_publication::digest(state.bytes);
+    state.generation = generation;
     return true;
 }
 

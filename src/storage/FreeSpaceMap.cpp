@@ -96,4 +96,11 @@ bool FreeSpaceMap::quiescentForSnapshot() const {
     return !cache_->dirty && derived_map_file::matches(fd_, filename_, cache_->bytes);
 }
 
+bool FreeSpaceMap::refreshPublishedChecked() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!cache_) return false;
+    std::lock_guard<std::mutex> sharedLock(cache_->mutex);
+    return derived_map_file::refreshPublished(fd_, filename_, *cache_);
+}
+
 } // namespace dbms

@@ -46,6 +46,7 @@ public:
     // 将内存缓存刷盘
     void flush();
     bool flushChecked();
+    bool refreshPublishedChecked();
     bool quiescentForSnapshot() const;
 
 private:

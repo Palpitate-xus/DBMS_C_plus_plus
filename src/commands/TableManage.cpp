@@ -2763,6 +2763,23 @@ static bool isRelationPhysicalFileName(const std::string& name,
     static constexpr std::string_view tdeSuffix = ".tde";
     static constexpr std::string_view extentMarkerSuffix =
         ".extent_pending";
+    static constexpr std::string_view mapPublicationSuffix = ".map_publication";
+    static constexpr std::string_view temporaryReceipt = ".map_publication.tmp.";
+    const auto temporaryPosition = name.rfind(temporaryReceipt);
+    if (temporaryPosition != std::string::npos) {
+        const auto serial = name.substr(temporaryPosition + temporaryReceipt.size());
+        const auto dot = serial.find('.');
+        if (dot != std::string::npos && dot != 0 && dot + 1 < serial.size() &&
+            serial.find_first_not_of("0123456789.") == std::string::npos &&
+            serial.find('.', dot + 1) == std::string::npos)
+            return isRelationPhysicalFileName(name.substr(0, temporaryPosition), tablename);
+    }
+    if (name.size() > mapPublicationSuffix.size() &&
+        name.compare(name.size() - mapPublicationSuffix.size(), mapPublicationSuffix.size(),
+                     mapPublicationSuffix) == 0) {
+        return isRelationPhysicalFileName(
+            name.substr(0, name.size() - mapPublicationSuffix.size()), tablename);
+    }
     if (name.size() > initSuffix.size() &&
         name.compare(name.size() - initSuffix.size(), initSuffix.size(),
                      initSuffix) == 0) {
@@ -6990,9 +7007,11 @@ bool StorageEngine::flushSelectedCaches(
     };
     if (heapPages) {
         for (const auto& [key, map] : fsmCache_)
-            if (slashKeySelected(key) && map && !map->flushChecked()) ok = false;
+            if (slashKeySelected(key) && map && !map->flushChecked() &&
+                (!map->refreshPublishedChecked() || !map->flushChecked())) ok = false;
         for (const auto& [key, map] : vmCache_)
-            if (slashKeySelected(key) && map && !map->flushChecked()) ok = false;
+            if (slashKeySelected(key) && map && !map->flushChecked() &&
+                (!map->refreshPublishedChecked() || !map->flushChecked())) ok = false;
         for (const auto& [key, allocator] : pageAllocators_) {
             if (slashKeySelected(key) && allocator) {
                 const std::string tableName = key.substr(tablePrefix.size());
