@@ -3,6 +3,7 @@
 #include "access/IndexFileUtil.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <cstddef>
 #include <cstdlib>
@@ -11,6 +12,7 @@
 #include <fcntl.h>
 #include <iostream>
 #include <limits>
+#include <unordered_map>
 #include <string>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -47,6 +49,46 @@ struct DurableAllocationState {
 std::filesystem::path allocationFlushMarkerPath(
     const std::string& filename) {
     return std::filesystem::path(filename + ALLOCATION_FLUSH_MARKER_SUFFIX);
+}
+
+// An extent marker belongs to the physical file, not to one allocator's
+// buffer pool. Other live allocators must not mistake an in-flight marker
+// for failed publication (or roll it back while opening another pool).
+struct AllocationPublicationState {
+    std::mutex mutex;
+    std::atomic<const PageAllocator*> markerOwner{nullptr};
+};
+
+std::shared_ptr<AllocationPublicationState> allocationPublicationMutex(const std::string& filename) {
+    struct Registry {
+        std::mutex mutex;
+        std::unordered_map<std::string, std::shared_ptr<AllocationPublicationState>> files;
+        size_t lookups = 0;
+    };
+    // Allocator destructors can run during global-engine teardown.
+    static Registry* registry = new Registry;
+    std::error_code error;
+    auto path = std::filesystem::weakly_canonical(filename, error);
+    if (error) {
+        error.clear();
+        path = std::filesystem::absolute(filename, error).lexically_normal();
+        if (error) path = std::filesystem::path(filename).lexically_normal();
+    }
+    std::lock_guard<std::mutex> lock(registry->mutex);
+    auto& entry = registry->files[path.string()];
+    auto result = entry;
+    if (!result) {
+        result = std::make_shared<AllocationPublicationState>();
+        entry = result;
+    }
+    if (++registry->lookups % 64 == 0) {
+        for (auto it = registry->files.begin(); it != registry->files.end();) {
+            if (it->second.use_count() == 1 && !it->second->markerOwner.load())
+                it = registry->files.erase(it);
+            else ++it;
+        }
+    }
+    return result;
 }
 
 bool readExactlyAt(int fd, void* data, size_t length, off_t offset) {
@@ -342,6 +384,8 @@ PageAllocator::~PageAllocator() {
 }
 
 bool PageAllocator::open() {
+    const auto publicationMutex = allocationPublicationMutex(filename_);
+    std::lock_guard<std::mutex> publicationLock(publicationMutex->mutex);
     std::lock_guard<std::mutex> flushLock(flushMutex_);
     if (pageSize_ != PgPage::PAGE_SIZE || formatVersion_ != DATA_FILE_FORMAT_VERSION ||
         rowSize_ > std::numeric_limits<uint32_t>::max()) {
@@ -403,6 +447,8 @@ bool PageAllocator::open() {
 }
 
 void PageAllocator::close() {
+    const auto publicationMutex = allocationPublicationMutex(filename_);
+    std::lock_guard<std::mutex> publicationLock(publicationMutex->mutex);
     std::lock_guard<std::mutex> flushLock(flushMutex_);
     std::lock_guard<std::mutex> allocLock(allocMutex_);
     if (bp_) {
@@ -419,6 +465,11 @@ void PageAllocator::close() {
     }
     numPages_ = 0;
     durableHeaderPresent_ = false;
+    // The cache is now closed; a subsequent opener may recover an actual
+    // failed publication instead of rolling back underneath a live owner.
+    if (publicationMutex->markerOwner.load() == this)
+        publicationMutex->markerOwner.store(nullptr);
+    pendingAllocationFlush_ = false;
 }
 
 bool PageAllocator::isOpen() const {
@@ -528,6 +579,8 @@ uint32_t PageAllocator::numPages() const {
 
 std::optional<bool> PageAllocator::pageExistsOnDisk(uint32_t pageId) const {
     if (!isOpen() || pageSize_ == 0) return std::nullopt;
+    const auto publicationMutex = allocationPublicationMutex(filename_);
+    std::lock_guard<std::mutex> publicationLock(publicationMutex->mutex);
     std::lock_guard<std::mutex> flushLock(flushMutex_);
     // A marker owned by this live allocator means physical publication is
     // incomplete but recoverable. Report the page as not-yet-published
@@ -591,6 +644,8 @@ void PageAllocator::markDirty(uint32_t pageId) {
 
 bool PageAllocator::flush() {
     if (!isOpen()) return false;
+    const auto publicationMutex = allocationPublicationMutex(filename_);
+    std::lock_guard<std::mutex> publicationLock(publicationMutex->mutex);
     std::lock_guard<std::mutex> flushLock(flushMutex_);
     std::lock_guard<std::mutex> allocLock(allocMutex_);
     return flushWithAllocationMarker(false);
@@ -598,6 +653,8 @@ bool PageAllocator::flush() {
 
 bool PageAllocator::flushAllocationStateForCommit() {
     if (!isOpen()) return false;
+    const auto publicationMutex = allocationPublicationMutex(filename_);
+    std::lock_guard<std::mutex> publicationLock(publicationMutex->mutex);
     std::lock_guard<std::mutex> flushLock(flushMutex_);
     std::lock_guard<std::mutex> allocLock(allocMutex_);
     return flushWithAllocationMarker(true);
@@ -636,9 +693,12 @@ bool PageAllocator::prepareAllocationFlushMarker(
 
 bool PageAllocator::finishAllocationFlushMarker(
     const std::string& markerPath) {
+    const auto publication = allocationPublicationMutex(filename_);
     if (removeFileDurably(markerPath)) {
         pendingAllocationFlush_ = false;
         durableHeaderPresent_ = true;
+        if (publication->markerOwner.load() == this)
+            publication->markerOwner.store(nullptr);
         return true;
     }
     // unlink may have succeeded while only the directory fsync failed. The
@@ -650,6 +710,8 @@ bool PageAllocator::finishAllocationFlushMarker(
     if (!ec && !exists) {
         pendingAllocationFlush_ = false;
         durableHeaderPresent_ = true;
+        if (publication->markerOwner.load() == this)
+            publication->markerOwner.store(nullptr);
     }
     return false;
 }
@@ -670,11 +732,14 @@ bool PageAllocator::flushWithAllocationMarker(bool allocationOnly) {
         allocationFlushMarkerPath(filename_).string();
     std::string markerBytes;
     if (!pendingAllocationFlush_) {
-        if (!prepareAllocationFlushMarker(markerPath, markerBytes) ||
-            !index_file::writeAtomically(markerPath, markerBytes)) {
-            return false;
+        if (!prepareAllocationFlushMarker(markerPath, markerBytes)) return false;
+        const bool written = index_file::writeAtomically(markerPath, markerBytes);
+        std::error_code error;
+        if (written || std::filesystem::exists(markerPath, error) || error) {
+            pendingAllocationFlush_ = true;
+            allocationPublicationMutex(filename_)->markerOwner.store(this);
         }
-        pendingAllocationFlush_ = true;
+        if (!written) return false;
     }
 
     // BufferPool writes every dirty data page, syncs main/TDE files, and only
@@ -687,6 +752,8 @@ bool PageAllocator::flushWithAllocationMarker(bool allocationOnly) {
 bool PageAllocator::flushDirtyUnpinned(
     const std::function<bool()>& walBarrier) {
     if (!isOpen()) return false;
+    const auto publicationMutex = allocationPublicationMutex(filename_);
+    std::lock_guard<std::mutex> publicationLock(publicationMutex->mutex);
     std::lock_guard<std::mutex> flushLock(flushMutex_);
     std::lock_guard<std::mutex> allocLock(allocMutex_);
     if (!recoverPendingAllocationFlush()) return false;
@@ -710,10 +777,13 @@ bool PageAllocator::flushDirtyUnpinned(
         // changed between this durability boundary and physical writeback.
         if (!walBarrier || !walBarrier()) return false;
         if (headerDirty && !pendingAllocationFlush_) {
-            if (!index_file::writeAtomically(markerPath, markerBytes)) {
-                return false;
+            const bool written = index_file::writeAtomically(markerPath, markerBytes);
+            std::error_code error;
+            if (written || std::filesystem::exists(markerPath, error) || error) {
+                pendingAllocationFlush_ = true;
+                publicationMutex->markerOwner.store(this);
             }
-            pendingAllocationFlush_ = true;
+            if (!written) return false;
         }
         writebackStarted = true;
         return true;
@@ -727,6 +797,8 @@ bool PageAllocator::flushDirtyUnpinned(
 
 bool PageAllocator::flushPage(uint32_t pageId) {
     if (!isOpen() || pageId == 0) return false;
+    const auto publicationMutex = allocationPublicationMutex(filename_);
+    std::lock_guard<std::mutex> publicationLock(publicationMutex->mutex);
     std::lock_guard<std::mutex> flushLock(flushMutex_);
     std::lock_guard<std::mutex> allocLock(allocMutex_);
     if (!recoverPendingAllocationFlush()) return false;
@@ -738,6 +810,7 @@ bool PageAllocator::flushPage(uint32_t pageId) {
 }
 
 bool PageAllocator::recoverPendingAllocationFlush() {
+    const auto publication = allocationPublicationMutex(filename_);
     const std::filesystem::path marker =
         allocationFlushMarkerPath(filename_);
     std::error_code ec;
@@ -745,8 +818,14 @@ bool PageAllocator::recoverPendingAllocationFlush() {
     if (ec) return false;
     if (!exists) {
         pendingAllocationFlush_ = false;
+        if (publication->markerOwner.load() == this)
+            publication->markerOwner.store(nullptr);
         return true;
     }
+    // A failed flush remains retryable by its live cache. Other allocators
+    // must fail closed, not consume its marker as though the owner crashed.
+    const auto owner = publication->markerOwner.load();
+    if (owner && owner != this) return false;
     // A marker created by this live allocator protects an in-progress or
     // retryable flush. Restoring its old disk image underneath the live cache
     // would lose clean frames after a marker-cleanup failure. Only startup
