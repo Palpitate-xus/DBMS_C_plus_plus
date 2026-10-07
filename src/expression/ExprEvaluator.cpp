@@ -2038,6 +2038,12 @@ ExprValue ExprEvaluator::coerceComparison(const QueryComparisonBinding& binding,
         else if(source=="real" && target=="double precision")
             result=ExprValue(target,formatFloatingCastValue(static_cast<double>(parseRealCastValue(value))));
         else if(target=="bpchar")result.typeName=target; // implicit, unconstrained CHAR
+        else if(target=="bit") {
+            // Operator input conversion is unconstrained, not explicit
+            // ::BIT's default BIT(1). Validate through the real VARBIT
+            // codec and retain every bit, including empty/leading zeroes.
+            result=evalCast(nullptr,RowContext{},value,"bit varying");
+        }
         else result=evalCast(nullptr,RowContext{},value,target);
     }
     result.typeName=target;
