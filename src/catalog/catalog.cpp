@@ -1487,6 +1487,10 @@ void CatalogManager::bootstrapSystemTypes() {
     ensureType(28,    "xid",         4,   'b', 'U');
     ensureType(29,    "cid",         4,   'b', 'U');
     ensureType(30,    "oidvector",  -1,   'b', 'A');
+    ensureType(114,   "json",       -1,   'b', 'U');
+    ensureType(199,   "_json",      -1,   'b', 'A', 114);
+    ensureType(142,   "xml",        -1,   'b', 'U');
+    ensureType(143,   "_xml",       -1,   'b', 'A', 142);
     ensureType(600,   "point",      16,   'b', 'G');
     ensureType(601,   "lseg",       32,   'b', 'G');
     ensureType(602,   "path",       -1,   'b', 'G');
