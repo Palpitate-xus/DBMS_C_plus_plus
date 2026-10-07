@@ -26340,8 +26340,10 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
         if (opEnd == 0) continue;
         c.op = s.substr(0, opEnd);
         if (c.op == "<>") c.op = "!=";  // canonical not-equal
-        size_t sp = s.find(' ', opEnd);
-        if (sp == std::string::npos) continue;
+        const auto protectedBytes=sqlProtectedBytes(s);
+        size_t sp=opEnd;
+        while(sp<s.size() && (protectedBytes[sp] || !std::isspace(static_cast<unsigned char>(s[sp]))))++sp;
+        if(sp==s.size())continue;
         c.colName = s.substr(opEnd, sp - opEnd);
         // Computed operands are not physical column names. Preserve the
         // original RHS before literal decoding for typed comparison/coercion.
