@@ -586,68 +586,105 @@ namespace {
 class PreparedSetReturningOp final : public Operator {
     std::shared_ptr<PreparedQuery> query_;
     SelectStmt* select_;
-    const FunctionCallExpr* call_;
     PreparedQueryExecution execution_;
     RowContext outer_;
+    std::string database_;
+    PreparedSetReturningReader providerReader_;
+    std::vector<const FunctionCallExpr*> calls_;
+    std::vector<std::vector<ExprValue>> providerRows_;
     std::vector<ExprValue> values_;
     size_t position_=0;
-    bool evaluated_=false,opened_=false;
+    bool initialized_=false,qualified_=false,ended_=false,opened_=false;
     std::optional<StorageEngine::NullRowBindingState> callerNullBinding_;
 public:
     PreparedSetReturningOp(StorageEngine* engine,const std::string& database,
         std::shared_ptr<PreparedQuery> query,SelectStmt* select,const RowContext& outer,
-        PreparedChildExecutor reader,PreparedChildCursorFactory cursor,bool planRootConstants)
+        PreparedChildExecutor reader,PreparedChildCursorFactory cursor,bool planRootConstants,
+        PreparedSetReturningReader providerReader)
         :query_(std::move(query)),select_(select),
-         call_(static_cast<const FunctionCallExpr*>(select->selectList.front().expr.get())),
-         execution_(query_,engine,database),outer_(outer) {
+         execution_(query_,engine,database),outer_(outer),database_(database),providerReader_(std::move(providerReader)) {
         execution_.setQueryExecutor(std::move(reader));
         execution_.setChildCursorFactory(std::move(cursor));
-        if(planRootConstants) {
-            execution_.planStatementConstants(select_);
-            // ProjectSet evaluates the actual array argument, not its scalar
-            // routine envelope. Retain its planned clone on this same carrier.
-            execution_.planExpressionConstants(call_->args.front().get());
+        if(planRootConstants)execution_.planStatementConstants(select_);
+        for(auto& target:select_->selectList) {
+            const auto* call=dynamic_cast<const FunctionCallExpr*>(target.expr.get());
+            calls_.push_back(call && call->setReturning?call:nullptr);
+            if(calls_.back()) {
+                (void)queryHostSetReturningProvider(*call->setReturning);
+                for(const auto& argument:call->args) {
+                    if(planRootConstants)execution_.planExpressionConstants(argument.get());
+                    execution_.prepareExpression(argument.get());
+                }
+            } else execution_.prepareExpression(target.expr.get());
         }
-        execution_.prepareExpression(call_->args.front().get());
+        providerRows_.resize(calls_.size());
         execution_.prepareExpression(select_->whereClause.get());
         execution_.prepareChildCursors();
     }
     bool open() override {
         OpenInstrument instrument(this);values_.clear();position_=0;
+        for(auto& rows:providerRows_)rows.clear();
         callerNullBinding_=StorageEngine::captureNullRowBinding();
-        evaluated_=false;opened_=true;return true;
+        initialized_=false;qualified_=false;ended_=false;opened_=true;return true;
     }
     bool next(std::string& display) override {
         NextInstrument instrument(this);
         checkForQueryInterrupt();
-        if(!evaluated_) {
-            evaluated_=true;auto context=outer_;context.setParameters(query_->parameters);
+        if(ended_)return false;
+        auto context=outer_;context.setParameters(query_->parameters);
+        if(!qualified_) {
+            qualified_=true;
             if(select_->whereClause) {
                 const auto filter=execution_.evaluate(select_->whereClause.get(),context);
-                if(filter.isNull || !filter.asBool())return false;
+                if(filter.isNull || !filter.asBool()){ended_=true;return false;}
             }
-            const auto array=execution_.evaluate(call_->args.front().get(),context);
-            values_=ExprEvaluator::arrayElements(array);
-            for(const auto& cell:values_)
-                if(ExprHelper::canonicalResultTypeName(cell.typeName)!=
-                    ExprHelper::canonicalResultTypeName(call_->setReturning->elementType))
-                    throw DbError("XX000","set-returning receiver lost its declared element type");
         }
-        if(position_==values_.size())return false;
-        const auto& value=values_[position_++];
-        display=value.isNull?"NULL ":value.value+" ";instrument.emitted=true;return true;
+        bool hasSetRow=false;values_.clear();display.clear();
+        for(size_t i=0;i<calls_.size();++i) {
+            if(const auto* call=calls_[i]) {
+                if(!initialized_) {
+                    std::vector<ExprValue> arguments;
+                    for(const auto& argument:call->args)arguments.push_back(execution_.evaluate(argument.get(),context));
+                    const auto& binding=*call->setReturning;
+                    providerRows_[i]=providerReader_?providerReader_(binding,arguments):
+                        queryHostSetReturningProvider(binding).read(arguments,currentSession(),database_);
+                    for(const auto& cell:providerRows_[i])
+                        if(ExprHelper::canonicalResultTypeName(cell.typeName)!=
+                            ExprHelper::canonicalResultTypeName(binding.elementType))
+                            throw DbError("XX000","set-returning receiver lost its declared element type");
+                }
+                if(position_<providerRows_[i].size()) {
+                    hasSetRow=true;values_.push_back(providerRows_[i][position_]);
+                } else values_.emplace_back(call->setReturning->elementType,"",true);
+            } else {
+                // Ordinary targets are evaluated on each ProjectSet attempt,
+                // including its terminal attempt. WHERE false/LIMIT 0 never
+                // reaches this phase. Genuine PG18 effect controls preserve
+                // that distinction even when the SRF emits no row.
+                auto value=execution_.evaluate(select_->selectList[i].expr.get(),context);
+                if(value.typeName=="unknown")value.typeName="text";
+                values_.push_back(std::move(value));
+            }
+        }
+        initialized_=true;
+        if(!hasSetRow){ended_=true;values_.clear();return false;}
+        ++position_;
+        for(const auto& value:values_)display+=value.isNull?"NULL ":value.value+" ";
+        instrument.emitted=true;return true;
     }
     bool supportsStructuredRows() const override {return true;}
     bool lastStructuredValues(std::vector<ExprValue>& row) const override {
-        if(!position_ || position_>values_.size())return false;
-        row={values_[position_-1]};return true;
+        if(values_.empty())return false;
+        row=values_;return true;
     }
     bool lastStructuredRow(std::vector<std::string>& cells,std::vector<bool>& nulls) const override {
-        if(!position_ || position_>values_.size())return false;
-        const auto& value=values_[position_-1];cells={value.value};nulls={value.isNull};return true;
+        if(values_.empty())return false;
+        cells.clear();nulls.clear();
+        for(const auto& value:values_){cells.push_back(value.value);nulls.push_back(value.isNull);}return true;
     }
     void close() override {
-        values_.clear();position_=0;evaluated_=false;
+        values_.clear();position_=0;initialized_=false;qualified_=false;ended_=false;
+        for(auto& rows:providerRows_)rows.clear();
         std::exception_ptr failure;
         if(opened_){opened_=false;try{execution_.closeChildCursors();}catch(...){failure=std::current_exception();}}
         if(callerNullBinding_) {
@@ -658,7 +695,12 @@ public:
     }
     std::string preparedPlanNodeName() const override {return "ProjectSet";}
     std::vector<Operator*> preparedPlanChildren() const override {
-        auto plans=execution_.childPlans(call_->args.front().get());
+        std::vector<Operator*> plans;
+        for(size_t i=0;i<calls_.size();++i) {
+            const auto append=[&](const Expr* expression){auto children=execution_.childPlans(expression);plans.insert(plans.end(),children.begin(),children.end());};
+            if(calls_[i])for(const auto& argument:calls_[i]->args)append(argument.get());
+            else append(select_->selectList[i].expr.get());
+        }
         auto filters=execution_.childPlans(select_->whereClause.get());
         plans.insert(plans.end(),filters.begin(),filters.end());return plans;
     }
@@ -1012,17 +1054,19 @@ OpPtr QueryPlanner::buildPreparedUnionAllPlan(StorageEngine* engine,const std::s
 
 OpPtr QueryPlanner::buildPreparedSetReturningPlan(StorageEngine* engine,const std::string& database,
     std::shared_ptr<PreparedQuery> query,SelectStmt* select,const RowContext& outer,
-    PreparedChildExecutor reader,PreparedChildCursorFactory cursor,bool planRootConstants) {
-    if(!select || select->selectList.size()!=1)return {};
-    const auto* call=dynamic_cast<const FunctionCallExpr*>(select->selectList.front().expr.get());
-    if(!call || !call->setReturning)return {};
+    PreparedChildExecutor reader,PreparedChildCursorFactory cursor,bool planRootConstants,
+    PreparedSetReturningReader providerReader) {
+    if(!select)return {};
+    bool returning=false;
+    for(const auto& target:select->selectList)
+        if(const auto* call=dynamic_cast<const FunctionCallExpr*>(target.expr.get());call && call->setReturning)returning=true;
+    if(!returning)return {};
     if(select->command!=SqlCommand::Select || select->fromClause || select->setOp!=SetOp::None ||
         select->setOpLhs || select->setOpRhs || !select->groupBy.empty() || !select->groupByElems.empty() ||
         select->having || select->distinct || !select->distinctOn.empty() || !select->orderBy.empty() ||
         !select->windowDefs.empty() || !select->locking.empty() || select->withTies)
         throw DbError("0A000","set-returning SELECT requires additional relational lowering");
-    if(!query || call->setReturning->identity!="builtin:pg_catalog.unnest(anyarray)" ||
-        call->setReturning->kind!=QuerySetReturningBinding::Kind::Unnest || call->args.size()!=1)
+    if(!query)
         throw DbError("XX000","set-returning SELECT has no prepared query-host implementation");
     // PreparedQueryExecution validates each original child descriptor and
     // requires a real restartable provider for actual correlations. An
@@ -1039,7 +1083,7 @@ OpPtr QueryPlanner::buildPreparedSetReturningPlan(StorageEngine* engine,const st
         }
     }
     OpPtr plan=std::make_unique<PreparedSetReturningOp>(engine,database,std::move(query),select,outer,
-        std::move(reader),std::move(cursor),planRootConstants);
+        std::move(reader),std::move(cursor),planRootConstants,std::move(providerReader));
     if(select->offset)plan=std::make_unique<OffsetOp>(std::move(plan),*select->offset);
     if(select->limit)plan=std::make_unique<LimitOp>(std::move(plan),*select->limit);
     return plan;

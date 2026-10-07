@@ -6,6 +6,7 @@
 #include "common/GeometryValue.h"
 #include "expression/geometric_input.h"
 #include "common/NotificationManager.h"
+#include "common/QueryHostProvider.h"
 #include "common/sha256.h"
 #include "utils/plpgsql.h"
 #include "utils/interval.h"
@@ -31853,25 +31854,29 @@ void validatePreparedPrimitiveInput(const QueryOutputColumn& target, const Expr*
 }
 } // namespace
 
-static std::optional<QuerySetReturningBinding::Kind> preparedSetReturningRole(
+static const QueryHostSetReturningProvider* preparedSetReturningRole(
     const ExprEvaluator& evaluator,const FunctionCallExpr* function,
     const StorageEngine* engine) {
-    if(!function || evaluator.hasScalarFunction(function,const_cast<StorageEngine*>(engine)))
-        return std::nullopt;
+    if(!function)return nullptr;
     CatalogManager::QualifiedName routine;
     const auto spelling=function->schema.empty()?function->funcName:function->schema+"."+function->funcName;
     if(!CatalogManager::parseQualifiedName(spelling,routine,true) ||
-       (!routine.schema.empty() && routine.schema!="pg_catalog"))return std::nullopt;
-    // This is the real typed provider registry shared with binding, not a
-    // query spelling or a list of functions to bypass after an exception.
-    if(routine.name=="unnest")return QuerySetReturningBinding::Kind::Unnest;
-    return std::nullopt;
+       (!routine.schema.empty() && routine.schema!="pg_catalog"))return nullptr;
+    const auto* provider=queryHostSetReturningProvider(routine.name);
+    if(!provider)return nullptr;
+    // The exact fixed builtin signature in implicit pg_catalog wins over a
+    // same-arity public shadow. Explicit public calls are scalar resolution.
+    // Polymorphic provider inputs retain existing scalar overload resolution.
+    if(provider->fixedSignature && function->args.size()==provider->arity && function->namedArgs.empty())
+        return provider;
+    if(evaluator.hasScalarFunction(function,const_cast<StorageEngine*>(engine)))return nullptr;
+    return provider;
 }
 
 bool StorageEngine::ownsPreparedSetReturningCall(const std::string& dbname,
     const FunctionCallExpr* function) const {
     ExprEvaluator evaluator;evaluator.setCurrentDB(dbname);
-    return preparedSetReturningRole(evaluator,function,this).has_value();
+    return preparedSetReturningRole(evaluator,function,this)!=nullptr;
 }
 
 PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
@@ -31989,16 +31994,14 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
             const auto role=preparedSetReturningRole(evaluator,function,this);
             if(!role)return std::nullopt;
             const auto spelling=function->schema.empty()?function->funcName:function->schema+"."+function->funcName;
-            if(function->args.size()!=1 || !function->namedArgs.empty() || function->hasOver ||
+            if(function->args.size()!=role->arity || !function->namedArgs.empty() || function->hasOver ||
                 function->filter || function->distinct || !function->orderBy.empty())
                 throw DbError("42883","function does not exist: "+spelling);
-            const auto input=ExprHelper::canonicalResultTypeName(ExprHelper::inferParsedInputType(
-                function->args.front().get(),{},dbname,const_cast<StorageEngine*>(this)));
-            if(input=="unknown")throw DbError("42725","function unnest(unknown) is not unique");
-            if(input.size()<2 || input.compare(input.size()-2,2,"[]")!=0)
-                throw DbError("42883","function unnest("+input+") does not exist");
-            return QuerySetReturningBinding{*role,
-                "builtin:pg_catalog.unnest(anyarray)",input.substr(0,input.size()-2)};
+            std::vector<std::string> inputs;
+            for(const auto& argument:function->args)
+                inputs.push_back(ExprHelper::canonicalResultTypeName(ExprHelper::inferParsedInputType(
+                    argument.get(),{},dbname,const_cast<StorageEngine*>(this))));
+            return QuerySetReturningBinding{role->kind,role->identity,role->resultType(inputs)};
         };
         metadata.functionType = [&](const FunctionCallExpr* function) {
             CatalogManager::QualifiedName routine;

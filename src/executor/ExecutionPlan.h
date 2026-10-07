@@ -13,6 +13,7 @@
 #include "parser/query_binding.h"
 #include "common/DbError.h"
 #include "expression/prepared_query_execution.h"
+#include "common/QueryHostProvider.h"
 
 namespace dbms {
 
@@ -1349,7 +1350,7 @@ public:
     static OpPtr buildPreparedSetReturningPlan(StorageEngine*,const std::string&,
         std::shared_ptr<PreparedQuery>,SelectStmt*,const RowContext& = {},
         PreparedChildExecutor = {},PreparedChildCursorFactory = {},
-        bool planRootConstants = false);
+        bool planRootConstants = false, PreparedSetReturningReader providerReader = {});
     // Build operator tree for SELECT * FROM t WHERE ... ORDER BY ... LIMIT ...
     static OpPtr buildSelectPlan(StorageEngine* engine, const PlanContext& ctx);
 

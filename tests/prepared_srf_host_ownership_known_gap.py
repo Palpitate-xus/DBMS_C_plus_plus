@@ -2,6 +2,7 @@
 """Whole SRF host/limit/unknown-input diagnostic; retained gaps are not skips."""
 import importlib.util
 import socket
+import struct
 import sys
 from pathlib import Path
 
@@ -30,6 +31,36 @@ def main():
                 if actual != expected: failures.append((sql,role,actual,expected))
         if state and (result[0] or result[4] is not None): failures.append((sql,'partial success',result))
 
+    def described(sql, rows, types, labels):
+        statement=b'host_description'; portal=b'host_portal'
+        parse=statement+b'\0'+sql.encode()+b'\0'+struct.pack('!H',0)
+        bind=portal+b'\0'+statement+b'\0'+struct.pack('!HHH',0,0,0)
+        sock.sendall(c.typed(b'P',parse)+c.typed(b'D',b'S'+statement+b'\0')+
+            c.typed(b'B',bind)+c.typed(b'D',b'P'+portal+b'\0')+
+            c.typed(b'E',portal+b'\0'+struct.pack('!I',0))+c.typed(b'S'))
+        messages=c.read_until_ready(sock)
+        descriptions=[c.row_description_fields([message]) for message in messages if message[0]==b'T']
+        print('SRF_HOST_DESCRIBE',sql,descriptions,c.data_row_values(messages),flush=True)
+        if len(descriptions)!=2: failures.append((sql,'two descriptions',descriptions))
+        for fields in descriptions:
+            if [field[3] for field in fields]!=types or [field[0].decode() for field in fields]!=labels:
+                failures.append((sql,'descriptor',fields,types,labels))
+        wanted=[[None if cell is None else cell.encode() for cell in row] for row in rows]
+        if c.data_row_values(messages)!=wanted or any(kind==b'E' for kind,_ in messages):
+            failures.append((sql,'extended execution',messages))
+        sock.sendall(c.typed(b'C',b'P'+portal+b'\0')+c.typed(b'C',b'S'+statement+b'\0')+c.typed(b'S'))
+        c.read_until_ready(sock)
+
+    def describe_error(sql,state):
+        statement=b'host_bad_description'
+        parse=statement+b'\0'+sql.encode()+b'\0'+struct.pack('!H',0)
+        sock.sendall(c.typed(b'P',parse)+c.typed(b'D',b'S'+statement+b'\0')+c.typed(b'S'))
+        messages=c.read_until_ready(sock)
+        result=r.decode_wire_result(messages,include_types=True)
+        print('SRF_HOST_DESCRIBE_ERROR',sql,result,flush=True)
+        if result[1]!=state or result[0] or any(kind==b'T' for kind,_ in messages):
+            failures.append((sql,'pure descriptor error',result,state))
+
     channels = "SELECT pg_listening_channels();"
     try:
         query(channels,[],[25],['pg_listening_channels'])
@@ -53,6 +84,43 @@ def main():
         query("SELECT currval('host_effects');",state='55000')
         query("SELECT upper('x');",[['X']],[25],['upper'])
         query('SELECT 1;',[['1']],[23])
+        query('SELECT pg_catalog.pg_listening_channels();',[],[25],['pg_listening_channels'])
+        query('SELECT "pg_catalog"."pg_listening_channels"();',[],[25],['pg_listening_channels'])
+        query('SELECT pg_listening_channels(),pg_catalog.upper(\'x\') AS marker;',[],[25,25],['pg_listening_channels','marker'])
+        query("SELECT pg_listening_channels(),nextval('host_effects');",[],[25,20],['pg_listening_channels','nextval'])
+        # ProjectSet evaluates an ordinary target on its terminal attempt
+        # too, even when this otherwise-qualified input emits no SRF row.
+        query("SELECT currval('host_effects');",[['1']],[20],['currval'])
+        for suffix in ['', ' WHERE false', ' LIMIT 0']:
+            query('SELECT public.pg_listening_channels()'+suffix+';',state='42883')
+            query("SELECT nextval('host_effects'),pg_listening_channels(),missing_host_projection()"+suffix+';',state='42883')
+            query("SELECT pg_listening_channels(missing_host_argument(nextval('host_effects')))"+suffix+';',state='42883')
+        query('SELECT pg_listening_channels(1);',state='42883')
+        query('SELECT "Pg_listening_channels"();',state='42883')
+        query("SELECT currval('host_effects');",[['1']],[20],['currval'])
+        describe_error("SELECT nextval('host_effects'),pg_listening_channels(),missing_host_projection() LIMIT 0",'42883')
+        describe_error("SELECT pg_listening_channels(missing_host_argument(nextval('host_effects'))) LIMIT 0",'42883')
+        describe_error('SELECT pg_listening_channels(1) LIMIT 0','42883')
+        query("SELECT currval('host_effects');",[['1']],[20],['currval'])
+        query('LISTEN host_alpha;'); query('LISTEN host_zeta;')
+        for suffix in [' WHERE false', ' LIMIT 0']:
+            sql="SELECT pg_catalog.pg_listening_channels(),nextval('host_effects') AS marker"+suffix
+            query(sql,[],[25,20],['pg_listening_channels','marker'])
+            described(sql,[],[25,20],['pg_listening_channels','marker'])
+        query("SELECT currval('host_effects');",[['1']],[20],['currval'])
+        query("SELECT pg_catalog.pg_listening_channels(),pg_catalog.upper('x') AS marker;",
+            [['host_alpha','X'],['host_zeta','X']],[25,25],['pg_listening_channels','marker'])
+        query('SELECT unnest(ARRAY[1,2,3]),pg_listening_channels();',
+            [['1','host_alpha'],['2','host_zeta'],['3',None]],[23,25],['unnest','pg_listening_channels'])
+        query("SELECT pg_listening_channels(),nextval('host_effects');",
+            [['host_alpha','2'],['host_zeta','3']],[25,20],['pg_listening_channels','nextval'])
+        query("SELECT currval('host_effects');",[['4']],[20],['currval'])
+        described('SELECT pg_catalog.pg_listening_channels() LIMIT 0',[],[25],['pg_listening_channels'])
+        query('BEGIN;')
+        query("CREATE FUNCTION pg_listening_channels() RETURNS TEXT LANGUAGE plpgsql AS $$BEGIN RETURN 'public scalar'; END$$")
+        query('SELECT public.pg_listening_channels();',[['public scalar']],[25],['pg_listening_channels'])
+        query(channels,[['host_alpha'],['host_zeta']],[25],['pg_listening_channels'])
+        query('ROLLBACK;')
         assert not failures, failures
         print('[PREPARED SRF HOST OWNERSHIP '+('PG18.6' if reference else 'PROTOCOL')+'] passed',flush=True)
     finally:

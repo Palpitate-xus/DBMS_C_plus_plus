@@ -29,7 +29,9 @@ int main() {
     assert(owns("pg_catalog.unnest(ARRAY[1,2])"));
     assert(owns("unnest(NULL)"));
     assert(owns("unnest(missing_host_function())"));
-    assert(!owns("pg_listening_channels()"));
+    assert(owns("pg_listening_channels()"));
+    assert(owns("pg_catalog.pg_listening_channels()"));
+    assert(!owns("public.pg_listening_channels()"));
     assert(!owns("upper('x')"));
     assert(!owns("missing_host_function(nextval('host_effects'))"));
     assert(!owns("\"Unnest\"(ARRAY[1,2])"));

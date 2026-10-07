@@ -69,6 +69,8 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/physical_array_element_descriptor_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/routine_array_signature_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/qualified_routine_frontend_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/prepared_srf_unknown_input_known_gap.py)
+    DBMS_E2E_TESTS+=(tests/prepared_srf_host_ownership_known_gap.py)
     DBMS_E2E_TESTS+=(tests/physical_column_origin_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/view_trigger_typed_values_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/table_extract_quoted_operand_protocol_e2e_test.py)

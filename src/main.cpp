@@ -20598,15 +20598,17 @@ static bool handlePreparedMultirowQuery(const string& raw,Session& session,bool&
     // Only a provider actually owned by this receiver may request whole
     // binding here. Other scalar/session host functions retain their own
     // consumer; no analysis exception is swallowed to discover ownership.
-    const auto* candidate=!select->fromClause && select->selectList.size()==1
-        ? dynamic_cast<const dbms::FunctionCallExpr*>(select->selectList.front().expr.get()) : nullptr;
-    const bool possibleSet=candidate && g_engine.ownsPreparedSetReturningCall(session.currentDB,candidate);
+    const bool possibleSet=!select->fromClause && any_of(select->selectList.begin(),select->selectList.end(),[&](const auto& target) {
+        const auto* candidate=dynamic_cast<const dbms::FunctionCallExpr*>(target.expr.get());
+        return candidate && g_engine.ownsPreparedSetReturningCall(session.currentDB,candidate);
+    });
     if(!quantified && !possibleSet)return false;
     auto query=make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(session.currentDB,raw));
     const auto* bound=static_cast<const dbms::SelectStmt*>(query->ast.get());
-    const auto* call=bound->selectList.size()==1 ?
-        dynamic_cast<const dbms::FunctionCallExpr*>(bound->selectList.front().expr.get()) : nullptr;
-    const bool setReturning=call && call->setReturning.has_value();
+    const bool setReturning=any_of(bound->selectList.begin(),bound->selectList.end(),[](const auto& target) {
+        const auto* call=dynamic_cast<const dbms::FunctionCallExpr*>(target.expr.get());
+        return call && call->setReturning.has_value();
+    });
     if(!quantified && !setReturning)return false;
     PreparedWithDmlRuntime runtime(session,query);
     auto plan=runtime.queryPlan();
