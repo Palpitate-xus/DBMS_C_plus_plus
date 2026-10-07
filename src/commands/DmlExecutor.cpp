@@ -15,6 +15,7 @@
 #include "expression/ExprEvaluator.h"
 #include "expression/expr_helper.h"
 #include "expression/prepared_query_execution.h"
+#include "executor/ExecutionPlan.h"
 #include "parser/parser.h"
 #include "permissions.h"
 #include "types/numeric.h"
@@ -5241,7 +5242,7 @@ class BoundDmlExecution {
     const PreparedQuery::SourceRange* target_ = nullptr;
     TableSchema table_;
     std::string physical_;
-    PreparedQueryExecution execution_;
+    std::shared_ptr<PreparedQueryExecution> execution_;
     const std::vector<SelectItem>* returning_ = nullptr;
     std::vector<std::pair<const PreparedQuery::SourceRange*,ReturningProjection::Source>> transitionSources_;
     std::map<const Expr*,std::vector<std::pair<size_t,size_t>>> returningStarCells_;
@@ -5290,13 +5291,13 @@ class BoundDmlExecution {
         }
     }
     RowContext context(const SqlRow& values,const RowContext* source=nullptr) const {
-        auto row=source?*source:execution_.context();std::vector<ExprValue> cells;
+        auto row=source?*source:execution_->context();std::vector<ExprValue> cells;
         for(const auto& column:target_->columns) {
             const auto found=values.find(column.name);
             if(found==values.end())throw DbError("XX000","DML row has no bound target column: "+column.name);
             cells.emplace_back(column.type,found->second.value_or(""),!found->second);
         }
-        execution_.setSourceRow(row,target_->ordinal,cells);return row;
+        execution_->setSourceRow(row,target_->ordinal,cells);return row;
     }
     static bool returningStar(const Expr* value) {
         const auto* column=dynamic_cast<const ColumnRefExpr*>(value);
@@ -5317,13 +5318,13 @@ class BoundDmlExecution {
                 const bool isNull=found==values.end() || !found->second;
                 cells.emplace_back(column.type,isNull?std::string{}:*found->second,isNull);
             }
-            execution_.setSourceRow(row,source.ordinal,cells);
+            execution_->setSourceRow(row,source.ordinal,cells);
         }
         return row;
     }
     bool matches(const Expr* where,const SqlRow& values) const {
         if(!where)return true;
-        const auto value=execution_.evaluate(where,context(values));
+        const auto value=execution_->evaluate(where,context(values));
         return !value.isNull && value.asBool();
     }
     DmlResult result(const std::vector<ReturningRowImage>& rows,const std::string& command,size_t count,
@@ -5342,7 +5343,7 @@ class BoundDmlExecution {
                 if(returningStar(item.expr.get())) {
                     for(const auto& cell:returningStarCells_.at(item.expr.get()))
                         values.push_back(row.boundColumn(cell.first,cell.second));
-                } else values.push_back(execution_.evaluate(item.expr.get(),row));
+                } else values.push_back(execution_->evaluate(item.expr.get(),row));
             }
             if(values.size()!=descriptor.size())throw DbError("XX000","DML RETURNING width differs from prepared descriptor");
             std::vector<std::string> cells;std::vector<bool> nulls;
@@ -5355,10 +5356,13 @@ public:
     BoundDmlExecution(Stmt* statement,Session& session,std::shared_ptr<PreparedQuery> query,
                       PreparedDmlSourceFactory sourceFactory = {},
                       PreparedChildCursorFactory childCursorFactory = {},
-                      bool planRootConstants = false)
-        :statement_(statement),session_(session),query_(std::move(query)),execution_(query_,&g_engine,session.currentDB) {
+                      bool planRootConstants = false,bool deferWriteChecks = false,
+                      std::function<PreparedDmlSourceFactory(std::weak_ptr<PreparedQueryExecution>)> sources = {})
+        :statement_(statement),session_(session),query_(std::move(query)),
+         execution_(std::make_shared<PreparedQueryExecution>(query_,&g_engine,session.currentDB)) {
+        if(sources)sourceFactory=sources(execution_);
         ownsChildCursors_=static_cast<bool>(childCursorFactory);
-        execution_.setChildCursorFactory(std::move(childCursorFactory));
+        execution_->setChildCursorFactory(std::move(childCursorFactory));
         for(const auto& range:query_->sourceRanges)if(range.owner==statement_ && !range.source && !range.mergedUsing && !range.relationName.empty()) {
             if(target_)throw DbError("XX000","prepared DML has multiple target occurrences");
             target_=&range;
@@ -5369,7 +5373,8 @@ public:
         const bool temporary=target_->relationSchema==sessionTempSchemaName(session_) || target_->relationSchema=="pg_temp";
         physical_=temporary?tempTablePrefix(session_,name):target_->relationSchema=="public"?name:target_->relationSchema+"__"+name;
         if(temporary)g_engine.noteTemporaryRelationAccess(session_.currentDB,physical_);
-        if(g_engine.isReadOnly() && !temporary)throw DbError("25006","cannot execute DML in a read-only transaction");
+        if(!deferWriteChecks && g_engine.isReadOnly() && !temporary)
+            throw DbError("25006","cannot execute DML in a read-only transaction");
         rejectPreparedMaterializedTarget(statement_,session_,query_);
         table_=g_engine.getTableSchema(session_.currentDB,physical_);
         if(!table_.len || table_.len!=target_->columns.size())throw DbError("0A000","prepared DML target requires additional view/virtual lowering");
@@ -5389,7 +5394,7 @@ public:
             if(!update->whereCurrentOf.empty())throw DbError("0A000","prepared WITH UPDATE cursor requires additional lowering");
             if(update->fromClause) {
                 if(!sourceFactory)throw DbError("0A000","prepared WITH UPDATE FROM requires an actual source provider");
-                source_=sourceFactory(statement_,update->fromClause.get(),execution_.context());hasSource_=true;
+                source_=sourceFactory(statement_,update->fromClause.get(),execution_->context());hasSource_=true;
             }
             predicate(update->whereClause.get());
             for(auto& assignment:update->setClauses) {
@@ -5402,7 +5407,7 @@ public:
             if(!remove->whereCurrentOf.empty())throw DbError("0A000","prepared WITH DELETE cursor requires additional lowering");
             if(remove->usingClause) {
                 if(!sourceFactory)throw DbError("0A000","prepared WITH DELETE USING requires an actual source provider");
-                source_=sourceFactory(statement_,remove->usingClause.get(),execution_.context());hasSource_=true;
+                source_=sourceFactory(statement_,remove->usingClause.get(),execution_->context());hasSource_=true;
             }
             predicate(remove->whereClause.get());
         } else throw DbError("0A000","prepared WITH primary DML is not lowered");
@@ -5442,7 +5447,7 @@ public:
             };
             append(*source,star!=nullptr);
             if(!star && hasSource_)for(const auto ordinal:source_.occurrences)
-                append(execution_.sourceRange(ordinal),false);
+                append(execution_->sourceRange(ordinal),false);
             returningStarCells_.emplace(item.expr.get(),std::move(cells));
         }
         // Keep original assignments until metadata has checked every value,
@@ -5460,21 +5465,33 @@ public:
         // Whole metadata/privileges/duplicate targets precede pure planning.
         // Plan this actual execution-owned carrier before callback binding
         // rewrites routine identities, then consume these same compiled roots.
-        if(planRootConstants)execution_.planStatementConstants(statement_);
-        for(auto* value:expressions_)execution_.prepareExpression(value);
+        if(planRootConstants)execution_->planStatementConstants(statement_);
+        for(auto* value:expressions_)execution_->prepareExpression(value);
     }
     DmlResult run(PreparedChildExecutor reader) {
-        execution_.setQueryExecutor(reader);
+        const bool temporary=target_->relationSchema==sessionTempSchemaName(session_) || target_->relationSchema=="pg_temp";
+        if(g_engine.isReadOnly() && !temporary)throw DbError("25006","cannot execute DML in a read-only transaction");
+        execution_->setQueryExecutor(reader);
         try {
-            if(ownsChildCursors_)execution_.prepareChildCursors();
+            if(ownsChildCursors_)execution_->prepareChildCursors();
             auto output=executeRows(reader);
-            execution_.closeChildCursors();
+            execution_->closeChildCursors();
             return output;
         } catch(...) {
             const auto primary=std::current_exception();
-            try{execution_.closeChildCursors();}catch(...){}
+            try{execution_->closeChildCursors();}catch(...){}
             std::rethrow_exception(primary);
         }
+    }
+    std::weak_ptr<PreparedQueryExecution> carrier() const {return execution_;}
+    void preparePlanChildren() {if(ownsChildCursors_)execution_->prepareChildCursors();}
+    void closePlanChildren() {execution_->closeChildCursors();}
+    std::vector<Operator*> planChildren() const {return execution_->childPlans();}
+    std::map<std::string,std::string> planAttributes() const {
+        const auto operation=dynamic_cast<const InsertStmt*>(statement_)?"Insert":
+            dynamic_cast<const UpdateStmt*>(statement_)?"Update":"Delete";
+        return {{"operation",operation},{"schema",target_->relationSchema},
+            {"relation",target_->relationName},{"alias",target_->name}};
     }
 private:
     DmlResult executeRows(const PreparedChildExecutor& reader) {
@@ -5496,7 +5513,7 @@ private:
                 SqlRow row;
                 for(size_t i=0;i<expressions.size();++i) {
                     if(defaultValue(expressions[i].get()))continue;
-                    const auto value=execution_.evaluate(expressions[i].get(),execution_.context());
+                    const auto value=execution_->evaluate(expressions[i].get(),execution_->context());
                     row[columns.at(i)]=value.isNull?SqlCell{}:SqlCell{value.value};
                 }
                 write(row);
@@ -5504,7 +5521,7 @@ private:
             if(insert->selectSource) {
                 // INSERT SELECT retains the full-row source contract; SQL
                 // scalar/quantified value children use the paired cursor.
-                const auto rows=reader(insert->selectSource.get(),execution_.context(),0);
+                const auto rows=reader(insert->selectSource.get(),execution_->context(),0);
                 for(const auto& values:rows) {
                     if(values.size()>columns.size())throw DbError("XX000","INSERT SELECT lost its prepared width");
                     SqlRow row;
@@ -5528,17 +5545,17 @@ private:
             StorageEngine::SqlMutationCallbacks callbacks;
             callbacks.matches=[&](int64_t rid,const SqlRow& old) {
                 if(oneTimeQualification) {
-                    const auto value=execution_.evaluate(where,context(old));
+                    const auto value=execution_->evaluate(where,context(old));
                     if(value.isNull || !value.asBool())return false;
                 }
                 bool matched=false;
                 RowContext source;
                 for(size_t i=0;source_.read(i,source);++i) {
                     auto row=context(old,&source);
-                    if(where && !oneTimeQualification) {const auto condition=execution_.evaluate(where,row);if(condition.isNull || !condition.asBool())continue;}
+                    if(where && !oneTimeQualification) {const auto condition=execution_->evaluate(where,row);if(condition.isNull || !condition.asBool())continue;}
                     SqlRow values;
                     if(update)for(const auto& assignment:update->setClauses) {
-                        const auto value=execution_.evaluate(assignment.second.get(),row);
+                        const auto value=execution_->evaluate(assignment.second.get(),row);
                         values[identifier(assignment.first)]=value.isNull?SqlCell{}:SqlCell{value.value};
                     }
                     // Multiple eligible join tuples still evaluate their
@@ -5573,7 +5590,7 @@ private:
             const auto resolver=[&](const SqlRow& old,SqlRow& values) {
                 const auto row=context(old);
                 for(const auto& assignment:update->setClauses) {
-                    const auto value=execution_.evaluate(assignment.second.get(),row);
+                    const auto value=execution_->evaluate(assignment.second.get(),row);
                     values[identifier(assignment.first)]=value.isNull?SqlCell{}:SqlCell{value.value};
                 }
                 return true;
@@ -5591,6 +5608,171 @@ private:
     }
 };
 } // namespace
+
+namespace {
+struct PreparedDmlSessionScope {
+    Session* previous=currentSession();
+    explicit PreparedDmlSessionScope(Session& session){setCurrentSession(&session);}
+    ~PreparedDmlSessionScope(){setCurrentSession(previous);}
+};
+class MutationContextSourceOp final : public Operator {
+    PreparedSourceContextsOp::Reader reader_;
+    RowContext row_;
+    size_t position_=0;
+    bool closed_=false;
+public:
+    explicit MutationContextSourceOp(PreparedSourceContextsOp::Reader reader):reader_(std::move(reader)) {}
+    bool open() override {
+        OpenInstrument instrument(this);clearError();
+        if(closed_)throw DbError("XX000","closed mutation source cannot reopen");
+        position_=0;row_=RowContext{};return true;
+    }
+    bool next(std::string& display) override {
+        NextInstrument instrument(this);
+        if(closed_)throw DbError("XX000","mutation source is closed");
+        if(!reader_(position_,row_))return false;
+        ++position_;display.clear();instrument.emitted=true;return true;
+    }
+    bool lastPreparedContext(RowContext& row) const override {
+        if(!position_)return false;
+        row=row_;return true;
+    }
+    bool supportsPreparedContexts() const override {return true;}
+    void close() override {closed_=true;row_=RowContext{};reader_={};}
+    std::string preparedPlanNodeName() const override {return "TypedSource";}
+};
+// One genuine source graph supplies positions to several target candidates.
+// Retain typed source contexts and real next() counters while preserving the
+// original source's random-index reuse contract; no source is opened by bind.
+struct MutationSourcePlan {
+    OpPtr plan;
+    std::vector<RowContext> rows;
+    bool opened=false,complete=false;
+    bool read(size_t index,RowContext& row) {
+        while(!complete && rows.size()<=index) {
+            if(!opened){opened=true;if(!plan->open())throw DbError("XX000","mutation source failed to open");}
+            std::string display;
+            if(!plan->next(display)) {
+                if(plan->hasError())throw DbError("XX000",plan->errorMessage());
+                plan->close();complete=true;opened=false;break;
+            }
+            RowContext value;
+            if(!plan->lastPreparedContext(value))throw DbError("XX000","mutation source lost its typed context");
+            rows.push_back(std::move(value));
+        }
+        if(index>=rows.size())return false;
+        row=rows[index];return true;
+    }
+    void close() {
+        if(opened){opened=false;plan->close();}
+    }
+};
+class PreparedDmlMutationOp final : public Operator {
+    Session& session_;
+    std::unique_ptr<BoundDmlExecution> execution_;
+    PreparedChildExecutor reader_;
+    std::vector<std::shared_ptr<MutationSourcePlan>> sources_;
+    DmlResult result_;
+    std::function<void()> finishStatement_;
+    std::function<std::vector<Operator*>()> extraChildren_;
+    bool ownsAtomicUnit_;
+    size_t position_=0;
+    bool opened_=false,executed_=false,closed_=false;
+public:
+    PreparedDmlMutationOp(Stmt* statement,Session& session,std::shared_ptr<PreparedQuery> query,
+        PreparedChildExecutor reader,PreparedDmlSourceFactory sourceFactory,
+        PreparedChildCursorFactory cursorFactory,bool rootPlanning,bool atomic,
+        PreparedDmlPlanHooks hooks)
+        :session_(session),reader_(std::move(reader)),finishStatement_(std::move(hooks.finishStatement)),
+         extraChildren_(std::move(hooks.extraChildren)),ownsAtomicUnit_(atomic) {
+        const auto wrapSource=[this](PreparedDmlSourceFactory suppliedFactory) {
+            if(!suppliedFactory)return PreparedDmlSourceFactory{};
+            return PreparedDmlSourceFactory([this,suppliedFactory](const Stmt* owner,const FromItem* source,const RowContext& outer) {
+            auto supplied=suppliedFactory(owner,source,outer);
+            auto state=std::make_shared<MutationSourcePlan>();
+            state->plan=std::make_unique<MutationContextSourceOp>(std::move(supplied.read));
+            sources_.push_back(state);
+            supplied.read=[state](size_t index,RowContext& row){return state->read(index,row);};
+            return supplied;
+            });
+        };
+        std::function<PreparedDmlSourceFactory(std::weak_ptr<PreparedQueryExecution>)> sourceOwner;
+        if(hooks.sources)sourceOwner=[wrapSource,factory=std::move(hooks.sources)](std::weak_ptr<PreparedQueryExecution> owner){
+            return wrapSource(factory(std::move(owner)));
+        };
+        execution_=std::make_unique<BoundDmlExecution>(statement,session,std::move(query),
+            wrapSource(std::move(sourceFactory)),std::move(cursorFactory),rootPlanning,true,std::move(sourceOwner));
+        if(hooks.reader)reader_=hooks.reader(execution_->carrier());
+        execution_->preparePlanChildren();
+    }
+    ~PreparedDmlMutationOp() override {try{close();}catch(...) {}}
+    bool open() override {
+        OpenInstrument instrument(this);clearError();
+        if(opened_ || executed_ || closed_)throw DbError("XX000","a mutation plan cannot execute twice");
+        opened_=true;return true;
+    }
+    bool next(std::string& row) override {
+        NextInstrument instrument(this);
+        PreparedDmlSessionScope sessionScope(session_);
+        if(!opened_ || closed_)throw DbError("XX000","mutation plan is not open");
+        if(!executed_) {
+            // Mark before executing: an exception/retry cannot repeat effects.
+            executed_=true;
+            const auto command=[&] {
+                auto result=execution_->run(reader_);
+                if(finishStatement_)finishStatement_();
+                return result;
+            };
+            result_=ownsAtomicUnit_?executeAtomicDmlUnit(session_,command):command();
+        }
+        if(position_>=result_.rows.size())return false;
+        row.clear();
+        for(size_t i=0;i<result_.rows[position_].size();++i)
+            row+=result_.nulls[position_][i]?"NULL ":result_.rows[position_][i]+" ";
+        ++position_;instrument.emitted=true;return true;
+    }
+    bool supportsStructuredRows() const override {return true;}
+    bool lastStructuredRow(std::vector<std::string>& cells,std::vector<bool>& nulls) const override {
+        if(!position_)return false;
+        cells=result_.rows.at(position_-1);nulls=result_.nulls.at(position_-1);return true;
+    }
+    bool lastStructuredValues(std::vector<ExprValue>& cells) const override {
+        if(!position_)return false;
+        cells.clear();const auto& row=result_.rows.at(position_-1);
+        for(size_t i=0;i<row.size();++i)cells.emplace_back(result_.columnTypes.at(i),row[i],result_.nulls.at(position_-1).at(i));
+        return true;
+    }
+    bool lastColumnIsNull(size_t ordinal) const override {
+        return position_ && result_.nulls.at(position_-1).at(ordinal);
+    }
+    void close() override {
+        if(closed_)return;
+        closed_=true;opened_=false;std::exception_ptr failure;
+        try{if(execution_)execution_->closePlanChildren();}catch(...){failure=std::current_exception();}
+        for(auto& source:sources_)try{source->close();}catch(...){if(!failure)failure=std::current_exception();}
+        if(failure)std::rethrow_exception(failure);
+    }
+    std::string preparedPlanNodeName() const override {return "ModifyTable";}
+    std::map<std::string,std::string> preparedPlanAttributes() const override {return execution_->planAttributes();}
+    std::vector<Operator*> preparedPlanChildren() const override {
+        auto plans=execution_->planChildren();
+        for(const auto& source:sources_)plans.push_back(source->plan.get());
+        if(extraChildren_) {
+            auto children=extraChildren_();plans.insert(plans.end(),children.begin(),children.end());
+        }
+        return plans;
+    }
+};
+} // namespace
+
+std::unique_ptr<Operator> buildBoundDmlPlan(Stmt* statement,Session& session,
+    const std::shared_ptr<PreparedQuery>& query,PreparedChildExecutor reader,
+    PreparedDmlSourceFactory sourceFactory,PreparedChildCursorFactory cursorFactory,
+    bool rootPlanning,bool ownsAtomicUnit,PreparedDmlPlanHooks hooks) {
+    PreparedDmlSessionScope sessionScope(session);
+    return std::make_unique<PreparedDmlMutationOp>(statement,session,query,std::move(reader),
+        std::move(sourceFactory),std::move(cursorFactory),rootPlanning,ownsAtomicUnit,std::move(hooks));
+}
 
 void prepareBoundDml(Stmt* statement,Session& session,const std::shared_ptr<PreparedQuery>& query,
     PreparedDmlSourceFactory sourceFactory,PreparedChildCursorFactory childCursorFactory,bool planRootConstants) {

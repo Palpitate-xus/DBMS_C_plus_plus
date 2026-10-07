@@ -6517,7 +6517,18 @@ static CostEstimate explainOp(Operator* op, int indent,
             est.rows += estimate.rows; est.cost += estimate.cost;
         }
         est.cost += est.rows * 0.1;
-        out += prefix + name + costRowsStr(est, opts) + "\n";
+        out += prefix + name;
+        const auto attributes=op->preparedPlanAttributes();
+        if(!attributes.empty()) {
+            out += " (";bool first=true;
+            for(const auto& field:attributes) {
+                if(!first)out+=", ";
+                first=false;
+                out+=field.first+"="+field.second;
+            }
+            out += ")";
+        }
+        out += costRowsStr(est, opts) + "\n";
     } else if (auto* pscan = dynamic_cast<ParallelTableScanOp*>(op)) {
         double rows = static_cast<double>(plannerRowEstimate(
             engine, dbname, pscan->tableName()));
@@ -6862,6 +6873,8 @@ static std::pair<std::string, CostEstimate> explainOpJson(Operator* op,
         }
         est.cost += est.rows * 0.1;
         json += "\"nodeType\":\"" + jsonEscape(name) + "\"," + jsonCostRows(est, opts);
+        for(const auto& field:op->preparedPlanAttributes())
+            json += "\""+jsonEscape(field.first)+"\":\""+jsonEscape(field.second)+"\",";
         json += "\"children\":[" + childJson + "]";
     } else if (auto* pscan = dynamic_cast<ParallelTableScanOp*>(op)) {
         double rows = static_cast<double>(plannerRowEstimate(

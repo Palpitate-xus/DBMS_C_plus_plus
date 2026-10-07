@@ -18,6 +18,7 @@
 #include <vector>
 
 namespace dbms {
+class Operator;
 
 struct DmlResult {
     bool available = false;
@@ -85,6 +86,25 @@ DmlResult executeBoundDml(Stmt* statement, Session& session,
     bool planRootConstants = false);
 DmlResult executeAtomicDmlUnit(Session& session,
     const std::function<DmlResult()>& command);
+
+// Compile a real mutation operator without opening any source/child or
+// executing the mutation. Its same retained carrier is driven exactly once
+// by next(); structured rows are the actual RETURNING result, not a plan
+// assembled after a second SQL execution. The caller owns provider lifetimes.
+struct PreparedDmlPlanHooks {
+    // Weak owners prevent reader/child callbacks from retaining their own
+    // carrier in a cycle. Source/INSERT SELECT lowering borrows the genuine
+    // root's already-planned copies rather than throwing them away.
+    std::function<PreparedChildExecutor(std::weak_ptr<PreparedQueryExecution>)> reader;
+    std::function<PreparedDmlSourceFactory(std::weak_ptr<PreparedQueryExecution>)> sources;
+    std::function<void()> finishStatement;
+    std::function<std::vector<Operator*>()> extraChildren;
+};
+std::unique_ptr<Operator> buildBoundDmlPlan(Stmt*, Session&,
+    const std::shared_ptr<PreparedQuery>&, PreparedChildExecutor,
+    PreparedDmlSourceFactory = {}, PreparedChildCursorFactory = {},
+    bool planRootConstants = true, bool ownsAtomicUnit = true,
+    PreparedDmlPlanHooks hooks = {});
 
 // Record real TEMP relation access during preparation, without executing any
 // expression or modifying rows. Shared by SQL PREPARE and wire Parse.

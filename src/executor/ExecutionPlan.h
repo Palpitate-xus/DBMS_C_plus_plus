@@ -1,6 +1,7 @@
 #pragma once
 
 #include <exception>
+#include <map>
 #include <memory>
 #include <set>
 #include <string>
@@ -80,6 +81,9 @@ public:
     // Prepared expression nodes expose the same children that they execute.
     // EXPLAIN must not substitute a separately built display-only tree.
     virtual std::string preparedPlanNodeName() const { return {}; }
+    // Static properties of the actual executing node (operation/target,
+    // not a second display tree or values inferred by opening a source).
+    virtual std::map<std::string,std::string> preparedPlanAttributes() const { return {}; }
     virtual std::vector<Operator*> preparedPlanChildren() const { return {}; }
     virtual bool supportsPreparedOuterRow() const { return false; }
     virtual bool bindPreparedOuterRow(const RowContext&) { return false; }
