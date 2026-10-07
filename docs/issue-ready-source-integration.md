@@ -1,4 +1,47 @@
-# Latest 5661 checkpoint: 90 independently committed source/test repairs
+# Latest 7f77 checkpoint: 99 independently committed source/test repairs
+
+Current source `7f778476`: **707 auto-native plus one actual frontend /
+375 registered /58 production TUs**. Nine BIT issues are independently
+committed: ordered values/lengths, corrected literal provenance, typed IN,
+pre-scan signatures, complete UNKNOWN input, actual routine owner, per-pair
+literal versus shared parameter inference, complete textual/Bind codec and
+every-member compact admission. Seven precise CPP deltas, no public headers;
+current integer/quoted/index/window/enum/aggregate/CTE/hash/array increments
+remain. Unsafe literal intermediate was corrected before its one issue commit.
+
+Current90 complete12 native9927 ends1/tenfail/twohonestPASS; complete15
+whole22297 ends1/fourteenfail/onehonestPASS, no later first-assert controls
+claimed. Actual strict180006 complete14 whole44482 ends0. **Normal25764,
+complete49 fresh native67270, complete57 whole41612 and postcommit21
+whole51595 all end0**, default disk/deadlines. Exactly seven fresh CPP plus51
+current566 source/header/actual-flags/manifest/original58-receipt/object-byte-
+proved normal donors; not fresh58. Repeat/all58/cache/frozen inputs pass.
+SHA `e6c7d94dbd5a755c2d5b4c3649d3ec4865d6c462068d50e7f1b7469889b817b8`.
+
+Actual main publication81540 ends0: all58 matching normal objects are proved
+and migrated, own path-sensitive receipts derived, normal/repeat relink with
+zero new CPP compilation; not fresh58. Actual `./dbms_main` matches that SHA.
+Direct main-binary complete21 whole81093 ends0, frozen inputs unchanged and
+previous source90 binary recoverably backed up. Master only fast-forwards.
+Full nine-commit mapping and precise logs/build scopes:
+`docs/issue-bit-current-root-composition.md`.
+
+Separate full OPEN3 whole53438 ends1, retaining old derived COUNT1, clause
+UNKNOWN1 and expanded CTE9. TYPE-11 and every other original unclosed family
+remain partial/open. BETWEEN input/true-parameter provenance has been fully
+reviewed and independently committed only in a new current99 tree; normal/
+baseline/reference checks running, not master approval. Logical demand,
+VARBIT literal/compact receivers, enum rank/FILTER/SUM/MINMAX custom OIDs,
+signed and other FETCH consumers and all remaining catalog/query/storage/
+recovery/operations requirements continue. Future public headers require
+genuine current all58 compilation, not private old-ABI donors.
+
+Original Source80 full42496 remains actual1/all1043, not14 bugs/current99
+verdict; new current99 original full not started. Original273 unchanged
+**22complete/166partial/70unverified/15deferred**, completion gate rejects.
+No assistant push, Actions activation or skipped security/TDE restart.
+
+# Historical 5661 checkpoint: 90 independently committed source/test repairs
 
 Current source `56610199`: **695 auto-native plus one actual frontend /
 361 registered /58 production TUs**. Five integer/quoted-column issues are

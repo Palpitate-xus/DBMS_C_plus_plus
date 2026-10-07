@@ -1,4 +1,30 @@
-# 2026-10-07 最新5661总清单 checkpoint
+# 2026-10-07 最新7f77总清单 checkpoint
+
+当前source `7f778476`：707auto-native+实际frontend1/375registered/58TU，
+99项独立source/test修复commit。BIT九有限issue各独立提交，精确保留当前
+integer/quoted physical/index、Window NULL/GROUPS、enum AST/OID、aggregate/
+CTE、BIT constructor/hash NULL/BETWEEN BOOL/TRUNCATE；无公共头或旧整CPP覆盖。
+
+当前90完整12native baseline9927真1/10fail2诚实PASS；15whole baseline22297
+真1/14fail1诚实PASS，不称firstassert之后执行。strict180006完整14whole44482
+全0。normal25764真7CPP fresh+51当前566逐源/头/flags/manifest/原58receipt/
+byte证明正常donors，repeat/all58/stamp/frozeninput0，非fresh58/SAN。
+完整49native67270/57whole41612/跨仅doc提交后完整21whole51595全部0，默认
+磁盘/期限；实际主目录publication81540完整证明58当期对象迁移/重链、normal/
+repeat和自身path-sensitive receipts全0，实际./dbms_main同e6c7 frozenSHA。
+直接该binary完整21whole81093全0/输入未变，旧source90 binary可恢复备份。
+九commit/全部真实日志/范围见 `docs/issue-bit-current-root-composition.md`。
+
+OPEN3whole53438仍真1：旧COUNT1/UNKNOWN1/expandedCTE9全保留。独立BETWEEN
+输入/真实参数f5已全文审查并精确合成到新current99私树，normal/baseline/
+reference仍运行，未冒主分支批准；logical demand另继续。enum rank/FILTER/
+SUM metadata/MINMAX/customOID、signed与所有其它FETCH消费者及所有原未闭环
+catalog/query/storage/recovery/ops保总范围，不借有限绿关闭family。
+旧source80原full42496终1/all1043非当前99结论；新99原full未启动。原273
+仍22complete166partial70unverified15deferred，完成gate拒绝，无assistant
+push/Actions启用/用户跳过安全TDE重启。
+
+# 2026-10-07 历史5661总清单 checkpoint
 
 当前source `56610199`：695auto-native+实际frontend1/361registered/58TU，
 90项独立source/test修复commit。五有限issue分别commit：2a2 quoted物理identifier，
