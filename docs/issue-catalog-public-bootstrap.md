@@ -53,10 +53,12 @@ defaults, routine namespaces/providers, search_path, temp and sequence namespace
 durability. The statement-savepoint fixture also printed an unchanged heap
 background-writeback warning; its exit 0 is not proof of all storage correctness.
 
-The 11 original whole scripts in `whole-11-v2.log`, 60367, are actually running
-with the frozen matching binary and unchanged default disk/time limits. Their
-complete terminal result is not yet known at this source commit. Earlier failed
-whole runs remain retained; no deadline or SQL is removed to obtain a green gate.
+At the source commit, the 11 original whole scripts in `whole-11-v2.log`, 60367,
+were actually running with the frozen matching binary and unchanged default
+disk/time limits. Their subsequently observed authoritative terminal is exit 1:
+eight scripts pass and three original entrypoints (domain-default lifecycle,
+domain ancestry, UPDATE-domain-default) explicitly time out. Earlier failed runs
+remain retained; no deadline or SQL is removed to obtain a green gate.
 
 ## Still open
 

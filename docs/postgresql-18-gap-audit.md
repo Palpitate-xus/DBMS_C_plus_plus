@@ -1,4 +1,27 @@
-# 2026-10-07 最新8f69总清单 checkpoint
+# 2026-10-07 最新8694总清单 checkpoint
+
+生产/测试source `8694f31e`：**672native/342registered/58TU**，累计56项
+独立source/test commit。新增map受检cooperative发布/实际backup `58c3d0a7`、
+普通I/U/D真实EXPLAIN消费者 `504fd544`、public冷bootstrap身份 `79b0b644`、
+旧native scalar-open契约oracle `8694f31e`，各问题独立本地提交。
+public独立exec/22native/strict180006均0，原whole11实际8pass/3timeout；
+EXPLAIN完整33×4 strict18/候选及13whole/10native/局部DML-PCE SAN均0；
+Map真engine/故障/局部SAN绿且原timeout不抹除；Volcano全部原正负控/真实
+TableScan关闭计数/原scalar whole重复0，首次原15s setup timeout保留。
+最新组合全58 fresh正常O2 **44782 live**，位于
+`/tmp/dbms-canonical-map-explain-bootstrap.NXwnyTuz`，无donors；
+89native/43whole/原672342full/两个GNU fault仅准备未启动，不借私有绿。
+精确旧8f normal61223已0，native84实际83pass/1旧oracle失败，whole42为
+32pass/10fail（DELETE六断言+九入口timeout），fault82058为0、原full未启动；
+a1b58/fault已0，d4cad native82为81pass/1fail、whole42为30pass/12fail。
+九个更早original full逐个handle复查live，并看到最新两组日志/进程前进；
+未证实死锁、未宣称full通过，未kill或restart。详细hash/范围见integration。
+WITH-DML、INSERT默认值source/真实规划、descriptor/phase、DELETE/nativeUSING、
+UPDATE FROM、native schema完整owner、目录WAL/MVCC、所有原273未闭环项继续。
+总账仍22complete/166partial/70unverified/15deferred；不push、不启用Actions，
+不恢复用户跳过安全/TDE、不用历史小范围完成宣称总账完成。
+
+# 2026-10-07 历史8f69总清单 checkpoint
 
 生产/测试source `8f69ffa8`：**669native/341registered/58TU**，累计52个独立
 source/test commit。实际ModifyTable同carrier primitive `c7a4d029` 与独立

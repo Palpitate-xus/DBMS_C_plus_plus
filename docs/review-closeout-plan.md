@@ -4,6 +4,27 @@
 
 # 工作区与复查清单收尾计划
 
+## 2026-10-07 当前完整273目标计划（8694；以下较早记录均历史）
+
+当前生产/测试source `8694f31e`：672native/342registered/58TU，56项独立
+source/test commit。map clean-peer、ordinary DML EXPLAIN、public bootstrap、
+旧scalar native契约oracle分别提交；这不是四个完整family关闭。
+
+| 阶段 | 必须验收的原范围 | 当前证据 / 下一动作 |
+| --- | --- | --- |
+| 独立修复 | 真复现、完整原SQL/控制、每问题独立commit | 四新Root映射见integration；private红/所有timeouts保留 |
+| 组合构建 | 最新公共头一致，全58 fresh正常O2/repeat/receipts/freeze | 精确8694 build44782 live，无donors；89native/43whole/fault/full仅准备 |
+| 原全量回归 | 原672native/342registered、默认磁盘期限、完整终态 | 最新组合未启动；九更早full逐个核实live，两较新组实际前进，不冒全绿/不restart |
+| 剩余DML计划/执行 | 原DELETE/nativeUSING、UPDATE FROM、INSERT default/CASE真实source、WITH-DML/descriptor/phase | actual新强PG18基线/候选继续，不能用oracle改动隐藏真实consumer失败 |
+| 目录/存储/所有family | 真namespace完整owner/WAL-MVCC、FSM/VM恢复和所有原273要求 | public/bootstrap及map三个根因修复不替代CAT-01/CAT-09/STO-05架构完成 |
+| 总账闭合 | 每个原条目完整证据、状态/checkbox/commit/验收一致 | 22complete/166partial/70unverified/15deferred，require-complete必须继续拒绝 |
+
+旧8f58正常已0、native84=83pass/1旧oracle、whole42=32pass/10fail；
+旧a1b58/fault已0、旧d4cad native82=81pass/1fail及whole42=30pass/12fail。
+新bootstrap22native/strict180006为0，whole11=8pass/3原timeout。
+专项/重复绿不消除失败或转成完整suite/TLS/全部family批准。
+不push、不启用Actions、不恢复用户跳过安全/TDE；完成目标没有缩小。
+
 范围：开始时未提交的 `ExecutionPlan.cpp`、`main.cpp`、`grouping_sets_expr.sql`，以及 `code-review-progress.md` 中尚未验证的投影子查询解析。历史 PostgreSQL 全功能路线图不属于本次收尾；此前用户要求跳过的安全专项仍排除。不执行 git push。
 
 | 阶段 | 工作 | 验收标准 | 状态 |

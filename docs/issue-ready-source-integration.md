@@ -1,4 +1,71 @@
-# Latest 8f69 checkpoint: 52 independently committed source/test repairs
+# Latest 8694 checkpoint: 56 independently committed source/test repairs
+
+Production/test source `8694f31e` is **672 native /342 registered /58 TU**.
+Four further repairs/corrections are individually committed, not four completed
+PostgreSQL families:
+
+| Issue | Private commit | ROOT commit | Verified issue scope |
+| --- | --- | --- | --- |
+| Checked cooperative clean-map publication/backup | `66c4a352` | `58c3d0a7` | 19 native, actual engine fallback/restore/rename, GNU faults and scoped two-map SAN; original timeouts retained |
+| Actual ordinary I/U/D EXPLAIN consumer | `28c60148` | `504fd544` | Strict180006 and complete33-by-four,13 adjacent whole,10 native, scoped DML/PCE SAN |
+| Dropped/recreated public catalog bootstrap identity | `0a80e7b8` | `79b0b644` | Actual DDL/independent exec/native22/strict1800060; whole11=8pass/3 original timeouts |
+| Stale native scalar-open API oracle | `494bb855` | `8694f31e` | Exact original plan/open retained; full Volcano/direct+checked21000/real close counters and original whole repeat0 |
+
+The third map repair accepts only complete inode/content cooperative candidates
+after independent checked consumer sync and stable revalidation; generic raw
+flush stays strict. Interrupted local writes and failed last-close still retain
+pending state. Unsupported-xattr arbitrary cross-directory hardlinks remain
+fail-closed/open, not claimed fully coherent. The actual EXPLAIN consumer retains
+its genuine mutation/source graphs, runs once atomically and preserves NULL and
+RETURNING counters. WITH-final-DML and full default/descriptor/phase semantics
+remain separate requirements. Public bootstrap now preserves committed absence
+and actual recreated OID without pretending catalogs are WAL/MVCC relations.
+The scalar correction does not regress the actual 21000 producer to bool/string
+XX000; no original SQL, setup row or positive control was dropped.
+
+Latest exact8694 `/tmp/dbms-canonical-map-explain-bootstrap.NXwnyTuz/repo`
+starts a genuinely fresh normal O2 **all58 build44782, live**, no donor objects.
+**89 native/43 whole/original672/342 full/two explicit GNU map-fault controls**
+are count/path checked and prepared, **not started**. Existing new public map
+headers must match the DML/PCE/UPDATE callback and array layouts. Private builds
+do not approve this new ROOT optimized combination or the original full suite.
+
+Late terminal outcomes supersede earlier historical live/prepared observations:
+
+- Exact8f69 normal61223/all58/repeat/audits exits0, frozen SHA256
+  `559f6446bdfe7c2bfa5ecf6879985b9dbb1a536d9fa3772cc13ca95efd692326`.
+  Native84 **15630 exits1:83pass/1 obsolete Volcano-oracle failure**; whole42
+  **58861 exits1:32pass/10fail**, comprising the original DELETE six assertions
+  and nine explicit failed-entry timeouts. GNU pwrite fault82058 exits0.
+  Its original669/341 full helper was prepared, never started.
+- Exacta1b7 fresh58/repeat/receipts92141 exits0, SHA256
+  `a786a0cd7281dbc5338b178fe0f9640a5832293d380b8d6d161a04146ce01e7b`;
+  genuine wrapped pwrite/last-close63946 exits0. Other groups remained prepared.
+- Exactd4cad native82 **74573 exits1:81pass/1 obsolete Volcano oracle**;
+  whole42 **59900 exits1:30pass/12fail**, actual DELETE assertions plus11
+  explicit failed-entry timeouts. Original667/341 full93414 remains live.
+- Bootstrap private whole11 **60367 exits1:8pass/3fail**: original lifecycle,
+  ancestry and UPDATE-domain-default entrypoints time out with unchanged default
+  disk/deadlines. Strong native22 **62370 exits0**; baseline51386 exits1 with14
+  failed assertions, not14 bugs. Strict180006 reference privately creates and
+  then drops only its own database; reference public is never modified.
+
+ROOT individually re-polled original full16482/36568/33648/56028/48518/27869/
+79042/97347/93414 live. Process/log inspection confirms forward progress of the
+two newest older groups beyond previously sampled lines, not a proven deadlock
+or whole-suite success. No runner/server is killed or restarted for an expired
+observation. Failed/default-timeout logs remain authoritative failed runs.
+
+Source-specific evidence: `issue-derived-map-clean-peer-publication.md`,
+`issue-prepared-dml-plan.md`, `issue-catalog-public-bootstrap.md`, and
+`issue-volcano-scalar-open-contract-fixture.md`. All original273 remain
+**22complete/166partial/70unverified/15deferred**. Actual DELETE consumer/native
+USING, UPDATE FROM carrier, INSERT default source/planning, full native namespace
+owners, catalog WAL/MVCC, storage/recovery and every remaining original family
+continue. No push, Actions enablement, deferred security/TDE restart or completion
+claim.
+
+# Historical 8f69 checkpoint: 52 independently committed source/test repairs
 
 Production/test source `8f69ffa8` is **669 native /341 registered /58 TU**.
 The actual prepared mutation operator foundation `b23bf83d` maps to ROOT
