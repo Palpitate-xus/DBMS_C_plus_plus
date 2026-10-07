@@ -1,6 +1,40 @@
 # Independent source integrations after canonical 75090
 
-## Current 5ca checkpoint: retained array consumers, source identity, storage and planning
+## Verified 5ca epoch and RR fixture checkpoint
+
+ROOT production source remains `5ca4278e`; independent test-only RR correction
+is `4c05967b`. Counts remain618 native/319 registered/58 TU.
+The exact clean 5ca normal fresh all58 O2 build/repeat/audit/freeze **36316
+exits0**, SHA256
+`aff183ff1d92bb24166088e4b87c20c23bebf511bc94ef1b72c14bd4e55af73a`.
+Original unchanged full618/319 **16482** and matching fresh native156 **6042**
+are actually running in `/tmp/dbms-canonical-storage-set-srf.OBaWSkrC`.
+Complete wire75 **93351 exits1: 70 pass / 5 fail**: original full NOT LIKE
+UPDATE2867, non-NULL ALTER ARRAY conversion, unfiltered SRF host/UNKNOWN,
+set-operation Simple/Describe consumer and whole37 UNION ALL/cumulative
+effects. Original SQL/assertions/deadlines stay intact; no full PASS is claimed.
+The earlier exact d2 original full590/312 **96468** also remains live.
+
+Strict180006 two actual sessions prove that the old vacuum_toast fixture
+wrongly expects an old RR snapshot before its first data read. Test-only
+`4c05967b` establishes that read before the writer, preserves every original
+old-payload/deleted-row/vacuum/orphan assertion and adds a lazy-first-read
+new-payload control. Five matching private natives/reference pass. ROOT
+independently reruns `tests/compat/vacuum_toast_snapshot_reference18.py`, exit0
+in `/tmp/dbms-vacuum-toast-root-reference18.log`. This was not evidence of a
+lost TOAST object; the exact old e6/5ca fixtures retain their old failure and
+cannot inherit the later pass. See `issue-vacuum-toast-repeatable-read-fixture.md`.
+Heap WAL relation-generation recovery remains a separate production defect.
+
+New raw UNKNOWN input and actual bound-function type metadata work is still
+private. Its complete strict180006 matrix passes; the V1 candidate fixes direct
+UNKNOWN ambiguity but exposes independent NULLIF context and qualified
+public.unnest wrong-success cases. V2 full58O0 exits0; execution-owned copies
+must also retain the new static declaration. The whole controls are not
+removed or registered as a passing gate. Original273 counts stay22/166/70/15;
+no push, Actions activation or user-skipped security/TDE restart.
+
+## Historical 5ca kickoff: retained array consumers, source identity, storage and planning
 
 Current source `5ca4278e` has **618 native / 319 registered / 58 TU**.
 Every repair below is an independent local commit; no squash or push.

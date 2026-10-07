@@ -30,9 +30,9 @@ Source `5ca4278e` 已逐项本地提交，618 native / 319 registered / 58 TU；
 
 | 下一阶段 | 验收要求 | 当前证据与状态 |
 | --- | --- | --- |
-| 最新组合正式构建 | 全58 fresh 正常O2、repeat、全部 source/header/flags/stamp、冻结同一binary | 精确5ca快照36316已运行；未宣称通过 |
-| 原完整回归 | 不改原SQL/assertions/deadlines，执行618native/319registered | 5ca runner已准备未启动；旧d2 full590/312 96468仍live |
-| 存储剩余问题 | 真实rename/drop/recreate代际恢复、原vacuum_toast可见性/值断言通过 | e6 137native135pass/2fail，新BTree候选仍不能关闭这两项；分别修复 |
+| 最新组合正式构建 | 全58 fresh 正常O2、repeat、全部 source/header/flags/stamp、冻结同一binary | 精确5ca快照36316实际exit0，冻结SHA见integration文档 |
+| 原完整回归 | 不改原SQL/assertions/deadlines，执行618native/319registered | 5ca full16482与156native6042已运行；75wire93351=70pass/5fail；旧d2 full590/312 96468仍live |
+| 存储剩余问题 | 真实rename/drop/recreate代际恢复、正确RR setup的vacuum_toast原值断言通过 | 4c05967b独立修正错误首次读setup且保留所有旧断言/新增lazy控制，PG18双连接与5native通过；恢复生产问题仍独立修复 |
 | 查询/类型剩余问题 | 保留whole37 DML/UNION ALL、whole domain/pattern priority、SRF完整known-gap控制 | 新ANY whole19和数组whole12专项绿；typed append、TYPE-19域链、模式、SRF两项仍进行 |
 | 总账验收 | 全部原273逐项满足完整证据；用户跳过15保持deferred | 22complete/166partial/70unverified/15deferred；完成gate仍拒绝 |
 

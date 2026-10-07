@@ -785,6 +785,10 @@
 - [PostgreSQL 18 release notes](https://www.postgresql.org/docs/18/release-18.html)
 # 2026-10-07 当前执行 checkpoint（后续段落为历史）
 
+正式5ca全58正常O2/repeat/audit/freeze36316实际0，SHA `aff183ff1d92bb24166088e4b87c20c23bebf511bc94ef1b72c14bd4e55af73a`。原full618/319 runner16482已运行、matching156native6042仍live；完整75wire93351实际1=70pass/5fail（原full NOT LIKE2867、非NULL ALTER数组转换、完整SRF/集合输出metadata/whole37 UNION ALL诊断）。原断言与累计计数均保留，不称全套通过。另已独立 test-only commit `4c05967b`：真实180006双连接证明旧vacuum_toast夹具第一次读取在writer提交后，错误期待旧RR快照；现先读取建立快照，保留所有旧值/orphan/vacuum断言，并新增lazy首次读取看到新值的控制。private匹配5native/reference0，ROOT独立reference复跑0；不是TOAST对象丢失，也不反向覆盖旧e6/5ca未修夹具的失败。ROOT生产源码仍5ca，测试额外4c；完整总273状态不变。UNKNOWN输入新强整套在strict180006通过，私有候选保留NULLIF上下文/限定函数错成功；未注册假绿、未提交未完成的候选。
+
+## 前一 5ca 启动 checkpoint（当时记录）
+
 最新 source `5ca4278e`，618 native / 319 registered / 58 TU。本轮再新增五项独立本地 commit：`1a7ce3ec` 真实 REAL/DOUBLE 目录身份、`b72e27aa` RETURNING 数组元素修饰符、`c8e9a83b` 零行 boolean DELETE RETURNING 描述、`b140ac13` 实际数组 prepared 输出消费、`5ca4278e` parent-local 非 volatile ANY qualification 先于 BOOL pruning 的纯规划。此前 physical restart/CAST 边界/数组身份与来源/共享 BTree/set 分支 descriptor/SRF ownership 等19项提交映射见 `docs/issue-ready-source-integration.md`。新公共头组合的精确 clean detached 全58 fresh 正式 O2 build/repeat/audit/freeze36316已运行，`/tmp/dbms-canonical-storage-set-srf.OBaWSkrC`；原618/319全runner尚未启动，不声称新构建或整套通过。
 
 旧e6正常全58/repeat/freeze68192实际0；matching137native79137实际1=135pass/2fail（parent表重命名恢复、vacuum_toast原line73）；65wire83623实际1=64pass/1fail（完整协议listening channel line2006）。精确d2的120native37724实际0，64wire25527实际1=60pass/4fail（3项原deadline timeout、完整协议line2006）；原full590/312 runner96468仍live。所有原SQL/assertions/deadlines保留，不把后续fix或专项绿反向覆盖旧失败。数组整条private normal58、15native、12wholewire及两组strict180006均0；ANY规划whole19/reference、8native、9wire均0，但不是新ROOT完整证明。ARRAY归TYPE-16，历史TYPE-09误标不扩散。模式V4 fresh58私有O0实际0，更强完整domain/type优先级在strict180006通过而candidate domain-on-domain建表setup仍红；不删除该setup。WAL真实relation generation、VACUUM/TOAST、TYPE-19完整domain ancestry、typed lazy UNION ALL和SRF LIMIT0/UNKNOWN仍分别修复中。总273保持22complete/166partial/70unverified/15deferred，完成gate拒绝；未push、Actions保持disabled、用户跳过专项不恢复。

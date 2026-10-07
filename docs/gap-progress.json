@@ -2,6 +2,21 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Exact5ca normal58 verified; unchangedfull618/319 running; completewire75 retains five failures; RR fixture independently corrected",
+      "gap_ids": ["STO-04", "TXN-07", "WAL-05", "TYPE-16", "QRY-01", "DML-02", "DML-05"],
+      "status": "partial",
+      "commits": ["5ca4278e", "4c05967b"],
+      "evidence": ["docs/issue-ready-source-integration.md", "docs/issue-vacuum-toast-repeatable-read-fixture.md"],
+      "tests": ["tests/vacuum_toast_test.cpp", "tests/compat/vacuum_toast_snapshot_reference18.py", "tests/bound_dml_query_children_protocol_e2e_test.py", "tests/prepared_srf_host_ownership_known_gap.py", "tests/set_operation_type_metadata_known_gap.py"],
+      "verification": {
+        "reproduction": "Complete5ca75wire retains five actual failures: originalNOTLIKE2867, nonNULLarrayALTER, wholeSRF, wholeSetOutputMetadata and whole37UNIONALL/cumulativeeffects. Actualstrict180006 two-session proof shows oldvacuumfixture firstread afterwriter legitimatelysees newpayload, notTOASTloss.",
+        "fix": "Independent test-only4c establishes firstreadbeforewriter withoutremoving oldpayload/vacuum/orphan asserts, and adds separatelazyfirstreadcontrol. HeapWALgeneration production, typedUNIONALL, pattern/domain and SRFscope remainrequired.",
+        "focused_tests": "4c correctedfixture plusfouradjacent privatenatives actual0; strict180006 reference actual0, independentlyrerunROOT /tmp/dbms-vacuum-toast-root-reference18.log0. Privatebasis matching scopedO2storage/O0remainder, notnewformalallO2 orfullsuite proof.",
+        "full_suite": "5ca exactfreshnormal58 build/repeat/audit/freeze36316 actual0 SHAaff183ff1d92bb24166088e4b87c20c23bebf511bc94ef1b72c14bd4e55af73a. Exact5ca unchangedfull618/31916482 andfreshnative1566042 live /tmp/dbms-canonical-storage-set-srf.OBaWSkrC; completewire7593351 terminal1=70pass5fail. Old d2 originalfull590/31296468 remainslive. Exactoldfixtures donotinherit4c laterpass. No fullPASS/TLSruntime claim.",
+        "scope": "Original273 unchanged22complete166partial70unverified15deferred; no push/Actionsactivation/securityrestart. UNKNOWN privatewhole1800060, candidateNULLIFcontext/qualifiedroutine redretained; newstaticfunctionfield requiresactualcopy retention andmatching58ABI, notprematurecommit/greenregistration."
+      }
+    },
+    {
       "issue": "5ca independent array/source/storage/planner integrations; exact fresh normal58 running; old scoped failures retained",
       "gap_ids": ["TYPE-16", "TYPE-19", "SQL-04", "QRY-01", "QRY-02", "DML-02", "DML-05", "STO-04", "WAL-01", "WAL-05", "TXN-07"],
       "status": "partial",
