@@ -5801,7 +5801,11 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                     }
                     literals.push_back(std::move(literal));
                 }
-                if (bareValues || bitBetween) {
+                // A real NULL Bind datum still has its declared parameter
+                // type. Preserve that builtin identity in the existing SQL
+                // lowering path; neither NULL bytes nor a later source row
+                // can supply it. Non-NULL and unmapped OID paths are unchanged.
+                if (bareValues || bitBetween || valueLength == -1) {
                     if (const char* castType =
                             valuesParameterCastType(preparedParameterTypes[i])) {
                         literals.back() = "CAST(" + literals.back() +
