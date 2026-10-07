@@ -45439,6 +45439,23 @@ Lsn StorageEngine::switchWal(const std::string& dbname) {
 // PITR: point-in-time recovery
 // ========================================================================
 
+static bool pitrSegmentNumber(const std::string& name,
+                              uint32_t timeline, uint32_t& segment) {
+    if (name.size() != 24) return false;
+    uint32_t parts[3]{};
+    for (size_t i = 0; i < 3; ++i) {
+        const char* begin = name.data() + i * 8;
+        const char* end = begin + 8;
+        const auto parsed = std::from_chars(begin, end, parts[i], 16);
+        if (parsed.ec != std::errc{} || parsed.ptr != end) return false;
+    }
+    // This WAL format uses the final eight digits as its segment number;
+    // the middle log field is always zero (see WALManager::segmentPath).
+    if (parts[0] != timeline || parts[1] != 0) return false;
+    segment = parts[2];
+    return true;
+}
+
 bool StorageEngine::pitrRestore(const std::string& dbname,
                                 const std::string& backupPath,
                                 const std::string& archiveDir,
@@ -45464,43 +45481,49 @@ bool StorageEngine::pitrRestore(const std::string& dbname,
     std::filesystem::create_directories(walDir, ec);
     if (ec) return false;
 
-    // Backup's highest retained segment decides where archived history
-    // starts overlapping; copy every archived segment with a number >= the
-    // backup's newest, letting the copy overwrite the (older) backup copy.
+    // A base backup can itself follow an earlier PITR fork. Recover the
+    // timeline selected by that image, not timeline 1 or the highest-named
+    // unrelated segment. Opening the restored WAL uses the same durable
+    // selector/inference and content validation as ordinary startup.
+    uint32_t backupTimeline = 0;
+    {
+        WALManager restoredWal(walDir);
+        if (!restoredWal.ensureOpen(false)) return false;
+        backupTimeline = restoredWal.timelineId();
+    }
+
+    // Only the selected stream determines the overlap boundary. Older
+    // abandoned timelines can retain numerically much newer segments.
     uint32_t backupMaxSeg = 0;
     {
         std::error_code iterEc;
-        for (const auto& entry : std::filesystem::directory_iterator(walDir, iterEc)) {
+        std::filesystem::directory_iterator it(walDir, iterEc), end;
+        if (iterEc) return false;
+        for (; it != end; it.increment(iterEc)) {
+            if (iterEc) return false;
+            const auto& entry = *it;
             const std::string name = entry.path().filename().string();
-            if (name.size() != 24) continue;
-            unsigned long long parts[3] = {0, 0, 0};
-            bool ok = true;
-            for (int i = 0; i < 3; ++i) {
-                std::string hex = name.substr(i * 8, 8);
-                try { parts[i] = std::stoul(hex, nullptr, 16); }
-                catch (...) { ok = false; break; }
-            }
-            if (!ok) continue;
-            backupMaxSeg = std::max(backupMaxSeg, static_cast<uint32_t>(parts[2]));
+            uint32_t segNo = 0;
+            if (!pitrSegmentNumber(name, backupTimeline, segNo)) continue;
+            if (!entry.is_regular_file(iterEc) || iterEc) return false;
+            backupMaxSeg = std::max(backupMaxSeg, segNo);
         }
+        if (iterEc) return false;
     }
 
     size_t copied = 0;
     {
         std::error_code iterEc;
-        for (const auto& entry : std::filesystem::directory_iterator(srcArchive, iterEc)) {
+        std::filesystem::directory_iterator it(srcArchive, iterEc), end;
+        if (iterEc) return false;
+        for (; it != end; it.increment(iterEc)) {
+            if (iterEc) return false;
+            const auto& entry = *it;
             const std::string name = entry.path().filename().string();
-            if (name.size() != 24) continue;
-            unsigned long long parts[3] = {0, 0, 0};
-            bool ok = true;
-            for (int i = 0; i < 3; ++i) {
-                std::string hex = name.substr(i * 8, 8);
-                try { parts[i] = std::stoul(hex, nullptr, 16); }
-                catch (...) { ok = false; break; }
-            }
-            if (!ok || parts[0] != 1) continue;  // timeline 1 only for now
-            const auto segNo = static_cast<uint32_t>(parts[2]);
+            uint32_t segNo = 0;
+            if (!pitrSegmentNumber(name, backupTimeline, segNo)) continue;
             if (segNo < backupMaxSeg) continue;
+            if (!entry.is_regular_file(iterEc) || iterEc) return false;
             std::error_code copyEc;
             std::filesystem::copy_file(
                 entry.path(), walDir / name,
@@ -45514,6 +45537,7 @@ bool StorageEngine::pitrRestore(const std::string& dbname,
                 return false;
             ++copied;
         }
+        if (iterEc) return false;
     }
     // Archived history replaces the ready/done bookkeeping of the backup;
     // recovery decides from content, not markers.
