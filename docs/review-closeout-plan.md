@@ -4,7 +4,24 @@
 
 # 工作区与复查清单收尾计划
 
-## 2026-10-07 当前完整273目标计划（3ffb；以下较早记录均历史）
+## 2026-10-07 当前完整273目标计划（7b22；以下较早记录均历史）
+
+当前test/source `7b2223cf`：690auto+frontend/352registered/58TU，81项
+独立source/test commit；生产逐字同3ffbb516。原273目标/所有未闭环范围不缩。
+
+| 阶段 | 原要求 / 下一动作 | 当前实际证据 |
+| --- | --- | --- |
+| 独立提交 | 真复现、保原SQL/场景/强断言、每问题commit | 原TRUNCATE完整134；7b2223cf仅fixture身份，原三节+第四拒绝控制/target及11邻接/postcommit全0 |
+| 全量原验收 | 所有当前注册/自动native、真实终态、不隐藏旧红 | 冻结Source80 full42496真正LIVE，仍含旧TRUNCATE；非81 testepoch，81 full未启动 |
+| 当前matview生产故障 | 真后台consumer、目录publication、dirty/retry边界 | 原首轮0而四轮重复78209为1/两134；真实后台domain目录栈97700为1，独立producer复现/修复继续 |
+| BIT / generic / enum aggregate | 完整实际type/owner/NULL/IN/OR/FILTER/rank/once消费者 | BIT新mixed未知左operand误cast已查出，仍held；aggregate真实OR/FALSE及enum绑定独立处理，不import未证source |
+| 恢复/CREATE/全部原family | 每原owner/retry/IO/DDL/query/storage/operations要求 | 原scope继续，不以TRUNCATE测试契约修正冒恢复窗口或family关闭 |
+| 总账 | 原273逐条证据/状态/checkbox/commit一致 | 22complete166partial70unverified15deferred；完成gate拒绝，无push/Actions/安全TDE恢复 |
+
+完整输入/实际终值/源码映射见integration和独立TRUNCATE issue；当前生产all58
+与exact3ffb一致，所有driver/stubs fresh+57正常对象匹配证明，不冒fresh58/SAN。
+
+## 2026-10-07 历史完整273目标计划（3ffb）
 
 当前source `3ffbb516`：690auto+1frontend/352registered/58TU，80项独立
 source/test commit。四新Root issue对应原scope保持；最新原full已真实启动。

@@ -1,4 +1,42 @@
-# Latest 3ffb checkpoint: 80 independently committed source/test repairs
+# Latest 7b22 checkpoint: 81 independently committed source/test repairs
+
+Current test source `7b2223cf` retains **690 auto-native plus one actual
+frontend /352 registered /58 production TUs**. Production/scripts/cmake
+remain byte-identical to `3ffbb516`; this is a test-contract repair, not a
+new recovery implementation or production build.
+
+`7b2223cf` corrects the original pending-TRUNCATE fixture's name-only WAL
+marker to carry the actual current table generation. All three original
+sections/assertions remain; real record decoding and generation preservation
+are checked, and a fourth name-only/current-generation rejection control
+retains the original boundary. Current original complete baseline12790 is
+actual1/native134; final complete25481 and postcommit75277 are actual0.
+Eleven unchanged complete adjacent native drivers20430 are actual0.
+Every invocation proves all58 current sources/headers/flags/manifest/original
+normal receipts/stamp/frozen against exact3ffb, with fresh drivers/stubs and
+57 matching normal production objects. No new fresh58/SAN/full-suite claim.
+Evidence: `docs/issue-truncate-recovery-wal-fixture-identity.md` and
+`/tmp/dbms-truncate-wal-fixture.8CdcMbRo/`.
+
+Original frozen Source80 full42496 is still actually live; it is not a
+Source81 test-input run and is not restarted to remove a known original red.
+Current production is identical, but the full runner still has the original
+unrepaired TRUNCATE fixture. New current81 full has not been started.
+
+Independent current80 original matview reproduction is now genuinely red:
+first complete run passes, four unchanged repeats78209 end1 with two native
+134s; external termination-stack diagnosis97700 also ends1. The actual
+background writeback calls relationDir/dataPath/getTableSchema/domainColumns/
+CatalogManager loading and terminates on58030. This is an open ordinary
+production issue, not waived as a flaky test. Private BIT owner/routine
+controls pass, but newly exposed mixed UNKNOWN-left IN coercion regression
+keeps that bundle held; generic/enum aggregate work also remains private.
+
+Original273 remains22complete/166partial/70unverified/15deferred. WAL-05/08
+and every original unclosed family remain open/partial. No push, Actions
+activation, unverified source import or deferred security/TDE restart.
+
+# Historical 3ffb checkpoint: 80 independently committed source/test repairs
 
 Current source `3ffbb516`: **690 auto-native plus one actual frontend native /
 352 registered /58 production TUs**. Four independent issue commits are now

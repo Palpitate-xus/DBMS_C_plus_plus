@@ -1,4 +1,25 @@
-# 2026-10-07 最新3ffb总清单 checkpoint
+# 2026-10-07 最新7b22总清单 checkpoint
+
+当前test/source `7b2223cf`：690auto-native+1实际frontend/352registered/
+58TU，81项独立source/test commit；生产/scripts/cmake逐字同3ffbb516。
+原pending-TRUNCATE fixture手写name-only记录却针对新physical generation，
+当前完整原测试12790实际1/native134。仅补真实schemaID与既有codec，保全部
+原三节/断言，补精确durable WAL decode/两次restart身份和第四name-only拒绝
+控制；final完整25481、十一完整邻接20430、postcommit75277全部实际0。
+每次all58当前源头flags/manifest/原receipt/stamp/frozen证明匹配，再fresh
+driver/stubs链接57当期正常production objects；非新生产fresh58/SAN或恢复
+实现修复。独立commit7b2223cf，完整出处见对应issue及integration。
+
+原Source80 full42496仍真正live、冻结原test输入不改不重启；虽生产同当前，
+不是Source81 testepoch全量。当前81 full未启动。当前原matview重复已真实
+复现后台writeback读取domain目录时58030/native134，正处理真实producer/
+publication边界，不能因第一次绿而关闭。BIT候选新mixed UNKNOWN-left IN
+误cast仍held，generic/enum aggregate各独立修复继续，未证source不导入。
+总账原273仍22complete166partial70unverified15deferred；完成gate拒绝，
+WAL05/08与全部原未闭环family不勾。不push、不启用Actions，用户跳过安全/
+TDE保持deferred。
+
+# 2026-10-07 历史3ffb总清单 checkpoint
 
 当前source `3ffbb516`：690auto-native+1实际frontend/352registered/58TU，
 80项独立source/test commit。本轮7ecf的DDL fixture游标、8467的enum真实类型

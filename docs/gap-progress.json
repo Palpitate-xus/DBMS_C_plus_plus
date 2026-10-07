@@ -2,6 +2,21 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "81 independent ROOT source/test repairs through7b22: actual pending-TRUNCATE fixture generation and current matview production reproduction",
+      "gap_ids": ["WAL-05", "WAL-08", "CAT-17"],
+      "status": "partial",
+      "commits": ["7b2223cf"],
+      "evidence": ["docs/issue-ready-source-integration.md", "docs/issue-truncate-recovery-wal-fixture-identity.md"],
+      "tests": ["tests/truncate_recovery_test.cpp", "tests/matview_test.cpp"],
+      "verification": {
+        "reproduction": "Actualcurrent80 completeoriginalTRUNCATE12790 wrapper1/native134 aftercompleted-resetsection; realpositivefixture writesname-only marker tocurrent nonzerophysicalRelationId. OriginalfixtureSHA8328c5ffb6735be34decdfbbbe5f666b0e6c5993dcc65bc5938ffe621c0a9d54 preserved. Matvieworiginalfirstcomplete0; independentfourunchangedrepeats78209 end1/two134; diagnostic97700 end1 confirmsbackgroundBufferFlush viaactualphysicalpath/getTableSchema/domainColumns/CatalogManager load58030.",
+        "fix": "7b2223cf test-contract only, production/scripts/cmakebyteidentical3ffbb516. ActualschemaID+existingappendImagecodec, exactdurablerecorddecode/rmid/info/xid/name/ID andbothrestartgenerationassertions; originalall3sections/row/index/TOAST/corruptstateassertionsretained. Fourthname-onlyrecordoncurrentgenerationstillrejectsstartupwithnocompletionmarker; originalguardnotweakened. Matviewproductionnotyetfixed/imported.",
+        "focused_tests": "Completefinaltarget25481andpostcommit75277actual0; completeunchanged11adjacent20430actual0 includesTRUNCATE/ownedsequence/identitycodecguardgeneration/WALbasicFPW/checkpoint/PITR/all19DDLsections/sequenceDDLrollback. FinaltestSHA07c5e810e54c16191fb86b825f8339ed286f9f7c3ea82be777d40947d0460361. Everyinvocationall58currentCPP/headers/manifest/actualflags/originalreceipts/stamp/frozenbinaryproof againstexact3ffb; freshdriver/stubs+57matchingnormalproductionobjects, notfresh58/SAN. FrozenproductionSHA701db03fc9abbaad25136c8fd95d355dea08a8481c604d0745ea14e2bfb48a2d.",
+        "full_suite": "Currenttest7b2223cf690auto+frontend352registered58TU;81Rootindependentsource/testcommits. OriginalfrozenSource80full42496confirmedlive; hasoriginalunrepairedTRUNCATEinputs despiteproductionbyteequalcurrent. Notcurrent81testepochfull, notPASS/restartedtohideknownred. Current81originalfullnotstarted.",
+        "scope": "Original273unchanged22complete166partial70unverified15deferred; completiongaterefuses. Realmatviewbackgroundcatalog/dirty/retryissuecontinues. BITowner/routinecontrols0butnewmixedUNKNOWN-leftINcastregressionkeepsbundleheld; genericandenumaggregateindependentissuesstillprivate. WAL05/08andALLoriginalunclosedcatalog/query/storage/recovery/operationsrequirementsremainpartial/open. No unverifiedimport/push/Actionsactivation/deferredsecurityTDErestart/overallcompletion."
+      }
+    },
+    {
       "issue": "80 independent ROOT source/test repairs through3ffb: real enum scalar rank and ordinary TYPE identity plus Boolean BETWEEN metadata; original full running",
       "gap_ids": ["TYPE-08", "SQL-05", "DML-03", "DML-04", "CAT-01", "TXN-05"],
       "status": "partial",
