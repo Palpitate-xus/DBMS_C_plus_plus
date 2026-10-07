@@ -1,4 +1,68 @@
-# Latest 7ecf checkpoint: 77 independently committed source/test repairs
+# Latest 3ffb checkpoint: 80 independently committed source/test repairs
+
+Current source `3ffbb516`: **690 auto-native plus one actual frontend native /
+352 registered /58 production TUs**. Four independent issue commits are now
+in master; no unverified BIT/temp/CLOG/CREATE source is imported.
+
+| Issue | Private commit | ROOT commit | Verified scope |
+| --- | --- | --- | --- |
+| DDL fixture skips actual catalog WAL | Root-owned | `7ecfd8eb` | Original actual134; all19 sections plus actual CREATE/XID/matching COMMIT and ten adjacent drivers |
+| Enum projection/CASE/sort uses lexical text | `6593bf29` | `84672d30` | Actual current seven-operator wire failure; catalog OID/labels, declared rank, CASE/copies/aliases/ordinals/CTE/index/cold consumers |
+| Quoted and uppercase TYPE identities disagree | `fc16bbab` | `0ffd958b` | Actual native134/quoted42883; decoded catalog/sidecar identity, opposite scopes, actual casts/CASE/cold and dependency-free CREATE/DROP |
+| BETWEEN/NOT BETWEEN metadata is not Boolean | `d53f8d50` | `3ffbb516` | Original populated and empty UPDATE/DELETE42804; actual grammar node, BOOL descriptor/NULL/value and no-effects controls |
+
+Root exact0ffd `/tmp/dbms-canonical-enum-comparison.8gSYp7zi/final-repo`
+normal83683 actually ends0: **genuinely freshly compiled all58**, no donors,
+against all three changed public headers. Repeat/all58 receipts/stamp/freeze0;
+SHA `22a11acf133ffb95c5fd90775d59735ff1bb3acaccb11cc67b315225afe11e36`.
+**33 complete native28511 /six complete default-disk whole67368 /complete
+strict180006 original enum matrix all end0**. Original quoted controls remain;
+the TYPE follow-up adds seven uppercase/case-distinct lifecycle controls.
+Root's existing BIT constructor, strengthened Hash NULL-bucket fixture and
+DDL nineteen-section fixture are retained and actually pass in this composition.
+Root original current77 full enum-wire94923 ends1 at the genuine first rank
+assertion; its original values/SQL and failed log remain. The first external
+helper preflight incorrectly named the CASE wire file and ended1 before any
+compilation/runtime; corrected path preflight0 precedes the fresh58 run. It is
+an author preflight error, not a database failure or hidden successful build.
+
+Root exact3ffb `/tmp/dbms-canonical-between-type.zwBrZgUc/repo` normal71958
+actually ends0: fresh sole ExprHelper plus57 fully source/header/actual-flag/
+manifest/original58-receipt/object-byte-proved **current0ffd fresh58 normal
+donors**, not another fresh58. Repeat/all58 current receipts/stamp/freeze0;
+SHA `701db03fc9abbaad25136c8fd95d355dea08a8481c604d0745ea14e2bfb48a2d`.
+**15 complete native74973 /seven complete default-disk whole35207 /strict
+180006 complete permanent BETWEEN matrix all end0**. New target plus actual
+enum/Hash/BIT/CASE/EXPLAIN neighbours are whole files, not selected statements.
+Actual current79 complete new wire96456 ends1 with populated and empty-source
+42804 failures; current77 native29871 ends1/body134 at missing Boolean type.
+Private11-native first22297 ends1 only because the new author's factory scale4
+created BIGINT while supplying INT cells; exact corrected INT seed/descriptor
+guard yields complete11-native70823 end0. Production type guard is unchanged.
+Private complete original postgres_protocol27151 still ends1 at its original
+prepared ALTER timeout before the range section, not whole-protocol green.
+
+The exact current **original690 auto-native plus frontend /352 registered
+full42496 is running** in its separate clean `full-repo`, original runner,
+disk and default deadlines. Its58 normal and57 same-flags test production
+layers migrate only after full exact-input/current-receipt/object-byte proof;
+all drivers/stubs are compiled by the unchanged original runner. This is not
+fresh58/57 in that full invocation or a full-suite PASS. Helpers/inputs freeze.
+Older exact7504 full6359 now actually ends1: all1032 labels,678native/
+331registered/one frontend PASS,6native/16registered FAIL. Older82bf full48181
+has all1031 labels and also ends1; neither22 failures are22 independent bugs.
+
+TYPE08 remains partial: custom wire OIDs, ALTER safety/quoted physical columns/
+sidecar encoding and aggregate expression/binding consumers remain OPEN.
+Aggregate diagnosis separates a genuine generic argument bug, a true enum-rank
+binding bug and C versus en_US reference defaults; no global locale is changed
+to green a fixture and old failures remain. BIT literal/IN/typing/operator/
+descriptor/binary, temp/CLOG ordinary owner/retry, CREATE and every original
+unclosed family continue. Original273 remains **22complete/166partial/
+70unverified/15deferred**; completion gate rejects. No push, Actions activation
+or deferred security/TDE restart. See the four issue docs and retained logs.
+
+# Historical 7ecf checkpoint: 77 independently committed source/test repairs
 
 Current test/source `7ecfd8eb` keeps **687 auto-native plus one actual frontend
 native /350 registered /58 production TUs**. One independent test-contract

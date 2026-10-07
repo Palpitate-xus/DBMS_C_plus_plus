@@ -2,6 +2,21 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "80 independent ROOT source/test repairs through3ffb: real enum scalar rank and ordinary TYPE identity plus Boolean BETWEEN metadata; original full running",
+      "gap_ids": ["TYPE-08", "SQL-05", "DML-03", "DML-04", "CAT-01", "TXN-05"],
+      "status": "partial",
+      "commits": ["7ecfd8eb", "84672d30", "0ffd958b", "3ffbb516"],
+      "evidence": ["docs/issue-ready-source-integration.md", "docs/issue-ddl-catalog-wal-test-cursor.md", "docs/issue-enum-comparison-binding.md", "docs/issue-enum-quoted-type-identity.md", "docs/issue-between-predicate-boolean-type.md"],
+      "tests": ["tests/ddl_transaction_skeleton_test.cpp", "tests/enum_comparison_binding_test.cpp", "tests/enum_quoted_type_identity_test.cpp", "tests/enum_comparison_binding_protocol_e2e_test.py", "tests/between_predicate_type_test.cpp", "tests/between_predicate_type_protocol_e2e_test.py"],
+      "verification": {
+        "reproduction": "Realcurrent77 fullenumwire94923actual1 firstwronglexicalrank; strongquotedtypecanonicalcatalog134 andquotedCASE42883; CREATE-only uppercaseDROP134 retained. Actualcurrent77 original16DML statements andstrict180006 diagnostic exposeUPDATE/DELETEBETWEEN42804, newwhole78472=1/current79whole96456=1/emptycontrols; native29871 wrapper1/body134 missingBOOL. DDL originalfound134; sameactualSQL/assertions retained.",
+        "fix": "Four independentRootcommits:7ecf correctfalse-negativeDDL cursor/realCREATE-XID-COMMIT;6593to8467 copiesactualcatalogenumOID/orderedlabels, scalarCASE/sort/copies/rootownedAST preservingphysicalWHERE/index;fc16to0ffd decodesCREATE tokens andonlyactualDROP TYPE folding, noCOLLATIONchange;d53to3ffb addsBETWEEN/NOTBETWEEN toparserownedBOOLmetadata, originalnonBooleanWHERE/typeguards unchanged. CurrentBITconstructor/HashNULLstrongcontrols retained.",
+        "focused_tests": "Exact0ffd actualfresh58normal83683=0/no donors/newpublicheads, repeat/all58/stamp/freeze0 SHA22a11acf133ffb95c5fd90775d59735ff1bb3acaccb11cc67b315225afe11e36;33complete native28511=0/6whole67368=0/strict180006completeenum0. Exact3ff normal71958=0 freshsoleHelper+57exactcurrent0ffdsource/header/flags/original58receipt/byte-provednormaldonors, notfresh58;15native74973/7whole35207/permanentstrictBETWEENall0/defaultdisk/originaldeadlines. Privatefirst11native22297=1authorfactoryscale4BIGINTvsINTguardXX000retained; correctedonlyINTseed+exactdescriptorassert11native70823=0. Originalprivatefullpostgres27151actual1earlypreparedALTERtimeout—notgreen. No all58SAN.",
+        "full_suite": "Current690auto-native+actualfrontend352registered58TU/SHA701db03fc9abbaad25136c8fd95d355dea08a8481c604d0745ea14e2bfb48a2d. Exactcurrentoriginalfull42496LIVE in/tmp/dbms-canonical-between-type.zwBrZgUc/full-repo, originalrunner/defaultdisk/deadlines,58normal/57test-productionlayersmigrateonlyafterall58currentreceipt/source/header/flags/byte/stampproof; drivers/stubsfreshasoriginalrunner. Notfresh58/57/fullPASS. Old75046359actual1/all1032labels678native331registeredfrontend1PASS,6native16registeredFAIL;old82bf48181actual1/all1031labels;not22bugs/latestverdict.",
+        "scope": "Original273unchanged22complete166partial70unverified15deferred/requirecomplete1. TYPE08genericaggregateargument/trueenumbinding/customwireOIDs/ALTER/quotedphysical/sidecar stillOPEN; defaultCvsenUSreferenceenvironmentseparatelyproven/no globalgreenchange. BITliteralINtyping/casts/operators/descriptor/binaryheld, realtempCLOGordinaryowner/retry/CREATE/allunclosedfamiliescontinue. No push/Actions/deferredsecurityTDErestart oroverallcompletion."
+      }
+    },
+    {
       "issue": "77 independent ROOT source/test repairs through7ecf: correct original DDL catalog-WAL fixture cursor without production changes",
       "gap_ids": ["CAT-01", "TXN-05"],
       "status": "partial",

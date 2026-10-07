@@ -4,7 +4,25 @@
 
 # 工作区与复查清单收尾计划
 
-## 2026-10-07 当前完整273目标计划（7ecf；以下较早记录均历史）
+## 2026-10-07 当前完整273目标计划（3ffb；以下较早记录均历史）
+
+当前source `3ffbb516`：690auto+1frontend/352registered/58TU，80项独立
+source/test commit。四新Root issue对应原scope保持；最新原full已真实启动。
+
+| 阶段 | 原要求 / 下一动作 | 当前真实证据 |
+| --- | --- | --- |
+| 逐根因commit | 复现/不弱化SQL/完整consumer/独立提交 | 7ecf、8467、0ffd、3ffb分别commit；原DDL/rank/TYPE/range错误和作者错误均保留 |
+| 当前生产输入 | 每公共头ABI正确，全58正常/receipt/flags/freeze | 0ffd真fresh58 normal83683为0；3ffb新soleHelper+57当期proved donors71958为0，非新fresh58/SAN |
+| 原完整验收 | 当前全部690+frontend/352原runner/default期限完整终态 | 原full42496 LIVE，独立树原58/57生产层proof迁移；focused15/7与strict0不是全绿 |
+| TYPE08/TYPE11所有消费者 | aggregate/rank/OID/DDL事务；全literal/IN/NULL/CAST/descriptor/binary | Rootenum33/6完整0；真实generic/enumaggregate与匹配locale继续，BIT held缺口未虚报闭合 |
+| 恢复/CREATE/所有family | 每原owner/retry/IO/catalog/query/storage/ops要求 | temp/CLOG普通owner重试、CREATE与其它原未闭环继续，未证private source不导入 |
+| 总账验收 | 每原条目完整证据/状态/checkbox/commit一致 | 22complete166partial70unverified15deferred；完成gate拒绝，无push/Actions/deferred安全恢复 |
+
+旧7504full6359已实际1/all1032标签、旧82bf48181实际1/all1031；不把22失败
+当22bug或当前结论。所有helpers/source冻结后启动，无观察到期kill/restart。
+完整出处/输入/失败/源码映射见integration。
+
+## 2026-10-07 历史完整273目标计划（7ecf）
 
 当前test/source `7ecfd8eb`：687auto+1frontend/350registered/58TU，77项独立
 source/test commit。DDL fixture错误游标单项修复，不改任何生产源/头/格式。

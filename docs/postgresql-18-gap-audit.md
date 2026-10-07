@@ -1,4 +1,35 @@
-# 2026-10-07 最新7ecf总清单 checkpoint
+# 2026-10-07 最新3ffb总清单 checkpoint
+
+当前source `3ffbb516`：690auto-native+1实际frontend/352registered/58TU，
+80项独立source/test commit。本轮7ecf的DDL fixture游标、8467的enum真实类型
+投影/CASE/排序、0ffd的quoted/uppercase CREATE/DROP身份、3ffb的BETWEEN布尔
+元数据分别提交；不以四个有限根因修复冒完整family关闭。
+
+Root exact0ffd normal83683真正fresh全58/无donor，三处新公共头一致；repeat/
+all58receipts/stamp/freeze0，完整33native28511/6whole67368/strict180006原
+enum矩阵均0。Root current77原矩阵94923真的1/首rank断言；quoted SQL和原
+强assert不改，新增大小写lifecycle控制。最终current3ffb normal71958为0，
+soleExprHelper fresh+57当期0ffd完整proved正常donors；非又一fresh58/SAN。
+完整15native74973、7whole35207、strict180006永久BETWEEN矩阵均0；正常
+冻结SHA/范围见integration。原UPDATE/DELETE范围42804及空表错误真实修好，
+非Boolean WHERE仍拒绝且无sequence副作用。原default期限/磁盘/SQL不改。
+
+原current79完整BETWEEN wire96456为1，private首11native的BIGINT/INT作者
+seed错误保留，纠正仅seed+descriptor断言后11全0；原完整postgres协议
+27151仍1/早期prepared ALTER超时，不借专项绿宣该大文件或全suite通过。
+当前原690+frontend/352 full42496已启动LIVE，独立clean树原runner，58normal/
+57test-production仅全输入/receipt/byte证明迁移，不冒fresh58/57或全绿。
+旧7504full6359已真实1/1032完整标签，678native331registered+frontend1PASS，
+6native16registered FAIL；旧82bf48181也真实1，均不算独立bug数/当前批准。
+
+ENUM aggregate/customOID/ALTER/quotedphysical/sidecar、BIT held literal/IN/
+typing/CAST/operators/descriptor/binary、temp/CLOG普通owner/retry、CREATE
+与全部原未闭环要求继续；默认C/enUS比较环境差异独立实证，不改global
+locale凑绿。总账22complete166partial70unverified15deferred不变；完成gate
+仍拒绝，不push、不启用Actions，用户跳过安全/TDE仍deferred。完整映射/证据
+及下一动作见integration/closeout。
+
+# 2026-10-07 历史7ecf总清单 checkpoint
 
 当前test/source `7ecfd8eb`：687auto-native+1实际frontend/350registered/58TU，
 77项独立source/test commit。`7ecfd8eb` 修正原DDL回归错误的WAL游标；原完整
