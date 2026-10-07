@@ -783,3 +783,12 @@
 - [Logical Replication Architecture](https://www.postgresql.org/docs/18/logical-replication-architecture.html)
 - [Extending SQL](https://www.postgresql.org/docs/18/extend.html)
 - [PostgreSQL 18 release notes](https://www.postgresql.org/docs/18/release-18.html)
+# 2026-10-07 当前执行 checkpoint（后续段落为历史）
+
+最新 ROOT source `c62d5579`，数组物理列描述符 `dd05e9dc`、typed view OLD/NEW `9b04671e`、plain EXPLAIN root `c62d5579` 已逐项独立本地提交。当前 588 native / 311 registered / 58 production TU；正式 O2 构建 45445 正在运行，源码、头文件、测试与 registry 冻结。三个 private proof 均有真实旧红、强矩阵、matching native/serial adjacent 和严格 PostgreSQL 18.6（180006）证据；不冒称整合后的 whole suite 已通过。
+
+前一精确 f6 源版本的全部 58 正式 O2 编译 51258 与 repeat/audited immutable copy 73325 均实际 exit 0。冻结 binary SHA256 `0a086be0e532e8e9f804af090901a34db72807be071048c2ce95ea9b7e84aa4f`；58 source/header/flags/signatures/stamp、测试和 manifest 已核实。不可变副本中的 116 fresh native 53646 / 60 wire 93171 当前运行中；原 full 586/308 尚未执行。这些结果只证明 f6，不证明后续 c62。更早 4f 的原 full 564/293 runner 15248 已实际 exit 1：native 560 pass / 4 fail，registered 290 pass / 3 fail（原完整协议 scalar SQLSTATE、原 UNNEST、PL destination 一次执行计数）；原 SQL/assertions/deadlines 与全部失败日志保留。
+
+下一步：完成 c62 正式构建及强整合回归；独立修复真实模式谓词 BOOL typing（旧 native 上 NOT LIKE 输出 TEXT，SELECT/UPDATE/DELETE/CASE 报 42804，同一整套协议矩阵在 180006 已通过）；继续 coherent multi-engine heap/WAL 和独立 BTree physical entry loss、ProjectSet/quantified sources、array element typmods 等已复现问题，再运行最新源码的原完整 native/registered runner。总 273 仍 22 complete / 166 partial / 70 unverified / 15 deferred，未完成；不 push、不启用 Actions、不恢复用户跳过的安全/TDE专项。
+
+## 历史 checkpoint（以下 live/当前均指记录当时）

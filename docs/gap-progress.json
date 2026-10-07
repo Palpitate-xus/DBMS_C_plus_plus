@@ -2,6 +2,32 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Three independent ROOT ARRAY/typed VIEW/plain EXPLAIN commits; f6 formal58 and audited copy0; old original full4f terminal1",
+      "gap_ids": ["SQL-04", "TYPE-09", "QRY-01", "DML-02", "DML-05"],
+      "status": "partial",
+      "commits": ["dd05e9dc", "9b04671e", "c62d5579"],
+      "evidence": [
+        "docs/issue-ready-source-integration.md",
+        "docs/issue-physical-array-protocol-descriptor.md",
+        "docs/issue-view-trigger-typed-old-new.md",
+        "docs/issue-explain-read-root-constant-planning.md"
+      ],
+      "tests": [
+        "tests/physical_array_builtin_oid_test.cpp",
+        "tests/physical_array_protocol_descriptor_e2e_test.py",
+        "tests/view_trigger_typed_parameter_test.cpp",
+        "tests/view_trigger_typed_values_protocol_e2e_test.py",
+        "tests/explain_root_constant_planning_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "reproduction": "Independent actual array scalar-OID failures, original joined-view UPDATE42703 and plain EXPLAIN root-priority failures retained. New exactf6 mode predicate native shows NOTLIKE TEXT and SELECT/UPDATE/DELETE/CASE42804; entire new strict180006 matrix0 before candidate repair.",
+        "fix": "ARRAY physical descriptor and BOOL arrayOID, typed declared OLD/NEW slots with NULL bitmap/sameOLD SET and rollback, retained actual EXPLAIN execution root. Separate ROOT commits with no header/ABI change; VIEW depends ARRAY; no duplicate old RETURNING fixture import.",
+        "focused_tests": "Private complete strong ARRAY matrix/native7/wire8/ref1800060; VIEW typed value/owner rollback matrix/native18/wire8/ref1800060, unchanged full crosses2764/2773 then NOTLIKE2867 fails; EXPLAIN19x4/native7/wire8/ref1800060. None is current ROOT O2 whole-suite proof.",
+        "full_suite": "SOURCEc62d5579 current588native311registered58TU; normalbuild45445 live, inputsfrozen; matching combination notrun. Previous f6 freshall58 51258 and auditedcopy73325 actual0, binarySHA0a086be0e532e8e9f804af090901a34db72807be071048c2ce95ea9b7e84aa4f; immutable116native53646/60wire93171 live, originalfull586/308 notrun. Older original4f full564/29315248 actualterminal1 native560/4 and registered290/3; fullSQL/assertions/deadlines preserved.",
+        "scope": "273 unchanged22complete166partial70unverified15deferred. Multi-engine heap/WAL row loss and independent BTree entry loss, mode predicates, ProjectSet/quantified sources, arraytypmods and remainingfamily requirements remainactive. No push/Actionsenablement/deferredsecurityrestart."
+      }
+    },
+    {
       "issue": "Nine independent ROOT integrations; previous107/1native and52/4wire terminal failures retained; new586/308 normal58 build live",
       "gap_ids": [
         "SQL-04",

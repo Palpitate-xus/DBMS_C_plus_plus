@@ -360,3 +360,19 @@
 4. 然后按 B2–B5 推进 catalog / 事务化 DDL、持久性、资源治理及剩余功能族，逐项补实测证据。用户跳过的安全 / TDE 专项仍不计完成。
 5. CAT-15：第 652 项 quoted schema 名含点号的序列路径，以及第 672 项 `public."a.b"` 与 `a.b` 的旧式物理键碰撞，均已改用可逆编码并纳入正式差分。后者在启动时按 catalog 归属迁移旧 public 带点号序列文件，重启测试验证计数值延续；归属歧义时拒绝猜测。序列 namespace 的全部依赖、并发、崩溃和旧格式组合仍未系统验收，CAT-15 仍为 partial。
 6. IDX-03 / IDX-14 / OPT-15 / OPT-16：第 823 项 B-tree 加载／创建分离与第 824 项主键编码／复合成员规划已定向验证；上述最新整套仍有 VACUUM 夹具与超时失败，先处理并复跑。第 825 项缓存代际失效、第 826 项 Hash/Bloom Bitmap/DNF 失败检查、第 827 项 Bitmap EXPLAIN 节点、第 828 项 JSON 可选逗号、第 829 项 JSON cache-hit framing 均有旧版本失败与新版本定向通过证据，各隔离正式生产构建／正式专项协议已退出码 0；825／829 完整协议也退出码 0。第 830 项 JSON ANALYZE 单文档与真实计数的新增协议及 5 个 C++ 通过，相邻／完整协议与隔离正式构建进行中。下一步处理 VACUUM 夹具、文本 TIMING FALSE、缺失 ANALYZE 时的默认基数；整数条件 0001 在普通 SELECT 返回原行而 EXPLAIN ANALYZE 实际为零已复现，类型归一化需修复。继续 Hash/Bloom 运行时加载／显式构建和索引 rollback incomplete 的真实持久化状态。功能族均保持 partial，总清单未完成，用户跳过项不重新开启。
+# 2026-10-07 当前总清单执行计划
+
+当前 source `c62d5579`，588 native / 311 registered / 58 TU。总清单仍为 273：22 complete、166 partial、70 unverified、15 deferred；下面历史报告不代表当前完成状态。
+
+| 顺序 | 实际工作与验收 | 当前状态 |
+| --- | --- | --- |
+| 1 | 每项独立提交数组物理类型、view OLD/NEW typed datum、plain EXPLAIN retained root；正式 O2 matching 全 58 signatures/stamp + 强矩阵整合回归 | ROOT `dd05e9dc` / `9b04671e` / `c62d5579` 已提交；45445 构建运行中，整合矩阵未执行 |
+| 2 | 收集前一精确 f6 不可变版本的 116 native / 60 wire 终态；保留原脚本、完整断言、原 deadline | f6 fresh58 编译与 audited copy 均 exit 0；53646 / 93171 运行中，只证明 f6 |
+| 3 | 从真实失败独立修复模式谓词 BOOL typing、multi-engine heap/WAL 丢行和 BTree entry loss；补强失败持久性、旧快照、owner lifetime、恢复及零副作用控制 | NOT LIKE native 真实 42804/TEXT；整套 strict180006 模式 oracle exit 0；heap/BTree 强 red 尚未关闭 |
+| 4 | 完成 ProjectSet/quantified source 与普通 UNNEST、数组元素 typmods/真实目录字段等未完成机制，每项独立复现、验证和 commit | 独立工作树进行中，不以 fail-closed 0A000 或简单烟测当作实现 |
+| 5 | 在下一份实际 verified 最新源码快照上执行原始全 native / 全 registered runner，归档全部失败并继续逐项修；随后推进 273 项各自剩余要求及严格 PG18 对照 | 旧 4f full15248 实际 exit 1，560/4 native、290/3 registered；f6 full586/308 尚未运行，不能记全绿 |
+| 6 | 对每个非 deferred 项按原 scope 核对实现、测试、oracle 与持久化证据，执行文档和总账 validators；只有 require-complete 真通过后报告完成 | 总清单仍不满足完成 gate；不改变剩余项目定义 |
+
+只本地 git commit，由用户 push；不启用 GitHub Actions，不恢复已跳过的安全/TDE。后面的 checkpoint 保留当时状态，其中“当前/live”不是本次实时状态。
+
+## 历史执行记录

@@ -1,5 +1,48 @@
 # Independent source integrations after canonical 75090
 
+## Latest c62 checkpoint: three additional independent source commits
+
+| Independent repair | Private commit | ROOT commit |
+| --- | --- | --- |
+| Physical array OID/length/structured and prepared descriptors | `dc7469ea` | `dd05e9dc` |
+| Structured typed view SQL-action OLD/NEW and same-OLD SET | `bbc89ca5` | `9b04671e` |
+| Plain/ANALYZE EXPLAIN constant planning on the retained root | `ae095935` | `c62d5579` |
+
+These are three separate commits, not a squash. ARRAY precedes the VIEW
+dependency; the already-verified RETURNING fixture `ab7972eb` is not imported
+twice. No public header or ABI change is introduced here. Current source is
+c62d5579,588native/311registered/58TU. Formal normal-O2 build45445 is live;
+source/header/test/registry inputs remain frozen during compilation. Matching
+ROOT combination tests have not run. Each issue document retains the exact
+private baseline/candidate/reference failures, final strong matrix and proof
+scope; private O0 controls are not ROOT O2/full-suite evidence.
+
+The previous f6 fresh all58 formal build51258 and repeat/audited immutable
+copy73325 actually exit0. Frozen binary SHA256:
+`0a086be0e532e8e9f804af090901a34db72807be071048c2ce95ea9b7e84aa4f`.
+Artifacts and unchanged detached source are in
+`/tmp/dbms-root-storage-mv-root-combination.26UiCBTM`.
+All source/header/flags/58 signatures/stamp and test/manifest bytes were
+verified before copying matching ROOT normal objects, with only path-addressed
+receipts readdressed. It is not a private fresh58 build. New116fresh-native53646
+and60wire93171 are live on that immutable f6 snapshot. Originalfull586/308 has
+not run; no result from these inputs proves c62.
+
+The older original full4f564/293 runner15248 actually exits1 after the complete
+original runner: native560pass/4fail and registered290pass/3fail. The registered
+failures are originalfull scalar XX000-vs21000, unchanged originalUNNEST and
+PLdestination executed-once counter2-vs1. Native failures remain ambiguous
+conflict fixture, ordinary scalar WHERE/ORDER host counts and disjoint SSI.
+Log: `/tmp/dbms-canonical-case-quant.IqZfi3a6/full-registered.log`.
+Do not transfer newer fixes or focused greens onto this older failed run.
+
+Actual mode-predicate typing is independently reproduced: NOT LIKE output TEXT
+and WHERE/CASE42804 instead of BOOL. The whole new strong wire matrix passes
+actual180006 before the candidate fix. Coherent heap/WAL row loss, independent
+BTree cached-entry loss, ProjectSet/quantified sources, array element typmods
+and wider families remain in progress. Totals273=22/166/70/15 are unchanged;
+no push, Actions enablement or deferred-security restart.
+
 ## Latest f6 checkpoint: nine further independently committed integrations
 
 | Independent repair | Private commit | ROOT commit |
