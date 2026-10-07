@@ -6435,24 +6435,32 @@ bool tryDmlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         const auto* stmt = dynamic_cast<const DeleteStmt*>(parsed.stmt.get());
         if (!stmt || stmt->only) return false;
         bool viewTarget = false;
-        if (!stmt->usingClause && stmt->whereCurrentOf.empty()) {
+        if (stmt->whereCurrentOf.empty()) {
             if (!checkDatabase(s)) { handled = true; return true; }
             (void)resolveTable(s, stmt->tableName, true, &viewTarget);
         }
-        if (!stmt->usingClause && stmt->whereCurrentOf.empty() && !viewTarget) {
-            // Direct native bridge callers need the same retained target-only
-            // carrier as the SQL frontend: qualify exact typed OLD rows and
-            // evaluate RETURNING inside the atomic mutation boundary. Keep
+        if (stmt->whereCurrentOf.empty() && !viewTarget) {
+            // Direct native bridge callers consume the retained whole carrier:
+            // qualify exact typed OLD/source rows and evaluate RETURNING inside
+            // the atomic mutation boundary. Keep
             // metadata even for zero matches; never retry a partially owned
             // expression through the legacy string adapter.
             auto query = std::make_shared<PreparedQuery>(g_engine.prepareBoundQuery(
                 s.currentDB, rawSql.empty() ? sql : rawSql));
             auto* deletion = dynamic_cast<DeleteStmt*>(query->ast.get());
             if (!deletion) throw DbError("XX000", "DELETE lost its prepared statement identity");
-            prepareBoundDml(deletion, s, query, {}, {}, true);
-            auto result = executeAtomicDmlUnit(s, [&]() {
-                return executeBoundDml(deletion, s, query, {}, {}, {}, true);
-            });
+            NativeBoundDmlSources sources(s,query);
+            const auto sourceFactory=deletion->usingClause?sources.factory():PreparedDmlSourceFactory{};
+            const auto cursorFactory=deletion->usingClause?sources.cursorFactory():PreparedChildCursorFactory{};
+            DmlResult result;
+            try {
+                result=executeAtomicDmlUnit(s,[&] {
+                    return executeBoundDml(deletion,s,query,{},sourceFactory,cursorFactory,true);
+                });
+            } catch(const NativeMutationStatusError& failure) {
+                std::cout<<"ERROR: "<<failure.what()<<std::endl;
+                handled=true;return true;
+            }
             // This public legacy bridge historically spells NULL payloads
             // as "NULL" alongside their authoritative bitmap. Preserve that
             // representation only at publication; the bound runtime still
