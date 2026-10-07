@@ -6627,22 +6627,82 @@ std::vector<std::string> StorageEngine::listTablespaces(const std::string& dbnam
 // ========================================================================
 namespace {
 
-bool installHeapWritebackWalBarrier(const StorageEngine& engine,
-                                    const std::string& dbname,
-                                    PageAllocator& allocator) {
-    WALManager* wal = engine.getWAL(dbname);
-    if (!wal || !allocator.bufferPool()) return false;
-    // Capture the manager, not StorageEngine::getWAL(): writeback holds the
-    // buffer-pool mutex, while getWAL takes cacheMutex_. Background writeback
-    // takes those locks in the opposite order. The database-cache teardown
-    // path erases allocators before their corresponding WAL manager.
-    allocator.bufferPool()->setWritebackBarrier([wal]() {
-        return wal->XLogFlush(wal->currentWriteLsn());
-    });
-    return true;
+std::string canonicalStoragePath(const std::filesystem::path& path) {
+    std::error_code error;
+    auto canonical = std::filesystem::weakly_canonical(path, error);
+    if (error) {
+        error.clear();
+        canonical = std::filesystem::absolute(path, error).lexically_normal();
+        if (error) canonical = path.lexically_normal();
+    }
+    return canonical.string();
+}
+
+template <typename T> struct PhysicalStorageOwnerSlot {
+    std::mutex mutex;
+    std::weak_ptr<T> owner;
+};
+
+template <typename T>
+std::shared_ptr<PhysicalStorageOwnerSlot<T>> physicalStorageSlot(const std::string& key) {
+    struct Registry {
+        std::mutex mutex;
+        std::map<std::string, std::shared_ptr<PhysicalStorageOwnerSlot<T>>> slots;
+        size_t lookups = 0;
+    };
+    // Engines may be destroyed after unrelated function-local statics.
+    static auto* registry = new Registry;
+    std::lock_guard<std::mutex> lock(registry->mutex);
+    auto& entry = registry->slots[key];
+    if (!entry) entry = std::make_shared<PhysicalStorageOwnerSlot<T>>();
+    auto slot = entry;
+    if (++registry->lookups % 64 == 0) {
+        for (auto it = registry->slots.begin(); it != registry->slots.end();) {
+            // No operation can modify a sole registry-owned slot: acquiring
+            // an operation reference happens under this same registry lock.
+            if (it->second.use_count() == 1 && it->second->owner.expired())
+                it = registry->slots.erase(it);
+            else ++it;
+        }
+    }
+    return slot;
 }
 
 }  // namespace
+
+std::shared_ptr<PageAllocator> StorageEngine::acquireSharedHeap(
+    const std::string& dbname, const std::filesystem::path& path,
+    size_t rowSize, size_t pageSize, uint32_t formatVersion,
+    const std::string& physicalCacheKey) const {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+    if (!getWAL(dbname)) return {};
+    const auto wal = walManagers_.at(dbname);
+    const auto physicalKey = canonicalStoragePath(path);
+    const auto slot = physicalStorageSlot<PageAllocator>(physicalKey);
+    // Opening a cold file serializes only that file, not every database.
+    std::lock_guard<std::mutex> ownerLock(slot->mutex);
+    const auto retain = [&](const std::shared_ptr<PageAllocator>& owner) {
+        if (!physicalCacheKey.empty()) pageAllocators_[physicalCacheKey] = owner;
+        return owner;
+    };
+    if (auto owner = slot->owner.lock()) {
+        if (owner->isOpen() && owner->bufferPool()->refersToCurrentFiles()) {
+            if (owner->rowSize() != rowSize || owner->pageSize() != pageSize ||
+                owner->formatVersion() != formatVersion) return {};
+            return retain(owner);
+        }
+    }
+    auto owner = std::make_shared<PageAllocator>(
+        physicalKey, rowSize, pageSize, formatVersion);
+    // Every writer uses this WAL owner. Its lifetime follows the heap,
+    // rather than the first StorageEngine that happened to open the file.
+    owner->bufferPool()->setWritebackBarrier([wal]() {
+        return wal->XLogFlush(wal->currentWriteLsn());
+    });
+    if (!owner->open()) return {};
+    slot->owner = owner;
+    return retain(owner);
+}
 
 PageAllocator* StorageEngine::getPageAllocator(const std::string& dbname,
                                                 const std::string& tablename) const {
@@ -6653,7 +6713,10 @@ PageAllocator* StorageEngine::getPageAllocator(const std::string& dbname,
     std::string key = dbname + "/" + tablename;
     auto it = pageAllocators_.find(key);
     if (it != pageAllocators_.end()) {
-        return it->second.get();
+        if (it->second && it->second->isOpen() &&
+            it->second->bufferPool()->refersToCurrentFiles())
+            return it->second.get();
+        pageAllocators_.erase(it);
     }
 
     TableSchema tbl = getTableSchema(dbname, tablename);
@@ -6671,9 +6734,17 @@ PageAllocator* StorageEngine::getPageAllocator(const std::string& dbname,
         }
     }
     std::filesystem::path dt = dataPath(dbname, tablename);
+    // An ordinary runtime heap miss is not CREATE TABLE. A partitioned
+    // parent has no tuples of its own and retains the existing empty-header
+    // locator contract; real rows live in its separately owned forks.
+    std::error_code dataError;
+    if (tbl.partitionType == TableSchema::PartitionType::None &&
+        (!std::filesystem::is_regular_file(dt, dataError) || dataError))
+        return nullptr;
 
-    auto pa = std::make_unique<PageAllocator>(dt.string(), tbl.rowSize(), pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion);
-    if (!installHeapWritebackWalBarrier(*this, dbname, *pa) || !pa->open()) {
+    auto pa = acquireSharedHeap(dbname, dt, tbl.rowSize(),
+        pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion);
+    if (!pa) {
         return nullptr;
     }
     PageAllocator* ptr = pa.get();
@@ -7465,11 +7536,12 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
                 ? partitionDataPath(dbname, tablename, leaf.partition)
                 : partitionDataPath(dbname, tablename, leaf.partition,
                                     leaf.subPartition);
-            auto ppa = std::make_unique<PageAllocator>(
-                path.string(), tbl.rowSize(),
+            auto ppa = acquireSharedHeap(
+                dbname, path, tbl.rowSize(),
                 pageSizeForFormatVersion(tbl.formatVersion),
-                tbl.formatVersion);
-            if (!ppa->open()) return false;
+                tbl.formatVersion, dbname + "/" + tablename + "#" + leaf.partition +
+                    (leaf.subPartition.empty() ? "" : "#" + leaf.subPartition));
+            if (!ppa) return false;
             const uint32_t pageCount = ppa->numPages();
             for (uint32_t pageId = 1; pageId < pageCount; ++pageId) {
                 checkForQueryInterrupt();
@@ -7490,7 +7562,6 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
                 ppa->unpinPage(pageId);
                 lockManager_.pageUnlock(dbname, tablename, pageId);
             }
-            ppa->close();
         }
         return true;
     }
@@ -13792,9 +13863,10 @@ DBStatus StorageEngine::createBrinIndex(const std::string& dbname,
                 for (size_t i = 0; i < t.hashPartitions; ++i) partNames.push_back("p" + std::to_string(i));
             }
             for (const auto& pname : partNames) {
-                auto ppa = std::make_unique<PageAllocator>(
-                    partitionDataPath(dbname, actualTableName, pname).string(), t.rowSize(), pageSizeForFormatVersion(t.formatVersion), t.formatVersion);
-                if (!ppa->open() || !scanAllocator(*ppa, t)) return false;
+                auto ppa = acquireSharedHeap(
+                    dbname, partitionDataPath(dbname, actualTableName, pname), t.rowSize(), pageSizeForFormatVersion(t.formatVersion), t.formatVersion,
+                    dbname + "/" + actualTableName + "#" + pname);
+                if (!ppa || !scanAllocator(*ppa, t)) return false;
             }
         } else {
             // Use the shared allocator so CREATE INDEX observes dirty heap
@@ -15393,12 +15465,21 @@ PageAllocator* StorageEngine::getToastPageAllocator(const std::string& dbname,
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     std::string key = dbname + ":" + tablename;
     auto it = toastPageAllocators_.find(key);
-    if (it != toastPageAllocators_.end()) return it->second.get();
-    auto pa = std::make_unique<PageAllocator>(toastDataPath(dbname, tablename).string(),
+    if (it != toastPageAllocators_.end()) {
+        if (it->second && it->second->isOpen() &&
+            it->second->bufferPool()->refersToCurrentFiles())
+            return it->second.get();
+        toastPageAllocators_.erase(it);
+    }
+    const auto path = toastDataPath(dbname, tablename);
+    std::error_code dataError;
+    if (!std::filesystem::is_regular_file(path, dataError) || dataError)
+        return nullptr;
+    auto pa = acquireSharedHeap(dbname, path,
                                               /*rowSize=*/0, // variable-length rows
                                               /*pageSize=*/8192,
                                               /*formatVersion=*/DATA_FILE_FORMAT_VERSION);
-    if (!pa->open()) return nullptr;
+    if (!pa) return nullptr;
     PageAllocator* ptr = pa.get();
     toastPageAllocators_[key] = std::move(pa);
     return ptr;
@@ -17157,9 +17238,9 @@ DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
     // Re-create the current page-format heap(s) and TOAST relation.
     const size_t pageSize = pageSizeForFormatVersion(tbl.formatVersion);
     if (tbl.partitionType == TableSchema::PartitionType::None) {
-        auto pa = std::make_unique<PageAllocator>(
-            dataPath(dbname, tablename).string(), tbl.rowSize(), pageSize, tbl.formatVersion);
-        pa->open();
+        auto pa = acquireSharedHeap(
+            dbname, dataPath(dbname, tablename), tbl.rowSize(), pageSize, tbl.formatVersion);
+        if (!pa) return DBStatus::IO_ERROR;
         pageAllocators_[key] = std::move(pa);
     } else {
         std::vector<std::string> partitions;
@@ -17484,9 +17565,9 @@ DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
 
     const size_t pageSize = pageSizeForFormatVersion(tbl.formatVersion);
     if (tbl.partitionType == TableSchema::PartitionType::None) {
-        auto pa = std::make_unique<PageAllocator>(
-            dataPath(dbname, tablename).string(), tbl.rowSize(), pageSize, tbl.formatVersion);
-        pa->open();
+        auto pa = acquireSharedHeap(
+            dbname, dataPath(dbname, tablename), tbl.rowSize(), pageSize, tbl.formatVersion);
+        if (!pa) return DBStatus::IO_ERROR;
         pageAllocators_[key] = std::move(pa);
     } else {
         for (const auto& leaf : partitionLeaves(tbl)) {
@@ -17717,10 +17798,10 @@ DBStatus StorageEngine::alterTableAlterColumnType(const std::string& dbname,
 
     // 5. Re-create the empty data file with the NEW row size.
     {
-        auto pa = std::make_unique<PageAllocator>(
-            dataPath(dbname, tablename).string(), tbl.rowSize(),
+        auto pa = acquireSharedHeap(
+            dbname, dataPath(dbname, tablename), tbl.rowSize(),
             pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion);
-        pa->open();
+        if (!pa) return DBStatus::IO_ERROR;
         pageAllocators_[key] = std::move(pa);
     }
 
@@ -24778,18 +24859,18 @@ DBStatus StorageEngine::insertInternal(
 
     // Write row into page-based storage
     PageAllocator* pa = nullptr;
-    std::unique_ptr<PageAllocator> partPa;
+    std::shared_ptr<PageAllocator> partPa;
     if (!targetPartition.empty() && !targetSubPartition.empty()) {
-        partPa = std::make_unique<PageAllocator>(partitionDataPath(dbname, tablename, targetPartition, targetSubPartition).string(), tbl.rowSize(), pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion);
-        if (!installHeapWritebackWalBarrier(*this, dbname, *partPa) ||
-            !partPa->open()) {
+        partPa = acquireSharedHeap(dbname, partitionDataPath(dbname, tablename, targetPartition, targetSubPartition), tbl.rowSize(), pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion,
+            dbname + "/" + tablename + "#" + targetPartition + "#" + targetSubPartition);
+        if (!partPa) {
             return failBeforeHeapInsert(DBStatus::INVALID_VALUE);
         }
         pa = partPa.get();
     } else if (!targetPartition.empty()) {
-        partPa = std::make_unique<PageAllocator>(partitionDataPath(dbname, tablename, targetPartition).string(), tbl.rowSize(), pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion);
-        if (!installHeapWritebackWalBarrier(*this, dbname, *partPa) ||
-            !partPa->open()) {
+        partPa = acquireSharedHeap(dbname, partitionDataPath(dbname, tablename, targetPartition), tbl.rowSize(), pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion,
+            dbname + "/" + tablename + "#" + targetPartition);
+        if (!partPa) {
             return failBeforeHeapInsert(DBStatus::INVALID_VALUE);
         }
         pa = partPa.get();
@@ -26047,15 +26128,15 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
         auto targetParts = getTargetPartitions(tbl, conds);
         if (!targetParts.empty()) {
             for (const auto& pname : targetParts) {
-                auto ppa = std::make_unique<PageAllocator>(
-                    partitionDataPath(dbname, tablename, pname).string(), tbl.rowSize(), pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion);
-                if (!ppa->open()) return failScan();
+                auto ppa = acquireSharedHeap(
+                    dbname, partitionDataPath(dbname, tablename, pname), tbl.rowSize(), pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion,
+                    dbname + "/" + tablename + "#" + pname);
+                if (!ppa) return failScan();
                 uint32_t np = ppa->numPages();
                 for (uint32_t pid = 1; pid < np; ++pid) {
                     registerPageSiread(pid);
                     char* buf = ppa->fetchPage(pid);
                     if (!buf) {
-                        ppa->close();
                         return failScan();
                     }
                     PageWrapper page(buf, ppa->pageSize(), tbl.formatVersion);
@@ -26070,7 +26151,6 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
                     });
                     ppa->unpinPage(pid);
                 }
-                ppa->close();
             }
             finishSerializablePredicateRead();
             return ids;
@@ -40540,10 +40620,31 @@ std::vector<std::string> StorageEngine::crossJoin(
 WALManager* StorageEngine::getWAL(const std::string& dbname) const {
     requireDatabaseTransactionOwnership();
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
-    auto it = walManagers_.find(dbname);
-    if (it != walManagers_.end()) return it->second.get();
-    auto wal = std::make_unique<WALManager>(walPath(dbname));
-    if (!wal->ensureOpen()) return nullptr;
+    // A peer's cached background work can outlive DROP DATABASE. It must
+    // not recreate that database merely to initialize a WAL directory.
+    if (!databaseExists(dbname)) return nullptr;
+    const auto path = walPath(dbname);
+    std::error_code error;
+    std::filesystem::create_directory(path, error);
+    if (error) return nullptr;
+    struct stat directory {};
+    if (::stat(path.c_str(), &directory) != 0 || !S_ISDIR(directory.st_mode))
+        return nullptr;
+    const auto key = canonicalStoragePath(path) + ":" +
+        std::to_string(directory.st_dev) + ":" + std::to_string(directory.st_ino);
+    const auto slot = physicalStorageSlot<WALManager>(key);
+    std::lock_guard<std::mutex> ownerLock(slot->mutex);
+    auto wal = slot->owner.lock();
+    if (wal && !wal->refersToCurrentDirectory()) wal.reset();
+    if (!wal) {
+        wal = std::make_shared<WALManager>(canonicalStoragePath(path));
+        if (!wal->ensureOpen(false)) return nullptr;
+        struct stat opened {};
+        if (::stat(path.c_str(), &opened) != 0 ||
+            opened.st_dev != directory.st_dev || opened.st_ino != directory.st_ino)
+            return nullptr;
+        slot->owner = wal;
+    }
     WALManager* ptr = wal.get();
     walManagers_[dbname] = std::move(wal);
     return ptr;
@@ -40854,11 +40955,11 @@ bool StorageEngine::redoPageImage(const std::string& dbname, const std::string& 
                 ? partitionDataPath(dbname, tablename, leaf.partition)
                 : partitionDataPath(dbname, tablename, leaf.partition,
                                     leaf.subPartition);
-            auto allocator = std::make_unique<PageAllocator>(
-                path.string(), table.rowSize(),
+            auto allocator = acquireSharedHeap(
+                dbname, path, table.rowSize(),
                 pageSizeForFormatVersion(table.formatVersion),
                 table.formatVersion);
-            if (!allocator->open()) return false;
+            if (!allocator) return false;
             pa = allocator.get();
             pageAllocators_[key] = std::move(allocator);
         }

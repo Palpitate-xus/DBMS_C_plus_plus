@@ -1705,7 +1705,11 @@ private:
     // and database lifecycle operations. A recursive mutex is intentional:
     // cache-owning DDL paths call other cache helpers while holding it.
     mutable std::recursive_mutex cacheMutex_;
-    mutable std::map<std::string, std::unique_ptr<PageAllocator>> pageAllocators_;
+    mutable std::map<std::string, std::shared_ptr<PageAllocator>> pageAllocators_;
+    std::shared_ptr<PageAllocator> acquireSharedHeap(
+        const std::string& dbname, const std::filesystem::path& path,
+        size_t rowSize, size_t pageSize, uint32_t formatVersion,
+        const std::string& physicalCacheKey = "") const;
     void closeAllPageAllocators();
     // Flush every loaded cache for the database. heapPages=false skips the
     // bulk heap/TOAST page flushes; COMMIT instead writes its main-heap pages
@@ -1756,7 +1760,7 @@ private:
     void closeAllCommitLogs();
 
     // WAL manager per database
-    mutable std::unordered_map<std::string, std::unique_ptr<WALManager>> walManagers_;
+    mutable std::unordered_map<std::string, std::shared_ptr<WALManager>> walManagers_;
     void closeAllWALs();
 
     // Catalog service (Phase 2 wiring): per-database CatalogManager cache.
@@ -1828,7 +1832,7 @@ private:
     void closeAllIndexes();
 
     // TOAST relation + index caches
-    mutable std::map<std::string, std::unique_ptr<PageAllocator>> toastPageAllocators_;
+    mutable std::map<std::string, std::shared_ptr<PageAllocator>> toastPageAllocators_;
     mutable std::map<std::string, std::unique_ptr<BPTree>> toastIndexes_;
     PageAllocator* getToastPageAllocator(const std::string& dbname, const std::string& tablename) const;
     BPTree* getToastIndex(const std::string& dbname, const std::string& tablename) const;

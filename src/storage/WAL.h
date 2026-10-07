@@ -189,11 +189,15 @@ public:
     // Reset the WAL (delete all segment files). Used after checkpoint.
     void reset();
 
-    // Ensure walDir exists.
-    bool ensureOpen();
+    // Standalone users may create a new directory; an engine runtime
+    // getter opens only the directory its database lifecycle already owns.
+    bool ensureOpen(bool createDirectory = true);
+
+    // A retained manager must not follow a DROP/recreate of its pathname.
+    bool refersToCurrentDirectory() const;
 
     // Validate that the WAL directory is usable.
-    bool isOpen() const { return open_; }
+    bool isOpen() const { return open_ && refersToCurrentDirectory(); }
 
     // Path to a specific segment file (useful for tests / archiving).
     std::filesystem::path segmentPath(uint32_t segNo) const;
@@ -222,6 +226,7 @@ private:
     // of the segment currently being appended to. Reopened only on segment
     // switch instead of per record.
     mutable int lockFd_ = -1;
+    int directoryFd_ = -1;
     int writeFd_ = -1;
     uint32_t writeFdSeg_ = 0;
     bool writeFdValid_ = false;

@@ -453,7 +453,7 @@ void PageAllocator::close() {
     std::lock_guard<std::mutex> allocLock(allocMutex_);
     if (bp_) {
         if (bp_->isOpen()) {
-            if (!flushWithAllocationMarker(false)) {
+            if (bp_->refersToCurrentFiles() && !flushWithAllocationMarker(false)) {
                 std::cerr
                     << "[storage] failed to flush heap allocator during close; "
                        "discarding cached writeback for WAL/marker recovery: "
@@ -648,6 +648,7 @@ bool PageAllocator::flush() {
     std::lock_guard<std::mutex> publicationLock(publicationMutex->mutex);
     std::lock_guard<std::mutex> flushLock(flushMutex_);
     std::lock_guard<std::mutex> allocLock(allocMutex_);
+    if (!bp_->refersToCurrentFiles()) return false;
     return flushWithAllocationMarker(false);
 }
 
@@ -657,6 +658,7 @@ bool PageAllocator::flushAllocationStateForCommit() {
     std::lock_guard<std::mutex> publicationLock(publicationMutex->mutex);
     std::lock_guard<std::mutex> flushLock(flushMutex_);
     std::lock_guard<std::mutex> allocLock(allocMutex_);
+    if (!bp_->refersToCurrentFiles()) return false;
     return flushWithAllocationMarker(true);
 }
 
@@ -756,6 +758,7 @@ bool PageAllocator::flushDirtyUnpinned(
     std::lock_guard<std::mutex> publicationLock(publicationMutex->mutex);
     std::lock_guard<std::mutex> flushLock(flushMutex_);
     std::lock_guard<std::mutex> allocLock(allocMutex_);
+    if (!bp_->refersToCurrentFiles()) return false;
     if (!recoverPendingAllocationFlush()) return false;
 
     bool headerDirty = bp_->isPageDirty(0);
@@ -801,6 +804,7 @@ bool PageAllocator::flushPage(uint32_t pageId) {
     std::lock_guard<std::mutex> publicationLock(publicationMutex->mutex);
     std::lock_guard<std::mutex> flushLock(flushMutex_);
     std::lock_guard<std::mutex> allocLock(allocMutex_);
+    if (!bp_->refersToCurrentFiles()) return false;
     if (!recoverPendingAllocationFlush()) return false;
     if (pendingAllocationFlush_ &&
         !flushWithAllocationMarker(/*allocationOnly=*/true)) {

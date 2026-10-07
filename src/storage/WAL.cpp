@@ -243,14 +243,32 @@ WALManager::~WALManager() {
         ::close(lockFd_);
         lockFd_ = -1;
     }
+    if (directoryFd_ >= 0) ::close(directoryFd_);
 }
 
-bool WALManager::ensureOpen() {
+bool WALManager::refersToCurrentDirectory() const {
+    struct stat opened {}, current {};
+    return directoryFd_ >= 0 && ::fstat(directoryFd_, &opened) == 0 &&
+           ::stat(walDir_.c_str(), &current) == 0 &&
+           S_ISDIR(current.st_mode) && opened.st_dev == current.st_dev &&
+           opened.st_ino == current.st_ino;
+}
+
+bool WALManager::ensureOpen(bool createDirectory) {
+    if (directoryFd_ >= 0 && !refersToCurrentDirectory()) return false;
     if (open_) return true;
     std::error_code ec;
-    std::filesystem::create_directories(walDir_, ec);
-    if (ec) return false;
-    std::filesystem::create_directories(archiveStatusDir(), ec);
+    if (directoryFd_ < 0) {
+        if (createDirectory) {
+            std::filesystem::create_directories(walDir_, ec);
+            if (ec) return false;
+        }
+        directoryFd_ = ::open(walDir_.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (directoryFd_ < 0) return false;
+    }
+    if (!refersToCurrentDirectory()) return false;
+    // Never recreate a missing parent through a retained stale manager.
+    std::filesystem::create_directory(archiveStatusDir(), ec);
     if (ec) return false;
 
     // Load or infer timeline ID.
@@ -389,18 +407,20 @@ std::optional<Lsn> WALManager::lastRecordLsn() const {
 }
 
 int WALManager::acquireWalFileLock() const {
-    std::error_code ec;
-    std::filesystem::create_directories(walDir_, ec);
-    if (ec) return -1;
+    if (!refersToCurrentDirectory()) return -1;
     // Reuse the long-lived lock descriptor across operations. Only the flock
     // itself is taken/dropped per operation, preserving cross-process
     // semantics while removing the per-record open/close syscalls.
     if (lockFd_ < 0) {
-        int fd = ::open(lockPath().c_str(), O_RDWR | O_CREAT, 0644);
+        int fd = ::openat(directoryFd_, "wal.lock", O_RDWR | O_CREAT | O_CLOEXEC, 0644);
         if (fd < 0) return -1;
         lockFd_ = fd;
     }
     if (::flock(lockFd_, LOCK_EX) != 0) return -1;
+    if (!refersToCurrentDirectory()) {
+        ::flock(lockFd_, LOCK_UN);
+        return -1;
+    }
     return lockFd_;
 }
 
@@ -560,7 +580,7 @@ bool WALManager::markSegmentReadyForArchive(uint32_t segNo) {
 
 bool WALManager::markSegmentReadyForArchiveLocked(uint32_t segNo) {
     std::error_code ec;
-    std::filesystem::create_directories(archiveStatusDir(), ec);
+    std::filesystem::create_directory(archiveStatusDir(), ec);
     if (ec) return false;
     return writeEmptyFileAtomically(readyPath(segNo));
 }
