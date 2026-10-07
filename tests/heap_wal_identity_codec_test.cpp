@@ -61,6 +61,8 @@ int main() {
     assert(codec::event(event, decoded) && decoded.relationId == 99 && decoded.name == "items");
     event.header.xl_info = (uint32_t{RM_SMGR_ID} << 8) | XLOG_SMGR_RELATION_RETIRE;
     assert(codec::event(event, decoded));
+    event.header.xl_info = (uint32_t{RM_SMGR_ID} << 8) | XLOG_SMGR_RELATION_RETIRE_COMPLETE;
+    assert(codec::event(event, decoded));
     for (size_t length = 0; length < event.data.size(); ++length) {
         auto truncated = event;
         truncated.data.resize(length);

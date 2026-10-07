@@ -114,7 +114,8 @@ inline bool event(const XLogRecord& record, Event& result) {
     result = {};
     if (record.rmid() != RM_SMGR_ID ||
         (record.info() != XLOG_SMGR_RELATION_CREATE &&
-         record.info() != XLOG_SMGR_RELATION_RETIRE)) return false;
+         record.info() != XLOG_SMGR_RELATION_RETIRE &&
+         record.info() != XLOG_SMGR_RELATION_RETIRE_COMPLETE)) return false;
     size_t offset = 0;
     uint32_t magic = 0, version = 0, length = 0;
     if (!read(record.data, offset, magic) || !read(record.data, offset, version) ||

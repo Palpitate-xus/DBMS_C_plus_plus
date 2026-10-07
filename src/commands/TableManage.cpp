@@ -17003,15 +17003,17 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
     }
 
     const TableSchema retiringSchema = getTableSchema(dbname, tablename);
+    WALManager* retirementWal = nullptr;
+    const uint64_t retirementXid = transactionContext().inTransaction
+        ? transactionContext().currentTxnId : 0;
     if (retiringSchema.physicalRelationId != 0 && !retiringSchema.isUnlogged) {
-        WALManager* wal = getWAL(dbname);
+        retirementWal = getWAL(dbname);
         const auto payload = heap_wal_identity::event(
             retiringSchema.physicalRelationId, tablename);
-        const uint64_t xid = transactionContext().inTransaction
-            ? transactionContext().currentTxnId : 0;
-        const Lsn retirementLsn = wal ? wal->XLogInsert(
-            RM_SMGR_ID, XLOG_SMGR_RELATION_RETIRE, xid, payload) : INVALID_LSN;
-        if (!wal || retirementLsn == INVALID_LSN || !wal->XLogFlush(retirementLsn)) {
+        const Lsn retirementLsn = retirementWal ? retirementWal->XLogInsert(
+            RM_SMGR_ID, XLOG_SMGR_RELATION_RETIRE, retirementXid, payload) : INVALID_LSN;
+        if (!retirementWal || retirementLsn == INVALID_LSN ||
+            !retirementWal->XLogFlush(retirementLsn)) {
             lockManager_.unlock(tablename);
             return DBStatus::IO_ERROR;
         }
@@ -17104,11 +17106,32 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
                   << "not durably publish tlist.lst: " << dbname << "/"
                   << tablename << std::endl;
     }
+    bool retirementCompleted = tableListPersisted;
+    if (retirementCompleted && retirementWal) {
+        // Intent is write-ahead of irreversible unlink, not evidence that
+        // DROP finished. Publish authority to discard old images only after
+        // every relation unlink and the final catalog publication are durable.
+        retirementCompleted = index_file::syncDirectory(relationRoot) &&
+                              index_file::syncDirectory(dbPath(dbname));
+        if (retirementCompleted) {
+            const auto payload = heap_wal_identity::event(
+                retiringSchema.physicalRelationId, tablename);
+            const Lsn completion = retirementWal->XLogInsert(
+                RM_SMGR_ID, XLOG_SMGR_RELATION_RETIRE_COMPLETE,
+                retirementXid, payload);
+            retirementCompleted = completion != INVALID_LSN &&
+                                  retirementWal->XLogFlush(completion);
+        }
+        if (!retirementCompleted) {
+            std::cerr << "[catalog] DROP TABLE could not durably complete retirement: "
+                      << dbname << "/" << tablename << std::endl;
+        }
+    }
     invalidateCatalogTableList(dbname);
     invalidateCatalogSchema(dbname, tablename);
     dbms::resetRuntimeTableStats(dbname, tablename);
     lockManager_.unlock(tablename);
-    return tableListPersisted ? DBStatus::OK : DBStatus::IO_ERROR;
+    return retirementCompleted ? DBStatus::OK : DBStatus::IO_ERROR;
 }
 
 DBStatus StorageEngine::truncateTable(const std::string& dbname,
@@ -42495,6 +42518,12 @@ bool StorageEngine::recoverAllDatabases() {
             }
         }
         std::map<uint64_t, std::pair<uint64_t, Lsn>> relationBirths;
+        struct RetirementIntent {
+            uint64_t xid;
+            Lsn lsn;
+            std::string name;
+        };
+        std::map<uint64_t, RetirementIntent> retirementIntents;
         std::map<uint64_t, Lsn> committedRetirements;
         uint64_t relationHighwater = 1;
         for (const auto& [identity, name] : physicalRelations) {
@@ -42507,7 +42536,8 @@ bool StorageEngine::recoverAllDatabases() {
             if (!record || record->header.xl_tot_len == 0) break;
             if (record->rmid() == RM_SMGR_ID &&
                 (record->info() == XLOG_SMGR_RELATION_CREATE ||
-                 record->info() == XLOG_SMGR_RELATION_RETIRE)) {
+                 record->info() == XLOG_SMGR_RELATION_RETIRE ||
+                 record->info() == XLOG_SMGR_RELATION_RETIRE_COMPLETE)) {
                 heap_wal_identity::Event event;
                 if (!heap_wal_identity::event(*record, event) ||
                     !validStoredIdentifier(event.name, MAX_TABLE_NAME_LEN) ||
@@ -42521,9 +42551,23 @@ bool StorageEngine::recoverAllDatabases() {
                     if (!relationBirths.emplace(event.relationId,
                             std::make_pair(record->header.xl_xid, historyLsn)).second)
                         return false;
-                } else if (record->header.xl_xid == 0 ||
-                           committedXids.count(record->header.xl_xid)) {
-                    committedRetirements[event.relationId] = historyLsn;
+                } else if (record->info() == XLOG_SMGR_RELATION_RETIRE) {
+                    retirementIntents[event.relationId] = {
+                        record->header.xl_xid, historyLsn, event.name};
+                } else {
+                    const auto intent = retirementIntents.find(event.relationId);
+                    if (intent == retirementIntents.end() ||
+                        intent->second.xid != record->header.xl_xid ||
+                        intent->second.name != event.name ||
+                        intent->second.lsn >= historyLsn) {
+                        std::cerr << "[recovery] retirement completion without matching intent in "
+                                  << dbname << " at LSN " << historyLsn << '\n';
+                        return false;
+                    }
+                    if (record->header.xl_xid == 0 ||
+                        committedXids.count(record->header.xl_xid)) {
+                        committedRetirements[event.relationId] = historyLsn;
+                    }
                 }
             }
             historyLsn += record->header.xl_tot_len;

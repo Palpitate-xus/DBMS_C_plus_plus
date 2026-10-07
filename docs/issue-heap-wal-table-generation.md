@@ -21,7 +21,7 @@ migrated. A partial new trailer cannot fall back to a valid legacy schema.
 Serialization remains field-by-field, not raw `sizeof(TableSchema)`.
 
 Heap full-page images and TRUNCATE records gain a strict, versioned generation
-extension. Durable CREATE/RETIRE lifecycle records carry the actual owning
+extension. Durable CREATE/retirement-intent/completion records carry the actual owning
 transaction ID. Recovery builds an exact generation-to-current-schema map
 and resolves renames through it. Absence is not proof of deletion: it may
 skip an older absent generation only with a later committed retirement, or
@@ -43,6 +43,12 @@ All artifacts are under `/tmp/dbms-heap-wal-identity.dcGDltHu/`; this document
 does not label intermediate groups as wholly passing. These native storage
 tests are not PostgreSQL SQL differential tests. The separate RR/TOAST
 fixture correction has strict PostgreSQL 18.6 evidence and its own commit.
+
+Combined follow-up evidence is recorded in
+`issue-heap-wal-retirement-completion.md`: independent xid reload `02896e3b`,
+the unchanged same-parent crash loop, normal 19/19 and scoped sanitizer 8/8
+are actual final successes. Retirement intent alone is not authority; its
+completion protocol is a separate root-cause fix and required dependency.
 
 This item closes table-birth/name identity only after the combined strong
 gate. It does not prove general heap-layout rewrite epochs, physical DROP
