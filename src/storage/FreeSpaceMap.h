@@ -1,11 +1,13 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
 
 namespace dbms {
+namespace derived_map_file { struct Cache; }
 
 // ========================================================================
 // FreeSpaceMap - 记录每个数据页的空闲空间百分比
@@ -49,13 +51,9 @@ public:
 private:
     std::string filename_;
     int fd_ = -1;
-    mutable std::vector<uint8_t> cache_;
-    mutable bool dirty_ = false;
-    mutable uint32_t numPages_ = 0;
+    std::shared_ptr<derived_map_file::Cache> cache_;
     mutable std::mutex mutex_;
 
-    void ensureSizeLocked(uint32_t pageId);
-    bool writeToDiskLocked() const;
 };
 
 } // namespace dbms

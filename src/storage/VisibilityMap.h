@@ -2,11 +2,13 @@
 
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
 
 namespace dbms {
+namespace derived_map_file { struct Cache; }
 
 // ========================================================================
 // VisibilityMap - 记录每个数据页的"全部可见"状态
@@ -50,12 +52,8 @@ public:
 private:
     std::string filename_;
     int fd_ = -1;
-    mutable std::vector<uint8_t> cache_;
-    mutable bool dirty_ = false;
+    std::shared_ptr<derived_map_file::Cache> cache_;
     mutable std::mutex mutex_;
-
-    void ensureSizeLocked(uint32_t pageId);
-    bool writeToDiskLocked() const;
 
     static size_t byteIndex(uint32_t pageId) { return pageId / 8; }
     static uint8_t bitMask(uint32_t pageId) { return static_cast<uint8_t>(1) << (pageId % 8); }
