@@ -111,6 +111,7 @@ struct CatalogPersistenceState {
     std::shared_ptr<CatalogPublicationState> publication;
     std::map<std::string, std::string> baseline;
     std::map<std::string, CatalogFileGeneration> observed;
+    bool namespaceBootstrapApplied = false;
 };
 
 // ============================================================================
@@ -1568,6 +1569,12 @@ bool CatalogManager::applyDropPlan(const DropPlan& plan, std::string* error) {
 
 void CatalogManager::bootstrapSystemNamespaces() {
     std::lock_guard<std::mutex> lock(mutex_);
+    const auto namespaceImage = persistence_->observed.find("namespace");
+    // Public is an ordinary, droppable namespace. Initialize it only for a
+    // new catalog, never over a loaded snapshot or an earlier bootstrap's
+    // in-memory DROP/CREATE. Preserve the actual recreated namespace OID.
+    const bool initializePublic = !persistence_->namespaceBootstrapApplied &&
+        (namespaceImage==persistence_->observed.end() || !namespaceImage->second.exists);
     auto ensureNs = [&](Oid oid, const std::string& name, Oid owner) {
         if (nsByOid_.count(oid)) return;
         PgNamespaceRow row;
@@ -1581,8 +1588,9 @@ void CatalogManager::bootstrapSystemNamespaces() {
     };
     ensureNs(11,    "pg_catalog",   10);  // PG 标准 OID
     ensureNs(99,    "pg_toast",     10);
-    ensureNs(2200,  "public",       10);
+    if (initializePublic && !nsByName_.count("public")) ensureNs(2200, "public", 10);
     ensureNs(1213,  "pg_temp_1",    10);
+    persistence_->namespaceBootstrapApplied = true;
 }
 
 void CatalogManager::bootstrapSystemTypes() {
