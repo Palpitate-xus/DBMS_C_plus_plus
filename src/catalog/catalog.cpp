@@ -1458,7 +1458,7 @@ void CatalogManager::bootstrapSystemNamespaces() {
 void CatalogManager::bootstrapSystemTypes() {
     std::lock_guard<std::mutex> lock(mutex_);
     auto ensureType = [&](Oid oid, const std::string& name, int16_t len,
-                         char typtype, char category) {
+                         char typtype, char category, Oid element = INVALID_OID) {
         if (typeByOid_.count(oid)) return;
         PgTypeRow row;
         row.oid = oid;
@@ -1467,6 +1467,7 @@ void CatalogManager::bootstrapSystemTypes() {
         row.typlen = len;
         row.typtype = typtype;
         row.typcategory = category;
+        row.typelem = element;
         size_t idx = types_.size();
         types_.push_back(row);
         typeByOid_[oid] = idx;
@@ -1520,6 +1521,7 @@ void CatalogManager::bootstrapSystemTypes() {
     ensureType(1184,  "timestamptz", 8,   'b', 'D');
     ensureType(1186,  "interval",   16,   'b', 'D');
     ensureType(1266,  "timetz",     12,   'b', 'D');
+    ensureType(1270,  "_timetz",    -1,   'b', 'A', 1266);
     ensureType(1560,  "bit",        -1,   'b', 'V');
     ensureType(1561,  "_bit",       -1,   'b', 'A');
     ensureType(1562,  "varbit",     -1,   'b', 'V');
