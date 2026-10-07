@@ -24,6 +24,7 @@ int main() {
     const std::vector<std::pair<std::string,PreparedQueryRows>> cases={
         {"SELECT 1 UNION ALL SELECT 2147483648",{{ExprValue("bigint","1")},{ExprValue("bigint","2147483648")}}},
         {"SELECT NULL UNION ALL SELECT 1",{{ExprValue("integer","",true)},{ExprValue("integer","1")}}},
+        {"SELECT NULL::BIGINT UNION ALL SELECT 2",{{ExprValue("bigint","",true)},{ExprValue("bigint","2")}}},
         {"SELECT NULL UNION ALL SELECT 'NULL'",{{ExprValue("text","",true)},{ExprValue("text","NULL")}}},
         {"SELECT '' UNION ALL SELECT 'a b'",{{ExprValue("text","")},{ExprValue("text","a b")}}},
         {"SELECT 1 UNION ALL SELECT 1 UNION ALL SELECT 2147483648",{{ExprValue("bigint","1")},{ExprValue("bigint","1")},{ExprValue("bigint","2147483648")}}},

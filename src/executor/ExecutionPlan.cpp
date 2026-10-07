@@ -967,6 +967,7 @@ public:
                     }
                     if(ExprHelper::canonicalResultTypeName(values_[i].typeName)!=target)
                         throw DbError("XX000","typed append coercion lost its common output type");
+                    values_[i].typeName=target;
                     display+=values_[i].isNull?"NULL ":values_[i].value+" ";
                 }
                 instrument.emitted=true;return true;
