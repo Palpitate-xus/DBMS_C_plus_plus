@@ -31559,6 +31559,193 @@ static bool executeInternal(const string& rawSql, Session& s) {
         vector<dbms::ProjectionTarget> projectionTargets;
         dbms::ScalarSubquerySpec scalarSubquery;
         bool structuredScalar = false;
+        // Probe only grammar/roles before the legacy FILTER adapter. An
+        // eligible reduction retains its original parameter and filter ASTs.
+        vector<string> typedAggregateTargets;
+        vector<string> typedAggregateHeaders;
+        vector<vector<string>> typedAggregateConditions;
+        if (groupPos == string::npos && havingPos == string::npos &&
+            windowPos == string::npos) {
+            dbms::SQLParser aggregateParser;
+            auto parsedAggregate = aggregateParser.parseForBinding(effectiveRawSql);
+            const auto* aggregateSelect = parsedAggregate.isValid()
+                ? dynamic_cast<const dbms::SelectStmt*>(parsedAggregate.stmt.get()) : nullptr;
+            bool expressionArgument = false;
+            const set<string> typedAggregates = {
+                "count", "sum", "avg", "min", "max", "bool_and", "bool_or", "every"
+            };
+            function<bool(const dbms::Expr*)> supportedAggregate = [&](const dbms::Expr* value) {
+                if (!value) return true;
+                const auto roles = scalarQueryRoles(value);
+                if (value->preparedSubquery || roles.first || roles.second ||
+                    value->type == dbms::ExprType::RowExpr ||
+                    value->type == dbms::ExprType::QuantifiedComparison) return false;
+                if (const auto* call = dynamic_cast<const dbms::FunctionCallExpr*>(value)) {
+                    if (call->hasOver || call->setReturning || !call->orderBy.empty()) return false;
+                    if (isFrontendAggregateCall(call)) {
+                        dbms::CatalogManager::QualifiedName name;
+                        const string spelling = call->schema.empty() ? call->funcName
+                            : call->schema + "." + call->funcName;
+                        if (!dbms::CatalogManager::parseQualifiedName(spelling, name, true) ||
+                            !typedAggregates.count(name.name) || call->args.size() != 1) return false;
+                        if (call->schema.empty() && g_engine.udfExists(queryDb, name.name)) return false;
+                        // This parser retains in-call ORDER BY as another
+                        // synthetic argument. Its established owner stays put.
+                        for (const auto& argument : call->args) {
+                            const auto* literal = dynamic_cast<const dbms::LiteralExpr*>(argument.get());
+                            if (!dynamic_cast<const dbms::ColumnRefExpr*>(argument.get()) &&
+                                !(literal && literal->value == "*")) expressionArgument = true;
+                        }
+                    } else if (call->distinct || call->filter ||
+                               g_engine.ownsPreparedSetReturningCall(queryDb, call)) return false;
+                    for (const auto& argument : call->args)
+                        if (!supportedAggregate(argument.get())) return false;
+                    for (const auto& argument : call->namedArgs)
+                        if (!supportedAggregate(argument.value.get())) return false;
+                    return supportedAggregate(call->filter.get());
+                }
+                if (const auto* binary = dynamic_cast<const dbms::BinaryOpExpr*>(value))
+                    return supportedAggregate(binary->left.get()) &&
+                        (binary->op == "::" || supportedAggregate(binary->right.get()));
+                if (const auto* unary = dynamic_cast<const dbms::UnaryOpExpr*>(value))
+                    return supportedAggregate(unary->operand.get());
+                if (const auto* cast = dynamic_cast<const dbms::CastExpr*>(value))
+                    return supportedAggregate(cast->operand.get());
+                if (const auto* conditional = dynamic_cast<const dbms::CaseExpr*>(value)) {
+                    if (!supportedAggregate(conditional->switchExpr.get()) ||
+                        !supportedAggregate(conditional->elseExpr.get())) return false;
+                    for (const auto& arm : conditional->whenClauses)
+                        if (!supportedAggregate(arm.first.get()) || !supportedAggregate(arm.second.get())) return false;
+                }
+                if (const auto* array = dynamic_cast<const dbms::ArrayExpr*>(value))
+                    for (const auto& element : array->elements)
+                        if (!supportedAggregate(element.get())) return false;
+                return value->type != dbms::ExprType::Subquery;
+            };
+            function<bool(const dbms::Expr*)> supportedWhere = [&](const dbms::Expr* value) {
+                if (!value) return true;
+                const auto roles = scalarQueryRoles(value);
+                if (value->preparedSubquery || roles.first || roles.second) return false;
+                if (const auto* binary = dynamic_cast<const dbms::BinaryOpExpr*>(value))
+                    return supportedWhere(binary->left.get()) &&
+                        (binary->op == "::" || supportedWhere(binary->right.get()));
+                if (const auto* unary = dynamic_cast<const dbms::UnaryOpExpr*>(value))
+                    return supportedWhere(unary->operand.get());
+                if (const auto* cast = dynamic_cast<const dbms::CastExpr*>(value))
+                    return supportedWhere(cast->operand.get());
+                return value->type == dbms::ExprType::ColumnRef ||
+                    value->type == dbms::ExprType::Literal;
+            };
+            bool supported = aggregateSelect && aggregateSelect->ctes.empty() &&
+                aggregateSelect->setOp == dbms::SetOp::None &&
+                aggregateSelect->fromClause &&
+                aggregateSelect->fromClause->type == dbms::FromItem::Type::Table &&
+                aggregateSelect->distinctOn.empty() && aggregateSelect->locking.empty() &&
+                aggregateSelect->orderBy.empty() && supportedWhere(aggregateSelect->whereClause.get()) &&
+                aggregateSelect->selectList.size() == splitSelectColumns(columns).size();
+            if (supported) for (const auto& target : aggregateSelect->selectList) {
+                const auto* value = target.expr.get();
+                if (!value || value->sourceBegin == string::npos ||
+                    value->sourceBegin > value->sourceEnd || value->sourceEnd > effectiveRawSql.size() ||
+                    !supportedAggregate(value)) { supported = false; break; }
+                typedAggregateTargets.push_back(effectiveRawSql.substr(
+                    value->sourceBegin, value->sourceEnd - value->sourceBegin));
+                string header = target.alias;
+                if (!header.empty()) {
+                    dbms::CatalogManager::QualifiedName alias;
+                    if (dbms::CatalogManager::parseQualifiedName(header, alias, true) && alias.schema.empty())
+                        header = alias.name;
+                }
+                if (header.empty()) if (const auto* call = dynamic_cast<const dbms::FunctionCallExpr*>(value)) {
+                    dbms::CatalogManager::QualifiedName name;
+                    if (dbms::CatalogManager::parseQualifiedName(call->funcName, name, true)) header = name.name;
+                }
+                typedAggregateHeaders.push_back(std::move(header));
+            }
+            if (supported && expressionArgument && aggregateSelect->whereClause) {
+                // DNF comes from actual Boolean nodes, not tokens after the
+                // compact adapter has erased TRUE/FALSE/NULL or NOT atoms.
+                // Proven source-column/literal comparisons retain their
+                // established physical/index receiver; other leaves retain
+                // typed, parenthesized syntax in the existing predicate
+                // receiver. Inner composite parser nodes need not have a
+                // source span, so their type/role tree is authoritative.
+                function<string(const dbms::Expr*)> conditionSql = [&](const dbms::Expr* value) -> string {
+                    if (const auto* column = dynamic_cast<const dbms::ColumnRefExpr*>(value))
+                        return sourceRange.contains(*column) && sourceRange.columns.count(column->column)
+                            ? quoteDumpIdentifier(column->column) : string{};
+                    if (const auto* literal = dynamic_cast<const dbms::LiteralExpr*>(value)) {
+                        if (literal->sourceBegin != string::npos && literal->sourceBegin <= literal->sourceEnd &&
+                            literal->sourceEnd <= effectiveRawSql.size())
+                            return effectiveRawSql.substr(literal->sourceBegin, literal->sourceEnd - literal->sourceBegin);
+                        return literal->value;
+                    }
+                    if (const auto* unary = dynamic_cast<const dbms::UnaryOpExpr*>(value)) {
+                        const string operand = conditionSql(unary->operand.get());
+                        if (operand.empty()) return {};
+                        return toLower(unary->op).rfind("is ", 0) == 0
+                            ? "(" + operand + " " + unary->op + ")"
+                            : "(" + unary->op + " (" + operand + "))";
+                    }
+                    if (const auto* binary = dynamic_cast<const dbms::BinaryOpExpr*>(value)) {
+                        const string left = conditionSql(binary->left.get());
+                        const string right = binary->op == "::" || toLower(binary->op) == "collate"
+                            ? binary->right->toString() : conditionSql(binary->right.get());
+                        return left.empty() || right.empty() ? string{}
+                            : "(" + left + " " + binary->op + " " + right + ")";
+                    }
+                    if (const auto* cast = dynamic_cast<const dbms::CastExpr*>(value)) {
+                        const string operand = conditionSql(cast->operand.get());
+                        if (operand.empty()) return {};
+                        string type = cast->typeName;
+                        if (!cast->typeMods.empty()) {
+                            type += "(";
+                            for (size_t i = 0; i < cast->typeMods.size(); ++i)
+                                type += (i ? "," : "") + cast->typeMods[i];
+                            type += ")";
+                        }
+                        return "CAST(" + operand + " AS " + type + ")";
+                    }
+                    return {};
+                };
+                function<vector<vector<string>>(const dbms::Expr*)> inputBranches =
+                    [&](const dbms::Expr* value) -> vector<vector<string>> {
+                    if (const auto* binary = dynamic_cast<const dbms::BinaryOpExpr*>(value)) {
+                        const string operation = toLower(binary->op);
+                        if (operation == "and" || operation == "or") {
+                            auto left = inputBranches(binary->left.get());
+                            auto right = inputBranches(binary->right.get());
+                            if (operation == "or") {
+                                left.insert(left.end(), make_move_iterator(right.begin()),
+                                    make_move_iterator(right.end()));
+                                return left;
+                            }
+                            vector<vector<string>> combined;
+                            for (const auto& first : left) for (const auto& second : right) {
+                                auto branch = first;
+                                branch.insert(branch.end(), second.begin(), second.end());
+                                combined.push_back(std::move(branch));
+                            }
+                            return combined;
+                        }
+                    }
+                    const auto* binary = dynamic_cast<const dbms::BinaryOpExpr*>(value);
+                    const auto* column = binary ? dynamic_cast<const dbms::ColumnRefExpr*>(binary->left.get()) : nullptr;
+                    const auto* literal = binary ? dynamic_cast<const dbms::LiteralExpr*>(binary->right.get()) : nullptr;
+                    if (column && literal && literal->typeName.empty() && sourceRange.contains(*column) &&
+                        sourceRange.columns.count(column->column) &&
+                        (binary->op == "=" || binary->op == "<>" || binary->op == "!=" ||
+                         binary->op == "<" || binary->op == ">" || binary->op == "<=" || binary->op == ">="))
+                        return {{binary->op + quoteDumpIdentifier(column->column) + " " + literal->value}};
+                    const string predicate = conditionSql(value);
+                    if (predicate.empty()) { supported = false; return {}; }
+                    return {{"typedexpr " + predicate}};
+                };
+                typedAggregateConditions = inputBranches(aggregateSelect->whereClause.get());
+                if (typedAggregateConditions.empty()) supported = false;
+            }
+            if (!supported || !expressionArgument) typedAggregateTargets.clear();
+        }
         {
             for (const auto& itemRaw : splitSelectColumns(columns)) {
                 string item = trim(itemRaw);
@@ -31861,10 +32048,12 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             // Normalize IS [NOT] NULL before converting to the
                             // legacy predicate form, as in WHERE. Whitespace
                             // inside quoted SQL literals must remain intact.
-                            string parseStr = modifyLogic(normalizeConditionStr(filterStr));
-                            if (parseStr.empty() || StorageEngine::parseConditions({parseStr}).empty())
-                                throw dbms::DbError("0A000", "unsupported aggregate FILTER predicate");
-                            filterConds.push_back(parseStr);
+                            if (typedAggregateTargets.empty()) {
+                                string parseStr = modifyLogic(normalizeConditionStr(filterStr));
+                                if (parseStr.empty() || StorageEngine::parseConditions({parseStr}).empty())
+                                    throw dbms::DbError("0A000", "unsupported aggregate FILTER predicate");
+                                filterConds.push_back(parseStr);
+                            }
                         }
                         itemBase = trim(item.substr(0, filterPos));
                     }
@@ -32492,6 +32681,22 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     }
                 }
             }
+        }
+
+        // Selected direct expression arguments retain the typed reduction
+        // owner, including original CASE grammar and FILTER-before-input demand.
+        if (!typedAggregateTargets.empty()) {
+            if (typedAggregateTargets.size() != selectExprs.size() || hasWindow)
+                throw dbms::DbError("XX000", "aggregate target ownership changed during projection collection");
+            for (size_t i = 0; i < selectExprs.size(); ++i) {
+                selectExprs[i].isScalar = true;
+                selectExprs[i].funcName = "expreval";
+                selectExprs[i].funcArgs = {typedAggregateTargets[i]};
+                if (!typedAggregateHeaders[i].empty()) selectExprs[i].displayName = typedAggregateHeaders[i];
+                exprTypes[i] = 3;
+            }
+            hasAgg = false;
+            hasScalar = true;
         }
 
         // A single plain scalar subquery can use the structured init-plan
@@ -35345,7 +35550,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
             if (forUpdate) { cout << "FOR UPDATE not supported with scalar functions" << endl; return true; }
 
             if (shouldPublishQueryMetadata()) {
-                const vector<string> rawTargets = splitSelectColumns(columns);
+                const vector<string> rawTargets = typedAggregateTargets.empty()
+                    ? splitSelectColumns(columns) : typedAggregateTargets;
                 if (rawTargets.size() == selectExprs.size() &&
                     none_of(rawTargets.begin(), rawTargets.end(),
                             [](const string& target) {
@@ -35722,6 +35928,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 auto groups = breakDownConditions(condTokens);
                 vector<dbms::StorageEngine::SelectExpr> mergeExprs =
                     scalarSortExprs;
+                if (!typedAggregateTargets.empty()) groups = typedAggregateConditions;
                 struct HiddenOrderKey {
                     const dbms::StorageEngine::OrderBySpec* spec;
                     size_t cellIndex;
@@ -35752,7 +35959,20 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 }
                 const bool hasMixedOrderKeys =
                     hasOutputOrderKey && !hiddenOrderKeys.empty();
-                if (captureStructuredScalar && groups.size() == 1) {
+                if (!typedAggregateTargets.empty() && !groups.empty()) {
+                    // Aggregate the union of qualifying input RIDs once, not
+                    // one reduced row per OR branch with the same sentinel RID.
+                    scalarExecutionOptions.conditionAlternatives = groups;
+                    if (captureStructuredScalar) {
+                        answers = g_engine.queryExpr(queryDb, tname, groups.front(),
+                            selectExprs, {}, &structuredScalarResult.rows,
+                            &structuredScalarResult.nulls, nullptr, scalarExecutionOptions);
+                        structuredScalarRows = true;
+                    } else {
+                        answers = g_engine.queryExpr(queryDb, tname, groups.front(),
+                            selectExprs, {}, scalarExecutionOptions);
+                    }
+                } else if (captureStructuredScalar && groups.size() == 1) {
                     answers = g_engine.queryExpr(
                         queryDb, tname, groups.front(),
                         canSortScalarProjected ? mergeExprs : selectExprs,
