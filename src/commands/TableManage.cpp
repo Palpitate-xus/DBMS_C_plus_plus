@@ -43730,6 +43730,14 @@ std::string StorageEngine::exportSnapshot() const {
     snap.xmax = context.readView.lowLimitId;
     snap.curCid = context.currentCommandId;
     snap.activeXids.assign(context.readView.activeTxnIds.begin(), context.readView.activeTxnIds.end());
+    // Own writes are visible in the live view, but the exporter was in
+    // progress for every importing owner. XIDs beyond this retained xmax
+    // (for example when re-exporting an imported snapshot) are excluded already.
+    if (context.currentTxnId < snap.xmax) {
+        const auto position = std::lower_bound(snap.activeXids.begin(), snap.activeXids.end(), context.currentTxnId);
+        if (position == snap.activeXids.end() || *position != context.currentTxnId)
+            snap.activeXids.insert(position, context.currentTxnId);
+    }
     snap.subxip.assign(context.readView.subTxnIds.begin(), context.readView.subTxnIds.end());
     return snap.exportToBytes();
 }
