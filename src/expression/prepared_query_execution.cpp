@@ -935,6 +935,9 @@ void PreparedQueryExecution::closeChildCursors() {
         try {site.second.cursor->close();}catch(...){if(!failure)failure=std::current_exception();}
     if(failure)std::rethrow_exception(failure);
 }
+void PreparedQueryExecution::releaseQueryCallbacks() {
+    queryExecutor_={};childCursorFactory_={};memo_.clear();
+}
 std::vector<Operator*> PreparedQueryExecution::childPlans(const Expr* scope) const {
     std::set<const Expr*> sites;
     std::function<void(const Expr*)> gather=[&](const Expr* node) {

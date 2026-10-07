@@ -66,6 +66,9 @@ public:
                                bool ownsScalarChildren = true);
     void prepareChildCursors(); // pure graph construction, no open/evaluation
     void closeChildCursors();   // explicit normal cleanup; primary errors preserved
+    // Terminal owner cleanup after close, not a correlated restart. Release
+    // providers without destroying the actual closed child graphs/counters.
+    void releaseQueryCallbacks();
     std::vector<Operator*> childPlans(const Expr* scope = nullptr) const;
     ExprValue evaluate(const Expr* expression, const RowContext& row) const;
 

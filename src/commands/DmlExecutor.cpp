@@ -5486,6 +5486,7 @@ public:
     std::weak_ptr<PreparedQueryExecution> carrier() const {return execution_;}
     void preparePlanChildren() {if(ownsChildCursors_)execution_->prepareChildCursors();}
     void closePlanChildren() {execution_->closeChildCursors();}
+    void releasePlanCallbacks() {execution_->releaseQueryCallbacks();source_.read={};}
     std::vector<Operator*> planChildren() const {return execution_->childPlans();}
     std::map<std::string,std::string> planAttributes() const {
         const auto operation=dynamic_cast<const InsertStmt*>(statement_)?"Insert":
@@ -5647,14 +5648,14 @@ public:
 struct MutationSourcePlan {
     OpPtr plan;
     std::vector<RowContext> rows;
-    bool opened=false,complete=false;
+    bool opened=false,complete=false,closed=false;
     bool read(size_t index,RowContext& row) {
         while(!complete && rows.size()<=index) {
             if(!opened){opened=true;if(!plan->open())throw DbError("XX000","mutation source failed to open");}
             std::string display;
             if(!plan->next(display)) {
                 if(plan->hasError())throw DbError("XX000",plan->errorMessage());
-                plan->close();complete=true;opened=false;break;
+                plan->close();closed=true;complete=true;opened=false;break;
             }
             RowContext value;
             if(!plan->lastPreparedContext(value))throw DbError("XX000","mutation source lost its typed context");
@@ -5664,7 +5665,8 @@ struct MutationSourcePlan {
         row=rows[index];return true;
     }
     void close() {
-        if(opened){opened=false;plan->close();}
+        opened=false;complete=true;rows.clear();
+        if(!closed){closed=true;plan->close();}
     }
 };
 class PreparedDmlMutationOp final : public Operator {
@@ -5674,7 +5676,8 @@ class PreparedDmlMutationOp final : public Operator {
     std::vector<std::shared_ptr<MutationSourcePlan>> sources_;
     DmlResult result_;
     std::function<void()> finishStatement_;
-    std::function<std::vector<Operator*>()> extraChildren_;
+    std::function<std::vector<std::shared_ptr<Operator>>()> extraChildren_;
+    std::vector<std::shared_ptr<Operator>> retainedChildren_;
     bool ownsAtomicUnit_;
     size_t position_=0;
     bool opened_=false,executed_=false,closed_=false;
@@ -5748,8 +5751,12 @@ public:
     void close() override {
         if(closed_)return;
         closed_=true;opened_=false;std::exception_ptr failure;
-        try{if(execution_)execution_->closePlanChildren();}catch(...){failure=std::current_exception();}
+        try{if(extraChildren_)retainedChildren_=extraChildren_();}catch(...){failure=std::current_exception();}
+        extraChildren_={};reader_={};finishStatement_={};
+        try{if(execution_)execution_->closePlanChildren();}catch(...){if(!failure)failure=std::current_exception();}
         for(auto& source:sources_)try{source->close();}catch(...){if(!failure)failure=std::current_exception();}
+        for(auto& child:retainedChildren_)try{child->close();}catch(...){if(!failure)failure=std::current_exception();}
+        if(execution_)execution_->releasePlanCallbacks();
         if(failure)std::rethrow_exception(failure);
     }
     std::string preparedPlanNodeName() const override {return "ModifyTable";}
@@ -5757,9 +5764,8 @@ public:
     std::vector<Operator*> preparedPlanChildren() const override {
         auto plans=execution_->planChildren();
         for(const auto& source:sources_)plans.push_back(source->plan.get());
-        if(extraChildren_) {
-            auto children=extraChildren_();plans.insert(plans.end(),children.begin(),children.end());
-        }
+        const auto children=extraChildren_?extraChildren_():retainedChildren_;
+        for(const auto& child:children)plans.push_back(child.get());
         return plans;
     }
 };

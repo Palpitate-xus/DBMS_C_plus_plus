@@ -98,7 +98,9 @@ struct PreparedDmlPlanHooks {
     std::function<PreparedChildExecutor(std::weak_ptr<PreparedQueryExecution>)> reader;
     std::function<PreparedDmlSourceFactory(std::weak_ptr<PreparedQueryExecution>)> sources;
     std::function<void()> finishStatement;
-    std::function<std::vector<Operator*>()> extraChildren;
+    // Own actual producer graphs independently of the callback. Closing
+    // releases providers but keeps these same nodes/counters safe to render.
+    std::function<std::vector<std::shared_ptr<Operator>>()> extraChildren;
 };
 std::unique_ptr<Operator> buildBoundDmlPlan(Stmt*, Session&,
     const std::shared_ptr<PreparedQuery>&, PreparedChildExecutor,

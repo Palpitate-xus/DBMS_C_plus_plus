@@ -45,3 +45,30 @@ interval WITH input priority and both typed EXPLAIN formats. Source/header
 audits matched 57 unchanged production sources, the freshly rebuilt DML source,
 and all 108 current headers. Frozen foundation server SHA-256:
 `0d283ba03cd6b3185e05e7f4605178be1d6b3d61fee37eb65471727cb92d0387`.
+
+## Explicit terminal provider release
+
+An independent close baseline (`68199`) against the frozen foundation exited
+134: a weak reference to a real source plan remained live after explicit
+close without open. The instrumented source itself could release its reader,
+but the facade's close skipped never-demanded sources. Root callbacks also
+retained their provider captures. This stronger control was not part of the
+original green foundation driver and is not relabeled as having passed there.
+
+Terminal close now closes even never-opened source facades, releases row and
+cursor factory callbacks, and clears finish/extra-child providers even during
+cleanup failure. `releaseQueryCallbacks()` is terminal cleanup, not correlated
+restart: it preserves the actual closed cursor graphs and counters. Extra
+children are owned `shared_ptr<Operator>` graphs, separately retained before
+their callback is cleared; no dangling display-only pointer is substituted.
+
+The strengthened native retains pure and executed-but-undemanded source
+weak-owner release, pure callback release, late 22012 unwind, and checked
+executor automatic close. The same real target/producer pointers and runtime
+counters survive close for rendering. A second all-58/new-header O0 build
+`76185`, strengthened native `37289`, seven adjacent natives `50274`, seven
+complete serial protocol scripts `85299`, and scoped DML/PCE plus driver/stub
+ASan/UBSan `37780` all finished with exit 0. This is two instrumented production
+TUs with the other matching normal objects, not all-58 sanitizer coverage.
+Frozen close epoch server SHA-256:
+`76e4f1bd5388f18c1a1d6ed683336cc3de29f3f30b024ed7211b719cd379caec`.
