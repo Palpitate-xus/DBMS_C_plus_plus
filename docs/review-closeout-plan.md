@@ -26,6 +26,8 @@ SQL 验证使用本次构建的 `build/dbms_review_main`，运行 `review_sql_e2
 全部阶段关闭，未遗留本次范围内待办。仓库 GitHub Actions 工作流保持禁用，不执行 push；历史全功能路线图和这里明确排除的功能不计入完成范围。
 ## 2026-10-07 当前总清单执行计划（以上记录为历史）
 
+最新执行版本 `c061a38a`（622native/320registered/58TU）：UNKNOWN输入、typed Append、普通UNION ALL入口及跨进程XID分别本地commit；private强矩阵scope见integration文档。新公共ABI的全58 fresh正常O290776运行，当前full622/320未启动。下面表格记录前一精确5ca验收，不替代c061。后续顺序：完成c061正式签名/冻结和不改原断言的整合回归；验证并逐项合入domain/WAL代际候选；修复完整SRF/限定函数、模式/domain优先级、集合P/D和剩余273项。原全文37/21强矩阵均保留，不仅用绿色子集。没有push、Actions启用或用户跳过专项恢复。
+
 Source `5ca4278e` 已逐项本地提交，618 native / 319 registered / 58 TU；完整总账仍未完成，不沿用以上旧“本次范围关闭”作为273项完成证明。提交映射/实际失败/证据见 `docs/issue-ready-source-integration.md`。
 
 | 下一阶段 | 验收要求 | 当前证据与状态 |

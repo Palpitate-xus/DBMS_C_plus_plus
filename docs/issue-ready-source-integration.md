@@ -1,5 +1,55 @@
 # Independent source integrations after canonical 75090
 
+## Current c061 checkpoint: input types, typed append and external XID state
+
+Current ROOT `c061a38a`: **622 native / 320 registered / 58 TU**, clean.
+
+| Independent repair | Private commit | ROOT commit |
+| --- | --- | --- |
+| UNKNOWN inputs versus output TEXT; actual static routine type and copies | `c11e8178` | `931c5370` |
+| Real lazy typed UNION ALL bodies with one execution carrier | `97bd2264` | `548168c2` |
+| Ordinary UNION ALL consumes that actual owned plan | `7dcd82f7` | `d62af4ca` |
+| Durable cross-process XID allocation and fresh snapshot horizon | `02896e3b` | `c061a38a` |
+
+The new FunctionCall layout and public Append API require a fresh ABI epoch.
+Exact clean detached normal all58 O2 build/repeat/audit/freeze **90776** is
+running in `/tmp/dbms-canonical-bound-function-append.6mp6wGea`. Its original
+622/320 runner is prepared, not started; no latest formal/full PASS is claimed.
+
+UNKNOWN input private full58 V2 plus matching clone-CPP V3 passes native8 and
+nine complete serial adjacent scripts. The whole strict180006 fixture passes;
+candidate retains only qualified-public unnest wrong-success, unregistered
+without removing any assertion. The original whole host diagnostic still
+retains listening-channel LIMIT0 preflight. Source/doc proof:
+`issue-prepared-srf-unknown-input.md`.
+
+Typed Append and its separate ordinary consumer pass the complete original37
+DML matrix, complete new21 UNION matrix, nine matching natives and nine
+adjacent scripts in their matching private epoch. This does not retroactively
+change the exact5ca wire75 failure. Pure declaration, source/body identity,
+compiled root planning, typed coercion, lazy RHS and cumulative sequence
+assertions remain intact. Set Parse/Describe and clause ownership are still
+independently open. See `issue-prepared-union-all-execution.md` and
+`issue-ordinary-union-all-consumer.md`.
+
+Cross-process XID old control allocates duplicate1 and keeps stale horizon0;
+the new six-process72 allocation, corrupt-warmed-counter, unchanged boundary/
+legacy/failure, scoped sanitizer and matching nine native gates pass. An
+acquired RR boundary stays fixed while a new reader sees external commits.
+This is scoped O2 transaction/storage plus matching O0 remainder, not all-O2
+engine proof or arbitrary lost-counter reconstruction. The separate heap
+identity source must still pass its unchanged same-parent crash loop with
+this dependency; no early identity completion is claimed. See
+`issue-cross-process-transaction-id-state.md`.
+
+Earlier exact5ca native156 **6042**, full618/319 **16482** and exactd2
+full590/312 **96468** remain live. Finished5ca wire75 stays70pass/5fail;
+normal5ca58 stays exit0, with its frozen SHA below. Neither proves c061.
+Domain ancestry and physical WAL generation are separate private candidates
+under strong whole tests; no ROOT import or completed-family claim yet.
+All273 states remain22/166/70/15; no push, Actions activation or user-skipped
+security/TDE restart.
+
 ## Verified 5ca epoch and RR fixture checkpoint
 
 ROOT production source remains `5ca4278e`; independent test-only RR correction

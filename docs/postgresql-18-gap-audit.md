@@ -785,6 +785,10 @@
 - [PostgreSQL 18 release notes](https://www.postgresql.org/docs/18/release-18.html)
 # 2026-10-07 当前执行 checkpoint（后续段落为历史）
 
+当前ROOT `c061a38a`，622 native / 320 registered / 58 TU。四项新增修复逐项commit：`931c5370` UNKNOWN输入/输出TEXT边界与静态函数类型复制；`548168c2` 同载体的typed lazy Append；`d62af4ca` 普通UNION ALL实际plan入口；`c061a38a` 跨进程XID文件锁/reload/快照新边界。private输入8native/9wire专项通过，完整诊断保留限定public函数错成功；Append完整原37和新21矩阵/9native/9邻居通过，所有累计计数未重置；XID六进程72分配/损坏/旧边界/9native与scoped sanitizer通过。详见integration四项独立证据文档，不算最新ROOT完整验收。新FunctionCall布局/Append公共头要求全58 fresh，精确c061正式O2/repeat/audit/freeze90776已启动于 `/tmp/dbms-canonical-bound-function-append.6mp6wGea`，full622/320未启动。旧5ca native1566042、full618/31916482和d2 full590/31296468仍live；5ca wire75=70pass/5fail不反向改绿。domain全祖先/目录保存、WAL物理代际与SRF/限定frontend仍独立进行；未premature合入未完整验证候选。总273仍22complete/166partial/70unverified/15deferred，未push、Actions disabled、用户跳过专项保持deferred。
+
+## 前一 5ca 正式验收 checkpoint（当时记录）
+
 正式5ca全58正常O2/repeat/audit/freeze36316实际0，SHA `aff183ff1d92bb24166088e4b87c20c23bebf511bc94ef1b72c14bd4e55af73a`。原full618/319 runner16482已运行、matching156native6042仍live；完整75wire93351实际1=70pass/5fail（原full NOT LIKE2867、非NULL ALTER数组转换、完整SRF/集合输出metadata/whole37 UNION ALL诊断）。原断言与累计计数均保留，不称全套通过。另已独立 test-only commit `4c05967b`：真实180006双连接证明旧vacuum_toast夹具第一次读取在writer提交后，错误期待旧RR快照；现先读取建立快照，保留所有旧值/orphan/vacuum断言，并新增lazy首次读取看到新值的控制。private匹配5native/reference0，ROOT独立reference复跑0；不是TOAST对象丢失，也不反向覆盖旧e6/5ca未修夹具的失败。ROOT生产源码仍5ca，测试额外4c；完整总273状态不变。UNKNOWN输入新强整套在strict180006通过，私有候选保留NULLIF上下文/限定函数错成功；未注册假绿、未提交未完成的候选。
 
 ## 前一 5ca 启动 checkpoint（当时记录）
