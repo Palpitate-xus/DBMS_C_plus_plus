@@ -86,13 +86,20 @@ Two unchanged savepoint protocol scripts (`savepoint_read_only` and
 default 15-second deadline and all SQL/state/rows assertions. Their logs are
 `readonly-wire.log` and `lock-savepoint-wire.log`; their owned servers are gone.
 
-The additional five-original-storage-native group (handle 43614) is still
-running at source freeze. `vacuum_toast` passed; the unchanged 800-row
-`parallel_vacuum` is live, and `vacuum_full`, `foreign_key_action_dml` and
-`savepoint_insert_failure` are still queued. These are **not** reported passed.
-The live process's file I/O grows and has been sampled in `jbd2_log_wait_commit`;
-that is an observation, not proof of a deadlock or an entire I/O root cause.
-Terminal results will be added separately; no unrelated process was stopped.
+The additional five-original-storage-native group (handle 43614) subsequently
+reached actual terminal exit 0: `vacuum_toast`, unchanged 800-row
+`parallel_vacuum`, `vacuum_full`, unchanged `foreign_key_action_dml` (table rename
+and reopen/recovery), and `savepoint_insert_failure`. `native-storage.log`
+retains all assertions and intentional corrupt-page/abort negatives. During
+the run the live process's file I/O grew and was sampled in
+`jbd2_log_wait_commit`; that observation is not a universal I/O root cause.
+No process or assertion was stopped/modified to produce this terminal result.
+
+Source commit is `6f62ac73865049183c3cb332c2069f0bfc5072d5` (the terminal
+extension is documentation only). The all-58/source/header/flags immutable
+donor is `final-immutable/`, including source.tar and the matching binary.
+Its SHA is the one above. Neither the source commit nor immutable donor is
+changed by the following close-lifetime worktree.
 
 ## Boundaries
 
