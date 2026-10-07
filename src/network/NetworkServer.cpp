@@ -1530,8 +1530,10 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
                  physicalTypeName == "macaddr" ||
                  physicalTypeName == "macaddr8" ||
                  isGeometryTypeName(physicalTypeName)) &&
-                lowerProtocolText(result.columnTypes[columnIndex]) ==
-                    physicalTypeName;
+                (column.isArray
+                    ? ExprHelper::canonicalResultTypeName(result.columnTypes[columnIndex]) ==
+                        ExprHelper::canonicalResultTypeName(physicalTypeName)
+                    : lowerProtocolText(result.columnTypes[columnIndex]) == physicalTypeName);
             if (!hasStructuredType || structuredMatchesPhysical) {
                 const std::string typeName = physicalTypeName;
                 description.typeOid = isByteaTypeName(typeName)
