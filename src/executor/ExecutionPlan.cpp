@@ -780,26 +780,22 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
         if (target.expr && (target.expr->type == ExprType::A_Star ||
             (reference && reference->column == "*") || (literal && literal->value == "*"))) {
             if (!select->fromClause) throw DbError("42601", "SELECT * requires a FROM source");
-            if (state->sourceContexts) {
-                for (const auto* range : state->visibleRanges) {
-                    const bool qualified = reference && !reference->table.empty();
-                    if (qualified && (range->mergedUsing || reference->table != range->name ||
-                        (!reference->schema.empty() && reference->schema != range->schema))) continue;
-                    for (size_t i = 0; i < range->columns.size(); ++i) {
-                        if (!qualified && range->hiddenUnqualified.count(range->columns[i].name)) continue;
-                        auto expression = std::make_unique<ColumnRefExpr>();
-                        expression->column = range->columns[i].name;
-                        expression->binding = QueryColumnBinding{0, range->ordinal, i, range->columns[i].type, range->mergedUsing};
-                        state->targets.push_back(expression.get());
-                        state->starTargets.push_back(std::move(expression));
-                    }
-                }
-            } else for (size_t i = 0; i < state->schema.len; ++i) {
+            const auto projections = state->query->projectionBindings.find(select);
+            if (projections == state->query->projectionBindings.end())
+                throw DbError("XX000", "prepared star has no projection bindings");
+            for (const auto& projection : projections->second) {
+                if (projection.expression != target.expr.get()) continue;
+                if (!projection.column)
+                    throw DbError("XX000", "prepared star has no positional source identity");
+                const auto& binding = *projection.column;
+                const auto range = std::find_if(state->query->sourceRanges.begin(), state->query->sourceRanges.end(),
+                    [&](const auto& sourceRange) { return sourceRange.ordinal == binding.sourceOrdinal; });
+                if (range == state->query->sourceRanges.end() || range->owner != select ||
+                    binding.scopeDepth != 0 || binding.columnOrdinal >= range->columns.size())
+                    throw DbError("XX000", "prepared star source identity is invalid");
                 auto expression = std::make_unique<ColumnRefExpr>();
-                expression->column = state->schema.cols[i].dataName;
-                expression->binding = QueryColumnBinding{0, state->sourceOrdinal, i,
-                    ExprHelper::canonicalResultTypeName(state->schema.cols[i].dataType +
-                        (state->schema.cols[i].isArray ? "[]" : "")), false};
+                expression->column = range->columns[binding.columnOrdinal].name;
+                expression->binding = binding;
                 state->targets.push_back(expression.get());
                 state->starTargets.push_back(std::move(expression));
             }
