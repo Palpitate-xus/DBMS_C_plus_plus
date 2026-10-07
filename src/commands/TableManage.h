@@ -1253,6 +1253,14 @@ public:
         // Native compact read API values are decoded data, even when a
         // scalar function is the left operand. SQL expressions stay untagged.
         bool decodedLiteralRhs = false;
+        // Pattern operands are data plus NULL/type metadata, not rendered SQL
+        // rows. nullopt selects the default escape; an empty escape disables it.
+        bool patternIsNull = false;
+        std::optional<std::string> patternEscape;
+        bool patternEscapeIsNull = false;
+        std::string patternType;
+        std::string patternEscapeType;
+        std::string patternEscapeColumn;
     };
     enum class PredicateTruth { False, True, Unknown };
     // Compare two already decoded values using the column's PostgreSQL-like

@@ -1533,6 +1533,24 @@ void ExprHelper::prepareArrayTypes(Expr* expression,
     StorageEngine* owner) {
     const auto routines = collectRoutineResultTypes(expression, database, owner);
     const auto type = [&](const Expr* node) { return inferAstResultType(node,hints,&routines); };
+    const auto patternType = [&](std::string operation,const std::vector<const Expr*>& operands) {
+        const auto op=toLower(operation);
+        const bool like=op=="like" || op=="not like" || op=="like escape" || op=="not like escape";
+        bool bytes=false;
+        std::vector<std::string> types;
+        for (const auto* operand:operands) {
+            const auto resolved=canonicalResultTypeName(type(operand));
+            bytes=bytes || resolved=="bytea";
+            types.push_back(resolved);
+        }
+        for (const auto& resolved:types) {
+            const bool unknown=resolved.empty() || resolved=="unknown";
+            const bool text=resolved=="text" || resolved=="character" || resolved=="character varying" ||
+                resolved=="name" || resolved=="citext";
+            if ((!like && bytes) || (!unknown && (bytes ? resolved!="bytea" : !text)))
+                throw DbError("42883","operator does not exist for SQL pattern operand types");
+        }
+    };
     const auto validateConst = [&](const Expr* node, const std::string& target) {
         const auto* literal = dynamic_cast<const LiteralExpr*>(node);
         if (!literal || literal->preparedSubquery || !literal->typeName.empty()) return;
@@ -1566,6 +1584,10 @@ void ExprHelper::prepareArrayTypes(Expr* expression,
                 visit(binary->left.get(),target ? target->value : std::string()); return;
             }
             visit(binary->left.get(),{}); visit(binary->right.get(),{});
+            const auto operation=toLower(binary->op);
+            if (operation=="like" || operation=="not like" || operation=="ilike" ||
+                operation=="not ilike" || operation=="similar to" || operation=="not similar to")
+                patternType(operation,{binary->left.get(),binary->right.get()});
             if (binary->op=="||") {
                 binary->arrayConcat = resolveArrayConcatTypes(type(binary->left.get()),type(binary->right.get()));
                 if (binary->arrayConcat) {
@@ -1595,6 +1617,11 @@ void ExprHelper::prepareArrayTypes(Expr* expression,
             visit(conditional->switchExpr.get(),{}); visit(conditional->elseExpr.get(),{});
             for (auto& arm : conditional->whenClauses) { visit(arm.first.get(),{}); visit(arm.second.get(),{}); }
         } else if (auto* call = dynamic_cast<FunctionCallExpr*>(node)) {
+            const auto operation=toLower(call->funcName);
+            if (call->schema.empty() && call->args.size()==3 &&
+                (operation=="like escape" || operation=="not like escape" || operation=="ilike escape" ||
+                 operation=="not ilike escape" || operation=="similar to escape" || operation=="not similar to escape"))
+                patternType(operation,{call->args[0].get(),call->args[1].get(),call->args[2].get()});
             for (auto& arg : call->args) visit(arg.get(),{});
             for (auto& arg : call->namedArgs) visit(arg.value.get(),{});
             visit(call->filter.get(),{});
@@ -2065,7 +2092,8 @@ static ExprEvalResult evalStringImpl(
     const std::set<std::string>* nullColumns,
     const std::string& currentDB,
     const std::string& currentUser,
-    StorageEngine* functionEngine = nullptr) {
+    StorageEngine* functionEngine = nullptr,
+    const std::map<std::string, std::string>* collationHints = nullptr) {
 
     // Unwrap typed literals before parsing: date '2026-08-15' -> '2026-08-15'.
     // EXTRACT retains its actual parser node; its field label is protected
@@ -2218,7 +2246,12 @@ static ExprEvalResult evalStringImpl(
         do {
             key = "\x01helper_value_" + std::to_string(nextPosition++);
         } while (!occupiedKeys.insert(key).second);
-        ctx.set(key, ExprValue(typeName, value, isNull));
+        ExprValue datum(typeName,value,isNull);
+        if (collationHints) {
+            const auto collation=collationHints->find(name);
+            if (collation!=collationHints->end()) datum.collation=collation->second;
+        }
+        ctx.set(key,std::move(datum));
         bindings.emplace(name, key);
     }
     // PostgreSQL exposes these as special session-value expressions. The
@@ -2324,9 +2357,10 @@ ExprEvalResult ExprHelper::evalStringWithNulls(
     const std::map<std::string, std::string>& typeHints,
     const std::string& currentDB,
     const std::string& currentUser,
-    StorageEngine* functionEngine) {
+    StorageEngine* functionEngine,
+    const std::map<std::string, std::string>& collationHints) {
     return evalStringImpl(
-        exprSql, row, typeHints, &nullColumns, currentDB, currentUser, functionEngine);
+        exprSql, row, typeHints, &nullColumns, currentDB, currentUser, functionEngine,&collationHints);
 }
 
 bool ExprHelper::evalBool(

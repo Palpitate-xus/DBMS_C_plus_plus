@@ -27,6 +27,7 @@
 #include "expression/expr_helper.h"
 #include "expression/assignment_input.h"
 #include "expression/ExprEvaluator.h"
+#include "expression/SqlPattern.h"
 #include "expression/ExpressionVolatility.h"
 #include "permissions.h"
 #include "utils/Session.h"
@@ -1079,7 +1080,7 @@ static std::string buildCompositeKeyFromRowMap(
 static std::map<std::string, std::string> buildTypeHints(const dbms::TableSchema& tbl) {
     std::map<std::string, std::string> hints;
     for (size_t i = 0; i < tbl.len; ++i) {
-        hints[tbl.cols[i].dataName] = tbl.cols[i].dataType;
+        hints[tbl.cols[i].dataName] = tbl.cols[i].dataType + (tbl.cols[i].isArray ? "[]" : "");
     }
     return hints;
 }
@@ -1110,36 +1111,126 @@ static bool evalExpressionSqlValue(
     return true;
 }
 
-static bool likeMatch(const std::string& text, const std::string& pattern, bool foldCase = false) {
-    std::string t = text;
-    std::string p = pattern;
-    if (foldCase) {
-        for (char& c : t) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        for (char& c : p) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+static std::string storedPatternOperator(const std::string& input) {
+    std::string op;
+    for (const unsigned char c : input) if (!std::isspace(c)) op += std::tolower(c);
+    if (op == "like" || op == "~~") return "like";
+    if (op == "notlike" || op == "!~~") return "notlike";
+    if (op == "ilike" || op == "~~*") return "ilike";
+    if (op == "notilike" || op == "!~~*") return "notilike";
+    if (op == "similar" || op == "similarto") return "similar";
+    if (op == "notsimilar" || op == "notsimilarto") return "notsimilar";
+    return {};
+}
+
+static bool storedPatternTextType(const std::string& input) {
+    const auto type = ExprHelper::canonicalResultTypeName(input);
+    return type == "text" || type == "character varying" || type == "character" ||
+           type == "name" || type == "citext" || type == "unknown";
+}
+
+static void validateStoredPatternTypes(const Column& column,
+                                      const StorageEngine::Condition& condition) {
+    const auto op = storedPatternOperator(condition.op);
+    if (op.empty()) return;
+    const bool bytes = isByteaTypeName(column.dataType);
+    const bool like = op == "like" || op == "notlike";
+    const auto accepts = [&](const std::string& type) {
+        return type.empty() || type == "unknown" ||
+               (bytes ? isByteaTypeName(type) : storedPatternTextType(type));
+    };
+    if (column.isArray || (bytes ? !like : !storedPatternTextType(column.dataType)) ||
+        !accepts(condition.patternType) || !accepts(condition.patternEscapeType))
+        throw DbError("42883", "operator does not exist for stored pattern operand types");
+}
+
+static std::string storedPatternBytes(const std::string& input) {
+    ByteaValue value;
+    if (!ByteaValue::parse(input,value)) throw DbError("22P02", "invalid input syntax for type bytea");
+    return value.bytes();
+}
+
+static std::string storedPatternTextArgument(std::string value,const std::string& type) {
+    if (ExprHelper::canonicalResultTypeName(type)=="character")
+        while (!value.empty() && value.back()==' ') value.pop_back();
+    return value;
+}
+
+static StorageEngine::Condition bindStoredPatternTypes(
+    const TableSchema& table, const StorageEngine::Condition& input) {
+    auto condition = input;
+    if (storedPatternOperator(condition.op).empty()) return condition;
+    const Column* left = nullptr;
+    for (size_t i=0;i<table.len;++i) {
+        const auto& column = table.cols[i];
+        const auto type = column.dataType + (column.isArray ? "[]" : "");
+        if (column.dataName == condition.colName) left = &column;
+        if (!condition.decodedLiteralRhs && column.dataName == condition.value)
+            condition.patternType = type;
+        if (column.dataName == condition.patternEscapeColumn)
+            condition.patternEscapeType = type;
     }
-    size_t i = 0, j = 0;
-    size_t starIdx = std::string::npos, matchIdx = 0;
-    while (i < t.size()) {
-        if (j + 1 < p.size() && p[j] == 0x01) {
-            // escaped literal (from LIKE ... ESCAPE): next pattern char
-            // matches itself exactly.
-            if (p[j + 1] != t[i]) return false;
-            ++i; j += 2;
-        } else if (j < p.size() && p[j] == '%') {
-            // wildcard takes precedence over a literal '%' in the TEXT
-            starIdx = j++;
-            matchIdx = i;
-        } else if (j < p.size() && (p[j] == t[i] || p[j] == '_')) {
-            ++i; ++j;
-        } else if (starIdx != std::string::npos) {
-            j = starIdx + 1;
-            i = ++matchIdx;
-        } else {
-            return false;
+    if (!condition.patternEscapeColumn.empty() && condition.patternEscapeType.empty())
+        throw DbError("42703", "pattern escape column does not exist");
+    if (left) {
+        validateStoredPatternTypes(*left,condition);
+        if (condition.decodedLiteralRhs && !condition.patternIsNull &&
+            condition.patternEscape && !condition.patternEscapeIsNull &&
+            condition.patternEscapeColumn.empty()) {
+            const bool bytes=isByteaTypeName(left->dataType);
+            const auto escape=bytes ? storedPatternBytes(*condition.patternEscape)
+                : storedPatternTextArgument(*condition.patternEscape,condition.patternEscapeType);
+            if (sql_pattern::characters(escape,bytes).size()>1)
+                throw DbError("22025", "invalid escape string");
         }
     }
-    while (j < p.size() && p[j] == '%') ++j;
-    return j == p.size();
+    return condition;
+}
+
+static void validateStoredPatternConditions(
+    const TableSchema& table, const std::vector<StorageEngine::Condition>& conditions) {
+    for (const auto& condition : conditions) (void)bindStoredPatternTypes(table,condition);
+}
+
+static StorageEngine::PredicateTruth storedPatternTruth(
+    const Column& column, const std::string& value, bool valueIsNull,
+    const std::string& pattern, bool patternIsNull,
+    const StorageEngine::Condition& condition) {
+    using Truth = StorageEngine::PredicateTruth;
+    validateStoredPatternTypes(column,condition);
+    if (patternIsNull || condition.patternIsNull || condition.patternEscapeIsNull)
+        return Truth::Unknown;
+    const bool bytes = isByteaTypeName(column.dataType);
+    const std::string escape = condition.patternEscape
+        ? (bytes ? storedPatternBytes(*condition.patternEscape)
+                 : storedPatternTextArgument(*condition.patternEscape,condition.patternEscapeType))
+        : "\\";
+    if (condition.patternEscape && sql_pattern::characters(escape,bytes).size() > 1)
+        throw DbError("22025", "invalid escape string");
+    if (valueIsNull) return Truth::Unknown;
+    std::string source = bytes ? storedPatternBytes(value) : value;
+    std::string match = bytes ? storedPatternBytes(pattern) : pattern;
+    if (!bytes) match=storedPatternTextArgument(std::move(match),condition.patternType);
+    // The retained SQL string normalizer used 0x01 to encode escape literals.
+    // Translate only that untagged legacy form; decoded native data keeps it.
+    if (!condition.patternEscape && !condition.decodedLiteralRhs && condition.patternType.empty() &&
+        match.find(char(1)) != std::string::npos) {
+        std::string translated;
+        for (size_t i=0;i<match.size();++i) {
+            if (match[i] == char(1)) translated += '\\';
+            else { if (match[i] == '\\') translated += '\\'; translated += match[i]; }
+        }
+        match = std::move(translated);
+    }
+    const auto locale = collation::normalizeName(column.resolvedCollation.empty()
+        ? column.collation : column.resolvedCollation);
+    const bool ascii = locale == "c" || locale == "posix";
+    const auto op = storedPatternOperator(condition.op);
+    bool matched = (op == "similar" || op == "notsimilar")
+        ? sql_pattern::similar(source,match,escape,ascii)
+        : sql_pattern::like(source,match,escape,op == "ilike" || op == "notilike",bytes,ascii);
+    if (op == "notlike" || op == "notilike" || op == "notsimilar") matched = !matched;
+    return matched ? Truth::True : Truth::False;
 }
 
 // REGEXP pattern matching (ECMAScript syntax), case-insensitive
@@ -22634,6 +22725,11 @@ bool StorageEngine::stringToBuffer(const std::string& src, char* dst, size_t len
 StorageEngine::PredicateTruth StorageEngine::compareValues(
     const Column& col, const std::string& left, bool leftIsNull,
     const std::string& right, bool rightIsNull, const std::string& op) {
+    if (!storedPatternOperator(op).empty()) {
+        Condition pattern;
+        pattern.op = op; pattern.decodedLiteralRhs = true;
+        return storedPatternTruth(col,left,leftIsNull,right,rightIsNull,pattern);
+    }
     if (leftIsNull || rightIsNull) return PredicateTruth::Unknown;
 
     auto fromCompare = [&](int cmp) -> PredicateTruth {
@@ -22843,7 +22939,7 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
     // scalar evaluator used by infix predicates during a heap fallback.
     if (cond.op != "scalarexpr" &&
         cond.colName.find('(') != std::string::npos) {
-        Condition scalarCondition;
+        Condition scalarCondition = cond;
         scalarCondition.op = "scalarexpr";
         scalarCondition.colName = cond.colName;
         std::string right = cond.value;
@@ -22857,8 +22953,26 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
             }
             right += '\'';
         }
+        const auto pattern = storedPatternOperator(cond.op);
+        std::string operation = cond.op;
+        if (!pattern.empty()) {
+            operation = pattern == "similar" ? "SIMILAR TO" :
+                pattern == "notsimilar" ? "NOT SIMILAR TO" :
+                pattern == "notlike" ? "NOT LIKE" : pattern == "notilike" ? "NOT ILIKE" : pattern;
+            if (cond.patternIsNull) right = "NULL";
+            if (cond.patternEscape || cond.patternEscapeIsNull || !cond.patternEscapeColumn.empty()) {
+                right += " ESCAPE ";
+                if (cond.patternEscapeIsNull) right += "NULL";
+                else if (!cond.patternEscapeColumn.empty()) right += cond.patternEscapeColumn;
+                else {
+                    right += "'";
+                    for (char ch : *cond.patternEscape) { right += ch; if (ch=='\'') right += ch; }
+                    right += "'";
+                }
+            }
+        }
         scalarCondition.value = cond.op == "isnull" ? "IS NULL" :
-            cond.op == "isnotnull" ? "IS NOT NULL" : cond.op + " " + right;
+            cond.op == "isnotnull" ? "IS NOT NULL" : operation + " " + right;
         return evalConditionOnRow(scalarCondition, rowBuffer, tbl);
     }
 
@@ -22875,6 +22989,7 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
 
     if (cond.op == "typedexpr") {
         std::map<std::string, std::string> rowValues;
+        std::map<std::string, std::string> collations;
         std::set<std::string> nullColumns;
         for (size_t i = 0; i < tbl.len; ++i) {
             bool isNull = false;
@@ -22882,10 +22997,13 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
             if (!buffered && !valueEngine && !tbl.cols[i].isVariableLength &&
                 tbl.cols[i].isNull && value.empty()) isNull = true;
             rowValues[tbl.cols[i].dataName] = std::move(value);
+            collations[tbl.cols[i].dataName]=tbl.cols[i].resolvedCollation.empty()
+                ? tbl.cols[i].collation : tbl.cols[i].resolvedCollation;
             if (isNull) nullColumns.insert(tbl.cols[i].dataName);
         }
         const auto evaluated = ExprHelper::evalStringWithNulls(
-            cond.value, rowValues, nullColumns, buildTypeHints(tbl), valueDb, "", valueEngine);
+            cond.value, rowValues, nullColumns, buildTypeHints(tbl), valueDb, "", valueEngine,collations);
+        if (!evaluated.ok && !evaluated.sqlState.empty()) throw DbError(evaluated.sqlState,evaluated.error);
         if (!evaluated.ok)
             throw std::runtime_error(evaluated.error.empty()
                 ? "failed to evaluate typed predicate" : evaluated.error);
@@ -22960,6 +23078,31 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
         g_condNullEngine->isColumnNullByRid(g_condNullDb, tbl.tablename,
                                             g_condNullRid, ci)) {
         physNull = true;
+    }
+    if (!storedPatternOperator(cond.op).empty()) {
+        Condition pattern = bindStoredPatternTypes(tbl,cond);
+        std::string right = cond.value;
+        bool rightNull = cond.patternIsNull;
+        if (!cond.decodedLiteralRhs && !cond.patternIsNull) {
+            for (size_t i=0;i<tbl.len;++i) if (tbl.cols[i].dataName == cond.value) {
+                right = extractValue(i,&rightNull);
+                if (buffered) rightNull = (*g_bufferedConditionNulls)[i];
+                pattern.patternType = tbl.cols[i].isArray ? tbl.cols[i].dataType+"[]" : tbl.cols[i].dataType;
+                break;
+            }
+        }
+        if (!cond.patternEscapeColumn.empty()) {
+            bool found = false;
+            for (size_t i=0;i<tbl.len;++i) if (tbl.cols[i].dataName == cond.patternEscapeColumn) {
+                bool escapeNull = false;
+                pattern.patternEscape = extractValue(i,&escapeNull);
+                pattern.patternEscapeIsNull = buffered ? (*g_bufferedConditionNulls)[i] : escapeNull;
+                pattern.patternEscapeType = tbl.cols[i].isArray ? tbl.cols[i].dataType+"[]" : tbl.cols[i].dataType;
+                found = true; break;
+            }
+            if (!found) throw DbError("42703", "pattern escape column does not exist");
+        }
+        return storedPatternTruth(col,val,physNull,right,rightNull,pattern) == PredicateTruth::True;
     }
     if (cond.op == "isnull") return physNull;
     if (cond.op == "isnotnull") return !physNull;
@@ -23081,10 +23224,6 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
         if (cond.op == "<=" && (scmp(val, cond.value) > 0))      return false;
         if (cond.op == ">=" && (scmp(val, cond.value) < 0))      return false;
         if (cond.op == "!=" && scmp(val, cond.value) == 0)        return false;
-        if (cond.op == "like" && !likeMatch(val, cond.value, false)) return false;
-        if (cond.op == "notlike" && likeMatch(val, cond.value, false)) return false;
-        if (cond.op == "ilike" && !likeMatch(val, cond.value, true)) return false;
-        if (cond.op == "notilike" && likeMatch(val, cond.value, true)) return false;
         if (cond.op == "between" || cond.op == "notbetween") {
             // cond.value = "lo hi" (space-joined by modifyLogic)
             size_t sp = cond.value.find(' ');
@@ -23378,12 +23517,6 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
             bool inRange = num >= *lo && num <= *hi;
             if (cond.op == "between" && !inRange) return false;
             if (cond.op == "notbetween" && inRange) return false;
-            return true;
-        }
-        if (cond.op == "notlike" || cond.op == "notilike") {
-            // NOT LIKE / NOT ILIKE on a non-text column: match textually,
-            // then negate.
-            if (likeMatch(val, cond.value, cond.op == "notilike")) return false;
             return true;
         }
         const auto parsedCmp = parseStoredInteger(cond.value);
@@ -25892,6 +26025,83 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
             conds.push_back(std::move(c));
             continue;
         }
+        bool parsedPattern = false;
+        for (const std::string prefix : {"notsimilarto","notsimilar","notilike","notlike",
+                                         "similarto","similar","ilike","like"}) {
+            if (s.compare(0,prefix.size(),prefix) != 0) continue;
+            size_t begin = prefix.size();
+            while (begin < s.size() && std::isspace(static_cast<unsigned char>(s[begin]))) ++begin;
+            size_t space = begin;
+            char quote = 0; size_t depth = 0;
+            for (;space<s.size();++space) {
+                const char ch=s[space];
+                if (quote) {
+                    if (ch==quote) {
+                        if (space+1<s.size() && s[space+1]==quote) { ++space; continue; }
+                        quote=0;
+                    }
+                } else if (ch=='\'' || ch=='"') quote=ch;
+                else if (ch=='(') ++depth;
+                else if (ch==')' && depth) --depth;
+                else if (!depth && std::isspace(static_cast<unsigned char>(ch))) break;
+            }
+            if (space == s.size()) throw DbError("42601", "missing stored pattern operand");
+            c.op = storedPatternOperator(prefix);
+            c.colName = s.substr(begin,space-begin);
+            std::string raw = trim(s.substr(space+1));
+            c.decodedLiteralRhs = apiCondition;
+            if (!apiCondition) {
+                // Parse operand syntax only. Physical rows remain native data.
+                const std::string operation = c.op == "similar" ? "SIMILAR TO" :
+                    c.op == "notsimilar" ? "NOT SIMILAR TO" :
+                    c.op == "notlike" ? "NOT LIKE" : c.op == "notilike" ? "NOT ILIKE" : c.op;
+                SQLParser parser;
+                auto parsed = parser.parse("SELECT NULL " + operation + " " + raw);
+                auto* select = parsed.success ? dynamic_cast<SelectStmt*>(parsed.stmt.get()) : nullptr;
+                const Expr* pattern = nullptr; const Expr* escape = nullptr;
+                if (select && select->selectList.size()==1 && !select->fromClause) {
+                    const Expr* expression = select->selectList.front().expr.get();
+                    if (const auto* binary=dynamic_cast<const BinaryOpExpr*>(expression)) pattern=binary->right.get();
+                    else if (const auto* call=dynamic_cast<const FunctionCallExpr*>(expression);
+                             call && call->args.size()==3 && SQLParser::toLower(call->funcName).find("escape")!=std::string::npos) {
+                        pattern=call->args[1].get(); escape=call->args[2].get();
+                    }
+                }
+                const auto decode = [&](const Expr* operand,std::string& datum,
+                                        std::string& type,bool& isNull,bool& literal) {
+                    if (!operand) return false;
+                    if (const auto* reference=dynamic_cast<const ColumnRefExpr*>(operand)) {
+                        datum=reference->toString(); literal=false; return true;
+                    }
+                    const Expr* leaf=operand;
+                    for (;;) {
+                        if (const auto* cast=dynamic_cast<const CastExpr*>(leaf)) leaf=cast->operand.get();
+                        else if (const auto* binary=dynamic_cast<const BinaryOpExpr*>(leaf);binary && binary->op=="::") leaf=binary->left.get();
+                        else break;
+                    }
+                    if (!dynamic_cast<const LiteralExpr*>(leaf)) return false;
+                    ExprEvaluator evaluator; const auto value=evaluator.eval(operand,{});
+                    datum=value.value;type=ExprHelper::inferParsedInputType(operand,{});
+                    isNull=value.isNull;literal=true;return true;
+                };
+                bool decoded=decode(pattern,c.value,c.patternType,c.patternIsNull,c.decodedLiteralRhs);
+                if (decoded && escape) {
+                    std::string value; bool literal=false;
+                    decoded=decode(escape,value,c.patternEscapeType,c.patternEscapeIsNull,literal);
+                    if (literal) c.patternEscape=std::move(value);
+                    else c.patternEscapeColumn=std::move(value);
+                }
+                if (pattern && !decoded) {
+                    c.value=c.colName+" "+operation+" "+raw;
+                    c.colName.clear();c.op="typedexpr";
+                } else if (!decoded) c.value=decodeSqlLiteral(raw);
+            } else c.value=decodeSqlLiteral(raw);
+            // Quoted compact values have always been literal data, including
+            // the four-byte string NULL and values equal to column names.
+            if (!raw.empty() && raw.front() == '\'') c.decodedLiteralRhs = true;
+            conds.push_back(std::move(c)); parsedPattern = true; break;
+        }
+        if (parsedPattern) continue;
         // Handle LIKE operator
         // Accept both "notlike<col> <val>" (glued, from modifyLogic's
         // compact path) and "notlike <col> <val>" (spaced, from splitConds
@@ -26214,6 +26424,14 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
         return failScan();
     };
     TableSchema tbl = getTableSchema(dbname, tablename);
+    validateStoredPatternConditions(tbl,conds);
+    for (const auto& condition:conds) if (condition.op=="typedexpr") {
+        SQLParser parser;auto parsed=parser.parse("SELECT "+condition.value);
+        auto* select=parsed.success ? dynamic_cast<SelectStmt*>(parsed.stmt.get()) : nullptr;
+        if (!select || select->selectList.size()!=1 || select->fromClause)
+            throw DbError("42601","invalid typed predicate");
+        ExprHelper::prepareArrayTypes(select->selectList[0].expr.get(),buildTypeHints(tbl),dbname,this);
+    }
     const auto secondaryMetadata = getIndexMetadata(dbname, tablename);
     const auto hasCompleteSecondaryIndex = [&](const std::string& columnName) {
         return std::any_of(
@@ -39743,6 +39961,7 @@ struct JoinCondition : StorageEngine::Condition {
         size_t column;
         std::string key;
         std::string type;
+        std::string collation;
     };
     std::shared_ptr<Stmt> expressionOwner;
     Expr* expression = nullptr;
@@ -39758,6 +39977,10 @@ static std::vector<JoinCondition> parseJoinConditions(
         for (auto& condition : conditions) {
             JoinCondition parsed;
             static_cast<StorageEngine::Condition&>(parsed) = std::move(condition);
+            if (!storedPatternOperator(parsed.op).empty()) {
+                parsed.valueIsLiteral=parsed.decodedLiteralRhs;
+                parsed.valueIsNull=parsed.patternIsNull;
+            }
             if (parsed.op == "typedexpr") {
                 SQLParser parser;
                 auto expression = parser.parse("SELECT " + parsed.value);
@@ -39803,6 +40026,29 @@ static void prepareJoinExpressions(
     const std::string& leftRange, const std::string& rightRange,
     bool encoded, const std::string& database, StorageEngine* engine) {
     for (auto& condition : conditions) {
+        if (!storedPatternOperator(condition.op).empty()) {
+            const auto find = [&](const std::string& key) -> const Column* {
+                for (int side=0;side<2;++side) {
+                    const auto& table=side==0 ? left : right;
+                    const auto& range=side==0 ? leftRange : rightRange;
+                    for (size_t i=0;i<table.len;++i)
+                        if (key==table.cols[i].dataName ||
+                            key==StorageEngine::joinRangeColumnKey(range,table.cols[i].dataName,encoded))
+                            return &table.cols[i];
+                }
+                return nullptr;
+            };
+            const auto* column=find(condition.colName);
+            if (!column) throw DbError("42703", "pattern column does not exist");
+            if (!condition.valueIsLiteral) if (const auto* pattern=find(condition.value))
+                condition.patternType=pattern->dataType+(pattern->isArray ? "[]" : "");
+            if (!condition.patternEscapeColumn.empty()) {
+                const auto* escape=find(condition.patternEscapeColumn);
+                if (!escape) throw DbError("42703", "pattern escape column does not exist");
+                condition.patternEscapeType=escape->dataType+(escape->isArray ? "[]" : "");
+            }
+            validateStoredPatternTypes(*column,condition);
+        }
         if (condition.op != "typedexpr") continue;
         condition.evaluator = std::make_shared<ExprEvaluator>();
         condition.evaluator->setCurrentDB(database);
@@ -39845,7 +40091,8 @@ static void prepareJoinExpressions(
                 const auto& column = (isLeft ? left : right).cols[index];
                 const std::string key = "__dbms_join_value_" + std::to_string(condition.bindings.size());
                 condition.bindings.push_back({isLeft, index, key,
-                    ExprHelper::canonicalResultTypeName(column.dataType + (column.isArray ? "[]" : ""))});
+                    ExprHelper::canonicalResultTypeName(column.dataType + (column.isArray ? "[]" : "")),
+                    column.resolvedCollation.empty() ? column.collation : column.resolvedCollation});
                 reference->column = key;
                 reference->table.clear();
                 reference->schema.clear();
@@ -39910,7 +40157,8 @@ static bool evaluateJoinExpression(const JoinCondition& condition, ValueGetter v
     for (const auto& binding : condition.bindings) {
         bool isNull = false;
         const std::string value = valueAt(binding.isLeft, binding.column, isNull);
-        row.set(binding.key, ExprValue(binding.type, value, isNull));
+        ExprValue datum(binding.type,value,isNull);datum.collation=binding.collation;
+        row.set(binding.key,std::move(datum));
     }
     if (const Session* session = currentSession()) {
         row.set("current_user", ExprValue("name", session->username, false));
@@ -39955,6 +40203,9 @@ static bool joinValuePredicateMatches(
     const std::string& op = condition.op;
     if (op == "isnull") return valueIsNull;
     if (op == "isnotnull") return !valueIsNull;
+    if (!storedPatternOperator(op).empty())
+        return storedPatternTruth(column,value,valueIsNull,comparisonValue,
+                                  comparisonIsNull,condition) == StorageEngine::PredicateTruth::True;
     if (valueIsNull) return false;
 
     if (isJoinComparisonOperator(op)) {
@@ -39962,12 +40213,6 @@ static bool joinValuePredicateMatches(
                    column, value, false, comparisonValue,
                    comparisonIsNull, op) ==
                StorageEngine::PredicateTruth::True;
-    }
-    if (op == "like" || op == "notlike" ||
-        op == "ilike" || op == "notilike") {
-        const bool insensitive = op == "ilike" || op == "notilike";
-        const bool matched = likeMatch(value, comparisonValue, insensitive);
-        return (op == "notlike" || op == "notilike") ? !matched : matched;
     }
     if (op == "regexp" || op == "notregexp") {
         const bool matched = regexMatch(value, comparisonValue);
@@ -40186,7 +40431,8 @@ std::vector<std::string> StorageEngine::join(
         const Column& col = tbl.cols[it->second.colIdx];
         std::string comparisonValue = c.value;
         bool comparisonIsNull = c.valueIsNull;
-        if (isJoinComparisonOperator(c.op) && !c.valueIsLiteral) {
+        Condition bound=c;
+        if ((isJoinComparisonOperator(c.op) || !storedPatternOperator(c.op).empty()) && !c.valueIsLiteral) {
             auto comparison = colMap.find(c.value);
             if (comparison != colMap.end()) {
                 const TableSchema& comparisonTable =
@@ -40200,8 +40446,16 @@ std::vector<std::string> StorageEngine::join(
                     comparison->second.colIdx, &comparisonIsNull);
             }
         }
+        if (!c.patternEscapeColumn.empty()) {
+            const auto escape=colMap.find(c.patternEscapeColumn);
+            if (escape==colMap.end()) throw DbError("42703", "pattern escape column does not exist");
+            bound.patternEscape=logicalValue(escape->second.isLeft ? leftRow : rightRow,
+                escape->second.isLeft ? leftTbl : rightTbl,
+                escape->second.isLeft ? leftTable : rightTable,
+                escape->second.colIdx,&bound.patternEscapeIsNull);
+        }
         return joinValuePredicateMatches(
-            c, col, val, valueIsNull, comparisonValue, comparisonIsNull);
+            bound, col, val, valueIsNull, comparisonValue, comparisonIsNull);
     };
 
     auto conds = parseJoinConditions(conditions);
@@ -40223,6 +40477,7 @@ std::vector<std::string> StorageEngine::join(
         bool valIsCol = false;
         auto vit = colMap.find(c.value);
         if (!c.valueIsLiteral && vit != colMap.end()) valIsCol = true;
+        if (!c.patternEscapeColumn.empty()) valIsCol=true;
         if (onLeft && !valIsCol) leftConds.push_back(c);
         else if (onRight && !valIsCol) rightConds.push_back(c);
         else joinConds.push_back(c);
@@ -40481,7 +40736,8 @@ std::vector<std::string> StorageEngine::leftJoin(
             *row, tbl, tableName, it->second.colIdx, &valueIsNull);
         std::string comparisonValue = c.value;
         bool comparisonIsNull = c.valueIsNull;
-        if (isJoinComparisonOperator(c.op) && !c.valueIsLiteral) {
+        Condition bound=c;
+        if ((isJoinComparisonOperator(c.op) || !storedPatternOperator(c.op).empty()) && !c.valueIsLiteral) {
             auto comparison = colMap.find(c.value);
             if (comparison != colMap.end()) {
                 const JoinRow* comparisonRow = comparison->second.isLeft
@@ -40499,8 +40755,18 @@ std::vector<std::string> StorageEngine::leftJoin(
                 }
             }
         }
+        if (!c.patternEscapeColumn.empty()) {
+            const auto escape=colMap.find(c.patternEscapeColumn);
+            if (escape==colMap.end()) throw DbError("42703", "pattern escape column does not exist");
+            const auto* escapeRow=escape->second.isLeft ? leftRow : rightRow;
+            if (!escapeRow) bound.patternEscapeIsNull=true;
+            else bound.patternEscape=logicalValue(*escapeRow,
+                escape->second.isLeft ? leftTbl : rightTbl,
+                escape->second.isLeft ? leftTable : rightTable,
+                escape->second.colIdx,&bound.patternEscapeIsNull);
+        }
         return joinValuePredicateMatches(
-            c, col, val, valueIsNull, comparisonValue, comparisonIsNull);
+            bound, col, val, valueIsNull, comparisonValue, comparisonIsNull);
     };
 
     auto conds = parseJoinConditions(conditions);
@@ -40783,7 +41049,8 @@ std::vector<std::string> StorageEngine::rightJoin(
             *row, tbl, tableName, it->second.colIdx, &valueIsNull);
         std::string comparisonValue = c.value;
         bool comparisonIsNull = c.valueIsNull;
-        if (isJoinComparisonOperator(c.op) && !c.valueIsLiteral) {
+        Condition bound=c;
+        if ((isJoinComparisonOperator(c.op) || !storedPatternOperator(c.op).empty()) && !c.valueIsLiteral) {
             auto comparison = colMap.find(c.value);
             if (comparison != colMap.end()) {
                 const JoinRow* comparisonRow = comparison->second.isLeft
@@ -40801,8 +41068,18 @@ std::vector<std::string> StorageEngine::rightJoin(
                 }
             }
         }
+        if (!c.patternEscapeColumn.empty()) {
+            const auto escape=colMap.find(c.patternEscapeColumn);
+            if (escape==colMap.end()) throw DbError("42703", "pattern escape column does not exist");
+            const auto* escapeRow=escape->second.isLeft ? leftRow : rightRow;
+            if (!escapeRow) bound.patternEscapeIsNull=true;
+            else bound.patternEscape=logicalValue(*escapeRow,
+                escape->second.isLeft ? leftTbl : rightTbl,
+                escape->second.isLeft ? leftTable : rightTable,
+                escape->second.colIdx,&bound.patternEscapeIsNull);
+        }
         return joinValuePredicateMatches(
-            c, col, val, valueIsNull, comparisonValue, comparisonIsNull);
+            bound, col, val, valueIsNull, comparisonValue, comparisonIsNull);
     };
 
     auto conds = parseJoinConditions(conditions);
@@ -41065,7 +41342,8 @@ std::vector<std::string> StorageEngine::crossJoin(
         const Column& col = tbl.cols[it->second.colIdx];
         std::string comparisonValue = c.value;
         bool comparisonIsNull = c.valueIsNull;
-        if (isJoinComparisonOperator(c.op) && !c.valueIsLiteral) {
+        Condition bound=c;
+        if ((isJoinComparisonOperator(c.op) || !storedPatternOperator(c.op).empty()) && !c.valueIsLiteral) {
             auto comparison = colMap.find(c.value);
             if (comparison != colMap.end()) {
                 const TableSchema& comparisonTable =
@@ -41079,8 +41357,16 @@ std::vector<std::string> StorageEngine::crossJoin(
                     comparison->second.colIdx, &comparisonIsNull);
             }
         }
+        if (!c.patternEscapeColumn.empty()) {
+            const auto escape=colMap.find(c.patternEscapeColumn);
+            if (escape==colMap.end()) throw DbError("42703", "pattern escape column does not exist");
+            bound.patternEscape=logicalValue(escape->second.isLeft ? leftRow : rightRow,
+                escape->second.isLeft ? leftTbl : rightTbl,
+                escape->second.isLeft ? leftTable : rightTable,
+                escape->second.colIdx,&bound.patternEscapeIsNull);
+        }
         return joinValuePredicateMatches(
-            c, col, val, valueIsNull, comparisonValue, comparisonIsNull);
+            bound, col, val, valueIsNull, comparisonValue, comparisonIsNull);
     };
 
     for (const auto& lr : leftRows) {

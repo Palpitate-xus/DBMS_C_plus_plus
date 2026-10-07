@@ -2765,6 +2765,15 @@ static bool similarToMatchEscape(const std::string& text, const std::string& pat
     return sql_pattern::similar(text,pattern,escape,asciiOnly);
 }
 
+static void coercePatternTextArgument(ExprValue& value) {
+    // SQL pattern/escape arguments accept TEXT, so a CHAR datum loses its
+    // trailing padding there. The left bpchar datum keeps its own padding.
+    if (ExprHelper::canonicalResultTypeName(value.typeName)=="character") {
+        while (!value.value.empty() && value.value.back()==' ') value.value.pop_back();
+        value.typeName="text";
+    }
+}
+
 void ExprEvaluator::validatePatternEscapeInput(const ExprValue& escape) {
     if (escape.isNull) return;
     const bool bytes = ExprHelper::canonicalResultTypeName(escape.typeName) == "bytea";
@@ -3300,6 +3309,8 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
     }
 
     // LIKE / ILIKE / SIMILAR TO
+    if (op == "like" || op == "not like" || op == "ilike" || op == "not ilike" ||
+        op == "similar to" || op == "not similar to") coercePatternTextArgument(r);
     if ((op == "like" || op == "not like" ||
          op == "ilike" || op == "not ilike" ||
          op == "similar to" || op == "not similar to") &&
@@ -4943,6 +4954,7 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
     // escape literals and determines trailing-escape demand during matching.
     if (name == "like escape" || name == "not like escape" ||
         name == "ilike escape" || name == "not ilike escape") {
+        if (args.size()==3) { coercePatternTextArgument(args[1]);coercePatternTextArgument(args[2]); }
         if (args.size() < 3 || args[1].isNull || args[2].isNull) {
             return ExprValue("boolean", "", true);
         }
@@ -4962,6 +4974,7 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
     }
 
     if (name == "similar to escape" || name == "not similar to escape") {
+        if (args.size()==3) { coercePatternTextArgument(args[1]);coercePatternTextArgument(args[2]); }
         if (args.size() < 3 || args[1].isNull || args[2].isNull) {
             return ExprValue("boolean", "", true);
         }

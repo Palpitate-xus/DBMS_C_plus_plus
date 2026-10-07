@@ -122,7 +122,8 @@ public:
 
     // Variant for callers that retain SQL NULL metadata separately from the
     // textual value.  This preserves a real empty string as distinct from
-    // NULL while constructing the evaluator's row context.
+    // NULL while constructing the evaluator's row context. Collation hints
+    // retain actual source-column semantics without interpolating row SQL.
     static ExprEvalResult evalStringWithNulls(
         const std::string& exprSql,
         const std::map<std::string, std::string>& row,
@@ -130,7 +131,8 @@ public:
         const std::map<std::string, std::string>& typeHints = {},
         const std::string& currentDB = "",
         const std::string& currentUser = "",
-        StorageEngine* functionEngine = nullptr);
+        StorageEngine* functionEngine = nullptr,
+        const std::map<std::string, std::string>& collationHints = {});
 
     // Convenience: evaluate a boolean expression. NULL is treated as false.
     // Returns false and writes the error message to `error` (if non-null) on
