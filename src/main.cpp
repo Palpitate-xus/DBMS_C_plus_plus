@@ -603,7 +603,42 @@ static pair<set<string>, bool> parseReturningClause(const string& sql, size_t se
 }
 
 static size_t findMatchingParen(const string& sql, size_t start);
+// Retain a parsed SQL pattern predicate as one typed execution atom. This
+// boundary handles the actual legacy callers too (aggregate/subquery/DML),
+// without rewriting ESCAPE bytes or turning SIMILAR into a regex operator.
+static bool hasSqlPatternPredicate(const string& sql) {
+    dbms::SQLParser parser;
+    const auto parsed=parser.parse("SELECT "+sql);
+    const auto* select=parsed.success ? dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()) : nullptr;
+    if (!select || select->fromClause || select->selectList.size()!=1) return false;
+    std::function<bool(const dbms::Expr*)> visit=[&](const dbms::Expr* expression) -> bool {
+        if (const auto* binary=dynamic_cast<const dbms::BinaryOpExpr*>(expression)) {
+            const auto op=dbms::SQLParser::toLower(binary->op);
+            if (op=="like" || op=="not like" || op=="ilike" || op=="not ilike" ||
+                op=="similar to" || op=="not similar to") return true;
+            return visit(binary->left.get()) || visit(binary->right.get());
+        }
+        if (const auto* unary=dynamic_cast<const dbms::UnaryOpExpr*>(expression)) return visit(unary->operand.get());
+        if (const auto* cast=dynamic_cast<const dbms::CastExpr*>(expression)) return visit(cast->operand.get());
+        if (const auto* call=dynamic_cast<const dbms::FunctionCallExpr*>(expression)) {
+            const auto name=dbms::SQLParser::toLower(call->funcName);
+            if (name=="like escape" || name=="not like escape" || name=="ilike escape" ||
+                name=="not ilike escape" || name=="similar to escape" || name=="not similar to escape") return true;
+            for (const auto& argument:call->args) if (visit(argument.get())) return true;
+        }
+        if (const auto* conditional=dynamic_cast<const dbms::CaseExpr*>(expression)) {
+            if (visit(conditional->switchExpr.get()) || visit(conditional->elseExpr.get())) return true;
+            for (const auto& branch:conditional->whenClauses)
+                if (visit(branch.first.get()) || visit(branch.second.get())) return true;
+        }
+        return false;
+    };
+    return visit(select->selectList.front().expr.get());
+}
+
 static vector<string> tokenize(const string& sql) {
+    if (sql.rfind("typedexpr ",0)==0) return {sql};
+    if (hasSqlPatternPredicate(sql)) return {"typedexpr "+sql};
     vector<string> tokens;
     size_t i = 0;
     while (i < sql.size()) {
@@ -2017,6 +2052,17 @@ static bool renderJoinExpression(
     if (const auto* call = dynamic_cast<const dbms::FunctionCallExpr*>(expression)) {
         if (call->hasOver || call->distinct || call->filter ||
             !call->orderBy.empty() || !call->namedArgs.empty()) return false;
+        const auto name=dbms::SQLParser::toLower(call->funcName);
+        if (call->schema.empty() && call->args.size()==3 &&
+            (name=="like escape" || name=="not like escape" || name=="ilike escape" ||
+             name=="not ilike escape" || name=="similar to escape" || name=="not similar to escape")) {
+            string left,pattern,escape;
+            if (!renderJoinExpression(call->args[0].get(),bindColumn,left) ||
+                !renderJoinExpression(call->args[1].get(),bindColumn,pattern) ||
+                !renderJoinExpression(call->args[2].get(),bindColumn,escape)) return false;
+            result="("+left+" "+name.substr(0,name.size()-7)+" "+pattern+" ESCAPE "+escape+")";
+            return true;
+        }
         result = (call->schema.empty() ? string{} : call->schema + ".") + call->funcName + "(";
         for (size_t i = 0; i < call->args.size(); ++i) {
             string argument;
@@ -9534,7 +9580,10 @@ static bool hasComputedPredicate(const string& sql, bool* immutableConstant = nu
                 binary->op == "/" || binary->op == "%" || binary->op == "^" ||
                 binary->op == "||" || binary->op == "::" ||
                 toLower(binary->op) == "is distinct from" ||
-                toLower(binary->op) == "is not distinct from") computed = true;
+                toLower(binary->op) == "is not distinct from" ||
+                toLower(binary->op) == "like" || toLower(binary->op) == "not like" ||
+                toLower(binary->op) == "ilike" || toLower(binary->op) == "not ilike" ||
+                toLower(binary->op) == "similar to" || toLower(binary->op) == "not similar to") computed = true;
             inspect(binary->left.get());
             inspect(binary->right.get());
         } else if (const auto* unary = dynamic_cast<const dbms::UnaryOpExpr*>(node)) {
@@ -9582,6 +9631,10 @@ static bool hasComputedPredicate(const string& sql, bool* immutableConstant = nu
 }
 
 static string normalizeConditionStr(string s) {
+    // Preserve the original SQL for the typed predicate bridge. Generated
+    // expressions/CHECK declarations also need the SQL itself, not a compact
+    // execution marker; tokenize/modifyLogic attach that marker for scans.
+    if (hasSqlPatternPredicate(s)) return s;
     // Errors belong to expression evaluation. Text scanning cannot distinguish
     // zero from 0.5 or account for an unused COALESCE/CASE branch.
     // Typed literals (DATE 'x', TIME 'x', TIMESTAMP 'x') in predicates:
@@ -9628,30 +9681,6 @@ static string normalizeConditionStr(string s) {
             }
         }
     }
-    // LIKE ... ESCAPE clause: rewrite into an encoded pattern.
-    for (size_t ep = 0;
-         (ep = findKeywordOutsideQuotes(s, "escape", ep)) != string::npos; ) {
-        size_t vs = ep;
-        while (vs > 0 && isspace(static_cast<unsigned char>(s[vs - 1]))) vs--;
-        if (vs == 0 || s[vs - 1] != (char)39) { ep += 6; continue; }
-        size_t q1 = s.find_first_not_of(" ", ep + 6);
-        if (q1 == string::npos || s[q1] != (char)39 || q1 + 2 >= s.size() || s[q1 + 2] != (char)39) { ep += 6; continue; }
-        char esc = s[q1 + 1];
-        size_t pe = vs - 1;
-        size_t ps = pe;
-        while (ps > 0 && s[ps - 1] != (char)39) ps--;
-        if (ps == 0) { ep += 6; continue; }
-        string pat = s.substr(ps, pe - ps);
-        string enc;
-        for (size_t k = 0; k < pat.size(); ++k) {
-            if (pat[k] == esc && k + 1 < pat.size()) { enc += char(1); enc += pat[k + 1]; ++k; }
-            else enc += pat[k];
-        }
-        size_t clauseEnd = q1 + 3;
-        string tail = (clauseEnd + 1 < s.size()) ? s.substr(clauseEnd + 1) : string();
-        s = s.substr(0, ps) + enc + (char)39 + tail;
-        ep = ps + enc.size() + 1;
-    }
     size_t ipos = 0;
     while ((ipos = findTextOutsideQuotes(s, "ilike", ipos)) != string::npos) {
         size_t before = ipos;
@@ -9692,16 +9721,6 @@ static string normalizeConditionStr(string s) {
         } else {
             pos += 6;
         }
-    }
-    // Normalize SIMILAR TO keyword: "name similar to '^a%'" → "nameregexp'^a%'"
-    pos = 0;
-    while ((pos = findTextOutsideQuotes(s, "similar to", pos)) != string::npos) {
-        size_t before = pos;
-        while (before > 0 && isspace(static_cast<unsigned char>(s[before - 1]))) before--;
-        size_t after = pos + 10;
-        while (after < s.size() && isspace(static_cast<unsigned char>(s[after]))) after++;
-        s = s.substr(0, before) + "regexp" + s.substr(after);
-        pos = before + 6;
     }
 
     // Normalize OVERLAPS keyword: "(d1,d2) overlaps (d3,d4)" → "(d1,d2)overlaps(d3,d4)"
@@ -10110,6 +10129,7 @@ static vector<string> mergeNegPredTokens(const vector<string>& toks) {
 static string modifyLogic(const string& logic) {
     if (logic == "(" || logic == ")" || logic == "and" || logic == "or") return logic;
     if (logic.rfind("typedexpr ", 0) == 0) return logic;
+    if (hasSqlPatternPredicate(logic)) return "typedexpr "+logic;
     // Evaluate expression NULL tests, rather than replacing them with a
     // constant or leaving a function token without its postfix predicate.
     for (const string suffix : {string("isnotnull"), string("isnull")}) {
@@ -29167,6 +29187,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         if (binary->op == "AND")
                             return collectOnComparisons(binary->left.get()) &&
                                 collectOnComparisons(binary->right.get());
+                        if (containsPreparedPattern(binary)) {
+                            onPredicates.push_back(binary);return true;
+                        }
                         if (joinHasNullSafeComparison(binary)) {
                             onPredicates.push_back(binary);
                             return true;
@@ -29177,6 +29200,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             binary->op != ">=") return false;
                         onPredicates.push_back(binary);
                         return true;
+                    }
+                    if (containsPreparedPattern(expression)) {
+                        onPredicates.push_back(expression);return true;
                     }
                     const auto* unary = dynamic_cast<
                         const dbms::UnaryOpExpr*>(expression);
@@ -29257,7 +29283,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                          << "\" does not exist (SQLSTATE 42703)" << endl;
                 };
                 for (const auto* predicate : onPredicates) {
-                    if (joinHasNullSafeComparison(predicate)) {
+                    if (joinHasNullSafeComparison(predicate) || containsPreparedPattern(predicate)) {
                         string sqlExpression;
                         bool bindingError = false;
                         const auto bindColumn = [&](const dbms::ColumnRefExpr* ref, string& key) {
