@@ -34,8 +34,13 @@ static void test_create_function_single_param() {
     assert(g_engine.udfExists(db, "inc"));
     auto info = g_engine.getUDF(db, "inc");
     assert(info.expression == "x + 1");
-    assert(info.returnType == "int");
-    assert(info.paramTypes == std::vector<std::string>{"int"});
+    // SQL DDL stores canonical type identity; the original SQL alias stays.
+    assert(info.returnType == "integer");
+    assert(info.paramTypes == std::vector<std::string>{"integer"});
+    for (const std::string spelling : {"int", "int4", "INTEGER"}) {
+        assert(dbms::TypeRegistry::instance().normalizeTypeName(spelling) ==
+               info.returnType);
+    }
     std::string result;
     bool resultIsNull = false;
     assert(g_engine.callUDF(db, "inc", {"4"}, result, &resultIsNull));
@@ -59,7 +64,9 @@ static void test_create_function_multi_param() {
     auto info = g_engine.getUDF(db, "add");
     assert(info.paramNames.size() == 2);
     assert(info.language == "sql");
-    assert(info.returnType == "int");
+    assert(info.returnType == "integer");
+    assert(info.paramTypes ==
+           std::vector<std::string>({"integer", "integer"}));
     std::string result;
     bool resultIsNull = false;
     assert(g_engine.callUDF(db, "add", {"20", "22"}, result,
@@ -115,6 +122,8 @@ static void test_create_or_replace_function() {
         "STRICT LANGUAGE sql AS 'SELECT x + 2'", s));
     auto info = g_engine.getUDF(db, "replace_me");
     assert(info.strict && info.expression == "SELECT x + 2");
+    assert(info.returnType == "integer" &&
+           info.paramTypes == std::vector<std::string>{"integer"});
     std::string result;
     bool resultIsNull = false;
     assert(g_engine.callUDF(db, "replace_me", {"3"}, result,
