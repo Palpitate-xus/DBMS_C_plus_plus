@@ -457,7 +457,39 @@ public:
                 "AND", "OR", "LIKE", "NOT LIKE", "ILIKE", "NOT ILIKE",
                 "SIMILAR TO", "NOT SIMILAR TO", "IN", "NOT IN", "IS DISTINCT FROM", "IS NOT DISTINCT FROM"};
             static const std::set<std::string> comparisons={"=","<>","!=","<",">","<=",">=","IS DISTINCT FROM","IS NOT DISTINCT FROM"};
-            if(comparisons.count(binary->op))binary->comparison=enumComparison(binary->op,binary->left,binary->right,left,right);
+            if(comparisons.count(binary->op)) {
+                binary->comparison=enumComparison(binary->op,binary->left,binary->right,left,right);
+                // Integer input functions transform genuine UNKNOWN SQL
+                // literals during binding, even if no source row is demanded.
+                // Parameters, routines, typed casts and query children are
+                // not constants and must remain runtime expression sites.
+                const auto integer=[](const std::string& type) {
+                    const auto canonical=common_type_detail::canonical(type);
+                    return canonical=="smallint" || canonical=="integer" || canonical=="bigint";
+                };
+                const auto unknownLiteral=[](const Expr* input) {
+                    const auto* literal=dynamic_cast<const LiteralExpr*>(input);
+                    return literal && !literal->preparedSubquery && literal->typeName.empty() &&
+                        ExprHelper::inferValuesResultType(literal->value)=="unknown";
+                };
+                const auto integerInput=[&](ExprPtr& input,const std::string& target) {
+                    auto* literal=static_cast<LiteralExpr*>(input.get());
+                    if(metadata.assignmentInput)metadata.assignmentInput({"",target},literal,"unknown");
+                    CastExpr conversion;conversion.typeName=target;conversion.implicit=true;
+                    conversion.operand=std::make_unique<LiteralExpr>(*literal);
+                    ExprEvaluator pure;const auto value=pure.eval(&conversion,RowContext{});
+                    // PostgreSQL transforms UNKNOWN into a typed Const, not
+                    // a runtime CAST. Retain this literal's original source
+                    // coordinates and keep the established physical/index
+                    // receiver instead of requesting a different query graph.
+                    literal->typeName=target;
+                    if(!value.isNull)literal->value=value.value;
+                };
+                if(!binary->comparison && integer(left) && right=="unknown" && unknownLiteral(binary->right.get()))
+                    integerInput(binary->right,common_type_detail::canonical(left));
+                else if(!binary->comparison && integer(right) && left=="unknown" && unknownLiteral(binary->left.get()))
+                    integerInput(binary->left,common_type_detail::canonical(right));
+            }
             return predicates.count(binary->op) ? "boolean" : left;
         }
         case ExprType::QuantifiedComparison: {

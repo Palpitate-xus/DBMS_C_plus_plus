@@ -1748,6 +1748,72 @@ bool describePreparedExplainResult(const std::string& sql, Session& session,
     return !columns.empty();
 }
 
+// Parse-time integer input transformation must use the same whole-query
+// binder as simple execution. This finite entry only owns actual integer
+// column/UNKNOWN literal comparisons in a single physical source SELECT.
+// Its catalog/schema probe is metadata-only: no row provider or routine runs.
+void validatePreparedIntegerInputs(const std::string& sql,Session& session,
+                                   const std::vector<uint32_t>& parameterOids) {
+    SQLParser parser;const auto parsed=parser.parseForBinding(sql);
+    const auto* select=parsed.isValid()?dynamic_cast<const SelectStmt*>(parsed.stmt.get()):nullptr;
+    if(!select || !select->fromClause || select->fromClause->type!=FromItem::Type::Table ||
+       !select->ctes.empty() || select->setOp!=SetOp::None || !select->groupBy.empty() ||
+       !select->groupByElems.empty() || select->having || !select->windowDefs.empty() ||
+       !select->locking.empty() || !select->distinctOn.empty())return;
+    const auto physical=protocolPhysicalSourceFromQuery(sql,session);
+    if(!physical.table.len)return;
+    const auto unknown=[](const Expr* value) {
+        const auto* literal=dynamic_cast<const LiteralExpr*>(value);
+        return literal && !literal->preparedSubquery && literal->typeName.empty() &&
+            ExprHelper::inferValuesResultType(literal->value)=="unknown";
+    };
+    const auto integerColumn=[&](const Expr* value) {
+        const auto* column=dynamic_cast<const ColumnRefExpr*>(value);
+        if(!column)return false;
+        for(size_t i=0;i<physical.table.len;++i) {
+            const auto& candidate=physical.table.cols[i];
+            const auto type=ExprHelper::canonicalResultTypeName(candidate.dataType);
+            if(candidate.dataName==column->column && !candidate.isArray &&
+               (type=="smallint" || type=="integer" || type=="bigint"))return true;
+        }
+        return false;
+    };
+    std::function<bool(const Expr*)> contains=[&](const Expr* value) {
+        if(!value || value->preparedSubquery)return false;
+        if(const auto* binary=dynamic_cast<const BinaryOpExpr*>(value)) {
+            static const std::set<std::string> comparisons={"=","<>","!=","<",">","<=",">=","IS DISTINCT FROM","IS NOT DISTINCT FROM"};
+            if(comparisons.count(binary->op) &&
+               ((integerColumn(binary->left.get()) && unknown(binary->right.get())) ||
+                (unknown(binary->left.get()) && integerColumn(binary->right.get()))))return true;
+            return contains(binary->left.get()) || (binary->op!="::" && contains(binary->right.get()));
+        }
+        if(const auto* unary=dynamic_cast<const UnaryOpExpr*>(value))return contains(unary->operand.get());
+        if(const auto* cast=dynamic_cast<const CastExpr*>(value))return contains(cast->operand.get());
+        if(const auto* call=dynamic_cast<const FunctionCallExpr*>(value)) {
+            for(const auto& arg:call->args)if(contains(arg.get()))return true;
+            for(const auto& arg:call->namedArgs)if(contains(arg.value.get()))return true;
+            return contains(call->filter.get());
+        }
+        if(const auto* conditional=dynamic_cast<const CaseExpr*>(value)) {
+            if(contains(conditional->switchExpr.get()) || contains(conditional->elseExpr.get()))return true;
+            for(const auto& arm:conditional->whenClauses)if(contains(arm.first.get()) || contains(arm.second.get()))return true;
+        }
+        return false;
+    };
+    bool candidate=contains(select->whereClause.get());
+    for(const auto& target:select->selectList)candidate=candidate || contains(target.expr.get());
+    for(const auto& key:select->orderBy)candidate=candidate || contains(key.expr.get());
+    if(!candidate)return;
+    std::vector<QueryBindingDatum> parameters;
+    for(size_t i=0;i<parameterOids.size();++i) {
+        const auto* type=valuesParameterCastType(parameterOids[i]);
+        if(parameterOids[i] && !type)return; // retain the existing custom-type owner
+        QueryBindingDatum datum;datum.identity="protocol-parameter-"+std::to_string(i+1);
+        datum.position=i+1;datum.type=type?type:"unknown";parameters.push_back(std::move(datum));
+    }
+    (void)g_engine.prepareBoundQuery(session.currentDB,sql,parameters);
+}
+
 bool describePreparedResult(const std::string& sql, Session& session,
                             std::vector<PgColumnDescription>& columns,
                             const std::vector<uint32_t>& parameterOids = {}) {
@@ -5443,6 +5509,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             }
             try {
                 notePreparedTemporaryObjectAccess(sql, session);
+                validatePreparedIntegerInputs(sql,session,parameterTypes);
                 std::vector<PgColumnDescription> explainDescriptor;
                 (void)describePreparedExplainResult(sql,session,explainDescriptor,parameterTypes);
                 if(parameterTypes.empty()) {
