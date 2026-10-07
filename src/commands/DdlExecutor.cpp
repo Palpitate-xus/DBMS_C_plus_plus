@@ -54,6 +54,17 @@ struct DdlSourceScope {
     ~DdlSourceScope() { ddlSourceIdentity=prior; }
 };
 
+// Definition validation reads existing namespace facts. In particular it
+// must not fabricate public after a cold native DROP or bootstrap a catalog merely
+// to reject a declaration. The physical namespace marker must be a real file.
+std::set<std::string> declarationNamespaceFacts(const std::string& database) {
+    std::set<std::string> names;
+    for(const auto& entry:g_engine.catalogService().metadataSnapshot(database).namespaces)
+        names.insert(entry.nspname);
+    for(const auto& name:g_engine.getSchemaNames(database))names.insert(name);
+    return names;
+}
+
 std::string toLower(std::string s) {
     std::transform(s.begin(), s.end(), s.begin(),
                    [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
@@ -8742,20 +8753,22 @@ bool DdlExecutor::executeCreateDomain(const CreateObjectStmt* stmt, Session& s) 
     const auto rawName = stmt->schema.empty() ? stmt->objectName : stmt->schema + "." + stmt->objectName;
     if (!CatalogManager::parseQualifiedName(rawName, declared, true))
         throw DbError("42601", "invalid domain name");
+    const auto namespaceFacts=declarationNamespaceFacts(s.currentDB);
     if (declared.schema.empty()) {
         std::vector<std::string> path;
         std::string canonical;
-        if (!parseSessionSearchPath(s.searchPath, path, canonical)) path = {"public"};
+        if (!parseSessionSearchPath(s.searchPath, path, canonical))
+            throw DbError("22023","invalid search_path");
         for (const auto& entry : path) {
             const auto schema = expandSessionSearchPathEntry(entry, s.username);
-            if (schema != "pg_catalog" && schema != "pg_temp" && g_engine.schemaExists(s.currentDB, schema)) {
+            if (schema != "pg_catalog" && schema != "pg_temp" && namespaceFacts.count(schema)) {
                 declared.schema = schema;
                 break;
             }
         }
         if (declared.schema.empty()) throw DbError("3F000", "no schema has been selected to create in");
     }
-    if (!g_engine.schemaExists(s.currentDB, declared.schema))
+    if (!namespaceFacts.count(declared.schema))
         throw DbError("3F000", "schema does not exist: " + declared.schema);
     info.name = domainQuotedIdentifier(declared.schema) + "." + domainQuotedIdentifier(declared.name);
     auto it = stmt->options.find("base_type");
@@ -10743,12 +10756,9 @@ bool DdlExecutor::executeCreateFunction(const CreateFunctionStmt* stmt, Session&
     }
 
     std::string functionSchema=stmt->schema;
-    const auto namespaces=g_engine.catalogService().metadataSnapshot(s.currentDB).namespaces;
-    const auto storedNamespaces=g_engine.getSchemaNames(s.currentDB);
+    const auto namespaceFacts=declarationNamespaceFacts(s.currentDB);
     const auto namespaceExists=[&](const std::string& schema) {
-        return std::any_of(namespaces.begin(),namespaces.end(),
-                   [&](const auto& entry){return entry.nspname==schema;}) ||
-               std::find(storedNamespaces.begin(),storedNamespaces.end(),schema)!=storedNamespaces.end();
+        return namespaceFacts.count(schema)!=0;
     };
     if(functionSchema.empty()) {
         std::vector<std::string> path;
