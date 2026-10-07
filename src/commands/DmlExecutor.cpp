@@ -1857,6 +1857,7 @@ ExprPtr copyReturningExpression(const Expr* expression, const TableSchema& table
         auto target = std::make_unique<FunctionCallExpr>();
         target->schema = node->schema; target->funcName = node->funcName;
         target->setReturning = node->setReturning;
+        target->resolvedResultType = node->resolvedResultType;
         for (const auto& arg : node->args) target->args.push_back(copy(arg));
         result = std::move(target);
     } else if (const auto* node = dynamic_cast<const ArrayExpr*>(expression)) {

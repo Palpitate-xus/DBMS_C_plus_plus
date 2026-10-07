@@ -378,10 +378,12 @@ public:
             if(call->setReturning) {
                 if(!allowSetReturning)throw DbError("0A000","set-returning functions are not allowed in this expression context");
                 call->setReturning->elementType=ExprHelper::canonicalResultTypeName(call->setReturning->elementType);
-                return call->setReturning->elementType;
+                call->resolvedResultType=call->setReturning->elementType;
+                return call->resolvedResultType;
             }
             const auto type = metadata.functionType ? metadata.functionType(call) : std::string();
-            return type.empty() ? first : type;
+            call->resolvedResultType=type.empty() ? first : type;
+            return call->resolvedResultType;
         }
         case ExprType::CaseExpr: {
             auto* conditional = static_cast<CaseExpr*>(node.get());

@@ -80,6 +80,14 @@ public:
         const std::map<std::string, std::string>& typeHints = {},
         const std::string& currentDB = "",
         StorageEngine* functionEngine = nullptr);
+    // Argument/signature inference must retain UNKNOWN until the owning
+    // operator or routine supplies a context. Protocol output's TEXT fallback
+    // is intentionally applied only by inferParsedResultType above.
+    static std::string inferParsedInputType(
+        const Expr* expression,
+        const std::map<std::string, std::string>& typeHints = {},
+        const std::string& currentDB = "",
+        StorageEngine* functionEngine = nullptr);
 
     // Parse-only collation analysis; does not evaluate row-dependent or
     // volatile functions. Raises DbError for syntax/collation errors.

@@ -56,6 +56,7 @@ ExprPtr copyExpression(const Expr* source, std::map<const Expr*, const Expr*>& s
         auto target = std::make_unique<FunctionCallExpr>();
         target->schema = node->schema; target->funcName = node->funcName;
         target->setReturning = node->setReturning;
+        target->resolvedResultType = node->resolvedResultType;
         target->distinct = node->distinct; target->orderBy = node->orderBy; target->hasOver = node->hasOver;
         for (const auto& arg : node->args) target->args.push_back(copy(arg));
         // The binder deliberately leaves EXTRACT's unqualified grammar field

@@ -411,6 +411,10 @@ struct FunctionCallExpr : public Expr {
     WindowDef over;              // window specification for row_number() OVER (...)
     bool hasOver = false;        // true if OVER clause was parsed
     std::optional<QuerySetReturningBinding> setReturning;
+    // Exact static value type returned by whole-query binding. Nested routine
+    // inputs reuse this declaration, not protocol output's UNKNOWN fallback
+    // or a second reconstruction of the routine's argument context.
+    std::string resolvedResultType;
 
     FunctionCallExpr() { type = ExprType::FunctionCall; }
     std::string toString() const override;

@@ -31954,7 +31954,7 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
             if(function->args.size()!=1 || !function->namedArgs.empty() || function->hasOver ||
                 function->filter || function->distinct || !function->orderBy.empty())
                 throw DbError("42883","function does not exist: "+spelling);
-            const auto input=ExprHelper::canonicalResultTypeName(ExprHelper::inferParsedResultType(
+            const auto input=ExprHelper::canonicalResultTypeName(ExprHelper::inferParsedInputType(
                 function->args.front().get(),{},dbname,const_cast<StorageEngine*>(this)));
             if(input=="unknown")throw DbError("42725","function unnest(unknown) is not unique");
             if(input.size()<2 || input.compare(input.size()-2,2,"[]")!=0)

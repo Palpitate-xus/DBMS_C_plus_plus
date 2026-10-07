@@ -305,6 +305,7 @@ std::string inferAstResultType(
         return selectCommonType(types,"CASE");
     }
     if (const auto* call = dynamic_cast<const FunctionCallExpr*>(expression)) {
+        if (!call->resolvedResultType.empty()) return protocolTypeName(call->resolvedResultType);
         if(call->setReturning)return call->setReturning->elementType;
         if (routineTypes) {
             const auto routine = routineTypes->find(call);
@@ -1480,9 +1481,18 @@ std::string ExprHelper::inferParsedResultType(
     const std::map<std::string, std::string>& typeHints,
     const std::string& currentDB,
     StorageEngine* functionEngine) {
+    const std::string type = inferParsedInputType(expression, typeHints, currentDB, functionEngine);
+    return type.empty() || type == "unknown" ? "text" : type;
+}
+
+std::string ExprHelper::inferParsedInputType(
+    const Expr* expression,
+    const std::map<std::string, std::string>& typeHints,
+    const std::string& currentDB,
+    StorageEngine* functionEngine) {
     const auto routineTypes = collectRoutineResultTypes(expression, currentDB, functionEngine);
     const std::string type = protocolTypeName(inferAstResultType(expression, typeHints, &routineTypes));
-    return type.empty() || type == "unknown" ? "text" : type;
+    return type.empty() ? "unknown" : type;
 }
 
 std::optional<ArrayConcatBinding> ExprHelper::resolveArrayConcatTypes(
