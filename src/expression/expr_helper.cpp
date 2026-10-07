@@ -332,7 +332,8 @@ std::string inferAstResultType(
         // These names are parser-owned three-operand grammar nodes, not
         // ordinary scalar calls whose type can follow their first argument.
         if (call->schema.empty() &&
-            (name == "like escape" || name == "not like escape" ||
+            (name == "between" || name == "not between" ||
+             name == "like escape" || name == "not like escape" ||
              name == "ilike escape" || name == "not ilike escape" ||
              name == "similar to escape" || name == "not similar to escape"))
             return "boolean";
