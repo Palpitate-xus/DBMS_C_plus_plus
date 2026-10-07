@@ -20,6 +20,7 @@ struct BindingParseContext {
     const std::string& source;
     size_t base = 0;
     size_t pendingBase = 0;
+    bool fetchGrammarError = false;
     std::unordered_map<const std::string*, TokenProvenance> tokens;
 };
 thread_local BindingParseContext* bindingParse = nullptr;
@@ -458,6 +459,21 @@ static std::string joinParserTokens(const std::vector<std::string>& tokens,
         result += tokens[i];
     }
     return result;
+}
+
+// Scalar SQL envelopes are otherwise bound later. Validate only this actual
+// child grammar role before any outer catalog lookup, retaining the original
+// AST/source envelope and excluding quoted FETCH data/identifiers.
+static bool subqueryFetchGrammarValid(const std::vector<std::string>& tokens,size_t begin,size_t end) {
+    if(begin>=end || end>tokens.size() || std::none_of(tokens.begin()+begin,tokens.begin()+end,
+        [](const auto& token){return SQLParser::toLower(token)=="fetch";}))return true;
+    static thread_local size_t depth=0;
+    if(depth>=127)throw DbError("54001","query binding nesting limit exceeded");
+    ++depth;struct RestoreDepth{size_t& value;~RestoreDepth(){--value;}}restore{depth};
+    SQLParser parser;const auto parsed=parser.parseForBinding(joinParserTokens(tokens,begin,end));
+    if(parsed.error!="WITH TIES cannot be specified without ORDER BY clause")return true;
+    if(bindingParse)bindingParse->fetchGrammarError=true;
+    return false;
 }
 
 // ============================================================================
@@ -1766,7 +1782,11 @@ ParseResult SQLParser::parseForBinding(const std::string& sql) {
     auto* saved = bindingParse;
     bindingParse = &context;
     struct Restore { BindingParseContext* saved; ~Restore() { bindingParse = saved; } } restore{saved};
-    return parse(sql);
+    auto parsed=parse(sql);
+    if(context.fetchGrammarError) {
+        parsed.success=false;parsed.error="WITH TIES cannot be specified without ORDER BY clause";
+    }
+    return parsed;
 }
 
 // ============================================================================
@@ -2527,6 +2547,7 @@ static ExprPtr parsePrimaryExprImpl(const std::vector<std::string>& tokens, size
                 }
             }
             if (pos < tokens.size() && tokens[pos] == ")") ++pos;
+            if(!subqueryFetchGrammarValid(tokens,queryBegin+1,pos-1))return nullptr;
             auto func = std::make_unique<FunctionCallExpr>();
             func->funcName = "EXISTS";
             auto lit = std::make_unique<LiteralExpr>();
@@ -2542,6 +2563,7 @@ static ExprPtr parsePrimaryExprImpl(const std::vector<std::string>& tokens, size
 
     // Parenthesized expression or subquery
     if (tokens[pos] == "(") {
+        const size_t queryBegin=pos;
         ++pos;
         // Check for subquery
         if (pos < tokens.size() &&
@@ -2558,6 +2580,7 @@ static ExprPtr parsePrimaryExprImpl(const std::vector<std::string>& tokens, size
                 }
             }
             if (pos < tokens.size() && tokens[pos] == ")") ++pos;
+            if(!subqueryFetchGrammarValid(tokens,queryBegin+1,pos-1))return nullptr;
             auto lit = std::make_unique<LiteralExpr>();
             lit->value = "(" + subq + ")";
             return lit;
@@ -3748,6 +3771,9 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
         }
     }
 
+    if(stmt->withTies && stmt->orderBy.empty()) {
+        r.error="WITH TIES cannot be specified without ORDER BY clause";return r;
+    }
     r.success = true;
     r.stmt = std::move(stmt);
     return r;

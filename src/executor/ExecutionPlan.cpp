@@ -420,6 +420,27 @@ public:
         row = rows_[position_++].raw; instrumentation.emitted = true; return true;
     }
     const std::vector<std::optional<ExprValue>>& targets() const { return rows_.at(position_ - 1).targets; }
+    const std::vector<ExprValue>& keys() const { return rows_.at(position_-1).keys; }
+    bool peers(const std::vector<ExprValue>& left,const std::vector<ExprValue>& right) const {
+        for(size_t i=0;i<state_->keys.size();++i) {
+            const auto& a=left.at(i);const auto& b=right.at(i);
+            if(a.isNull || b.isNull){if(a.isNull!=b.isNull)return false;continue;}
+            if(const auto& comparison=state_->keys[i].enumComparison) {
+                if(state_->evaluator.comparePrepared(*comparison,a,b).asBool() ||
+                   state_->evaluator.comparePrepared(*comparison,b,a).asBool())return false;
+                continue;
+            }
+            Column column;
+            const auto error=TypeRegistry::instance().resolveColumnType(column,a.typeName,{},false);
+            if(!error.empty())throw DbError("0A000","unsupported prepared peer type: "+a.typeName);
+            column.collation=a.collation;
+            const auto equality=StorageEngine::compareValues(column,a.value,false,b.value,false,"=");
+            if(equality==StorageEngine::PredicateTruth::Unknown)
+                throw DbError("0A000","unsupported prepared peer comparison");
+            if(equality!=StorageEngine::PredicateTruth::True)return false;
+        }
+        return true;
+    }
     bool supportsPreparedContexts() const override { return true; }
     bool lastPreparedContext(RowContext& row) const override {
         if (!position_ || position_ > rows_.size()) return false;
@@ -531,6 +552,50 @@ public:
             !state_->logicalSource->bindPreparedOuterRow(row))) return false;
         state_->outerRow=row;return true;
     }
+};
+
+// Limit consumes the real projection stream, including its boundary probe
+// and OFFSET sites. Its peer test reads the sort's already evaluated typed
+// key slots; it never reexecutes a target, child query or volatile sort key.
+class PreparedTiesLimitOp final : public Operator {
+    OpPtr child_;
+    PreparedSortOp* sort_;
+    size_t limit_,emitted_=0;
+    std::vector<ExprValue> boundary_;
+    bool opened_=false,done_=false;
+public:
+    PreparedTiesLimitOp(OpPtr child,PreparedSortOp* sort,size_t limit)
+        :child_(std::move(child)),sort_(sort),limit_(limit) {
+        if(!sort_)throw DbError("XX000","prepared WITH TIES lost its actual sort owner");
+    }
+    ~PreparedTiesLimitOp() override {try{close();}catch(...) {}}
+    bool open() override {
+        OpenInstrument instrument(this);clearError();emitted_=0;boundary_.clear();done_=!limit_;
+        if(done_)return true;
+        opened_=true;return child_->open() || propagateChildError(child_.get(),"prepared ties child open failed");
+    }
+    bool next(std::string& row) override {
+        NextInstrument instrument(this);checkForQueryInterrupt();
+        if(done_)return false;
+        if(!child_->next(row)) {
+            done_=true;return child_->hasError()?propagateChildError(child_.get(),"prepared ties child failed"):false;
+        }
+        const auto& keys=sort_->keys();
+        if(emitted_>=limit_ && !sort_->peers(keys,boundary_)){done_=true;return false;}
+        if(++emitted_==limit_)boundary_=keys;
+        instrument.emitted=true;return true;
+    }
+    void close() override {if(opened_){opened_=false;child_->close();}boundary_.clear();emitted_=0;done_=false;}
+    bool supportsStructuredRows() const override {return child_->supportsStructuredRows();}
+    bool lastStructuredValues(std::vector<ExprValue>& row) const override {return child_->lastStructuredValues(row);}
+    bool lastStructuredRow(std::vector<std::string>& cells,std::vector<bool>& nulls) const override {return child_->lastStructuredRow(cells,nulls);}
+    bool lastColumnIsNull(size_t ordinal) const override {return child_->lastColumnIsNull(ordinal);}
+    bool supportsPreparedContexts() const override {return child_->supportsPreparedContexts();}
+    bool lastPreparedContext(RowContext& row) const override {return child_->lastPreparedContext(row);}
+    bool supportsPreparedOuterRow() const override {return child_->supportsPreparedOuterRow();}
+    bool bindPreparedOuterRow(const RowContext& row) override {return child_->bindPreparedOuterRow(row);}
+    std::string preparedPlanNodeName() const override {return "LimitWithTies";}
+    std::vector<Operator*> preparedPlanChildren() const override {return {child_.get()};}
 };
 
 class PreparedDistinctOp final : public Operator {
@@ -723,7 +788,7 @@ static bool supportsPreparedSelectShape(const SelectStmt& select, bool allowCtes
         (selectBodyOnly && (select.setOp != SetOp::Union || !select.setOpAll || select.setOpLhs || !select.setOpRhs)) ||
         !select.groupBy.empty() || !select.groupByElems.empty() || select.having ||
         !select.windowDefs.empty() || !select.distinctOn.empty() ||
-        !select.locking.empty() || select.withTies) return false;
+        !select.locking.empty() || (select.withTies && (select.distinct || selectBodyOnly))) return false;
     if (!sourceContexts && select.fromClause && select.fromClause->type != FromItem::Type::Table &&
         select.fromClause->type != FromItem::Type::Subquery) return false;
     std::function<bool(const Expr*)> scalar = [&](const Expr* expr) {
@@ -912,10 +977,14 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
     OpPtr root = std::move(source);
     if (select->whereClause) root = std::make_unique<PreparedFilterOp>(std::move(root), state);
     if (!state->keys.empty()) root = std::make_unique<PreparedSortOp>(std::move(root), state);
+    auto* tiesSort=select->withTies?dynamic_cast<PreparedSortOp*>(root.get()):nullptr;
     root = std::make_unique<PreparedProjectOp>(std::move(root), state);
     if (select->distinct) root = std::make_unique<PreparedDistinctOp>(std::move(root));
     if (select->offset && *select->offset) root = std::make_unique<OffsetOp>(std::move(root), *select->offset);
-    if (select->limit) root = std::make_unique<LimitOp>(std::move(root), *select->limit);
+    if(select->limit) {
+        if(select->withTies)root=std::make_unique<PreparedTiesLimitOp>(std::move(root),tiesSort,*select->limit);
+        else root=std::make_unique<LimitOp>(std::move(root),*select->limit);
+    }
     return root;
 }
 
