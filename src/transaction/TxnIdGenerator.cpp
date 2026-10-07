@@ -1,5 +1,6 @@
 #include "TxnIdGenerator.h"
 #include "access/IndexFileUtil.h"
+#include "common/DbError.h"
 
 #include <algorithm>
 #include <cstring>
@@ -7,6 +8,10 @@
 #include <fstream>
 #include <limits>
 #include <string>
+#include <cerrno>
+#include <fcntl.h>
+#include <sys/file.h>
+#include <unistd.h>
 
 namespace dbms {
 
@@ -22,6 +27,32 @@ constexpr size_t kStateSize = kStatePayloadSize + sizeof(uint64_t);
 // transaction ID that the durable tuple header would silently truncate.
 constexpr uint64_t kMaxHeapTupleXid =
     std::numeric_limits<uint32_t>::max();
+
+class CounterFileLock {
+public:
+    explicit CounterFileLock(const std::string& statePath) {
+        const std::string path = statePath + ".lock";
+        fd_ = ::open(path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+        if (fd_ < 0) return;
+        while (::flock(fd_, LOCK_EX) != 0) {
+            if (errno == EINTR) continue;
+            ::close(fd_);
+            fd_ = -1;
+            return;
+        }
+    }
+    ~CounterFileLock() {
+        if (fd_ >= 0) {
+            (void)::flock(fd_, LOCK_UN);
+            (void)::close(fd_);
+        }
+    }
+    bool ok() const { return fd_ >= 0; }
+    CounterFileLock(const CounterFileLock&) = delete;
+    CounterFileLock& operator=(const CounterFileLock&) = delete;
+private:
+    int fd_ = -1;
+};
 
 uint64_t checksum(const char* data, size_t size) {
     uint64_t hash = 1469598103934665603ULL;
@@ -53,12 +84,14 @@ TxnIdGenerator& TxnIdGenerator::instance() {
 }
 
 TxnIdGenerator::TxnIdGenerator() {
-    healthy_ = load();
+    CounterFileLock lock(persistPath_);
+    healthy_ = lock.ok() && load();
 }
 
 bool TxnIdGenerator::load() {
     std::error_code ec;
-    if (!std::filesystem::exists(persistPath_, ec)) return !ec;
+    if (!std::filesystem::exists(persistPath_, ec))
+        return !ec && nextTxId_ == 1 && maxCommitted_ == 0;
     const uintmax_t fileSize = std::filesystem::file_size(persistPath_, ec);
     if (ec || (fileSize != kLegacyStateSize && fileSize != kStateSize)) return false;
 
@@ -96,11 +129,11 @@ bool TxnIdGenerator::load() {
         return false;
     }
 
-    nextTxId_ = parsedNext;
+    nextTxId_ = std::max(nextTxId_, parsedNext);
     // Old files tracked only committed transactions.  Advancing to the last
     // allocated ID is conservative for snapshot xmax and prevents an aborted
     // or prepared gap from lowering the horizon after restart.
-    maxCommitted_ = std::max(parsedHighWater, parsedNext - 1);
+    maxCommitted_ = std::max(maxCommitted_, std::max(parsedHighWater, nextTxId_ - 1));
     return true;
 }
 
@@ -119,6 +152,12 @@ bool TxnIdGenerator::save(uint64_t nextTxId,
 
 uint64_t TxnIdGenerator::nextTxId() {
     std::lock_guard<std::mutex> lock(mtx_);
+    CounterFileLock fileLock(persistPath_);
+    if (!fileLock.ok() || !healthy_) return 0;
+    if (!load()) {
+        healthy_ = false;
+        return 0;
+    }
     if (!healthy_ || nextTxId_ > kMaxHeapTupleXid) return 0;
 
     const uint64_t id = nextTxId_;
@@ -133,6 +172,14 @@ uint64_t TxnIdGenerator::nextTxId() {
 
 uint64_t TxnIdGenerator::maxCommittedTxId() const {
     std::lock_guard<std::mutex> lock(mtx_);
+    CounterFileLock fileLock(persistPath_);
+    if (!fileLock.ok())
+        throw DbError("58030", "could not lock durable transaction counter");
+    auto* generator = const_cast<TxnIdGenerator*>(this);
+    if (!healthy_ || !generator->load()) {
+        generator->healthy_ = false;
+        throw DbError("58030", "durable transaction counter is invalid or missing");
+    }
     return maxCommitted_;
 }
 
