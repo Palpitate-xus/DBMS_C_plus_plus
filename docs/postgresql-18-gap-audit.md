@@ -1,4 +1,27 @@
-# 2026-10-08 最新5386总清单 checkpoint
+# 2026-10-08 最新b888总清单 checkpoint
+
+当前source b8882d04：714auto-native+实际frontend2/387registered/58TU，
+110项独立Root source/test修复。README长期项目入口单独commit9603，不计作数据库修复。
+两真实问题分别commit：0e6空OVER builtin准入与实际全query纯绑定，b888无ORDER的
+NTH_VALUE默认frame实际partition end；不改公共头/捏造排序，不关闭窗口整个族。
+
+完整84旧Root37错、ownedPG180006全0；admission-only完整6whole实际1仅NTH一错，
+五旧whole全0。独立80原Root10错（含2partition-only）、前缀4错、严格PG全0。
+最终normal40826真1freshMain57当期逐源/头/flags/manifest/receipt/bytes证明donors，
+all58/repeat/freeze0，非fresh58；完整7whole95717/5freshnative35060/真实Main前端58
+24206全0，原144/72native与195/147wire强控完整保留。主目录FF两独立commit，
+publication62119全58matching对象证明迁移/自身path receipts/正常relink/repeat零fresh，
+actual/frozen c7SHA一致、old0d可恢复；直接实际主程序完整7whole1868真0/所有input不变。
+详见 `docs/issue-unordered-window-current-root-composition.md`，全部中间红/冻结前缀保留。
+
+QRY08仍partial；callee/dynamic参数/位置/qualified/named/inherited/frame grammar等
+独立缺口继续。INTEGER99native/19post0不替代原88whole1；Origin/typedchild/memo/
+BIT/TypeName/NULL/MINMAX/customOID及全部原CTE/scalar/catalog/storage/recovery/ops未闭环。
+当前110原full/SAN未开始，原80full42496终1/all1043不改为当前证明。
+原273 items/hash/statuses不变22complete166partial70unverified15deferred，完成gate拒绝。
+不push/启用Actions/安全TDE/filtered重启，不冒总目标完成。
+
+# 2026-10-08 历史5386总清单 checkpoint
 
 当前source53865cec：714auto-native+实际frontend2/385registered/58TU，
 108项独立Root source/test修复。私有Main排序方向默认初始化，修复无ORDER窗口

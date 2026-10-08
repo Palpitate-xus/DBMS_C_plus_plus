@@ -2,6 +2,21 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "110 independently committed ROOT source/test repairs throughb888: empty builtin window admission and actual NTH_VALUE default peer frame",
+      "gap_ids": ["QRY-08"],
+      "status": "partial",
+      "commits": ["0e6a34e3", "b8882d04"],
+      "evidence": ["docs/issue-unordered-window-admission.md", "docs/issue-nth-value-default-peer-frame.md", "docs/issue-unordered-window-current-root-composition.md"],
+      "tests": ["tests/unordered_window_protocol_e2e_test.py", "tests/nth_value_default_peer_frame_protocol_e2e_test.py"],
+      "verification": {
+        "reproduction": "Actual original Root1080d complete84 baseline15270=1/37; owned strictPG180006 full84/80 both0. Admission-only00b full6whole62342=1 exactly1 NTH frame failure with all5oldwhole0; same80 originalRoot57891=1/10 including two accepted PARTITION-only frame failures, admission-only39446=1/4. Full failed epochs/logs preserved.",
+        "fix": "Two independent Root commits0e6/b888: known eleven builtin empty-window admission with actual whole-query pure signature/column/range binding before demand; separate sole legacy NTH default end initialization uses actual partition end only without order or explicitframe. All current Root fields/consumers retained, no publichead or invented key. README9603 maintenance separately committed, not counted as a database review repair.",
+        "focused_tests": "Normal87712/40826 each actual1freshMain57current independentlyprovednormalobjects; repeat/all58 receipts/cache/inputfreeze0, notfresh58. Admission-only native5 65923/frontend58 94577=0. Final full7whole95717=0 (84+80+all5original), full5freshnative35060=0/full144NULL72GROUPS, genuineMainfrontend58 24206=0. ActualRootpublication62119=0 FFboth, all58matching normal source/header/flags/compiler/manifest/receipt/objectbyte-proved migration/ownabsolute-path receipts/relink/repeat0fresh. Actual/frozen SHA c7abd647dad7e633de9f4e09f387640f100cbdae121ac8afdd1fb03c3eec568b; old0d recoverable. DirectactualRoot7whole1868=0/allinputs unchanged.",
+        "full_suite": "Actual714auto-native+2realfrontend/387registered/58TU. No current110 original full/SAN claimed. HistoricalSource80full42496 actual1/all1043 unchanged. Scoped5/58/7/direct7 not whole-window/family/273 approval.",
+        "scope": "QRY08 stayspartial: actualcallee/qualified/dynamicargument/position/named/inherited/leadingframe/exclusion gaps unclosed. INTEGER exact87 full99native/post190 still doesnotreplace full88actual1; newOrigin/typedchild/memo lifecycle/BITTypeNameNULL/MINMAXcustomOID and all originalCTE/scalar/catalog/storage/recovery/ops scopes retained. Original273 itemhash/statuses unchanged22complete166partial70unverified15deferred, completiongate rejects; no push/Actions/skippedsecurityTDE/filteredrestart."
+      }
+    },
+    {
       "issue": "108 independently committed ROOT source/test repairs through5386: initialize real frontend unordered-window sort direction",
       "gap_ids": ["QRY-08"],
       "status": "partial",

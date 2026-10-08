@@ -1,4 +1,31 @@
-# Latest5386 checkpoint:108 independently committed source/test repairs
+# Latestb888 checkpoint:110 independently committed source/test repairs
+
+Current source `b8882d04`:714 auto-native + two actual Main frontends /
+387 registered whole wrappers /58 production TUs. README9603 is independent
+maintenance, not a database review repair. Two real issues have separate
+Root commits:0e6 empty builtin OVER admission/pure actual whole-query binding,
+b888 NTH_VALUE unordered default peer end. Public headers/old strong gates
+and every current Root source owner are retained.
+
+Actual full84 oldRoot37 failures/strictPG1800060; admission-only6whole1 with
+exactly1 NTH failure and all5oldwhole0. New full80 originalRoot10/admission4/
+strict0. Final normal40826 actual1freshMain57individually current proved normal
+objects, notfresh58; all58/repeat/freeze0. Full7whole95717/5native35060/realMain
+frontend58 24206 all0/defaultdisk/deadlines. ActualRootpublication62119=0,
+FFboth independent commits, all58 matching-object proof/migration/own receipts/
+relink/repeat0fresh. DirectactualMain7whole1868=0/allinputs unchanged, c7SHA
+matches frozen candidate and old0d binary is recoverable. Full mapping:
+`docs/issue-unordered-window-current-root-composition.md`.
+
+QRY08 remains partial; qualified/callee/dynamic/position/named/inherited/frame
+owners remain open. Exact INTEGER full88actual1 remains held despite99native/
+post190. Current-Root Origin/typedchild/memo/NULL/BIT/TypeName/MINMAX/customOID
+and all original requirements continue. Original273 itemhash/statuses unchanged
+22complete166partial70unverified15deferred; gate rejects. Historical original80
+full42496 stays1/all1043; no current110 original full/SAN/push/Actions/filtered
+restart or whole-family completion is claimed.
+
+# Historical5386 checkpoint:108 independently committed source/test repairs
 
 Current source `53865cec`:714 auto-native plus two separately registered real
 frontend drivers,385 registered whole wrappers,58 production TUs. Sole

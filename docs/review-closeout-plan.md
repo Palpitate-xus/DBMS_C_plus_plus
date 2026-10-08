@@ -4,7 +4,25 @@
 
 # 工作区与复查清单收尾计划
 
-## 2026-10-08 当前完整273目标计划（5386；以下较早记录均历史）
+## 2026-10-08 当前完整273目标计划（b888；以下较早记录均历史）
+
+当前source b8882d04，714auto+实际frontend2/387registered/58TU，110项独立
+Root source/test修复。README9603已单独commit，不计作数据库修复；原273范围不缩。
+
+| 阶段 | 原要求 / 下一动作 | 当前实际证据 |
+| --- | --- | --- |
+| 每真实根因逐commit | 独立commit、用户push | 0e6空窗口准入、b888独立NTH peer frame；master FF，两项独立历史保留 |
+| 当前完整窗口组合 | 真实Main/NULL/空/FALSE/cap/arity/frame/type | full84 old37/strict0/admission1；独立80 old10/prefix4/strict0；最终7whole95717/5native35060/真实frontend58 24206全0 |
+| 主目录实际程序 | 全58 proof/正常repeat/实际完整复测 |62119 matching迁移/自身receipts零fresh/relink/repeat0；direct7whole1868全0，实际c7SHA，old0d可恢复 |
+| 剩余窗口scope | callee/dynamic参数/position/qualified/named/inherited/frame | QRY08仍partial，下一项保持真实metadata/grammar/输入owner并独立基线与完整测试 |
+| 当前其它原owner | Origin/typedchild/memo/BIT/TypeName/NULL/MINMAX/customOID | private finite commits须全源码复查/当前Root公共头fresh58/强gate，不能借旧ABI或私树绿直接发布 |
+| 保持全部原红 | 不删SQL/assert/注册、不冒族闭环 |INTEGER99native/19post0不替代原88whole1，旧OPEN4/full8/其它原scope保留 |
+| 原full与273全scope | 全部原需求真实证明 |当前110原full/SAN未开始；source80full1/all1043历史；273/hash不变22complete166partial70unverified15deferred/gate拒绝 |
+
+继续原全部query/catalog/storage/recovery/ops及未闭环项，不push/启用Actions/
+重启用户跳过专项。完整出处 `docs/issue-unordered-window-current-root-composition.md`。
+
+## 2026-10-08 历史完整273目标计划（5386）
 
 当前source53865cec，714auto+实际frontend2/385registered/58TU，108项独立
 Root source/test修复。原273范围及未闭环要求不缩。

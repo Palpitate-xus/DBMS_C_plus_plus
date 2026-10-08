@@ -60,7 +60,9 @@ the complete84 failure is retained, not replaced by the passed subset.
 The same80 on original Root108 completes with10 failures, including the two
 already-admitted PARTITION-only frame controls. Strict80 actually exits0.
 
-Root publication is held until the remaining frame failure and final complete
-composition gates are addressed. No original full/sanitizer run, family or
+This admission-only prefix's Root publication was held until the separate
+frame repair and final complete composition gates passed. Actual subsequent
+publication is recorded in `issue-unordered-window-current-root-composition.md`.
+No original full/sanitizer run, family or
 273-item completion, push, Actions activation, skipped security/TDE work or
 filtered-branch rerun is claimed.
