@@ -6,7 +6,7 @@
 
 本项目使用自己的存储格式，不是 PostgreSQL 的直接替代品，也不能直接打开 PostgreSQL 数据目录。客户端能够连接，不代表 SQL、系统目录、事务或存储行为与 PostgreSQL 等价。
 
-SQL 与客户端协议的支持范围见[兼容性契约](docs/compatibility-contract.md)和[能力清单](docs/postgresql-18-gap-audit.md)。README 只介绍项目、构建、使用和贡献方式；版本变更见 [CHANGELOG](CHANGELOG.md)，逐项验证依据见[机器可读记录](docs/gap-progress.json)。
+SQL 与客户端协议的接口边界见[兼容性契约](docs/compatibility-contract.md)，具体用法见[使用手册](docs/MANUAL.md)。
 
 ## 功能概览
 
@@ -17,7 +17,7 @@ SQL 与客户端协议的支持范围见[兼容性契约](docs/compatibility-con
 - 事务、MVCC、保存点、锁管理、WAL 和恢复模块。
 - 交互式命令行，以及 PostgreSQL Simple / Extended Query 协议入口。
 
-功能入口不代表完整 PostgreSQL 语义；具体语法、适用条件与限制请查阅[使用手册](docs/MANUAL.md)。
+以上是模块概览，不是完整 PostgreSQL 兼容性声明。
 
 ## 构建
 
@@ -58,7 +58,7 @@ cmake --build build/cmake --parallel
 
 ## 运行
 
-每次启动都必须用 `-D` / `--data-dir` 或 `DBMS_DATA_DIR` 显式指定本项目的数据目录。登录角色和访问配置须提前准备；数据目录、角色配置与部署约定见[打包与部署说明](docs/PACKAGING.md)。
+每次启动都必须用 `-D` / `--data-dir` 或 `DBMS_DATA_DIR` 显式指定本项目的数据目录。不要使用 PostgreSQL 的数据目录。登录角色和访问配置须提前准备；数据目录、角色配置与部署约定见[打包与部署说明](docs/PACKAGING.md)。
 
 交互式命令行：
 
@@ -164,7 +164,7 @@ docs/              # 使用、兼容性与开发文档
 
 - [使用手册](docs/MANUAL.md)：SQL 与操作说明。
 - [兼容性契约](docs/compatibility-contract.md)：SQL、协议及扩展模式的边界。
-- [能力清单](docs/postgresql-18-gap-audit.md)与[机器可读记录](docs/gap-progress.json)：兼容性要求及验证依据。
+- [兼容性审计](docs/postgresql-18-gap-audit.md)与[验证记录](docs/gap-progress.json)：供开发与复查使用，不在 README 重复进度或测试结果。
 - [打包与部署](docs/PACKAGING.md)：源码包、数据目录和配置约定。
 - [CHANGELOG](CHANGELOG.md)：版本变更记录。
 
@@ -178,7 +178,15 @@ docs/              # 使用、兼容性与开发文档
 - 可在独立测试数据目录执行的最小 SQL 复现及启动参数。
 - 预期与实际结果，以及相关错误信息。
 
-不要附带真实数据库数据、私钥或凭据。修改代码时请补充回归测试，保持独立、易复查的提交，并说明实际运行的测试范围。新增生产源码需同步共享清单，新增测试需接入对应测试入口。
+不要附带真实数据库数据、私钥或凭据。
+
+提交改动时：
+
+- 补充覆盖问题的回归测试，并说明实际运行的测试范围。
+- 保持每个提交独立、易复查，避免混入无关修改。
+- 新增生产源码时同步 `cmake/dbms_sources.txt`。
+- 新增测试时接入对应测试入口。
+- 更新受影响的使用文档；版本变更和测试证据分别放入 CHANGELOG 与专项记录，不在 README 保存阶段性快照。
 
 ## 许可证
 
