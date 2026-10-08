@@ -2,6 +2,20 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "HELD: seven independently committed enum extrema and result identity candidates; Root production remains ea67/123 repairs",
+      "gap_ids": ["TYPE-08", "QRY-07", "PROTO-04"],
+      "status": "partial",
+      "commits": ["8919976b", "d6b12dbe", "3cf381f1", "714a0ce6", "d99c2fb8", "8dade1c5", "ef2f56c7"],
+      "evidence": ["docs/issue-enum-current-candidate-hold.md"],
+      "tests": [],
+      "verification": {
+        "reproduction": "Current five-issue original pure58 baseline actual134/all58/50fail. Producer whole32 actual1/31pass/fullenum39 actualOID failures. All immutable fixtures and failed baselines retained.",
+        "focused_tests": "Five-issue genuine current fresh58 normal0/full38native0/owned19reference0/whole32=1. Independent producer genuinely fresh58 normal0/full68 and 50/117/93=0/full39native0/owned19reference0/whole32=1 same39OID reds. Consumer one fresh Network CPP plus57 same-current-ABI source/header/compiler/flags/manifest/receipt/byte-proven objects, all58 own receipts/cache/repeat/seal0, NOT fresh58. Full39native0; all original32 protocol0 including original39 enumOID assertions; independent full enum-comparison protocol neighbour0.",
+        "full_suite": "HELD not Root publication: initial registered whole33 actual1/all original32 pass but additive fixture fails during setup. Corrected exact fixture producer164/79fail, consumer164/67fail including abort cascades; permanent corrected candidate164/67fail, owned PG18.6 reference166/0. Stronger functional matrix not approved or replaced by original32 green. No current originalfull/SAN claim.",
+        "scope": "Published sourceea67/123 repairs and original273 items/hash/statuses22complete166partial70unverified15deferred unchanged. Next separate ordinary qualified-callee execution handoff; failed CREATE branch preserved without restart/rephrase. No private candidate count promoted to Root count, no enum/general-overload/family completion, assistantpush, Actions activation or deferred security/TDE work."
+      }
+    },
+    {
       "issue": "123 independently committed ROOT source/test repairs throughea67: physical BIT input, declared scalar Parse source, reverse comparison owner and actual SQL NULL qualification",
       "gap_ids": ["TYPE-11", "TYPE-02", "SQL-05", "QRY-01", "PROTO-04", "PROTO-05"],
       "status": "partial",

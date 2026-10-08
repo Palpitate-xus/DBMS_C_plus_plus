@@ -4,6 +4,16 @@
 
 # 工作区与复查清单收尾计划
 
+## 2026-10-08 枚举候选暂缓合入
+
+README `9603c8ab` 已完成。七项枚举候选分别本地commit至 `ef2f56c7`，
+正式source仍为 `ea67ad29` /123项。真实fresh58 producer、完整39native通过；
+协议consumer原完整32通过且39条真实OID失败消除，但新增phase fixture
+仍164检查/67失败，reference166/0，不能虚报完整33或总目标完成。
+先继续独立的qualified callee执行owner；保留新旧完整失败fixture，
+不重启或改写已保留CREATE失败分支。全部273要求与跳过项继续保留。
+计划、各commit和完整证据见 `docs/issue-enum-current-candidate-hold.md`。
+
 ## 2026-10-08 当前完整273目标计划（ea67；以下较早记录均历史）
 
 当前sourceea67ad29，728auto+实际Main frontend2/402registered/58TU，123独立

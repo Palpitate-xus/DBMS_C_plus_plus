@@ -1,3 +1,13 @@
+# Latest candidate checkpoint: seven enum repairs HELD, published source unchanged
+
+Seven independent local candidate commits through `ef2f56c7` are preserved;
+they are not merged into master. Published source stays `ea67ad29` /123 repairs.
+Producer genuine fresh58 and full39 native pass; protocol candidate original32
+all pass including original39 catalog-OID assertions, but its additional phase
+fixture remains actual164/67 failed (owned reference166/0). No complete33,
+enum-family or273-item approval. Full evidence and next safe owner:
+`docs/issue-enum-current-candidate-hold.md`.
+
 # Latestea67 checkpoint:123 independently committed source/test repairs
 
 Current source `ea67ad29`:728auto-native+two real Main frontends/
