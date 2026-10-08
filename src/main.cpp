@@ -31050,11 +31050,21 @@ static bool executeInternal(const string& rawSql, Session& s) {
             const auto parsed = parser.parse("SELECT " + expression);
             const auto* select = parsed.success
                 ? dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()) : nullptr;
-            const auto* binary = select && select->selectList.size() == 1
-                ? dynamic_cast<const dbms::BinaryOpExpr*>(select->selectList.front().expr.get()) : nullptr;
+            if (!select || select->selectList.size()!=1) return expression;
+            std::function<std::optional<string>(const dbms::Expr*)> lower = [&](const dbms::Expr* node)->std::optional<string> {
+            const auto* binary = dynamic_cast<const dbms::BinaryOpExpr*>(node);
+            if (binary && (binary->op=="AND" || binary->op=="OR")) {
+                const auto left=lower(binary->left.get()),right=lower(binary->right.get());
+                if (!left || !right) return std::nullopt;
+                const auto group=[](const dbms::Expr* child,const string& sql) {
+                    const auto* connective=dynamic_cast<const dbms::BinaryOpExpr*>(child);
+                    return connective && (connective->op=="AND" || connective->op=="OR")?"("+sql+")":sql;
+                };
+                return group(binary->left.get(),*left)+(binary->op=="AND"?" and ":" or ")+group(binary->right.get(),*right);
+            }
             if (!binary || (binary->op != "=" && binary->op != "<>" &&
                     binary->op != "!=" && binary->op != "<" && binary->op != ">" &&
-                    binary->op != "<=" && binary->op != ">=")) return expression;
+                    binary->op != "<=" && binary->op != ">=")) return std::nullopt;
             const auto* column = dynamic_cast<const dbms::ColumnRefExpr*>(binary->left.get());
             const auto* literal = dynamic_cast<const dbms::LiteralExpr*>(binary->right.get());
             string operation=binary->op;
@@ -31063,13 +31073,17 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 literal=dynamic_cast<const dbms::LiteralExpr*>(binary->left.get());
                 if(!column || !literal || !sourceRange.contains(*column) ||
                    !sourceRange.columns.count(column->column) || !literal->typeName.empty() ||
-                   literal->preparedSubquery || dbms::ExprHelper::inferValuesResultType(literal->value)!="unknown")
-                    return expression;
+                   literal->preparedSubquery)
+                    return std::nullopt;
                 const auto& descriptor=tbl.cols[sourceRange.columns.at(column->column)];
                 const auto type=dbms::ExprHelper::canonicalResultTypeName(descriptor.dataType);
-                if(descriptor.isArray || (type!="smallint" && type!="integer" && type!="bigint"))return expression;
+                const auto inputType=dbms::ExprHelper::inferValuesResultType(literal->value);
+                const bool integerInput=(type=="smallint" || type=="integer" || type=="bigint") && inputType=="unknown";
+                const bool bitInput=(type=="bit" || type=="bit varying") && (inputType=="unknown" || inputType=="bit");
+                const bool textInput=type=="text" && inputType=="unknown";
+                if(descriptor.isArray || (!integerInput && !bitInput && !textInput))return std::nullopt;
                 // This receiver stores physical-column/literal predicates.
-                // Commuting a genuine integer comparison retains that same
+                // Commuting a genuine integer or BIT comparison retains that same
                 // index/NULL owner, not a string-rewritten SQL namespace.
                 if(operation=="<")operation=">";
                 else if(operation==">")operation="<";
@@ -31077,7 +31091,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 else if(operation==">=")operation="<=";
             }
             if (!column || !literal || !sourceRange.contains(*column) ||
-                    !sourceRange.columns.count(column->column)) return expression;
+                    !sourceRange.columns.count(column->column)) return std::nullopt;
             string physicalName="\"";
             for(const char character:column->column) {
                 physicalName+=character;
@@ -31085,6 +31099,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
             }
             physicalName+='"';
             return physicalName + operation + literal->value;
+            };
+            const auto result=lower(select->selectList.front().expr.get());
+            return result ? *result : expression;
         };
         // Targets and their lazy branches share this source namespace too.
         // Validate before any row or writing target function is evaluated.
