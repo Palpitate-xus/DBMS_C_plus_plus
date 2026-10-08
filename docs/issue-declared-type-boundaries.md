@@ -1,6 +1,10 @@
-# Declared type boundaries: verified FLOAT repair, broader matrix still open
+# Declared type boundaries: verified repairs and remaining scope
 
-Published Root source remains `ea67ad29` /123 repairs. The earlier four
+The sections below retain their historical revisions and failed attempts.
+Current publication is recorded in the final section; earlier candidate-only
+statements are not the current master status.
+
+At the original checkpoint, published Root source remained `ea67ad29` /123 repairs. The earlier four
 TypeName candidates are held outside master. Their exact final generation
 `5b99960a` completed38 native and31 protocol fixtures with zero failed
 invocations; the original384 also passed. This is not general type-family
@@ -253,3 +257,84 @@ Original273 requirements/hash/statuses remain22 complete,166 partial,
 70 unverified,15 user-deferred. No full-suite/SAN, master source publication,
 push, Actions activation, skipped security/TDE or filtered-branch restart is
 claimed here.
+
+## Current publication: declaration chain imported, Root build in progress
+
+All18 independent declaration-chain commits have now been cherry-picked with
+their original commit identifiers retained in Git trailers. Master source is
+`7e6dfc28`; this adds17 scoped source/test repairs and one independent regression
+corpus commit to the previous123 repairs. It does not close whole type families
+or import any of the eight separately held enum candidates. README remains
+byte-identical to its evergreen `976f4d5f` revision.
+
+| Private commit | Master commit | Repair or regression corpus |
+| --- | --- | --- |
+| `e4f16819` | `e4ed0c59` | Shared CAST/postfix declaration grammar |
+| `63e226bb` | `ece16145` | Actual declared constant input and catalog identity |
+| `cb20f7f6` | `db4fd458` | Pure builtin lookup before catalog initialization |
+| `5b99960a` | `23695fa8` | CASE grammar ahead of generic constants |
+| `fad73c35` | `db7c19f1` | FLOAT precision and structured syntax diagnostics |
+| `d1b463f7` | `6c18f7f8` | Complete75 actual-reference regression corpus, test-only |
+| `213d37dc` | `b8da36e9` | Function argument versus complete type prefix |
+| `b619d350` | `176c2674` | Modifier grammar, input capability and raw declaration |
+| `f54cae24` | `cc141f15` | Actual keyword category eligibility |
+| `30738452` | `55e867eb` | Named fixed-type defaults and quoted postfix casts |
+| `82fcea77` | `2f32edf5` | Internal-char identity and byte input |
+| `a7fe4f35` | `468a371c` | Signed internal-char/int4 casts and pure eligibility |
+| `040f3a2c` | `54256df1` | Actual boolean identity for predicates |
+| `29e22c35` | `2f750bfd` | Unsigned byte comparison and matching hash |
+| `4e5ec6b3` | `df6d1606` | Scalar concat ambiguity and text result identity |
+| `89eec85d` | `54a1d231` | Boolean text concatenation output |
+| `77b532e6` | `3cd7dbf3` | Actual builtin array rows and reciprocal element links |
+| `27e03a89` | `7e6dfc28` | Shared AST-owned default result labels |
+
+The final two repairs retain strong function/column/ARRAY/ROW names through
+casts, replace weak type names using the original declaration, and share the
+same pure naming analysis across Main, binding and protocol descriptors.
+No AS alias was added to hide the original naming failures. The new native79
+baseline failed9 checks; protocol78 failed29. The naming repair's first epoch
+still failed2 checks in both fixtures because bigint array catalog rows were
+missing; those failures and binary are retained. The independent array repair
+ensures37 genuine builtin array rows/element links and scalar typarray backlinks. Its
+original native112 failed90 checks; the strengthened native187 also verifies
+serialized records using direct read-only snapshots, without cache/bootstrap
+masking missing on-disk fields. Current native79/187 and protocol78 all pass.
+
+The extended312 lifecycle checks retain all78 SQL queries, real expected
+names/OIDs/rows/tags, and Parse/Bind/Describe/Execute/Close assertions. An initial
+reference probe omitted BEGIN, allowing Sync to close implicit-transaction
+portals; its34000 failures are fixture setup failures, not product evidence.
+The corrected fixture uses an explicit transaction without changing SQL,
+expectations or deadlines. Both actual PostgreSQL18.6 and the candidate pass312;
+the permanent simple78 reference fixture also passes.
+
+Final private generation `27e03a89` has terminal zero results for all55 native
+and40 protocol entry points, retaining every previous53/38 fixture and adding
+native79/187 plus protocol78/312. Original immutable BIT384 again passes on
+owned PostgreSQL18.6 (`180006`, C/libc). No full registered suite or SAN claim.
+The label public header genuinely rebuilt all58 normal units; array follow-up
+rebuilt only three CPPs against55 own unchanged current objects. All58 own
+source/header/compiler/flags/manifest receipts, cache, no-recompile repeat and
+frozen binary bytes are verified. Candidate binary/input seal:
+`03cd1d43a8b80773730a2ba3f7577c01ce99917ec37b474e5b33e7fca19414d7` /
+`0d3c99f1b266771e6b92ca77305533f9cc231e5204dafd2c61ac2d1f1d157d60`.
+Artifacts: `/tmp/dbms-root-type-modifiers.iAKKIfgU`.
+
+Master src/scripts/tests/cmake are byte-identical to that final private
+generation. Actual Root inventory is now746 auto-native plus two existing
+Main frontend tests,412 registered entry points and58 production units. A
+genuine Root-path fresh58 normal O2 build is running, handle65438, artifacts
+`/tmp/dbms-root-declaration-publish.gNnyMWd5`; its completion and Root-path tests
+are not yet claimed. The previous Root binary is not this source's evidence.
+
+A new read-only104 actual-reference cold type-name probe finishes1 with48
+differences: the standalone producer admits quoted SQL aliases as physical
+type names and cannot resolve some real physical names. Its SQL, actual
+PostgreSQL18.6 records and baseline are preserved in the Root publication
+artifact directory. Continue a shared genuine builtin catalog producer, not
+an alias blacklist or synthetic runtime catalog. This additional red scope
+does not invalidate the unchanged55/40/384 composition results or close
+TYPE-11/21. Binary I/O, arrays beyond these catalog links, custom types/domains
+and all other original273 requirements remain open. Original items are
+unchanged:22 complete,166 partial,70 unverified,15 deferred_by_user. No push,
+Actions activation or user-skipped/filtered branch restart.

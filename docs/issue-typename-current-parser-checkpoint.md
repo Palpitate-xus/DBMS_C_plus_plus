@@ -1,6 +1,9 @@
 # TypeName parser checkpoint: independent partial repair, Goal remains open
 
-Published Root stays `ea67ad29` /123 source-test repairs. The eight enum
+At this historical parser checkpoint, published Root stayed `ea67ad29` /123
+source-test repairs. The verified declaration chain was subsequently imported
+through `7e6dfc28`; see the current publication section in
+`docs/issue-declared-type-boundaries.md`. The eight enum
 candidates remain held separately. Independent local commit `e4f16819` on
 `fix/root-typename-0mADrqkN` repairs the common declared-type envelope for CAST
 and ::. It is not imported into master and is not TYPE-11/family completion.
