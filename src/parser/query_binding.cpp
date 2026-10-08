@@ -575,7 +575,9 @@ public:
                     coerceCaseInput(member,memberType,comparison.rightType);
                 }
             }
-            return predicates.count(binary->op) ? "boolean" : left;
+            // A predicate's result identity is the catalog-owned boolean,
+            // not either input OID (and not an untyped label with OID zero).
+            return predicates.count(binary->op) ? declaredType("boolean",binary) : left;
         }
         case ExprType::QuantifiedComparison: {
             auto* quantified = static_cast<QuantifiedComparisonExpr*>(node.get());
