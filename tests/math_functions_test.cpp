@@ -32,7 +32,12 @@ static dbms::ExprValue callFn(dbms::ExprEvaluator& eval, const std::string& name
 }
 
 static dbms::ExprValue D(double v) { return dbms::ExprValue("double precision", std::to_string(v), false); }
-static dbms::ExprValue I(int64_t v) { return dbms::ExprValue("integer", std::to_string(v), false); }
+static dbms::ExprValue I(int64_t v) {
+    // Do not annotate an int8 datum as int4: input validation must reject
+    // that before the function, hiding the intended function-boundary check.
+    const bool wide=v<std::numeric_limits<int32_t>::min() || v>std::numeric_limits<int32_t>::max();
+    return dbms::ExprValue(wide?"bigint":"integer",std::to_string(v),false);
+}
 static dbms::ExprValue N(const std::string& v) { return dbms::ExprValue("numeric", v, false); }
 
 static bool approx(const dbms::ExprValue& r, double want) {
