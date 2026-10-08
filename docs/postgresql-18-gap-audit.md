@@ -1,5 +1,12 @@
 # 2026-10-08 最新29f9总清单 checkpoint
 
+后续精确当前INTEGER组合仍HELD，未入master：完整99native30310实际0，
+完整88whole40068实际1/87pass1 socket超时，位置为quantified SAVEPOINT。
+额外完整19post76793实际0不替代原失败gate；所有旧红仍保留，不推断超时原因、
+不加期限/删assert/重启filtered专项。独立private Main初始化7041已commit，
+真实旧前端58基线48失败、五完整native0，候选gate仍运行，不能计作Root已完成。
+详情 `docs/issue-integer-current-root-held-verification.md`；原273范围/状态不变。
+
 当前source `29f90184`：714auto-native+实际frontend1/385registered/58TU，
 107项独立source/test修复。新增三独立commit：f7c真实DISTINCT scalar21000
 测试预期修正、aeac声明TEXT变量宽度、29f实际NULL Bind声明类型保留。

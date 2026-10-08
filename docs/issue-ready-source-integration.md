@@ -1,5 +1,14 @@
 # Latest 29f9 checkpoint: 107 independently committed source/test repairs
 
+Further exact current INTEGER composition is HELD, not master-approved:
+complete99 native30310=0 and proper complete19 post76793=0, but complete88
+whole40068=1 (87pass/one socket timeout in quantified SAVEPOINT). The failed
+full gate and unchanged old reds remain; post19 does not replace it. Root
+source/107 count is unchanged. Independent private Main initialization7041
+has actual frontend58 baseline48 failures and five full native neighbours0;
+candidate gates are running, not approved. Full evidence and unchanged scopes:
+`docs/issue-integer-current-root-held-verification.md`.
+
 Current source `29f90184`: **714 auto-native plus one actual frontend /
 385 registered /58 production TUs**. Three independent commits: corrected
 actual scalar DISTINCT fixture21000 (`f7c12587`), builtin declared TEXT

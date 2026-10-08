@@ -6,6 +6,12 @@
 
 ## 2026-10-08 当前完整273目标计划（29f9；以下较早记录均历史）
 
+当前新增验证不等于合入：精确INTEGER完整99native0/19post0，但完整88whole1，
+87pass及一真实socket超时均保留，未入master/未关闭族，不以19替代88。
+独立private窗口排序方向初始化7041 commit：真实旧前端58/48红、五完整native0；
+候选正常版/真实前端/完整窗口协议仍验证，完成后才批准实际主目录发布。
+完整scope/logs见 `docs/issue-integer-current-root-held-verification.md`。
+
 当前source `29f90184`：714auto+frontend/385registered/58TU，
 107项独立source/test修复。原273全部要求及未闭环scope不缩。
 

@@ -2,6 +2,21 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Held exact current INTEGER composition: native99 and post19 pass, complete88 whole remains actual1",
+      "gap_ids": ["QRY-01", "PROTO-04", "PROTO-05"],
+      "status": "partial",
+      "commits": ["561ed34c", "80ff6659", "87dcb1de"],
+      "evidence": ["docs/issue-integer-current-root-held-verification.md"],
+      "tests": [],
+      "verification": {
+        "reproduction": "Current107 five whole baselines39585 actual1/all collected: input5208/3198, true params350/250 phases, Parse312/407, metadata32/13, BOOL105/54. Same owned matched strict18.6/180006 complete22 actual0.",
+        "fix": "Three independently committed exact private current compositions over b4e9fef4, no public headers; all original reviewed actual INTEGER/BIT/NULL Bind owners retained. Not master-approved or published; Root source remains29f/107.",
+        "focused_tests": "Normal79820 actual0 exactly4freshCPP54current provednormaldonors, notfresh58; all58 receipts/cache/repeat/freeze0 SHA147b47359a96b470b4c8a0bd9ad2543d24f0895a745ba7369f235117dc04a2da. Full99 freshnative30310 actual0/defaultdisk. Full88 whole40068 actual1/87pass1 socket timeout in quantified demand SAVEPOINT after8 ordinary controls; every remaining wrapper completes. Separate proper19post76793 actual0/full13+correctedscalar38+all5new controls, notreplacement offailed88.",
+        "full_suite": "Separate fullOPEN4 84363 actual1/all4oldreds COUNT1UNKNOWN1expandedCTE9scalar83/18. Originalfull8 52056 actual1:132/1296/250/40/50 pass;38423writer6constant3 remain. No current originalfull/mainpublication/family completion claimed.",
+        "scope": "Hold retained and full traceback preserved; no timeoutcause inferred, no deadline/assertion/registry weakening, no filtered fixture restart. Private independentwindow initializer7041 has actualoldfrontend58/48 baseline and5fullnative0 but candidategates running, notRootapproved. Original273 items22complete166partial70unverified15deferred andoriginalhash unchanged; no push/Actions/skippedsecurityTDE."
+      }
+    },
+    {
       "issue": "107 independent ROOT source/test repairs through 29f9: declared TEXT width, actual typed NULL Bind and true scalar DISTINCT fixture",
       "gap_ids": [
         "PROTO-04",
