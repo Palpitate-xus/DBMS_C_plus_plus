@@ -136,6 +136,8 @@ public:
 };
 
 
+static void prepareNullWhereBranches(PreparedQueryExecution& execution,Expr* expression);
+
 // A prepared plan owns its AST and the evaluator's metadata-only routine
 // bindings. Columns consume the binder's true source occurrence/ordinal,
 // and the shared execution carrier owns parameter and lazy-child evaluation.
@@ -249,6 +251,7 @@ struct PreparedSelectState {
             execution->prepareProjectionColumn(static_cast<ColumnRefExpr*>(target.get()), statement);
         for (auto* target : targets) execution->prepareExpression(target);
         execution->prepareExpression(select().whereClause.get());
+        prepareNullWhereBranches(*execution,select().whereClause.get());
         for (const auto& key : keys)
             if (key.target == noTarget) execution->prepareExpression(key.expression);
         execution->prepareChildCursors();
@@ -329,6 +332,95 @@ public:
     std::string preparedPlanNodeName() const override { return "Result"; }
 };
 
+// A prepared operator supplies strictness and retained SQL datum identity.
+// Do not infer constants from row cells, parameter values or routine output.
+static bool preparedLiteralNull(const Expr* expression) {
+    if(!expression || expression->preparedSubquery) return false;
+    if(const auto* literal=dynamic_cast<const LiteralExpr*>(expression))
+        return SQLParser::toLower(literal->value)=="null";
+    const auto* cast=dynamic_cast<const CastExpr*>(expression);
+    return cast && cast->implicit && cast->typeMods.empty() && preparedLiteralNull(cast->operand.get());
+}
+
+static bool preparedStrictNullComparison(const BinaryOpExpr& binary) {
+    const bool leftNull=preparedLiteralNull(binary.left.get()),rightNull=preparedLiteralNull(binary.right.get());
+    if(!leftNull && !rightNull) return false;
+    if(binary.comparison) return binary.comparison->strict;
+    // The existing binder retains enum implementations, but not all builtin
+    // comparison objects. Resolve that existing pure implementation only from
+    // a real bound source descriptor, never a guessed name or evaluated cell.
+    const Expr* source=leftNull?binary.right.get():binary.left.get();
+    while(const auto* cast=dynamic_cast<const CastExpr*>(source)) {
+        if(!cast->implicit || !cast->typeMods.empty()) return false;
+        source=cast->operand.get();
+    }
+    const auto* column=dynamic_cast<const ColumnRefExpr*>(source);
+    if(!column || !column->binding) return false;
+    try {
+        const auto& type=column->binding->declaredType;
+        return ExprEvaluator::resolveComparison(binary.op,leftNull?"unknown":type,leftNull?type:"unknown").strict;
+    } catch(const DbError&) {
+        // A non-builtin/domain implementation without retained strict metadata
+        // stays on its original prepared evaluator and admission path.
+        return false;
+    }
+}
+
+static unsigned preparedWhereTruths(const Expr* expression) {
+    // Bit 0 TRUE, bit 1 FALSE, bit 2 UNKNOWN: all runtime possibilities.
+    if(const auto* unary=dynamic_cast<const UnaryOpExpr*>(expression);unary && unary->op=="NOT") {
+        const auto input=preparedWhereTruths(unary->operand.get());
+        return ((input&1)<<1) | ((input&2)>>1) | (input&4);
+    }
+    const auto* binary=dynamic_cast<const BinaryOpExpr*>(expression);
+    if(!binary) return 7;
+    if((binary->op=="=" || binary->op=="<>" || binary->op=="!=" || binary->op=="<" ||
+        binary->op==">" || binary->op=="<=" || binary->op==">=") &&
+       preparedStrictNullComparison(*binary)) return 4;
+    if(binary->op!="AND" && binary->op!="OR") return 7;
+    const auto left=preparedWhereTruths(binary->left.get()),right=preparedWhereTruths(binary->right.get());
+    unsigned output=0;
+    for(unsigned a=1;a<=4;a<<=1) if(left&a)
+        for(unsigned b=1;b<=4;b<<=1) if(right&b) {
+            if(binary->op=="AND") output|=(a==2 || b==2)?2:(a==4 || b==4)?4:1;
+            else output|=(a==1 || b==1)?1:(a==4 || b==4)?4:2;
+        }
+    return output;
+}
+
+static bool preparedNullWhereBranch(const Expr* expression) {
+    if(!(preparedWhereTruths(expression)&1)) return true;
+    const auto* binary=dynamic_cast<const BinaryOpExpr*>(expression);
+    return binary && (binary->op=="AND" || binary->op=="OR") &&
+        (preparedNullWhereBranch(binary->left.get()) || preparedNullWhereBranch(binary->right.get()));
+}
+
+static void prepareNullWhereBranches(PreparedQueryExecution& execution,Expr* expression) {
+    if(!expression || !(preparedWhereTruths(expression)&1)) return;
+    auto* binary=dynamic_cast<BinaryOpExpr*>(expression);
+    if(!binary || (binary->op!="AND" && binary->op!="OR") || !preparedNullWhereBranch(expression)) return;
+    const auto child=[&](Expr* node) {
+        if(!(preparedWhereTruths(node)&1)) return;
+        const auto* connective=dynamic_cast<const BinaryOpExpr*>(node);
+        if(connective && (connective->op=="AND" || connective->op=="OR") && preparedNullWhereBranch(node))
+            prepareNullWhereBranches(execution,node);
+        else execution.prepareExpression(node);
+    };
+    child(binary->left.get());child(binary->right.get());
+}
+
+static ExprValue evaluatePreparedWhere(const PreparedSelectState& state,const Expr* expression,const RowContext& row) {
+    if(!(preparedWhereTruths(expression)&1)) return ExprValue("boolean","false");
+    const auto* binary=dynamic_cast<const BinaryOpExpr*>(expression);
+    if(binary && (binary->op=="AND" || binary->op=="OR") && preparedNullWhereBranch(expression)) {
+        const auto left=evaluatePreparedWhere(state,binary->left.get(),row);
+        const bool truth=!left.isNull && left.asBool();
+        if((binary->op=="AND" && !truth) || (binary->op=="OR" && truth)) return left;
+        return evaluatePreparedWhere(state,binary->right.get(),row);
+    }
+    return state.evaluate(expression,row);
+}
+
 class PreparedFilterOp final : public Operator {
     OpPtr child_;
     std::shared_ptr<PreparedSelectState> state_;
@@ -338,6 +430,7 @@ public:
         : child_(std::move(child)), state_(std::move(state)) {}
     bool open() override {
         OpenInstrument startup(this); clearError(); childOpened_ = false; empty_ = false;
+        if(!(preparedWhereTruths(state_->select().whereClause.get())&1)) { empty_=true;return true; }
         if (PreparedSelectState::rowIndependent(state_->select().whereClause.get())) {
             auto row = state_->execution->context(state_->outerRow);
             const auto value = state_->evaluate(state_->select().whereClause.get(), row);
@@ -349,7 +442,7 @@ public:
         NextInstrument instrumentation(this);
         if (empty_) return false;
         while (child_->next(row)) {
-            const auto value = state_->evaluate(state_->select().whereClause.get(),
+            const auto value = evaluatePreparedWhere(*state_,state_->select().whereClause.get(),
                 state_->context(*child_, row));
             if (!value.isNull && value.asBool()) { instrumentation.emitted = true; return true; }
         }
@@ -2527,7 +2620,7 @@ static std::vector<StorageEngine::Condition> prepareUnknownBitPredicateInputs(
             if (column.isArray || (column.dataType != "bit" && column.dataType != "bit varying")) break;
             const auto binding = ExprEvaluator::resolveComparison(condition.op, column.dataType, "unknown");
             ExprEvaluator evaluator;
-            const auto input = evaluator.coerceComparison(binding, ExprValue("unknown", condition.value), false);
+            const auto input = evaluator.coerceComparison(binding, ExprValue("unknown", condition.value, condition.patternIsNull), false);
             condition.value = input.value;
             condition.patternType = input.typeName;
             break;
@@ -2536,10 +2629,48 @@ static std::vector<StorageEngine::Condition> prepareUnknownBitPredicateInputs(
     return conditions;
 }
 
+static bool nullScalarPredicate(const StorageEngine::Condition& condition) {
+    return condition.patternIsNull && (condition.op=="typedexpr" || condition.op=="=" || condition.op=="<>" || condition.op=="!=" ||
+        condition.op=="<" || condition.op==">" || condition.op=="<=" || condition.op==">=");
+}
+
+static bool nullPredicateBranch(const std::vector<StorageEngine::Condition>& conditions) {
+    return std::any_of(conditions.begin(),conditions.end(),nullScalarPredicate);
+}
+
+static void validateNullPredicateColumns(const Expr* expression,const TableSchema& table) {
+    const auto* binary=dynamic_cast<const BinaryOpExpr*>(expression);
+    if(!binary) return;
+    if(binary->op=="AND" || binary->op=="OR") {
+        validateNullPredicateColumns(binary->left.get(),table);validateNullPredicateColumns(binary->right.get(),table);return;
+    }
+    if(binary->op!="=" && binary->op!="<>" && binary->op!="!=" && binary->op!="<" &&
+       binary->op!=">" && binary->op!="<=" && binary->op!=">=") return;
+    const auto isNull=[](const Expr* value) {
+        const auto* literal=dynamic_cast<const LiteralExpr*>(value);
+        return literal && literal->typeName.empty() && !literal->preparedSubquery && literal->value=="null";
+    };
+    const auto* reference=isNull(binary->right.get())?dynamic_cast<const ColumnRefExpr*>(binary->left.get()):
+        isNull(binary->left.get())?dynamic_cast<const ColumnRefExpr*>(binary->right.get()):nullptr;
+    if(!reference || !reference->table.empty() || !reference->schema.empty()) return;
+    for(size_t i=0;i<table.len;++i) if(table.cols[i].dataName==reference->column) return;
+    throw DbError("42703","column does not exist: "+reference->column);
+}
+
 static void validatePredicateTypes(const TableSchema& table,
         const std::vector<StorageEngine::Condition>& conditions,
         const std::string& database = {}, StorageEngine* owner = nullptr) {
     for (const auto& condition : conditions) {
+        if (nullScalarPredicate(condition) && condition.op!="typedexpr") {
+            bool found=false;
+            for(size_t i=0;i<table.len;++i) if(table.cols[i].dataName==condition.colName) {
+                found=true;
+                (void)ExprEvaluator::resolveComparison(condition.op,table.cols[i].dataType+
+                    (table.cols[i].isArray?"[]":""),"unknown");
+                break;
+            }
+            if(!found) throw DbError("42703","column does not exist: "+condition.colName);
+        }
         if (condition.op == "typedexpr") {
             // Only the planner owns database/routine metadata. A filter's
             // schema alone must not guess an already prepared UDF as TEXT.
@@ -2549,6 +2680,7 @@ static void validatePredicateTypes(const TableSchema& table,
             auto* select = parsed.success ? dynamic_cast<SelectStmt*>(parsed.stmt.get()) : nullptr;
             if (!select || select->selectList.size() != 1 || select->fromClause)
                 throw DbError("42601", "invalid typed filter predicate");
+            validateNullPredicateColumns(select->selectList.front().expr.get(),table);
             std::map<std::string, std::string> hints;
             for (size_t i = 0; i < table.len; ++i)
                 hints[table.cols[i].dataName] = table.cols[i].dataType +
@@ -2621,6 +2753,7 @@ bool FilterOp::next(std::string& outRow) {
     NextInstrument rtInstr_(this);  // EXPLAIN ANALYZE per-node stats
     const auto matchesBranch = [&](
         const std::vector<StorageEngine::Condition>& conditions) {
+        if (nullPredicateBranch(conditions)) return false;
         for (const auto& c : conditions) {
             size_t colIdx = tbl_.len;
             for (size_t i = 0; i < tbl_.len; ++i) {
@@ -5921,7 +6054,13 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& in
     validatePredicateTypes(table, ctx.conds, ctx.dbname, engine);
     for (const auto& branch : ctx.disjunctiveConds)
         validatePredicateTypes(table, branch, ctx.dbname, engine);
+    const bool allNullBranches=!ctx.disjunctiveConds.empty() &&
+        std::all_of(ctx.disjunctiveConds.begin(),ctx.disjunctiveConds.end(),nullPredicateBranch);
+    ctx.disjunctiveConds.erase(std::remove_if(ctx.disjunctiveConds.begin(),ctx.disjunctiveConds.end(),nullPredicateBranch),
+        ctx.disjunctiveConds.end());
     OpPtr root;
+    if (nullPredicateBranch(ctx.conds) || allNullBranches)
+        root=std::make_unique<MaterializedRowsOp>(std::vector<std::string>{});
 
     // Choose between the protected IndexScan and TableScan paths.
     std::vector<StorageEngine::Condition> remainingConds = ctx.conds;
@@ -5929,12 +6068,12 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& in
     // bitmap, or parallel access path duplicate policy evaluation: use the
     // policy-aware TableScanOp and keep user predicates above it.
     const bool rlsApplies = engine->rlsAppliesTo(ctx.dbname, ctx.tablename);
-    const bool useBitmap = !rlsApplies && canUseBitmapHeapScan(engine, ctx);
+    const bool useBitmap = !root && !rlsApplies && canUseBitmapHeapScan(engine, ctx);
     // GiST acceleration: a range or anchored-prefix predicate on a
     // .gist-indexed column narrows candidates via the sidecar overlap
     // scan.  All predicates stay in FilterOp above as the recheck
     // boundary, identical to the bitmap path.
-    const bool useGiST = !rlsApplies && canUseGiSTScan(engine, ctx);
+    const bool useGiST = !root && !rlsApplies && canUseGiSTScan(engine, ctx);
     if (useBitmap) {
         // Keep all predicates for FilterOp's heap recheck.  The bitmap node
         // only narrows the candidate RID set; it is not a correctness filter.
@@ -5943,7 +6082,7 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& in
     } else if (useGiST) {
         root = std::make_unique<GiSTScanOp>(
             engine, ctx.dbname, ctx.tablename, ctx.conds);
-    } else if (!rlsApplies && !remainingConds.empty()) {
+    } else if (!root && !rlsApplies && !remainingConds.empty()) {
         for (const auto& c : remainingConds) {
             if (c.op == "=" && !equalityIndexKeyIsEmpty(
                     engine->getTableSchema(ctx.dbname, ctx.tablename), c)) {
@@ -6262,6 +6401,17 @@ OpPtr QueryPlanner::buildDisjunctiveSelectPlan(
         branches.push_back(prepareUnknownBitPredicateInputs(table, branch));
     for (const auto& branch : branches)
         validatePredicateTypes(table, branch, ctx.dbname, engine);
+    if (branches.empty()) return nullptr;
+    const auto firstBranch=branches.front();
+    branches.erase(std::remove_if(branches.begin(),branches.end(),nullPredicateBranch),branches.end());
+    if (branches.empty()) {
+        PlanContext empty=ctx;empty.conds=firstBranch;empty.disjunctiveConds.clear();
+        return buildSelectPlan(engine,empty);
+    }
+    if(branches.size()==1 && inputBranches.size()>1) {
+        PlanContext single=ctx;single.conds=branches.front();single.disjunctiveConds.clear();
+        return buildSelectPlan(engine,single);
+    }
     if (engine->rlsAppliesTo(ctx.dbname, ctx.tablename) ||
         !canUseBitmapOrScan(engine, ctx, branches)) return nullptr;
 

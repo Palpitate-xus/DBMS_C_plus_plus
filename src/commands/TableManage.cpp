@@ -1220,7 +1220,7 @@ static std::vector<StorageEngine::Condition> prepareStoredUnknownBitScalarInputs
             if (column.isArray || (column.dataType != "bit" && column.dataType != "bit varying")) break;
             const auto binding = ExprEvaluator::resolveComparison(condition.op, column.dataType, "unknown");
             ExprEvaluator evaluator;
-            const auto input = evaluator.coerceComparison(binding, ExprValue("unknown", condition.value), false);
+            const auto input = evaluator.coerceComparison(binding, ExprValue("unknown", condition.value, condition.patternIsNull), false);
             condition.value = input.value;
             condition.patternType = input.typeName;
             break;
@@ -1229,9 +1229,70 @@ static std::vector<StorageEngine::Condition> prepareStoredUnknownBitScalarInputs
     return conditions;
 }
 
+// This is a WHERE-only truth property, not value folding: NULL remains
+// Unknown in projections, NOT, CASE and function arguments. Only positive
+// AND/OR branches containing an actual strict column/NULL comparison qualify.
+static bool nullWhereComparison(const Expr* expression) {
+    const auto* binary=dynamic_cast<const BinaryOpExpr*>(expression);
+    if(!binary) return false;
+    if(binary->op=="AND") return nullWhereComparison(binary->left.get()) || nullWhereComparison(binary->right.get());
+    if(binary->op=="OR") return nullWhereComparison(binary->left.get()) && nullWhereComparison(binary->right.get());
+    if(binary->op!="=" && binary->op!="<>" && binary->op!="!=" && binary->op!="<" &&
+       binary->op!=">" && binary->op!="<=" && binary->op!=">=") return false;
+    const auto isNull=[](const Expr* operand) {
+        const auto* literal=dynamic_cast<const LiteralExpr*>(operand);
+        return literal && literal->typeName.empty() && !literal->preparedSubquery && literal->value=="null";
+    };
+    const auto column=[](const Expr* operand) {
+        const auto* reference=dynamic_cast<const ColumnRefExpr*>(operand);
+        return reference && reference->schema.empty() && reference->table.empty();
+    };
+    return (column(binary->left.get()) && isNull(binary->right.get())) ||
+           (column(binary->right.get()) && isNull(binary->left.get()));
+}
+
+static bool containsNullWhereComparison(const Expr* expression) {
+    if(nullWhereComparison(expression)) return true;
+    const auto* binary=dynamic_cast<const BinaryOpExpr*>(expression);
+    return binary && (binary->op=="AND" || binary->op=="OR") &&
+        (containsNullWhereComparison(binary->left.get()) || containsNullWhereComparison(binary->right.get()));
+}
+
+static bool nullScalarComparison(const StorageEngine::Condition& condition) {
+    return condition.patternIsNull && (condition.op=="typedexpr" || condition.op=="=" || condition.op=="<>" || condition.op=="!=" ||
+        condition.op=="<" || condition.op==">" || condition.op=="<=" || condition.op==">=");
+}
+
+static void validateNullWhereColumns(const Expr* expression,const TableSchema& table) {
+    const auto* binary=dynamic_cast<const BinaryOpExpr*>(expression);
+    if(!binary) return;
+    if(binary->op=="AND" || binary->op=="OR") {
+        validateNullWhereColumns(binary->left.get(),table);validateNullWhereColumns(binary->right.get(),table);return;
+    }
+    if(!nullWhereComparison(expression)) return;
+    const auto* column=dynamic_cast<const ColumnRefExpr*>(binary->left.get());
+    if(!column) column=dynamic_cast<const ColumnRefExpr*>(binary->right.get());
+    for(size_t i=0;i<table.len;++i) if(table.cols[i].dataName==column->column) return;
+    throw DbError("42703","column does not exist: "+column->column);
+}
+
+static bool nullScalarBranch(const std::vector<StorageEngine::Condition>& conditions) {
+    return std::any_of(conditions.begin(), conditions.end(), nullScalarComparison);
+}
+
 static void validateStoredPatternConditions(
     const TableSchema& table, const std::vector<StorageEngine::Condition>& conditions) {
     for (const auto& condition : conditions) {
+        if (nullScalarComparison(condition) && condition.op!="typedexpr") {
+            bool found=false;
+            for(size_t i=0;i<table.len;++i) if(table.cols[i].dataName==condition.colName) {
+                found=true;
+                (void)ExprEvaluator::resolveComparison(condition.op,table.cols[i].dataType+
+                    (table.cols[i].isArray?"[]":""),"unknown");
+                break;
+            }
+            if(!found) throw DbError("42703","column does not exist: "+condition.colName);
+        }
         (void)bindStoredPatternTypes(table,condition);
         // The SQL literal adapter retains BIT operand type independently
         // of its decoded bytes. The existing right-operand type slot also
@@ -23175,8 +23236,49 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
                 ? tbl.cols[i].collation : tbl.cols[i].resolvedCollation;
             if (isNull) nullColumns.insert(tbl.cols[i].dataName);
         }
-        const auto evaluated = ExprHelper::evalStringWithNulls(
-            cond.value, rowValues, nullColumns, buildTypeHints(tbl), valueDb, "", valueEngine,collations);
+        const auto hints=buildTypeHints(tbl);
+        auto evaluate=[&](const std::string& sql) {
+            return ExprHelper::evalStringWithNulls(sql,rowValues,nullColumns,hints,valueDb,"",valueEngine,collations);
+        };
+        SQLParser parser;const std::string source="SELECT "+cond.value;
+        auto parsed=parser.parseForBinding(source);
+        auto* select=parsed.success?dynamic_cast<SelectStmt*>(parsed.stmt.get()):nullptr;
+        ExprEvalResult evaluated;
+        const auto* root=select && select->selectList.size()==1 && !select->fromClause
+            ?select->selectList.front().expr.get():nullptr;
+        if(root && containsNullWhereComparison(root)) {
+            // Admit the entire original AST before reducing execution demand.
+            // No routine, parameter or row value is evaluated to infer a type.
+            validateNullWhereColumns(root,tbl);
+            ExprHelper::prepareArrayTypes(select->selectList.front().expr.get(),hints,valueDb,valueEngine);
+            std::function<ExprEvalResult(const Expr*)> qualify=[&](const Expr* node)->ExprEvalResult {
+                if(nullWhereComparison(node)) {
+                    ExprEvalResult result;result.ok=true;result.value="false";result.typeName="boolean";return result;
+                }
+                const auto* binary=dynamic_cast<const BinaryOpExpr*>(node);
+                if(binary && (binary->op=="AND" || binary->op=="OR") && containsNullWhereComparison(node)) {
+                    auto left=qualify(binary->left.get());if(!left.ok) return left;
+                    const bool truth=!left.isNull && ExprValue("boolean",left.value).asBool();
+                    if((binary->op=="AND" && !truth) || (binary->op=="OR" && truth)) return left;
+                    return qualify(binary->right.get());
+                }
+                std::function<std::pair<size_t,size_t>(const Expr*)> interval=[&](const Expr* value) {
+                    if(value->sourceBegin<value->sourceEnd && value->sourceEnd<=source.size())
+                        return std::make_pair(value->sourceBegin,value->sourceEnd);
+                    if(const auto* comparison=dynamic_cast<const BinaryOpExpr*>(value)) {
+                        const auto left=interval(comparison->left.get()),right=interval(comparison->right.get());
+                        if(left.first<left.second && right.first<right.second)
+                            return std::make_pair(std::min(left.first,right.first),std::max(left.second,right.second));
+                    }
+                    return std::make_pair(size_t(0),size_t(0));
+                };
+                const auto owned=interval(node);
+                if(owned.first<owned.second) return evaluate(source.substr(owned.first,owned.second-owned.first));
+                // Unsupported source ownership stays on the unchanged evaluator.
+                return evaluate(cond.value);
+            };
+            evaluated=qualify(root);
+        } else evaluated=evaluate(cond.value);
         if (!evaluated.ok && !evaluated.sqlState.empty()) throw DbError(evaluated.sqlState,evaluated.error);
         if (!evaluated.ok)
             throw std::runtime_error(evaluated.error.empty()
@@ -23280,6 +23382,7 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
     }
     if (cond.op == "isnull") return physNull;
     if (cond.op == "isnotnull") return !physNull;
+    if (nullScalarComparison(cond)) return false;
     if (cond.patternType=="bit")
         (void)ExprEvaluator::resolveComparison("=",col.dataType+(col.isArray?"[]":""),"bit");
     if (physNull) {
@@ -26633,10 +26736,25 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
         c.value = decodeSqlLiteral(s.substr(sp + 1));
         c.decodedLiteralRhs = apiCondition || (!rawRight.empty() && rawRight.front()=='\'');
         if (!apiCondition && !rawRight.empty() && rawRight.front()=='\'') c.patternType = "unknown";
+        if (!apiCondition) {
+            SQLParser parser; const auto parsed=parser.parse("SELECT "+rawRight);
+            const auto* select=parsed.success?dynamic_cast<const SelectStmt*>(parsed.stmt.get()):nullptr;
+            const auto* literal=select && select->selectList.size()==1 && !select->fromClause
+                ?dynamic_cast<const LiteralExpr*>(select->selectList.front().expr.get()):nullptr;
+            if(literal && !literal->preparedSubquery && literal->typeName.empty() && literal->value=="null") {
+                c.patternIsNull=true;c.patternType="unknown";c.decodedLiteralRhs=true;c.value.clear();
+            }
+        }
         conds.push_back(c);
     }
     for (auto& condition : conds) {
         condition.colName = decodeSqlIdentifier(condition.colName);
+        if(condition.op=="typedexpr") {
+            SQLParser parser;const auto parsed=parser.parseForBinding("SELECT "+condition.value);
+            const auto* select=parsed.success?dynamic_cast<const SelectStmt*>(parsed.stmt.get()):nullptr;
+            if(select && select->selectList.size()==1 && !select->fromClause)
+                condition.patternIsNull=nullWhereComparison(select->selectList.front().expr.get());
+        }
     }
     return conds;
 }
@@ -26681,8 +26799,13 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
         auto* select=parsed.success ? dynamic_cast<SelectStmt*>(parsed.stmt.get()) : nullptr;
         if (!select || select->selectList.size()!=1 || select->fromClause)
             throw DbError("42601","invalid typed predicate");
+        validateNullWhereColumns(select->selectList[0].expr.get(),tbl);
         ExprHelper::prepareArrayTypes(select->selectList[0].expr.get(),buildTypeHints(tbl),dbname,this);
     }
+    // A strict comparison to the actual SQL NULL datum cannot qualify a
+    // row. Admit every signature/input first, then avoid all row/routine
+    // execution in this AND branch; quoted/API text NULL is not this datum.
+    if (nullScalarBranch(conds)) return {};
     const auto secondaryMetadata = getIndexMetadata(dbname, tablename);
     const auto hasCompleteSecondaryIndex = [&](const std::string& columnName) {
         return std::any_of(
@@ -37870,6 +37993,21 @@ std::vector<std::string> StorageEngine::queryExpr(
         preparedAlternatives.push_back(prepareStoredUnknownBitScalarInputs(tbl,parseConditions(branch)));
         validateStoredPatternConditions(tbl,preparedAlternatives.back());
     }
+    const auto admitTyped=[&](const std::vector<Condition>& branch) {
+        for(const auto& condition:branch) if(condition.op=="typedexpr") {
+            SQLParser parser;auto parsed=parser.parseForBinding("SELECT "+condition.value);
+            auto* select=parsed.success?dynamic_cast<SelectStmt*>(parsed.stmt.get()):nullptr;
+            if(!select || select->selectList.size()!=1 || select->fromClause)
+                throw DbError("42601","invalid typed predicate");
+            validateNullWhereColumns(select->selectList.front().expr.get(),tbl);
+            ExprHelper::prepareArrayTypes(select->selectList.front().expr.get(),buildTypeHints(tbl),dbname,this);
+        }
+    };
+    admitTyped(conds);for(const auto& branch:preparedAlternatives) admitTyped(branch);
+    const bool noMatches=options.conditionAlternatives.empty()?nullScalarBranch(conds):
+        std::all_of(preparedAlternatives.begin(),preparedAlternatives.end(),nullScalarBranch);
+    preparedAlternatives.erase(std::remove_if(preparedAlternatives.begin(),preparedAlternatives.end(),nullScalarBranch),
+        preparedAlternatives.end());
     if (options.maxProjectionRows && *options.maxProjectionRows == 0) return result;
     // With no blocking sort, qualification and projection belong to the
     // same demand-driven row receiver. Do not first evaluate WHERE on later
@@ -37884,7 +38022,10 @@ std::vector<std::string> StorageEngine::queryExpr(
     std::vector<std::pair<int64_t, std::string>> matchRows;
     bool scanFailed = false;
     bool indexReadFailed = false;
-    if (conds.empty() || streamingQualification) {
+    if (noMatches) {
+        // Keep empty aggregate input semantics; do not evaluate a WHERE or
+        // target function merely to discover that this branch cannot be true.
+    } else if (conds.empty() || streamingQualification) {
         if (!forEachRow(dbname, tablename, [&](uint32_t pid, uint16_t sid, const char* data, size_t len) {
             matchRows.emplace_back(encodeRid(pid, sid), std::string(data, len));
         })) scanFailed = true;
