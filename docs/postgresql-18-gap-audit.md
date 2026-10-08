@@ -1,4 +1,35 @@
-# 2026-10-07 最新f323总清单 checkpoint
+# 2026-10-08 最新af7d总清单 checkpoint
+
+当前source `af7d46c8`：713auto-native+实际frontend1/383registered/58TU，
+104项独立source/test修复commit。新增四独立issue：enum aggregate argument/
+FILTER实际绑定、真正外层reducer结果元数据、positive scalar FETCH peers及
+signed FETCH真实Limit需求。两公共字段追加保全部当前Window/enum/CTE/
+integer/BIT/quoted/index/hash/array修复，无旧整CPP或旧ABI对象替换。
+
+完整current100四whole基线61951真1/all4失败；同四owned matched-enUS
+strict180006全0。真正fresh58 normal92632、完整默认磁盘93native99777/
+默认期限71whole70736全部真实终0；原50native/61whole完整并集未省。
+all58自身receipt/header/source/flags/cache/repeat/frozeninput全0，同3d6446
+SHA。保source168 donor冻结，另树跨doc36a4精确合四issue，source/scripts/
+tests/manifest不变，完整15post31826全0后master仅FF。
+实际主目录publication20012全58正常对象证明迁移/自身receipts/normal/repeat
+重链真0、零freshCPP而非又fresh58；实际./dbms_main同SHA，直接15完整whole
+86345真0/全部输入不变，旧bf33 binary可恢复。完整mapping/log/build范围见
+`docs/issue-public-consumers-current-root-composition.md`。
+
+独立OPEN5whole35004真1/all5失败：旧COUNT1/UNKNOWN1/expanded9，
+scalar全83保18强失败、旧DISTINCT期待0A000但实际21000，全部保留。
+旧80原full42496仍终1/all1043非当前104结论，新104原full未启动。
+原273仍22complete166partial70unverified15deferred，完成gate拒绝。
+
+两个真实协议TEXT-width/declared-NULL Bind问题仅在独立当前私树commit，
+normal1freshNetwork+57当期证明donors；需当前完整强gate后才能批准。
+BETWEEN需求必须独立真新header证明，并核实聚合行/计算结果Param非Bind常量。
+原VARBIT TypeName/catalog、INTEGER ranges、MINMAX rank/producers/customOID、
+其它FETCH/COUNT/UNKNOWN/CASE/readers和全部catalog/query/storage/recovery/ops
+未闭环要求不缩。无assistantpush、Actions启用或用户跳过安全/TDE重启。
+
+# 2026-10-07 历史f323总清单 checkpoint
 
 当前source `f32327cd`：708auto-native+实际frontend1/379registered/58TU，
 100项独立source/test修复commit。独立修复BIT BETWEEN纯输入/真实参数来源，

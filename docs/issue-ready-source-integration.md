@@ -1,4 +1,46 @@
-# Latest f323 checkpoint: 100 independently committed source/test repairs
+# Latest af7d checkpoint: 104 independently committed source/test repairs
+
+Current source `af7d46c8`: **713 auto-native plus one actual frontend /
+383 registered /58 production TUs**. Four independently committed issues:
+enum aggregate argument/FILTER input bindings, actual outer reducer result
+metadata, positive scalar FETCH peers and genuine signed FETCH runtime demand.
+Two appended public fields preserve all current Window/enum/CTE/integer/BIT/
+quoted/index/hash/array increments. Exact four-commit mapping:
+`docs/issue-public-consumers-current-root-composition.md`.
+
+Complete current100 four whole baselines61951 genuinely end1/all4 fail;
+the same four owned matched-enUS strict180006 whole matrices end0.
+**Genuine fresh58 normal92632, complete93 fresh native99777 and complete71
+whole70736 all end0**, default disk/deadlines. All58 current receipts/header/
+source/flags/cache/repeat/frozen inputs pass; no old-ABI donors stand in for
+the fresh58 build. Frozen SHA
+`3d6446bee02de0ac8ec976cc157b17caf368de452f17891ede6db4eef4f0fc9c`.
+
+The immutable source168 donor stays unchanged. A separate publication tree
+composes the four exact issue commits over doc36a4; source/script/test/manifest
+unchanged and complete15 post31826 ends0. Master only fast-forwards. Actual
+main publication20012 ends0, proving matching all58 normal objects and own
+path-sensitive receipts before zero-fresh-CPP normal/repeat relink; this is
+migration, not another fresh58. Actual `./dbms_main` matches that SHA and its
+direct complete15 whole86345 ends0. Previous bf33 binary is recoverable.
+
+Separate complete OPEN5 whole35004 genuinely ends1/all5 fail: old COUNT1/
+UNKNOWN1/expandedCTE9, scalar83/18 strong records, original DISTINCT assertion
+expects0A000 versus actual21000. No full family approval or filtered pass group.
+Original Source80 full42496 stays terminal1/all1043, not current104; a new
+current104 original full has not started. Original273 stays
+**22complete/166partial/70unverified/15deferred**, completion gate rejects.
+
+Next: two independent protocol TEXT-width/declared-NULL Bind issues are only
+in a separate current104 private composition, with one fresh Network and57
+proved current104 normal donors. BETWEEN demand additionally needs genuine
+new-header proof and actual aggregate row/computed-cell provenance controls.
+VARBIT true TypeName/catalog input, INTEGER ranges, MIN/MAX rank/producers/
+custom OIDs, other FETCH/COUNT/UNKNOWN readers and every original unclosed
+catalog/query/storage/recovery/operations requirement continue. No assistant
+push, Actions activation or skipped security/TDE work.
+
+# Historical f323 checkpoint: 100 independently committed source/test repairs
 
 Current source `f32327cd`: **708 auto-native plus one actual frontend /
 379 registered /58 production TUs**. One independently committed finite

@@ -4,7 +4,28 @@
 
 # 工作区与复查清单收尾计划
 
-## 2026-10-07 当前完整273目标计划（f323；以下较早记录均历史）
+## 2026-10-08 当前完整273目标计划（af7d；以下较早记录均历史）
+
+当前source `af7d46c8`：713auto+frontend/383registered/58TU，104项独立
+source/test修复commit。原273及所有未闭环要求完整保留。
+
+| 阶段 | 原要求 / 下一动作 | 当前实际证据 |
+| --- | --- | --- |
+| 逐项版本管理 | 每实际根因独立commit，用户push | 四新issue分别1f3a/4906/9cf9/af7d，独立shadow组合后master仅FF |
+| 当前完整组合 | 真ABI/inputs/receipts/默认磁盘和期限 | 真fresh58 normal92632，完整93native99777/71whole70736/15post31826全0 |
+| 主目录可用binary | 正常build/repeat/逐对象proof/直接复测 | publication20012迁移全58证明正常对象与自身receipts重链0；实际3dSHA，直接15whole86345全0，旧bf33可恢复 |
+| 原强红全保留 | 不删SQL/assert/注册红，不冒族关闭 | OPEN5whole35004真1：CTE11/scalar18/旧DISTINCT；原80full42496终1/all1043 |
+| 接续协议和输入 | TEXT width、NULL Bind、INTEGER/VARBIT真实owner | NULL两私树独立commit、真1freshNetwork+57当前证明donors；完整94native/78whole实际运行，非master批准；INTEGER/VARBIT另实际强差分 |
+| 接续真实需求 | BETWEEN、aggregate runtime cells、各FETCH实际consumer | 新BETWEEN私树全58真构建；严格32聚合来源控制0，Root104完整基线保旧COUNT FILTER两红，其余30真实row/computed NULL效应均0，待候选对照 |
+| 每原full/family | 原发现/注册终态及原273全证据 | 新104原full未启动；MINMAX/customOID/其它FETCH/COUNT/UNKNOWN/CASE/all原catalog/query/storage/recovery/ops继续 |
+| 总账与约束 | 原checkbox/证据/commit全scope一致 | 273=22complete166partial70unverified15deferred，完成gate拒绝；不push/启用Actions/重启跳过安全TDE |
+
+下一动作：完成两个协议issue当期完整gate并精确逐commit合入；核实BETWEEN
+是否误将实际聚合行/计算结果Parameter当输入常量，复现后修真实producer/copy
+角色，不凭slot/NULL值猜。继续其它原未闭环根因及完整族验证。
+完整出处见public-consumers current-root组合文档。
+
+## 2026-10-07 历史完整273目标计划（f323）
 
 当前source `f32327cd`：708auto+frontend/379registered/58TU，100项独立
 source/test修复commit；原273全部范围及每个未闭环要求不缩。

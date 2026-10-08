@@ -2,6 +2,48 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "104 independent ROOT source/test repairs through af7d: actual enum aggregate inputs, outer result metadata and FETCH consumers",
+      "gap_ids": [
+        "TYPE-08",
+        "QRY-07",
+        "QRY-10",
+        "PROTO-04"
+      ],
+      "status": "partial",
+      "commits": [
+        "1f3a118e",
+        "4906ec0a",
+        "9cf9034d",
+        "af7d46c8"
+      ],
+      "evidence": [
+        "docs/issue-ready-source-integration.md",
+        "docs/issue-public-consumers-current-root-composition.md",
+        "docs/issue-enum-aggregate-argument-binding.md",
+        "docs/issue-aggregate-result-root-owner.md",
+        "docs/issue-prepared-scalar-fetch-ties.md",
+        "docs/issue-signed-fetch-runtime-demand.md"
+      ],
+      "tests": [
+        "tests/enum_aggregate_argument_binding_test.cpp",
+        "tests/aggregate_result_root_owner_test.cpp",
+        "tests/scalar_fetch_ties_test.cpp",
+        "tests/fetch_signed_count_test.cpp",
+        "tests/fetch_signed_identity_test.cpp",
+        "tests/enum_aggregate_argument_binding_protocol_e2e_test.py",
+        "tests/aggregate_result_root_owner_protocol_e2e_test.py",
+        "tests/scalar_fetch_ties_protocol_e2e_test.py",
+        "tests/fetch_signed_count_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "reproduction": "Actual current100 frozen bf33 four complete whole baselines 61951 end1/all4 fail, including scalar85/61records and signed152/118records. Same four complete owned matched-enUS PG18.6/180006 reference whole matrices end0; all original SQL, NULL/value/OID/width/effect/phase assertions and default deadlines retained.",
+        "fix": "Four independent exact current ROOT commits: real enum aggregate argument/FILTER metadata before lowering physical columns to runtime datum slots with actual decoded alias; whole outer reducer descriptor instead of nested predicate spelling; positive scalar FETCH peers from real evaluated typed sort slots with actual projection/OFFSET/boundary demand; genuine signed FETCH AST and real demanded Limit2201W, syntax42601 and pure identity/default consumers. Two appended public fields preserve every current Window/enum/CTE/integer/BIT/quoted/index/hash/array/TRUNCATE increment; no old whole source or private ABI replacement.",
+        "focused_tests": "Frozen source168596fc normal92632 actual0, genuinely fresh all58 production TUs exactly once with zero donor objects; original58 own receipts/header/source/flags/cache/repeat/frozen inputs all0 SHA3d6446bee02de0ac8ec976cc157b17caf368de452f17891ede6db4eef4f0fc9c. Complete93 fresh native99777 and71 whole70736 actual terminal0/default disk and deadlines, full preceding50/61 retained. Separate publication tree preserves immutable168 donor; source-script-test-manifest unchanged over doc36a4 and four exact issue commits; complete15 composed post31826=0. Master only fast-forwards. Actual main publication20012=0 proves all58 matching normal object migration/relink and own path-sensitive receipts, zero fresh CPP, not another fresh58. Actual ./dbms_main matches3d SHA; direct15 complete whole86345=0/all inputs unchanged. Previous bf33 source100 binary recoverably backed up.",
+        "full_suite": "Actual af7d inventory713auto-native plus actualfrontend1/383registered/58TU/104 independent ROOT repairs. Separate complete OPEN5 whole35004 ends1/all5 genuinely fail: old COUNT1/UNKNOWN1/expandedCTE9, full scalar83/18records, and original DISTINCT fixture expects0A000 vs actual21000. Original Source80 full42496 stays actualterminal1/all1043, not current104 or14 independent bugs. No new current104 original full started; diagnostic signed20 probe0 is observational, not compatibility PASS.",
+        "scope": "Original273 items unchanged22complete166partial70unverified15deferred; require-complete still rejects. TYPE08/QRY07/QRY10/PROTO04/all original unclosed families remain partial/open. Source100 original seven matrices remain the last actual full differential evidence: VARBIT parser16/physicalprefix7, INTEGER BETWEEN26, writer6 unresolved there. Current typed TEXT width/declared NULL Bind two issues only separate Root104 private composition with actual one-freshNetwork57-proved104 normal donors; not master approval. BETWEEN demand requires new current header proof and aggregate row/computed-cell provenance controls, not assumption all ParameterExpr are Bind constants. MINMAX custom OID/actual column producers, other FETCH/COUNT/UNKNOWN/CASE/readers and all catalog/query/storage/recovery/operations requirements continue. No assistant push, Actions activation or deferred security/TDE restart; no full-family or overall completion claim."
+      }
+    },
+    {
       "issue": "100 independent ROOT source/test repairs throughf323: actual BETWEEN input and original parameter occurrence ownership",
       "gap_ids": ["TYPE-11", "TYPE-02", "SQL-05"],
       "status": "partial",
