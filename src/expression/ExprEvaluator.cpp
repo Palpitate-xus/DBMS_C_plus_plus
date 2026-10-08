@@ -2953,6 +2953,15 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
 
     ExprValue l = eval(e->left.get(), ctx);
 
+    if (op == "::") {
+        // The parser's right literal carries declaration syntax, not a SQL
+        // string value. Evaluating it would strip identifier quotes and turn
+        // a named type ("bit", "char") into a different keyword declaration.
+        const auto* declaration = dynamic_cast<const LiteralExpr*>(e->right.get());
+        if (!declaration) throw DbError("42601", "cast type declaration is required");
+        return evalCast(nullptr, ctx, l, declaration->value);
+    }
+
     // A scalar IN list is represented as a RowExpr so each member retains its
     // own type, NULL bit, and expression tree. IN is an OR of equality
     // comparisons; NOT IN negates that three-valued result.
@@ -3442,11 +3451,6 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
                 return ExprValue("boolean", op == "in" ? "t" : "f", false);
         }
         return ExprValue("boolean", op == "in" ? "f" : "t", false);
-    }
-
-    // Cast (::)
-    if (op == "::") {
-        return evalCast(nullptr, ctx, l, r.value);
     }
 
     // Array slice (expr[lower:upper]) — PostgreSQL inclusive bounds,
@@ -4662,9 +4666,25 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
         }
         return ExprValue("xml", v.value, false);
     }
-    const BitCastSpec bitSpec = parseBitCastSpec(target);
-    if (bitSpec.matches) return castToBitString(v, bitSpec);
-    const CharacterCastSpec characterSpec = parseCharacterCastSpec(target);
+    // A named pg_catalog type and its SQL keyword may resolve to the same
+    // input codec but have different omitted typmods. Only the unquoted,
+    // unqualified CHAR/CHARACTER/BIT grammar supplies a length-one default.
+    bool namedFixedWithoutLength = false;
+    if (target == "character" || target == "bpchar" || target == "bit") {
+        const auto declaration = SQLParser::parseTypeSpecification(targetTypeName);
+        const auto spelling = toLower(declaration.typeName);
+        namedFixedWithoutLength = declaration.typeMods.empty() &&
+            spelling != "char" && spelling != "character" && spelling != "bit";
+    }
+    BitCastSpec bitSpec = parseBitCastSpec(target);
+    if (bitSpec.matches) {
+        if (namedFixedWithoutLength) bitSpec.varying = true;
+        auto result = castToBitString(v, bitSpec);
+        if (namedFixedWithoutLength) result.typeName = "bit";
+        return result;
+    }
+    CharacterCastSpec characterSpec = parseCharacterCastSpec(target);
+    if (namedFixedWithoutLength) characterSpec.hasLength = false;
     if (characterSpec.kind != CharacterCastKind::None) {
         ExprValue result = castToCharacter(v, characterSpec);
         result.collation = v.collation;
