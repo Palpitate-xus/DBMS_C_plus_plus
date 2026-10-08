@@ -59,6 +59,8 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/bit_unknown_mixed_list_length_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/bit_text_input_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/bit_scalar_unknown_input_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/bit_scalar_parameter_source_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/bit_scalar_parameter_effects_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/bit_text_parameter_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/bit_compact_list_type_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/bit_between_input_protocol_e2e_test.py)

@@ -1832,6 +1832,74 @@ void validatePreparedIntegerInputs(const std::string& sql,Session& session,
     (void)g_engine.prepareBoundQuery(session.currentDB,sql,parameters);
 }
 
+// A genuine BIT-column/parameter comparison has its operator at Parse, when
+// only the declared OIDs are available. Bind's SQL rendering is not a new
+// UNKNOWN literal declaration, even when its bytes happen to look like bits.
+void validatePreparedBitScalarParameters(const std::string& sql, Session& session,
+                                        const std::vector<uint32_t>& parameterOids) {
+    if (parameterOids.empty()) return;
+    SQLParser parser; const auto parsed = parser.parseForBinding(sql);
+    const auto* select = parsed.isValid() ? dynamic_cast<const SelectStmt*>(parsed.stmt.get()) : nullptr;
+    if (!select || !select->fromClause || select->fromClause->type != FromItem::Type::Table ||
+        !select->ctes.empty() || select->setOp != SetOp::None || !select->groupBy.empty() ||
+        !select->groupByElems.empty() || select->having || !select->windowDefs.empty() ||
+        !select->locking.empty() || !select->distinctOn.empty()) return;
+    const auto physical = protocolPhysicalSourceFromQuery(sql, session);
+    const auto bitColumn = [&](const Expr* node) {
+        const auto* column = dynamic_cast<const ColumnRefExpr*>(node);
+        if (!column) return false;
+        for (size_t i = 0; i < physical.table.len; ++i) {
+            const auto& descriptor = physical.table.cols[i];
+            if (descriptor.dataName == column->column && !descriptor.isArray &&
+                (descriptor.dataType == "bit" || descriptor.dataType == "bit varying")) return true;
+        }
+        return false;
+    };
+    const auto parameter = [](const Expr* node) {
+        return dynamic_cast<const ParameterExpr*>(node) != nullptr;
+    };
+    std::function<bool(const Expr*)> contains = [&](const Expr* node) {
+        if (!node || node->preparedSubquery) return false;
+        if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(node)) {
+            static const std::set<std::string> comparisons = {"=","<>","!=","<",">","<=",">=",
+                "IS DISTINCT FROM","IS NOT DISTINCT FROM"};
+            if (comparisons.count(binary->op) &&
+                ((bitColumn(binary->left.get()) && parameter(binary->right.get())) ||
+                 (parameter(binary->left.get()) && bitColumn(binary->right.get())))) return true;
+            return contains(binary->left.get()) || (binary->op != "::" && contains(binary->right.get()));
+        }
+        if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(node)) return contains(unary->operand.get());
+        if (const auto* cast = dynamic_cast<const CastExpr*>(node)) return contains(cast->operand.get());
+        if (const auto* call = dynamic_cast<const FunctionCallExpr*>(node)) {
+            for (const auto& input : call->args) if (contains(input.get())) return true;
+            for (const auto& input : call->namedArgs) if (contains(input.value.get())) return true;
+            return contains(call->filter.get());
+        }
+        if (const auto* conditional = dynamic_cast<const CaseExpr*>(node)) {
+            if (contains(conditional->switchExpr.get()) || contains(conditional->elseExpr.get())) return true;
+            for (const auto& arm : conditional->whenClauses)
+                if (contains(arm.first.get()) || contains(arm.second.get())) return true;
+        }
+        return false;
+    };
+    bool owned = contains(select->whereClause.get());
+    for (const auto& target : select->selectList) owned = owned || contains(target.expr.get());
+    for (const auto& key : select->orderBy) owned = owned || contains(key.expr.get());
+    if (!owned) return;
+    std::vector<QueryBindingDatum> parameters;
+    for (size_t i = 0; i < parameterOids.size(); ++i) {
+        const auto oid = parameterOids[i]; const char* type = valuesParameterCastType(oid);
+        if (oid == 1560) type = "bit";
+        if (oid == 1562) type = "bit varying";
+        if (oid && !type) return; // an existing actual custom-type owner is not guessed
+        QueryBindingDatum datum; datum.identity = "protocol-parameter-" + std::to_string(i+1);
+        datum.origin = ParameterOrigin::MetadataPlaceholder;
+        datum.position = i+1; datum.type = type ? type : "unknown";
+        parameters.push_back(std::move(datum));
+    }
+    (void)g_engine.prepareBoundQuery(session.currentDB, sql, parameters);
+}
+
 // The retained ordinary parameter path renders Bind values as SQL. A BIT
 // BETWEEN must first infer its shared parameter cells, not turn each rendered
 // occurrence into a separately typed UNKNOWN literal. This finite owner is a
@@ -5663,6 +5731,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             try {
                 notePreparedTemporaryObjectAccess(sql, session);
                 validatePreparedIntegerInputs(sql,session,parameterTypes);
+                validatePreparedBitScalarParameters(sql,session,parameterTypes);
                 std::vector<PgColumnDescription> explainDescriptor;
                 (void)describePreparedExplainResult(sql,session,explainDescriptor,parameterTypes);
                 (void)prepareProtocolBitBetween(sql, session, parameterTypes);
