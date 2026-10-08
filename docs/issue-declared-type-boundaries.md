@@ -81,8 +81,9 @@ normal cache/repeat and frozen bytes are verified. Latest binary SHA-256:
 `df383b14bc6f11be306c768867b3376a9e138268ce5e23c4f8e63d0c76a79a0d`.
 Latest input seal:
 `a968296abbe812edfc522d7c4f860e04726327dc7031a49680f0029caefdaf20`.
-Original384 passed again on this exact latest generation. Full43 native and31
-protocol composition gates are running; no final result is claimed for them.
+Original384 passed again on this exact generation. Full43 native and31
+protocol composition gates subsequently completed with zero failed invocations
+on the same sealed inputs and frozen binary.
 
 Remaining exact7 in the unchanged full75:three named bpchar/qualified bit
 default-length queries and four internal `"char"` identity/input queries.
@@ -90,6 +91,39 @@ Continue their actual declaration-role and catalog-owned input/descriptor
 repairs, retaining all75/45/384 and prior failure logs. Other modifier/type
 boundaries, custom types, domains and all original273 requirements remain in
 scope. None of these candidate commits has been imported into master.
+
+## Named fixed-type defaults: independent follow-up
+
+Local `30738452` preserves omitted modifiers for actual named bpchar/bit
+inputs without changing SQL CHAR/CHARACTER/BIT's explicit-cast length-one
+defaults. A `::` declaration's right-hand literal is syntax, not a string
+value: evaluating it previously discarded quotes and changed `"bit"` into
+keyword BIT. The repair retains the parser's raw declaration instead.
+
+The new complete native117 failed30 on the actual predecessor and now
+passes; the new complete protocol39 failed10 on the predecessor, and both
+the candidate and actual owned PostgreSQL18.6 pass all39. The first repair
+attempt still failed three native/one wire checks on quoted postfix BIT;
+those logs and its frozen binary are preserved, not called PASS. Original
+modifier90, keyword254 and enum aggregate argument fixtures also pass.
+The unchanged full75 now reaches75 with four differences, all internal
+`"char"`; full45 still passes. These are scoped results, not family completion.
+
+Only ExprEvaluator changed in this follow-up. Normal builds and all58 own
+current source/header/compiler/flags receipts, cache and no-recompile repeat
+were verified; final binary SHA-256:
+`1fcbb534fe0d125b3c36e30be542106479c335ffff448d17c6e276359f44bd83`.
+Input seal:
+`1a6ef9db80dfb911bd37433971901bd32cfec1d70262e8b8f204e939c0435410`.
+
+The internal-char follow-up is still uncommitted in the same isolated tree:
+its new native181 predecessor reaches181/fails174, and protocol62 reaches62/
+fails62; actual owned PostgreSQL18.6 passes all62. The candidate distinguishes
+the catalog-owned OID18 from SQL bpchar and tests byte input, octal escapes,
+empty/NULL and empty-source descriptors. A public declared-type header changed,
+so all58 production units are rebuilding. No build/test success or integration
+is claimed for this unfinished follow-up. Integer casts, binary protocol,
+arrays and broader internal-char operations are not covered by these62.
 
 ## Remaining exact19 and next actions
 
