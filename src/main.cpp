@@ -5875,7 +5875,7 @@ struct WindowFunc {
     string name;
     string arg;
     string orderByCol;
-    bool orderByAsc;
+    bool orderByAsc = true;
     bool orderByNullsFirst = false;
     bool hasExplicitOrderNulls = false;
     vector<string> partitionByCols;

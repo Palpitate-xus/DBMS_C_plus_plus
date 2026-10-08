@@ -132,6 +132,14 @@ else
     FAILED=1
 fi
 
+# Another actual Main frontend driver, likewise not linked with test stubs.
+if bash scripts/test_window_default_order.sh; then
+    echo "[test-build] window_default_order_frontend PASSED"
+else
+    echo "[test-build] window_default_order_frontend FAILED"
+    FAILED=1
+fi
+
 for e2e_test in "${DBMS_E2E_TESTS[@]}"; do
     echo "[test-build] Running ${e2e_test} ..."
     if python3 "${e2e_test}"; then
