@@ -98,14 +98,11 @@ static void test_extract_date_part() {
     assert(callFn(eval, "extract", {F("quarter"), ts}).value == "2");
     // date_part is an alias of extract.
     assert(callFn(eval, "date_part", {F("year"), ts}).value == "2026");
+    expectExtractError("dow", TS("2026-13-01 14:35:09"), "22008");
+    expectExtractError("month", TS("2026-02-30 14:35:09"), "22008");
     assert(callFn(eval, "extract",
-                  {F("dow"), TS("2026-13-01 14:35:09")}).isNull);
-    assert(callFn(eval, "extract",
-                  {F("month"), TS("2026-02-30 14:35:09")}).isNull);
-    assert(callFn(eval, "extract",
-                  {F("hour"), TS("2026-06-26 24:00:00")}).isNull);
-    assert(callFn(eval, "date_part",
-                  {F("year"), TS("not-a-timestamp")}).isNull);
+                  {F("hour"), TS("2026-06-26 24:00:00")}).value == "0");
+    expectExtractError("year", TS("not-a-timestamp"), "22007");
     assert(callFn(eval, "extract",
                   {F("year"), TS("infinity")}).value == "Infinity");
     assert(callFn(eval, "extract",
@@ -289,6 +286,13 @@ static void test_make() {
         }
         assert(rejected);
     };
+    const auto expectInputRangeError = [&](const std::string& function,
+                                           const std::vector<dbms::ExprValue>& args) {
+        bool rejected = false;
+        try { (void)callFn(eval, function, args); }
+        catch (const dbms::DbError& error) { rejected = error.sqlState() == "22003"; }
+        assert(rejected);
+    };
     assert(callFn(eval, "make_date", {I(2026), I(6), I(26)}).value == "2026-06-26");
     assert(callFn(eval, "make_time", {I(14), I(5), I(9)}).value == "14:05:09");
     assert(callFn(eval, "make_timestamp", {I(2026), I(6), I(26), I(14), I(5), I(9)}).value
@@ -305,9 +309,10 @@ static void test_make() {
     expectFieldError("make_date", {I(2023), I(2), I(29)});
     assert(callFn(eval, "make_date", {I(2024), I(2), I(29)}).value ==
            "2024-02-29");
-    expectFieldError(
+    expectInputRangeError(
         "make_date",
         {I(std::numeric_limits<int64_t>::max()), I(1), I(1)});
+    expectFieldError("make_date", {I(std::numeric_limits<int32_t>::max()), I(1), I(1)});
 
     assert(callFn(eval, "make_time", {I(12), I(0), I(60)}).value ==
            "12:01:00");
@@ -323,17 +328,20 @@ static void test_make() {
         {I(2023), I(12), I(31), I(24), I(0), I(0)});
     assert(rolledTimestamp.value == "2024-01-01 00:00:00");
 
-    expectFieldError("make_time", {I(4294967296LL), I(0), I(0)});
+    expectInputRangeError("make_time", {I(4294967296LL), I(0), I(0)});
+    expectFieldError("make_time", {I(std::numeric_limits<int32_t>::max()), I(0), I(0)});
     expectFieldError("make_time", {I(24), I(1), I(0)});
     expectFieldError(
         "make_time",
         {I(23), I(59), dbms::ExprValue("numeric", "60.1", false)});
     expectFieldError("make_timestamp",
                      {I(2026), I(2), I(30), I(0), I(0), I(0)});
-    expectFieldError(
+    expectInputRangeError(
         "make_timestamp",
         {I(std::numeric_limits<int64_t>::max()), I(1), I(1),
          I(0), I(0), I(0)});
+    expectFieldError("make_timestamp", {I(std::numeric_limits<int32_t>::max()), I(1), I(1),
+        I(0), I(0), I(0)});
     std::cout << "[DATEFN] make_* OK" << std::endl;
 }
 
@@ -454,14 +462,10 @@ static void test_date_trunc() {
                   {F("day"), TS("infinity")}).value == "infinity");
     assert(callFn(eval, "date_trunc",
                   {F("day"), TS("-infinity")}).value == "-infinity");
-    assert(callFn(eval, "date_trunc",
-                  {F("day"), TS("2026-02-30 14:35:09")}).isNull);
-    assert(callFn(eval, "date_trunc",
-                  {F("day"), TS("2026-13-01 14:35:09")}).isNull);
-    assert(callFn(eval, "date_trunc",
-                  {F("day"), TS("2026x06x26 14:35:09")}).isNull);
-    assert(callFn(eval, "date_trunc",
-                  {F("day"), TS("not-a-timestamp")}).isNull);
+    expectDateTruncError("day", TS("2026-02-30 14:35:09"), "22008");
+    expectDateTruncError("day", TS("2026-13-01 14:35:09"), "22008");
+    expectDateTruncError("day", TS("2026x06x26 14:35:09"), "22007");
+    expectDateTruncError("day", TS("not-a-timestamp"), "22007");
     expectDateTruncError("not_a_unit", ts, "22023");
     std::cout << "[DATEFN] date_trunc OK" << std::endl;
 }
