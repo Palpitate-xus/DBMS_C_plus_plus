@@ -4636,6 +4636,23 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
             throw DbError("22P02","invalid input syntax for type "+geometryTarget);
         return ExprValue(geometryTarget,std::move(normalized),false);
     }
+    if (target == "interval") {
+        // Cast eligibility is independent of value demand. In particular,
+        // NULL integers/bools are not string input and cannot be cast here.
+        const auto source=common_type_detail::canonical(sourceType);
+        static const std::set<std::string> inputs={"unknown","text","varchar","bpchar","name","time","interval"};
+        if(!inputs.count(source))throw DbError("42846","cannot cast type "+sourceType+" to interval");
+        if(v.isNull)return ExprValue("interval","",true);
+        const auto symbolic=toLower(trimStr(v.value));
+        // Preserve PostgreSQL18's valid symbolic inputs; finite field parsing
+        // cannot represent these without changing its arithmetic contract.
+        if(symbolic=="infinity" || symbolic=="+infinity" || symbolic=="-infinity")
+            return ExprValue("interval",symbolic=="+infinity"?"infinity":symbolic,false);
+        const auto parsed=parseIntervalInput(v.value);
+        const auto state=intervalInputSqlState(parsed);
+        if(!state.empty())throw DbError(state,"invalid input syntax or range for type interval");
+        return ExprValue("interval",formatIntervalInput(parsed.months,parsed.days,parsed.micros,true),false);
+    }
     if (v.isNull) {
         ExprValue result(targetTypeName, "", true);
         if (parseCharacterCastSpec(target).kind != CharacterCastKind::None)
@@ -4689,10 +4706,6 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
     const NumericCastSpec numericSpec = parseNumericCastSpec(target);
     if (numericSpec.matches) return castToNumeric(v, numericSpec);
     if (target == "money") return castToMoney(v);
-    if (target == "interval") {
-        validateTypedIntervalRange(v.value);
-        return ExprValue("interval", v.value, false);
-    }
     if (target == "uuid") return castToUuid(v);
     if (target == "bytea" || target == "blob") return castToBytea(v);
     if (target == "inet" || target == "cidr") {

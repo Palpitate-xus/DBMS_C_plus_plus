@@ -1,0 +1,2182 @@
+[
+  {
+    "sql": "SELECT CAST('1 us' AS interval) AS value",
+    "reference": [
+      [
+        [
+          "00:00:00.000001"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST('1 us' AS text) AS interval) AS value",
+    "reference": [
+      [
+        [
+          "00:00:00.000001"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN true THEN '1 us' ELSE INTERVAL '2 days' END AS value",
+    "reference": [
+      [
+        [
+          "00:00:00.000001"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT INTERVAL '1 us' AS value",
+    "reference": [
+      [
+        [
+          "00:00:00.000001"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('1000 us' AS interval) AS value",
+    "reference": [
+      [
+        [
+          "00:00:00.001"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST('1000 us' AS text) AS interval) AS value",
+    "reference": [
+      [
+        [
+          "00:00:00.001"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN true THEN '1000 us' ELSE INTERVAL '2 days' END AS value",
+    "reference": [
+      [
+        [
+          "00:00:00.001"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT INTERVAL '1000 us' AS value",
+    "reference": [
+      [
+        [
+          "00:00:00.001"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('-1 us' AS interval) AS value",
+    "reference": [
+      [
+        [
+          "-00:00:00.000001"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST('-1 us' AS text) AS interval) AS value",
+    "reference": [
+      [
+        [
+          "-00:00:00.000001"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN true THEN '-1 us' ELSE INTERVAL '2 days' END AS value",
+    "reference": [
+      [
+        [
+          "-00:00:00.000001"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT INTERVAL '-1 us' AS value",
+    "reference": [
+      [
+        [
+          "-00:00:00.000001"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('90 minutes' AS interval) AS value",
+    "reference": [
+      [
+        [
+          "01:30:00"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST('90 minutes' AS text) AS interval) AS value",
+    "reference": [
+      [
+        [
+          "01:30:00"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN true THEN '90 minutes' ELSE INTERVAL '2 days' END AS value",
+    "reference": [
+      [
+        [
+          "01:30:00"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT INTERVAL '90 minutes' AS value",
+    "reference": [
+      [
+        [
+          "01:30:00"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('1.5 days' AS interval) AS value",
+    "reference": [
+      [
+        [
+          "1 day 12:00:00"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST('1.5 days' AS text) AS interval) AS value",
+    "reference": [
+      [
+        [
+          "1 day 12:00:00"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN true THEN '1.5 days' ELSE INTERVAL '2 days' END AS value",
+    "reference": [
+      [
+        [
+          "1 day 12:00:00"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT INTERVAL '1.5 days' AS value",
+    "reference": [
+      [
+        [
+          "1 day 12:00:00"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('1 month' AS interval) AS value",
+    "reference": [
+      [
+        [
+          "1 mon"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST('1 month' AS text) AS interval) AS value",
+    "reference": [
+      [
+        [
+          "1 mon"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN true THEN '1 month' ELSE INTERVAL '2 days' END AS value",
+    "reference": [
+      [
+        [
+          "1 mon"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT INTERVAL '1 month' AS value",
+    "reference": [
+      [
+        [
+          "1 mon"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('-1 mon 2 days' AS interval) AS value",
+    "reference": [
+      [
+        [
+          "-1 mons +2 days"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST('-1 mon 2 days' AS text) AS interval) AS value",
+    "reference": [
+      [
+        [
+          "-1 mons +2 days"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN true THEN '-1 mon 2 days' ELSE INTERVAL '2 days' END AS value",
+    "reference": [
+      [
+        [
+          "-1 mons +2 days"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT INTERVAL '-1 mon 2 days' AS value",
+    "reference": [
+      [
+        [
+          "-1 mons +2 days"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('-1 day 1 hour' AS interval) AS value",
+    "reference": [
+      [
+        [
+          "-1 days +01:00:00"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST('-1 day 1 hour' AS text) AS interval) AS value",
+    "reference": [
+      [
+        [
+          "-1 days +01:00:00"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN true THEN '-1 day 1 hour' ELSE INTERVAL '2 days' END AS value",
+    "reference": [
+      [
+        [
+          "-1 days +01:00:00"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT INTERVAL '-1 day 1 hour' AS value",
+    "reference": [
+      [
+        [
+          "-1 days +01:00:00"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('1-2' AS interval) AS value",
+    "reference": [
+      [
+        [
+          "1 year 2 mons"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST('1-2' AS text) AS interval) AS value",
+    "reference": [
+      [
+        [
+          "1 year 2 mons"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN true THEN '1-2' ELSE INTERVAL '2 days' END AS value",
+    "reference": [
+      [
+        [
+          "1 year 2 mons"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT INTERVAL '1-2' AS value",
+    "reference": [
+      [
+        [
+          "1 year 2 mons"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('14:05:06.12345' AS interval) AS value",
+    "reference": [
+      [
+        [
+          "14:05:06.12345"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST('14:05:06.12345' AS text) AS interval) AS value",
+    "reference": [
+      [
+        [
+          "14:05:06.12345"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN true THEN '14:05:06.12345' ELSE INTERVAL '2 days' END AS value",
+    "reference": [
+      [
+        [
+          "14:05:06.12345"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT INTERVAL '14:05:06.12345' AS value",
+    "reference": [
+      [
+        [
+          "14:05:06.12345"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('@ 1 day ago' AS interval) AS value",
+    "reference": [
+      [
+        [
+          "-1 days"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST('@ 1 day ago' AS text) AS interval) AS value",
+    "reference": [
+      [
+        [
+          "-1 days"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN true THEN '@ 1 day ago' ELSE INTERVAL '2 days' END AS value",
+    "reference": [
+      [
+        [
+          "-1 days"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT INTERVAL '@ 1 day ago' AS value",
+    "reference": [
+      [
+        [
+          "-1 days"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('P1DT2H' AS interval) AS value",
+    "reference": [
+      [
+        [
+          "1 day 02:00:00"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST('P1DT2H' AS text) AS interval) AS value",
+    "reference": [
+      [
+        [
+          "1 day 02:00:00"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN true THEN 'P1DT2H' ELSE INTERVAL '2 days' END AS value",
+    "reference": [
+      [
+        [
+          "1 day 02:00:00"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT INTERVAL 'P1DT2H' AS value",
+    "reference": [
+      [
+        [
+          "1 day 02:00:00"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('0' AS interval) AS value",
+    "reference": [
+      [
+        [
+          "00:00:00"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST('0' AS text) AS interval) AS value",
+    "reference": [
+      [
+        [
+          "00:00:00"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN true THEN '0' ELSE INTERVAL '2 days' END AS value",
+    "reference": [
+      [
+        [
+          "00:00:00"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT INTERVAL '0' AS value",
+    "reference": [
+      [
+        [
+          "00:00:00"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('bad' AS interval) AS value",
+    "reference": [
+      [],
+      "22007",
+      "invalid input syntax for type interval: \"bad\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST('bad' AS text) AS interval) AS value",
+    "reference": [
+      [],
+      "22007",
+      "invalid input syntax for type interval: \"bad\"",
+      [
+        "value"
+      ],
+      null,
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN true THEN 'bad' ELSE INTERVAL '2 days' END AS value",
+    "reference": [
+      [],
+      "22007",
+      "invalid input syntax for type interval: \"bad\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT INTERVAL 'bad' AS value",
+    "reference": [
+      [],
+      "22007",
+      "invalid input syntax for type interval: \"bad\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST('' AS interval) AS value",
+    "reference": [
+      [],
+      "22007",
+      "invalid input syntax for type interval: \"\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST('' AS text) AS interval) AS value",
+    "reference": [
+      [],
+      "22007",
+      "invalid input syntax for type interval: \"\"",
+      [
+        "value"
+      ],
+      null,
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN true THEN '' ELSE INTERVAL '2 days' END AS value",
+    "reference": [
+      [],
+      "22007",
+      "invalid input syntax for type interval: \"\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT INTERVAL '' AS value",
+    "reference": [
+      [],
+      "22007",
+      "invalid input syntax for type interval: \"\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST('infinity' AS interval) AS value",
+    "reference": [
+      [
+        [
+          "infinity"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST('infinity' AS text) AS interval) AS value",
+    "reference": [
+      [
+        [
+          "infinity"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN true THEN 'infinity' ELSE INTERVAL '2 days' END AS value",
+    "reference": [
+      [
+        [
+          "infinity"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT INTERVAL 'infinity' AS value",
+    "reference": [
+      [
+        [
+          "infinity"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('-infinity' AS interval) AS value",
+    "reference": [
+      [
+        [
+          "-infinity"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST('-infinity' AS text) AS interval) AS value",
+    "reference": [
+      [
+        [
+          "-infinity"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN true THEN '-infinity' ELSE INTERVAL '2 days' END AS value",
+    "reference": [
+      [
+        [
+          "-infinity"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT INTERVAL '-infinity' AS value",
+    "reference": [
+      [
+        [
+          "-infinity"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('+infinity' AS interval) AS value",
+    "reference": [
+      [
+        [
+          "infinity"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST('+infinity' AS text) AS interval) AS value",
+    "reference": [
+      [
+        [
+          "infinity"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN true THEN '+infinity' ELSE INTERVAL '2 days' END AS value",
+    "reference": [
+      [
+        [
+          "infinity"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT INTERVAL '+infinity' AS value",
+    "reference": [
+      [
+        [
+          "infinity"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('INF' AS interval) AS value",
+    "reference": [
+      [],
+      "22007",
+      "invalid input syntax for type interval: \"INF\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST('INF' AS text) AS interval) AS value",
+    "reference": [
+      [],
+      "22007",
+      "invalid input syntax for type interval: \"INF\"",
+      [
+        "value"
+      ],
+      null,
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN true THEN 'INF' ELSE INTERVAL '2 days' END AS value",
+    "reference": [
+      [],
+      "22007",
+      "invalid input syntax for type interval: \"INF\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT INTERVAL 'INF' AS value",
+    "reference": [
+      [],
+      "22007",
+      "invalid input syntax for type interval: \"INF\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST('2147483648 months' AS interval) AS value",
+    "reference": [
+      [],
+      "22015",
+      "interval field value out of range: \"2147483648 months\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST('2147483648 months' AS text) AS interval) AS value",
+    "reference": [
+      [],
+      "22015",
+      "interval field value out of range: \"2147483648 months\"",
+      [
+        "value"
+      ],
+      null,
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN true THEN '2147483648 months' ELSE INTERVAL '2 days' END AS value",
+    "reference": [
+      [],
+      "22015",
+      "interval field value out of range: \"2147483648 months\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT INTERVAL '2147483648 months' AS value",
+    "reference": [
+      [],
+      "22015",
+      "interval field value out of range: \"2147483648 months\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST('178956971 years' AS interval) AS value",
+    "reference": [
+      [],
+      "22008",
+      "interval out of range",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST('178956971 years' AS text) AS interval) AS value",
+    "reference": [
+      [],
+      "22008",
+      "interval out of range",
+      [
+        "value"
+      ],
+      null,
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN true THEN '178956971 years' ELSE INTERVAL '2 days' END AS value",
+    "reference": [
+      [],
+      "22008",
+      "interval out of range",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT INTERVAL '178956971 years' AS value",
+    "reference": [
+      [],
+      "22008",
+      "interval out of range",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST('9223372036854775808 microseconds' AS interval) AS value",
+    "reference": [
+      [],
+      "22015",
+      "interval field value out of range: \"9223372036854775808 microseconds\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST('9223372036854775808 microseconds' AS text) AS interval) AS value",
+    "reference": [
+      [],
+      "22015",
+      "interval field value out of range: \"9223372036854775808 microseconds\"",
+      [
+        "value"
+      ],
+      null,
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN true THEN '9223372036854775808 microseconds' ELSE INTERVAL '2 days' END AS value",
+    "reference": [
+      [],
+      "22015",
+      "interval field value out of range: \"9223372036854775808 microseconds\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT INTERVAL '9223372036854775808 microseconds' AS value",
+    "reference": [
+      [],
+      "22015",
+      "interval field value out of range: \"9223372036854775808 microseconds\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST('0.0000005 seconds' AS interval) AS value",
+    "reference": [
+      [
+        [
+          "00:00:00"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST('0.0000005 seconds' AS text) AS interval) AS value",
+    "reference": [
+      [
+        [
+          "00:00:00"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN true THEN '0.0000005 seconds' ELSE INTERVAL '2 days' END AS value",
+    "reference": [
+      [
+        [
+          "00:00:00"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT INTERVAL '0.0000005 seconds' AS value",
+    "reference": [
+      [
+        [
+          "00:00:00"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('1.9999995 seconds' AS interval) AS value",
+    "reference": [
+      [
+        [
+          "00:00:01.999999"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST('1.9999995 seconds' AS text) AS interval) AS value",
+    "reference": [
+      [
+        [
+          "00:00:01.999999"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN true THEN '1.9999995 seconds' ELSE INTERVAL '2 days' END AS value",
+    "reference": [
+      [
+        [
+          "00:00:01.999999"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT INTERVAL '1.9999995 seconds' AS value",
+    "reference": [
+      [
+        [
+          "00:00:01.999999"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(1 AS interval) AS value",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type integer to interval",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(1 AS interval) AS value WHERE false",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type integer to interval",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST(NULL AS integer) AS interval) AS value",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type integer to interval",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST(NULL AS integer) AS interval) AS value WHERE false",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type integer to interval",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST(1 AS bigint) AS interval) AS value",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type bigint to interval",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST(1 AS bigint) AS interval) AS value WHERE false",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type bigint to interval",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST(NULL AS bigint) AS interval) AS value",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type bigint to interval",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST(NULL AS bigint) AS interval) AS value WHERE false",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type bigint to interval",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(true AS interval) AS value",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type boolean to interval",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(true AS interval) AS value WHERE false",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type boolean to interval",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST(NULL AS boolean) AS interval) AS value",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type boolean to interval",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST(NULL AS boolean) AS interval) AS value WHERE false",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type boolean to interval",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST('1' AS numeric) AS interval) AS value",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type numeric to interval",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST('1' AS numeric) AS interval) AS value WHERE false",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type numeric to interval",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST(NULL AS numeric) AS interval) AS value",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type numeric to interval",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST(NULL AS numeric) AS interval) AS value WHERE false",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type numeric to interval",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST('1' AS text) AS interval) AS value",
+    "reference": [
+      [
+        [
+          "00:00:01"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST('1' AS text) AS interval) AS value WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 0",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST(NULL AS text) AS interval) AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST(NULL AS text) AS interval) AS value WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 0",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST('1' AS varchar) AS interval) AS value",
+    "reference": [
+      [
+        [
+          "00:00:01"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST('1' AS varchar) AS interval) AS value WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 0",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST('1' AS bpchar) AS interval) AS value",
+    "reference": [
+      [
+        [
+          "00:00:01"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST('1' AS bpchar) AS interval) AS value WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 0",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST('1' AS name) AS interval) AS value",
+    "reference": [
+      [
+        [
+          "00:00:01"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST('1' AS name) AS interval) AS value WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 0",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST('1' AS \"char\") AS interval) AS value",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type \"char\" to interval",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST('1' AS \"char\") AS interval) AS value WHERE false",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type \"char\" to interval",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(TIME '14:30:00' AS interval) AS value",
+    "reference": [
+      [
+        [
+          "14:30:00"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(TIME '14:30:00' AS interval) AS value WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 0",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST(NULL AS time) AS interval) AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST(NULL AS time) AS interval) AS value WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 0",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(TIMETZ '14:30:00+08' AS interval) AS value",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type time with time zone to interval",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(TIMETZ '14:30:00+08' AS interval) AS value WHERE false",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type time with time zone to interval",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(DATE '2026-10-08' AS interval) AS value",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type date to interval",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(DATE '2026-10-08' AS interval) AS value WHERE false",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type date to interval",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(TIMESTAMP '2026-10-08 00:00:00' AS interval) AS value",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type timestamp without time zone to interval",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(TIMESTAMP '2026-10-08 00:00:00' AS interval) AS value WHERE false",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type timestamp without time zone to interval",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(ARRAY[1] AS interval) AS value",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type integer[] to interval",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(ARRAY[1] AS interval) AS value WHERE false",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type integer[] to interval",
+      [],
+      null,
+      []
+    ]
+  }
+]

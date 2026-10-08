@@ -18,12 +18,13 @@ inline void intervalLiteral(const LiteralExpr& literal) {
     // Decode one actual SQL literal only. No expression folding, stored
     // function lookup, parameters, rows, or scalar children are evaluated.
     ExprEvaluator evaluator;
-    const auto value = evaluator.eval(&literal, RowContext{});
-    if (value.isNull) return;
-    const auto state = intervalInputSqlState(parseIntervalInput(value.value));
-    if (!state.empty())
-        throw DbError(state, state == "22007"
-            ? "invalid input syntax for type interval" : "interval value out of range");
+    CastExpr conversion;
+    conversion.typeName = "interval";
+    conversion.operand = std::make_unique<LiteralExpr>(literal);
+    // Reuse actual interval input, including valid symbolic infinity, rather
+    // than imposing a second finite-only parser contract. The operand is
+    // still one genuine literal: no row/routine/query is folded here.
+    (void)evaluator.eval(&conversion, RowContext{});
 }
 
 inline void declaredIntervalLiteral(const Expr* source) {

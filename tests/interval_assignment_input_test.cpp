@@ -27,6 +27,10 @@ int main() {
         assert(source->toString() == original); // metadata never rewrites a datum
     };
     check("'1 day'", "unknown", "");
+    check("'infinity'", "unknown", "");
+    check("'+infinity'", "unknown", "");
+    check("'-infinity'", "unknown", "");
+    check("'INF'", "unknown", "22007");
     check("''", "unknown", "22007");
     check("'NULL'", "unknown", "22007");
     check("'1 day (SQLSTATE 99999)'", "unknown", "22007");
