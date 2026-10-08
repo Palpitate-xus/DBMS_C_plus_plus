@@ -219,6 +219,19 @@ static ColumnDef consumeDeclaredType(const std::vector<std::string>& tokens,
         definition.typeName = precision <= 24 ? "real" : "double precision";
         definition.typeMods.clear();
     }
+    if(!qualified && !quoted && !definition.typeMods.empty()) {
+        static const std::set<std::string> noModifierGrammar={
+            "bigint","boolean","int","integer","real","smallint","double precision"};
+        const auto name=SQLParser::toLower(definition.typeName);
+        if(noModifierGrammar.count(name))
+            throw DbError("42601","type declaration does not allow modifiers");
+        if(initial=="char" || initial=="character" || initial=="varchar") {
+            const auto& modifier=definition.typeMods.front();
+            if(definition.typeMods.size()!=1 || modifier.empty() ||
+               !std::all_of(modifier.begin(),modifier.end(),[](unsigned char c){return std::isdigit(c);}))
+                throw DbError("42601","character length requires one unsigned integer");
+        }
+    }
     if (!qualified && !quoted && (initial == "time" || initial == "timestamp") &&
         pos + 2 < tokens.size()) {
         const std::string zone = SQLParser::toLower(tokens[pos]);

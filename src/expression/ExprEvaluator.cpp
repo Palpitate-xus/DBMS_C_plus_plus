@@ -1418,7 +1418,10 @@ ExprValue ExprEvaluator::evalLiteral(const LiteralExpr* e) const {
             }
             return ExprValue(target,unquote(raw),false);
         }
-        return evalCast(nullptr,RowContext{},ExprValue("unknown",unquote(raw),false),target);
+        // Keep the original declaration role for the input conversion. A
+        // generic qualified/quoted name has different modifier grammar from
+        // its SQL keyword codec alias (e.g. varchar versus pg_catalog.varchar).
+        return evalCast(nullptr,RowContext{},ExprValue("unknown",unquote(raw),false),e->typeName);
     }
 
     if (isQuotedString(raw)) {

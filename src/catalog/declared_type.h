@@ -82,6 +82,11 @@ inline DeclaredTypeBinding resolveDeclaredTypeName(const std::string& spelling,
         }
     }
     if(!result.typeOid)throw DbError("42704","type \""+declaration.typeName+"\" does not exist");
+    if(!declaration.typeMods.empty()) {
+        const auto* input=TypeRegistry::instance().findType(result.typeName);
+        if(input && !input->hasTypeMod)
+            throw DbError("42601","type modifier is not allowed for type "+declaration.typeName);
+    }
     result.inputType=result.typeName;
     if(!declaration.typeMods.empty()) {
         result.inputType+='(';
