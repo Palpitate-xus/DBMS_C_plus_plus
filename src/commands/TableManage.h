@@ -454,6 +454,9 @@ public:
     // not routine SPI. Cardinality, exact SQL NULL, and errors stay typed.
     ExprValue executeScalarSubquery(const std::string& dbname,
         const std::string& sql) const;
+    ExprValue executeScalarSubquery(const std::string& dbname,
+        const std::string& legacySql, std::shared_ptr<PreparedQuery> query,
+        const Stmt* statement, const RowContext& row) const;
     std::vector<std::string> getUDFNames(const std::string& dbname) const;
 
     // Table-valued functions (return a result set)

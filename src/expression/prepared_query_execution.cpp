@@ -1196,7 +1196,12 @@ ExprValue PreparedQueryExecution::executeChild(const Expr* expression, const Row
     }
     for (const auto& alias : child.aliases)
         adapter.projectionAliases.emplace_back(alias.first - child.begin, alias.second);
-    ExprValue result = engine_->executeScalarSubquery(database_, adapter.legacySql());
+    // Keep the existing embedding host's rendered-SQL contract, but never
+    // make that rendering the actual native typed child's executable input.
+    // The original Binder's parameter roles, source metadata, namespace and
+    // real runtime caller cells cross this boundary together.
+    ExprValue result = engine_->executeScalarSubquery(database_, adapter.legacySql(),
+        query_, expression->preparedSubquery.get(), row);
     // Failed executions are not cached, and structured SQL NULL is retained.
     if (child.correlations.empty()) memo_.emplace(expression, result);
     return result;

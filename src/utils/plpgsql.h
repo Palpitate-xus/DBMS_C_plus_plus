@@ -52,6 +52,13 @@ struct PlPgsqlQueryOptions {
     size_t maxRows = 0;
     enum class Purpose { StoredFunction, OrdinarySubquery };
     Purpose purpose = Purpose::StoredFunction;
+    // An ordinary scalar fallback may still supply its historical rendered
+    // SQL to an embedding host. Actual typed consumers must use this retained
+    // whole-query owner, genuine child identity and caller row instead: a
+    // rendered correlated NULL is not a statement input constant.
+    std::shared_ptr<PreparedQuery> preparedQuery;
+    const Stmt* preparedStatement = nullptr;
+    RowContext preparedRow;
 };
 
 // Callbacks the interpreter needs from the host.

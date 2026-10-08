@@ -28,6 +28,7 @@
 #include "expression/expr_helper.h"
 #include "expression/assignment_input.h"
 #include "expression/ExprEvaluator.h"
+#include "executor/ExecutionPlan.h"
 #include "expression/SqlPattern.h"
 #include "expression/ExpressionVolatility.h"
 #include "permissions.h"
@@ -33058,12 +33059,27 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
 
 ExprValue StorageEngine::executeScalarSubquery(const std::string& dbname,
     const std::string& sql) const {
+    return executeScalarSubquery(dbname, sql, {}, nullptr, {});
+}
+
+ExprValue StorageEngine::executeScalarSubquery(const std::string& dbname,
+    const std::string& sql, std::shared_ptr<PreparedQuery> query,
+    const Stmt* statement, const RowContext& row) const {
     const auto command = SQLParser::classify(sql);
     if (command != SqlCommand::Select && command != SqlCommand::Values)
         throw DbError("42601", "scalar subquery must be a SELECT or VALUES query");
     PlPgsqlQueryOptions options;
     options.maxRows = 2;
     options.purpose = PlPgsqlQueryOptions::Purpose::OrdinarySubquery;
+    if (query) {
+        if (!statement || !query->statementOutputs.count(statement))
+            throw DbError("XX000", "ordinary typed child has no genuine prepared owner");
+        options.preparedQuery = std::move(query);
+        options.preparedStatement = statement;
+        options.preparedRow = row;
+    } else if (statement) {
+        throw DbError("XX000", "ordinary typed child has no retained query");
+    }
     // Ordinary children inherit their caller's snapshot/CTE context. They
     // must not enter the PL/SPI command-counter and ReadView-refresh wrapper.
     const auto result = plpgsqlQueryExecutor_
@@ -53528,6 +53544,35 @@ PlPgsqlQueryResult StorageEngine::plpgsqlQueryNative(
         return result;
     };
     try {
+        if (options.preparedQuery) {
+            const auto& query = options.preparedQuery;
+            const auto output = query->statementOutputs.find(options.preparedStatement);
+            if (output == query->statementOutputs.end())
+                return fail("XX000", "native typed child has no genuine prepared descriptor");
+            auto cursor = QueryPlanner::makePreparedCursor(
+                QueryPlanner::buildPreparedQueryPlan(const_cast<StorageEngine*>(this),
+                    dbname, query, options.preparedStatement, options.preparedRow), output->second);
+            try {
+                result.columnCount = output->second.size();
+                for (const auto& column : output->second) result.columnTypes.push_back(column.type);
+                std::vector<ExprValue> cells;
+                while ((!options.maxRows || result.rowCount < options.maxRows) && cursor->next(cells)) {
+                    if (cells.size() != result.columnCount)
+                        throw DbError("XX000", "native typed child lost structured width");
+                    if (result.rowCount++ == 0)
+                        for (const auto& cell : cells)
+                            result.firstRow.push_back(cell.isNull ? std::optional<std::string>{}
+                                : std::optional<std::string>{cell.value});
+                }
+                cursor->close();
+            } catch (...) {
+                const auto primary = std::current_exception();
+                try { cursor->close(); } catch (...) {}
+                std::rethrow_exception(primary);
+            }
+            result.ok = true;
+            return result;
+        }
         const auto tokens = SQLParser::tokenize(sql);
         if (tokens.empty()) return fail("42601", "empty PL/pgSQL query");
         for (size_t i = 0; i < tokens.size(); ++i) {

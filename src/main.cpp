@@ -37966,6 +37966,44 @@ int main(int argc, char* argv[]) {
             explicit HostScope(bool body) : routine(body) { if (routine) ++storedFunctionHostDepth; }
             ~HostScope() { if (routine) --storedFunctionHostDepth; }
         } hostScope(options.purpose == dbms::PlPgsqlQueryOptions::Purpose::StoredFunction);
+        // The real scalar fallback carries its original typed child and row.
+        // Consume supported source-free graphs directly; the rendered string
+        // remains only the compatibility input of the older full dispatcher.
+        // Unsupported graph admission is pure, before any source/effect opens.
+        if (options.preparedQuery) {
+            const auto* child = dynamic_cast<const dbms::SelectStmt*>(options.preparedStatement);
+            if (child && !child->fromClause && dbms::QueryPlanner::supportsPreparedSelectPlan(*child)) {
+                dbms::OpPtr typedPlan;
+                try {
+                    typedPlan = dbms::QueryPlanner::buildPreparedQueryPlan(&g_engine, dbname,
+                        options.preparedQuery, child, options.preparedRow);
+                } catch (const dbms::DbError& error) {
+                    if (error.sqlState() != "0A000") throw;
+                }
+                if (typedPlan) {
+                    const auto executed = dbms::QueryPlanner::executePlanChecked(std::move(typedPlan), options.maxRows);
+                    executed.throwIfFailed();
+                    if (!executed.structuredRowsAvailable)
+                        throw dbms::DbError("XX000", "ordinary typed child lost structured rows");
+                    const auto output = options.preparedQuery->statementOutputs.find(child);
+                    if (output == options.preparedQuery->statementOutputs.end())
+                        throw dbms::DbError("XX000", "ordinary typed child lost its declared descriptor");
+                    result.columnCount = output->second.size();
+                    for (const auto& column : output->second) result.columnTypes.push_back(column.type);
+                    result.rowCount = executed.structuredRows.size();
+                    if (!executed.structuredRows.empty()) {
+                        if (executed.structuredRows.front().size() != result.columnCount ||
+                            executed.structuredNulls.front().size() != result.columnCount)
+                            throw dbms::DbError("XX000", "ordinary typed child lost structured width");
+                        for (size_t i = 0; i < result.columnCount; ++i)
+                            result.firstRow.push_back(executed.structuredNulls.front()[i]
+                                ? std::nullopt : std::optional<string>{executed.structuredRows.front()[i]});
+                    }
+                    result.ok = true;
+                    return result;
+                }
+            }
+        }
         vector<string> names, types;
         vector<vector<string>> rows;
         vector<vector<bool>> nulls;
