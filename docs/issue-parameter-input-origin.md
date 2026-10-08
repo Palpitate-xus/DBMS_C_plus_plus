@@ -92,8 +92,13 @@ legacy-fallback cases plus its reach assertion. The genuine direct public
 execution owner, without a fake provider/executor, takes a scalar child path
 which renders correlated runtime cells into typed SQL literals. That old
 adapter loses the origin before the next consumer binds/evaluates the query.
-For BIT/INTEGER runtime-NULL left operands and both operators, the d14 snapshot
+For BIT/BIGINT runtime-NULL left operands and both operators, the d14 snapshot
 and this origin-label snapshot still omit both writer demands: four failures.
+The physical `i` column uses `makeIntColumn(..., 4)`, whose actual descriptor
+is eight-byte BIGINT, not four-byte INTEGER. The protocol fixture below does
+use genuine SQL INTEGER. The original native fixture remains unchanged;
+[separate genuine INTEGER coverage](issue-correlated-integer-parameter-coverage.md)
+checks the real registry, persisted schema and bound source descriptor.
 The pre-demand Root104 snapshot passes all 25 assertions. These are four new
 d14 regressions, not old unsupported behavior and not fixed by this commit.
 

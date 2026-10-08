@@ -29,4 +29,3 @@ int main() {
     if(g_engine.dropDatabase(database)!=DBStatus::OK)return 2;
     std::cout<<"[VALUES CHILD SCOPE] complete controls="<<controls<<" failures="<<failures<<'\n';return failures?1:0;
 }
-

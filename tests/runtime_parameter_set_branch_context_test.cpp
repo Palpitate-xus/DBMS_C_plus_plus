@@ -53,4 +53,3 @@ int main() {
     if(g_engine.dropDatabase(database)!=DBStatus::OK)return 2;
     std::cout<<"[RUNTIME PARAMETER SET BRANCH CONTEXT] controls="<<controls<<" failures="<<failures<<'\n';return failures?1:0;
 }
-
