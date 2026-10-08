@@ -99,6 +99,42 @@ bool PreparedSourceRowsOp::lastStructuredRow(std::vector<std::string>& cells, st
 bool PreparedSourceRowsOp::lastColumnIsNull(size_t ordinal) const { return ordinal < row_.size() && row_[ordinal].isNull; }
 
 namespace {
+// VALUES owns the same per-invocation carrier lifetime as SELECT/Append.
+// Keep its actual typed source graph, but never retain an initplan or open
+// quantified child across a root cursor close/restart.
+class PreparedValuesExecutionOp final : public Operator {
+    OpPtr child_;
+    std::function<void()> begin_, finish_;
+    bool opened_ = false;
+public:
+    PreparedValuesExecutionOp(OpPtr child, std::function<void()> begin, std::function<void()> finish)
+        : child_(std::move(child)), begin_(std::move(begin)), finish_(std::move(finish)) {}
+    bool open() override {
+        OpenInstrument instrument(this); clearError();
+        begin_(); opened_ = true;
+        return child_->open();
+    }
+    bool next(std::string& row) override {
+        NextInstrument instrument(this); const bool present = child_->next(row);
+        instrument.emitted = present; return present;
+    }
+    void close() override {
+        if (!opened_) return;
+        opened_ = false; std::exception_ptr failure;
+        try { finish_(); } catch (...) { failure = std::current_exception(); }
+        try { child_->close(); } catch (...) { if (!failure) failure = std::current_exception(); }
+        if (failure) std::rethrow_exception(failure);
+    }
+    bool supportsStructuredRows() const override { return child_->supportsStructuredRows(); }
+    bool lastStructuredValues(std::vector<ExprValue>& row) const override { return child_->lastStructuredValues(row); }
+    bool lastStructuredRow(std::vector<std::string>& cells, std::vector<bool>& nulls) const override { return child_->lastStructuredRow(cells,nulls); }
+    bool lastColumnIsNull(size_t ordinal) const override { return child_->lastColumnIsNull(ordinal); }
+    bool supportsPreparedOuterRow() const override { return child_->supportsPreparedOuterRow(); }
+    bool bindPreparedOuterRow(const RowContext& row) override { close(); return child_->bindPreparedOuterRow(row); }
+    std::string preparedPlanNodeName() const override { return "ValuesScan"; }
+    std::vector<Operator*> preparedPlanChildren() const override { return {child_.get()}; }
+};
+
 
 // A prepared plan owns its AST and the evaluator's metadata-only routine
 // bindings. Columns consume the binder's true source occurrence/ordinal,
@@ -179,16 +215,14 @@ struct PreparedSelectState {
         return values;
     }
     RowContext context(const std::vector<ExprValue>& values) const {
-        auto row = outerRow;
-        row.setParameters(query->parameters);
+        auto row = execution->context(outerRow);
         if (sourceOrdinal != noTarget) execution->setSourceRow(row, sourceOrdinal, values);
         return row;
     }
     RowContext context(Operator& source, const std::string& raw) const {
         RowContext row;
         if (source.supportsPreparedContexts() && source.lastPreparedContext(row)) {
-            row.setParameters(query->parameters);
-            return row;
+            return execution->context(row);
         }
         if (sourceContexts) throw DbError("XX000", "logical source lost its bound row context");
         return context(cells(source, raw));
@@ -305,7 +339,7 @@ public:
     bool open() override {
         OpenInstrument startup(this); clearError(); childOpened_ = false; empty_ = false;
         if (PreparedSelectState::rowIndependent(state_->select().whereClause.get())) {
-            auto row = state_->outerRow; row.setParameters(state_->query->parameters);
+            auto row = state_->execution->context(state_->outerRow);
             const auto value = state_->evaluate(state_->select().whereClause.get(), row);
             if (value.isNull || !value.asBool()) { empty_ = true; return true; }
         }
@@ -720,7 +754,7 @@ public:
         NextInstrument instrument(this);
         checkForQueryInterrupt();
         if(ended_)return false;
-        auto context=outer_;context.setParameters(query_->parameters);
+        auto context=execution_.context(outer_);
         if(!qualified_) {
             qualified_=true;
             if(select_->whereClause) {
@@ -1349,24 +1383,36 @@ OpPtr QueryPlanner::buildPreparedQueryPlan(StorageEngine* engine,const std::stri
     if(select->command==SqlCommand::Values) {
         if(!select->orderBy.empty() || (!selectBodyOnly && select->setOp!=SetOp::None))
             throw DbError("0A000","prepared VALUES requires additional clause lowering");
-        auto execution=executionProvider?executionProvider():std::make_shared<PreparedQueryExecution>(query,engine,database);
-        if(!executionProvider)execution->setChildCursorFactory(childFactory, false);
-        for(auto& row:select->valuesRows)for(auto& cell:row)execution->prepareExpression(cell.get());
-        execution->prepareChildCursors();
-        auto cells=outer;cells.setParameters(query->parameters);
+        auto slot=std::make_shared<std::shared_ptr<PreparedQueryExecution>>();
+        const auto prepare=[slot,executionProvider,query,engine,database,select,childFactory] {
+            *slot=executionProvider?executionProvider():std::make_shared<PreparedQueryExecution>(query,engine,database);
+            if(!*slot)throw DbError("XX000","prepared VALUES lost its execution owner");
+            if(!executionProvider)(*slot)->setChildCursorFactory(childFactory,false);
+            for(auto& row:select->valuesRows)for(auto& cell:row)(*slot)->prepareExpression(cell.get());
+            (*slot)->prepareChildCursors();
+        };
+        prepare();
+        auto cells=std::make_shared<RowContext>((*slot)->context(outer));
         auto descriptor=selectBodyOnly?query->setOperationInputs.at(select).left:output->second;
-        return std::make_unique<PreparedSourceRowsOp>(descriptor,
-            [select,execution,executionProvider,cells,descriptor](size_t index,std::vector<ExprValue>& row) {
+        OpPtr source=std::make_unique<PreparedSourceRowsOp>(descriptor,
+            [select,slot,executionProvider,cells,descriptor](size_t index,std::vector<ExprValue>& row) {
                 if(index>=select->valuesRows.size())return false;
                 row.clear();
-                const auto actual=executionProvider?executionProvider():execution;
+                const auto actual=executionProvider?executionProvider():*slot;
                 for(size_t i=0;i<select->valuesRows[index].size();++i) {
                     actual->prepareExpression(select->valuesRows[index][i].get());
-                    auto value=actual->evaluate(select->valuesRows[index][i].get(),cells);
+                    auto value=actual->evaluate(select->valuesRows[index][i].get(),*cells);
                     value.typeName=descriptor.at(i).type;row.push_back(std::move(value));
                 }
                 return true;
+            }, [cells,slot,executionProvider](const RowContext& caller) {
+                const auto actual=executionProvider?executionProvider():*slot;
+                *cells=actual->context(caller);
             });
+        auto started=std::make_shared<bool>(false);
+        const auto begin=[started,prepare] {if(*started)prepare();*started=true;};
+        const auto finish=[slot,executionProvider] {if(!executionProvider && *slot)(*slot)->closeChildCursors();};
+        return std::make_unique<PreparedValuesExecutionOp>(std::move(source),begin,finish);
     }
     if(!supportsPreparedSelectShape(*select,true,false,selectBodyOnly))
         throw DbError("0A000","prepared query requires additional relational lowering");

@@ -123,8 +123,9 @@ private:
 class PreparedSourceRowsOp final : public Operator {
 public:
     using Reader = std::function<bool(size_t, std::vector<ExprValue>&)>;
-    PreparedSourceRowsOp(QueryRowDescriptor descriptor, Reader reader)
-        : descriptor_(std::move(descriptor)), reader_(std::move(reader)) {}
+    using Rebinder = std::function<void(const RowContext&)>;
+    PreparedSourceRowsOp(QueryRowDescriptor descriptor, Reader reader, Rebinder rebinder = {})
+        : descriptor_(std::move(descriptor)), reader_(std::move(reader)), rebinder_(std::move(rebinder)) {}
     bool open() override;
     bool next(std::string& row) override;
     void close() override;
@@ -136,9 +137,15 @@ public:
     bool lastStructuredRow(std::vector<std::string>& cells, std::vector<bool>& nulls) const override;
     bool lastColumnIsNull(size_t ordinal) const override;
     std::string preparedPlanNodeName() const override { return "CTEScan"; }
+    bool supportsPreparedOuterRow() const override { return static_cast<bool>(rebinder_); }
+    bool bindPreparedOuterRow(const RowContext& row) override {
+        if (!rebinder_) return false;
+        close(); rebinder_(row); return true;
+    }
 private:
     QueryRowDescriptor descriptor_;
     Reader reader_;
+    Rebinder rebinder_;
     size_t position_ = 0;
     std::vector<ExprValue> row_;
 };

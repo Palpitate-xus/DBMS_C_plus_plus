@@ -64,6 +64,7 @@ public:
     std::optional<ExprValue> get(const std::string& name) const;
     bool has(const std::string& name) const { return get(name).has_value(); }
     void setParameters(std::vector<ExprValue> cells) { parameters_ = std::move(cells); }
+    size_t parameterCount() const { return parameters_.size(); }
     const ExprValue& parameter(size_t slot) const;
     // Prepared SQL uses query-owned occurrence/descriptor identities, never
     // RowContext's case-insensitive legacy identifier map.

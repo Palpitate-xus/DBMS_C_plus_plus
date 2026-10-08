@@ -42,6 +42,9 @@ public:
 
     const PreparedQuery& query() const { return *query_; }
     RowContext context() const;
+    // Statement inputs remain the query's frozen frame. Only actual
+    // runtime/metadata parameter nodes may inherit the caller's row cells.
+    RowContext context(const RowContext& caller) const;
     const PreparedQuery::SourceRange& sourceRange(size_t ordinal) const;
     void setSourceRow(RowContext& row, size_t ordinal,
                       const std::vector<ExprValue>& cells) const;
@@ -75,6 +78,7 @@ public:
 private:
     struct Child {
         size_t begin = 0, end = 0;
+        bool runtimeParameters = false;
         std::vector<const ColumnRefExpr*> correlations;
         std::vector<std::pair<size_t, std::string>> aliases;
     };

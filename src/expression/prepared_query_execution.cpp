@@ -471,6 +471,10 @@ PreparedQueryExecution::PreparedQueryExecution(std::shared_ptr<PreparedQuery> qu
         child.begin = open + 1; child.end = close;
         const Stmt* root = expression->preparedSubquery.get();
         for (const auto& owned : owners_) {
+            if (const auto* parameter = dynamic_cast<const ParameterExpr*>(owned.first);
+                parameter && isAncestor(root, owned.second) &&
+                parameter->origin != ParameterOrigin::StatementInput)
+                child.runtimeParameters = true;
             const auto* column = dynamic_cast<const ColumnRefExpr*>(owned.first);
             if (!column || !column->binding || !isAncestor(root, owned.second)) continue;
             const auto& range = sourceRange(column->binding->sourceOrdinal);
@@ -532,6 +536,28 @@ const PreparedQuery::SourceRange& PreparedQueryExecution::sourceRange(size_t ord
 
 RowContext PreparedQueryExecution::context() const {
     RowContext row; row.setParameters(query_->parameters); return row;
+}
+
+RowContext PreparedQueryExecution::context(const RowContext& caller) const {
+    auto row = caller;
+    auto cells = query_->parameters;
+    if (caller.parameterCount()) {
+        for (const auto& owned : owners_) {
+            const auto* parameter = dynamic_cast<const ParameterExpr*>(owned.first);
+            if (!parameter || parameter->origin == ParameterOrigin::StatementInput) continue;
+            if (caller.parameterCount() != cells.size())
+                throw DbError("XX000", "prepared caller has a different parameter frame width");
+            if (parameter->slot >= cells.size())
+                throw DbError("XX000", "runtime parameter has no owned frame slot");
+            const auto& value = caller.parameter(parameter->slot);
+            if (ExprHelper::canonicalResultTypeName(value.typeName) !=
+                ExprHelper::canonicalResultTypeName(parameter->declaredType))
+                throw DbError("XX000", "runtime parameter differs from its declared metadata type");
+            cells[parameter->slot] = value;
+        }
+    }
+    row.setParameters(std::move(cells));
+    return row;
 }
 
 void PreparedQueryExecution::setSourceRow(RowContext& row, size_t ordinal,
@@ -983,7 +1009,8 @@ PreparedQueryExecution::QuantifiedState& PreparedQueryExecution::quantifiedState
             ExprHelper::canonicalResultTypeName(descriptor.front().type)!=
                 ExprHelper::canonicalResultTypeName(output->second.front().type))
             throw DbError("XX000","quantified cursor lost its declared descriptor");
-        if (!found->second.correlations.empty() && !state.cursor->supportsRestart())
+        if ((!found->second.correlations.empty() || found->second.runtimeParameters) &&
+            !state.cursor->supportsRestart())
             throw DbError("0A000","correlated query source requires a parameterized cursor provider");
     }
     return state;
@@ -1050,8 +1077,8 @@ ExprValue PreparedQueryExecution::executeQuantified(const QuantifiedComparisonEx
     const auto description=children_.find(child);
     if(description==children_.end())throw DbError("XX000","quantified child belongs to another execution");
     auto& state=quantifiedState(original,row);
-    const bool correlated=!description->second.correlations.empty();
-    if(correlated) {
+    const bool callerDependent=!description->second.correlations.empty() || description->second.runtimeParameters;
+    if(callerDependent) {
         state.cursor->close();state.cursor->restart(row);
         state.values.clear();state.hash.clear();state.eof=false;state.hasNull=false;state.hashBuilt=false;
     }
@@ -1069,7 +1096,7 @@ ExprValue PreparedQueryExecution::executeQuantified(const QuantifiedComparisonEx
         return &state.values.back();
     };
     ExprValue answer("boolean",all?"t":"f");
-    if(!all && !correlated && binding.strict && binding.hashable) {
+    if(!all && !callerDependent && binding.strict && binding.hashable) {
         if(!state.hashBuilt) {
             for(size_t i=0;;++i) {
                 const auto* value=at(i);if(!value)break;
@@ -1103,7 +1130,7 @@ ExprValue PreparedQueryExecution::executeQuantified(const QuantifiedComparisonEx
         if(truth.isNull)unknown=true;
         else if(truth.asBool()!=all) {answer=ExprValue("boolean",all?"f":"t");unknown=false;break;}
     }
-    if(correlated)state.cursor->close();
+    if(callerDependent)state.cursor->close();
     return unknown?ExprValue("boolean","",true):answer;
 }
 
@@ -1111,7 +1138,8 @@ ExprValue PreparedQueryExecution::executeChild(const Expr* expression, const Row
     const auto found = children_.find(expression);
     if (found == children_.end()) throw DbError("XX000", "scalar child belongs to another execution");
     const Child& child = found->second;
-    if (child.correlations.empty()) {
+    const bool memoizable = child.correlations.empty() && !child.runtimeParameters;
+    if (memoizable) {
         const auto cached = memo_.find(expression);
         if (cached != memo_.end()) return cached->second;
     }
@@ -1141,7 +1169,7 @@ ExprValue PreparedQueryExecution::executeChild(const Expr* expression, const Row
                     throw DbError("21000", "more than one row returned by a subquery used as an expression");
             }
             cursor->close();
-            if (child.correlations.empty()) memo_.emplace(expression, result);
+            if (memoizable) memo_.emplace(expression, result);
             return result;
         } catch (...) {
             // A close failure cannot replace the actual scalar/cardinality
@@ -1164,7 +1192,7 @@ ExprValue PreparedQueryExecution::executeChild(const Expr* expression, const Row
             if (rows.front().size() != 1) throw DbError("XX000", "scalar child lost its structured width");
             result = rows.front().front();
         }
-        if (child.correlations.empty()) memo_.emplace(expression, result);
+        if (memoizable) memo_.emplace(expression, result);
         return result;
     }
     PreparedQuery adapter;
@@ -1203,7 +1231,7 @@ ExprValue PreparedQueryExecution::executeChild(const Expr* expression, const Row
     ExprValue result = engine_->executeScalarSubquery(database_, adapter.legacySql(),
         query_, expression->preparedSubquery.get(), row);
     // Failed executions are not cached, and structured SQL NULL is retained.
-    if (child.correlations.empty()) memo_.emplace(expression, result);
+    if (memoizable) memo_.emplace(expression, result);
     return result;
 }
 
