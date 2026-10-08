@@ -2,6 +2,21 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "108 independently committed ROOT source/test repairs through5386: initialize real frontend unordered-window sort direction",
+      "gap_ids": ["QRY-08"],
+      "status": "partial",
+      "commits": ["53865cec"],
+      "evidence": ["docs/issue-window-default-order-initialization.md", "docs/issue-window-default-current-root-composition.md"],
+      "tests": ["tests/frontend/window_default_order.cpp", "scripts/test_window_default_order.sh"],
+      "verification": {
+        "reproduction": "Actual unchanged Root107 normalO2 Main frontend58 baseline1/48, both constructors and46unordered parser/lowering cases fail;10explicit order controls pass. Test checks bool bytes before uninitialized read. Initial mixed-header baseline compile failure retained; corrected same-header actualbaseline counts every58.",
+        "fix": "Only private Main WindowFunc orderByAsc=true initializer; no invented ORDERkey, no publicheader/frame/NULL/operator change. Permanent actualMain frontend58 links genuine57production objects without stubs and separately registers inbuild_tests. Corrected runner explicitly uses owned isolated data directory. Oneexact independent Root5386 commit over0cbb; frozen7041/3cc evidence retained.",
+        "focused_tests": "Original16887 normal/repeat succeeds1freshMain57currentRoot107 separatelysource/header/flags/manifest/original58-receipt/objectbyte-proved normaldonors, notfresh58; actualformal ends1 when newlycompiled frontend runner lacksdatadir before58, failure retained. Complete5fresh defaultnative27825=0/5whole58588=0 including144/72native195/147wire. SameactualBash isolationhelper withDBMS_DATA_DIR frontend58/0. Corrected formal22632=0 actualregistered frontend58/0 plus58matchingnormalmigration/relink/repeat0fresh/ownreceipts/cache/inputseal. ActualRootFF/publication87796=0 all58matched normalproof/ownpath receipts0fresh/relink/repeat; actualmain0d6c4461b39898d30dd56c3437d1e39a55aa54df319baa0a5e7ea136da77b957. Directactualmain5fullwhole79548=0/allinputs unchanged; old672binary recoverable.",
+        "full_suite": "Actualinventory714auto-native+2separatelyrealfrontend/385registered/58TU. No newcurrent108original full orSanitizer claimed; Source80full42496 staysactual1/all1043. Scoped5/58/5/direct5 notwholefamily approval.",
+        "scope": "Independent ownedPG180006/current0d observational24window calls showPG0errors/current9errors+rank/dense_rank0wrongrows=11diffs; neitherPARTITIONnorORDER admission guard is separate, notfixed byinitialization. OriginalNTILEINTEGER23 oracle correct. INTEGER full99native0/post190 stilldoesnotreplacefailedfull88actual1. Original273items/hash/statuses22complete166partial70unverified15deferred unchanged, alloriginalunclosed scopes retained. No push/Actions/skippedsecurityTDE/filteredrestart."
+      }
+    },
+    {
       "issue": "Held exact current INTEGER composition: native99 and post19 pass, complete88 whole remains actual1",
       "gap_ids": ["QRY-01", "PROTO-04", "PROTO-05"],
       "status": "partial",

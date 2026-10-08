@@ -1,4 +1,25 @@
-# 2026-10-08 最新29f9总清单 checkpoint
+# 2026-10-08 最新5386总清单 checkpoint
+
+当前source53865cec：714auto-native+实际frontend2/385registered/58TU，
+108项独立Root source/test修复。私有Main排序方向默认初始化，修复无ORDER窗口
+转换时的未初始化读取，不捏造ORDER key、不改公共头/NULL/frame/执行算子。
+真实旧O2前端58基线48失败，修正后同真实前端58全0；5完整native27825及
+5完整whole58588全0/默认磁盘期限（144/72 native195/147 wire强控完整）。
+原16887正常版真1freshMain57证明donors/repeat通过，但作者新runner缺数据目录
+在58前启动失败，实际1保留。修正目录后完整formal22632真0；全58matching
+normal对象证明迁移/自身receipts/relink/repeat零freshCPP，而非fresh58。
+master仅FF独立5386，实际主目录publication87796真0、直接5完整whole79548真0，
+actual/frozen0dSHA一致，旧672binary可恢复。见window-default current-root组合文档。
+
+QRY-08仍partial：新完整24普通窗口探测PG180006全无错、当前9错+rank/dense_rank
+错零行共11差异，未带PARTITION/ORDER的独立admission guard仍未修，不能用
+初始化修复关闭整个窗口族。INTEGER完整99native0/19post0不替代88whole真1，
+其余全部CTE/scalar/enum/BIT/type/catalog/storage/recovery/ops原未闭环继续。
+旧80full42496终1/all1043非当前108，新108原full/SAN未启动。
+原273及item hash/statuses不变22complete166partial70unverified15deferred，gate真拒绝。
+不push/启用Actions/安全TDE或filtered专项重启，不冒总目标完成。
+
+# 2026-10-08 历史29f9总清单 checkpoint
 
 后续精确当前INTEGER组合仍HELD，未入master：完整99native30310实际0，
 完整88whole40068实际1/87pass1 socket超时，位置为quantified SAVEPOINT。

@@ -4,7 +4,27 @@
 
 # 工作区与复查清单收尾计划
 
-## 2026-10-08 当前完整273目标计划（29f9；以下较早记录均历史）
+## 2026-10-08 当前完整273目标计划（5386；以下较早记录均历史）
+
+当前source53865cec，714auto+实际frontend2/385registered/58TU，108项独立
+Root source/test修复。原273范围及未闭环要求不缩。
+
+| 阶段 | 原要求 / 下一动作 | 当前实际证据 |
+| --- | --- | --- |
+| 每真实根因逐commit | 独立commit、用户push |5386私有窗口方向初始化；保7041/3cc及作者runner失败证据，master仅FF |
+| 当前实际窗口组合 | 同真实前端、完整旧强控、正式构建 | 旧58/48红、修正58/0；完整5native27825/5whole58588/正式22632全部0；原正式16887缺目录1保留 |
+| 主目录实际程序 | 逐对象proof/正常repeat/直接完整复测 |87796全58正常对象证明迁移零fresh/relink/repeat0，实际0dSHA；直接完整5whole79548全0，旧672可恢复 |
+| 接续真正窗口admission | 无PARTITION/ORDER仍要真实Window角色/正确值与类型 |完整24实际PG0错/current9错+2错零行；独立guard未修，不关闭QRY08 |
+| 保持每原红 | 不删SQL/assert/注册、不给族虚绿 |INTEGER99native/19post0但88whole1未批准；oldOPEN4/full8/全原scope保留，source80full1/all1043历史 |
+| 当前所有其它owner | 真来源/typedchild/memo/BIT/TypeName/NULL/MINMAX/customOID |新公共头须真实当前fresh58/强gate；不借旧ABI，现全部原未闭环继续 |
+| 原full和总账全scope | 原发现/注册全部终态、原273全部证明 |新108原full/SAN未开始；273/hash不变22complete166partial70unverified15deferred，完成gate拒绝 |
+
+下一动作：按真实PG参考独立修plain OVER窗口admission并保护错arity/函数owner/
+空行/false/cap/NULL/frame/type边界；继续其它原query/catalog/storage/recovery/
+ops requirements，不以当前小gate代替全部证明，不push/启用Actions/filtered重启。
+完整出处见 `docs/issue-window-default-current-root-composition.md`。
+
+## 2026-10-08 历史完整273目标计划（29f9）
 
 当前新增验证不等于合入：精确INTEGER完整99native0/19post0，但完整88whole1，
 87pass及一真实socket超时均保留，未入master/未关闭族，不以19替代88。

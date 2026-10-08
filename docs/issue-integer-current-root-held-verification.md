@@ -1,6 +1,6 @@
 # Current ROOT INTEGER composition: verified gates and retained hold
 
-The current main source remains `29f90184` (107 independently committed
+At held checkpoint0cbb53ab, the main source remained `29f90184` (107 independently committed
 source/test repairs). Three further independent issue commits have been
 composed over checkpoint `b4e9fef4` in the immutable private tree
 `/tmp/dbms-root-integer-between-current.WZfkQkb0/repo @87dcb1de`:

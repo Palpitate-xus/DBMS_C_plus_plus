@@ -1,4 +1,30 @@
-# Latest 29f9 checkpoint: 107 independently committed source/test repairs
+# Latest5386 checkpoint:108 independently committed source/test repairs
+
+Current source `53865cec`:714 auto-native plus two separately registered real
+frontend drivers,385 registered whole wrappers,58 production TUs. Sole
+private Main `orderByAsc=true` initializer removes an actual uninitialized
+read during unordered window conversion. No public header or ORDER key change.
+
+Actual unchanged O2 frontend58 baseline1/48; corrected actual frontend58/0.
+Complete5 native27825/5whole58588 all0/defaultdisk/deadlines (full144/72native
+and195/147wire retained). Original16887 actually builds1freshMain57proved
+Root107 normal donors and repeats0 but newlycompiled frontend startup fails
+without explicit directory; this author-runner failure remains actual1.
+Corrected formal22632 actual0, owned isolated directory, all58 matching-object
+migration/ownreceipts/relink/repeat0fresh/inputseal. Master only FF5386.
+Actual main publication87796 normal/repeat/all58proof0fresh0, direct full5
+whole79548=0, actual/frozen0dSHA, old672binary recoverable. Full mapping:
+`docs/issue-window-default-current-root-composition.md`.
+
+QRY-08 remains partial: new ownedPG180006/current24 observational calls show
+11differences in plain `OVER ()` admission (9errors+rank/dense_rank zero rows).
+Initialization does not fix that independent guard. INTEGER99native0/post19
+still do not replace its complete88actual1; all old OPEN4/full8 reds retained.
+No current108 original full orSAN started; original80full42496 stays1/all1043.
+Original273 unchanged22complete166partial70unverified15deferred/gate rejects.
+Continue all original unmet requirements; no push/Actions/filtered restart.
+
+# Historical29f9 checkpoint:107 independently committed source/test repairs
 
 Further exact current INTEGER composition is HELD, not master-approved:
 complete99 native30310=0 and proper complete19 post76793=0, but complete88
