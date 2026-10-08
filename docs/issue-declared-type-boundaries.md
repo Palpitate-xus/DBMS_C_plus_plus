@@ -116,16 +116,75 @@ were verified; final binary SHA-256:
 Input seal:
 `1a6ef9db80dfb911bd37433971901bd32cfec1d70262e8b8f204e939c0435410`.
 
-The internal-char follow-up is still uncommitted in the same isolated tree:
+At the `22ae5739` documentation checkpoint, the internal-char follow-up was
+still uncommitted in the same isolated tree:
 its new native181 predecessor reaches181/fails174, and protocol62 reaches62/
 fails62; actual owned PostgreSQL18.6 passes all62. The candidate distinguishes
 the catalog-owned OID18 from SQL bpchar and tests byte input, octal escapes,
 empty/NULL and empty-source descriptors. A public declared-type header changed,
-so all58 production units are rebuilding. No build/test success or integration
-is claimed for this unfinished follow-up. Integer casts, binary protocol,
+so all58 production units were rebuilding. That checkpoint claimed no
+build/test success or integration. Integer casts, binary protocol,
 arrays and broader internal-char operations are not covered by these62.
 
-## Remaining exact19 and next actions
+## Internal-char follow-ups: verified input, casts, comparison and result identity
+
+The input generation subsequently genuinely rebuilt all58, verified own
+current receipts/cache/no-recompile repeat and frozen bytes, and passed
+native181/117/type_registry plus wire62/39/full75/full45. Independent local
+`82fcea77` commits its OID18 identity and byte input repair. Full75 now has
+zero differences, but this did not close TYPE-21 or any whole type family.
+Input binary/seal:
+`073989b44537a17eed37f4887e28819fd69e4d4772ac5ab636741a93ff4fc582` /
+`dcdead1f07a67ebdf722d55c82d9dfdbdf8b9eccf7f5b2ac9bc66fb866c9954e`.
+
+Stronger actual-reference operations reveal remaining behavior beyond75:
+the new complete29 operation records differ27 times on that input generation.
+Reference concat ambiguity was checked against actual pg_operator/pg_cast,
+search_path and explicit pg_catalog operator qualification: it is not an
+accidental public-schema overload left in the reference database.
+
+| Independent local commit | Actual baseline and repaired evidence |
+| --- | --- |
+| `a7fe4f35`: signed int4/internal-char conversions, range diagnostics and pure input cast eligibility | Native71 reached71/failed67 before, all71 pass after; full29 improves27 to2 differences. Unsupported bigint/smallint/boolean/numeric casts fail42846 for NULL and WHERE false too. Native181/117/type_registry, wire62/39/full75/full45 pass. |
+| `040f3a2c`: actual catalog boolean result identity for binary predicates | Native18 reached18/failed16 with descriptor OID0; all18 pass with the actual copied catalog OID16. Tests retain their OID assertion. |
+| `29e22c35`: unsigned byte comparison and matching noncollation hash | Matching-header predecessor native872 fails271 and wire216 fails16; current native872/wire216 pass. First runtime repair still fails6 metadata assertions, diagnosed as the independent predicate OID bug above; not called complete. Actual owned180006 reference passes216. |
+
+The cast's first compile attempt failed on an int64_t/long-long reference
+type mismatch. Subsequent tests accidentally used the still-old objects/binary;
+their `*-current` logs are not candidate proof. The corrected epoch2 genuinely
+rebuilt ExprEvaluator and Binder with unchanged public headers, verified all58
+own receipts/cache/repeat, then passed the complete71 and retained the broader
+red29. Cast binary/seal:
+`4d8714591f3327d59395ce8f4b90a02e2c51d2aa037bb05ff2201cf2ad4bc569` /
+`eeea7d228c0ca0b70bee6029f5d769906d70e139d5c08a53ff36adef60879c07`.
+
+The latest committed comparison/result-identity generation also verifies all58
+own current receipts/cache/repeat and frozen bytes. Binary/seal:
+`10a28782f49a79fdcb348dec294616bce15682f078483dd888bfa00d83cbe2a8` /
+`ae2c8b68870bcea4286630a65d21c59be9f0adb141cbf13113ad7306ba581831`.
+Its full29 has one remaining concat ambiguity difference; no full composition
+gate or master integration is claimed for this generation.
+
+An uncommitted concat follow-up retains a new full17 actual-reference matrix
+and native70 (baselines fail15/62 respectively), covering ambiguity and valid
+integer/boolean concatenation. It keeps array-function and binary-operator
+roles distinct, rejects actual ambiguous scalar char/text candidates before
+value/NULL demand, and preserves the actual text result identity for valid
+scalar char concatenation. Its public helper signature changed, so all58 are
+rebuilding again. No success is claimed yet; boolean output formatting,
+binary protocol, arrays and broader internal-char operations remain to verify.
+
+Next: finish and individually commit concat resolution and boolean text I/O,
+retain full75/45/29/216/17/384, complete the original composition inputs plus
+all new fixtures, then verify actual master integration without importing the
+eight independently held enum candidates. All other original273 requirements
+remain in scope; isolated candidate green matrices do not replace that scope.
+
+Primary implementation evidence:
+[PostgreSQL18 internal-char I/O/comparison](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/utils/adt/char.c),
+[builtin cast contexts](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/include/catalog/pg_cast.dat).
+
+## Historical exact19 at the FLOAT boundary checkpoint
 
 | Root cause | Failed queries in the complete75 | Required repair |
 | --- | --- | --- |
@@ -135,10 +194,11 @@ arrays and broader internal-char operations are not covered by these62.
 | Internal catalog `"char"` borrowed as SQL CHAR/bpchar | 4 | Use its real catalog identity, input codec and OID18, not a spelling alias |
 | Reserved grammar words treated as type names | 4 | Respect type/function identifier eligibility and existing expression grammar |
 
-Continue all19 with unchanged full75/45/384 and composition evidence, then
-the original custom-type/domain/search-path and all other unmet requirements.
-These19 are not an exhaustive claim that all remaining type problems have
-been found. FLOAT formatting/NaN/overflow/binary semantics and the original
+These19 have now been repaired in the isolated declaration chain's unchanged
+full75; this table records the original causes rather than a current remaining
+count. Continue the broader operations/composition/custom-type/domain/search-
+path and all other unmet requirements. FLOAT formatting/NaN/overflow/binary
+semantics and the original
 TYPE-02/04/11 scopes also remain open.
 
 Primary grammar evidence:
