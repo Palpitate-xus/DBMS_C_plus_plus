@@ -123,9 +123,13 @@ Current final binary SHA-256:
 `aeaaa5755482baea06213da0721f3651234d09a5d35228b0631e3638b82894a8`.
 Current full input seal:
 `4d0ab7c3252872ca02c7d8b14902cb54b2ef02405eebf2a5cf8faf04316526a8`.
-The unchanged complete38 native and31 protocol composition gates are running
-on this sealed generation; **no final result is claimed yet**. These candidates
+The unchanged complete38 native and31 protocol composition gates completed
+on this sealed generation with zero failed invocations. These candidates
 remain held outside master, not a completed TypeName family or original273.
+The stronger full75 then found49 differences, including four FLOAT cast
+regressions. FLOAT and structured declaration diagnostics are repaired in a
+further independent candidate; full75 still has19 differences. See
+[`issue-declared-type-boundaries.md`](issue-declared-type-boundaries.md).
 
 Next: fix cold builtin lookup without bootstrapping during preparation;
 restore expression grammar precedence for CASE; rerun the same complete
