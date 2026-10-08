@@ -41,7 +41,8 @@ public:
     // Pure SQL ARRAY/array-concatenation analysis. No row, query, sequence or
     // stored routine is executed. Only execution-owned ASTs may be annotated.
     static std::optional<ArrayConcatBinding> resolveArrayConcatTypes(
-        const std::string& leftType, const std::string& rightType);
+        const std::string& leftType, const std::string& rightType,
+        bool binaryOperator = false);
     static void prepareArrayTypes(Expr* expression,
         const std::map<std::string, std::string>& typeHints = {},
         const std::string& currentDB = "", StorageEngine* owner = nullptr);

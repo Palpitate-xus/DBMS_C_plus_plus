@@ -474,7 +474,7 @@ public:
                 return "boolean";
             }
             if (binary->op=="||") {
-                binary->arrayConcat = ExprHelper::resolveArrayConcatTypes(left,right);
+                binary->arrayConcat = ExprHelper::resolveArrayConcatTypes(left,right,true);
                 if (binary->arrayConcat) {
                     validateArrayConstant(binary->left.get(),binary->arrayConcat->leftType);
                     validateArrayConstant(binary->right.get(),binary->arrayConcat->rightType);
@@ -484,6 +484,11 @@ public:
                     }
                     return binary->arrayConcat->elementType + "[]";
                 }
+                // A surviving internal-char scalar concatenation selects
+                // text's non-array overload, not the left operand's type.
+                if (common_type_detail::canonical(left)=="\"char\"" ||
+                    common_type_detail::canonical(right)=="\"char\"")
+                    return declaredType("text",binary);
             }
             static const std::set<std::string> predicates = {"=", "<>", "!=", "<", ">", "<=", ">=",
                 "AND", "OR", "LIKE", "NOT LIKE", "ILIKE", "NOT ILIKE",

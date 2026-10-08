@@ -289,7 +289,7 @@ std::string inferAstResultType(
         if (op == "->>" || op == "#>>") return "text";
         if (op == "->" || op == "#>") return left;
         if (op == "||") {
-            if (const auto binding = ExprHelper::resolveArrayConcatTypes(left, right))
+            if (const auto binding = ExprHelper::resolveArrayConcatTypes(left, right, true))
                 return binding->elementType + "[]";
             if ((left == "bit" || left == "bit varying") &&
                 (right == "bit" || right == "bit varying")) {
@@ -1569,7 +1569,7 @@ std::string ExprHelper::inferParsedInputType(
 }
 
 std::optional<ArrayConcatBinding> ExprHelper::resolveArrayConcatTypes(
-    const std::string& leftRaw, const std::string& rightRaw) {
+    const std::string& leftRaw, const std::string& rightRaw, bool binaryOperator) {
     auto canonical = [](std::string type) {
         const bool array = type.size() >= 2 && type.compare(type.size()-2,2,"[]") == 0;
         if (array) type.resize(type.size()-2);
@@ -1581,7 +1581,20 @@ std::optional<ArrayConcatBinding> ExprHelper::resolveArrayConcatTypes(
         return type.size() >= 2 && type.compare(type.size()-2,2,"[]") == 0;
     };
     result.leftArray = array(result.leftType); result.rightArray = array(result.rightType);
-    if (!result.leftArray && !result.rightArray) return {};
+    if (!result.leftArray && !result.rightArray) {
+        // The scalar || operator and array_append/prepend share array type
+        // promotion, not overload sets. Internal char can use implicit text
+        // conversion, but with another text-compatible operand its scalar
+        // text/polymorphic || candidates are ambiguous, even for NULLs.
+        if (binaryOperator) {
+            const auto left=common_type_detail::canonical(result.leftType);
+            const auto right=common_type_detail::canonical(result.rightType);
+            const auto text=[](const std::string& type){return common_type_detail::implicit(type,"text");};
+            if ((left=="\"char\"" && text(right)) || (right=="\"char\"" && text(left)))
+                throw DbError("42725","operator is not unique: "+leftRaw+" || "+rightRaw);
+        }
+        return {};
+    }
     // An unknown operand chooses the array-cat overload, not append/prepend.
     if (result.leftType == "unknown") { result.leftType = result.rightType; result.leftArray = true; }
     if (result.rightType == "unknown") { result.rightType = result.leftType; result.rightArray = true; }
@@ -1722,7 +1735,7 @@ void ExprHelper::prepareArrayTypes(Expr* expression,
                 operation=="not ilike" || operation=="similar to" || operation=="not similar to")
                 patternType(operation,{binary->left.get(),binary->right.get()});
             if (binary->op=="||") {
-                binary->arrayConcat = resolveArrayConcatTypes(type(binary->left.get()),type(binary->right.get()));
+                binary->arrayConcat = resolveArrayConcatTypes(type(binary->left.get()),type(binary->right.get()),true);
                 if (binary->arrayConcat) {
                     validateConst(binary->left.get(),binary->arrayConcat->leftType);
                     validateConst(binary->right.get(),binary->arrayConcat->rightType);

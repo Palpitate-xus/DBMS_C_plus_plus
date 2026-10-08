@@ -1,0 +1,221 @@
+[
+  {
+    "sql": "SELECT \"char\" 'A' || \"char\" 'B' AS value",
+    "reference": [
+      [],
+      "42725",
+      "operator is not unique: \"char\" || \"char\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT \"char\" 'A' || TEXT 'B' AS value",
+    "reference": [
+      [],
+      "42725",
+      "operator is not unique: \"char\" || text",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT TEXT 'A' || \"char\" 'B' AS value",
+    "reference": [
+      [],
+      "42725",
+      "operator is not unique: text || \"char\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT \"char\" 'A' || 'B' AS value",
+    "reference": [
+      [],
+      "42725",
+      "operator is not unique: \"char\" || unknown",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS \"char\") || \"char\" 'B' AS value",
+    "reference": [
+      [],
+      "42725",
+      "operator is not unique: \"char\" || \"char\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT \"char\" 'A' || CAST(NULL AS \"char\") AS value",
+    "reference": [
+      [],
+      "42725",
+      "operator is not unique: \"char\" || \"char\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT \"char\" 'A' || \"char\" 'B' AS value WHERE false",
+    "reference": [
+      [],
+      "42725",
+      "operator is not unique: \"char\" || \"char\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS text) || \"char\" 'B' AS value",
+    "reference": [
+      [],
+      "42725",
+      "operator is not unique: text || \"char\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT \"char\" 'A' || CAST(NULL AS text) AS value",
+    "reference": [
+      [],
+      "42725",
+      "operator is not unique: \"char\" || text",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT \"char\" 'A' || VARCHAR 'B' AS value",
+    "reference": [
+      [],
+      "42725",
+      "operator is not unique: \"char\" || character varying",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT VARCHAR 'A' || \"char\" 'B' AS value",
+    "reference": [
+      [],
+      "42725",
+      "operator is not unique: character varying || \"char\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT \"char\" 'A' || CHAR 'B' AS value",
+    "reference": [
+      [],
+      "42725",
+      "operator is not unique: \"char\" || character",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CHAR 'A' || \"char\" 'B' AS value",
+    "reference": [
+      [],
+      "42725",
+      "operator is not unique: character || \"char\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT \"char\" 'A' || 1 AS value",
+    "reference": [
+      [
+        [
+          "A1"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        25
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT 1 || \"char\" 'B' AS value",
+    "reference": [
+      [
+        [
+          "1B"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        25
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT \"char\" 'A' || true AS value",
+    "reference": [
+      [
+        [
+          "Atrue"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        25
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT true || \"char\" 'B' AS value",
+    "reference": [
+      [
+        [
+          "trueB"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        25
+      ]
+    ]
+  }
+]

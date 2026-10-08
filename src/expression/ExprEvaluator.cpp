@@ -2935,7 +2935,7 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
     if (op=="||" && !arrayConcat)
         arrayConcat = ExprHelper::resolveArrayConcatTypes(
             arrayExpressionType(e->left.get(),ctx,currentDB_,this),
-            arrayExpressionType(e->right.get(),ctx,currentDB_,this));
+            arrayExpressionType(e->right.get(),ctx,currentDB_,this),true);
 
     // Logical short-circuit with SQL three-valued logic:
     //   NULL AND false = false,  NULL AND true  = NULL
