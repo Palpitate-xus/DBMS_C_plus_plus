@@ -58,6 +58,9 @@ struct QueryBindingMetadata {
     // Same-generation catalog type + ordered enum labels, copied once.
     // An actual source OID wins over the current search_path spelling.
     std::function<std::optional<QueryEnumType>(const std::string&, uint32_t)> enumType;
+    // Resolve a grammar type declaration against the same copied catalog as
+    // relation/operator metadata. This must not evaluate input or a routine.
+    std::function<QueryOutputColumn(const std::string&)> declaredType;
 };
 struct PreparedQuery {
     struct Use { size_t begin, end, slot; };

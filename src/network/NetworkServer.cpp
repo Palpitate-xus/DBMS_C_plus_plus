@@ -2076,7 +2076,8 @@ bool describePreparedResult(const std::string& sql, Session& session,
                 const auto* literal =
                     dynamic_cast<const LiteralExpr*>(row[i].get());
                 std::string typeName = literal && !literal->typeName.empty()
-                    ? ExprHelper::canonicalResultTypeName(literal->typeName)
+                    ? ExprHelper::canonicalResultTypeName(ExprHelper::declaredTypeInput(
+                        literal->typeName,session.currentDB,&g_engine))
                     : ExprHelper::inferValuesResultType(expression);
                 if (expression.size() > 1 && expression.front() == '$' &&
                     std::all_of(expression.begin() + 1, expression.end(),
@@ -2325,7 +2326,8 @@ bool describePreparedResult(const std::string& sql, Session& session,
                                 std::to_string(shape.columns.size()));
         const std::string inferredType =
             literal && !literal->typeName.empty()
-                ? ExprHelper::canonicalResultTypeName(literal->typeName)
+                ? ExprHelper::canonicalResultTypeName(ExprHelper::declaredTypeInput(
+                    literal->typeName,session.currentDB,&g_engine))
                 : ExprHelper::inferParsedResultType(item.expr.get(), typeHints,
                                                   session.currentDB, &g_engine);
         shape.columnTypes.push_back(inferredType);

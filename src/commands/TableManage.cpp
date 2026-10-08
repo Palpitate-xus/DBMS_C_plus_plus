@@ -24,6 +24,7 @@
 #include "types/xml.h"
 #include "catalog/collation.h"
 #include "catalog/CatalogService.h"
+#include "catalog/declared_type.h"
 #include "common/SqlSyntax.h"
 #include "expression/expr_helper.h"
 #include "expression/assignment_input.h"
@@ -33080,6 +33081,11 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
                 description.identity+=":"+std::to_string(label.enumlabel.size())+":"+label.enumlabel;
             }
             return description;
+        };
+        metadata.declaredType = [&](const std::string& spelling) {
+            if(!catalogSnapshot)catalogSnapshot=catalogService_->metadataSnapshot(dbname);
+            const auto type=resolveDeclaredTypeName(spelling,&*catalogSnapshot,currentSession());
+            return QueryOutputColumn{"",type.typeName,false,0,type.typeOid};
         };
         ExprEvaluator evaluator; evaluator.setCurrentDB(dbname);
         metadata.setReturning = [&](const FunctionCallExpr* function) -> std::optional<QuerySetReturningBinding> {

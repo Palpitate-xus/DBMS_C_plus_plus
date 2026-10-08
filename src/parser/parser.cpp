@@ -2437,24 +2437,26 @@ static ExprPtr parsePrimaryExprImpl(const std::vector<std::string>& tokens, size
         }
         pos = save; // fall through to generic handling on malformed input
     }
-    // SQL typed literals. Keep the declared type on the literal node so
-    // VALUES and other expression consumers do not mistake DATE/TIMESTAMP
-    // spellings for a column reference followed by stray text.
-    const std::string typedLiteralName = SQLParser::toLower(tokens[pos]);
-    static const std::set<std::string> typedLiteralNames = {
-        "boolean", "date", "interval", "numeric", "time",
-        "timestamp", "timestamptz", "xml", "point", "line", "lseg",
-        "box", "path", "polygon", "circle"
-    };
-    if (typedLiteralNames.count(typedLiteralName) &&
-        pos + 1 < tokens.size() && tokens[pos + 1].size() >= 2 &&
-        tokens[pos + 1].front() == '\'' &&
-        tokens[pos + 1].back() == '\'') {
-        auto lit = std::make_unique<LiteralExpr>();
-        lit->value = tokens[pos + 1];
-        lit->typeName = typedLiteralName;
-        pos += 2;
-        return lit;
+    // A declared type followed by a real string constant is a type-input
+    // grammar role, including named/qualified/quoted and modified types.
+    // A function call without that following constant retains its callee.
+    {
+        size_t typeEnd=pos;
+        try {
+            const auto declaration=consumeDeclaredType(tokens,typeEnd);
+            if(typeEnd<tokens.size() && tokens[typeEnd].size()>=2 &&
+               tokens[typeEnd].front()=='\'' && tokens[typeEnd].back()=='\'') {
+                auto literal=std::make_unique<LiteralExpr>();
+                literal->value=tokens[typeEnd];
+                literal->typeName=renderDeclaredType(declaration);
+                pos=typeEnd+1;
+                return literal;
+            }
+        } catch(const DbError& error) {
+            if(error.sqlState()!="42601")throw;
+            // This may instead be ordinary CASE/ARRAY/operator/function
+            // syntax. Its actual expression owner supplies any diagnosis.
+        }
     }
 
     // ARRAY is grammar, not a user-visible function name. Retain its actual

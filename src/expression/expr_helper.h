@@ -34,6 +34,10 @@ struct ExprEvalResult {
 
 class ExprHelper {
 public:
+    // Pure declared type lookup. The backend's copied catalog/search_path
+    // owns qualified/custom identities; this never executes a scalar call.
+    static std::string declaredTypeInput(const std::string& spelling,
+        const std::string& currentDB = "", StorageEngine* owner = nullptr);
     // Pure SQL ARRAY/array-concatenation analysis. No row, query, sequence or
     // stored routine is executed. Only execution-owned ASTs may be annotated.
     static std::optional<ArrayConcatBinding> resolveArrayConcatTypes(

@@ -176,6 +176,12 @@ public:
         return unary && unary->op.rfind("COLLATE ",0)==0
             ? expressionTypeOid(unary->operand.get()) : 0;
     }
+    std::string declaredType(const std::string& spelling,const Expr* node) {
+        if(!metadata.declaredType)return ExprHelper::canonicalResultTypeName(spelling);
+        const auto type=metadata.declaredType(spelling);
+        valueTypeOids[node]=type.typeOid;
+        return type.type;
+    }
     std::optional<QueryEnumType> enumType(const std::string& spelling,const Expr* node) const {
         return metadata.enumType?metadata.enumType(spelling,expressionTypeOid(node)):std::nullopt;
     }
@@ -346,13 +352,14 @@ public:
         case ExprType::Literal: {
             auto* literal = static_cast<LiteralExpr*>(node.get());
             if (!literal->typeName.empty()) {
+                const auto type=declaredType(literal->typeName,literal);
                 if (isGeometryTypeName(literal->typeName)) {
                     GeometryValue value;
                     if (!parseGeometryValue(literal->value, literal->typeName, value))
                         throw DbError("22P02", "invalid input syntax for type " + literal->typeName);
                 }
                 if (metadata.assignmentInput) metadata.assignmentInput({"", literal->typeName}, literal, literal->typeName);
-                return literal->typeName;
+                return type;
             }
             if (literal->value == "*") return "record";
             if (decimalIntegerConstant(literal->value))
@@ -371,13 +378,23 @@ public:
         }
         case ExprType::CastExpr: {
             auto* cast = static_cast<CastExpr*>(node.get());
+            std::string declaration=cast->typeName;
+            const bool array=declaration.size()>=2 && declaration.compare(declaration.size()-2,2,"[]")==0;
+            if(!cast->typeMods.empty()) {
+                if(array)declaration.resize(declaration.size()-2);
+                declaration+='(';
+                for(size_t i=0;i<cast->typeMods.size();++i)declaration+=(i?",":"")+cast->typeMods[i];
+                declaration+=')';
+                if(array)declaration+="[]";
+            }
+            const auto type=declaredType(declaration,cast);
             expression(cast->operand, scopes, cast->typeName);
             geometric_input_detail::validateUnknownInput(cast->operand.get(),cast->typeName);
             if (metadata.assignmentInput) metadata.assignmentInput({"", cast->typeName}, cast, cast->typeName);
             bindEnumCast(cast,cast->operand.get(),cast->typeName);
             if(const auto geometry=geometric_input_detail::builtinType(cast->typeName);!geometry.empty())
                 return geometry;
-            return cast->typeName;
+            return type;
         }
         case ExprType::UnaryOp: {
             auto* unary = static_cast<UnaryOpExpr*>(node.get());
@@ -413,6 +430,7 @@ public:
         case ExprType::BinaryOp: {
             auto* binary = static_cast<BinaryOpExpr*>(node.get());
             const auto* castTarget = binary->op=="::" ? dynamic_cast<const LiteralExpr*>(binary->right.get()) : nullptr;
+            const auto castType=castTarget?declaredType(castTarget->value,binary):std::string();
             const auto left = expression(binary->left, scopes, castTarget ? castTarget->value : std::string());
             if (binary->op == "::") {
                 const auto* type = dynamic_cast<const LiteralExpr*>(binary->right.get());
@@ -422,7 +440,7 @@ public:
                 bindEnumCast(binary,binary->left.get(),type->value);
                 if(const auto geometry=geometric_input_detail::builtinType(type->value);!geometry.empty())
                     return geometry;
-                return type->value; // grammar type, not a SQL value namespace
+                return castType; // grammar type, not a SQL value namespace
             }
             // Slice bounds are this parser's retained grammar envelope, not
             // an opaque SQL value/name expression (analogous to ::'s label).

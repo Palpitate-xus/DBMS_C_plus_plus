@@ -10,6 +10,9 @@
 #include "parser/query_binding.h"
 #include "catalog/catalog.h"
 #include "catalog/type_registry.h"
+#include "catalog/declared_type.h"
+#include "catalog/CatalogService.h"
+#include "commands/TableManage.h"
 #include "common/DbError.h"
 
 #include <algorithm>
@@ -20,6 +23,8 @@
 #include <memory>
 #include <sstream>
 #include <vector>
+
+extern dbms::StorageEngine g_engine;
 
 namespace dbms {
 
@@ -186,11 +191,15 @@ std::string inferAstResultType(
     const std::map<std::string, std::string>& typeHints,
     const std::map<const Expr*, std::string>* routineTypes = nullptr) {
     if (!expression) return "text";
+    if(routineTypes) {
+        const auto declared=routineTypes->find(expression);
+        if(declared!=routineTypes->end())return protocolTypeName(declared->second);
+    }
     if (const auto* parameter = dynamic_cast<const ParameterExpr*>(expression))
         return protocolTypeName(parameter->declaredType);
     if (const auto* literal = dynamic_cast<const LiteralExpr*>(expression)) {
         if (!literal->typeName.empty())
-            return protocolTypeName(literal->typeName);
+            return protocolTypeName(ExprHelper::declaredTypeInput(literal->typeName));
         const std::string value = toLower(literal->value);
         if (literal->value.size() >= 3 && literal->value[1] == '\'' &&
             (literal->value[0] == 'b' || literal->value[0] == 'B' ||
@@ -225,7 +234,7 @@ std::string inferAstResultType(
         return "text";
     }
     if (const auto* cast = dynamic_cast<const CastExpr*>(expression))
-        return protocolTypeName(cast->typeName);
+        return protocolTypeName(ExprHelper::declaredTypeInput(cast->typeName));
     if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(expression)) {
         const std::string op = toLower(unary->op);
         if (op == "not" || op.find("is ") == 0) return "boolean";
@@ -251,7 +260,7 @@ std::string inferAstResultType(
         if (op == "::") {
             if (const auto* target =
                     dynamic_cast<const LiteralExpr*>(binary->right.get())) {
-                return protocolTypeName(target->value);
+                return protocolTypeName(ExprHelper::declaredTypeInput(target->value));
             }
             return protocolTypeName(binary->right
                                         ? binary->right->toString()
@@ -519,7 +528,9 @@ std::map<const Expr*, std::string> collectRoutineResultTypes(
     evaluator.setCurrentDB(currentDB);
     std::function<void(const Expr*)> inspect = [&](const Expr* node) {
         if (!node) return;
-        if (const auto* call = dynamic_cast<const FunctionCallExpr*>(node)) {
+        if(const auto* literal=dynamic_cast<const LiteralExpr*>(node)) {
+            if(!literal->typeName.empty())routineTypes[node]=ExprHelper::declaredTypeInput(literal->typeName,currentDB,functionEngine);
+        } else if (const auto* call = dynamic_cast<const FunctionCallExpr*>(node)) {
             if (evaluator.hasScalarFunction(call, functionEngine)) {
                 const std::string type = evaluator.scalarFunctionResultType(call, functionEngine);
                 if (!type.empty()) routineTypes[call] = type;
@@ -531,10 +542,13 @@ std::map<const Expr*, std::string> collectRoutineResultTypes(
         } else if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(node)) {
             inspect(binary->left.get());
             if (binary->op != "::") inspect(binary->right.get());
+            else if(const auto* target=dynamic_cast<const LiteralExpr*>(binary->right.get()))
+                routineTypes[node]=ExprHelper::declaredTypeInput(target->value,currentDB,functionEngine);
         } else if (const auto* quantified = dynamic_cast<const QuantifiedComparisonExpr*>(node)) {
             inspect(quantified->left.get()); inspect(quantified->right.get());
         } else if (const auto* cast = dynamic_cast<const CastExpr*>(node)) {
             inspect(cast->operand.get());
+            routineTypes[node]=ExprHelper::declaredTypeInput(cast->typeName,currentDB,functionEngine);
         } else if (const auto* conditional = dynamic_cast<const CaseExpr*>(node)) {
             inspect(conditional->switchExpr.get());
             for (const auto& arm : conditional->whenClauses) {
@@ -1529,6 +1543,21 @@ std::string ExprHelper::inferParsedResultType(
     return type.empty() || type == "unknown" ? "text" : type;
 }
 
+std::string ExprHelper::declaredTypeInput(const std::string& spelling,
+    const std::string& currentDB,StorageEngine* owner) {
+    const auto* session=currentSession();
+    const auto database=currentDB.empty() && session?session->currentDB:currentDB;
+    if(database.empty())return resolveDeclaredTypeName(spelling,nullptr,session).inputType;
+    auto* engine=owner?owner:&g_engine;
+    const auto catalog=engine->catalogService().metadataSnapshot(database);
+    // Standalone consumers may carry only a nominal database label. A cold,
+    // absent catalog cannot supply user types, but the actual registered
+    // builtin input codecs remain available without bootstrapping or writes.
+    if(catalog.namespaces.empty() && catalog.types.empty())
+        return resolveDeclaredTypeName(spelling,nullptr,session).inputType;
+    return resolveDeclaredTypeName(spelling,&catalog,session).inputType;
+}
+
 std::string ExprHelper::inferParsedInputType(
     const Expr* expression,
     const std::map<std::string, std::string>& typeHints,
@@ -2249,49 +2278,10 @@ static ExprEvalResult evalStringImpl(
     StorageEngine* functionEngine = nullptr,
     const std::map<std::string, std::string>* collationHints = nullptr) {
 
-    // Unwrap typed literals before parsing: date '2026-08-15' -> '2026-08-15'.
-    // EXTRACT retains its actual parser node; its field label is protected
-    // by the value-reference walker, not rewritten as a date_part SQL string.
-    std::string sql = exprSql;
-    {
-        static const std::string kws[] = {"date ", "timestamp ", "timestamptz ", "interval ", "boolean ", "time ", "numeric ", "int ", "text "};
-        std::string out;
-        out.reserve(sql.size());
-        for (size_t i = 0; i < sql.size();) {
-            bool matched = false;
-            for (const auto& kw : kws) {
-                bool keywordMatch = sql.size() >= i + kw.size();
-                for (size_t k = 0; keywordMatch && k < kw.size(); ++k) {
-                    keywordMatch = std::tolower(
-                        static_cast<unsigned char>(sql[i + k])) == kw[k];
-                }
-                if (sql.size() >= i + kw.size() + 2 &&
-                    keywordMatch &&
-                    sql[i + kw.size()] == 39) {
-                    if (i == 0 || !isalnum((unsigned char)sql[i - 1])) {
-                        size_t close = sql.find(39, i + kw.size() + 1);
-                        if (close != std::string::npos) {
-                            out += 39;
-                            out += sql.substr(i + kw.size() + 1, close - i - kw.size() - 1);
-                            out += 39;
-                            // Keep the declared type observable downstream:
-                            // date '...' becomes '...'::date so arithmetic
-                            // sees a date-typed operand (PG semantics),
-                            // instead of a bare unknown-type string.
-                            std::string tkw = kw;
-                            while (!tkw.empty() && tkw.back() == ' ') tkw.pop_back();
-                            out += "::" + tkw;
-                            i = close + 1;
-                            matched = true;
-                            break;
-                        }
-                    }
-                }
-            }
-            if (!matched) out += sql[i++];
-        }
-        sql = out;
-    }
+    // The parser retains the actual declared-type grammar. Rewriting a
+    // keyword/string pair into :: changes bare BIT/CHAR length semantics and
+    // corrupts qualified names or escaped quotes.
+    const std::string& sql = exprSql;
 
     ExprEvalResult res;
     if (exprSql.empty()) {

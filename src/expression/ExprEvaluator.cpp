@@ -1392,6 +1392,7 @@ ExprValue ExprEvaluator::evalLiteral(const LiteralExpr* e) const {
     }
 
     if (!e->typeName.empty()) {
+        const auto target=ExprHelper::declaredTypeInput(e->typeName,currentDB_);
         if (isGeometryTypeName(e->typeName)) {
             std::string value;
             if (!normalizeGeometryText(unquote(raw), e->typeName, value))
@@ -1408,7 +1409,16 @@ ExprValue ExprEvaluator::evalLiteral(const LiteralExpr* e) const {
             }
             return ExprValue("xml", value, false);
         }
-        return ExprValue(e->typeName, unquote(raw), false);
+        if(target=="bit" || target=="character") {
+            // A bare declared constant has no explicit CAST's default
+            // length-one coercion. Its actual input length is retained.
+            if(target=="bit") {
+                auto result=evalCast(nullptr,RowContext{},ExprValue("unknown",unquote(raw),false),"bit varying");
+                result.typeName="bit";return result;
+            }
+            return ExprValue(target,unquote(raw),false);
+        }
+        return evalCast(nullptr,RowContext{},ExprValue("unknown",unquote(raw),false),target);
     }
 
     if (isQuotedString(raw)) {
@@ -4533,7 +4543,8 @@ static ExprValue castToBitString(const ExprValue& value,
 // Helper overload used by BinaryOpExpr "::"
 ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
                                   const ExprValue& v, const std::string& targetTypeName) const {
-    std::string target = toLower(targetTypeName);
+    std::string target = ExprHelper::declaredTypeInput(targetTypeName,currentDB_);
+    target=toLower(target);
     {
         // :: type modifier lists arrive space-joined without an opening
         // parenthesis ("numeric 4 , 2)"). CAST nodes already contain the
