@@ -63,6 +63,51 @@ published Root728+2/402/58 inventory.
    original unmet families. The broader registered29 counterpart is red,
    not approved by the narrower original28 pass.
 
+## Declared-constant candidate (held, not integrated)
+
+Independent local commit `63e226bb` on `fix/root-type-constants-ZF9xcCr9`
+adds generic type constants, copied-catalog type lookup, builtin input
+conversion and canonical builtin descriptors. It removes the textual
+keyword/string-to-`::` rewrite that changed bare BIT length semantics and
+could corrupt qualified names or escaped quotes. Published master source
+remains `ea67ad29`; the README-only update is `05470414`.
+
+Artifacts: `/tmp/dbms-root-type-constants.ZF9xcCr9`.
+
+| Complete exact input | Actual outcome |
+| --- | --- |
+| New native69, corrected real catalog initialization, unchanged expectations, on parser-only baseline | 1;69 reached,68 failures |
+| Current native69 on candidate epoch2 | 0;69 reached,zero failures |
+| Current full45 protocol | 0;45 reached,zero differences |
+| Owned PG18.6 full45 reference | 0;45 reached,zero differences |
+| Original immutable paired BIT384 | 0;384 reached,zero differences |
+| Original28 plus three additive protocol fixtures | 0;31 complete invocations |
+| Original35 plus three additive native fixtures | 1;38 complete invocations,10 failed fixtures |
+
+Epoch1 compiled all58 production units genuinely afresh. Epoch2 rebuilt only
+NetworkServer and expr_helper against those same unchanged headers; all58
+current-path source/header/compiler/flag/manifest receipts, the normal cache,
+no-recompile repeat and frozen bytes are verified. Epoch2 binary SHA-256:
+`1873b89606ad83918a47a50127abc213e3ec9a80d68c5510cb695f46b10e70ed`.
+Full input seal:
+`54584889add4d2f92c6736537badd68c1055656d4ed24df345a4ed89845883a3`.
+The first epoch's six genuine OID differences, initial native setup failures
+and all subsequent red native logs remain preserved; none is labelled PASS.
+
+The candidate is **not approved for integration**. The complete native gate
+found cold, uninitialized catalog lookup regressions and a separate grammar
+regression: `CASE 'zeta'::rank_type WHEN ...` is intercepted as a type
+constant rather than a CASE expression. Neither the successful45/384 nor the
+successful31 protocol fixtures closes those failures. A separate cold lookup
+repair and authentic empty-catalog/no-bootstrap native test are in progress at
+`/tmp/dbms-root-type-cold.b3XG2ENF/repo`; no result is claimed for that WIP.
+
+Next: fix cold builtin lookup without bootstrapping during preparation;
+restore expression grammar precedence for CASE; rerun the same complete
+native and protocol gates, including full45/384. General custom type input,
+domains, search-path shadowing and all other original unmet families remain
+open pending their own evidence.
+
 Every original273 item/hash/status stays unchanged:22 complete,166 partial,
 70 unverified,15 user-deferred. No original full-suite/SAN, general TypeName,
 enum or entire Goal completion is claimed. No push, Actions activation,
