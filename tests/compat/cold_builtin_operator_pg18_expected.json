@@ -1,0 +1,470 @@
+[
+  {
+    "sql": "SELECT CASE WHEN true THEN 'abc' ELSE 'def' END AS value",
+    "reference": [
+      [
+        [
+          "abc"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        25
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN false THEN NULL END AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        25
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN true THEN NULL ELSE CAST(1 AS BIGINT) END AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        20
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN true THEN 2 ELSE CAST(1 AS REAL) END AS value",
+    "reference": [
+      [
+        [
+          "2"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        700
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN true THEN CAST(2 AS NUMERIC) ELSE CAST(1 AS BIGINT) END AS value",
+    "reference": [
+      [
+        [
+          "2"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1700
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN true THEN CAST(2 AS REAL) ELSE CAST(1 AS DOUBLE PRECISION) END AS value",
+    "reference": [
+      [
+        [
+          "2"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        701
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN true THEN CAST('ab' AS VARCHAR) ELSE CAST('cd' AS TEXT) END AS value",
+    "reference": [
+      [
+        [
+          "ab"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        25
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN true THEN CAST('ab' AS TEXT) ELSE CAST('cd' AS VARCHAR) END AS value",
+    "reference": [
+      [
+        [
+          "ab"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1043
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN true THEN CAST('abcd' AS VARCHAR) ELSE CAST('xy' AS CHAR(2)) END AS value",
+    "reference": [
+      [
+        [
+          "abcd"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1042
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN true THEN CAST(B'0101' AS BIT VARYING) ELSE CAST(B'11' AS BIT(2)) END AS value",
+    "reference": [
+      [
+        [
+          "0101"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1560
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN true THEN DATE '2026-10-06' ELSE TIMESTAMP '2026-10-07 00:00:00' END AS value",
+    "reference": [
+      [
+        [
+          "2026-10-06 00:00:00"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1114
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN true THEN '1 us' ELSE INTERVAL '2 days' END AS value",
+    "reference": [
+      [
+        [
+          "00:00:00.000001"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1186
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN false THEN 1/0 ELSE 2 END AS value",
+    "reference": [
+      [
+        [
+          "2"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        23
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN false THEN CAST(2147483648 AS INTEGER) ELSE 2 END AS value",
+    "reference": [
+      [
+        [
+          "2"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        23
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN false THEN 'bad' ELSE 1 END AS value WHERE false",
+    "reference": [
+      [],
+      "22P02",
+      "invalid input syntax for type integer: \"bad\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN false THEN '1 fortnight' ELSE INTERVAL '1 day' END AS value WHERE false",
+    "reference": [
+      [],
+      "22007",
+      "invalid input syntax for type interval: \"1 fortnight\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN false THEN '2147483648 months' ELSE INTERVAL '1 day' END AS value WHERE false",
+    "reference": [
+      [],
+      "22015",
+      "interval field value out of range: \"2147483648 months\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN false THEN CAST('1 day' AS TEXT) ELSE INTERVAL '1 day' END AS value WHERE false",
+    "reference": [
+      [],
+      "42804",
+      "CASE types interval and text cannot be matched",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN false THEN 1 ELSE INTERVAL '1 day' END AS value WHERE false",
+    "reference": [
+      [],
+      "42804",
+      "CASE types interval and integer cannot be matched",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN 1 THEN 1 ELSE 2 END AS value WHERE false",
+    "reference": [
+      [],
+      "42804",
+      "argument of CASE/WHEN must be type boolean, not type integer",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN 'bad' THEN 1 ELSE 2 END AS value WHERE false",
+    "reference": [
+      [],
+      "22P02",
+      "invalid input syntax for type boolean: \"bad\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CASE 1 WHEN 'bad' THEN 1 ELSE 2 END AS value WHERE false",
+    "reference": [
+      [],
+      "22P02",
+      "invalid input syntax for type integer: \"bad\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN true THEN NULL ELSE CAST('A' AS \"char\") END AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        18
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN false THEN NULL ELSE CAST('A' AS \"char\") END AS value",
+    "reference": [
+      [
+        [
+          "A"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        18
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN true THEN CAST('A' AS \"char\") ELSE CAST('B' AS \"char\") END AS value",
+    "reference": [
+      [
+        [
+          "A"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        18
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN true THEN NULL ELSE ARRAY[1::bigint,2::bigint] END AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1016
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN false THEN NULL ELSE ARRAY[1::bigint,2::bigint] END AS value",
+    "reference": [
+      [
+        [
+          "{1,2}"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1016
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN true THEN NULL ELSE CAST('0.125' AS numeric) END AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1700
+      ]
+    ]
+  }
+]

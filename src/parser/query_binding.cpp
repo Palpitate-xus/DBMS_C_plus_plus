@@ -768,7 +768,10 @@ public:
             coerceCaseInput(conditional->elseExpr,elseType,type);
             for (size_t i=0;i<thenTypes.size();++i)
                 coerceCaseInput(conditional->whenClauses[i].second,thenTypes[i],type);
-            return type;
+            // The common result owns a real catalog identity too. Preserve
+            // the existing enum owner; builtin CASE results must not become
+            // descriptor OID0 merely because their root is not a CAST.
+            return resultEnum?type:declaredType(type,conditional);
         }
         case ExprType::ArrayExpr: {
             auto* array = static_cast<ArrayExpr*>(node.get());
