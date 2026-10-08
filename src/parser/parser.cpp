@@ -24,6 +24,16 @@ struct BindingParseContext {
     std::unordered_map<const std::string*, TokenProvenance> tokens;
 };
 thread_local BindingParseContext* bindingParse = nullptr;
+thread_local std::string* declarationSyntaxError = nullptr;
+struct DeclarationSyntaxAbort {};
+static void retainDeclarationSyntaxError(const DbError& error) {
+    if(declarationSyntaxError) {
+        if(declarationSyntaxError->empty())*declarationSyntaxError=error.what();
+        // Stop this parse rather than return an unconsumed/null expression
+        // to a SELECT/CASE/function loop. The public parse API catches this.
+        throw DeclarationSyntaxAbort{};
+    }
+}
 struct BindingSourceScope {
     size_t oldBase = 0;
     explicit BindingSourceScope(size_t leading) {
@@ -189,6 +199,25 @@ static ColumnDef consumeDeclaredType(const std::vector<std::string>& tokens,
         if (pos >= tokens.size() || needsValue)
             throw DbError("42601", "invalid type modifier list");
         ++pos;
+    }
+    if (!qualified && !quoted && initial == "float") {
+        // FLOAT(p) selects a physical IEEE type; p is not a runtime typmod.
+        // SQL's omitted precision is float8, 1..24 chooses float4, 25..53
+        // chooses float8. Its grammar accepts one unsigned integer only.
+        unsigned precision = 53;
+        if (!definition.typeMods.empty()) {
+            const auto& modifier = definition.typeMods.front();
+            if (definition.typeMods.size() != 1 || modifier.empty() ||
+                !std::all_of(modifier.begin(), modifier.end(), [](unsigned char c) { return std::isdigit(c); }))
+                throw DbError("42601", "FLOAT precision requires one unsigned integer");
+            const auto parsed = std::from_chars(modifier.data(), modifier.data()+modifier.size(), precision);
+            if (parsed.ec != std::errc() || parsed.ptr != modifier.data()+modifier.size())
+                throw DbError("22023", "precision for type float must be less than 54 bits");
+        }
+        if (precision < 1) throw DbError("22023", "precision for type float must be at least 1 bit");
+        if (precision > 53) throw DbError("22023", "precision for type float must be less than 54 bits");
+        definition.typeName = precision <= 24 ? "real" : "double precision";
+        definition.typeMods.clear();
     }
     if (!qualified && !quoted && (initial == "time" || initial == "timestamp") &&
         pos + 2 < tokens.size()) {
@@ -1578,6 +1607,12 @@ SqlCommand SQLParser::classify(const std::string& sql) {
 // ============================================================================
 
 ParseResult SQLParser::parse(const std::string& inputSql) {
+    std::string declarationError;
+    auto* previousError=declarationSyntaxError;
+    declarationSyntaxError=&declarationError;
+    struct RestoreError {std::string* previous;~RestoreError(){declarationSyntaxError=previous;}} restoreError{previousError};
+    ParseResult parsed;
+    try { parsed=[&]() -> ParseResult {
     ParseResult result;
     result.originalSql = inputSql;
     const size_t offset = skipLeadingSqlTrivia(inputSql);
@@ -1797,6 +1832,16 @@ ParseResult SQLParser::parse(const std::string& inputSql) {
             result.error = "unknown or unsupported SQL command";
             return result;
     }
+    }(); } catch(const DeclarationSyntaxAbort&) {}
+    if(!declarationError.empty()) {
+        parsed.success=false;
+        parsed.stmt.reset();
+        parsed.originalSql=inputSql;
+        parsed.error=declarationError;
+        parsed.sqlState="42601";
+        if(previousError && previousError->empty())*previousError=declarationError;
+    }
+    return parsed;
 }
 
 ParseResult SQLParser::parseForBinding(const std::string& sql) {
@@ -2291,7 +2336,7 @@ static ExprPtr parseCastExpr(const std::vector<std::string>& tokens, size_t& pos
         ColumnDef declaration;
         try {declaration=consumeDeclaredType(tokens,pos);}
         catch(const DbError& error) {
-            if(error.sqlState()=="42601")return nullptr;
+            if(error.sqlState()=="42601"){retainDeclarationSyntaxError(error);return nullptr;}
             throw;
         }
         const std::string typeName=renderDeclaredType(declaration);
@@ -2423,7 +2468,7 @@ static ExprPtr parsePrimaryExprImpl(const std::vector<std::string>& tokens, size
             ColumnDef declaration;
             try {declaration=consumeDeclaredType(tokens,pos);}
             catch(const DbError& error) {
-                if(error.sqlState()=="42601")return nullptr;
+                if(error.sqlState()=="42601"){retainDeclarationSyntaxError(error);return nullptr;}
                 throw;
             }
             if (pos < tokens.size() && tokens[pos] == ")") {
@@ -2436,6 +2481,13 @@ static ExprPtr parsePrimaryExprImpl(const std::vector<std::string>& tokens, size
             }
         }
         pos = save; // fall through to generic handling on malformed input
+    }
+    // ARRAY's expression grammar owns '[' and its value children before
+    // any speculative declared-type suffix/constant parsing.
+    if (SQLParser::toLower(tokens[pos]) == "array" && pos + 1 < tokens.size()
+        && tokens[pos + 1] == "[") {
+        ++pos;
+        return parseArrayConstructorContents(tokens, pos);
     }
     // A declared type followed by a real string constant is a type-input
     // grammar role, including named/qualified/quoted and modified types.
@@ -2454,17 +2506,16 @@ static ExprPtr parsePrimaryExprImpl(const std::vector<std::string>& tokens, size
             }
         } catch(const DbError& error) {
             if(error.sqlState()!="42601")throw;
+            // A following string proves this is type input, not a function
+            // call. Its malformed declaration must not fall through to a
+            // scalar callee or a successful SELECT with a null AST item.
+            if(typeEnd>pos && typeEnd<tokens.size() && tokens[typeEnd].size()>=2 &&
+                tokens[typeEnd].front()=='\'' && tokens[typeEnd].back()=='\'') {
+                retainDeclarationSyntaxError(error);return nullptr;
+            }
             // This may instead be ordinary CASE/ARRAY/operator/function
             // syntax. Its actual expression owner supplies any diagnosis.
         }
-    }
-
-    // ARRAY is grammar, not a user-visible function name. Retain its actual
-    // value children so pure preparation can choose a fixed element type.
-    if (SQLParser::toLower(tokens[pos]) == "array" && pos + 1 < tokens.size()
-        && tokens[pos + 1] == "[") {
-        ++pos;
-        return parseArrayConstructorContents(tokens, pos);
     }
 
     // CASE expression

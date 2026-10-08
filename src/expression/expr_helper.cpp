@@ -2294,6 +2294,7 @@ static ExprEvalResult evalStringImpl(
     ParseResult pr = parser.parse("SELECT " + sql);
     if (!pr.success || !pr.stmt) {
         res.error = pr.error.empty() ? "failed to parse expression" : pr.error;
+        res.sqlState = pr.sqlState;
         return res;
     }
 

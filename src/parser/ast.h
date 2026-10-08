@@ -1529,6 +1529,9 @@ struct ParseResult {
     std::string error;
     StmtPtr stmt;              // 解析后的 AST
     std::string originalSql;   // 原始 SQL（保留大小写和格式）
+    // Structured parser diagnostic; appended for existing aggregate callers.
+    // Empty retains the legacy diagnostic contract where not yet supplied.
+    std::string sqlState;
 
     bool isValid() const { return success && stmt != nullptr; }
     SqlCommand command() const { return stmt ? stmt->command : SqlCommand::Unknown; }
