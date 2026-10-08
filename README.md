@@ -132,13 +132,7 @@ cmake --build build/cmake --target check
 bash scripts/build_one_test.sh window_functions_test
 ```
 
-校验能力清单与机器可读记录的一致性：
-
-```bash
-python3 scripts/check_gap_progress.py
-```
-
-请保留实际运行的命令、代码提交、环境与完整输出，便于复现测试结果。专项测试的先决条件以对应脚本和测试说明为准。
+专项测试的依赖与运行方式以对应脚本和测试说明为准。报告测试问题时，请附上运行命令、环境与相关输出，便于复现。
 
 ## 项目结构
 
@@ -164,7 +158,7 @@ docs/              # 使用、兼容性与开发文档
 
 - [使用手册](docs/MANUAL.md)：SQL 与操作说明。
 - [兼容性契约](docs/compatibility-contract.md)：SQL、协议及扩展模式的边界。
-- [兼容性审计](docs/postgresql-18-gap-audit.md)与[验证记录](docs/gap-progress.json)：供开发与复查使用，不在 README 重复进度或测试结果。
+- [兼容性清单](docs/postgresql-18-gap-audit.md)与[验证索引](docs/gap-progress.json)：开发者参考，可用[一致性检查脚本](scripts/check_gap_progress.py)校验。
 - [打包与部署](docs/PACKAGING.md)：源码包、数据目录和配置约定。
 - [CHANGELOG](CHANGELOG.md)：版本变更记录。
 
@@ -186,7 +180,7 @@ docs/              # 使用、兼容性与开发文档
 - 保持每个提交独立、易复查，避免混入无关修改。
 - 新增生产源码时同步 `cmake/dbms_sources.txt`。
 - 新增测试时接入对应测试入口。
-- 更新受影响的使用文档；版本变更和测试证据分别放入 CHANGELOG 与专项记录，不在 README 保存阶段性快照。
+- 更新受影响的使用文档，并在 CHANGELOG 中记录面向用户的变更。
 
 ## 许可证
 
