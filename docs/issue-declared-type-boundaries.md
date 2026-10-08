@@ -349,16 +349,66 @@ type names and cannot resolve some real physical names. Its SQL, actual
 PostgreSQL18.6 records and baseline are preserved in the Root publication
 artifact directory. A new permanent104 simple-protocol fixture also reproduces
 eight OID errors for real name/array types on frozen Root; owned PG18.6 passes
-all104. A shared genuine builtin catalog producer is implemented but still
-uncommitted at `/tmp/dbms-root-cold-catalog.MLUxaZbL/repo`; public catalog and
-declared-type headers changed, so its own all58 are rebuilding (17384).
-New native525 retains all104 declarations across standalone, cold helper,
+all104. Independent private `ff8f0889` commits the shared genuine builtin
+catalog producer at `/tmp/dbms-root-cold-catalog.MLUxaZbL/repo`. Public catalog
+and declared-type headers changed; its own fresh58 normal build17384 completed0.
+New native526 retains all104 declarations across standalone, cold helper,
 cold prepare, copied warm catalog and warm prepare roles, and verifies cold
-lookup has no catalog side effects and real initialization uses those same
-definitions. No candidate test success or master import is claimed yet.
-Continue a shared genuine builtin catalog producer, not
-an alias blacklist or synthetic runtime catalog. This additional red scope
-does not invalidate the unchanged55/40/384 composition results or close
+lookup has no catalog/cache/directory/file-byte side effects and real
+initialization uses those same definitions. Native526 and wire104 now pass;
+complete native56 (43937), wire41 (23754) and original384 on owned180006 (97634)
+all completed0 on the sealed generation. All58 own current receipts/cache/
+no-recompile repeat/frozen bytes are verified, binary/input seal:
+`26e8200be4b6acbd18ab816fb51b2c2c0df44ca35880e7673ac335831cf905fe` /
+`2370a492f67165a058da57f76cd6e5a5befdae3c2d896057895fee14d48f2339`.
+This is a shared real bootstrap definition producer, not an alias blacklist or
+synthetic runtime catalog. It has not been imported into Root while its full
+standard driver is running.
+
+The Root standard driver remains live and has actual failures, not full-suite
+success. At this checkpoint its unchanged native fixtures have failed in
+array_functions, bpchar_array_type_alias, case_common_type, date_functions,
+enum_quoted_type_identity and expression_evaluator. All original failure logs
+are preserved; no original SQL/expected values/OIDs/counts/deadlines were
+removed. The enum fixture's existing full-driver failure is retained without
+restarting the separately held/filtered creator branches.
+
+Independent private `50d5a1c2` fixes a genuine public-AST NULL regression found
+by that full run: a legacy literal with unquoted NULL value and null type
+annotation is a sentinel, not a SQL type declaration. Pure inference, cold
+routine-type collection and default naming now preserve that role. Quoted
+text, invalid null declarations and real typed annotations remain distinct.
+New native36 reproduces27 failures on exact current ff8 objects/headers and
+now passes; the unchanged full array_functions fixture failed on Root and
+ff8 and now passes. Bytea/encoding/string library fixtures and physical526
+also pass. An exploratory math_functions invocation still fails22003; this
+is retained, not called a five-library PASS or removed from the full driver.
+The original date fixture's invalid typed timestamp fails22008; verify its
+actual PostgreSQL semantics before deciding whether code or expectations
+need correction. The old bpchar fixture asserts that quoted internal char
+is unregistered, contradicting the now-implemented separate OID18 type;
+its update must preserve or strengthen real char/bpchar identity assertions.
+
+The NULL repair rebuilt one ExprHelper CPP against57 own unchanged current
+source/header/flag objects, not a new fresh58. All58 receipts/cache/repeat/
+frozen bytes are verified, binary/input seal:
+`855a0645be39eacad2d5f7e890f4e08a487662e0e5095dcab63cf6b97d9dfdb7` /
+`3e3c0c1c236a3d408d1029bbe0a8481d84dc41d728bf5f0b89b05fa2ecd27aa5`.
+Original384 on this generation also finishes0. Complete native61 (30929) and
+wire41 (59212) gates are running; no success is claimed for these pending
+gates. Private inventory is748 auto-native+2 Main frontends/413 registered/
+58TU, not the Root746+2/412/58 inventory. Both private follow-ups are locally
+committed; neither is a Root source publication or whole-family completion.
+
+The CASE cold failure is reproduced by the unchanged full case_common_type
+fixture: its third positive case (NULL versus BIGINT) raisesXX000 because
+the operator base-type callback receives a genuine builtin OID but looks
+only in an uninitialized catalog snapshot. Continue a shared genuine builtin
+metadata lookup there without initializing/writing a catalog, inventing
+custom/domain/enum rows or weakening the original fourteen positives and
+eight negative controls. Expression-evaluator and other full-driver failures
+still require independent reproduction and repairs. These additional scopes
+do not invalidate the unchanged focused composition results or close
 TYPE-11/21. Binary I/O, arrays beyond these catalog links, custom types/domains
 and all other original273 requirements remain open. Original items are
 unchanged:22 complete,166 partial,70 unverified,15 deferred_by_user. No push,
