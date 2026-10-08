@@ -35679,7 +35679,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         // the default frame ends at the current row (RANGE
                         // ... CURRENT ROW extends to peers): the nth row must
                         // lie within partStart..frameEnd, else NULL.
-                        size_t frameEnd = i;
+                        // Without ORDER BY every partition row is a peer,
+                        // so the default RANGE end includes the whole partition.
+                        // Explicit ROWS bounds still start from the current row.
+                        size_t frameEnd = !wf.hasFrame && wf.orderByCol.empty() ? partEnd : i;
                         if (wf.hasFrame) {
                             // Explicit frame: honor ROWS offsets; peer-extension
                             // only applies to RANGE-style CURRENT ROW ends.
