@@ -1,4 +1,32 @@
-# Latest1866 checkpoint:118 independently committed source/test repairs
+# Latestea67 checkpoint:123 independently committed source/test repairs
+
+Current source `ea67ad29`:728auto-native+two real Main frontends/
+402registered whole wrappers/58TU. Four independent production commits
+ff7732eb/fb580c20/40edf12e/ea67ad29 repair physical BIT UNKNOWN input,
+declared scalar parameter Parse ownership, reverse physical comparisons and
+SQL NULL qualification demand; separate8798490a corrects genuine INTEGER
+factory without dropping original613 controls. All five remain individual.
+
+Normal84086=0 actual4freshCPP54individually currentRoot118 source/header/
+flags/compiler/manifest/original58-receipt/objectbyte-proved normal donors,
+NOTfresh58; all58 own receipts/cache/input seal/freeze/repeat0, actual048cSHA.
+Complete34freshnative24253/28whole3004/owned180006strict15 93608 all0.
+ActualRoot118 baselines3native60193=1/531,0,225;6whole63382=1/all6 remain.
+Originalfull384paired89931=1/16VARBIT typed-literal reds, parent32 23668=1
+onlysame2old COUNT FILTER0A000. Actualpublication25665 all58 proved migration/
+ownpath receipts/relink/repeat0fresh=0; old3194recoverable. DirectactualRoot
+complete28 59889 finishes0, all58 receipts/stamp/input seal/frozen bytes
+unchanged before/after. Full mapping:
+`docs/issue-bit-null-current-root-composition.md`.
+
+All original273items/hash/statuses unchanged22complete166partial70unverified
+15deferred/gate rejects. Current123 originalfull/SAN not claimed; old failed
+INTEGER87full88 andsource80full42496 retained, scoped34/28 not replacements.
+Next genuine TypeName/catalog/typmod/OID and MINMAX/customOID plus every
+original unmet owner continue. No assistantpush/Actions/skippedsecurityTDE/
+filtered fixture restart or full-family closure.
+
+# Historical1866 checkpoint:118 independently committed source/test repairs
 
 Current source `18664795`:725 auto-native plus two actual Main frontends /
 396 registered whole wrappers /58 production TUs. Seven independent production

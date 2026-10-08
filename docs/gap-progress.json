@@ -2,6 +2,21 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "123 independently committed ROOT source/test repairs throughea67: physical BIT input, declared scalar Parse source, reverse comparison owner and actual SQL NULL qualification",
+      "gap_ids": ["TYPE-11", "TYPE-02", "SQL-05", "QRY-01", "PROTO-04", "PROTO-05"],
+      "status": "partial",
+      "commits": ["ff7732eb", "8798490a", "fb580c20", "40edf12e", "ea67ad29"],
+      "evidence": ["docs/issue-bit-null-current-root-composition.md", "docs/issue-physical-bit-unknown-input.md", "docs/issue-bit-scalar-parameter-source.md", "docs/issue-bit-reverse-comparison-owner.md", "docs/issue-scalar-sql-null-condition-carrier.md"],
+      "tests": ["tests/bit_scalar_unknown_input_test.cpp", "tests/bit_scalar_parameter_binding_test.cpp", "tests/scalar_sql_null_predicate_test.cpp", "tests/bit_scalar_unknown_input_protocol_e2e_test.py", "tests/bit_scalar_parameter_source_protocol_e2e_test.py", "tests/bit_scalar_parameter_effects_protocol_e2e_test.py", "tests/bit_reverse_comparison_protocol_e2e_test.py", "tests/scalar_sql_null_predicate_protocol_e2e_test.py", "tests/scalar_sql_null_preparation_protocol_e2e_test.py"],
+      "verification": {
+        "reproduction": "ActualRoot1183native baseline60193=1/all3 reached613/531fail,112/0,376/225fail. Same actualRoot1186whole63382=1/all6:431/111,396/56 Parse priority failures,31/2,878/244,442/32,117/11. Same strict ownedPG1800066whole16077=0 with432/284/32/879/443/118 fullcontrols. Native112 alreadygreen beforeParse guard; not nativebinderbug. All baselines preserved, wrong admittedParse increases actualphase recordcount rather than shortenedfixture.",
+        "fix": "Four independently reviewed exactRoot production issues plus one independent actualINTEGER factory correction, all5commitsFF. Actualphysical schema andSQLLiteral UNKNOWN codecs beforeindexscanORcap; declaredOID BIT scalarParse usesgenuineASTwholebinder and currentMetadataPlaceholder carrier; actualreversephysical comparison owner andlowercaseANDOR receiver contract; genuineSQLNULL carrier andWHERE-only strictness/truth demand whileNOTCASEvalue/runtimeParam/sourceNULL rolesretained. Solethreefixture registry conflict exactunion; allcurrentRootpublicheads/origin-child-context-memo/INTEGER/window/defaultpeer/enum/FETCH/typedNULLBind/TEXTwidth/sourcecoords retained.",
+        "focused_tests": "Normal84086=0 exact4freshCPP54individuallycurrentRoot118 source-header-compiler-flags-manifest-original58-receipt-objectbyte-proved normaldonors, noold104ABIobjects/notfresh58; ownall58cache/repeat/seal/freeze0 SHA048c38de9ea8f5867612930e733126823b144172d61b0f42701b817c54bcd40b. Complete34freshnative24253/28whole3004/strict15 93608 all0/defaultdisk/deadlines, includingoriginal9649 incl70/61/211 andpreceding22whole. ActualRootpublication25665=0 all58matchednormalbytes migration/ownabsolute-path receipts/relink/repeat0fresh, actualfrozenSHA/old3194recoverable. DirectactualRoot28 59889=0 alloriginalfixtures/all58ownreceipts-stamp-inputseal-frozenbytes unchangedbeforeafter.",
+        "full_suite": "Actual728auto-native+2realMainfrontends/402registered/58TU/123Root independent source-test repairs. Scoped34/28 not currentoriginalfull/SAN orfamilyclosure; historical INTEGER87full88actual1 andsource80full42496actual1/all1043 remainfailed/nonreplacement.",
+        "scope": "Immutable original384 paired89931=1 exactly16VARBIT typed-literal grammar/type-owner differences; fullparent32 23668=1 onlysame2oldCOUNT FILTER0A000, other30 rowcomputedNULL effectsunchanged. Original273items/hash/statuses22complete166partial70unverified15deferred unchanged/gate rejects. ActualVARBITTypeName/catalog/typmods/inputOID/OID0/custom-domain-operator/MINMAX/customenumOID/COUNT/CTE/scalar/UNKNOWN/alloriginalcatalog-query-storage-recovery-ops unclosed. No assistantpush/Actions/skippedsecurityTDE/filteredfixture restart oroverallcompletion."
+      }
+    },
+    {
       "issue": "118 independently committed ROOT source/test repairs through1866: genuine parameter provenance, typed children, runtime contexts and INTEGER inputs/descriptors/output",
       "gap_ids": ["TYPE-02", "TYPE-11", "SQL-05", "QRY-01", "PROTO-04", "PROTO-05"],
       "status": "partial",

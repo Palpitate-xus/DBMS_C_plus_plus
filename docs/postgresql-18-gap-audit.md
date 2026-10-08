@@ -1,4 +1,32 @@
-# 2026-10-08 最新1866总清单 checkpoint
+# 2026-10-08 最新ea67总清单 checkpoint
+
+当前sourceea67ad29：728auto-native+实际Main frontend2/402registered/58TU，
+123项独立Root source/test修复=原118+四production+一真正INTEGER factory更正。
+独立ff77物理BIT UNKNOWN输入/index/scan/OR/cap；fb58声明BIT标量参数Parse
+与实际MetadataPlaceholder角色；40ed反向BIT/TEXT physical owner；ea67真正
+SQL NULL nullable carrier与WHERE专属需求；8798保完整613断言纠正factory。
+不替换公共头/旧ABI/现origin-child-context/memo/INTEGER/window/enum/FETCH字段。
+
+actualRoot118全三native基线60193真1/613531错、1120错、376225错；
+完整六whole63382真1/all6，strict180006完整六16077全0。正常84086实际4freshCPP
++54自身当前Root118逐源/头/flags/compiler/manifest/原58receipts/bytes证明normal
+对象，all58/cache/seal/freeze/repeat0，全0非fresh58。完整34freshnative24253、
+28whole3004、strict完整15 93608全0，原9649含70/61/211及全部preceding22保全。
+immutable原384 paired89931真1/16VARBIT typed-literal仍红，parent32 23668仍1
+仅同两旧COUNT FILTER0A000；不冒全部type/query族闭环。
+
+主目录FF五独立commit，publication25665匹配58正常对象证明迁移/自身path receipts/
+relink/repeat零fresh全0，actual/frozen048cSHA/old3194可恢复；直接实际Root完整28
+59889真0/all58 receipts/stamp/input seal/frozen bytes前后不变。
+原273 items/hash/statuses不变22complete166partial70unverified
+15deferred/完成gate拒绝；123原full/SAN未跑，历史INTEGER87full88真1与
+source80full42496真1/all1043保留，不被scoped34/28替代。
+全范围及出处：`docs/issue-bit-null-current-root-composition.md`。
+下一真实VARBIT TypeName/catalog/typmods/inputOID、MINMAX/customOID、COUNT/
+CTE/scalar/UNKNOWN/catalog/query/storage/recovery/ops及全部原未闭环继续。
+不assistantpush/启用Actions/安全TDE或filtered fixture重启，不冒总目标完成。
+
+# 2026-10-08 历史1866总清单 checkpoint
 
 当前source18664795：725auto-native+实际Main frontend2/396registered/58TU，
 118项独立Root source/test修复=原110+七项production+一项真正INTEGER覆盖更正。

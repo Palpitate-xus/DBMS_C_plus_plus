@@ -4,7 +4,25 @@
 
 # 工作区与复查清单收尾计划
 
-## 2026-10-08 当前完整273目标计划（1866；以下较早记录均历史）
+## 2026-10-08 当前完整273目标计划（ea67；以下较早记录均历史）
+
+当前sourceea67ad29，728auto+实际Main frontend2/402registered/58TU，123独立
+Root source/test修复；原273全部scope、每原红和跳过项保留。
+
+| 阶段 | 原要求 / 下一动作 | 当前真实终态证据 |
+| --- | --- | --- |
+| 每真实根因逐commit | 个别commit、用户push | ff77/fb58/40ed/ea67四production，8798单独factory更正；master仅FF |
+| 当前真实ABI和组合 | physical input/Parse声明/NULL真角色/需求 | 84086 actual4freshCPP54当期Root118逐对象证明normal，all58/repeat/seal0；34native24253/28whole3004/strict15 93608全0 |
+| 主目录程序 | matching58/自身receipts/直接复测 | publication25665全58证明迁移/relink/repeat零fresh0，048cSHA/old3194可恢复；direct28 59889真0/all58及inputs/freeze前后不变 |
+| 保留全部原红 | 不冒type/SQL/family/full闭环 | 真original384paired89931=1/16VARBIT literal；parent32仅两旧COUNT FILTER；历史INTEGER87full88和source80full1不改绿 |
+| 下一真实类型owner | VARBIT TypeName/catalog/typmods/inputOID/OID0 | 稳定新Root Origin及fb58 MetadataPlaceholder，按actual grammar/catalog/input桥修，不用类型名猜；16原SQL/完整强矩阵不减 |
+| 其它每原scope | MINMAX/customOID/COUNT/CTE/scalar/UNKNOWN/catalog/storage/recovery/ops | 原273不变22complete166partial70unverified15deferred/gate拒绝，123原full/SAN未跑，逐项根因/测试/commit继续 |
+
+当前direct28已实际终0，总账QA后commit证据；继续上述所有原未闭环。完整出处：
+`docs/issue-bit-null-current-root-composition.md`。不assistantpush/启用Actions/
+用户跳过securityTDE或filtered fixture重启。
+
+## 2026-10-08 历史完整273目标计划（1866）
 
 当前source18664795，725auto+实际Main frontend2/396registered/58TU，118项独立
 Root source/test修复。README9603维护不计；原273完整scope和每旧红保留。
