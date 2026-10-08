@@ -52,6 +52,45 @@ Current40 native and31 protocol composition gates are running on that exact
 generation; their final results are not yet claimed. They do not substitute
 for the broader registered boundary fixture, which is red.
 
+## Follow-up results: argument ownership, modifiers and keyword grammar
+
+The above epoch4 composition subsequently completed:31 protocol fixtures
+passed, but40 native fixtures had one real failure in
+`enum_aggregate_argument_binding` (invalid type modifier separator).
+Do not relabel that generation as green.
+
+Three further independent local commits address genuine observed causes:
+
+| Commit / exact cause | Actual verification |
+| --- | --- |
+| `213d37dc`: a string inside unclosed function arguments is not a constant following a complete type prefix | Matching-header prior parser native12 failed8, current12 passed; original failed enum aggregate argument fixture, FLOAT70 and syntax60 all passed. One Parser CPP rebuilt,57 unchanged own current objects/headers verified. Full75 remained19 differences. |
+| `b619d350`: keyword modifier grammar and genuine registered input capability; retain raw declaration role for literal conversion | Original native90 failed36; current90 passed; owned180006 exact30 reference passed. Five complete native fixtures and full45 passed; full75 improved19 to11. Initial candidate's12 literal re-normalization failures are preserved. |
+| `f54cae24`: real PG18.6 keyword category eligibility before generic type input, preserving quoted identifiers and expression grammar | Exact254 matching-header baseline failed129, current254 passed; five complete native fixtures/full45 passed, full75 improved11 to7. Categories come from actual owned `pg_get_keywords()` records, not a known-type-name whitelist. |
+
+The initial argument-baseline attempt wrongly used an older public-header
+Parser object and aborted with an invalid pointer. It is discarded as ABI
+evidence, preserved, and not called a product reproduction. The corrected
+baseline compiles the exact predecessor Parser source, checked by byte
+comparison to git, against the actual current headers and matching own objects.
+
+Latest artifacts: `/tmp/dbms-root-type-modifiers.iAKKIfgU`.
+This worktree genuinely recompiled all58 after the declared-type header
+change; literal-role repair rebuilt ExprEvaluator only, then keyword repair
+rebuilt Parser only. All58 own source/header/compiler/flags/manifest receipts,
+normal cache/repeat and frozen bytes are verified. Latest binary SHA-256:
+`df383b14bc6f11be306c768867b3376a9e138268ce5e23c4f8e63d0c76a79a0d`.
+Latest input seal:
+`a968296abbe812edfc522d7c4f860e04726327dc7031a49680f0029caefdaf20`.
+Original384 passed again on this exact latest generation. Full43 native and31
+protocol composition gates are running; no final result is claimed for them.
+
+Remaining exact7 in the unchanged full75:three named bpchar/qualified bit
+default-length queries and four internal `"char"` identity/input queries.
+Continue their actual declaration-role and catalog-owned input/descriptor
+repairs, retaining all75/45/384 and prior failure logs. Other modifier/type
+boundaries, custom types, domains and all original273 requirements remain in
+scope. None of these candidate commits has been imported into master.
+
 ## Remaining exact19 and next actions
 
 | Root cause | Failed queries in the complete75 | Required repair |
