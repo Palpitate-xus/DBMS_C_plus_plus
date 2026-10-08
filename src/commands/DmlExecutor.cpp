@@ -5518,7 +5518,9 @@ class BoundDmlExecution {
     }
     static bool rowIndependentPredicate(const Expr* value) {
         if(!value || value->preparedSubquery)return false;
-        if(dynamic_cast<const LiteralExpr*>(value) || dynamic_cast<const ParameterExpr*>(value))return true;
+        if(dynamic_cast<const LiteralExpr*>(value))return true;
+        if(const auto* parameter=dynamic_cast<const ParameterExpr*>(value))
+            return parameter->origin==ParameterOrigin::StatementInput;
         if(const auto* unary=dynamic_cast<const UnaryOpExpr*>(value))return rowIndependentPredicate(unary->operand.get());
         if(const auto* cast=dynamic_cast<const CastExpr*>(value))return rowIndependentPredicate(cast->operand.get());
         if(const auto* binary=dynamic_cast<const BinaryOpExpr*>(value))

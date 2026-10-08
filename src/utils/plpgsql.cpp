@@ -932,6 +932,7 @@ struct Interp {
             const auto dot = name.find('.');
             QueryBindingDatum datum;
             datum.identity = "implicit:" + name;
+            datum.origin = ParameterOrigin::StatementInput;
             datum.name = dot == std::string::npos ? name : name.substr(dot + 1);
             if (dot != std::string::npos) datum.qualifiers.push_back(name.substr(0, dot));
             datum.visible = dot == std::string::npos;
@@ -949,6 +950,7 @@ struct Interp {
         for (const auto& declaration : declarations) {
             QueryBindingDatum datum;
             datum.identity = identity + ":" + declaration.name;
+            datum.origin = ParameterOrigin::StatementInput;
             datum.name = declaration.name; datum.type = declaration.type;
             if (!label.empty()) datum.qualifiers.push_back(label);
             frame.datums.emplace(declaration.name, std::move(datum));
@@ -975,6 +977,7 @@ struct Interp {
         for (const auto& [name, value] : params) {
             QueryBindingDatum datum;
             datum.identity = "parameter:" + name; datum.name = name;
+            datum.origin = ParameterOrigin::StatementInput;
             datum.type = variableTypes.count(name) ? variableTypes[name] : "text";
             datum.value = value;
             if (!host.functionLabel.empty()) datum.qualifiers.push_back(host.functionLabel);

@@ -26,6 +26,9 @@ struct QueryBindingDatum {
     bool visible = true;                // false for a shadowed outer datum
     std::optional<std::string> value;
     size_t position = 0;                // $n alias of a function parameter
+    // Existing public datum initializers describe statement-owned frozen
+    // inputs. Synthetic runtime/metadata producers override this explicitly.
+    ParameterOrigin origin = ParameterOrigin::StatementInput;
 };
 struct QueryEnumType {
     std::string identity, typeName;

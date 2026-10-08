@@ -4995,11 +4995,12 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
         const std::function<bool(const Expr*)> nullInput = [&](const Expr* expression) {
             if (!expression || expression->preparedSubquery) return false;
             if (between_input_detail::nullConstant(expression)) return true;
-            // Bound parameter cells are owned, immutable input datums, not a
-            // row/provider callback. Inspect only the NULL flag after Bind;
-            // never evaluate an expression to infer preparation-time NULL.
+            // Only actual statement inputs are immutable after Bind. Runtime
+            // rows/aggregate cells and metadata placeholders keep peer demand;
+            // never execute an expression to infer preparation-time NULL.
             if (const auto* parameter = dynamic_cast<const ParameterExpr*>(expression))
-                return ctx.parameter(parameter->slot).isNull;
+                return parameter->origin == ParameterOrigin::StatementInput &&
+                    ctx.parameter(parameter->slot).isNull;
             if (const auto* cast = dynamic_cast<const CastExpr*>(expression))
                 return cast->typeMods.empty() && between_input_detail::primitiveType(cast->typeName) &&
                     nullInput(cast->operand.get());

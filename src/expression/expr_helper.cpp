@@ -1138,7 +1138,8 @@ std::string ExprHelper::scalarExpressionIdentity(
             return "prepared-child-site" + field(std::to_string(reinterpret_cast<uintptr_t>(node)));
         if (const auto* parameter = dynamic_cast<const ParameterExpr*>(node)) {
             if (parameter->declaredType.empty()) throw DbError("0A000", "parameter identity requires a prepared typed slot");
-            return "parameter" + field(std::to_string(parameter->slot)) + field(parameter->declaredType);
+            return "parameter" + field(std::to_string(parameter->slot)) + field(parameter->declaredType) +
+                field(std::to_string(static_cast<unsigned>(parameter->origin)));
         }
         if (const auto* column = dynamic_cast<const ColumnRefExpr*>(node))
             return "column" + field(columnIdentity(*column));

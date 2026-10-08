@@ -92,6 +92,7 @@ std::string bindDomainCheck(const std::string& db, const std::string& check,
     value.identity = "domain-value";
     value.name = "value";
     value.type = baseType;
+    value.origin = ParameterOrigin::MetadataPlaceholder;
     const auto prepared = g_engine.prepareBoundQuery(db, prefix + check, {value});
     if (prepared.output.size() != 1 ||
         ExprHelper::canonicalResultTypeName(prepared.output[0].type) != "boolean")

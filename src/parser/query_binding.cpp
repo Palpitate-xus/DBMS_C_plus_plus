@@ -121,6 +121,7 @@ public:
             datum.value.value_or(""), !datum.value.has_value());
         auto bound = std::make_unique<ParameterExpr>();
         bound->slot = position->second; bound->declaredType = datum.type;
+        bound->origin = datum.origin;
         bound->sourceBegin = node->sourceBegin; bound->sourceEnd = node->sourceEnd;
         result.uses.push_back({bound->sourceBegin, bound->sourceEnd, bound->slot});
         node = std::move(bound); return datum.type;

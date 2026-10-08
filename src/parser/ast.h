@@ -291,11 +291,17 @@ public:
 
 using ExprPtr = std::unique_ptr<Expr>;
 
+// A typed execution cell is not necessarily a statement Bind input. Runtime
+// row/aggregate/array/set cells and metadata-only placeholders must retain
+// their demand even when their current datum is NULL.
+enum class ParameterOrigin { RuntimeCell, StatementInput, MetadataPlaceholder };
+
 // Prepared parameters are typed cells, not identifier strings or literals.
 // Slots are zero based and retain their declared type even for SQL NULL.
 struct ParameterExpr : Expr {
     size_t slot = 0;
     std::string declaredType;
+    ParameterOrigin origin = ParameterOrigin::RuntimeCell;
     ParameterExpr() { type = ExprType::Parameter; }
     std::string toString() const override { return "$" + std::to_string(slot + 1); }
 };

@@ -66,6 +66,8 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/bit_between_cast_parameter_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/bit_between_demand_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/bit_between_demand_parameter_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/parameter_input_origin_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/parameter_origin_correlated_child_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/prepared_primitive_assignment_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/cte_clause_boundary_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/cte_relation_scope_protocol_e2e_test.py)

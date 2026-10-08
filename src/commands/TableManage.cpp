@@ -9488,6 +9488,7 @@ static bool normalizeArray(const std::string& in, const std::string& elemType, s
         if (cast.typeName.size() >= 2 && cast.typeName.compare(cast.typeName.size()-2,2,"[]") == 0)
             cast.typeName.resize(cast.typeName.size()-2);
         auto parameter=std::make_unique<ParameterExpr>();parameter->declaredType="unknown";
+        parameter->origin=ParameterOrigin::RuntimeCell;
         cast.operand=std::move(parameter);
         const auto convert=[&](const std::string& value) {
             RowContext row;row.setParameters({ExprValue("unknown",value,false)});
@@ -18196,6 +18197,7 @@ DBStatus StorageEngine::alterTableAlterColumnType(const std::string& dbname,
     elementCast.typeName = ExprHelper::canonicalResultTypeName(target.dataType);
     elementCast.typeMods = typeMods;
     auto elementParameter = std::make_unique<ParameterExpr>();
+    elementParameter->origin = ParameterOrigin::RuntimeCell;
     elementParameter->declaredType = ExprHelper::canonicalResultTypeName(tbl.cols[colIdx].dataType);
     elementCast.operand = std::move(elementParameter);
     // Native callers have a character width in Column rather than a parsed
@@ -37529,6 +37531,7 @@ ExprValue evaluateAggregateBinary(ExprEvaluator& evaluator, const std::string& o
     expression.op = op;
     auto first = std::make_unique<ParameterExpr>(); first->slot = 0; first->declaredType = left.typeName;
     auto second = std::make_unique<ParameterExpr>(); second->slot = 1; second->declaredType = right.typeName;
+    first->origin = second->origin = ParameterOrigin::RuntimeCell;
     expression.left = std::move(first); expression.right = std::move(second);
     RowContext context;
     context.setParameters({left, right});
@@ -37540,6 +37543,7 @@ ExprValue coerceAggregateValue(ExprEvaluator& evaluator, const ExprValue& value,
     expression.typeName = type;
     auto parameter = std::make_unique<ParameterExpr>();
     parameter->declaredType = value.typeName;
+    parameter->origin = ParameterOrigin::RuntimeCell;
     expression.operand = std::move(parameter);
     RowContext context;
     context.setParameters({value});
@@ -37584,6 +37588,7 @@ void prepareAggregateExpression(ExprPtr& expression, bool input,
         if (!input) throw DbError("42803", "column must appear in GROUP BY or be used in an aggregate function");
         auto parameter = std::make_unique<ParameterExpr>();
         parameter->slot = index;
+        parameter->origin = ParameterOrigin::RuntimeCell;
         parameter->declaredType = ExprHelper::canonicalResultTypeName(
             table.cols[index].dataType + (table.cols[index].isArray ? "[]" : ""));
         expression = std::move(parameter);
@@ -37634,6 +37639,7 @@ void prepareAggregateExpression(ExprPtr& expression, bool input,
             state.slot = table.len + states.size();
             state.value = ExprValue(state.resultType, "", true);
             auto result = std::make_unique<ParameterExpr>(); result->slot = state.slot; result->declaredType = state.resultType;
+            result->origin = ParameterOrigin::RuntimeCell;
             state.call.reset(static_cast<FunctionCallExpr*>(expression.release()));
             expression = std::move(result);
             if (!star) evaluator.bindScalarFunctions(state.call->args.front().get(), engine);

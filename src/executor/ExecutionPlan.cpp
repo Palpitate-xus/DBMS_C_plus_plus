@@ -262,7 +262,9 @@ struct PreparedSelectState {
     }
     static bool rowIndependent(const Expr* expression) {
         if (!expression || expression->preparedSubquery) return !expression;
-        if (dynamic_cast<const LiteralExpr*>(expression) || dynamic_cast<const ParameterExpr*>(expression)) return true;
+        if (dynamic_cast<const LiteralExpr*>(expression)) return true;
+        if (const auto* parameter = dynamic_cast<const ParameterExpr*>(expression))
+            return parameter->origin == ParameterOrigin::StatementInput;
         if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(expression)) return rowIndependent(unary->operand.get());
         if (const auto* cast = dynamic_cast<const CastExpr*>(expression)) return rowIndependent(cast->operand.get());
         if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(expression))
@@ -1054,6 +1056,7 @@ public:
                         // row/SQL spelling. NULL and text 'NULL' stay distinct.
                         CastExpr cast;cast.typeName=target;cast.implicit=true;
                         auto parameter=std::make_unique<ParameterExpr>();
+                        parameter->origin=ParameterOrigin::RuntimeCell;
                         parameter->slot=0;parameter->declaredType=source;cast.operand=std::move(parameter);
                         RowContext row;row.setParameters({values_[i]});
                         values_[i]=evaluator_.eval(&cast,row);
@@ -1120,6 +1123,7 @@ class PreparedSetSortOp final : public Operator {
             BinaryOpExpr comparison; comparison.op=directions_[key].first?"<":">";
             auto first=std::make_unique<ParameterExpr>();first->slot=0;first->declaredType=a.typeName;
             auto second=std::make_unique<ParameterExpr>();second->slot=1;second->declaredType=b.typeName;
+            first->origin=second->origin=ParameterOrigin::RuntimeCell;
             comparison.left=std::move(first);comparison.right=std::move(second);
             RowContext context;context.setParameters({a,b});
             const auto before=evaluator_.eval(&comparison,context);
@@ -1185,6 +1189,7 @@ class PreparedSetTiesLimitOp final : public Operator {
             BinaryOpExpr equality;equality.op="=";
             auto left=std::make_unique<ParameterExpr>();left->slot=0;left->declaredType=a.typeName;
             auto right=std::make_unique<ParameterExpr>();right->slot=1;right->declaredType=b.typeName;
+            left->origin=right->origin=ParameterOrigin::RuntimeCell;
             equality.left=std::move(left);equality.right=std::move(right);
             RowContext context;context.setParameters({a,b});
             const auto equal=evaluator_.eval(&equality,context);

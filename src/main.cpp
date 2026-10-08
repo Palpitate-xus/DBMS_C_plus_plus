@@ -20538,7 +20538,7 @@ static bool executeTypedViewTriggers(Session& session, const string& viewname,
         for (const auto& [name, cell] : row)
             bindings.push_back({"view-trigger." + prefix + "." + name, name,
                 cell.typeName, {prefix}, false, cell.isNull ? optional<string>{}
-                    : optional<string>{cell.value}, 0});
+                    : optional<string>{cell.value}, 0, dbms::ParameterOrigin::RuntimeCell});
     };
     append("new", newValues); append("old", oldValues);
     for (const auto& trigger : triggers) {

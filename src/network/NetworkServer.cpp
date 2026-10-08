@@ -1740,6 +1740,7 @@ bool describePreparedExplainResult(const std::string& sql, Session& session,
     for(size_t i=0;i<parameterOids.size();++i) {
         QueryBindingDatum datum;
         datum.identity="protocol-parameter-"+std::to_string(i+1);
+        datum.origin=ParameterOrigin::MetadataPlaceholder;
         datum.type=typeName(parameterOids[i],{});datum.position=i+1;
         parameters.push_back(std::move(datum));
     }
@@ -1813,6 +1814,7 @@ void validatePreparedIntegerInputs(const std::string& sql,Session& session,
         const auto* type=valuesParameterCastType(parameterOids[i]);
         if(parameterOids[i] && !type)return; // retain the existing custom-type owner
         QueryBindingDatum datum;datum.identity="protocol-parameter-"+std::to_string(i+1);
+        datum.origin=ParameterOrigin::MetadataPlaceholder;
         datum.position=i+1;datum.type=type?type:"unknown";parameters.push_back(std::move(datum));
     }
     (void)g_engine.prepareBoundQuery(session.currentDB,sql,parameters);
@@ -1845,6 +1847,7 @@ bool prepareProtocolBitBetween(const std::string& sql, Session& session,
     for (size_t i = 0; i < parameterOids.size(); ++i) {
         QueryBindingDatum input;
         input.identity = "bit-range-protocol-parameter-" + std::to_string(i + 1);
+        input.origin = ParameterOrigin::MetadataPlaceholder;
         input.position = i + 1;
         if (parameterOids[i] == 1560) input.type = "bit";
         else if (parameterOids[i] == 1562) input.type = "bit varying";

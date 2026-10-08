@@ -2616,6 +2616,7 @@ static ExprPtr parsePrimaryExprImpl(const std::vector<std::string>& tokens, size
         if (!parseNonNegativeInteger(first.substr(1), number) || number == 0) return nullptr;
         auto parameter = std::make_unique<ParameterExpr>();
         parameter->slot = number - 1;
+        parameter->origin = ParameterOrigin::StatementInput;
         return parameter;
     }
 
