@@ -6104,8 +6104,14 @@ static bool parseWindowFunc(const string& item, WindowFunc& wf, const map<string
             }
         }
         if (wf.partitionByCols.empty() && !wf.isAggregate) {
-            // Neither PARTITION BY nor ORDER BY - invalid for non-aggregate window functions
-            return false;
+            // An empty window specification is valid: all rows belong to
+            // one partition and are peers. Do not admit arbitrary scalar
+            // routines merely because they are followed by OVER().
+            static const set<string> unorderedBuiltins = {
+                "row_number", "rank", "dense_rank", "percent_rank", "cume_dist",
+                "ntile", "lag", "lead", "first_value", "last_value", "nth_value"
+            };
+            if (!unorderedBuiltins.count(wf.name)) return false;
         }
     }
 
@@ -31725,6 +31731,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
         std::map<size_t, std::string> arithRawText;
         bool hasAgg = false;
         bool hasWindow = false;
+        bool unorderedWindowValidated = false;
         bool hasScalar = false;
         vector<dbms::ProjectionTarget> projectionTargets;
         dbms::ScalarSubquerySpec scalarSubquery;
@@ -32082,6 +32089,16 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         if (!referenced || *referenced) selectCols.insert(tbl.cols[ci].dataName);
                     }
                 } else if (parseWindowFunc(item, wf, namedWindows)) {
+                    if (!wf.isAggregate && wf.partitionByCols.empty() &&
+                        wf.orderByCol.empty() && !unorderedWindowValidated) {
+                        // Bind the actual complete query before row demand.
+                        // The metadata receiver validates window signatures
+                        // and column/range identity even for empty input,
+                        // WHERE FALSE and LIMIT 0; parsing the legacy name
+                        // above alone is not evidence of a valid call.
+                        (void)g_engine.prepareBoundQuery(queryDb, effectiveRawSql);
+                        unorderedWindowValidated = true;
+                    }
                     windowFuncs.push_back(wf);
                     hasWindow = true;
                     exprTypes.push_back(2);
