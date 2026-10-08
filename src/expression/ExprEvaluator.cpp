@@ -5018,6 +5018,10 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
                 value.typeName = "unknown";
             return value;
         };
+        const auto preparedType = [](const std::string& raw) {
+            const auto type = ExprHelper::canonicalResultTypeName(raw);
+            return isBitStringTypeName(type) || type == "smallint" || type == "integer" || type == "bigint";
+        };
         const auto comparison = [&](const std::string& operation, size_t bound) {
             // A genuine constant NULL makes a strict comparison NULL during
             // planning. Do not invoke its otherwise volatile peer just to
@@ -5032,14 +5036,14 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
                     (void)pure.eval(e->args[bound].get(), RowContext{});
                 const auto leftType = arrayExpressionType(e->args[0].get(), ctx, currentDB_, this);
                 const auto rightType = arrayExpressionType(e->args[bound].get(), ctx, currentDB_, this);
-                if (isBitStringTypeName(leftType) || isBitStringTypeName(rightType))
+                if (preparedType(leftType) || preparedType(rightType))
                     (void)resolveComparison(operation, leftType, rightType);
                 return ExprValue("boolean", "", true);
             }
             // Each logical comparison owns its actual left occurrence. A
             // demanded second pair repeats the left expression, not its value.
             const auto left = input(bound == 2 && e->args.size() == 4 ? 3 : 0), right = input(bound);
-            return isBitStringTypeName(left.typeName) || isBitStringTypeName(right.typeName)
+            return preparedType(left.typeName) || preparedType(right.typeName)
                 ? comparePrepared(resolveComparison(operation, left.typeName, right.typeName), left, right)
                 : applyComparison(operation, left, right);
         };

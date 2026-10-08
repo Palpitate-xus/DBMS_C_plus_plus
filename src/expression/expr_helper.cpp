@@ -1746,13 +1746,14 @@ void ExprHelper::prepareArrayTypes(Expr* expression,
                     }
                     operand = std::move(conversion);
                 };
-                bool bitRange = false;
+                bool bitRange = false, integerRange = false;
                 for (const auto& argument : call->args) {
                     const auto input = canonicalResultTypeName(type(argument.get()));
                     bitRange = bitRange || input == "bit" || input == "bit varying";
+                    integerRange = integerRange || input == "smallint" || input == "integer" || input == "bigint";
                 }
                 for (size_t i = 1; i < 3; ++i) {
-                    if (!bitRange) continue;
+                    if (!bitRange && !integerRange) continue;
                     const auto lhs = canonicalResultTypeName(type(call->args[0].get()));
                     const auto rhs = canonicalResultTypeName(type(call->args[i].get()));
                     const auto comparison = ExprEvaluator::resolveComparison(i == 1 ? ">=" : "<=", lhs, rhs);

@@ -1795,6 +1795,18 @@ void validatePreparedIntegerInputs(const std::string& sql,Session& session,
         if(const auto* unary=dynamic_cast<const UnaryOpExpr*>(value))return contains(unary->operand.get());
         if(const auto* cast=dynamic_cast<const CastExpr*>(value))return contains(cast->operand.get());
         if(const auto* call=dynamic_cast<const FunctionCallExpr*>(value)) {
+            if(call->schema.empty() && call->args.size()==3 &&
+               (call->funcName=="BETWEEN" || call->funcName=="NOT BETWEEN")) {
+                const bool integers=std::any_of(call->args.begin(),call->args.end(),[&](const auto& arg) {
+                    const auto type=ExprHelper::canonicalResultTypeName(ExprHelper::inferParsedInputType(arg.get()));
+                    return integerColumn(arg.get()) || type=="smallint" || type=="integer" || type=="bigint";
+                });
+                // A routine result can be INTEGER although this syntax-only
+                // probe cannot infer it. Let the real metadata binder own that
+                // case; never call a function/provider to discover its type.
+                if(integers || std::any_of(call->args.begin(),call->args.end(),[&](const auto& arg) {return unknown(arg.get());}))
+                    return true;
+            }
             for(const auto& arg:call->args)if(contains(arg.get()))return true;
             for(const auto& arg:call->namedArgs)if(contains(arg.value.get()))return true;
             return contains(call->filter.get());
@@ -1834,15 +1846,16 @@ bool prepareProtocolBitBetween(const std::string& sql, Session& session,
         select->selectList.size() != 1) return false;
     const auto* range = dynamic_cast<const FunctionCallExpr*>(select->selectList.front().expr.get());
     if (!range || !range->schema.empty() || range->args.size() != 3) return false;
-    const auto name = SQLParser::toLower(range->funcName);
-    if (name != "between" && name != "not between") return false;
-    bool bitRange = false;
+    if (range->funcName != "BETWEEN" && range->funcName != "NOT BETWEEN") return false;
+    bool bitRange = false, integerRange = false;
     for (const auto& input : range->args) {
         const auto type = ExprHelper::canonicalResultTypeName(ExprHelper::inferParsedInputType(input.get(), {}));
         bitRange = bitRange || type == "bit" || type == "bit varying";
+        integerRange = integerRange || type == "smallint" || type == "integer" || type == "bigint";
     }
     for (const auto oid : parameterOids) bitRange = bitRange || oid == 1560 || oid == 1562;
-    if (!bitRange) return false;
+    for (const auto oid : parameterOids) integerRange = integerRange || oid == 21 || oid == 23 || oid == 20;
+    if (!bitRange && !integerRange) return false;
     std::vector<QueryBindingDatum> parameters;
     for (size_t i = 0; i < parameterOids.size(); ++i) {
         QueryBindingDatum input;

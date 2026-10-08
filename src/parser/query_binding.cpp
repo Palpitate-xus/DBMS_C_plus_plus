@@ -598,8 +598,11 @@ public:
                 const bool bitRange = std::any_of(types.begin(), types.end(), [](const auto& type) {
                     return type == "bit" || type == "bit varying";
                 });
+                const bool integerRange = std::any_of(types.begin(), types.end(), [](const auto& type) {
+                    return type == "smallint" || type == "integer" || type == "bigint";
+                });
                 for (size_t i = 1; i < types.size(); ++i) {
-                    if (!bitRange) continue;
+                    if (!bitRange && !integerRange) continue;
                     const auto comparison = ExprEvaluator::resolveComparison(
                         i == 1 ? ">=" : "<=", types[0], types[i]);
                     if (types[0] == "unknown") {
