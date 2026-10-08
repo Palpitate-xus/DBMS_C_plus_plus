@@ -417,3 +417,62 @@ TYPE-11/21. Binary I/O, arrays beyond these catalog links, custom types/domains
 and all other original273 requirements remain open. Original items are
 unchanged:22 complete,166 partial,70 unverified,15 deferred_by_user. No push,
 Actions activation or user-skipped/filtered branch restart.
+## Follow-up: actual cold operator metadata, CASE identities and interval input
+
+Private worktree `/tmp/dbms-root-cold-catalog.MLUxaZbL/repo` now has seven
+independent commits beyond the published Root source. None has been imported
+while Root's full standard driver63302 is running; original inputs stay frozen.
+
+| Local commit | Actual repair and verification |
+| --- | --- |
+| `ff8f0889` | Shared physical builtin definition producer; previous56/41/384 composition passed as recorded above. |
+| `50d5a1c2` | Legacy NULL ownership; previous61/41/384 composition passed as recorded above. |
+| `a8bda9aa` | Resolve genuine builtin operator OIDs from shared bootstrap definitions only when the actual catalog snapshot is completely uninitialized. Populated snapshots remain authoritative; no user/domain/enum metadata is invented. Original unchanged case_common_type14 positives/8 negatives now pass. One TableManage CPP rebuilt against57 own unchanged current objects/headers. |
+| `70f92b1f` | Retain actual CASE builtin result identity through the existing declaration metadata callback, preserving separately bound enum identity. New actual-reference native140 initially failed42:40 descriptor OID0 failures and2 interval value failures. OID repair fixes all40; the full140 remains honestly red with2 interval failures at that epoch. |
+| `1944122c` | Validate interval cast source eligibility before NULL/WHERE-false demand, use structured syntax/range errors, and canonicalize actual input values. Unknown/text/varchar/bpchar/name/time/interval roles match actual PG18.6 controls; numeric/bool/internal-char/date/timestamp/array casts reject42846. Valid symbolic infinity input is retained; the assignment input validator reuses the same literal-only cast rather than a conflicting finite-only validator. Native140 and complete28 CASE protocol now pass. Full136 cast corpus improves101 baseline differences to3 in epoch1 and0 in corrected epoch2; SQL, expected values/states/OIDs, count and deadlines unchanged. |
+| `ec29d244` | Replace obsolete unsupported-internal-char assertion with five stronger supported/distinct identity checks (real OID18 versus bpchar1042), retaining all original array/NULL/DDL assertions. Full bpchar_array_type_alias now passes. |
+| `925fbfe9` | A host int64 fixture must not label an int8 value as int4 and fail input validation before the intended math operation. Select the actual int4/int8 width; retain every original value/error assertion. Complete math_functions now passes. |
+
+New28 CASE records preserve all original22 controls and add six NULL/internal-
+char/array/numeric controls, copied from actual owned PostgreSQL18.6. Native140
+checks cold/warm preparation identities, exact lazy values/NULLs, actual evaluated
+type identities, errors, and absence of cold catalog/cache/directory creation.
+The first diagnostic epoch retains42 failed checks and its binary; no OID/name
+assertion was removed. The protocol's original remaining raw `1 us` interval
+value is also retained until the actual conversion repair.
+
+An owned reference13 additionally confirms invalid timestamps report22008/
+22007, valid24:00 becomes next-day hour0, bigint abs/gcd/lcm boundary errors
+remain22003, and int8 data cannot be annotated as int4. Date fixture corrections
+are currently uncommitted and reach a later make_date constructor boundary
+failure, not full date-library success. Preserve that failure and distinguish
+input type/range errors from function field-range errors; do not relax the
+actual datum parser to satisfy old invalid-data expectations.
+
+The interval first epoch rebuilt two CPPs, verified58 own current receipts/
+cache/repeat/frozen bytes, and still failed3 of136, all CASE infinity validation.
+Correcting the inline assignment validator changed a public header, so epoch2
+genuinely rebuilt all58 and freshly compiled its current-header test stub.
+Build25338 finished0. All58 own source/header/compiler/flags/manifest receipts,
+normal cache and no-recompile repeat/frozen bytes are checked. Final binary:
+`b7af513adfa90d1c6b90252548bb32378e7e22a9c4d17a3c8f2484e0d0e5e34f`;
+input seal (including the explicitly uncommitted date fixture correction):
+`fb201bb0f8ebdfc5145bba5071dbb346c03e48cb2be6e85c18a0e92c90a2e032`.
+Focused batch six has five passes (native140, original CASE, interval assignment,
+bpchar array, math) and one actual134 date-library failure. It is not six passes.
+Expanded66 native93982 and43 protocol29888 are now running, retaining all
+previous61/41 controls and adding these five relevant native/two protocol
+fixtures. Original384 on this generation finishes0. No pending-gate success.
+
+Private inventory is749 auto-native+2 Main frontends/415 registered/58TU,
+distinct from unchanged Root746+2/412/58. Root's unchanged full standard driver
+remains live, now past both native and Main frontend phases and into protocol
+fixtures. Its log currently contains21 native failures and nine protocol
+failures, not a final total. Original failure logs/inputs remain unchanged;
+filtered creator/temp/etc. branches are not restarted by this checkpoint.
+Continue every original failure and unmet273 owner, including the cold/label/
+parser/range/value paths and actual-reference fixture corrections. Root source
+is still `7e6dfc28` /140 scoped repairs; this checkpoint does not claim full
+suite, whole-family, sanitizer or TLS success. Original273 items remain
+22 complete,166 partial,70 unverified,15 deferred_by_user. No push or Actions
+activation.
