@@ -32996,6 +32996,15 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
             const PgTypeRow* resolved=nullptr;
             if(typeOid) {
                 for(const auto& type:catalog.types)if(type.oid==typeOid){resolved=&type;break;}
+                // Before a catalog is initialized, builtin declarations can
+                // already carry their real OIDs. Resolve those from the same
+                // immutable physical definitions used by real bootstrap,
+                // without writing/initializing a catalog or inventing user
+                // type/domain/enum metadata. A populated snapshot stays
+                // authoritative; missing rows there remain genuine errors.
+                if(!resolved && catalog.types.empty() && catalog.namespaces.empty())
+                    for(const auto& type:CatalogManager::builtinTypeRows())
+                        if(type.oid==typeOid){resolved=&type;break;}
             } else {
                 CatalogManager::QualifiedName requested;
                 // CAST grammar may retain spaces around a qualified dot.
