@@ -184,6 +184,50 @@ Primary implementation evidence:
 [PostgreSQL18 internal-char I/O/comparison](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/utils/adt/char.c),
 [builtin cast contexts](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/include/catalog/pg_cast.dat).
 
+## Concat follow-up and complete declaration-chain composition
+
+Independent `4e5ec6b3` commits the scalar concat role/ambiguity/text identity
+repair. Its public helper signature change genuinely rebuilt all58 production
+units. Complete native70 improved62 to6 failures, wire17 improved15 to2;
+all remaining failures were boolean text serialization, not ignored assertions.
+Native71/181/117/type_registry/identity18/comparison872 and wire62/39/75/45/29
+passed on that generation. Binary/seal:
+`a2a26ae3f2bf9a10804fb744b2c3ead3d66443aa8eaad4fcbaf8663dc32805ff` /
+`cecd707e9960b865d5e5f10d418bd6e456520a7394504f99c86658f8e1f6807e`.
+
+Independent `89eec85d` uses boolean's true/false text output rather than t/f
+wire output inside text concatenation, retaining NULL and bpchar trimming.
+New native42/wire14 fail30/10 on the actual predecessor; actual reference14
+and repaired native42/wire14 all pass. Complete native70 and wire17 now pass;
+unchanged wire29/75/45 pass. Only ExprEvaluator rebuilt against57 own unchanged
+current source/header/compiler/flag/manifest objects. Current58 receipts,
+normal cache, no-recompile repeat and frozen bytes are verified. Binary/seal:
+`4b05c7ca8019837b5c376c3a96358f0354fca878a2378122337cd3c3700a4e81` /
+`3a2948773fa995d4b962b1f3d333fcf4364648b109b34452929aace0a5f7313a`.
+
+On that exact sealed generation the original complete38 native/31 wire inputs
+were retained and every new declaration fixture added: complete53 native and
+38 protocol invocations both finish0, zero failed invocations. The unchanged
+original384 also finishes0/zero differences on actual owned180006. Its first
+invocation accidentally selected the default PG17 endpoint and was rejected
+by the mandatory version guard before test SQL; that failure is preserved and
+not relabelled candidate proof. Corrected invocation changes only reference
+connection settings, not SQL/expectations/OIDs/counts/deadlines.
+
+These exact composition passes do not prove the original273 scope. A stronger
+read-only36 matrix without AS aliases reaches36 and differs23 times in default
+column names (values/OIDs match), including typed constants, qualified casts,
+quoted internal char and FLOAT(24). Reference/candidate records are preserved
+at `type-labels36-{reference,candidate}.jsonl` in the same artifacts directory.
+Continue a genuine AST/type-owned default label repair across scalar Main,
+binding and protocol descriptors; do not add aliases to hide these differences.
+Then rerun the complete composition and verify actual master source integration.
+Cold standalone named-type eligibility, binary I/O, arrays, custom types/domains
+and all other original requirements remain open. Master production source is
+still unchanged123; none of these declaration commits or held8 enum candidates
+has been imported, and no push, Actions activation or whole-family/full-suite
+completion is claimed.
+
 ## Historical exact19 at the FLOAT boundary checkpoint
 
 | Root cause | Failed queries in the complete75 | Required repair |
