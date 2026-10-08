@@ -4378,7 +4378,8 @@ static CharacterCastSpec parseCharacterCastSpec(const std::string& target) {
 
 static ExprValue castToCharacter(const ExprValue& value,
                                  const CharacterCastSpec& spec) {
-    std::string converted = value.value;
+    std::string converted = ExprHelper::canonicalResultTypeName(value.typeName) == "boolean"
+        ? (value.asBool() ? "true" : "false") : value.value;
     if (spec.kind != CharacterCastKind::Char &&
         isBlankPaddedCharacterType(value.typeName)) {
         converted.resize(logicalCharacterByteLength(value));
