@@ -1,4 +1,45 @@
-# Latest af7d checkpoint: 104 independently committed source/test repairs
+# Latest 29f9 checkpoint: 107 independently committed source/test repairs
+
+Current source `29f90184`: **714 auto-native plus one actual frontend /
+385 registered /58 production TUs**. Three independent commits: corrected
+actual scalar DISTINCT fixture21000 (`f7c12587`), builtin declared TEXT
+width (`aeac4424`) and real declared-NULL Bind type retention (`29f90184`).
+Only seven precise Network lines plus additive tests; no public header/Main
+delta. Existing integer Parse/BIT range/Bind/casts and all current fields remain.
+
+Actual current104 full2 baselines62096 end1, TEXT113/32 and NULL956/58 records.
+Same strict180006 complete2 end0, TEXT113/NULL1001. Corrected DISTINCT full38
+strict and actual89255 end0; all original6 SQL retained and full6 neighbours
+57072 end0. **Normal59239, complete94 native34779, complete78 whole28991 and
+composed complete14 post67075 all end0**, default disk/deadlines. Exactly
+one fresh Network plus57 individually proved current168 normal donors, not
+fresh58; all58/cache/repeat/frozen inputs pass. SHA
+`6725361f264b80f85598ccc61dfe41f89684d4471cd6715991a8cde1b777e55c`.
+
+Immutable7ebe and168 donor trees stay unchanged. Separate publication over
+docbd57/f7c preserves all production/native/78whole files, only the verified
+DISTINCT fixture differs. Master only FF. Actual main publication3939 ends0,
+all58 proved normal objects migrated with own path-sensitive receipts and
+zero-fresh-CPP normal/repeat relink; not another fresh58. Actual./dbms_main
+matches672 SHA, direct complete14 whole99047 ends0, old3d binary recoverable.
+Full mapping and exact scopes: `docs/issue-typed-null-current-root-composition.md`.
+
+Actual main separate OPEN4 whole37221 ends1/all4 fail: old COUNT1/UNKNOWN1/
+expandedCTE9/scalar83 with18 records. Original uncorrected OPEN5 full86075 stays
+historical red. Original Source80 full42496 remains1/all1043, not current107;
+new current107 original full not started. Original273 unchanged
+**22complete/166partial/70unverified/15deferred**, completion gate rejects.
+
+The d14 current demand candidate is NOT imported: actual genuinefresh58 passes,
+but full32 aggregate-provenance matrix has28 failures versus old Root104's2
+and strict180006's0.26 new real row/computed-NULL writer omissions require
+explicit actual Parameter/QueryBindingDatum origins, genuine new-header58
+and full587/190/20/Root-neighbour gates. Independent private INTEGER, BIT
+prefix/true Param/TypeName and MIN/MAX/customOID issues still need current
+composition. All original catalog/query/storage/recovery/operations scope
+remains; no assistant push/Actions/skipped securityTDE or filtered restart.
+
+# Historical af7d checkpoint: 104 independently committed source/test repairs
 
 Current source `af7d46c8`: **713 auto-native plus one actual frontend /
 383 registered /58 production TUs**. Four independently committed issues:

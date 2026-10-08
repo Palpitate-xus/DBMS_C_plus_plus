@@ -4,7 +4,28 @@
 
 # 工作区与复查清单收尾计划
 
-## 2026-10-08 当前完整273目标计划（af7d；以下较早记录均历史）
+## 2026-10-08 当前完整273目标计划（29f9；以下较早记录均历史）
+
+当前source `29f90184`：714auto+frontend/385registered/58TU，
+107项独立source/test修复。原273全部要求及未闭环scope不缩。
+
+| 阶段 | 原要求 / 下一动作 | 当前实际证据 |
+| --- | --- | --- |
+| 每真实根因逐commit | 独立commit，用户push | f7c DISTINCT原预期纠正、aeac TEXT width、29f NULL Bind，各独立commit/master仅FF |
+| 当前强组合 | 正常ABI/receipts/默认磁盘期限/旧强gate | normal59239真1freshNetwork57证明donors，完整94native34779/78whole28991/14post67075全0 |
+| 真实主目录可用 | 全对象proof/正常repeat/直接完整复测 | publication3939全58证明迁移零freshCPP正常重链0；实际672SHA，直接14whole99047全0，旧3d可恢复 |
+| 每原失败保留 | 不删SQL/assert/注册红，不冒族关闭 | 当前OPEN4whole37221真1/旧CTE11 scalar18；原OPEN5历史真红，DISTINCT原6SQL+38强strict/ours0才独立纠正 |
+| BETWEEN实际来源 | 新row/computedNULL omissions复现后正确修producer/copy | strict32全0、旧Root104仅2旧COUNT FILTER、d14候选28红即26新漏调用；未入master，新真实origin字段必须genuine58及全原587/190/20+Root邻居 |
+| 接续所有原输入和consumer | INTEGER/VARBIT TypeName/Param、MINMAX/customOID/其它FETCH | 三INTEGER私commit/强矩阵仅private READY；BIT/enum各真实独立owner继续，不能用旧ABI或私绿替代Root批准 |
+| 原full和每原family | 原发现/注册完整终态及全部273证明 | 旧80full42496终1/all1043非当前107；新107full未启动，全部原catalog/query/storage/recovery/ops继续 |
+| 总账约束 | 原checkbox/证据/commit全scope一致 | 原273与hash不变：22complete166partial70unverified15deferred；完成gate拒绝，不push/启用Actions/安全TDE或filtered重启 |
+
+下一动作：独立修真实Parameter/Datum来源、精确组合INTEGER三issue并保d14
+两个比较的真实需求/输入转型与完整9649含70共享参数；全新header/current58
+和强完整Root gates后才合入。继续全部其它原未闭环根因，不关闭任何未证族。
+完整出处见typed-null current-root组合文档。
+
+## 2026-10-08 历史完整273目标计划（af7d）
 
 当前source `af7d46c8`：713auto+frontend/383registered/58TU，104项独立
 source/test修复commit。原273及所有未闭环要求完整保留。

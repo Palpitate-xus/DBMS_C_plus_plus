@@ -1,4 +1,37 @@
-# 2026-10-08 最新af7d总清单 checkpoint
+# 2026-10-08 最新29f9总清单 checkpoint
+
+当前source `29f90184`：714auto-native+实际frontend1/385registered/58TU，
+107项独立source/test修复。新增三独立commit：f7c真实DISTINCT scalar21000
+测试预期修正、aeac声明TEXT变量宽度、29f实际NULL Bind声明类型保留。
+精确Network7行/no公共头/Main，保当前integerParse/BIT完整Bind及range参数，
+NULL路径保bareValues OR bitBetween OR valueLength==-1与现有11builtin映射。
+
+当前104完整两whole基线62096真1：TEXT113/32、NULL956/58；同strict180006
+完整2全0：TEXT113/NULL1001。原6SQL保留的DISTINCT完整38 strict/实际89255
+全0、完整6邻居57072全0，仅纠正0A000为真实21000并加强值/NULL/type/需求。
+normal59239真1freshNetwork+57当期168逐源/头/flags/manifest/原58receipt/
+byte证明正常donors，repeat/all58/cache/freeze0，非fresh58。
+完整94native34779/78whole28991/14组合post67075全部实际0/默认磁盘期限；
+全部production/native/78whole与frozen7ebe不变，另verified DISTINCT测试已强证。
+实际主目录publication3939全58对象证明迁移/自身receipts/normal/repeat重链0，
+零freshCPP非又fresh58；./dbms_main同672SHA，直接完整14whole99047全0，
+输入不变且旧3d binary可恢复。mapping/logs/build范围见
+`docs/issue-typed-null-current-root-composition.md`。
+
+主目录完整OPEN4whole37221真1/all4，旧COUNT1/UNKNOWN1/expanded9/scalar18
+全保；原未修正fixture的OPEN5whole86075仍历史真红，不能说删红实现全PASS。
+旧80full42496仍终1/all1043非当前107，新107原full未启动。
+原273仍22complete166partial70unverified15deferred及原item hash不变，完成gate拒绝。
+
+BETWEEN demand current候选未合入：真fresh58成功，但相同完整32聚合来源强
+矩阵旧Root104仅旧COUNT FILTER两红、strict180006全0，候选实际28红，
+其中26真实row/computed NULL副作用漏调用。新真实Parameter/Datum origin字段
+修正必须另genuinefresh58及原587/190/20和Root全邻居；不按NULL/slot/名字猜。
+INTEGER三私修复、BIT prefix/真Parameter/TypeName、MINMAX producers/argument/
+DISTINCT/customOID及全部其它catalog/query/storage/recovery/ops未闭环范围继续。
+不push/启用Actions/重启用户跳过安全TDE或filtered专项，不冒族/总目标完成。
+
+# 2026-10-08 历史af7d总清单 checkpoint
 
 当前source `af7d46c8`：713auto-native+实际frontend1/383registered/58TU，
 104项独立source/test修复commit。新增四独立issue：enum aggregate argument/

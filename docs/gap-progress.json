@@ -2,6 +2,41 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "107 independent ROOT source/test repairs through 29f9: declared TEXT width, actual typed NULL Bind and true scalar DISTINCT fixture",
+      "gap_ids": [
+        "PROTO-04",
+        "PROTO-05",
+        "PROTO-08",
+        "QRY-05"
+      ],
+      "status": "partial",
+      "commits": [
+        "f7c12587",
+        "aeac4424",
+        "29f90184"
+      ],
+      "evidence": [
+        "docs/issue-ready-source-integration.md",
+        "docs/issue-typed-null-current-root-composition.md",
+        "docs/issue-prepared-text-parameter-width.md",
+        "docs/issue-declared-builtin-null-bind.md",
+        "docs/issue-scalar-distinct-cardinality-fixture.md"
+      ],
+      "tests": [
+        "tests/prepared_text_parameter_width_protocol_e2e_test.py",
+        "tests/typed_null_bind_protocol_e2e_test.py",
+        "tests/typed_null_parameter_execution_test.cpp",
+        "tests/subquery_sqlstate_e2e_test.py"
+      ],
+      "verification": {
+        "reproduction": "Actual frozen Root104 two full whole baselines62096=1: TEXT113/32 wrong-width records, NULL956/58 records (including14 width and44 true scalar-child Exec errors). Same full owned matched-enUS strict180006 reference2=0, TEXT113 andNULL1001. Native68 itself was not the protocol defect; existing native binder already retains genuine typed NULL. Original scalar DISTINCT fixture was truly red expecting0A000 versus actual21000; corrected original6SQL plus full38 strong NULL/cardinality/type/demand/recovery controls strict180006=0 and actualcurrent10489255=0, full6 neighbours57072=0.",
+        "fix": "Three independent Root issue commits: f7c fixture preserves original6SQL/all error/recovery assertions and corrects only actual DISTINCT state21000, adding full positive/NULL/zero-demand controls; aeac adds only protocolTypeSize builtinTEXT25=-1;29f preserves declared types for actual NULL Bind length-1 through existing11 builtinOID cast mapping. Exact soleNetwork conflict retains bareValues OR bitBetween OR valueLength==-1, current integerParse/completeBITBind/boundCast source positions and all current public enum/window/aggregate/CTE fields. NonNULL/unmapped/customOID paths unchanged, no value/firstrow metadata guess.",
+        "focused_tests": "Frozen current7ebe normal59239=0 exactly1freshNetwork+57 individually source/header/actualflags/manifest/original58receipt/objectbyte-proved current168 normal donors; NOTfresh58. All58 own receipts/cache/repeat/frozen inputs0 SHA6725361f264b80f85598ccc61dfe41f89684d4471cd6715991a8cde1b777e55c. Complete94 fresh native34779 and78 whole28991 actual terminal0/defaultdisk/deadlines, full preceding93/71 retained. Separate immutable-donor publication tree composes two exact issues over docbd57 and corrected f7c fixture; allCPP/heads/native and78whole inputs identical, only validated scalar fixture changes; full14 composed post67075=0. Master only FF. Actual main publication3939=0, all58 proved matching normal migration/relink/ownpath-sensitive receipts, zero freshCPP, notfresh58. Actual ./dbms_main sameSHA, direct14fullwhole99047=0/allinputs unchanged; previous3d source104binary recoverably backed up.",
+        "full_suite": "Current29f actual714auto-native+frontend1/385registered/58TU/107 independent ROOT source-test repairs. Source106 separate originalOPEN5 full86075=1 remains historical/all5genuineoldreds. Corrected current main OPEN4 full37221=1/all4 still fail exactCOUNT1UNKNOWN1expandedCTE9scalar83/18records; DISTINCT only closes its false fixture expectation after actual strict/full38 proof. No current107 original full started; originalSource80full42496actualterminal1/all1043 stayshistorical, notcurrent107/not14independentbugs.",
+        "scope": "Original273 itemshash unchangedaea348dcf132a33cd4f54d4b17fce11f1fa290fb830a269039fa67903da0538e/count22complete166partial70unverified15deferred; completion gate rejects. All current original unclosed requirements staypartial/open. Incoming privateINTEGER3issues4cc strong1296/5208/350/312/metadata32/BOOL105 do not substituteRoot currentABI approval; physicalBITprefix/trueTEXTParam/TypeName andMINMAX producers/arguments/DISTINCT/customOID remain independent. d14 current86 genuinefresh5823159=0 SHA35635ab4844a36caabae86a61cb56ba2fe53d57206f07dc5bd22e01e905c5262 but NOT masterapproved: unchanged strong32 actualRoot104baseline85395=1 only2 oldCOUNTFILTER, strict180006=0; currentd14candidate20253=1/28 =26 newlyomitted row/computedNULL writer effects plussame2 oldreds. Frozenunsafecandidate neverimported; NEW independent explicitParameter/QueryBindingDatum origin correction needs genuinecurrentfresh58/allRootgates andoriginal587/190/20 beforeapproval. No filteredbranch restart, assistantpush, Actionsactivation or securityTDE work."
+      }
+    },
+    {
       "issue": "104 independent ROOT source/test repairs through af7d: actual enum aggregate inputs, outer result metadata and FETCH consumers",
       "gap_ids": [
         "TYPE-08",
