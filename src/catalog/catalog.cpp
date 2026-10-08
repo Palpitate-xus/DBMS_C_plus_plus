@@ -1593,11 +1593,13 @@ void CatalogManager::bootstrapSystemNamespaces() {
     persistence_->namespaceBootstrapApplied = true;
 }
 
-void CatalogManager::bootstrapSystemTypes() {
-    std::lock_guard<std::mutex> lock(mutex_);
+const std::vector<PgTypeRow>& CatalogManager::builtinTypeRows() {
+    static const auto rows=[] {
+    std::vector<PgTypeRow> types;
+    std::unordered_map<Oid,size_t> typeByOid;
     auto ensureType = [&](Oid oid, const std::string& name, int16_t len,
                          char typtype, char category, Oid element = INVALID_OID) {
-        if (typeByOid_.count(oid)) return;
+        if (typeByOid.count(oid)) return;
         PgTypeRow row;
         row.oid = oid;
         row.typname = name;
@@ -1606,9 +1608,9 @@ void CatalogManager::bootstrapSystemTypes() {
         row.typtype = typtype;
         row.typcategory = category;
         row.typelem = element;
-        size_t idx = types_.size();
-        types_.push_back(row);
-        typeByOid_[oid] = idx;
+        size_t idx = types.size();
+        types.push_back(row);
+        typeByOid[oid] = idx;
     };
     // PG 标准类型 OID（bootstrap 固定值）
     ensureType(16,    "bool",        1,   'b', 'B');
@@ -1716,12 +1718,48 @@ void CatalogManager::bootstrapSystemTypes() {
     };
     for(const auto& array:arrays)ensureType(array.oid,array.name,-1,'b','A',array.element);
     for(const auto& array:arrays) {
-        auto& row=types_[typeByOid_.at(array.oid)];
-        auto& element=types_[typeByOid_.at(array.element)];
+        auto& row=types[typeByOid.at(array.oid)];
+        auto& element=types[typeByOid.at(array.element)];
         if(row.typnamespace==11 && row.typname==array.name && row.typcategory=='A' &&
            element.typnamespace==11 && element.typname==std::string(array.name+1)) {
             row.typelem=array.element;
             element.typarray=array.oid;
+        }
+    }
+    return types;
+    }();
+    return rows;
+}
+
+void CatalogManager::bootstrapSystemTypes() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto& definitions=builtinTypeRows();
+    for(const auto& definition:definitions) {
+        if(typeByOid_.count(definition.oid))continue;
+        typeByOid_[definition.oid]=types_.size();
+        auto row=definition;
+        // A scalar backlink is published only after the corresponding actual
+        // array identity passes the same upgrade guard as existing catalogs.
+        row.typarray=INVALID_OID;
+        types_.push_back(std::move(row));
+    }
+    // Upgrade existing installations only when both actual identities match.
+    // Fresh and cold consumers use the same definitions; no alias registry
+    // determines whether a physical catalog type exists.
+    for(const auto& definition:definitions) {
+        if(definition.typcategory!='A' || !definition.typelem)continue;
+        const auto elementIndex=typeByOid_.find(definition.typelem);
+        if(elementIndex==typeByOid_.end())continue;
+        const auto expectedElement=std::find_if(definitions.begin(),definitions.end(),
+            [&](const PgTypeRow& row){return row.oid==definition.typelem;});
+        if(expectedElement==definitions.end())continue;
+        auto& row=types_[typeByOid_.at(definition.oid)];
+        auto& element=types_[elementIndex->second];
+        if(row.typnamespace==definition.typnamespace && row.typname==definition.typname &&
+           row.typcategory==definition.typcategory && element.typnamespace==expectedElement->typnamespace &&
+           element.typname==expectedElement->typname) {
+            row.typelem=definition.typelem;
+            element.typarray=definition.oid;
         }
     }
 }

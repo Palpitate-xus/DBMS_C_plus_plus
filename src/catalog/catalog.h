@@ -240,6 +240,10 @@ public:
     // Bootstrap: 初始化标准 schema / 类型
     // =====================================================================
     void bootstrapSystemTypes();
+    // The immutable physical rows used by real catalog initialization.
+    // Standalone/cold lookup shares these definitions without filesystem I/O,
+    // catalog allocation, namespace creation or aliases inventing types.
+    static const std::vector<PgTypeRow>& builtinTypeRows();
     void bootstrapSystemNamespaces();
 
     // 获取下一个可用 OID（用于外部手动分配）

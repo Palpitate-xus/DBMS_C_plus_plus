@@ -1,0 +1,1627 @@
+[
+  {
+    "sql": "SELECT NULL::\"integer\" AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"integer\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"integer\"[] AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"integer[]\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"integer\" AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"pg_catalog.integer\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"integer\"[] AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"pg_catalog.integer[]\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"smallint\" AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"smallint\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"smallint\"[] AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"smallint[]\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"smallint\" AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"pg_catalog.smallint\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"smallint\"[] AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"pg_catalog.smallint[]\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"bigint\" AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"bigint\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"bigint\"[] AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"bigint[]\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"bigint\" AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"pg_catalog.bigint\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"bigint\"[] AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"pg_catalog.bigint[]\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"boolean\" AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"boolean\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"boolean\"[] AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"boolean[]\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"boolean\" AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"pg_catalog.boolean\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"boolean\"[] AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"pg_catalog.boolean[]\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"real\" AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"real\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"real\"[] AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"real[]\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"real\" AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"pg_catalog.real\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"real\"[] AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"pg_catalog.real[]\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"double precision\" AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"double precision\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"double precision\"[] AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"double precision[]\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"double precision\" AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"pg_catalog.double precision\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"double precision\"[] AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"pg_catalog.double precision[]\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"character\" AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"character\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"character\"[] AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"character[]\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"character\" AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"pg_catalog.character\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"character\"[] AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"pg_catalog.character[]\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"character varying\" AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"character varying\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"character varying\"[] AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"character varying[]\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"character varying\" AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"pg_catalog.character varying\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"character varying\"[] AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"pg_catalog.character varying[]\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"bit varying\" AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"bit varying\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"bit varying\"[] AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"bit varying[]\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"bit varying\" AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"pg_catalog.bit varying\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"bit varying\"[] AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"pg_catalog.bit varying[]\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"decimal\" AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"decimal\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"decimal\"[] AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"decimal[]\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"decimal\" AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"pg_catalog.decimal\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"decimal\"[] AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"pg_catalog.decimal[]\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"int4\" AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        23
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"int4\"[] AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1007
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"int4\" AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        23
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"int4\"[] AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1007
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"int2\" AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        21
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"int2\"[] AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1005
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"int2\" AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        21
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"int2\"[] AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1005
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"int8\" AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        20
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"int8\"[] AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1016
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"int8\" AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        20
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"int8\"[] AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1016
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"bool\" AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        16
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"bool\"[] AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1000
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"bool\" AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        16
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"bool\"[] AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1000
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"float4\" AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        700
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"float4\"[] AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1021
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"float4\" AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        700
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"float4\"[] AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1021
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"float8\" AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        701
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"float8\"[] AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1022
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"float8\" AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        701
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"float8\"[] AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1022
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"bpchar\" AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1042
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"bpchar\"[] AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1014
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"bpchar\" AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1042
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"bpchar\"[] AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1014
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"varchar\" AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1043
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"varchar\"[] AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1015
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"varchar\" AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1043
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"varchar\"[] AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1015
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"varbit\" AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1562
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"varbit\"[] AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1563
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"varbit\" AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1562
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"varbit\"[] AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1563
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"numeric\" AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1700
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"numeric\"[] AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1231
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"numeric\" AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1700
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"numeric\"[] AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1231
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"char\" AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        18
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"char\"[] AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1002
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"char\" AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        18
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"char\"[] AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1002
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"text\" AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        25
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"text\"[] AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1009
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"text\" AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        25
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"text\"[] AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1009
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"name\" AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        19
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"name\"[] AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1003
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"name\" AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        19
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"name\"[] AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1003
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"bytea\" AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        17
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"bytea\"[] AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1001
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"bytea\" AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        17
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"bytea\"[] AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1001
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"_int8\" AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1016
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"_int8\"[] AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"_int8[]\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"_int8\" AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1016
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"_int8\"[] AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"pg_catalog._int8[]\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"_char\" AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1002
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::\"_char\"[] AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"_char[]\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"_char\" AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1002
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::pg_catalog.\"_char\"[] AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"pg_catalog._char[]\" does not exist",
+      [],
+      null,
+      []
+    ]
+  }
+]
+

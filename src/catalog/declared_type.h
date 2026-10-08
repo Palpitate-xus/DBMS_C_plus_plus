@@ -37,6 +37,21 @@ inline DeclaredTypeBinding resolveDeclaredTypeName(const std::string& spelling,
         std::string result="\"";for(char c:name){result+=c;if(c=='\"')result+=c;}return result+'\"';
     };
     DeclaredTypeBinding result;
+    const auto builtinInput=[&](const PgTypeRow& type,const std::vector<PgTypeRow>& types) {
+        const PgTypeRow* element=&type;
+        if(type.typcategory=='A' && type.typelem) {
+            const auto found=std::find_if(types.begin(),types.end(),[&](const PgTypeRow& row) {
+                return row.oid==type.typelem && row.typnamespace==11;
+            });
+            if(found==types.end())throw DbError("42704","array element type does not exist");
+            element=&*found;
+        }
+        auto input=element->oid==18?std::string("\"char\""):
+            TypeRegistry::instance().normalizeTypeName(element->typname);
+        if(input.empty())input=element->typname;
+        if(element!=&type)input+="[]";
+        return input;
+    };
     if(catalog) {
         std::vector<std::string> schemas;
         if(!requested.schema.empty())schemas.push_back(requested.schema);
@@ -58,7 +73,7 @@ inline DeclaredTypeBinding resolveDeclaredTypeName(const std::string& spelling,
             for(const auto& type:catalog->types)if(type.typnamespace==namespaceOid && type.typname==requested.name) {
                 result.typeOid=type.oid;
                 result.typeName=schema=="pg_catalog"
-                    ?(type.oid==18?"\"char\"":TypeRegistry::instance().normalizeTypeName(type.typname))
+                    ?builtinInput(type,catalog->types)
                     :quote(schema)+"."+quote(type.typname);
                 if(result.typeName.empty())result.typeName=quote(schema)+"."+quote(type.typname);
                 if(declaration.isArray) {
@@ -73,14 +88,20 @@ inline DeclaredTypeBinding resolveDeclaredTypeName(const std::string& spelling,
             if(result.typeOid)break;
         }
     } else {
-        // Standalone expression consumers have genuine builtin registrations,
-        // not a backend catalog. They cannot invent custom namespace/type rows.
+        // Only actual bootstrap physical identities are eligible. SQL aliases
+        // were handled by grammar above; quoted/qualified aliases are not rows.
+        // This immutable shared producer performs no catalog or filesystem I/O.
         if(!requested.schema.empty() && requested.schema!="pg_catalog")
             throw DbError("3F000","schema \""+requested.schema+"\" does not exist");
-        if(requested.name==SQLParser::toLower(requested.name)) {
-            result.typeName=TypeRegistry::instance().normalizeTypeName(
-                requested.name=="char"?"\"char\"":requested.name);
-            if(!result.typeName.empty())result.typeOid=mapBuiltinTypeNameToOid(result.typeName+(declaration.isArray?"[]":""));
+        const auto& types=CatalogManager::builtinTypeRows();
+        for(const auto& type:types)if(type.typnamespace==11 && type.typname==requested.name) {
+            result.typeName=builtinInput(type,types);
+            result.typeOid=type.oid;
+            if(declaration.isArray) {
+                if(!type.typarray)throw DbError("42704","array type for declared type does not exist");
+                result.typeOid=type.typarray;
+            }
+            break;
         }
     }
     if(!result.typeOid)throw DbError("42704","type \""+declaration.typeName+"\" does not exist");
