@@ -58,6 +58,14 @@ bool looksLikeNumber(const std::string& s) {
     return hasDigit;
 }
 
+// Legacy public AST callers annotate an unquoted NULL token with "null".
+// This is a NULL sentinel, not a declared SQL type. Keep real annotations
+// and quoted text/type names on their normal declaration path.
+bool legacyNullLiteral(const LiteralExpr* literal) {
+    return literal && !literal->preparedSubquery &&
+        toLower(literal->value)=="null" && toLower(literal->typeName)=="null";
+}
+
 std::string inferType(const std::string& value) {
     if (value.empty()) return "text";
     if (looksLikeNumber(value)) {
@@ -198,6 +206,7 @@ std::string inferAstResultType(
     if (const auto* parameter = dynamic_cast<const ParameterExpr*>(expression))
         return protocolTypeName(parameter->declaredType);
     if (const auto* literal = dynamic_cast<const LiteralExpr*>(expression)) {
+        if (legacyNullLiteral(literal)) return "unknown";
         if (!literal->typeName.empty())
             return protocolTypeName(ExprHelper::declaredTypeInput(literal->typeName));
         const std::string value = toLower(literal->value);
@@ -529,7 +538,8 @@ std::map<const Expr*, std::string> collectRoutineResultTypes(
     std::function<void(const Expr*)> inspect = [&](const Expr* node) {
         if (!node) return;
         if(const auto* literal=dynamic_cast<const LiteralExpr*>(node)) {
-            if(!literal->typeName.empty())routineTypes[node]=ExprHelper::declaredTypeInput(literal->typeName,currentDB,functionEngine);
+            if(!literal->typeName.empty() && !legacyNullLiteral(literal))
+                routineTypes[node]=ExprHelper::declaredTypeInput(literal->typeName,currentDB,functionEngine);
         } else if (const auto* call = dynamic_cast<const FunctionCallExpr*>(node)) {
             if (evaluator.hasScalarFunction(call, functionEngine)) {
                 const std::string type = evaluator.scalarFunctionResultType(call, functionEngine);
@@ -1607,7 +1617,7 @@ std::pair<std::string,int> ExprHelper::projectionLabel(const Expr* expression,
     if(dynamic_cast<const ArrayExpr*>(expression))return {"array",2};
     if(dynamic_cast<const RowExpr*>(expression))return {"row",2};
     if(const auto* literal=dynamic_cast<const LiteralExpr*>(expression);literal && !literal->typeName.empty())
-        return {typeLabel(literal->typeName),1};
+        return legacyNullLiteral(literal)?std::make_pair(std::string(),0):std::make_pair(typeLabel(literal->typeName),1);
     return {"",0};
 }
 
