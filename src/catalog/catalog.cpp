@@ -1672,6 +1672,58 @@ void CatalogManager::bootstrapSystemTypes() {
     ensureType(2950,  "uuid",       16,   'b', 'U');
     ensureType(2951,  "_uuid",      -1,   'b', 'A');
     ensureType(3802,  "jsonb",      -1,   'b', 'U');
+    // Genuine builtin array rows and reciprocal element links. Existing
+    // installations can lack rows or retain old zero element/backlink fields.
+    struct BuiltinArray {Oid oid;const char* name;Oid element;};
+    static const BuiltinArray arrays[]={
+        {1000,"_bool",16},
+        {1001,"_bytea",17},
+        {1002,"_char",18},
+        {1003,"_name",19},
+        {1005,"_int2",21},
+        {1007,"_int4",23},
+        {1009,"_text",25},
+        {1014,"_bpchar",1042},
+        {1015,"_varchar",1043},
+        {1016,"_int8",20},
+        {1017,"_point",600},
+        {1018,"_lseg",601},
+        {1019,"_path",602},
+        {1020,"_box",603},
+        {1021,"_float4",700},
+        {1022,"_float8",701},
+        {1027,"_polygon",604},
+        {629,"_line",628},
+        {719,"_circle",718},
+        {1040,"_macaddr",829},
+        {1041,"_inet",869},
+        {651,"_cidr",650},
+        {775,"_macaddr8",774},
+        {791,"_money",790},
+        {1182,"_date",1082},
+        {1183,"_time",1083},
+        {1115,"_timestamp",1114},
+        {1185,"_timestamptz",1184},
+        {1187,"_interval",1186},
+        {1270,"_timetz",1266},
+        {1561,"_bit",1560},
+        {1563,"_varbit",1562},
+        {1231,"_numeric",1700},
+        {2951,"_uuid",2950},
+        {199,"_json",114},
+        {3807,"_jsonb",3802},
+        {143,"_xml",142},
+    };
+    for(const auto& array:arrays)ensureType(array.oid,array.name,-1,'b','A',array.element);
+    for(const auto& array:arrays) {
+        auto& row=types_[typeByOid_.at(array.oid)];
+        auto& element=types_[typeByOid_.at(array.element)];
+        if(row.typnamespace==11 && row.typname==array.name && row.typcategory=='A' &&
+           element.typnamespace==11 && element.typname==std::string(array.name+1)) {
+            row.typelem=array.element;
+            element.typarray=array.oid;
+        }
+    }
 }
 
 // ============================================================================
