@@ -2506,10 +2506,17 @@ static ExprPtr parsePrimaryExprImpl(const std::vector<std::string>& tokens, size
             }
         } catch(const DbError& error) {
             if(error.sqlState()!="42601")throw;
+            int parentheses=0,brackets=0;
+            for(size_t token=pos;token<typeEnd;++token) {
+                if(tokens[token]=="(")++parentheses;
+                else if(tokens[token]==")")--parentheses;
+                else if(tokens[token]=="[")++brackets;
+                else if(tokens[token]=="]")--brackets;
+            }
             // A following string proves this is type input, not a function
             // call. Its malformed declaration must not fall through to a
             // scalar callee or a successful SELECT with a null AST item.
-            if(typeEnd>pos && typeEnd<tokens.size() && tokens[typeEnd].size()>=2 &&
+            if(parentheses==0 && brackets==0 && typeEnd>pos && typeEnd<tokens.size() && tokens[typeEnd].size()>=2 &&
                 tokens[typeEnd].front()=='\'' && tokens[typeEnd].back()=='\'') {
                 retainDeclarationSyntaxError(error);return nullptr;
             }
