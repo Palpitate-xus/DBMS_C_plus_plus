@@ -2355,16 +2355,10 @@ bool describePreparedResult(const std::string& sql, Session& session,
                 outputName = lowerProtocolText(call->funcName);
             } else if (cast || (binary && binary->op == "::") ||
                        (literal && !literal->typeName.empty())) {
-                switch (mapBuiltinTypeNameToOid(inferredType)) {
-                    case 16: outputName = "bool"; break;
-                    case 20: outputName = "int8"; break;
-                    case 21: outputName = "int2"; break;
-                    case 23: outputName = "int4"; break;
-                    case 700: outputName = "float4"; break;
-                    case 701: outputName = "float8"; break;
-                    case 1042: outputName = "bpchar"; break;
-                    default: outputName = lowerProtocolText(inferredType); break;
-                }
+                outputName = ExprHelper::projectionLabel(item.expr.get(),
+                    [&](const std::string& declaration) {
+                        return ExprHelper::declaredTypeInput(declaration,session.currentDB,&g_engine);
+                    }).first;
             } else if (dynamic_cast<const CaseExpr*>(item.expr.get())) {
                 outputName = "case";
             } else if (reference && relation.empty() &&

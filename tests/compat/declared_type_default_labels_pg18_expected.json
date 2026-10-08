@@ -1,0 +1,1340 @@
+[
+  {
+    "sql": "SELECT \"char\" 'A'",
+    "reference": [
+      [
+        [
+          "A"
+        ]
+      ],
+      null,
+      "",
+      [
+        "char"
+      ],
+      "SELECT 1",
+      [
+        18
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('A' AS \"char\")",
+    "reference": [
+      [
+        [
+          "A"
+        ]
+      ],
+      null,
+      "",
+      [
+        "char"
+      ],
+      "SELECT 1",
+      [
+        18
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT 'A'::\"char\"",
+    "reference": [
+      [
+        [
+          "A"
+        ]
+      ],
+      null,
+      "",
+      [
+        "char"
+      ],
+      "SELECT 1",
+      [
+        18
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT pg_catalog.\"char\" 'A'",
+    "reference": [
+      [
+        [
+          "A"
+        ]
+      ],
+      null,
+      "",
+      [
+        "char"
+      ],
+      "SELECT 1",
+      [
+        18
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('A' AS pg_catalog.\"char\")",
+    "reference": [
+      [
+        [
+          "A"
+        ]
+      ],
+      null,
+      "",
+      [
+        "char"
+      ],
+      "SELECT 1",
+      [
+        18
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT 'A'::pg_catalog.\"char\"",
+    "reference": [
+      [
+        [
+          "A"
+        ]
+      ],
+      null,
+      "",
+      [
+        "char"
+      ],
+      "SELECT 1",
+      [
+        18
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CHAR 'abc'",
+    "reference": [
+      [
+        [
+          "abc"
+        ]
+      ],
+      null,
+      "",
+      [
+        "bpchar"
+      ],
+      "SELECT 1",
+      [
+        1042
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('abc' AS CHAR)",
+    "reference": [
+      [
+        [
+          "a"
+        ]
+      ],
+      null,
+      "",
+      [
+        "bpchar"
+      ],
+      "SELECT 1",
+      [
+        1042
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT 'abc'::CHAR",
+    "reference": [
+      [
+        [
+          "a"
+        ]
+      ],
+      null,
+      "",
+      [
+        "bpchar"
+      ],
+      "SELECT 1",
+      [
+        1042
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT bpchar 'abc'",
+    "reference": [
+      [
+        [
+          "abc"
+        ]
+      ],
+      null,
+      "",
+      [
+        "bpchar"
+      ],
+      "SELECT 1",
+      [
+        1042
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('abc' AS bpchar)",
+    "reference": [
+      [
+        [
+          "abc"
+        ]
+      ],
+      null,
+      "",
+      [
+        "bpchar"
+      ],
+      "SELECT 1",
+      [
+        1042
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT 'abc'::bpchar",
+    "reference": [
+      [
+        [
+          "abc"
+        ]
+      ],
+      null,
+      "",
+      [
+        "bpchar"
+      ],
+      "SELECT 1",
+      [
+        1042
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT pg_catalog.bpchar 'abc'",
+    "reference": [
+      [
+        [
+          "abc"
+        ]
+      ],
+      null,
+      "",
+      [
+        "bpchar"
+      ],
+      "SELECT 1",
+      [
+        1042
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('abc' AS pg_catalog.bpchar)",
+    "reference": [
+      [
+        [
+          "abc"
+        ]
+      ],
+      null,
+      "",
+      [
+        "bpchar"
+      ],
+      "SELECT 1",
+      [
+        1042
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT 'abc'::pg_catalog.bpchar",
+    "reference": [
+      [
+        [
+          "abc"
+        ]
+      ],
+      null,
+      "",
+      [
+        "bpchar"
+      ],
+      "SELECT 1",
+      [
+        1042
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT BIT '01'",
+    "reference": [
+      [
+        [
+          "01"
+        ]
+      ],
+      null,
+      "",
+      [
+        "bit"
+      ],
+      "SELECT 1",
+      [
+        1560
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('01' AS BIT)",
+    "reference": [
+      [
+        [
+          "0"
+        ]
+      ],
+      null,
+      "",
+      [
+        "bit"
+      ],
+      "SELECT 1",
+      [
+        1560
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT '01'::BIT",
+    "reference": [
+      [
+        [
+          "0"
+        ]
+      ],
+      null,
+      "",
+      [
+        "bit"
+      ],
+      "SELECT 1",
+      [
+        1560
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT pg_catalog.bit '01'",
+    "reference": [
+      [
+        [
+          "01"
+        ]
+      ],
+      null,
+      "",
+      [
+        "bit"
+      ],
+      "SELECT 1",
+      [
+        1560
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('01' AS pg_catalog.bit)",
+    "reference": [
+      [
+        [
+          "01"
+        ]
+      ],
+      null,
+      "",
+      [
+        "bit"
+      ],
+      "SELECT 1",
+      [
+        1560
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT '01'::pg_catalog.bit",
+    "reference": [
+      [
+        [
+          "01"
+        ]
+      ],
+      null,
+      "",
+      [
+        "bit"
+      ],
+      "SELECT 1",
+      [
+        1560
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT VARCHAR 'abc'",
+    "reference": [
+      [
+        [
+          "abc"
+        ]
+      ],
+      null,
+      "",
+      [
+        "varchar"
+      ],
+      "SELECT 1",
+      [
+        1043
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('abc' AS VARCHAR)",
+    "reference": [
+      [
+        [
+          "abc"
+        ]
+      ],
+      null,
+      "",
+      [
+        "varchar"
+      ],
+      "SELECT 1",
+      [
+        1043
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT 'abc'::VARCHAR",
+    "reference": [
+      [
+        [
+          "abc"
+        ]
+      ],
+      null,
+      "",
+      [
+        "varchar"
+      ],
+      "SELECT 1",
+      [
+        1043
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT pg_catalog.varchar 'abc'",
+    "reference": [
+      [
+        [
+          "abc"
+        ]
+      ],
+      null,
+      "",
+      [
+        "varchar"
+      ],
+      "SELECT 1",
+      [
+        1043
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('abc' AS pg_catalog.varchar)",
+    "reference": [
+      [
+        [
+          "abc"
+        ]
+      ],
+      null,
+      "",
+      [
+        "varchar"
+      ],
+      "SELECT 1",
+      [
+        1043
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT 'abc'::pg_catalog.varchar",
+    "reference": [
+      [
+        [
+          "abc"
+        ]
+      ],
+      null,
+      "",
+      [
+        "varchar"
+      ],
+      "SELECT 1",
+      [
+        1043
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT FLOAT(24) '1.25'",
+    "reference": [
+      [
+        [
+          "1.25"
+        ]
+      ],
+      null,
+      "",
+      [
+        "float4"
+      ],
+      "SELECT 1",
+      [
+        700
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('1.25' AS FLOAT(24))",
+    "reference": [
+      [
+        [
+          "1.25"
+        ]
+      ],
+      null,
+      "",
+      [
+        "float4"
+      ],
+      "SELECT 1",
+      [
+        700
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT '1.25'::FLOAT(24)",
+    "reference": [
+      [
+        [
+          "1.25"
+        ]
+      ],
+      null,
+      "",
+      [
+        "float4"
+      ],
+      "SELECT 1",
+      [
+        700
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT INTEGER '12'",
+    "reference": [
+      [
+        [
+          "12"
+        ]
+      ],
+      null,
+      "",
+      [
+        "int4"
+      ],
+      "SELECT 1",
+      [
+        23
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('12' AS INTEGER)",
+    "reference": [
+      [
+        [
+          "12"
+        ]
+      ],
+      null,
+      "",
+      [
+        "int4"
+      ],
+      "SELECT 1",
+      [
+        23
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT '12'::INTEGER",
+    "reference": [
+      [
+        [
+          "12"
+        ]
+      ],
+      null,
+      "",
+      [
+        "int4"
+      ],
+      "SELECT 1",
+      [
+        23
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT int4 '12'",
+    "reference": [
+      [
+        [
+          "12"
+        ]
+      ],
+      null,
+      "",
+      [
+        "int4"
+      ],
+      "SELECT 1",
+      [
+        23
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('12' AS int4)",
+    "reference": [
+      [
+        [
+          "12"
+        ]
+      ],
+      null,
+      "",
+      [
+        "int4"
+      ],
+      "SELECT 1",
+      [
+        23
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT '12'::int4",
+    "reference": [
+      [
+        [
+          "12"
+        ]
+      ],
+      null,
+      "",
+      [
+        "int4"
+      ],
+      "SELECT 1",
+      [
+        23
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT \"char\" 'A' WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "char"
+      ],
+      "SELECT 0",
+      [
+        18
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('A' AS \"char\") WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "char"
+      ],
+      "SELECT 0",
+      [
+        18
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT 'A'::\"char\" WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "char"
+      ],
+      "SELECT 0",
+      [
+        18
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT pg_catalog.\"char\" 'A' WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "char"
+      ],
+      "SELECT 0",
+      [
+        18
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('A' AS pg_catalog.\"char\") WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "char"
+      ],
+      "SELECT 0",
+      [
+        18
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT 'A'::pg_catalog.\"char\" WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "char"
+      ],
+      "SELECT 0",
+      [
+        18
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CHAR 'abc' WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "bpchar"
+      ],
+      "SELECT 0",
+      [
+        1042
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('abc' AS CHAR) WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "bpchar"
+      ],
+      "SELECT 0",
+      [
+        1042
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT 'abc'::CHAR WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "bpchar"
+      ],
+      "SELECT 0",
+      [
+        1042
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT bpchar 'abc' WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "bpchar"
+      ],
+      "SELECT 0",
+      [
+        1042
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('abc' AS bpchar) WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "bpchar"
+      ],
+      "SELECT 0",
+      [
+        1042
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT 'abc'::bpchar WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "bpchar"
+      ],
+      "SELECT 0",
+      [
+        1042
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT pg_catalog.bpchar 'abc' WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "bpchar"
+      ],
+      "SELECT 0",
+      [
+        1042
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('abc' AS pg_catalog.bpchar) WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "bpchar"
+      ],
+      "SELECT 0",
+      [
+        1042
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT 'abc'::pg_catalog.bpchar WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "bpchar"
+      ],
+      "SELECT 0",
+      [
+        1042
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT BIT '01' WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "bit"
+      ],
+      "SELECT 0",
+      [
+        1560
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('01' AS BIT) WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "bit"
+      ],
+      "SELECT 0",
+      [
+        1560
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT '01'::BIT WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "bit"
+      ],
+      "SELECT 0",
+      [
+        1560
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT pg_catalog.bit '01' WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "bit"
+      ],
+      "SELECT 0",
+      [
+        1560
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('01' AS pg_catalog.bit) WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "bit"
+      ],
+      "SELECT 0",
+      [
+        1560
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT '01'::pg_catalog.bit WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "bit"
+      ],
+      "SELECT 0",
+      [
+        1560
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT VARCHAR 'abc' WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "varchar"
+      ],
+      "SELECT 0",
+      [
+        1043
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('abc' AS VARCHAR) WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "varchar"
+      ],
+      "SELECT 0",
+      [
+        1043
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT 'abc'::VARCHAR WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "varchar"
+      ],
+      "SELECT 0",
+      [
+        1043
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT pg_catalog.varchar 'abc' WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "varchar"
+      ],
+      "SELECT 0",
+      [
+        1043
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('abc' AS pg_catalog.varchar) WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "varchar"
+      ],
+      "SELECT 0",
+      [
+        1043
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT 'abc'::pg_catalog.varchar WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "varchar"
+      ],
+      "SELECT 0",
+      [
+        1043
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT FLOAT(24) '1.25' WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "float4"
+      ],
+      "SELECT 0",
+      [
+        700
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('1.25' AS FLOAT(24)) WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "float4"
+      ],
+      "SELECT 0",
+      [
+        700
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT '1.25'::FLOAT(24) WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "float4"
+      ],
+      "SELECT 0",
+      [
+        700
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT INTEGER '12' WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "int4"
+      ],
+      "SELECT 0",
+      [
+        23
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('12' AS INTEGER) WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "int4"
+      ],
+      "SELECT 0",
+      [
+        23
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT '12'::INTEGER WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "int4"
+      ],
+      "SELECT 0",
+      [
+        23
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT int4 '12' WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "int4"
+      ],
+      "SELECT 0",
+      [
+        23
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('12' AS int4) WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "int4"
+      ],
+      "SELECT 0",
+      [
+        23
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT '12'::int4 WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "int4"
+      ],
+      "SELECT 0",
+      [
+        23
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(lower('A') AS varchar)",
+    "reference": [
+      [
+        [
+          "a"
+        ]
+      ],
+      null,
+      "",
+      [
+        "lower"
+      ],
+      "SELECT 1",
+      [
+        1043
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT lower('A')::varchar",
+    "reference": [
+      [
+        [
+          "a"
+        ]
+      ],
+      null,
+      "",
+      [
+        "lower"
+      ],
+      "SELECT 1",
+      [
+        1043
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(ARRAY[1,2] AS bigint[])",
+    "reference": [
+      [
+        [
+          "{1,2}"
+        ]
+      ],
+      null,
+      "",
+      [
+        "array"
+      ],
+      "SELECT 1",
+      [
+        1016
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT ARRAY[1,2]::bigint[]",
+    "reference": [
+      [
+        [
+          "{1,2}"
+        ]
+      ],
+      null,
+      "",
+      [
+        "array"
+      ],
+      "SELECT 1",
+      [
+        1016
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST('A' AS \"char\") AS text)",
+    "reference": [
+      [
+        [
+          "A"
+        ]
+      ],
+      null,
+      "",
+      [
+        "text"
+      ],
+      "SELECT 1",
+      [
+        25
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(TEXT 'A' AS \"char\")",
+    "reference": [
+      [
+        [
+          "A"
+        ]
+      ],
+      null,
+      "",
+      [
+        "char"
+      ],
+      "SELECT 1",
+      [
+        18
+      ]
+    ]
+  }
+]

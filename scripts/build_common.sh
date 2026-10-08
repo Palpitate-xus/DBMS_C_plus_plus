@@ -87,6 +87,8 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/internal_char_comparison_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/internal_char_concat_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/boolean_text_concat_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/declared_type_default_labels_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/declared_type_default_labels_describe_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/prepared_primitive_assignment_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/cte_clause_boundary_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/cte_relation_scope_protocol_e2e_test.py)

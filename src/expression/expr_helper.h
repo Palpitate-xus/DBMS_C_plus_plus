@@ -5,6 +5,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace dbms {
@@ -38,6 +39,11 @@ public:
     // owns qualified/custom identities; this never executes a scalar call.
     static std::string declaredTypeInput(const std::string& spelling,
         const std::string& currentDB = "", StorageEngine* owner = nullptr);
+    // Default result naming from the retained AST. Strong source names win
+    // over weak cast/type names. The optional resolver owns type metadata;
+    // no expression, row or routine body is evaluated to choose a label.
+    static std::pair<std::string,int> projectionLabel(const Expr* expression,
+        const std::function<std::string(const std::string&)>& declaredType = {});
     // Pure SQL ARRAY/array-concatenation analysis. No row, query, sequence or
     // stored routine is executed. Only execution-owned ASTs may be annotated.
     static std::optional<ArrayConcatBinding> resolveArrayConcatTypes(

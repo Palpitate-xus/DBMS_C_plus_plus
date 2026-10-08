@@ -9084,6 +9084,19 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
                 const auto* rootExpression = headerSelect->selectList.front().expr.get();
                 const auto* binary = dynamic_cast<const dbms::BinaryOpExpr*>(rootExpression);
                 const auto* unary = dynamic_cast<const dbms::UnaryOpExpr*>(rootExpression);
+                const auto* literal = dynamic_cast<const dbms::LiteralExpr*>(rootExpression);
+                if (dynamic_cast<const dbms::CastExpr*>(rootExpression) ||
+                    (binary && binary->op == "::") ||
+                    (literal && !literal->typeName.empty())) {
+                    const auto label = dbms::ExprHelper::projectionLabel(rootExpression,
+                        [&](const string& declaration) {
+                            return dbms::ExprHelper::declaredTypeInput(declaration,s.currentDB,&g_engine);
+                        });
+                    if (!label.first.empty()) {
+                        headers.push_back(label.first);
+                        goto headerDone;
+                    }
+                }
                 if (dynamic_cast<const dbms::CastExpr*>(rootExpression) ||
                     (binary && binary->op == "::")) {
                     // A cast replaces weak names (e.g. another cast's type),

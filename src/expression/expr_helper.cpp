@@ -1558,6 +1558,59 @@ std::string ExprHelper::declaredTypeInput(const std::string& spelling,
     return resolveDeclaredTypeName(spelling,&catalog,session).inputType;
 }
 
+std::pair<std::string,int> ExprHelper::projectionLabel(const Expr* expression,
+    const std::function<std::string(const std::string&)>& declaredType) {
+    const auto typeLabel=[&](const std::string& spelling) {
+        // Naming uses the untransformed declaration, not the eventual input
+        // codec (a named array/domain can have a different visible name).
+        if(declaredType)(void)declaredType(spelling);
+        auto type=SQLParser::parseTypeSpecification(spelling).typeName;
+        // SQL grammar aliases name their actual catalog types. Quoted or
+        // qualified names keep their own final identifier instead.
+        static const std::map<std::string,std::string> catalogNames={
+            {"boolean","bool"},{"smallint","int2"},{"integer","int4"},{"int","int4"},{"bigint","int8"},
+            {"real","float4"},{"double precision","float8"},{"character","bpchar"},{"char","bpchar"},
+            {"character varying","varchar"},{"bit varying","varbit"},{"decimal","numeric"},{"dec","numeric"}};
+        if(!type.empty() && type.front()!='\"' && type.find('.')==std::string::npos)
+            if(const auto found=catalogNames.find(SQLParser::toLower(type));found!=catalogNames.end())return found->second;
+        CatalogManager::QualifiedName name;
+        return CatalogManager::parseQualifiedName(type,name,true)?name.name:type;
+    };
+    if(!expression)return {"",0};
+    if(const auto* column=dynamic_cast<const ColumnRefExpr*>(expression))return {column->column,2};
+    if(const auto* call=dynamic_cast<const FunctionCallExpr*>(expression)) {
+        if(call->schema.empty() && SQLParser::toLower(call->funcName)=="case_when") {
+            const auto label=call->args.size()%2?projectionLabel(call->args.back().get(),declaredType):std::make_pair(std::string(),0);
+            return label.second==2?label:std::make_pair(std::string("case"),1);
+        }
+        CatalogManager::QualifiedName name;
+        return CatalogManager::parseQualifiedName(call->funcName,name,true)
+            ?std::make_pair(name.name,2):std::make_pair(std::string(),0);
+    }
+    const Expr* operand=nullptr;std::string type;
+    if(const auto* cast=dynamic_cast<const CastExpr*>(expression)){operand=cast->operand.get();type=cast->typeName;}
+    else if(const auto* binary=dynamic_cast<const BinaryOpExpr*>(expression);binary && binary->op=="::") {
+        operand=binary->left.get();
+        if(const auto* declaration=dynamic_cast<const LiteralExpr*>(binary->right.get()))type=declaration->value;
+    }
+    if(!type.empty()) {
+        const auto inherited=projectionLabel(operand,declaredType);
+        return inherited.second==2?inherited:std::make_pair(typeLabel(type),1);
+    }
+    if(const auto* unary=dynamic_cast<const UnaryOpExpr*>(expression);
+        unary && SQLParser::toLower(unary->op).rfind("collate ",0)==0)
+        return projectionLabel(unary->operand.get(),declaredType);
+    if(const auto* conditional=dynamic_cast<const CaseExpr*>(expression)) {
+        const auto label=projectionLabel(conditional->elseExpr.get(),declaredType);
+        return label.second==2?label:std::make_pair(std::string("case"),1);
+    }
+    if(dynamic_cast<const ArrayExpr*>(expression))return {"array",2};
+    if(dynamic_cast<const RowExpr*>(expression))return {"row",2};
+    if(const auto* literal=dynamic_cast<const LiteralExpr*>(expression);literal && !literal->typeName.empty())
+        return {typeLabel(literal->typeName),1};
+    return {"",0};
+}
+
 std::string ExprHelper::inferParsedInputType(
     const Expr* expression,
     const std::map<std::string, std::string>& typeHints,

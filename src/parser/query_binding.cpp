@@ -830,45 +830,11 @@ public:
         for (auto& field : value.orderBy) expression(field.first, scopes);
         expression(value.frameStart, scopes); expression(value.frameEnd, scopes);
     }
-    static std::string projectionTypeLabel(const std::string& spelling) {
-        if(const auto geometry=geometric_input_detail::builtinType(spelling);!geometry.empty())
-            return geometry;
-        auto type=common_type_detail::canonical(spelling);
-        if(common_type_detail::array(type))type.resize(type.size()-2);
-        static const std::map<std::string,std::string> catalogNames={
-            {"boolean","bool"},{"smallint","int2"},{"integer","int4"},{"bigint","int8"},
-            {"real","float4"},{"double precision","float8"},{"bit varying","varbit"}};
-        if(const auto found=catalogNames.find(type);found!=catalogNames.end())return found->second;
-        if(TypeRegistry::instance().findType(type))return type;
-        CatalogManager::QualifiedName name;
-        return CatalogManager::parseQualifiedName(spelling,name,true)?name.name:type;
-    }
-    static std::pair<std::string,int> projectionLabel(const Expr* expression) {
-        if(!expression)return {"",0};
-        if(const auto* column=dynamic_cast<const ColumnRefExpr*>(expression))return {column->column,2};
-        if(const auto* call=dynamic_cast<const FunctionCallExpr*>(expression))
-            return call->funcName.find(' ')==std::string::npos?std::make_pair(identifier(call->funcName),2):std::make_pair(std::string(),0);
-        const Expr* operand=nullptr;std::string castType;
-        if(const auto* cast=dynamic_cast<const CastExpr*>(expression)){operand=cast->operand.get();castType=cast->typeName;}
-        else if(const auto* binary=dynamic_cast<const BinaryOpExpr*>(expression);binary&&binary->op=="::") {
-            operand=binary->left.get();
-            if(const auto* target=dynamic_cast<const LiteralExpr*>(binary->right.get()))castType=target->value;
-        }
-        if(!castType.empty()) {
-            const auto label=projectionLabel(operand);
-            return label.second==2?label:std::make_pair(projectionTypeLabel(castType),1);
-        }
-        if(const auto* unary=dynamic_cast<const UnaryOpExpr*>(expression);
-            unary&&SQLParser::toLower(unary->op).rfind("collate ",0)==0)return projectionLabel(unary->operand.get());
-        if(const auto* conditional=dynamic_cast<const CaseExpr*>(expression)) {
-            const auto label=projectionLabel(conditional->elseExpr.get());
-            return label.second>1?label:std::make_pair(std::string("case"),1);
-        }
-        if(dynamic_cast<const ArrayExpr*>(expression))return {"array",1};
-        if(dynamic_cast<const RowExpr*>(expression))return {"row",1};
-        if(const auto* literal=dynamic_cast<const LiteralExpr*>(expression);literal&&!literal->typeName.empty())
-            return {projectionTypeLabel(literal->typeName),1};
-        return {"",0};
+    std::pair<std::string,int> projectionLabel(const Expr* expression) {
+        return ExprHelper::projectionLabel(expression,[&](const std::string& spelling) {
+            return metadata.declaredType?metadata.declaredType(spelling).type:
+                ExprHelper::declaredTypeInput(spelling);
+        });
     }
     QueryRowDescriptor project(std::vector<SelectItem>& items, const std::vector<Namespace>& scopes,
                               std::vector<const Expr*>* leaves = nullptr,
