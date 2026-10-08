@@ -258,7 +258,7 @@ Original273 requirements/hash/statuses remain22 complete,166 partial,
 push, Actions activation, skipped security/TDE or filtered-branch restart is
 claimed here.
 
-## Current publication: declaration chain imported, Root build in progress
+## Current publication: declaration chain imported, Root composition verified
 
 All18 independent declaration-chain commits have now been cherry-picked with
 their original commit identifiers retained in Git trailers. Master source is
@@ -323,15 +323,40 @@ Artifacts: `/tmp/dbms-root-type-modifiers.iAKKIfgU`.
 Master src/scripts/tests/cmake are byte-identical to that final private
 generation. Actual Root inventory is now746 auto-native plus two existing
 Main frontend tests,412 registered entry points and58 production units. A
-genuine Root-path fresh58 normal O2 build is running, handle65438, artifacts
-`/tmp/dbms-root-declaration-publish.gNnyMWd5`; its completion and Root-path tests
-are not yet claimed. The previous Root binary is not this source's evidence.
+genuine Root-path fresh58 normal O2 build completed0, handle65438, artifacts
+`/tmp/dbms-root-declaration-publish.gNnyMWd5`. All58 units were genuinely
+compiled at the Root path; current source/header/compiler/flags/manifest
+receipts, normal cache and no-recompile repeat are verified. The actual Root
+binary SHA and input seal equal the final candidate values above, and frozen
+Root bytes are preserved as `dbms_main.root-types.frozen`. Matching Root-owned
+objects/stubs then completed native55 (62543), protocol40 (10362) and original
+BIT384 on owned180006 (44798), all terminal0. These are now actual Root tests,
+not extrapolation from a private tree or an older Root binary.
+
+The unchanged standard `scripts/build_tests.sh` is now running, handle63302,
+log `root-full746-412.log` in the same directory: all746 standalone sources,
+two Main frontend drivers and412 registered entries, no fixture selection or
+weakened expectations. Its reusable production layer consists of57 current
+Root normal objects, each receipt-verified and byte-compared into the standard
+test cache, plus a freshly compiled current-header Root stub. This cache reuse
+is not an invented second fresh57 build. The full driver's result is pending;
+keep Root src/scripts/tests/cmake frozen until its terminal result and seal are
+checked. There is still no full-suite, TLS or sanitizer success claim.
 
 A new read-only104 actual-reference cold type-name probe finishes1 with48
 differences: the standalone producer admits quoted SQL aliases as physical
 type names and cannot resolve some real physical names. Its SQL, actual
 PostgreSQL18.6 records and baseline are preserved in the Root publication
-artifact directory. Continue a shared genuine builtin catalog producer, not
+artifact directory. A new permanent104 simple-protocol fixture also reproduces
+eight OID errors for real name/array types on frozen Root; owned PG18.6 passes
+all104. A shared genuine builtin catalog producer is implemented but still
+uncommitted at `/tmp/dbms-root-cold-catalog.MLUxaZbL/repo`; public catalog and
+declared-type headers changed, so its own all58 are rebuilding (17384).
+New native525 retains all104 declarations across standalone, cold helper,
+cold prepare, copied warm catalog and warm prepare roles, and verifies cold
+lookup has no catalog side effects and real initialization uses those same
+definitions. No candidate test success or master import is claimed yet.
+Continue a shared genuine builtin catalog producer, not
 an alias blacklist or synthetic runtime catalog. This additional red scope
 does not invalidate the unchanged55/40/384 composition results or close
 TYPE-11/21. Binary I/O, arrays beyond these catalog links, custom types/domains

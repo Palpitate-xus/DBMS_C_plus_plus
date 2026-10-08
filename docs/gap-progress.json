@@ -2,7 +2,7 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
-      "issue": "Verified declaration chain imported into master through 7e6dfc28; Root fresh58 build pending, broader cold type-name scope red",
+      "issue": "Verified declaration chain imported through 7e6dfc28; actual Root fresh58 and55native/40wire/384 pass, full standard driver pending and cold scope red",
       "gap_ids": ["TYPE-02", "TYPE-04", "TYPE-11", "TYPE-21", "PROTO-04"],
       "status": "partial",
       "commits": ["e4ed0c59", "ece16145", "db4fd458", "23695fa8", "db7c19f1", "6c18f7f8", "b8da36e9", "176c2674", "cc141f15", "55e867eb", "2f32edf5", "468a371c", "54256df1", "2f750bfd", "df6d1606", "54a1d231", "3cd7dbf3", "7e6dfc28"],
@@ -11,7 +11,7 @@
       "verification": {
         "reproduction": "Default-label native79 baseline9 failures and protocol78 baseline29 differences; first naming epoch retains2 bigint-array catalog errors each. Original actual array native112 baseline90 failures. Stronger cold physical-name native104 baseline48 failures remains open; exact PG18.6 records and baselines retained.",
         "focused_tests": "Final private 27e03a89 actual terminal0 for native55, protocol40 and original immutable BIT384 on owned180006. New native79/187 including direct persisted catalog snapshots, protocol78/312 lifecycle all pass; actual reference permanent78/312 also pass. All58 own current receipts/cache/repeat and frozen03cdSHA/inputseal0d3c verified; public label header fresh58, final array follow-up3 CPP+55 own unchanged current objects.",
-        "full_suite": "Not the full registered suite, SAN, TLS or family completion. Actual Root source src/scripts/tests/cmake is byte-identical to final private inputs, but genuine Root-path fresh58 normal O2 build65438 and Root-path tests are still pending; older Root binary is not evidence for new source.",
+        "full_suite": "Actual Root fresh58 normal65438 terminal0 with all own current receipts/cache/repeat/frozen03cdSHA/inputseal0d3c, then actual Root native55 62543, wire40 10362 and original384 44798 all terminal0. Full unchanged standard driver63302 is live, all746 standalone+2 Main frontends/412 registered, current Root production cache reused only after receipt/byte proof; not a second fresh57 build or full-suite PASS. Root source inputs frozen. No SAN, TLS or family completion. Cold candidate public headers trigger its own all58 build17384, new525native/104wire not yet passed; actual Root104wire baseline8 failures, PG18.6 reference104=0.",
         "scope": "18 independent commits imported with provenance:17 scoped source/test repairs plus1 test corpus, previous123 now140. Root actual inventory746 auto-native+2 existing Main frontends/412 registered/58TU. Evergreen README976f retained unchanged; eight enum candidates remain held. Original273 items unchanged22complete166partial70unverified15deferred; continue genuine builtin cold producer, binary I/O, broader arrays/custom/domain and every unmet owner. No push, Actions activation or user-skipped/filtered branch restart."
       }
     },
