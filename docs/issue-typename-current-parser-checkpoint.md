@@ -98,9 +98,34 @@ The candidate is **not approved for integration**. The complete native gate
 found cold, uninitialized catalog lookup regressions and a separate grammar
 regression: `CASE 'zeta'::rank_type WHEN ...` is intercepted as a type
 constant rather than a CASE expression. Neither the successful45/384 nor the
-successful31 protocol fixtures closes those failures. A separate cold lookup
-repair and authentic empty-catalog/no-bootstrap native test are in progress at
-`/tmp/dbms-root-type-cold.b3XG2ENF/repo`; no result is claimed for that WIP.
+successful31 protocol fixtures closes those failures.
+
+Two further independent local commits at
+`/tmp/dbms-root-type-cold.b3XG2ENF/repo` address those regressions:
+
+- `cb20f7f6`: retain real registered builtin input lookup for an actually
+  empty catalog snapshot without initializing or writing the catalog.
+  Exact native12 failed8 on the preceding candidate and passed12 on this
+  repair. Three complete previously failing native fixtures
+  (parameter_input_origin, prepared_query_execution, boolean_character_cast)
+  and full45 passed. All58 units were compiled genuinely afresh in this
+  worktree; own current58 receipts/cache/repeat/frozen bytes are checked.
+- `5b99960a`: keep CASE's grammar role ahead of generic type constants.
+  Exact native16 failed10 on the preceding parser, then passed16; the original
+  enum_comparison_binding native and full45 also passed. Initial missing
+  native-test include compilation failure is preserved separately; adding
+  that include did not change any SQL or expected value. Normal build rebuilt
+  only Parser with57 unchanged own objects and the same public headers;
+  current58 receipts/cache/repeat/frozen bytes are checked. Full original384
+  passed again on this exact final binary.
+
+Current final binary SHA-256:
+`aeaaa5755482baea06213da0721f3651234d09a5d35228b0631e3638b82894a8`.
+Current full input seal:
+`4d0ab7c3252872ca02c7d8b14902cb54b2ef02405eebf2a5cf8faf04316526a8`.
+The unchanged complete38 native and31 protocol composition gates are running
+on this sealed generation; **no final result is claimed yet**. These candidates
+remain held outside master, not a completed TypeName family or original273.
 
 Next: fix cold builtin lookup without bootstrapping during preparation;
 restore expression grammar precedence for CASE; rerun the same complete
