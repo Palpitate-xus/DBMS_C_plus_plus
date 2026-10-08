@@ -1,4 +1,32 @@
-# 2026-10-08 最新b888总清单 checkpoint
+# 2026-10-08 最新1866总清单 checkpoint
+
+当前source18664795：725auto-native+实际Main frontend2/396registered/58TU，
+118项独立Root source/test修复=原110+七项production+一项真正INTEGER覆盖更正。
+七根因分别commit1e2/82f/99b/258/dfc/4f7/186：BETWEEN需求与左表达式独立site，
+实际Parameter来源，真实typed-child fallback，runtime child上下文/缓存生命周期，
+INTEGER输入准备，outer BETWEEN结果descriptor，BOOL转字符SQL输出。
+e49保留原25 BIGINT覆盖并另加真正INTEGER28，README9603维护单独计。
+
+真正fresh58 core5065全0，最终normal85558实际4freshCPP+54自身当前ABI逐源/头/
+flags/compiler/receipt/bytes证明正常对象，all58/stamp/repeat/seal全0，不冒第二次
+fresh58。完整31fresh native70472、22whole97362、ownedPG180006完整9strict78808
+全0，原9649含70共享参数/metadata61/BOOL211全部0。core9649原4116错及五whole
+基线56412全红保留；parent32最终61478仍1/仅同两旧COUNT FILTER 0A000，另30
+行/计算NULL writer需求正确，不以局部green关闭原整个族。
+
+主目录FF保八独立commit，publication29443逐对象58证明迁移/自身path receipts/
+正常relink/repeat零freshCPP全0；实际/frozen3194SHA一致、oldc7 binary可恢复。
+直接实际主程序完整22 session20876真0，前后all58 receipts/stamp/input seal/
+frozen bytes不变。出处及完整范围：
+`docs/issue-parameter-integer-current-root-composition.md`。
+
+原273 items/hash/statuses不变22complete166partial70unverified15deferred，完成gate
+拒绝；118原full/SAN未跑。历史INTEGER87完整88真1与source80full42496真1保留，
+不被本scoped31/22替代。真实VARBIT TypeName/BIT/NULL/MINMAX/customOID/COUNT/
+CTE/scalar/catalog/storage/recovery/ops及全部原未闭环scope继续；不push/启用Actions/
+重启跳过securityTDE或filtered fixture，不冒总目标完成。
+
+# 2026-10-08 历史b888总清单 checkpoint
 
 当前source b8882d04：714auto-native+实际frontend2/387registered/58TU，
 110项独立Root source/test修复。README长期项目入口单独commit9603，不计作数据库修复。

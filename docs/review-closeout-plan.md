@@ -4,7 +4,27 @@
 
 # 工作区与复查清单收尾计划
 
-## 2026-10-08 当前完整273目标计划（b888；以下较早记录均历史）
+## 2026-10-08 当前完整273目标计划（1866；以下较早记录均历史）
+
+当前source18664795，725auto+实际Main frontend2/396registered/58TU，118项独立
+Root source/test修复。README9603维护不计；原273完整scope和每旧红保留。
+
+| 阶段 | 原要求 / 下一动作 | 当前实际证据 |
+| --- | --- | --- |
+| 每真实根因逐commit | 独立历史、用户push | 七production独立1e2/82f/99b/258/dfc/4f7/186，另e49真正INTEGER覆盖更正；master仅FF |
+| 当前真实ABI和组合 | origin/typedchild/context/INTEGER/whole-query demand | 真fresh58 core5065；最终4freshCPP54自身ABI证明normal85558；31native70472/22whole97362/strict9 78808全0，原9649含70全部0 |
+| 主目录实际程序 | matching58正常对象/自身receipts/直接完整复测 | publication29443 all58迁移/自身path receipts/relink/repeat零fresh全0，actual3194SHA/oldc7可恢复；direct22 20876真0/前后all58和inputs不变 |
+| 保留原完整红 | 不删SQL/assert/注册，不借小gate关闭族 | parent32仅同两旧COUNT FILTER失败；core9649 4116错及五whole基线保留；历史INTEGER87完整88仍1 |
+| 下一原输入consumer | BIT反向physical owner/真SQL NULL/TypeName/MINMAX/customOID | 已独立复查BIT15d及NULL98f所有source/fixtures，需当前Root composition与真正baseline/gates，不借旧Root104 ABI绿 |
+| 所有原scope继续 | COUNT/CTE/scalar/UNKNOWN/catalog/storage/recovery/ops | 不改原273要求：22complete166partial70unverified15deferred/gate拒绝；118原full/SAN未跑，source80full1/all1043历史保留 |
+
+下一动作：当前direct22已实际终0，总账QA后commit checkpoint；分别组合实际BIT reverse
+owner和nullable WHERE consumer，在当前origin/lazy/public ABI下验证，再继续真实
+VARBIT TypeName与MINMAX及所有原未闭环需求。全出处：
+`docs/issue-parameter-integer-current-root-composition.md`。不push/启用Actions/
+重启用户跳过securityTDE或filtered fixtures。
+
+## 2026-10-08 历史完整273目标计划（b888）
 
 当前source b8882d04，714auto+实际frontend2/387registered/58TU，110项独立
 Root source/test修复。README9603已单独commit，不计作数据库修复；原273范围不缩。

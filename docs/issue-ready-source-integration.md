@@ -1,4 +1,35 @@
-# Latestb888 checkpoint:110 independently committed source/test repairs
+# Latest1866 checkpoint:118 independently committed source/test repairs
+
+Current source `18664795`:725 auto-native plus two actual Main frontends /
+396 registered whole wrappers /58 production TUs. Seven independent production
+repairs (1e2/82f/99b/258/dfc/4f7/186) and separate genuine INTEGER coverage
+correction e49 are committed individually and fast-forwarded into master.
+README9603 remains independent maintenance, not a database review repair.
+
+Current core truly fresh58 normal5065=0. Final normal85558=0 compiles4changed
+CPP and proves54own unchanged objects from that current ABI, not another
+fresh58; all58 receipts/stamp/input seal/repeat0. Complete31fresh native70472,
+22whole97362 and owned strictPG1800069whole78808 all0, original9649 including70
+shared parameters/61/211 all0. Core INTEGER9649 actual4116fail and all5 whole
+baselines56412 remain preserved. Parent32 final61478 remains1 onlysame2old
+COUNT FILTER 0A000, allother30 actual demands preserved.
+
+Actual main publication29443=0 proves all58 matching normal object migration,
+own path receipts/relink/repeat0fresh and actual/frozen3194SHA. Oldc7 executable
+is recoverable. Direct actual main complete22 session20876 finishes0; all58
+receipts/stamp/input seal/frozen bytes remain unchanged before/after.
+Full mapping, exact logs and proof boundaries:
+`docs/issue-parameter-integer-current-root-composition.md`.
+
+No current118 original full/SAN or full-family closure claimed. Original
+273items/hash unchanged22complete166partial70unverified15deferred/gate rejects;
+all original unmet scope retained. Historical INTEGER87 complete88actual1 and
+source80full42496actual1 remain failed, not replaced by scoped31/22 green.
+Continue genuine BIT/TypeName/NULL/MINMAX/customOID/COUNT/CTE/scalar/catalog/
+storage/recovery/operations owners; no push/Actions/skippedsecurityTDE or
+filtered fixture restart.
+
+# Historicalb888 checkpoint:110 independently committed source/test repairs
 
 Current source `b8882d04`:714 auto-native + two actual Main frontends /
 387 registered whole wrappers /58 production TUs. README9603 is independent
