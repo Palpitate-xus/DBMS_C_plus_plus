@@ -1,5 +1,6 @@
 #include "Session.h"
 #include "catalog/type_registry.h"
+#include "catalog/systables.h"
 #include "commands/DdlExecutor.h"
 #include "commands/TableManage.h"
 #include "executor/ExecutionPlan.h"
@@ -18,7 +19,11 @@ int main() {
     assert(dbms::ExprHelper::canonicalResultTypeName("bpchar[]") ==
            dbms::ExprHelper::canonicalResultTypeName("CHAR(3)[]"));
     // SQL CHAR is not PostgreSQL's separately quoted internal byte type.
-    assert(types.normalizeTypeName("\"char\"").empty());
+    assert(types.normalizeTypeName("\"char\"") == "\"char\"");
+    assert(types.normalizeTypeName("char") == "character");
+    assert(types.findType("\"char\"") != types.findType("character"));
+    assert(dbms::mapBuiltinTypeNameToOid("\"char\"") == 18);
+    assert(dbms::mapBuiltinTypeNameToOid("bpchar") == 1042);
     const std::string name = "bpchar_array_type_alias";
     cleanupTestDb(name);
     const auto database = testDbPath(name);
