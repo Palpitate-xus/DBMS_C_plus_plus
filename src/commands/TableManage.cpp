@@ -1202,6 +1202,33 @@ static StorageEngine::Condition bindStoredPatternTypes(
     return condition;
 }
 
+static std::vector<StorageEngine::Condition> prepareStoredUnknownBitScalarInputs(
+    const TableSchema& table, const std::vector<StorageEngine::Condition>& inputs) {
+    auto conditions = inputs;
+    for (auto& condition : conditions) {
+        // Only a genuine SQL string-literal occurrence has UNKNOWN input
+        // identity. Native apicond values remain decoded data, not SQL input.
+        if (condition.patternType != "unknown" || !condition.decodedLiteralRhs ||
+            !(condition.op == "=" || condition.op == "<>" || condition.op == "!=" ||
+              condition.op == "<" || condition.op == ">" || condition.op == "<=" ||
+              condition.op == ">=")) continue;
+        for (size_t i = 0; i < table.len; ++i) {
+            const auto& column = table.cols[i];
+            if (column.dataName != condition.colName) continue;
+            // Storage publishes the actual base representation. A TEXT
+            // domain called varbit is not a BIT column by spelling.
+            if (column.isArray || (column.dataType != "bit" && column.dataType != "bit varying")) break;
+            const auto binding = ExprEvaluator::resolveComparison(condition.op, column.dataType, "unknown");
+            ExprEvaluator evaluator;
+            const auto input = evaluator.coerceComparison(binding, ExprValue("unknown", condition.value), false);
+            condition.value = input.value;
+            condition.patternType = input.typeName;
+            break;
+        }
+    }
+    return conditions;
+}
+
 static void validateStoredPatternConditions(
     const TableSchema& table, const std::vector<StorageEngine::Condition>& conditions) {
     for (const auto& condition : conditions) {
@@ -26605,6 +26632,7 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
         }
         c.value = decodeSqlLiteral(s.substr(sp + 1));
         c.decodedLiteralRhs = apiCondition || (!rawRight.empty() && rawRight.front()=='\'');
+        if (!apiCondition && !rawRight.empty() && rawRight.front()=='\'') c.patternType = "unknown";
         conds.push_back(c);
     }
     for (auto& condition : conds) {
@@ -26625,7 +26653,7 @@ bool StorageEngine::anyRowMatches(const std::string& dbname,
 
 std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
                                              const std::string& tablename,
-                                             const std::vector<Condition>& conds,
+                                             const std::vector<Condition>& inputConditions,
                                              bool* usedIndex,
                                              bool* scanFailed,
                                              bool* indexReadFailed) {
@@ -26646,6 +26674,7 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
         return failScan();
     };
     TableSchema tbl = getTableSchema(dbname, tablename);
+    const auto conds = prepareStoredUnknownBitScalarInputs(tbl, inputConditions);
     validateStoredPatternConditions(tbl,conds);
     for (const auto& condition:conds) if (condition.op=="typedexpr") {
         SQLParser parser;auto parsed=parser.parse("SELECT "+condition.value);
@@ -37831,13 +37860,16 @@ std::vector<std::string> StorageEngine::queryExpr(
         for (const auto& state : aggregateStates)
             collectAggregateInputSlots(state.call.get(), tbl.len, aggregateInputSlots);
     }
-    auto conds = parseConditions(conditions);
+    auto conds = prepareStoredUnknownBitScalarInputs(tbl, parseConditions(conditions));
     // Receiver caps and OR alternatives constrain execution demand, not
     // schema-owned signature/input admission. Validate before any index or
     // streaming scan, even when zero rows will be requested.
     validateStoredPatternConditions(tbl,conds);
-    for(const auto& branch:options.conditionAlternatives)
-        validateStoredPatternConditions(tbl,parseConditions(branch));
+    std::vector<std::vector<Condition>> preparedAlternatives;
+    for(const auto& branch:options.conditionAlternatives) {
+        preparedAlternatives.push_back(prepareStoredUnknownBitScalarInputs(tbl,parseConditions(branch)));
+        validateStoredPatternConditions(tbl,preparedAlternatives.back());
+    }
     if (options.maxProjectionRows && *options.maxProjectionRows == 0) return result;
     // With no blocking sort, qualification and projection belong to the
     // same demand-driven row receiver. Do not first evaluate WHERE on later
@@ -37847,8 +37879,7 @@ std::vector<std::string> StorageEngine::queryExpr(
     std::vector<std::vector<Condition>> qualificationBranches;
     if (streamingQualification) {
         if (options.conditionAlternatives.empty()) qualificationBranches.push_back(conds);
-        else for (const auto& branch : options.conditionAlternatives)
-            qualificationBranches.push_back(parseConditions(branch));
+        else qualificationBranches = preparedAlternatives;
     }
     std::vector<std::pair<int64_t, std::string>> matchRows;
     bool scanFailed = false;
@@ -37865,8 +37896,7 @@ std::vector<std::string> StorageEngine::queryExpr(
             ids.assign(filtered.begin(), filtered.end());
         } else {
             std::set<int64_t> seen;
-            for (const auto& branch : options.conditionAlternatives) {
-                const auto branchConditions = parseConditions(branch);
+            for (const auto& branchConditions : preparedAlternatives) {
                 auto branchIds = filterRows(dbname, tablename, branchConditions,
                     nullptr, &scanFailed, &indexReadFailed);
                 if (scanFailed) break;

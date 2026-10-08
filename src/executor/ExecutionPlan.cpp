@@ -2514,6 +2514,28 @@ void BitmapOrHeapScanOp::close() {
 // FilterOp
 // ========================================================================
 
+static std::vector<StorageEngine::Condition> prepareUnknownBitPredicateInputs(
+        const TableSchema& table, const std::vector<StorageEngine::Condition>& inputs) {
+    auto conditions = inputs;
+    for (auto& condition : conditions) {
+        if (condition.patternType != "unknown" || !condition.decodedLiteralRhs ||
+            !(condition.op == "=" || condition.op == "<>" || condition.op == "!=" ||
+              condition.op == "<" || condition.op == ">" || condition.op == "<=" || condition.op == ">=")) continue;
+        for (size_t i = 0; i < table.len; ++i) {
+            const auto& column = table.cols[i];
+            if (column.dataName != condition.colName) continue;
+            if (column.isArray || (column.dataType != "bit" && column.dataType != "bit varying")) break;
+            const auto binding = ExprEvaluator::resolveComparison(condition.op, column.dataType, "unknown");
+            ExprEvaluator evaluator;
+            const auto input = evaluator.coerceComparison(binding, ExprValue("unknown", condition.value), false);
+            condition.value = input.value;
+            condition.patternType = input.typeName;
+            break;
+        }
+    }
+    return conditions;
+}
+
 static void validatePredicateTypes(const TableSchema& table,
         const std::vector<StorageEngine::Condition>& conditions,
         const std::string& database = {}, StorageEngine* owner = nullptr) {
@@ -2579,12 +2601,15 @@ static void validatePredicateTypes(const TableSchema& table,
 
 FilterOp::FilterOp(OpPtr child, const TableSchema& tbl,
                     const std::vector<StorageEngine::Condition>& conds)
-    : child_(std::move(child)), tbl_(tbl), conds_(conds) {}
+    : child_(std::move(child)), tbl_(tbl), conds_(prepareUnknownBitPredicateInputs(tbl, conds)) {}
 
 FilterOp::FilterOp(
     OpPtr child, const TableSchema& tbl,
     const std::vector<std::vector<StorageEngine::Condition>>& branches)
-    : child_(std::move(child)), tbl_(tbl), branches_(branches) {}
+    : child_(std::move(child)), tbl_(tbl) {
+    for (const auto& branch : branches)
+        branches_.push_back(prepareUnknownBitPredicateInputs(tbl, branch));
+}
 
 bool FilterOp::open() {
     validatePredicateTypes(tbl_, conds_);
@@ -5885,8 +5910,14 @@ static bool canUseBitmapOrScan(
     return true;
 }
 
-OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ctx) {
+OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& inputContext) {
+    auto ctx = inputContext;
     const auto table = engine->getTableSchema(ctx.dbname, ctx.tablename);
+    // Prepare once before selecting an access path: both the index key and
+    // its heap/residual predicate must consume the same canonical datum.
+    ctx.conds = prepareUnknownBitPredicateInputs(table, ctx.conds);
+    for (auto& branch : ctx.disjunctiveConds)
+        branch = prepareUnknownBitPredicateInputs(table, branch);
     validatePredicateTypes(table, ctx.conds, ctx.dbname, engine);
     for (const auto& branch : ctx.disjunctiveConds)
         validatePredicateTypes(table, branch, ctx.dbname, engine);
@@ -6224,8 +6255,11 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& ct
 
 OpPtr QueryPlanner::buildDisjunctiveSelectPlan(
     StorageEngine* engine, const PlanContext& ctx,
-    const std::vector<std::vector<StorageEngine::Condition>>& branches) {
+    const std::vector<std::vector<StorageEngine::Condition>>& inputBranches) {
     const auto table = engine->getTableSchema(ctx.dbname, ctx.tablename);
+    std::vector<std::vector<StorageEngine::Condition>> branches;
+    for (const auto& branch : inputBranches)
+        branches.push_back(prepareUnknownBitPredicateInputs(table, branch));
     for (const auto& branch : branches)
         validatePredicateTypes(table, branch, ctx.dbname, engine);
     if (engine->rlsAppliesTo(ctx.dbname, ctx.tablename) ||
