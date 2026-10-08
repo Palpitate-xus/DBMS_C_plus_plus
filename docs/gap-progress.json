@@ -2,6 +2,20 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Independent partial TypeName repair: actual shared CAST and postfix declaration envelope; broader full45 remains red, Root ea67/123 unchanged",
+      "gap_ids": ["TYPE-11", "TYPE-02"],
+      "status": "partial",
+      "commits": ["e4f16819"],
+      "evidence": ["docs/issue-typename-current-parser-checkpoint.md"],
+      "tests": [],
+      "verification": {
+        "reproduction": "Actual Root own all58 receipt/cache/frozen proof; full68 native baseline41256=134/all68/40fail; original full45 paired baseline80391=1/all45/41differences against owned180006. First candidate46959 abort on malformed cast retained with patch/binary/log, not PASS.",
+        "focused_tests": "Corrected unchanged68 actual0; normal57195=0 one genuinelyfresh Parser CPP plus57 own unchanged current Root123 source/header/compiler/flags/manifest/receipt/ABI and byte-proven objects, all58 receipts/cache/repeat/inputseal/frozen1312SHA, NOTfresh58. Complete35native7717=0 and original28whole60174=0 on original sealed epoch. Full45 paired now1/38 differences; final permanent45ours1/38, ownedreference45=0. Three legal TIME/TIMESTAMP-with-mods-and-zone / BIT VARYING-mod-array CAST executions newly repaired.",
+        "full_suite": "Permanent45 default ours plus optional reference18 retains exactSQL/value/state/name/tag/builtinOID controls from actual PG records; outer tuple/JSON list normalization has no nested value change, erroneous container-comparison reference failure frozen. Additive corpus/registration later relink same production SHA, not relabelled older35/28 as whole29. Broader29 staysred, originalBIT38416 VARBIT typed-literal reds still required. No full/SAN/type-family/integration approval.",
+        "scope": "Independent private729auto+2actualMain/403registered/58TU not promoted to Root728+2/402/58. Rootsourceea67/123 and original273items/hash/statuses22complete166partial70unverified15deferred unchanged; eight enum candidates separately held. Continue generic typed constants, actual catalog/namespace/OID and unknown-type errors, runtime/pure descriptors including bareBIT literal length, original384/all original unmet owners. No assistantpush, Actions activation, skipped security/TDE or filtered CREATE restart."
+      }
+    },
+    {
       "issue": "Eighth held candidate: qualified catalog MIN/MAX actual column owner, published Root remains ea67/123",
       "gap_ids": ["QRY-07", "PROTO-04"],
       "status": "partial",

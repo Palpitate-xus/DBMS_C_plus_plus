@@ -1,3 +1,14 @@
+# Latest TypeName checkpoint: independent parser repair, broader corpus remains red
+
+Local `e4f16819` (not imported into master) shares the genuine CAST/:: type
+declaration grammar. Actual Root68 baseline40 failures -> unchanged candidate68
+all0; current35native/ original28whole all0. Complete TypeName45 baseline41
+differences -> candidate38 differences, reference45/0; permanent full corpus
+retained and registered. Normal epoch2 one freshParser57current Root123 proven
+objects/all58 receipts/cache/repeat/seal0, NOTfresh58. Published source remains
+ea67/123, eight enum candidates separately held, no full29/type-family approval.
+Evidence and full next owners: `docs/issue-typename-current-parser-checkpoint.md`.
+
 # Latest candidate checkpoint: eight enum repairs HELD, published source unchanged
 
 Eight independent local candidate commits through `12bbf068` are preserved;

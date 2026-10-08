@@ -4,6 +4,16 @@
 
 # 工作区与复查清单收尾计划
 
+## 2026-10-08 TypeName 声明语法与完整后续计划
+
+独立候选 `e4f16819` 修复 CAST/:: 声明 envelope，保原68断言：Root基线40错
+-> 新全0；完整35native/原28whole全0。完整TypeName45仍38错（基线41错），
+reference45全0，永久保全45并注册，不能用28绿冒更广29或type族完成。
+继续generic typed-constant语法、真实catalog/namespace/OID、输入转换与
+静态descriptor，以及原BIT384仍16红和全部原未完成要求。正式source仍ea67/
+123，八enum候选另保持HELD，所有原273 scope/status和安全TDE跳过项不变。
+证据与具体计划：`docs/issue-typename-current-parser-checkpoint.md`。
+
 ## 2026-10-08 枚举候选暂缓合入
 
 README `9603c8ab` 已完成。八项枚举候选分别本地commit至 `12bbf068`，

@@ -1,3 +1,13 @@
+# 2026-10-08 TypeName parser partial checkpoint（正式source仍ea67）
+
+独立private e4f16819共用CAST/::声明grammar，原68基线40错 -> 新68全0，
+完整35native/原28whole全0；完整TypeName45基线41错 -> 新38错，reference
+45全0，保完整永久45与注册，不冒更广29/type族/总Goal完成。继续实际
+typed-constant语法、catalog/namespace/OID、转换与descriptor、原384的16红
+及全部原未完成要求。正式Root sourceea67/123不变，八enum候选另HELD。
+全部原273 items/hash/status22complete166partial70unverified15deferred不变。
+具体证据与完整后续：`docs/issue-typename-current-parser-checkpoint.md`。
+
 # 2026-10-08 枚举候选 HELD checkpoint（正式source仍ea67）
 
 八项独立本地候选commit至12bbf068未合入master，正式Root仍123项修复。
