@@ -2440,7 +2440,7 @@ static ExprPtr parsePrimaryExprImpl(const std::vector<std::string>& tokens, size
     // A declared type followed by a real string constant is a type-input
     // grammar role, including named/qualified/quoted and modified types.
     // A function call without that following constant retains its callee.
-    {
+    if (SQLParser::toLower(tokens[pos]) != "case") {
         size_t typeEnd=pos;
         try {
             const auto declaration=consumeDeclaredType(tokens,typeEnd);
