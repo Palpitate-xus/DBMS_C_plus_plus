@@ -14,8 +14,14 @@ int main() {
     TypeRegistry::instance().bootstrap();
     const auto database = testDbPath("bit_scalar_unknown_input");
     assert(g_engine.createDatabase(database) == DBStatus::OK);
+    const auto integerColumn = [](bool primaryKey) {
+        Column column; column.dataName = "id"; column.isNull = false; column.isPrimaryKey = primaryKey;
+        assert(TypeRegistry::instance().resolveColumnType(column, "integer", {}, false).empty());
+        assert(column.dataType == "integer" && column.dsize == 4 && !column.isVariableLength);
+        return column;
+    };
     TableSchema schema; schema.tablename = "bits";
-    schema.append(makeIntColumn("id", false, 4, true));
+    schema.append(integerColumn(true));
     for (const auto& name : {"v", "u"}) {
         Column column; column.dataName = name; column.isNull = true;
         assert(TypeRegistry::instance().resolveColumnType(column, "varbit", {}, false).empty());
@@ -98,7 +104,7 @@ int main() {
     TableSchema primary; primary.tablename = "bit_primary";
     Column key; key.dataName = "k"; key.isNull = false; key.isPrimaryKey = true;
     assert(TypeRegistry::instance().resolveColumnType(key, "bit", {"4"}, false).empty());
-    primary.append(key); primary.append(makeIntColumn("id", false, 4));
+    primary.append(key); primary.append(integerColumn(false));
     assert(g_engine.createTable(database, primary) == DBStatus::OK);
     assert(g_engine.insertRow(database, "bit_primary", {{"k", "0001"}, {"id", "1"}}) == DBStatus::OK);
     assert(g_engine.insertRow(database, "bit_primary", {{"k", "0100"}, {"id", "2"}}) == DBStatus::OK);

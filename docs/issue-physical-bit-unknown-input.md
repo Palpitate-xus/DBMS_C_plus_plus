@@ -85,7 +85,26 @@ with `bit-scalar-native-first.log`. The corrected test uses the actual public
 planner/index node and preserved all semantic checks. A later author version
 omitted `makeIntColumn`'s required width argument; its compile failure and
 source are retained in v3 artifacts. That was corrected to the genuine
-INTEGER width4, not a production change or a weakened assertion. An initial
+required scale argument4, not a production change or a weakened assertion. An initial
 manual baseline invocation used zsh on bash build helpers and failed; the
 proper bash rerun uses genuine frozen donor objects and fresh driver/stub.
 The full baseline/candidate controls, including failures, remain available.
+
+## Followup native-factory correction
+
+The preceding author explanation incorrectly called that API argument an
+INTEGER byte width. `makeIntColumn` takes a scale enum:2 means INT/4 bytes,
+whereas4 selects BIGINT/8 bytes. The frozen `6dcf5f3a` native613 comparison,
+NULL, index, OR, and unchanged-input controls remain genuine, but their `id`
+fixture was BIGINT. Its independent strict432/candidate431 protocol fixture
+uses actual SQL `INTEGER`, and verifies OID23; that claim is unchanged.
+
+This followup changes only the new native test factory: the real central
+TypeRegistry resolves INTEGER and hard-asserts canonical `integer`, width4,
+and fixed-length metadata for the actual physical columns. All original613
+semantic controls remain unchanged. The new parameter native fixture uses
+the same genuine INTEGER factory and retains all112 type/NULL/uses/runtime
+controls. No production dtype or assertion expectation was relaxed. The
+earlier parameter v1/v2 complete112/24 failures came solely from that author
+fixture's actual BIGINT descriptor, not from a production INTEGER defect;
+both versions and logs are frozen in the followup artifact directory.
