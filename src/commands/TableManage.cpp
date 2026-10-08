@@ -33084,7 +33084,13 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
         };
         metadata.declaredType = [&](const std::string& spelling) {
             if(!catalogSnapshot)catalogSnapshot=catalogService_->metadataSnapshot(dbname);
-            const auto type=resolveDeclaredTypeName(spelling,&*catalogSnapshot,currentSession());
+            // Native storage consumers can use a database before its system
+            // catalog has been initialized. In that genuinely empty snapshot
+            // only registered builtin input identities exist; lookup remains
+            // read-only and must neither bootstrap nor invent user types.
+            const bool emptyCatalog=catalogSnapshot->namespaces.empty() && catalogSnapshot->types.empty();
+            const auto type=resolveDeclaredTypeName(spelling,
+                emptyCatalog?nullptr:&*catalogSnapshot,currentSession());
             return QueryOutputColumn{"",type.typeName,false,0,type.typeOid};
         };
         ExprEvaluator evaluator; evaluator.setCurrentDB(dbname);
