@@ -1,0 +1,433 @@
+[
+  {
+    "sql": "SELECT CAST(65 AS \"char\") AS value",
+    "reference": [
+      [
+        [
+          "A"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        18
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(0 AS \"char\") AS value",
+    "reference": [
+      [
+        [
+          ""
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        18
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(-1 AS \"char\") AS value",
+    "reference": [
+      [
+        [
+          "\\377"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        18
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(-128 AS \"char\") AS value",
+    "reference": [
+      [
+        [
+          "\\200"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        18
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(127 AS \"char\") AS value",
+    "reference": [
+      [
+        [
+          ""
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        18
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(128 AS \"char\") AS value",
+    "reference": [
+      [],
+      "22003",
+      "\"char\" out of range",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(-129 AS \"char\") AS value",
+    "reference": [
+      [],
+      "22003",
+      "\"char\" out of range",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(\"char\" 'A' AS INTEGER) AS value",
+    "reference": [
+      [
+        [
+          "65"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        23
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT \"char\" '\\377'::int4 AS value",
+    "reference": [
+      [
+        [
+          "-1"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        23
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(\"char\" '\\200' AS INTEGER) AS value",
+    "reference": [
+      [
+        [
+          "-128"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        23
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(\"char\" '' AS INTEGER) AS value",
+    "reference": [
+      [
+        [
+          "0"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        23
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT \"char\" '\\177'::integer AS value",
+    "reference": [
+      [
+        [
+          "127"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        23
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT \"char\" '\\200' > \"char\" 'z' AS value",
+    "reference": [
+      [
+        [
+          "t"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        16
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT \"char\" '' < \"char\" 'a' AS value",
+    "reference": [
+      [
+        [
+          "t"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        16
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT \"char\" 'A' || \"char\" 'B' AS value",
+    "reference": [
+      [],
+      "42725",
+      "operator is not unique: \"char\" || \"char\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST('abc'::text AS \"char\") AS value",
+    "reference": [
+      [
+        [
+          "a"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        18
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(CAST(65 AS \"char\") AS text) AS value",
+    "reference": [
+      [
+        [
+          "A"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        25
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(65::bigint AS \"char\") AS value",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type bigint to \"char\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(65::smallint AS \"char\") AS value",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type smallint to \"char\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(true AS \"char\") AS value",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type boolean to \"char\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(1.2 AS \"char\") AS value",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type numeric to \"char\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(65::bigint AS \"char\") AS value WHERE false",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type bigint to \"char\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(65::smallint AS \"char\") AS value WHERE false",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type smallint to \"char\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(true AS \"char\") AS value WHERE false",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type boolean to \"char\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(1.2 AS \"char\") AS value WHERE false",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type numeric to \"char\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL::bigint AS \"char\") AS value",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type bigint to \"char\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL::smallint AS \"char\") AS value",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type smallint to \"char\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL::boolean AS \"char\") AS value",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type boolean to \"char\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL::numeric AS \"char\") AS value",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type numeric to \"char\"",
+      [],
+      null,
+      []
+    ]
+  }
+]

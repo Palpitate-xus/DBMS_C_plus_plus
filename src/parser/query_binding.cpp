@@ -54,6 +54,16 @@ bool decimalIntegerConstant(const std::string& value) {
     return begin < value.size() && std::all_of(value.begin() + begin, value.end(),
         [](unsigned char character) { return character >= '0' && character <= '9'; });
 }
+void validateInternalCharInputCast(const std::string& input,const std::string& target) {
+    if (common_type_detail::canonical(target)!="\"char\"") return;
+    // Eligibility is a type-graph property, including NULL and empty sources;
+    // no operand/callback is evaluated to discover it. Only int4 has the
+    // numeric byte cast; string inputs use explicit text I/O conversion.
+    const auto source=common_type_detail::canonical(input);
+    static const std::set<std::string> inputs={"unknown","integer","text","varchar","bpchar","name","\"char\""};
+    if (!inputs.count(source))
+        throw DbError("42846","cannot cast type "+input+" to \"char\"");
+}
 void validateArrayConstant(const Expr* source, const std::string& type) {
     const auto* literal = dynamic_cast<const LiteralExpr*>(source);
     if (!literal || literal->preparedSubquery || !literal->typeName.empty()) return;
@@ -388,7 +398,8 @@ public:
                 if(array)declaration+="[]";
             }
             const auto type=declaredType(declaration,cast);
-            expression(cast->operand, scopes, cast->typeName);
+            const auto input=expression(cast->operand, scopes, cast->typeName);
+            validateInternalCharInputCast(input,type);
             geometric_input_detail::validateUnknownInput(cast->operand.get(),cast->typeName);
             if (metadata.assignmentInput) metadata.assignmentInput({"", cast->typeName}, cast, cast->typeName);
             bindEnumCast(cast,cast->operand.get(),cast->typeName);
@@ -435,6 +446,7 @@ public:
             if (binary->op == "::") {
                 const auto* type = dynamic_cast<const LiteralExpr*>(binary->right.get());
                 if (!type) throw DbError("42601", "cast requires a type name");
+                validateInternalCharInputCast(left,castType);
                 geometric_input_detail::validateUnknownInput(binary->left.get(),type->value);
                 if (metadata.assignmentInput) metadata.assignmentInput({"", type->value}, binary, type->value);
                 bindEnumCast(binary,binary->left.get(),type->value);

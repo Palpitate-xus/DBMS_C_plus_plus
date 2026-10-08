@@ -4547,7 +4547,7 @@ static ExprValue castToBitString(const ExprValue& value,
                      std::move(bits), false);
 }
 
-static ExprValue inputInternalChar(const std::string& input) {
+static unsigned char parseInternalCharByte(const std::string& input) {
     // This type holds a byte, not a UTF-8 character or a CHAR(1) string.
     // Its text input accepts an exact three-octal-digit escape, otherwise
     // the first input byte. Output keeps high bytes safe for client encoding.
@@ -4556,6 +4556,10 @@ static ExprValue inputInternalChar(const std::string& input) {
         std::all_of(input.begin()+1,input.end(),[](char c){return c>='0' && c<='7';})) {
         byte=static_cast<unsigned char>((input[1]-'0')*64+(input[2]-'0')*8+input[3]-'0');
     }
+    return byte;
+}
+
+static ExprValue formatInternalCharByte(unsigned char byte) {
     std::string output;
     if (byte>=128) {
         output={'\\',static_cast<char>('0'+(byte>>6)),
@@ -4596,8 +4600,19 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
     const auto geometryTarget=geometric_input_detail::builtinType(targetTypeName);
     const auto sourceType=ExprHelper::canonicalResultTypeName(v.typeName);
     if (target=="\"char\"") {
+        const auto source=common_type_detail::canonical(sourceType);
+        static const std::set<std::string> inputs={"unknown","integer","text","varchar","bpchar","name","\"char\""};
+        if (!inputs.count(source))
+            throw DbError("42846","cannot cast type "+sourceType+" to \"char\"");
         if (v.isNull) return ExprValue(target,"",true);
-        return inputInternalChar(v.value);
+        if (source=="integer") {
+            const auto integer=castToInteger(v,IntegerCastTarget::Integer);
+            long long number=0;
+            if (!parseInt64Exact(integer.value,number) || number < -128 || number > 127)
+                throw DbError("22003","\"char\" out of range");
+            return formatInternalCharByte(static_cast<unsigned char>(number));
+        }
+        return formatInternalCharByte(parseInternalCharByte(v.value));
     }
     if(!geometryTarget.empty() &&
         (v.isNull || sourceType==geometryTarget || sourceType=="unknown" || sourceType=="text" ||
@@ -4637,6 +4652,11 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
     }
 
     if (target == "boolean" || target == "bool") return castToBoolean(v);
+    if ((target == "integer" || target == "int" || target == "int4") && sourceType=="\"char\"") {
+        const unsigned char byte=parseInternalCharByte(v.value);
+        const int number=byte>=128?static_cast<int>(byte)-256:byte;
+        return ExprValue("integer",std::to_string(number),false);
+    }
     if (target == "integer" || target == "int" || target == "int4")
         return castToInteger(v, IntegerCastTarget::Integer);
     if (target == "bigint" || target == "int8") {
