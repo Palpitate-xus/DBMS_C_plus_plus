@@ -225,6 +225,18 @@ ColumnDef SQLParser::parseTypeSpecification(const std::string& sql) {
     return definition;
 }
 
+static std::string renderDeclaredType(const ColumnDef& definition) {
+    std::string result=definition.typeName;
+    if(!definition.typeMods.empty()) {
+        result+='(';
+        for(size_t i=0;i<definition.typeMods.size();++i)
+            result+=(i?",":"")+definition.typeMods[i];
+        result+=')';
+    }
+    if(definition.isArray)result+="[]";
+    return result;
+}
+
 static bool parseNonNegativeInteger(const std::string& token, size_t& value) {
     if (token.empty()) return false;
     const bool negative = token.front() == '-';
@@ -2274,60 +2286,15 @@ static ExprPtr parseCastExpr(const std::vector<std::string>& tokens, size_t& pos
         auto bin = std::make_unique<BinaryOpExpr>();
         bin->op = "::";
         bin->left = std::move(left);
-        // Type name: read until next operator/terminator
-        std::string typeName;
-        while (pos < tokens.size()) {
-            if (isAtTimeZone(tokens, pos)) break; // postfix AT TIME ZONE
-            std::string w = SQLParser::toLower(tokens[pos]);
-            if (w == "as" || w == "and" || w == "or" || w == "then" || w == "else" || w == "end"
-                || w == "is" || w == "not" || w == "collate"
-                || w == "like" || w == "ilike" || w == "similar" || w == "escape"
-                || w == "in" || w == "between"
-                || w == "when" || w == "from" || w == "where" || w == "group"
-                || w == "order" || w == "having" || w == "limit" || w == "offset"
-                || w == "union" || w == "intersect" || w == "except" || w == "for"
-                || w == "returning" || w == "on" || w == "using" || w == "set"
-                || w == "into" || w == "values" || w == "by" || w == "asc" || w == "desc"
-                || tokens[pos] == ")" || tokens[pos] == "]" || tokens[pos] == "," || tokens[pos] == ";"
-                || tokens[pos] == "::" || tokens[pos] == "||"
-                || tokens[pos] == "&" || tokens[pos] == "|"
-                || tokens[pos] == "#" || tokens[pos] == "<<"
-                || tokens[pos] == ">>"
-                || tokens[pos] == "+" || tokens[pos] == "-"
-                || tokens[pos] == "*" || tokens[pos] == "/" || tokens[pos] == "%"
-                || tokens[pos] == "^" || tokens[pos] == "=" || tokens[pos] == "<"
-                || tokens[pos] == ">" || tokens[pos] == "<=" || tokens[pos] == ">="
-                || tokens[pos] == "<>" || tokens[pos] == "!="
-                || tokens[pos] == "->" || tokens[pos] == "->>"
-                || tokens[pos] == "#>" || tokens[pos] == "#>>"
-                || tokens[pos] == "@>" || tokens[pos] == "<@"
-                || tokens[pos] == "&&" || tokens[pos] == "<<=" ||
-                   tokens[pos] == ">>=" || tokens[pos] == "@@") {
-                break;
-            }
-            if (tokens[pos] == "(") {
-                typeName += "(";
-                ++pos;
-                while (pos < tokens.size() && tokens[pos] != ")") {
-                    typeName += tokens[pos++];
-                }
-                if (pos < tokens.size() && tokens[pos] == ")") {
-                    typeName += ")";
-                    ++pos;
-                }
-                continue;
-            }
-            if (tokens[pos] == "[") {
-                ++pos;
-                if (pos < tokens.size() && tokens[pos] == "]") {
-                    typeName += "[]";
-                    ++pos;
-                }
-                continue;
-            }
-            if (!typeName.empty()) typeName += " ";
-            typeName += tokens[pos++];
+        // CAST and :: consume one genuine declared-type envelope, not an
+        // arbitrary run of words that can absorb a target alias/operator.
+        ColumnDef declaration;
+        try {declaration=consumeDeclaredType(tokens,pos);}
+        catch(const DbError& error) {
+            if(error.sqlState()=="42601")return nullptr;
+            throw;
         }
+        const std::string typeName=renderDeclaredType(declaration);
         auto right = std::make_unique<LiteralExpr>();
         right->value = typeName;
         bin->right = std::move(right);
@@ -2453,32 +2420,18 @@ static ExprPtr parsePrimaryExprImpl(const std::vector<std::string>& tokens, size
         if (operand && pos < tokens.size()
             && SQLParser::toLower(tokens[pos]) == "as") {
             ++pos;
-            std::string typeName;
-            while (pos < tokens.size()
-                   && tokens[pos] != ")"
-                   && tokens[pos] != "("
-                   && tokens[pos] != ","
-                   && SQLParser::toLower(tokens[pos]) != "as") {
-                if (!typeName.empty()) typeName += ' ';
-                typeName += tokens[pos];
-                ++pos;
-            }
-            // Optional modifier list: varchar(10), numeric(10,2)
-            std::vector<std::string> mods;
-            if (pos < tokens.size() && tokens[pos] == "(") {
-                ++pos;
-                while (pos < tokens.size() && tokens[pos] != ")") {
-                    if (tokens[pos] != ",") mods.push_back(tokens[pos]);
-                    ++pos;
-                }
-                if (pos < tokens.size()) ++pos; // consume ')'
+            ColumnDef declaration;
+            try {declaration=consumeDeclaredType(tokens,pos);}
+            catch(const DbError& error) {
+                if(error.sqlState()=="42601")return nullptr;
+                throw;
             }
             if (pos < tokens.size() && tokens[pos] == ")") {
                 ++pos;
                 auto cast = std::make_unique<CastExpr>();
                 cast->operand = std::move(operand);
-                cast->typeName = typeName;
-                cast->typeMods = std::move(mods);
+                cast->typeName = declaration.typeName+(declaration.isArray?"[]":"");
+                cast->typeMods = declaration.typeMods;
                 return cast;
             }
         }

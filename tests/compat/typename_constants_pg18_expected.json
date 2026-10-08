@@ -1,0 +1,769 @@
+[
+  {
+    "sql": "SELECT VARBIT 'b01' AS value",
+    "reference": [
+      [
+        [
+          "01"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1562
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT BIT VARYING 'b01' AS value",
+    "reference": [
+      [
+        [
+          "01"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1562
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT pg_catalog.varbit 'b01' AS value",
+    "reference": [
+      [
+        [
+          "01"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1562
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT \"varbit\" 'b01' AS value",
+    "reference": [
+      [
+        [
+          "01"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1562
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT VARBIT(2) 'b111' AS value",
+    "reference": [
+      [
+        [
+          "11"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1562
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT BIT(2) 'b111' AS value",
+    "reference": [
+      [
+        [
+          "11"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1560
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT BIT 'b01' AS value",
+    "reference": [
+      [
+        [
+          "01"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1560
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT BIT VARYING(2) 'b111' AS value",
+    "reference": [
+      [
+        [
+          "11"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1562
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT VARBIT(4) 'b01' AS value",
+    "reference": [
+      [
+        [
+          "01"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1562
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT BIT(4) 'b01' AS value",
+    "reference": [
+      [
+        [
+          "0100"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1560
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT VARBIT '' AS value",
+    "reference": [
+      [
+        [
+          ""
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1562
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT BIT '' AS value",
+    "reference": [
+      [
+        [
+          ""
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1560
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT pg_catalog.varbit(2) 'b111' AS value",
+    "reference": [
+      [
+        [
+          "11"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1562
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT \"pg_catalog\".\"varbit\"(2) 'b111' AS value",
+    "reference": [
+      [
+        [
+          "11"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1562
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT VARBIT(+2) 'b111' AS value",
+    "reference": [
+      [],
+      "42601",
+      "type modifiers must be simple constants or identifiers",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT VARBIT(0) 'b01' AS value",
+    "reference": [
+      [],
+      "22023",
+      "length for type varbit must be at least 1",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT VARBIT(-2) 'b01' AS value",
+    "reference": [
+      [],
+      "22023",
+      "length for type varbit must be at least 1",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT VARBIT(2,3) 'b01' AS value",
+    "reference": [
+      [],
+      "22023",
+      "invalid type modifier",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT VARBIT 'b02' AS value",
+    "reference": [
+      [],
+      "22P02",
+      "\"2\" is not a valid binary digit",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT VARBIT 'xg' AS value",
+    "reference": [
+      [],
+      "22P02",
+      "\"g\" is not a valid hexadecimal digit",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT VARBIT 'X0aF' AS value",
+    "reference": [
+      [
+        [
+          "000010101111"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1562
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT VARBIT 'x' AS value",
+    "reference": [
+      [
+        [
+          ""
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1562
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('b111' AS BIT VARYING(2)) AS value",
+    "reference": [
+      [
+        [
+          "11"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1562
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT 'b111'::BIT VARYING(2) AS value",
+    "reference": [
+      [
+        [
+          "11"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1562
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('b01' AS pg_catalog.varbit) AS value",
+    "reference": [
+      [
+        [
+          "01"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1562
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT 'b01'::pg_catalog.varbit AS value",
+    "reference": [
+      [
+        [
+          "01"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1562
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('12:23:34' AS TIME(2) WITHOUT TIME ZONE) AS value",
+    "reference": [
+      [
+        [
+          "12:23:34"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1083
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('2020-01-01 12:23:34' AS TIMESTAMP(2) WITHOUT TIME ZONE) AS value",
+    "reference": [
+      [
+        [
+          "2020-01-01 12:23:34"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1114
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('{01,111}' AS BIT VARYING(2)[]) AS value",
+    "reference": [
+      [
+        [
+          "{01,11}"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1563
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT '{01,111}'::BIT VARYING(2)[] AS value",
+    "reference": [
+      [
+        [
+          "{01,11}"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1563
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('b01' AS BIT VARYING) = B'01' AS value",
+    "reference": [
+      [
+        [
+          "t"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        16
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT VARBIT 'b01' = B'01' AS value",
+    "reference": [
+      [
+        [
+          "t"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        16
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN true THEN VARBIT 'b01' ELSE NULL END AS value",
+    "reference": [
+      [
+        [
+          "01"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1562
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT ARRAY[VARBIT 'b01',NULL] AS value",
+    "reference": [
+      [
+        [
+          "{01,NULL}"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1563
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT VARBIT 'b01' IN(B'01') AS value",
+    "reference": [
+      [
+        [
+          "t"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        16
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT VARBIT 'b01' BETWEEN B'00' AND B'11' AS value",
+    "reference": [
+      [
+        [
+          "t"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        16
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT TEXT 'x' AS value",
+    "reference": [
+      [
+        [
+          "x"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        25
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT INTEGER '12' AS value",
+    "reference": [
+      [
+        [
+          "12"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        23
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NUMERIC(4,2) '1.2' AS value",
+    "reference": [
+      [
+        [
+          "1.20"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1700
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT UUID '12345678-1234-1234-1234-123456789012' AS value",
+    "reference": [
+      [
+        [
+          "12345678-1234-1234-1234-123456789012"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        2950
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT not_a_type 'x' AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"not_a_type\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT not_a_namespace.varbit 'b01' AS value",
+    "reference": [
+      [],
+      "3F000",
+      "schema \"not_a_namespace\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT \"VARBIT\" 'b01' AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"VARBIT\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST('b01' AS not_a_type) AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"not_a_type\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT 'b01'::not_a_type AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"not_a_type\" does not exist",
+      [],
+      null,
+      []
+    ]
+  }
+]
