@@ -1839,6 +1839,10 @@ std::string ExprHelper::inferResultType(
     ParseResult structuralParse;
     if (const Expr* structural = parseStoredExpression(trimmed, structuralParse)) {
         const auto* binary = dynamic_cast<const BinaryOpExpr*>(structural);
+        const auto* outerCast = dynamic_cast<const CastExpr*>(structural);
+        const auto* grammar = dynamic_cast<const FunctionCallExpr*>(outerCast ? outerCast->operand.get() : structural);
+        const bool rangePredicate = grammar && grammar->schema.empty() && grammar->args.size() == 3 &&
+            (grammar->funcName == "BETWEEN" || grammar->funcName == "NOT BETWEEN");
         const std::string type = inferAstResultType(structural, typeHints);
         const bool numericOperator = binary && arithmetic_detail::resultType(
             toLower(binary->op), inferAstResultType(binary->left.get(), typeHints),
@@ -1846,7 +1850,7 @@ std::string ExprHelper::inferResultType(
         // A predicate inside an aggregate argument/FILTER (or a string value)
         // cannot declare the aggregate's result boolean. Infer the actual
         // outer reducer and its value-argument overload before textual scans.
-        if (!builtinReductionName(dynamic_cast<const FunctionCallExpr*>(structural)).empty() ||
+        if (rangePredicate || !builtinReductionName(dynamic_cast<const FunctionCallExpr*>(structural)).empty() ||
             dynamic_cast<const UnaryOpExpr*>(structural) || dynamic_cast<const ArrayExpr*>(structural) ||
             (binary && (type == "boolean" || binary->op == "::" ||
                         binary->op == "||" || numericOperator))) {
