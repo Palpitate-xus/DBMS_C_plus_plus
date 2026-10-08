@@ -645,6 +645,7 @@ static size_t utf8CharCount(const std::string& s);
 static size_t utf8ByteAt(const std::string& s, size_t charIdx);
 static bool isBlankPaddedCharacterType(const std::string& typeName);
 static size_t logicalCharacterByteLength(const ExprValue& value);
+static unsigned char parseInternalCharByte(const std::string& input);
 
 // ----------------------------------------------------------------------------
 // Interval support
@@ -1734,6 +1735,10 @@ int ExprEvaluator::compareValues(const ExprValue& a, const ExprValue& b) {
 
     std::string ta = toLower(a.typeName);
     std::string tb = toLower(b.typeName);
+    if (ta=="\"char\"" && tb=="\"char\"") {
+        const auto left=parseInternalCharByte(a.value),right=parseInternalCharByte(b.value);
+        return (left>right)-(left<right);
+    }
     if(common_type_detail::array(ta) && common_type_detail::array(tb)) {
         const auto left=sql_array_text::parse(a.value),right=sql_array_text::parse(b.value);
         const auto first=arrayElements(a),second=arrayElements(b);
@@ -2032,7 +2037,7 @@ QueryComparisonBinding ExprEvaluator::resolveComparison(const std::string& rawOp
     const bool strings=textual.count(binding.leftType) && textual.count(binding.rightType);
     const bool timestamps=temporal.count(binding.leftType) && temporal.count(binding.rightType);
     const bool same=binding.leftType==binding.rightType &&
-        (binding.leftType=="boolean" || binding.leftType=="uuid" || binding.leftType=="bytea" ||
+        (binding.leftType=="boolean" || binding.leftType=="\"char\"" || binding.leftType=="uuid" || binding.leftType=="bytea" ||
          binding.leftType=="time" || binding.leftType=="interval" ||
          isBitStringTypeName(binding.leftType) || common_type_detail::array(binding.leftType));
     if (!operations.count(binding.op) || (!numbers && !strings && !timestamps && !same))
@@ -2041,7 +2046,7 @@ QueryComparisonBinding ExprEvaluator::resolveComparison(const std::string& rawOp
     binding.strict=true;
     // Capability is attached to the resolved typed implementation. Unknown
     // operators/custom datatypes never reach an equality/hash fallback.
-    binding.hashable=binding.op=="=" && (numbers || strings || binding.leftType=="boolean" ||
+    binding.hashable=binding.op=="=" && (numbers || strings || binding.leftType=="boolean" || binding.leftType=="\"char\"" ||
         binding.leftType=="interval" || isBitStringTypeName(binding.leftType));
     return binding;
 }
@@ -2104,6 +2109,7 @@ std::string ExprEvaluator::comparisonHashKey(const QueryComparisonBinding& bindi
         throw DbError("XX000","comparison has no non-NULL hash implementation");
     const auto type=common_type_detail::canonical(value.typeName);
     if (type!=(left?binding.leftType:binding.rightType)) throw DbError("XX000","comparison hash received an uncoerced cell");
+    if (type=="\"char\"") return "internal-char:"+std::to_string(parseInternalCharByte(value.value));
     static const std::set<std::string> numeric={"smallint","integer","bigint","real","double precision","numeric"};
     if(type=="real" || type=="double precision") {
         double number=type=="real"?static_cast<double>(parseRealCastValue(value)):parseDoubleCastValue(value);
