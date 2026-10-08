@@ -4547,6 +4547,23 @@ static ExprValue castToBitString(const ExprValue& value,
                      std::move(bits), false);
 }
 
+static ExprValue inputInternalChar(const std::string& input) {
+    // This type holds a byte, not a UTF-8 character or a CHAR(1) string.
+    // Its text input accepts an exact three-octal-digit escape, otherwise
+    // the first input byte. Output keeps high bytes safe for client encoding.
+    unsigned char byte = input.empty()?0:static_cast<unsigned char>(input.front());
+    if (input.size()==4 && input.front()=='\\' &&
+        std::all_of(input.begin()+1,input.end(),[](char c){return c>='0' && c<='7';})) {
+        byte=static_cast<unsigned char>((input[1]-'0')*64+(input[2]-'0')*8+input[3]-'0');
+    }
+    std::string output;
+    if (byte>=128) {
+        output={'\\',static_cast<char>('0'+(byte>>6)),
+            static_cast<char>('0'+((byte>>3)&7)),static_cast<char>('0'+(byte&7))};
+    } else if (byte) output.push_back(static_cast<char>(byte));
+    return ExprValue("\"char\"",std::move(output),false);
+}
+
 // Helper overload used by BinaryOpExpr "::"
 ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
                                   const ExprValue& v, const std::string& targetTypeName) const {
@@ -4578,6 +4595,10 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
     }
     const auto geometryTarget=geometric_input_detail::builtinType(targetTypeName);
     const auto sourceType=ExprHelper::canonicalResultTypeName(v.typeName);
+    if (target=="\"char\"") {
+        if (v.isNull) return ExprValue(target,"",true);
+        return inputInternalChar(v.value);
+    }
     if(!geometryTarget.empty() &&
         (v.isNull || sourceType==geometryTarget || sourceType=="unknown" || sourceType=="text" ||
          sourceType=="character varying" || sourceType=="varchar" || sourceType=="character" ||

@@ -58,7 +58,8 @@ inline DeclaredTypeBinding resolveDeclaredTypeName(const std::string& spelling,
             for(const auto& type:catalog->types)if(type.typnamespace==namespaceOid && type.typname==requested.name) {
                 result.typeOid=type.oid;
                 result.typeName=schema=="pg_catalog"
-                    ?TypeRegistry::instance().normalizeTypeName(type.typname):quote(schema)+"."+quote(type.typname);
+                    ?(type.oid==18?"\"char\"":TypeRegistry::instance().normalizeTypeName(type.typname))
+                    :quote(schema)+"."+quote(type.typname);
                 if(result.typeName.empty())result.typeName=quote(schema)+"."+quote(type.typname);
                 if(declaration.isArray) {
                     Oid arrayOid=type.typarray;
@@ -77,7 +78,8 @@ inline DeclaredTypeBinding resolveDeclaredTypeName(const std::string& spelling,
         if(!requested.schema.empty() && requested.schema!="pg_catalog")
             throw DbError("3F000","schema \""+requested.schema+"\" does not exist");
         if(requested.name==SQLParser::toLower(requested.name)) {
-            result.typeName=TypeRegistry::instance().normalizeTypeName(requested.name);
+            result.typeName=TypeRegistry::instance().normalizeTypeName(
+                requested.name=="char"?"\"char\"":requested.name);
             if(!result.typeName.empty())result.typeOid=mapBuiltinTypeNameToOid(result.typeName+(declaration.isArray?"[]":""));
         }
     }
