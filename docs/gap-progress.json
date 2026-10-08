@@ -2,6 +2,20 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Independent cold operator, real CASE OID and interval input repairs; full standard driver still live and red",
+      "gap_ids": ["TYPE-11", "TYPE-12", "TYPE-21", "QRY-06", "PROTO-04"],
+      "status": "partial",
+      "commits": ["a8bda9aa", "70f92b1f", "1944122c", "ec29d244", "925fbfe9"],
+      "evidence": ["docs/issue-declared-type-boundaries.md"],
+      "tests": [],
+      "verification": {
+        "reproduction": "Original CASE third positive coldNULL/BIGINT XX000 now passes unchanged14positive/8negative fixture. Stronger native140 originally42 failures:40 descriptorOID0 and2 interval values. Complete interval136 actual-reference baseline101 differences; first cast repair still3 infinity CASE differences; all epochs/logs retained.",
+        "focused_tests": "Current native140, original CASE, interval assignment, corrected complete bpchar-array and math fixtures all0; complete CASE protocol28 and interval protocol136 all0. Native batch6 is5pass/1date failure134, not allPASS; uncommitted date corrections expose a later constructor-boundary assertion. Actual owned PG18.6 reference28/136 and extra13 input/range controls verified. Public inline assignment header correction triggered genuine own58 normal25338=0/current-stub; all58 receipts/cache/repeat/frozen b7afSHA/inputseal fb201 proven. Earlier first epoch2CPP+56 own current objects was stillred, not substituted as final proof.",
+        "full_suite": "Private expanded66native93982/43wire29888 running, retaining every prior61/41 control; original38446624=0. Root full unchanged standard63302 still live, currently21native/9protocol failures observed (not final totals), source inputs frozen. No full-suite, type-family, SAN or TLS success claim.",
+        "scope": "All seven follow-up commits remain private, not Root imports: five source repairs plus two actual-reference fixture corrections. Private749auto+2Main/415registered/58TU differs from Root746+2/412/58; Root source7e6/140 unchanged. Original273 items remain22complete166partial70unverified15deferred. Continue all original failure/unmet owners; no fake custom type/catalog metadata, filtered branch restart, push or Actions activation."
+      }
+    },
+    {
       "issue": "Independent cold physical builtin producer and public-AST NULL ownership repairs; Root full standard driver live with preserved failures",
       "gap_ids": ["TYPE-11", "TYPE-21", "TYPE-16", "QRY-06", "PROTO-04"],
       "status": "partial",
