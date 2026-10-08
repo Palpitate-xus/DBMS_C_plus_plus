@@ -2,6 +2,20 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Eighth held candidate: qualified catalog MIN/MAX actual column owner, published Root remains ea67/123",
+      "gap_ids": ["QRY-07", "PROTO-04"],
+      "status": "partial",
+      "commits": ["12bbf068"],
+      "evidence": ["docs/issue-enum-current-candidate-hold.md"],
+      "tests": [],
+      "verification": {
+        "reproduction": "Independent ordinary INTEGER-only full32 baseline on frozen ef2 actual1/all32/eight42P01 failures for qualified catalog MINMAX with quoted range; exact owned PG180006 full32=0. No enum CREATE branch used.",
+        "focused_tests": "Current full32 candidate0; normal60963=0 one genuinelyfresh Main CPP plus57 exact-current-ABI ef2 source/header/compiler/flags/manifest/receipt/byte-proven normal objects, all58 own receipts/cache/repeat/inputseal/frozen b857SHA, NOT fresh58. Actual current full39 native58882=0, focused33 whole71093=0 retaining all original32 and every original39OID assert plus new wrapper, owned reference21 48838=0 including full phase166 and qualified32.",
+        "full_suite": "HELD no Root publication/full/SAN/family approval. Failed additional ours enum phase CREATE branch not restarted; last actual broader failure remains ef2 full164/67, reference166/0. Focused33 is NOT whole34 counterpart or a replacement approval gate. Private733auto+2actualMainfrontends/408registered/58TU not promoted to Root728+2/402/58 inventory.",
+        "scope": "Eight independent local candidate issues preserved through12bb. Actual Root sourceea67/123 and all original273 items/hash/statuses22complete166partial70unverified15deferred unchanged. Continue all original unmet TypeName/catalog/typmod/query/storage/recovery/ops; no assistantpush, Actions activation, skipped security/TDE or filtered fixture restart."
+      }
+    },
+    {
       "issue": "HELD: seven independently committed enum extrema and result identity candidates; Root production remains ea67/123 repairs",
       "gap_ids": ["TYPE-08", "QRY-07", "PROTO-04"],
       "status": "partial",

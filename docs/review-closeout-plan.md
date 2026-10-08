@@ -6,11 +6,13 @@
 
 ## 2026-10-08 枚举候选暂缓合入
 
-README `9603c8ab` 已完成。七项枚举候选分别本地commit至 `ef2f56c7`，
+README `9603c8ab` 已完成。八项枚举候选分别本地commit至 `12bbf068`，
 正式source仍为 `ea67ad29` /123项。真实fresh58 producer、完整39native通过；
 协议consumer原完整32通过且39条真实OID失败消除，但新增phase fixture
 仍164检查/67失败，reference166/0，不能虚报完整33或总目标完成。
-先继续独立的qualified callee执行owner；保留新旧完整失败fixture，
+qualified callee执行owner已独立修复：普通INTEGER32基线8错 -> 新0，
+current完整native39、专项33（保全部原32）、reference21全0，仍非whole34
+或整组approval。继续未闭环TypeName/catalog/typmod等；保留新旧失败fixture，
 不重启或改写已保留CREATE失败分支。全部273要求与跳过项继续保留。
 计划、各commit和完整证据见 `docs/issue-enum-current-candidate-hold.md`。
 

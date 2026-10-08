@@ -1,12 +1,20 @@
-# Latest candidate checkpoint: seven enum repairs HELD, published source unchanged
+# Latest candidate checkpoint: eight enum repairs HELD, published source unchanged
 
-Seven independent local candidate commits through `ef2f56c7` are preserved;
+Eight independent local candidate commits through `12bbf068` are preserved;
 they are not merged into master. Published source stays `ea67ad29` /123 repairs.
 Producer genuine fresh58 and full39 native pass; protocol candidate original32
 all pass including original39 catalog-OID assertions, but its additional phase
 fixture remains actual164/67 failed (owned reference166/0). No complete33,
 enum-family or273-item approval. Full evidence and next safe owner:
 `docs/issue-enum-current-candidate-hold.md`.
+
+The eighth issue fixes qualified catalog MIN/MAX with a quoted column alias:
+ordinary INTEGER-only original32 baseline8 failures -> candidate0, reference0;
+normal60963 actual1freshMain57current proved objects/all58 receipts/repeat0;
+current native39/ focused33 (all original32 + new wrapper) /owned reference21
+all0. The extra ours phase CREATE branch is not rerun; focused33 is not whole34
+or approval. Published Root remains sourceea67/123; TypeName/catalog/typmod and
+all original unmet requirements continue.
 
 # Latestea67 checkpoint:123 independently committed source/test repairs
 

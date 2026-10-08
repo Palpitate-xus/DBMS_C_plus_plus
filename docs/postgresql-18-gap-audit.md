@@ -1,12 +1,14 @@
 # 2026-10-08 枚举候选 HELD checkpoint（正式source仍ea67）
 
-七项独立本地候选commit至ef2f56c7未合入master，正式Root仍123项修复。
+八项独立本地候选commit至12bbf068未合入master，正式Root仍123项修复。
 producer真正fresh58与完整39native通过；consumer原完整32协议通过、
 原39条真实enumOID断言全通过，但新增phase fixture实际164/67失败，
 ownedPG18.6 reference166/0；完整33、enum族与总Goal均未完成。
 全部原273 items与状态22complete166partial70unverified15deferred不变。
-后续先检查普通qualified callee执行owner，不重启/改写保留CREATE失败分支。
-计划、七独立commit、完整红绿证据及未触达边界：
+普通qualified callee执行owner已修复，INTEGER原32基线8错 -> 新0，完整
+native39/专项33（保原全部32）/reference21全0；额外phase CREATE分支未重启，
+不是whole34或整组approval。继续TypeName/catalog/typmod与全部原未完成要求。
+计划、八独立commit、完整红绿证据及未触达边界：
 `docs/issue-enum-current-candidate-hold.md`。
 
 # 2026-10-08 最新ea67总清单 checkpoint

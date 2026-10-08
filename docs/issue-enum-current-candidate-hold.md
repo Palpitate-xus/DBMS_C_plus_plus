@@ -2,7 +2,7 @@
 
 Published Root production remains `ea67ad29` with 123 independently committed
 source/test repairs. README maintenance is separately committed as `9603c8ab`.
-No source from the seven candidates below is merged into master. All original
+No source from the eight candidates below is merged into master. All original
 273 requirements and statuses remain unchanged: 22 complete,166 partial,
 70 unverified,15 user-deferred. No push or GitHub Actions activation occurred.
 
@@ -17,10 +17,12 @@ No source from the seven candidates below is merged into master. All original
 | `d99c2fb8` | Actual stored/callback/catalog MIN/MAX metadata ownership |
 | `8dade1c5` | Actual enum extrema result OID in pure whole-query binding |
 | `ef2f56c7` | Pre-execution protocol consumer of real enum result identity |
+| `12bbf068` | Actual qualified catalog MIN/MAX owner with quoted column aliases |
 
 These commits are recoverable through local branches
 `fix/root-enum-extrema-s6ykqNwx`, `fix/root-enum-identity-I1ncZkWa` and
-`fix/root-enum-wire-iYA0HKUO`. A private commit does not mean its composition
+`fix/root-enum-wire-iYA0HKUO` and `fix/root-qualified-extrema-50CVFlax`.
+A private commit does not mean its composition
 has been approved for the user's push branch.
 
 ## Preserved complete evidence
@@ -83,8 +85,8 @@ TYPE-08/aggregate/protocol family is marked complete.
 
 ## Continuing plan
 
-1. Inspect and independently repair the ordinary qualified-callee execution
-   handoff; preserve the existing full phase failure fixture.
+1. The ordinary qualified-callee handoff is independently repaired in
+   `12bbf068`; preserve the existing full phase failure fixture and its hold.
 2. Rerun full original native/protocol matrices and all stronger retained
    assertions. Record any unreached controls and actual terminal failures.
 3. Publish only an actually approved composition, keeping each issue commit.
@@ -92,3 +94,32 @@ TYPE-08/aggregate/protocol family is marked complete.
 4. Continue every original unmet TypeName/catalog/typmod, query, storage,
    recovery and operations requirement. These scoped gates do not replace
    original failed full-suite/SAN evidence or complete the273-item Goal.
+
+## Eighth candidate: qualified-callee execution verified independently
+
+`12bbf068` is frozen at `/tmp/dbms-root-qualified-extrema.50CVFlax/repo`.
+Its ordinary INTEGER-only full32 baseline actually runs all32 and fails8;
+owned PostgreSQL18.6 full32 passes. The finite Main handoff now consults the
+real resolver for an explicitly qualified catalog extremum instead of treating
+its raw spelling as an unknown row-scalar. Original arguments, source
+visibility and stored-scalar ownership remain; no enum CREATE is used to
+reproduce or fix this independent issue.
+
+Normal60963 finishes0: one genuine fresh Main CPP plus57 source/header/
+compiler/flags/manifest/receipt/ABI and byte-proven current ef2 objects,
+all58 own receipts/cache/repeat/seal verified, NOT fresh58. Frozen SHA-256:
+`b857578985dad895098aedd8b9ffaebaa366372ef473da812526296a43cd68ed`.
+The full32 candidate assertions pass. Complete current native39 session58882,
+focused33 session71093 and owned reference21 session48838 all finish0.
+Focused33 retains **all original32** protocol drivers plus the new qualified
+wrapper, including every original39 enum-OID assertion. Reference21 also
+retains the full phase fixture and its166 checks.
+
+The additional ours phase fixture's failed CREATE branch is **not restarted**
+by this ordinary handoff repair. Its last genuine ours evidence remains the
+ef2 epoch164/67 failure, not a current candidate pass. Focused33 is not the
+whole34 counterpart or composition approval; all original failures and stronger
+assertions remain frozen. Current private inventory733 auto-native plus two
+actual Main frontends/408 registered/58TU is not the published Root inventory.
+Root stays sourceea67/123 repairs. Eight local issue commits remain held,
+and all original unmet TypeName/catalog/typmod and other families continue.
