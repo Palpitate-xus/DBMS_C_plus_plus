@@ -395,8 +395,12 @@ frozen bytes are verified, binary/input seal:
 `855a0645be39eacad2d5f7e890f4e08a487662e0e5095dcab63cf6b97d9dfdb7` /
 `3e3c0c1c236a3d408d1029bbe0a8481d84dc41d728bf5f0b89b05fa2ecd27aa5`.
 Original384 on this generation also finishes0. Complete native61 (30929) and
-wire41 (59212) gates are running; no success is claimed for these pending
-gates. Private inventory is748 auto-native+2 Main frontends/413 registered/
+wire41 (59212) gates subsequently finished terminal0, with their final input
+seal/cache/receipt/frozen-byte fences passing too. These retain all prior
+native56/protocol41 inputs and add the NULL36 and unchanged full array/bytea/
+encoding/string library fixtures; they are not the Root full standard driver
+and do not omit or close its separately recorded failures. Private inventory
+is748 auto-native+2 Main frontends/413 registered/
 58TU, not the Root746+2/412/58 inventory. Both private follow-ups are locally
 committed; neither is a Root source publication or whole-family completion.
 
