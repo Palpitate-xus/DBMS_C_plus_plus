@@ -2,7 +2,11 @@
 
 使用 C++17 实现的关系型数据库管理系统，提供 SQL 交互、页式存储、索引、事务和查询执行模块，以及 PostgreSQL wire protocol 3.0 的部分实现。
 
-本项目使用自己的存储格式，不是 PostgreSQL 的直接替代品，也不能直接打开 PostgreSQL 数据目录。SQL 与客户端协议的支持范围见[兼容性契约](docs/compatibility-contract.md)和[能力清单](docs/postgresql-18-gap-audit.md)。
+## 项目定位与兼容性
+
+本项目使用自己的存储格式，不是 PostgreSQL 的直接替代品，也不能直接打开 PostgreSQL 数据目录。客户端能够连接，不代表 SQL、系统目录、事务或存储行为与 PostgreSQL 等价。
+
+SQL 与客户端协议的支持范围见[兼容性契约](docs/compatibility-contract.md)和[能力清单](docs/postgresql-18-gap-audit.md)。README 只介绍项目、构建、使用和贡献方式；版本变更见 [CHANGELOG](CHANGELOG.md)，逐项验证依据见[机器可读记录](docs/gap-progress.json)。
 
 ## 功能概览
 
@@ -134,7 +138,7 @@ bash scripts/build_one_test.sh window_functions_test
 python3 scripts/check_gap_progress.py
 ```
 
-测试结果以所运行的代码、配置和完整输出为准；README 不维护通过数量或性能基准。
+请保留实际运行的命令、代码提交、环境与完整输出，便于复现测试结果。专项测试的先决条件以对应脚本和测试说明为准。
 
 ## 项目结构
 
@@ -168,7 +172,13 @@ docs/              # 使用、兼容性与开发文档
 
 欢迎通过 Issue 报告问题，或通过 Pull Request 提交改进。
 
-提交问题时请提供最小 SQL 复现、预期与实际结果、构建环境及运行参数；不要附带真实数据库数据或凭据。修改代码时请补充回归测试，保持独立、易复查的提交，并说明实际运行的测试范围。新增生产源码需同步共享清单，新增测试需接入对应测试入口。
+提交问题时请提供：
+
+- 使用的提交或版本、编译器和操作系统。
+- 可在独立测试数据目录执行的最小 SQL 复现及启动参数。
+- 预期与实际结果，以及相关错误信息。
+
+不要附带真实数据库数据、私钥或凭据。修改代码时请补充回归测试，保持独立、易复查的提交，并说明实际运行的测试范围。新增生产源码需同步共享清单，新增测试需接入对应测试入口。
 
 ## 许可证
 
