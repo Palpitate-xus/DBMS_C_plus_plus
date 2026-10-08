@@ -154,6 +154,37 @@ static std::string parseRoutineIdentifier(const std::string& token) {
     return identifier;
 }
 
+static bool declaredTypePrefixEligible(const std::string& token) {
+    if(!token.empty() && token.front()=='"')return true;
+    // PostgreSQL18.6 pg_get_keywords() categories: reserved words and
+    // non-type COL_NAME keywords cannot begin generic type/function names.
+    // Standard type grammar remains available, independently of type lookup.
+    static const std::set<std::string> excluded={
+        "all","analyse","analyze","and","any","array",
+        "as","asc","asymmetric","between","both","case",
+        "cast","check","coalesce","collate","column","constraint",
+        "create","current_catalog","current_date","current_role","current_time","current_timestamp",
+        "current_user","default","deferrable","desc","distinct","do",
+        "else","end","except","exists","extract","false",
+        "fetch","for","foreign","from","grant","greatest",
+        "group","grouping","having","in","initially","inout",
+        "intersect","into","json_array","json_arrayagg","json_exists","json_object",
+        "json_objectagg","json_query","json_scalar","json_serialize","json_table","json_value",
+        "lateral","leading","least","limit","localtime","localtimestamp",
+        "merge_action","none","normalize","not","null","nullif",
+        "offset","on","only","or","order","out",
+        "overlay","placing","position","precision","primary","references",
+        "returning","row","select","session_user","setof","some",
+        "substring","symmetric","system_user","table","then","to",
+        "trailing","treat","trim","true","union","unique",
+        "user","using","values","variadic","when","where",
+        "window","with","xmlattributes","xmlconcat","xmlelement","xmlexists",
+        "xmlforest","xmlnamespaces","xmlparse","xmlpi","xmlroot","xmlserialize",
+        "xmltable"
+    };
+    return !excluded.count(SQLParser::toLower(token));
+}
+
 static ColumnDef consumeDeclaredType(const std::vector<std::string>& tokens,
                                      size_t& pos) {
     ColumnDef definition;
@@ -161,7 +192,7 @@ static ColumnDef consumeDeclaredType(const std::vector<std::string>& tokens,
         return !token.empty() && (token.front() == '"' ||
             std::isalpha(static_cast<unsigned char>(token.front())) || token.front() == '_');
     };
-    if (pos >= tokens.size() || !identifier(tokens[pos]))
+    if (pos >= tokens.size() || !identifier(tokens[pos]) || !declaredTypePrefixEligible(tokens[pos]))
         throw DbError("42601", "type name is required");
     definition.typeName = tokens[pos++];
     bool qualified = false;
@@ -2505,7 +2536,12 @@ static ExprPtr parsePrimaryExprImpl(const std::vector<std::string>& tokens, size
     // A declared type followed by a real string constant is a type-input
     // grammar role, including named/qualified/quoted and modified types.
     // A function call without that following constant retains its callee.
-    if (SQLParser::toLower(tokens[pos]) != "case") {
+    const bool eligibleTypePrefix=declaredTypePrefixEligible(tokens[pos]);
+    if(!eligibleTypePrefix && SQLParser::toLower(tokens[pos])!="case" &&
+       pos+1<tokens.size() && tokens[pos+1].size()>=2 &&
+       tokens[pos+1].front()=='\'' && tokens[pos+1].back()=='\'')
+        retainDeclarationSyntaxError(DbError("42601","grammar keyword cannot introduce a type constant"));
+    if (eligibleTypePrefix) {
         size_t typeEnd=pos;
         try {
             const auto declaration=consumeDeclaredType(tokens,typeEnd);
