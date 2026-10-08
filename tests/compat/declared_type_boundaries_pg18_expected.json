@@ -1,0 +1,1115 @@
+[
+  {
+    "sql": "SELECT FLOAT '1.25' AS value",
+    "reference": [
+      [
+        [
+          "1.25"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        701
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('1.25' AS FLOAT) AS value",
+    "reference": [
+      [
+        [
+          "1.25"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        701
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT '1.25'::FLOAT AS value",
+    "reference": [
+      [
+        [
+          "1.25"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        701
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT FLOAT(1) '1.25' AS value",
+    "reference": [
+      [
+        [
+          "1.25"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        700
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('1.25' AS FLOAT(1)) AS value",
+    "reference": [
+      [
+        [
+          "1.25"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        700
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT '1.25'::FLOAT(1) AS value",
+    "reference": [
+      [
+        [
+          "1.25"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        700
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT FLOAT(24) '1.25' AS value",
+    "reference": [
+      [
+        [
+          "1.25"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        700
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('1.25' AS FLOAT(24)) AS value",
+    "reference": [
+      [
+        [
+          "1.25"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        700
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT '1.25'::FLOAT(24) AS value",
+    "reference": [
+      [
+        [
+          "1.25"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        700
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT FLOAT(25) '1.25' AS value",
+    "reference": [
+      [
+        [
+          "1.25"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        701
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('1.25' AS FLOAT(25)) AS value",
+    "reference": [
+      [
+        [
+          "1.25"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        701
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT '1.25'::FLOAT(25) AS value",
+    "reference": [
+      [
+        [
+          "1.25"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        701
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT FLOAT(53) '1.25' AS value",
+    "reference": [
+      [
+        [
+          "1.25"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        701
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('1.25' AS FLOAT(53)) AS value",
+    "reference": [
+      [
+        [
+          "1.25"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        701
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT '1.25'::FLOAT(53) AS value",
+    "reference": [
+      [
+        [
+          "1.25"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        701
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT FLOAT(0) '1.25' AS value",
+    "reference": [
+      [],
+      "22023",
+      "precision for type float must be at least 1 bit",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST('1.25' AS FLOAT(0)) AS value",
+    "reference": [
+      [],
+      "22023",
+      "precision for type float must be at least 1 bit",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT '1.25'::FLOAT(0) AS value",
+    "reference": [
+      [],
+      "22023",
+      "precision for type float must be at least 1 bit",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT FLOAT(54) '1.25' AS value",
+    "reference": [
+      [],
+      "22023",
+      "precision for type float must be less than 54 bits",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST('1.25' AS FLOAT(54)) AS value",
+    "reference": [
+      [],
+      "22023",
+      "precision for type float must be less than 54 bits",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT '1.25'::FLOAT(54) AS value",
+    "reference": [
+      [],
+      "22023",
+      "precision for type float must be less than 54 bits",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT FLOAT(-1) '1.25' AS value",
+    "reference": [
+      [],
+      "42601",
+      "syntax error at or near \"-\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST('1.25' AS FLOAT(-1)) AS value",
+    "reference": [
+      [],
+      "42601",
+      "syntax error at or near \"-\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT '1.25'::FLOAT(-1) AS value",
+    "reference": [
+      [],
+      "42601",
+      "syntax error at or near \"-\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT FLOAT(+1) '1.25' AS value",
+    "reference": [
+      [],
+      "42601",
+      "syntax error at or near \"+\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST('1.25' AS FLOAT(+1)) AS value",
+    "reference": [
+      [],
+      "42601",
+      "syntax error at or near \"+\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT '1.25'::FLOAT(+1) AS value",
+    "reference": [
+      [],
+      "42601",
+      "syntax error at or near \"+\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT FLOAT(24,25) '1.25' AS value",
+    "reference": [
+      [],
+      "42601",
+      "syntax error at or near \",\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST('1.25' AS FLOAT(24,25)) AS value",
+    "reference": [
+      [],
+      "42601",
+      "syntax error at or near \",\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT '1.25'::FLOAT(24,25) AS value",
+    "reference": [
+      [],
+      "42601",
+      "syntax error at or near \",\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT INTEGER(2) '12' AS value",
+    "reference": [
+      [],
+      "42601",
+      "syntax error at or near \"(\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST('12' AS INTEGER(2)) AS value",
+    "reference": [
+      [],
+      "42601",
+      "syntax error at or near \"(\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT int4(2) '12' AS value",
+    "reference": [
+      [],
+      "42601",
+      "type modifier is not allowed for type \"int4\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST('12' AS int4(2)) AS value",
+    "reference": [
+      [],
+      "42601",
+      "type modifier is not allowed for type \"int4\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT TEXT(3) 'abcdef' AS value",
+    "reference": [
+      [],
+      "42601",
+      "type modifier is not allowed for type \"text\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST('abcdef' AS TEXT(3)) AS value",
+    "reference": [
+      [],
+      "42601",
+      "type modifier is not allowed for type \"text\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT VARCHAR(0) 'a' AS value",
+    "reference": [
+      [],
+      "22023",
+      "length for type varchar must be at least 1",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST('a' AS VARCHAR(0)) AS value",
+    "reference": [
+      [],
+      "22023",
+      "length for type varchar must be at least 1",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT VARCHAR(-1) 'a' AS value",
+    "reference": [
+      [],
+      "42601",
+      "syntax error at or near \"-\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST('a' AS VARCHAR(-1)) AS value",
+    "reference": [
+      [],
+      "42601",
+      "syntax error at or near \"-\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT VARCHAR(2,3) 'abc' AS value",
+    "reference": [
+      [],
+      "42601",
+      "syntax error at or near \",\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST('abc' AS VARCHAR(2,3)) AS value",
+    "reference": [
+      [],
+      "42601",
+      "syntax error at or near \",\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT NUMERIC(0) '1' AS value",
+    "reference": [
+      [],
+      "22023",
+      "NUMERIC precision 0 must be between 1 and 1000",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST('1' AS NUMERIC(0)) AS value",
+    "reference": [
+      [],
+      "22023",
+      "NUMERIC precision 0 must be between 1 and 1000",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT NUMERIC(2,2000) '1' AS value",
+    "reference": [
+      [],
+      "22023",
+      "NUMERIC scale 2000 must be between -1000 and 1000",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST('1' AS NUMERIC(2,2000)) AS value",
+    "reference": [
+      [],
+      "22023",
+      "NUMERIC scale 2000 must be between -1000 and 1000",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CHAR 'abc' AS value",
+    "reference": [
+      [
+        [
+          "abc"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1042
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('abc' AS CHAR) AS value",
+    "reference": [
+      [
+        [
+          "a"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1042
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT bpchar 'abc' AS value",
+    "reference": [
+      [
+        [
+          "abc"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1042
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('abc' AS bpchar) AS value",
+    "reference": [
+      [
+        [
+          "abc"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1042
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT pg_catalog.bpchar 'abc' AS value",
+    "reference": [
+      [
+        [
+          "abc"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1042
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('abc' AS pg_catalog.bpchar) AS value",
+    "reference": [
+      [
+        [
+          "abc"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1042
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT \"char\" 'abc' AS value",
+    "reference": [
+      [
+        [
+          "a"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        18
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('abc' AS \"char\") AS value",
+    "reference": [
+      [
+        [
+          "a"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        18
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT pg_catalog.\"char\" 'abc' AS value",
+    "reference": [
+      [
+        [
+          "a"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        18
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('abc' AS pg_catalog.\"char\") AS value",
+    "reference": [
+      [
+        [
+          "a"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        18
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT BIT '01' AS value",
+    "reference": [
+      [
+        [
+          "01"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1560
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('01' AS BIT) AS value",
+    "reference": [
+      [
+        [
+          "0"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1560
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT pg_catalog.bit '01' AS value",
+    "reference": [
+      [
+        [
+          "01"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1560
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('01' AS pg_catalog.bit) AS value",
+    "reference": [
+      [
+        [
+          "01"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1560
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT \"integer\" '12' AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"integer\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST('12' AS \"integer\") AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"integer\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT pg_catalog.integer '12' AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"pg_catalog.integer\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST('12' AS pg_catalog.integer) AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"pg_catalog.integer\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT \"int4\" '12' AS value",
+    "reference": [
+      [
+        [
+          "12"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        23
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('12' AS \"int4\") AS value",
+    "reference": [
+      [
+        [
+          "12"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        23
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT float4 '1.25' AS value",
+    "reference": [
+      [
+        [
+          "1.25"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        700
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('1.25' AS float4) AS value",
+    "reference": [
+      [
+        [
+          "1.25"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        700
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT float8 '1.25' AS value",
+    "reference": [
+      [
+        [
+          "1.25"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        701
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('1.25' AS float8) AS value",
+    "reference": [
+      [
+        [
+          "1.25"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        701
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT TRUE 'x' AS value",
+    "reference": [
+      [],
+      "42601",
+      "syntax error at or near \"'x'\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT NULL 'x' AS value",
+    "reference": [
+      [],
+      "42601",
+      "syntax error at or near \"'x'\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT ARRAY 'x' AS value",
+    "reference": [
+      [],
+      "42601",
+      "syntax error at or near \"'x'\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT SELECT 'x' AS value",
+    "reference": [
+      [],
+      "42601",
+      "syntax error at or near \"SELECT\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CASE 'x' WHEN 'x' THEN 1 ELSE 2 END AS value",
+    "reference": [
+      [
+        [
+          "1"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        23
+      ]
+    ]
+  }
+]
