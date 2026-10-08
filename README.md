@@ -1,681 +1,182 @@
-# 关系型数据库管理系统 (DBMS)
+# DBMS C++
 
-基于 C++17 实现的关系型数据库管理系统，支持标准 SQL 交互，具备页式存储、B+ 树索引、MVCC 事务、查询优化器、网络服务等数据库核心功能。
+使用 C++17 实现的关系型数据库管理系统，提供 SQL 交互、页式存储、索引、事务和查询执行模块，以及 PostgreSQL wire protocol 3.0 的部分实现。
 
-> **完整使用手册**: [docs/MANUAL.md](docs/MANUAL.md)
-> **生产化状态与边界**: [docs/production-status.md](docs/production-status.md)
-> **兼容版本契约**: [docs/compatibility-contract.md](docs/compatibility-contract.md)
-> **PostgreSQL 18 差距审计与实施蓝图**: [差距清单](docs/postgresql-18-gap-audit.md) · [逐项实施方案](docs/postgresql-18-implementation-blueprint.md)
-> **当前状态（2026-09-09）**：发行标识为 v0.2.0；PostgreSQL 18 兼容和生产化复查仍在进行，不能宣称生产就绪或 PostgreSQL 等价。唯一的实时范围与完成状态来自 [`docs/postgresql-18-gap-audit.md`](docs/postgresql-18-gap-audit.md) 和机器可读 [`docs/gap-progress.json`](docs/gap-progress.json)，可运行 `python3 scripts/check_gap_progress.py` 校验。其他文档中的 PASS 数、批次和性能数字都是带日期的历史记录，不是当前全量绿色声明。GitHub Actions 当前全部禁用；本地验证入口仍为 `scripts/build_tests.sh`。
->
-> **2026-08-14 性能与并发硬化轮次**（13 个提交，每步全量回归保持绿色）：WAL 追加改为增量状态 + 常开 segment fd + 按库互斥；同事务重复页 before-image 去重；`.secidx`/`.hashidx`/排除约束/表 schema/序列计数器内存缓存（DDL 全路径失效）；缓冲池默认 256/128 帧可环境变量覆盖，页校验只在磁盘加载时执行；B+ 树节点下降改二分查找并加 64 项节点缓存；BufferPool 磁盘 I/O 移出池锁（两阶段加载 + 单加载者规则 + 孤儿帧失效语义）；FSM/VM/PageAllocator/BPTree/HashIndex/CLOG 映射内部锁；`invalidatePage` 并发读者下的孤儿帧修复经 TSAN/ASAN 多线程压测验证 0 竞态 0 损坏。典型负载提升：事务内带 PK 插入 11.7 → ~2000+ 行/秒，commit 267ms → ~13ms，500 行插入+聚合 106s → ~0.3s。
+本项目使用自己的存储格式，不是 PostgreSQL 的直接替代品，也不能直接打开 PostgreSQL 数据目录。SQL 与客户端协议的支持范围见[兼容性契约](docs/compatibility-contract.md)和[能力清单](docs/postgresql-18-gap-audit.md)。
 
-## 功能特性
+## 功能概览
 
-### 数据定义 (DDL)
-- **数据库管理**：`CREATE DATABASE`, `DROP DATABASE`；extended 模式另提供 `USE DATABASE`
-- **表管理**：`CREATE TABLE`, `CREATE TEMPORARY TABLE`, `DROP TABLE`, `ALTER TABLE ADD/DROP/ALTER COLUMN`
-- **视图**：`CREATE VIEW`, `CREATE MATERIALIZED VIEW`, `DROP VIEW`, `REFRESH MATERIALIZED VIEW`
-- **索引**：`CREATE INDEX`, `CREATE UNIQUE INDEX`, `CREATE INDEX ... USING HASH`, `CREATE FULLTEXT INDEX`, `DROP INDEX`
-  - 覆盖索引（`INCLUDE` 列）、部分索引（`WHERE` 条件）、复合索引
-- **触发器**：`CREATE TRIGGER`（BEFORE/AFTER + INSERT/UPDATE/DELETE）
-- **存储程序**：`CREATE PROCEDURE`, `CREATE FUNCTION`（UDF）, `CALL`
-- **角色**：`CREATE ROLE`, `GRANT role TO user`, `REVOKE role FROM user`
-- **分区表**：`CREATE TABLE ... PARTITION BY RANGE`
-- **查看结构**：标准 catalog 查询；extended 模式另提供 `VIEW TABLE`, `VIEW DATABASE`, `DESC`, `SHOW COLUMNS`, `SHOW CREATE TABLE`
-- **数据类型**：`INT`, `SMALLINT`, `BIGINT`, `FLOAT`, `DOUBLE`, `MONEY`, `BOOL`, `CHAR(n)`, `VARCHAR(n)`, `NCHAR(n)`, `NVARCHAR(n)`, `DATE`, `TIME`, `DATETIME`, `TIMESTAMP`, `TIMESTAMPTZ`, `BLOB`, `TEXT`, `JSON`, `JSONB`, `ARRAY type`, `SERIAL`
-- **约束支持**：主键 (Primary Key)、非空 (NOT NULL)、唯一 (UNIQUE)、外键 (Foreign Key) 含 `ON DELETE/UPDATE CASCADE/SET NULL/RESTRICT/DEFAULT/NO ACTION`、CHECK 约束、DEFAULT 默认值、AUTO_INCREMENT
+- SQL 解析、AST、类型绑定，以及数据定义、查询和数据修改的执行入口。
+- 页式堆存储、缓冲池、变长数据和 TOAST。
+- B+ 树、Hash 等索引访问方法。
+- Volcano 查询执行器，包含扫描、过滤、投影、连接、排序、聚合和窗口算子。
+- 事务、MVCC、保存点、锁管理、WAL 和恢复模块。
+- 交互式命令行，以及 PostgreSQL Simple / Extended Query 协议入口。
 
-### 数据操纵 (DML)
-- **插入**：`INSERT INTO ... VALUES (...)`, `INSERT INTO ... SELECT ...`
-- **替换**：`REPLACE INTO`（冲突时先删后插）
-- **合并**：`MERGE INTO ... USING ... ON ... UPDATE SET ... INSERT ...`
-- **Upsert（窄版 AST 路径）**：显式匹配单列或复合主键/UNIQUE 约束的 target，配合常量或 evaluator 支持的、只引用 `excluded` 的标量表达式 `SET` 的 `INSERT INTO ... VALUES ... ON CONFLICT (...) DO UPDATE SET ...`
-- **查询**：`SELECT` 支持 `*`、指定列、`WHERE`、`ORDER BY`、`LIMIT`、`OFFSET`、`DISTINCT`
-- **更新**：`UPDATE ... SET ... WHERE ...`, `UPDATE ... FROM ... WHERE ...`
-- **删除**：`DELETE FROM ... WHERE ...`, `DELETE ... USING ... WHERE ...`
-- **多表更新/删除**：支持 `FROM` / `USING` 子句的跨表 UPDATE/DELETE
+功能入口不代表完整 PostgreSQL 语义；具体语法、适用条件与限制请查阅[使用手册](docs/MANUAL.md)。
 
-普通单表 `INSERT ... VALUES` / `DEFAULT VALUES`、无 JOIN/聚合/排序的单表 `INSERT ... SELECT`、无 target 或显式匹配主键/UNIQUE 约束 target 的 `ON CONFLICT DO NOTHING`，以及显式匹配单列或复合主键/UNIQUE 约束 target、配合常量或只引用 `excluded` 的 evaluator 受限标量表达式 `SET` 和受限 `WHERE` 的窄版 `ON CONFLICT DO UPDATE`，当前由 `src/commands/DmlExecutor` 消费 AST；单表 UPDATE 还支持以当前目标行列值为输入的受限标量表达式，单源表 `UPDATE ... FROM` 和单源表 `DELETE ... USING` 支持来源 INNER/CROSS JOIN、别名、限定连接谓词和受限 `RETURNING`。窄版 `MERGE` 也由同一 typed executor 执行：单源表、限定/别名关系、单个 MATCHED UPDATE/DO NOTHING 和单个 NOT MATCHED INSERT/DO NOTHING，并在修改前拒绝多源行匹配同一目标行。支持结构化常量/列表达式、简单 `AND` 谓词、`IS NULL`/`IS NOT NULL` 及 StorageEngine 统一约束路径。普通单表 INSERT/UPDATE/DELETE 的列投影和 evaluator 支持的受限标量表达式 `RETURNING` 已在存储修改边界收集并通过 PostgreSQL 协议结果集发送。复杂 `INSERT ... SELECT`、部分/索引推断 conflict target、引用子查询或其他关系的 `DO UPDATE` 表达式/`WHERE`、复杂/子查询/窗口 `RETURNING`、外连接/复杂 JOIN、视图写入以及 MERGE 的多 WHEN、BY SOURCE/BY TARGET、DELETE、复杂 source query 和 RETURNING 仍 fail-closed。该边界不能视为 PostgreSQL 完整语义。
+## 构建
 
-无显式 `BEGIN` 时，顶层 `INSERT`、`UPDATE`、`DELETE`、`MERGE`、`REPLACE` 以及包含写 CTE 的 `WITH` 语句由统一执行入口建立内部事务：成功自动提交，错误或异常自动回滚；触发器、视图 action 和 CTE 的递归 SQL 复用同一边界。复杂 DML 仍按上文列出的 fail-closed/legacy 边界执行。
+### 环境与依赖
 
-### 高级查询 (DQL)
-- **条件过滤**：支持 `=`, `<>`, `!=`, `>`, `<`, `>=`, `<=`, `LIKE`, `BETWEEN`, `IN`, `EXISTS`, `ANY`, `ALL`, `IS NULL`, `IS NOT NULL` 以及 `AND`/`OR` 组合；未关联单列 `IN`/`NOT IN`、未关联单表 `EXISTS`/`NOT EXISTS` 和单列 `ANY/ALL` 已进入结构化 Volcano 计划，复杂/关联子查询仍受生产边界限制
-- **三值逻辑**：`TRUE` / `FALSE` / `UNKNOWN`，WHERE 子句中 `UNKNOWN` 被当作 `FALSE`
-- **排序**：`ORDER BY column [ASC|DESC]`，支持字符串、数值、日期类型
-- **聚合函数**：`COUNT(*)`, `COUNT(DISTINCT ...)`, `MAX`, `MIN`, `SUM`, `AVG`
-- **分组**：`GROUP BY ... HAVING ...`
-- **表连接**：`INNER JOIN`, `LEFT JOIN`, `RIGHT JOIN`, `CROSS JOIN`
-- **JOIN 算法选择**：NestedLoopJoin / HashJoin / MergeJoin，查询优化器根据统计信息自动选择
-- **子查询**：解析层支持 `IN`, `EXISTS`, `ANY`, `ALL` 及标量子查询；执行层已结构化未关联单列 `IN`/`NOT IN`、未关联单表 `EXISTS`/`NOT EXISTS`、单个未关联标量目标（严格 0/1 行）以及单列 `ANY/ALL` 量化过滤（含 NULL/空集三值逻辑）；关联、复杂标量、row comparison 和复杂组合仍走兼容 fallback
-- **联合**：`UNION`, `UNION ALL`
-- **CTE**：`WITH cte_name AS (SELECT ...)` 公用表表达式
-- **导出**：`COPY table TO 'file.csv'`
-- **执行计划**：`EXPLAIN SELECT ...`, `EXPLAIN ANALYZE SELECT ...`, `EXPLAIN FORMAT JSON SELECT ...`
-- **窗口函数**：`ROW_NUMBER()`, `RANK()`, `DENSE_RANK()`, `LAG()`, `LEAD()`, `FIRST_VALUE()`, `LAST_VALUE()`, `NTILE()`, `PERCENT_RANK()`, `CUME_DIST()` 支持 `OVER (PARTITION BY ... ORDER BY ...)`
-- **派生表**：`(SELECT ...) AS alias`
-- **锁查询**：`FOR UPDATE`, `FOR SHARE`, `NOWAIT`, `SKIP LOCKED`
+- Linux，支持 C++17 的编译器；脚本构建使用 `g++`。
+- Bash、`pkg-config`。
+- zlib 与 ICU 开发库。
+- OpenSSL 开发库用于 TLS 网络服务；未检测到 OpenSSL 时构建 TLS stub。
+- Python 3 用于测试；CMake 构建需要 CMake 3.16 或更高版本。
 
-### 事务控制 (TCL) / MVCC
-- `BEGIN` / `START TRANSACTION` 支持 `ISOLATION LEVEL`、`READ ONLY/WRITE` 和 `NOT DEFERRABLE` 选项；当前 `DEFERRABLE` 会明确拒绝（尚无安全快照实现）
-- `COMMIT` — 提交事务，持久化到 WAL
-- `ROLLBACK` — 基于 Undo Log 的增量回滚
-- `SAVEPOINT spname` / `ROLLBACK TO [SAVEPOINT] spname` / `RELEASE [SAVEPOINT] spname` 通过事务 AST 统一解析
-- **MVCC 快照隔离**：每行使用 PostgreSQL 风格 HeapTupleHeader，事务内读取基于 ReadView 的可见性规则
-- **隔离级别**：支持 `READ UNCOMMITTED` / `READ COMMITTED` / `REPEATABLE READ` / `SERIALIZABLE`
-- **SERIALIZABLE 读覆盖**：非空索引谓词和顺序扫描登记 heap page SIREAD，空谓词保留关系级兜底；非相交页与跨页危险结构已有回归，完整索引范围 predicate lock/SSI 仍在建设中
-- **全局事务 ID 生成器**：单调递增 64 位 txId，持久化到 `.txnid` 文件
-- **HOT 更新**：堆内元组直接更新（不更新索引指针），减少 WAL 写入与索引维护开销
-- **CLOG (Commit Log)**：事务提交状态位图，加速可见性判断与故障恢复；段更新使用文件锁和按位合并，多个 backend 不会互相覆盖状态；截断仅在持久化和目录同步成功后删除旧段
+Ubuntu / Debian 安装依赖示例：
 
-### 索引
-- **B+ 树主键索引**：磁盘页式存储，O(log n) 精确查找
-- **B+ 树二级索引**：单列/多列二级索引，支持覆盖索引和部分索引
-- **Hash 索引**：等值查询优化
-- **GIN/BRIN 索引**：基础倒排与块范围能力；独立及 StorageEngine 索引文件采用严格校验、fsync 和原子替换，损坏文件不会被当作空索引加载
-- **访问方法失败安全**：B+树/复合、Hash、全文、GiST、SP-GiST、GIN、BRIN 的构建和 `REINDEX` 会传播 heap 扫描失败；Volcano 顺序/索引扫描遇到页面 I/O 错误时 fail-closed
-- **存储操作失败安全**：过滤器、聚合、JOIN、FK/EXCLUDE、`ANALYZE`、表重写和 TOAST/page 写入会传播页面 I/O 错误；`ANALYZE` 统计文件采用原子替换，不会以半成品覆盖旧统计
-- **Fulltext 索引**：文本全文检索
-- **复合索引**：多列联合索引
-- **唯一性约束**：通过 B+ 树自动检测重复主键/唯一键
-
-### 查询优化器
-- **执行计划树**：火山模型（TableScan, IndexScan, Filter, Project, Sort, Limit, Distinct, NestedLoopJoin, HashJoin, MergeJoin, Aggregate, GroupAggregate）
-- **成本估计**：基于表统计信息估算各算子成本
-- **索引选择**：自动选择 IndexScan 替代 TableScan
-- **条件下推**：索引条件从 Filter 中移除避免重复过滤
-- **JOIN 算法选择**：根据表大小和排序状态自动选择最优 JOIN 算法
-- **查询计划缓存**：重复 SQL 自动复用执行计划
-
-### 存储引擎
-- **Slotted Page**：8192 字节页式存储，line pointer 数组管理记录位置
-- **页分配器**：空闲页链表管理，支持页复用
-- **Buffer Pool**：clock-sweep 缓存，保护 pinned 页并在淘汰前保留脏页写盘失败状态
-- **页完整性**：Fletcher-16 heap page 校验和 + FNV 文件头校验；布局、line pointer、页数和截断边界均 fail-closed，损坏页不会暴露给执行层
-- **WAL 日志**：Write-Ahead Logging 支持崩溃恢复；记录长度/CRC/对齐/`xl_prev` 链和 heap page image 严格校验，损坏输入 fail-closed
-- **Checkpoint**：`CHECKPOINT` 命令刷盘已加载的 heap/index 脏缓存、写入 checkpoint WAL 记录并持久化 checkpoint LSN；活动事务期间不会推进恢复起点，并在归档成功后回收 checkpoint 之前的 WAL 段
-- **fsync 持久化**：WAL、CLOG 段和事务提交、Checkpoint 均检查 `fsync()`；CLOG 段采用临时文件原子替换并持久化 `pg_xact` 目录，事务只有在 COMMIT WAL 和 CLOG 状态都成功刷盘后才报告提交成功，CLOG 刷盘失败会追加 ABORT WAL、回滚并 fail-closed
-- **Catalog 持久化**：系统 catalog 使用临时文件、文件 `fsync`、原子替换和目录 `fsync`；checkpoint 与 DDL 事务快照在 catalog 持久化失败时 fail-closed
-- **VARCHAR 变长行**：`[定长数据 | 变长偏移数组 | 变长数据]` 格式，减少存储浪费
-- **溢出页**：单行数据超过页空间时，大字段（TEXT/BLOB/JSON）自动存放到溢出页
-- **MVCC 行格式**：每行开头为 PostgreSQL 风格 HeapTupleHeader（含 xmin/xmax/ctid、null bitmap 和对齐信息）
-- **统计信息**：`ANALYZE TABLE` 收集行数、列基数、最小/最大值、MCV（最常出现值）、多列统计
-- **SQL 可观测性**：`SHOW STATEMENTS` 与 `pg_stat_statements` 风格虚拟表提供线程安全的调用次数及耗时聚合；统计当前为进程内生命周期
-- **运行时统计**：共享 `RuntimeStats` 在 SQL、StorageEngine 和 Volcano 扫描算子边界记录数据库查询/失败/事务、顺序扫描、索引扫描及 DML 计数，供 `SHOW STATUS`、`pg_stat_database` 和 `pg_stat_tables` 使用；完整扫描建立的有效 live-row 估计会参与 Join 成本与 EXPLAIN，关系重建/截断会使旧估计失效；当前为进程内统计
-- **VACUUM**：`VACUUM [tablename]` 回收已删除行占用的空间，页压缩并归还空页
-- **自动 VACUUM**：可配置阈值，死行数达到阈值时自动触发
-
-### 权限管理
-- 用户登录系统（角色与 SCRAM 凭据存储于 `info/pg_catalog/pg_authid.cat`）
-- 管理员与普通用户权限区分
-- `CREATE USER` 创建新用户，支持密码强度策略
-- **表级权限**：`GRANT` / `REVOKE` SELECT/INSERT/UPDATE/DELETE/ALL
-- **列级权限**：`GRANT SELECT (col1, col2) ON table TO user`
-- **角色**：`CREATE ROLE`, `GRANT role TO user`, `REVOKE role FROM user`
-- **审计日志**：可配置审计级别，记录 DDL/DML/全部操作
-
-### JSONB 支持
-- `JSON` / `JSONB` 数据类型，插入时自动验证 JSON 格式合法性
-- **标量函数**：`JSONB_EXTRACT`, `JSONB_EXTRACT_TEXT`, `JSONB_CONTAINS`, `JSONB_EXISTS`, `JSONB_PRETTY`
-
-### 临时表
-- **CREATE TEMP/TEMPORARY TABLE**：typed DDL 会话级临时表，自动覆盖同名永久表
-- 每个连接使用独立内部对象名，可创建同名临时表；连接断开时自动清理
-- 服务器启动时会清理异常退出遗留的临时 relation、分区/TOAST fork 及 `tlist.lst` 条目，临时对象不会跨进程重启存活
-- 支持 `ON COMMIT PRESERVE ROWS`、`DELETE ROWS`、`DROP`；真正的 `pg_temp` catalog/search_path 语义尚未实现
-
-### 网络服务
-- **PostgreSQL TCP 服务器**：`./dbms_main -D DATA_DIR --server PORT` 启动 PostgreSQL protocol 3.0 服务端
-- **扩展查询协议**：支持 Parse/Bind/Execute/Describe/Close/Sync、SCRAM、常用标量及 date/time/timestamp/timestamptz/uuid binary 参数与结果，以及基础 portal `maxRows` 分页；完整 libpq/cursor 语义仍在建设中
-- **TLS 加密**：默认必须提供证书和私钥；证书缺失或 TLS 初始化失败时拒绝启动
-- **开发明文模式**：仅可通过显式 `./dbms_main -D DATA_DIR --server PORT --insecure` 开启，不得用于生产环境
-- **多客户端**：每个连接独立线程，支持并发访问；legacy 文本执行器的结果捕获采用线程局部输出路由，不再用全局锁串行化协议会话
-- **会话隔离**：每个客户端连接拥有独立的 Session（用户名、权限、当前数据库、预编译语句、临时表），多客户端互不干扰
-- **连接管理**：最大连接数限制（默认 64）
-- **连接监控**：`SHOW CONNECTIONS`, `SHOW PROCESSLIST`, `SHOW STATUS`
-
-### 数据导入导出
-- **CSV 导入**：`LOAD DATA INFILE 'file.csv' INTO TABLE tname`
-- **CSV 导出**：`COPY table TO 'file.csv'`
-- **后台逻辑导出**：extended 模式 `DUMP DATABASE dbname TO 'file.sql' [RATE kib_per_second]`
-- **后台物理恢复**：extended 模式 `RESTORE DATABASE dbname FROM 'backup_dir' [RATE kib_per_second]`
-- **后台物理备份**：extended 模式 `BACKUP DATABASE dbname TO 'backup_dir' [RATE kib_per_second]`
-- **维护作业**：`SHOW MAINTENANCE JOBS`、`SHOW/CANCEL MAINTENANCE JOB id`
-
-### 预编译语句
-- `PREPARE stmt_name FROM 'SQL template'`
-- `EXECUTE stmt_name USING (val1, val2, ...)` — `?` 占位符替换
-- `DEALLOCATE PREPARE stmt_name`
-
-### 锁与并发
-- **多级锁**：表级共享锁/排他锁、行级锁、Gap 锁、页级锁
-- **死锁检测**：等待图（Wait-for Graph）检测并打破死锁
-- **死锁日志**：`SHOW DEADLOCKS` 查看历史死锁记录
-- **锁监控**：`SHOW LOCKS` 查看当前锁持有和等待情况
-
-### 并发测试结果
-以下指标均在并发测试套件（`concurrency_test`、`lock_manager_concurrency_test`、`lock_failure_propagation_test`、`hot_update_test`、`clog_test`、`clog_integration_test`、`subxip_visibility_test`、`checkpoint_test`、`wal_basic_test`）中实测验证，全部 PASS：
-
-| 测试项 | 结果 | 关键指标 |
-|--------|------|----------|
-| **事务原子性** | ✅ PASS | BEGIN/COMMIT/ROLLBACK 正确提交与回滚；SAVEPOINT 回滚恢复行/DDL undo，并释放保存点后的表、row/page/gap 锁 |
-| **WAL 顺序写入吞吐** | ✅ PASS | ~1700–1990 行/秒（200 行写入约 100–118ms；本轮性能优化前约 4.7 行/秒） |
-| **B+ 树索引插入吞吐** | ✅ PASS | ~1290–1800 行/秒（100 行插入约 55–77ms） |
-| **索引等值查找** | ✅ PASS | 34 条匹配记录在 1–2ms 内返回 |
-| **聚合性能** | ✅ PASS | 500 行 COUNT/SUM/MAX/GROUP BY 约 1.4ms；批量插入 500 行约 265–305ms（本轮优化前插入约 106s） |
-| **事务内主键插入微基准** | ✅ PASS | 200 行单事务带 PK 插入约 86–114ms（1760–2370 行/秒，commit 约 12–15ms；优化前 11.7 行/秒、commit 267ms） |
-| **MVCC 快照隔离** | ✅ PASS | 事务内 ReadView 可见性规则正确，未提交数据不可见 |
-| **HOT 堆内更新** | ✅ PASS | 更新不修改索引指针，减少 WAL 日志写入 |
-| **CLOG 提交日志** | ✅ PASS | 事务提交状态位图读写、提交顺序追踪、子事务可见性正确 |
-| **Checkpoint 持久化** | ✅ PASS | 脏页刷盘 + checkpoint WAL/LSN 持久化，重启后数据完整恢复 |
-| **WAL 崩溃恢复** | ✅ PASS | 已提交记录正序重做，未提交事务的多次 page before-image 逆序回滚 |
-| **恢复完整性保护** | ✅ PASS | 损坏索引 WAL 镜像、非法索引路径和应用失败均 fail-closed，中止启动并输出 LSN 诊断 |
-| **锁管理器并发安全** | ✅ PASS | 双线程死锁检测只释放一个受害者；表锁重入/升级、行/页锁 token 归属、跨 backend/跨进程表-row-page 锁协调、跨 database 隔离、gap 阻塞和 backend-local 超时均经真实回归 |
-| **锁失败传播** | ✅ PASS | 表锁冲突时 StorageEngine DDL 返回 `LOCK_CONFLICT`，不会继续执行或留下等待边 |
-
-**并发隔离验证示例**（基于 MVCC 快照隔离 + 锁机制）：
-```sql
--- 连接 A
-begin;
-insert into users (id, name) values (10, 'Tom');
--- 不提交
-
--- 连接 B
-select * from users where id = 10;  -- 看不到（未提交隔离）
-
--- 连接 A
-commit;
-
--- 连接 B
-select * from users where id = 10;  -- 现在能看到
-```
-
-### 新增功能 (Phase 4 完整化)
-- **pg_hba.conf 访问控制**: 首条匹配、CIDR/IPv4/IPv6、角色组和传输类型约束；运行时支持 trust/password/md5→SCRAM/scram/reject
-- **表继承**: `ALTER TABLE ... INHERIT / NO INHERIT`
-- **ALTER TABLE SET TABLESPACE / SET STATISTICS**：表空间关系文件统一路由到
-  `<location>/<database>/`，`SET TABLESPACE` 会迁移 heap、fork、索引、分区和 TOAST
-  文件；重启时不会静默回退到默认目录。
-- **COMMIT/ROLLBACK AND [NO] CHAIN**
-- **复制管理**: ReplicationManager（slot 快照、定义校验、激活/停用、standby、sync、promote；真实流复制/PITR 仍未完成）
-- **大对象**: LargeObjectManager (CRUD + import/export)
-- **多进程后端**: ProcessManager (10 种后端类型)
-- **扩展生态框架**: EXTENSION, FDW, PL, custom types/operators
-
-> 详细语法和示例请查阅 [docs/MANUAL.md](docs/MANUAL.md)
-
-## 编译与运行
-
-### 环境要求
-- GCC / Clang 支持 C++17
-- Linux 环境
-- POSIX 线程支持
-
-### 编译
-
-#### 方式一：标准脚本构建（推荐）
 ```bash
-./scripts/build.sh
+sudo apt-get update
+sudo apt-get install build-essential cmake pkg-config python3 \
+    zlib1g-dev libicu-dev libssl-dev
 ```
 
-#### 方式二：CMake
+### 脚本构建
+
 ```bash
-cmake -S . -B build
-cmake --build build -j$(nproc)
-# 标准完整回归入口（也可用 ctest --test-dir build --output-on-failure）
-cmake --build build --target check
+git clone https://github.com/Palpitate-xus/DBMS_C_plus_plus.git
+cd DBMS_C_plus_plus
+bash scripts/build.sh
 ```
 
-> CMake 与全部 shell 构建/测试入口共同使用 [`cmake/dbms_sources.txt`](cmake/dbms_sources.txt)；CMake 的 `check`/CTest 和 shell 测试入口统一调用唯一的 `scripts/build_tests.sh` 测试编排器，避免测试链接、桩选择和 E2E 调度漂移。shell 对象缓存复用 [`scripts/build_common.sh`](scripts/build_common.sh) 的配置指纹。
+生成的程序位于仓库根目录：`./dbms_main`。
 
-> **依赖说明**：zlib 与 ICU 开发库是必需依赖（Ubuntu/Debian 安装 `zlib1g-dev`、`libicu-dev`）；前者用于 TOAST 压缩，后者用于按日期查询 IANA 时区及夏令时规则。CMake 与全部 shell 构建入口会统一链接它们。若系统已安装 OpenSSL 开发库（`libssl-dev`），CMake 和 `build.sh` 会编译真实 TLS；否则只保留离线构建所需的 stub，网络服务默认 fail-closed。生产部署必须使用真实 OpenSSL、证书和私钥。
+### CMake 构建
 
-### 交互式运行
+```bash
+cmake -S . -B build/cmake
+cmake --build build/cmake --parallel
+```
+
+生成的程序为 `build/cmake/dbms_main`。两种构建方式使用同一份[生产源码清单](cmake/dbms_sources.txt)。
+
+## 运行
+
+每次启动都必须用 `-D` / `--data-dir` 或 `DBMS_DATA_DIR` 显式指定本项目的数据目录。登录角色和访问配置须提前准备；数据目录、角色配置与部署约定见[打包与部署说明](docs/PACKAGING.md)。
+
+交互式命令行：
+
 ```bash
 ./dbms_main -D /srv/dbms/main
 ```
-启动后输入用户名和密码登录（角色必须先存在于 `pg_authid`，密码使用 SCRAM-SHA-256）。
 
-### 网络服务模式
+网络服务：
+
 ```bash
-# 服务端
 export DBMS_TLS_CERT=/etc/dbms/tls/server.crt
 export DBMS_TLS_KEY=/etc/dbms/tls/server.key
 ./dbms_main -D /srv/dbms/main --server 9999
+```
 
-# 仅限本地开发：显式允许明文
-./dbms_main -D /srv/dbms/main --server 9999 --insecure
+服务端 TLS 需要真实 OpenSSL、证书和私钥。仅在本地开发时，可显式使用 `--insecure` 启动明文服务。
 
-# 客户端（libpq/psql；当前支持 SCRAM-SHA-256 与基础协议流程）
+使用已有角色连接：
+
+```bash
 psql "host=localhost port=9999 dbname=info user=admin sslmode=require"
 ```
 
-服务收到 `SIGINT`/`SIGTERM` 后会停止接收新连接并等待活动连接退出；监听端口或 TLS 初始化失败会以非零状态结束。`--insecure` 仅用于本地开发。
+仓库也提供 [Dockerfile](Dockerfile) 和 [Compose 配置](docker-compose.yml)。使用 Compose 前需准备角色、访问配置与 `deploy/tls` 下的证书和私钥；数据库文件通过数据卷保存。
 
-### Docker 部署
+## SQL 示例
 
-项目支持 Docker 多阶段构建与 Docker Compose 一键部署。
+在已连接的数据库中执行：
+
+```sql
+CREATE TABLE users (
+    id INTEGER PRIMARY KEY,
+    name VARCHAR(50) NOT NULL,
+    score INTEGER
+);
+
+INSERT INTO users VALUES (1, 'Alice', 85), (2, 'Bob', 72);
+
+SELECT id, name, score
+FROM users
+WHERE score >= 80
+ORDER BY id;
+
+BEGIN;
+UPDATE users SET score = 90 WHERE id = 1;
+SAVEPOINT before_second_update;
+UPDATE users SET score = 75 WHERE id = 2;
+ROLLBACK TO SAVEPOINT before_second_update;
+COMMIT;
+```
+
+`USE DATABASE` 等项目扩展命令需要显式启用 extended compatibility mode，不属于 PostgreSQL 标准接口。
+
+## 测试
+
+完整本地回归入口：
 
 ```bash
-# 构建镜像
-docker build -t dbms-c-plus-plus:latest .
-
-# 交互式运行（开发调试）
-docker run -it --rm -v dbms_data:/data dbms-c-plus-plus:latest
-
-# 服务器模式
-docker run -d --name dbms_server -p 9999:9999 -v dbms_data:/data \
-    dbms-c-plus-plus:latest ./dbms_main -D /data --server 9999
-
-# Docker Compose 一键启动
-docker compose up -d
-
-# 自定义端口（默认 9999）
-DBMS_PORT=8888 docker compose up -d
-
-# 停止
-docker compose down
+bash scripts/build_tests.sh
 ```
 
-> **镜像**：基于 `ubuntu:26.10`，多阶段构建（g++15 + OpenSSL），最终镜像约 114MB。
-> **数据持久化**：数据库文件存储在 `/data` 目录，通过 Docker 卷（`dbms_data`）持久化，容器重启数据不丢失。
-> **TLS**：容器不再自动生成证书，也不会在证书缺失时回退到明文；请挂载证书/私钥并通过 `DBMS_TLS_CERT`、`DBMS_TLS_KEY` 指定路径。仅本地调试可显式追加 `--insecure`。
+CMake 的 `check` 目标调用同一测试编排器：
 
-## SQL 语法示例
-
-### 数据库操作
-```sql
-create database shopdb
-use database shopdb
-drop database shopdb
+```bash
+cmake --build build/cmake --target check
 ```
 
-### 建表
-```sql
-create table users (
-    id int not null primary key auto_increment,
-    name varchar(50) not null,
-    email varchar(100) unique,
-    age int default 0,
-    score int check (score >= 0 and score <= 100),
-    created_at timestamp
-);
+运行单个 C++ 测试：
 
--- 花括号格式（旧版兼容）
-create table users {id:int 0 PK, name:char20 0, age:int 1, score:int 0}
+```bash
+bash scripts/build_one_test.sh window_functions_test
 ```
 
-### 外键约束
-```sql
-create table orders (
-    order_id int primary key,
-    user_id int not null,
-    amount double,
-    foreign key (user_id) references users(id)
-        on delete cascade on update cascade
-);
+校验能力清单与机器可读记录的一致性：
+
+```bash
+python3 scripts/check_gap_progress.py
 ```
 
-### 分区表
-```sql
-create table events (
-    id int primary key,
-    event_time timestamp
-) partition by range(event_time) (
-    partition p1 values less than ('2024-01-01'),
-    partition p2 values less than ('2025-01-01')
-);
-```
-
-### 插入数据
-```sql
-insert into users (id, name, age, score) values (1, 'Alice', 25, 85);
-insert into users (id, name, score) values (2, 'Bob', 72);
-insert into orders (order_id, user_id, amount) values (101, 1, 199.99);
-```
-
-### JSONB
-```sql
-create table configs (id int primary key, settings jsonb);
-insert into configs (id, settings) values (1, '{"theme":"dark","notifications":true}');
-select jsonb_extract_text(settings, '$.theme') from configs;
-select jsonb_pretty(settings) from configs;
-```
-
-### 查询
-```sql
-select * from users;
-select name, score from users where score >= 80;
-select * from users where score > 70 and age > 20;
-select * from users where name like 'A%';
-select * from users order by score desc;
-select * from users limit 10 offset 5;
-select distinct age from users;
-select count(*), max(score), min(score), sum(score), avg(score) from users;
-```
-
-### JOIN 查询
-```sql
-select users.name, orders.amount from users join orders on users.id = orders.user_id;
-select * from users left join orders on users.id = orders.user_id;
-select a.name, b.name as referrer from users a left join users b on a.referral_id = b.id;
-```
-
-### GROUP BY
-```sql
-select age, count(*) from users group by age;
-select age, count(*) from users group by age having count(*) > 1;
-```
-
-### UNION
-```sql
-select name from users where status = 1
-union
-select name from archived_users where status = 1;
-```
-
-### CTE
-```sql
-with vip_users as (select id, name from users where vip = 1)
-select vip_users.name, orders.amount from vip_users join orders on vip_users.id = orders.user_id;
-```
-
-### 窗口函数
-```sql
-select name, row_number() over (order by score) from users;
-select name, rank() over (order by score desc) from users;
-select name, lag(score, 1, 0) over (order by id) from users;
-select dept, name, sum(salary) over (partition by dept) from employees;
-```
-
-### 视图
-```sql
-create view adult_users as select * from users where age >= 18;
-select * from adult_users;
-drop view adult_users;
-```
-
-### 物化视图
-```sql
-create materialized view daily_sales as
-select date(created_at) as sale_date, sum(amount) as total from orders group by date(created_at);
-refresh materialized view daily_sales;
-```
-
-### 索引
-```sql
-create index idx_name on users(name);
-create unique index idx_email on users(email);
-create index idx_hash on users(id) using hash;
-create index idx_cover on users(name) include (email, age);
-create index idx_partial on orders(amount) where amount > 100;
-drop index idx_name on users;
-```
-
-### 执行计划
-```sql
-analyze table users;
-explain select * from users where id = 1;
-explain analyze select * from users join orders on users.id = orders.user_id;
-```
-
-### 更新与删除
-```sql
-update users set score = 95 where id = 1;
-update users set status = 0 where age > 60;
-update orders set amount = amount * 1.1 from users where orders.user_id = users.id and users.vip = 1;
-delete from users where id = 1;
-delete from orders where amount < 10;
-```
-
-### MERGE INTO
-```sql
-merge into users using temp_users on users.id = temp_users.id
-when matched then update set name = temp_users.name, email = temp_users.email
-when not matched then insert (id, name, email) values (temp_users.id, temp_users.name, temp_users.email);
-```
-
-### 事务
-```sql
-begin;
-insert into users (id, name, age, score) values (5, 'frank', 35, 55);
-savepoint sp1;
-update users set age = 99 where id = 1;
-rollback to savepoint sp1;
-commit;
-```
-
-### 多事务隔离测试
-```sql
--- 连接 A
-begin;
-insert into users (id, name) values (10, 'Tom');
--- 不提交
-
--- 连接 B
-select * from users where id = 10;  -- 看不到（未提交隔离）
-
--- 连接 A
-commit;
-
--- 连接 B
-select * from users where id = 10;  -- 现在能看到
-```
-
-### Checkpoint
-```sql
-checkpoint;
-```
-
-### VACUUM
-```sql
-vacuum users;
-vacuum;
-```
-
-### 用户管理
-```sql
-create user eve secret123 0;
-create user admin2 pass123 1;
-create role readonly;
-```
-
-### 权限管理
-```sql
-grant select on users to eve;
-grant select, insert on orders to eve;
-grant select (name, email) on users to reporter;
-grant all on orders to eve;
-revoke insert on users from eve;
-grant readonly to eve;
-revoke readonly from eve;
-```
-
-### CSV 导入导出
-```sql
-load data infile '/tmp/users.csv' into table users;
-copy users to '/tmp/export.csv';
-```
-
-### 预编译语句
-```sql
-prepare get_user from 'select * from users where id = ?';
-execute get_user using (1);
-deallocate prepare get_user;
-```
-
-### 连接监控
-```sql
-show connections;
-show processlist;
-show status;
-show slow log;
-show locks;
-show deadlocks;
-```
+测试结果以所运行的代码、配置和完整输出为准；README 不维护通过数量或性能基准。
 
 ## 项目结构
 
+```text
+src/
+├── main.cpp       # 命令行与服务启动入口
+├── parser/        # SQL 解析、AST 与绑定
+├── catalog/       # 类型与系统目录
+├── commands/      # DDL、DML 与存储引擎接口
+├── executor/      # 查询计划与执行算子
+├── expression/    # 表达式与预绑定查询执行
+├── storage/       # 页面、缓冲池与存储组件
+├── access/        # 索引与访问方法
+├── transaction/   # 事务与日志组件
+└── network/       # PostgreSQL 协议与 TLS
+tests/             # 原生测试与协议测试
+scripts/           # 构建、测试与打包入口
+cmake/             # 共享源码清单
+docs/              # 使用、兼容性与开发文档
 ```
-.
-├── main.cpp                 # SQL 交互入口、命令解析、网络服务启动
-├── TableManage.h            # 存储引擎头文件
-├── TableManage.cpp          # 存储引擎实现（DDL/DML/索引/事务/权限/统计/MVCC/Checkpoint）
-├── ExecutionPlan.h          # 查询执行计划框架（火山模型算子）
-├── ExecutionPlan.cpp        # 查询优化器与 EXPLAIN，JOIN 算法选择
-├── PgPage.h                 # 8 KiB PostgreSQL 风格 heap page
-├── PgPage.cpp               # 页操作（插入/删除/更新/压缩/校验和）
-├── PageWrapper.h            # 引擎 RowId 与 line pointer 的适配层
-├── PageWrapper.cpp          # 单一 v2 页格式实现
-├── PageAllocator.h          # 页分配管理器
-├── PageAllocator.cpp        # 页分配与空闲链表
-├── BufferPool.h             # clock-sweep 缓冲池
-├── BufferPool.cpp           # 缓冲池实现（含 fsync）
-├── BPTree.h                 # B+ 树索引头文件
-├── BPTree.cpp               # B+ 树索引实现
-├── HashIndex.h              # Hash 索引头文件
-├── HashIndex.cpp            # Hash 索引实现
-├── LockManager.h            # 锁管理器头文件
-├── LockManager.cpp          # 读写锁、行锁、死锁检测
-├── NetworkServer.h          # TCP 网络服务头文件
-├── NetworkServer.cpp        # 网络服务实现（TLS + 独立 Session）
-├── src/process/OutputCapture.*  # legacy 执行器的线程局部文本输出捕获
-├── TLSWrapper.h             # TLS 加密包装器
-├── TLSWrapper.cpp           # TLS 上下文与握手实现
-├── TxnIdGenerator.h         # 全局事务 ID 生成器头文件
-├── TxnIdGenerator.cpp       # 全局事务 ID 生成器（持久化、线程安全）
-├── Config.h                 # 运行时配置头文件
-├── Config.cpp               # 配置加载与保存
-├── Session.h                # 会话上下文结构体
-├── DateType.h               # 日期类型定义与运算
-├── logs.h                   # 操作日志记录
-├── permissions.h            # 用户认证与权限查询
-├── sha256.h                 # SHA-256 哈希实现
-├── data/                    # 由 -D/--data-dir 显式选择的数据根
-│   ├── DBMS_CONTROL         # DBMS magic、format version、system identifier
-│   ├── info/pg_catalog/pg_authid.cat # 角色与 SCRAM 凭据 catalog
-│   ├── dbms.log             # 运行日志
-│   └── slow_query.log       # 慢查询日志
-├── Dockerfile               # Docker 多阶段构建定义
-├── docker-compose.yml       # Docker Compose 一键部署配置
-├── .dockerignore            # Docker 构建排除规则
-└── docs/
-    ├── commandsList.md      # SQL 命令完整参考手册（含示例和参数说明）
-    └── feature-gap-analysis.md  # 功能差距分析
-```
-
-## 存储格式
-
-每个数据库为一个独立目录：
-
-```
-dbname/
-├── tlist.lst               # 表名列表
-├── .stats                  # 表统计信息（行数、列基数、最小/最大值、MCV）
-├── .permissions            # 表级权限数据
-├── .views/                 # 视图定义目录
-│   └── viewname.view
-├── .triggers/              # 触发器定义目录
-│   └── triggername.trg
-├── .procedures/            # 存储过程目录
-│   └── procname.proc
-├── .udfs/                  # 用户定义函数目录
-│   └── funcname.udf
-├── .roles                  # 角色数据
-├── .materialized_views/    # 物化视图数据
-│   └── mvname/
-├── checkpoint              # Checkpoint 记录
-├── wal                     # Write-Ahead Log（事务日志）
-├── .txnid                  # 全局事务 ID 持久化文件
-├── tablename.stc           # 表结构（二进制）
-├── tablename.dt            # 表数据（Slotted Page，8192 字节/页）
-├── tablename.idx           # B+ 树主键索引
-├── tablename.colname.idx   # 二级索引
-├── tablename.secidx        # 二级索引元数据
-└── tablename.hashidx       # Hash 索引
-```
-
-## 页格式
-
-数据页（8192 字节，项目内部布局 v5；字段借鉴 PostgreSQL，但不兼容 PostgreSQL on-disk 格式）：
-
-```
-+----------------------+------------------+-------------+------------------+----------+
-| PageHeaderData (24B) | ItemIdData[]     | Free Space  | Tuple Data       | Special  |
-|                      | (pd_lower 前)    |             | (向低地址增长)  | 4B       |
-+----------------------+------------------+-------------+------------------+----------+
-0                      pd_lower           pd_upper    pd_special        8192
-
-Header:
-  - pd_lsn (8B), pd_checksum (2B): LSN 与 Fletcher-16 校验和
-  - pd_flags/pd_lower/pd_upper/pd_special (2B each): 页面状态和边界
-  - pd_pagesize_version (2B): 8 KiB + 项目页布局版本
-  - pd_page_id (4B): v5 物理块号，由页 checksum 覆盖；v4 旧页首次写入时惰性升级
-  - pd_flags 的 PD_PAGE_ID_BOUND 位：标记块号身份字段有效
-  - special space 末尾 4B：空闲页链表 nextPage
-
-文件头页额外保存 magic、页数、空闲链表头、rowSize、格式版本和 FNV 校验和；`rowSize`
-是逻辑行宽元数据，TEXT/BYTEA 等大值可由 TOAST 外部化，不受单页容量限制。
-打开/读取时严格验证；checksum 为 0、截断文件、非法页边界、坏 line pointer 或已绑定的错误块号均拒绝。v4 旧页在首次真实写入时升级，离线校验会单独列出尚未绑定块号的 v4 页。
-```
-
-## 行格式
-
-### 定长行
-
-```
-+-------------+---------------------------+
-| MVCC Header | Fixed Data                |
-| (16 bytes)  |                           |
-+-------------+---------------------------+
-
-MVCC Header:
-  - creatorTxnId (8B): 创建此行的事务 ID
-  - rollbackPtr  (8B): 指向旧版本（Undo Log），0 表示无旧版本
-```
-
-### 变长行（VARCHAR / TEXT / BLOB / JSON）
-
-```
-+-------------+-------------+------------------+----------------+
-| MVCC Header | Fixed Data  | Var Offset Array | Var Data       |
-| (16 bytes)  |             | (4 bytes/var col)|                |
-+-------------+-------------+------------------+----------------+
-
-Var Offset Array 每项 (4 bytes):
-  - dataOffset (2B): 变长数据起始偏移（相对行数据起始）
-  - dataLen    (2B): 变长数据长度
-```
-
-## 已知限制
-
-- **兼容范围仍未闭合**：以 PostgreSQL 18 差距审计和进度总账为准；README 的功能列举只表示已有入口，不表示完整 PostgreSQL 语义。
-- **兼容声明分级**：当前定位是提供 PostgreSQL wire protocol 3.0 子集的自有 DBMS；“客户端可连接”和“PostgreSQL 18 行为兼容”的独立验收门见[兼容版本契约](docs/compatibility-contract.md)，两者均未宣告通过。
-- **非 PostgreSQL 扩展需显式模式**：`USE DATABASE`、`REPLACE INTO`、`SET GLOBAL`、`SHOW USERS/ROLES` 等只应在 extended compatibility mode 使用。
-- **`SAVEPOINT` 需要在事务内**：`SAVEPOINT` 命令必须在 `BEGIN` 之后执行，否则返回 "Not in transaction"
-
-## 参考项目
 
 ## 文档
 
-| 文件 | 说明 |
-|------|------|
-| [README.md](README.md) | 项目总览与功能特性 |
-| [docs/MANUAL.md](docs/MANUAL.md) | 唯一完整使用手册（25 章，覆盖当前 SQL 语法与明确能力边界） |
-| [compatibility-contract.md](docs/compatibility-contract.md) | 产品、PG 行为、wire protocol 和 extended 模式的独立版本与验收门 |
-| [postgresql-18-gap-audit.md](docs/postgresql-18-gap-audit.md) | PostgreSQL 18.6 完整差距审计（当前权威清单） |
-| [postgresql-18-implementation-blueprint.md](docs/postgresql-18-implementation-blueprint.md) | 273 个差距逐项完整实施方案（代码落点、I/O 保真、性能与验收） |
-| [implementation-plan.md](docs/implementation-plan.md) | 实施计划与历史 Wave 记录（当前状态以 Gap 表为准） |
-| [all-gaps-todo.md](docs/all-gaps-todo.md) | 历史 Gap 追踪与进度备注（已由新审计取代） |
-| [postgresql-comparison.md](docs/postgresql-comparison.md) | PostgreSQL 18 功能对比与差距分析 |
-| [test-report.md](docs/test-report.md) | 带日期的历史自动测试报告（不是当前全量状态） |
-| [commandsList.md](docs/commandsList.md) | SQL 命令参考手册 |
-| [archive/](docs/archive/) | 历史过程文档 (Phase 4 专项计划、PG 差距分析) |
+- [使用手册](docs/MANUAL.md)：SQL 与操作说明。
+- [兼容性契约](docs/compatibility-contract.md)：SQL、协议及扩展模式的边界。
+- [能力清单](docs/postgresql-18-gap-audit.md)与[机器可读记录](docs/gap-progress.json)：兼容性要求及验证依据。
+- [打包与部署](docs/PACKAGING.md)：源码包、数据目录和配置约定。
+- [CHANGELOG](CHANGELOG.md)：版本变更记录。
+
+## 参与贡献
+
+欢迎通过 Issue 报告问题，或通过 Pull Request 提交改进。
+
+提交问题时请提供最小 SQL 复现、预期与实际结果、构建环境及运行参数；不要附带真实数据库数据或凭据。修改代码时请补充回归测试，保持独立、易复查的提交，并说明实际运行的测试范围。新增生产源码需同步共享清单，新增测试需接入对应测试入口。
+
+## 许可证
+
+仓库未提供独立的 `LICENSE` 文件。授权方式请向项目维护者确认。
 
 ## 致谢
 
-- [hyrise/sql-parser](https://github.com/hyrise/sql-parser) — SQL Parser for C++
-- [zcbenz/BPlusTree](https://github.com/zcbenz/BPlusTree) — B+ tree implementation which stores data in file
-- [Jefung/simple_DBMS](https://github.com/Jefung/simple_DBMS) — C++ 实现简单数据库引擎
-- [niteshkumartiwari/B-Plus-Tree](https://github.com/niteshkumartiwari/B-Plus-Tree) — Mini Database System using B+ Tree in C++
+- [hyrise/sql-parser](https://github.com/hyrise/sql-parser)
+- [zcbenz/BPlusTree](https://github.com/zcbenz/BPlusTree)
+- [Jefung/simple_DBMS](https://github.com/Jefung/simple_DBMS)
+- [niteshkumartiwari/B-Plus-Tree](https://github.com/niteshkumartiwari/B-Plus-Tree)

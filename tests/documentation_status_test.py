@@ -30,7 +30,15 @@ def main():
         for marker in canonical:
             assert marker in document, "%s omits %s" % (name, marker)
 
-    assert ("发行标识为 v%s" % version) in readme
+    # README is an evergreen project entry point, not another release/status
+    # snapshot. Actual build/header/changelog/package version checks remain in
+    # version_consistency_test.py.
+    for section in ("## 构建", "## 运行", "## 测试", "## 文档",
+                    "## 参与贡献", "## 许可证"):
+        assert section in readme, "README omits %s" % section
+    for stale_marker in ("发行标识为 v", "当前状态（", "性能与并发硬化轮次",
+                         "### 并发测试结果", "### 新增功能 (Phase"):
+        assert stale_marker not in readme, "README retains %s" % stale_marker
     assert "历史发布快照" in release_notes
     assert "不是当前工作树" in release_notes
     assert "156 个 `*_test.cpp` 测试源" in release_notes
