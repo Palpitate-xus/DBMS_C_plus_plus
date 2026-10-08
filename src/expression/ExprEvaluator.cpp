@@ -2965,7 +2965,24 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
         // a named type ("bit", "char") into a different keyword declaration.
         const auto* declaration = dynamic_cast<const LiteralExpr*>(e->right.get());
         if (!declaration) throw DbError("42601", "cast type declaration is required");
-        return evalCast(nullptr, ctx, l, declaration->value);
+        auto spelling = trimStr(declaration->value);
+        // Older native AST producers stored postfix numeric modifiers as
+        // "numeric 2 , - 3)". Restore that API envelope before resolving the
+        // declaration. SQL parsing remains strict, and quoted names are never
+        // rewritten as keyword types.
+        if (!spelling.empty() && spelling.back() == ')' &&
+            spelling.find_first_of("(\"'") == std::string::npos) {
+            const auto separator = spelling.find_first_of(" \t\r\n");
+            if (separator != std::string::npos) {
+                const auto base = toLower(spelling.substr(0, separator));
+                if (base == "numeric" || base == "decimal") {
+                    const auto modifiers = trimStr(spelling.substr(
+                        separator, spelling.size() - separator - 1));
+                    spelling = base + "(" + modifiers + ")";
+                }
+            }
+        }
+        return evalCast(nullptr, ctx, l, spelling);
     }
 
     // A scalar IN list is represented as a RowExpr so each member retains its

@@ -928,6 +928,35 @@ static void test_cast() {
     postfixCast->right = std::move(postfixType);
     assert(eval.eval(postfixCast.get(), {}).value == "1000");
 
+    auto* declaration = static_cast<LiteralExpr*>(postfixCast->right.get());
+    for (const auto& spelling : {"NUMERIC 2 , - 3)", "decimal 2 , - 3)",
+                                 " numeric 2 , - 3) "}) {
+        declaration->value = spelling;
+        assert(eval.eval(postfixCast.get(), {}).value == "1000");
+    }
+    for (const auto& spelling : {"numeric 2 ,)", "numeric 2 garbage)",
+                                 "numeric 2 , - 3))"}) {
+        declaration->value = spelling;
+        bool rejected = false;
+        try { (void)eval.eval(postfixCast.get(), {}); }
+        catch (const DbError& error) { rejected = error.sqlState() == "42601"; }
+        assert(rejected);
+    }
+    declaration->value = "\"numeric 2 , - 3)\"";
+    bool quotedNameRejected = false;
+    try { (void)eval.eval(postfixCast.get(), {}); }
+    catch (const DbError& error) { quotedNameRejected = error.sqlState() == "42704"; }
+    assert(quotedNameRejected);
+
+    // The native compatibility envelope is not accepted by the shared SQL
+    // declaration parser. It is restored only at the legacy AST boundary.
+    for (const auto& spelling : {"numeric 2 , - 3)", "decimal 2 , - 3)"}) {
+        bool rejected = false;
+        try { (void)SQLParser::parseTypeSpecification(spelling); }
+        catch (const DbError& error) { rejected = error.sqlState() == "42601"; }
+        assert(rejected);
+    }
+
     std::cout << "[EXPR] cast OK" << std::endl;
 }
 
