@@ -3188,9 +3188,15 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
         // The text concatenation operator casts bpchar operands to text.
         // That cast discards the blank padding, unlike concat(), which
         // preserves the original character datum's visible spaces.
+        const auto textOutput=[](const ExprValue& value) {
+            // Boolean's text cast emits true/false, whereas its direct wire
+            // value is t/f. Do not concatenate the latter representation.
+            if (ExprHelper::canonicalResultTypeName(value.typeName)=="boolean")
+                return std::string(value.asBool()?"true":"false");
+            return value.value.substr(0,logicalCharacterByteLength(value));
+        };
         ExprValue result(
-            "text", l.value.substr(0, logicalCharacterByteLength(l)) +
-                        r.value.substr(0, logicalCharacterByteLength(r)),
+            "text", textOutput(l) + textOutput(r),
             false);
         result.collation = std::move(resultCollation);
         return result;
