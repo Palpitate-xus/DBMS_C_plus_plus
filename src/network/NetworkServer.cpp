@@ -33,6 +33,7 @@
 #include "parser/parser.h"
 #include "expression/expr_helper.h"
 #include "expression/ExprEvaluator.h"
+#include "expression/function_namespace.h"
 #include <netinet/tcp.h>
 
 #include <algorithm>
@@ -1791,6 +1792,53 @@ bool describePreparedExplainResult(const std::string& sql, Session& session,
     for(const auto& field:prepared.output){shape.columns.push_back(field.name);shape.columnTypes.push_back(field.type);}
     columns=describeProtocolColumns(shape,std::string{},session);
     return !columns.empty();
+}
+
+// A known stored name with a missing signature cannot be published as a
+// TEXT-shaped prepared statement. Admit only metadata-detected source-free
+// cases and let the ordinary whole-query binder own the actual diagnostic.
+void validatePreparedStoredSignatures(const std::string& sql,Session& session,
+                                     const std::vector<uint32_t>& parameterOids) {
+    SQLParser parser;
+    const auto parsed=parser.parseForBinding(sql);
+    const auto* select=parsed.isValid()?dynamic_cast<const SelectStmt*>(parsed.stmt.get()):nullptr;
+    if(!select || select->fromClause)return;
+    ExprEvaluator resolver;resolver.setCurrentDB(session.currentDB);
+    std::function<bool(const Expr*)> missing=[&](const Expr* value) {
+        if(!value)return false;
+        if(const auto* call=dynamic_cast<const FunctionCallExpr*>(value)) {
+            if(call->schema.empty() && !resolver.hasScalarFunction(call,&g_engine)) {
+                CatalogManager::QualifiedName name;
+                if(CatalogManager::parseQualifiedName(call->funcName,name,true) && name.schema.empty())
+                    for(const auto& schema:functionNamespaceSearchPath(g_engine,session.currentDB))
+                        if(schema!="pg_catalog" && !g_engine.getUDF(session.currentDB,name.name,schema).expression.empty())
+                            return true;
+            }
+            for(const auto& arg:call->args)if(missing(arg.get()))return true;
+            for(const auto& arg:call->namedArgs)if(missing(arg.value.get()))return true;
+        } else if(const auto* binary=dynamic_cast<const BinaryOpExpr*>(value))
+            return missing(binary->left.get()) || (binary->op!="::" && missing(binary->right.get()));
+        else if(const auto* unary=dynamic_cast<const UnaryOpExpr*>(value))return missing(unary->operand.get());
+        else if(const auto* cast=dynamic_cast<const CastExpr*>(value))return missing(cast->operand.get());
+        else if(const auto* conditional=dynamic_cast<const CaseExpr*>(value)) {
+            if(missing(conditional->switchExpr.get()) || missing(conditional->elseExpr.get()))return true;
+            for(const auto& arm:conditional->whenClauses)if(missing(arm.first.get()) || missing(arm.second.get()))return true;
+        }
+        return false;
+    };
+    bool candidate=missing(select->whereClause.get());
+    for(const auto& item:select->selectList)candidate=candidate || missing(item.expr.get());
+    for(const auto& item:select->orderBy)candidate=candidate || missing(item.expr.get());
+    if(!candidate)return;
+    std::vector<QueryBindingDatum> parameters;
+    for(size_t i=0;i<parameterOids.size();++i) {
+        const auto* type=valuesParameterCastType(parameterOids[i]);
+        if(parameterOids[i] && !type)return; // existing custom-type owner
+        QueryBindingDatum datum;datum.identity="protocol-parameter-"+std::to_string(i+1);
+        datum.origin=ParameterOrigin::MetadataPlaceholder;
+        datum.position=i+1;datum.type=type?type:"unknown";parameters.push_back(std::move(datum));
+    }
+    (void)g_engine.prepareBoundQuery(session.currentDB,sql,parameters);
 }
 
 // Parse-time integer input transformation must use the same whole-query
@@ -5780,6 +5828,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             }
             try {
                 notePreparedTemporaryObjectAccess(sql, session);
+                validatePreparedStoredSignatures(sql,session,parameterTypes);
                 validatePreparedIntegerInputs(sql,session,parameterTypes);
                 validatePreparedBitScalarParameters(sql,session,parameterTypes);
                 std::vector<PgColumnDescription> explainDescriptor;

@@ -44,6 +44,7 @@
 #include "common/scram_sha256.h"
 #include "Session.h"
 #include "expression/expr_helper.h"
+#include "expression/function_namespace.h"
 #include "expression/array_type.h"
 #include "expression/ExprEvaluator.h"
 #include "expression/ExpressionVolatility.h"
@@ -20963,8 +20964,19 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
         }
         if(const auto* call=dynamic_cast<const dbms::FunctionCallExpr*>(value)) {
             if(call->sqlValue!=dbms::FunctionCallExpr::SqlValue::None)return true;
-            if(routineMetadata.hasScalarFunction(call,&g_engine) &&
-               routineMetadata.scalarFunctionIdentity(call,&g_engine).rfind("stored",0)==0)return true;
+            const bool resolved=routineMetadata.hasScalarFunction(call,&g_engine);
+            if(resolved && routineMetadata.scalarFunctionIdentity(call,&g_engine).rfind("stored",0)==0)return true;
+            // A real stored name with a nonmatching signature still needs
+            // whole-query binding. The legacy source-free path would evaluate
+            // its arguments before discovering the arity mismatch at callUDF.
+            if(!resolved && call->schema.empty()) {
+                dbms::CatalogManager::QualifiedName name;
+                if(dbms::CatalogManager::parseQualifiedName(call->funcName,name,true) && name.schema.empty()) {
+                    for(const auto& schema:dbms::functionNamespaceSearchPath(g_engine,session.currentDB))
+                        if(schema!="pg_catalog" && !g_engine.getUDF(session.currentDB,name.name,schema).expression.empty())
+                            return true;
+                }
+            }
             // An explicit routine namespace is executable identity, not a
             // spelling the legacy FROM-less string dispatch may discard.
             // Bind the complete source-free projection before evaluating

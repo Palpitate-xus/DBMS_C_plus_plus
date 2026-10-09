@@ -142,7 +142,7 @@ def main():
         for sql in ["SELECT fn_sql_add();"]:
             rows, state, message, headers = runner.ours_query(
                 client, server["sock"], sql)
-            assert state is not None, (sql, rows, headers)
+            assert state == "42883", (sql, state, message, rows, headers)
 
         # Preserve the original table-reading SQL as an exact positive
         # assertion now that whole SQL-function query bodies are executable.
