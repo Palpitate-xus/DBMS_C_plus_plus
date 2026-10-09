@@ -2,6 +2,20 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Independent private aggregate and ALTER array repairs committed; numeric and ROW dependencies remain open",
+      "gap_ids": ["TYPE-06", "PROTO-04", "QRY-02", "QRY-05"],
+      "status": "partial",
+      "commits": ["cfcab3cd", "409507fb", "4c5b1cdc"],
+      "evidence": ["docs/issue-private-aggregate-array-followup.md"],
+      "tests": ["tests/alter_array_type_envelope_test.cpp", "tests/alter_array_type_envelope_protocol_e2e_test.py"],
+      "verification": {
+        "reproduction": "Original unchanged array envelope baseline42973=134. Aggregate initial31 failures and all intermediate failures retained; final strict55 controls still have4 NUMERIC and1 ROW failures.",
+        "focused_tests": "Private aggregate50186 terminal1:47native pass40/41wire pass, original derived90388=0 and BIT38447434=0 against verified180006. Private array55834/52764 both0:8native8wire. Both generations verify58 own receipts/cache/repeat/source/frozen terminal fences. Independent private commits409507fb/4c5b1cdc; no imported source proof substitution.",
+        "full_suite": "Root84918 remains running on prior dc89 source seal and43b0 frozen binary. Root182 scoped repairs768automatic+2Main432registered58TU. Source inputs remain frozen, private commits not yet imported.",
+        "scope": "Original273 statuses unchanged22complete166partial70unverified15user-deferred. READMEevergreen cfcab3cd committed. Continue NUMERIC declaration persistence and assignment coercion, then independent ROW constructor work. No push or Actions activation."
+      }
+    },
+    {
       "issue": "Imported interval repairs pass actual Root publication proof; next full driver running; aggregate correction remains unapproved",
       "gap_ids": ["TYPE-06", "PROTO-04", "QRY-02", "QRY-05"],
       "status": "partial",
