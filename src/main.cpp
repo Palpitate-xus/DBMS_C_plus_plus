@@ -18846,6 +18846,19 @@ static bool executePgTypeQuery(const string& rawSql, const Session& session) {
     return false;
 }
 
+static bool handlePreparedTypeCatalogQuery(const string& rawSql,const Session& session,bool& handled) {
+    handled=false;
+    dbms::SQLParser parser;const auto parsed=parser.parseForBinding(rawSql);
+    const auto* select=parsed.success?dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()):nullptr;
+    if(!select || !select->fromClause || select->fromClause->type!=dbms::FromItem::Type::Table)return false;
+    dbms::CatalogManager::QualifiedName name;
+    if(!dbms::CatalogManager::parseQualifiedName(select->fromClause->tableName,name,true) || name.name!="pg_type")return false;
+    if(name.schema!="pg_catalog" && (!name.schema.empty() ||
+        g_engine.tableExists(session.currentDB,name.name) || g_engine.viewExists(session.currentDB,name.name)))return false;
+    handled=true;
+    return executePgTypeQuery(rawSql,session);
+}
+
 static bool executePgSettingsQuery(const string& rawSql,
                                    const Session& session) {
     dbms::SQLParser parser;
@@ -25943,6 +25956,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
 
     if (sql.substr(0, 6) == "select" || sql.substr(0, 5) == "with ") {
         if (!checkDB(s)) return true;
+
+        bool typeCatalogHandled=false;
+        const bool typeCatalogFailed=handlePreparedTypeCatalogQuery(effectiveRawSql,s,typeCatalogHandled);
+        if(typeCatalogHandled)return typeCatalogFailed;
 
         bool quantifiedHandled=false;
         const bool quantifiedFailed=handlePreparedMultirowQuery(effectiveRawSql,s,quantifiedHandled);
