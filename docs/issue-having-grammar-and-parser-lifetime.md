@@ -1,5 +1,12 @@
 # HAVING grammar, parser shutdown lifetime and LIMIT error handoff
 
+The worktree-publication notes below record the earlier private checkpoint.
+These commits are now independently imported onto master, with actual Root
+verification and the complete former Root full-run result documented in
+[the interval follow-up](issue-interval-field-grammar.md) and
+[the unchanged full-run record](issue-full-registered-b2b376a3.md).
+Do not interpret the earlier pending/live statements as current state.
+
 These repairs are developed in the isolated local worktree
 `/tmp/dbms-having-grammar.MPk64yc0/repo`. They are not yet published on master:
 the unchanged Root full-suite driver86574 is still live, with its

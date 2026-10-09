@@ -2,6 +2,20 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Six independent HAVING lifetime LIMIT and interval repairs imported with actual Root proof; complete previous failures retained",
+      "gap_ids": ["QRY-01", "QRY-05", "QRY-07", "TYPE-06", "TYPE-11", "FUNC-01", "PROTO-04"],
+      "status": "partial",
+      "commits": ["7fe32138", "f78853a9", "0313e441", "7cb068a8", "16823731", "26d981dd", "f88b4971", "bb62238e", "974b383f", "b70710ab", "1e773568"],
+      "evidence": ["docs/issue-interval-field-grammar.md", "docs/issue-full-registered-b2b376a3.md"],
+      "tests": ["tests/interval_field_type_test.cpp", "tests/interval_field_type_protocol_e2e_test.py", "tests/pattern_cast_parser_test.cpp", "tests/parser_type_exit_lifetime_test.cpp", "tests/documentation_status_test.py", "tests/set_operation_structured_protocol_e2e_test.py", "tests/function_result_protocol_e2e_test.py"],
+      "verification": {
+        "reproduction": "Old exact full86574 terminal1:760native/Main PASS6fail,416wire PASS11fail, finalb2b3 unchanged. All17 failures retained. New interval49 actual PG18.6 all0, old candidate30fail. Genuine Root original domainFK shutdown139 and new lifetime baseline139 retained. Five-control actual storage/postfix reference0 but candidate2fail remains open. Hidden-FETCH/SQL-reader positive expectations verified on180006, zero-arity XX000 vs42883 remains genuine.",
+        "focused_tests": "Private ownfresh57/Main64854/54367=0;41native36wire gates54220 and unchanged38418733=0. New95 native assertions and entire original interval136/defaultprotocol/CTE/FETCH92/HAVING controls pass. Exact complete corrected originals15407/66786=0. Actual Root ownfresh57/Main42176/1612=0; Root41native38wire gates8020 and originalBIT38472314=0. All58 current receipts/cache/no-recompile repeat/source/frozen fences0; Root2acb SHA/f048 seal matches candidate bytes after genuine Root compilation. No borrowed objects, assertion/deadline weakening or inherited private proof.",
+        "full_suite": "After preceding whole86574 terminal1, ten source/test imports each retain -x Git provenance; documentation fixture separately26d981dd. Root180scoped/766automatic+2Main/430registered/58TU. New unchanged complete driver88630 started and confirmed live, source inputs frozen. No current full/family/SAN/realTLS completion claim.",
+        "scope": "Original273 items unchanged22complete166partial70unverified15user-deferred. Ordinary aggregate child0A000, routine arity/session binding, interval storage precision/postfix literals and remaining original failures stay open. READMEaed6e80a evergreen. No push/Actions activation/user-filtered branch restart."
+      }
+    },
+    {
       "issue": "Independent HAVING grammar, parser shutdown lifetime and invalid LIMIT handoff repairs; candidate verified but pending Root integration",
       "gap_ids": ["QRY-01", "QRY-05", "QRY-07", "TYPE-11", "PROTO-04"],
       "status": "partial",
