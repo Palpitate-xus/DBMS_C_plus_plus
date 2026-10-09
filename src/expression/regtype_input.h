@@ -3,6 +3,7 @@
 #include "catalog/declared_type.h"
 #include "commands/TableManage.h"
 #include "expression/common_type.h"
+#include "expression/regtype_cast.h"
 #include <charconv>
 #include <limits>
 
@@ -16,11 +17,7 @@ inline CatalogManager::MetadataSnapshot metadata(StorageEngine& engine,const std
     return result;
 }
 inline void validateCast(const std::string& input,const std::string& target) {
-    if(common_type_detail::canonical(target)!="regtype")return;
-    const auto source=common_type_detail::canonical(input);
-    static const std::set<std::string> inputs={"unknown","text","varchar","bpchar","name","smallint","integer","bigint"};
-    if(!inputs.count(source) && !common_type_detail::oidType(source))
-        throw DbError("42846","cannot cast type "+input+" to regtype");
+    regtype_cast_detail::validate(input,target);
 }
 inline Oid numericOid(const std::string& input) {
     Oid value=0;

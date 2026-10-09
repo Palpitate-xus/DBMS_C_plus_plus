@@ -4648,6 +4648,7 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
                 throw DbError("22003","OID out of range");
             oid=static_cast<Oid>(number);
         } else if(common_type_detail::oidType(source) && source!="regtype") {
+    regtype_cast_detail::validate(sourceType,target);
             oid=v.objectOid?*v.objectOid:regtype_detail::numericOid(v.value);
         } else oid=regtype_detail::inputOid(v.value,catalog,session);
         ExprValue result("regtype",regtype_detail::output(oid,catalog,session),false);

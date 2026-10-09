@@ -1,0 +1,434 @@
+[
+  {
+    "sql": "SELECT CAST(NULL::regtype AS smallint) AS value",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type regtype to smallint",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL::regtype AS smallint) AS value WHERE false",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type regtype to smallint",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST('integer'::regtype AS smallint) AS value WHERE false",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type regtype to smallint",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST('integer'::regtype AS numeric) AS value",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type regtype to numeric",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL::regtype AS boolean) AS value WHERE false",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type regtype to boolean",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST('integer'::regtype AS bigint) AS value",
+    "reference": [
+      [
+        [
+          "23"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        20
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL::regtype AS regtype) AS value WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 0",
+      [
+        2206
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL::regtype AS smallint) AS value WHERE false",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type regtype to smallint",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL::regtype AS integer) AS value WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 0",
+      [
+        23
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL::regtype AS bigint) AS value WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 0",
+      [
+        20
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL::regtype AS oid) AS value WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 0",
+      [
+        26
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL::regtype AS regproc) AS value WHERE false",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type regtype to regproc",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL::regtype AS regclass) AS value WHERE false",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type regtype to regclass",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL::regtype AS regrole) AS value WHERE false",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type regtype to regrole",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL::regtype AS regnamespace) AS value WHERE false",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type regtype to regnamespace",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL::regtype AS numeric) AS value WHERE false",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type regtype to numeric",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL::regtype AS real) AS value WHERE false",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type regtype to real",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL::regtype AS double precision) AS value WHERE false",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type regtype to double precision",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL::regtype AS boolean) AS value WHERE false",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type regtype to boolean",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL::regtype AS date) AS value WHERE false",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type regtype to date",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL::regtype AS text) AS value WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 0",
+      [
+        25
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL::regtype AS varchar(5)) AS value WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 0",
+      [
+        1043
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL::regtype AS character(10)) AS value WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 0",
+      [
+        1042
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL::regtype AS name) AS value WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 0",
+      [
+        19
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL::regtype AS \"char\") AS value WHERE false",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type regtype to \"char\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL::regtype AS regtype[]) AS value WHERE false",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type regtype to regtype[]",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT oid,typname,typlen,typbyval,typtype,typcategory,typelem,typarray,typalign,typstorage FROM pg_catalog.pg_type WHERE typname IN ('regclass','_regclass','regrole','_regrole','regnamespace','_regnamespace') ORDER BY oid",
+    "reference": [
+      [
+        [
+          "2205",
+          "regclass",
+          "4",
+          "t",
+          "b",
+          "N",
+          "0",
+          "2210",
+          "i",
+          "p"
+        ],
+        [
+          "2210",
+          "_regclass",
+          "-1",
+          "f",
+          "b",
+          "A",
+          "2205",
+          "0",
+          "i",
+          "x"
+        ],
+        [
+          "4089",
+          "regnamespace",
+          "4",
+          "t",
+          "b",
+          "N",
+          "0",
+          "4090",
+          "i",
+          "p"
+        ],
+        [
+          "4090",
+          "_regnamespace",
+          "-1",
+          "f",
+          "b",
+          "A",
+          "4089",
+          "0",
+          "i",
+          "x"
+        ],
+        [
+          "4096",
+          "regrole",
+          "4",
+          "t",
+          "b",
+          "N",
+          "0",
+          "4097",
+          "i",
+          "p"
+        ],
+        [
+          "4097",
+          "_regrole",
+          "-1",
+          "f",
+          "b",
+          "A",
+          "4096",
+          "0",
+          "i",
+          "x"
+        ]
+      ],
+      null,
+      "",
+      [
+        "oid",
+        "typname",
+        "typlen",
+        "typbyval",
+        "typtype",
+        "typcategory",
+        "typelem",
+        "typarray",
+        "typalign",
+        "typstorage"
+      ],
+      "SELECT 6",
+      [
+        26,
+        19,
+        21,
+        16,
+        18,
+        18,
+        26,
+        26,
+        18,
+        18
+      ]
+    ]
+  }
+]

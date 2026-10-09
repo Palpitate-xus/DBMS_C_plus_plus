@@ -10,6 +10,7 @@
 #include "expression/array_type.h"
 #include "expression/geometric_input.h"
 #include "expression/between_input.h"
+#include "expression/regtype_cast.h"
 #include <algorithm>
 #include <map>
 #include <set>
@@ -71,11 +72,7 @@ void validateIntervalInputCast(const std::string& input,const std::string& targe
     if(!inputs.count(source))throw DbError("42846","cannot cast type "+input+" to interval");
 }
 void validateRegtypeInputCast(const std::string& input,const std::string& target) {
-    if(common_type_detail::canonical(target)!="regtype")return;
-    const auto source=common_type_detail::canonical(input);
-    static const std::set<std::string> inputs={"unknown","text","varchar","bpchar","name","smallint","integer","bigint"};
-    if(!inputs.count(source) && !common_type_detail::oidType(source))
-        throw DbError("42846","cannot cast type "+input+" to regtype");
+    regtype_cast_detail::validate(input,target);
 }
 
 void validateArrayConstant(const Expr* source, const std::string& type) {
