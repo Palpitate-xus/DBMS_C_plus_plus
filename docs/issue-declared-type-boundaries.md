@@ -488,8 +488,10 @@ input23.log, adjacent-native5.log, regtype53-baseline.log,
 regtype53-reference-recheck.log and regtype53-first.log. The five adjacent
 unchanged native fixtures passed (range catalog, full28 persistence, type
 catalog reader, builtin array identity and cold declaration binding). Original
-BIT38432624 finished0. Expanded84native54901 and46wire91478 are still running;
-no final combined PASS or Root import is claimed.
+BIT38432624 finished0. Expanded84native54901 and46wire91478 subsequently
+finished0, with their final current source/receipt/cache/frozen fences. This
+is the preceding private generation, not approval of later owner changes or
+a Root import.
 
 A further unmodified nine-query actual PG18.6/candidate probe exposes six
 remaining differences: NULL/empty regtype-to-smallint eligibility, invalid
@@ -502,6 +504,64 @@ cast rejection. Wider storage/binary/alias IO, operator/coercion graphs,
 complex type input modifiers and actual catalog callback ownership also remain
 open. Original273 statuses/hash unchanged; no full/family/SAN/TLS approval,
 push, workflow activation or restart of user-skipped branches.
+
+## Follow-up: genuine cast edges, contextual arrays and retained OID execution
+
+The six differences from the original nine-query probe are now repaired in
+the same isolated worktree, clean at05bbefe7, with four more independent local
+commits (not imported while Root complete driver21540 remains running):
+
+| Commit | Actual repair and verification |
+| --- | --- |
+| d242a901 | Shared genuine regclass2205/2210, regnamespace4089/4090 and regrole4096/4097 scalar/array identities, not alias-only mappings. Native40 checks cold/warm/direct disk fields, reciprocal links, true physical mappings and no cold writes. Actual PG18.6 six-row reference retained. Their complete symbolic IO, storage and callback ownership are not claimed implemented. |
+| 8cb9ffa1 | Shared pure regtype cast graph used by runtime and binding before NULL/empty-source demand. Direct casts to/from other reference aliases are rejected, not composed transitively through OID. Native33 checks unknown/typed literals, NULLs, three genuine parameter origins and four incoming aliases. Actual PG18.6 reference27 and final wire27 pass, versus unchanged preceding baseline16fail. |
+| d5a7ae18 | Contextual ARRAY binding uses the actual scalar regtype cast graph, including typed integer inputs, NULLs and forbidden element conversions. All12 unchanged reference/wire controls pass, versus6 baseline differences. Dimensions, lower bounds and actual scalar conversion behavior are retained. |
+| 05bbefe7 | Keep physical OIDs through primitive/prepared comparisons, equal hash keys, array subscripts/quantifiers, sorting and DISTINCT. VALUES now gets its common result identity from the actual pure declaration callback. Real regtype-derived sources use typed cells and genuine descriptors, not an invented heap codec. Main dispatch retains their parsed owner instead of invoking the rejecting legacy VALUES host. Native13 and complete13 protocol controls pass, versus10 baseline differences. |
+
+All existing53 input cases plus new27 cast/12 array/13 identity cases pass on
+the final frozen production binary. The27/12/13 reference fixtures were also
+rechecked directly against the owned PostgreSQL18.6 instance. The original
+nine SQL statements and all their states/values/OIDs remain present in these
+fixtures; none was replaced to hide a failure. The broader reference21 cast
+catalog probe and incoming four actual reference controls are also retained.
+
+Preserve failed intermediate evidence: graph production compile76668 ended1
+because an attempted call to a private comparator was invalid; the existing
+public comparison interface replaced that call. All other57 fresh graph
+units and corrected ExecutionPlan52603 have matching own current receipts.
+Graph native first33826 stopped at a missing test include after native40
+passed; fixed49138 reached native33 then stopped at a test call-signature
+error. Both fixtures were corrected without changing assertions. Native11
+24945 then passed, but protocol13 still failed two original VALUES controls.
+Stronger native13 owner82804 actually aborted134 on the lost descriptor;
+actual callback repair73374 then passed all13. These failures are not counted
+as successful builds or replaced by later epochs.
+
+Production owner changes freshly rebuilt Main80522 and ExecutionPlan1510;
+the VALUES descriptor repair freshly rebuilt query_binding73374. No objects
+were borrowed from another worktree. Final own58 current source/header/
+compiler/flags/manifest receipts, normal cache, no-recompile repeat, frozen
+bytes and source fence all verified in owner-final-proof.log (99573=0).
+This final proof reuses verified unchanged graph objects, not a new claim of
+another fresh58 compile. Earlier graph final proofs87955/29019 remain0 for
+their corresponding test/source epochs, not the later owner generation.
+Final SHA `2d89537f8c6ca87633ba9b85af94d827e114a00356f2e396a8cdabcb270752cb`;
+final input seal
+`17bf16b537b1070292fba47d0f0d1b146e8c7de7637f52c37fc6b4e645287aae`.
+Artifact directory remains `/tmp/dbms-root-regtype.at5Xh2kT`.
+
+The final nine unchanged/additive native fixtures86520 pass (new40/33/13,
+original input23, original arrays, VALUES types, cold operators140, CASE and
+identity sort24); frozen wire53/27/12/13 batch65936 also0. Original BIT38484214
+finished0. Expanded87native52330/49wire51017 are now running with final input/
+receipt/cache/frozen fences; no pending-gate PASS. Private inventory758auto+
+2Main/421registered/58TU differs from Root753+2/417/58. Root21540 is still
+running on unchanged source40a3/b424, with real failures retained; it is not
+a complete suite success and these six private repairs are not Master code.
+Original273 statuses/hash remain22complete166partial70unverified15deferred;
+complete type catalog fields, binary/storage/callback/alias IO, broader
+operators and all other families remain open. No push, Actions activation,
+filtered-branch restart, sanitizer/TLS or whole-family approval.
 
 ## Historical held follow-up: real type catalog sources, sorting and identity metadata
 

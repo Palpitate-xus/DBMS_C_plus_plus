@@ -2,6 +2,20 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Four further private regtype cast graph ARRAY and physical identity repairs independently committed; stronger unchanged controls pass",
+      "gap_ids": ["TYPE-11", "TYPE-18", "TYPE-21", "QRY-06", "PROTO-04"],
+      "status": "partial",
+      "commits": ["d242a901", "8cb9ffa1", "d5a7ae18", "05bbefe7"],
+      "evidence": ["docs/issue-declared-type-boundaries.md"],
+      "tests": ["tests/regtype_alias_catalog_test.cpp", "tests/regtype_cast_graph_test.cpp", "tests/regtype_identity_test.cpp", "tests/regtype_cast_graph_protocol_e2e_test.py", "tests/regtype_array_graph_protocol_e2e_test.py", "tests/regtype_identity_protocol_e2e_test.py"],
+      "verification": {
+        "reproduction": "Original9 six differences preserved in complete new27 cast/12 array/13 identity fixtures; preceding baseline16/6/10 failures retained. Real PG18.6 cast catalog21, incoming4 and alias six-row references retained. Intermediate protocol13 two VALUES failures and native13 actual134 preserved; actual common-result descriptor repair fixes them without changing expectations.",
+        "focused_tests": "Final native40/33/13, nine-native86520 and actual frozen wire53/27/12/13 batch65936 all0; new27/12/13 reference recheck against ownedPG18.6 all0; originalBIT38484214 terminal0. Final own58 receipts/cache/repeat/frozen/source fence99573=0,2d895SHA/17bfseal. Graph fresh compile76668 failed private-interface call, corrected unit52603; subsequent Main80522/plan1510/binder73374 freshly built, other own graph objects verified reused. Not another fresh58 claim; all failed epochs preserved.",
+        "full_suite": "New87native52330/49wire51017 still running. Private clean05bbefe7 and total six source commits not imported while Root unchanged complete753+2/417 standard21540 remains running. New private758auto+2Main/421registered/58TU. Preceding private84/46/384 terminal0 applies only to earliera537 generation. No combined/Root full/SAN/TLS/family approval.",
+        "scope": "Actual cast graph, contextual ARRAY, physical comparisons/hash/sort/DISTINCT, actual VALUES metadata callback and typed derived-source owner repaired. New alias catalog identities do not claim symbolic IO/storage/callback implementations. Wider catalog fields, codecs/operators and all original273 requirements remain open. Original273 statuses/hash unchanged; README db35e522 evergreen, no push/Actions activation/user-filtered branch restart."
+      }
+    },
+    {
       "issue": "Private regtype physical catalog and bounded input codec committed independently; stronger cast/operator gaps retained",
       "gap_ids": ["TYPE-11", "TYPE-18", "TYPE-21", "QRY-06", "PROTO-04"],
       "status": "partial",
