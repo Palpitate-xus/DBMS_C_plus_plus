@@ -1503,3 +1503,12 @@ driver18383运行中，尚无新全量通过。当前186 scoped、771auto+2Main�
 435registered、58TU；原273状态22complete/166partial/70unverified/15deferred
 不变。继续普通 DML/session-value/arity/decimal API 及原全部未闭环要求。
 完整证据见 [Root ROW 验证](issue-root-row-publication.md)。以下为历史记录。
+# 2026-10-09 当前虚拟关系目标修复
+
+Private `34d5d956` 已独立提交，真实native19/6基线 -> 新19/0；首组27/18
+实际1保留，原样完整default91426和完整27native/18wire7823均终0、BIT384
+终0，all58当前自身receipts/cache/repeat/fences0，非fresh58。尚未合入master，
+因为原完整18383仍在运行、源码保持795479/02c69冻结。master186scoped/
+771auto+2Main/435wire/58TU；private187/772+2/435/58。下一普通SQL-value
+语法/静态类型/context绑定已实际诊断，修复待做；原273状态和跳过项不变。
+详情：[独立修复证据](issue-private-virtual-shadow-repair.md)。以下为历史记录。

@@ -12,7 +12,9 @@
    现全部终0，all58 receipts/cache/repeat/source/frozen终态一致。
 3. 完整注册回归18383正在运行773native/Main/435wire；此前所有失败仍保留，
    不冒全量通过，不改输入/断言/期限；源码保持冻结，下一项独立工作区修复。
-4. 逐项修普通同名关系DML、SQL-body session-value、零参数SQL routine、
+4. 普通同名关系DML已独立private commit `34d5d956`，完整27native/18wire原样
+   复跑终0、首组失败保留，待18383终态后合入并做Root自身验证。接着修
+   SQL-body session-value、零参数SQL routine、
    native decimal API，再继续总清单所有原未闭环要求；每项独立 commit。
 5. 原273范围/状态不变22complete166partial70unverified15deferred；不push、
    不启用Actions、不重启跳过专项、不以 scoped 通过宣布原整个 family 完成。

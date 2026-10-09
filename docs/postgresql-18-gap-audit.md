@@ -1,4 +1,18 @@
-# 2026-10-09 当前 ROW checkpoint（README 已独立提交）
+# 2026-10-09 当前虚拟关系绑定 checkpoint（master 全量仍在运行）
+
+独立 private `34d5d956` 修复同名 `pg_stat_activity` / `pg_settings` 用户关系
+预绑定目标误指虚拟目录的错误。真实 INTEGER native19/6基线 -> 新19/0；
+第一组27native/18wire真1（仅原default role_rows失败）保留，原样完整default
+复跑91426和完整27/18复跑7823均终0，原BIT384/22944终0、all58当前自身
+receipts/cache/repeat/source/frozen终态一致。仅自身受影响CPP重编，不冒fresh58。
+source commit已完成但尚未合入master：原完整18383仍在795479/02c69源上运行。
+master仍186scoped/771auto+2Main/435wire/58TU；private187/772+2/435/58。
+下一SQL-value实际诊断拒绝5个合法关键字并错标部分temporal类型，实际180006
+完整10标签/OID、语法和4真实callee元数据已保存；该独立修复仍待进行。
+原273范围/hash/22complete166partial70unverified15deferred不变。
+详情：[独立修复证据](issue-private-virtual-shadow-repair.md)。以下为历史记录。
+
+# 2026-10-09 ROW checkpoint（README 已独立提交）
 
 README 长期项目入口已独立 commit `cfcab3cd`，不计作数据库修复。
 ROW `99c155ee` 已在 private26native/16protocol 全部终0后，以 -x 合入 master

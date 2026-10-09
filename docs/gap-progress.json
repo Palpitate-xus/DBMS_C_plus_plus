@@ -2,6 +2,20 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Independent virtual-relation target repair committed after complete repeat; master full source remains frozen",
+      "gap_ids": ["CAT-03", "CAT-09", "PROTO-04"],
+      "status": "partial",
+      "commits": ["34d5d956"],
+      "evidence": ["docs/issue-private-virtual-shadow-repair.md"],
+      "tests": ["tests/pg_stat_activity_protocol_e2e_test.py", "tests/pg_settings_query_protocol_e2e_test.py"],
+      "verification": {
+        "reproduction": "Entire original pg_stat_activity fails INSERT XX001 on preceding ROW frozen. Initial fixture compile/type errors retained; actual INTEGER baseline30701 terminal1 with19/6 real binding failures. Explicit physical and pg_type controls already pass.",
+        "focused_tests": "Affected own CPP94653=0, no public header/Main change. First complete42803=1:27native all0 and17/18wire pass, native19/0 and original whole pg_stat_activity/pg_settings pass. Original default role_rows=[] failure retained without filtered investigation. Exact unchanged entire default repeat91426=0 and whole27native18wire7823=0 on samec823/fc334 inputs. All58 current own receipts/cache/repeat/source/frozen terminal fences0; no fresh58 or foreign-object claim. Original BIT384/22944=0 on verified180006. Independent private source34d5d956 committed, not imported.",
+        "full_suite": "Master full18383 still live773native/Main435wire on unchanged795479/02c69 generation. Master186 scoped771auto+2Main435registered58TU; private187scoped772auto+2Main435registered58TU. No new full result or Root publication of private repair.",
+        "scope": "All273 original items/hash/statuses unchanged22complete166partial70unverified15deferred. Next actual SQL-value diagnosis69124 and verified180006 metadata/grammar evidence saved; source fix pending. Other arity/native decimal API and all original incomplete requirements continue. No push, Actions activation or filtered restart."
+      }
+    },
+    {
       "issue": "Typed ROW repair passes independent Root publication; complete registered driver running",
       "gap_ids": ["TYPE-06", "PROTO-04", "QRY-02", "QRY-05"],
       "status": "partial",
