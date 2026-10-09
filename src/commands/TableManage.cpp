@@ -33001,7 +33001,15 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
                         {"pg_stat_activity", {{"pid","integer"},{"datname","name"},{"usename","name"},{"state","text"},{"query","text"}}}
                     };
                     const auto found = virtualTables.find(requested.name);
-                    if (found != virtualTables.end()) {
+                    // Match the established pg_settings/pg_stat_activity
+                    // dispatcher: an unqualified user table/view remains a
+                    // physical relation, not a virtual INSERT/UPDATE target.
+                    // Explicit pg_catalog names and pg_class keep their
+                    // existing catalog identity; no source is opened here.
+                    const bool physicalShadow = requested.schema.empty() &&
+                        (requested.name == "pg_settings" || requested.name == "pg_stat_activity") &&
+                        (tableExists(dbname,requested.name) || viewExists(dbname,requested.name));
+                    if (found != virtualTables.end() && !physicalShadow) {
                         description.columns = found->second;
                         for(auto& column:description.columns)column.typeOid=mapBuiltinTypeNameToOid(column.type);
                         return description;
