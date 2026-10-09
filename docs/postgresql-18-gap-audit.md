@@ -1,3 +1,17 @@
+# 2026-10-09 当前 ROW checkpoint（README 已独立提交）
+
+README 长期项目入口已独立 commit `cfcab3cd`，不计作数据库修复。
+ROW `99c155ee` 已在 private26native/16protocol 全部终0后，以 -x 合入 master
+`bec026c7`。含真实根常量规划检查的 native52、wire54、PG18.6 reference55
+及原 BIT384 全0；全部中间失败保留，不以默认未开启常量规划的 native 绿代替
+前端验收。现186 scoped repairs、771auto-native+2Main、435registered、58TU。
+Root 自身57/Main59900/66760正在编译，尚无 Root ROW publication/full pass。
+继续同名虚拟关系DML、SQL-body session-value grammar、零参数SQL routine
+诊断、native decimal factory API及全部原未完成要求。原273仍22complete、
+166partial、70unverified、15user-deferred；不push/启用Actions/重启跳过专项。
+详情：[ROW 修复](issue-row-constructor.md)、[Root 验证](issue-root-row-publication.md)。
+以下均为历史 checkpoint。
+
 # 2026-10-08 TypeName parser partial checkpoint（正式source仍ea67）
 
 独立private e4f16819共用CAST/::声明grammar，原68基线40错 -> 新68全0，

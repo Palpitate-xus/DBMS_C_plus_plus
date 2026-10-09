@@ -2,6 +2,20 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Typed ROW repair independently committed and imported; Root-owned publication compile running",
+      "gap_ids": ["TYPE-06", "PROTO-04", "QRY-02", "QRY-05"],
+      "status": "partial",
+      "commits": ["99c155ee", "bec026c7"],
+      "evidence": ["docs/issue-row-constructor.md", "docs/issue-root-row-publication.md"],
+      "tests": ["tests/row_constructor_test.cpp", "tests/row_constructor_protocol_e2e_test.py", "tests/prepared_constant_planning_test.cpp", "tests/prepared_query_execution_test.cpp"],
+      "verification": {
+        "reproduction": "Baseline29/22fail and all initial/corrected generations retained. Actual180006 reference55 including BEGIN all0; pg_proc confirms record_in/record_out STABLE. Later cast-planning failures are retained and repaired, not hidden by ordinary native planning defaults.",
+        "focused_tests": "Private49135 terminal0:26native16wire all0, nativeROW52/wire54 controls, whole original defaultprotocol and composite NOT IN entries unchanged. All58 private own receipts/cache/repeat/source/frozen terminal fences0. BIT384/7762=0 against verified180006. Independent99c155ee -> masterbec026c7 -x after terminal. Actual Root own57/59900 and Main/66760 running in Kijp5GbF; Root gate not yet started, no borrowed objects or private publication substitution.",
+        "full_suite": "Master186 scoped771automatic+2Main435registered58TU. No new whole driver/pass. Previous dc89 full84918 terminal1 retains all12 failures and preceding Root numeric77034 failure is unchanged.",
+        "scope": "Original273 items/hash/statuses unchanged22complete166partial70unverified15deferred. READMEevergreen cfcab3cd already committed. Ordinary virtual-relation DML/session-value/SQL arity/native decimal API and all original incomplete families continue. No push, Actions activation or filtered restart."
+      }
+    },
+    {
       "issue": "Actual Root publication proof for three imports retains numeric timeout and ROW dependency; original numeric repeat passes",
       "gap_ids": ["TYPE-06", "PROTO-04", "QRY-02", "QRY-05"],
       "status": "partial",
