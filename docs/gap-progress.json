@@ -2,6 +2,20 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Eight verified private range/type catalog repairs imported individually; actual new Root build pending",
+      "gap_ids": ["TYPE-11", "TYPE-18", "TYPE-21", "QRY-06", "PROTO-04"],
+      "status": "partial",
+      "commits": ["741e7d0b", "729c80be", "d8ed2694", "4130a6bf", "045c172e", "a00a5d3b", "722b0bb3", "40a3d0f6"],
+      "evidence": ["docs/issue-declared-type-boundaries.md"],
+      "tests": ["tests/builtin_range_catalog_test.cpp", "tests/type_catalog_descriptor_persistence_test.cpp", "tests/owned_type_catalog_query_test.cpp", "tests/prepared_identity_sort_test.cpp", "tests/builtin_range_catalog_protocol_e2e_test.py", "tests/owned_type_catalog_query_protocol_e2e_test.py"],
+      "verification": {
+        "reproduction": "All private baseline/stage failures retained: whole121115fail then97 thenone catalog0A000; reader one OID sort failure then0; new30baseline30fail then15 then3 then0; native19 descriptor10fail then0; stronger sort18 DISTINCT abort then12pass6incorrect fixture expectations, actualPG18.6 unsigned comparison/int8 cast reference corrects only expectations plus adds octal controls24/0.",
+        "focused_tests": "Final private unchanged82native71878/45wire48275/original3845963 all terminal0, source/receipt/cache/frozen fences retained. Full121/new30/owned19/sort24 all0; actual owned reference121/30 and char3 also0. Private final706SHA/b424seal; all58 own receipts/cache/repeat verified. No SQL/count/deadline/OID weakening.",
+        "full_suite": "Eight source commits individually imported with provenance after private gates terminal. Root40a3 source bytes exactly match private, inventory753auto+2Main/417registered/58TU,154 scoped source repairs. Actual Root-path fresh58 normal95909 running, all58 compiler invocations begun but no terminal build/proof yet; new Root82/45/384 and complete standard driver not yet run. No Root full/SAN/TLS/family approval.",
+        "scope": "Evergreen README db35e522 unchanged. Older eight enum candidates held; ordinary actualPG18.6 regtype reference28 gathered for next remaining scope, not projectPASS. Whole pg_type schema/default/subscript/ACL and wider codec/bootstrap/complex-source/aggregate requirements remain open. Original273 hash/statuses22complete166partial70unverified15deferred unchanged; no push, Actions activation or user-filtered branch restart."
+      }
+    },
+    {
       "issue": "Five independent private type catalog source, sorting, actual descriptor OID, DISTINCT and AST routing repairs; complete121/30 pass, combination gates pending",
       "gap_ids": ["TYPE-11", "TYPE-18", "TYPE-21", "QRY-06", "PROTO-04"],
       "status": "partial",

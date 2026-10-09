@@ -417,7 +417,48 @@ TYPE-11/21. Binary I/O, arrays beyond these catalog links, custom types/domains
 and all other original273 requirements remain open. Original items are
 unchanged:22 complete,166 partial,70 unverified,15 deferred_by_user. No push,
 Actions activation or user-skipped/filtered branch restart.
-## Current held follow-up: real type catalog sources, sorting and identity metadata
+## Current publication: eight individually imported range/type catalog repairs
+
+Final private82native71878,45wire48275 and original3845963 all finished0 on
+the unchanged706893/b424 generation recorded below. The complete old121 and
+new30 protocol fixtures, all19 owned-field checks and24 identity-sort controls
+are retained; no pending run was counted as passed.
+
+Eight independent source commits have now been imported individually with
+Git provenance:
+
+| Private | Master |
+| --- | --- |
+| 5d727bad | 741e7d0b |
+| 4de53760 | 729c80be |
+| d21a8b81 | d8ed2694 |
+| bd6ebae6 | 4130a6bf |
+| 38d58f0d | 045c172e |
+| 8d1906da | a00a5d3b |
+| b5eeb684 | 722b0bb3 |
+| 36106b26 | 40a3d0f6 |
+
+Master40a3d0f6 has154 scoped source repairs and753 auto-native+2 Main frontend/
+417 registered/58TU. Its src/scripts/tests/cmake bytes exactly match the final
+private generation. A genuine Root-path header-aware fresh58 normal build95909
+is running, artifact
+`/tmp/dbms-root-pgtype-publish.fwcF6Kdr/root-fresh58-proof.log`.
+All58 compiler invocations have begun; this is not terminal build success or
+receipt/cache/repeat/frozen proof yet. New Root82/45/384 and the complete753+2/
+417 standard driver have not run on this publication. Source inputs remain
+frozen; do not reuse private results as Root test results. Older Root76/43/384
+and original full21native/14protocol failures remain historical evidence.
+
+An additional actual owned PG18.6 regtype reference28 now exposes the next
+ordinary codec/catalog scope (numeric identities, symbolic/qualified names,
+arrays, errors and WHERE-false input demand). It is not implemented or counted
+as project PASS. The eight older enum candidates remain held and separate;
+user-filtered branches are not restarted. Complete pg_type schema/default/
+subscript/ACL ownership and broader codec/bootstrap/aggregate/source semantics
+remain open. Original273 status/hash unchanged22complete166partial70unverified
+15deferred. No assistant push, Actions activation or full/family/SAN/TLS claim.
+
+## Historical held follow-up: real type catalog sources, sorting and identity metadata
 
 The preceding private range composition has now actually finished:80native
 52807=0,44wire63169=1 (43pass and the unchanged complete121 catalog fixture
