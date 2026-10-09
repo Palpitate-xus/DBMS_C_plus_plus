@@ -2,6 +2,20 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Three independently committed actual modifier ownership named-array and NULL-array repairs; original19/8/6 expectations pass",
+      "gap_ids": ["TYPE-11", "TYPE-18", "TYPE-21", "QRY-06", "PROTO-04"],
+      "status": "partial",
+      "commits": ["16c7acde", "9afdd878", "d5edb1f1"],
+      "evidence": ["docs/issue-declared-type-boundaries.md"],
+      "tests": ["tests/declared_modifier_owner_test.cpp", "tests/named_array_modifier_test.cpp", "tests/nullable_character_array_cast_test.cpp", "tests/declared_modifier_owner_protocol_e2e_test.py", "tests/named_array_modifier_protocol_e2e_test.py", "tests/nullable_character_array_cast_protocol_e2e_test.py"],
+      "verification": {
+        "reproduction": "All original8 controls retained in19: preceding baseline13fail; named8 baseline5fail. Initial native50/25 pass but full19 protocol still1 valid NULL varchar-array failure; named8 not reached. Exact owned partial89/51 gates stopped143, not full PASS. Actual NULL-array6 reference and old generation4fail retained unchanged.",
+        "focused_tests": "ActualPG18.6 permanent19/8 reference rechecks0, NULL-array6 actual reference retained; final wire19/8/6 batch65459=0 and native50/25/13 plus original arrays/type_registry39144=0. Genuine own-path fresh58 normal83630=0 all receipts/cache/repeat/frozen/source fences; later only ExprEvaluator3043 freshly rebuilt, other57 own units verified. Final proof21940=0 e72dSHA/faabseal/current stub. Original finalBIT38489564=0. No expectation/SQL/OID/count/deadline weakening.",
+        "full_suite": "Earlier05bb private87native52330/49wire51017/original38484214 all0. New modifiers90native90443/52wire34368 running, not combined PASS. Root unchanged complete753+2/417 driver21540 still running with actual failures, source40a3/b424 frozen. Three new cleanprivate d5edb1f1 commits plus earlier six not imported. Private761auto+2Main/424registered/58TU. No Root full/SAN/TLS/family approval.",
+        "scope": "Real scalar/element modifier ownership instead of missing-registry acceptance, modifier placement for named physical arrays, and NULL character-array scalar input repaired. Broader codecs/callback/full type catalog and all original273 remain open; statuses/hash unchanged22complete166partial70unverified15deferred. README db35e522 evergreen. No push/Actions activation/user-filtered branch restart."
+      }
+    },
+    {
       "issue": "Four further private regtype cast graph ARRAY and physical identity repairs independently committed; stronger unchanged controls pass",
       "gap_ids": ["TYPE-11", "TYPE-18", "TYPE-21", "QRY-06", "PROTO-04"],
       "status": "partial",

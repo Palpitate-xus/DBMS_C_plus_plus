@@ -553,8 +553,9 @@ Artifact directory remains `/tmp/dbms-root-regtype.at5Xh2kT`.
 The final nine unchanged/additive native fixtures86520 pass (new40/33/13,
 original input23, original arrays, VALUES types, cold operators140, CASE and
 identity sort24); frozen wire53/27/12/13 batch65936 also0. Original BIT38484214
-finished0. Expanded87native52330/49wire51017 are now running with final input/
-receipt/cache/frozen fences; no pending-gate PASS. Private inventory758auto+
+finished0. Expanded87native52330/49wire51017 subsequently finished0 with final
+input/receipt/cache/frozen fences for05bbefe7, not the later modifier generation.
+Private inventory758auto+
 2Main/421registered/58TU differs from Root753+2/417/58. Root21540 is still
 running on unchanged source40a3/b424, with real failures retained; it is not
 a complete suite success and these six private repairs are not Master code.
@@ -575,6 +576,57 @@ owned modifier eligibility/metadata, not execution of fabricated inputs, is
 the next repair. Root full21540 has entered protocol fixtures and the original
 default protocol fails its obsolete unsupported-pg_type expectation; its
 failure remains unchanged, not a complete protocol PASS.
+
+## Follow-up: actual modifier ownership, named arrays and NULL input
+
+New isolated `/tmp/dbms-root-typmods.6VseZ9N2/repo` starts from05bbefe7 and is
+clean atd5edb1f1, with three independent local repairs:
+
+| Commit | Scope and actual verification |
+| --- | --- |
+| 16c7acde | NULL character-array casts validate the actual scalar element modifier instead of including the array suffix in a scalar length. Direct/stored/prepared native13 and final wire6 preserve NULL/OIDs and retain zero-length22023 errors under WHERE false. |
+| 9afdd878 | Real scalar/array-element owners and genuine frontend codecs or actual catalog modifier-input fields determine eligibility; missing TypeRegistry entries no longer grant arbitrary modifiers. Native50 covers cold/warm/direct persisted rows, no cold writes, genuine array owners and42601. Final reference/wire19 passes versus13 preceding baseline failures; all original8 retained. |
+| d5edb1f1 | Move modifiers before an already named physical array suffix. _varchar(3), _numeric(5,2), _bpchar(3) apply actual truncation/rounding/padding while preserving NULLs/lower bounds/OIDs. Native25 and reference/final wire8 pass versus5 baseline failures. |
+
+All27 immutable19/8 records came from actual owned PG18.6, with both complete
+fixtures rechecked there. An additional actual six-query NULL-array reference
+preserves four valid and two zero-length negative controls. Final19/8/6 batch
+65459=0; five-native39144 (50/25/13 plus original arrays/type_registry)=0.
+No SQL/value/state/OID/count/deadline weakening or artificial execution for
+metadata. Artifacts are in `/tmp/dbms-root-typmods.6VseZ9N2`.
+
+The new-path worktree genuinely compiled all58 normal O2 units83630=0 and a
+fresh current-header stub, with all58 own path/source/header/compiler/flags
+receipts, cache/no-recompile repeat/frozen/source fences. Initiale031/seal6b14
+native50/25 passed, but full19 protocol37542 still failed one valid NULL
+varchar(3)[] control22023 (also already in the preceding baseline). Named8
+was not reached by that stop-on-error batch; do not label that batch27 green.
+Owned89native52755/51wire70504 were deliberately stopped after exact PIDs/
+PGIDs were verified, ending143; partial logs remain, not a full PASS.
+
+NULL-array correction rebuilt only ExprEvaluator3043 against57 verified own
+unchanged units; no objects borrowed from other worktrees. Additional native13
+and registered wire6 do not change the production compile signature. Final
+normal proof21940=0 verifies all58 current receipts/cache/no-recompile repeat/
+frozen/source fences and a fresh stub, not another fresh58 claim.
+Final SHA `e72d239bc6b97b1bd2be6eeb4bcfd37e2b0f6be447d4428f757ba903c86e1e71`;
+input seal
+`faab37582970a39091ab5bdf81f9b15cdb729c8833be6c2f87fee60d06308e18`.
+Logs: fresh58-modifier-build.log, modifier-native-first.log,
+modifier-native-final.log, modifier-final-proof.log and all *-baseline,
+*-first, *-old-generation, *-reference-recheck and *-final fixture logs.
+Old NULL-array6 generation failed4; its original records remain unchanged.
+
+Previous05bb private87/49/original38484214 all0. New final original38489564
+finishes0. Expanded90native90443/52wire34368 are running with final input/
+receipt/cache/frozen fences, not yet PASS. Private761auto+2Main/424registered/
+58TU differs from unchanged Root753+2/417/58. Root complete21540 remains live
+with actual failures; Master source40a3/b424 is frozen. Neither earlier six
+nor these three private commits are imported. Continue every original273 unmet
+requirement/full-run failure, including obsolete pg_type-unavailable fixtures,
+ordinary parser/metadata/codec/source boundaries and wider array/type features.
+Original273 statuses/hash22complete166partial70unverified15deferred unchanged.
+No push, workflow activation, filtered restart, SAN/TLS or family approval.
 
 ## Historical held follow-up: real type catalog sources, sorting and identity metadata
 
