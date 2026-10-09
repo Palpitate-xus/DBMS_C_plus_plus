@@ -849,8 +849,12 @@ static string sqlProcessor(string raw, bool /*normalizeBooleanLiterals*/ = false
                 preprocessCaseWhen(prefix.substr(fromKeyword));
         else prefix = preprocessCaseWhen(prefix);
         raw = prefix + raw.substr(predicateKeyword);
-    } else if (toLower(raw).rfind("select ", 0) == 0 &&
+    } else if (caseCommand == dbms::SqlCommand::Select &&
         fromKeyword != string::npos) {
+        // WITH SELECT has the same expression grammar owner as SELECT.
+        // Keep CASE inside its CTE definitions as real AST expressions;
+        // evaluator-only case_when pseudo-tokens cannot be rebound in a
+        // subsequently executed child or preserve lazy routine arms.
         raw = raw.substr(0, fromKeyword) +
             preprocessCaseWhen(raw.substr(fromKeyword));
     } else {

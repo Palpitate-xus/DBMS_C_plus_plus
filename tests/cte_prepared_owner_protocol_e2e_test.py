@@ -81,6 +81,10 @@ def main():
              [["2", "1"]], ["id", "id"], [23, 23]),
             ("WITH coalesce AS (SELECT 1 AS id) SELECT coalesce(id,9) AS id FROM coalesce;",
              [["1"]], ["id"], [23]),
+            ("WITH c AS (SELECT 1 AS id), d AS (SELECT CASE id WHEN 1 THEN id+1 ELSE 9 END "
+             "AS id FROM c) SELECT id FROM d;", [["2"]], ["id"], [23]),
+            ("WITH c AS (SELECT 1 AS id), d AS (SELECT CASE WHEN id=2 THEN id+1 ELSE 9 END "
+             "AS id FROM c) SELECT id FROM d;", [["9"]], ["id"], [23]),
         ]
         for case in cases:
             query(*case)
