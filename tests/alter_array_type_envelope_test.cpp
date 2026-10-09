@@ -21,6 +21,17 @@ int main() {
         assert(alter->subCommands[0].dataType == "NUMERIC(8,3)[]");
         assert(alter->subCommands[1].dataType == "CHARACTER VARYING(7)[][]");
     }
+    for (const auto& envelope : {std::string("NUMERIC(8,3)[2][4]"),
+         std::string("INTERVAL DAY TO SECOND(3)[][]"),
+         std::string("TIMESTAMP(3) WITH TIME ZONE[][]"),
+         std::string("NUMERIC(8,-2)[][]")}) {
+        const auto parsed = parser.parse("ALTER TABLE t ALTER COLUMN a TYPE " + envelope);
+        assert(parsed.success);
+        const auto* alter = dynamic_cast<const dbms::AlterTableStmt*>(parsed.stmt.get());
+        assert(alter && alter->subCommands.size() == 1 && alter->subCommands[0].dataType == envelope);
+        const auto declaration = dbms::SQLParser::parseTypeSpecification(alter->subCommands[0].dataType);
+        assert(declaration.isArray);
+    }
     dbms::TypeRegistry::instance().bootstrap();
     const std::string name = "alter_array_type_envelope";
     cleanupTestDb(name);

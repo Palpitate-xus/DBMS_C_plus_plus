@@ -9829,7 +9829,22 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
     auto stmt = std::make_unique<AlterTableStmt>();
     const auto columnType = [&](std::string& type) {
         try {
-            type = renderDeclaredType(consumeDeclaredType(tokens, pos));
+            const size_t begin = pos;
+            (void)consumeDeclaredType(tokens, pos);
+            // Validate with the shared grammar, but retain the complete
+            // declaration envelope. Its semantic isArray bit cannot retain
+            // repeated [] or explicit bounds from the original token stream.
+            type.clear();
+            for (size_t i = begin; i < pos; ++i) {
+                const auto& token = tokens[i];
+                const bool punctuation = token == "." || token == "(" || token == ")" ||
+                    token == "[" || token == "]" || token == ",";
+                const bool adjacent = i == begin || tokens[i - 1] == "." ||
+                    tokens[i - 1] == "(" || tokens[i - 1] == "[" ||
+                    tokens[i - 1] == "," || tokens[i - 1] == "+" || tokens[i - 1] == "-";
+                if (!punctuation && !adjacent) type += ' ';
+                type += token;
+            }
             return true;
         } catch (const DbError& error) {
             if (error.sqlState() != "42601") throw;
