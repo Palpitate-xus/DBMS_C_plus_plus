@@ -417,6 +417,54 @@ TYPE-11/21. Binary I/O, arrays beyond these catalog links, custom types/domains
 and all other original273 requirements remain open. Original items are
 unchanged:22 complete,166 partial,70 unverified,15 deferred_by_user. No push,
 Actions activation or user-skipped/filtered branch restart.
+## Current held follow-up: real type catalog sources, sorting and identity metadata
+
+The preceding private range composition has now actually finished:80native
+52807=0,44wire63169=1 (43pass and the unchanged complete121 catalog fixture
+fails its single pg_type query),original38421324=0. None was mislabelled44/44.
+An isolated successor `/tmp/dbms-root-pgtype-query.k3FIyPfj/repo` adds five
+independent source commits to the preceding three, all still private:
+
+| Commit | Actual repair/evidence |
+| --- | --- |
+| bd6ebae6 | Shared descriptor/cell producer for the28 fields actually owned by PgTypeRow; pure virtual relation metadata and a genuine lazy PreparedSourceRowsOp in the ordinary native planner. Main dispatch publishes the real structured output of that plan. Existing full121 still fails ORDER BY oid at this first stage; new actual-reference30 improves30 baseline failures to15. |
+| 38d58f0d | Prepared sorting/peer equality consumes real unsigned32 OIDs and existing NAME/internal-char typed comparison implementations, retaining enum-owned ordering. Full30 improves15fail to3, all remaining CASE/quoted source routing. Stronger sort fixture then independently exposes unsupported OID DISTINCT; it is not all PASS at this commit. |
+| 8d1906da | Virtual catalog descriptors retain actual builtin type OIDs, not zero. Native19 initially aborts on OID sorting; after sorting fixes it has10 failed descriptor-OID assertions. This independent metadata repair fixes all10; complete19=0, including actual cold read no cache/directory writes and all28 cached/direct-persisted field values. |
+| b5eeb684 | DISTINCT uses real scalar identity equality/hash material for OID, NAME and internal char, preserving typed NULL and empty/NUL distinctions. The initial18 fixture aborts on OID DISTINCT; its next epoch has12passes/6char failures because the new fixture incorrectly expected signed char ordering. Actual PG18.6 three-query reference and primary char.c prove comparisons are uint8 although integer casts are int8. Retain all original high-byte inputs, correct expected ordering, add canonical octal-input controls. Strengthened24 actual0; production's existing char comparisons were already correct and were not changed to satisfy the faulty fixture. |
+| 36106b26 | Route genuine parsed pg_type source identities before legacy CASE/physical-source hosts. Qualified/quoted names and CASE now use the same typed source plan, not string matching. Complete new30 and complete existing121 both0 with all original SQL/expectations/errors/labels/OIDs/counts/deadlines retained. |
+
+Primary schema and byte-comparison definitions:
+[PostgreSQL18 pg_type](https://www.postgresql.org/docs/18/catalog-pg-type.html),
+[PostgreSQL18 char.c](https://raw.githubusercontent.com/postgres/postgres/REL_18_STABLE/src/backend/utils/adt/char.c).
+Owned actual PG18.6 permanent reference30 also passes0. Prefix schema28 is not
+the complete PostgreSQL schema: PgTypeRow still lacks typsubscript, defaults,
+default-expression trees and ACL fields; SELECT* explicitly returns0A000.
+Complete pg_type schema/codec/bootstrap semantics, unsupported-field diagnostics,
+aggregate/complex-source lowering and wider type families remain open. This
+incremental row provider is not a family-completion claim or substitute for
+those requirements. No invented catalog rows/NULL defaults/extra field values.
+
+Successor initial header-aware production build79609 genuinely compiles58
+normal O2 units and finishes0. Native staging45734 separately verified all57
+fresh current non-Main inputs while Main was still building; its actual134
+OID-sort failure is preserved, not production-success evidence. Later repairs
+freshly rebuild only their changed CPPs, retaining own current-header objects.
+Final proof68371 verifies every58 source/header/compiler/flags/manifest receipt,
+normal cache and no-recompile repeat/frozen bytes. SHA
+`706893b3d18593d35e5d4a138efa477c323c471e400649079c621156078655bd`;
+seal `b424975d0f4fc0d7bf9aa2cc272a5e7b3b15c3e08e1ebaa5cae57fe50f3258e9`.
+Current82native71878/45wire48275 are running; original3845963 has finished0.
+Do not declare pending gates passed. Source inputs stay frozen.
+
+Successor inventory753auto-native+2 Main/417registered/58TU; unchanged Master
+source36eabe53 remains749+2/415/58 and146 scoped repairs. Eight source commits
+across these two private worktrees are not imported yet. Previously held enum
+candidates remain separate and are not reopened. Master76/43/384 remain0;
+old original full63302 remains1 with21native/14protocol failures. Original273
+statuses/hash stay22complete166partial70unverified15deferred; continue every
+remaining original owner. No assistant push, Actions activation, family/full/
+sanitizer/TLS PASS claim. The following sections retain historical checkpoints.
+
 ## Open follow-up: genuine range catalog, descriptor persistence and wire OIDs
 
 Private `/tmp/dbms-root-range-catalog.ZzhBFYQA/repo` now has three independent

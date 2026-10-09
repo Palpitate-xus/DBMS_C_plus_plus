@@ -2,6 +2,20 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Five independent private type catalog source, sorting, actual descriptor OID, DISTINCT and AST routing repairs; complete121/30 pass, combination gates pending",
+      "gap_ids": ["TYPE-11", "TYPE-18", "TYPE-21", "QRY-06", "PROTO-04"],
+      "status": "partial",
+      "commits": ["bd6ebae6", "38d58f0d", "8d1906da", "b5eeb684", "36106b26"],
+      "evidence": ["docs/issue-declared-type-boundaries.md"],
+      "tests": [],
+      "verification": {
+        "reproduction": "Preceding range80native0/44wire1=43pass+one genuine pg_type query0A000/original3840. New query30 baseline30fail; genuine reader15fail; sorting3fail; AST routing full30/1210. Native19 initial actual134 OID sort, then10 genuine descriptor OID0 assertions; metadata repair19/0. Sort fixture18 initial OID DISTINCT abort; after DISTINCT12pass6bad signed-char expectations. Actual PG18.6 char3 and primary char.c verify uint8 ordering/int8 conversion, retained original high bytes plus additive canonical octal controls24/0; production char comparison unchanged.",
+        "focused_tests": "Complete native19 and24, full existing121 and new30 protocol all0; full30 actual-owned PG18.6 permanent reference also0. All28 actual cached/persisted field values, typed OIDs and cold no-directory/cache writes checked. No expected SQL/value/state/label/OID/time weakened. Genuine header-aware own58 normal79609=0; later changed CPPs freshly rebuilt. Final all58 current receipts/cache/repeat/frozen706SHA/b424seal verified68371=0.",
+        "full_suite": "New private82native71878/45wire48275 running on frozen generation; original3845963 terminal0. Pending gates not PASS. Published Master76/43/384 remain0; old full63302 remains1 with21native/14protocol failures. No full/SAN/TLS/family success.",
+        "scope": "Five new private source commits plus preceding three range commits held, not Master imports. New753auto+2Main/417registered/58TU versus Root749+2/415/58. Actual-owned28-field reader is not whole PostgreSQL pg_type schema; star0A000 and remaining fields/codec/bootstrap/complex/aggregate lowering all stay open. Original273 hash/statuses22complete166partial70unverified15deferred unchanged; no push/Actions/filtered branch restart."
+      }
+    },
+    {
       "issue": "Private range physical producer, complete descriptor persistence and actual wire OIDs; pg_type query still unsupported",
       "gap_ids": ["TYPE-11", "TYPE-18", "TYPE-21", "PROTO-04"],
       "status": "partial",
