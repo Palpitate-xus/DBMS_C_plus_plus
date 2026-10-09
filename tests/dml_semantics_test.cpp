@@ -69,8 +69,8 @@ static void test_limit_with_ties() {
     dbms::SQLParser parser;
     // Preserve the original SQL as a negative grammar assertion.
     auto r = parser.parse("SELECT id FROM t ORDER BY id LIMIT 5 WITH TIES");
-    // The parse-only API returns an error message, not a wire SQLSTATE.
-    assert(!r.success && !r.error.empty());
+    // The parse-only diagnostic text is separate from its SQLSTATE field.
+    assert(!r.success && !r.error.empty() && r.sqlState == "42601");
     r = parser.parse("SELECT id FROM t ORDER BY id FETCH FIRST 5 ROWS WITH TIES");
     assert(r.success);
     auto* select = dynamic_cast<dbms::SelectStmt*>(r.stmt.get());

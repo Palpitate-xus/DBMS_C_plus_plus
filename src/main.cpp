@@ -20923,7 +20923,8 @@ static bool usesInheritedQueryCteSource(const dbms::SelectStmt& root,
 static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& handled) {
     handled=false;
     dbms::SQLParser parser;auto parsed=parser.parseForBinding(rawSql);
-    if(!parsed.isValid() && parsed.error=="WITH TIES cannot be specified without ORDER BY clause")
+    if(!parsed.isValid() && (parsed.error=="WITH TIES cannot be specified without ORDER BY clause" ||
+        parsed.error=="WITH TIES requires FETCH, not LIMIT"))
         throw dbms::DbError("42601",parsed.error);
     auto* select=parsed.isValid()?dynamic_cast<dbms::SelectStmt*>(parsed.stmt.get()):nullptr;
     if(!select)return false;
