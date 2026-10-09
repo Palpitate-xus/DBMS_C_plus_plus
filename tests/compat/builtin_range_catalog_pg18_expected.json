@@ -1,0 +1,2364 @@
+[
+  {
+    "sql": "SELECT oid, typname, typlen, typtype, typcategory, typelem, typarray, typalign, typstorage, typbyval FROM pg_catalog.pg_type WHERE typname IN ('int4range','int8range','numrange','daterange','tsrange','tstzrange','_int4range','_int8range','_numrange','_daterange','_tsrange','_tstzrange') ORDER BY oid",
+    "reference": [
+      [
+        [
+          "3904",
+          "int4range",
+          "-1",
+          "r",
+          "R",
+          "0",
+          "3905",
+          "i",
+          "x",
+          "f"
+        ],
+        [
+          "3905",
+          "_int4range",
+          "-1",
+          "b",
+          "A",
+          "3904",
+          "0",
+          "i",
+          "x",
+          "f"
+        ],
+        [
+          "3906",
+          "numrange",
+          "-1",
+          "r",
+          "R",
+          "0",
+          "3907",
+          "i",
+          "x",
+          "f"
+        ],
+        [
+          "3907",
+          "_numrange",
+          "-1",
+          "b",
+          "A",
+          "3906",
+          "0",
+          "i",
+          "x",
+          "f"
+        ],
+        [
+          "3908",
+          "tsrange",
+          "-1",
+          "r",
+          "R",
+          "0",
+          "3909",
+          "d",
+          "x",
+          "f"
+        ],
+        [
+          "3909",
+          "_tsrange",
+          "-1",
+          "b",
+          "A",
+          "3908",
+          "0",
+          "d",
+          "x",
+          "f"
+        ],
+        [
+          "3910",
+          "tstzrange",
+          "-1",
+          "r",
+          "R",
+          "0",
+          "3911",
+          "d",
+          "x",
+          "f"
+        ],
+        [
+          "3911",
+          "_tstzrange",
+          "-1",
+          "b",
+          "A",
+          "3910",
+          "0",
+          "d",
+          "x",
+          "f"
+        ],
+        [
+          "3912",
+          "daterange",
+          "-1",
+          "r",
+          "R",
+          "0",
+          "3913",
+          "i",
+          "x",
+          "f"
+        ],
+        [
+          "3913",
+          "_daterange",
+          "-1",
+          "b",
+          "A",
+          "3912",
+          "0",
+          "i",
+          "x",
+          "f"
+        ],
+        [
+          "3926",
+          "int8range",
+          "-1",
+          "r",
+          "R",
+          "0",
+          "3927",
+          "d",
+          "x",
+          "f"
+        ],
+        [
+          "3927",
+          "_int8range",
+          "-1",
+          "b",
+          "A",
+          "3926",
+          "0",
+          "d",
+          "x",
+          "f"
+        ]
+      ],
+      null,
+      "",
+      [
+        "oid",
+        "typname",
+        "typlen",
+        "typtype",
+        "typcategory",
+        "typelem",
+        "typarray",
+        "typalign",
+        "typstorage",
+        "typbyval"
+      ],
+      "SELECT 12",
+      [
+        26,
+        19,
+        21,
+        18,
+        18,
+        26,
+        26,
+        18,
+        18,
+        16
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('[1,5)' AS int4range) AS value",
+    "reference": [
+      [
+        [
+          "[1,5)"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3904
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS int4range) AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3904
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS int4range[]) AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3905
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('{\"[1,5)\"}' AS int4range[]) AS value",
+    "reference": [
+      [
+        [
+          "{\"[1,5)\"}"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3905
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('[1,5)' AS \"int4range\") AS value",
+    "reference": [
+      [
+        [
+          "[1,5)"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3904
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS \"int4range\") AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3904
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS \"int4range\"[]) AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3905
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('{\"[1,5)\"}' AS \"int4range\"[]) AS value",
+    "reference": [
+      [
+        [
+          "{\"[1,5)\"}"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3905
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('[1,5)' AS pg_catalog.int4range) AS value",
+    "reference": [
+      [
+        [
+          "[1,5)"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3904
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS pg_catalog.int4range) AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3904
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS pg_catalog.int4range[]) AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3905
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('{\"[1,5)\"}' AS pg_catalog.int4range[]) AS value",
+    "reference": [
+      [
+        [
+          "{\"[1,5)\"}"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3905
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('[1,5)' AS pg_catalog.\"int4range\") AS value",
+    "reference": [
+      [
+        [
+          "[1,5)"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3904
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS pg_catalog.\"int4range\") AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3904
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS pg_catalog.\"int4range\"[]) AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3905
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('{\"[1,5)\"}' AS pg_catalog.\"int4range\"[]) AS value",
+    "reference": [
+      [
+        [
+          "{\"[1,5)\"}"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3905
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT lower(CAST('[1,5)' AS int4range)) AS value",
+    "reference": [
+      [
+        [
+          "1"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        23
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT upper(CAST('[1,5)' AS int4range)) AS value",
+    "reference": [
+      [
+        [
+          "5"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        23
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS int4range(2)) AS value",
+    "reference": [
+      [],
+      "42601",
+      "type modifier is not allowed for type \"int4range\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS \"INT4RANGE\") AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"INT4RANGE\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST('[1,5)' AS int8range) AS value",
+    "reference": [
+      [
+        [
+          "[1,5)"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3926
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS int8range) AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3926
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS int8range[]) AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3927
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('{\"[1,5)\"}' AS int8range[]) AS value",
+    "reference": [
+      [
+        [
+          "{\"[1,5)\"}"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3927
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('[1,5)' AS \"int8range\") AS value",
+    "reference": [
+      [
+        [
+          "[1,5)"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3926
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS \"int8range\") AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3926
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS \"int8range\"[]) AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3927
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('{\"[1,5)\"}' AS \"int8range\"[]) AS value",
+    "reference": [
+      [
+        [
+          "{\"[1,5)\"}"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3927
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('[1,5)' AS pg_catalog.int8range) AS value",
+    "reference": [
+      [
+        [
+          "[1,5)"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3926
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS pg_catalog.int8range) AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3926
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS pg_catalog.int8range[]) AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3927
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('{\"[1,5)\"}' AS pg_catalog.int8range[]) AS value",
+    "reference": [
+      [
+        [
+          "{\"[1,5)\"}"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3927
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('[1,5)' AS pg_catalog.\"int8range\") AS value",
+    "reference": [
+      [
+        [
+          "[1,5)"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3926
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS pg_catalog.\"int8range\") AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3926
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS pg_catalog.\"int8range\"[]) AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3927
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('{\"[1,5)\"}' AS pg_catalog.\"int8range\"[]) AS value",
+    "reference": [
+      [
+        [
+          "{\"[1,5)\"}"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3927
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT lower(CAST('[1,5)' AS int8range)) AS value",
+    "reference": [
+      [
+        [
+          "1"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        20
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT upper(CAST('[1,5)' AS int8range)) AS value",
+    "reference": [
+      [
+        [
+          "5"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        20
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS int8range(2)) AS value",
+    "reference": [
+      [],
+      "42601",
+      "type modifier is not allowed for type \"int8range\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS \"INT8RANGE\") AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"INT8RANGE\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST('[1.25,5.5)' AS numrange) AS value",
+    "reference": [
+      [
+        [
+          "[1.25,5.5)"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3906
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS numrange) AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3906
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS numrange[]) AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3907
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('{\"[1.25,5.5)\"}' AS numrange[]) AS value",
+    "reference": [
+      [
+        [
+          "{\"[1.25,5.5)\"}"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3907
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('[1.25,5.5)' AS \"numrange\") AS value",
+    "reference": [
+      [
+        [
+          "[1.25,5.5)"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3906
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS \"numrange\") AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3906
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS \"numrange\"[]) AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3907
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('{\"[1.25,5.5)\"}' AS \"numrange\"[]) AS value",
+    "reference": [
+      [
+        [
+          "{\"[1.25,5.5)\"}"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3907
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('[1.25,5.5)' AS pg_catalog.numrange) AS value",
+    "reference": [
+      [
+        [
+          "[1.25,5.5)"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3906
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS pg_catalog.numrange) AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3906
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS pg_catalog.numrange[]) AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3907
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('{\"[1.25,5.5)\"}' AS pg_catalog.numrange[]) AS value",
+    "reference": [
+      [
+        [
+          "{\"[1.25,5.5)\"}"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3907
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('[1.25,5.5)' AS pg_catalog.\"numrange\") AS value",
+    "reference": [
+      [
+        [
+          "[1.25,5.5)"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3906
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS pg_catalog.\"numrange\") AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3906
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS pg_catalog.\"numrange\"[]) AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3907
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('{\"[1.25,5.5)\"}' AS pg_catalog.\"numrange\"[]) AS value",
+    "reference": [
+      [
+        [
+          "{\"[1.25,5.5)\"}"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3907
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT lower(CAST('[1.25,5.5)' AS numrange)) AS value",
+    "reference": [
+      [
+        [
+          "1.25"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1700
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT upper(CAST('[1.25,5.5)' AS numrange)) AS value",
+    "reference": [
+      [
+        [
+          "5.5"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1700
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS numrange(2)) AS value",
+    "reference": [
+      [],
+      "42601",
+      "type modifier is not allowed for type \"numrange\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS \"NUMRANGE\") AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"NUMRANGE\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST('[2026-01-01,2026-01-05)' AS daterange) AS value",
+    "reference": [
+      [
+        [
+          "[2026-01-01,2026-01-05)"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3912
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS daterange) AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3912
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS daterange[]) AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3913
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('{\"[2026-01-01,2026-01-05)\"}' AS daterange[]) AS value",
+    "reference": [
+      [
+        [
+          "{\"[2026-01-01,2026-01-05)\"}"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3913
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('[2026-01-01,2026-01-05)' AS \"daterange\") AS value",
+    "reference": [
+      [
+        [
+          "[2026-01-01,2026-01-05)"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3912
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS \"daterange\") AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3912
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS \"daterange\"[]) AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3913
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('{\"[2026-01-01,2026-01-05)\"}' AS \"daterange\"[]) AS value",
+    "reference": [
+      [
+        [
+          "{\"[2026-01-01,2026-01-05)\"}"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3913
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('[2026-01-01,2026-01-05)' AS pg_catalog.daterange) AS value",
+    "reference": [
+      [
+        [
+          "[2026-01-01,2026-01-05)"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3912
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS pg_catalog.daterange) AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3912
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS pg_catalog.daterange[]) AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3913
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('{\"[2026-01-01,2026-01-05)\"}' AS pg_catalog.daterange[]) AS value",
+    "reference": [
+      [
+        [
+          "{\"[2026-01-01,2026-01-05)\"}"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3913
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('[2026-01-01,2026-01-05)' AS pg_catalog.\"daterange\") AS value",
+    "reference": [
+      [
+        [
+          "[2026-01-01,2026-01-05)"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3912
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS pg_catalog.\"daterange\") AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3912
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS pg_catalog.\"daterange\"[]) AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3913
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('{\"[2026-01-01,2026-01-05)\"}' AS pg_catalog.\"daterange\"[]) AS value",
+    "reference": [
+      [
+        [
+          "{\"[2026-01-01,2026-01-05)\"}"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3913
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT lower(CAST('[2026-01-01,2026-01-05)' AS daterange)) AS value",
+    "reference": [
+      [
+        [
+          "2026-01-01"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1082
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT upper(CAST('[2026-01-01,2026-01-05)' AS daterange)) AS value",
+    "reference": [
+      [
+        [
+          "2026-01-05"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1082
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS daterange(2)) AS value",
+    "reference": [
+      [],
+      "42601",
+      "type modifier is not allowed for type \"daterange\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS \"DATERANGE\") AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"DATERANGE\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST('[2026-01-01 01:02:03,2026-01-05 04:05:06)' AS tsrange) AS value",
+    "reference": [
+      [
+        [
+          "[\"2026-01-01 01:02:03\",\"2026-01-05 04:05:06\")"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3908
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS tsrange) AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3908
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS tsrange[]) AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3909
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('{\"[2026-01-01 01:02:03,2026-01-05 04:05:06)\"}' AS tsrange[]) AS value",
+    "reference": [
+      [
+        [
+          "{\"[\\\"2026-01-01 01:02:03\\\",\\\"2026-01-05 04:05:06\\\")\"}"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3909
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('[2026-01-01 01:02:03,2026-01-05 04:05:06)' AS \"tsrange\") AS value",
+    "reference": [
+      [
+        [
+          "[\"2026-01-01 01:02:03\",\"2026-01-05 04:05:06\")"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3908
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS \"tsrange\") AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3908
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS \"tsrange\"[]) AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3909
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('{\"[2026-01-01 01:02:03,2026-01-05 04:05:06)\"}' AS \"tsrange\"[]) AS value",
+    "reference": [
+      [
+        [
+          "{\"[\\\"2026-01-01 01:02:03\\\",\\\"2026-01-05 04:05:06\\\")\"}"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3909
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('[2026-01-01 01:02:03,2026-01-05 04:05:06)' AS pg_catalog.tsrange) AS value",
+    "reference": [
+      [
+        [
+          "[\"2026-01-01 01:02:03\",\"2026-01-05 04:05:06\")"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3908
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS pg_catalog.tsrange) AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3908
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS pg_catalog.tsrange[]) AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3909
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('{\"[2026-01-01 01:02:03,2026-01-05 04:05:06)\"}' AS pg_catalog.tsrange[]) AS value",
+    "reference": [
+      [
+        [
+          "{\"[\\\"2026-01-01 01:02:03\\\",\\\"2026-01-05 04:05:06\\\")\"}"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3909
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('[2026-01-01 01:02:03,2026-01-05 04:05:06)' AS pg_catalog.\"tsrange\") AS value",
+    "reference": [
+      [
+        [
+          "[\"2026-01-01 01:02:03\",\"2026-01-05 04:05:06\")"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3908
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS pg_catalog.\"tsrange\") AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3908
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS pg_catalog.\"tsrange\"[]) AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3909
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('{\"[2026-01-01 01:02:03,2026-01-05 04:05:06)\"}' AS pg_catalog.\"tsrange\"[]) AS value",
+    "reference": [
+      [
+        [
+          "{\"[\\\"2026-01-01 01:02:03\\\",\\\"2026-01-05 04:05:06\\\")\"}"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3909
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT lower(CAST('[2026-01-01 01:02:03,2026-01-05 04:05:06)' AS tsrange)) AS value",
+    "reference": [
+      [
+        [
+          "2026-01-01 01:02:03"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1114
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT upper(CAST('[2026-01-01 01:02:03,2026-01-05 04:05:06)' AS tsrange)) AS value",
+    "reference": [
+      [
+        [
+          "2026-01-05 04:05:06"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1114
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS tsrange(2)) AS value",
+    "reference": [
+      [],
+      "42601",
+      "type modifier is not allowed for type \"tsrange\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS \"TSRANGE\") AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"TSRANGE\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST('[2026-01-01 01:02:03+00,2026-01-05 04:05:06+00)' AS tstzrange) AS value",
+    "reference": [
+      [
+        [
+          "[\"2026-01-01 01:02:03+00\",\"2026-01-05 04:05:06+00\")"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3910
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS tstzrange) AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3910
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS tstzrange[]) AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3911
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('{\"[2026-01-01 01:02:03+00,2026-01-05 04:05:06+00)\"}' AS tstzrange[]) AS value",
+    "reference": [
+      [
+        [
+          "{\"[\\\"2026-01-01 01:02:03+00\\\",\\\"2026-01-05 04:05:06+00\\\")\"}"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3911
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('[2026-01-01 01:02:03+00,2026-01-05 04:05:06+00)' AS \"tstzrange\") AS value",
+    "reference": [
+      [
+        [
+          "[\"2026-01-01 01:02:03+00\",\"2026-01-05 04:05:06+00\")"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3910
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS \"tstzrange\") AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3910
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS \"tstzrange\"[]) AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3911
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('{\"[2026-01-01 01:02:03+00,2026-01-05 04:05:06+00)\"}' AS \"tstzrange\"[]) AS value",
+    "reference": [
+      [
+        [
+          "{\"[\\\"2026-01-01 01:02:03+00\\\",\\\"2026-01-05 04:05:06+00\\\")\"}"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3911
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('[2026-01-01 01:02:03+00,2026-01-05 04:05:06+00)' AS pg_catalog.tstzrange) AS value",
+    "reference": [
+      [
+        [
+          "[\"2026-01-01 01:02:03+00\",\"2026-01-05 04:05:06+00\")"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3910
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS pg_catalog.tstzrange) AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3910
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS pg_catalog.tstzrange[]) AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3911
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('{\"[2026-01-01 01:02:03+00,2026-01-05 04:05:06+00)\"}' AS pg_catalog.tstzrange[]) AS value",
+    "reference": [
+      [
+        [
+          "{\"[\\\"2026-01-01 01:02:03+00\\\",\\\"2026-01-05 04:05:06+00\\\")\"}"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3911
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('[2026-01-01 01:02:03+00,2026-01-05 04:05:06+00)' AS pg_catalog.\"tstzrange\") AS value",
+    "reference": [
+      [
+        [
+          "[\"2026-01-01 01:02:03+00\",\"2026-01-05 04:05:06+00\")"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3910
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS pg_catalog.\"tstzrange\") AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3910
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS pg_catalog.\"tstzrange\"[]) AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3911
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('{\"[2026-01-01 01:02:03+00,2026-01-05 04:05:06+00)\"}' AS pg_catalog.\"tstzrange\"[]) AS value",
+    "reference": [
+      [
+        [
+          "{\"[\\\"2026-01-01 01:02:03+00\\\",\\\"2026-01-05 04:05:06+00\\\")\"}"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        3911
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT lower(CAST('[2026-01-01 01:02:03+00,2026-01-05 04:05:06+00)' AS tstzrange)) AS value",
+    "reference": [
+      [
+        [
+          "2026-01-01 01:02:03+00"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1184
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT upper(CAST('[2026-01-01 01:02:03+00,2026-01-05 04:05:06+00)' AS tstzrange)) AS value",
+    "reference": [
+      [
+        [
+          "2026-01-05 04:05:06+00"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1184
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS tstzrange(2)) AS value",
+    "reference": [
+      [],
+      "42601",
+      "type modifier is not allowed for type \"tstzrange\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS \"TSTZRANGE\") AS value",
+    "reference": [
+      [],
+      "42704",
+      "type \"TSTZRANGE\" does not exist",
+      [],
+      null,
+      []
+    ]
+  }
+]

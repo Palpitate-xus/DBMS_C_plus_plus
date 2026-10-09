@@ -1674,6 +1674,14 @@ const std::vector<PgTypeRow>& CatalogManager::builtinTypeRows() {
     ensureType(2950,  "uuid",       16,   'b', 'U');
     ensureType(2951,  "_uuid",      -1,   'b', 'A');
     ensureType(3802,  "jsonb",      -1,   'b', 'U');
+    // Existing range codecs must have real physical catalog identities too.
+    // Scalar/array OIDs and alignment follow PostgreSQL's pg_type bootstrap.
+    ensureType(3904,  "int4range",  -1,   'r', 'R');
+    ensureType(3906,  "numrange",   -1,   'r', 'R');
+    ensureType(3908,  "tsrange",    -1,   'r', 'R');
+    ensureType(3910,  "tstzrange",  -1,   'r', 'R');
+    ensureType(3912,  "daterange",  -1,   'r', 'R');
+    ensureType(3926,  "int8range",  -1,   'r', 'R');
     // Genuine builtin array rows and reciprocal element links. Existing
     // installations can lack rows or retain old zero element/backlink fields.
     struct BuiltinArray {Oid oid;const char* name;Oid element;};
@@ -1715,6 +1723,12 @@ const std::vector<PgTypeRow>& CatalogManager::builtinTypeRows() {
         {199,"_json",114},
         {3807,"_jsonb",3802},
         {143,"_xml",142},
+        {3905,"_int4range",3904},
+        {3907,"_numrange",3906},
+        {3909,"_tsrange",3908},
+        {3911,"_tstzrange",3910},
+        {3913,"_daterange",3912},
+        {3927,"_int8range",3926},
     };
     for(const auto& array:arrays)ensureType(array.oid,array.name,-1,'b','A',array.element);
     for(const auto& array:arrays) {
@@ -1724,6 +1738,13 @@ const std::vector<PgTypeRow>& CatalogManager::builtinTypeRows() {
            element.typnamespace==11 && element.typname==std::string(array.name+1)) {
             row.typelem=array.element;
             element.typarray=array.oid;
+            if(element.typtype=='r') {
+                element.typalign=(element.oid==3908 || element.oid==3910 ||
+                                  element.oid==3926)?'d':'i';
+                element.typstorage='x';
+                row.typalign=element.typalign;
+                row.typstorage='x';
+            }
         }
     }
     return types;
