@@ -15,7 +15,9 @@
 4. 普通同名关系DML已独立private commit `34d5d956`，完整27native/18wire原样
    复跑终0、首组失败保留，待18383终态后合入并做Root自身验证。SQL-value
    范围内修复已private commit `217bdcb9`，校正33native全0、19/21wire通过，
-   NAME原失败和default超时保留，不冒整轮绿。正在独立修普通SQL routine错误arity；
+   NAME原失败和default超时保留，不冒整轮绿。普通SQL routine错误arity已private
+   commit `94eea9bf`：50强控和33native全0、21/23wire通过，原NAME/TEMP超时保留；
+   独立public-parser API候选旧134已复现，own parser编译0，新扩展回归已启动；
    native decimal API，再继续总清单所有原未闭环要求；每项独立 commit。
 5. 原273范围/状态不变22complete166partial70unverified15deferred；不push、
    不启用Actions、不重启跳过专项、不以 scoped 通过宣布原整个 family 完成。

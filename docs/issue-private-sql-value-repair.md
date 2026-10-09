@@ -49,7 +49,26 @@ and falsely supplies a TEXT descriptor at Parse/Describe. The new strict fixture
 has50 controls: actual reference all0, preceding frozen baseline19 failures.
 Same-statement volatile writes stay unexecuted on invalid signatures. Main and
 Network Parse admission are being repaired using metadata-only lookup followed
-by whole-query binding; their own CPP builds and new validation are pending.
+by whole-query binding. Own Main72710/Network30165 compiles exit0. Expanded
+85145 is terminal1:33native all0 and21/23wire pass; strict arity50 and original
+function_result with exact42883 assertion pass. All58 current own receipts/cache/
+repeat/source/frozen terminal checks pass. Original BIT384/19117=0 against180006.
+Five original NAME controls and default TEMP CTAS socket timeout remain failed,
+not weakened or reopened as filtered investigations. This scoped ordinary repair
+is independently committed as94eea9bf, still not imported into master.
+
+Private committed repair count is now189, not Root186. Original273 statuses and
+family completion claims do not change. Frozen arity SHA256:
+91a620d82c3774c39520d46f58e5ac14bd1918d726bf3134260aef1901d205fc.
+Source seal:3142a185e39d4bf8ee58fa7bd632c93c7f41886b1d15bdee27deb7cfd54c18af.
+Full expanded log:stored-arity-initial-gates.log.
+
+Next separate public-parser API defect is reproduced: invalid SQL-value forms
+throw42601 instead of returning the statement-owned failure result. Existing31
+native checks plus18 strict public parse/parseForBinding checks abort134 on the
+preceding own parser (27197). Local grammar catch now uses the existing syntax
+error owner; own affected parser20525 compile exits0. New33native/23wire matrix
+has started, not approved or committed yet. Root full18383 remains unchanged.
 
 Original273 items/hash/statuses remain22complete/166partial/70unverified/
 15deferred_by_user. No push, Actions activation or filtered restart.
