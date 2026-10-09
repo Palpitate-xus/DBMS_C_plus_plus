@@ -563,6 +563,19 @@ complete type catalog fields, binary/storage/callback/alias IO, broader
 operators and all other families remain open. No push, Actions activation,
 filtered-branch restart, sanitizer/TLS or whole-family approval.
 
+The next actual owned PG18.6 eight-query probe has six genuine remaining
+failures: regtype(3), qualified pg_catalog.regtype(3), regproc(3), regclass(3),
+regrole(3) and regnamespace(3) must reject42601 even for NULL/WHERE false, but
+the final candidate accepts them. Both valid unmodified-type controls match.
+Exact records are retained as typmods8-reference.jsonl and
+typmods8-candidate.jsonl beside probe-reference-typmods.py. Do not treat the
+cast-graph fix as modifier validation: resolveDeclaredTypeName currently
+checks forbidden modifiers only when a TypeRegistry entry exists. Actual
+owned modifier eligibility/metadata, not execution of fabricated inputs, is
+the next repair. Root full21540 has entered protocol fixtures and the original
+default protocol fails its obsolete unsupported-pg_type expectation; its
+failure remains unchanged, not a complete protocol PASS.
+
 ## Historical held follow-up: real type catalog sources, sorting and identity metadata
 
 The preceding private range composition has now actually finished:80native
