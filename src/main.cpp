@@ -20527,7 +20527,7 @@ public:
             return result;
         });
     }
-    dbms::DmlResult runRead() {
+    dbms::DmlResult runRead(size_t receiverRows = 0) {
         if(!readRoot_)throw dbms::DbError("XX000","read runtime requires a genuine SELECT/VALUES");
         Frames frames{definitions(readRoot_->ctes,validation_.context())};
         bool hasWriter=false;
@@ -20542,7 +20542,8 @@ public:
         // through validate(). Do not install the root definitions twice.
         auto plan=selectPlan(readRoot_,validation_.context(),frames,true,true);
         const auto command=[&] {
-            auto evaluated=dbms::QueryPlanner::executePlanChecked(std::move(plan),currentQueryRowDemand());
+            auto evaluated=dbms::QueryPlanner::executePlanChecked(std::move(plan),
+                receiverRows ? receiverRows : currentQueryRowDemand());
             evaluated.throwIfFailed();
             if(!evaluated.structuredRowsAvailable)throw dbms::DbError("XX000","prepared CASE query lost typed rows");
             dbms::DmlResult result;result.available=true;
@@ -38152,6 +38153,26 @@ int main(int argc, char* argv[]) {
         // Unsupported graph admission is pure, before any source/effect opens.
         if (options.preparedQuery) {
             const auto* child = dynamic_cast<const dbms::SelectStmt*>(options.preparedStatement);
+            if (child && options.purpose == dbms::PlPgsqlQueryOptions::Purpose::StoredFunction &&
+                options.preparedStatement == options.preparedQuery->ast.get()) {
+                QueryCteScope functionNamespace(*activeSession, false);
+                PreparedWithDmlRuntime runtime(*activeSession, options.preparedQuery);
+                const auto executed = runtime.runRead(options.maxRows);
+                result.columnCount = executed.columns.size();
+                result.columnTypes = executed.columnTypes;
+                result.rowCount = executed.rows.size();
+                if (!executed.rows.empty()) {
+                    if (executed.nulls.size() != executed.rows.size() ||
+                        executed.rows.front().size() != result.columnCount ||
+                        executed.nulls.front().size() != result.columnCount)
+                        throw dbms::DbError("XX000", "SQL-function query lost structured width");
+                    for (size_t i = 0; i < result.columnCount; ++i)
+                        result.firstRow.push_back(executed.nulls.front()[i]
+                            ? std::nullopt : std::optional<string>{executed.rows.front()[i]});
+                }
+                result.ok = true;
+                return result;
+            }
             if (child && !child->fromClause && dbms::QueryPlanner::supportsPreparedSelectPlan(*child)) {
                 dbms::OpPtr typedPlan;
                 try {

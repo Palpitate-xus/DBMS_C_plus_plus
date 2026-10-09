@@ -29,6 +29,9 @@ struct QueryBindingDatum {
     // Existing public datum initializers describe statement-owned frozen
     // inputs. Synthetic runtime/metadata producers override this explicitly.
     ParameterOrigin origin = ParameterOrigin::StatementInput;
+    // SQL-function argument names yield to a matching SQL range column;
+    // PL/pgSQL locals retain the existing ambiguity check by default.
+    bool columnPrecedence = false;
 };
 struct QueryEnumType {
     std::string identity, typeName;
@@ -61,6 +64,11 @@ struct QueryBindingMetadata {
     // Resolve a grammar type declaration against the same copied catalog as
     // relation/operator metadata. This must not evaluate input or a routine.
     std::function<QueryOutputColumn(const std::string&)> declaredType;
+    // An explicit query-output receiver (e.g. an SQL function body) resolves
+    // remaining UNKNOWN outputs to real TEXT declarations after binding.
+    // Appended to preserve positional aggregate initialization of callbacks.
+    // INSERT SELECT assignment contexts do not opt into this boundary.
+    bool finalizeUnknownOutput = false;
 };
 struct PreparedQuery {
     struct Use { size_t begin, end, slot; };

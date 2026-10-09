@@ -445,7 +445,8 @@ public:
     // This never executes SQL, changes command IDs, or refreshes ReadView.
     PreparedQuery prepareBoundQuery(const std::string& dbname,
         const std::string& sql,
-        const std::vector<QueryBindingDatum>& bindings = {}) const;
+        const std::vector<QueryBindingDatum>& bindings = {},
+        bool finalizeUnknownOutput = false) const;
     // Pure provider ownership probe. It resolves routine identity only;
     // argument binding/errors remain at the whole-query analysis boundary.
     bool ownsPreparedSetReturningCall(const std::string& dbname,

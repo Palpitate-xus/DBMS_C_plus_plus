@@ -32881,12 +32881,14 @@ bool StorageEngine::ownsPreparedSetReturningCall(const std::string& dbname,
 }
 
 PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
-    const std::string& sql, const std::vector<QueryBindingDatum>& bindings) const {
+    const std::string& sql, const std::vector<QueryBindingDatum>& bindings,
+    bool finalizeUnknownOutput) const {
         // Catalog rows are copied under one lock; schema/view loads only read.
         // The lock is released on return, before any prepared AST executes.
         std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
         std::optional<CatalogManager::MetadataSnapshot> catalogSnapshot;
         QueryBindingMetadata metadata;
+        metadata.finalizeUnknownOutput = finalizeUnknownOutput;
         const auto viewSource = [&](const std::string& name) {
             auto view = getViewSQL(dbname, name);
             if (view.empty()) return view;
@@ -33643,7 +33645,8 @@ static bool evalUDFBody(const StorageEngine::UDFInfo& udf,
     if (returnIsNull) *returnIsNull = false;
     std::vector<std::string> funcArgs = argValues;
     size_t expectedArgs = udf.paramNames.size();
-    if (expectedArgs == 1 && udf.paramNames.front().empty()) expectedArgs = 0;
+    if (expectedArgs == 1 && udf.paramNames.front().empty() &&
+        (udf.paramTypes.empty() || udf.paramTypes.front().empty())) expectedArgs = 0;
     if (funcArgs.size() != expectedArgs) return false;
     if (udf.strict && argNulls &&
         std::any_of(argNulls->begin(), argNulls->end(), [](bool value) {
@@ -33768,75 +33771,40 @@ static bool evalUDFBody(const StorageEngine::UDFInfo& udf,
         return coerceReturn(rv, plpgsqlIsNull, plpgsqlReturnType);
     }
 
-    // SQL scalar functions in this engine are deliberately limited to one
-    // FROM-less SELECT expression (the historic bare-expression form remains
-    // accepted).  Bind parameters as typed row values instead of textual
-    // replacement, which used to rewrite identifiers and quoted literals.
-    std::string expression = trim(udf.expression);
-    std::string lowerExpression;
-    lowerExpression.reserve(expression.size());
-    for (char ch : expression) {
-        lowerExpression += static_cast<char>(
-            std::tolower(static_cast<unsigned char>(ch)));
-    }
-    if (lowerExpression.rfind("select", 0) == 0 &&
-        (expression.size() == 6 ||
-         std::isspace(static_cast<unsigned char>(expression[6])))) {
-        expression = trim(expression.substr(6));
-    }
-    if (!expression.empty() && expression.back() == ';') {
-        expression.pop_back();
-        expression = trim(expression);
-    }
-    if (expression.empty()) return false;
-    {
-        const auto tokens = SQLParser::tokenize(expression);
-        int depth = 0;
-        static const std::set<std::string> queryClauses = {
-            "from", "where", "group", "having", "window", "order",
-            "limit", "offset", "fetch", "for", "union", "intersect",
-            "except"
-        };
-        for (const auto& token : tokens) {
-            if (token == "(") { ++depth; continue; }
-            if (token == ")") { --depth; continue; }
-            if (depth != 0) continue;
-            const std::string lowerToken = SQLParser::toLower(token);
-            if (token == "," || token == ";" ||
-                queryClauses.count(lowerToken) != 0) {
-                return false;
-            }
-        }
-        if (depth != 0) return false;
-    }
-
-    std::map<std::string, std::string> params;
-    std::map<std::string, std::string> typeHints;
-    std::set<std::string> nullParams;
+    // A SQL query body is a whole statement, not a scalar-expression suffix.
+    // Keep the historical bare-expression form by giving it one SELECT
+    // envelope, but never strip clauses, substitute text or borrow caller CTEs.
+    std::string sql = trim(udf.expression);
+    if (sql.empty()) return false;
+    const auto command = SQLParser::classify(sql);
+    if (command != SqlCommand::Select && command != SqlCommand::Values)
+        sql = "SELECT " + sql;
+    std::vector<QueryBindingDatum> parameters;
     for (size_t i = 0; i < udf.paramNames.size() && i < funcArgs.size(); ++i) {
         const std::string& name = udf.paramNames[i];
-        params[name] = funcArgs[i];
-        if (i < udf.paramTypes.size() && !udf.paramTypes[i].empty()) {
-            std::string type = TypeRegistry::instance().normalizeTypeName(
-                udf.paramTypes[i]);
-            typeHints[name] = type.empty() ? udf.paramTypes[i] : type;
-        }
-        if (argNulls && i < argNulls->size() && (*argNulls)[i]) {
-            nullParams.insert(name);
-        }
+        if (i >= udf.paramTypes.size() || udf.paramTypes[i].empty())
+            throw DbError("XX000", "SQL-function parameter has no declared type");
+        const bool null = argNulls && i < argNulls->size() && (*argNulls)[i];
+        parameters.push_back({"sql-function:" + std::to_string(i), name,
+            udf.paramTypes[i], {udf.name}, !name.empty(),
+            null ? std::nullopt : std::optional<std::string>{funcArgs[i]},
+            i + 1, ParameterOrigin::RuntimeCell, true});
     }
-    // SQL functions retain their own parameter namespace (no implicit
-    // PL/pgSQL FOUND) and the existing FROM-less scalar shape. Bind actual
-    // AST references through the quoted positional helper. Stored-call
-    // callbacks use the same function entry/transaction owner as ordinary
-    // SQL; no SQL text substitution or second query dispatcher is needed.
-    const Session* session = currentSession();
-    const auto evaluated = plpgsqlEvalBoundExpression(expression, params,
-        nullParams, typeHints, dbname, session ? session->username : std::string{}, engine);
+    auto prepared = std::make_shared<PreparedQuery>(engine->prepareBoundQuery(dbname, sql, parameters, true));
+    if (prepared->output.size() != 1)
+        throw DbError("42601", "SQL scalar function must return one column");
+    PlPgsqlQueryOptions options;
+    options.maxRows = 1; // SQL scalar functions return the first row, not scalar-subquery cardinality.
+    options.purpose = PlPgsqlQueryOptions::Purpose::StoredFunction;
+    options.preparedQuery = prepared;
+    options.preparedStatement = prepared->ast.get();
+    const auto evaluated = engine->plpgsqlQuery(dbname, sql, options);
     if (!evaluated.ok)
         throw DbError(evaluated.sqlState.empty() ? "XX000" : evaluated.sqlState, evaluated.message);
-    if (evaluated.rowCount != 1 || evaluated.columnCount != 1 || evaluated.firstRow.size() != 1)
+    if (evaluated.columnCount != 1 || evaluated.rowCount > 1 ||
+        (evaluated.rowCount && evaluated.firstRow.size() != 1))
         throw DbError("XX000", "SQL-function scalar host returned an invalid result shape");
+    if (!evaluated.rowCount) return coerceReturn("", true, udf.returnType);
     return coerceReturn(evaluated.firstRow.front().value_or(""),
         !evaluated.firstRow.front(), evaluated.columnTypes.empty() ? "text" : evaluated.columnTypes.front());
     };

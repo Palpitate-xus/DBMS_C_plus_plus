@@ -4986,7 +4986,8 @@ ResolvedScalarFunction resolveScalarFunction(
         auto routine=engine->getUDF(database,result.name,candidateSchema);
         if (!routine.expression.empty()) {
             size_t arity = routine.paramNames.size();
-            if (arity == 1 && routine.paramNames.front().empty()) arity = 0;
+            if (arity == 1 && routine.paramNames.front().empty() &&
+                (routine.paramTypes.empty() || routine.paramTypes.front().empty())) arity = 0;
             if (call->namedArgs.empty() && call->args.size() == arity) {
                 // The registered array SRF has a polymorphic candidate.
                 // An actual typed scalar overload is a better exact match

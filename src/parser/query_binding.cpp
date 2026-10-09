@@ -357,7 +357,7 @@ public:
                 }
                 if (matches || rangeFound) break; // nearest SQL level wins
             }
-            if (matches > 1 || (matches && datum))
+            if (matches > 1 || (matches && datum && !datum->columnPrecedence))
                 throw DbError("42702", "column reference \"" + column->toString() + "\" is ambiguous");
             if (matches) {
                 column->binding = std::move(resolved);
@@ -1621,6 +1621,18 @@ PreparedQuery prepareQuery(const std::string& sql, const std::vector<QueryBindin
     SQLParser parser; auto parsed = parser.parseForBinding(sql);
     if (!parsed.isValid()) throw DbError("42601", parsed.error);
     binder.result.output = binder.statement(*parsed.stmt, {}, {});
+    if (metadata.finalizeUnknownOutput && parsed.stmt->command == SqlCommand::Select) {
+        const auto* select = dynamic_cast<const SelectStmt*>(parsed.stmt.get());
+        for (size_t i = 0; i < binder.result.output.size(); ++i) {
+            auto& output = binder.result.output[i];
+            if (output.type != "unknown") continue;
+            binder.coerceSetUnknown(parsed.stmt.get(), i, "text");
+            const auto* value = binder.result.projectionBindings.at(select).at(i).expression;
+            output.type = binder.declaredType("text", value);
+            output.typeOid = binder.expressionTypeOid(value);
+        }
+        binder.result.statementOutputs[parsed.stmt.get()] = binder.result.output;
+    }
     binder.result.ast = std::move(parsed.stmt);
     return std::move(binder.result);
 }
