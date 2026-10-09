@@ -37,6 +37,15 @@ inline DeclaredTypeBinding resolveDeclaredTypeName(const std::string& spelling,
         std::string result="\"";for(char c:name){result+=c;if(c=='\"')result+=c;}return result+'\"';
     };
     DeclaredTypeBinding result;
+    const PgTypeRow* modifierOwner=nullptr;
+    const auto ownModifiers=[&](const PgTypeRow& type,const std::vector<PgTypeRow>& types) {
+        modifierOwner=&type;
+        if(type.typcategory=='A' && type.typelem) {
+            const auto element=std::find_if(types.begin(),types.end(),[&](const PgTypeRow& row){return row.oid==type.typelem;});
+            if(element==types.end())throw DbError("42704","array element type does not exist");
+            modifierOwner=&*element;
+        }
+    };
     const auto builtinInput=[&](const PgTypeRow& type,const std::vector<PgTypeRow>& types) {
         const PgTypeRow* element=&type;
         if(type.typcategory=='A' && type.typelem) {
@@ -71,6 +80,7 @@ inline DeclaredTypeBinding resolveDeclaredTypeName(const std::string& spelling,
                 continue;
             }
             for(const auto& type:catalog->types)if(type.typnamespace==namespaceOid && type.typname==requested.name) {
+                ownModifiers(type,catalog->types);
                 result.typeOid=type.oid;
                 result.typeName=schema=="pg_catalog"
                     ?builtinInput(type,catalog->types)
@@ -95,6 +105,7 @@ inline DeclaredTypeBinding resolveDeclaredTypeName(const std::string& spelling,
             throw DbError("3F000","schema \""+requested.schema+"\" does not exist");
         const auto& types=CatalogManager::builtinTypeRows();
         for(const auto& type:types)if(type.typnamespace==11 && type.typname==requested.name) {
+            ownModifiers(type,types);
             result.typeName=builtinInput(type,types);
             result.typeOid=type.oid;
             if(declaration.isArray) {
@@ -106,8 +117,15 @@ inline DeclaredTypeBinding resolveDeclaredTypeName(const std::string& spelling,
     }
     if(!result.typeOid)throw DbError("42704","type \""+declaration.typeName+"\" does not exist");
     if(!declaration.typeMods.empty()) {
-        const auto* input=TypeRegistry::instance().findType(result.typeName);
-        if(input && !input->hasTypeMod)
+        auto inputName=result.typeName;
+        while(inputName.size()>=2 && inputName.compare(inputName.size()-2,2,"[]")==0)
+            inputName.resize(inputName.size()-2);
+        const auto* input=TypeRegistry::instance().findType(inputName);
+        // The actual scalar/element owns modifier input. Absence from the
+        // frontend codec registry must not grant arbitrary modifiers to
+        // genuine named reference types, domains or other catalog rows.
+        const bool accepts=input?input->hasTypeMod:modifierOwner && modifierOwner->typmodin!=INVALID_OID;
+        if(!accepts)
             throw DbError("42601","type modifier is not allowed for type "+declaration.typeName);
     }
     result.inputType=result.typeName;

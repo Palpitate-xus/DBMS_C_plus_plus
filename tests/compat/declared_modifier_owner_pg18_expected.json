@@ -1,0 +1,231 @@
+[
+  {
+    "sql": "SELECT CAST(NULL AS regtype(3)) AS value WHERE false",
+    "reference": [
+      [],
+      "42601",
+      "type modifier is not allowed for type \"regtype\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS pg_catalog.regtype(3)) AS value WHERE false",
+    "reference": [
+      [],
+      "42601",
+      "type modifier is not allowed for type \"pg_catalog.regtype\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS regproc(3)) AS value WHERE false",
+    "reference": [
+      [],
+      "42601",
+      "type modifier is not allowed for type \"regproc\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS regclass(3)) AS value WHERE false",
+    "reference": [
+      [],
+      "42601",
+      "type modifier is not allowed for type \"regclass\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS regrole(3)) AS value WHERE false",
+    "reference": [
+      [],
+      "42601",
+      "type modifier is not allowed for type \"regrole\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS regnamespace(3)) AS value WHERE false",
+    "reference": [
+      [],
+      "42601",
+      "type modifier is not allowed for type \"regnamespace\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS regtype) AS value WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 0",
+      [
+        2206
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS regclass) AS value WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 0",
+      [
+        2205
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS regtype(3)[]) AS value WHERE false",
+    "reference": [
+      [],
+      "42601",
+      "type modifier is not allowed for type \"regtype[]\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS pg_catalog._regtype(3)) AS value WHERE false",
+    "reference": [
+      [],
+      "42601",
+      "type modifier is not allowed for type \"pg_catalog._regtype\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS pg_catalog._regclass(3)) AS value WHERE false",
+    "reference": [
+      [],
+      "42601",
+      "type modifier is not allowed for type \"pg_catalog._regclass\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS pg_catalog._regnamespace(3)) AS value WHERE false",
+    "reference": [
+      [],
+      "42601",
+      "type modifier is not allowed for type \"pg_catalog._regnamespace\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS pg_catalog._regrole(3)) AS value WHERE false",
+    "reference": [
+      [],
+      "42601",
+      "type modifier is not allowed for type \"pg_catalog._regrole\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS name(3)) AS value WHERE false",
+    "reference": [
+      [],
+      "42601",
+      "type modifier is not allowed for type \"name\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS pg_catalog.\"char\"(3)) AS value WHERE false",
+    "reference": [
+      [],
+      "42601",
+      "type modifier is not allowed for type \"pg_catalog.char\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS integer(3)[]) AS value WHERE false",
+    "reference": [
+      [],
+      "42601",
+      "syntax error at or near \"(\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS varchar(3)[]) AS value WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 0",
+      [
+        1015
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS numeric(5,2)[]) AS value WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 0",
+      [
+        1231
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS regtype[]) AS value WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 0",
+      [
+        2211
+      ]
+    ]
+  }
+]
