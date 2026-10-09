@@ -54,7 +54,7 @@ struct Column {
     std::vector<std::string> enumValues;  // ENUM('a','b','c') values
     std::string domainName;         // If type is a DOMAIN, the domain name
     // Actual persisted declaration modifier, independent of physical width.
-    // Currently used by interval scalar/element input and assignment.
+    // Used by interval/numeric scalar and array-element assignment.
     int32_t typeMod = -1;
 
     void print() const;

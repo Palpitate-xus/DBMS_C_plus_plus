@@ -44,6 +44,9 @@ struct ExprValue {
     std::optional<uint32_t> objectOid;
     // Row-major physical identities, including NULL positions, for OID arrays.
     std::vector<std::optional<uint32_t>> elementOids;
+    // Actual typed record fields, independent of record text output. An
+    // empty vector is ROW(); absence means no structural record datum.
+    std::optional<std::vector<ExprValue>> recordFields;
 
     ExprValue() = default;
     ExprValue(std::string typeName_, std::string value_, bool isNull_ = false)
@@ -174,6 +177,9 @@ private:
     ExprValue evalArrayExpr(const ArrayExpr* e, const RowContext& ctx) const;
     ExprValue evalQuantified(const QuantifiedComparisonExpr* e, const RowContext& ctx) const;
     ExprValue evalRowExpr(const RowExpr* e, const RowContext& ctx) const;
+    ExprValue evalRowComparison(const RowExpr* left, const RowExpr* right,
+        const std::string& op, const std::vector<QueryComparisonBinding>& bindings,
+        const RowContext& ctx) const;
 
     // 辅助
     static int compareValues(const ExprValue& a, const ExprValue& b);

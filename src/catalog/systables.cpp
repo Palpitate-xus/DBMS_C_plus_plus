@@ -89,6 +89,8 @@ static const std::unordered_map<std::string, Oid> kBuiltinTypeMap = {
 };
 
 Oid mapBuiltinTypeNameToOid(const std::string& typeName) {
+    if (typeName == "record") return 2249;
+    if (typeName == "record[]") return 2287;
     auto it = kBuiltinTypeMap.find(typeName);
     if (it != kBuiltinTypeMap.end()) return it->second;
     return INVALID_OID;
@@ -98,7 +100,7 @@ bool isBuiltinTypeOid(Oid oid) {
     if (oid == INVALID_OID) return false;
     // OID 18 is PostgreSQL's internal "char" type, distinct from SQL CHAR.
     // It has no unquoted SQL type-name mapping but remains a built-in OID.
-    if (oid == 18) return true;
+    if (oid == 18 || oid == 2249 || oid == 2287) return true;
     return std::any_of(
         kBuiltinTypeMap.begin(), kBuiltinTypeMap.end(),
         [oid](const auto& entry) { return entry.second == oid; });

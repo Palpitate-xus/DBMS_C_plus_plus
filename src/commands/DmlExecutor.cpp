@@ -1861,6 +1861,8 @@ ExprPtr copyReturningExpression(const Expr* expression, const TableSchema& table
         auto target = std::make_unique<BinaryOpExpr>(); target->op = node->op;
         target->arrayConcat = node->arrayConcat;
         target->comparison = node->comparison;
+        target->rowComparison = node->rowComparison;
+        target->rowComparisons = node->rowComparisons;
         target->left = copy(node->left); target->right = copy(node->right); result = std::move(target);
     } else if (const auto* node = dynamic_cast<const CastExpr*>(expression)) {
         auto target = std::make_unique<CastExpr>(); target->typeName = node->typeName;
@@ -1891,6 +1893,8 @@ ExprPtr copyReturningExpression(const Expr* expression, const TableSchema& table
         result = std::move(target);
     } else if (const auto* node = dynamic_cast<const RowExpr*>(expression)) {
         auto target = std::make_unique<RowExpr>();
+        target->constructor = node->constructor;
+        target->fieldTypes = node->fieldTypes;
         for (const auto& item : node->elements) target->elements.push_back(copy(item));
         result = std::move(target);
     } else {

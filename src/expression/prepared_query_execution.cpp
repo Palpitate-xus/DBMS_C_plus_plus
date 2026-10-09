@@ -41,6 +41,8 @@ ExprPtr copyExpression(const Expr* source, std::map<const Expr*, const Expr*>& s
         auto target = std::make_unique<BinaryOpExpr>(); target->op = node->op;
         target->arrayConcat = node->arrayConcat;
         target->comparison = node->comparison;
+        target->rowComparison = node->rowComparison;
+        target->rowComparisons = node->rowComparisons;
         target->left = copy(node->left); target->right = copy(node->right); result = std::move(target);
     } else if (const auto* node = dynamic_cast<const QuantifiedComparisonExpr*>(source)) {
         auto target = std::make_unique<QuantifiedComparisonExpr>();
@@ -94,6 +96,8 @@ ExprPtr copyExpression(const Expr* source, std::map<const Expr*, const Expr*>& s
         result = std::move(target);
     } else if (const auto* node = dynamic_cast<const RowExpr*>(source)) {
         auto target = std::make_unique<RowExpr>();
+        target->constructor = node->constructor;
+        target->fieldTypes = node->fieldTypes;
         for (const auto& arg : node->elements) target->elements.push_back(copy(arg));
         result = std::move(target);
     } else throw DbError("0A000", "prepared execution requires a structured value expression");
@@ -205,10 +209,70 @@ std::optional<ExprValue> simplifyCaseConstants(ExprPtr& expression,
     bool constant = false;
     if (auto* unary = dynamic_cast<UnaryOpExpr*>(expression.get()))
         constant = simplifyCaseConstants(unary->operand,evaluator,roles).has_value();
-    else if (auto* cast = dynamic_cast<CastExpr*>(expression.get()))
+    else if (auto* cast = dynamic_cast<CastExpr*>(expression.get())) {
         constant = simplifyCaseConstants(cast->operand,evaluator,roles).has_value();
+        // record_in is STABLE, not IMMUTABLE. UNKNOWN input was checked by
+        // binding; typed string I/O must wait for a reached runtime value.
+        if (ExprHelper::declaredTypeInput(cast->typeName) == "record") return std::nullopt;
+    }
     else if (auto* binary = dynamic_cast<BinaryOpExpr*>(expression.get())) {
         const auto op = SQLParser::toLower(binary->op);
+        if (binary->rowComparison) {
+            auto* left = dynamic_cast<RowExpr*>(binary->left.get());
+            auto* right = dynamic_cast<RowExpr*>(binary->right.get());
+            if (!left || !right || !left->constructor)
+                throw DbError("XX000","row comparison has no constructor owner");
+            std::vector<std::optional<ExprValue>> first;
+            for (auto& field : left->elements)
+                first.push_back(simplifyCaseConstants(field,evaluator,roles));
+            const auto pair = [&](RowExpr& peer,
+                                  const std::vector<QueryComparisonBinding>& bindings) {
+                std::vector<std::optional<ExprValue>> second;
+                for (auto& field : peer.elements)
+                    second.push_back(simplifyCaseConstants(field,evaluator,roles));
+                bool all = true;
+                bool falseEquality = false;
+                for (size_t i = 0; i < first.size(); ++i) {
+                    all = all && first[i].has_value() && second[i].has_value();
+                    if (!first[i] || !second[i]) continue;
+                    auto binding = bindings.at(i); binding.op = "=";
+                    const auto equal = evaluator.comparePrepared(binding,*first[i],*second[i]);
+                    if (!equal.isNull && !equal.asBool()) falseEquality = true;
+                }
+                return std::pair<bool,bool>{all,falseEquality};
+            };
+            if (op == "in" || op == "not in") {
+                std::vector<ExprPtr> peers;
+                std::vector<std::vector<QueryComparisonBinding>> signatures;
+                for (size_t i = 0; i < right->elements.size(); ++i) {
+                    auto* peer = dynamic_cast<RowExpr*>(right->elements[i].get());
+                    if (!peer || !peer->constructor)
+                        throw DbError("XX000","row IN lost a constructor member");
+                    const auto constants = pair(*peer,binary->rowComparisons.at(i));
+                    // SQL row equality is a conjunction. A genuine constant
+                    // false field makes this entire peer unreachable without
+                    // invoking any volatile field on either side.
+                    if (constants.second) continue;
+                    peers.push_back(std::move(right->elements[i]));
+                    signatures.push_back(binary->rowComparisons[i]);
+                }
+                right->elements = std::move(peers);
+                binary->rowComparisons = std::move(signatures);
+                if (right->elements.empty()) {
+                    const ExprValue result("boolean",op == "in" ? "f" : "t");
+                    expression = constantExpression(result,expression.get()); return result;
+                }
+                return std::nullopt;
+            }
+            const auto constants = pair(*right,binary->rowComparisons.at(0));
+            if ((op == "=" || op == "<>" || op == "!=") && constants.second) {
+                const ExprValue result("boolean",op == "=" ? "f" : "t");
+                expression = constantExpression(result,expression.get()); return result;
+            }
+            if (!constants.first) return std::nullopt;
+            const auto result = evaluator.eval(binary,RowContext{});
+            expression = constantExpression(result,expression.get()); return result;
+        }
         if(op=="[]" && dynamic_cast<BinaryOpExpr*>(binary->left.get()) &&
            static_cast<BinaryOpExpr*>(binary->left.get())->op=="[]") {
             // Scalar multidimensional fetch owns the whole postfix chain.
@@ -228,6 +292,10 @@ std::optional<ExprValue> simplifyCaseConstants(ExprPtr& expression,
             expression=constantExpression(value,expression.get());return value;
         }
         const auto left = simplifyCaseConstants(binary->left,evaluator,roles);
+        if (binary->op == "::") {
+            const auto* target = dynamic_cast<const LiteralExpr*>(binary->right.get());
+            if (target && ExprHelper::declaredTypeInput(target->value) == "record") return std::nullopt;
+        }
         // Match boolean constant demand rather than folding a dead right arm.
         if (left && !left->isNull &&
             ((op=="and" && !left->asBool()) || (op=="or" && left->asBool()))) {

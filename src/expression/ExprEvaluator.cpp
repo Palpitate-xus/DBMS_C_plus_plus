@@ -17,6 +17,7 @@
 #include "expression/geometric_input.h"
 #include "expression/between_input.h"
 #include "expression/regtype_input.h"
+#include "expression/record_cast.h"
 #include "common/DbError.h"
 #include "common/SqlArrayText.h"
 #include "common/NotificationManager.h"
@@ -1600,9 +1601,15 @@ ExprValue ExprEvaluator::evalUnaryOp(const UnaryOpExpr* e, const RowContext& ctx
         return ExprValue(tzIn ? "timestamp" : "timestamptz", out, false);
     }
     if (toLower(op) == "is null") {
+        if (v.recordFields)
+            return ExprValue("boolean", std::all_of(v.recordFields->begin(),v.recordFields->end(),
+                [](const auto& field) { return field.isNull; }) ? "t" : "f");
         return ExprValue("boolean", v.isNull ? "t" : "f", false);
     }
     if (toLower(op) == "is not null") {
+        if (v.recordFields)
+            return ExprValue("boolean", std::all_of(v.recordFields->begin(),v.recordFields->end(),
+                [](const auto& field) { return !field.isNull; }) ? "t" : "f");
         return ExprValue("boolean", v.isNull ? "f" : "t", false);
     }
     if (op.find("is true") != std::string::npos) {
@@ -1737,6 +1744,31 @@ int ExprEvaluator::compareValues(const ExprValue& a, const ExprValue& b) {
 
     std::string ta = toLower(a.typeName);
     std::string tb = toLower(b.typeName);
+    if (ta == "record" || tb == "record") {
+        if (ta != "record" || tb != "record")
+            throw DbError("42883", "record comparison requires two record datums");
+        if (!a.recordFields || !b.recordFields)
+            throw DbError("0A000", "record datum has no typed field descriptor");
+        const auto& first = *a.recordFields;
+        const auto& second = *b.recordFields;
+        for (size_t i = 0; i < std::min(first.size(), second.size()); ++i) {
+            const auto left = common_type_detail::canonical(first[i].typeName);
+            const auto right = common_type_detail::canonical(second[i].typeName);
+            if (left == "unknown" || right == "unknown")
+                throw DbError("42883", "could not identify a comparison function for type unknown");
+            if (left != right) throw DbError("42804", "cannot compare dissimilar record field types");
+            (void)resolveComparison("<", left, right);
+            // Operator lookup belongs to the reached field descriptor, even
+            // when both values are NULL. Earlier unequal fields still exit.
+            if (first[i].isNull != second[i].isNull) return first[i].isNull ? 1 : -1;
+            if (first[i].isNull) continue;
+            const int comparison = compareValues(first[i], second[i]);
+            if (comparison) return comparison;
+        }
+        if (first.size() != second.size())
+            throw DbError("42804", "cannot compare record types with different numbers of columns");
+        return 0;
+    }
     if((ta=="oid" || ta=="regtype") && (tb=="oid" || tb=="regtype")) {
         const auto identity=[](const ExprValue& value) {
             if(value.objectOid)return *value.objectOid;
@@ -2054,7 +2086,7 @@ QueryComparisonBinding ExprEvaluator::resolveComparison(const std::string& rawOp
     const bool timestamps=temporal.count(binding.leftType) && temporal.count(binding.rightType);
     const bool same=binding.leftType==binding.rightType &&
         (binding.leftType=="oid" || binding.leftType=="boolean" || binding.leftType=="\"char\"" || binding.leftType=="uuid" || binding.leftType=="bytea" ||
-         binding.leftType=="time" || binding.leftType=="interval" ||
+         binding.leftType=="time" || binding.leftType=="interval" || binding.leftType=="record" ||
          isBitStringTypeName(binding.leftType) || common_type_detail::array(binding.leftType));
     if (!operations.count(binding.op) || (!numbers && !strings && !timestamps && !same))
         throw DbError("42883","operator does not exist: " + binding.leftType + " " + rawOp + " " + binding.rightType);
@@ -2914,6 +2946,75 @@ static std::string arrayExpressionType(const Expr* expression, const RowContext&
 ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& ctx) const {
     if (!e || !e->left || !e->right) return ExprValue{};
     std::string op = toLower(e->op);
+    const auto* rowLeft = dynamic_cast<const RowExpr*>(e->left.get());
+    const auto* rowRight = dynamic_cast<const RowExpr*>(e->right.get());
+    static const std::set<std::string> rowOperations = {"=","<>","!=","<",">","<=",">="};
+    const bool constructorPair = rowLeft && rowLeft->constructor && rowRight &&
+        rowRight->constructor && rowOperations.count(op);
+    const bool constructorList = rowLeft && rowLeft->constructor && rowRight &&
+        !rowRight->constructor && (op == "in" || op == "not in") &&
+        std::all_of(rowRight->elements.begin(),rowRight->elements.end(),[](const auto& member) {
+            const auto* row = dynamic_cast<const RowExpr*>(member.get());
+            return row && row->constructor;
+        });
+    if (e->rowComparison || constructorPair || constructorList) {
+        const auto* left = rowLeft;
+        const auto* right = rowRight;
+        if (!left || !right || !left->constructor)
+            throw DbError("XX000", "row comparison lost its constructor role");
+        auto signatures = e->rowComparisons;
+        if (!e->rowComparison) {
+            const auto pair = [&](const RowExpr& peer,const std::string& operation) {
+                if (left->elements.size() != peer.elements.size())
+                    throw DbError("42601","unequal number of entries in row expressions");
+                if (left->elements.empty())
+                    throw DbError("0A000","cannot compare rows of zero length");
+                std::vector<QueryComparisonBinding> bindings;
+                for (size_t i = 0; i < left->elements.size(); ++i) {
+                    const auto first = i < left->fieldTypes.size() ? left->fieldTypes[i] :
+                        arrayExpressionType(left->elements[i].get(),ctx,currentDB_,this);
+                    const auto second = i < peer.fieldTypes.size() ? peer.fieldTypes[i] :
+                        arrayExpressionType(peer.elements[i].get(),ctx,currentDB_,this);
+                    const auto binding = resolveComparison(operation,first,second);
+                    const auto unknownInput = [&](const Expr* source,const std::string& type,
+                                                  const std::string& target) {
+                        const auto* literal = dynamic_cast<const LiteralExpr*>(source);
+                        if (type != "unknown" || !literal || literal->preparedSubquery ||
+                            !literal->typeName.empty()) return;
+                        CastExpr cast; cast.typeName = target;
+                        cast.operand = std::make_unique<LiteralExpr>(*literal);
+                        (void)eval(&cast,RowContext{});
+                    };
+                    unknownInput(left->elements[i].get(),first,binding.leftType);
+                    unknownInput(peer.elements[i].get(),second,binding.rightType);
+                    bindings.push_back(binding);
+                }
+                return bindings;
+            };
+            if (constructorPair) signatures = {pair(*right,op)};
+            else for (const auto& member : right->elements)
+                signatures.push_back(pair(*static_cast<const RowExpr*>(member.get()),"="));
+        }
+        if (op == "in" || op == "not in") {
+            if (right->constructor || right->elements.size() != signatures.size())
+                throw DbError("XX000", "row IN lost its member signatures");
+            bool unknown = false;
+            for (size_t i = 0; i < right->elements.size(); ++i) {
+                const auto* member = dynamic_cast<const RowExpr*>(right->elements[i].get());
+                if (!member || !member->constructor)
+                    throw DbError("XX000", "row IN member is not a constructor");
+                const auto equal = evalRowComparison(left, member, "=", signatures[i], ctx);
+                if (!equal.isNull && equal.asBool())
+                    return ExprValue("boolean", op == "in" ? "t" : "f");
+                unknown = unknown || equal.isNull;
+            }
+            return unknown ? ExprValue("boolean", "", true) :
+                ExprValue("boolean", op == "in" ? "f" : "t");
+        }
+        if (!right->constructor || signatures.size() != 1)
+            throw DbError("XX000", "row comparison lost its field signatures");
+        return evalRowComparison(left, right, op, signatures.front(), ctx);
+    }
     if(op=="[]") {
         // A multidimensional subscript is one receiver with N indexes, not
         // N independent one-dimensional array fetches. Preserve the original
@@ -4653,6 +4754,12 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
     }
     const auto geometryTarget=geometric_input_detail::builtinType(targetTypeName);
     const auto sourceType=ExprHelper::canonicalResultTypeName(v.typeName);
+    record_cast_detail::validate(sourceType,target);
+    if (target == "record") {
+        if (sourceType == "record") return v;
+        if (v.isNull) return ExprValue("record","",true);
+        throw DbError("0A000", "input of anonymous composite types is not implemented");
+    }
     regtype_cast_detail::validate(sourceType,target);
     if(target=="regtype") {
         regtype_detail::validateCast(sourceType,target);
@@ -5654,8 +5761,66 @@ std::vector<ExprValue> ExprEvaluator::arrayElements(const ExprValue& array) {
     flatten(array.value);return elements;
 }
 
-ExprValue ExprEvaluator::evalRowExpr(const RowExpr*, const RowContext&) const {
-    return ExprValue("unknown", "", true);
+ExprValue ExprEvaluator::evalRowExpr(const RowExpr* row, const RowContext& context) const {
+    if (!row || !row->constructor) return ExprValue("unknown", "", true);
+    ExprValue result("record", "(", false);
+    result.recordFields.emplace();
+    for (size_t i = 0; i < row->elements.size(); ++i) {
+        auto field = eval(row->elements[i].get(), context);
+        if (i < row->fieldTypes.size()) field.typeName = row->fieldTypes[i];
+        else if (const auto* literal = dynamic_cast<const LiteralExpr*>(row->elements[i].get());
+                 literal && literal->typeName.empty() && !literal->preparedSubquery &&
+                 ExprHelper::inferValuesResultType(literal->value) == "unknown")
+            field.typeName = "unknown";
+        if (i) result.value += ',';
+        if (!field.isNull) {
+            const bool quote = field.value.empty() ||
+                std::any_of(field.value.begin(), field.value.end(), [](unsigned char c) {
+                    return c == ',' || c == '(' || c == ')' || c == '"' ||
+                        c == '\\' || std::isspace(c);
+                });
+            if (quote) result.value += '"';
+            for (char c : field.value) {
+                if (quote && (c == '"' || c == '\\')) result.value += c;
+                result.value += c;
+            }
+            if (quote) result.value += '"';
+        }
+        result.recordFields->push_back(std::move(field));
+    }
+    result.value += ')';
+    return result;
+}
+
+ExprValue ExprEvaluator::evalRowComparison(const RowExpr* left, const RowExpr* right,
+    const std::string& operation, const std::vector<QueryComparisonBinding>& bindings,
+    const RowContext& context) const {
+    if (left->elements.size() != right->elements.size())
+        throw DbError("42601", "unequal number of entries in row expressions");
+    if (left->elements.empty()) throw DbError("0A000", "cannot compare rows of zero length");
+    if (bindings.size() != left->elements.size())
+        throw DbError("XX000", "row comparison has incomplete field signatures");
+    const bool equality = operation == "=" || operation == "<>" || operation == "!=";
+    const bool negate = operation != "=";
+    bool unknown = false;
+    for (size_t i = 0; i < bindings.size(); ++i) {
+        const auto first = eval(left->elements[i].get(), context);
+        const auto second = eval(right->elements[i].get(), context);
+        auto binding = bindings[i];
+        binding.op = "=";
+        const auto equal = comparePrepared(binding, first, second);
+        if (equal.isNull) {
+            if (!equality) return ExprValue("boolean", "", true);
+            unknown = true;
+        } else if (!equal.asBool()) {
+            if (equality) return ExprValue("boolean", negate ? "t" : "f");
+            binding.op = operation;
+            return comparePrepared(binding, first, second);
+        }
+    }
+    if (equality && unknown) return ExprValue("boolean", "", true);
+    const bool truth = equality ? !negate : operation == "<=" || operation == ">=";
+    return ExprValue("boolean", truth ? "t" : "f");
 }
 
 // ----------------------------------------------------------------------------

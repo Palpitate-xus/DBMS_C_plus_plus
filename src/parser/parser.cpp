@@ -2205,6 +2205,13 @@ static ExprPtr parseRangeExpr(const std::vector<std::string>& tokens, size_t& po
                 }
                 if (pos < tokens.size() && tokens[pos] == ")") ++pos;
                 list->value = value;
+                // This RHS is a row-valued query grammar role, not a scalar
+                // IN-list datum or an already-bound scalar child. The mature
+                // relational row-IN consumer owns it until typed row-SubLink
+                // lowering is available.
+                if (const auto* row = dynamic_cast<const RowExpr*>(bin->left.get());
+                    row && row->constructor)
+                    list->type = ExprType::Subquery;
                 bin->right = std::move(list);
             } else {
                 auto list = std::make_unique<RowExpr>();
@@ -2542,6 +2549,26 @@ static ExprPtr parsePrimaryExprImpl(const std::vector<std::string>& tokens, size
     if (pos >= tokens.size()) return nullptr;
     if (tokens[pos] == "[" || tokens[pos] == "]") return nullptr;
 
+    // Unqualified unquoted ROW is constructor grammar, not a scalar callee.
+    if (SQLParser::toLower(tokens[pos]) == "row" && pos + 1 < tokens.size() &&
+        tokens[pos + 1] == "(") {
+        pos += 2;
+        auto row = std::make_unique<RowExpr>();
+        row->constructor = true;
+        while (pos < tokens.size() && tokens[pos] != ")") {
+            auto element = parseExpr(tokens, pos);
+            if (!element) return nullptr;
+            row->elements.push_back(std::move(element));
+            if (pos < tokens.size() && tokens[pos] == ",") {
+                ++pos;
+                if (pos >= tokens.size() || tokens[pos] == ")") return nullptr;
+            } else break;
+        }
+        if (pos >= tokens.size() || tokens[pos] != ")") return nullptr;
+        ++pos;
+        return row;
+    }
+
     // CAST(expr AS type [mods]): prefix form of the :: cast operator.
     if (SQLParser::toLower(tokens[pos]) == "cast" && pos + 1 < tokens.size()
         && tokens[pos + 1] == "(") {
@@ -2721,6 +2748,20 @@ static ExprPtr parsePrimaryExprImpl(const std::vector<std::string>& tokens, size
             return lit;
         }
         auto inner = parseExpr(tokens, pos);
+        if (inner && pos < tokens.size() && tokens[pos] == ",") {
+            auto row = std::make_unique<RowExpr>();
+            row->constructor = true;
+            row->elements.push_back(std::move(inner));
+            while (pos < tokens.size() && tokens[pos] == ",") {
+                ++pos;
+                auto element = parseExpr(tokens, pos);
+                if (!element) return nullptr;
+                row->elements.push_back(std::move(element));
+            }
+            if (pos >= tokens.size() || tokens[pos] != ")") return nullptr;
+            ++pos;
+            return row;
+        }
         if (pos < tokens.size() && tokens[pos] == ")") ++pos;
         return inner;
     }

@@ -1679,6 +1679,15 @@ const std::vector<PgTypeRow>& CatalogManager::builtinTypeRows() {
     ensureType(1563,  "_varbit",    -1,   'b', 'A');
     ensureType(1700,  "numeric",    -1,   'b', 'N');
     ensureType(2206,  "regtype",     4,   'b', 'N');
+    ensureType(2249,  "record",     -1,   'p', 'P');
+    ensureType(2287,  "_record",    -1,   'p', 'P', 2249);
+    types.at(typeByOid.at(2249)).typarray = 2287;
+    for (Oid oid : {2249U,2287U}) {
+        auto& record = types.at(typeByOid.at(oid));
+        record.typbyval = false;
+        record.typalign = 'd';
+        record.typstorage = 'x';
+    }
     types.at(typeByOid.at(2206)).typbyval=true;
     types.at(typeByOid.at(2206)).typalign='i';
     types.at(typeByOid.at(2206)).typstorage='p';
@@ -1790,16 +1799,17 @@ void CatalogManager::bootstrapSystemTypes() {
     // Fresh and cold consumers use the same definitions; no alias registry
     // determines whether a physical catalog type exists.
     for(const auto& definition:definitions) {
-        if(definition.typcategory!='A' || !definition.typelem)continue;
+        if(!definition.typelem)continue;
         const auto elementIndex=typeByOid_.find(definition.typelem);
         if(elementIndex==typeByOid_.end())continue;
         const auto expectedElement=std::find_if(definitions.begin(),definitions.end(),
             [&](const PgTypeRow& row){return row.oid==definition.typelem;});
-        if(expectedElement==definitions.end())continue;
+        if(expectedElement==definitions.end() || expectedElement->typarray != definition.oid)continue;
         auto& row=types_[typeByOid_.at(definition.oid)];
         auto& element=types_[elementIndex->second];
         if(row.typnamespace==definition.typnamespace && row.typname==definition.typname &&
-           row.typcategory==definition.typcategory && element.typnamespace==expectedElement->typnamespace &&
+           row.typcategory==definition.typcategory && row.typtype==definition.typtype &&
+           element.typnamespace==expectedElement->typnamespace &&
            element.typname==expectedElement->typname) {
             row.typelem=definition.typelem;
             element.typarray=definition.oid;

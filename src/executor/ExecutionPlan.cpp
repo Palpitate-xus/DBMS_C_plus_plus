@@ -211,6 +211,19 @@ struct PreparedSelectState {
     }
     std::vector<ExprValue> cells(Operator& source, const std::string& raw) const {
         std::vector<ExprValue> values;
+        if (source.lastStructuredValues(values)) {
+            if (values.size() != schema.len)
+                throw DbError("XX000","prepared source lost its typed descriptor width");
+            for (size_t i = 0; i < values.size(); ++i) {
+                const auto declared = ExprHelper::canonicalResultTypeName(schema.cols[i].dataType +
+                    (schema.cols[i].isArray ? "[]" : ""));
+                if (ExprHelper::canonicalResultTypeName(values[i].typeName) != declared)
+                    throw DbError("XX000","prepared source changed its declared cell type");
+            }
+            // Record fields/OID identities are part of the actual datum,
+            // never reconstructed from its formatted text representation.
+            return values;
+        }
         std::vector<std::string> structured;
         std::vector<bool> nulls;
         const bool available = source.supportsStructuredRows() && source.lastStructuredRow(structured, nulls);

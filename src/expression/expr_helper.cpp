@@ -1278,7 +1278,8 @@ std::string ExprHelper::scalarExpressionIdentity(
             return result;
         }
         if (const auto* row = dynamic_cast<const RowExpr*>(node)) {
-            std::string result = "row";
+            std::string result = row->constructor ? "row-constructor" : "in-list";
+            for (const auto& type : row->fieldTypes) result += field(type);
             for (const auto& value : row->elements) result += field(key(value.get()));
             return result;
         }
@@ -1755,6 +1756,43 @@ void ExprHelper::prepareArrayTypes(Expr* expression,
             const bool bitOperand=leftType=="bit" || leftType=="bit varying" ||
                                   rightType=="bit" || rightType=="bit varying";
             static const std::set<std::string> comparisons={"=","<>","!=","<",">","<=",">="};
+            if (binary->rowComparison) return; // actual binder-owned signatures win
+            auto* lhsRow = dynamic_cast<RowExpr*>(binary->left.get());
+            auto* rhsRow = dynamic_cast<RowExpr*>(binary->right.get());
+            if (lhsRow && lhsRow->constructor && rhsRow) {
+                const auto pair = [&](RowExpr& peer,const std::string& op) {
+                    if (lhsRow->elements.size() != peer.elements.size())
+                        throw DbError("42601","unequal number of entries in row expressions");
+                    if (lhsRow->elements.empty())
+                        throw DbError("0A000","cannot compare rows of zero length");
+                    std::vector<QueryComparisonBinding> bindings;
+                    for (size_t i = 0; i < lhsRow->elements.size(); ++i) {
+                        const auto left = canonicalResultTypeName(type(lhsRow->elements[i].get()));
+                        const auto right = canonicalResultTypeName(type(peer.elements[i].get()));
+                        const auto binding = ExprEvaluator::resolveComparison(op,left,right);
+                        if (left == "unknown") validateConst(lhsRow->elements[i].get(),binding.leftType);
+                        if (right == "unknown") validateConst(peer.elements[i].get(),binding.rightType);
+                        bindings.push_back(binding);
+                    }
+                    return bindings;
+                };
+                if (rhsRow->constructor && comparisons.count(operation)) {
+                    binary->rowComparison = true;
+                    binary->rowComparisons = {pair(*rhsRow,operation)};
+                    return;
+                }
+                if (!rhsRow->constructor && (operation == "in" || operation == "not in") &&
+                    std::all_of(rhsRow->elements.begin(),rhsRow->elements.end(),[](const auto& member) {
+                        const auto* row = dynamic_cast<const RowExpr*>(member.get());
+                        return row && row->constructor;
+                    })) {
+                    binary->rowComparison = true;
+                    binary->rowComparisons.clear();
+                    for (auto& member : rhsRow->elements)
+                        binary->rowComparisons.push_back(pair(*static_cast<RowExpr*>(member.get()),"="));
+                    return;
+                }
+            }
             const auto unknownInput=[&](ExprPtr& operand,const std::string& source,const std::string& target) {
                 if(source!="unknown")return;
                 auto conversion=std::make_unique<CastExpr>();
@@ -1902,7 +1940,13 @@ void ExprHelper::prepareArrayTypes(Expr* expression,
             for (auto& arg : call->over.partitionBy) visit(arg.get(),{});
             for (auto& arg : call->over.orderBy) visit(arg.first.get(),{});
             visit(call->over.frameStart.get(),{}); visit(call->over.frameEnd.get(),{});
-        } else if (auto* row = dynamic_cast<RowExpr*>(node)) for (auto& arg : row->elements) visit(arg.get(),{});
+        } else if (auto* row = dynamic_cast<RowExpr*>(node)) {
+            row->fieldTypes.clear();
+            for (auto& arg : row->elements) {
+                visit(arg.get(),{});
+                row->fieldTypes.push_back(type(arg.get()));
+            }
+        }
     };
     visit(expression,{});
 }

@@ -19,7 +19,7 @@ inline std::pair<std::string,std::string> resolveBuiltinEquality(
         for(const auto& type:std::vector<std::string>{"boolean","\"char\"","name","text",
             "bpchar","numeric","money","oid","date","time","timetz","timestamp",
             "timestamptz","interval","uuid","bytea","inet","macaddr","macaddr8",
-            "bit","bit varying","jsonb","pg_lsn","tsvector","tsquery","path",
+            "bit","bit varying","jsonb","pg_lsn","tsvector","tsquery","path","record",
             "circle","lseg","line"}) result.emplace_back(type,type);
         for(const auto& a:std::vector<std::string>{"smallint","integer","bigint"})
             for(const auto& b:std::vector<std::string>{"smallint","integer","bigint"})

@@ -20938,18 +20938,29 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
         if(!value)return false;
         if(containsPreparedPattern(value))return true;
         if(dynamic_cast<const dbms::CaseExpr*>(value))return true;
+        if(const auto* binary=dynamic_cast<const dbms::BinaryOpExpr*>(value);
+           binary && binary->right && binary->right->type==dbms::ExprType::Subquery &&
+           (toLower(binary->op)=="in" || toLower(binary->op)=="not in")) {
+            // Preserve the actual relational row-IN implementation. A ROW
+            // constructor does not grant this query child a scalar role.
+            return false;
+        }
         if(scalarQueryRoles(value).first)return true;
         if(const auto* binary=dynamic_cast<const dbms::BinaryOpExpr*>(value)) {
             static const set<string> operators={"=","<>","!=","<",">","<=",">=","IS DISTINCT FROM","IS NOT DISTINCT FROM"};
             comparisonCandidate=comparisonCandidate || operators.count(binary->op);
             if(binary->comparison && binary->comparison->enumTypeOid)return true;
-            if(binary->op=="::")if(const auto* target=dynamic_cast<const dbms::LiteralExpr*>(binary->right.get()))
-                if(dbms::ExprHelper::declaredTypeInput(target->value,session.currentDB)=="regtype")return true;
+            if(binary->op=="::")if(const auto* target=dynamic_cast<const dbms::LiteralExpr*>(binary->right.get())) {
+                const auto type=dbms::ExprHelper::declaredTypeInput(target->value,session.currentDB);
+                if(type=="regtype" || type=="record")return true;
+            }
             return requiresPreparedValue(binary->left.get()) || (binary->op!="::" && requiresPreparedValue(binary->right.get()));
         }
         if(const auto* unary=dynamic_cast<const dbms::UnaryOpExpr*>(value))return unary->op=="+" || unary->op=="-" || requiresPreparedValue(unary->operand.get());
-        if(const auto* cast=dynamic_cast<const dbms::CastExpr*>(value))
-            return dbms::ExprHelper::declaredTypeInput(cast->typeName,session.currentDB)=="regtype" || requiresPreparedValue(cast->operand.get());
+        if(const auto* cast=dynamic_cast<const dbms::CastExpr*>(value)) {
+            const auto type=dbms::ExprHelper::declaredTypeInput(cast->typeName,session.currentDB);
+            return type=="regtype" || type=="record" || requiresPreparedValue(cast->operand.get());
+        }
         if(const auto* call=dynamic_cast<const dbms::FunctionCallExpr*>(value)) {
             if(routineMetadata.hasScalarFunction(call,&g_engine) &&
                routineMetadata.scalarFunctionIdentity(call,&g_engine).rfind("stored",0)==0)return true;
@@ -20970,7 +20981,10 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
             for(const auto& arg:call->namedArgs)if(requiresPreparedValue(arg.value.get()))return true;
         }
         if(const auto* array=dynamic_cast<const dbms::ArrayExpr*>(value))for(const auto& element:array->elements)if(requiresPreparedValue(element.get()))return true;
-        if(const auto* row=dynamic_cast<const dbms::RowExpr*>(value))for(const auto& element:row->elements)if(requiresPreparedValue(element.get()))return true;
+        if(const auto* row=dynamic_cast<const dbms::RowExpr*>(value)) {
+            if(row->constructor)return true;
+            for(const auto& element:row->elements)if(requiresPreparedValue(element.get()))return true;
+        }
         return false;
     };
     // Only the genuine top-level FETCH grammar owner supplies this signed

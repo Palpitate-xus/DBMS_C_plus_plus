@@ -11,6 +11,7 @@
 #include "expression/geometric_input.h"
 #include "expression/between_input.h"
 #include "expression/regtype_cast.h"
+#include "expression/record_cast.h"
 #include "utils/interval_type.h"
 #include <algorithm>
 #include <map>
@@ -74,6 +75,17 @@ void validateIntervalInputCast(const std::string& input,const std::string& targe
 }
 void validateRegtypeInputCast(const std::string& input,const std::string& target) {
     regtype_cast_detail::validate(input,target);
+}
+
+void validateRecordInputCast(const std::string& input, const std::string& target, const Expr* operand) {
+    record_cast_detail::validate(input, target);
+    if (common_type_detail::canonical(input) != "unknown" ||
+        common_type_detail::canonical(target) != "record") return;
+    const auto* literal = dynamic_cast<const LiteralExpr*>(operand);
+    if (!literal || literal->preparedSubquery) return;
+    const auto tokens = SQLParser::tokenize(literal->value);
+    if (tokens.size() == 1 && !tokens.front().empty() && tokens.front().front() == '\'')
+        throw DbError("0A000", "input of anonymous composite types is not implemented");
 }
 
 void validateArrayConstant(const Expr* source, const std::string& type) {
@@ -178,6 +190,40 @@ public:
             }
         }
         input = std::move(cast);
+    }
+
+    std::vector<QueryComparisonBinding> rowPairBindings(RowExpr& left, RowExpr& right,
+        const std::string& operation) {
+        if (left.elements.size() != right.elements.size())
+            throw DbError("42601", "unequal number of entries in row expressions");
+        if (left.elements.empty()) throw DbError("0A000", "cannot compare rows of zero length");
+        if (left.fieldTypes.size() != left.elements.size() ||
+            right.fieldTypes.size() != right.elements.size())
+            throw DbError("XX000", "row constructor has no prepared field types");
+        std::vector<QueryComparisonBinding> signatures;
+        for (size_t i = 0; i < left.elements.size(); ++i) {
+            auto binding = enumComparison(operation, left.elements[i], right.elements[i],
+                left.fieldTypes[i], right.fieldTypes[i]);
+            if (!binding)
+                binding = ExprEvaluator::resolveComparison(operation,left.fieldTypes[i],right.fieldTypes[i]);
+            // UNKNOWN literal conversion belongs to transformation. Field
+            // signatures remain pair-owned, particularly across row IN peers.
+            const auto unknownInput = [&](const ExprPtr& input, const std::string& type,
+                                          const std::string& target) {
+                const auto* literal = dynamic_cast<const LiteralExpr*>(input.get());
+                if (common_type_detail::canonical(type) != "unknown" || !literal ||
+                    literal->preparedSubquery || !literal->typeName.empty()) return;
+                if (metadata.assignmentInput) metadata.assignmentInput({"",target},literal,"unknown");
+                CastExpr cast; cast.typeName = target; cast.implicit = true;
+                cast.operand = std::make_unique<LiteralExpr>(*literal);
+                ExprEvaluator pure;
+                (void)pure.eval(&cast,RowContext{});
+            };
+            unknownInput(left.elements[i],left.fieldTypes[i],binding->leftType);
+            unknownInput(right.elements[i],right.fieldTypes[i],binding->rightType);
+            signatures.push_back(std::move(*binding));
+        }
+        return signatures;
     }
 
     static std::string arrayElement(const std::string& type) {
@@ -418,6 +464,7 @@ public:
             validateInternalCharInputCast(input,type);
             validateIntervalInputCast(input,type);
             validateRegtypeInputCast(input,type);
+            validateRecordInputCast(input,type,cast->operand.get());
             geometric_input_detail::validateUnknownInput(cast->operand.get(),cast->typeName);
             if (metadata.assignmentInput) metadata.assignmentInput({"", cast->typeName}, cast, cast->typeName);
             bindEnumCast(cast,cast->operand.get(),cast->typeName);
@@ -467,6 +514,7 @@ public:
                 validateInternalCharInputCast(left,castType);
                 validateIntervalInputCast(left,castType);
                 validateRegtypeInputCast(left,castType);
+                validateRecordInputCast(left,castType,binary->left.get());
                 geometric_input_detail::validateUnknownInput(binary->left.get(),type->value);
                 if (metadata.assignmentInput) metadata.assignmentInput({"", type->value}, binary, type->value);
                 bindEnumCast(binary,binary->left.get(),type->value);
@@ -477,6 +525,29 @@ public:
             // Slice bounds are this parser's retained grammar envelope, not
             // an opaque SQL value/name expression (analogous to ::'s label).
             const auto right = binary->op=="[:]"?std::string("unknown"):expression(binary->right, scopes);
+            static const std::set<std::string> rowOperators = {"=","<>","!=","<",">","<=",">="};
+            const auto* leftConstructor = dynamic_cast<RowExpr*>(binary->left.get());
+            auto* rightRow = dynamic_cast<RowExpr*>(binary->right.get());
+            if (leftConstructor && leftConstructor->constructor && rightRow) {
+                auto* lhs = static_cast<RowExpr*>(binary->left.get());
+                if (rightRow->constructor && rowOperators.count(binary->op)) {
+                    binary->rowComparison = true;
+                    binary->rowComparisons = {rowPairBindings(*lhs,*rightRow,binary->op)};
+                    return "boolean";
+                }
+                const auto operation = SQLParser::toLower(binary->op);
+                if (!rightRow->constructor && (operation == "in" || operation == "not in") &&
+                    std::all_of(rightRow->elements.begin(),rightRow->elements.end(),[](const auto& member) {
+                        const auto* row = dynamic_cast<const RowExpr*>(member.get());
+                        return row && row->constructor;
+                    })) {
+                    binary->rowComparison = true;
+                    for (auto& member : rightRow->elements)
+                        binary->rowComparisons.push_back(rowPairBindings(*lhs,
+                            *static_cast<RowExpr*>(member.get()),"="));
+                    return "boolean";
+                }
+            }
             if(binary->op=="[]" || binary->op=="[:]") {
                 const Expr* receiver=binary->left.get();
                 if(binary->op=="[]")while(const auto* item=dynamic_cast<const BinaryOpExpr*>(receiver)) {
@@ -840,9 +911,13 @@ public:
             }
             return array->elementType + "[]";
         }
-        case ExprType::RowExpr:
-            for (auto& element : static_cast<RowExpr*>(node.get())->elements) expression(element, scopes);
+        case ExprType::RowExpr: {
+            auto* row = static_cast<RowExpr*>(node.get());
+            row->fieldTypes.clear();
+            for (auto& element : row->elements) row->fieldTypes.push_back(expression(element, scopes));
+            if (row->constructor) valueTypeOids[row] = mapBuiltinTypeNameToOid("record");
             return "record";
+        }
         default: throw DbError("0A000", "expression requires structured preparation");
         }
     }

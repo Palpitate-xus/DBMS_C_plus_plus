@@ -368,6 +368,10 @@ struct BinaryOpExpr : public Expr {
     ExprPtr right;
     std::optional<ArrayConcatBinding> arrayConcat;
     std::optional<QueryComparisonBinding> comparison;
+    bool rowComparison = false;
+    // One signature vector for a direct row comparison; one per actual
+    // RHS constructor for row IN. No input evaluation is used to prepare it.
+    std::vector<std::vector<QueryComparisonBinding>> rowComparisons;
     BinaryOpExpr() { type = ExprType::BinaryOp; }
     std::string toString() const override {
         return (left ? left->toString() : "?") + " " + op + " " +
@@ -481,6 +485,8 @@ struct ArrayExpr : public Expr {
 // ROW(expr, ...)
 struct RowExpr : public Expr {
     std::vector<ExprPtr> elements;
+    bool constructor = false; // false is the historical scalar IN-list role
+    std::vector<std::string> fieldTypes;
     RowExpr() { type = ExprType::RowExpr; }
     std::string toString() const override { return "ROW(...)"; }
 };
