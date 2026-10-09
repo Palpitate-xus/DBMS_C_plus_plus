@@ -32924,11 +32924,16 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
                         {"pg_stat_activity", {{"pid","integer"},{"datname","name"},{"usename","name"},{"state","text"},{"query","text"}}}
                     };
                     const auto found = virtualTables.find(requested.name);
-                    if (found != virtualTables.end()) { description.columns = found->second; return description; }
+                    if (found != virtualTables.end()) {
+                        description.columns = found->second;
+                        for(auto& column:description.columns)column.typeOid=mapBuiltinTypeNameToOid(column.type);
+                        return description;
+                    }
                     if(requested.name=="pg_type" &&
                        (!requested.schema.empty() ||
                         (!tableExists(dbname,requested.name) && !viewExists(dbname,requested.name)))) {
                         description.columns=ownedTypeCatalogDescriptor();
+                        for(auto& column:description.columns)column.typeOid=mapBuiltinTypeNameToOid(column.type);
                         return description;
                     }
                 }
