@@ -4732,7 +4732,9 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
     }
     if (v.isNull) {
         ExprValue result(targetTypeName, "", true);
-        if (parseCharacterCastSpec(target).kind != CharacterCastKind::None)
+        auto characterTarget=target;
+        while(common_type_detail::array(characterTarget))characterTarget.resize(characterTarget.size()-2);
+        if (parseCharacterCastSpec(characterTarget).kind != CharacterCastKind::None)
             result.collation = v.collation;
         return result;
     }

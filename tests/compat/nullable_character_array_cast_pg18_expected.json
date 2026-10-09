@@ -1,0 +1,100 @@
+[
+  {
+    "sql": "SELECT CAST(NULL AS varchar(3)[]) AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1015
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS character(3)[]) AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1014
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS varchar(3)[][]) AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1015
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS pg_catalog._varchar(3)) AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1015
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS varchar(0)[]) AS value WHERE false",
+    "reference": [
+      [],
+      "22023",
+      "length for type varchar must be at least 1",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS character(0)[]) AS value WHERE false",
+    "reference": [
+      [],
+      "22023",
+      "length for type char must be at least 1",
+      [],
+      null,
+      []
+    ]
+  }
+]
