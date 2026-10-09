@@ -21,6 +21,17 @@ static void test_bootstrap_has_core_types() {
     assert(reg.findType("varchar") != nullptr);
     assert(reg.findType("character varying") != nullptr);
     assert(reg.findType("text") != nullptr);
+    const auto* name=reg.findType("NAME");
+    assert(name && name->canonicalName=="name" && name->typlen==64 &&
+        name->typalign=='c' && name->typstorage=='p' &&
+        name->category==TypeCategory::String && !name->hasTypeMod);
+    assert(reg.normalizeTypeName("NaMe")=="name");
+    assert(mapBuiltinTypeNameToOid("name")==19 && mapBuiltinTypeNameToOid("name[]")==1003);
+    Column nameColumn;
+    assert(reg.resolveColumnType(nameColumn,"NAME",{},false).empty());
+    assert(nameColumn.dataType=="name" && nameColumn.dsize==64 && nameColumn.typeMod==-1 &&
+        !nameColumn.isArray && !nameColumn.isVariableLength);
+    assert(!reg.applyTypeMods("name",{"2"}).ok());
     assert(reg.findType("timestamp") != nullptr);
     assert(reg.findType("timestamptz") != nullptr);
     assert(reg.findType("bytea") != nullptr);

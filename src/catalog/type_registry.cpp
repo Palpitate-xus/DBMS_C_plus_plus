@@ -349,6 +349,7 @@ void TypeRegistry::registerNumericTypes() {
 }
 
 void TypeRegistry::registerStringTypes() {
+    registerType({"name", 64, 'c', 'p', TypeCategory::String, false, -1, 0, true});
     // The catalog's one-byte type has its own quoted identity. Never register
     // unquoted char as its alias: SQL CHAR remains the bpchar grammar alias.
     registerType({"\"char\"", 1, 'c', 'p', TypeCategory::String, false, -1, 0, false});
