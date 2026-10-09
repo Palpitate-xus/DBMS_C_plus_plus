@@ -206,6 +206,7 @@ std::string TypeRegistry::resolveColumnType(Column& col,
         col.dsize = base.dsize;
         col.isVariableLength = true;
         col.isArray = true;
+        col.typeMod = canonical == "interval" ? base.typmod : -1;
         return "";
     }
 
@@ -216,6 +217,7 @@ std::string TypeRegistry::resolveColumnType(Column& col,
     col.dsize = r.dsize;
     col.isVariableLength = r.isVariableLength;
     col.isArray = false;
+    col.typeMod = canonical == "interval" ? r.typmod : -1;
 
     // 同步 dataName（列名）不应由类型系统设置，但保留调用者已设置的值
     return "";
@@ -236,6 +238,12 @@ std::string TypeRegistry::validateColumn(Column& col) const {
     // store the element type in dataType (no "[]" suffix), so the suffix check
     // alone would wrongly clear isArray and revert them to fixed-width scalars.
     if (col.isArray) isArray = true;
+
+    if (col.typeMod != -1) {
+        if (normalizeTypeName(baseType) != "interval") return "unsupported persisted column modifier";
+        try { (void)interval_type_detail::unpack(col.typeMod); }
+        catch (const DbError& error) { return error.message(); }
+    }
 
     const TypeEntry* entry = findType(baseType);
     if (!entry) {

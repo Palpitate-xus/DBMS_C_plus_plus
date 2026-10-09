@@ -10,6 +10,7 @@
 #include "catalog/CatalogService.h"
 #include "catalog/systables.h"
 #include "catalog/type_registry.h"
+#include "utils/interval_type.h"
 #include "access/IndexFileUtil.h"
 #include "common/logs.h"
 #include "common/FeatureGate.h"
@@ -115,6 +116,10 @@ bool rejectMalformedDdlAst() {
 
 bool declaredColumnTypeMod(const ColumnDef& definition, int32_t& modifier) {
     const std::string type = toLower(trim(definition.typeName));
+    if (type == "interval") {
+        modifier = interval_type_detail::modifiers(definition.typeMods).packed();
+        return true;
+    }
     const bool varying = type == "varchar" || type == "character varying";
     const bool fixed = type == "char" || type == "character" || type == "bpchar";
     const bool numeric = type == "numeric" || type == "decimal";
@@ -980,6 +985,7 @@ static PgAttributeRow catalogAttributeForColumn(
     }
     attribute.attndims = column.isArray ? 1 : 0;
     attribute.atttypmod = -1;
+    if (column.dataType == "interval") attribute.atttypmod = column.typeMod;
     if (!column.isArray && column.dataType == "bit") {
         attribute.atttypmod = static_cast<int32_t>(column.dsize + 4);
     } else if (!column.isArray && column.dataType == "bit varying" &&
@@ -1910,6 +1916,15 @@ bool DdlExecutor::checkDatabaseCommandOutsideTransaction(Session& s) {
 static ColumnDef columnDefFromAlterType(const std::string& name,
                                         const std::string& typeSpec,
                                         bool allowArraySuffix = false) {
+    if (allowArraySuffix) {
+        // The AST stores a rendered declaration, not a physical type name.
+        // Decode it with the same grammar as CREATE/Cast rather than treating
+        // INTERVAL SECOND(1) as a user type named "INTERVAL SECOND".
+        auto definition = SQLParser::parseTypeSpecification(typeSpec);
+        definition.name = name;
+        definition.isNull = true;
+        return definition;
+    }
     ColumnDef cd;
     cd.name = name;
     cd.isNull = true;
@@ -4457,6 +4472,7 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
         col.dataType = "timetz";
     } else if (baseType == "interval") {
         col = makeIntervalColumn(cd.name, cd.isNull, cd.isPrimaryKey);
+        col.typeMod = interval_type_detail::modifiers(typeMods).packed();
     } else if (baseType == "json") {
         col = makeJsonColumn(cd.name, cd.isNull, cd.isPrimaryKey);
     } else if (baseType == "jsonb") {

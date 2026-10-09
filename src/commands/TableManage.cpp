@@ -11,6 +11,7 @@
 #include "common/sha256.h"
 #include "utils/plpgsql.h"
 #include "utils/interval.h"
+#include "utils/interval_type.h"
 #include "replication/ReplicationManager.h"
 #include "parser/parser.h"
 #include "TxnIdGenerator.h"
@@ -9827,6 +9828,31 @@ static bool normalizeInterval(const std::string& value, std::string& normalized)
     return true;
 }
 
+// One real runtime datum, never interpolated into SQL. Scalar/array input
+// and every storage writer use the same declaration-owned interval cast.
+static bool normalizeIntervalColumn(const Column& column, const std::string& value,
+                                    std::string& normalized) {
+    try {
+        CastExpr cast;
+        cast.typeName = "interval" + std::string(column.isArray ? "[]" : "");
+        cast.typeMods = interval_type_detail::unpack(column.typeMod);
+        auto parameter = std::make_unique<ParameterExpr>();
+        parameter->origin = ParameterOrigin::RuntimeCell;
+        parameter->declaredType = "unknown";
+        cast.operand = std::move(parameter);
+        RowContext context;
+        context.setParameters({ExprValue("unknown", value, false)});
+        ExprEvaluator evaluator;
+        normalized = evaluator.eval(&cast, context).value;
+        if (column.isArray) {
+            std::string canonical;
+            if (!normalizeArray(normalized, "interval", canonical)) return false;
+            normalized = std::move(canonical);
+        }
+        return true;
+    } catch (const DbError&) { return false; }
+}
+
 // ========================================================================
 // Composite-type row literal: "(v1,v2,...)". Validates the field count against
 // the composite type definition, checks numeric fields parse, and re-emits the
@@ -14851,6 +14877,8 @@ DBStatus StorageEngine::renameDatabase(const std::string& oldName,
 constexpr int32_t SCHEMA_FORMAT_VERSION = 0x44420009;  // "DB" + 64-byte identifier fields
 constexpr int32_t SCHEMA_PHYSICAL_ID_FORMAT_VERSION = 0x4442000A;
 constexpr int32_t SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION = 0x4442000B;
+constexpr int32_t SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION = 0x4442000C;
+constexpr uint32_t SCHEMA_COLUMN_TYPEMOD_MAGIC = 0x314D5449; // "ITM1"
 constexpr uint32_t SCHEMA_PHYSICAL_ID_MAGIC = 0x31444952;  // "RID1"
 constexpr uint32_t SCHEMA_DEFAULT_ORIGIN_MAGIC = 0x314F5344; // "DSO1"
 constexpr int32_t MAX_PERSISTED_COLUMN_SIZE = 65535;
@@ -14904,7 +14932,14 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
         }
     }
     bool hasDefaultOrigins = false;
+    bool hasColumnTypeMods = false;
     for (size_t i = 0; i < tbl.len; ++i) {
+        if (tbl.cols[i].typeMod != -1) {
+            if (tbl.cols[i].dataType != "interval") { out.setstate(std::ios::failbit); return; }
+            try { (void)interval_type_detail::unpack(tbl.cols[i].typeMod); }
+            catch (const DbError&) { out.setstate(std::ios::failbit); return; }
+            hasColumnTypeMods = true;
+        }
         const auto origin = tbl.cols[i].defaultOrigin;
         if (origin != Column::DefaultOrigin::LegacyFrozen && origin != Column::DefaultOrigin::Column && origin != Column::DefaultOrigin::Domain) {
             out.setstate(std::ios::failbit); return;
@@ -14920,7 +14955,7 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
     }
     // Old readers reject B before consuming it rather than treating an
     // implicit domain default as a frozen SQL column expression.
-    const int32_t schemaFormat = hasDefaultOrigins ? SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION : tbl.physicalRelationId == 0
+    const int32_t schemaFormat = hasColumnTypeMods ? SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION : hasDefaultOrigins ? SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION : tbl.physicalRelationId == 0
         ? SCHEMA_FORMAT_VERSION : SCHEMA_PHYSICAL_ID_FORMAT_VERSION;
     out.write(reinterpret_cast<const char*>(&schemaFormat), sizeof(schemaFormat));
     int32_t len = static_cast<int32_t>(tbl.len);
@@ -15139,7 +15174,7 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
     uint16_t longDefaultCount = 0;
     for (size_t i = 0; i < tbl.len; ++i)
         if (tbl.cols[i].defaultValue.size() > MAX_COL_NAME_LEN) ++longDefaultCount;
-    if (longDefaultCount != 0 || !tbl.rangePartitions.empty() || tbl.physicalRelationId != 0 || hasDefaultOrigins) {
+    if (longDefaultCount != 0 || !tbl.rangePartitions.empty() || tbl.physicalRelationId != 0 || hasDefaultOrigins || hasColumnTypeMods) {
         out.write(reinterpret_cast<const char*>(&SCHEMA_LONG_DEFAULT_MAGIC),
                   sizeof(SCHEMA_LONG_DEFAULT_MAGIC));
         out.write(reinterpret_cast<const char*>(&longDefaultCount),
@@ -15156,7 +15191,7 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
 
     // Persist lower endpoints without changing the legacy schema prefix. Old
     // schemas infer them as MINVALUE followed by the preceding upper bound.
-    if (!tbl.rangePartitions.empty() || tbl.physicalRelationId != 0 || hasDefaultOrigins) {
+    if (!tbl.rangePartitions.empty() || tbl.physicalRelationId != 0 || hasDefaultOrigins || hasColumnTypeMods) {
         out.write(reinterpret_cast<const char*>(&SCHEMA_RANGE_LOWER_BOUNDS_MAGIC),
                   sizeof(SCHEMA_RANGE_LOWER_BOUNDS_MAGIC));
         const int32_t lowerBoundCount =
@@ -15171,13 +15206,13 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
             writeFixedString(out, lower, MAX_COL_NAME_LEN);
         }
     }
-    if (tbl.physicalRelationId != 0 || hasDefaultOrigins) {
+    if (tbl.physicalRelationId != 0 || hasDefaultOrigins || hasColumnTypeMods) {
         out.write(reinterpret_cast<const char*>(&SCHEMA_PHYSICAL_ID_MAGIC),
                   sizeof(SCHEMA_PHYSICAL_ID_MAGIC));
         out.write(reinterpret_cast<const char*>(&tbl.physicalRelationId),
                   sizeof(tbl.physicalRelationId));
     }
-    if (hasDefaultOrigins) {
+    if (hasDefaultOrigins || hasColumnTypeMods) {
         out.write(reinterpret_cast<const char*>(&SCHEMA_DEFAULT_ORIGIN_MAGIC),sizeof(SCHEMA_DEFAULT_ORIGIN_MAGIC));
         const uint16_t count = static_cast<uint16_t>(tbl.len);
         out.write(reinterpret_cast<const char*>(&count),sizeof(count));
@@ -15192,6 +15227,13 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
             out.write(tbl.cols[i].domainName.data(),length);
         }
     }
+    if (hasColumnTypeMods) {
+        out.write(reinterpret_cast<const char*>(&SCHEMA_COLUMN_TYPEMOD_MAGIC), sizeof(SCHEMA_COLUMN_TYPEMOD_MAGIC));
+        const uint16_t count = static_cast<uint16_t>(tbl.len);
+        out.write(reinterpret_cast<const char*>(&count), sizeof(count));
+        for (size_t i = 0; i < tbl.len; ++i)
+            out.write(reinterpret_cast<const char*>(&tbl.cols[i].typeMod), sizeof(tbl.cols[i].typeMod));
+    }
 }
 
 TableSchema StorageEngine::readSchema(std::istream& in, const std::string& tablename) const {
@@ -15201,7 +15243,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     in.read(reinterpret_cast<char*>(&firstInt), 4);
     if (!in) return {};
 
-    if (firstInt != SCHEMA_FORMAT_VERSION && firstInt != SCHEMA_PHYSICAL_ID_FORMAT_VERSION && firstInt != SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION) {
+    if (firstInt != SCHEMA_FORMAT_VERSION && firstInt != SCHEMA_PHYSICAL_ID_FORMAT_VERSION && firstInt != SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION && firstInt != SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION) {
         std::cerr << "[catalog] unsupported schema format for table " << tablename
                   << "; recreate the database with the current binary" << std::endl;
         return {};
@@ -15510,7 +15552,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     if (!in) return {};
     if (in.peek() == std::char_traits<char>::eof()) {
         if (!in.eof()) return {};
-        if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION || firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION) return {};
+        if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION || firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION || firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION) return {};
         in.clear();
         return tbl;
     }
@@ -15556,7 +15598,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     // them as SERIAL-like auto-increment columns (identityKind == 0).
     if (in.peek() == std::char_traits<char>::eof()) {
         if (!in.eof()) return {};
-        if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION || firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION) return {};
+        if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION || firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION || firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION) return {};
         in.clear();
         return tbl;
     }
@@ -15577,7 +15619,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     }
     if (in.peek() == std::char_traits<char>::eof()) {
         if (!in.eof()) return {};
-        if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION || firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION) return {};
+        if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION || firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION || firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION) return {};
         in.clear();
         return tbl;
     }
@@ -15605,7 +15647,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     }
     if (in.peek() == std::char_traits<char>::eof()) {
         if (!in.eof()) return {};
-        if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION || firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION) return {};
+        if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION || firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION || firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION) return {};
         // A zero-entry DFT1 block is emitted only with the new RANGE-bound
         // extension; an EOF here therefore means a truncated new schema.
         if (defaultCount == 0 && !tbl.rangePartitions.empty()) return {};
@@ -15643,7 +15685,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
         }
         persistedLowerBounds.push_back(std::move(lower));
     }
-    if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION || firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION) {
+    if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION || firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION || firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION) {
         uint32_t physicalIdMagic = 0;
         in.read(reinterpret_cast<char*>(&physicalIdMagic), sizeof(physicalIdMagic));
         in.read(reinterpret_cast<char*>(&tbl.physicalRelationId), sizeof(tbl.physicalRelationId));
@@ -15651,7 +15693,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
             (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION && tbl.physicalRelationId == 0))
             return {};
     }
-    if (firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION) {
+    if (firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION || firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION) {
         uint32_t magic = 0; uint16_t count = 0;
         in.read(reinterpret_cast<char*>(&magic),sizeof(magic));
         in.read(reinterpret_cast<char*>(&count),sizeof(count));
@@ -15670,6 +15712,21 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
             if (!tbl.cols[i].domainName.empty()) {
                 CatalogManager::QualifiedName domain;
                 if (!CatalogManager::parseQualifiedName(tbl.cols[i].domainName,domain,true) || domain.name.empty()) return {};
+            }
+        }
+    }
+    if (firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION) {
+        uint32_t magic = 0; uint16_t count = 0;
+        in.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+        in.read(reinterpret_cast<char*>(&count), sizeof(count));
+        if (!in || magic != SCHEMA_COLUMN_TYPEMOD_MAGIC || count != tbl.len) return {};
+        for (size_t i = 0; i < tbl.len; ++i) {
+            in.read(reinterpret_cast<char*>(&tbl.cols[i].typeMod), sizeof(tbl.cols[i].typeMod));
+            if (!in) return {};
+            if (tbl.cols[i].typeMod != -1) {
+                if (tbl.cols[i].dataType != "interval") return {};
+                try { (void)interval_type_detail::unpack(tbl.cols[i].typeMod); }
+                catch (const DbError&) { return {}; }
             }
         }
     }
@@ -18350,6 +18407,7 @@ DBStatus StorageEngine::alterTableAlterColumnType(const std::string& dbname,
     updated.dsize = target.dsize;
     updated.isVariableLength = target.isVariableLength;
     updated.isArray = target.isArray;
+    updated.typeMod = target.typeMod;
     updated.isUnsigned = target.isUnsigned;
     updated.enumValues = target.enumValues;
     tbl.cols[colIdx] = updated;
@@ -25000,7 +25058,7 @@ DBStatus StorageEngine::insertInternal(
         if (col.isArray) {
             if (!val.empty()) {
                 std::string canonical;
-                if (!normalizeArray(val, col.dataType, canonical)) {
+                if (!(col.dataType == "interval" ? normalizeIntervalColumn(col, val, canonical) : normalizeArray(val, col.dataType, canonical))) {
                     lockManager_.unlock(tablename);
                     return DBStatus::INVALID_VALUE;
                 }
@@ -25135,7 +25193,7 @@ DBStatus StorageEngine::insertInternal(
         // dimensions, per-element type for numeric element types).
         if (col.isArray && !val.empty()) {
             std::string canon;
-            if (!normalizeArray(val, col.dataType, canon)) {
+            if (!(col.dataType == "interval" ? normalizeIntervalColumn(col, val, canon) : normalizeArray(val, col.dataType, canon))) {
                 lockManager_.unlock(tablename);
                 return DBStatus::INVALID_VALUE;
             }
@@ -25173,7 +25231,7 @@ DBStatus StorageEngine::insertInternal(
         // Validate / canonicalize interval to PG postgres style.
         if (col.dataType == "interval" && !col.isArray && !val.empty()) {
             std::string canon;
-            if (!normalizeInterval(val, canon)) {
+            if (!normalizeIntervalColumn(col, val, canon)) {
                 lockManager_.unlock(tablename);
                 return DBStatus::INVALID_VALUE;
             }
@@ -28767,7 +28825,7 @@ DBStatus StorageEngine::updateInternal(
                     } else if (col.isArray) {
                         if (!kv.second.empty()) {
                             std::string canon;
-                            if (!normalizeArray(kv.second, col.dataType, canon))
+                            if (!(col.dataType == "interval" ? normalizeIntervalColumn(col, kv.second, canon) : normalizeArray(kv.second, col.dataType, canon)))
                                 return DBStatus::INVALID_VALUE;
                             storeVal = canon;
                         }
@@ -28796,7 +28854,7 @@ DBStatus StorageEngine::updateInternal(
                     } else if (col.dataType == "interval") {
                         if (!kv.second.empty()) {
                             std::string canon;
-                            if (!normalizeInterval(kv.second, canon))
+                            if (!normalizeIntervalColumn(col, kv.second, canon))
                                 return DBStatus::INVALID_VALUE;
                             storeVal = canon;
                         }
@@ -32984,7 +33042,7 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
                         // scalar alias registry does not fold "int4[]".
                         typeName = ExprHelper::canonicalResultTypeName(typeName) + (arrayType ? "[]" : "");
                         description.columns.push_back({attribute.attname, typeName,
-                            attribute.attgenerated != '\0', attribute.attidentity, attribute.atttypid});
+                            attribute.attgenerated != '\0', attribute.attidentity, attribute.atttypid, attribute.atttypmod});
                     }
                     if (relation.relkind == 'v') {
                         description.viewSql = viewSource(schema == "public" ? requested.name : schema + "." + requested.name);
@@ -33002,7 +33060,7 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
                     for (size_t i = 0; i < table.len; ++i)
                         description.columns.push_back({table.cols[i].dataName,
                             ExprHelper::canonicalResultTypeName(table.cols[i].dataType + (table.cols[i].isArray ? "[]" : "")),
-                            !table.cols[i].generatedExpr.empty(), table.cols[i].identityKind});
+                            !table.cols[i].generatedExpr.empty(), table.cols[i].identityKind, 0, table.cols[i].typeMod});
                     if (!description.columns.empty()) return description;
                 }
                 auto view = viewSource(schema == "public" ? requested.name : schema + "." + requested.name);

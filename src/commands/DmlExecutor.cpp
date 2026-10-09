@@ -20,6 +20,7 @@
 #include "permissions.h"
 #include "types/numeric.h"
 #include "utils/interval.h"
+#include "utils/interval_type.h"
 
 #include <algorithm>
 #include <atomic>
@@ -709,8 +710,22 @@ std::string intervalTargetInputState(const TableSchema& table,
     for (size_t i = 0; i < table.len; ++i) {
         const auto& target = table.cols[i];
         if (target.dataName == column && !target.isArray &&
-            canonicalSetType(target.dataType) == "interval")
-            return intervalInputSqlState(parseIntervalInput(*value));
+            canonicalSetType(target.dataType) == "interval") {
+            try {
+                CastExpr cast;
+                cast.typeName = "interval";
+                cast.typeMods = interval_type_detail::unpack(target.typeMod);
+                auto parameter = std::make_unique<ParameterExpr>();
+                parameter->origin = ParameterOrigin::RuntimeCell;
+                parameter->declaredType = "unknown";
+                cast.operand = std::move(parameter);
+                RowContext context;
+                context.setParameters({ExprValue("unknown", *value, false)});
+                ExprEvaluator evaluator;
+                (void)evaluator.eval(&cast, context);
+                return {};
+            } catch (const DbError& error) { return error.sqlState(); }
+        }
     }
     return {};
 }

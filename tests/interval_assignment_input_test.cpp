@@ -57,7 +57,10 @@ int main() {
     LiteralExpr defaultValue; defaultValue.value = "DEFAULT";
     validateAssignmentInput(target, &defaultValue, "unknown");
     validateAssignmentInput(target, nullptr, "interval");
-    validateAssignmentInput({"v", "interval[]"}, nullptr, "text");
+    bool textArrayRejected = false;
+    try { validateAssignmentInput({"v", "interval[]"}, nullptr, "text"); }
+    catch (const DbError& error) { textArrayRejected = error.sqlState() == "42804"; }
+    assert(textArrayRejected);
     validateAssignmentInput({"v", "integer"}, nullptr, "text");
     bool textNullRejected = false;
     try { validateAssignmentInput(target, nullptr, "text"); }

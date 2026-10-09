@@ -6,6 +6,8 @@
 
 ## [Unreleased]
 
+- 修复 INTERVAL 列字段范围和小数秒精度在 INSERT、UPDATE、数组元素及 ALTER TYPE 中丢失的问题，并为实际表列返回对应的协议类型修饰符。
+- 带 INTERVAL 修饰符的表声明使用 schema 格式 `0x4442000C` 保存精度；未带修饰符的旧声明仍可读取且保持原格式。写入新格式的声明不能由旧版程序读取，请保留升级前备份，不要直接降级打开这类数据目录。
 - PostgreSQL 18 兼容审计仍在逐项执行；完成状态只以 `docs/postgresql-18-gap-audit.md` 与 `docs/gap-progress.json` 为准。
 - GitHub Actions workflow 按维护要求保持 `.disabled`；`scripts/build_tests.sh` 是本地完整验证入口。
 

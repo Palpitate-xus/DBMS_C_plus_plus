@@ -6,6 +6,7 @@
 #include "parser/query_binding.h"
 #include "parser/parser.h"
 #include "utils/interval.h"
+#include "utils/interval_type.h"
 
 namespace dbms {
 namespace assignment_input_detail {
@@ -14,12 +15,14 @@ inline bool unknownLiteral(const LiteralExpr* literal) {
     return literal && !literal->preparedSubquery && literal->typeName.empty();
 }
 
-inline void intervalLiteral(const LiteralExpr& literal) {
+inline void intervalLiteral(const LiteralExpr& literal, int32_t modifier = -1,
+                            bool array = false) {
     // Decode one actual SQL literal only. No expression folding, stored
     // function lookup, parameters, rows, or scalar children are evaluated.
     ExprEvaluator evaluator;
     CastExpr conversion;
-    conversion.typeName = "interval";
+    conversion.typeName = array ? "interval[]" : "interval";
+    conversion.typeMods = interval_type_detail::unpack(modifier);
     conversion.operand = std::make_unique<LiteralExpr>(literal);
     // Reuse actual interval input, including valid symbolic infinity, rather
     // than imposing a second finite-only parser contract. The operand is
@@ -59,23 +62,25 @@ inline void declaredIntervalLiteral(const Expr* source) {
 // resolve all siblings of one VALUES row before this callback, and must not
 // bind a later row first. CTE/derived unknown output types must be finalized
 // to text; only a direct source leaf retains contextual unknown input.
-// Other target types and arrays deliberately retain their existing contract.
+// Other target types deliberately retain their existing contract. Interval
+// arrays use their actual element modifier when validating unknown input.
 inline void validateAssignmentInput(const QueryOutputColumn& target,
                                     const Expr* source,
                                     const std::string& sourceType) {
-    if (ExprHelper::canonicalResultTypeName(target.type) != "interval") return;
+    const auto targetType = ExprHelper::canonicalResultTypeName(target.type);
+    if (targetType != "interval" && targetType != "interval[]") return;
     const auto type = ExprHelper::canonicalResultTypeName(sourceType);
     if (type.empty() || type == "unknown") {
         const auto* literal = dynamic_cast<const LiteralExpr*>(source);
         if (assignment_input_detail::unknownLiteral(literal)) {
             if (SQLParser::toLower(literal->value) == "default") return;
-            assignment_input_detail::intervalLiteral(*literal);
+            assignment_input_detail::intervalLiteral(*literal, target.typeMod, targetType == "interval[]");
         }
         return;
     }
-    if (type != "interval")
+    if (type != targetType)
         throw DbError("42804", "column \"" + target.name +
-            "\" is of type interval but expression is of type " + type);
+            "\" is of type " + targetType + " but expression is of type " + type);
     assignment_input_detail::declaredIntervalLiteral(source);
 }
 

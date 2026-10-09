@@ -13,6 +13,7 @@ struct QueryOutputColumn {
     bool generated = false;
     char identity = 0;
     uint32_t typeOid = 0;
+    int32_t typeMod = -1; // same-generation physical assignment metadata
 };
 using QueryRowDescriptor = std::vector<QueryOutputColumn>;
 struct QueryRelationMetadata {

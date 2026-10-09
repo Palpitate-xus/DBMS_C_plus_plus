@@ -77,6 +77,18 @@ inline Modifiers modifiers(const std::vector<std::string>& values) {
     return result;
 }
 
+inline std::vector<std::string> unpack(int32_t packed) {
+    if (packed == -1) return {};
+    if (packed < 0) throw DbError("22023", "invalid interval type modifier");
+    const int range = uint32_t(packed) >> 16;
+    const int precision = uint32_t(packed) & 0xffff;
+    if (!fields(range) || (precision > 6 && precision != fullPrecision))
+        throw DbError("22023", "invalid interval type modifier");
+    std::vector<std::string> values{std::to_string(range)};
+    if (precision != fullPrecision) values.push_back(std::to_string(precision));
+    return values;
+}
+
 // Render the stored semantic mask back into genuine SQL grammar, rather
 // than leaking internal interval(mask,precision) into another parser.
 inline std::string render(const std::string& base, const std::vector<std::string>& values) {

@@ -9828,36 +9828,14 @@ StmtPtr SQLParser::parseDropLargeObject(const std::vector<std::string>& tokens, 
 StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_t& pos) {
     auto stmt = std::make_unique<AlterTableStmt>();
     const auto columnType = [&](std::string& type) {
-        if (pos >= tokens.size() || tokens[pos] == ";" || tokens[pos] == ",") return false;
-        type = tokens[pos++];
-        if (pos + 1 < tokens.size() && tokens[pos] == ".") {
-            type += "." + tokens[pos + 1];
-            pos += 2;
+        try {
+            type = renderDeclaredType(consumeDeclaredType(tokens, pos));
+            return true;
+        } catch (const DbError& error) {
+            if (error.sqlState() != "42601") throw;
+            retainDeclarationSyntaxError(error);
+            return false;
         }
-        const auto base = toLower(type);
-        if (pos < tokens.size() &&
-            ((base == "double" && toLower(tokens[pos]) == "precision") ||
-             (base == "character" && toLower(tokens[pos]) == "varying") ||
-             (base == "bit" && toLower(tokens[pos]) == "varying")))
-            type += " " + tokens[pos++];
-        if (pos < tokens.size() && tokens[pos] == "(") {
-            type += tokens[pos++];
-            while (pos < tokens.size() && tokens[pos] != ")" && tokens[pos] != ";")
-                type += tokens[pos++];
-            if (pos >= tokens.size() || tokens[pos] != ")") return false;
-            type += tokens[pos++];
-        }
-        if ((base == "time" || base == "timestamp") && pos + 2 < tokens.size() &&
-            (toLower(tokens[pos]) == "with" || toLower(tokens[pos]) == "without") &&
-            toLower(tokens[pos + 1]) == "time" && toLower(tokens[pos + 2]) == "zone") {
-            for (int i = 0; i < 3; ++i) type += " " + tokens[pos++];
-        }
-        while (pos < tokens.size() && tokens[pos] == "[") {
-            if (pos + 1 >= tokens.size() || tokens[pos + 1] != "]") return false;
-            type += "[]";
-            pos += 2;
-        }
-        return true;
     };
     if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
         stmt->ifExists = true; pos += 2;
