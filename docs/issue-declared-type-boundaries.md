@@ -658,11 +658,13 @@ cherry-pick provenance; source inputs now exactly match private faab.
 
 Masterd21e0a5b has163 scoped source repairs and761auto+2Main/424registered/
 58TU. READMEdb35e522 remains evergreen. Actual Root-path fresh58 normal build
-94462 is running under `/tmp/dbms-root-modifiers-publish.YVRgelTf` with current
-input sealfaab. This is genuine Root recompilation, not cross-path receipt or
-object reuse. Root90/52/original384 gates are prepared but not started until
-the actual build/receipts/cache/repeat/frozen/source proof succeeds. No pending
-build or private test is counted as Root PASS; new full suite not started.
+94462 finished0 under `/tmp/dbms-root-modifiers-publish.YVRgelTf`, genuine58
+fresh compile entries and all58 current receipts/cache/no-recompile repeat/
+frozen/source proof passed, input sealfaab and SHAe72d matching private.
+This is genuine Root recompilation, not cross-path receipt or object reuse.
+Actual Root90native19079/52wire35347/original38435578 are now running on the
+current Root frozen binary, not yet PASS. No pending gate or private test is
+counted as Root test success; new full suite not started.
 Root src/scripts/tests/cmake stay frozen during the publication gates.
 
 The modifier-input field's absence/zero means the type lacks that facility,
