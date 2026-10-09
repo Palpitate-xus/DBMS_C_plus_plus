@@ -139,10 +139,22 @@ def main():
         assert type_oids == [23, 23, 23], type_oids
         assert tag == "SELECT 1", tag
 
-        for sql in ["SELECT fn_sql_add();", "SELECT fn_sql_from();"]:
+        for sql in ["SELECT fn_sql_add();"]:
             rows, state, message, headers = runner.ours_query(
                 client, server["sock"], sql)
             assert state is not None, (sql, rows, headers)
+
+        # Preserve the original table-reading SQL as an exact positive
+        # assertion now that whole SQL-function query bodies are executable.
+        result = runner.decode_wire_result(
+            client.simple_query(server["sock"], "SELECT fn_sql_from();"),
+            include_types=True)
+        rows, state, message, headers, tag, type_oids = result
+        assert state is None, (state, message)
+        assert rows == [["5"]], rows
+        assert headers == ["fn_sql_from"], headers
+        assert tag == "SELECT 1", tag
+        assert type_oids == [23], type_oids
 
         # An error after function execution must not poison the connection.
         rows, state, message, headers = runner.ours_query(
