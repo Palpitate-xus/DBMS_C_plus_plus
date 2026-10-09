@@ -64,15 +64,20 @@ static void test_order_by_nulls() {
     std::cout << "[DML] ORDER BY NULLS OK" << std::endl;
 }
 
-// 5.17 LIMIT WITH TIES parser
+// 5.17 WITH TIES belongs to FETCH, not the LIMIT grammar.
 static void test_limit_with_ties() {
     dbms::SQLParser parser;
+    // Preserve the original SQL as a negative grammar assertion.
     auto r = parser.parse("SELECT id FROM t ORDER BY id LIMIT 5 WITH TIES");
+    // The parse-only API returns an error message, not a wire SQLSTATE.
+    assert(!r.success && !r.error.empty());
+    r = parser.parse("SELECT id FROM t ORDER BY id FETCH FIRST 5 ROWS WITH TIES");
     assert(r.success);
     auto* select = dynamic_cast<dbms::SelectStmt*>(r.stmt.get());
     assert(select);
     assert(select->withTies == true);
-    std::cout << "[DML] LIMIT WITH TIES OK" << std::endl;
+    assert(select->limit && *select->limit == 5);
+    std::cout << "[DML] invalid LIMIT WITH TIES and valid ordered FETCH WITH TIES OK" << std::endl;
 }
 
 // 5.18 FOR UPDATE parser
