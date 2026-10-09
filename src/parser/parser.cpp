@@ -2,6 +2,7 @@
 #include "catalog/catalog.h"
 #include "common/SqlTrivia.h"
 #include "common/DbError.h"
+#include "utils/interval_type.h"
 #include <charconv>
 #include <cctype>
 #include <algorithm>
@@ -217,7 +218,39 @@ static ColumnDef consumeDeclaredType(const std::vector<std::string>& tokens,
             (initial == "double" && next == "precision"))
             definition.typeName += " " + tokens[pos++];
     }
-    if (pos < tokens.size() && tokens[pos] == "(") {
+    if (!qualified && !quoted && initial == "interval") {
+        int mask = interval_type_detail::fullRange;
+        bool hasFields = false;
+        if (pos < tokens.size()) {
+            std::string phrase = SQLParser::toLower(tokens[pos]);
+            if (interval_type_detail::fieldMask(phrase)) {
+                hasFields = true;
+                ++pos;
+                if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "to") {
+                    ++pos;
+                    if (pos >= tokens.size()) throw DbError("42601", "incomplete interval field range");
+                    phrase += " to " + SQLParser::toLower(tokens[pos++]);
+                }
+                mask = interval_type_detail::fieldMask(phrase);
+                if (!mask) throw DbError("42601", "invalid interval field range");
+                definition.typeMods.push_back(std::to_string(mask));
+            }
+        }
+        if (pos < tokens.size() && tokens[pos] == "(") {
+            if (hasFields && !(mask & interval_type_detail::second))
+                throw DbError("42601", "interval field precision requires SECOND");
+            ++pos;
+            if (pos >= tokens.size() || tokens[pos].empty() ||
+                !std::all_of(tokens[pos].begin(), tokens[pos].end(), [](unsigned char c) { return std::isdigit(c); }))
+                throw DbError("42601", "interval precision requires one unsigned integer");
+            if (!hasFields) definition.typeMods.push_back(std::to_string(mask));
+            definition.typeMods.push_back(tokens[pos++]);
+            if (pos >= tokens.size() || tokens[pos++] != ")")
+                throw DbError("42601", "invalid interval precision");
+        }
+        if (pos < tokens.size() && interval_type_detail::fieldMask(SQLParser::toLower(tokens[pos])))
+            throw DbError("42601", "unexpected interval field qualifier");
+    } else if (pos < tokens.size() && tokens[pos] == "(") {
         ++pos;
         bool needsValue = true;
         while (pos < tokens.size() && tokens[pos] != ")") {
@@ -307,7 +340,9 @@ ColumnDef SQLParser::parseTypeSpecification(const std::string& sql) {
 
 static std::string renderDeclaredType(const ColumnDef& definition) {
     std::string result=definition.typeName;
-    if(!definition.typeMods.empty()) {
+    if (SQLParser::toLower(result) == "interval") {
+        result = interval_type_detail::render(result, definition.typeMods);
+    } else if(!definition.typeMods.empty()) {
         result+='(';
         for(size_t i=0;i<definition.typeMods.size();++i)
             result+=(i?",":"")+definition.typeMods[i];

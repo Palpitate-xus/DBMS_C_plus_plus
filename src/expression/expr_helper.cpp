@@ -116,6 +116,10 @@ std::string protocolTypeName(std::string type) {
     if(const auto geometry=geometric_input_detail::builtinType(type);!geometry.empty())
         return geometry;
     type = toLower(type);
+    if (type.rfind("interval ", 0) == 0) {
+        const auto declaration = SQLParser::parseTypeSpecification(type);
+        if (SQLParser::toLower(declaration.typeName) == "interval") return "interval";
+    }
     const size_t modifier = type.find('(');
     if (modifier != std::string::npos) type.resize(modifier);
     while (!type.empty() && std::isspace(static_cast<unsigned char>(type.back())))
@@ -955,6 +959,10 @@ std::string ExprHelper::canonicalResultTypeName(std::string typeName) {
     }
     if(const auto geometry=geometric_input_detail::builtinType(typeName);!geometry.empty())
         return geometry+(array?"[]":"");
+    if (toLower(typeName).rfind("interval ", 0) == 0) {
+        const auto declaration = SQLParser::parseTypeSpecification(typeName);
+        if (SQLParser::toLower(declaration.typeName) == "interval") return "interval" + std::string(array ? "[]" : "");
+    }
     const size_t modifier = typeName.find('(');
     if (modifier != std::string::npos) {
         typeName.resize(modifier);

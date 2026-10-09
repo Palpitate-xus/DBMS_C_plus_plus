@@ -1,6 +1,7 @@
 #include "type_registry.h"
 #include <mutex>
 #include "types/numeric.h"
+#include "utils/interval_type.h"
 
 #include <cctype>
 #include <cstdint>
@@ -81,6 +82,14 @@ TypeModResult TypeRegistry::applyTypeMods(const std::string& canonicalName,
         return res;
     }
 
+    if (entry->canonicalName == "interval") {
+        try { res.typmod = interval_type_detail::modifiers(mods).packed(); }
+        catch (const DbError& error) { res.error = error.message(); return res; }
+        res.dsize = entry->maxLength;
+        res.isVariableLength = true;
+        return res;
+    }
+
     // 单修饰符：长度 / 精度
     if (mods.size() == 1) {
         int64_t n = 0;
@@ -130,16 +139,6 @@ TypeModResult TypeRegistry::applyTypeMods(const std::string& canonicalName,
             res.typmod = static_cast<int32_t>(prec);
             res.dsize = entry->typlen > 0 ? static_cast<size_t>(entry->typlen) : entry->maxLength;
             res.isVariableLength = entry->typlen < 0;
-        } else if (c == "interval") {
-            // 简化：interval(p) 保留精度，不改宽度
-            int64_t prec = n;
-            if (prec < 0 || prec > 6) {
-                res.error = "interval precision must be between 0 and 6";
-                return res;
-            }
-            res.typmod = static_cast<int32_t>(prec);
-            res.dsize = entry->maxLength;
-            res.isVariableLength = true;
         } else if (c == "geometry" || c == "geography") {
             // PostGIS 风格 SRID/类型修饰符，暂时仅记录
             res.typmod = static_cast<int32_t>(n);

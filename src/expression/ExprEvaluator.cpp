@@ -6,6 +6,7 @@
 #include "function_namespace.h"
 #include "common/QueryHostProvider.h"
 #include "utils/interval.h"
+#include "utils/interval_type.h"
 #include "commands/TableManage.h"
 #include "catalog/collation.h"
 #include "catalog/catalog.h"
@@ -4491,12 +4492,16 @@ ExprValue ExprEvaluator::evalCast(const CastExpr* e, const RowContext& ctx) cons
                 }
                 if (modifier != ",") modifiers.push_back(std::move(modifier));
             }
-            fullT += "(";
-            for (size_t i = 0; i < modifiers.size(); ++i) {
-                if (i) fullT += ",";
-                fullT += modifiers[i];
+            if (toLower(fullT) == "interval") {
+                fullT = interval_type_detail::render(fullT, modifiers);
+            } else {
+                fullT += "(";
+                for (size_t i = 0; i < modifiers.size(); ++i) {
+                    if (i) fullT += ",";
+                    fullT += modifiers[i];
+                }
+                fullT += ")";
             }
-            fullT += ")";
             if(arrayTarget)fullT+="[]";
         }
         return evalCast(nullptr, ctx, v, fullT);
@@ -4713,7 +4718,12 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
             throw DbError("22P02","invalid input syntax for type "+geometryTarget);
         return ExprValue(geometryTarget,std::move(normalized),false);
     }
-    if (target == "interval") {
+    const bool intervalArray = target.size() >= 2 && target.compare(target.size() - 2, 2, "[]") == 0;
+    const auto intervalDeclaration = !intervalArray && (target == "interval" || target.rfind("interval ", 0) == 0 ||
+        target.rfind("interval(", 0) == 0);
+    if (intervalDeclaration) {
+        const auto declaration = SQLParser::parseTypeSpecification(target);
+        const auto spec = interval_type_detail::modifiers(declaration.typeMods);
         // Cast eligibility is independent of value demand. In particular,
         // NULL integers/bools are not string input and cannot be cast here.
         const auto source=common_type_detail::canonical(sourceType);
@@ -4725,9 +4735,44 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
         // cannot represent these without changing its arithmetic contract.
         if(symbolic=="infinity" || symbolic=="+infinity" || symbolic=="-infinity")
             return ExprValue("interval",symbolic=="+infinity"?"infinity":symbolic,false);
-        const auto parsed=parseIntervalInput(v.value);
+        auto input = v.value;
+        // An unadorned numeric input denotes the least-significant field
+        // selected by the genuine declaration, not always seconds.
+        if (isNumericLiteral(trimStr(input)) && spec.range != interval_type_detail::fullRange) {
+            const char* unit = spec.range & interval_type_detail::second ? "seconds" :
+                spec.range & interval_type_detail::minute ? "minutes" :
+                spec.range & interval_type_detail::hour ? "hours" :
+                spec.range & interval_type_detail::day ? "days" :
+                spec.range & interval_type_detail::month ? "months" : "years";
+            input += std::string(" ") + unit;
+        }
+        auto parsed=parseIntervalInput(input);
         const auto state=intervalInputSqlState(parsed);
         if(!state.empty())throw DbError(state,"invalid input syntax or range for type interval");
+        if (spec.range == interval_type_detail::year) {
+            parsed.months = (parsed.months / 12) * 12;
+            parsed.days = 0;
+            parsed.micros = 0;
+        } else if (spec.range == interval_type_detail::month ||
+                   spec.range == (interval_type_detail::year | interval_type_detail::month)) {
+            parsed.days = 0;
+            parsed.micros = 0;
+        } else if (spec.range == interval_type_detail::day) {
+            parsed.micros = 0;
+        } else if (spec.range != interval_type_detail::fullRange && !(spec.range & interval_type_detail::second)) {
+            const int64_t granule = spec.range & interval_type_detail::minute ? 60000000LL : 3600000000LL;
+            parsed.micros = (parsed.micros / granule) * granule;
+        }
+        if (spec.precision != interval_type_detail::fullPrecision && spec.precision < 6) {
+            int64_t scale = 1;
+            for (int digit = spec.precision; digit < 6; ++digit) scale *= 10;
+            const __int128 value = parsed.micros;
+            const __int128 magnitude = value < 0 ? -value : value;
+            const __int128 rounded = ((magnitude + scale / 2) / scale) * scale * (value < 0 ? -1 : 1);
+            if (rounded < std::numeric_limits<int64_t>::min() || rounded > std::numeric_limits<int64_t>::max())
+                throw DbError("22008", "interval out of range");
+            parsed.micros = static_cast<int64_t>(rounded);
+        }
         return ExprValue("interval",formatIntervalInput(parsed.months,parsed.days,parsed.micros,true),false);
     }
     if (v.isNull) {

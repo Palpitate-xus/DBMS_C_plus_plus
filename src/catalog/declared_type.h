@@ -5,6 +5,7 @@
 #include "parser/parser.h"
 #include "utils/Session.h"
 #include "common/DbError.h"
+#include "utils/interval_type.h"
 #include <algorithm>
 
 namespace dbms {
@@ -26,7 +27,7 @@ inline DeclaredTypeBinding resolveDeclaredTypeName(const std::string& spelling,
         {"character","bpchar"},{"char","bpchar"},{"character varying","varchar"},
         {"varchar","varchar"},{"bit","bit"},{"bit varying","varbit"},
         {"numeric","numeric"},{"decimal","numeric"},{"dec","numeric"},
-        {"time","time"},{"timestamp","timestamp"}
+        {"time","time"},{"timestamp","timestamp"},{"interval","interval"}
     };
     CatalogManager::QualifiedName requested;
     const auto syntax=syntaxAliases.find(low);
@@ -134,13 +135,17 @@ inline DeclaredTypeBinding resolveDeclaredTypeName(const std::string& spelling,
         existingArray+="[]";result.inputType.resize(result.inputType.size()-2);
     }
     if(!declaration.typeMods.empty()) {
-        result.inputType+='(';
-        for(size_t i=0;i<declaration.typeMods.size();++i) {
-            if(!declaration.typeMods[i].empty() && declaration.typeMods[i].front()=='+')
-                throw DbError("42601","type modifiers must be simple constants or identifiers");
-            result.inputType+=(i?",":"")+declaration.typeMods[i];
+        if (modifierOwner && modifierOwner->oid == 1186) {
+            result.inputType = interval_type_detail::render(result.inputType, declaration.typeMods);
+        } else {
+            result.inputType+='(';
+            for(size_t i=0;i<declaration.typeMods.size();++i) {
+                if(!declaration.typeMods[i].empty() && declaration.typeMods[i].front()=='+')
+                    throw DbError("42601","type modifiers must be simple constants or identifiers");
+                result.inputType+=(i?",":"")+declaration.typeMods[i];
+            }
+            result.inputType+=')';
         }
-        result.inputType+=')';
     }
     result.inputType+=existingArray;
     if(declaration.isArray){result.typeName+="[]";result.inputType+="[]";}

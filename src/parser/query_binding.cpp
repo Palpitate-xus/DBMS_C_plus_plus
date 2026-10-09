@@ -11,6 +11,7 @@
 #include "expression/geometric_input.h"
 #include "expression/between_input.h"
 #include "expression/regtype_cast.h"
+#include "utils/interval_type.h"
 #include <algorithm>
 #include <map>
 #include <set>
@@ -403,9 +404,13 @@ public:
             const bool array=declaration.size()>=2 && declaration.compare(declaration.size()-2,2,"[]")==0;
             if(!cast->typeMods.empty()) {
                 if(array)declaration.resize(declaration.size()-2);
-                declaration+='(';
-                for(size_t i=0;i<cast->typeMods.size();++i)declaration+=(i?",":"")+cast->typeMods[i];
-                declaration+=')';
+                if (SQLParser::toLower(declaration) == "interval")
+                    declaration = interval_type_detail::render(declaration, cast->typeMods);
+                else {
+                    declaration+='(';
+                    for(size_t i=0;i<cast->typeMods.size();++i)declaration+=(i?",":"")+cast->typeMods[i];
+                    declaration+=')';
+                }
                 if(array)declaration+="[]";
             }
             const auto type=declaredType(declaration,cast);
