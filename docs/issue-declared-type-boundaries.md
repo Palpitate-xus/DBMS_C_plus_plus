@@ -417,6 +417,55 @@ TYPE-11/21. Binary I/O, arrays beyond these catalog links, custom types/domains
 and all other original273 requirements remain open. Original items are
 unchanged:22 complete,166 partial,70 unverified,15 deferred_by_user. No push,
 Actions activation or user-skipped/filtered branch restart.
+## Open follow-up: genuine range catalog, descriptor persistence and wire OIDs
+
+Private `/tmp/dbms-root-range-catalog.ZzhBFYQA/repo` now has three independent
+commits, not imported into Master:
+
+| Commit | Repair | Actual evidence |
+| --- | --- | --- |
+| 5d727bad | Add six real scalar range definitions and their six reciprocal array identities to the shared physical builtin producer. Real PostgreSQL18.6 metadata/OIDs/alignment/storage are retained. | Original complete range_functions and range_bound_projection now0. New complete121 actual-reference baseline115fail improves97fail, retaining every original expected row/value/state/name/tag/OID. |
+| 4de53760 | Persist all28 owned PgTypeRow fields using D3, preserving read support for historical eight-field and D2 rows. Reject incomplete/invalid present suffixes. | Full live/disk28-field roundtrip, old8/D2 and tornD3 fixture0; existing domain_catalog_text0; genuine range cold/warm/direct persisted checks233/0. |
+| d21a8b81 | Add the real twelve scalar/array OIDs to protocol builtin identity lookup rather than falling back to TEXT25. | Strengthened native245/0; whole121 protocol now1fail, with all120 range input/lower/upper/NULL/array/quoted/qualified/error controls passing unchanged. |
+
+Primary definitions were checked against
+[PostgreSQL18 pg_type.dat](https://raw.githubusercontent.com/postgres/postgres/REL_18_STABLE/src/include/catalog/pg_type.dat)
+and an actual owned PostgreSQL18.6 catalog/query reference. The permanent full121
+reference mode passes0. Its single remaining project failure is an actual
+`SELECT ... FROM pg_catalog.pg_type ... ORDER BY oid` capability gap0A000,
+not an OID test removed or a rewritten query. It remains part of the new
+registered fixture and must be implemented via genuine typed catalog rows.
+No claim of whole range/catalog/type-family completion or publication approval.
+
+The initial native232 persisted phase mistakenly passed the database root
+instead of its actual pg_catalog directory to the direct snapshot reader;
+those12 failed checks were a fixture path error, not proof of12 on-disk failures.
+The corrected fixture verifies the actual pg_type.cat file exists and reads
+that directory directly, adds one check and passes233 after the D3 repair.
+The separate all28-field roundtrip demonstrates the persistence behavior;
+the old persistence source serializes only eight identity fields plus four
+domain fields and cannot preserve the other owned descriptor properties.
+All failed logs and epochs remain unchanged. D3 is backwards-readable by the
+new reader; older binaries are not claimed to understand newly written D3.
+
+Private initial production build75807 actually freshly compiled58 units and
+finished0. An attempted cross-path reuse script failed before copying any
+objects (its config initialization was in a subshell); it is not reused56 or
+an alternative successful build. Subsequent descriptor/OID repairs each rebuilt
+one actual changed CPP, retaining57 own unchanged current-header objects.
+Final all58 own receipts/cache/repeat/frozen bytes verified73588=0; SHA
+`c04e58ea31da0ca0d8d0045741281bd7203ec815dff50cb6978ee4011d7ad95a`;
+input seal `deb16fbfad9157ca622025f41f0c2985c704d10c49f8b622ae29ffb6e4eefb6b`.
+New80-native52807,44-wire63169 and original38421324 compositions are running
+on that frozen generation. The full44 retains the new whole121 fixture;
+the known remaining0A000 cannot be counted as a44/44 pass.
+Private751auto-native+2 Main/416registered/58TU differs from unchanged Root
+749+2/415/58. Master latest actual76native/43wire/original384 remain terminal0;
+the earlier full63302 remains terminal1 with21native/14protocol failures.
+Continue real pg_type row ownership, original parser failures and every other
+original273 owner. No assistant push, Actions activation or skipped branch
+restart; original273 status/hash remains unchanged.
+
 ## Current publication: cold repairs and legacy numeric AST compatibility
 
 The previous full standard driver63302 finished with actual exit1:21 native

@@ -2,6 +2,20 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Private range physical producer, complete descriptor persistence and actual wire OIDs; pg_type query still unsupported",
+      "gap_ids": ["TYPE-11", "TYPE-18", "TYPE-21", "PROTO-04"],
+      "status": "partial",
+      "commits": ["5d727bad", "4de53760", "d21a8b81"],
+      "evidence": ["docs/issue-declared-type-boundaries.md"],
+      "tests": [],
+      "verification": {
+        "reproduction": "Complete121 actualPG18.6 golden corpus baseline115fail; initial catalog repair97fail; actual OID repair1fail remains genuine pg_type query0A000. All120 other inputs/values/NULLs/arrays/errors/labels/OIDs now match; whole121 reference0. Original complete range_functions and range_bound_projection pass unchanged. Initial native232 disk12fail was a fixture path error, retained and explained, not falsely attributed to physical persistence.",
+        "focused_tests": "Corrected actual-file cold/warm/persisted native233=0, strengthened wire-identity native245=0, complete28field live/disk roundtrip plus old8/D2/tornD3=0, original domain_catalog_text=0. Private initial genuinefresh58 build75807=0; reuse attempt failed before any object copy. Later one changed Catalog CPP and one changed systables CPP against57 own matching unchanged objects. Final all58 current receipts/cache/repeat/frozen c04SHA/deb16seal verified73588=0.",
+        "full_suite": "New private80native52807/44wire63169/original38421324 running; all44 include the still-red whole121 fixture. Not full-suite, family, TLS or SAN success. Actual published Root76/43/384 all0; previous original full63302 remains1 with21native/14protocol failures.",
+        "scope": "Three independent private commits held, no master import yet. Private751auto+2Main/416registered/58TU versus Root749+2/415/58. D3 new reader accepts old8/D2, not an assertion older binaries read D3. Original273 hash/statuses unchanged22complete166partial70unverified15deferred. Continue genuine typed pg_type and every original remaining owner; no push/Actions/filtered branch restart."
+      }
+    },
+    {
       "issue": "Nine cold and numeric AST repairs imported individually; original full runner failed and new Root fresh58 verified",
       "gap_ids": ["TYPE-11", "TYPE-12", "TYPE-21", "QRY-06", "PROTO-04"],
       "status": "partial",
