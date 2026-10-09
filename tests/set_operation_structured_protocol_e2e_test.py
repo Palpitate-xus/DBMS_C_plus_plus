@@ -123,8 +123,12 @@ def main():
                 ("SELECT id FROM fetch_ties_plain ORDER BY score "
                  "FETCH FIRST 1 ROW WITH TIES;")),
             include_types=True)
-        _, state, message, _, _, _ = hidden_order_key
-        assert state == "0A000", (state, message)
+        rows, state, message, headers, command_tag, type_oids = hidden_order_key
+        assert state is None, (state, message)
+        assert rows == [["1"]], rows
+        assert headers == ["id"], headers
+        assert command_tag == "SELECT 1", command_tag
+        assert type_oids == [23], type_oids
 
         sql = ("SELECT upper(v) AS value FROM setop_edges "
                "UNION ALL SELECT 'tail'::text;")
