@@ -158,7 +158,6 @@ docs/              # 使用、兼容性与开发文档
 
 - [使用手册](docs/MANUAL.md)：SQL 与操作说明。
 - [兼容性契约](docs/compatibility-contract.md)：SQL、协议及扩展模式的边界。
-- [兼容性清单](docs/postgresql-18-gap-audit.md)与[验证索引](docs/gap-progress.json)：开发者参考，可用[一致性检查脚本](scripts/check_gap_progress.py)校验。
 - [打包与部署](docs/PACKAGING.md)：源码包、数据目录和配置约定。
 - [CHANGELOG](CHANGELOG.md)：版本变更记录。
 
