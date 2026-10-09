@@ -5722,16 +5722,15 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 extendedQueryError = true;
                 continue;
             }
-            // Preserve this grammar rejection before descriptor fallbacks can
-            // publish an invalid prepared statement. Parsing is metadata-only:
+            // Preserve explicit syntax diagnostics before descriptor fallbacks
+            // can publish an invalid prepared statement. Parsing is metadata-only:
             // expressions (including volatile calls) must not execute here.
             // Other unsupported parser forms still belong to their existing
             // protocol analyzers rather than becoming blanket syntax errors.
             {
                 SQLParser parser;
                 const auto parsed = parser.parseForBinding(sql);
-                if (!parsed.success &&
-                    parsed.error == "WITH TIES requires FETCH, not LIMIT") {
+                if (!parsed.success && parsed.sqlState == "42601") {
                     sendExtendedProtocolError("42601", parsed.error);
                     extendedQueryError = true;
                     continue;
