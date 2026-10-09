@@ -31853,7 +31853,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             }
             size_t pos = 0;
             while (pos < havingClause.size()) {
-                size_t andPos = havingClause.find("and", pos);
+                size_t andPos = findKeywordOutsideQuotes(havingClause, "and", pos);
                 if (andPos == string::npos) {
                     havingConds.push_back(trim(havingClause.substr(pos)));
                     break;

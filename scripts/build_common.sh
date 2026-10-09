@@ -107,6 +107,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/cte_prepared_owner_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/sql_function_query_body_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/group_having_column_identity_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/having_and_identifier_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/cte_inherited_comparison_owner_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/cte_duplicate_name_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/cte_stored_query_namespace_protocol_e2e_test.py)
