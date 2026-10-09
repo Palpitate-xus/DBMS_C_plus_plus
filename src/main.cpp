@@ -18815,6 +18815,37 @@ static dbms::PreparedQueryRows preparedPgSettingsRows(const Session& session) {
     return rows;
 }
 
+static bool executePgTypeQuery(const string& rawSql, const Session& session) {
+    dbms::SQLParser parser;
+    const auto parsed=parser.parseForBinding(rawSql);
+    const auto* select=parsed.success?dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()):nullptr;
+    if(!select || !select->fromClause || select->fromClause->type!=dbms::FromItem::Type::Table)
+        throw dbms::DbError("42601","invalid pg_type query");
+    // PgTypeRow does not yet own PostgreSQL's subscripting/default/ACL fields.
+    // A star must not silently return a shortened PostgreSQL catalog schema.
+    for(const auto& item:select->selectList) {
+        const auto* column=dynamic_cast<const dbms::ColumnRefExpr*>(item.expr.get());
+        const auto* literal=dynamic_cast<const dbms::LiteralExpr*>(item.expr.get());
+        if((item.expr && item.expr->type==dbms::ExprType::A_Star) ||
+           (column && column->column=="*") || (literal && literal->value=="*"))
+            throw dbms::DbError("0A000","SELECT * requires the complete pg_type schema");
+    }
+    auto query=make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(session.currentDB,rawSql));
+    vector<string> names,types;
+    for(const auto& column:query->output){names.push_back(column.name);types.push_back(column.type);}
+    auto plan=dbms::QueryPlanner::buildPreparedQueryPlan(&g_engine,session.currentDB,query,query->ast.get());
+    auto result=dbms::QueryPlanner::executePlanChecked(std::move(plan),currentQueryRowDemand());
+    result.throwIfFailed();
+    if(!result.structuredRowsAvailable)throw dbms::DbError("XX000","pg_type query lost typed rows");
+    for(const auto& name:names)cout<<renderLegacyHeader(name)<<' ';
+    cout<<'\n';
+    for(const auto& row:result.rows)cout<<row<<'\n';
+    const auto tag="SELECT "+to_string(result.rows.size());
+    publishStructuredUtilityResult(std::move(names),std::move(types),
+        std::move(result.structuredRows),std::move(result.structuredNulls),tag);
+    return false;
+}
+
 static bool executePgSettingsQuery(const string& rawSql,
                                    const Session& session) {
     dbms::SQLParser parser;
@@ -30711,6 +30742,12 @@ static bool executeInternal(const string& rawSql, Session& s) {
             }
             return false;
         }
+
+        const bool virtualPgType = tname == "pg_type" &&
+            (queryDb == "pg_catalog" ||
+             (queryDb == s.currentDB && !g_engine.tableExists(queryDb,tname) &&
+              !g_engine.viewExists(queryDb,tname)));
+        if(virtualPgType)return executePgTypeQuery(effectiveRawSql,s);
 
         const bool virtualPgDatabase = tname == "pg_database" &&
             (queryDb == "pg_catalog" ||

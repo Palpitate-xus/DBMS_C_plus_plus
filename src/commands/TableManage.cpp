@@ -25,6 +25,7 @@
 #include "catalog/collation.h"
 #include "catalog/CatalogService.h"
 #include "catalog/declared_type.h"
+#include "catalog/type_catalog.h"
 #include "common/SqlSyntax.h"
 #include "expression/expr_helper.h"
 #include "expression/assignment_input.h"
@@ -32924,6 +32925,12 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
                     };
                     const auto found = virtualTables.find(requested.name);
                     if (found != virtualTables.end()) { description.columns = found->second; return description; }
+                    if(requested.name=="pg_type" &&
+                       (!requested.schema.empty() ||
+                        (!tableExists(dbname,requested.name) && !viewExists(dbname,requested.name)))) {
+                        description.columns=ownedTypeCatalogDescriptor();
+                        return description;
+                    }
                 }
                 Oid namespaceId = INVALID_OID;
                 for (const auto& ns : catalog.namespaces) if (ns.nspname == schema) namespaceId = ns.oid;

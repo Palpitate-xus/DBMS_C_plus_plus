@@ -93,6 +93,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/cold_builtin_operator_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/interval_cast_input_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/builtin_range_catalog_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/owned_type_catalog_query_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/prepared_primitive_assignment_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/cte_clause_boundary_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/cte_relation_scope_protocol_e2e_test.py)

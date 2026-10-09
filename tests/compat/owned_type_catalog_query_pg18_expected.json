@@ -1,0 +1,674 @@
+[
+  {
+    "sql": "SELECT oid,typname FROM pg_catalog.pg_type WHERE typname='int4range'",
+    "reference": [
+      [
+        [
+          "3904",
+          "int4range"
+        ]
+      ],
+      null,
+      "",
+      [
+        "oid",
+        "typname"
+      ],
+      "SELECT 1",
+      [
+        26,
+        19
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT oid,typname FROM pg_type WHERE typname='int4range'",
+    "reference": [
+      [
+        [
+          "3904",
+          "int4range"
+        ]
+      ],
+      null,
+      "",
+      [
+        "oid",
+        "typname"
+      ],
+      "SELECT 1",
+      [
+        26,
+        19
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT t.oid,t.typname AS \"Mixed Label\",t.typlen FROM pg_catalog.pg_type AS t WHERE t.typname IN ('int4range','int8range') ORDER BY t.oid DESC",
+    "reference": [
+      [
+        [
+          "3926",
+          "int8range",
+          "-1"
+        ],
+        [
+          "3904",
+          "int4range",
+          "-1"
+        ]
+      ],
+      null,
+      "",
+      [
+        "oid",
+        "Mixed Label",
+        "typlen"
+      ],
+      "SELECT 2",
+      [
+        26,
+        19,
+        21
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT oid,typname FROM pg_catalog.pg_type WHERE typname IN ('int4range','int8range','numrange','tsrange','tstzrange','daterange') ORDER BY oid LIMIT 3 OFFSET 1",
+    "reference": [
+      [
+        [
+          "3906",
+          "numrange"
+        ],
+        [
+          "3908",
+          "tsrange"
+        ],
+        [
+          "3910",
+          "tstzrange"
+        ]
+      ],
+      null,
+      "",
+      [
+        "oid",
+        "typname"
+      ],
+      "SELECT 3",
+      [
+        26,
+        19
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT oid,typtype,typcategory FROM pg_catalog.pg_type WHERE typname IN ('int4range','numrange') ORDER BY oid",
+    "reference": [
+      [
+        [
+          "3904",
+          "r",
+          "R"
+        ],
+        [
+          "3906",
+          "r",
+          "R"
+        ]
+      ],
+      null,
+      "",
+      [
+        "oid",
+        "typtype",
+        "typcategory"
+      ],
+      "SELECT 2",
+      [
+        26,
+        18,
+        18
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT oid,typbyval,typispreferred,typisdefined FROM pg_catalog.pg_type WHERE typname IN ('int4range','numrange') ORDER BY oid",
+    "reference": [
+      [
+        [
+          "3904",
+          "f",
+          "f",
+          "t"
+        ],
+        [
+          "3906",
+          "f",
+          "f",
+          "t"
+        ]
+      ],
+      null,
+      "",
+      [
+        "oid",
+        "typbyval",
+        "typispreferred",
+        "typisdefined"
+      ],
+      "SELECT 2",
+      [
+        26,
+        16,
+        16,
+        16
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT oid,typdelim,typrelid,typnotnull,typbasetype,typtypmod,typndims,typcollation FROM pg_catalog.pg_type WHERE typname IN ('int4range','numrange') ORDER BY oid",
+    "reference": [
+      [
+        [
+          "3904",
+          ",",
+          "0",
+          "f",
+          "0",
+          "-1",
+          "0",
+          "0"
+        ],
+        [
+          "3906",
+          ",",
+          "0",
+          "f",
+          "0",
+          "-1",
+          "0",
+          "0"
+        ]
+      ],
+      null,
+      "",
+      [
+        "oid",
+        "typdelim",
+        "typrelid",
+        "typnotnull",
+        "typbasetype",
+        "typtypmod",
+        "typndims",
+        "typcollation"
+      ],
+      "SELECT 2",
+      [
+        26,
+        18,
+        26,
+        16,
+        26,
+        23,
+        23,
+        26
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT oid,typname FROM pg_catalog.pg_type WHERE typtype='r' AND typname IN ('int4range','numrange') ORDER BY oid",
+    "reference": [
+      [
+        [
+          "3904",
+          "int4range"
+        ],
+        [
+          "3906",
+          "numrange"
+        ]
+      ],
+      null,
+      "",
+      [
+        "oid",
+        "typname"
+      ],
+      "SELECT 2",
+      [
+        26,
+        19
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT oid,typname FROM pg_catalog.pg_type WHERE typstorage='x' AND typname IN ('int4range','numrange') ORDER BY typname",
+    "reference": [
+      [
+        [
+          "3904",
+          "int4range"
+        ],
+        [
+          "3906",
+          "numrange"
+        ]
+      ],
+      null,
+      "",
+      [
+        "oid",
+        "typname"
+      ],
+      "SELECT 2",
+      [
+        26,
+        19
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT oid,typname FROM pg_catalog.pg_type WHERE oid=3904",
+    "reference": [
+      [
+        [
+          "3904",
+          "int4range"
+        ]
+      ],
+      null,
+      "",
+      [
+        "oid",
+        "typname"
+      ],
+      "SELECT 1",
+      [
+        26,
+        19
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT oid,typname FROM pg_catalog.pg_type WHERE oid>3904 AND oid<3910 ORDER BY oid",
+    "reference": [
+      [
+        [
+          "3905",
+          "_int4range"
+        ],
+        [
+          "3906",
+          "numrange"
+        ],
+        [
+          "3907",
+          "_numrange"
+        ],
+        [
+          "3908",
+          "tsrange"
+        ],
+        [
+          "3909",
+          "_tsrange"
+        ]
+      ],
+      null,
+      "",
+      [
+        "oid",
+        "typname"
+      ],
+      "SELECT 5",
+      [
+        26,
+        19
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT oid AS a,oid AS a,typname FROM pg_catalog.pg_type WHERE oid=3904",
+    "reference": [
+      [
+        [
+          "3904",
+          "3904",
+          "int4range"
+        ]
+      ],
+      null,
+      "",
+      [
+        "a",
+        "a",
+        "typname"
+      ],
+      "SELECT 1",
+      [
+        26,
+        26,
+        19
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT typname FROM pg_catalog.pg_type WHERE typname='does_not_exist'",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "typname"
+      ],
+      "SELECT 0",
+      [
+        19
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT oid,typname FROM pg_catalog.pg_type WHERE false",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "oid",
+        "typname"
+      ],
+      "SELECT 0",
+      [
+        26,
+        19
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT oid,typname FROM pg_catalog.pg_type LIMIT 0",
+    "reference": [
+      [],
+      null,
+      "",
+      [
+        "oid",
+        "typname"
+      ],
+      "SELECT 0",
+      [
+        26,
+        19
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT DISTINCT typtype FROM pg_catalog.pg_type WHERE typname IN ('int4range','numrange','_int4range') ORDER BY typtype",
+    "reference": [
+      [
+        [
+          "b"
+        ],
+        [
+          "r"
+        ]
+      ],
+      null,
+      "",
+      [
+        "typtype"
+      ],
+      "SELECT 2",
+      [
+        18
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT lower(typname::text) AS value FROM pg_catalog.pg_type WHERE typname='int4range'",
+    "reference": [
+      [
+        [
+          "int4range"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        25
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN typbyval THEN 1 ELSE 0 END AS value FROM pg_catalog.pg_type WHERE typname='int4range'",
+    "reference": [
+      [
+        [
+          "0"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        23
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT typname,typstorage='x' AS value FROM pg_catalog.pg_type WHERE typname='int4range'",
+    "reference": [
+      [
+        [
+          "int4range",
+          "t"
+        ]
+      ],
+      null,
+      "",
+      [
+        "typname",
+        "value"
+      ],
+      "SELECT 1",
+      [
+        19,
+        16
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CASE WHEN typlen=-1 THEN true ELSE false END AS value FROM pg_catalog.pg_type WHERE typname='int4range'",
+    "reference": [
+      [
+        [
+          "t"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        16
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT missing_field FROM pg_catalog.pg_type",
+    "reference": [
+      [],
+      "42703",
+      "column \"missing_field\" does not exist",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT missing_alias.typname FROM pg_catalog.pg_type",
+    "reference": [
+      [],
+      "42P01",
+      "missing FROM-clause entry for table \"missing_alias\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT pg_type.typname FROM pg_catalog.pg_type t",
+    "reference": [
+      [],
+      "42P01",
+      "invalid reference to FROM-clause entry for table \"pg_type\"",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT oid,typname FROM pg_catalog.pg_type WHERE 1",
+    "reference": [
+      [],
+      "42804",
+      "argument of WHERE must be type boolean, not type integer",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT oid,typname FROM pg_catalog.pg_type WHERE 'x'::text",
+    "reference": [
+      [],
+      "42804",
+      "argument of WHERE must be type boolean, not type text",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT \"typname\" FROM \"pg_catalog\".\"pg_type\" WHERE \"typname\"='int4range'",
+    "reference": [
+      [
+        [
+          "int4range"
+        ]
+      ],
+      null,
+      "",
+      [
+        "typname"
+      ],
+      "SELECT 1",
+      [
+        19
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT typname::text AS value FROM pg_catalog.pg_type WHERE typname='int4range'",
+    "reference": [
+      [
+        [
+          "int4range"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        25
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT typname,typlen FROM pg_catalog.pg_type WHERE typname IN ('int4range','int8range') ORDER BY 1 DESC",
+    "reference": [
+      [
+        [
+          "int8range",
+          "-1"
+        ],
+        [
+          "int4range",
+          "-1"
+        ]
+      ],
+      null,
+      "",
+      [
+        "typname",
+        "typlen"
+      ],
+      "SELECT 2",
+      [
+        19,
+        21
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT typname AS x FROM pg_catalog.pg_type WHERE typname IN ('int4range','int8range') ORDER BY x DESC",
+    "reference": [
+      [
+        [
+          "int8range"
+        ],
+        [
+          "int4range"
+        ]
+      ],
+      null,
+      "",
+      [
+        "x"
+      ],
+      "SELECT 2",
+      [
+        19
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT typname,typstorage FROM pg_catalog.pg_type WHERE typname='int4range' OR typname='int8range' ORDER BY typname",
+    "reference": [
+      [
+        [
+          "int4range",
+          "x"
+        ],
+        [
+          "int8range",
+          "x"
+        ]
+      ],
+      null,
+      "",
+      [
+        "typname",
+        "typstorage"
+      ],
+      "SELECT 2",
+      [
+        19,
+        18
+      ]
+    ]
+  }
+]
