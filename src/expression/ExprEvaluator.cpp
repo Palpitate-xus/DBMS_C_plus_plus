@@ -18,6 +18,7 @@
 #include "expression/between_input.h"
 #include "expression/regtype_input.h"
 #include "expression/record_cast.h"
+#include "expression/sql_value.h"
 #include "common/DbError.h"
 #include "common/SqlArrayText.h"
 #include "common/NotificationManager.h"
@@ -5044,6 +5045,14 @@ char ExprEvaluator::volatility(const std::string& name) const {
 }
 
 namespace {
+// The four real NAME callees exist in pg_proc. Keyword grammar has a separate
+// owner and must not resolve through this SQL-visible callback registry.
+struct SqlNameFunction {
+    sql_value_detail::Kind kind;
+    ExprValue operator()(const std::vector<ExprValue>&) const {
+        throw DbError("XX000","SQL name callee requires its actual evaluation context");
+    }
+};
 struct ResolvedScalarFunction {
     bool found = false;
     bool stored = false;
@@ -5125,7 +5134,9 @@ ResolvedScalarFunction resolveScalarFunction(
         if(candidateSchema=="pg_catalog") {
             const auto callback=registry.find(toLower(result.name));
             const bool internalCallback=callback!=registry.end() && callback->second.target<BoundScalarRoutine>();
-            if(result.name==toLower(result.name) && evaluator.hasFunction(result.name) && !internalCallback) {
+            const bool nameSignature = callback==registry.end() || !callback->second.target<SqlNameFunction>() ||
+                (call->args.empty() && call->namedArgs.empty());
+            if(result.name==toLower(result.name) && evaluator.hasFunction(result.name) && !internalCallback && nameSignature) {
                 result.found=true;result.schema=candidateSchema;return result;
             }
             provider=queryHostSetReturningProvider(result.name);
@@ -5185,16 +5196,23 @@ ResolvedScalarFunction resolveScalarFunction(
 
 bool ExprEvaluator::hasScalarFunction(const FunctionCallExpr* call,
                                       StorageEngine* engine) const {
+    if(call && call->sqlValue!=FunctionCallExpr::SqlValue::None) {
+        sql_value_detail::validate(*call);return true;
+    }
     return resolveScalarFunction(*this, call, currentDB_, engine,functions_).found;
 }
 
 const QueryHostSetReturningProvider* ExprEvaluator::queryHostSetReturningRole(
     const FunctionCallExpr* call,StorageEngine* engine) const {
+    if(call && call->sqlValue!=FunctionCallExpr::SqlValue::None)return nullptr;
     return resolveScalarFunction(*this,call,currentDB_,engine,functions_).provider;
 }
 
 char ExprEvaluator::scalarFunctionVolatility(const FunctionCallExpr* call,
                                              StorageEngine* engine) const {
+    if(call && call->sqlValue!=FunctionCallExpr::SqlValue::None) {
+        sql_value_detail::validate(*call);return 's';
+    }
     const auto resolved = resolveScalarFunction(*this, call, currentDB_, engine,functions_);
     if (!resolved.found)
         throw DbError("42883", "function does not exist: " +
@@ -5207,6 +5225,9 @@ char ExprEvaluator::scalarFunctionVolatility(const FunctionCallExpr* call,
 
 std::string ExprEvaluator::scalarFunctionResultType(const FunctionCallExpr* call,
                                                    StorageEngine* engine) const {
+    if(call && call->sqlValue!=FunctionCallExpr::SqlValue::None) {
+        sql_value_detail::validate(*call);return sql_value_detail::type(call->sqlValue);
+    }
     const auto resolved = resolveScalarFunction(*this, call, currentDB_, engine,functions_);
     if (!resolved.found)
         throw DbError("42883", "function does not exist: " +
@@ -5215,6 +5236,7 @@ std::string ExprEvaluator::scalarFunctionResultType(const FunctionCallExpr* call
         return ExprHelper::canonicalResultTypeName(resolved.routine.returnType);
     const auto callback = functions_.find(toLower(resolved.name));
     if (callback != functions_.end()) {
+        if(callback->second.target<SqlNameFunction>())return "name";
         if (const auto* bound = callback->second.target<BoundScalarRoutine>())
             return ExprHelper::canonicalResultTypeName(bound->resolved.routine.returnType);
     }
@@ -5223,6 +5245,10 @@ std::string ExprEvaluator::scalarFunctionResultType(const FunctionCallExpr* call
 
 std::string ExprEvaluator::scalarFunctionIdentity(const FunctionCallExpr* call,
                                                  StorageEngine* engine) const {
+    if(call && call->sqlValue!=FunctionCallExpr::SqlValue::None) {
+        sql_value_detail::validate(*call);
+        return "sql-value:"+call->funcName+":"+(call->sqlValuePrecision?std::to_string(*call->sqlValuePrecision):"default");
+    }
     auto resolved = resolveScalarFunction(*this, call, currentDB_, engine,functions_);
     if (!resolved.found)
         throw DbError("42883", "function does not exist: " +
@@ -5256,9 +5282,13 @@ std::string ExprEvaluator::scalarFunctionIdentity(const FunctionCallExpr* call,
 
 void ExprEvaluator::bindScalarFunctions(Expr* expression, StorageEngine* engine) {
     engine = engine ? engine : &g_engine;
+    sqlValueEngine_=engine;
     std::function<void(Expr*)> visit = [&](Expr* node) {
         if (!node) return;
         if (auto* function = dynamic_cast<FunctionCallExpr*>(node)) {
+            if(function->sqlValue!=FunctionCallExpr::SqlValue::None) {
+                sql_value_detail::validate(*function);return;
+            }
             if (function->schema.empty() && toLower(function->funcName) == "exists" &&
                 function->args.size() == 1 && function->args.front()->preparedSubquery)
                 return; // SQL grammar owns this child; never register a routine callback.
@@ -5311,8 +5341,63 @@ void ExprEvaluator::bindScalarFunctions(Expr* expression, StorageEngine* engine)
     visit(expression);
 }
 
+ExprValue ExprEvaluator::evalSqlValue(const FunctionCallExpr* e,const RowContext& ctx) const {
+    sql_value_detail::validate(*e);
+    const auto kind=e->sqlValue;
+    const auto declared=sql_value_detail::type(kind);
+    if(const auto supplied=ctx.sqlValue(kind)) {
+        if(ExprHelper::canonicalResultTypeName(supplied->typeName)!=declared)
+            throw DbError("42804","SQL value context changed its declared type");
+        return *supplied;
+    }
+    const auto* session=currentSession();
+    const auto nameValue=[](const std::string& name) { return ExprValue("name",name,name.empty()); };
+    switch(kind) {
+    case sql_value_detail::Kind::CurrentUser:
+    case sql_value_detail::Kind::CurrentRole:
+        return nameValue(session?(session->currentRole.empty()?session->username:session->currentRole):std::string());
+    case sql_value_detail::Kind::SessionUser:
+        return nameValue(session?(session->originalRole.empty()?session->username:session->originalRole):std::string());
+    case sql_value_detail::Kind::CurrentCatalog:
+        return nameValue(currentDB_.empty() && session?session->currentDB:currentDB_);
+    case sql_value_detail::Kind::CurrentSchema: {
+        std::vector<std::string> path;std::string canonical;
+        if(!session || !parseSessionSearchPath(session->searchPath,path,canonical))path={"public"};
+        auto* engine=sqlValueEngine_?sqlValueEngine_:&g_engine;
+        const auto database=currentDB_.empty() && session?session->currentDB:currentDB_;
+        const auto metadata=database.empty()?CatalogManager::MetadataSnapshot{}:
+            engine->catalogService().metadataSnapshot(database);
+        for(const auto& entry:path) {
+            auto name=expandSessionSearchPathEntry(entry,session?session->username:std::string{});
+            if(name=="pg_temp" && session)name=sessionTempSchemaName(*session);
+            if(name=="pg_catalog")return nameValue(name);
+            const bool present=std::any_of(metadata.namespaces.begin(),metadata.namespaces.end(),
+                [&](const auto& ns){return ns.nspname==name;});
+            const bool stored=!name.empty() && name.size()<MAX_TABLE_NAME_LEN && name!="." && name!=".." &&
+                name.find('/')==std::string::npos && name.find('\\')==std::string::npos && name.find('\0')==std::string::npos;
+            if(present || (stored && !database.empty() && engine->databaseExists(database) &&
+                std::filesystem::exists(engine->dbPath(database)/(".schema_"+name))))return nameValue(name);
+        }
+        return nameValue("");
+    }
+    default:break;
+    }
+    const auto clock=sqlTimeValues_.find(kind);
+    if(clock==sqlTimeValues_.end())throw DbError("XX000","SQL value lost its clock owner");
+    auto value=clock->second({});
+    if(e->sqlValuePrecision && !value.isNull) {
+        const auto precision=std::min(*e->sqlValuePrecision,6);
+        if(precision) {
+            const auto zone=value.value.find('+',value.value.find(':'));
+            value.value.insert(zone==std::string::npos?value.value.size():zone,"."+std::string(precision,'0'));
+        }
+    }
+    return value;
+}
+
 ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowContext& ctx) const {
     if (!e) return ExprValue{};
+    if(e->sqlValue!=FunctionCallExpr::SqlValue::None)return evalSqlValue(e,ctx);
     if(e->setReturning)throw DbError("0A000","set-returning routine requires its query-host receiver");
     std::string name = toLower(e->funcName);
     if (e->schema.empty() && name == "exists" && e->args.size() == 1 &&
@@ -5558,7 +5643,13 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
                 argumentCollation = mergeExplicitCollations(
                     argumentCollation, argument.collation);
         }
-        ExprValue result = it->second(args);
+        ExprValue result;
+        if(const auto* keyword=it->second.target<SqlNameFunction>()) {
+            FunctionCallExpr intrinsic;
+            intrinsic.sqlValue=keyword->kind;
+            intrinsic.funcName=keyword->kind==sql_value_detail::Kind::CurrentCatalog?"current_catalog":name;
+            result=evalSqlValue(&intrinsic,ctx);
+        } else result = it->second(args);
         if(declaredResult.size()>=2 && declaredResult.compare(declaredResult.size()-2,2,"[]")==0)
             result=evalCast(nullptr,ctx,result,declaredResult);
         if (isCollatableExprType(result.typeName))
@@ -10979,16 +11070,16 @@ void ExprEvaluator::registerBuiltins() {
     // ------------------------------------------------------------------------
     // Date/time functions
     // ------------------------------------------------------------------------
-    functions_["current_date"] = [stableDate](const std::vector<ExprValue>&) {
+    sqlTimeValues_[sql_value_detail::Kind::CurrentDate] = [stableDate](const std::vector<ExprValue>&) {
         return ExprValue("date", stableDate, stableDate.empty());
     };
     // Stable clock functions share the evaluator's creation-time snapshot.
     // The engine currently has a fixed UTC session timezone.
-    functions_["current_timestamp"] = [stableTimestamp](const std::vector<ExprValue>&) {
+    sqlTimeValues_[sql_value_detail::Kind::CurrentTimestamp] = [stableTimestamp](const std::vector<ExprValue>&) {
         return ExprValue("timestamptz", stableTimestamp + "+00",
                          stableTimestamp.empty());
     };
-    functions_["localtimestamp"] = [stableTimestamp](const std::vector<ExprValue>&) {
+    sqlTimeValues_[sql_value_detail::Kind::LocalTimestamp] = [stableTimestamp](const std::vector<ExprValue>&) {
         return ExprValue(
             "timestamp", stableTimestamp, stableTimestamp.empty());
     };
@@ -11006,15 +11097,21 @@ void ExprEvaluator::registerBuiltins() {
         return ExprValue(
             "timestamptz", timestamp + "+00", timestamp.empty());
     };
-    functions_["current_time"] = [stableTime](const std::vector<ExprValue>&) {
-        return ExprValue("time with time zone", stableTime + "+00",
+    sqlTimeValues_[sql_value_detail::Kind::CurrentTime] = [stableTime](const std::vector<ExprValue>&) {
+        return ExprValue("timetz", stableTime + "+00",
                          stableTime.empty());
     };
-    functions_["localtime"] = [stableTime](const std::vector<ExprValue>&) {
+    sqlTimeValues_[sql_value_detail::Kind::LocalTime] = [stableTime](const std::vector<ExprValue>&) {
         return ExprValue("time", stableTime, stableTime.empty());
     };
 
     // Shared field extractor for extract() / date_part(); src is an ISO date or
+    functions_["current_user"]=SqlNameFunction{sql_value_detail::Kind::CurrentUser};
+    functions_["session_user"]=SqlNameFunction{sql_value_detail::Kind::SessionUser};
+    functions_["current_database"]=SqlNameFunction{sql_value_detail::Kind::CurrentCatalog};
+    functions_["current_schema"]=SqlNameFunction{sql_value_detail::Kind::CurrentSchema};
+    for(const auto* name:{"current_user","session_user","current_database","current_schema"})
+        volatility_[name]='s';
     // timestamp 'YYYY-MM-DD[ HH:MM:SS]'.
     auto extractImpl = [](const std::vector<ExprValue>& a) -> ExprValue {
         if (a.size() < 2 || a[0].isNull || a[1].isNull)

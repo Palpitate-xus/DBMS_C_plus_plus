@@ -2,6 +2,7 @@
 #include "catalog/catalog.h"
 #include "common/SqlTrivia.h"
 #include "common/DbError.h"
+#include "expression/sql_value.h"
 #include "utils/interval_type.h"
 #include <charconv>
 #include <cctype>
@@ -2806,10 +2807,25 @@ static ExprPtr parsePrimaryExprImpl(const std::vector<std::string>& tokens, size
         "current_date", "current_time", "current_timestamp", "localtime", "localtimestamp",
         "current_catalog", "current_schema", "current_user", "session_user", "current_role"
     };
-    if (bindingParse && valueFunctions.count(firstLower) &&
-        (pos == tokens.size() || tokens[pos] != "(")) {
+    if (valueFunctions.count(firstLower) &&
+        (firstLower != "current_schema" || pos == tokens.size() || tokens[pos] != "(")) {
         auto value = std::make_unique<FunctionCallExpr>();
-        value->schema = "pg_catalog"; value->funcName = firstLower; return value;
+        value->schema = "pg_catalog"; value->funcName = firstLower;
+        value->sqlValue = sql_value_detail::kind(firstLower);
+        if(pos<tokens.size() && tokens[pos]=="(") {
+            if(!sql_value_detail::temporalPrecision(value->sqlValue))
+                throw DbError("42601","SQL value keyword does not accept parentheses");
+            ++pos;
+            if(pos>=tokens.size() || tokens[pos].empty() ||
+               !std::all_of(tokens[pos].begin(),tokens[pos].end(),[](unsigned char c){return c>='0' && c<='9';}))
+                throw DbError("42601","SQL value precision requires an integer constant");
+            try { value->sqlValuePrecision=std::stoi(tokens[pos++]); }
+            catch(const std::out_of_range&) { throw DbError("22003","integer out of range"); }
+            if(pos>=tokens.size() || tokens[pos]!=")")
+                throw DbError("42601","invalid SQL value precision");
+            ++pos;
+        }
+        return value;
     }
 
     // Collect possible qualified name parts before deciding function vs column.
@@ -11694,6 +11710,8 @@ std::string TransactionStmt::toString() const {
 // ============================================================================
 
 std::string FunctionCallExpr::toString() const {
+    if(sqlValue!=SqlValue::None)
+        return funcName+(sqlValuePrecision?"("+std::to_string(*sqlValuePrecision)+")":"");
     std::string s = funcName + "(";
     if (distinct) s += "DISTINCT ";
     for (size_t i = 0; i < args.size(); ++i) {

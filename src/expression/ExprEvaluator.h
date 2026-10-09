@@ -72,6 +72,11 @@ public:
     void set(const std::string& name, ExprValue val) { values_[normalize(name)] = std::move(val); }
     std::optional<ExprValue> get(const std::string& name) const;
     bool has(const std::string& name) const { return get(name).has_value(); }
+    void setSqlValue(FunctionCallExpr::SqlValue kind, ExprValue value) { sqlValues_[kind]=std::move(value); }
+    std::optional<ExprValue> sqlValue(FunctionCallExpr::SqlValue kind) const {
+        const auto found=sqlValues_.find(kind);
+        return found==sqlValues_.end()?std::nullopt:std::optional<ExprValue>(found->second);
+    }
     void setParameters(std::vector<ExprValue> cells) { parameters_ = std::move(cells); }
     size_t parameterCount() const { return parameters_.size(); }
     const ExprValue& parameter(size_t slot) const;
@@ -83,6 +88,7 @@ public:
     const ExprValue& boundColumn(size_t sourceOrdinal, size_t columnOrdinal) const;
 
 private:
+    std::map<FunctionCallExpr::SqlValue,ExprValue> sqlValues_;
     std::map<std::string, ExprValue> values_;
     std::vector<ExprValue> parameters_;
     std::map<std::pair<size_t, size_t>, ExprValue> boundColumns_;
@@ -160,6 +166,9 @@ private:
     std::map<std::string, ScalarFunction, std::less<>> functions_;
     std::map<std::string, char, std::less<>> volatility_;
     std::string currentDB_;
+    StorageEngine* sqlValueEngine_ = nullptr;
+    std::map<FunctionCallExpr::SqlValue,ScalarFunction> sqlTimeValues_;
+    ExprValue evalSqlValue(const FunctionCallExpr*,const RowContext&) const;
     ScalarSubqueryExecutor scalarSubqueryExecutor_;
     QuantifiedExecutor quantifiedExecutor_;
 

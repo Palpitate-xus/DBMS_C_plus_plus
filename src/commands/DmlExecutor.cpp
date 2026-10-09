@@ -1881,6 +1881,7 @@ ExprPtr copyReturningExpression(const Expr* expression, const TableSchema& table
         // named-argument roles from this legacy consumer.
         auto target = std::make_unique<FunctionCallExpr>();
         target->schema = node->schema; target->funcName = node->funcName;
+        target->sqlValue = node->sqlValue; target->sqlValuePrecision = node->sqlValuePrecision;
         target->setReturning = node->setReturning;
         target->resolvedResultType = node->resolvedResultType;
         for (const auto& arg : node->args) target->args.push_back(copy(arg));

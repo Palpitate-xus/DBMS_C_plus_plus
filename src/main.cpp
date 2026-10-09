@@ -20962,6 +20962,7 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
             return type=="regtype" || type=="record" || requiresPreparedValue(cast->operand.get());
         }
         if(const auto* call=dynamic_cast<const dbms::FunctionCallExpr*>(value)) {
+            if(call->sqlValue!=dbms::FunctionCallExpr::SqlValue::None)return true;
             if(routineMetadata.hasScalarFunction(call,&g_engine) &&
                routineMetadata.scalarFunctionIdentity(call,&g_engine).rfind("stored",0)==0)return true;
             // An explicit routine namespace is executable identity, not a

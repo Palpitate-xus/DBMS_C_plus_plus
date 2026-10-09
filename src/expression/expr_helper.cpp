@@ -6,6 +6,7 @@
 #include "arithmetic_type.h"
 #include "geometric_input.h"
 #include "ExprEvaluator.h"
+#include "sql_value.h"
 #include "parser/parser.h"
 #include "parser/ast.h"
 #include "parser/query_binding.h"
@@ -359,6 +360,8 @@ std::string inferAstResultType(
         return selectCommonType(types,"CASE");
     }
     if (const auto* call = dynamic_cast<const FunctionCallExpr*>(expression)) {
+        if(call->sqlValue!=FunctionCallExpr::SqlValue::None)
+            return sql_value_detail::type(call->sqlValue);
         if (!call->resolvedResultType.empty()) return protocolTypeName(call->resolvedResultType);
         if(call->setReturning)return call->setReturning->elementType;
         if (routineTypes) {
@@ -2549,6 +2552,11 @@ static ExprEvalResult evalStringImpl(
         const ExprValue userValue("name", currentUser, false);
         ctx.set("current_user", userValue);
         ctx.set("session_user", userValue);
+        ctx.setSqlValue(FunctionCallExpr::SqlValue::CurrentUser,userValue);
+        ctx.setSqlValue(FunctionCallExpr::SqlValue::CurrentRole,userValue);
+        const auto* session=currentSession();
+        ctx.setSqlValue(FunctionCallExpr::SqlValue::SessionUser,
+            ExprValue("name",session && !session->originalRole.empty()?session->originalRole:currentUser,false));
     }
     // SQL-standard date/time special values, resolvable as bare identifiers
     // (PG exposes current_date/current_timestamp/localtimestamp both ways).

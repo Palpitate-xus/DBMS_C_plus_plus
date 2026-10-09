@@ -414,6 +414,11 @@ struct QuerySetReturningBinding {
     std::string identity, elementType;
 };
 struct FunctionCallExpr : public Expr {
+    enum class SqlValue { None, CurrentUser, SessionUser, CurrentRole, CurrentCatalog,
+        CurrentSchema, CurrentDate, CurrentTime, LocalTime, CurrentTimestamp, LocalTimestamp };
+    // SQL value keywords are grammar, not search_path-resolved callees.
+    SqlValue sqlValue = SqlValue::None;
+    std::optional<int> sqlValuePrecision;
     std::string schema;          // schema-qualified function (pg_catalog.now())
     std::string funcName;
     std::vector<ExprPtr> args;

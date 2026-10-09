@@ -62,6 +62,7 @@ ExprPtr copyExpression(const Expr* source, std::map<const Expr*, const Expr*>& s
     } else if (const auto* node = dynamic_cast<const FunctionCallExpr*>(source)) {
         auto target = std::make_unique<FunctionCallExpr>();
         target->schema = node->schema; target->funcName = node->funcName;
+        target->sqlValue = node->sqlValue; target->sqlValuePrecision = node->sqlValuePrecision;
         target->setReturning = node->setReturning;
         target->resolvedResultType = node->resolvedResultType;
         target->distinct = node->distinct; target->orderBy = node->orderBy; target->hasOver = node->hasOver;

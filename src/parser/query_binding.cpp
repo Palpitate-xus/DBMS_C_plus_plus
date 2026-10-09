@@ -12,6 +12,7 @@
 #include "expression/between_input.h"
 #include "expression/regtype_cast.h"
 #include "expression/record_cast.h"
+#include "expression/sql_value.h"
 #include "utils/interval_type.h"
 #include <algorithm>
 #include <map>
@@ -717,6 +718,12 @@ public:
         }
         case ExprType::FunctionCall: {
             auto* call = static_cast<FunctionCallExpr*>(node.get());
+            if(call->sqlValue!=FunctionCallExpr::SqlValue::None) {
+                sql_value_detail::validate(*call);
+                call->resolvedResultType=sql_value_detail::type(call->sqlValue);
+                valueTypeOids[call]=mapBuiltinTypeNameToOid(call->resolvedResultType);
+                return call->resolvedResultType;
+            }
             const auto grammarOperation = SQLParser::toLower(call->funcName);
             if (call->schema.empty() && call->args.size() == 3 &&
                 (grammarOperation == "between" || grammarOperation == "not between")) {

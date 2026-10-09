@@ -114,6 +114,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/interval_column_modifier_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/numeric_column_modifier_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/row_constructor_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/sql_value_keyword_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/prepared_global_aggregate_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/cte_inherited_comparison_owner_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/cte_duplicate_name_protocol_e2e_test.py)

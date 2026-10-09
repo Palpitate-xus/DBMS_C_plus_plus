@@ -31,6 +31,7 @@
 #include "catalog/type_catalog.h"
 #include "common/SqlSyntax.h"
 #include "expression/expr_helper.h"
+#include "expression/sql_value.h"
 #include "expression/assignment_input.h"
 #include "expression/ExprEvaluator.h"
 #include "executor/ExecutionPlan.h"
@@ -35826,7 +35827,8 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     }
     if (expr.funcName == "now" || expr.funcName == "current_timestamp") {
         const auto evaluated = ExprHelper::evalString(
-            expr.funcName + "()", {}, {}, dbname, expr.sessionUser, engine);
+            expr.funcName == "current_timestamp" ? expr.funcName : expr.funcName + "()",
+            {}, {}, dbname, expr.sessionUser, engine);
         return evaluated.ok && !evaluated.isNull ? evaluated.value : "";
     }
     if (expr.funcName == "extract") {
@@ -37780,6 +37782,8 @@ std::string projectionExpressionSql(const StorageEngine::SelectExpr& expression)
         return "CAST(" + expression.funcArgs[0] + " AS " + expression.funcArgs[1] + ")";
     if (expression.funcName == "extract" && expression.funcArgs.size() == 1)
         return expression.funcArgs.front();
+    if(expression.funcArgs.empty() && sql_value_detail::kind(expression.funcName)!=sql_value_detail::Kind::None)
+        return expression.funcName; // legacy projection's actual keyword role
     std::string sql = expression.funcName + '(';
     for (const auto& argument : expression.funcArgs) { if (sql.back() != '(') sql += ','; sql += argument; }
     return sql + ')';
@@ -38393,6 +38397,8 @@ std::vector<std::string> StorageEngine::queryExpr(
                     }
                 } else if (expr.funcName == "cast" && expr.funcArgs.size() >= 2) {
                     expression = "cast(" + expr.funcArgs[0] + " as " + expr.funcArgs[1] + ")";
+                } else if(expr.funcArgs.empty() && sql_value_detail::kind(expr.funcName)!=sql_value_detail::Kind::None) {
+                    expression=expr.funcName;
                 } else if (!expr.funcName.empty()) {
                     expression = expr.funcName + "(";
                     for (size_t i = 0; i < expr.funcArgs.size(); ++i) {
