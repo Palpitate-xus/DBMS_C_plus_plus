@@ -2,6 +2,7 @@
 #include "expression/expr_helper.h"
 #include "catalog/type_registry.h"
 #include "common/DbError.h"
+#include "expression/regtype_cast.h"
 
 namespace dbms::array_detail {
 inline bool isArray(const std::string& type) {
@@ -28,6 +29,10 @@ inline std::string commonElement(const std::vector<std::string>& inputs) {
 // passthrough cast. Unknown Const input is checked by the primitive codec.
 inline void checkExplicitElementCast(const std::string& sourceRaw,const std::string& targetRaw) {
     const auto source=elementType(sourceRaw),target=elementType(targetRaw);
+    if(source=="regtype" || target=="regtype") {
+        regtype_cast_detail::validate(source,target);
+        return;
+    }
     if(source.empty() || source=="unknown" || source==target)return;
     const auto* from=TypeRegistry::instance().findType(source);
     const auto* to=TypeRegistry::instance().findType(target);

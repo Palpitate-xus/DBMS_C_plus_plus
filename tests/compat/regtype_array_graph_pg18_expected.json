@@ -1,0 +1,190 @@
+[
+  {
+    "sql": "SELECT CAST(ARRAY[23,-1] AS regtype[]) AS value",
+    "reference": [
+      [
+        [
+          "{integer,4294967295}"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        2211
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(ARRAY[NULL::boolean] AS regtype[]) AS value WHERE false",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type boolean to regtype",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(ARRAY[23,16,NULL] AS regtype[]) AS value",
+    "reference": [
+      [
+        [
+          "{integer,boolean,NULL}"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        2211
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(ARRAY[ARRAY[23,16],ARRAY[20,25]] AS regtype[]) AS value",
+    "reference": [
+      [
+        [
+          "{{integer,boolean},{bigint,text}}"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        2211
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(ARRAY[23,16]::integer[] AS regtype[]) AS value",
+    "reference": [
+      [
+        [
+          "{integer,boolean}"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        2211
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(ARRAY[-1::bigint] AS regtype[]) AS value",
+    "reference": [
+      [],
+      "22003",
+      "OID out of range",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(ARRAY[NULL::boolean] AS regtype[]) AS value",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type boolean to regtype",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(ARRAY[NULL::numeric] AS regtype[]) AS value WHERE false",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type numeric to regtype",
+      [],
+      null,
+      []
+    ]
+  },
+  {
+    "sql": "SELECT CAST(ARRAY['integer'::regtype,'boolean'::regtype] AS integer[]) AS value",
+    "reference": [
+      [
+        [
+          "{23,16}"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1007
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('[0:1]={integer,boolean}'::regtype[] AS integer[]) AS value",
+    "reference": [
+      [
+        [
+          "[0:1]={23,16}"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1007
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('{integer,boolean}'::regtype[] AS text[]) AS value",
+    "reference": [
+      [
+        [
+          "{integer,boolean}"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1009
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL::regtype[] AS boolean[]) AS value WHERE false",
+    "reference": [
+      [],
+      "42846",
+      "cannot cast type regtype[] to boolean[]",
+      [],
+      null,
+      []
+    ]
+  }
+]
