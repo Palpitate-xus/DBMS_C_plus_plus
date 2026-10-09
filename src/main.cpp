@@ -19239,6 +19239,34 @@ static bool executePgDatabaseQuery(const string& rawSql,
     return false;
 }
 
+// Resolve the owned pg_database subset before prepared comparison hosts try
+// to bind it as a physical relation. Explicit catalog qualification bypasses
+// user shadows; unqualified names retain ordinary table/view lookup.
+static bool handlePreparedDatabaseCatalogQuery(const string& rawSql,
+                                               const Session& session,
+                                               bool& handled) {
+    handled = false;
+    dbms::SQLParser parser;
+    const auto parsed = parser.parseForBinding(rawSql);
+    const auto* select = parsed.success
+        ? dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()) : nullptr;
+    if (!select || !select->fromClause ||
+        select->fromClause->type != dbms::FromItem::Type::Table)
+        return false;
+    dbms::CatalogManager::QualifiedName name;
+    if (!dbms::CatalogManager::parseQualifiedName(
+            select->fromClause->tableName, name, true) ||
+        name.name != "pg_database")
+        return false;
+    if (name.schema != "pg_catalog" &&
+        (!name.schema.empty() ||
+         g_engine.tableExists(session.currentDB, name.name) ||
+         g_engine.viewExists(session.currentDB, name.name)))
+        return false;
+    handled = true;
+    return executePgDatabaseQuery(rawSql, session);
+}
+
 static bool executePgClassQuery(const string& rawSql, Session& session,
                                 const string& database) {
     dbms::SQLParser parser;
@@ -25985,6 +26013,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
         bool typeCatalogHandled=false;
         const bool typeCatalogFailed=handlePreparedTypeCatalogQuery(effectiveRawSql,s,typeCatalogHandled);
         if(typeCatalogHandled)return typeCatalogFailed;
+
+        bool databaseCatalogHandled = false;
+        const bool databaseCatalogFailed = handlePreparedDatabaseCatalogQuery(
+            effectiveRawSql, s, databaseCatalogHandled);
+        if (databaseCatalogHandled) return databaseCatalogFailed;
 
         bool quantifiedHandled=false;
         const bool quantifiedFailed=handlePreparedMultirowQuery(effectiveRawSql,s,quantifiedHandled);

@@ -161,6 +161,37 @@ def main():
         result = runner.decode_wire_result(messages, include_types=True)
         assert result[1] is None and result[0] == [["1"]], result
         assert messages[-1] == (b"Z", b"I"), messages[-1]
+
+        # Early typed-catalog routing must not consume ordinary user shadows.
+        for sql in (
+                "CREATE TABLE pg_database (id INTEGER)",
+                "INSERT INTO pg_database VALUES (23)"):
+            result = runner.decode_wire_result(
+                client.simple_query(sock, sql), include_types=True)
+            assert result[1] is None, (sql, result)
+        for sql in ("SELECT id FROM pg_database WHERE id = 23",
+                    "SELECT id FROM public.pg_database WHERE id = 23"):
+            result = runner.decode_wire_result(
+                client.simple_query(sock, sql), include_types=True)
+            assert result[1] is None and result[0] == [["23"]], (sql, result)
+            assert result[3] == ["id"] and result[5] == [23], result
+        for sql in (
+                "DROP TABLE pg_database",
+                "CREATE VIEW pg_database AS SELECT id FROM catalog_view_source"):
+            result = runner.decode_wire_result(
+                client.simple_query(sock, sql), include_types=True)
+            assert result[1] is None, (sql, result)
+        result = runner.decode_wire_result(client.simple_query(
+            sock, "SELECT id FROM pg_database WHERE id = 17"), include_types=True)
+        assert result[1] is None and result[0] == [["17"]], result
+        assert result[3] == ["id"] and result[5] == [23], result
+        messages = client.simple_query(sock,
+            "SELECT d.datname, d.encoding FROM pg_catalog.pg_database AS d "
+            "WHERE d.datname = 'info'")
+        result = runner.decode_wire_result(messages, include_types=True)
+        assert result[1] is None and result[0] == [["info", "6"]], result
+        assert result[3] == ["datname", "encoding"] and result[5] == [19, 23], result
+        assert messages[-1] == (b"Z", b"I"), messages[-1]
     finally:
         runner.stop_ours(server)
 
