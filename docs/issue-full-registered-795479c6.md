@@ -7,6 +7,8 @@ Actual markers:773native/Main=769pass/4fail,435registered wire=427pass/8fail.
 All1208 registered entries have terminal markers; the wrapper's own58 receipts,
 cache/source/frozen terminal checks pass. No assertion, deadline or fixture was
 removed or widened. This is not a full-suite pass.
+The build uses the TLS stub; an intentional TLS-test skip is not runtime TLS
+verification, regardless of its driver marker.
 
 Artifacts:/tmp/dbms-root-row-record.Kijp5GbF/root-full773-435.log.
 
