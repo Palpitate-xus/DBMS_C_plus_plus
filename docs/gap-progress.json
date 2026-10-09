@@ -2,6 +2,20 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Independent HAVING grammar, parser shutdown lifetime and invalid LIMIT handoff repairs; candidate verified but pending Root integration",
+      "gap_ids": ["QRY-01", "QRY-05", "QRY-07", "TYPE-11", "PROTO-04"],
+      "status": "partial",
+      "commits": ["48d35f1d", "6968d94d", "cf4e62a0", "e5114a10", "75480b5e"],
+      "evidence": ["docs/issue-having-grammar-and-parser-lifetime.md"],
+      "tests": ["tests/having_and_identifier_protocol_e2e_test.py", "tests/group_having_column_identity_test.cpp", "tests/group_having_column_identity_protocol_e2e_test.py", "tests/parser_type_exit_lifetime_test.cpp", "tests/dml_semantics_test.cpp", "tests/limit_with_ties_syntax_protocol_e2e_test.py"],
+      "verification": {
+        "reproduction": "HAVING identifier baselines11/13fail, actual PG18.6 references0. Root original domainFK139 repeated5 times; real original-object destructor backtrace139, new parser-exit baseline139. Failed candidate64903=1 and initial DML diagnostic assertion134 retained. Invalid ordinary LIMIT returns rows/effects, baseline Extended Parse accepted; real PG18.6 reference36 statements plus Extended42601/effects0.",
+        "focused_tests": "Private own57 fresh32210/Main74605=0; corrected Main44404/parser98177 and final LIMIT Main66955/network31903 incremental own units0, other current signatures verified. Candidate22561=0:22native25wire; final5630=0:22native26wire incl unchanged defaultprotocol/CTE/quoted-range/scalarFETCH92. Final unchanged BIT38422258=0 against180006. Current069c SHA/8d62 seal/58 receipts/cache/no-recompile repeat/source/frozen fences0. All original SQL/assertions/counts/OIDs/deadlines retained; private evidence is not Root evidence.",
+        "full_suite": "Source commits remain isolated pending unchanged Root whole driver86574 terminal state. Root174/764auto+2Main/427registered/58TU, candidate178/765auto+2Main/429registered/58TU. Root current6native failures and defaultprotocol timeout retained; domainancestry passes. Root inputs frozen, no completed full/family/SAN/TLS claim.",
+        "scope": "Original273 items unchanged22complete166partial70unverified15user-deferred. READMEaed6e80a independently committed on master. No push, Actions activation or user-filtered branch restart."
+      }
+    },
+    {
       "issue": "Parsed grouped-column HAVING identity and namespace-aware legacy scalar arguments",
       "gap_ids": ["QRY-01", "QRY-05", "QRY-07", "FUNC-01", "PROTO-04"],
       "status": "partial",
