@@ -3723,10 +3723,9 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
             stmt->limit = limit;
         }
         if (pos < tokens.size() && toLower(tokens[pos]) == "with") {
-            ++pos;
-            if (pos < tokens.size() && toLower(tokens[pos]) == "ties") {
-                stmt->withTies = true; ++pos;
-            }
+            r.error = "WITH TIES requires FETCH, not LIMIT";
+            r.sqlState = "42601";
+            return r;
         }
         continue;
     }
@@ -3847,7 +3846,8 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
     }
 
     if(stmt->withTies && stmt->orderBy.empty()) {
-        r.error="WITH TIES cannot be specified without ORDER BY clause";return r;
+        r.error="WITH TIES cannot be specified without ORDER BY clause";
+        r.sqlState="42601";return r;
     }
     r.success = true;
     r.stmt = std::move(stmt);

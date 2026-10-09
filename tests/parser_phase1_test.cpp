@@ -531,6 +531,9 @@ int main() {
     {
         auto r1 = parser.parse("SELECT * FROM t LIMIT 10 WITH TIES");
         assert(!r1.success && r1.sqlState == "42601");
+        auto orderedLimitTies = parser.parse(
+            "SELECT * FROM t ORDER BY id LIMIT 10 WITH TIES");
+        assert(!orderedLimitTies.success && orderedLimitTies.sqlState == "42601");
 
         auto r2 = parser.parse("SELECT * FROM t FETCH FIRST 5 ROWS ONLY");
         assert(r2.success);
