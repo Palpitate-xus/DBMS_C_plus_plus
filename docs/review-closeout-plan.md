@@ -8,8 +8,10 @@
 
 1. README 长期项目入口已独立 commit `cfcab3cd`；不放临时进度或测试统计。
 2. ROW 已独立 commit/import `99c155ee` / `bec026c7`，private26native/16wire
-   全0；继续 Root 自身57/Main59900/66760及26native/16wire出版验证。
-3. Root 验证终态后，再跑完整注册回归；此前所有失败仍保留，不冒全量通过。
+   全0；Root自身fresh57/Main59900/66760、26native/16wire50787与BIT384/99693
+   现全部终0，all58 receipts/cache/repeat/source/frozen终态一致。
+3. 完整注册回归18383正在运行773native/Main/435wire；此前所有失败仍保留，
+   不冒全量通过，不改输入/断言/期限；源码保持冻结，下一项独立工作区修复。
 4. 逐项修普通同名关系DML、SQL-body session-value、零参数SQL routine、
    native decimal API，再继续总清单所有原未闭环要求；每项独立 commit。
 5. 原273范围/状态不变22complete166partial70unverified15deferred；不push、

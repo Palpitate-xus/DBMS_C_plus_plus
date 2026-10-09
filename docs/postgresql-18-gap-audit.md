@@ -5,7 +5,9 @@ ROW `99c155ee` 已在 private26native/16protocol 全部终0后，以 -x 合入 m
 `bec026c7`。含真实根常量规划检查的 native52、wire54、PG18.6 reference55
 及原 BIT384 全0；全部中间失败保留，不以默认未开启常量规划的 native 绿代替
 前端验收。现186 scoped repairs、771auto-native+2Main、435registered、58TU。
-Root 自身57/Main59900/66760正在编译，尚无 Root ROW publication/full pass。
+Root 自身fresh57/Main59900/66760与26native/16wire50787、原BIT384/99693
+全部终0；all58 receipts/cache/repeat/source/frozen终态一致，无借用对象。
+完整注册driver18383正在运行773native/Main/435wire，尚无新全量通过。
 继续同名虚拟关系DML、SQL-body session-value grammar、零参数SQL routine
 诊断、native decimal factory API及全部原未完成要求。原273仍22complete、
 166partial、70unverified、15user-deferred；不push/启用Actions/重启跳过专项。

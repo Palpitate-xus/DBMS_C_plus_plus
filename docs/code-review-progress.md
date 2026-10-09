@@ -1497,8 +1497,9 @@ D已合并源 `f5f9ce81`；下一轮根/A快进相同源码后正式production�
 
 README evergreen `cfcab3cd` 已独立提交；ROW 源码修复 `99c155ee` 已以 -x
 导入 master `bec026c7`。Private26native/16protocol、原 BIT384 与实际180006
-reference55全0，所有中间失败保留。Root 自身57/Main59900/66760正在编译，
-尚无 Root ROW publication 或新全量通过。当前186 scoped、771auto+2Main、
+reference55全0，所有中间失败保留。Root 自身fresh57/Main59900/66760与
+26native/16wire50787、原BIT384/99693全部终0，all58终态验证一致；完整注册
+driver18383运行中，尚无新全量通过。当前186 scoped、771auto+2Main、
 435registered、58TU；原273状态22complete/166partial/70unverified/15deferred
 不变。继续普通 DML/session-value/arity/decimal API 及原全部未闭环要求。
 完整证据见 [Root ROW 验证](issue-root-row-publication.md)。以下为历史记录。
