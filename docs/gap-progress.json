@@ -2,6 +2,20 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Parsed grouped-column HAVING identity and namespace-aware legacy scalar arguments",
+      "gap_ids": ["QRY-01", "QRY-05", "QRY-07", "FUNC-01", "PROTO-04"],
+      "status": "partial",
+      "commits": ["f787fd83", "0a8cfbff"],
+      "evidence": ["docs/issue-having-and-legacy-routine-arguments.md"],
+      "tests": ["tests/group_having_column_identity_test.cpp", "tests/group_having_column_identity_protocol_e2e_test.py", "tests/legacy_scalar_routine_arguments_test.cpp", "tests/cte_prepared_owner_protocol_e2e_test.py", "tests/stored_function_quoted_range_scope_protocol_e2e_test.py"],
+      "verification": {
+        "reproduction": "Old frozen HAVING53 checks51fail; native baseline134. ActualPG18.6 HAVING54 includingBEGIN0. Legacy fixture helper compile error retained; corrected original native arithmetic baseline134. OriginalCTE function(unknown)42883 and missing3effects retained until genuine fix.",
+        "focused_tests": "HAVING oneCPP17744/proof50492:17native all0,24wire23PASS/CTE1. Legacy oneCPP59040/finalproof42384:18native and24wire all0. Exact originalCTE current18901 and actualreference18 full matrices0; originalquoted-rangeHAVING now0. FinalBIT38482775=0. Actualcurrent58 receipts/cache/repeat/frozen/source fences pass;99ab SHA/b2b3 seal. Incremental own objects, not another fresh58 or foreign-object reuse.",
+        "full_suite": "174 scoped repairs/764 automatic native+2 actual Main/427 registered/58TU. Exact unchanged full standard driver86574 started and verified live; no terminal/full-pass claim. Additional final-frozen candy/x(y) HAVING2 fail, samePG18.6 SQL0, retained for next source-freeze release. Earlier whole-run failures and broad graph families remain open.",
+        "scope": "Original273 items unchanged22complete166partial70unverified15user-deferred. README00675e31 evergreen. No push/Actions activation/user-deferred branch restart."
+      }
+    },
+    {
       "issue": "Whole scalar SQL query bodies and unnamed typed parameter persistence",
       "gap_ids": ["QRY-02", "QRY-04", "FUNC-01", "PROTO-04"],
       "status": "partial",
