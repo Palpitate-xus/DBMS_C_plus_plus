@@ -2,6 +2,20 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Full f048 regression terminal with thirteen retained failures; two interval repairs imported with Root proof running",
+      "gap_ids": ["TYPE-06", "PROTO-04", "QRY-02", "QRY-05"],
+      "status": "partial",
+      "commits": ["772cc7dc", "ef034862", "4830b5cc"],
+      "evidence": ["docs/issue-full-registered-f048f155.md", "docs/issue-interval-literal-and-column-modifiers.md", "docs/issue-interval-column-modifier.md"],
+      "tests": ["tests/interval_field_literal_test.cpp", "tests/interval_field_literal_protocol_e2e_test.py", "tests/interval_column_modifier_test.cpp", "tests/interval_column_modifier_protocol_e2e_test.py"],
+      "verification": {
+        "reproduction": "Unchanged Root88630 terminal1:765/768 native/Main and420/430wire pass, all13 failures retained; sourcef048 unchanged until terminal. Original defaultprotocol passes in this generation. Literal24fail/column11fail baselines and actual180006 reference evidence retained.",
+        "focused_tests": "After terminal, independent -x imports772cc7dc/ef034862. Actual Root ownfresh57/Main57803/3143 both0 with57+1 entries, no borrowed objects. New Root46native40wire34532 live with dc89 seal and current58 start fences. Private globalaggregate reference37=0/baseline36 controls31fail; new public-header own57/Main79593/56598 both0. Initial9native66851 exit1 with8pass and new COUNT identity42883; full47native41wire45203 still running, no aggregate fix approval.",
+        "full_suite": "Root182scoped/768automatic+2Main/432registered/58TU. Root publication source inputs frozen; no current Root full pass or aggregate integration claim.",
+        "scope": "Original273 item statuses unchanged22complete166partial70unverified15user-deferred. Scalar aggregate genuine plan/identity repair continues; routine arity and session-value binding remain open. No push, Actions activation or filtered branch restart."
+      }
+    },
+    {
       "issue": "Evergreen README committed; interval literal and durable column modifier candidates independently committed",
       "gap_ids": ["TYPE-06", "PROTO-04"],
       "status": "partial",
