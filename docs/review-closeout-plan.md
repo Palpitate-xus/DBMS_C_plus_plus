@@ -20,8 +20,14 @@
    public-parser API已private commit `dc534a93`：旧134保留，新49和33native全0、
    21/23wire通过，NAME与原default超时保留。四项已分别-x合入Root
    `deb49f76`/`86ba021d`/`8eed940c`/`6fc40db8`，own fresh57/Main97646/52631
-   已启动，尚无新Root通过；继续独立publication和完整775/437验收，再处理
-   native decimal API，再继续总清单所有原未闭环要求；每项独立 commit。
+   全部终0，Root自身publication3492=1：33native全0、22/23wire通过，唯一NAME
+   五控仍失败；原default和BIT384/5131通过，all58/source/frozen终态一致。
+   完整775/437新driver85873已实际启动并冻结Root输入。private NAME登记已
+   独立commit `e55c863e`：原33/5fail -> 新33全0，类型registry单元/actual18参考0。
+   普通函数结果OID0候选own binder0、NAME/NULL/scalar/unnest native0，扩展35/23
+   14272已启动；新generate_series绑定正控42883单独保留并待修，不改负期待。
+   继续所有普通声明/查询/storage/recovery/EXPLAIN未完成项及native decimal API；
+   按[准确跳过范围](deferred-scope.md)只保留15安全/TDE deferred，不扩成普通失败跳过。
 5. 原273范围/状态不变22complete166partial70unverified15deferred；不push、
    不启用Actions、不重启跳过专项、不以 scoped 通过宣布原整个 family 完成。
 
@@ -30,6 +36,7 @@
 
 SQL-value提交与arity后续详见[独立修复证据](issue-private-sql-value-repair.md)。
 原全量终态和四项导入见[完整回归记录](issue-full-registered-795479c6.md)。
+新Root自身证明见[SQL-value发布验证](issue-root-sql-value-publication.md)。
 
 ## 2026-10-08 TypeName 声明语法与完整后续计划
 

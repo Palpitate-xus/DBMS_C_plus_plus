@@ -2,6 +2,20 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Root own58 and publication terminate; complete775/437 starts; ordinary NAME registration committed without broadening15 deferred requirements",
+      "gap_ids": ["TYPE-02", "SQL-04", "FUNC-05", "FUNC-06", "PROTO-04"],
+      "status": "partial",
+      "commits": ["deb49f76", "86ba021d", "8eed940c", "6fc40db8", "e55c863e"],
+      "evidence": ["docs/issue-root-sql-value-publication.md", "docs/deferred-scope.md"],
+      "tests": ["tests/sql_value_keyword_test.cpp", "tests/sql_value_keyword_protocol_e2e_test.py", "tests/stored_function_arity_protocol_e2e_test.py", "tests/type_registry_test.cpp"],
+      "verification": {
+        "reproduction": "Whole unchanged keyword33 originally5 NAME declaration/dependent failures; missing TypeRegistry entry native22903=134. After declaration repair native52395 exposes separate bound-result OID0; the assertion is retained. Original generate_series bound positive independently42883, preserved as strict native test rather than expected error.",
+        "focused_tests": "Root actual own57/Main97646/52631=0, all58 current own start/terminal receipts/cache/repeat/source/frozen checks0. Whole3492=1:33native all0 and22/23wire pass, original default passes, only NAME5 retained. Root BIT384/5131=0 against180006. Private registry19174 and full unit9061=0, reference33 all0, original keyword33 now all0/58952; independent private e55c863e committed, not imported. Binder own8552 and strict native63477=0; expanded35/23 candidate14272 live, no approval yet.",
+        "full_suite": "Root complete775native/Main437wire85873 actually started on unchangeda85e/beb50 generation. Root190scoped and58TU; source/script/test/cmake frozen until terminal. Previous773/435 whole12 failures remain historical, not relabeled green.",
+        "scope": "Original273 items/hash/statuses unchanged22complete166partial70unverified15deferred. Only P0-13,STO-08,SEC-01..13 are user-deferred; ordinary declaration/type/query/storage/recovery/EXPLAIN failures remain incomplete work. No push, Actions activation, broader deferred list or goal completion."
+      }
+    },
+    {
       "issue": "Root full ROW driver ends with12 retained failures; four independent repairs imported and own fresh production build started",
       "gap_ids": ["CAT-03", "CAT-09", "SQL-04", "FUNC-05", "FUNC-06", "PROTO-04"],
       "status": "partial",

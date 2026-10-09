@@ -1,3 +1,18 @@
+# 2026-10-09 Root自身新组合证明与普通声明/结果OID后续
+
+Root ownfresh57/Main97646/52631均终0，publication3492=1：33native全0、
+22/23wire通过，仅原NAME五控失败；原default及BIT384/5131 against180006均0，
+all58当前自身receipt/cache/repeat/source/frozen终态一致，无借用编译产物。
+完整775native/Main437wire85873已实际启动，Root190scoped/sourcea85e冻结。
+private NAME登记 `e55c863e` 已独立commit，原33/5fail -> 新33全0；registry
+单元和actual18.6参考0。独立routine-result OID候选原native OID0保留，新NAME/
+NULL/scalar/unnest native0，扩展35native23wire14272正在跑；新generate_series
+合法绑定正控42883保留并独立待修，不改负期待。尚未导入/批准此binder候选。
+原273范围/hash/22complete166partial70unverified15deferred不变。准确用户跳过
+仅15安全/TDE，普通声明/类型/TEMP/recovery/trigger/EXPLAIN不自动deferred。
+详见[实际Root证明](issue-root-sql-value-publication.md)、[跳过范围](deferred-scope.md)。
+以下均历史记录，不表示旧任务仍live，也不以partial proof宣布完成。
+
 # 2026-10-09 完整 ROW 回归终态与四项修复逐项合入
 
 README长期入口 `f513ac1f` 已提交，12本地链接与文档检查0。Root原完整
