@@ -74,7 +74,9 @@ int main() {
     error("SELECT q.v FROM t,(SELECT t.id AS v)q", "42P01");
     error("SELECT q.v FROM t,(WITH c AS(SELECT t.id AS v) SELECT c.v FROM c)q", "42P01");
     prepared = prepareQuery("SELECT EXISTS(SELECT t.id,t.\"ID\" FROM t)", datums, metadata);
-    assert(prepared.output[0].type == "bigint"); // fake metadata's declared return type
+    // EXISTS has its own boolean SQL grammar result even when the ordinary
+    // routine metadata callback above deliberately returns bigint.
+    assert(prepared.output[0].type == "boolean");
     prepared = prepareQuery("SELECT pg_catalog.extract(wanted,DATE '2026-10-06')", datums, metadata);
     assert(prepared.parameters.size() == 1 && prepared.parameters[0].value == "O'Brien");
     error("WITH ins AS(INSERT INTO side VALUES(nextval('s')) RETURNING side.id) SELECT pg_catalog.extract(missing_field,DATE '2026-10-06')", "42703");
