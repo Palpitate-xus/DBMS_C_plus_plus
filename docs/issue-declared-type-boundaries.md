@@ -440,12 +440,13 @@ Git provenance:
 
 Master40a3d0f6 has154 scoped source repairs and753 auto-native+2 Main frontend/
 417 registered/58TU. Its src/scripts/tests/cmake bytes exactly match the final
-private generation. A genuine Root-path header-aware fresh58 normal build95909
-is running, artifact
+private generation. Genuine Root-path header-aware fresh58 normal build95909
+has finished0, artifact
 `/tmp/dbms-root-pgtype-publish.fwcF6Kdr/root-fresh58-proof.log`.
-All58 compiler invocations have begun; this is not terminal build success or
-receipt/cache/repeat/frozen proof yet. New Root82/45/384 and the complete753+2/
-417 standard driver have not run on this publication. Source inputs remain
+All58 current receipts, cache, no-recompile repeat and frozen/source fences
+are verified; actual Root SHA706893 equals private. New Root82native82170,
+45wire67466 and original38423507 are now running on this publication; the
+complete753+2/417 standard driver has not started yet. Source inputs remain
 frozen; do not reuse private results as Root test results. Older Root76/43/384
 and original full21native/14protocol failures remain historical evidence.
 
