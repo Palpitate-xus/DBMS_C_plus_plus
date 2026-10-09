@@ -8,15 +8,16 @@ The original ledger remains 22 complete, 166 partial, 70 unverified and
 
 1. Keep README evergreen and commit it independently: done on master in
    `cfcab3cd`. Documentation-status and compatibility-contract checks pass.
-2. Fix postfix interval fields on actual typed constants: committed privately
-   as `c9a25ab6`, not imported while the Root whole-suite inputs are frozen.
+2. Fix postfix interval fields on actual typed constants: private `c9a25ab6`
+   imported as master `772cc7dc` after the Root whole suite terminated.
 3. Retain interval declaration modifiers through column assignment, schema
    persistence, ALTER TYPE and physical-column protocol descriptions:
-   committed privately as `aee0b1bf` after the final matrix terminated.
+   private `aee0b1bf` imported as master `ef034862` after terminal state.
    All 46 native and 39/40 protocol entries pass; original TEMP CTAS timeout
    remains a failure, not a whole-green result.
-4. After the current Root full driver terminates, import only verified repairs
-   individually with Git provenance and verify actual Root-path build objects.
+4. Both imports retain `git cherry-pick -x` provenance. Actual Root own-path
+   fresh 57 units/Main and publication matrix completed successfully; the
+   new complete registered Root driver is now running.
 5. Continue ordinary scalar aggregate children, SQL-function arity and session
    value binding, then the other in-scope original checklist requirements.
    Do not reopen user-skipped security/TDE or filtered investigation branches.
@@ -107,15 +108,30 @@ start and terminal state. No foreign objects are borrowed. Storage repair
 `aee0b1bf` also documents the C-schema downgrade boundary in CHANGELOG.
 Candidate inventory is 768 automatic native plus 2 Main drivers, 432
 registered protocol/E2E entries and 58 production units. Candidate scoped
-repair count is 182; master remains 180 until individual verified imports.
+repair count is 182, now independently published on master.
 
 ## Root whole-suite state
 
-Root session 88630 continues against the unchanged production/source/test
-generation recorded in `issue-interval-field-grammar.md`. Only documentation
-has changed in master while its source inputs are frozen. All native/Main
-entries have run; original quoted-enum, stale-temp and table-owner fixtures
-failed. Protocol entries are still running. No terminal/full-pass claim.
+Root session 88630 terminated 1 against the unchanged f048 generation:
+765/768 native/Main and 420/430 protocol entries pass; all 13 failures are
+retained in `issue-full-registered-f048f155.md`. The original complete
+default protocol passes in that generation.
+
+Only after terminal state were the two repairs imported independently. New
+Root artifacts: `/tmp/dbms-root-interval-columns.sbteRgYZ`.
+Actual Root own fresh 57 units/Main (57803/3143) both terminate 0, with
+57+1 real compilation entries and no foreign objects. Root gate 34532
+terminates 0: all 46 C++ and 40 protocol entries pass, including the full
+default protocol. Original BIT differential 53082 terminates 0: all 384
+controls match explicit PostgreSQL 180006. All 58 own-path receipts,
+cache/no-recompile repeat/source/frozen start and terminal checks pass.
+
+Actual Root compilation produces the same final 43b0 frozen bytes and dc89
+source seal quoted above; matching bytes are not a substitute for the own
+Root build and test evidence. The new unchanged whole driver 84918 is running
+all 768 automatic native plus 2 Main drivers and 432 registered protocol
+entries against that frozen binary. Root source inputs remain frozen. No
+new whole-inventory or family completion claim.
 
 Focused results do not close TYPE-06, PROTO-04 or any broader family. Binary
 interval formats, computed-cast modifiers and other unverified requirements

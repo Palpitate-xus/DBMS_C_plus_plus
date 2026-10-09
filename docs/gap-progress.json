@@ -2,6 +2,20 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Imported interval repairs pass actual Root publication proof; next full driver running; aggregate correction remains unapproved",
+      "gap_ids": ["TYPE-06", "PROTO-04", "QRY-02", "QRY-05"],
+      "status": "partial",
+      "commits": ["772cc7dc", "ef034862"],
+      "evidence": ["docs/issue-interval-literal-and-column-modifiers.md", "docs/issue-full-registered-f048f155.md"],
+      "tests": ["tests/interval_column_modifier_test.cpp", "tests/interval_column_modifier_protocol_e2e_test.py", "tests/interval_field_literal_test.cpp", "tests/interval_field_literal_protocol_e2e_test.py"],
+      "verification": {
+        "reproduction": "Previous whole Root88630 terminal1 retains all13 failures with765/768native/Main420/430wire. Private aggregate37 initial reference0, frozen36 checks31fail; next demand/signature references45 then56 all0 onactual180006, actualpg_proc MIN/MAX/SUM/AVG signature evidence retained.",
+        "focused_tests": "Actual Root own57/Main57803/3143=0; all58 receipts/cache/no-recompile/source/frozen terminal fences0, no foreign objects. Root46native40wire34532=0 including original complete defaultprotocol; originalBIT38453082=0 on180006. Actual Root matches43b0 SHA/dc89 seal. Private aggregate initial47native41wire45203=1, onlynewnative andnewwire failures (46/47native40/41wire pass); direct pure identity probe50683=0 proves binderBIGINT followedbywrong42883. Corrected first own57 build123 missingASTinclude retained. Final own57/Main77692/94448=0; newnative29 assertions and9native28229 all0. New47native41wire50186 live, sourcefrozen, aggregate source not committed/imported or declared fixed.",
+        "full_suite": "New unchanged complete Root84918 running768automatic+2Main/432registered/58TU on Root-owned frozen43b0 binary, source seal dc89 frozen. No current full pass/family completion claim.",
+        "scope": "Root182scoped source repairs. Original273 statuses unchanged22complete166partial70unverified15user-deferred. READMEevergreen cfcab3cd, no push, Actions activation or filtered branch restart. Ordinary aggregate lowering, arity/session-value and remaining in-scope issues continue."
+      }
+    },
+    {
       "issue": "Full f048 regression terminal with thirteen retained failures; two interval repairs imported with Root proof running",
       "gap_ids": ["TYPE-06", "PROTO-04", "QRY-02", "QRY-05"],
       "status": "partial",
