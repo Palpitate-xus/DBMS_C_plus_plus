@@ -96,7 +96,10 @@ def main():
             ('k NULLS FIRST','FETCH FIRST 1 ROW WITH TIES',[['4'],['5']]),
             ('k,id','FETCH FIRST 1 ROW WITH TIES',[['1']]),
             ('k','OFFSET 1 ROW FETCH FIRST 1 ROW WITH TIES',[['2']]),
-            ('b DESC NULLS LAST','FETCH FIRST 1 ROW WITH TIES',[['1']])]:
+            ('b DESC NULLS LAST','FETCH FIRST 1 ROW WITH TIES',[['1']]),
+            ('k % 2 DESC NULLS LAST','FETCH FIRST 1 ROW WITH TIES',[['1'],['2']]),
+            ('id DESC','FETCH FIRST 0 ROWS WITH TIES',[]),
+            ('b DESC NULLS LAST','OFFSET 1 ROW FETCH FIRST 1 ROW WITH TIES',[['2']])]:
             query('SELECT id FROM '+table+' ORDER BY '+order+' '+tail,rows=rows,types=[23])
         for body,rows,types in [('SELECT id FROM '+table+' ORDER BY id DESC FETCH FIRST 1 ROW WITH TIES',[['5']],[23]),
             ('SELECT p FROM '+table+' WHERE id=3 ORDER BY id FETCH FIRST 1 ROW WITH TIES',[[None]],[25]),

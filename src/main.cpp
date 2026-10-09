@@ -20972,7 +20972,7 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
             explicitSignedFetch=tail.size()>2 && (tail[2]=="+" || tail[2]=="-");
         }
     }
-    bool required=explicitSignedFetch || (select->signedFetchCount && *select->signedFetchCount<0) ||
+    bool required=select->withTies || explicitSignedFetch || (select->signedFetchCount && *select->signedFetchCount<0) ||
         requiresPreparedValue(select->whereClause.get());
     for(const auto& item:select->selectList)required=required || requiresPreparedValue(item.expr.get());
     for(const auto& item:select->orderBy)required=required || requiresPreparedValue(item.expr.get());
@@ -21295,6 +21295,20 @@ static bool executeInternal(const string& rawSql, Session& s) {
         bool preparedUnionHandled=false;
         const bool preparedUnionFailed=handlePreparedUnionAllQuery(effectiveRawSql,s,preparedUnionHandled);
         if(preparedUnionHandled)return preparedUnionFailed;
+        // The typed sort/peer operator owns all ORDER expressions, including
+        // keys not projected by the query. Admit its actual FETCH envelope
+        // before legacy lowering removes the clause or rejects hidden keys.
+        dbms::SQLParser fetchParser;
+        const auto fetchParsed = fetchParser.parseForBinding(effectiveRawSql);
+        const auto* fetchSelect = fetchParsed.isValid()
+            ? dynamic_cast<const dbms::SelectStmt*>(fetchParsed.stmt.get()) : nullptr;
+        if (fetchSelect && fetchSelect->withTies &&
+            fetchSelect->setOp == dbms::SetOp::None) {
+            bool fetchHandled = false;
+            const bool fetchFailed = handlePreparedCaseQuery(
+                effectiveRawSql, s, fetchHandled);
+            if (fetchHandled) return fetchFailed;
+        }
         bool setOperationHandled = false;
         if (executeSetOperation(sql, s, setOperationHandled)) return true;
         if (setOperationHandled) return false;
