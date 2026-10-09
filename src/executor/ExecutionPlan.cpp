@@ -494,7 +494,7 @@ static std::optional<int> comparePreparedIdentityKeys(ExprEvaluator& evaluator,
         const auto a=preparedOidValue(left.value),b=preparedOidValue(right.value);
         return (a>b)-(a<b);
     }
-    if(type=="name" || type=="\"char\"") {
+    if(type=="regtype" || type=="name" || type=="\"char\"") {
         const auto binding=ExprEvaluator::resolveComparison("<",type,type);
         if(evaluator.comparePrepared(binding,left,right).asBool())return -1;
         if(evaluator.comparePrepared(binding,right,left).asBool())return 1;
@@ -679,10 +679,14 @@ public:
         std::string key;
         for (const auto& value : values_) {
             const auto type=ExprHelper::canonicalResultTypeName(value.typeName);
-            if(type=="oid" || type=="name" || type=="\"char\"") {
+            if(type=="oid" || type=="regtype" || type=="name" || type=="\"char\"") {
                 if(value.isNull){key+="N;";continue;}
                 std::string material;
-                if(type=="oid")material="oid:"+std::to_string(preparedOidValue(value.value));
+                if(type=="oid" || type=="regtype") {
+                    ExprEvaluator evaluator;
+                    const auto oid=type=="regtype"?evaluator.coerceComparison(ExprEvaluator::resolveComparison("=",type,type),value,true):value;
+                    material="oid:"+std::to_string(oid.objectOid?*oid.objectOid:preparedOidValue(oid.value));
+                }
                 else {
                     auto binding=ExprEvaluator::resolveComparison("=",type,type);
                     if(type=="name")binding.collation=value.collation.empty()?"C":value.collation;
@@ -1574,6 +1578,16 @@ OpPtr QueryPlanner::buildPreparedQueryPlan(StorageEngine* engine,const std::stri
                 throw DbError("0A000","writing CTE requires the statement-owned source provider");
             for(const auto& output:found->columns) {
                 Column column;column.dataName=output.name;
+                if(output.typeOid==2206 && output.type=="regtype") {
+                    // This source owns typed ExprValue cells, not heap bytes.
+                    // Its genuine descriptor keeps OIDs without inventing a
+                    // TypeRegistry storage codec for the displayed type name.
+                    for(const auto& row:CatalogManager::builtinTypeRows())if(row.oid==output.typeOid) {
+                        column.dataType=output.type;column.dsize=row.typlen;
+                        column.isVariableLength=row.typlen<0;break;
+                    }
+                    schema.append(column);continue;
+                }
                 const auto error=TypeRegistry::instance().resolveColumnType(column,output.type,{},false);
                 if(!error.empty())throw DbError("42704",error);schema.append(column);
             }

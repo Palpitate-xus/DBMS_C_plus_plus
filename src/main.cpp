@@ -19898,6 +19898,13 @@ class PreparedWithDmlRuntime {
         dbms::TableSchema schema;
         for(const auto& column:descriptor) {
             dbms::Column cell;cell.dataName=column.name;
+            if(column.typeOid==2206 && column.type=="regtype") {
+                for(const auto& row:dbms::CatalogManager::builtinTypeRows())if(row.oid==column.typeOid) {
+                    cell.dataType=column.type;cell.dsize=row.typlen;
+                    cell.isVariableLength=row.typlen<0;break;
+                }
+                schema.append(cell);continue;
+            }
             const auto error=dbms::TypeRegistry::instance().resolveColumnType(cell,column.type,{},false);
             if(!error.empty())throw dbms::DbError("0A000","WITH source type is not lowered: "+column.type);
             schema.append(cell);
@@ -20892,10 +20899,13 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
             static const set<string> operators={"=","<>","!=","<",">","<=",">=","IS DISTINCT FROM","IS NOT DISTINCT FROM"};
             comparisonCandidate=comparisonCandidate || operators.count(binary->op);
             if(binary->comparison && binary->comparison->enumTypeOid)return true;
+            if(binary->op=="::")if(const auto* target=dynamic_cast<const dbms::LiteralExpr*>(binary->right.get()))
+                if(dbms::ExprHelper::declaredTypeInput(target->value,session.currentDB)=="regtype")return true;
             return requiresPreparedValue(binary->left.get()) || (binary->op!="::" && requiresPreparedValue(binary->right.get()));
         }
         if(const auto* unary=dynamic_cast<const dbms::UnaryOpExpr*>(value))return unary->op=="+" || unary->op=="-" || requiresPreparedValue(unary->operand.get());
-        if(const auto* cast=dynamic_cast<const dbms::CastExpr*>(value))return requiresPreparedValue(cast->operand.get());
+        if(const auto* cast=dynamic_cast<const dbms::CastExpr*>(value))
+            return dbms::ExprHelper::declaredTypeInput(cast->typeName,session.currentDB)=="regtype" || requiresPreparedValue(cast->operand.get());
         if(const auto* call=dynamic_cast<const dbms::FunctionCallExpr*>(value)) {
             if(routineMetadata.hasScalarFunction(call,&g_engine) &&
                routineMetadata.scalarFunctionIdentity(call,&g_engine).rfind("stored",0)==0)return true;
@@ -20935,6 +20945,21 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
     for(const auto& item:select->selectList)required=required || requiresPreparedValue(item.expr.get());
     for(const auto& item:select->orderBy)required=required || requiresPreparedValue(item.expr.get());
     for(const auto& row:select->valuesRows)for(const auto& value:row)required=required || requiresPreparedValue(value.get());
+    function<bool(const dbms::FromItem*)> requiresTypedSource=[&](const dbms::FromItem* source) {
+        if(!source)return false;
+        if(source->type==dbms::FromItem::Type::Subquery) {
+            const auto* child=dynamic_cast<const dbms::SelectStmt*>(source->subquery.get());
+            if(!child)return false;
+            for(const auto& row:child->valuesRows)for(const auto& cell:row)
+                if(requiresPreparedValue(cell.get()))return true;
+            for(const auto& target:child->selectList)if(requiresPreparedValue(target.expr.get()))return true;
+            return requiresTypedSource(child->fromClause.get());
+        }
+        if(source->type==dbms::FromItem::Type::Join)
+            return requiresTypedSource(source->left.get()) || requiresTypedSource(source->right.get());
+        return false;
+    };
+    required=required || requiresTypedSource(select->fromClause.get());
     if(!required && !comparisonCandidate)return false;
     if(select->command==dbms::SqlCommand::Values) {
         if(!select->ctes.empty() || !select->orderBy.empty() || select->whereClause || select->limit || select->offset || select->setOp!=dbms::SetOp::None)return false;

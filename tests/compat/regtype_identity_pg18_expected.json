@@ -1,0 +1,270 @@
+[
+  {
+    "sql": "SELECT 'integer'::regtype = 23::oid AS value",
+    "reference": [
+      [
+        [
+          "t"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        16
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT 23::oid = 'integer'::regtype AS value",
+    "reference": [
+      [
+        [
+          "t"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        16
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT 'integer'::regtype = 23 AS value",
+    "reference": [
+      [
+        [
+          "t"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        16
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT 'boolean'::regtype < 'bigint'::regtype AS value",
+    "reference": [
+      [
+        [
+          "t"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        16
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT 'text'::regtype > 'integer'::regtype AS value",
+    "reference": [
+      [
+        [
+          "t"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        16
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(-1 AS regtype) > 'integer'::regtype AS value",
+    "reference": [
+      [
+        [
+          "t"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        16
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT 'integer'::regtype IS DISTINCT FROM 23::oid AS value",
+    "reference": [
+      [
+        [
+          "f"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        16
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT NULL::regtype = 23::oid AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        16
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT 'integer'::regtype = ANY(ARRAY['boolean'::regtype,'integer'::regtype]) AS value",
+    "reference": [
+      [
+        [
+          "t"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        16
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT 'integer'::regtype = ALL(ARRAY['integer'::regtype,NULL::regtype]) AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        16
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST((ARRAY['integer'::regtype,'boolean'::regtype])[2] AS oid) AS value",
+    "reference": [
+      [
+        [
+          "16"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        26
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT value FROM (VALUES ('integer'::regtype),('boolean'::regtype),('bigint'::regtype),('text'::regtype),(NULL::regtype)) AS types(value) ORDER BY value NULLS LAST",
+    "reference": [
+      [
+        [
+          "boolean"
+        ],
+        [
+          "bigint"
+        ],
+        [
+          "integer"
+        ],
+        [
+          "text"
+        ],
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 5",
+      [
+        2206
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT DISTINCT value FROM (VALUES ('integer'::regtype),('boolean'::regtype),('bigint'::regtype),('int4'::regtype),(NULL::regtype),(NULL::regtype)) AS types(value) ORDER BY value NULLS FIRST",
+    "reference": [
+      [
+        [
+          null
+        ],
+        [
+          "boolean"
+        ],
+        [
+          "bigint"
+        ],
+        [
+          "integer"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 4",
+      [
+        2206
+      ]
+    ]
+  }
+]

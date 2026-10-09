@@ -1736,6 +1736,16 @@ int ExprEvaluator::compareValues(const ExprValue& a, const ExprValue& b) {
 
     std::string ta = toLower(a.typeName);
     std::string tb = toLower(b.typeName);
+    if((ta=="oid" || ta=="regtype") && (tb=="oid" || tb=="regtype")) {
+        const auto identity=[](const ExprValue& value) {
+            if(value.objectOid)return *value.objectOid;
+            if(value.typeName=="oid")return regtype_detail::numericOid(value.value);
+            const auto* session=currentSession();
+            const auto catalog=regtype_detail::metadata(g_engine,session?session->currentDB:std::string{});
+            return regtype_detail::inputOid(value.value,catalog,session);
+        };
+        const auto left=identity(a),right=identity(b);return (left>right)-(left<right);
+    }
     if (ta=="\"char\"" && tb=="\"char\"") {
         const auto left=parseInternalCharByte(a.value),right=parseInternalCharByte(b.value);
         return (left>right)-(left<right);
@@ -2003,6 +2013,10 @@ static std::optional<bool> compareGeometricEquality(const std::string& op,
 ExprValue ExprEvaluator::applyComparison(const std::string& op,
                                          const ExprValue& l,
                                          const ExprValue& r) {
+    if(common_type_detail::canonical(l.typeName)=="regtype" || common_type_detail::canonical(r.typeName)=="regtype") {
+        ExprEvaluator evaluator;
+        return evaluator.comparePrepared(resolveComparison(op,l.typeName,r.typeName),l,r);
+    }
     if(isBitStringTypeName(l.typeName) || isBitStringTypeName(r.typeName))
         (void)resolveComparison(op,l.typeName,r.typeName);
     if (l.isNull || r.isNull) return ExprValue("boolean", "", true);
@@ -2038,7 +2052,7 @@ QueryComparisonBinding ExprEvaluator::resolveComparison(const std::string& rawOp
     const bool strings=textual.count(binding.leftType) && textual.count(binding.rightType);
     const bool timestamps=temporal.count(binding.leftType) && temporal.count(binding.rightType);
     const bool same=binding.leftType==binding.rightType &&
-        (binding.leftType=="boolean" || binding.leftType=="\"char\"" || binding.leftType=="uuid" || binding.leftType=="bytea" ||
+        (binding.leftType=="oid" || binding.leftType=="boolean" || binding.leftType=="\"char\"" || binding.leftType=="uuid" || binding.leftType=="bytea" ||
          binding.leftType=="time" || binding.leftType=="interval" ||
          isBitStringTypeName(binding.leftType) || common_type_detail::array(binding.leftType));
     if (!operations.count(binding.op) || (!numbers && !strings && !timestamps && !same))
@@ -2047,7 +2061,7 @@ QueryComparisonBinding ExprEvaluator::resolveComparison(const std::string& rawOp
     binding.strict=true;
     // Capability is attached to the resolved typed implementation. Unknown
     // operators/custom datatypes never reach an equality/hash fallback.
-    binding.hashable=binding.op=="=" && (numbers || strings || binding.leftType=="boolean" || binding.leftType=="\"char\"" ||
+    binding.hashable=binding.op=="=" && (numbers || strings || binding.leftType=="oid" || binding.leftType=="boolean" || binding.leftType=="\"char\"" ||
         binding.leftType=="interval" || isBitStringTypeName(binding.leftType));
     return binding;
 }
@@ -2111,6 +2125,7 @@ std::string ExprEvaluator::comparisonHashKey(const QueryComparisonBinding& bindi
     const auto type=common_type_detail::canonical(value.typeName);
     if (type!=(left?binding.leftType:binding.rightType)) throw DbError("XX000","comparison hash received an uncoerced cell");
     if (type=="\"char\"") return "internal-char:"+std::to_string(parseInternalCharByte(value.value));
+    if(type=="oid")return "oid:"+std::to_string(value.objectOid?*value.objectOid:regtype_detail::numericOid(value.value));
     static const std::set<std::string> numeric={"smallint","integer","bigint","real","double precision","numeric"};
     if(type=="real" || type=="double precision") {
         double number=type=="real"?static_cast<double>(parseRealCastValue(value)):parseDoubleCastValue(value);
@@ -2922,15 +2937,19 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
         const auto literal=sql_array_text::parse(array.value);
         if(subscripts.size()!=literal.dimensions.size())return ExprValue(element,"",true);
         std::string current=literal.body;
+        size_t flatIndex=0;
         for(size_t dimension=0;dimension<subscripts.size();++dimension) {
             const auto& metadata=literal.dimensions[dimension];
             const int64_t offset=int64_t(subscripts[dimension])-metadata.lower;
             if(offset<0 || offset>=metadata.length)return ExprValue(element,"",true);
+            flatIndex=flatIndex*metadata.length+static_cast<size_t>(offset);
             const auto fields=sql_array_text::parse(current).elements;
             current=fields.at(static_cast<size_t>(offset));
         }
         const bool isNull=current=="NULL";
-        return ExprValue(element,isNull?std::string{}:arrayElemUnquote(current),isNull);
+        ExprValue result(element,isNull?std::string{}:arrayElemUnquote(current),isNull);
+        if(flatIndex<array.elementOids.size())result.objectOid=array.elementOids[flatIndex];
+        return result;
     }
     auto arrayConcat = e->arrayConcat;
     if (op=="||" && !arrayConcat)
@@ -4629,6 +4648,7 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
     }
     const auto geometryTarget=geometric_input_detail::builtinType(targetTypeName);
     const auto sourceType=ExprHelper::canonicalResultTypeName(v.typeName);
+    regtype_cast_detail::validate(sourceType,target);
     if(target=="regtype") {
         regtype_detail::validateCast(sourceType,target);
         if(v.isNull)return ExprValue("regtype","",true);
@@ -4648,7 +4668,6 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
                 throw DbError("22003","OID out of range");
             oid=static_cast<Oid>(number);
         } else if(common_type_detail::oidType(source) && source!="regtype") {
-    regtype_cast_detail::validate(sourceType,target);
             oid=v.objectOid?*v.objectOid:regtype_detail::numericOid(v.value);
         } else oid=regtype_detail::inputOid(v.value,catalog,session);
         ExprValue result("regtype",regtype_detail::output(oid,catalog,session),false);
@@ -5536,12 +5555,15 @@ ExprValue ExprEvaluator::evalQuantified(const QuantifiedComparisonExpr* expressi
     flatten(array.value);
     const bool all=expression->quantifier==QuantifiedComparisonExpr::Quantifier::All;
     bool unknown=false;
+    size_t elementIndex=0;
     for (const auto& token:elements) {
         const auto text=trimStr(token);
         const bool quoted=text.size()>=2 && text.front()=='"' && text.back()=='"';
         const std::string arrayType=common_type_detail::canonical(array.typeName);
         if(!common_type_detail::array(arrayType))throw DbError("XX000","quantified ARRAY lost its typed datum");
         ExprValue right(arrayType.substr(0,arrayType.size()-2),arrayElemUnquote(text),!quoted && toLower(text)=="null");
+        if(elementIndex<array.elementOids.size())right.objectOid=array.elementOids[elementIndex];
+        ++elementIndex;
         right.collation=array.collation;
         const auto truth=comparePrepared(*expression->comparison,left,right);
         if (truth.isNull) unknown=true;

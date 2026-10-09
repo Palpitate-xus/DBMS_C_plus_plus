@@ -547,8 +547,10 @@ public:
             const bool bitOperand=leftBase=="bit" || leftBase=="bit varying" ||
                                   rightBase=="bit" || rightBase=="bit varying";
             static const std::set<std::string> bitComparisons={"=","<>","!=","<",">","<=",">="};
-            if(bitOperand && bitComparisons.count(binary->op)) {
+            const bool typeReference=leftBase=="regtype" || rightBase=="regtype";
+            if((bitOperand || typeReference) && bitComparisons.count(binary->op)) {
                 const auto comparison=ExprEvaluator::resolveComparison(binary->op,left,right);
+                if(typeReference)binary->comparison=comparison;
                 coerceCaseInput(binary->left,left,comparison.leftType);
                 coerceCaseInput(binary->right,right,comparison.rightType);
             }
@@ -1230,7 +1232,9 @@ public:
                     std::vector<std::string> types;
                     for(const auto& row:inputs)types.push_back(row[column]);
                     const auto common=selectCommonType(types,"VALUES");
-                    columns.push_back({"column"+std::to_string(column+1),common});
+                    auto descriptor=metadata.declaredType?metadata.declaredType(common):QueryOutputColumn{"",common};
+                    descriptor.name="column"+std::to_string(column+1);
+                    columns.push_back(std::move(descriptor));
                     for(size_t row=0;row<inputs.size();++row)
                         coerceCaseInput(select->valuesRows[row][column],inputs[row][column],common);
                 }
