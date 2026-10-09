@@ -6,21 +6,24 @@
 
 ## 2026-10-09 当前执行计划
 
-1. README 长期项目入口已独立 commit `cfcab3cd`；不放临时进度或测试统计。
+1. README 长期项目入口已独立 commit `cfcab3cd` / `f513ac1f`；不放临时进度或测试统计。
 2. ROW 已独立 commit/import `99c155ee` / `bec026c7`，private26native/16wire
    全0；Root自身fresh57/Main59900/66760、26native/16wire50787与BIT384/99693
    现全部终0，all58 receipts/cache/repeat/source/frozen终态一致。
 3. 完整注册回归18383正在运行773native/Main/435wire；此前所有失败仍保留，
    不冒全量通过，不改输入/断言/期限；源码保持冻结，下一项独立工作区修复。
 4. 普通同名关系DML已独立private commit `34d5d956`，完整27native/18wire原样
-   复跑终0、首组失败保留，待18383终态后合入并做Root自身验证。接着修
-   SQL-body session-value、零参数SQL routine、
+   复跑终0、首组失败保留，待18383终态后合入并做Root自身验证。SQL-value
+   范围内修复已private commit `217bdcb9`，校正33native全0、19/21wire通过，
+   NAME原失败和default超时保留，不冒整轮绿。正在独立修普通SQL routine错误arity；
    native decimal API，再继续总清单所有原未闭环要求；每项独立 commit。
 5. 原273范围/状态不变22complete166partial70unverified15deferred；不push、
    不启用Actions、不重启跳过专项、不以 scoped 通过宣布原整个 family 完成。
 
 当前186 scoped、771auto-native+2Main、435registered、58TU。完整证据见
 [Root ROW 验证](issue-root-row-publication.md)。以下为历史执行计划。
+
+SQL-value提交与arity后续详见[独立修复证据](issue-private-sql-value-repair.md)。
 
 ## 2026-10-08 TypeName 声明语法与完整后续计划
 

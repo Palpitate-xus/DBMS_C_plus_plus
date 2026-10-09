@@ -1,3 +1,15 @@
+# 2026-10-09 SQL-value 独立提交 checkpoint（master 全量仍在运行）
+
+README长期入口commit `f513ac1f` 已完成，不加入临时进度。SQL-value范围内
+修复private `217bdcb9` 已提交：actual18.6 reference33全0、own57/Main编译全0，
+校正33native全0、19/21wire通过；NAME五控和原default两次timeout保留，
+all58自有receipt/cache/repeat/source/frozen终态一致，不冒整轮绿或完整temporal。
+与 `34d5d956` 一起尚未导入Root，完整18383仍在795479/02c69上运行。
+正在独立修普通routine arity，actual18.6新50控全0，旧冻结19fail保留。
+Root186scoped/771auto+2Main435wire58TU不变；private已提交188，不混计发布。
+原273范围/hash/22complete166partial70unverified15deferred不变。
+详情：[SQL-value与后续证据](issue-private-sql-value-repair.md)。以下为历史记录。
+
 # 2026-10-09 当前虚拟关系绑定 checkpoint（master 全量仍在运行）
 
 独立 private `34d5d956` 修复同名 `pg_stat_activity` / `pg_settings` 用户关系
