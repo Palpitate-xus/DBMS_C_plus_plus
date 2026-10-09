@@ -12,12 +12,14 @@ int main() {
         std::vector<std::string> input,ascending;
         size_t tiesCount,tiesExpected;
     };
-    const std::string negative128(1,static_cast<char>(0x80));
-    const std::string negative1(1,static_cast<char>(0xff));
+    const std::string byte128(1,static_cast<char>(0x80));
+    const std::string byte255(1,static_cast<char>(0xff));
     const Case cases[]={
         {"oid",{"10","2","4294967295","0","2"},{"0","2","2","10","4294967295"},2,3},
         {"name",{"a","10","Z","2","a"},{"10","2","Z","a","a"},4,5},
-        {"\"char\"",{"Z",negative1,"2","",negative128,"2"},{negative128,negative1,"","2","2","Z"},4,5}
+        // PostgreSQL compares this type as uint8, while integer casts use int8.
+        {"\"char\"",{"Z",byte255,"2","",byte128,"2"},{"","2","2","Z",byte128,byte255},2,3},
+        {"\"char\"",{"Z","\\377","2","","\\200","2"},{"","2","2","Z","\\200","\\377"},2,3}
     };
     size_t checked=0,failures=0;
     const auto require=[&](bool good,const std::string& role){++checked;failures+=!good;std::cout<<"PREPARED_IDENTITY_SORT "<<role<<" pass="<<good<<'\n';};
@@ -57,10 +59,11 @@ int main() {
         require(ties.structuredRows==expectedTies,item.type+" actual peer equality");
         auto unique=item.ascending;unique.erase(std::unique(unique.begin(),unique.end()),unique.end());
         std::vector<std::vector<std::string>> expectedUnique;
-        for(const auto& value:unique)expectedUnique.push_back({value});expectedUnique.push_back({""});
+        for(const auto& value:unique)expectedUnique.push_back({value});
+        expectedUnique.push_back({""});
         const auto distinct=execute("SELECT DISTINCT key FROM input ORDER BY key ASC NULLS LAST");
         require(distinct.structuredRows==expectedUnique && distinct.structuredNulls.back()==std::vector<bool>{true},item.type+" DISTINCT keeps actual NULL/empty identity");
     }
     std::cout<<"PREPARED_IDENTITY_SORT_CHECKED="<<checked<<" FAILED="<<failures<<'\n';
-    return checked==18 && !failures?0:1;
+    return checked==24 && !failures?0:1;
 }

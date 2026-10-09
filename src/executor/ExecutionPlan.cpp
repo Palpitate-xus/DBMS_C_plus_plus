@@ -477,20 +477,21 @@ public:
 // Catalog identities are genuine scalar datums, not physical Column codecs.
 // NAME/internal-char use their existing typed implementations; OIDs order as
 // unsigned32 identities. The same comparison defines sorting and WITH TIES.
+static uint32_t preparedOidValue(const std::string& value) {
+    uint32_t result=0;
+    const auto parsed=std::from_chars(value.data(),value.data()+value.size(),result);
+    if(parsed.ec==std::errc::result_out_of_range)throw DbError("22003","oid datum out of range");
+    if(parsed.ec!=std::errc{} || parsed.ptr!=value.data()+value.size())
+        throw DbError("22P02","invalid oid datum");
+    return result;
+}
+
 static std::optional<int> comparePreparedIdentityKeys(ExprEvaluator& evaluator,
     const ExprValue& left,const ExprValue& right) {
     const auto type=ExprHelper::canonicalResultTypeName(left.typeName);
     if(type!=ExprHelper::canonicalResultTypeName(right.typeName))return std::nullopt;
     if(type=="oid") {
-        const auto number=[](const std::string& value) {
-            uint32_t result=0;
-            const auto parsed=std::from_chars(value.data(),value.data()+value.size(),result);
-            if(parsed.ec==std::errc::result_out_of_range)throw DbError("22003","oid datum out of range");
-            if(parsed.ec!=std::errc{} || parsed.ptr!=value.data()+value.size())
-                throw DbError("22P02","invalid oid datum");
-            return result;
-        };
-        const auto a=number(left.value),b=number(right.value);
+        const auto a=preparedOidValue(left.value),b=preparedOidValue(right.value);
         return (a>b)-(a<b);
     }
     if(type=="name" || type=="\"char\"") {
@@ -677,6 +678,19 @@ public:
     std::string typedKey() const {
         std::string key;
         for (const auto& value : values_) {
+            const auto type=ExprHelper::canonicalResultTypeName(value.typeName);
+            if(type=="oid" || type=="name" || type=="\"char\"") {
+                if(value.isNull){key+="N;";continue;}
+                std::string material;
+                if(type=="oid")material="oid:"+std::to_string(preparedOidValue(value.value));
+                else {
+                    auto binding=ExprEvaluator::resolveComparison("=",type,type);
+                    if(type=="name")binding.collation=value.collation.empty()?"C":value.collation;
+                    material=ExprEvaluator::comparisonHashKey(binding,value,true);
+                }
+                key+="V"+std::to_string(material.size())+":"+material;
+                continue;
+            }
             Column column;
             const auto error = TypeRegistry::instance().resolveColumnType(column, value.typeName, {}, false);
             if (!error.empty()) throw DbError("0A000", "unsupported prepared DISTINCT type: " + value.typeName);
