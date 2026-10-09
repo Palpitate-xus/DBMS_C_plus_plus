@@ -33,6 +33,11 @@ int main() {
         }
     };
     metadataCheck(CatalogManager::builtinTypeRows(),"pure physical definition");
+    for(const auto& range:ranges) for(bool array:{false,true}) {
+        const std::string name=std::string(range.name)+(array?"[]":"");
+        const Oid oid=array?range.array:range.oid;
+        require(mapBuiltinTypeNameToOid(name)==oid && isBuiltinTypeOid(oid),"actual protocol builtin identity "+name);
+    }
     const auto database=testDbPath("builtin_range_catalog");
     require(g_engine.createDatabase(database)==DBStatus::OK,"isolated database");
     const auto catalogDirectory=g_engine.dbPath(database)/"pg_catalog";
@@ -72,5 +77,5 @@ int main() {
     metadataCheck(disk.types,"actual persisted definition");
     bindings("uncached persisted preparation",false);
     std::cout<<"BUILTIN_RANGE_CHECKED="<<checked<<" FAILED="<<failures<<'\n';
-    return checked==233 && !failures?0:1;
+    return checked==245 && !failures?0:1;
 }

@@ -76,6 +76,12 @@ static const std::unordered_map<std::string, Oid> kBuiltinTypeMap = {
     {"jsonb", 3802},
     {"jsonb[]", 3807},
     {"xml", 142}, {"xml[]", 143},
+    {"int4range", 3904}, {"int4range[]", 3905},
+    {"numrange", 3906}, {"numrange[]", 3907},
+    {"tsrange", 3908}, {"tsrange[]", 3909},
+    {"tstzrange", 3910}, {"tstzrange[]", 3911},
+    {"daterange", 3912}, {"daterange[]", 3913},
+    {"int8range", 3926}, {"int8range[]", 3927},
 };
 
 Oid mapBuiltinTypeNameToOid(const std::string& typeName) {
