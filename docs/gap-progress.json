@@ -2,6 +2,20 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Actual Root publication proof for three imports retains numeric timeout and ROW dependency; original numeric repeat passes",
+      "gap_ids": ["TYPE-06", "PROTO-04", "QRY-02", "QRY-05"],
+      "status": "partial",
+      "commits": ["ecbaf702", "c23b18cd", "c9e951ec"],
+      "evidence": ["docs/issue-root-numeric-publication.md", "docs/issue-full-registered-dc89dfbb.md"],
+      "tests": ["tests/prepared_global_aggregate_test.cpp", "tests/prepared_global_aggregate_protocol_e2e_test.py", "tests/numeric_column_modifier_test.cpp", "tests/numeric_column_modifier_protocol_e2e_test.py", "tests/alter_array_type_envelope_test.cpp"],
+      "verification": {
+        "reproduction": "Original whole84918 terminal1 retains all12 failures:766/770native/Main424/432wire. Private new ROW baseline29 controls22fail; actual reference30 all0.",
+        "focused_tests": "Actual Root own57/Main79599/43176 both0, all58 receipts/cache/repeat/source/frozen terminal fences0. Root77034 terminal1:13native pass5/7wire pass including full defaultprotocol; original numeric first CREATE timeout and strict ROW1fail retained. Exact unchanged full numeric repeat3889=0 with25 controls; original BIT38428666=0 on verified180006. Root genuine compiled d639 bytes/bd4f inputs, no borrowed objects. Private ROW corrected27405 live24native16wire, newROW29 and original aggregate55 all0; original physical catalog526 fixture retains1 genuine pseudo-array backlink failure. ROW repair still uncommitted/unapproved.",
+        "full_suite": "No new master full driver or ROW import. Root185scoped770automatic+2Main434registered58TU. Latest Root full dc89 result remains failed, not overwritten by focused passes.",
+        "scope": "Original273 statuses unchanged22complete166partial70unverified15user-deferred. READMEevergreen cfcab3cd. No push, Actions activation or new filtered investigation."
+      }
+    },
+    {
       "issue": "Complete dc89 driver retains twelve actual failures; three independent source repairs imported after terminal",
       "gap_ids": ["TYPE-06", "PROTO-04", "QRY-02", "QRY-05"],
       "status": "partial",
