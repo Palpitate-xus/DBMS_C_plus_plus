@@ -92,6 +92,9 @@ def main():
         query('SELECT EXISTS(SELECT id FROM '+table+' ORDER BY k FETCH FIRST 0 ROWS WITH TIES)',rows=[['f']],types=[16])
         # Main-query peer definition must match the scalar child's real sort:
         # all keys, NULL equality, direction, exact typed keys and OFFSET.
+        plain_peers='SELECT id FROM '+table+' ORDER BY k FETCH FIRST 1 ROW WITH TIES'
+        query(plain_peers,rows=[['1'],['2']],types=[23])
+        query('('+plain_peers+')',rows=[['1'],['2']],types=[23])
         for order,tail,rows in [('k','FETCH FIRST 1 ROW WITH TIES',[['1'],['2']]),
             ('k NULLS FIRST','FETCH FIRST 1 ROW WITH TIES',[['4'],['5']]),
             ('k,id','FETCH FIRST 1 ROW WITH TIES',[['1']]),
