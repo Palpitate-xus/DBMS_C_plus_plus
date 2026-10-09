@@ -2,17 +2,17 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
-      "issue": "Evergreen README committed; interval literal candidate committed; durable column modifier final gate running",
+      "issue": "Evergreen README committed; interval literal and durable column modifier candidates independently committed",
       "gap_ids": ["TYPE-06", "PROTO-04"],
       "status": "partial",
-      "commits": ["cfcab3cd", "c9a25ab6"],
+      "commits": ["cfcab3cd", "c9a25ab6", "aee0b1bf"],
       "evidence": ["docs/issue-interval-literal-and-column-modifiers.md"],
       "tests": ["tests/documentation_status_test.py", "tests/compatibility_contract_test.py"],
       "verification": {
         "reproduction": "Literal reference30 passes on real180006; original frozen baseline24 failures. Column original reference26 and strengthened28 pass; previous frozen baseline25 controls11 failures retained.",
-        "focused_tests": "Private committed literal42native39wire and originalBIT384 pass. Column initial test compile failure retained; corrected complete69747 exit1 with43/45native and38/40wire, including original default routine-role assertion failure. Final46native40wire75744 live; own58 receipts/cache/repeat/source/frozen start fences pass. No end or full-pass claim.",
+        "focused_tests": "Private committed literal42native39wire and originalBIT384 pass. Column initial test compile failure retained; corrected complete69747 exit1 with43/45native and38/40wire, including original default routine-role assertion failure. Final75744 terminal1:46/46native39/40wire; original default TEMP CTAS query timeout retained. New column27 and actualPG18reference28 all0. OriginalBIT38411874=0 on180006; earlier missing env170002 preflight1 retained. All own58 receipts/cache/repeat/source/frozen terminal fences pass. Original derived collect16735=1 with only scalarCOUNT child0A000. No whole-pass claim.",
         "full_suite": "Root88630 remains live against frozen source inputs; all native/Main entries ran with three original filtered failures; protocol phase ongoing. Only README/docs changed on master. Private candidates not yet imported.",
-        "scope": "READMEcfcab3cd independently committed, two documentation checks0. Original273 items unchanged22complete166partial70unverified15user-deferred. No push, Actions activation or filtered branch restart."
+        "scope": "READMEcfcab3cd independently committed, two documentation checks0. Privatec9a25ab6/aee0b1bf each committed; Root180source vs candidate182,768auto+2Main/432registered/58TU. C-schema downgrade boundary in private CHANGELOG. Original273 items unchanged22complete166partial70unverified15user-deferred. No push, Actions activation or filtered branch restart."
       }
     },
     {

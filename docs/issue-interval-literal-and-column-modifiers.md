@@ -12,7 +12,9 @@ The original ledger remains 22 complete, 166 partial, 70 unverified and
    as `c9a25ab6`, not imported while the Root whole-suite inputs are frozen.
 3. Retain interval declaration modifiers through column assignment, schema
    persistence, ALTER TYPE and physical-column protocol descriptions:
-   implementation in the isolated worktree, final verification running.
+   committed privately as `aee0b1bf` after the final matrix terminated.
+   All 46 native and 39/40 protocol entries pass; original TEMP CTAS timeout
+   remains a failure, not a whole-green result.
 4. After the current Root full driver terminates, import only verified repairs
    individually with Git provenance and verify actual Root-path build objects.
 5. Continue ordinary scalar aggregate children, SQL-function arity and session
@@ -80,9 +82,18 @@ and its array-owning DDL conversion, recognize interval physical provenance
 in descriptors, and assert actual 42804 in the original native fixture.
 Non-array-owning declaration callers keep their existing suffix restriction.
 
-Final matrix session 75744 is running 46 C++ entries (including the original
-ALTER type fixture) and 40 protocol entries. It must reach a terminal result
-before candidate approval or source edits. No deadlines/assertions relaxed.
+Final matrix session 75744 terminated 1: all 46 C++ entries (including the
+original ALTER type fixture) and 39/40 protocol entries pass. The final new
+column protocol passes all 27 checks. The original default protocol times
+out at `CREATE TEMP TABLE ctas_drop ON COMMIT DROP AS SELECT id FROM t`
+(line 3488), rather than the preceding generation's routine-role assertion.
+Both failed generations remain retained. No deadlines/assertions relaxed,
+and no new user-filtered TEMP investigation is performed.
+
+The original BIT differential 11874 also terminated 0: 384 controls with
+zero differences against explicitly selected server 180006. An earlier
+invocation omitted that reference environment and correctly rejected server
+170002 before running controls; its failed log is retained separately.
 
 Final candidate frozen SHA256:
 `43b0c7cffcd4a14c07168b840435cd48c2649fb47fce6c651e7b0f63719e5812`.
@@ -92,7 +103,11 @@ Source seal:
 The column public-header epoch compiled its own fresh 57 units plus Main.
 Subsequent CPP-only corrections rebuilt their own affected objects. Current
 58 receipts/cache/no-recompile repeat/source/frozen checks pass at gate
-start; end-of-gate checks remain required. No foreign objects are borrowed.
+start and terminal state. No foreign objects are borrowed. Storage repair
+`aee0b1bf` also documents the C-schema downgrade boundary in CHANGELOG.
+Candidate inventory is 768 automatic native plus 2 Main drivers, 432
+registered protocol/E2E entries and 58 production units. Candidate scoped
+repair count is 182; master remains 180 until individual verified imports.
 
 ## Root whole-suite state
 
@@ -105,3 +120,13 @@ failed. Protocol entries are still running. No terminal/full-pass claim.
 Focused results do not close TYPE-06, PROTO-04 or any broader family. Binary
 interval formats, computed-cast modifiers and other unverified requirements
 remain open. The original audit checkboxes and item statuses are unchanged.
+
+The entire original `derived_type_protocol_e2e_test.py --collect-errors`
+also ran against the final interval-column frozen candidate (session 16735,
+exit 1). Its only collected failure is the unchanged ordinary query
+`SELECT (SELECT count(*) FROM typed_src) AS c;`, returning 0A000 with
+`query requires an additional prepared plan lowering`. The planner's
+`supportsPreparedSelectShape` explicitly rejects builtin aggregate roles;
+repair requires actual aggregate relational lowering, not substituting the
+SQL or suppressing the error. The other original collected assertions pass.
+This additional diagnosis does not approve a repair or close QRY-02/QRY-05.
