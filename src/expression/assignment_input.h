@@ -7,6 +7,8 @@
 #include "parser/parser.h"
 #include "utils/interval.h"
 #include "utils/interval_type.h"
+#include "utils/numeric_type.h"
+#include <set>
 
 namespace dbms {
 namespace assignment_input_detail {
@@ -68,6 +70,35 @@ inline void validateAssignmentInput(const QueryOutputColumn& target,
                                     const Expr* source,
                                     const std::string& sourceType) {
     const auto targetType = ExprHelper::canonicalResultTypeName(target.type);
+    if (targetType == "numeric" || targetType == "numeric[]") {
+        const auto type = ExprHelper::canonicalResultTypeName(sourceType);
+        const auto* literal = dynamic_cast<const LiteralExpr*>(source);
+        if ((type.empty() || type == "unknown") &&
+            assignment_input_detail::unknownLiteral(literal) &&
+            SQLParser::toLower(literal->value) != "default") {
+            // Only direct contextual unknown input is converted at analysis.
+            // Typed numeric expressions retain their runtime evaluation order.
+            CastExpr conversion;
+            conversion.typeName = targetType;
+            conversion.typeMods = numeric_type_detail::unpack(target.typeMod);
+            conversion.operand = std::make_unique<LiteralExpr>(*literal);
+            ExprEvaluator evaluator;
+            (void)evaluator.eval(&conversion, RowContext{});
+        } else if (!type.empty() && type != "unknown") {
+            static const std::set<std::string> numeric = {
+                "smallint", "integer", "bigint", "numeric", "real", "double precision"
+            };
+            const bool array = targetType == "numeric[]";
+            const auto element = array && type.size() >= 2 &&
+                type.compare(type.size() - 2, 2, "[]") == 0
+                ? type.substr(0, type.size() - 2) : type;
+            if ((array && (type.size() < 2 || type.compare(type.size() - 2, 2, "[]") != 0)) ||
+                (!array && type != element) || !numeric.count(element))
+                throw DbError("42804", "column \"" + target.name +
+                    "\" is of type " + targetType + " but expression is of type " + type);
+        }
+        return;
+    }
     if (targetType != "interval" && targetType != "interval[]") return;
     const auto type = ExprHelper::canonicalResultTypeName(sourceType);
     if (type.empty() || type == "unknown") {

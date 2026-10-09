@@ -1545,6 +1545,7 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
                  physicalTypeName == "char" ||
                  physicalTypeName == "bpchar" ||
                  physicalTypeName == "varchar" ||
+                 physicalTypeName == "numeric" ||
                  physicalTypeName == "interval" ||
                  physicalTypeName == "inet" || physicalTypeName == "cidr" ||
                  physicalTypeName == "macaddr" ||

@@ -6,6 +6,8 @@
 
 ## [Unreleased]
 
+- 修复 NUMERIC 声明精度/scale 在存储和赋值中丢失的问题，覆盖标量及数组元素舍入、溢出检查、ALTER 重写和协议类型修饰符；支持负 scale 与大于 precision 的 scale。裸 NUMERIC 与旧无修饰符声明仍保持原语义。
+- 带 NUMERIC 修饰符的声明也使用 schema 格式 `0x4442000C`；仅支持 INTERVAL 修饰符的早期 C 格式读取器不能读取这类 NUMERIC 声明。请保留升级前备份，不要直接降级打开已写入新声明的数据目录。
 - 修复 INTERVAL 列字段范围和小数秒精度在 INSERT、UPDATE、数组元素及 ALTER TYPE 中丢失的问题，并为实际表列返回对应的协议类型修饰符。
 - 带 INTERVAL 修饰符的表声明使用 schema 格式 `0x4442000C` 保存精度；未带修饰符的旧声明仍可读取且保持原格式。写入新格式的声明不能由旧版程序读取，请保留升级前备份，不要直接降级打开这类数据目录。
 - PostgreSQL 18 兼容审计仍在逐项执行；完成状态只以 `docs/postgresql-18-gap-audit.md` 与 `docs/gap-progress.json` 为准。

@@ -11,6 +11,7 @@
 #include "catalog/systables.h"
 #include "catalog/type_registry.h"
 #include "utils/interval_type.h"
+#include "utils/numeric_type.h"
 #include "access/IndexFileUtil.h"
 #include "common/logs.h"
 #include "common/FeatureGate.h"
@@ -985,7 +986,7 @@ static PgAttributeRow catalogAttributeForColumn(
     }
     attribute.attndims = column.isArray ? 1 : 0;
     attribute.atttypmod = -1;
-    if (column.dataType == "interval") attribute.atttypmod = column.typeMod;
+    if (column.dataType == "interval" || column.dataType == "numeric") attribute.atttypmod = column.typeMod;
     if (!column.isArray && column.dataType == "bit") {
         attribute.atttypmod = static_cast<int32_t>(column.dsize + 4);
     } else if (!column.isArray && column.dataType == "bit varying" &&
@@ -1003,11 +1004,12 @@ static PgAttributeRow catalogAttributeForColumn(
         (previous->attndims > 0) == column.isArray &&
         ((attribute.atttypid == 1043 && previous->atttypmod >= 4 &&
           static_cast<size_t>(previous->atttypmod - 4) == column.dsize) ||
-         attribute.atttypid == 1700)) {
+         (attribute.atttypid == 1700 && column.typeMod == -1))) {
         // A catalog-backed VARCHAR bound can equal the physical capacity.
         // Preserve it across unrelated ALTER TABLE catalog synchronizations.
-        // Numeric modifiers also live only in the durable attribute, not the
-        // physical width. An explicit new declaration overrides this below.
+        // Preserve historical catalog-only numeric modifiers when an older
+        // physical descriptor has no modifier. Current physical declaration
+        // metadata is authoritative and must not inherit a stale typmod.
         attribute.atttypmod = previous->atttypmod;
     }
     if (!column.domainName.empty()) attribute.atttypmod = -1;
@@ -4457,6 +4459,7 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
     } else if (baseType == "numeric" || baseType == "decimal") {
         col = makeDecimalColumn(cd.name, cd.isNull, typeMod1 > 0 ? typeMod1 : 18,
                                 typeMod2 > 0 ? typeMod2 : 2, cd.isPrimaryKey);
+        col.typeMod = numeric_type_detail::pack(typeMods);
     } else if (baseType == "money") {
         col = makeMoneyColumn(cd.name, cd.isNull, cd.isPrimaryKey);
     } else if (baseType == "date") {

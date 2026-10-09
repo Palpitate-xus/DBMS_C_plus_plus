@@ -2,6 +2,7 @@
 #include <mutex>
 #include "types/numeric.h"
 #include "utils/interval_type.h"
+#include "utils/numeric_type.h"
 
 #include <cctype>
 #include <cstdint>
@@ -91,6 +92,14 @@ TypeModResult TypeRegistry::applyTypeMods(const std::string& canonicalName,
     }
 
     // 单修饰符：长度 / 精度
+    if (entry->canonicalName == "numeric" || entry->canonicalName == "decimal") {
+        try { res.typmod = numeric_type_detail::pack(mods); }
+        catch (const DbError& error) { res.error = error.message(); return res; }
+        res.dsize = Numeric::kMaxTextLength;
+        res.isVariableLength = true;
+        return res;
+    }
+
     if (mods.size() == 1) {
         int64_t n = 0;
         if (!parseInt(mods[0], n)) {
@@ -206,7 +215,7 @@ std::string TypeRegistry::resolveColumnType(Column& col,
         col.dsize = base.dsize;
         col.isVariableLength = true;
         col.isArray = true;
-        col.typeMod = canonical == "interval" ? base.typmod : -1;
+        col.typeMod = canonical == "interval" || canonical == "numeric" || canonical == "decimal" ? base.typmod : -1;
         return "";
     }
 
@@ -217,7 +226,7 @@ std::string TypeRegistry::resolveColumnType(Column& col,
     col.dsize = r.dsize;
     col.isVariableLength = r.isVariableLength;
     col.isArray = false;
-    col.typeMod = canonical == "interval" ? r.typmod : -1;
+    col.typeMod = canonical == "interval" || canonical == "numeric" || canonical == "decimal" ? r.typmod : -1;
 
     // 同步 dataName（列名）不应由类型系统设置，但保留调用者已设置的值
     return "";
@@ -240,8 +249,12 @@ std::string TypeRegistry::validateColumn(Column& col) const {
     if (col.isArray) isArray = true;
 
     if (col.typeMod != -1) {
-        if (normalizeTypeName(baseType) != "interval") return "unsupported persisted column modifier";
-        try { (void)interval_type_detail::unpack(col.typeMod); }
+        const auto canonical = normalizeTypeName(baseType);
+        try {
+            if (canonical == "interval") (void)interval_type_detail::unpack(col.typeMod);
+            else if (canonical == "numeric" || canonical == "decimal") (void)numeric_type_detail::unpack(col.typeMod);
+            else return "unsupported persisted column modifier";
+        }
         catch (const DbError& error) { return error.message(); }
     }
 

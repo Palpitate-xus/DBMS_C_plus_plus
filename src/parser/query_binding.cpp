@@ -830,8 +830,13 @@ public:
                 array_detail::checkExplicitElementCast(type,array->elementType);
             for (size_t i=0;i<array->elements.size();++i) {
                 validateArrayConstant(array->elements[i].get(),array->elementType);
-                if (metadata.assignmentInput)
-                    metadata.assignmentInput({"array element",array->elementType},array->elements[i].get(),types[i]);
+                if (metadata.assignmentInput) {
+                    // A nested constructor contributes an array-valued
+                    // child, not a scalar datum of the base element type.
+                    const auto target = array->elementType +
+                        std::string(array->nestedElements ? "[]" : "");
+                    metadata.assignmentInput({"array element",target},array->elements[i].get(),types[i]);
+                }
             }
             return array->elementType + "[]";
         }

@@ -21,6 +21,7 @@
 #include "types/numeric.h"
 #include "utils/interval.h"
 #include "utils/interval_type.h"
+#include "utils/numeric_type.h"
 
 #include <algorithm>
 #include <atomic>
@@ -709,12 +710,14 @@ std::string intervalTargetInputState(const TableSchema& table,
     if (!value) return {};
     for (size_t i = 0; i < table.len; ++i) {
         const auto& target = table.cols[i];
-        if (target.dataName == column && !target.isArray &&
-            canonicalSetType(target.dataType) == "interval") {
+        const auto targetType = canonicalSetType(target.dataType);
+        if (target.dataName == column &&
+            ((!target.isArray && targetType == "interval") || targetType == "numeric")) {
             try {
                 CastExpr cast;
-                cast.typeName = "interval";
-                cast.typeMods = interval_type_detail::unpack(target.typeMod);
+                cast.typeName = targetType + std::string(target.isArray ? "[]" : "");
+                cast.typeMods = targetType == "numeric" ? numeric_type_detail::unpack(target.typeMod)
+                                                       : interval_type_detail::unpack(target.typeMod);
                 auto parameter = std::make_unique<ParameterExpr>();
                 parameter->origin = ParameterOrigin::RuntimeCell;
                 parameter->declaredType = "unknown";
@@ -731,6 +734,8 @@ std::string intervalTargetInputState(const TableSchema& table,
 }
 
 [[noreturn]] void rejectIntervalInput(const std::string& state) {
+    if (state == "22003") throw DbError(state, "numeric field overflow");
+    if (state == "22P02") throw DbError(state, "invalid input syntax for target column");
     throw DbError(state, state == "22007"
         ? "invalid input syntax for type interval" : "interval value out of range");
 }

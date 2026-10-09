@@ -93,6 +93,10 @@ static void test_apply_type_mods_numeric() {
     assert(r.error.find("precision") != std::string::npos);
 
     r = reg.applyTypeMods("numeric", {"5", "6"});
+    assert(r.ok() && r.typmod == (5 << 16) + 6 + 4);
+    r = reg.applyTypeMods("numeric", {"5", "-2"});
+    assert(r.ok() && r.typmod == (5 << 16) + 2046 + 4);
+    r = reg.applyTypeMods("numeric", {"5", "1001"});
     assert(!r.ok());
     std::cout << "test_apply_type_mods_numeric passed\n";
 }

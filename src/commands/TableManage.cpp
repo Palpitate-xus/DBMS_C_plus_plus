@@ -12,6 +12,7 @@
 #include "utils/plpgsql.h"
 #include "utils/interval.h"
 #include "utils/interval_type.h"
+#include "utils/numeric_type.h"
 #include "expression/aggregate_type.h"
 #include "replication/ReplicationManager.h"
 #include "parser/parser.h"
@@ -9830,13 +9831,14 @@ static bool normalizeInterval(const std::string& value, std::string& normalized)
 }
 
 // One real runtime datum, never interpolated into SQL. Scalar/array input
-// and every storage writer use the same declaration-owned interval cast.
-static bool normalizeIntervalColumn(const Column& column, const std::string& value,
+// and every storage writer use the same declaration-owned datum cast.
+static bool normalizeModifiedColumn(const Column& column, const std::string& value,
                                     std::string& normalized) {
     try {
         CastExpr cast;
-        cast.typeName = "interval" + std::string(column.isArray ? "[]" : "");
-        cast.typeMods = interval_type_detail::unpack(column.typeMod);
+        cast.typeName = column.dataType + std::string(column.isArray ? "[]" : "");
+        cast.typeMods = column.dataType == "numeric" ? numeric_type_detail::unpack(column.typeMod)
+                                                   : interval_type_detail::unpack(column.typeMod);
         auto parameter = std::make_unique<ParameterExpr>();
         parameter->origin = ParameterOrigin::RuntimeCell;
         parameter->declaredType = "unknown";
@@ -9847,7 +9849,7 @@ static bool normalizeIntervalColumn(const Column& column, const std::string& val
         normalized = evaluator.eval(&cast, context).value;
         if (column.isArray) {
             std::string canonical;
-            if (!normalizeArray(normalized, "interval", canonical)) return false;
+            if (!normalizeArray(normalized, column.dataType, canonical)) return false;
             normalized = std::move(canonical);
         }
         return true;
@@ -14936,8 +14938,11 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
     bool hasColumnTypeMods = false;
     for (size_t i = 0; i < tbl.len; ++i) {
         if (tbl.cols[i].typeMod != -1) {
-            if (tbl.cols[i].dataType != "interval") { out.setstate(std::ios::failbit); return; }
-            try { (void)interval_type_detail::unpack(tbl.cols[i].typeMod); }
+            try {
+                if (tbl.cols[i].dataType == "interval") (void)interval_type_detail::unpack(tbl.cols[i].typeMod);
+                else if (tbl.cols[i].dataType == "numeric") (void)numeric_type_detail::unpack(tbl.cols[i].typeMod);
+                else { out.setstate(std::ios::failbit); return; }
+            }
             catch (const DbError&) { out.setstate(std::ios::failbit); return; }
             hasColumnTypeMods = true;
         }
@@ -15725,8 +15730,11 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
             in.read(reinterpret_cast<char*>(&tbl.cols[i].typeMod), sizeof(tbl.cols[i].typeMod));
             if (!in) return {};
             if (tbl.cols[i].typeMod != -1) {
-                if (tbl.cols[i].dataType != "interval") return {};
-                try { (void)interval_type_detail::unpack(tbl.cols[i].typeMod); }
+                try {
+                    if (tbl.cols[i].dataType == "interval") (void)interval_type_detail::unpack(tbl.cols[i].typeMod);
+                    else if (tbl.cols[i].dataType == "numeric") (void)numeric_type_detail::unpack(tbl.cols[i].typeMod);
+                    else return {};
+                }
                 catch (const DbError&) { return {}; }
             }
         }
@@ -25059,7 +25067,7 @@ DBStatus StorageEngine::insertInternal(
         if (col.isArray) {
             if (!val.empty()) {
                 std::string canonical;
-                if (!(col.dataType == "interval" ? normalizeIntervalColumn(col, val, canonical) : normalizeArray(val, col.dataType, canonical))) {
+                if (!(col.dataType == "interval" || col.dataType == "numeric" ? normalizeModifiedColumn(col, val, canonical) : normalizeArray(val, col.dataType, canonical))) {
                     lockManager_.unlock(tablename);
                     return DBStatus::INVALID_VALUE;
                 }
@@ -25105,10 +25113,12 @@ DBStatus StorageEngine::insertInternal(
             }
             actualValues[col.dataName] = canonical;
         } else if (col.dataType == "numeric" && !val.empty()) {
-            try { Numeric numeric(val); (void)numeric; } catch (...) {
+            std::string canonical;
+            if (!normalizeModifiedColumn(col, val, canonical)) {
                 lockManager_.unlock(tablename);
                 return DBStatus::INVALID_VALUE;
             }
+            actualValues[col.dataName] = std::move(canonical);
         } else if (!col.isVariableLength && (col.dataType == "double" || col.dataType == "decimal") && !val.empty()) {
             double parsed = 0.0;
             if (!parseDoubleLiteral(val, parsed)) {
@@ -25194,7 +25204,7 @@ DBStatus StorageEngine::insertInternal(
         // dimensions, per-element type for numeric element types).
         if (col.isArray && !val.empty()) {
             std::string canon;
-            if (!(col.dataType == "interval" ? normalizeIntervalColumn(col, val, canon) : normalizeArray(val, col.dataType, canon))) {
+            if (!(col.dataType == "interval" || col.dataType == "numeric" ? normalizeModifiedColumn(col, val, canon) : normalizeArray(val, col.dataType, canon))) {
                 lockManager_.unlock(tablename);
                 return DBStatus::INVALID_VALUE;
             }
@@ -25232,7 +25242,7 @@ DBStatus StorageEngine::insertInternal(
         // Validate / canonicalize interval to PG postgres style.
         if (col.dataType == "interval" && !col.isArray && !val.empty()) {
             std::string canon;
-            if (!normalizeIntervalColumn(col, val, canon)) {
+            if (!normalizeModifiedColumn(col, val, canon)) {
                 lockManager_.unlock(tablename);
                 return DBStatus::INVALID_VALUE;
             }
@@ -28721,7 +28731,9 @@ DBStatus StorageEngine::updateInternal(
                         return DBStatus::INVALID_VALUE;
                     }
                     std::string storeVal = kv.second;
-                    if (col.dataType == "date") {
+                    if (col.isArray && col.dataType == "numeric") {
+                        if (!normalizeModifiedColumn(col, kv.second, storeVal)) return DBStatus::INVALID_VALUE;
+                    } else if (col.dataType == "date") {
                         Date d(kv.second.c_str());
                         if (d.year == 0) return DBStatus::INVALID_VALUE;
                     } else if (col.dataType == "timestamp" ||
@@ -28763,12 +28775,7 @@ DBStatus StorageEngine::updateInternal(
                         }
                     } else if (col.dataType == "numeric") {
                         if (!kv.second.empty()) {
-                            try {
-                                Numeric numeric(kv.second);
-                                (void)numeric;
-                            } catch (...) {
-                                return DBStatus::INVALID_VALUE;
-                            }
+                            if (!normalizeModifiedColumn(col, kv.second, storeVal)) return DBStatus::INVALID_VALUE;
                         }
                     } else if (col.dataType == "macaddr" || col.dataType == "macaddr8") {
                         if (!kv.second.empty()) {
@@ -28826,7 +28833,7 @@ DBStatus StorageEngine::updateInternal(
                     } else if (col.isArray) {
                         if (!kv.second.empty()) {
                             std::string canon;
-                            if (!(col.dataType == "interval" ? normalizeIntervalColumn(col, kv.second, canon) : normalizeArray(kv.second, col.dataType, canon)))
+                            if (!(col.dataType == "interval" ? normalizeModifiedColumn(col, kv.second, canon) : normalizeArray(kv.second, col.dataType, canon)))
                                 return DBStatus::INVALID_VALUE;
                             storeVal = canon;
                         }
@@ -28855,7 +28862,7 @@ DBStatus StorageEngine::updateInternal(
                     } else if (col.dataType == "interval") {
                         if (!kv.second.empty()) {
                             std::string canon;
-                            if (!normalizeIntervalColumn(col, kv.second, canon))
+                            if (!normalizeModifiedColumn(col, kv.second, canon))
                                 return DBStatus::INVALID_VALUE;
                             storeVal = canon;
                         }
