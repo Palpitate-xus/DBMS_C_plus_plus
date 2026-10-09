@@ -39704,18 +39704,34 @@ std::unordered_set<std::string> arraySeen;
                 havings.push_back(h);
             }
         } else {
-            const size_t opStart = s.find_first_of("<>=!");
-            if (opStart == std::string::npos) continue;
-            size_t opEnd = opStart;
-            while (opEnd < s.size() &&
-                   (s[opEnd] == '<' || s[opEnd] == '>' ||
-                    s[opEnd] == '=' || s[opEnd] == '!')) ++opEnd;
-            const std::string colName = trim(s.substr(0, opStart));
+            // The frontend hands off a structurally bound physical column,
+            // quoted as an SQL identifier. Consume its real grammar identity,
+            // not rendered quotes or an operator-looking character inside it.
+            SQLParser parser;
+            auto parsed = parser.parse("SELECT " + s);
+            const auto* select = parsed.success ? dynamic_cast<const SelectStmt*>(parsed.stmt.get()) : nullptr;
+            const auto* comparison = select && select->selectList.size() == 1
+                ? dynamic_cast<const BinaryOpExpr*>(select->selectList.front().expr.get()) : nullptr;
+            if (!comparison || (comparison->op != "=" && comparison->op != "<>" &&
+                comparison->op != "!=" && comparison->op != "<" && comparison->op != ">" &&
+                comparison->op != "<=" && comparison->op != ">=")) continue;
+            const auto* column = dynamic_cast<const ColumnRefExpr*>(comparison->left.get());
+            if (!column || !column->table.empty() || !column->schema.empty()) continue;
+            const std::string& colName = column->column;
             if (std::find(groupByCols.begin(), groupByCols.end(), colName) ==
                 groupByCols.end()) continue;
+            const Expr* input = comparison->right.get();
+            std::string sign;
+            if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(input)) {
+                if (unary->op != "+" && unary->op != "-") continue;
+                sign = unary->op;
+                input = unary->operand.get();
+            }
+            const auto* literal = dynamic_cast<const LiteralExpr*>(input);
+            if (!literal || literal->preparedSubquery || !literal->typeName.empty()) continue;
             for (size_t i = 0; i < tbl.len; ++i) {
                 if (tbl.cols[i].dataName != colName) continue;
-                std::string value = trim(s.substr(opEnd));
+                std::string value = sign + literal->value;
                 const bool valueIsNull = SQLParser::toLower(value) == "null";
                 if (value.size() >= 2 && value.front() == '\'' &&
                     value.back() == '\'') {
@@ -39728,7 +39744,7 @@ std::unordered_set<std::string> arraySeen;
                     value = std::move(decoded);
                 }
                 groupHavings.push_back(
-                    {i, s.substr(opStart, opEnd - opStart),
+                    {i, comparison->op,
                      std::move(value), valueIsNull});
                 break;
             }
