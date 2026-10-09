@@ -1193,7 +1193,8 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
     if(select->signedFetchCount && *select->signedFetchCount<0)
         root=std::make_unique<PreparedNegativeFetchOp>(std::move(root));
     else if(select->limit) {
-        if(select->withTies)root=std::make_unique<PreparedTiesLimitOp>(std::move(root),tiesSort,*select->limit);
+        if(select->withTies && !select->existsTargetPrunable)
+            root=std::make_unique<PreparedTiesLimitOp>(std::move(root),tiesSort,*select->limit);
         else root=std::make_unique<LimitOp>(std::move(root),*select->limit);
     }
     return root;

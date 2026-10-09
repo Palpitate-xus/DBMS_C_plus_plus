@@ -719,6 +719,13 @@ public:
             }
             for (auto& arg : call->namedArgs) expression(arg.value, scopes);
             expression(call->filter, scopes); window(call->over, scopes);
+            if (call->schema.empty() && SQLParser::toLower(call->funcName) == "exists" &&
+                call->args.size() == 1 && call->args.front()->preparedSubquery) {
+                // EXISTS is a SQL consumer, not a callable whose name or
+                // return type can be selected by search_path overloads.
+                call->resolvedResultType = declaredType("boolean", call);
+                return call->resolvedResultType;
+            }
             call->setReturning=metadata.setReturning?metadata.setReturning(call):std::nullopt;
             if(call->setReturning) {
                 if(!allowSetReturning)throw DbError("0A000","set-returning functions are not allowed in this expression context");
@@ -851,6 +858,15 @@ public:
             result.statementOutputs[parsed.stmt.get()] = columns;
         }
         if (!scalar) {
+            for (size_t i = 0; i < columns.size(); ++i) {
+                if (columns[i].type != "unknown") continue;
+                coerceSetUnknown(parsed.stmt.get(), i, "text");
+                const auto* select = dynamic_cast<const SelectStmt*>(parsed.stmt.get());
+                const auto* value = result.projectionBindings.at(select).at(i).expression;
+                columns[i].type = declaredType("text", value);
+                columns[i].typeOid = expressionTypeOid(value);
+            }
+            result.statementOutputs[parsed.stmt.get()] = columns;
             if (auto* select = dynamic_cast<SelectStmt*>(parsed.stmt.get())) {
                 bool targetSrfOrWindow = false;
                 std::function<void(const Expr*)> inspect = [&](const Expr* value) {

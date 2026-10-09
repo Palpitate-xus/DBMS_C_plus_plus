@@ -36,6 +36,7 @@ int main() {
         {"SELECT EXISTS(SELECT id,k FROM exists_rows WHERE false)","f"},
         {"SELECT EXISTS(SELECT 1)","t"},
         {"SELECT EXISTS(SELECT NULL)","t"},
+        {"SELECT EXISTS(SELECT NULL,'text')","t"},
         {"SELECT EXISTS(SELECT 1/0 FROM exists_rows)","t"},
         {"SELECT EXISTS(SELECT id FROM exists_rows ORDER BY 1/0)","t"},
         {"SELECT EXISTS(SELECT DISTINCT id FROM exists_rows)","t"},
@@ -59,5 +60,5 @@ int main() {
         std::cout<<"PREPARED_EXISTS_STATE "<<item.first<<" actual="<<state<<" expected="<<item.second<<" pass="<<pass<<'\n';
     }
     std::cout<<"PREPARED_EXISTS_CHECKED="<<checked<<" FAILED="<<failed<<'\n';
-    return checked==18 && !failed?0:1;
+    return checked==19 && !failed?0:1;
 }

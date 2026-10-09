@@ -51,6 +51,7 @@ def main():
             ("SELECT EXISTS(SELECT id,k FROM exists_rows WHERE false)", "f"),
             ("SELECT EXISTS(SELECT 1)", "t"),
             ("SELECT EXISTS(SELECT NULL)", "t"),
+            ("SELECT EXISTS(SELECT NULL,'text')", "t"),
             ("SELECT EXISTS(SELECT 1/0 FROM exists_rows)", "t"),
             ("SELECT EXISTS(SELECT id FROM exists_rows ORDER BY 1/0)", "t"),
             ("SELECT EXISTS(SELECT DISTINCT id FROM exists_rows)", "t"),

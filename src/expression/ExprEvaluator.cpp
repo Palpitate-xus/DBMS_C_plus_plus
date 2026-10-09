@@ -5106,6 +5106,9 @@ void ExprEvaluator::bindScalarFunctions(Expr* expression, StorageEngine* engine)
     std::function<void(Expr*)> visit = [&](Expr* node) {
         if (!node) return;
         if (auto* function = dynamic_cast<FunctionCallExpr*>(node)) {
+            if (function->schema.empty() && toLower(function->funcName) == "exists" &&
+                function->args.size() == 1 && function->args.front()->preparedSubquery)
+                return; // SQL grammar owns this child; never register a routine callback.
             const auto resolved = resolveScalarFunction(*this, function, currentDB_, engine,functions_);
             if (!resolved.found && !function->setReturning)
                 throw DbError("42883", "function does not exist: " + function->funcName);
