@@ -129,6 +129,10 @@ inline DeclaredTypeBinding resolveDeclaredTypeName(const std::string& spelling,
             throw DbError("42601","type modifier is not allowed for type "+declaration.typeName);
     }
     result.inputType=result.typeName;
+    std::string existingArray;
+    while(result.inputType.size()>=2 && result.inputType.compare(result.inputType.size()-2,2,"[]")==0) {
+        existingArray+="[]";result.inputType.resize(result.inputType.size()-2);
+    }
     if(!declaration.typeMods.empty()) {
         result.inputType+='(';
         for(size_t i=0;i<declaration.typeMods.size();++i) {
@@ -138,6 +142,7 @@ inline DeclaredTypeBinding resolveDeclaredTypeName(const std::string& spelling,
         }
         result.inputType+=')';
     }
+    result.inputType+=existingArray;
     if(declaration.isArray){result.typeName+="[]";result.inputType+="[]";}
     return result;
 }

@@ -1,0 +1,146 @@
+[
+  {
+    "sql": "SELECT CAST('{abcdef,xy,NULL}' AS pg_catalog._varchar(3)) AS value",
+    "reference": [
+      [
+        [
+          "{abc,xy,NULL}"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1015
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('{1.235,2,NULL}' AS pg_catalog._numeric(5,2)) AS value",
+    "reference": [
+      [
+        [
+          "{1.24,2.00,NULL}"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1231
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('{a,abcd,NULL}' AS pg_catalog._bpchar(3)) AS value",
+    "reference": [
+      [
+        [
+          "{\"a  \",abc,NULL}"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1014
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('[0:1]={abcdef,xy}' AS pg_catalog._varchar(3)) AS value",
+    "reference": [
+      [
+        [
+          "[0:1]={abc,xy}"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1015
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('{abcdef,xy}' AS varchar(3)[]) AS value",
+    "reference": [
+      [
+        [
+          "{abc,xy}"
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1015
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS pg_catalog._varchar(3)) AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1015
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST(NULL AS pg_catalog._numeric(5,2)) AS value",
+    "reference": [
+      [
+        [
+          null
+        ]
+      ],
+      null,
+      "",
+      [
+        "value"
+      ],
+      "SELECT 1",
+      [
+        1231
+      ]
+    ]
+  },
+  {
+    "sql": "SELECT CAST('{1,2}' AS pg_catalog._int4(3)) AS value WHERE false",
+    "reference": [
+      [],
+      "42601",
+      "type modifier is not allowed for type \"pg_catalog._int4\"",
+      [],
+      null,
+      []
+    ]
+  }
+]
