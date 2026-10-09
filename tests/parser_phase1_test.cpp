@@ -527,12 +527,10 @@ int main() {
         std::cout << "[PARSER P1] ORDER BY NULLS OK\n";
     }
 
-    // 11. SELECT LIMIT WITH TIES / FETCH FIRST
+    // 11. FETCH WITH TIES requires ORDER BY and is not LIMIT syntax.
     {
         auto r1 = parser.parse("SELECT * FROM t LIMIT 10 WITH TIES");
-        assert(r1.success);
-        auto* s1 = asSelect(r1.stmt);
-        assert(s1 && s1->limit == 10 && s1->withTies);
+        assert(!r1.success && r1.sqlState == "42601");
 
         auto r2 = parser.parse("SELECT * FROM t FETCH FIRST 5 ROWS ONLY");
         assert(r2.success);
@@ -542,12 +540,22 @@ int main() {
         assert(s2->fromClause->tableName == "t");
         auto signedFetch = parser.parse(
             "SELECT * FROM t FETCH FIRST +5 ROWS WITH TIES");
-        assert(signedFetch.success);
-        assert(asSelect(signedFetch.stmt)->limit == 5);
+        assert(!signedFetch.success && signedFetch.sqlState == "42601");
         auto negativeZeroFetch = parser.parse(
             "SELECT * FROM t FETCH FIRST -0 ROWS WITH TIES");
-        assert(negativeZeroFetch.success);
-        assert(asSelect(negativeZeroFetch.stmt)->limit == 0);
+        assert(!negativeZeroFetch.success && negativeZeroFetch.sqlState == "42601");
+        auto orderedFetch = parser.parse(
+            "SELECT * FROM t ORDER BY id FETCH FIRST +5 ROWS WITH TIES");
+        assert(orderedFetch.success);
+        const auto* ordered = asSelect(orderedFetch.stmt);
+        assert(ordered && ordered->fetchFirst && ordered->withTies &&
+               ordered->limit == 5 && ordered->orderBy.size() == 1);
+        auto orderedZeroFetch = parser.parse(
+            "SELECT * FROM t ORDER BY id FETCH FIRST -0 ROWS WITH TIES");
+        assert(orderedZeroFetch.success);
+        const auto* orderedZero = asSelect(orderedZeroFetch.stmt);
+        assert(orderedZero && orderedZero->fetchFirst && orderedZero->withTies &&
+               orderedZero->limit == 0 && orderedZero->orderBy.size() == 1);
         auto signedLimit = parser.parse("SELECT * FROM t LIMIT +5");
         assert(signedLimit.success && asSelect(signedLimit.stmt)->limit == 5);
         auto signedOffset = parser.parse("SELECT * FROM t OFFSET +2 ROWS");
