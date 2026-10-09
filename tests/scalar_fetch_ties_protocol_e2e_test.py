@@ -124,6 +124,8 @@ def main():
         before=calls();sql=scalar('SELECT '+writer+'(id) FROM '+table+' ORDER BY id FETCH FIRST 1 ROW WITH TIES')
         metadata_sql='EXPLAIN '+sql;result=query(metadata_sql)
         if not result[0] or calls()!=before:failures.append(('plain EXPLAIN ran a child',result,before,calls()))
+        extended('SELECT(SELECT b FROM '+table+' WHERE false) AS value',[[None]],[20])
+        extended("SELECT(SELECT 'typed text') AS value",[['typed text']],[25])
         extended(sql,[['1']],[23])
         if calls()-before!=2:failures.append(('Parse/Describe/Bind reexecuted child',calls()-before,2))
         print('SCALAR_FETCH_COMPLETE',controls,'failures',len(failures),failures,flush=True)

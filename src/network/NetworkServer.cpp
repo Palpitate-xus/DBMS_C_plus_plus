@@ -1687,7 +1687,43 @@ bool describePreparedQueryHostResult(const std::string& sql, Session& session,
     const auto probe=parser.parseForBinding(sql);
     const auto* statement=probe.isValid()?dynamic_cast<const SelectStmt*>(probe.stmt.get()):nullptr;
     if(!statement || statement->fromClause)return false;
+    std::function<bool(const Expr*)> queryChild = [&](const Expr* value) {
+        if (!value) return false;
+        if (value->preparedSubquery) return true;
+        if (const auto* literal = dynamic_cast<const LiteralExpr*>(value)) {
+            // The parser's actual SQL-child envelope, not a keyword in a
+            // string datum. Preparation supplies its static child output
+            // without executing rows, sort keys or volatile projections.
+            const auto origin = SQLParser::tokenize(literal->value);
+            return origin.size() > 1 && origin.front() == "(" &&
+                (SQLParser::toLower(origin[1]) == "select" ||
+                 SQLParser::toLower(origin[1]) == "with");
+        }
+        if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(value))
+            return queryChild(binary->left.get()) ||
+                (binary->op != "::" && queryChild(binary->right.get()));
+        if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(value))
+            return queryChild(unary->operand.get());
+        if (const auto* cast = dynamic_cast<const CastExpr*>(value))
+            return queryChild(cast->operand.get());
+        if (const auto* call = dynamic_cast<const FunctionCallExpr*>(value)) {
+            for (const auto& arg : call->args) if (queryChild(arg.get())) return true;
+            for (const auto& arg : call->namedArgs) if (queryChild(arg.value.get())) return true;
+        }
+        if (const auto* conditional = dynamic_cast<const CaseExpr*>(value)) {
+            if (queryChild(conditional->switchExpr.get()) ||
+                queryChild(conditional->elseExpr.get())) return true;
+            for (const auto& arm : conditional->whenClauses)
+                if (queryChild(arm.first.get()) || queryChild(arm.second.get())) return true;
+        }
+        if (const auto* array = dynamic_cast<const ArrayExpr*>(value))
+            for (const auto& cell : array->elements) if (queryChild(cell.get())) return true;
+        if (const auto* row = dynamic_cast<const RowExpr*>(value))
+            for (const auto& cell : row->elements) if (queryChild(cell.get())) return true;
+        return false;
+    };
     const bool owned=std::any_of(statement->selectList.begin(),statement->selectList.end(),[&](const auto& target) {
+        if (queryChild(target.expr.get())) return true;
         const auto* call=dynamic_cast<const FunctionCallExpr*>(target.expr.get());
         return call && g_engine.ownsPreparedSetReturningCall(session.currentDB,call);
     });
@@ -1695,7 +1731,9 @@ bool describePreparedQueryHostResult(const std::string& sql, Session& session,
     const auto prepared=g_engine.prepareBoundQuery(session.currentDB,sql);
     QueryResult shape;
     for(const auto& field:prepared.output){shape.columns.push_back(field.name);shape.columnTypes.push_back(field.type);}
-    columns=describeProtocolColumns(shape,sql,session);
+    // Source-free expression outputs cannot borrow a child table's physical
+    // attribute origin merely because their labels happen to match it.
+    columns=describeProtocolColumns(shape,std::string{},session);
     return !columns.empty();
 }
 
