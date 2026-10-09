@@ -838,9 +838,19 @@ public:
             throw DbError("42601", "subquery requires a SELECT or VALUES primary statement");
         // Child coordinate rebasing is structural, not identifier matching.
         rebase(*parsed.stmt, begin);
-        const auto columns = statement(*parsed.stmt, scopes, cteScopes.empty() ? Ctes{} : *cteScopes.back());
-        literal.preparedSubquery = std::move(parsed.stmt);
+        auto columns = statement(*parsed.stmt, scopes, cteScopes.empty() ? Ctes{} : *cteScopes.back());
         if (scalar && columns.size() != 1) throw DbError("42601", "subquery must return only one column");
+        // A scalar SELECT is a query-output boundary, not an assignment's
+        // bare UNKNOWN input. Finalize its actual child value as TEXT before
+        // a parent expression rebinds the retained subquery node. Quantified
+        // subqueries keep their separate operator-driven coercion path.
+        if (scalar && columns.front().type == "unknown") {
+            coerceSetUnknown(parsed.stmt.get(), 0, "text");
+            columns.front().type = declaredType("text", &literal);
+            columns.front().typeOid = expressionTypeOid(&literal);
+            result.statementOutputs[parsed.stmt.get()] = columns;
+        }
+        literal.preparedSubquery = std::move(parsed.stmt);
         literal.typeName = scalar ? columns.front().type : "boolean";
         if(scalar)valueTypeOids[&literal]=columns.front().typeOid;
         return literal.typeName;

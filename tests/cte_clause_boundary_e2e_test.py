@@ -57,6 +57,23 @@ def main():
         assert headers == ["flag"], headers
         assert command_tag == "SELECT 1", command_tag
         assert type_oids == [16], type_oids
+
+        for statement, expected in (
+                ("SELECT (SELECT 'with data' FROM cte_boundary_rows) AS value "
+                 "FROM cte_boundary_rows;", [["with data"]]),
+                ("SELECT (SELECT NULL FROM cte_boundary_rows) AS value "
+                 "FROM cte_boundary_rows;", [[None]]),
+                ("SELECT (SELECT 'with data' FROM cte_boundary_rows WHERE false) "
+                 "AS value FROM cte_boundary_rows;", [[None]]),
+                ("SELECT (SELECT (SELECT 'nested')) AS value "
+                 "FROM cte_boundary_rows;", [["nested"]])):
+            decoded = runner.decode_wire_result(client.simple_query(
+                server["sock"], statement), include_types=True)
+            rows, state, message, headers, command_tag, type_oids = decoded
+            assert state is None, (statement, state, message)
+            assert rows == expected, (statement, rows, expected)
+            assert headers == ["value"] and type_oids == [25], (statement, decoded)
+            assert command_tag == "SELECT 1", (statement, decoded)
         assert not failures, ("complete original CTE clause boundary matrix failed", failures)
         print("[CTE CLAUSE BOUNDARY E2E] passed")
     finally:
