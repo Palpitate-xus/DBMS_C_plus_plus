@@ -2,6 +2,20 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Numeric column modifiers independently repaired and committed in private worktree; ROW remains a strict failed dependency",
+      "gap_ids": ["TYPE-06", "PROTO-04", "QRY-02", "QRY-05"],
+      "status": "partial",
+      "commits": ["2144d7d7"],
+      "evidence": ["docs/issue-private-aggregate-array-followup.md"],
+      "tests": ["tests/alter_array_type_envelope_protocol_e2e_test.py", "tests/type_registry_test.cpp"],
+      "verification": {
+        "reproduction": "New numeric reference26 controls against verified180006 all0; old22 controls12fail retained. Initial complete51084 exits1 with13native all0 and4/7wire pass; scalar typmod and nested numeric ARRAY failures diagnosed, ROW independent failure retained.",
+        "focused_tests": "Corrected actual own CPP81179/43506/10068 all0, full78431 terminal1 with13native all0 and6/7wire pass including new25 numeric controls, all unchanged adjacent entries and entire defaultprotocol. Strict aggregate55 controls retain only ROW1fail; four numeric failures repaired. OriginalBIT38459453=0. All58 current own receipts/cache/repeat/source/frozen terminal fences0, no copied objects or assertion changes.",
+        "full_suite": "Root84918 still live and source-frozen on dc89 generation; only documentation changed on master. Root182source768automatic+2Main432registered58TU. Private185source770automatic+2Main434registered58TU; independent409507fb/4c5b1cdc/2144d7d7 not yet imported.",
+        "scope": "Original273 statuses unchanged22complete166partial70unverified15user-deferred. READMEevergreen cfcab3cd already committed. Native legacy decimal factory modifier API and numeric full capacity remain open. Continue independent ROW constructor/datum work. No push, Actions activation or filtered branch restart."
+      }
+    },
+    {
       "issue": "Independent private aggregate and ALTER array repairs committed; numeric and ROW dependencies remain open",
       "gap_ids": ["TYPE-06", "PROTO-04", "QRY-02", "QRY-05"],
       "status": "partial",
