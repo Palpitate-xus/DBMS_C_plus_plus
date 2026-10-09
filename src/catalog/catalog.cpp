@@ -1682,6 +1682,11 @@ const std::vector<PgTypeRow>& CatalogManager::builtinTypeRows() {
     types.at(typeByOid.at(2206)).typbyval=true;
     types.at(typeByOid.at(2206)).typalign='i';
     types.at(typeByOid.at(2206)).typstorage='p';
+    for(const auto& identity:std::vector<std::pair<Oid,std::string>>{
+        {2205,"regclass"},{4089,"regnamespace"},{4096,"regrole"}}) {
+        ensureType(identity.first,identity.second,4,'b','N');
+        types.at(typeByOid.at(identity.first)).typbyval=true;
+    }
     ensureType(2950,  "uuid",       16,   'b', 'U');
     ensureType(2951,  "_uuid",      -1,   'b', 'A');
     ensureType(3802,  "jsonb",      -1,   'b', 'U');
@@ -1735,6 +1740,9 @@ const std::vector<PgTypeRow>& CatalogManager::builtinTypeRows() {
         {3807,"_jsonb",3802},
         {143,"_xml",142},
         {2211,"_regtype",2206},
+        {2210,"_regclass",2205},
+        {4090,"_regnamespace",4089},
+        {4097,"_regrole",4096},
         {3905,"_int4range",3904},
         {3907,"_numrange",3906},
         {3909,"_tsrange",3908},
@@ -1744,6 +1752,7 @@ const std::vector<PgTypeRow>& CatalogManager::builtinTypeRows() {
     };
     for(const auto& array:arrays)ensureType(array.oid,array.name,-1,'b','A',array.element);
     types.at(typeByOid.at(2211)).typstorage='x';
+    for(Oid oid:{2210U,4090U,4097U})types.at(typeByOid.at(oid)).typstorage='x';
     for(const auto& array:arrays) {
         auto& row=types[typeByOid.at(array.oid)];
         auto& element=types[typeByOid.at(array.element)];
