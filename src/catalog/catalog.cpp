@@ -1567,6 +1567,13 @@ bool CatalogManager::applyDropPlan(const DropPlan& plan, std::string* error) {
 // Bootstrap: 初始化标准 namespace / 类型
 // ============================================================================
 
+const std::vector<PgNamespaceRow>& CatalogManager::builtinNamespaceRows() {
+    static const std::vector<PgNamespaceRow> rows={
+        {11,"pg_catalog",10},{99,"pg_toast",10},{2200,"public",10},{1213,"pg_temp_1",10}
+    };
+    return rows;
+}
+
 void CatalogManager::bootstrapSystemNamespaces() {
     std::lock_guard<std::mutex> lock(mutex_);
     const auto namespaceImage = persistence_->observed.find("namespace");
@@ -1586,10 +1593,10 @@ void CatalogManager::bootstrapSystemNamespaces() {
         nsByOid_[oid] = idx;
         nsByName_[name] = oid;
     };
-    ensureNs(11,    "pg_catalog",   10);  // PG 标准 OID
-    ensureNs(99,    "pg_toast",     10);
-    if (initializePublic && !nsByName_.count("public")) ensureNs(2200, "public", 10);
-    ensureNs(1213,  "pg_temp_1",    10);
+    for(const auto& row:builtinNamespaceRows()) {
+        if(row.nspname=="public" && (!initializePublic || nsByName_.count("public")))continue;
+        ensureNs(row.oid,row.nspname,row.nspowner);
+    }
     persistence_->namespaceBootstrapApplied = true;
 }
 
@@ -1671,6 +1678,10 @@ const std::vector<PgTypeRow>& CatalogManager::builtinTypeRows() {
     ensureType(1562,  "varbit",     -1,   'b', 'V');
     ensureType(1563,  "_varbit",    -1,   'b', 'A');
     ensureType(1700,  "numeric",    -1,   'b', 'N');
+    ensureType(2206,  "regtype",     4,   'b', 'N');
+    types.at(typeByOid.at(2206)).typbyval=true;
+    types.at(typeByOid.at(2206)).typalign='i';
+    types.at(typeByOid.at(2206)).typstorage='p';
     ensureType(2950,  "uuid",       16,   'b', 'U');
     ensureType(2951,  "_uuid",      -1,   'b', 'A');
     ensureType(3802,  "jsonb",      -1,   'b', 'U');
@@ -1723,6 +1734,7 @@ const std::vector<PgTypeRow>& CatalogManager::builtinTypeRows() {
         {199,"_json",114},
         {3807,"_jsonb",3802},
         {143,"_xml",142},
+        {2211,"_regtype",2206},
         {3905,"_int4range",3904},
         {3907,"_numrange",3906},
         {3909,"_tsrange",3908},
@@ -1731,6 +1743,7 @@ const std::vector<PgTypeRow>& CatalogManager::builtinTypeRows() {
         {3927,"_int8range",3926},
     };
     for(const auto& array:arrays)ensureType(array.oid,array.name,-1,'b','A',array.element);
+    types.at(typeByOid.at(2211)).typstorage='x';
     for(const auto& array:arrays) {
         auto& row=types[typeByOid.at(array.oid)];
         auto& element=types[typeByOid.at(array.element)];

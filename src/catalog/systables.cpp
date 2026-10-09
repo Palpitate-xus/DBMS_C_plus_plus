@@ -69,6 +69,7 @@ static const std::unordered_map<std::string, Oid> kBuiltinTypeMap = {
     {"bit varying", 1562}, {"varbit", 1562},
     {"bit varying[]", 1563}, {"varbit[]", 1563},
     {"regtype", 2206},
+    {"regtype[]", 2211},
     {"void", 2278},
     {"uuid", 2950},
     {"uuid[]", 2951},
