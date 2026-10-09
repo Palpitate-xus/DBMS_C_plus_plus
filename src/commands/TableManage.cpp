@@ -39690,10 +39690,20 @@ std::unordered_set<std::string> arraySeen;
         if (hc.empty()) continue;
         // Format: "func(col) op value" or "op col value" (if already modified)
         std::string s = hc;
+        // A parenthesis in a delimited column or a literal is not a function
+        // call. Classify the genuine comparison's left AST before consulting
+        // the older aggregate-call adapter below.
+        SQLParser parser;
+        auto parsed = parser.parse("SELECT " + s);
+        const auto* select = parsed.success ? dynamic_cast<const SelectStmt*>(parsed.stmt.get()) : nullptr;
+        const auto* comparison = select && select->selectList.size() == 1
+            ? dynamic_cast<const BinaryOpExpr*>(select->selectList.front().expr.get()) : nullptr;
+        const auto* column = comparison
+            ? dynamic_cast<const ColumnRefExpr*>(comparison->left.get()) : nullptr;
         // Try parse aggFunc(col) op value
         size_t lp = s.find('(');
         size_t rp = s.find(')');
-        if (lp != std::string::npos && rp != std::string::npos && rp > lp + 1) {
+        if (!column && lp != std::string::npos && rp != std::string::npos && rp > lp + 1) {
             HavingCond h;
             h.func = s.substr(0, lp);
             h.colName = s.substr(lp + 1, rp - lp - 1);
@@ -39710,15 +39720,9 @@ std::unordered_set<std::string> arraySeen;
             // The frontend hands off a structurally bound physical column,
             // quoted as an SQL identifier. Consume its real grammar identity,
             // not rendered quotes or an operator-looking character inside it.
-            SQLParser parser;
-            auto parsed = parser.parse("SELECT " + s);
-            const auto* select = parsed.success ? dynamic_cast<const SelectStmt*>(parsed.stmt.get()) : nullptr;
-            const auto* comparison = select && select->selectList.size() == 1
-                ? dynamic_cast<const BinaryOpExpr*>(select->selectList.front().expr.get()) : nullptr;
             if (!comparison || (comparison->op != "=" && comparison->op != "<>" &&
                 comparison->op != "!=" && comparison->op != "<" && comparison->op != ">" &&
                 comparison->op != "<=" && comparison->op != ">=")) continue;
-            const auto* column = dynamic_cast<const ColumnRefExpr*>(comparison->left.get());
             if (!column || !column->table.empty() || !column->schema.empty()) continue;
             const std::string& colName = column->column;
             if (std::find(groupByCols.begin(), groupByCols.end(), colName) ==

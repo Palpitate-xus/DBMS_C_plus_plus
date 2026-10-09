@@ -34314,7 +34314,17 @@ static bool executeInternal(const string& rawSql, Session& s) {
             for (const auto& condition : havingConds) {
                 const string normalized = trim(condition);
                 const size_t rightParen = normalized.rfind(')');
-                if (normalized.find('(') == string::npos || rightParen == string::npos ||
+                dbms::SQLParser parser;
+                const auto parsed = parser.parse("SELECT " + normalized);
+                const auto* select = parsed.success
+                    ? dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()) : nullptr;
+                const auto* comparison = select && select->selectList.size() == 1
+                    ? dynamic_cast<const dbms::BinaryOpExpr*>(select->selectList.front().expr.get()) : nullptr;
+                const bool groupedColumn = comparison &&
+                    dynamic_cast<const dbms::ColumnRefExpr*>(comparison->left.get());
+                // A literal/identifier parenthesis cannot admit a real
+                // grouped-column predicate into the aggregate-call adapter.
+                if (groupedColumn || normalized.find('(') == string::npos || rightParen == string::npos ||
                     normalized.find(" or ") != string::npos) {
                     canUseVolcanoGroup = false;
                 }

@@ -10,7 +10,8 @@ int main() {
     const std::string name="group_having_column_identity";
     const std::string db=testDbPath(name);
     assert(owner.createDatabase(db,"utf8")==DBStatus::OK);
-    for (const auto& columnName : {"id", "ID", "value key", "x.y", "a\"b", "x>y"}) {
+    for (const auto& columnName : {"id", "ID", "value key", "x.y", "a\"b", "x>y",
+                                  "x(y)", "sum(v)", "count(*)"}) {
         TableSchema table;
         table.tablename="items";
         table.append(makeIntColumn(columnName,true,4));

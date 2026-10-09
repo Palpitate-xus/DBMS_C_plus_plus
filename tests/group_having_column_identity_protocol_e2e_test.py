@@ -58,6 +58,16 @@ def main():
         check('SELECT id FROM having_identity AS "m" GROUP BY m.id HAVING m.id=1', [["1"]], [23])
         check('SELECT id,count(*) FROM having_identity AS "M" GROUP BY "M".id HAVING "M".id=1',
               [["1", "1"]], [23,20])
+        # Preserve the preceding original53 checks verbatim. New columns and
+        # literal data have their own relation and complete grammar controls.
+        check('CREATE TABLE having_call_columns("x(y)" INT,"sum(v)" INT,"count(*)" INT,txt TEXT)')
+        check("INSERT INTO having_call_columns VALUES(1,1,1,'a(b)'),(2,2,2,'plain'),(NULL,NULL,NULL,NULL)")
+        for column in ('"x(y)"','"sum(v)"','"count(*)"'):
+            for operator,right,rows in (('=','1',[["1"]]),('>','1',[["2"]]),
+                                        ('<>','1',[["2"]]),('=','NULL',[])):
+                check('SELECT '+column+' FROM having_call_columns GROUP BY '+column+
+                      ' HAVING '+column+operator+right+' ORDER BY '+column,rows,[23])
+        check("SELECT txt FROM having_call_columns GROUP BY txt HAVING txt='a(b)'",[["a(b)"]],[25])
         print("GROUP_HAVING_IDENTITY_COMPLETE", checked, "FAILED", len(failures), failures, flush=True)
         assert not failures, failures
     finally:
