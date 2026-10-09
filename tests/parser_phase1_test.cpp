@@ -1,7 +1,7 @@
 // Phase 1 parser feature tests
 // Covers SET/SHOW/RESET, EXPLAIN, CREATE INDEX/VIEW, ALTER TABLE,
 // SELECT extensions (GROUP BY ROLLUP/CUBE/GROUPING SETS, ORDER BY NULLS FIRST/LAST,
-// LIMIT WITH TIES, FETCH FIRST), function calls (named args, window, schema-qualified),
+// FETCH FIRST WITH TIES), function calls (named args, window, schema-qualified),
 // and VALUES, transaction option/savepoint parsing.
 
 #include "parser.h"
@@ -699,9 +699,13 @@ int main() {
             typedValues->valuesRows[0][0].get());
         auto* timestampLiteral = dynamic_cast<LiteralExpr*>(
             typedValues->valuesRows[1][0].get());
-        assert(dateLiteral && dateLiteral->typeName == "date");
+        // Type declarations retain their source spelling for real catalog
+        // lookup; the old lowercased AST is not the declared-type contract.
+        assert(dateLiteral && dateLiteral->typeName == "DATE" &&
+               dateLiteral->value == "'2024-03-15'");
         assert(timestampLiteral &&
-               timestampLiteral->typeName == "timestamp");
+               timestampLiteral->typeName == "TIMESTAMP" &&
+               timestampLiteral->value == "'2024-03-16 10:30:00'");
 
         for (const char* invalid : {
                  "VALUES", "VALUES ()", "VALUES (1,)", "VALUES (,1)",
