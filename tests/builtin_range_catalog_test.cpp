@@ -67,9 +67,10 @@ int main() {
     bindings("warm preparation",false);
     require(g_engine.catalogService().persistAll(),"persist actual catalog");
     g_engine.catalogService().evict(database);
-    const auto disk=CatalogManager::readMetadataSnapshot(g_engine.dbPath(database).string());
+    require(std::filesystem::is_regular_file(catalogDirectory/"pg_type.cat"),"actual persisted type file exists");
+    const auto disk=CatalogManager::readMetadataSnapshot(catalogDirectory.string());
     metadataCheck(disk.types,"actual persisted definition");
     bindings("uncached persisted preparation",false);
     std::cout<<"BUILTIN_RANGE_CHECKED="<<checked<<" FAILED="<<failures<<'\n';
-    return checked==232 && !failures?0:1;
+    return checked==233 && !failures?0:1;
 }

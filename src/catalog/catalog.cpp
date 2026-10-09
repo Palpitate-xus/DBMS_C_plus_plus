@@ -1904,10 +1904,17 @@ std::map<std::string, std::string> CatalogManager::serializeAllLocked() const {
             out << r.typcategory << ',';
             writeOid(out, r.typelem); out << ',';
             writeOid(out, r.typarray);
-            // Optional, backwards-readable logical domain metadata. PgTypeRow
-            // already owns these fields; no binary storage format changes.
-            out << ",D2," << r.typbasetype << ',' << (r.typnotnull ? 1 : 0)
-                << ',' << r.typtypmod << ',' << r.typndims;
+            // Preserve the complete owned type descriptor, not only identity
+            // and domain fields. Older eight-field and D2 rows remain readable.
+            out << ",D3," << r.typbasetype << ',' << (r.typnotnull ? 1 : 0)
+                << ',' << r.typtypmod << ',' << r.typndims
+                << ',' << r.typowner << ',' << (r.typbyval ? 1 : 0)
+                << ',' << (r.typispreferred ? 1 : 0) << ',' << (r.typisdefined ? 1 : 0)
+                << ',' << static_cast<unsigned int>(static_cast<unsigned char>(r.typdelim))
+                << ',' << r.typrelid << ',' << r.typinput << ',' << r.typoutput
+                << ',' << r.typreceive << ',' << r.typsend << ',' << r.typmodin
+                << ',' << r.typmodout << ',' << r.typanalyze << ',' << r.typalign
+                << ',' << r.typstorage << ',' << r.typcollation;
             out << '\n';
         }
     });
@@ -2259,15 +2266,46 @@ void CatalogManager::loadAllLocked() {
                 std::string version;
                 int notNull = 0;
                 if (!iss.get(delimiter) || delimiter != ',' ||
-                    !std::getline(iss, version, ',') || version != "D2" ||
+                    !std::getline(iss, version, ',') || (version != "D2" && version != "D3") ||
                     !readCatalogCsvField(iss, r.typbasetype) ||
                     !readCatalogCsvField(iss, notNull) ||
                     !readCatalogCsvField(iss, r.typtypmod) ||
-                    !readCatalogCsvLastField(iss, r.typndims) ||
+                    !(version == "D2" ? readCatalogCsvLastField(iss, r.typndims)
+                                      : readCatalogCsvField(iss, r.typndims)) ||
                     (notNull != 0 && notNull != 1) || r.typndims < 0 ||
                     (r.typtype == 'd' && r.typbasetype == INVALID_OID))
                     throw DbError("XX001", "invalid pg_type domain metadata suffix");
                 r.typnotnull = notNull == 1;
+                if (version == "D3") {
+                    int byValue=0, preferred=0, defined=0;
+                    unsigned int typeDelimiter=0;
+                    if (!readCatalogCsvField(iss, r.typowner) ||
+                        !readCatalogCsvField(iss, byValue) ||
+                        !readCatalogCsvField(iss, preferred) ||
+                        !readCatalogCsvField(iss, defined) ||
+                        !readCatalogCsvField(iss, typeDelimiter) ||
+                        !readCatalogCsvField(iss, r.typrelid) ||
+                        !readCatalogCsvField(iss, r.typinput) ||
+                        !readCatalogCsvField(iss, r.typoutput) ||
+                        !readCatalogCsvField(iss, r.typreceive) ||
+                        !readCatalogCsvField(iss, r.typsend) ||
+                        !readCatalogCsvField(iss, r.typmodin) ||
+                        !readCatalogCsvField(iss, r.typmodout) ||
+                        !readCatalogCsvField(iss, r.typanalyze) ||
+                        !readCatalogCsvField(iss, r.typalign) ||
+                        !readCatalogCsvField(iss, r.typstorage) ||
+                        !readCatalogCsvLastField(iss, r.typcollation) ||
+                        (byValue != 0 && byValue != 1) ||
+                        (preferred != 0 && preferred != 1) ||
+                        (defined != 0 && defined != 1) || typeDelimiter > 255 ||
+                        std::string("csid").find(r.typalign) == std::string::npos ||
+                        std::string("pemx").find(r.typstorage) == std::string::npos)
+                        throw DbError("XX001", "invalid pg_type physical metadata suffix");
+                    r.typbyval=byValue == 1;
+                    r.typispreferred=preferred == 1;
+                    r.typisdefined=defined == 1;
+                    r.typdelim=static_cast<char>(static_cast<unsigned char>(typeDelimiter));
+                }
             }
             types_.push_back(r);
         }
