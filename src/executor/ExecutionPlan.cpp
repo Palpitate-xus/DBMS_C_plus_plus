@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <charconv>
 #include <cmath>
 #include <cstdlib>
 #include <cstdio>
@@ -473,6 +474,34 @@ public:
     }
 };
 
+// Catalog identities are genuine scalar datums, not physical Column codecs.
+// NAME/internal-char use their existing typed implementations; OIDs order as
+// unsigned32 identities. The same comparison defines sorting and WITH TIES.
+static std::optional<int> comparePreparedIdentityKeys(ExprEvaluator& evaluator,
+    const ExprValue& left,const ExprValue& right) {
+    const auto type=ExprHelper::canonicalResultTypeName(left.typeName);
+    if(type!=ExprHelper::canonicalResultTypeName(right.typeName))return std::nullopt;
+    if(type=="oid") {
+        const auto number=[](const std::string& value) {
+            uint32_t result=0;
+            const auto parsed=std::from_chars(value.data(),value.data()+value.size(),result);
+            if(parsed.ec==std::errc::result_out_of_range)throw DbError("22003","oid datum out of range");
+            if(parsed.ec!=std::errc{} || parsed.ptr!=value.data()+value.size())
+                throw DbError("22P02","invalid oid datum");
+            return result;
+        };
+        const auto a=number(left.value),b=number(right.value);
+        return (a>b)-(a<b);
+    }
+    if(type=="name" || type=="\"char\"") {
+        const auto binding=ExprEvaluator::resolveComparison("<",type,type);
+        if(evaluator.comparePrepared(binding,left,right).asBool())return -1;
+        if(evaluator.comparePrepared(binding,right,left).asBool())return 1;
+        return 0;
+    }
+    return std::nullopt;
+}
+
 class PreparedSortOp final : public Operator {
     struct Row {
         std::string raw;
@@ -530,6 +559,10 @@ public:
                     if(state_->evaluator.comparePrepared(*key.enumComparison,b,a).asBool())return !key.asc;
                     continue;
                 }
+                if(const auto comparison=comparePreparedIdentityKeys(state_->evaluator,a,b)) {
+                    if(*comparison)return key.asc?*comparison<0:*comparison>0;
+                    continue;
+                }
                 Column column;
                 const auto error = TypeRegistry::instance().resolveColumnType(column, a.typeName, {}, false);
                 if (!error.empty()) throw DbError("0A000", "unsupported prepared sort type: " + a.typeName);
@@ -559,6 +592,10 @@ public:
             if(const auto& comparison=state_->keys[i].enumComparison) {
                 if(state_->evaluator.comparePrepared(*comparison,a,b).asBool() ||
                    state_->evaluator.comparePrepared(*comparison,b,a).asBool())return false;
+                continue;
+            }
+            if(const auto comparison=comparePreparedIdentityKeys(state_->evaluator,a,b)) {
+                if(*comparison)return false;
                 continue;
             }
             Column column;
