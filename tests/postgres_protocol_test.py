@@ -2146,14 +2146,12 @@ def main():
         assert data_row_values(simple_query(
             sock, "SELECT v FROM path_pick")) == [[b"10"]]
 
-        # Enum DDL is supported, but the legacy pg_type/pg_enum SQL paths do
-        # not provide correct typed projection semantics. They must fail
-        # explicitly until backed by typed catalog query execution.
+        # The owned pg_type projection is typed. Complete pg_type/pg_enum
+        # schemas still fail explicitly rather than returning fabricated rows.
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "CREATE TYPE protocol_priority AS ENUM ('low', 'high')"))
         for catalog_sql in (
                 "SELECT * FROM pg_catalog.pg_type",
-                "SELECT typname FROM pg_type",
                 "SELECT * FROM pg_catalog.pg_enum",
                 "SELECT enumlabel FROM pg_enum"):
             catalog_result = simple_query(sock, catalog_sql)
@@ -2161,6 +2159,15 @@ def main():
                        for kind, body in catalog_result), \
                 (catalog_sql, catalog_result)
             assert catalog_result[-1] == (b"Z", b"I"), catalog_result[-1]
+
+        catalog_result = simple_query(sock, "SELECT typname FROM pg_type")
+        assert not any(kind == b"E" for kind, _ in catalog_result), catalog_result
+        assert row_description_fields(catalog_result) == [
+            (b"typname", 0, 0, 19, 64, -1, 0)], catalog_result
+        catalog_names = data_row_values(catalog_result)
+        for name in (b"bool", b"int4", b"text", b"protocol_priority"):
+            assert [name] in catalog_names, (name, catalog_names)
+        assert catalog_result[-1] == (b"Z", b"I"), catalog_result[-1]
 
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "ALTER TYPE protocol_priority ADD VALUE 'medium' BEFORE 'high'"))
