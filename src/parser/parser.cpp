@@ -2586,13 +2586,34 @@ static ExprPtr parsePrimaryExprImpl(const std::vector<std::string>& tokens, size
     if (eligibleTypePrefix) {
         size_t typeEnd=pos;
         try {
-            const auto declaration=consumeDeclaredType(tokens,typeEnd);
+            auto declaration=consumeDeclaredType(tokens,typeEnd);
             if(typeEnd<tokens.size() && tokens[typeEnd].size()>=2 &&
                tokens[typeEnd].front()=='\'' && tokens[typeEnd].back()=='\'') {
+                size_t afterConstant = typeEnd + 1;
+                // INTERVAL string constants own their field qualifiers after
+                // the string. A declaration's prefix field grammar is only
+                // valid for a type target, not INTERVAL DAY '2'. Quoted and
+                // qualified physical names retain generic constant grammar.
+                if (SQLParser::toLower(tokens[pos]) == "interval" && !declaration.isArray) {
+                    if (!declaration.typeMods.empty() &&
+                        declaration.typeMods.front() != std::to_string(interval_type_detail::fullRange))
+                        throw DbError("42601", "interval constant fields must follow the string");
+                    if (afterConstant < tokens.size() &&
+                        interval_type_detail::fieldMask(SQLParser::toLower(tokens[afterConstant]))) {
+                        if (!declaration.typeMods.empty())
+                            throw DbError("42601", "interval constant precision cannot precede field qualifiers");
+                        std::vector<std::string> suffix{tokens[pos]};
+                        suffix.insert(suffix.end(), tokens.begin() + afterConstant, tokens.end());
+                        size_t suffixEnd = 0;
+                        const auto qualified = consumeDeclaredType(suffix, suffixEnd);
+                        declaration.typeMods = qualified.typeMods;
+                        afterConstant += suffixEnd - 1;
+                    }
+                }
                 auto literal=std::make_unique<LiteralExpr>();
                 literal->value=tokens[typeEnd];
                 literal->typeName=renderDeclaredType(declaration);
-                pos=typeEnd+1;
+                pos=afterConstant;
                 return literal;
             }
         } catch(const DbError& error) {

@@ -110,6 +110,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/having_and_identifier_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/limit_with_ties_syntax_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/interval_field_type_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/interval_field_literal_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/cte_inherited_comparison_owner_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/cte_duplicate_name_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/cte_stored_query_namespace_protocol_e2e_test.py)
