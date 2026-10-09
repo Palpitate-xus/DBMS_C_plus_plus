@@ -159,7 +159,10 @@ static bool declaredTypePrefixEligible(const std::string& token) {
     // PostgreSQL18.6 pg_get_keywords() categories: reserved words and
     // non-type COL_NAME keywords cannot begin generic type/function names.
     // Standard type grammar remains available, independently of type lookup.
-    static const std::set<std::string> excluded={
+    // Declaration parsing is also needed while global storage engines flush
+    // domain schemas at shutdown. Immutable grammar data must outlive that
+    // phase; a late-initialized heap set is destroyed before those engines.
+    static constexpr const char* excluded[]={
         "all","analyse","analyze","and","any","array",
         "as","asc","asymmetric","between","both","case",
         "cast","check","coalesce","collate","column","constraint",
@@ -182,7 +185,10 @@ static bool declaredTypePrefixEligible(const std::string& token) {
         "xmlforest","xmlnamespaces","xmlparse","xmlpi","xmlroot","xmlserialize",
         "xmltable"
     };
-    return !excluded.count(SQLParser::toLower(token));
+    const auto keyword=SQLParser::toLower(token);
+    for (const char* entry : excluded)
+        if (keyword==entry) return false;
+    return true;
 }
 
 static ColumnDef consumeDeclaredType(const std::vector<std::string>& tokens,
@@ -251,11 +257,12 @@ static ColumnDef consumeDeclaredType(const std::vector<std::string>& tokens,
         definition.typeMods.clear();
     }
     if(!qualified && !quoted && !definition.typeMods.empty()) {
-        static const std::set<std::string> noModifierGrammar={
+        static constexpr const char* noModifierGrammar[]={
             "bigint","boolean","int","integer","real","smallint","double precision"};
         const auto name=SQLParser::toLower(definition.typeName);
-        if(noModifierGrammar.count(name))
-            throw DbError("42601","type declaration does not allow modifiers");
+        for (const char* entry : noModifierGrammar)
+            if(name==entry)
+                throw DbError("42601","type declaration does not allow modifiers");
         if(initial=="char" || initial=="character" || initial=="varchar") {
             const auto& modifier=definition.typeMods.front();
             if(definition.typeMods.size()!=1 || modifier.empty() ||
