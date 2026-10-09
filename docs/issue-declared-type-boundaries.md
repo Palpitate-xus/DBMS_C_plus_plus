@@ -470,8 +470,10 @@ repairs (six new source repairs, three separate fixture corrections).
 Root actual fresh58 normal99397 finished0, all58 receipts/cache/repeat/frozen/
 source fences verified in
 `/tmp/dbms-root-cold-publish.ZsxPxf4N/root-fresh58-proof.log`.
-Root SHA matches33990 above. Combined Root test gates have not yet run; neither
-private success nor old full failure is a new Master full-suite proof.
+Root SHA matches33990 above. New combined Root76 native57095,43wire81789
+and originalBIT38441784 all finished0, with unchanged current source/receipt/
+frozen fences. These focused gates are not the complete749+2/415 registered
+suite; neither private success nor old full failure is a new full-suite proof.
 
 An unchanged13-fixture private triage passed eight (name comparison, scalar
 WHERE, prepared projection/sort identity, pattern binding, both simple CASE
