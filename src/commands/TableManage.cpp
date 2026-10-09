@@ -5543,7 +5543,7 @@ DBStatus StorageEngine::createUDF(const std::string& dbname,
     }
     std::ostringstream serialized;
     serialized << "PARAMS2:";
-    if (!param.empty()) {
+    if (!param.empty() || !paramType.empty()) {
         appendRoutineMetadataField(serialized, param);
         appendRoutineMetadataField(serialized, paramType);
     }

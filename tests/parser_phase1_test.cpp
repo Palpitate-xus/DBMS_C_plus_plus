@@ -630,6 +630,25 @@ int main() {
     assert(quotedRoutineStmt && quotedRoutineStmt->funcName == "Mixed" &&
            quotedRoutineStmt->params.size() == 1 &&
            quotedRoutineStmt->params[0].first == "A");
+    for (const auto& declaration : {"BIGINT", "DOUBLE PRECISION", "NUMERIC(10,2)",
+                                    "CHARACTER VARYING(20)", "TIMESTAMP WITH TIME ZONE", "INT[]"}) {
+        auto unnamed = parser.parse("CREATE FUNCTION unnamed(" + std::string(declaration) +
+            ") RETURNS INT LANGUAGE SQL AS $$ SELECT 1 $$");
+        assert(unnamed.success);
+        const auto* function = dynamic_cast<CreateFunctionStmt*>(unnamed.stmt.get());
+        assert(function && function->params.size()==1 && function->params.front().first.empty() &&
+            !function->params.front().second.empty());
+    }
+    auto mixedParameters=parser.parse("CREATE FUNCTION mixed_parameters(INT, n INT, TEXT) "
+        "RETURNS INT LANGUAGE SQL AS $$ SELECT $1 + n $$");
+    assert(mixedParameters.success);
+    const auto* mixedParameterStmt=dynamic_cast<CreateFunctionStmt*>(mixedParameters.stmt.get());
+    assert(mixedParameterStmt && mixedParameterStmt->params.size()==3 &&
+        mixedParameterStmt->params[0].first.empty() && mixedParameterStmt->params[1].first=="n" &&
+        mixedParameterStmt->params[2].first.empty());
+    for (const auto& invalid : {",INT", "INT,", "INT,,TEXT", "n INT extra", "NUMERIC(10,)", "INT["})
+        assert(!parser.parse("CREATE FUNCTION invalid_parameters(" + std::string(invalid) +
+            ") RETURNS INT LANGUAGE SQL AS $$ SELECT 1 $$").success);
     assert(!parser.parse(
         "CREATE PROCEDURE p() AS 'SELECT 1' LANGUAGE sql garbage").success);
     assert(!parser.parse(

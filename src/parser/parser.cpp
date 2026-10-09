@@ -7884,26 +7884,45 @@ StmtPtr SQLParser::parseCreateFunction(const std::vector<std::string>& tokens, s
     stmt->schema = routine.schema;
     stmt->funcName = routine.name;
 
-    // Optional parameter list: (name type [, ...])
+    // Optional parameter list: ([name] type [, ...]). A whole declared type
+    // has no argument name; use the existing type grammar so multiword types,
+    // modifiers and array suffixes are not mistaken for names or separators.
     if (pos < tokens.size() && tokens[pos] == "(") {
         ++pos;
         while (pos < tokens.size() && tokens[pos] != ")") {
-            if (tokens[pos] == ",") { ++pos; continue; }
-            std::string pname = parseRoutineIdentifier(tokens[pos++]);
+            if (tokens[pos] == ",") return nullptr;
+            const size_t begin = pos;
+            const auto boundary = [&](size_t end) {
+                return end < tokens.size() && (tokens[end] == "," || tokens[end] == ")");
+            };
+            std::string pname;
             std::string ptype;
-            // Collect type tokens until comma or closing paren, handling typemods like varchar(20).
-            int depth = 0;
-            while (pos < tokens.size() && (tokens[pos] != "," || depth > 0) &&
-                   (tokens[pos] != ")" || depth > 0)) {
-                if (tokens[pos] == "(") ++depth;
-                else if (tokens[pos] == ")") --depth;
-                if (!ptype.empty()) ptype += " ";
-                ptype += tokens[pos++];
+            size_t typeEnd = begin;
+            try {
+                const auto type = consumeDeclaredType(tokens, typeEnd);
+                if (boundary(typeEnd)) ptype = renderDeclaredType(type);
+            } catch (const DbError&) {
+                // The first token can instead be the argument identifier.
             }
-            if (!pname.empty()) stmt->params.emplace_back(pname, ptype);
-            if (pos < tokens.size() && tokens[pos] == ",") ++pos;
+            if (ptype.empty()) {
+                pname = parseRoutineIdentifier(tokens[pos++]);
+                if (pname.empty()) return nullptr;
+                try {
+                    const auto type = consumeDeclaredType(tokens, pos);
+                    if (!boundary(pos)) return nullptr;
+                    ptype = renderDeclaredType(type);
+                } catch (const DbError&) { return nullptr; }
+            } else {
+                pos = typeEnd;
+            }
+            stmt->params.emplace_back(pname, ptype);
+            if (tokens[pos] == ",") {
+                ++pos;
+                if (pos >= tokens.size() || tokens[pos] == ")") return nullptr;
+            }
         }
-        if (pos < tokens.size() && tokens[pos] == ")") ++pos;
+        if (pos >= tokens.size() || tokens[pos] != ")") return nullptr;
+        ++pos;
     }
 
     // RETURNS / RETURNS TABLE (...)

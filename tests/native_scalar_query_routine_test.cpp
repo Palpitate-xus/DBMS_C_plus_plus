@@ -70,6 +70,13 @@ int main() {
         "SELECT $1 + 1",'i',"sql","bigint")==DBStatus::OK);
     result=owner.plpgsqlQuery(db,"SELECT native_positional(2147483648::bigint)");
     assert(result.ok && result.firstRow==std::vector<std::optional<std::string>>{"2147483649"});
+    assert(owner.createUDF(db,"native_single_unnamed",std::string{},"SELECT $1 + 1",
+        'i',"sql","bigint","bigint")==DBStatus::OK);
+    const auto singleUnnamed=owner.getUDF(db,"native_single_unnamed");
+    assert(singleUnnamed.paramNames==std::vector<std::string>{""} &&
+        singleUnnamed.paramTypes==std::vector<std::string>{"bigint"});
+    result=owner.plpgsqlQuery(db,"SELECT native_single_unnamed(2147483648::bigint)");
+    assert(result.ok && result.firstRow==std::vector<std::optional<std::string>>{"2147483649"});
     assert(owner.createUDF(db,"native_column_wins",{"id"},{"int"},
         "SELECT id FROM source ORDER BY id DESC",'s',"sql","int")==DBStatus::OK);
     result=owner.plpgsqlQuery(db,"SELECT native_column_wins(99)");
