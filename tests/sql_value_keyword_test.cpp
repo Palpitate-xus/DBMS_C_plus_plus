@@ -75,6 +75,10 @@ int main() {
         std::string state;
         try{(void)g_engine.prepareBoundQuery(database,sql);}catch(const DbError& error){state=error.sqlState();}
         assert(state=="42601");++checked;
+        const auto raw=SQLParser().parse(sql);
+        assert(!raw.success && raw.sqlState=="42601" && !raw.stmt && !raw.error.empty());++checked;
+        const auto binding=SQLParser().parseForBinding(sql);
+        assert(!binding.success && binding.sqlState=="42601" && !binding.stmt && !binding.error.empty());++checked;
     }
     for(const auto* sql:{"SELECT \"current_user\"()","SELECT pg_catalog.\"current_user\"()",
          "SELECT current_schema()","SELECT pg_catalog.current_schema()","SELECT current_database()"}) {

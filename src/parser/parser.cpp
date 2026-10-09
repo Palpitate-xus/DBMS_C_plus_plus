@@ -2809,6 +2809,7 @@ static ExprPtr parsePrimaryExprImpl(const std::vector<std::string>& tokens, size
     };
     if (valueFunctions.count(firstLower) &&
         (firstLower != "current_schema" || pos == tokens.size() || tokens[pos] != "(")) {
+        try {
         auto value = std::make_unique<FunctionCallExpr>();
         value->schema = "pg_catalog"; value->funcName = firstLower;
         value->sqlValue = sql_value_detail::kind(firstLower);
@@ -2826,6 +2827,13 @@ static ExprPtr parsePrimaryExprImpl(const std::vector<std::string>& tokens, size
             ++pos;
         }
         return value;
+        } catch(const DbError& error) {
+            // Public parse() reports grammar failures through ParseResult.
+            // Preserve non-syntax semantic errors and standalone expression
+            // parsing, whose caller does not supply this statement owner.
+            if(error.sqlState()=="42601")retainDeclarationSyntaxError(error);
+            throw;
+        }
     }
 
     // Collect possible qualified name parts before deciding function vs column.
