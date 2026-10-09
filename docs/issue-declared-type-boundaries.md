@@ -445,15 +445,24 @@ has finished0, artifact
 `/tmp/dbms-root-pgtype-publish.fwcF6Kdr/root-fresh58-proof.log`.
 All58 current receipts, cache, no-recompile repeat and frozen/source fences
 are verified; actual Root SHA706893 equals private. New Root82native82170,
-45wire67466 and original38423507 are now running on this publication; the
-complete753+2/417 standard driver has not started yet. Source inputs remain
-frozen; do not reuse private results as Root test results. Older Root76/43/384
+45wire67466 and original38423507 have all finished0 on this publication.
+Their logs are root-native82.log, root-wire45.log and root-original384.log
+under the Root artifact directory above. The unchanged complete753+2/417
+standard driver21540 is now running (root-full753-417.log); it is not a
+full-suite PASS. It reuses57 individually byte/receipt-verified current Root
+objects, not another claimed fresh57 compile. Source inputs remain frozen;
+do not reuse private results as Root test results. Older Root76/43/384
 and original full21native/14protocol failures remain historical evidence.
 
-An additional actual owned PG18.6 regtype reference28 now exposes the next
+An additional actual owned PG18.6 regtype reference28 plus25 now exposes the next
 ordinary codec/catalog scope (numeric identities, symbolic/qualified names,
 arrays, errors and WHERE-false input demand). It is not implemented or counted
-as project PASS. The eight older enum candidates remain held and separate;
+as project PASS. All53 permanent expectations revalidated against actual
+owned PG18.6 at this checkpoint; the unchanged published Root binary fails48
+of53. Isolated worktree /tmp/dbms-root-regtype.at5Xh2kT/repo has an uncommitted
+candidate and genuine fresh58 normal build59602 running. No candidate build,
+codec test or independent repair commit is claimed complete yet.
+The eight older enum candidates remain held and separate;
 user-filtered branches are not restarted. Complete pg_type schema/default/
 subscript/ACL ownership and broader codec/bootstrap/aggregate/source semantics
 remain open. Original273 status/hash unchanged22complete166partial70unverified
