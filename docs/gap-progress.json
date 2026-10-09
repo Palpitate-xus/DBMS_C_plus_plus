@@ -2,6 +2,20 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Root full ROW driver ends with12 retained failures; four independent repairs imported and own fresh production build started",
+      "gap_ids": ["CAT-03", "CAT-09", "SQL-04", "FUNC-05", "FUNC-06", "PROTO-04"],
+      "status": "partial",
+      "commits": ["deb49f76", "86ba021d", "8eed940c", "6fc40db8"],
+      "evidence": ["docs/issue-full-registered-795479c6.md", "docs/issue-sql-value-public-parser.md"],
+      "tests": ["tests/virtual_relation_shadow_binding_test.cpp", "tests/sql_value_keyword_test.cpp", "tests/stored_function_arity_protocol_e2e_test.py", "tests/function_result_protocol_e2e_test.py"],
+      "verification": {
+        "reproduction": "Original full18383 terminal1 with773native/Main769pass4fail and435wire427pass8fail; all1208 terminal markers retained, own58/source/frozen terminal fences0 on795479/02c69. Public parser strengthened49 fixture old27197=134 uncaught42601 preserved.",
+        "focused_tests": "Final private parser88485=1:33native all0/21of23wire pass, native49 and arity50 all0, original BIT384/56735=0 againstverified180006. Original NAME5 failures and default CREATE deferred_child timeout retained; all58 actual current own receipts/cache/repeat/source/frozen terminal fences0. Four source commits imported individually with-x, not an entire-family or whole-green claim.",
+        "full_suite": "Root190scoped773auto+2Main437registered58TU, sourcea85e matches imported final private source bytes. Own Root fresh57/Main97646/52631 actually started in /tmp/dbms-root-sql-value.x5X8O5vm; not completed. New Root publication and complete775/437 pending. No borrowed objects/binaries or substitution of private proof for Root proof.",
+        "scope": "Original273 items/hash/statuses unchanged22complete166partial70unverified15deferred. Native decimal API and all original incomplete requirements continue. No push, Actions activation or filtered restart."
+      }
+    },
+    {
       "issue": "Evergreen README committed; independent SQL-value and stored-arity source repairs committed with retained whole-gate failures",
       "gap_ids": ["SQL-04", "FUNC-05", "FUNC-06", "PROTO-04"],
       "status": "partial",

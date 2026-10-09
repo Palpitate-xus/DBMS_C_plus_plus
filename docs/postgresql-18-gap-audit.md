@@ -1,3 +1,15 @@
+# 2026-10-09 完整 ROW 回归终态与四项修复逐项合入
+
+README长期入口 `f513ac1f` 已提交，12本地链接与文档检查0。Root原完整
+18383已终1：769/773native/Main、427/435wire通过，12失败全保留，all58/
+source/frozen终态一致。之后四项独立-x导入 `deb49f76`、`86ba021d`、
+`8eed940c`、`6fc40db8`；public parser旧134保留，新49native、arity50和
+BIT384全0，最后private33native全0/21of23wire通过，NAME与default超时不改绿。
+Root现190scoped/773auto+2Main437wire58TU，ownfresh57/Main97646/52631已
+启动，未完成；新publication与完整775/437尚待，不冒private证明代Root。
+原273范围/hash/22complete166partial70unverified15deferred不变。
+详情：[全量终态与逐项提交](issue-full-registered-795479c6.md)。以下为历史记录。
+
 # 2026-10-09 SQL-value 独立提交 checkpoint（master 全量仍在运行）
 
 README长期入口commit `f513ac1f` 已完成，不加入临时进度。SQL-value范围内
