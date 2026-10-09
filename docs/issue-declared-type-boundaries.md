@@ -456,17 +456,52 @@ and original full21native/14protocol failures remain historical evidence.
 
 An additional actual owned PG18.6 regtype reference28 plus25 now exposes the next
 ordinary codec/catalog scope (numeric identities, symbolic/qualified names,
-arrays, errors and WHERE-false input demand). It is not implemented or counted
-as project PASS. All53 permanent expectations revalidated against actual
-owned PG18.6 at this checkpoint; the unchanged published Root binary fails48
-of53. Isolated worktree /tmp/dbms-root-regtype.at5Xh2kT/repo has an uncommitted
-candidate and genuine fresh58 normal build59602 running. No candidate build,
-codec test or independent repair commit is claimed complete yet.
+arrays, errors and WHERE-false input demand). All53 permanent expectations
+revalidated against actual owned PG18.6; the unchanged published Root binary
+fails48 of53. The following private repairs now pass this bounded corpus,
+not the complete type family or published Root53 test.
 The eight older enum candidates remain held and separate;
 user-filtered branches are not restarted. Complete pg_type schema/default/
 subscript/ACL ownership and broader codec/bootstrap/aggregate/source semantics
 remain open. Original273 status/hash unchanged22complete166partial70unverified
 15deferred. No assistant push, Actions activation or full/family/SAN/TLS claim.
+
+## Follow-up: regtype physical catalog rows and bounded input codec
+
+Private worktree `/tmp/dbms-root-regtype.at5Xh2kT/repo` is clean at a5377f54.
+It remains separate from master while Root full driver21540 has frozen source
+inputs. Two repairs have independent local commits:
+
+| Commit | Scope and actual verification |
+| --- | --- |
+| 3fbe0ce1 | Publish actual regtype2206 and array2211 with reciprocal element links; read-only namespace definitions share existing bootstrap logic without resurrecting dropped public. New native18 checks cold/warm/direct persisted rows, OIDs, storage and no cold writes. |
+| a5377f54 | Parse actual regtype text/name input, integer/OID casts and typed array datum identities; distinguish int4 wrapping from int8 range rejection, retain physical OID separately from display name and validate genuine unknown constants without evaluating rows/routines/parameters. Native23 checks physical identity, array NULL/dimensions/lower bounds, primitive conversions, early input errors and no cold cache/disk allocation. Immutable actual PG18.6 reference53 and candidate wire53 both0, versus Root baseline48fail. |
+
+The candidate genuinely compiled all58 normal O2 production translation units
+(59602 terminal0), with its own current paths/source/header/compiler/flags/
+manifest receipts; cache and no-recompile repeat/frozen/source fences verified.
+Binary SHA `bb19d770662ea7b5bc71607baf4f140bfeded949c8ba6d5b6c60f4a95b7deefd`;
+src/scripts/tests/cmake seal
+`be63f9560fc64bbe00dbc5759222f6e83bb062de7fd5e3ba081d2daf4c0d0353`.
+Logs under `/tmp/dbms-root-regtype.at5Xh2kT`: build-first.log, catalog18.log,
+input23.log, adjacent-native5.log, regtype53-baseline.log,
+regtype53-reference-recheck.log and regtype53-first.log. The five adjacent
+unchanged native fixtures passed (range catalog, full28 persistence, type
+catalog reader, builtin array identity and cold declaration binding). Original
+BIT38432624 finished0. Expanded84native54901 and46wire91478 are still running;
+no final combined PASS or Root import is claimed.
+
+A further unmodified nine-query actual PG18.6/candidate probe exposes six
+remaining differences: NULL/empty regtype-to-smallint eligibility, invalid
+regtype-to-numeric and regtype-to-boolean eligibility, contextual integer
+ARRAY conversion, and regtype-versus-oid comparison. Exact SQL/values/states/
+OIDs are retained in remaining9-reference.jsonl and remaining9-candidate.jsonl
+beside probe-remaining-casts.py. These are open follow-ups, not removed controls.
+The other three controls match, including bigint output and boolean ARRAY
+cast rejection. Wider storage/binary/alias IO, operator/coercion graphs,
+complex type input modifiers and actual catalog callback ownership also remain
+open. Original273 statuses/hash unchanged; no full/family/SAN/TLS approval,
+push, workflow activation or restart of user-skipped branches.
 
 ## Historical held follow-up: real type catalog sources, sorting and identity metadata
 

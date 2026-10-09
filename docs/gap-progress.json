@@ -2,6 +2,20 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Private regtype physical catalog and bounded input codec committed independently; stronger cast/operator gaps retained",
+      "gap_ids": ["TYPE-11", "TYPE-18", "TYPE-21", "QRY-06", "PROTO-04"],
+      "status": "partial",
+      "commits": ["3fbe0ce1", "a5377f54"],
+      "evidence": ["docs/issue-declared-type-boundaries.md"],
+      "tests": ["tests/regtype_catalog_test.cpp", "tests/regtype_input_test.cpp", "tests/regtype_input_protocol_e2e_test.py"],
+      "verification": {
+        "reproduction": "Published Root frozen53 baseline48fail; all53 expectations copied unchanged from actual ownedPG18.6 and reference recheck53/0. Stronger subsequent actual9 probe exposes6 remaining differences, retained unchanged and open.",
+        "focused_tests": "Private native18 catalog and23 datum/input proofs0; all five unchanged adjacent native fixtures0; current frozen wire53/0 and originalBIT38432624 terminal0. Own genuine58 normal59602 terminal0, all current receipts/cache/no-recompile repeat/frozen/source fences verified; bb19SHA/be63seal. Source/tests expected values/OIDs/counts/deadlines not weakened.",
+        "full_suite": "New84native54901/46wire91478 still running. Source commits private, not imported while Root unchanged complete753+2/417 standard21540 running. No combined/Root full/SAN/TLS/family approval.",
+        "scope": "Remaining6/9 include pure outgoing cast eligibility with NULL/empty source, contextual integer ARRAY conversion and regtype/oid equality. Broader IO, storage/binary/alias/callback ownership and all original273 requirements remain open. Original273 statuses/hash22complete166partial70unverified15deferred unchanged. README db35e522 remains evergreen; no push/Actions activation/user-filtered branch restart."
+      }
+    },
+    {
       "issue": "Eight range/type catalog repairs published individually; actual Root82/45/384 pass, unchanged full runner live",
       "gap_ids": ["TYPE-11", "TYPE-18", "TYPE-21", "QRY-06", "PROTO-04"],
       "status": "partial",
