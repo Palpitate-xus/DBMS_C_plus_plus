@@ -122,3 +122,7 @@ The next work retains genuine child cursor, output-demand, correlation,
 early-close and effect ownership for EXISTS, then the remaining CTE/routine
 and prior full-run failures. New full761-auto +2 Main /424-registered has not
 completed. No push, Actions activation or user-deferred branch restart.
+
+The subsequently committed existence consumer and original full scalar92
+verification are in [prepared EXISTS evidence](issue-prepared-exists.md).
+Earlier failed checkpoints stay retained; CTE stored-routine failures remain.

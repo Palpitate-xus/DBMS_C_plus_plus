@@ -2,6 +2,20 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Genuine retained EXISTS row-presence cursor and grammar-owned type",
+      "gap_ids": ["QRY-02", "QRY-04", "PROTO-04"],
+      "status": "partial",
+      "commits": ["bcaf593c", "5dbb7c83", "8972cf58"],
+      "evidence": ["docs/issue-prepared-exists.md"],
+      "tests": ["tests/prepared_exists_test.cpp", "tests/prepared_exists_protocol_e2e_test.py", "tests/query_binding_test.cpp", "tests/scalar_fetch_ties_protocol_e2e_test.py"],
+      "verification": {
+        "reproduction": "Original native6 all0A000; realPG18 same6 correct. New protocol previous-frozen27 controls9fail. First native18 failed2 actual Sort/UNKNOWN omissions. Reference unnamed-statement26000 and initial4 invalid-argv invocations retained.",
+        "focused_tests": "Genuine Root fresh57-unit78138/Main45435 both0; normal45128 current58 receipts/cache. Corrected3CPP97990=0 plus55 own verified units. Final proof28286 receipts/cache/repeat/frozen/source passes,19native all0;15wire1 includes4 bad argv+CTE1. Correct-argv complete15wire48749=1:14PASS/CTE1fail. New native19/protocol28+Extended/counter assertions pass; original fullscalar92 all0; defaultfullprotocol passes. Owned updatedPG18 reference41 checks0. OriginalBIT38442056=0.",
+        "full_suite": "170scoped repairs/762native+2actual Main/425registered/58TU. No new completed whole inventory/SAN/TLS/family approval. CTE4 original stored-routine/effect assertions, previous whole-run failures and broader aggregate/set/SRF/locking graph semantics remain open.",
+        "scope": "Original27322complete166partial70unverified15deferred/exactitems hash unchanged. READMEdb35e522 evergreen. No push/Actions activation/user-deferred branch restart."
+      }
+    },
+    {
       "issue": "Retained CTE CASE, pure scalar Describe and actual typed FETCH peer dispatcher",
       "gap_ids": ["QRY-02", "QRY-04", "QRY-05", "PROTO-04"],
       "status": "partial",
