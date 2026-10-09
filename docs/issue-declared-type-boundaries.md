@@ -662,10 +662,12 @@ Masterd21e0a5b has163 scoped source repairs and761auto+2Main/424registered/
 fresh compile entries and all58 current receipts/cache/no-recompile repeat/
 frozen/source proof passed, input sealfaab and SHAe72d matching private.
 This is genuine Root recompilation, not cross-path receipt or object reuse.
-Actual Root90native19079/52wire35347/original38435578 are now running on the
-current Root frozen binary, not yet PASS. No pending gate or private test is
-counted as Root test success; new full suite not started.
-Root src/scripts/tests/cmake stay frozen during the publication gates.
+Actual Root90native19079/52wire35347/original38435578 all finished with
+terminal0 on that Root frozen binary and passed their final fences. These
+are scoped gates, not a new full-suite pass. Their source freeze was released
+only after all terminal results. Subsequent separately committed repairs and
+actual remaining failures are recorded in
+[the follow-up evidence](issue-catalog-scalar-followup.md).
 
 The modifier-input field's absence/zero means the type lacks that facility,
 as specified by the [PG18 pg_type documentation](https://www.postgresql.org/docs/18/catalog-pg-type.html).

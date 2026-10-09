@@ -2,6 +2,20 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Typed catalog routing, scalar UNKNOWN output boundary and FETCH grammar follow-up",
+      "gap_ids": ["QRY-04", "QRY-05", "PROTO-04", "TYPE-11"],
+      "status": "partial",
+      "commits": ["6f687e7a", "5d829bb8", "52504ada", "f5856fde", "a56cf1ca", "a1cd35b4"],
+      "evidence": ["docs/issue-catalog-scalar-followup.md"],
+      "tests": ["tests/pg_catalog_unavailable_sqlstate_protocol_e2e_test.py", "tests/cte_clause_boundary_e2e_test.py", "tests/parser_phase1_test.cpp", "tests/postgres_protocol_test.py"],
+      "verification": {
+        "reproduction": "Original pg_database WHERE query42P01 and scalar child string42704 retained. Owned PG18.6 confirms scalar text OID25, invalid LIMIT WITH TIES and unordered FETCH42601; ordered FETCH controls retain actual values/counts.",
+        "focused_tests": "Actual Main/binder/parser incremental Root builds0; all58 own-path receipts/cache/no-recompile repeat/frozen/source fences pass. Full8native/10wire73096 terminal1:7native/8wire PASS3fail, including complete defaultpostgres_protocol PASS. Original parser DATE spelling failure134 retained, separately corrected full parser56046 terminal0. Not a fresh58/full-family approval.",
+        "full_suite": "Previous Root90native19079/52wire35347/original38435578 all terminal0. Original full21540 remains terminal1; no new complete761auto+2Main/424registered run. Chained CTE CASE and scalar FETCH wire remain failed and other original whole-run failures remain open.",
+        "scope": "166 scoped source repairs; original273 statuses/hash unchanged22complete166partial70unverified15deferred. READMEdb35e522 evergreen and committed. No push/Actions activation/user-deferred branch restart."
+      }
+    },
+    {
       "issue": "Nine verified type/array repairs published individually after actual full-driver and private gates terminal; Root fresh58 pending",
       "gap_ids": ["TYPE-11", "TYPE-18", "TYPE-21", "QRY-06", "PROTO-04"],
       "status": "partial",
