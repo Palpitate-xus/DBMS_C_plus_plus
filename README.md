@@ -2,6 +2,8 @@
 
 使用 C++17 实现的关系型数据库管理系统，提供 SQL 交互、页式存储、索引、事务和查询执行模块，以及 PostgreSQL wire protocol 3.0 的部分实现。
 
+本仓库面向数据库实现的学习、研究与开发。评估具体使用场景时，请先阅读兼容性契约，并在独立的数据目录验证所需的 SQL 与客户端行为。
+
 ## 快速导航
 
 - [构建](#构建)与[运行](#运行)：环境准备、编译和启动。
@@ -23,8 +25,6 @@ SQL 与客户端协议的接口边界见[兼容性契约](docs/compatibility-con
 - Volcano 查询执行器，包含扫描、过滤、投影、连接、排序、聚合和窗口算子。
 - 事务、MVCC、保存点、锁管理、WAL 和恢复模块。
 - 交互式命令行，以及 PostgreSQL Simple / Extended Query 协议入口。
-
-以上是模块概览，不是完整 PostgreSQL 兼容性声明。
 
 ## 构建
 
@@ -165,8 +165,6 @@ docs/              # 使用、兼容性与开发文档
 
 ## 文档
 
-README 仅介绍项目、安装、使用和贡献方式。版本历史集中在 CHANGELOG，具体接口和操作细节保留在对应文档中。
-
 - [使用手册](docs/MANUAL.md)：SQL 与操作说明。
 - [兼容性契约](docs/compatibility-contract.md)：SQL、协议及扩展模式的边界。
 - [打包与部署](docs/PACKAGING.md)：源码包、数据目录和配置约定。
@@ -174,7 +172,7 @@ README 仅介绍项目、安装、使用和贡献方式。版本历史集中在 
 
 ## 参与贡献
 
-欢迎通过 Issue 报告问题，或通过 Pull Request 提交改进。
+欢迎通过 [Issue](https://github.com/Palpitate-xus/DBMS_C_plus_plus/issues) 报告问题、讨论使用与设计，或通过 [Pull Request](https://github.com/Palpitate-xus/DBMS_C_plus_plus/pulls) 提交改进。
 
 提交问题时请提供：
 
@@ -186,6 +184,7 @@ README 仅介绍项目、安装、使用和贡献方式。版本历史集中在 
 
 提交改动时：
 
+- 从自己的分支提交修改，并在 Pull Request 中说明问题、改动与验证结果。
 - 补充覆盖问题的回归测试，并说明实际运行的测试范围。
 - 保持每个提交独立、易复查，避免混入无关修改。
 - 新增生产源码时同步 `cmake/dbms_sources.txt`。
