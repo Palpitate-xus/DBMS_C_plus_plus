@@ -2,6 +2,20 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Nine cold and numeric AST repairs imported individually; original full runner failed and new Root fresh58 verified",
+      "gap_ids": ["TYPE-11", "TYPE-12", "TYPE-21", "QRY-06", "PROTO-04"],
+      "status": "partial",
+      "commits": ["0eea2c78", "759cbae1", "ef0177e2", "4fbbdfee", "da509ecb", "06ca3235", "cfe2ba3c", "5e5eead1", "36eabe53"],
+      "evidence": ["docs/issue-declared-type-boundaries.md"],
+      "tests": [],
+      "verification": {
+        "reproduction": "Old full63302 terminal1:21native/14protocol failures, unchanged seal0d3c. Private13 original fixture triage8pass5fail; missing genuine int4range42704 remains open. Legacy numeric AST expression regression repaired; separately discovered malformed trailing SELECT acceptance remains open with failed log.",
+        "focused_tests": "Private66native93982/43wire29888/original38446624 all terminal0; subsequent complete date43360 and corrected expression fixture plus unchanged declaration68 also0. Preserve old epochs and actual PG18.6 references. Numeric fix one fresh evaluator+57 matching own objects, not fresh58.",
+        "full_suite": "All nine commits imported individually with provenance after old full exit. Genuine Root fresh58 normal99397 now terminal0, all58 current receipts/cache/repeat/frozen/source fences verified, SHA33990 matches private and inputseal7ff5. New combined Root test gates not yet run; no new full/SAN/TLS/family success claim.",
+        "scope": "Root749auto+2Main/415registered/58TU;146 scoped source repairs, three additional independent fixture corrections. README evergreen db35e522 committed. Original273 unchanged22complete166partial70unverified15deferred; continue every original remaining owner. No push, Actions activation or filtered branch restart."
+      }
+    },
+    {
       "issue": "Independent cold operator, real CASE OID and interval input repairs; full standard driver still live and red",
       "gap_ids": ["TYPE-11", "TYPE-12", "TYPE-21", "QRY-06", "PROTO-04"],
       "status": "partial",

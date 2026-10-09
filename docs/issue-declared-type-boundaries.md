@@ -417,6 +417,71 @@ TYPE-11/21. Binary I/O, arrays beyond these catalog links, custom types/domains
 and all other original273 requirements remain open. Original items are
 unchanged:22 complete,166 partial,70 unverified,15 deferred_by_user. No push,
 Actions activation or user-skipped/filtered branch restart.
+## Current publication: cold repairs and legacy numeric AST compatibility
+
+The previous full standard driver63302 finished with actual exit1:21 native
+failures and14 protocol failures. Final original source seal remained
+`0d3c99f1b266771e6b92ca77305533f9cc231e5204dafd2c61ac2d1f1d157d60`.
+Preserve the complete original log at
+`/tmp/dbms-root-declaration-publish.gNnyMWd5/root-full746-412.log`.
+The later failures include explain_typed_execution, explain_join,
+pg_stat_activity and pg_catalog_unavailable_sqlstate; this is not full PASS.
+
+Private expanded66native93982/43wire29888/original38446624 all finished0.
+These66 exclude date_functions. Independent actual PG18.6 constructor6
+distinguishes input overflow22003 from legal-int4 function field overflow22008;
+private3785636b retains original huge values and adds genuine int4 controls.
+The complete date_functions43360 separately passed.
+
+Independent private90ef85fb fixes a real old public-AST numeric postfix
+regression: restore unquoted numeric/decimal legacy envelopes before semantic
+lookup. Quoted names are not rewritten and malformed modifiers remain42601.
+The complete original expression fixture plus added controls and unchanged68
+declaration-parser controls pass. One fresh evaluator CPP plus57 own unchanged
+matching objects; all58 receipts/cache/repeat/frozen bytes verified. Final SHA:
+`33990e190df1e7b6bed7a215d89cd9d88efbdbe145d3b54fee27bf5297f014ad`.
+Final corrected test seal:
+`7ff5acb75f0c43985d73c093cfd1ed777e679352dd9c5d822181b46808b93af0`.
+An additional exploratory malformed SELECT rejection assertion failed because
+the general parser accepts trailing legacy-looking tokens. Preserve its log
+expression-evaluator-legacy-numeric.log as a separate open grammar issue.
+The corrected fixture directly tests the strict declaration parser; it does
+not claim this native API fix repairs that broader SQL grammar problem.
+
+After the old full runner finished, nine private commits were individually
+imported with provenance:
+
+| Private | Master |
+| --- | --- |
+| ff8f0889 | 0eea2c78 |
+| 50d5a1c2 | 759cbae1 |
+| a8bda9aa | ef0177e2 |
+| 70f92b1f | 4fbbdfee |
+| 1944122c | da509ecb |
+| ec29d244 | 06ca3235 |
+| 925fbfe9 | cfe2ba3c |
+| 3785636b | 5e5eead1 |
+| 90ef85fb | 36eabe53 |
+
+README-only db35e522 retains evergreen project guidance; documentation checks
+pass. Master36eabe53 src/scripts/tests/cmake exactly matches final private
+bytes. Inventory749auto-native+2 Main/415registered/58TU;146 scoped source
+repairs (six new source repairs, three separate fixture corrections).
+Root actual fresh58 normal99397 finished0, all58 receipts/cache/repeat/frozen/
+source fences verified in
+`/tmp/dbms-root-cold-publish.ZsxPxf4N/root-fresh58-proof.log`.
+Root SHA matches33990 above. Combined Root test gates have not yet run; neither
+private success nor old full failure is a new Master full-suite proof.
+
+An unchanged13-fixture private triage passed eight (name comparison, scalar
+WHERE, prepared projection/sort identity, pattern binding, both simple CASE
+fixtures and VALUES types) and failed five (range bounds/functions, parser
+phase1, pattern cast parser and expression evaluator). The last is now fixed;
+genuine missing int4range42704 and other original failures remain open.
+Original273 remains22complete166partial70unverified15deferred. No push,
+workflow activation, skipped branch restart, sanitizer/TLS/family PASS claim.
+The following follow-up is an older checkpoint, not current pending status.
+
 ## Follow-up: actual cold operator metadata, CASE identities and interval input
 
 Private worktree `/tmp/dbms-root-cold-catalog.MLUxaZbL/repo` now has seven
