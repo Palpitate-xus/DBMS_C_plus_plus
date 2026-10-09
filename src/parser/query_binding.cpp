@@ -850,6 +850,38 @@ public:
             columns.front().typeOid = expressionTypeOid(&literal);
             result.statementOutputs[parsed.stmt.get()] = columns;
         }
+        if (!scalar) {
+            if (auto* select = dynamic_cast<SelectStmt*>(parsed.stmt.get())) {
+                bool targetSrfOrWindow = false;
+                std::function<void(const Expr*)> inspect = [&](const Expr* value) {
+                    if (!value || value->preparedSubquery) return;
+                    if (const auto* call = dynamic_cast<const FunctionCallExpr*>(value)) {
+                        targetSrfOrWindow = targetSrfOrWindow || call->setReturning.has_value() || call->hasOver;
+                        for (const auto& arg : call->args) inspect(arg.get());
+                        for (const auto& arg : call->namedArgs) inspect(arg.value.get());
+                    } else if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(value)) {
+                        inspect(binary->left.get()); if (binary->op != "::") inspect(binary->right.get());
+                    } else if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(value)) inspect(unary->operand.get());
+                    else if (const auto* cast = dynamic_cast<const CastExpr*>(value)) inspect(cast->operand.get());
+                    else if (const auto* conditional = dynamic_cast<const CaseExpr*>(value)) {
+                        inspect(conditional->switchExpr.get()); inspect(conditional->elseExpr.get());
+                        for (const auto& arm : conditional->whenClauses) { inspect(arm.first.get()); inspect(arm.second.get()); }
+                    } else if (const auto* array = dynamic_cast<const ArrayExpr*>(value))
+                        for (const auto& item : array->elements) inspect(item.get());
+                    else if (const auto* row = dynamic_cast<const RowExpr*>(value))
+                        for (const auto& item : row->elements) inspect(item.get());
+                };
+                for (const auto& item : select->selectList) inspect(item.expr.get());
+                const bool writes = std::any_of(select->ctes.begin(), select->ctes.end(), [](const auto& cte) {
+                    return cte.query->command != SqlCommand::Select && cte.query->command != SqlCommand::Values;
+                });
+                select->existsTargetPrunable = !targetSrfOrWindow && !writes &&
+                    select->setOp == SetOp::None && select->groupBy.empty() && select->groupByElems.empty() &&
+                    !select->having && !select->offset && select->locking.empty() && select->windowDefs.empty() &&
+                    (!select->limit || *select->limit > 0) &&
+                    (!select->signedFetchCount || *select->signedFetchCount >= 0);
+            }
+        }
         literal.preparedSubquery = std::move(parsed.stmt);
         literal.typeName = scalar ? columns.front().type : "boolean";
         if(scalar)valueTypeOids[&literal]=columns.front().typeOid;

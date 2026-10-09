@@ -882,9 +882,11 @@ void PreparedQueryExecution::planStatementConstants(const Stmt* statement,
         // DISTINCT/set operations retain their complete row identity; ORDER
         // aliases/ordinals and volatile/SRF targets retain their actual slots.
         auto demanded = outputDemand ? *outputDemand : std::set<size_t>{};
-        const bool all = !outputDemand || node->distinct || !node->distinctOn.empty() || node->setOp != SetOp::None;
+        const bool all = !node->existsTargetPrunable &&
+            (!outputDemand || node->distinct || !node->distinctOn.empty() || node->setOp != SetOp::None);
         const auto output = query_->statementOutputs.find(statement);
         for (const auto& order : node->orderBy) {
+            if (node->existsTargetPrunable) break;
             if (const auto* column = dynamic_cast<const ColumnRefExpr*>(order.expr.get()); column && !column->binding &&
                 column->table.empty() && column->schema.empty() && output != query_->statementOutputs.end()) {
                 for (size_t i = 0; i < output->second.size(); ++i)
@@ -903,7 +905,7 @@ void PreparedQueryExecution::planStatementConstants(const Stmt* statement,
         std::set<const Expr*> usedExpressions;
         auto& previousOutputs = plannedOutputOrdinals_[node];
         for (const auto& target : node->selectList) {
-            const bool forced = all || retainedTarget(target.expr.get());
+            const bool forced = all || (!node->existsTargetPrunable && retainedTarget(target.expr.get()));
             if (projected != query_->projectionBindings.end())
                 for (size_t i=0;i<projected->second.size();++i)
                     if (projected->second[i].expression == target.expr.get() && (forced || demanded.count(i) || previousOutputs.count(i))) {
@@ -923,7 +925,8 @@ void PreparedQueryExecution::planStatementConstants(const Stmt* statement,
             for (const auto& item : element.exprs) value(item);
         value(node->having);
         for (const auto& item : node->distinctOn) value(item);
-        for (const auto& item : node->orderBy) value(item.expr);
+        if (!node->existsTargetPrunable)
+            for (const auto& item : node->orderBy) value(item.expr);
         for (const auto& row : node->valuesRows) for (const auto& item : row) value(item);
         for (const auto& definition : node->windowDefs) window(definition);
         qualifications(node->fromClause.get()); sources(); from(node->fromClause.get());
@@ -1135,24 +1138,41 @@ ExprValue PreparedQueryExecution::executeQuantified(const QuantifiedComparisonEx
 }
 
 ExprValue PreparedQueryExecution::executeChild(const Expr* expression, const RowContext& row) const {
+    const Expr* consumer = expression;
+    const auto* call = dynamic_cast<const FunctionCallExpr*>(expression);
+    const bool existence = call && call->schema.empty() && SQLParser::toLower(call->funcName) == "exists" &&
+        call->args.size() == 1 && call->args.front()->preparedSubquery;
+    if (existence) expression = call->args.front().get();
     const auto found = children_.find(expression);
     if (found == children_.end()) throw DbError("XX000", "scalar child belongs to another execution");
     const Child& child = found->second;
     const bool memoizable = child.correlations.empty() && !child.runtimeParameters;
     if (memoizable) {
-        const auto cached = memo_.find(expression);
+        const auto cached = memo_.find(consumer);
         if (cached != memo_.end()) return cached->second;
     }
-    if (childCursorFactory_ && (cursorOwnsScalarChildren_ ||
+    if (childCursorFactory_ && (existence || cursorOwnsScalarChildren_ ||
         (!queryExecutor_ && !engine_->hasPlpgsqlQueryExecutor()))) {
         const Stmt* statement = expression->preparedSubquery.get();
         const auto output = query_->statementOutputs.find(statement);
-        if (output == query_->statementOutputs.end() || output->second.size() != 1)
+        if (output == query_->statementOutputs.end() || (!existence && output->second.size() != 1))
             throw DbError("42601", "subquery must return only one column");
         auto cursor = childCursorFactory_(statement, row);
         if (!cursor) throw DbError("XX000", "prepared child cursor factory returned no cursor");
         try {
             const auto& descriptor = cursor->descriptor();
+            if (existence) {
+                if (descriptor.size() != output->second.size())
+                    throw DbError("XX000", "EXISTS cursor lost its declared descriptor");
+                std::vector<ExprValue> values;
+                const bool present = cursor->next(values);
+                if (present && values.size() != descriptor.size())
+                    throw DbError("XX000", "EXISTS cursor lost its structured width");
+                cursor->close();
+                const ExprValue result("boolean", present ? "t" : "f", false);
+                if (memoizable) memo_.emplace(consumer, result);
+                return result;
+            }
             if (descriptor.size() != 1 ||
                 ExprHelper::canonicalResultTypeName(descriptor.front().type) !=
                     ExprHelper::canonicalResultTypeName(output->second.front().type))
@@ -1182,9 +1202,14 @@ ExprValue PreparedQueryExecution::executeChild(const Expr* expression, const Row
     if (queryExecutor_) {
         const Stmt* statement = expression->preparedSubquery.get();
         const auto output = query_->statementOutputs.find(statement);
-        if (output == query_->statementOutputs.end() || output->second.size() != 1)
+        if (output == query_->statementOutputs.end() || (!existence && output->second.size() != 1))
             throw DbError("42601", "subquery must return only one column");
-        const auto rows = queryExecutor_(statement, row, 2);
+        const auto rows = queryExecutor_(statement, row, existence ? 1 : 2);
+        if (existence) {
+            const ExprValue result("boolean", rows.empty() ? "f" : "t", false);
+            if (memoizable) memo_.emplace(consumer, result);
+            return result;
+        }
         if (rows.size() > 1)
             throw DbError("21000", "more than one row returned by a subquery used as an expression");
         ExprValue result(output->second.front().type, "", true);
@@ -1195,6 +1220,7 @@ ExprValue PreparedQueryExecution::executeChild(const Expr* expression, const Row
         if (memoizable) memo_.emplace(expression, result);
         return result;
     }
+    if (existence) throw DbError("0A000", "EXISTS requires its prepared child cursor or row receiver");
     PreparedQuery adapter;
     adapter.source = query_->source.substr(child.begin, child.end - child.begin);
     adapter.parameters = query_->parameters;

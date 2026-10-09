@@ -801,6 +801,12 @@ struct SelectStmt : public Stmt {
     // when this query's real Limit is demanded; no size_t sentinel is used.
     std::optional<int64_t> signedFetchCount;
 
+    // Set only after whole-query binding for a genuine EXISTS child whose
+    // row existence is independent of its target values and ordering.
+    // Descriptors/source provenance remain intact; OFFSET and other semantic
+    // barriers retain their ordinary projection/sort consumers.
+    bool existsTargetPrunable = false;
+
     SelectStmt() : Stmt(SqlCommand::Select) {}
     std::string toString() const override { return "SELECT"; }
 };

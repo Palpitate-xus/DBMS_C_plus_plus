@@ -5159,6 +5159,14 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
     if (!e) return ExprValue{};
     if(e->setReturning)throw DbError("0A000","set-returning routine requires its query-host receiver");
     std::string name = toLower(e->funcName);
+    if (e->schema.empty() && name == "exists" && e->args.size() == 1 &&
+        e->args.front()->preparedSubquery) {
+        if (!scalarSubqueryExecutor_)
+            throw DbError("0A000", "prepared EXISTS requires a query execution context");
+        // Send the real EXISTS consumer, not its multirow argument through
+        // scalar evaluation/cardinality or the legacy text-table parser.
+        return scalarSubqueryExecutor_(e, ctx);
+    }
     // Keep polymorphic array builtin results typed at the same boundary as
     // ARRAY constructors. The descriptor is read before any argument runs;
     // a brace-looking TEXT value never determines the result type.

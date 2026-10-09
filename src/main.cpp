@@ -5303,6 +5303,16 @@ static bool containsPreparedQuantifier(const dbms::Expr* value) {
     if(const auto* unary=dynamic_cast<const dbms::UnaryOpExpr*>(value))return containsPreparedQuantifier(unary->operand.get());
     if(const auto* cast=dynamic_cast<const dbms::CastExpr*>(value))return containsPreparedQuantifier(cast->operand.get());
     if(const auto* call=dynamic_cast<const dbms::FunctionCallExpr*>(value)){
+        if (call->schema.empty() && dbms::SQLParser::toLower(call->funcName) == "exists" &&
+            call->args.size() == 1) {
+            const auto* child = dynamic_cast<const dbms::LiteralExpr*>(call->args.front().get());
+            if (child) {
+                const auto origin = dbms::SQLParser::tokenize(child->value);
+                if (child->preparedSubquery || (origin.size() > 1 && origin.front() == "(" &&
+                    (dbms::SQLParser::toLower(origin[1]) == "select" || dbms::SQLParser::toLower(origin[1]) == "with")))
+                    return true;
+            }
+        }
         for(const auto& arg:call->args)if(containsPreparedQuantifier(arg.get()))return true;
         for(const auto& arg:call->namedArgs)if(containsPreparedQuantifier(arg.value.get()))return true;
     }

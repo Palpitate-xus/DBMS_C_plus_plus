@@ -250,9 +250,10 @@ struct PreparedSelectState {
         // graph construction must not reacquire outputs that root demand
         // already pruned, or plan a child in a discarded CASE arm.
         if (planRootConstants && !executionProvider) execution->planStatementConstants(statement);
-        for (auto& target : starTargets)
+        if (!select().existsTargetPrunable) for (auto& target : starTargets)
             execution->prepareProjectionColumn(static_cast<ColumnRefExpr*>(target.get()), statement);
-        for (auto* target : targets) execution->prepareExpression(target);
+        if (!select().existsTargetPrunable)
+            for (auto* target : targets) execution->prepareExpression(target);
         execution->prepareExpression(select().whereClause.get());
         prepareNullWhereBranches(*execution,select().whereClause.get());
         for (const auto& key : keys)
@@ -656,7 +657,9 @@ public:
         const auto* sorted = dynamic_cast<const PreparedSortOp*>(child_.get());
         values_.clear(); row.clear();
         for (size_t i = 0; i < state_->targets.size(); ++i) {
-            values_.push_back(sorted && sorted->targets()[i] ? *sorted->targets()[i]
+            values_.push_back(state_->select().existsTargetPrunable
+                ? ExprValue(state_->output.at(i).type, "", true)
+                : sorted && sorted->targets()[i] ? *sorted->targets()[i]
                 : state_->evaluate(state_->targets[i], context));
             // A bare NULL's unknown type resolves to text at a SELECT output
             // boundary. Keep declared typed NULLs (parameters/casts) intact.
@@ -991,7 +994,7 @@ static bool supportsPreparedSelectShape(const SelectStmt& select, bool allowCtes
         (selectBodyOnly && (select.setOp != SetOp::Union || !select.setOpAll || select.setOpLhs || !select.setOpRhs)) ||
         !select.groupBy.empty() || !select.groupByElems.empty() || select.having ||
         !select.windowDefs.empty() || !select.distinctOn.empty() ||
-        !select.locking.empty() || (select.withTies && (select.distinct || selectBodyOnly))) return false;
+        !select.locking.empty() || (select.withTies && ((select.distinct && !select.existsTargetPrunable) || selectBodyOnly))) return false;
     if (!sourceContexts && select.fromClause && select.fromClause->type != FromItem::Type::Table &&
         select.fromClause->type != FromItem::Type::Subquery) return false;
     std::function<bool(const Expr*)> scalar = [&](const Expr* expr) {
@@ -1003,7 +1006,9 @@ static bool supportsPreparedSelectShape(const SelectStmt& select, bool allowCtes
             const auto spelling = call->schema.empty() ? call->funcName : call->schema + "." + call->funcName;
             const bool builtinRole = CatalogManager::parseQualifiedName(spelling, routine, true) &&
                 (routine.schema.empty() || routine.schema == "pg_catalog");
-            if ((builtinRole && routine.name == "exists") || call->hasOver || call->distinct || call->filter || !call->orderBy.empty() ||
+            if (builtinRole && routine.name == "exists")
+                return call->schema.empty() && call->args.size() == 1 && call->args.front()->preparedSubquery;
+            if (call->hasOver || call->distinct || call->filter || !call->orderBy.empty() ||
                 (builtinRole && aggregates.count(routine.name))) return false;
             for (const auto& argument : call->args) if (!scalar(argument.get())) return false;
             for (const auto& argument : call->namedArgs) if (!scalar(argument.value.get())) return false;
@@ -1133,6 +1138,7 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
     for (const auto* target : state->targets) identities.push_back(state->identity(target));
     std::vector<std::string> keyIdentities;
     for (auto& order : select->orderBy) {
+        if (select->existsTargetPrunable) break;
         size_t target = PreparedSelectState::noTarget;
         if (auto* ref = dynamic_cast<ColumnRefExpr*>(order.expr.get())) {
             if (ref->schema.empty() && ref->table.empty()) {
@@ -1182,7 +1188,7 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
     if (!state->keys.empty()) root = std::make_unique<PreparedSortOp>(std::move(root), state);
     auto* tiesSort=select->withTies?dynamic_cast<PreparedSortOp*>(root.get()):nullptr;
     root = std::make_unique<PreparedProjectOp>(std::move(root), state);
-    if (select->distinct) root = std::make_unique<PreparedDistinctOp>(std::move(root));
+    if (select->distinct && !select->existsTargetPrunable) root = std::make_unique<PreparedDistinctOp>(std::move(root));
     if (select->offset && *select->offset) root = std::make_unique<OffsetOp>(std::move(root), *select->offset);
     if(select->signedFetchCount && *select->signedFetchCount<0)
         root=std::make_unique<PreparedNegativeFetchOp>(std::move(root));
