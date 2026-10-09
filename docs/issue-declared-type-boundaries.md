@@ -628,6 +628,61 @@ ordinary parser/metadata/codec/source boundaries and wider array/type features.
 Original273 statuses/hash22complete166partial70unverified15deferred unchanged.
 No push, workflow activation, filtered restart, SAN/TLS or family approval.
 
+## Publication: nine independently committed type/array repairs
+
+Root's unchanged complete753auto+2Main/417registered driver21540 ended1,
+final source fenceb424 unchanged. All753 native sources were compiled; actual
+labels are747 native/Main PASSED and8 FAILED, plus405 registered PASSED labels
+and12 FAILED. One PASSED label follows a literal backslash-n on the same line,
+so anchored-only counting misses it. Both Main frontend controls pass. One
+registered PASSED label is an intentional TLS-stub skip, not TLS runtime
+success. No compile/link failures were found. Full failure list remains in
+root-full753-417.log, never replaced by the private focused successes.
+
+New private final90native90443/52wire34368/original38489564 all finished0 with
+current source/receipt/cache/frozen fences. Only after both the old Root full
+driver and private gates ended were nine repairs individually imported with
+cherry-pick provenance; source inputs now exactly match private faab.
+
+| Private | Master |
+| --- | --- |
+| 3fbe0ce1 | 7208bb47 |
+| a5377f54 | 62a79c78 |
+| d242a901 | 6aaaa1fc |
+| 8cb9ffa1 | cbffce09 |
+| d5a7ae18 | 4264104d |
+| 05bbefe7 | cbf81fbf |
+| 16c7acde | 1a557686 |
+| 9afdd878 | fb847b22 |
+| d5edb1f1 | d21e0a5b |
+
+Masterd21e0a5b has163 scoped source repairs and761auto+2Main/424registered/
+58TU. READMEdb35e522 remains evergreen. Actual Root-path fresh58 normal build
+94462 is running under `/tmp/dbms-root-modifiers-publish.YVRgelTf` with current
+input sealfaab. This is genuine Root recompilation, not cross-path receipt or
+object reuse. Root90/52/original384 gates are prepared but not started until
+the actual build/receipts/cache/repeat/frozen/source proof succeeds. No pending
+build or private test is counted as Root PASS; new full suite not started.
+Root src/scripts/tests/cmake stay frozen during the publication gates.
+
+The modifier-input field's absence/zero means the type lacks that facility,
+as specified by the [PG18 pg_type documentation](https://www.postgresql.org/docs/18/catalog-pg-type.html).
+Project builtins with genuine frontend modifier codecs retain those owned
+handlers; custom/reference types cannot gain modifiers just because they
+are absent from the frontend registry. Complete catalog callback ownership
+is still an open family requirement, not approval of nonexistent routines.
+
+Continue all original273 unmet owners and original full-run failures. The
+parser_phase1 fixture has obsolete valid expectations for LIMIT WITH TIES
+and signed FETCH WITH TIES without ORDER; strengthen with preserved original
+negative SQL and genuine ordered FETCH positives after actual PG verification.
+Default protocol and unavailable-catalog fixtures still expect0A000 for the
+now-real pg_type typname projection; preserve the query and add genuine typed
+positive assertions, retaining still-unsupported catalog negatives. Filtered
+creator/TEMP/etc. branches remain excluded. Original273 statuses/hash unchanged
+22complete166partial70unverified15deferred. No assistant push, workflow
+activation, SAN/TLS or full/family completion claim.
+
 ## Historical held follow-up: real type catalog sources, sorting and identity metadata
 
 The preceding private range composition has now actually finished:80native

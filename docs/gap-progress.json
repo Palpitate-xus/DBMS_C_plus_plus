@@ -2,6 +2,20 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Nine verified type/array repairs published individually after actual full-driver and private gates terminal; Root fresh58 pending",
+      "gap_ids": ["TYPE-11", "TYPE-18", "TYPE-21", "QRY-06", "PROTO-04"],
+      "status": "partial",
+      "commits": ["7208bb47", "62a79c78", "6aaaa1fc", "cbffce09", "4264104d", "cbf81fbf", "1a557686", "fb847b22", "d21e0a5b"],
+      "evidence": ["docs/issue-declared-type-boundaries.md"],
+      "tests": ["tests/regtype_catalog_test.cpp", "tests/regtype_input_test.cpp", "tests/regtype_alias_catalog_test.cpp", "tests/regtype_cast_graph_test.cpp", "tests/regtype_identity_test.cpp", "tests/declared_modifier_owner_test.cpp", "tests/named_array_modifier_test.cpp", "tests/nullable_character_array_cast_test.cpp"],
+      "verification": {
+        "reproduction": "All preceding baselines/intermediate failures retained:53baseline48fail;27/12/13 baseline16/6/10fail; two VALUES red/native134; modifier19/8 baseline13/5fail, first19 still1valid NULL array failure; partial89/51 deliberately stopped143, old NULL-array6 failed4. SQL/assertions/OIDs/counts/deadlines unchanged.",
+        "focused_tests": "Final private90native90443/52wire34368/original38489564 all terminal0 with current own58 receipt/cache/repeat/frozen/source fences e72dSHA/faabseal. All native18/23/40/33/13/50/25/13 proofs and complete actualPG18.6 references retained. Source files now exactly Root/privatefaab; individual -x provenance mapped in evidence doc.",
+        "full_suite": "Previous unchanged Root full21540 terminal1,753auto+2Main/417registered:747 native/Main PASS8fail,405registered PASSlabels12fail including1TLS-stub intentional skip; no compile/link failures, final b424 fence unchanged. One native PASS marker glued after literal backslash-n; use unanchored label count. Nine source commits only imported after terminal states. New Masterd21e0a5b/163 repairs/761auto+2Main/424registered/58TU. Actual Root-path fresh58 build94462 running in /tmp/dbms-root-modifiers-publish.YVRgelTf; Root90/52/384 prepared not launched, newfull not started. No pending/Rootfull/SAN/TLS/family approval.",
+        "scope": "Typed identities, cast graph, ARRAY binding, VALUES descriptors/execution, modifier owners/placement and nullable character arrays repaired within retained proofs. Full type fields/callback/binary/storage/alias IO and all original273 still open, statuses/hash unchanged22complete166partial70unverified15deferred. Root source freeze maintained during publication gates. READMEdb35e522 evergreen; no push, Actions activation or user-filtered branch restart."
+      }
+    },
+    {
       "issue": "Three independently committed actual modifier ownership named-array and NULL-array repairs; original19/8/6 expectations pass",
       "gap_ids": ["TYPE-11", "TYPE-18", "TYPE-21", "QRY-06", "PROTO-04"],
       "status": "partial",
