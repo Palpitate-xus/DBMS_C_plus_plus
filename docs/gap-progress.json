@@ -2,6 +2,20 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Whole scalar SQL query bodies and unnamed typed parameter persistence",
+      "gap_ids": ["QRY-02", "QRY-04", "FUNC-01", "PROTO-04"],
+      "status": "partial",
+      "commits": ["5ded1ab9", "8b03449a"],
+      "evidence": ["docs/issue-sql-function-query-body.md"],
+      "tests": ["tests/native_scalar_query_routine_test.cpp", "tests/sql_function_query_body_protocol_e2e_test.py", "tests/parser_phase1_test.cpp", "tests/cte_prepared_owner_protocol_e2e_test.py"],
+      "verification": {
+        "reproduction": "Old frozen query bodies22023, unnamed declaration42704/calls42883. Actual PG18.6 reference26 statement checks+4 Extended executions pass. Initial Main compile1, initial11native/21wire3fails and intermediate12native/21wire4fails retained. Intermediate parser comma negatives134 and single-unnamed persistence omission were independently corrected.",
+        "focused_tests": "Actual Root fresh57 and corrected Main0; subsequent parser/storage2CPP current rebuild0 plus56 own signed objects. Final12 native all0 and complete21 protocol entries terminal1:19PASS/2 original CTE-writer and quoted-range-HAVING failures. New25 statements+4 Extended pass, originalCTE SQL readers pass, complete scalar FETCH92/defaultprotocol/stored-function-order fixtures pass. Unchanged originalBIT384 final explicit180006 comparison0. Final821f SHA/06cc source seal/current58 receipts/cache/repeat/frozen/source fences pass.",
+        "full_suite": "172 scoped repairs/762 automatic native+2 actual Main/426 registered/58TU. No new completed whole inventory, sanitizer/realTLS or full-function-family approval. Recursive CTE42883 and missing effects, quoted-range HAVING and preceding whole-run failures remain open.",
+        "scope": "Original273 states unchanged22complete166partial70unverified15user-deferred; exactitems match f80f86af. README00675e31 independently committed evergreen. No push, Actions activation or user-deferred branch restart."
+      }
+    },
+    {
       "issue": "Genuine retained EXISTS row-presence cursor and grammar-owned type",
       "gap_ids": ["QRY-02", "QRY-04", "PROTO-04"],
       "status": "partial",
