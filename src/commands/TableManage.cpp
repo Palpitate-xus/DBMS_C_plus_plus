@@ -37526,35 +37526,38 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
               << notificationManager().queueUsage();
         return value.str();
     }
-    // User-defined function fallback
+    // Legacy scalar projections still own argument SQL, not evaluated cells.
+    // Bind the whole call through the ordinary namespace-aware resolver and
+    // evaluate arguments against this actual typed row. A public-only lookup
+    // plus getVal() loses search_path, arithmetic, casts and runtime NULLs.
     if (engine && !dbname.empty()) {
-        auto udf = engine->getUDF(dbname, expr.funcName);
-        if (!udf.expression.empty()) {
-            std::vector<std::string> argVals;
-            std::vector<bool> argNulls;
-            argVals.reserve(expr.funcArgs.size());
-            argNulls.reserve(expr.funcArgs.size());
-            for (const auto& a : expr.funcArgs) {
-                argVals.push_back(getVal(a));
-                std::string normalized = trim(a);
-                for (char& ch : normalized) {
-                    ch = static_cast<char>(
-                        std::tolower(static_cast<unsigned char>(ch)));
-                }
-                argNulls.push_back(
-                    normalized == "null" ||
-                    scalarArgColumnIsNull(a, rowBuffer, tbl, engine, dbname));
-            }
-            std::string rv;
-            bool rvIsNull = false;
-            if (evalUDFBody(udf, expr.funcName, argVals, engine, dbname, rv,
-                            nullptr, &rvIsNull, &argNulls)) {
-                if (knownNull) *knownNull = rvIsNull;
-                return rvIsNull ? "NULL" : rv;
-            }
-            throw DbError("22023", "function " + expr.funcName +
-                                      " evaluation failed");
+        std::map<std::string, std::string> values, types;
+        std::set<std::string> nulls;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            bool isNull = false;
+            const auto& column = tbl.cols[i];
+            values[column.dataName] = engine->extractColumnValue(
+                rowBuffer, tbl, i, dbname, true, &isNull);
+            types[column.dataName] = column.isArray
+                ? ExprHelper::canonicalResultTypeName(column.dataType + "[]") : column.dataType;
+            if (isNull) nulls.insert(column.dataName);
         }
+        // SelectExpr dispatch names are already decoded canonical identifiers.
+        // Quote that identity once; do not fold a mixed-case routine again.
+        std::string call = "\"";
+        for (char c : expr.funcName) { call += c; if (c == '"') call += '"'; }
+        call += "\"(";
+        for (size_t i = 0; i < expr.funcArgs.size(); ++i)
+            call += (i ? "," : "") + expr.funcArgs[i];
+        call += ')';
+        const auto evaluated = ExprHelper::evalStringWithNulls(
+            call, values, nulls, types, dbname, expr.sessionUser, engine);
+        if (!evaluated.ok) {
+            const auto failure = plpgsqlScalarResult(evaluated);
+            throw DbError(failure.sqlState, failure.message);
+        }
+        if (knownNull) *knownNull = evaluated.isNull;
+        return evaluated.isNull ? "NULL" : evaluated.value;
     }
     // PG 42883: undefined function over table columns aborts the
     // statement (previously returned empty silently).
