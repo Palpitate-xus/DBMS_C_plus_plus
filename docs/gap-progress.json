@@ -2,6 +2,20 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Retained CTE CASE, pure scalar Describe and actual typed FETCH peer dispatcher",
+      "gap_ids": ["QRY-02", "QRY-04", "QRY-05", "PROTO-04"],
+      "status": "partial",
+      "commits": ["276fc6d1", "014f72f5", "5a7251e2", "19e9314b"],
+      "evidence": ["docs/issue-catalog-scalar-followup.md"],
+      "tests": ["tests/cte_prepared_owner_protocol_e2e_test.py", "tests/scalar_fetch_ties_protocol_e2e_test.py", "tests/scalar_fetch_ties_test.cpp", "tests/postgres_protocol_test.py"],
+      "verification": {
+        "reproduction": "Original full CTE owner matrix9 failed assertions; scalar6 execution assertions after real Descriptor repair. Initial FETCH dispatcher epoch still90 controls8fail because only parenthesized entry reached; retained original failures and frozen generations. Native genuine EXISTS6 controls all0A000; actual PG18 same6 correct boolean/OID16.",
+        "focused_tests": "Final Root build69336 terminal0; genuine current58 own-path receipts/cache/repeat/frozen/source fences. Final8native/9wire96558 terminal1:8native7wire PASS2wirefail. Complete scalar92 controls only EXISTS1fail; hidden/expression keys/OFFSET/NULL peer/bigint/typed Describe/effect counts pass. Default full protocol PASS; unchanged originalBIT3846726=0. Actual current complete CTE and scalar reference18 matrices0. No assertion/SQL/OID/count/deadline weakening.",
+        "full_suite": "Three scoped source repairs in4 separate source commits including FETCH correction;169 scoped repairs. CTE stored writer/readers and EXISTS remain open, as do other previous whole-run failures. No new completed761auto+2Main/424registered full run, no new cold fresh58, SAN/TLS or family approval.",
+        "scope": "Original27322complete166partial70unverified15deferred and exact item hash remain unchanged. READMEdb35e522 evergreen. No push/Actions activation/user-deferred branch restart."
+      }
+    },
+    {
       "issue": "Typed catalog routing, scalar UNKNOWN output boundary and FETCH grammar follow-up",
       "gap_ids": ["QRY-04", "QRY-05", "PROTO-04", "TYPE-11"],
       "status": "partial",

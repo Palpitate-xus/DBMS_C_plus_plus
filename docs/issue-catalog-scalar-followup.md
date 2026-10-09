@@ -60,3 +60,65 @@ The preceding complete run's other original failures remain open. Source
 repair count is 166; the original273 statuses remain 22 complete, 166 partial,
 70 unverified and 15 deferred_by_user. Focused repairs do not approve a whole
 catalog/type/query family, TLS runtime, sanitizers or overall compatibility.
+
+## Subsequent CTE expression, Describe and FETCH dispatcher repairs
+
+| Master commit | Actual scope |
+| --- | --- |
+| `276fc6d1` | WITH SELECT retains the CTE CASE expression instead of rewriting its condition into evaluator-only pseudo-tokens before child binding. Original chained/nested CASE and lazy writing-arm checks now pass. |
+| `014f72f5` | Source-free scalar query projections use whole-query pure binding for protocol Describe. Child labels cannot lend their table/attribute origin to scalar output. Original integer/bigint descriptors and execution-count checks now pass; empty bigint and string children add coverage. |
+| `5a7251e2` | Admit genuine FETCH peer queries to the typed sort consumer. Its first dispatcher change only reached parenthesized expressions; the complete failed invocation is retained. |
+| `19e9314b` | Share the same actual FETCH envelope consumer with the ordinary SELECT dispatcher, before legacy lowering rejects unprojected ORDER keys. Preserve ordinary/parenthesized counterparts and all original queries. |
+
+These are three additional scoped source repairs, not four independent issues;
+the FETCH dispatcher correction remains separately committed for provenance.
+Total scoped source repairs: 169. Original273 states and item hash remain
+unchanged; no family has been marked complete from these focused checks.
+
+The first CTE build92591 exited1 because the Network source changed during
+compilation; the source-change guard correctly prevented linking. Its actual
+current Main receipt and Network fresh-unit83437 exit0 were retained. With
+inputs held constant, final Root build93193 exited0; all58 own-path current
+receipts/cache/repeat/frozen/source fences passed. CTE/Describe five-wire
+invocation14666 exited1, with3 passes and2 failures; the complete CTE matrix
+fell from9 failed assertions to4, while original scalar FETCH failures became
+6 execution-only assertions. Default full protocol passed. This is not a
+cold fresh58 build or whole-suite success.
+
+First FETCH build68253 exited0; complete8-native/9-wire invocation9699 exited1
+with all8 native and7 wire passes and2 failed wire fixtures. The full90 scalar
+controls had8 failed assertions: the ordinary dispatcher was not yet reached.
+These failures and that frozen generation are retained, not relabeled PASS.
+
+Final corrected dispatcher build69336 exited0. Current frozen SHA256 is
+`4b0aa390b33b266f3a73c85cc97328d280b905dd3637513dcd4cf132ca3b6ded`,
+source seal `53da00258c155f50f0af32970f904a8f029e02750a0ef9f74020e423b453a6ed`.
+All58 current Root receipts/cache/repeat/frozen fences passed. Complete final
+8-native/9-wire invocation96558 exited1: all8 native and7 wire passed,2 wire
+fixtures still failed. The scalar fixture reached all92 controls with only
+the original EXISTS assertion failing; all original hidden/expression sort
+keys, OFFSET, NULL peer, exact bigint, Simple/Extended descriptors and actual
+routine-call count checks passed. Default full protocol again passed. The
+unchanged original BIT384 differential6726 completed0 with zero differences.
+No SQL, expectation, OID, count or timeout was weakened.
+
+Owned PostgreSQL18.6 completed the entire updated CTE matrix and scalar FETCH
+matrix, including the final ordinary/parenthesized counterparts, with zero
+failed assertions. These reference runs retain actual version verification
+and rollback their fixture transactions.
+
+Remaining complete-fixture failures:
+
+- CTE stored recursive writer argument resolution42883 and its consequent
+  missing three output/effect rows; independent stored SQL readers22023.
+- EXISTS with a nonempty FETCH child returns false in the legacy frontend.
+  A separate genuine native probe43824 reached all6 existence controls and
+  rejected all6 with0A000, including multi-column and source-free children.
+  The same6 SQL against actual PG18.6 returned correct booleans/OID16. This
+  requires a real existence consumer, not just trimming ORDER text or routing
+  a multirow existence child through scalar cardinality.
+
+The next work retains genuine child cursor, output-demand, correlation,
+early-close and effect ownership for EXISTS, then the remaining CTE/routine
+and prior full-run failures. New full761-auto +2 Main /424-registered has not
+completed. No push, Actions activation or user-deferred branch restart.
