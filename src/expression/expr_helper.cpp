@@ -1,4 +1,5 @@
 #include "expr_helper.h"
+#include "expression/aggregate_type.h"
 #include "between_input.h"
 #include "expression/common_type.h"
 #include "array_type.h"
@@ -1433,8 +1434,7 @@ std::string ExprHelper::preparedSortExpressionIdentity(
                     if (!CatalogManager::parseQualifiedName(spelling, name, true)) throw DbError("0A000", "function identity requires a canonical name");
                     std::string routine;
                     if (evaluator.hasScalarFunction(call, functionEngine)) routine = evaluator.scalarFunctionIdentity(call, functionEngine);
-                    else if ((name.schema.empty() || name.schema == "pg_catalog") &&
-                        (name.name == "count" || name.name == "sum" || name.name == "avg" || name.name == "min" || name.name == "max"))
+                    else if (!aggregate_type_detail::builtinName(call).empty())
                         routine = "builtin-aggregate" + field(name.name);
                     else throw DbError("0A000", "SQL child identity requires resolved function metadata");
                     std::string key = "function" + field(routine) + field(call->distinct ? "distinct" : "all") +
@@ -1540,7 +1540,22 @@ std::string ExprHelper::preparedSortExpressionIdentity(
     };
     return scalarExpressionIdentity(expression, columnIdentity, currentDB, functionEngine,
         [&](const Expr* node) -> std::optional<std::string> {
-            if (!node->preparedSubquery) return {};
+            if (!node->preparedSubquery) {
+                const auto* call = dynamic_cast<const FunctionCallExpr*>(node);
+                const auto name = aggregate_type_detail::builtinName(call);
+                ExprEvaluator evaluator; evaluator.setCurrentDB(currentDB);
+                if (name.empty() || evaluator.hasScalarFunction(call, functionEngine)) return {};
+                if (!call->orderBy.empty())
+                    throw DbError("0A000", "aggregate ORDER identity requires structured order nodes");
+                const auto identity = [&](const Expr* value) {
+                    return preparedSortExpressionIdentity(value, query, columnIdentity, currentDB, functionEngine);
+                };
+                std::string result = "builtin-aggregate" + field(name) +
+                    field(call->resolvedResultType) + field(call->distinct ? "distinct" : "all");
+                for (const auto& argument : call->args) result += field(identity(argument.get()));
+                result += field(identity(call->filter.get()));
+                return result;
+            }
             try { return childKey(node); }
             catch (const DbError& error) {
                 // Opaque unsupported grammar stays a distinct slot. This

@@ -723,7 +723,14 @@ public:
                 const auto type = expression(call->args[i], scopes); if (i == 0) first = type;
             }
             for (auto& arg : call->namedArgs) expression(arg.value, scopes);
-            expression(call->filter, scopes); window(call->over, scopes);
+            if (call->filter) {
+                const auto filterType = expression(call->filter, scopes);
+                const auto canonical = ExprHelper::canonicalResultTypeName(filterType);
+                if (canonical != "boolean" && canonical != "unknown")
+                    throw DbError("42804", "argument of FILTER must be type boolean");
+                coerceCaseInput(call->filter, filterType, "boolean");
+            }
+            window(call->over, scopes);
             if (call->schema.empty() && SQLParser::toLower(call->funcName) == "exists" &&
                 call->args.size() == 1 && call->args.front()->preparedSubquery) {
                 // EXISTS is a SQL consumer, not a callable whose name or

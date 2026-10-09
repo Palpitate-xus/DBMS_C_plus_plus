@@ -51,6 +51,11 @@ public:
     // Call on every executable expression before opening sources/evaluating
     // any expression. Routine registration and collation checks are pure.
     void prepareExpression(Expr* expression);
+    // A real aggregate operator publishes one typed result cell per original
+    // call site. Only execution-owned copies are lowered to those cells.
+    QueryColumnBinding registerAggregateColumn(const FunctionCallExpr* call,
+                                               const std::string& type);
+    bool aggregateColumnDemanded(const FunctionCallExpr* call) const;
     // Explicit planning phase, after whole-query binding and before any
     // source/child is opened. Fold only structural constants in execution-
     // owned copies; routines and query results are never planning datums.
@@ -91,6 +96,7 @@ private:
     std::map<const Expr*, Child> children_;
     std::set<const Expr*> prepared_;
     std::map<const Expr*, ExprPtr> compiled_;
+    std::map<const Expr*, QueryColumnBinding> aggregateColumns_;
     std::map<const SelectStmt*, std::set<size_t>> plannedOutputOrdinals_;
     std::map<const Expr*, const Expr*> originalSites_;
     mutable std::map<const Expr*, ExprValue> memo_;

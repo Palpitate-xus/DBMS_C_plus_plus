@@ -12,6 +12,7 @@
 #include "utils/plpgsql.h"
 #include "utils/interval.h"
 #include "utils/interval_type.h"
+#include "expression/aggregate_type.h"
 #include "replication/ReplicationManager.h"
 #include "parser/parser.h"
 #include "TxnIdGenerator.h"
@@ -33268,9 +33269,14 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
                         ExprHelper::inferParsedResultType(function->args.front().get(), {}, dbname,
                                                          const_cast<StorageEngine*>(this)));
                 }
-                if (routine.name == "count") return std::string("bigint");
-                if (routine.name == "sum" || routine.name == "avg" ||
-                    routine.name == "min" || routine.name == "max") return std::string();
+                const auto aggregate = aggregate_type_detail::builtinName(function);
+                if (!aggregate.empty() &&
+                    !evaluator.hasScalarFunction(function, const_cast<StorageEngine*>(this))) {
+                    const auto input = function->args.empty() ? std::string("unknown") :
+                        ExprHelper::inferParsedInputType(function->args.front().get(), {}, dbname,
+                                                       const_cast<StorageEngine*>(this));
+                    return aggregate_type_detail::resultType(function, aggregate, input);
+                }
             }
             if (!evaluator.hasScalarFunction(function, const_cast<StorageEngine*>(this)))
                 throw DbError("42883", "function does not exist: " + function->funcName);

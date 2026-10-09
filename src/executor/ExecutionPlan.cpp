@@ -13,6 +13,7 @@
 #include "expression/expr_helper.h"
 #include "expression/ExprEvaluator.h"
 #include "expression/prepared_query_execution.h"
+#include "expression/aggregate_type.h"
 #include "parser/parser.h"
 #include "Session.h"
 
@@ -145,6 +146,12 @@ static void prepareNullWhereBranches(PreparedQueryExecution& execution,Expr* exp
 // bindings. Columns consume the binder's true source occurrence/ordinal,
 // and the shared execution carrier owns parameter and lazy-child evaluation.
 struct PreparedSelectState {
+    struct Aggregate {
+        FunctionCallExpr* call;
+        std::string name, argumentType, resultType;
+        QueryColumnBinding column;
+    };
+    std::vector<Aggregate> aggregates;
     StorageEngine* engine;
     std::string dbname;
     TableSchema schema;
@@ -246,6 +253,13 @@ struct PreparedSelectState {
             execution->setQueryExecutor(childExecutor);
             execution->setChildCursorFactory(childCursorFactory, cursorOwnsScalarChildren);
         }
+        for (auto& aggregate : aggregates) {
+            aggregate.column = execution->registerAggregateColumn(aggregate.call, aggregate.resultType);
+            const auto* literal = dynamic_cast<const LiteralExpr*>(aggregate.call->args.front().get());
+            if (!literal || literal->value != "*")
+                execution->prepareExpression(aggregate.call->args.front().get());
+            execution->prepareExpression(aggregate.call->filter.get());
+        }
         // Only the execution root opts into whole-query planning. Child
         // graph construction must not reacquire outputs that root demand
         // already pruned, or plan a child in a discarded CASE arm.
@@ -256,6 +270,7 @@ struct PreparedSelectState {
             for (auto* target : targets) execution->prepareExpression(target);
         execution->prepareExpression(select().whereClause.get());
         prepareNullWhereBranches(*execution,select().whereClause.get());
+        execution->prepareExpression(select().having.get());
         for (const auto& key : keys)
             if (key.target == noTarget) execution->prepareExpression(key.expression);
         execution->prepareChildCursors();
@@ -282,6 +297,8 @@ struct PreparedSelectState {
         if (const auto* quantified=dynamic_cast<const QuantifiedComparisonExpr*>(expression))
             return containsVolatile(quantified->left.get()) || containsVolatile(quantified->right.get());
         if (auto* call = dynamic_cast<const FunctionCallExpr*>(expression)) {
+            if (std::any_of(aggregates.begin(), aggregates.end(),
+                    [&](const auto& aggregate) { return aggregate.call == call; })) return false;
             if (evaluator.scalarFunctionVolatility(call, engine) == 'v') return true;
             for (const auto& argument : call->args) if (containsVolatile(argument.get())) return true;
             for (const auto& argument : call->namedArgs) if (containsVolatile(argument.value.get())) return true;
@@ -473,6 +490,124 @@ public:
         auto plans=state_->execution?state_->execution->childPlans(state_->select().whereClause.get()):std::vector<Operator*>{};
         plans.insert(plans.begin(),child_.get());return plans;
     }
+};
+
+// Aggregates consume the original typed source graph. Each original call has
+// an execution-owned result column; shared SQL ASTs and parameter frames are
+// never rewritten to a rendered SQL query or to per-row text placeholders.
+class PreparedAggregateOp final : public Operator {
+    OpPtr child_;
+    std::shared_ptr<PreparedSelectState> state_;
+    struct Entry { ExprValue value; };
+    std::vector<std::vector<Entry>> inputs_;
+    RowContext result_;
+    bool emitted_ = false, opened_ = false;
+
+    ExprValue binary(const std::string& operation, const ExprValue& left,
+                     const ExprValue& right) const {
+        BinaryOpExpr expression; expression.op = operation;
+        auto first = std::make_unique<ParameterExpr>();
+        first->slot = 0; first->origin = ParameterOrigin::RuntimeCell; first->declaredType = left.typeName;
+        auto second = std::make_unique<ParameterExpr>();
+        second->slot = 1; second->origin = ParameterOrigin::RuntimeCell; second->declaredType = right.typeName;
+        expression.left = std::move(first); expression.right = std::move(second);
+        RowContext row; row.setParameters({left, right});
+        return state_->evaluator.eval(&expression, row);
+    }
+    ExprValue cast(const ExprValue& value, const std::string& type) const {
+        if (ExprHelper::canonicalResultTypeName(value.typeName) == type) return value;
+        CastExpr expression; expression.typeName = type;
+        auto input = std::make_unique<ParameterExpr>();
+        input->origin = ParameterOrigin::RuntimeCell; input->declaredType = value.typeName;
+        expression.operand = std::move(input);
+        RowContext row; row.setParameters({value});
+        return state_->evaluator.eval(&expression, row);
+    }
+    ExprValue finish(size_t index) {
+        const auto& aggregate = state_->aggregates[index];
+        auto& inputs = inputs_[index];
+        int64_t count = 0;
+        ExprValue value(aggregate.resultType, "", true);
+        std::vector<ExprValue> distinct;
+        for (const auto& input : inputs) {
+            if (input.value.isNull) continue;
+            if (aggregate.call->distinct) {
+                if (std::any_of(distinct.begin(), distinct.end(), [&](const auto& previous) {
+                        return binary("=", previous, input.value).asBool(); })) continue;
+                distinct.push_back(input.value);
+            }
+            if (count == std::numeric_limits<int64_t>::max()) throw DbError("22003", "aggregate count out of range");
+            ++count;
+            if (aggregate.name == "count") continue;
+            if (aggregate.name == "sum" || aggregate.name == "avg") {
+                const auto converted = cast(input.value, aggregate.resultType);
+                value = value.isNull ? converted : binary("+", value, converted);
+            } else if (aggregate.name == "min" || aggregate.name == "max") {
+                const auto converted = cast(input.value, aggregate.resultType);
+                if (value.isNull || binary(aggregate.name == "min" ? "<" : ">", converted, value).asBool())
+                    value = converted;
+            } else value = value.isNull ? input.value :
+                binary(aggregate.name == "bool_or" ? "OR" : "AND", value, input.value);
+        }
+        if (aggregate.name == "count") return ExprValue("bigint", std::to_string(count));
+        if (aggregate.name == "avg" && count)
+            value = binary("/", value, cast(ExprValue("bigint", std::to_string(count)),
+                aggregate.resultType == "interval" ? "double precision" : aggregate.resultType));
+        return value;
+    }
+public:
+    PreparedAggregateOp(OpPtr child, std::shared_ptr<PreparedSelectState> state)
+        : child_(std::move(child)), state_(std::move(state)) {}
+    bool open() override {
+        OpenInstrument instrument(this); clearError(); emitted_ = false;
+        inputs_.assign(state_->aggregates.size(), {});
+        opened_ = true; return child_->open();
+    }
+    bool next(std::string& display) override {
+        NextInstrument instrument(this);
+        if (emitted_) return false;
+        emitted_ = true;
+        std::string raw;
+        while (child_->next(raw)) {
+            checkForQueryInterrupt();
+            const auto row = state_->context(*child_, raw);
+            for (size_t i = 0; i < state_->aggregates.size(); ++i) {
+                const auto& aggregate = state_->aggregates[i];
+                if (!state_->select().existsTargetPrunable &&
+                    !state_->execution->aggregateColumnDemanded(aggregate.call)) continue;
+                if (aggregate.call->filter) {
+                    const auto filter = state_->evaluate(aggregate.call->filter.get(), row);
+                    if (filter.isNull || !filter.asBool()) continue;
+                }
+                const auto* literal = dynamic_cast<const LiteralExpr*>(aggregate.call->args.front().get());
+                Entry input;
+                input.value = literal && literal->value == "*" ? ExprValue("boolean", "t") :
+                    state_->evaluate(aggregate.call->args.front().get(), row);
+                inputs_[i].push_back(std::move(input));
+            }
+        }
+        if (child_->hasError()) return propagateChildError(child_.get(), "prepared aggregate input failed");
+        result_ = state_->execution->context(state_->outerRow);
+        for (size_t i = 0; i < state_->aggregates.size(); ++i) {
+            const auto& column = state_->aggregates[i].column;
+            result_.setBoundColumn(column.sourceOrdinal, column.columnOrdinal, finish(i));
+        }
+        if (state_->select().having) {
+            const auto having = state_->evaluate(state_->select().having.get(), result_);
+            if (having.isNull || !having.asBool()) return false;
+        }
+        display.clear(); instrument.emitted = true; return true;
+    }
+    void close() override {
+        inputs_.clear(); emitted_ = false;
+        if (opened_) { opened_ = false; child_->close(); }
+    }
+    bool supportsPreparedContexts() const override { return true; }
+    bool lastPreparedContext(RowContext& row) const override {
+        if (!emitted_) return false; row = result_; return true;
+    }
+    std::string preparedPlanNodeName() const override { return "Aggregate"; }
+    std::vector<Operator*> preparedPlanChildren() const override { return {child_.get()}; }
 };
 
 // Catalog identities are genuine scalar datums, not physical Column codecs.
@@ -992,7 +1127,7 @@ static bool supportsPreparedSelectShape(const SelectStmt& select, bool allowCtes
     if (select.command != SqlCommand::Select || (!allowCtes && !select.ctes.empty()) ||
         (!selectBodyOnly && (select.setOp != SetOp::None || select.setOpLhs || select.setOpRhs)) ||
         (selectBodyOnly && (select.setOp != SetOp::Union || !select.setOpAll || select.setOpLhs || !select.setOpRhs)) ||
-        !select.groupBy.empty() || !select.groupByElems.empty() || select.having ||
+        !select.groupBy.empty() || !select.groupByElems.empty() ||
         !select.windowDefs.empty() || !select.distinctOn.empty() ||
         !select.locking.empty() || (select.withTies && ((select.distinct && !select.existsTargetPrunable) || selectBodyOnly))) return false;
     if (!sourceContexts && select.fromClause && select.fromClause->type != FromItem::Type::Table &&
@@ -1008,6 +1143,14 @@ static bool supportsPreparedSelectShape(const SelectStmt& select, bool allowCtes
                 (routine.schema.empty() || routine.schema == "pg_catalog");
             if (builtinRole && routine.name == "exists")
                 return call->schema.empty() && call->args.size() == 1 && call->args.front()->preparedSubquery;
+            if (!aggregate_type_detail::builtinName(call).empty()) {
+                // The AST still stores inside-call ORDER BY as opaque text.
+                // Do not accept that clause and silently discard its role.
+                if (!call->orderBy.empty()) return false;
+                for (const auto& argument : call->args) if (!scalar(argument.get())) return false;
+                if (!scalar(call->filter.get())) return false;
+                return true;
+            }
             if (call->hasOver || call->distinct || call->filter || !call->orderBy.empty() ||
                 (builtinRole && aggregates.count(routine.name))) return false;
             for (const auto& argument : call->args) if (!scalar(argument.get())) return false;
@@ -1023,7 +1166,7 @@ static bool supportsPreparedSelectShape(const SelectStmt& select, bool allowCtes
     };
     for (const auto& target : select.selectList) if (!scalar(target.expr.get())) return false;
     for (const auto& key : select.orderBy) if (!scalar(key.expr.get()) || !key.usingOp.empty()) return false;
-    return scalar(select.whereClause.get());
+    return scalar(select.whereClause.get()) && scalar(select.having.get());
 }
 
 bool QueryPlanner::supportsPreparedSelectPlan(const SelectStmt& select) {
@@ -1031,6 +1174,78 @@ bool QueryPlanner::supportsPreparedSelectPlan(const SelectStmt& select) {
 }
 bool QueryPlanner::supportsPreparedSourceSelectPlan(const SelectStmt& select) {
     return supportsPreparedSelectShape(select, true, true);
+}
+
+static bool preparedAggregateRole(const FunctionCallExpr* call, const PreparedSelectState& state) {
+    return !aggregate_type_detail::builtinName(call).empty() &&
+        !state.evaluator.hasScalarFunction(call, state.engine);
+}
+
+static void visitPreparedAggregateExpression(Expr* expression,
+    const std::function<bool(Expr*)>& visit) {
+    if (!expression || expression->preparedSubquery || !visit(expression)) return;
+    const auto child = [&](Expr* value) { visitPreparedAggregateExpression(value, visit); };
+    if (auto* call = dynamic_cast<FunctionCallExpr*>(expression)) {
+        for (auto& argument : call->args) child(argument.get());
+        for (auto& argument : call->namedArgs) child(argument.value.get());
+        child(call->filter.get());
+    } else if (auto* unary = dynamic_cast<UnaryOpExpr*>(expression)) child(unary->operand.get());
+    else if (auto* binary = dynamic_cast<BinaryOpExpr*>(expression)) {
+        child(binary->left.get()); if (binary->op != "::") child(binary->right.get());
+    } else if (auto* cast = dynamic_cast<CastExpr*>(expression)) child(cast->operand.get());
+    else if (auto* conditional = dynamic_cast<CaseExpr*>(expression)) {
+        child(conditional->switchExpr.get()); child(conditional->elseExpr.get());
+        for (auto& arm : conditional->whenClauses) { child(arm.first.get()); child(arm.second.get()); }
+    } else if (auto* array = dynamic_cast<ArrayExpr*>(expression))
+        for (auto& value : array->elements) child(value.get());
+    else if (auto* row = dynamic_cast<RowExpr*>(expression))
+        for (auto& value : row->elements) child(value.get());
+}
+
+static void prepareAggregateRoles(PreparedSelectState& state) {
+    const auto forbidAggregate = [&](Expr* root) {
+        visitPreparedAggregateExpression(root, [&](Expr* expression) {
+            if (const auto* call = dynamic_cast<FunctionCallExpr*>(expression);
+                call && preparedAggregateRole(call, state))
+                throw DbError("42803", "aggregate functions are not allowed in this input context");
+            return true;
+        });
+    };
+    forbidAggregate(state.select().whereClause.get());
+    const auto gather = [&](Expr* root) {
+        visitPreparedAggregateExpression(root, [&](Expr* expression) {
+            auto* call = dynamic_cast<FunctionCallExpr*>(expression);
+            if (!call || !preparedAggregateRole(call, state)) return true;
+            if (std::any_of(state.aggregates.begin(), state.aggregates.end(),
+                    [&](const auto& aggregate) { return aggregate.call == call; })) return false;
+            const auto name = aggregate_type_detail::builtinName(call);
+            const auto type = call->args.empty() ? std::string("unknown") :
+                ExprHelper::canonicalResultTypeName(ExprHelper::inferParsedInputType(
+                    call->args.front().get(), {}, state.dbname, state.engine));
+            const auto resultType = aggregate_type_detail::resultType(call, name, type);
+            for (const auto& argument : call->args) forbidAggregate(argument.get());
+            forbidAggregate(call->filter.get());
+            state.aggregates.push_back({call, name, type, resultType, {}});
+            return false;
+        });
+    };
+    for (auto& target : state.select().selectList) gather(target.expr.get());
+    gather(state.select().having.get());
+    for (auto& key : state.select().orderBy) gather(key.expr.get());
+    if (state.aggregates.empty() && !state.select().having) return;
+    const auto grouped = [&](Expr* root) {
+        visitPreparedAggregateExpression(root, [&](Expr* expression) {
+            if (auto* call = dynamic_cast<FunctionCallExpr*>(expression);
+                call && preparedAggregateRole(call, state)) return false;
+            if (const auto* column = dynamic_cast<ColumnRefExpr*>(expression);
+                column && column->binding && !column->binding->scopeDepth)
+                throw DbError("42803", "column must appear in GROUP BY or be used in an aggregate function");
+            return true;
+        });
+    };
+    for (auto& target : state.select().selectList) grouped(target.expr.get());
+    grouped(state.select().having.get());
+    for (auto& key : state.select().orderBy) grouped(key.expr.get());
 }
 
 OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
@@ -1082,6 +1297,7 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
             return QueryPlanner::makePreparedCursor(std::move(plan),descriptor->second);
         });
     state->evaluator.setCurrentDB(dbname);
+    prepareAggregateRoles(*state);
     state->sourceContexts = source->supportsPreparedContexts();
     if (state->sourceContexts) state->logicalSource = source.get();
     if (state->sourceContexts && select->fromClause) {
@@ -1185,6 +1401,8 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
     state->prepareExecution();
     OpPtr root = std::move(source);
     if (select->whereClause) root = std::make_unique<PreparedFilterOp>(std::move(root), state);
+    if (!state->aggregates.empty() || select->having)
+        root = std::make_unique<PreparedAggregateOp>(std::move(root), state);
     if (!state->keys.empty()) root = std::make_unique<PreparedSortOp>(std::move(root), state);
     auto* tiesSort=select->withTies?dynamic_cast<PreparedSortOp*>(root.get()):nullptr;
     root = std::make_unique<PreparedProjectOp>(std::move(root), state);

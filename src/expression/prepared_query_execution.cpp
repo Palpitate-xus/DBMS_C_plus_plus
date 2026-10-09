@@ -6,6 +6,7 @@
 #include "parser/parser.h"
 #include <algorithm>
 #include <optional>
+#include <limits>
 
 namespace dbms {
 namespace {
@@ -575,6 +576,78 @@ void PreparedQueryExecution::setSourceRow(RowContext& row, size_t ordinal,
     }
 }
 
+namespace {
+void lowerAggregateColumns(ExprPtr& expression,
+    const std::map<const Expr*, QueryColumnBinding>& columns,
+    const std::map<const Expr*, const Expr*>& sites) {
+    if (!expression || expression->preparedSubquery) return;
+    const auto original = sites.find(expression.get());
+    if (original != sites.end()) {
+        const auto column = columns.find(original->second);
+        if (column != columns.end()) {
+            auto result = std::make_unique<ColumnRefExpr>();
+            result->column = "__aggregate_result";
+            result->binding = column->second;
+            result->sourceBegin = expression->sourceBegin;
+            result->sourceEnd = expression->sourceEnd;
+            expression = std::move(result);
+            return;
+        }
+    }
+    const auto lower = [&](ExprPtr& child) { lowerAggregateColumns(child, columns, sites); };
+    if (auto* call = dynamic_cast<FunctionCallExpr*>(expression.get())) {
+        for (auto& argument : call->args) lower(argument);
+        for (auto& argument : call->namedArgs) lower(argument.value);
+        lower(call->filter);
+    } else if (auto* unary = dynamic_cast<UnaryOpExpr*>(expression.get())) lower(unary->operand);
+    else if (auto* binary = dynamic_cast<BinaryOpExpr*>(expression.get())) {
+        lower(binary->left);
+        if (binary->op != "::") lower(binary->right);
+    } else if (auto* cast = dynamic_cast<CastExpr*>(expression.get())) lower(cast->operand);
+    else if (auto* conditional = dynamic_cast<CaseExpr*>(expression.get())) {
+        lower(conditional->switchExpr); lower(conditional->elseExpr);
+        for (auto& arm : conditional->whenClauses) { lower(arm.first); lower(arm.second); }
+    } else if (auto* array = dynamic_cast<ArrayExpr*>(expression.get()))
+        for (auto& child : array->elements) lower(child);
+    else if (auto* row = dynamic_cast<RowExpr*>(expression.get()))
+        for (auto& child : row->elements) lower(child);
+}
+}
+
+QueryColumnBinding PreparedQueryExecution::registerAggregateColumn(
+    const FunctionCallExpr* call, const std::string& type) {
+    if (!call || !owners_.count(call) || type.empty())
+        throw DbError("XX000", "aggregate result requires an original prepared call");
+    auto [position, inserted] = aggregateColumns_.try_emplace(call);
+    if (inserted) {
+        position->second.sourceOrdinal = std::numeric_limits<size_t>::max();
+        position->second.columnOrdinal = aggregateColumns_.size() - 1;
+        position->second.declaredType = type;
+        // Whole-query planning can precede constructing a reached child graph.
+        // Lower that child's existing copies too; never mutate its shared AST.
+        for (auto& compiled : compiled_)
+            lowerAggregateColumns(compiled.second, aggregateColumns_, originalSites_);
+    } else if (position->second.declaredType != type) {
+        throw DbError("XX000", "aggregate call changed its result descriptor");
+    }
+    return position->second;
+}
+
+bool PreparedQueryExecution::aggregateColumnDemanded(const FunctionCallExpr* call) const {
+    const auto binding = aggregateColumns_.find(call);
+    if (binding == aggregateColumns_.end())
+        throw DbError("XX000", "aggregate demand requires its registered result column");
+    bool demanded = false;
+    for (const auto* original : prepared_)
+        visitStructuredValue(compiled_.at(original).get(), [&](const Expr* value) {
+            const auto* column = dynamic_cast<const ColumnRefExpr*>(value);
+            if (column && column->binding &&
+                column->binding->sourceOrdinal == binding->second.sourceOrdinal &&
+                column->binding->columnOrdinal == binding->second.columnOrdinal) demanded = true;
+        });
+    return demanded;
+}
+
 void PreparedQueryExecution::prepareExpression(Expr* expression) {
     if (!expression || prepared_.count(expression)) return;
     if (!owners_.count(expression))
@@ -591,6 +664,7 @@ void PreparedQueryExecution::prepareExpression(Expr* expression) {
     std::map<const Expr*, const Expr*> sites;
     std::map<const Expr*, const Expr*> independentChildren;
     auto compiled = copyExpression(expression,sites,independentChildren);
+    lowerAggregateColumns(compiled, aggregateColumns_, sites);
     for (const auto& child : independentChildren) {
         const auto source = children_.find(child.second);
         if (source == children_.end()) throw DbError("XX000", "range child has no prepared owner");
@@ -630,6 +704,7 @@ void PreparedQueryExecution::planExpressionConstants(Expr* expression,
         std::map<const Expr*, const Expr*> sites;
         std::map<const Expr*, const Expr*> independentChildren;
         auto compiled = copyExpression(expression, sites, independentChildren);
+        lowerAggregateColumns(compiled, aggregateColumns_, sites);
         for (const auto& child : independentChildren) {
             const auto source = children_.find(child.second);
             if (source == children_.end()) throw DbError("XX000", "range child has no prepared owner");
