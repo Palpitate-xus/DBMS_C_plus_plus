@@ -24,8 +24,7 @@ def main():
 
     canonical = ("postgresql-18-gap-audit.md", "gap-progress.json",
                  "scripts/check_gap_progress.py")
-    for name, document in (("README", readme),
-                           ("feature-gaps", feature_gaps),
+    for name, document in (("feature-gaps", feature_gaps),
                            ("production-status", production)):
         for marker in canonical:
             assert marker in document, "%s omits %s" % (name, marker)
@@ -36,7 +35,7 @@ def main():
     for section in ("## 构建", "## 运行", "## 测试", "## 文档",
                     "## 参与贡献", "## 许可证"):
         assert section in readme, "README omits %s" % section
-    for stale_marker in ("发行标识为 v", "当前状态（", "性能与并发硬化轮次",
+    for stale_marker in (*canonical, "发行标识为 v", "当前状态（", "性能与并发硬化轮次",
                          "### 并发测试结果", "### 新增功能 (Phase"):
         assert stale_marker not in readme, "README retains %s" % stale_marker
     assert "历史发布快照" in release_notes
