@@ -15,6 +15,7 @@
 #include "common/GeometryValue.h"
 #include "expression/geometric_input.h"
 #include "expression/between_input.h"
+#include "expression/regtype_input.h"
 #include "common/DbError.h"
 #include "common/SqlArrayText.h"
 #include "common/NotificationManager.h"
@@ -4628,6 +4629,45 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
     }
     const auto geometryTarget=geometric_input_detail::builtinType(targetTypeName);
     const auto sourceType=ExprHelper::canonicalResultTypeName(v.typeName);
+    if(target=="regtype") {
+        regtype_detail::validateCast(sourceType,target);
+        if(v.isNull)return ExprValue("regtype","",true);
+        const auto* session=currentSession();
+        const auto database=currentDB_.empty() && session?session->currentDB:currentDB_;
+        const auto catalog=regtype_detail::metadata(g_engine,database);
+        const auto source=common_type_detail::canonical(sourceType);
+        Oid oid=0;
+        if(source=="regtype" && v.objectOid)oid=*v.objectOid;
+        else if(source=="smallint" || source=="integer" || source=="bigint") {
+            const auto kind=source=="smallint"?IntegerCastTarget::SmallInt:
+                source=="integer"?IntegerCastTarget::Integer:IntegerCastTarget::BigInt;
+            const auto integer=castToInteger(v,kind);
+            long long number=0;
+            if(!parseInt64Exact(integer.value,number) ||
+               (source=="bigint" && (number<0 || static_cast<unsigned long long>(number)>std::numeric_limits<Oid>::max())))
+                throw DbError("22003","OID out of range");
+            oid=static_cast<Oid>(number);
+        } else if(common_type_detail::oidType(source) && source!="regtype") {
+            oid=v.objectOid?*v.objectOid:regtype_detail::numericOid(v.value);
+        } else oid=regtype_detail::inputOid(v.value,catalog,session);
+        ExprValue result("regtype",regtype_detail::output(oid,catalog,session),false);
+        result.objectOid=oid;return result;
+    }
+    if(sourceType=="regtype" &&
+       (target=="oid" || target=="integer" || target=="smallint" || target=="bigint")) {
+        if(v.isNull)return ExprValue(target,"",true);
+        const auto* session=currentSession();
+        const auto database=currentDB_.empty() && session?session->currentDB:currentDB_;
+        const auto catalog=regtype_detail::metadata(g_engine,database);
+        const Oid oid=v.objectOid?*v.objectOid:regtype_detail::inputOid(v.value,catalog,session);
+        if(target=="oid"){ExprValue result("oid",std::to_string(oid));result.objectOid=oid;return result;}
+        if(target=="integer") {
+            const int64_t number=oid>std::numeric_limits<int32_t>::max()?static_cast<int64_t>(oid)-(int64_t{1}<<32):oid;
+            return ExprValue("integer",std::to_string(number));
+        }
+        if(target=="smallint")throw DbError("42846","cannot cast type regtype to smallint");
+        return ExprValue("bigint",std::to_string(oid));
+    }
     if (target=="\"char\"") {
         const auto source=common_type_detail::canonical(sourceType);
         static const std::set<std::string> inputs={"unknown","integer","text","varchar","bpchar","name","\"char\""};
@@ -4679,6 +4719,14 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
     if (target.size()>=2 && target.compare(target.size()-2,2,"[]")==0) {
         const auto elementTarget = target.substr(0,target.size()-2);
         const auto elementType = ExprHelper::canonicalResultTypeName(elementTarget);
+        const auto sourceArrayType=common_type_detail::canonical(sourceType);
+        const bool oidElements=elementType=="regtype" ||
+            (common_type_detail::array(sourceArrayType) && sourceArrayType=="regtype[]");
+        const auto sourceElement=oidElements && common_type_detail::array(sourceArrayType)
+            ?sourceArrayType.substr(0,sourceArrayType.size()-2):std::string("unknown");
+        if(elementType=="regtype")regtype_detail::validateCast(sourceElement,elementType);
+        std::vector<std::optional<uint32_t>> identities;
+        size_t elementIndex=0;
         auto literal = sql_array_text::parse(v.value);
         std::function<std::string(const std::string&)> convert = [&](const std::string& source) {
             std::vector<std::string> elements;
@@ -4688,13 +4736,20 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
                 if(i)output+=',';
                 const auto& token=elements[i];
                 if(!token.empty() && token.front()=='{') output+=convert(token);
-                else if(toLower(token)=="null") output+="NULL";
-                else output+=arrayElemQuote(evalCast(nullptr,RowContext{},ExprValue("unknown",arrayElemUnquote(token),false),elementTarget).value);
+                else {
+                    ExprValue input(sourceElement,arrayElemUnquote(token),toLower(token)=="null");
+                    if(oidElements && elementIndex<v.elementOids.size())input.objectOid=v.elementOids[elementIndex];
+                    ++elementIndex;
+                    const auto converted=evalCast(nullptr,RowContext{},input,elementTarget);
+                    if(elementType=="regtype")identities.push_back(converted.objectOid);
+                    output+=converted.isNull?"NULL":arrayElemQuote(converted.value);
+                }
             }
             return output+'}';
         };
         literal.body=convert(literal.body);
-        return ExprValue(elementType+"[]",sql_array_text::render(literal),false);
+        ExprValue result(elementType+"[]",sql_array_text::render(literal),false);
+        result.elementOids=std::move(identities);return result;
     }
 
     if (target == "boolean" || target == "bool") return castToBoolean(v);
@@ -5416,6 +5471,7 @@ ExprValue ExprEvaluator::evalArrayExpr(const ArrayExpr* array, const RowContext&
     }
     size_t nestedWidth=0;
     std::vector<sql_array_text::Dimension> childDimensions;
+    std::vector<std::optional<uint32_t>> identities;
     for(size_t i=0;i<array->elements.size();++i){
         ExprValue value=eval(array->elements[i].get(),row);
         if(i)output+=',';
@@ -5430,6 +5486,7 @@ ExprValue ExprEvaluator::evalArrayExpr(const ArrayExpr* array, const RowContext&
             if(i && child.dimensions!=childDimensions)throw DbError("2202E","multidimensional arrays must have matching dimensions");
             childDimensions=child.dimensions;
             nestedWidth=elements.size();output+=child.body;
+            if(elementType=="regtype")identities.insert(identities.end(),value.elementOids.begin(),value.elementOids.end());
         } else {
             if (elementType == "bit") {
                 // ARRAY chooses a common element type without a typmod.
@@ -5441,9 +5498,10 @@ ExprValue ExprEvaluator::evalArrayExpr(const ArrayExpr* array, const RowContext&
                 value=evalCast(nullptr,row,value,elementType);
             }
             output+=value.isNull?"NULL":arrayElemQuote(value.value);
+            if(elementType=="regtype")identities.push_back(value.objectOid);
         }
     }
-    const auto result=[&](std::string value){ExprValue cell(elementType+"[]",std::move(value));cell.collation=explicitResultCollation(array);return cell;};
+    const auto result=[&](std::string value){ExprValue cell(elementType+"[]",std::move(value));cell.collation=explicitResultCollation(array);cell.elementOids=identities;return cell;};
     if(nested && nestedWidth==0)return result("{}");
     if(!arrayShapeOf(output+'}'))throw DbError("2202E","multidimensional arrays must have matching dimensions");
     if(nested) {
@@ -5506,6 +5564,7 @@ std::vector<ExprValue> ExprEvaluator::arrayElements(const ExprValue& array) {
                 const auto text=trimStr(field);
                 const bool quoted=text.size()>=2 && text.front()=='"' && text.back()=='"';
                 ExprValue value(elementType,arrayElemUnquote(text),!quoted && toLower(text)=="null");
+                if(elements.size()<array.elementOids.size())value.objectOid=array.elementOids[elements.size()];
                 value.collation=array.collation;elements.push_back(std::move(value));
             }
         }

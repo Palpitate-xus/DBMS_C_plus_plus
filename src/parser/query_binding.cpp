@@ -70,6 +70,13 @@ void validateIntervalInputCast(const std::string& input,const std::string& targe
     static const std::set<std::string> inputs={"unknown","text","varchar","bpchar","name","time","interval"};
     if(!inputs.count(source))throw DbError("42846","cannot cast type "+input+" to interval");
 }
+void validateRegtypeInputCast(const std::string& input,const std::string& target) {
+    if(common_type_detail::canonical(target)!="regtype")return;
+    const auto source=common_type_detail::canonical(input);
+    static const std::set<std::string> inputs={"unknown","text","varchar","bpchar","name","smallint","integer","bigint"};
+    if(!inputs.count(source) && !common_type_detail::oidType(source))
+        throw DbError("42846","cannot cast type "+input+" to regtype");
+}
 
 void validateArrayConstant(const Expr* source, const std::string& type) {
     const auto* literal = dynamic_cast<const LiteralExpr*>(source);
@@ -408,6 +415,7 @@ public:
             const auto input=expression(cast->operand, scopes, cast->typeName);
             validateInternalCharInputCast(input,type);
             validateIntervalInputCast(input,type);
+            validateRegtypeInputCast(input,type);
             geometric_input_detail::validateUnknownInput(cast->operand.get(),cast->typeName);
             if (metadata.assignmentInput) metadata.assignmentInput({"", cast->typeName}, cast, cast->typeName);
             bindEnumCast(cast,cast->operand.get(),cast->typeName);
@@ -456,6 +464,7 @@ public:
                 if (!type) throw DbError("42601", "cast requires a type name");
                 validateInternalCharInputCast(left,castType);
                 validateIntervalInputCast(left,castType);
+                validateRegtypeInputCast(left,castType);
                 geometric_input_detail::validateUnknownInput(binary->left.get(),type->value);
                 if (metadata.assignmentInput) metadata.assignmentInput({"", type->value}, binary, type->value);
                 bindEnumCast(binary,binary->left.get(),type->value);

@@ -32823,7 +32823,8 @@ std::string preparedPrimitiveInputType(const std::string& spelling) {
     return found == inputTypes.end() ? std::string{} : found->second;
 }
 
-void validatePreparedPrimitiveInput(const QueryOutputColumn& target, const Expr* source) {
+void validatePreparedPrimitiveInput(const QueryOutputColumn& target, const Expr* source,
+    const std::string& database) {
     if (!source || source->preparedSubquery) return;
     const LiteralExpr* input = nullptr;
     if (!target.name.empty()) {
@@ -32847,7 +32848,14 @@ void validatePreparedPrimitiveInput(const QueryOutputColumn& target, const Expr*
     const auto literalTokens = SQLParser::tokenize(input->value);
     if (literalTokens.size() != 1 || literalTokens.front().size() < 2 ||
         literalTokens.front().front() != '\'' || literalTokens.front().back() != '\'') return;
-    const auto type = preparedPrimitiveInputType(target.type);
+    auto type = preparedPrimitiveInputType(target.type);
+    auto regtypeSpelling=target.type;
+    const bool array=regtypeSpelling.size()>=2 && regtypeSpelling.compare(regtypeSpelling.size()-2,2,"[]")==0;
+    if(array)regtypeSpelling.resize(regtypeSpelling.size()-2);
+    CatalogManager::QualifiedName regtypeName;
+    if(CatalogManager::parseQualifiedName(regtypeSpelling,regtypeName,true) &&
+       regtypeName.name=="regtype" && (regtypeName.schema.empty() || regtypeName.schema=="pg_catalog"))
+        type=ExprHelper::canonicalResultTypeName(ExprHelper::declaredTypeInput(target.type,database));
     if (type.empty()) return;
     CastExpr conversion;
     auto literal = std::make_unique<LiteralExpr>();
@@ -32855,6 +32863,7 @@ void validatePreparedPrimitiveInput(const QueryOutputColumn& target, const Expr*
     conversion.operand = std::move(literal);
     conversion.typeName = type; // deliberately no ordinary typmod
     ExprEvaluator evaluator;
+    evaluator.setCurrentDB(database);
     (void)evaluator.eval(&conversion, RowContext{});
 }
 } // namespace
@@ -33213,10 +33222,10 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
                 const_cast<StorageEngine*>(this));
             return type;
         };
-        metadata.assignmentInput = [](const QueryOutputColumn& target,
+        metadata.assignmentInput = [&](const QueryOutputColumn& target,
                                       const Expr* source, const std::string& sourceType) {
             validateAssignmentInput(target, source, sourceType);
-            validatePreparedPrimitiveInput(target, source);
+            validatePreparedPrimitiveInput(target, source, dbname);
         };
         metadata.updateDefault = [&](const std::string& schema,const std::string& name,
                                      const std::string& column)->std::optional<std::string> {
