@@ -2,6 +2,20 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Complete dc89 driver retains twelve actual failures; three independent source repairs imported after terminal",
+      "gap_ids": ["TYPE-06", "PROTO-04", "QRY-02", "QRY-05"],
+      "status": "partial",
+      "commits": ["ecbaf702", "c23b18cd", "c9e951ec"],
+      "evidence": ["docs/issue-full-registered-dc89dfbb.md"],
+      "tests": ["tests/prepared_global_aggregate_test.cpp", "tests/prepared_global_aggregate_protocol_e2e_test.py", "tests/numeric_column_modifier_test.cpp", "tests/numeric_column_modifier_protocol_e2e_test.py", "tests/alter_array_type_envelope_test.cpp"],
+      "verification": {
+        "reproduction": "Unchanged Root84918 terminal1:766/770 native/Main and424/432wire pass, all12 original failures retained. Source dc89 unchanged until terminal; production/frozen43b0 equality0. Both Main and complete default protocol pass.",
+        "focused_tests": "Independent -x source imports ecbaf702/c23b18cd/c9e951ec after terminal. Actual Root own57/Main79599/43176 compilation running in VVbNxCXQ; no foreign objects or inherited private publication proof. Private ROW reference30 all0, baseline29 controls22fail; actual early native record identity failure and raw native NULL defects retained. Current private gate49242 live; aggregate55 all0, ROW strict own controls still expose genuine carrier/root-planning issues. ROW repair not committed or approved.",
+        "full_suite": "Root185 scoped770automatic+2Main434registered58TU. Source frozen while own publication proof is being built. No new Root full pass, ROW integration or full-family completion claim.",
+        "scope": "Original273 statuses unchanged22complete166partial70unverified15user-deferred. README cfcab3cd evergreen, no push, Actions activation or new filtered investigation."
+      }
+    },
+    {
       "issue": "Numeric column modifiers independently repaired and committed in private worktree; ROW remains a strict failed dependency",
       "gap_ids": ["TYPE-06", "PROTO-04", "QRY-02", "QRY-05"],
       "status": "partial",
