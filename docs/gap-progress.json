@@ -2,6 +2,20 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Evergreen README committed; independent SQL-value and stored-arity source repairs committed with retained whole-gate failures",
+      "gap_ids": ["SQL-04", "FUNC-05", "FUNC-06", "PROTO-04"],
+      "status": "partial",
+      "commits": ["f513ac1f", "217bdcb9", "94eea9bf"],
+      "evidence": ["docs/issue-private-sql-value-repair.md"],
+      "tests": ["tests/stored_function_atomicity_protocol_e2e_test.py", "tests/function_result_protocol_e2e_test.py"],
+      "verification": {
+        "reproduction": "SQL-value old29 controls/23fail. Arity actual verified PostgreSQL18.6 strict50 controls all0, preceding frozen19fail including XX000 and falsely successful Parse/Describe. Public-parser extension retains31 controls and adds18; preceding own parser exits134 with uncaught42601.",
+        "focused_tests": "SQL-value corrected91913=1:33native all0 and19/21wire pass, retaining five NAME controls and default CREATE timeout; unchanged default66108=1. Arity85145=1:33native all0 and21/23wire pass; strict50 and original strengthened exact42883 function_result pass, BIT384/19117=0 against180006. All58 current own receipts/cache/repeat/source/frozen terminal checks0. Own source compiles actual, no borrowed objects or whole-green claim.",
+        "full_suite": "Root full18383 still live unchanged795479/02c69,773native/Main435wire. Root186 scoped repairs remains frozen; private189 committed repairs are not imported or counted as Root verified. README f513ac1f and documentation only changed on master.",
+        "scope": "All273 original items/hash/statuses unchanged22complete166partial70unverified15deferred. Public-parser API candidate own parser20525=0, expanded33native23wire88485 started, not yet approved or committed. Other original incomplete requirements continue. No push, Actions activation or filtered restart."
+      }
+    },
+    {
       "issue": "Independent virtual-relation target repair committed after complete repeat; master full source remains frozen",
       "gap_ids": ["CAT-03", "CAT-09", "PROTO-04"],
       "status": "partial",
