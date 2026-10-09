@@ -20,7 +20,7 @@ int main() {
         {"SELECT 'a'::TEXT NOT ILIKE 'b'", "NOT ILIKE", {"TEXT"}},
         {"SELECT 'a'::TEXT NOT SIMILAR TO '%'", "NOT SIMILAR TO", {"TEXT"}},
         {"SELECT 1::DOUBLE PRECISION >= 0", ">=", {"DOUBLE PRECISION"}},
-        {"SELECT NULL::TIME(2) WITH TIME ZONE IS NULL", "IS NULL", {"TIME(2) WITH TIME ZONE"}},
+        {"SELECT NULL::TIME(2) WITH TIME ZONE IS NULL", "IS NULL", {"timetz(2)"}},
         {"SELECT NULL::INTERVAL DAY TO SECOND(3) LIKE '%'", "LIKE", {"INTERVAL DAY TO SECOND(3)"}},
         {"SELECT NULL::TEXT[] LIKE '%'", "LIKE", {"TEXT[]"}},
         {"SELECT NULL::\"like\" LIKE '%'", "LIKE", {"\"like\""}},
