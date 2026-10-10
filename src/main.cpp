@@ -37899,6 +37899,16 @@ bool managesNotificationTransaction(const std::string& sql) {
 // Recursive execution stays inside the same boundary.
 static bool executeWithCteInheritance(const std::string& inputSql, Session& s,
                                      bool inheritCtes) {
+    // Bind before statement BEGIN and retain this caller through rollback.
+    // Recursive trigger/JOIN execution can use a stack-local Session; normal
+    // returns and exception unwinding must restore its enclosing live owner.
+    struct CurrentSessionScope {
+        Session* previous = dbms::currentSession();
+        explicit CurrentSessionScope(Session& session) {
+            dbms::setCurrentSession(&session);
+        }
+        ~CurrentSessionScope() { dbms::setCurrentSession(previous); }
+    } currentSessionScope(s);
     const size_t commandOffset = dbms::skipLeadingSqlTrivia(inputSql);
     if (commandOffset == std::string::npos) {
         throw dbms::DbError("42601", "unterminated block comment");

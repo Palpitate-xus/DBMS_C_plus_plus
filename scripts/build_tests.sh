@@ -140,6 +140,13 @@ else
     FAILED=1
 fi
 
+if bash scripts/test_session_execution_lifetime.sh; then
+    echo "[test-build] session_execution_lifetime_frontend PASSED"
+else
+    echo "[test-build] session_execution_lifetime_frontend FAILED"
+    FAILED=1
+fi
+
 for e2e_test in "${DBMS_E2E_TESTS[@]}"; do
     echo "[test-build] Running ${e2e_test} ..."
     if python3 "${e2e_test}"; then
