@@ -1680,6 +1680,8 @@ const std::vector<PgTypeRow>& CatalogManager::builtinTypeRows() {
     ensureType(1700,  "numeric",    -1,   'b', 'N');
     ensureType(2206,  "regtype",     4,   'b', 'N');
     ensureType(2249,  "record",     -1,   'p', 'P');
+    ensureType(2278,  "void",        4,   'p', 'P');
+    types.at(typeByOid.at(2278)).typbyval = true;
     ensureType(2287,  "_record",    -1,   'p', 'P', 2249);
     types.at(typeByOid.at(2249)).typarray = 2287;
     for (Oid oid : {2249U,2287U}) {

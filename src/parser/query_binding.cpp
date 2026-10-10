@@ -820,11 +820,14 @@ public:
             if(call->setReturning) {
                 if(!allowSetReturning)throw DbError("0A000","set-returning functions are not allowed in this expression context");
                 call->setReturning->elementType=ExprHelper::canonicalResultTypeName(call->setReturning->elementType);
-                call->resolvedResultType=call->setReturning->elementType;
+                call->resolvedResultType=declaredType(call->setReturning->elementType,call);
                 return call->resolvedResultType;
             }
             const auto type = metadata.functionType ? metadata.functionType(call) : std::string();
-            call->resolvedResultType=type.empty() ? first : type;
+            // A callee's static result declaration owns a real catalog type,
+            // just like CAST and CASE. Returning only its spelling loses the
+            // OID at query-output/child boundaries; never run it to infer one.
+            call->resolvedResultType=declaredType(type.empty() ? first : type,call);
             return call->resolvedResultType;
         }
         case ExprType::CaseExpr: {
