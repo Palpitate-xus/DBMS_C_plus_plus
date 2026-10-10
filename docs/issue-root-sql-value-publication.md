@@ -42,7 +42,19 @@ and registered SRF result types/OIDs, without executing them. Own binder8552=0,
 strict NAME/NULL/scalar/unnest native63477=0. A separate valid generate_series
 bound-metadata positive reveals42883; it remains a permanent strict native
 test and included failure, not an unsupported expectation. Expanded35native/
-23wire14272 has started and is not approved or committed yet.
+23wire14272 ends1:34native and22wire pass, with generate_series134 and original
+default pg_notify empty-row assertion failed. A direct old/candidate/reference
+comparison isolates the candidate's computed-argument pg_notify42704 to missing
+actual VOID catalog identity, not a changed notification expectation.
+
+The usable metadata repair now also provides real VOID2278/4/byval/p/P/i/p/no-
+array/no-collation, verified directly against18.6. Missing-row native80712=134
+retained; own affected catalog54822=0, cold/warm/disk/pure-binding62544=0 and
+three pg_notify probes again match old/reference. Corrected36native/23wire53041
+is still live:35native pass and only strict generate_series134 remains at native
+layer;22wire neighbors pass, default protocol has not ended. Original BIT384/
+48089 on corrected frozen6e6499 against180006 exits0. All original failed
+generations remain retained; no source approval, Root import or whole-green claim.
 
 All273 original item statuses/hash unchanged. Ordinary deferred-scope corrections
 are documented in [deferred-scope.md](deferred-scope.md), without changing the15
