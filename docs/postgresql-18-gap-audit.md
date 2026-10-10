@@ -1,3 +1,18 @@
+# 2026-10-10 普通 NAME 与结果 OID/VOID 已独立提交
+
+private NAME登记 `e55c863e`：原33/5fail -> 原样33全0，actual18.6参考0。
+合法generate_series绑定正控单独fixture commit `3d9b1a61`；结果OID+真实VOID
+前置元数据原子修复 `d0c5582c`：初始35/23的Gen与原pg_notify失败保留，校正
+36/23的53041终1=35native/全部23wire通过，原default/pg_notify与BIT384通过，
+all58自有receipt/cache/repeat/source/frozen终态一致，仅Gen正控134待修。
+Root190scoped/775native(Main含)/437wire完整85873仍实际live、a85e/beb50冻结；
+private192未导入，不冒全量绿或完整TYPE/FUNC/SRF。下一项必须实现真实lazy
+query-host provider/cursor及overload/NULL/step/overflow/需求语义，不cap/eager假替代。
+原273范围/hash/22complete166partial70unverified15deferred不变；仅明确15安全/TDE
+跳过，普通声明/类型/存储/recovery/EXPLAIN仍未完成。不push、不启用Actions。
+详情：[实际验证与提交](issue-root-sql-value-publication.md)、[跳过范围](deferred-scope.md)。
+以下为历史记录。
+
 # 2026-10-09 Root自身新组合证明与普通声明/结果OID后续
 
 Root ownfresh57/Main97646/52631均终0，publication3492=1：33native全0、
