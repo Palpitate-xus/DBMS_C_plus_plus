@@ -409,7 +409,7 @@ struct WindowDef {
 
 // 函数调用
 struct QuerySetReturningBinding {
-    enum class Kind { Unnest, ListeningChannels };
+    enum class Kind { Unnest, ListeningChannels, GenerateSeries };
     Kind kind = Kind::Unnest;
     std::string identity, elementType;
 };

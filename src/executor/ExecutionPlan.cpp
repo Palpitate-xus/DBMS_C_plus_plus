@@ -1004,6 +1004,16 @@ public:
 } // namespace
 
 namespace {
+class MaterializedProviderCursor final : public QueryHostValueCursor {
+    std::vector<ExprValue> rows_;
+    size_t position_=0;
+public:
+    explicit MaterializedProviderCursor(std::vector<ExprValue> rows):rows_(std::move(rows)){}
+    bool next(ExprValue& value) override {
+        if(position_==rows_.size())return false;
+        value=rows_[position_++];return true;
+    }
+};
 // This is an actual ProjectSet execution node. Array expressions are evaluated
 // once on the qualifying input, then their declared cells are emitted lazily.
 // No SQL is rendered/reexecuted to obtain a row or an output descriptor.
@@ -1015,7 +1025,7 @@ class PreparedSetReturningOp final : public Operator {
     std::string database_;
     PreparedSetReturningReader providerReader_;
     std::vector<const FunctionCallExpr*> calls_;
-    std::vector<std::vector<ExprValue>> providerRows_;
+    std::vector<std::unique_ptr<QueryHostValueCursor>> providerCursors_;
     std::vector<ExprValue> values_;
     size_t position_=0;
     bool initialized_=false,qualified_=false,ended_=false,opened_=false;
@@ -1041,13 +1051,13 @@ public:
                 }
             } else execution_.prepareExpression(target.expr.get());
         }
-        providerRows_.resize(calls_.size());
+        providerCursors_.resize(calls_.size());
         execution_.prepareExpression(select_->whereClause.get());
         execution_.prepareChildCursors();
     }
     bool open() override {
         OpenInstrument instrument(this);values_.clear();position_=0;
-        for(auto& rows:providerRows_)rows.clear();
+        for(auto& cursor:providerCursors_)cursor.reset();
         callerNullBinding_=StorageEngine::captureNullRowBinding();
         initialized_=false;qualified_=false;ended_=false;opened_=true;return true;
     }
@@ -1070,15 +1080,27 @@ public:
                     std::vector<ExprValue> arguments;
                     for(const auto& argument:call->args)arguments.push_back(execution_.evaluate(argument.get(),context));
                     const auto& binding=*call->setReturning;
-                    providerRows_[i]=providerReader_?providerReader_(binding,arguments):
-                        queryHostSetReturningProvider(binding).read(arguments,currentSession(),database_);
-                    for(const auto& cell:providerRows_[i])
-                        if(ExprHelper::canonicalResultTypeName(cell.typeName)!=
-                            ExprHelper::canonicalResultTypeName(binding.elementType))
-                            throw DbError("XX000","set-returning receiver lost its declared element type");
+                    const auto& provider=queryHostSetReturningProvider(binding);
+                    if(provider.open && !providerReader_)
+                        providerCursors_[i]=provider.open(arguments,binding,currentSession(),database_);
+                    else {
+                        if(!providerReader_ && !provider.read)
+                            throw DbError("XX000","set-returning receiver has no cursor factory");
+                        auto rows=providerReader_?providerReader_(binding,arguments):provider.read(arguments,currentSession(),database_);
+                        for(const auto& cell:rows)
+                            if(ExprHelper::canonicalResultTypeName(cell.typeName)!=
+                               ExprHelper::canonicalResultTypeName(binding.elementType))
+                                throw DbError("XX000","set-returning receiver lost its declared element type");
+                        providerCursors_[i]=std::make_unique<MaterializedProviderCursor>(std::move(rows));
+                    }
+                    if(!providerCursors_[i])throw DbError("XX000","set-returning receiver lost its cursor");
                 }
-                if(position_<providerRows_[i].size()) {
-                    hasSetRow=true;values_.push_back(providerRows_[i][position_]);
+                ExprValue cell;
+                if(providerCursors_[i]->next(cell)) {
+                    if(ExprHelper::canonicalResultTypeName(cell.typeName)!=
+                       ExprHelper::canonicalResultTypeName(call->setReturning->elementType))
+                        throw DbError("XX000","set-returning cursor changed its declared element type");
+                    hasSetRow=true;values_.push_back(std::move(cell));
                 } else values_.emplace_back(call->setReturning->elementType,"",true);
             } else {
                 // Ordinary targets are evaluated on each ProjectSet attempt,
@@ -1108,7 +1130,7 @@ public:
     }
     void close() override {
         values_.clear();position_=0;initialized_=false;qualified_=false;ended_=false;
-        for(auto& rows:providerRows_)rows.clear();
+        for(auto& cursor:providerCursors_)cursor.reset();
         std::exception_ptr failure;
         if(opened_){opened_=false;try{execution_.closeChildCursors();}catch(...){failure=std::current_exception();}}
         if(callerNullBinding_) {

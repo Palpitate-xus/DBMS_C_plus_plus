@@ -4,6 +4,7 @@
 #include "common/NotificationManager.h"
 #include "expression/ExprEvaluator.h"
 #include "utils/Session.h"
+#include "expression/series_cursor.h"
 #include <array>
 
 namespace dbms {
@@ -18,10 +19,14 @@ struct QueryHostSetReturningProvider {
     std::string (*resultType)(const std::vector<std::string>&);
     std::vector<ExprValue> (*read)(const std::vector<ExprValue>&,
                                  const Session*, const std::string&);
+    std::unique_ptr<QueryHostValueCursor> (*open)(const std::vector<ExprValue>&,
+        const QuerySetReturningBinding&,const Session*,const std::string&)=nullptr;
+    size_t maximumArity=0;
+    bool acceptsArity(size_t count) const {return count>=arity && count<=(maximumArity?maximumArity:arity);}
 };
 
-inline const std::array<QueryHostSetReturningProvider,2>& queryHostSetReturningProviders() {
-    static const std::array<QueryHostSetReturningProvider,2> providers{{
+inline const std::array<QueryHostSetReturningProvider,3>& queryHostSetReturningProviders() {
+    static const std::array<QueryHostSetReturningProvider,3> providers{{
         {QuerySetReturningBinding::Kind::Unnest,"unnest","builtin:pg_catalog.unnest(anyarray)",1,false,
             [](const std::vector<std::string>& types) {
                 if(types.size()!=1)throw DbError("42883","function unnest does not exist for these arguments");
@@ -50,7 +55,13 @@ inline const std::array<QueryHostSetReturningProvider,2>& queryHostSetReturningP
                 for(const auto& channel:notificationManager().subscriptions(backend->pid,database))
                     rows.emplace_back("text",channel,false);
                 return rows;
-            }}
+            }},
+        {QuerySetReturningBinding::Kind::GenerateSeries,"generate_series","builtin:pg_catalog.generate_series",2,false,
+            seriesResultType,nullptr,
+            [](const std::vector<ExprValue>& arguments,const QuerySetReturningBinding& binding,
+               const Session* backend,const std::string&)->std::unique_ptr<QueryHostValueCursor> {
+                return std::make_unique<GenerateSeriesCursor>(arguments,binding.elementType,backend);
+            },4}
     }};
     return providers;
 }

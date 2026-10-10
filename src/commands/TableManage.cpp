@@ -33207,7 +33207,7 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
             const auto role=preparedSetReturningRole(evaluator,function,this);
             if(!role)return std::nullopt;
             const auto spelling=function->schema.empty()?function->funcName:function->schema+"."+function->funcName;
-            if(function->args.size()!=role->arity || !function->namedArgs.empty() || function->hasOver ||
+            if(!role->acceptsArity(function->args.size()) || !function->namedArgs.empty() || function->hasOver ||
                 function->filter || function->distinct || !function->orderBy.empty())
                 throw DbError("42883","function does not exist: "+spelling);
             std::vector<std::string> inputs;

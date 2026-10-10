@@ -5143,6 +5143,31 @@ ResolvedScalarFunction resolveScalarFunction(
             if(provider && provider->fixedSignature && call->args.size()==provider->arity && call->namedArgs.empty()) {
                 result.provider=provider;result.schema=candidateSchema;return result;
             }
+            if(provider && provider->kind==QuerySetReturningBinding::Kind::GenerateSeries &&
+               provider->acceptsArity(call->args.size()) && call->namedArgs.empty()) {
+                std::vector<std::string> inputs;
+                for(const auto& argument:call->args)
+                    inputs.push_back(ExprHelper::canonicalResultTypeName(ExprHelper::inferParsedInputType(
+                        argument.get(),{},database,engine)));
+                try {
+                    const auto output=provider->resultType(inputs);
+                    bool exact=true;
+                    for(size_t i=0;i<inputs.size();++i) {
+                        const auto expected=i==2 && (output=="timestamp" || output=="timestamptz")
+                            ?std::string("interval"):i==3?std::string("text"):output;
+                        if(inputs[i]!=expected)exact=false;
+                    }
+                    // These are concrete builtin overloads, not anyarray.
+                    // An identical later namespace cannot replace the first
+                    // exact signature. A different exact user overload may
+                    // still beat a builtin that requires coercion.
+                    if(exact){result.provider=provider;result.schema=candidateSchema;return result;}
+                } catch(const DbError& error) {
+                    if(error.sqlState()!="42883" && error.sqlState()!="42725")throw;
+                    // Keep the candidate for its normal binding diagnostic
+                    // if no real exact user signature resolves this call.
+                }
+            }
             continue;
         }
         if(database.empty())continue;
