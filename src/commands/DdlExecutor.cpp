@@ -92,10 +92,10 @@ StoredRoutineDropTarget resolveStoredRoutineDropTarget(
         if(schema=="pg_temp")schema=sessionTempSchemaName(session);
         StoredRoutineDropTarget target{identity.name,schema};
         target.scalar=functions && g_engine.udfExists(session.currentDB,target.name,schema);
-        // The old TVF/procedure stores are public-only. Never reinterpret a
+        // The old TVF store is public-only. Never reinterpret a
         // qualified non-public object as a same-named public stored object.
         target.table=functions && schema=="public" && g_engine.tvfExists(session.currentDB,target.name);
-        target.procedure=procedures && schema=="public" && g_engine.procedureExists(session.currentDB,target.name);
+        target.procedure=procedures && g_engine.procedureExists(session.currentDB,target.name,schema);
         if(target.scalar || target.table || target.procedure)return target;
     }
     return {identity.name,identity.schema};
@@ -4009,6 +4009,7 @@ bool DdlExecutor::executeDropSchema(const DropStmt* stmt, Session& s) {
     struct AuxiliarySchemaObject {
         AuxiliarySchemaObjectKind kind;
         std::string name;
+        std::string schema;
     };
     std::vector<AuxiliarySchemaObject> auxiliaryObjects;
     const std::string logicalPrefix = name + ".";
@@ -4060,8 +4061,8 @@ bool DdlExecutor::executeDropSchema(const DropStmt* stmt, Session& s) {
                           AuxiliarySchemaObjectKind::Function);
         addLogicalObjects(g_engine.getTVFNames(s.currentDB),
                           AuxiliarySchemaObjectKind::TableFunction);
-        addLogicalObjects(g_engine.getProcedureNames(s.currentDB),
-                          AuxiliarySchemaObjectKind::Procedure);
+        for(const auto& procedure:g_engine.getProcedureNames(s.currentDB,name))
+            auxiliaryObjects.push_back({AuxiliarySchemaObjectKind::Procedure,procedure,name});
         for (const auto& collation :
              g_engine.getCollationNames(s.currentDB)) {
             if (hasLogicalNamespace(collation) ||
@@ -4079,7 +4080,7 @@ bool DdlExecutor::executeDropSchema(const DropStmt* stmt, Session& s) {
     if (!stmt->cascade && !auxiliaryObjects.empty()) {
         std::cout << "ERROR: cannot drop schema " << name
                   << " because object " << auxiliaryObjects.front().name
-                  << " depends on it" << std::endl;
+                  << " depends on it (SQLSTATE 2BP01)" << std::endl;
         return true;
     }
 
@@ -4178,7 +4179,7 @@ bool DdlExecutor::executeDropSchema(const DropStmt* stmt, Session& s) {
                 ddlKind = DdlObjectKind::Function;
                 break;
             case AuxiliarySchemaObjectKind::Procedure:
-                status = g_engine.dropProcedure(s.currentDB, object.name);
+                status = g_engine.dropProcedure(s.currentDB, object.name,object.schema);
                 ddlKind = DdlObjectKind::Procedure;
                 break;
             case AuxiliarySchemaObjectKind::Collation:
@@ -4191,7 +4192,7 @@ bool DdlExecutor::executeDropSchema(const DropStmt* stmt, Session& s) {
                       << object.name << std::endl;
             return true;
         }
-        txn.recordDrop(ddlKind, object.name);
+        txn.recordDrop(ddlKind, object.name,object.schema);
     }
     // Catalog-planned relation removal above is dependency ordered and also
     // includes objects outside this namespace reached by CASCADE. The storage
@@ -11078,6 +11079,19 @@ bool DdlExecutor::executeCreateProcedure(const CreateFunctionStmt* stmt, Session
         return true;
     }
 
+    std::string procedureSchema=stmt->schema;
+    const auto namespaces=declarationNamespaceFacts(s.currentDB);
+    if(procedureSchema.empty()) {
+        std::vector<std::string> path;std::string canonical;
+        if(!parseSessionSearchPath(s.searchPath,path,canonical))throw DbError("22023","invalid search_path");
+        for(const auto& entry:path) {
+            const auto candidate=expandSessionSearchPathEntry(entry,s.username);
+            if(namespaces.count(candidate)){procedureSchema=candidate;break;}
+        }
+        if(procedureSchema.empty())throw DbError("3F000","no schema has been selected to create in");
+    }
+    if(!namespaces.count(procedureSchema))throw DbError("3F000","schema \""+procedureSchema+"\" does not exist");
+
     const std::string language = stmt->language.empty()
         ? "sql" : toLower(stmt->language);
     if (language != "sql") {
@@ -11134,10 +11148,10 @@ bool DdlExecutor::executeCreateProcedure(const CreateFunctionStmt* stmt, Session
     }
 
     const bool replacedExisting =
-        stmt->replace && g_engine.procedureExists(s.currentDB, stmt->funcName);
+        stmt->replace && g_engine.procedureExists(s.currentDB, stmt->funcName,procedureSchema);
     if (replacedExisting) {
         const auto existingParams =
-            g_engine.getProcedureParams(s.currentDB, stmt->funcName);
+            g_engine.getProcedureParams(s.currentDB, stmt->funcName,procedureSchema);
         if (existingParams.size() != params.size()) {
             std::cout << "ERROR: CREATE OR REPLACE PROCEDURE cannot change "
                          "argument types (SQLSTATE 42P13)" << std::endl;
@@ -11166,7 +11180,7 @@ bool DdlExecutor::executeCreateProcedure(const CreateFunctionStmt* stmt, Session
     }
 
     DBStatus res = g_engine.createProcedure(
-        s.currentDB, stmt->funcName, params, stmts, stmt->replace);
+        s.currentDB, stmt->funcName, params, stmts, stmt->replace,procedureSchema);
     if (res != DBStatus::OK) {
         std::cout << "CREATE PROCEDURE failed (SQLSTATE "
                   << sqlstateForDBStatus(res) << ")" << std::endl;
@@ -11175,9 +11189,9 @@ bool DdlExecutor::executeCreateProcedure(const CreateFunctionStmt* stmt, Session
 
     if (stmt->replace) txn.markSnapshotDirty();
     if (replacedExisting) {
-        txn.recordUpdate(DdlObjectKind::Procedure, stmt->funcName);
+        txn.recordUpdate(DdlObjectKind::Procedure, stmt->funcName,procedureSchema);
     } else {
-        txn.recordCreate(DdlObjectKind::Procedure, stmt->funcName);
+        txn.recordCreate(DdlObjectKind::Procedure, stmt->funcName,procedureSchema);
     }
     if (!txn.commit()) return true;
     std::cout << "CREATE PROCEDURE succeeded" << std::endl;
@@ -11205,7 +11219,7 @@ bool DdlExecutor::executeDropProcedure(const DropStmt* stmt, Session& s) {
     const auto target=resolveStoredRoutineDropTarget(name,s,false,true);
     bool exists = target.procedure;
     if (zeroArgumentSignature && exists) {
-        exists = g_engine.getProcedureParams(s.currentDB, target.name).empty();
+        exists = g_engine.getProcedureParams(s.currentDB, target.name,target.schema).empty();
     }
     if (!exists) {
         if (stmt->ifExists) {
@@ -11230,13 +11244,13 @@ bool DdlExecutor::executeDropProcedure(const DropStmt* stmt, Session& s) {
         return true;
     }
     txn.markSnapshotDirty();
-    const DBStatus status = g_engine.dropProcedure(s.currentDB, target.name);
+    const DBStatus status = g_engine.dropProcedure(s.currentDB, target.name,target.schema);
     if (status != DBStatus::OK) {
         std::cout << "ERROR: DROP PROCEDURE failed (SQLSTATE "
                   << sqlstateForDBStatus(status) << ")" << std::endl;
         return true;
     }
-    txn.recordDrop(DdlObjectKind::Procedure, target.name);
+    txn.recordDrop(DdlObjectKind::Procedure, target.name,target.schema);
     if (!txn.commit()) return true;
     std::cout << "DROP PROCEDURE succeeded" << std::endl;
     return false;
@@ -11280,7 +11294,7 @@ bool DdlExecutor::executeDropRoutine(const DropStmt* stmt, Session& s) {
         }
         if (procedureExists) {
             procedureMatches =
-                g_engine.getProcedureParams(s.currentDB, resolved.name).empty();
+                g_engine.getProcedureParams(s.currentDB, resolved.name,resolved.schema).empty();
         }
     }
     const int matches = static_cast<int>(scalarMatches) +

@@ -267,14 +267,19 @@ public:
     DBStatus createProcedure(const std::string& dbname, const std::string& procname,
                              const std::vector<ProcParam>& params,
                              const std::vector<std::string>& statements,
-                             bool replace = false);
-    DBStatus dropProcedure(const std::string& dbname, const std::string& procname);
-    bool procedureExists(const std::string& dbname, const std::string& procname) const;
+                             bool replace = false, const std::string& schema = "public");
+    DBStatus dropProcedure(const std::string& dbname, const std::string& procname,
+                           const std::string& schema = "public");
+    bool procedureExists(const std::string& dbname, const std::string& procname,
+                         const std::string& schema = "public") const;
     std::vector<std::string> getProcedureStatements(const std::string& dbname,
-                                                     const std::string& procname) const;
+                                                     const std::string& procname,
+                                                     const std::string& schema = "public") const;
     std::vector<ProcParam> getProcedureParams(const std::string& dbname,
-                                               const std::string& procname) const;
-    std::vector<std::string> getProcedureNames(const std::string& dbname) const;
+                                               const std::string& procname,
+                                               const std::string& schema = "public") const;
+    std::vector<std::string> getProcedureNames(const std::string& dbname,
+                                               const std::string& schema = "public") const;
 
     // Schema management
     DBStatus createSchema(const std::string& dbname, const std::string& schemaname);

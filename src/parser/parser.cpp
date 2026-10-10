@@ -8191,7 +8191,12 @@ StmtPtr SQLParser::parseCreateFunction(const std::vector<std::string>& tokens, s
 StmtPtr SQLParser::parseCreateProcedure(const std::vector<std::string>& tokens, size_t& pos) {
     auto stmt = std::make_unique<CreateFunctionStmt>(true);
     if (pos >= tokens.size()) return stmt;
-    stmt->funcName = parseRoutineIdentifier(tokens[pos++]);
+    std::string declared;
+    CatalogManager::QualifiedName routine;
+    if(!parseQualifiedRoutineName(tokens,pos,declared) ||
+       !CatalogManager::parseQualifiedName(declared,routine,true))return nullptr;
+    stmt->schema=routine.schema;
+    stmt->funcName=routine.name;
 
     if (pos < tokens.size() && tokens[pos] == "(") {
         ++pos;

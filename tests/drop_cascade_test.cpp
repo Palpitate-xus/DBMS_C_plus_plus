@@ -421,8 +421,11 @@ static void test_drop_schema_handles_auxiliary_objects() {
                db, "app_aux.rows", "x", "SELECT x") ==
            dbms::DBStatus::OK);
     assert(g_engine.createProcedure(
-               db, "app_aux.work", {}, {"SELECT 1"}) ==
+               db, "work", {}, {"SELECT 1"},false,"app_aux") ==
            dbms::DBStatus::OK);
+    // A quoted public name containing the same prefix is not a member of
+    // app_aux. Namespace identity is separate from literal identifier dots.
+    assert(g_engine.createProcedure(db,"app_aux.work",{}, {"SELECT 2"})==dbms::DBStatus::OK);
     assert(g_engine.createCollation(
                db, "app_aux__locale", "libc", "C") ==
            dbms::DBStatus::OK);
@@ -450,7 +453,7 @@ static void test_drop_schema_handles_auxiliary_objects() {
     assert(g_engine.schemaExists(db, "app_aux"));
     assert(!g_engine.getDomain(db, domain.name).name.empty());
     assert(g_engine.udfExists(db, "app_aux.bump"));
-    assert(g_engine.procedureExists(db, "app_aux.work"));
+    assert(g_engine.procedureExists(db, "work","app_aux"));
 
     assert(!ddl.executeSql("DROP SCHEMA app_aux CASCADE", s));
     assert(!g_engine.schemaExists(db, "app_aux"));
@@ -459,7 +462,9 @@ static void test_drop_schema_handles_auxiliary_objects() {
     assert(g_engine.getEnumType(db, enumeration.name).name.empty());
     assert(!g_engine.udfExists(db, "app_aux.bump"));
     assert(!g_engine.tvfExists(db, "app_aux.rows"));
-    assert(!g_engine.procedureExists(db, "app_aux.work"));
+    assert(!g_engine.procedureExists(db, "work","app_aux"));
+    assert(g_engine.procedureExists(db,"app_aux.work"));
+    assert((g_engine.getProcedureStatements(db,"app_aux.work")==std::vector<std::string>{"SELECT 2"}));
     const auto collations = g_engine.getCollationNames(db);
     assert(std::find(collations.begin(), collations.end(),
                      "app_aux__locale") == collations.end());

@@ -4443,7 +4443,7 @@ static bool handleCallProcedure(const string& sql, Session& s) {
                 "(SQLSTATE 42601)" << endl;
         return true;
     }
-    procname = decodeQuotedIdentifier(trim(rest.substr(0, lp)));
+    procname = trim(rest.substr(0, lp));
     size_t rp = string::npos;
     int depth = 0;
     bool singleQuoted = false;
@@ -4530,11 +4530,35 @@ static bool handleCallProcedure(const string& sql, Session& s) {
              << endl;
         return true;
     }
-    if (!g_engine.procedureExists(s.currentDB, procname)) {
-        cout << "Procedure " << procname << " not exist" << endl;
-        return true;
+    dbms::CatalogManager::QualifiedName declaredProcedure;
+    const auto procedureNameTokens=dbms::SQLParser::tokenize(procname);
+    string normalizedProcedureName;
+    if(procedureNameTokens.size()==1)normalizedProcedureName=procedureNameTokens.front();
+    else if(procedureNameTokens.size()==3 && procedureNameTokens[1]==".")
+        normalizedProcedureName=procedureNameTokens[0]+"."+procedureNameTokens[2];
+    else throw dbms::DbError("42601","invalid procedure name");
+    if(!dbms::CatalogManager::parseQualifiedName(normalizedProcedureName,declaredProcedure,true))
+        throw dbms::DbError("42601","invalid procedure name");
+    vector<string> procedurePath;
+    if(!declaredProcedure.schema.empty())procedurePath.push_back(declaredProcedure.schema);
+    else {
+        string canonical;
+        if(!dbms::parseSessionSearchPath(s.searchPath,procedurePath,canonical))
+            throw dbms::DbError("22023","invalid search_path");
+        for(auto& entry:procedurePath)entry=dbms::expandSessionSearchPathEntry(entry,s.username);
+        if(find(procedurePath.begin(),procedurePath.end(),"pg_catalog")==procedurePath.end())
+            procedurePath.insert(procedurePath.begin(),"pg_catalog");
     }
-    auto params = g_engine.getProcedureParams(s.currentDB, procname);
+    string procedureSchema;
+    for(auto schema:procedurePath) {
+        if(schema=="pg_temp")schema=sessionTempSchemaName(s);
+        if(g_engine.procedureExists(s.currentDB,declaredProcedure.name,schema)) {
+            procedureSchema=schema;break;
+        }
+    }
+    if(procedureSchema.empty())throw dbms::DbError("42883","procedure "+procname+" does not exist");
+    procname=declaredProcedure.name;
+    auto params = g_engine.getProcedureParams(s.currentDB, procname,procedureSchema);
     if (args.size() != params.size()) {
         cout << "SQL syntax error: procedure " << procname << " expects "
              << params.size() << " arguments, got " << args.size() << endl;
@@ -4578,7 +4602,7 @@ static bool handleCallProcedure(const string& sql, Session& s) {
             }
         }
     }
-    auto stmts = g_engine.getProcedureStatements(s.currentDB, procname);
+    auto stmts = g_engine.getProcedureStatements(s.currentDB, procname,procedureSchema);
     if (stmts.empty()) {
         cout << "ERROR: procedure " << procname
              << " has no executable statements (SQLSTATE 2F003)" << endl;

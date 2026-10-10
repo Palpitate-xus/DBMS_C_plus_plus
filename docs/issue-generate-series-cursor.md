@@ -30,9 +30,11 @@ subsequent concrete namespace repair recompiles its own evaluator CPP. Early
 matching native cursor, bound-metadata, backend-provider and namespace-provider
 tests pass. No foreign object/binary copying. A normal build/repeat and all 58
 own signatures/cache/source/frozen checks pass at publication start. Expanded
-43-native/27-wire verification is still running; all43native pass. The completed
-26wire entries have24passes and two failures; original default protocol is still
-running. This is not a full-suite pass or a terminal publication claim.
+43-native/27-wire verification91737 ends1: all43native and25/27wire pass,
+including the entire unchanged original default protocol. Only the independent
+qualified-DROP dependency and pre-existing mixed pg_typeof neighbor fail. All58
+own receipts/cache/source/frozen terminal checks pass. This is not a full-suite
+pass; both failures remain recorded and the next parser repair is separate.
 
 The namespace fixture additionally finds a separate DROP bug: the parser
 splits `public.generate_series` into several objectNames and the DDL executor

@@ -369,7 +369,7 @@ bool DdlTransaction::undoCreate(StorageEngine& engine, const std::string& db,
             return removed;
         }
         case DdlObjectKind::Procedure:
-            return engine.dropProcedure(db, op.name) == DBStatus::OK;
+            return engine.dropProcedure(db, op.name,op.extra.empty()?"public":op.extra) == DBStatus::OK;
         case DdlObjectKind::Trigger:
             return engine.dropTrigger(db, op.name, op.extra) == DBStatus::OK;
         case DdlObjectKind::Policy:

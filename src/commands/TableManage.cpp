@@ -5173,8 +5173,10 @@ static std::filesystem::path proceduresDir(const std::string& dbname) {
 }
 
 static std::filesystem::path procedurePath(const std::string& dbname,
-                                           const std::string& procname) {
-    return std::filesystem::path(dbname) / ".procs" / (procname + ".proc");
+                                           const std::string& procname,
+                                           const std::string& schema = "public") {
+    if(schema=="public")return proceduresDir(dbname)/(procname+".proc");
+    return proceduresDir(dbname)/".namespaces"/schema/(procname+".proc");
 }
 
 // Routine type names may contain commas (for example numeric(10,2)), so the
@@ -5240,12 +5242,12 @@ DBStatus StorageEngine::createProcedure(const std::string& dbname,
                                          const std::string& procname,
                                          const std::vector<ProcParam>& params,
                                          const std::vector<std::string>& statements,
-                                         bool replace) {
+                                         bool replace,const std::string& schema) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
-    if (!validMetadataObjectName(procname)) return DBStatus::INVALID_ARGUMENT;
-    auto pdir = proceduresDir(dbname);
+    if (!validMetadataObjectName(procname) || !validMetadataObjectName(schema)) return DBStatus::INVALID_ARGUMENT;
+    auto pdir = procedurePath(dbname,procname,schema).parent_path();
     if (!ensureMetadataDirectory(pdir)) return DBStatus::IO_ERROR;
-    if (!replace && std::filesystem::exists(procedurePath(dbname, procname))) {
+    if (!replace && std::filesystem::exists(procedurePath(dbname, procname,schema))) {
         return DBStatus::TABLE_ALREADY_EXISTS;
     }
     std::ostringstream serialized;
@@ -5259,14 +5261,14 @@ DBStatus StorageEngine::createProcedure(const std::string& dbname,
     for (const auto& stmt : statements) {
         serialized << "STMT2:" << encodeRoutineStatement(stmt) << '\n';
     }
-    return persistMetadata(procedurePath(dbname, procname), serialized.str());
+    return persistMetadata(procedurePath(dbname, procname,schema), serialized.str());
 }
 
 DBStatus StorageEngine::dropProcedure(const std::string& dbname,
-                                       const std::string& procname) {
+                                       const std::string& procname,const std::string& schema) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
-    if (!validMetadataObjectName(procname)) return DBStatus::INVALID_ARGUMENT;
-    auto path = procedurePath(dbname, procname);
+    if (!validMetadataObjectName(procname) || !validMetadataObjectName(schema)) return DBStatus::INVALID_ARGUMENT;
+    auto path = procedurePath(dbname, procname,schema);
     if (!std::filesystem::exists(path)) return DBStatus::TABLE_NOT_FOUND;
     std::error_code error;
     if (!std::filesystem::remove(path, error) || error) return DBStatus::IO_ERROR;
@@ -5274,16 +5276,16 @@ DBStatus StorageEngine::dropProcedure(const std::string& dbname,
 }
 
 bool StorageEngine::procedureExists(const std::string& dbname,
-                                    const std::string& procname) const {
-    return databaseExists(dbname) && validMetadataObjectName(procname) &&
-           std::filesystem::exists(procedurePath(dbname, procname));
+                                    const std::string& procname,const std::string& schema) const {
+    return databaseExists(dbname) && validMetadataObjectName(procname) && validMetadataObjectName(schema) &&
+           std::filesystem::exists(procedurePath(dbname, procname,schema));
 }
 
 std::vector<std::string> StorageEngine::getProcedureStatements(
-    const std::string& dbname, const std::string& procname) const {
+    const std::string& dbname, const std::string& procname,const std::string& schema) const {
     std::vector<std::string> result;
-    if (!databaseExists(dbname) || !validMetadataObjectName(procname)) return result;
-    auto path = procedurePath(dbname, procname);
+    if (!databaseExists(dbname) || !validMetadataObjectName(procname) || !validMetadataObjectName(schema)) return result;
+    auto path = procedurePath(dbname, procname,schema);
     std::ifstream ifs(path);
     if (!ifs) return result;
     std::string line;
@@ -5303,10 +5305,10 @@ std::vector<std::string> StorageEngine::getProcedureStatements(
 }
 
 std::vector<StorageEngine::ProcParam> StorageEngine::getProcedureParams(
-    const std::string& dbname, const std::string& procname) const {
+    const std::string& dbname, const std::string& procname,const std::string& schema) const {
     std::vector<ProcParam> result;
-    if (!databaseExists(dbname) || !validMetadataObjectName(procname)) return result;
-    auto path = procedurePath(dbname, procname);
+    if (!databaseExists(dbname) || !validMetadataObjectName(procname) || !validMetadataObjectName(schema)) return result;
+    auto path = procedurePath(dbname, procname,schema);
     std::ifstream ifs(path);
     if (!ifs) return result;
     std::string line;
@@ -5351,10 +5353,10 @@ std::vector<StorageEngine::ProcParam> StorageEngine::getProcedureParams(
     return result;
 }
 
-std::vector<std::string> StorageEngine::getProcedureNames(const std::string& dbname) const {
+std::vector<std::string> StorageEngine::getProcedureNames(const std::string& dbname,const std::string& schema) const {
     std::vector<std::string> result;
-    if (!databaseExists(dbname)) return result;
-    auto pdir = proceduresDir(dbname);
+    if (!databaseExists(dbname) || !validMetadataObjectName(schema)) return result;
+    auto pdir = schema=="public"?proceduresDir(dbname):proceduresDir(dbname)/".namespaces"/schema;
     if (!std::filesystem::exists(pdir)) return result;
     for (const auto& entry : std::filesystem::directory_iterator(pdir)) {
         if (entry.is_regular_file()) {
