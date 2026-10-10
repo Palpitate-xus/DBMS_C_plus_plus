@@ -1,3 +1,22 @@
+# 2026-10-10 USER与version普通表达式修复
+
+前一Root own62792/Main45597均0；真实changed-unit2/Main1编译后，Root
+publication61841实际终1：57/57native、41/42wire通过，default及all58/
+repeat/cache/source/frozen首尾检查0，仅原fromless USER42703未修。当前Root
+引号enum native57761也真实134，仍属普通类型正确性，不扩大安全deferred。
+USER已独立合入 `ff9d75a3`：真实语法alias CurrentUser，保留user列名/NAME、
+引号标识符区分与USER()42601；actual180006 keyword41全0，自有57/Main
+48376/36374均0，私有81549终1：13native全过、14/15wire过，仅下一version42883。
+version已独立合入 `633dc2f4`：真实零参数TEXT/stable标量，正常namespace/signature
+解析，报告项目真实版本；reference16全0，私有98287终0：14native/16wire全过，
+原fromless/default/keyword41/整数350/BIT250/42均通过；all58首尾检查0。
+两次原失败与enum失败保留，不当作整个原清单完成。主工作区因USER内联header
+变化已真实own fresh57/Main38420/93741均0，57/1实际编译；新Root58native/43wire
+匹配publication正在运行，不借私有obj/binary。当前784auto-native+2Main、443wire、
+58TU，原273状态保持22complete166partial70unverified15deferred；新全注册未跑，
+quoted enum/目录race/recovery/corruption/typed trigger/EXPLAIN及所有原要求继续。
+不push，Actions禁用。README仍为长期入口。
+
 # 2026-10-10 README核对与四项类型/参数修复
 
 README长期入口已在 `f513ac1f` 提交；本次本地链接、兼容性契约与版本检查均0，

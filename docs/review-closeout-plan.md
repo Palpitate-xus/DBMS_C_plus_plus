@@ -4,7 +4,21 @@
 
 # 工作区与复查清单收尾计划
 
-## 2026-10-10 当前执行顺序：类型与参数修复之后
+## 2026-10-10 当前执行顺序：USER与version之后
+
+1. USER `ff9d75a3`、version `633dc2f4` 已逐项独立合入master。前一Root61841
+   实际57native全过、41/42wire过，仅USER；私有USER81549实际13native/14of15wire
+   过，仅下一version。最终私有98287实际14native/16wire全过，原fromless/default
+   全过；所有首尾58对象/source/cache/frozen检查0。各失败原样保留。
+2. Root因USER header已真实own fresh57/Main38420/93741均0，57/1实际编译。
+   新Root58native/43wire匹配publication正在运行；不得把私有绿当Root验收。
+3. 完成Root组合回归后运行最新完整784auto+2Main/443wire注册组合；当前已有
+   quoted enum57761真实134继续优先修复，再处理目录race、TEMP/recovery、索引
+   corruption、typed trigger、EXPLAIN及原273清单其他要求。只明确15安全/TDE跳过。
+4. 原273仍22complete166partial70unverified15deferred。保持每项本地commit，
+   不push或启用Actions，不用专项通过代替全要求完成。
+
+## 2026-10-10 先前执行记录：类型与参数修复之后
 
 1. README已在 `f513ac1f` 整理为长期项目入口，本次链接/契约/版本核对全0。
    日期fixture `dbfc241a` 与四项独立实现修复 `9c7100f8`/`1da68f6e`/

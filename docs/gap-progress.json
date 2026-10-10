@@ -2,6 +2,20 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "USER grammar identity and version typed scalar independently committed; original fromless passes in matching private publication",
+      "gap_ids": ["SQL-04", "QRY-01", "FUNC-01", "FUNC-05", "PROTO-04"],
+      "status": "partial",
+      "commits": ["ff9d75a3", "633dc2f4"],
+      "evidence": ["docs/issue-user-sql-value-intrinsic.md", "docs/issue-version-ordinary-scalar.md", "docs/issue-qualified-null-cast-identity.md", "docs/issue-full-registered-a85e653e.md"],
+      "tests": ["tests/sql_value_keyword_test.cpp", "tests/sql_value_keyword_protocol_e2e_test.py", "tests/version_function_test.cpp", "tests/version_function_protocol_e2e_test.py", "tests/fromless_structured_protocol_e2e_test.py"],
+      "verification": {
+        "reproduction": "Old frozen440 expanded keyword38 has4 failures including USER42703 and wrong USER()42883. After USER, original fromless reaches missing version42883; frozen816 newversion16 has6 failures. Current Root enum quoted57761 actually134 at lowercased MixedRank42704; retained ordinary requirement, not security deferred.",
+        "focused_tests": "Verified180006 reference keyword41/version16 all0. Private USER own57/Main48376/36374=0 with57/1real compile; publication81549 terminal1:13native14/15wire pass, onlyversion42883. Version ownCPP/Main50779/63496 and native24895=0; final98287 terminal0:14native16wire allpass, originalfromless/default/keyword41/pgtypeof56/params18/TEXT113/INTEGER350/BIT250+42 pass. All58/repeat/cache/source/frozen start+terminal0, frozenee1d8c/source635204bd.",
+        "full_suite": "Previous Root own2units62792/Main45597=0; publication61841 terminal1:57native41/42wire pass, default/all58/source/frozen0, onlyUSER42703. After two independent imports, actual Root own fresh57/Main38420/93741=0 with57/1real compiler entries. New Root58native43wire publication is running against same635204bd source, no foreignobj/binary; current784auto-native+2Main443wire58TU. New complete registered suite not run; original full85873 retains12 failures and does not prove current closure.",
+        "scope": "Original273 statuses unchanged22complete166partial70unverified15deferred. Only15 explicit security/TDE requirements deferred. Quoted enum, catalog race, recovery, index corruption, typed triggers, EXPLAIN and all original remaining requirements continue. No push or Actions activation."
+      }
+    },
+    {
       "issue": "Evergreen README verified; four independently committed physical type and Bind repairs retain the remaining USER failure",
       "gap_ids": ["TYPE-02", "CAT-03", "SQL-04", "QRY-01", "FUNC-05", "PROTO-04"],
       "status": "partial",
