@@ -4884,7 +4884,11 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
         return ExprValue("interval",formatIntervalInput(parsed.months,parsed.days,parsed.micros,true),false);
     }
     if (v.isNull) {
-        ExprValue result(targetTypeName, "", true);
+        const auto* session=currentSession();
+        const auto database=currentDB_.empty() && session?session->currentDB:currentDB_;
+        auto* owner=sqlValueEngine_?sqlValueEngine_:&g_engine;
+        const auto catalog=regtype_detail::metadata(*owner,database);
+        ExprValue result(resolveDeclaredTypeName(targetTypeName,&catalog,session).typeName, "", true);
         auto characterTarget=target;
         while(common_type_detail::array(characterTarget))characterTarget.resize(characterTarget.size()-2);
         if (parseCharacterCastSpec(characterTarget).kind != CharacterCastKind::None)
