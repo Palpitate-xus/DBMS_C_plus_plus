@@ -33539,6 +33539,12 @@ static PlPgsqlQueryResult plpgsqlEvalBoundExpression(
                 }
                 if (conditional->elseExpr) bind(conditional->elseExpr.get());
             } else if (auto* function = dynamic_cast<FunctionCallExpr*>(node)) {
+                if(function->sqlValue!=FunctionCallExpr::SqlValue::None) {
+                    // The parser's intrinsic is not a callable registry
+                    // entry. Preserve its validated grammar and identity.
+                    sql_value_detail::validate(*function);
+                    return;
+                }
                 if (function->hasOver || function->filter || function->distinct ||
                     !function->orderBy.empty())
                     throw DbError("0A000", "aggregate/window expression requires a query host");
@@ -33637,6 +33643,9 @@ static PlPgsqlQueryResult plpgsqlEvalBoundExpression(
         // available; only then lower functions to execution-private slots.
         ExprHelper::prepareArrayTypes(select->selectList.front().expr.get(),arrayTypes,dbname,sqlFunctionEngine);
         for(const auto& function:functionNames){function.first->funcName=function.second;function.first->schema.clear();}
+        // Set the actual engine owner for intrinsic namespace values too;
+        // custom scalar slots above remain execution-private registrations.
+        evaluator.bindScalarFunctions(select->selectList.front().expr.get(),sqlFunctionEngine);
         const ExprValue value = evaluator.eval(select->selectList.front().expr.get(), context);
         ExprEvalResult evaluated;
         evaluated.ok = !value.isUnknown();

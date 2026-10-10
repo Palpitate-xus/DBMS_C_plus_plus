@@ -55,6 +55,8 @@ int main() {
     call("BEGIN RETURN current_user||':'||session_user; END;", "text", "review_user:review_user");
     call("DECLARE \"current_user\" TEXT := 'local'; BEGIN RETURN \"current_user\"||':'||session_user; END;", "text", "local:review_user");
     call("BEGIN RETURN current_date IS NOT NULL AND current_timestamp IS NOT NULL AND localtimestamp IS NOT NULL; END;", "boolean", "t");
+    call("BEGIN RETURN current_time IS NOT NULL AND localtime IS NOT NULL AND current_catalog IS NOT NULL AND current_schema IS NOT NULL; END;", "boolean", "t");
+    call("BEGIN RETURN current_timestamp(3) IS NOT NULL AND localtimestamp(0) IS NOT NULL AND current_time(6) IS NOT NULL AND localtime(1) IS NOT NULL; END;", "boolean", "t");
     call("BEGIN RETURN EXTRACT(year FROM DATE '2026-10-06'); END;", "numeric", "2026");
     call("BEGIN RETURN DATE '2026-10-06'+1; END;", "date", "2026-10-07");
     assert(g_engine.createUDF(db, "quoted_parameter_binding", {"X", "x"}, {"int", "int"},
@@ -71,7 +73,10 @@ int main() {
         {"DECLARE \"X\" INT := 1; BEGIN RETURN no_such_function(\"X\"); END;", "42883"},
         {"BEGIN RETURN coalesce(1,no_such_function(1)); END;", "42883"},
         {"BEGIN RETURN coalesce(1,no_such_variable); END;", "42703"},
-        {"DECLARE \"X\" INT := 1; BEGIN RETURN \"X\"/0; END;", "22012"}
+        {"DECLARE \"X\" INT := 1; BEGIN RETURN \"X\"/0; END;", "22012"},
+        {"BEGIN RETURN current_date(); END;", "42601"},
+        {"BEGIN RETURN localtimestamp(); END;", "42601"},
+        {"BEGIN RETURN current_time(-1); END;", "42601"}
     }) {
         const std::string function = "quoted_binding_" + std::to_string(++serial);
         assert(g_engine.createUDF(db, function, {}, {}, errorCase.first, 'v', "plpgsql", "int")
