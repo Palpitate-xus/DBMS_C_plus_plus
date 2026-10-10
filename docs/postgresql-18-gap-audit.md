@@ -12,8 +12,11 @@ version已独立合入 `633dc2f4`：真实零参数TEXT/stable标量，正常nam
 原fromless/default/keyword41/整数350/BIT250/42均通过；all58首尾检查0。
 两次原失败与enum失败保留，不当作整个原清单完成。主工作区因USER内联header
 变化已真实own fresh57/Main38420/93741均0，57/1实际编译；新Root58native/43wire
-匹配publication正在运行，不借私有obj/binary。当前784auto-native+2Main、443wire、
-58TU，原273状态保持22complete166partial70unverified15deferred；新全注册未跑，
+匹配publication88526已真实终0：58/58native、43/43wire和原default均通过，
+all58/repeat/cache/source/frozen首尾检查0，不借私有obj/binary。
+当前784auto-native+2Main、443wire、58TU；新完整注册1229个driver的23985
+正在运行，源码/测试/脚本保持冻结，不把专项通过当全套通过。
+原273状态保持22complete166partial70unverified15deferred；
 quoted enum/目录race/recovery/corruption/typed trigger/EXPLAIN及所有原要求继续。
 不push，Actions禁用。README仍为长期入口。
 
