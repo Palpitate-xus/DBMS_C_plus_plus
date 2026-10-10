@@ -24,8 +24,11 @@
    五控仍失败；原default和BIT384/5131通过，all58/source/frozen终态一致。
    完整775/437新driver85873已实际启动并冻结Root输入。private NAME登记已
    独立commit `e55c863e`：原33/5fail -> 新33全0，类型registry单元/actual18参考0。
-   普通函数结果OID0候选own binder0、NAME/NULL/scalar/unnest native0，扩展35/23
-   14272已启动；新generate_series绑定正控42883单独保留并待修，不改负期待。
+   普通函数结果OID修复已private `d0c5582c`，包含实际VOID目录前置；初始35/23
+   14272=1（Gen与原pg_notify失败）保留，校正36/23的53041=1：35native与全部
+   23wire通过、原default/pg_notify断言和BIT384通过、all58终态一致，仅Gen失败。
+   合法Gen绑定正控已独立fixture commit `3d9b1a61`，不改负期待；下一项实现真实
+   lazy provider/cursor及完整overload/NULL/step/overflow/需求语义，不用cap/eager假替代。
    继续所有普通声明/查询/storage/recovery/EXPLAIN未完成项及native decimal API；
    按[准确跳过范围](deferred-scope.md)只保留15安全/TDE deferred，不扩成普通失败跳过。
 5. 原273范围/状态不变22complete166partial70unverified15deferred；不push、

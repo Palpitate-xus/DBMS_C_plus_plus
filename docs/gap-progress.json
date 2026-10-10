@@ -2,6 +2,20 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Ordinary NAME and result OID/VOID repairs independently committed; generate_series positive retained as separate unfinished requirement",
+      "gap_ids": ["TYPE-02", "CAT-03", "SQL-04", "FUNC-05", "FUNC-06", "PROTO-04"],
+      "status": "partial",
+      "commits": ["e55c863e", "3d9b1a61", "d0c5582c"],
+      "evidence": ["docs/issue-root-sql-value-publication.md", "docs/deferred-scope.md"],
+      "tests": ["tests/type_registry_test.cpp", "tests/sql_value_keyword_protocol_e2e_test.py"],
+      "verification": {
+        "reproduction": "Original keyword33/5fail from missing NAME declaration registration. Strict native then exposes OID0. Initial binder14272=1 retains generate_series134 and original pg_notify assertion failure; direct old/new/18.6 isolates missing VOID row42704. Actual VOID reference exact2278/4/byval/p/P/i/p/noelem/array/collation, missing-row80712=134 retained.",
+        "focused_tests": "Name registry own19174/unit9061/reference33/originalkeyword33=0 and private e55c863e committed. Usable binder+VOID d0c5582c follows own8552/54822=0, strict NAME/NULL/scalar/unnest63477 and cold/warm/disk/pure VOID62544=0. Corrected53041 terminal1:35/36native and23/23wire pass, complete original default/pg_notify pass, only preserved legitimate generate_series binding positive134; separately committed test3d9b1a61. All58 current own receipts/cache/repeat/source/frozen terminal checks0; original BIT384/48089=0 on actual180006. No source/header/object borrowing or full-family claim.",
+        "full_suite": "Root190scoped/sourcea85e/beb50 unchanged complete775native/Main437wire85873 is still live. Private192 scoped repairs are not imported, and new independent tests remain private until Root terminal. No latest full-green claim.",
+        "scope": "Original273 items/hash/statuses unchanged22complete166partial70unverified15deferred. Only15 explicit security/TDE items deferred; ordinary CREATE/NAME/type/query/storage/recovery/EXPLAIN work continues. Next actual generate_series lazy provider/cursor and all overload/NULL/step/overflow/demand rules, NAME storage/catalog and native decimal API, not a capped/eager fake. No push or Actions activation."
+      }
+    },
+    {
       "issue": "Root own58 and publication terminate; complete775/437 starts; ordinary NAME registration committed without broadening15 deferred requirements",
       "gap_ids": ["TYPE-02", "SQL-04", "FUNC-05", "FUNC-06", "PROTO-04"],
       "status": "partial",

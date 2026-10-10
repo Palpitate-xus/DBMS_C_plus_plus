@@ -51,10 +51,25 @@ The usable metadata repair now also provides real VOID2278/4/byval/p/P/i/p/no-
 array/no-collation, verified directly against18.6. Missing-row native80712=134
 retained; own affected catalog54822=0, cold/warm/disk/pure-binding62544=0 and
 three pg_notify probes again match old/reference. Corrected36native/23wire53041
-is still live:35native pass and only strict generate_series134 remains at native
-layer;22wire neighbors pass, default protocol has not ended. Original BIT384/
+now ends1:35/36native and23/23wire pass, including the entire original default
+protocol and its original pg_notify assertion. Only strict generate_series134
+remains. All58 current own receipts/cache/repeat/source/frozen terminal checks
+pass. Original BIT384/
 48089 on corrected frozen6e6499 against180006 exits0. All original failed
-generations remain retained; no source approval, Root import or whole-green claim.
+generations remain retained. The positive generate_series fixture is committed
+separately as3d9b1a61; the usable binder+required VOID metadata repair is
+independently committed d0c5582c. Private192 scoped repairs remain separate from
+Root190; neither new source is imported while full85873 remains live. No new
+whole-green/family claim. Corrected frozen SHA256:
+6e64993ec0bc497a754e2e222cb34defecac3ffd9dc597ad2f2402df9d35e5a5.
+Source seal:eac6f79b7b6f0aab7a086e25faa4b3c733ba31054ed2c1a61e65c4a5d5a1285d.
+
+Next ordinary generate_series repair must use a real query-host provider and
+lazy cursor/demand ownership with correct overloads, NULL/step/overflow/stop and
+error semantics, not a scalar callback or capped eager vector that only satisfies
+the small positive case. The independent strict test remains in the native
+discovery path. NAME column/length/collation/catalog details, decimal factory
+modifiers and all original incomplete requirements still continue.
 
 All273 original item statuses/hash unchanged. Ordinary deferred-scope corrections
 are documented in [deferred-scope.md](deferred-scope.md), without changing the15
