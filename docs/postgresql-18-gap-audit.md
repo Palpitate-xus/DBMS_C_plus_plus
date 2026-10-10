@@ -7,8 +7,10 @@ Gen正控、结果OID/VOID、lazy Gen、限定routine DROP、procedure namespace
 intrinsic：`abf225d9`/`f245410a`/`3afd0b04`/`200db2e4`/`3fef1112`/
 `ea89eede`/`249f4fe1`。私有原失败保留；actual180006的Gen78/DROP20/procedure32
 全0，最终procedure5native与四wire、PL4native/七wire全0。新Root196scoped、
-780auto+2Main/440wire/58TU，own fresh57/Main91787/31765正在编译，不借私有
-obj/binary，尚无新Root组合验收。原273及22complete166partial70unverified15deferred
+780auto+2Main/440wire/58TU，own fresh57/Main91787/31765均0，57/1真实编译；
+normal/repeat/all58/cache/source/frozen start均0，不借私有obj/binary。53native/
+36wire新publication86219在77e17d/a66d冻结输入上运行，尚无终态组合验收。
+原273及22complete166partial70unverified15deferred
 保持，Date native AST、pg_typeof、quoted enum、catalog race、recovery/EXPLAIN及
 所有原未完族继续。不push、不启用Actions，仅15明确安全/TDE项deferred。
 以下均历史checkpoint。

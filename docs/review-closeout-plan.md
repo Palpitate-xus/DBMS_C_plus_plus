@@ -11,9 +11,9 @@
    不冒全套通过，原default/两个Main确实通过。
 2. 七项修复/fixture已逐项-x合入master：NAME、Gen绑定正控、结果OID/VOID、
    lazy Gen、限定DROP、procedure namespace、PL intrinsic；最新source249f4fe1，
-   196scoped/780auto+2Main/440wire/58TU，own fresh57/Main91787/31765正运行。
-   Main完成后先normal/repeat/all58/source/frozen检查，再完整publication矩阵；
-   不用私有obj/binary替代Root验证。
+   196scoped/780auto+2Main/440wire/58TU，own fresh57/Main91787/31765均0，实际
+   57/1编译；normal/repeat/all58/cache/source/frozen start均0。53native/36wire
+   publication86219正在运行，77e17d/a66d输入冻结到终态；不用私有obj/binary。
 3. 普通Date native AST、pg_typeof receiver、quoted enum、catalog加载race、
    recovery、index corruption、typed trigger与EXPLAIN失败继续逐项复现修复提交。
    当前没有新Root组合全量结果；所有原273族仍须按完整要求验收。
