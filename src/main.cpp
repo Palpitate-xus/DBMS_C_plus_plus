@@ -8938,24 +8938,6 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
             appendValue("public", false, "name");
             continue;
         }
-        if (lowItem.substr(0, 10) == "pg_typeof(" || lowItem.substr(0, 10) == "pg_typeof (") {
-            // pg_typeof(literal): PG type names for common literal shapes.
-            std::string inner = expr;
-            size_t lp = inner.find('(');
-            size_t rp = inner.rfind(')');
-            std::string arg = (lp != std::string::npos && rp != std::string::npos && rp > lp)
-                ? trim(inner.substr(lp + 1, rp - lp - 1)) : std::string();
-            std::string tn;
-            if (!arg.empty() && arg.front() == 39 && arg.back() == 39) tn = "unknown";
-            else if (!arg.empty() && (arg.find('.') != std::string::npos || arg.find('e') != std::string::npos || arg.find('E') != std::string::npos)) tn = "numeric";
-            else if (!arg.empty() && arg.find_first_not_of("0123456789-+") == std::string::npos) tn = "integer";
-            else if (arg == "true" || arg == "false") tn = "boolean";
-            else if (!arg.empty() && arg.front() == '{') tn = "text[]";
-            else tn = "unknown";
-            headers.push_back(disp == item ? "pg_typeof" : disp);
-            appendValue(tn, false, "regtype");
-            continue;
-        }
         if (lowItem == "version()" || lowItem == "version ( )") {
             headers.push_back(disp == item ? "version" : disp);
             // Report this server's identity, not a fabricated PostgreSQL
@@ -8987,7 +8969,7 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
             string fname = expr.substr(0, lp);
             if (nameOk && !s.currentDB.empty()) {
                 auto udf = g_engine.getUDF(s.currentDB, fname);
-                if (!udf.expression.empty()) {
+                if (!udf.expression.empty() && fname != "pg_typeof") {
                     string inner = expr.substr(lp + 1, expr.size() - lp - 2);
                     vector<string> args;
                     {

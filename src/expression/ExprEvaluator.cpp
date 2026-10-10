@@ -2914,12 +2914,13 @@ static std::string arrayElemQuote(const std::string&);
 static std::optional<std::vector<size_t>> arrayShapeOf(const std::string&);
 
 static std::string arrayExpressionType(const Expr* expression, const RowContext& row,
-                                       const std::string& database, const ExprEvaluator* evaluator = nullptr) {
+                                       const std::string& database, const ExprEvaluator* evaluator = nullptr,
+                                       bool preserveUnknown = false, StorageEngine* owner = nullptr) {
     if (const auto* literal=dynamic_cast<const LiteralExpr*>(expression);
         literal && literal->typeName.empty() && !literal->preparedSubquery &&
         (isQuotedString(literal->value) || toLower(literal->value)=="null")) return "unknown";
     if(const auto* function=dynamic_cast<const FunctionCallExpr*>(expression);function && evaluator){
-        const auto type=evaluator->scalarFunctionResultType(function);
+        const auto type=evaluator->scalarFunctionResultType(function,owner);
         if(!type.empty())return ExprHelper::canonicalResultTypeName(type);
     }
     std::map<std::string,std::string> hints;
@@ -2941,7 +2942,8 @@ static std::string arrayExpressionType(const Expr* expression, const RowContext&
         }
     };
     collect(expression);
-    return ExprHelper::inferParsedResultType(expression,hints,database);
+    return preserveUnknown ? ExprHelper::inferParsedInputType(expression,hints,database,owner)
+                           : ExprHelper::inferParsedResultType(expression,hints,database);
 }
 
 ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& ctx) const {
@@ -5057,6 +5059,13 @@ struct SqlNameFunction {
         throw DbError("XX000","SQL name callee requires its actual evaluation context");
     }
 };
+// This builtin consumes the argument's declaration, not its runtime datum.
+// The marker distinguishes it from an actual same-named stored routine.
+struct SqlTypeOfFunction {
+    ExprValue operator()(const std::vector<ExprValue>&) const {
+        throw DbError("XX000","pg_typeof requires its expression metadata context");
+    }
+};
 struct ResolvedScalarFunction {
     bool found = false;
     bool stored = false;
@@ -5131,6 +5140,9 @@ ResolvedScalarFunction resolveScalarFunction(
         schema = decoded.name;
     }
     result.name = name.name;
+    const auto typeOfCallback=registry.find(result.name);
+    const bool polymorphicTypeOf=typeOfCallback!=registry.end() && typeOfCallback->second.target<SqlTypeOfFunction>();
+    bool typeOfCandidate=false;
     engine = engine ? engine : &g_engine;
     const auto path=functionNamespaceSearchPath(*engine,database,schema);
     const QueryHostSetReturningProvider* provider=nullptr;
@@ -5140,7 +5152,15 @@ ResolvedScalarFunction resolveScalarFunction(
             const bool internalCallback=callback!=registry.end() && callback->second.target<BoundScalarRoutine>();
             const bool nameSignature = callback==registry.end() || !callback->second.target<SqlNameFunction>() ||
                 (call->args.empty() && call->namedArgs.empty());
-            if(result.name==toLower(result.name) && evaluator.hasFunction(result.name) && !internalCallback && nameSignature) {
+            const bool typeOfSignature = callback==registry.end() || !callback->second.target<SqlTypeOfFunction>() ||
+                (call->args.size()==1 && call->namedArgs.empty());
+            if(callback!=registry.end() && callback->second.target<SqlTypeOfFunction>() && typeOfSignature &&
+               (call->hasOver || call->distinct || call->filter || !call->orderBy.empty()))
+                throw DbError("42809","pg_typeof is not an aggregate or window function");
+            if(result.name==toLower(result.name) && evaluator.hasFunction(result.name) && !internalCallback && nameSignature && typeOfSignature) {
+                // pg_typeof(any) is a polymorphic candidate. A real exact
+                // typed routine in a later namespace still wins resolution.
+                if(polymorphicTypeOf && schema.empty()) {typeOfCandidate=true;continue;}
                 result.found=true;result.schema=candidateSchema;return result;
             }
             provider=queryHostSetReturningProvider(result.name);
@@ -5188,6 +5208,14 @@ ResolvedScalarFunction resolveScalarFunction(
                 // remains ambiguous. Never inspect an evaluated datum.
                 const auto* polymorphic=queryHostSetReturningProvider(result.name);
                 bool matches=true;
+                if(schema.empty() && polymorphicTypeOf && call->args.size()==1 && call->namedArgs.empty()) {
+                    const auto input=ExprHelper::canonicalResultTypeName(ExprHelper::inferParsedInputType(
+                        call->args.front().get(),{},database,engine));
+                    const auto declared=routine.paramTypes.empty()?std::string{}:
+                        ExprHelper::canonicalResultTypeName(routine.paramTypes.front());
+                    if(input=="unknown")throw DbError("42725","function pg_typeof(unknown) is not unique");
+                    matches=input==declared;
+                }
                 if(schema.empty() && polymorphic && !polymorphic->fixedSignature) {
                     for(size_t i=0;i<call->args.size();++i) {
                         const auto type=ExprHelper::canonicalResultTypeName(ExprHelper::inferParsedInputType(
@@ -5206,6 +5234,7 @@ ResolvedScalarFunction resolveScalarFunction(
             }
         }
     }
+    if(typeOfCandidate){result.found=true;result.schema="pg_catalog";return result;}
     result.provider=provider;
     // SUM/AVG's existing evaluator diagnostic concerns aggregate overload
     // resolution, not a missing scalar callback. Keep it at preparation so
@@ -5266,6 +5295,7 @@ std::string ExprEvaluator::scalarFunctionResultType(const FunctionCallExpr* call
     const auto callback = functions_.find(toLower(resolved.name));
     if (callback != functions_.end()) {
         if(callback->second.target<SqlNameFunction>())return "name";
+        if(callback->second.target<SqlTypeOfFunction>())return "regtype";
         if (const auto* bound = callback->second.target<BoundScalarRoutine>())
             return ExprHelper::canonicalResultTypeName(bound->resolved.routine.returnType);
     }
@@ -5429,6 +5459,26 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
     if(e->sqlValue!=FunctionCallExpr::SqlValue::None)return evalSqlValue(e,ctx);
     if(e->setReturning)throw DbError("0A000","set-returning routine requires its query-host receiver");
     std::string name = toLower(e->funcName);
+    const auto callback=functions_.find(name);
+    if(callback!=functions_.end() && callback->second.target<SqlTypeOfFunction>()) {
+        if(e->args.size()!=1 || !e->namedArgs.empty())
+            throw DbError("42883","function pg_typeof does not exist for these arguments");
+        if(e->hasOver || e->distinct || e->filter || !e->orderBy.empty())
+            throw DbError("42809","pg_typeof is not an aggregate or window function");
+        auto* owner=sqlValueEngine_?sqlValueEngine_:&g_engine;
+        const auto catalog=regtype_detail::metadata(*owner,currentDB_);
+        const auto type=arrayExpressionType(e->args.front().get(),ctx,currentDB_,this,true,owner);
+        Oid oid=0;
+        if(const auto* column=dynamic_cast<const ColumnRefExpr*>(e->args.front().get());column && column->binding)
+            oid=column->binding->typeOid;
+        if(!oid)oid=resolveDeclaredTypeName(type,&catalog,currentSession()).typeOid;
+        // Non-strict does not mean unevaluated: preserve argument effects and
+        // errors, including for a NULL result or an otherwise unused datum.
+        (void)eval(e->args.front().get(),ctx);
+        ExprValue result("regtype",regtype_detail::output(oid,catalog,currentSession()));
+        result.objectOid=oid;
+        return result;
+    }
     if (e->schema.empty() && name == "exists" && e->args.size() == 1 &&
         e->args.front()->preparedSubquery) {
         if (!scalarSubqueryExecutor_)
@@ -11139,6 +11189,7 @@ void ExprEvaluator::registerBuiltins() {
     functions_["session_user"]=SqlNameFunction{sql_value_detail::Kind::SessionUser};
     functions_["current_database"]=SqlNameFunction{sql_value_detail::Kind::CurrentCatalog};
     functions_["current_schema"]=SqlNameFunction{sql_value_detail::Kind::CurrentSchema};
+    functions_["pg_typeof"]=SqlTypeOfFunction{};
     for(const auto* name:{"current_user","session_user","current_database","current_schema"})
         volatility_[name]='s';
     // timestamp 'YYYY-MM-DD[ HH:MM:SS]'.
@@ -12180,6 +12231,7 @@ void ExprEvaluator::registerBuiltins() {
     volatility_["localtime"] = 's';
     volatility_["clock_timestamp"] = 'v';
     volatility_["current_user"] = 's';
+    volatility_["pg_typeof"] = 's';
     volatility_["session_user"] = 's';
     volatility_["nextval"] = 'v';
     volatility_["currval"] = 'v';
