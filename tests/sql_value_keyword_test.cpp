@@ -22,9 +22,9 @@ int main() {
     struct Restore {Session* value;~Restore(){setCurrentSession(value);}} restore{previous};
     size_t checked=0;
     const std::vector<std::string> names={"current_user","session_user","current_role","current_catalog",
-        "current_schema","current_date","current_timestamp","localtimestamp","current_time","localtime"};
-    const std::vector<uint32_t> oids={19,19,19,19,19,1082,1184,1114,1266,1083};
-    const std::vector<std::string> types={"name","name","name","name","name","date","timestamptz","timestamp","timetz","time"};
+        "current_schema","current_date","current_timestamp","localtimestamp","current_time","localtime","user"};
+    const std::vector<uint32_t> oids={19,19,19,19,19,1082,1184,1114,1266,1083,19};
+    const std::vector<std::string> types={"name","name","name","name","name","date","timestamptz","timestamp","timetz","time","name"};
     for(size_t i=0;i<names.size();++i) {
         const auto sql="SELECT "+names[i];
         auto query=std::make_shared<PreparedQuery>(g_engine.prepareBoundQuery(database,sql));
@@ -39,7 +39,7 @@ int main() {
         RowContext row;row.set(names[i],ExprValue("text","ordinary column cannot replace a keyword"));
         const auto value=execution.evaluate(call,row);
         assert(value.typeName==types[i] && !value.isNull);
-        if(i==0 || i==2)assert(value.value=="role_a");
+        if(i==0 || i==2 || names[i]=="user")assert(value.value=="role_a");
         if(i==1)assert(value.value=="login");
         if(i==3)assert(value.value==database);
         if(i==4)assert(value.value=="public");
@@ -62,6 +62,12 @@ int main() {
     const auto parsed=SQLParser().parse("SELECT current_user");assert(parsed.success);
     assert(direct.eval(static_cast<const SelectStmt*>(parsed.stmt.get())->selectList[0].expr.get(),{}).value=="role_b");
     assert(effects==0);++checked;
+    direct.registerFunction("user",[&](const std::vector<ExprValue>&){++effects;return ExprValue("name","fake user callee");});
+    const auto userParsed=SQLParser().parse("SELECT USER");assert(userParsed.success);
+    const auto* userExpression=static_cast<const SelectStmt*>(userParsed.stmt.get())->selectList[0].expr.get();
+    const auto* userCall=dynamic_cast<const FunctionCallExpr*>(userExpression);
+    assert(userCall && userCall->funcName=="user" && userCall->sqlValue==FunctionCallExpr::SqlValue::CurrentUser);
+    assert(direct.eval(userExpression,{}).value=="role_b" && effects==0);++checked;
     for(const auto* name:{"current_timestamp","localtimestamp","current_time","localtime"}) {
         const auto sql="SELECT "+std::string(name)+"(3)";
         const auto prepared=g_engine.prepareBoundQuery(database,sql);
@@ -69,7 +75,7 @@ int main() {
         const auto* call=dynamic_cast<const FunctionCallExpr*>(select->selectList[0].expr.get());
         assert(call && call->sqlValuePrecision==3 && call->toString()==std::string(name)+"(3)");++checked;
     }
-    for(const auto* sql:{"SELECT current_user()","SELECT session_user()","SELECT current_role()",
+    for(const auto* sql:{"SELECT current_user()","SELECT USER()","SELECT session_user()","SELECT current_role()",
          "SELECT current_catalog()","SELECT current_date()","SELECT localtime()","SELECT localtimestamp()",
          "SELECT current_timestamp(1+1)","SELECT current_timestamp(-1)"}) {
         std::string state;

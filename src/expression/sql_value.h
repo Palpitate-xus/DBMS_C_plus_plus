@@ -6,7 +6,7 @@
 namespace dbms::sql_value_detail {
 using Kind = FunctionCallExpr::SqlValue;
 inline Kind kind(const std::string& name) {
-    if(name=="current_user")return Kind::CurrentUser;
+    if(name=="current_user" || name=="user")return Kind::CurrentUser;
     if(name=="session_user")return Kind::SessionUser;
     if(name=="current_role")return Kind::CurrentRole;
     if(name=="current_catalog")return Kind::CurrentCatalog;

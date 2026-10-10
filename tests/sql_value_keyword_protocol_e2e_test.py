@@ -44,23 +44,27 @@ def main():
 
     try:
         keywords=['current_user','session_user','current_role','current_catalog','current_schema',
-                  'current_date','current_timestamp','localtimestamp','current_time','localtime']
-        oids=[19]*5+[1082,1184,1114,1266,1083]
+                  'current_date','current_timestamp','localtimestamp','current_time','localtime','user']
+        oids=[19]*5+[1082,1184,1114,1266,1083,19]
         sql='SELECT '+','.join(keywords)
         result=check(sql,oids=oids,names=keywords)
         if result[1] is None:
             assert len(result[0])==1 and result[0][0][:5]==[user,user,user,database,'public'],result
             assert all(value is not None for value in result[0][0]),result
         check(sql,[],oids,keywords,describe=True)
-        check('SELECT current_user=session_user,current_role=current_user,current_catalog=current_database(),current_schema=current_schema()',
-              [['t']*4],[16]*4)
+        check('SELECT current_user=session_user,current_role=current_user,current_catalog=current_database(),current_schema=current_schema(),USER=current_user',
+              [['t']*5],[16]*5)
+        check('SELECT USER,user AS who,(USER)::NAME',[[user,user,user]],[19]*3,['user','who','user'])
+        check('SELECT USER,user AS who,(USER)::NAME',[],[19]*3,['user','who','user'],describe=True)
+        check('SELECT "user"',state='42703')
+        check('SELECT "user"() WHERE false',state='42883')
         check('SELECT "current_user"(),pg_catalog."current_user"(),current_schema(),pg_catalog.current_schema()',
               [[user,user,'public','public']],[19]*4)
         check("SELECT CASE WHEN false THEN current_user ELSE 'kept'::NAME END",[['kept']],[19])
         for name,oid in [('current_timestamp',1184),('localtimestamp',1114),('current_time',1266),('localtime',1083)]:
             check('SELECT '+name+'(3)',oids=[oid],names=[name])
             check('SELECT '+name+'(3)',[],[oid],[name],describe=True)
-        for invalid in ['current_user()','session_user()','current_role()','current_catalog()',
+        for invalid in ['current_user()','USER()','session_user()','current_role()','current_catalog()',
                         'current_date()','localtime()','localtimestamp()',
                         'current_timestamp(1+1)','current_timestamp(-1)']:
             check('SELECT '+invalid,state='42601')
@@ -70,6 +74,10 @@ def main():
         if result[1] is None:created.append('sql_value_keyword_user')
         check('SELECT sql_value_keyword_user()',[[user]],[19])
         check('SELECT sql_value_keyword_user()',[],[19],describe=True)
+        result=check('CREATE FUNCTION sql_value_keyword_alias_user() RETURNS NAME LANGUAGE sql AS $$ SELECT USER $$')
+        if result[1] is None:created.append('sql_value_keyword_alias_user')
+        check('SELECT sql_value_keyword_alias_user()',[[user]],[19])
+        check('SELECT sql_value_keyword_alias_user()',[],[19],describe=True)
         result=check('CREATE FUNCTION sql_value_keyword_schema() RETURNS NAME LANGUAGE sql AS $$ SELECT current_schema $$')
         if result[1] is None:created.append('sql_value_keyword_schema')
         check('SELECT sql_value_keyword_schema()',[["public"]],[19])

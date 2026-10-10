@@ -2823,7 +2823,7 @@ static ExprPtr parsePrimaryExprImpl(const std::vector<std::string>& tokens, size
     // is invoked to discover the expression's namespace.
     static const std::set<std::string> valueFunctions = {
         "current_date", "current_time", "current_timestamp", "localtime", "localtimestamp",
-        "current_catalog", "current_schema", "current_user", "session_user", "current_role"
+        "current_catalog", "current_schema", "current_user", "session_user", "current_role", "user"
     };
     if (valueFunctions.count(firstLower) &&
         (firstLower != "current_schema" || pos == tokens.size() || tokens[pos] != "(")) {
