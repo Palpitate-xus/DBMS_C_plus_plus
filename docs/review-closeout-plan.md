@@ -13,8 +13,10 @@
    lazy Gen、限定DROP、procedure namespace、PL intrinsic；最新source249f4fe1，
    196scoped/780auto+2Main/440wire/58TU，own fresh57/Main91787/31765均0，实际
    57/1编译；normal/repeat/all58/cache/source/frozen start均0。53native/36wire
-   publication86219正在运行，77e17d/a66d输入冻结到终态；不用私有obj/binary。
-3. 普通Date native AST、pg_typeof receiver、quoted enum、catalog加载race、
+   publication86219终1：53/53native、35/36wire通过，default/all58/repeat/source/
+   frozen终态检查0；仅fromless混合pg_typeof失败。Date native AST修正已独立
+   合入 `dbfc241a`；不用私有obj/binary。
+3. pg_typeof receiver、quoted enum、catalog加载race、
    recovery、index corruption、typed trigger与EXPLAIN失败继续逐项复现修复提交。
    当前没有新Root组合全量结果；所有原273族仍须按完整要求验收。
 4. 保持原273的22complete166partial70unverified15deferred；仅明确15安全/TDE

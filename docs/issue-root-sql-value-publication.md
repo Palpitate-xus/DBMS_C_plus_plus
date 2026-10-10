@@ -1,5 +1,27 @@
 # Actual Root verification after four independent imports
 
+## Latest combined publication terminal (2026-10-10)
+
+After the seven independent imports through `249f4fe1`, Root publication
+86219 actually exits 1: all 53 native entries and 35 of 36 wire entries pass.
+The unchanged `fromless_structured_protocol_e2e_test` alone fails 42883 at
+its mixed `pg_typeof` projection. The complete default protocol passes.
+All 58 own-object receipts, repeat-build, source and frozen-binary checks
+also pass at terminal. Frozen binary SHA256 starts `77e17da587df0241`;
+source seal is `a66d830ddac38bf941557c8cd06242a8865e185c37702aa7ce2853252436e35b`.
+Log: `/tmp/dbms-root-sql-value.x5X8O5vm/root-namespace-publication53-36.log`.
+This is a focused publication, not a new complete registered-suite pass.
+
+After terminal, date fixture `cd824c56` was independently imported as
+`dbfc241a`. Its original value, NULL and clock assertions are retained;
+it now constructs genuine parser-owned SQL-value intrinsic ASTs.
+The original 273-item completion status and the 15 explicitly deferred
+security/TDE items are unchanged. No push and no Actions activation.
+
+README was rechecked: its evergreen changes are already committed in
+`f513ac1f`; all local links, compatibility-contract and version checks pass.
+No redundant README change or claim of complete gap closure was made.
+
 Root own fresh57 build97646 exits0 with57 actual compiler entries. Actual own
 Main52631 exits0. Normal production builder/repeat use these Root-produced
 objects and perform no repeat recompilation. No private objects or binaries

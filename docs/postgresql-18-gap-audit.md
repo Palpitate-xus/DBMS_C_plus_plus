@@ -9,7 +9,11 @@ intrinsic：`abf225d9`/`f245410a`/`3afd0b04`/`200db2e4`/`3fef1112`/
 全0，最终procedure5native与四wire、PL4native/七wire全0。新Root196scoped、
 780auto+2Main/440wire/58TU，own fresh57/Main91787/31765均0，57/1真实编译；
 normal/repeat/all58/cache/source/frozen start均0，不借私有obj/binary。53native/
-36wire新publication86219在77e17d/a66d冻结输入上运行，尚无终态组合验收。
+36wire新publication86219在77e17d/a66d冻结输入上终1：53/53native、35/36wire
+通过，原default协议通过，all58/repeat/source/frozen终态检查全0。唯一失败是
+原fromless混合投影pg_typeof的42883；继续修复，不能宣称全套通过。终态后独立
+合入日期fixture `dbfc241a`，保留原断言并使用真实SQL-value AST。README长期
+入口已在 `f513ac1f` 提交，本次链接/契约/版本检查均通过；不重复制造修改。
 原273及22complete166partial70unverified15deferred
 保持，Date native AST、pg_typeof、quoted enum、catalog race、recovery/EXPLAIN及
 所有原未完族继续。不push、不启用Actions，仅15明确安全/TDE项deferred。
