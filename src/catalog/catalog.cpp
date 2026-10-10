@@ -1654,6 +1654,14 @@ const std::vector<PgTypeRow>& CatalogManager::builtinTypeRows() {
     ensureType(1027,  "_polygon",   -1,   'b', 'A');
     ensureType(700,   "float4",      4,   'b', 'N');
     ensureType(701,   "float8",      8,   'b', 'N');
+    ensureType(705,   "unknown",    -2,   'p', 'X');
+    auto& unknown = types.at(typeByOid.at(705));
+    unknown.typowner = 10;
+    unknown.typalign = 'c';
+    unknown.typinput = 109;
+    unknown.typoutput = 110;
+    unknown.typreceive = 2416;
+    unknown.typsend = 2417;
     ensureType(650,   "cidr",       -1,   'b', 'I');
     ensureType(651,   "_cidr",      -1,   'b', 'A');
     ensureType(774,   "macaddr8",    8,   'b', 'U');
