@@ -10,6 +10,7 @@
 #include "expression/expr_helper.h"
 #include "common/DbError.h"
 #include "parser/ast.h"
+#include "parser/parser.h"
 #include <cassert>
 #include <cstdio>
 #include <ctime>
@@ -35,6 +36,18 @@ static dbms::ExprValue callFn(dbms::ExprEvaluator& eval, const std::string& name
 }
 
 static dbms::ExprValue F(const std::string& v) { return dbms::ExprValue("text", v, false); }
+static dbms::ExprValue sqlValue(dbms::ExprEvaluator& eval,const std::string& name) {
+    // CURRENT_* is SQL value grammar, not an ordinary zero-argument call.
+    // Construct the actual parser-owned intrinsic and retain every value,
+    // type and clock-boundary assertion at the call sites below.
+    auto parsed=dbms::SQLParser().parseForBinding("SELECT "+name);
+    assert(parsed.success);
+    const auto* select=dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get());
+    assert(select && select->selectList.size()==1);
+    const auto* call=dynamic_cast<const dbms::FunctionCallExpr*>(select->selectList.front().expr.get());
+    assert(call && call->sqlValue!=dbms::FunctionCallExpr::SqlValue::None);
+    return eval.eval(call,dbms::RowContext{});
+}
 static dbms::ExprValue D(const std::string& v) { return dbms::ExprValue("date", v, false); }
 static dbms::ExprValue TS(const std::string& v) { return dbms::ExprValue("timestamp", v, false); }
 static dbms::ExprValue TSTZ(const std::string& v) { return dbms::ExprValue("timestamptz", v, false); }
@@ -502,16 +515,16 @@ static void test_current_family() {
     const std::string beforeTimestamp = utcNow("%Y-%m-%d %H:%M:%S");
     const std::string beforeTime = utcNow("%H:%M:%S");
     dbms::ExprEvaluator eval;
-    const auto currentDate = callFn(eval, "current_date", {});
-    const auto currentTimestamp = callFn(eval, "current_timestamp", {});
-    const auto localTimestamp = callFn(eval, "localtimestamp", {});
+    const auto currentDate = sqlValue(eval, "current_date");
+    const auto currentTimestamp = sqlValue(eval, "current_timestamp");
+    const auto localTimestamp = sqlValue(eval, "localtimestamp");
     const auto transactionTimestamp =
         callFn(eval, "transaction_timestamp", {});
     const auto statementTimestamp = callFn(eval, "statement_timestamp", {});
     const auto now = callFn(eval, "now", {});
     const auto clockTimestamp = callFn(eval, "clock_timestamp", {});
-    const auto currentTime = callFn(eval, "current_time", {});
-    const auto localTime = callFn(eval, "localtime", {});
+    const auto currentTime = sqlValue(eval, "current_time");
+    const auto localTime = sqlValue(eval, "localtime");
     const std::string afterDate = utcNow("%Y-%m-%d");
     const std::string afterTimestamp = utcNow("%Y-%m-%d %H:%M:%S");
     const std::string afterTime = utcNow("%H:%M:%S");
@@ -644,7 +657,7 @@ static void test_age_fractional_seconds() {
 
 static void test_age_single_argument() {
     dbms::ExprEvaluator eval;
-    const auto today = callFn(eval, "current_date", {});
+    const auto today = sqlValue(eval, "current_date");
     assert(!today.isNull);
 
     const auto oneArgument =
