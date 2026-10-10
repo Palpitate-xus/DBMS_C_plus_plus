@@ -2,6 +2,20 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Complete Root regression retains12 failures; seven independent NAME/OID/SRF/DDL/procedure/PL commits imported after its terminal",
+      "gap_ids": ["TYPE-02", "CAT-03", "SQL-04", "QRY-01", "FUNC-01", "FUNC-05", "FUNC-06", "TXN-05", "PROTO-04"],
+      "status": "partial",
+      "commits": ["abf225d9", "f245410a", "3afd0b04", "200db2e4", "3fef1112", "ea89eede", "249f4fe1"],
+      "evidence": ["docs/issue-full-registered-a85e653e.md", "docs/issue-function-drop-namespace.md", "docs/issue-drop-routine-qualified-name.md", "docs/issue-plpgsql-sql-value-intrinsics.md", "docs/deferred-scope.md"],
+      "tests": ["tests/generate_series_cursor_test.cpp", "tests/generate_series_protocol_e2e_test.py", "tests/drop_function_namespace_test.cpp", "tests/drop_routine_qualified_name_protocol_e2e_test.py", "tests/procedure_namespace_test.cpp", "tests/procedure_namespace_protocol_e2e_test.py", "tests/plpgsql_quoted_scalar_binding_test.cpp"],
+      "verification": {
+        "reproduction": "Original NAME/OID/VOID/Gen failures remain. Known-bad DROP/procedure matrices58725/55914 deliberately interrupted143, not full passes. Actual180006 reference Gen78/DROP20/procedure32 all0. New precision authoring22023 disproven by genuine42601 reference; strict control retained.",
+        "focused_tests": "Private Gen91737=1:43native25/27wire pass, originaldefault pass, qualifiedDROP/pre-existingpg_typeof failures retained, all58terminalfences0. Qualified function four native/Gen78 all0. Procedure ownfresh57/Main44937/91300, correctedMain/DDL57191/55555=0; corrected5native21277 and32/20/78+originalreplace44066 all0, all58/repeat79772=0. PL original82335=1, ownstorage57091=0, four native8479/sevenwire48517=0, all58/repeat78296=0. Scoped proofs do not close original families.",
+        "full_suite": "Old Root85873 terminal1:769/775native/Main431/437wire pass; all1212 terminal markers, bothMain/originaldefault pass,12 failures in evidence table, all58/source/frozen terminal fences0. Seven commits separately-x imported after terminal. Master196scoped780auto+2Main440wire58TU; new ownRoot57/Main91787/31765 running on249f4fe1. No new Root publication/full-green claim.",
+        "scope": "Original273 items/statuses unchanged22complete166partial70unverified15deferred. Only15 explicit security/TDE requirements deferred. Date native AST,pg_typeof,quoted enum,catalog race,recovery,EXPLAIN and all original incomplete requirements continue. No push or Actions activation."
+      }
+    },
+    {
       "issue": "Ordinary NAME and result OID/VOID repairs independently committed; generate_series positive retained as separate unfinished requirement",
       "gap_ids": ["TYPE-02", "CAT-03", "SQL-04", "FUNC-05", "FUNC-06", "PROTO-04"],
       "status": "partial",

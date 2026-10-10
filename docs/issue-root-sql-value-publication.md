@@ -26,9 +26,11 @@ Root frozen SHA256:
 beb50f30e23cf2a3ddc12e6aaf2a83bfcf23fc9f451287667e968c4920eb97fb.
 Source seal:a85e653e42b8a466780138e3ae9faf001db78874419dc1cbd8f455f949b8350a.
 
-Unchanged new complete775native/Main/437wire driver85873 is now actually live
-on these frozen inputs; Root src/scripts/tests/cmake remain frozen until its
-terminal. Root190 scoped repairs are committed, but no new full-suite pass.
+Unchanged complete775native/Main/437wire driver85873 now ends1:769native and
+431wire pass, all1212 terminal markers present. Both real Main drivers and
+complete original default protocol pass;12 failures remain. All58/source/
+frozen terminal fences pass. See issue-full-registered-a85e653e.md for every
+failure and preserved scope. Root190 repairs are committed; no full-suite pass.
 
 Private ordinary NAME registration e55c863e fixes the declaration gap. Its own
 registry CPP19174=0, complete original type_registry9061=0, actual reference33=0,

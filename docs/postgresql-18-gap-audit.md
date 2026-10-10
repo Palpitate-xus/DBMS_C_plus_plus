@@ -1,3 +1,18 @@
+# 2026-10-10 全注册回归终态与七项独立修复合入
+
+旧Root完整85873终1：769/775native(Main含)、431/437wire通过，全部1212终态
+marker齐全，两个真实Main与原default通过；12失败见[逐项表](issue-full-registered-a85e653e.md)。
+all58/source/frozen终态一致，TLS仅stub，不冒全套绿。终态后分别-x合入NAME、
+Gen正控、结果OID/VOID、lazy Gen、限定routine DROP、procedure namespace、PL
+intrinsic：`abf225d9`/`f245410a`/`3afd0b04`/`200db2e4`/`3fef1112`/
+`ea89eede`/`249f4fe1`。私有原失败保留；actual180006的Gen78/DROP20/procedure32
+全0，最终procedure5native与四wire、PL4native/七wire全0。新Root196scoped、
+780auto+2Main/440wire/58TU，own fresh57/Main91787/31765正在编译，不借私有
+obj/binary，尚无新Root组合验收。原273及22complete166partial70unverified15deferred
+保持，Date native AST、pg_typeof、quoted enum、catalog race、recovery/EXPLAIN及
+所有原未完族继续。不push、不启用Actions，仅15明确安全/TDE项deferred。
+以下均历史checkpoint。
+
 # 2026-10-10 普通 NAME 与结果 OID/VOID 已独立提交
 
 private NAME登记 `e55c863e`：原33/5fail -> 原样33全0，actual18.6参考0。

@@ -4,6 +4,22 @@
 
 # 工作区与复查清单收尾计划
 
+## 2026-10-10 当前执行顺序
+
+1. 原完整85873终1，769/775native(Main含)、431/437wire通过；12失败表见
+   `docs/issue-full-registered-a85e653e.md`。all1212终态/all58/source/frozen一致，
+   不冒全套通过，原default/两个Main确实通过。
+2. 七项修复/fixture已逐项-x合入master：NAME、Gen绑定正控、结果OID/VOID、
+   lazy Gen、限定DROP、procedure namespace、PL intrinsic；最新source249f4fe1，
+   196scoped/780auto+2Main/440wire/58TU，own fresh57/Main91787/31765正运行。
+   Main完成后先normal/repeat/all58/source/frozen检查，再完整publication矩阵；
+   不用私有obj/binary替代Root验证。
+3. 普通Date native AST、pg_typeof receiver、quoted enum、catalog加载race、
+   recovery、index corruption、typed trigger与EXPLAIN失败继续逐项复现修复提交。
+   当前没有新Root组合全量结果；所有原273族仍须按完整要求验收。
+4. 保持原273的22complete166partial70unverified15deferred；仅明确15安全/TDE
+   专项跳过，不扩大deferred，不push或启用Actions。README仍为长期项目入口。
+
 ## 2026-10-09 当前执行计划
 
 1. README 长期项目入口已独立 commit `cfcab3cd` / `f513ac1f`；不放临时进度或测试统计。
