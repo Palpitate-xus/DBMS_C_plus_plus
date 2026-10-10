@@ -67,6 +67,40 @@ std::set<std::string> declarationNamespaceFacts(const std::string& database) {
     return names;
 }
 
+struct StoredRoutineDropTarget {
+    std::string name;
+    std::string schema;
+    bool scalar=false,table=false,procedure=false;
+};
+
+StoredRoutineDropTarget resolveStoredRoutineDropTarget(
+    const std::string& spelling,const Session& session,bool functions,bool procedures) {
+    CatalogManager::QualifiedName identity;
+    if(!CatalogManager::parseQualifiedName(spelling,identity,true))
+        throw DbError("42601","invalid routine name");
+    std::vector<std::string> path;
+    if(!identity.schema.empty())path.push_back(identity.schema);
+    else {
+        std::string canonical;
+        if(!parseSessionSearchPath(session.searchPath,path,canonical))
+            throw DbError("22023","invalid search_path");
+        for(auto& entry:path)entry=expandSessionSearchPathEntry(entry,session.username);
+        if(std::find(path.begin(),path.end(),"pg_catalog")==path.end())
+            path.insert(path.begin(),"pg_catalog");
+    }
+    for(auto schema:path) {
+        if(schema=="pg_temp")schema=sessionTempSchemaName(session);
+        StoredRoutineDropTarget target{identity.name,schema};
+        target.scalar=functions && g_engine.udfExists(session.currentDB,target.name,schema);
+        // The old TVF/procedure stores are public-only. Never reinterpret a
+        // qualified non-public object as a same-named public stored object.
+        target.table=functions && schema=="public" && g_engine.tvfExists(session.currentDB,target.name);
+        target.procedure=procedures && schema=="public" && g_engine.procedureExists(session.currentDB,target.name);
+        if(target.scalar || target.table || target.procedure)return target;
+    }
+    return {identity.name,identity.schema};
+}
+
 std::string toLower(std::string s) {
     std::transform(s.begin(), s.end(), s.begin(),
                    [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
@@ -10966,8 +11000,9 @@ bool DdlExecutor::executeDropFunction(const DropStmt* stmt, Session& s) {
         return true;
     }
     const std::string& name = parts[0];
-    const bool scalarExists = g_engine.udfExists(s.currentDB, name);
-    const bool tableFunctionExists = g_engine.tvfExists(s.currentDB, name);
+    const auto target=resolveStoredRoutineDropTarget(name,s,true,false);
+    const bool scalarExists = target.scalar;
+    const bool tableFunctionExists = target.table;
     if (scalarExists && tableFunctionExists) {
         std::cout << "ERROR: function \"" << name
                   << "\" is ambiguous (SQLSTATE 42725)" << std::endl;
@@ -10975,7 +11010,7 @@ bool DdlExecutor::executeDropFunction(const DropStmt* stmt, Session& s) {
     }
     bool signatureMatches = scalarExists || tableFunctionExists;
     if (zeroArgumentSignature && scalarExists) {
-        const auto function = g_engine.getUDF(s.currentDB, name);
+        const auto function = g_engine.getUDF(s.currentDB, target.name,target.schema);
         if (function.expression.empty()) {
             std::cout << "ERROR: function metadata is invalid (SQLSTATE 58030)"
                       << std::endl;
@@ -10983,7 +11018,7 @@ bool DdlExecutor::executeDropFunction(const DropStmt* stmt, Session& s) {
         }
         signatureMatches = function.paramTypes.empty();
     } else if (zeroArgumentSignature && tableFunctionExists) {
-        signatureMatches = g_engine.getTVFParam(s.currentDB, name).empty();
+        signatureMatches = g_engine.getTVFParam(s.currentDB, target.name).empty();
     }
     if (!signatureMatches) {
         if (stmt->ifExists) {
@@ -11009,14 +11044,14 @@ bool DdlExecutor::executeDropFunction(const DropStmt* stmt, Session& s) {
     }
     txn.markSnapshotDirty();
     const DBStatus status = scalarExists
-        ? g_engine.dropUDF(s.currentDB, name)
-        : g_engine.dropTVF(s.currentDB, name);
+        ? g_engine.dropUDF(s.currentDB, target.name,target.schema)
+        : g_engine.dropTVF(s.currentDB, target.name);
     if (status != DBStatus::OK) {
         std::cout << "ERROR: DROP FUNCTION failed (SQLSTATE "
                   << sqlstateForDBStatus(status) << ")" << std::endl;
         return true;
     }
-    txn.recordDrop(DdlObjectKind::Function, name);
+    txn.recordDrop(DdlObjectKind::Function, target.name,scalarExists?target.schema:"");
     if (!txn.commit()) return true;
     std::cout << "DROP FUNCTION succeeded" << std::endl;
     return false;
@@ -11167,9 +11202,10 @@ bool DdlExecutor::executeDropProcedure(const DropStmt* stmt, Session& s) {
         return true;
     }
     const std::string& name = parts[0];
-    bool exists = g_engine.procedureExists(s.currentDB, name);
+    const auto target=resolveStoredRoutineDropTarget(name,s,false,true);
+    bool exists = target.procedure;
     if (zeroArgumentSignature && exists) {
-        exists = g_engine.getProcedureParams(s.currentDB, name).empty();
+        exists = g_engine.getProcedureParams(s.currentDB, target.name).empty();
     }
     if (!exists) {
         if (stmt->ifExists) {
@@ -11194,13 +11230,13 @@ bool DdlExecutor::executeDropProcedure(const DropStmt* stmt, Session& s) {
         return true;
     }
     txn.markSnapshotDirty();
-    const DBStatus status = g_engine.dropProcedure(s.currentDB, name);
+    const DBStatus status = g_engine.dropProcedure(s.currentDB, target.name);
     if (status != DBStatus::OK) {
         std::cout << "ERROR: DROP PROCEDURE failed (SQLSTATE "
                   << sqlstateForDBStatus(status) << ")" << std::endl;
         return true;
     }
-    txn.recordDrop(DdlObjectKind::Procedure, name);
+    txn.recordDrop(DdlObjectKind::Procedure, target.name);
     if (!txn.commit()) return true;
     std::cout << "DROP PROCEDURE succeeded" << std::endl;
     return false;
@@ -11221,15 +11257,16 @@ bool DdlExecutor::executeDropRoutine(const DropStmt* stmt, Session& s) {
         return true;
     }
     const std::string& name = parts[0];
-    const bool scalarExists = g_engine.udfExists(s.currentDB, name);
-    const bool tableFunctionExists = g_engine.tvfExists(s.currentDB, name);
-    const bool procedureExists = g_engine.procedureExists(s.currentDB, name);
+    const auto resolved=resolveStoredRoutineDropTarget(name,s,true,true);
+    const bool scalarExists = resolved.scalar;
+    const bool tableFunctionExists = resolved.table;
+    const bool procedureExists = resolved.procedure;
     bool scalarMatches = scalarExists;
     bool tableFunctionMatches = tableFunctionExists;
     bool procedureMatches = procedureExists;
     if (zeroArgumentSignature) {
         if (scalarExists) {
-            const auto function = g_engine.getUDF(s.currentDB, name);
+            const auto function = g_engine.getUDF(s.currentDB, resolved.name,resolved.schema);
             if (function.expression.empty()) {
                 std::cout << "ERROR: function metadata is invalid "
                              "(SQLSTATE 58030)" << std::endl;
@@ -11239,11 +11276,11 @@ bool DdlExecutor::executeDropRoutine(const DropStmt* stmt, Session& s) {
         }
         if (tableFunctionExists) {
             tableFunctionMatches =
-                g_engine.getTVFParam(s.currentDB, name).empty();
+                g_engine.getTVFParam(s.currentDB, resolved.name).empty();
         }
         if (procedureExists) {
             procedureMatches =
-                g_engine.getProcedureParams(s.currentDB, name).empty();
+                g_engine.getProcedureParams(s.currentDB, resolved.name).empty();
         }
     }
     const int matches = static_cast<int>(scalarMatches) +

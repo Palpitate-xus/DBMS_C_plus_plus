@@ -507,6 +507,24 @@ static bool parseQualifiedObjectName(
     return true;
 }
 
+static bool parseQualifiedRoutineName(const std::vector<std::string>& tokens,
+    size_t& pos, std::string& name) {
+    const auto identifier=[](const std::string& token) {
+        if(token.empty())return false;
+        if(token.front()=='"')return token.size()>=2 && token.back()=='"';
+        const auto first=static_cast<unsigned char>(token.front());
+        if(!std::isalpha(first) && first!='_' && first<128)return false;
+        for(const unsigned char c:token)
+            if(!std::isalnum(c) && c!='_' && c!='$' && c<128)return false;
+        return true;
+    };
+    const auto first=pos;
+    if(!parseQualifiedObjectName(tokens,pos,name) || !identifier(tokens[first]) ||
+       (pos>first+1 && !identifier(tokens[pos-1])))return false;
+    CatalogManager::QualifiedName identity;
+    return CatalogManager::parseQualifiedName(name,identity,true);
+}
+
 static bool parseForeignKeyTarget(
     const std::vector<std::string>& tokens, size_t& pos,
     std::string& name) {
@@ -9312,6 +9330,9 @@ StmtPtr SQLParser::parseDropFunction(const std::vector<std::string>& tokens, siz
     if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
         stmt->ifExists = true; pos += 2;
     }
+    std::string name;
+    if (!parseQualifiedRoutineName(tokens, pos, name)) return nullptr;
+    stmt->objectNames.push_back(std::move(name));
     while (pos < tokens.size() && tokens[pos] != ";") {
         std::string w = toLower(tokens[pos]);
         if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
@@ -9328,6 +9349,9 @@ StmtPtr SQLParser::parseDropProcedure(const std::vector<std::string>& tokens, si
     if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
         stmt->ifExists = true; pos += 2;
     }
+    std::string name;
+    if (!parseQualifiedRoutineName(tokens, pos, name)) return nullptr;
+    stmt->objectNames.push_back(std::move(name));
     while (pos < tokens.size() && tokens[pos] != ";") {
         std::string w = toLower(tokens[pos]);
         if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
@@ -9344,6 +9368,9 @@ StmtPtr SQLParser::parseDropRoutine(const std::vector<std::string>& tokens, size
     if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
         stmt->ifExists = true; pos += 2;
     }
+    std::string name;
+    if (!parseQualifiedRoutineName(tokens, pos, name)) return nullptr;
+    stmt->objectNames.push_back(std::move(name));
     while (pos < tokens.size() && tokens[pos] != ";") {
         std::string w = toLower(tokens[pos]);
         if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
