@@ -8938,14 +8938,6 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
             appendValue("public", false, "name");
             continue;
         }
-        if (lowItem == "version()" || lowItem == "version ( )") {
-            headers.push_back(disp == item ? "version" : disp);
-            // Report this server's identity, not a fabricated PostgreSQL
-            // release/build that can mislead clients about supported behavior.
-            appendValue(std::string("DBMS-C++ ") + DBMS_VERSION_STRING +
-                            " (PostgreSQL protocol 3.0)", false, "text");
-            continue;
-        }
         if (lowItem == "user" || lowItem == "current_user" || lowItem == "session_user") {
             // The bare keyword USER is a PG synonym for CURRENT_USER.
             if (lowItem == "user") {
@@ -8969,7 +8961,7 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
             string fname = expr.substr(0, lp);
             if (nameOk && !s.currentDB.empty()) {
                 auto udf = g_engine.getUDF(s.currentDB, fname);
-                if (!udf.expression.empty() && fname != "pg_typeof") {
+                if (!udf.expression.empty() && fname != "pg_typeof" && fname != "version") {
                     string inner = expr.substr(lp + 1, expr.size() - lp - 2);
                     vector<string> args;
                     {

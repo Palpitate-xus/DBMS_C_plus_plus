@@ -20,6 +20,7 @@
 #include "expression/record_cast.h"
 #include "expression/sql_value.h"
 #include "common/DbError.h"
+#include "common/version.h"
 #include "common/SqlArrayText.h"
 #include "common/NotificationManager.h"
 #include "common/sha256.h"
@@ -5066,6 +5067,13 @@ struct SqlTypeOfFunction {
         throw DbError("XX000","pg_typeof requires its expression metadata context");
     }
 };
+struct SqlVersionFunction {
+    ExprValue operator()(const std::vector<ExprValue>& args) const {
+        if(!args.empty())throw DbError("42883","version does not accept arguments");
+        return ExprValue("text",std::string("DBMS-C++ ")+DBMS_VERSION_STRING+
+            " (PostgreSQL protocol 3.0)");
+    }
+};
 struct ResolvedScalarFunction {
     bool found = false;
     bool stored = false;
@@ -5154,10 +5162,15 @@ ResolvedScalarFunction resolveScalarFunction(
                 (call->args.empty() && call->namedArgs.empty());
             const bool typeOfSignature = callback==registry.end() || !callback->second.target<SqlTypeOfFunction>() ||
                 (call->args.size()==1 && call->namedArgs.empty());
+            const bool versionSignature = callback==registry.end() || !callback->second.target<SqlVersionFunction>() ||
+                (call->args.empty() && call->namedArgs.empty());
+            if(callback!=registry.end() && callback->second.target<SqlVersionFunction>() && versionSignature &&
+               (call->hasOver || call->distinct || call->filter || !call->orderBy.empty()))
+                throw DbError("42809","version is not an aggregate or window function");
             if(callback!=registry.end() && callback->second.target<SqlTypeOfFunction>() && typeOfSignature &&
                (call->hasOver || call->distinct || call->filter || !call->orderBy.empty()))
                 throw DbError("42809","pg_typeof is not an aggregate or window function");
-            if(result.name==toLower(result.name) && evaluator.hasFunction(result.name) && !internalCallback && nameSignature && typeOfSignature) {
+            if(result.name==toLower(result.name) && evaluator.hasFunction(result.name) && !internalCallback && nameSignature && typeOfSignature && versionSignature) {
                 // pg_typeof(any) is a polymorphic candidate. A real exact
                 // typed routine in a later namespace still wins resolution.
                 if(polymorphicTypeOf && schema.empty()) {typeOfCandidate=true;continue;}
@@ -5296,6 +5309,7 @@ std::string ExprEvaluator::scalarFunctionResultType(const FunctionCallExpr* call
     if (callback != functions_.end()) {
         if(callback->second.target<SqlNameFunction>())return "name";
         if(callback->second.target<SqlTypeOfFunction>())return "regtype";
+        if(callback->second.target<SqlVersionFunction>())return "text";
         if (const auto* bound = callback->second.target<BoundScalarRoutine>())
             return ExprHelper::canonicalResultTypeName(bound->resolved.routine.returnType);
     }
@@ -11190,6 +11204,7 @@ void ExprEvaluator::registerBuiltins() {
     functions_["current_database"]=SqlNameFunction{sql_value_detail::Kind::CurrentCatalog};
     functions_["current_schema"]=SqlNameFunction{sql_value_detail::Kind::CurrentSchema};
     functions_["pg_typeof"]=SqlTypeOfFunction{};
+    functions_["version"]=SqlVersionFunction{};
     for(const auto* name:{"current_user","session_user","current_database","current_schema"})
         volatility_[name]='s';
     // timestamp 'YYYY-MM-DD[ HH:MM:SS]'.
@@ -12232,6 +12247,7 @@ void ExprEvaluator::registerBuiltins() {
     volatility_["clock_timestamp"] = 'v';
     volatility_["current_user"] = 's';
     volatility_["pg_typeof"] = 's';
+    volatility_["version"] = 's';
     volatility_["session_user"] = 's';
     volatility_["nextval"] = 'v';
     volatility_["currval"] = 'v';
