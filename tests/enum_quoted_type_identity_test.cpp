@@ -38,12 +38,17 @@ int main() {
     const auto scopeOid=scoped->oid;
     const auto* other=catalog.findTypeByName("MixedRank",scopeOid);assert(other && other->oid!=typeOid);
     assert(g_engine.getEnumType(db,"ScopeRank.MixedRank").labels==std::vector<std::string>({"alpha","","zeta"}));
+    assert(!ddl.executeSql("CREATE TYPE \"Ra\"\"nk(Name)\" AS ENUM ('zeta','alpha')",session));
+    assert(!ddl.executeSql("CREATE TYPE \"Rank[]\" AS ENUM ('zeta','alpha')",session));
     for(const auto& control:std::vector<std::pair<std::string,std::string>>{
         {"SELECT 'zeta'::\"MixedRank\" < 'alpha'","t"},
         {"SELECT CAST('zeta' AS \"MixedRank\") < 'alpha'","t"},
         {"SELECT CASE ''::\"MixedRank\" WHEN '' THEN 1 ELSE 2 END","1"},
         {"SELECT (CASE WHEN true THEN 'zeta'::\"MixedRank\" ELSE 'alpha' END) < 'alpha'","t"},
-        {"SELECT 'zeta'::\"ScopeRank\".\"MixedRank\" < 'alpha'","f"}}) {
+        {"SELECT 'zeta'::\"ScopeRank\".\"MixedRank\" < 'alpha'","f"},
+        {"SELECT 'zeta'::\"Ra\"\"nk(Name)\" < 'alpha'","t"},
+        {"SELECT (CASE WHEN true THEN 'zeta'::\"Ra\"\"nk(Name)\" ELSE 'alpha' END) < 'alpha'","t"},
+        {"SELECT 'zeta'::\"Rank[]\" < 'alpha'","t"}}) {
         auto prepared=std::make_shared<PreparedQuery>(g_engine.prepareBoundQuery(db,control.first));
         auto* statement=dynamic_cast<SelectStmt*>(prepared->ast.get());assert(statement);
         PreparedQueryExecution execution(prepared,&g_engine,db);

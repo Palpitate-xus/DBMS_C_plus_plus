@@ -117,13 +117,11 @@ std::string protocolTypeName(std::string type) {
     if(array)return protocolTypeName(type)+"[]";
     if(const auto geometry=geometric_input_detail::builtinType(type);!geometry.empty())
         return geometry;
-    type = toLower(type);
+    type = type_spelling_detail::scalarIdentity(type);
     if (type.rfind("interval ", 0) == 0) {
         const auto declaration = SQLParser::parseTypeSpecification(type);
         if (SQLParser::toLower(declaration.typeName) == "interval") return "interval";
     }
-    const size_t modifier = type.find('(');
-    if (modifier != std::string::npos) type.resize(modifier);
     while (!type.empty() && std::isspace(static_cast<unsigned char>(type.back())))
         type.pop_back();
     if (type == "int" || type == "int4" || type == "serial") return "integer";
@@ -967,17 +965,11 @@ std::string ExprHelper::canonicalResultTypeName(std::string typeName) {
         const auto declaration = SQLParser::parseTypeSpecification(typeName);
         if (SQLParser::toLower(declaration.typeName) == "interval") return "interval" + std::string(array ? "[]" : "");
     }
-    const size_t modifier = typeName.find('(');
-    if (modifier != std::string::npos) {
-        typeName.resize(modifier);
-        while (!typeName.empty() &&
-               std::isspace(static_cast<unsigned char>(typeName.back()))) {
-            typeName.pop_back();
-        }
-    }
+    typeName=type_spelling_detail::scalarIdentity(typeName);
     std::string canonical =
-        TypeRegistry::instance().normalizeTypeName(typeName);
-    return (canonical.empty() ? toLower(typeName) : canonical) + (array ? "[]" : "");
+        typeName.find('"')==std::string::npos
+        ?TypeRegistry::instance().normalizeTypeName(typeName):std::string{};
+    return (canonical.empty() ? typeName : canonical) + (array ? "[]" : "");
 }
 
 std::string ExprHelper::inferValuesResultType(const std::string& exprSql) {

@@ -39,6 +39,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/pg_typeof_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/protocol_parameter_type_identity_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/version_function_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/quoted_type_identity_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/drop_routine_qualified_name_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/procedure_namespace_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/stored_function_arity_protocol_e2e_test.py)

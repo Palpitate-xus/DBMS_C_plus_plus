@@ -2,6 +2,7 @@
 
 #include "catalog/type_registry.h"
 #include "common/DbError.h"
+#include "expression/type_spelling.h"
 #include <algorithm>
 #include <cctype>
 #include <set>
@@ -19,12 +20,9 @@ inline std::string canonical(std::string name) {
     while (name.size() >= 2 && name.compare(name.size()-2, 2, "[]") == 0) {
         array = true; name.resize(name.size()-2);
     }
-    if (const auto modifier = name.find('('); modifier != std::string::npos)
-        name.resize(modifier);
-    const auto end = name.find_last_not_of(" \t\r\n");
-    if (end != std::string::npos) name.resize(end+1);
-    std::transform(name.begin(),name.end(),name.begin(),[](unsigned char c){return std::tolower(c);});
-    const auto normalized = TypeRegistry::instance().normalizeTypeName(name);
+    name=type_spelling_detail::scalarIdentity(name);
+    const auto normalized = name.find('"')==std::string::npos
+        ?TypeRegistry::instance().normalizeTypeName(name):std::string{};
     if (!normalized.empty()) name = normalized;
     if (name == "character varying") name = "varchar";
     if (name == "character") name = "bpchar";
