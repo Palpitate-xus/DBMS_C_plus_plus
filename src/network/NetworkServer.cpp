@@ -15,6 +15,7 @@
 #include "common/NotificationManager.h"
 #include "catalog/CatalogService.h"
 #include "catalog/systables.h"
+#include "expression/regtype_input.h"
 #include "common/DateType.h"
 #include "common/BooleanCodec.h"
 #include "common/IntegerTextCodec.h"
@@ -905,6 +906,16 @@ std::string protocolParameterLiteral(uint32_t typeOid,
         return {};
     }
     if (isIntegerParameterType(typeOid)) {
+        if(typeOid!=26) {
+            const unsigned width=typeOid==21?16:typeOid==23?32:64;
+            const auto parsed=parsePostgresIntegerText(value,width);
+            if(parsed.error!=IntegerTextError::None) {
+                error=parsed.error==IntegerTextError::OutOfRange
+                    ?"integer parameter out of range":"invalid input syntax for integer parameter";
+                return {};
+            }
+            return std::to_string(parsed.value);
+        }
         if (!isStrictInteger(value)) {
             error = "invalid input syntax for integer parameter";
             return {};
@@ -989,6 +1000,7 @@ const char* valuesParameterCastType(uint32_t typeOid) {
 
 static const char* protocolParameterErrorSqlstate(
     const std::string& message) {
+    if(message=="integer parameter out of range")return "22003";
     if (message.rfind("invalid binary input", 0) == 0 ||
         message == "invalid binary input length for parameter type") {
         return "22P03";  // invalid_binary_representation
@@ -2078,7 +2090,7 @@ bool prepareProtocolBitBetween(const std::string& sql, Session& session,
     return true;
 }
 
-bool protocolConstantBitBetween(const Stmt& statement) {
+bool protocolConstantBitBetween(const Stmt& statement,Session& session) {
     const auto* select = dynamic_cast<const SelectStmt*>(&statement);
     if (!select || select->command != SqlCommand::Select || select->fromClause ||
         !select->ctes.empty() || select->setOpLhs || select->setOpRhs || select->setOp != SetOp::None ||
@@ -2091,10 +2103,14 @@ bool protocolConstantBitBetween(const Stmt& statement) {
         !range->namedArgs.empty() || range->distinct) return false;
     const auto name = SQLParser::toLower(range->funcName);
     if (name != "between" && name != "not between") return false;
-    const auto primitiveType = [](const std::string& type) {
-        static const std::set<std::string> types = {"bit", "bit varying", "text", "boolean", "smallint", "integer", "bigint"};
-        if (type.find('"') != std::string::npos || type.find('.') != std::string::npos) return size_t(0);
-        return types.count(ExprHelper::canonicalResultTypeName(type));
+    const auto catalog=regtype_detail::metadata(g_engine,session.currentDB);
+    const auto primitiveType = [&](const std::string& type) {
+        static const std::set<Oid> types = {16,20,21,23,25,1560,1562};
+        try {
+            // Resolve the actual immutable primitive identity; generated
+            // qualified casts are not routines or user-domain callbacks.
+            return types.count(resolveDeclaredTypeName(type,&catalog,&session).typeOid);
+        } catch(const DbError&) {return size_t(0);}
     };
     std::function<bool(const Expr*)> primitive = [&](const Expr* input) {
         if (!input || input->preparedSubquery) return false;
@@ -5883,7 +5899,6 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             }
             const std::string& preparedSql = statementIt->second;
             const std::vector<uint32_t>& preparedParameterTypes = oidIt->second;
-            const bool bareValues = firstSqlKeyword(preparedSql) == "values";
             auto betweenParameterTypes = preparedParameterTypes;
             bool bitBetween = false;
             try {bitBetween = prepareProtocolBitBetween(preparedSql, session, betweenParameterTypes);}
@@ -5985,19 +6000,28 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                     }
                     literals.push_back(std::move(literal));
                 }
-                // A real NULL Bind datum still has its declared parameter
-                // type. Preserve that builtin identity in the existing SQL
-                // lowering path; neither NULL bytes nor a later source row
-                // can supply it. Non-NULL and unmapped OID paths are unchanged.
-                if (bareValues || bitBetween || valueLength == -1) {
-                    if (const char* castType =
-                            valuesParameterCastType(preparedParameterTypes[i])) {
-                        literals.back() = "CAST(" + literals.back() +
-                            " AS " + castType + ")";
-                    } else if (bitBetween && (preparedParameterTypes[i] == 1562 || valueLength == -1)) {
-                        if (preparedParameterTypes[i] == 1560 || preparedParameterTypes[i] == 1562)
-                            literals.back() = "CAST(" + literals.back() + " AS " +
-                                (preparedParameterTypes[i] == 1560 ? "bit" : "varbit") + ")";
+                // SQL lowering must preserve Parse's physical declaration
+                // for every Bind datum, not only NULL or bare VALUES. A
+                // numeric spelling must not turn SMALLINT into INTEGER, and
+                // NULL VARCHAR/array inputs must not become UNKNOWN.
+                if (preparedParameterTypes[i]) {
+                    try {
+                        const auto catalog=regtype_detail::metadata(g_engine,session.currentDB);
+                        const auto oid=preparedParameterTypes[i];
+                        const auto type=std::find_if(catalog.types.begin(),catalog.types.end(),
+                            [&](const PgTypeRow& row){return row.oid==oid;});
+                        if(type==catalog.types.end())
+                            throw DbError("42704","prepared parameter type does not exist");
+                        const auto space=std::find_if(catalog.namespaces.begin(),catalog.namespaces.end(),
+                            [&](const PgNamespaceRow& row){return row.oid==type->typnamespace;});
+                        if(space==catalog.namespaces.end())throw DbError("XX001","parameter type has no namespace");
+                        // A protocol declaration has no SQL keyword's implicit
+                        // length-one typmod (notably BIT and CHARACTER).
+                        literals.back()="CAST("+literals.back()+" AS "+
+                            regtype_detail::quoted(space->nspname)+"."+
+                            regtype_detail::quoted(type->typname)+")";
+                    } catch(const DbError& error) {
+                        bindError=true;bindErrorSqlstate=error.sqlState();bindErrorMessage=error.message();break;
                     }
                 }
             }
@@ -6049,7 +6073,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 auto parsed = parser.parseForBinding(expandedSql);
                 if (parsed.success && parsed.stmt &&
                     (SQLParser::isDatabaseIndependentQuery(*parsed.stmt) ||
-                     (bitBetween && protocolConstantBitBetween(*parsed.stmt)))) {
+                     (bitBetween && protocolConstantBitBetween(*parsed.stmt,session)))) {
                     const auto& select = static_cast<const SelectStmt&>(*parsed.stmt);
                     ExprEvaluator evaluator;
                     RowContext row;
