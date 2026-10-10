@@ -2,6 +2,20 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Evergreen README verified; four independently committed physical type and Bind repairs retain the remaining USER failure",
+      "gap_ids": ["TYPE-02", "CAT-03", "SQL-04", "QRY-01", "FUNC-05", "PROTO-04"],
+      "status": "partial",
+      "commits": ["f513ac1f", "dbfc241a", "9c7100f8", "1da68f6e", "7b61abf9", "1f8232b5"],
+      "evidence": ["docs/issue-unknown-physical-catalog.md", "docs/issue-qualified-null-cast-identity.md", "docs/issue-protocol-parameter-physical-identity.md", "docs/issue-pg-typeof-declared-input.md", "docs/issue-root-sql-value-publication.md"],
+      "tests": ["tests/unknown_catalog_test.cpp", "tests/qualified_null_cast_test.cpp", "tests/pg_typeof_test.cpp", "tests/pg_typeof_protocol_e2e_test.py", "tests/protocol_parameter_type_identity_protocol_e2e_test.py", "tests/fromless_structured_protocol_e2e_test.py"],
+      "verification": {
+        "reproduction": "Root86219 actually terminates1:53/53native35/36wire pass; original mixed pg_typeof42883 fails. Subsequent candidate43092 retains UNKNOWN42704 and parameter failures;20317 retains Bind overflows;23111 retains qualified nullable-type regressions;67366 retains nine integer error-phase differences. No original assertion relaxed or failure relabeled.",
+        "focused_tests": "Actual verified180006 reference qualifiedNULL24/parameter18/pg_typeof56 all0. Final private85985 terminal1:11/11native14/15wire pass; whole pg_typeof56/parameter18/default/INTEGER-BETWEEN350/BIT-input42/BIT-BETWEEN250/TEXT-width pass. Sole unchanged fromless failure USER42703 remains. All58 own receipts/repeat/cache/source/frozen start+terminal checks0, frozen44074863/source d0f95be6. Root own UNKNOWN/nullableCAST compiles2979/96755, normal/repeat/58receipts and matching native95122/65478 all0; original date21756 all0. README links/contract/version checks0.",
+        "full_suite": "Old complete Root85873 retains12 real failures; new complete registered suite not run. Four repairs separately-x imported into master. Current783auto-native+2realMain442wire58TU. Root own changed units62792 and Main45597 now building against the same d0f95be6 source seal, no private objects/binaries copied; no current Root combined acceptance or full-green claim.",
+        "scope": "Original273 item statuses unchanged22complete166partial70unverified15deferred. Only explicit15 security/TDE requirements deferred; USER/quoted enum/catalog race/recovery/index corruption/typed triggers/EXPLAIN and remaining original requirements continue. No push or Actions activation."
+      }
+    },
+    {
       "issue": "Complete Root regression retains12 failures; seven independent NAME/OID/SRF/DDL/procedure/PL commits imported after its terminal",
       "gap_ids": ["TYPE-02", "CAT-03", "SQL-04", "QRY-01", "FUNC-01", "FUNC-05", "FUNC-06", "TXN-05", "PROTO-04"],
       "status": "partial",

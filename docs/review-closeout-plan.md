@@ -4,7 +4,22 @@
 
 # 工作区与复查清单收尾计划
 
-## 2026-10-10 当前执行顺序
+## 2026-10-10 当前执行顺序：类型与参数修复之后
+
+1. README已在 `f513ac1f` 整理为长期项目入口，本次链接/契约/版本核对全0。
+   日期fixture `dbfc241a` 与四项独立实现修复 `9c7100f8`/`1da68f6e`/
+   `7b61abf9`/`1f8232b5` 均已本地提交；不push。
+2. 最新私有85985终1：11native全过、14/15wire过，default与原350整数/
+   250BIT参数控制全部通过；仅原fromless的USER42703未修。所有旧红矩阵保留。
+   主工作区先前两个修复的独立O2/58签名/native均0；新Root own62792/Main45597
+   正在构建。完成后做匹配构建/回归，不借私有缓存或把私有结果当作Root验收。
+3. 下一项修复bare USER语法/身份，再处理原quoted enum、目录加载race、TEMP/
+   recovery、index corruption、typed trigger、EXPLAIN及完整原清单要求。
+   新全注册组合未跑；以前完整回归的12项失败逐项表不得删改为已完成。
+4. 原273保持22complete166partial70unverified15deferred；仅明确安全/TDE专项
+   跳过，不能用专项通过或拒绝未实现路径来宣称总清单全部完成。Actions保持禁用。
+
+## 2026-10-10 先前执行记录
 
 1. 原完整85873终1，769/775native(Main含)、431/437wire通过；12失败表见
    `docs/issue-full-registered-a85e653e.md`。all1212终态/all58/source/frozen一致，

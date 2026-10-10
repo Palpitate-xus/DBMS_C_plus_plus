@@ -1,3 +1,19 @@
+# 2026-10-10 README核对与四项类型/参数修复
+
+README长期入口已在 `f513ac1f` 提交；本次本地链接、兼容性契约与版本检查均0，
+无需重复制造README提交。日期fixture已独立合入 `dbfc241a`，主工作区原O2测试0。
+随后四项独立实现修复已分别-x合入：UNKNOWN物理目录 `9c7100f8`、NULL CAST
+真实类型身份 `1da68f6e`、Bind参数身份/输入宽度/错误阶段 `7b61abf9`、pg_typeof
+声明输入与真实REGTYPE身份 `1f8232b5`。不猜OID、不降低原断言或扩大安全跳过。
+actual180006 reference：qualified NULL24、参数18、pg_typeof56均0；最终私有
+publication85985终1：11/11native、14/15wire通过，default、整数BETWEEN350、
+BIT输入42/BETWEEN250及TEXT-width通过；唯一原fromless的USER42703仍须修复。
+此前所有失败矩阵保留，all58/repeat/cache/source/frozen首尾检查0；不冒全注册绿。
+主工作区 UNKNOWN/NULL CAST 独立真实O2构建、两个native及all58签名均0；最新
+两项合入后 Root own changed-unit62792/Main45597 正在构建，不借私有obj/binary。
+当前783auto-native+2真实Main、442wire、58TU；原273状态保持22complete/
+166partial/70unverified/15deferred。仅明确15安全/TDE专项跳过；不push、Actions禁用。
+
 # 2026-10-10 全注册回归终态与七项独立修复合入
 
 旧Root完整85873终1：769/775native(Main含)、431/437wire通过，全部1212终态
