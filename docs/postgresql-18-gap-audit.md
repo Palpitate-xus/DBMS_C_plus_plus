@@ -1,3 +1,21 @@
+# 最新全注册终态、两项独立修复与用户跳过范围
+
+Root完整23985已终1：782/786 native/Main、439/443wire通过，全部1229终态
+marker齐全；all58/source/cache/frozen首尾一致。八失败是CTAS目录58030、
+quoted enum native/wire、stale TEMP startup、table-owner atomicity、typed
+view trigger、index corruption和EXPLAIN/JOIN。重跑8次CTAS皆0不抹掉正式失败。
+用户最新要求跳过当前模块：暂跳CTAS／后台checkpoint排查，不标记已修复，
+不据此跳过整个catalog／storage族。相关压力诊断已停止，日志保留。
+接下来处理EXPLAIN/JOIN，之后继续其余原未完要求。
+
+已保独立commit合入引号类型身份 `c3bc643e`（私有4761b86f）与SQL Session
+生命周期 `2dc9554e`（私有89760f85）。前者23/23native、24/25wire通过，唯一
+原typed trigger失败另修；后者最终12/12native、16/16wire全过，完整默认协议、
+原typed trigger与PG18.6原完整fixture均0；新增真实Main14控及原EXPLAIN清理
+Main均0。两私有验证不替代Root独立fresh58与后续匹配验收。
+Root原273状态22complete166partial70unverified15deferred未虚改完成；用户新
+跳过项单独列为未修复，不扩大原安全/TDE跳过范围。不push、Actions保持禁用。
+
 # 2026-10-10 USER与version普通表达式修复
 
 前一Root own62792/Main45597均0；真实changed-unit2/Main1编译后，Root
