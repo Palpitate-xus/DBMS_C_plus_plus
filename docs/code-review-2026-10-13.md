@@ -194,7 +194,7 @@ R10：容量按 user 计算，复用却要求 database 一致。pool_size=1 时�
 `src/replication/LogicalDecoder.h` 的 LogicalChange 和 `LogicalDecoder.cpp:24`、`:54`、`:604`。
 
 R13：行像按 `|` 拼接各列，只追加非 NULL 的文本值，因此两列 `(NULL,'x')` 和 `('','x')` 都变成 `|x`；`('a|b','c')` 与 `('a','b|c')` 都变成 `a|b|c`。二进制预览只为整行添加长度，文本预览也没有逐列边界/NULL编码，均不能恢复已丢失的信息。
-修复：以 nullable typed cells 保存各列，逐列编码长度/NULL/类型信息，对持久化流格式明确版本。测试 INSERT/UPDATE/DELETE 的 NULL、空串、分隔符、多字节和回滚。
+修复：以 nullable typed cells 保存各列，逐列编码长度/NULL/类型信息，对预览/API输出格式明确版本。当前change stream仅在内存中，不存在可据此宣称已修复的持久化流。测试 INSERT/UPDATE/DELETE 的 NULL、空串、分隔符、多字节和回滚。
 
 R14：`PublicationCatalog::publishes` 调用严格 list 失败后返回 false，与合法“不属于任何 publication”相同；写路径据此跳过逻辑变更缓冲。若已发布对象的元数据发生读取错误，DML 可能成功而变更流没有对应记录。本轮没有实施该故障注入。
 修复：返回可区分成员关系与读取失败的结果，向事务传播错误，或明确使受影响槽失效并要求重新同步；不能静默宣称流连续。测试读失败、非法元数据、正常无 publication 和已有槽的连续性。
@@ -222,6 +222,7 @@ pg_class / pg_attribute 可选尾段解析错误执行 continue；loadAllLocked 
 rollbackTransaction 返回非 OK 后仅输出 warning，随后仍调用 discardTransactionBackup；事务 ID 已清零时也允许删除已拥有的备份。
 修复：只有完整持久回滚确认成功后才清理恢复图像。失败时保留备份及状态，向调用者报告 incomplete rollback；明确下次启动的恢复步骤。同文件 `TableManage.cpp:49939` 在部分回滚步骤失败后仍可能持久化 ABORT，而启动恢复 `:43596` 又可能据此删除备份。因此还需让终结 ABORT 表示 undo 已持久完成，或持久化独立 incomplete-rollback 状态供启动保留并重试；仅修改备份清理调用并不充分。
 验收：引擎回滚失败、DDL snapshot 恢复失败及随后重启。正常回滚通过不能证明本错误分支安全。
+析构路径也会调用rollback；恢复失败应以显式状态及次级诊断报告，保留原始SQL错误，不在析构中新增抛异常行为。
 
 ### R18：catalog 行指针的寿命
 

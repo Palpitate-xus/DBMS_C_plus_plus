@@ -1,9 +1,9 @@
-# DBMS 完整使用手册
+# DBMS 使用手册
 
 > 本手册说明用法，不作为全功能兼容或测试通过的证明。当前边界见[兼容性契约](compatibility-contract.md)，已发现的问题与修复方法见[代码审查索引](review-index.md)。
 > 产品版本由 `src/common/version.h` 定义；存储和升级边界见[打包与部署](PACKAGING.md)。
 
-> 数据目录说明：当前版本只接受 v2、8 KiB heap page 和当前 schema 格式。heap 文件头、页布局、line pointer 和 checksum 必须通过严格校验；损坏或截断文件 fail-closed。WAL 记录的长度、CRC、8 字节对齐和前向链也必须通过校验；恢复遇到损坏 WAL 或非法 heap image 会 fail-closed。旧数据目录不会自动迁移；升级前请导出 SQL 或删除并重建数据目录。WAL 的 LSN 0 是合法首位置，事务提交会先刷盘 COMMIT WAL，再刷盘 CLOG 可见性；WAL/CLOG/fsync 失败时提交失败、追加 ABORT WAL 并回滚。
+> 数据目录说明：当前版本使用 v2、8 KiB heap page 和当前 schema 格式。读取路径检查heap文件头、页布局、line pointer和checksum，WAL读取还检查记录长度、CRC、8字节对齐和前向链。这些检查不等于所有数据损坏都可被识别：页压缩和catalog读取仍有已知错误，见[审查报告](code-review-2026-10-13.md)。旧关系数据不会自动迁移；升级前保留备份，在副本上验证SQL导出及新目录重建/导入，不要直接删除唯一副本。WAL的LSN 0是合法首位置，提交先刷COMMIT WAL再刷CLOG；失败会尝试回滚，但失败回滚的恢复图像处理仍有待修问题，不能据此保证所有故障均已恢复。
 
 > 路由说明：基础 `ALTER TABLE`、RLS enable/disable/force、分区 ATTACH/DETACH、trigger enable/disable、CLUSTER、REPLICA IDENTITY、约束验证/延迟属性、`CREATE TABLE` 分区、RLS 可见性扫描和简单单表视图 `INSTEAD OF` DML 路径由统一执行链处理；ALTER 多子命令失败会恢复整句当前格式快照，DROP/REPLACE 在变更前建立快照，外层 `ROLLBACK` 先恢复对象再撤销行级变更；规范和 legacy DDL 入口在隐式提交失败时都会报告 SQLSTATE 并停止执行；快照已被 DDL 修改后继续执行另一条快照型 DDL、创建或回滚 SAVEPOINT 会 fail-closed；普通事务提交/回滚会清理物理事务备份，DDL CREATE undo 会跨语句外层事务和 SAVEPOINT 回放；触发器函数运行时和完整对象 owner/ACL 组合语义仍未完成。含内存 DDL undo 的事务暂不支持 PREPARE TRANSACTION。RLS 已支持默认 `WITH CHECK`、`PUBLIC` 角色、基础 `PERMISSIVE/RESTRICTIVE` 组合、表 owner 绕过、基于 `pg_authid` 的 `SUPERUSER/BYPASSRLS` 绕过和 `FORCE ROW LEVEL SECURITY`。
 
@@ -69,7 +69,7 @@ ctest --test-dir build --output-on-failure
 
 ### 首次登录
 
-默认情况下，系统启动后需要创建数据库和用户。首次使用时在交互模式下执行：
+按[部署说明](PACKAGING.md)准备数据目录、登录角色与访问配置后，可在交互模式下创建并选择数据库：
 
 ```sql
 CREATE DATABASE mydb;

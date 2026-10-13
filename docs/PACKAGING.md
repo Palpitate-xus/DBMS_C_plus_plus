@@ -90,7 +90,7 @@ marker 不得手工编辑或改成 symlink；location 不得与 data directory �
 | `info/pg_catalog/pg_authid.cat` | 角色目录。CSV 行：`oid,"name",super,createdb,createrole,inherit,login,replication,bypassrls,-1,"SCRAM-SHA-256$iter:salt$stored:server",""`（注意 stored/server 之间是 `:`） |
 | `info/tlist.lst` | 数据库清单（每行一个数据库名） |
 | `<dbname>/pg_tblspc/*.path` | 当前数据库的外部 tablespace canonical root marker；只允许普通单行文件 |
-| `pg_hba.conf` | 可选但服务端建议：`host all <user> 127.0.0.1/32 scram-sha-256`。**无匹配行时连接在认证前悬挂** |
+| `pg_hba.conf` | 访问规则示例：`host all <user> 127.0.0.1/32 scram-sha-256`。空规则或无匹配规则返回 `FATAL / 28000` 并关闭连接，不会等待后续认证 |
 | `dbms.conf` | 可选 `key=value`：`tde_keyring`、`pool_mode`、`pool_size`、`checkpoint_interval`（1..1000000，0 非法）、`audit_level` 等。服务端启动时读取一次；CLI 每进程读取 |
 | `<dbname>/` | 每数据库一目录：`*.dt` 堆文件、`*.idx` 索引、`<file>.tde` TDE 边车信封（48B/页 nonce+MAC）、`.publication` 逻辑复制目录、`.runtime_stats` |
 | `*.wal` / WAL 段 | 每数据库目录下 16MiB 段文件 |
