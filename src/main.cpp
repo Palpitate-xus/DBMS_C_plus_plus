@@ -35687,12 +35687,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                 fEnd = (endGroup + 1 < groupStart.size()) ? groupStart[endGroup + 1] : effIdxs.size();
                             }
                         }
-                        int64_t sum = 0, count = 0;
+                        int64_t count = 0;
                         bool hasMax = false, hasMin = false;
                         int64_t maxVal = 0, minVal = 0;
                         dbms::Numeric exactSum(0);
                         int64_t exactCnt = 0;
-                        bool exactOk = true;
                         // Determine peer group boundaries for GROUP/TIES exclusion
                         size_t peerStart = fStart, peerEnd = fStart;
                         if (!wf.frameExclusion.empty() && wf.frameExclusion != "current row" && wf.frameExclusion != "no others") {
@@ -35742,29 +35741,29 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             auto it = rows[rj].find(wf.arg);
                             if (it == rows[rj].end()) continue;
                             if (it->second.empty()) continue;
+                            if (wf.name == "sum" || wf.name == "avg") {
+                                // This legacy receiver renders SQL NULL as
+                                // "NULL"; it is not a numeric input datum.
+                                if (it->second == "NULL") continue;
+                                // The exact NUMERIC result may exceed int64.
+                                // Do not also accumulate a signed fallback or
+                                // hide an arithmetic failure as a partial sum.
+                                exactSum = exactSum + dbms::Numeric(it->second);
+                                ++exactCnt;
+                                continue;
+                            }
                             try {
                                 int64_t v = stoll(it->second);
-                                if (wf.name == "sum" || wf.name == "avg") { sum += v; count++; }
                                 if (wf.name == "max") { if (!hasMax || v > maxVal) { maxVal = v; hasMax = true; } }
                                 if (wf.name == "min") { if (!hasMin || v < minVal) { minVal = v; hasMin = true; } }
                             } catch (...) {}
-                            if (wf.name == "sum" || wf.name == "avg") {
-                                // numeric/decimal storage: exact accumulation
-                                if (exactOk) {
-                                    try { exactSum = exactSum + dbms::Numeric(it->second); ++exactCnt; }
-                                    catch (...) { exactOk = false; }
-                                }
-                            }
                         }
                         string aggVal;
-                        if (wf.name == "sum") aggVal = exactOk ? exactSum.toString() : to_string(sum);
+                        if (wf.name == "sum") aggVal = exactCnt ? exactSum.toString() : "NULL";
                         else if (wf.name == "count") aggVal = to_string(count);
                         else if (wf.name == "avg") {
-                            if (count == 0) aggVal = "NULL";
-                            else if (exactOk) {
-                                try { aggVal = (exactSum / dbms::Numeric(exactCnt)).toString(); }
-                                catch (...) { aggVal = to_string(static_cast<double>(sum) / count); }
-                            } else aggVal = to_string(static_cast<double>(sum) / count);
+                            if (exactCnt == 0) aggVal = "NULL";
+                            else aggVal = (exactSum / dbms::Numeric(exactCnt)).toString();
                         }
                         else if (wf.name == "max") aggVal = hasMax ? to_string(maxVal) : "NULL";
                         else if (wf.name == "min") aggVal = hasMin ? to_string(minVal) : "NULL";

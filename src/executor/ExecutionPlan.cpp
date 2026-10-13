@@ -4181,9 +4181,7 @@ bool WindowOp::open() {
             } else {
                 const auto [frameBegin, frameEnd] = frameBounds(position);
                 int64_t count = 0;
-                int64_t sum = 0;
                 dbms::Numeric exactSum(0);
-                bool exactSumOk = true;
                 bool hasValue = false;
                 bool boolValue = function.name == "bool_and" || function.name == "every";
                 bool boolSeen = false;
@@ -4253,24 +4251,12 @@ bool WindowOp::open() {
                         continue;
                     }
                     if (valueIsNull) continue;
-                    int64_t number = 0;
                     if (function.name == "sum" || function.name == "avg") {
-                        if (!parseInteger(value, number)) {
-                            // numeric/decimal storage keeps fraction digits;
-                            // accumulate exactly instead of skipping
-                            if (!exactSumOk) continue;
-                            try {
-                                exactSum = exactSum + dbms::Numeric(value);
-                                ++count;
-                            } catch (...) { exactSumOk = false; continue; }
-                        } else {
-                            sum += number;
-                            ++count;
-                            if (exactSumOk) {
-                                try { exactSum = exactSum + dbms::Numeric(value); }
-                                catch (...) { exactSumOk = false; }
-                            }
-                        }
+                        // BIGINT windows can exceed int64 even when the exact
+                        // result is valid NUMERIC. Keep only the exact state;
+                        // an arithmetic error must not become a partial sum.
+                        exactSum = exactSum + dbms::Numeric(value);
+                        ++count;
                     } else if (function.name == "min" || function.name == "max") {
                         if (!hasValue || (function.name == "min"
                                 ? compareNonNullAggregateValue(value, selected) < 0
@@ -4305,31 +4291,18 @@ bool WindowOp::open() {
                         computed[rowIndex][functionIndex].clear();
                         computedNulls[rowIndex][functionIndex] = true;
                     }
-                    else if (exactSumOk) {
-                        try { computed[rowIndex][functionIndex] = exactSum.toString(); }
-                        catch (...) { computed[rowIndex][functionIndex] = std::to_string(sum); }
-                        computedNulls[rowIndex][functionIndex] = false;
-                    } else {
-                        computed[rowIndex][functionIndex] = std::to_string(sum);
+                    else {
+                        computed[rowIndex][functionIndex] = exactSum.toString();
                         computedNulls[rowIndex][functionIndex] = false;
                     }
                 } else if (function.name == "avg") {
                     if (count == 0) {
                         computed[rowIndex][functionIndex].clear();
                         computedNulls[rowIndex][functionIndex] = true;
-                    } else if (exactSumOk) {
-                        // PG avg(numeric): exact division with select_div_scale
-                        try {
-                            computed[rowIndex][functionIndex] =
-                                (exactSum / dbms::Numeric(count)).toString();
-                        } catch (...) {
-                            computed[rowIndex][functionIndex] =
-                                std::to_string(static_cast<double>(sum) / count);
-                        }
-                        computedNulls[rowIndex][functionIndex] = false;
                     } else {
+                        // PG avg(numeric): exact division with select_div_scale
                         computed[rowIndex][functionIndex] =
-                            std::to_string(static_cast<double>(sum) / count);
+                            (exactSum / dbms::Numeric(count)).toString();
                         computedNulls[rowIndex][functionIndex] = false;
                     }
                 } else if (function.name == "bool_and" || function.name == "every" ||
