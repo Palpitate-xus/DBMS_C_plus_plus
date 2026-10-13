@@ -35669,52 +35669,73 @@ static bool executeInternal(const string& rawSql, Session& s) {
 
             // Fetch all data (need all columns for window function computation)
             set<string> allCols;
-            vector<string> rawAnswers;
+            vector<map<string, string>> rows;
+            set<int64_t> windowRowIds;
+            const auto appendWindowRows = [&](const vector<string>& conditions, bool deduplicate) {
+                vector<vector<string>> cells;
+                vector<vector<bool>> nulls;
+                vector<int64_t> ids;
+                g_engine.query(queryDb, tname, conditions, allCols, {},
+                    false, false, false, 0, {}, &cells, &nulls, &ids);
+                if (cells.size() != nulls.size() || cells.size() != ids.size())
+                    throw dbms::DbError("XX000", "window source lost its structured row identity");
+                for (size_t index = 0; index < cells.size(); ++index) {
+                    if (deduplicate && !windowRowIds.insert(ids[index]).second) continue;
+                    if (cells[index].size() != tbl.len || nulls[index].size() != tbl.len)
+                        throw dbms::DbError("XX000", "window source lost its declared row width");
+                    map<string, string> row;
+                    for (size_t column = 0; column < tbl.len; ++column)
+                        if (!nulls[index][column]) row[tbl.cols[column].dataName] = cells[index][column];
+                    rows.push_back(std::move(row));
+                }
+            };
             if (condTokens.empty()) {
-                rawAnswers = g_engine.query(s.currentDB, tname, {}, allCols, {});
+                appendWindowRows({}, false);
             } else {
                 condTokens.insert(condTokens.begin(), "(");
                 condTokens.push_back(")");
                 for (auto& t : condTokens) t = modifyLogic(t);
                 auto groups = breakDownConditions(condTokens);
-                set<string> seen;
                 for (const auto& g : groups) {
-                    auto part = g_engine.query(s.currentDB, tname, g, allCols, {});
-                    for (const auto& row : part) {
-                        if (seen.insert(row).second) rawAnswers.push_back(row);
-                    }
+                    appendWindowRows(g, true);
                 }
             }
 
-            // Parse rows into column name -> value maps
-            vector<map<string, string>> rows;
-            for (const auto& rowStr : rawAnswers) {
-                map<string, string> rowData;
-                stringstream ss(rowStr);
-                string val;
-                for (size_t i = 0; i < tbl.len && ss >> val; ++i) {
-                    rowData[tbl.cols[i].dataName] = val;
-                }
-                rows.push_back(rowData);
-            }
+            // SQL NULL is an absent cell, not an empty string or "NULL".
+            // Partition keys use the actual descriptor and lossless grouping
+            // encoding already shared with ordinary GROUP BY.
+            const auto partitionColumn = [&](const string& name) -> const dbms::Column& {
+                for (size_t column = 0; column < tbl.len; ++column)
+                    if (tbl.cols[column].dataName == name) return tbl.cols[column];
+                throw dbms::DbError("42703", "window partition column does not exist: " + name);
+            };
+            const auto partitionKey = [&](const map<string, string>& row, const string& name) {
+                const auto value = row.find(name);
+                return dbms::StorageEngine::groupingValueKey(partitionColumn(name),
+                    value == row.end() ? string() : value->second, value == row.end());
+            };
+            const auto comparePartitionColumn = [&](const map<string, string>& a,
+                const map<string, string>& b, const string& name) {
+                const auto left = a.find(name), right = b.find(name);
+                if ((left == a.end()) != (right == b.end())) return left == a.end() ? 1 : -1;
+                if (left == a.end()) return 0;
+                const auto& column = partitionColumn(name);
+                const auto less = dbms::StorageEngine::compareValues(column, left->second, false, right->second, false, "<");
+                const auto greater = dbms::StorageEngine::compareValues(column, left->second, false, right->second, false, ">");
+                if (less == dbms::StorageEngine::PredicateTruth::Unknown ||
+                    greater == dbms::StorageEngine::PredicateTruth::Unknown)
+                    throw dbms::DbError("0A000", "unsupported declared window partition comparison");
+                return less == dbms::StorageEngine::PredicateTruth::True ? -1 :
+                    greater == dbms::StorageEngine::PredicateTruth::True ? 1 : 0;
+            };
 
             // Sort by partition columns first, then by ORDER BY column
             const WindowFunc& wf0 = windowFuncs[0];
             std::stable_sort(rows.begin(), rows.end(), [&](const auto& a, const auto& b) {
                 // Compare partition columns first
                 for (const auto& pcol : wf0.partitionByCols) {
-                    auto itA = a.find(pcol);
-                    auto itB = b.find(pcol);
-                    if (itA == a.end() || itB == b.end()) continue;
-                    if (itA->second != itB->second) {
-                        try {
-                            int64_t va = stoll(itA->second);
-                            int64_t vb = stoll(itB->second);
-                            return va < vb;
-                        } catch (...) {
-                            return itA->second < itB->second;
-                        }
-                    }
+                    const int cmp = comparePartitionColumn(a, b, pcol);
+                    if (cmp) return cmp < 0;
                 }
                 // Then compare ORDER BY column
                 if (wf0.orderByCol.empty()) return false;
@@ -35734,10 +35755,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             auto samePartition = [&](size_t i, size_t j, const WindowFunc& wf) -> bool {
                 if (wf.partitionByCols.empty()) return true;
                 for (const auto& pcol : wf.partitionByCols) {
-                    auto itA = rows[i].find(pcol);
-                    auto itB = rows[j].find(pcol);
-                    if (itA == rows[i].end() || itB == rows[j].end()) continue;
-                    if (itA->second != itB->second) return false;
+                    if (partitionKey(rows[i], pcol) != partitionKey(rows[j], pcol)) return false;
                 }
                 return true;
             };
@@ -35752,8 +35770,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 for (size_t ri = 0; ri < rows.size(); ++ri) {
                     string key;
                     for (const auto& pcol : wf.partitionByCols) {
-                        auto it = rows[ri].find(pcol);
-                        key += (it != rows[ri].end() ? it->second : "") + "\x01";
+                        key += partitionKey(rows[ri], pcol);
                     }
                     partRows[key].push_back(ri);
                 }
@@ -36157,18 +36174,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
             // (NULLS FIRST for DESC) on the ORDER BY column.
             std::stable_sort(rows.begin(), rows.end(), [&](const auto& a, const auto& b) {
                 for (const auto& pcol : wf0.partitionByCols) {
-                    auto itA = a.find(pcol);
-                    auto itB = b.find(pcol);
-                    if (itA == a.end() || itB == b.end()) continue;
-                    if (itA->second != itB->second) {
-                        try {
-                            int64_t va = stoll(itA->second);
-                            int64_t vb = stoll(itB->second);
-                            return va < vb;
-                        } catch (...) {
-                            return itA->second < itB->second;
-                        }
-                    }
+                    const int cmp = comparePartitionColumn(a, b, pcol);
+                    if (cmp) return cmp < 0;
                 }
                 if (wf0.orderByCol.empty()) return false;
                 bool aNull = a.find(wf0.orderByCol) == a.end();

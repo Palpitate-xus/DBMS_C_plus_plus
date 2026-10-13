@@ -3814,13 +3814,25 @@ static size_t windowColumnIndex(const TableSchema& tbl, const std::string& name)
     return tbl.len;
 }
 
+static int compareDeclaredWindowCell(const Column& column,
+    const std::string& left, bool leftNull, const std::string& right, bool rightNull) {
+    if (leftNull != rightNull) return leftNull ? 1 : -1;
+    if (leftNull) return 0;
+    const auto less = StorageEngine::compareValues(column, left, false, right, false, "<");
+    const auto greater = StorageEngine::compareValues(column, left, false, right, false, ">");
+    if (less == StorageEngine::PredicateTruth::Unknown ||
+        greater == StorageEngine::PredicateTruth::Unknown)
+        throw DbError("0A000", "unsupported declared window partition comparison");
+    return less == StorageEngine::PredicateTruth::True ? -1 :
+        greater == StorageEngine::PredicateTruth::True ? 1 : 0;
+}
+
 static bool sameWindowPartition(const WindowInputRow& left,
                                 const WindowInputRow& right,
-    const std::vector<size_t>& columns) {
+    const std::vector<size_t>& columns, const TableSchema& schema) {
     for (size_t column : columns) {
-        if (left.nulls[column] != right.nulls[column]) return false;
-        if (!left.nulls[column] &&
-            left.values[column] != right.values[column]) return false;
+        if (compareDeclaredWindowCell(schema.cols[column], left.values[column], left.nulls[column],
+                right.values[column], right.nulls[column]) != 0) return false;
     }
     return true;
 }
@@ -3936,7 +3948,7 @@ bool WindowOp::open() {
             const auto& leftRow = input[left];
             const auto& rightRow = input[right];
             for (size_t column : partitionColumns) {
-                const int cmp = compareWindowCell(
+                const int cmp = compareDeclaredWindowCell(tbl_.cols[column],
                     leftRow.values[column], leftRow.nulls[column],
                     rightRow.values[column], rightRow.nulls[column]);
                 if (cmp != 0) return cmp < 0;
@@ -3962,7 +3974,7 @@ bool WindowOp::open() {
         for (size_t position = 0; position < order.size();) {
             size_t end = position + 1;
             while (end < order.size() &&
-                   sameWindowPartition(input[order[end]], input[order[position]], partitionColumns)) {
+                   sameWindowPartition(input[order[end]], input[order[position]], partitionColumns, tbl_)) {
                 ++end;
             }
             for (size_t p = position; p < end; ++p) {
@@ -4413,7 +4425,7 @@ bool WindowOp::open() {
     if (finalOrderColumn < tbl_.len || !finalPartitionColumns.empty()) {
         std::stable_sort(output.begin(), output.end(), [&](const OutputRow& left, const OutputRow& right) {
             for (size_t column : finalPartitionColumns) {
-                const int cmp = compareWindowCell(
+                const int cmp = compareDeclaredWindowCell(tbl_.cols[column],
                     left.keys[column], left.keyNulls[column],
                     right.keys[column], right.keyNulls[column]);
                 if (cmp != 0) return cmp < 0;
