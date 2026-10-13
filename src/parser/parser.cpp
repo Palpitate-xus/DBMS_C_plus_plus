@@ -8129,9 +8129,21 @@ StmtPtr SQLParser::parseCreateFunction(const std::vector<std::string>& tokens, s
         }
     }
 
-    // Volatility / strict / security definer / parallel / cost / rows / SET options
+    // Definition attributes, LANGUAGE and AS may occur in any order. Keep
+    // one option owner so LANGUAGE cannot hide a following VOLATILE/STRICT.
+    bool seenLanguage = false, seenBody = false;
     while (pos < tokens.size()) {
-        if (match(tokens, pos, "immutable")) { stmt->immutable = true; stmt->volatile_ = false; ++pos; }
+        if (match(tokens, pos, "language")) {
+            if (seenLanguage || pos + 1 >= tokens.size()) return nullptr;
+            seenLanguage = true;
+            stmt->language = toLower(tokens[pos + 1]); pos += 2;
+        }
+        else if (match(tokens, pos, "as")) {
+            if (seenBody || pos + 1 >= tokens.size()) return nullptr;
+            seenBody = true;
+            stmt->body = stripQuotes(tokens[pos + 1]); pos += 2;
+        }
+        else if (match(tokens, pos, "immutable")) { stmt->immutable = true; stmt->volatile_ = false; ++pos; }
         else if (match(tokens, pos, "stable")) { stmt->stable = true; stmt->volatile_ = false; ++pos; }
         else if (match(tokens, pos, "volatile")) { stmt->volatile_ = true; ++pos; }
         else if (match(tokens, pos, "strict")) {
@@ -8185,25 +8197,6 @@ StmtPtr SQLParser::parseCreateFunction(const std::vector<std::string>& tokens, s
         else {
             break;
         }
-    }
-
-    // LANGUAGE lang and AS body in either order (PG commonly writes
-    // LANGUAGE plpgsql AS $$...$$; dumps sometimes reverse them).
-    for (int round = 0; round < 2 && pos < tokens.size(); ++round) {
-        if (match(tokens, pos, "language") && pos + 1 < tokens.size()) {
-            stmt->language = toLower(tokens[pos + 1]);
-            pos += 2;
-            continue;
-        }
-        if (match(tokens, pos, "as")) {
-            ++pos;
-            if (pos < tokens.size()) {
-                stmt->body = stripQuotes(tokens[pos]);
-                ++pos;
-            }
-            continue;
-        }
-        break;
     }
 
     // Never accept an option prefix while silently discarding the remaining
