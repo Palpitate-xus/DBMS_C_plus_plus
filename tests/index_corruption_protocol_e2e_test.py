@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A corrupt B-tree must produce an error rather than successful empty rows."""
+"""Index readers report corruption; independent heap readers stay exact."""
 
 import importlib.util
 from pathlib import Path
@@ -53,19 +53,27 @@ def main():
         )
         for sql, rows in other_queries:
             assert expect(sql) == rows
-        primary_plan = expect("EXPLAIN " + queries[0])
-        secondary_plan = expect("EXPLAIN " + queries[1])
-        assert "IndexScan" in str(primary_plan), primary_plan
-        assert "IndexScan" in str(secondary_plan), secondary_plan
+        index_queries = queries + tuple(sql for sql, _ in other_queries[:-1])
+        for sql in queries[:3]:
+            plan = expect("EXPLAIN " + sql)
+            assert any(node in str(plan) for node in ("IndexScan", "BitmapHeapScan")), (sql, plan)
+        heap_queries = (other_queries[-1],
+                        ("SELECT EXISTS(SELECT 1 FROM corrupt_items WHERE state=99);", [["f"]]))
+        for sql, rows in heap_queries:
+            assert expect(sql) == rows
 
         database = Path(server["dir"]) / "info"
         corrupt(database / "corrupt_items.idx")
         corrupt(database / "corrupt_items_tenant.idx")
         corrupt(database / "corrupt_items_state.idx")
-        for sql in queries:
+        for sql in index_queries:
             assert expect(sql, "XX001") == []
-        for sql, _ in other_queries:
-            assert expect(sql, "XX001") == []
+        # EXISTS' prepared child uses its actual heap scan, not the legacy
+        # IndexScan receiver above. It must not inspect an unused index, nor
+        # hide a row/error behind successful empty results: keep both exact
+        # matching and nonmatching Boolean controls after corruption.
+        for sql, rows in heap_queries:
+            assert expect(sql) == rows
         assert expect("SELECT id FROM corrupt_items;") == [["1"]]
         assert expect("SELECT 42;") == [["42"]]
         print("[INDEX CORRUPTION PROTOCOL E2E] passed")
