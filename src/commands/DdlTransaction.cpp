@@ -97,7 +97,14 @@ DdlTransaction::DdlTransaction(Session& session)
     : session_(session), engine_(g_engine) {}
 
 DdlTransaction::~DdlTransaction() {
-    if (active_ && !committed_) rollback();
+    if (active_ && !committed_) {
+        try { rollback(); }
+        catch (const std::exception& error) {
+            std::cerr << "DDL rollback secondary error: " << error.what() << std::endl;
+        } catch (...) {
+            std::cerr << "DDL rollback secondary error: unknown exception" << std::endl;
+        }
+    }
 }
 
 bool DdlTransaction::enableSnapshotRollback() {
@@ -203,6 +210,18 @@ bool DdlTransaction::commit() {
     if (!active_) return committed_;
 
     if (startedByUs_ && engine_.inTransaction()) {
+        // Make the engine own CREATE undo before commit can encounter a
+        // failure and initiate rollback. A failed rollback must not depend
+        // on this statement wrapper surviving stack unwinding.
+        const std::string db = session_.currentDB;
+        for (const auto& op : ops_) {
+            if (op.op != RecordedOp::Op::Create) continue;
+            const std::string undoDb = db.empty() ? op.extra : db;
+            engine_.registerDdlUndo([engine = &engine_, undoDb, op]() {
+                return DdlTransaction::undoCreate(*engine, undoDb, op);
+            });
+        }
+        ops_.clear();
         auto& notifications = notificationManager();
         if (notifications.inTransaction(session_.pid) &&
             !notifications.prepareCommitTransaction(session_.pid)) {
@@ -252,6 +271,28 @@ bool DdlTransaction::commit() {
 
 void DdlTransaction::rollback() {
     if (!active_) return;
+    if (startedByUs_ && engine_.inTransaction()) {
+        const std::string db = session_.currentDB;
+        for (const auto& op : ops_) {
+            if (op.op != RecordedOp::Op::Create) continue;
+            const std::string undoDb = db.empty() ? op.extra : db;
+            engine_.registerDdlUndo([engine = &engine_, undoDb, op]() {
+                return DdlTransaction::undoCreate(*engine, undoDb, op);
+            });
+        }
+        ops_.clear();
+        const DBStatus status = engine_.rollbackTransaction();
+        if (status != DBStatus::OK) {
+            std::cerr << "DDL rollback incomplete (SQLSTATE "
+                      << sqlstateForDBStatus(status)
+                      << "); retaining engine transaction and recovery image" << std::endl;
+            return;
+        }
+        engine_.discardTransactionBackup(session_.currentDB);
+        committed_ = false;
+        active_ = false;
+        return;
+    }
     // 按后进先出顺序撤销 CREATE 操作。
     for (auto it = ops_.rbegin(); it != ops_.rend(); ++it) {
         if (it->op == RecordedOp::Op::Create) {
@@ -262,13 +303,6 @@ void DdlTransaction::rollback() {
         }
     }
     if (startedByUs_) {
-        if (engine_.inTransaction()) {
-            const DBStatus status = engine_.rollbackTransaction();
-            if (status != DBStatus::OK) {
-                std::cerr << "DDL rollback warning (SQLSTATE "
-                          << sqlstateForDBStatus(status) << ")" << std::endl;
-            }
-        }
         // rollbackTransaction restores row-level state, but the DDL wrapper
         // owns the physical snapshot created in begin(). Leaving it behind
         // makes the next process startup mistake an already-rolled-back
@@ -282,6 +316,10 @@ void DdlTransaction::rollback() {
                 std::cerr << "DDL rollback warning: failed to restore "
                              "statement snapshot for "
                           << session_.currentDB << std::endl;
+                // A failed statement restore cannot safely admit later
+                // writes. Fall back to full transaction rollback; if that
+                // fails too, its graph/locks/images remain owned for retry.
+                if (engine_.rollbackTransaction() != DBStatus::OK) return;
             }
         } else {
             engine_.discardDdlStatementBackup(statementBackupPath_);
@@ -293,6 +331,7 @@ void DdlTransaction::rollback() {
         if (!engine_.restoreTransactionBackup(session_.currentDB)) {
             std::cerr << "DDL rollback warning: failed to restore database snapshot for "
                       << session_.currentDB << std::endl;
+            if (engine_.rollbackTransaction() != DBStatus::OK) return;
         }
     } else if (!startedByUs_ && engine_.inTransaction() &&
                snapshotRollbackEnabled_ && !snapshotDirty_) {

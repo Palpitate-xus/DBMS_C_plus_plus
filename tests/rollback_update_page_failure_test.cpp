@@ -147,6 +147,9 @@ void test_full_rollback_repairs_indexes_when_update_page_is_bad() {
     failure.restore();
 
     assert(status == dbms::DBStatus::IO_ERROR);
+    assert(g_engine.inTransaction());
+    assert(g_engine.beginTransaction(database) == dbms::DBStatus::IO_ERROR);
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
     assert(!g_engine.inTransaction());
     assertOldVersionAndIndexes(database);
     cleanupTestDb(testName);
@@ -166,6 +169,9 @@ void test_savepoint_rollback_aborts_and_repairs_update_indexes() {
     failure.restore();
 
     assert(status == dbms::DBStatus::IO_ERROR);
+    assert(g_engine.inTransaction());
+    assert(g_engine.beginTransaction(database) == dbms::DBStatus::IO_ERROR);
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
     assert(!g_engine.inTransaction());
     assertOldVersionAndIndexes(database);
     cleanupTestDb(testName);
@@ -183,6 +189,9 @@ void test_full_rollback_stages_update_until_wal_is_durable() {
     failure.restore();
 
     assert(status == dbms::DBStatus::IO_ERROR);
+    assert(g_engine.inTransaction());
+    assert(g_engine.beginTransaction(database) == dbms::DBStatus::IO_ERROR);
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
     assert(!g_engine.inTransaction());
     assertOldVersionAndIndexes(database);
     cleanupTestDb(testName);

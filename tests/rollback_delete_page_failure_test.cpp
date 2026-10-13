@@ -104,6 +104,9 @@ void test_full_rollback_reports_delete_heap_failure() {
     failure.restore();
 
     assert(status == dbms::DBStatus::IO_ERROR);
+    assert(g_engine.inTransaction());
+    assert(g_engine.beginTransaction(database) == dbms::DBStatus::IO_ERROR);
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
     assert(!g_engine.inTransaction());
     assertRowAndPrimaryKey(database, 1);
     cleanupTestDb(testName);
@@ -124,6 +127,9 @@ void test_savepoint_rollback_aborts_on_delete_heap_failure() {
     failure.restore();
 
     assert(status == dbms::DBStatus::IO_ERROR);
+    assert(g_engine.inTransaction());
+    assert(g_engine.beginTransaction(database) == dbms::DBStatus::IO_ERROR);
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
     assert(!g_engine.inTransaction());
     assertRowAndPrimaryKey(database, 2);
     cleanupTestDb(testName);

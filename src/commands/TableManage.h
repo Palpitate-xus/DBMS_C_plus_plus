@@ -965,7 +965,7 @@ public:
         bool previous_;
     };
     bool databaseTransactionOwnershipDeferred() const;
-    DBStatus ensureDatabaseTransactionOwnership() const;
+    DBStatus ensureDatabaseTransactionOwnership(const std::string& dbname = {}) const;
     DBStatus commitTransaction();
     DBStatus rollbackTransaction();
     // SQL statements inside one transaction share a command ID.  Tuple
@@ -1002,7 +1002,8 @@ public:
     // Restore/remove the current transaction's pre-change database snapshot.
     // DDL uses this because schema/file rewrites are not represented by the
     // row-level transaction undo log.
-    bool restoreTransactionBackup(const std::string& dbname);
+    bool restoreTransactionBackup(const std::string& dbname,
+                                  bool retainUntilTerminalAbort = false);
     void discardTransactionBackup(const std::string& dbname);
     // Mark the current DDL snapshot as covering a physical/catalog mutation.
     void markTransactionBackupDirty();
@@ -2118,6 +2119,9 @@ private:
     // backends coordinate exactly like protocol workers. The resource
     // namespace is set from the database operation before table/row/gap locks.
     LockManager& lockManager_;
+    // Only teardown may flush already-owned state while a failed rollback
+    // quarantines the database from live backends. No terminal ABORT is added.
+    std::atomic<bool> shuttingDown_{false};
 
     // Auto-VACUUM: per-table dead tuple tracking
     mutable std::mutex deadTupleMutex_;
@@ -2269,6 +2273,11 @@ private:
         std::map<std::string, bool> constraintMode; // name -> deferred?
         std::map<uint64_t, std::vector<DeferredCheck>> deferredChecks;
         bool inTransaction = false;
+        // An incomplete physical rollback is still a live transaction graph.
+        // Only its explicit rollback retry may access the affected database.
+        bool rollbackPending = false;
+        bool rollbackRunning = false;
+        Lsn rollbackAbortLsn = INVALID_LSN;
         bool deferDatabaseBeginRequested = false;
         bool databaseOwnershipDeferred = false;
         bool promotingDatabaseOwnership = false;
@@ -2387,7 +2396,7 @@ private:
     TransactionContext& transactionContext() const;
     DBStatus createSavepoint(const std::string& name, bool internalStatement);
     DBStatus finishDatabaseIndependentTransaction();
-    void requireDatabaseTransactionOwnership() const;
+    void requireDatabaseTransactionOwnership(const std::string& dbname = {}) const;
     bool hasUserSavepoint() const;
     void ensureTransactionSnapshot() const;
     bool markTupleDeletedByCurrentCommand(

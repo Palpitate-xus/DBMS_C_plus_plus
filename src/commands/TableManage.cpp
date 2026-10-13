@@ -237,6 +237,9 @@ namespace dbms {
 namespace {
 std::shared_ptr<std::shared_mutex> databaseTxnLockFor(
     const std::string& dbname);
+bool databaseRollbackPending(const std::string& dbname);
+void setDatabaseRollbackPending(const std::string& dbname, uint64_t xid, bool pending);
+bool anyDatabaseRollbackPending();
 }
 
 // Forward declarations for row-header helpers used by TableSchema::rowSize().
@@ -2347,16 +2350,32 @@ StorageEngine::TransactionContext& StorageEngine::transactionContext() const {
 void StorageEngine::endBackendSession() {
     const std::thread::id worker = std::this_thread::get_id();
     if (transactionContext().inTransaction) {
-        rollbackTransaction();
+        try {
+            if (rollbackTransaction() != DBStatus::OK) {
+                std::cerr << "[transaction] backend ended with incomplete rollback; "
+                             "retaining recovery graph" << std::endl;
+                return;
+            }
+        } catch (const std::exception& error) {
+            std::cerr << "[transaction] backend rollback secondary error: "
+                      << error.what() << "; retaining recovery graph" << std::endl;
+            return;
+        } catch (...) {
+            std::cerr << "[transaction] backend rollback secondary error; retaining recovery graph"
+                      << std::endl;
+            return;
+        }
     }
     std::lock_guard<std::mutex> lock(transactionContextsMutex_);
     transactionContexts_.erase(worker);
 }
 
 StorageEngine::~StorageEngine() {
+    shuttingDown_.store(true, std::memory_order_release);
+    try {
     stopBackgroundWorker();
 
-    bool cleanShutdown = true;
+    bool cleanShutdown = !anyDatabaseRollbackPending();
     const auto shutdownDatabases = getDatabaseNames();
 
     // Persist deferred sequence counters before any teardown; rows inserted
@@ -2460,6 +2479,13 @@ StorageEngine::~StorageEngine() {
             for (auto& entry : ssiInEdges_) entry.second.erase(xid);
             for (auto& entry : ssiOutEdges_) entry.second.erase(xid);
         }
+    }
+    } catch (const std::exception& error) {
+        std::cerr << "[storage] shutdown secondary error: " << error.what()
+                  << "; retaining recovery images and nonterminal WAL" << std::endl;
+    } catch (...) {
+        std::cerr << "[storage] shutdown secondary error; retaining recovery images and nonterminal WAL"
+                  << std::endl;
     }
 }
 
@@ -2606,17 +2632,31 @@ void StorageEngine::backgroundBufferFlush() {
         const size_t separator = kv.first.find('/');
         if (!pa || separator == std::string::npos || separator == 0) continue;
         const std::string dbname = kv.first.substr(0, separator);
+        // A failed undo owns this database until the caller repairs and
+        // retries it. Background writeback must not resolve its relation
+        // paths (which correctly reject ordinary access while pending).
+        // Other databases retain their usual writeback behavior.
+        if (databaseRollbackPending(dbname)) continue;
         const std::string tableName = kv.first.substr(separator + 1);
-        const std::string currentPath = tableName.find('#') == std::string::npos &&
-            tableName.find('/') == std::string::npos
-            ? dataPath(dbname, tableName).string() : std::string{};
-        if (cleanRetiredHeap(pa, currentPath)) continue;
-        WALManager* wal = getWAL(dbname);
-        if (!wal || !pa->flushDirtyUnpinned([wal]() {
-                return wal->XLogFlush(wal->currentWriteLsn());
-            })) {
-            std::cerr << "[background] heap writeback failed for "
-                      << kv.first << std::endl;
+        try {
+            const std::string currentPath = tableName.find('#') == std::string::npos &&
+                tableName.find('/') == std::string::npos
+                ? dataPath(dbname, tableName).string() : std::string{};
+            if (cleanRetiredHeap(pa, currentPath)) continue;
+            WALManager* wal = getWAL(dbname);
+            if (databaseRollbackPending(dbname)) continue;
+            if (!wal || !pa->flushDirtyUnpinned([wal]() {
+                    return wal->XLogFlush(wal->currentWriteLsn());
+                })) {
+                std::cerr << "[background] heap writeback failed for "
+                          << kv.first << std::endl;
+            }
+        } catch (const DbError& error) {
+            // Undo can become pending between the initial check and path
+            // resolution. Suppress only that ownership error, not unrelated
+            // I/O/SQL failures in a healthy database.
+            if (error.sqlState() != "58030" || !databaseRollbackPending(dbname))
+                throw;
         }
     }
 }
@@ -2649,7 +2689,7 @@ void StorageEngine::backgroundCheckpoint() {
 // Primary Key Index
 // ========================================================================
 std::filesystem::path StorageEngine::dbPath(const std::string& dbname) const {
-    const auto status = ensureDatabaseTransactionOwnership();
+    const auto status = ensureDatabaseTransactionOwnership(dbname);
     if (status != DBStatus::OK)
         throw DbError(sqlstateForDBStatus(status), "could not acquire database transaction ownership");
     return std::filesystem::path(dbname);
@@ -6975,7 +7015,7 @@ std::shared_ptr<PageAllocator> StorageEngine::acquireSharedHeap(
 
 PageAllocator* StorageEngine::getPageAllocator(const std::string& dbname,
                                                 const std::string& tablename) const {
-    const auto status = ensureDatabaseTransactionOwnership();
+    const auto status = ensureDatabaseTransactionOwnership(dbname);
     if (status != DBStatus::OK)
         throw DbError(sqlstateForDBStatus(status), "could not acquire database transaction ownership");
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
@@ -7506,7 +7546,7 @@ void StorageEngine::pruneMissingDatabaseCaches() {
 
 FreeSpaceMap* StorageEngine::getFSM(const std::string& dbname,
                                      const std::string& tablename) const {
-    requireDatabaseTransactionOwnership();
+    requireDatabaseTransactionOwnership(dbname);
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     std::string key = dbname + "/" + tablename;
     auto it = fsmCache_.find(key);
@@ -7526,7 +7566,7 @@ void StorageEngine::closeAllFSM() {
 
 VisibilityMap* StorageEngine::getVM(const std::string& dbname,
                                      const std::string& tablename) const {
-    requireDatabaseTransactionOwnership();
+    requireDatabaseTransactionOwnership(dbname);
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     std::string key = dbname + "/" + tablename;
     auto it = vmCache_.find(key);
@@ -7545,7 +7585,7 @@ void StorageEngine::closeAllVM() {
 }
 
 CommitLog* StorageEngine::getCommitLog(const std::string& dbname) const {
-    const auto status = ensureDatabaseTransactionOwnership();
+    const auto status = ensureDatabaseTransactionOwnership(dbname);
     if (status != DBStatus::OK)
         throw DbError(sqlstateForDBStatus(status), "could not acquire database transaction ownership");
     // commitLogs_ is a mutable shared map; lock it (cacheMutex_ is recursive,
@@ -7648,7 +7688,7 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
                                 const std::vector<std::string>& targetPartitions,
                                 bool registerSiread,
                                 bool indexMaintenanceView) const {
-    const auto status = ensureDatabaseTransactionOwnership();
+    const auto status = ensureDatabaseTransactionOwnership(dbname);
     if (status != DBStatus::OK)
         throw DbError(sqlstateForDBStatus(status), "could not acquire database transaction ownership");
     if (!indexMaintenanceView) noteTemporaryRelationAccess(dbname, tablename);
@@ -8494,7 +8534,7 @@ void StorageEngine::invalidateHashidxCache(const std::string& dbname,
 HashIndex* StorageEngine::getHashIndex(const std::string& dbname,
                                         const std::string& tablename,
                                         const std::string& colname) const {
-    requireDatabaseTransactionOwnership();
+    requireDatabaseTransactionOwnership(dbname);
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     std::string key = dbname + "." + tablename + "." + colname;
     auto it = hashIndexCache_.find(key);
@@ -8516,7 +8556,7 @@ HashIndex* StorageEngine::getHashIndex(const std::string& dbname,
 HashIndex* StorageEngine::getHashIndexForBuild(
         const std::string& dbname, const std::string& tablename,
         const std::string& colname) const {
-    requireDatabaseTransactionOwnership();
+    requireDatabaseTransactionOwnership(dbname);
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     const std::string key = dbname + "." + tablename + "." + colname;
     auto it = hashIndexCache_.find(key);
@@ -8654,7 +8694,7 @@ std::vector<std::string> StorageEngine::getBloomIndexedColumns(const std::string
 BloomIndex* StorageEngine::getBloomIndex(const std::string& dbname,
                                          const std::string& tablename,
                                          const std::string& colname) const {
-    requireDatabaseTransactionOwnership();
+    requireDatabaseTransactionOwnership(dbname);
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     std::string key = dbname + "." + tablename + "." + colname;
     auto it = bloomIndexCache_.find(key);
@@ -8676,7 +8716,7 @@ BloomIndex* StorageEngine::getBloomIndex(const std::string& dbname,
 BloomIndex* StorageEngine::getBloomIndexForBuild(
         const std::string& dbname, const std::string& tablename,
         const std::string& colname) const {
-    requireDatabaseTransactionOwnership();
+    requireDatabaseTransactionOwnership(dbname);
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     const std::string key = dbname + "." + tablename + "." + colname;
     auto it = bloomIndexCache_.find(key);
@@ -16002,7 +16042,7 @@ std::filesystem::path StorageEngine::toastIndexPath(const std::string& dbname,
 
 PageAllocator* StorageEngine::getToastPageAllocator(const std::string& dbname,
                                                     const std::string& tablename) const {
-    requireDatabaseTransactionOwnership();
+    requireDatabaseTransactionOwnership(dbname);
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     std::string key = dbname + ":" + tablename;
     auto it = toastPageAllocators_.find(key);
@@ -21385,7 +21425,7 @@ std::string StorageEngine::getColumnComment(const std::string& dbname,
 }
 
 std::vector<std::string> StorageEngine::getTableNames(const std::string& dbname) const {
-    const auto status = ensureDatabaseTransactionOwnership();
+    const auto status = ensureDatabaseTransactionOwnership(dbname);
     if (status != DBStatus::OK)
         throw DbError(sqlstateForDBStatus(status), "could not acquire database transaction ownership");
     {
@@ -22831,7 +22871,7 @@ void StorageEngine::invalidateCachedSchema(const std::string& dbname,
 
 TableSchema StorageEngine::getTableSchema(const std::string& dbname,
                                             const std::string& tablename) const {
-    const auto status = ensureDatabaseTransactionOwnership();
+    const auto status = ensureDatabaseTransactionOwnership(dbname);
     if (status != DBStatus::OK)
         throw DbError(sqlstateForDBStatus(status), "could not acquire database transaction ownership");
     if (dbname.empty() || !validStoredIdentifier(dbname, MAX_TABLE_NAME_LEN) ||
@@ -24476,7 +24516,7 @@ DBStatus StorageEngine::insertRow(const std::string& dbname,
                                    const SqlRow& sqlValues,
                                    std::vector<SqlRow>* insertedRows,
                                    IdentityOverride identityOverride) {
-    const auto ownershipStatus = ensureDatabaseTransactionOwnership();
+    const auto ownershipStatus = ensureDatabaseTransactionOwnership(dbname);
     if (ownershipStatus != DBStatus::OK) return ownershipStatus;
     std::map<std::string, std::string> values;
     std::set<std::string> nullColumns;
@@ -27340,7 +27380,7 @@ DBStatus StorageEngine::removeRows(
     const SqlDeleteMatcher& deleteMatcher,
     size_t* affectedRows,
     const SqlMutationCallbacks* mutationCallbacks) {
-    const auto ownershipStatus = ensureDatabaseTransactionOwnership();
+    const auto ownershipStatus = ensureDatabaseTransactionOwnership(dbname);
     if (ownershipStatus != DBStatus::OK) return ownershipStatus;
     if (affectedRows) *affectedRows = 0;
     if (transactionContext().inTransaction &&
@@ -28543,7 +28583,7 @@ DBStatus StorageEngine::update(
     const UpdateMatcher& updateMatcher,
     size_t* affectedRows,
     std::vector<UpdateRowImage>* rowImages) {
-    const auto ownershipStatus = ensureDatabaseTransactionOwnership();
+    const auto ownershipStatus = ensureDatabaseTransactionOwnership(dbname);
     if (ownershipStatus != DBStatus::OK) return ownershipStatus;
     SqlUpdateResolver typedResolver;
     if (updateResolver) {
@@ -38071,7 +38111,7 @@ std::vector<std::string> StorageEngine::queryExpr(
     std::vector<std::vector<bool>>* structuredNulls,
     std::vector<int64_t>* structuredRowIds,
     const QueryExprExecutionOptions& options) {
-    const auto status = ensureDatabaseTransactionOwnership();
+    const auto status = ensureDatabaseTransactionOwnership(dbname);
     if (status != DBStatus::OK)
         throw DbError(sqlstateForDBStatus(status), "could not acquire database transaction ownership");
     std::vector<std::string> result;
@@ -42180,7 +42220,7 @@ std::vector<std::string> StorageEngine::crossJoin(
 // ========================================================================
 
 WALManager* StorageEngine::getWAL(const std::string& dbname) const {
-    requireDatabaseTransactionOwnership();
+    requireDatabaseTransactionOwnership(dbname);
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     auto& context = transactionContext();
     const bool ownsDatabaseLock =
@@ -43162,6 +43202,9 @@ static bool validPhysicalBackupSource(
     const std::filesystem::path& source, std::string& sourceDatabase);
 
 bool StorageEngine::recoverAllDatabases() {
+    // A second embedded backend is not a process restart. It must not replay
+    // an incomplete owner's image while that owner still retains its graph.
+    if (anyDatabaseRollbackPending()) return false;
     if (!std::filesystem::exists(".") || !std::filesystem::is_directory(".")) {
         return true;
     }
@@ -47696,6 +47739,7 @@ namespace {
 struct DatabaseTransactionLockRegistry {
     std::mutex mutex;
     std::map<std::string, std::shared_ptr<std::shared_mutex>> locks;
+    std::map<std::string, std::set<uint64_t>> pendingRollbacks;
 };
 
 DatabaseTransactionLockRegistry& databaseTransactionLockRegistry() {
@@ -47715,6 +47759,33 @@ std::shared_ptr<std::shared_mutex> databaseTxnLockFor(const std::string& dbname)
     auto& lock = registry.locks[dbname];
     if (!lock) lock = std::make_shared<std::shared_mutex>();
     return lock;
+}
+
+bool databaseRollbackPending(const std::string& dbname) {
+    auto& registry = databaseTransactionLockRegistry();
+    std::lock_guard<std::mutex> guard(registry.mutex);
+    const auto found = registry.pendingRollbacks.find(dbname);
+    if (found == registry.pendingRollbacks.end()) return false;
+    return true;
+}
+
+void setDatabaseRollbackPending(const std::string& dbname, uint64_t xid, bool pending) {
+    auto& registry = databaseTransactionLockRegistry();
+    std::lock_guard<std::mutex> guard(registry.mutex);
+    if (pending) registry.pendingRollbacks[dbname].insert(xid);
+    else {
+        const auto found = registry.pendingRollbacks.find(dbname);
+        if (found != registry.pendingRollbacks.end()) {
+            found->second.erase(xid);
+            if (found->second.empty()) registry.pendingRollbacks.erase(found);
+        }
+    }
+}
+
+bool anyDatabaseRollbackPending() {
+    auto& registry = databaseTransactionLockRegistry();
+    std::lock_guard<std::mutex> guard(registry.mutex);
+    return !registry.pendingRollbacks.empty();
 }
 
 std::filesystem::path transactionBackupPath(const std::string& dbname, uint64_t xid) {
@@ -47748,14 +47819,19 @@ bool StorageEngine::databaseTransactionOwnershipDeferred() const {
     return transactionContext().inTransaction && transactionContext().databaseOwnershipDeferred;
 }
 
-void StorageEngine::requireDatabaseTransactionOwnership() const {
-    const auto status = ensureDatabaseTransactionOwnership();
+void StorageEngine::requireDatabaseTransactionOwnership(const std::string& dbname) const {
+    const auto status = ensureDatabaseTransactionOwnership(dbname);
     if (status != DBStatus::OK)
         throw DbError(sqlstateForDBStatus(status), "could not acquire database transaction ownership");
 }
 
-DBStatus StorageEngine::ensureDatabaseTransactionOwnership() const {
+DBStatus StorageEngine::ensureDatabaseTransactionOwnership(const std::string& dbname) const {
+    if (shuttingDown_.load(std::memory_order_acquire)) return DBStatus::OK;
     auto& context = transactionContext();
+    if (context.rollbackPending && !context.rollbackRunning) return DBStatus::IO_ERROR;
+    const auto& target = dbname.empty() ? context.txnDB : dbname;
+    if (!target.empty() && databaseRollbackPending(target) &&
+        !(context.rollbackRunning && context.txnDB == target)) return DBStatus::IO_ERROR;
     if (!context.inTransaction || !context.databaseOwnershipDeferred ||
         context.promotingDatabaseOwnership) return DBStatus::OK;
     // Keep the same xid, command ID, first-query snapshot and transaction
@@ -47922,6 +47998,7 @@ bool StorageEngine::transactionBackupDirty() const {
 
 bool StorageEngine::beginSqlCommand() {
     auto& context = transactionContext();
+    if (context.rollbackPending && !context.rollbackRunning) return false;
     if (!context.inTransaction) return false;
     context.commandInternalRelations.clear();
     // PostgreSQL READ COMMITTED takes one snapshot per command.  Complex SQL
@@ -48047,6 +48124,7 @@ void StorageEngine::registerSqlCommandInternalRelation(
 
 DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnapshot) {
     auto& context = transactionContext();
+    if (context.rollbackPending || databaseRollbackPending(dbname)) return DBStatus::IO_ERROR;
     if (context.inTransaction) {
         // BEGIN inside an active transaction is a warning/no-op in
         // PostgreSQL. Never publish the existing transaction merely because
@@ -48436,6 +48514,7 @@ void StorageEngine::discardDdlStatementBackup(
     const std::string& backupPath) {
     if (backupPath.empty()) return;
     const auto& context = transactionContext();
+    if (context.rollbackPending && !context.rollbackRunning) return;
     if (context.txnDB.empty() || context.currentTxnId == 0) return;
     if (std::any_of(context.savepoints.begin(), context.savepoints.end(),
         [&](const auto& savepoint) { return savepoint.ddlBackupPath == backupPath; })) return;
@@ -48450,6 +48529,7 @@ void StorageEngine::discardDdlStatementBackup(
 }
 
 DBStatus StorageEngine::commitTransaction() {
+    if (transactionContext().rollbackPending) return DBStatus::IO_ERROR;
     if (!transactionContext().inTransaction) return DBStatus::OK;
     if (transactionContext().databaseOwnershipDeferred) return finishDatabaseIndependentTransaction();
     lockManager_.setResourceNamespace(transactionContext().txnDB);
@@ -49362,6 +49442,18 @@ DBStatus StorageEngine::rollbackTransaction() {
     lockManager_.setResourceNamespace(transactionContext().txnDB);
 
     auto& rollbackContext = transactionContext();
+    if (rollbackContext.rollbackRunning) return DBStatus::IO_ERROR;
+    rollbackContext.rollbackPending = true;
+    rollbackContext.rollbackRunning = true;
+    struct RollbackAttempt {
+        TransactionContext& context;
+        const std::string database;
+        const uint64_t xid;
+        ~RollbackAttempt() {
+            context.rollbackRunning = false;
+            setDatabaseRollbackPending(database, xid, context.rollbackPending);
+        }
+    } attempt{rollbackContext, rollbackContext.txnDB, rollbackContext.currentTxnId};
     const bool databaseWideUndo =
         rollbackContext.transactionBackupDirty ||
         !rollbackContext.ddlUndoActions.empty();
@@ -49408,18 +49500,19 @@ DBStatus StorageEngine::rollbackTransaction() {
     // full ROLLBACK restore DROP/REPLACE operations without reintroducing the
     // rows that existed before the snapshot was taken.
     if (hasBackup) {
-        snapshotRestoreOk = restoreTransactionBackup(rollbackDb);
+        snapshotRestoreOk = restoreTransactionBackup(rollbackDb, true);
+        if (!snapshotRestoreOk) {
+            std::cerr << "[transaction] rollback snapshot incomplete for " << rollbackDb
+                      << "; retaining transaction graph and image" << std::endl;
+            return DBStatus::IO_ERROR;
+        }
     }
 
-    // Mark transaction as aborted in CLOG. Continue rollback even if the
-    // status cannot be persisted, but report the durability failure after all
-    // in-memory and physical undo work has completed.
+    // Retain nonterminal CLOG status until physical undo is durable too.
+    // The active xid/read view already exclude this transaction's NEW rows;
+    // an early durable Aborted status would mislead prepared-state consumers.
     bool clogOk = true;
     CommitLog* clog = getCommitLog(transactionContext().txnDB);
-    if (clog) {
-        clog->setStatus(transactionContext().currentTxnId, CommitLog::Status::Aborted);
-        clogOk = clog->flush();
-    }
 
     // Keep the xid in the active set until physical/index undo is complete.
     // Otherwise a concurrent reader may re-enable an index while it still
@@ -49926,14 +50019,25 @@ DBStatus StorageEngine::rollbackTransaction() {
         ddlUndoBegin = transactionContext().ddlUndoActions.rbegin() +
                        (transactionContext().ddlUndoActions.size() - ddlUndoReplaySize);
     }
+    std::vector<std::function<bool()>> failedDdlUndoActions;
     for (auto it = ddlUndoBegin; it != ddlUndoEnd; ++it) {
+        bool undone = false;
         try {
-            if (!(*it)()) ddlUndoOk = false;
+            undone = (*it)();
         } catch (...) {
+        }
+        if (!undone) {
             ddlUndoOk = false;
+            failedDdlUndoActions.push_back(*it);
         }
     }
-    transactionContext().ddlUndoActions.clear();
+    // A retained image reintroduces its prefix on retry, so retain the full
+    // prefix's undo actions too. Without an image, retry only failed actions;
+    // successful access-method DROP actions need not be idempotent.
+    if (!hasBackup) {
+        std::reverse(failedDdlUndoActions.begin(), failedDdlUndoActions.end());
+        transactionContext().ddlUndoActions = std::move(failedDdlUndoActions);
+    }
 
     // A commit attempt can already have rebuilt these sidecars with the
     // transaction's NEW versions before a later durability step fails.  Once
@@ -49989,16 +50093,35 @@ DBStatus StorageEngine::rollbackTransaction() {
         : flushTableCaches(
               rollbackDb, rollbackContext.specializedIndexTables);
 
+    if (snapshotRestoreOk && rowUndoOk && ddlUndoOk &&
+        specializedUndoOk && undoFlushOk && clog) {
+        clog->setStatus(transactionContext().currentTxnId, CommitLog::Status::Aborted);
+        clogOk = clog->flush();
+    }
+
+    if (!(snapshotRestoreOk && rowUndoOk && ddlUndoOk &&
+          specializedUndoOk && undoFlushOk && clogOk)) {
+        std::cerr << "[transaction] rollback incomplete for " << rollbackDb
+                  << " (snapshot=" << snapshotRestoreOk << ", rows=" << rowUndoOk
+                  << ", ddl=" << ddlUndoOk << ", specialized_indexes=" << specializedUndoOk
+                  << ", flush=" << undoFlushOk << ", clog=" << clogOk
+                  << "); retaining transaction graph, without terminal ABORT" << std::endl;
+        return DBStatus::IO_ERROR;
+    }
+
     // Write WAL ABORT marker after undo.
     WALManager* wal = getWAL(transactionContext().txnDB);
     bool abortWalOk = true;
     if (wal) {
-        const Lsn abortLsn = walXactAbort(transactionContext().txnDB,
-                                           transactionContext().currentTxnId);
-        abortWalOk = abortLsn != INVALID_LSN && wal->XLogFlush(abortLsn);
+        if (rollbackContext.rollbackAbortLsn == INVALID_LSN)
+            rollbackContext.rollbackAbortLsn = walXactAbort(
+                transactionContext().txnDB, transactionContext().currentTxnId);
+        abortWalOk = rollbackContext.rollbackAbortLsn != INVALID_LSN &&
+                     wal->XLogFlush(rollbackContext.rollbackAbortLsn);
     } else {
         abortWalOk = false;
     }
+    if (!abortWalOk) return DBStatus::IO_ERROR;
 
     // The heap and every current-version index now agree again, so readers
     // may stop treating this xid as a source of snapshot-incomplete indexes.
@@ -50011,6 +50134,7 @@ DBStatus StorageEngine::rollbackTransaction() {
 
     transactionContext().deferredChecks.erase(transactionContext().currentTxnId);
     transactionContext().txnLog.clear();
+    transactionContext().ddlUndoActions.clear();
     transactionContext().specializedIndexTables.clear();
     // Logical decoding: rollback discards buffered changes — subscribers
     // never see uncommitted work.
@@ -50085,7 +50209,9 @@ DBStatus StorageEngine::rollbackTransaction() {
             transactionContext().tempTablesCreatedAtTransactionStart;
     }
 
-    if (!preserveBackup) discardTransactionBackup(rollbackDb);
+    // A restored dirty image is no longer needed after complete durable
+    // undo+ABORT. Clean opt-in images retain their existing wrapper ownership.
+    if (!preserveBackup || hasBackup) discardTransactionBackup(rollbackDb);
 
     if (!preserveBackup && snapshotRestoreOk && rowUndoOk && ddlUndoOk &&
         specializedUndoOk && undoFlushOk && clogOk && abortWalOk &&
@@ -50094,6 +50220,9 @@ DBStatus StorageEngine::rollbackTransaction() {
         pruneSequenceRuntimeForks(rollbackDb);
 
     transactionContext().currentTxnId = 0;
+    setDatabaseRollbackPending(rollbackDb, attempt.xid, false);
+    transactionContext().rollbackPending = false;
+    transactionContext().rollbackAbortLsn = INVALID_LSN;
     transactionContext().inTransaction = false;
     transactionContext().transactionWalOwner.reset();
     transactionContext().readOnly = false;
@@ -50127,10 +50256,12 @@ DBStatus StorageEngine::rollbackTransaction() {
     return rollbackOk ? DBStatus::OK : DBStatus::IO_ERROR;
 }
 
-bool StorageEngine::restoreTransactionBackup(const std::string& dbname) {
+bool StorageEngine::restoreTransactionBackup(const std::string& dbname,
+                                             bool retainUntilTerminalAbort) {
     if (dbname.empty()) return false;
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     auto& context = transactionContext();
+    if (context.rollbackPending && !context.rollbackRunning) return false;
     if (context.inTransaction &&
         (context.txnLogSizeAtBackup > context.txnLog.size() ||
          context.ddlUndoSizeAtBackup > context.ddlUndoActions.size())) {
@@ -50165,12 +50296,14 @@ bool StorageEngine::restoreTransactionBackup(const std::string& dbname) {
             clearCatalogSnapshot();
             captureCatalogSnapshot();
         }
-        (void)discardOwnedPhysicalBackup(backup, dbname);
-        context.txnBackupPath.clear();
-        context.transactionBackupDirty = false;
-        context.restoreBackupBeforeRowUndo = false;
-        context.txnLogSizeAtBackup = 0;
-        context.ddlUndoSizeAtBackup = 0;
+        if (!retainUntilTerminalAbort) {
+            (void)discardOwnedPhysicalBackup(backup, dbname);
+            context.txnBackupPath.clear();
+            context.transactionBackupDirty = false;
+            context.restoreBackupBeforeRowUndo = false;
+            context.txnLogSizeAtBackup = 0;
+            context.ddlUndoSizeAtBackup = 0;
+        }
         if (context.inTransaction) {
             context.readView.commitLog = getCommitLog(dbname);
         }
@@ -50181,6 +50314,7 @@ bool StorageEngine::restoreTransactionBackup(const std::string& dbname) {
 void StorageEngine::discardTransactionBackup(const std::string& dbname) {
     if (dbname.empty()) return;
     auto& context = transactionContext();
+    if (context.rollbackPending && !context.rollbackRunning) return;
     if (!context.txnBackupPath.empty()) {
         const auto expected = transactionBackupPath(
             dbname, context.currentTxnId);
@@ -50525,6 +50659,7 @@ static PreparedTerminalState preparedTerminalState(
 }
 
 DBStatus StorageEngine::prepareTransaction(const std::string& xid) {
+    if (transactionContext().rollbackPending) return DBStatus::IO_ERROR;
     if (!transactionContext().inTransaction) return DBStatus::INVALID_VALUE;
     if (!validPreparedXid(xid)) return DBStatus::INVALID_VALUE;
     if (transactionContext().accessedTemporaryObjects) {
@@ -51128,6 +51263,7 @@ DBStatus StorageEngine::createSavepoint(
 
 DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
     auto& context = transactionContext();
+    if (context.rollbackPending) return DBStatus::IO_ERROR;
     if (!context.inTransaction) return DBStatus::INVALID_VALUE;
     const auto reverseIt = std::find_if(
         context.savepoints.rbegin(), context.savepoints.rend(),
@@ -51677,9 +51813,9 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
     }
 
     // Never discard undo records after a partial savepoint rollback.  The
-    // transaction's heap and indexes may already disagree, so keeping it
-    // active would expose a state that neither COMMIT nor a later ROLLBACK TO
-    // could repair. Escalate to a full abort while every log entry is intact.
+    // transaction's heap and indexes may already disagree. Escalate to full
+    // rollback while every entry is intact; if it cannot finish, preserve the
+    // pending/quarantined graph for an explicit retry rather than exposing it.
     if (!rowUndoOk || !ddlUndoOk) {
         (void)rollbackTransaction();
         return DBStatus::IO_ERROR;
@@ -51749,6 +51885,7 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
 }
 
 DBStatus StorageEngine::releaseSavepoint(const std::string& name) {
+    if (transactionContext().rollbackPending) return DBStatus::IO_ERROR;
     auto& context = transactionContext();
     if (!context.inTransaction) return DBStatus::INVALID_VALUE;
     const auto reverseIt = std::find_if(

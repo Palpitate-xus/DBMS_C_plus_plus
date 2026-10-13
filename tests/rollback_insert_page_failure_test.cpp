@@ -119,6 +119,9 @@ void test_insert_undo_reports_heap_failure_and_cleans_index() {
     failure.restore();
 
     assert(rollbackStatus == dbms::DBStatus::IO_ERROR);
+    assert(g_engine.inTransaction());
+    assert(g_engine.beginTransaction(database) == dbms::DBStatus::IO_ERROR);
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
     assert(!g_engine.inTransaction());
     assert(g_engine.query(database, "t", {"=id 1"}, {"id"}).empty());
     int64_t rid = -1;
@@ -158,6 +161,9 @@ void test_insert_undo_stops_before_heap_on_wal_failure() {
     failure.restore();
 
     assert(rollbackStatus == dbms::DBStatus::IO_ERROR);
+    assert(g_engine.inTransaction());
+    assert(g_engine.beginTransaction(database) == dbms::DBStatus::IO_ERROR);
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
     assert(!g_engine.inTransaction());
     assert(g_engine.query(database, "t", {"=id 2"}, {"id"}).empty());
     int64_t rid = -1;
