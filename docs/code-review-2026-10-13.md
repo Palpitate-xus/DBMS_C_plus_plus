@@ -38,6 +38,9 @@
 标准回归日志：`/tmp/dbms-review-20261013.f9Ywep98/full-regression.log`。
 原始运行日志为本机辅助证据，关键复现和结论会保存在本仓库中，避免只依赖临时文件。
 
+实际工具链：g++ 13.3.0、Python 3.13.12、zlib 1.3、ICU 74.2。注册驱动没有修改断言、跳过测试或放宽默认期限；运行期间保持产品源码、测试、脚本和构建清单摘要不变。
+编译存在warning，不能沿用旧批次“无警告”的结论。类别包括缺省成员初始化、未使用项、易误读缩进、运算符优先级和字符串地址比较；最后一项作为R29单独记录。一般warning并不自动等同于已复现的数据库错误，后续清理应逐项确认语义并保留回归。
+
 已完成的机械检查：465 个 Python 文件 AST 解析、13 个 shell 文件 `bash -n`，均通过。
 412 份 Markdown 的本地文件链接检查发现两处失效链接，均在历史 `all-gaps-todo.md` 中指向已移动的档案。
 `check_gap_progress.py` 通过一致性检查；`--require-complete` 按预期失败，因为清单尚未完成。
@@ -86,6 +89,7 @@ P1 表示可能导致错误结果、崩溃或服务不可用；P2 表示受限�
 | R26 | P2 | 递归CTE未核对共同输出类型/typmod与seed声明 | PG18.6对照复现 | 5 |
 | R27 | P1 | 页压缩只处理前256个存活行，错误释放其余行空间 | 正常API操作复现，3个控制中2个失败 | 1 |
 | R28 | P2 | 页插入复用空槽时的空间减法可能下溢 | 静态API风险；未跑边界探针，普通INSERT已检查canFit | 2 |
+| R29 | P2 | LIKE ESCAPE绑定以字符串地址判断bytea类型 | 编译器-Waddress及源码确认；当前构建未复现SQL失败 | 5 |
 
 ### R01：大 NUMERIC 平方根
 
@@ -367,6 +371,14 @@ compact只收集前256个LP_NORMAL条目，随后却用这部分条目的总长�
 当前普通INSERT两条已检查的路径先调用canFit（`src/commands/TableManage.cpp:25853`、`:25889`），能阻止这里的空间不足输入，因此本项仅登记为公共API静态风险，没有宣称SQL端可复现或已经发生损坏。
 修复：用先比较再相减的方式计算可用空间；明确区分复用槽和新建槽的开销，使insert本身提供完整容量保证，并让canFit与之采用一致规则。失败必须保持页字节不变。
 验收：空闲空间0至一个line-pointer大小的边界、可复用槽/无可复用槽、恰好放下的行、拒绝后checksum与原内容不变；本轮未执行这些新增边界测试。
+
+### R29：模式匹配类型的字符串地址比较
+
+位置：`src/parser/query_binding.cpp:776` 至 `:781`。
+条件表达式 `... ? "bytea" : "text"` 使 `const auto target` 成为const char*，后续 `target=="bytea"` 比较字符串地址而非内容。两个相同字面量是否共享地址不能作为类型判断契约；编译器已输出 `comparison with string literal results in unspecified behavior [-Waddress]`。
+因此bytea/text ESCAPE的校验可能依赖常量合并行为。本轮当前O2构建没有独立SQL失败证据，不能把可移植性风险写成已经出现的错误结果。
+修复：将target声明为std::string/std::string_view，或先保存显式isBytea布尔值再选择目标类型，避免地址比较；继续使用已解析的操作数类型处理ESCAPE输入。
+验收：bytea和text模式、正确/错误类型的ESCAPE、unknown字面量和参数、空源准备阶段；至少在正常优化及关闭常量合并的构建中运行同一语义控制，保持合法输入和错误SQLSTATE一致。
 
 ## 历史失败与待判定项目
 
