@@ -42929,6 +42929,7 @@ bool StorageEngine::rebuildIndexesAfterRecovery(
         // Rebuild it before user indexes because their logical keys may need
         // de-TOASTing while REINDEX scans the heap.
         for (const auto& tableName : tableNames) {
+            if (isSessionTempPhysicalName(tableName)) continue;
             const TableSchema table = getTableSchema(dbname, tableName);
             if (table.isUnlogged) continue;
 
@@ -43012,6 +43013,7 @@ bool StorageEngine::rebuildIndexesAfterRecovery(
         if (preservePreparedState) return true;
 
         for (const auto& tableName : tableNames) {
+            if (isSessionTempPhysicalName(tableName)) continue;
             const TableSchema table = getTableSchema(dbname, tableName);
             if (table.isUnlogged) continue;
 
@@ -43764,6 +43766,7 @@ bool StorageEngine::recoverAllDatabases() {
         const auto prepareUnloggedTables = [&]() -> bool {
             try {
                 for (const auto& tableName : getTableNames(dbname)) {
+                    if (isSessionTempPhysicalName(tableName)) continue;
                     const TableSchema table =
                         getTableSchema(dbname, tableName);
                     if (!table.isUnlogged) continue;
@@ -43918,6 +43921,10 @@ bool StorageEngine::recoverAllDatabases() {
         // for discarding images whose physical generation no longer exists.
         std::map<uint64_t, std::string> physicalRelations;
         for (const auto& name : getTableNames(dbname)) {
+            // Stale session TEMP names/forks are removed only after recovery.
+            // Their schemas may never have become durable; they have no
+            // persistent relation generation to replay or index to rebuild.
+            if (isSessionTempPhysicalName(name)) continue;
             const TableSchema schema = getTableSchema(dbname, name);
             if (schema.tablename != name) return false;
             if (schema.physicalRelationId != 0 &&
