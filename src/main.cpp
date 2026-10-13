@@ -4918,9 +4918,9 @@ static dbms::Oid resolvePreparedParameterType(const string& typeSpec,
     if (!g_engine.databaseExists(s.currentDB)) return dbms::INVALID_OID;
     auto& catalog = g_engine.catalogService().get(s.currentDB);
     if (!qualified.schema.empty()) {
-        const auto* nameSpace = catalog.findNamespaceByName(qualified.schema);
+        const auto nameSpace = catalog.getNamespaceByName(qualified.schema);
         if (!nameSpace) return dbms::INVALID_OID;
-        const auto* type = catalog.findTypeByName(qualified.name, nameSpace->oid);
+        const auto type = catalog.getTypeByName(qualified.name, nameSpace->oid);
         return type ? type->oid : dbms::INVALID_OID;
     }
     vector<string> searchPath;
@@ -4931,10 +4931,10 @@ static dbms::Oid resolvePreparedParameterType(const string& typeSpec,
     for (const auto& rawSchema : searchPath) {
         const string schema = dbms::expandSessionSearchPathEntry(
             rawSchema, s.username);
-        const auto* nameSpace = catalog.findNamespaceByName(schema);
+        const auto nameSpace = catalog.getNamespaceByName(schema);
         if (!nameSpace) continue;
-        if (const auto* type =
-                catalog.findTypeByName(qualified.name, nameSpace->oid)) {
+        if (const auto type =
+                catalog.getTypeByName(qualified.name, nameSpace->oid)) {
             return type->oid;
         }
     }

@@ -355,6 +355,94 @@ std::map<std::string, std::string> CatalogManager::readDomainColumns(
     return catalog.domainColumns(schema, relation);
 }
 
+// Each returned value is copied while mutex_ protects its source row. Do not
+// implement these by copying a public find* pointer after that getter unlocks.
+std::optional<PgNamespaceRow> CatalogManager::getNamespace(Oid oid) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto* row = findNamespaceUnlocked(oid);
+    return row ? std::make_optional(*row) : std::nullopt;
+}
+
+std::optional<PgNamespaceRow> CatalogManager::getNamespaceByName(
+    const std::string& name) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = nsByName_.find(name);
+    const auto* row = found == nsByName_.end() ? nullptr : findNamespaceUnlocked(found->second);
+    return row ? std::make_optional(*row) : std::nullopt;
+}
+
+std::optional<PgNamespaceRow> CatalogManager::getTempNamespace(uint64_t sessionId) const {
+    return getNamespaceByName("pg_temp_" + std::to_string(sessionId));
+}
+
+std::optional<PgClassRow> CatalogManager::getClass(Oid oid) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto* row = findClassUnlocked(oid);
+    return row ? std::make_optional(*row) : std::nullopt;
+}
+
+std::optional<PgClassRow> CatalogManager::getClassByName(
+    const std::string& name, Oid nspOid) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = classByName_.find(classNameKey(nspOid, name));
+    if (found == classByName_.end() || found->second >= classes_.size()) return std::nullopt;
+    return classes_[found->second];
+}
+
+std::optional<PgClassRow> CatalogManager::resolveRelationSnapshot(
+    const std::string& name, const std::vector<std::string>& searchPath) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto* row = resolveRelationUnlocked(name, searchPath);
+    return row ? std::make_optional(*row) : std::nullopt;
+}
+
+std::optional<PgAttributeRow> CatalogManager::resolveAttributeSnapshot(
+    const std::string& tableName, const std::string& colName,
+    const std::vector<std::string>& searchPath) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto* relation = resolveRelationUnlocked(tableName, searchPath);
+    if (!relation) return std::nullopt;
+    for (const auto& row : attributes_)
+        if (row.attrelid == relation->oid && row.attname == colName) return row;
+    return std::nullopt;
+}
+
+std::optional<PgAttributeRow> CatalogManager::getAttribute(
+    Oid relOid, const std::string& attname) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& row : attributes_)
+        if (row.attrelid == relOid && row.attname == attname) return row;
+    return std::nullopt;
+}
+
+std::optional<PgTypeRow> CatalogManager::getType(Oid oid) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto* row = findTypeUnlocked(oid);
+    return row ? std::make_optional(*row) : std::nullopt;
+}
+
+std::optional<PgTypeRow> CatalogManager::getTypeByName(
+    const std::string& name, Oid nspOid) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto* row = findTypeByNameUnlocked(name, nspOid);
+    return row ? std::make_optional(*row) : std::nullopt;
+}
+
+std::optional<PgProcRow> CatalogManager::getProc(Oid oid) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto* row = findProcUnlocked(oid);
+    return row ? std::make_optional(*row) : std::nullopt;
+}
+
+std::vector<PgProcRow> CatalogManager::getProcsByName(
+    const std::string& name, Oid nspOid) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<PgProcRow> result;
+    for (const auto& row : procs_)
+        if (row.proname == name && row.pronamespace == nspOid) result.push_back(row);
+    return result;
+}
+
 // ============================================================================
 // pg_namespace
 // ============================================================================
@@ -428,7 +516,7 @@ std::vector<PgNamespaceRow> CatalogManager::listNamespaces() const {
 
 Oid CatalogManager::createTempNamespace(uint64_t sessionId) {
     std::string name = "pg_temp_" + std::to_string(sessionId);
-    auto existing = findNamespaceByName(name);
+    auto existing = getNamespaceByName(name);
     if (existing) return existing->oid;
     return createNamespace(name, 10); // owner = bootstrap superuser
 }
@@ -647,10 +735,16 @@ std::vector<std::string> CatalogManager::parseSearchPath(const std::string& sear
 const PgClassRow* CatalogManager::resolveRelation(
         const std::string& name,
         const std::vector<std::string>& searchPath) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return resolveRelationUnlocked(name, searchPath);
+}
+
+const PgClassRow* CatalogManager::resolveRelationUnlocked(
+        const std::string& name,
+        const std::vector<std::string>& searchPath) const {
     QualifiedName qn;
     if (!parseQualifiedName(name, qn)) return nullptr;
 
-    std::lock_guard<std::mutex> lock(mutex_);
     if (!qn.schema.empty()) {
         auto nsIt = nsByName_.find(qn.schema);
         if (nsIt == nsByName_.end()) return nullptr;

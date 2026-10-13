@@ -5853,7 +5853,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 parameterTypes.push_back(parameterType);
                 if (parameterType != 0 &&
                     !dbms::isBuiltinTypeOid(parameterType) &&
-                    g_engine.catalogService().get(session.currentDB).findType(parameterType) == nullptr) {
+                    !g_engine.catalogService().get(session.currentDB).getType(parameterType)) {
                     unknownParameterType = parameterType;
                 }
             }

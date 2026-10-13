@@ -30,8 +30,8 @@ static void migrateLegacyPublicDottedSequences(
             relation.relname.find('.') == std::string::npos) {
             continue;
         }
-        const PgNamespaceRow* nameSpace =
-            catalog.findNamespace(relation.relnamespace);
+        const auto nameSpace =
+            catalog.getNamespace(relation.relnamespace);
         if (!nameSpace || nameSpace->nspname != "public") continue;
 
         const std::string encoded =
@@ -66,12 +66,12 @@ static void migrateLegacyPublicDottedSequences(
         // same file and the second CREATE was rejected. If it does, do not
         // guess which sequence owns the bytes.
         const size_t dot = relation.relname.find('.');
-        const PgNamespaceRow* conflictingNamespace =
-            catalog.findNamespaceByName(relation.relname.substr(0, dot));
-        const PgClassRow* conflictingRelation = conflictingNamespace
-            ? catalog.findClassByName(relation.relname.substr(dot + 1),
+        const auto conflictingNamespace =
+            catalog.getNamespaceByName(relation.relname.substr(0, dot));
+        const auto conflictingRelation = conflictingNamespace
+            ? catalog.getClassByName(relation.relname.substr(dot + 1),
                                       conflictingNamespace->oid)
-            : nullptr;
+            : std::nullopt;
         // A non-public table uses <schema>__<table>.seq, not the joined
         // sequence key. A public table does use <table>.seq for identity
         // counters, so keep that case fail-closed when names overlap.

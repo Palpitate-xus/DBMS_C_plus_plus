@@ -5073,11 +5073,11 @@ StorageEngine::resolveMaterializedView(const std::string& dbname,
     if (storageName.empty()) return std::nullopt;
 
     CatalogManager& catalog = catalogService().get(dbname);
-    const PgNamespaceRow* namespaceRow =
-        catalog.findNamespaceByName(schemaName);
-    const PgClassRow* relation = namespaceRow
-        ? catalog.findClassByName(relationName, namespaceRow->oid)
-        : nullptr;
+    const auto namespaceRow =
+        catalog.getNamespaceByName(schemaName);
+    const auto relation = namespaceRow
+        ? catalog.getClassByName(relationName, namespaceRow->oid)
+        : std::nullopt;
     if (!relation || relation->relkind != 'm') {
         throw DbError(
             "XX001",
@@ -7631,9 +7631,9 @@ void StorageEngine::noteTemporaryRelationAccess(
     if (parsed.ec != std::errc{} ||
         parsed.ptr != tablename.data() + separator) return;
     auto& catalog = const_cast<StorageEngine*>(this)->catalogService().get(dbname);
-    const auto* nameSpace = catalog.findTempNamespace(sessionId);
+    const auto nameSpace = catalog.getTempNamespace(sessionId);
     if (!nameSpace) return;
-    const auto* relation = catalog.findClassByName(
+    const auto relation = catalog.getClassByName(
         tablename.substr(separator + 1), nameSpace->oid);
     // Query-local CTE/derived/transition storage uses the same physical prefix
     // but is not a user TEMP catalog object. Do not mistake it for one.
@@ -19617,7 +19617,7 @@ DBStatus StorageEngine::alterTableOwner(const std::string& dbname,
         const auto qualifiedName = CatalogService::logicalName(tablename);
         const std::string schemaName = qualifiedName.schema.empty()
             ? "public" : qualifiedName.schema;
-        const auto* relation = tableCatalog.resolveRelation(
+        const auto relation = tableCatalog.resolveRelationSnapshot(
             qualifiedName.name, {schemaName});
         if (relation) {
             catalog = &tableCatalog;
@@ -19894,7 +19894,7 @@ DBStatus StorageEngine::alterTableSetReplicaIdentity(
         const auto qualifiedName = CatalogService::logicalName(tablename);
         const std::string schemaName = qualifiedName.schema.empty()
             ? "public" : qualifiedName.schema;
-        const auto* relation = catalog.resolveRelation(
+        const auto relation = catalog.resolveRelationSnapshot(
             qualifiedName.name, {schemaName});
         if (relation) {
             auto updated = *relation;
@@ -21484,9 +21484,9 @@ bool StorageEngine::dropSessionTemporaryTable(const std::string& dbname,
     if (!databaseExists(dbname)) return true;
     try {
         auto& catalog = catalogService().get(dbname);
-        const auto* nameSpace = catalog.findTempNamespace(sessionId);
+        const auto nameSpace = catalog.getTempNamespace(sessionId);
         const Oid namespaceOid = nameSpace ? nameSpace->oid : INVALID_OID;
-        const auto* table = nameSpace ? catalog.findClassByName(logicalName, namespaceOid) : nullptr;
+        const auto table = nameSpace ? catalog.getClassByName(logicalName, namespaceOid) : std::nullopt;
         const Oid tableOid = table ? table->oid : INVALID_OID;
         if (table && (table->relkind != 'r' || table->relpersistence != 't')) return false;
         std::vector<Oid> indexOids;
@@ -21494,7 +21494,7 @@ bool StorageEngine::dropSessionTemporaryTable(const std::string& dbname,
             for (const auto& dependency : catalog.findRefs(PgClassOid_Class, tableOid, -1)) {
                 if (dependency.classid != PgClassOid_Class || dependency.objsubid != 0 ||
                     (dependency.deptype != 'a' && dependency.deptype != 'i')) continue;
-                const auto* sequence = catalog.findClass(dependency.objid);
+                const auto sequence = catalog.getClass(dependency.objid);
                 if (sequence && sequence->relkind == 'i' && dependency.refobjsubid == 0) {
                     if (sequence->relnamespace != namespaceOid || sequence->relpersistence != 't') return false;
                     indexOids.push_back(sequence->oid);
@@ -21532,14 +21532,14 @@ bool StorageEngine::dropSessionTemporaryObjects(const std::string& dbname,
     if (!databaseExists(dbname)) return true;
     try {
         auto& catalog = catalogService().get(dbname);
-        const auto* nameSpace = catalog.findTempNamespace(sessionId);
+        const auto nameSpace = catalog.getTempNamespace(sessionId);
         if (!nameSpace) return true;
         const Oid namespaceOid = nameSpace->oid;
         for (const auto& relation : catalog.listClasses()) {
             if (relation.relnamespace != namespaceOid) continue;
             if (relation.relkind == 'r') {
                 if (!dropSessionTemporaryTable(dbname, sessionId, relation.relname)) return false;
-            } else if (relation.relkind == 'S' && catalog.findClass(relation.oid)) {
+            } else if (relation.relkind == 'S' && catalog.getClass(relation.oid)) {
                 const auto status = dropSequence(dbname, sequenceStorageName(
                     "pg_temp_" + std::to_string(sessionId), relation.relname));
                 if (status != DBStatus::OK && status != DBStatus::TABLE_NOT_FOUND) return false;
@@ -21702,14 +21702,14 @@ static ResolvedSequenceReference resolveSequenceReference(
         if (entry == "pg_temp") entry = sessionTempSchemaName(*session);
     }
     CatalogManager& catalog = engine.catalogService().get(dbname);
-    if (session->tempNamespaceCreated && catalog.findTempNamespace(session->pid) &&
+    if (session->tempNamespaceCreated && catalog.getTempNamespace(session->pid) &&
         std::find(searchPath.begin(), searchPath.end(), sessionTempSchemaName(*session)) == searchPath.end()) {
         searchPath.insert(searchPath.begin(), sessionTempSchemaName(*session));
     }
     const std::string lookup = qualified.schema == "pg_temp"
         ? quoteRegclassPart(sessionTempSchemaName(*session)) + "." + quoteRegclassPart(qualified.name)
         : *normalized;
-    const PgClassRow* relation = catalog.resolveRelation(
+    const auto relation = catalog.resolveRelationSnapshot(
         lookup, searchPath.empty() ? std::vector<std::string>{"public"}
                                         : searchPath);
     if (!relation) {
@@ -21720,8 +21720,8 @@ static ResolvedSequenceReference resolveSequenceReference(
         throw DbError("42809",
                       "\"" + input + "\" is not a sequence");
     }
-    const PgNamespaceRow* relationNamespace =
-        catalog.findNamespace(relation->relnamespace);
+    const auto relationNamespace =
+        catalog.getNamespace(relation->relnamespace);
     if (!relationNamespace) {
         throw DbError("XX001", "sequence namespace metadata is corrupt");
     }
@@ -22619,7 +22619,7 @@ int64_t StorageEngine::lastval() const {
         }
         CatalogManager& catalog = const_cast<StorageEngine*>(this)
             ->catalogService().get(g_currentSession->lastUsedSequenceDatabase);
-        const PgClassRow* relation = catalog.findClass(
+        const auto relation = catalog.getClass(
             g_currentSession->lastUsedSequenceOid);
         const auto value = g_currentSession->sequenceLastValuesByOid.find(
             g_currentSession->lastUsedSequenceOid);
@@ -53159,11 +53159,11 @@ DBStatus StorageEngine::updateEnumType(const std::string& dbname, const EnumType
         const std::string namespaceName = qualifiedName.schema.empty()
             ? "public" : qualifiedName.schema;
         enumCatalog = &catalogService().get(dbname);
-        const PgNamespaceRow* typeNamespace =
-            enumCatalog->findNamespaceByName(namespaceName);
+        const auto typeNamespace =
+            enumCatalog->getNamespaceByName(namespaceName);
         if (!typeNamespace)
             throw std::runtime_error("enum namespace is not cataloged");
-        const PgTypeRow* catalogType = enumCatalog->findTypeByName(
+        const auto catalogType = enumCatalog->getTypeByName(
             qualifiedName.name, typeNamespace->oid);
         if (catalogType) {
             if (catalogType->typtype != 'e')

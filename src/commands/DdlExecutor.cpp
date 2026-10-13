@@ -940,14 +940,14 @@ static Oid ensureTypeInCatalog(CatalogManager& cat, Oid nspOid, const Column& co
         throw std::runtime_error("invalid column type name");
     Oid typeNamespace = nspOid;
     if (!typeName.schema.empty()) {
-        const PgNamespaceRow* namedNamespace =
-            cat.findNamespaceByName(typeName.schema);
+        const auto namedNamespace =
+            cat.getNamespaceByName(typeName.schema);
         if (!namedNamespace)
             throw std::runtime_error("column type schema has no catalog entry");
         typeNamespace = namedNamespace->oid;
     }
-    if (const auto* existing =
-            cat.findTypeByName(typeName.name, typeNamespace)) {
+    if (const auto existing =
+            cat.getTypeByName(typeName.name, typeNamespace)) {
         const Oid existingOid = existing->oid;
         if (!col.enumValues.empty()) {
             if (existing->typtype != 'e') {
@@ -997,8 +997,8 @@ static PgAttributeRow catalogAttributeForColumn(
         CatalogManager::QualifiedName domain;
         if (!CatalogManager::parseQualifiedName(column.domainName, domain))
             throw DbError("XX001", "invalid persisted domain identity");
-        const auto* ns = cat.findNamespaceByName(domain.schema.empty() ? "public" : domain.schema);
-        const auto* type = ns ? cat.findTypeByName(domain.name, ns->oid) : nullptr;
+        const auto ns = cat.getNamespaceByName(domain.schema.empty() ? "public" : domain.schema);
+        const auto type = ns ? cat.getTypeByName(domain.name, ns->oid) : std::nullopt;
         if (!type || type->typtype != 'd')
             throw DbError("XX001", "domain has no catalog identity");
         attribute.atttypid = type->oid;
@@ -1183,12 +1183,12 @@ static void registerTableInCatalog(CatalogManager& cat, const TableSchema& tbl,
                                        inheritedColumns = nullptr,
                                    const std::map<std::string, int32_t>*
                                        declaredVarcharMods = nullptr) {
-    const auto* ns = cat.findNamespaceByName(logicalSchema);
+    const auto ns = cat.getNamespaceByName(logicalSchema);
     if (!ns) {
         throw std::runtime_error("table schema has no catalog entry");
     }
     const Oid nspOid = ns->oid;
-    if (cat.findClassByName(logicalName, nspOid)) {
+    if (cat.getClassByName(logicalName, nspOid)) {
         throw std::runtime_error("table name already exists in catalog");
     }
 
@@ -1245,13 +1245,13 @@ static Oid registerMaterializedViewInCatalog(
     CatalogManager& catalog, const TableSchema& output,
     const std::string& logicalSchema, const std::string& logicalName,
     bool populated) {
-    const auto* viewNamespace =
-        catalog.findNamespaceByName(logicalSchema);
+    const auto viewNamespace =
+        catalog.getNamespaceByName(logicalSchema);
     if (!viewNamespace) {
         throw std::runtime_error("materialized-view schema has no catalog entry");
     }
     const Oid namespaceOid = viewNamespace->oid;
-    if (catalog.findClassByName(logicalName, namespaceOid)) {
+    if (catalog.getClassByName(logicalName, namespaceOid)) {
         throw std::runtime_error("materialized-view name already exists");
     }
 
@@ -1278,7 +1278,7 @@ static Oid registerViewInCatalog(
     CatalogManager& catalog, const TableSchema* output,
     const std::string& logicalSchema, const std::string& logicalName,
     const std::string& owner, Oid replaceOid = INVALID_OID) {
-    const auto* viewNamespace = catalog.findNamespaceByName(logicalSchema);
+    const auto viewNamespace = catalog.getNamespaceByName(logicalSchema);
     if (!viewNamespace) {
         throw std::runtime_error("view schema has no catalog entry");
     }
@@ -1286,7 +1286,7 @@ static Oid registerViewInCatalog(
 
     Oid relationOid = replaceOid;
     if (relationOid == INVALID_OID) {
-        if (catalog.findClassByName(logicalName, namespaceOid)) {
+        if (catalog.getClassByName(logicalName, namespaceOid)) {
             throw std::runtime_error("view name already exists");
         }
         PgClassRow relation;
@@ -1299,7 +1299,7 @@ static Oid registerViewInCatalog(
         if (ownerRole) relation.relowner = ownerRole->oid;
         relationOid = catalog.createClass(relation);
     } else {
-        const PgClassRow* current = catalog.findClass(relationOid);
+        const auto current = catalog.getClass(relationOid);
         if (!current || current->relkind != 'v' ||
             current->relnamespace != namespaceOid ||
             current->relname != logicalName) {
@@ -1338,7 +1338,7 @@ static bool synchronizeTableAttributesInCatalog(
             CatalogService::logicalName(physicalTableName);
         const std::string schemaName = qualifiedName.schema.empty()
             ? "public" : qualifiedName.schema;
-        const auto* relation = catalog.resolveRelation(
+        const auto relation = catalog.resolveRelationSnapshot(
             qualifiedName.name, {schemaName});
         // Storage-only relations intentionally remain outside pg_catalog.
         if (!relation) return true;
@@ -1385,7 +1385,7 @@ static bool synchronizeTableAttributesInCatalog(
         if (!catalog.replaceAttributes(relationOid, replacement)) {
             return false;
         }
-        const auto* updatedRelation = catalog.findClass(relationOid);
+        const auto updatedRelation = catalog.getClass(relationOid);
         if (!updatedRelation) return false;
         PgClassRow classReplacement = *updatedRelation;
         classReplacement.relchecks = tableCheckConstraintCount(table);
@@ -1408,7 +1408,7 @@ static bool updateTableClassInCatalog(
             CatalogService::logicalName(physicalTableName);
         const std::string schemaName = qualifiedName.schema.empty()
             ? "public" : qualifiedName.schema;
-        const auto* relation = catalog.resolveRelation(
+        const auto relation = catalog.resolveRelationSnapshot(
             qualifiedName.name, {schemaName});
         // Storage-only relations intentionally remain outside pg_catalog.
         if (!relation) return true;
@@ -1501,7 +1501,7 @@ static bool updateTableHierarchyFlagsInCatalog(
         CatalogService::logicalName(physicalTableName);
     const std::string schemaName = qualifiedName.schema.empty()
         ? "public" : qualifiedName.schema;
-    const auto* relation = catalog.resolveRelation(
+    const auto relation = catalog.resolveRelationSnapshot(
         qualifiedName.name, {schemaName});
     // Storage-only relations intentionally remain outside pg_catalog.
     if (!relation) return true;
@@ -1543,7 +1543,7 @@ static bool updateInheritanceColumnsInCatalog(
         CatalogService::logicalName(physicalChildName);
     const std::string childSchema = qualifiedChild.schema.empty()
         ? "public" : qualifiedChild.schema;
-    const auto* childRelation = catalog.resolveRelation(
+    const auto childRelation = catalog.resolveRelationSnapshot(
         qualifiedChild.name, {childSchema});
     // Temporary and storage-only relations intentionally have no catalog row.
     if (!childRelation) return true;
@@ -1598,11 +1598,11 @@ static bool columnHasInheritanceParents(
             CatalogService::logicalName(physicalTableName);
         const std::string schemaName = qualifiedName.schema.empty()
             ? "public" : qualifiedName.schema;
-        const auto* relation = catalog.resolveRelation(
+        const auto relation = catalog.resolveRelationSnapshot(
             qualifiedName.name, {schemaName});
         if (!relation) return true;
-        const auto* attribute =
-            catalog.findAttribute(relation->oid, columnName);
+        const auto attribute =
+            catalog.getAttribute(relation->oid, columnName);
         inherited = attribute && attribute->attinhcount > 0;
         // The graph is authoritative for databases created by older builds,
         // whose pg_attribute rows always contained attinhcount=0.
@@ -1643,7 +1643,7 @@ static bool updateColumnStatisticsInCatalog(
             CatalogService::logicalName(physicalTableName);
         const std::string schemaName = qualifiedName.schema.empty()
             ? "public" : qualifiedName.schema;
-        const auto* relation = catalog.resolveRelation(
+        const auto relation = catalog.resolveRelationSnapshot(
             qualifiedName.name, {schemaName});
         // Storage-only relations intentionally remain outside pg_catalog.
         if (!relation) return true;
@@ -2205,11 +2205,11 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                         const std::string schemaName =
                             qualifiedName.schema.empty()
                                 ? "public" : qualifiedName.schema;
-                        const auto* relation = catalog.resolveRelation(
+                        const auto relation = catalog.resolveRelationSnapshot(
                             qualifiedName.name, {schemaName});
-                        const auto* droppedAttribute = relation
-                            ? catalog.findAttribute(relation->oid, sub.name)
-                            : nullptr;
+                        const auto droppedAttribute = relation
+                            ? catalog.getAttribute(relation->oid, sub.name)
+                            : std::nullopt;
                         const int32_t droppedAttributeNumber =
                             droppedAttribute ? droppedAttribute->attnum : 0;
                         if (relation &&
@@ -2304,7 +2304,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                         const std::string schemaName =
                             qualifiedName.schema.empty()
                                 ? "public" : qualifiedName.schema;
-                        const auto* relation = catalog.resolveRelation(
+                        const auto relation = catalog.resolveRelationSnapshot(
                             qualifiedName.name, {schemaName});
                         if (relation) {
                             const dbms::Oid relationOid = relation->oid;
@@ -2315,7 +2315,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                                     << std::endl;
                                 return true;
                             }
-                            const auto* renamedAttribute = catalog.findAttribute(
+                            const auto renamedAttribute = catalog.getAttribute(
                                 relationOid, sub.newName);
                             const std::string logicalTableName =
                                 schemaName == "public"
@@ -2382,7 +2382,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                         const std::string schemaName =
                             qualifiedName.schema.empty()
                                 ? "public" : qualifiedName.schema;
-                        if (catalog.resolveRelation(sub.newName,
+                        if (catalog.resolveRelationSnapshot(sub.newName,
                                                     {schemaName})) {
                             std::cout << "ERROR: relation \"" << sub.newName
                                       << "\" already exists (SQLSTATE 42P07)"
@@ -2419,7 +2419,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                         const std::string schemaName = qualifiedName.schema.empty()
                             ? "public"
                             : qualifiedName.schema;
-                        const auto* relation = catalog.resolveRelation(
+                        const auto relation = catalog.resolveRelationSnapshot(
                             qualifiedName.name, {schemaName});
                         if (relation) {
                             const dbms::Oid relationOid = relation->oid;
@@ -3814,16 +3814,16 @@ bool DdlExecutor::executeTruncate(const TruncateStmt* stmt, Session& s) {
             for (const auto& name : targets) {
                 const auto tableName = CatalogService::logicalName(name);
                 const std::string schema = tableName.schema.empty() ? "public" : tableName.schema;
-                const auto* ns = catalog.findNamespaceByName(schema);
-                const auto* table = ns ? catalog.findClassByName(tableName.name, ns->oid) : nullptr;
+                const auto ns = catalog.getNamespaceByName(schema);
+                const auto table = ns ? catalog.getClassByName(tableName.name, ns->oid) : std::nullopt;
                 if (!table) continue; // Legacy anonymous identities remain below.
                 for (const auto& dependency : catalog.findRefs(PgClassOid_Class, table->oid, -1)) {
                     if (dependency.classid != PgClassOid_Class || dependency.objsubid != 0 ||
                         dependency.refobjsubid <= 0 ||
                         (dependency.deptype != 'a' && dependency.deptype != 'i')) continue;
-                    const auto* sequence = catalog.findClass(dependency.objid);
+                    const auto sequence = catalog.getClass(dependency.objid);
                     if (!sequence || sequence->relkind != 'S') continue;
-                    const auto* sequenceNamespace = catalog.findNamespace(sequence->relnamespace);
+                    const auto sequenceNamespace = catalog.getNamespace(sequence->relnamespace);
                     if (!sequenceNamespace) {
                         std::cout << "ERROR: owned sequence namespace is missing (SQLSTATE XX001)" << std::endl;
                         return true;
@@ -4094,7 +4094,7 @@ bool DdlExecutor::executeDropSchema(const DropStmt* stmt, Session& s) {
     try {
         dbms::CatalogManager& cat = g_engine.catalogService().get(s.currentDB);
         catalogManager = &cat;
-        const auto* ns = cat.findNamespaceByName(name);
+        const auto ns = cat.getNamespaceByName(name);
         if (!ns) {
             if (!storageSchemaExists && auxiliaryObjects.empty()) {
                 if (stmt->ifExists) {
@@ -5143,18 +5143,18 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     {
         try {
             tableCatalog = &g_engine.catalogService().get(s.currentDB);
-            if (temporary && !tableCatalog->findTempNamespace(s.pid)) {
+            if (temporary && !tableCatalog->getTempNamespace(s.pid)) {
                 txn.markSnapshotDirty();
                 tableCatalog->createTempNamespace(s.pid);
             }
-            const PgNamespaceRow* targetNamespace =
-                tableCatalog->findNamespaceByName(targetSchema);
+            const auto targetNamespace =
+                tableCatalog->getNamespaceByName(targetSchema);
             if (!targetNamespace) {
                 std::cout << "ERROR: schema \"" << targetSchema
                           << "\" has no catalog entry" << std::endl;
                 return true;
             }
-            if (tableCatalog->findClassByName(
+            if (tableCatalog->getClassByName(
                     targetName.name, targetNamespace->oid)) {
                 if (stmt->ifNotExists) {
                     std::cout << "NOTICE: relation \"" << stmt->tableName
@@ -5988,7 +5988,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
 
     std::vector<CreateObjectStmt> serialSequences;
     {
-        const auto* tableNamespace = tableCatalog->findNamespaceByName(targetSchema);
+        const auto tableNamespace = tableCatalog->getNamespaceByName(targetSchema);
         std::set<std::string> reservedSequenceNames;
         for (const auto& definition : stmt->columns) {
             const std::string type = toLower(definition.typeName);
@@ -5998,7 +5998,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             std::string sequenceName;
             for (uint64_t suffix = 0;; ++suffix) {
                 sequenceName = serialSequenceRelationName(targetName.name, definition.name, suffix);
-                if (!tableCatalog->findClassByName(sequenceName, tableNamespace->oid) &&
+                if (!tableCatalog->getClassByName(sequenceName, tableNamespace->oid) &&
                     reservedSequenceNames.count(sequenceName) == 0 &&
                     !g_engine.sequenceExists(s.currentDB, sequenceStorageName(targetSchema, sequenceName)))
                     break;
@@ -6124,9 +6124,9 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
                 inheritedParents.empty()
                     ? nullptr : &inheritanceCatalogColumns,
                 &declaredVarcharMods);
-            const PgClassRow* tableRelation = cat.findClassByName(
+            const auto tableRelation = cat.getClassByName(
                 targetName.name,
-                cat.findNamespaceByName(targetSchema)->oid);
+                cat.getNamespaceByName(targetSchema)->oid);
             if (!tableRelation || tableRelation->relkind != 'r') {
                 throw std::runtime_error("created table catalog row is missing");
             }
@@ -6177,8 +6177,8 @@ static bool catalogTableStorageName(const CatalogManager& catalog,
                                     const PgClassRow& relation,
                                     std::string& storageName,
                                     std::string& error) {
-    const PgNamespaceRow* relationNamespace =
-        catalog.findNamespace(relation.relnamespace);
+    const auto relationNamespace =
+        catalog.getNamespace(relation.relnamespace);
     if (!relationNamespace) {
         error = "relation namespace is missing";
         return false;
@@ -6202,8 +6202,8 @@ static bool catalogViewStorageName(const CatalogManager& catalog,
                                    const PgClassRow& relation,
                                    std::string& storageName,
                                    std::string& error) {
-    const PgNamespaceRow* relationNamespace =
-        catalog.findNamespace(relation.relnamespace);
+    const auto relationNamespace =
+        catalog.getNamespace(relation.relnamespace);
     if (!relationNamespace) {
         error = "relation namespace is missing";
         return false;
@@ -6218,8 +6218,8 @@ static bool catalogSequenceStorageName(const CatalogManager& catalog,
                                        const PgClassRow& relation,
                                        std::string& storageName,
                                        std::string& error) {
-    const PgNamespaceRow* relationNamespace =
-        catalog.findNamespace(relation.relnamespace);
+    const auto relationNamespace =
+        catalog.getNamespace(relation.relnamespace);
     if (!relationNamespace) {
         error = "sequence namespace is missing";
         return false;
@@ -6251,7 +6251,7 @@ static bool updateOwnedSequenceNames(
             dependency.refobjsubid != renamedColumnNumber) {
             continue;
         }
-        const PgClassRow* dependent = catalog.findClass(dependency.objid);
+        const auto dependent = catalog.getClass(dependency.objid);
         if (!dependent || dependent->relkind != 'S' ||
             updatedSequences.count(dependent->oid) != 0) {
             continue;
@@ -6355,7 +6355,7 @@ static bool buildPhysicalCascadeActions(
     for (const auto& object : plan.objectsToDrop) {
         if (object.first != PgClassOid_Class || object.second == rootOid) continue;
 
-        const PgClassRow* relation = catalog.findClass(object.second);
+        const auto relation = catalog.getClass(object.second);
         if (!relation) {
             error = "dependent catalog relation is missing";
             return false;
@@ -6400,7 +6400,7 @@ static bool buildPhysicalCascadeActions(
         for (const auto& dependency :
              catalog.findDepends(PgClassOid_Class, rel.oid)) {
             if (dependency.refclassid != PgClassOid_Class) continue;
-            const PgClassRow* referenced = catalog.findClass(dependency.refobjid);
+            const auto referenced = catalog.getClass(dependency.refobjid);
             if (referenced && referenced->relkind == 'r') {
                 if (!catalogTableStorageName(
                         catalog, *referenced, tableName, error)) {
@@ -6629,7 +6629,7 @@ static bool dropOwnedSequencesForColumn(
             continue;
         }
 
-        const PgClassRow* dependent = catalog.findClass(dependency.objid);
+        const auto dependent = catalog.getClass(dependency.objid);
         if (!dependent || dependent->relkind != 'S' ||
             targetOids.count(dependent->oid) != 0) {
             continue;
@@ -6869,8 +6869,8 @@ static bool executeDropTableSingle(const DropStmt* stmt, Session& s,
                     catalogSearchPath.push_back(schema);
                 }
             }
-            const PgClassRow* relation =
-                g_engine.catalogService().get(s.currentDB).resolveRelation(
+            const auto relation =
+                g_engine.catalogService().get(s.currentDB).resolveRelationSnapshot(
                     logicalName, catalogSearchPath);
             if (relation) resolvedCatalogOid = relation->oid;
             if (relation && relation->relkind != 'r' &&
@@ -6997,9 +6997,9 @@ static bool executeDropTableSingle(const DropStmt* stmt, Session& s,
     try {
         CatalogManager& cat = g_engine.catalogService().get(s.currentDB);
         catalogManager = &cat;
-        const PgClassRow* cls = resolvedCatalogOid != INVALID_OID
-            ? cat.findClass(resolvedCatalogOid)
-            : cat.resolveRelation(catalogLookupName, {"public"});
+        const auto cls = resolvedCatalogOid != INVALID_OID
+            ? cat.getClass(resolvedCatalogOid)
+            : cat.resolveRelationSnapshot(catalogLookupName, {"public"});
         if (cls) {
             catalogRootOid = cls->oid;
             // Releases before this fix recorded an ordinary DEFAULT
@@ -7017,8 +7017,8 @@ static bool executeDropTableSingle(const DropStmt* stmt, Session& s,
                     dependency.deptype != 'a') {
                     continue;
                 }
-                const PgClassRow* dependent =
-                    cat.findClass(dependency.objid);
+                const auto dependent =
+                    cat.getClass(dependency.objid);
                 if (!dependent || dependent->relkind != 'S') continue;
 
                 std::string sequenceStorageName;
@@ -7339,8 +7339,8 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
                     catalogSearchPath.push_back(schema);
                 }
             }
-            const PgClassRow* relation =
-                g_engine.catalogService().get(s.currentDB).resolveRelation(
+            const auto relation =
+                g_engine.catalogService().get(s.currentDB).resolveRelationSnapshot(
                     stmt->tableName, catalogSearchPath);
             if (relation && relation->relkind != 'r' &&
                 relation->relkind != 'p' && relation->relkind != 'm') {
@@ -7400,8 +7400,8 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
             const auto tableName = CatalogService::logicalName(tname);
             const std::string schema = tableName.schema.empty() ? "public" : tableName.schema;
             auto& catalog = g_engine.catalogService().get(s.currentDB);
-            const auto* ns = catalog.findNamespaceByName(schema);
-            return ns != nullptr && catalog.findClassByName(candidate, ns->oid) != nullptr;
+            const auto ns = catalog.getNamespaceByName(schema);
+            return ns.has_value() && catalog.getClassByName(candidate, ns->oid).has_value();
         } catch (...) {
             std::cout << "CREATE INDEX failed: cannot inspect catalog metadata" << std::endl;
             std::string dummy;
@@ -7541,12 +7541,12 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
         dbms::CatalogManager& cat = g_engine.catalogService().get(s.currentDB);
         catalogForCleanup = &cat;
         auto qn = CatalogService::logicalName(tname);
-        const auto* ns = cat.findNamespaceByName(qn.schema.empty() ? "public" : qn.schema);
-        const auto* tbl = (ns ? cat.resolveRelation(qn.name, {qn.schema.empty() ? "public" : qn.schema}) : nullptr);
+        const auto ns = cat.getNamespaceByName(qn.schema.empty() ? "public" : qn.schema);
+        const auto tbl = (ns ? cat.resolveRelationSnapshot(qn.name, {qn.schema.empty() ? "public" : qn.schema}) : std::nullopt);
         if (!ns || !tbl) {
             throw std::runtime_error("table has no catalog entry");
         }
-        if (cat.findClassByName(idxName, ns->oid) != nullptr) {
+        if (cat.getClassByName(idxName, ns->oid)) {
             throw std::runtime_error("index name already exists");
         }
         {
@@ -7573,7 +7573,7 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
             dep.deptype = 'a';
             cat.addDepend(dep);
 
-            const auto* currentTable = cat.findClass(tableOid);
+            const auto currentTable = cat.getClass(tableOid);
             if (!currentTable) {
                 throw std::runtime_error("indexed table catalog row disappeared");
             }
@@ -7695,13 +7695,13 @@ bool DdlExecutor::executeDropIndex(const DropStmt* stmt, Session& s) {
         } else {
             indexSearchPath.push_back(indexQn.schema);
         }
-        const PgClassRow* indexRel = nullptr;
+        std::optional<PgClassRow> indexRel;
         if (!tempIndexOwner.empty()) {
-            const auto* tempNamespace = cat.findTempNamespace(s.pid);
+            const auto tempNamespace = cat.getTempNamespace(s.pid);
             if (tempNamespace)
-                indexRel = cat.findClassByName(indexQn.name, tempNamespace->oid);
+                indexRel = cat.getClassByName(indexQn.name, tempNamespace->oid);
         } else {
-            indexRel = cat.resolveRelation(rawName, indexSearchPath);
+            indexRel = cat.resolveRelationSnapshot(rawName, indexSearchPath);
         }
         if (indexRel && indexRel->relkind != 'i' &&
             indexRel->relkind != 'I') {
@@ -7720,10 +7720,10 @@ bool DdlExecutor::executeDropIndex(const DropStmt* stmt, Session& s) {
             auto deps = cat.findDepends(PgClassOid_Class, indexOid);
             for (const auto& dep : deps) {
                 if (dep.refclassid != PgClassOid_Class) continue;
-                const PgClassRow* ref = cat.findClass(dep.refobjid);
+                const auto ref = cat.getClass(dep.refobjid);
                 if (ref && ref->relkind == 'r') {
-                    const auto* tableNamespace =
-                        cat.findNamespace(ref->relnamespace);
+                    const auto tableNamespace =
+                        cat.getNamespace(ref->relnamespace);
                     if (!tableNamespace) {
                         std::cout << "DROP INDEX table namespace lookup failed"
                                   << std::endl;
@@ -7852,7 +7852,7 @@ bool DdlExecutor::executeDropIndex(const DropStmt* stmt, Session& s) {
             const auto tableQn = CatalogService::logicalName(tableName);
             const std::string tableSchema = tableQn.schema.empty()
                 ? "public" : tableQn.schema;
-            const auto* tableRelation = cat.resolveRelation(
+            const auto tableRelation = cat.resolveRelationSnapshot(
                 tableQn.name, {tableSchema});
             if (tableRelation && tableRelation->relkind == 'r') {
                 tableOid = tableRelation->oid;
@@ -7861,7 +7861,7 @@ bool DdlExecutor::executeDropIndex(const DropStmt* stmt, Session& s) {
         if (tableOid != INVALID_OID) {
             const bool hasRemainingIndex =
                 storageTableHasIndex(s.currentDB, tableName);
-            const auto* tableRelation = cat.findClass(tableOid);
+            const auto tableRelation = cat.getClass(tableOid);
             if (!tableRelation) {
                 std::cout << "DROP INDEX table catalog update failed"
                           << std::endl;
@@ -7913,10 +7913,10 @@ static std::vector<std::string> effectiveSequenceSearchPath(
 }
 
 static std::string schemaNameForRelation(
-    CatalogManager& catalog, const PgClassRow* relation) {
+    CatalogManager& catalog, const std::optional<PgClassRow>& relation) {
     if (!relation) return {};
-    const PgNamespaceRow* relationNamespace =
-        catalog.findNamespace(relation->relnamespace);
+    const auto relationNamespace =
+        catalog.getNamespace(relation->relnamespace);
     return relationNamespace ? relationNamespace->nspname : std::string{};
 }
 
@@ -8025,8 +8025,8 @@ bool DdlExecutor::executeCreateSequence(const CreateObjectStmt* stmt, Session& s
         CatalogManager& catalog =
             g_engine.catalogService().get(s.currentDB);
         sequenceCatalog = &catalog;
-        const auto* sequenceNamespace =
-            catalog.findNamespaceByName(sequenceSchema);
+        const auto sequenceNamespace =
+            catalog.getNamespaceByName(sequenceSchema);
         if (!sequenceNamespace) {
             std::cout << "ERROR: schema \"" << sequenceSchema
                       << "\" does not exist (SQLSTATE 3F000)"
@@ -8034,7 +8034,7 @@ bool DdlExecutor::executeCreateSequence(const CreateObjectStmt* stmt, Session& s
             return true;
         }
         sequenceNamespaceOid = sequenceNamespace->oid;
-        const auto* existing = catalog.findClassByName(
+        const auto existing = catalog.getClassByName(
             sequenceName.name, sequenceNamespaceOid);
         if (existing) {
             if (stmt->ifNotExists &&
@@ -8069,11 +8069,11 @@ bool DdlExecutor::executeCreateSequence(const CreateObjectStmt* stmt, Session& s
                           << std::endl;
                 return true;
             }
-            const auto* table = catalog.findClassByName(
+            const auto table = catalog.getClassByName(
                 ownerName.name, sequenceNamespaceOid);
-            const auto* column = table && table->relkind == 'r'
-                ? catalog.findAttribute(table->oid, info.ownedByColumn)
-                : nullptr;
+            const auto column = table && table->relkind == 'r'
+                ? catalog.getAttribute(table->oid, info.ownedByColumn)
+                : std::nullopt;
             if (!table || table->relkind != 'r' || !column) {
                 std::cout << "CREATE SEQUENCE OWNED BY target does not exist"
                           << std::endl;
@@ -8163,7 +8163,7 @@ bool DdlExecutor::executeAlterSequence(const AlterObjectStmt* stmt, Session& s) 
         CatalogManager& catalog =
             g_engine.catalogService().get(s.currentDB);
         sequenceSchema = schemaNameForRelation(
-            catalog, catalog.resolveRelation(
+            catalog, catalog.resolveRelationSnapshot(
                          sequenceName.name,
                          effectiveSequenceSearchPath(s)));
         if (sequenceSchema.empty()) sequenceSchema = "public";
@@ -8351,12 +8351,12 @@ bool DdlExecutor::executeAlterSequence(const AlterObjectStmt* stmt, Session& s) 
         sequenceCatalog = &catalog;
         const bool physicalExists =
             g_engine.sequenceExists(s.currentDB, seqname);
-        const auto* sequenceNamespace =
-            catalog.findNamespaceByName(sequenceSchema);
-        const PgClassRow* sequence = sequenceNamespace
-            ? catalog.findClassByName(
+        const auto sequenceNamespace =
+            catalog.getNamespaceByName(sequenceSchema);
+        const auto sequence = sequenceNamespace
+            ? catalog.getClassByName(
                   sequenceName.name, sequenceNamespace->oid)
-            : nullptr;
+            : std::nullopt;
         if (!sequence) {
             if (physicalExists) {
                 std::cout << "ALTER SEQUENCE failed: sequence catalog entry is missing"
@@ -8386,8 +8386,8 @@ bool DdlExecutor::executeAlterSequence(const AlterObjectStmt* stmt, Session& s) 
         sequenceNamespaceOid = sequence->relnamespace;
 
         if (renameRequested) {
-            const auto* collision =
-                catalog.findClassByName(newName, sequenceNamespaceOid);
+            const auto collision =
+                catalog.getClassByName(newName, sequenceNamespaceOid);
             const std::string newStorageName = sequenceStorageName(
                 sequenceSchema, newName);
             if (collision ||
@@ -8414,11 +8414,11 @@ bool DdlExecutor::executeAlterSequence(const AlterObjectStmt* stmt, Session& s) 
                           << std::endl;
                 return true;
             }
-            const auto* table = catalog.findClassByName(
+            const auto table = catalog.getClassByName(
                 ownerName.name, sequenceNamespaceOid);
-            const auto* column = table && table->relkind == 'r'
-                ? catalog.findAttribute(table->oid, info.ownedByColumn)
-                : nullptr;
+            const auto column = table && table->relkind == 'r'
+                ? catalog.getAttribute(table->oid, info.ownedByColumn)
+                : std::nullopt;
             if (!table || table->relkind != 'r' || !column) {
                 std::cout << "ALTER SEQUENCE OWNED BY target does not exist"
                           << std::endl;
@@ -8614,9 +8614,9 @@ bool DdlExecutor::executeDropSequence(const DropStmt* stmt, Session& s) {
                 return true;
             }
             std::string schema = qualifiedName.schema;
-            const PgClassRow* resolvedRelation = nullptr;
+            std::optional<PgClassRow> resolvedRelation;
             if (schema.empty()) {
-                resolvedRelation = catalog->resolveRelation(
+                resolvedRelation = catalog->resolveRelationSnapshot(
                     qualifiedName.name, effectiveSequenceSearchPath(s));
                 schema = schemaNameForRelation(*catalog, resolvedRelation);
                 if (schema.empty()) schema = "public";
@@ -8627,14 +8627,14 @@ bool DdlExecutor::executeDropSequence(const DropStmt* stmt, Session& s) {
 
             const bool physicalExists =
                 g_engine.sequenceExists(s.currentDB, storageName);
-            const auto* sequenceNamespace =
-                catalog->findNamespaceByName(schema);
-            const PgClassRow* sequence = resolvedRelation
+            const auto sequenceNamespace =
+                catalog->getNamespaceByName(schema);
+            const auto sequence = resolvedRelation
                 ? resolvedRelation
                 : (sequenceNamespace
-                       ? catalog->findClassByName(
+                       ? catalog->getClassByName(
                              qualifiedName.name, sequenceNamespace->oid)
-                       : nullptr);
+                       : std::nullopt);
             if (!sequence) {
                 if (physicalExists) {
                     std::cout << "DROP SEQUENCE failed: sequence catalog entry is missing for \""
@@ -8864,10 +8864,10 @@ bool DdlExecutor::executeCreateDomain(const CreateObjectStmt* stmt, Session& s) 
         return true;
     }
     auto& catalog = g_engine.catalogService().get(s.currentDB);
-    const auto* ns = catalog.findNamespaceByName(declared.schema);
+    const auto ns = catalog.getNamespaceByName(declared.schema);
     if (!ns) throw DbError("3F000", "domain schema has no catalog identity");
     const Oid namespaceOid = ns->oid;
-    if (catalog.findTypeByName(declared.name, namespaceOid))
+    if (catalog.getTypeByName(declared.name, namespaceOid))
         throw DbError("42710", "type already exists: " + info.name);
     txn.markSnapshotDirty();
     DBStatus res = g_engine.createDomain(s.currentDB, info);
@@ -8884,13 +8884,13 @@ bool DdlExecutor::executeCreateDomain(const CreateObjectStmt* stmt, Session& s) 
     if (!parent.name.empty()) {
         CatalogManager::QualifiedName parentName;
         CatalogManager::parseQualifiedName(parent.name, parentName);
-        const auto* parentNs = catalog.findNamespaceByName(parentName.schema.empty() ? "public" : parentName.schema);
-        const auto* parentType = parentNs ? catalog.findTypeByName(parentName.name, parentNs->oid) : nullptr;
+        const auto parentNs = catalog.getNamespaceByName(parentName.schema.empty() ? "public" : parentName.schema);
+        const auto parentType = parentNs ? catalog.getTypeByName(parentName.name, parentNs->oid) : std::nullopt;
         if (!parentType || parentType->typtype != 'd')
             throw DbError("XX001", "parent domain has no catalog identity");
         baseOid = parentType->oid;
     } else baseOid = ensureTypeInCatalog(catalog, namespaceOid, physical);
-    const auto* base = catalog.findType(baseOid);
+    const auto base = catalog.getType(baseOid);
     if (!base) throw DbError("XX001", "domain base has no catalog identity");
     PgTypeRow type = *base;
     type.oid = INVALID_OID;
@@ -9111,8 +9111,8 @@ bool DdlExecutor::executeDropDomain(const DropStmt* stmt, Session& s) {
     CatalogManager::QualifiedName declared;
     CatalogManager::parseQualifiedName(info.name, declared, true);
     auto& catalog = g_engine.catalogService().get(s.currentDB);
-    const auto* ns = catalog.findNamespaceByName(declared.schema.empty() ? "public" : declared.schema);
-    const auto* type = ns ? catalog.findTypeByName(declared.name, ns->oid) : nullptr;
+    const auto ns = catalog.getNamespaceByName(declared.schema.empty() ? "public" : declared.schema);
+    const auto type = ns ? catalog.getTypeByName(declared.name, ns->oid) : std::nullopt;
     const Oid domainOid = type ? type->oid : INVALID_OID;
     if (domainOid != INVALID_OID) {
         const auto snapshot = catalog.metadataSnapshot();
@@ -9203,10 +9203,10 @@ bool DdlExecutor::executeCreateType(const CreateObjectStmt* stmt, Session& s) {
         try {
             CatalogManager& catalog =
                 g_engine.catalogService().get(s.currentDB);
-            const PgNamespaceRow* typeNamespace =
-                catalog.findNamespaceByName(typeSchema);
+            const auto typeNamespace =
+                catalog.getNamespaceByName(typeSchema);
             if (!typeNamespace ||
-                catalog.findTypeByName(stmt->objectName,
+                catalog.getTypeByName(stmt->objectName,
                                        typeNamespace->oid)) {
                 throw std::runtime_error(
                     "enum namespace/type catalog conflict");
@@ -9480,12 +9480,12 @@ bool DdlExecutor::executeDropType(const DropStmt* stmt, Session& s) {
     try {
         CatalogManager& catalog =
             g_engine.catalogService().get(s.currentDB);
-        const PgNamespaceRow* typeNamespace =
-            catalog.findNamespaceByName(schemaName);
-        const PgTypeRow* catalogType = typeNamespace
-            ? catalog.findTypeByName(qualifiedName.name,
+        const auto typeNamespace =
+            catalog.getNamespaceByName(schemaName);
+        const auto catalogType = typeNamespace
+            ? catalog.getTypeByName(qualifiedName.name,
                                      typeNamespace->oid)
-            : nullptr;
+            : std::nullopt;
         if (catalogType) {
             const Oid typeOid = catalogType->oid;
             if (!catalog.dropType(typeOid) || !catalog.persistAll()) {
@@ -9690,12 +9690,12 @@ bool DdlExecutor::executeCreateView(const CreateViewStmt* stmt, Session& s) {
     Oid existingViewOid = INVALID_OID;
     try {
         catalog = &g_engine.catalogService().get(s.currentDB);
-        const PgNamespaceRow* viewNamespace =
-            catalog->findNamespaceByName(schemaName);
+        const auto viewNamespace =
+            catalog->getNamespaceByName(schemaName);
         if (!viewNamespace) {
             throw std::runtime_error("view schema has no catalog entry");
         }
-        const PgClassRow* existing = catalog->findClassByName(
+        const auto existing = catalog->getClassByName(
             qualifiedName.name, viewNamespace->oid);
         if (existing) {
             if (existing->relkind != 'v') {
@@ -9766,8 +9766,8 @@ bool DdlExecutor::executeCreateView(const CreateViewStmt* stmt, Session& s) {
                 dependency.refobjsubid);
         }
         if (!baseTable.empty()) {
-            const PgClassRow* baseRelation =
-                catalog->resolveRelation(baseTable, {"public"});
+            const auto baseRelation =
+                catalog->resolveRelationSnapshot(baseTable, {"public"});
             if (baseRelation && baseRelation->oid != viewOid) {
                 PgDependRow dependency;
                 dependency.classid = PgClassOid_Class;
@@ -9853,13 +9853,13 @@ bool DdlExecutor::executeDropView(const DropStmt* stmt, Session& s) {
         }
     }
     CatalogManager* catalog = nullptr;
-    const PgClassRow* relation = nullptr;
+    std::optional<PgClassRow> relation;
     try {
         catalog = &g_engine.catalogService().get(s.currentDB);
-        relation = catalog->resolveRelation(rawViewName, catalogSearchPath);
+        relation = catalog->resolveRelationSnapshot(rawViewName, catalogSearchPath);
         if (relation && relation->relkind == 'v') {
-            const PgNamespaceRow* namespaceRow =
-                catalog->findNamespace(relation->relnamespace);
+            const auto namespaceRow =
+                catalog->getNamespace(relation->relnamespace);
             if (namespaceRow) {
                 const std::string prefix = namespaceRow->nspname == "public"
                     ? "" : namespaceRow->nspname + ".";
@@ -10143,9 +10143,9 @@ bool DdlExecutor::executeCreateMaterializedView(const CreateViewStmt* stmt, Sess
 
     try {
         CatalogManager& catalog = g_engine.catalogService().get(s.currentDB);
-        const PgNamespaceRow* namespaceRow =
-            catalog.findNamespaceByName(schemaName);
-        if (namespaceRow && catalog.findClassByName(
+        const auto namespaceRow =
+            catalog.getNamespaceByName(schemaName);
+        if (namespaceRow && catalog.getClassByName(
                                 qualifiedName.name, namespaceRow->oid)) {
             std::cout << "ERROR: relation \"" << viewname
                       << "\" already exists (SQLSTATE 42P07)"
@@ -10306,8 +10306,8 @@ bool DdlExecutor::executeCreateMaterializedView(const CreateViewStmt* stmt, Sess
             g_engine.catalogService().get(s.currentDB);
         const Oid materializedViewOid = registerMaterializedViewInCatalog(
             catalog, tbl, schemaName, qualifiedName.name, stmt->withData);
-        const PgClassRow* sourceRelation =
-            catalog.resolveRelation(sourceRelationName, {"public"});
+        const auto sourceRelation =
+            catalog.resolveRelationSnapshot(sourceRelationName, {"public"});
         if (sourceRelation && sourceRelation->oid != materializedViewOid) {
             PgDependRow dependency;
             dependency.classid = PgClassOid_Class;
@@ -10436,12 +10436,12 @@ bool DdlExecutor::executeRefreshMaterializedView(
     try {
         CatalogManager& catalog =
             g_engine.catalogService().get(s.currentDB);
-        const PgNamespaceRow* namespaceRow =
-            catalog.findNamespaceByName(materialized->schemaName);
-        const PgClassRow* relation = namespaceRow
-            ? catalog.findClassByName(
+        const auto namespaceRow =
+            catalog.getNamespaceByName(materialized->schemaName);
+        const auto relation = namespaceRow
+            ? catalog.getClassByName(
                   materialized->relationName, namespaceRow->oid)
-            : nullptr;
+            : std::nullopt;
         if (!relation || relation->relkind != 'm') {
             std::cout << "ERROR: materialized-view catalog entry is missing "
                          "(SQLSTATE XX001)"
@@ -10549,8 +10549,8 @@ bool DdlExecutor::executeDropMaterializedView(const DropStmt* stmt, Session& s) 
             return true;
         }
 
-        const PgClassRow* relation =
-            catalog->resolveRelation(rawName, catalogSearchPath);
+        const auto relation =
+            catalog->resolveRelationSnapshot(rawName, catalogSearchPath);
         const bool physicalExists =
             g_engine.isMaterializedView(s.currentDB, name);
         const bool catalogExists = relation && relation->relkind == 'm';
@@ -11479,7 +11479,7 @@ bool DdlExecutor::executeComment(const CommentStmt* stmt, Session& s) {
         if (objType == "table" || objType == "column" ||
             objType == "index" || objType == "view" ||
             objType == "materialized view" || objType == "sequence") {
-            const PgClassRow* relation = catalog->resolveRelation(
+            auto relation = catalog->resolveRelationSnapshot(
                 stmt->objectName, searchPath);
             // Embedded callers and clusters created before catalog wiring can
             // legitimately have a durable heap without pg_class identity.
@@ -11495,8 +11495,8 @@ bool DdlExecutor::executeComment(const CommentStmt* stmt, Session& s) {
                     const std::string logicalSchema =
                         logicalName.schema.empty()
                             ? "public" : logicalName.schema;
-                    const PgNamespaceRow* nameSpace =
-                        catalog->findNamespaceByName(logicalSchema);
+                    const auto nameSpace =
+                        catalog->getNamespaceByName(logicalSchema);
                     const TableSchema table = g_engine.getTableSchema(
                         s.currentDB, physicalName);
                     if (!nameSpace || table.len == 0) {
@@ -11510,7 +11510,7 @@ bool DdlExecutor::executeComment(const CommentStmt* stmt, Session& s) {
                     txn.markSnapshotDirty();
                     registerTableInCatalog(
                         *catalog, table, logicalSchema, logicalName.name);
-                    relation = catalog->findClassByName(
+                    relation = catalog->getClassByName(
                         logicalName.name, nameSpace->oid);
                 }
             }
@@ -11542,7 +11542,7 @@ bool DdlExecutor::executeComment(const CommentStmt* stmt, Session& s) {
             classOid = PgClassOid_Class;
             objectOid = relation->oid;
             if (objType == "column") {
-                const PgAttributeRow* attribute = catalog->findAttribute(
+                const auto attribute = catalog->getAttribute(
                     relation->oid, stmt->columnName);
                 if (!attribute) {
                     std::cout << "ERROR: column \"" << stmt->columnName
@@ -11554,8 +11554,8 @@ bool DdlExecutor::executeComment(const CommentStmt* stmt, Session& s) {
                 ddlExtra = stmt->columnName;
             }
 
-            const PgNamespaceRow* relationNamespace =
-                catalog->findNamespace(relation->relnamespace);
+            const auto relationNamespace =
+                catalog->getNamespace(relation->relnamespace);
             if (!relationNamespace) {
                 std::cout << "ERROR: relation namespace metadata is corrupt "
                              "(SQLSTATE XX001)" << std::endl;
@@ -11593,8 +11593,8 @@ bool DdlExecutor::executeComment(const CommentStmt* stmt, Session& s) {
                           << std::endl;
                 return true;
             }
-            const PgNamespaceRow* nameSpace =
-                catalog->findNamespaceByName(schemaName.name);
+            const auto nameSpace =
+                catalog->getNamespaceByName(schemaName.name);
             if (!nameSpace) {
                 std::cout << "ERROR: schema \"" << schemaName.name
                           << "\" does not exist (SQLSTATE 3F000)"
@@ -11613,20 +11613,20 @@ bool DdlExecutor::executeComment(const CommentStmt* stmt, Session& s) {
                           << std::endl;
                 return true;
             }
-            const PgTypeRow* type = nullptr;
+            std::optional<PgTypeRow> type;
             if (!typeName.schema.empty()) {
-                const PgNamespaceRow* nameSpace =
-                    catalog->findNamespaceByName(typeName.schema);
+                const auto nameSpace =
+                    catalog->getNamespaceByName(typeName.schema);
                 if (nameSpace) {
-                    type = catalog->findTypeByName(
+                    type = catalog->getTypeByName(
                         typeName.name, nameSpace->oid);
                 }
             } else {
                 for (const std::string& schema : searchPath) {
-                    const PgNamespaceRow* nameSpace =
-                        catalog->findNamespaceByName(schema);
+                    const auto nameSpace =
+                        catalog->getNamespaceByName(schema);
                     if (!nameSpace) continue;
-                    type = catalog->findTypeByName(
+                    type = catalog->getTypeByName(
                         typeName.name, nameSpace->oid);
                     if (type) break;
                 }

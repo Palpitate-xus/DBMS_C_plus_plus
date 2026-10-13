@@ -6153,12 +6153,12 @@ void notePreparedTemporaryObjectAccess(const std::string& sql, Session& session)
         if (name.empty() || !CatalogManager::parseQualifiedName(name, qualified, true)) return;
         if (qualified.schema.empty() && ctes.count(qualified.name)) return;
         auto& catalog = g_engine.catalogService().get(session.currentDB);
-        const PgClassRow* relation = nullptr;
+        std::optional<PgClassRow> relation;
         if (qualified.schema == "pg_temp") {
-            const auto* nameSpace = catalog.findTempNamespace(session.pid);
-            if (nameSpace) relation = catalog.findClassByName(qualified.name, nameSpace->oid);
+            const auto nameSpace = catalog.getTempNamespace(session.pid);
+            if (nameSpace) relation = catalog.getClassByName(qualified.name, nameSpace->oid);
         } else {
-            relation = catalog.resolveRelation(name, searchPath);
+            relation = catalog.resolveRelationSnapshot(name, searchPath);
         }
         // Looking at catalog identity must not open data or reject a permanent
         // unpopulated materialized view during side-effect-free preparation.

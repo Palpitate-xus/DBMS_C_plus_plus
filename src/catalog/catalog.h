@@ -25,8 +25,11 @@ struct CatalogPersistenceState;
 //   4. 持久化/加载系统表数据
 //   5. 提供依赖追踪接口（CASCADE / RESTRICT 基础）
 //
+// Pointer-returning inspection APIs require external serialization across the
+// whole pointer use. Any mutation/reload invalidates their returned pointers.
+// Runtime/concurrent callers must use the copy-returning get*/Snapshot APIs.
+// Their values remain valid independently of later catalog mutation/destruction.
 // 当前简化假设：
-//   - 单线程访问（或外部加锁）
 //   - 持久化格式：每表一个 CSV 文件
 //   - 后续 Phase 3/4 迁移到真正的 HeapTuple/页面格式
 // ============================================================================
@@ -65,6 +68,8 @@ public:
     Oid createNamespace(const std::string& nspname, Oid owner);
     const PgNamespaceRow* findNamespace(Oid oid) const;
     const PgNamespaceRow* findNamespaceByName(const std::string& name) const;
+    std::optional<PgNamespaceRow> getNamespace(Oid oid) const;
+    std::optional<PgNamespaceRow> getNamespaceByName(const std::string& name) const;
     bool dropNamespace(Oid oid);
     std::vector<PgNamespaceRow> listNamespaces() const;
 
@@ -92,6 +97,11 @@ public:
     const PgAttributeRow* resolveAttribute(const std::string& tableName,
                                            const std::string& colName,
                                            const std::vector<std::string>& searchPath) const;
+    std::optional<PgClassRow> resolveRelationSnapshot(
+        const std::string& name, const std::vector<std::string>& searchPath) const;
+    std::optional<PgAttributeRow> resolveAttributeSnapshot(
+        const std::string& tableName, const std::string& colName,
+        const std::vector<std::string>& searchPath) const;
 
     // =====================================================================
     // 临时 schema（会话隔离）
@@ -99,6 +109,7 @@ public:
     Oid createTempNamespace(uint64_t sessionId);
     bool dropTempNamespace(uint64_t sessionId);
     const PgNamespaceRow* findTempNamespace(uint64_t sessionId) const;
+    std::optional<PgNamespaceRow> getTempNamespace(uint64_t sessionId) const;
     void dropAllTempNamespaces(); // 服务器关闭时清理所有临时 schema
 
     // =====================================================================
@@ -107,6 +118,8 @@ public:
     Oid createClass(const PgClassRow& row);
     const PgClassRow* findClass(Oid oid) const;
     const PgClassRow* findClassByName(const std::string& name, Oid nspOid) const;
+    std::optional<PgClassRow> getClass(Oid oid) const;
+    std::optional<PgClassRow> getClassByName(const std::string& name, Oid nspOid) const;
     bool updateClass(Oid oid, const PgClassRow& row);
     // Rename a relation while preserving its OID and dependency records.
     // PostgreSQL object identity is OID-based; a name change must not create
@@ -122,6 +135,7 @@ public:
     std::vector<PgAttributeRow> findAttributes(Oid relOid) const;
     std::vector<PgAttributeRow> findAttributesByNum(Oid relOid) const; // 按 attnum 排序
     const PgAttributeRow* findAttribute(Oid relOid, const std::string& attname) const;
+    std::optional<PgAttributeRow> getAttribute(Oid relOid, const std::string& attname) const;
     bool renameAttribute(Oid relOid, const std::string& oldName,
                          const std::string& newName);
     // Atomically replace a relation's live user-column rows and keep
@@ -140,6 +154,8 @@ public:
     Oid createType(const PgTypeRow& row);
     const PgTypeRow* findType(Oid oid) const;
     const PgTypeRow* findTypeByName(const std::string& name, Oid nspOid) const;
+    std::optional<PgTypeRow> getType(Oid oid) const;
+    std::optional<PgTypeRow> getTypeByName(const std::string& name, Oid nspOid) const;
     bool updateType(Oid oid, const PgTypeRow& row);
     bool dropType(Oid oid);
     std::vector<PgTypeRow> listTypes() const;
@@ -160,6 +176,8 @@ public:
     Oid createProc(const PgProcRow& row);
     const PgProcRow* findProc(Oid oid) const;
     std::vector<const PgProcRow*> findProcsByName(const std::string& name, Oid nspOid) const;
+    std::optional<PgProcRow> getProc(Oid oid) const;
+    std::vector<PgProcRow> getProcsByName(const std::string& name, Oid nspOid) const;
     bool dropProc(Oid oid);
 
     // =====================================================================
@@ -294,6 +312,8 @@ private:
 
     // 在已持有 mutex_ 的情况下使用，避免公共接口死锁
     const PgNamespaceRow* findNamespaceUnlocked(Oid oid) const;
+    const PgClassRow* resolveRelationUnlocked(
+        const std::string& name, const std::vector<std::string>& searchPath) const;
     const PgClassRow*     findClassUnlocked(Oid oid) const;
     const PgTypeRow*      findTypeUnlocked(Oid oid) const;
     const PgProcRow*      findProcUnlocked(Oid oid) const;

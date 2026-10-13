@@ -48,7 +48,7 @@ bool undoIndexCreate(StorageEngine& engine, const std::string& db,
     auto& catalog = engine.catalogService().get(db);
     const auto tableName = CatalogService::logicalName(op.extra);
     const std::string schema = tableName.schema.empty() ? "public" : tableName.schema;
-    const auto* relation = catalog.resolveRelation(op.name, {schema});
+    const auto relation = catalog.resolveRelationSnapshot(op.name, {schema});
     if (!relation || relation->relkind != 'i') return true;
     const Oid indexOid = relation->oid;
     std::string error;
@@ -68,8 +68,8 @@ bool undoTableCreate(StorageEngine& engine, const std::string& db,
     const auto name = CatalogService::logicalName(op.name);
     const std::string logicalName = name.schema.empty()
         ? name.name : name.schema + "." + name.name;
-    const PgClassRow* relation =
-        catalog.resolveRelation(logicalName, {"public"});
+    const auto relation =
+        catalog.resolveRelationSnapshot(logicalName, {"public"});
     if (!relation) return true;
     if (relation->relkind != 'r') return false;
 
