@@ -28,13 +28,13 @@
 | R07 | LAG/LEAD偏移 | 待修复 | |
 | R08 | binary float参数往返 | 处理中 | 独立worktree |
 | R09 | 连接池等待期间引用寿命 | 已修复 | `2332382f`；原实现ASan失败；修复O2/ASan及重复测试通过，见[验证](issue-review-r09-pool-wait-reference.md) |
-| R10 | 连接池跨数据库等待 | 已修复 | Root真实源新编译4控制通过；O2/ASan及重复验证见[验证](issue-review-r10-pool-database-capacity.md) |
+| R10 | 连接池跨数据库等待 | 已修复 | `cb934db9`；Root真实源新编译4控制通过；O2/ASan及重复验证见[验证](issue-review-r10-pool-database-capacity.md) |
 | R11 | 窗口SUM中间溢出 | 待修复 | |
 | R12 | 测试注册 | 待修复 | |
 | R13 | 逻辑预览NULL及字段编码 | 待修复 | |
 | R14 | publication读取错误传播 | 待修复 | |
 | R15 | 关停唤醒顺序 | 待修复 | |
-| R16 | catalog坏行及完整加载 | 处理中 | 独立worktree |
+| R16 | catalog坏行及完整加载 | 已修复 | Root真实源新编译691检查通过；48实际字段边界原始失败保留，见[验证](issue-review-r16-catalog-complete-read.md) |
 | R17 | 失败回滚恢复图像 | 待修复 | |
 | R18 | catalog值快照 | 待修复 | |
 | R19 | TEMP启动恢复 | 待修复 | |

@@ -199,6 +199,19 @@ static bool readCatalogCsvLastField(std::istringstream& input, T& value) {
     return input.eof();
 }
 
+static bool readCatalogCsvStringField(std::istringstream& input,
+                                      std::string& value) {
+    input >> std::ws;
+    if (input.peek() == '"') {
+        value = readString(input);
+        char delimiter = 0;
+        return input.get(delimiter) && delimiter == ',';
+    }
+    // Older images may have unquoted names. getline consumes their delimiter,
+    // unlike readString's quoted branch; do not skip the first following byte.
+    return static_cast<bool>(std::getline(input, value, ',')) && !input.eof();
+}
+
 static std::string oidPath(const std::string& dbPath) {
     return dbPath + "/.oid_counter";
 }
@@ -2137,6 +2150,23 @@ void CatalogManager::loadAllLocked() {
             before.emplace(image.first, generation);
     }
 
+    const auto openRelationImage = [&](const char* name) {
+        const auto generation = before.find(name);
+        if (generation == before.end() ||
+            (generation->second.exists && !generation->second.regular))
+            throw DbError("58030", "cannot read catalog image " + std::string(name));
+        if (!generation->second.exists) {
+            const auto prior = persistence_->observed.find(name);
+            if (prior != persistence_->observed.end() && prior->second.exists)
+                throw DbError("58030", "catalog image disappeared: " + std::string(name));
+            return std::ifstream{}; // Legitimate first bootstrap has no image.
+        }
+        std::ifstream input(catalogFilePath(name), std::ios::binary);
+        if (!input)
+            throw DbError("58030", "cannot open catalog image " + std::string(name));
+        return input;
+    };
+
     // pg_namespace
     {
         std::ifstream in(catalogFilePath("namespace"));
@@ -2154,25 +2184,31 @@ void CatalogManager::loadAllLocked() {
 
     // pg_class
     {
-        std::ifstream in(catalogFilePath("class"));
+        auto in = openRelationImage("class");
         std::string line;
         while (std::getline(in, line)) {
             if (line.empty()) continue;
             std::istringstream iss(line);
             PgClassRow r;
-            iss >> r.oid; iss.ignore(1);
-            r.relname = readString(iss); iss.ignore(1);
-            iss >> r.relnamespace; iss.ignore(1);
-            iss >> r.reltype; iss.ignore(1);
-            iss >> r.relowner; iss.ignore(1);
-            iss >> r.relam; iss.ignore(1);
-            iss >> r.relfilenode; iss.ignore(1);
-            iss >> r.relkind; iss.ignore(1);
-            iss >> r.relnatts; iss.ignore(1);
-            char flag;
-            iss >> flag; r.relhasindex = (flag == 't'); iss.ignore(1);
-            iss >> r.relpersistence; iss.ignore(1);
-            iss >> flag; r.relisshared = (flag == 't');
+            char hasIndex = 'f';
+            char isShared = 'f';
+            if (!readCatalogCsvField(iss, r.oid) ||
+                !readCatalogCsvStringField(iss, r.relname) ||
+                !readCatalogCsvField(iss, r.relnamespace) ||
+                !readCatalogCsvField(iss, r.reltype) ||
+                !readCatalogCsvField(iss, r.relowner) ||
+                !readCatalogCsvField(iss, r.relam) ||
+                !readCatalogCsvField(iss, r.relfilenode) ||
+                !readCatalogCsvField(iss, r.relkind) ||
+                !readCatalogCsvField(iss, r.relnatts) ||
+                !readCatalogCsvField(iss, hasIndex) ||
+                !readCatalogCsvField(iss, r.relpersistence) ||
+                !(iss >> isShared) ||
+                (hasIndex != 't' && hasIndex != 'f') ||
+                (isShared != 't' && isShared != 'f'))
+                throw DbError("XX001", "incomplete pg_class catalog record");
+            r.relhasindex = hasIndex == 't';
+            r.relisshared = isShared == 't';
 
             // Rows written before the pg_class extension end here. Keep
             // their in-struct defaults; if a tail exists it must be complete.
@@ -2212,7 +2248,7 @@ void CatalogManager::loadAllLocked() {
                     (isPartition != 't' && isPartition != 'f') ||
                     (r.relreplident != 'd' && r.relreplident != 'n' &&
                      r.relreplident != 'f' && r.relreplident != 'i')) {
-                    continue;
+                    throw DbError("XX001", "incomplete pg_class catalog extension");
                 }
                 r.relhasrules = hasRules == 't';
                 r.relhastriggers = hasTriggers == 't';
@@ -2221,30 +2257,42 @@ void CatalogManager::loadAllLocked() {
                 r.relforcerowsecurity = forceRowSecurity == 't';
                 r.relispopulated = isPopulated == 't';
                 r.relispartition = isPartition == 't';
+            } else {
+                iss >> std::ws;
+                if (!iss.eof())
+                    throw DbError("XX001", "unexpected pg_class catalog suffix");
             }
             classes_.push_back(r);
         }
+        if (in.is_open() && (in.bad() || !in.eof()))
+            throw DbError("58030", "failed while reading pg_class catalog");
     }
 
     // pg_attribute
     {
-        std::ifstream in(catalogFilePath("attribute"));
+        auto in = openRelationImage("attribute");
         std::string line;
         while (std::getline(in, line)) {
             if (line.empty()) continue;
             std::istringstream iss(line);
             PgAttributeRow r;
-            iss >> r.attrelid; iss.ignore(1);
-            r.attname = readString(iss); iss.ignore(1);
-            iss >> r.atttypid; iss.ignore(1);
-            iss >> r.attnum; iss.ignore(1);
-            iss >> r.attlen; iss.ignore(1);
-            iss >> r.atttypmod; iss.ignore(1);
-            char flag;
-            iss >> flag; r.attnotnull = (flag == 't'); iss.ignore(1);
-            iss >> flag; r.atthasdef = (flag == 't'); iss.ignore(1);
-            iss >> r.attstorage; iss.ignore(1);
-            iss >> r.attalign;
+            char notNull = 'f';
+            char hasDefault = 'f';
+            if (!readCatalogCsvField(iss, r.attrelid) ||
+                !readCatalogCsvStringField(iss, r.attname) ||
+                !readCatalogCsvField(iss, r.atttypid) ||
+                !readCatalogCsvField(iss, r.attnum) ||
+                !readCatalogCsvField(iss, r.attlen) ||
+                !readCatalogCsvField(iss, r.atttypmod) ||
+                !readCatalogCsvField(iss, notNull) ||
+                !readCatalogCsvField(iss, hasDefault) ||
+                !readCatalogCsvField(iss, r.attstorage) ||
+                !(iss >> r.attalign) ||
+                (notNull != 't' && notNull != 'f') ||
+                (hasDefault != 't' && hasDefault != 'f'))
+                throw DbError("XX001", "incomplete pg_attribute catalog record");
+            r.attnotnull = notNull == 't';
+            r.atthasdef = hasDefault == 't';
 
             // Attribute rows written before the extension end at attalign.
             // Preserve the in-struct defaults for those rows.  A present tail
@@ -2273,16 +2321,22 @@ void CatalogManager::loadAllLocked() {
                     (identity != 0 && identity != 'a' && identity != 'd') ||
                     (generated != 0 && generated != 's' &&
                      generated != 'v')) {
-                    continue;
+                    throw DbError("XX001", "incomplete pg_attribute catalog extension");
                 }
                 r.attbyval = byValue == 't';
                 r.attidentity = static_cast<char>(identity);
                 r.attgenerated = static_cast<char>(generated);
                 r.attisdropped = isDropped == 't';
                 r.attislocal = isLocal == 't';
+            } else {
+                iss >> std::ws;
+                if (!iss.eof())
+                    throw DbError("XX001", "unexpected pg_attribute catalog suffix");
             }
             attributes_.push_back(r);
         }
+        if (in.is_open() && (in.bad() || !in.eof()))
+            throw DbError("58030", "failed while reading pg_attribute catalog");
     }
 
     // pg_type
