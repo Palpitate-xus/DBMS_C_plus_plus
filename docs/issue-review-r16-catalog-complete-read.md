@@ -32,6 +32,12 @@ The change is limited to `pg_class` and `pg_attribute`; it does not claim a
 complete rewrite of the other catalog CSV readers or multi-file atomic commit.
 There is no new public header or ABI change in this commit.
 
+Broader follow-up on 2026-10-13: the original complete `catalog_snapshot_test`
+raised `58030: cannot read catalog image class` after this change in the R18
+candidate. Its assertions remain unchanged. This newly discovered normal-path
+regression is being diagnosed; the focused 691 checks below are not a claim
+that catalog snapshot compatibility has already passed.
+
 ## Actual verification
 
 The new normal native fixture starts from catalog rows created and persisted

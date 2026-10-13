@@ -773,7 +773,7 @@ public:
                 const auto escape=expression(call->args[2],scopes);
                 const auto op=call->funcName.substr(0,call->funcName.size()-escapeSuffix.size());
                 resolvePattern(op,call->args[0],call->args[1],lhs,rhs);
-                const auto target=patternBaseType(rhs,call->args[1].get())=="bytea" ||
+                const std::string target=patternBaseType(rhs,call->args[1].get())=="bytea" ||
                     patternBaseType(lhs,call->args[0].get())=="bytea" ? "bytea" : "text";
                 const auto escapeBase=patternBaseType(escape,call->args[2].get());
                 const bool textEscape=escapeBase=="text" || escapeBase=="character varying" ||

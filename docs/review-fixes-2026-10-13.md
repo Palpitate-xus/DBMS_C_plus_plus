@@ -26,7 +26,7 @@
 | R05 | NTILE分桶 | 待修复 | |
 | R06 | NTILE非正参数 | 待修复 | |
 | R07 | LAG/LEAD偏移 | 待修复 | |
-| R08 | binary float参数往返 | 已修复 | Root标准构建及86协议控制通过；PG18.6与native邻居见[验证](issue-review-r08-binary-float.md) |
+| R08 | binary float参数往返 | 已修复 | `2d600491`；Root标准构建及86协议控制通过；PG18.6与native邻居见[验证](issue-review-r08-binary-float.md) |
 | R09 | 连接池等待期间引用寿命 | 已修复 | `2332382f`；原实现ASan失败；修复O2/ASan及重复测试通过，见[验证](issue-review-r09-pool-wait-reference.md) |
 | R10 | 连接池跨数据库等待 | 已修复 | `cb934db9`；Root真实源新编译4控制通过；O2/ASan及重复验证见[验证](issue-review-r10-pool-database-capacity.md) |
 | R11 | 窗口SUM中间溢出 | 待修复 | |
@@ -34,7 +34,7 @@
 | R13 | 逻辑预览NULL及字段编码 | 待修复 | |
 | R14 | publication读取错误传播 | 待修复 | |
 | R15 | 关停唤醒顺序 | 待修复 | |
-| R16 | catalog坏行及完整加载 | 已修复 | `0d85f6b9`；Root真实源新编译691检查通过；48实际字段边界原始失败保留，见[验证](issue-review-r16-catalog-complete-read.md) |
+| R16 | catalog坏行及完整加载 | 邻居复核中 | `0d85f6b9`；691检查通过，但完整catalog_snapshot原驱动新失败，正在修复兼容；见[验证](issue-review-r16-catalog-complete-read.md) |
 | R17 | 失败回滚恢复图像 | 待修复 | |
 | R18 | catalog值快照 | 待修复 | |
 | R19 | TEMP启动恢复 | 待修复 | |
@@ -47,7 +47,7 @@
 | R26 | 递归CTE类型/typmod | 待修复 | |
 | R27 | 页压缩全部存活行 | 已修复 | `58f1ee3d`；原生26组O2/ASan/UBSan通过；SQL及进程重启通过，见[验证](issue-review-r27-page-compaction.md) |
 | R28 | 页插入空间计算 | 已修复 | `261ffb86`；原始满页插入失败证据；198边界O2/ASan/UBSan及26压缩邻居通过，见[验证](issue-review-r28-page-insert-capacity.md) |
-| R29 | LIKE ESCAPE类型比较 | 待修复 | |
+| R29 | LIKE ESCAPE类型比较 | 已修复 | Root项目flags的-Werror=address通过；34绑定控制及相邻协议见[验证](issue-review-r29-pattern-escape-type.md) |
 | R30 | Parse/Describe会话上下文 | 已修复 | `8ba70380`；Root标准构建及12控制通过；5个原失败驱动在候选通过，见[验证](issue-review-r30-session-metadata.md) |
 | O01 | owner健康重试及测试覆盖 | 待修复 | |
 | O02 | EXISTS索引错误的访问计划/断言 | 待复核 | |
