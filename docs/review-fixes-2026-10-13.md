@@ -27,7 +27,7 @@
 | R06 | NTILE非正参数 | 待修复 | |
 | R07 | LAG/LEAD偏移 | 待修复 | |
 | R08 | binary float参数往返 | 处理中 | 独立worktree |
-| R09 | 连接池等待期间引用寿命 | 已修复 | 原实现ASan失败；修复O2/ASan及重复测试通过，见[验证](issue-review-r09-pool-wait-reference.md) |
+| R09 | 连接池等待期间引用寿命 | 已修复 | `2332382f`；原实现ASan失败；修复O2/ASan及重复测试通过，见[验证](issue-review-r09-pool-wait-reference.md) |
 | R10 | 连接池跨数据库等待 | 待修复 | |
 | R11 | 窗口SUM中间溢出 | 待修复 | |
 | R12 | 测试注册 | 待修复 | |
@@ -45,7 +45,7 @@
 | R24 | EXECUTE参数求值 | 待修复 | |
 | R25 | Numeric::withPrecision | 待修复 | |
 | R26 | 递归CTE类型/typmod | 待修复 | |
-| R27 | 页压缩全部存活行 | 处理中 | |
+| R27 | 页压缩全部存活行 | 已修复 | 原生26组O2/ASan/UBSan通过；SQL及进程重启通过，见[验证](issue-review-r27-page-compaction.md) |
 | R28 | 页插入空间计算 | 待修复 | |
 | R29 | LIKE ESCAPE类型比较 | 待修复 | |
 | R30 | Parse/Describe会话上下文 | 处理中 | 独立worktree |

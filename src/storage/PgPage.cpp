@@ -1,7 +1,9 @@
 #include "PgPage.h"
+#include "common/DbError.h"
 
 #include <algorithm>
 #include <cstring>
+#include <vector>
 
 namespace dbms {
 
@@ -349,6 +351,7 @@ bool PgPage::update(OffsetNumber linePtr, const char* data, size_t len,
 // ============================================================================
 
 void PgPage::compact() {
+    if (!isValid()) throw DbError("XX001", "cannot compact an invalid heap page");
     PageHeaderData* h = header();
     uint16_t n = numLinePointers();
     if (n == 0) return;
@@ -359,43 +362,60 @@ void PgPage::compact() {
         uint16_t off;
         uint16_t len;
     };
-    LiveItem items[256];
-    uint16_t liveCount = 0;
+    std::vector<LiveItem> items;
+    items.reserve(n);
+    OffsetNumber highestRedirectTarget = 0;
+    size_t liveBytes = 0;
 
     for (uint16_t i = 1; i <= n; ++i) {
         ItemIdData* id = itemId(i);
-        if (getLpFlags(id) == LP_NORMAL && liveCount < 256) {
-            items[liveCount++] = {i, getLpOff(id), getLpLen(id)};
+        if (getLpFlags(id) == LP_NORMAL) {
+            items.push_back({i, getLpOff(id), getLpLen(id)});
+            liveBytes += getLpLen(id);
+        } else if (getLpFlags(id) == LP_REDIRECT) {
+            highestRedirectTarget = std::max(highestRedirectTarget, getLpOff(id));
         }
     }
 
-    if (liveCount == 0) {
-        // 全部删除：重置页
-        init(0);
-        return;
-    }
-
     // 按偏移量降序排序（从底部到顶部）
-    std::sort(items, items + liveCount,
+    std::sort(items.begin(), items.end(),
               [](const LiveItem& a, const LiveItem& b) {
                   return a.off > b.off;
               });
+    size_t previousOffset = h->pd_special;
+    for (const auto& item : items) {
+        if (static_cast<size_t>(item.off) + item.len > previousOffset)
+            throw DbError("XX001", "overlapping heap tuples during compaction");
+        previousOffset = item.off;
+    }
+    if (liveBytes > static_cast<size_t>(h->pd_special - h->pd_lower))
+        throw DbError("XX001", "heap tuples exceed page capacity during compaction");
 
     // 重新排列数据
     // Keep the reserved special space outside the heap tuple area.  Starting
     // at PAGE_SIZE would place compacted tuples over the free-list pointer
     // stored in the final four bytes and makes the page structurally invalid.
     uint16_t newUpper = h->pd_special;
-    for (uint16_t i = 0; i < liveCount; ++i) {
-        newUpper -= items[i].len;
-        std::memmove(buf_ + newUpper, buf_ + items[i].off, items[i].len);
+    for (const auto& item : items) {
+        newUpper -= item.len;
+        std::memmove(buf_ + newUpper, buf_ + item.off, item.len);
         // 更新 line pointer
-        ItemIdData* id = itemId(items[i].linePtr);
+        ItemIdData* id = itemId(item.linePtr);
         setLpOff(id, newUpper);
     }
 
+    // Deleted tuple bytes have now been reclaimed. Their former offsets must
+    // not be restored or mistaken for still-owned data after relocation.
+    for (uint16_t i = 1; i <= n; ++i) {
+        ItemIdData* id = itemId(i);
+        if (getLpFlags(id) == LP_UNUSED) {
+            setLpOff(id, 0);
+            setLpLen(id, 0);
+        }
+    }
+
     // 清理 trailing unused line pointers
-    while (n > 0) {
+    while (n > highestRedirectTarget) {
         ItemIdData* id = itemId(n);
         if (getLpFlags(id) != LP_UNUSED) break;
         setLpOff(id, 0);
@@ -406,6 +426,8 @@ void PgPage::compact() {
     h->pd_lower = static_cast<uint16_t>(sizeof(PageHeaderData) + n * sizeof(ItemIdData));
     h->pd_upper = newUpper;
     h->pd_flags &= ~PD_HAS_FREE_LINES;
+    for (uint16_t i = 1; i <= n; ++i)
+        if (getLpFlags(itemId(i)) == LP_UNUSED) h->pd_flags |= PD_HAS_FREE_LINES;
     writeChecksum();
 }
 
