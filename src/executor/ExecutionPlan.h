@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <exception>
 #include <map>
 #include <memory>
@@ -756,7 +757,7 @@ struct WindowFunctionSpec {
     std::vector<std::string> partitionBy;
     std::string orderBy;
     bool orderAscending = true;
-    size_t offset = 1;
+    int32_t offset = 1; // SQL INTEGER: zero is current row, negative reverses direction
     std::string defaultValue;
     bool hasDefault = false;
     bool defaultIsNull = false;

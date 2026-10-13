@@ -4151,13 +4151,14 @@ bool WindowOp::open() {
                 computed[rowIndex][functionIndex] = std::to_string(denseRank);
                 computedNulls[rowIndex][functionIndex] = false;
             } else if (function.name == "lag" || function.name == "lead") {
-                const size_t offset = std::max<size_t>(1, function.offset);
-                const bool hasTarget = function.name == "lag"
-                    ? position >= partitionStart + offset
-                    : position + offset < partitionEnd;
+                const int64_t distance = function.name == "lag"
+                    ? -static_cast<int64_t>(function.offset) : static_cast<int64_t>(function.offset);
+                const bool hasTarget = distance < 0
+                    ? static_cast<uint64_t>(-distance) <= position - partitionStart
+                    : static_cast<uint64_t>(distance) < partitionEnd - position;
                 if (hasTarget) {
-                    const size_t targetPosition = function.name == "lag"
-                        ? position - offset : position + offset;
+                    const size_t targetPosition = distance < 0
+                        ? position - static_cast<size_t>(-distance) : position + static_cast<size_t>(distance);
                     const auto& targetRow = input[order[targetPosition]];
                     computed[rowIndex][functionIndex] =
                         targetRow.values[argumentColumn];

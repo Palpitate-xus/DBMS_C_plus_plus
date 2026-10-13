@@ -14,6 +14,7 @@
 #include "utils/interval_type.h"
 #include "utils/numeric_type.h"
 #include "expression/aggregate_type.h"
+#include "expression/common_type.h"
 #include "replication/ReplicationManager.h"
 #include "parser/parser.h"
 #include "TxnIdGenerator.h"
@@ -33389,6 +33390,19 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
                         return name == "percent_rank" || name == "cume_dist"
                             ? std::string("double precision") : std::string("bigint");
                     if (name == "ntile") return std::string("integer");
+                    if (shiftedValue) {
+                        std::vector<std::string> inputs{ExprHelper::inferParsedInputType(
+                            function->args.front().get(), {}, dbname, const_cast<StorageEngine*>(this))};
+                        if (count < 3 && common_type_detail::canonical(inputs.front()) == "unknown")
+                            throw DbError("42804", "could not determine polymorphic type because input has type unknown");
+                        if (count == 3) inputs.push_back(ExprHelper::inferParsedInputType(
+                            function->args[2].get(), {}, dbname, const_cast<StorageEngine*>(this)));
+                        try { return selectCommonType(inputs, name); }
+                        catch (const DbError& error) {
+                            if (error.sqlState() != "42804" && error.sqlState() != "42846") throw;
+                            throw DbError("42883", "function does not exist: " + spelling);
+                        }
+                    }
                     return ExprHelper::canonicalResultTypeName(
                         ExprHelper::inferParsedResultType(function->args.front().get(), {}, dbname,
                                                          const_cast<StorageEngine*>(this)));

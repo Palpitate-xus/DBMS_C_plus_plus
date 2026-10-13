@@ -887,6 +887,21 @@ public:
             // just like CAST and CASE. Returning only its spelling loses the
             // OID at query-output/child boundaries; never run it to infer one.
             call->resolvedResultType=declaredType(type.empty() ? first : type,call);
+            CatalogManager::QualifiedName windowRoutine;
+            const auto windowSpelling=call->schema.empty()?call->funcName:call->schema+"."+call->funcName;
+            if(call->hasOver && CatalogManager::parseQualifiedName(windowSpelling,windowRoutine,true) &&
+               (windowRoutine.schema.empty() || windowRoutine.schema=="pg_catalog") &&
+               (windowRoutine.name=="lag" || windowRoutine.name=="lead")) {
+                if(call->args.empty() || call->args.size()>3 || !call->namedArgs.empty())
+                    throw DbError("42883","function does not exist: "+windowSpelling);
+                // anycompatible value/default operands share their real
+                // result declaration; the offset has INTEGER input context.
+                // UNKNOWN literals are checked during pure transformation,
+                // never by executing a branch or a user routine.
+                coerceCaseInput(call->args.front(),argumentTypes.front().first,call->resolvedResultType);
+                if(call->args.size()>=2)coerceCaseInput(call->args[1],argumentTypes[1].first,"integer");
+                if(call->args.size()==3)coerceCaseInput(call->args[2],argumentTypes[2].first,call->resolvedResultType);
+            }
             if(call->schema.empty() && (grammarOperation=="coalesce" || grammarOperation=="greatest" || grammarOperation=="least"))
                 valueTypeModifiers[call]=commonModifier(argumentTypes,call->resolvedResultType);
             return call->resolvedResultType;

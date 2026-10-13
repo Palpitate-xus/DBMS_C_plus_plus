@@ -6282,8 +6282,8 @@ static bool convertToVolcanoWindowSpec(const WindowFunc& wf,
         return true;
     }
 
-    // Keep the first implementation deliberately strict: support the common
-    // lag/lead(value) form and the standard numeric offset/default extension.
+    // The constant fast path retains signed INTEGER offsets and genuine
+    // literal defaults; other expressions use the prepared legacy receiver.
     vector<string> args;
     string current;
     char quote = '\0';
@@ -6306,25 +6306,27 @@ static bool convertToVolcanoWindowSpec(const WindowFunc& wf,
     if (args.size() >= 2) {
         try {
             size_t consumed = 0;
-            const auto offset = stoull(args[1], &consumed);
-            if (consumed != args[1].size() || offset == 0) return false;
-            spec.offset = offset;
+            const auto offset = stoll(args[1], &consumed);
+            if (consumed != args[1].size() || offset < numeric_limits<int32_t>::min() ||
+                offset > numeric_limits<int32_t>::max()) return false;
+            spec.offset = static_cast<int32_t>(offset);
         } catch (...) {
             return false;
         }
     }
     if (args.size() == 3) {
-        string defaultValue = args[2];
-        const bool quoted = defaultValue.size() >= 2 &&
-            ((defaultValue.front() == '\'' && defaultValue.back() == '\'') ||
-             (defaultValue.front() == '"' && defaultValue.back() == '"'));
-        if (quoted) {
-            defaultValue = defaultValue.substr(1, defaultValue.size() - 2);
-        } else if (toLower(trim(defaultValue)) == "null") {
-            defaultValue.clear();
-            spec.defaultIsNull = true;
-        }
-        spec.defaultValue = defaultValue;
+        dbms::SQLParser parser;
+        const auto parsed=parser.parseForBinding("SELECT "+args[2]);
+        const auto* select=parsed.success?dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()):nullptr;
+        const auto* expression=select && select->selectList.size()==1?select->selectList.front().expr.get():nullptr;
+        const auto* literal=dynamic_cast<const dbms::LiteralExpr*>(expression);
+        if(const auto* unary=dynamic_cast<const dbms::UnaryOpExpr*>(expression);
+           unary && (unary->op=="-" || unary->op=="+"))
+            literal=dynamic_cast<const dbms::LiteralExpr*>(unary->operand.get());
+        if(!literal || literal->preparedSubquery || !literal->typeName.empty())return false;
+        dbms::ExprEvaluator pure;
+        const auto value=pure.eval(expression,dbms::RowContext{});
+        spec.defaultValue=value.value;spec.defaultIsNull=value.isNull;
         spec.hasDefault = true;
     }
     return true;
@@ -33913,6 +33915,14 @@ static bool executeInternal(const string& rawSql, Session& s) {
             if (wf.name == "percent_rank" || wf.name == "cume_dist")
                 return string("double precision");
             if (wf.name == "ntile") return string("integer");
+            if (wf.name == "lag" || wf.name == "lead") {
+                const auto declaration = g_engine.prepareBoundQuery(s.currentDB,
+                    "SELECT " + wf.name + "(" + wf.arg + ") OVER() FROM " + tnameOrig +
+                    (tableAlias.empty() ? string() : " AS " + tableAlias), {}, true);
+                if (declaration.output.size() != 1)
+                    throw dbms::DbError("XX000", "offset window lost its output declaration");
+                return declaration.output.front().type;
+            }
 
             if (wf.isAggregate || wf.name == "array_agg") {
                 dbms::StorageEngine::AggItem aggregate;
@@ -35532,38 +35542,41 @@ static bool executeInternal(const string& rawSql, Session& s) {
             // the legacy semantic fallback below.
             size_t windowLimit = 0, windowOffset = 0;
             const bool finiteWindowLimit = parseLimitOffset(windowLimit, windowOffset);
-            struct WindowBucketArgument {
+            struct WindowScalarArguments {
                 shared_ptr<dbms::PreparedQuery> query;
                 unique_ptr<dbms::PreparedQueryExecution> execution;
-                dbms::Expr* expression = nullptr;
+                vector<dbms::Expr*> expressions;
                 size_t sourceOrdinal = 0;
                 dbms::QueryRowDescriptor descriptor;
             };
-            vector<WindowBucketArgument> windowBucketArguments(windowFuncs.size());
-            // NTILE's INTEGER signature and constant conversions are bound
-            // before opening sources. The actual argument is evaluated only
-            // while its partition has not obtained a non-NULL bucket count.
+            vector<WindowScalarArguments> windowArguments(windowFuncs.size());
+            // Bind all value/offset/default signatures and constant
+            // conversions before opening sources. Runtime demand remains
+            // specific to NTILE or LAG/LEAD, not eager argument evaluation.
             for (size_t wi = 0; wi < windowFuncs.size(); ++wi) {
-                if (windowFuncs[wi].name != "ntile") continue;
-                auto& argument = windowBucketArguments[wi];
-                const string argumentSql = "SELECT ntile(" + windowFuncs[wi].arg + ") OVER() FROM " +
+                const auto& function=windowFuncs[wi];
+                if (function.name != "ntile" && function.name != "lag" && function.name != "lead") continue;
+                auto& argument = windowArguments[wi];
+                const string argumentSql = "SELECT " + function.name + "(" + function.arg + ") OVER() FROM " +
                     tnameOrig + (tableAlias.empty() ? string() : " AS " + tableAlias);
                 argument.query = make_shared<dbms::PreparedQuery>(
                     g_engine.prepareBoundQuery(s.currentDB, argumentSql, {}, true));
                 auto* select = dynamic_cast<dbms::SelectStmt*>(argument.query->ast.get());
                 auto* call = select && select->selectList.size() == 1
                     ? dynamic_cast<dbms::FunctionCallExpr*>(select->selectList.front().expr.get()) : nullptr;
-                if (!call || call->args.size() != 1)
-                    throw dbms::DbError("XX000", "NTILE argument lost its prepared owner");
-                auto conversion = make_unique<dbms::CastExpr>();
-                conversion->typeName = "integer"; conversion->implicit = true;
-                conversion->operand = std::move(call->args.front());
-                call->args.front() = std::move(conversion);
-                argument.expression = call->args.front().get();
+                if (!call || call->args.empty())
+                    throw dbms::DbError("XX000", "window arguments lost their prepared owner");
+                if (function.name == "ntile") {
+                    auto conversion = make_unique<dbms::CastExpr>();
+                    conversion->typeName = "integer"; conversion->implicit = true;
+                    conversion->operand = std::move(call->args.front());
+                    call->args.front() = std::move(conversion);
+                }
+                for (const auto& value : call->args) argument.expressions.push_back(value.get());
                 const auto source = find_if(argument.query->sourceRanges.begin(), argument.query->sourceRanges.end(),
                     [&](const auto& range) { return range.owner == select; });
                 if (source == argument.query->sourceRanges.end() || source->columns.size() != tbl.len)
-                    throw dbms::DbError("XX000", "NTILE argument lost its actual source descriptor");
+                    throw dbms::DbError("XX000", "window arguments lost their actual source descriptor");
                 argument.sourceOrdinal = source->ordinal; argument.descriptor = source->columns;
                 argument.execution = make_unique<dbms::PreparedQueryExecution>(argument.query, &g_engine, queryDb);
                 const auto prepared = argument.query;
@@ -35572,8 +35585,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         dbms::QueryPlanner::buildPreparedQueryPlan(&g_engine, queryDb, prepared, child, row),
                         prepared->statementOutputs.at(child));
                 });
-                argument.execution->prepareExpression(argument.expression);
-                argument.execution->planExpressionConstants(argument.expression);
+                for (auto* value : argument.expressions) argument.execution->prepareExpression(value);
+                for (auto* value : argument.expressions) argument.execution->planExpressionConstants(value);
                 argument.execution->prepareChildCursors();
             }
             bool canUseVolcanoWindow = !hasAgg && !hasScalar &&
@@ -35588,6 +35601,22 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     if (!convertToVolcanoWindowSpec(wf, tbl, spec)) {
                         canUseVolcanoWindow = false;
                         break;
+                    }
+                    if (wf.name == "lag" || wf.name == "lead") {
+                        const auto& argument=windowArguments[volcanoWindowFunctions.size()];
+                        const auto input=find_if(tbl.cols,tbl.cols+tbl.len,
+                            [&](const auto& column){return column.dataName==spec.argument;});
+                        if(input==tbl.cols+tbl.len ||
+                           dbms::ExprHelper::canonicalResultTypeName(input->dataType)!=
+                           dbms::ExprHelper::canonicalResultTypeName(argument.query->output.front().type)) {
+                            // A real common-type promotion must be executed
+                            // on the value, not merely published in metadata.
+                            canUseVolcanoWindow=false;break;
+                        }
+                        if(spec.hasDefault) {
+                            const auto value=argument.execution->evaluate(argument.expressions.at(2),argument.execution->context());
+                            spec.defaultValue=value.value;spec.defaultIsNull=value.isNull;
+                        }
                     }
                     volcanoWindowFunctions.push_back(std::move(spec));
                 }
@@ -36174,6 +36203,19 @@ static bool executeInternal(const string& rawSql, Session& s) {
 
             struct WindowBucketState { optional<size_t> buckets; size_t emitted = 0; };
             vector<map<size_t, WindowBucketState>> windowBucketStates(windowFuncs.size());
+            const auto evaluateWindowArgument = [&](size_t wi, size_t value, size_t row) {
+                auto& argument=windowArguments.at(wi);
+                auto context=argument.execution->context();
+                vector<dbms::ExprValue> cells;
+                for(size_t column=0;column<tbl.len;++column) {
+                    const auto cell=rows.at(row).find(tbl.cols[column].dataName);
+                    cells.emplace_back(argument.descriptor[column].type,
+                        cell==rows[row].end()?string():cell->second,cell==rows[row].end());
+                    cells.back().collation=tbl.cols[column].collation;
+                }
+                argument.execution->setSourceRow(context,argument.sourceOrdinal,cells);
+                return argument.execution->evaluate(argument.expressions.at(value),context);
+            };
             // Compute window function values
             for (size_t i = 0; i < rows.size(); ++i) {
                 for (size_t wi = 0; wi < windowFuncs.size(); ++wi) {
@@ -36214,22 +36256,24 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                 val = to_string(prevRank + 1);
                             }
                         }
-                    } else if (wf.name == "lag") {
-                        if (partIdx == 0) { val = "NULL"; valueIsNull = true; }
-                        else {
-                            auto it = rows[i - 1].find(wf.arg);
-                            val = (it != rows[i - 1].end()) ? it->second : "NULL";
-                            valueIsNull = it == rows[i - 1].end();
-                        }
-                    } else if (wf.name == "lead") {
-                        // Check if next row is in same partition
-                        if (i + 1 < rows.size() && samePartition(i + 1, i, wf)) {
-                            auto it = rows[i + 1].find(wf.arg);
-                            val = (it != rows[i + 1].end()) ? it->second : "NULL";
-                            valueIsNull = it == rows[i + 1].end();
-                        } else {
-                            val = "NULL";
-                            valueIsNull = true;
+                    } else if (wf.name == "lag" || wf.name == "lead") {
+                        auto& argument=windowArguments[wi];
+                        const auto offset=argument.expressions.size()>=2?evaluateWindowArgument(wi,1,i):
+                            dbms::ExprValue("integer","1");
+                        valueIsNull=true;
+                        if(!offset.isNull) {
+                            size_t partEnd=i;
+                            while(partEnd+1<rows.size() && samePartition(partEnd+1,i,wf))++partEnd;
+                            const int64_t distance=wf.name=="lag"?-offset.asInt():offset.asInt();
+                            const bool found=distance<0?static_cast<uint64_t>(-distance)<=i-partStart:
+                                static_cast<uint64_t>(distance)<=partEnd-i;
+                            dbms::ExprValue value;
+                            if(found) {
+                                const size_t target=distance<0?i-static_cast<size_t>(-distance):i+static_cast<size_t>(distance);
+                                value=evaluateWindowArgument(wi,0,target);
+                            } else if(argument.expressions.size()==3)value=evaluateWindowArgument(wi,2,i);
+                            else value=dbms::ExprValue(argument.query->output.front().type,"",true);
+                            val=value.value;valueIsNull=value.isNull;
                         }
                     } else if (wf.name == "first_value") {
                         auto it = rows[partStart].find(wf.arg);
@@ -36248,17 +36292,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         const size_t partitionSize = partEnd - partStart + 1;
                         auto& state = windowBucketStates[wi][partStart];
                         if (!state.buckets) {
-                            auto& argument = windowBucketArguments[wi];
-                            auto context = argument.execution->context();
-                            vector<dbms::ExprValue> cells;
-                            for (size_t column = 0; column < tbl.len; ++column) {
-                                const auto value = rows[i].find(tbl.cols[column].dataName);
-                                cells.emplace_back(argument.descriptor[column].type,
-                                    value == rows[i].end() ? string() : value->second, value == rows[i].end());
-                                cells.back().collation = tbl.cols[column].collation;
-                            }
-                            argument.execution->setSourceRow(context, argument.sourceOrdinal, cells);
-                            const auto count = argument.execution->evaluate(argument.expression, context);
+                            const auto count = evaluateWindowArgument(wi,0,i);
                             if (count.isNull) valueIsNull = true;
                             else {
                                 const int64_t buckets = count.asInt();
