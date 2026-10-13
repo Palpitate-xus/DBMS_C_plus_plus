@@ -8,6 +8,7 @@
 #include "expression/equality_type.h"
 #include "expression/expr_helper.h"
 #include "expression/array_type.h"
+#include "expression/arithmetic_type.h"
 #include "expression/geometric_input.h"
 #include "expression/between_input.h"
 #include "expression/regtype_cast.h"
@@ -15,6 +16,8 @@
 #include "expression/sql_value.h"
 #include "utils/interval_type.h"
 #include <algorithm>
+#include <charconv>
+#include <limits>
 #include <map>
 #include <set>
 
@@ -111,6 +114,7 @@ public:
     std::vector<const Ctes*> cteScopes;
     std::map<const Stmt*, std::vector<const Expr*>> projectionLeaves;
     std::map<const Expr*,uint32_t> valueTypeOids;
+    std::map<const Expr*,int32_t> valueTypeModifiers;
     const QueryRowDescriptor* setOrderScope = nullptr;
     Binder(const std::string& sql, const std::vector<QueryBindingDatum>& values,
            const QueryBindingMetadata& descriptions) : datums(values), metadata(descriptions) {
@@ -245,10 +249,60 @@ public:
         return unary && unary->op.rfind("COLLATE ",0)==0
             ? expressionTypeOid(unary->operand.get()) : 0;
     }
+    int32_t expressionTypeModifier(const Expr* node) const {
+        const auto resolved=valueTypeModifiers.find(node);
+        if(resolved!=valueTypeModifiers.end())return resolved->second;
+        const auto* unary=dynamic_cast<const UnaryOpExpr*>(node);
+        return unary && unary->op.rfind("COLLATE ",0)==0
+            ? expressionTypeModifier(unary->operand.get()) : -1;
+    }
+    int32_t commonModifier(const std::vector<std::pair<std::string,const Expr*>>& inputs,
+                           const std::string& common) const {
+        if(inputs.empty())return -1;
+        const auto modifier=expressionTypeModifier(inputs.front().second);
+        for(const auto& input:inputs)
+            if(common_type_detail::canonical(input.first)!=common_type_detail::canonical(common) ||
+               expressionTypeModifier(input.second)!=modifier)return -1;
+        return modifier;
+    }
     std::string declaredType(const std::string& spelling,const Expr* node) {
-        if(!metadata.declaredType)return ExprHelper::canonicalResultTypeName(spelling);
-        const auto type=metadata.declaredType(spelling);
+        const auto type=metadata.declaredType?metadata.declaredType(spelling):
+            QueryOutputColumn{"",ExprHelper::canonicalResultTypeName(spelling)};
         valueTypeOids[node]=type.typeOid;
+        valueTypeModifiers[node]=type.typeMod;
+        // Keep static input modifiers separately from scalar type identity.
+        // No user expression is evaluated to discover a recursive row type.
+        const auto declaration=SQLParser::parseTypeSpecification(spelling);
+        auto scalar=common_type_detail::canonical(type.type);
+        if(common_type_detail::array(scalar))scalar.resize(scalar.size()-2);
+        auto modifiers=declaration.typeMods;
+        const auto syntax=SQLParser::toLower(declaration.typeName);
+        const auto* binary=dynamic_cast<const BinaryOpExpr*>(node);
+        const bool inputDeclaration=dynamic_cast<const CastExpr*>(node) || dynamic_cast<const LiteralExpr*>(node) ||
+            (binary && binary->op=="::");
+        if(inputDeclaration && modifiers.empty() && (syntax=="char" || syntax=="character" || syntax=="bit"))
+            modifiers.push_back("1");
+        if(!modifiers.empty()) {
+            if((scalar=="bpchar" || scalar=="varchar") && modifiers.size()==1) {
+                // Static declarations are not the storage codec's allocation
+                // limit. Keep a legal large modifier without allocating rows.
+                int32_t length=0;
+                const auto& text=modifiers.front();
+                const auto converted=std::from_chars(text.data(),text.data()+text.size(),length);
+                if(converted.ec==std::errc{} && converted.ptr==text.data()+text.size() &&
+                   length>0 && length<=std::numeric_limits<int32_t>::max()-4)
+                    valueTypeModifiers[node]=length+4;
+            } else if((scalar=="time" || scalar=="timetz" || scalar=="timestamp" || scalar=="timestamptz") && modifiers.size()==1) {
+                int32_t precision=0;
+                const auto& text=modifiers.front();
+                const auto converted=std::from_chars(text.data(),text.data()+text.size(),precision);
+                if(converted.ec==std::errc{} && converted.ptr==text.data()+text.size() && precision>=0)
+                    valueTypeModifiers[node]=std::min(precision,6);
+            } else {
+                const auto resolved=TypeRegistry::instance().applyTypeMods(scalar,modifiers);
+                if(resolved.ok())valueTypeModifiers[node]=resolved.typmod;
+            }
+        }
         return type.type;
     }
     std::optional<QueryEnumType> enumType(const std::string& spelling,const Expr* node) const {
@@ -400,6 +454,7 @@ public:
                         if (field.name != column->column) continue;
                         if (column->table.empty() && range.hiddenUnqualified.count(field.name)) continue;
                         ++matches; sourceType = field.type;
+                        valueTypeModifiers[column]=field.typeMod;
                         resolved = {scopeDepth, range.occurrence, ordinal, field.type, range.mergedUsing, field.typeOid};
                     }
                 }
@@ -676,6 +731,8 @@ public:
             }
             // A predicate's result identity is the catalog-owned boolean,
             // not either input OID (and not an untyped label with OID zero).
+            if(const auto type=arithmetic_detail::resultType(binary->op,left,right))
+                return declaredType(*type,binary);
             return predicates.count(binary->op) ? declaredType("boolean",binary) : left;
         }
         case ExprType::QuantifiedComparison: {
@@ -785,6 +842,7 @@ public:
                 return "boolean";
             }
             std::string first = "unknown";
+            std::vector<std::pair<std::string,const Expr*>> argumentTypes;
             for (size_t i = 0; i < call->args.size(); ++i) {
                 if (i == 0 && call->schema.empty() && SQLParser::toLower(call->funcName) == "extract") {
                     if (const auto* field = dynamic_cast<ColumnRefExpr*>(call->args[i].get())) {
@@ -799,6 +857,7 @@ public:
                     }
                 }
                 const auto type = expression(call->args[i], scopes); if (i == 0) first = type;
+                argumentTypes.emplace_back(type,call->args[i].get());
             }
             for (auto& arg : call->namedArgs) expression(arg.value, scopes);
             if (call->filter) {
@@ -828,6 +887,8 @@ public:
             // just like CAST and CASE. Returning only its spelling loses the
             // OID at query-output/child boundaries; never run it to infer one.
             call->resolvedResultType=declaredType(type.empty() ? first : type,call);
+            if(call->schema.empty() && (grammarOperation=="coalesce" || grammarOperation=="greatest" || grammarOperation=="least"))
+                valueTypeModifiers[call]=commonModifier(argumentTypes,call->resolvedResultType);
             return call->resolvedResultType;
         }
         case ExprType::CaseExpr: {
@@ -876,6 +937,10 @@ public:
             if(resultEnum)for(size_t i=0;i<resultTypes.size();++i)
                 if(enumInputs[i])resultTypes[i]=resultEnum->typeName;
             const auto type = selectCommonType(resultTypes,"CASE");
+            std::vector<std::pair<std::string,const Expr*>> modifierInputs{{elseType,conditional->elseExpr.get()}};
+            for(size_t i=0;i<thenTypes.size();++i)
+                modifierInputs.emplace_back(thenTypes[i],conditional->whenClauses[i].second.get());
+            const auto modifier=commonModifier(modifierInputs,type);
             if(resultEnum) {
                 if(elseType=="unknown")validateEnumLiteral(conditional->elseExpr.get(),*resultEnum);
                 for(size_t i=0;i<thenTypes.size();++i)if(thenTypes[i]=="unknown")
@@ -888,7 +953,9 @@ public:
             // The common result owns a real catalog identity too. Preserve
             // the existing enum owner; builtin CASE results must not become
             // descriptor OID0 merely because their root is not a CAST.
-            return resultEnum?type:declaredType(type,conditional);
+            const auto resultType=resultEnum?type:declaredType(type,conditional);
+            valueTypeModifiers[conditional]=modifier;
+            return resultType;
         }
         case ExprType::ArrayExpr: {
             auto* array = static_cast<ArrayExpr*>(node.get());
@@ -1002,7 +1069,10 @@ public:
         }
         literal.preparedSubquery = std::move(parsed.stmt);
         literal.typeName = scalar ? columns.front().type : "boolean";
-        if(scalar)valueTypeOids[&literal]=columns.front().typeOid;
+        if(scalar) {
+            valueTypeOids[&literal]=columns.front().typeOid;
+            valueTypeModifiers[&literal]=columns.front().typeMod;
+        }
         return literal.typeName;
     }
     void window(WindowDef& value, const std::vector<Namespace>& scopes) {
@@ -1071,7 +1141,8 @@ public:
                 item.alias = quoted;
                 result.projectionAliases.emplace_back(item.sourceExpressionEnd, quoted);
             }
-            columns.push_back({name, type, false, 0, expressionTypeOid(item.expr.get())});
+            columns.push_back({name, type, false, 0, expressionTypeOid(item.expr.get()),
+                expressionTypeModifier(item.expr.get())});
             if (leaves) leaves->push_back(item.expr.get());
             if (bindings) {
                 const auto* column = dynamic_cast<const ColumnRefExpr*>(item.expr.get());
@@ -1258,19 +1329,33 @@ public:
         if(auto output=result.statementOutputs.find(statement);output!=result.statementOutputs.end()) {
             output->second.at(ordinal).type=targetType;
             output->second.at(ordinal).typeOid=0;
+            output->second.at(ordinal).typeMod=-1;
         }
     }
     QueryRowDescriptor setColumns(SelectStmt& select,QueryRowDescriptor left,QueryRowDescriptor right) {
         if(left.size()!=right.size())throw DbError("42601","set query column count mismatch");
         auto output=left;
         for(size_t i=0;i<left.size();++i) {
-            const auto common=selectCommonType({left[i].type,right[i].type},"set query");
+            auto leftType=left[i].type,rightType=right[i].type;
+            // Identical domains retain their declared identity. Otherwise
+            // UNION selects on the actual domain bases, not assignment casts.
+            if(metadata.baseType && common_type_detail::canonical(leftType)!=common_type_detail::canonical(rightType)) {
+                leftType=metadata.baseType(leftType,left[i].typeOid);
+                rightType=metadata.baseType(rightType,right[i].typeOid);
+            }
+            const auto common=selectCommonType({leftType,rightType},"set query");
+            // A set's typmod survives only identical input declarations of
+            // the common type. A cast/promotion cannot inherit the seed's cap.
+            if(left[i].typeMod!=right[i].typeMod ||
+               common_type_detail::canonical(left[i].type)!=common_type_detail::canonical(common) ||
+               common_type_detail::canonical(right[i].type)!=common_type_detail::canonical(common))
+                output[i].typeMod=-1;
             // A common result is not the left branch's physical type identity
             // when coercion or a different catalog type produced its value.
             if(!left[i].typeOid || left[i].typeOid!=right[i].typeOid ||
                common_type_detail::canonical(left[i].type)!=common_type_detail::canonical(common) ||
                common_type_detail::canonical(right[i].type)!=common_type_detail::canonical(common))
-                output[i].typeOid=0;
+                output[i].typeOid=metadata.declaredType?metadata.declaredType(common).typeOid:0;
             if(common_type_detail::canonical(left[i].type)=="unknown") {
                 coerceSetUnknown(select.setOpLhs?select.setOpLhs.get():&select,i,common);
                 left[i].type=common;
@@ -1340,14 +1425,35 @@ public:
                 auto* recursive = dynamic_cast<SelectStmt*>(cte.query.get());
                 if (cte.recursive && recursive && recursive->setOp != SetOp::None) {
                     // Seed only from the non-recursive term; never execute it.
-                    StmtPtr tail = std::move(recursive->setOpRhs);
-                    columns = statement(*recursive, cteOuter, ctes);
-                    recursive->setOpRhs = std::move(tail);
+                    if(recursive->setOpLhs)columns=statement(*recursive->setOpLhs,cteOuter,ctes);
+                    else {
+                        StmtPtr tail = std::move(recursive->setOpRhs);
+                        struct RestoreTail { StmtPtr& slot; StmtPtr& tail; ~RestoreTail(){slot=std::move(tail);} }
+                            restore{recursive->setOpRhs,tail};
+                        columns = statement(*recursive, cteOuter, ctes);
+                    }
                     applyNames(columns, cte.columnNames);
-                    auto inner = ctes; inner[name] = {columns, cte.query.get()};
+                    auto seed=columns;
+                    for(auto& column:seed)if(column.type=="unknown")column.type="text";
+                    auto inner = ctes; inner[name] = {seed, cte.query.get()};
                     if (recursive->setOpRhs) {
+                        const auto firstRange=result.sourceRanges.size();
                         auto rhs = statement(*recursive->setOpRhs, cteOuter, inner);
                         if (rhs.size() != columns.size()) throw DbError("42601", "recursive query column count mismatch");
+                        const bool selfReference=std::any_of(result.sourceRanges.begin()+firstRange,
+                            result.sourceRanges.end(),[&](const auto& range){return range.cteStatement==cte.query.get();});
+                        if(selfReference) {
+                            for(size_t i=0;i<columns.size();++i)if(columns[i].type=="unknown")
+                                coerceSetUnknown(recursive->setOpLhs?recursive->setOpLhs.get():recursive,i,"text");
+                            const auto common=setColumns(*recursive,seed,std::move(rhs));
+                            for(size_t i=0;i<seed.size();++i)
+                                if(common_type_detail::canonical(common[i].type)!=common_type_detail::canonical(seed[i].type) ||
+                                   common[i].typeMod!=seed[i].typeMod ||
+                                   (common[i].typeOid && seed[i].typeOid && common[i].typeOid!=seed[i].typeOid))
+                                    throw DbError("42804","recursive query column "+std::to_string(i+1)+
+                                        " has a different type or type modifier in its non-recursive term");
+                            columns=std::move(seed);
+                        } else columns=setColumns(*recursive,std::move(columns),std::move(rhs));
                     }
                 } else columns = statement(*cte.query, cteOuter, ctes);
                 applyNames(columns, cte.columnNames);
@@ -1394,6 +1500,10 @@ public:
                     const auto common=selectCommonType(types,"VALUES");
                     auto descriptor=metadata.declaredType?metadata.declaredType(common):QueryOutputColumn{"",common};
                     descriptor.name="column"+std::to_string(column+1);
+                    std::vector<std::pair<std::string,const Expr*>> modifierInputs;
+                    for(size_t row=0;row<inputs.size();++row)
+                        modifierInputs.emplace_back(inputs[row][column],select->valuesRows[row][column].get());
+                    descriptor.typeMod=commonModifier(modifierInputs,common);
                     columns.push_back(std::move(descriptor));
                     for(size_t row=0;row<inputs.size();++row)
                         coerceCaseInput(select->valuesRows[row][column],inputs[row][column],common);

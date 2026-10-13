@@ -13304,6 +13304,11 @@ static std::string processCTEs(const std::string& sql, Session& s, bool& failed)
         }
     }
 
+    // Resolve the complete recursive declaration before materializing even
+    // its seed. Empty recursive branches and volatile seeds must receive the
+    // same static type/typmod check as prepared execution and wire Parse.
+    if(recursiveMode)(void)g_engine.prepareBoundQuery(s.currentDB,sql);
+
     while (pos < result.size()) {
         // Skip leading whitespace
         while (pos < result.size() && isspace((unsigned char)result[pos])) ++pos;

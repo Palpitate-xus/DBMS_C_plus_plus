@@ -33205,6 +33205,19 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
             if(resolved->typcategory=='A' || (spelling.size()>=2 &&
                 spelling.compare(spelling.size()-2,2,"[]")==0))
                 return ExprHelper::canonicalResultTypeName(spelling);
+            // A user type's basename is not a builtin identity. Preserve its
+            // actual namespace after following domains (including an enum or
+            // range named text/int4) instead of resolving a search_path alias.
+            if(resolved->typnamespace!=11) {
+                if(!catalogSnapshot)catalogSnapshot=catalogService_->metadataSnapshot(dbname);
+                for(const auto& space:catalogSnapshot->namespaces)if(space.oid==resolved->typnamespace) {
+                    const auto quote=[](const std::string& name) {
+                        std::string value="\"";for(char c:name){value+=c;if(c=='\"')value+=c;}return value+'\"';
+                    };
+                    return quote(space.nspname)+"."+quote(resolved->typname);
+                }
+                throw DbError("XX000","operator input type namespace is missing");
+            }
             return ExprHelper::canonicalResultTypeName(resolved->typname);
         };
         metadata.enumType = [&](const std::string& spelling,uint32_t typeOid) -> std::optional<QueryEnumType> {

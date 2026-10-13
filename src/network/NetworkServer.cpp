@@ -1813,20 +1813,8 @@ bool describePreparedQueryHostResult(const std::string& sql, Session& session,
 // Describe must not execute the statement: even a SELECT can call a function
 // with side effects. Resolve statically knowable SELECT/RETURNING projections
 // against the catalog and leave other query shapes to the execution path.
-bool describePreparedExplainResult(const std::string& sql, Session& session,
-        std::vector<PgColumnDescription>& columns,
-        const std::vector<uint32_t>& parameterOids = {}) {
-    if(SQLParser::classify(sql)!=SqlCommand::Explain)return false;
-    SQLParser parser;
-    const auto probe=parser.parseForBinding(sql);
-    if(!probe.isValid())throw DbError("42601",probe.error.empty()?"invalid EXPLAIN statement":probe.error);
-    const auto* explain=dynamic_cast<const ExplainStmt*>(probe.stmt.get());
-    // The retained plan publisher owns TEXT/JSON. XML/YAML renderers remain
-    // separate unsupported consumers, not text relabeled as those formats.
-    if(!explain || explain->xml || explain->yaml)return false;
-    // Genuine typed parameter sites, not substituted NULL SQL or a rendered
-    // statement. Binding describes the whole tree but never plans constants,
-    // invokes a routine, or constructs/opens its row providers.
+std::vector<QueryBindingDatum> protocolMetadataParameters(Session& session,
+    const std::vector<uint32_t>& parameterOids) {
     std::vector<QueryBindingDatum> parameters;
     std::optional<CatalogManager::MetadataSnapshot> catalog;
     std::function<std::string(uint32_t,std::set<uint32_t>)> typeName;
@@ -1855,6 +1843,65 @@ bool describePreparedExplainResult(const std::string& sql, Session& session,
         datum.type=typeName(parameterOids[i],{});datum.position=i+1;
         parameters.push_back(std::move(datum));
     }
+    return parameters;
+}
+
+bool describePreparedRecursiveCteResult(const std::string& sql,Session& session,
+    std::vector<PgColumnDescription>& columns,const std::vector<uint32_t>& parameterOids = {}) {
+    SQLParser parser;
+    const auto parsed=parser.parseForBinding(sql);
+    if(!parsed.isValid())return false;
+    const auto* select=dynamic_cast<const SelectStmt*>(parsed.stmt.get());
+    const auto* with=dynamic_cast<const WithStmt*>(parsed.stmt.get());
+    const auto* definitions=select?&select->ctes:with?&with->ctes:nullptr;
+    if(!definitions || !std::any_of(definitions->begin(),definitions->end(),
+        [](const auto& cte){return cte.recursive;}))return false;
+    const auto prepared=g_engine.prepareBoundQuery(session.currentDB,sql,
+        protocolMetadataParameters(session,parameterOids));
+    QueryResult shape;
+    for(const auto& field:prepared.output){shape.columns.push_back(field.name);shape.columnTypes.push_back(field.type);}
+    columns=describeProtocolColumns(shape,std::string{},session);
+    std::optional<CatalogManager::MetadataSnapshot> catalog;
+    for(size_t i=0;i<columns.size();++i) {
+        columns[i].typeModifier=prepared.output[i].typeMod;
+        if(prepared.output[i].typeOid)columns[i].typeOid=prepared.output[i].typeOid;
+        if(prepared.output[i].typeOid && !mapBuiltinTypeNameToOid(prepared.output[i].type)) {
+            if(!catalog)catalog=g_engine.catalogService().metadataSnapshot(session.currentDB);
+            std::set<Oid> ancestry;
+            for(;;) {
+                const auto found=std::find_if(catalog->types.begin(),catalog->types.end(),
+                    [&](const auto& type){return type.oid==columns[i].typeOid;});
+                if(found==catalog->types.end())throw DbError("42704","prepared output type does not exist");
+                columns[i].typeSize=found->typlen;
+                if(found->typtype!='d')break;
+                if(ancestry.size()>=64 || !ancestry.insert(found->oid).second || !found->typbasetype)
+                    throw DbError("XX001","invalid domain catalog ancestry");
+                // Internal common-type analysis retains an identical domain;
+                // PostgreSQL's wire descriptor instead exposes its base type.
+                if(columns[i].typeModifier<0 && found->typtypmod>=0)
+                    columns[i].typeModifier=found->typtypmod;
+                columns[i].typeOid=found->typbasetype;
+            }
+        }
+    }
+    return !columns.empty();
+}
+
+bool describePreparedExplainResult(const std::string& sql, Session& session,
+        std::vector<PgColumnDescription>& columns,
+        const std::vector<uint32_t>& parameterOids = {}) {
+    if(SQLParser::classify(sql)!=SqlCommand::Explain)return false;
+    SQLParser parser;
+    const auto probe=parser.parseForBinding(sql);
+    if(!probe.isValid())throw DbError("42601",probe.error.empty()?"invalid EXPLAIN statement":probe.error);
+    const auto* explain=dynamic_cast<const ExplainStmt*>(probe.stmt.get());
+    // The retained plan publisher owns TEXT/JSON. XML/YAML renderers remain
+    // separate unsupported consumers, not text relabeled as those formats.
+    if(!explain || explain->xml || explain->yaml)return false;
+    // Genuine typed parameter sites, not substituted NULL SQL or a rendered
+    // statement. Binding describes the whole tree but never plans constants,
+    // invokes a routine, or constructs/opens its row providers.
+    const auto parameters=protocolMetadataParameters(session,parameterOids);
     auto* previous=currentSession();setCurrentSession(&session);
     struct Restore {Session* previous;~Restore(){setCurrentSession(previous);}} restore{previous};
     const auto prepared=g_engine.prepareBoundQuery(session.currentDB,sql,parameters);
@@ -2198,6 +2245,7 @@ bool protocolConstantBitBetween(const Stmt& statement,Session& session) {
 bool describePreparedResult(const std::string& sql, Session& session,
                             std::vector<PgColumnDescription>& columns,
                             const std::vector<uint32_t>& parameterOids = {}) {
+    if(describePreparedRecursiveCteResult(sql,session,columns,parameterOids))return true;
     auto betweenParameterOids = parameterOids;
     if (prepareProtocolBitBetween(sql, session, betweenParameterOids, &columns)) return true;
     if(describePreparedExplainResult(sql,session,columns,parameterOids))return true;
@@ -5935,6 +5983,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 validatePreparedIntegerInputs(sql,session,parameterTypes);
                 validatePreparedBitScalarParameters(sql,session,parameterTypes);
                 std::vector<PgColumnDescription> explainDescriptor;
+                (void)describePreparedRecursiveCteResult(sql,session,explainDescriptor,parameterTypes);
                 (void)describePreparedExplainResult(sql,session,explainDescriptor,parameterTypes);
                 (void)prepareProtocolBitBetween(sql, session, parameterTypes);
                 if(parameterTypes.empty()) {
