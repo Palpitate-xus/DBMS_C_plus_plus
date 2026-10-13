@@ -51,7 +51,8 @@
 五个未注册驱动另行运行，均实际exit 0，摘要在 `/tmp/dbms-review-20261013.f9Ywep98/unregistered-summary.log`：复制槽持久化、pg_settings查询、bound DML children、named ON CONFLICT、离线checksum验证。这些通过不消除注册缺口。
 
 本机缺少 `cmake`，配置尝试exit127，未运行CMake构建；未安装额外依赖。标准脚本使用TLS stub/plain TCP，不能当作真实OpenSSL/TLS验收。
-本轮未运行全库ASan/UBSan/TSan、fuzz、长期soak或实际多节点复制。新SQL对照共89条语句；49条观测不同，其中包含错误写入造成的后续状态差异，不能当作49个独立bug。SQL的MATCH仅比较行、SQLSTATE和OID，不比较诊断文本、列名及command tag。正常binary float 6项中4项失败。
+本轮未运行全库ASan/UBSan/TSan、fuzz、长期soak或实际多节点复制。前六组新SQL对照共89条语句；49条观测不同，其中包含错误写入造成的后续状态差异，不能当作49个独立bug。SQL的MATCH仅比较行、SQLSTATE和OID，不比较诊断文本、列名及command tag。正常binary float 6项中4项失败。
+注册回归新失败的后续定位另有27个协议动作（21个Simple Query、6个Parse/Describe/Sync），其中两个描述动作与PG18不同，归入R30；原注册驱动的独立诊断副本只增加消息打印、保留全部原断言，两份均实际exit1。
 原实现的独立O2 API检查另有Numeric有效数字舍入4项中3项失败，以及PgPage正常插入/删除/压缩3项中2项失败；这两个驱动的实际退出码均为1。
 
 ## 问题与修复方法
@@ -79,7 +80,7 @@ P1 表示可能导致错误结果、崩溃或服务不可用；P2 表示受限�
 | R16 | P1 | 损坏 catalog 行被跳过，后续可能将缺行状态写回 | 静态路径确认，未做故障注入 | 2 |
 | R17 | P1 | DDL 回滚失败仍尝试清理恢复备份 | 静态错误路径确认，未做故障注入 | 2 |
 | R18 | P2 | catalog getter 返回的内部行指针可能失效 | API 生命周期风险；SQL 并发可达性待验证 | 2 |
-| R19 | P1 | 失效 session-temp 元数据阻断普通启动恢复 | 历史全套失败及本轮源码追踪；当前回归待终态 | 2 |
+| R19 | P1 | 失效 session-temp 元数据阻断普通启动恢复 | 历史失败在本轮注册回归再次出现，并已追踪源码 | 2 |
 | R20 | P1 | INSERT/UPDATE RETURNING 子查询被当成字符串，错误写入提交 | PG18.6 对照及后续表内容复现 | 1 |
 | R21 | P1 | ON CONFLICT WHERE 缺少 BOOLEAN 绑定，`'f'` 也更新 | PG18.6 对照及后续表内容复现 | 1 |
 | R22 | P2 | 严格模式接受缺少 FROM/INTO 的修改语句 | 显式 postgresql18 模式对照复现 | 3 |
@@ -90,6 +91,7 @@ P1 表示可能导致错误结果、崩溃或服务不可用；P2 表示受限�
 | R27 | P1 | 页压缩只处理前256个存活行，错误释放其余行空间 | 正常API操作复现，3个控制中2个失败 | 1 |
 | R28 | P2 | 页插入复用空槽时的空间减法可能下溢 | 静态API风险；未跑边界探针，普通INSERT已检查canFit | 2 |
 | R29 | P2 | LIKE ESCAPE绑定以字符串地址判断bytea类型 | 编译器-Waddress及源码确认；当前构建未复现SQL失败 | 5 |
+| R30 | P2 | Extended Parse/Describe缺少会话上下文，搜索路径与错误前后行为不一致 | 注册回归失败及PG18.6协议对照复现 | 2 |
 
 ### R01：大 NUMERIC 平方根
 
@@ -238,6 +240,7 @@ rollbackTransaction 返回非 OK 后仅输出 warning，随后仍调用 discardT
 ### R19：失效 TEMP 条目阻断启动
 
 原完整日志 `root-full786-443.log` 的 `stale_temp_startup_recovery_test` 实际异常退出。
+本轮原注册驱动再次在同一测试抛出 `WAL crash recovery failed; startup aborted to protect data` 并异常退出；完整套件继续执行，不以重跑覆盖这次失败。
 `src/commands/TableManage.cpp:43821` 枚举全部关系建立 physicalRelationId 映射，`:43823` 在临时条目缺少 schema 时直接失败；普通启动构造器据此中止。已有较晚的 specialized-index 临时名过滤无法覆盖该入口。
 修复：恢复的持久关系枚举统一排除真正的 reserved session-temp 名称，保留普通持久表缺 schema 的 fail-closed 行为；一并检查同文件 `42835`、`42918`、`43667` 相邻枚举。
 验收：原测试不缩减，并覆盖有 lifecycle WAL、残留 TEMP、健康持久表和持久 schema 真缺失的不同情况。
@@ -380,11 +383,27 @@ compact只收集前256个LP_NORMAL条目，随后却用这部分条目的总长�
 修复：将target声明为std::string/std::string_view，或先保存显式isBytea布尔值再选择目标类型，避免地址比较；继续使用已解析的操作数类型处理ESCAPE输入。
 验收：bytea和text模式、正确/错误类型的ESCAPE、unknown字面量和参数、空源准备阶段；至少在正常优化及关闭常量合并的构建中运行同一语义控制，保持合法输入和错误SQLSTATE一致。
 
+### R30：协议元数据分析丢失连接会话上下文
+
+位置：`src/network/NetworkServer.cpp:1932`、`:2435`、`:5024`、`:5848`；`src/commands/TableManage.cpp:32986`；`src/expression/function_namespace.h:15` 和 `src/expression/expr_helper.cpp:529`。
+表和函数位于独立非public schema，连接已正确设置search_path。两个原注册驱动失败，追加完整协议消息后确认不是RowDescription字段格式问题：
+
+| 合法SQL | 当前程序的扩展查询响应 | PG18.6 |
+| --- | --- | --- |
+| `SELECT sum(CASE WHEN i BETWEEN 1 AND 2 THEN 1 ELSE 0 END) AS total,avg(CASE WHEN i BETWEEN 1 AND 2 THEN 1 ELSE 0 END) AS mean FROM inputs` | Parse即42P01，声称inputs不存在 | 正常描述total为int8、mean为numeric |
+| `SELECT sum(CASE WHEN r<'alpha' THEN enum_argument_writer(id) ELSE 0 END) AS total FROM ranks` | Parse成功后Describe报42804，声称CASE混合integer/text | 正常描述total为int8 |
+
+相同BETWEEN语句通过Simple Query可执行；改为i>0的描述控制也成功。第二条语句在新鲜连接首次Describe失败，紧接着完全相同的描述却成功，两次均没有执行writer。
+原因是Parse的整数输入校验和Describe类型推导没有建立currentSession：关系binder退回public查找，函数元数据也退回public并把未知函数猜为text。错误回滚abortActiveTransaction反而setCurrentSession且未恢复，使首次错误改变后续分析环境。
+
+修复：向完整元数据分析链显式传递Session，或在协议入口设置异常安全、短寿命的会话守卫，覆盖Parse/Describe及依赖会话的类型、函数、关系查询。错误和成功出口均恢复上下文，不能靠制造错误或重试初始化，也不能删除Main已有生命周期恢复机制。描述仍只能查元数据，禁止执行用户表达式获取类型。
+验收：保留两个原驱动全部断言；新鲜连接、非public schema、首次扩展查询、成功/错误前后相同SQL、同名对象和临时schema、连接池模式，以及Describe不执行writer的控制。独立诊断实例均已关闭，Root输入没有修改。
+
 ## 历史失败与待判定项目
 
 | 项目 | 已有证据及正确解释 | 下一步 |
 | --- | --- | --- |
-| table_owner_atomicity | 原全套在第105行健康重试返回非 OK；实际 status 未记录，不能据此认定数据回滚失败 | 记录 status、schema/catalog 发布阶段和 peer generation；确认原因后修复并保留重试断言 |
+| table_owner_atomicity | 历史失败在本轮原注册回归再次出现：第105行健康重试返回非 OK；实际 status 未记录，不能据此认定数据回滚失败 | 记录 status、schema/catalog 发布阶段和 peer generation；确认原因后修复并保留重试断言 |
 | owner 测试覆盖说明 | 第82行称 class 先发布、attribute 后失败，但当前 persistAll 在所有写入前检查目录，且 map 顺序为 attribute 在前 | 保留原控制，另加真实分阶段发布失败控制，不能用现有绿色断言证明部分发布恢复 |
 | index_corruption / EXISTS | 原 fixture 期望 XX001，实际 t；EXISTS 固定读取健康 heap，没有证明它访问了被破坏的 B-tree | 先核对所要求的访问计划；若接入公共 planner，再验证错误传播，不能无条件检查未访问索引 |
 | ALTER ARRAY | 前次同源码专项在建立两个索引后执行 `ALTER TABLE array_values ALTER COLUMN i TYPE BIGINT[]` 超时 | 保留失败和原10秒期限，定位等待/错误边界，不将超时直接归因于环境 |
@@ -392,6 +411,7 @@ compact只收集前256个LP_NORMAL条目，随后却用这部分条目的总长�
 | CTAS / background checkpoint | 原正式回归存在58030失败，后续重复通过不抹掉失败 | 按用户要求暂缓专项调查，保持未修复 |
 | HAVING 非 BOOLEAN | 新差分 `HAVING 1` / `HAVING 'notboolean'` 实际成功空结果，PG18分别42804/22P02 | 追踪实际 aggregate/HAVING 消费路径，共用 BOOLEAN 绑定；保留空输入和准备阶段控制 |
 | ORDER BY 重复别名 | 新差分 `SELECT id AS x,v AS x FROM d ORDER BY x` 与无FROM双 x 均未返回预期42702 | 在 ORDER BY 名称解析阶段检查多重匹配，区分合法同一表达式引用与歧义；核对标签及行序 |
+| 物化视图刷新 | 本轮原注册 `matview_refresh_protocol_e2e_test.py:93` 执行 `REFRESH MATERIALIZED VIEW unpopulated_mv` 时socket超时 | 保留原期限和fixture，下一步记录刷新阶段及等待边界；不能直接归因环境，也不在本轮重开用户暂缓的CTAS/后台checkpoint专项 |
 
 ## 实施顺序
 

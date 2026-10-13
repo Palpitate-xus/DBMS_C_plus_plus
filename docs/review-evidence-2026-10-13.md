@@ -4,7 +4,7 @@
 以下输出原样保留 SQL、结果行、SQLSTATE 和 OID；本机路径只记录运行来源，不是重现所必需的固定路径。
 SQL 参考实例已验证为 PostgreSQL 18.6；双方使用独立测试数据，参考侧事务最终回滚。
 复现时，参考侧使用独立随机 schema 和外层事务，每条被测语句前建立 SAVEPOINT，失败后回滚至该 SAVEPOINT，成功则释放；最后整体回滚。Root 使用独立目录、随机端口和普通自动提交会话。不能把含预期错误的日志直接连续粘贴进一个没有 SAVEPOINT 的 PostgreSQL 事务，否则后续会话状态不同。
-前两组 SQL 共 29 条语句，其中 14 条查询不同；后续DML、EXECUTE和递归CTE对照追加后共89条语句、49条不同观测（含前面错误写入的后续影响，不能当作49个独立问题）。观测脚本正常退出只表示收集完成，不表示结果通过。MATCH仅比较rows、SQLSTATE和OID，不比较诊断文本、列名或command tag；原输出保留这些字段便于另行检查。
+前两组 SQL 共 29 条语句，其中 14 条查询不同；前六组（含后续DML、EXECUTE和递归CTE）共89条语句、49条不同观测（含前面错误写入的后续影响，不能当作49个独立问题）。末尾Extended Parse/Describe定位另含27个协议动作、两个失败描述。观测脚本正常退出只表示收集完成，不表示结果通过。MATCH仅比较rows、SQLSTATE和OID，不比较诊断文本、列名或command tag；原输出保留这些字段便于另行检查。
 二进制浮点测试要求 SELECT $1 的输入和输出字节、OID、格式码相同，6 项中 4 项失败。
 
 ## 窗口和数值 SQL
@@ -553,4 +553,152 @@ initial=258 after_two_inserts_valid=1 after_two_inserts_live=259 survivor_mismat
 initial=270 tuple_bytes=26 before_valid=1 before_live=269 before_free=64 before_mismatch=0 compact_valid=0 compact_checksum=1 compact_live=269 compact_free=428 compact_mismatch=0
 initial=270 after_two_inserts_valid=0 after_two_inserts_live=271 survivor_mismatch=1
 cases=3 failed=2
+```
+
+## Extended Parse/Describe 会话上下文
+
+对应R30。双方先创建独立非public schema并设置search_path，以下SQL中的表和函数均在该schema。Q表示Simple Query，PDS表示Parse/Describe/Sync，未发送Execute。两组共27个动作，其中两个描述失败；MATCH仍仅比较行、SQLSTATE和OID，原始消息另外保留。失败前后的顺序是复现条件，不能以错误之后的成功重试替代新鲜连接控制。
+
+### probe7_aggregate_describe.log
+
+```text
+COMPATIBILITY_MODE postgresql18
+CASE 0 MODE Q SQL CREATE TABLE inputs(i INT,t TEXT)
+PG18 ([], None, '', [], 'CREATE TABLE', [])
+ROOT ([], None, '', [], 'CREATE TABLE', [])
+MATCH True
+CASE 1 MODE Q SQL INSERT INTO inputs VALUES(1,'alpha'),(2,''),(NULL,NULL)
+PG18 ([], None, '', [], 'INSERT 0 3', [])
+ROOT ([], None, '', [], 'INSERT 0 3', [])
+MATCH True
+CASE 2 MODE PDS SQL SELECT sum(CASE WHEN i BETWEEN 1 AND 2 THEN 1 ELSE 0 END) AS total,avg(CASE WHEN i BETWEEN 1 AND 2 THEN 1 ELSE 0 END) AS mean FROM inputs
+PG18 ([], None, '', ['total', 'mean'], None, [20, 1700])
+ROOT ([], '42P01', 'relation "inputs" does not exist', [], None, [])
+PG18 RAW_MESSAGES [(b'1', b''), (b't', b'\x00\x00'), (b'T', b'\x00\x02total\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x14\x00\x08\xff\xff\xff\xff\x00\x00mean\x00\x00\x00\x00\x00\x00\x00\x00\x00\x06\xa4\xff\xff\xff\xff\xff\xff\x00\x00'), (b'Z', b'T')]
+PG18 DIAGNOSTICS []
+ROOT RAW_MESSAGES [(b'E', b'SERROR\x00VERROR\x00C42P01\x00Mrelation "inputs" does not exist\x00\x00'), (b'Z', b'I')]
+ROOT DIAGNOSTICS [{b'S': b'ERROR', b'V': b'ERROR', b'C': b'42P01', b'M': b'relation "inputs" does not exist'}]
+MATCH False
+CASE 3 MODE Q SQL SELECT sum(CASE WHEN i BETWEEN 1 AND 2 THEN 1 ELSE 0 END) AS total,avg(CASE WHEN i BETWEEN 1 AND 2 THEN 1 ELSE 0 END) AS mean FROM inputs
+PG18 ([['2', '0.66666666666666666667']], None, '', ['total', 'mean'], 'SELECT 1', [20, 1700])
+ROOT ([['2', '0.66666666666666666667']], None, '', ['total', 'mean'], 'SELECT 1', [20, 1700])
+MATCH True
+CASE 4 MODE PDS SQL SELECT sum(CASE WHEN i > 0 THEN 1 ELSE 0 END) AS total,avg(CASE WHEN i > 0 THEN 1 ELSE 0 END) AS mean FROM inputs
+PG18 ([], None, '', ['total', 'mean'], None, [20, 1700])
+ROOT ([], None, '', ['total', 'mean'], None, [20, 1700])
+PG18 RAW_MESSAGES [(b'1', b''), (b't', b'\x00\x00'), (b'T', b'\x00\x02total\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x14\x00\x08\xff\xff\xff\xff\x00\x00mean\x00\x00\x00\x00\x00\x00\x00\x00\x00\x06\xa4\xff\xff\xff\xff\xff\xff\x00\x00'), (b'Z', b'T')]
+PG18 DIAGNOSTICS []
+ROOT RAW_MESSAGES [(b'1', b''), (b't', b'\x00\x00'), (b'T', b'\x00\x02total\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x14\x00\x08\xff\xff\xff\xff\x00\x00mean\x00\x00\x00\x00\x00\x00\x00\x00\x00\x06\xa4\xff\xff\xff\xff\xff\xff\x00\x00'), (b'Z', b'I')]
+ROOT DIAGNOSTICS []
+MATCH True
+CASE 5 MODE Q SQL CREATE TYPE rank_type AS ENUM ('zeta','','alpha')
+PG18 ([], None, '', [], 'CREATE TYPE', [])
+ROOT ([], None, '', [], 'CREATE TYPE', [])
+MATCH True
+CASE 6 MODE Q SQL CREATE TABLE ranks(id INT PRIMARY KEY,r rank_type)
+PG18 ([], None, '', [], 'CREATE TABLE', [])
+ROOT ([], None, '', [], 'CREATE TABLE', [])
+MATCH True
+CASE 7 MODE Q SQL INSERT INTO ranks VALUES (1,'zeta'),(2,''),(3,'alpha'),(4,NULL)
+PG18 ([], None, '', [], 'INSERT 0 4', [])
+ROOT ([], None, '', [], 'INSERT 0 4', [])
+MATCH True
+CASE 8 MODE Q SQL CREATE SEQUENCE enum_argument_seq
+PG18 ([], None, '', [], 'CREATE SEQUENCE', [])
+ROOT ([], None, '', [], 'CREATE SEQUENCE', [])
+MATCH True
+CASE 9 MODE Q SQL CREATE TABLE enum_argument_effect(seq BIGINT DEFAULT nextval('enum_argument_seq'),v INT)
+PG18 ([], None, '', [], 'CREATE TABLE', [])
+ROOT ([], None, '', [], 'CREATE TABLE', [])
+MATCH True
+CASE 10 MODE Q SQL CREATE FUNCTION enum_argument_writer(i INT) RETURNS INT LANGUAGE plpgsql AS $$BEGIN INSERT INTO enum_argument_effect(v) VALUES(i); RETURN i; END;$$
+PG18 ([], None, '', [], 'CREATE FUNCTION', [])
+ROOT ([], None, '', [], 'CREATE FUNCTION', [])
+MATCH True
+CASE 11 MODE PDS SQL SELECT sum(CASE WHEN r<'alpha' THEN enum_argument_writer(id) ELSE 0 END) AS total FROM ranks
+PG18 ([], None, '', ['total'], None, [20])
+ROOT ([], None, '', ['total'], None, [20])
+PG18 RAW_MESSAGES [(b'1', b''), (b't', b'\x00\x00'), (b'T', b'\x00\x01total\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x14\x00\x08\xff\xff\xff\xff\x00\x00'), (b'Z', b'T')]
+PG18 DIAGNOSTICS []
+ROOT RAW_MESSAGES [(b'1', b''), (b't', b'\x00\x00'), (b'T', b'\x00\x01total\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x14\x00\x08\xff\xff\xff\xff\x00\x00'), (b'Z', b'I')]
+ROOT DIAGNOSTICS []
+MATCH True
+CASE 12 MODE Q SQL SELECT v FROM enum_argument_effect ORDER BY seq
+PG18 ([], None, '', ['v'], 'SELECT 0', [23])
+ROOT ([], None, '', ['v'], 'SELECT 0', [23])
+MATCH True
+CASE 13 MODE Q SQL SELECT sum(CASE WHEN r<'alpha' THEN enum_argument_writer(id) ELSE 0 END) AS total FROM ranks
+PG18 ([['3']], None, '', ['total'], 'SELECT 1', [20])
+ROOT ([['3']], None, '', ['total'], 'SELECT 1', [20])
+MATCH True
+CASE 14 MODE Q SQL SELECT v FROM enum_argument_effect ORDER BY seq
+PG18 ([['1'], ['2']], None, '', ['v'], 'SELECT 2', [23])
+ROOT ([['1'], ['2']], None, '', ['v'], 'SELECT 2', [23])
+MATCH True
+CASE 15 MODE PDS SQL SELECT sum(enum_argument_writer(id)) AS total FROM ranks
+PG18 ([], None, '', ['total'], None, [20])
+ROOT ([], None, '', ['total'], None, [20])
+PG18 RAW_MESSAGES [(b'1', b''), (b't', b'\x00\x00'), (b'T', b'\x00\x01total\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x14\x00\x08\xff\xff\xff\xff\x00\x00'), (b'Z', b'T')]
+PG18 DIAGNOSTICS []
+ROOT RAW_MESSAGES [(b'1', b''), (b't', b'\x00\x00'), (b'T', b'\x00\x01total\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x14\x00\x08\xff\xff\xff\xff\x00\x00'), (b'Z', b'I')]
+ROOT DIAGNOSTICS []
+MATCH True
+```
+
+### probe8_fresh_enum_describe.log
+
+```text
+COMPATIBILITY_MODE postgresql18
+CASE 0 MODE Q SQL CREATE TYPE rank_type AS ENUM ('zeta','','alpha')
+PG18 ([], None, '', [], 'CREATE TYPE', [])
+ROOT ([], None, '', [], 'CREATE TYPE', [])
+MATCH True
+CASE 1 MODE Q SQL CREATE TABLE ranks(id INT PRIMARY KEY,r rank_type)
+PG18 ([], None, '', [], 'CREATE TABLE', [])
+ROOT ([], None, '', [], 'CREATE TABLE', [])
+MATCH True
+CASE 2 MODE Q SQL INSERT INTO ranks VALUES (1,'zeta'),(2,''),(3,'alpha'),(4,NULL)
+PG18 ([], None, '', [], 'INSERT 0 4', [])
+ROOT ([], None, '', [], 'INSERT 0 4', [])
+MATCH True
+CASE 3 MODE Q SQL CREATE SEQUENCE enum_argument_seq
+PG18 ([], None, '', [], 'CREATE SEQUENCE', [])
+ROOT ([], None, '', [], 'CREATE SEQUENCE', [])
+MATCH True
+CASE 4 MODE Q SQL CREATE TABLE enum_argument_effect(seq BIGINT DEFAULT nextval('enum_argument_seq'),v INT)
+PG18 ([], None, '', [], 'CREATE TABLE', [])
+ROOT ([], None, '', [], 'CREATE TABLE', [])
+MATCH True
+CASE 5 MODE Q SQL CREATE FUNCTION enum_argument_writer(i INT) RETURNS INT LANGUAGE plpgsql AS $$BEGIN INSERT INTO enum_argument_effect(v) VALUES(i); RETURN i; END;$$
+PG18 ([], None, '', [], 'CREATE FUNCTION', [])
+ROOT ([], None, '', [], 'CREATE FUNCTION', [])
+MATCH True
+CASE 6 MODE PDS SQL SELECT sum(CASE WHEN r<'alpha' THEN enum_argument_writer(id) ELSE 0 END) AS total FROM ranks
+PG18 ([], None, '', ['total'], None, [20])
+ROOT ([], '42804', 'CASE types integer and text cannot be matched', [], None, [])
+PG18 RAW_MESSAGES [(b'1', b''), (b't', b'\x00\x00'), (b'T', b'\x00\x01total\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x14\x00\x08\xff\xff\xff\xff\x00\x00'), (b'Z', b'T')]
+PG18 DIAGNOSTICS []
+ROOT RAW_MESSAGES [(b'1', b''), (b'E', b'SERROR\x00VERROR\x00C42804\x00MCASE types integer and text cannot be matched\x00\x00'), (b'Z', b'I')]
+ROOT DIAGNOSTICS [{b'S': b'ERROR', b'V': b'ERROR', b'C': b'42804', b'M': b'CASE types integer and text cannot be matched'}]
+MATCH False
+CASE 7 MODE PDS SQL SELECT sum(CASE WHEN r<'alpha' THEN enum_argument_writer(id) ELSE 0 END) AS total FROM ranks
+PG18 ([], None, '', ['total'], None, [20])
+ROOT ([], None, '', ['total'], None, [20])
+PG18 RAW_MESSAGES [(b'1', b''), (b't', b'\x00\x00'), (b'T', b'\x00\x01total\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x14\x00\x08\xff\xff\xff\xff\x00\x00'), (b'Z', b'T')]
+PG18 DIAGNOSTICS []
+ROOT RAW_MESSAGES [(b'1', b''), (b't', b'\x00\x00'), (b'T', b'\x00\x01total\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x14\x00\x08\xff\xff\xff\xff\x00\x00'), (b'Z', b'I')]
+ROOT DIAGNOSTICS []
+MATCH True
+CASE 8 MODE Q SQL SELECT v FROM enum_argument_effect ORDER BY seq
+PG18 ([], None, '', ['v'], 'SELECT 0', [23])
+ROOT ([], None, '', ['v'], 'SELECT 0', [23])
+MATCH True
+CASE 9 MODE Q SQL SELECT sum(CASE WHEN r<'alpha' THEN enum_argument_writer(id) ELSE 0 END) AS total FROM ranks
+PG18 ([['3']], None, '', ['total'], 'SELECT 1', [20])
+ROOT ([['3']], None, '', ['total'], 'SELECT 1', [20])
+MATCH True
+CASE 10 MODE Q SQL SELECT v FROM enum_argument_effect ORDER BY seq
+PG18 ([['1'], ['2']], None, '', ['v'], 'SELECT 2', [23])
+ROOT ([['1'], ['2']], None, '', ['v'], 'SELECT 2', [23])
+MATCH True
 ```
