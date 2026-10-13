@@ -4104,30 +4104,35 @@ ParseResult SQLParser::parseInsert(const std::string& sql) {
     } else if (pos < tokens.size() && toLower(tokens[pos]) == "select") {
         // INSERT INTO ... SELECT ...
         std::string selectSql;
-        size_t returningPos = tokens.size();
+        size_t sourceEnd = tokens.size();
         int depth = 0;
         for (size_t i = pos; i < tokens.size(); ++i) {
             if (tokens[i] == "(") {
                 ++depth;
             } else if (tokens[i] == ")" && depth > 0) {
                 --depth;
-            } else if (depth == 0 && toLower(tokens[i]) == "returning") {
-                returningPos = i;
+            } else if (depth == 0 &&
+                       (toLower(tokens[i]) == "returning" ||
+                        (toLower(tokens[i]) == "on" && i + 1 < tokens.size() &&
+                         toLower(tokens[i + 1]) == "conflict"))) {
+                // INSERT owns these clauses. JOIN ... ON, quoted tokens and
+                // nested SELECT expressions still belong to the source.
+                sourceEnd = i;
                 break;
             }
         }
-        for (size_t i = pos; i < returningPos; ++i) {
+        for (size_t i = pos; i < sourceEnd; ++i) {
             if (!selectSql.empty()) selectSql += " ";
             selectSql += tokens[i];
         }
-        if (bindingParse) selectSql = joinParserTokens(tokens, pos, returningPos);
+        if (bindingParse) selectSql = joinParserTokens(tokens, pos, sourceEnd);
         ParseResult source = bindingParse ? parse(selectSql) : parseSelect(selectSql);
         if (!source.success || !source.stmt) {
             r.error = source.error.empty() ? "invalid INSERT SELECT source" : source.error;
             return r;
         }
         stmt->selectSource = std::move(source.stmt);
-        pos = returningPos;
+        pos = sourceEnd;
     }
 
     // ON CONFLICT
