@@ -160,6 +160,10 @@ bool PgPage::insert(const char* data, size_t len, OffsetNumber& linePtr) {
     }
 
     PageHeaderData* h = header();
+    if (h->pd_lower < sizeof(PageHeaderData) || h->pd_lower > h->pd_upper ||
+        h->pd_upper > h->pd_special || h->pd_special > PAGE_SIZE)
+        return false;
+    const size_t available = static_cast<size_t>(h->pd_upper) - h->pd_lower;
 
     // 1. 尝试重用已删除的 line pointer
     uint16_t n = numLinePointers();
@@ -167,7 +171,10 @@ bool PgPage::insert(const char* data, size_t len, OffsetNumber& linePtr) {
         ItemIdData* id = itemId(i);
         if (getLpFlags(id) == LP_UNUSED) {
             // 检查空间是否足够
-            if (len <= static_cast<size_t>(h->pd_upper - h->pd_lower - sizeof(ItemIdData))) {
+            // The line pointer already exists. Charge only tuple bytes and
+            // subtract only after validating the available space; subtracting
+            // four from a full page before casting used to wrap to SIZE_MAX.
+            if (len <= available) {
                 h->pd_upper -= static_cast<uint16_t>(len);
                 std::memcpy(buf_ + h->pd_upper, data, len);
                 setLpOff(id, h->pd_upper);
@@ -181,8 +188,7 @@ bool PgPage::insert(const char* data, size_t len, OffsetNumber& linePtr) {
     }
 
     // 2. 需要新的 line pointer
-    size_t need = sizeof(ItemIdData) + len;
-    if (static_cast<size_t>(h->pd_upper) < h->pd_lower + need) {
+    if (len > available || sizeof(ItemIdData) > available - len) {
         return false;
     }
 
@@ -460,8 +466,15 @@ size_t PgPage::freeSpaceWithFrag() const {
 
 bool PgPage::canFit(size_t len) const {
     const PageHeaderData* h = header();
-    size_t need = sizeof(ItemIdData) + len;
-    return static_cast<size_t>(h->pd_upper) >= h->pd_lower + need;
+    if (len == 0 || len > PAGE_SIZE - sizeof(PageHeaderData) - sizeof(ItemIdData) ||
+        h->pd_lower < sizeof(PageHeaderData) || h->pd_lower > h->pd_upper ||
+        h->pd_upper > h->pd_special || h->pd_special > PAGE_SIZE)
+        return false;
+    const size_t available = static_cast<size_t>(h->pd_upper) - h->pd_lower;
+    if (len > available) return false;
+    for (uint16_t i = 1; i <= numLinePointers(); ++i)
+        if (getLpFlags(itemId(i)) == LP_UNUSED) return true;
+    return sizeof(ItemIdData) <= available - len;
 }
 
 uint16_t PgPage::numLinePointers() const {
