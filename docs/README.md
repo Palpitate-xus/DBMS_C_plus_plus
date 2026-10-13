@@ -6,6 +6,7 @@
 ## 审查、问题与验证
 
 - [代码审查索引](review-index.md)：当前审查报告、复现、修复方法与验证边界。
+- [逐项修复进度](review-fixes-2026-10-13.md)：审查问题的修复、独立提交和验收结果。
 - [全部文档检查清单](documentation-inventory.md)：逐文件分类和本地链接检查。
 - [测试报告](test-report.md)：当前验证入口与按版本保留的结果。
 - [PostgreSQL 18 总清单](postgresql-18-gap-audit.md)与[机器可读状态](gap-progress.json)：唯一的功能完成状态来源。
