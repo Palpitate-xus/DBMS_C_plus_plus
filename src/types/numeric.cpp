@@ -612,16 +612,16 @@ Numeric Numeric::withScale(int newScale, RoundingMode mode) const {
 }
 
 Numeric Numeric::withPrecision(int maxPrecision, RoundingMode mode) const {
-    (void)mode;
+    if (maxPrecision < 1 || maxPrecision > kMaxPrecision)
+        throw std::invalid_argument("numeric precision must be between 1 and 1000");
     if (nan_ || inf_) return *this;
     if (precision_ <= maxPrecision) return *this;
-    int drop = precision_ - maxPrecision;
-    Numeric r;
-    r.digits_ = divideByPowerOf10(digits_, drop);
-    r.scale_ = std::max(0, scale_ - drop);
-    r.sign_ = sign_;
-    r.normalize();
-    return r;
+    const int drop = precision_ - maxPrecision;
+    // A negative target scale rounds integer places. Clamping it to zero
+    // after dropping digits would shrink 12345 to 123 rather than 12300.
+    // withScale handles rounding carry, restores integer zeros and checks
+    // the implementation's precision limit before publishing the result.
+    return withScale(scale_ - drop, mode);
 }
 
 } // namespace dbms

@@ -43,10 +43,10 @@
 | R22 | 严格模式FROM/INTO | 待修复 | |
 | R23 | 维护任务持久化门禁 | 待修复 | |
 | R24 | EXECUTE参数求值 | 待修复 | |
-| R25 | Numeric::withPrecision | 待修复 | |
+| R25 | Numeric::withPrecision | 已修复 | 原始12345→123失败保留；41控制O2/ASan/UBSan和原Numeric完整驱动通过，见[验证](issue-review-r25-numeric-precision.md) |
 | R26 | 递归CTE类型/typmod | 待修复 | |
 | R27 | 页压缩全部存活行 | 已修复 | `58f1ee3d`；原生26组O2/ASan/UBSan通过；SQL及进程重启通过，见[验证](issue-review-r27-page-compaction.md) |
-| R28 | 页插入空间计算 | 已修复 | 原始满页插入失败证据；198边界O2/ASan/UBSan及26压缩邻居通过，见[验证](issue-review-r28-page-insert-capacity.md) |
+| R28 | 页插入空间计算 | 已修复 | `261ffb86`；原始满页插入失败证据；198边界O2/ASan/UBSan及26压缩邻居通过，见[验证](issue-review-r28-page-insert-capacity.md) |
 | R29 | LIKE ESCAPE类型比较 | 待修复 | |
 | R30 | Parse/Describe会话上下文 | 已修复 | `8ba70380`；Root标准构建及12控制通过；5个原失败驱动在候选通过，见[验证](issue-review-r30-session-metadata.md) |
 | O01 | owner健康重试及测试覆盖 | 待修复 | |
