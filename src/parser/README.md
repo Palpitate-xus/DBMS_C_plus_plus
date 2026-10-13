@@ -1,22 +1,15 @@
 # Parser（SQL 解析器）
 
-## 当前状态
+`src/parser/` 提供 SQL parser、typed AST 和查询绑定。主入口 `src/main.cpp` 仍有尚未迁移的字符串解析及 legacy 路由；能构建 AST 不代表所有消费者已使用完整绑定结果。
 
-SQL 解析主入口已拆到 `src/parser/`，由递归下降 parser 生成 typed AST；`src/main.cpp::execute()` 仍保留未迁移命令的路由和 legacy fallback：
+基础 DDL 通过 `DdlExecutor` 和 `StorageEngine` 执行。类型名称和修饰符必须验证成功后才能进入存储；ALTER SEQUENCE 的变更由存储层同步物理状态与目录身份。DML 的真实支持范围应结合 `DmlExecutor`、查询绑定及对应协议测试判断。
 
-typed DDL 的列类型转换必须成功才会进入存储层；未知类型和非法类型修饰符 fail-closed，
-不会再由执行器静默降级为 `varchar`。
+## 已知边界
 
-标准 `DOMAIN`、`SEQUENCE`、`SCHEMA`、数据库和角色/用户的创建、删除也只有
-parser → `DdlExecutor` → `StorageEngine` 一条路由；主入口中不再保留这些命令的旧字符串实现。
+[代码审查报告](../../docs/code-review-2026-10-13.md)记录了严格模式仍接受缺少 FROM/INTO 的语句、ON CONFLICT 条件缺少 BOOLEAN 上下文，以及 INSERT/UPDATE RETURNING 消费未绑定子查询的问题。
+窗口两端 frame 的方向需要同时扩展 AST、parser 和执行器，不能只修改最终结果格式。
+协议Parse/Describe的元数据分析还需显式建立连接会话上下文；否则search_path和临时schema查找可与普通执行不同，详见报告R30。
 
-`ALTER SEQUENCE` 的选项变更和 `RENAME TO` 均由 typed bridge 执行；重命名由存储层原子改名、
-保留 catalog OID，并同步依赖默认表达式，不再经过兼容元数据文件路径。
+后续迁移应让各执行消费者使用同一份完整绑定 AST，保留类型、SQL NULL、名字作用域和错误阶段；分析失败时不得进入写入路径。先增加能复现当前错误的 native/协议控制，再逐项修复。
 
-- `DdlExecutor` 消费已迁移的 DDL AST 子集
-- `DmlExecutor` 消费普通单表 `INSERT VALUES/DEFAULT VALUES`、受限行级表达式 UPDATE、来源 INNER/CROSS JOIN 的结构化 `UPDATE ... FROM`/`DELETE ... USING`、单源表 `UPDATE ... FROM`、单源表 `DELETE ... USING` 和简单单表 `DELETE`
-- `execute()` 中的字符串解析仅保留尚未完成 AST 迁移的高级 DML/DQL 与兼容路径
-
-## 未来迁移计划
-
-继续将复杂 `INSERT SELECT`、部分/索引推断 conflict target、引用子查询或其他关系的 `ON CONFLICT DO UPDATE` 表达式/`WHERE`、复杂/子查询/窗口 `RETURNING`、外连接/复杂 `UPDATE ... FROM`/`DELETE ... USING`、多表 DML、`MERGE` 和复杂表达式迁移到结构化执行器，并在每个边界删除对应 legacy 分支；简单单表 INSERT SELECT、无 target 或显式匹配主键/唯一约束 target 的 `ON CONFLICT DO NOTHING`、显式匹配单列或复合主键/唯一约束 target 的常量或只引用 `excluded` 的 evaluator 受限标量表达式 `DO UPDATE` 及目标行/`excluded` 的受限 `WHERE`、以当前目标行列值为输入的受限标量表达式 UPDATE、来源 INNER/CROSS JOIN 的 `UPDATE ... FROM`/`DELETE ... USING`、列投影和 evaluator 支持的受限标量表达式 RETURNING 已接入。
+产品接口与项目扩展的区分见[兼容性契约](../../docs/compatibility-contract.md)，完整功能状态见[总清单](../../docs/postgresql-18-gap-audit.md)。

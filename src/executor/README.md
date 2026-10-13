@@ -1,26 +1,14 @@
 # Executor（执行器）
 
-## 当前状态
+Volcano 算子定义于 `ExecutionPlan.h/.cpp`，生命周期接口位于 `src/interfaces/executor.h`。查询计划和 prepared cursor 等消费者必须区分正常 EOF 与执行错误：`next()` 返回 false 后仍需检查错误状态。
 
-执行算子（`TableScanOp`、`IndexScanOp`、`HashJoinOp` 等）统一定义于
-`src/executor/ExecutionPlan.h/.cpp`，并通过 `src/interfaces/executor.h` 的
-`IOperator` 生命周期接口接入 Volcano 执行模型。
+通过 `QueryPlanner` 执行的路径使用 `executePlanChecked()` 并检查 `PlanExecutionResult::ok/error`。该结果保留 SQLSTATE 和原始错误消息；SQL dispatcher 使用 `throwIfFailed()` 传播错误，不应从显示文本猜错误码或把失败转换成空子查询。其他 prepared 执行入口也须遵守等价的错误、部分结果和清理契约。
 
-生产入口必须使用 `QueryPlanner::executePlanChecked()` 并检查
-`PlanExecutionResult::ok/error`；`next()` 返回 `false` 只表示没有更多行，调用方还
-必须检查 `hasError()`。旧的空结果兼容执行入口已删除，避免执行失败被误用为空结果。
+清理不能覆盖首个执行错误。EXPLAIN ANALYZE 应观察实际执行图及其累计计数，PLAIN EXPLAIN 不得执行带副作用的表达式。
 
-`executePlanChecked()` 将 SQL 执行异常作为 `ok=false` 返回，并分别保留
-`errorSqlState`、原始 `errorMessage` 和显示诊断 `error`；失败不返回部分行。
-SQL dispatcher 必须调用结果的 `throwIfFailed()`，把精确错误元数据交给宿主边界，
-不能把失败转换为空子查询或从显示文本猜错误码。非 SQL 的 C++ 异常仍以原始类型
-传播。所有路径都会尝试关闭计划，清理错误不能覆盖首个执行错误。
+## 已知边界
 
-## 未来迁移计划
+[代码审查报告](../../docs/code-review-2026-10-13.md)包含窗口排序/peer 的类型丢失、NUMERIC 分区等价、frame 方向、NTILE、LAG/LEAD 和 SUM 中间溢出问题，以及 EXPLAIN 子图的残留缺口。
+部分复杂 DQL/DML 仍经 legacy 或物化适配路径执行；现有窄范围测试通过不证明完整 PostgreSQL 执行语义。
 
-`QueryPlanner::buildSelectPlan()` 负责生成当前结构化计划；启用 RLS 的关系统一
-经过 `forEachVisibleRow(..., "SELECT")` 的策略感知扫描，规划器不会让索引、
-bitmap 或并行访问路径绕过安全边界。复杂或尚未迁移的 SQL 会经明确的
-legacy/materialized-row 边界进入同一算子树。后续重点是
-继续迁移复杂 DQL/DML producer、补齐并行 join/aggregate 和完整 PostgreSQL
-计划语义，而不是再移动算子目录。
+后续应统一 typed 比较、分区/peer 等价、窗口边界和已绑定表达式消费，并分别覆盖结果值、NULL、OID、错误阶段、副作用次数和清理。完整功能状态见[总清单](../../docs/postgresql-18-gap-audit.md)。
