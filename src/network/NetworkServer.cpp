@@ -344,6 +344,22 @@ std::vector<ProcessInfo> getProcessList() {
 
 namespace {
 
+// Protocol analysis also resolves relations, routines and types through the
+// current session. It runs outside Main's execution scope, and must not rely
+// on a previous query/error leaving a thread-local session behind. Keep this
+// ownership bounded even when a handler continues, throws, or rents a backend.
+class ProtocolSessionScope {
+public:
+    explicit ProtocolSessionScope(Session& session) : previous_(currentSession()) {
+        setCurrentSession(&session);
+    }
+    ~ProtocolSessionScope() { setCurrentSession(previous_); }
+    ProtocolSessionScope(const ProtocolSessionScope&) = delete;
+    ProtocolSessionScope& operator=(const ProtocolSessionScope&) = delete;
+private:
+    Session* previous_;
+};
+
 struct QueryNotice {
     std::string severity;
     std::string sqlState;
@@ -5021,7 +5037,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
     const auto abortActiveTransaction = [&]() -> bool {
         // Short-rent pooling may have executed on a now-returned Session.
         // Snapshot restoration must use this connection's live state.
-        dbms::setCurrentSession(&session);
+        ProtocolSessionScope sessionScope(session);
         const auto recovery = g_engine.latestUserSavepoint();
         if (recovery) {
             if (g_engine.rollbackToSavepoint(*recovery) != DBStatus::OK)
@@ -5517,6 +5533,10 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         return true;
     };
     while (true) {
+        // Includes Parse/Bind/Describe, their snapshot/rollback boundaries,
+        // Sync and timeout handling. Main temporarily installs a rented
+        // execution session when needed and restores this connection owner.
+        ProtocolSessionScope sessionScope(session);
         if (extendedQueryError) clearExtendedQueryTimeout();
         if (extendedQueryTimeoutExpired()) {
             if (!sendExtendedProtocolError(
