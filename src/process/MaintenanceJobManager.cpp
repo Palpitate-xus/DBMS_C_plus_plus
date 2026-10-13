@@ -48,6 +48,9 @@ bool hexDecode(const std::string& input, std::string& output) {
 }
 
 bool parseUnsigned(const std::string& text, uint64_t& value) {
+    if (text.empty() || !std::all_of(text.begin(), text.end(),
+            [](unsigned char byte) { return byte >= '0' && byte <= '9'; }))
+        return false;
     try {
         size_t consumed = 0;
         const auto parsed = std::stoull(text, &consumed);
@@ -158,6 +161,10 @@ uint64_t MaintenanceJobManager::submit(
         error = "maintenance job state is unavailable";
         return 0;
     }
+    if (nextId_ == UINT64_MAX) {
+        error = "maintenance job identifiers are exhausted";
+        return 0;
+    }
     MaintenanceJobSnapshot job;
     job.id = nextId_++;
     job.spec = spec;
@@ -176,6 +183,10 @@ uint64_t MaintenanceJobManager::submit(
 
 bool MaintenanceJobManager::cancel(uint64_t id, std::string& error) {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (!persistenceHealthy_) {
+        error = "maintenance job state is unavailable";
+        return false;
+    }
     const auto found = jobs_.find(id);
     if (found == jobs_.end()) {
         error = "maintenance job does not exist";
@@ -263,6 +274,7 @@ void MaintenanceJobManager::workerLoop() {
             std::unique_lock<std::mutex> lock(mutex_);
             workAvailable_.wait(lock, [&] {
                 if (stopping_) return true;
+                if (!persistenceHealthy_) return false;
                 return std::any_of(jobs_.begin(), jobs_.end(), [](const auto& item) {
                     return item.second.status == MaintenanceJobStatus::Queued;
                 });
@@ -270,11 +282,17 @@ void MaintenanceJobManager::workerLoop() {
             if (stopping_) return;
             for (auto& [candidateId, job] : jobs_) {
                 if (job.status != MaintenanceJobStatus::Queued) continue;
-                id = candidateId;
                 job.status = MaintenanceJobStatus::Running;
                 job.startedAt = epochSeconds();
                 spec = job.spec;
-                if (!persistLocked()) persistenceHealthy_ = false;
+                if (!persistLocked()) {
+                    persistenceHealthy_ = false;
+                    // No runner has acquired this task. Keep the in-memory
+                    // image retryable, but dispatch nothing until repair and
+                    // restart have established a healthy durable state.
+                    job.status = MaintenanceJobStatus::Queued;
+                    job.startedAt = 0;
+                } else id = candidateId;
                 break;
             }
         }
@@ -326,23 +344,29 @@ void MaintenanceJobManager::workerLoop() {
 }
 
 bool MaintenanceJobManager::loadLocked() {
-    jobs_.clear();
-    nextId_ = 1;
-    if (!std::filesystem::exists(statePath_)) return true;
+    std::map<uint64_t, MaintenanceJobSnapshot> loadedJobs;
+    uint64_t loadedNextId = 1;
+    std::error_code stateError;
+    if (!std::filesystem::exists(statePath_, stateError)) {
+        if (stateError) return false;
+        jobs_.swap(loadedJobs);
+        nextId_ = loadedNextId;
+        return true;
+    }
     std::ifstream input(statePath_);
     if (!input) return false;
     std::string line;
     if (!std::getline(input, line) || line != "DBMS_MAINTENANCE_JOBS_V1")
         return false;
-    if (!std::getline(input, line) || !parseUnsigned(line, nextId_) ||
-        nextId_ == 0) return false;
+    if (!std::getline(input, line) || !parseUnsigned(line, loadedNextId) ||
+        loadedNextId == 0) return false;
     while (std::getline(input, line)) {
         if (line.empty()) continue;
         const auto fields = splitTabs(line);
         if (fields.size() != 15) return false;
         MaintenanceJobSnapshot job;
         uint64_t kind = 0, status = 0, cancelled = 0;
-        if (!parseUnsigned(fields[0], job.id) || job.id == 0 ||
+        if (!parseUnsigned(fields[0], job.id) || job.id == 0 || job.id == UINT64_MAX ||
             !parseUnsigned(fields[1], kind) || !decodeKind(kind, job.spec.kind) ||
             !parseUnsigned(fields[2], status) || !decodeStatus(status, job.status) ||
             !parseUnsigned(fields[3], cancelled) || cancelled > 1 ||
@@ -359,10 +383,14 @@ bool MaintenanceJobManager::loadLocked() {
         uint64_t reserved = 0;
         if (!parseUnsigned(fields[14], reserved) || reserved != 0) return false;
         job.cancelRequested = cancelled != 0;
-        if (!jobs_.emplace(job.id, std::move(job)).second) return false;
-        nextId_ = std::max(nextId_, job.id + 1);
+        const auto id = job.id;
+        if (!loadedJobs.emplace(id, std::move(job)).second) return false;
+        loadedNextId = std::max(loadedNextId, id + 1);
     }
-    return input.eof();
+    if (!input.eof()) return false;
+    jobs_.swap(loadedJobs);
+    nextId_ = loadedNextId;
+    return true;
 }
 
 bool MaintenanceJobManager::persistLocked() {
