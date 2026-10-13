@@ -637,6 +637,16 @@ static bool hasSqlPatternPredicate(const string& sql) {
     return visit(select->selectList.front().expr.get());
 }
 
+// The legacy projection splitter must preserve a numeric token's exponent
+// sign. Ask the actual SQL lexer about the prefix; an identifier ending in
+// e/E (for example rate-1) must still split at its arithmetic operator.
+static bool continuesNumericExponent(const string& operand,char sign,char next) {
+    if((sign!='+' && sign!='-') || operand.empty() ||
+       (operand.back()!='e' && operand.back()!='E') ||
+       !isdigit(static_cast<unsigned char>(next)))return false;
+    return dbms::SQLParser::tokenize(operand+sign+"0").size()==1;
+}
+
 static vector<string> tokenize(const string& sql) {
     if (sql.rfind("typedexpr ",0)==0) return {sql};
     if (hasSqlPatternPredicate(sql)) return {"typedexpr "+sql};
@@ -32446,6 +32456,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                 parts.push_back("||");
                                 continue;
                             }
+                            if (depth == 0 && i + 1 < exprText.size() &&
+                                continuesNumericExponent(cur,c,exprText[i+1])) {
+                                cur += c; continue;
+                            }
                             if (depth == 0 && i > 0 && string("+-*/%").find(c) != string::npos &&
                                 !cur.empty() && cur.find_first_not_of(" 	") != string::npos) {
                                 // binary arithmetic at top level; the
@@ -32960,6 +32974,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             string operand;
                             for (size_t k = 0; k < arithItem.size(); ++k) {
                                 char ch = arithItem[k];
+                                if (k + 1 < arithItem.size() &&
+                                    continuesNumericExponent(operand,ch,arithItem[k+1])) {
+                                    operand += ch; continue;
+                                }
                                 if (ch == '|' && k + 1 < arithItem.size() &&
                                     arithItem[k+1] == '|') {
                                     // concat operator: one token, operands
