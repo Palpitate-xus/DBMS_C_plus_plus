@@ -702,3 +702,146 @@ PG18 ([['1'], ['2']], None, '', ['v'], 'SELECT 2', [23])
 ROOT ([['1'], ['2']], None, '', ['v'], 'SELECT 2', [23])
 MATCH True
 ```
+
+### TEMP原驱动诊断
+
+保留原SQL、顺序和断言，仅调整独立副本的仓库定位并打印read_message，实际exit1。正常TEMP SELECT可以Parse，标量子查询却报42P01，与R30的会话查找遗漏一致。未增加PG差分矩阵。
+
+```text
+[TEMP PREPARE PARSE-ONLY RAW] SELECT id FROM prep_empty_7faa05e50a24; (b'1', b'')
+[TEMP PREPARE PARSE-ONLY] SELECT id FROM prep_empty_7faa05e50a24;
+[TEMP PREPARE PARSE-ONLY RAW] SELECT (SELECT id FROM prep_empty_7faa05e50a24 LIMIT 1); (b'E', b'SERROR\x00VERROR\x00C42P01\x00Mrelation "prep_empty_7faa05e50a24" does not exist\x00\x00')
+```
+
+## 完整注册回归终态
+
+基准a502ffa3；原命令为`bash scripts/build_tests.sh`，未修改输入或放宽期限。实际exit1，日志终态输入核对通过。1232个唯一注册项与实际运行记录逐项一致，无遗漏/重复/额外项：785普通native中783通过、2失败；3个真实Main入口全通过；444个Python驱动中436返回成功、8失败。成功数包含`statement_timeout_tls_protocol_e2e_test.py`因无OpenSSL而显式跳过，不能当作真实TLS通过。
+
+完整日志本机路径`/tmp/dbms-review-20261013.f9Ywep98/full-regression.log`，SHA-256为`5c00bd608190058c75ff829f2f4894c81e711a9cc249e04a03ec6b317a59f006`。下面按原顺序保留十个失败及终态的关键行；省略中间通过输出，未把临时诊断副本的输出冒充原注册结果。
+
+```text
+[test-build] Compiling tests/stale_temp_startup_recovery_test.cpp ...
+[test-build] Linking/running /home/xusheng/workspace/DBMS_C_plus_plus/build/stale_temp_startup_recovery_test ...
+terminate called after throwing an instance of 'std::runtime_error'
+  what():  WAL crash recovery failed; startup aborted to protect data
+/home/xusheng/workspace/DBMS_C_plus_plus/scripts/build_common.sh: line 631: 3869415 Aborted                 (core dumped) ( cd "$work_dir" && "$binary" )
+[test-build] stale_temp_startup_recovery_test FAILED
+[test-build] Compiling tests/table_owner_atomicity_test.cpp ...
+[test-build] Linking/running /home/xusheng/workspace/DBMS_C_plus_plus/build/table_owner_atomicity_test ...
+table_owner_atomicity_test: tests/table_owner_atomicity_test.cpp:105: int main(): Assertion `g_engine.alterTableOwner(db, table.tablename, newOwnerName) == dbms::DBStatus::OK' failed.
+/home/xusheng/workspace/DBMS_C_plus_plus/scripts/build_common.sh: line 631: 3876750 Aborted                 (core dumped) ( cd "$work_dir" && "$binary" )
+[test-build] table_owner_atomicity_test FAILED
+Traceback (most recent call last):
+  File "/home/xusheng/workspace/DBMS_C_plus_plus/tests/enum_aggregate_argument_binding_protocol_e2e_test.py", line 130, in <module>
+    if __name__=='__main__': main()
+                             ~~~~^^
+  File "/home/xusheng/workspace/DBMS_C_plus_plus/tests/enum_aggregate_argument_binding_protocol_e2e_test.py", line 83, in main
+    messages=client.read_until_ready(sock);fields=client.row_description_fields(messages)
+                                                  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^
+  File "/home/xusheng/workspace/DBMS_C_plus_plus/tests/postgres_protocol_test.py", line 336, in row_description_fields
+    raise AssertionError("RowDescription was not returned")
+AssertionError: RowDescription was not returned
+[test-build] tests/enum_aggregate_argument_binding_protocol_e2e_test.py FAILED
+  File "/home/xusheng/workspace/DBMS_C_plus_plus/tests/aggregate_result_root_owner_protocol_e2e_test.py", line 96, in <module>
+    if __name__ == "__main__": main()
+                               ~~~~^^
+  File "/home/xusheng/workspace/DBMS_C_plus_plus/tests/aggregate_result_root_owner_protocol_e2e_test.py", line 65, in main
+    describe("SELECT sum("+expr+") AS total,avg("+expr+") AS mean FROM inputs", [20, 1700], ["total", "mean"])
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/xusheng/workspace/DBMS_C_plus_plus/tests/aggregate_result_root_owner_protocol_e2e_test.py", line 39, in describe
+    messages = client.read_until_ready(sock); fields = client.row_description_fields(messages)
+                                                       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^
+  File "/home/xusheng/workspace/DBMS_C_plus_plus/tests/postgres_protocol_test.py", line 336, in row_description_fields
+    raise AssertionError("RowDescription was not returned")
+AssertionError: RowDescription was not returned
+[test-build] tests/aggregate_result_root_owner_protocol_e2e_test.py FAILED
+SET META DESCRIBE SELECT ARRAY[1] UNION ALL SELECT ARRAY[2147483648] None [(b'array', 0, 0, 1016, -1, -1, 0)]
+SET META SQL ROLLBACK TO set_meta_case; ([], None, '', [], 'ROLLBACK', [])
+SET META PORTAL SELECT ARRAY[1] UNION ALL SELECT ARRAY[2147483648] ([], None, '', ['array'], None, [1016]) [(b'array', 0, 0, 1016, -1, -1, 0)]
+SET META SQL SAVEPOINT set_meta_case; ([], None, '', [], 'SAVEPOINT', [])
+SET META DESCRIBE SELECT id FROM source UNION ALL SELECT wide FROM source 42P01 []
+SET META SQL ROLLBACK TO set_meta_case; ([], None, '', [], 'ROLLBACK', [])
+SET META PORTAL SELECT id FROM source UNION ALL SELECT wide FROM source ([], '26000', 'prepared statement does not exist', [], None, []) []
+SET META SQL SAVEPOINT set_meta_case; ([], '25P02', 'current transaction is aborted, commands ignored until end of transaction block', [], None, [])
+Traceback (most recent call last):
+  File "/home/xusheng/workspace/DBMS_C_plus_plus/tests/set_operation_type_metadata_known_gap.py", line 111, in <module>
+    if __name__ == "__main__": main()
+                               ~~~~^^
+  File "/home/xusheng/workspace/DBMS_C_plus_plus/tests/set_operation_type_metadata_known_gap.py", line 61, in main
+    assert simple("SAVEPOINT set_meta_case;")[1] is None
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError
+[test-build] tests/set_operation_type_metadata_known_gap.py FAILED
+SET CLAUSE FAILURES [('SELECT id AS n FROM clause_source UNION ALL SELECT 0 ORDER BY n LIMIT 1', 'metadata state', '42P01', None), ('SELECT id AS n FROM clause_source UNION ALL SELECT 0 ORDER BY n LIMIT 1', 'metadata types', [], [23]), ('SELECT id AS n FROM clause_source UNION ALL SELECT 0 ORDER BY n LIMIT 1', 'metadata labels', [], ['n'])]
+Traceback (most recent call last):
+  File "/home/xusheng/workspace/DBMS_C_plus_plus/tests/set_operation_clause_ownership_protocol_e2e_test.py", line 117, in <module>
+    if __name__ == "__main__": main()
+                               ~~~~^^
+  File "/home/xusheng/workspace/DBMS_C_plus_plus/tests/set_operation_clause_ownership_protocol_e2e_test.py", line 109, in main
+    assert not failures, failures
+           ^^^^^^^^^^^^
+AssertionError: [('SELECT id AS n FROM clause_source UNION ALL SELECT 0 ORDER BY n LIMIT 1', 'metadata state', '42P01', None), ('SELECT id AS n FROM clause_source UNION ALL SELECT 0 ORDER BY n LIMIT 1', 'metadata types', [], [23]), ('SELECT id AS n FROM clause_source UNION ALL SELECT 0 ORDER BY n LIMIT 1', 'metadata labels', [], ['n'])]
+[test-build] tests/set_operation_clause_ownership_protocol_e2e_test.py FAILED
+[test-build] Running tests/matview_refresh_protocol_e2e_test.py ...
+Traceback (most recent call last):
+  File "/home/xusheng/workspace/DBMS_C_plus_plus/tests/matview_refresh_protocol_e2e_test.py", line 179, in <module>
+    main()
+    ~~~~^^
+  File "/home/xusheng/workspace/DBMS_C_plus_plus/tests/matview_refresh_protocol_e2e_test.py", line 93, in main
+    _, state, message, _, command_tag, _ = query(
+                                           ~~~~~^
+        runner, client, server,
+        ^^^^^^^^^^^^^^^^^^^^^^^
+        "REFRESH MATERIALIZED VIEW unpopulated_mv;")
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/xusheng/workspace/DBMS_C_plus_plus/tests/matview_refresh_protocol_e2e_test.py", line 10, in query
+    client.simple_query(server["sock"], sql), include_types=True)
+    ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "/home/xusheng/workspace/DBMS_C_plus_plus/tests/postgres_protocol_test.py", line 235, in simple_query
+    return read_until_ready(sock)
+  File "/home/xusheng/workspace/DBMS_C_plus_plus/tests/postgres_protocol_test.py", line 53, in read_until_ready
+    message = read_message(sock)
+  File "/home/xusheng/workspace/DBMS_C_plus_plus/tests/postgres_protocol_test.py", line 43, in read_message
+    kind = read_exact(sock, 1)
+  File "/home/xusheng/workspace/DBMS_C_plus_plus/tests/postgres_protocol_test.py", line 34, in read_exact
+    chunk = sock.recv(size)
+TimeoutError: timed out
+[test-build] tests/matview_refresh_protocol_e2e_test.py FAILED
+Traceback (most recent call last):
+  File "/home/xusheng/workspace/DBMS_C_plus_plus/tests/index_corruption_protocol_e2e_test.py", line 77, in <module>
+    main()
+    ~~~~^^
+  File "/home/xusheng/workspace/DBMS_C_plus_plus/tests/index_corruption_protocol_e2e_test.py", line 68, in main
+    assert expect(sql, "XX001") == []
+           ~~~~~~^^^^^^^^^^^^^^
+  File "/home/xusheng/workspace/DBMS_C_plus_plus/tests/index_corruption_protocol_e2e_test.py", line 21, in expect
+    assert state == expected_state, (sql, rows, state, message)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: ('SELECT EXISTS(SELECT 1 FROM corrupt_items WHERE state=8);', [['t']], None, '')
+[test-build] tests/index_corruption_protocol_e2e_test.py FAILED
+Traceback (most recent call last):
+  File "/home/xusheng/workspace/DBMS_C_plus_plus/tests/explain_join_protocol_e2e_test.py", line 91, in <module>
+    main()
+    ~~~~^^
+  File "/home/xusheng/workspace/DBMS_C_plus_plus/tests/explain_join_protocol_e2e_test.py", line 83, in main
+    query("EXPLAIN (FORMAT JSON,ANALYZE TRUE) " + sql, state)
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/xusheng/workspace/DBMS_C_plus_plus/tests/explain_join_protocol_e2e_test.py", line 21, in query
+    assert state == expected_state, (sql, state, message)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: ('EXPLAIN (FORMAT JSON,ANALYZE TRUE) SELECT * FROM explain_join_l l JOIN explain_join_r r ON l.k=r.k OFFSET 1;', None, '')
+[test-build] tests/explain_join_protocol_e2e_test.py FAILED
+Traceback (most recent call last):
+  File "/home/xusheng/workspace/DBMS_C_plus_plus/tests/temp_prepared_access_protocol_e2e_test.py", line 213, in <module>
+    main()
+    ~~~~^^
+  File "/home/xusheng/workspace/DBMS_C_plus_plus/tests/temp_prepared_access_protocol_e2e_test.py", line 150, in main
+    assert client.read_message(sock) == (b"1", b""), parsed_sql
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: SELECT (SELECT id FROM prep_empty_ebabf705d8ee LIMIT 1);
+[test-build] tests/temp_prepared_access_protocol_e2e_test.py FAILED
+[test-build] tests/compat_fallback_registry_test.py PASSED
+[test-build] Some tests failed
+[REVIEW] driver_actual_exit=1
+[REVIEW] terminal_input_verification=PASS
+```

@@ -9,7 +9,7 @@
 基准包含 `src/` 下 205 个文件、201263 行（含注释及模块 README），412 份已跟踪 Markdown。
 静态检查覆盖文件清单和模块接口；深入审查按下面的模块表记录，不能推导为每行都已证明正确。
 
-本轮已复现查询结果错误。标准回归正在运行，最终计数将在终态后填写；目前不能宣称全套通过。
+本轮已复现查询结果和存储页数据完整性错误。标准回归已终态：1232个注册驱动全部运行，1222个返回成功、10个失败；成功计数包含一个因缺少OpenSSL而显式跳过的TLS专项，不能宣称全套通过。
 原总账 273 项仍为 22 complete、166 partial、70 unverified、15 deferred_by_user。
 
 ## 检测计划与覆盖
@@ -37,8 +37,11 @@
 生产二进制 SHA-256：`0a24168fe54d61b1382448b4df58a983a978ad1c12733c37c959930ef1b5c80a`。
 标准回归日志：`/tmp/dbms-review-20261013.f9Ywep98/full-regression.log`。
 原始运行日志为本机辅助证据，关键复现和结论会保存在本仓库中，避免只依赖临时文件。
+完整日志SHA-256：`5c00bd608190058c75ff829f2f4894c81e711a9cc249e04a03ec6b317a59f006`。
+原驱动实际exit1；终态源码摘要、58个生产TU对象签名、构建配置及冻结二进制比较均通过。
+只有完成该终态校验后才更新`src/`下四份模块README；本轮没有修改产品代码、脚本、测试或构建清单。
 
-实际工具链：g++ 13.3.0、Python 3.13.12、zlib 1.3、ICU 74.2。注册驱动没有修改断言、跳过测试或放宽默认期限；运行期间保持产品源码、测试、脚本和构建清单摘要不变。
+实际工具链：g++ 13.3.0、Python 3.13.12、zlib 1.3、ICU 74.2。没有人工删减注册项、修改断言或放宽默认期限；TLS环境跳过按原驱动如实记录。运行期间保持产品源码、测试、脚本和构建清单摘要不变。
 编译存在warning，不能沿用旧批次“无警告”的结论。类别包括缺省成员初始化、未使用项、易误读缩进、运算符优先级和字符串地址比较；最后一项作为R29单独记录。一般warning并不自动等同于已复现的数据库错误，后续清理应逐项确认语义并保留回归。
 
 已完成的机械检查：465 个 Python 文件 AST 解析、13 个 shell 文件 `bash -n`，均通过。
@@ -47,12 +50,21 @@
 
 本轮新增报告后共417份Markdown，本地文件链接复查通过；465 Python / 13 shell 语法检查不代表运行时通过。
 现有文档状态、版本、兼容性契约检查和6个总账单元测试通过。
-注册集合机械计数为785个普通native、3个真实Main frontend、444个Python driver，共1232个driver；这不是当前已通过数量。
+注册集合与实际终态逐项核对，无遗漏、无额外项、无重复；结果如下。
+
+| 注册组 | 数量 | 返回成功 | 失败 |
+| --- | ---: | ---: | ---: |
+| 普通native | 785 | 783 | 2 |
+| 真实Main frontend | 3 | 3 | 0 |
+| Python driver | 444 | 436 | 8 |
+| 合计 | 1232 | 1222 | 10 |
+
+Python的成功数包含`statement_timeout_tls_protocol_e2e_test.py`输出的明确环境跳过；该项没有进行真实TLS测试。未发现COMPILE FAILED或LINK FAILED。
 五个未注册驱动另行运行，均实际exit 0，摘要在 `/tmp/dbms-review-20261013.f9Ywep98/unregistered-summary.log`：复制槽持久化、pg_settings查询、bound DML children、named ON CONFLICT、离线checksum验证。这些通过不消除注册缺口。
 
 本机缺少 `cmake`，配置尝试exit127，未运行CMake构建；未安装额外依赖。标准脚本使用TLS stub/plain TCP，不能当作真实OpenSSL/TLS验收。
 本轮未运行全库ASan/UBSan/TSan、fuzz、长期soak或实际多节点复制。前六组新SQL对照共89条语句；49条观测不同，其中包含错误写入造成的后续状态差异，不能当作49个独立bug。SQL的MATCH仅比较行、SQLSTATE和OID，不比较诊断文本、列名及command tag。正常binary float 6项中4项失败。
-注册回归新失败的后续定位另有27个协议动作（21个Simple Query、6个Parse/Describe/Sync），其中两个描述动作与PG18不同，归入R30；原注册驱动的独立诊断副本只增加消息打印、保留全部原断言，两份均实际exit1。
+注册回归新失败的后续定位另有27个协议动作（21个Simple Query、6个Parse/Describe/Sync），其中两个描述动作与PG18不同，归入R30；三个原注册驱动的独立诊断副本只调整仓库定位及增加消息打印、保留全部原SQL/顺序/断言，均实际exit1，其中第三个进一步确认TEMP标量子查询的同源错误。
 原实现的独立O2 API检查另有Numeric有效数字舍入4项中3项失败，以及PgPage正常插入/删除/压缩3项中2项失败；这两个驱动的实际退出码均为1。
 
 ## 问题与修复方法
@@ -398,6 +410,8 @@ compact只收集前256个LP_NORMAL条目，随后却用这部分条目的总长�
 
 修复：向完整元数据分析链显式传递Session，或在协议入口设置异常安全、短寿命的会话守卫，覆盖Parse/Describe及依赖会话的类型、函数、关系查询。错误和成功出口均恢复上下文，不能靠制造错误或重试初始化，也不能删除Main已有生命周期恢复机制。描述仍只能查元数据，禁止执行用户表达式获取类型。
 验收：保留两个原驱动全部断言；新鲜连接、非public schema、首次扩展查询、成功/错误前后相同SQL、同名对象和临时schema、连接池模式，以及Describe不执行writer的控制。独立诊断实例均已关闭，Root输入没有修改。
+后续原TEMP驱动同样实际exit1：普通`SELECT id FROM prep_empty_...`可Parse，而`SELECT (SELECT id FROM prep_empty_... LIMIT 1)`报42P01。`NetworkServer.cpp:5859 → :1746`调用prepareBoundQuery时也没有当前会话，关系查找遗漏真正的session-temp namespace；此控制也须纳入修复验收。
+两个集合查询驱动的含表描述同样在本轮注册回归报42P01；源码路径为`NetworkServer.cpp:5858 → :1687 prepareBoundQuery`，共享同一依赖currentSession的关系查找，纳入R30统一修复和验收。这里的集合路径关联来自原运行结果加源码追踪，没有另做独立集合故障实验。
 
 ## 历史失败与待判定项目
 
@@ -405,13 +419,30 @@ compact只收集前256个LP_NORMAL条目，随后却用这部分条目的总长�
 | --- | --- | --- |
 | table_owner_atomicity | 历史失败在本轮原注册回归再次出现：第105行健康重试返回非 OK；实际 status 未记录，不能据此认定数据回滚失败 | 记录 status、schema/catalog 发布阶段和 peer generation；确认原因后修复并保留重试断言 |
 | owner 测试覆盖说明 | 第82行称 class 先发布、attribute 后失败，但当前 persistAll 在所有写入前检查目录，且 map 顺序为 attribute 在前 | 保留原控制，另加真实分阶段发布失败控制，不能用现有绿色断言证明部分发布恢复 |
-| index_corruption / EXISTS | 原 fixture 期望 XX001，实际 t；EXISTS 固定读取健康 heap，没有证明它访问了被破坏的 B-tree | 先核对所要求的访问计划；若接入公共 planner，再验证错误传播，不能无条件检查未访问索引 |
-| ALTER ARRAY | 前次同源码专项在建立两个索引后执行 `ALTER TABLE array_values ALTER COLUMN i TYPE BIGINT[]` 超时 | 保留失败和原10秒期限，定位等待/错误边界，不将超时直接归因于环境 |
-| EXPLAIN / JOIN | 原 OFFSET 1 负向 fixture 已过时：查询实际可正确返回4行，但该路线的 EXPLAIN 又缺少 JOIN/scan 子图 | 分别修正合法行为的断言和真实执行图；私有补丁还存在关联重绑计数遗漏，尚未合入 |
-| CTAS / background checkpoint | 原正式回归存在58030失败，后续重复通过不抹掉失败 | 按用户要求暂缓专项调查，保持未修复 |
+| index_corruption / EXISTS | 本轮再次出现原fixture期望XX001、实际t；EXISTS固定读取健康heap，没有证明它访问了被破坏的B-tree | 先核对所要求的访问计划；若接入公共 planner，再验证错误传播，不能无条件检查未访问索引 |
+| ALTER ARRAY | 前次同源码专项在建立两个索引后执行 `ALTER TABLE array_values ALTER COLUMN i TYPE BIGINT[]` 超时；本轮注册驱动返回成功，不能抹掉前次失败 | 保留失败和原10秒期限，定位等待/错误边界，不将超时直接归因于环境 |
+| EXPLAIN / JOIN | 本轮再次命中OFFSET 1负向fixture：查询实际可正确返回4行，但该路线的EXPLAIN又缺少JOIN/scan子图 | 分别修正合法行为的断言和真实执行图；私有补丁还存在关联重绑计数遗漏，尚未合入 |
+| CTAS / background checkpoint | 原正式回归存在58030失败，本轮ctas_test通过，不能据此抹掉历史失败 | 按用户要求暂缓专项调查，保持未修复 |
 | HAVING 非 BOOLEAN | 新差分 `HAVING 1` / `HAVING 'notboolean'` 实际成功空结果，PG18分别42804/22P02 | 追踪实际 aggregate/HAVING 消费路径，共用 BOOLEAN 绑定；保留空输入和准备阶段控制 |
 | ORDER BY 重复别名 | 新差分 `SELECT id AS x,v AS x FROM d ORDER BY x` 与无FROM双 x 均未返回预期42702 | 在 ORDER BY 名称解析阶段检查多重匹配，区分合法同一表达式引用与歧义；核对标签及行序 |
 | 物化视图刷新 | 本轮原注册 `matview_refresh_protocol_e2e_test.py:93` 执行 `REFRESH MATERIALIZED VIEW unpopulated_mv` 时socket超时 | 保留原期限和fixture，下一步记录刷新阶段及等待边界；不能直接归因环境，也不在本轮重开用户暂缓的CTAS/后台checkpoint专项 |
+
+## 本轮注册失败清单
+
+| 原驱动 | 实际失败 | 归属与处理 |
+| --- | --- | --- |
+| stale_temp_startup_recovery_test | WAL恢复异常中止 | R19 |
+| table_owner_atomicity_test | 第105行健康重试非OK | 上表，实际status尚待记录 |
+| enum_aggregate_argument_binding_protocol_e2e_test.py | Describe 42804，未返回RowDescription | R30，原断言正确 |
+| aggregate_result_root_owner_protocol_e2e_test.py | Parse 42P01，未返回RowDescription | R30，原断言正确 |
+| set_operation_type_metadata_known_gap.py | 含表的集合描述42P01，随后Bind26000、SAVEPOINT25P02 | R30调用链关联，保留首错与后续影响 |
+| set_operation_clause_ownership_protocol_e2e_test.py | 含表UNION的描述42P01，OID及标签缺失 | R30调用链关联，不能仅修改预期OID |
+| matview_refresh_protocol_e2e_test.py | 刷新unpopulated_mv的socket超时 | 上表，原因未定 |
+| index_corruption_protocol_e2e_test.py | EXISTS返回t而fixture期望XX001 | 访问计划与断言问题，不能据此宣称返回了损坏行 |
+| explain_join_protocol_e2e_test.py | 合法OFFSET 1返回成功而fixture期望错误 | 分开修正过时断言与EXPLAIN执行图缺口 |
+| temp_prepared_access_protocol_e2e_test.py | TEMP标量子查询Parse 42P01 | R30，普通TEMP SELECT控制成功 |
+
+关键原始日志已摘录到[证据文档](review-evidence-2026-10-13.md)。以上失败没有通过改断言、扩大超时或替换原驱动消除。
 
 ## 实施顺序
 
