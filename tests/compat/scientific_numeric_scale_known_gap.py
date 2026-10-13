@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Unfixed arithmetic finding from R32; kept separate from literal typing.
+"""Original arithmetic finding from R32, fixed separately by R34.
 
 Run with --reference18 for PostgreSQL, or DBMS_MAIN for a frozen candidate.
-This diagnostic intentionally exits nonzero until the scale bug is fixed.
-It is not registered as a passing regression of the R32 type-only change.
+The original SQL/value/type assertion remains unchanged. R34 registers the
+larger scientific_numeric_arithmetic_protocol_e2e_test.py regression suite.
 """
 from decimal import Decimal
 import importlib.util

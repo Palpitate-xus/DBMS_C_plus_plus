@@ -2673,27 +2673,17 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
                 }
             }
             else return ExprValue("numeric", "", true);
-            // PG display scale from the operand TEXTS: +/- max,
-            // * sum, / division scale.
-            auto textScale = [](const std::string& s) {
-                size_t d = s.find('.');
-                return (d == std::string::npos) ? 0 : (int)(s.size() - d - 1);
-            };
-            int tsL = textScale(l.value), tsR = textScale(r.value);
+            // Exponents contribute to decimal scale, not to the count of
+            // characters after '.'. Preserve zero/trailing-zero scale too.
+            const int tsL = numericTextScale(l.value, *nl);
+            const int tsR = numericTextScale(r.value, *nr);
             if (op == "/")
                 return ExprValue("numeric", res.toString(), false);
             int target = std::max(tsL, tsR);
             if (op == "*") target = tsL + tsR;
-            Numeric rs2 = res.withScale(target);
-            std::string s = rs2.toString();
-            int cur = 0;
-            size_t dot = s.find('.');
-            if (dot != std::string::npos) cur = (int)(s.size() - dot - 1);
-            if (cur < target) {
-                if (dot == std::string::npos) { s += '.'; }
-                s += std::string(target - cur, '0');
-            }
-            return ExprValue("numeric", s, false);
+            // Numeric renders the requested scale itself; appending zeros
+            // here would also corrupt NaN and Infinity spellings.
+            return ExprValue("numeric", res.withScale(target).toString(), false);
         }
     }
 
@@ -9126,13 +9116,9 @@ void ExprEvaluator::registerBuiltins() {
                     remainder = *left -
                         numericTruncatedQuotient(*left, *right) * *right;
                 }
-                auto textScale = [](const std::string& value) {
-                    const size_t point = value.find('.');
-                    return point == std::string::npos
-                        ? 0 : static_cast<int>(value.size() - point - 1);
-                };
                 const int scale = std::max(
-                    textScale(a[0].value), textScale(a[1].value));
+                    numericTextScale(a[0].value, *left),
+                    numericTextScale(a[1].value, *right));
                 return ExprValue(
                     "numeric", remainder.withScale(scale).toString(), false);
             } catch (const std::invalid_argument&) {

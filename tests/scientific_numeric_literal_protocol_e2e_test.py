@@ -104,8 +104,8 @@ def main():
         ):
             check('SELECT '+expression+' AS n', [[expected]], [1700], numeric=True)
             describe('SELECT '+expression+' AS n', [1700])
-        # Type metadata is fixed here; the independent arithmetic scale bug
-        # remains reproducible in compat/scientific_numeric_scale_known_gap.py.
+        # R32 covers metadata here. R34 separately fixes/tests arithmetic;
+        # compat/scientific_numeric_scale_known_gap.py retains its original probe.
         describe('SELECT 1e-40+1e-40 AS n', [1700])
         check("SELECT '1e40' AS n", [['1e40']], [25])
         describe("SELECT '1e40' AS n", [25])

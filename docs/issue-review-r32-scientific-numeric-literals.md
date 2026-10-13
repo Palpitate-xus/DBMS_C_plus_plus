@@ -98,3 +98,7 @@ scale 或是否使用指数输出纳入此项类型修复的验收。
 所有原始 PG、baseline、候选和相邻回归日志及初始完整协议驱动快照保留在
 `/tmp/dbms-review-r32-evidence.lmCg5Ovk/`。本项定向验证不是全项目无 bug 或
 NUMERIC 支持 PostgreSQL 全部范围的声明；现有实现仍有独立的 1000 位精度限制。
+
+后续状态：上述独立算术问题已在 [R34](issue-review-r34-scientific-numeric-arithmetic.md)
+单独修复。原诊断 SQL/断言未放宽；原始完整 111 项快照在 R34 候选上全部通过。
+本页保留 R32 提交当时的失败记录和范围，不将后续算术修复追记为 R32 的成果。
