@@ -3,7 +3,8 @@
 对应[审查报告](code-review-2026-10-13.md)及其基准提交/二进制摘要。
 以下输出原样保留 SQL、结果行、SQLSTATE 和 OID；本机路径只记录运行来源，不是重现所必需的固定路径。
 SQL 参考实例已验证为 PostgreSQL 18.6；双方使用独立测试数据，参考侧事务最终回滚。
-前两组 SQL 共 29 条语句，其中 14 条查询不同；后续DML和EXECUTE对照追加后共80条语句、47条不同观测（含前面错误写入的后续影响，不能当作47个独立问题）。观测脚本正常退出只表示收集完成，不表示结果通过。
+复现时，参考侧使用独立随机 schema 和外层事务，每条被测语句前建立 SAVEPOINT，失败后回滚至该 SAVEPOINT，成功则释放；最后整体回滚。Root 使用独立目录、随机端口和普通自动提交会话。不能把含预期错误的日志直接连续粘贴进一个没有 SAVEPOINT 的 PostgreSQL 事务，否则后续会话状态不同。
+前两组 SQL 共 29 条语句，其中 14 条查询不同；后续DML、EXECUTE和递归CTE对照追加后共89条语句、49条不同观测（含前面错误写入的后续影响，不能当作49个独立问题）。观测脚本正常退出只表示收集完成，不表示结果通过。MATCH仅比较rows、SQLSTATE和OID，不比较诊断文本、列名或command tag；原输出保留这些字段便于另行检查。
 二进制浮点测试要求 SELECT $1 的输入和输出字节、OID、格式码相同，6 项中 4 项失败。
 
 ## 窗口和数值 SQL
@@ -367,3 +368,189 @@ ROOT ([['2']], None, '', ['currval'], 'SELECT 1', [20])
 MATCH False
 ```
 
+## 递归 CTE 的类型及作用域控制
+
+```text
+COMPATIBILITY_MODE postgresql18
+CASE 0 SQL WITH RECURSIVE q(n) AS (SELECT 1 UNION ALL SELECT (n+1)::bigint FROM q WHERE n<2) SELECT n FROM q
+PG18 ([], '42804', 'recursive query "q" column 1 has type integer in non-recursive term but type bigint overall', [], None, [])
+ROOT ([['1'], ['2']], None, '', ['n'], 'SELECT 2', [23])
+MATCH False
+CASE 1 SQL WITH RECURSIVE q(n) AS (SELECT 1::bigint UNION ALL SELECT (n+1)::bigint FROM q WHERE n<2) SELECT n FROM q
+PG18 ([['1'], ['2']], None, '', ['n'], 'SELECT 2', [20])
+ROOT ([['1'], ['2']], None, '', ['n'], 'SELECT 2', [20])
+MATCH True
+CASE 2 SQL WITH RECURSIVE q(n) AS (SELECT 1 UNION ALL SELECT 2::bigint) SELECT n FROM q
+PG18 ([['1'], ['2']], None, '', ['n'], 'SELECT 2', [20])
+ROOT ([['1'], ['2']], None, '', ['n'], 'SELECT 2', [20])
+MATCH True
+CASE 3 SQL WITH q(n) AS (SELECT 1 UNION ALL SELECT 2::bigint) SELECT n FROM q
+PG18 ([['1'], ['2']], None, '', ['n'], 'SELECT 2', [20])
+ROOT ([['1'], ['2']], None, '', ['n'], 'SELECT 2', [20])
+MATCH True
+CASE 4 SQL WITH RECURSIVE q(n) AS (SELECT 'a'::varchar(1) UNION ALL SELECT (n||'b')::varchar(2) FROM q WHERE length(n)<2) SELECT n FROM q
+PG18 ([], '42804', 'recursive query "q" column 1 has type character varying(1) in non-recursive term but type character varying overall', [], None, [])
+ROOT ([['a'], ['ab']], None, '', ['n'], 'SELECT 2', [1043])
+MATCH False
+CASE 5 SQL SELECT (SELECT x.v FROM (SELECT 2 AS z) x) FROM (SELECT 1 AS v) x
+PG18 ([], '42703', 'column x.v does not exist', [], None, [])
+ROOT ([], '42703', 'column "x.v" does not exist', [], None, [])
+MATCH True
+CASE 6 SQL CREATE TABLE input_rows(id integer)
+PG18 ([], None, '', [], 'CREATE TABLE', [])
+ROOT ([], None, '', [], 'CREATE TABLE', [])
+MATCH True
+CASE 7 SQL INSERT INTO input_rows VALUES (1),(2)
+PG18 ([], None, '', [], 'INSERT 0 2', [])
+ROOT ([], None, '', [], 'INSERT 0 2', [])
+MATCH True
+CASE 8 SQL SELECT id,(WITH t AS (SELECT id) SELECT * FROM t) FROM input_rows ORDER BY id
+PG18 ([], '42702', 'ORDER BY "id" is ambiguous', [], None, [])
+ROOT ([], '42702', 'ORDER BY name is ambiguous', [], None, [])
+MATCH True
+```
+
+## PgPage 正常API数据完整性控制
+
+对应R27。原实现独立O2编译通过；驱动实际exit1，3项中2项失败，重复执行同样失败。
+从仓库根目录将下列驱动保存到独立临时目录后编译，不需要修改生产代码：
+
+```sh
+g++ -std=c++17 -O2 -Wall -Wextra -Isrc /path/to/compact_normal_api_probe.cpp src/storage/PgPage.cpp -o /path/to/compact_normal_api_probe
+/path/to/compact_normal_api_probe
+```
+
+正常初始化、插入、删除和压缩构造了测试状态，没有直接改写页头或使用外部损坏页。驱动逐项验证原有tuple字节，不能仅凭checksum通过判断数据保持正确。
+
+```cpp
+#include "storage/PgPage.h"
+#include "storage/HeapTupleHeader.h"
+
+#include <array>
+#include <cstdint>
+#include <cstring>
+#include <iostream>
+#include <vector>
+
+using namespace dbms;
+
+static std::vector<char> smallintTuple(int16_t value) {
+    const size_t headerSize = computeHeapHeaderSize(1);
+    std::vector<char> row(headerSize + sizeof(value), 0);
+    auto* header = reinterpret_cast<HeapTupleHeaderData*>(row.data());
+    initHeapTupleHeader(header, 1, 1);
+    setNotNull(header, 0);
+    setXminCommitted(header);
+    std::memcpy(row.data() + headerSize, &value, sizeof(value));
+    return row;
+}
+
+static int mismatches(const PgPage& page,
+                      const std::vector<OffsetNumber>& slots,
+                      const std::vector<std::vector<char>>& expected) {
+    int bad = 0;
+    for (size_t i = 0; i < slots.size(); ++i) {
+        const char* data = nullptr;
+        size_t len = 0;
+        const bool found = page.get(slots[i], data, len);
+        if (i == 0) {
+            if (found) ++bad;
+        } else if (!found || len != expected[i].size() ||
+                   std::memcmp(data, expected[i].data(), len) != 0) {
+            ++bad;
+        }
+    }
+    return bad;
+}
+
+static bool runCase(int initialCount) {
+    alignas(8) std::array<char, PgPage::PAGE_SIZE> buffer{};
+    PgPage page(buffer.data());
+    page.init(1);
+    std::vector<OffsetNumber> slots;
+    std::vector<std::vector<char>> expected;
+    for (int i = 1; i <= initialCount; ++i) {
+        expected.push_back(smallintTuple(static_cast<int16_t>(i)));
+        OffsetNumber slot = 0;
+        if (!page.insert(expected.back().data(), expected.back().size(), slot)) {
+            std::cerr << "normal insert unexpectedly failed at " << i << '\n';
+            return false;
+        }
+        slots.push_back(slot);
+        if (!page.isValid(1)) {
+            std::cerr << "normal insertion produced invalid page at " << i << '\n';
+            return false;
+        }
+    }
+    if (!page.remove(slots.front())) return false;
+    const bool beforeValid = page.isValid(1);
+    const int beforeBad = mismatches(page, slots, expected);
+    const size_t beforeFree = page.freeSpace();
+    const unsigned beforeLive = page.liveCount();
+    page.compact();
+    const bool compactValid = page.isValid(1);
+    const int compactBad = mismatches(page, slots, expected);
+    const size_t compactFree = page.freeSpace();
+    const unsigned compactLive = page.liveCount();
+    std::cout << "initial=" << initialCount
+              << " tuple_bytes=" << expected.front().size()
+              << " before_valid=" << beforeValid
+              << " before_live=" << beforeLive
+              << " before_free=" << beforeFree
+              << " before_mismatch=" << beforeBad
+              << " compact_valid=" << compactValid
+              << " compact_checksum=" << page.verifyChecksum()
+              << " compact_live=" << compactLive
+              << " compact_free=" << compactFree
+              << " compact_mismatch=" << compactBad << '\n';
+
+    // Follow only normal insert/canFit APIs, without modifying any page bytes.
+    // This detects whether the compactor incorrectly advertised a live tuple
+    // region as reusable free space.
+    for (int i = 0; i < 2; ++i) {
+        const auto row = smallintTuple(static_cast<int16_t>(1000 + i));
+        OffsetNumber slot = 0;
+        if (!page.canFit(row.size()) ||
+            !page.insert(row.data(), row.size(), slot)) {
+            std::cerr << "advertised reclaimed-space insert failed\n";
+            return false;
+        }
+    }
+    const int afterBad = mismatches(page, slots, expected);
+    // The deleted line pointer is legitimately reusable; exclude its reuse
+    // from survivor integrity verification.
+    const char* deletedData = nullptr;
+    size_t deletedLen = 0;
+    const int reusedDeleted = page.get(slots.front(), deletedData, deletedLen) ? 1 : 0;
+    const int survivorBad = afterBad - reusedDeleted;
+    std::cout << "initial=" << initialCount
+              << " after_two_inserts_valid=" << page.isValid(1)
+              << " after_two_inserts_live=" << page.liveCount()
+              << " survivor_mismatch=" << survivorBad << '\n';
+    return beforeValid && beforeBad == 0 &&
+           beforeLive == static_cast<unsigned>(initialCount - 1) &&
+           compactValid && compactBad == 0 && compactLive == beforeLive &&
+           survivorBad == 0;
+}
+
+int main() {
+    int failures = 0;
+    for (int initial : {257, 258, 270}) {
+        if (!runCase(initial)) ++failures;
+    }
+    std::cout << "cases=3 failed=" << failures << '\n';
+    return failures == 0 ? 0 : 1;
+}
+```
+
+实际输出（本机来源：`/tmp/dbms-review-pgpage-compact.gocRrhal/compact_normal_api_probe.log`）：
+
+```text
+initial=257 tuple_bytes=26 before_valid=1 before_live=256 before_free=454 before_mismatch=0 compact_valid=1 compact_checksum=1 compact_live=256 compact_free=480 compact_mismatch=0
+initial=257 after_two_inserts_valid=1 after_two_inserts_live=258 survivor_mismatch=0
+initial=258 tuple_bytes=26 before_valid=1 before_live=257 before_free=424 before_mismatch=0 compact_valid=0 compact_checksum=1 compact_live=257 compact_free=476 compact_mismatch=0
+initial=258 after_two_inserts_valid=1 after_two_inserts_live=259 survivor_mismatch=1
+initial=270 tuple_bytes=26 before_valid=1 before_live=269 before_free=64 before_mismatch=0 compact_valid=0 compact_checksum=1 compact_live=269 compact_free=428 compact_mismatch=0
+initial=270 after_two_inserts_valid=0 after_two_inserts_live=271 survivor_mismatch=1
+cases=3 failed=2
+```

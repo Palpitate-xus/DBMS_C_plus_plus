@@ -48,7 +48,8 @@
 五个未注册驱动另行运行，均实际exit 0，摘要在 `/tmp/dbms-review-20261013.f9Ywep98/unregistered-summary.log`：复制槽持久化、pg_settings查询、bound DML children、named ON CONFLICT、离线checksum验证。这些通过不消除注册缺口。
 
 本机缺少 `cmake`，配置尝试exit127，未运行CMake构建；未安装额外依赖。标准脚本使用TLS stub/plain TCP，不能当作真实OpenSSL/TLS验收。
-本轮未运行全库ASan/UBSan/TSan、fuzz、长期soak或实际多节点复制。新SQL对照共80条语句；47条观测不同，其中包含错误写入造成的后续状态差异，不能当作47个独立bug。正常binary float 6项中4项失败。
+本轮未运行全库ASan/UBSan/TSan、fuzz、长期soak或实际多节点复制。新SQL对照共89条语句；49条观测不同，其中包含错误写入造成的后续状态差异，不能当作49个独立bug。SQL的MATCH仅比较行、SQLSTATE和OID，不比较诊断文本、列名及command tag。正常binary float 6项中4项失败。
+原实现的独立O2 API检查另有Numeric有效数字舍入4项中3项失败，以及PgPage正常插入/删除/压缩3项中2项失败；这两个驱动的实际退出码均为1。
 
 ## 问题与修复方法
 
@@ -64,16 +65,16 @@ P1 表示可能导致错误结果、崩溃或服务不可用；P2 表示受限�
 | R05 | P2 | NTILE 桶大小分配不正确，桶号跳号 | PG18.6 对照复现 | 6 |
 | R06 | P2 | NTILE 非正桶数被静默改为 1 | PG18.6 对照复现 | 6 |
 | R07 | P2 | LAG/LEAD 零偏移及负偏移错误 | PG18.6 对照复现 | 6 |
-| R08 | P1 | binary float4/float8 参数截断到六位小数 | 正常协议精确回传复现 | 2 |
+| R08 | P1 | binary float4/float8 参数以六位小数格式化导致精度损失 | 正常协议精确回传复现 | 2 |
 | R09 | P1 | 连接池等待期间保存了可被删除的容器引用 | 源码生命周期确认，未跑并发/ASan | 1 |
 | R10 | P1 | 同用户跨数据库连接池可能永久等待 | 源码条件链确认，未跑阻塞探针 | 1 |
 | R11 | P1 | 窗口精确 SUM/AVG 仍执行可能溢出的 int64 中间累加 | 静态 UB 风险；O2 结果未失败，未跑 UBSan | 4 |
 | R12 | P2 | 独立测试未进入完整注册回归 | 文件与调度列表核对 | 7 |
-| R13 | P1 | 逻辑变更行像不能区分 NULL、空串和字段分隔符 | 源码编码链确认，未做运行时流对照 | 3 |
-| R14 | P1 | publication 读取失败被当作未发布，可能漏采变更 | 静态错误路径确认，未做故障注入 | 3 |
+| R13 | P2 | 逻辑变更行像不能区分 NULL、空串和字段分隔符 | 源码编码链确认，未做运行时流对照 | 3 |
+| R14 | P2 | publication 读取失败被当作未发布，可能漏采变更 | 静态错误路径确认，未做故障注入 | 3 |
 | R15 | P1 | 服务停机先 join 再唤醒池等待者，可能无法退出 | 源码等待链确认，未跑停机探针 | 1 |
 | R16 | P1 | 损坏 catalog 行被跳过，后续可能将缺行状态写回 | 静态路径确认，未做故障注入 | 2 |
-| R17 | P1 | DDL 回滚失败仍删除恢复备份 | 静态错误路径确认，未做故障注入 | 2 |
+| R17 | P1 | DDL 回滚失败仍尝试清理恢复备份 | 静态错误路径确认，未做故障注入 | 2 |
 | R18 | P2 | catalog getter 返回的内部行指针可能失效 | API 生命周期风险；SQL 并发可达性待验证 | 2 |
 | R19 | P1 | 失效 session-temp 元数据阻断普通启动恢复 | 历史全套失败及本轮源码追踪；当前回归待终态 | 2 |
 | R20 | P1 | INSERT/UPDATE RETURNING 子查询被当成字符串，错误写入提交 | PG18.6 对照及后续表内容复现 | 1 |
@@ -81,7 +82,10 @@ P1 表示可能导致错误结果、崩溃或服务不可用；P2 表示受限�
 | R22 | P2 | 严格模式接受缺少 FROM/INTO 的修改语句 | 显式 postgresql18 模式对照复现 | 3 |
 | R23 | P1 | 后台维护状态读取/持久化失败仍执行任务 | 静态控制流确认，未运行故障探针 | 2 |
 | R24 | P1 | SQL EXECUTE 参数按引用次数/行数求值，未引用参数不求值 | PG18.6 对照及 sequence 状态复现 | 1 |
-| R25 | P2 | Numeric::withPrecision 丢失整数数量级 | 静态公共 API 问题；没有生产调用者 | 7 |
+| R25 | P2 | Numeric::withPrecision 丢失整数数量级 | 原实现独立O2 API复现；没有生产调用者 | 7 |
+| R26 | P2 | 递归CTE未核对共同输出类型/typmod与seed声明 | PG18.6对照复现 | 5 |
+| R27 | P1 | 页压缩只处理前256个存活行，错误释放其余行空间 | 正常API操作复现，3个控制中2个失败 | 1 |
+| R28 | P2 | 页插入复用空槽时的空间减法可能下溢 | 静态API风险；未跑边界探针，普通INSERT已检查canFit | 2 |
 
 ### R01：大 NUMERIC 平方根
 
@@ -102,6 +106,7 @@ SELECT sqrt(10000000000000000000000000000000000000000::numeric);
 位置：`src/executor/ExecutionPlan.cpp:3784` 的 `compareNonNullAggregateValue`、`:3807` 的窗口比较和 `:3817` 的 `sameWindowPartition`。
 
 实证：TEXT `('2','10','1','01')` 被猜成数值比较，`'01'` 与 `'1'` 变成 peer，MIN 返回 `'1'`；BIGINT `9007199254740993` 与 `9007199254740992` 因 double 舍入被当成相同值，RANK 和 MIN 错误；NUMERIC `1.0,1.00,1,2` 的分区 COUNT 实际为 `1,1,1,1`，预期 `3,3,3,1`。
+MAX使用同一比较器，属于源码外推；本轮没有独立MAX对照日志。
 
 修复：将声明类型和 collation 传入统一类型化比较器。整数保持精确、NUMERIC 按十进制、文本按文本规则比较；排序、peer 和分区使用一致的 SQL 等价关系，NULL 依照分组语义处理。不能对所有字符串尝试 `strtod`，也不能以原始字符串差异决定 NUMERIC 分区。
 验收：数字状 TEXT、空字符串/NULL、2^53 附近 BIGINT、高精度 NUMERIC、不同 scale、复合分区、ASC/DESC、RANK/DENSE_RANK/MIN/MAX 和 peer frame。
@@ -118,7 +123,7 @@ SELECT sqrt(10000000000000000000000000000000000000000::numeric);
 | `ROWS BETWEEN 1 FOLLOWING AND 2 FOLLOWING` | 50,70,90,110,60,NULL | 30,60,100,150,210,210 |
 | `ROWS BETWEEN CURRENT ROW AND 1 PRECEDING` | SQLSTATE 42P20 | 成功返回当前行的值 |
 
-修复：从 typed WindowDef AST 保存两端各自的 boundary kind 和表达式，分别表示 unbounded/current/offset preceding/offset following；绑定阶段验证非法组合，执行时计算、裁剪并保留空 frame。现有两个整数偏移无法完整表达方向。
+修复：扩展 typed WindowDef AST 和对应 parser，为两端分别保存 boundary kind 和 offset 表达式，再由执行器消费结构化边界，分别表示 unbounded/current/offset preceding/offset following；绑定阶段验证非法组合，执行时计算、裁剪并保留空 frame。现有 AST 和执行结构都没有完整保存两端方向，仅修改执行器不能解决输入信息丢失。
 验收：ROWS/RANGE/GROUPS、全部合法方向组合、简写、非法组合、NULL/负数 offset、分区边缘、EXCLUDE、空输入与 LIMIT 0 的验证阶段。
 
 ### R05、R06：NTILE
@@ -188,7 +193,7 @@ R10：容量按 user 计算，复用却要求 database 一致。pool_size=1 时�
 位置：`src/commands/TableManage.cpp:26282` 的 INSERT 行像、`:31177` 的 UPDATE 行像；
 `src/replication/LogicalDecoder.h` 的 LogicalChange 和 `LogicalDecoder.cpp:24`、`:54`、`:604`。
 
-R13：行像按 `|` 拼接各列，只追加非 NULL 的文本值，因此两列 `(NULL,'x')` 和 `('','x')` 都变成 `|x`；`('a|b','c')` 与 `('a','b|c')` 都变成 `a|b|c`。输出插件只为整行添加长度，不能恢复已丢失的字段边界和 NULL 标志。
+R13：行像按 `|` 拼接各列，只追加非 NULL 的文本值，因此两列 `(NULL,'x')` 和 `('','x')` 都变成 `|x`；`('a|b','c')` 与 `('a','b|c')` 都变成 `a|b|c`。二进制预览只为整行添加长度，文本预览也没有逐列边界/NULL编码，均不能恢复已丢失的信息。
 修复：以 nullable typed cells 保存各列，逐列编码长度/NULL/类型信息，对持久化流格式明确版本。测试 INSERT/UPDATE/DELETE 的 NULL、空串、分隔符、多字节和回滚。
 
 R14：`PublicationCatalog::publishes` 调用严格 list 失败后返回 false，与合法“不属于任何 publication”相同；写路径据此跳过逻辑变更缓冲。若已发布对象的元数据发生读取错误，DML 可能成功而变更流没有对应记录。本轮没有实施该故障注入。
@@ -215,7 +220,7 @@ pg_class / pg_attribute 可选尾段解析错误执行 continue；loadAllLocked 
 
 位置：`src/commands/DdlTransaction.cpp:266`、`:276`；`src/commands/TableManage.cpp:50141`。
 rollbackTransaction 返回非 OK 后仅输出 warning，随后仍调用 discardTransactionBackup；事务 ID 已清零时也允许删除已拥有的备份。
-修复：只有完整持久回滚确认成功后才清理恢复图像。失败时保留备份及状态，向调用者报告 incomplete rollback；明确下次启动的恢复步骤。
+修复：只有完整持久回滚确认成功后才清理恢复图像。失败时保留备份及状态，向调用者报告 incomplete rollback；明确下次启动的恢复步骤。同文件 `TableManage.cpp:49939` 在部分回滚步骤失败后仍可能持久化 ABORT，而启动恢复 `:43596` 又可能据此删除备份。因此还需让终结 ABORT 表示 undo 已持久完成，或持久化独立 incomplete-rollback 状态供启动保留并重试；仅修改备份清理调用并不充分。
 验收：引擎回滚失败、DDL snapshot 恢复失败及随后重启。正常回滚通过不能证明本错误分支安全。
 
 ### R18：catalog 行指针的寿命
@@ -254,7 +259,7 @@ PostgreSQL 18.6 分别报 `22012`、`22012`、`21000`，数据不变。
 
 ### R21：ON CONFLICT 条件没有 BOOLEAN 上下文
 
-位置：`src/expression/query_binding.cpp:1516`；`src/commands/DmlExecutor.cpp:3376`。
+位置：`src/parser/query_binding.cpp:1516`；`src/commands/DmlExecutor.cpp:3376`。
 
 ```sql
 INSERT INTO e VALUES (2,200)
@@ -262,7 +267,7 @@ ON CONFLICT(id) DO UPDATE SET v=excluded.v WHERE 'f' RETURNING id,v;
 ```
 
 预期 `INSERT 0 0`、原 id2 保持20；当前返回 `(2,200)` / `INSERT 0 1`，实际表已修改。
-`WHERE 1` 应报42804，`WHERE 'notboolean'` 应报22P02，当前都被当真；没有冲突时非法条件也没有在分析期拒绝，PREPARE 同样错误成功。
+`WHERE 1` 应报42804，`WHERE 'notboolean'` 应报22P02，当前都被当真；没有冲突时非法条件也没有在分析期拒绝。本轮另实测 `PREPARE ... WHERE 1` 错误成功，未单测 `'notboolean'` 的 PREPARE 阶段。
 
 原因：binder 只解析条件，没有 BOOLEAN 验证及 UNKNOWN 转换；执行时又丢弃类型，只把 NULL、空串、`0`、`false` 当假。
 修复：分析阶段复用普通 WHERE 的 BOOLEAN 验证/UNKNOWN 转换，执行实际消费已绑定的 typed ExprValue，仅非 NULL 且 asBool 为真才更新。确保无冲突、空源和 PREPARE 也按正确阶段验证。
@@ -305,8 +310,62 @@ Root 输出列名也受到替换表达式污染。14条语句对照和 sequence 
 
 位置：`src/types/numeric.cpp:618` 至 `:621`。
 withPrecision 删除整数末位后将负 scale 钳为0，却没有补回数量级；静态推导 `Numeric("12345").withPrecision(3)` 为123，预期12300；999取两位会成为100，预期1000。
-本轮没有动态验证，源码搜索没有发现生产调用者，不能由此宣称 SQL NUMERIC typmod 当前错误。
+本轮直接以原 `src/types/numeric.cpp` 和独立C++驱动做O2编译，4个API控制中3个失败，实际exit1；小数1.2345取3位仍正确。源码搜索没有发现生产调用者，不能由此宣称 SQL NUMERIC typmod 当前错误。
+这里的12300/1000是该API“保留有效数字”契约的预期，不是PostgreSQL typmod差分结果。
 修复：校验 precision，复用保留负 scale 数量级的 withScale 逻辑；验证整数、负数、进位和非法精度，以及现有小数控制。
+
+```text
+12345 precision=3 expected=12300 actual=123 match=0
+999 precision=2 expected=1000 actual=100 match=0
+-12345 precision=3 expected=-12300 actual=-123 match=0
+1.2345 precision=3 expected=1.23 actual=1.23 match=1
+cases=4 failures=3
+```
+
+编译与运行：`g++ -std=c++17 -O2 -Wall -Wextra -Isrc /tmp/dbms-review-20261013.f9Ywep98/numeric_precision_probe.cpp src/types/numeric.cpp -o /tmp/dbms-review-20261013.f9Ywep98/numeric_precision_probe`，随后单独执行该驱动。驱动逐项调用上述API并比较expected，失败时返回1；未修改生产或原测试源。
+
+### R26：递归 CTE 的类型声明
+
+位置：`src/parser/query_binding.cpp:1341` 和 `src/main.cpp:13114`、`:13176`。
+
+```sql
+WITH RECURSIVE q(n) AS (
+  SELECT 1 UNION ALL SELECT (n+1)::bigint FROM q WHERE n<2
+) SELECT n FROM q;
+```
+
+PG18.6 报42804（seed是integer、共同类型为bigint），当前返回1、2且OID仍为23。
+varchar(1) seed与varchar(2)递归项也错误成功；显式bigint seed的合法控制双方正确返回OID20。
+binder和legacy递归执行路径都只检查列数，最终沿用seed类型。
+
+修复：先按集合操作规则解析共同输出类型和typmod，再要求递归CTE的共同声明与seed声明一致，不一致报42804。不能简单要求两侧原始类型完全相同，因为合法的隐式提升仍须保留。两个消费者共享执行前校验，不依赖递归项是否实际产出行。
+验收：本次类型/typmod反例、合法bigint seed、合法RHS提升、递归分支为空、非自引用WITH RECURSIVE的普通UNION。
+本轮另外9条语句对照中2条不同；最近层范围遮蔽的42703控制正常。嵌套CTE控制被双方相同的ORDER BY歧义挡住，不能作为其缓存正确性证明。
+
+### R27：超过256个存活行的页压缩
+
+位置：`src/storage/PgPage.cpp:362`、`:367`、`:407`；普通VACUUM的调用见 `src/commands/TableManage.cpp:46231`。
+compact只收集前256个LP_NORMAL条目，随后却用这部分条目的总长度更新整页pd_upper。合法小行能够在同一页中超过该数量，剩余存活行被错误算进空闲区。checksum重新计算成功并不能证明布局及行内容正确。
+
+本轮使用原PgPage.cpp、正常26字节tuple和公开API：依次insert、remove首行、compact，再经canFit检查做两次insert；未直接改写页头或构造非法页。
+
+| 初始行数 / 删除后存活数 | 压缩前布局/内容 | 压缩后布局检查 | 压缩后空间 | 再插入两行后幸存行内容 |
+| --- | --- | --- | --- | --- |
+| 257 / 256 | 正确 | 通过 | 454→480，符合回收26字节 | 全部正确，阳性控制 |
+| 258 / 257 | 正确 | 失败，checksum却通过 | 424→476，正确应450 | 1行内容改变，布局检查反而重新通过 |
+| 270 / 269 | 正确 | 失败，checksum却通过 | 64→428，正确应90 | 1行内容改变 |
+
+独立驱动实际exit1，父审查者重复执行得到相同结果。这里证明的是正常API的数据完整性错误；本轮没有另跑SQL VACUUM端到端复现，不能将源码调用链等同于SQL实测。
+修复：根据实际line-pointer数量收集全部存活条目，或使用由页大小和最小条目大小推导且经过检查的容量；完整验证条目布局后再搬移，不允许静默截断。按所有存活行计算pd_upper，保持slot身份、reserved special空间及页标识，避免回收仍被使用的区域。
+验收：256/257/269存活行、不同删除位置、多轮压缩和后续插入；核对每个幸存行的字节、页布局、freeSpace与checksum，并补普通SQL小行表DELETE/VACUUM/INSERT及重启后内容对照。完整独立驱动和原始输出保存在[证据文档](review-evidence-2026-10-13.md)。
+
+### R28：复用已删除槽位的空间计算
+
+位置：`src/storage/PgPage.cpp:168`。
+复用LP_UNUSED时从pd_upper-pd_lower再次减去sizeof(ItemIdData)，既不必要，又在剩余连续空间少于一个ItemIdData时产生无符号下溢，使本应拒绝的请求可能通过。复用已有槽本来不需要新增line-pointer空间。
+当前普通INSERT两条已检查的路径先调用canFit（`src/commands/TableManage.cpp:25853`、`:25889`），能阻止这里的空间不足输入，因此本项仅登记为公共API静态风险，没有宣称SQL端可复现或已经发生损坏。
+修复：用先比较再相减的方式计算可用空间；明确区分复用槽和新建槽的开销，使insert本身提供完整容量保证，并让canFit与之采用一致规则。失败必须保持页字节不变。
+验收：空闲空间0至一个line-pointer大小的边界、可复用槽/无可复用槽、恰好放下的行、拒绝后checksum与原内容不变；本轮未执行这些新增边界测试。
 
 ## 历史失败与待判定项目
 
@@ -323,6 +382,6 @@ withPrecision 删除整数末位后将负 scale 钳为0，却没有补回数量�
 
 ## 实施顺序
 
-优先修连接池生命周期/等待/关停、回滚备份/catalog读取、参数精度和已确认的数据修改错误，再处理数值与窗口比较、frame、NTILE/LAG及逻辑变更预览；每个问题独立提交并加入能先失败后通过的回归。
+优先修页压缩数据完整性、连接池生命周期/等待/关停、回滚备份/catalog读取、参数精度和已确认的数据修改错误，再处理数值与窗口比较、frame、NTILE/LAG及逻辑变更预览；每个问题独立提交并加入能先失败后通过的回归。
 修复后先跑匹配的专项及相邻测试，再跑注册回归；性能、并发和 sanitizer 结果分别登记。
 本轮的文档提交不改变上述问题的未修复状态，也不改变原 273 项完成统计。

@@ -1271,10 +1271,12 @@ SHOW 入口已经删除。该模式是会话级设置，进入事务后不可切
   PostgreSQL 的 `pg_dump`、base backup/restore 工具或 project extension；
   extended 模式只提交持久化后台作业并返回 typed job id/status，支持管理员权限、
   非事务边界、`RATE` 限速、取消、状态查询和 crash resume
-- PgBouncer 风格连接池与 TDE（DIV-12）：`SHOW POOLS`、`SHOW TDE STATUS`
-  → `0A000`；`pool_mode`/`pool_size`/`max_client_conn` 不再出现在
-  `SHOW ALL`，单独 `SHOW` 返回 `42704` 未识别参数；扩展能力只能通过
-  服务器配置文件启用，不在 SQL 层暴露
+- 项目连接池（DIV-12）：默认模式的 `SHOW POOLS` 返回 `42704`，
+  `pool_mode`/`pool_size`/`max_client_conn` 在默认 `SHOW ALL`/`pg_settings` 中隐藏，
+  单独 `SHOW` 返回 `42704`。显式 extended 模式提供只读 `SHOW POOLS`、
+  池参数 `SHOW` 和 `pg_settings` 展示；池运行配置由服务器配置入口管理。
+  池等待、生命周期和停机的已知问题见[审查报告](code-review-2026-10-13.md)。
+- TDE（DIV-12）：`SHOW TDE STATUS` 返回 `0A000`；该专项仍按[用户暂缓范围](deferred-scope.md)处理，本轮未重新验收。
 - `CREATE ASSERTION`（DIV-08）→ 两种模式都返回 `0A000`（PostgreSQL 18
   同样未实现 SQL assertion）
 - 启动标识（DIV-13）：服务端 banner 标明自身版本与兼容模式，并明确
