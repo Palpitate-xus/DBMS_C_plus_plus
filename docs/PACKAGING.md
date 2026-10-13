@@ -1,4 +1,6 @@
-# 打包与部署（v0.1.0）
+# 打包与部署
+
+版本以 `src/common/version.h` 为准。部署前请核对[兼容性契约](compatibility-contract.md)和[已知问题](review-index.md)；历史性能结果不能替代目标环境的验证。
 
 `scripts/package.sh` 产出源码 tarball（`dist/dbms-<version>.tar.gz`），打包前三重一致性校验：
 

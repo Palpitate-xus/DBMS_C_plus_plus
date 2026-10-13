@@ -1,5 +1,7 @@
 # User-deferred scope and ordinary incomplete work
 
+The user subsequently also asked to skip the CTAS / background checkpoint investigation. That specific investigation remains unresolved and deferred separately from the original 15 ledger entries; it does not defer all catalog, storage, recovery or ordinary query correctness work. Existing regression observations remain evidence, not a completion claim. Current review findings are recorded in [the review index](review-index.md).
+
 The original273-item ledger explicitly defers15 items: P0-13 (unified permission
 boundaries), STO-08 (TDE), and SEC-01 through SEC-13. These remain
 deferred_by_user, unchecked and outside the repair workflow. Do not implement or

@@ -1,8 +1,7 @@
 # DBMS 完整使用手册
 
-> 最后更新: 2026-08-14
-> 版本: v2 存储格式 / 生产化重构阶段
-> 回归基线: PASS=139 FAIL=0（137 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）
+> 本手册说明用法，不作为全功能兼容或测试通过的证明。当前边界见[兼容性契约](compatibility-contract.md)，已发现的问题与修复方法见[代码审查索引](review-index.md)。
+> 产品版本由 `src/common/version.h` 定义；存储和升级边界见[打包与部署](PACKAGING.md)。
 
 > 数据目录说明：当前版本只接受 v2、8 KiB heap page 和当前 schema 格式。heap 文件头、页布局、line pointer 和 checksum 必须通过严格校验；损坏或截断文件 fail-closed。WAL 记录的长度、CRC、8 字节对齐和前向链也必须通过校验；恢复遇到损坏 WAL 或非法 heap image 会 fail-closed。旧数据目录不会自动迁移；升级前请导出 SQL 或删除并重建数据目录。WAL 的 LSN 0 是合法首位置，事务提交会先刷盘 COMMIT WAL，再刷盘 CLOG 可见性；WAL/CLOG/fsync 失败时提交失败、追加 ABORT WAL 并回滚。
 
@@ -553,6 +552,9 @@ SELECT * FROM cte;
 ```
 
 ### 窗口函数
+
+`NTILE`、`LAG/LEAD` 的偏移、窗口排序/分区及部分 frame 边界仍有已复现错误，
+具体 SQL 和修复方法见[审查报告](code-review-2026-10-13.md)。以下示例展示语法，不能据此推导所有输入均正确。
 
 ```sql
 SELECT NAME, ROW_NUMBER() OVER (ORDER BY SCORE DESC) FROM users;
@@ -1140,27 +1142,12 @@ host    all       all       0.0.0.0/0       reject
 
 ## 22. 复制与高可用
 
-```sql
--- 创建复制槽 (支持物理和逻辑)
-SELECT * FROM pg_create_physical_replication_slot('standby_1');
-SELECT * FROM pg_create_logical_replication_slot('logical_slot', 'test_decoding');
+当前提供复制槽/发布等管理对象和项目格式的逻辑变更预览，不能据此建立 PostgreSQL 物理或逻辑复制拓扑。
+实际插件名为 `dbms_test_decoding`、`dbms_pgoutput_preview`；保留名 `test_decoding`、`pgoutput` 被拒绝，预览格式与 PostgreSQL 插件不兼容。
 
--- 查看复制槽
-SELECT * FROM pg_replication_slots;
-
--- 删除复制槽
-SELECT * FROM pg_drop_replication_slot('standby_1');
-
--- 备用节点管理
--- standby_mode / promote 通过 ReplicationManager API 操作
-
--- 同步/异步复制配置
-SET synchronous_commit = on;
-
--- 发布/订阅
-CREATE PUBLICATION mypub FOR TABLE users, orders;
-CREATE SUBSCRIPTION mysub CONNECTION 'host=primary' PUBLICATION mypub;
-```
+`CREATE SUBSCRIPTION` 尚无真实拉取/应用运行时，不能作为可运行的订阅示例；设置 `synchronous_commit` 也不证明已有远端同步确认。
+项目管理语法受 `extended` 模式约束，具体边界见[兼容性契约](compatibility-contract.md)和[复制模块说明](../src/replication/README.md)。
+预览行像的 NULL/字段边界和错误传播还有待修复问题，见[审查报告](code-review-2026-10-13.md)。
 
 ---
 
@@ -1399,11 +1386,14 @@ date 输出 ISO 零填充格式（`2020-01-02`）；聚合/函数投影列头按
 
 ```bash
 ./scripts/build.sh              # 编译生产二进制
-./scripts/run_all_tests_fast.sh # 自包含地构建并安静运行统一回归：137 个 C++ 测试 + 2 个 E2E
+./scripts/run_all_tests_fast.sh # 同一注册回归的安静输出入口
 ./scripts/build_tests.sh        # 自包含地构建并运行完整输出的规范测试入口
 ```
 
 `build_tests.sh` 是唯一负责生产二进制、生产对象编译、测试链接、桩对象选择和 E2E 调度的测试实现；即使项目根目录没有 `dbms_main`，它也会先通过共享构建逻辑生成当前二进制。`run_all_tests_fast.sh` 只是它的安静输出外壳，成功时输出计数，失败时保留完整诊断。上述 shell 入口共享 `scripts/build_common.sh` 的编译配置；`scripts/build_one_test.sh <test_name>` 可用于单测试增量编译，编译配置变化会自动使对象缓存失效。
+
+“完整”指该入口注册的集合：原生测试由 `tests/*_test.cpp` 枚举，真实 frontend 测试另行调用，
+Python 测试取自 `build_common.sh` 的列表。目录里存在测试文件不等于已注册；当前遗漏和实际运行结果见[审查报告](code-review-2026-10-13.md)。
 
 每个 C++ 测试都在独立的临时目录中执行，E2E 服务端还显式传入独立
 `--data-dir`；测试结束后自动删除，因此 `.txnid`、WAL、catalog、日志和

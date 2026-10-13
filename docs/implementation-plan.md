@@ -1,5 +1,7 @@
 # DBMS 修改计划表（按 all-gaps-todo.md）
 
+> 本文件是按旧 TODO 编排的历史计划。当前范围以[273项总账](postgresql-18-gap-audit.md)为准；本轮新增 bug 的修复顺序、方法和验收条件见[审查报告](code-review-2026-10-13.md)。
+
 > 原则：只排顺序，不估时间；每一阶段完成后，下一阶段方可启动。  
 > 引用格式：`X.Y` = all-gaps-todo.md 第 X 章第 Y 条；`16.X` = 架构级根本差距。
 

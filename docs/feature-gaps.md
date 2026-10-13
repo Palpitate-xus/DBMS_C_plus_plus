@@ -1,5 +1,7 @@
 # 功能缺失清单 (Feature Gaps)
 
+> 2026-10-13 复查补充：窗口语义、binary float 参数及连接池等待存在新确认问题；逻辑解码仅使用 `dbms_pgoutput_preview` / `dbms_test_decoding` 项目插件。下文旧“完成”标记和插件名称不可作为当前支持声明。具体证据与修复方法见[审查报告](code-review-2026-10-13.md)。
+
 > 历史专题清单，生成于 2026-08-14，后续按日期追加批次记录。它不是当前完整清单，也不提供当前 PASS 基线。
 > PostgreSQL 18 的唯一权威范围是 [`postgresql-18-gap-audit.md`](postgresql-18-gap-audit.md)，机器可读状态是 [`gap-progress.json`](gap-progress.json)；用 `python3 scripts/check_gap_progress.py` 校验两者一致。下文所有 PASS 数仅表示对应日期的历史运行。
 

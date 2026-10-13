@@ -1,3 +1,12 @@
+# 2026-10-13 审查与验证入口
+
+本轮按用户要求进行全仓库审查、复现和文档整理，结果与逐项修复方法见[审查报告](code-review-2026-10-13.md)，文件覆盖见[文档清单](documentation-inventory.md)。
+下方批次中的“当前”“正在运行”和 PASS 数均属于对应记录日期。此前 Root 60 native / 46 wire 验证已经终止：60/60、45/46 通过，唯一失败为 ALTER ARRAY 超时；不能继续标成运行中或全绿。
+原 273 项状态仍为 22 complete、166 partial、70 unverified、15 deferred_by_user；CTAS／后台 checkpoint 另按用户要求暂缓，详见[范围说明](deferred-scope.md)。
+本轮新运行的终态以审查报告为准。保留独立本地 commit，不 push，Actions 保持禁用。
+
+以下为历史执行记录。
+
 2026-10-09 当前发布证明：interval两项独立Root772cc7dc/ef034862导入后，Root真实fresh57/Main57803/3143=0；Root46native/40wire34532全0含原完整defaultprotocol，原BIT38453082 against实际180006全0；58自有receipt/cache/repeat/source/frozen终态fence通过，43b0 binary/dc89 seal，不借private对象。新未缩减Root完整768auto+2Main/432 driver84918已启动确认live，源输入冻结，不冒全套PASS。私有aggregate初始47native/41wire45203=1，仅新native/newwire失败；实际纯identity probe证明绑定BIGINT后被scalar identity误报42883。更正公共header遗漏ASTinclude失败123保留，最终own57/Main77692/94448=0，新native29assertions与9native28229全0，真实PG18.6 reference扩充56全0；最终47native/41wire50186仍live，源码未批准/提交/导入。见 `docs/issue-interval-literal-and-column-modifiers.md` 与 `docs/issue-full-registered-f048f155.md`。Root182scoped/768auto+2Main/432registered/58TU，273原项状态不变，不push/启用Actions/重启跳过专项。
 
 2026-10-09 全量与继续修复：旧Root88630已terminal1，实际765/768native/Main、420/430wire通过，全部13原失败保留，默认完整protocol在该代通过，f048输入seal终态不变。随后独立-x导入772cc7dc/ef034862，master182scoped/768auto+2Main/432registered/58TU；真实Root ownfresh57/Main57803/3143均0，新46native/40wire34532仍live，dc89输入冻结，不借private对象。隔离工作树继续真实标量聚合lowering，PG18.6新37参考全0、旧36控31fail保留；新公共header own57/Main79593/56598均0，初始9native66851=1（8通过，新COUNT被scalar identity错误拒绝），初始47native/41wire45203仍live，未批准源码修复。详见 `docs/issue-full-registered-f048f155.md`；273原项状态不变，不push/启用Actions/重启用户跳过专项。

@@ -173,6 +173,7 @@ docs/              # 使用、兼容性与开发文档
 
 ## 文档
 
+- [文档索引](docs/README.md)：使用、开发、代码审查与历史记录的入口。
 - [使用手册](docs/MANUAL.md)：SQL 与操作说明。
 - [兼容性契约](docs/compatibility-contract.md)：SQL、协议及扩展模式的边界。
 - [打包与部署](docs/PACKAGING.md)：源码包、数据目录和配置约定。

@@ -1,5 +1,7 @@
 # DBMS_C_plus_plus 对标 PostgreSQL 18.6：逐项完整实施蓝图
 
+> 蓝图描述目标和验收方法，不代表实现已完成。本轮实际 bug 及修复方案见[代码审查报告](code-review-2026-10-13.md)；完成状态仍取自原总账。
+
 > 编制日期：2026-08-23
 > 源码基线：`5a31aa3` 加当前动态工作区
 > 对应审计：[postgresql-18-gap-audit.md](postgresql-18-gap-audit.md)

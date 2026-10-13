@@ -1,8 +1,13 @@
 # DBMS 功能测试报告
 
-> 最后更新：2026-08-14
-> 自动测试套件基线：PASS=139 FAIL=0（137 个 C++ 测试 + PostgreSQL 协议 E2E + 窗口函数 E2E）；窗口函数 E2E：13/13
-> 测试依据：[commandsList.md](commandsList.md) + [all-gaps-todo.md](all-gaps-todo.md)
+当前运行结果、失败明细和复现方法见[代码审查索引](review-index.md)。验证入口为 `bash scripts/build_tests.sh`，只运行其已注册集合；未注册测试需单独运行或补入入口。
+
+2026-10-13 审查输入为 `a502ffa3`。前次同源码专项是 60/60 native、45/46 wire 通过，ALTER ARRAY 超时；本轮新注册回归终态在[审查报告](code-review-2026-10-13.md)登记。已有实际 SQL 差分和 binary float 错值，不能沿用旧全绿结论。
+
+## 历史记录：2026-08-14
+
+以下仅保存当时 137 个 C++ 测试和 2 个 E2E 的 PASS=139、FAIL=0 记录，不代表当前 HEAD、当前测试总数或所有功能已验证。
+当前功能状态见[原总账](postgresql-18-gap-audit.md)，原始旧依据为[命令手册](commandsList.md)和[历史 TODO](all-gaps-todo.md)。
 
 本轮完成性能与并发硬化轮次的全面复验（13 个提交后）：
 

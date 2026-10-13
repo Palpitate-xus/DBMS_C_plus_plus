@@ -1,5 +1,7 @@
 # PostgreSQL 18 vs 本 DBMS 功能对比
 
+> 以下是按日期保留的历史对比，代码规模、测试数量和完成标记不代表当前 HEAD。当前能力声明见[兼容性契约](compatibility-contract.md)，实际 bug、检测范围和修复方法见[代码审查报告](code-review-2026-10-13.md)。
+
 > 生成日期: 2026-08-14；2026-08-16 复核修正若干过高标注（EXPLAIN ANALYZE、TSVECTOR/TSQUERY、INTERVAL、INHERITS、统计信息消费）并补充文件级差距说明；2026-08-17 批量补齐 P1-10~13 / P2-9~13 / P3-7 共 10 项差距（PG 语法 PREPARE/EXECUTE、EXPLAIN ANALYZE 每节点统计、统计驱动选择率与 join 成本、并行 HashJoin/聚合/GatherMerge、deferrable UNIQUE/FK、数组构造/切片/包含、CREATE INHERITS+ONLY、interval 算术+AT TIME ZONE、dollar-quoting、全文检索 @@/to_tsvector/to_tsquery/ts_rank）；2026-08-20 第二批 8 项（PL/pgSQL 最小解释器、VACUUM PARALLEL、pg_stats/pg_statistic 视图、unnest 表函数、TimeZone GUC 渲染、多表 join 贪心搜索、deferrable EXCLUDE、ts_rank weights+`<->` 短语）；2026-08-20 续：P1-9 自定义成本函数（CostModel+GUC+hook）；P2-2 Bloom 索引
 > 本 DBMS 代码规模: ~66,000 行 C++ (44 .cpp + 56 .h)
 > 对照: PostgreSQL 18 (~1,200,000 行 C)

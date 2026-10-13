@@ -819,8 +819,8 @@ OID，原子改名物理文件并同步 `nextval` 默认表达式/依赖；冲�
 
 *最后更新：2026-08-09*
 *关联文档：*
-- [postgresql-complete-gap-analysis.md](postgresql-complete-gap-analysis.md) — 最详细的差距分析原文（不可删除）
+- [postgresql-complete-gap-analysis.md](archive/postgresql-complete-gap-analysis.md) — 最详细的差距分析原文（不可删除）
 - [implementation-plan.md](implementation-plan.md) — 按 phase 排列的实施计划与"已完成内容"记录（Phase 0~3 已完成，Phase 4 进行中）
-- [phase4-plan.md](phase4-plan.md) — Phase 4 逐子任务展开与 Wave 0~6 进度
+- [phase4-plan.md](archive/phase4-plan.md) — Phase 4 逐子任务展开与 Wave 0~6 进度
 - [test-report.md](test-report.md) — 功能测试报告
 - [commandsList.md](commandsList.md) — 支持的 SQL 命令列表

@@ -1,6 +1,8 @@
 # DBMS SQL 命令参考手册
 
-本文档列出本 DBMS 支持的全部 SQL 命令，按功能分类组织。每条命令包含语法说明、参数类型、返回值/输出格式及可运行示例。
+本文档按功能分类提供 SQL 语法和示例，其中包含需要显式启用 `extended` 模式的项目命令。
+功能是否完整、不同子句和类型组合是否正确，应以[兼容性契约](compatibility-contract.md)、[总清单](postgresql-18-gap-audit.md)和[已知问题](review-index.md)为准。
+本文不是 PostgreSQL 命令全集或所有示例组合已通过验证的声明。
 
 ---
 

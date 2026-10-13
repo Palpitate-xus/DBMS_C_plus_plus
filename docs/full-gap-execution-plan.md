@@ -1,3 +1,12 @@
+# 2026-10-13 审查与验证入口
+
+本轮按用户要求进行全仓库审查、复现和文档整理，结果与逐项修复方法见[审查报告](code-review-2026-10-13.md)，文件覆盖见[文档清单](documentation-inventory.md)。
+下方批次中的“当前”“正在运行”和 PASS 数均属于对应记录日期。此前 Root 60 native / 46 wire 验证已经终止：60/60、45/46 通过，唯一失败为 ALTER ARRAY 超时；不能继续标成运行中或全绿。
+原 273 项状态仍为 22 complete、166 partial、70 unverified、15 deferred_by_user；CTAS／后台 checkpoint 另按用户要求暂缓，详见[范围说明](deferred-scope.md)。
+本轮新运行的终态以审查报告为准。保留独立本地 commit，不 push，Actions 保持禁用。
+
+以下为历史执行记录。
+
 2026-10-06 最新核实：ROOT新增五项独立source commit：40fb2c11真实typed source contexts/owned VIEW与lazy JOIN，8907d061普通CASE wholeprepare消费，483daa08 NAME文本+implicit C，ab26b129 finiteINTERVAL128bit比较，4f23f997 genuine ANY/ALL/SOME AST、child cursor、ProjectSet与真实EXPLAIN；合并保静态列名/ARRAY/CASE及真实correlated provider重建/close-once，未缩原正控。当前564native/293registered/58TU，公共AST/evaluator/source/DmlResult头变化要求fresh58正式O2；build45716正在运行（/tmp/dbms-case-quant-integration.g8OmOcrc），源/头/测试/registry冻结，新90native/44wire尚未运行，完整564/293独立4f23工作树已准备但未启动，不冒private绿。上一fa/f7组合85native全0、42wire40pass2fail（PLdestination需求2≠1及原Quant2444）终态保留；fromless候选原PL脚本已0，扩展24控仍有3真实常量/child规划优先级错误，独立pureplanner修复继续，未合ROOT。两原465 timeout case在f7/C与enUS按原15s均实际match；ONE原full465/f7/enUS在独立工作树运行，旧fd全量失败不改绿，不冒最新ROOT证明。private ELSE标签404931c4已READY待freeze后独立合入；MV readonly/输入与规划优先级、宽Literal/geometry/其他族继续。总273仍22complete/166partial/70unverified/15deferred，未完成；每项本地commit、不push、Actions禁用、用户跳过安全/TDE不重启。详见 docs/issue-ready-source-integration.md；下方均历史时点。
 
 2026-10-06 新组合真实验证：ROOT3bc45e3b新增独立typed UPDATE提交（private c09f9d5b：24native/11wire/actual PG17.2 matrix均0）；合并前efc全部57正式O2编译86360 terminal0/57 entries及repeat+签名stamp通过，合入后只重编DML CPP83522并复核全部57匹配。新冻结09121ee8的81fresh matching native81137已全部通过；68wire53215已terminal1=67/68通过（1项初始connect errno103/SQL前，原因未明保留日志并captured复跑），新完整517native/257registered runner75090仍live，源/头/测试/registry冻结，不能提前宣全量通过。精确证据见 `docs/issue-typed-query-explain-update-combination.md`；旧完整40539为5native/2wire失败含TLS skip，不覆盖成绿。新增duplicate UPDATE target真实native134/wire12assert red及PG17 priority reference正在独立修，interval parser4afb/querybegin2f85尚只private READY，ordinary scalar/EXPLAINsort/readI/O/完整族继续。总账273仍22complete166partial70unverified15deferred，完成gate仍拒绝；只本地commit，不push/启用Actions/重启用户跳过专项。下方是各历史时点记录。
