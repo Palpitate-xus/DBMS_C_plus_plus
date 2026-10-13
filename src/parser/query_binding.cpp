@@ -1633,7 +1633,16 @@ public:
                 conflictScopes.front().push_back(registerSource({"","excluded",target.columns}));
             }
             for (auto& value : insert->conflictUpdateSet) expression(value.second, conflictScopes);
-            expression(insert->conflictWhere, conflictScopes);
+            const auto conflictCondition = expression(insert->conflictWhere, conflictScopes);
+            if (insert->conflictWhere) {
+                const auto base = metadata.baseType
+                    ? metadata.baseType(conflictCondition, expressionTypeOid(insert->conflictWhere.get()))
+                    : conflictCondition;
+                const auto type = common_type_detail::canonical(base);
+                if (type != "unknown" && type != "boolean")
+                    throw DbError("42804", "argument of WHERE must be type boolean");
+                coerceCaseInput(insert->conflictWhere, conflictCondition, "boolean");
+            }
             auto output=returning(insert->returning,insert->returningOptions,target,std::move(scopes));
             // Analysis of every explicit input and RETURNING site precedes
             // stored-default planning. Retain only actually omitted/DEFAULT

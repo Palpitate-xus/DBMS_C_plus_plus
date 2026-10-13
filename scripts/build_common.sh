@@ -185,6 +185,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/delete_exception_owner_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/delete_bound_returning_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/insert_update_returning_subquery_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/conflict_where_boolean_context_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/update_source_bound_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/physical_array_element_descriptor_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/routine_array_signature_protocol_e2e_test.py)

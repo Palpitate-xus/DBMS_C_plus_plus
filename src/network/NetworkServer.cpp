@@ -1904,6 +1904,23 @@ bool describePreparedRecursiveCteResult(const std::string& sql,Session& session,
     return !columns.empty();
 }
 
+bool describePreparedConflictPredicateResult(const std::string& sql, Session& session,
+    std::vector<PgColumnDescription>& columns, const std::vector<uint32_t>& parameterOids = {}) {
+    SQLParser parser;
+    const auto parsed = parser.parseForBinding(sql);
+    const auto* insert = parsed.isValid() ? dynamic_cast<const InsertStmt*>(parsed.stmt.get()) : nullptr;
+    if (!insert || !insert->conflictWhere) return false;
+    const auto prepared = g_engine.prepareBoundQuery(session.currentDB, sql,
+        protocolMetadataParameters(session, parameterOids));
+    QueryResult shape;
+    for (const auto& field : prepared.output) {
+        shape.columns.push_back(field.name);
+        shape.columnTypes.push_back(field.type);
+    }
+    columns = describeProtocolColumns(shape, sql, session);
+    return !columns.empty();
+}
+
 bool describePreparedExplainResult(const std::string& sql, Session& session,
         std::vector<PgColumnDescription>& columns,
         const std::vector<uint32_t>& parameterOids = {}) {
@@ -2263,6 +2280,7 @@ bool describePreparedResult(const std::string& sql, Session& session,
                             std::vector<PgColumnDescription>& columns,
                             const std::vector<uint32_t>& parameterOids = {}) {
     if (describePreparedHavingResult(sql, session, columns, parameterOids)) return true;
+    if (describePreparedConflictPredicateResult(sql, session, columns, parameterOids)) return true;
     if(describePreparedRecursiveCteResult(sql,session,columns,parameterOids))return true;
     auto betweenParameterOids = parameterOids;
     if (prepareProtocolBitBetween(sql, session, betweenParameterOids, &columns)) return true;
@@ -6002,6 +6020,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 validatePreparedBitScalarParameters(sql,session,parameterTypes);
                 std::vector<PgColumnDescription> explainDescriptor;
                 (void)describePreparedHavingResult(sql, session, explainDescriptor, parameterTypes);
+                (void)describePreparedConflictPredicateResult(sql, session, explainDescriptor, parameterTypes);
                 (void)describePreparedRecursiveCteResult(sql,session,explainDescriptor,parameterTypes);
                 (void)describePreparedExplainResult(sql,session,explainDescriptor,parameterTypes);
                 (void)prepareProtocolBitBetween(sql, session, parameterTypes);

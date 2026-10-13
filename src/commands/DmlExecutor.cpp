@@ -3086,7 +3086,7 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
         }
     }
     std::shared_ptr<PreparedQuery> preparedInsert;
-    if (stmt.selectSource || !stmt.values.empty() || !stmt.returning.empty()) {
+    if (stmt.selectSource || !stmt.values.empty() || !stmt.returning.empty() || stmt.conflictWhere) {
         // Prepare actual source descriptors and contextual target input before
         // opening a source, testing WHERE, or evaluating any volatile target.
         // The shared metadata callback distinguishes a direct unknown literal
@@ -3110,6 +3110,10 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
         if (!insert->returning.empty())
             returningExecution = std::make_unique<PreparedReturningExecution>(
                 *insertExecution, insert, insert->returning, insertReturningBinding);
+        if (insert->conflictWhere) {
+            insertExecution->planExpressionConstants(insert->conflictWhere.get());
+            insertExecution->prepareExpression(insert->conflictWhere.get());
+        }
     }
     std::vector<std::map<std::string, std::string>> insertedRows;
     const bool ignoreDuplicate = lower(stmt.conflictAction) == "do nothing";
@@ -3477,16 +3481,27 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
                     }
                     return true;
                 }
-                if (stmt.conflictWhere) {
-                    SqlCell whereValue;
-                    if (!evaluateConflictExpression(stmt.conflictWhere.get(), table,
-                                                     values, s.currentDB, whereValue,
-                                                     &targetRow, requestedTable)) {
-                        std::cout << "ON CONFLICT WHERE evaluation failed" << std::endl;
-                        return true;
+                if (typedInsert->conflictWhere) {
+                    auto row = execution.context();
+                    for (const auto& range : preparedInsert->sourceRanges) {
+                        if (range.owner != typedInsert || range.source || range.mergedUsing || range.cteStatement)
+                            continue;
+                        const bool incoming = range.relationName.empty() && range.name == "excluded";
+                        if (!incoming && range.relationName.empty()) continue;
+                        const auto& image = incoming ? values : targetRow;
+                        std::vector<ExprValue> cells;
+                        for (const auto& column : range.columns) {
+                            const auto found = image.find(column.name);
+                            if (found == image.end())
+                                throw DbError("XX000", "ON CONFLICT predicate lost a bound row column");
+                            cells.emplace_back(column.type, found->second.value_or(""), !found->second);
+                        }
+                        execution.setSourceRow(row, range.ordinal, cells);
                     }
-                    if (!whereValue || whereValue->empty() ||
-                        *whereValue == "0" || lower(*whereValue) == "false") {
+                    const auto whereValue = execution.evaluate(typedInsert->conflictWhere.get(), row);
+                    if (ExprHelper::canonicalResultTypeName(whereValue.typeName) != "boolean")
+                        throw DbError("42804", "argument of WHERE must be type boolean");
+                    if (whereValue.isNull || !whereValue.asBool()) {
                         // PostgreSQL treats a false/NULL conflict WHERE as
                         // "do not update" for this conflicting input row.
                         continue;
