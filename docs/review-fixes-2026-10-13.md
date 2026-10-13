@@ -26,11 +26,11 @@
 | R05 | NTILE分桶 | 待修复 | |
 | R06 | NTILE非正参数 | 待修复 | |
 | R07 | LAG/LEAD偏移 | 待修复 | |
-| R08 | binary float参数往返 | 处理中 | 独立worktree |
+| R08 | binary float参数往返 | 已修复 | Root标准构建及86协议控制通过；PG18.6与native邻居见[验证](issue-review-r08-binary-float.md) |
 | R09 | 连接池等待期间引用寿命 | 已修复 | `2332382f`；原实现ASan失败；修复O2/ASan及重复测试通过，见[验证](issue-review-r09-pool-wait-reference.md) |
 | R10 | 连接池跨数据库等待 | 已修复 | `cb934db9`；Root真实源新编译4控制通过；O2/ASan及重复验证见[验证](issue-review-r10-pool-database-capacity.md) |
 | R11 | 窗口SUM中间溢出 | 待修复 | |
-| R12 | 测试注册 | 已修复 | 五个原驱动实际0；新增完整注册盘点及构建路由检查通过，见[验证](issue-review-r12-test-registration.md) |
+| R12 | 测试注册 | 已修复 | `a6bb7ef7`；五个原驱动实际0；新增完整注册盘点及构建路由检查通过，见[验证](issue-review-r12-test-registration.md) |
 | R13 | 逻辑预览NULL及字段编码 | 待修复 | |
 | R14 | publication读取错误传播 | 待修复 | |
 | R15 | 关停唤醒顺序 | 待修复 | |

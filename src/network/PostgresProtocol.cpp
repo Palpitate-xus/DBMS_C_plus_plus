@@ -10,6 +10,8 @@
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
+#include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <string>
@@ -148,18 +150,25 @@ bool encodeBinaryValue(const std::string& value, const PgColumnDescription& colu
                 return true;
             }
             case 700: {
-                size_t consumed = 0;
-                const float number = std::stof(value, &consumed);
-                if (consumed != value.size()) return false;
+                errno = 0;
+                char* end = nullptr;
+                const float number = std::strtof(value.c_str(), &end);
+                // libc also sets ERANGE for a representable subnormal.
+                // Reject only genuine overflow/underflow, not a nonzero
+                // float that the typed input path has already preserved.
+                if (end == value.c_str() || end != value.c_str() + value.size() ||
+                    (errno == ERANGE && (number == 0.0f || std::isinf(number)))) return false;
                 uint32_t bits = 0;
                 std::memcpy(&bits, &number, sizeof(bits));
                 appendRawUInt32(encoded, bits);
                 return true;
             }
             case 701: {
-                size_t consumed = 0;
-                const double number = std::stod(value, &consumed);
-                if (consumed != value.size()) return false;
+                errno = 0;
+                char* end = nullptr;
+                const double number = std::strtod(value.c_str(), &end);
+                if (end == value.c_str() || end != value.c_str() + value.size() ||
+                    (errno == ERANGE && (number == 0.0 || std::isinf(number)))) return false;
                 uint64_t bits = 0;
                 std::memcpy(&bits, &number, sizeof(bits));
                 appendRawUInt64(encoded, bits);

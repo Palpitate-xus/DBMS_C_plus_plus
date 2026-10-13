@@ -41,7 +41,9 @@
 #include <arpa/inet.h>
 #include <cctype>
 #include <chrono>
+#include <charconv>
 #include <cerrno>
+#include <cmath>
 #include <condition_variable>
 #include <cstdlib>
 #include <cstring>
@@ -729,6 +731,23 @@ bool decodeBinaryUnsigned(const std::vector<uint8_t>& raw, size_t width, uint64_
     return true;
 }
 
+template <typename Floating>
+std::string binaryFloatingParameterLiteral(Floating value, std::string& error) {
+    if (std::isnan(value)) return "'NaN'";
+    if (std::isinf(value)) return std::signbit(value) ? "'-Infinity'" : "'Infinity'";
+    char buffer[64];
+    const auto converted = std::to_chars(buffer, buffer + sizeof(buffer), value,
+        std::chars_format::general, std::numeric_limits<Floating>::max_digits10);
+    if (converted.ec != std::errc()) {
+        error = "could not encode binary floating-point parameter";
+        return {};
+    }
+    // Bind supplies the declared float OID's cast. Keep the input as text so
+    // SQL integer/NUMERIC literal processing cannot lose -0 or re-interpret
+    // non-finite spellings before that actual floating-point input function.
+    return quoteProtocolText(std::string(buffer, converted.ptr), error);
+}
+
 std::string binaryProtocolParameterLiteral(uint32_t typeOid,
                                            const std::vector<uint8_t>& raw,
                                            const std::string& moneyLocale,
@@ -771,13 +790,13 @@ std::string binaryProtocolParameterLiteral(uint32_t typeOid,
             uint32_t rawBits = static_cast<uint32_t>(bits);
             float number = 0;
             std::memcpy(&number, &rawBits, sizeof(number));
-            return std::to_string(number);
+            return binaryFloatingParameterLiteral(number, error);
         }
         case 701: {
             if (!decodeBinaryUnsigned(raw, 8, bits)) break;
             double number = 0;
             std::memcpy(&number, &bits, sizeof(number));
-            return std::to_string(number);
+            return binaryFloatingParameterLiteral(number, error);
         }
         case 790: {
             if (!decodeBinaryUnsigned(raw, 8, bits)) break;
@@ -937,6 +956,12 @@ std::string protocolParameterLiteral(uint32_t typeOid,
             return {};
         }
         return value;
+    }
+    if (typeOid == 700 || typeOid == 701) {
+        // These are typed input strings, not SQL arithmetic expressions.
+        // The declared floating cast validates syntax/range at its width;
+        // quoting also preserves -0 and prevents -1e1000 becoming unary SQL.
+        return quoteProtocolText(value, error);
     }
     if (isNumericParameterType(typeOid)) {
         if (!isStrictNumeric(value)) {
@@ -1444,12 +1469,20 @@ ProtocolPhysicalSource protocolPhysicalSourceFromQuery(const std::string& sql,
 }
 
 std::string protocolPhysicalTypeName(const Column& column) {
+    // Storage retains legacy codec spellings: four-byte "float" is REAL,
+    // not SQL FLOAT (float8), and "double" is not an SQL catalog type name.
+    // Read the declared layout, never the returned cell's spelling/value.
+    std::string elementType = column.dataType;
+    if (elementType == "float" && column.dsize == sizeof(float))
+        elementType = "real";
+    else if (elementType == "double" && column.dsize == sizeof(double))
+        elementType = "double precision";
     // Storage schemas retain the element name and a separate array flag.
     // A protocol descriptor needs the declared array identity, independently
     // of row count, NULL/value bytes, SQL alias, and number of dimensions.
     return column.isArray
-        ? ExprHelper::canonicalResultTypeName(column.dataType + "[]")
-        : column.dataType;
+        ? ExprHelper::canonicalResultTypeName(elementType + "[]")
+        : elementType;
 }
 
 int16_t protocolTypeSize(uint32_t typeOid, const Column& column) {
@@ -1567,7 +1600,16 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
             if (!physicalColumn || column.dataName != *physicalColumn) continue;
             const std::string physicalTypeName =
                 lowerProtocolText(protocolPhysicalTypeName(column));
-            const bool structuredMatchesPhysical = hasStructuredType &&
+            // Some execution consumers still publish storage codec names in
+            // columnTypes. Only a genuine direct physical projection may
+            // translate those names; expression aliases must keep their type.
+            const bool structuredFloatingMatchesPhysical = hasStructuredType &&
+                !column.isArray && column.domainName.empty() &&
+                ((column.dataType == "float" && column.dsize == sizeof(float)) ||
+                 (column.dataType == "double" && column.dsize == sizeof(double))) &&
+                (lowerProtocolText(result.columnTypes[columnIndex]) == column.dataType ||
+                 ExprHelper::canonicalResultTypeName(result.columnTypes[columnIndex]) == physicalTypeName);
+            const bool structuredMatchesPhysical = structuredFloatingMatchesPhysical || (hasStructuredType &&
                 (!column.domainName.empty() || column.isArray || physicalTypeName == "bit" ||
                  physicalTypeName == "bit varying" ||
                  physicalTypeName == "character" ||
@@ -1583,7 +1625,7 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
                 (column.isArray || !column.domainName.empty()
                     ? ExprHelper::canonicalResultTypeName(result.columnTypes[columnIndex]) ==
                         ExprHelper::canonicalResultTypeName(physicalTypeName)
-                    : lowerProtocolText(result.columnTypes[columnIndex]) == physicalTypeName);
+                    : lowerProtocolText(result.columnTypes[columnIndex]) == physicalTypeName));
             if (!hasStructuredType || structuredMatchesPhysical) {
                 const std::string typeName = physicalTypeName;
                 description.typeOid = isByteaTypeName(typeName)

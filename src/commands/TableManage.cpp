@@ -64,6 +64,7 @@
 #include <charconv>
 #include <cmath>
 #include <cctype>
+#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <iomanip>
@@ -701,25 +702,23 @@ static std::string trim(const std::string& s) {
 static bool parseFloatLiteral(const std::string& input, float& value) {
     const std::string token = trim(input);
     if (token.empty()) return false;
-    try {
-        size_t consumed = 0;
-        value = std::stof(token, &consumed);
-        return consumed == token.size();
-    } catch (...) {
-        return false;
-    }
+    errno = 0;
+    char* end = nullptr;
+    value = std::strtof(token.c_str(), &end);
+    // ERANGE also reports a representable, nonzero subnormal. Reject only
+    // genuine overflow/underflow, and still require the complete input.
+    return end != token.c_str() && end == token.c_str() + token.size() &&
+        !(errno == ERANGE && (value == 0.0f || std::isinf(value)));
 }
 
 static bool parseDoubleLiteral(const std::string& input, double& value) {
     const std::string token = trim(input);
     if (token.empty()) return false;
-    try {
-        size_t consumed = 0;
-        value = std::stod(token, &consumed);
-        return consumed == token.size();
-    } catch (...) {
-        return false;
-    }
+    errno = 0;
+    char* end = nullptr;
+    value = std::strtod(token.c_str(), &end);
+    return end != token.c_str() && end == token.c_str() + token.size() &&
+        !(errno == ERANGE && (value == 0.0 || std::isinf(value)));
 }
 
 static bool parseFiniteDouble(const std::string& input, double& value) {
