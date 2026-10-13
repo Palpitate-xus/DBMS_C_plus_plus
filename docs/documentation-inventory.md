@@ -1,6 +1,6 @@
 # 全部文档检查清单
 
-审查输入和发现见[代码审查报告](code-review-2026-10-13.md)。基准提交 `a502ffa3` 包含 412 份已跟踪 Markdown；首次审查含新增报告共 417 份。当前本轮修复后逐文件复查 461 份 Markdown，下表覆盖全部；历史数量不改写。
+审查输入和发现见[代码审查报告](code-review-2026-10-13.md)。基准提交 `a502ffa3` 包含 412 份已跟踪 Markdown；首次审查含新增报告共 417 份。当前本轮修复后逐文件复查 462 份 Markdown，下表覆盖全部；历史数量不改写。
 
 检查逐文件读取 UTF-8 内容并验证 Markdown 内联链接的本地文件目标是否存在。它不验证外部网址、锚点、所有引用式链接，也不证明文中每个历史技术结论在当前版本成立。
 使用手册、部署、命令参考、模块 README 和状态入口另作人工一致性核查；`issue-*.md` 保留原始提交和运行证据，其结论须按对应输入读取。
@@ -340,6 +340,7 @@
 | [docs/issue-review-r30-session-metadata.md](issue-review-r30-session-metadata.md) | 历史问题证据 | 通过 |
 | [docs/issue-review-r31-delete-only-typed-owner.md](issue-review-r31-delete-only-typed-owner.md) | 历史问题证据 | 通过 |
 | [docs/issue-review-r32-scientific-numeric-literals.md](issue-review-r32-scientific-numeric-literals.md) | 历史问题证据 | 通过 |
+| [docs/issue-review-r33-window-final-order.md](issue-review-r33-window-final-order.md) | 历史问题证据 | 通过 |
 | [docs/issue-review-r34-scientific-numeric-arithmetic.md](issue-review-r34-scientific-numeric-arithmetic.md) | 历史问题证据 | 通过 |
 | [docs/issue-review-r35-insert-select-conflict-boundary.md](issue-review-r35-insert-select-conflict-boundary.md) | 历史问题证据 | 通过 |
 | [docs/issue-review-r36-gcd-lcm-result-types.md](issue-review-r36-gcd-lcm-result-types.md) | 历史问题证据 | 通过 |

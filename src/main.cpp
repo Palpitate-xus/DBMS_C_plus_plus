@@ -26547,8 +26547,15 @@ static bool executeInternal(const string& rawSql, Session& s) {
             const string item = trim(rawItem);
             const size_t asPos = findTopLevelKeyword(toLower(item), "as");
             string expression = trim(item.substr(0, asPos));
-            const string alias = asPos == string::npos
+            const string aliasSql = asPos == string::npos
                 ? string{} : trim(item.substr(asPos + 2));
+            string alias;
+            if (!aliasSql.empty()) {
+                dbms::CatalogManager::QualifiedName name;
+                if (!dbms::CatalogManager::parseQualifiedName(aliasSql, name, true) || !name.schema.empty())
+                    throw dbms::DbError("42601", "invalid SELECT output alias");
+                alias = name.name;
+            }
             const size_t collateAt = findTopLevelKeyword(
                 toLower(expression), "collate");
             if (collateAt != string::npos) {
@@ -26565,8 +26572,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     expression = source;
                 }
             }
-            if (!expression.empty() && !alias.empty() &&
-                alias.find_first_of(" ,()+-*/%") == string::npos) {
+            if (!expression.empty() && !alias.empty()) {
                 selectAliasMap[alias] = expression;
             }
         }
@@ -31538,6 +31544,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
         vector<dbms::StorageEngine::OrderBySpec> orderBySpecs;
         vector<dbms::StorageEngine::OrderBySpec> exprOrderBySpecs; // expressions sorted post-query
         vector<pair<bool, size_t>> orderKeyRefs; // expression flag, index; preserve SQL key order
+        map<pair<bool, size_t>, string> orderKeySourceSql;
         if (orderPos != string::npos) {
             size_t orderEnd = (limitPos != string::npos) ? limitPos
                             : (offsetPos != string::npos) ? offsetPos : sql.size();
@@ -31604,13 +31611,19 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     if (projected != projectedColumnCollation.end())
                         collation = projected->second;
                 }
+                const string sortKeySyntax = sortItem;
+                // Keep its original quoted grammar before alias lowering.
                 // A bare ORDER BY name can refer to an output alias, but a
                 // decorated expression such as alias COLLATE "C" is bound to
                 // input columns in PostgreSQL.  Keep function expressions on
                 // their existing path; their inner COLLATE is not a bare name.
-                const bool collatedBareName = collatePos != string::npos &&
-                    !sortItem.empty() &&
-                    sortItem.find_first_of("()+-*/%, ") == string::npos;
+                dbms::SQLParser orderSyntaxParser;
+                const auto orderSyntaxParsed = orderSyntaxParser.parseForBinding("SELECT " + sortKeySyntax);
+                const auto* orderSyntaxSelect = orderSyntaxParsed.success
+                    ? dynamic_cast<const dbms::SelectStmt*>(orderSyntaxParsed.stmt.get()) : nullptr;
+                const auto* simpleOrderReference = orderSyntaxSelect && orderSyntaxSelect->selectList.size() == 1
+                    ? dynamic_cast<const dbms::ColumnRefExpr*>(orderSyntaxSelect->selectList.front().expr.get()) : nullptr;
+                const bool collatedBareName = collatePos != string::npos && simpleOrderReference;
                 {
                     string bindingError, bindingSqlState;
                     if (!validateFromlessColumnBindings(
@@ -31673,10 +31686,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         spec.collation = collation;
                         exprOrderBySpecs.push_back(std::move(spec));
                         orderKeyRefs.emplace_back(true, exprOrderBySpecs.size() - 1);
+                        orderKeySourceSql[orderKeyRefs.back()] = sortKeySyntax;
                         continue;
                     }
                 }
-                if (lp != string::npos && rp != string::npos && rp > lp) {
+                if (!simpleOrderReference && lp != string::npos && rp != string::npos && rp > lp) {
                     // Expression: func(arg)
                     string func = toLower(trim(sortItem.substr(0, lp)));
                     string arg = trim(sortItem.substr(lp + 1, rp - lp - 1));
@@ -31756,6 +31770,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         spec.hasExplicitNullOrder = nullsSpecified;
                         exprOrderBySpecs.push_back(spec);
                         orderKeyRefs.emplace_back(true, exprOrderBySpecs.size() - 1);
+                        orderKeySourceSql[orderKeyRefs.back()] = sortKeySyntax;
                         continue;
                     }
                 }
@@ -31764,7 +31779,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     size_t plusPos = sortItem.find('+');
                     size_t minusPos = sortItem.find('-');
                     size_t opPos = (plusPos != string::npos) ? plusPos : minusPos;
-                    if (opPos != string::npos) {
+                    if (!simpleOrderReference && opPos != string::npos) {
                         string left = trim(sortItem.substr(0, opPos));
                         string right = trim(sortItem.substr(opPos + 1));
                         if (!left.empty() && !right.empty()) {
@@ -31779,15 +31794,16 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             spec.collation = collation;
                             exprOrderBySpecs.push_back(spec);
                             orderKeyRefs.emplace_back(true, exprOrderBySpecs.size() - 1);
+                            orderKeySourceSql[orderKeyRefs.back()] = sortKeySyntax;
                             continue;
                         }
                     }
                 }
                 // Simple column (resolve SELECT-list aliases first: PG
                 // allows ORDER BY to reference output aliases)
-                if (sortItem.find_first_of("()+-*/%") == string::npos) {
-                    if (!collatedBareName) {
-                        auto amIt = selectAliasMap.find(sortItem);
+                if (simpleOrderReference) {
+                    if (!collatedBareName && simpleOrderReference->table.empty() && simpleOrderReference->schema.empty()) {
+                        auto amIt = selectAliasMap.find(simpleOrderReference->column);
                         if (amIt != selectAliasMap.end()) sortItem = amIt->second;
                     }
                     sortItem = sourceColumnName(sortItem);
@@ -31800,6 +31816,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 spec.collation = collation;
                 orderBySpecs.push_back(spec);
                 orderKeyRefs.emplace_back(false, orderBySpecs.size() - 1);
+                orderKeySourceSql[orderKeyRefs.back()] = sortKeySyntax;
             }
         }
 
@@ -33915,9 +33932,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
             return string("text");
         };
 
-        auto buildWindowProtocolMetadata = [&] {
+        auto buildWindowProtocolMetadata = [&](bool requireDescriptor = false) {
             dbms::DmlResult metadata;
-            if (!shouldPublishQueryMetadata()) return metadata;
+            if (!requireDescriptor && !shouldPublishQueryMetadata()) return metadata;
             for (const auto& rawTarget : splitSelectColumns(columns)) {
                 string item = trim(rawTarget);
                 string alias;
@@ -35673,6 +35690,130 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 set<size_t> nullWindows;
             };
             vector<LegacyWindowRow> rows;
+            const auto partitionColumn = [&](const string& name) -> const dbms::Column& {
+                for (size_t column = 0; column < tbl.len; ++column)
+                    if (tbl.cols[column].dataName == name) return tbl.cols[column];
+                throw dbms::DbError("42703", "window column does not exist: " + name);
+            };
+            const auto sortColumn = [&](const string& declared) {
+                dbms::Column column;
+                const string type = dbms::ExprHelper::canonicalResultTypeName(declared);
+                column.dataType = type == "integer" ? "int" : type == "real" ? "float" :
+                    type == "double precision" ? "double" : type == "character varying" ? "varchar" :
+                    type == "character" || type == "bpchar" ? "char" : type;
+                column.isVariableLength = column.dataType == "text" || column.dataType == "varchar" ||
+                    column.dataType == "name" || column.dataType == "numeric";
+                return column;
+            };
+            auto finalWindowResult = buildWindowProtocolMetadata(true);
+            struct WindowSortKey {
+                const dbms::StorageEngine::OrderBySpec* spec;
+                size_t projection = numeric_limits<size_t>::max();
+                size_t scalar = numeric_limits<size_t>::max();
+                string sourceColumn;
+                dbms::Column column;
+            };
+            vector<WindowSortKey> finalWindowKeys;
+            vector<string> scalarWindowKeys;
+            map<string, size_t> scalarWindowSlots;
+            // Bind the final SQL sort separately from window input ordering,
+            // before opening any source. Output references keep their actual
+            // producer ordinal; scalar keys use one retained prepared query.
+            for (const auto& reference : orderKeyRefs) {
+                const auto& spec = reference.first ? exprOrderBySpecs.at(reference.second)
+                    : orderBySpecs.at(reference.second);
+                WindowSortKey key; key.spec = &spec;
+                const string expression = spec.isExpression ? orderKeySourceSql.at(reference) : spec.colName;
+                dbms::SQLParser keyParser;
+                const auto keyParsed = keyParser.parseForBinding("SELECT " + orderKeySourceSql.at(reference));
+                const auto* keySelect = keyParsed.success
+                    ? dynamic_cast<const dbms::SelectStmt*>(keyParsed.stmt.get()) : nullptr;
+                if (!keySelect || keySelect->selectList.size() != 1)
+                    throw dbms::DbError("42601", "invalid final window ORDER BY expression");
+                const auto* keyExpression = keySelect->selectList.front().expr.get();
+                const auto* constant = dynamic_cast<const dbms::LiteralExpr*>(keyExpression);
+                bool negativeConstant = false;
+                if (const auto* unary = dynamic_cast<const dbms::UnaryOpExpr*>(keyExpression);
+                    unary && unary->op == "-") {
+                    constant = dynamic_cast<const dbms::LiteralExpr*>(unary->operand.get());
+                    negativeConstant = true;
+                }
+                const bool bareConstant = constant && constant->typeName.empty() &&
+                    !scalarQueryRoles(constant).first && !scalarQueryRoles(constant).second;
+                if (bareConstant) {
+                    if (constant->value.empty() || !all_of(constant->value.begin(), constant->value.end(),
+                        [](unsigned char value) { return value >= '0' && value <= '9'; }))
+                        throw dbms::DbError("42601", "non-integer constant in ORDER BY");
+                    size_t ordinal = 0;
+                    for (char value : constant->value) {
+                        if (ordinal > static_cast<size_t>(numeric_limits<int32_t>::max()) / 10)
+                            throw dbms::DbError("42601", "non-integer constant in ORDER BY");
+                        ordinal = ordinal * 10 + static_cast<size_t>(value - '0');
+                        if (ordinal > static_cast<size_t>(numeric_limits<int32_t>::max()))
+                            throw dbms::DbError("42601", "non-integer constant in ORDER BY");
+                    }
+                    if (negativeConstant || !ordinal || ordinal > selectExprs.size())
+                        throw dbms::DbError("42P10", "ORDER BY position is not in select list");
+                    key.projection = ordinal - 1;
+                } else {
+                    for (size_t target = 0; target < selectExprs.size(); ++target)
+                        if (selectExprs[target].colName == expression) { key.projection = target; break; }
+                }
+                if (key.projection != numeric_limits<size_t>::max()) {
+                    if (key.projection >= finalWindowResult.columnTypes.size())
+                        throw dbms::DbError("XX000", "window sort lost its output declaration");
+                    key.column = sortColumn(finalWindowResult.columnTypes[key.projection]);
+                    if (exprTypes[key.projection] == 0)
+                        key.column = partitionColumn(sourceColumnName(selectExprs[key.projection].colName));
+                } else if (!spec.isExpression && dynamic_cast<const dbms::ColumnRefExpr*>(keyExpression)) {
+                    key.sourceColumn = sourceColumnName(spec.colName);
+                    key.column = partitionColumn(key.sourceColumn);
+                } else {
+                    const string& scalarSql = orderKeySourceSql.at(reference);
+                    const string identity = spec.expressionIdentity.empty()
+                        ? scalarOrderIdentity(scalarSql) : spec.expressionIdentity;
+                    auto [slot, inserted] = scalarWindowSlots.emplace(identity, scalarWindowKeys.size());
+                    key.scalar = slot->second;
+                    if (inserted) scalarWindowKeys.push_back(scalarSql);
+                }
+                finalWindowKeys.push_back(std::move(key));
+            }
+            unique_ptr<dbms::PreparedQueryCursor> scalarWindowCursor;
+            shared_ptr<dbms::PreparedQuery> scalarWindowQuery;
+            if (!scalarWindowKeys.empty()) {
+                string keySql = "SELECT ";
+                for (size_t index = 0; index < scalarWindowKeys.size(); ++index)
+                    keySql += (index ? "," : "") + scalarWindowKeys[index];
+                keySql += " FROM " + tnameOrig + (tableAlias.empty() ? string() : " AS " + tableAlias);
+                scalarWindowQuery = make_shared<dbms::PreparedQuery>(
+                    g_engine.prepareBoundQuery(s.currentDB, keySql, {}, true));
+                auto* select = dynamic_cast<dbms::SelectStmt*>(scalarWindowQuery->ast.get());
+                if (!select) throw dbms::DbError("XX000", "window sort lost its prepared SELECT");
+                const auto source = find_if(scalarWindowQuery->sourceRanges.begin(), scalarWindowQuery->sourceRanges.end(),
+                    [&](const auto& range) { return range.owner == select; });
+                if (source == scalarWindowQuery->sourceRanges.end() || source->columns.size() != tbl.len)
+                    throw dbms::DbError("XX000", "window sort lost its actual source descriptor");
+                const auto descriptor = source->columns;
+                auto input = make_unique<dbms::PreparedSourceRowsOp>(descriptor,
+                    [&, descriptor](size_t index, vector<dbms::ExprValue>& cells) {
+                        cells.clear();
+                        if (index >= rows.size() || (finiteWindowLimit && windowLimit == 0)) return false;
+                        for (size_t column = 0; column < tbl.len; ++column) {
+                            const auto value = rows[index].find(tbl.cols[column].dataName);
+                            dbms::ExprValue cell(descriptor[column].type,
+                                value == rows[index].end() ? string() : value->second, value == rows[index].end());
+                            cell.collation = tbl.cols[column].collation;
+                            cells.push_back(std::move(cell));
+                        }
+                        return true;
+                    });
+                scalarWindowCursor = dbms::QueryPlanner::makePreparedCursor(
+                    dbms::QueryPlanner::buildPreparedSelectPlan(&g_engine, queryDb, scalarWindowQuery,
+                        select, tbl, std::move(input), {}, {}, {}, true, true), scalarWindowQuery->output);
+                for (auto& key : finalWindowKeys)
+                    if (key.scalar != numeric_limits<size_t>::max())
+                        key.column = sortColumn(scalarWindowQuery->output.at(key.scalar).type);
+            }
             set<int64_t> windowRowIds;
             const auto appendWindowRows = [&](const vector<string>& conditions, bool deduplicate) {
                 vector<vector<string>> cells;
@@ -35707,11 +35848,6 @@ static bool executeInternal(const string& rawSql, Session& s) {
             // SQL NULL is an absent cell, not an empty string or "NULL".
             // Partition keys use the actual descriptor and lossless grouping
             // encoding already shared with ordinary GROUP BY.
-            const auto partitionColumn = [&](const string& name) -> const dbms::Column& {
-                for (size_t column = 0; column < tbl.len; ++column)
-                    if (tbl.cols[column].dataName == name) return tbl.cols[column];
-                throw dbms::DbError("42703", "window partition column does not exist: " + name);
-            };
             const auto partitionKey = [&](const map<string, string>& row, const string& name) {
                 const auto value = row.find(name);
                 return dbms::StorageEngine::groupingValueKey(partitionColumn(name),
@@ -36208,6 +36344,54 @@ static bool executeInternal(const string& rawSql, Session& s) {
             vector<string> outputIndices;
             for (size_t index = 0; index < winAnswers.size(); ++index)
                 outputIndices.push_back(to_string(index));
+            if (finiteWindowLimit && windowLimit == 0) outputIndices.clear();
+            vector<vector<dbms::ExprValue>> scalarWindowValues;
+            if (scalarWindowCursor) {
+                try {
+                    vector<dbms::ExprValue> cells;
+                    while (scalarWindowCursor->next(cells)) scalarWindowValues.push_back(cells);
+                    scalarWindowCursor->close();
+                } catch (...) {
+                    const auto primary = std::current_exception();
+                    try { scalarWindowCursor->close(); } catch (...) {}
+                    std::rethrow_exception(primary);
+                }
+                if (!(finiteWindowLimit && windowLimit == 0) && scalarWindowValues.size() != rows.size())
+                    throw dbms::DbError("XX000", "window sort lost its cached scalar input rows");
+            }
+            if (!finalWindowKeys.empty()) {
+                stable_sort(outputIndices.begin(), outputIndices.end(), [&](const string& a, const string& b) {
+                    const size_t left = stoull(a), right = stoull(b);
+                    for (const auto& key : finalWindowKeys) {
+                        const auto value = [&](size_t row) {
+                            if (key.projection != numeric_limits<size_t>::max())
+                                return dbms::ExprValue(finalWindowResult.columnTypes.at(key.projection),
+                                    winCells[row].at(key.projection), winNulls[row].at(key.projection));
+                            if (key.scalar != numeric_limits<size_t>::max())
+                                return scalarWindowValues.at(row).at(key.scalar);
+                            const auto cell = rows[row].find(key.sourceColumn);
+                            return dbms::ExprValue(key.column.dataType,
+                                cell == rows[row].end() ? string() : cell->second, cell == rows[row].end());
+                        };
+                        const auto first = value(left), second = value(right);
+                        if (first.isNull != second.isNull) return first.isNull == key.spec->nullsFirst;
+                        if (first.isNull) continue;
+                        auto column = key.column;
+                        if (!key.spec->collation.empty()) {
+                            column.collation = key.spec->collation;
+                            column.resolvedCollation.clear(); column.resolvedCollationUsesLocale = false;
+                        } else if (!first.collation.empty()) column.collation = first.collation;
+                        const auto less = dbms::StorageEngine::compareValues(column, first.value, false, second.value, false, "<");
+                        const auto greater = dbms::StorageEngine::compareValues(column, first.value, false, second.value, false, ">");
+                        if (less == dbms::StorageEngine::PredicateTruth::Unknown ||
+                            greater == dbms::StorageEngine::PredicateTruth::Unknown)
+                            throw dbms::DbError("0A000", "unsupported declared window final ORDER BY comparison");
+                        if (less == dbms::StorageEngine::PredicateTruth::True) return key.spec->ascending;
+                        if (greater == dbms::StorageEngine::PredicateTruth::True) return !key.spec->ascending;
+                    }
+                    return false;
+                });
+            }
             // DISTINCT
             if (isDistinct) {
                 vector<string> deduped;
@@ -36227,8 +36411,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
             applyLimitOffset(outputIndices);
 
             // Output
-            auto windowResult = buildWindowProtocolMetadata();
-            bool structuredOutput = windowResult.available;
+            auto windowResult = std::move(finalWindowResult);
+            bool structuredOutput = windowResult.available && shouldPublishQueryMetadata();
             if (structuredOutput) {
                 windowResult.metadataOnly = false;
                 windowResult.rows.clear(); windowResult.nulls.clear();
