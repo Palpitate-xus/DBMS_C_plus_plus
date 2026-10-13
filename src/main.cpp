@@ -46,6 +46,8 @@
 #include "expression/expr_helper.h"
 #include "expression/function_namespace.h"
 #include "expression/array_type.h"
+#include "expression/aggregate_type.h"
+#include "expression/common_type.h"
 #include "expression/ExprEvaluator.h"
 #include "expression/ExpressionVolatility.h"
 #include "common/DateType.h"
@@ -5119,6 +5121,9 @@ static bool handlePrepare(const string& sql, Session& s) {
     return false;
 }
 
+static bool executePreparedInputQuery(const string& sql, const vector<string>& arguments,
+    const vector<string>& parameterTypes, Session& session);
+
 static bool handleExecutePrepared(const string& sql, Session& s) {
     string rest = trim(sql.substr(8));
     // PostgreSQL:  EXECUTE name [(expr, ...)]
@@ -5168,18 +5173,7 @@ static bool handleExecutePrepared(const string& sql, Session& s) {
         return true;
     }
     if (dollarForm) {
-        vector<string> typedValues = values;
-        for (size_t i = 0; i < typedValues.size(); ++i) {
-            if (!parameterTypes[i].empty()) {
-                typedValues[i] = "(" + typedValues[i] + ")::" + parameterTypes[i];
-            }
-        }
-        string sub, perr;
-        if (!dbms::ps_substituteDollarParams(expanded, typedValues, sub, perr)) {
-            cout << "ERROR: " << perr << " (SQLSTATE 42P02)" << endl;
-            return true;
-        }
-        expanded = std::move(sub);
+        return executePreparedInputQuery(expanded, values, parameterTypes, s);
     }
     if (!values.empty() && !dollarForm) {
         // Legacy '?' substitution for templates without $n.
@@ -20596,6 +20590,143 @@ public:
         return hasWriter?dbms::executeAtomicDmlUnit(session_,command):command();
     }
 };
+}
+
+static bool executePreparedInputQuery(const string& sql, const vector<string>& arguments,
+    const vector<string>& parameterTypes, Session& session) {
+    vector<dbms::QueryBindingDatum> inputs;
+    if (!arguments.empty()) {
+        string argumentSql = "SELECT ";
+        for (size_t i = 0; i < arguments.size(); ++i) {
+            if (i) argumentSql += ',';
+            argumentSql += parameterTypes[i].empty() ? "(" + arguments[i] + ")"
+                : "CAST((" + arguments[i] + ") AS " + parameterTypes[i] + ")";
+        }
+        auto query = make_shared<dbms::PreparedQuery>(
+            g_engine.prepareBoundQuery(session.currentDB, argumentSql, {}, true));
+        const auto* select = dynamic_cast<const dbms::SelectStmt*>(query->ast.get());
+        if (!select || select->fromClause || select->selectList.size() != arguments.size())
+            throw dbms::DbError("42601", "EXECUTE requires scalar parameter expressions");
+        dbms::ExprEvaluator signatures; signatures.setCurrentDB(session.currentDB);
+        function<void(const dbms::Expr*)> parameterRole = [&](const dbms::Expr* value) {
+            if (!value) return;
+            if (const auto* call = dynamic_cast<const dbms::FunctionCallExpr*>(value)) {
+                if (call->hasOver)
+                    throw dbms::DbError("42P20", "window functions are not allowed in EXECUTE parameters");
+                if (call->setReturning)
+                    throw dbms::DbError("0A000", "set-returning functions are not allowed in EXECUTE parameters");
+                if (!dbms::aggregate_type_detail::builtinName(call).empty() &&
+                    !signatures.hasScalarFunction(call, &g_engine))
+                    throw dbms::DbError("42803", "aggregate functions are not allowed in EXECUTE parameters");
+                for (const auto& argument : call->args) parameterRole(argument.get());
+                for (const auto& argument : call->namedArgs) parameterRole(argument.value.get());
+            } else if (const auto* cast = dynamic_cast<const dbms::CastExpr*>(value)) parameterRole(cast->operand.get());
+            else if (const auto* unary = dynamic_cast<const dbms::UnaryOpExpr*>(value)) parameterRole(unary->operand.get());
+            else if (const auto* binary = dynamic_cast<const dbms::BinaryOpExpr*>(value)) {
+                parameterRole(binary->left.get()); if (binary->op != "::") parameterRole(binary->right.get());
+            } else if (const auto* conditional = dynamic_cast<const dbms::CaseExpr*>(value)) {
+                parameterRole(conditional->switchExpr.get()); parameterRole(conditional->elseExpr.get());
+                for (const auto& arm : conditional->whenClauses) { parameterRole(arm.first.get()); parameterRole(arm.second.get()); }
+            } else if (const auto* array = dynamic_cast<const dbms::ArrayExpr*>(value))
+                for (const auto& item : array->elements) parameterRole(item.get());
+            else if (const auto* row = dynamic_cast<const dbms::RowExpr*>(value))
+                for (const auto& item : row->elements) parameterRole(item.get());
+        };
+        // Arguments are a value boundary, not a nested SELECT receiver. In
+        // particular an unused parameter cannot hide an illegal subquery.
+        for (const auto& target : select->selectList) {
+            const auto roles = scalarQueryRoles(target.expr.get());
+            if (roles.first || roles.second)
+                throw dbms::DbError("0A000", "cannot use subquery in EXECUTE parameter");
+            parameterRole(target.expr.get());
+        }
+        for (size_t i = 0; i < parameterTypes.size(); ++i) {
+            if (parameterTypes[i].empty()) continue;
+            const auto* cast = dynamic_cast<const dbms::CastExpr*>(select->selectList[i].expr.get());
+            if (!cast) throw dbms::DbError("XX000", "EXECUTE parameter lost its declared coercion");
+            const auto sourceType = dbms::common_type_detail::canonical(
+                dbms::ExprHelper::inferParsedInputType(cast->operand.get(), {}, session.currentDB, &g_engine));
+            const auto targetType = dbms::common_type_detail::canonical(cast->typeName);
+            // Explicit text casts are not numeric/Boolean assignment casts.
+            // UNKNOWN still receives its legitimate parameter input context.
+            if (sourceType != "unknown" &&
+                ((dbms::common_type_detail::numericRank(targetType) &&
+                  dbms::common_type_detail::category(sourceType) != 'N') ||
+                 (targetType == "boolean" && sourceType != "boolean")))
+                throw dbms::DbError("42804", "EXECUTE parameter type cannot be coerced to " + targetType);
+        }
+        auto source = make_unique<dbms::PreparedSourceRowsOp>(dbms::QueryRowDescriptor{},
+            [](size_t index, vector<dbms::ExprValue>& row) { row.clear(); return index == 0; });
+        auto cursor = dbms::QueryPlanner::makePreparedCursor(
+            dbms::QueryPlanner::buildPreparedSelectPlan(&g_engine, session.currentDB,
+                query, const_cast<dbms::SelectStmt*>(select), dbms::TableSchema{}, std::move(source),
+                {}, {}, {}, true, true), query->output);
+        vector<dbms::ExprValue> cells;
+        try {
+            if (!cursor->next(cells) || cells.size() != arguments.size())
+                throw dbms::DbError("XX000", "EXECUTE parameter evaluation lost its typed cells");
+            vector<dbms::ExprValue> extra;
+            if (cursor->next(extra))
+                throw dbms::DbError("0A000", "EXECUTE parameter must not return a set");
+            cursor->close();
+        } catch (...) {
+            const auto primary = std::current_exception();
+            try { cursor->close(); } catch (...) {}
+            std::rethrow_exception(primary);
+        }
+        for (size_t i = 0; i < cells.size(); ++i) {
+            dbms::QueryBindingDatum input;
+            input.identity = "sql-execute-parameter-" + to_string(i + 1);
+            input.position = i + 1;
+            input.type = parameterTypes[i].empty() ? cells[i].typeName : parameterTypes[i];
+            if (!cells[i].isNull) input.value = cells[i].value;
+            input.origin = dbms::ParameterOrigin::StatementInput;
+            inputs.push_back(std::move(input));
+        }
+    }
+    // Fresh execution, frozen statement inputs: repeated $n sites share one
+    // slot, while the original output labels and declarations stay intact.
+    auto query = make_shared<dbms::PreparedQuery>(
+        g_engine.prepareBoundQuery(session.currentDB, sql, inputs, true));
+    const auto* read = dynamic_cast<const dbms::SelectStmt*>(query->ast.get());
+    const auto* insert = dynamic_cast<const dbms::InsertStmt*>(query->ast.get());
+    const bool mutation = (insert && insert->conflictAction.empty()) ||
+        dynamic_cast<const dbms::UpdateStmt*>(query->ast.get()) ||
+        dynamic_cast<const dbms::DeleteStmt*>(query->ast.get());
+    dbms::DmlResult result;
+    if (mutation || (read && dbms::QueryPlanner::supportsPreparedSelectPlan(*read))) {
+        PreparedWithDmlRuntime runtime(session, query);
+        result = mutation ? runtime.runDml() : runtime.runRead();
+        for (const auto& name : result.columns) cout << renderLegacyHeader(name) << ' ';
+        if (!result.columns.empty()) cout << '\n';
+        for (size_t i = 0; i < result.rows.size(); ++i) {
+            for (size_t j = 0; j < result.rows[i].size(); ++j)
+                cout << (result.nulls[i][j] ? "NULL" : result.rows[i][j]) << ' ';
+            cout << '\n';
+        }
+        cout << result.commandTag << endl;
+    } else {
+        // Existing unsupported graph owners receive encoded frozen values,
+        // never the argument expressions. This admission is pure; there is
+        // no retry after opening the typed query or running a target effect.
+        const unsigned previousDepth = metadataCaptureDepth;
+        metadataCaptureDepth = executeDepth + 1;
+        dbms::clearLastDmlResult();
+        bool failed;
+        try { failed = execute(query->legacySql(), session); }
+        catch (...) { metadataCaptureDepth = previousDepth; throw; }
+        result = dbms::takeLastDmlResult();
+        metadataCaptureDepth = previousDepth;
+        if (failed) return true;
+        if (result.available && result.columns.size() == query->output.size()) {
+            for (size_t i = 0; i < query->output.size(); ++i) {
+                result.columns[i] = query->output[i].name;
+                result.columnTypes[i] = query->output[i].type;
+            }
+        }
+    }
+    if (result.available) dbms::publishLastDmlResult(std::move(result));
+    return false;
 }
 
 // The view trigger boundary carries SQL values, not strings from display
