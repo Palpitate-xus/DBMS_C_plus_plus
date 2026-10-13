@@ -4172,8 +4172,17 @@ bool WindowOp::open() {
                     computedNulls[rowIndex][functionIndex] = true;
                 }
             } else if (function.name == "ntile") {
-                int64_t bucketCount = 1;
-                if (!parseInteger(function.argument, bucketCount) || bucketCount <= 0) bucketCount = 1;
+                if (SQLParser::toLower(trimExec(function.argument)) == "null") {
+                    computedNulls[rowIndex][functionIndex] = true;
+                    continue;
+                }
+                int64_t bucketCount = 0;
+                if (!parseInteger(function.argument, bucketCount))
+                    throw DbError("22P02", "invalid input syntax for NTILE integer argument");
+                if (bucketCount < std::numeric_limits<int32_t>::min() || bucketCount > std::numeric_limits<int32_t>::max())
+                    throw DbError("22003", "NTILE integer argument out of range");
+                if (bucketCount <= 0)
+                    throw DbError("22014", "argument of ntile must be greater than zero");
                 const size_t partitionSize = partitionEnd - partitionStart;
                 const size_t index = position - partitionStart;
                 const size_t buckets = static_cast<size_t>(bucketCount);

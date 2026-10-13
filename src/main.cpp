@@ -6256,10 +6256,15 @@ static bool convertToVolcanoWindowSpec(const WindowFunc& wf,
     }
 
     if (wf.name == "ntile") {
+        if (toLower(trim(wf.arg)) == "null") {
+            spec.argument = "NULL";
+            return true;
+        }
         try {
             size_t consumed = 0;
-            const auto bucketCount = stoull(trim(wf.arg), &consumed);
-            if (consumed != trim(wf.arg).size() || bucketCount == 0) return false;
+            const auto bucketCount = stoll(trim(wf.arg), &consumed);
+            if (consumed != trim(wf.arg).size() || bucketCount < numeric_limits<int32_t>::min() ||
+                bucketCount > numeric_limits<int32_t>::max()) return false;
         } catch (...) {
             return false;
         }
@@ -35527,6 +35532,50 @@ static bool executeInternal(const string& rawSql, Session& s) {
             // the legacy semantic fallback below.
             size_t windowLimit = 0, windowOffset = 0;
             const bool finiteWindowLimit = parseLimitOffset(windowLimit, windowOffset);
+            struct WindowBucketArgument {
+                shared_ptr<dbms::PreparedQuery> query;
+                unique_ptr<dbms::PreparedQueryExecution> execution;
+                dbms::Expr* expression = nullptr;
+                size_t sourceOrdinal = 0;
+                dbms::QueryRowDescriptor descriptor;
+            };
+            vector<WindowBucketArgument> windowBucketArguments(windowFuncs.size());
+            // NTILE's INTEGER signature and constant conversions are bound
+            // before opening sources. The actual argument is evaluated only
+            // while its partition has not obtained a non-NULL bucket count.
+            for (size_t wi = 0; wi < windowFuncs.size(); ++wi) {
+                if (windowFuncs[wi].name != "ntile") continue;
+                auto& argument = windowBucketArguments[wi];
+                const string argumentSql = "SELECT ntile(" + windowFuncs[wi].arg + ") OVER() FROM " +
+                    tnameOrig + (tableAlias.empty() ? string() : " AS " + tableAlias);
+                argument.query = make_shared<dbms::PreparedQuery>(
+                    g_engine.prepareBoundQuery(s.currentDB, argumentSql, {}, true));
+                auto* select = dynamic_cast<dbms::SelectStmt*>(argument.query->ast.get());
+                auto* call = select && select->selectList.size() == 1
+                    ? dynamic_cast<dbms::FunctionCallExpr*>(select->selectList.front().expr.get()) : nullptr;
+                if (!call || call->args.size() != 1)
+                    throw dbms::DbError("XX000", "NTILE argument lost its prepared owner");
+                auto conversion = make_unique<dbms::CastExpr>();
+                conversion->typeName = "integer"; conversion->implicit = true;
+                conversion->operand = std::move(call->args.front());
+                call->args.front() = std::move(conversion);
+                argument.expression = call->args.front().get();
+                const auto source = find_if(argument.query->sourceRanges.begin(), argument.query->sourceRanges.end(),
+                    [&](const auto& range) { return range.owner == select; });
+                if (source == argument.query->sourceRanges.end() || source->columns.size() != tbl.len)
+                    throw dbms::DbError("XX000", "NTILE argument lost its actual source descriptor");
+                argument.sourceOrdinal = source->ordinal; argument.descriptor = source->columns;
+                argument.execution = make_unique<dbms::PreparedQueryExecution>(argument.query, &g_engine, queryDb);
+                const auto prepared = argument.query;
+                argument.execution->setChildCursorFactory([&, prepared](const dbms::Stmt* child, const dbms::RowContext& row) {
+                    return dbms::QueryPlanner::makePreparedCursor(
+                        dbms::QueryPlanner::buildPreparedQueryPlan(&g_engine, queryDb, prepared, child, row),
+                        prepared->statementOutputs.at(child));
+                });
+                argument.execution->prepareExpression(argument.expression);
+                argument.execution->planExpressionConstants(argument.expression);
+                argument.execution->prepareChildCursors();
+            }
             bool canUseVolcanoWindow = !hasAgg && !hasScalar &&
                                        distinctOnCols.empty() &&
                                        exprOrderBySpecs.empty() &&
@@ -35816,6 +35865,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             }
             set<int64_t> windowRowIds;
             const auto appendWindowRows = [&](const vector<string>& conditions, bool deduplicate) {
+                if (finiteWindowLimit && windowLimit == 0) return;
                 vector<vector<string>> cells;
                 vector<vector<bool>> nulls;
                 vector<int64_t> ids;
@@ -36122,6 +36172,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 }
             }
 
+            struct WindowBucketState { optional<size_t> buckets; size_t emitted = 0; };
+            vector<map<size_t, WindowBucketState>> windowBucketStates(windowFuncs.size());
             // Compute window function values
             for (size_t i = 0; i < rows.size(); ++i) {
                 for (size_t wi = 0; wi < windowFuncs.size(); ++wi) {
@@ -36193,23 +36245,43 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     } else if (wf.name == "ntile") {
                         size_t partEnd = i;
                         while (partEnd + 1 < rows.size() && samePartition(partEnd + 1, i, wf)) partEnd++;
-                        size_t partitionSize = partEnd - partStart + 1;
-                        int n = 1;
-                        try { n = std::stoi(wf.arg); } catch (...) { n = 1; }
-                        if (n <= 0) n = 1;
-                        const size_t buckets = static_cast<size_t>(n);
-                        size_t bucket = partIdx + 1;
+                        const size_t partitionSize = partEnd - partStart + 1;
+                        auto& state = windowBucketStates[wi][partStart];
+                        if (!state.buckets) {
+                            auto& argument = windowBucketArguments[wi];
+                            auto context = argument.execution->context();
+                            vector<dbms::ExprValue> cells;
+                            for (size_t column = 0; column < tbl.len; ++column) {
+                                const auto value = rows[i].find(tbl.cols[column].dataName);
+                                cells.emplace_back(argument.descriptor[column].type,
+                                    value == rows[i].end() ? string() : value->second, value == rows[i].end());
+                                cells.back().collation = tbl.cols[column].collation;
+                            }
+                            argument.execution->setSourceRow(context, argument.sourceOrdinal, cells);
+                            const auto count = argument.execution->evaluate(argument.expression, context);
+                            if (count.isNull) valueIsNull = true;
+                            else {
+                                const int64_t buckets = count.asInt();
+                                if (buckets <= 0) throw dbms::DbError("22014", "argument of ntile must be greater than zero");
+                                state.buckets = static_cast<size_t>(buckets);
+                            }
+                        }
+                        if (state.buckets) {
+                        const size_t buckets = *state.buckets;
+                        const size_t index = state.emitted++;
+                        size_t bucket = index + 1;
                         if (buckets < partitionSize) {
                             const size_t base = partitionSize / buckets;
                             const size_t extra = partitionSize % buckets;
                             // Match WindowOp: larger buckets come first, and
                             // more buckets than rows cannot create ID gaps.
                             const size_t leadingRows = extra ? (base + 1) * extra : 0;
-                            bucket = partIdx < leadingRows
-                                ? partIdx / (base + 1) + 1
-                                : extra + (partIdx - leadingRows) / base + 1;
+                            bucket = index < leadingRows
+                                ? index / (base + 1) + 1
+                                : extra + (index - leadingRows) / base + 1;
                         }
                         val = to_string(bucket);
+                        }
                     } else if (wf.name == "percent_rank") {
                         size_t partEnd = i;
                         while (partEnd + 1 < rows.size() && samePartition(partEnd + 1, i, wf)) partEnd++;
