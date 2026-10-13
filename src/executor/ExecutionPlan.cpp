@@ -4163,8 +4163,20 @@ bool WindowOp::open() {
                 int64_t bucketCount = 1;
                 if (!parseInteger(function.argument, bucketCount) || bucketCount <= 0) bucketCount = 1;
                 const size_t partitionSize = partitionEnd - partitionStart;
-                const size_t bucket = (position - partitionStart) * static_cast<size_t>(bucketCount) /
-                    std::max<size_t>(1, partitionSize) + 1;
+                const size_t index = position - partitionStart;
+                const size_t buckets = static_cast<size_t>(bucketCount);
+                size_t bucket = index + 1;
+                if (buckets < partitionSize) {
+                    const size_t base = partitionSize / buckets;
+                    const size_t extra = partitionSize % buckets;
+                    // The extra rows belong to the first extra buckets, not
+                    // evenly spaced buckets. This product is at most rows;
+                    // avoid index*buckets and the base+1 edge when extra=0.
+                    const size_t leadingRows = extra ? (base + 1) * extra : 0;
+                    bucket = index < leadingRows
+                        ? index / (base + 1) + 1
+                        : extra + (index - leadingRows) / base + 1;
+                }
                 computed[rowIndex][functionIndex] = std::to_string(bucket);
                 computedNulls[rowIndex][functionIndex] = false;
             } else if (function.name == "percent_rank") {

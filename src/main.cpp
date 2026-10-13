@@ -35846,7 +35846,18 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         int n = 1;
                         try { n = std::stoi(wf.arg); } catch (...) { n = 1; }
                         if (n <= 0) n = 1;
-                        size_t bucket = (partIdx * static_cast<size_t>(n)) / partitionSize + 1;
+                        const size_t buckets = static_cast<size_t>(n);
+                        size_t bucket = partIdx + 1;
+                        if (buckets < partitionSize) {
+                            const size_t base = partitionSize / buckets;
+                            const size_t extra = partitionSize % buckets;
+                            // Match WindowOp: larger buckets come first, and
+                            // more buckets than rows cannot create ID gaps.
+                            const size_t leadingRows = extra ? (base + 1) * extra : 0;
+                            bucket = partIdx < leadingRows
+                                ? partIdx / (base + 1) + 1
+                                : extra + (partIdx - leadingRows) / base + 1;
+                        }
                         val = to_string(bucket);
                     } else if (wf.name == "percent_rank") {
                         size_t partEnd = i;
