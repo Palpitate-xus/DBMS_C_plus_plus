@@ -49,3 +49,7 @@ CREATE TABLE 的正常协议接收中 timeout，未到维护任务用例；原�
 `r23-div14-whole-protocol.log`，不计为完整维护协议通过，不放宽 timeout。
 该私树不含 Root 已独立合入的 R17 等后续修复；Root 集成后须重新跑完整
 驱动，任何剩余失败继续记录，不据局部 native 成功宣称总清单完成。
+
+Root `07f71677` 已实际集成复验：真实变化源新编译及完整生产链接exit 0；
+十一完整native（含新/原maintenance驱动）、五完整相关协议及未改动的完整
+DIV14能力驱动均exit 0，记录见主[修复清单](review-fixes-2026-10-13.md)。

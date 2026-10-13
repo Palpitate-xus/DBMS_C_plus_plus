@@ -41,7 +41,7 @@
 | R20 | RETURNING子查询 | 已修复 | 原Root native29检查失败；PG/Root 35协议、七完整native及14完整协议全过，见[验证](issue-review-r20-returning-query-owner.md) |
 | R21 | ON CONFLICT BOOLEAN条件 | 已修复 | `1463b6be`；119 native、75 PG/候选/Root协议及完整邻居、Root十二native/PGprotocol通过，见[验证](issue-review-r21-conflict-boolean-context.md) |
 | R22 | 严格模式FROM/INTO | 已修复 | `799636f7`；36 native及拒绝控制通过；完整协议的独立R31后续通过，见[验证](issue-review-r22-dml-required-keywords.md) |
-| R23 | 维护任务持久化门禁 | 待修复 | |
+| R23 | 维护任务持久化门禁 | 已修复 | `07f71677`；49故障控制原28失败→0、ASan/UBSan、20重复与原管理器通过；Root十一native、五协议及完整DIV14通过，见[验证](issue-review-r23-maintenance-persistence-gate.md) |
 | R24 | EXECUTE参数求值 | 待修复 | |
 | R25 | Numeric::withPrecision | 已修复 | `021b3031`；原始12345→123失败保留；41控制O2/ASan/UBSan和原Numeric完整驱动通过，见[验证](issue-review-r25-numeric-precision.md) |
 | R26 | 递归CTE类型/typmod | 已修复 | `7cae7c1f`；PG/候选/Root57控制及Root六完整native通过，Root SQRT46控制也通过，见[验证](issue-review-r26-recursive-cte-types.md) |
@@ -55,10 +55,10 @@
 | R34 | 科学计数法NUMERIC算术scale | 已修复 | `a36efcb5`；120 native、123 PG/候选/Root协议，原111字节快照/known-gap断言及完整邻居通过，见[验证](issue-review-r34-scientific-numeric-arithmetic.md) |
 | R35 | INSERT SELECT的ON CONFLICT分句边界 | 已修复 | `a196264d`；42 native、17 PG/候选/Root协议及完整邻居通过，原失败保留；执行owner另记R39，见[验证](issue-review-r35-insert-select-conflict-boundary.md) |
 | R36 | gcd/lcm指数NUMERIC结果OID | 已修复 | `d1cd3cce`；63 native、61 PG/候选/Root协议，六native/五协议邻居通过，见[验证](issue-review-r36-gcd-lcm-result-types.md) |
-| R37 | TEXT与NUMERIC算术类型检查 | 待修复 | R34邻居发现；显式TEXT加NUMERIC错误接受；原SQL与日志见R34文档 |
-| R38 | 表列混合指数表达式投影 | 待修复 | R34邻居发现；`a+1e-40`旧投影错拆`1e`为列，原SQL与日志见R34文档 |
-| R39 | INSERT SELECT冲突/复杂source执行owner | 待修复 | R35 parser修复后，已有typed分派仍拒绝source DO UPDATE/JOIN/scalar；完整PG通过而候选失败的驱动及所有断言保留在`tests/compat/insert_select_conflict_owner_known_gap.py`（将随R35提交），不据parser通过宣称执行兼容 |
-| R40 | TEMP清理误删空尾相似名称的持久表fork | 候选已提交，待集成复验 | 候选`39ae50a6`；原known-gap断言134→0、新强化file-owner与六完整native邻居通过，见[验证](issue-review-r40-temp-cleanup-file-ownership.md)（随修复合入） |
+| R37 | TEXT与NUMERIC算术类型检查 | 已修复 | `b5fc5b73`；109 PG/候选/Root协议与60native通过；Root真实fresh58、十一完整native/PGprotocol通过，见[验证](issue-review-r37-numeric-text-arithmetic.md) |
+| R38 | 表列混合指数表达式投影 | 已修复 | `758c375b`；60协议原18失败→PG/候选/Root全过，36native及完整邻居通过；Root十一native/五协议通过，见[验证](issue-review-r38-scientific-column-projections.md) |
+| R39 | INSERT SELECT冲突/复杂source执行owner | 已修复 | `2d66c751`；53native原39失败→0、原完整23协议PG/候选/Root全过，保留全部known-gap断言；直接UNKNOWN输出的中间回归已修复，Root十一native/五协议通过，见[验证](issue-review-r39-insert-select-owner.md) |
+| R40 | TEMP清理误删空尾相似名称的持久表fork | 已修复 | `707a23f5`；原known-gap断言134→0、新强化file-owner与六完整native邻居通过；Root真实fresh58、十一native/PGprotocol通过，见[验证](issue-review-r40-temp-cleanup-file-ownership.md) |
 | O01 | owner健康重试及测试覆盖 | 已修复 | `c9a1e3c3`；原全部owner断言、新真实peer/dirty冲突及10完整native提交前/后通过；Root R14集成fresh58后两完整owner再次通过，见[验证](issue-review-o01-table-owner-health-retry.md) |
 | O02 | EXISTS索引错误的访问计划/断言 | 待复核 | |
 | O03 | EXPLAIN JOIN图及过时断言 | 待修复 | |
@@ -68,3 +68,19 @@
 | O07 | ALTER ARRAY历史超时 | 待复核 | |
 
 原273项功能总账独立维护；关闭这里的缺陷不自动宣称完整PostgreSQL功能兼容。
+
+## 最新主分支集成记录
+
+`b5fc5b73` 的公共算术类型头变化后真实重编全部58个生产翻译单元，标准构建
+实际exit 0（`/tmp/dbms-review-fix-donor.N9sdas6f/root-r37-r40-fresh58-build.log`）。
+R37协议109控制、最终十一完整native及完整postgres_protocol均exit 0。首次
+native批次在五个驱动通过后因调用者拼错 rollback 驱动文件名而exit 1；保留
+`root-r37-r40-native.log`，更正真实文件名并预校验全部输入后完整重跑十一项
+exit 0，不将首次批次记为十一项通过。
+
+`07f71677`（已含R38/R39）真实重编Main、DML、binder、maintenance四个变化
+翻译单元并链接exit 0；逐对象核对全部58份当前receipts及最终输入不变。
+`root-r38-r39-r23-native.log` 的十一完整native、五个
+`root-r38-r39-r23-*_test.py.log` 协议和 `root-r23-div14-whole-protocol.log`
+完整能力测试均exit 0。私树R23首次DIV14早期DDL超时仍保留，不改断言/timeout。
+上述为集成门禁，尚不是最后一次完整注册回归，也不关闭表内其余待修复项。
