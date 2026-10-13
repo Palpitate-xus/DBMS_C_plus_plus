@@ -35766,6 +35766,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             set<string> allCols;
             struct LegacyWindowRow : map<string, string> {
                 set<size_t> nullWindows;
+                vector<string> windowValues;
             };
             vector<LegacyWindowRow> rows;
             const auto partitionColumn = [&](const string& name) -> const dbms::Column& {
@@ -35907,6 +35908,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     if (cells[index].size() != tbl.len || nulls[index].size() != tbl.len)
                         throw dbms::DbError("XX000", "window source lost its declared row width");
                     LegacyWindowRow row;
+                    row.windowValues.resize(windowFuncs.size());
                     for (size_t column = 0; column < tbl.len; ++column)
                         if (!nulls[index][column]) row[tbl.cols[column].dataName] = cells[index][column];
                     rows.push_back(std::move(row));
@@ -36238,7 +36240,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             val = "1";
                         } else {
                             if (samePeer(i, i - 1, wf)) {
-                                val = rows[i - 1]["_win_" + to_string(wi)];
+                                val = rows[i - 1].windowValues.at(wi);
                             } else {
                                 val = to_string(partIdx + 1);
                             }
@@ -36248,10 +36250,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             val = "1";
                         } else {
                             if (samePeer(i, i - 1, wf)) {
-                                val = rows[i - 1]["_win_" + to_string(wi)];
+                                val = rows[i - 1].windowValues.at(wi);
                             } else {
                                 int64_t prevRank = 0;
-                                try { prevRank = stoll(rows[i - 1]["_win_" + to_string(wi)]); }
+                                try { prevRank = stoll(rows[i - 1].windowValues.at(wi)); }
                                 catch (...) { prevRank = 0; }
                                 val = to_string(prevRank + 1);
                             }
@@ -36397,7 +36399,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             valueIsNull = true;
                         }
                     }
-                    rows[i]["_win_" + to_string(wi)] = val;
+                    rows[i].windowValues.at(wi) = val;
                     if (valueIsNull) rows[i].nullWindows.insert(wi);
                 }
             }
@@ -36427,9 +36429,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         for (size_t j = 0; j < i; ++j) {
                             if (exprTypes[j] == 2) wi++;
                         }
-                        auto it = row.find("_win_" + to_string(wi));
-                        const bool isNull = it == row.end() || row.nullWindows.count(wi);
-                        const string value = it == row.end() ? string() : it->second;
+                        const bool isNull = row.nullWindows.count(wi);
+                        const string& value = row.windowValues.at(wi);
                         cells.push_back(isNull ? string() : value);
                         nulls.push_back(isNull);
                         line += (isNull ? "NULL" : value) + " ";

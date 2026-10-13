@@ -1,6 +1,6 @@
 # 全部文档检查清单
 
-审查输入和发现见[代码审查报告](code-review-2026-10-13.md)。基准提交 `a502ffa3` 包含 412 份已跟踪 Markdown；首次审查含新增报告共 417 份。当前本轮修复后逐文件复查 464 份 Markdown，下表覆盖全部；历史数量不改写。
+审查输入和发现见[代码审查报告](code-review-2026-10-13.md)。基准提交 `a502ffa3` 包含 412 份已跟踪 Markdown；首次审查含新增报告共 417 份。当前本轮修复后逐文件复查 465 份 Markdown，下表覆盖全部；历史数量不改写。
 
 检查逐文件读取 UTF-8 内容并验证 Markdown 内联链接的本地文件目标是否存在。它不验证外部网址、锚点、所有引用式链接，也不证明文中每个历史技术结论在当前版本成立。
 使用手册、部署、命令参考、模块 README 和状态入口另作人工一致性核查；`issue-*.md` 保留原始提交和运行证据，其结论须按对应输入读取。
@@ -353,6 +353,7 @@
 | [docs/issue-review-r41-insert-source-preflight.md](issue-review-r41-insert-source-preflight.md) | 历史问题证据 | 通过 |
 | [docs/issue-review-r42-index-rollback-fixture.md](issue-review-r42-index-rollback-fixture.md) | 历史问题证据 | 通过 |
 | [docs/issue-review-r43-function-attribute-order.md](issue-review-r43-function-attribute-order.md) | 历史问题证据 | 通过 |
+| [docs/issue-review-r44-window-internal-namespace.md](issue-review-r44-window-internal-namespace.md) | 历史问题证据 | 通过 |
 | [docs/issue-root-numeric-publication.md](issue-root-numeric-publication.md) | 历史问题证据 | 通过 |
 | [docs/issue-root-row-publication.md](issue-root-row-publication.md) | 历史问题证据 | 通过 |
 | [docs/issue-root-sql-value-publication.md](issue-root-sql-value-publication.md) | 历史问题证据 | 通过 |
