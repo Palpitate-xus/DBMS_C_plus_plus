@@ -17610,6 +17610,19 @@ DBStatus StorageEngine::truncateTable(const std::string& dbname,
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     const TableSchema table = getTableSchema(dbname, tablename);
 
+    // An unreadable publication is not a negative membership result. Check
+    // before WAL/heap mutation so direct callers cannot truncate without a
+    // trustworthy logical-capture decision.
+    try {
+        if (!table.isUnlogged)
+            (void)PublicationCatalog::instance().publishes(
+                dbname, tablename, LogicalChange::Op::Truncate);
+    } catch (const DbError& error) {
+        if (error.sqlState() != "58030") throw;
+        lockManager_.unlock(tablename);
+        return DBStatus::IO_ERROR;
+    }
+
     const auto finish = [&](DBStatus status) {
         lockManager_.unlock(tablename);
         return status;
@@ -24632,6 +24645,15 @@ DBStatus StorageEngine::insertInternal(
     TableSchema tbl;
     try { tbl = getTableSchema(dbname, tablename); }
     catch (...) { lockManager_.unlock(tablename); throw; }
+    bool captureLogicalInsert = false;
+    try {
+        captureLogicalInsert = !tbl.isUnlogged && PublicationCatalog::instance().publishes(
+            dbname, tablename, LogicalChange::Op::Insert);
+    } catch (const DbError& error) {
+        if (error.sqlState() != "58030") throw;
+        lockManager_.unlock(tablename);
+        return DBStatus::IO_ERROR;
+    }
     const auto secondaryIndexMetadata =
         getIndexMetadata(dbname, tablename);
     const auto compositeIndexMetadata =
@@ -26278,8 +26300,7 @@ DBStatus StorageEngine::insertInternal(
         return abortIndexUpdate();
     }
     // Logical decoding: buffer the change for streaming at commit.
-    if (!tbl.isUnlogged && PublicationCatalog::instance().publishes(
-            dbname, tablename, LogicalChange::Op::Insert)) {
+    if (captureLogicalInsert) {
         auto& txn = transactionContext();
         if (txn.inTransaction) {
             // Render every column in text form so subscribers see the same
@@ -27440,6 +27461,15 @@ DBStatus StorageEngine::removeInternal(
     if (!lockManager_.lockIntentExclusive(tablename)) return DBStatus::LOCK_CONFLICT;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
+    bool captureLogicalDelete = false;
+    try {
+        captureLogicalDelete = !tbl.isUnlogged && PublicationCatalog::instance().publishes(
+            dbname, tablename, LogicalChange::Op::Delete);
+    } catch (const DbError& error) {
+        if (error.sqlState() != "58030") throw;
+        lockManager_.unlock(tablename);
+        return DBStatus::IO_ERROR;
+    }
     // UPDATE/DELETE currently consume a parent-table RID after predicate
     // scanning.  Such a RID has no partition identity, so proceeding can
     // silently report success while touching no row, or target a different
@@ -28332,8 +28362,7 @@ DBStatus StorageEngine::removeInternal(
     }
     // Logical decoding: buffer the deletes (old images) for streaming at
     // commit.
-    if (!tbl.isUnlogged && PublicationCatalog::instance().publishes(
-            dbname, tablename, LogicalChange::Op::Delete)) {
+    if (captureLogicalDelete) {
         auto& txn = transactionContext();
         if (txn.inTransaction) {
             size_t di = 0;
@@ -28690,6 +28719,14 @@ DBStatus StorageEngine::updateInternal(
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
+    bool captureLogicalUpdate = false;
+    try {
+        captureLogicalUpdate = !tbl.isUnlogged && PublicationCatalog::instance().publishes(
+            dbname, tablename, LogicalChange::Op::Update);
+    } catch (const DbError& error) {
+        if (error.sqlState() != "58030") throw;
+        return DBStatus::IO_ERROR;
+    }
     // See removeInternal(): the current UPDATE machinery re-opens every RID
     // through the parent heap and cannot safely identify a partition tuple.
     if (tbl.partitionType != TableSchema::PartitionType::None) {
@@ -31175,8 +31212,7 @@ DBStatus StorageEngine::updateInternal(
 
         // Logical decoding: buffer the update (old/new images) for
         // streaming at commit.
-        if (!tbl.isUnlogged && PublicationCatalog::instance().publishes(
-                dbname, tablename, LogicalChange::Op::Update)) {
+        if (captureLogicalUpdate) {
             auto& txn = transactionContext();
             if (txn.inTransaction) {
                 std::string oldRendered, newRendered;

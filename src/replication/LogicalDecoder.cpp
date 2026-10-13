@@ -1,5 +1,6 @@
 #include "replication/LogicalDecoder.h"
 #include "access/IndexFileUtil.h"
+#include "common/DbError.h"
 
 #include <algorithm>
 #include <filesystem>
@@ -590,7 +591,8 @@ bool PublicationCatalog::publishes(const std::string& dbname,
                                    const std::string& table) const {
     std::vector<Publication> publications;
     std::string error;
-    if (!list(dbname, publications, error)) return false;
+    if (!list(dbname, publications, error))
+        throw DbError("58030", "cannot read publication metadata: " + error);
     for (const auto& pub : publications) {
         if (pub.publishAllTables) return true;
         if (std::find(pub.tables.begin(), pub.tables.end(), table) != pub.tables.end())
@@ -604,7 +606,8 @@ bool PublicationCatalog::publishes(const std::string& dbname,
                                    LogicalChange::Op operation) const {
     std::vector<Publication> publications;
     std::string error;
-    if (!list(dbname, publications, error)) return false;
+    if (!list(dbname, publications, error))
+        throw DbError("58030", "cannot read publication metadata: " + error);
     for (const auto& pub : publications) {
         const bool member = pub.publishAllTables ||
             std::find(pub.tables.begin(), pub.tables.end(), table) !=

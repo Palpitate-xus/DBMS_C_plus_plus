@@ -11,6 +11,7 @@
 #include "replication/LogicalDecoder.h"
 #include "replication/ReplicationManager.h"
 #include "access/IndexFileUtil.h"
+#include "common/DbError.h"
 #include "commands/TableManage.h"
 #include "commands/DdlExecutor.h"
 #include "Session.h"
@@ -293,7 +294,10 @@ static void test_publication_catalog() {
     assert(!cat.list(corruptDb, strictPublications, error));
     assert(error.find("invalid publication file") != std::string::npos);
     assert(strictPublications.empty());
-    assert(!cat.publishes(corruptDb, "orders"));
+    bool membershipRejected = false;
+    try { (void)cat.publishes(corruptDb, "orders"); }
+    catch (const DbError& error) { membershipRejected = error.sqlState() == "58030"; }
+    assert(membershipRejected); // Read failure must not mean "unpublished".
     Publication replacement;
     replacement.name = "corrupt";
     replacement.owner = "admin";

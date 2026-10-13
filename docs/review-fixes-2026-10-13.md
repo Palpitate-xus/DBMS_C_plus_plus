@@ -32,11 +32,11 @@
 | R11 | 窗口SUM中间溢出 | 待修复 | |
 | R12 | 测试注册 | 已修复 | `a6bb7ef7`；五个原驱动实际0；新增完整注册盘点及构建路由检查通过，见[验证](issue-review-r12-test-registration.md) |
 | R13 | 逻辑预览NULL及字段编码 | 待修复 | |
-| R14 | publication读取错误传播 | 待修复 | |
+| R14 | publication读取错误传播 | 已修复 | 原成员读取五个错误实际失败；Root fresh58 与写入前保护、原逻辑解码及目录/owner九完整native全过，见[验证](issue-review-r14-publication-read-errors.md) |
 | R15 | 关停唤醒顺序 | 待修复 | |
 | R16 | catalog坏行及完整加载 | 已修复 | `0d85f6b9`/`a0d2efde`；691、cold正常API及原catalog_snapshot全通过，见[初始验证](issue-review-r16-catalog-complete-read.md)/[兼容修复](issue-review-r16-optional-catalog-directory.md) |
 | R17 | 失败回滚恢复图像 | 待修复 | |
-| R18 | catalog值快照 | 已修复 | `8f6e3c43`；候选fresh58及提交前/后8完整native通过，Root整合随后复验，见[验证](issue-review-r18-catalog-value-snapshots.md) |
+| R18 | catalog值快照 | 已修复 | `8f6e3c43`；候选fresh58及提交前/后8完整native通过，Root R14 集成 fresh58 后再次通过 snapshot/complete/cold/owner，见[验证](issue-review-r18-catalog-value-snapshots.md) |
 | R19 | TEMP启动恢复 | 待修复 | |
 | R20 | RETURNING子查询 | 待修复 | |
 | R21 | ON CONFLICT BOOLEAN条件 | 待修复 | |
@@ -51,7 +51,8 @@
 | R30 | Parse/Describe会话上下文 | 已修复 | `8ba70380`；Root标准构建及12控制通过；5个原失败驱动在候选通过，见[验证](issue-review-r30-session-metadata.md) |
 | R31 | DELETE ONLY回退错删多行 | 已修复 | `eabfc340`；新12控制PG/候选、原R22完整协议、3 native/3协议/完整PGprotocol通过，见[验证](issue-review-r31-delete-only-typed-owner.md) |
 | R32 | 科学计数法字面量的NUMERIC写入绑定 | 待修复 | 新增；`INSERT ... VALUES(1e40)`对NUMERIC列错误返回42804，而typed cast合法 |
-| O01 | owner健康重试及测试覆盖 | 已修复 | 原全部owner断言、新真实peer/dirty冲突及10完整native提交前/后通过，见[验证](issue-review-o01-table-owner-health-retry.md) |
+| R33 | legacy窗口路径丢失最终ORDER BY | 待修复 | R11新控制发现；配合nth_value的合法窗口查询按partition顺序返回而忽略最终ORDER BY id；独立失败证据保留 |
+| O01 | owner健康重试及测试覆盖 | 已修复 | `c9a1e3c3`；原全部owner断言、新真实peer/dirty冲突及10完整native提交前/后通过；Root R14集成fresh58后两完整owner再次通过，见[验证](issue-review-o01-table-owner-health-retry.md) |
 | O02 | EXISTS索引错误的访问计划/断言 | 待复核 | |
 | O03 | EXPLAIN JOIN图及过时断言 | 待修复 | |
 | O04 | HAVING BOOLEAN绑定 | 待修复 | |
