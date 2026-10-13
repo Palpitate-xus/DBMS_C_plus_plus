@@ -25,6 +25,9 @@ void ConnectionPool::configure(const std::string& poolMode, int poolSize,
     if (poolSize >= 1) poolSize_ = poolSize;
     maxClientConnections_.store(std::max(0, maxClientConnections),
                                 std::memory_order_release);
+    // A capacity increase may make a blocked rental possible without any
+    // existing backend being released.
+    cv_.notify_all();
 }
 
 bool ConnectionPool::tryReserveClientSlot() {
@@ -69,12 +72,30 @@ std::shared_ptr<BackendContext> ConnectionPool::acquire(const std::string& user,
                 }
             }
 
-            if (static_cast<int>(entries.size()) < poolSize_) {
+            const auto newContext = [&]() {
                 auto ctx = std::make_shared<BackendContext>();
                 ctx->session.username = user;
                 ctx->session.currentDB = database;
                 ctx->session.permission = 1;
+                return ctx;
+            };
+            if (static_cast<int>(entries.size()) < poolSize_) {
+                auto ctx = newContext();
                 entries.push_back({ctx, false});
+                totalRents_.fetch_add(1, std::memory_order_relaxed);
+                return ctx;
+            }
+
+            // pool_size is a per-user limit, including all databases.
+            // At capacity an idle foreign-database entry can be retired,
+            // but its Session/prepared state must not travel into the new
+            // database. Replace it with a fresh context; never retarget a
+            // rented backend or mutate an externally held old context.
+            for (auto& entry : entries) {
+                if (!entry.idle) continue;
+                auto ctx = newContext();
+                entry.ctx = ctx;
+                entry.idle = false;
                 totalRents_.fetch_add(1, std::memory_order_relaxed);
                 return ctx;
             }

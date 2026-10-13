@@ -28,7 +28,7 @@
 | R07 | LAG/LEAD偏移 | 待修复 | |
 | R08 | binary float参数往返 | 处理中 | 独立worktree |
 | R09 | 连接池等待期间引用寿命 | 已修复 | `2332382f`；原实现ASan失败；修复O2/ASan及重复测试通过，见[验证](issue-review-r09-pool-wait-reference.md) |
-| R10 | 连接池跨数据库等待 | 待修复 | |
+| R10 | 连接池跨数据库等待 | 已修复 | Root真实源新编译4控制通过；O2/ASan及重复验证见[验证](issue-review-r10-pool-database-capacity.md) |
 | R11 | 窗口SUM中间溢出 | 待修复 | |
 | R12 | 测试注册 | 待修复 | |
 | R13 | 逻辑预览NULL及字段编码 | 待修复 | |
@@ -48,7 +48,7 @@
 | R27 | 页压缩全部存活行 | 已修复 | `58f1ee3d`；原生26组O2/ASan/UBSan通过；SQL及进程重启通过，见[验证](issue-review-r27-page-compaction.md) |
 | R28 | 页插入空间计算 | 待修复 | |
 | R29 | LIKE ESCAPE类型比较 | 待修复 | |
-| R30 | Parse/Describe会话上下文 | 已修复 | Root标准构建及12控制通过；5个原失败驱动在候选通过，见[验证](issue-review-r30-session-metadata.md) |
+| R30 | Parse/Describe会话上下文 | 已修复 | `8ba70380`；Root标准构建及12控制通过；5个原失败驱动在候选通过，见[验证](issue-review-r30-session-metadata.md) |
 | O01 | owner健康重试及测试覆盖 | 待修复 | |
 | O02 | EXISTS索引错误的访问计划/断言 | 待复核 | |
 | O03 | EXPLAIN JOIN图及过时断言 | 待修复 | |
