@@ -2516,6 +2516,119 @@ bool publishReturning(const std::vector<ReturningProjection>& projections,
     return true;
 }
 
+// Legacy INSERT/target-only UPDATE still own their physical mutation loop,
+// but RETURNING must consume the same wholly bound AST as the input. A raw
+// scalar-query literal is not a text datum, and copying it into ExprEvaluator
+// loses its query host, correlations and declared result descriptor.
+class PreparedReturningExecution {
+    PreparedQueryExecution& execution_;
+    const Stmt* statement_;
+    const std::vector<SelectItem>& items_;
+    const PreparedQuery::SourceRange* target_ = nullptr;
+    std::vector<std::pair<const PreparedQuery::SourceRange*, ReturningProjection::Source>> images_;
+    std::map<const Expr*, std::vector<std::pair<size_t, size_t>>> stars_;
+
+    static bool star(const Expr* expression) {
+        const auto* column = dynamic_cast<const ColumnRefExpr*>(expression);
+        return isStarProjection(expression) || (column && column->column == "*");
+    }
+public:
+    PreparedReturningExecution(PreparedQueryExecution& execution, const Stmt* statement,
+                               const std::vector<SelectItem>& items,
+                               const ReturningBinding& binding)
+        : execution_(execution), statement_(statement), items_(items) {
+        for (const auto& range : execution_.query().sourceRanges) {
+            if (range.owner != statement_ || range.source || range.mergedUsing || range.cteStatement)
+                continue;
+            if (!range.relationName.empty()) {
+                if (target_) throw DbError("XX000", "RETURNING has multiple physical target occurrences");
+                target_ = &range;
+            } else if (!binding.oldName.empty() && range.name == binding.oldName) {
+                images_.emplace_back(&range, ReturningProjection::Source::Old);
+            } else if (!binding.newName.empty() && range.name == binding.newName) {
+                images_.emplace_back(&range, ReturningProjection::Source::New);
+            }
+        }
+        if (!target_) throw DbError("XX000", "RETURNING lost its prepared target occurrence");
+        for (const auto& item : items_) {
+            if (!star(item.expr.get())) {
+                // PostgreSQL plans structural constants, including those in
+                // scalar children, before a DEFAULT constraint or empty
+                // input can hide their errors. This never runs volatile
+                // routines or caches row-dependent child query results.
+                execution_.planExpressionConstants(item.expr.get());
+                execution_.prepareExpression(item.expr.get());
+                continue;
+            }
+            const auto* column = dynamic_cast<const ColumnRefExpr*>(item.expr.get());
+            const PreparedQuery::SourceRange* source = column ? nullptr : target_;
+            if (column) for (const auto& range : execution_.query().sourceRanges) {
+                if (range.owner != statement_ || range.name != column->table ||
+                    (!column->schema.empty() && range.schema != column->schema)) continue;
+                if (source) throw DbError("XX000", "RETURNING star has multiple prepared occurrences");
+                source = &range;
+            }
+            if (!source) throw DbError("XX000", "RETURNING star lost its prepared occurrence");
+            auto& cells = stars_[item.expr.get()];
+            for (size_t i = 0; i < source->columns.size(); ++i)
+                if (column || !source->hiddenUnqualified.count(source->columns[i].name))
+                    cells.emplace_back(source->ordinal, i);
+        }
+    }
+
+    bool publish(const std::vector<ReturningRowImage>& rows, const std::string& command) {
+        // Publish only the complete result. An exception leaves no partially
+        // available rows and is handled by the caller's statement savepoint.
+        g_lastDmlResult = {};
+        DmlResult output;
+        output.available = true;
+        output.commandTag = command == "INSERT" ? "INSERT 0 " + std::to_string(rows.size())
+                                                : command + " " + std::to_string(rows.size());
+        const auto& descriptor = execution_.query().statementOutputs.at(statement_);
+        for (const auto& column : descriptor) {
+            output.columns.push_back(column.name);
+            output.columnTypes.push_back(column.type == "unknown" ? "text"
+                : ExprHelper::canonicalResultTypeName(column.type));
+        }
+        for (const auto& image : rows) {
+            RowContext row = execution_.context();
+            const auto set = [&](const PreparedQuery::SourceRange& source, const SqlRow& values) {
+                std::vector<ExprValue> cells;
+                for (const auto& column : source.columns) {
+                    const auto found = values.find(column.name);
+                    if (!values.empty() && found == values.end())
+                        throw DbError("XX000", "RETURNING row image lost a bound column");
+                    const bool isNull = found == values.end() || !found->second;
+                    cells.emplace_back(column.type, isNull ? std::string{} : *found->second, isNull);
+                }
+                execution_.setSourceRow(row, source.ordinal, cells);
+            };
+            set(*target_, returningSourceRow(image, ReturningProjection::Source::Default));
+            for (const auto& channel : images_)
+                set(*channel.first, returningSourceRow(image, channel.second));
+            std::vector<ExprValue> values;
+            for (const auto& item : items_) {
+                if (star(item.expr.get())) {
+                    for (const auto& cell : stars_.at(item.expr.get()))
+                        values.push_back(row.boundColumn(cell.first, cell.second));
+                } else values.push_back(execution_.evaluate(item.expr.get(), row));
+            }
+            if (values.size() != descriptor.size())
+                throw DbError("XX000", "RETURNING width differs from its prepared descriptor");
+            std::vector<std::string> cells;
+            std::vector<bool> nulls;
+            for (const auto& value : values) {
+                cells.push_back(value.isNull ? "NULL" : value.value);
+                nulls.push_back(value.isNull);
+            }
+            output.rows.push_back(std::move(cells));
+            output.nulls.push_back(std::move(nulls));
+        }
+        g_lastDmlResult = std::move(output);
+        return true;
+    }
+};
+
 void printReturningRows(const DmlResult& result) {
     for (const auto& row : result.rows) {
         std::ostringstream line;
@@ -2973,7 +3086,7 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
         }
     }
     std::shared_ptr<PreparedQuery> preparedInsert;
-    if (stmt.selectSource || !stmt.values.empty()) {
+    if (stmt.selectSource || !stmt.values.empty() || !stmt.returning.empty()) {
         // Prepare actual source descriptors and contextual target input before
         // opening a source, testing WHERE, or evaluating any volatile target.
         // The shared metadata callback distinguishes a direct unknown literal
@@ -2988,13 +3101,15 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
 
     const ReturningBinding insertReturningBinding = returningBinding(
         stmt.returningOptions, requestedTable, "");
-    std::vector<ReturningProjection> returningProjections;
-    if (!stmt.returning.empty() &&
-        !buildReturningProjections(stmt.returning, table,
-                                   insertReturningBinding,
-                                   returningProjections, s.currentDB)) {
-        fallback = true;
-        return false;
+    std::unique_ptr<PreparedQueryExecution> insertExecution;
+    std::unique_ptr<PreparedReturningExecution> returningExecution;
+    if (preparedInsert) {
+        insertExecution = std::make_unique<PreparedQueryExecution>(preparedInsert, &g_engine, s.currentDB);
+        const auto* insert = dynamic_cast<const InsertStmt*>(preparedInsert->ast.get());
+        if (!insert) throw DbError("XX000", "INSERT RETURNING lost its prepared statement");
+        if (!insert->returning.empty())
+            returningExecution = std::make_unique<PreparedReturningExecution>(
+                *insertExecution, insert, insert->returning, insertReturningBinding);
     }
     std::vector<std::map<std::string, std::string>> insertedRows;
     const bool ignoreDuplicate = lower(stmt.conflictAction) == "do nothing";
@@ -3139,9 +3254,8 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
         }
         std::cout << inserted << " row(s) inserted" << std::endl;
         if (!stmt.returning.empty()) {
-            if (!publishReturning(
-                    returningProjections, table, insertReturningBinding,
-                    s.currentDB, insertedReturningImages(selectInsertedRows),
+            if (!returningExecution->publish(
+                    insertedReturningImages(selectInsertedRows),
                     "INSERT")) return true;
             printReturningRows(g_lastDmlResult);
         }
@@ -3171,9 +3285,8 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
         if (status == DBStatus::DUPLICATE_KEY && ignoreDuplicate) {
             std::cout << "INSERT 0 0 (ON CONFLICT DO NOTHING)" << std::endl;
             if (!stmt.returning.empty()) {
-                if (!publishReturning(
-                        returningProjections, table, insertReturningBinding,
-                        s.currentDB, insertedReturningImages(insertedRows),
+                if (!returningExecution->publish(
+                        insertedReturningImages(insertedRows),
                         "INSERT")) return true;
                 printReturningRows(g_lastDmlResult);
             }
@@ -3191,9 +3304,8 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
         }
         std::cout << "INSERT 0 1" << std::endl;
         if (!stmt.returning.empty()) {
-            if (!publishReturning(
-                    returningProjections, table, insertReturningBinding,
-                    s.currentDB, insertedReturningImages(insertedRows),
+            if (!returningExecution->publish(
+                    insertedReturningImages(insertedRows),
                     "INSERT")) return true;
             printReturningRows(g_lastDmlResult);
         }
@@ -3214,7 +3326,7 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
     const auto* typedInsert = preparedInsert
         ? dynamic_cast<const InsertStmt*>(preparedInsert->ast.get()) : nullptr;
     if (!typedInsert) throw DbError("XX000","INSERT VALUES has no prepared statement");
-    PreparedQueryExecution execution(preparedInsert,&g_engine,s.currentDB);
+    PreparedQueryExecution& execution = *insertExecution;
     for (const auto& row : typedInsert->values)
         for (const auto& value : row)
             if (!isDefaultValue(value)) execution.prepareExpression(value.get());
@@ -3436,9 +3548,7 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
 
     std::cout << inserted << " row(s) inserted" << std::endl;
     if (!stmt.returning.empty()) {
-        if (!publishReturning(
-                returningProjections, table, insertReturningBinding,
-                s.currentDB, returningImages, "INSERT")) return true;
+        if (!returningExecution->publish(returningImages, "INSERT")) return true;
         printReturningRows(g_lastDmlResult);
     }
     if (!statementScope.finish()) {
@@ -4040,12 +4150,6 @@ bool executePreparedUpdate(const UpdateStmt& stmt, Session& s, bool& fallback,
 
     const ReturningBinding binding = returningBinding(
         stmt.returningOptions, requestedTable, stmt.alias);
-    std::vector<ReturningProjection> projections;
-    if (!stmt.returning.empty() &&
-        !buildReturningProjections(stmt.returning, table, binding, projections, s.currentDB)) {
-        fallback = true;
-        return false;
-    }
     // Bare unknown strings and NULL acquire the boolean WHERE context. Typed
     // text/numeric expressions must not pass just because they return NULL.
     if (auto* literal = dynamic_cast<LiteralExpr*>(update->whereClause.get())) {
@@ -4093,6 +4197,7 @@ bool executePreparedUpdate(const UpdateStmt& stmt, Session& s, bool& fallback,
         assignment.second = std::move(cast);
     }
     PreparedQueryExecution execution(prepared, &g_engine, s.currentDB);
+    PreparedReturningExecution returningExecution(execution, update, update->returning, binding);
     // A lowered DEFAULT remains this execution's actual value root. Plan its
     // structural constants before row demand, including arguments of a
     // volatile default, without invoking that routine. Non-DEFAULT legacy
@@ -4195,8 +4300,7 @@ bool executePreparedUpdate(const UpdateStmt& stmt, Session& s, bool& fallback,
     if (status != DBStatus::OK)
         throw DbError(sqlstateForDBStatus(status), "UPDATE failed");
     if (!stmt.returning.empty() &&
-        !publishReturning(projections, table, binding, s.currentDB,
-                          updatedReturningImages(images), "UPDATE")) return true;
+        !returningExecution.publish(updatedReturningImages(images), "UPDATE")) return true;
     if (!statementScope.finish()) {
         clearLastDmlResult();
         throw DbError("58030", "UPDATE transaction finish failed");
