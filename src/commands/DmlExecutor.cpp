@@ -647,17 +647,17 @@ bool supportsConflict(const InsertStmt& stmt) {
     const bool hasArbiter = !stmt.conflictTarget.empty() ||
         !stmt.conflictConstraint.empty();
     // DO NOTHING may be target-less or explicitly constrained; DO UPDATE is
-    // admitted only for a narrow VALUES shape and is constraint-backed by
+    // admitted for materialized VALUES/SELECT input and is constraint-backed by
     // buildConflictUpdatePlan().
     if (action.empty()) return true;
     if (action == "do nothing") {
         if (!hasArbiter) return !stmt.conflictWhere;
         return !stmt.conflictWhere && !stmt.defaultValues &&
-               stmt.selectSource == nullptr && !stmt.values.empty();
+               (stmt.selectSource != nullptr || !stmt.values.empty());
     }
     return action == "do update" && hasArbiter &&
            !stmt.defaultValues &&
-           stmt.selectSource == nullptr && !stmt.values.empty();
+           (stmt.selectSource != nullptr || !stmt.values.empty());
 }
 
 bool supportsInsert(const InsertStmt& stmt) {
@@ -1511,290 +1511,14 @@ bool buildReturningProjections(const std::vector<SelectItem>& returning,
     return !projections.empty();
 }
 
-bool collectSourceColumns(const Expr* expr, const TableSchema& table,
-                          const std::string& sourceName,
-                          const std::string& alias,
-                          ExprEvaluator& evaluator,
-                          std::set<std::string>& columns) {
-    if (!expr) return false;
-    if (dynamic_cast<const LiteralExpr*>(expr)) return true;
-    if (const auto* ref = dynamic_cast<const ColumnRefExpr*>(expr)) {
-        if (!ref->schema.empty()) return false;
-        if (!ref->table.empty() &&
-            identifier(ref->table) != identifier(sourceName) &&
-            (alias.empty() || identifier(ref->table) != identifier(alias))) {
-            return false;
-        }
-        const std::string& column = ref->column;
-        for (size_t i = 0; i < table.len; ++i) {
-            if (table.cols[i].dataName == column) {
-                columns.insert(column);
-                return true;
-            }
-        }
-        return false;
-    }
-    if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(expr)) {
-        return collectSourceColumns(unary->operand.get(), table, sourceName,
-                                    alias, evaluator, columns);
-    }
-    if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(expr)) {
-        return collectSourceColumns(binary->left.get(), table, sourceName,
-                                    alias, evaluator, columns) &&
-               collectSourceColumns(binary->right.get(), table, sourceName,
-                                    alias, evaluator, columns);
-    }
-    if (const auto* call = dynamic_cast<const FunctionCallExpr*>(expr)) {
-        if (!evaluator.hasFunction(call->funcName) || call->hasOver ||
-            call->filter || !call->namedArgs.empty() || !call->orderBy.empty()) {
-            return false;
-        }
-        for (const auto& arg : call->args) {
-            if (!collectSourceColumns(arg.get(), table, sourceName, alias,
-                                      evaluator, columns)) return false;
-        }
-        return true;
-    }
-    if (const auto* caseExpr = dynamic_cast<const CaseExpr*>(expr)) {
-        if (caseExpr->switchExpr &&
-            !collectSourceColumns(caseExpr->switchExpr.get(), table, sourceName,
-                                  alias, evaluator, columns)) return false;
-        for (const auto& clause : caseExpr->whenClauses) {
-            if (!collectSourceColumns(clause.first.get(), table, sourceName,
-                                      alias, evaluator, columns) ||
-                !collectSourceColumns(clause.second.get(), table, sourceName,
-                                      alias, evaluator, columns)) return false;
-        }
-        return !caseExpr->elseExpr ||
-               collectSourceColumns(caseExpr->elseExpr.get(), table, sourceName,
-                                    alias, evaluator, columns);
-    }
-    if (const auto* cast = dynamic_cast<const CastExpr*>(expr)) {
-        return collectSourceColumns(cast->operand.get(), table, sourceName,
-                                    alias, evaluator, columns);
-    }
-    if (const auto* array = dynamic_cast<const ArrayExpr*>(expr)) {
-        for (const auto& element : array->elements) {
-            if (!collectSourceColumns(element.get(), table, sourceName, alias,
-                                      evaluator, columns)) return false;
-        }
-        return true;
-    }
-    if (const auto* row = dynamic_cast<const RowExpr*>(expr)) {
-        for (const auto& element : row->elements) {
-            if (!collectSourceColumns(element.get(), table, sourceName, alias,
-                                      evaluator, columns)) return false;
-        }
-        return true;
-    }
-    return false;
-}
-
 bool isStarProjection(const Expr* expr) {
     const auto* literal = expr ? dynamic_cast<const LiteralExpr*>(expr) : nullptr;
     return literal && literal->value == "*";
 }
 
-bool evaluateSourceExpression(const Expr* expr, const RowContext& context,
-                              ExprEvaluator& evaluator, SqlCell& value) {
-    const ExprValue result = evaluator.eval(expr, context);
-    if (result.isNull) {
-        value = std::nullopt;
-        return true;
-    }
-    if (result.isUnknown() || result.typeName == "unknown") return false;
-    std::string evaluated = result.value;
-    if (result.typeName == "boolean") {
-        if (evaluated == "t") evaluated = "1";
-        else if (evaluated == "f") evaluated = "0";
-    }
-    value = std::move(evaluated);
-    return true;
-}
-
-enum class InsertSelectBuildResult { Success, Unsupported, Error };
-
-InsertSelectBuildResult buildInsertSelectRows(
-    const SelectStmt& select, Session& s,
-    const std::vector<std::string>& targetColumns,
-    std::vector<SqlRow>& pendingRows, PreparedQueryExecution& execution) {
-    if (!select.ctes.empty() || !select.groupBy.empty() ||
-        !select.groupByElems.empty() || select.having || !select.orderBy.empty() ||
-        select.limit || select.offset || select.withTies || select.fetchFirst ||
-        select.setOp != SetOp::None || select.setOpLhs || select.setOpRhs ||
-        !select.valuesRows.empty() || select.distinct || !select.distinctOn.empty() ||
-        !select.locking.empty() || !select.windowDefs.empty() ||
-        select.selectList.empty()) {
-        return InsertSelectBuildResult::Unsupported;
-    }
-
-    std::string sourceName;
-    std::string sourceAlias;
-    TableSchema sourceTable;
-    bool hasSource = select.fromClause != nullptr;
-    if (hasSource) {
-        if (select.fromClause->type != FromItem::Type::Table ||
-            select.fromClause->tableName.empty()) {
-            return InsertSelectBuildResult::Unsupported;
-        }
-        sourceName = identifier(select.fromClause->tableName);
-        sourceAlias = identifier(select.fromClause->alias);
-        if (select.fromClause->left || select.fromClause->right ||
-            select.fromClause->subquery) {
-            return InsertSelectBuildResult::Unsupported;
-        }
-        const std::string resolvedSource = resolveTable(s, sourceName);
-        if (g_engine.viewExists(s.currentDB, sourceName) ||
-            g_engine.isMaterializedView(s.currentDB, sourceName)) {
-            return InsertSelectBuildResult::Unsupported;
-        }
-        if (!g_engine.tableExists(s.currentDB, resolvedSource)) {
-            std::cout << "Table " << sourceName << " not exist" << std::endl;
-            return InsertSelectBuildResult::Error;
-        }
-        if (!checkTablePrivilege(s, sourceName,
-                                 StorageEngine::TablePrivilege::Select)) {
-            return InsertSelectBuildResult::Error;
-        }
-        sourceTable = g_engine.getTableSchema(s.currentDB, resolvedSource);
-    }
-
-    ExprEvaluator evaluator;
-    evaluator.setCurrentDB(s.currentDB);
-    std::set<std::string> referencedColumns;
-    struct Projection { const Expr* expr = nullptr; size_t sourceIndex = 0; };
-    std::vector<Projection> projections;
-    for (const auto& item : select.selectList) {
-        if (!item.expr || (!item.alias.empty() && isStarProjection(item.expr.get()))) {
-            return InsertSelectBuildResult::Unsupported;
-        }
-        if (isStarProjection(item.expr.get())) {
-            if (!hasSource) return InsertSelectBuildResult::Unsupported;
-            for (size_t i = 0; i < sourceTable.len; ++i) {
-                referencedColumns.insert(sourceTable.cols[i].dataName);
-                projections.push_back({nullptr, i});
-            }
-            continue;
-        }
-        if (hasSource && !collectSourceColumns(item.expr.get(), sourceTable, sourceName,
-                                               sourceAlias, evaluator,
-                                               referencedColumns)) {
-            return InsertSelectBuildResult::Unsupported;
-        }
-        if (!hasSource && !collectSourceColumns(item.expr.get(), TableSchema{}, "", "",
-                                                evaluator, referencedColumns)) {
-            return InsertSelectBuildResult::Unsupported;
-        }
-        projections.push_back({item.expr.get(), 0});
-    }
-    if (hasSource && select.whereClause &&
-        !collectSourceColumns(select.whereClause.get(), sourceTable, sourceName,
-                              sourceAlias, evaluator, referencedColumns)) {
-        return InsertSelectBuildResult::Unsupported;
-    }
-    if (hasSource && !sessionIsAdmin(s) && !isTempTable(s, sourceName) &&
-        !g_engine.hasColumnPermission(s.currentDB, sourceName, effectiveSessionRole(s),
-                                      StorageEngine::TablePrivilege::Select,
-                                      std::vector<std::string>(referencedColumns.begin(),
-                                                               referencedColumns.end()))) {
-        std::cout << "permission denied: SELECT on restricted columns of table "
-                  << sourceName << std::endl;
-        return InsertSelectBuildResult::Error;
-    }
-    if (projections.size() != targetColumns.size()) {
-        std::cout << "SQL syntax error: column count mismatch" << std::endl;
-        return InsertSelectBuildResult::Error;
-    }
-
-    const PreparedQuery::SourceRange* sourceRange = nullptr;
-    if (hasSource) {
-        for (const auto& range : execution.query().sourceRanges)
-            if (range.owner == &select && range.source == select.fromClause.get()) {
-                sourceRange = &range; break;
-            }
-        if (!sourceRange || sourceRange->columns.size() != sourceTable.len)
-            throw DbError("XX000","INSERT SELECT source descriptor does not match its prepared range");
-    }
-    for (const auto& projection : projections)
-        if (projection.expr) execution.prepareExpression(const_cast<Expr*>(projection.expr));
-    execution.prepareExpression(select.whereClause.get());
-
-    bool evaluationFailed = false;
-    auto appendRow = [&](const std::string& row) {
-        RowContext context = execution.context();
-        if (hasSource) {
-            std::vector<ExprValue> sourceCells;
-            for (size_t i = 0; i < sourceTable.len; ++i) {
-                const auto& column = sourceTable.cols[i];
-                bool isNull = false;
-                const std::string value = g_engine.extractColumnValue(
-                    row, sourceTable, i, s.currentDB, true, &isNull);
-                ExprValue expressionValue(column.dataType, value, isNull);
-                sourceCells.emplace_back(sourceRange->columns[i].type,value,isNull);
-                context.set(column.dataName, expressionValue);
-                if (!sourceAlias.empty()) {
-                    context.set(sourceAlias + "." + column.dataName,
-                                expressionValue);
-                }
-                context.set(sourceName + "." + column.dataName,
-                            expressionValue);
-            }
-            execution.setSourceRow(context,sourceRange->ordinal,sourceCells);
-        }
-        if (select.whereClause) {
-            const ExprValue predicate = execution.evaluate(select.whereClause.get(), context);
-            if (predicate.isUnknown() || predicate.typeName == "unknown") {
-                evaluationFailed = true;
-                return;
-            }
-            if (predicate.isNull) return;
-            if (predicate.typeName != "boolean") {
-                evaluationFailed = true;
-                return;
-            }
-            if (!predicate.asBool()) return;
-        }
-
-        SqlRow values;
-        for (size_t i = 0; i < projections.size(); ++i) {
-            SqlCell value;
-            if (projections[i].expr == nullptr) {
-                bool isNull = false;
-                std::string extracted = g_engine.extractColumnValue(
-                    row, sourceTable, projections[i].sourceIndex, s.currentDB, true,
-                    &isNull);
-                value = isNull ? SqlCell{} : SqlCell{std::move(extracted)};
-            } else {
-                const auto result = execution.evaluate(projections[i].expr,context);
-                if (result.isUnknown()) { evaluationFailed = true; return; }
-                if (!result.isNull) {
-                    auto text = result.value;
-                    if (result.typeName == "boolean") {
-                        if (text == "t") text = "1";
-                        else if (text == "f") text = "0";
-                    }
-                    value = std::move(text);
-                }
-            }
-            values[targetColumns[i]] = std::move(value);
-        }
-        pendingRows.push_back(std::move(values));
-    };
-
-    if (hasSource) {
-        const std::string resolvedSource = resolveTable(s, sourceName);
-        const bool scanOk = g_engine.forEachVisibleRow(
-            s.currentDB, resolvedSource, "SELECT",
-            [&](uint32_t, uint16_t, const char* data, size_t len) {
-                if (!evaluationFailed) appendRow(std::string(data, len));
-            });
-        if (!scanOk) evaluationFailed = true;
-    } else {
-        appendRow({});
-    }
-    return evaluationFailed ? InsertSelectBuildResult::Unsupported
-                            : InsertSelectBuildResult::Success;
-}
+OpPtr buildPreparedInsertJoinSource(const std::shared_ptr<PreparedQuery>& query,
+    SelectStmt* select, Session& session,
+    const std::shared_ptr<PreparedQueryExecution>& execution);
 
 void addReturningRowToContext(RowContext& context, const SqlRow& source,
                               const TableSchema& table, size_t sourceOrdinal) {
@@ -3101,10 +2825,10 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
 
     const ReturningBinding insertReturningBinding = returningBinding(
         stmt.returningOptions, requestedTable, "");
-    std::unique_ptr<PreparedQueryExecution> insertExecution;
+    std::shared_ptr<PreparedQueryExecution> insertExecution;
     std::unique_ptr<PreparedReturningExecution> returningExecution;
     if (preparedInsert) {
-        insertExecution = std::make_unique<PreparedQueryExecution>(preparedInsert, &g_engine, s.currentDB);
+        insertExecution = std::make_shared<PreparedQueryExecution>(preparedInsert, &g_engine, s.currentDB);
         const auto* insert = dynamic_cast<const InsertStmt*>(preparedInsert->ast.get());
         if (!insert) throw DbError("XX000", "INSERT RETURNING lost its prepared statement");
         if (!insert->returning.empty())
@@ -3191,6 +2915,7 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
         }
     }
 
+    std::vector<SqlRow> pendingRows;
     if (stmt.selectSource) {
         for (size_t i = 0; i < generatedTargets.size(); ++i) {
             if (generatedTargets[i]) return rejectGeneratedValue(i);
@@ -3207,15 +2932,39 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
             fallback = true;
             return false;
         }
-        std::vector<SqlRow> pendingRows;
-        PreparedQueryExecution execution(preparedInsert,&g_engine,s.currentDB);
-        const InsertSelectBuildResult buildResult = buildInsertSelectRows(
-            *select, s, columns, pendingRows, execution);
-        if (buildResult == InsertSelectBuildResult::Unsupported) {
-            fallback = true;
-            return false;
+        // Execute this exact bound source once, retaining real descriptor,
+        // parameter and NULL cells. Do not reparse it through the narrower
+        // legacy SELECT receiver or retry it after partial evaluation.
+        const auto& descriptor = preparedInsert->statementOutputs.at(select);
+        if (descriptor.size() != columns.size())
+            throw DbError("XX000", "INSERT SELECT lost its prepared width");
+        auto plan = select->fromClause && select->fromClause->type == FromItem::Type::Join
+            ? buildPreparedInsertJoinSource(preparedInsert, const_cast<SelectStmt*>(select), s, insertExecution)
+            : QueryPlanner::buildPreparedQueryPlan(&g_engine, s.currentDB, preparedInsert, select, insertExecution->context());
+        auto cursor = QueryPlanner::makePreparedCursor(std::move(plan), descriptor);
+        try {
+            std::vector<ExprValue> cells;
+            while (cursor->next(cells)) {
+                if (cells.size() != columns.size())
+                    throw DbError("XX000", "INSERT SELECT lost its structured row width");
+                SqlRow values;
+                for (size_t i = 0; i < cells.size(); ++i) {
+                    if (cells[i].isNull) values[columns[i]] = std::nullopt;
+                    else {
+                        auto text = cells[i].value;
+                        if (ExprHelper::canonicalResultTypeName(cells[i].typeName) == "boolean")
+                            text = cells[i].asBool() ? "1" : "0";
+                        values[columns[i]] = std::move(text);
+                    }
+                }
+                pendingRows.push_back(std::move(values));
+            }
+            cursor->close();
+        } catch (...) {
+            const auto primary = std::current_exception();
+            try { cursor->close(); } catch (...) {}
+            std::rethrow_exception(primary);
         }
-        if (buildResult == InsertSelectBuildResult::Error) return true;
         if (identityOverride == StorageEngine::IdentityOverride::User) {
             for (auto& values : pendingRows) {
                 for (size_t i = 0; i < identityTargets.size(); ++i) {
@@ -3223,52 +2972,8 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
                 }
             }
         }
-        for (const auto& values : pendingRows)
-            validateIntervalTargetInputs(table, values);
-
-        DmlStatementScope statementScope(g_engine, s.currentDB);
-        if (!statementScope.ready()) {
-            std::cout << "Could not start INSERT statement transaction"
-                      << std::endl;
-            return true;
-        }
-        int inserted = 0;
-        std::vector<SqlRow> selectInsertedRows;
-        for (const auto& values : pendingRows) {
-            const DBStatus status = g_engine.insertRow(
-                s.currentDB, resolvedTable, values,
-                stmt.returning.empty() ? nullptr : &selectInsertedRows,
-                identityOverride);
-            if (status == DBStatus::DUPLICATE_KEY) {
-                if (ignoreDuplicate) continue;
-                std::cout << "Duplicate key (SQLSTATE 23505)" << std::endl;
-                return true;
-            }
-            if (status != DBStatus::OK) {
-                if (status == DBStatus::STRING_DATA_RIGHT_TRUNCATION) {
-                    std::cout << "value too long for character column "
-                                 "(SQLSTATE 22001)" << std::endl;
-                    return true;
-                }
-                std::cout << "Invalid data, please check (SQLSTATE "
-                          << sqlstateForDBStatus(status) << ")" << std::endl;
-                return true;
-            }
-            ++inserted;
-        }
-        std::cout << inserted << " row(s) inserted" << std::endl;
-        if (!stmt.returning.empty()) {
-            if (!returningExecution->publish(
-                    insertedReturningImages(selectInsertedRows),
-                    "INSERT")) return true;
-            printReturningRows(g_lastDmlResult);
-        }
-        if (!statementScope.finish()) {
-            std::cout << "Could not finish INSERT statement transaction"
-                      << std::endl;
-            return true;
-        }
-        return false;
+        // SELECT and VALUES share the same arbiter, conflict predicate,
+        // atomic mutation and RETURNING owner below.
     }
 
     if (stmt.defaultValues) {
@@ -3325,7 +3030,6 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
     // expression is outside this executor's supported evaluator, the legacy
     // path must receive the untouched statement without a partially inserted
     // prefix.
-    std::vector<SqlRow> pendingRows;
     std::vector<SqlRow> sqlInsertedRows;
     const auto* typedInsert = preparedInsert
         ? dynamic_cast<const InsertStmt*>(preparedInsert->ast.get()) : nullptr;
@@ -5639,6 +5343,23 @@ private:
         return node;
     }
 };
+
+// Reuse the existing actual source graph for multi-occurrence INSERT SELECT,
+// including JOIN outer NULL extension and USING/NATURAL merged occurrences.
+// Keep its owner alive until the project's cursor releases all source nodes.
+OpPtr buildPreparedInsertJoinSource(const std::shared_ptr<PreparedQuery>& query,
+    SelectStmt* select, Session& session,
+    const std::shared_ptr<PreparedQueryExecution>& execution) {
+    auto owner = std::make_shared<NativeBoundDmlSources>(session, query);
+    auto rows = owner->factory()(select, select->fromClause.get(), execution->context());
+    auto source = std::make_unique<PreparedSourceContextsOp>(
+        [owner, rows = std::move(rows)](size_t index, RowContext& row) {
+            return rows.read(index, row);
+        });
+    return QueryPlanner::buildPreparedSelectPlan(&g_engine, session.currentDB,
+        query, select, TableSchema{}, std::move(source), execution->context(),
+        {}, owner->cursorFactory(), false, false, [execution] { return execution; });
+}
 
 class BoundDmlExecution {
     Stmt* statement_;

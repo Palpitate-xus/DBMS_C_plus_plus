@@ -1622,6 +1622,16 @@ public:
                         const Expr* leaf = directValues ? leaves->second[i] : nullptr;
                         metadata.assignmentInput(assignments[i],leaf,inputs[i].type);
                     }
+                // The source cursor needs an actual declared output type.
+                // Only direct UNKNOWN projection roots receive the INSERT
+                // target context: typed TEXT from a source/CTE must retain its
+                // real type, and NULL must not be rediscovered from its bytes.
+                // Complete the existing pure assignment preflight first, then
+                // replace the roots and their projection provenance together.
+                if (directValues)
+                    for (size_t i = 0; i < inputs.size(); ++i)
+                        if (inputs[i].type == "unknown")
+                            coerceSetUnknown(insert->selectSource.get(), i, assignments[i].type);
             }
             auto scopes = outer; scopes.insert(scopes.begin(), {target});
             auto conflictScopes = scopes;

@@ -444,6 +444,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/foreign_key_insert_sqlstate_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/insert_select_null_bitmap_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/insert_select_conflict_clause_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/insert_select_conflict_owner_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/sequence_rollback_identity_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/alter_sequence_quoted_options_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/truncate_owned_sequence_restart_protocol_e2e_test.py)

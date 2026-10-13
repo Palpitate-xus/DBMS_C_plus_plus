@@ -55,3 +55,7 @@ import-context change accommodates the compat directory. The full red logs
 registered as a passing test, and must be made green under R39 before the total
 defect list is closed. Neither the focused fixture nor this commit claims those
 execution shapes work.
+
+The later [R39 execution-owner fix](issue-review-r39-insert-select-owner.md)
+closes this separately. Its registered wrapper runs this same complete fixture,
+with no SQL or assertion removed; the original eight-mismatch evidence remains.
