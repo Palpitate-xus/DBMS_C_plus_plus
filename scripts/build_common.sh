@@ -123,6 +123,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/sql_function_query_body_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/group_having_column_identity_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/having_and_identifier_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/having_boolean_context_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/limit_with_ties_syntax_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/interval_field_type_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/interval_field_literal_protocol_e2e_test.py)

@@ -26097,6 +26097,48 @@ static bool executeInternal(const string& rawSql, Session& s) {
     if (sql.substr(0, 6) == "select" || sql.substr(0, 5) == "with ") {
         if (!checkDB(s)) return true;
 
+        // HAVING is a boolean expression, not an opaque storage predicate.
+        // Whole-query analysis must reject invalid input before a source,
+        // volatile target, CTE or an empty group can hide the error.
+        {
+            dbms::SQLParser parser;
+            const auto probe = parser.parseForBinding(effectiveRawSql);
+            const auto* select = probe.isValid()
+                ? dynamic_cast<const dbms::SelectStmt*>(probe.stmt.get()) : nullptr;
+            if (select && select->having) {
+                auto query = make_shared<dbms::PreparedQuery>(
+                    g_engine.prepareBoundQuery(s.currentDB, effectiveRawSql));
+                const auto* bound = static_cast<const dbms::SelectStmt*>(query->ast.get());
+                if (dbms::QueryPlanner::supportsPreparedSourceSelectPlan(*bound)) {
+                    PreparedWithDmlRuntime runtime(s, query);
+                    auto result = runtime.runRead();
+                    for (const auto& name : result.columns) cout << renderLegacyHeader(name) << ' ';
+                    cout << '\n';
+                    for (size_t i = 0; i < result.rows.size(); ++i) {
+                        for (size_t j = 0; j < result.rows[i].size(); ++j)
+                            cout << (result.nulls[i][j] ? "NULL" : result.rows[i][j]) << ' ';
+                        cout << '\n';
+                    }
+                    dbms::publishLastDmlResult(std::move(result));
+                    return false;
+                }
+                // The established grouped receiver understands comparisons
+                // of grouping keys, not a standalone boolean key. Lower that
+                // verified grammar role to the equivalent key = TRUE; NULL
+                // remains excluded. No row value or user expression is run.
+                if (dynamic_cast<const dbms::ColumnRefExpr*>(bound->having.get())) {
+                    const auto start = findTopLevelKeyword(sql, "having");
+                    if (start == string::npos) throw dbms::DbError("XX000", "bound HAVING lost its source clause");
+                    size_t end = sql.size();
+                    for (const char* clause : {"order", "limit", "offset", "fetch", "for"}) {
+                        const auto position = findTopLevelKeyword(sql, clause, start + 6);
+                        if (position != string::npos) end = min(end, position);
+                    }
+                    sql.insert(end, " = TRUE ");
+                }
+            }
+        }
+
         bool typeCatalogHandled=false;
         const bool typeCatalogFailed=handlePreparedTypeCatalogQuery(effectiveRawSql,s,typeCatalogHandled);
         if(typeCatalogHandled)return typeCatalogFailed;

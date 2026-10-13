@@ -1846,6 +1846,23 @@ std::vector<QueryBindingDatum> protocolMetadataParameters(Session& session,
     return parameters;
 }
 
+bool describePreparedHavingResult(const std::string& sql, Session& session,
+    std::vector<PgColumnDescription>& columns, const std::vector<uint32_t>& parameterOids = {}) {
+    SQLParser parser;
+    const auto parsed = parser.parseForBinding(sql);
+    const auto* select = parsed.isValid() ? dynamic_cast<const SelectStmt*>(parsed.stmt.get()) : nullptr;
+    if (!select || !select->having) return false;
+    const auto prepared = g_engine.prepareBoundQuery(session.currentDB, sql,
+        protocolMetadataParameters(session, parameterOids));
+    QueryResult shape;
+    for (const auto& field : prepared.output) {
+        shape.columns.push_back(field.name);
+        shape.columnTypes.push_back(field.type);
+    }
+    columns = describeProtocolColumns(shape, sql, session);
+    return !columns.empty();
+}
+
 bool describePreparedRecursiveCteResult(const std::string& sql,Session& session,
     std::vector<PgColumnDescription>& columns,const std::vector<uint32_t>& parameterOids = {}) {
     SQLParser parser;
@@ -2245,6 +2262,7 @@ bool protocolConstantBitBetween(const Stmt& statement,Session& session) {
 bool describePreparedResult(const std::string& sql, Session& session,
                             std::vector<PgColumnDescription>& columns,
                             const std::vector<uint32_t>& parameterOids = {}) {
+    if (describePreparedHavingResult(sql, session, columns, parameterOids)) return true;
     if(describePreparedRecursiveCteResult(sql,session,columns,parameterOids))return true;
     auto betweenParameterOids = parameterOids;
     if (prepareProtocolBitBetween(sql, session, betweenParameterOids, &columns)) return true;
@@ -5983,6 +6001,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 validatePreparedIntegerInputs(sql,session,parameterTypes);
                 validatePreparedBitScalarParameters(sql,session,parameterTypes);
                 std::vector<PgColumnDescription> explainDescriptor;
+                (void)describePreparedHavingResult(sql, session, explainDescriptor, parameterTypes);
                 (void)describePreparedRecursiveCteResult(sql,session,explainDescriptor,parameterTypes);
                 (void)describePreparedExplainResult(sql,session,explainDescriptor,parameterTypes);
                 (void)prepareProtocolBitBetween(sql, session, parameterTypes);

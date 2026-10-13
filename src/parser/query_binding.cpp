@@ -1523,7 +1523,17 @@ public:
             for (auto& value : select->distinctOn) expression(value, scopes);
             for (auto& value : select->groupBy) expression(value, scopes);
             for (auto& group : select->groupByElems) for (auto& value : group.exprs) expression(value, scopes);
-            expression(select->having, scopes);
+            const auto havingType = expression(select->having, scopes);
+            if (select->having) {
+                const auto base = metadata.baseType
+                    ? metadata.baseType(havingType, expressionTypeOid(select->having.get())) : havingType;
+                const auto type = common_type_detail::canonical(base);
+                if (type != "unknown" && type != "boolean")
+                    throw DbError("42804", "argument of HAVING must be type boolean");
+                // Unknown NULL/string input acquires the genuine boolean
+                // context during analysis, even when there are no groups.
+                coerceCaseInput(select->having, havingType, "boolean");
+            }
             for (auto& value : select->windowDefs) window(value, scopes);
             for (auto& order : select->orderBy) {
                 const auto* ref = dynamic_cast<ColumnRefExpr*>(order.expr.get());
