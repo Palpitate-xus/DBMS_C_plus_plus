@@ -49,7 +49,7 @@
 | R28 | 页插入空间计算 | 已修复 | `261ffb86`；原始满页插入失败证据；198边界O2/ASan/UBSan及26压缩邻居通过，见[验证](issue-review-r28-page-insert-capacity.md) |
 | R29 | LIKE ESCAPE类型比较 | 已修复 | `d7a3293d`；Root项目flags的-Werror=address通过；34绑定控制及相邻协议见[验证](issue-review-r29-pattern-escape-type.md) |
 | R30 | Parse/Describe会话上下文 | 已修复 | `8ba70380`；Root标准构建及12控制通过；5个原失败驱动在候选通过，见[验证](issue-review-r30-session-metadata.md) |
-| R31 | DELETE ONLY回退错删多行 | 处理中 | 新增；正常ONLY/alias/WHERE/RETURNING与PG不同，独立修复 |
+| R31 | DELETE ONLY回退错删多行 | 已修复 | 新12控制PG/候选、原R22完整协议、3 native/3协议/完整PGprotocol通过，见[验证](issue-review-r31-delete-only-owner.md) |
 | R32 | 科学计数法字面量的NUMERIC写入绑定 | 待修复 | 新增；`INSERT ... VALUES(1e40)`对NUMERIC列错误返回42804，而typed cast合法 |
 | O01 | owner健康重试及测试覆盖 | 待修复 | |
 | O02 | EXISTS索引错误的访问计划/断言 | 待复核 | |

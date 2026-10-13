@@ -4388,10 +4388,20 @@ ParseResult SQLParser::parseDelete(const std::string& sql) {
         ++pos;
     }
 
+    const bool parenthesizedOnly = stmt->only && pos < tokens.size() && tokens[pos] == "(";
+    if (parenthesizedOnly) ++pos;
     // Table name
     if (!parseQualifiedObjectName(tokens, pos, stmt->tableName)) {
         r.error = "DELETE requires a valid target table";
         return r;
+    }
+    if (parenthesizedOnly) {
+        if (pos >= tokens.size() || tokens[pos] != ")") {
+            r.error = "DELETE ONLY requires a closing parenthesis after its target";
+            r.sqlState = "42601";
+            return r;
+        }
+        ++pos;
     }
 
     // PostgreSQL hides the original relation name once an alias is supplied.

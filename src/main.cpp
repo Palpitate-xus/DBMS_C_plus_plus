@@ -20809,7 +20809,9 @@ static bool handlePreparedDelete(const string& rawSql,Session& session,bool& han
     handled=false;
     dbms::SQLParser parser;auto parsed=parser.parseForBinding(rawSql);
     const auto* remove=parsed.isValid()?dynamic_cast<const dbms::DeleteStmt*>(parsed.stmt.get()):nullptr;
-    if(!remove || remove->only || !remove->whereCurrentOf.empty())return false;
+    // The bound mutation target is the named physical relation. ONLY does
+    // not require legacy text lowering; that loses aliases/WHERE/RETURNING.
+    if(!remove || !remove->whereCurrentOf.empty())return false;
     if(!checkDB(session)){handled=true;return true;}
     auto query=make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(session.currentDB,rawSql));
     for(const auto& range:query->sourceRanges)

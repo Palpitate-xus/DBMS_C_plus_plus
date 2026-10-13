@@ -6474,7 +6474,9 @@ bool tryDmlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         else error = executeUpdate(*stmt, s, fallback);
     } else if (parsedCmd == SqlCommand::Delete) {
         const auto* stmt = dynamic_cast<const DeleteStmt*>(parsed.stmt.get());
-        if (!stmt || stmt->only) return false;
+        // BoundDmlExecution mutates the named physical target, so ONLY has
+        // the same typed predicate/RETURNING owner as a direct table DELETE.
+        if (!stmt) return false;
         bool viewTarget = false;
         if (stmt->whereCurrentOf.empty()) {
             if (!checkDatabase(s)) { handled = true; return true; }

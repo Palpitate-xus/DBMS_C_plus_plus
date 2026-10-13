@@ -57,3 +57,10 @@ INSERT 实际求值了 nextval。相同完整驱动在 PostgreSQL 18.6 上全部
 原始日志目录：`/tmp/dbms-review-r22-evidence.2xQ9zE9B/`。首次 PG 启动使用了错误的
 密码文件路径，其 fixture 错误单独保留为 `protocol-pg18-fixture-path-error.log`；
 纠正路径后的完整 PG 输出为 `protocol-pg18.log`，不把 fixture 错误算产品缺陷。
+
+## R31 后续验证
+
+独立 R31 修复后，原 `dml_required_keywords_protocol_e2e_test.py` 完整运行 exit 0，
+包括上文原样保留的 ONLY 执行断言和其后的合法 PREPARE/EXECUTE。结果保存在
+`/tmp/dbms-review-r31-evidence.bWm3P0mR/r22-protocol-candidate.log`；这不改变上文
+R22 单独候选曾 exit 1 的历史证据。详见 [R31 记录](issue-review-r31-delete-only-typed-owner.md)。
