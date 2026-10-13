@@ -1766,6 +1766,9 @@ void ExprHelper::prepareArrayTypes(Expr* expression,
             const auto operation=toLower(binary->op);
             const auto leftType=canonicalResultTypeName(type(binary->left.get()));
             const auto rightType=canonicalResultTypeName(type(binary->right.get()));
+            // Legacy scalar execution also prepares signatures before any
+            // operand is evaluated (including volatile routines and NULLs).
+            (void)arithmetic_detail::resultType(operation,leftType,rightType);
             const bool bitOperand=leftType=="bit" || leftType=="bit varying" ||
                                   rightType=="bit" || rightType=="bit varying";
             static const std::set<std::string> comparisons={"=","<>","!=","<",">","<=",">="};

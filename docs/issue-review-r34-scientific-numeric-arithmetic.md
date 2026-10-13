@@ -93,3 +93,5 @@ header epoch 的对象；原生测试链接前核对每个生产对象的源码/
 
 后续：[R36](issue-review-r36-gcd-lcm-result-types.md) 已单独修复上述 gcd/lcm
 结果类型问题，并按未加 cast 的原 SQL 完成值和 OID 回归。
+[R37](issue-review-r37-numeric-text-arithmetic.md) 随后单独修复显式 TEXT/数值
+算术的非法接纳，并验证 UNKNOWN 合法输入及纯 metadata 错误阶段。

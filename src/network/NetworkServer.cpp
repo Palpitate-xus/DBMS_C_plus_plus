@@ -1992,6 +1992,65 @@ void validatePreparedStoredSignatures(const std::string& sql,Session& session,
     (void)g_engine.prepareBoundQuery(session.currentDB,sql,parameters);
 }
 
+// Ordinary scalar arithmetic owns its signatures at Parse, before a named
+// statement is published. Reuse the metadata binder with real parameter OIDs;
+// do not substitute NULL SQL or evaluate inputs to discover operand types.
+void validatePreparedScalarArithmetic(const std::string& sql,Session& session,
+                                      const std::vector<uint32_t>& parameterOids) {
+    SQLParser parser;
+    const auto parsed=parser.parseForBinding(sql);
+    if(!parsed.isValid())return;
+    std::function<bool(const Expr*)> contains=[&](const Expr* expression) {
+        if(!expression || expression->preparedSubquery)return false;
+        if(const auto* binary=dynamic_cast<const BinaryOpExpr*>(expression)) {
+            static const std::set<std::string> operators={"+","-","*","/","%","^"};
+            return operators.count(binary->op) || contains(binary->left.get()) ||
+                (binary->op!="::" && contains(binary->right.get()));
+        }
+        if(const auto* unary=dynamic_cast<const UnaryOpExpr*>(expression))return contains(unary->operand.get());
+        if(const auto* cast=dynamic_cast<const CastExpr*>(expression))return contains(cast->operand.get());
+        if(const auto* conditional=dynamic_cast<const CaseExpr*>(expression)) {
+            if(contains(conditional->switchExpr.get()) || contains(conditional->elseExpr.get()))return true;
+            for(const auto& arm:conditional->whenClauses)
+                if(contains(arm.first.get()) || contains(arm.second.get()))return true;
+        }
+        if(const auto* call=dynamic_cast<const FunctionCallExpr*>(expression)) {
+            for(const auto& argument:call->args)if(contains(argument.get()))return true;
+            for(const auto& argument:call->namedArgs)if(contains(argument.value.get()))return true;
+            return contains(call->filter.get());
+        }
+        if(const auto* array=dynamic_cast<const ArrayExpr*>(expression))
+            for(const auto& element:array->elements)if(contains(element.get()))return true;
+        if(const auto* row=dynamic_cast<const RowExpr*>(expression))
+            for(const auto& element:row->elements)if(contains(element.get()))return true;
+        return false;
+    };
+    bool candidate=false;
+    if(const auto* select=dynamic_cast<const SelectStmt*>(parsed.stmt.get())) {
+        // Query children, joins and CTE/set/window graphs retain their own
+        // preparation owners; this entry covers ordinary scalar projections.
+        if(!select->ctes.empty() || select->setOp!=SetOp::None || !select->windowDefs.empty() ||
+           (select->fromClause && select->fromClause->type!=FromItem::Type::Table))return;
+        candidate=contains(select->whereClause.get()) || contains(select->having.get());
+        for(const auto& item:select->selectList)candidate=candidate || contains(item.expr.get());
+        for(const auto& item:select->orderBy)candidate=candidate || contains(item.expr.get());
+        for(const auto& item:select->groupBy)candidate=candidate || contains(item.get());
+    } else if(const auto* insert=dynamic_cast<const InsertStmt*>(parsed.stmt.get())) {
+        if(insert->selectSource || !insert->conflictAction.empty())return;
+        for(const auto& row:insert->values)for(const auto& value:row)candidate=candidate || contains(value.get());
+        for(const auto& item:insert->returning)candidate=candidate || contains(item.expr.get());
+    } else if(const auto* update=dynamic_cast<const UpdateStmt*>(parsed.stmt.get())) {
+        if(update->fromClause || !update->whereCurrentOf.empty())return;
+        candidate=contains(update->whereClause.get());
+        for(const auto& assignment:update->setClauses)candidate=candidate || contains(assignment.second.get());
+        for(const auto& item:update->returning)candidate=candidate || contains(item.expr.get());
+    }
+    if(!candidate)return;
+    auto* previous=currentSession();setCurrentSession(&session);
+    struct Restore {Session* previous;~Restore(){setCurrentSession(previous);}} restore{previous};
+    (void)g_engine.prepareBoundQuery(session.currentDB,sql,protocolMetadataParameters(session,parameterOids));
+}
+
 // Parse-time integer input transformation must use the same whole-query
 // binder as simple execution. This finite entry only owns actual integer
 // column/UNKNOWN literal comparisons in a single physical source SELECT.
@@ -6016,6 +6075,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             try {
                 notePreparedTemporaryObjectAccess(sql, session);
                 validatePreparedStoredSignatures(sql,session,parameterTypes);
+                validatePreparedScalarArithmetic(sql,session,parameterTypes);
                 validatePreparedIntegerInputs(sql,session,parameterTypes);
                 validatePreparedBitScalarParameters(sql,session,parameterTypes);
                 std::vector<PgColumnDescription> explainDescriptor;

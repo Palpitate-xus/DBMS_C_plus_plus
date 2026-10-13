@@ -132,6 +132,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/scientific_numeric_literal_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/scientific_numeric_arithmetic_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/numeric_gcd_lcm_type_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/numeric_text_arithmetic_binding_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/row_constructor_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/sql_value_keyword_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/prepared_global_aggregate_protocol_e2e_test.py)

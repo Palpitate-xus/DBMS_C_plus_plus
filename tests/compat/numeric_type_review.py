@@ -56,7 +56,8 @@ class Review:
         else:
             valid = valid and [field[3] for field in fields] == oids
             valid = valid and sum(kind == b'1' for kind, _ in messages) == 1
-        self.record('DESCRIBE '+sql, valid, ([field[3] for field in fields], states), (oids, state))
+        kinds = [kind.decode('ascii') for kind, _ in messages]
+        self.record('DESCRIBE '+sql, valid, ([field[3] for field in fields], states, kinds), (oids, state))
 
     def parameter(self, sql, inputs, input_oids, rows, output_oids):
         parse = b'\0'+sql.encode()+b'\0'+struct.pack('!H', len(input_oids))

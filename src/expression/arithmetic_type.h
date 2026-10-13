@@ -1,5 +1,6 @@
 #pragma once
 
+#include "common/DbError.h"
 #include <algorithm>
 #include <cctype>
 #include <optional>
@@ -63,6 +64,15 @@ inline std::optional<std::string> resultType(
     const auto numeric = [](const std::string& type) {
         return integerWidth(type) || floatingWidth(type) || type == "numeric";
     };
+    const auto string = [](const std::string& type) {
+        return type == "text" || type == "varchar" || type == "character varying" ||
+            type == "char" || type == "character";
+    };
+    // A declared string is not an UNKNOWN input that may inherit the peer's
+    // numeric type. This shared boundary is used by metadata and execution;
+    // reject before a NULL/empty source can hide the absent operator.
+    if ((numeric(left) && string(right)) || (string(left) && numeric(right)))
+        throw DbError("42883", "operator does not exist: " + left + " " + operation + " " + right);
     if (!numeric(left) || !numeric(right)) return std::nullopt;
     const int leftFloat = floatingWidth(left), rightFloat = floatingWidth(right);
     if (operation == "^")
