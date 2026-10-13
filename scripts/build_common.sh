@@ -46,6 +46,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/procedure_namespace_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/stored_function_arity_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/insert_values_syntax_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/dml_required_keywords_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/between_predicate_type_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/window_null_order_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/window_groups_unbounded_protocol_e2e_test.py)

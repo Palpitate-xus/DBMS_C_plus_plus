@@ -4010,7 +4010,12 @@ ParseResult SQLParser::parseInsert(const std::string& sql) {
 
     auto stmt = std::make_unique<InsertStmt>();
     size_t pos = 1; // skip INSERT
-    if (pos < tokens.size() && toLower(tokens[pos]) == "into") ++pos;
+    if (pos >= tokens.size() || toLower(tokens[pos]) != "into") {
+        r.error = "INSERT requires INTO before the target table";
+        r.sqlState = "42601";
+        return r;
+    }
+    ++pos;
 
     // Table name
     if (!parseQualifiedObjectName(tokens, pos, stmt->tableName)) {
@@ -4372,7 +4377,12 @@ ParseResult SQLParser::parseDelete(const std::string& sql) {
     auto stmt = std::make_unique<DeleteStmt>();
     size_t pos = 1; // skip DELETE
 
-    if (pos < tokens.size() && toLower(tokens[pos]) == "from") ++pos;
+    if (pos >= tokens.size() || toLower(tokens[pos]) != "from") {
+        r.error = "DELETE requires FROM before the target table";
+        r.sqlState = "42601";
+        return r;
+    }
+    ++pos;
     if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
         stmt->only = true;
         ++pos;

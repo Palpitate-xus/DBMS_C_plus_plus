@@ -40,7 +40,7 @@
 | R19 | TEMP启动恢复 | 待修复 | |
 | R20 | RETURNING子查询 | 待修复 | |
 | R21 | ON CONFLICT BOOLEAN条件 | 待修复 | |
-| R22 | 严格模式FROM/INTO | 待修复 | |
+| R22 | 严格模式FROM/INTO | 已修复 | 36 native及拒绝控制通过；完整协议的独立R31后续通过，见[验证](issue-review-r22-dml-required-keywords.md) |
 | R23 | 维护任务持久化门禁 | 待修复 | |
 | R24 | EXECUTE参数求值 | 待修复 | |
 | R25 | Numeric::withPrecision | 已修复 | `021b3031`；原始12345→123失败保留；41控制O2/ASan/UBSan和原Numeric完整驱动通过，见[验证](issue-review-r25-numeric-precision.md) |

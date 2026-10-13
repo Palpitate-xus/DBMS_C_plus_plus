@@ -5022,6 +5022,21 @@ static bool handlePrepare(const string& sql, Session& s) {
                  << endl;
             return true;
         }
+        // PREPARE stores a template without executing it. Still enforce the
+        // ordinary INSERT/DELETE grammar now, before publishing a statement
+        // name or consulting target/parameter metadata. This is syntax-only;
+        // broader prepared-query binding remains with its existing owner.
+        const auto templateCommand = dbms::SQLParser::classify(templateSql);
+        if (templateCommand == dbms::SqlCommand::Insert ||
+            templateCommand == dbms::SqlCommand::Delete) {
+            dbms::SQLParser parser;
+            const auto parsed = parser.parseForBinding(templateSql);
+            if (!parsed.isValid()) {
+                cout << "ERROR: " << parsed.error << " (SQLSTATE "
+                     << (parsed.sqlState.empty() ? "42601" : parsed.sqlState) << ")" << endl;
+                return true;
+            }
+        }
         if (s.preparedStmts.count(stmtName) != 0) {
             cout << "ERROR: prepared statement \"" << stmtName
                  << "\" already exists (SQLSTATE 42P05)" << endl;
