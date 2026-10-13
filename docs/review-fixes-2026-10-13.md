@@ -37,9 +37,9 @@
 | R16 | catalog坏行及完整加载 | 已修复 | `0d85f6b9`/`a0d2efde`；691、cold正常API及原catalog_snapshot全通过，见[初始验证](issue-review-r16-catalog-complete-read.md)/[兼容修复](issue-review-r16-optional-catalog-directory.md) |
 | R17 | 失败回滚恢复图像 | 已修复 | `9edf30ce`；候选fresh58、23完整native及20重复通过；Root fresh58、最终31完整native与完整PGprotocol实际0，见[验证](issue-review-r17-rollback-recovery-ownership.md) |
 | R18 | catalog值快照 | 已修复 | `8f6e3c43`；候选fresh58及提交前/后8完整native通过，Root R14 集成 fresh58 后再次通过 snapshot/complete/cold/owner，见[验证](issue-review-r18-catalog-value-snapshots.md) |
-| R19 | TEMP启动恢复 | 待修复 | |
+| R19 | TEMP启动恢复 | 已修复 | `18e91f2b`；原失败134→0、候选八完整native和Root十二完整native/PGprotocol通过；新文件清理问题独立R40，见[验证](issue-review-r19-stale-temp-startup.md) |
 | R20 | RETURNING子查询 | 已修复 | 原Root native29检查失败；PG/Root 35协议、七完整native及14完整协议全过，见[验证](issue-review-r20-returning-query-owner.md) |
-| R21 | ON CONFLICT BOOLEAN条件 | 待修复 | |
+| R21 | ON CONFLICT BOOLEAN条件 | 已修复 | `1463b6be`；119 native、75 PG/候选/Root协议及完整邻居、Root十二native/PGprotocol通过，见[验证](issue-review-r21-conflict-boolean-context.md) |
 | R22 | 严格模式FROM/INTO | 已修复 | `799636f7`；36 native及拒绝控制通过；完整协议的独立R31后续通过，见[验证](issue-review-r22-dml-required-keywords.md) |
 | R23 | 维护任务持久化门禁 | 待修复 | |
 | R24 | EXECUTE参数求值 | 待修复 | |
@@ -53,12 +53,12 @@
 | R32 | 科学计数法字面量的NUMERIC写入绑定 | 已修复 | `40e0a152`；203 native、110 PG/候选/Root协议及完整邻居通过；独立微小scale问题由R34关闭，见[验证](issue-review-r32-scientific-numeric-literals.md) |
 | R33 | legacy窗口路径丢失最终ORDER BY | 待修复 | R11新控制发现；配合nth_value的合法窗口查询按partition顺序返回而忽略最终ORDER BY id；独立失败证据保留 |
 | R34 | 科学计数法NUMERIC算术scale | 已修复 | `a36efcb5`；120 native、123 PG/候选/Root协议，原111字节快照/known-gap断言及完整邻居通过，见[验证](issue-review-r34-scientific-numeric-arithmetic.md) |
-| R35 | INSERT SELECT的ON CONFLICT分句边界 | 修复验证中 | parser把INSERT所属ON CONFLICT并入SELECT source；42 native、17 PG/候选协议通过，原失败保留；执行owner的不同根因另记R39 |
-| R36 | gcd/lcm指数NUMERIC结果OID | 待修复 | R34邻居发现；值正确但OID错误为integer，原SQL与日志见R34文档 |
+| R35 | INSERT SELECT的ON CONFLICT分句边界 | 已修复 | `a196264d`；42 native、17 PG/候选/Root协议及完整邻居通过，原失败保留；执行owner另记R39，见[验证](issue-review-r35-insert-select-conflict-boundary.md) |
+| R36 | gcd/lcm指数NUMERIC结果OID | 已修复 | `d1cd3cce`；63 native、61 PG/候选/Root协议，六native/五协议邻居通过，见[验证](issue-review-r36-gcd-lcm-result-types.md) |
 | R37 | TEXT与NUMERIC算术类型检查 | 待修复 | R34邻居发现；显式TEXT加NUMERIC错误接受；原SQL与日志见R34文档 |
 | R38 | 表列混合指数表达式投影 | 待修复 | R34邻居发现；`a+1e-40`旧投影错拆`1e`为列，原SQL与日志见R34文档 |
 | R39 | INSERT SELECT冲突/复杂source执行owner | 待修复 | R35 parser修复后，已有typed分派仍拒绝source DO UPDATE/JOIN/scalar；完整PG通过而候选失败的驱动及所有断言保留在`tests/compat/insert_select_conflict_owner_known_gap.py`（将随R35提交），不据parser通过宣称执行兼容 |
-| R40 | TEMP清理误删空尾相似名称的持久表fork | 待修复 | R19新控制发现；合法持久表`__tmp_12_`的`.stc`/fork被文件名TEMP前缀规则误判，原失败fixture/log保留，将独立修复 |
+| R40 | TEMP清理误删空尾相似名称的持久表fork | 候选已提交，待集成复验 | 候选`39ae50a6`；原known-gap断言134→0、新强化file-owner与六完整native邻居通过，见[验证](issue-review-r40-temp-cleanup-file-ownership.md)（随修复合入） |
 | O01 | owner健康重试及测试覆盖 | 已修复 | `c9a1e3c3`；原全部owner断言、新真实peer/dirty冲突及10完整native提交前/后通过；Root R14集成fresh58后两完整owner再次通过，见[验证](issue-review-o01-table-owner-health-retry.md) |
 | O02 | EXISTS索引错误的访问计划/断言 | 待复核 | |
 | O03 | EXPLAIN JOIN图及过时断言 | 待修复 | |

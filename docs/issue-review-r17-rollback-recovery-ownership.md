@@ -187,3 +187,19 @@ The runner must receive objects built for its exact current headers; copying
 old Root ABI objects is not an alternative to the fresh58 proof. This issue's
 native results do not claim that all project SQL/protocol tests or the user's
 entire review checklist have already completed.
+
+## Root integrated verification
+
+Root genuinely rebuilt all 58 production translation units after the public
+header change (`root-r17-o04-fresh58-build.log`, actual exit 0, exactly 58 compile
+lines). R34 then genuinely rebuilt ExprEvaluator.cpp. The final integrated
+31-driver native batch, including all 23 R17 drivers, completed with exit 0;
+every current object receipt and the unchanged final input signature was checked.
+R32/R34/O04 protocol controls and the complete PostgreSQL protocol driver also
+completed with exit 0. Logs are in `/tmp/dbms-review-fix-donor.N9sdas6f/`:
+`root-r17-r34-o04-final31-native.log`, `root-r32-protocol.log`,
+`root-r34-protocol.log`, `root-o04-protocol.log` and
+`root-r17-r34-o04-postgres-protocol.log`. A preceding batch completed 27 drivers
+but then failed because its requested NTILE filename omitted `window_`; that
+exit-1 log remains as `root-r17-r34-o04-integrated-native.log`, not a passing
+31-driver result. The final runner validates every requested filename first.
