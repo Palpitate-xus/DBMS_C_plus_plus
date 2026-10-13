@@ -19614,6 +19614,14 @@ DBStatus StorageEngine::alterTableOwner(const std::string& dbname,
     std::optional<PgClassRow> originalRelation;
     try {
         auto& tableCatalog = catalogService().get(dbname);
+        // A clean cache may be older than a peer engine's durable image.
+        // Refresh it before turning this owner change into an unsaved edit;
+        // persistAll intentionally refuses to merge dirty stale models.
+        // A genuine local/peer conflict is still an error, before .stc writes.
+        if (!tableCatalog.persistAll()) {
+            lockManager_.unlock(tablename);
+            return DBStatus::IO_ERROR;
+        }
         const auto qualifiedName = CatalogService::logicalName(tablename);
         const std::string schemaName = qualifiedName.schema.empty()
             ? "public" : qualifiedName.schema;
@@ -19646,9 +19654,9 @@ DBStatus StorageEngine::alterTableOwner(const std::string& dbname,
             catalogPersisted = false;
         }
         if (!catalogUpdated || !catalogPersisted) {
-            // pg_class may have been published before a later catalog file
-            // failed. Restore both the in-memory row and every durable copy;
-            // persistAll deliberately keeps visiting files after an error.
+            // Restore the in-memory row and attempt durable rollback after a
+            // publication error. Preflight failures publish no catalog images;
+            // later write failures can still leave a partially published set.
             if (catalogUpdated) {
                 try {
                     if (catalog->updateClass(

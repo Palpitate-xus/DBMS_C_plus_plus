@@ -36,11 +36,11 @@
 | R15 | 关停唤醒顺序 | 待修复 | |
 | R16 | catalog坏行及完整加载 | 已修复 | `0d85f6b9`/`a0d2efde`；691、cold正常API及原catalog_snapshot全通过，见[初始验证](issue-review-r16-catalog-complete-read.md)/[兼容修复](issue-review-r16-optional-catalog-directory.md) |
 | R17 | 失败回滚恢复图像 | 待修复 | |
-| R18 | catalog值快照 | 已修复 | 候选fresh58及提交前/后8完整native通过，Root整合随后复验，见[验证](issue-review-r18-catalog-value-snapshots.md) |
+| R18 | catalog值快照 | 已修复 | `8f6e3c43`；候选fresh58及提交前/后8完整native通过，Root整合随后复验，见[验证](issue-review-r18-catalog-value-snapshots.md) |
 | R19 | TEMP启动恢复 | 待修复 | |
 | R20 | RETURNING子查询 | 待修复 | |
 | R21 | ON CONFLICT BOOLEAN条件 | 待修复 | |
-| R22 | 严格模式FROM/INTO | 已修复 | 36 native及拒绝控制通过；完整协议的独立R31后续通过，见[验证](issue-review-r22-dml-required-keywords.md) |
+| R22 | 严格模式FROM/INTO | 已修复 | `799636f7`；36 native及拒绝控制通过；完整协议的独立R31后续通过，见[验证](issue-review-r22-dml-required-keywords.md) |
 | R23 | 维护任务持久化门禁 | 待修复 | |
 | R24 | EXECUTE参数求值 | 待修复 | |
 | R25 | Numeric::withPrecision | 已修复 | `021b3031`；原始12345→123失败保留；41控制O2/ASan/UBSan和原Numeric完整驱动通过，见[验证](issue-review-r25-numeric-precision.md) |
@@ -49,9 +49,9 @@
 | R28 | 页插入空间计算 | 已修复 | `261ffb86`；原始满页插入失败证据；198边界O2/ASan/UBSan及26压缩邻居通过，见[验证](issue-review-r28-page-insert-capacity.md) |
 | R29 | LIKE ESCAPE类型比较 | 已修复 | `d7a3293d`；Root项目flags的-Werror=address通过；34绑定控制及相邻协议见[验证](issue-review-r29-pattern-escape-type.md) |
 | R30 | Parse/Describe会话上下文 | 已修复 | `8ba70380`；Root标准构建及12控制通过；5个原失败驱动在候选通过，见[验证](issue-review-r30-session-metadata.md) |
-| R31 | DELETE ONLY回退错删多行 | 已修复 | 新12控制PG/候选、原R22完整协议、3 native/3协议/完整PGprotocol通过，见[验证](issue-review-r31-delete-only-owner.md) |
+| R31 | DELETE ONLY回退错删多行 | 已修复 | `eabfc340`；新12控制PG/候选、原R22完整协议、3 native/3协议/完整PGprotocol通过，见[验证](issue-review-r31-delete-only-typed-owner.md) |
 | R32 | 科学计数法字面量的NUMERIC写入绑定 | 待修复 | 新增；`INSERT ... VALUES(1e40)`对NUMERIC列错误返回42804，而typed cast合法 |
-| O01 | owner健康重试及测试覆盖 | 待修复 | |
+| O01 | owner健康重试及测试覆盖 | 已修复 | 原全部owner断言、新真实peer/dirty冲突及10完整native提交前/后通过，见[验证](issue-review-o01-table-owner-health-retry.md) |
 | O02 | EXISTS索引错误的访问计划/断言 | 待复核 | |
 | O03 | EXPLAIN JOIN图及过时断言 | 待修复 | |
 | O04 | HAVING BOOLEAN绑定 | 待修复 | |

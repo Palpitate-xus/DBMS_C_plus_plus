@@ -79,9 +79,9 @@ int main() {
     fs::rename(savedSchemaPath, schemaPath);
     assert(g_engine.getTableSchema(db, table.tablename).owner == oldOwnerName);
 
-    // persistAll writes pg_class before pg_attribute. Force the latter to
-    // fail after the new owner could have reached disk; ALTER TABLE must put
-    // both the catalog and .stc owner back to their original values.
+    // persistAll preflights every catalog image before publishing any of
+    // them. An unavailable pg_attribute target must still restore the .stc
+    // owner and the in-memory pg_class row to their original values.
     const fs::path attributePath =
         fs::path(db) / "pg_catalog" / "pg_attribute.cat";
     const fs::path savedAttributePath = attributePath.string() + ".saved";
@@ -102,8 +102,13 @@ int main() {
     assert(schemaReload.getTableSchema(db, table.tablename).owner ==
            oldOwnerName);
 
-    assert(g_engine.alterTableOwner(db, table.tablename, newOwnerName) ==
-           dbms::DBStatus::OK);
+    const auto retryStatus =
+        g_engine.alterTableOwner(db, table.tablename, newOwnerName);
+    if (retryStatus != dbms::DBStatus::OK) {
+        std::cerr << "healthy owner retry returned "
+                  << static_cast<int>(retryStatus) << '\n';
+    }
+    assert(retryStatus == dbms::DBStatus::OK);
     assert(g_engine.getTableSchema(db, table.tablename).owner == newOwnerName);
     assert(relationOwner(failedReload, "tenant", "items") == newOwner);
 
