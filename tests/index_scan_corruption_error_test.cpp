@@ -56,6 +56,16 @@ int main() {
     assert(g_engine.insert(database, "items", {{"id", "1"}, {"value", "7"}}) ==
            dbms::DBStatus::OK);
     assert(g_engine.createIndex(database, "items", "value") == dbms::DBStatus::OK);
+    auto* primary = g_engine.getPKIndex(database, "items");
+    auto* secondary = g_engine.getSecondaryIndex(database, "items", "value");
+    const auto capture = [](dbms::BPTree* tree) {
+        assert(tree && tree->flush());
+        std::ifstream input(tree->filePath(), std::ios::binary);
+        assert(input);
+        return std::vector<char>{std::istreambuf_iterator<char>(input), {}};
+    };
+    const auto healthyPrimary = capture(primary);
+    const auto healthySecondary = capture(secondary);
     installCorruption(g_engine.getPKIndex(database, "items"));
     installCorruption(g_engine.getSecondaryIndex(database, "items", "value"));
 
@@ -122,11 +132,35 @@ int main() {
     }
     assert(g_engine.update(database, "items", {{"value", "9"}}, {}) ==
            dbms::DBStatus::IO_ERROR);
+    // R17 intentionally retains an owner whose row/index undo could not
+    // finish. Do not require a false terminal ABORT while the fault remains.
+    assert(g_engine.inTransaction());
+    const auto pendingXid = g_engine.currentTxnId();
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::IO_ERROR);
+    assert(g_engine.inTransaction() && g_engine.currentTxnId() == pendingXid);
+    // This isolated fixture owns the escaped index handles and their files.
+    // Restore the exact known-healthy images, then explicitly retry undo.
+    const auto restore = [](dbms::BPTree* tree, const std::vector<char>& bytes) {
+        tree->close();
+        std::ofstream output(tree->filePath(), std::ios::binary | std::ios::trunc);
+        assert(output);
+        output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        output.close();
+        assert(output && tree->openExisting());
+    };
+    restore(primary, healthyPrimary);
+    restore(secondary, healthySecondary);
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
     assert(!g_engine.inTransaction());
     assert(g_engine.getLockManager().captureCheckpoint().tableCounts.empty());
     const auto afterFailure = dbms::QueryPlanner::executePlanChecked(
         std::make_unique<dbms::TableScanOp>(&g_engine, database, "items"));
     assert(afterFailure.ok && afterFailure.rows == heap.rows);
+    // Restore the original corrupt-index precondition for the unchanged
+    // explicit REINDEX/write assertions below, rather than claiming that
+    // failed UPDATE or rollback silently repairs an unrelated bad index.
+    installCorruption(g_engine.getPKIndex(database, "items"), true);
+    installCorruption(g_engine.getSecondaryIndex(database, "items", "value"), true);
     // The rejected write must not claim to repair a pre-existing corrupt
     // B-tree. Reindex is the explicit recovery operation; after it succeeds,
     // both access paths and writes should be usable again.
