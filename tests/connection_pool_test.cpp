@@ -15,6 +15,7 @@
 
 #include <cassert>
 #include <chrono>
+#include <future>
 #include <iostream>
 #include <thread>
 #include <vector>
@@ -168,6 +169,49 @@ static void test_client_limit() {
     std::cout << "[POOL] client limit accounting OK" << std::endl;
 }
 
+static void test_discard_wakes_renter() {
+    auto& pool = ConnectionPool::instance();
+    resetPoolSafe(pool, "session", 1, 0);
+
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        auto held = pool.acquire("discard_waiter", "db1");
+        assert(held);
+        std::promise<std::shared_ptr<BackendContext>> rented;
+        auto result = rented.get_future();
+        std::thread waiter([&]() {
+            rented.set_value(pool.acquire("discard_waiter", "db1"));
+        });
+
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::chrono::seconds(3);
+        while (pool.stats().waitingRenters != 1 &&
+               std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        assert(pool.stats().waitingRenters == 1);
+
+        // This erases the last entry and its entire map node while acquire
+        // is asleep. A waiter must look the key up again and use the newly
+        // available capacity, never the erased vector's address.
+        pool.discard(held);
+        const bool ready = result.wait_for(std::chrono::seconds(3)) ==
+                           std::future_status::ready;
+        if (!ready) pool.shutdown();  // bounded failure, not a hung test
+        waiter.join();
+        assert(ready);
+        auto replacement = result.get();
+        assert(replacement && replacement != held);
+        assert(replacement->session.username == "discard_waiter");
+        assert(replacement->session.currentDB == "db1");
+        const auto stats = pool.stats();
+        assert(stats.totalContexts == 1 && stats.rentedContexts == 1);
+        assert(stats.waitingRenters == 0);
+        pool.discard(replacement);
+        assert(pool.stats().totalContexts == 0);
+    }
+    std::cout << "[POOL] discard wakes renter without stale references OK" << std::endl;
+}
+
 static void test_stats() {
     auto& pool = ConnectionPool::instance();
     resetPoolSafe(pool, "session", 4, 0);
@@ -189,6 +233,7 @@ int main() {
     test_session_mode_lifecycle();
     test_short_rent_reuse();
     test_capacity_blocking();
+    test_discard_wakes_renter();
     test_client_limit();
     test_stats();
     ConnectionPool::instance().shutdown();

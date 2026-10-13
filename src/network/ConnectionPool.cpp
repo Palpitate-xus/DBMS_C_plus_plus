@@ -53,51 +53,41 @@ void ConnectionPool::releaseClientSlot() {
 std::shared_ptr<BackendContext> ConnectionPool::acquire(const std::string& user,
                                                         const std::string& database) {
     std::unique_lock<std::mutex> lock(mutex_);
-    if (shutdown_) return nullptr;
-
-    auto& entries = pools_[user];
-
-    // Reuse an idle context bound to the same database.
-    for (auto& entry : entries) {
-        if (entry.idle && entry.ctx->session.currentDB == database) {
-            entry.idle = false;
-            totalRents_.fetch_add(1, std::memory_order_relaxed);
-            return entry.ctx;
-        }
-    }
-
-    // Grow the pool when below capacity.
-    if (static_cast<int>(entries.size()) < poolSize_) {
-        auto ctx = std::make_shared<BackendContext>();
-        ctx->session.username = user;
-        ctx->session.currentDB = database;
-        ctx->session.permission = 1;
-        entries.push_back({ctx, false});
-        totalRents_.fetch_add(1, std::memory_order_relaxed);
-        return ctx;
-    }
-
-    // At capacity: wait for a matching backend to come back.
-    ++waitingRenters_;
-    totalWaits_.fetch_add(1, std::memory_order_relaxed);
-    cv_.wait(lock, [&]() {
-        return shutdown_ || [&]() {
-            for (const auto& entry : entries) {
-                if (entry.idle && entry.ctx->session.currentDB == database) return true;
+    bool waited = false;
+    for (;;) {
+        if (shutdown_) return nullptr;
+        {
+            // discard() can erase this entire map node while wait unlocks
+            // mutex_. Keep every reference within the locked lookup scope
+            // and re-resolve the key after each wakeup.
+            auto& entries = pools_[user];
+            for (auto& entry : entries) {
+                if (entry.idle && entry.ctx->session.currentDB == database) {
+                    entry.idle = false;
+                    totalRents_.fetch_add(1, std::memory_order_relaxed);
+                    return entry.ctx;
+                }
             }
-            return false;
-        }();
-    });
-    --waitingRenters_;
-    if (shutdown_) return nullptr;
-    for (auto& entry : entries) {
-        if (entry.idle && entry.ctx->session.currentDB == database) {
-            entry.idle = false;
-            totalRents_.fetch_add(1, std::memory_order_relaxed);
-            return entry.ctx;
+
+            if (static_cast<int>(entries.size()) < poolSize_) {
+                auto ctx = std::make_shared<BackendContext>();
+                ctx->session.username = user;
+                ctx->session.currentDB = database;
+                ctx->session.permission = 1;
+                entries.push_back({ctx, false});
+                totalRents_.fetch_add(1, std::memory_order_relaxed);
+                return ctx;
+            }
         }
+
+        ++waitingRenters_;
+        if (!waited) {
+            totalWaits_.fetch_add(1, std::memory_order_relaxed);
+            waited = true;
+        }
+        cv_.wait(lock);
+        --waitingRenters_;
     }
-    return nullptr;  // spurious wakeup guard; should not happen
 }
 
 void ConnectionPool::release(const std::shared_ptr<BackendContext>& ctx) {
