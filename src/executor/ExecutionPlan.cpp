@@ -3822,7 +3822,7 @@ static int compareDeclaredWindowCell(const Column& column,
     const auto greater = StorageEngine::compareValues(column, left, false, right, false, ">");
     if (less == StorageEngine::PredicateTruth::Unknown ||
         greater == StorageEngine::PredicateTruth::Unknown)
-        throw DbError("0A000", "unsupported declared window partition comparison");
+        throw DbError("0A000", "unsupported declared window comparison");
     return less == StorageEngine::PredicateTruth::True ? -1 :
         greater == StorageEngine::PredicateTruth::True ? 1 : 0;
 }
@@ -3840,9 +3840,9 @@ static bool sameWindowPartition(const WindowInputRow& left,
 static bool sameWindowPeer(const WindowInputRow& left,
                            const WindowInputRow& right,
     size_t orderColumn,
-    size_t columnCount) {
-    return orderColumn >= columnCount ||
-           compareWindowCell(left.values[orderColumn], left.nulls[orderColumn],
+    const TableSchema& schema) {
+    return orderColumn >= schema.len ||
+           compareDeclaredWindowCell(schema.cols[orderColumn], left.values[orderColumn], left.nulls[orderColumn],
                              right.values[orderColumn], right.nulls[orderColumn]) == 0;
 }
 
@@ -3961,7 +3961,7 @@ bool WindowOp::open() {
                         ? function.orderByNullsFirst : !function.orderAscending;
                     return leftNull==nullsFirst;
                 }
-                const int cmp = compareWindowCell(
+                const int cmp = compareDeclaredWindowCell(tbl_.cols[orderColumn],
                     leftRow.values[orderColumn], leftRow.nulls[orderColumn],
                     rightRow.values[orderColumn], rightRow.nulls[orderColumn]);
                 if (cmp != 0) return function.orderAscending ? cmp < 0 : cmp > 0;
@@ -3993,7 +3993,7 @@ bool WindowOp::open() {
                 size_t groupEnd = groupStart + 1;
                 while (groupEnd < partitionEnd &&
                        sameWindowPeer(input[order[groupEnd]], input[order[groupStart]],
-                                      orderColumn, tbl_.len)) {
+                                      orderColumn, tbl_)) {
                     ++groupEnd;
                 }
                 for (size_t p = groupStart; p < groupEnd; ++p) {
@@ -4283,8 +4283,8 @@ bool WindowOp::open() {
                         ++count;
                     } else if (function.name == "min" || function.name == "max") {
                         if (!hasValue || (function.name == "min"
-                                ? compareNonNullAggregateValue(value, selected) < 0
-                                : compareNonNullAggregateValue(value, selected) > 0)) {
+                                ? compareDeclaredWindowCell(tbl_.cols[argumentColumn], value, false, selected, false) < 0
+                                : compareDeclaredWindowCell(tbl_.cols[argumentColumn], value, false, selected, false) > 0)) {
                             selected = value;
                             selectedIsNull = false;
                             hasValue = true;
@@ -4433,7 +4433,7 @@ bool WindowOp::open() {
             if (finalOrderColumn >= tbl_.len) return false;
             if (left.sortKeyNull!=right.sortKeyNull)
                 return left.sortKeyNull==finalOrderNullsFirst_;
-            const int cmp = compareWindowCell(
+            const int cmp = compareDeclaredWindowCell(tbl_.cols[finalOrderColumn],
                 left.sortKey, left.sortKeyNull,
                 right.sortKey, right.sortKeyNull);
             return finalOrderAscending_ ? cmp < 0 : cmp > 0;

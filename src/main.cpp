@@ -35669,7 +35669,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
 
             // Fetch all data (need all columns for window function computation)
             set<string> allCols;
-            vector<map<string, string>> rows;
+            struct LegacyWindowRow : map<string, string> {
+                set<size_t> nullWindows;
+            };
+            vector<LegacyWindowRow> rows;
             set<int64_t> windowRowIds;
             const auto appendWindowRows = [&](const vector<string>& conditions, bool deduplicate) {
                 vector<vector<string>> cells;
@@ -35683,7 +35686,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     if (deduplicate && !windowRowIds.insert(ids[index]).second) continue;
                     if (cells[index].size() != tbl.len || nulls[index].size() != tbl.len)
                         throw dbms::DbError("XX000", "window source lost its declared row width");
-                    map<string, string> row;
+                    LegacyWindowRow row;
                     for (size_t column = 0; column < tbl.len; ++column)
                         if (!nulls[index][column]) row[tbl.cols[column].dataName] = cells[index][column];
                     rows.push_back(std::move(row));
@@ -35724,9 +35727,26 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 const auto greater = dbms::StorageEngine::compareValues(column, left->second, false, right->second, false, ">");
                 if (less == dbms::StorageEngine::PredicateTruth::Unknown ||
                     greater == dbms::StorageEngine::PredicateTruth::Unknown)
-                    throw dbms::DbError("0A000", "unsupported declared window partition comparison");
+                    throw dbms::DbError("0A000", "unsupported declared window comparison");
                 return less == dbms::StorageEngine::PredicateTruth::True ? -1 :
                     greater == dbms::StorageEngine::PredicateTruth::True ? 1 : 0;
+            };
+            const auto compareWindowOrder = [&](const map<string, string>& a,
+                const map<string, string>& b, const WindowFunc& window) {
+                if (window.orderByCol.empty()) return 0;
+                const bool leftNull = a.find(window.orderByCol) == a.end();
+                const bool rightNull = b.find(window.orderByCol) == b.end();
+                if (leftNull != rightNull) {
+                    const bool first = window.hasExplicitOrderNulls
+                        ? window.orderByNullsFirst : !window.orderByAsc;
+                    return leftNull == first ? -1 : 1;
+                }
+                const int cmp = comparePartitionColumn(a, b, window.orderByCol);
+                return window.orderByAsc ? cmp : -cmp;
+            };
+            const auto samePeer = [&](size_t left, size_t right, const WindowFunc& window) {
+                return window.orderByCol.empty() ||
+                    comparePartitionColumn(rows[left], rows[right], window.orderByCol) == 0;
             };
 
             // Sort by partition columns first, then by ORDER BY column
@@ -35738,17 +35758,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     if (cmp) return cmp < 0;
                 }
                 // Then compare ORDER BY column
-                if (wf0.orderByCol.empty()) return false;
-                auto itA = a.find(wf0.orderByCol);
-                auto itB = b.find(wf0.orderByCol);
-                if (itA == a.end() || itB == b.end()) return false;
-                try {
-                    int64_t va = stoll(itA->second);
-                    int64_t vb = stoll(itB->second);
-                    return wf0.orderByAsc ? (va < vb) : (va > vb);
-                } catch (...) {
-                    return wf0.orderByAsc ? (itA->second < itB->second) : (itA->second > itB->second);
-                }
+                return compareWindowOrder(a, b, wf0) < 0;
             });
 
             // Helper: check if two rows are in the same partition
@@ -35762,6 +35772,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
 
             // Pre-compute partition boundaries for aggregate window functions
             vector<map<size_t, string>> aggCache(windowFuncs.size());
+            vector<set<size_t>> aggNulls(windowFuncs.size());
             for (size_t wi = 0; wi < windowFuncs.size(); ++wi) {
                 const auto& wf = windowFuncs[wi];
                 if (!wf.isAggregate) continue;
@@ -35781,11 +35792,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     vector<size_t> sortedIdxs = idxs;
                     if (wf.hasFrame && wf.frameType != WindowFunc::FrameType::ROWS && !wf.orderByCol.empty()) {
                         sort(sortedIdxs.begin(), sortedIdxs.end(), [&](size_t a, size_t b) {
-                            auto itA = rows[a].find(wf.orderByCol);
-                            auto itB = rows[b].find(wf.orderByCol);
-                            string va = (itA != rows[a].end()) ? itA->second : "";
-                            string vb = (itB != rows[b].end()) ? itB->second : "";
-                            try { return stoll(va) < stoll(vb); } catch (...) { return va < vb; }
+                            return compareWindowOrder(rows[a], rows[b], wf) < 0;
                         });
                     }
                     const auto& effIdxs = (wf.hasFrame && wf.frameType != WindowFunc::FrameType::ROWS) ? sortedIdxs : idxs;
@@ -35796,10 +35803,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             groupStart.push_back(gi);
                             size_t gj = gi + 1;
                             while (gj < effIdxs.size()) {
-                                auto itA = rows[effIdxs[gi]].find(wf.orderByCol);
-                                auto itB = rows[effIdxs[gj]].find(wf.orderByCol);
-                                if ((itA == rows[effIdxs[gi]].end()) != (itB == rows[effIdxs[gj]].end())) break;
-                                if (itA != rows[effIdxs[gi]].end() && itA->second != itB->second) break;
+                                if (!samePeer(effIdxs[gi], effIdxs[gj], wf)) break;
                                 ++gj;
                             }
                             gi = gj;
@@ -35812,6 +35816,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         size_t ri = idxs[ii];
                         // Determine frame boundaries within this partition
                         size_t fStart = 0, fEnd = effIdxs.size();
+                        if (!wf.hasFrame && !wf.orderByCol.empty()) {
+                            fEnd = posInEff.at(ri) + 1;
+                            while (fEnd < effIdxs.size() && samePeer(effIdxs[fEnd], ri, wf)) ++fEnd;
+                        }
                         if (wf.hasFrame) {
                             if (wf.frameType == WindowFunc::FrameType::ROWS) {
                                 if (wf.frameStartOffset >= 0) {
@@ -35896,8 +35904,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             }
                         }
                         int64_t count = 0;
-                        bool hasMax = false, hasMin = false;
-                        int64_t maxVal = 0, minVal = 0;
+                        optional<string> selected;
                         dbms::Numeric exactSum(0);
                         int64_t exactCnt = 0;
                         // Determine peer group boundaries for GROUP/TIES exclusion
@@ -35911,10 +35918,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                     while (peerStart > fStart) {
                                         size_t prevIdx = effIdxs[peerStart - 1];
                                         if (!samePartition(prevIdx, ri, wf)) break;
-                                        auto itA = rows[prevIdx].find(wf.orderByCol);
-                                        auto itB = rows[ri].find(wf.orderByCol);
-                                        if (itA == rows[prevIdx].end() || itB == rows[ri].end()) break;
-                                        if (itA->second != itB->second) break;
+                                        if (!samePeer(prevIdx, ri, wf)) break;
                                         --peerStart;
                                     }
                                     // Expand forwards
@@ -35922,10 +35926,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                     while (peerEnd < fEnd) {
                                         size_t nextIdx = effIdxs[peerEnd];
                                         if (!samePartition(nextIdx, ri, wf)) break;
-                                        auto itA = rows[nextIdx].find(wf.orderByCol);
-                                        auto itB = rows[ri].find(wf.orderByCol);
-                                        if (itA == rows[nextIdx].end() || itB == rows[ri].end()) break;
-                                        if (itA->second != itB->second) break;
+                                        if (!samePeer(nextIdx, ri, wf)) break;
                                         ++peerEnd;
                                     }
                                     break;
@@ -35943,12 +35944,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                 if (fj >= peerStart && fj < peerEnd && rj != ri) continue;
                             }
                             if (wf.name == "count") {
-                                count++;
+                                if (wf.arg == "*" || rows[rj].count(wf.arg)) count++;
                                 continue;
                             }
                             auto it = rows[rj].find(wf.arg);
                             if (it == rows[rj].end()) continue;
-                            if (it->second.empty()) continue;
                             if (wf.name == "sum" || wf.name == "avg") {
                                 // This legacy receiver renders SQL NULL as
                                 // "NULL"; it is not a numeric input datum.
@@ -35960,11 +35960,16 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                 ++exactCnt;
                                 continue;
                             }
-                            try {
-                                int64_t v = stoll(it->second);
-                                if (wf.name == "max") { if (!hasMax || v > maxVal) { maxVal = v; hasMax = true; } }
-                                if (wf.name == "min") { if (!hasMin || v < minVal) { minVal = v; hasMin = true; } }
-                            } catch (...) {}
+                            if (wf.name == "min" || wf.name == "max") {
+                                const auto& column = partitionColumn(wf.arg);
+                                const auto op = wf.name == "min" ? "<" : ">";
+                                const auto better = selected ? dbms::StorageEngine::compareValues(
+                                    column, it->second, false, *selected, false, op)
+                                    : dbms::StorageEngine::PredicateTruth::True;
+                                if (better == dbms::StorageEngine::PredicateTruth::Unknown)
+                                    throw dbms::DbError("0A000", "unsupported declared window aggregate comparison");
+                                if (better == dbms::StorageEngine::PredicateTruth::True) selected = it->second;
+                            }
                         }
                         string aggVal;
                         if (wf.name == "sum") aggVal = exactCnt ? exactSum.toString() : "NULL";
@@ -35973,8 +35978,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             if (exactCnt == 0) aggVal = "NULL";
                             else aggVal = (exactSum / dbms::Numeric(exactCnt)).toString();
                         }
-                        else if (wf.name == "max") aggVal = hasMax ? to_string(maxVal) : "NULL";
-                        else if (wf.name == "min") aggVal = hasMin ? to_string(minVal) : "NULL";
+                        else if (wf.name == "max" || wf.name == "min") aggVal = selected.value_or("NULL");
+                        if (((wf.name == "sum" || wf.name == "avg") && exactCnt == 0) ||
+                            ((wf.name == "min" || wf.name == "max") && !selected)) aggNulls[wi].insert(ri);
                         aggCache[wi][ri] = aggVal;
                     }
                 }
@@ -35985,6 +35991,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 for (size_t wi = 0; wi < windowFuncs.size(); ++wi) {
                     const auto& wf = windowFuncs[wi];
                     string val;
+                    bool valueIsNull = false;
                     // Determine partition start index for current row
                     size_t partStart = i;
                     while (partStart > 0 && samePartition(partStart - 1, i, wf)) partStart--;
@@ -35993,16 +36000,14 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     if (wf.isAggregate) {
                         auto it = aggCache[wi].find(i);
                         val = (it != aggCache[wi].end()) ? it->second : "NULL";
+                        valueIsNull = it == aggCache[wi].end() || aggNulls[wi].count(i);
                     } else if (wf.name == "row_number") {
                         val = to_string(partIdx + 1);
                     } else if (wf.name == "rank") {
                         if (partIdx == 0) {
                             val = "1";
                         } else {
-                            auto itCur = rows[i].find(wf.orderByCol);
-                            auto itPrev = rows[i - 1].find(wf.orderByCol);
-                            if (itCur != rows[i].end() && itPrev != rows[i - 1].end()
-                                && itCur->second == itPrev->second) {
+                            if (samePeer(i, i - 1, wf)) {
                                 val = rows[i - 1]["_win_" + to_string(wi)];
                             } else {
                                 val = to_string(partIdx + 1);
@@ -36012,10 +36017,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         if (partIdx == 0) {
                             val = "1";
                         } else {
-                            auto itCur = rows[i].find(wf.orderByCol);
-                            auto itPrev = rows[i - 1].find(wf.orderByCol);
-                            if (itCur != rows[i].end() && itPrev != rows[i - 1].end()
-                                && itCur->second == itPrev->second) {
+                            if (samePeer(i, i - 1, wf)) {
                                 val = rows[i - 1]["_win_" + to_string(wi)];
                             } else {
                                 int64_t prevRank = 0;
@@ -36025,28 +36027,33 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             }
                         }
                     } else if (wf.name == "lag") {
-                        if (partIdx == 0) val = "NULL";
+                        if (partIdx == 0) { val = "NULL"; valueIsNull = true; }
                         else {
                             auto it = rows[i - 1].find(wf.arg);
                             val = (it != rows[i - 1].end()) ? it->second : "NULL";
+                            valueIsNull = it == rows[i - 1].end();
                         }
                     } else if (wf.name == "lead") {
                         // Check if next row is in same partition
                         if (i + 1 < rows.size() && samePartition(i + 1, i, wf)) {
                             auto it = rows[i + 1].find(wf.arg);
                             val = (it != rows[i + 1].end()) ? it->second : "NULL";
+                            valueIsNull = it == rows[i + 1].end();
                         } else {
                             val = "NULL";
+                            valueIsNull = true;
                         }
                     } else if (wf.name == "first_value") {
                         auto it = rows[partStart].find(wf.arg);
                         val = (it != rows[partStart].end()) ? it->second : "NULL";
+                        valueIsNull = it == rows[partStart].end();
                     } else if (wf.name == "last_value") {
                         // Find last row in same partition
                         size_t partEnd = i;
                         while (partEnd + 1 < rows.size() && samePartition(partEnd + 1, i, wf)) partEnd++;
                         auto it = rows[partEnd].find(wf.arg);
                         val = (it != rows[partEnd].end()) ? it->second : "NULL";
+                        valueIsNull = it == rows[partEnd].end();
                     } else if (wf.name == "ntile") {
                         size_t partEnd = i;
                         while (partEnd + 1 < rows.size() && samePartition(partEnd + 1, i, wf)) partEnd++;
@@ -36078,10 +36085,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             int64_t rankVal = 1;
                             for (size_t j = partStart; j <= i; ++j) {
                                 if (j == partStart) continue;
-                                auto itCur = rows[j].find(wf.orderByCol);
-                                auto itPrev = rows[j - 1].find(wf.orderByCol);
-                                if (itCur != rows[j].end() && itPrev != rows[j - 1].end()
-                                    && itCur->second == itPrev->second) {
+                                if (samePeer(j, j - 1, wf)) {
                                     // Same rank as previous
                                 } else {
                                     rankVal = static_cast<int64_t>(j - partStart + 1);
@@ -36097,22 +36101,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         while (partEnd + 1 < rows.size() && samePartition(partEnd + 1, i, wf)) partEnd++;
                         size_t partitionSize = partEnd - partStart + 1;
                         // Count rows with value <= current row's value
-                        auto itCur = rows[i].find(wf.orderByCol);
                         size_t countLe = 0;
-                        if (itCur != rows[i].end()) {
-                            for (size_t j = partStart; j <= partEnd; ++j) {
-                                auto itJ = rows[j].find(wf.orderByCol);
-                                if (itJ != rows[j].end()) {
-                                    try {
-                                        int64_t vCur = stoll(itCur->second);
-                                        int64_t vJ = stoll(itJ->second);
-                                        if (vJ <= vCur) countLe++;
-                                    } catch (...) {
-                                        if (itJ->second <= itCur->second) countLe++;
-                                    }
-                                }
-                            }
-                        }
+                        for (size_t j = partStart; j <= partEnd; ++j)
+                            if (compareWindowOrder(rows[j], rows[i], wf) <= 0) countLe++;
                         double cd = partitionSize > 0 ? static_cast<double>(countLe) / static_cast<double>(partitionSize) : 0.0;
                         std::ostringstream oss;
                         oss << std::fixed << std::setprecision(4) << cd;
@@ -36149,22 +36140,23 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                 if (frameEnd > partEnd) frameEnd = partEnd;
                             }
                         } else if (!wf.orderByCol.empty()) {
-                            const string curOrd = rows[i].count(wf.orderByCol) ? rows[i].at(wf.orderByCol) : string();
                             while (frameEnd + 1 < rows.size() &&
                                    samePartition(frameEnd + 1, i, wf) &&
-                                   rows[frameEnd + 1].count(wf.orderByCol) &&
-                                   rows[frameEnd + 1].at(wf.orderByCol) == curOrd)
+                                   samePeer(frameEnd + 1, i, wf))
                                 ++frameEnd;
                         }
                         size_t nthIdx = partStart + static_cast<size_t>(n) - 1;
                         if (nthIdx <= frameEnd) {
                             auto it = rows[nthIdx].find(nthCol);
                             val = (it != rows[nthIdx].end()) ? it->second : "NULL";
+                            valueIsNull = it == rows[nthIdx].end();
                         } else {
                             val = "NULL";
+                            valueIsNull = true;
                         }
                     }
                     rows[i]["_win_" + to_string(wi)] = val;
+                    if (valueIsNull) rows[i].nullWindows.insert(wi);
                 }
             }
 
@@ -36177,27 +36169,16 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     const int cmp = comparePartitionColumn(a, b, pcol);
                     if (cmp) return cmp < 0;
                 }
-                if (wf0.orderByCol.empty()) return false;
-                bool aNull = a.find(wf0.orderByCol) == a.end();
-                bool bNull = b.find(wf0.orderByCol) == b.end();
-                if (aNull || bNull) {
-                    if (aNull && bNull) return false;
-                    return wf0.orderByAsc ? bNull : aNull;
-                }
-                auto itA = a.find(wf0.orderByCol);
-                auto itB = b.find(wf0.orderByCol);
-                try {
-                    int64_t va = stoll(itA->second);
-                    int64_t vb = stoll(itB->second);
-                    return wf0.orderByAsc ? (va < vb) : (va > vb);
-                } catch (...) {
-                    return wf0.orderByAsc ? (itA->second < itB->second) : (itA->second > itB->second);
-                }
+                return compareWindowOrder(a, b, wf0) < 0;
             });
             // Format results as strings
             vector<string> winAnswers;
+            vector<vector<string>> winCells;
+            vector<vector<bool>> winNulls;
             for (const auto& row : rows) {
                 string line;
+                vector<string> cells;
+                vector<bool> nulls;
                 for (size_t i = 0; i < aggItems.size(); ++i) {
                     if (exprTypes[i] == 2) {
                         size_t wi = 0;
@@ -36205,34 +36186,68 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             if (exprTypes[j] == 2) wi++;
                         }
                         auto it = row.find("_win_" + to_string(wi));
-                        if (it != row.end()) line += it->second + " ";
+                        const bool isNull = it == row.end() || row.nullWindows.count(wi);
+                        const string value = it == row.end() ? string() : it->second;
+                        cells.push_back(isNull ? string() : value);
+                        nulls.push_back(isNull);
+                        line += (isNull ? "NULL" : value) + " ";
                     } else if (exprTypes[i] == 0) {
                         auto it = row.find(aggItems[i].arg);
-                        if (it != row.end()) line += it->second + " ";
+                        const bool isNull = it == row.end();
+                        const string value = isNull ? string() : it->second;
+                        cells.push_back(value); nulls.push_back(isNull);
+                        line += (isNull ? "NULL" : value) + " ";
                     }
                 }
                 if (!line.empty() && line.back() == ' ') line.pop_back();
                 winAnswers.push_back(line);
+                winCells.push_back(std::move(cells));
+                winNulls.push_back(std::move(nulls));
             }
 
+            vector<string> outputIndices;
+            for (size_t index = 0; index < winAnswers.size(); ++index)
+                outputIndices.push_back(to_string(index));
             // DISTINCT
             if (isDistinct) {
                 vector<string> deduped;
                 set<string> seen;
-                for (const auto& row : winAnswers) {
-                    if (seen.insert(row).second) deduped.push_back(row);
+                for (const auto& index : outputIndices) {
+                    const size_t row = stoull(index);
+                    string key;
+                    for (size_t column = 0; column < winCells[row].size(); ++column)
+                        key += winNulls[row][column] ? "N;" :
+                            "V" + to_string(winCells[row][column].size()) + ":" + winCells[row][column];
+                    if (seen.insert(key).second) deduped.push_back(index);
                 }
-                winAnswers = std::move(deduped);
+                outputIndices = std::move(deduped);
             }
 
             // LIMIT / OFFSET
-            applyLimitOffset(winAnswers);
+            applyLimitOffset(outputIndices);
 
             // Output
-            for (const auto& row : winAnswers) {
+            auto windowResult = buildWindowProtocolMetadata();
+            bool structuredOutput = windowResult.available;
+            if (structuredOutput) {
+                windowResult.metadataOnly = false;
+                windowResult.rows.clear(); windowResult.nulls.clear();
+                windowResult.commandTag = "SELECT " + to_string(outputIndices.size());
+            }
+            for (const auto& index : outputIndices) {
+                const size_t rowIndex = stoull(index);
+                const auto& row = winAnswers[rowIndex];
                 cout << row << endl;
                 log(s.username, row, getTime());
+                if (structuredOutput) {
+                    if (winCells[rowIndex].size() != windowResult.columns.size()) structuredOutput = false;
+                    else {
+                        windowResult.rows.push_back(winCells[rowIndex]);
+                        windowResult.nulls.push_back(winNulls[rowIndex]);
+                    }
+                }
             }
+            if (structuredOutput) dbms::publishLastDmlResult(std::move(windowResult));
             return false;
         } else if (hasScalar) {
             if (forUpdate) { cout << "FOR UPDATE not supported with scalar functions" << endl; return true; }
