@@ -624,4 +624,59 @@ Numeric Numeric::withPrecision(int maxPrecision, RoundingMode mode) const {
     return withScale(scale_ - drop, mode);
 }
 
+Numeric Numeric::squareRoot() const {
+    if (nan_) return *this;
+    if (sign_ < 0 && (inf_ || !isAllZero(digits_)))
+        throw std::domain_error("cannot take square root of a negative number");
+    if (inf_) return *this;
+
+    // PG numeric's weight counts base-10000 digits. Floor, not truncation,
+    // is necessary for values below one; zero has normalized weight zero.
+    const int decimalWeight = isAllZero(digits_) ? 0
+        : static_cast<int>(digits_.size()) - scale_ - 1;
+    const int weight = decimalWeight >= 0 ? decimalWeight / 4
+        : -((-decimalWeight + 3) / 4);
+    const int resultScale = std::min(kMaxPrecision,
+        std::max({0, scale_, 16 - (2 * weight + 1)}));
+
+    // Calculate one guard digit. sqrt(floor(x)) and sqrt(x) have the same
+    // integer floor, so fractional digits below this precision may be cut.
+    // The longhand algorithm uses only decimal digit vectors: no double,
+    // floating-to-integer conversion, or bounded integer sum is involved.
+    auto radicand = digits_;
+    const int shift = 2 * (resultScale + 1) - scale_;
+    if (shift >= 0) radicand.insert(radicand.end(), shift, 0);
+    else if (static_cast<size_t>(-shift) >= radicand.size()) radicand = {0};
+    else radicand.resize(radicand.size() - static_cast<size_t>(-shift));
+    stripLeadingZeros(radicand);
+    std::vector<uint8_t> root{0}, remainder{0};
+    size_t position = 0;
+    size_t pairWidth = radicand.size() % 2 ? 1 : 2;
+    while (position < radicand.size()) {
+        remainder.insert(remainder.end(), pairWidth, 0);
+        const std::vector<uint8_t> pair(radicand.begin() + position,
+                                       radicand.begin() + position + pairWidth);
+        remainder = addDigitVectors(remainder, pair);
+        stripLeadingZeros(remainder);
+        const auto twentyRoot = mulDigitVectors(root, {2, 0});
+        uint8_t digit = 9;
+        std::vector<uint8_t> candidate;
+        for (;;) {
+            candidate = mulDigitVectors(addDigitVectors(twentyRoot, {digit}), {digit});
+            if (cmpDigitVectors(candidate, remainder) <= 0) break;
+            --digit;
+        }
+        remainder = subDigitVectors(remainder, candidate);
+        root.push_back(digit);
+        stripLeadingZeros(root);
+        position += pairWidth;
+        pairWidth = 2;
+    }
+    Numeric result;
+    result.digits_ = divideByPowerOf10(root, 1);
+    result.scale_ = resultScale;
+    result.normalize();
+    return result;
+}
+
 } // namespace dbms

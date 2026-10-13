@@ -57,6 +57,10 @@ public:
     // Clamp the total number of significant digits to `maxPrecision`.
     Numeric withPrecision(int maxPrecision, RoundingMode mode = RoundingMode::HalfUp) const;
 
+    // Decimal square root, rounded with PostgreSQL-style display scale.
+    // Negative finite values and -Infinity raise domain_error.
+    Numeric squareRoot() const;
+
     static constexpr int kMaxPrecision = 1000;
     // Decimal text storage leaves room for sign, decimal point, and a small
     // formatting margin while retaining the 1000-digit precision cap.

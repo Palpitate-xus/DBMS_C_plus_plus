@@ -8752,7 +8752,7 @@ void ExprEvaluator::registerBuiltins() {
     // PG presents exp/ln/log/sqrt as numeric with fixed display scales:
     //   exp: 15 frac digits for integer input, 16 for fractional input;
     //   ln/log/log10: 16 for fractional or (ln) any input, bare for exact int log of int;
-    //   sqrt: 15 for fractional input, bare for integer input.
+    // sqrt uses the typed floating/decimal implementations below.
     // Values are computed in long double to reproduce PG's 16th digit.
     auto numericFixed = [](long double v, int frac) {
         std::ostringstream out;
@@ -8799,25 +8799,25 @@ void ExprEvaluator::registerBuiltins() {
         requireLogarithmArgument(value);
         return numericFixed(logl(value), 16);
     };
-    functions_["sqrt"] = [numericFixed, argHasDot](const auto& a) {
-        if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
-        if (const auto exact = tryParseNumeric(a[0].value)) {
-            if (exact->isNaN()) return ExprValue("numeric", "NaN", false);
-            if (exact->isInfinite() && exact->toString().front() != '-')
-                return ExprValue("numeric", "Infinity", false);
+    functions_["sqrt"] = [](const auto& a) {
+        const bool decimal = !a.empty() &&
+            ExprHelper::canonicalResultTypeName(a[0].typeName) == "numeric";
+        const std::string resultType = decimal ? "numeric" : "double precision";
+        if (a.empty() || a[0].isNull) return ExprValue(resultType, "", true);
+        if (decimal) {
+            const Numeric input(a[0].value);
+            try {
+                return ExprValue(resultType, input.squareRoot().toString(), false);
+            } catch (const std::domain_error& error) {
+                throw DbError("2201F", error.what());
+            } catch (const std::invalid_argument& error) {
+                throw DbError("22003", error.what());
+            }
         }
-        const long double input = a[0].asDouble();
-        if (input < 0) {
-            throw std::runtime_error(
-                "cannot take square root of a negative number "
-                "(SQLSTATE 2201F)");
-        }
-        long double v = sqrtl(input);
-        if (!argHasDot(a)) {
-            if (v == floorl(v)) return ExprValue("numeric", std::to_string(static_cast<long long>(v)), false);
-            return numericFixed(v, 15);
-        }
-        return numericFixed(v, 15);
+        const double input = ExprHelper::canonicalResultTypeName(a[0].typeName) == "real"
+            ? static_cast<double>(parseRealCastValue(a[0])) : parseDoubleCastValue(a[0]);
+        if (input < 0) throw DbError("2201F", "cannot take square root of a negative number");
+        return ExprValue(resultType, formatFloatingCastValue(std::sqrt(input)), false);
     };
     functions_["log"] = [numericFixed, argHasDot,
                           requireLogarithmArgument](

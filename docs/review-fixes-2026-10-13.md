@@ -19,7 +19,7 @@
 
 | 项目 | 内容 | 状态 | commit / 验证 |
 | --- | --- | --- | --- |
-| R01 | NUMERIC SQRT | 处理中 | 十进制算法1023原生控制O2/ASan/UBSan通过，SQL正在验证 |
+| R01 | NUMERIC SQRT | 已修复 | 1023原生控制O2/ASan/UBSan、46协议PG/Root及5完整native邻居通过，见[验证](issue-review-r01-numeric-square-root.md) |
 | R02 | 窗口排序、peer、MIN/MAX | 待修复 | |
 | R03 | 窗口分区的NUMERIC等价 | 待修复 | |
 | R04 | 窗口frame边界 | 待修复 | |
@@ -34,7 +34,7 @@
 | R13 | 逻辑预览NULL及字段编码 | 待修复 | |
 | R14 | publication读取错误传播 | 待修复 | |
 | R15 | 关停唤醒顺序 | 待修复 | |
-| R16 | catalog坏行及完整加载 | 已修复 | `0d85f6b9`及cold兼容后继；691、cold正常API及原catalog_snapshot全通过，见[初始验证](issue-review-r16-catalog-complete-read.md)/[兼容修复](issue-review-r16-optional-catalog-directory.md) |
+| R16 | catalog坏行及完整加载 | 已修复 | `0d85f6b9`/`a0d2efde`；691、cold正常API及原catalog_snapshot全通过，见[初始验证](issue-review-r16-catalog-complete-read.md)/[兼容修复](issue-review-r16-optional-catalog-directory.md) |
 | R17 | 失败回滚恢复图像 | 待修复 | |
 | R18 | catalog值快照 | 待修复 | |
 | R19 | TEMP启动恢复 | 待修复 | |

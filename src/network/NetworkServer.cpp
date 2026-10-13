@@ -2216,6 +2216,31 @@ bool describePreparedResult(const std::string& sql, Session& session,
         }
     }
     const auto* select = dynamic_cast<const SelectStmt*>(parsed.stmt.get());
+    if (select && !parameterOids.empty() &&
+        std::all_of(parameterOids.begin(), parameterOids.end(),
+            [](uint32_t oid) { return oid != 0 && valuesParameterCastType(oid); })) {
+        // An expression containing a declared parameter (e.g. sqrt($1))
+        // cannot infer its overload from the unbound "$1" text. Use the
+        // existing whole-query binder with genuine typed metadata cells;
+        // Describe must not evaluate a value, call a function or read rows.
+        std::vector<QueryBindingDatum> parameters;
+        for (size_t i = 0; i < parameterOids.size(); ++i) {
+            QueryBindingDatum parameter;
+            parameter.identity = "protocol-parameter-" + std::to_string(i + 1);
+            parameter.position = i + 1;
+            parameter.origin = ParameterOrigin::MetadataPlaceholder;
+            parameter.type = valuesParameterCastType(parameterOids[i]);
+            parameters.push_back(std::move(parameter));
+        }
+        const auto prepared = g_engine.prepareBoundQuery(session.currentDB, sql, parameters);
+        QueryResult shape;
+        for (const auto& field : prepared.output) {
+            shape.columns.push_back(field.name);
+            shape.columnTypes.push_back(field.type);
+        }
+        columns = describeProtocolColumns(shape, sql, session);
+        return !columns.empty();
+    }
     if (select && !select->fromClause && parameterOids.empty()) {
         // Query-host providers publish their genuine whole-bound static
         // descriptor. Describe neither reads their backend rows nor guesses
