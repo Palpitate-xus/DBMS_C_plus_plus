@@ -67,7 +67,7 @@
 | O04 | HAVING BOOLEAN绑定 | 已修复 | `157e5d2e`；20 native、49 PG/候选/Root协议、五native/六协议邻居与完整PGprotocol通过；原超时及原错误均保留，见[验证](issue-review-o04-having-boolean-context.md) |
 | O05 | ORDER BY重复别名 | 待修复 | |
 | O06 | 物化视图刷新超时 | 待定位 | |
-| O07 | ALTER ARRAY历史超时 | 待复核 | |
+| O07 | ALTER ARRAY历史超时 | 当前完整复验通过 | 原驱动未改，默认15秒及原10秒配置两完整exit0；历史原因未定，见[验证](issue-review-o07-alter-array-revalidation.md) |
 
 原273项功能总账独立维护；关闭这里的缺陷不自动宣称完整PostgreSQL功能兼容。
 
