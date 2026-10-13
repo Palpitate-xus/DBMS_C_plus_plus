@@ -1,6 +1,6 @@
 # 全部文档检查清单
 
-审查输入和发现见[代码审查报告](code-review-2026-10-13.md)。基准提交 `a502ffa3` 包含 412 份已跟踪 Markdown；下表包括本轮新增报告，共 417 份。
+审查输入和发现见[代码审查报告](code-review-2026-10-13.md)。基准提交 `a502ffa3` 包含 412 份已跟踪 Markdown；首次审查含新增报告共 417 份。当前本轮修复后逐文件复查 458 份已跟踪 Markdown，下表覆盖全部；历史数量不改写。
 
 检查逐文件读取 UTF-8 内容并验证 Markdown 内联链接的本地文件目标是否存在。它不验证外部网址、锚点、所有引用式链接，也不证明文中每个历史技术结论在当前版本成立。
 使用手册、部署、命令参考、模块 README 和状态入口另作人工一致性核查；`issue-*.md` 保留原始提交和运行证据，其结论须按对应输入读取。
@@ -10,6 +10,11 @@
 | 文档 | 分类 | 本地文件链接 |
 | --- | --- | --- |
 | [CHANGELOG.md](../CHANGELOG.md) | 使用/开发/状态文档 | 通过 |
+| [README.md](../README.md) | 使用/开发/状态文档 | 通过 |
+| [RELEASE-NOTES.md](../RELEASE-NOTES.md) | 使用/开发/状态文档 | 通过 |
+| [docs/MANUAL.md](MANUAL.md) | 使用/开发/状态文档 | 通过 |
+| [docs/PACKAGING.md](PACKAGING.md) | 使用/开发/状态文档 | 通过 |
+| [docs/README.md](README.md) | 使用/开发/状态文档 | 通过 |
 | [docs/all-gaps-todo.md](all-gaps-todo.md) | 使用/开发/状态文档 | 通过 |
 | [docs/archive/phase4-plan.md](archive/phase4-plan.md) | 历史档案 | 通过 |
 | [docs/archive/postgresql-complete-gap-analysis.md](archive/postgresql-complete-gap-analysis.md) | 历史档案 | 通过 |
@@ -302,6 +307,46 @@
 | [docs/issue-returning-array-declared-metadata.md](issue-returning-array-declared-metadata.md) | 历史问题证据 | 通过 |
 | [docs/issue-returning-hidden-range-fixture.md](issue-returning-hidden-range-fixture.md) | 历史问题证据 | 通过 |
 | [docs/issue-returning-transition-namespaces.md](issue-returning-transition-namespaces.md) | 历史问题证据 | 通过 |
+| [docs/issue-review-o01-table-owner-health-retry.md](issue-review-o01-table-owner-health-retry.md) | 历史问题证据 | 通过 |
+| [docs/issue-review-o02-index-access-path-expectations.md](issue-review-o02-index-access-path-expectations.md) | 历史问题证据 | 通过 |
+| [docs/issue-review-o04-having-boolean-context.md](issue-review-o04-having-boolean-context.md) | 历史问题证据 | 通过 |
+| [docs/issue-review-o07-alter-array-revalidation.md](issue-review-o07-alter-array-revalidation.md) | 历史问题证据 | 通过 |
+| [docs/issue-review-r01-numeric-square-root.md](issue-review-r01-numeric-square-root.md) | 历史问题证据 | 通过 |
+| [docs/issue-review-r05-ntile-distribution.md](issue-review-r05-ntile-distribution.md) | 历史问题证据 | 通过 |
+| [docs/issue-review-r08-binary-float.md](issue-review-r08-binary-float.md) | 历史问题证据 | 通过 |
+| [docs/issue-review-r09-pool-wait-reference.md](issue-review-r09-pool-wait-reference.md) | 历史问题证据 | 通过 |
+| [docs/issue-review-r10-pool-database-capacity.md](issue-review-r10-pool-database-capacity.md) | 历史问题证据 | 通过 |
+| [docs/issue-review-r11-window-exact-accumulator.md](issue-review-r11-window-exact-accumulator.md) | 历史问题证据 | 通过 |
+| [docs/issue-review-r12-test-registration.md](issue-review-r12-test-registration.md) | 历史问题证据 | 通过 |
+| [docs/issue-review-r14-publication-read-errors.md](issue-review-r14-publication-read-errors.md) | 历史问题证据 | 通过 |
+| [docs/issue-review-r16-catalog-complete-read.md](issue-review-r16-catalog-complete-read.md) | 历史问题证据 | 通过 |
+| [docs/issue-review-r16-optional-catalog-directory.md](issue-review-r16-optional-catalog-directory.md) | 历史问题证据 | 通过 |
+| [docs/issue-review-r17-rollback-recovery-ownership.md](issue-review-r17-rollback-recovery-ownership.md) | 历史问题证据 | 通过 |
+| [docs/issue-review-r18-catalog-value-snapshots.md](issue-review-r18-catalog-value-snapshots.md) | 历史问题证据 | 通过 |
+| [docs/issue-review-r19-stale-temp-startup.md](issue-review-r19-stale-temp-startup.md) | 历史问题证据 | 通过 |
+| [docs/issue-review-r20-returning-query-owner.md](issue-review-r20-returning-query-owner.md) | 历史问题证据 | 通过 |
+| [docs/issue-review-r21-conflict-boolean-context.md](issue-review-r21-conflict-boolean-context.md) | 历史问题证据 | 通过 |
+| [docs/issue-review-r22-dml-required-keywords.md](issue-review-r22-dml-required-keywords.md) | 历史问题证据 | 通过 |
+| [docs/issue-review-r23-maintenance-persistence-gate.md](issue-review-r23-maintenance-persistence-gate.md) | 历史问题证据 | 通过 |
+| [docs/issue-review-r24-execute-argument-values.md](issue-review-r24-execute-argument-values.md) | 历史问题证据 | 通过 |
+| [docs/issue-review-r25-numeric-precision.md](issue-review-r25-numeric-precision.md) | 历史问题证据 | 通过 |
+| [docs/issue-review-r26-recursive-cte-types.md](issue-review-r26-recursive-cte-types.md) | 历史问题证据 | 通过 |
+| [docs/issue-review-r27-page-compaction.md](issue-review-r27-page-compaction.md) | 历史问题证据 | 通过 |
+| [docs/issue-review-r28-page-insert-capacity.md](issue-review-r28-page-insert-capacity.md) | 历史问题证据 | 通过 |
+| [docs/issue-review-r29-pattern-escape-type.md](issue-review-r29-pattern-escape-type.md) | 历史问题证据 | 通过 |
+| [docs/issue-review-r30-session-metadata.md](issue-review-r30-session-metadata.md) | 历史问题证据 | 通过 |
+| [docs/issue-review-r31-delete-only-typed-owner.md](issue-review-r31-delete-only-typed-owner.md) | 历史问题证据 | 通过 |
+| [docs/issue-review-r32-scientific-numeric-literals.md](issue-review-r32-scientific-numeric-literals.md) | 历史问题证据 | 通过 |
+| [docs/issue-review-r34-scientific-numeric-arithmetic.md](issue-review-r34-scientific-numeric-arithmetic.md) | 历史问题证据 | 通过 |
+| [docs/issue-review-r35-insert-select-conflict-boundary.md](issue-review-r35-insert-select-conflict-boundary.md) | 历史问题证据 | 通过 |
+| [docs/issue-review-r36-gcd-lcm-result-types.md](issue-review-r36-gcd-lcm-result-types.md) | 历史问题证据 | 通过 |
+| [docs/issue-review-r37-numeric-text-arithmetic.md](issue-review-r37-numeric-text-arithmetic.md) | 历史问题证据 | 通过 |
+| [docs/issue-review-r38-scientific-column-projections.md](issue-review-r38-scientific-column-projections.md) | 历史问题证据 | 通过 |
+| [docs/issue-review-r39-insert-select-owner.md](issue-review-r39-insert-select-owner.md) | 历史问题证据 | 通过 |
+| [docs/issue-review-r40-temp-cleanup-file-ownership.md](issue-review-r40-temp-cleanup-file-ownership.md) | 历史问题证据 | 通过 |
+| [docs/issue-review-r41-insert-source-preflight.md](issue-review-r41-insert-source-preflight.md) | 历史问题证据 | 通过 |
+| [docs/issue-review-r42-index-rollback-fixture.md](issue-review-r42-index-rollback-fixture.md) | 历史问题证据 | 通过 |
+| [docs/issue-review-r43-function-attribute-order.md](issue-review-r43-function-attribute-order.md) | 历史问题证据 | 通过 |
 | [docs/issue-root-numeric-publication.md](issue-root-numeric-publication.md) | 历史问题证据 | 通过 |
 | [docs/issue-root-row-publication.md](issue-root-row-publication.md) | 历史问题证据 | 通过 |
 | [docs/issue-root-sql-value-publication.md](issue-root-sql-value-publication.md) | 历史问题证据 | 通过 |
@@ -409,19 +454,15 @@
 | [docs/issue-with-primary-dml-execution.md](issue-with-primary-dml-execution.md) | 历史问题证据 | 通过 |
 | [docs/issue-with-primary-dml-preparation.md](issue-with-primary-dml-preparation.md) | 历史问题证据 | 通过 |
 | [docs/issues/issue-native-resolved-array-storage.md](issues/issue-native-resolved-array-storage.md) | 历史问题证据 | 通过 |
-| [docs/MANUAL.md](MANUAL.md) | 使用/开发/状态文档 | 通过 |
-| [docs/PACKAGING.md](PACKAGING.md) | 使用/开发/状态文档 | 通过 |
 | [docs/postgresql-18-gap-audit.md](postgresql-18-gap-audit.md) | 使用/开发/状态文档 | 通过 |
 | [docs/postgresql-18-implementation-blueprint.md](postgresql-18-implementation-blueprint.md) | 使用/开发/状态文档 | 通过 |
 | [docs/postgresql-comparison.md](postgresql-comparison.md) | 使用/开发/状态文档 | 通过 |
 | [docs/production-status.md](production-status.md) | 使用/开发/状态文档 | 通过 |
-| [docs/README.md](README.md) | 使用/开发/状态文档 | 通过 |
 | [docs/review-closeout-plan.md](review-closeout-plan.md) | 使用/开发/状态文档 | 通过 |
 | [docs/review-evidence-2026-10-13.md](review-evidence-2026-10-13.md) | 使用/开发/状态文档 | 通过 |
+| [docs/review-fixes-2026-10-13.md](review-fixes-2026-10-13.md) | 使用/开发/状态文档 | 通过 |
 | [docs/review-index.md](review-index.md) | 使用/开发/状态文档 | 通过 |
 | [docs/test-report.md](test-report.md) | 使用/开发/状态文档 | 通过 |
-| [README.md](../README.md) | 使用/开发/状态文档 | 通过 |
-| [RELEASE-NOTES.md](../RELEASE-NOTES.md) | 历史档案 | 通过 |
 | [src/catalog/README.md](../src/catalog/README.md) | 使用/开发/状态文档 | 通过 |
 | [src/executor/README.md](../src/executor/README.md) | 使用/开发/状态文档 | 通过 |
 | [src/parser/README.md](../src/parser/README.md) | 使用/开发/状态文档 | 通过 |

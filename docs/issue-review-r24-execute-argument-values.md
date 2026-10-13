@@ -40,3 +40,17 @@ aggregate、TEMP、RETURNING、required keywords、参数 identity、投影标�
 完整 postgres_protocol。R43 的独立 parser 修复单独提交，不能用重排函数
 定义 SQL 掩盖它。所有修改后的生产源实际重编标准链接；主分支集成另需
 使用主分支当前头文件对象，不借用私树旧 ABI 对象。
+
+## 主分支集成终态
+
+`1d5aac14` 实际重编 Main 和 parser 并标准链接 exit 0；日志为
+`/tmp/dbms-review-fix-donor.N9sdas6f/root-r43-r24-build.log`。
+Root 新59控制及十二完整协议邻居全部 exit 0，含原完整 postgres_protocol、
+HAVING BOOLEAN 与原冲突75控制（`root-r24-r43-*_test.py.log`）。九完整
+native（`root-r24-r43-final-native.log`）全部 exit 0，包括真实 INSERT
+SELECT source preflight、恢复图像及新函数属性52控制。新链接前核对全部
+58份当前源/头/flags receipts，批次结束核对输入未变。
+
+首次原生批次在编译前因调用者拼错 source-preflight 驱动名 exit 1，保留
+`root-r24-r43-native.log`；使用真实文件名完整重跑九者通过，不宣称失败
+批次通过。未修改公共头文件，不使用私树对象。这仍不是最终全注册回归。

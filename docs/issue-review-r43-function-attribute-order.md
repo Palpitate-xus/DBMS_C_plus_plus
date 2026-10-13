@@ -25,3 +25,11 @@ tokenize 的字面量；不搜索函数体内关键字。重复 LANGUAGE/AS 与�
 
 52项是实际 AST 原生测试，不冒充52项独立 PG 比较。Root 集成需按当前主分支
 头文件真实重新编译，不能使用私树旧头时代的生产对象。
+
+主分支 `0c3ebac4`/`1d5aac14` 已真实重编当前 parser/Main 并标准链接 exit 0。
+Root 九完整native包含本52控制、stored function 两邻居、INSERT SELECT
+clause/source/conflict/NULL、rollback graph、HAVING，全部 exit 0；新59控制
+及十二完整协议邻居（含完整postgres_protocol）全部 exit 0。证据目录
+`/tmp/dbms-review-fix-donor.N9sdas6f/` 的 `root-r43-r24-build.log`、
+`root-r24-r43-final-native.log` 与 `root-r24-r43-*_test.py.log`。全部58份
+当前对象receipt及输入不变门禁通过；不将私树通过代替Root验收。

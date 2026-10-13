@@ -3,7 +3,9 @@
 本轮按用户要求进行全仓库审查、复现和文档整理，结果与逐项修复方法见[审查报告](code-review-2026-10-13.md)，文件覆盖见[文档清单](documentation-inventory.md)。
 下方批次中的“当前”“正在运行”和 PASS 数均属于对应记录日期。此前 Root 60 native / 46 wire 验证已经终止：60/60、45/46 通过，唯一失败为 ALTER ARRAY 超时；不能继续标成运行中或全绿。
 原 273 项状态仍为 22 complete、166 partial、70 unverified、15 deferred_by_user；CTAS／后台 checkpoint 另按用户要求暂缓，详见[范围说明](deferred-scope.md)。
-本轮新运行的终态以审查报告为准。保留独立本地 commit，不 push，Actions 保持禁用。
+原审查终态以审查报告为准；后续修复、主分支实际复验与剩余问题以
+[逐项修复进度](review-fixes-2026-10-13.md)为准。下面旧批次不代表当前正在运行。
+保留独立本地 commit，不 push，Actions 保持禁用。
 
 以下为历史执行记录。
 
