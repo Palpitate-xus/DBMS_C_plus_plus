@@ -36,7 +36,9 @@ Broader follow-up on 2026-10-13: the original complete `catalog_snapshot_test`
 raised `58030: cannot read catalog image class` after this change in the R18
 candidate. Its assertions remain unchanged. This newly discovered normal-path
 regression is being diagnosed; the focused 691 checks below are not a claim
-that catalog snapshot compatibility has already passed.
+that catalog snapshot compatibility has already passed. The follow-up
+[optional cold-directory fix](issue-review-r16-optional-catalog-directory.md)
+subsequently passed the unchanged complete snapshot test and all 691 checks.
 
 ## Actual verification
 

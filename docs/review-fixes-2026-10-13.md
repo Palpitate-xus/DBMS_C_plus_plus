@@ -19,7 +19,7 @@
 
 | 项目 | 内容 | 状态 | commit / 验证 |
 | --- | --- | --- | --- |
-| R01 | NUMERIC SQRT | 待修复 | |
+| R01 | NUMERIC SQRT | 处理中 | 十进制算法1023原生控制O2/ASan/UBSan通过，SQL正在验证 |
 | R02 | 窗口排序、peer、MIN/MAX | 待修复 | |
 | R03 | 窗口分区的NUMERIC等价 | 待修复 | |
 | R04 | 窗口frame边界 | 待修复 | |
@@ -34,7 +34,7 @@
 | R13 | 逻辑预览NULL及字段编码 | 待修复 | |
 | R14 | publication读取错误传播 | 待修复 | |
 | R15 | 关停唤醒顺序 | 待修复 | |
-| R16 | catalog坏行及完整加载 | 邻居复核中 | `0d85f6b9`；691检查通过，但完整catalog_snapshot原驱动新失败，正在修复兼容；见[验证](issue-review-r16-catalog-complete-read.md) |
+| R16 | catalog坏行及完整加载 | 已修复 | `0d85f6b9`及cold兼容后继；691、cold正常API及原catalog_snapshot全通过，见[初始验证](issue-review-r16-catalog-complete-read.md)/[兼容修复](issue-review-r16-optional-catalog-directory.md) |
 | R17 | 失败回滚恢复图像 | 待修复 | |
 | R18 | catalog值快照 | 待修复 | |
 | R19 | TEMP启动恢复 | 待修复 | |
@@ -47,8 +47,10 @@
 | R26 | 递归CTE类型/typmod | 待修复 | |
 | R27 | 页压缩全部存活行 | 已修复 | `58f1ee3d`；原生26组O2/ASan/UBSan通过；SQL及进程重启通过，见[验证](issue-review-r27-page-compaction.md) |
 | R28 | 页插入空间计算 | 已修复 | `261ffb86`；原始满页插入失败证据；198边界O2/ASan/UBSan及26压缩邻居通过，见[验证](issue-review-r28-page-insert-capacity.md) |
-| R29 | LIKE ESCAPE类型比较 | 已修复 | Root项目flags的-Werror=address通过；34绑定控制及相邻协议见[验证](issue-review-r29-pattern-escape-type.md) |
+| R29 | LIKE ESCAPE类型比较 | 已修复 | `d7a3293d`；Root项目flags的-Werror=address通过；34绑定控制及相邻协议见[验证](issue-review-r29-pattern-escape-type.md) |
 | R30 | Parse/Describe会话上下文 | 已修复 | `8ba70380`；Root标准构建及12控制通过；5个原失败驱动在候选通过，见[验证](issue-review-r30-session-metadata.md) |
+| R31 | DELETE ONLY回退错删多行 | 处理中 | 新增；正常ONLY/alias/WHERE/RETURNING与PG不同，独立修复 |
+| R32 | 科学计数法字面量的NUMERIC写入绑定 | 待修复 | 新增；`INSERT ... VALUES(1e40)`对NUMERIC列错误返回42804，而typed cast合法 |
 | O01 | owner健康重试及测试覆盖 | 待修复 | |
 | O02 | EXISTS索引错误的访问计划/断言 | 待复核 | |
 | O03 | EXPLAIN JOIN图及过时断言 | 待修复 | |

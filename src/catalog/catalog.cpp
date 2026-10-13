@@ -2150,8 +2150,20 @@ void CatalogManager::loadAllLocked() {
             before.emplace(image.first, generation);
     }
 
+    // A cold read-only metadata lookup must not bootstrap a catalog. Storage
+    // schema reads legitimately precede creation of a pg_catalog directory.
+    // Only that initial absent-directory case is empty metadata; losing a
+    // loaded directory or failing to inspect an existing one still fails closed.
+    std::error_code directoryError;
+    const auto directoryStatus = std::filesystem::symlink_status(dbPath_, directoryError);
+    const bool optionalDirectoryAbsent = !oidGen_ && persistence_->observed.empty() &&
+        directoryStatus.type() == std::filesystem::file_type::not_found &&
+        (!directoryError || directoryError == std::errc::no_such_file_or_directory);
+
     const auto openRelationImage = [&](const char* name) {
         const auto generation = before.find(name);
+        if (generation == before.end() && optionalDirectoryAbsent)
+            return std::ifstream{};
         if (generation == before.end() ||
             (generation->second.exists && !generation->second.regular))
             throw DbError("58030", "cannot read catalog image " + std::string(name));
