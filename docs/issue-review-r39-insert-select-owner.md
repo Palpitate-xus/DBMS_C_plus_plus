@@ -60,3 +60,7 @@ isStarProjection 帮助函数的失败记录也保留在 `r39-owned-source-build
 保存的全部原 SQL/断言，没有删除或替换为缩小版。注册盘点实际 exit 0。
 这不是所有 INSERT SELECT/PostgreSQL 查询形状完整兼容的声明；总账中的其他
 功能缺口继续独立维护，Root 集成验证在主修复清单另行登记。
+
+复查通用 source 接收器发现其未继承旧路径的来源表/列检查，另列
+[R41](issue-review-r41-insert-source-preflight.md) 保留原始13失败及修复验证。
+R39 的绿色局部驱动不替代这项后来发现的 source 合约回归。

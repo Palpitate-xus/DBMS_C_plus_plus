@@ -1520,6 +1520,97 @@ OpPtr buildPreparedInsertJoinSource(const std::shared_ptr<PreparedQuery>& query,
     SelectStmt* select, Session& session,
     const std::shared_ptr<PreparedQueryExecution>& execution);
 
+void checkPreparedInsertSources(const PreparedQuery& query, Session& session) {
+    if (sessionIsAdmin(session)) return;
+    std::map<size_t, std::set<std::string>> referenced;
+    const std::function<bool(const FromItem*, const FromItem*)> contains =
+        [&](const FromItem* root, const FromItem* item) {
+            return root && item && (root == item || contains(root->left.get(), item) || contains(root->right.get(), item));
+        };
+    const auto add = [&](const QueryColumnBinding& binding) {
+        const auto& range = query.sourceRanges.at(binding.sourceOrdinal);
+        if (binding.columnOrdinal >= range.columns.size())
+            throw DbError("XX000", "INSERT source lost its bound column descriptor");
+        const auto& name = range.columns[binding.columnOrdinal].name;
+        if (!range.mergedUsing) referenced[range.ordinal].insert(name);
+        else for (const auto& source : query.sourceRanges)
+            if (source.owner == range.owner && !source.mergedUsing && contains(range.source, source.source))
+                for (const auto& column : source.columns)
+                    if (column.name == name) referenced[source.ordinal].insert(name);
+    };
+    std::function<void(const Expr*)> expression;
+    const auto window = [&](const WindowDef& definition) {
+        for (const auto& value : definition.partitionBy) expression(value.get());
+        for (const auto& value : definition.orderBy) expression(value.first.get());
+        expression(definition.frameStart.get()); expression(definition.frameEnd.get());
+    };
+    expression = [&](const Expr* value) {
+        if (!value || value->preparedSubquery) return;
+        if (const auto* column = dynamic_cast<const ColumnRefExpr*>(value)) {
+            if (column->binding) add(*column->binding);
+        } else if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(value)) expression(unary->operand.get());
+        else if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(value)) {
+            expression(binary->left.get()); if (binary->op != "::") expression(binary->right.get());
+        } else if (const auto* quantified = dynamic_cast<const QuantifiedComparisonExpr*>(value)) {
+            expression(quantified->left.get()); expression(quantified->right.get());
+        } else if (const auto* cast = dynamic_cast<const CastExpr*>(value)) expression(cast->operand.get());
+        else if (const auto* call = dynamic_cast<const FunctionCallExpr*>(value)) {
+            for (const auto& argument : call->args) expression(argument.get());
+            for (const auto& argument : call->namedArgs) expression(argument.value.get());
+            expression(call->filter.get()); if (call->hasOver) window(call->over);
+        } else if (const auto* conditional = dynamic_cast<const CaseExpr*>(value)) {
+            expression(conditional->switchExpr.get()); expression(conditional->elseExpr.get());
+            for (const auto& arm : conditional->whenClauses) { expression(arm.first.get()); expression(arm.second.get()); }
+        } else if (const auto* array = dynamic_cast<const ArrayExpr*>(value))
+            for (const auto& item : array->elements) expression(item.get());
+        else if (const auto* row = dynamic_cast<const RowExpr*>(value))
+            for (const auto& item : row->elements) expression(item.get());
+    };
+    std::function<void(const FromItem*, const SelectStmt*)> from = [&](const FromItem* source, const SelectStmt* owner) {
+        if (!source) return;
+        expression(source->joinCondition.get());
+        // The binder's actual merged-key descriptor covers both USING and
+        // NATURAL, even when the key is absent from the projection. Restrict
+        // it to this JOIN subtree, not unrelated ranges with the same name.
+        for (const auto& merged : query.sourceRanges)
+            if (merged.owner == owner && merged.source == source && merged.mergedUsing)
+                for (size_t i = 0; i < merged.columns.size(); ++i)
+                    add(QueryColumnBinding{0, merged.ordinal, i, merged.columns[i].type, true});
+        from(source->left.get(), owner); from(source->right.get(), owner);
+    };
+    // All retained SELECT bodies, including real scalar/derived/CTE children,
+    // are bound already. Inspect declarations, never open or evaluate rows.
+    for (const auto& output : query.statementOutputs) {
+        const auto* select = dynamic_cast<const SelectStmt*>(output.first);
+        if (!select) continue;
+        const auto projections = query.projectionBindings.find(select);
+        if (projections != query.projectionBindings.end())
+            for (const auto& projected : projections->second)
+                if (projected.column) add(*projected.column);
+        for (const auto& item : select->selectList) expression(item.expr.get());
+        expression(select->whereClause.get()); expression(select->having.get());
+        for (const auto& item : select->groupBy) expression(item.get());
+        for (const auto& group : select->groupByElems) for (const auto& item : group.exprs) expression(item.get());
+        for (const auto& item : select->distinctOn) expression(item.get());
+        for (const auto& item : select->orderBy) expression(item.expr.get());
+        for (const auto& definition : select->windowDefs) window(definition);
+        from(select->fromClause.get(), select);
+    }
+    for (const auto& range : query.sourceRanges) {
+        if (!range.source || range.mergedUsing || range.cteStatement || range.relationName.empty()) continue;
+        const bool temporary = range.relationSchema == sessionTempSchemaName(session) || range.relationSchema == "pg_temp";
+        if (temporary) continue;
+        const auto table = range.relationSchema.empty() || range.relationSchema == "public"
+            ? range.relationName : range.relationSchema + "__" + range.relationName;
+        if (!checkTablePrivilege(session, table, StorageEngine::TablePrivilege::Select))
+            throw DbError("42501", "permission denied for INSERT source");
+        const auto& names = referenced[range.ordinal];
+        if (!g_engine.hasColumnPermission(session.currentDB, table, effectiveSessionRole(session),
+                StorageEngine::TablePrivilege::Select, {names.begin(), names.end()}))
+            throw DbError("42501", "permission denied for INSERT source columns");
+    }
+}
+
 void addReturningRowToContext(RowContext& context, const SqlRow& source,
                               const TableSchema& table, size_t sourceOrdinal) {
     for (size_t i = 0; i < table.len; ++i) {
@@ -2917,6 +3008,7 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
 
     std::vector<SqlRow> pendingRows;
     if (stmt.selectSource) {
+        checkPreparedInsertSources(*preparedInsert, s);
         for (size_t i = 0; i < generatedTargets.size(); ++i) {
             if (generatedTargets[i]) return rejectGeneratedValue(i);
             if (identityTargets[i] == 'a' &&
@@ -5546,6 +5638,8 @@ public:
             predicate(remove->whereClause.get());
         } else throw DbError("0A000","prepared WITH primary DML is not lowered");
         if(!temporary && !checkTablePrivilege(session_,physical_,privilege))throw DbError("42501","permission denied for DML target");
+        if(const auto* insert=dynamic_cast<const InsertStmt*>(statement_); insert && insert->selectSource)
+            checkPreparedInsertSources(*query_, session_);
         // Resolve canonical transition names once against the prepared
         // occurrences. Runtime evaluation reads source/column ordinals only.
         const auto binding=returningBinding(*options,returningRelation,returningAlias);
