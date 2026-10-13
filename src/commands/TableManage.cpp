@@ -21497,6 +21497,16 @@ bool StorageEngine::cleanupStaleSessionTemporaryFiles() {
                      dbPath(dbname), std::filesystem::directory_options::skip_permission_denied)) {
                 const std::string filename = entry.path().filename().string();
                 if (!isSessionTempPhysicalName(filename)) continue;
+                // A fork suffix/index column can complete a name which is
+                // not itself TEMP: __tmp_12_.stc or __tmp_34_tag.idx. Durable
+                // relation ownership wins over a guessed backend prefix.
+                const auto stem = entry.path().stem().string();
+                const bool persistentOwned = std::any_of(names.begin(), names.end(),
+                    [&](const std::string& name) {
+                        return !isSessionTempPhysicalName(name) &&
+                            (stem == name || isRelationPhysicalFileName(filename, name));
+                    });
+                if (persistentOwned) continue;
                 std::error_code ec;
                 std::filesystem::remove_all(entry.path(), ec);
                 if (ec) {
