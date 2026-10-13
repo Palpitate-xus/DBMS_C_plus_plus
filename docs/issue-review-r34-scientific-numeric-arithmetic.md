@@ -90,3 +90,6 @@ header epoch 的对象；原生测试链接前核对每个生产对象的源码/
 新注册测试中 gcd/lcm 及表列混合输入使用显式 numeric cast，覆盖此次算术
 值/scale 路径；原始失败 SQL 和证据没有删除，也没有替换 R32 原 111 项断言。
 本次定向验证不等于全项目无 bug，也不改变现有 NUMERIC 1000 位精度限制。
+
+后续：[R36](issue-review-r36-gcd-lcm-result-types.md) 已单独修复上述 gcd/lcm
+结果类型问题，并按未加 cast 的原 SQL 完成值和 OID 回归。

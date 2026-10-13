@@ -444,12 +444,18 @@ std::string inferAstResultType(
         if (name == "pg_notification_queue_usage") return "double precision";
         if (name == "count" || name == "row_number" || name == "rank" ||
             name == "dense_rank") return "bigint";
+        if (name == "gcd" || name == "lcm") {
+            const auto left = arithmetic_detail::numericTypeName(argType(0));
+            const auto right = arithmetic_detail::numericTypeName(argType(1));
+            if (left == "numeric" || right == "numeric") return "numeric";
+            if (left == "bigint" || right == "bigint") return "bigint";
+            return "integer";
+        }
         if (name == "ntile" || name == "width_bucket" || name == "length" ||
             name == "char_length" || name == "character_length" ||
             name == "bit_length" || name == "octet_length" || name == "strpos" ||
             name == "position" || name == "get_byte" || name == "get_bit" ||
-            name == "ascii" || name == "gcd" ||
-            name == "lcm") return "integer";
+            name == "ascii") return "integer";
         if (name == "bit_count" || name == "crc32" || name == "crc32c" ||
             name == "nextval" || name == "currval" || name == "lastval")
             return "bigint";
