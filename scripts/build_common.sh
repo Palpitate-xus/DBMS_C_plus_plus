@@ -471,6 +471,12 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/cli_error_recovery_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/no_fake_compat_objects_test.py)
     DBMS_E2E_TESTS+=(tests/compat_fallback_registry_test.py)
+    DBMS_E2E_TESTS+=(tests/replication_slot_persistence_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/pg_settings_query_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/bound_dml_query_children_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/on_conflict_constraint_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/checksum_verification_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/test_registration_inventory_test.py)
     DBMS_CXXFLAGS=(-std=c++17 -O2 -pthread -Wall -Wextra)
     DBMS_LDFLAGS=(-pthread)
 
