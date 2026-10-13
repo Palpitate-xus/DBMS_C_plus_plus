@@ -55,6 +55,17 @@ bool looksLikeNumber(const std::string& s) {
     for (; i < s.size(); ++i) {
         if (s[i] >= '0' && s[i] <= '9') { hasDigit = true; continue; }
         if (s[i] == '.' && !hasDot) { hasDot = true; continue; }
+        // Match the parser's decimal literal grammar without converting a
+        // value. A binary floating-point probe would lose the declaration
+        // of valid NUMERIC constants such as 1e500 and 1e-500.
+        if ((s[i] == 'e' || s[i] == 'E') && hasDigit) {
+            ++i;
+            if (i < s.size() && (s[i] == '+' || s[i] == '-')) ++i;
+            const size_t exponentStart = i;
+            for (; i < s.size(); ++i)
+                if (s[i] < '0' || s[i] > '9') return false;
+            return i != exponentStart;
+        }
         return false;
     }
     return hasDigit;
@@ -71,6 +82,7 @@ bool legacyNullLiteral(const LiteralExpr* literal) {
 std::string inferType(const std::string& value) {
     if (value.empty()) return "text";
     if (looksLikeNumber(value)) {
+        if (value.find_first_of("eE") != std::string::npos) return "numeric";
         return value.find('.') != std::string::npos ? "double precision" : "integer";
     }
     return "text";
