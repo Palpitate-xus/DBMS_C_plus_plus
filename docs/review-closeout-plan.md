@@ -12,10 +12,19 @@ R67普通视图替换以ca554c2f合入master，Root八完整native/九完整协�
 全0；R69短会话超时夹具以a3b3b4b9/d52779a0独立提交，Root完整PG、真实取消
 协议和CLI串行全0。记录见[逐项修复进度](review-fixes-2026-10-13.md)。
 
-后续按顺序处理[R62标量签名](issue-review-r62-scalar-signatures.md)、
-[R68 ABS范围及常量分析](issue-review-r68-abs-integer-bounds.md)，再继续
-[冻结18d85f4e全量记录](issue-full-registered-18d85f4e.md)尚未闭环的目录guard、
-跨engine事务启动、snapshot及其他普通失败，逐根因复现、修复、完整门禁、独立commit。
+R62已完成ABS/upper/lower/length四组声明签名，通用回调/UDF范围仍partial；
+R68整数ABS范围及空输入常量分析已验收。R70实际全文类型身份、R71目标目录
+事务发布、R72别名锁去重、R73纯常量绑定、R74 owner夹具及R75异常锁释放均
+已分别本地commit。原三个generation/snapshot、两个owner、extended literal及
+目录guard完整驱动均已实际复验0，不改写原冻结失败。
+
+当前顺序：完成[R76协议状态崩溃](issue-review-r76-restore-parameter-status.md)
+和[R77恢复staging目录](issue-review-r77-restore-catalog-staging.md)的独立验收，
+保持原DIV14、完整PG、真实取消和COPY断言/期限，再冻结已提交HEAD、全部tracked
+输入、生产binary、cache及58份对象receipt，执行不筛选的标准注册回归。
+当前盘点858 native、3个真实Main frontend、498 Python注册入口，共1359。
+完整运行期间不改源文件/文档/HEAD，结束后严格逐项核对missing/extra/duplicate、
+失败和TLS环境skip；存在失败则保留原证据，逐根因修复、独立commit并复验。
 按[准确暂缓范围](deferred-scope.md)保持已跳过模块，不自动扩展到普通SQL或存储错误。
 新组合需要重新运行全注册入口；本轮定向通过不能完成原273总账或把历史FAILED改绿。
 总目标尚未全部完成；各原partial/unverified与15项原始用户暂缓状态保持不变。

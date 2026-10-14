@@ -46033,7 +46033,6 @@ bool StorageEngine::physicalRestore(const std::string& dbname,
     TablespaceCatalogLock tablespaceLock(
         tablespaceCatalogLockPath(*this, dbname), true);
     if (!tablespaceLock.acquired()) return false;
-    if (catalogService_) catalogService_->evict(dbname);
     closeDatabaseCaches(dbname);
     return physicalRestoreLocked(dbname, backupPath, progress);
 }
@@ -46271,6 +46270,11 @@ bool StorageEngine::physicalRestoreLocked(
             return false;
         }
 
+        // Staging still leaves the live directory and its catalog generation
+        // unchanged. Keep that committed generation readable by foreign
+        // metadata observers; invalid/cancelled staging must not evict it.
+        // Invalidate only at the actual physical publication boundary.
+        if (catalogService_) catalogService_->evict(dbname);
         for (auto& replacement : restoreReplacements) {
             if (!publishDirectoryReplacement(replacement)) {
                 if (!rollbackPublished()) {
