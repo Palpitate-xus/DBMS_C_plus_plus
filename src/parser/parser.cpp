@@ -2668,6 +2668,15 @@ static WindowDef parseWindowDefinition(const std::vector<std::string>& tokens,si
 static ExprPtr parsePrimaryExprImpl(const std::vector<std::string>& tokens, size_t& pos) {
     if (pos >= tokens.size()) return nullptr;
     if (tokens[pos] == "[" || tokens[pos] == "]") return nullptr;
+    if (SQLParser::toLower(tokens[pos]) == "default") {
+        // DEFAULT is a grammar value, not a bare column. Its permitted
+        // assignment/VALUES consumers transform it before value binding;
+        // quoted and qualified same-named columns keep their own parser.
+        auto value = std::make_unique<LiteralExpr>();
+        value->value = "DEFAULT";
+        ++pos;
+        return value;
+    }
 
     // Unqualified unquoted ROW is constructor grammar, not a scalar callee.
     if (SQLParser::toLower(tokens[pos]) == "row" && pos + 1 < tokens.size() &&

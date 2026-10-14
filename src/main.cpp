@@ -5929,12 +5929,15 @@ static bool handleExplain(const string& sql, Session& s) {
 // ========================================================================
 // Window function support
 // ========================================================================
-static bool hasParsedWindowCall(const dbms::Stmt* root) {
+static bool requiresParsedValueBinding(const dbms::Stmt* root) {
     function<bool(const dbms::Expr*)> expression;
     function<bool(const dbms::Stmt*)> statement;
     function<bool(const dbms::FromItem*)> source;
     expression=[&](const dbms::Expr* value)->bool {
         if(!value)return false;
+        if(const auto* literal=dynamic_cast<const dbms::LiteralExpr*>(value);
+                literal && literal->typeName.empty() && toLower(literal->value)=="default")
+            return true;
         if(value->preparedSubquery && statement(value->preparedSubquery.get()))return true;
         if(const auto* call=dynamic_cast<const dbms::FunctionCallExpr*>(value)) {
             if(call->hasOver)return true;
@@ -26305,13 +26308,14 @@ static bool executeInternal(const string& rawSql, Session& s) {
             }
         }
 
-        // Bind every actual window site before a legacy CASE/WHERE or FROM
-        // receiver can hide it in a dead branch/empty source. This includes
-        // its original scope, routine role and frame-offset declaration.
+        // Bind actual window and DEFAULT grammar sites before a legacy
+        // receiver can hide them in a dead branch/empty source or evaluate
+        // DEFAULT as an ordinary string. Preserve the original source and
+        // declaration priority; quoted/qualified columns are not DEFAULT.
         {
             dbms::SQLParser parser;
             const auto parsed=parser.parseForBinding(effectiveRawSql);
-            if(hasParsedWindowCall(parsed.stmt.get()))
+            if(requiresParsedValueBinding(parsed.stmt.get()))
                 (void)g_engine.prepareBoundQuery(s.currentDB,effectiveRawSql);
         }
 

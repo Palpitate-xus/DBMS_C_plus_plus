@@ -517,6 +517,8 @@ public:
             if (tokens.size() != 1)
                 throw DbError("0A000", "opaque expression requires structured preparation");
             const auto low = SQLParser::toLower(tokens.front());
+            if (low == "default")
+                throw DbError("42601", "DEFAULT is not allowed in this context");
             if (low == "true" || low == "false") return "boolean";
             if (low == "null" || tokens.front().front() == '\'') return "unknown";
             return ExprHelper::inferValuesResultType(literal->value);

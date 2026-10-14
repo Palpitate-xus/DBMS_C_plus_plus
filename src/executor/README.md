@@ -22,6 +22,8 @@ Volcano 算子定义于 `ExecutionPlan.h/.cpp`，生命周期接口位于 `src/i
 重建类型/参数query须保留原限定身份，不能用调度短名重新解析另一函数。
 CASE/WHERE等嵌套site的纯预检查与验证范围见[R60](../../docs/issue-review-r60-window-routine-identity.md)。
 部分复杂 DQL/DML 仍经 legacy 或物化适配路径执行；现有窄范围测试通过不证明完整 PostgreSQL 执行语义。
+未引用DEFAULT保留赋值语法角色，普通SELECT值表达式必须先纯绑定并拒绝；引用/
+限定同名列与合法INSERT/UPDATE DEFAULT不能被误伤，见[R63](../../docs/issue-review-r63-default-expression-role.md)。
 
 默认prepared reader及原生DML/JOIN reader通过canonical schema/name解析已有
 物化视图的真实backing relation，保留population检查而不重跑其定义SQL。
