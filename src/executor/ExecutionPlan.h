@@ -16,6 +16,7 @@
 #include "common/DbError.h"
 #include "expression/prepared_query_execution.h"
 #include "common/QueryHostProvider.h"
+#include "executor/window_frame.h"
 
 namespace dbms {
 
@@ -770,6 +771,7 @@ struct WindowFunctionSpec {
     std::string frameExclusion; // current row, group, ties, no others
     bool orderByNullsFirst = false;
     bool hasExplicitOrderNulls = false;
+    WindowFrame preparedFrame;
 };
 
 struct WindowTarget {

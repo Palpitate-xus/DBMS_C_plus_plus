@@ -6,9 +6,12 @@
 
 ## 已知边界
 
-[代码审查报告](../../docs/code-review-2026-10-13.md)记录了严格模式仍接受缺少 FROM/INTO 的语句、ON CONFLICT 条件缺少 BOOLEAN 上下文，以及 INSERT/UPDATE RETURNING 消费未绑定子查询的问题。
-窗口两端 frame 的方向需要同时扩展 AST、parser 和执行器，不能只修改最终结果格式。
-协议Parse/Describe的元数据分析还需显式建立连接会话上下文；否则search_path和临时schema查找可与普通执行不同，详见报告R30。
+[代码审查报告](../../docs/code-review-2026-10-13.md)保留原始发现；FROM/INTO、
+ON CONFLICT BOOLEAN、RETURNING 子查询和协议会话上下文的当前修复结果见
+[逐项进度](../../docs/review-fixes-2026-10-13.md)，不能将原报告当成当前未修列表。
+窗口 frame AST 保留两端方向及原始语法区别，纯绑定与执行期 offset 初始化
+分别验证；其数值 RANGE 和尚不支持的日期/间隔边界见
+[R04](../../docs/issue-review-r04-window-frame-boundaries.md)。
 
 后续迁移应让各执行消费者使用同一份完整绑定 AST，保留类型、SQL NULL、名字作用域和错误阶段；分析失败时不得进入写入路径。先增加能复现当前错误的 native/协议控制，再逐项修复。
 

@@ -1304,7 +1304,7 @@ std::string ExprHelper::scalarExpressionIdentity(
 std::string ExprHelper::preparedSortExpressionIdentity(
     const Expr* expression, const PreparedQuery& query,
     const std::function<std::string(const ColumnRefExpr&)>& columnIdentity,
-    const std::string& currentDB, StorageEngine* functionEngine) {
+    const std::string& currentDB, StorageEngine* functionEngine,bool parsedWindowSyntax) {
     const auto field = [](const std::string& value) {
         return std::to_string(value.size()) + ":" + value;
     };
@@ -1412,6 +1412,7 @@ std::string ExprHelper::preparedSortExpressionIdentity(
         std::function<std::string(const Expr*)> expressionKey;
         std::function<std::string(const FromItem*)> fromKey;
         const auto boundColumn = [&](const ColumnRefExpr& column) {
+            if(parsedWindowSyntax)return field(column.schema)+field(column.table)+field(column.column);
             if (!column.binding) {
                 const auto alias = outputAliases.find(&column);
                 if (alias != outputAliases.end()) return "output-alias" + field(alias->second);
@@ -1425,10 +1426,19 @@ std::string ExprHelper::preparedSortExpressionIdentity(
                 field(canonicalResultTypeName(binding.declaredType)) + field(binding.mergedUsing ? "merged" : "ordinary");
         };
         const auto windowKey = [&](const WindowDef& window) {
-            std::string key = field(window.name) + field(toLower(window.frameMode)) + field(toLower(window.frameExclusion));
+            std::string key = field(window.name) + field(toLower(window.frameMode)) + field(toLower(window.frameExclusion)) +
+                field(std::to_string(static_cast<unsigned>(window.frameStartKind))) +
+                field(std::to_string(static_cast<unsigned>(window.frameEndKind))) + field(window.frameBetween?"between":"single");
             for (const auto& value : window.partitionBy) key += field(expressionKey(value.get()));
             key += field("order");
-            for (const auto& order : window.orderBy) key += field(expressionKey(order.first.get())) + field(order.second ? "asc" : "desc");
+            for (size_t i=0;i<window.orderBy.size();++i) {
+                const auto& order=window.orderBy[i];
+                const bool first=i<window.orderNullsFirst.size()?window.orderNullsFirst[i].value_or(!order.second):!order.second;
+                const bool specified=i<window.orderDirectionSpecified.size() && window.orderDirectionSpecified[i];
+                key+=field(expressionKey(order.first.get()))+field(order.second?"asc":"desc")+field(first?"nulls-first":"nulls-last")+
+                    field(specified?"direction-explicit":"direction-default")+
+                    field(i<window.orderNullsFirst.size() && window.orderNullsFirst[i]?"nulls-explicit":"nulls-default");
+            }
             return key + field(expressionKey(window.frameStart.get())) + field(expressionKey(window.frameEnd.get()));
         };
         const auto itemsKey = [&](const std::vector<SelectItem>& items) {
@@ -1439,6 +1449,8 @@ std::string ExprHelper::preparedSortExpressionIdentity(
         expressionKey = [&](const Expr* node) {
             return scalarExpressionIdentity(node, boundColumn, currentDB, functionEngine,
                 [&](const Expr* nested) -> std::optional<std::string> {
+                    if(parsedWindowSyntax)if(const auto* cast=dynamic_cast<const CastExpr*>(nested))
+                        if(cast->implicit)return expressionKey(cast->operand.get());
                     if (nested->preparedSubquery) return statementKey(nested->preparedSubquery.get());
                     const auto* call = dynamic_cast<const FunctionCallExpr*>(nested);
                     if (!call) return {};
@@ -1447,7 +1459,8 @@ std::string ExprHelper::preparedSortExpressionIdentity(
                     const auto spelling = call->schema.empty() ? call->funcName : call->schema + "." + call->funcName;
                     if (!CatalogManager::parseQualifiedName(spelling, name, true)) throw DbError("0A000", "function identity requires a canonical name");
                     std::string routine;
-                    if (evaluator.hasScalarFunction(call, functionEngine)) routine = evaluator.scalarFunctionIdentity(call, functionEngine);
+                    if(parsedWindowSyntax)routine="parsed-function"+field(name.schema)+field(name.name);
+                    else if (evaluator.hasScalarFunction(call, functionEngine)) routine = evaluator.scalarFunctionIdentity(call, functionEngine);
                     else if (!aggregate_type_detail::builtinName(call).empty())
                         routine = "builtin-aggregate" + field(name.name);
                     else throw DbError("0A000", "SQL child identity requires resolved function metadata");
@@ -1554,6 +1567,31 @@ std::string ExprHelper::preparedSortExpressionIdentity(
     };
     return scalarExpressionIdentity(expression, columnIdentity, currentDB, functionEngine,
         [&](const Expr* node) -> std::optional<std::string> {
+            if(parsedWindowSyntax) {
+                const auto identity=[&](const Expr* value) {
+                    return preparedSortExpressionIdentity(value,query,columnIdentity,currentDB,functionEngine,true);
+                };
+                if(const auto* cast=dynamic_cast<const CastExpr*>(node))
+                    if(cast->implicit)return identity(cast->operand.get());
+                if(const auto* call=dynamic_cast<const FunctionCallExpr*>(node)) {
+                    if(call->hasOver)throw DbError("0A000","nested window syntax is not a frame offset");
+                    CatalogManager::QualifiedName name;
+                    const auto spelling=call->schema.empty()?call->funcName:call->schema+"."+call->funcName;
+                    if(!CatalogManager::parseQualifiedName(spelling,name,true))
+                        throw DbError("0A000","frame identity requires a canonical function name");
+                    std::string result="parsed-function"+field(name.schema)+field(name.name)+
+                        field(call->distinct?"distinct":"all")+field(identity(call->filter.get()))+field(call->orderBy);
+                    for(size_t i=0;i<call->args.size();++i) {
+                        const auto* label=dynamic_cast<const ColumnRefExpr*>(call->args[i].get());
+                        if(i==0 && name.schema.empty() && name.name=="extract" && label && label->table.empty() && label->schema.empty())
+                            result+=field("extract-field"+field(toLower(label->column)));
+                        else if(call->args[i]->type==ExprType::A_Star)result+=field("star");
+                        else result+=field(identity(call->args[i].get()));
+                    }
+                    for(const auto& argument:call->namedArgs)result+=field(argument.name)+field(identity(argument.value.get()));
+                    return result;
+                }
+            }
             if (!node->preparedSubquery) {
                 const auto* call = dynamic_cast<const FunctionCallExpr*>(node);
                 const auto name = aggregate_type_detail::builtinName(call);

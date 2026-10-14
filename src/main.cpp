@@ -5950,229 +5950,71 @@ struct WindowFunc {
     bool hasFrame = false;
     // Frame exclusion: "", "current row", "group", "ties", "no others"
     string frameExclusion;
+    string overSql;
+    string windowReference;
+    shared_ptr<dbms::Stmt> windowSyntax;
+    dbms::WindowFrame preparedFrame;
 };
 
 static bool parseWindowFunc(const string& item, WindowFunc& wf, const map<string, string>& namedWindows = {}) {
-    string low = toLower(item);
-    size_t overPos = low.find("over");
-    if (overPos == string::npos) return false;
-
-    string funcPart = trim(item.substr(0, overPos));
-    string overPart = trim(item.substr(overPos + 4));
-
-    size_t lp = funcPart.find('(');
-    size_t rp = funcPart.rfind(')');
-    if (lp == string::npos || rp == string::npos) return false;
-    wf.name = toLower(trim(funcPart.substr(0, lp)));
-    wf.arg = trim(funcPart.substr(lp + 1, rp - lp - 1));
-
-    // Detect aggregate window functions: sum, count, avg, max, min
-    static const set<string> aggNames = {"sum", "count", "avg", "max", "min"};
-    wf.isAggregate = aggNames.count(wf.name) != 0;
-
-    size_t overLp = overPart.find('(');
-    size_t overRp = overPart.rfind(')');
-    string overContent;
-    if (overLp != string::npos && overRp != string::npos) {
-        overContent = trim(overPart.substr(overLp + 1, overRp - overLp - 1));
-    } else {
-        // Named window reference: OVER name
-        string wname = toLower(trim(overPart));
-        auto it = namedWindows.find(wname);
-        if (it == namedWindows.end()) return false;
-        overContent = it->second;
+    const size_t overPos=findTopLevelKeyword(toLower(item),"over");
+    if(overPos==string::npos)return false;
+    const string functionSql=trim(item.substr(0,overPos));
+    const size_t left=functionSql.find('('),right=functionSql.rfind(')');
+    if(left==string::npos || right==string::npos)return false;
+    wf.name=toLower(trim(functionSql.substr(0,left)));
+    wf.arg=trim(functionSql.substr(left+1,right-left-1));
+    string over=trim(item.substr(overPos+4));
+    const size_t begin=over.find('('),end=over.rfind(')');
+    if(begin!=string::npos && end!=string::npos)wf.overSql=trim(over.substr(begin+1,end-begin-1));
+    else {
+        wf.windowReference=toLower(over);
+        const auto found=namedWindows.find(toLower(over));
+        if(found==namedWindows.end())return false;
+        wf.overSql=found->second;
     }
-
-    string lowContent = toLower(overContent);
-    // Extract the frame clause (ROWS/RANGE/GROUPS ...) at the OVER level:
-    // a frame may follow PARTITION BY directly when ORDER BY is absent,
-    // e.g. OVER (PARTITION BY g ROWS BETWEEN UNBOUNDED PRECEDING AND
-    // UNBOUNDED FOLLOWING).  The keywords are space-bounded so columns
-    // named rows/range/groups do not match.
-    size_t frameInOver = string::npos;
-    string frameKeywordOver;
-    for (const char* kw : {" rows ", " range ", " groups "}) {
-        const size_t fp = lowContent.find(kw);
-        if (fp != string::npos &&
-            (frameInOver == string::npos || fp + 1 < frameInOver)) {
-            frameInOver = fp + 1;
-            frameKeywordOver = string(kw).substr(1, strlen(kw) - 2);
+    dbms::SQLParser parser;
+    auto parsed=parser.parse("SELECT "+functionSql+" OVER("+wf.overSql+")");
+    if(!parsed.success)throw dbms::DbError(parsed.sqlState.empty()?"42601":parsed.sqlState,parsed.error);
+    const auto* select=dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get());
+    const auto* call=select && select->selectList.size()==1
+        ?dynamic_cast<const dbms::FunctionCallExpr*>(select->selectList.front().expr.get()):nullptr;
+    if(!call || !call->hasOver)return false;
+    const auto& window=call->over;
+    static const set<string> aggregates={"sum","count","avg","max","min"};
+    wf.isAggregate=aggregates.count(wf.name)!=0;
+    for(const auto& value:window.partitionBy) {
+        const auto* column=dynamic_cast<const dbms::ColumnRefExpr*>(value.get());
+        wf.partitionByCols.push_back(column?column->column:value->toString());
+    }
+    if(!window.orderBy.empty()) {
+        const auto& order=window.orderBy.front();
+        const auto* column=dynamic_cast<const dbms::ColumnRefExpr*>(order.first.get());
+        wf.orderByCol=column?column->column:order.first->toString();
+        wf.orderByAsc=order.second;
+        if(!window.orderNullsFirst.empty() && window.orderNullsFirst.front()) {
+            wf.hasExplicitOrderNulls=true;
+            wf.orderByNullsFirst=*window.orderNullsFirst.front();
         }
     }
-    string frameTextOver;
-    if (frameInOver != string::npos) {
-        frameTextOver = trim(overContent.substr(frameInOver));
-        lowContent = lowContent.substr(0, frameInOver);
-        overContent = overContent.substr(0, frameInOver);
+    wf.hasFrame=!window.frameMode.empty();
+    if(wf.hasFrame) {
+        wf.preparedFrame.mode=window.frameMode;
+        wf.preparedFrame.start=window.frameStartKind;
+        wf.preparedFrame.end=window.frameEndKind;
+        wf.frameType=window.frameMode=="range"?WindowFunc::FrameType::RANGE:
+            window.frameMode=="groups"?WindowFunc::FrameType::GROUPS:WindowFunc::FrameType::ROWS;
+        wf.frameExclusion=window.frameExclusion;
     }
-    size_t partPos = lowContent.find("partition by");
-    size_t orderPos = lowContent.find("order by");
-
-    // Parse PARTITION BY (optional)
-    if (partPos != string::npos) {
-        size_t partEnd = (orderPos != string::npos) ? orderPos : overContent.size();
-        string partRest = trim(overContent.substr(partPos + 12, partEnd - partPos - 12));
-        stringstream pss(partRest);
-        string col;
-        while (getline(pss, col, ',')) {
-            string c = trim(col);
-            if (!c.empty()) wf.partitionByCols.push_back(c);
-        }
+    if(window.orderBy.empty() && wf.partitionByCols.empty() && !wf.isAggregate) {
+        static const set<string> unordered={
+            "row_number","rank","dense_rank","percent_rank","cume_dist",
+            "ntile","lag","lead","first_value","last_value","nth_value"};
+        if(!unordered.count(wf.name))return false;
     }
-
-    // PERCENT_RANK, CUME_DIST, NTH_VALUE require ORDER BY (set flag for validation later)
-    if (wf.name == "percent_rank" || wf.name == "cume_dist" || wf.name == "nth_value") {
-        wf.isAggregate = false; // treated as ranking functions
-    }
-
-    // ORDER BY is optional for window functions like row_number with partition only
-    if (orderPos != string::npos) {
-        string orderRest = trim(overContent.substr(orderPos + 8));
-        // Frame already hoisted out of the OVER content; any leftover
-        // keyword inside orderRest would be part of the sort expression.
-        if (!frameTextOver.empty()) {
-            const string frameStr = frameTextOver;
-            const string frameKeyword = frameKeywordOver;
-            string lfs = toLower(frameStr);
-            // Bound parsing must not see the EXCLUDE clause: its
-            // "current row"/"group"/"ties" words corrupt the bounds.
-            const size_t exclBoundPos = lfs.find("exclude");
-            if (exclBoundPos != string::npos) lfs = lfs.substr(0, exclBoundPos);
-            if (lfs.find("between") != string::npos) {
-                wf.hasFrame = true;
-                if (frameKeyword == "range") wf.frameType = WindowFunc::FrameType::RANGE;
-                else if (frameKeyword == "groups") wf.frameType = WindowFunc::FrameType::GROUPS;
-                else wf.frameType = WindowFunc::FrameType::ROWS;
-                // start bound
-                if (lfs.find("unbounded preceding") != string::npos) {
-                    wf.frameStartOffset = -1;
-                } else if (lfs.find("current row") != string::npos &&
-                           lfs.find("current row") < lfs.find(" and ")) {
-                    wf.frameStartOffset = 0;
-                } else {
-                    size_t precPos = lfs.find("preceding");
-                    if (precPos != string::npos) {
-                        string numStr;
-                        for (size_t i = lfs.find("between") + 7; i < precPos; ++i) {
-                            if (isdigit(static_cast<unsigned char>(lfs[i]))) numStr += lfs[i];
-                        }
-                        if (!numStr.empty()) wf.frameStartOffset = std::stoi(numStr);
-                    }
-                }
-                // end bound: everything here is relative to the " and "
-                // separator; "current row" as the START bound must not match.
-                const size_t andPos = lfs.find(" and ");
-                if (lfs.find("unbounded following") != string::npos) {
-                    wf.frameEndOffset = -1;
-                } else if (andPos != string::npos &&
-                           lfs.find("current row", andPos) != string::npos) {
-                    wf.frameEndOffset = 0;
-                } else {
-                    size_t follPos = lfs.find("following");
-                    if (follPos != string::npos) {
-                        string numStr;
-                        for (size_t i = lfs.rfind(" and ", follPos) + 5; i < follPos; ++i) {
-                            if (isdigit(static_cast<unsigned char>(lfs[i]))) numStr += lfs[i];
-                        }
-                        if (!numStr.empty()) wf.frameEndOffset = std::stoi(numStr);
-                    }
-                }
-                // Parse EXCLUDE clause from the UNTRIMMED frame text (the
-                // bounds copy above has the EXCLUDE words removed):
-                // EXCLUDE CURRENT ROW / GROUP / TIES / NO OTHERS
-                const string lfsFull = toLower(frameStr);
-                size_t exclPos = lfsFull.find("exclude");
-                if (exclPos != string::npos) {
-                    string exclRest = lfsFull.substr(exclPos + 7);
-                    exclRest = trim(exclRest);
-                    if (exclRest.find("current row") == 0) wf.frameExclusion = "current row";
-                    else if (exclRest.find("group") == 0) wf.frameExclusion = "group";
-                    else if (exclRest.find("ties") == 0) wf.frameExclusion = "ties";
-                    else if (exclRest.find("no others") == 0) wf.frameExclusion = "no others";
-                }
-            }
-        }
-        vector<string> ot = tokenize(orderRest);
-        if (!ot.empty()) {
-            wf.orderByCol = ot[0];
-            wf.orderByAsc = true;
-            if (ot.size() > 1 && toLower(ot[1]) == "desc") wf.orderByAsc = false;
-            size_t nullOrder=1;
-            if (ot.size()>1 && (toLower(ot[1])=="asc" || toLower(ot[1])=="desc")) ++nullOrder;
-            if (ot.size()>nullOrder+1 && toLower(ot[nullOrder])=="nulls") {
-                const string placement=toLower(ot[nullOrder+1]);
-                if (placement=="first" || placement=="last") {
-                    wf.orderByNullsFirst=placement=="first";
-                    wf.hasExplicitOrderNulls=true;
-                }
-            }
-        }
-    } else {
-        // ORDER BY absent: the hoisted frame (if any) still applies, e.g.
-        // OVER (PARTITION BY g ROWS BETWEEN UNBOUNDED PRECEDING AND
-        // UNBOUNDED FOLLOWING).
-        if (!frameTextOver.empty()) {
-            string lfs = toLower(frameTextOver);
-            const size_t exclBoundPos2 = lfs.find("exclude");
-            if (exclBoundPos2 != string::npos) lfs = lfs.substr(0, exclBoundPos2);
-            if (lfs.find("between") != string::npos) {
-                wf.hasFrame = true;
-                if (frameKeywordOver == "range") wf.frameType = WindowFunc::FrameType::RANGE;
-                else if (frameKeywordOver == "groups") wf.frameType = WindowFunc::FrameType::GROUPS;
-                else wf.frameType = WindowFunc::FrameType::ROWS;
-                const size_t andPos2 = lfs.find(" and ");
-                if (lfs.find("unbounded preceding") != string::npos) {
-                    wf.frameStartOffset = -1;
-                } else if (lfs.find("current row") != string::npos &&
-                           lfs.find("current row") < andPos2) {
-                    wf.frameStartOffset = 0;
-                } else {
-                    size_t precPos = lfs.find("preceding");
-                    if (precPos != string::npos) {
-                        string numStr;
-                        for (size_t i = lfs.find("between") + 7; i < precPos; ++i)
-                            if (isdigit(static_cast<unsigned char>(lfs[i]))) numStr += lfs[i];
-                        if (!numStr.empty()) wf.frameStartOffset = std::stoi(numStr);
-                    }
-                }
-                if (lfs.find("unbounded following") != string::npos) {
-                    wf.frameEndOffset = -1;
-                } else if (andPos2 != string::npos &&
-                           lfs.find("current row", andPos2) != string::npos) {
-                    wf.frameEndOffset = 0;
-                } else {
-                    size_t follPos = lfs.find("following");
-                    if (follPos != string::npos) {
-                        string numStr;
-                        for (size_t i = lfs.rfind(" and ", follPos) + 5; i < follPos; ++i)
-                            if (isdigit(static_cast<unsigned char>(lfs[i]))) numStr += lfs[i];
-                        if (!numStr.empty()) wf.frameEndOffset = std::stoi(numStr);
-                    }
-                }
-            }
-            // EXCLUDE clause (from the untrimmed frame text)
-            const string lfsFull2 = toLower(frameTextOver);
-            size_t exclPos2 = lfsFull2.find("exclude");
-            if (exclPos2 != string::npos) {
-                string exclRest2 = trim(lfsFull2.substr(exclPos2 + 7));
-                if (exclRest2.find("current row") == 0) wf.frameExclusion = "current row";
-                else if (exclRest2.find("group") == 0) wf.frameExclusion = "group";
-                else if (exclRest2.find("ties") == 0) wf.frameExclusion = "ties";
-                else if (exclRest2.find("no others") == 0) wf.frameExclusion = "no others";
-            }
-        }
-        if (wf.partitionByCols.empty() && !wf.isAggregate) {
-            // An empty window specification is valid: all rows belong to
-            // one partition and are peers. Do not admit arbitrary scalar
-            // routines merely because they are followed by OVER().
-            static const set<string> unorderedBuiltins = {
-                "row_number", "rank", "dense_rank", "percent_rank", "cume_dist",
-                "ntile", "lag", "lead", "first_value", "last_value", "nth_value"
-            };
-            if (!unorderedBuiltins.count(wf.name)) return false;
-        }
-    }
-
+    // Binding may qualify id as t.id. Window reference identity is chosen
+    // from the parsed clause, before that namespace normalization.
+    wf.windowSyntax=shared_ptr<dbms::Stmt>(std::move(parsed.stmt));
     return true;
 }
 
@@ -6221,6 +6063,7 @@ static bool convertToVolcanoWindowSpec(const WindowFunc& wf,
     spec.frameStartOffset = wf.frameStartOffset;
     spec.frameEndOffset = wf.frameEndOffset;
     spec.frameExclusion = wf.frameExclusion;
+    spec.preparedFrame = wf.preparedFrame;
     for (const auto& column : wf.partitionByCols) {
         if (!isColumn(column)) return false;
         spec.partitionBy.push_back(column);
@@ -26332,6 +26175,24 @@ static bool executeInternal(const string& rawSql, Session& s) {
     if (sql.substr(0, 6) == "select" || sql.substr(0, 5) == "with ") {
         if (!checkDB(s)) return true;
 
+        // Frame offsets can contain nested CTE/derived SQL. Bind their
+        // original scopes before any legacy FROM materialization or target
+        // validation can flatten them, including for empty input/LIMIT 0.
+        {
+            dbms::SQLParser parser;
+            const auto parsed=parser.parseForBinding(effectiveRawSql);
+            const dbms::Stmt* statement=parsed.stmt.get();
+            if(const auto* envelope=dynamic_cast<const dbms::WithStmt*>(statement))
+                statement=envelope->statement.get();
+            const auto* select=dynamic_cast<const dbms::SelectStmt*>(statement);
+            if(select && std::any_of(select->selectList.begin(),select->selectList.end(),
+                    [](const auto& target) {
+                        const auto* call=dynamic_cast<const dbms::FunctionCallExpr*>(target.expr.get());
+                        return call && call->hasOver;
+                    }))
+                (void)g_engine.prepareBoundQuery(s.currentDB,effectiveRawSql);
+        }
+
         // HAVING is a boolean expression, not an opaque storage predicate.
         // Whole-query analysis must reject invalid input before a source,
         // volatile target, CTE or an empty group can hide the error.
@@ -35633,25 +35494,40 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 shared_ptr<dbms::PreparedQuery> query;
                 unique_ptr<dbms::PreparedQueryExecution> execution;
                 vector<dbms::Expr*> expressions;
+                dbms::Expr* frameStart = nullptr;
+                dbms::Expr* frameEnd = nullptr;
+                string frameIdentity;
                 size_t sourceOrdinal = 0;
                 dbms::QueryRowDescriptor descriptor;
             };
             vector<WindowScalarArguments> windowArguments(windowFuncs.size());
+            // The legacy SQL normalizer can erase a source qualifier. Keep
+            // the original SELECT sites for parsed-window identity instead
+            // of trying to rediscover that syntax from normalized text.
+            dbms::SQLParser originalWindowParser;
+            auto originalWindowQuery=originalWindowParser.parseForBinding(effectiveRawSql);
+            const dbms::Stmt* originalWindowStatement=originalWindowQuery.stmt.get();
+            if(const auto* envelope=dynamic_cast<const dbms::WithStmt*>(originalWindowStatement))
+                originalWindowStatement=envelope->statement.get();
+            vector<const dbms::FunctionCallExpr*> originalWindowSites;
+            if(const auto* select=dynamic_cast<const dbms::SelectStmt*>(originalWindowStatement))
+                for(const auto& target:select->selectList)
+                    if(const auto* call=dynamic_cast<const dbms::FunctionCallExpr*>(target.expr.get()))
+                        if(call->hasOver)originalWindowSites.push_back(call);
             // Bind all value/offset/default signatures and constant
             // conversions before opening sources. Runtime demand remains
             // specific to NTILE or LAG/LEAD, not eager argument evaluation.
             for (size_t wi = 0; wi < windowFuncs.size(); ++wi) {
-                const auto& function=windowFuncs[wi];
-                if (function.name != "ntile" && function.name != "lag" && function.name != "lead") continue;
+                auto& function=windowFuncs[wi];
                 auto& argument = windowArguments[wi];
-                const string argumentSql = "SELECT " + function.name + "(" + function.arg + ") OVER() FROM " +
+                const string argumentSql = "SELECT " + function.name + "(" + function.arg + ") OVER(" + function.overSql + ") FROM " +
                     tnameOrig + (tableAlias.empty() ? string() : " AS " + tableAlias);
                 argument.query = make_shared<dbms::PreparedQuery>(
                     g_engine.prepareBoundQuery(s.currentDB, argumentSql, {}, true));
                 auto* select = dynamic_cast<dbms::SelectStmt*>(argument.query->ast.get());
                 auto* call = select && select->selectList.size() == 1
                     ? dynamic_cast<dbms::FunctionCallExpr*>(select->selectList.front().expr.get()) : nullptr;
-                if (!call || call->args.empty())
+                if (!call)
                     throw dbms::DbError("XX000", "window arguments lost their prepared owner");
                 if (function.name == "ntile") {
                     auto conversion = make_unique<dbms::CastExpr>();
@@ -35659,12 +35535,44 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     conversion->operand = std::move(call->args.front());
                     call->args.front() = std::move(conversion);
                 }
-                for (const auto& value : call->args) argument.expressions.push_back(value.get());
+                for (const auto& value : call->args)
+                    if(value->type!=dbms::ExprType::A_Star)argument.expressions.push_back(value.get());
+                argument.frameStart=call->over.frameStart.get();
+                argument.frameEnd=call->over.frameEnd.get();
                 const auto source = find_if(argument.query->sourceRanges.begin(), argument.query->sourceRanges.end(),
                     [&](const auto& range) { return range.owner == select; });
                 if (source == argument.query->sourceRanges.end() || source->columns.size() != tbl.len)
                     throw dbms::DbError("XX000", "window arguments lost their actual source descriptor");
                 argument.sourceOrdinal = source->ordinal; argument.descriptor = source->columns;
+                if(function.hasFrame) {
+                    const auto field=[](const string& value){return to_string(value.size())+":"+value;};
+                    const auto expressionKey=[&](const dbms::Expr* value) {
+                        return dbms::ExprHelper::preparedSortExpressionIdentity(value,*argument.query,
+                            [&](const dbms::ColumnRefExpr& column){return field(column.schema)+field(column.table)+field(column.column);},
+                            queryDb,&g_engine,true);
+                    };
+                    const auto& window=call->over;
+                    const auto* syntaxSelect=dynamic_cast<const dbms::SelectStmt*>(function.windowSyntax.get());
+                    const auto* syntaxCall=syntaxSelect && syntaxSelect->selectList.size()==1
+                        ?dynamic_cast<const dbms::FunctionCallExpr*>(syntaxSelect->selectList.front().expr.get()):nullptr;
+                    if(originalWindowSites.size()==windowFuncs.size())syntaxCall=originalWindowSites[wi];
+                    const auto& syntaxWindow=syntaxCall && syntaxCall->over.name.empty()?syntaxCall->over:window;
+                    string key=field(function.windowReference)+field(window.frameMode)+field(window.frameBetween?"between":"single")+
+                        field(to_string(static_cast<unsigned>(window.frameStartKind)))+
+                        field(to_string(static_cast<unsigned>(window.frameEndKind)))+
+                        field(window.frameExclusion=="no others"?string():window.frameExclusion);
+                    for(const auto& partition:syntaxWindow.partitionBy)key+=field(expressionKey(partition.get()));
+                    key+=field("order");
+                    for(size_t i=0;i<syntaxWindow.orderBy.size();++i) {
+                        const auto& order=syntaxWindow.orderBy[i];
+                        const auto placement=i<window.orderNullsFirst.size()?window.orderNullsFirst[i]:std::optional<bool>{};
+                        const bool directionSpecified=i<window.orderDirectionSpecified.size() && window.orderDirectionSpecified[i];
+                        key+=field(expressionKey(order.first.get()))+field(directionSpecified?(order.second?"asc":"desc"):"default")+
+                            field(placement?(*placement?"first":"last"):"default");
+                    }
+                    key+=field(expressionKey(argument.frameStart))+field(expressionKey(argument.frameEnd));
+                    argument.frameIdentity=std::move(key);
+                }
                 argument.execution = make_unique<dbms::PreparedQueryExecution>(argument.query, &g_engine, queryDb);
                 const auto prepared = argument.query;
                 argument.execution->setChildCursorFactory([&, prepared](const dbms::Stmt* child, const dbms::RowContext& row) {
@@ -35674,7 +35582,31 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 });
                 for (auto* value : argument.expressions) argument.execution->prepareExpression(value);
                 for (auto* value : argument.expressions) argument.execution->planExpressionConstants(value);
+                for(auto* value:{argument.frameStart,argument.frameEnd})if(value) {
+                    argument.execution->prepareExpression(value);
+                    argument.execution->planExpressionConstants(value);
+                }
                 argument.execution->prepareChildCursors();
+            }
+            // Frame initialization precedes reading even an empty child;
+            // parent LIMIT 0 suppresses execution, but not pure preparation.
+            map<string,pair<dbms::ExprValue,dbms::ExprValue>> initializedFrames;
+            if(!(finiteWindowLimit && windowLimit==0))for(size_t wi=0;wi<windowFuncs.size();++wi) {
+                auto& function=windowFuncs[wi];auto& argument=windowArguments[wi];
+                if(!function.hasFrame)continue;
+                const auto previous=initializedFrames.find(argument.frameIdentity);
+                if(previous!=initializedFrames.end()) {
+                    function.preparedFrame.startOffset=previous->second.first;
+                    function.preparedFrame.endOffset=previous->second.second;
+                } else {
+                    if(argument.frameStart)function.preparedFrame.startOffset=
+                        argument.execution->evaluate(argument.frameStart,argument.execution->context());
+                    if(argument.frameEnd)function.preparedFrame.endOffset=
+                        argument.execution->evaluate(argument.frameEnd,argument.execution->context());
+                }
+                function.preparedFrame.validateOffsets();
+                if(previous==initializedFrames.end())initializedFrames.emplace(argument.frameIdentity,
+                    make_pair(function.preparedFrame.startOffset,function.preparedFrame.endOffset));
             }
             bool canUseVolcanoWindow = !hasAgg && !hasScalar &&
                                        distinctOnCols.empty() &&
@@ -36052,6 +35984,26 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 return window.orderByCol.empty() ||
                     comparePartitionColumn(rows[left], rows[right], window.orderByCol) == 0;
             };
+            const auto legacyFrameBounds = [&](const WindowFunc& window,const vector<size_t>& indices,size_t current) {
+                auto frame=window.preparedFrame;
+                if(!window.hasFrame) {
+                    frame.mode="range";
+                    frame.start=dbms::WindowDef::BoundKind::UnboundedPreceding;
+                    frame.end=window.orderByCol.empty()?dbms::WindowDef::BoundKind::UnboundedFollowing:
+                        dbms::WindowDef::BoundKind::CurrentRow;
+                }
+                return frame.bounds(current,0,indices.size(),[&](size_t position) {
+                    size_t first=position,last=position+1;
+                    while(first && samePeer(indices[first-1],indices[position],window))--first;
+                    while(last<indices.size() && samePeer(indices[last],indices[position],window))++last;
+                    return make_pair(first,last);
+                },[&](size_t position) {
+                    const auto& source=rows[indices[position]];
+                    const auto value=source.find(window.orderByCol);
+                    return dbms::ExprValue(partitionColumn(window.orderByCol).dataType,
+                        value==source.end()?string():value->second,value==source.end());
+                },window.orderByAsc,window.hasExplicitOrderNulls?window.orderByNullsFirst:!window.orderByAsc);
+            };
 
             // Sort by partition columns first, then by ORDER BY column
             const WindowFunc& wf0 = windowFuncs[0];
@@ -36094,158 +36046,32 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     const auto& idxs = pr.second;
                     // For RANGE/GROUPS frames, pre-sort by ORDER BY within partition
                     vector<size_t> sortedIdxs = idxs;
-                    if (wf.hasFrame && wf.frameType != WindowFunc::FrameType::ROWS && !wf.orderByCol.empty()) {
-                        sort(sortedIdxs.begin(), sortedIdxs.end(), [&](size_t a, size_t b) {
+                    if (!wf.orderByCol.empty()) {
+                        stable_sort(sortedIdxs.begin(), sortedIdxs.end(), [&](size_t a, size_t b) {
                             return compareWindowOrder(rows[a], rows[b], wf) < 0;
                         });
                     }
-                    const auto& effIdxs = (wf.hasFrame && wf.frameType != WindowFunc::FrameType::ROWS) ? sortedIdxs : idxs;
-                    // Pre-compute peer group boundaries for GROUPS
-                    vector<size_t> groupStart; // start index of each peer group in effIdxs
-                    if (wf.hasFrame && wf.frameType == WindowFunc::FrameType::GROUPS && !wf.orderByCol.empty()) {
-                        for (size_t gi = 0; gi < effIdxs.size(); ) {
-                            groupStart.push_back(gi);
-                            size_t gj = gi + 1;
-                            while (gj < effIdxs.size()) {
-                                if (!samePeer(effIdxs[gi], effIdxs[gj], wf)) break;
-                                ++gj;
-                            }
-                            gi = gj;
-                        }
-                    }
+                    const auto& effIdxs = sortedIdxs;
                     // Map from original row index to position in effIdxs
                     unordered_map<size_t, size_t> posInEff;
                     for (size_t ei = 0; ei < effIdxs.size(); ++ei) posInEff[effIdxs[ei]] = ei;
                     for (size_t ii = 0; ii < idxs.size(); ++ii) {
                         size_t ri = idxs[ii];
-                        // Determine frame boundaries within this partition
-                        size_t fStart = 0, fEnd = effIdxs.size();
-                        if (!wf.hasFrame && !wf.orderByCol.empty()) {
-                            fEnd = posInEff.at(ri) + 1;
-                            while (fEnd < effIdxs.size() && samePeer(effIdxs[fEnd], ri, wf)) ++fEnd;
-                        }
-                        if (wf.hasFrame) {
-                            if (wf.frameType == WindowFunc::FrameType::ROWS) {
-                                if (wf.frameStartOffset >= 0) {
-                                    size_t pos = posInEff.count(ri) ? posInEff[ri] : ii;
-                                    fStart = (pos >= static_cast<size_t>(wf.frameStartOffset)) ? (pos - wf.frameStartOffset) : 0;
-                                }
-                                if (wf.frameEndOffset >= 0) {
-                                    size_t pos = posInEff.count(ri) ? posInEff[ri] : ii;
-                                    fEnd = pos + wf.frameEndOffset + 1;
-                                    if (fEnd > effIdxs.size()) fEnd = effIdxs.size();
-                                }
-                            } else if (wf.frameType == WindowFunc::FrameType::RANGE && !wf.orderByCol.empty()) {
-                                auto itCur = rows[ri].find(wf.orderByCol);
-                                if (itCur != rows[ri].end() && !itCur->second.empty()) {
-                                    try {
-                                        int64_t curVal = stoll(itCur->second);
-                                        // Find start: first row with value >= curVal - startOffset (or unbounded)
-                                        if (wf.frameStartOffset == -1) {
-                                            fStart = 0;
-                                        } else if (wf.frameStartOffset == 0) {
-                                            // current row means value == curVal
-                                            for (size_t k = 0; k < effIdxs.size(); ++k) {
-                                                auto itK = rows[effIdxs[k]].find(wf.orderByCol);
-                                                if (itK != rows[effIdxs[k]].end()) {
-                                                    try {
-                                                        if (stoll(itK->second) >= curVal) { fStart = k; break; }
-                                                    } catch (...) {}
-                                                }
-                                            }
-                                        } else {
-                                            int64_t bound = curVal - wf.frameStartOffset;
-                                            for (size_t k = 0; k < effIdxs.size(); ++k) {
-                                                auto itK = rows[effIdxs[k]].find(wf.orderByCol);
-                                                if (itK != rows[effIdxs[k]].end()) {
-                                                    try {
-                                                        if (stoll(itK->second) >= bound) { fStart = k; break; }
-                                                    } catch (...) {}
-                                                }
-                                            }
-                                        }
-                                        // Find end: last row with value <= curVal + endOffset (or unbounded)
-                                        if (wf.frameEndOffset == -1) {
-                                            fEnd = effIdxs.size();
-                                        } else if (wf.frameEndOffset == 0) {
-                                            for (size_t k = effIdxs.size(); k-- > 0; ) {
-                                                auto itK = rows[effIdxs[k]].find(wf.orderByCol);
-                                                if (itK != rows[effIdxs[k]].end()) {
-                                                    try {
-                                                        if (stoll(itK->second) <= curVal) { fEnd = k + 1; break; }
-                                                    } catch (...) {}
-                                                }
-                                            }
-                                        } else {
-                                            int64_t bound = curVal + wf.frameEndOffset;
-                                            for (size_t k = effIdxs.size(); k-- > 0; ) {
-                                                auto itK = rows[effIdxs[k]].find(wf.orderByCol);
-                                                if (itK != rows[effIdxs[k]].end()) {
-                                                    try {
-                                                        if (stoll(itK->second) <= bound) { fEnd = k + 1; break; }
-                                                    } catch (...) {}
-                                                }
-                                            }
-                                        }
-                                    } catch (...) {}
-                                }
-                            } else if (wf.frameType == WindowFunc::FrameType::GROUPS && !groupStart.empty()) {
-                                size_t pos = posInEff.count(ri) ? posInEff[ri] : ii;
-                                // Find which group current row belongs to
-                                size_t curGroup = 0;
-                                for (size_t g = 0; g < groupStart.size(); ++g) {
-                                    if (groupStart[g] <= pos && (g + 1 >= groupStart.size() || groupStart[g + 1] > pos)) {
-                                        curGroup = g; break;
-                                    }
-                                }
-                                size_t startGroup = (wf.frameStartOffset == -1) ? 0 :
-                                    (curGroup >= static_cast<size_t>(wf.frameStartOffset) ? curGroup - wf.frameStartOffset : 0);
-                                size_t endGroup = (wf.frameEndOffset == -1) ? groupStart.size() - 1 :
-                                    (curGroup + wf.frameEndOffset);
-                                if (endGroup >= groupStart.size()) endGroup = groupStart.size() - 1;
-                                fStart = groupStart[startGroup];
-                                fEnd = (endGroup + 1 < groupStart.size()) ? groupStart[endGroup + 1] : effIdxs.size();
-                            }
-                        }
+                        // Shared typed, directional half-open frame boundaries.
+                        const auto [fStart,fEnd]=legacyFrameBounds(wf,effIdxs,posInEff.at(ri));
                         int64_t count = 0;
                         optional<string> selected;
                         dbms::Numeric exactSum(0);
                         int64_t exactCnt = 0;
-                        // Determine peer group boundaries for GROUP/TIES exclusion
-                        size_t peerStart = fStart, peerEnd = fStart;
-                        if (!wf.frameExclusion.empty() && wf.frameExclusion != "current row" && wf.frameExclusion != "no others") {
-                            // Find peer group of current row within frame
-                            for (size_t fj = fStart; fj < fEnd; ++fj) {
-                                if (effIdxs[fj] == ri) {
-                                    // Expand backwards: peers share partition and ORDER BY value
-                                    peerStart = fj;
-                                    while (peerStart > fStart) {
-                                        size_t prevIdx = effIdxs[peerStart - 1];
-                                        if (!samePartition(prevIdx, ri, wf)) break;
-                                        if (!samePeer(prevIdx, ri, wf)) break;
-                                        --peerStart;
-                                    }
-                                    // Expand forwards
-                                    peerEnd = fj + 1;
-                                    while (peerEnd < fEnd) {
-                                        size_t nextIdx = effIdxs[peerEnd];
-                                        if (!samePartition(nextIdx, ri, wf)) break;
-                                        if (!samePeer(nextIdx, ri, wf)) break;
-                                        ++peerEnd;
-                                    }
-                                    break;
-                                }
-                            }
-                        }
                         for (size_t fj = fStart; fj < fEnd; ++fj) {
                             size_t rj = effIdxs[fj];
                             // Apply frame exclusion
                             if (wf.frameExclusion == "current row") {
                                 if (rj == ri) continue;
                             } else if (wf.frameExclusion == "group") {
-                                if (fj >= peerStart && fj < peerEnd) continue;
+                                if (samePeer(rj,ri,wf)) continue;
                             } else if (wf.frameExclusion == "ties") {
-                                if (fj >= peerStart && fj < peerEnd && rj != ri) continue;
+                                if (rj!=ri && samePeer(rj,ri,wf)) continue;
                             }
                             if (wf.name == "count") {
                                 if (wf.arg == "*" || rows[rj].count(wf.arg)) count++;
@@ -36304,6 +36130,30 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 }
                 argument.execution->setSourceRow(context,argument.sourceOrdinal,cells);
                 return argument.execution->evaluate(argument.expressions.at(value),context);
+            };
+            const auto frameValue = [&](size_t wi,size_t current,uint64_t number,bool fromEnd) {
+                const auto& window=windowFuncs[wi];
+                vector<size_t> indices;
+                for(size_t row=0;row<rows.size();++row)
+                    if(samePartition(row,current,window))indices.push_back(row);
+                if(!window.orderByCol.empty())stable_sort(indices.begin(),indices.end(),[&](size_t a,size_t b) {
+                    return compareWindowOrder(rows[a],rows[b],window)<0;
+                });
+                const auto found=find(indices.begin(),indices.end(),current);
+                if(found==indices.end())throw dbms::DbError("XX000","window frame lost its source row");
+                const auto [begin,end]=legacyFrameBounds(window,indices,static_cast<size_t>(found-indices.begin()));
+                optional<size_t> selected;
+                uint64_t count=0;
+                for(size_t position=begin;position<end;++position) {
+                    const size_t row=indices[position];
+                    if(window.frameExclusion=="current row" && row==current)continue;
+                    if(window.frameExclusion=="group" && samePeer(row,current,window))continue;
+                    if(window.frameExclusion=="ties" && row!=current && samePeer(row,current,window))continue;
+                    if(fromEnd)selected=row;
+                    else if(++count==number){selected=row;break;}
+                }
+                if(selected)return evaluateWindowArgument(wi,0,*selected);
+                return dbms::ExprValue(windowArguments[wi].query->output.front().type,"",true);
             };
             // Compute window function values
             for (size_t i = 0; i < rows.size(); ++i) {
@@ -36364,17 +36214,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             else value=dbms::ExprValue(argument.query->output.front().type,"",true);
                             val=value.value;valueIsNull=value.isNull;
                         }
-                    } else if (wf.name == "first_value") {
-                        auto it = rows[partStart].find(wf.arg);
-                        val = (it != rows[partStart].end()) ? it->second : "NULL";
-                        valueIsNull = it == rows[partStart].end();
-                    } else if (wf.name == "last_value") {
-                        // Find last row in same partition
-                        size_t partEnd = i;
-                        while (partEnd + 1 < rows.size() && samePartition(partEnd + 1, i, wf)) partEnd++;
-                        auto it = rows[partEnd].find(wf.arg);
-                        val = (it != rows[partEnd].end()) ? it->second : "NULL";
-                        valueIsNull = it == rows[partEnd].end();
+                    } else if (wf.name == "first_value" || wf.name == "last_value") {
+                        const auto value=frameValue(wi,i,1,wf.name=="last_value");
+                        val=value.value;valueIsNull=value.isNull;
                     } else if (wf.name == "ntile") {
                         size_t partEnd = i;
                         while (partEnd + 1 < rows.size() && samePartition(partEnd + 1, i, wf)) partEnd++;
@@ -36440,50 +36282,13 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         oss << std::fixed << std::setprecision(4) << cd;
                         val = oss.str();
                     } else if (wf.name == "nth_value") {
-                        size_t partEnd = i;
-                        while (partEnd + 1 < rows.size() && samePartition(partEnd + 1, i, wf)) partEnd++;
-                        size_t partitionSize = partEnd - partStart + 1;
-                        // Parse "col,n" from wf.arg
-                        string nthCol;
-                        int n = 1;
-                        size_t commaPos = wf.arg.find(',');
-                        if (commaPos != string::npos) {
-                            nthCol = trim(wf.arg.substr(0, commaPos));
-                            try { n = std::stoi(trim(wf.arg.substr(commaPos + 1))); } catch (...) { n = 1; }
-                        } else {
-                            nthCol = wf.arg;
-                        }
-                        if (n <= 0) n = 1;
-                        // PG evaluates nth_value over the FRAME.  With ORDER BY
-                        // the default frame ends at the current row (RANGE
-                        // ... CURRENT ROW extends to peers): the nth row must
-                        // lie within partStart..frameEnd, else NULL.
-                        // Without ORDER BY every partition row is a peer,
-                        // so the default RANGE end includes the whole partition.
-                        // Explicit ROWS bounds still start from the current row.
-                        size_t frameEnd = !wf.hasFrame && wf.orderByCol.empty() ? partEnd : i;
-                        if (wf.hasFrame) {
-                            // Explicit frame: honor ROWS offsets; peer-extension
-                            // only applies to RANGE-style CURRENT ROW ends.
-                            if (wf.frameEndOffset == -1) frameEnd = partEnd;
-                            else if (wf.frameEndOffset > 0) {
-                                frameEnd = i + static_cast<size_t>(wf.frameEndOffset);
-                                if (frameEnd > partEnd) frameEnd = partEnd;
-                            }
-                        } else if (!wf.orderByCol.empty()) {
-                            while (frameEnd + 1 < rows.size() &&
-                                   samePartition(frameEnd + 1, i, wf) &&
-                                   samePeer(frameEnd + 1, i, wf))
-                                ++frameEnd;
-                        }
-                        size_t nthIdx = partStart + static_cast<size_t>(n) - 1;
-                        if (nthIdx <= frameEnd) {
-                            auto it = rows[nthIdx].find(nthCol);
-                            val = (it != rows[nthIdx].end()) ? it->second : "NULL";
-                            valueIsNull = it == rows[nthIdx].end();
-                        } else {
-                            val = "NULL";
-                            valueIsNull = true;
+                        const auto number=evaluateWindowArgument(wi,1,i);
+                        valueIsNull=true;
+                        if(!number.isNull) {
+                            const int64_t n=number.asInt();
+                            if(n<=0)throw dbms::DbError("22023","argument of nth_value must be greater than zero");
+                            const auto value=frameValue(wi,i,static_cast<uint64_t>(n),false);
+                            val=value.value;valueIsNull=value.isNull;
                         }
                     }
                     rows[i].windowValues.at(wi) = val;

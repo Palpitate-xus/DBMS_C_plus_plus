@@ -62,11 +62,15 @@ public:
     // Sort-slot equivalence only: a retained SQL child is compared using its
     // prepared tree/ranges/typed slots, never SQL spelling or runtime values.
     // This does not merge distinct evaluation sites in the execution carrier.
+    // parsedWindowSyntax instead identifies parsed window clauses for their
+    // shared offset initializer: preserve explicit casts/names and strip only
+    // binder-added coercions. It is not ordinary sort-slot equivalence.
     static std::string preparedSortExpressionIdentity(
         const Expr* expression, const PreparedQuery& query,
         const std::function<std::string(const ColumnRefExpr&)>& columnIdentity,
         const std::string& currentDB = "",
-        StorageEngine* functionEngine = nullptr);
+        StorageEngine* functionEngine = nullptr,
+        bool parsedWindowSyntax = false);
     // Retained prepared AST consumer: no rendering/reparsing and no routine
     // execution. Parameters retain stable typed slots; child sites are unique.
     static std::string scalarExpressionIdentity(

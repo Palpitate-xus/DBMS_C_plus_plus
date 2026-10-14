@@ -398,12 +398,19 @@ struct QuantifiedComparisonExpr : public Expr {
 
 // 窗口函数定义（ also used by FunctionCallExpr for OVER clauses）
 struct WindowDef {
+    enum class BoundKind { Unspecified, UnboundedPreceding, Preceding,
+        CurrentRow, Following, UnboundedFollowing };
     std::string name;
     std::vector<ExprPtr> partitionBy;
     std::vector<std::pair<ExprPtr, bool>> orderBy;
+    std::vector<std::optional<bool>> orderNullsFirst;
+    std::vector<bool> orderDirectionSpecified;
     std::string frameMode;  // ROWS, RANGE, GROUPS
     ExprPtr frameStart;
     ExprPtr frameEnd;
+    BoundKind frameStartKind = BoundKind::Unspecified;
+    BoundKind frameEndKind = BoundKind::Unspecified;
+    bool frameBetween = false;
     std::string frameExclusion; // CURRENT ROW, GROUP, TIES, NO OTHERS
 };
 

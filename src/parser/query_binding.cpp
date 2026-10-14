@@ -902,6 +902,12 @@ public:
                 if(call->args.size()>=2)coerceCaseInput(call->args[1],argumentTypes[1].first,"integer");
                 if(call->args.size()==3)coerceCaseInput(call->args[2],argumentTypes[2].first,call->resolvedResultType);
             }
+            if(call->hasOver && CatalogManager::parseQualifiedName(windowSpelling,windowRoutine,true) &&
+               (windowRoutine.schema.empty() || windowRoutine.schema=="pg_catalog") && windowRoutine.name=="nth_value") {
+                if(call->args.size()!=2 || !call->namedArgs.empty())
+                    throw DbError("42883","function does not exist: "+windowSpelling);
+                coerceCaseInput(call->args[1],argumentTypes[1].first,"integer");
+            }
             if(call->schema.empty() && (grammarOperation=="coalesce" || grammarOperation=="greatest" || grammarOperation=="least"))
                 valueTypeModifiers[call]=commonModifier(argumentTypes,call->resolvedResultType);
             return call->resolvedResultType;
@@ -1092,8 +1098,109 @@ public:
     }
     void window(WindowDef& value, const std::vector<Namespace>& scopes) {
         for (auto& field : value.partitionBy) expression(field, scopes);
-        for (auto& field : value.orderBy) expression(field.first, scopes);
-        expression(value.frameStart, scopes); expression(value.frameEnd, scopes);
+        std::vector<std::string> orderTypes;
+        for (auto& field : value.orderBy) {
+            const auto type=expression(field.first,scopes);
+            orderTypes.push_back(patternBaseType(type,field.first.get()));
+        }
+        using Bound=WindowDef::BoundKind;
+        const auto offsetBound=[](Bound kind){return kind==Bound::Preceding || kind==Bound::Following;};
+        const bool offsets=offsetBound(value.frameStartKind) || offsetBound(value.frameEndKind);
+        if(value.frameMode=="groups" && value.orderBy.empty())
+            throw DbError("42P20","GROUPS mode requires an ORDER BY clause");
+        if(value.frameMode=="range" && offsets && value.orderBy.size()!=1)
+            throw DbError("42P20","RANGE with offset requires exactly one ORDER BY column");
+        std::set<size_t> currentSources;
+        if(!scopes.empty())for(const auto& range:scopes.front())currentSources.insert(range.occurrence);
+        std::function<void(const Expr*)> rejectVariables;
+        std::function<void(const Stmt*)> inspectChild;
+        std::function<void(const FromItem*)> inspectSource;
+        size_t childDepth=0;
+        rejectVariables=[&](const Expr* node) {
+            if(!node)return;
+            if(const auto* column=dynamic_cast<const ColumnRefExpr*>(node)) {
+                if(column->binding && currentSources.count(column->binding->sourceOrdinal))
+                    throw DbError("42P10","argument of window frame must not contain variables");
+            }
+            if(node->preparedSubquery){inspectChild(node->preparedSubquery.get());return;}
+            if(const auto* unary=dynamic_cast<const UnaryOpExpr*>(node))rejectVariables(unary->operand.get());
+            else if(const auto* binary=dynamic_cast<const BinaryOpExpr*>(node)) {
+                rejectVariables(binary->left.get());rejectVariables(binary->right.get());
+            } else if(const auto* cast=dynamic_cast<const CastExpr*>(node))rejectVariables(cast->operand.get());
+            else if(const auto* call=dynamic_cast<const FunctionCallExpr*>(node)) {
+                if(call->hasOver && !childDepth)throw DbError("42P20","window functions are not allowed in window frame offsets");
+                for(const auto& arg:call->args)rejectVariables(arg.get());
+                for(const auto& arg:call->namedArgs)rejectVariables(arg.value.get());
+                rejectVariables(call->filter.get());
+                for(const auto& field:call->over.partitionBy)rejectVariables(field.get());
+                for(const auto& order:call->over.orderBy)rejectVariables(order.first.get());
+                rejectVariables(call->over.frameStart.get());rejectVariables(call->over.frameEnd.get());
+            } else if(const auto* conditional=dynamic_cast<const CaseExpr*>(node)) {
+                rejectVariables(conditional->switchExpr.get());rejectVariables(conditional->elseExpr.get());
+                for(const auto& arm:conditional->whenClauses){rejectVariables(arm.first.get());rejectVariables(arm.second.get());}
+            } else if(const auto* array=dynamic_cast<const ArrayExpr*>(node)) {
+                for(const auto& element:array->elements)rejectVariables(element.get());
+            } else if(const auto* row=dynamic_cast<const RowExpr*>(node)) {
+                for(const auto& element:row->elements)rejectVariables(element.get());
+            } else if(const auto* quantified=dynamic_cast<const QuantifiedComparisonExpr*>(node)) {
+                rejectVariables(quantified->left.get());rejectVariables(quantified->right.get());
+            }
+        };
+        inspectSource=[&](const FromItem* source) {
+            if(!source)return;
+            inspectChild(source->subquery.get());rejectVariables(source->joinCondition.get());
+            inspectSource(source->left.get());inspectSource(source->right.get());
+        };
+        inspectChild=[&](const Stmt* node) {
+            if(!node)return;
+            struct Depth {
+                size_t& value;
+                explicit Depth(size_t& depth):value(depth){++value;}
+                ~Depth(){--value;}
+            } depth(childDepth);
+            if(const auto* envelope=dynamic_cast<const WithStmt*>(node)) {
+                for(const auto& cte:envelope->ctes)inspectChild(cte.query.get());
+                inspectChild(envelope->statement.get());return;
+            }
+            const auto* select=dynamic_cast<const SelectStmt*>(node);
+            if(!select)return;
+            for(const auto& cte:select->ctes)inspectChild(cte.query.get());
+            for(const auto& target:select->selectList)rejectVariables(target.expr.get());
+            rejectVariables(select->whereClause.get());rejectVariables(select->having.get());
+            for(const auto& order:select->orderBy)rejectVariables(order.expr.get());
+            for(const auto& group:select->groupBy)rejectVariables(group.get());
+            for(const auto& group:select->groupByElems)for(const auto& field:group.exprs)rejectVariables(field.get());
+            for(const auto& row:select->valuesRows)for(const auto& field:row)rejectVariables(field.get());
+            for(const auto& field:select->distinctOn)rejectVariables(field.get());
+            for(const auto& window:select->windowDefs) {
+                for(const auto& field:window.partitionBy)rejectVariables(field.get());
+                for(const auto& order:window.orderBy)rejectVariables(order.first.get());
+                rejectVariables(window.frameStart.get());rejectVariables(window.frameEnd.get());
+            }
+            inspectSource(select->fromClause.get());
+            inspectChild(select->setOpLhs.get());inspectChild(select->setOpRhs.get());
+        };
+        const auto prepareOffset=[&](ExprPtr& offset,Bound kind) {
+            if(!offsetBound(kind))return;
+            const auto source=expression(offset,scopes);
+            const auto base=patternBaseType(source,offset.get());
+            const bool integer=base=="smallint" || base=="integer" || base=="bigint";
+            const bool number=integer || base=="numeric" || base=="real" || base=="double precision";
+            std::string target="bigint";
+            if(value.frameMode=="range") {
+                const auto& ordering=orderTypes.front();
+                const bool integralOrder=ordering=="smallint" || ordering=="integer" || ordering=="bigint";
+                if(integralOrder && (integer || base=="unknown"))target=base=="unknown"?ordering:base;
+                else if(ordering=="numeric" && (number || base=="unknown"))target="numeric";
+                else if((ordering=="real" || ordering=="double precision") && (number || base=="unknown"))target="double precision";
+                else throw DbError("0A000","RANGE offset is not supported for column type "+ordering+" and offset type "+source);
+            } else if(!number && base!="unknown")
+                throw DbError("42804","argument of window frame must be type bigint, not "+source);
+            coerceCaseInput(offset,source,target);
+            rejectVariables(offset.get());
+        };
+        prepareOffset(value.frameStart,value.frameStartKind);
+        prepareOffset(value.frameEnd,value.frameEndKind);
     }
     std::pair<std::string,int> projectionLabel(const Expr* expression) {
         return ExprHelper::projectionLabel(expression,[&](const std::string& spelling) {

@@ -27,6 +27,11 @@ ExprPtr copyExpression(const Expr* source, std::map<const Expr*, const Expr*>& s
     const auto window = [&](const WindowDef& source, WindowDef& target) {
         target.name = source.name; target.frameMode = source.frameMode;
         target.frameExclusion = source.frameExclusion;
+        target.frameStartKind = source.frameStartKind;
+        target.frameEndKind = source.frameEndKind;
+        target.frameBetween = source.frameBetween;
+        target.orderNullsFirst = source.orderNullsFirst;
+        target.orderDirectionSpecified = source.orderDirectionSpecified;
         for (const auto& expr : source.partitionBy) target.partitionBy.push_back(copy(expr));
         for (const auto& expr : source.orderBy) target.orderBy.emplace_back(copy(expr.first),expr.second);
         target.frameStart = copy(source.frameStart); target.frameEnd = copy(source.frameEnd);

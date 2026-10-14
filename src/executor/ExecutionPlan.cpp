@@ -3893,6 +3893,8 @@ bool WindowOp::open() {
     structuredRows_.clear();
     structuredNulls_.clear();
     pos_ = 0;
+    for(const auto& function:functions_)
+        if(function.preparedFrame.prepared())function.preparedFrame.validateOffsets();
     if (!child_->open()) return false;
 
     std::vector<WindowInputRow> input;
@@ -4021,6 +4023,15 @@ bool WindowOp::open() {
         auto frameBounds = [&](size_t position) -> std::pair<size_t, size_t> {
             const size_t partitionStart = partitionStartAt[position];
             const size_t partitionEnd = partitionEndAt[position];
+            if(function.preparedFrame.prepared()) {
+                return function.preparedFrame.bounds(position,partitionStart,partitionEnd,
+                    [&](size_t row){return std::make_pair(groupStartAt[row],groupEndAt[row]);},
+                    [&](size_t row){
+                        if(orderColumn>=tbl_.len)throw DbError("XX000","RANGE frame has no ORDER BY key");
+                        return ExprValue(tbl_.cols[orderColumn].dataType,input[order[row]].values[orderColumn],
+                            input[order[row]].nulls[orderColumn]);
+                    },function.orderAscending,function.hasExplicitOrderNulls?function.orderByNullsFirst:!function.orderAscending);
+            }
             if (!function.hasFrame) {
                 if (orderColumn < tbl_.len) return {partitionStart, groupEndAt[position]};
                 return {partitionStart, partitionEnd};

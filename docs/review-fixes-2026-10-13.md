@@ -22,7 +22,7 @@
 | R01 | NUMERIC SQRT | 已修复 | `91951e37`；1023原生控制O2/ASan/UBSan、46协议PG/Root及5完整native邻居通过，见[验证](issue-review-r01-numeric-square-root.md) |
 | R02 | 窗口排序、peer、MIN/MAX | 已修复 | `491dae49`；最终28协议原24失败→PG/Root全过，168native、八完整native/十一完整协议通过；C/默认locale区别明确，见[验证](issue-review-r02-window-declared-comparisons.md) |
 | R03 | 窗口分区的NUMERIC等价 | 已修复 | `cd3980fe`；原12native全失败/18协议11失败→PG/Root全过，七完整native/十完整协议通过，见[验证](issue-review-r03-window-partition-equivalence.md) |
-| R04 | 窗口frame边界 | 待修复 | |
+| R04 | 窗口frame边界 | 已修复 | 原最终307协议275失败→PG/Root全过；349native、78初始化控制、十五完整native/十八完整协议通过，方向/空区间/EXCLUDE/typed offset/嵌套变量及初始化次数保留，见[验证](issue-review-r04-window-frame-boundaries.md) |
 | R05 | NTILE分桶 | 已修复 | `aeaa3257`；24 native与18 PG/Root协议控制及六完整窗口native通过，见[验证](issue-review-r05-ntile-distribution.md) |
 | R06 | NTILE非正参数 | 已修复 | `41d45c4a`；20native原8失败、72协议原57失败→PG/Root全过；九完整native/十八完整协议通过，保留NULL、参数、逐分区求值次数，见[验证](issue-review-r06-ntile-argument.md) |
 | R07 | LAG/LEAD偏移 | 已修复 | `c94a8714`；原native120中36失败、原合法负偏移协议触发退出→最终122native/152 PG及Root协议全过；最终58当前生产对象、十五完整native/十九完整协议通过，见[验证](issue-review-r07-window-signed-offset.md) |

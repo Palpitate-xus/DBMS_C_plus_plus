@@ -33429,9 +33429,17 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
                         ExprHelper::inferParsedResultType(function->args.front().get(), {}, dbname,
                                                          const_cast<StorageEngine*>(this)));
                 }
-                const auto aggregate = aggregate_type_detail::builtinName(function);
+                auto aggregate = aggregate_type_detail::builtinName(function);
+                // Aggregate windows keep the genuine aggregate signature;
+                // the ordinary aggregate planner deliberately excludes OVER.
+                // Only this query-host metadata boundary admits that role.
+                if(aggregate.empty() && function->hasOver && !function->setReturning)
+                    for(const auto* builtin:{"count","sum","avg","min","max","bool_and","bool_or","every"})
+                        if(name==builtin){aggregate=name;break;}
                 if (!aggregate.empty() &&
                     !evaluator.hasScalarFunction(function, const_cast<StorageEngine*>(this))) {
+                    if(function->hasOver && function->distinct)
+                        throw DbError("0A000","DISTINCT is not implemented for window aggregates");
                     const auto input = function->args.empty() ? std::string("unknown") :
                         ExprHelper::inferParsedInputType(function->args.front().get(), {}, dbname,
                                                        const_cast<StorageEngine*>(this));

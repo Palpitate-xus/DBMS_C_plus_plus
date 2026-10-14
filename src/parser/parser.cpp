@@ -3008,41 +3008,86 @@ static ExprPtr parsePrimaryExprImpl(const std::vector<std::string>& tokens, size
                     if (w == "partition") {
                         ++pos;
                         if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "by") ++pos;
-                        while (pos < tokens.size() && tokens[pos] != ")" &&
-                               SQLParser::toLower(tokens[pos]) != "order" &&
-                               SQLParser::toLower(tokens[pos]) != "rows" &&
-                               SQLParser::toLower(tokens[pos]) != "range" &&
-                               SQLParser::toLower(tokens[pos]) != "groups") {
+                        if(pos>=tokens.size() || tokens[pos]==")")throw DbError("42601","PARTITION BY requires an expression");
+                        while (pos < tokens.size() && tokens[pos] != ")") {
                             auto part = parseExpr(tokens, pos);
                             if (part) winDef.partitionBy.push_back(std::move(part));
-                            if (pos < tokens.size() && tokens[pos] == ",") ++pos;
+                            if (pos < tokens.size() && tokens[pos] == ",") {++pos;continue;}
+                            break;
                         }
                     } else if (w == "order") {
                         ++pos;
                         if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "by") ++pos;
-                        while (pos < tokens.size() && tokens[pos] != ")" &&
-                               SQLParser::toLower(tokens[pos]) != "rows" &&
-                               SQLParser::toLower(tokens[pos]) != "range" &&
-                               SQLParser::toLower(tokens[pos]) != "groups") {
+                        if(pos>=tokens.size() || tokens[pos]==")")throw DbError("42601","window ORDER BY requires an expression");
+                        while (pos < tokens.size() && tokens[pos] != ")") {
                             auto obExpr = parseExpr(tokens, pos);
                             bool asc = true;
-                            if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "asc") { asc = true; ++pos; }
-                            else if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "desc") { asc = false; ++pos; }
-                            if (obExpr) winDef.orderBy.emplace_back(std::move(obExpr), asc);
-                            if (pos < tokens.size() && tokens[pos] == ",") ++pos;
+                            bool directionSpecified=false;
+                            if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "asc") { asc = true; ++pos; directionSpecified=true; }
+                            else if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "desc") { asc = false; ++pos; directionSpecified=true; }
+                            std::optional<bool> nullsFirst;
+                            if(pos<tokens.size() && SQLParser::toLower(tokens[pos])=="nulls") {
+                                ++pos;
+                                if(pos>=tokens.size() || (SQLParser::toLower(tokens[pos])!="first" && SQLParser::toLower(tokens[pos])!="last"))
+                                    throw DbError("42601","expected FIRST or LAST after NULLS");
+                                nullsFirst=SQLParser::toLower(tokens[pos++])=="first";
+                            }
+                            if (obExpr) {
+                                winDef.orderBy.emplace_back(std::move(obExpr), asc);
+                                winDef.orderNullsFirst.push_back(nullsFirst);
+                                winDef.orderDirectionSpecified.push_back(directionSpecified);
+                            }
+                            if (pos < tokens.size() && tokens[pos] == ",") {++pos;continue;}
+                            break;
                         }
                     } else if (w == "rows" || w == "range" || w == "groups") {
                         winDef.frameMode = w; ++pos;
-                        if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "between") {
+                        using Bound = WindowDef::BoundKind;
+                        const auto require = [&](const std::string& expected) {
+                            if(pos>=tokens.size() || SQLParser::toLower(tokens[pos])!=expected)
+                                throw DbError("42601","expected "+expected+" in window frame");
                             ++pos;
-                            winDef.frameStart = parseExpr(tokens, pos);
-                            if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "and") { ++pos; winDef.frameEnd = parseExpr(tokens, pos); }
+                        };
+                        const auto boundary = [&](ExprPtr& offset) {
+                            if(pos>=tokens.size())throw DbError("42601","incomplete window frame boundary");
+                            const auto word=SQLParser::toLower(tokens[pos]);
+                            if(word=="unbounded") {
+                                ++pos;
+                                if(pos<tokens.size() && SQLParser::toLower(tokens[pos])=="preceding") {
+                                    ++pos;return Bound::UnboundedPreceding;
+                                }
+                                require("following");return Bound::UnboundedFollowing;
+                            }
+                            if(word=="current") {++pos;require("row");return Bound::CurrentRow;}
+                            offset=parseExpr(tokens,pos);
+                            if(!offset)throw DbError("42601","window frame offset is required");
+                            if(pos<tokens.size() && SQLParser::toLower(tokens[pos])=="preceding") {
+                                ++pos;return Bound::Preceding;
+                            }
+                            require("following");return Bound::Following;
+                        };
+                        if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "between") {
+                            winDef.frameBetween = true;
+                            ++pos;
+                            winDef.frameStartKind=boundary(winDef.frameStart);
+                            require("and");winDef.frameEndKind=boundary(winDef.frameEnd);
                         } else {
-                            winDef.frameStart = parseExpr(tokens, pos);
+                            winDef.frameStartKind=boundary(winDef.frameStart);
+                            winDef.frameEndKind=Bound::CurrentRow;
                         }
+                        const auto start=winDef.frameStartKind,end=winDef.frameEndKind;
+                        if(start==Bound::UnboundedFollowing || end==Bound::UnboundedPreceding ||
+                            (start==Bound::CurrentRow && end==Bound::Preceding) ||
+                            (start==Bound::Following && (end==Bound::CurrentRow || end==Bound::Preceding)))
+                            throw DbError("42P20","invalid window frame boundary ordering");
                         if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "exclude") {
                             ++pos;
-                            if (pos < tokens.size()) winDef.frameExclusion = SQLParser::toLower(tokens[pos++]);
+                            if(pos>=tokens.size())throw DbError("42601","window frame exclusion is required");
+                            const auto exclusion=SQLParser::toLower(tokens[pos++]);
+                            if(exclusion=="current") {require("row");winDef.frameExclusion="current row";}
+                            else if(exclusion=="no") {require("others");winDef.frameExclusion="no others";}
+                            else if(exclusion=="group" || exclusion=="ties")winDef.frameExclusion=exclusion;
+                            else throw DbError("42601","invalid window frame exclusion");
                         }
                     } else {
                         ++pos;

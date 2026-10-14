@@ -553,8 +553,11 @@ SELECT * FROM cte;
 
 ### 窗口函数
 
-`NTILE`、`LAG/LEAD` 的偏移、窗口排序/分区及部分 frame 边界仍有已复现错误，
-具体 SQL 和修复方法见[审查报告](code-review-2026-10-13.md)。以下示例展示语法，不能据此推导所有输入均正确。
+窗口排序/分区、`NTILE`、`LAG/LEAD` 及 frame 的专项修复和验收范围见
+[逐项修复进度](review-fixes-2026-10-13.md)。支持的 frame 区分 ROWS、GROUPS
+和数值排序键的 RANGE，包含方向边界、合法空区间及 EXCLUDE；带 offset 的
+DATE/INTERVAL RANGE 仍不支持。以下示例展示语法，不代表完整 PostgreSQL
+窗口兼容，详细边界见 [frame 说明](issue-review-r04-window-frame-boundaries.md)。
 
 ```sql
 SELECT NAME, ROW_NUMBER() OVER (ORDER BY SCORE DESC) FROM users;
