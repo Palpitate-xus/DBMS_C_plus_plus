@@ -11,6 +11,20 @@ merely on a generic "continue", and do not broaden it to all DROP, recovery or
 cache correctness work. Existing unfiltered registered regression observations
 may still be recorded; they do not authorize reopening the deferred investigation.
 
+On 2026-10-14 the user also explicitly asked to skip the then-current R65
+mutation execution graph / child-provider lifecycle investigation. It remains
+unresolved. The five original diagnostic modes exited 134/134/134/134/139;
+the partial implementation still failed its acceptance gate. Its five production
+file changes and two new unaccepted native tests were removed from the candidate
+tree after preservation under `/tmp/dbms-review-r46.ifu6SWLp/` as
+`r65-user-deferred.patch` and `r65-user-deferred-tests/`. Earlier build, assertion,
+and stack-trace logs remain there and in
+`/tmp/dbms-review-orphan-controls.vQleNfjM/`. These local evidence paths are not
+portable release artifacts. No R65 product fix is committed or accepted, and a
+generic continuation does not resume this module. Ordinary view replacement and
+other independent SQL correctness issues remain in scope. The original273-item
+ledger and its15 deferred items are unchanged by this separate investigation.
+
 The original273-item ledger explicitly defers15 items: P0-13 (unified permission
 boundaries), STO-08 (TDE), and SEC-01 through SEC-13. These remain
 deferred_by_user, unchecked and outside the repair workflow. Do not implement or
