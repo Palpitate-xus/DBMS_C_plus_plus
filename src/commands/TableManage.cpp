@@ -14928,10 +14928,10 @@ DBStatus StorageEngine::renameDatabase(const std::string& oldName,
     const auto second = databaseTxnLockFor(std::max(oldName, newName));
     std::unique_lock<std::shared_mutex> firstLock(*first, std::try_to_lock);
     if (!firstLock.owns_lock()) return DBStatus::DATABASE_IN_USE;
-    std::unique_lock<std::shared_mutex> secondLock(*second, std::try_to_lock);
-    if (!secondLock.owns_lock()) return DBStatus::DATABASE_IN_USE;
+    std::unique_lock<std::shared_mutex> secondLock(*second, std::defer_lock);
+    if (first != second && !secondLock.try_lock()) return DBStatus::DATABASE_IN_USE;
     const auto oldNameMutex = oldName < newName ? first : second;
-    auto& oldNameLock = oldName < newName ? firstLock : secondLock;
+    auto& oldNameLock = first == second || oldName < newName ? firstLock : secondLock;
     PhysicalCatalogOwnership catalogOwnership(
         transactionContext(), oldNameMutex, oldNameLock);
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
