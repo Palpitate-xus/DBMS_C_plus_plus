@@ -91,6 +91,8 @@
 | R70 | 全文类型的真实目录与协议身份 | 本范围已修复 | tsvector/tsquery及数组补齐真实OID/字段；原67native中64失败、10wire全失败→当前全部0，五完整native/十一完整协议0；不代表全文功能完成，见[记录](issue-review-r70-text-search-type-identities.md) |
 | R71 | BEGIN错误发布其他数据库目录 | 已复现，待修复 | 独立双engine/双DB控制实际IO_ERROR；计划限制到目标缓存，保留目标真实故障和原三个完整generation/snapshot入口，见[记录](issue-review-r71-transaction-catalog-scope.md) |
 | R72 | RENAME对同一canonical锁重复获取 | 已复现，待修复 | symlink别名与源映射同一mutex导致55006，原要求42P04；完整原协议再次复现，见[记录](issue-review-r72-rename-alias-lock.md) |
+| R73 | 纯常量查询的类型绑定/折叠来源 | 已复现，候选待验收 | 原10native中3失败，明确bind/evaluate两阶段55P03；原完整extended协议同点失败，保留真实physical fence，见[记录](issue-review-r73-independent-binding.md) |
+| R74 | 两个owner夹具的bootstrap/COW/fault角色 | 候选待验收 | 不修改产品策略；保留完整字节、当前generation、真实脏冲突、目录58030及健康重试检查，见[记录](issue-review-r74-owner-fixture-generations.md) |
 | O01 | owner健康重试及测试覆盖 | 已修复 | `c9a1e3c3`；原全部owner断言、新真实peer/dirty冲突及10完整native提交前/后通过；Root R14集成fresh58后两完整owner再次通过，见[验证](issue-review-o01-table-owner-health-retry.md) |
 | O02 | EXISTS索引错误的访问计划/断言 | 已修正回归夹具 | 原完整协议exit 1→0，保留六严格XX001，新增精确t/f，完整EXISTS协议/19native通过；未改产品，见[验证](issue-review-o02-index-access-path-expectations.md) |
 | O03 | EXPLAIN JOIN图及过时断言 | 已修复 | 实际执行的source/cache/join/scan图及相关重绑；最终完整60控制、十二native/十协议CLI全过，OFFSET阳性及42601原/PG对照保留，见[验证](issue-review-o03-explain-join-source-graph.md) |
