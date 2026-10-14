@@ -82,7 +82,7 @@
 | R61 | 普通CREATE TABLE初始化与I/O状态 | 已复现，待修复 | 原native真实EIO返回22023；初始化marker刷盘失败仍返回OK且表可见。须检查显式flush与schema写入终态、保留失败清理/冷exec/同名retry；不涉及CTAS或后台checkpoint专项 |
 | R62 | 标量函数的参数签名静态校验 | 已复现，待修复 | 实际PG对upper(1)/upper()/upper(text,text)/abs(text)/length(1)加OVER报42883，原候选返回值；先按声明类型/arity匹配真实routine，不能执行求值选签名。证据scalar-over-signature-discovery.log |
 | R63 | DEFAULT的普通值表达式角色 | 原生对照失败，待核实修复 | 保留历史default_value_role完整断言；当前主分支首个非法DEFAULT控制未按42601拒绝。须区分合法赋值DEFAULT、普通表达式及引用/限定同名列；见orphan-controls的native-controls.log |
-| R64 | 三个旧测试跨DDL保留过期目录引用 | 当前代诊断通过，待加强并提交 | 冻结完整回归alter_inherit、alter_sequence_quoted_options、alter_statistics原断言失败；只将目录读取改为当前代的三完整诊断全0，原断言保留。不得把已退休代当成DDL后的当前目录；见generation-probes.log |
+| R64 | 三个旧测试跨DDL保留过期目录引用 | 已修正夹具，待冻结完整回归终态后集成 | 原三完整驱动失败、未改产品主分支三当前代完整诊断全0；最终三完整native加入旧代lease阳性/当前代原值断言，全0，见[记录](issue-review-r64-catalog-generation-fixtures.md) |
 | R65 | 未执行mutation图的child provider生命周期 | 已复现，待修复 | 当前主分支原完整mutation_child_provider_close首个mode0显示provider_retained=1并失败；关闭应释放运行时捕获而保留真实图/计数，不改变普通cursor可restart语义。证据mutation-provider-probe.log |
 | O01 | owner健康重试及测试覆盖 | 已修复 | `c9a1e3c3`；原全部owner断言、新真实peer/dirty冲突及10完整native提交前/后通过；Root R14集成fresh58后两完整owner再次通过，见[验证](issue-review-o01-table-owner-health-retry.md) |
 | O02 | EXISTS索引错误的访问计划/断言 | 已修正回归夹具 | 原完整协议exit 1→0，保留六严格XX001，新增精确t/f，完整EXISTS协议/19native通过；未改产品，见[验证](issue-review-o02-index-access-path-expectations.md) |

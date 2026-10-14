@@ -33,23 +33,29 @@ int main() {
     assert(g_engine.getSequenceInfo(database, physical, info) == dbms::DBStatus::OK);
     assert(info.ownedByColumn == "id\"quote");
     assert(g_engine.nextval(database, physical) == 23);
-    auto& catalog = g_engine.catalogService().get(database);
-    const auto* ns = catalog.findNamespaceByName("alter space");
+    const auto catalog = [&]() -> dbms::CatalogManager& { return g_engine.catalogService().get(database); };
+    const auto* ns = catalog().findNamespaceByName("alter space");
     assert(ns);
-    const auto* table = catalog.findClassByName("table.dot", ns->oid);
-    const auto* sequence = catalog.findClassByName("renamed seq", ns->oid);
+    const auto* table = catalog().findClassByName("table.dot", ns->oid);
+    const auto* sequence = catalog().findClassByName("renamed seq", ns->oid);
     assert(table && sequence);
     const auto tableOid = table->oid;
     const auto sequenceOid = sequence->oid;
     bool owned = false;
-    for (const auto& dependency : catalog.findRefs(dbms::PgClassOid_Class, tableOid, -1)) {
+    for (const auto& dependency : catalog().findRefs(dbms::PgClassOid_Class, tableOid, -1)) {
         if (dependency.objid == sequenceOid && dependency.refobjsubid == 2 && dependency.deptype == 'a')
             owned = true;
     }
     assert(owned);
+    const auto beforeDetach = g_engine.catalogService().acquire(database);
     assert(!ddl.executeSql("ALTER SEQUENCE \"alter space\".\"renamed seq\" OWNED BY NONE", session));
-    for (const auto& dependency : catalog.findRefs(dbms::PgClassOid_Class, tableOid, -1))
+    for (const auto& dependency : catalog().findRefs(dbms::PgClassOid_Class, tableOid, -1))
         assert(dependency.objid != sequenceOid);
+    bool retiredOwned = false;
+    for (const auto& dependency : beforeDetach->findRefs(dbms::PgClassOid_Class, tableOid, -1))
+        retiredOwned = retiredOwned || (dependency.objid == sequenceOid &&
+            dependency.refobjsubid == 2 && dependency.deptype == 'a');
+    assert(retiredOwned);
     assert(g_engine.dropDatabase(database) == dbms::DBStatus::OK);
     cleanupTestDb("alter_sequence_quoted_options");
     std::cout << "[ALTER SEQUENCE QUOTED OPTIONS] passed" << std::endl;

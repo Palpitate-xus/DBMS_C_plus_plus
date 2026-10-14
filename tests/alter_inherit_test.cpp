@@ -99,10 +99,9 @@ static void test_inherit_execution() {
     assert(g_engine.getInheritedChildren(db, "p1") ==
            std::vector<std::string>{"child"});
     assert(ddl.executeSql("ALTER TABLE child INHERIT p1", s));
-    dbms::CatalogManager& catalog =
-        g_engine.catalogService().get(db);
+    const auto catalog = [&]() -> dbms::CatalogManager& { return g_engine.catalogService().get(db); };
     const auto* parentRelation =
-        catalog.resolveRelation("p1", {"public"});
+        catalog().resolveRelation("p1", {"public"});
     assert(parentRelation && parentRelation->relhassubclass);
     const dbms::Oid parentOid = parentRelation->oid;
     assert(!fs::exists(fs::path(db) / ".child.inherits"));
@@ -115,7 +114,7 @@ static void test_inherit_execution() {
 
     assert(!ddl.executeSql("ALTER TABLE child NO INHERIT p1", s));
     assert(g_engine.getInheritedChildren(db, "p1").empty());
-    assert(!catalog.findClass(parentOid)->relhassubclass);
+    assert(!catalog().findClass(parentOid)->relhassubclass);
     assert(ddl.executeSql("ALTER TABLE child NO INHERIT p1", s));
     assert(ddl.executeSql("ALTER TABLE child INHERIT missing_parent", s));
     assert(ddl.executeSql("ALTER TABLE missing_child INHERIT p1", s));
@@ -244,9 +243,9 @@ static void test_inherited_column_catalog_provenance() {
         "INHERITS (parent_a, parent_a)", s));
     assert(!g_engine.tableExists(db, "duplicate_parent"));
 
-    dbms::CatalogManager& catalog = g_engine.catalogService().get(db);
+    const auto catalog = [&]() -> dbms::CatalogManager& { return g_engine.catalogService().get(db); };
     const auto* childRelation =
-        catalog.resolveRelation("child", {"public"});
+        catalog().resolveRelation("child", {"public"});
     assert(childRelation);
     const dbms::Oid childOid = childRelation->oid;
     const auto assertProvenance = [&](const std::string& column,
@@ -307,22 +306,26 @@ static void test_drop_removes_inheritance_edges() {
     assert(!ddl.executeSql("CREATE TABLE parent (id INT)", s));
     assert(!ddl.executeSql(
         "CREATE TABLE child (payload INT) INHERITS (parent)", s));
-    dbms::CatalogManager& catalog =
-        g_engine.catalogService().get(db);
+    const auto catalog = [&]() -> dbms::CatalogManager& { return g_engine.catalogService().get(db); };
     const auto* parentRelation =
-        catalog.resolveRelation("parent", {"public"});
+        catalog().resolveRelation("parent", {"public"});
     assert(parentRelation && parentRelation->relhassubclass);
     const dbms::Oid parentOid = parentRelation->oid;
+    const auto beforeDrop = g_engine.catalogService().acquire(db);
     assert(!ddl.executeSql("DROP TABLE child", s));
     assert(g_engine.getInheritedChildren(db, "parent").empty());
-    assert(!catalog.findClass(parentOid)->relhassubclass);
+    assert(!catalog().findClass(parentOid)->relhassubclass);
+    // An owned retired generation stays valid, but is not the post-DDL
+    // catalog. Keep that distinction explicit instead of dereferencing a
+    // borrowed model across its replacing transaction.
+    assert(beforeDrop->findClass(parentOid)->relhassubclass);
 
     // Reusing the child's name without INHERITS must not resurrect the old
     // edge. Dropping the parent must likewise detach a surviving child.
     assert(!ddl.executeSql("CREATE TABLE child (id INT, payload INT)", s));
     assert(g_engine.getInheritedChildren(db, "parent").empty());
     assert(!ddl.executeSql("ALTER TABLE child INHERIT parent", s));
-    assert(catalog.findClass(parentOid)->relhassubclass);
+    assert(catalog().findClass(parentOid)->relhassubclass);
     assert(ddl.executeSql("DROP TABLE parent", s));
     assert(ddl.executeSql("DROP TABLE parent CASCADE", s));
     assert(g_engine.getInheritedChildren(db, "parent") ==

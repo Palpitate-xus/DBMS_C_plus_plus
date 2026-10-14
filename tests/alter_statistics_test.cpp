@@ -67,24 +67,27 @@ static void test_statistics_persistence() {
 
     assert(!ddl.executeSql("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR(50), val INT)", s));
 
-    dbms::CatalogManager& initial = g_engine.catalogService().get(db);
-    const auto* relation = initial.resolveRelation("t", {"public"});
+    const auto initial = [&]() -> dbms::CatalogManager& { return g_engine.catalogService().get(db); };
+    const auto* relation = initial().resolveRelation("t", {"public"});
     assert(relation != nullptr);
     const dbms::Oid relationOid = relation->oid;
+    const auto beforeChanges = g_engine.catalogService().acquire(db);
 
     assert(!ddl.executeSql(
         "ALTER TABLE t ALTER COLUMN name SET STATISTICS 500", s));
     auto opts = g_engine.getStorageParams(db, "t");
     assert(opts["column_statistics:name"] == "500");
-    auto* attribute = initial.findAttribute(relationOid, "name");
+    auto* attribute = initial().findAttribute(relationOid, "name");
     assert(attribute != nullptr && attribute->attstattarget == 500);
+    const auto* originalAttribute = beforeChanges->findAttribute(relationOid, "name");
+    assert(originalAttribute && originalAttribute->attstattarget == -1);
 
     assert(!ddl.executeSql(
         "ALTER TABLE t ALTER COLUMN val SET STATISTICS 1000", s));
     opts = g_engine.getStorageParams(db, "t");
     assert(opts["column_statistics:name"] == "500");
     assert(opts["column_statistics:val"] == "1000");
-    attribute = initial.findAttribute(relationOid, "val");
+    attribute = initial().findAttribute(relationOid, "val");
     assert(attribute != nullptr && attribute->attstattarget == 1000);
 
     // -1 removes the private override and restores pg_attribute's default.
@@ -93,7 +96,7 @@ static void test_statistics_persistence() {
     opts = g_engine.getStorageParams(db, "t");
     assert(opts.count("column_statistics:name") == 0);
     assert(opts["column_statistics:val"] == "1000");
-    attribute = initial.findAttribute(relationOid, "name");
+    attribute = initial().findAttribute(relationOid, "name");
     assert(attribute != nullptr && attribute->attstattarget == -1);
 
     // A misspelled column must fail without leaving an orphan option behind.
@@ -103,10 +106,10 @@ static void test_statistics_persistence() {
     assert(opts.count("column_statistics:missing") == 0);
 
     g_engine.catalogService().evict(db);
-    dbms::CatalogManager& reloaded = g_engine.catalogService().get(db);
-    attribute = reloaded.findAttribute(relationOid, "name");
+    const auto reloaded = [&]() -> dbms::CatalogManager& { return g_engine.catalogService().get(db); };
+    attribute = reloaded().findAttribute(relationOid, "name");
     assert(attribute != nullptr && attribute->attstattarget == -1);
-    attribute = reloaded.findAttribute(relationOid, "val");
+    attribute = reloaded().findAttribute(relationOid, "val");
     assert(attribute != nullptr && attribute->attstattarget == 1000);
 
     g_engine.catalogService().evict(db);
