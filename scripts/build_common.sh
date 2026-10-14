@@ -67,6 +67,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/bit_integer_cast_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/bit_integer_cast_descriptor_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/bit_type_modifier_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/insert_select_interval_context_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/matview_insert_source_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/logical_tuple_encoding_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/unordered_window_protocol_e2e_test.py)

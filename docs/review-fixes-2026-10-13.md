@@ -71,7 +71,7 @@
 | R50 | BIT/VARBIT 的协议及目录长度描述符 | 已修复，待主分支集成 | 原新60全部失败→PG/候选全0；原完整172、42native及七完整native/八完整协议全0，保留未通过邻居及全部known-gap断言，见[验证](issue-review-r50-bit-type-modifiers.md) |
 | R51 | recovery graph 邻居的 DROP DATABASE 观察 | 独立复验通过，历史原因未定 | 原驱动一次失败保留；R47固定生产代独立诊断及5+20次新隔离cwd全0，未改原断言，待主分支组合复验 |
 | R52 | 原生测试终态输出换行 | 已修正夹具，待主分支集成 | 使用真实换行分隔测试输出与PASSED marker；完整原驱动重新编译执行0，原完整日志及严格解析遗漏保留，见下方复验记录 |
-| R53 | INSERT SELECT 的INTERVAL字段修饰符上下文 | 待修复 | 本轮完整interval_column_modifier协议27控制中1失败：来源UNKNOWN文本'4'被先解读成秒，YEAR/DAY TO MINUTE列得到0而非4年/4分钟 |
+| R53 | INSERT SELECT 的INTERVAL字段修饰符上下文 | 已修复，待主分支集成 | 原27中1失败/新133中9失败→PG/候选全0，78纯binder控制及六完整native/七完整协议全0；标量与数组解析阶段分开，见[验证](issue-review-r53-insert-interval-context.md) |
 | R54 | 聚合表达式中未提供参数的错误优先级 | 待修复 | 原aggregate_expression_scope协议在sum($1)+1返回42883(text+integer)，原断言要求42P02；待独立实际参考核验 |
 | R55 | BYTEA LIKE 的显式pattern类型 | 待修复 | 原legacy_sql_pattern_consumers完整协议中，b LIKE '__'::bytea返回42883，预期匹配id 1/2/7；保留原SQL，待实际参考及绑定路径核验 |
 | R56 | ARRAY_AGG 窗口函数的解析/绑定 | 待修复 | 原window_type完整协议中array_agg(v) OVER报42883；其他窗口实现不代表该聚合已覆盖，待参考和独立复现 |

@@ -17,6 +17,10 @@ INSERT来源可交给既有WITH查询parser处理，ON CONFLICT/RETURNING仍归I
 WITH必须保留合法AS(query)及实际主语句；不能将DML主语句当成SELECT来源。
 实际AST/执行控制及剩余边界见[R49](../../docs/issue-review-r49-materialized-insert-sources.md)。
 
+INSERT SELECT 的直接 UNKNOWN 标量 INTERVAL 输出在第一次输入解析前保留目标
+范围/精度，不能先按秒解析再截断；已类型化来源和数组输入阶段不被重写。
+13种范围、NULL、无行/派生来源及数组差异见[R53](../../docs/issue-review-r53-insert-interval-context.md)。
+
 后续迁移应让各执行消费者使用同一份完整绑定 AST，保留类型、SQL NULL、名字作用域和错误阶段；分析失败时不得进入写入路径。先增加能复现当前错误的 native/协议控制，再逐项修复。
 
 产品接口与项目扩展的区分见[兼容性契约](../../docs/compatibility-contract.md)，完整功能状态见[总清单](../../docs/postgresql-18-gap-audit.md)。

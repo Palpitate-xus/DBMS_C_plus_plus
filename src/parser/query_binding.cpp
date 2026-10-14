@@ -186,7 +186,8 @@ public:
     }
 
     void coerceCaseInput(ExprPtr& input, const std::string& sourceType,
-                         const std::string& targetType) {
+                         const std::string& targetType,
+                         const std::vector<std::string>& typeMods = {}) {
         if (!input) {
             auto null = std::make_unique<LiteralExpr>();
             null->value = "null";
@@ -195,6 +196,7 @@ public:
         if (common_type_detail::canonical(sourceType) == targetType) return;
         auto cast = std::make_unique<CastExpr>();
         cast->typeName = targetType;
+        cast->typeMods = typeMods;
         cast->implicit = true;
         cast->sourceBegin = input->sourceBegin; cast->sourceEnd = input->sourceEnd;
         cast->operand = std::move(input);
@@ -1458,7 +1460,8 @@ public:
         result.statementOutputs[&node] = columns;
         return columns;
     }
-    void coerceSetUnknown(Stmt* statement,size_t ordinal,const std::string& targetType) {
+    void coerceSetUnknown(Stmt* statement,size_t ordinal,const std::string& targetType,
+                          int32_t targetTypeMod = -1) {
         auto* select=dynamic_cast<SelectStmt*>(statement);
         if(!select)throw DbError("XX000","set operand lost its prepared SELECT");
         auto bindings=result.projectionBindings.find(select);
@@ -1469,7 +1472,13 @@ public:
             [&](const auto& value){return value.expr.get()==original;});
         if(item==select->selectList.end() || bindings->second[ordinal].column)
             throw DbError("XX000","unknown set output has no direct value site");
-        coerceCaseInput(item->expr,"unknown",targetType);
+        // Scalar UNKNOWN INTERVAL input is parsed in the target's field
+        // range: '4' can mean years or minutes, not necessarily seconds.
+        // Array input deliberately keeps its generic element-input stage;
+        // PostgreSQL applies element typmods only after that parsing stage.
+        const bool interval = common_type_detail::canonical(targetType) == "interval";
+        coerceCaseInput(item->expr,"unknown",targetType,
+            interval ? interval_type_detail::unpack(targetTypeMod) : std::vector<std::string>{});
         // Replacing the genuine value root must preserve expanded-output
         // identity. Source bytes/parameter uses and output labels stay put.
         for(auto& binding:bindings->second)
@@ -1479,7 +1488,7 @@ public:
         if(auto output=result.statementOutputs.find(statement);output!=result.statementOutputs.end()) {
             output->second.at(ordinal).type=targetType;
             output->second.at(ordinal).typeOid=0;
-            output->second.at(ordinal).typeMod=-1;
+            output->second.at(ordinal).typeMod=interval ? targetTypeMod : -1;
         }
     }
     QueryRowDescriptor setColumns(SelectStmt& select,QueryRowDescriptor left,QueryRowDescriptor right) {
@@ -1809,7 +1818,8 @@ public:
                 if (directValues)
                     for (size_t i = 0; i < inputs.size(); ++i)
                         if (inputs[i].type == "unknown")
-                            coerceSetUnknown(insert->selectSource.get(), i, assignments[i].type);
+                            coerceSetUnknown(insert->selectSource.get(), i, assignments[i].type,
+                                             assignments[i].typeMod);
             }
             auto scopes = outer; scopes.insert(scopes.begin(), {target});
             auto conflictScopes = scopes;
