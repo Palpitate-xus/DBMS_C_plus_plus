@@ -1,5 +1,11 @@
 # 2026-10-13 审查与验证入口
 
+2026-10-14：R13逻辑预览原native64/61fail、wire53/50fail已保留；Root最终
+77native/53wire及十二完整native/七完整协议全0。真实fresh58后针对虚拟列
+再编译TableManage，全部58receipts与终态输入一致。逐列版本化JSON保存
+声明类型、NULL、空串和分隔符；不冒PG真实复制或全注册绿。
+R04/O03/O05仍开放，用户已跳过模块不重开；总273状态不虚改完成。
+
 本轮按用户要求进行全仓库审查、复现和文档整理，结果与逐项修复方法见[审查报告](code-review-2026-10-13.md)，文件覆盖见[文档清单](documentation-inventory.md)。
 下方批次中的“当前”“正在运行”和 PASS 数均属于对应记录日期。此前 Root 60 native / 46 wire 验证已经终止：60/60、45/46 通过，唯一失败为 ALTER ARRAY 超时；不能继续标成运行中或全绿。
 原 273 项状态仍为 22 complete、166 partial、70 unverified、15 deferred_by_user；CTAS／后台 checkpoint 另按用户要求暂缓，详见[范围说明](deferred-scope.md)。

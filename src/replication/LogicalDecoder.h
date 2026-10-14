@@ -6,6 +6,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace dbms {
@@ -28,8 +29,10 @@ struct LogicalChange {
     enum class Op { Insert, Update, Delete, Truncate };
     Op op = Op::Insert;
     std::string table;
-    // Row images as bar-separated column values (the storage layer's
-    // stripped row text format).
+    // New storage captures use DBMS_TUPLE_V1 followed by a JSON array of
+    // [declared-storage-type, nullable-text-value] cells in schema order.
+    // Old opaque row images remain pass-through: their missing boundaries
+    // and NULL information cannot be recovered after the fact.
     std::string oldRow;
     std::string newRow;
     uint64_t xid = 0;
@@ -45,6 +48,9 @@ struct LogicalChangeBatch {
 
 class LogicalDecoder {
 public:
+    using Cell = std::pair<std::string, std::optional<std::string>>;
+    // Lossless, printable row encoding; no SQL evaluation or type guessing.
+    static std::string encodeRow(const std::vector<Cell>& cells);
     // Render a committed batch with the named output plugin.
     // Returns false for unknown plugins.
     static bool format(const std::string& plugin, const LogicalChangeBatch& batch,

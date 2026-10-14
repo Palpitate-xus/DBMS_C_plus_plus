@@ -1,6 +1,6 @@
 # 全部文档检查清单
 
-审查输入和发现见[代码审查报告](code-review-2026-10-13.md)。基准提交 `a502ffa3` 包含 412 份已跟踪 Markdown；首次审查含新增报告共 417 份。当前本轮修复后逐文件复查 465 份 Markdown，下表覆盖全部；历史数量不改写。
+审查输入和发现见[代码审查报告](code-review-2026-10-13.md)。基准提交 `a502ffa3` 包含 412 份已跟踪 Markdown；首次审查含新增报告共 417 份。当前本轮修复后逐文件复查 466 份 Markdown，下表覆盖全部；历史数量不改写。
 
 检查逐文件读取 UTF-8 内容并验证 Markdown 内联链接的本地文件目标是否存在。它不验证外部网址、锚点、所有引用式链接，也不证明文中每个历史技术结论在当前版本成立。
 使用手册、部署、命令参考、模块 README 和状态入口另作人工一致性核查；`issue-*.md` 保留原始提交和运行证据，其结论须按对应输入读取。
@@ -323,6 +323,7 @@
 | [docs/issue-review-r10-pool-database-capacity.md](issue-review-r10-pool-database-capacity.md) | 历史问题证据 | 通过 |
 | [docs/issue-review-r11-window-exact-accumulator.md](issue-review-r11-window-exact-accumulator.md) | 历史问题证据 | 通过 |
 | [docs/issue-review-r12-test-registration.md](issue-review-r12-test-registration.md) | 历史问题证据 | 通过 |
+| [docs/issue-review-r13-logical-tuple-encoding.md](issue-review-r13-logical-tuple-encoding.md) | 历史问题证据 | 通过 |
 | [docs/issue-review-r14-publication-read-errors.md](issue-review-r14-publication-read-errors.md) | 历史问题证据 | 通过 |
 | [docs/issue-review-r16-catalog-complete-read.md](issue-review-r16-catalog-complete-read.md) | 历史问题证据 | 通过 |
 | [docs/issue-review-r16-optional-catalog-directory.md](issue-review-r16-optional-catalog-directory.md) | 历史问题证据 | 通过 |

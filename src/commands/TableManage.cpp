@@ -10288,6 +10288,8 @@ std::string StorageEngine::extractColumnValue(const std::string& rowBuffer,
         std::map<std::string, std::string> rowValues;
         std::set<std::string> nullColumns;
         const bool hasBoundNullMetadata =
+            (g_bufferedConditionSchema == &tbl && g_bufferedConditionNulls &&
+             g_bufferedConditionNulls->size() == tbl.len) ||
             (g_nullRowEngine && g_nullRowRid >= 0 &&
              tbl.tablename == g_nullRowTable) ||
             (g_condNullEngine && g_condNullRid >= 0 &&
@@ -26354,17 +26356,22 @@ DBStatus StorageEngine::insertInternal(
     if (captureLogicalInsert) {
         auto& txn = transactionContext();
         if (txn.inTransaction) {
-            // Render every column in text form so subscribers see the same
-            // row image regardless of physical storage format.
-            std::string rendered;
+            // Retain the row's own NULL bitmap, including dependencies of
+            // virtual generated columns; text bytes never imply SQL NULL.
+            std::vector<bool> nulls(tbl.len, false);
+            for (const size_t column : physicalNullColumns) nulls[column] = true;
+            BufferedNullRowBinding binding(tbl, nulls);
+            std::vector<LogicalDecoder::Cell> cells;
+            cells.reserve(tbl.len);
             for (size_t i = 0; i < tbl.len; ++i) {
-                if (i) rendered += '|';
-                if (!insertedColumnIsNull(i)) {
-                    rendered += extractColumnValue(
-                        strippedRow, tbl, i, dbname, true);
-                }
+                bool isNull = false;
+                const auto value = extractColumnValue(
+                    strippedRow, tbl, i, dbname, true, &isNull);
+                cells.emplace_back(tbl.cols[i].dataType,
+                    isNull ? std::nullopt : std::optional<std::string>(value));
             }
-            txn.txnLogicalChanges.push_back({tablename, 0, "", rendered});
+            txn.txnLogicalChanges.push_back(
+                {tablename, 0, "", LogicalDecoder::encodeRow(cells)});
         }
     }
     lockManager_.unlock(tablename);
@@ -28420,12 +28427,18 @@ DBStatus StorageEngine::removeInternal(
             for (int64_t rid : toDelete) {
                 if (di < logicalRowsToDelete.size() &&
                     !logicalRowsToDelete[di].empty()) {
-                    std::string rendered;
+                    BufferedNullRowBinding binding(tbl, nullColumnsToDelete[di]);
+                    std::vector<LogicalDecoder::Cell> cells;
+                    cells.reserve(tbl.len);
                     for (size_t i = 0; i < tbl.len; ++i) {
-                        if (i) rendered += '|';
-                        rendered += deletedColumnValue(di, i, true);
+                        bool isNull = false;
+                        const auto value = extractColumnValue(
+                            logicalRowsToDelete[di], tbl, i, dbname, true, &isNull);
+                        cells.emplace_back(tbl.cols[i].dataType,
+                            isNull ? std::nullopt : std::optional<std::string>(value));
                     }
-                    txn.txnLogicalChanges.push_back({tablename, 2, rendered, ""});
+                    txn.txnLogicalChanges.push_back(
+                        {tablename, 2, LogicalDecoder::encodeRow(cells), ""});
                 }
                 ++di;
             }
@@ -31266,19 +31279,28 @@ DBStatus StorageEngine::updateInternal(
         if (captureLogicalUpdate) {
             auto& txn = transactionContext();
             if (txn.inTransaction) {
-                std::string oldRendered, newRendered;
+                std::vector<LogicalDecoder::Cell> oldCells, newCells;
+                oldCells.reserve(tbl.len); newCells.reserve(tbl.len);
                 for (size_t i = 0; i < tbl.len; ++i) {
-                    if (i) { oldRendered += '|'; newRendered += '|'; }
-                    oldRendered += oldLogicalValues[tbl.cols[i].dataName];
-                    if (!newColumnIsNull(i)) {
-                        newRendered += withNewRowNulls([&] {
-                            return extractColumnValue(
-                                strippedNewRow, tbl, i, dbname, true);
-                        });
+                    bool oldIsNull = false, newIsNull = false;
+                    std::string oldValue;
+                    {
+                        BufferedNullRowBinding binding(tbl, oldNullColumns);
+                        oldValue = extractColumnValue(
+                            resolvedOldRow, tbl, i, dbname, true, &oldIsNull);
                     }
+                    const auto newValue = withNewRowNulls([&] {
+                        return extractColumnValue(
+                            strippedNewRow, tbl, i, dbname, true, &newIsNull);
+                    });
+                    oldCells.emplace_back(tbl.cols[i].dataType,
+                        oldIsNull ? std::nullopt : std::optional<std::string>(oldValue));
+                    newCells.emplace_back(tbl.cols[i].dataType,
+                        newIsNull ? std::nullopt : std::optional<std::string>(newValue));
                 }
                 txn.txnLogicalChanges.push_back(
-                    {tablename, 1, oldRendered, newRendered});
+                    {tablename, 1, LogicalDecoder::encodeRow(oldCells),
+                        LogicalDecoder::encodeRow(newCells)});
             }
         }
 

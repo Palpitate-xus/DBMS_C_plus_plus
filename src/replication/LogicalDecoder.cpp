@@ -15,6 +15,39 @@ namespace fs = std::filesystem;
 // LogicalDecoder — output plugins
 // ----------------------------------------------------------------------------
 
+std::string LogicalDecoder::encodeRow(const std::vector<Cell>& cells) {
+    std::string out = "DBMS_TUPLE_V1:[";
+    const auto quote = [&](const std::string& value) {
+        static const char hex[] = "0123456789abcdef";
+        out += '"';
+        for (const unsigned char character : value) {
+            switch (character) {
+                case '"': out += "\\\""; break;
+                case '\\': out += "\\\\"; break;
+                case '\n': out += "\\n"; break;
+                case '\r': out += "\\r"; break;
+                case '\t': out += "\\t"; break;
+                case '\b': out += "\\b"; break;
+                case '\f': out += "\\f"; break;
+                default:
+                    if (character < 0x20) {
+                        out += "\\u00";
+                        out += hex[character >> 4]; out += hex[character & 15];
+                    } else out += static_cast<char>(character);
+            }
+        }
+        out += '"';
+    };
+    for (size_t i = 0; i < cells.size(); ++i) {
+        if (i) out += ',';
+        out += '['; quote(cells[i].first); out += ',';
+        if (cells[i].second) quote(*cells[i].second);
+        else out += "null";
+        out += ']';
+    }
+    return out + ']';
+}
+
 std::vector<std::string> LogicalDecoder::availablePlugins() {
     return {"dbms_pgoutput_preview", "dbms_test_decoding"};
 }
@@ -50,8 +83,8 @@ bool LogicalDecoder::format(const std::string& plugin, const LogicalChangeBatch&
     if (plugin == "dbms_pgoutput_preview") {
         // Compact binary-ish stream: message framing with a type byte.
         // 'B' begin(xid), 'R' relation(table), 'I'/'U'/'D' change, 'C'
-        // commit(lsn).  Values are length-prefixed; rows keep the storage
-        // layer's bar-separated text so consumers need no schema decode.
+        // commit(lsn). Whole row images are length-prefixed, with their own
+        // versioned nullable-cell encoding. Old opaque images pass through.
         auto putU64 = [&](uint64_t v) {
             for (int i = 0; i < 8; ++i) os.put(static_cast<char>((v >> (8 * i)) & 0xFF));
         };

@@ -520,7 +520,8 @@ static void test_end_to_end_streaming() {
         "e2e_slot", peek.nextLsn, 100);
     assert(autocommitPeek.batches.size() == 1);
     assert(autocommitPeek.batches[0].changes.size() == 1);
-    assert(autocommitPeek.batches[0].changes[0].newRow == "4|four");
+    assert(autocommitPeek.batches[0].changes[0].newRow ==
+           "DBMS_TUPLE_V1:[[\"int\",\"4\"],[\"varchar\",\"four\"]]");
     LogicalChangeStore::instance().acknowledge(
         "e2e_slot", autocommitPeek.nextLsn);
     assert(repl.advanceSlotLsn(
@@ -547,7 +548,8 @@ static void test_end_to_end_streaming() {
     assert(filteredPeek.batches[0].changes.size() == 1);
     assert(filteredPeek.batches[0].changes[0].op ==
            LogicalChange::Op::Insert);
-    assert(filteredPeek.batches[0].changes[0].newRow == "5|five");
+    assert(filteredPeek.batches[0].changes[0].newRow ==
+           "DBMS_TUPLE_V1:[[\"int\",\"5\"],[\"varchar\",\"five\"]]");
     LogicalChangeStore::instance().acknowledge(
         "e2e_slot", filteredPeek.nextLsn);
     assert(repl.advanceSlotLsn(
@@ -665,7 +667,8 @@ static void test_prepared_transaction_streaming() {
     assert(peek.batches[0].changes.size() == 1);
     assert(peek.batches[0].changes[0].op == LogicalChange::Op::Insert);
     assert(peek.batches[0].changes[0].table == table.tablename);
-    assert(peek.batches[0].changes[0].newRow == "1|prepared value");
+    assert(peek.batches[0].changes[0].newRow ==
+           "DBMS_TUPLE_V1:[[\"int\",\"1\"],[\"varchar\",\"prepared value\"]]");
     changes.acknowledge(slotName, peek.nextLsn);
     assert(changes.depth(slotName) == 0);
 
