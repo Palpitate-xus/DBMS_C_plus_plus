@@ -5,6 +5,21 @@
 原 273 项状态仍为 22 complete、166 partial、70 unverified、15 deferred_by_user；CTAS／后台 checkpoint 另按用户要求暂缓，详见[范围说明](deferred-scope.md)。
 本轮新运行的终态以审查报告为准。保留独立本地 commit，不 push，Actions 保持禁用。
 
+## 2026-10-14后续执行计划
+
+本次跳过R65，保留未验收补丁和失败证据，不合入其产品代码。
+R67普通视图替换以ca554c2f合入master，Root八完整native/九完整协议（含新80检查）
+全0；R69短会话超时夹具以a3b3b4b9/d52779a0独立提交，Root完整PG、真实取消
+协议和CLI串行全0。记录见[逐项修复进度](review-fixes-2026-10-13.md)。
+
+后续按顺序处理[R62标量签名](issue-review-r62-scalar-signatures.md)、
+[R68 ABS范围及常量分析](issue-review-r68-abs-integer-bounds.md)，再继续
+[冻结18d85f4e全量记录](issue-full-registered-18d85f4e.md)尚未闭环的目录guard、
+跨engine事务启动、snapshot及其他普通失败，逐根因复现、修复、完整门禁、独立commit。
+按[准确暂缓范围](deferred-scope.md)保持已跳过模块，不自动扩展到普通SQL或存储错误。
+新组合需要重新运行全注册入口；本轮定向通过不能完成原273总账或把历史FAILED改绿。
+总目标尚未全部完成；各原partial/unverified与15项原始用户暂缓状态保持不变。
+
 以下为历史执行记录。
 
 2026-10-06 PL scalar/native follow-ups 两项独立source/test commits：`b6683521` 修复真实native SELECT/WHERE/ORDER/INTO表达式错误从22012/22P02/22003被吞为XX000；`8cd860e7` 用canonical AST位置绑定修复quoted "X"/x变量值/NULL/type混淆，保留BIGINT宽度、session特殊值、EXTRACT语法和显式trigger binding，并拒绝不存在的变量/qualifier/function。旧native/wire实际红、独立development新storage/stubs的3native及2protocol绿均有记录。ROOT正式O2只重编变更storage对象，其他54对象严格复核匹配，normal/repeat build、55/55签名及binary stamp通过；最终matching O2的6native及7项专项/相邻protocol通过。完整默认协议本follow-up未重跑；前一615/7bc组合在main3170 INSERT kw_joined timeout exit1，之前三次完整超时也保留，不能宣称完整protocol/suite通过。6项ledger unit/3项文档版本兼容检查通过，require-complete仍exit1。见 `docs/issue-plpgsql-scalar-binding-and-native-errors.md`。query内variable/source-column歧义、函数错误后写入不原子及statement-image写放大仍独立未完成；SQL-04/FUNC-05/06仍partial。总账273保持22 complete、166 partial、70 unverified、15 deferred_by_user；未push、Actions禁用、用户安全/TDE跳过项保持deferred。

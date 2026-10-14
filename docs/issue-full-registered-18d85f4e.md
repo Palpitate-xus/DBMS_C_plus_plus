@@ -79,3 +79,11 @@ R66集成后另跑原完整snapshot_exporter_visibility_test：第一组commit�
 foreign.beginTransaction失败（exit134）。因此该完整驱动仍未通过，不能仅凭
 后台异常边界修复将其清零；继续分离事务ownership失败的实际原因。保留
 root-r66-snapshot-neighbor.log及独立gate目录，不覆盖原冻结全量失败。
+
+R67以ca554c2f修复普通视图替换描述符合约，Root实际O2重编后八完整native及
+九完整协议全0，包含新80检查；见[视图记录](issue-review-r67-view-replacement-contract.md)。
+额外完整PG协议曾因参数探针遗留的短会话超时失败，R69在保留全部原断言后
+单独修正夹具，Root a3b3b4b9/d52779a0；完整PG、真实取消协议和CLI在Root
+串行全0，见[超时夹具记录](issue-review-r69-protocol-timeout-fixture.md)。
+这些额外运行不更改本报告原1339入口、1319 PASSED（含TLS skip）及20 FAILED，
+也不把原冻结全量中本来通过的PG驱动改成失败。新组合全注册回归仍需另行运行。

@@ -50,3 +50,14 @@ root-r69-cancellation-protocol-logs/保留；批次随之停止，CLI并未运�
 全部0，r69-all-probes-serial.log及逐项日志，前后生产输入/binary及58份receipt
 一致。后续还需主分支同样串行验收，不将此前Root失败改为通过，也不宣称
 所有负载下的产品时序问题已消失。
+
+## 主分支终态
+
+补齐候选2a7c8dee以d52779a0独立cherry-pick -x到master，保留前置a3b3b4b9。
+Root原完整PG协议、原真实statement_timeout协议及原CLI超时驱动按原阈值串行
+全部退出0：root-r69-all-probes-serial.log及root-r69-all-probes-serial-logs/。
+没有修改取消驱动或重试其单个SQL；每个完整驱动只按本轮列表执行一次。
+前后生产输入、binary、全部58份receipt一致，Root生产binary保持
+aeea4c6411a4fb3686781e31043f87c9dffc81b41c7fe593b579981303e92763。
+此项只修正夹具参数范围，不代表所有运行时性能/时序问题已修复；原失败、
+原冻结全量结果和原273项功能状态均保留。未push，Actions继续禁用。

@@ -88,5 +88,9 @@ Root原未改驱动独立复跑也在相同role_rows断言失败，root-r67-full
 保留。恢复会话参数的夹具候选已完整通过，见[R69](issue-review-r69-protocol-timeout-fixture.md)；
 上述对照不能冒充冻结全量全部通过，也不改写原驱动失败历史。
 
+R69补齐后，同一Root生产二进制上的完整PG协议、真实取消协议及CLI串行3项
+全部0，root-r69-all-probes-serial.log；只是附加当前组合证据，不替代全部
+注册入口再次完整运行。
+
 本项仅覆盖普通视图既有列名、OID类型、typmod及列前缀兼容性，不宣称完整view
 DDL、collation传播、依赖图、所有更新规则或权限语义已经完成。用户暂缓专项不重启。
