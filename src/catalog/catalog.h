@@ -38,6 +38,9 @@ class CatalogManager {
 public:
     // dbPath: 数据库数据目录（如 data/base/mydb/）
     explicit CatalogManager(const std::string& dbPath);
+    // Service-owned generations publish through their checked database
+    // owner, never from an arbitrary last lease's destructor.
+    CatalogManager(const std::string& dbPath, bool persistOnDestruction);
     ~CatalogManager();
     struct MetadataSnapshot {
         std::vector<PgNamespaceRow> namespaces;
@@ -197,6 +200,11 @@ public:
     // =====================================================================
     bool persistAll();
     void loadAll();
+    enum class PublicationState { Current, CleanPeerChange, Conflict };
+    // Pure serialized-model/generation check. This does not reload rows or
+    // publish files; even raw row edits participate in the dirty comparison.
+    PublicationState publicationState() const;
+    bool hasUnpublishedChanges() const;
 
     // =====================================================================
     // 依赖追踪：CASCADE / RESTRICT 删除计划
@@ -272,6 +280,7 @@ private:
     struct ReadOnlyTag {};
     CatalogManager(const std::string& dbPath, ReadOnlyTag);
     std::string dbPath_;
+    bool persistOnDestruction_ = true;
     std::unique_ptr<OidGenerator> oidGen_;
     mutable std::mutex mutex_;
     // Serialized baselines and receipts, not setter-only dirty flags. The

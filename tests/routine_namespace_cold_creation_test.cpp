@@ -37,6 +37,9 @@ int main() {
     cleanupTestDb(emptyName); assert(g_engine.createDatabase(emptyDb)==DBStatus::OK);
     session.currentDB=emptyDb;
     assert(g_engine.dropSchema(emptyDb,"public",false)==DBStatus::OK);
+    // Native DROP now owns catalog publication. Explicitly restore the cold
+    // fixture precondition; CREATE validation must still not populate it.
+    g_engine.catalogService().evict(emptyDb);
     assert(!g_engine.catalogService().has(emptyDb));
     for(const auto& spelling:{std::string{"cold_rejected"},std::string{"public.cold_rejected"}}) {
         error.clear();

@@ -14,7 +14,22 @@
 
 ## 已知边界
 
-[代码审查报告](../../docs/code-review-2026-10-13.md)记录了损坏 pg_class/pg_attribute 行可能被跳过、内部行指针跨锁存活、owner 健康重试失败及相关测试覆盖限制。
-这些状态仍需逐项修复和验证。普通 TEMP 启动恢复、DDL 回滚恢复图像问题见同一报告；CTAS／后台 checkpoint 专项仍按用户要求暂缓。
+[原代码审查报告](../../docs/code-review-2026-10-13.md)保留了损坏目录行、内部行指针及 owner 重试的原始失败。当前逐项状态以[修复清单](../../docs/review-fixes-2026-10-13.md)为准，不能把历史问题都当作当前未修复，或把局部修复当作整个目录族完成。CTAS／后台 checkpoint 专项仍按用户要求暂缓。
+
+## Namespace 与目录对象生命周期
+
+原生及 SQL CREATE/DROP SCHEMA 共用实际 engine/database 的 namespace owner，
+包含目录身份、依赖和 statement rollback；`createTable` 的低层 storage-only
+合约不因此改变。`public` 是可删除、可重新创建的 namespace，不是永远存在的
+隐式别名。物理 marker 原语不提供独立的目录/依赖原子性。
+
+`get()` 返回借用引用，不可跨 refresh/eviction/rollback 保留并当作 live model。
+需要保留行或引用时使用 `acquire()` 的 generation lease；旧 lease 保持旧对象，
+不会自动变成新提交的视图。发布是显式检查的操作，不从 retired generation 的
+析构函数回写。干净 peer 更新换代，未发布修改冲突不能被静默覆盖。
+
+父事务拥有 DDL 物理图像时，已有 reader 使用 committed generation；无可用
+generation 的冷 reader fail closed（55P03），不等于 PostgreSQL 完整目录 MVCC。
+已验证范围和中间失败见 [R46](../../docs/issue-review-r46-native-schema-ownership.md)。
 
 后续重点是完整字段校验、事务化目录与存储发布、值快照或明确的对象生命周期、依赖/回滚和真实错误传播。类型、对象及权限的完整范围见[总清单](../../docs/postgresql-18-gap-audit.md)；兼容声明见[兼容性契约](../../docs/compatibility-contract.md)。

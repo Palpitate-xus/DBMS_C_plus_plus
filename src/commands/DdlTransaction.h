@@ -42,6 +42,10 @@ enum class DdlObjectKind {
 class DdlTransaction {
 public:
     explicit DdlTransaction(Session& session);
+    // Native callers keep explicit engine/database ownership; no synthetic
+    // SQL session or global-engine redirection is involved.
+    DdlTransaction(StorageEngine& engine, const std::string& database,
+                   Session* sqlSession = nullptr);
     ~DdlTransaction();
 
     // 尝试进入事务：复用已有事务，或新起一个事务。返回是否成功。
@@ -80,7 +84,8 @@ public:
     };
 
 private:
-    Session& session_;
+    Session* session_ = nullptr;
+    std::string database_;
     StorageEngine& engine_;
     bool active_ = false;
     bool startedByUs_ = false;

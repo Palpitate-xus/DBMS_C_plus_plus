@@ -435,28 +435,33 @@ static void test_explicit_transaction_ddl_rollback_and_savepoint() {
     assert(!ddl.executeSql("CREATE TABLE outer_second (id INT PRIMARY KEY)", s));
     assert(g_engine.tableExists(db, "outer_first"));
     assert(g_engine.tableExists(db, "outer_second"));
-    dbms::CatalogManager& catalog = g_engine.catalogService().get(db);
-    assert(catalog.resolveRelation("outer_first", {"public"}) != nullptr);
-    assert(catalog.resolveRelation("outer_second", {"public"}) != nullptr);
+    // get() is borrowed only until refresh/rollback. Inspect the actual
+    // current owner after each boundary instead of dereferencing an evicted
+    // model; retained-generation lifetime has separate explicit-lease tests.
+    const auto catalog = [&]() -> dbms::CatalogManager& {
+        return g_engine.catalogService().get(db);
+    };
+    assert(catalog().resolveRelation("outer_first", {"public"}) != nullptr);
+    assert(catalog().resolveRelation("outer_second", {"public"}) != nullptr);
     assert(g_engine.prepareTransaction("ddl_prepare_rejected") ==
            dbms::DBStatus::INVALID_VALUE);
     assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
     assert(!g_engine.tableExists(db, "outer_first"));
     assert(!g_engine.tableExists(db, "outer_second"));
-    assert(catalog.resolveRelation("outer_first", {"public"}) == nullptr);
-    assert(catalog.resolveRelation("outer_second", {"public"}) == nullptr);
+    assert(catalog().resolveRelation("outer_first", {"public"}) == nullptr);
+    assert(catalog().resolveRelation("outer_second", {"public"}) == nullptr);
 
     assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
     assert(!ddl.executeSql("CREATE TABLE savepoint_first (id INT PRIMARY KEY)", s));
     assert(g_engine.savepoint("after_first") == dbms::DBStatus::OK);
     assert(!ddl.executeSql("CREATE TABLE savepoint_second (id INT PRIMARY KEY)", s));
-    assert(catalog.resolveRelation("savepoint_first", {"public"}) != nullptr);
-    assert(catalog.resolveRelation("savepoint_second", {"public"}) != nullptr);
+    assert(catalog().resolveRelation("savepoint_first", {"public"}) != nullptr);
+    assert(catalog().resolveRelation("savepoint_second", {"public"}) != nullptr);
     assert(g_engine.rollbackToSavepoint("after_first") == dbms::DBStatus::OK);
     assert(g_engine.tableExists(db, "savepoint_first"));
     assert(!g_engine.tableExists(db, "savepoint_second"));
-    assert(catalog.resolveRelation("savepoint_first", {"public"}) != nullptr);
-    assert(catalog.resolveRelation("savepoint_second", {"public"}) == nullptr);
+    assert(catalog().resolveRelation("savepoint_first", {"public"}) != nullptr);
+    assert(catalog().resolveRelation("savepoint_second", {"public"}) == nullptr);
     assert(g_engine.commitTransaction() == dbms::DBStatus::OK);
     assert(g_engine.tableExists(db, "savepoint_first"));
 
@@ -741,10 +746,12 @@ static void test_schema_drop_plan_is_deferred() {
     assert(cat.applyDropPlan(plan));
     assert(!cat.findNamespaceByName("app"));
     // Catalog planning is independent from physical storage.  The executor
-    // applies the plan only after StorageEngine::dropSchema succeeds.
+    // applies the plan only after the storage-only schema marker primitive
+    // succeeds. The public dropSchema owner also owns catalog planning and
+    // must not be called after this test has independently applied its plan.
     assert(g_engine.schemaExists(db, "app"));
 
-    assert(g_engine.dropSchema(db, "app", false) == dbms::DBStatus::OK);
+    assert(g_engine.dropSchemaMarker(db, "app") == dbms::DBStatus::OK);
     cleanup(db);
     std::cout << "[DDL-TXN] schema catalog drop plan ordering OK" << std::endl;
 }

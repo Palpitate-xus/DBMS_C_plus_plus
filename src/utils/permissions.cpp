@@ -3,6 +3,8 @@
 #include "commands/TableManage.h"
 #include "catalog/CatalogService.h"
 #include "common/scram_sha256.h"
+#include "common/DbError.h"
+#include <filesystem>
 
 #include <chrono>
 #include <ctime>
@@ -15,6 +17,15 @@
 extern dbms::StorageEngine g_engine;
 
 dbms::CatalogManager& authCatalog() {
+    // This explicit cluster-catalog entry historically bootstraps only the
+    // reserved directory/catalog, not a new user database or privileges.
+    // Keep existing partial info catalogs and their role records unchanged.
+    // Ordinary CatalogService::get never creates an absent database.
+    const auto directory = g_engine.dbPath("info") / "pg_catalog";
+    std::error_code error;
+    std::filesystem::create_directories(directory, error);
+    if (error || !std::filesystem::is_directory(directory, error) || error)
+        throw dbms::DbError("58030", "cannot initialize reserved cluster catalog");
     return g_engine.catalogService().get("info");
 }
 

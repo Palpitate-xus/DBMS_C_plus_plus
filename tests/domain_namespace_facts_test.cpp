@@ -27,6 +27,10 @@ int main() {
         std::string declaration="domain_rejected";
         if(which<2) {
             assert(g_engine.dropSchema(db,"public",false)==DBStatus::OK);
+            // The complete native namespace owner now publishes its real
+            // catalog drop. Restore this test's intentional cold-input
+            // precondition before checking pure declaration validation.
+            g_engine.catalogService().evict(db);
             if(which==1)declaration="public.domain_rejected";
         } else if(which==2) {
             assert(std::filesystem::create_directory(g_engine.dbPath(db)/".schema_directory"));

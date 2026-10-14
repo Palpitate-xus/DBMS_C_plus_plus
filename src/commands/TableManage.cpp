@@ -1,4 +1,5 @@
 #include "TableManage.h"
+#include "commands/SchemaNamespace.h"
 #include "commands/SequenceStorageName.h"
 #include "common/DbError.h"
 #include "common/SqlArrayText.h"
@@ -223,6 +224,7 @@ static constexpr const char* kPhysicalBackupManifest = ".dbms_backup_manifest";
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <type_traits>
 #include <string_view>
 #include <string>
 #include <sys/file.h>
@@ -241,6 +243,45 @@ std::shared_ptr<std::shared_mutex> databaseTxnLockFor(
 bool databaseRollbackPending(const std::string& dbname);
 void setDatabaseRollbackPending(const std::string& dbname, uint64_t xid, bool pending);
 bool anyDatabaseRollbackPending();
+
+// Physical operations already hold this exact lock without starting a
+// logical transaction. Lend that real capability to reentrant catalog
+// getters, retaining every prior logical/physical context field unchanged.
+// This is neither a session override nor a flag claiming lock ownership.
+template<class Context, class Lock>
+class PhysicalCatalogOwnership {
+    Context& context_;
+    Lock& physicalLock_;
+    std::shared_ptr<std::shared_mutex> previousMutex_;
+    std::unique_ptr<std::shared_lock<std::shared_mutex>> previousShared_;
+    std::unique_ptr<std::unique_lock<std::shared_mutex>> previousExclusive_;
+public:
+    PhysicalCatalogOwnership(Context& context,
+        std::shared_ptr<std::shared_mutex> mutex,
+        Lock& physicalLock)
+        : context_(context), physicalLock_(physicalLock) {
+        if (!physicalLock.owns_lock() || physicalLock.mutex() != mutex.get())
+            throw DbError("XX000", "physical catalog ownership has no matching database lock");
+        auto owned = std::make_unique<Lock>(std::move(physicalLock));
+        previousMutex_ = std::move(context_.databaseTxnMutex);
+        previousShared_ = std::move(context_.databaseSharedLock);
+        previousExclusive_ = std::move(context_.databaseExclusiveLock);
+        context_.databaseTxnMutex = std::move(mutex);
+        if constexpr (std::is_same_v<Lock, std::unique_lock<std::shared_mutex>>)
+            context_.databaseExclusiveLock = std::move(owned);
+        else
+            context_.databaseSharedLock = std::move(owned);
+    }
+    ~PhysicalCatalogOwnership() {
+        if constexpr (std::is_same_v<Lock, std::unique_lock<std::shared_mutex>>)
+            physicalLock_ = std::move(*context_.databaseExclusiveLock);
+        else
+            physicalLock_ = std::move(*context_.databaseSharedLock);
+        context_.databaseExclusiveLock = std::move(previousExclusive_);
+        context_.databaseSharedLock = std::move(previousShared_);
+        context_.databaseTxnMutex = std::move(previousMutex_);
+    }
+};
 }
 
 // Forward declarations for row-header helpers used by TableSchema::rowSize().
@@ -2596,6 +2637,17 @@ void StorageEngine::backgroundAutoVacuum() {
     }
     for (const auto& [dbname, tablename] : todo) {
         if (!databaseExists(dbname)) continue;
+        const auto mutex = databaseTxnLockFor(dbname);
+        std::shared_lock<std::shared_mutex> databaseLock(*mutex, std::try_to_lock);
+        if (!databaseLock.owns_lock()) {
+            // Never take a table lock and then read an uncommitted catalog
+            // behind the DDL owner's database lock. Keep the request pending.
+            std::lock_guard<std::mutex> pendingLock(autoVacuumMutex_);
+            autoVacuumPending_[{dbname, tablename}] = true;
+            continue;
+        }
+        PhysicalCatalogOwnership catalogOwnership(
+            transactionContext(), mutex, databaseLock);
         const auto t0 = std::chrono::steady_clock::now();
         vacuum(dbname, tablename);
         const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -2639,6 +2691,14 @@ void StorageEngine::backgroundBufferFlush() {
         // Other databases retain their usual writeback behavior.
         if (databaseRollbackPending(dbname)) continue;
         const std::string tableName = kv.first.substr(separator + 1);
+        // Resolving a heap path reads catalog/domain files. Do not consume
+        // another thread's uncommitted namespace image or wait while holding
+        // the cache lock needed by its DDL owner.
+        const auto databaseMutex = databaseTxnLockFor(dbname);
+        std::shared_lock<std::shared_mutex> databaseLock(*databaseMutex, std::try_to_lock);
+        if (!databaseLock.owns_lock()) continue;
+        PhysicalCatalogOwnership catalogOwnership(
+            transactionContext(), databaseMutex, databaseLock);
         try {
             const std::string currentPath = tableName.find('#') == std::string::npos &&
                 tableName.find('/') == std::string::npos
@@ -2656,7 +2716,8 @@ void StorageEngine::backgroundBufferFlush() {
             // Undo can become pending between the initial check and path
             // resolution. Suppress only that ownership error, not unrelated
             // I/O/SQL failures in a healthy database.
-            if (error.sqlState() != "58030" || !databaseRollbackPending(dbname))
+            if (error.sqlState() != "55P03" &&
+                (error.sqlState() != "58030" || !databaseRollbackPending(dbname)))
                 throw;
         }
     }
@@ -5420,6 +5481,11 @@ static std::filesystem::path schemaMarkerPath(const std::string& dbname,
 
 DBStatus StorageEngine::createSchema(const std::string& dbname,
                                      const std::string& schemaname) {
+    return createSchemaNamespace(*this, dbname, schemaname).status;
+}
+
+DBStatus StorageEngine::createSchemaMarker(const std::string& dbname,
+                                     const std::string& schemaname) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     if (schemaname.empty() || !validStoredIdentifier(schemaname, MAX_TABLE_NAME_LEN)) {
         return DBStatus::INVALID_ARGUMENT;
@@ -5439,27 +5505,21 @@ DBStatus StorageEngine::createSchema(const std::string& dbname,
 DBStatus StorageEngine::dropSchema(const std::string& dbname,
                                    const std::string& schemaname,
                                    bool cascade) {
+    return dropSchemaNamespace(*this, dbname, schemaname, cascade).status;
+}
+
+DBStatus StorageEngine::dropSchemaMarker(const std::string& dbname,
+                                        const std::string& schemaname) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     if (schemaname.empty() || !validStoredIdentifier(schemaname, MAX_TABLE_NAME_LEN)) {
         return DBStatus::INVALID_ARGUMENT;
     }
     auto path = schemaMarkerPath(dbname, schemaname);
     if (!std::filesystem::exists(path)) return DBStatus::TABLE_NOT_FOUND;
-    const std::string prefix = schemaname + "__";
-    std::vector<std::string> tablesToDrop;
-    // The table list is authoritative for relations in external tablespaces
-    // and partitioned parents, neither of which needs a .dt in dbPath.
-    for (const auto& name : getTableNames(dbname)) {
-        if (name.size() > prefix.size() && name.rfind(prefix, 0) == 0) {
-            tablesToDrop.push_back(name);
-        }
-    }
-    if (!cascade && !tablesToDrop.empty()) return DBStatus::INVALID_VALUE;
-    for (const auto& tableName : tablesToDrop) {
-        if (dropTable(dbname, tableName) != DBStatus::OK) {
-            return DBStatus::INVALID_VALUE;
-        }
-    }
+    std::error_code markerError;
+    if (!std::filesystem::is_regular_file(
+            std::filesystem::symlink_status(path, markerError)) || markerError)
+        return DBStatus::IO_ERROR;
     if (!index_file::removeDurably(path)) {
         // Schema markers have an empty payload. If unlink succeeded but the
         // parent fsync failed, restore the marker without replacing a
@@ -5502,19 +5562,29 @@ DBStatus StorageEngine::alterTableSetSchema(const std::string& dbname,
 
 bool StorageEngine::schemaExists(const std::string& dbname,
                                  const std::string& schemaname) const {
-    // The public namespace is implicit for databases initialized by older
-    // bootstrap paths (including a manually prepared test/server directory).
-    // New databases persist the marker as well, but validation must preserve
-    // the PostgreSQL invariant that public always exists.
-    if (schemaname == "public" && databaseExists(dbname)) return true;
     if (schemaname.empty() || !validStoredIdentifier(schemaname, MAX_TABLE_NAME_LEN)) {
         return false;
     }
-    return std::filesystem::exists(schemaMarkerPath(dbname, schemaname));
+    const auto ownership = catalogReadOwnership(dbname);
+    if (!ownership.mayReadCurrentFiles && catalogService_) {
+        for (const auto& row : catalogService_->metadataSnapshot(dbname).namespaces)
+            if (row.nspname == schemaname) return true;
+        return false;
+    }
+    std::error_code error;
+    return std::filesystem::is_regular_file(std::filesystem::symlink_status(
+        schemaMarkerPath(dbname, schemaname), error)) && !error;
 }
 
 std::vector<std::string> StorageEngine::getSchemaNames(const std::string& dbname) const {
     std::vector<std::string> result;
+    const auto ownership = catalogReadOwnership(dbname);
+    if (!ownership.mayReadCurrentFiles && catalogService_) {
+        for (const auto& row : catalogService_->metadataSnapshot(dbname).namespaces)
+            if (row.nspname != "pg_catalog" && row.nspname != "information_schema" &&
+                row.nspname != "pg_toast") result.push_back(row.nspname);
+        return result;
+    }
     auto dbPath = std::filesystem::path(dbname);
     if (!std::filesystem::exists(dbPath)) return result;
     for (const auto& entry : std::filesystem::directory_iterator(dbPath)) {
@@ -5552,10 +5622,6 @@ std::vector<std::string> StorageEngine::getTablesInSchema(
 // ========================================================================
 // User-defined functions (simple expression-based)
 // ========================================================================
-
-static std::filesystem::path udfDir(const std::string& dbname) {
-    return std::filesystem::path(dbname) / ".funcs";
-}
 
 static std::filesystem::path udfPath(const std::string& dbname,
                                      const std::string& funcname,
@@ -5807,9 +5873,15 @@ bool StorageEngine::callUDFWithCtx(const std::string& dbname,
 }
 
 std::vector<std::string> StorageEngine::getUDFNames(const std::string& dbname) const {
+    return getUDFNames(dbname, "public");
+}
+
+std::vector<std::string> StorageEngine::getUDFNames(
+    const std::string& dbname, const std::string& schema) const {
     std::vector<std::string> result;
     if (!databaseExists(dbname)) return result;
-    auto fdir = udfDir(dbname);
+    if (!validMetadataObjectName(schema)) return result;
+    auto fdir = udfPath(dbname, "", schema).parent_path();
     if (!std::filesystem::exists(fdir)) return result;
     for (const auto& entry : std::filesystem::directory_iterator(fdir)) {
         if (entry.is_regular_file()) {
@@ -14846,6 +14918,8 @@ DBStatus StorageEngine::renameDatabase(const std::string& oldName,
         (context.txnDB == oldName || context.txnDB == newName)) {
         return DBStatus::DATABASE_IN_USE;
     }
+    const auto ownershipStatus = ensureDatabaseTransactionOwnership();
+    if (ownershipStatus != DBStatus::OK) return ownershipStatus;
 
     // Rename owns both names. Acquire them in a stable order before the
     // cache lock so CREATE/DROP/BEGIN cannot observe a half-moved database.
@@ -14855,6 +14929,10 @@ DBStatus StorageEngine::renameDatabase(const std::string& oldName,
     if (!firstLock.owns_lock()) return DBStatus::DATABASE_IN_USE;
     std::unique_lock<std::shared_mutex> secondLock(*second, std::try_to_lock);
     if (!secondLock.owns_lock()) return DBStatus::DATABASE_IN_USE;
+    const auto oldNameMutex = oldName < newName ? first : second;
+    auto& oldNameLock = oldName < newName ? firstLock : secondLock;
+    PhysicalCatalogOwnership catalogOwnership(
+        transactionContext(), oldNameMutex, oldNameLock);
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!databaseExists(oldName)) return DBStatus::DATABASE_NOT_FOUND;
     std::error_code targetEc;
@@ -44631,12 +44709,15 @@ bool StorageEngine::checkpoint(const std::string& dbname) {
     // to upgrade this thread's own transaction lock.
     const auto& context = transactionContext();
     if (context.inTransaction && context.txnDB == dbname) return false;
+    if (ensureDatabaseTransactionOwnership() != DBStatus::OK) return false;
     const auto databaseMutex = databaseTxnLockFor(dbname);
     std::unique_lock<std::shared_mutex> checkpointDatabaseLock(
         *databaseMutex, std::try_to_lock);
     if (!checkpointDatabaseLock.owns_lock() || !databaseExists(dbname)) {
         return false;
     }
+    PhysicalCatalogOwnership catalogOwnership(
+        transactionContext(), databaseMutex, checkpointDatabaseLock);
 
     // Do not advance the recovery start point while a transaction for this
     // database is active.  A checkpoint must not make an uncommitted heap or
@@ -45500,6 +45581,8 @@ bool StorageEngine::physicalBackup(const std::string& dbname,
     const auto databaseMutex = databaseTxnLockFor(dbname);
     std::unique_lock<std::shared_mutex> databaseLock(*databaseMutex);
     if (!databaseExists(dbname)) return false;
+    PhysicalCatalogOwnership catalogOwnership(
+        transactionContext(), databaseMutex, databaseLock);
     if (catalogService_ && !catalogService_->persistAll()) return false;
     if (!flushDatabaseCaches(dbname)) return false;
     WALManager* wal = getWAL(dbname);
@@ -45857,6 +45940,8 @@ bool StorageEngine::physicalRestore(const std::string& dbname,
     if (transactionContext().inTransaction) return false;
     const auto databaseMutex = databaseTxnLockFor(dbname);
     std::unique_lock<std::shared_mutex> databaseLock(*databaseMutex);
+    PhysicalCatalogOwnership catalogOwnership(
+        transactionContext(), databaseMutex, databaseLock);
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     TablespaceCatalogLock tablespaceLock(
         tablespaceCatalogLockPath(*this, dbname), true);
@@ -47824,8 +47909,13 @@ DatabaseTransactionLockRegistry& databaseTransactionLockRegistry() {
 
 std::shared_ptr<std::shared_mutex> databaseTxnLockFor(const std::string& dbname) {
     auto& registry = databaseTransactionLockRegistry();
+    // Namespace/physical snapshots must share their owner for lexical aliases
+    // of the same database, not only identical caller strings.
+    std::error_code error;
+    auto canonical = std::filesystem::weakly_canonical(dbname, error);
+    if (error) canonical = std::filesystem::absolute(dbname).lexically_normal();
     std::lock_guard<std::mutex> guard(registry.mutex);
-    auto& lock = registry.locks[dbname];
+    auto& lock = registry.locks[canonical.string()];
     if (!lock) lock = std::make_shared<std::shared_mutex>();
     return lock;
 }
@@ -47870,6 +47960,30 @@ std::filesystem::path ddlStatementBackupPath(const std::string& dbname,
 }
 
 } // anonymous namespace
+
+StorageEngine::CatalogReadOwnership StorageEngine::catalogReadOwnership(
+    const std::string& dbname) const {
+    // Physical catalog access must preserve the existing deferred-owner
+    // promotion contract, before taking a second read lock.
+    requireDatabaseTransactionOwnership(dbname);
+    auto actualMutex = databaseTxnLockFor(dbname);
+    const auto& context = transactionContext();
+    if (context.databaseTxnMutex == actualMutex &&
+        ((context.databaseExclusiveLock && context.databaseExclusiveLock->owns_lock()) ||
+         (context.databaseSharedLock && context.databaseSharedLock->owns_lock()))) {
+        const bool writer = context.inTransaction && context.databaseExclusiveLock &&
+            context.databaseExclusiveLock->owns_lock();
+        return {true, {}, writer ? context.currentTxnId : 0};
+    }
+    struct ReadFence {
+        std::shared_ptr<std::shared_mutex> mutex;
+        std::shared_lock<std::shared_mutex> lock;
+        explicit ReadFence(std::shared_ptr<std::shared_mutex> actual)
+            : mutex(std::move(actual)), lock(*mutex, std::try_to_lock) {}
+    };
+    auto fence = std::make_shared<ReadFence>(std::move(actualMutex));
+    return {fence->lock.owns_lock(), std::move(fence)};
+}
 
 DBStatus StorageEngine::beginTransaction(const std::string& dbname) {
     return beginTransaction(dbname, false);
@@ -47924,6 +48038,22 @@ DBStatus StorageEngine::ensureDatabaseTransactionOwnership(const std::string& db
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     if (!databaseExists(context.txnDB)) return DBStatus::DATABASE_NOT_FOUND;
+    // Expose the actual held lock to reentrant catalog/WAL getters while
+    // promoting. A failed promotion relinquishes only these staged locks,
+    // leaving the same logical transaction alive for abort/Sync.
+    context.databaseTxnMutex = mutex;
+    context.databaseSharedLock = std::move(lock);
+    bool promotionSucceeded = false;
+    struct StagedOwnership {
+        TransactionContext& context;
+        bool& succeeded;
+        ~StagedOwnership() {
+            if (!succeeded) {
+                context.databaseSharedLock.reset();
+                context.databaseTxnMutex.reset();
+            }
+        }
+    } staged{context, promotionSucceeded};
     if (catalogService_ && !catalogService_->persistAll()) return DBStatus::IO_ERROR;
     auto* commitLog = getCommitLog(context.txnDB);
     if (!commitLog) return DBStatus::IO_ERROR;
@@ -47933,11 +48063,10 @@ DBStatus StorageEngine::ensureDatabaseTransactionOwnership(const std::string& db
         if (!getWAL(context.txnDB)) return DBStatus::IO_ERROR;
         transactionWal = walManagers_.at(context.txnDB);
     }
-    context.databaseTxnMutex = std::move(mutex);
-    context.databaseSharedLock = std::move(lock);
     context.readView.commitLog = commitLog;
     context.transactionWalOwner = std::move(transactionWal);
     context.databaseOwnershipDeferred = false;
+    promotionSucceeded = true;
     return DBStatus::OK;
 }
 
@@ -48562,6 +48691,9 @@ bool StorageEngine::restoreDdlStatementBackup(
     const bool restored =
         physicalRestoreLocked(context.txnDB, backupPath);
     if (!restored) return false;
+    // Adopt the restored physical generation without discarding this
+    // parent's committed catalog lease held for concurrent readers.
+    if (catalogService_) catalogService_->evict(context.txnDB);
 
     // A restored image can have multiple live savepoint aliases. Keep it
     // immutable until each frame has either been released or acquired its
@@ -50354,6 +50486,7 @@ bool StorageEngine::restoreTransactionBackup(const std::string& dbname,
     SequenceRollbackRestoreScope sequenceScope(dbname);
     const bool restored = physicalRestoreLocked(dbname, backup.string());
     if (restored) {
+        if (catalogService_) catalogService_->evict(dbname);
         if (context.inTransaction) {
             // The image has already undone every physical change after its
             // log boundary. Replaying those entries at a later SAVEPOINT or

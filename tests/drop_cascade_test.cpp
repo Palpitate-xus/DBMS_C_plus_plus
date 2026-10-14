@@ -38,12 +38,15 @@ static void test_drop_table_cascade_removes_dependents() {
     ddl.executeSql("CREATE TABLE child (id INT, pid INT)", s);
     assert(!ddl.executeSql("CREATE INDEX child_id_idx ON child (id)", s));
 
-    dbms::CatalogManager& cat = g_engine.catalogService().get(db);
-    const auto* nsPublic = cat.findNamespaceByName("public");
-    assert(nsPublic != nullptr);
+    // Borrow from the actual owner again after DDL/rollback boundaries.
+    const auto cat = [&]() -> dbms::CatalogManager& {
+        return g_engine.catalogService().get(db);
+    };
+    const auto nsPublic = cat().getNamespaceByName("public");
+    assert(nsPublic);
 
-    const auto* parentCls = cat.findClassByName("parent", nsPublic->oid);
-    const auto* childCls = cat.findClassByName("child", nsPublic->oid);
+    const auto* parentCls = cat().findClassByName("parent", nsPublic->oid);
+    const auto* childCls = cat().findClassByName("child", nsPublic->oid);
     assert(parentCls != nullptr);
     assert(childCls != nullptr);
 
@@ -56,13 +59,13 @@ static void test_drop_table_cascade_removes_dependents() {
     dep.refobjid = parentCls->oid;
     dep.refobjsubid = 0;
     dep.deptype = 'n';
-    cat.addDepend(dep);
+    cat().addDepend(dep);
 
     // RESTRICT should fail because child depends on parent.
     bool err = ddl.executeSql("DROP TABLE parent", s);
     assert(err);
     assert(g_engine.tableExists(db, "parent"));
-    assert(cat.findClassByName("parent", nsPublic->oid) != nullptr);
+    assert(cat().findClassByName("parent", nsPublic->oid) != nullptr);
 
     // CASCADE must remove dependent catalog rows and their physical relation
     // and index files before publishing the catalog deletion plan.
@@ -71,8 +74,8 @@ static void test_drop_table_cascade_removes_dependents() {
     assert(!g_engine.tableExists(db, "parent"));
     assert(!g_engine.tableExists(db, "child"));
     assert(!g_engine.getNamedIndex(db, "child", "child_id_idx"));
-    assert(cat.findClassByName("parent", nsPublic->oid) == nullptr);
-    assert(cat.findClassByName("child", nsPublic->oid) == nullptr);
+    assert(cat().findClassByName("parent", nsPublic->oid) == nullptr);
+    assert(cat().findClassByName("child", nsPublic->oid) == nullptr);
 
     // Evict the catalog so the global engine destructor does not recreate
     // the database directory after cleanup().
@@ -126,12 +129,15 @@ static void test_drop_table_restrict_removes_automatic_dependents() {
     assert(!ddl.executeSql(
         "CREATE SEQUENCE owner_id_seq OWNED BY owner.id", s));
 
-    auto& catalog = g_engine.catalogService().get(db);
-    const auto* publicNamespace = catalog.findNamespaceByName("public");
-    assert(publicNamespace != nullptr);
-    assert(catalog.findClassByName(
+    // Borrow from the actual owner again after DDL/rollback boundaries.
+    const auto catalog = [&]() -> dbms::CatalogManager& {
+        return g_engine.catalogService().get(db);
+    };
+    const auto publicNamespace = catalog().getNamespaceByName("public");
+    assert(publicNamespace);
+    assert(catalog().findClassByName(
                "owner_id_idx", publicNamespace->oid) != nullptr);
-    assert(catalog.findClassByName(
+    assert(catalog().findClassByName(
                "owner_id_seq", publicNamespace->oid) != nullptr);
 
     // Neither an index nor an OWNED BY sequence should force users to spell
@@ -140,9 +146,9 @@ static void test_drop_table_restrict_removes_automatic_dependents() {
     assert(!g_engine.tableExists(db, "owner"));
     assert(!g_engine.getNamedIndex(db, "owner", "owner_id_idx"));
     assert(!g_engine.sequenceExists(db, "owner_id_seq"));
-    assert(catalog.findClassByName(
+    assert(catalog().findClassByName(
                "owner_id_idx", publicNamespace->oid) == nullptr);
-    assert(catalog.findClassByName(
+    assert(catalog().findClassByName(
                "owner_id_seq", publicNamespace->oid) == nullptr);
 
     g_engine.catalogService().evict(db);
@@ -417,6 +423,11 @@ static void test_drop_schema_handles_auxiliary_objects() {
     assert(g_engine.createEnumType(db, enumeration) == dbms::DBStatus::OK);
     assert(g_engine.createUDF(db, "app_aux.bump", "x", "x + 1") ==
            dbms::DBStatus::OK);
+    // Native scalar routines use an explicit canonical schema argument.
+    // The original decoded-dot name above is public."app_aux.bump" and
+    // must survive; create the actual app_aux.bump independently.
+    assert(g_engine.createUDF(db, "bump", "x", "x + 1", 'v', "sql", "int",
+                            "int", false, false, "app_aux") == dbms::DBStatus::OK);
     assert(g_engine.createTVF(
                db, "app_aux.rows", "x", "SELECT x") ==
            dbms::DBStatus::OK);
@@ -453,6 +464,7 @@ static void test_drop_schema_handles_auxiliary_objects() {
     assert(g_engine.schemaExists(db, "app_aux"));
     assert(!g_engine.getDomain(db, domain.name).name.empty());
     assert(g_engine.udfExists(db, "app_aux.bump"));
+    assert(g_engine.udfExists(db, "bump", "app_aux"));
     assert(g_engine.procedureExists(db, "work","app_aux"));
 
     assert(!ddl.executeSql("DROP SCHEMA app_aux CASCADE", s));
@@ -460,7 +472,8 @@ static void test_drop_schema_handles_auxiliary_objects() {
     assert(g_engine.getDomain(db, domain.name).name.empty());
     assert(!g_engine.isCompositeType(db, composite.name));
     assert(g_engine.getEnumType(db, enumeration.name).name.empty());
-    assert(!g_engine.udfExists(db, "app_aux.bump"));
+    assert(g_engine.udfExists(db, "app_aux.bump"));
+    assert(!g_engine.udfExists(db, "bump", "app_aux"));
     assert(!g_engine.tvfExists(db, "app_aux.rows"));
     assert(!g_engine.procedureExists(db, "work","app_aux"));
     assert(g_engine.procedureExists(db,"app_aux.work"));

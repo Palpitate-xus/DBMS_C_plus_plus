@@ -5,6 +5,7 @@
 #include "commands/DdlExecutor.h"
 #include "commands/DmlExecutor.h"
 #include "commands/DdlTransaction.h"
+#include "commands/SchemaNamespace.h"
 #include "commands/SequenceStorageName.h"
 #include "parser/parser.h"
 #include "catalog/CatalogService.h"
@@ -1331,22 +1332,31 @@ static Oid registerViewInCatalog(
 
 static bool synchronizeTableAttributesInCatalog(
     const std::string& dbname, const std::string& physicalTableName,
-    const std::map<std::string, int32_t>* declaredVarcharMods = nullptr) {
+    const std::map<std::string, int32_t>* declaredVarcharMods = nullptr,
+    StorageEngine& engine = g_engine, Oid actualRelation = INVALID_OID) {
     try {
-        CatalogManager& catalog = g_engine.catalogService().get(dbname);
+        CatalogManager& catalog = engine.catalogService().get(dbname);
         const auto qualifiedName =
             CatalogService::logicalName(physicalTableName);
         const std::string schemaName = qualifiedName.schema.empty()
             ? "public" : qualifiedName.schema;
-        const auto relation = catalog.resolveRelationSnapshot(
-            qualifiedName.name, {schemaName});
+        const auto relation = actualRelation == INVALID_OID
+            ? catalog.resolveRelationSnapshot(qualifiedName.name, {schemaName})
+            : catalog.getClass(actualRelation);
         // Storage-only relations intentionally remain outside pg_catalog.
         if (!relation) return true;
         const Oid relationOid = relation->oid;
         const Oid namespaceOid = relation->relnamespace;
+        if (actualRelation != INVALID_OID) {
+            const auto* actualNamespace = catalog.findNamespace(namespaceOid);
+            if (!actualNamespace || physicalTableName !=
+                (actualNamespace->nspname == "public" ? relation->relname
+                    : actualNamespace->nspname + "__" + relation->relname))
+                return false;
+        }
 
         const TableSchema table =
-            g_engine.getTableSchema(dbname, physicalTableName);
+            engine.getTableSchema(dbname, physicalTableName);
         if (table.len == 0) return false;
         const std::vector<PgAttributeRow> previous =
             catalog.findAttributes(relationOid);
@@ -2017,13 +2027,18 @@ static bool dropOwnedSequencesForColumn(
     const std::string& physicalTableName,
     const std::string& logicalTableName, Oid tableOid,
     int32_t columnNumber, const std::string& columnName, bool cascade,
-    std::set<std::string>& droppedSequenceStorageNames);
+    std::set<std::string>& droppedSequenceStorageNames,
+    StorageEngine& engine = g_engine);
 
 static bool executeSchemaPhysicalDropPlan(
-    CatalogManager& catalog, const std::string& dbname,
+    StorageEngine& engine, CatalogManager& catalog, const std::string& dbname,
     const CatalogManager::DropPlan& catalogPlan, bool cascade,
+    const std::vector<std::string>& storageOnlyTables,
     std::set<std::string>& droppedSequenceStorageNames,
     std::string& error);
+
+static bool catalogTableStorageName(const CatalogManager& catalog,
+    const PgClassRow& relation, std::string& storageName, std::string& error);
 
 bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
     if (!stmt) return true;
@@ -3916,318 +3931,389 @@ bool DdlExecutor::executeDropRole(const DropStmt* stmt, Session& s) {
     return false;
 }
 
+namespace {
+bool validNamespaceName(const std::string& name) {
+    return !name.empty() && name.size() < MAX_TABLE_NAME_LEN &&
+        name.find('\0') == std::string::npos && name.find('/') == std::string::npos &&
+        name.find('\\') == std::string::npos && name != "." && name != "..";
+}
+
+}
+
+SchemaNamespaceResult createSchemaNamespace(StorageEngine& engine,
+    const std::string& database, const std::string& name, Session* sqlSession) try {
+    if (!engine.databaseExists(database))
+        return {DBStatus::DATABASE_NOT_FOUND, "database does not exist", {}};
+    if (!validNamespaceName(name))
+        return {DBStatus::INVALID_ARGUMENT, "invalid schema name", {}};
+    if (engine.inTransaction() && engine.transactionDatabase() != database)
+        return {DBStatus::INVALID_VALUE, "namespace operation belongs to another transaction database", {}};
+    if (engine.isReadOnly()) throw DbError("25006", "cannot create schema in a read-only transaction");
+    std::error_code markerError;
+    const auto existingMarker = std::filesystem::symlink_status(
+        engine.dbPath(database) / (".schema_" + name), markerError);
+    if (markerError && markerError != std::errc::no_such_file_or_directory)
+        return {DBStatus::IO_ERROR, "cannot inspect namespace marker", {}};
+    if (std::filesystem::exists(existingMarker))
+        return {DBStatus::TABLE_ALREADY_EXISTS, "schema already exists", {}};
+    DdlTransaction txn(engine, database, sqlSession);
+    txn.enableSnapshotRollback();
+    if (!txn.begin())
+        return {DBStatus::IO_ERROR, "namespace transaction begin failed", {}};
+    // Publication and reentrant column/default synchronization must use one
+    // actual engine-owned model. Cold acquire() intentionally does not cache
+    // a pure lease; establish the mutable generation before retaining it.
+    (void)engine.catalogService().get(database);
+    const auto catalogOwner = engine.catalogService().acquire(database);
+    auto& catalog = *catalogOwner;
+    if (catalog.findNamespaceByName(name))
+        return {DBStatus::TABLE_ALREADY_EXISTS, "schema already exists", {}};
+    // Persisting a new catalog or marker is covered by the same image.
+    txn.markSnapshotDirty();
+    const DBStatus marker = engine.createSchemaMarker(database, name);
+    if (marker != DBStatus::OK) return {marker, "schema marker publication failed", {}};
+    catalog.createNamespace(name, INVALID_OID);
+    if (!catalog.persistAll())
+        return {DBStatus::IO_ERROR, "schema catalog publication failed", {}};
+    txn.recordCreate(DdlObjectKind::Schema, name);
+    if (!txn.commit())
+        return {DBStatus::IO_ERROR, "namespace transaction commit failed", {}};
+    return {};
+} catch (const DbError& error) {
+    if (error.sqlState() == "58030")
+        return {DBStatus::IO_ERROR, error.what(), {}};
+    throw;
+} catch (const std::bad_alloc&) {
+    return {DBStatus::OUT_OF_MEMORY, "namespace allocation failed", {}};
+} catch (const std::exception& error) {
+    return {DBStatus::IO_ERROR, error.what(), {}};
+}
+
+SchemaNamespaceResult dropSchemaNamespace(StorageEngine& engine,
+    const std::string& database, const std::string& name, bool cascade,
+    Session* sqlSession) try {
+    if (!engine.databaseExists(database))
+        return {DBStatus::DATABASE_NOT_FOUND, "database does not exist", {}};
+    if (!validNamespaceName(name))
+        return {DBStatus::INVALID_ARGUMENT, "invalid schema name", {}};
+    if (engine.inTransaction() && engine.transactionDatabase() != database)
+        return {DBStatus::INVALID_VALUE, "namespace operation belongs to another transaction database", {}};
+    if (engine.isReadOnly()) throw DbError("25006", "cannot drop schema in a read-only transaction");
+    if (!engine.schemaExists(database, name)) {
+        bool catalogExists = false;
+        for (const auto& entry : engine.catalogService().metadataSnapshot(database).namespaces)
+            catalogExists = catalogExists || entry.nspname == name;
+        if (!catalogExists)
+            return {DBStatus::TABLE_NOT_FOUND, "schema does not exist", {}};
+    }
+    DdlTransaction txn(engine, database, sqlSession);
+    txn.enableSnapshotRollback();
+    if (!txn.begin())
+        return {DBStatus::IO_ERROR, "namespace transaction begin failed", {}};
+
+    enum class Kind { Domain, Composite, Enum, Shell, Udt, Function,
+                      TableFunction, Procedure, Collation };
+    struct Auxiliary { Kind kind; std::string name; std::string schema; };
+    std::vector<Auxiliary> auxiliary;
+    const auto belongs = [&](const std::string& spelling) {
+        CatalogManager::QualifiedName identity;
+        if (!CatalogManager::parseQualifiedName(spelling, identity, true) ||
+            identity.name.empty()) throw DbError("XX001", "invalid auxiliary namespace identity");
+        return (identity.schema.empty() ? "public" : identity.schema) == name;
+    };
+    const auto add = [&](const std::vector<std::string>& names, Kind kind) {
+        for (const auto& spelling : names)
+            if (belongs(spelling)) auxiliary.push_back({kind, spelling, {}});
+    };
+    std::vector<std::string> shells;
+    DBStatus status = loadShellTypes(database, shells);
+    if (status != DBStatus::OK) return {status, "shell-type preflight failed", {}};
+    std::vector<UdtMeta> udts;
+    status = loadUdtMeta(database, udts);
+    if (status != DBStatus::OK) return {status, "UDT preflight failed", {}};
+    add(engine.getDomainNames(database), Kind::Domain);
+    add(engine.getCompositeTypeNames(database), Kind::Composite);
+    add(engine.getEnumTypeNames(database), Kind::Enum);
+    add(shells, Kind::Shell);
+    for (const auto& value : udts)
+        if (belongs(value.name)) auxiliary.push_back({Kind::Udt, value.name, {}});
+    // Scalar functions already have separate canonical namespace directories.
+    // A decoded public name containing a dot is not a joined namespace.
+    for (const auto& function : engine.getUDFNames(database, name))
+        auxiliary.push_back({Kind::Function, function, name});
+    add(engine.getTVFNames(database), Kind::TableFunction);
+    for (const auto& procedure : engine.getProcedureNames(database, name))
+        auxiliary.push_back({Kind::Procedure, procedure, name});
+    for (const auto& collation : engine.getCollationNames(database)) {
+        const auto identity = CatalogService::logicalName(collation);
+        if ((identity.schema.empty() ? "public" : identity.schema) == name)
+            auxiliary.push_back({Kind::Collation, collation, {}});
+    }
+
+    (void)engine.catalogService().get(database);
+    const auto catalogOwner = engine.catalogService().acquire(database);
+    auto& catalog = *catalogOwner;
+    const auto namespaceRow = catalog.getNamespaceByName(name);
+    const bool markerExists = engine.schemaExists(database, name);
+    if (!namespaceRow) {
+        if (!markerExists && auxiliary.empty())
+            return {DBStatus::TABLE_NOT_FOUND, "schema does not exist", {}};
+        return {DBStatus::CORRUPTED_DATA, "storage namespace has no catalog identity", {}};
+    }
+    if (!markerExists)
+        return {DBStatus::CORRUPTED_DATA, "catalog namespace has no physical marker", {}};
+    if (!cascade && !auxiliary.empty())
+        return {DBStatus::INVALID_VALUE, "schema has dependent auxiliary objects", {}};
+    const Oid namespaceOid = namespaceRow->oid;
+    const auto behavior = cascade ? CatalogManager::DropBehavior::Cascade
+                                  : CatalogManager::DropBehavior::Restrict;
+    auto plan = catalog.planDrop(PgClassOid_Namespace, namespaceOid, behavior);
+    if (!plan.ok()) return {DBStatus::INVALID_VALUE, plan.error, {}};
+
+    // Low-level createTable intentionally does not register pg_class. Its
+    // unregistered physical names retain the documented plain/schema__name
+    // contract. A registered relation's copied canonical catalog identity
+    // always wins, so public."owner_schema__t" is never misclassified.
+    std::map<std::string, std::string> registered;
+    std::map<std::string, Oid> registeredRelations;
+    for (const auto& relation : catalog.listClasses()) {
+        if (relation.relkind != 'r' && relation.relkind != 'p') continue;
+        const auto schema = catalog.getNamespace(relation.relnamespace);
+        if (!schema) return {DBStatus::CORRUPTED_DATA, "relation namespace is missing", {}};
+        const std::string physical = schema->nspname == "public"
+            ? relation.relname : schema->nspname + "__" + relation.relname;
+        if (!registered.emplace(physical, schema->nspname).second)
+            return {DBStatus::CORRUPTED_DATA, "ambiguous physical relation namespace", {}};
+        registeredRelations.emplace(physical, relation.oid);
+    }
+    std::set<std::string> materializedHeaps;
+    for (const auto& view : engine.getMaterializedViewNames(database))
+        materializedHeaps.insert(StorageEngine::materializedViewPrefix(view));
+    std::vector<std::string> storageOnlyTables;
+    for (const auto& tableName : engine.getTableNames(database)) {
+        if (registered.count(tableName) || materializedHeaps.count(tableName)) continue;
+        const TableSchema table = engine.getTableSchema(database, tableName);
+        if (table.isTemporary) continue;
+        const auto identity = CatalogService::logicalName(tableName);
+        if ((identity.schema.empty() ? "public" : identity.schema) == name)
+            storageOnlyTables.push_back(tableName);
+    }
+    if (!cascade && !storageOnlyTables.empty())
+        return {DBStatus::INVALID_VALUE, "schema has dependent storage-only relations", {}};
+
+    // Older catalogs do not encode attribute->type or domain->base edges.
+    // Derive these real typed dependencies from the copied descriptor, not
+    // a name prefix, and prepare the column work before removing any type.
+    const auto metadata = catalog.metadataSnapshot();
+    std::set<Oid> droppedTypes, droppedRelations;
+    for (const auto& object : plan.objectsToDrop) {
+        if (object.first == PgClassOid_Type) droppedTypes.insert(object.second);
+        if (object.first == PgClassOid_Class) droppedRelations.insert(object.second);
+    }
+    std::vector<Oid> additionalDomains;
+    bool expanded;
+    do {
+        expanded = false;
+        for (const auto& type : metadata.types) {
+            if (type.typtype != 'd' || !droppedTypes.count(type.typbasetype) ||
+                droppedTypes.count(type.oid)) continue;
+            droppedTypes.insert(type.oid);
+            additionalDomains.push_back(type.oid);
+            expanded = true;
+        }
+    } while (expanded);
+    if (!cascade && !additionalDomains.empty())
+        return {DBStatus::INVALID_VALUE, "schema has dependent domains", {}};
+    for (auto it = additionalDomains.rbegin(); it != additionalDomains.rend(); ++it) {
+        const auto type = catalog.getType(*it);
+        const auto schema = type ? catalog.getNamespace(type->typnamespace) : std::nullopt;
+        if (!schema) return {DBStatus::CORRUPTED_DATA, "dependent domain namespace is missing", {}};
+        const std::string identity = domainQuotedIdentifier(schema->nspname) + "." +
+            domainQuotedIdentifier(type->typname);
+        if (engine.getDomain(database, identity).name.empty())
+            return {DBStatus::CORRUPTED_DATA, "dependent domain has no physical metadata", {}};
+        auxiliary.push_back({Kind::Domain, identity, {}});
+    }
+    // Derived domains precede their old-format parent types in the catalog
+    // plan. Existing namespace/type objects are not duplicated.
+    std::vector<std::pair<Oid, Oid>> extendedPlan;
+    for (auto it = additionalDomains.rbegin(); it != additionalDomains.rend(); ++it)
+        extendedPlan.emplace_back(PgClassOid_Type, *it);
+    extendedPlan.insert(extendedPlan.end(), plan.objectsToDrop.begin(), plan.objectsToDrop.end());
+    plan.objectsToDrop = std::move(extendedPlan);
+
+    struct ColumnAction { std::string table, column; Oid relation; int16_t ordinal; };
+    std::vector<ColumnAction> columns;
+    std::set<std::pair<std::string, std::string>> columnIdentities;
+    for (const auto& attribute : metadata.attributes) {
+        if (attribute.attisdropped || !droppedTypes.count(attribute.atttypid) ||
+            droppedRelations.count(attribute.attrelid)) continue;
+        const auto relation = catalog.getClass(attribute.attrelid);
+        if (!relation || (relation->relkind != 'r' && relation->relkind != 'p'))
+            return {DBStatus::FEATURE_NOT_SUPPORTED, "dependent typed view column cannot be removed safely", {}};
+        std::string physical;
+        std::string error;
+        if (!catalogTableStorageName(catalog, *relation, physical, error))
+            return {DBStatus::CORRUPTED_DATA, error, {}};
+        const auto table = engine.getTableSchema(database, physical);
+        if (attribute.attnum <= 0 || static_cast<size_t>(attribute.attnum) > table.len ||
+            table.cols[attribute.attnum - 1].dataName != attribute.attname)
+            return {DBStatus::CORRUPTED_DATA, "dependent column has inconsistent physical ordinal", {}};
+        columns.push_back({physical, attribute.attname, attribute.attrelid, attribute.attnum});
+        columnIdentities.emplace(physical, attribute.attname);
+    }
+    std::set<std::pair<std::string, std::string>> domainIdentities;
+    for (const auto& object : auxiliary) {
+        if (object.kind != Kind::Domain) continue;
+        CatalogManager::QualifiedName domain;
+        if (!CatalogManager::parseQualifiedName(object.name, domain, true))
+            return {DBStatus::CORRUPTED_DATA, "invalid domain cleanup identity", {}};
+        domainIdentities.emplace(domain.schema.empty() ? "public" : domain.schema, domain.name);
+    }
+    const std::set<std::string> removedStorageOnly(storageOnlyTables.begin(), storageOnlyTables.end());
+    for (const auto& physical : engine.getTableNames(database)) {
+        const auto registeredRelation = registeredRelations.find(physical);
+        if (removedStorageOnly.count(physical) || materializedHeaps.count(physical) ||
+            (registeredRelation != registeredRelations.end() && droppedRelations.count(registeredRelation->second)))
+            continue;
+        const auto table = engine.getTableSchema(database, physical);
+        for (size_t i = 0; i < table.len; ++i) {
+            const auto& column = table.cols[i];
+            if (column.domainName.empty()) continue;
+            CatalogManager::QualifiedName domain;
+            if (!CatalogManager::parseQualifiedName(column.domainName, domain, true))
+                return {DBStatus::CORRUPTED_DATA, "invalid physical column domain identity", {}};
+            if (!domainIdentities.count({domain.schema.empty() ? "public" : domain.schema, domain.name}) ||
+                columnIdentities.count({physical, column.dataName})) continue;
+            // A registered relation must corroborate its own domain columns
+            // in pg_attribute. Low-level createTable explicitly need not
+            // register a relation; preserve that contract while removing its
+            // real physical dependent column, not the whole external table.
+            if (registeredRelation != registeredRelations.end())
+                return {DBStatus::CORRUPTED_DATA, "registered domain column lacks consistent catalog type identity", {}};
+            columns.push_back({physical, column.dataName, INVALID_OID, static_cast<int16_t>(i + 1)});
+            columnIdentities.emplace(physical, column.dataName);
+        }
+    }
+    if (!cascade && !columns.empty())
+        return {DBStatus::INVALID_VALUE, "schema has dependent typed columns", {}};
+    std::sort(columns.begin(), columns.end(), [](const auto& left, const auto& right) {
+        return left.table == right.table ? left.ordinal > right.ordinal : left.table < right.table;
+    });
+
+    // Every physical, auxiliary and catalog mutation is statement-atomic,
+    // including outer transactions and their savepoints.
+    txn.markSnapshotDirty();
+    SchemaNamespaceResult result;
+    for (const auto& column : columns) {
+        const auto columnStatus = engine.alterTableDropColumn(database, column.table, column.column);
+        if (columnStatus != DBStatus::OK)
+            return {columnStatus, "dependent column removal failed: " + column.table + "." + column.column, {}};
+        if (column.relation == INVALID_OID) continue;
+        const auto relation = catalog.getClass(column.relation);
+        const auto schema = relation ? catalog.getNamespace(relation->relnamespace) : std::nullopt;
+        if (!schema || !dropOwnedSequencesForColumn(catalog, database, column.table,
+                domainQuotedIdentifier(schema->nspname) + "." + domainQuotedIdentifier(relation->relname),
+                column.relation, column.ordinal, column.column, true, result.droppedSequences, engine) ||
+            !catalog.remapColumnMetadataAfterDrop(column.relation, column.ordinal) ||
+            !synchronizeTableAttributesInCatalog(database, column.table, nullptr, engine, column.relation))
+            return {DBStatus::CORRUPTED_DATA, "dependent column catalog update failed", {}};
+    }
+    if (!executeSchemaPhysicalDropPlan(engine, catalog, database, plan, cascade,
+            storageOnlyTables, result.droppedSequences, result.error)) {
+        result.status = DBStatus::INVALID_VALUE;
+        return result;
+    }
+    for (const auto& object : auxiliary) {
+        DdlObjectKind ddlKind = DdlObjectKind::Type;
+        switch (object.kind) {
+            case Kind::Domain:
+                status = engine.dropDomain(database, object.name);
+                ddlKind = DdlObjectKind::Domain; break;
+            case Kind::Composite: status = engine.dropCompositeType(database, object.name); break;
+            case Kind::Enum: status = engine.dropEnumType(database, object.name); break;
+            case Kind::Shell: status = removeShellType(database, object.name); break;
+            case Kind::Udt: status = removeUdtMeta(database, object.name); break;
+            case Kind::Function:
+                status = engine.dropUDF(database, object.name, object.schema);
+                ddlKind = DdlObjectKind::Function; break;
+            case Kind::TableFunction:
+                status = engine.dropTVF(database, object.name);
+                ddlKind = DdlObjectKind::Function; break;
+            case Kind::Procedure:
+                status = engine.dropProcedure(database, object.name, object.schema);
+                ddlKind = DdlObjectKind::Procedure; break;
+            case Kind::Collation:
+                status = engine.dropCollation(database, object.name);
+                ddlKind = DdlObjectKind::Collation; break;
+        }
+        if (status != DBStatus::OK)
+            return {status, "auxiliary cleanup failed: " + object.name, {}};
+        txn.recordDrop(ddlKind, object.name, object.schema);
+    }
+    status = engine.dropSchemaMarker(database, name);
+    if (status != DBStatus::OK) return {status, "schema marker removal failed", {}};
+    if (!catalog.applyDropPlan(plan, &result.error)) {
+        result.status = DBStatus::CORRUPTED_DATA; return result;
+    }
+    if (!catalog.persistAll()) return {DBStatus::IO_ERROR, "schema catalog publication failed", {}};
+    txn.recordDrop(DdlObjectKind::Schema, name);
+    for (const auto& sequence : result.droppedSequences)
+        txn.recordDrop(DdlObjectKind::Sequence, sequence);
+    if (!txn.commit()) return {DBStatus::IO_ERROR, "namespace transaction commit failed", {}};
+    return result;
+} catch (const DbError& error) {
+    if (error.sqlState() == "58030")
+        return {DBStatus::IO_ERROR, error.what(), {}};
+    throw;
+} catch (const std::bad_alloc&) {
+    return {DBStatus::OUT_OF_MEMORY, "namespace allocation failed", {}};
+} catch (const std::exception& error) {
+    return {DBStatus::IO_ERROR, error.what(), {}};
+}
+
 bool DdlExecutor::executeCreateSchema(const CreateObjectStmt* stmt, Session& s) {
     if (!stmt) return rejectMalformedDdlAst();
-    if (!checkAdmin(s)) return true;
-    if (!checkDB(s)) return true;
-
-    DdlTransaction txn(s);
-    txn.enableSnapshotRollback();
-    if (!txn.begin()) {
-        std::cout << "DDL transaction begin failed" << std::endl;
+    if (!checkAdmin(s) || !checkDB(s)) return true;
+    const auto result = createSchemaNamespace(g_engine, s.currentDB, stmt->objectName, &s);
+    if (result.status == DBStatus::TABLE_ALREADY_EXISTS && stmt->ifNotExists) {
+        std::cout << "NOTICE: schema already exists, skipping" << std::endl;
+        return false;
+    }
+    if (result.status != DBStatus::OK) {
+        std::cout << "ERROR: " << result.error << " (SQLSTATE "
+                  << (result.status == DBStatus::TABLE_ALREADY_EXISTS ? "42P06"
+                       : sqlstateForDBStatus(result.status)) << ")" << std::endl;
         return true;
     }
-
-    std::string name = stmt->objectName;
-    if (name.empty()) {
-        std::cout << "SQL syntax error: CREATE SCHEMA name" << std::endl;
-        return true;
-    }
-    DBStatus res = g_engine.createSchema(s.currentDB, name);
-    if (res == DBStatus::TABLE_ALREADY_EXISTS) {
-        if (stmt->ifNotExists) {
-            std::cout << "NOTICE: schema \"" << name << "\" already exists, skipping"
-                      << std::endl;
-            return false;
-        }
-        std::cout << "ERROR: schema \"" << name
-                  << "\" already exists (SQLSTATE 42P06)" << std::endl;
-        return true;
-    }
-    if (res != DBStatus::OK) {
-        std::cout << "CREATE SCHEMA failed" << std::endl;
-        return true;
-    }
-
-    try {
-        dbms::CatalogManager& cat = g_engine.catalogService().get(s.currentDB);
-        cat.createNamespace(name, INVALID_OID);
-        if (!cat.persistAll()) {
-            std::cout << "CREATE SCHEMA catalog persistence failed" << std::endl;
-            return true;
-        }
-    } catch (const std::exception& e) {
-        std::cerr << "CREATE SCHEMA catalog registration failed: " << e.what() << std::endl;
-        return true;
-    }
-
-    txn.recordCreate(DdlObjectKind::Schema, name);
-    if (!txn.commit()) return true;
     std::cout << "CREATE SCHEMA succeeded" << std::endl;
     return false;
 }
 
 bool DdlExecutor::executeDropSchema(const DropStmt* stmt, Session& s) {
     if (!stmt) return rejectMalformedDdlAst();
-    if (!checkAdmin(s)) return true;
-    if (!checkDB(s)) return true;
-
-    DdlTransaction txn(s);
-    txn.enableSnapshotRollback();
-    if (!txn.begin()) {
-        std::cout << "DDL transaction begin failed" << std::endl;
-        return true;
-    }
-
-    if (stmt->objectNames.empty()) {
-        std::cout << "SQL syntax error: DROP SCHEMA name" << std::endl;
-        return true;
-    }
+    if (!checkAdmin(s) || !checkDB(s)) return true;
     if (stmt->objectNames.size() != 1) {
-        std::cout << "DROP SCHEMA with multiple targets is not supported"
-                  << std::endl;
+        std::cout << "ERROR: DROP SCHEMA requires one target" << std::endl;
         return true;
     }
-    std::string name = stmt->objectNames.front();
-    const bool storageSchemaExists =
-        g_engine.schemaExists(s.currentDB, name);
-
-    // Several object families still use storage sidecars instead of pg_type
-    // or pg_proc rows. They nevertheless belong to their logical namespace
-    // and must participate in the same RESTRICT/CASCADE decision.
-    enum class AuxiliarySchemaObjectKind {
-        Domain,
-        CompositeType,
-        EnumType,
-        ShellType,
-        UdtType,
-        Function,
-        TableFunction,
-        Procedure,
-        Collation
-    };
-    struct AuxiliarySchemaObject {
-        AuxiliarySchemaObjectKind kind;
-        std::string name;
-        std::string schema;
-    };
-    std::vector<AuxiliarySchemaObject> auxiliaryObjects;
-    const std::string logicalPrefix = name + ".";
-    const std::string physicalPrefix = name + "__";
-    const auto hasLogicalNamespace = [&](const std::string& objectName) {
-        return objectName.size() > logicalPrefix.size() &&
-               objectName.rfind(logicalPrefix, 0) == 0;
-    };
-    const auto addLogicalObjects = [&](const std::vector<std::string>& names,
-                                       AuxiliarySchemaObjectKind kind) {
-        for (const auto& objectName : names) {
-            if (hasLogicalNamespace(objectName)) {
-                auxiliaryObjects.push_back({kind, objectName});
-            }
-        }
-    };
-    try {
-        std::vector<std::string> shellTypes;
-        DBStatus auxiliaryStatus = loadShellTypes(s.currentDB, shellTypes);
-        if (auxiliaryStatus != DBStatus::OK) {
-            std::cout << "DROP SCHEMA shell-type preflight failed (SQLSTATE "
-                      << sqlstateForDBStatus(auxiliaryStatus) << ")"
-                      << std::endl;
-            return true;
-        }
-        std::vector<UdtMeta> udtTypes;
-        auxiliaryStatus = loadUdtMeta(s.currentDB, udtTypes);
-        if (auxiliaryStatus != DBStatus::OK) {
-            std::cout << "DROP SCHEMA UDT preflight failed (SQLSTATE "
-                      << sqlstateForDBStatus(auxiliaryStatus) << ")"
-                      << std::endl;
-            return true;
-        }
-        addLogicalObjects(g_engine.getDomainNames(s.currentDB),
-                          AuxiliarySchemaObjectKind::Domain);
-        addLogicalObjects(g_engine.getCompositeTypeNames(s.currentDB),
-                          AuxiliarySchemaObjectKind::CompositeType);
-        addLogicalObjects(g_engine.getEnumTypeNames(s.currentDB),
-                          AuxiliarySchemaObjectKind::EnumType);
-        addLogicalObjects(shellTypes,
-                          AuxiliarySchemaObjectKind::ShellType);
-        for (const auto& meta : udtTypes) {
-            if (hasLogicalNamespace(meta.name)) {
-                auxiliaryObjects.push_back(
-                    {AuxiliarySchemaObjectKind::UdtType, meta.name});
-            }
-        }
-        addLogicalObjects(g_engine.getUDFNames(s.currentDB),
-                          AuxiliarySchemaObjectKind::Function);
-        addLogicalObjects(g_engine.getTVFNames(s.currentDB),
-                          AuxiliarySchemaObjectKind::TableFunction);
-        for(const auto& procedure:g_engine.getProcedureNames(s.currentDB,name))
-            auxiliaryObjects.push_back({AuxiliarySchemaObjectKind::Procedure,procedure,name});
-        for (const auto& collation :
-             g_engine.getCollationNames(s.currentDB)) {
-            if (hasLogicalNamespace(collation) ||
-                (collation.size() > physicalPrefix.size() &&
-                 collation.rfind(physicalPrefix, 0) == 0)) {
-                auxiliaryObjects.push_back(
-                    {AuxiliarySchemaObjectKind::Collation, collation});
-            }
-        }
-    } catch (const std::exception& error) {
-        std::cout << "DROP SCHEMA auxiliary-object preflight failed: "
-                  << error.what() << std::endl;
+    const std::string& name = stmt->objectNames.front();
+    const auto result = dropSchemaNamespace(g_engine, s.currentDB, name, stmt->cascade, &s);
+    if (result.status == DBStatus::TABLE_NOT_FOUND && stmt->ifExists) {
+        std::cout << "NOTICE: schema does not exist, skipping" << std::endl;
+        return false;
+    }
+    if (result.status != DBStatus::OK) {
+        std::cout << "ERROR: " << result.error << " (SQLSTATE "
+                  << (result.status == DBStatus::TABLE_NOT_FOUND ? "3F000"
+                       : result.status == DBStatus::INVALID_VALUE ? "2BP01"
+                       : sqlstateForDBStatus(result.status)) << ")" << std::endl;
         return true;
     }
-    if (!stmt->cascade && !auxiliaryObjects.empty()) {
-        std::cout << "ERROR: cannot drop schema " << name
-                  << " because object " << auxiliaryObjects.front().name
-                  << " depends on it (SQLSTATE 2BP01)" << std::endl;
-        return true;
-    }
-
-    // Validate dependencies without mutating the catalog.  The physical
-    // schema removal must win the race with catalog publication, otherwise a
-    // failed filesystem operation can leave a catalog namespace that no
-    // longer matches storage (or vice versa).
-    CatalogManager* catalogManager = nullptr;
-    CatalogManager::DropPlan catalogDropPlan;
-    bool hasCatalogDropPlan = false;
-    try {
-        dbms::CatalogManager& cat = g_engine.catalogService().get(s.currentDB);
-        catalogManager = &cat;
-        const auto ns = cat.getNamespaceByName(name);
-        if (!ns) {
-            if (!storageSchemaExists && auxiliaryObjects.empty()) {
-                if (stmt->ifExists) {
-                    if (!txn.commit()) return true;
-                    std::cout << "NOTICE: schema \"" << name
-                              << "\" does not exist, skipping" << std::endl;
-                    return false;
-                }
-                std::cout << "ERROR: schema \"" << name
-                          << "\" does not exist (SQLSTATE 3F000)"
-                          << std::endl;
-            } else {
-                std::cout << "DROP SCHEMA refused: storage objects for "
-                          << name << " have no catalog namespace" << std::endl;
-            }
-            return true;
-        }
-        if (!storageSchemaExists) {
-            std::cout << "DROP SCHEMA refused: catalog namespace " << name
-                      << " has no storage marker" << std::endl;
-            return true;
-        }
-        const auto behavior = stmt->cascade
-            ? CatalogManager::DropBehavior::Cascade
-            : CatalogManager::DropBehavior::Restrict;
-        catalogDropPlan = cat.planDrop(PgClassOid_Namespace, ns->oid, behavior);
-        if (!catalogDropPlan.ok()) {
-            std::cout << "ERROR: " << catalogDropPlan.error;
-            if (!stmt->cascade) std::cout << " (SQLSTATE 2BP01)";
-            std::cout << std::endl;
-            return true;
-        }
-        hasCatalogDropPlan = true;
-    } catch (const std::exception& e) {
-        std::cerr << "DROP SCHEMA catalog preflight failed: " << e.what()
-                  << std::endl;
-        return true;
-    }
-
-    // From this point on physical deletion may be partial (CASCADE can
-    // remove several relations), so every failure must be able to restore
-    // the pre-statement snapshot.
-    txn.markSnapshotDirty();
-    std::set<std::string> droppedSequenceStorageNames;
-    if (hasCatalogDropPlan && catalogManager) {
-        std::string error;
-        if (!executeSchemaPhysicalDropPlan(
-                *catalogManager, s.currentDB, catalogDropPlan,
-                stmt->cascade, droppedSequenceStorageNames, error)) {
-            std::cout << "DROP SCHEMA physical cleanup failed: "
-                      << error << std::endl;
-            return true;
-        }
-    }
-    for (const auto& object : auxiliaryObjects) {
-        DBStatus status = DBStatus::OK;
-        DdlObjectKind ddlKind = DdlObjectKind::Type;
-        switch (object.kind) {
-            case AuxiliarySchemaObjectKind::Domain:
-                status = g_engine.dropDomain(s.currentDB, object.name);
-                ddlKind = DdlObjectKind::Domain;
-                break;
-            case AuxiliarySchemaObjectKind::CompositeType:
-                status = g_engine.dropCompositeType(
-                    s.currentDB, object.name);
-                break;
-            case AuxiliarySchemaObjectKind::EnumType:
-                status = g_engine.dropEnumType(s.currentDB, object.name);
-                break;
-            case AuxiliarySchemaObjectKind::ShellType:
-                status = removeShellType(s.currentDB, object.name);
-                break;
-            case AuxiliarySchemaObjectKind::UdtType:
-                status = removeUdtMeta(s.currentDB, object.name);
-                break;
-            case AuxiliarySchemaObjectKind::Function:
-                status = g_engine.dropUDF(s.currentDB, object.name);
-                ddlKind = DdlObjectKind::Function;
-                break;
-            case AuxiliarySchemaObjectKind::TableFunction:
-                status = g_engine.dropTVF(s.currentDB, object.name);
-                ddlKind = DdlObjectKind::Function;
-                break;
-            case AuxiliarySchemaObjectKind::Procedure:
-                status = g_engine.dropProcedure(s.currentDB, object.name,object.schema);
-                ddlKind = DdlObjectKind::Procedure;
-                break;
-            case AuxiliarySchemaObjectKind::Collation:
-                status = g_engine.dropCollation(s.currentDB, object.name);
-                ddlKind = DdlObjectKind::Collation;
-                break;
-        }
-        if (status != DBStatus::OK) {
-            std::cout << "DROP SCHEMA auxiliary cleanup failed for "
-                      << object.name << std::endl;
-            return true;
-        }
-        txn.recordDrop(ddlKind, object.name,object.schema);
-    }
-    // Catalog-planned relation removal above is dependency ordered and also
-    // includes objects outside this namespace reached by CASCADE. The storage
-    // primitive now only removes the namespace marker; asking it to cascade
-    // again would double-drop tables while still missing other relation kinds.
-    DBStatus res = g_engine.dropSchema(s.currentDB, name, false);
-    if (res != DBStatus::OK) {
-        std::cout << "DROP SCHEMA failed" << std::endl;
-        return true;
-    }
-
-    // DROP SCHEMA can remove multiple relations and their side files.  If
-    // catalog post-processing fails, restore the transaction snapshot rather
-    // than exposing a partially dropped namespace.
-    if (hasCatalogDropPlan && catalogManager) {
-        std::string error;
-        if (!catalogManager->applyDropPlan(catalogDropPlan, &error)) {
-            std::cout << "DROP SCHEMA catalog cleanup failed: " << error << std::endl;
-            return true;
-        }
-        if (!catalogManager->persistAll()) {
-            std::cout << "DROP SCHEMA catalog persistence failed" << std::endl;
-            return true;
-        }
-    }
-    txn.recordDrop(DdlObjectKind::Schema, name);
-    for (const auto& sequenceName : droppedSequenceStorageNames) {
-        txn.recordDrop(DdlObjectKind::Sequence, sequenceName);
-    }
-    if (!txn.commit()) return true;
-    for (const auto& sequenceName : droppedSequenceStorageNames) {
-        s.sequenceLastValues.erase(sequenceName);
-        if (sequenceName.find('.') == std::string::npos) {
-            s.sequenceLastValues.erase("public." + sequenceName);
-        }
+    for (const auto& sequence : result.droppedSequences) {
+        s.sequenceLastValues.erase(sequence);
+        if (sequence.find('.') == std::string::npos)
+            s.sequenceLastValues.erase("public." + sequence);
     }
     std::cout << "DROP SCHEMA succeeded" << std::endl;
     return false;
@@ -4980,12 +5066,13 @@ static bool parseSequenceOwnedByReference(
 }
 
 static std::vector<std::pair<std::string, std::string>> findDefaultNextvalDeps(
-    const std::string& dbname, const std::string& seqname) {
+    const std::string& dbname, const std::string& seqname,
+    StorageEngine& engine = g_engine) {
     const std::string canonicalTarget =
         canonicalSequenceReferenceName(seqname);
     std::vector<std::pair<std::string, std::string>> deps;
-    for (const auto& tname : g_engine.getTableNames(dbname)) {
-        dbms::TableSchema tbl = g_engine.getTableSchema(dbname, tname);
+    for (const auto& tname : engine.getTableNames(dbname)) {
+        dbms::TableSchema tbl = engine.getTableSchema(dbname, tname);
         for (size_t i = 0; i < tbl.len; ++i) {
             const std::string sequence =
                 extractNextvalSequence(tbl.cols[i].defaultValue);
@@ -6362,7 +6449,7 @@ static bool buildPhysicalCascadeActions(
         }
         const PgClassRow rel = *relation;
 
-        if (rel.relkind == 'r') {
+        if (rel.relkind == 'r' || rel.relkind == 'p') {
             std::string tableName;
             if (!catalogTableStorageName(
                     catalog, rel, tableName, error)) {
@@ -6463,16 +6550,20 @@ static bool dropPhysicalCascadeAction(StorageEngine& engine,
 }
 
 static bool executeSchemaPhysicalDropPlan(
-    CatalogManager& catalog, const std::string& dbname,
+    StorageEngine& engine, CatalogManager& catalog, const std::string& dbname,
     const CatalogManager::DropPlan& catalogPlan, bool cascade,
+    const std::vector<std::string>& storageOnlyTables,
     std::set<std::string>& droppedSequenceStorageNames,
     std::string& error) {
     std::vector<PhysicalCascadeAction> actions;
     if (!buildPhysicalCascadeActions(
-            catalog, g_engine, dbname, INVALID_OID,
+            catalog, engine, dbname, INVALID_OID,
             catalogPlan, actions, error)) {
         return false;
     }
+
+    for (const auto& table : storageOnlyTables)
+        actions.push_back({PhysicalCascadeAction::Kind::Table, table, "", "", ""});
 
     std::set<std::string> droppedTableStorageNames;
     std::set<std::string> sequenceStorageNames;
@@ -6488,9 +6579,9 @@ static bool executeSchemaPhysicalDropPlan(
     // namespace CASCADE drops its tables but must only remove an external
     // child's FK, not the child relation itself.
     std::vector<std::pair<std::string, std::string>> foreignKeysToDrop;
-    for (const auto& childName : g_engine.getTableNames(dbname)) {
+    for (const auto& childName : engine.getTableNames(dbname)) {
         if (droppedTableStorageNames.count(childName) != 0) continue;
-        const TableSchema child = g_engine.getTableSchema(dbname, childName);
+        const TableSchema child = engine.getTableSchema(dbname, childName);
         for (size_t i = 0; i < child.fkLen; ++i) {
             const auto& fk = child.fks[i];
             bool referencesDroppedTable =
@@ -6508,7 +6599,7 @@ static bool executeSchemaPhysicalDropPlan(
             }
             if (!referencesDroppedTable && fk.refTable.find('.') ==
                     std::string::npos &&
-                !g_engine.tableExists(dbname, fk.refTable)) {
+                !engine.tableExists(dbname, fk.refTable)) {
                 for (const auto& target : droppedTableStorageNames) {
                     if (CatalogService::logicalName(target).name ==
                         fk.refTable) {
@@ -6533,9 +6624,9 @@ static bool executeSchemaPhysicalDropPlan(
         }
     }
     for (const auto& [childName, constraintName] : foreignKeysToDrop) {
-        if (g_engine.alterTableDropConstraint(
+        if (engine.alterTableDropConstraint(
                 dbname, childName, constraintName) != DBStatus::OK ||
-            g_engine.updateStorageParams(
+            engine.updateStorageParams(
                 dbname, childName,
                 {{constraintMetadataKey(constraintName, "validated"), ""},
                  {constraintMetadataKey(constraintName, "not_valid"), ""},
@@ -6554,7 +6645,7 @@ static bool executeSchemaPhysicalDropPlan(
     std::set<std::pair<std::string, std::string>> defaultsToClear;
     for (const auto& sequenceName : sequenceStorageNames) {
         for (const auto& dependency :
-             findDefaultNextvalDeps(dbname, sequenceName)) {
+             findDefaultNextvalDeps(dbname, sequenceName, engine)) {
             if (droppedTableStorageNames.count(dependency.first) != 0) {
                 continue;
             }
@@ -6570,7 +6661,7 @@ static bool executeSchemaPhysicalDropPlan(
 
     std::set<std::string> changedDefaultTables;
     for (const auto& dependency : defaultsToClear) {
-        if (g_engine.alterTableDropDefault(
+        if (engine.alterTableDropDefault(
                 dbname, dependency.first,
                 dependency.second) != DBStatus::OK) {
             error = "cannot clear default on " + dependency.first + "." +
@@ -6580,14 +6671,14 @@ static bool executeSchemaPhysicalDropPlan(
         changedDefaultTables.insert(dependency.first);
     }
     for (const auto& changedTable : changedDefaultTables) {
-        if (!synchronizeTableAttributesInCatalog(dbname, changedTable)) {
+        if (!synchronizeTableAttributesInCatalog(dbname, changedTable, nullptr, engine)) {
             error = "cannot persist default removal for " + changedTable;
             return false;
         }
     }
 
     for (const auto& action : actions) {
-        if (!dropPhysicalCascadeAction(g_engine, dbname, action)) {
+        if (!dropPhysicalCascadeAction(engine, dbname, action)) {
             error = "cannot remove relation " + action.name;
             return false;
         }
@@ -6607,7 +6698,8 @@ static bool dropOwnedSequencesForColumn(
     const std::string& physicalTableName,
     const std::string& logicalTableName, Oid tableOid,
     int32_t columnNumber, const std::string& columnName, bool cascade,
-    std::set<std::string>& droppedSequenceStorageNames) {
+    std::set<std::string>& droppedSequenceStorageNames,
+    StorageEngine& engine) {
     struct Target {
         Oid oid = INVALID_OID;
         std::string storageName;
@@ -6644,7 +6736,7 @@ static bool dropOwnedSequencesForColumn(
             return false;
         }
         SequenceInfo sequenceInfo;
-        if (g_engine.getSequenceInfo(
+        if (engine.getSequenceInfo(
                 dbname, storageName, sequenceInfo) != DBStatus::OK) {
             std::cout << "ALTER TABLE DROP COLUMN cannot read owned sequence "
                       << storageName << std::endl;
@@ -6667,7 +6759,7 @@ static bool dropOwnedSequencesForColumn(
         target.oid = dependent->oid;
         target.storageName = storageName;
         for (const auto& defaultDependency :
-             findDefaultNextvalDeps(dbname, storageName)) {
+             findDefaultNextvalDeps(dbname, storageName, engine)) {
             if (defaultDependency.first == physicalTableName &&
                 defaultDependency.second == columnName) {
                 continue;
@@ -6710,7 +6802,7 @@ static bool dropOwnedSequencesForColumn(
         std::vector<PhysicalCascadeAction> targetActions;
         std::string error;
         if (!buildPhysicalCascadeActions(
-                catalog, g_engine, dbname, target.oid,
+                catalog, engine, dbname, target.oid,
                 target.catalogPlan, targetActions, error)) {
             std::cout << "ALTER TABLE DROP COLUMN dependency planning failed: "
                       << error << std::endl;
@@ -6741,7 +6833,7 @@ static bool dropOwnedSequencesForColumn(
     for (const auto& target : targets) {
         for (const auto& dependency : target.defaultDependencies) {
             if (!clearedDefaults.insert(dependency).second) continue;
-            if (g_engine.alterTableDropDefault(
+            if (engine.alterTableDropDefault(
                     dbname, dependency.first,
                     dependency.second) != DBStatus::OK) {
                 std::cout << "ALTER TABLE DROP COLUMN failed to clear default on "
@@ -6757,7 +6849,7 @@ static bool dropOwnedSequencesForColumn(
         // compact dependency/description sub-ids. Its final synchronization
         // will publish both the compacted schema and this default change.
         if (changedTable == physicalTableName) continue;
-        if (!synchronizeTableAttributesInCatalog(dbname, changedTable)) {
+        if (!synchronizeTableAttributesInCatalog(dbname, changedTable, nullptr, engine)) {
             std::cout << "ALTER TABLE DROP COLUMN default catalog update failed for "
                       << changedTable << std::endl;
             return false;
@@ -6765,7 +6857,7 @@ static bool dropOwnedSequencesForColumn(
     }
 
     for (const auto& action : physicalActions) {
-        if (!dropPhysicalCascadeAction(g_engine, dbname, action)) {
+        if (!dropPhysicalCascadeAction(engine, dbname, action)) {
             std::cout << "ALTER TABLE DROP COLUMN dependency cleanup failed for "
                       << action.name << std::endl;
             return false;
@@ -6775,7 +6867,7 @@ static bool dropOwnedSequencesForColumn(
         }
     }
     for (const auto& target : targets) {
-        if (g_engine.dropSequence(
+        if (engine.dropSequence(
                 dbname, target.storageName) != DBStatus::OK) {
             std::cout << "ALTER TABLE DROP COLUMN failed to drop owned sequence "
                       << target.storageName << std::endl;

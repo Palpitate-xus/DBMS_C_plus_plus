@@ -281,9 +281,13 @@ public:
     std::vector<std::string> getProcedureNames(const std::string& dbname,
                                                const std::string& schema = "public") const;
 
-    // Schema management
+    // Complete native namespace operations. Unlike createTable(), these own
+    // catalog identity/dependencies and statement-level physical rollback.
     DBStatus createSchema(const std::string& dbname, const std::string& schemaname);
     DBStatus dropSchema(const std::string& dbname, const std::string& schemaname, bool cascade);
+    // Physical marker primitives for the namespace owner/DDL undo only.
+    DBStatus createSchemaMarker(const std::string& dbname, const std::string& schemaname);
+    DBStatus dropSchemaMarker(const std::string& dbname, const std::string& schemaname);
     DBStatus renameSchema(const std::string& dbname, const std::string& oldname,
                           const std::string& newname);
     bool schemaExists(const std::string& dbname, const std::string& schemaname) const;
@@ -464,6 +468,9 @@ public:
         const std::string& legacySql, std::shared_ptr<PreparedQuery> query,
         const Stmt* statement, const RowContext& row) const;
     std::vector<std::string> getUDFNames(const std::string& dbname) const;
+    // Explicit canonical namespace; decoded routine names may contain dots.
+    std::vector<std::string> getUDFNames(const std::string& dbname,
+                                        const std::string& schema) const;
 
     // Table-valued functions (return a result set)
     DBStatus createTVF(const std::string& dbname, const std::string& funcname,
@@ -905,6 +912,15 @@ public:
 
     // Transaction operations
     bool inTransaction() const { return transactionContext().inTransaction; }
+    const std::string& transactionDatabase() const { return transactionContext().txnDB; }
+    struct CatalogReadOwnership {
+        bool mayReadCurrentFiles = false;
+        std::shared_ptr<void> lifetime;
+        uint64_t writeTransaction = 0;
+    };
+    // A non-blocking, actual-database read fence. Own transaction locks are
+    // recognized directly, including BEGIN before its logical active flag.
+    CatalogReadOwnership catalogReadOwnership(const std::string& dbname) const;
     bool isReadOnly() const { return transactionContext().readOnly; }
     bool setReadOnly(bool readOnly) {
         auto& context = transactionContext();

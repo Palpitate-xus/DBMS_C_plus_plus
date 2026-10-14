@@ -94,7 +94,11 @@ bool undoTableCreate(StorageEngine& engine, const std::string& db,
 } // anonymous namespace
 
 DdlTransaction::DdlTransaction(Session& session)
-    : session_(session), engine_(g_engine) {}
+    : session_(&session), database_(session.currentDB), engine_(g_engine) {}
+
+DdlTransaction::DdlTransaction(StorageEngine& engine, const std::string& database,
+                               Session* sqlSession)
+    : session_(sqlSession), database_(database), engine_(engine) {}
 
 DdlTransaction::~DdlTransaction() {
     if (active_ && !committed_) {
@@ -130,6 +134,7 @@ void DdlTransaction::markSnapshotDirty() {
 
 bool DdlTransaction::begin() {
     if (engine_.inTransaction()) {
+        if (engine_.transactionDatabase() != database_) return false;
         if (snapshotRollbackEnabled_ && engine_.transactionBackupDirty()) {
             // Keep the transaction's original image reserved for full
             // ROLLBACK. A later file-rewriting statement gets an auxiliary
@@ -157,14 +162,14 @@ bool DdlTransaction::begin() {
         }
         return true;
     }
-    if (session_.currentDB.empty()) {
+    if (database_.empty()) {
         // CREATE/DROP DATABASE 等跨库命令在没有 currentDB 时也能执行，
         // 这里先激活事务状态，实际操作自行使用合适的 dbname。
         active_ = true;
         startedByUs_ = false;
         return true;
     }
-    DBStatus st = engine_.beginTransaction(session_.currentDB, snapshotRollbackEnabled_);
+    DBStatus st = engine_.beginTransaction(database_, snapshotRollbackEnabled_);
     if (st == DBStatus::LOCK_CONFLICT) {
         throw DbError("55P03", "could not obtain database transaction lock");
     }
@@ -213,7 +218,7 @@ bool DdlTransaction::commit() {
         // Make the engine own CREATE undo before commit can encounter a
         // failure and initiate rollback. A failed rollback must not depend
         // on this statement wrapper surviving stack unwinding.
-        const std::string db = session_.currentDB;
+        const std::string db = database_;
         for (const auto& op : ops_) {
             if (op.op != RecordedOp::Op::Create) continue;
             const std::string undoDb = db.empty() ? op.extra : db;
@@ -223,8 +228,8 @@ bool DdlTransaction::commit() {
         }
         ops_.clear();
         auto& notifications = notificationManager();
-        if (notifications.inTransaction(session_.pid) &&
-            !notifications.prepareCommitTransaction(session_.pid)) {
+        if (session_ && notifications.inTransaction(session_->pid) &&
+            !notifications.prepareCommitTransaction(session_->pid)) {
             std::cerr << "ERROR: too many notifications in the NOTIFY queue "
                          "(SQLSTATE 54000)" << std::endl;
             rollback();
@@ -244,13 +249,13 @@ bool DdlTransaction::commit() {
     }
 
     if (startedByUs_) {
-        engine_.discardTransactionBackup(session_.currentDB);
+        engine_.discardTransactionBackup(database_);
     } else if (engine_.inTransaction()) {
         // A DDL wrapper is statement-scoped, while the engine transaction may
         // span many statements. Preserve CREATE undo actions in that outer
         // transaction so COMMIT/ROLLBACK and SAVEPOINT see the complete DDL
         // history instead of only the last statement.
-        const std::string db = session_.currentDB;
+        const std::string db = database_;
         for (const auto& op : ops_) {
             if (op.op != RecordedOp::Op::Create) continue;
             const std::string undoDb = db.empty() ? op.extra : db;
@@ -272,7 +277,7 @@ bool DdlTransaction::commit() {
 void DdlTransaction::rollback() {
     if (!active_) return;
     if (startedByUs_ && engine_.inTransaction()) {
-        const std::string db = session_.currentDB;
+        const std::string db = database_;
         for (const auto& op : ops_) {
             if (op.op != RecordedOp::Op::Create) continue;
             const std::string undoDb = db.empty() ? op.extra : db;
@@ -288,7 +293,7 @@ void DdlTransaction::rollback() {
                       << "); retaining engine transaction and recovery image" << std::endl;
             return;
         }
-        engine_.discardTransactionBackup(session_.currentDB);
+        engine_.discardTransactionBackup(database_);
         committed_ = false;
         active_ = false;
         return;
@@ -307,7 +312,7 @@ void DdlTransaction::rollback() {
         // owns the physical snapshot created in begin(). Leaving it behind
         // makes the next process startup mistake an already-rolled-back
         // statement for an in-progress DDL and restore stale files.
-        engine_.discardTransactionBackup(session_.currentDB);
+        engine_.discardTransactionBackup(database_);
     } else if (!startedByUs_ && engine_.inTransaction() &&
                !statementBackupPath_.empty()) {
         if (snapshotDirty_) {
@@ -315,7 +320,7 @@ void DdlTransaction::rollback() {
                     statementBackupPath_)) {
                 std::cerr << "DDL rollback warning: failed to restore "
                              "statement snapshot for "
-                          << session_.currentDB << std::endl;
+                          << database_ << std::endl;
                 // A failed statement restore cannot safely admit later
                 // writes. Fall back to full transaction rollback; if that
                 // fails too, its graph/locks/images remain owned for retry.
@@ -327,16 +332,16 @@ void DdlTransaction::rollback() {
         statementBackupPath_.clear();
     } else if (!startedByUs_ && engine_.inTransaction() &&
                snapshotRollbackEnabled_ && snapshotDirty_ &&
-               !session_.currentDB.empty()) {
-        if (!engine_.restoreTransactionBackup(session_.currentDB)) {
+               !database_.empty()) {
+        if (!engine_.restoreTransactionBackup(database_)) {
             std::cerr << "DDL rollback warning: failed to restore database snapshot for "
-                      << session_.currentDB << std::endl;
+                      << database_ << std::endl;
             if (engine_.rollbackTransaction() != DBStatus::OK) return;
         }
     } else if (!startedByUs_ && engine_.inTransaction() &&
                snapshotRollbackEnabled_ && !snapshotDirty_) {
         if (snapshotCreatedByThis_) {
-            engine_.discardTransactionBackup(session_.currentDB);
+            engine_.discardTransactionBackup(database_);
         }
     }
     ops_.clear();
@@ -365,7 +370,7 @@ std::string DdlTransaction::kindString(DdlObjectKind kind) const {
 }
 
 bool DdlTransaction::undoCreate(const RecordedOp& op) {
-    const std::string db = session_.currentDB.empty() ? op.extra : session_.currentDB;
+    const std::string db = database_.empty() ? op.extra : database_;
     return undoCreate(engine_, db, op);
 }
 
@@ -377,9 +382,21 @@ bool DdlTransaction::undoCreate(StorageEngine& engine, const std::string& db,
         case DdlObjectKind::Database:
             engine.dropDatabase(op.name);
             break;
-        case DdlObjectKind::Schema:
-            engine.dropSchema(db, op.name, true);
-            break;
+        case DdlObjectKind::Schema: {
+            const DBStatus marker = engine.dropSchemaMarker(db, op.name);
+            if (marker != DBStatus::OK && marker != DBStatus::TABLE_NOT_FOUND)
+                return false;
+            auto& catalog = engine.catalogService().get(db);
+            const auto* nameSpace = catalog.findNamespaceByName(op.name);
+            if (!nameSpace) return true;
+            const Oid oid = nameSpace->oid;
+            std::string error;
+            if (!catalog.dropObject(PgClassOid_Namespace, oid,
+                    CatalogManager::DropBehavior::Cascade, &error)) return false;
+            // A dirty physical image replaces this catalog during rollback.
+            return (engine.hasTransactionBackup() && engine.transactionBackupDirty()) ||
+                catalog.persistAll();
+        }
         case DdlObjectKind::Table:
             return undoTableCreate(engine, db, op);
         case DdlObjectKind::Index:
@@ -423,7 +440,7 @@ bool DdlTransaction::undoCreate(StorageEngine& engine, const std::string& db,
 }
 
 void DdlTransaction::writeWal(const RecordedOp& op) {
-    const std::string& db = session_.currentDB.empty() ? op.extra : session_.currentDB;
+    const std::string& db = database_.empty() ? op.extra : database_;
     if (db.empty()) return;
     engine_.walCatalogChange(db, walInfoForOp(op.op), kindString(op.kind), op.name);
 }

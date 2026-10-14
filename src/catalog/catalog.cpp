@@ -299,14 +299,18 @@ static bool writeCatalogFileAtomically(
 // ============================================================================
 
 CatalogManager::CatalogManager(const std::string& dbPath)
-    : dbPath_(dbPath), persistence_(std::make_unique<CatalogPersistenceState>(dbPath)) {
+    : CatalogManager(dbPath, true) {}
+
+CatalogManager::CatalogManager(const std::string& dbPath, bool persistOnDestruction)
+    : dbPath_(dbPath), persistOnDestruction_(persistOnDestruction),
+      persistence_(std::make_unique<CatalogPersistenceState>(dbPath)) {
     std::filesystem::create_directories(dbPath_);
     oidGen_ = std::make_unique<OidGenerator>(oidPath(dbPath));
     loadAll();
 }
 
 CatalogManager::~CatalogManager() {
-    if (oidGen_) (void)persistAll();
+    if (oidGen_ && persistOnDestruction_) (void)persistAll();
 }
 
 CatalogManager::CatalogManager(const std::string& dbPath, ReadOnlyTag)
@@ -2153,6 +2157,33 @@ std::map<std::string, std::string> CatalogManager::serializeAllLocked() const {
     });
 
     return images;
+}
+
+CatalogManager::PublicationState CatalogManager::publicationState() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> publicationLock(persistence_->publication->mutex);
+    const auto images = serializeAllLocked();
+    bool changed = false;
+    for (const auto& image : images) {
+        CatalogFileGeneration generation;
+        if (!catalogGeneration(catalogFilePath(image.first), generation) ||
+            (generation.exists && !generation.regular))
+            return PublicationState::Conflict;
+        const auto observed = persistence_->observed.find(image.first);
+        if (observed == persistence_->observed.end() || !(observed->second == generation)) {
+            // A lost file is not an authoritative empty namespace image.
+            if (!generation.exists) return PublicationState::Conflict;
+            changed = true;
+        }
+    }
+    if (!changed) return PublicationState::Current;
+    return images == persistence_->baseline ? PublicationState::CleanPeerChange
+                                            : PublicationState::Conflict;
+}
+
+bool CatalogManager::hasUnpublishedChanges() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return serializeAllLocked() != persistence_->baseline;
 }
 
 bool CatalogManager::persistAll() {
