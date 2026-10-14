@@ -23,6 +23,9 @@ R49/R52已分别以47b4e04b/34bff4ea/ce332459/e1ab8111/ebbf795c合入master，
 已terminal1：829native中5失败、3frontend全过、481Python中8失败，其中TLS环境
 skip不算TLS运行通过；原换行导致一项PASSED行首汇总遗漏，原严格结果与独立
 精确标记审计均保留，不伪装全绿。
+完整输入签名、1313入口终态、13项失败归属及后续主分支合入记录见
+[f408完整回归记录](issue-full-registered-f4087f5d.md)。R51仍未归因，R58/R59只
+记录原输入独立复验通过，不把历史连接/超时失败改称代码已修复。
 
 本轮按用户要求进行全仓库审查、复现和文档整理，结果与逐项修复方法见[审查报告](code-review-2026-10-13.md)，文件覆盖见[文档清单](documentation-inventory.md)。
 下方批次中的“当前”“正在运行”和 PASS 数均属于对应记录日期。此前 Root 60 native / 46 wire 验证已经终止：60/60、45/46 通过，唯一失败为 ALTER ARRAY 超时；不能继续标成运行中或全绿。
