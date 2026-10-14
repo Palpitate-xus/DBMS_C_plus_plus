@@ -87,6 +87,7 @@
 | R66 | 后台写回的目录错误逃出工作线程 | 已修复，已合主分支 | Root本地9e32343d；集成真实重编后十五完整native/十完整协议全0；固定真实目录EIO原主分支SIGABRT→候选dirty保留/worker存活/真实刷盘恢复全0；十三完整native、六完整协议、五轮十次控制全0，见[记录](issue-review-r66-background-catalog-errors.md) |
 | R67 | CREATE OR REPLACE VIEW既有列定义合约 | 已修复，已合主分支 | Root ca554c2f；PG80全0、原80中38失败→候选/Root全0；12严格拒绝/无副作用/旧代/冷目录，候选及Root各八完整native/九完整协议全0；额外完整PG驱动的57014已在无R67产物复现，R69独立验收，见[记录](issue-review-r67-view-replacement-contract.md) |
 | R68 | ABS整数范围及空输入常量分析 | 已复现，待修复 | INT4最小值取绝对值返回超范围2147483648/OID23；实际PG22003，空来源/LIMIT 0亦有错误阶段差异，保留INT8运行时已正确观察，见[记录](issue-review-r68-abs-integer-bounds.md) |
+| R69 | 完整协议夹具遗留456ms会话超时 | 已修正夹具，候选全驱动通过待集成 | 新旧产品原样完整驱动均57014；仅恢复参数探针前的会话默认0，保留974原断言新增3；完整PG及两真实取消驱动全0，见[记录](issue-review-r69-protocol-timeout-fixture.md) |
 | O01 | owner健康重试及测试覆盖 | 已修复 | `c9a1e3c3`；原全部owner断言、新真实peer/dirty冲突及10完整native提交前/后通过；Root R14集成fresh58后两完整owner再次通过，见[验证](issue-review-o01-table-owner-health-retry.md) |
 | O02 | EXISTS索引错误的访问计划/断言 | 已修正回归夹具 | 原完整协议exit 1→0，保留六严格XX001，新增精确t/f，完整EXISTS协议/19native通过；未改产品，见[验证](issue-review-o02-index-access-path-expectations.md) |
 | O03 | EXPLAIN JOIN图及过时断言 | 已修复 | 实际执行的source/cache/join/scan图及相关重绑；最终完整60控制、十二native/十协议CLI全过，OFFSET阳性及42601原/PG对照保留，见[验证](issue-review-o03-explain-join-source-graph.md) |

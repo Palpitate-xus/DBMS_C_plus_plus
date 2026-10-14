@@ -84,7 +84,9 @@ Root八完整native及九完整协议全部0，root-r67-native.log、root-r67-pr
 r67-prior-full-protocol-observation.log与r67-current-full-protocol-observation.log
 保留完整原始响应。原驱动的会话设置探针把456ms遗留给了无关后续数据读取，
 单独记为R69并验收夹具恢复默认值；不修改R67产品代码或数据/权限断言掩盖它。
-Root原未改驱动还在另行运行，其结果独立记录。上述对照不能冒充完整全绿。
+Root原未改驱动独立复跑也在相同role_rows断言失败，root-r67-full-pg-logs/
+保留。恢复会话参数的夹具候选已完整通过，见[R69](issue-review-r69-protocol-timeout-fixture.md)；
+上述对照不能冒充冻结全量全部通过，也不改写原驱动失败历史。
 
 本项仅覆盖普通视图既有列名、OID类型、typmod及列前缀兼容性，不宣称完整view
 DDL、collation传播、依赖图、所有更新规则或权限语义已经完成。用户暂缓专项不重启。

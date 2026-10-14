@@ -3622,6 +3622,15 @@ def main():
         sock.sendall(typed(b"X"))
         sock.close()
 
+        # The short statement_timeout above probes session-setting isolation,
+        # not a latency requirement for these later data/permission checks.
+        # Restore this connection's original default after that probe; keep
+        # all its 456/peer-0 assertions and the data assertions below intact.
+        reset_timeout = simple_query(role_sock, "RESET statement_timeout")
+        assert any(kind == b"C" for kind, _ in reset_timeout), reset_timeout
+        assert reset_timeout[-1] == (b"Z", b"I"), reset_timeout
+        assert setting_value(simple_query(role_sock, "SELECT name, setting, unit FROM pg_settings"),
+                             "statement_timeout") == b"0"
         role_rows = data_row_values(simple_query(role_sock, "SELECT id FROM t"))
         assert role_rows == [[b"1"], [b"3"], [b"20"]], role_rows
         default_role_rows = data_row_values(simple_query(
