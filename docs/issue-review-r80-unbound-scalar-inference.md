@@ -31,5 +31,6 @@ ABS(TEXT)、upper(integer)、length(integer)的严格拒绝。原实现实际8�
 实际PostgreSQL18.6原44控制也全0，`r80-reference44.log`。
 这些日志都位于`/tmp/dbms-review-r46.ifu6SWLp/`。
 
-本项只关闭原冻结的窗口失败，不改写其1360入口/2失败历史终态；另一项LENGTH
-原生VARBINARY签名失败仍待独立修复，不能将此组合宣称成完整全绿。
+本项验收时只关闭原冻结的窗口失败，不改写其1360入口/2失败历史终态；当时
+另一项LENGTH原生VARBINARY失败尚未修复，随后由[R79](issue-review-r79-native-binary-length.md)
+独立验收。两项定向通过也不能宣称该历史全量或修复后的新组合已经完整全绿。

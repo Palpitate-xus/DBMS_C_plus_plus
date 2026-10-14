@@ -10,6 +10,10 @@ def main():
     spec = importlib.util.spec_from_file_location('restore_status_runner', root / 'tests/compat/pg_diff_runner.py')
     runner = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(runner)
+    poll_spec = importlib.util.spec_from_file_location(
+        'restore_publication_poll', root / 'tests/div14_feature_gate_test.py')
+    restore_poll = importlib.util.module_from_spec(poll_spec)
+    poll_spec.loader.exec_module(restore_poll)
     client = runner.load_protocol_client()
     server = runner.start_ours(client)
     sock = server['sock']
@@ -85,7 +89,13 @@ def main():
         while stage.is_dir() and time.monotonic() < deadline:
             time.sleep(0.02)
         assert not stage.is_dir(), 'restore stage did not finish'
-        wait_job(restore)
+        # A staging directory disappears at rename, before the restore runner
+        # releases ownership and publishes its terminal job status. Reuse the
+        # strict restore-only conflict handling, keeping the original 20s.
+        row = restore_poll.wait_for_maintenance(
+            sock, restore, timeout=20, retry_restore_publication=True)
+        assert row[4] == b'succeeded', row
+        checks += 1
         query('SELECT id FROM restore_status_rows ORDER BY id', rows=[['1']])
         query('SHOW application_name', rows=[['during_restore_status']])
         query('SELECT 7', rows=[['7']])

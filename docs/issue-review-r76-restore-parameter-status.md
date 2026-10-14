@@ -1,6 +1,8 @@
 # R76：恢复期间的ParameterStatus读取逃出客户端线程
 
-状态：协议状态观察崩溃已修复并完成本范围门禁；DIV14的独立55P03仍需后续处理。
+状态：协议状态观察崩溃已修复并完成本范围门禁。本页保留当时DIV14冲突，
+后续publication轮询及阶段边界分别见[R78](issue-review-r78-restore-poll-publication.md)
+和[R81](issue-review-r81-restore-stage-completion.md)，不绕过真实管理员检查。
 
 ## 原始证据
 
