@@ -67,5 +67,24 @@ DEFAULT。门禁前后输入、binary和全部58份receipt一致。
 原完整postgres_protocol_test另跑于r67-verified-full-pg.log，提交此核心修复时
 仍在运行，不提前将它计为通过。本项也不把冻结1339入口的失败改写成全绿。
 
+## 主分支集成与完整协议失败归属
+
+核心修复独立提交aeaef87d，主分支cherry-pick -x为ca554c2f。
+Root自己的Main/NetworkServer/parser/DdlExecutor真实标准O2重编、链接0，
+root-r67-integration-build.log；实际binary SHA256为
+aeea4c6411a4fb3686781e31043f87c9dffc81b41c7fe593b579981303e92763。
+Root八完整native及九完整协议全部0，root-r67-native.log、root-r67-protocols.log
+及逐项日志；新80检查也在Root全0。前后生产输入/binary和58份receipt一致。
+
+额外完整postgres_protocol_test最终并未通过：末尾role_rows断言得到空列表。
+原r67-verified-full-pg-logs/postgres_protocol_test.log保留。仅包装原simple_query
+打印原始响应，不改SQL、默认超时、返回值或任何原断言，分别对照修复前已验收
+产物（SHA256 88cd9b86fa2b847a6679d90af5830b2488f4f3505f99cb7983dfea1ba97905a6）
+和当前候选，两者同位置均收到57014 statement timeout，而不是返回空数据。
+r67-prior-full-protocol-observation.log与r67-current-full-protocol-observation.log
+保留完整原始响应。原驱动的会话设置探针把456ms遗留给了无关后续数据读取，
+单独记为R69并验收夹具恢复默认值；不修改R67产品代码或数据/权限断言掩盖它。
+Root原未改驱动还在另行运行，其结果独立记录。上述对照不能冒充完整全绿。
+
 本项仅覆盖普通视图既有列名、OID类型、typmod及列前缀兼容性，不宣称完整view
 DDL、collation传播、依赖图、所有更新规则或权限语义已经完成。用户暂缓专项不重启。
