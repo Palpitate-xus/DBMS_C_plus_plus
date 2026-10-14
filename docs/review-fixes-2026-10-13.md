@@ -74,7 +74,7 @@
 | R53 | INSERT SELECT 的INTERVAL字段修饰符上下文 | 已修复，待主分支集成 | 原27中1失败/新133中9失败→PG/候选全0，78纯binder控制及六完整native/七完整协议全0；标量与数组解析阶段分开，见[验证](issue-review-r53-insert-interval-context.md) |
 | R54 | 聚合表达式中未提供参数的错误优先级 | 已修复，待主分支集成 | 实际PG18.6新54全0，候选原13失败→0；原完整聚合scope及五完整协议全0，保留合法Extended/SQL PREPARE，见[验证](issue-review-r54-missing-parameter-priority.md) |
 | R55 | BYTEA 存储别名错误目录身份 | 已修复，待主分支集成 | 新28协议原17失败→PG/候选全0；原完整patterns及七完整协议/六完整native全0，7个目录/cold/显式历史修复控制全0，见[验证](issue-review-r55-bytea-catalog-identity.md) |
-| R56 | ARRAY_AGG 窗口函数的解析/绑定 | 待修复 | 原window_type完整协议中array_agg(v) OVER报42883；其他窗口实现不代表该聚合已覆盖，待参考和独立复现 |
+| R56 | ARRAY_AGG 窗口函数的声明/接收器 | 已修复，待主分支集成 | 原42中37失败→PG/候选最终45全0；33native、七完整native/六完整协议全0，原window_type通过，数组值输入仍0A000，见[验证](issue-review-r56-window-array-aggregate.md) |
 | R57 | pending rollback后的协议连接中断 | 已修复，待主分支集成 | 原进程SIGABRT→加强完整驱动及五次重复全0；五完整native/四完整协议全0，原默认协议role_rows失败保留，见[验证](issue-review-r57-pending-rollback-protocol.md) |
 | R58 | 两个协议驱动的启动连接失败 | 原样复验通过，历史原因未定 | 原errno103保留；两个原完整驱动在主分支按默认超时独立复跑0，不宣称已修复启动竞态，见[完整记录](issue-full-registered-f4087f5d.md) |
 | R59 | 新组合物化视图target协议超时 | 原样复验通过，历史原因未定 | 71个原target控制及source/事务控制主分支原样复跑0，原超时保留；来源55000缺陷归R49，见[完整记录](issue-full-registered-f4087f5d.md) |

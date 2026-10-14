@@ -46,6 +46,7 @@
 #include "expression/expr_helper.h"
 #include "expression/function_namespace.h"
 #include "expression/array_type.h"
+#include "common/SqlArrayText.h"
 #include "expression/aggregate_type.h"
 #include "expression/common_type.h"
 #include "expression/ExprEvaluator.h"
@@ -5979,8 +5980,13 @@ static bool parseWindowFunc(const string& item, WindowFunc& wf, const map<string
     const auto* call=select && select->selectList.size()==1
         ?dynamic_cast<const dbms::FunctionCallExpr*>(select->selectList.front().expr.get()):nullptr;
     if(!call || !call->hasOver)return false;
+    dbms::CatalogManager::QualifiedName routine;
+    const auto spelling=call->schema.empty()?call->funcName:call->schema+"."+call->funcName;
+    if(!dbms::CatalogManager::parseQualifiedName(spelling,routine,true) ||
+       (!routine.schema.empty() && routine.schema!="pg_catalog"))return false;
+    wf.name=routine.name;
     const auto& window=call->over;
-    static const set<string> aggregates={"sum","count","avg","max","min"};
+    static const set<string> aggregates={"sum","count","avg","max","min","array_agg"};
     wf.isAggregate=aggregates.count(wf.name)!=0;
     for(const auto& value:window.partitionBy) {
         const auto* column=dynamic_cast<const dbms::ColumnRefExpr*>(value.get());
@@ -6036,6 +6042,9 @@ static bool convertToVolcanoWindowSpec(const WindowFunc& wf,
         "array_agg"
     };
     if (!supported.count(wf.name)) return false;
+    // Collection arguments/FILTER use the genuine prepared value receiver,
+    // including casts and NULLs, not a raw column-name approximation.
+    if (wf.name == "array_agg") return false;
 
     auto isColumn = [&](const string& name) {
         if (!isSimpleWindowIdentifier(name)) return false;
@@ -35557,6 +35566,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 vector<dbms::Expr*> expressions;
                 dbms::Expr* frameStart = nullptr;
                 dbms::Expr* frameEnd = nullptr;
+                dbms::Expr* filter = nullptr;
                 string frameIdentity;
                 size_t sourceOrdinal = 0;
                 dbms::QueryRowDescriptor descriptor;
@@ -35617,6 +35627,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     if(value->type!=dbms::ExprType::A_Star)argument.expressions.push_back(value.get());
                 argument.frameStart=call->over.frameStart.get();
                 argument.frameEnd=call->over.frameEnd.get();
+                argument.filter=call->filter.get();
                 const auto source = find_if(argument.query->sourceRanges.begin(), argument.query->sourceRanges.end(),
                     [&](const auto& range) { return range.owner == select; });
                 if (source == argument.query->sourceRanges.end() || source->columns.size() != tbl.len)
@@ -35660,6 +35671,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 });
                 for (auto* value : argument.expressions) argument.execution->prepareExpression(value);
                 for (auto* value : argument.expressions) argument.execution->planExpressionConstants(value);
+                if(argument.filter) {
+                    argument.execution->prepareExpression(argument.filter);
+                    argument.execution->planExpressionConstants(argument.filter);
+                }
                 for(auto* value:{argument.frameStart,argument.frameEnd})if(value) {
                     argument.execution->prepareExpression(value);
                     argument.execution->planExpressionConstants(value);
@@ -36113,7 +36128,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 return true;
             };
 
-            const auto evaluateWindowArgument = [&](size_t wi, size_t value, size_t row) {
+            const auto evaluateWindowExpression = [&](size_t wi, const dbms::Expr* expression, size_t row) {
                 auto& argument=windowArguments.at(wi);
                 auto context=argument.execution->context();
                 vector<dbms::ExprValue> cells;
@@ -36124,7 +36139,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     cells.back().collation=tbl.cols[column].collation;
                 }
                 argument.execution->setSourceRow(context,argument.sourceOrdinal,cells);
-                return argument.execution->evaluate(argument.expressions.at(value),context);
+                return argument.execution->evaluate(expression,context);
+            };
+            const auto evaluateWindowArgument = [&](size_t wi, size_t value, size_t row) {
+                return evaluateWindowExpression(wi,windowArguments.at(wi).expressions.at(value),row);
             };
 
             // Only an actual extra final sort/distinct needs all window
@@ -36157,6 +36175,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 dbms::Numeric sum{0};
                 double floatingSum=0;
                 optional<dbms::ExprValue> selected;
+                vector<string> arrayElements;
             };
             for(const auto& entry:aggregateWindows) {
                 const auto& functions=entry.second;
@@ -36196,8 +36215,18 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                 const size_t wi=functions[index];
                                 const auto& function=windowFuncs[wi];
                                 auto& state=states[index];
+                                if(windowArguments[wi].filter) {
+                                    const auto accepted=evaluateWindowExpression(wi,windowArguments[wi].filter,source);
+                                    if(accepted.isNull || !accepted.asBool())continue;
+                                }
                                 if(function.name=="count" && function.arg=="*"){++state.count;continue;}
                                 const auto value=evaluateWindowArgument(wi,0,source);
+                                if(function.name=="array_agg") {
+                                    const string scalar=dbms::ExprHelper::canonicalResultTypeName(value.typeName)=="boolean"
+                                        && !value.isNull ? (value.asBool()?"t":"f") : value.value;
+                                    state.arrayElements.push_back(value.isNull?"NULL":dbms::sql_array_text::quote(scalar));
+                                    continue;
+                                }
                                 if(value.isNull)continue;
                                 if(function.name=="count"){++state.count;continue;}
                                 if(function.name=="sum" || function.name=="avg") {
@@ -36236,6 +36265,17 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                 throw dbms::DbError("22003","window aggregate count is out of range");
                             string value;bool isNull=false;
                             if(function.name=="count")value=to_string(state.count);
+                            else if(function.name=="array_agg") {
+                                isNull=state.arrayElements.empty();
+                                if(!isNull) {
+                                    value="{";
+                                    for(const auto& element:state.arrayElements) {
+                                        if(value.size()>1)value+=',';
+                                        value+=element;
+                                    }
+                                    value+='}';
+                                }
+                            }
                             else if(function.name=="sum" || function.name=="avg") {
                                 isNull=state.count==0;
                                 if(!isNull) {

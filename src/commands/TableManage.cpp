@@ -33515,6 +33515,29 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
                         ExprHelper::inferParsedResultType(function->args.front().get(), {}, dbname,
                                                          const_cast<StorageEngine*>(this)));
                 }
+                if (name == "array_agg" && function->hasOver &&
+                    !function->setReturning &&
+                    !evaluator.hasScalarFunction(function, const_cast<StorageEngine*>(this))) {
+                    if (function->distinct)
+                        throw DbError("0A000", "DISTINCT is not implemented for window aggregates");
+                    const auto* argument = function->args.size() == 1
+                        ? function->args.front().get() : nullptr;
+                    const auto* literal = dynamic_cast<const LiteralExpr*>(argument);
+                    if (!argument || !function->namedArgs.empty() ||
+                        (literal && literal->value == "*"))
+                        throw DbError("42883", "aggregate function has no matching signature");
+                    const auto input = ExprHelper::canonicalResultTypeName(
+                        ExprHelper::inferParsedInputType(argument, {}, dbname,
+                                                         const_cast<StorageEngine*>(this)));
+                    if (input == "unknown")
+                        throw DbError("42725", "aggregate function is not unique");
+                    // The existing window receiver collects scalar datums.
+                    // Do not admit array-valued input as quoted scalar text:
+                    // PostgreSQL requires another dimension and shape checks.
+                    if (common_type_detail::array(input))
+                        throw DbError("0A000", "array-valued ARRAY_AGG window input is not supported");
+                    return input + "[]";
+                }
                 auto aggregate = aggregate_type_detail::builtinName(function);
                 // Aggregate windows keep the genuine aggregate signature;
                 // the ordinary aggregate planner deliberately excludes OVER.
