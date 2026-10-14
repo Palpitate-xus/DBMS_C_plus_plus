@@ -18,6 +18,9 @@ Volcano 算子定义于 `ExecutionPlan.h/.cpp`，生命周期接口位于 `src/i
 标量ARRAY_AGG窗口使用真实参数声明和prepared集合接收器，FILTER先于参数求值；
 空frame与含NULL成员的数组不同，编码保留空串和文本NULL。已验证边界及尚未
 支持的数组值输入见[R56](../../docs/issue-review-r56-window-array-aggregate.md)。
+窗口的routine角色在实际参数绑定后检查，普通标量不能因为带OVER变成窗口；
+重建类型/参数query须保留原限定身份，不能用调度短名重新解析另一函数。
+CASE/WHERE等嵌套site的纯预检查与验证范围见[R60](../../docs/issue-review-r60-window-routine-identity.md)。
 部分复杂 DQL/DML 仍经 legacy 或物化适配路径执行；现有窄范围测试通过不证明完整 PostgreSQL 执行语义。
 
 默认prepared reader及原生DML/JOIN reader通过canonical schema/name解析已有

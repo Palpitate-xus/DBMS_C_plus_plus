@@ -5929,9 +5929,68 @@ static bool handleExplain(const string& sql, Session& s) {
 // ========================================================================
 // Window function support
 // ========================================================================
+static bool hasParsedWindowCall(const dbms::Stmt* root) {
+    function<bool(const dbms::Expr*)> expression;
+    function<bool(const dbms::Stmt*)> statement;
+    function<bool(const dbms::FromItem*)> source;
+    expression=[&](const dbms::Expr* value)->bool {
+        if(!value)return false;
+        if(value->preparedSubquery && statement(value->preparedSubquery.get()))return true;
+        if(const auto* call=dynamic_cast<const dbms::FunctionCallExpr*>(value)) {
+            if(call->hasOver)return true;
+            for(const auto& argument:call->args)if(expression(argument.get()))return true;
+            for(const auto& argument:call->namedArgs)if(expression(argument.value.get()))return true;
+            return expression(call->filter.get());
+        }
+        if(const auto* cast=dynamic_cast<const dbms::CastExpr*>(value))return expression(cast->operand.get());
+        if(const auto* unary=dynamic_cast<const dbms::UnaryOpExpr*>(value))return expression(unary->operand.get());
+        if(const auto* binary=dynamic_cast<const dbms::BinaryOpExpr*>(value))
+            return expression(binary->left.get()) || (binary->op!="::" && expression(binary->right.get()));
+        if(const auto* comparison=dynamic_cast<const dbms::QuantifiedComparisonExpr*>(value))
+            return expression(comparison->left.get()) || expression(comparison->right.get());
+        if(const auto* conditional=dynamic_cast<const dbms::CaseExpr*>(value)) {
+            if(expression(conditional->switchExpr.get()) || expression(conditional->elseExpr.get()))return true;
+            for(const auto& arm:conditional->whenClauses)
+                if(expression(arm.first.get()) || expression(arm.second.get()))return true;
+        }
+        if(const auto* array=dynamic_cast<const dbms::ArrayExpr*>(value))
+            for(const auto& item:array->elements)if(expression(item.get()))return true;
+        if(const auto* row=dynamic_cast<const dbms::RowExpr*>(value))
+            for(const auto& item:row->elements)if(expression(item.get()))return true;
+        return false;
+    };
+    source=[&](const dbms::FromItem* item)->bool {
+        return item && (statement(item->subquery.get()) || expression(item->joinCondition.get()) ||
+            source(item->left.get()) || source(item->right.get()));
+    };
+    statement=[&](const dbms::Stmt* value)->bool {
+        if(const auto* envelope=dynamic_cast<const dbms::WithStmt*>(value)) {
+            for(const auto& cte:envelope->ctes)if(statement(cte.query.get()))return true;
+            return statement(envelope->statement.get());
+        }
+        const auto* select=dynamic_cast<const dbms::SelectStmt*>(value);
+        if(!select)return false;
+        for(const auto& cte:select->ctes)if(statement(cte.query.get()))return true;
+        for(const auto& target:select->selectList)if(expression(target.expr.get()))return true;
+        for(const auto& key:select->orderBy)if(expression(key.expr.get()))return true;
+        for(const auto& key:select->groupBy)if(expression(key.get()))return true;
+        for(const auto& group:select->groupByElems)
+            for(const auto& key:group.exprs)if(expression(key.get()))return true;
+        for(const auto& key:select->distinctOn)if(expression(key.get()))return true;
+        for(const auto& row:select->valuesRows)
+            for(const auto& cell:row)if(expression(cell.get()))return true;
+        return expression(select->whereClause.get()) || expression(select->having.get()) ||
+            source(select->fromClause.get()) || statement(select->setOpLhs.get()) || statement(select->setOpRhs.get());
+    };
+    return statement(root);
+}
+
 struct WindowFunc {
     string name;
     string arg;
+    // Dispatch uses the canonical short name; rebinding must retain the
+    // original namespace, quoted spelling and aggregate FILTER syntax.
+    string routineSql;
     string orderByCol;
     bool orderByAsc = true;
     bool orderByNullsFirst = false;
@@ -5960,6 +6019,7 @@ static bool parseWindowFunc(const string& item, WindowFunc& wf, const map<string
     const size_t overPos=findTopLevelKeyword(toLower(item),"over");
     if(overPos==string::npos)return false;
     const string functionSql=trim(item.substr(0,overPos));
+    wf.routineSql=functionSql;
     const size_t left=functionSql.find('('),right=functionSql.rfind(')');
     if(left==string::npos || right==string::npos)return false;
     wf.name=toLower(trim(functionSql.substr(0,left)));
@@ -26245,21 +26305,13 @@ static bool executeInternal(const string& rawSql, Session& s) {
             }
         }
 
-        // Frame offsets can contain nested CTE/derived SQL. Bind their
-        // original scopes before any legacy FROM materialization or target
-        // validation can flatten them, including for empty input/LIMIT 0.
+        // Bind every actual window site before a legacy CASE/WHERE or FROM
+        // receiver can hide it in a dead branch/empty source. This includes
+        // its original scope, routine role and frame-offset declaration.
         {
             dbms::SQLParser parser;
             const auto parsed=parser.parseForBinding(effectiveRawSql);
-            const dbms::Stmt* statement=parsed.stmt.get();
-            if(const auto* envelope=dynamic_cast<const dbms::WithStmt*>(statement))
-                statement=envelope->statement.get();
-            const auto* select=dynamic_cast<const dbms::SelectStmt*>(statement);
-            if(select && std::any_of(select->selectList.begin(),select->selectList.end(),
-                    [](const auto& target) {
-                        const auto* call=dynamic_cast<const dbms::FunctionCallExpr*>(target.expr.get());
-                        return call && call->hasOver;
-                    }))
+            if(hasParsedWindowCall(parsed.stmt.get()))
                 (void)g_engine.prepareBoundQuery(s.currentDB,effectiveRawSql);
         }
 
@@ -33935,7 +33987,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             if (wf.name == "ntile") return string("integer");
             if (wf.name == "lag" || wf.name == "lead" || wf.isAggregate) {
                 const auto declaration = g_engine.prepareBoundQuery(s.currentDB,
-                    "SELECT " + wf.name + "(" + wf.arg + ") OVER("+wf.overSql+") FROM " + tnameOrig +
+                    "SELECT " + wf.routineSql + " OVER("+wf.overSql+") FROM " + tnameOrig +
                     (tableAlias.empty() ? string() : " AS " + tableAlias), {}, true);
                 if (declaration.output.size() != 1)
                     throw dbms::DbError("XX000", "offset window lost its output declaration");
@@ -35608,7 +35660,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             for (size_t wi = 0; wi < windowFuncs.size(); ++wi) {
                 auto& function=windowFuncs[wi];
                 auto& argument = windowArguments[wi];
-                const string argumentSql = "SELECT " + function.name + "(" + function.arg + ") OVER(" + function.overSql + ") FROM " +
+                const string argumentSql = "SELECT " + function.routineSql + " OVER(" + function.overSql + ") FROM " +
                     tnameOrig + (tableAlias.empty() ? string() : " AS " + tableAlias);
                 argument.query = make_shared<dbms::PreparedQuery>(
                     g_engine.prepareBoundQuery(s.currentDB, argumentSql, {}, true));

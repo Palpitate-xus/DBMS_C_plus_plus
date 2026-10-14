@@ -33454,6 +33454,15 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
                       std::filesystem::exists(dbPath(dbname) / (".schema_" + schema))))
                     throw DbError("3F000", "schema \"" + routine.schema + "\" does not exist");
             }
+            // OVER changes the required routine role, not its namespace or
+            // identity. Resolve an actual scalar first, including stored
+            // routines shadowing builtin window names on the search path.
+            // Its arguments have already been bound, so ordinary missing
+            // column/routine diagnostics retain their preparation priority.
+            if (function->hasOver &&
+                evaluator.hasScalarFunction(function, const_cast<StorageEngine*>(this)))
+                throw DbError("42809", "OVER specified, but " + spelling +
+                    " is not a window function nor an aggregate function");
             if (CatalogManager::parseQualifiedName(spelling, routine, true) &&
                 (routine.schema.empty() || routine.schema == "pg_catalog")) {
                 if (routine.name == "exists") return std::string("boolean");
