@@ -1,5 +1,6 @@
 #include "expr_helper.h"
 #include "expression/aggregate_type.h"
+#include "types/numeric.h"
 #include "between_input.h"
 #include "expression/common_type.h"
 #include "array_type.h"
@@ -1304,7 +1305,8 @@ std::string ExprHelper::scalarExpressionIdentity(
 std::string ExprHelper::preparedSortExpressionIdentity(
     const Expr* expression, const PreparedQuery& query,
     const std::function<std::string(const ColumnRefExpr&)>& columnIdentity,
-    const std::string& currentDB, StorageEngine* functionEngine,bool parsedWindowSyntax) {
+    const std::string& currentDB, StorageEngine* functionEngine,bool parsedWindowSyntax,
+    const SelectStmt* outputAliasOwner) {
     const auto field = [](const std::string& value) {
         return std::to_string(value.size()) + ":" + value;
     };
@@ -1313,6 +1315,24 @@ std::string ExprHelper::preparedSortExpressionIdentity(
     };
     ExprEvaluator evaluator;
     evaluator.setCurrentDB(currentDB);
+    const auto noOpCast=[&](const Expr* node)->const Expr* {
+        if(!outputAliasOwner)return nullptr;
+        const auto* cast=dynamic_cast<const CastExpr*>(node);
+        const auto* binary=dynamic_cast<const BinaryOpExpr*>(node);
+        const Expr* operand=nullptr;std::string declaration;
+        if(cast && cast->typeMods.empty()){operand=cast->operand.get();declaration=cast->typeName;}
+        else if(binary && binary->op=="::" && binary->right) {
+            operand=binary->left.get();declaration=binary->right->toString();
+            if(declaration.find('(')!=std::string::npos)return nullptr;
+        }
+        if(!operand)return nullptr;
+        const auto target=canonicalResultTypeName(declaration);
+        // Do not erase domain/typmod coercions or a real type promotion.
+        static const std::set<std::string> builtins={"smallint","integer","bigint","numeric",
+            "real","double precision","text","boolean","date","timestamp","interval"};
+        return builtins.count(target) && canonicalResultTypeName(
+            inferParsedInputType(operand,{},currentDB,functionEngine))==target?operand:nullptr;
+    };
     std::function<std::string(const Expr*)> childKey;
     childKey = [&](const Expr* child) -> std::string {
         if (!child || !child->preparedSubquery) throw DbError("XX000", "missing prepared SQL child");
@@ -1449,6 +1469,7 @@ std::string ExprHelper::preparedSortExpressionIdentity(
         expressionKey = [&](const Expr* node) {
             return scalarExpressionIdentity(node, boundColumn, currentDB, functionEngine,
                 [&](const Expr* nested) -> std::optional<std::string> {
+                    if(const auto* operand=noOpCast(nested))return expressionKey(operand);
                     if(parsedWindowSyntax)if(const auto* cast=dynamic_cast<const CastExpr*>(nested))
                         if(cast->implicit)return expressionKey(cast->operand.get());
                     if (nested->preparedSubquery) return statementKey(nested->preparedSubquery.get());
@@ -1567,6 +1588,82 @@ std::string ExprHelper::preparedSortExpressionIdentity(
     };
     return scalarExpressionIdentity(expression, columnIdentity, currentDB, functionEngine,
         [&](const Expr* node) -> std::optional<std::string> {
+            if(outputAliasOwner) {
+                const auto identity=[&](const Expr* value) {
+                    return preparedSortExpressionIdentity(value,query,columnIdentity,currentDB,
+                        functionEngine,false,outputAliasOwner);
+                };
+                if(const auto* literal=dynamic_cast<const LiteralExpr*>(node);literal && !literal->preparedSubquery &&
+                        (literal->typeName.empty() || canonicalResultTypeName(literal->typeName)=="numeric") &&
+                        canonicalResultTypeName(inferParsedInputType(literal,{},currentDB,functionEngine))=="numeric") {
+                    LiteralExpr constant;
+                    constant.typeName="numeric";
+                    constant.value=Numeric(evaluator.eval(literal,RowContext{}).value).toString();
+                    return scalarExpressionIdentity(&constant,columnIdentity,currentDB,functionEngine);
+                }
+                const Expr* castInput=nullptr;std::string castDeclaration;
+                if(const auto* cast=dynamic_cast<const CastExpr*>(node);cast && cast->typeMods.empty()) {
+                    castInput=cast->operand.get();castDeclaration=cast->typeName;
+                } else if(const auto* cast=dynamic_cast<const BinaryOpExpr*>(node);cast && cast->op=="::" && cast->right) {
+                    castInput=cast->left.get();castDeclaration=cast->right->toString();
+                }
+                if(castInput && castDeclaration.find('(')==std::string::npos) {
+                    const auto* input=dynamic_cast<const LiteralExpr*>(castInput);
+                    const auto type=canonicalResultTypeName(castDeclaration);
+                    static const std::set<std::string> inputs={"smallint","integer","bigint","numeric",
+                        "real","double precision","text","boolean","date","timestamp","interval"};
+                    // Analysis converts a genuine UNKNOWN string input to
+                    // a typed Const. This does not fold an operator/routine,
+                    // erase a domain coercion, or finalize a bare UNKNOWN.
+                    if(input && !input->preparedSubquery && input->typeName.empty() &&
+                            input->value.size()>=2 && input->value.front()=='\'' && inputs.count(type)) {
+                        const auto value=evaluator.eval(node,RowContext{});
+                        LiteralExpr constant;constant.typeName=type;constant.value=value.value;
+                        return identity(&constant);
+                    }
+                }
+                if(const auto* operand=noOpCast(node))return identity(operand);
+                if(const auto* call=dynamic_cast<const FunctionCallExpr*>(node);call && call->hasOver) {
+                    CatalogManager::QualifiedName name;
+                    if(!CatalogManager::parseQualifiedName(call->schema.empty()?call->funcName:
+                            call->schema+"."+call->funcName,name,true))
+                        throw DbError("XX000","bound window has no canonical routine identity");
+                    const WindowDef* window=&call->over;
+                    if(!window->name.empty()) {
+                        const auto found=std::find_if(outputAliasOwner->windowDefs.begin(),outputAliasOwner->windowDefs.end(),
+                            [&](const auto& definition) {
+                                CatalogManager::QualifiedName declared,reference;
+                                return CatalogManager::parseQualifiedName(definition.name,declared,true) &&
+                                    CatalogManager::parseQualifiedName(window->name,reference,true) && declared.name==reference.name;
+                            });
+                        if(found!=outputAliasOwner->windowDefs.end())window=&*found;
+                    }
+                    const auto raw=[&](const Expr* value) {
+                        return preparedSortExpressionIdentity(value,query,
+                            [&](const ColumnRefExpr& column){return field(column.schema)+field(column.table)+field(column.column);},
+                            currentDB,functionEngine,true);
+                    };
+                    std::string definition=field(window->frameMode)+field(window->frameBetween?"between":"single")+
+                        field(std::to_string(static_cast<unsigned>(window->frameStartKind)))+
+                        field(std::to_string(static_cast<unsigned>(window->frameEndKind)))+
+                        field(window->frameExclusion=="no others"?"":window->frameExclusion);
+                    for(const auto& partition:window->partitionBy)definition+=field(raw(partition.get()));
+                    definition+=field("order");
+                    for(size_t i=0;i<window->orderBy.size();++i) {
+                        const auto& order=window->orderBy[i];
+                        const bool explicitDirection=i<window->orderDirectionSpecified.size() && window->orderDirectionSpecified[i];
+                        definition+=field(raw(order.first.get()))+field(explicitDirection?(order.second?"asc":"desc"):"default");
+                        definition+=field(i<window->orderNullsFirst.size() && window->orderNullsFirst[i].has_value()
+                            ?(*window->orderNullsFirst[i]?"first":"last"):"default");
+                    }
+                    definition+=field(raw(window->frameStart.get()))+field(raw(window->frameEnd.get()));
+                    std::string key="analyzed-window"+field(name.schema=="pg_catalog"?"":name.schema)+field(name.name)+
+                        field(call->resolvedResultType)+field(definition)+field(call->distinct?"distinct":"all");
+                    for(const auto& value:call->args)
+                        key+=field(value->type==ExprType::A_Star?"star":identity(value.get()));
+                    return key+field(identity(call->filter.get()));
+                }
+            }
             if(parsedWindowSyntax) {
                 const auto identity=[&](const Expr* value) {
                     return preparedSortExpressionIdentity(value,query,columnIdentity,currentDB,functionEngine,true);
@@ -1600,7 +1697,7 @@ std::string ExprHelper::preparedSortExpressionIdentity(
                 if (!call->orderBy.empty())
                     throw DbError("0A000", "aggregate ORDER identity requires structured order nodes");
                 const auto identity = [&](const Expr* value) {
-                    return preparedSortExpressionIdentity(value, query, columnIdentity, currentDB, functionEngine);
+                    return preparedSortExpressionIdentity(value, query, columnIdentity, currentDB, functionEngine,false,outputAliasOwner);
                 };
                 std::string result = "builtin-aggregate" + field(name) +
                     field(call->resolvedResultType) + field(call->distinct ? "distinct" : "all");

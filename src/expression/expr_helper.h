@@ -13,6 +13,7 @@ class StorageEngine;
 class Expr;
 struct ColumnRefExpr;
 struct PreparedQuery;
+struct SelectStmt;
 struct ArrayConcatBinding;
 
 // ----------------------------------------------------------------------------
@@ -70,7 +71,8 @@ public:
         const std::function<std::string(const ColumnRefExpr&)>& columnIdentity,
         const std::string& currentDB = "",
         StorageEngine* functionEngine = nullptr,
-        bool parsedWindowSyntax = false);
+        bool parsedWindowSyntax = false,
+        const SelectStmt* outputAliasOwner = nullptr);
     // Retained prepared AST consumer: no rendering/reparsing and no routine
     // execution. Parameters retain stable typed slots; child sites are unique.
     static std::string scalarExpressionIdentity(

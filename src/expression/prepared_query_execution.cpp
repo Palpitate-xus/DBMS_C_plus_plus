@@ -1049,6 +1049,11 @@ void PreparedQueryExecution::planStatementConstants(const Stmt* statement,
             }
         }
         const auto projected = query_->projectionBindings.find(node);
+        const auto aliases=query_->sortOutputOwners.find(node);
+        if(aliases!=query_->sortOutputOwners.end()) {
+            const auto original=demanded;
+            for(size_t ordinal:original)if(ordinal<aliases->second.size())demanded.insert(aliases->second[ordinal]);
+        }
         if (projected == query_->projectionBindings.end() && !node->selectList.empty())
             throw DbError("XX000", "SELECT constant planning requires bound projection ordinals");
         std::set<const Expr*> usedExpressions;
@@ -1057,7 +1062,8 @@ void PreparedQueryExecution::planStatementConstants(const Stmt* statement,
             const bool forced = all || (!node->existsTargetPrunable && retainedTarget(target.expr.get()));
             if (projected != query_->projectionBindings.end())
                 for (size_t i=0;i<projected->second.size();++i)
-                    if (projected->second[i].expression == target.expr.get() && (forced || demanded.count(i) || previousOutputs.count(i))) {
+                    if ((aliases==query_->sortOutputOwners.end() || aliases->second.at(i)==i) &&
+                        projected->second[i].expression == target.expr.get() && (forced || demanded.count(i) || previousOutputs.count(i))) {
                         usedExpressions.insert(target.expr.get()); plannedOutputs.insert(i);
                     }
         }

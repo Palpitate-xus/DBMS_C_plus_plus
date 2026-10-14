@@ -61,6 +61,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/window_internal_namespace_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/window_frame_boundaries_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/window_frame_initialization_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/order_by_duplicate_alias_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/logical_tuple_encoding_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/unordered_window_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/nth_value_default_peer_frame_protocol_e2e_test.py)

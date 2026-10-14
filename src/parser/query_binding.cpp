@@ -1097,6 +1097,13 @@ public:
         return literal.typeName;
     }
     void window(WindowDef& value, const std::vector<Namespace>& scopes) {
+        if(!value.name.empty() && !statementOwners.empty()) {
+            const auto* owner=dynamic_cast<const SelectStmt*>(statementOwners.back());
+            const auto name=identifier(value.name);
+            if(owner && std::none_of(owner->windowDefs.begin(),owner->windowDefs.end(),
+                    [&](const auto& definition){return identifier(definition.name)==name;}))
+                throw DbError("42704","window \""+name+"\" does not exist");
+        }
         for (auto& field : value.partitionBy) expression(field, scopes);
         std::vector<std::string> orderTypes;
         for (auto& field : value.orderBy) {
@@ -1656,7 +1663,12 @@ public:
                 // context during analysis, even when there are no groups.
                 coerceCaseInput(select->having, havingType, "boolean");
             }
-            for (auto& value : select->windowDefs) window(value, scopes);
+            std::set<std::string> windowNames;
+            for (auto& value : select->windowDefs) {
+                if(!windowNames.insert(identifier(value.name)).second)
+                    throw DbError("42P20","window \""+identifier(value.name)+"\" is already defined");
+                window(value, scopes);
+            }
             for (auto& order : select->orderBy) {
                 const auto* ref = dynamic_cast<ColumnRefExpr*>(order.expr.get());
                 const bool outputAlias = ref && ref->table.empty() && ref->schema.empty() &&
@@ -1665,6 +1677,29 @@ public:
                 uint32_t orderOid=0;
                 if(outputAlias) {
                     const auto output=std::find_if(columns.begin(),columns.end(),[&](const auto& col){return col.name==ref->column;});
+                    const size_t first=static_cast<size_t>(output-columns.begin());
+                    const auto identity=[&](size_t ordinal) {
+                        const auto& projection=projected.at(ordinal);
+                        ColumnRefExpr source;
+                        source.binding=projection.column;
+                        const Expr* value=projection.column?static_cast<const Expr*>(&source):projection.expression;
+                        if(metadata.outputExpressionIdentity)return metadata.outputExpressionIdentity(value,result,select);
+                        return ExprHelper::preparedSortExpressionIdentity(value,result,[](const ColumnRefExpr& column) {
+                            if(!column.binding)throw DbError("XX000","output equality lost its source binding");
+                            const auto& binding=*column.binding;
+                            return std::to_string(binding.scopeDepth)+":"+std::to_string(binding.sourceOrdinal)+":"+
+                                std::to_string(binding.columnOrdinal)+":"+binding.declaredType;
+                        },"",nullptr,false,select);
+                    };
+                    std::optional<std::string> firstIdentity;
+                    for(size_t i=first+1;i<columns.size();++i)if(columns[i].name==ref->column) {
+                        if(!firstIdentity)firstIdentity=identity(first);
+                        if(identity(i)!=*firstIdentity)
+                            throw DbError("42702","ORDER BY \""+ref->column+"\" is ambiguous");
+                        auto& owners=result.sortOutputOwners[select];
+                        if(owners.empty())for(size_t j=0;j<columns.size();++j)owners.push_back(j);
+                        owners[i]=first;
+                    }
                     orderType=output->type;orderOid=output->typeOid;
                 } else {
                     orderType=expression(order.expr,scopes);

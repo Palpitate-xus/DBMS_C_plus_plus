@@ -26175,6 +26175,55 @@ static bool executeInternal(const string& rawSql, Session& s) {
     if (sql.substr(0, 6) == "select" || sql.substr(0, 5) == "with ") {
         if (!checkDB(s)) return true;
 
+        shared_ptr<dbms::PreparedQuery> duplicateOrderAliasQuery;
+        {
+            dbms::SQLParser parser;
+            const auto parsed=parser.parseForBinding(effectiveRawSql);
+            const auto* select=dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get());
+            bool candidate=false;
+            if(select && select->setOp==dbms::SetOp::None && !select->orderBy.empty()) {
+                map<string,size_t> labels;size_t stars=0;
+                for(const auto& target:select->selectList) {
+                    string label="?column?";
+                    const auto* column=dynamic_cast<const dbms::ColumnRefExpr*>(target.expr.get());
+                    if(target.expr->type==dbms::ExprType::A_Star || (column && column->column=="*")){++stars;continue;}
+                    if(!target.alias.empty()) {
+                        dbms::CatalogManager::QualifiedName alias;
+                        if(!dbms::CatalogManager::parseQualifiedName(target.alias,alias,true))continue;
+                        label=alias.name;
+                    } else if(column)label=column->column;
+                    else if(const auto* call=dynamic_cast<const dbms::FunctionCallExpr*>(target.expr.get())) {
+                        dbms::CatalogManager::QualifiedName name;
+                        if(dbms::CatalogManager::parseQualifiedName(call->schema.empty()?call->funcName:
+                                call->schema+"."+call->funcName,name,true))label=name.name;
+                    }
+                    ++labels[label];
+                }
+                for(const auto& order:select->orderBy)
+                    if(const auto* column=dynamic_cast<const dbms::ColumnRefExpr*>(order.expr.get());
+                            column && column->schema.empty() && column->table.empty())
+                        candidate=candidate || labels[column->column]>1 || (stars && labels[column->column]) ||
+                            stars>1 || (stars && select->fromClause && select->fromClause->type==dbms::FromItem::Type::Join);
+            }
+            if(candidate) {
+                duplicateOrderAliasQuery=make_shared<dbms::PreparedQuery>(
+                    g_engine.prepareBoundQuery(s.currentDB,effectiveRawSql));
+                auto* bound=dynamic_cast<dbms::SelectStmt*>(duplicateOrderAliasQuery->ast.get());
+                const bool windows=any_of(bound->selectList.begin(),bound->selectList.end(),[](const auto& target) {
+                    const auto* call=dynamic_cast<const dbms::FunctionCallExpr*>(target.expr.get());return call && call->hasOver;
+                });
+                if(!windows && !duplicateOrderAliasQuery->sortOutputOwners.empty()) {
+                    PreparedWithDmlRuntime runtime(s,duplicateOrderAliasQuery);auto result=runtime.runRead();
+                    for(const auto& name:result.columns)cout<<name<<' ';cout<<'\n';
+                    for(size_t i=0;i<result.rows.size();++i) {
+                        for(size_t j=0;j<result.rows[i].size();++j)cout<<(result.nulls[i][j]?"NULL":result.rows[i][j])<<' ';
+                        cout<<'\n';
+                    }
+                    dbms::publishLastDmlResult(std::move(result));return false;
+                }
+            }
+        }
+
         // Frame offsets can contain nested CTE/derived SQL. Bind their
         // original scopes before any legacy FROM materialization or target
         // validation can flatten them, including for empty input/LIMIT 0.
@@ -32088,10 +32137,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
             windowDefs.push_back(trim(windowRest.substr(start)));
             for (const auto& wd : windowDefs) {
                 // Format: "name AS (PARTITION BY ... ORDER BY ...)"
-                size_t asPos = findTextOutsideQuotes(toLower(wd), " as ");
+                size_t asPos = findTopLevelKeyword(wd, "as");
                 if (asPos == string::npos) continue;
                 string wname = trim(wd.substr(0, asPos));
-                string wbody = trim(wd.substr(asPos + 4));
+                string wbody = trim(wd.substr(asPos + 2));
                 // Remove outer parentheses
                 if (!wbody.empty() && wbody.front() == '(' && wbody.back() == ')') {
                     wbody = wbody.substr(1, wbody.size() - 2);
@@ -35501,6 +35550,23 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 dbms::QueryRowDescriptor descriptor;
             };
             vector<WindowScalarArguments> windowArguments(windowFuncs.size());
+            vector<size_t> windowOwners;
+            for(size_t i=0;i<windowFuncs.size();++i)windowOwners.push_back(i);
+            if(duplicateOrderAliasQuery) {
+                const auto* select=dynamic_cast<const dbms::SelectStmt*>(duplicateOrderAliasQuery->ast.get());
+                const auto aliases=duplicateOrderAliasQuery->sortOutputOwners.find(select);
+                if(aliases!=duplicateOrderAliasQuery->sortOutputOwners.end()) {
+                    const auto& projections=duplicateOrderAliasQuery->projectionBindings.at(select);
+                    map<size_t,size_t> ordinalToWindow;
+                    for(size_t i=0;i<projections.size();++i)
+                        if(const auto* call=dynamic_cast<const dbms::FunctionCallExpr*>(projections[i].expression);call && call->hasOver)
+                            ordinalToWindow.emplace(i,ordinalToWindow.size());
+                    if(ordinalToWindow.size()!=windowFuncs.size())
+                        throw dbms::DbError("XX000","window alias outputs lost their original producers");
+                    for(const auto& [ordinal,window]:ordinalToWindow)
+                        windowOwners[window]=ordinalToWindow.at(aliases->second.at(ordinal));
+                }
+            }
             // The legacy SQL normalizer can erase a source qualifier. Keep
             // the original SELECT sites for parsed-window identity instead
             // of trying to rediscover that syntax from normalized text.
@@ -35594,6 +35660,12 @@ static bool executeInternal(const string& rawSql, Session& s) {
             if(!(finiteWindowLimit && windowLimit==0))for(size_t wi=0;wi<windowFuncs.size();++wi) {
                 auto& function=windowFuncs[wi];auto& argument=windowArguments[wi];
                 if(!function.hasFrame)continue;
+                if(windowOwners[wi]!=wi) {
+                    const auto& owner=windowFuncs[windowOwners[wi]].preparedFrame;
+                    function.preparedFrame.startOffset=owner.startOffset;
+                    function.preparedFrame.endOffset=owner.endOffset;
+                    continue;
+                }
                 const auto previous=initializedFrames.find(argument.frameIdentity);
                 if(previous!=initializedFrames.end()) {
                     function.preparedFrame.startOffset=previous->second.first;
@@ -36032,6 +36104,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
             for (size_t wi = 0; wi < windowFuncs.size(); ++wi) {
                 const auto& wf = windowFuncs[wi];
                 if (!wf.isAggregate) continue;
+                if(windowOwners[wi]!=wi) {
+                    aggCache[wi]=aggCache[windowOwners[wi]];
+                    aggNulls[wi]=aggNulls[windowOwners[wi]];
+                    continue;
+                }
                 // Group row indices by partition key
                 map<string, vector<size_t>> partRows;
                 for (size_t ri = 0; ri < rows.size(); ++ri) {
@@ -36158,6 +36235,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
             // Compute window function values
             for (size_t i = 0; i < rows.size(); ++i) {
                 for (size_t wi = 0; wi < windowFuncs.size(); ++wi) {
+                    if(windowOwners[wi]!=wi) {
+                        rows[i].windowValues.at(wi)=rows[i].windowValues.at(windowOwners[wi]);
+                        if(rows[i].nullWindows.count(windowOwners[wi]))rows[i].nullWindows.insert(wi);
+                        continue;
+                    }
                     const auto& wf = windowFuncs[wi];
                     string val;
                     bool valueIsNull = false;

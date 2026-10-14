@@ -456,6 +456,11 @@ SELECT * FROM users ORDER BY AGE ASC, NAME DESC;
 SELECT * FROM users ORDER BY AGE NULLS FIRST;
 ```
 
+裸 ORDER BY 输出名字遇到不同表达式的同名列时返回 42702；同一已分析
+表达式允许重复名字，并共享实际排序输出值。需要明确选择不同输出时可用
+序号（例如 ORDER BY 2）。这与 ORDER BY 表达式中按输入列解析名字不同，
+详见[重复别名规则](issue-review-o05-order-by-duplicate-alias.md)。
+
 ### 聚合
 
 ```sql

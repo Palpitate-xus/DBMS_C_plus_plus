@@ -170,6 +170,7 @@ struct PreparedSelectState {
     std::vector<Expr*> targets;
     std::vector<ExprPtr> starTargets;
     std::vector<bool> targetsBeforeSort;
+    std::vector<size_t> targetOwners;
     struct SortKey { Expr* expression; size_t target, priorKey; bool asc, nullsFirst; std::optional<QueryComparisonBinding> enumComparison; };
     std::vector<SortKey> keys;
     static constexpr size_t noTarget = std::numeric_limits<size_t>::max();
@@ -680,7 +681,7 @@ public:
             // Volatile non-key targets remain above Sort/LIMIT demand; sort
             // keys, aliases and structurally identical targets share slots.
             for (size_t i = 0; i < state_->targets.size(); ++i)
-                if (state_->targetsBeforeSort[i])
+                if (state_->targetOwners[i]==i && state_->targetsBeforeSort[i])
                     row.targets[i] = state_->evaluate(state_->targets[i], context);
             for (const auto& key : state_->keys) {
                 if (key.priorKey != PreparedSelectState::noTarget) {
@@ -805,8 +806,10 @@ public:
         const auto* sorted = dynamic_cast<const PreparedSortOp*>(child_.get());
         values_.clear(); row.clear();
         for (size_t i = 0; i < state_->targets.size(); ++i) {
+            const auto owner=state_->targetOwners[i];
             values_.push_back(state_->select().existsTargetPrunable
                 ? ExprValue(state_->output.at(i).type, "", true)
+                : owner!=i ? values_.at(owner)
                 : sorted && sorted->targets()[i] ? *sorted->targets()[i]
                 : state_->evaluate(state_->targets[i], context));
             // A bare NULL's unknown type resolves to text at a SELECT output
@@ -1385,6 +1388,9 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
             }
         } else state->targets.push_back(target.expr.get());
     }
+    const auto aliases=state->query->sortOutputOwners.find(select);
+    for(size_t i=0;i<state->targets.size();++i)state->targetOwners.push_back(
+        aliases==state->query->sortOutputOwners.end()?i:aliases->second.at(i));
     std::vector<std::string> identities;
     for (const auto* target : state->targets) identities.push_back(state->identity(target));
     std::vector<std::string> keyIdentities;
@@ -1395,9 +1401,10 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
             if (ref->schema.empty() && ref->table.empty()) {
                 for (size_t i = 0; i < state->output.size(); ++i) {
                     if (state->output[i].name != ref->column) continue;
-                    if (target != PreparedSelectState::noTarget && identities[target] != identities[i])
+                    const size_t owner=state->targetOwners[i];
+                    if (target != PreparedSelectState::noTarget && target!=owner && identities[target] != identities[i])
                         throw DbError("42702", "ORDER BY name is ambiguous");
-                    target = i;
+                    if(target==PreparedSelectState::noTarget)target=owner;
                 }
             }
         } else if (auto* literal = dynamic_cast<LiteralExpr*>(order.expr.get())) {

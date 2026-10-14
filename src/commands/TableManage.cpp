@@ -33074,6 +33074,14 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
         std::optional<CatalogManager::MetadataSnapshot> catalogSnapshot;
         QueryBindingMetadata metadata;
         metadata.finalizeUnknownOutput = finalizeUnknownOutput;
+        metadata.outputExpressionIdentity=[&](const Expr* expression,const PreparedQuery& query,const SelectStmt* owner) {
+            return ExprHelper::preparedSortExpressionIdentity(expression,query,[](const ColumnRefExpr& column) {
+                if(!column.binding)throw DbError("XX000","output equality lost its bound source");
+                const auto& binding=*column.binding;
+                return std::to_string(binding.scopeDepth)+":"+std::to_string(binding.sourceOrdinal)+":"+
+                    std::to_string(binding.columnOrdinal)+":"+binding.declaredType;
+            },dbname,const_cast<StorageEngine*>(this),false,owner);
+        };
         const auto viewSource = [&](const std::string& name) {
             auto view = getViewSQL(dbname, name);
             if (view.empty()) return view;

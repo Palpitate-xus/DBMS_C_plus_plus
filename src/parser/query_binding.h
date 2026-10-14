@@ -39,6 +39,7 @@ struct QueryEnumType {
     uint32_t typeOid = 0;
     std::vector<std::string> labels;
 };
+struct PreparedQuery;
 struct QueryBindingMetadata {
     // Must return a copied, metadata-only descriptor, never execute a query.
     std::function<QueryRelationMetadata(const std::string&)> relation;
@@ -70,6 +71,9 @@ struct QueryBindingMetadata {
     // Appended to preserve positional aggregate initialization of callbacks.
     // INSERT SELECT assignment contexts do not opt into this boundary.
     bool finalizeUnknownOutput = false;
+    // Pure analyzed-expression equality for SQL92 output-name lookup.
+    // It must preserve source occurrences and resolved routine identities.
+    std::function<std::string(const Expr*,const PreparedQuery&,const SelectStmt*)> outputExpressionIdentity;
 };
 struct PreparedQuery {
     struct Use { size_t begin, end, slot; };
@@ -113,6 +117,9 @@ struct PreparedQuery {
     // SELECT expanded output ordinal -> genuine expression/source binding.
     // Compound/parameter outputs retain their expression with no source cell.
     std::map<const SelectStmt*, std::vector<ProjectionBinding>> projectionBindings;
+    // ORDER BY may identify equivalent duplicate output names with one
+    // actual producer. Other repeated targets retain independent demand.
+    std::map<const SelectStmt*,std::vector<size_t>> sortOutputOwners;
     struct SetOperationInputs {
         // Static output types of the real left SELECT body (or composed
         // lhs) and right child, before execution's common-type conversion.
