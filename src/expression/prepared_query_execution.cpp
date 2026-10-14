@@ -119,6 +119,11 @@ ExprPtr copyExpression(const Expr* source, std::map<const Expr*, const Expr*>& s
 ExprPtr constantExpression(const ExprValue& value, const Expr* source) {
     auto literal = std::make_unique<LiteralExpr>();
     literal->typeName = value.typeName;
+    static const std::set<std::string> primitiveTypes={"unknown","boolean","smallint","integer","bigint",
+        "numeric","real","double precision","text","character varying","character","bit","bit varying"};
+    literal->analyzedPrimitiveConstant=primitiveTypes.count(ExprHelper::canonicalResultTypeName(value.typeName)) &&
+        !value.objectOid && value.elementOids.empty() && !value.recordFields;
+    const bool analyzedPrimitive=literal->analyzedPrimitiveConstant;
     if (value.isNull) literal->value = "NULL";
     else {
         literal->value = "'";
@@ -128,7 +133,7 @@ ExprPtr constantExpression(const ExprValue& value, const Expr* source) {
     ExprPtr result = std::move(literal);
     // Literal NULL itself has unknown type; retain a typed NULL datum without
     // changing the shared query's output descriptor or original expression.
-    if (value.isNull && value.typeName != "unknown" && !value.typeName.empty()) {
+    if (!analyzedPrimitive && value.isNull && value.typeName != "unknown" && !value.typeName.empty()) {
         auto cast = std::make_unique<CastExpr>();
         cast->typeName = value.typeName; cast->operand = std::move(result);
         result = std::move(cast);

@@ -310,6 +310,10 @@ struct ParameterExpr : Expr {
 struct LiteralExpr : public Expr {
     std::string value;     // 原始文本
     std::string typeName;  // 推断/指定的类型
+    // Execution-owned primitive datum from the constant planner, not an SQL
+    // type declaration. Its already-resolved codec must not acquire catalog
+    // ownership again merely to decode the planner's quoted payload.
+    bool analyzedPrimitiveConstant = false;
     LiteralExpr() { type = ExprType::Literal; }
     std::string toString() const override { return value; }
 };

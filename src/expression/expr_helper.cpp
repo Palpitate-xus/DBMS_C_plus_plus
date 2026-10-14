@@ -223,6 +223,7 @@ std::string inferAstResultType(
     if (const auto* parameter = dynamic_cast<const ParameterExpr*>(expression))
         return protocolTypeName(parameter->declaredType);
     if (const auto* literal = dynamic_cast<const LiteralExpr*>(expression)) {
+        if(literal->analyzedPrimitiveConstant)return protocolTypeName(literal->typeName);
         if (legacyNullLiteral(literal)) return "unknown";
         if (!literal->typeName.empty())
             return protocolTypeName(ExprHelper::declaredTypeInput(literal->typeName));
@@ -564,7 +565,8 @@ std::map<const Expr*, std::string> collectRoutineResultTypes(
     std::function<void(const Expr*)> inspect = [&](const Expr* node) {
         if (!node) return;
         if(const auto* literal=dynamic_cast<const LiteralExpr*>(node)) {
-            if(!literal->typeName.empty() && !legacyNullLiteral(literal))
+            if(literal->analyzedPrimitiveConstant)routineTypes[node]=literal->typeName;
+            else if(!literal->typeName.empty() && !legacyNullLiteral(literal))
                 routineTypes[node]=ExprHelper::declaredTypeInput(literal->typeName,currentDB,functionEngine);
         } else if (const auto* call = dynamic_cast<const FunctionCallExpr*>(node)) {
             if (evaluator.hasScalarFunction(call, functionEngine)) {

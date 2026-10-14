@@ -123,6 +123,10 @@ public:
     // Validate only the ESCAPE input, without matching a pattern or invoking
     // routines. Text admits one code point; bytea admits one decoded byte.
     static void validatePatternEscapeInput(const ExprValue& escape);
+    // Apply a resolved builtin integer input codec to a genuine UNKNOWN
+    // literal datum. No SQL type lookup, row, routine or query is evaluated.
+    static ExprValue transformUnknownIntegerInput(const ExprValue& input,
+        const std::string& resolvedType);
     ExprValue comparePrepared(const QueryComparisonBinding& binding,
         const ExprValue& left, const ExprValue& right) const;
     ExprValue coerceComparison(const QueryComparisonBinding& binding,

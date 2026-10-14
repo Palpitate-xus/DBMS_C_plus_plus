@@ -23,4 +23,9 @@ INSERT SELECT 的直接 UNKNOWN 标量 INTERVAL 输出在第一次输入解析�
 
 后续迁移应让各执行消费者使用同一份完整绑定 AST，保留类型、SQL NULL、名字作用域和错误阶段；分析失败时不得进入写入路径。先增加能复现当前错误的 native/协议控制，再逐项修复。
 
+已分析primitive Const与SQL typed literal不是同一来源：前者保留既有codec身份，
+不应在求值时重新查声明而晋升逻辑事务；parser默认不会授予该来源。纯查询的
+metadata捷径必须先有整个原始AST的database-independent证明，见
+[R73](../../docs/issue-review-r73-independent-binding.md)。
+
 产品接口与项目扩展的区分见[兼容性契约](../../docs/compatibility-contract.md)，完整功能状态见[总清单](../../docs/postgresql-18-gap-audit.md)。

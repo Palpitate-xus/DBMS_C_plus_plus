@@ -1383,6 +1383,8 @@ ExprValue ExprEvaluator::evalLiteral(const LiteralExpr* e) const {
     const std::string& raw = e->value;
     std::string low = toLower(raw);
 
+    if(e->analyzedPrimitiveConstant)
+        return ExprValue(e->typeName,low=="null"?std::string{}:unquote(raw),low=="null");
     if (low == "null") return ExprValue("unknown", "", true);
     if (low == "true") return ExprValue("boolean", "t", false);
     if (low == "false") return ExprValue("boolean", "f", false);
@@ -4744,6 +4746,17 @@ static ExprValue formatInternalCharByte(unsigned char byte) {
             static_cast<char>('0'+((byte>>3)&7)),static_cast<char>('0'+(byte&7))};
     } else if (byte) output.push_back(static_cast<char>(byte));
     return ExprValue("\"char\"",std::move(output),false);
+}
+
+ExprValue ExprEvaluator::transformUnknownIntegerInput(const ExprValue& input,
+    const std::string& resolvedType) {
+    const auto target=ExprHelper::canonicalResultTypeName(resolvedType);
+    if(ExprHelper::canonicalResultTypeName(input.typeName)!="unknown" ||
+       (target!="smallint" && target!="integer" && target!="bigint"))
+        throw DbError("XX000","integer input transformation requires UNKNOWN and a resolved builtin declaration");
+    if(input.isNull)return ExprValue(target,"",true);
+    return castToInteger(input,target=="smallint"?IntegerCastTarget::SmallInt:
+        target=="integer"?IntegerCastTarget::Integer:IntegerCastTarget::BigInt);
 }
 
 // Helper overload used by BinaryOpExpr "::"

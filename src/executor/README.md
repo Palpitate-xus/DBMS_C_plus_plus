@@ -34,3 +34,10 @@ CASE/WHERE等嵌套site的纯预检查与验证范围见[R60](../../docs/issue-r
 普通视图在DDL阶段通过纯绑定确定输出列，替换必须先保留已有列前缀的名称、
 OID类型及typmod；legacy结果物化仍须使用视图目录列名，不能直接采用独立body
 的别名。具体证据和未覆盖边界见[R67](../../docs/issue-review-r67-view-replacement-contract.md)。
+
+纯常量规划只对实际解析为catalog builtin的ABS结构常量应用已知immutable规则；
+同名用户routine、参数、SQL child不能被执行来猜结果。整数结果须遵守各自宽度，
+无行/零LIMIT的旧接收器也不能吞掉规划错误，见
+[R68](../../docs/issue-review-r68-abs-integer-bounds.md)。折叠后的primitive datum保留
+已分析来源，避免重新查SQL类型而获取无关数据库ownership，见
+[R73](../../docs/issue-review-r73-independent-binding.md)。

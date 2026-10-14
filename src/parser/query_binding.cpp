@@ -684,14 +684,15 @@ public:
                 const auto integerInput=[&](ExprPtr& input,const std::string& target) {
                     auto* literal=static_cast<LiteralExpr*>(input.get());
                     if(metadata.assignmentInput)metadata.assignmentInput({"",target},literal,"unknown");
-                    CastExpr conversion;conversion.typeName=target;conversion.implicit=true;
-                    conversion.operand=std::make_unique<LiteralExpr>(*literal);
-                    ExprEvaluator pure;const auto value=pure.eval(&conversion,RowContext{});
+                    ExprEvaluator pure;auto inputValue=pure.eval(literal,RowContext{});
+                    inputValue.typeName="unknown"; // actual untyped SQL literal, not a runtime string column
+                    const auto value=ExprEvaluator::transformUnknownIntegerInput(inputValue,target);
                     // PostgreSQL transforms UNKNOWN into a typed Const, not
                     // a runtime CAST. Retain this literal's original source
                     // coordinates and keep the established physical/index
                     // receiver instead of requesting a different query graph.
                     literal->typeName=target;
+                    literal->analyzedPrimitiveConstant=true;
                     if(!value.isNull)literal->value=value.value;
                 };
                 if(!binary->comparison && integer(left) && right=="unknown" && unknownLiteral(binary->right.get()))

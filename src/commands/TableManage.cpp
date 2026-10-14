@@ -33185,6 +33185,22 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
         // The lock is released on return, before any prepared AST executes.
         std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
         std::optional<CatalogManager::MetadataSnapshot> catalogSnapshot;
+        if(databaseTransactionOwnershipDeferred()) {
+            SQLParser parser;
+            const auto parsed=parser.parseForBinding(sql);
+            if(parsed.success && parsed.stmt && SQLParser::isDatabaseIndependentQuery(*parsed.stmt)) {
+                // This whole AST has no relation, routine, parameter, SQL type
+                // declaration or child. Its inferred primitive identities are
+                // the immutable physical builtin producer, not a reason to
+                // promote the logical transaction or inspect another owner's
+                // uncommitted catalog. Every non-proven query keeps the fence.
+                CatalogManager::MetadataSnapshot primitives;
+                PgNamespaceRow catalog;catalog.oid=11;catalog.nspname="pg_catalog";catalog.nspowner=10;
+                primitives.namespaces.push_back(std::move(catalog));
+                primitives.types=CatalogManager::builtinTypeRows();
+                catalogSnapshot=std::move(primitives);
+            }
+        }
         QueryBindingMetadata metadata;
         metadata.finalizeUnknownOutput = finalizeUnknownOutput;
         metadata.outputExpressionIdentity=[&](const Expr* expression,const PreparedQuery& query,const SelectStmt* owner) {
