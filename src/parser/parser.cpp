@@ -7592,6 +7592,22 @@ StmtPtr SQLParser::parseCreateView(const std::vector<std::string>& tokens, size_
         ++pos;
         std::vector<std::string> sel;
         for (size_t i = pos; i < tokens.size(); ++i) sel.push_back(tokens[i]);
+        if (!sel.empty() && sel.back() == ";") sel.pop_back();
+        // CHECK OPTION belongs to CREATE VIEW, not to the SELECT that is
+        // independently bound and stored as its query definition.
+        if (sel.size() >= 3 && toLower(sel[sel.size() - 2]) == "check" &&
+            toLower(sel.back()) == "option") {
+            size_t with = sel.size() - 3;
+            std::string option = "cascaded";
+            if (toLower(sel[with]) == "local" || toLower(sel[with]) == "cascaded") {
+                option = toLower(sel[with]);
+                if (with > 0) --with;
+            }
+            if (toLower(sel[with]) == "with") {
+                stmt->checkOption = option;
+                sel.resize(with);
+            }
+        }
         // Strip trailing WITH [NO] DATA (materialized views); default WITH DATA.
         if (sel.size() >= 2 && toLower(sel.back()) == "data") {
             if (sel.size() >= 3 && toLower(sel[sel.size() - 3]) == "with" &&

@@ -734,6 +734,10 @@ SHOW INDEX FROM users;
 
 ## 9. 视图与物化视图
 
+普通视图的 `CREATE OR REPLACE` 保留既有列名、类型和类型修饰符，允许末尾追加
+列；不兼容替换返回 `42P16` 并保留旧定义。创建时静态绑定输出，不提前执行
+查询或消耗序列。物化视图的支持范围独立于普通视图替换。
+
 ```sql
 -- 视图
 CREATE VIEW vip_users AS SELECT * FROM users WHERE VIP = 1;

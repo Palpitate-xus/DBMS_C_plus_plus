@@ -30,3 +30,7 @@ CASE/WHERE等嵌套site的纯预检查与验证范围见[R60](../../docs/issue-r
 来源/refresh/冲突的已验证范围见[R49](../../docs/issue-review-r49-materialized-insert-sources.md)。
 
 后续应统一 typed 比较、分区/peer 等价、窗口边界和已绑定表达式消费，并分别覆盖结果值、NULL、OID、错误阶段、副作用次数和清理。完整功能状态见[总清单](../../docs/postgresql-18-gap-audit.md)。
+
+普通视图在DDL阶段通过纯绑定确定输出列，替换必须先保留已有列前缀的名称、
+OID类型及typmod；legacy结果物化仍须使用视图目录列名，不能直接采用独立body
+的别名。具体证据和未覆盖边界见[R67](../../docs/issue-review-r67-view-replacement-contract.md)。

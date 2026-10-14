@@ -31404,6 +31404,12 @@ static bool executeInternal(const string& rawSql, Session& s) {
             if (g_engine.viewExists(queryDb, viewLookup)) {
                 string viewSql = g_engine.getViewSQL(queryDb, viewLookup);
                 if (!viewSql.empty()) {
+                    // Explicit CREATE VIEW column names belong to the view
+                    // relation, not its independently executed query body.
+                    // Read that same bound contract before materialization;
+                    // deriving names from the body loses quoted/prefix aliases.
+                    const auto viewContract = g_engine.prepareBoundQuery(
+                        queryDb, "SELECT * FROM " + tnameOrig, {}, true).output;
                     // Strip BASE_TABLE metadata line for expansion
                     string expandedSql = viewSql;
                     size_t btPos = expandedSql.find("\nBASE_TABLE:");
@@ -31426,6 +31432,13 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     }
                     if (viewColumns.empty())
                         throw dbms::DbError("0A000", "view query has no result columns");
+                    if (viewContract.size() != viewColumns.size())
+                        throw dbms::DbError("XX000", "view result width differs from its descriptor");
+                    viewTypes.clear();
+                    for (size_t column = 0; column < viewColumns.size(); ++column) {
+                        viewColumns[column] = viewContract[column].name;
+                        viewTypes.push_back(viewContract[column].type);
+                    }
                     int viewCounter = 0;
                     const string materialized = createTempTableFromRows(
                         s, displayRows, viewColumns, viewCounter, viewTypes,

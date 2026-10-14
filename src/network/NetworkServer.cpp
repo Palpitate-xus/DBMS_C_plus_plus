@@ -1314,6 +1314,7 @@ bool startsWithSqlPhrase(const std::string& sql, const std::string& phrase) {
 
 struct ProtocolPhysicalSource {
     TableSchema table;
+    bool logicalView = false;
     Oid relationOid = INVALID_OID;
     std::vector<PgAttributeRow> attributes;
     std::vector<std::optional<std::string>> projections;
@@ -1396,7 +1397,10 @@ ProtocolPhysicalSource protocolPhysicalSourceFromQuery(const std::string& sql,
             if (relation.relnamespace != namespaceOid || relation.relname != source.name) continue;
             // A nearer view/virtual relation shadows a farther physical
             // table; metadata lookup must follow the same namespace order.
-            if (relation.relkind != 'r') return result;
+            if (relation.relkind != 'r') {
+                result.logicalView = select && relation.relkind == 'v';
+                return result;
+            }
             const auto physical = schema == sessionTempSchemaName(session)
                 ? tempTablePrefix(session, source.name)
                 : schema == "public" ? source.name : schema + "__" + source.name;
@@ -1576,7 +1580,8 @@ bool protocolHasLengthModifier(uint32_t oid) {
 
 std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& result,
                                                           const std::string& sql,
-                                                          const Session& session) {
+                                                          const Session& session,
+                                                          const QueryRowDescriptor* preparedOutput = nullptr) {
     std::vector<PgColumnDescription> descriptions;
     descriptions.reserve(result.columns.size());
 
@@ -1584,6 +1589,20 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
     const auto& table = source.table;
     const auto relationOid = source.relationOid;
     const auto& catalogAttributes = source.attributes;
+    // A legacy view's display/materialization adapter is not its declaration.
+    // Bind the real query output read-only, or reuse the caller's typed
+    // parameter descriptor. Never reinterpret an array as fallback TEXT.
+    std::optional<PreparedQuery> viewDescriptor;
+    const QueryRowDescriptor* viewOutput = nullptr;
+    if (source.logicalView) {
+        viewOutput = preparedOutput;
+        if (!viewOutput) {
+            viewDescriptor.emplace(g_engine.prepareBoundQuery(session.currentDB, sql, {}, true));
+            viewOutput = &viewDescriptor->output;
+        }
+        if (viewOutput->size() != result.columns.size())
+            throw DbError("XX000", "view protocol result width differs from its descriptor");
+    }
 
     for (const auto& name : result.columns) {
         PgColumnDescription description;
@@ -1607,6 +1626,18 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
                                       : mapBuiltinTypeNameToOid(typeName);
             if (description.typeOid == INVALID_OID) description.typeOid = 25;
             description.typeSize = protocolTypeSize(description.typeOid, expressionColumn);
+        }
+        if (viewOutput) {
+            const auto& field = (*viewOutput)[columnIndex];
+            description.typeOid = field.typeOid != INVALID_OID
+                ? field.typeOid : mapBuiltinTypeNameToOid(field.type);
+            if (description.typeOid == INVALID_OID)
+                throw DbError("XX000", "view protocol output has no declared type");
+            Column declared;
+            declared.dataType = field.type;
+            declared.isVariableLength = true;
+            description.typeSize = protocolTypeSize(description.typeOid, declared);
+            description.typeModifier = field.typeMod;
         }
         for (size_t i = 0; i < table.len; ++i) {
             const Column& column = table.cols[i];
@@ -1883,7 +1914,7 @@ bool describePreparedHavingResult(const std::string& sql, Session& session,
         shape.columns.push_back(field.name);
         shape.columnTypes.push_back(field.type);
     }
-    columns = describeProtocolColumns(shape, sql, session);
+    columns = describeProtocolColumns(shape, sql, session, &prepared.output);
     return !columns.empty();
 }
 
@@ -1941,7 +1972,7 @@ bool describePreparedConflictPredicateResult(const std::string& sql, Session& se
         shape.columns.push_back(field.name);
         shape.columnTypes.push_back(field.type);
     }
-    columns = describeProtocolColumns(shape, sql, session);
+    columns = describeProtocolColumns(shape, sql, session, &prepared.output);
     return !columns.empty();
 }
 
@@ -2383,6 +2414,17 @@ bool describePreparedResult(const std::string& sql, Session& session,
         }
     }
     const auto* select = dynamic_cast<const SelectStmt*>(parsed.stmt.get());
+    if (select && protocolPhysicalSourceFromQuery(sql, session).logicalView) {
+        const auto prepared = g_engine.prepareBoundQuery(session.currentDB, sql,
+            protocolMetadataParameters(session, parameterOids), true);
+        QueryResult shape;
+        for (const auto& field : prepared.output) {
+            shape.columns.push_back(field.name);
+            shape.columnTypes.push_back(field.type);
+        }
+        columns = describeProtocolColumns(shape, sql, session, &prepared.output);
+        return !columns.empty();
+    }
     if (select && !parameterOids.empty() &&
         std::all_of(parameterOids.begin(), parameterOids.end(),
             [](uint32_t oid) { return oid != 0 && valuesParameterCastType(oid); })) {
@@ -2405,7 +2447,7 @@ bool describePreparedResult(const std::string& sql, Session& session,
             shape.columns.push_back(field.name);
             shape.columnTypes.push_back(field.type);
         }
-        columns = describeProtocolColumns(shape, sql, session);
+        columns = describeProtocolColumns(shape, sql, session, &prepared.output);
         return !columns.empty();
     }
     if (select && !select->fromClause && parameterOids.empty()) {

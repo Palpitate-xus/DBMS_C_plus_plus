@@ -1,3 +1,4 @@
+#include "catalog_generation_test_view.h"
 #include "commands/DdlExecutor.h"
 #include "commands/TableManage.h"
 #include "Session.h"
@@ -63,21 +64,23 @@ static void test_create_or_replace_view() {
     assert(g_engine.insert(db, "t", {{"id", "1"}, {"name", "alice"}, {"score", "90"}}) == dbms::DBStatus::OK);
 
     assert(!ddl.executeSql("CREATE VIEW v AS SELECT id, name FROM t", s));
-    dbms::CatalogManager& catalog = g_engine.catalogService().get(db);
-    const auto* initialView = catalog.resolveRelation("v", {"public"});
+    dbms_test::CatalogGenerationView catalog(g_engine, db);
+    const auto* initialView = catalog().resolveRelation("v", {"public"});
     assert(initialView != nullptr && initialView->relkind == 'v');
     const dbms::Oid viewOid = initialView->oid;
-    assert(!ddl.executeSql("CREATE OR REPLACE VIEW v AS SELECT id, score FROM t", s));
+    // Replacing a view may change its query, but not the existing column
+    // name/type contract. Keep the score predicate without renaming name.
+    assert(!ddl.executeSql("CREATE OR REPLACE VIEW v AS SELECT id, name FROM t WHERE score >= 0", s));
 
     assert(g_engine.getViewBaseTable(db, "v") == "t");
     std::string sql = g_engine.getViewSQL(db, "v");
     assert(sql.find("score") != std::string::npos);
-    const auto* replacedView = catalog.resolveRelation("v", {"public"});
+    const auto* replacedView = catalog().resolveRelation("v", {"public"});
     assert(replacedView != nullptr && replacedView->oid == viewOid);
-    const auto attributes = catalog.findAttributes(viewOid);
+    const auto attributes = catalog().findAttributes(viewOid);
     assert(attributes.size() == 2);
     assert(attributes[0].attname == "id");
-    assert(attributes[1].attname == "score");
+    assert(attributes[1].attname == "name");
 
     g_engine.catalogService().evict(db);
     cleanup(db);
@@ -135,13 +138,13 @@ static void test_schema_qualified_view_name() {
     assert(g_engine.viewExists(db, "reporting.v"));
     assert(!g_engine.viewExists(db, "v"));
     assert(g_engine.getViewBaseTable(db, "reporting.v") == "t");
-    dbms::CatalogManager& catalog = g_engine.catalogService().get(db);
-    const auto* reporting = catalog.findNamespaceByName("reporting");
+    dbms_test::CatalogGenerationView catalog(g_engine, db);
+    const auto* reporting = catalog().findNamespaceByName("reporting");
     assert(reporting != nullptr);
-    const auto* view = catalog.findClassByName("v", reporting->oid);
+    const auto* view = catalog().findClassByName("v", reporting->oid);
     assert(view != nullptr && view->relkind == 'v');
     assert(!ddl.executeSql("DROP VIEW reporting.v", s));
-    assert(catalog.findClassByName("v", reporting->oid) == nullptr);
+    assert(catalog().findClassByName("v", reporting->oid) == nullptr);
 
     g_engine.catalogService().evict(db);
     cleanup(db);
@@ -161,19 +164,19 @@ static void test_view_catalog_drop_and_table_cascade() {
     assert(!ddl.executeSql(
         "CREATE VIEW visible_base AS SELECT id, label FROM base", s));
 
-    dbms::CatalogManager& catalog = g_engine.catalogService().get(db);
-    const auto* base = catalog.resolveRelation("base", {"public"});
-    const auto* view = catalog.resolveRelation("visible_base", {"public"});
+    dbms_test::CatalogGenerationView catalog(g_engine, db);
+    const auto* base = catalog().resolveRelation("base", {"public"});
+    const auto* view = catalog().resolveRelation("visible_base", {"public"});
     assert(base != nullptr);
     assert(view != nullptr && view->relkind == 'v' && view->relnatts == 2);
     const dbms::Oid baseOid = base->oid;
     const dbms::Oid viewOid = view->oid;
-    const auto attributes = catalog.findAttributes(viewOid);
+    const auto attributes = catalog().findAttributes(viewOid);
     assert(attributes.size() == 2);
     assert(attributes[0].attname == "id");
     assert(attributes[1].attname == "label");
     const auto dependencies =
-        catalog.findDepends(dbms::PgClassOid_Class, viewOid);
+        catalog().findDepends(dbms::PgClassOid_Class, viewOid);
     assert(std::any_of(
         dependencies.begin(), dependencies.end(),
         [&](const dbms::PgDependRow& dependency) {
@@ -187,20 +190,20 @@ static void test_view_catalog_drop_and_table_cascade() {
     assert(!ddl.executeSql("DROP TABLE base CASCADE", s));
     assert(!g_engine.tableExists(db, "base"));
     assert(!g_engine.viewExists(db, "visible_base"));
-    assert(catalog.findClass(baseOid) == nullptr);
-    assert(catalog.findClass(viewOid) == nullptr);
-    assert(catalog.findAttributes(viewOid).empty());
+    assert(catalog().findClass(baseOid) == nullptr);
+    assert(catalog().findClass(viewOid) == nullptr);
+    assert(catalog().findAttributes(viewOid).empty());
 
     g_engine.catalogService().evict(db);
-    dbms::CatalogManager& reloaded = g_engine.catalogService().get(db);
-    assert(reloaded.findClass(baseOid) == nullptr);
-    assert(reloaded.findClass(viewOid) == nullptr);
+    dbms_test::CatalogGenerationView reloaded(g_engine, db);
+    assert(reloaded().findClass(baseOid) == nullptr);
+    assert(reloaded().findClass(viewOid) == nullptr);
 
     assert(!ddl.executeSql(
         "CREATE TABLE drop_base (id INT)", s));
     assert(!ddl.executeSql(
         "CREATE VIEW drop_view AS SELECT id FROM drop_base", s));
-    const auto* dropView = reloaded.resolveRelation("drop_view", {"public"});
+    const auto* dropView = reloaded().resolveRelation("drop_view", {"public"});
     assert(dropView != nullptr && dropView->relkind == 'v');
     const dbms::Oid dropViewOid = dropView->oid;
     bool handled = false;
@@ -209,8 +212,8 @@ static void test_view_catalog_drop_and_table_cascade() {
         s, handled);
     assert(handled && !error);
     assert(!g_engine.viewExists(db, "drop_view"));
-    assert(reloaded.findClass(dropViewOid) == nullptr);
-    assert(reloaded.findAttributes(dropViewOid).empty());
+    assert(reloaded().findClass(dropViewOid) == nullptr);
+    assert(reloaded().findAttributes(dropViewOid).empty());
     error = dbms::tryDdlBridge(
         "drop view if exists drop_view", dbms::SqlCommand::DropView,
         s, handled);

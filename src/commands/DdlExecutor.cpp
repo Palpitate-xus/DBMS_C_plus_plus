@@ -1293,8 +1293,72 @@ static Oid registerMaterializedViewInCatalog(
     return relationOid;
 }
 
+static Oid viewOutputTypeOid(CatalogManager& catalog, Oid oid, bool array) {
+    const auto type = catalog.getType(oid);
+    // Older physical array descriptors expose the element OID plus an array
+    // marker. A new view must publish the real registered array identity.
+    if (array && type && type->typcategory != 'A' && type->typarray != INVALID_OID) {
+        const auto registered = catalog.getType(type->typarray);
+        if (!registered || registered->typcategory != 'A' || registered->typelem != oid)
+            throw DbError("XX001", "invalid view array type identity");
+        return registered->oid;
+    }
+    return oid;
+}
+
+static std::vector<PgAttributeRow> viewCatalogAttributes(
+    CatalogManager& catalog, const QueryRowDescriptor& output) {
+    if (output.size() > static_cast<size_t>(std::numeric_limits<int16_t>::max()))
+        throw DbError("54011", "too many columns in view");
+    std::vector<PgAttributeRow> attributes;
+    std::set<std::string> names;
+    for (size_t column = 0; column < output.size(); ++column) {
+        const auto& description = output[column];
+        if (!names.insert(description.name).second)
+            throw DbError("42701", "column \"" + description.name + "\" specified more than once");
+        const bool array = description.type.size() >= 2 &&
+            description.type.compare(description.type.size() - 2, 2, "[]") == 0;
+        const Oid declaredOid = description.typeOid != INVALID_OID
+            ? description.typeOid : mapBuiltinTypeNameToOid(description.type);
+        const Oid typeOid = viewOutputTypeOid(catalog, declaredOid, array);
+        const auto type = catalog.getType(typeOid);
+        if (!type) throw DbError("42704", "view output type does not exist: " + description.type);
+        PgAttributeRow attribute;
+        attribute.attname = description.name;
+        attribute.attnum = static_cast<int16_t>(column + 1);
+        attribute.atttypid = typeOid;
+        attribute.atttypmod = description.typeMod;
+        attribute.attlen = type->typlen;
+        attribute.attbyval = type->typbyval;
+        attribute.attalign = type->typalign;
+        attribute.attstorage = type->typstorage;
+        attribute.attcollation = type->typcollation;
+        attribute.attndims = array || type->typcategory == 'A' ? 1 : 0;
+        attributes.push_back(std::move(attribute));
+    }
+    return attributes;
+}
+
+static void validateViewReplacement(
+    CatalogManager& catalog,
+    const std::vector<PgAttributeRow>& previous,
+    const std::vector<PgAttributeRow>& replacement) {
+    if (replacement.size() < previous.size())
+        throw DbError("42P16", "cannot drop columns from view");
+    for (size_t column = 0; column < previous.size(); ++column) {
+        const auto& oldColumn = previous[column];
+        const auto& newColumn = replacement[column];
+        if (newColumn.attname != oldColumn.attname)
+            throw DbError("42P16", "cannot change name of view column \"" + oldColumn.attname + "\"");
+        if (viewOutputTypeOid(catalog, newColumn.atttypid, newColumn.attndims > 0) !=
+                viewOutputTypeOid(catalog, oldColumn.atttypid, oldColumn.attndims > 0) ||
+            newColumn.atttypmod != oldColumn.atttypmod)
+            throw DbError("42P16", "cannot change data type of view column \"" + oldColumn.attname + "\"");
+    }
+}
+
 static Oid registerViewInCatalog(
-    CatalogManager& catalog, const TableSchema* output,
+    CatalogManager& catalog, std::vector<PgAttributeRow> attributes,
     const std::string& logicalSchema, const std::string& logicalName,
     const std::string& owner, Oid replaceOid = INVALID_OID) {
     const auto viewNamespace = catalog.getNamespaceByName(logicalSchema);
@@ -1312,8 +1376,7 @@ static Oid registerViewInCatalog(
         relation.relname = logicalName;
         relation.relnamespace = namespaceOid;
         relation.relkind = 'v';
-        relation.relnatts = output
-            ? static_cast<int16_t>(output->len) : 0;
+        relation.relnatts = static_cast<int16_t>(attributes.size());
         const auto ownerRole = authCatalog().getAuthIdByName(owner);
         if (ownerRole) relation.relowner = ownerRole->oid;
         relationOid = catalog.createClass(relation);
@@ -1324,26 +1387,16 @@ static Oid registerViewInCatalog(
             current->relname != logicalName) {
             throw std::runtime_error("cannot replace non-view catalog object");
         }
-        if (output) {
-            PgClassRow replacement = *current;
-            replacement.relnatts = static_cast<int16_t>(output->len);
-            if (!catalog.updateClass(relationOid, replacement)) {
-                throw std::runtime_error("cannot update view catalog row");
-            }
+        PgClassRow replacement = *current;
+        replacement.relnatts = static_cast<int16_t>(attributes.size());
+        if (!catalog.updateClass(relationOid, replacement)) {
+            throw std::runtime_error("cannot update view catalog row");
         }
     }
 
-    if (output) {
-        std::vector<PgAttributeRow> attributes;
-        attributes.reserve(output->len);
-        for (size_t column = 0; column < output->len; ++column) {
-            attributes.push_back(catalogAttributeForColumn(
-                catalog, relationOid, namespaceOid, output->cols[column],
-                column));
-        }
-        if (!catalog.replaceAttributes(relationOid, attributes)) {
-            throw std::runtime_error("cannot replace view attributes");
-        }
+    for (auto& attribute : attributes) attribute.attrelid = relationOid;
+    if (!catalog.replaceAttributes(relationOid, attributes)) {
+        throw std::runtime_error("cannot replace view attributes");
     }
     return relationOid;
 }
@@ -1888,6 +1941,7 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         parsedCmd == dbms::SqlCommand::CreateProcedure ||
         parsedCmd == dbms::SqlCommand::DropProcedure ||
         parsedCmd == dbms::SqlCommand::DropRoutine ||
+        parsedCmd == dbms::SqlCommand::CreateView ||
         parsedCmd == dbms::SqlCommand::AlterTable ||
         parsedCmd == dbms::SqlCommand::CreateTable;
     const std::string& parseInput = preservesLiteralText && !rawSql.empty()
@@ -9633,7 +9687,7 @@ bool DdlExecutor::executeCreateView(const CreateViewStmt* stmt, Session& s) {
     std::string viewname = stmt->viewName;
     std::string viewSql = stmt->selectSql;
     CatalogManager::QualifiedName qualifiedName;
-    if (!CatalogManager::parseQualifiedName(viewname, qualifiedName) ||
+    if (!CatalogManager::parseQualifiedName(viewname, qualifiedName, true) ||
         qualifiedName.name.empty()) {
         std::cout << "ERROR: invalid view name \"" << viewname << "\""
                   << std::endl;
@@ -9724,71 +9778,27 @@ bool DdlExecutor::executeCreateView(const CreateViewStmt* stmt, Session& s) {
         }
     }
 
-    TableSchema output;
-    output.owner = effectiveSessionRole(s);
-    bool outputKnown = false;
-    std::vector<std::string> selectColumns;
-    std::string parsedSource;
-    std::vector<std::string> ignoredConditions;
-    if (parseSimpleSelect(
-            viewSql, selectColumns, parsedSource, ignoredConditions)) {
-        const std::string sourceStorageName =
-            resolveTableName(s, parsedSource);
-        if (g_engine.tableExists(s.currentDB, sourceStorageName)) {
-            const TableSchema source =
-                g_engine.getTableSchema(s.currentDB, sourceStorageName);
-            outputKnown = source.len != 0;
-            if (selectColumns.size() == 1 && selectColumns.front() == "*") {
-                for (size_t column = 0; column < source.len; ++column) {
-                    output.append(makeColumnFromSource(
-                        source.cols[column], source.cols[column].dataName));
-                }
-            } else {
-                for (const std::string& projection : selectColumns) {
-                    std::string sourceName = projection;
-                    std::string outputName;
-                    const std::string lowerProjection = toLower(projection);
-                    const size_t asPosition = lowerProjection.find(" as ");
-                    if (asPosition != std::string::npos) {
-                        sourceName = trim(projection.substr(0, asPosition));
-                        outputName = trim(projection.substr(asPosition + 4));
-                    }
-                    const size_t qualifier = sourceName.rfind('.');
-                    if (qualifier != std::string::npos) {
-                        sourceName = sourceName.substr(qualifier + 1);
-                    }
-                    if (outputName.empty()) outputName = sourceName;
-
-                    const Column* sourceColumn = nullptr;
-                    for (size_t column = 0; column < source.len; ++column) {
-                        if (toLower(source.cols[column].dataName) ==
-                            toLower(sourceName)) {
-                            sourceColumn = &source.cols[column];
-                            break;
-                        }
-                    }
-                    if (!sourceColumn) {
-                        outputKnown = false;
-                        output = TableSchema{};
-                        break;
-                    }
-                    output.append(makeColumnFromSource(
-                        *sourceColumn, outputName));
-                }
-            }
-            if (outputKnown && !stmt->columnNames.empty()) {
-                if (stmt->columnNames.size() != output.len) {
-                    std::cout << "ERROR: CREATE VIEW column list has "
-                              << stmt->columnNames.size()
-                              << " names but query returns " << output.len
-                              << " columns" << std::endl;
-                    return true;
-                }
-                for (size_t column = 0; column < output.len; ++column) {
-                    output.cols[column].dataName = stmt->columnNames[column];
-                }
-            }
+    // A view's output contract comes from whole-query binding, not a first
+    // row or textual projection guesses. This is pure even for empty input,
+    // expressions, constants and volatile routines.
+    QueryRowDescriptor output;
+    try {
+        auto prepared = g_engine.prepareBoundQuery(s.currentDB, viewSql, {}, true);
+        if (!dynamic_cast<const SelectStmt*>(prepared.ast.get()))
+            throw DbError("42601", "CREATE VIEW requires a query");
+        output = std::move(prepared.output);
+        if (stmt->columnNames.size() > output.size())
+            throw DbError("42601", "CREATE VIEW has more column names than columns");
+        for (size_t column = 0; column < stmt->columnNames.size(); ++column) {
+            CatalogManager::QualifiedName name;
+            if (!CatalogManager::parseQualifiedName(stmt->columnNames[column], name, true) ||
+                !name.schema.empty() || name.name.empty())
+                throw DbError("42601", "invalid view column name");
+            output[column].name = std::move(name.name);
         }
+    } catch (const DbError& error) {
+        std::cout << "CREATE VIEW: " << error.what() << std::endl;
+        return true;
     }
 
     std::string checkOption = stmt->checkOption;
@@ -9798,8 +9808,10 @@ bool DdlExecutor::executeCreateView(const CreateViewStmt* stmt, Session& s) {
 
     CatalogManager* catalog = nullptr;
     Oid existingViewOid = INVALID_OID;
+    std::vector<PgAttributeRow> outputAttributes;
     try {
         catalog = &g_engine.catalogService().get(s.currentDB);
+        outputAttributes = viewCatalogAttributes(*catalog, output);
         const auto viewNamespace =
             catalog->getNamespaceByName(schemaName);
         if (!viewNamespace) {
@@ -9827,6 +9839,24 @@ bool DdlExecutor::executeCreateView(const CreateViewStmt* stmt, Session& s) {
                 return true;
             }
             existingViewOid = existing->oid;
+            auto previous = catalog->findAttributesByNum(existingViewOid);
+            if (previous.empty() && existing->relnatts == 0) {
+                // Older expression/constant views could have no registered
+                // descriptor. Recover their existing contract read-only;
+                // never accept an incompatible replacement just for that.
+                const auto oldQuery = g_engine.prepareBoundQuery(
+                    s.currentDB, g_engine.getViewSQL(s.currentDB, viewname), {}, true);
+                previous = viewCatalogAttributes(*catalog, oldQuery.output);
+            } else if (previous.size() != static_cast<size_t>(existing->relnatts)) {
+                throw DbError("XX001", "view catalog descriptor is incomplete");
+            }
+            validateViewReplacement(*catalog, previous, outputAttributes);
+        }
+        if (!existing && stmt->replace && g_engine.viewExists(s.currentDB, viewname)) {
+            const auto oldQuery = g_engine.prepareBoundQuery(
+                s.currentDB, g_engine.getViewSQL(s.currentDB, viewname), {}, true);
+            validateViewReplacement(
+                *catalog, viewCatalogAttributes(*catalog, oldQuery.output), outputAttributes);
         }
     } catch (const std::exception& error) {
         std::cout << "CREATE VIEW: catalog lookup failed: "
@@ -9859,9 +9889,8 @@ bool DdlExecutor::executeCreateView(const CreateViewStmt* stmt, Session& s) {
     }
 
     try {
-        const TableSchema* catalogOutput = outputKnown ? &output : nullptr;
         const Oid viewOid = registerViewInCatalog(
-            *catalog, catalogOutput, schemaName, qualifiedName.name,
+            *catalog, std::move(outputAttributes), schemaName, qualifiedName.name,
             effectiveSessionRole(s), existingViewOid);
 
         // CREATE OR REPLACE changes the referenced relation set. Preserve
