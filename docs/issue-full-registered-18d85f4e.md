@@ -73,3 +73,9 @@ discard_all_pending、合法INSERT DEFAULT及domain DEFAULT，全部0，
 root-r60-r66-protocols.log及root-r60-r66-protocol-logs/。全部生产输入、binary
 和58份receipt在门禁前后核对一致。这是当前定向组合验收，不是1339入口重新全绿。
 这些本机集成日志也位于`/tmp/dbms-review-r46.ifu6SWLp/`。
+
+R66集成后另跑原完整snapshot_exporter_visibility_test：第一组commit场景通过；
+实际后台domain58030被记录并延后写回，不再逃出线程terminate，但第二组仍在
+foreign.beginTransaction失败（exit134）。因此该完整驱动仍未通过，不能仅凭
+后台异常边界修复将其清零；继续分离事务ownership失败的实际原因。保留
+root-r66-snapshot-neighbor.log及独立gate目录，不覆盖原冻结全量失败。
