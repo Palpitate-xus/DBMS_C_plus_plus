@@ -258,11 +258,13 @@ void CatalogService::evict(const std::string& dbname) {
     cache_.erase(dbname);
 }
 
-bool CatalogService::persistAll() {
+bool CatalogService::persistAll(const std::string& database) {
     std::vector<std::pair<std::string, CachedCatalog>> models;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        for (const auto& entry : cache_) models.push_back(entry);
+        for (const auto& entry : cache_)
+            if(database.empty() || engine_.dbPath(entry.first).lexically_normal()==
+                                   engine_.dbPath(database).lexically_normal())models.push_back(entry);
     }
     bool ok = true;
     for (const auto& entry : models) {

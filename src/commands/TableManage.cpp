@@ -48121,7 +48121,7 @@ DBStatus StorageEngine::ensureDatabaseTransactionOwnership(const std::string& db
             }
         }
     } staged{context, promotionSucceeded};
-    if (catalogService_ && !catalogService_->persistAll()) return DBStatus::IO_ERROR;
+    if (catalogService_ && !catalogService_->persistAll(context.txnDB)) return DBStatus::IO_ERROR;
     auto* commitLog = getCommitLog(context.txnDB);
     if (!commitLog) return DBStatus::IO_ERROR;
     std::shared_ptr<WALManager> transactionWal;
@@ -48466,9 +48466,9 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnap
     }
 
     // CatalogManager is lazily persisted and may contain the latest DDL
-    // state only in memory.  Persist it before taking the transaction
+    // state only in memory. Persist this database before taking its transaction
     // snapshot so a DDL rollback can safely evict/reload the catalog.
-    if (catalogService_ && !catalogService_->persistAll()) {
+    if (catalogService_ && !catalogService_->persistAll(dbname)) {
         context.databaseExclusiveLock.reset();
         context.databaseSharedLock.reset();
         context.databaseTxnMutex.reset();

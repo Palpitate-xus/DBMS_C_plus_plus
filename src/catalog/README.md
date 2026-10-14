@@ -28,6 +28,10 @@
 不会自动变成新提交的视图。发布是显式检查的操作，不从 retired generation 的
 析构函数回写。干净 peer 更新换代，未发布修改冲突不能被静默覆盖。
 
+事务BEGIN及延迟ownership晋升只用`persistAll(database)`发布目标缓存，不能因
+另一个数据库的未发布模型或DDL owner阻塞本数据库；无参数`persistAll()`仍显式
+发布全部缓存。此范围选择不会绕过目标数据库自己的generation冲突和I/O失败。
+
 父事务拥有 DDL 物理图像时，已有 reader 使用 committed generation；无可用
 generation 的冷 reader fail closed（55P03），不等于 PostgreSQL 完整目录 MVCC。
 已验证范围和中间失败见 [R46](../../docs/issue-review-r46-native-schema-ownership.md)。

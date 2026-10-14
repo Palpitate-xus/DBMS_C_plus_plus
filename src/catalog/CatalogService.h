@@ -47,8 +47,9 @@ public:
     // publication is explicit, not a retired generation's destructor effect.
     void evict(const std::string& dbname);
 
-    // Persist all cached catalogs.
-    bool persistAll();
+    // Persist cached catalogs; a nonempty database restricts publication to
+    // that database. BEGIN must not publish another database's dirty model.
+    bool persistAll(const std::string& database = {});
 
     // Test/debug: is `dbname` currently cached?
     bool has(const std::string& dbname) const;
