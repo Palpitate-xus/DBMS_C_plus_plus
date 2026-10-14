@@ -65,6 +65,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/window_aggregate_arguments_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/schema_namespace_atomicity_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/bit_integer_cast_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/matview_insert_source_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/logical_tuple_encoding_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/unordered_window_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/nth_value_default_peer_frame_protocol_e2e_test.py)

@@ -17,4 +17,8 @@ Volcano 算子定义于 `ExecutionPlan.h/.cpp`，生命周期接口位于 `src/i
 [R45](../../docs/issue-review-r45-window-aggregate-arguments.md)。
 部分复杂 DQL/DML 仍经 legacy 或物化适配路径执行；现有窄范围测试通过不证明完整 PostgreSQL 执行语义。
 
+默认prepared reader及原生DML/JOIN reader通过canonical schema/name解析已有
+物化视图的真实backing relation，保留population检查而不重跑其定义SQL。
+来源/refresh/冲突的已验证范围见[R49](../../docs/issue-review-r49-materialized-insert-sources.md)。
+
 后续应统一 typed 比较、分区/peer 等价、窗口边界和已绑定表达式消费，并分别覆盖结果值、NULL、OID、错误阶段、副作用次数和清理。完整功能状态见[总清单](../../docs/postgresql-18-gap-audit.md)。

@@ -1898,9 +1898,19 @@ OpPtr QueryPlanner::buildPreparedQueryPlan(StorageEngine* engine,const std::stri
             const auto* session=currentSession();
             const bool temporary=session &&
                 (found->relationSchema==sessionTempSchemaName(*session) || found->relationSchema=="pg_temp");
-            const auto table=temporary?tempTablePrefix(*session,found->relationName):
+            auto table=temporary?tempTablePrefix(*session,found->relationName):
                 found->relationSchema.empty() || found->relationSchema=="public"?found->relationName:
                 found->relationSchema+"__"+found->relationName;
+            if (!temporary) {
+                const auto materialized = engine->resolveMaterializedView(database,
+                    found->relationSchema.empty() ? "public" : found->relationSchema,
+                    found->relationName);
+                if (materialized) {
+                    if (!materialized->populated)
+                        throw DbError("55000", "materialized view has not been populated");
+                    table = materialized->backingTable;
+                }
+            }
             schema=engine->getTableSchema(database,table);
             source=std::make_unique<TableScanOp>(engine,database,table);
         }

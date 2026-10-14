@@ -67,9 +67,12 @@
 | R46 | 原生/SQL schema 目录及事务 owner | 已修复，待主分支集成 | 原 namespace 18 条断言失败，PG/候选46全过；最终35完整native和十一完整协议全0，中间同引擎/保存点/夹具及原默认协议失败保留，见[验证](issue-review-r46-native-schema-ownership.md) |
 | R47 | BIT 与整数转换的真实 cast 关系 | 已修复，待主分支集成 | 174native/160协议及十完整native/九完整协议全0；扩展172的BIT输出typmod另列R50，未放宽断言，见[验证](issue-review-r47-bit-integer-casts.md) |
 | R48 | 故障注入回归的 pending rollback 合约 | 已修正夹具，待主分支集成 | 四个原完整驱动失败；加强后的四驱动在主分支五轮20次全0，候选六完整native全0，未改产品，见[验证](issue-review-r48-pending-rollback-fixtures.md) |
-| R49 | INSERT SELECT 物化视图 source lowering | 待修复 | 本轮完整 matview_test 失败；保留原语句的独立诊断实际返回0A000，未达到未填充视图应报55000的原断言 |
+| R49 | INSERT SELECT 物化视图 source lowering | 已修复，待主分支集成 | 原完整native错误0A000/原41协议22失败→PG/候选41全0；parser24、十完整native/九完整协议全0，见[验证](issue-review-r49-materialized-insert-sources.md) |
 | R50 | BIT cast 的协议结果长度描述符 | 待修复 | 实际PG18.6扩展172全0，候选首个合法integer::bit(5)的RowDescription仍丢失typmod；完整失败输入保存在compat known-gap中 |
-| R51 | recovery graph 邻居的 DROP DATABASE 观察 | 待核验 | 候选七项批次中原驱动一次失败；原控制独立诊断已通过，重复观测中，未改原断言或把首批记为通过 |
+| R51 | recovery graph 邻居的 DROP DATABASE 观察 | 独立复验通过，历史原因未定 | 原驱动一次失败保留；R47固定生产代独立诊断及5+20次新隔离cwd全0，未改原断言，待主分支组合复验 |
+| R52 | 原生测试终态输出换行 | 待修正 | prepared_srf_host_ownership_test打印字面反斜杠n，导致真实PASSED marker与上一行相连；原日志保留，不把解析遗漏伪装为未执行 |
+| R53 | INSERT SELECT 的INTERVAL字段修饰符上下文 | 待修复 | 本轮完整interval_column_modifier协议27控制中1失败：来源UNKNOWN文本'4'被先解读成秒，YEAR/DAY TO MINUTE列得到0而非4年/4分钟 |
+| R54 | 聚合表达式中未提供参数的错误优先级 | 待修复 | 原aggregate_expression_scope协议在sum($1)+1返回42883(text+integer)，原断言要求42P02；待独立实际参考核验 |
 | O01 | owner健康重试及测试覆盖 | 已修复 | `c9a1e3c3`；原全部owner断言、新真实peer/dirty冲突及10完整native提交前/后通过；Root R14集成fresh58后两完整owner再次通过，见[验证](issue-review-o01-table-owner-health-retry.md) |
 | O02 | EXISTS索引错误的访问计划/断言 | 已修正回归夹具 | 原完整协议exit 1→0，保留六严格XX001，新增精确t/f，完整EXISTS协议/19native通过；未改产品，见[验证](issue-review-o02-index-access-path-expectations.md) |
 | O03 | EXPLAIN JOIN图及过时断言 | 已修复 | 实际执行的source/cache/join/scan图及相关重绑；最终完整60控制、十二native/十协议CLI全过，OFFSET阳性及42601原/PG对照保留，见[验证](issue-review-o03-explain-join-source-graph.md) |

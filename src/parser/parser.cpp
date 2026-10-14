@@ -3602,7 +3602,11 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
                     if (c != ",") cte.columnNames.push_back(c);
                 }
             }
-            if (pos < tokens.size() && toLower(tokens[pos]) == "as") ++pos;
+            if (pos >= tokens.size() || toLower(tokens[pos]) != "as") {
+                r.error = "WITH query requires AS (query)";
+                return r;
+            }
+            ++pos;
             if (pos + 1 < tokens.size() && toLower(tokens[pos]) == "not"
                 && toLower(tokens[pos + 1]) == "materialized") {
                 cte.materialized = false;
@@ -3626,22 +3630,22 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
                         subq += tokens[pos++];
                     }
                 }
+                if (depth != 0) { r.error = "unterminated WITH query"; return r; }
                 const size_t childEnd = pos;
                 const auto span = statementSource(tokens, childBegin, childEnd);
                 cte.queryBegin = span.first;
                 cte.queryEnd = span.second;
                 if (pos < tokens.size() && tokens[pos] == ")") ++pos;
-                if (bindingParse) {
-                    subq = joinParserTokens(tokens, childBegin, childEnd);
-                    auto child = parse(subq);
-                    if (!child.isValid()) {
-                        r.error = child.error.empty() ? "invalid WITH query" : child.error;
-                        return r;
-                    }
-                    cte.query = std::move(child.stmt);
-                } else cte.query = parse(subq).stmt;
+                if (bindingParse) subq = joinParserTokens(tokens, childBegin, childEnd);
+                auto child = parse(subq);
+                if (!child.isValid()) {
+                    r.error = child.error.empty() ? "invalid WITH query" : child.error;
+                    r.sqlState = child.sqlState;
+                    return r;
+                }
+                cte.query = std::move(child.stmt);
             }
-            if (bindingParse && !cte.query) { r.error = "WITH requires AS (query)"; return r; }
+            if (!cte.query) { r.error = "WITH requires AS (query)"; return r; }
             stmt->ctes.push_back(std::move(cte));
             if (pos < tokens.size() && tokens[pos] == ",") {
                 ++pos;
@@ -3649,6 +3653,7 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
             }
             break;
         }
+        if (pos >= tokens.size()) { r.error = "WITH requires a primary statement"; return r; }
     }
 
     if (pos < tokens.size()) {
@@ -4174,7 +4179,8 @@ ParseResult SQLParser::parseInsert(const std::string& sql) {
             ++pos;
             stmt->defaultValues = true;
         }
-    } else if (pos < tokens.size() && toLower(tokens[pos]) == "select") {
+    } else if (pos < tokens.size() &&
+               (toLower(tokens[pos]) == "select" || toLower(tokens[pos]) == "with")) {
         // INSERT INTO ... SELECT ...
         std::string selectSql;
         size_t sourceEnd = tokens.size();
@@ -4202,6 +4208,11 @@ ParseResult SQLParser::parseInsert(const std::string& sql) {
         ParseResult source = bindingParse ? parse(selectSql) : parseSelect(selectSql);
         if (!source.success || !source.stmt) {
             r.error = source.error.empty() ? "invalid INSERT SELECT source" : source.error;
+            return r;
+        }
+        if (!dynamic_cast<SelectStmt*>(source.stmt.get())) {
+            r.error = "INSERT source must be a SELECT or VALUES query";
+            r.sqlState = "42601";
             return r;
         }
         stmt->selectSource = std::move(source.stmt);

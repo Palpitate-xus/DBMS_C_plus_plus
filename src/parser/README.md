@@ -13,6 +13,10 @@ ON CONFLICT BOOLEAN、RETURNING 子查询和协议会话上下文的当前修复
 分别验证；其数值 RANGE 和尚不支持的日期/间隔边界见
 [R04](../../docs/issue-review-r04-window-frame-boundaries.md)。
 
+INSERT来源可交给既有WITH查询parser处理，ON CONFLICT/RETURNING仍归INSERT。
+WITH必须保留合法AS(query)及实际主语句；不能将DML主语句当成SELECT来源。
+实际AST/执行控制及剩余边界见[R49](../../docs/issue-review-r49-materialized-insert-sources.md)。
+
 后续迁移应让各执行消费者使用同一份完整绑定 AST，保留类型、SQL NULL、名字作用域和错误阶段；分析失败时不得进入写入路径。先增加能复现当前错误的 native/协议控制，再逐项修复。
 
 产品接口与项目扩展的区分见[兼容性契约](../../docs/compatibility-contract.md)，完整功能状态见[总清单](../../docs/postgresql-18-gap-audit.md)。

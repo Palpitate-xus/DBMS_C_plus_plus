@@ -5265,9 +5265,22 @@ private:
                 const auto table=physical(range);
                 if(!checkTablePrivilege(session_,table,dbms::StorageEngine::TablePrivilege::Select))
                     throw dbms::DbError("42501","permission denied for mutation source");
-                scanSchema=g_engine.getTableSchema(session_.currentDB,table);
+                auto scanTable = table;
+                const bool temporary = range.relationSchema == sessionTempSchemaName(session_) ||
+                    range.relationSchema == "pg_temp";
+                if (!temporary) {
+                    const auto materialized = g_engine.resolveMaterializedView(session_.currentDB,
+                        range.relationSchema.empty() ? "public" : range.relationSchema,
+                        range.relationName);
+                    if (materialized) {
+                        if (!materialized->populated)
+                            throw dbms::DbError("55000", "materialized view has not been populated");
+                        scanTable = materialized->backingTable;
+                    }
+                }
+                scanSchema=g_engine.getTableSchema(session_.currentDB,scanTable);
                 if(scanSchema.len!=range.columns.size())throw dbms::DbError("XX000","mutation source descriptor differs from physical relation");
-                scan=std::make_shared<dbms::TableScanOp>(&g_engine,session_.currentDB,table);
+                scan=std::make_shared<dbms::TableScanOp>(&g_engine,session_.currentDB,scanTable);
             } else
                 throw dbms::DbError("0A000","mutation source requires additional std::function-range lowering");
             auto scanOpened=std::make_shared<bool>(false);

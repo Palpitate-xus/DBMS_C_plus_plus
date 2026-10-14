@@ -288,8 +288,12 @@ static void test_create_matview_with_no_data() {
     auto rows = g_engine.query(db, backing, {}, {}, {});
     assert(rows.empty());                               // but no rows
 
-    dbms::CatalogManager& catalog = g_engine.catalogService().get(db);
-    const auto* relation = catalog.resolveRelation("mv", {"public"});
+    // Inspect the current generation after each DDL boundary, not a retired
+    // borrowed model whose rows correctly retain an older snapshot.
+    const auto catalog = [&]() -> dbms::CatalogManager& {
+        return g_engine.catalogService().get(db);
+    };
+    const auto* relation = catalog().resolveRelation("mv", {"public"});
     assert(relation != nullptr && relation->relkind == 'm');
     assert(!relation->relispopulated);
 
@@ -462,15 +466,19 @@ static void test_refresh_preserves_typed_values_and_population_state() {
     assert(!ddl.executeSql(
         "REFRESH MATERIALIZED VIEW refreshed_values WITH NO DATA", s));
     assert(readStructuredRows(db, backing).empty());
-    dbms::CatalogManager& catalog = g_engine.catalogService().get(db);
+    // Inspect the current generation after each DDL boundary, not a retired
+    // borrowed model whose rows correctly retain an older snapshot.
+    const auto catalog = [&]() -> dbms::CatalogManager& {
+        return g_engine.catalogService().get(db);
+    };
     const auto* relation =
-        catalog.resolveRelation("refreshed_values", {"public"});
+        catalog().resolveRelation("refreshed_values", {"public"});
     assert(relation != nullptr && !relation->relispopulated);
 
     assert(!ddl.executeSql(
         "REFRESH MATERIALIZED VIEW refreshed_values WITH DATA", s));
     assert(readStructuredRows(db, backing).size() == 5);
-    relation = catalog.resolveRelation("refreshed_values", {"public"});
+    relation = catalog().resolveRelation("refreshed_values", {"public"});
     assert(relation != nullptr && relation->relispopulated);
 
     g_engine.catalogService().evict(db);
@@ -527,8 +535,12 @@ static void test_refresh_failure_preserves_old_contents() {
     const auto indexes = g_engine.getIndexMetadata(db, backing);
     assert(indexes.size() == 1 && indexes.front().isUnique);
 
-    dbms::CatalogManager& catalog = g_engine.catalogService().get(db);
-    const auto* relation = catalog.resolveRelation("rollback_mv", {"public"});
+    // Inspect the current generation after each DDL boundary, not a retired
+    // borrowed model whose rows correctly retain an older snapshot.
+    const auto catalog = [&]() -> dbms::CatalogManager& {
+        return g_engine.catalogService().get(db);
+    };
+    const auto* relation = catalog().resolveRelation("rollback_mv", {"public"});
     assert(relation != nullptr && relation->relispopulated);
 
     g_engine.catalogService().evict(db);
@@ -551,12 +563,16 @@ static void test_drop_matview_cleans_catalog_atomically() {
     assert(!ddl.executeSql(
         "CREATE MATERIALIZED VIEW second_mv AS SELECT id FROM t", s));
 
-    dbms::CatalogManager& catalog = g_engine.catalogService().get(db);
+    // Inspect the current generation after each DDL boundary, not a retired
+    // borrowed model whose rows correctly retain an older snapshot.
+    const auto catalog = [&]() -> dbms::CatalogManager& {
+        return g_engine.catalogService().get(db);
+    };
     const auto* firstRelation =
-        catalog.resolveRelation("first_mv", {"public"});
+        catalog().resolveRelation("first_mv", {"public"});
     assert(firstRelation != nullptr && firstRelation->relkind == 'm');
     const dbms::Oid firstOid = firstRelation->oid;
-    assert(catalog.findAttributes(firstOid).size() == 2);
+    assert(catalog().findAttributes(firstOid).size() == 2);
 
     bool handled = false;
     bool error = dbms::tryDdlBridge(
@@ -564,7 +580,7 @@ static void test_drop_matview_cleans_catalog_atomically() {
         dbms::SqlCommand::DropMaterializedView, s, handled);
     assert(handled && error);
     assert(g_engine.isMaterializedView(db, "first_mv"));
-    assert(catalog.findClass(firstOid) != nullptr);
+    assert(catalog().findClass(firstOid) != nullptr);
 
     error = dbms::tryDdlBridge(
         "drop materialized view first_mv, second_mv",
@@ -576,8 +592,8 @@ static void test_drop_matview_cleans_catalog_atomically() {
         db, dbms::StorageEngine::materializedViewPrefix("first_mv")));
     assert(!g_engine.tableExists(
         db, dbms::StorageEngine::materializedViewPrefix("second_mv")));
-    assert(catalog.findClass(firstOid) == nullptr);
-    assert(catalog.findAttributes(firstOid).empty());
+    assert(catalog().findClass(firstOid) == nullptr);
+    assert(catalog().findAttributes(firstOid).empty());
 
     g_engine.catalogService().evict(db);
     dbms::CatalogManager& reloaded = g_engine.catalogService().get(db);
@@ -619,8 +635,12 @@ static void test_matview_metadata_write_failure_rolls_back() {
     assert(g_engine.getMaterializedViewSQL(db, "blocked_mv").empty());
     assert(!g_engine.tableExists(
         db, dbms::StorageEngine::materializedViewPrefix("blocked_mv")));
-    dbms::CatalogManager& catalog = g_engine.catalogService().get(db);
-    assert(catalog.resolveRelation("blocked_mv", {"public"}) == nullptr);
+    // Inspect the current generation after each DDL boundary, not a retired
+    // borrowed model whose rows correctly retain an older snapshot.
+    const auto catalog = [&]() -> dbms::CatalogManager& {
+        return g_engine.catalogService().get(db);
+    };
+    assert(catalog().resolveRelation("blocked_mv", {"public"}) == nullptr);
     for (const auto& entry : fs::directory_iterator(g_engine.viewsDir(db))) {
         assert(entry.path().filename().string().find(
                    "blocked_mv.mview.tmp.") != 0);
@@ -661,8 +681,12 @@ static void test_matview_drop_io_failure_rolls_back() {
     assert(g_engine.tableExists(db, backing));
     assert(fs::is_directory(metadata));
     assert(fs::exists(metadata / "keep"));
-    dbms::CatalogManager& catalog = g_engine.catalogService().get(db);
-    const auto* relation = catalog.resolveRelation("mv", {"public"});
+    // Inspect the current generation after each DDL boundary, not a retired
+    // borrowed model whose rows correctly retain an older snapshot.
+    const auto catalog = [&]() -> dbms::CatalogManager& {
+        return g_engine.catalogService().get(db);
+    };
+    const auto* relation = catalog().resolveRelation("mv", {"public"});
     assert(relation != nullptr && relation->relkind == 'm');
 
     g_engine.catalogService().evict(db);
@@ -692,9 +716,13 @@ static void test_schema_qualified_matview_name() {
     assert(!g_engine.isMaterializedView(db, "mv"));
     assert(g_engine.tableExists(
         db, dbms::StorageEngine::materializedViewPrefix("reporting.mv")));
-    dbms::CatalogManager& catalog = g_engine.catalogService().get(db);
+    // Inspect the current generation after each DDL boundary, not a retired
+    // borrowed model whose rows correctly retain an older snapshot.
+    const auto catalog = [&]() -> dbms::CatalogManager& {
+        return g_engine.catalogService().get(db);
+    };
     const auto* relation =
-        catalog.resolveRelation("reporting.mv", {"public"});
+        catalog().resolveRelation("reporting.mv", {"public"});
     assert(relation != nullptr && relation->relkind == 'm');
     const dbms::Oid relationOid = relation->oid;
 
@@ -702,7 +730,7 @@ static void test_schema_qualified_matview_name() {
     assert(!g_engine.isMaterializedView(db, "reporting.mv"));
     assert(!g_engine.tableExists(
         db, dbms::StorageEngine::materializedViewPrefix("reporting.mv")));
-    assert(catalog.findClass(relationOid) == nullptr);
+    assert(catalog().findClass(relationOid) == nullptr);
 
     g_engine.catalogService().evict(db);
     cleanup(db);
@@ -721,15 +749,19 @@ static void test_matview_source_dependency_cascade() {
     assert(!ddl.executeSql(
         "CREATE MATERIALIZED VIEW cached_base AS SELECT id FROM base", s));
 
-    dbms::CatalogManager& catalog = g_engine.catalogService().get(db);
-    const auto* base = catalog.resolveRelation("base", {"public"});
-    const auto* view = catalog.resolveRelation("cached_base", {"public"});
+    // Inspect the current generation after each DDL boundary, not a retired
+    // borrowed model whose rows correctly retain an older snapshot.
+    const auto catalog = [&]() -> dbms::CatalogManager& {
+        return g_engine.catalogService().get(db);
+    };
+    const auto* base = catalog().resolveRelation("base", {"public"});
+    const auto* view = catalog().resolveRelation("cached_base", {"public"});
     assert(base != nullptr);
     assert(view != nullptr && view->relkind == 'm');
     const dbms::Oid baseOid = base->oid;
     const dbms::Oid viewOid = view->oid;
     const auto dependencies =
-        catalog.findDepends(dbms::PgClassOid_Class, viewOid);
+        catalog().findDepends(dbms::PgClassOid_Class, viewOid);
     assert(std::any_of(
         dependencies.begin(), dependencies.end(),
         [&](const dbms::PgDependRow& dependency) {
@@ -745,9 +777,9 @@ static void test_matview_source_dependency_cascade() {
     assert(!g_engine.isMaterializedView(db, "cached_base"));
     assert(!g_engine.tableExists(
         db, dbms::StorageEngine::materializedViewPrefix("cached_base")));
-    assert(catalog.findClass(baseOid) == nullptr);
-    assert(catalog.findClass(viewOid) == nullptr);
-    assert(catalog.findAttributes(viewOid).empty());
+    assert(catalog().findClass(baseOid) == nullptr);
+    assert(catalog().findClass(viewOid) == nullptr);
+    assert(catalog().findAttributes(viewOid).empty());
 
     g_engine.catalogService().evict(db);
     dbms::CatalogManager& reloaded = g_engine.catalogService().get(db);
