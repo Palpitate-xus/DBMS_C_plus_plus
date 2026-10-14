@@ -48,4 +48,7 @@ routine及结果OID/typmod。原无条件失败与中间8失败不覆盖。
 `r56-first32-candidate.log`启动在第一轮构建结束之前，实际仍使用上一代二进制，
 不能当成新源失败或验收；构建真正终态后另存上述metadata候选及最终日志。
 用户暂缓的R51、R15、CTAS/后台checkpoint专项与安全/TDE工作均不重开。
-主分支独立集成和下一轮全注册回归仍须另行验证，原273总账不虚改完成。
+主分支以`4533d8db`独立集成，真实O2重编Main/TableManage并链接0；
+`root-r56-standard-build.log`、`root-r56-native.log`及`root-r56-protocols.log`
+记录主分支七完整native/六完整协议全0及开始/结束58份receipts门禁。
+下一轮全注册回归仍须另行冻结验证，原273总账不虚改完成。

@@ -64,18 +64,18 @@
 | R43 | 函数属性与LANGUAGE/AS交错 | 已修复 | `0c3ebac4`；52native原36失败→候选/Root全过，Root真实重编/九native/十三协议通过，见[验证](issue-review-r43-function-attribute-order.md) |
 | R44 | legacy窗口临时列名覆盖真实源列 | 已修复 | `80fe342e`；原39控制29失败→PG/Root全通过；十五完整native/二十完整协议通过，独立结果槽不修改源列身份，见[验证](issue-review-r44-window-internal-namespace.md) |
 | R45 | 窗口聚合的表达式参数 | 已修复 | 原300协议287失败→PG/Root全0；typed参数/NULL/结果声明、frame推进与VOLATILE重算、LIMIT需求和REAL宽度已修，Root十四完整native/十七完整协议全0，见[验证](issue-review-r45-window-aggregate-arguments.md) |
-| R46 | 原生/SQL schema 目录及事务 owner | 已修复，待主分支集成 | 原 namespace 18 条断言失败，PG/候选46全过；最终35完整native和十一完整协议全0，中间同引擎/保存点/夹具及原默认协议失败保留，见[验证](issue-review-r46-native-schema-ownership.md) |
-| R47 | BIT 与整数转换的真实 cast 关系 | 已修复，待主分支集成 | 174native/160协议及十完整native/九完整协议全0；扩展172的BIT输出typmod另列R50，未放宽断言，见[验证](issue-review-r47-bit-integer-casts.md) |
-| R48 | 故障注入回归的 pending rollback 合约 | 已修正夹具，待主分支集成 | 四个原完整驱动失败；加强后的四驱动在主分支五轮20次全0，候选六完整native全0，未改产品，见[验证](issue-review-r48-pending-rollback-fixtures.md) |
-| R49 | INSERT SELECT 物化视图 source lowering | 已修复，待主分支集成 | 原完整native错误0A000/原41协议22失败→PG/候选41全0；parser24、十完整native/九完整协议全0，见[验证](issue-review-r49-materialized-insert-sources.md) |
-| R50 | BIT/VARBIT 的协议及目录长度描述符 | 已修复，待主分支集成 | 原新60全部失败→PG/候选全0；原完整172、42native及七完整native/八完整协议全0，保留未通过邻居及全部known-gap断言，见[验证](issue-review-r50-bit-type-modifiers.md) |
+| R46 | 原生/SQL schema 目录及事务 owner | 已修复，已合主分支 | 原 namespace 18 条断言失败，PG/候选46全过；最终35完整native和十一完整协议全0，中间同引擎/保存点/夹具及原默认协议失败保留，见[验证](issue-review-r46-native-schema-ownership.md) |
+| R47 | BIT 与整数转换的真实 cast 关系 | 已修复，已合主分支 | 174native/160协议及十完整native/九完整协议全0；扩展172的BIT输出typmod另列R50，未放宽断言，见[验证](issue-review-r47-bit-integer-casts.md) |
+| R48 | 故障注入回归的 pending rollback 合约 | 已修正夹具，已合主分支 | 四个原完整驱动失败；加强后的四驱动在主分支五轮20次全0，候选六完整native全0，未改产品，见[验证](issue-review-r48-pending-rollback-fixtures.md) |
+| R49 | INSERT SELECT 物化视图 source lowering | 已修复，已合主分支 | 原完整native错误0A000/原41协议22失败→PG/候选41全0；parser24、十完整native/九完整协议全0，见[验证](issue-review-r49-materialized-insert-sources.md) |
+| R50 | BIT/VARBIT 的协议及目录长度描述符 | 已修复，已合主分支 | 原新60全部失败→PG/候选全0；原完整172、42native及七完整native/八完整协议全0，保留未通过邻居及全部known-gap断言，见[验证](issue-review-r50-bit-type-modifiers.md) |
 | R51 | recovery graph 邻居的 DROP DATABASE 观察 | 用户暂缓，未修复 | 原失败与早期通过保留；新固定诊断第13次复现状态25(DATABASE_IN_USE)，缓存/目录读锁竞争仍未修正；按用户要求跳过，不改原断言或宣称清零 |
-| R52 | 原生测试终态输出换行 | 已修正夹具，待主分支集成 | 使用真实换行分隔测试输出与PASSED marker；完整原驱动重新编译执行0，原完整日志及严格解析遗漏保留，见下方复验记录 |
-| R53 | INSERT SELECT 的INTERVAL字段修饰符上下文 | 已修复，待主分支集成 | 原27中1失败/新133中9失败→PG/候选全0，78纯binder控制及六完整native/七完整协议全0；标量与数组解析阶段分开，见[验证](issue-review-r53-insert-interval-context.md) |
-| R54 | 聚合表达式中未提供参数的错误优先级 | 已修复，待主分支集成 | 实际PG18.6新54全0，候选原13失败→0；原完整聚合scope及五完整协议全0，保留合法Extended/SQL PREPARE，见[验证](issue-review-r54-missing-parameter-priority.md) |
-| R55 | BYTEA 存储别名错误目录身份 | 已修复，待主分支集成 | 新28协议原17失败→PG/候选全0；原完整patterns及七完整协议/六完整native全0，7个目录/cold/显式历史修复控制全0，见[验证](issue-review-r55-bytea-catalog-identity.md) |
-| R56 | ARRAY_AGG 窗口函数的声明/接收器 | 已修复，待主分支集成 | 原42中37失败→PG/候选最终45全0；33native、七完整native/六完整协议全0，原window_type通过，数组值输入仍0A000，见[验证](issue-review-r56-window-array-aggregate.md) |
-| R57 | pending rollback后的协议连接中断 | 已修复，待主分支集成 | 原进程SIGABRT→加强完整驱动及五次重复全0；五完整native/四完整协议全0，原默认协议role_rows失败保留，见[验证](issue-review-r57-pending-rollback-protocol.md) |
+| R52 | 原生测试终态输出换行 | 已修正夹具，已合主分支 | 使用真实换行分隔测试输出与PASSED marker；完整原驱动重新编译执行0，原完整日志及严格解析遗漏保留，见下方复验记录 |
+| R53 | INSERT SELECT 的INTERVAL字段修饰符上下文 | 已修复，已合主分支 | 原27中1失败/新133中9失败→PG/候选全0，78纯binder控制及六完整native/七完整协议全0；标量与数组解析阶段分开，见[验证](issue-review-r53-insert-interval-context.md) |
+| R54 | 聚合表达式中未提供参数的错误优先级 | 已修复，已合主分支 | 实际PG18.6新54全0，候选原13失败→0；原完整聚合scope及五完整协议全0，保留合法Extended/SQL PREPARE，见[验证](issue-review-r54-missing-parameter-priority.md) |
+| R55 | BYTEA 存储别名错误目录身份 | 已修复，已合主分支 | 新28协议原17失败→PG/候选全0；原完整patterns及七完整协议/六完整native全0，7个目录/cold/显式历史修复控制全0，见[验证](issue-review-r55-bytea-catalog-identity.md) |
+| R56 | ARRAY_AGG 窗口函数的声明/接收器 | 已修复，已合主分支 | 原42中37失败→PG/候选最终45全0；33native、七完整native/六完整协议全0，原window_type通过，数组值输入仍0A000，见[验证](issue-review-r56-window-array-aggregate.md) |
+| R57 | pending rollback后的协议连接中断 | 已修复，已合主分支 | 原进程SIGABRT→加强完整驱动及五次重复全0；五完整native/四完整协议全0，原默认协议role_rows失败保留，见[验证](issue-review-r57-pending-rollback-protocol.md) |
 | R58 | 两个协议驱动的启动连接失败 | 原样复验通过，历史原因未定 | 原errno103保留；两个原完整驱动在主分支按默认超时独立复跑0，不宣称已修复启动竞态，见[完整记录](issue-full-registered-f4087f5d.md) |
 | R59 | 新组合物化视图target协议超时 | 原样复验通过，历史原因未定 | 71个原target控制及source/事务控制主分支原样复跑0，原超时保留；来源55000缺陷归R49，见[完整记录](issue-full-registered-f4087f5d.md) |
 | O01 | owner健康重试及测试覆盖 | 已修复 | `c9a1e3c3`；原全部owner断言、新真实peer/dirty冲突及10完整native提交前/后通过；Root R14集成fresh58后两完整owner再次通过，见[验证](issue-review-o01-table-owner-health-retry.md) |
@@ -96,8 +96,8 @@
 或脚本终态解析规则。候选完整驱动以当前全部58份生产对象 receipts 为门禁重新
 编译、链接、隔离执行，结果0；证据为
 `/tmp/dbms-review-r46.ifu6SWLp/r52-native.log`。
-主分支仍运行的完整回归保持原输入与日志不变，其严格汇总与独立标记核验须同时
-保留，不能用候选修正覆盖原始观测。
+原冻结完整回归已经结束；其输入、日志、严格汇总及独立标记核验均保留，见
+[完整终态](issue-full-registered-f4087f5d.md)，不能用修正后结果覆盖原始观测。
 
 ## 最新主分支集成记录
 
@@ -114,3 +114,28 @@ exit 0，不将首次批次记为十一项通过。
 `root-r38-r39-r23-*_test.py.log` 协议和 `root-r23-div14-whole-protocol.log`
 完整能力测试均exit 0。私树R23首次DIV14早期DDL超时仍保留，不改断言/timeout。
 上述为集成门禁，尚不是最后一次完整注册回归，也不关闭表内其余待修复项。
+
+R46–R57的已验收修改均已逐项合入主工作区并各自commit，未push。主分支对应
+R46 `47b4e04b`、R47 `34bff4ea`、R48 `ce332459`、R49 `e1ab8111`、
+R50 `9ea19c2d`、R52 `ebbf795c`、R53 `5cdccf4a`、R54 `c5b90fbc`、
+R55 `ee303db6`、R57 `b15223ab`、R56 `4533d8db`。R51没有产品修复，按用户
+要求暂缓，scope记录为`93443c1f`。
+
+本段证据目录为`/tmp/dbms-review-r46.ifu6SWLp/`，不把私树验收冒充主分支：
+
+- R46公共头变化后主分支真实重编58份生产单元，`root-r46-r49-fresh58.log`为0；
+  首轮native在11项通过后因R51失败，不能写成整批通过；原样五项retry为0。
+- R50的42native及R53的78native、R55目录身份等最终九完整native为0，
+  `root-r55-native.log`；BIT160/172/60及schema/MV协议五入口为0，
+  `root-r46-r50-protocols.log`。各后续变化CPP真实标准重编。
+- R53新133及原完整INTERVAL、R54新54及原聚合scope、R55新28及原patterns
+  主分支完整通过，`root-r53-protocols.log`、`root-r54-r55-protocols.log`。
+- R57主分支五完整native、三完整协议为0，`root-r57-native.log`和
+  `root-r57-protocols.log`，含加强后的真实故障/显式恢复全过程。
+- R56主分支真实O2重编Main和TableManage并链接0，
+  `root-r56-standard-build.log`；七完整native、六完整协议为0，
+  `root-r56-native.log`、`root-r56-protocols.log`，含新33/45控制与原完整window_type。
+  native门禁开始/结束核对当前58份生产receipts及构建输入。
+
+这些是各提交集成验证，不是当前1339注册入口的完整终态。下一轮完整注册回归
+须另冻结全部已提交输入、二进制及58份receipts，保留失败、环境skip和中间结果。
