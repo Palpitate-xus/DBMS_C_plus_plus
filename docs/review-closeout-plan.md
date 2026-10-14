@@ -20,11 +20,22 @@ R68整数ABS范围及空输入常量分析已验收。R70实际全文类型身�
 
 R76/R77本范围分别验收并提交；[R78恢复轮询](issue-review-r78-restore-poll-publication.md)
 保留成功断言和原期限、仅重试真实publication冲突，完整DIV14/真实restore-stage
-及五组负控全0。当前顺序：保持完整PG、真实取消和COPY断言/期限，冻结已提交HEAD、全部tracked
-输入、生产binary、cache及58份对象receipt，执行不筛选的标准注册回归。
-当前盘点858 native、3个真实Main frontend、499 Python注册入口，共1360。
-完整运行期间不改源文件/文档/HEAD，结束后严格逐项核对missing/extra/duplicate、
-失败和TLS环境skip；存在失败则保留原证据，逐根因修复、独立commit并复验。
+及五组负控全0。[冻结b5def9ba全量](issue-full-registered-b5def9ba.md)已经终态：
+1360入口、1358 PASSED退出（含TLS skip）、2 FAILED，全部入口覆盖/冻结fence一致。
+前次20个失败入口本轮均0；新暴露的复杂未绑定参数由R80 `6456ad4f`修复，
+原生二进制LENGTH由R79 `7c294fe7`修复，分别有失败复现、完整邻居和独立commit。
+
+当前执行顺序：
+
+1. 已完成[R81恢复阶段夹具](issue-review-r81-restore-stage-completion.md)，`a7f0e404`：
+   五次真实恢复及完整PG/取消/CLI/COPY/DIV14等七入口串行全0；不改产品或20秒期限。
+2. 已核对503份Markdown、821个本地目标、519 Python AST/13 shell、499注册入口及
+   六个总账单测；文档检查不代表所有历史技术结论当前都已验证。提交证据及当前计划。
+3. 下一步冻结最新干净HEAD、tracked输入、binary、cache及58份receipt，重新运行未筛选
+   标准全注册入口。当前860 native、3实际Main frontend、499 Python，共1362。
+   运行期间不改文件/HEAD，结束严格核对覆盖、失败、环境skip及全部fence；若有
+   新失败，保留原证据并逐项修复提交，不提前宣布全绿。
+
 按[准确暂缓范围](deferred-scope.md)保持已跳过模块，不自动扩展到普通SQL或存储错误。
 新组合需要重新运行全注册入口；本轮定向通过不能完成原273总账或把历史FAILED改绿。
 总目标尚未全部完成；各原partial/unverified与15项原始用户暂缓状态保持不变。

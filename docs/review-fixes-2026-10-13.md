@@ -15,6 +15,12 @@
 
 用户此前暂缓的安全/TDE及CTAS/后台checkpoint专项仍暂缓；本轮普通数据完整性与现有回归失败照常修复。CMake、TLS及sanitizer的实际验证范围按结果记录。
 
+最近完整终态为[冻结b5def9ba](issue-full-registered-b5def9ba.md)：1360入口，
+1358 PASSED退出（含TLS环境skip）及2 FAILED，无遗漏/重复，全部冻结fence一致。
+两个新失败随后由R80 `6456ad4f`、R79 `7c294fe7`分别验收提交；R81 `a7f0e404`
+补齐恢复阶段夹具，五次真实恢复及七项完整串行门禁0。当前860 native+3实际Main+
+499 Python，共1362；新组合全注册尚待另行冻结，不把定向验收写成全量终态。
+
 ## 逐项清单
 
 | 项目 | 内容 | 状态 | commit / 验证 |

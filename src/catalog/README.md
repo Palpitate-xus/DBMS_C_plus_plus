@@ -36,6 +36,11 @@
 generation 的冷 reader fail closed（55P03），不等于 PostgreSQL 完整目录 MVCC。
 已验证范围和中间失败见 [R46](../../docs/issue-review-r46-native-schema-ownership.md)。
 
+物理恢复staging尚未替换live目录，不提前淘汰仍有效的generation；实际publication
+窗口的cold reader仍可报告55P03。staging消失也不代表后台job已终态，维护客户端
+须等待实际状态，见[R77](../../docs/issue-review-r77-restore-catalog-staging.md)和
+[R81](../../docs/issue-review-r81-restore-stage-completion.md)。
+
 BIT/VARBIT目录修饰符按位数保存，不使用CHAR/VARCHAR的加4编码。显式最大容量
 VARBIT与无界声明不能只用物理宽度区分；CREATE/ALTER使用实际声明，其他目录
 同步保留已知声明。协议、数组及冷重载边界见[R50](../../docs/issue-review-r50-bit-type-modifiers.md)。
