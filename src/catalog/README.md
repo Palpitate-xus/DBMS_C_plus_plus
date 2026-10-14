@@ -36,4 +36,7 @@ BIT/VARBIT目录修饰符按位数保存，不使用CHAR/VARCHAR的加4编码。
 VARBIT与无界声明不能只用物理宽度区分；CREATE/ALTER使用实际声明，其他目录
 同步保留已知声明。协议、数组及冷重载边界见[R50](../../docs/issue-review-r50-bit-type-modifiers.md)。
 
+BYTEA的内部BLOB存储编解码名不代表schema下的新类型；目录必须保存真实内置
+OID17。已有错误目录的明确ALTER修复与同名用户类型边界见[R55](../../docs/issue-review-r55-bytea-catalog-identity.md)。
+
 后续重点是完整字段校验、事务化目录与存储发布、值快照或明确的对象生命周期、依赖/回滚和真实错误传播。类型、对象及权限的完整范围见[总清单](../../docs/postgresql-18-gap-audit.md)；兼容声明见[兼容性契约](../../docs/compatibility-contract.md)。

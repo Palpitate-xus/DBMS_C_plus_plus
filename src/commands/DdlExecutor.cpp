@@ -939,6 +939,10 @@ static Oid ensureTypeInCatalog(CatalogManager& cat, Oid nspOid, const Column& co
     // arrays; changing the codec spelling itself would break scalar storage.
     if (col.dataType == "float" && col.dsize == sizeof(float)) return 700;
     if (col.dataType == "double" && col.dsize == sizeof(double)) return 701;
+    // BYTEA uses the legacy BLOB heap codec. That physical spelling is not
+    // a new user base type in the table's schema (including an empty table).
+    // Qualified user enum/composite names retain their separate identities.
+    if (col.dataType == "blob" && col.enumValues.empty()) return 17;
     Oid typid = mapBuiltinTypeNameToOid(col.dataType);
     if (typid != INVALID_OID) return typid;
 

@@ -73,7 +73,7 @@
 | R52 | 原生测试终态输出换行 | 已修正夹具，待主分支集成 | 使用真实换行分隔测试输出与PASSED marker；完整原驱动重新编译执行0，原完整日志及严格解析遗漏保留，见下方复验记录 |
 | R53 | INSERT SELECT 的INTERVAL字段修饰符上下文 | 已修复，待主分支集成 | 原27中1失败/新133中9失败→PG/候选全0，78纯binder控制及六完整native/七完整协议全0；标量与数组解析阶段分开，见[验证](issue-review-r53-insert-interval-context.md) |
 | R54 | 聚合表达式中未提供参数的错误优先级 | 已修复，待主分支集成 | 实际PG18.6新54全0，候选原13失败→0；原完整聚合scope及五完整协议全0，保留合法Extended/SQL PREPARE，见[验证](issue-review-r54-missing-parameter-priority.md) |
-| R55 | BYTEA LIKE 的显式pattern类型 | 待修复 | 原legacy_sql_pattern_consumers完整协议中，b LIKE '__'::bytea返回42883，预期匹配id 1/2/7；保留原SQL，待实际参考及绑定路径核验 |
+| R55 | BYTEA 存储别名错误目录身份 | 已修复，待主分支集成 | 新28协议原17失败→PG/候选全0；原完整patterns及七完整协议/六完整native全0，7个目录/cold/显式历史修复控制全0，见[验证](issue-review-r55-bytea-catalog-identity.md) |
 | R56 | ARRAY_AGG 窗口函数的解析/绑定 | 待修复 | 原window_type完整协议中array_agg(v) OVER报42883；其他窗口实现不代表该聚合已覆盖，待参考和独立复现 |
 | R57 | 缺失索引后的协议连接中断 | 待复现 | 原missing_index完整驱动在INSERT时连接关闭，而非预期58030；需保留服务端日志并核对失败回滚owner，不能只调整超时或期望 |
 | R58 | 两个协议驱动的启动连接失败 | 待复验/归因 | 原ALTER SEQUENCE quoted options和TRUNCATE owned sequence均在首次连接报errno103，尚未执行SQL；不能据此改SQL断言或将原失败记绿 |
