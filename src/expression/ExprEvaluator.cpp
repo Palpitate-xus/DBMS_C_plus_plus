@@ -3789,7 +3789,36 @@ static bool integerFitsTarget(int64_t value, IntegerCastTarget target) {
 
 static ExprValue castToInteger(const ExprValue& value,
                                IntegerCastTarget target) {
-    const std::string sourceType = toLower(value.typeName);
+    const std::string sourceType = ExprHelper::canonicalResultTypeName(value.typeName);
+
+    if (sourceType == "bit") {
+        if (target == IntegerCastTarget::SmallInt)
+            throw DbError("42846", "cannot cast type bit to smallint");
+        const size_t width = target == IntegerCastTarget::Integer ? 32U : 64U;
+        if (value.value.size() > width) throwIntegerCastRangeError(target);
+        uint64_t bits = 0;
+        for (const char bit : value.value) {
+            if (bit != '0' && bit != '1')
+                throw DbError("22P02", "invalid input syntax for type bit");
+            bits = (bits << 1) | static_cast<unsigned>(bit == '1');
+        }
+        int64_t converted = 0;
+        if (value.value.size() == width &&
+            (bits & (uint64_t{1} << (width - 1))) != 0) {
+            // Only a full-width bit string is signed. Avoid both signed
+            // overflow and implementation-defined uint64_t-to-int64_t casts.
+            if (width == 64) {
+                converted = bits == (uint64_t{1} << 63)
+                    ? std::numeric_limits<int64_t>::min()
+                    : -static_cast<int64_t>((~bits) + 1U);
+            } else {
+                converted = static_cast<int64_t>(bits) - (int64_t{1} << 32);
+            }
+        } else {
+            converted = static_cast<int64_t>(bits);
+        }
+        return ExprValue(integerCastTypeName(target), std::to_string(converted), false);
+    }
 
     if (isCanonicalByteaType(sourceType)) {
         const ByteaValue parsedBytes = parseByteaOrThrow(value);
@@ -4748,6 +4777,25 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
     }
     const auto geometryTarget=geometric_input_detail::builtinType(targetTypeName);
     const auto sourceType=ExprHelper::canonicalResultTypeName(v.typeName);
+    const auto targetBase=ExprHelper::canonicalResultTypeName(target);
+    // These catalog cast relationships are type checks, not value checks:
+    // NULL cannot make an absent BIT/VARBIT numeric cast legal. PostgreSQL
+    // has BIT <-> INT4/INT8, but neither INT2 nor VARBIT numeric casts.
+    if (isBitStringTypeName(sourceType)) {
+        const bool integerTarget = targetBase == "integer" || targetBase == "bigint";
+        const bool unsupportedTarget = targetBase == "smallint" || targetBase == "numeric" ||
+            targetBase == "real" || targetBase == "double precision" ||
+            targetBase == "money" || targetBase == "boolean" || targetBase == "bytea";
+        if (unsupportedTarget || (integerTarget && sourceType != "bit"))
+            throw DbError("42846", "cannot cast type " + sourceType + " to " + targetBase);
+    }
+    if (isBitStringTypeName(targetBase) && isIntegerTypeName(sourceType) &&
+        (targetBase != "bit" || sourceType == "smallint"))
+        throw DbError("42846", "cannot cast type " + sourceType + " to " + targetBase);
+    if (isBitStringTypeName(targetBase) &&
+        (sourceType == "numeric" || sourceType == "real" || sourceType == "double precision" ||
+         sourceType == "money" || sourceType == "boolean" || sourceType == "bytea"))
+        throw DbError("42846", "cannot cast type " + sourceType + " to " + targetBase);
     record_cast_detail::validate(sourceType,target);
     if (target == "record") {
         if (sourceType == "record") return v;

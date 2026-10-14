@@ -65,9 +65,10 @@
 | R44 | legacy窗口临时列名覆盖真实源列 | 已修复 | `80fe342e`；原39控制29失败→PG/Root全通过；十五完整native/二十完整协议通过，独立结果槽不修改源列身份，见[验证](issue-review-r44-window-internal-namespace.md) |
 | R45 | 窗口聚合的表达式参数 | 已修复 | 原300协议287失败→PG/Root全0；typed参数/NULL/结果声明、frame推进与VOLATILE重算、LIMIT需求和REAL宽度已修，Root十四完整native/十七完整协议全0，见[验证](issue-review-r45-window-aggregate-arguments.md) |
 | R46 | 原生/SQL schema 目录及事务 owner | 已修复，待主分支集成 | 原 namespace 18 条断言失败，PG/候选46全过；最终35完整native和十一完整协议全0，中间同引擎/保存点/夹具及原默认协议失败保留，见[验证](issue-review-r46-native-schema-ownership.md) |
-| R47 | BIT 与整数转换的真实 cast 关系 | 待修复 | 遗留未注册协议160条在实际PG18.6全过；主分支首条 B''::smallint 返回22P02而非42846，原始日志保留 |
+| R47 | BIT 与整数转换的真实 cast 关系 | 已修复，待主分支集成 | 174native/160协议及十完整native/九完整协议全0；扩展172的BIT输出typmod另列R50，未放宽断言，见[验证](issue-review-r47-bit-integer-casts.md) |
 | R48 | 缺失索引回归的 pending rollback 合约 | 夹具验证中 | 本轮完整注册的Bloom清理/B-tree保护失败；显式修复自有文件并重试原undo后，两完整加强夹具在主分支实际对象上通过，未修改产品 |
 | R49 | INSERT SELECT 物化视图 source lowering | 待修复 | 本轮完整 matview_test 失败；保留原语句的独立诊断实际返回0A000，未达到未填充视图应报55000的原断言 |
+| R50 | BIT cast 的协议结果长度描述符 | 待修复 | 实际PG18.6扩展172全0，候选首个合法integer::bit(5)的RowDescription仍丢失typmod；完整失败输入保存在compat known-gap中 |
 | O01 | owner健康重试及测试覆盖 | 已修复 | `c9a1e3c3`；原全部owner断言、新真实peer/dirty冲突及10完整native提交前/后通过；Root R14集成fresh58后两完整owner再次通过，见[验证](issue-review-o01-table-owner-health-retry.md) |
 | O02 | EXISTS索引错误的访问计划/断言 | 已修正回归夹具 | 原完整协议exit 1→0，保留六严格XX001，新增精确t/f，完整EXISTS协议/19native通过；未改产品，见[验证](issue-review-o02-index-access-path-expectations.md) |
 | O03 | EXPLAIN JOIN图及过时断言 | 已修复 | 实际执行的source/cache/join/scan图及相关重绑；最终完整60控制、十二native/十协议CLI全过，OFFSET阳性及42601原/PG对照保留，见[验证](issue-review-o03-explain-join-source-graph.md) |

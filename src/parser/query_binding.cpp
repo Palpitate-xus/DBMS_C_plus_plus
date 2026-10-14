@@ -102,6 +102,25 @@ void validateArrayConstant(const Expr* source, const std::string& type) {
     ExprEvaluator pure; (void)pure.eval(&cast,RowContext{});
 }
 
+void validateBitCastTypes(const std::string& source, const std::string& target) {
+    const auto from = ExprHelper::canonicalResultTypeName(source);
+    const auto to = ExprHelper::canonicalResultTypeName(target);
+    if (from != "bit" && from != "bit varying" && to != "bit" && to != "bit varying") return;
+    // Use the real cast's type checks with a typed NULL datum. Preparation
+    // must reject an absent cast even in an empty input or a dead CASE arm;
+    // it must not evaluate the operand, parameters, arithmetic or routines.
+    ExprEvaluator evaluator;
+    RowContext context;
+    context.setParameters({ExprValue(from,"",true)});
+    CastExpr typeCheck;
+    typeCheck.typeName = target;
+    auto datum = std::make_unique<ParameterExpr>();
+    datum->slot = 0;
+    datum->declaredType = from;
+    typeCheck.operand = std::move(datum);
+    (void)evaluator.eval(&typeCheck,context);
+}
+
 class Binder {
 public:
     PreparedQuery result;
@@ -517,6 +536,7 @@ public:
             }
             const auto type=declaredType(declaration,cast);
             const auto input=expression(cast->operand, scopes, cast->typeName);
+            validateBitCastTypes(input,type);
             validateInternalCharInputCast(input,type);
             validateIntervalInputCast(input,type);
             validateRegtypeInputCast(input,type);
@@ -567,6 +587,7 @@ public:
             if (binary->op == "::") {
                 const auto* type = dynamic_cast<const LiteralExpr*>(binary->right.get());
                 if (!type) throw DbError("42601", "cast requires a type name");
+                validateBitCastTypes(left,castType);
                 validateInternalCharInputCast(left,castType);
                 validateIntervalInputCast(left,castType);
                 validateRegtypeInputCast(left,castType);
