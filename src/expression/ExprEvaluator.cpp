@@ -8701,11 +8701,13 @@ void ExprEvaluator::registerBuiltins() {
         }
         if (isIntegerTypeName(a[0].typeName)) {
             long long value = 0;
-            if (!parseInt64Exact(a[0].value, value) ||
-                value == std::numeric_limits<int64_t>::lowest()) {
-                throw std::runtime_error(
-                    "integer out of range (SQLSTATE 22003)");
-            }
+            const auto declared=common_type_detail::canonical(a[0].typeName);
+            const int64_t minimum=declared=="smallint"?std::numeric_limits<int16_t>::lowest():
+                declared=="integer"?std::numeric_limits<int32_t>::lowest():std::numeric_limits<int64_t>::lowest();
+            const int64_t maximum=declared=="smallint"?std::numeric_limits<int16_t>::max():
+                declared=="integer"?std::numeric_limits<int32_t>::max():std::numeric_limits<int64_t>::max();
+            if (!parseInt64Exact(a[0].value, value) || value<=minimum || value>maximum)
+                throw DbError("22003","integer out of range");
             return ExprValue(
                 a[0].typeName,
                 std::to_string(value < 0 ? -value : value), false);

@@ -1,6 +1,7 @@
 #include "prepared_query_execution.h"
 #include <exception>
 #include "commands/TableManage.h"
+#include "catalog/catalog.h"
 #include "common/DbError.h"
 #include "expression/expr_helper.h"
 #include "parser/parser.h"
@@ -149,6 +150,7 @@ struct ConstantPlanningRoles {
     std::function<bool(const FunctionCallExpr*)> coalesce;
     std::function<std::string(const FunctionCallExpr*)> resultType;
     std::function<bool(const FunctionCallExpr*)> patternEscape;
+    std::function<std::string(const FunctionCallExpr*)> immutableBuiltin;
 };
 
 std::optional<ExprValue> simplifyCaseConstants(ExprPtr& expression,
@@ -418,10 +420,35 @@ std::optional<ExprValue> simplifyCaseConstants(ExprPtr& expression,
             }
             return std::nullopt;
         }
-        // Constant arguments can have planning errors even under a volatile
-        // routine. The routine itself is never evaluated by this simplifier.
-        for (auto& arg : call->args) simplifyCaseConstants(arg,evaluator,roles);
+        // Only a positively resolved builtin may consume structural constant
+        // datums here. A user routine (even IMMUTABLE), row, parameter or SQL
+        // child is never executed to discover a planning value.
+        std::vector<ExprValue> constants;
+        bool allConstant=call->namedArgs.empty();
+        for (auto& arg : call->args) {
+            const auto value=simplifyCaseConstants(arg,evaluator,roles);
+            if(value)constants.push_back(*value);else allConstant=false;
+        }
         for (auto& arg : call->namedArgs) simplifyCaseConstants(arg.value,evaluator,roles);
+        const auto builtin=allConstant && roles && roles->immutableBuiltin
+            ?roles->immutableBuiltin(call):std::string{};
+        if(!builtin.empty()) {
+            FunctionCallExpr operation;operation.funcName=builtin;operation.schema="pg_catalog";
+            for(const auto& value:constants) {
+                auto argument=constantExpression(value,nullptr);
+                // ABS's input/output declarations are identical. Its UNKNOWN
+                // SQL string has selected a numeric overload, not VARCHAR
+                // merely because the literal evaluator produced string bytes.
+                const auto target=builtin=="abs"?roles->resultType(call):std::string{};
+                if(!target.empty() && ExprHelper::canonicalResultTypeName(value.typeName)!=target) {
+                    auto cast=std::make_unique<CastExpr>();cast->typeName=target;cast->implicit=true;
+                    cast->operand=std::move(argument);argument=std::move(cast);
+                }
+                operation.args.push_back(std::move(argument));
+            }
+            const auto value=evaluator.eval(&operation,RowContext{});
+            expression=constantExpression(value,expression.get());return value;
+        }
         return std::nullopt;
     } else if (auto* array = dynamic_cast<ArrayExpr*>(expression.get())) {
         for (auto& element : array->elements) simplifyCaseConstants(element,evaluator,roles);
@@ -827,6 +854,19 @@ void PreparedQueryExecution::planCompiledConstants(ExprPtr& expression,
                 "ILIKE ESCAPE","NOT ILIKE ESCAPE","SIMILAR TO ESCAPE","NOT SIMILAR TO ESCAPE"};
             return call->schema.empty() && names.count(call->funcName) && call->args.size()==3 &&
                 call->namedArgs.empty() && !call->hasOver && !call->filter && !call->distinct && call->orderBy.empty();
+        },
+        [&](const FunctionCallExpr* call)->std::string {
+            CatalogManager::QualifiedName name;
+            if(!CatalogManager::parseQualifiedName(call->funcName,name,true) || name.name!="abs" ||
+               call->args.size()!=1 || !call->namedArgs.empty() || call->hasOver || call->filter ||
+               call->distinct || !call->orderBy.empty() || !evaluator_.hasScalarFunction(call,engine_))return {};
+            FunctionCallExpr builtin;builtin.funcName="abs";builtin.schema="pg_catalog";
+            auto declaration=std::make_unique<ParameterExpr>();
+            declaration->declaredType=ExprHelper::inferParsedInputType(call->args.front().get(),{},database_,engine_);
+            declaration->origin=ParameterOrigin::MetadataPlaceholder;builtin.args.push_back(std::move(declaration));
+            if(!evaluator_.hasScalarFunction(&builtin,engine_) ||
+               evaluator_.scalarFunctionIdentity(call,engine_)!=evaluator_.scalarFunctionIdentity(&builtin,engine_))return {};
+            return "abs";
         }
     };
     simplifyCaseConstants(expression, evaluator_, &roles);

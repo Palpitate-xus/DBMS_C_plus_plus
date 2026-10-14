@@ -4909,7 +4909,7 @@ static bool handleCopy(const string& sql, Session& s) {
     return true;
 }
 
-static bool requiresParsedValueBinding(const dbms::Stmt* root);
+static bool requiresParsedValueBinding(const dbms::Stmt* root,bool constantScalarOnly=false);
 
 static dbms::Oid resolvePreparedParameterType(const string& typeSpec,
                                               const Session& s) {
@@ -5948,25 +5948,28 @@ static bool handleExplain(const string& sql, Session& s) {
 // ========================================================================
 // Window function support
 // ========================================================================
-static bool requiresParsedValueBinding(const dbms::Stmt* root) {
+static bool requiresParsedValueBinding(const dbms::Stmt* root,bool constantScalarOnly) {
     function<bool(const dbms::Expr*)> expression;
     function<bool(const dbms::Stmt*)> statement;
     function<bool(const dbms::FromItem*)> source;
     expression=[&](const dbms::Expr* value)->bool {
         if(!value)return false;
         if(const auto* literal=dynamic_cast<const dbms::LiteralExpr*>(value);
-                literal && literal->typeName.empty() && toLower(literal->value)=="default")
+                literal && !constantScalarOnly && literal->typeName.empty() && toLower(literal->value)=="default")
             return true;
         if(value->preparedSubquery && statement(value->preparedSubquery.get()))return true;
         if(const auto* call=dynamic_cast<const dbms::FunctionCallExpr*>(value)) {
-            if(call->hasOver)return true;
+            if(call->hasOver && !constantScalarOnly)return true;
             dbms::CatalogManager::QualifiedName routine;
             if(dbms::CatalogManager::parseQualifiedName(call->funcName,routine,true) &&
-               (routine.name=="abs" || routine.name=="upper" || routine.name=="lower" || routine.name=="length"))
+               (routine.name=="abs" || (!constantScalarOnly &&
+                (routine.name=="upper" || routine.name=="lower" || routine.name=="length"))))
                 return true; // Validate real overloads even if no row/branch will execute.
             for(const auto& argument:call->args)if(expression(argument.get()))return true;
             for(const auto& argument:call->namedArgs)if(expression(argument.value.get()))return true;
-            return expression(call->filter.get());
+            for(const auto& key:call->over.partitionBy)if(expression(key.get()))return true;
+            for(const auto& key:call->over.orderBy)if(expression(key.first.get()))return true;
+            return expression(call->filter.get()) || expression(call->over.frameStart.get()) || expression(call->over.frameEnd.get());
         }
         if(const auto* cast=dynamic_cast<const dbms::CastExpr*>(value))return expression(cast->operand.get());
         if(const auto* unary=dynamic_cast<const dbms::UnaryOpExpr*>(value))return expression(unary->operand.get());
@@ -26338,8 +26341,17 @@ static bool executeInternal(const string& rawSql, Session& s) {
         {
             dbms::SQLParser parser;
             const auto parsed=parser.parseForBinding(effectiveRawSql);
-            if(requiresParsedValueBinding(parsed.stmt.get()))
-                (void)g_engine.prepareBoundQuery(s.currentDB,effectiveRawSql);
+            if(requiresParsedValueBinding(parsed.stmt.get())) {
+                auto query=make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(s.currentDB,effectiveRawSql));
+                if(requiresParsedValueBinding(parsed.stmt.get(),true)) {
+                    // Some legacy CAST/text receivers can return an empty
+                    // source without opening a native plan. Run the same pure
+                    // constant planner first; never execute a source/provider
+                    // or a user routine merely to discover an ABS error.
+                    dbms::PreparedQueryExecution constants(query,&g_engine,s.currentDB);
+                    constants.planStatementConstants(query->ast.get());
+                }
+            }
         }
 
         // HAVING is a boolean expression, not an opaque storage predicate.
