@@ -104,13 +104,25 @@ def submit_maintenance(sock, sql, label):
     return int(rows[0][0])
 
 
-def wait_for_maintenance(sock, job_id, terminal=None, timeout=20):
+def wait_for_maintenance(sock, job_id, terminal=None, timeout=20,
+                         retry_restore_publication=False):
     if terminal is None:
         terminal = {b"succeeded", b"failed", b"cancelled"}
     deadline = time.time() + timeout
     last = None
     while time.time() < deadline:
         messages = simple_query(sock, "SHOW MAINTENANCE JOB %d" % job_id)
+        if retry_restore_publication and error_of(messages) == (
+                "55P03", "cold catalog read conflicts with an active DDL owner"):
+            # Only the known restore job replaces this catalog. Its real
+            # administrator lookup can be unavailable at publication; do not
+            # bypass it or treat this transient response as job completion.
+            # Keep the original deadline and validate the live idle connection.
+            assert messages[-1] == (b"Z", b"I"), messages
+            assert sum(kind == b"E" for kind, _ in messages) == 1, messages
+            assert not any(kind in (b"T", b"D", b"C") for kind, _ in messages), messages
+            time.sleep(0.02)
+            continue
         assert error_of(messages) is None, messages
         fields = row_description_fields(messages)
         assert [field[3] for field in fields] == [
@@ -791,7 +803,8 @@ def main():
             sock,
             "RESTORE DATABASE info FROM '%s'" % backup_path,
             "maintenance restore")
-        restore_row = wait_for_maintenance(sock, restore_id, timeout=30)
+        restore_row = wait_for_maintenance(
+            sock, restore_id, timeout=30, retry_restore_publication=True)
         assert restore_row[1] == b"restore" and \
             restore_row[4] == b"succeeded", restore_row
         assert data_row_values(simple_query(

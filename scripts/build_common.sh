@@ -77,6 +77,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/abs_integer_bounds_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/database_independent_input_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/restore_parameter_status_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/maintenance_restore_poll_test.py)
     DBMS_E2E_TESTS+=(tests/default_value_role_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/view_replacement_contract_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/matview_insert_source_protocol_e2e_test.py)

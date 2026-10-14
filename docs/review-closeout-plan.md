@@ -18,11 +18,11 @@ R68整数ABS范围及空输入常量分析已验收。R70实际全文类型身�
 已分别本地commit。原三个generation/snapshot、两个owner、extended literal及
 目录guard完整驱动均已实际复验0，不改写原冻结失败。
 
-当前顺序：完成[R76协议状态崩溃](issue-review-r76-restore-parameter-status.md)
-和[R77恢复staging目录](issue-review-r77-restore-catalog-staging.md)的独立验收，
-保持原DIV14、完整PG、真实取消和COPY断言/期限，再冻结已提交HEAD、全部tracked
+R76/R77本范围分别验收并提交；[R78恢复轮询](issue-review-r78-restore-poll-publication.md)
+保留成功断言和原期限、仅重试真实publication冲突，完整DIV14/真实restore-stage
+及五组负控全0。当前顺序：保持完整PG、真实取消和COPY断言/期限，冻结已提交HEAD、全部tracked
 输入、生产binary、cache及58份对象receipt，执行不筛选的标准注册回归。
-当前盘点858 native、3个真实Main frontend、498 Python注册入口，共1359。
+当前盘点858 native、3个真实Main frontend、499 Python注册入口，共1360。
 完整运行期间不改源文件/文档/HEAD，结束后严格逐项核对missing/extra/duplicate、
 失败和TLS环境skip；存在失败则保留原证据，逐根因修复、独立commit并复验。
 按[准确暂缓范围](deferred-scope.md)保持已跳过模块，不自动扩展到普通SQL或存储错误。

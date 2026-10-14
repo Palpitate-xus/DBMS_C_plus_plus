@@ -87,3 +87,22 @@ R67以ca554c2f修复普通视图替换描述符合约，Root实际O2重编后八
 串行全0，见[超时夹具记录](issue-review-r69-protocol-timeout-fixture.md)。
 这些额外运行不更改本报告原1339入口、1319 PASSED（含TLS skip）及20 FAILED，
 也不把原冻结全量中本来通过的PG驱动改成失败。新组合全注册回归仍需另行运行。
+
+## 后续逐根因验收（不改写上述冻结结果）
+
+R71使BEGIN只发布真正目标数据库；三个原generation/snapshot完整入口已0。
+R72按真实canonical mutex去重，原目录guard的native/协议均0。
+R73保留纯常量声明绑定与折叠来源，原extended literal完整协议0。
+R74修正owner夹具的bootstrap/当前代读取，R75修复真实异常路径metadata锁释放，
+两个原owner及七邻居完整入口0。原COPY驱动在后续两次串行组合原样0，但历史
+超时原因未证实，不能虚称已修复未定位竞态。
+
+原DIV14先复现SIGABRT并精确定位到协议状态footer；R76已修复并以真实restore
+窗口和完整PG/取消/CLI/COPY验收。R77延后staging目录淘汰，十完整native及
+五完整协议0。真正publication的管理员cold-read冲突仍正确报告；R78仅对已
+提交的RESTORE任务在原30秒期限内精确重试55P03，保留全部成功/OID/恢复数据
+断言，完整DIV14、真实restore-stage及五组负控均0。见[最新修复清单](review-fixes-2026-10-13.md)。
+
+因此原20失败都有定向后续记录，但不是这份历史报告被改成全绿。当前858 native、
+3个实际Main frontend、499 Python注册入口，共1360，仍须另冻结输入运行全量。
+R62通用签名仍partial，原273总账及用户暂缓范围不因这些门禁改变。
