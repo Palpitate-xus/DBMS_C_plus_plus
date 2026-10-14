@@ -2713,12 +2713,13 @@ void StorageEngine::backgroundBufferFlush() {
                           << kv.first << std::endl;
             }
         } catch (const DbError& error) {
-            // Undo can become pending between the initial check and path
-            // resolution. Suppress only that ownership error, not unrelated
-            // I/O/SQL failures in a healthy database.
-            if (error.sqlState() != "55P03" &&
-                (error.sqlState() != "58030" || !databaseRollbackPending(dbname)))
-                throw;
+            // A recoverable path/catalog error must not escape the worker
+            // entry point and terminate the server. This allocator has not
+            // reached writeback; keep its dirty pages for a later healthy
+            // pass, report the real cause and continue other databases.
+            if (error.sqlState() != "55P03" && !databaseRollbackPending(dbname))
+                std::cerr << "[background] heap writeback deferred for "
+                          << kv.first << ": " << error.what() << std::endl;
         }
     }
 }

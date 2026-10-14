@@ -57,3 +57,9 @@ backgroundWorkerLoop，未捕获的58030让工作线程调用terminate。证据
 后台写回异常边界另列R66继续修复；不改原失败记录、不禁用后台时序、不扩大
 用户暂缓范围。I/O核心改动可独立提交，但整体新native验收须待R66闭环，
 不能以先前一次完整initializer或十完整相邻native通过冒充最终十二全0。
+
+后续[R66](issue-review-r66-background-catalog-errors.md)独立修复写回错误边界后，
+`r66-final-native.log`十三完整native及`r66-final-protocols.log`六完整协议均0，
+`r66-five-repeat.log`包含完整七故障initializer五次及新后台控制五次，全0。
+这是含R66组合的验收，不反写`7ad3ccca`单独候选的原异常终态；用户暂缓专项
+及原主分支冻结1339完整回归保持不变，退役partition缓存警告仍保留。
