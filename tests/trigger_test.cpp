@@ -1,3 +1,4 @@
+#include "catalog_generation_test_view.h"
 #include "commands/DdlExecutor.h"
 #include "commands/TableManage.h"
 #include "parser/parser.h"
@@ -67,15 +68,13 @@ static void test_create_trigger_before_insert() {
     assert(triggers[0].name == "trg");
     assert(triggers[0].forEachRow);
 
-    dbms::CatalogManager& initialCatalog =
-        g_engine.catalogService().get(db);
-    const auto* relation = initialCatalog.resolveRelation("t", {"public"});
+    dbms_test::CatalogGenerationView initialCatalog(g_engine, db);
+    const auto* relation = initialCatalog().resolveRelation("t", {"public"});
     assert(relation != nullptr && relation->relhastriggers);
     const dbms::Oid relationOid = relation->oid;
     g_engine.catalogService().evict(db);
-    dbms::CatalogManager& reloadedCatalog =
-        g_engine.catalogService().get(db);
-    relation = reloadedCatalog.findClass(relationOid);
+    dbms_test::CatalogGenerationView reloadedCatalog(g_engine, db);
+    relation = reloadedCatalog().findClass(relationOid);
     assert(relation != nullptr && relation->relhastriggers);
 
     g_engine.catalogService().evict(db);
@@ -160,8 +159,8 @@ static void test_drop_trigger_is_relation_scoped_and_updates_catalog() {
         "CREATE TRIGGER audit_update AFTER UPDATE ON events "
         "FOR EACH ROW EXECUTE FUNCTION audit()", s));
 
-    dbms::CatalogManager& catalog = g_engine.catalogService().get(db);
-    const auto* relation = catalog.resolveRelation("events", {"public"});
+    dbms_test::CatalogGenerationView catalog(g_engine, db);
+    const auto* relation = catalog().resolveRelation("events", {"public"});
     assert(relation != nullptr && relation->relhastriggers);
     const dbms::Oid relationOid = relation->oid;
 
@@ -180,17 +179,19 @@ static void test_drop_trigger_is_relation_scoped_and_updates_catalog() {
         firstDrop, dbms::SQLParser::classify(firstDrop), s, handled));
     assert(handled);
     assert(g_engine.getAllTriggers(db).size() == 1);
-    relation = catalog.findClass(relationOid);
+    relation = catalog().findClass(relationOid);
     assert(relation != nullptr && relation->relhastriggers);
 
+    const auto beforeLastDrop = g_engine.catalogService().acquire(db);
     assert(!ddl.executeSql("DROP TRIGGER audit_update ON events", s));
     assert(g_engine.getAllTriggers(db).empty());
-    relation = catalog.findClass(relationOid);
+    relation = catalog().findClass(relationOid);
     assert(relation != nullptr && !relation->relhastriggers);
+    assert(beforeLastDrop->findClass(relationOid)->relhastriggers);
 
     g_engine.catalogService().evict(db);
-    dbms::CatalogManager& reloaded = g_engine.catalogService().get(db);
-    relation = reloaded.findClass(relationOid);
+    dbms_test::CatalogGenerationView reloaded(g_engine, db);
+    relation = reloaded().findClass(relationOid);
     assert(relation != nullptr && !relation->relhastriggers);
 
     g_engine.catalogService().evict(db);
@@ -238,9 +239,9 @@ static void test_trigger_names_are_scoped_to_their_relation() {
     assert(triggers.size() == 1);
     assert(triggers.front().tableName == "second_table");
 
-    dbms::CatalogManager& catalog = g_engine.catalogService().get(db);
-    const auto* first = catalog.resolveRelation("first_table", {"public"});
-    const auto* second = catalog.resolveRelation("second_table", {"public"});
+    dbms_test::CatalogGenerationView catalog(g_engine, db);
+    const auto* first = catalog().resolveRelation("first_table", {"public"});
+    const auto* second = catalog().resolveRelation("second_table", {"public"});
     assert(first != nullptr && !first->relhastriggers);
     assert(second != nullptr && second->relhastriggers);
 

@@ -82,7 +82,7 @@
 | R61 | 普通CREATE TABLE初始化与I/O状态 | 已修复，R66组合验收通过待集成 | 独立核心commit为7ad3ccca，原EIO误报/成功返回已修；首轮完整门禁因R66崩溃保留，修R66后十三完整native/六完整协议及五次完整七故障重复全0，见[记录](issue-review-r61-create-initialization-io.md) |
 | R62 | 标量函数的参数签名静态校验 | 已复现，待修复 | 实际PG对upper(1)/upper()/upper(text,text)/abs(text)/length(1)加OVER报42883，原候选返回值；先按声明类型/arity匹配真实routine，不能执行求值选签名。证据scalar-over-signature-discovery.log |
 | R63 | DEFAULT的普通值表达式角色 | 已修复，待冻结完整回归终态后集成 | 原33中17失败→PG/候选全0，22native及六完整native/十完整协议全0，合法DEFAULT/域/事务/长表达式保留；第一轮legacy仍9失败保留，见[记录](issue-review-r63-default-expression-role.md) |
-| R64 | 六个旧测试跨DDL保留过期目录引用 | 已修正夹具，待冻结完整回归终态后集成 | 首三项150e5440、扩展六项ae583d88；原六失败→未改产品主分支/私树六完整当前代与旧代lease控制全0，原全部字面量/数据/故障断言保留，见[记录](issue-review-r64-catalog-generation-fixtures.md) |
+| R64 | 九个旧测试跨DDL保留过期目录引用 | 已修正夹具，待冻结完整回归终态后集成 | 首三项150e5440、扩展六项ae583d88；新增runtime/sequence/trigger后累计九个原完整主分支夹具全0，保留当前/旧代阳性及全部原SQL/数据/故障断言；新执行器组合另验，见[记录](issue-review-r64-catalog-generation-fixtures.md) |
 | R65 | 未执行mutation图的child provider生命周期 | 已复现，待修复 | 当前主分支原完整mutation_child_provider_close首个mode0显示provider_retained=1并失败；关闭应释放运行时捕获而保留真实图/计数，不改变普通cursor可restart语义。证据mutation-provider-probe.log |
 | R66 | 后台写回的目录错误逃出工作线程 | 已修复，待冻结完整回归终态后集成 | 固定真实目录EIO原主分支SIGABRT→候选dirty保留/worker存活/真实刷盘恢复全0；十三完整native、六完整协议、五轮十次控制全0，见[记录](issue-review-r66-background-catalog-errors.md) |
 | O01 | owner健康重试及测试覆盖 | 已修复 | `c9a1e3c3`；原全部owner断言、新真实peer/dirty冲突及10完整native提交前/后通过；Root R14集成fresh58后两完整owner再次通过，见[验证](issue-review-o01-table-owner-health-retry.md) |

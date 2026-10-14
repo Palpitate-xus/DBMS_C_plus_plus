@@ -8,6 +8,7 @@
 #include <iostream>
 #include <string>
 #include "test_utils.h"
+#include "catalog_generation_test_view.h"
 
 extern dbms::StorageEngine g_engine;
 
@@ -45,11 +46,11 @@ static void test_runtime_wiring_smoke() {
     err = ddl.executeSql("CREATE INDEX i ON t(id)", s);
     assert(!err);
 
-    dbms::CatalogManager& cat = g_engine.catalogService().get(db);
-    assert(hasClass(cat, "t"));
-    assert(hasClass(cat, "i"));
+    dbms_test::CatalogGenerationView cat(g_engine, db);
+    assert(hasClass(cat(), "t"));
+    assert(hasClass(cat(), "i"));
 
-    auto classes = cat.listClasses();
+    auto classes = cat().listClasses();
     bool sawT = false, sawI = false;
     for (const auto& cls : classes) {
         if (cls.relname == "t" && cls.relkind == 'r') sawT = true;
@@ -58,10 +59,12 @@ static void test_runtime_wiring_smoke() {
     assert(sawT);
     assert(sawI);
 
+    const auto beforeDrop = g_engine.catalogService().acquire(db);
     err = ddl.executeSql("DROP TABLE t CASCADE", s);
     assert(!err);
-    assert(!hasClass(cat, "t"));
-    assert(!hasClass(cat, "i"));
+    assert(!hasClass(cat(), "t"));
+    assert(!hasClass(cat(), "i"));
+    assert(hasClass(*beforeDrop, "t") && hasClass(*beforeDrop, "i"));
 
     s.currentDB = "info";
     err = ddl.executeSql("DROP DATABASE " + db, s);

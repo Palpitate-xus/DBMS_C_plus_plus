@@ -1,3 +1,4 @@
+#include "catalog_generation_test_view.h"
 #include "commands/DdlExecutor.h"
 #include "commands/TableManage.h"
 #include "Session.h"
@@ -184,10 +185,10 @@ static void test_sequence_rename() {
     assert(!ddl.executeSql("CREATE SEQUENCE s_old", s));
     assert(!ddl.executeSql(
         "CREATE TABLE t (id INT DEFAULT nextval('s_old'), name VARCHAR(20))", s));
-    dbms::CatalogManager& catalog = g_engine.catalogService().get(db);
-    const auto* publicNamespace = catalog.findNamespaceByName("public");
+    dbms_test::CatalogGenerationView catalog(g_engine, db);
+    const auto* publicNamespace = catalog().findNamespaceByName("public");
     assert(publicNamespace != nullptr);
-    const auto* oldRelation = catalog.findClassByName("s_old", publicNamespace->oid);
+    const auto* oldRelation = catalog().findClassByName("s_old", publicNamespace->oid);
     assert(oldRelation != nullptr);
     const dbms::Oid sequenceOid = oldRelation->oid;
 
@@ -200,12 +201,15 @@ static void test_sequence_rename() {
     assert(renameAst != nullptr);
     assert(renameAst->subCommand == "RENAME TO s_new");
 
+    const auto beforeRename = g_engine.catalogService().acquire(db);
     assert(!ddl.executeSql("ALTER SEQUENCE s_old RENAME TO s_new", s));
     assert(!g_engine.sequenceExists(db, "s_old"));
     assert(g_engine.sequenceExists(db, "s_new"));
-    assert(catalog.findClassByName("s_old", publicNamespace->oid) == nullptr);
-    const auto* newRelation = catalog.findClassByName("s_new", publicNamespace->oid);
+    assert(catalog().findClassByName("s_old", publicNamespace->oid) == nullptr);
+    const auto* newRelation = catalog().findClassByName("s_new", publicNamespace->oid);
     assert(newRelation != nullptr && newRelation->oid == sequenceOid);
+    assert(beforeRename->findClassByName("s_old", publicNamespace->oid));
+    assert(!beforeRename->findClassByName("s_new", publicNamespace->oid));
 
     const auto schema = g_engine.getTableSchema(db, "t");
     assert(schema.cols[0].defaultValue.find("s_new") != std::string::npos);
@@ -215,10 +219,10 @@ static void test_sequence_rename() {
     dbms::StorageEngine restarted;
     assert(restarted.sequenceExists(db, "s_new"));
     assert(!restarted.sequenceExists(db, "s_old"));
-    const auto& restartedCatalog = restarted.catalogService().get(db);
-    const auto* restartedPublic = restartedCatalog.findNamespaceByName("public");
+    dbms_test::CatalogGenerationView restartedCatalog(restarted, db);
+    const auto* restartedPublic = restartedCatalog().findNamespaceByName("public");
     assert(restartedPublic != nullptr);
-    const auto* restartedRelation = restartedCatalog.findClassByName(
+    const auto* restartedRelation = restartedCatalog().findClassByName(
         "s_new", restartedPublic->oid);
     assert(restartedRelation != nullptr && restartedRelation->oid == sequenceOid);
     assert(restarted.getTableSchema(db, "t").cols[0].defaultValue.find("s_new") !=
@@ -252,21 +256,21 @@ static void test_sequence_owned_by_drop_table() {
     assert(g_engine.sequenceExists(db, "s1"));
     assert(g_engine.sequenceExists(db, "legacy_owned"));
 
-    dbms::CatalogManager& cat = g_engine.catalogService().get(db);
-    const auto* seqRel = cat.resolveRelation("s1", {"public"});
+    dbms_test::CatalogGenerationView cat(g_engine, db);
+    const auto* seqRel = cat().resolveRelation("s1", {"public"});
     const auto* legacySeqRel =
-        cat.resolveRelation("legacy_owned", {"public"});
+        cat().resolveRelation("legacy_owned", {"public"});
     assert(seqRel != nullptr);
     assert(legacySeqRel != nullptr);
-    const auto* tableRel = cat.resolveRelation("t", {"public"});
+    const auto* tableRel = cat().resolveRelation("t", {"public"});
     assert(tableRel != nullptr);
-    const auto* ownerColumn = cat.findAttribute(tableRel->oid, "id");
+    const auto* ownerColumn = cat().findAttribute(tableRel->oid, "id");
     assert(ownerColumn != nullptr);
     const dbms::Oid tableOid = tableRel->oid;
     const dbms::Oid sequenceOid = seqRel->oid;
     const dbms::Oid legacySequenceOid = legacySeqRel->oid;
     const int32_t ownerColumnNumber = ownerColumn->attnum;
-    const auto ownerships = cat.findDepends(
+    const auto ownerships = cat().findDepends(
         dbms::PgClassOid_Class, sequenceOid, 0);
     assert(std::count_if(
                ownerships.begin(), ownerships.end(),
@@ -279,7 +283,7 @@ static void test_sequence_owned_by_drop_table() {
     // Simulate a genuine ownership row written before referenced column
     // numbers were persisted. Rename must use the sequence file to preserve
     // this legacy association without confusing it with an old DEFAULT row.
-    assert(cat.removeDepend(
+    assert(cat().removeDepend(
         dbms::PgClassOid_Class, legacySequenceOid, 0,
         dbms::PgClassOid_Class, tableOid, ownerColumnNumber));
     dbms::PgDependRow legacyOwnership;
@@ -290,21 +294,21 @@ static void test_sequence_owned_by_drop_table() {
     legacyOwnership.refobjid = tableOid;
     legacyOwnership.refobjsubid = 0;
     legacyOwnership.deptype = 'a';
-    cat.addDepend(legacyOwnership);
-    cat.setDescription(
+    cat().addDepend(legacyOwnership);
+    cat().setDescription(
         tableOid, dbms::PgClassOid_Class, 1, "removed column");
-    cat.setDescription(
+    cat().setDescription(
         tableOid, dbms::PgClassOid_Class, ownerColumnNumber,
         "owned column");
-    assert(cat.persistAll());
+    assert(cat().persistAll());
     assert(g_engine.commentOnColumn(
                db, "t", "drop_me", "must not reappear") ==
            dbms::DBStatus::OK);
 
     assert(!ddl.executeSql("ALTER TABLE t DROP COLUMN drop_me", s));
-    const auto* compactedOwner = cat.findAttribute(tableOid, "id");
+    const auto* compactedOwner = cat().findAttribute(tableOid, "id");
     assert(compactedOwner && compactedOwner->attnum == 1);
-    const auto compactedOwnerships = cat.findDepends(
+    const auto compactedOwnerships = cat().findDepends(
         dbms::PgClassOid_Class, sequenceOid, 0);
     assert(std::count_if(
                compactedOwnerships.begin(), compactedOwnerships.end(),
@@ -313,9 +317,9 @@ static void test_sequence_owned_by_drop_table() {
                           dependency.refobjid == tableOid &&
                           dependency.refobjsubid == 1;
                }) == 1);
-    assert(cat.getDescription(
+    assert(cat().getDescription(
                tableOid, dbms::PgClassOid_Class, 1) == "owned column");
-    assert(cat.getDescription(
+    assert(cat().getDescription(
                tableOid, dbms::PgClassOid_Class, 2).empty());
     assert(!ddl.executeSql("ALTER TABLE t ADD COLUMN drop_me INT", s));
     assert(g_engine.getColumnComment(db, "t", "drop_me").empty());
@@ -339,9 +343,9 @@ static void test_sequence_owned_by_drop_table() {
     assert(currentInfo.ownedByColumn == "sequence_id");
     assert(legacyInfo.ownedByColumn == "sequence_id");
     const auto* renamedTable =
-        cat.resolveRelation("renamed_t", {"public"});
+        cat().resolveRelation("renamed_t", {"public"});
     const auto* renamedColumn = renamedTable
-        ? cat.findAttribute(renamedTable->oid, "sequence_id") : nullptr;
+        ? cat().findAttribute(renamedTable->oid, "sequence_id") : nullptr;
     assert(renamedTable && renamedTable->oid == tableOid);
     assert(renamedColumn && renamedColumn->attnum == 1);
 
@@ -404,16 +408,15 @@ static void test_sequence_owned_by_drop_column() {
         "CREATE SEQUENCE app.legacy_owned "
         "OWNED BY app.legacy_owner.id", s));
     {
-        dbms::CatalogManager& catalog =
-            g_engine.catalogService().get(db);
+        dbms_test::CatalogGenerationView catalog(g_engine, db);
         const auto* table =
-            catalog.resolveRelation("app.legacy_owner", {"public"});
+            catalog().resolveRelation("app.legacy_owner", {"public"});
         const auto* sequence =
-            catalog.resolveRelation("app.legacy_owned", {"public"});
+            catalog().resolveRelation("app.legacy_owned", {"public"});
         const auto* column = table
-            ? catalog.findAttribute(table->oid, "id") : nullptr;
+            ? catalog().findAttribute(table->oid, "id") : nullptr;
         assert(table && sequence && column);
-        assert(catalog.removeDepend(
+        assert(catalog().removeDepend(
             dbms::PgClassOid_Class, sequence->oid, 0,
             dbms::PgClassOid_Class, table->oid, column->attnum));
         dbms::PgDependRow legacyOwnership;
@@ -424,8 +427,8 @@ static void test_sequence_owned_by_drop_column() {
         legacyOwnership.refobjid = table->oid;
         legacyOwnership.refobjsubid = 0;
         legacyOwnership.deptype = 'a';
-        catalog.addDepend(legacyOwnership);
-        assert(catalog.persistAll());
+        catalog().addDepend(legacyOwnership);
+        assert(catalog().persistAll());
     }
     s.sequenceLastValues["app.legacy_owned"] = 3;
     assert(!ddl.executeSql(
@@ -521,15 +524,14 @@ static void test_default_sequence_is_not_table_owned() {
         "CREATE TABLE uses_standalone "
         "(id INT DEFAULT nextval('standalone'))", s));
 
-    dbms::CatalogManager& catalog =
-        g_engine.catalogService().get(db);
-    const auto* sequence = catalog.resolveRelation("standalone", {"public"});
+    dbms_test::CatalogGenerationView catalog(g_engine, db);
+    const auto* sequence = catalog().resolveRelation("standalone", {"public"});
     const auto* table =
-        catalog.resolveRelation("uses_standalone", {"public"});
+        catalog().resolveRelation("uses_standalone", {"public"});
     assert(sequence && table);
     const dbms::Oid sequenceOid = sequence->oid;
     const dbms::Oid tableOid = table->oid;
-    const auto dependencies = catalog.findDepends(
+    const auto dependencies = catalog().findDepends(
         dbms::PgClassOid_Class, sequenceOid, 0);
     assert(std::none_of(
         dependencies.begin(), dependencies.end(),
@@ -548,9 +550,9 @@ static void test_default_sequence_is_not_table_owned() {
         "CREATE TABLE legacy_uses "
         "(id INT DEFAULT nextval('legacy_standalone'))", s));
     const auto* legacySequence =
-        catalog.resolveRelation("legacy_standalone", {"public"});
+        catalog().resolveRelation("legacy_standalone", {"public"});
     const auto* legacyTable =
-        catalog.resolveRelation("legacy_uses", {"public"});
+        catalog().resolveRelation("legacy_uses", {"public"});
     assert(legacySequence && legacyTable);
     const dbms::Oid legacySequenceOid = legacySequence->oid;
     dbms::PgDependRow legacyDependency;
@@ -561,8 +563,8 @@ static void test_default_sequence_is_not_table_owned() {
     legacyDependency.refobjid = legacyTable->oid;
     legacyDependency.refobjsubid = 0;
     legacyDependency.deptype = 'a';
-    catalog.addDepend(legacyDependency);
-    assert(catalog.persistAll());
+    catalog().addDepend(legacyDependency);
+    assert(catalog().persistAll());
 
     assert(!ddl.executeSql("DROP TABLE legacy_uses", s));
     assert(g_engine.sequenceExists(db, "legacy_standalone"));
@@ -702,15 +704,14 @@ static void test_schema_qualified_sequence_create() {
     assert(g_engine.sequenceExists(db, "app.counter"));
     assert(!g_engine.sequenceExists(db, "counter"));
 
-    dbms::CatalogManager& catalog =
-        g_engine.catalogService().get(db);
-    const auto* appNamespace = catalog.findNamespaceByName("app");
-    const auto* publicNamespace = catalog.findNamespaceByName("public");
+    dbms_test::CatalogGenerationView catalog(g_engine, db);
+    const auto* appNamespace = catalog().findNamespaceByName("app");
+    const auto* publicNamespace = catalog().findNamespaceByName("public");
     assert(appNamespace && publicNamespace);
     const auto* appSequence =
-        catalog.findClassByName("counter", appNamespace->oid);
+        catalog().findClassByName("counter", appNamespace->oid);
     assert(appSequence && appSequence->relkind == 'S');
-    assert(catalog.findClassByName(
+    assert(catalog().findClassByName(
                "counter", publicNamespace->oid) == nullptr);
     {
         dbms::CatalogManager durable(
@@ -743,12 +744,11 @@ static void test_schema_qualified_sequence_create() {
     assert(!g_engine.sequenceExists(db, "app.must_rollback"));
     fs::remove_all(blockedCatalogTemporary);
     g_engine.catalogService().evict(db);
-    dbms::CatalogManager& reloadedCatalog =
-        g_engine.catalogService().get(db);
+    dbms_test::CatalogGenerationView reloadedCatalog(g_engine, db);
     const auto* reloadedAppNamespace =
-        reloadedCatalog.findNamespaceByName("app");
+        reloadedCatalog().findNamespaceByName("app");
     assert(reloadedAppNamespace);
-    assert(reloadedCatalog.findClassByName(
+    assert(reloadedCatalog().findClassByName(
                "must_rollback", reloadedAppNamespace->oid) == nullptr);
 
     assert(!ddl.executeSql("CREATE SEQUENCE counter START 100", s));
@@ -799,21 +799,20 @@ static void test_schema_qualified_sequence_alter() {
     assert(!ddl.executeSql(
         "ALTER SEQUENCE app.counter OWNED BY app.owner.id", s));
 
-    dbms::CatalogManager& catalog =
-        g_engine.catalogService().get(db);
-    const auto* appNamespace = catalog.findNamespaceByName("app");
+    dbms_test::CatalogGenerationView catalog(g_engine, db);
+    const auto* appNamespace = catalog().findNamespaceByName("app");
     assert(appNamespace);
     const auto* sequence =
-        catalog.findClassByName("counter", appNamespace->oid);
+        catalog().findClassByName("counter", appNamespace->oid);
     const auto* owner =
-        catalog.findClassByName("owner", appNamespace->oid);
+        catalog().findClassByName("owner", appNamespace->oid);
     assert(sequence && sequence->relkind == 'S');
     assert(owner && owner->relkind == 'r');
     const dbms::Oid sequenceOid = sequence->oid;
     const dbms::Oid ownerOid = owner->oid;
-    const auto* ownerColumn = catalog.findAttribute(ownerOid, "id");
+    const auto* ownerColumn = catalog().findAttribute(ownerOid, "id");
     assert(ownerColumn);
-    auto ownerships = catalog.findDepends(
+    auto ownerships = catalog().findDepends(
         dbms::PgClassOid_Class, sequenceOid, 0);
     assert(std::count_if(
                ownerships.begin(), ownerships.end(),
@@ -838,7 +837,7 @@ static void test_schema_qualified_sequence_alter() {
 
     assert(!ddl.executeSql(
         "ALTER SEQUENCE app.counter OWNED BY NONE", s));
-    ownerships = catalog.findDepends(
+    ownerships = catalog().findDepends(
         dbms::PgClassOid_Class, sequenceOid, 0);
     assert(std::none_of(
         ownerships.begin(), ownerships.end(),
@@ -878,9 +877,9 @@ static void test_schema_qualified_sequence_alter() {
     assert(rows.size() == 1 && rows[0].find("19 x") == 0);
 
     const auto* renamed =
-        catalog.findClassByName("renamed", appNamespace->oid);
+        catalog().findClassByName("renamed", appNamespace->oid);
     assert(renamed && renamed->oid == sequenceOid);
-    assert(catalog.findClassByName("counter", appNamespace->oid) == nullptr);
+    assert(catalog().findClassByName("counter", appNamespace->oid) == nullptr);
     {
         dbms::CatalogManager durable(
             (fs::path(g_engine.dbPath(db)) / "pg_catalog").string());
@@ -1025,11 +1024,10 @@ static void test_schema_qualified_sequence_drop() {
                db, "app.catalog_only") == dbms::DBStatus::OK);
     assert(ddl.executeSql(
         "DROP SEQUENCE IF EXISTS app.catalog_only", s));
-    dbms::CatalogManager& catalog =
-        g_engine.catalogService().get(db);
-    const auto* appNamespace = catalog.findNamespaceByName("app");
+    dbms_test::CatalogGenerationView catalog(g_engine, db);
+    const auto* appNamespace = catalog().findNamespaceByName("app");
     assert(appNamespace);
-    assert(catalog.findClassByName(
+    assert(catalog().findClassByName(
                "catalog_only", appNamespace->oid) != nullptr);
 
     const fs::path nonSequencePath = fs::path(db) / "app.not_a_file.seq";

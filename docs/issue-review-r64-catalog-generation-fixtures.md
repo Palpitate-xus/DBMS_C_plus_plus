@@ -52,3 +52,19 @@ tests目录，不改生产头或CatalogService契约。
 `generation-followup-probes.log`保留。逐一对照原477/63/262个C++字符串字面量后
 恢复唯一误改，完整DDL重新通过；该失败不能归因于产品故障或临时文件API改变。
 最终夹具保留原故障路径，不增加另一种伪造的成功/失败来源。
+
+## 后续：runtime、sequence、trigger三个入口
+
+冻结完整回归又在runtime_wiring_smoke、sequence_full、trigger的DROP/rename后
+复现过期目录引用。三入口同样使用上述测试view，不改产品；Runtime保留DROP前
+旧代中的表和索引阳性，sequence保留rename前旧名/无新名，trigger保留最后一次
+DROP前旧代的relhastriggers=true，当前代原断言仍严格检查相反状态及原OID/数据。
+
+三个原完整入口在冻结主分支的实际58份生产对象上均0，
+`/tmp/dbms-review-r46.ifu6SWLp/r64-root-runtime-sequence-trigger.log`；加入额外
+旧代阳性后的同三个完整入口再次全0，`r64-root-runtime-strong.log`，结束输入及
+receipts一致。sequence/trigger原595/155个C++字符串逐一保留，没有改SQL、
+故障路径或错误期望；替换仅限代码中的getter调用，字符串和注释不改。
+
+本项现在累计覆盖九个完整原生夹具。私树新执行器ABI重编仍独立进行，不能把
+上述冻结主分支fixture验证冒充该新执行器组合或整个1339注册回归终态。
