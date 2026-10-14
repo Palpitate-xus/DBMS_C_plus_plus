@@ -1,3 +1,4 @@
+#include "catalog_generation_test_view.h"
 #include "Session.h"
 #include "catalog/CatalogService.h"
 #include "catalog/systables.h"
@@ -33,7 +34,7 @@ int main() {
     assert(g_engine.getSequenceInfo(database, physical, info) == dbms::DBStatus::OK);
     assert(info.ownedByColumn == "id\"quote");
     assert(g_engine.nextval(database, physical) == 23);
-    const auto catalog = [&]() -> dbms::CatalogManager& { return g_engine.catalogService().get(database); };
+    dbms_test::CatalogGenerationView catalog(g_engine, database);
     const auto* ns = catalog().findNamespaceByName("alter space");
     assert(ns);
     const auto* table = catalog().findClassByName("table.dot", ns->oid);

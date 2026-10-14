@@ -1,3 +1,4 @@
+#include "catalog_generation_test_view.h"
 #include "commands/DdlExecutor.h"
 #include "parser/ast.h"
 #include "parser/parser.h"
@@ -171,10 +172,10 @@ static void test_create_table_registers_in_catalog() {
     bool err = ddl.executeSql("CREATE TABLE cat_t1 (id INT, name VARCHAR(100))", s);
     assert(!err);
 
-    dbms::CatalogManager& cat = g_engine.catalogService().get(db);
-    const auto* nsPublic = cat.findNamespaceByName("public");
+    dbms_test::CatalogGenerationView cat(g_engine, db);
+    const auto* nsPublic = cat().findNamespaceByName("public");
     assert(nsPublic != nullptr);
-    const auto* cls = cat.findClassByName("cat_t1", nsPublic->oid);
+    const auto* cls = cat().findClassByName("cat_t1", nsPublic->oid);
     assert(cls != nullptr);
     assert(cls->relnatts == 2);
     assert(cls->relkind == 'r');
@@ -211,8 +212,8 @@ static void test_create_table_requires_existing_schema() {
             db, std::string("missing_schema__") + name));
     }
     assert(!g_engine.schemaExists(db, "missing_schema"));
-    dbms::CatalogManager& catalog = g_engine.catalogService().get(db);
-    assert(catalog.findNamespaceByName("missing_schema") == nullptr);
+    dbms_test::CatalogGenerationView catalog(g_engine, db);
+    assert(catalog().findNamespaceByName("missing_schema") == nullptr);
 
     g_engine.catalogService().evict(db);
     cleanup(db);
@@ -232,12 +233,11 @@ static void test_alter_table_rename_updates_catalog() {
 
     dbms::Oid originalOid = dbms::INVALID_OID;
     {
-        dbms::CatalogManager& initialCatalog =
-            g_engine.catalogService().get(db);
+        dbms_test::CatalogGenerationView initialCatalog(g_engine, db);
         const auto* initialPublic =
-            initialCatalog.findNamespaceByName("public");
+            initialCatalog().findNamespaceByName("public");
         assert(initialPublic != nullptr);
-        const auto* original = initialCatalog.findClassByName(
+        const auto* original = initialCatalog().findClassByName(
             "rename_source", initialPublic->oid);
         assert(original != nullptr);
         originalOid = original->oid;
@@ -254,29 +254,32 @@ static void test_alter_table_rename_updates_catalog() {
     assert(!g_engine.tableExists(db, "rename_collision"));
     // Snapshot rollback evicts the catalog cache, so reacquire it before
     // inspecting the restored state.
-    dbms::CatalogManager& cat = g_engine.catalogService().get(db);
-    const auto* nsPublic = cat.findNamespaceByName("public");
+    dbms_test::CatalogGenerationView cat(g_engine, db);
+    const auto* nsPublic = cat().findNamespaceByName("public");
     assert(nsPublic != nullptr);
-    const auto* original = cat.findClassByName(
+    const auto* original = cat().findClassByName(
         "rename_source", nsPublic->oid);
     assert(original != nullptr && original->oid == originalOid);
 
+    const auto beforeRename = g_engine.catalogService().acquire(db);
     assert(!ddl.executeSql(
         "ALTER TABLE rename_source RENAME TO rename_target", s));
     assert(!g_engine.tableExists(db, "rename_source"));
     assert(g_engine.tableExists(db, "rename_target"));
-    assert(cat.findClassByName("rename_source", nsPublic->oid) == nullptr);
-    const auto* renamed = cat.findClassByName("rename_target", nsPublic->oid);
+    assert(cat().findClassByName("rename_source", nsPublic->oid) == nullptr);
+    const auto* renamed = cat().findClassByName("rename_target", nsPublic->oid);
     assert(renamed != nullptr && renamed->oid == originalOid);
+    assert(beforeRename->findClassByName("rename_source", nsPublic->oid));
+    assert(!beforeRename->findClassByName("rename_target", nsPublic->oid));
 
     // The rename must survive a catalog cache reload, not merely update the
     // current process's name index.
     g_engine.catalogService().evict(db);
-    dbms::CatalogManager& reloaded = g_engine.catalogService().get(db);
-    const auto* reloadedPublic = reloaded.findNamespaceByName("public");
+    dbms_test::CatalogGenerationView reloaded(g_engine, db);
+    const auto* reloadedPublic = reloaded().findNamespaceByName("public");
     assert(reloadedPublic != nullptr);
-    assert(reloaded.findClassByName("rename_source", reloadedPublic->oid) == nullptr);
-    renamed = reloaded.findClassByName("rename_target", reloadedPublic->oid);
+    assert(reloaded().findClassByName("rename_source", reloadedPublic->oid) == nullptr);
+    renamed = reloaded().findClassByName("rename_target", reloadedPublic->oid);
     assert(renamed != nullptr && renamed->oid == originalOid);
 
     g_engine.catalogService().evict(db);
@@ -297,14 +300,13 @@ static void test_alter_column_rename_updates_catalog() {
 
     dbms::Oid relationOid = dbms::INVALID_OID;
     {
-        dbms::CatalogManager& catalog =
-            g_engine.catalogService().get(db);
+        dbms_test::CatalogGenerationView catalog(g_engine, db);
         const auto* relation =
-            catalog.resolveRelation("rename_columns", {"public"});
+            catalog().resolveRelation("rename_columns", {"public"});
         assert(relation != nullptr);
         relationOid = relation->oid;
         const auto* oldAttribute =
-            catalog.findAttribute(relationOid, "old_name");
+            catalog().findAttribute(relationOid, "old_name");
         assert(oldAttribute != nullptr && oldAttribute->attnum == 1);
     }
 
@@ -313,20 +315,20 @@ static void test_alter_column_rename_updates_catalog() {
     const auto schema = g_engine.getTableSchema(db, "rename_columns");
     assert(schema.cols[0].dataName == "new_name");
 
-    dbms::CatalogManager& catalog = g_engine.catalogService().get(db);
-    assert(catalog.findAttribute(relationOid, "old_name") == nullptr);
+    dbms_test::CatalogGenerationView catalog(g_engine, db);
+    assert(catalog().findAttribute(relationOid, "old_name") == nullptr);
     const auto* renamedAttribute =
-        catalog.findAttribute(relationOid, "new_name");
+        catalog().findAttribute(relationOid, "new_name");
     assert(renamedAttribute != nullptr && renamedAttribute->attnum == 1);
 
     // The pg_attribute update must be durable, not just an in-memory rename.
     g_engine.catalogService().evict(db);
-    dbms::CatalogManager& reloaded = g_engine.catalogService().get(db);
+    dbms_test::CatalogGenerationView reloaded(g_engine, db);
     const auto* relation =
-        reloaded.resolveRelation("rename_columns", {"public"});
+        reloaded().resolveRelation("rename_columns", {"public"});
     assert(relation != nullptr && relation->oid == relationOid);
-    assert(reloaded.findAttribute(relationOid, "old_name") == nullptr);
-    renamedAttribute = reloaded.findAttribute(relationOid, "new_name");
+    assert(reloaded().findAttribute(relationOid, "old_name") == nullptr);
+    renamedAttribute = reloaded().findAttribute(relationOid, "new_name");
     assert(renamedAttribute != nullptr && renamedAttribute->attnum == 1);
 
     g_engine.catalogService().evict(db);
@@ -346,27 +348,26 @@ static void test_alter_column_definitions_update_catalog() {
     assert(!ddl.executeSql(
         "CREATE TABLE catalog_columns (removed INT, retained VARCHAR(20))", s));
 
-    dbms::CatalogManager& initialCatalog =
-        g_engine.catalogService().get(db);
+    dbms_test::CatalogGenerationView initialCatalog(g_engine, db);
     const auto* relation =
-        initialCatalog.resolveRelation("catalog_columns", {"public"});
+        initialCatalog().resolveRelation("catalog_columns", {"public"});
     assert(relation != nullptr && relation->relnatts == 2);
     const dbms::Oid relationOid = relation->oid;
     const auto* retained =
-        initialCatalog.findAttribute(relationOid, "retained");
+        initialCatalog().findAttribute(relationOid, "retained");
     assert(retained != nullptr && retained->attnum == 2);
     const dbms::Oid originalType = retained->atttypid;
 
     assert(!ddl.executeSql(
         "ALTER TABLE catalog_columns ADD COLUMN added BIGINT DEFAULT 7", s));
-    relation = initialCatalog.findClass(relationOid);
+    relation = initialCatalog().findClass(relationOid);
     assert(relation != nullptr && relation->relnatts == 3);
-    const auto* added = initialCatalog.findAttribute(relationOid, "added");
+    const auto* added = initialCatalog().findAttribute(relationOid, "added");
     assert(added != nullptr && added->attnum == 3 && added->atthasdef);
 
     assert(!ddl.executeSql(
         "ALTER TABLE catalog_columns ALTER COLUMN retained TYPE BIGINT", s));
-    retained = initialCatalog.findAttribute(relationOid, "retained");
+    retained = initialCatalog().findAttribute(relationOid, "retained");
     assert(retained != nullptr && retained->atttypid != originalType &&
            retained->attlen == 8);
 
@@ -374,34 +375,34 @@ static void test_alter_column_definitions_update_catalog() {
         "ALTER TABLE catalog_columns ALTER COLUMN retained SET DEFAULT 9", s));
     assert(!ddl.executeSql(
         "ALTER TABLE catalog_columns ALTER COLUMN retained SET NOT NULL", s));
-    retained = initialCatalog.findAttribute(relationOid, "retained");
+    retained = initialCatalog().findAttribute(relationOid, "retained");
     assert(retained != nullptr && retained->atthasdef && retained->attnotnull);
 
     assert(!ddl.executeSql(
         "ALTER TABLE catalog_columns ALTER COLUMN retained DROP DEFAULT", s));
     assert(!ddl.executeSql(
         "ALTER TABLE catalog_columns ALTER COLUMN retained DROP NOT NULL", s));
-    retained = initialCatalog.findAttribute(relationOid, "retained");
+    retained = initialCatalog().findAttribute(relationOid, "retained");
     assert(retained != nullptr && !retained->atthasdef &&
            !retained->attnotnull);
 
     assert(!ddl.executeSql(
         "ALTER TABLE catalog_columns DROP COLUMN removed", s));
-    relation = initialCatalog.findClass(relationOid);
+    relation = initialCatalog().findClass(relationOid);
     assert(relation != nullptr && relation->relnatts == 2);
-    assert(initialCatalog.findAttribute(relationOid, "removed") == nullptr);
-    retained = initialCatalog.findAttribute(relationOid, "retained");
-    added = initialCatalog.findAttribute(relationOid, "added");
+    assert(initialCatalog().findAttribute(relationOid, "removed") == nullptr);
+    retained = initialCatalog().findAttribute(relationOid, "retained");
+    added = initialCatalog().findAttribute(relationOid, "added");
     assert(retained != nullptr && retained->attnum == 1);
     assert(added != nullptr && added->attnum == 2 && added->atthasdef);
 
     g_engine.catalogService().evict(db);
-    dbms::CatalogManager& reloaded = g_engine.catalogService().get(db);
-    relation = reloaded.findClass(relationOid);
+    dbms_test::CatalogGenerationView reloaded(g_engine, db);
+    relation = reloaded().findClass(relationOid);
     assert(relation != nullptr && relation->relnatts == 2);
-    assert(reloaded.findAttribute(relationOid, "removed") == nullptr);
-    retained = reloaded.findAttribute(relationOid, "retained");
-    added = reloaded.findAttribute(relationOid, "added");
+    assert(reloaded().findAttribute(relationOid, "removed") == nullptr);
+    retained = reloaded().findAttribute(relationOid, "retained");
+    added = reloaded().findAttribute(relationOid, "added");
     assert(retained != nullptr && retained->attnum == 1 &&
            retained->attlen == 8 && !retained->atthasdef &&
            !retained->attnotnull);
@@ -424,32 +425,32 @@ static void test_alter_logged_state_updates_catalog() {
     assert(!ddl.executeSql(
         "CREATE TABLE persistence_catalog (id INT)", s));
 
-    dbms::CatalogManager& initial = g_engine.catalogService().get(db);
+    dbms_test::CatalogGenerationView initial(g_engine, db);
     const auto* relation =
-        initial.resolveRelation("persistence_catalog", {"public"});
+        initial().resolveRelation("persistence_catalog", {"public"});
     assert(relation != nullptr && relation->relpersistence == 'p');
     const dbms::Oid relationOid = relation->oid;
 
     assert(!ddl.executeSql(
         "ALTER TABLE persistence_catalog SET UNLOGGED", s));
     assert(g_engine.getTableSchema(db, "persistence_catalog").isUnlogged);
-    relation = initial.findClass(relationOid);
+    relation = initial().findClass(relationOid);
     assert(relation != nullptr && relation->relpersistence == 'u');
 
     g_engine.catalogService().evict(db);
-    dbms::CatalogManager& unlogged = g_engine.catalogService().get(db);
-    relation = unlogged.findClass(relationOid);
+    dbms_test::CatalogGenerationView unlogged(g_engine, db);
+    relation = unlogged().findClass(relationOid);
     assert(relation != nullptr && relation->relpersistence == 'u');
 
     assert(!ddl.executeSql(
         "ALTER TABLE persistence_catalog SET LOGGED", s));
     assert(!g_engine.getTableSchema(db, "persistence_catalog").isUnlogged);
-    relation = unlogged.findClass(relationOid);
+    relation = unlogged().findClass(relationOid);
     assert(relation != nullptr && relation->relpersistence == 'p');
 
     g_engine.catalogService().evict(db);
-    dbms::CatalogManager& logged = g_engine.catalogService().get(db);
-    relation = logged.findClass(relationOid);
+    dbms_test::CatalogGenerationView logged(g_engine, db);
+    relation = logged().findClass(relationOid);
     assert(relation != nullptr && relation->relpersistence == 'p');
 
     g_engine.catalogService().evict(db);
@@ -467,9 +468,9 @@ static void test_alter_rls_state_updates_catalog() {
     dbms::DdlExecutor ddl;
     assert(!ddl.executeSql("CREATE TABLE rls_catalog (id INT)", s));
 
-    dbms::CatalogManager& initial = g_engine.catalogService().get(db);
+    dbms_test::CatalogGenerationView initial(g_engine, db);
     const auto* relation =
-        initial.resolveRelation("rls_catalog", {"public"});
+        initial().resolveRelation("rls_catalog", {"public"});
     assert(relation != nullptr && !relation->relrowsecurity &&
            !relation->relforcerowsecurity);
     const dbms::Oid relationOid = relation->oid;
@@ -480,13 +481,13 @@ static void test_alter_rls_state_updates_catalog() {
         "ALTER TABLE rls_catalog FORCE ROW LEVEL SECURITY", s));
     auto schema = g_engine.getTableSchema(db, "rls_catalog");
     assert(!schema.rowLevelSecurity && schema.forceRowLevelSecurity);
-    relation = initial.findClass(relationOid);
+    relation = initial().findClass(relationOid);
     assert(relation != nullptr && !relation->relrowsecurity &&
            relation->relforcerowsecurity);
 
     g_engine.catalogService().evict(db);
-    dbms::CatalogManager& forced = g_engine.catalogService().get(db);
-    relation = forced.findClass(relationOid);
+    dbms_test::CatalogGenerationView forced(g_engine, db);
+    relation = forced().findClass(relationOid);
     assert(relation != nullptr && !relation->relrowsecurity &&
            relation->relforcerowsecurity);
 
@@ -495,7 +496,7 @@ static void test_alter_rls_state_updates_catalog() {
         "ALTER TABLE rls_catalog ENABLE ROW LEVEL SECURITY", s));
     schema = g_engine.getTableSchema(db, "rls_catalog");
     assert(schema.rowLevelSecurity && schema.forceRowLevelSecurity);
-    relation = forced.findClass(relationOid);
+    relation = forced().findClass(relationOid);
     assert(relation != nullptr && relation->relrowsecurity &&
            relation->relforcerowsecurity);
 
@@ -503,7 +504,7 @@ static void test_alter_rls_state_updates_catalog() {
         "ALTER TABLE rls_catalog DISABLE ROW LEVEL SECURITY", s));
     schema = g_engine.getTableSchema(db, "rls_catalog");
     assert(!schema.rowLevelSecurity && schema.forceRowLevelSecurity);
-    relation = forced.findClass(relationOid);
+    relation = forced().findClass(relationOid);
     assert(relation != nullptr && !relation->relrowsecurity &&
            relation->relforcerowsecurity);
 
@@ -511,13 +512,13 @@ static void test_alter_rls_state_updates_catalog() {
         "ALTER TABLE rls_catalog NO FORCE ROW LEVEL SECURITY", s));
     schema = g_engine.getTableSchema(db, "rls_catalog");
     assert(!schema.rowLevelSecurity && !schema.forceRowLevelSecurity);
-    relation = forced.findClass(relationOid);
+    relation = forced().findClass(relationOid);
     assert(relation != nullptr && !relation->relrowsecurity &&
            !relation->relforcerowsecurity);
 
     g_engine.catalogService().evict(db);
-    dbms::CatalogManager& reloaded = g_engine.catalogService().get(db);
-    relation = reloaded.findClass(relationOid);
+    dbms_test::CatalogGenerationView reloaded(g_engine, db);
+    relation = reloaded().findClass(relationOid);
     assert(relation != nullptr && !relation->relrowsecurity &&
            !relation->relforcerowsecurity);
 
@@ -540,41 +541,41 @@ static void test_check_constraint_count_updates_catalog() {
         "b INT, c INT CHECK (c <> 10), "
         "CONSTRAINT b_nonnegative CHECK (b >= 0))", s));
 
-    dbms::CatalogManager& initial = g_engine.catalogService().get(db);
+    dbms_test::CatalogGenerationView initial(g_engine, db);
     const auto* relation =
-        initial.resolveRelation("check_catalog", {"public"});
+        initial().resolveRelation("check_catalog", {"public"});
     assert(relation != nullptr && relation->relchecks == 4);
     const dbms::Oid relationOid = relation->oid;
 
     assert(!ddl.executeSql(
         "ALTER TABLE check_catalog DROP COLUMN c", s));
-    relation = initial.findClass(relationOid);
+    relation = initial().findClass(relationOid);
     assert(relation != nullptr && relation->relchecks == 3);
 
     assert(!ddl.executeSql(
         "ALTER TABLE check_catalog ADD COLUMN c INT", s));
-    relation = initial.findClass(relationOid);
+    relation = initial().findClass(relationOid);
     assert(relation != nullptr && relation->relchecks == 3);
 
     assert(!ddl.executeSql(
         "ALTER TABLE check_catalog DROP COLUMN c", s));
-    relation = initial.findClass(relationOid);
+    relation = initial().findClass(relationOid);
     assert(relation != nullptr && relation->relchecks == 3);
 
     assert(!ddl.executeSql(
         "ALTER TABLE check_catalog ADD CONSTRAINT a_not_50 "
         "CHECK (a <> 50)", s));
-    relation = initial.findClass(relationOid);
+    relation = initial().findClass(relationOid);
     assert(relation != nullptr && relation->relchecks == 4);
 
     assert(!ddl.executeSql(
         "ALTER TABLE check_catalog DROP CONSTRAINT a_not_50", s));
-    relation = initial.findClass(relationOid);
+    relation = initial().findClass(relationOid);
     assert(relation != nullptr && relation->relchecks == 3);
 
     g_engine.catalogService().evict(db);
-    dbms::CatalogManager& reloaded = g_engine.catalogService().get(db);
-    relation = reloaded.findClass(relationOid);
+    dbms_test::CatalogGenerationView reloaded(g_engine, db);
+    relation = reloaded().findClass(relationOid);
     assert(relation != nullptr && relation->relchecks == 3);
 
     g_engine.catalogService().evict(db);
@@ -602,11 +603,11 @@ static void test_schema_qualified_rename_preserves_schema() {
     assert(g_engine.tableExists(db, "analytics__rename_target"));
     assert(!g_engine.tableExists(db, "rename_target"));
 
-    dbms::CatalogManager& catalog = g_engine.catalogService().get(db);
-    const auto* analytics = catalog.findNamespaceByName("analytics");
+    dbms_test::CatalogGenerationView catalog(g_engine, db);
+    const auto* analytics = catalog().findNamespaceByName("analytics");
     assert(analytics != nullptr);
-    assert(catalog.findClassByName("rename_source", analytics->oid) == nullptr);
-    assert(catalog.findClassByName("rename_target", analytics->oid) != nullptr);
+    assert(catalog().findClassByName("rename_source", analytics->oid) == nullptr);
+    assert(catalog().findClassByName("rename_target", analytics->oid) != nullptr);
 
     g_engine.catalogService().evict(db);
     cleanup(db);
@@ -626,10 +627,10 @@ static void test_create_index_sequence() {
     bool err = ddl.executeSql("CREATE INDEX idx_a ON idx_tbl (a)", s);
     assert(!err);
 
-    dbms::CatalogManager& cat = g_engine.catalogService().get(db);
-    const auto* nsPublic = cat.findNamespaceByName("public");
+    dbms_test::CatalogGenerationView cat(g_engine, db);
+    const auto* nsPublic = cat().findNamespaceByName("public");
     assert(nsPublic != nullptr);
-    const auto* idx = cat.findClassByName("idx_a", nsPublic->oid);
+    const auto* idx = cat().findClassByName("idx_a", nsPublic->oid);
     assert(idx != nullptr);
     assert(idx->relkind == 'i');
 
@@ -637,18 +638,18 @@ static void test_create_index_sequence() {
     assert(!err);
     assert(g_engine.sequenceExists(db, "seq1"));
 
-    const auto* seq = cat.findClassByName("seq1", nsPublic->oid);
+    const auto* seq = cat().findClassByName("seq1", nsPublic->oid);
     assert(seq != nullptr);
     assert(seq->relkind == 'S');
 
     err = ddl.executeSql("DROP SEQUENCE seq1", s);
     assert(!err);
-    assert(cat.findClassByName("seq1", nsPublic->oid) == nullptr);
+    assert(cat().findClassByName("seq1", nsPublic->oid) == nullptr);
 
     // Dropping the table with CASCADE should remove the dependent index.
     err = ddl.executeSql("DROP TABLE idx_tbl CASCADE", s);
     assert(!err);
-    assert(cat.findClassByName("idx_a", nsPublic->oid) == nullptr);
+    assert(cat().findClassByName("idx_a", nsPublic->oid) == nullptr);
 
     cleanup(db);
     std::cout << "[DDL] index/sequence OK" << std::endl;
@@ -666,20 +667,20 @@ static void test_table_index_flag_updates_catalog() {
     assert(!ddl.executeSql(
         "CREATE TABLE unique_indexed_table (value INT UNIQUE)", s));
 
-    dbms::CatalogManager& initial = g_engine.catalogService().get(db);
+    dbms_test::CatalogGenerationView initial(g_engine, db);
     const auto* relation =
-        initial.resolveRelation("indexed_table", {"public"});
+        initial().resolveRelation("indexed_table", {"public"});
     assert(relation != nullptr && relation->relhasindex);
     const dbms::Oid tableOid = relation->oid;
     const auto* uniqueRelation =
-        initial.resolveRelation("unique_indexed_table", {"public"});
+        initial().resolveRelation("unique_indexed_table", {"public"});
     assert(uniqueRelation != nullptr && uniqueRelation->relhasindex);
 
     assert(!ddl.executeSql(
         "CREATE INDEX indexed_table_a_idx ON indexed_table (a)", s));
     assert(!ddl.executeSql(
         "CREATE INDEX indexed_table_b_idx ON indexed_table (b)", s));
-    relation = initial.findClass(tableOid);
+    relation = initial().findClass(tableOid);
     assert(relation != nullptr && relation->relhasindex);
 
     // Read through an independent manager rather than evicting the live one:
@@ -710,12 +711,12 @@ static void test_table_index_flag_updates_catalog() {
     }
 
     g_engine.catalogService().evict(db);
-    dbms::CatalogManager& indexed = g_engine.catalogService().get(db);
-    relation = indexed.findClass(tableOid);
+    dbms_test::CatalogGenerationView indexed(g_engine, db);
+    relation = indexed().findClass(tableOid);
     assert(relation != nullptr && relation->relhasindex);
 
     assert(!ddl.executeSql("DROP INDEX indexed_table_a_idx", s));
-    relation = indexed.findClass(tableOid);
+    relation = indexed().findClass(tableOid);
     assert(relation != nullptr && relation->relhasindex);
     {
         dbms::CatalogManager durable(
@@ -733,7 +734,7 @@ static void test_table_index_flag_updates_catalog() {
     }
 
     assert(!ddl.executeSql("DROP INDEX indexed_table_b_idx", s));
-    relation = indexed.findClass(tableOid);
+    relation = indexed().findClass(tableOid);
     assert(relation != nullptr && relation->relhasindex);
     {
         dbms::CatalogManager durable(
@@ -751,7 +752,7 @@ static void test_table_index_flag_updates_catalog() {
 
     assert(!ddl.executeSql(
         "ALTER TABLE indexed_table DROP CONSTRAINT indexed_table_pkey", s));
-    relation = indexed.findClass(tableOid);
+    relation = indexed().findClass(tableOid);
     assert(relation != nullptr && !relation->relhasindex);
     {
         dbms::CatalogManager durable(
@@ -763,7 +764,7 @@ static void test_table_index_flag_updates_catalog() {
     assert(!ddl.executeSql(
         "ALTER TABLE indexed_table ADD CONSTRAINT restored_pkey "
         "PRIMARY KEY (id)", s));
-    relation = indexed.findClass(tableOid);
+    relation = indexed().findClass(tableOid);
     assert(relation != nullptr && relation->relhasindex);
     {
         dbms::CatalogManager durable(
@@ -773,12 +774,12 @@ static void test_table_index_flag_updates_catalog() {
     }
     assert(!ddl.executeSql(
         "ALTER TABLE indexed_table DROP CONSTRAINT restored_pkey", s));
-    relation = indexed.findClass(tableOid);
+    relation = indexed().findClass(tableOid);
     assert(relation != nullptr && !relation->relhasindex);
 
     g_engine.catalogService().evict(db);
-    dbms::CatalogManager& unindexed = g_engine.catalogService().get(db);
-    relation = unindexed.findClass(tableOid);
+    dbms_test::CatalogGenerationView unindexed(g_engine, db);
+    relation = unindexed().findClass(tableOid);
     assert(relation != nullptr && !relation->relhasindex);
 
     g_engine.catalogService().evict(db);
@@ -808,13 +809,13 @@ static void test_create_database_schema() {
     assert(ddl.executeSql("CREATE SCHEMA myschema", s));
     assert(!ddl.executeSql("CREATE SCHEMA IF NOT EXISTS myschema", s));
 
-    dbms::CatalogManager& cat = g_engine.catalogService().get(db);
-    assert(cat.findNamespaceByName("myschema") != nullptr);
+    dbms_test::CatalogGenerationView cat(g_engine, db);
+    assert(cat().findNamespaceByName("myschema") != nullptr);
 
     err = ddl.executeSql("DROP SCHEMA myschema RESTRICT", s);
     assert(!err);
     assert(!g_engine.schemaExists(db, "myschema"));
-    assert(cat.findNamespaceByName("myschema") == nullptr);
+    assert(cat().findNamespaceByName("myschema") == nullptr);
     {
         dbms::CatalogManager durable(
             (fs::path(g_engine.dbPath(db)) / "pg_catalog").string());
@@ -848,10 +849,10 @@ static void test_drop_index_uses_sql_name() {
 
     assert(!ddl.executeSql("DROP INDEX idx_drop_value", s));
     assert(!g_engine.getNamedIndex(db, "drop_idx_tbl", "idx_drop_value").has_value());
-    dbms::CatalogManager& cat = g_engine.catalogService().get(db);
-    const auto* ns = cat.findNamespaceByName("public");
+    dbms_test::CatalogGenerationView cat(g_engine, db);
+    const auto* ns = cat().findNamespaceByName("public");
     assert(ns != nullptr);
-    assert(cat.findClassByName("idx_drop_value", ns->oid) == nullptr);
+    assert(cat().findClassByName("idx_drop_value", ns->oid) == nullptr);
 
     assert(!ddl.executeSql("CREATE INDEX idx_drop_composite ON drop_idx_tbl (id, value)", s));
     assert(!ddl.executeSql("DROP INDEX idx_drop_composite ON drop_idx_tbl", s));
@@ -908,23 +909,23 @@ static void test_drop_schema_qualified_index() {
     const std::string physicalTable = "inventory__items";
     assert(g_engine.getNamedIndex(
         db, physicalTable, "items_sku_idx").has_value());
-    dbms::CatalogManager& catalog = g_engine.catalogService().get(db);
-    const auto* inventory = catalog.findNamespaceByName("inventory");
+    dbms_test::CatalogGenerationView catalog(g_engine, db);
+    const auto* inventory = catalog().findNamespaceByName("inventory");
     assert(inventory != nullptr);
-    assert(catalog.findClassByName(
+    assert(catalog().findClassByName(
         "items_sku_idx", inventory->oid) != nullptr);
 
     assert(ddl.executeSql(
         "CREATE INDEX inventory.invalid_idx ON inventory.items (id)", s));
     assert(!g_engine.getNamedIndex(
         db, physicalTable, "invalid_idx").has_value());
-    assert(catalog.findClassByName(
+    assert(catalog().findClassByName(
         "invalid_idx", inventory->oid) == nullptr);
 
     assert(!ddl.executeSql("DROP INDEX inventory.items_sku_idx", s));
     assert(!g_engine.getNamedIndex(
         db, physicalTable, "items_sku_idx").has_value());
-    assert(catalog.findClassByName(
+    assert(catalog().findClassByName(
         "items_sku_idx", inventory->oid) == nullptr);
 
     g_engine.catalogService().evict(db);
@@ -999,18 +1000,18 @@ static void test_alter_table_metadata_actions() {
     assert(ddl.executeSql("ALTER TABLE alter_meta CLUSTER ON missing_idx", s));
 
     assert(!ddl.executeSql("ALTER TABLE alter_meta REPLICA IDENTITY FULL", s));
-    auto& cat = g_engine.catalogService().get(db);
-    const auto* ns = cat.findNamespaceByName("public");
+    dbms_test::CatalogGenerationView cat(g_engine, db);
+    const auto* ns = cat().findNamespaceByName("public");
     assert(ns != nullptr);
-    const auto* relation = cat.findClassByName("alter_meta", ns->oid);
+    const auto* relation = cat().findClassByName("alter_meta", ns->oid);
     assert(relation != nullptr && relation->relreplident == 'f');
     assert(!ddl.executeSql("ALTER TABLE alter_meta REPLICA IDENTITY USING INDEX alter_meta_id_idx", s));
-    relation = cat.findClassByName("alter_meta", ns->oid);
+    relation = cat().findClassByName("alter_meta", ns->oid);
     assert(relation != nullptr && relation->relreplident == 'i');
     params = g_engine.getStorageParams(db, "alter_meta");
     assert(params.at("replica_identity_index") == "alter_meta_id_idx");
     assert(!ddl.executeSql("ALTER TABLE alter_meta REPLICA IDENTITY DEFAULT", s));
-    relation = cat.findClassByName("alter_meta", ns->oid);
+    relation = cat().findClassByName("alter_meta", ns->oid);
     assert(relation != nullptr && relation->relreplident == 'd');
 
     assert(!ddl.executeSql(
@@ -1048,20 +1049,20 @@ static void test_schema_replica_identity_updates_catalog() {
 
     auto params = g_engine.getStorageParams(db, "replication__events");
     assert(params.at("replica_identity") == "full");
-    dbms::CatalogManager& initial = g_engine.catalogService().get(db);
-    const auto* relation = initial.resolveRelation(
+    dbms_test::CatalogGenerationView initial(g_engine, db);
+    const auto* relation = initial().resolveRelation(
         "events", {"replication"});
     assert(relation != nullptr && relation->relreplident == 'f');
     const dbms::Oid relationOid = relation->oid;
 
     g_engine.catalogService().evict(db);
-    dbms::CatalogManager& reloaded = g_engine.catalogService().get(db);
-    relation = reloaded.findClass(relationOid);
+    dbms_test::CatalogGenerationView reloaded(g_engine, db);
+    relation = reloaded().findClass(relationOid);
     assert(relation != nullptr && relation->relreplident == 'f');
 
     assert(!ddl.executeSql(
         "ALTER TABLE replication.events REPLICA IDENTITY NOTHING", s));
-    relation = reloaded.findClass(relationOid);
+    relation = reloaded().findClass(relationOid);
     assert(relation != nullptr && relation->relreplident == 'n');
     params = g_engine.getStorageParams(db, "replication__events");
     assert(params.at("replica_identity") == "nothing");
@@ -1094,10 +1095,10 @@ static void test_long_identifiers_round_trip() {
     schema = g_engine.getTableSchema(db, tableName);
     assert(schema.cols[0].checkConstraintName == constraintName);
 
-    auto& cat = g_engine.catalogService().get(db);
-    const auto* ns = cat.findNamespaceByName("public");
+    dbms_test::CatalogGenerationView cat(g_engine, db);
+    const auto* ns = cat().findNamespaceByName("public");
     assert(ns != nullptr);
-    assert(cat.findClassByName(tableName, ns->oid) != nullptr);
+    assert(cat().findClassByName(tableName, ns->oid) != nullptr);
 
     cleanup(db);
     std::cout << "[DDL] long identifier round-trip OK" << std::endl;
@@ -1115,8 +1116,8 @@ static void test_drop_database_evicts_catalog() {
     assert(!err);
 
     // Touch the catalog so it is cached for this database.
-    dbms::CatalogManager& cat = g_engine.catalogService().get(db);
-    assert(cat.findNamespaceByName("public") != nullptr);
+    dbms_test::CatalogGenerationView cat(g_engine, db);
+    assert(cat().findNamespaceByName("public") != nullptr);
     assert(g_engine.catalogService().has(db));
 
     err = ddl.executeSql("DROP DATABASE " + db, s);
@@ -1271,8 +1272,8 @@ static void test_table_catalog_persistence_failure_rolls_back() {
 
     fs::remove_all(blockedTemporary);
     g_engine.catalogService().evict(db);
-    dbms::CatalogManager& catalog = g_engine.catalogService().get(db);
-    assert(catalog.resolveRelation("must_rollback", {"public"}) == nullptr);
+    dbms_test::CatalogGenerationView catalog(g_engine, db);
+    assert(catalog().resolveRelation("must_rollback", {"public"}) == nullptr);
 
     g_engine.catalogService().evict(db);
     cleanup(db);

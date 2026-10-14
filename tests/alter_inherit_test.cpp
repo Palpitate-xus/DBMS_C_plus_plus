@@ -1,3 +1,4 @@
+#include "catalog_generation_test_view.h"
 // ============================================================================
 // ALTER TABLE INHERIT test — Phase 4 Wave 4.27
 // Tests parser handles INHERIT/NO INHERIT (execution via main.cpp requires
@@ -99,7 +100,7 @@ static void test_inherit_execution() {
     assert(g_engine.getInheritedChildren(db, "p1") ==
            std::vector<std::string>{"child"});
     assert(ddl.executeSql("ALTER TABLE child INHERIT p1", s));
-    const auto catalog = [&]() -> dbms::CatalogManager& { return g_engine.catalogService().get(db); };
+    dbms_test::CatalogGenerationView catalog(g_engine, db);
     const auto* parentRelation =
         catalog().resolveRelation("p1", {"public"});
     assert(parentRelation && parentRelation->relhassubclass);
@@ -243,7 +244,7 @@ static void test_inherited_column_catalog_provenance() {
         "INHERITS (parent_a, parent_a)", s));
     assert(!g_engine.tableExists(db, "duplicate_parent"));
 
-    const auto catalog = [&]() -> dbms::CatalogManager& { return g_engine.catalogService().get(db); };
+    dbms_test::CatalogGenerationView catalog(g_engine, db);
     const auto* childRelation =
         catalog().resolveRelation("child", {"public"});
     assert(childRelation);
@@ -306,7 +307,7 @@ static void test_drop_removes_inheritance_edges() {
     assert(!ddl.executeSql("CREATE TABLE parent (id INT)", s));
     assert(!ddl.executeSql(
         "CREATE TABLE child (payload INT) INHERITS (parent)", s));
-    const auto catalog = [&]() -> dbms::CatalogManager& { return g_engine.catalogService().get(db); };
+    dbms_test::CatalogGenerationView catalog(g_engine, db);
     const auto* parentRelation =
         catalog().resolveRelation("parent", {"public"});
     assert(parentRelation && parentRelation->relhassubclass);

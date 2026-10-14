@@ -1,3 +1,4 @@
+#include "catalog_generation_test_view.h"
 #include "commands/DdlExecutor.h"
 #include "commands/TableManage.h"
 #include "executor/ExecutionPlan.h"
@@ -42,16 +43,16 @@ static void test_enum_basic() {
 
     dbms::Oid moodTypeOid = dbms::INVALID_OID;
     {
-        auto& catalog = g_engine.catalogService().get(db);
-        const auto* publicNamespace = catalog.findNamespaceByName("public");
+        dbms_test::CatalogGenerationView catalog(g_engine, db);
+        const auto* publicNamespace = catalog().findNamespaceByName("public");
         assert(publicNamespace);
         const auto* moodType =
-            catalog.findTypeByName("mood", publicNamespace->oid);
+            catalog().findTypeByName("mood", publicNamespace->oid);
         assert(moodType);
         moodTypeOid = moodType->oid;
         assert(moodType->typtype == 'e');
         assert(moodType->typcategory == 'E');
-        const auto labels = catalog.findEnumLabels(moodType->oid);
+        const auto labels = catalog().findEnumLabels(moodType->oid);
         assert(labels.size() == 3);
         assert(labels[0].enumlabel == "happy");
         assert(labels[1].enumlabel == "sad");
@@ -62,12 +63,12 @@ static void test_enum_basic() {
     assert(!err);
 
     {
-        auto& catalog = g_engine.catalogService().get(db);
-        const auto* publicNamespace = catalog.findNamespaceByName("public");
+        dbms_test::CatalogGenerationView catalog(g_engine, db);
+        const auto* publicNamespace = catalog().findNamespaceByName("public");
         assert(publicNamespace);
-        const auto* table = catalog.findClassByName("t", publicNamespace->oid);
+        const auto* table = catalog().findClassByName("t", publicNamespace->oid);
         assert(table);
-        const auto* enumAttribute = catalog.findAttribute(table->oid, "m");
+        const auto* enumAttribute = catalog().findAttribute(table->oid, "m");
         assert(enumAttribute);
         assert(enumAttribute->atttypid == moodTypeOid);
     }
@@ -151,13 +152,13 @@ static void test_named_enum_alter_updates_dependent_schemas() {
     priority.labels.insert(priority.labels.begin() + 1, "medium");
     assert(g_engine.updateEnumType(db, priority) == dbms::DBStatus::OK);
     {
-        auto& catalog = g_engine.catalogService().get(db);
-        const auto* publicNamespace = catalog.findNamespaceByName("public");
+        dbms_test::CatalogGenerationView catalog(g_engine, db);
+        const auto* publicNamespace = catalog().findNamespaceByName("public");
         assert(publicNamespace);
         const auto* catalogType =
-            catalog.findTypeByName("priority", publicNamespace->oid);
+            catalog().findTypeByName("priority", publicNamespace->oid);
         assert(catalogType && catalogType->typtype == 'e');
-        const auto catalogLabels = catalog.findEnumLabels(catalogType->oid);
+        const auto catalogLabels = catalog().findEnumLabels(catalogType->oid);
         assert(catalogLabels.size() == priority.labels.size());
         for (size_t index = 0; index < priority.labels.size(); ++index)
             assert(catalogLabels[index].enumlabel == priority.labels[index]);
@@ -221,13 +222,13 @@ static void test_named_enum_alter_updates_dependent_schemas() {
     assert(g_engine.getHashIndex(db, "tasks", "p")
                ->search("urgent").size() == 1);
     {
-        auto& catalog = g_engine.catalogService().get(db);
-        const auto* publicNamespace = catalog.findNamespaceByName("public");
+        dbms_test::CatalogGenerationView catalog(g_engine, db);
+        const auto* publicNamespace = catalog().findNamespaceByName("public");
         assert(publicNamespace);
         const auto* catalogType =
-            catalog.findTypeByName("priority", publicNamespace->oid);
+            catalog().findTypeByName("priority", publicNamespace->oid);
         assert(catalogType);
-        const auto catalogLabels = catalog.findEnumLabels(catalogType->oid);
+        const auto catalogLabels = catalog().findEnumLabels(catalogType->oid);
         assert(catalogLabels.size() == priority.labels.size());
         for (size_t index = 0; index < priority.labels.size(); ++index)
             assert(catalogLabels[index].enumlabel == priority.labels[index]);
@@ -245,15 +246,15 @@ static void test_named_enum_alter_updates_dependent_schemas() {
     const auto restoredSchema = g_engine.getTableSchema(db, "tasks");
     assert(restoredSchema.cols[1].enumValues ==
            g_engine.getEnumType(db, "priority").labels);
-    auto& restoredCatalog = g_engine.catalogService().get(db);
+    dbms_test::CatalogGenerationView restoredCatalog(g_engine, db);
     const auto* restoredNamespace =
-        restoredCatalog.findNamespaceByName("public");
+        restoredCatalog().findNamespaceByName("public");
     assert(restoredNamespace);
     const auto* restoredType =
-        restoredCatalog.findTypeByName("priority", restoredNamespace->oid);
+        restoredCatalog().findTypeByName("priority", restoredNamespace->oid);
     assert(restoredType);
     const auto restoredLabels =
-        restoredCatalog.findEnumLabels(restoredType->oid);
+        restoredCatalog().findEnumLabels(restoredType->oid);
     assert(restoredLabels.size() == 4);
     assert(restoredLabels.back().enumlabel == "urgent");
     cleanup(backup);
@@ -281,14 +282,14 @@ static void test_enum_labels_round_trip_losslessly() {
     assert(stored.name == "punctuation");
     assert(stored.labels == expected);
 
-    auto& catalog = g_engine.catalogService().get(db);
-    const auto* publicNamespace = catalog.findNamespaceByName("public");
+    dbms_test::CatalogGenerationView catalog(g_engine, db);
+    const auto* publicNamespace = catalog().findNamespaceByName("public");
     assert(publicNamespace);
     const auto* punctuationType =
-        catalog.findTypeByName("punctuation", publicNamespace->oid);
+        catalog().findTypeByName("punctuation", publicNamespace->oid);
     assert(punctuationType && punctuationType->typtype == 'e');
     const dbms::Oid punctuationTypeOid = punctuationType->oid;
-    assert(catalog.persistAll());
+    assert(catalog().persistAll());
     dbms::CatalogManager reopenedCatalog(
         (std::filesystem::path(db) / "pg_catalog").string());
     const auto persistedLabels =
@@ -317,32 +318,32 @@ static void test_enum_catalog_label_oid_stability() {
     assert(!ddl.executeSql(
         "CREATE TYPE priority AS ENUM ('low', 'high', 'obsolete')", s));
 
-    auto& catalog = g_engine.catalogService().get(db);
-    const auto* publicNamespace = catalog.findNamespaceByName("public");
+    dbms_test::CatalogGenerationView catalog(g_engine, db);
+    const auto* publicNamespace = catalog().findNamespaceByName("public");
     assert(publicNamespace);
     const auto* type =
-        catalog.findTypeByName("priority", publicNamespace->oid);
+        catalog().findTypeByName("priority", publicNamespace->oid);
     assert(type && type->typtype == 'e');
     const dbms::Oid typeOid = type->oid;
-    const auto original = catalog.findEnumLabels(typeOid);
+    const auto original = catalog().findEnumLabels(typeOid);
     assert(original.size() == 3);
 
-    assert(catalog.replaceEnumLabels(
+    assert(catalog().replaceEnumLabels(
         typeOid, {"low", "medium", "high", "obsolete"}));
-    const auto added = catalog.findEnumLabels(typeOid);
+    const auto added = catalog().findEnumLabels(typeOid);
     assert(added.size() == 4);
     assert(added[0].oid == original[0].oid);
     assert(added[2].oid == original[1].oid);
     assert(added[3].oid == original[2].oid);
     assert(added[1].oid != dbms::INVALID_OID);
 
-    assert(catalog.replaceEnumLabels(
+    assert(catalog().replaceEnumLabels(
         typeOid, {"low", "medium", "high", "urgent"}));
-    const auto renamed = catalog.findEnumLabels(typeOid);
+    const auto renamed = catalog().findEnumLabels(typeOid);
     assert(renamed.size() == 4);
     assert(renamed[3].enumlabel == "urgent");
     assert(renamed[3].oid == added[3].oid);
-    assert(catalog.persistAll());
+    assert(catalog().persistAll());
 
     dbms::CatalogManager reopened(
         (std::filesystem::path(db) / "pg_catalog").string());
@@ -375,12 +376,12 @@ static void test_enum_drop_dependencies_and_catalog_cleanup() {
                db, "jobs", {{"id", "1"}, {"state", "new"}}) ==
            dbms::DBStatus::OK);
 
-    auto& catalog = g_engine.catalogService().get(db);
-    const auto* publicNamespace = catalog.findNamespaceByName("public");
+    dbms_test::CatalogGenerationView catalog(g_engine, db);
+    const auto* publicNamespace = catalog().findNamespaceByName("public");
     assert(publicNamespace);
     const dbms::Oid publicNamespaceOid = publicNamespace->oid;
     const auto* lifecycleType =
-        catalog.findTypeByName("lifecycle", publicNamespaceOid);
+        catalog().findTypeByName("lifecycle", publicNamespaceOid);
     assert(lifecycleType);
     const dbms::Oid lifecycleTypeOid = lifecycleType->oid;
 
@@ -388,10 +389,11 @@ static void test_enum_drop_dependencies_and_catalog_cleanup() {
     assert(ddl.executeSql("DROP TYPE lifecycle", s));
     assert(!g_engine.getEnumType(db, "lifecycle").name.empty());
     assert(g_engine.getTableSchema(db, "jobs").len == 2);
-    assert(catalog.findType(lifecycleTypeOid));
+    assert(catalog().findType(lifecycleTypeOid));
 
     // CASCADE removes the dependent column through ALTER TABLE, preserving
     // the surviving row, then removes both pg_type and pg_enum rows.
+    const auto beforeCascade = g_engine.catalogService().acquire(db);
     assert(!ddl.executeSql("DROP TYPE lifecycle CASCADE", s));
     assert(g_engine.getEnumType(db, "lifecycle").name.empty());
     const auto jobs = g_engine.getTableSchema(db, "jobs");
@@ -399,18 +401,20 @@ static void test_enum_drop_dependencies_and_catalog_cleanup() {
     assert(jobs.cols[0].dataName == "id");
     assert((g_engine.query(db, "jobs", {}, {"id"}) ==
             std::vector<std::string>{"1 "}));
-    assert(!catalog.findType(lifecycleTypeOid));
-    assert(catalog.findEnumLabels(lifecycleTypeOid).empty());
+    assert(!catalog().findType(lifecycleTypeOid));
+    assert(catalog().findEnumLabels(lifecycleTypeOid).empty());
+    assert(beforeCascade->findType(lifecycleTypeOid));
+    assert(beforeCascade->findEnumLabels(lifecycleTypeOid).size() == 2);
 
     assert(!ddl.executeSql(
         "CREATE TYPE standalone AS ENUM ('only')", s));
     const auto* standaloneType =
-        catalog.findTypeByName("standalone", publicNamespaceOid);
+        catalog().findTypeByName("standalone", publicNamespaceOid);
     assert(standaloneType);
     const dbms::Oid standaloneTypeOid = standaloneType->oid;
     assert(!ddl.executeSql("DROP TYPE standalone", s));
-    assert(!catalog.findType(standaloneTypeOid));
-    assert(catalog.findEnumLabels(standaloneTypeOid).empty());
+    assert(!catalog().findType(standaloneTypeOid));
+    assert(catalog().findEnumLabels(standaloneTypeOid).empty());
 
     cleanup(db);
     std::cout << "[ENUM] drop dependency/catalog cleanup OK" << std::endl;

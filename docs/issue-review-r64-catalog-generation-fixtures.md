@@ -28,3 +28,27 @@ R46已明确该引用不是跨代owner；原对象可能已退休甚至释放，
 
 本项是夹具生命周期修正，不宣称修复了目录功能或整个完整回归。
 主分支注册回归仍保持原输入，终态前不合入；未push，用户暂缓专项不重开。
+
+## 后续：另三个完整目录入口
+
+同一冻结完整回归继续在ddl_ast_bridge、enum_quoted_type_identity、enum_test
+复现相同借用引用跨DDL后的过期读取。未改产品主分支的当前代完整诊断全0：
+`/tmp/dbms-review-orphan-controls.vQleNfjM/enum-generation-followup-probes.log`及
+`ddl-exact-generation-probe.log`。DDL、物理文件及原异常断言均未放宽。
+
+六个夹具统一使用测试专用`CatalogGenerationView`：每次断言重新取得当前代，
+同时持有所有已借用行的generation lease，防止旧namespace/row指针悬空。
+额外断言旧代仍保留重命名前关系、CASCADE前enum及创建前schema，而当前代
+确实发生改变；原cold reload、依赖、数据和故障出版控制不删减。helper仅在
+tests目录，不改生产头或CatalogService契约。
+
+加强后的全部六个原完整入口在冻结主分支真实58份生产对象上全0，证据
+`/tmp/dbms-review-r46.ifu6SWLp/r64-root-six-current.log`；私树当前生产组合的
+同六入口也全0，`r64-final-six.log`，各自核对58份receipts及结束构建输入。
+这六个测试修正不是当前完整注册回归的终态，不会覆盖原六个失败。
+
+构造首个外部DDL诊断时，机械替换曾误改字符串`pg_class.cat.tmp.`为
+`pg_class.cat().tmp.`，使最后一个原有故障注入没有命中，日志
+`generation-followup-probes.log`保留。逐一对照原477/63/262个C++字符串字面量后
+恢复唯一误改，完整DDL重新通过；该失败不能归因于产品故障或临时文件API改变。
+最终夹具保留原故障路径，不增加另一种伪造的成功/失败来源。

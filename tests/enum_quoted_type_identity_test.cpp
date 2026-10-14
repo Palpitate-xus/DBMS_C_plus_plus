@@ -1,3 +1,4 @@
+#include "catalog_generation_test_view.h"
 #include "commands/DdlExecutor.h"
 #include "commands/TableManage.h"
 #include "catalog/CatalogService.h"
@@ -22,21 +23,23 @@ int main() {
     Session session;session.username="testuser";session.permission=1;session.currentDB=db;
     setCurrentSession(&session);DdlExecutor ddl;
     assert(!ddl.executeSql("CREATE TYPE \"MixedRank\" AS ENUM ('zeta','','alpha')",session));
-    auto& catalog=g_engine.catalogService().get(db);
-    const auto* ns=catalog.findNamespaceByName("public");assert(ns);
+    dbms_test::CatalogGenerationView catalog(g_engine, db);
+    const auto* ns=catalog().findNamespaceByName("public");assert(ns);
     const auto nsOid=ns->oid;
-    const auto* type=catalog.findTypeByName("MixedRank",nsOid);
+    const auto* type=catalog().findTypeByName("MixedRank",nsOid);
     std::cout<<"QUOTED_ENUM_CANONICAL_CATALOG_NAME_PRESENT="<<bool(type)<<std::endl;
     assert(type && type->typtype=='e' && type->typname=="MixedRank");
     const auto typeOid=type->oid;
-    assert(!catalog.findTypeByName("\"MixedRank\"",nsOid));
+    assert(!catalog().findTypeByName("\"MixedRank\"",nsOid));
     assert(g_engine.getEnumType(db,"MixedRank").labels==std::vector<std::string>({"zeta","","alpha"}));
     assert(g_engine.getEnumType(db,"\"MixedRank\"").name.empty());
+    const auto beforeScoped=g_engine.catalogService().acquire(db);
     assert(!ddl.executeSql("CREATE SCHEMA \"ScopeRank\"",session));
     assert(!ddl.executeSql("CREATE TYPE \"ScopeRank\".\"MixedRank\" AS ENUM ('alpha','','zeta')",session));
-    const auto* scoped=catalog.findNamespaceByName("ScopeRank");assert(scoped);
+    const auto* scoped=catalog().findNamespaceByName("ScopeRank");assert(scoped);
+    assert(!beforeScoped->findNamespaceByName("ScopeRank"));
     const auto scopeOid=scoped->oid;
-    const auto* other=catalog.findTypeByName("MixedRank",scopeOid);assert(other && other->oid!=typeOid);
+    const auto* other=catalog().findTypeByName("MixedRank",scopeOid);assert(other && other->oid!=typeOid);
     assert(g_engine.getEnumType(db,"ScopeRank.MixedRank").labels==std::vector<std::string>({"alpha","","zeta"}));
     assert(!ddl.executeSql("CREATE TYPE \"Ra\"\"nk(Name)\" AS ENUM ('zeta','alpha')",session));
     assert(!ddl.executeSql("CREATE TYPE \"Rank[]\" AS ENUM ('zeta','alpha')",session));
@@ -58,7 +61,7 @@ int main() {
         assert(!value.isNull && value.value==control.second);
     }
     assert(!ddl.executeSql("CREATE TYPE UPPER_RANK AS ENUM ('zeta','alpha')",session));
-    assert(catalog.findTypeByName("upper_rank",nsOid) && !catalog.findTypeByName("UPPER_RANK",nsOid));
+    assert(catalog().findTypeByName("upper_rank",nsOid) && !catalog().findTypeByName("UPPER_RANK",nsOid));
     {
         StorageEngine cold;
         const auto snapshot=cold.catalogService().metadataSnapshot(db);
@@ -67,10 +70,10 @@ int main() {
         assert(cold.getEnumType(db,"MixedRank").labels==std::vector<std::string>({"zeta","","alpha"}));
     }
     assert(!ddl.executeSql("DROP TYPE \"MixedRank\"",session));
-    assert(!catalog.findTypeByName("MixedRank",nsOid) && g_engine.getEnumType(db,"MixedRank").name.empty());
-    assert(catalog.findTypeByName("MixedRank",scopeOid));
+    assert(!catalog().findTypeByName("MixedRank",nsOid) && g_engine.getEnumType(db,"MixedRank").name.empty());
+    assert(catalog().findTypeByName("MixedRank",scopeOid));
     assert(!ddl.executeSql("DROP TYPE UPPER_RANK",session));
-    assert(!catalog.findTypeByName("upper_rank",nsOid));
+    assert(!catalog().findTypeByName("upper_rank",nsOid));
     assert(g_engine.getEnumType(db,"upper_rank").name.empty());
     std::cout<<"[ENUM QUOTED TYPE IDENTITY] canonical SQL identifiers, actual catalog/sidecar identities, distinct scopes, casts/CASE, unquoted folding, cold storage and exact DROP target passed\n";
 }

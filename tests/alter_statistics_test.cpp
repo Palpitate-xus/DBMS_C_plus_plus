@@ -1,3 +1,4 @@
+#include "catalog_generation_test_view.h"
 // ============================================================================
 // ALTER TABLE SET STATISTICS test — Phase 4 Wave 4.27
 // Tests parser for ALTER TABLE ... ALTER COLUMN ... SET STATISTICS n
@@ -67,7 +68,7 @@ static void test_statistics_persistence() {
 
     assert(!ddl.executeSql("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR(50), val INT)", s));
 
-    const auto initial = [&]() -> dbms::CatalogManager& { return g_engine.catalogService().get(db); };
+    dbms_test::CatalogGenerationView initial(g_engine, db);
     const auto* relation = initial().resolveRelation("t", {"public"});
     assert(relation != nullptr);
     const dbms::Oid relationOid = relation->oid;
@@ -106,7 +107,7 @@ static void test_statistics_persistence() {
     assert(opts.count("column_statistics:missing") == 0);
 
     g_engine.catalogService().evict(db);
-    const auto reloaded = [&]() -> dbms::CatalogManager& { return g_engine.catalogService().get(db); };
+    dbms_test::CatalogGenerationView reloaded(g_engine, db);
     attribute = reloaded().findAttribute(relationOid, "name");
     assert(attribute != nullptr && attribute->attstattarget == -1);
     attribute = reloaded().findAttribute(relationOid, "val");
