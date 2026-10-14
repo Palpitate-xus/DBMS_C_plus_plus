@@ -656,7 +656,8 @@ bool applyStartupParameters(const PgStartupMessage& startup,
 
 std::map<std::string, std::string> mutableProtocolParameterStatuses(
         const Session& session,
-        const std::string* previouslyReportedSuperuser = nullptr) {
+        const std::string* previouslyReportedSuperuser = nullptr,
+        const std::string* unchangedRoleFallback = nullptr) {
     const std::string effectiveRole = session.currentRole.empty()
                                           ? session.username
                                           : session.currentRole;
@@ -668,8 +669,25 @@ std::map<std::string, std::string> mutableProtocolParameterStatuses(
     if (previouslyReportedSuperuser) {
         superuser = *previouslyReportedSuperuser;
     } else {
-        const auto account = authCatalog().getAuthIdByName(effectiveRole);
-        superuser = account && account->rolsuper ? "on" : "off";
+        try {
+            // Startup already bootstrapped the cluster catalog. A status
+            // observation must not recreate its directory during a restore
+            // rename gap, and must own its generation across peer eviction.
+            const auto generation=g_engine.catalogService().acquire("info");
+            const auto account = generation->getAuthIdByName(effectiveRole);
+            superuser = account && account->rolsuper ? "on" : "off";
+        } catch(const DbError& error) {
+            // This is a wire observation, never an authorization decision.
+            // A physical publication can temporarily evict the catalog while
+            // owning its name. Only the same role may retain its last report;
+            // other session GUCs must still be sent, and the next readable
+            // publication is checked normally. Do not hide real I/O errors.
+            const bool publicationConflict=error.sqlState()=="55P03" ||
+                (error.sqlState()=="3D000" &&
+                 !g_engine.catalogReadOwnership("info").mayReadCurrentFiles);
+            if(!publicationConflict || !unchangedRoleFallback)throw;
+            superuser=*unchangedRoleFallback;
+        }
     }
     return {
         {"application_name", session.applicationName},
@@ -5198,22 +5216,35 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         unregisterProcess(pid);
         return;
     }
+    const std::string startupSuperuser=account->rolsuper?"on":"off";
     auto reportedParameterStatuses =
-        mutableProtocolParameterStatuses(session);
+        mutableProtocolParameterStatuses(session,&startupSuperuser);
     std::string reportedEffectiveRole = session.currentRole.empty()
         ? session.username : session.currentRole;
     const auto sendChangedParameterStatuses = [&]() -> bool {
         const std::string effectiveRole = session.currentRole.empty()
             ? session.username : session.currentRole;
         const auto priorSuperuser = reportedParameterStatuses.find("is_superuser");
+        const std::string* sameRoleSuperuser=effectiveRole==reportedEffectiveRole &&
+            priorSuperuser!=reportedParameterStatuses.end()?&priorSuperuser->second:nullptr;
         const std::string* unchangedSuperuser =
             (g_engine.databaseTransactionOwnershipDeferred() ||
-             session.failedTransactionBlock) &&
-            effectiveRole == reportedEffectiveRole &&
-            priorSuperuser != reportedParameterStatuses.end()
-                ? &priorSuperuser->second : nullptr;
-        const auto current = mutableProtocolParameterStatuses(
-            session, unchangedSuperuser);
+             session.failedTransactionBlock)?sameRoleSuperuser:nullptr;
+        std::map<std::string,std::string> current;
+        try {
+            current=mutableProtocolParameterStatuses(session,unchangedSuperuser,sameRoleSuperuser);
+        } catch(const DbError& error) {
+            // A footer metadata failure must not escape the client thread and
+            // terminate the whole server or replace an already-sent primary
+            // SQL error. An unreportable changed identity closes this client;
+            // it must never inherit another role's cached status.
+            std::cerr<<"protocol ParameterStatus metadata unavailable (SQLSTATE "
+                     <<error.sqlState()<<")"<<std::endl;
+            return false;
+        } catch(const std::exception&) {
+            std::cerr<<"protocol ParameterStatus metadata unavailable"<<std::endl;
+            return false;
+        }
         for (const auto& parameter : current) {
             const auto previous = reportedParameterStatuses.find(
                 parameter.first);

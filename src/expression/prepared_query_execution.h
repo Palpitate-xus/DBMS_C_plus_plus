@@ -57,8 +57,9 @@ public:
                                                const std::string& type);
     bool aggregateColumnDemanded(const FunctionCallExpr* call) const;
     // Explicit planning phase, after whole-query binding and before any
-    // source/child is opened. Fold only structural constants in execution-
-    // owned copies; routines and query results are never planning datums.
+    // source/child is opened. Fold structural constants in execution-owned
+    // copies, including explicitly resolved pure builtin operations. User
+    // routines and query results are never obtained as planning datums.
     // Default prepareExpression() timing/behaviour is unchanged.
     void planExpressionConstants(Expr* expression);
     void planStatementConstants(const Stmt* statement);
