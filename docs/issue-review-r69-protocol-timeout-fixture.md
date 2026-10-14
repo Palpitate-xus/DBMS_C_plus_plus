@@ -24,6 +24,29 @@ r67-current-full-protocol-observation.log；wrapper脚本同目录保留。
 receipt一致。TLS stub环境不能算作TLS runtime验收。
 
 修复后的完整原协议驱动已实际退出0，r69-timeout-cleanup-full-pg.log及逐项日志；
-所有977条断言执行完成，前后生产输入/binary/58份receipt一致。这是候选全驱动
+完整驱动执行完成，源码AST共977条断言（含helper/分支，不代表逐分支覆盖），
+前后生产输入/binary/58份receipt一致。这是候选全驱动
 验收，主分支仍需单独复验。所有本机证据位于`/tmp/dbms-review-r46.ifu6SWLp/`，
 临时路径不是发行产物。保留上述真实失败，不将其改写成历史全绿。
+
+## 首轮修正后的补充复查
+
+首轮候选只在最后一次role读取前RESET：5177b3b4/Root a3b3b4b9。候选完整通过，
+但Root完整重验更早在application_name扩展协议检查收到57014，说明只清理456ms
+不足。原记录root-r69-full-pg-logs/postgres_protocol_test.log保留。启动options
+的321ms此前也只用于参数验证，却继续约束无关后续帧检查；另一个连接的123ms
+同样需要在其跨连接隔离探针完成后清理。
+
+补充修正将321ms的会话在其配置断言之后显式SET statement_timeout=0；在
+123/456/peer0跨连接隔离断言全部完成后，将相应两个会话也显式SET为0，新增
+成功/Ready/有效值断言，不改产品配置、权限断言或socket/startup/shutdown超时。
+从R67原驱动对比，974原断言全部保留，新980条，移除/改写0条，见
+r69-all-probe-original-assertions.log。先前977是第一轮的真实数量，不能改写。
+
+Root并行负载下独立statement_timeout驱动也曾在锁释放后的读取收到57014，
+root-r69-cancellation-protocol-logs/保留；批次随之停止，CLI并未运行，不记作两项
+通过。其原断言及真实超时阈值均不修改。补充验收按完整PG、真实取消协议、CLI
+串行运行，避免并发重编/重回归引入额外时延。补充候选三个完整原驱动实际
+全部0，r69-all-probes-serial.log及逐项日志，前后生产输入/binary及58份receipt
+一致。后续还需主分支同样串行验收，不将此前Root失败改为通过，也不宣称
+所有负载下的产品时序问题已消失。

@@ -1473,6 +1473,14 @@ def main():
             startup_settings_sock, "SHOW lc_monetary")) == [[b"en_US.utf8"]]
         assert setting_value(settings, "lc_monetary") == b"en_US.utf8"
 
+        # The startup-options probe above owns its short deadline. Later
+        # ParameterStatus framing checks do not impose that latency budget.
+        clear_startup_timeout = simple_query(startup_settings_sock, "SET statement_timeout = 0")
+        assert any(kind == b"C" for kind, _ in clear_startup_timeout), clear_startup_timeout
+        assert clear_startup_timeout[-1] == (b"Z", b"I"), clear_startup_timeout
+        assert setting_value(simple_query(startup_settings_sock, "SELECT name, setting, unit FROM pg_settings"),
+                             "statement_timeout") == b"0"
+
         changed_name = simple_query(
             startup_settings_sock,
             "SET application_name = 'simple-client'")
@@ -3593,6 +3601,14 @@ def main():
                              "statement_timeout") == b"456"
         assert setting_value(simple_query(observer_sock, "SELECT name, setting, unit FROM pg_settings"),
                              "statement_timeout") == b"0"
+        # Keep the 123/456/peer-0 isolation checks above, then contain their
+        # deadlines before unrelated planner/data/permission checks begin.
+        for timeout_probe_sock in (sock, role_sock):
+            clear_timeout = simple_query(timeout_probe_sock, "SET statement_timeout = 0")
+            assert any(kind == b"C" for kind, _ in clear_timeout), clear_timeout
+            assert clear_timeout[-1] == (b"Z", b"I"), clear_timeout
+            assert setting_value(simple_query(timeout_probe_sock, "SELECT name, setting, unit FROM pg_settings"),
+                                 "statement_timeout") == b"0"
         assert any(kind == b"E" for kind, _ in simple_query(
             role_sock, "SET GLOBAL audit_level = 2"))
         assert any(kind == b"E" for kind, _ in simple_query(
@@ -3622,15 +3638,6 @@ def main():
         sock.sendall(typed(b"X"))
         sock.close()
 
-        # The short statement_timeout above probes session-setting isolation,
-        # not a latency requirement for these later data/permission checks.
-        # Restore this connection's original default after that probe; keep
-        # all its 456/peer-0 assertions and the data assertions below intact.
-        reset_timeout = simple_query(role_sock, "RESET statement_timeout")
-        assert any(kind == b"C" for kind, _ in reset_timeout), reset_timeout
-        assert reset_timeout[-1] == (b"Z", b"I"), reset_timeout
-        assert setting_value(simple_query(role_sock, "SELECT name, setting, unit FROM pg_settings"),
-                             "statement_timeout") == b"0"
         role_rows = data_row_values(simple_query(role_sock, "SELECT id FROM t"))
         assert role_rows == [[b"1"], [b"3"], [b"20"]], role_rows
         default_role_rows = data_row_values(simple_query(
