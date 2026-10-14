@@ -3117,8 +3117,7 @@ static bool handleRollbackTransaction(const string& sql, Session& s) {
     }
     auto res = g_engine.rollbackTransaction();
     if (res != DBStatus::OK) {
-        cout << "Rollback failed" << endl;
-        return true;
+        throw dbms::DbError(dbms::sqlstateForDBStatus(res), "Rollback failed");
     }
     s.searchPathTransaction.finish(s.searchPath,false);
     if (hadTransaction) {

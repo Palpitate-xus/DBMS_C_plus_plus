@@ -69,13 +69,13 @@
 | R48 | 故障注入回归的 pending rollback 合约 | 已修正夹具，待主分支集成 | 四个原完整驱动失败；加强后的四驱动在主分支五轮20次全0，候选六完整native全0，未改产品，见[验证](issue-review-r48-pending-rollback-fixtures.md) |
 | R49 | INSERT SELECT 物化视图 source lowering | 已修复，待主分支集成 | 原完整native错误0A000/原41协议22失败→PG/候选41全0；parser24、十完整native/九完整协议全0，见[验证](issue-review-r49-materialized-insert-sources.md) |
 | R50 | BIT/VARBIT 的协议及目录长度描述符 | 已修复，待主分支集成 | 原新60全部失败→PG/候选全0；原完整172、42native及七完整native/八完整协议全0，保留未通过邻居及全部known-gap断言，见[验证](issue-review-r50-bit-type-modifiers.md) |
-| R51 | recovery graph 邻居的 DROP DATABASE 观察 | 独立复验通过，历史原因未定 | 原驱动一次失败保留；R47固定生产代独立诊断及5+20次新隔离cwd全0，未改原断言，待主分支组合复验 |
+| R51 | recovery graph 邻居的 DROP DATABASE 观察 | 用户暂缓，未修复 | 原失败与早期通过保留；新固定诊断第13次复现状态25(DATABASE_IN_USE)，缓存/目录读锁竞争仍未修正；按用户要求跳过，不改原断言或宣称清零 |
 | R52 | 原生测试终态输出换行 | 已修正夹具，待主分支集成 | 使用真实换行分隔测试输出与PASSED marker；完整原驱动重新编译执行0，原完整日志及严格解析遗漏保留，见下方复验记录 |
 | R53 | INSERT SELECT 的INTERVAL字段修饰符上下文 | 已修复，待主分支集成 | 原27中1失败/新133中9失败→PG/候选全0，78纯binder控制及六完整native/七完整协议全0；标量与数组解析阶段分开，见[验证](issue-review-r53-insert-interval-context.md) |
 | R54 | 聚合表达式中未提供参数的错误优先级 | 已修复，待主分支集成 | 实际PG18.6新54全0，候选原13失败→0；原完整聚合scope及五完整协议全0，保留合法Extended/SQL PREPARE，见[验证](issue-review-r54-missing-parameter-priority.md) |
 | R55 | BYTEA 存储别名错误目录身份 | 已修复，待主分支集成 | 新28协议原17失败→PG/候选全0；原完整patterns及七完整协议/六完整native全0，7个目录/cold/显式历史修复控制全0，见[验证](issue-review-r55-bytea-catalog-identity.md) |
 | R56 | ARRAY_AGG 窗口函数的解析/绑定 | 待修复 | 原window_type完整协议中array_agg(v) OVER报42883；其他窗口实现不代表该聚合已覆盖，待参考和独立复现 |
-| R57 | 缺失索引后的协议连接中断 | 待复现 | 原missing_index完整驱动在INSERT时连接关闭，而非预期58030；需保留服务端日志并核对失败回滚owner，不能只调整超时或期望 |
+| R57 | pending rollback后的协议连接中断 | 已修复，待主分支集成 | 原进程SIGABRT→加强完整驱动及五次重复全0；五完整native/四完整协议全0，原默认协议role_rows失败保留，见[验证](issue-review-r57-pending-rollback-protocol.md) |
 | R58 | 两个协议驱动的启动连接失败 | 原样复验通过，历史原因未定 | 原errno103保留；两个原完整驱动在主分支按默认超时独立复跑0，不宣称已修复启动竞态，见[完整记录](issue-full-registered-f4087f5d.md) |
 | R59 | 新组合物化视图target协议超时 | 原样复验通过，历史原因未定 | 71个原target控制及source/事务控制主分支原样复跑0，原超时保留；来源55000缺陷归R49，见[完整记录](issue-full-registered-f4087f5d.md) |
 | O01 | owner健康重试及测试覆盖 | 已修复 | `c9a1e3c3`；原全部owner断言、新真实peer/dirty冲突及10完整native提交前/后通过；Root R14集成fresh58后两完整owner再次通过，见[验证](issue-review-o01-table-owner-health-retry.md) |

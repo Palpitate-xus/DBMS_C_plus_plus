@@ -5165,7 +5165,8 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             ? session.username : session.currentRole;
         const auto priorSuperuser = reportedParameterStatuses.find("is_superuser");
         const std::string* unchangedSuperuser =
-            g_engine.databaseTransactionOwnershipDeferred() &&
+            (g_engine.databaseTransactionOwnershipDeferred() ||
+             session.failedTransactionBlock) &&
             effectiveRole == reportedEffectiveRole &&
             priorSuperuser != reportedParameterStatuses.end()
                 ? &priorSuperuser->second : nullptr;
@@ -5423,10 +5424,13 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             pool.release(rented);
             rented.reset();
         }
-        if (result.error && wasInTransaction) {
+        if (result.error && (wasInTransaction || g_engine.inTransaction())) {
             // Only a transaction-ending command may return idle on error.
             // Ordinary DML may internally roll back the engine after a lock
             // failure, but the SQL connection must stay failed until ROLLBACK.
+            // An implicit statement whose physical rollback failed is also
+            // still a live failed block. Do not report it as healthy or read
+            // unrelated catalog state while its recovery owner is pending.
             const std::string keyword = firstSqlKeyword(sql);
             const bool transactionEnding =
                 (keyword == "commit" && !startsWithSqlPhrase(sql, "commit prepared")) ||

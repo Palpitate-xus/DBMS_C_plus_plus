@@ -14,10 +14,13 @@ def main():
     client = runner.load_protocol_client()
     server = runner.start_ours(client)
 
-    def expect(sql, expected_state=None):
+    def expect(sql, expected_state=None, ready=None):
+        messages = client.simple_query(server["sock"], sql)
         rows, state, message, _, _ = runner.decode_wire_result(
-            client.simple_query(server["sock"], sql))
+            messages)
         assert state == expected_state, (sql, rows, state, message)
+        if ready is not None:
+            assert messages[-1] == (b"Z", ready), (sql, messages[-1])
         return rows
 
     try:
@@ -38,6 +41,8 @@ def main():
         )
         for path, sql in paths:
             assert path.is_file(), path
+            healthy_image = path.read_bytes()
+            assert healthy_image, path
             if sql:
                 assert expect(sql) == [["1"]]
                 assert "IndexScan" in str(expect("EXPLAIN " + sql))
@@ -46,10 +51,21 @@ def main():
                 assert expect(sql, "XX001") == []
             if path.name == "missing_items_value.idx":
                 assert expect(bitmap, "XX001") == []
-            expect("INSERT INTO missing_items VALUES (2,9,10);", "58030")
+            expect("INSERT INTO missing_items VALUES (2,9,10);", "58030", b"E")
             assert not path.exists(), path
+            # Failed physical undo still owns the transaction. ErrorResponse
+            # and ReadyForQuery must survive without an unrelated catalog
+            # read, and no ordinary statement may silently discard the owner.
+            expect("SELECT 42;", "25P02", b"E")
+            expect("ROLLBACK;", "58030", b"E")
+            assert not path.exists(), path
+            path.write_bytes(healthy_image)
+            expect("ROLLBACK;", ready=b"I")
             assert expect("SELECT id,value FROM missing_items;") == [["1", "7"]]
             assert expect("SELECT 42;") == [["42"]]
+            # Preserve the original missing-file REINDEX test as a separate
+            # fault after the explicit healthy rollback has released its XID.
+            path.unlink()
             expect("REINDEX TABLE missing_items;")
             assert path.is_file(), path
             if sql:
