@@ -33912,9 +33912,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
             if (wf.name == "percent_rank" || wf.name == "cume_dist")
                 return string("double precision");
             if (wf.name == "ntile") return string("integer");
-            if (wf.name == "lag" || wf.name == "lead") {
+            if (wf.name == "lag" || wf.name == "lead" || wf.isAggregate) {
                 const auto declaration = g_engine.prepareBoundQuery(s.currentDB,
-                    "SELECT " + wf.name + "(" + wf.arg + ") OVER() FROM " + tnameOrig +
+                    "SELECT " + wf.name + "(" + wf.arg + ") OVER("+wf.overSql+") FROM " + tnameOrig +
                     (tableAlias.empty() ? string() : " AS " + tableAlias), {}, true);
                 if (declaration.output.size() != 1)
                     throw dbms::DbError("XX000", "offset window lost its output declaration");
@@ -35610,7 +35610,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 if (source == argument.query->sourceRanges.end() || source->columns.size() != tbl.len)
                     throw dbms::DbError("XX000", "window arguments lost their actual source descriptor");
                 argument.sourceOrdinal = source->ordinal; argument.descriptor = source->columns;
-                if(function.hasFrame) {
+                {
                     const auto field=[](const string& value){return to_string(value.size())+":"+value;};
                     const auto expressionKey=[&](const dbms::Expr* value) {
                         return dbms::ExprHelper::preparedSortExpressionIdentity(value,*argument.query,
@@ -36005,7 +36005,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     rows.push_back(std::move(row));
                 }
             };
-            if (condTokens.empty()) {
+            if (finiteWindowLimit && windowLimit==0) {
+                // Pure preparation above still runs; an unrequested source
+                // and its aggregate value arguments must remain unopened.
+            } else if (condTokens.empty()) {
                 appendWindowRows({}, false);
             } else {
                 condTokens.insert(condTokens.begin(), "(");
@@ -36098,103 +36101,6 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 return true;
             };
 
-            // Pre-compute partition boundaries for aggregate window functions
-            vector<map<size_t, string>> aggCache(windowFuncs.size());
-            vector<set<size_t>> aggNulls(windowFuncs.size());
-            for (size_t wi = 0; wi < windowFuncs.size(); ++wi) {
-                const auto& wf = windowFuncs[wi];
-                if (!wf.isAggregate) continue;
-                if(windowOwners[wi]!=wi) {
-                    aggCache[wi]=aggCache[windowOwners[wi]];
-                    aggNulls[wi]=aggNulls[windowOwners[wi]];
-                    continue;
-                }
-                // Group row indices by partition key
-                map<string, vector<size_t>> partRows;
-                for (size_t ri = 0; ri < rows.size(); ++ri) {
-                    string key;
-                    for (const auto& pcol : wf.partitionByCols) {
-                        key += partitionKey(rows[ri], pcol);
-                    }
-                    partRows[key].push_back(ri);
-                }
-                // Compute aggregate per partition
-                for (const auto& pr : partRows) {
-                    const auto& idxs = pr.second;
-                    // For RANGE/GROUPS frames, pre-sort by ORDER BY within partition
-                    vector<size_t> sortedIdxs = idxs;
-                    if (!wf.orderByCol.empty()) {
-                        stable_sort(sortedIdxs.begin(), sortedIdxs.end(), [&](size_t a, size_t b) {
-                            return compareWindowOrder(rows[a], rows[b], wf) < 0;
-                        });
-                    }
-                    const auto& effIdxs = sortedIdxs;
-                    // Map from original row index to position in effIdxs
-                    unordered_map<size_t, size_t> posInEff;
-                    for (size_t ei = 0; ei < effIdxs.size(); ++ei) posInEff[effIdxs[ei]] = ei;
-                    for (size_t ii = 0; ii < idxs.size(); ++ii) {
-                        size_t ri = idxs[ii];
-                        // Shared typed, directional half-open frame boundaries.
-                        const auto [fStart,fEnd]=legacyFrameBounds(wf,effIdxs,posInEff.at(ri));
-                        int64_t count = 0;
-                        optional<string> selected;
-                        dbms::Numeric exactSum(0);
-                        int64_t exactCnt = 0;
-                        for (size_t fj = fStart; fj < fEnd; ++fj) {
-                            size_t rj = effIdxs[fj];
-                            // Apply frame exclusion
-                            if (wf.frameExclusion == "current row") {
-                                if (rj == ri) continue;
-                            } else if (wf.frameExclusion == "group") {
-                                if (samePeer(rj,ri,wf)) continue;
-                            } else if (wf.frameExclusion == "ties") {
-                                if (rj!=ri && samePeer(rj,ri,wf)) continue;
-                            }
-                            if (wf.name == "count") {
-                                if (wf.arg == "*" || rows[rj].count(wf.arg)) count++;
-                                continue;
-                            }
-                            auto it = rows[rj].find(wf.arg);
-                            if (it == rows[rj].end()) continue;
-                            if (wf.name == "sum" || wf.name == "avg") {
-                                // This legacy receiver renders SQL NULL as
-                                // "NULL"; it is not a numeric input datum.
-                                if (it->second == "NULL") continue;
-                                // The exact NUMERIC result may exceed int64.
-                                // Do not also accumulate a signed fallback or
-                                // hide an arithmetic failure as a partial sum.
-                                exactSum = exactSum + dbms::Numeric(it->second);
-                                ++exactCnt;
-                                continue;
-                            }
-                            if (wf.name == "min" || wf.name == "max") {
-                                const auto& column = partitionColumn(wf.arg);
-                                const auto op = wf.name == "min" ? "<" : ">";
-                                const auto better = selected ? dbms::StorageEngine::compareValues(
-                                    column, it->second, false, *selected, false, op)
-                                    : dbms::StorageEngine::PredicateTruth::True;
-                                if (better == dbms::StorageEngine::PredicateTruth::Unknown)
-                                    throw dbms::DbError("0A000", "unsupported declared window aggregate comparison");
-                                if (better == dbms::StorageEngine::PredicateTruth::True) selected = it->second;
-                            }
-                        }
-                        string aggVal;
-                        if (wf.name == "sum") aggVal = exactCnt ? exactSum.toString() : "NULL";
-                        else if (wf.name == "count") aggVal = to_string(count);
-                        else if (wf.name == "avg") {
-                            if (exactCnt == 0) aggVal = "NULL";
-                            else aggVal = (exactSum / dbms::Numeric(exactCnt)).toString();
-                        }
-                        else if (wf.name == "max" || wf.name == "min") aggVal = selected.value_or("NULL");
-                        if (((wf.name == "sum" || wf.name == "avg") && exactCnt == 0) ||
-                            ((wf.name == "min" || wf.name == "max") && !selected)) aggNulls[wi].insert(ri);
-                        aggCache[wi][ri] = aggVal;
-                    }
-                }
-            }
-
-            struct WindowBucketState { optional<size_t> buckets; size_t emitted = 0; };
-            vector<map<size_t, WindowBucketState>> windowBucketStates(windowFuncs.size());
             const auto evaluateWindowArgument = [&](size_t wi, size_t value, size_t row) {
                 auto& argument=windowArguments.at(wi);
                 auto context=argument.execution->context();
@@ -36208,6 +36114,147 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 argument.execution->setSourceRow(context,argument.sourceOrdinal,cells);
                 return argument.execution->evaluate(argument.expressions.at(value),context);
             };
+
+            // Only an actual extra final sort/distinct needs all window
+            // outputs. A parent LIMIT still consumes OFFSET's prefix, but
+            // must not evaluate later aggregate/value arguments.
+            bool orderPreservesWindow=finalWindowKeys.empty();
+            if(finalWindowKeys.size()==1 && wf0.partitionByCols.empty()) {
+                const auto& key=finalWindowKeys.front();
+                string source=key.sourceColumn;
+                if(key.projection!=numeric_limits<size_t>::max() && exprTypes.at(key.projection)==0)
+                    source=sourceColumnName(selectExprs.at(key.projection).colName);
+                orderPreservesWindow=!wf0.orderByCol.empty() && source==wf0.orderByCol &&
+                    key.spec->ascending==wf0.orderByAsc && key.spec->collation.empty() &&
+                    key.spec->nullsFirst==(wf0.hasExplicitOrderNulls?wf0.orderByNullsFirst:!wf0.orderByAsc);
+            }
+            size_t demandedWindowRows=rows.size();
+            if(finiteWindowLimit && windowLimit==0)demandedWindowRows=0;
+            else if(finiteWindowLimit && orderPreservesWindow && !isDistinct &&
+                    windowOffset<rows.size() && windowLimit<rows.size()-windowOffset)
+                demandedWindowRows=windowOffset+windowLimit;
+
+            vector<map<size_t,string>> aggCache(windowFuncs.size());
+            vector<set<size_t>> aggNulls(windowFuncs.size());
+            map<string,vector<size_t>> aggregateWindows;
+            for(size_t wi=0;wi<windowFuncs.size();++wi)
+                if(windowFuncs[wi].isAggregate && windowOwners[wi]==wi)
+                    aggregateWindows[windowArguments[wi].frameIdentity].push_back(wi);
+            struct WindowAggregateState {
+                uint64_t count=0;
+                dbms::Numeric sum{0};
+                double floatingSum=0;
+                optional<dbms::ExprValue> selected;
+            };
+            for(const auto& entry:aggregateWindows) {
+                const auto& functions=entry.second;
+                const auto& window=windowFuncs[functions.front()];
+                map<string,vector<size_t>> partitions;
+                for(size_t ri=0;ri<rows.size();++ri) {
+                    string key;
+                    for(const auto& column:window.partitionByCols)key+=partitionKey(rows[ri],column);
+                    partitions[key].push_back(ri);
+                }
+                for(const auto& partition:partitions) {
+                    auto indices=partition.second;
+                    if(!window.orderByCol.empty())stable_sort(indices.begin(),indices.end(),[&](size_t a,size_t b) {
+                        return compareWindowOrder(rows[a],rows[b],window)<0;
+                    });
+                    vector<WindowAggregateState> states(functions.size());
+                    size_t previousStart=0,previousEnd=0;
+                    bool initialized=false;
+                    for(size_t position=0;position<indices.size();++position) {
+                        const size_t ri=indices[position];
+                        if(ri>=demandedWindowRows)continue;
+                        const auto [start,end]=legacyFrameBounds(window,indices,position);
+                        const bool exclusion=!window.frameExclusion.empty() && window.frameExclusion!="no others";
+                        const bool reuse=initialized && !exclusion && start==previousStart && end>=previousEnd;
+                        if(!reuse)states.assign(functions.size(),WindowAggregateState{});
+                        // A fixed frame head can append new inputs. Moving
+                        // heads/exclusions restart: volatile arguments must
+                        // be evaluated again, not memoized by source row.
+                        for(size_t member=reuse?previousEnd:start;member<end;++member) {
+                            const size_t source=indices[member];
+                            if(window.frameExclusion=="current row" && source==ri)continue;
+                            if(window.frameExclusion=="group" && samePeer(source,ri,window))continue;
+                            if(window.frameExclusion=="ties" && source!=ri && samePeer(source,ri,window))continue;
+                            // All aggregates of this actual window consume
+                            // one member before advancing to the next member.
+                            for(size_t index=0;index<functions.size();++index) {
+                                const size_t wi=functions[index];
+                                const auto& function=windowFuncs[wi];
+                                auto& state=states[index];
+                                if(function.name=="count" && function.arg=="*"){++state.count;continue;}
+                                const auto value=evaluateWindowArgument(wi,0,source);
+                                if(value.isNull)continue;
+                                if(function.name=="count"){++state.count;continue;}
+                                if(function.name=="sum" || function.name=="avg") {
+                                    const auto output=dbms::ExprHelper::canonicalResultTypeName(windowArguments[wi].query->output.front().type);
+                                    if(output=="real" || output=="double precision") {
+                                        const double input=dbms::ExprHelper::canonicalResultTypeName(value.typeName)=="real"
+                                            ?static_cast<double>(static_cast<float>(value.asDouble())):value.asDouble();
+                                        double next=state.count==0 && function.name=="sum"?input:state.floatingSum+input;
+                                        if(output=="real" && function.name=="sum")next=static_cast<float>(next);
+                                        if(isinf(next) && isfinite(state.floatingSum) && isfinite(input))
+                                            throw dbms::DbError("22003","window aggregate floating-point overflow");
+                                        state.floatingSum=next;
+                                    } else state.sum=state.sum+dbms::Numeric(value.value);
+                                    ++state.count;
+                                } else {
+                                    auto column=sortColumn(value.typeName);
+                                    const auto* argument=windowArguments[wi].expressions.front();
+                                    if(const auto* bound=dynamic_cast<const dbms::ColumnRefExpr*>(argument);
+                                            bound && bound->binding && bound->binding->columnOrdinal<tbl.len)
+                                        column=tbl.cols[bound->binding->columnOrdinal];
+                                    if(!value.collation.empty())column.collation=value.collation;
+                                    const auto better=state.selected?dbms::StorageEngine::compareValues(column,
+                                        value.value,false,state.selected->value,false,function.name=="min"?"<":">")
+                                        :dbms::StorageEngine::PredicateTruth::True;
+                                    if(better==dbms::StorageEngine::PredicateTruth::Unknown)
+                                        throw dbms::DbError("0A000","unsupported declared window aggregate comparison");
+                                    if(better==dbms::StorageEngine::PredicateTruth::True)state.selected=value;
+                                }
+                            }
+                        }
+                        initialized=true;previousStart=start;previousEnd=end;
+                        for(size_t index=0;index<functions.size();++index) {
+                            const size_t wi=functions[index];
+                            const auto& function=windowFuncs[wi];const auto& state=states[index];
+                            if(state.count>static_cast<uint64_t>(numeric_limits<int64_t>::max()))
+                                throw dbms::DbError("22003","window aggregate count is out of range");
+                            string value;bool isNull=false;
+                            if(function.name=="count")value=to_string(state.count);
+                            else if(function.name=="sum" || function.name=="avg") {
+                                isNull=state.count==0;
+                                if(!isNull) {
+                                    const auto output=dbms::ExprHelper::canonicalResultTypeName(windowArguments[wi].query->output.front().type);
+                                    if(output=="real" || output=="double precision") {
+                                        const double number=function.name=="avg"?state.floatingSum/static_cast<double>(state.count):state.floatingSum;
+                                        ostringstream rendered;rendered<<setprecision(numeric_limits<double>::max_digits10)<<number;
+                                        dbms::LiteralExpr literal;literal.typeName=output;literal.value="'"+rendered.str()+"'";
+                                        dbms::ExprEvaluator converter;converter.setCurrentDB(queryDb);
+                                        value=converter.eval(&literal,dbms::RowContext{}).value;
+                                    } else value=function.name=="sum"?state.sum.toString():
+                                        (state.sum/dbms::Numeric(static_cast<int64_t>(state.count))).toString();
+                                }
+                            } else {
+                                isNull=!state.selected.has_value();
+                                if(!isNull)value=state.selected->value;
+                            }
+                            aggCache[wi][ri]=std::move(value);
+                            if(isNull)aggNulls[wi].insert(ri);
+                        }
+                    }
+                }
+            }
+            for(size_t wi=0;wi<windowFuncs.size();++wi)
+                if(windowFuncs[wi].isAggregate && windowOwners[wi]!=wi) {
+                    aggCache[wi]=aggCache[windowOwners[wi]];
+                    aggNulls[wi]=aggNulls[windowOwners[wi]];
+                }
+
+            struct WindowBucketState { optional<size_t> buckets; size_t emitted=0; };
+            vector<map<size_t,WindowBucketState>> windowBucketStates(windowFuncs.size());
             const auto frameValue = [&](size_t wi,size_t current,uint64_t number,bool fromEnd) {
                 const auto& window=windowFuncs[wi];
                 vector<size_t> indices;
@@ -36233,7 +36280,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 return dbms::ExprValue(windowArguments[wi].query->output.front().type,"",true);
             };
             // Compute window function values
-            for (size_t i = 0; i < rows.size(); ++i) {
+            for (size_t i = 0; i < demandedWindowRows; ++i) {
                 for (size_t wi = 0; wi < windowFuncs.size(); ++wi) {
                     if(windowOwners[wi]!=wi) {
                         rows[i].windowValues.at(wi)=rows[i].windowValues.at(windowOwners[wi]);
