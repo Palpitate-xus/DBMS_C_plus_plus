@@ -1,6 +1,6 @@
 # R74：两个owner回归夹具的初始化与目录代
 
-状态：夹具修正候选，等待完整原驱动验收；没有修改产品权限或owner策略。
+状态：夹具已修正并通过完整原驱动；R75的普通metadata错误边界独立修复，未修改权限策略。
 
 冻结全量中的table_owner_atomicity与table_owner_peer_retry在首次get(info)时
 失败于3D000。普通CatalogService不能创建不存在的数据库；夹具应通过现有明确
@@ -17,7 +17,8 @@ getter丢掉故障条件。沿用已有CatalogGenerationView，初始化和故�
 
 原O01修复与历史通过记录仍保留于[旧记录](issue-review-o01-table-owner-health-retry.md)。
 本次两个原驱动及目录错误/持久化/快照邻居仍需重新完整运行，不能把初始化修正
-当作整项已经通过。本机初次test编译缺少DbError直接include的日志也保留。
+当作整项已经通过。该复验现已完成，具体终态见下方R75记录；本机初次test编译
+缺少DbError直接include的日志也保留。
 
 ## R75：普通owner操作的目录错误边界
 

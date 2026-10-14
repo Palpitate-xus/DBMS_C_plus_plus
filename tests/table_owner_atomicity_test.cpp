@@ -1,16 +1,26 @@
 #include "catalog/CatalogService.h"
 #include "catalog/type_registry.h"
 #include "commands/TableManage.h"
+#include "common/DbError.h"
 #include "test_utils.h"
+#include "catalog_generation_test_view.h"
+#include "permissions.h"
 
 #include <cassert>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <iostream>
 #include <string>
 
 extern dbms::StorageEngine g_engine;
 
 namespace fs = std::filesystem;
+
+static std::string fileBytes(const fs::path& path) {
+    std::ifstream input(path,std::ios::binary);assert(input);
+    return {std::istreambuf_iterator<char>(input),std::istreambuf_iterator<char>()};
+}
 
 static dbms::Oid createRole(dbms::CatalogManager& catalog,
                             const std::string& name) {
@@ -37,7 +47,7 @@ int main() {
     const std::string db = testDbPath("table_owner_atomicity");
     fs::remove_all(db);
 
-    auto& auth = g_engine.catalogService().get("info");
+    auto& auth = authCatalog();
     const std::string oldOwnerName = "owner_atomicity_old";
     const std::string newOwnerName = "owner_atomicity_new";
     const dbms::Oid oldOwner = createRole(auth, oldOwnerName);
@@ -51,7 +61,8 @@ int main() {
     table.append(dbms::makeIntColumn("id", true, 2));
     assert(g_engine.createTable(db, table) == dbms::DBStatus::OK);
 
-    auto& catalog = g_engine.catalogService().get(db);
+    dbms_test::CatalogGenerationView currentCatalog(g_engine,db);
+    auto& catalog = currentCatalog();
     const dbms::Oid tenantNamespace =
         catalog.createNamespace("tenant", oldOwner);
     dbms::PgClassRow relation;
@@ -69,12 +80,14 @@ int main() {
     // A failed schema publication must not reach pg_class.
     assert(g_engine.getTableSchema(db, table.tablename).owner == oldOwnerName);
     const auto schemaTimestamp = fs::last_write_time(schemaPath);
+    std::cout<<"OWNER_ATOMICITY_STAGE schema-publication-fault"<<std::endl;
     fs::rename(schemaPath, savedSchemaPath);
     assert(fs::create_directory(schemaPath));
     fs::last_write_time(schemaPath, schemaTimestamp);
     assert(g_engine.alterTableOwner(db, table.tablename, newOwnerName) ==
            dbms::DBStatus::IO_ERROR);
-    assert(relationOwner(catalog, "tenant", "items") == oldOwner);
+    assert(g_engine.getLockManager().captureCheckpoint().tableCounts.empty());
+    assert(relationOwner(currentCatalog(), "tenant", "items") == oldOwner);
     fs::remove(schemaPath);
     fs::rename(savedSchemaPath, schemaPath);
     assert(g_engine.getTableSchema(db, table.tablename).owner == oldOwnerName);
@@ -85,18 +98,31 @@ int main() {
     const fs::path attributePath =
         fs::path(db) / "pg_catalog" / "pg_attribute.cat";
     const fs::path savedAttributePath = attributePath.string() + ".saved";
+    const auto originalBytes=fileBytes(schemaPath);
+    const auto faultGeneration=g_engine.catalogService().acquire(db);
+    std::cout<<"OWNER_ATOMICITY_STAGE attribute-target-fault"<<std::endl;
     fs::rename(attributePath, savedAttributePath);
     assert(fs::create_directory(attributePath));
     assert(g_engine.alterTableOwner(db, table.tablename, newOwnerName) ==
            dbms::DBStatus::IO_ERROR);
-    assert(g_engine.getTableSchema(db, table.tablename).owner == oldOwnerName);
-    assert(relationOwner(catalog, "tenant", "items") == oldOwner);
+    // The public schema getter must reject the intentionally invalid catalog.
+    assert(g_engine.getLockManager().captureCheckpoint().tableCounts.empty());
+    // Compare the actual schema bytes and the retained current model while
+    // the fault is installed, then check public metadata after restoration.
+    assert(fileBytes(schemaPath)==originalBytes);
+    assert(relationOwner(*faultGeneration, "tenant", "items") == oldOwner);
+    std::string catalogError;
+    try{(void)g_engine.getTableSchema(db,table.tablename);}
+    catch(const dbms::DbError& error){catalogError=error.sqlState();}
+    assert(catalogError=="58030");
     fs::remove(attributePath);
     fs::rename(savedAttributePath, attributePath);
-    assert(catalog.persistAll());
+    std::cout<<"OWNER_ATOMICITY_STAGE restored-attribute"<<std::endl;
+    assert(currentCatalog().persistAll());
+    assert(g_engine.getTableSchema(db, table.tablename).owner == oldOwnerName);
 
     g_engine.catalogService().evict(db);
-    auto& failedReload = g_engine.catalogService().get(db);
+    auto& failedReload = currentCatalog();
     assert(relationOwner(failedReload, "tenant", "items") == oldOwner);
     dbms::StorageEngine schemaReload;
     assert(schemaReload.getTableSchema(db, table.tablename).owner ==
@@ -110,10 +136,10 @@ int main() {
     }
     assert(retryStatus == dbms::DBStatus::OK);
     assert(g_engine.getTableSchema(db, table.tablename).owner == newOwnerName);
-    assert(relationOwner(failedReload, "tenant", "items") == newOwner);
+    assert(relationOwner(currentCatalog(), "tenant", "items") == newOwner);
 
     g_engine.catalogService().evict(db);
-    auto& successReload = g_engine.catalogService().get(db);
+    auto& successReload = currentCatalog();
     assert(relationOwner(successReload, "tenant", "items") == newOwner);
     dbms::StorageEngine finalSchemaReload;
     assert(finalSchemaReload.getTableSchema(db, table.tablename).owner ==
