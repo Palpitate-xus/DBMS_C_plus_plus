@@ -57,3 +57,19 @@ R64/R66等候选定向门禁通过，不会把本轮20项FAILED改写成PASSED�
 新组合必须实际构建并分别记录集成门禁；用户暂缓的R65不在集成范围。
 原273项功能总账仍含partial/unverified及15项原始用户暂缓内容。
 所有提交仅本地，未push，GitHub Actions继续禁用。
+
+## 终态后的逐项集成门禁
+
+冻结终态和只读fence通过后，R60/R61/R63/R64/R66分别以2ae05d2d、977e71e8、
+3ce5731b、ef9e460e/6a4f0e9e/c6717180、9e32343d逐项cherry-pick -x到master。
+R65只集成用户暂缓说明49b7b7e5，没有该模块产品代码。
+主分支自己的Main/TableManage/parser/query_binding真实标准O2重编并链接0，
+不拷贝私树对象；日志root-r60-r66-integration-build.log。
+
+主分支十五完整native（五个新产品门禁、table_list_atomicity及九个R64原完整
+夹具）全部0，root-r60-r66-native.log。十完整协议含窗口routine、DEFAULT、
+原window_type/array_aggregate、namespace原子性、BYTEA、missing_index、
+discard_all_pending、合法INSERT DEFAULT及domain DEFAULT，全部0，
+root-r60-r66-protocols.log及root-r60-r66-protocol-logs/。全部生产输入、binary
+和58份receipt在门禁前后核对一致。这是当前定向组合验收，不是1339入口重新全绿。
+这些本机集成日志也位于`/tmp/dbms-review-r46.ifu6SWLp/`。
