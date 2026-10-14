@@ -4909,6 +4909,8 @@ static bool handleCopy(const string& sql, Session& s) {
     return true;
 }
 
+static bool requiresParsedValueBinding(const dbms::Stmt* root);
+
 static dbms::Oid resolvePreparedParameterType(const string& typeSpec,
                                               const Session& s) {
     string typeName = trim(typeSpec);
@@ -5082,6 +5084,23 @@ static bool handlePrepare(const string& sql, Session& s) {
                 return true;
             }
             parameterOids.push_back(oid);
+        }
+        {
+            dbms::SQLParser parser;
+            const auto parsed=parser.parseForBinding(templateSql);
+            if(requiresParsedValueBinding(parsed.stmt.get())) {
+                vector<dbms::QueryBindingDatum> declarations;
+                for(size_t i=0;i<paramTypes.size();++i) {
+                    dbms::QueryBindingDatum parameter;
+                    parameter.identity="sql-prepare:"+to_string(i+1);parameter.position=i+1;
+                    parameter.type=paramTypes[i].empty()?"unknown":paramTypes[i];
+                    parameter.origin=dbms::ParameterOrigin::MetadataPlaceholder;
+                    declarations.push_back(std::move(parameter));
+                }
+                // PREPARE analyzes declarations but never plans constants or
+                // evaluates argument values before publishing the name.
+                (void)g_engine.prepareBoundQuery(s.currentDB,templateSql,declarations);
+            }
         }
         dbms::notePreparedTemporaryObjectAccess(templateSql, s);
         s.preparedStmts[stmtName] = templateSql;
@@ -5941,6 +5960,10 @@ static bool requiresParsedValueBinding(const dbms::Stmt* root) {
         if(value->preparedSubquery && statement(value->preparedSubquery.get()))return true;
         if(const auto* call=dynamic_cast<const dbms::FunctionCallExpr*>(value)) {
             if(call->hasOver)return true;
+            dbms::CatalogManager::QualifiedName routine;
+            if(dbms::CatalogManager::parseQualifiedName(call->funcName,routine,true) &&
+               (routine.name=="abs" || routine.name=="upper" || routine.name=="lower" || routine.name=="length"))
+                return true; // Validate real overloads even if no row/branch will execute.
             for(const auto& argument:call->args)if(expression(argument.get()))return true;
             for(const auto& argument:call->namedArgs)if(expression(argument.value.get()))return true;
             return expression(call->filter.get());

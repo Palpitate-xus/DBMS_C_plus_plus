@@ -5119,7 +5119,112 @@ struct ResolvedScalarFunction {
     std::string schema;
     const QueryHostSetReturningProvider* provider=nullptr;
     StorageEngine::UDFInfo routine;
+    std::vector<std::string> inputs;
+    std::string output;
 };
+
+// Concrete overload declarations, shared by static resolution and runtime
+// coercion. UNKNOWN is an input category, not an already evaluated TEXT datum.
+// Keep this table scoped to the callbacks whose declarations it actually owns.
+struct ScalarSignature {
+    std::vector<std::string> inputs;
+    std::string output;
+};
+std::vector<ScalarSignature> scalarSignatures(const std::string& name) {
+    if(name=="abs") {
+        std::vector<ScalarSignature> result;
+        for(const auto* type:{"smallint","integer","bigint","numeric","real","double precision"})
+            result.push_back({{type},type});
+        return result;
+    }
+    if(name=="length")return {{{"text"},"integer"},{{"bpchar"},"integer"},
+        {{"bytea"},"integer"},{{"bytea","name"},"integer"},{{"bit"},"integer"},
+        {{"tsvector"},"integer"},{{"lseg"},"double precision"},{{"path"},"double precision"}};
+    if(name=="upper" || name=="lower")return {{{"text"},"text"},
+        {{"int4range"},"integer"},{{"int8range"},"bigint"},{{"numrange"},"numeric"},
+        {{"daterange"},"date"},{{"tsrange"},"timestamp"},{{"tstzrange"},"timestamptz"}};
+    return {};
+}
+
+bool hasUnboundScalarInput(const Expr* expression) {
+    if(!expression)return false;
+    if(const auto* column=dynamic_cast<const ColumnRefExpr*>(expression))return !column->binding;
+    // An explicit cast supplies the input declaration even to legacy callers
+    // without a query-owned range descriptor.
+    if(dynamic_cast<const CastExpr*>(expression))return false;
+    if(const auto* binary=dynamic_cast<const BinaryOpExpr*>(expression))
+        return binary->op!="::" && (hasUnboundScalarInput(binary->left.get()) || hasUnboundScalarInput(binary->right.get()));
+    if(const auto* unary=dynamic_cast<const UnaryOpExpr*>(expression))return hasUnboundScalarInput(unary->operand.get());
+    if(const auto* call=dynamic_cast<const FunctionCallExpr*>(expression)) {
+        if(!call->resolvedResultType.empty())return false;
+        for(const auto& argument:call->args)if(hasUnboundScalarInput(argument.get()))return true;
+    }
+    if(const auto* conditional=dynamic_cast<const CaseExpr*>(expression)) {
+        if(hasUnboundScalarInput(conditional->elseExpr.get()))return true;
+        for(const auto& arm:conditional->whenClauses)if(hasUnboundScalarInput(arm.second.get()))return true;
+    }
+    return false;
+}
+
+ResolvedScalarFunction resolveTypedScalar(const std::string& name,
+    const std::vector<std::string>& inputs,const FunctionCallExpr* call,
+    const std::vector<std::string>& path,StorageEngine* engine,const std::string& database) {
+    std::vector<ResolvedScalarFunction> candidates;
+    const auto append=[&](ResolvedScalarFunction candidate) {
+        if(candidate.inputs.size()!=inputs.size() || !call->namedArgs.empty())return;
+        for(size_t i=0;i<inputs.size();++i)
+            if(!common_type_detail::implicit(inputs[i],candidate.inputs[i]))return;
+        // Identical signatures in later namespaces are hidden, not ambiguous.
+        for(const auto& earlier:candidates)if(earlier.inputs==candidate.inputs)return;
+        candidates.push_back(std::move(candidate));
+    };
+    for(const auto& ns:path) {
+        if(ns=="pg_catalog") {
+            for(const auto& signature:scalarSignatures(name)) {
+                ResolvedScalarFunction candidate;candidate.found=true;candidate.name=name;candidate.schema=ns;
+                candidate.inputs=signature.inputs;candidate.output=signature.output;append(std::move(candidate));
+            }
+        } else if(!database.empty()) {
+            auto routine=engine->getUDF(database,name,ns);
+            if(routine.expression.empty())continue;
+            ResolvedScalarFunction candidate;candidate.found=candidate.stored=true;candidate.name=name;candidate.schema=ns;
+            for(const auto& input:routine.paramTypes)candidate.inputs.push_back(common_type_detail::canonical(input));
+            if(candidate.inputs.size()==1 && candidate.inputs.front()=="unknown" &&
+               routine.paramNames.size()==1 && routine.paramNames.front().empty())candidate.inputs.clear();
+            candidate.output=ExprHelper::canonicalResultTypeName(routine.returnType);candidate.routine=std::move(routine);
+            append(std::move(candidate));
+        }
+    }
+    const auto retainBest=[&](const auto& score) {
+        int best=-1;for(const auto& candidate:candidates)best=std::max(best,score(candidate));
+        candidates.erase(std::remove_if(candidates.begin(),candidates.end(),[&](const auto& candidate){return score(candidate)!=best;}),candidates.end());
+    };
+    retainBest([&](const auto& candidate){int count=0;for(size_t i=0;i<inputs.size();++i)if(inputs[i]==candidate.inputs[i])++count;return count;});
+    retainBest([&](const auto& candidate){int count=0;for(size_t i=0;i<inputs.size();++i)
+        if(inputs[i]!="unknown" && common_type_detail::category(inputs[i])==common_type_detail::category(candidate.inputs[i]) && common_type_detail::preferred(candidate.inputs[i]))++count;return count;});
+    for(size_t i=0;i<inputs.size() && candidates.size()>1;++i)if(inputs[i]=="unknown") {
+        std::set<char> categories;for(const auto& candidate:candidates)categories.insert(common_type_detail::category(candidate.inputs[i]));
+        const char category=categories.count('S')?'S':categories.size()==1?*categories.begin():0;
+        if(!category)throw DbError("42725","function "+name+" is not unique");
+        candidates.erase(std::remove_if(candidates.begin(),candidates.end(),[&](const auto& candidate){return common_type_detail::category(candidate.inputs[i])!=category;}),candidates.end());
+        const bool preferred=std::any_of(candidates.begin(),candidates.end(),[&](const auto& candidate){return common_type_detail::preferred(candidate.inputs[i]);});
+        if(preferred)candidates.erase(std::remove_if(candidates.begin(),candidates.end(),[&](const auto& candidate){return !common_type_detail::preferred(candidate.inputs[i]);}),candidates.end());
+    }
+    if(candidates.size()>1)throw DbError("42725","function "+name+" is not unique");
+    if(candidates.empty())return {};
+    // After signature selection, an invalid scalar OVER role precedes input
+    // conversion. Ordinary UNKNOWN literal conversion still belongs to
+    // analysis, including unused branches. Evaluate only a literal codec.
+    for(size_t i=0;i<inputs.size() && !call->hasOver;++i)if(inputs[i]=="unknown") {
+        const auto* literal=dynamic_cast<const LiteralExpr*>(call->args[i].get());
+        if(!literal || literal->preparedSubquery || !literal->typeName.empty() ||
+           !isQuotedString(literal->value))continue;
+        CastExpr conversion;conversion.typeName=candidates.front().inputs[i];conversion.implicit=true;
+        conversion.operand=std::make_unique<LiteralExpr>(*literal);
+        ExprEvaluator pure;(void)pure.eval(&conversion,RowContext{});
+    }
+    return candidates.front();
+}
 
 // A named callable keeps declaration metadata available after an AST call
 // has been rebound to its private key. Reading its type never invokes it.
@@ -5191,6 +5296,18 @@ ResolvedScalarFunction resolveScalarFunction(
     bool typeOfCandidate=false;
     engine = engine ? engine : &g_engine;
     const auto path=functionNamespaceSearchPath(*engine,database,schema);
+    if(!scalarSignatures(result.name).empty()) {
+        std::vector<std::string> inputs;
+        bool unbound=false;
+        for(const auto& argument:call->args) {
+            unbound=unbound || hasUnboundScalarInput(argument.get());
+            inputs.push_back(common_type_detail::canonical(ExprHelper::inferParsedInputType(argument.get(),{},database,engine)));
+        }
+        // Legacy row-context consumers do not yet own column declarations.
+        // Whole-query binding always supplies those declarations and takes
+        // the strict path. Runtime coercion uses the row's actual types.
+        if(!unbound)return resolveTypedScalar(result.name,inputs,call,path,engine,database);
+    }
     const QueryHostSetReturningProvider* provider=nullptr;
     for(const auto& candidateSchema:path) {
         if(candidateSchema=="pg_catalog") {
@@ -5343,6 +5460,7 @@ std::string ExprEvaluator::scalarFunctionResultType(const FunctionCallExpr* call
             (call ? call->funcName : std::string{}));
     if (resolved.stored)
         return ExprHelper::canonicalResultTypeName(resolved.routine.returnType);
+    if(!resolved.output.empty())return resolved.output;
     const auto callback = functions_.find(toLower(resolved.name));
     if (callback != functions_.end()) {
         if(callback->second.target<SqlNameFunction>())return "name";
@@ -5406,6 +5524,12 @@ void ExprEvaluator::bindScalarFunctions(Expr* expression, StorageEngine* engine)
             const auto resolved = resolveScalarFunction(*this, function, currentDB_, engine,functions_);
             if (!resolved.found && !function->setReturning)
                 throw DbError("42883", "function does not exist: " + function->funcName);
+            for(size_t i=0;i<resolved.inputs.size();++i) {
+                const auto input=common_type_detail::canonical(ExprHelper::inferParsedInputType(function->args[i].get(),{},currentDB_,engine));
+                if(input==resolved.inputs[i])continue;
+                auto cast=std::make_unique<CastExpr>();cast->typeName=resolved.inputs[i];cast->implicit=true;
+                cast->operand=std::move(function->args[i]);function->args[i]=std::move(cast);
+            }
             if (resolved.stored) {
                 if (function->hasOver || function->distinct || function->filter ||
                     !function->orderBy.empty())
@@ -5634,6 +5758,21 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
 
     std::vector<ExprValue> args;
     for (const auto& a : e->args) args.push_back(eval(a.get(), ctx));
+
+    if(callback!=functions_.end() && !callback->second.target<BoundScalarRoutine>() &&
+       !scalarSignatures(name).empty()) {
+        auto* owner=sqlValueEngine_?sqlValueEngine_:&g_engine;
+        std::vector<std::string> inputs;
+        for(const auto& argument:e->args)inputs.push_back(common_type_detail::canonical(
+            arrayExpressionType(argument.get(),ctx,currentDB_,this,true,owner)));
+        // Stored callbacks have private, occurrence-owned keys. Only the
+        // genuine catalog callback reaches this coercion boundary.
+        const auto resolved=resolveTypedScalar(name,inputs,e,{"pg_catalog"},owner,currentDB_);
+        if(!resolved.found)throw DbError("42883","function does not exist: "+name);
+        for(size_t i=0;i<args.size();++i)
+            if(common_type_detail::canonical(args[i].typeName)!=resolved.inputs[i])
+                args[i]=evalCast(nullptr,ctx,args[i],resolved.inputs[i]);
+    }
 
     if (name == "timezone" && args.size() == 2) {
         // Unknown SQL literals select the preferred timestamptz overload;
@@ -8593,11 +8732,24 @@ void ExprEvaluator::registerBuiltins() {
             "double precision", formatFloatingCastValue(value), false);
     };
     functions_["length"] = [](const std::vector<ExprValue>& a) {
+        const std::string type = a.empty()?std::string{}:toLower(a[0].typeName);
+        const bool geometric=type=="lseg" || type=="path";
         if (a.empty() || a[0].isNull ||
             (a.size() >= 2 && a[1].isNull)) {
-            return ExprValue("integer", "", true);
+            return ExprValue(geometric?"double precision":"integer", "", true);
         }
-        const std::string type = toLower(a[0].typeName);
+        if(geometric) {
+            GeometryValue value;
+            if(!parseGeometryValue(a[0].value,type,value))throw DbError("22P02","invalid input syntax for type "+type);
+            double result=0;
+            const auto& points=value.coordinates;
+            for(size_t i=2;i+1<points.size();i+=2)result+=std::hypot(points[i]-points[i-2],points[i+1]-points[i-1]);
+            if(type=="path" && !value.openPath && points.size()>2)
+                result+=std::hypot(points[0]-points[points.size()-2],points[1]-points.back());
+            return ExprValue("double precision",formatFloatingCastValue(result));
+        }
+        if(type=="tsvector")return ExprValue("integer",std::to_string(tsLexemesW(a[0].value).occ.size()));
+        if(isBitStringTypeName(type))return ExprValue("integer",std::to_string(a[0].value.size()));
         const bool canonicalBytea = isCanonicalByteaType(type);
         const bool byteLength = canonicalBytea || type == "binary" ||
                                 type == "varbinary";

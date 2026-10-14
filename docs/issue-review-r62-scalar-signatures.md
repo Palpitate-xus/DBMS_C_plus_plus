@@ -1,6 +1,8 @@
 # R62：标量函数必须先解析真实参数签名
 
-状态：已复现，尚未修复。R60修正窗口routine身份，不等于完成标量签名校验。
+状态：本次已复现的ABS、upper/lower、length签名已修复并通过定向门禁。
+其他回调及任意名称stored routine的完整通用签名覆盖仍未完成，R62广义范围保持partial。
+R60修正窗口routine身份，不等于完成全部标量签名校验。
 
 实际PostgreSQL18.6/180006对upper(1)、upper()、upper(text,text)、abs(text)、
 length(1)报42883；无FROM、空表WHERE false和LIMIT 0均如此。加OVER仍先报
@@ -22,3 +24,29 @@ scalar-over-signature-discovery.log是较早候选；
 r62-plain-signature-discovery.log和r62-plain-signature-expanded-discovery.log是
 对实际PG18.6及R60集成后主分支的独立只读对照，脚本保留。TEMP数据随连接清理，
 未修改共享参考表，未显示参考连接密码。这些临时证据路径不属于发行包。
+
+## 当前实现与验收
+
+真实resolver新增上述四个名字的声明表：arity、输入类型、结果类型、合法隐式转换、
+exact/preferred/UNKNOWN类别选择及search_path同签名遮蔽。同名用户routine参与真实
+参数匹配，不再由按名命中的catalog callback抢走upper(integer)。未知字面量只转换
+选定签名的输入codec，不执行表达式；实际PG验证普通abs('bad')为22P02，而带OVER
+的有效签名先报42809。错误类型/arity带OVER仍先报42883。
+
+纯binder负责无FROM、空来源、LIMIT 0和未执行分支；Main的真实AST前置检查及
+SQL PREPARE声明入口复用它，PREPARE不计划常量或执行参数。执行使用相同声明做
+隐式coercion，保留legacy带typed RowContext但尚无列binding的消费者。length的
+lseg/path/tsvector重载补齐结果值和声明，真实全文目录身份单独以R70提交。
+
+新增100项native控制及132项协议控制，实际PG18.6协议全0；主工作区最终十一完整
+native、十一完整协议全0，生产输入/binary/58份receipt首尾一致。相关日志：
+`r62-final-native.log`、`r62-final-protocols.log`及同名前缀独立gate/driver日志目录。
+真实标准O2三次构建分别保留`r62-root-build.log`、`r62-second-root-build.log`、
+`r62-third-root-build.log`；没有公共头改变或借用其他树对象。
+
+原126协议矩阵86失败；第一版126仍有6失败（几何结果OID、SQL PREPARE、全文
+目录），没有改写为通过。新增六项codec/OVER控制曾有三个错误参考预期，实际
+PG纠正后132全0，原`r62-expanded-reference.log`与纠正后的独立日志均保留。
+第一版98native已过不当作最终100覆盖；helper初次直接启动exit126不计产品失败。
+这里没有重新运行全部注册入口，也未补齐所有builtin/UDF重载、命名参数或
+自定义cast/domain功能，不能把四组签名修复升级为整个功能族完成。

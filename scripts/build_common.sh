@@ -73,6 +73,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/bytea_declared_identity_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/window_array_aggregate_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/window_routine_identity_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/scalar_signature_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/default_value_role_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/view_replacement_contract_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/matview_insert_source_protocol_e2e_test.py)

@@ -452,6 +452,7 @@ std::string inferAstResultType(
             if (left == "bigint" || right == "bigint") return "bigint";
             return "integer";
         }
+        if(name=="length" && (argType(0)=="lseg" || argType(0)=="path"))return "double precision";
         if (name == "ntile" || name == "width_bucket" || name == "length" ||
             name == "char_length" || name == "character_length" ||
             name == "bit_length" || name == "octet_length" || name == "strpos" ||

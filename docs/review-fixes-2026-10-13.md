@@ -80,7 +80,7 @@
 | R59 | 新组合物化视图target协议超时 | 原样复验通过，历史原因未定 | 71个原target控制及source/事务控制主分支原样复跑0，原超时保留；来源55000缺陷归R49，见[完整记录](issue-full-registered-f4087f5d.md) |
 | R60 | 窗口routine的真实身份/标量角色 | 已修复，已合主分支 | Root本地2ae05d2d；集成真实重编后十五完整native/十完整协议全0；PG73全0、原73中53失败→最终全0；59纯metadata、六完整native/十完整协议全0，第一轮8嵌套失败保留；原冻结完整结果独立保留，见[记录](issue-review-r60-window-routine-identity.md) |
 | R61 | 普通CREATE TABLE初始化与I/O状态 | 已修复，已合主分支 | Root本地977e71e8；集成真实重编后十五完整native/十完整协议全0；独立核心commit为7ad3ccca，原EIO误报/成功返回已修；首轮完整门禁因R66崩溃保留，修R66后十三完整native/六完整协议及五次完整七故障重复全0，见[记录](issue-review-r61-create-initialization-io.md) |
-| R62 | 标量函数的参数签名静态校验 | 已复现，待修复 | R60集成后普通错误签名仍返回值/空结果，错误OVER先报42809而实际PG为42883；包含无FROM/WHERE false/LIMIT 0，修复须纯匹配arity/声明类型/真实命名空间，见[记录](issue-review-r62-scalar-signatures.md) |
+| R62 | 标量函数的参数签名静态校验 | 已修四组，广义范围partial | ABS/upper/lower/length真实签名、同名用户匹配及SQL PREPARE入口；原126中86失败→最终132 PG/Root全0，100native及十一完整native/十一完整协议全0；其余回调/UDF通用签名仍待覆盖，见[记录](issue-review-r62-scalar-signatures.md) |
 | R63 | DEFAULT的普通值表达式角色 | 已修复，已合主分支 | Root本地3ce5731b；集成真实重编后十五完整native/十完整协议全0；原33中17失败→PG/候选全0，22native及六完整native/十完整协议全0，合法DEFAULT/域/事务/长表达式保留；第一轮legacy仍9失败保留，见[记录](issue-review-r63-default-expression-role.md) |
 | R64 | 九个旧测试跨DDL保留过期目录引用 | 已修正夹具，已合主分支 | Root本地ef9e460e/6a4f0e9e/c6717180；集成真实重编后十五完整native/十完整协议全0；首三项150e5440、扩展六项ae583d88；新增runtime/sequence/trigger后累计九个原完整主分支夹具全0，保留当前/旧代阳性及全部原SQL/数据/故障断言；新执行器组合另验，见[记录](issue-review-r64-catalog-generation-fixtures.md) |
 | R65 | 未执行mutation图的child provider生命周期 | 用户暂缓，未修复 | 用户要求跳过；原五模式exit134/134/134/134/139及未验收改动已另存，不合入产品。部分模式仍失败，不能宣称修复；见[暂缓范围](deferred-scope.md) |
