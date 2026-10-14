@@ -20047,30 +20047,107 @@ class PreparedWithDmlRuntime {
             return values;
         };
     }
-    struct DmlSourceNode {
+    // This materialized source executes its own graph. Children are the
+    // very scans/source nodes used below, not an EXPLAIN-only display tree.
+    struct DmlSourceNode : dbms::Operator {
         using Cell=pair<size_t,size_t>;
         vector<size_t> occurrences;
         vector<pair<string,Cell>> visible;
         vector<dbms::RowContext> rows;
         function<void(DmlSourceNode&)> load;
         function<bool(size_t,dbms::RowContext&)> read;
-        function<void()> close;
+        function<void()> closeReader;
+        function<void(const dbms::RowContext&)> reset;
+        vector<dbms::Operator*> planChildren;
+        string planName="Materialize";
+        map<string,string> planAttributes;
+        size_t position=0;
+        dbms::RowContext current;
         bool loaded=false,closed=false;
+        bool opened=false;
+        bool open() override {
+            OpenInstrument instrument(this);
+            clearError();opened=true;position=0;return true;
+        }
+        bool next(string& display) override {
+            if(!readAt(position,current))return false;
+            ++position;display.clear();return true;
+        }
+        void close() override {closeSource();}
+        bool supportsPreparedContexts() const override {return true;}
+        bool lastPreparedContext(dbms::RowContext& row) const override {
+            if(!position)return false;
+            row=current;return true;
+        }
+        string preparedPlanNodeName() const override {return planName;}
+        map<string,string> preparedPlanAttributes() const override {return planAttributes;}
+        vector<dbms::Operator*> preparedPlanChildren() const override {return planChildren;}
+        void rebind(const dbms::RowContext& outer) {
+            closeSource();
+            if(!reset)throw dbms::DbError("XX000","materialized source has no rebinder");
+            reset(outer);
+            rows.clear();current=dbms::RowContext{};position=0;
+            loaded=false;closed=false;opened=false;
+        }
         void closeSource() {
             if(closed)return;
             closed=true;
-            if(close)close();
+            if(closeReader)closeReader();
         }
         bool readAt(size_t index,dbms::RowContext& row) {
-            if(index<rows.size()){row=rows[index];return true;}
+            if(!opened)open();
+            NextInstrument instrument(this);
+            if(index<rows.size()){row=rows[index];instrument.emitted=true;return true;}
             if(loaded)return false;
-            if(!read){load(*this);loaded=true;return readAt(index,row);}
+            if(!read){
+                load(*this);loaded=true;
+                if(index>=rows.size())return false;
+                row=rows[index];instrument.emitted=true;return true;
+            }
             if(index!=rows.size())throw dbms::DbError("XX000","logical source read skipped its demand ordinal");
             if(!read(index,row)){loaded=true;closeSource();return false;}
-            rows.push_back(row);return true;
+            rows.push_back(row);instrument.emitted=true;return true;
         }
         void ensure(){dbms::RowContext ignored;while(readAt(rows.size(),ignored)) {}}
         ~DmlSourceNode(){try{closeSource();}catch(...) {}}
+    };
+    class DmlSourceContextsOp final : public dbms::Operator {
+    public:
+        DmlSourceContextsOp(shared_ptr<DmlSourceNode> node,bool rebindable)
+            : node_(std::move(node)),rebindable_(rebindable) {}
+        bool open() override {
+            OpenInstrument instrument(this);clearError();position_=0;row_=dbms::RowContext{};
+            if(closed_)throw dbms::DbError("XX000","prepared context source must rebind before reopening");
+            return true;
+        }
+        bool next(string& display) override {
+            NextInstrument instrument(this);
+            if(closed_)throw dbms::DbError("XX000","prepared context source has already been closed");
+            if(!node_->readAt(position_,row_))return false;
+            ++position_;display.clear();instrument.emitted=true;return true;
+        }
+        void close() override {
+            position_=0;row_=dbms::RowContext{};
+            if(closed_)return;
+            closed_=true;node_->closeSource();
+        }
+        bool supportsPreparedContexts() const override {return true;}
+        bool lastPreparedContext(dbms::RowContext& row) const override {
+            if(!position_)return false;
+            row=row_;return true;
+        }
+        string preparedPlanNodeName() const override {return "TypedSource";}
+        vector<dbms::Operator*> preparedPlanChildren() const override {return {node_.get()};}
+        bool supportsPreparedOuterRow() const override {return rebindable_;}
+        bool bindPreparedOuterRow(const dbms::RowContext& row) override {
+            if(!rebindable_)return false;
+            close();node_->rebind(row);closed_=false;return true;
+        }
+    private:
+        shared_ptr<DmlSourceNode> node_;
+        bool rebindable_=false,closed_=false;
+        size_t position_=0;
+        dbms::RowContext row_;
     };
     const dbms::PreparedQuery::SourceRange& sourceRange(const dbms::Stmt* owner,
         const dbms::FromItem* source,bool merged=false) const {
@@ -20091,6 +20168,14 @@ class PreparedWithDmlRuntime {
             execution->setQueryExecutor(reader(frames));
             execution->setChildCursorFactory(cursorFactory(frames));
         }
+        auto currentOuter=make_shared<dbms::RowContext>(outer);
+        auto executionOwner=make_shared<shared_ptr<dbms::PreparedQueryExecution>>(execution);
+        const auto resetExecution=[this,provider,frames,executionOwner] {
+            auto current=provider?provider():make_shared<dbms::PreparedQueryExecution>(query_,&g_engine,session_.currentDB);
+            if(!current)throw dbms::DbError("XX000","mutation source lost its rebound execution owner");
+            if(!provider){current->setQueryExecutor(reader(frames));current->setChildCursorFactory(cursorFactory(frames));}
+            *executionOwner=std::move(current);
+        };
         if(item->type!=dbms::FromItem::Type::Join) {
             const auto& range=sourceRange(owner,item);
             node->occurrences.push_back(range.ordinal);
@@ -20127,14 +20212,18 @@ class PreparedWithDmlRuntime {
                 scanSchema=g_engine.getTableSchema(session_.currentDB,table);
                 if(scanSchema.len!=range.columns.size())throw dbms::DbError("XX000","mutation source descriptor differs from physical relation");
                 scan=make_shared<dbms::TableScanOp>(&g_engine,session_.currentDB,table);
+                node->planChildren.push_back(scan.get());
             } else if(item->type!=dbms::FromItem::Type::Table || !range.cteStatement)
                 throw dbms::DbError("0A000","mutation source requires additional function-range lowering");
             auto scanOpened=make_shared<bool>(false);
-            node->close=[cursor,scan,scanOpened,viewRuntime] {
+            node->closeReader=[cursor,scan,scanOpened,viewRuntime] {
                 if(cursor)cursor->close();
                 if(scan && *scanOpened){*scanOpened=false;scan->close();}
             };
-            node->read=[this,execution,outer,frames,rangePointer=&range,cursor,scan,scanSchema,virtualRows,scanOpened]
+            node->reset=[currentOuter,resetExecution](const dbms::RowContext& row) {
+                *currentOuter=row;resetExecution();
+            };
+            node->read=[this,executionOwner,currentOuter,frames,rangePointer=&range,cursor,scan,scanSchema,virtualRows,scanOpened]
                 (size_t index,dbms::RowContext& row) {
                 vector<dbms::ExprValue> cells;
                 bool found=false;
@@ -20156,20 +20245,23 @@ class PreparedWithDmlRuntime {
                     }
                 }
                 if(!found)return false;
-                row=outer;execution->setSourceRow(row,rangePointer->ordinal,cells);
+                row=*currentOuter;(*executionOwner)->setSourceRow(row,rangePointer->ordinal,cells);
                 return true;
             };
             return node;
         }
         auto left=sourceNode(owner,item->left.get(),outer,frames,provider);
         auto right=sourceNode(owner,item->right.get(),outer,frames,provider);
-        node->close=[left,right] {
+        node->closeReader=[left,right] {
             std::exception_ptr failure;
             try{left->closeSource();}catch(...){failure=std::current_exception();}
             try{right->closeSource();}catch(...){if(!failure)failure=std::current_exception();}
             if(failure)std::rethrow_exception(failure);
         };
         const auto joinType=toLower(item->joinType);
+        node->planName="MaterializedNestedLoopJoin";
+        node->planAttributes["joinType"]=joinType;
+        node->planChildren={left.get(),right.get()};
         const bool leftJoin=joinType.find("left")!=string::npos || joinType.find("full")!=string::npos;
         const bool rightJoin=joinType.find("right")!=string::npos || joinType.find("full")!=string::npos;
         const dbms::PreparedQuery::SourceRange* merged=nullptr;
@@ -20235,11 +20327,17 @@ class PreparedWithDmlRuntime {
             vector<bool> rightMatched;
         };
         auto position=make_shared<JoinPosition>();
-        node->read=[execution,outer,left,right,leftJoin,rightJoin,merged,item,keys,comparisons,position]
+        node->reset=[currentOuter,resetExecution,executionOwner,left,right,item,position](const dbms::RowContext& row) {
+            *currentOuter=row;resetExecution();
+            if(item->joinCondition)(*executionOwner)->prepareExpression(item->joinCondition.get());
+            left->rebind(row);right->rebind(row);*position=JoinPosition{};
+        };
+        node->read=[executionOwner,currentOuter,left,right,leftJoin,rightJoin,merged,item,keys,comparisons,position]
             (size_t,dbms::RowContext& output) {
+            const auto& execution=*executionOwner;
             dbms::ExprEvaluator comparator;
             const auto combine=[&](const dbms::RowContext* a,const dbms::RowContext* b) {
-                auto row=outer;
+                auto row=*currentOuter;
                 const auto fill=[&](const shared_ptr<DmlSourceNode>& side,const dbms::RowContext* input) {
                     for(const auto ordinal:side->occurrences) {
                         const auto& range=execution->sourceRange(ordinal);
@@ -20355,9 +20453,7 @@ class PreparedWithDmlRuntime {
             source=make_unique<dbms::PreparedSourceRowsOp>(dbms::QueryRowDescriptor{},
                 [](size_t index,vector<dbms::ExprValue>& row){row.clear();return index==0;});
         } else {
-            auto holder=make_shared<shared_ptr<DmlSourceNode>>(
-                sourceNode(select,select->fromClause.get(),outer,frames,executionProvider));
-            dbms::PreparedSourceContextsOp::Rebinder rebind;
+            auto node=sourceNode(select,select->fromClause.get(),outer,frames,executionProvider);
             const function<bool(const dbms::FromItem*)> physicalSources=[&](const dbms::FromItem* item) {
                 if(!item)return false;
                 if(item->type==dbms::FromItem::Type::Join)return physicalSources(item->left.get()) && physicalSources(item->right.get());
@@ -20366,20 +20462,11 @@ class PreparedWithDmlRuntime {
                         return !range.relationName.empty() && !range.cteStatement && !range.viewQuery;
                 return false;
             };
-            if(select->ctes.empty() && physicalSources(select->fromClause.get())) {
-                // Rebuild the real provider and its lazy cursor/cache for
-                // each correlated invocation. Ancestor WITH definitions do
-                // not prevent a physical scan from receiving its new caller
-                // row. Local/derived/logical producer frames are NOT rebound
-                // by changing only the project state: they need a separate
-                // parameterized producer-lifetime contract.
-                rebind=[this,holder,select,frames,executionProvider](const dbms::RowContext& row) {
-                    *holder=sourceNode(select,select->fromClause.get(),row,frames,executionProvider);
-                };
-            }
-            source=make_unique<dbms::PreparedSourceContextsOp>(
-                [holder](size_t index,dbms::RowContext& row){return (*holder)->readAt(index,row);},
-                [holder]{(*holder)->closeSource();},std::move(rebind));
+            // Rebind the same executing nodes. Rebuilding the graph loses
+            // earlier correlated scan/join counters. Logical producer frames
+            // still require their own parameterized lifetime contract.
+            source=make_unique<DmlSourceContextsOp>(std::move(node),
+                select->ctes.empty() && physicalSources(select->fromClause.get()));
         }
         if(select->whereClause) {
             const auto type=dbms::ExprHelper::inferParsedResultType(select->whereClause.get(),{},session_.currentDB,&g_engine);

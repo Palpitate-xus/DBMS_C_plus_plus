@@ -31,7 +31,7 @@
 | R10 | 连接池跨数据库等待 | 已修复 | `cb934db9`；Root真实源新编译4控制通过；O2/ASan及重复验证见[验证](issue-review-r10-pool-database-capacity.md) |
 | R11 | 窗口SUM中间溢出 | 已修复 | `b8020acc`；原实现UBSan红证据、PG/Root12控制48行及六完整窗口native通过，见[验证](issue-review-r11-window-exact-accumulator.md) |
 | R12 | 测试注册 | 已修复 | `a6bb7ef7`；五个原驱动实际0；新增完整注册盘点及构建路由检查通过，见[验证](issue-review-r12-test-registration.md) |
-| R13 | 逻辑预览NULL及字段编码 | 已修复 | 原native64中61失败、最终wire53中50失败→Root77native/53wire全过；十二完整native/七完整协议通过，带版本逐列类型/NULL编码及虚拟列空串修复，见[验证](issue-review-r13-logical-tuple-encoding.md) |
+| R13 | 逻辑预览NULL及字段编码 | 已修复 | `123ac811`；原native64中61失败、最终wire53中50失败→Root77native/53wire全过；十二完整native/七完整协议通过，带版本逐列类型/NULL编码及虚拟列空串修复，见[验证](issue-review-r13-logical-tuple-encoding.md) |
 | R14 | publication读取错误传播 | 已修复 | 原成员读取五个错误实际失败；Root fresh58 与写入前保护、原逻辑解码及目录/owner九完整native全过，见[验证](issue-review-r14-publication-read-errors.md) |
 | R15 | 关停唤醒顺序 | 用户暂缓，未修复 | 此前单独要求跳过的模块，不重开；不据此跳过普通注册集成回归 |
 | R16 | catalog坏行及完整加载 | 已修复 | `0d85f6b9`/`a0d2efde`；691、cold正常API及原catalog_snapshot全通过，见[初始验证](issue-review-r16-catalog-complete-read.md)/[兼容修复](issue-review-r16-optional-catalog-directory.md) |
@@ -65,7 +65,7 @@
 | R44 | legacy窗口临时列名覆盖真实源列 | 已修复 | `80fe342e`；原39控制29失败→PG/Root全通过；十五完整native/二十完整协议通过，独立结果槽不修改源列身份，见[验证](issue-review-r44-window-internal-namespace.md) |
 | O01 | owner健康重试及测试覆盖 | 已修复 | `c9a1e3c3`；原全部owner断言、新真实peer/dirty冲突及10完整native提交前/后通过；Root R14集成fresh58后两完整owner再次通过，见[验证](issue-review-o01-table-owner-health-retry.md) |
 | O02 | EXISTS索引错误的访问计划/断言 | 已修正回归夹具 | 原完整协议exit 1→0，保留六严格XX001，新增精确t/f，完整EXISTS协议/19native通过；未改产品，见[验证](issue-review-o02-index-access-path-expectations.md) |
-| O03 | EXPLAIN JOIN图及过时断言 | 待修复 | |
+| O03 | EXPLAIN JOIN图及过时断言 | 已修复 | 实际执行的source/cache/join/scan图及相关重绑；最终完整60控制、十二native/十协议CLI全过，OFFSET阳性及42601原/PG对照保留，见[验证](issue-review-o03-explain-join-source-graph.md) |
 | O04 | HAVING BOOLEAN绑定 | 已修复 | `157e5d2e`；20 native、49 PG/候选/Root协议、五native/六协议邻居与完整PGprotocol通过；原超时及原错误均保留，见[验证](issue-review-o04-having-boolean-context.md) |
 | O05 | ORDER BY重复别名 | 待修复 | |
 | O06 | 物化视图刷新超时 | 当前完整复验通过 | 原驱动未改，默认15秒及原10秒配置两完整exit0；历史原因未定，见[验证](issue-review-o06-matview-refresh-revalidation.md) |
