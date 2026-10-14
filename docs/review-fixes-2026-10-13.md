@@ -70,9 +70,12 @@
 | R49 | INSERT SELECT 物化视图 source lowering | 已修复，待主分支集成 | 原完整native错误0A000/原41协议22失败→PG/候选41全0；parser24、十完整native/九完整协议全0，见[验证](issue-review-r49-materialized-insert-sources.md) |
 | R50 | BIT cast 的协议结果长度描述符 | 待修复 | 实际PG18.6扩展172全0，候选首个合法integer::bit(5)的RowDescription仍丢失typmod；完整失败输入保存在compat known-gap中 |
 | R51 | recovery graph 邻居的 DROP DATABASE 观察 | 独立复验通过，历史原因未定 | 原驱动一次失败保留；R47固定生产代独立诊断及5+20次新隔离cwd全0，未改原断言，待主分支组合复验 |
-| R52 | 原生测试终态输出换行 | 待修正 | prepared_srf_host_ownership_test打印字面反斜杠n，导致真实PASSED marker与上一行相连；原日志保留，不把解析遗漏伪装为未执行 |
+| R52 | 原生测试终态输出换行 | 已修正夹具，待主分支集成 | 使用真实换行分隔测试输出与PASSED marker；完整原驱动重新编译执行0，原完整日志及严格解析遗漏保留，见下方复验记录 |
 | R53 | INSERT SELECT 的INTERVAL字段修饰符上下文 | 待修复 | 本轮完整interval_column_modifier协议27控制中1失败：来源UNKNOWN文本'4'被先解读成秒，YEAR/DAY TO MINUTE列得到0而非4年/4分钟 |
 | R54 | 聚合表达式中未提供参数的错误优先级 | 待修复 | 原aggregate_expression_scope协议在sum($1)+1返回42883(text+integer)，原断言要求42P02；待独立实际参考核验 |
+| R55 | BYTEA LIKE 的显式pattern类型 | 待修复 | 原legacy_sql_pattern_consumers完整协议中，b LIKE '__'::bytea返回42883，预期匹配id 1/2/7；保留原SQL，待实际参考及绑定路径核验 |
+| R56 | ARRAY_AGG 窗口函数的解析/绑定 | 待修复 | 原window_type完整协议中array_agg(v) OVER报42883；其他窗口实现不代表该聚合已覆盖，待参考和独立复现 |
+| R57 | 缺失索引后的协议连接中断 | 待复现 | 原missing_index完整驱动在INSERT时连接关闭，而非预期58030；需保留服务端日志并核对失败回滚owner，不能只调整超时或期望 |
 | O01 | owner健康重试及测试覆盖 | 已修复 | `c9a1e3c3`；原全部owner断言、新真实peer/dirty冲突及10完整native提交前/后通过；Root R14集成fresh58后两完整owner再次通过，见[验证](issue-review-o01-table-owner-health-retry.md) |
 | O02 | EXISTS索引错误的访问计划/断言 | 已修正回归夹具 | 原完整协议exit 1→0，保留六严格XX001，新增精确t/f，完整EXISTS协议/19native通过；未改产品，见[验证](issue-review-o02-index-access-path-expectations.md) |
 | O03 | EXPLAIN JOIN图及过时断言 | 已修复 | 实际执行的source/cache/join/scan图及相关重绑；最终完整60控制、十二native/十协议CLI全过，OFFSET阳性及42601原/PG对照保留，见[验证](issue-review-o03-explain-join-source-graph.md) |
@@ -82,6 +85,17 @@
 | O07 | ALTER ARRAY历史超时 | 当前完整复验通过 | 原驱动未改，默认15秒及原10秒配置两完整exit0；历史原因未定，见[验证](issue-review-o07-alter-array-revalidation.md) |
 
 原273项功能总账独立维护；关闭这里的缺陷不自动宣称完整PostgreSQL功能兼容。
+
+## R52：测试终态行的真实分隔
+
+`prepared_srf_host_ownership_test` 的成功提示原来输出字面量反斜杠加 `n`，
+使随后构建脚本的 `[test-build] ... PASSED` 紧接在同一行。测试确已成功退出，
+但按行首严格盘点会漏记该项。修正方法仅为输出实际换行，不改变任何测试断言
+或脚本终态解析规则。候选完整驱动以当前全部58份生产对象 receipts 为门禁重新
+编译、链接、隔离执行，结果0；证据为
+`/tmp/dbms-review-r46.ifu6SWLp/r52-native.log`。
+主分支仍运行的完整回归保持原输入与日志不变，其严格汇总与独立标记核验须同时
+保留，不能用候选修正覆盖原始观测。
 
 ## 最新主分支集成记录
 

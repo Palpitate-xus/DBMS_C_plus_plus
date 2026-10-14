@@ -47,5 +47,5 @@ int main() {
     assert(g_engine.nextval(db,"host_effects")==1);
     assert(!g_engine.inTransaction());
     assert(g_engine.dropDatabase(db)==DBStatus::OK);cleanupTestDb(name);
-    std::cout<<"[PREPARED SRF HOST OWNERSHIP] pure identity, routine shadowing and argument priority passed\\n";
+    std::cout<<"[PREPARED SRF HOST OWNERSHIP] pure identity, routine shadowing and argument priority passed\n";
 }
