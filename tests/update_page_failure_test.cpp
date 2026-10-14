@@ -170,10 +170,18 @@ void test_after_trigger_row_read_failure_aborts_update() {
     const dbms::DBStatus status = g_engine.update(
         database, "t", {{"value", "changed"}}, {});
     g_engine.setTriggerExecutor({});
-    failure.restore();
-
     assert(calls == 1);
     assert(status == dbms::DBStatus::IO_ERROR);
+    // This failure happened after a real write. Corrupt undo must retain its
+    // actual recovery owner; the two prewrite-failure cases above still
+    // require immediate terminal abort without needing this retry.
+    assert(g_engine.inTransaction());
+    const auto pendingXid = g_engine.currentTxnId();
+    assert(pendingXid != 0);
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::IO_ERROR);
+    assert(g_engine.inTransaction() && g_engine.currentTxnId() == pendingXid);
+    failure.restore();
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
     assert(!g_engine.inTransaction());
     assertRowsUnchanged(database, 2);
 

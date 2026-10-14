@@ -2,10 +2,13 @@
 #include "access/BloomIndex.h"
 #include "catalog/type_registry.h"
 #include "commands/TableManage.h"
+#include "common/DbError.h"
 #include "test_utils.h"
 
 #include <cassert>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -43,11 +46,42 @@ void test_failed_insert_removes_earlier_bloom_entries() {
     // abortIndexUpdate after b1 already contains the new RID; a runtime
     // lookup must not reopen the deleted sidecar as an empty map.
     const auto secondPath = second->filePath();
+    assert(second->flush());
+    std::ifstream healthyInput(secondPath, std::ios::binary);
+    assert(healthyInput);
+    const std::vector<char> healthySecond{std::istreambuf_iterator<char>(healthyInput), {}};
+    healthyInput.close();
     assert(std::filesystem::remove(secondPath));
     assert(g_engine.insert(
                database, "t",
                {{"id", "1"}, {"b1", "first-key"}, {"b2", "second-key"}}) ==
            dbms::DBStatus::IO_ERROR);
+    // Missing b2 still prevents complete index undo. The active recovery
+    // owner must reject ordinary reads, not claim a terminal ABORT.
+    assert(g_engine.inTransaction());
+    const auto pendingXid = g_engine.currentTxnId();
+    assert(pendingXid != 0);
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::IO_ERROR);
+    assert(g_engine.inTransaction() && g_engine.currentTxnId() == pendingXid);
+    bool blocked = false;
+    try { (void)g_engine.query(database, "t", {}, {"id"}); }
+    catch (const dbms::DbError& error) { blocked = error.sqlState() == "58030"; }
+    assert(blocked);
+    // Keep the original exact healthy-index cleanup assertion even before
+    // repairing the unrelated missing sidecar.
+    assert(first->search("first-key").empty());
+
+    // This fixture owns the removed empty b2 image, not its now-retired
+    // cached pointer. Restore the exact bytes at the saved path and
+    // explicitly complete the existing undo graph before ordinary access.
+    std::ofstream repaired(secondPath, std::ios::binary | std::ios::trunc);
+    assert(repaired);
+    repaired.write(healthySecond.data(), static_cast<std::streamsize>(healthySecond.size()));
+    repaired.close();
+    assert(repaired);
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
+    assert(!g_engine.inTransaction());
+    assert(g_engine.getLockManager().captureCheckpoint().tableCounts.empty());
     assert(g_engine.query(database, "t", {}, {"id"}).empty());
     assert(first->search("first-key").empty());
 

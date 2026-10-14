@@ -85,13 +85,20 @@ void test_failed_savepoint_undo_aborts_outer_transaction() {
     assert(g_engine.insert(database, "t", {{"id", "1"}}) ==
            dbms::DBStatus::OK);
 
+    const auto originalXid = g_engine.currentTxnId();
     HeapPageFailure failure(database);
     failure.inject();
     const dbms::DBStatus status =
         g_engine.rollbackToSavepoint("keep_first");
-    failure.restore();
-
     assert(status == dbms::DBStatus::IO_ERROR);
+    // A corrupt heap prevents terminal undo. Preserve the real outer owner
+    // until the exact healthy page is restored and rollback is retried.
+    assert(g_engine.inTransaction() && g_engine.currentTxnId() == originalXid);
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::IO_ERROR);
+    assert(g_engine.inTransaction() && g_engine.currentTxnId() == originalXid);
+    failure.restore();
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
+
     assert(!g_engine.inTransaction());
     assert(g_engine.query(database, "t", {}, {"id"}).empty());
 

@@ -8,6 +8,9 @@
 
 #include <cassert>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <map>
 #include <iostream>
 #include <memory>
 
@@ -100,6 +103,43 @@ int main() {
         g_engine.getSecondaryIndex(database, "items", "value")->filePath();
     const auto compositePath =
         g_engine.getCompositeIndexTree(database, "items", "both")->filePath();
+    using Images = std::map<std::filesystem::path, std::vector<char>>;
+    const auto capture = [&]() {
+        assert(g_engine.getPKIndex(database, "items")->flush());
+        assert(g_engine.getSecondaryIndex(database, "items", "value")->flush());
+        assert(g_engine.getCompositeIndexTree(database, "items", "both")->flush());
+        Images images;
+        for (const auto& path : {primaryPath, secondaryPath, compositePath}) {
+            std::ifstream input(path, std::ios::binary);
+            assert(input);
+            images[path] = std::vector<char>{std::istreambuf_iterator<char>(input), {}};
+        }
+        return images;
+    };
+    const auto recover = [&](const Images& images) {
+        assert(g_engine.inTransaction());
+        const auto xid = g_engine.currentTxnId();
+        assert(xid != 0 && g_engine.rollbackTransaction() == dbms::DBStatus::IO_ERROR);
+        assert(g_engine.inTransaction() && g_engine.currentTxnId() == xid);
+        bool blocked = false;
+        try { (void)g_engine.query(database, "items", {}, {"id"}); }
+        catch (const dbms::DbError& error) { blocked = error.sqlState() == "58030"; }
+        assert(blocked);
+        // Restore only this fixture's exact files. The engine's real
+        // generation check retires stale cached owners during undo; no raw
+        // pointer to a retired index is used by the fixture.
+        for (const auto& image : images) {
+            std::ofstream output(image.first, std::ios::binary | std::ios::trunc);
+            assert(output);
+            output.write(image.second.data(), static_cast<std::streamsize>(image.second.size()));
+            output.close();
+            assert(output);
+        }
+        assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
+        assert(!g_engine.inTransaction());
+        assert(g_engine.getLockManager().captureCheckpoint().tableCounts.empty());
+    };
+    const auto healthyImages = capture();
     assert(std::filesystem::remove(primaryPath));
     const bool primaryRejected = rejectsIndexScan(database, "id", primaryKey);
     assert(rejectsBitmapScan(database, primaryKey));
@@ -122,8 +162,14 @@ int main() {
     assert(duplicate != dbms::DBStatus::OK && heap.ok && heap.rows.size() == 1);
     assert(g_engine.insert(database, "items", {{"id", "2"}, {"value", "8"}}) ==
            dbms::DBStatus::IO_ERROR);
-    assert(!g_engine.inTransaction());
-    assert(g_engine.getLockManager().captureCheckpoint().tableCounts.empty());
+    recover(healthyImages);
+    const auto afterRecovery = dbms::QueryPlanner::executePlanChecked(
+        std::make_unique<dbms::TableScanOp>(&g_engine, database, "items"));
+    assert(afterRecovery.ok && afterRecovery.rows == heap.rows);
+    // Preserve the original maintenance precondition: all three relations
+    // really are missing again, rather than already repaired by the fixture.
+    for (const auto& path : {primaryPath, secondaryPath, compositePath})
+        assert(std::filesystem::remove(path));
 
     // Explicit maintenance must still be able to rebuild missing relations.
     assert(g_engine.reindex(database, "items") == dbms::DBStatus::OK);
@@ -140,12 +186,17 @@ int main() {
     // Check each secondary family independently so a missing primary cannot
     // hide missing-secondary failures during DML.
     for (const auto& path : {secondaryPath, compositePath}) {
+        const auto beforeFailure = capture();
         assert(std::filesystem::remove(path));
         if (path == secondaryPath) assert(rejectsBitmapScan(database, primaryKey));
         assert(g_engine.insert(
                    database, "items", {{"id", "2"}, {"value", "8"}}) ==
                dbms::DBStatus::IO_ERROR);
         assert(!std::filesystem::exists(path));
+        if (g_engine.inTransaction()) {
+            recover(beforeFailure);
+            assert(std::filesystem::remove(path));
+        }
         const auto remaining = dbms::QueryPlanner::executePlanChecked(
             std::make_unique<dbms::TableScanOp>(&g_engine, database, "items"));
         assert(remaining.ok && remaining.rows.size() == 1);
