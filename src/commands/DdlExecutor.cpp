@@ -159,9 +159,11 @@ bool declaredColumnTypeMod(const ColumnDef& definition, int32_t& modifier) {
     const bool varying = type == "varchar" || type == "character varying";
     const bool fixed = type == "char" || type == "character" || type == "bpchar";
     const bool numeric = type == "numeric" || type == "decimal";
-    if (!varying && !fixed && !numeric) return false;
+    const bool fixedBit = type == "bit";
+    const bool varyingBit = type == "varbit" || type == "bit varying";
+    if (!varying && !fixed && !numeric && !fixedBit && !varyingBit) return false;
     if (definition.typeMods.empty()) {
-        modifier = fixed ? 5 : -1;
+        modifier = fixed ? 5 : fixedBit ? 1 : -1;
         return true;
     }
     const auto integer = [](const std::string& text, int32_t& value) {
@@ -178,6 +180,10 @@ bool declaredColumnTypeMod(const ColumnDef& definition, int32_t& modifier) {
         // PostgreSQL numeric typmod is a packed precision/11-bit signed
         // scale plus VARHDRSZ. The physical numeric width contains neither.
         modifier = static_cast<int32_t>(((first << 16) | (scale & 0x7ff)) + 4);
+    } else if (fixedBit || varyingBit) {
+        if (definition.typeMods.size() != 1 || first <= 0 || first > 8388608) return false;
+        // BIT typmods count bits, without the character VARHDRSZ offset.
+        modifier = first;
     } else {
         if (definition.typeMods.size() != 1 || first <= 0 || first > 65535) return false;
         modifier = first + 4;
@@ -1022,11 +1028,14 @@ static PgAttributeRow catalogAttributeForColumn(
     attribute.attndims = column.isArray ? 1 : 0;
     attribute.atttypmod = -1;
     if (column.dataType == "interval" || column.dataType == "numeric") attribute.atttypmod = column.typeMod;
-    if (!column.isArray && column.dataType == "bit") {
-        attribute.atttypmod = static_cast<int32_t>(column.dsize + 4);
-    } else if (!column.isArray && column.dataType == "bit varying" &&
+    std::string bitBaseType = column.dataType;
+    if (bitBaseType.size() >= 2 && bitBaseType.compare(bitBaseType.size() - 2, 2, "[]") == 0)
+        bitBaseType.resize(bitBaseType.size() - 2);
+    if (bitBaseType == "bit") {
+        attribute.atttypmod = static_cast<int32_t>(column.dsize);
+    } else if ((bitBaseType == "bit varying" || bitBaseType == "varbit") &&
                column.dsize != 8388608) {
-        attribute.atttypmod = static_cast<int32_t>(column.dsize + 4);
+        attribute.atttypmod = static_cast<int32_t>(column.dsize);
     } else if (
                (column.dataType == "character" || column.dataType == "char" ||
                 column.dataType == "bpchar") && column.dsize > 0) {
@@ -1039,12 +1048,17 @@ static PgAttributeRow catalogAttributeForColumn(
         (previous->attndims > 0) == column.isArray &&
         ((attribute.atttypid == 1043 && previous->atttypmod >= 4 &&
           static_cast<size_t>(previous->atttypmod - 4) == column.dsize) ||
-         (attribute.atttypid == 1700 && column.typeMod == -1))) {
+         (attribute.atttypid == 1700 && column.typeMod == -1) ||
+         ((attribute.atttypid == 1562 || attribute.atttypid == 1563) &&
+          previous->atttypmod >= 0 &&
+          static_cast<size_t>(previous->atttypmod) == column.dsize))) {
         // A catalog-backed VARCHAR bound can equal the physical capacity.
         // Preserve it across unrelated ALTER TABLE catalog synchronizations.
         // Preserve historical catalog-only numeric modifiers when an older
         // physical descriptor has no modifier. Current physical declaration
         // metadata is authoritative and must not inherit a stale typmod.
+        // Likewise retain explicitly bounded VARBIT at the storage capacity;
+        // its width alone cannot distinguish it from unbounded VARBIT.
         attribute.atttypmod = previous->atttypmod;
     }
     if (!column.domainName.empty()) attribute.atttypmod = -1;

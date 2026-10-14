@@ -1517,17 +1517,20 @@ int16_t protocolTypeSize(uint32_t typeOid, const Column& column) {
     }
 }
 
-int32_t protocolCharacterCastModifier(const Expr* expression) {
+int32_t protocolDeclaredCastModifier(const Expr* expression) {
     if (!expression) return -1;
     std::string typeName;
     std::vector<std::string> modifiers;
     if (const auto* cast = dynamic_cast<const CastExpr*>(expression)) {
+        if (cast->implicit) return -1;
         typeName = lowerProtocolText(cast->typeName);
         modifiers = cast->typeMods;
     } else if (const auto* binary =
                    dynamic_cast<const BinaryOpExpr*>(expression);
                binary && binary->op == "::" && binary->right) {
         typeName = lowerProtocolText(binary->right->toString());
+        while (typeName.size() >= 2 && typeName.compare(typeName.size() - 2, 2, "[]") == 0)
+            typeName.resize(typeName.size() - 2);
         const size_t open = typeName.find('(');
         if (open != std::string::npos && typeName.back() == ')') {
             modifiers.push_back(typeName.substr(open + 1,
@@ -1537,13 +1540,19 @@ int32_t protocolCharacterCastModifier(const Expr* expression) {
     } else {
         return -1;
     }
+    while (typeName.size() >= 2 && typeName.compare(typeName.size() - 2, 2, "[]") == 0)
+        typeName.resize(typeName.size() - 2);
+    if (typeName.compare(0, 11, "pg_catalog.") == 0)
+        typeName.erase(0, 11);
     const bool fixedCharacter = typeName == "char" ||
-                                typeName == "character";
+                                typeName == "character" || typeName == "bpchar";
     const bool varyingCharacter = typeName == "varchar" ||
                                   typeName == "character varying";
-    if (!fixedCharacter && !varyingCharacter) return -1;
+    const bool fixedBit = typeName == "bit";
+    const bool varyingBit = typeName == "varbit" || typeName == "bit varying";
+    if (!fixedCharacter && !varyingCharacter && !fixedBit && !varyingBit) return -1;
     if (modifiers.empty()) {
-        return fixedCharacter ? 5 : -1; // Only SQL CHAR defaults to length 1.
+        return fixedCharacter ? 5 : fixedBit ? 1 : -1;
     }
     if (modifiers.size() != 1 || modifiers.front().empty()) return -1;
     const std::string& lengthText = modifiers.front();
@@ -1551,12 +1560,18 @@ int32_t protocolCharacterCastModifier(const Expr* expression) {
                      [](unsigned char c) { return std::isdigit(c); })) return -1;
     try {
         const unsigned long length = std::stoul(lengthText);
+        const int32_t header = fixedBit || varyingBit ? 0 : 4;
         if (length > static_cast<unsigned long>(
-                std::numeric_limits<int32_t>::max() - 4)) return -1;
-        return static_cast<int32_t>(length + 4);
+                std::numeric_limits<int32_t>::max() - header)) return -1;
+        return static_cast<int32_t>(length + header);
     } catch (const std::exception&) {
         return -1;
     }
+}
+
+bool protocolHasLengthModifier(uint32_t oid) {
+    return oid == 1042 || oid == 1043 || oid == 1014 || oid == 1015 ||
+           oid == 1560 || oid == 1561 || oid == 1562 || oid == 1563;
 }
 
 std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& result,
@@ -1640,6 +1655,14 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
                             !unconstrainedVarbit
                         ? static_cast<int32_t>(column.dsize + 4)
                         : -1;
+                std::string bitBaseType = typeName;
+                if (column.isArray && bitBaseType.size() >= 2 &&
+                    bitBaseType.compare(bitBaseType.size() - 2, 2, "[]") == 0)
+                    bitBaseType.resize(bitBaseType.size() - 2);
+                if (bitBaseType == "bit" ||
+                    ((bitBaseType == "bit varying" || bitBaseType == "varbit") &&
+                     column.dsize != 8388608))
+                    description.typeModifier = static_cast<int32_t>(column.dsize);
             }
             description.tableOid = relationOid;
             description.attributeNumber = static_cast<uint16_t>(i + 1);
@@ -1665,18 +1688,19 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
         }
         descriptions.push_back(std::move(description));
     }
-    if (descriptions.size() == 1 &&
-        (descriptions[0].typeOid == 1042 ||
-         descriptions[0].typeOid == 1043) &&
-        descriptions[0].tableOid == INVALID_OID) {
+    if (!descriptions.empty()) {
         SQLParser parser;
         ParseResult parsed = parser.parse(sql);
         if (parsed.isValid()) {
             const auto* select = dynamic_cast<const SelectStmt*>(parsed.stmt.get());
-            if (select && select->selectList.size() == 1) {
-                const int32_t modifier = protocolCharacterCastModifier(
-                    select->selectList.front().expr.get());
-                if (modifier >= 0) descriptions[0].typeModifier = modifier;
+            if (select && select->selectList.size() == descriptions.size()) {
+                for (size_t i = 0; i < descriptions.size(); ++i) {
+                    if (!protocolHasLengthModifier(descriptions[i].typeOid) ||
+                        descriptions[i].tableOid != INVALID_OID) continue;
+                    const int32_t modifier = protocolDeclaredCastModifier(
+                        select->selectList[i].expr.get());
+                    if (modifier >= 0) descriptions[i].typeModifier = modifier;
+                }
             }
         }
     }
@@ -2718,7 +2742,7 @@ bool describePreparedResult(const std::string& sql, Session& session,
         directParameterOids.push_back(parameterOid);
         // The physical-descriptor adapter below uses SELECT * and cannot
         // retain a projection cast. Read typmods from the original live AST.
-        projectionTypeModifiers.push_back(protocolCharacterCastModifier(item.expr.get()));
+        projectionTypeModifiers.push_back(protocolDeclaredCastModifier(item.expr.get()));
     }
     if (shape.columns.empty()) return false;
     const std::string descriptionSql =
@@ -2729,7 +2753,7 @@ bool describePreparedResult(const std::string& sql, Session& session,
                                       descriptionSql, session);
     for (size_t i = 0; i < columns.size(); ++i) {
         columns[i].name = outputNames[i];
-        if ((columns[i].typeOid == 1042 || columns[i].typeOid == 1043) &&
+        if (protocolHasLengthModifier(columns[i].typeOid) &&
             projectionTypeModifiers[i] >= 0)
             columns[i].typeModifier = projectionTypeModifiers[i];
         if (directParameterOids[i] != 0) {

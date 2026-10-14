@@ -32,4 +32,8 @@
 generation 的冷 reader fail closed（55P03），不等于 PostgreSQL 完整目录 MVCC。
 已验证范围和中间失败见 [R46](../../docs/issue-review-r46-native-schema-ownership.md)。
 
+BIT/VARBIT目录修饰符按位数保存，不使用CHAR/VARCHAR的加4编码。显式最大容量
+VARBIT与无界声明不能只用物理宽度区分；CREATE/ALTER使用实际声明，其他目录
+同步保留已知声明。协议、数组及冷重载边界见[R50](../../docs/issue-review-r50-bit-type-modifiers.md)。
+
 后续重点是完整字段校验、事务化目录与存储发布、值快照或明确的对象生命周期、依赖/回滚和真实错误传播。类型、对象及权限的完整范围见[总清单](../../docs/postgresql-18-gap-audit.md)；兼容声明见[兼容性契约](../../docs/compatibility-contract.md)。

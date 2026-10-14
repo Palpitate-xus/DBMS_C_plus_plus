@@ -41,7 +41,7 @@ def main():
         assert headers == ["fixed", "varying"] and tag == "SELECT 2"
         assert type_oids == [1560, 1562], type_oids
         fields = client.row_description_fields(messages)
-        assert fields[0][4:] == (-1, 9, 0), fields[0]
+        assert fields[0][4:] == (-1, 5, 0), fields[0]
         assert fields[1][4:] == (-1, -1, 0), fields[1]
 
         _, decoded = execute(

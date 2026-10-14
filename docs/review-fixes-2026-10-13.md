@@ -68,7 +68,7 @@
 | R47 | BIT 与整数转换的真实 cast 关系 | 已修复，待主分支集成 | 174native/160协议及十完整native/九完整协议全0；扩展172的BIT输出typmod另列R50，未放宽断言，见[验证](issue-review-r47-bit-integer-casts.md) |
 | R48 | 故障注入回归的 pending rollback 合约 | 已修正夹具，待主分支集成 | 四个原完整驱动失败；加强后的四驱动在主分支五轮20次全0，候选六完整native全0，未改产品，见[验证](issue-review-r48-pending-rollback-fixtures.md) |
 | R49 | INSERT SELECT 物化视图 source lowering | 已修复，待主分支集成 | 原完整native错误0A000/原41协议22失败→PG/候选41全0；parser24、十完整native/九完整协议全0，见[验证](issue-review-r49-materialized-insert-sources.md) |
-| R50 | BIT cast 的协议结果长度描述符 | 待修复 | 实际PG18.6扩展172全0，候选首个合法integer::bit(5)的RowDescription仍丢失typmod；完整失败输入保存在compat known-gap中 |
+| R50 | BIT/VARBIT 的协议及目录长度描述符 | 已修复，待主分支集成 | 原新60全部失败→PG/候选全0；原完整172、42native及七完整native/八完整协议全0，保留未通过邻居及全部known-gap断言，见[验证](issue-review-r50-bit-type-modifiers.md) |
 | R51 | recovery graph 邻居的 DROP DATABASE 观察 | 独立复验通过，历史原因未定 | 原驱动一次失败保留；R47固定生产代独立诊断及5+20次新隔离cwd全0，未改原断言，待主分支组合复验 |
 | R52 | 原生测试终态输出换行 | 已修正夹具，待主分支集成 | 使用真实换行分隔测试输出与PASSED marker；完整原驱动重新编译执行0，原完整日志及严格解析遗漏保留，见下方复验记录 |
 | R53 | INSERT SELECT 的INTERVAL字段修饰符上下文 | 待修复 | 本轮完整interval_column_modifier协议27控制中1失败：来源UNKNOWN文本'4'被先解读成秒，YEAR/DAY TO MINUTE列得到0而非4年/4分钟 |
@@ -76,6 +76,8 @@
 | R55 | BYTEA LIKE 的显式pattern类型 | 待修复 | 原legacy_sql_pattern_consumers完整协议中，b LIKE '__'::bytea返回42883，预期匹配id 1/2/7；保留原SQL，待实际参考及绑定路径核验 |
 | R56 | ARRAY_AGG 窗口函数的解析/绑定 | 待修复 | 原window_type完整协议中array_agg(v) OVER报42883；其他窗口实现不代表该聚合已覆盖，待参考和独立复现 |
 | R57 | 缺失索引后的协议连接中断 | 待复现 | 原missing_index完整驱动在INSERT时连接关闭，而非预期58030；需保留服务端日志并核对失败回滚owner，不能只调整超时或期望 |
+| R58 | 两个协议驱动的启动连接失败 | 待复验/归因 | 原ALTER SEQUENCE quoted options和TRUNCATE owned sequence均在首次连接报errno103，尚未执行SQL；不能据此改SQL断言或将原失败记绿 |
+| R59 | 新组合物化视图target协议超时 | 待复验/归因 | 原完整target驱动第60个nextval哨兵后超时；原f408完整驱动只报来源55000错误码，需保留两代各自结果，不能合并称已通过 |
 | O01 | owner健康重试及测试覆盖 | 已修复 | `c9a1e3c3`；原全部owner断言、新真实peer/dirty冲突及10完整native提交前/后通过；Root R14集成fresh58后两完整owner再次通过，见[验证](issue-review-o01-table-owner-health-retry.md) |
 | O02 | EXISTS索引错误的访问计划/断言 | 已修正回归夹具 | 原完整协议exit 1→0，保留六严格XX001，新增精确t/f，完整EXISTS协议/19native通过；未改产品，见[验证](issue-review-o02-index-access-path-expectations.md) |
 | O03 | EXPLAIN JOIN图及过时断言 | 已修复 | 实际执行的source/cache/join/scan图及相关重绑；最终完整60控制、十二native/十协议CLI全过，OFFSET阳性及42601原/PG对照保留，见[验证](issue-review-o03-explain-join-source-graph.md) |
