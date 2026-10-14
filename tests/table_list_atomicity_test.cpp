@@ -204,7 +204,7 @@ int main() {
     dbms::index_file::failDirectorySyncAfterForTesting(1);
     std::string earlyError;
     assert(engine.createTable(database, makeTable("created"), &earlyError) ==
-           dbms::DBStatus::INVALID_VALUE);
+           dbms::DBStatus::IO_ERROR);
     assert(earlyError == "could not allocate durable physical relation identity");
     expectUnpublished();
     assert(engine.createTable(database, makeTable("created")) ==
@@ -219,7 +219,7 @@ int main() {
     armPublicationFault(tableList, PublicationFault::Rename);
     std::string publishError;
     assert(engine.createTable(database, makeTable("created"), &publishError) ==
-           dbms::DBStatus::INVALID_VALUE);
+           dbms::DBStatus::IO_ERROR);
     assert(publishError == "could not update table list");
     assert(publicationFault == PublicationFault::None && publicationHits == 1);
     assert(injectedFailures == 0 && durableRetries == 0);

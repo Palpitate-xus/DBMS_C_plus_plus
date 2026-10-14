@@ -16019,14 +16019,21 @@ static bool persistToastCounter(const std::filesystem::path& path,
 
 constexpr uint32_t PHYSICAL_RELATION_COUNTER_MAGIC = 0x31444947u;  // GID1
 
-static bool readPhysicalRelationCounter(const std::filesystem::path& path,
-                                        uint64_t& nextId) {
+static DBStatus readPhysicalRelationCounterChecked(const std::filesystem::path& path,
+                                                   uint64_t& nextId) {
     nextId = 1;
     std::error_code ec;
-    if (!std::filesystem::exists(path, ec)) return !ec;
+    if (!std::filesystem::exists(path, ec))
+        return ec ? DBStatus::IO_ERROR : DBStatus::OK;
+    if (!std::filesystem::is_regular_file(path, ec) || ec)
+        return DBStatus::IO_ERROR;
     std::ifstream input(path, std::ios::binary);
-    std::string bytes((std::istreambuf_iterator<char>(input)), {});
-    if (!input || bytes.size() != TOAST_COUNTER_SIZE) return false;
+    if (!input) return DBStatus::IO_ERROR;
+    std::string bytes;
+    try { bytes.assign(std::istreambuf_iterator<char>(input), {}); }
+    catch (const std::ios_base::failure&) { return DBStatus::IO_ERROR; }
+    if (input.bad()) return DBStatus::IO_ERROR;
+    if (bytes.size() != TOAST_COUNTER_SIZE) return DBStatus::CORRUPTED_DATA;
     uint32_t magic = 0, version = 0;
     uint64_t checksum = 0;
     std::memcpy(&magic, bytes.data(), sizeof(magic));
@@ -16034,7 +16041,13 @@ static bool readPhysicalRelationCounter(const std::filesystem::path& path,
     std::memcpy(&nextId, bytes.data() + sizeof(magic) + sizeof(version), sizeof(nextId));
     std::memcpy(&checksum, bytes.data() + TOAST_COUNTER_PAYLOAD_SIZE, sizeof(checksum));
     return magic == PHYSICAL_RELATION_COUNTER_MAGIC && version == 1 && nextId != 0 &&
-        checksum == toastCounterChecksum(bytes.data(), TOAST_COUNTER_PAYLOAD_SIZE);
+        checksum == toastCounterChecksum(bytes.data(), TOAST_COUNTER_PAYLOAD_SIZE)
+        ? DBStatus::OK : DBStatus::CORRUPTED_DATA;
+}
+
+static bool readPhysicalRelationCounter(const std::filesystem::path& path,
+                                        uint64_t& nextId) {
+    return readPhysicalRelationCounterChecked(path, nextId) == DBStatus::OK;
 }
 
 static bool persistPhysicalRelationCounter(const std::filesystem::path& path,
@@ -16048,7 +16061,7 @@ static bool persistPhysicalRelationCounter(const std::filesystem::path& path,
     return index_file::writeAtomically(path, bytes);
 }
 
-static bool allocatePhysicalRelationId(StorageEngine& engine,
+static DBStatus allocatePhysicalRelationId(StorageEngine& engine,
                                        const std::string& dbname,
                                        uint64_t& relationId) {
     // This file is outside database snapshots and is never rolled back.
@@ -16056,29 +16069,31 @@ static bool allocatePhysicalRelationId(StorageEngine& engine,
     // also prevent reuse when an older cluster counter accompanies a restore.
     const std::filesystem::path counter = ".physical_relation_ids";
     ToastCounterFileLock lock(counter);
-    if (!lock.ok()) return false;
+    if (!lock.ok()) return DBStatus::IO_ERROR;
     uint64_t nextId = 0;
-    if (!readPhysicalRelationCounter(counter, nextId)) return false;
+    const auto clusterStatus = readPhysicalRelationCounterChecked(counter, nextId);
+    if (clusterStatus != DBStatus::OK) return clusterStatus;
     for (const auto& database : engine.getDatabaseNames()) {
         uint64_t floor = 0;
-        if (!readPhysicalRelationCounter(
-                engine.dbPath(database) / ".physical_relation_id_highwater", floor))
-            return false;
+        const auto floorStatus = readPhysicalRelationCounterChecked(
+            engine.dbPath(database) / ".physical_relation_id_highwater", floor);
+        if (floorStatus != DBStatus::OK) return floorStatus;
         nextId = std::max(nextId, floor);
         for (const auto& tableName : engine.getTableNames(database)) {
             const auto table = engine.getTableSchema(database, tableName);
-            if (table.tablename != tableName ||
-                table.physicalRelationId == std::numeric_limits<uint64_t>::max()) return false;
+            if (table.tablename != tableName) return DBStatus::CORRUPTED_DATA;
+            if (table.physicalRelationId == std::numeric_limits<uint64_t>::max())
+                return DBStatus::INVALID_VALUE;
             nextId = std::max(nextId, table.physicalRelationId + 1);
         }
     }
-    if (nextId == std::numeric_limits<uint64_t>::max() ||
-        !persistPhysicalRelationCounter(counter, nextId + 1) ||
+    if (nextId == std::numeric_limits<uint64_t>::max()) return DBStatus::INVALID_VALUE;
+    if (!persistPhysicalRelationCounter(counter, nextId + 1) ||
         !persistPhysicalRelationCounter(
             engine.dbPath(dbname) / ".physical_relation_id_highwater", nextId + 1))
-        return false;
+        return DBStatus::IO_ERROR;
     relationId = nextId;
-    return true;
+    return DBStatus::OK;
 }
 
 static std::string compressToastPayload(const std::string& data, uint8_t& flags) {
@@ -17097,10 +17112,10 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
             invalidateCatalogTableList(dbname);
         }
     };
-    auto failCreate = [&](const std::string& message) {
+    auto failCreate = [&](const std::string& message, DBStatus status = DBStatus::IO_ERROR) {
         cleanupFailedCreate();
         if (error) *error = message;
-        return DBStatus::INVALID_VALUE;
+        return status;
     };
     bool createCompleted = false;
     std::unique_ptr<int, std::function<void(int*)>> cleanupGuard(
@@ -17128,8 +17143,9 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
     }
 
     {
-        if (!allocatePhysicalRelationId(*this, dbname, tblWithVersion.physicalRelationId))
-            return failCreate("could not allocate durable physical relation identity");
+        const auto identityStatus = allocatePhysicalRelationId(*this, dbname, tblWithVersion.physicalRelationId);
+        if (identityStatus != DBStatus::OK)
+            return failCreate("could not allocate durable physical relation identity", identityStatus);
         if (!tblWithVersion.isUnlogged) {
             WALManager* wal = getWAL(dbname);
             const auto payload = heap_wal_identity::event(
@@ -17144,7 +17160,10 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
         std::ofstream out(schemaPath(dbname, tblWithVersion.tablename), std::ios::binary);
         if (!out) return failCreate("could not create table schema");
         writeSchema(out, tblWithVersion);
-        if (!out) return failCreate("could not write table schema");
+        out.flush();
+        const bool schemaWritten = out.good();
+        out.close();
+        if (!schemaWritten || !out) return failCreate("could not write table schema");
         invalidateCatalogSchema(dbname, tblWithVersion.tablename);
     }
     {
@@ -17154,11 +17173,20 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
     }
 
     auto initializeHeap = [&](const std::filesystem::path& path, size_t rowSize) {
+        if (rowSize > std::numeric_limits<uint32_t>::max()) return DBStatus::INVALID_VALUE;
         auto pa = std::make_unique<PageAllocator>(path.string(), rowSize, pageSize,
                                                    tblWithVersion.formatVersion);
-        if (!pa->open()) return false;
+        const bool initialized = pa->open() && pa->flush();
+        // close() cannot report its flush error. Check while the initializer
+        // still owns the file, then close before the outer failure cleanup.
         pa->close();
-        return true;
+        return initialized ? DBStatus::OK : DBStatus::IO_ERROR;
+    };
+    const auto initializeIndex = [&](const std::filesystem::path& path) {
+        BPTree index(path.string());
+        const bool initialized = index.open() && index.flush();
+        index.close();
+        return initialized;
     };
     // Initialize page-based data file(s) via PageAllocator
     if (tblWithVersion.partitionType != TableSchema::PartitionType::None) {
@@ -17169,13 +17197,15 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
                 : partitionDataPath(
                       dbname, tblWithVersion.tablename, leaf.partition,
                       leaf.subPartition);
-            if (!initializeHeap(path, tblWithVersion.rowSize())) {
-                return failCreate("could not initialize table partition");
+            const auto heapStatus = initializeHeap(path, tblWithVersion.rowSize());
+            if (heapStatus != DBStatus::OK) {
+                return failCreate("could not initialize table partition", heapStatus);
             }
         }
     } else {
-        if (!initializeHeap(dataPath(dbname, tblWithVersion.tablename), tblWithVersion.rowSize())) {
-            return failCreate("could not initialize table heap");
+        const auto heapStatus = initializeHeap(dataPath(dbname, tblWithVersion.tablename), tblWithVersion.rowSize());
+        if (heapStatus != DBStatus::OK) {
+            return failCreate("could not initialize table heap", heapStatus);
         }
     }
     priorTableNames = getTableNames(dbname);
@@ -17199,14 +17229,18 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
         if (tbl.cols[i].isVariableLength) { hasVarLen = true; break; }
     }
     if (hasVarLen) {
-        auto toastPa = std::make_unique<PageAllocator>(
-            toastDataPath(dbname, tblWithVersion.tablename).string(),
-            /*rowSize=*/0, /*pageSize=*/8192, /*formatVersion=*/DATA_FILE_FORMAT_VERSION);
-        if (!toastPa->open()) return failCreate("could not initialize TOAST heap");
-        toastPa->close();
-        BPTree toastIdx(toastIndexPath(dbname, tblWithVersion.tablename).string());
-        if (!toastIdx.open()) return failCreate("could not initialize TOAST index");
-        toastIdx.close();
+        // TOAST has its own fixed page/format declaration, not the user's
+        // row format. Its owners must close before failed-CREATE cleanup.
+        bool toastInitialized = false;
+        {
+            PageAllocator toast(toastDataPath(dbname, tblWithVersion.tablename).string(),
+                /*rowSize=*/0, /*pageSize=*/8192, /*formatVersion=*/DATA_FILE_FORMAT_VERSION);
+            toastInitialized = toast.open() && toast.flush();
+            toast.close();
+        }
+        if (!toastInitialized) return failCreate("could not initialize TOAST heap");
+        if (!initializeIndex(toastIndexPath(dbname, tblWithVersion.tablename)))
+            return failCreate("could not initialize TOAST index");
         // Initialize the next-ID state without consuming ID 1 merely for
         // creating the relation.
         if (!persistToastCounter(toastMetaPath(dbname, tblWithVersion.tablename), 1))
@@ -17215,9 +17249,8 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
 
     // Create B+ tree index if table has primary key
     if (tbl.hasPrimaryKey()) {
-        BPTree idx(indexPath(dbname, tbl.tablename));
-        if (!idx.open()) return failCreate("could not initialize primary key index");
-        idx.close();
+        if (!initializeIndex(indexPath(dbname, tbl.tablename)))
+            return failCreate("could not initialize primary key index");
     }
     // Initialize auto-increment sequences
     for (size_t i = 0; i < tbl.len; ++i) {
@@ -17228,8 +17261,9 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
     // Auto-create secondary index for UNIQUE columns
     for (size_t i = 0; i < tbl.len; ++i) {
         if (tbl.cols[i].isUnique) {
-            if (createIndex(dbname, tbl.tablename, tbl.cols[i].dataName) != DBStatus::OK) {
-                return failCreate("could not initialize unique index");
+            const auto indexStatus = createIndex(dbname, tbl.tablename, tbl.cols[i].dataName);
+            if (indexStatus != DBStatus::OK) {
+                return failCreate("could not initialize unique index", indexStatus);
             }
         }
     }
