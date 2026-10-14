@@ -5310,16 +5310,19 @@ ResolvedScalarFunction resolveScalarFunction(
     engine = engine ? engine : &g_engine;
     const auto path=functionNamespaceSearchPath(*engine,database,schema);
     if(!scalarSignatures(result.name).empty()) {
-        std::vector<std::string> inputs;
-        bool unbound=false;
-        for(const auto& argument:call->args) {
-            unbound=unbound || hasUnboundScalarInput(argument.get());
-            inputs.push_back(common_type_detail::canonical(ExprHelper::inferParsedInputType(argument.get(),{},database,engine)));
-        }
         // Legacy row-context consumers do not yet own column declarations.
         // Whole-query binding always supplies those declarations and takes
         // the strict path. Runtime coercion uses the row's actual types.
-        if(!unbound)return resolveTypedScalar(result.name,inputs,call,path,engine,database);
+        // Check this before inferring even one argument: an unbound id-5
+        // must not become TEXT-minus-integer during structural fingerprinting.
+        const bool unbound=std::any_of(call->args.begin(),call->args.end(),
+            [](const auto& argument){return hasUnboundScalarInput(argument.get());});
+        if(!unbound) {
+            std::vector<std::string> inputs;
+            for(const auto& argument:call->args)
+                inputs.push_back(common_type_detail::canonical(ExprHelper::inferParsedInputType(argument.get(),{},database,engine)));
+            return resolveTypedScalar(result.name,inputs,call,path,engine,database);
+        }
     }
     const QueryHostSetReturningProvider* provider=nullptr;
     for(const auto& candidateSchema:path) {

@@ -50,3 +50,7 @@ PG纠正后132全0，原`r62-expanded-reference.log`与纠正后的独立日志�
 第一版98native已过不当作最终100覆盖；helper初次直接启动exit126不计产品失败。
 这里没有重新运行全部注册入口，也未补齐所有builtin/UDF重载、命名参数或
 自定义cast/domain功能，不能把四组签名修复升级为整个功能族完成。
+
+后续冻结b5def9ba全注册运行暴露legacy结构指纹中的复杂未绑定参数遗漏：
+保护顺序必须先于任何参数类型推断。该独立回归由[R80](issue-review-r80-unbound-scalar-inference.md)
+修正，17原生控制及原窗口44/七协议邻居验收，不改变本节原100/132历史数量。
