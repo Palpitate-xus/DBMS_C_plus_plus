@@ -5159,6 +5159,14 @@ std::vector<ScalarSignature> scalarSignatures(const std::string& name) {
     return {};
 }
 
+std::string scalarSignatureInputType(const std::string& type) {
+    const auto canonical=common_type_detail::canonical(type);
+    // Native factories keep their raw-byte storage codecs. They share
+    // BYTEA's overload identity, not its encoded textual datum format.
+    if(canonical=="binary" || canonical=="varbinary")return "bytea";
+    return canonical;
+}
+
 bool hasUnboundScalarInput(const Expr* expression) {
     if(!expression)return false;
     if(const auto* column=dynamic_cast<const ColumnRefExpr*>(expression))return !column->binding;
@@ -5201,7 +5209,7 @@ ResolvedScalarFunction resolveTypedScalar(const std::string& name,
             auto routine=engine->getUDF(database,name,ns);
             if(routine.expression.empty())continue;
             ResolvedScalarFunction candidate;candidate.found=candidate.stored=true;candidate.name=name;candidate.schema=ns;
-            for(const auto& input:routine.paramTypes)candidate.inputs.push_back(common_type_detail::canonical(input));
+            for(const auto& input:routine.paramTypes)candidate.inputs.push_back(scalarSignatureInputType(input));
             if(candidate.inputs.size()==1 && candidate.inputs.front()=="unknown" &&
                routine.paramNames.size()==1 && routine.paramNames.front().empty())candidate.inputs.clear();
             candidate.output=ExprHelper::canonicalResultTypeName(routine.returnType);candidate.routine=std::move(routine);
@@ -5320,7 +5328,7 @@ ResolvedScalarFunction resolveScalarFunction(
         if(!unbound) {
             std::vector<std::string> inputs;
             for(const auto& argument:call->args)
-                inputs.push_back(common_type_detail::canonical(ExprHelper::inferParsedInputType(argument.get(),{},database,engine)));
+                inputs.push_back(scalarSignatureInputType(ExprHelper::inferParsedInputType(argument.get(),{},database,engine)));
             return resolveTypedScalar(result.name,inputs,call,path,engine,database);
         }
     }
@@ -5541,7 +5549,7 @@ void ExprEvaluator::bindScalarFunctions(Expr* expression, StorageEngine* engine)
             if (!resolved.found && !function->setReturning)
                 throw DbError("42883", "function does not exist: " + function->funcName);
             for(size_t i=0;i<resolved.inputs.size();++i) {
-                const auto input=common_type_detail::canonical(ExprHelper::inferParsedInputType(function->args[i].get(),{},currentDB_,engine));
+                const auto input=scalarSignatureInputType(ExprHelper::inferParsedInputType(function->args[i].get(),{},currentDB_,engine));
                 if(input==resolved.inputs[i])continue;
                 auto cast=std::make_unique<CastExpr>();cast->typeName=resolved.inputs[i];cast->implicit=true;
                 cast->operand=std::move(function->args[i]);function->args[i]=std::move(cast);
@@ -5779,14 +5787,14 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
        !scalarSignatures(name).empty()) {
         auto* owner=sqlValueEngine_?sqlValueEngine_:&g_engine;
         std::vector<std::string> inputs;
-        for(const auto& argument:e->args)inputs.push_back(common_type_detail::canonical(
+        for(const auto& argument:e->args)inputs.push_back(scalarSignatureInputType(
             arrayExpressionType(argument.get(),ctx,currentDB_,this,true,owner)));
         // Stored callbacks have private, occurrence-owned keys. Only the
         // genuine catalog callback reaches this coercion boundary.
         const auto resolved=resolveTypedScalar(name,inputs,e,{"pg_catalog"},owner,currentDB_);
         if(!resolved.found)throw DbError("42883","function does not exist: "+name);
         for(size_t i=0;i<args.size();++i)
-            if(common_type_detail::canonical(args[i].typeName)!=resolved.inputs[i])
+            if(scalarSignatureInputType(args[i].typeName)!=resolved.inputs[i])
                 args[i]=evalCast(nullptr,ctx,args[i],resolved.inputs[i]);
     }
 
@@ -8772,8 +8780,9 @@ void ExprEvaluator::registerBuiltins() {
         const bool byteLength = canonicalBytea || type == "binary" ||
                                 type == "varbinary";
         size_t length = 0;
-        if (canonicalBytea && a.size() >= 2) {
-            const std::string bytes = parseByteaOrThrow(a[0]).bytes();
+        if (byteLength && a.size() >= 2) {
+            const std::string bytes = canonicalBytea
+                ? parseByteaOrThrow(a[0]).bytes() : a[0].value;
             (void)convertEncodingOrThrow(
                 bytes, parseEncodingOrThrow(a[1]), BuiltinEncoding::Utf8,
                 &length);

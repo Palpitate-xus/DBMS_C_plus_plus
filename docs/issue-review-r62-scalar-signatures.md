@@ -54,3 +54,7 @@ PG纠正后132全0，原`r62-expanded-reference.log`与纠正后的独立日志�
 后续冻结b5def9ba全注册运行暴露legacy结构指纹中的复杂未绑定参数遗漏：
 保护顺序必须先于任何参数类型推断。该独立回归由[R80](issue-review-r80-unbound-scalar-inference.md)
 修正，17原生控制及原窗口44/七协议邻居验收，不改变本节原100/132历史数量。
+
+原生BINARY/VARBINARY还需把真实overload身份与raw-byte codec区别开，
+[R79](issue-review-r79-native-binary-length.md)保留原九投影控制并新增30控制。
+这些具体遗漏已独立验收，不因此将通用签名覆盖从partial改为complete。

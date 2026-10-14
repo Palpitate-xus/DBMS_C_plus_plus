@@ -97,6 +97,7 @@
 | R76 | restore期间ParameterStatus目录观察崩溃 | 本范围已修复 | 实际58生产单元及标准repeat0；新17控制与完整PG/取消协议/CLI/COPY五入口0，原DIV14独立55P03尚未清零；不改变权限决策，见[记录](issue-review-r76-restore-parameter-status.md) |
 | R77 | restore在staging前过早淘汰目录 | 本范围已修复 | 新native原exit134→0；十完整native/五完整协议0，保留真正publication冷读冲突，不改变ownership/管理员判断；原DIV14夹具另记R78，见[记录](issue-review-r77-restore-catalog-staging.md) |
 | R78 | 恢复任务轮询的publication冲突 | 已修正并验收夹具 | 完整DIV14、新五组负控及真实restore-stage三个入口0；仅RESTORE原30秒内精确55P03重试，不改管理员规则/成功数据与OID断言，见[记录](issue-review-r78-restore-poll-publication.md) |
+| R79 | LENGTH原生二进制别名的签名身份 | 本范围已修复 | 新30控制19失败→0，原九控制及十三完整native/十完整协议0；PG六组语义对照0，签名身份与raw codec分离，见[记录](issue-review-r79-native-binary-length.md) |
 | R80 | 未绑定列保护晚于参数类型推断 | 本范围已修复 | 新17 native原8失败→0，原窗口44 PG/Root全0；十一完整native/八完整协议0，不放宽真实TEXT算术，见[记录](issue-review-r80-unbound-scalar-inference.md) |
 | O01 | owner健康重试及测试覆盖 | 已修复 | `c9a1e3c3`；原全部owner断言、新真实peer/dirty冲突及10完整native提交前/后通过；Root R14集成fresh58后两完整owner再次通过，见[验证](issue-review-o01-table-owner-health-retry.md) |
 | O02 | EXISTS索引错误的访问计划/断言 | 已修正回归夹具 | 原完整协议exit 1→0，保留六严格XX001，新增精确t/f，完整EXISTS协议/19native通过；未改产品，见[验证](issue-review-o02-index-access-path-expectations.md) |
