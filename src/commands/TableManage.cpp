@@ -19775,7 +19775,16 @@ DBStatus StorageEngine::alterTableOwner(const std::string& dbname,
     if (!ownerAccount) return DBStatus::INVALID_ARGUMENT;
 
     if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
-    const TableSchema originalSchema = getTableSchema(dbname, tablename);
+    struct MetadataRelease {
+        LockManager& locks;const std::string& table;
+        ~MetadataRelease(){locks.unlock(table);}
+    } release{lockManager_,tablename};
+    TableSchema originalSchema;
+    try { originalSchema=getTableSchema(dbname,tablename); }
+    catch(const DbError& error) {
+        if(error.sqlState()=="58030")return DBStatus::IO_ERROR;
+        throw;
+    }
     TableSchema updatedSchema = originalSchema;
     updatedSchema.owner = owner;
 
@@ -19788,7 +19797,6 @@ DBStatus StorageEngine::alterTableOwner(const std::string& dbname,
         // persistAll intentionally refuses to merge dirty stale models.
         // A genuine local/peer conflict is still an error, before .stc writes.
         if (!tableCatalog.persistAll()) {
-            lockManager_.unlock(tablename);
             return DBStatus::IO_ERROR;
         }
         const auto qualifiedName = CatalogService::logicalName(tablename);
@@ -19801,12 +19809,10 @@ DBStatus StorageEngine::alterTableOwner(const std::string& dbname,
             originalRelation = *relation;
         }
     } catch (...) {
-        lockManager_.unlock(tablename);
         return DBStatus::IO_ERROR;
     }
 
     if (!writeSchemaFile(dbname, tablename, updatedSchema)) {
-        lockManager_.unlock(tablename);
         return DBStatus::IO_ERROR;
     }
 
@@ -19836,12 +19842,10 @@ DBStatus StorageEngine::alterTableOwner(const std::string& dbname,
                 }
             }
             (void)writeSchemaFile(dbname, tablename, originalSchema);
-            lockManager_.unlock(tablename);
             return DBStatus::IO_ERROR;
         }
     }
 
-    lockManager_.unlock(tablename);
     return DBStatus::OK;
 }
 

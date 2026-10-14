@@ -27,3 +27,14 @@ attribute-target阶段的独立标记已定位：alterTableOwner取得metadata�
 同样的边界在真实local-unsaved/peer冲突中触发。修复应只规范普通metadata读取
 错误和锁释放，保留原角色选择及全部policy；58030按现有IO_ERROR合约返回，其他
 结构化错误不能被无条件吞掉。须重新运行两个原完整夹具及持久化邻居。
+
+R75产品修复使用作用域metadata锁释放，所有正常/错误/异常出口一致清理；仅把
+该读取边界的58030映射为原IO_ERROR合约，其他结构化错误仍抛出。没有修改角色
+选择、权限策略、目录generation保护或真实冲突处理。
+
+当前主工作区组合的两个完整owner驱动及七个相邻native均0，保留原所有数据/故障
+检查；新增公开58030、完整schema字节和无遗留metadata锁检查亦通过。
+日志`/tmp/dbms-review-r46.ifu6SWLp/r74-r75-verified-native.log`；产品构建为
+`r73-r75-final-fresh58.log`真正58单元O2及后续normal/repeat 0，门禁首尾生产输入
+和58份receipt一致。这里包含R74夹具候选，产品边界与夹具分别提交，不把它写成
+未含R74时的独立冻结通过。原abort及首次缺include编译失败不覆盖。
