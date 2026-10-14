@@ -76,6 +76,8 @@ static const std::unordered_map<std::string, Oid> kBuiltinTypeMap = {
     {"void", 2278},
     {"uuid", 2950},
     {"uuid[]", 2951},
+    {"tsvector", 3614}, {"tsvector[]", 3643},
+    {"tsquery", 3615}, {"tsquery[]", 3645},
     {"json", 114}, {"json[]", 199},
     {"jsonb", 3802},
     {"jsonb[]", 3807},

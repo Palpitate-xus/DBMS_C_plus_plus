@@ -1819,6 +1819,9 @@ const std::vector<PgTypeRow>& CatalogManager::builtinTypeRows() {
     }
     ensureType(2950,  "uuid",       16,   'b', 'U');
     ensureType(2951,  "_uuid",      -1,   'b', 'A');
+    ensureType(3614,  "tsvector",   -1,   'b', 'U');
+    ensureType(3615,  "tsquery",    -1,   'b', 'U');
+    types.at(typeByOid.at(3614)).typstorage='x';
     ensureType(3802,  "jsonb",      -1,   'b', 'U');
     // Existing range codecs must have real physical catalog identities too.
     // Scalar/array OIDs and alignment follow PostgreSQL's pg_type bootstrap.
@@ -1866,6 +1869,8 @@ const std::vector<PgTypeRow>& CatalogManager::builtinTypeRows() {
         {1563,"_varbit",1562},
         {1231,"_numeric",1700},
         {2951,"_uuid",2950},
+        {3643,"_tsvector",3614},
+        {3645,"_tsquery",3615},
         {199,"_json",114},
         {3807,"_jsonb",3802},
         {143,"_xml",142},
@@ -1882,6 +1887,7 @@ const std::vector<PgTypeRow>& CatalogManager::builtinTypeRows() {
     };
     for(const auto& array:arrays)ensureType(array.oid,array.name,-1,'b','A',array.element);
     types.at(typeByOid.at(2211)).typstorage='x';
+    for(Oid oid:{3643U,3645U})types.at(typeByOid.at(oid)).typstorage='x';
     for(Oid oid:{2210U,4090U,4097U})types.at(typeByOid.at(oid)).typstorage='x';
     for(const auto& array:arrays) {
         auto& row=types[typeByOid.at(array.oid)];
