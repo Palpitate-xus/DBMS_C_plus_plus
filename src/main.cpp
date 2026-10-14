@@ -26175,6 +26175,19 @@ static bool executeInternal(const string& rawSql, Session& s) {
     if (sql.substr(0, 6) == "select" || sql.substr(0, 5) == "with ") {
         if (!checkDB(s)) return true;
 
+        // This dispatcher executes a concrete statement, not an Extended
+        // Parse template. Resolve genuine $n uses in the actual query scope
+        // before legacy result-type inference can replace an unbound input
+        // with a guessed TEXT aggregate result. Quoted/comment bytes do not
+        // acquire parameters; prepared Bind/EXECUTE keep their own inputs.
+        size_t suppliedParameterCount = 0;
+        string suppliedParameterError;
+        if (!dbms::ps_analyzeDollarParams(effectiveRawSql, suppliedParameterCount,
+                                          suppliedParameterError))
+            throw dbms::DbError("42P02", suppliedParameterError);
+        if (suppliedParameterCount)
+            (void)g_engine.prepareBoundQuery(s.currentDB, effectiveRawSql);
+
         shared_ptr<dbms::PreparedQuery> duplicateOrderAliasQuery;
         {
             dbms::SQLParser parser;
