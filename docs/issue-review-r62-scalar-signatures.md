@@ -65,3 +65,7 @@ registerFunction替换的实际callback所有权。额外验证同名TEXT UDF、
 SQL PREPARE、嵌套、空来源及准备阶段不执行参数；真实前端还需保留选中callee的
 whole-query绑定，不能以未绑定列的legacy探测结果覆盖它。原100/132验收数字
 属于前述四组历史，不改写；全部通用签名及所有接收器形状仍保持partial。
+
+[R84](issue-review-r84-integral-rounding-result-types.md)另修正CEIL/CEILING/FLOOR
+的numeric/float8输出域，并区分实际builtin与opaque原生replacement；它修复
+结果声明，不等于补齐这三个名字的完整arity、输入签名或所有重载/接收器。

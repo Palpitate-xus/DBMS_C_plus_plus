@@ -84,6 +84,10 @@ static bool isFixedFloat8ScalarName(const std::string& name) {
     return names.count(name)!=0;
 }
 
+static bool isIntegralRoundingScalarName(const std::string& name) {
+    return name=="ceil" || name=="ceiling" || name=="floor";
+}
+
 static int compareTextWithCollation(const std::string& left,
                                     const std::string& right,
                                     const std::string& requested) {
@@ -5124,6 +5128,14 @@ struct DeclaredFloat8ScalarFunction {
         return callback(args);
     }
 };
+// These callbacks have operand-dependent numeric/float8 result metadata.
+// Replacing one through registerFunction must not inherit that builtin rule.
+struct IntegralRoundingScalarFunction {
+    ScalarFunction callback;
+    ExprValue operator()(const std::vector<ExprValue>& args) const {
+        return callback(args);
+    }
+};
 bool ownsScalarSignatures(const std::string& name,const ScalarFunction* callback) {
     // Preserve the existing four R62 families; this patch only distinguishes
     // ownership for the newly declared eighteen float8 callbacks.
@@ -5551,6 +5563,7 @@ std::string ExprEvaluator::scalarFunctionIdentity(const FunctionCallExpr* call,
             (call ? call->funcName : std::string{}));
     std::string database = currentDB_;
     engine = engine ? engine : &g_engine;
+    bool opaqueIntegral=false;
     if (!resolved.stored) {
         const auto callback = functions_.find(toLower(resolved.name));
         if (callback != functions_.end()) {
@@ -5558,13 +5571,15 @@ std::string ExprEvaluator::scalarFunctionIdentity(const FunctionCallExpr* call,
                 resolved = bound->resolved;
                 database = bound->database;
                 engine = bound->engine;
-            }
+            } else if(isIntegralRoundingScalarName(resolved.name) &&
+                      !callback->second.target<IntegralRoundingScalarFunction>())
+                opaqueIntegral=true;
         }
     }
     const auto field = [](const std::string& value) {
         return std::to_string(value.size()) + ":" + value;
     };
-    std::string key = resolved.stored ? "stored" : "builtin";
+    std::string key = resolved.stored ? "stored" : opaqueIntegral ? "native" : "builtin";
     key += field(std::to_string(reinterpret_cast<uintptr_t>(engine)));
     key += field(database) + field(resolved.schema) + field(resolved.name);
     key += field(std::to_string(call->args.size())) + field(std::to_string(call->namedArgs.size()));
@@ -12469,8 +12484,12 @@ void ExprEvaluator::registerBuiltins() {
         return ExprValue("bigint", std::to_string(v), false);
     };
 
-    for(auto& entry:functions_)if(isFixedFloat8ScalarName(entry.first))
-        entry.second=DeclaredFloat8ScalarFunction{std::move(entry.second)};
+    for(auto& entry:functions_) {
+        if(isFixedFloat8ScalarName(entry.first))
+            entry.second=DeclaredFloat8ScalarFunction{std::move(entry.second)};
+        else if(isIntegralRoundingScalarName(entry.first))
+            entry.second=IntegralRoundingScalarFunction{std::move(entry.second)};
+    }
 
     // Volatility metadata for builtins (safe default is 'v' set by registerFunction).
     volatility_["abs"] = 'i';

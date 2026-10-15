@@ -116,6 +116,7 @@ socket超时，精确SQL/栈和原期限保留，尚未确定根因，不称新�
 | R81 | staging消失被当成恢复作业完成 | 已修正并验收夹具 | 首轮三入口、五次真实恢复及七个完整串行协议全0，复用R78精确轮询，保留20秒/真实窗口/数据断言；未改产品，见[记录](issue-review-r81-restore-stage-completion.md) |
 | R82 | 新冻结中的普通协议间歇性超时 | 未解决，继续定位 | JOIN setup原样再现超时，后完整原样通过；bound DML的ROLLBACK TO在全量超时，独立37项全0；未修改产品或期限，未证明同一根因，见[冻结及后续观测](issue-full-registered-d974c80d.md) |
 | R83 | 十八个固定float8标量的声明/回调所有权 | 本范围已修复，整体回归未全绿 | 新906签名/237回调控制及二十完整native全0；实际PG18.6与Root新951协议全0；完整协议16/17通过，完整PG在CREATE超时未解决；保留中间OID/前端UDF失败，见[记录](issue-review-r83-float8-scalar-signatures.md) |
+| R84 | CEIL/CEILING/FLOOR输出类型与opaque回调 | 本范围已修复，整体回归未全绿 | 旧274/144及266/138失败保留；当前310回调/metadata与Root/PG266通过；21个不同native均有完整通过记录，首批DROP清理134保留；完整协议16/17通过，COPY的CREATE超时未定因，见[记录](issue-review-r84-integral-rounding-result-types.md) |
 | O01 | owner健康重试及测试覆盖 | 已修复 | `c9a1e3c3`；原全部owner断言、新真实peer/dirty冲突及10完整native提交前/后通过；Root R14集成fresh58后两完整owner再次通过，见[验证](issue-review-o01-table-owner-health-retry.md) |
 | O02 | EXISTS索引错误的访问计划/断言 | 已修正回归夹具 | 原完整协议exit 1→0，保留六严格XX001，新增精确t/f，完整EXISTS协议/19native通过；未改产品，见[验证](issue-review-o02-index-access-path-expectations.md) |
 | O03 | EXPLAIN JOIN图及过时断言 | 已修复 | 实际执行的source/cache/join/scan图及相关重绑；最终完整60控制、十二native/十协议CLI全过，OFFSET阳性及42601原/PG对照保留，见[验证](issue-review-o03-explain-join-source-graph.md) |

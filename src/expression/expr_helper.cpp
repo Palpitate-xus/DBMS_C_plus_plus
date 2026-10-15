@@ -211,14 +211,22 @@ std::string builtinReductionName(const FunctionCallExpr* call) {
     return reductions.count(function.name) ? function.name : std::string{};
 }
 
+struct RoutineResultTypes {
+    std::map<const Expr*,std::string> declarations;
+    // Native registration supplies no return declaration. Retain its old
+    // input-derived fallback without confusing it with the genuine builtin.
+    std::set<const Expr*> opaqueIntegralCalls;
+    bool empty() const {return declarations.empty() && opaqueIntegralCalls.empty();}
+};
+
 std::string inferAstResultType(
     const Expr* expression,
     const std::map<std::string, std::string>& typeHints,
-    const std::map<const Expr*, std::string>* routineTypes = nullptr) {
+    const RoutineResultTypes* routineTypes = nullptr) {
     if (!expression) return "text";
     if(routineTypes) {
-        const auto declared=routineTypes->find(expression);
-        if(declared!=routineTypes->end())return protocolTypeName(declared->second);
+        const auto declared=routineTypes->declarations.find(expression);
+        if(declared!=routineTypes->declarations.end())return protocolTypeName(declared->second);
     }
     if (const auto* parameter = dynamic_cast<const ParameterExpr*>(expression))
         return protocolTypeName(parameter->declaredType);
@@ -377,8 +385,8 @@ std::string inferAstResultType(
         if (!call->resolvedResultType.empty()) return protocolTypeName(call->resolvedResultType);
         if(call->setReturning)return call->setReturning->elementType;
         if (routineTypes) {
-            const auto routine = routineTypes->find(call);
-            if (routine != routineTypes->end()) return protocolTypeName(routine->second);
+            const auto routine = routineTypes->declarations.find(call);
+            if (routine != routineTypes->declarations.end()) return protocolTypeName(routine->second);
         }
         const std::string reduction = builtinReductionName(call);
         const std::string name = reduction.empty() ? toLower(call->funcName) : reduction;
@@ -517,6 +525,12 @@ std::string inferAstResultType(
             const std::string input = argType(0);
             return input == "numeric" ? "numeric" : "double precision";
         }
+        // Integral rounding has numeric and float8 return domains, not an
+        // integer/real overload that inherits its input declaration.
+        if (name == "ceil" || name == "ceiling" || name == "floor") {
+            if(routineTypes && routineTypes->opaqueIntegralCalls.count(call))return argType(0);
+            return argType(0) == "numeric" ? "numeric" : "double precision";
+        }
         if (name == "coalesce" || name == "greatest" || name == "least") {
             std::string result = "unknown";
             for (size_t i = 0; i < call->args.size(); ++i)
@@ -526,8 +540,7 @@ std::string inferAstResultType(
         if (name == "min" || name == "max" || name == "lag" ||
             name == "lead" || name == "first_value" || name == "last_value" ||
             name == "nth_value" || name == "nullif" || name == "abs" ||
-            name == "round" || name == "trunc" || name == "ceil" ||
-            name == "ceiling" || name == "floor" || name == "mod")
+            name == "round" || name == "trunc" || name == "mod")
             return argType(0);
         if (name == "div") return "numeric";
         if (name == "power") {
@@ -558,10 +571,10 @@ std::string inferAstResultType(
 // Keep routine result metadata associated with the exact live AST node, not
 // with strings which could collide with user column names. This walk resolves
 // declarations only: it does not bind callbacks or execute any expression.
-std::map<const Expr*, std::string> collectRoutineResultTypes(
+RoutineResultTypes collectRoutineResultTypes(
     const Expr* expression, const std::string& currentDB,
     StorageEngine* functionEngine,const ExprEvaluator* functionEvaluator = nullptr) {
-    std::map<const Expr*, std::string> routineTypes;
+    RoutineResultTypes routineTypes;
     if (currentDB.empty() && !functionEvaluator) return routineTypes;
     // A caller's native callback replacements belong to that evaluator.
     // Rebuilding the default registry here can parse their UNKNOWN inputs
@@ -575,13 +588,20 @@ std::map<const Expr*, std::string> collectRoutineResultTypes(
     std::function<void(const Expr*)> inspect = [&](const Expr* node) {
         if (!node) return;
         if(const auto* literal=dynamic_cast<const LiteralExpr*>(node)) {
-            if(literal->analyzedPrimitiveConstant)routineTypes[node]=literal->typeName;
+            if(literal->analyzedPrimitiveConstant)routineTypes.declarations[node]=literal->typeName;
             else if(!literal->typeName.empty() && !legacyNullLiteral(literal))
-                routineTypes[node]=ExprHelper::declaredTypeInput(literal->typeName,currentDB,functionEngine);
+                routineTypes.declarations[node]=ExprHelper::declaredTypeInput(literal->typeName,currentDB,functionEngine);
         } else if (const auto* call = dynamic_cast<const FunctionCallExpr*>(node)) {
             if (evaluator.hasScalarFunction(call, functionEngine)) {
                 const std::string type = evaluator.scalarFunctionResultType(call, functionEngine);
-                if (!type.empty()) routineTypes[call] = type;
+                if (!type.empty()) routineTypes.declarations[call] = type;
+                else {
+                    CatalogManager::QualifiedName name;
+                    if(CatalogManager::parseQualifiedName(call->funcName,name,true) && name.schema.empty() &&
+                       (name.name=="ceil" || name.name=="ceiling" || name.name=="floor") &&
+                       evaluator.scalarFunctionIdentity(call,functionEngine).rfind("native",0)==0)
+                        routineTypes.opaqueIntegralCalls.insert(call);
+                }
             }
             for (const auto& arg : call->args) inspect(arg.get());
             for (const auto& arg : call->namedArgs) inspect(arg.value.get());
@@ -591,12 +611,12 @@ std::map<const Expr*, std::string> collectRoutineResultTypes(
             inspect(binary->left.get());
             if (binary->op != "::") inspect(binary->right.get());
             else if(const auto* target=dynamic_cast<const LiteralExpr*>(binary->right.get()))
-                routineTypes[node]=ExprHelper::declaredTypeInput(target->value,currentDB,functionEngine);
+                routineTypes.declarations[node]=ExprHelper::declaredTypeInput(target->value,currentDB,functionEngine);
         } else if (const auto* quantified = dynamic_cast<const QuantifiedComparisonExpr*>(node)) {
             inspect(quantified->left.get()); inspect(quantified->right.get());
         } else if (const auto* cast = dynamic_cast<const CastExpr*>(node)) {
             inspect(cast->operand.get());
-            routineTypes[node]=ExprHelper::declaredTypeInput(cast->typeName,currentDB,functionEngine);
+            routineTypes.declarations[node]=ExprHelper::declaredTypeInput(cast->typeName,currentDB,functionEngine);
         } else if (const auto* conditional = dynamic_cast<const CaseExpr*>(node)) {
             inspect(conditional->switchExpr.get());
             for (const auto& arm : conditional->whenClauses) {
