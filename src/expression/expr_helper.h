@@ -10,6 +10,7 @@
 
 namespace dbms {
 class StorageEngine;
+class ExprEvaluator;
 class Expr;
 struct ColumnRefExpr;
 struct PreparedQuery;
@@ -96,7 +97,8 @@ public:
         const Expr* expression,
         const std::map<std::string, std::string>& typeHints = {},
         const std::string& currentDB = "",
-        StorageEngine* functionEngine = nullptr);
+        StorageEngine* functionEngine = nullptr,
+        const ExprEvaluator* functionEvaluator = nullptr);
     // Argument/signature inference must retain UNKNOWN until the owning
     // operator or routine supplies a context. Protocol output's TEXT fallback
     // is intentionally applied only by inferParsedResultType above.
@@ -104,7 +106,8 @@ public:
         const Expr* expression,
         const std::map<std::string, std::string>& typeHints = {},
         const std::string& currentDB = "",
-        StorageEngine* functionEngine = nullptr);
+        StorageEngine* functionEngine = nullptr,
+        const ExprEvaluator* functionEvaluator = nullptr);
 
     // Parse-only collation analysis; does not evaluate row-dependent or
     // volatile functions. Raises DbError for syntax/collation errors.

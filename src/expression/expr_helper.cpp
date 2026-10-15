@@ -537,8 +537,11 @@ std::string inferAstResultType(
                 ? "numeric" : "double precision";
         }
         if (name == "log" && call->args.size() == 2) return "numeric";
-        if (name == "exp" || name == "ln" || name == "log" || name == "sqrt" ||
-            name == "sin" || name == "cos" || name == "tan")
+        // The trigonometric overloads accept float8 even when their input is
+        // implicitly converted from NUMERIC. They never return NUMERIC.
+        if (name == "sin" || name == "cos" || name == "tan")
+            return "double precision";
+        if (name == "exp" || name == "ln" || name == "log" || name == "sqrt")
             return argType(0) == "numeric" ? "numeric" : "double precision";
         static const std::set<std::string> textFunctions = {
             "lower", "upper", "initcap", "concat", "concat_ws", "substring",
@@ -557,11 +560,18 @@ std::string inferAstResultType(
 // declarations only: it does not bind callbacks or execute any expression.
 std::map<const Expr*, std::string> collectRoutineResultTypes(
     const Expr* expression, const std::string& currentDB,
-    StorageEngine* functionEngine) {
+    StorageEngine* functionEngine,const ExprEvaluator* functionEvaluator = nullptr) {
     std::map<const Expr*, std::string> routineTypes;
-    if (currentDB.empty()) return routineTypes;
-    ExprEvaluator evaluator;
-    evaluator.setCurrentDB(currentDB);
+    if (currentDB.empty() && !functionEvaluator) return routineTypes;
+    // A caller's native callback replacements belong to that evaluator.
+    // Rebuilding the default registry here can parse their UNKNOWN inputs
+    // as unrelated builtin arguments even though preparation must be pure.
+    std::optional<ExprEvaluator> fallback;
+    if(!functionEvaluator) {
+        fallback.emplace();fallback->setCurrentDB(currentDB);
+        functionEvaluator=&*fallback;
+    }
+    const auto& evaluator=*functionEvaluator;
     std::function<void(const Expr*)> inspect = [&](const Expr* node) {
         if (!node) return;
         if(const auto* literal=dynamic_cast<const LiteralExpr*>(node)) {
@@ -1723,8 +1733,8 @@ std::string ExprHelper::inferParsedResultType(
     const Expr* expression,
     const std::map<std::string, std::string>& typeHints,
     const std::string& currentDB,
-    StorageEngine* functionEngine) {
-    const std::string type = inferParsedInputType(expression, typeHints, currentDB, functionEngine);
+    StorageEngine* functionEngine,const ExprEvaluator* functionEvaluator) {
+    const std::string type = inferParsedInputType(expression, typeHints, currentDB, functionEngine,functionEvaluator);
     return type.empty() || type == "unknown" ? "text" : type;
 }
 
@@ -1800,8 +1810,8 @@ std::string ExprHelper::inferParsedInputType(
     const Expr* expression,
     const std::map<std::string, std::string>& typeHints,
     const std::string& currentDB,
-    StorageEngine* functionEngine) {
-    const auto routineTypes = collectRoutineResultTypes(expression, currentDB, functionEngine);
+    StorageEngine* functionEngine,const ExprEvaluator* functionEvaluator) {
+    const auto routineTypes = collectRoutineResultTypes(expression, currentDB, functionEngine,functionEvaluator);
     const std::string type = protocolTypeName(inferAstResultType(expression, typeHints, &routineTypes));
     return type.empty() ? "unknown" : type;
 }

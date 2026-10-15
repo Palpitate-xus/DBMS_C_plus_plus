@@ -77,6 +77,13 @@ static std::string toLower(std::string s) {
     return s;
 }
 
+static bool isFixedFloat8ScalarName(const std::string& name) {
+    static const std::set<std::string> names={
+        "sin","cos","tan","asin","acos","atan","sinh","cosh","tanh",
+        "asinh","acosh","atanh","degrees","radians","cot","cbrt","atan2","pi"};
+    return names.count(name)!=0;
+}
+
 static int compareTextWithCollation(const std::string& left,
                                     const std::string& right,
                                     const std::string& requested) {
@@ -2915,6 +2922,12 @@ static std::string arrayExpressionType(const Expr* expression, const RowContext&
     if(const auto* function=dynamic_cast<const FunctionCallExpr*>(expression);function && evaluator){
         const auto type=evaluator->scalarFunctionResultType(function,owner);
         if(!type.empty())return ExprHelper::canonicalResultTypeName(type);
+        // An undeclared native replacement has no builtin result metadata.
+        // Do not rediscover this call through a new default evaluator below.
+        CatalogManager::QualifiedName name;
+        if(CatalogManager::parseQualifiedName(function->funcName,name,true) &&
+           name.schema.empty() && isFixedFloat8ScalarName(name.name) &&
+           evaluator->hasFunction(name.name))return "unknown";
     }
     std::map<std::string,std::string> hints;
     std::function<void(const Expr*)> collect = [&](const Expr* node) {
@@ -2935,8 +2948,8 @@ static std::string arrayExpressionType(const Expr* expression, const RowContext&
         }
     };
     collect(expression);
-    return preserveUnknown ? ExprHelper::inferParsedInputType(expression,hints,database,owner)
-                           : ExprHelper::inferParsedResultType(expression,hints,database);
+    return preserveUnknown ? ExprHelper::inferParsedInputType(expression,hints,database,owner,evaluator)
+                           : ExprHelper::inferParsedResultType(expression,hints,database,owner,evaluator);
 }
 
 ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& ctx) const {
@@ -5103,6 +5116,20 @@ char ExprEvaluator::volatility(const std::string& name) const {
 }
 
 namespace {
+// Registration may replace a builtin by name. Only the actual catalog
+// implementation owns the new fixed-float8 declarations and coercion rules.
+struct DeclaredFloat8ScalarFunction {
+    ScalarFunction callback;
+    ExprValue operator()(const std::vector<ExprValue>& args) const {
+        return callback(args);
+    }
+};
+bool ownsScalarSignatures(const std::string& name,const ScalarFunction* callback) {
+    // Preserve the existing four R62 families; this patch only distinguishes
+    // ownership for the newly declared eighteen float8 callbacks.
+    return !isFixedFloat8ScalarName(name) ||
+        (callback && callback->target<DeclaredFloat8ScalarFunction>());
+}
 // The four real NAME callees exist in pg_proc. Keyword grammar has a separate
 // owner and must not resolve through this SQL-visible callback registry.
 struct SqlNameFunction {
@@ -5156,6 +5183,9 @@ std::vector<ScalarSignature> scalarSignatures(const std::string& name) {
     if(name=="upper" || name=="lower")return {{{"text"},"text"},
         {{"int4range"},"integer"},{{"int8range"},"bigint"},{{"numrange"},"numeric"},
         {{"daterange"},"date"},{{"tsrange"},"timestamp"},{{"tstzrange"},"timestamptz"}};
+    if(name=="atan2")return {{{"double precision","double precision"},"double precision"}};
+    if(name=="pi")return {{{},"double precision"}};
+    if(isFixedFloat8ScalarName(name))return {{{"double precision"},"double precision"}};
     return {};
 }
 
@@ -5317,7 +5347,9 @@ ResolvedScalarFunction resolveScalarFunction(
     bool typeOfCandidate=false;
     engine = engine ? engine : &g_engine;
     const auto path=functionNamespaceSearchPath(*engine,database,schema);
-    if(!scalarSignatures(result.name).empty()) {
+    const auto signatureCallback=registry.find(result.name);
+    if(!scalarSignatures(result.name).empty() &&
+       ownsScalarSignatures(result.name,signatureCallback==registry.end()?nullptr:&signatureCallback->second)) {
         // Legacy row-context consumers do not yet own column declarations.
         // Whole-query binding always supplies those declarations and takes
         // the strict path. Runtime coercion uses the row's actual types.
@@ -5328,7 +5360,7 @@ ResolvedScalarFunction resolveScalarFunction(
         if(!unbound) {
             std::vector<std::string> inputs;
             for(const auto& argument:call->args)
-                inputs.push_back(scalarSignatureInputType(ExprHelper::inferParsedInputType(argument.get(),{},database,engine)));
+                inputs.push_back(scalarSignatureInputType(ExprHelper::inferParsedInputType(argument.get(),{},database,engine,&evaluator)));
             return resolveTypedScalar(result.name,inputs,call,path,engine,database);
         }
     }
@@ -5353,7 +5385,18 @@ ResolvedScalarFunction resolveScalarFunction(
                 // pg_typeof(any) is a polymorphic candidate. A real exact
                 // typed routine in a later namespace still wins resolution.
                 if(polymorphicTypeOf && schema.empty()) {typeOfCandidate=true;continue;}
-                result.found=true;result.schema=candidateSchema;return result;
+                result.found=true;result.schema=candidateSchema;
+                // Legacy callers can defer input resolution until their typed
+                // row exists, but a genuine callback with a fixed declared
+                // result must not become TEXT (or inherit a numeric argument's
+                // type) inside another call. Never infer/evaluate an unbound
+                // argument here, or attach builtin metadata to a stored callee.
+                const auto signatures=scalarSignatures(result.name);
+                if(!signatures.empty() && ownsScalarSignatures(result.name,&callback->second) &&
+                   std::all_of(signatures.begin(),signatures.end(),
+                    [&](const auto& signature){return signature.output==signatures.front().output;}))
+                    result.output=signatures.front().output;
+                return result;
             }
             provider=queryHostSetReturningProvider(result.name);
             if(provider && provider->fixedSignature && call->args.size()==provider->arity && call->namedArgs.empty()) {
@@ -5364,7 +5407,7 @@ ResolvedScalarFunction resolveScalarFunction(
                 std::vector<std::string> inputs;
                 for(const auto& argument:call->args)
                     inputs.push_back(ExprHelper::canonicalResultTypeName(ExprHelper::inferParsedInputType(
-                        argument.get(),{},database,engine)));
+                        argument.get(),{},database,engine,&evaluator)));
                 try {
                     const auto output=provider->resultType(inputs);
                     bool exact=true;
@@ -5402,7 +5445,7 @@ ResolvedScalarFunction resolveScalarFunction(
                 bool matches=true;
                 if(schema.empty() && polymorphicTypeOf && call->args.size()==1 && call->namedArgs.empty()) {
                     const auto input=ExprHelper::canonicalResultTypeName(ExprHelper::inferParsedInputType(
-                        call->args.front().get(),{},database,engine));
+                        call->args.front().get(),{},database,engine,&evaluator));
                     const auto declared=routine.paramTypes.empty()?std::string{}:
                         ExprHelper::canonicalResultTypeName(routine.paramTypes.front());
                     if(input=="unknown")throw DbError("42725","function pg_typeof(unknown) is not unique");
@@ -5411,7 +5454,7 @@ ResolvedScalarFunction resolveScalarFunction(
                 if(schema.empty() && polymorphic && !polymorphic->fixedSignature) {
                     for(size_t i=0;i<call->args.size();++i) {
                         const auto type=ExprHelper::canonicalResultTypeName(ExprHelper::inferParsedInputType(
-                            call->args[i].get(),{},database,engine));
+                            call->args[i].get(),{},database,engine,&evaluator));
                         const auto declared=i<routine.paramTypes.size()
                             ?ExprHelper::canonicalResultTypeName(routine.paramTypes[i]):std::string{};
                         const auto* entry=TypeRegistry::instance().findType(declared);
@@ -5549,7 +5592,7 @@ void ExprEvaluator::bindScalarFunctions(Expr* expression, StorageEngine* engine)
             if (!resolved.found && !function->setReturning)
                 throw DbError("42883", "function does not exist: " + function->funcName);
             for(size_t i=0;i<resolved.inputs.size();++i) {
-                const auto input=scalarSignatureInputType(ExprHelper::inferParsedInputType(function->args[i].get(),{},currentDB_,engine));
+                const auto input=scalarSignatureInputType(ExprHelper::inferParsedInputType(function->args[i].get(),{},currentDB_,engine,this));
                 if(input==resolved.inputs[i])continue;
                 auto cast=std::make_unique<CastExpr>();cast->typeName=resolved.inputs[i];cast->implicit=true;
                 cast->operand=std::move(function->args[i]);function->args[i]=std::move(cast);
@@ -5784,7 +5827,7 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
     for (const auto& a : e->args) args.push_back(eval(a.get(), ctx));
 
     if(callback!=functions_.end() && !callback->second.target<BoundScalarRoutine>() &&
-       !scalarSignatures(name).empty()) {
+       !scalarSignatures(name).empty() && ownsScalarSignatures(name,&callback->second)) {
         auto* owner=sqlValueEngine_?sqlValueEngine_:&g_engine;
         std::vector<std::string> inputs;
         for(const auto& argument:e->args)inputs.push_back(scalarSignatureInputType(
@@ -12425,6 +12468,9 @@ void ExprEvaluator::registerBuiltins() {
             isCalled);
         return ExprValue("bigint", std::to_string(v), false);
     };
+
+    for(auto& entry:functions_)if(isFixedFloat8ScalarName(entry.first))
+        entry.second=DeclaredFloat8ScalarFunction{std::move(entry.second)};
 
     // Volatility metadata for builtins (safe default is 'v' set by registerFunction).
     volatility_["abs"] = 'i';

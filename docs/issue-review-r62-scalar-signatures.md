@@ -1,6 +1,7 @@
 # R62：标量函数必须先解析真实参数签名
 
-状态：本次已复现的ABS、upper/lower、length签名已修复并通过定向门禁。
+状态：本次已复现的ABS、upper/lower、length签名已修复并通过定向门禁；
+后续十八个固定float8名字由[R83](issue-review-r83-float8-scalar-signatures.md)独立扩展。
 其他回调及任意名称stored routine的完整通用签名覆盖仍未完成，R62广义范围保持partial。
 R60修正窗口routine身份，不等于完成全部标量签名校验。
 
@@ -58,3 +59,9 @@ PG纠正后132全0，原`r62-expanded-reference.log`与纠正后的独立日志�
 原生BINARY/VARBINARY还需把真实overload身份与raw-byte codec区别开，
 [R79](issue-review-r79-native-binary-length.md)保留原九投影控制并新增30控制。
 这些具体遗漏已独立验收，不因此将通用签名覆盖从partial改为complete。
+
+R83补齐十八个固定float8名字的arity、输入转换、输出身份及角色顺序，并保护
+registerFunction替换的实际callback所有权。额外验证同名TEXT UDF、UNKNOWN/NULL、
+SQL PREPARE、嵌套、空来源及准备阶段不执行参数；真实前端还需保留选中callee的
+whole-query绑定，不能以未绑定列的legacy探测结果覆盖它。原100/132验收数字
+属于前述四组历史，不改写；全部通用签名及所有接收器形状仍保持partial。

@@ -5948,7 +5948,17 @@ static bool handleExplain(const string& sql, Session& s) {
 // ========================================================================
 // Window function support
 // ========================================================================
+static bool isFixedFloat8ScalarName(const string& name) {
+    static const set<string> names={
+        "sin","cos","tan","asin","acos","atan","sinh","cosh","tanh",
+        "asinh","acosh","atanh","degrees","radians","cot","cbrt","atan2","pi"};
+    return names.count(name)!=0;
+}
+
 static bool requiresParsedValueBinding(const dbms::Stmt* root,bool constantScalarOnly) {
+    // These names own concrete overload declarations. This is an analysis
+    // route, not permission to execute their arguments during preparation.
+    static const set<string> declaredScalars={"upper","lower","length"};
     function<bool(const dbms::Expr*)> expression;
     function<bool(const dbms::Stmt*)> statement;
     function<bool(const dbms::FromItem*)> source;
@@ -5963,7 +5973,7 @@ static bool requiresParsedValueBinding(const dbms::Stmt* root,bool constantScala
             dbms::CatalogManager::QualifiedName routine;
             if(dbms::CatalogManager::parseQualifiedName(call->funcName,routine,true) &&
                (routine.name=="abs" || (!constantScalarOnly &&
-                (routine.name=="upper" || routine.name=="lower" || routine.name=="length"))))
+                (declaredScalars.count(routine.name) || isFixedFloat8ScalarName(routine.name)))))
                 return true; // Validate real overloads even if no row/branch will execute.
             for(const auto& argument:call->args)if(expression(argument.get()))return true;
             for(const auto& argument:call->namedArgs)if(expression(argument.value.get()))return true;
@@ -21164,9 +21174,14 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
             // A real stored name with a nonmatching signature still needs
             // whole-query binding. The legacy source-free path would evaluate
             // its arguments before discovering the arity mismatch at callUDF.
-            if(!resolved && call->schema.empty()) {
+            // A legacy probe has no input column bindings yet. Its catalog
+            // fallback cannot rule out a typed user overload of these new
+            // declared builtins. Retain whole-query binding for that case;
+            // never choose a callee from a guessed TEXT/float8 input here.
+            if(call->schema.empty()) {
                 dbms::CatalogManager::QualifiedName name;
-                if(dbms::CatalogManager::parseQualifiedName(call->funcName,name,true) && name.schema.empty()) {
+                if(dbms::CatalogManager::parseQualifiedName(call->funcName,name,true) && name.schema.empty() &&
+                   (!resolved || isFixedFloat8ScalarName(name.name))) {
                     for(const auto& schema:dbms::functionNamespaceSearchPath(g_engine,session.currentDB))
                         if(schema!="pg_catalog" && !g_engine.getUDF(session.currentDB,name.name,schema).expression.empty())
                             return true;

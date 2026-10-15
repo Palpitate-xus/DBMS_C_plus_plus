@@ -4,6 +4,8 @@
 
 本页保留原始审查基准；后续实现状态见[逐项修复](review-fixes-2026-10-13.md)，
 新组合的实际全量终态见[冻结d974c80d记录](issue-full-registered-d974c80d.md)。
+后续固定float8签名及原生callback所有权修复见[R83](issue-review-r83-float8-scalar-signatures.md)，
+其定向门禁不替代最新全注册组合验收。
 下文的原始失败和统计不代表后续修复仍未完成，也不由局部通过改写。
 
 审查基准为 `a502ffa30df379c88f176c377cdd0f1dae4f3cd4`，产品源码末次提交 `2dc9554e`。

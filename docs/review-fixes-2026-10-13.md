@@ -24,6 +24,11 @@ socket timeout、bound DML的ROLLBACK TO timeout；逐项保留，未宣布全�
 先按原完整驱动/期限复现两个普通协议超时，再按确证根因修复；用户暂缓的
 DROP/cache专项不自行重开，其余通用函数签名覆盖仍继续，不改原273总账完成状态。
 
+[R83固定float8签名](issue-review-r83-float8-scalar-signatures.md)本范围已修复：
+最终906签名/237原生回调及二十完整native全0，实际PG18.6与Root新951协议全0。
+完整邻居协议合计16/17通过；完整PG驱动另在CREATE toasted_unicode_varchar
+socket超时，精确SQL/栈和原期限保留，尚未确定根因，不称新组合全量通过。
+
 ## 逐项清单
 
 | 项目 | 内容 | 状态 | commit / 验证 |
@@ -89,7 +94,7 @@ DROP/cache专项不自行重开，其余通用函数签名覆盖仍继续，不�
 | R59 | 新组合物化视图target协议超时 | 原样复验通过，历史原因未定 | 71个原target控制及source/事务控制主分支原样复跑0，原超时保留；来源55000缺陷归R49，见[完整记录](issue-full-registered-f4087f5d.md) |
 | R60 | 窗口routine的真实身份/标量角色 | 已修复，已合主分支 | Root本地2ae05d2d；集成真实重编后十五完整native/十完整协议全0；PG73全0、原73中53失败→最终全0；59纯metadata、六完整native/十完整协议全0，第一轮8嵌套失败保留；原冻结完整结果独立保留，见[记录](issue-review-r60-window-routine-identity.md) |
 | R61 | 普通CREATE TABLE初始化与I/O状态 | 已修复，已合主分支 | Root本地977e71e8；集成真实重编后十五完整native/十完整协议全0；独立核心commit为7ad3ccca，原EIO误报/成功返回已修；首轮完整门禁因R66崩溃保留，修R66后十三完整native/六完整协议及五次完整七故障重复全0，见[记录](issue-review-r61-create-initialization-io.md) |
-| R62 | 标量函数的参数签名静态校验 | 已修四组，广义范围partial | ABS/upper/lower/length真实签名、同名用户匹配及SQL PREPARE入口；原126中86失败→最终132 PG/Root全0，100native及十一完整native/十一完整协议全0；其余回调/UDF通用签名仍待覆盖，见[记录](issue-review-r62-scalar-signatures.md) |
+| R62 | 标量函数的参数签名静态校验 | 原四组及R83十八固定名字，广义范围partial | ABS/upper/lower/length真实签名、同名用户匹配及SQL PREPARE入口；原126中86失败→最终132 PG/Root全0，100native及十一完整native/十一完整协议全0；十八固定float8名字另由R83独立验收，其余回调/UDF通用签名仍待覆盖，见[记录](issue-review-r62-scalar-signatures.md) |
 | R63 | DEFAULT的普通值表达式角色 | 已修复，已合主分支 | Root本地3ce5731b；集成真实重编后十五完整native/十完整协议全0；原33中17失败→PG/候选全0，22native及六完整native/十完整协议全0，合法DEFAULT/域/事务/长表达式保留；第一轮legacy仍9失败保留，见[记录](issue-review-r63-default-expression-role.md) |
 | R64 | 九个旧测试跨DDL保留过期目录引用 | 已修正夹具，已合主分支 | Root本地ef9e460e/6a4f0e9e/c6717180；集成真实重编后十五完整native/十完整协议全0；首三项150e5440、扩展六项ae583d88；新增runtime/sequence/trigger后累计九个原完整主分支夹具全0，保留当前/旧代阳性及全部原SQL/数据/故障断言；新执行器组合另验，见[记录](issue-review-r64-catalog-generation-fixtures.md) |
 | R65 | 未执行mutation图的child provider生命周期 | 用户暂缓，未修复 | 用户要求跳过；原五模式exit134/134/134/134/139及未验收改动已另存，不合入产品。部分模式仍失败，不能宣称修复；见[暂缓范围](deferred-scope.md) |
@@ -110,6 +115,7 @@ DROP/cache专项不自行重开，其余通用函数签名覆盖仍继续，不�
 | R80 | 未绑定列保护晚于参数类型推断 | 本范围已修复 | 新17 native原8失败→0，原窗口44 PG/Root全0；十一完整native/八完整协议0，不放宽真实TEXT算术，见[记录](issue-review-r80-unbound-scalar-inference.md) |
 | R81 | staging消失被当成恢复作业完成 | 已修正并验收夹具 | 首轮三入口、五次真实恢复及七个完整串行协议全0，复用R78精确轮询，保留20秒/真实窗口/数据断言；未改产品，见[记录](issue-review-r81-restore-stage-completion.md) |
 | R82 | 新冻结中的普通协议间歇性超时 | 未解决，继续定位 | JOIN setup原样再现超时，后完整原样通过；bound DML的ROLLBACK TO在全量超时，独立37项全0；未修改产品或期限，未证明同一根因，见[冻结及后续观测](issue-full-registered-d974c80d.md) |
+| R83 | 十八个固定float8标量的声明/回调所有权 | 本范围已修复，整体回归未全绿 | 新906签名/237回调控制及二十完整native全0；实际PG18.6与Root新951协议全0；完整协议16/17通过，完整PG在CREATE超时未解决；保留中间OID/前端UDF失败，见[记录](issue-review-r83-float8-scalar-signatures.md) |
 | O01 | owner健康重试及测试覆盖 | 已修复 | `c9a1e3c3`；原全部owner断言、新真实peer/dirty冲突及10完整native提交前/后通过；Root R14集成fresh58后两完整owner再次通过，见[验证](issue-review-o01-table-owner-health-retry.md) |
 | O02 | EXISTS索引错误的访问计划/断言 | 已修正回归夹具 | 原完整协议exit 1→0，保留六严格XX001，新增精确t/f，完整EXISTS协议/19native通过；未改产品，见[验证](issue-review-o02-index-access-path-expectations.md) |
 | O03 | EXPLAIN JOIN图及过时断言 | 已修复 | 实际执行的source/cache/join/scan图及相关重绑；最终完整60控制、十二native/十协议CLI全过，OFFSET阳性及42601原/PG对照保留，见[验证](issue-review-o03-explain-join-source-graph.md) |

@@ -12,7 +12,9 @@ R67普通视图替换以ca554c2f合入master，Root八完整native/九完整协�
 全0；R69短会话超时夹具以a3b3b4b9/d52779a0独立提交，Root完整PG、真实取消
 协议和CLI串行全0。记录见[逐项修复进度](review-fixes-2026-10-13.md)。
 
-R62已完成ABS/upper/lower/length四组声明签名，通用回调/UDF范围仍partial；
+R62已完成ABS/upper/lower/length四组声明签名；后续[R83十八固定float8名字](issue-review-r83-float8-scalar-signatures.md)
+二十完整native及新951协议已通过、完整协议16/17通过（完整PG的CREATE超时
+仍未解决），通用回调/UDF范围仍partial；
 R68整数ABS范围及空输入常量分析已验收。R70实际全文类型身份、R71目标目录
 事务发布、R72别名锁去重、R73纯常量绑定、R74 owner夹具及R75异常锁释放均
 已分别本地commit。原三个generation/snapshot、两个owner、extended literal及
@@ -44,6 +46,11 @@ binary/cache/58 receipt与独立只读终态检查一致。R79/R80两个原失�
    prepared DML末尾DROP失败保留，R51暂缓范围不因通用继续而重开，不猜测为相同根因。
 4. 继续R62其余通用函数签名及原未完成普通问题；有产品变更后重新匹配构建和门禁，
    再另行冻结全注册回归。不删原失败、放宽断言或增加期限来宣布全绿。
+
+本次R83新增两个原生和一个注册协议驱动；最新组合为862 native + 3真实Main
+frontend + 500 Python = 1365入口，尚未执行这套新组合全量。Markdown505份、
+本地inline目标839次、Python AST520、shell13，注册500 unique/482独立E2E均通过。
+旧1362完整终态和504份检查属于前次输入，不由本次定向通过改写。
 
 按[准确暂缓范围](deferred-scope.md)保持已跳过模块，不自动扩展到普通SQL或存储错误。
 新组合需要重新运行全注册入口；本轮定向通过不能完成原273总账或把历史FAILED改绿。
