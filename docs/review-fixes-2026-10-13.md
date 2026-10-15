@@ -15,7 +15,14 @@
 
 用户此前暂缓的安全/TDE及CTAS/后台checkpoint专项仍暂缓；本轮普通数据完整性与现有回归失败照常修复。CMake、TLS及sanitizer的实际验证范围按结果记录。
 
-最近完整终态为[冻结27bac6ee](issue-full-registered-27bac6ee.md)：1368入口，
+最近完整终态为[冻结332bcff4](issue-full-registered-332bcff4.md)：2026-10-15
+15:15 UTC实际退出1，1382入口全部各一次，1379实际通过/1 TLS环境skip/2失败。
+全部冻结输入、58 receipt及57份test库字节独立复核0；新增14入口和旧六失败入口
+本轮均通过。新失败是stored-function-owner末尾DROP断言和SQRT准备阶段CREATE
+SCHEMA超时，不猜测为算法错误或同根因，不重开R51。原273状态不变，继续按新
+终态页计划先复现TOAST缺失计数器等普通问题，逐项修复/验证/本地commit。
+
+前次完整终态为[冻结27bac6ee](issue-full-registered-27bac6ee.md)：1368入口，
 1361实际通过、1个TLS环境skip、6失败，无遗漏/重复；全部冻结检查、58份
 生产receipt及57份test库对象逐字节独立复核一致。R83/R84/R85六个新增入口均0。
 该冻结的一个末尾DROP断言和五处超时完整保留。后续R90修复TOAST计数发布开销，

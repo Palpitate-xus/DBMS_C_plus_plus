@@ -7,7 +7,16 @@
 
 ## 2026-10-15后续执行计划
 
-最新[冻结27bac6ee全量](issue-full-registered-27bac6ee.md)已完整终态：1368入口，
+最新[冻结332bcff4全量](issue-full-registered-332bcff4.md)已实际终1：1382入口
+各一次，1379实际通过/1 TLS环境skip/2失败；独立输入/58 receipt/57 test库
+字节核对0。新增14入口和旧六失败入口均通过，但stored-function-owner末尾
+DROP断言与SQRT准备阶段CREATE SCHEMA超时仍须保留；R51不重开，SQRT算法
+并未进入46项控制。先独立提交终态，再对TOAST缺失计数器运行真实旧实现基线，
+兼顾合法ADD/DROP重写初始化；普通CREATE超时、聚合/数组等候选与原273未完
+要求继续。无源码草案代替执行，无局部/全量回归代替原要求完成。
+
+以下为先前各修复完成时的计划与证据，后续1382组合现已实际运行：
+[冻结27bac6ee全量](issue-full-registered-27bac6ee.md)已完整终态：1368入口，
 1361实际通过/1 TLS环境skip/6失败，全部输入及58 receipt/57 test库字节复核0。
 先逐项保存失败，再用原完整COPY作单次外部诊断，随后对普通数组/数值/聚合
 候选先旧基线、再修复/回归/独立commit。不放宽断言/期限，不重开用户暂缓项。

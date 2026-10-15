@@ -1,5 +1,12 @@
 # 2026-10-13 全仓库审查
 
+最新[冻结332bcff4完整回归](issue-full-registered-332bcff4.md)已于2026-10-15
+15:15 UTC实际终1：1382入口各一次，1379实际通过/1 TLS环境skip/2失败，全部
+冻结输入及58 receipt/57 test库字节独立核对0。新增14入口和旧六失败入口本轮
+均通过，但末尾DROP断言及SQRT准备阶段CREATE SCHEMA超时未解决；不重开暂缓
+专项，不把SQRT未执行的46控制或原273总清单写成完成。22 complete、166 partial、
+70 unverified、15 deferred不变，继续逐项复现、修复和本地commit，不push。
+
 新增问题、实际 SQL/协议观测、测试和文档检查见[审查报告](code-review-2026-10-13.md)。
 本轮发现不以新增原总账 ID 的方式重复计数：窗口问题归 QRY/执行器，数值问题归 TYPE/FUNC，协议和连接池归协议/运行时，持久化问题归 CAT/WAL；原273条状态不因文档更新而提升。
 Root两修复合入后的专项验证已终止：60/60 native、45/46 wire通过，ALTER ARRAY fixture在类型重写语句处超时。新完整注册回归与新增问题的结果以本轮报告为准。
