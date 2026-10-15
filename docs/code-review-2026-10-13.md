@@ -3,7 +3,7 @@
 ## 输入与结论范围
 
 本页保留原始审查基准；后续实现状态见[逐项修复](review-fixes-2026-10-13.md)，
-新组合的实际全量终态见[冻结b5def9ba记录](issue-full-registered-b5def9ba.md)。
+新组合的实际全量终态见[冻结d974c80d记录](issue-full-registered-d974c80d.md)。
 下文的原始失败和统计不代表后续修复仍未完成，也不由局部通过改写。
 
 审查基准为 `a502ffa30df379c88f176c377cdd0f1dae4f3cd4`，产品源码末次提交 `2dc9554e`。

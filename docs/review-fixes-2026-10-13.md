@@ -15,11 +15,14 @@
 
 用户此前暂缓的安全/TDE及CTAS/后台checkpoint专项仍暂缓；本轮普通数据完整性与现有回归失败照常修复。CMake、TLS及sanitizer的实际验证范围按结果记录。
 
-最近完整终态为[冻结b5def9ba](issue-full-registered-b5def9ba.md)：1360入口，
-1358 PASSED退出（含TLS环境skip）及2 FAILED，无遗漏/重复，全部冻结fence一致。
-两个新失败随后由R80 `6456ad4f`、R79 `7c294fe7`分别验收提交；R81 `a7f0e404`
-补齐恢复阶段夹具，五次真实恢复及七项完整串行门禁0。当前860 native+3实际Main+
-499 Python，共1362；新组合全注册尚待另行冻结，不把定向验收写成全量终态。
+最近完整终态为[冻结d974c80d](issue-full-registered-d974c80d.md)：2026-10-15
+01:25 UTC，1362入口、1359 PASSED退出（含1个TLS环境skip）、3 FAILED，
+无遗漏/重复，全部冻结fence及独立58 receipt复核一致。上一轮两个失败经
+R80 `6456ad4f`、R79 `7c294fe7`修复后，本轮原完整入口均0；R81 `a7f0e404`
+真实恢复和完整DIV14也0。新失败为prepared DML末尾DROP清理断言、JOIN准备阶段
+socket timeout、bound DML的ROLLBACK TO timeout；逐项保留，未宣布全绿。
+先按原完整驱动/期限复现两个普通协议超时，再按确证根因修复；用户暂缓的
+DROP/cache专项不自行重开，其余通用函数签名覆盖仍继续，不改原273总账完成状态。
 
 ## 逐项清单
 

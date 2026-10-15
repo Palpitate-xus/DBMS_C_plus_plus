@@ -5,7 +5,7 @@
 原 273 项状态仍为 22 complete、166 partial、70 unverified、15 deferred_by_user；CTAS／后台 checkpoint 另按用户要求暂缓，详见[范围说明](deferred-scope.md)。
 本轮新运行的终态以审查报告为准。保留独立本地 commit，不 push，Actions 保持禁用。
 
-## 2026-10-14后续执行计划
+## 2026-10-15后续执行计划
 
 本次跳过R65，保留未验收补丁和失败证据，不合入其产品代码。
 R67普通视图替换以ca554c2f合入master，Root八完整native/九完整协议（含新80检查）
@@ -25,16 +25,23 @@ R76/R77本范围分别验收并提交；[R78恢复轮询](issue-review-r78-resto
 前次20个失败入口本轮均0；新暴露的复杂未绑定参数由R80 `6456ad4f`修复，
 原生二进制LENGTH由R79 `7c294fe7`修复，分别有失败复现、完整邻居和独立commit。
 
+2026-10-15新组合[冻结d974c80d全量](issue-full-registered-d974c80d.md)已终态：
+1362入口，1359 PASSED退出（含TLS skip）及3 FAILED；无遗漏/重复，全部输入/
+binary/cache/58 receipt与独立只读终态检查一致。R79/R80两个原失败均0，三个
+新观测不能改写为通过，也不证明共享根因。
+
 当前执行顺序：
 
 1. 已完成[R81恢复阶段夹具](issue-review-r81-restore-stage-completion.md)，`a7f0e404`：
    五次真实恢复及完整PG/取消/CLI/COPY/DIV14等七入口串行全0；不改产品或20秒期限。
-2. 已核对503份Markdown、821个本地目标、519 Python AST/13 shell、499注册入口及
-   六个总账单测；文档检查不代表所有历史技术结论当前都已验证。提交证据及当前计划。
-3. 下一步冻结最新干净HEAD、tracked输入、binary、cache及58份receipt，重新运行未筛选
-   标准全注册入口。当前860 native、3实际Main frontend、499 Python，共1362。
-   运行期间不改文件/HEAD，结束严格核对覆盖、失败、环境skip及全部fence；若有
-   新失败，保留原证据并逐项修复提交，不提前宣布全绿。
+2. 已复查504份Markdown、830个本地内联目标、519 Python AST/13 shell，以及
+   499注册入口/481独立E2E和六个总账单测，全部0；提交冻结证据和三个失败的
+   定位方法。历史503份检查不改写，文档检查不代表所有技术结论当前已验收。
+3. 使用原完整JOIN和bound DML协议驱动、原期限、串行观测复现setup和ROLLBACK TO
+   timeout；记录具体SQL、耗时及服务端线程状态，按确证根因独立修复/回归/commit。
+   prepared DML末尾DROP失败保留，R51暂缓范围不因通用继续而重开，不猜测为相同根因。
+4. 继续R62其余通用函数签名及原未完成普通问题；有产品变更后重新匹配构建和门禁，
+   再另行冻结全注册回归。不删原失败、放宽断言或增加期限来宣布全绿。
 
 按[准确暂缓范围](deferred-scope.md)保持已跳过模块，不自动扩展到普通SQL或存储错误。
 新组合需要重新运行全注册入口；本轮定向通过不能完成原273总账或把历史FAILED改绿。
