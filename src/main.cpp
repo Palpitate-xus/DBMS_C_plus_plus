@@ -24962,6 +24962,13 @@ static bool executeInternal(const string& rawSql, Session& s) {
         }
         const auto* shown = dynamic_cast<const dbms::SetStmt*>(
             showParsed.stmt.get());
+        if (shown && shown->isShow && shown->name == "max_parallel_workers_per_gather") {
+            const auto value = to_string(g_config.maxParallelWorkersPerGather);
+            publishStructuredUtilityResult(
+                {shown->name}, {"text"}, {{value}}, {{false}}, "SHOW");
+            cout << shown->name << endl << value << endl;
+            return false;
+        }
         if (shown && shown->isShow && shown->name == "transaction_isolation") {
             // Outside a block, show the default used by a fresh SQL BEGIN,
             // not the engine's retained characteristics of an ended block.

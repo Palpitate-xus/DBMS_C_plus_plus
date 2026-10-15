@@ -5906,6 +5906,8 @@ ParseResult SQLParser::parseShow(const std::string& sql) {
     const std::string parameter = toLower(stmt->name);
     const bool isolationName = parameter == "transaction_isolation" ||
                                parameter == "\"transaction_isolation\"";
+    const bool parallelName = parameter == "max_parallel_workers_per_gather" ||
+                              parameter == "\"max_parallel_workers_per_gather\"";
     if (parameter == "transaction") {
         if (pos + 1 >= tokens.size() ||
             toLower(tokens[pos]) != "isolation" ||
@@ -5915,11 +5917,11 @@ ParseResult SQLParser::parseShow(const std::string& sql) {
         }
         pos += 2;
     }
-    if (isolationName || parameter == "transaction") {
-        stmt->name = "transaction_isolation";
+    if (isolationName || parameter == "transaction" || parallelName) {
+        stmt->name = parallelName ? "max_parallel_workers_per_gather" : "transaction_isolation";
         if (pos < tokens.size() && tokens[pos] == ";") ++pos;
         if (pos != tokens.size()) {
-            r.error = "unexpected input after SHOW transaction_isolation";
+            r.error = "unexpected input after SHOW " + stmt->name;
             return r;
         }
     }

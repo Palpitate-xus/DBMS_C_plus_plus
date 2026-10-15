@@ -2423,9 +2423,10 @@ bool describePreparedResult(const std::string& sql, Session& session,
     ParseResult parsed = parser.parse(sql);
     if (!parsed.isValid()) return false;
     if (const auto* shown = dynamic_cast<const SetStmt*>(parsed.stmt.get())) {
-        if (shown->isShow && shown->name == "transaction_isolation") {
+        if (shown->isShow && (shown->name == "transaction_isolation" ||
+                              shown->name == "max_parallel_workers_per_gather")) {
             QueryResult shape;
-            shape.columns = {"transaction_isolation"};
+            shape.columns = {shown->name};
             shape.columnTypes = {"text"};
             columns = describeProtocolColumns(shape, sql, session);
             return !columns.empty();

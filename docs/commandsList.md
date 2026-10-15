@@ -1163,6 +1163,11 @@ SELECT * FROM pg_catalog.pg_stat_tables;
 
 **说明** 显示当前运行时的配置变量值。
 
+`SHOW max_parallel_workers_per_gather;` 返回当前生效的并行worker配置，单列
+TEXT，支持Simple/Extended执行和Statement Describe。该参数在本项目中为进程
+级设置，修改配置后需通过现有reload路径应用；SHOW不会自行修改或重载配置。
+这不代表普通session SET或所有PostgreSQL配置参数均已兼容。
+
 **示例**
 ```sql
 SHOW VARIABLES;

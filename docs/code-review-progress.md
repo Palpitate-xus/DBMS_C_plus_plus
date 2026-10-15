@@ -1,5 +1,9 @@
 # 2026-10-13 审查与验证入口
 
+后续[R94配置SHOW](issue-review-r94-show-parallel-workers.md)专项40、原完整
+152、六个完整native及十个不同完整协议全部通过；不改写R93历史1。
+新880 native+3 Main+506 Python=1389尚未全量运行，原273完成状态不变。
+
 后续[R93布尔聚合参数](issue-review-r93-boolean-aggregate-arguments.md)核心
 408+68控制、21个不同完整native及18个完整协议邻居通过；原152协议150通过，
 仅独立SHOW两项失败保留，本范围修复不代表整套全绿。
