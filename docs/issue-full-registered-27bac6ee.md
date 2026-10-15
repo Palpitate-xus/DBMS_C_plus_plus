@@ -82,3 +82,41 @@ error/lock-release也通过。它们不是新的产品修复证明，原失败�
 原273项仍为22 complete、166 partial、70 unverified、15 deferred_by_user，
 R62广义函数/UDF范围仍partial。总目标没有全部完成。修复逐项保留本地commit，
 不push；GitHub Actions工作流继续禁用，README保留长期项目入口。
+
+## 终态后COPY原期限的单次诊断：捕获到失败现场
+
+在修改产品之前，同一生产binary下单次运行原完整COPY，外部观察器复用了
+只记录慢fsync的preload，并在唯一client的直接read_until_ready/read_message
+真实TimeoutError内部取栈。原SQL、帧字节、断言、15秒socket期限及清理不变，
+没有重试；无其他Root构建/测试并行。诊断会扰动时序，不计为无插桩验收。
+
+证据仍在 `/tmp/dbms-review-r46.ifu6SWLp/`：
+`r82-copy-stream-frozen27-1-client.log`、同名前缀server.log，以及
+`r82-copy-stream-frozen27-1-symbolized-156e45e9.txt`。driver实际exit1，
+仍在原line262超时；fixture子进程随后正常清理exit0不等于COPY成功。
+实际CopyData body为4195840字节、wire frame为4195845字节，CopyDone为5字节；
+原sendall均返回后才进入等待，首个响应字节实际等待15.014426076秒后超时。
+这不证明服务器已经消费完CopyData或执行到CopyDone提交。
+
+仅对该次Popen自有临时服务器，在核对PID/start ticks/exe/cwd/两个preload
+及READY标记后发送取栈信号；四个线程均收到信号。先取wchan，再顺序取栈。
+COPY线程的实际符号链为 `receiveCopyIn insertRecord -> insertRow ->
+insertInternal -> maybeAutoAnalyze -> analyzeTable -> sort -> compareValues ->
+文本collation -> strcoll`；该线程预采wchan为0。binary无精确debug行号，
+报告只给真实函数符号；源码行位置来自另行源码读取，不伪造PC到行的精确映射。
+
+源码确认普通插入在修改计数达到默认50时，同步调用全表ANALYZE；统计排序
+逐对含两次self-compare及一次小于比较，长TEXT会实际detoast并进入locale比较。
+这是具体的同步维护/CPU扫描放大候选，不证明一次strcoll持续15秒、比较死锁，
+也不证明该链解释其他四处协议超时或本轮原始无插桩运行的全部耗时。
+
+在首个真实等待窗口内，COPY线程有18个至少50ms的成功fsync：9个toastmeta
+临时文件合计约2.867秒，9个info目录合计约2.748秒，合计约5.615秒。
+另一线程的14个heap/WAL成功同步与其有重叠，不能跨线程相加当墙钟耗时。
+所有32个调用均返回0；残留errno不是I/O失败。更快的同步没有被记录，
+这些调用的合计也不是完整查询剖析。
+
+后续分别验证自动统计的重复比较/全表物化开销与长值元数据发布成本，保持
+类型、NULL、locale排序和恢复/持久化语义；不能删fsync、减少样本或提高期限
+来制造通过。观察到已有后台线程不意味着重开用户暂缓的后台checkpoint专项。
+本次只定位，未合入产品修复；R82及原六项FAILED保持未解决。

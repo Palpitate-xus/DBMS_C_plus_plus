@@ -120,7 +120,7 @@ socket超时，精确SQL/栈和原期限保留，尚未确定根因，不称新�
 | R79 | LENGTH原生二进制别名的签名身份 | 本范围已修复 | 新30控制19失败→0，原九控制及十三完整native/十完整协议0；PG六组语义对照0，签名身份与raw codec分离，见[记录](issue-review-r79-native-binary-length.md) |
 | R80 | 未绑定列保护晚于参数类型推断 | 本范围已修复 | 新17 native原8失败→0，原窗口44 PG/Root全0；十一完整native/八完整协议0，不放宽真实TEXT算术，见[记录](issue-review-r80-unbound-scalar-inference.md) |
 | R81 | staging消失被当成恢复作业完成 | 已修正并验收夹具 | 首轮三入口、五次真实恢复及七个完整串行协议全0，复用R78精确轮询，保留20秒/真实窗口/数据断言；未改产品，见[记录](issue-review-r81-restore-stage-completion.md) |
-| R82 | 新冻结中的普通协议间歇性超时 | 未解决，继续定位 | 原JOIN/ROLLBACK TO及CREATE失败保留；最新全量有PG CREATE、TEMP保护步骤、COPY完成、SAVEPOINT和extended ALTER五处超时；不改期限或假定同根因，见[最新全量及方法](issue-full-registered-27bac6ee.md)和[原后续观测](issue-full-registered-d974c80d.md) |
+| R82 | 新冻结中的普通协议间歇性超时 | 未解决，继续定位 | 最新全量五处超时保留；原完整COPY单次诊断再现line262，捕获同步auto-ANALYZE排序栈及COPY线程约5.615秒成功慢sync，尚非完整根因或修复；不改期限/持久化语义，见[最新全量及方法](issue-full-registered-27bac6ee.md)和[原后续观测](issue-full-registered-d974c80d.md) |
 | R83 | 十八个固定float8标量的声明/回调所有权 | 本范围已修复，整体回归未全绿 | 新906签名/237回调控制及二十完整native全0；实际PG18.6与Root新951协议全0；完整协议16/17通过，完整PG在CREATE超时未解决；保留中间OID/前端UDF失败，见[记录](issue-review-r83-float8-scalar-signatures.md) |
 | R84 | CEIL/CEILING/FLOOR输出类型与opaque回调 | 本范围已修复，整体回归未全绿 | 旧274/144及266/138失败保留；当前310回调/metadata与Root/PG266通过；21个不同native均有完整通过记录，首批DROP清理134保留；完整协议16/17通过，COPY的CREATE超时未定因，见[记录](issue-review-r84-integral-rounding-result-types.md) |
 | R85 | SIGN的numeric/decimal NULL结果域 | 本范围已修复 | 旧21/4失败、加强25/6失败保留；当前25与十一完整native/八完整协议全0，PG/Root对应20协议全0；原完整PG/COPY超时和全注册组合独立保留，不扩为通用SIGN签名完成，见[记录](issue-review-r85-numeric-sign-null.md) |
