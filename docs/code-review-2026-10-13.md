@@ -11,6 +11,9 @@
 真实243→1操作次数及完整邻居验证；原完整COPY仍超时，未关闭原六项失败。
 [R89 ROUND单参数声明](issue-review-r89-round-single-result-domains.md)另有独立
 旧实现失败及PG对照；完整签名/双参数/TRUNC范围仍未完成。
+[R90 TOAST计数发布](issue-review-r90-toast-durable-id-reservations.md)已有
+21不同native、原完整COPY固定三次和七协议邻居通过；其余历史失败入口复查
+三过一SAVEPOINT超时，原冻结结果不改写，新1380组合尚未全量运行。
 下文的原始失败和统计不代表后续修复仍未完成，也不由局部通过改写。
 
 审查基准为 `a502ffa30df379c88f176c377cdd0f1dae4f3cd4`，产品源码末次提交 `2dc9554e`。

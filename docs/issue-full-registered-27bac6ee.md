@@ -120,3 +120,16 @@ insertInternal -> maybeAutoAnalyze -> analyzeTable -> sort -> compareValues ->
 类型、NULL、locale排序和恢复/持久化语义；不能删fsync、减少样本或提高期限
 来制造通过。观察到已有后台线程不意味着重开用户暂缓的后台checkpoint专项。
 本次只定位，未合入产品修复；R82及原六项FAILED保持未解决。
+
+## 后续 R90：不改写冻结失败的当前修复验证
+
+后续[TOAST ID 持久化预留](issue-review-r90-toast-durable-id-reservations.md)
+保留发布同步屏障，把64次分配的计数发布64→1；原完整COPY在原15秒期限下
+固定三次完整通过，均到达后面的慢读COPY TO取消断言。此处是后续产品输入
+的独立验证，不把本页冻结27bac6ee的六个FAILED改成通过，也不是新1380组合
+已经完整运行。首版UINT64末尾区间回归和修正证据另在R90保存。
+
+R90另原样串行复查其余四个普通协议失败入口，默认PG/LATERAL/CHECK完整通过，
+MV目标矩阵仍在SAVEPOINT超时，本次前一sentinel65；整个复查包装器实际exit1，
+其终态输入/binary/58 receipt一致。三个通过不证明它们的旧超时已被本项修复。
+R51末尾DROP/cache专项仍暂缓；后续需新的全注册运行和逐根因核实。

@@ -45,3 +45,13 @@ STO-06 remains partial. PostgreSQL-compatible varlena/external-pointer layout,
 column storage strategy, configurable target, PGLZ/LZ4, TOAST deduplication,
 and complete transactional/WAL integration remain open; this audit does not
 claim those capabilities are implemented.
+
+## Independent allocator follow-up
+
+[R90 durable ID reservations](issue-review-r90-toast-durable-id-reservations.md)
+addresses repeated counter-publication cost without removing durability barriers.
+The same checksummed 24-byte counter now records the exclusive upper bound of
+durably reserved IDs; unused IDs may be skipped after replacement or restart.
+This does not change the chunk format, compression/storage policies or the
+partial status above. The historical audit/test results are not rewritten as
+acceptance of the later implementation.

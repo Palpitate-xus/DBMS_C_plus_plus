@@ -16048,6 +16048,65 @@ static bool persistToastCounter(const std::filesystem::path& path,
     return index_file::writeAtomically(path, bytes);
 }
 
+// Reserve IDs only after the unchanged atomic file+directory durability
+// barrier. One reservation per thread bounds memory/FD use and avoids any
+// process-global mutex (including an inherited locked mutex after fork).
+class ToastIdReservation {
+public:
+    ~ToastIdReservation() { clear(); }
+    ToastIdReservation() = default;
+    ToastIdReservation(const ToastIdReservation&) = delete;
+    ToastIdReservation& operator=(const ToastIdReservation&) = delete;
+
+    void clear() {
+        if (fd_ >= 0) (void)::close(fd_);
+        fd_ = -1;
+        next_ = limit_ = 0;
+    }
+
+    bool take(const std::filesystem::path& path, uint64_t durableLimit,
+              uint64_t& allocated) {
+        if (fd_ < 0 || process_ != ::getpid() || next_ >= limit_ ||
+            durableLimit != limit_) return false;
+        struct stat current {}, held {};
+        // Pin the reserved inode until invalidation: unlink/recreate cannot
+        // recycle its inode and accidentally validate a stale reservation.
+        // Counter replacement by another writer, restore or TRUNCATE burns
+        // any remaining IDs rather than applying them to the new generation.
+        if (::stat(path.c_str(), &current) != 0 ||
+            ::fstat(fd_, &held) != 0 || !S_ISREG(current.st_mode) ||
+            current.st_dev != held.st_dev || current.st_ino != held.st_ino)
+            return false;
+        allocated = next_++;
+        return true;
+    }
+
+    void remember(const std::filesystem::path& path, uint64_t next,
+                  uint64_t limit) {
+        clear();
+        const int descriptor = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+        if (descriptor < 0) return; // The first ID is still durably covered.
+        struct stat identity {};
+        if (::fstat(descriptor, &identity) != 0 || !S_ISREG(identity.st_mode)) {
+            (void)::close(descriptor);
+            return;
+        }
+        fd_ = descriptor;
+        process_ = ::getpid();
+        next_ = next;
+        limit_ = limit;
+    }
+
+private:
+    int fd_ = -1;
+    pid_t process_ = 0;
+    uint64_t next_ = 0;
+    uint64_t limit_ = 0;
+};
+
+thread_local ToastIdReservation toastIdReservation;
+constexpr uint64_t TOAST_ID_RESERVATION_SIZE = 128;
+
 constexpr uint32_t PHYSICAL_RELATION_COUNTER_MAGIC = 0x31444947u;  // GID1
 
 static DBStatus readPhysicalRelationCounterChecked(const std::filesystem::path& path,
@@ -16206,26 +16265,31 @@ void StorageEngine::closeAllToast() {
 }
 
 uint64_t StorageEngine::allocToastId(const std::string& dbname, const std::string& tablename) {
+    const auto invalidCounter = []() -> uint64_t {
+        toastIdReservation.clear();
+        return 0;
+    };
     auto metaPath = toastMetaPath(dbname, tablename);
     ToastCounterFileLock counterLock(metaPath);
-    if (!counterLock.ok()) return 0;
+    if (!counterLock.ok()) return invalidCounter();
 
     uint64_t nextId = 1;
+    bool canonicalCounter = false;
     std::error_code ec;
     const bool exists = std::filesystem::exists(metaPath, ec);
-    if (ec) return 0;
+    if (ec) return invalidCounter();
     if (exists) {
         const uintmax_t fileSize = std::filesystem::file_size(metaPath, ec);
         if (ec || (fileSize != TOAST_COUNTER_LEGACY_SIZE &&
                    fileSize != TOAST_COUNTER_SIZE)) {
-            return 0;
+            return invalidCounter();
         }
         std::ifstream ifs(metaPath, std::ios::binary);
-        if (!ifs) return 0;
+        if (!ifs) return invalidCounter();
         std::string bytes(static_cast<size_t>(fileSize), '\0');
         if (!ifs.read(bytes.data(), static_cast<std::streamsize>(bytes.size())) ||
             ifs.peek() != std::char_traits<char>::eof()) {
-            return 0;
+            return invalidCounter();
         }
         if (bytes.size() == TOAST_COUNTER_LEGACY_SIZE) {
             std::memcpy(&nextId, bytes.data(), sizeof(nextId));
@@ -16242,15 +16306,32 @@ uint64_t StorageEngine::allocToastId(const std::string& dbname, const std::strin
             if (magic != TOAST_COUNTER_MAGIC || version != TOAST_COUNTER_VERSION ||
                 storedChecksum != toastCounterChecksum(bytes.data(),
                                                        TOAST_COUNTER_PAYLOAD_SIZE)) {
-                return 0;
+                return invalidCounter();
             }
+            canonicalCounter = true;
         }
     }
-    if (nextId == 0 || nextId == std::numeric_limits<uint64_t>::max()) return 0;
+    if (nextId == 0) return invalidCounter();
 
-    uint64_t allocated = nextId;
-    ++nextId;
-    if (!persistToastCounter(metaPath, nextId)) return 0;
+    // Always reread and validate the actual counter under the existing
+    // cross-process lock, even on a hit. A cache cannot hide corruption,
+    // legacy-format replacement, another allocator or a changed file.
+    uint64_t allocated = 0;
+    if (canonicalCounter && toastIdReservation.take(metaPath, nextId, allocated))
+        return allocated;
+    // UINT64_MAX is the exhausted durable floor, but an already confirmed
+    // final reservation may still contain IDs strictly below that floor.
+    if (nextId == std::numeric_limits<uint64_t>::max()) return invalidCounter();
+
+    toastIdReservation.clear();
+    allocated = nextId;
+    const auto count = std::min(TOAST_ID_RESERVATION_SIZE,
+        std::numeric_limits<uint64_t>::max() - nextId);
+    const uint64_t limit = nextId + count;
+    if (!persistToastCounter(metaPath, limit)) return invalidCounter();
+    // Publish a reservation only after both syncs succeed. On failure after
+    // rename, the next attempt burns the unconfirmed range from its new floor.
+    toastIdReservation.remember(metaPath, allocated + 1, limit);
     return allocated;
 }
 

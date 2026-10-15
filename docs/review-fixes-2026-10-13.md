@@ -18,8 +18,9 @@
 最近完整终态为[冻结27bac6ee](issue-full-registered-27bac6ee.md)：1368入口，
 1361实际通过、1个TLS环境skip、6失败，无遗漏/重复；全部冻结检查、58份
 生产receipt及57份test库对象逐字节独立复核一致。R83/R84/R85六个新增入口均0。
-一个末尾DROP清理断言和五个普通协议超时仍未解决；先记录完整COPY直接读取
-路径的失败现场，再独立修复普通数组/数值/聚合问题，不调期限或重开暂缓专项。
+该冻结的一个末尾DROP断言和五处超时完整保留。后续R90修复TOAST计数发布开销，
+原完整COPY三次通过；另复查默认PG/LATERAL/CHECK通过，MV目标仍在SAVEPOINT
+超时，三个通过不证明旧间歇性超时已修复。新1380组合未全量运行，R51仍暂缓。
 
 前次完整终态[冻结d974c80d](issue-full-registered-d974c80d.md)：2026-10-15
 01:25 UTC，1362入口、1359 PASSED退出（含1个TLS环境skip）、3 FAILED，
@@ -120,7 +121,7 @@ socket超时，精确SQL/栈和原期限保留，尚未确定根因，不称新�
 | R79 | LENGTH原生二进制别名的签名身份 | 本范围已修复 | 新30控制19失败→0，原九控制及十三完整native/十完整协议0；PG六组语义对照0，签名身份与raw codec分离，见[记录](issue-review-r79-native-binary-length.md) |
 | R80 | 未绑定列保护晚于参数类型推断 | 本范围已修复 | 新17 native原8失败→0，原窗口44 PG/Root全0；十一完整native/八完整协议0，不放宽真实TEXT算术，见[记录](issue-review-r80-unbound-scalar-inference.md) |
 | R81 | staging消失被当成恢复作业完成 | 已修正并验收夹具 | 首轮三入口、五次真实恢复及七个完整串行协议全0，复用R78精确轮询，保留20秒/真实窗口/数据断言；未改产品，见[记录](issue-review-r81-restore-stage-completion.md) |
-| R82 | 新冻结中的普通协议间歇性超时 | 未解决，继续定位 | 最新全量五处超时保留；原完整COPY单次诊断再现line262，捕获同步auto-ANALYZE排序栈及COPY线程约5.615秒成功慢sync，尚非完整根因或修复；不改期限/持久化语义，见[最新全量及方法](issue-full-registered-27bac6ee.md)和[原后续观测](issue-full-registered-d974c80d.md) |
+| R82 | 新冻结中的普通协议间歇性超时 | COPY本路径修复，其它继续定位 | 原五处超时保留；原COPY诊断捕获auto-ANALYZE及约5.615秒慢sync，后续[R90](issue-review-r90-toast-durable-id-reservations.md)保留持久化屏障后原完整COPY三次通过；其它复查三过一SAVEPOINT超时，不冒共享根因，见[冻结及方法](issue-full-registered-27bac6ee.md)和[原观测](issue-full-registered-d974c80d.md) |
 | R83 | 十八个固定float8标量的声明/回调所有权 | 本范围已修复，整体回归未全绿 | 新906签名/237回调控制及二十完整native全0；实际PG18.6与Root新951协议全0；完整协议16/17通过，完整PG在CREATE超时未解决；保留中间OID/前端UDF失败，见[记录](issue-review-r83-float8-scalar-signatures.md) |
 | R84 | CEIL/CEILING/FLOOR输出类型与opaque回调 | 本范围已修复，整体回归未全绿 | 旧274/144及266/138失败保留；当前310回调/metadata与Root/PG266通过；21个不同native均有完整通过记录，首批DROP清理134保留；完整协议16/17通过，COPY的CREATE超时未定因，见[记录](issue-review-r84-integral-rounding-result-types.md) |
 | R85 | SIGN的numeric/decimal NULL结果域 | 本范围已修复 | 旧21/4失败、加强25/6失败保留；当前25与十一完整native/八完整协议全0，PG/Root对应20协议全0；原完整PG/COPY超时和全注册组合独立保留，不扩为通用SIGN签名完成，见[记录](issue-review-r85-numeric-sign-null.md) |
@@ -128,6 +129,7 @@ socket超时，精确SQL/栈和原期限保留，尚未确定根因，不称新�
 | R87 | MOD的有限整数宽度/numeric NULL结果域 | 本范围已修复 | 旧254/126失败、10查询/4失败；最终254+153、十四完整native/十一完整协议及PG130全0；首版121/90个native回归保留，最终保护无声明复杂输入，不扩完整签名，见[记录](issue-review-r87-mod-result-domains.md) |
 | R88 | ANALYZE 重复验证/相同长文本比较开销 | 本范围已修复，COPY 未关闭 | `813f5105`；同32长值的真实locale比较243→1，全部统计值不变；96列/运行控制、十四完整native及六完整统计协议通过；原完整COPY仍line262超时，见[记录](issue-review-r88-analyze-sort-comparison-cost.md) |
 | R89 | ROUND 单参数的有限结果声明 | 本范围已修复 | 旧124/48失败、91协议/44失败；最终124+97、十七完整native/十二完整协议及PG91全0；首版native97/6回归保留并收窄输入域，不扩完整签名/双参数/TRUNC范围，见[记录](issue-review-r89-round-single-result-domains.md) |
+| R90 | TOAST ID 持久化区间预留 | 本范围已修复 | 旧64次分配/64次发布→1次；首版UINT64尾部断言失败保留并修正；21不同完整native、原完整COPY固定三次及七完整协议邻居全0，另四历史失败入口三过一SAVEPOINT超时；不扩完整持久性，见[记录](issue-review-r90-toast-durable-id-reservations.md) |
 | O01 | owner健康重试及测试覆盖 | 已修复 | `c9a1e3c3`；原全部owner断言、新真实peer/dirty冲突及10完整native提交前/后通过；Root R14集成fresh58后两完整owner再次通过，见[验证](issue-review-o01-table-owner-health-retry.md) |
 | O02 | EXISTS索引错误的访问计划/断言 | 已修正回归夹具 | 原完整协议exit 1→0，保留六严格XX001，新增精确t/f，完整EXISTS协议/19native通过；未改产品，见[验证](issue-review-o02-index-access-path-expectations.md) |
 | O03 | EXPLAIN JOIN图及过时断言 | 已修复 | 实际执行的source/cache/join/scan图及相关重绑；最终完整60控制、十二native/十协议CLI全过，OFFSET阳性及42601原/PG对照保留，见[验证](issue-review-o03-explain-join-source-graph.md) |
