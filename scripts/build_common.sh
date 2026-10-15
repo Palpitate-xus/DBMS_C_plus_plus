@@ -215,6 +215,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/array_element_typmod_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/alter_array_type_envelope_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/explicit_array_bounds_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/array_position_empty_null_start_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/delete_exception_owner_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/delete_bound_returning_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/insert_update_returning_subquery_protocol_e2e_test.py)

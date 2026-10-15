@@ -124,6 +124,7 @@ socket超时，精确SQL/栈和原期限保留，尚未确定根因，不称新�
 | R83 | 十八个固定float8标量的声明/回调所有权 | 本范围已修复，整体回归未全绿 | 新906签名/237回调控制及二十完整native全0；实际PG18.6与Root新951协议全0；完整协议16/17通过，完整PG在CREATE超时未解决；保留中间OID/前端UDF失败，见[记录](issue-review-r83-float8-scalar-signatures.md) |
 | R84 | CEIL/CEILING/FLOOR输出类型与opaque回调 | 本范围已修复，整体回归未全绿 | 旧274/144及266/138失败保留；当前310回调/metadata与Root/PG266通过；21个不同native均有完整通过记录，首批DROP清理134保留；完整协议16/17通过，COPY的CREATE超时未定因，见[记录](issue-review-r84-integral-rounding-result-types.md) |
 | R85 | SIGN的numeric/decimal NULL结果域 | 本范围已修复 | 旧21/4失败、加强25/6失败保留；当前25与十一完整native/八完整协议全0，PG/Root对应20协议全0；原完整PG/COPY超时和全注册组合独立保留，不扩为通用SIGN签名完成，见[记录](issue-review-r85-numeric-sign-null.md) |
+| R86 | ARRAY_POSITION空数组与NULL起点 | 本范围已修复 | 正式旧基线208/32失败、20查询/2失败；新208、九完整native、七完整协议及PG对应80控制全0；不吞非法非NULL起点或改变opaque callback，见[记录](issue-review-r86-array-position-empty-null-start.md) |
 | O01 | owner健康重试及测试覆盖 | 已修复 | `c9a1e3c3`；原全部owner断言、新真实peer/dirty冲突及10完整native提交前/后通过；Root R14集成fresh58后两完整owner再次通过，见[验证](issue-review-o01-table-owner-health-retry.md) |
 | O02 | EXISTS索引错误的访问计划/断言 | 已修正回归夹具 | 原完整协议exit 1→0，保留六严格XX001，新增精确t/f，完整EXISTS协议/19native通过；未改产品，见[验证](issue-review-o02-index-access-path-expectations.md) |
 | O03 | EXPLAIN JOIN图及过时断言 | 已修复 | 实际执行的source/cache/join/scan图及相关重绑；最终完整60控制、十二native/十协议CLI全过，OFFSET阳性及42601原/PG对照保留，见[验证](issue-review-o03-explain-join-source-graph.md) |

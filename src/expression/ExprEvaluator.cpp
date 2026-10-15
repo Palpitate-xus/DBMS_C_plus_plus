@@ -11003,6 +11003,9 @@ void ExprEvaluator::registerBuiltins() {
         long long initialPosition = lower;
         if (a.size() >= 3) {
             if (a[2].isNull) {
+                // An empty array has no search position to validate. Keep
+                // non-NULL start parsing below, including invalid input.
+                if (elems.empty()) return ExprValue("integer", "", true);
                 throw std::runtime_error(
                     "initial position must not be null (SQLSTATE 22004)");
             }
