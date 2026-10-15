@@ -1,5 +1,9 @@
 # 2026-10-13 审查与验证入口
 
+后续[R95旧全局BOOL参数](issue-review-r95-legacy-global-boolean-arguments.md)
+118控制、PG/Root60、十个完整native及十个完整协议通过；原setup超时与C warning保留。
+新881 native+3 Main+507 Python=1391尚未取得全量终态，原273状态不变。
+
 后续[R94配置SHOW](issue-review-r94-show-parallel-workers.md)专项40、原完整
 152、六个完整native及十个不同完整协议全部通过；不改写R93历史1。
 新880 native+3 Main+506 Python=1389尚未全量运行，原273完成状态不变。

@@ -15,6 +15,10 @@
 
 用户此前暂缓的安全/TDE及CTAS/后台checkpoint专项仍暂缓；本轮普通数据完整性与现有回归失败照常修复。CMake、TLS及sanitizer的实际验证范围按结果记录。
 
+后续[R95旧全局BOOL参数](issue-review-r95-legacy-global-boolean-arguments.md)
+118控制、PG/Root60、十个完整native及十个完整协议通过；原setup超时与C warning保留。
+新881 native+3 Main+507 Python=1391尚未取得全量终态，原273状态不变。
+
 后续[R94配置SHOW](issue-review-r94-show-parallel-workers.md)专项40、原完整
 152、六个完整native及十个不同完整协议全部通过；不改写R93历史1。
 新880 native+3 Main+506 Python=1389尚未全量运行，原273完成状态不变。
@@ -154,7 +158,8 @@ socket超时，精确SQL/栈和原期限保留，尚未确定根因，不称新�
 | R91 | 合法非事务序列运行态与保存点映像复用 | 本范围已修复 | `332bcff4`；旧native16份/真实前端71份→当前各1份，保持nextval/setval不回滚及坏状态拒绝；23完整native及18不同完整协议通过；1382组合已完整终1，本项新增与MV通过、两项其它失败保留，见[记录](issue-review-r91-savepoint-sequence-runtime-images.md) |
 | R92 | TOAST计数器缺失破坏已提交长值 | 本范围已修复，整体回归未全绿 | `4a4c7254`；原IO_ERROR仍重建计数器且原查询1→0行；当前INSERT/UPDATE拒绝而旧值不变，合法ADD/DROP五次重写通过；30完整native、18/20完整协议通过，两个普通DDL超时保留，见[记录](issue-review-r92-toast-missing-counter.md) |
 | R93 | 串行/并行及旧GROUP BY布尔参数 | 本范围已修复 | `9fa6a39d`；旧408/213、68/36及152/56失败；408+68、21完整native/18完整协议邻居通过，原协议150/152两个SHOW失败由后续R94补齐，见[记录](issue-review-r93-boolean-aggregate-arguments.md) |
-| R94 | 并行配置SHOW结果与Describe | 本范围已修复 | 旧10/5、40/33失败；当前10、PG/Root40、原完整152、六个完整native及十个完整协议通过，见[记录](issue-review-r94-show-parallel-workers.md) |
+| R94 | 并行配置SHOW结果与Describe | 本范围已修复 | `ccaf0ac5`；旧10/5、40/33失败；当前10、PG/Root40、原完整152、六个完整native及十个完整协议通过，见[记录](issue-review-r94-show-parallel-workers.md) |
+| R95 | 旧全局BOOL表达式及混合JSON聚合 | 本范围已修复 | 旧native118/56及观察60/15失败；当前118、PG/Root60、十个完整native及十个完整协议通过，原setup超时与C warning保留，见[记录](issue-review-r95-legacy-global-boolean-arguments.md) |
 | O01 | owner健康重试及测试覆盖 | 已修复 | `c9a1e3c3`；原全部owner断言、新真实peer/dirty冲突及10完整native提交前/后通过；Root R14集成fresh58后两完整owner再次通过，见[验证](issue-review-o01-table-owner-health-retry.md) |
 | O02 | EXISTS索引错误的访问计划/断言 | 已修正回归夹具 | 原完整协议exit 1→0，保留六严格XX001，新增精确t/f，完整EXISTS协议/19native通过；未改产品，见[验证](issue-review-o02-index-access-path-expectations.md) |
 | O03 | EXPLAIN JOIN图及过时断言 | 已修复 | 实际执行的source/cache/join/scan图及相关重绑；最终完整60控制、十二native/十协议CLI全过，OFFSET阳性及42601原/PG对照保留，见[验证](issue-review-o03-explain-join-source-graph.md) |

@@ -39280,6 +39280,40 @@ std::unordered_set<std::string> arraySeen;
                 }
             }
         }
+        if ((isBoolAnd || isBoolOr) && colIdx >= tbl.len) {
+            try {
+                aggregate_type_detail::BooleanArgument argument(tbl, this, dbname, actualColName);
+                const auto parsedFilters = parseConditions(item.filterConds);
+                struct ArgumentRow { std::vector<std::string> values; std::vector<bool> nulls; };
+                for (const auto rid : matchIds) {
+                    std::string row;
+                    if (!readRowByRid(pa, rid, row, tbl)) continue;
+                    NullRowBinding binding(this, dbname, tablename, rid, tbl.len);
+                    bool passes = true;
+                    for (const auto& filter : parsedFilters) {
+                        if (!evalConditionOnRow(filter, row, tbl)) { passes = false; break; }
+                    }
+                    if (!passes) continue;
+                    ArgumentRow input;
+                    for (size_t i = 0; i < tbl.len; ++i) {
+                        bool isNull = false;
+                        input.values.push_back(logicalValue(row, i, &isNull));
+                        input.nulls.push_back(isNull);
+                    }
+                    const auto evaluated = argument.evaluate(input);
+                    if (evaluated.isNull) continue;
+                    boolSeen = true;
+                    const bool truth = evaluated.value == "t" || evaluated.value == "true" || evaluated.value == "1";
+                    if (isBoolAnd) boolResult = boolResult && truth;
+                    else boolResult = boolResult || truth;
+                }
+                rowResult += boolSeen ? (boolResult ? "t " : "f ") : "NULL ";
+                continue;
+            } catch (...) {
+                lockManager_.unlock(tablename);
+                throw;
+            }
+        }
         // Aggregate over an arithmetic expression ("sum(amt * 2)"):
         // resolve operands per row; numeric aggregation semantics.
         const bool aggArgExpr = (colIdx >= tbl.len) && !isPercentile &&
@@ -39397,15 +39431,6 @@ std::unordered_set<std::string> arraySeen;
                         return tok;
                     };
                     val = evalAggArgExpr(aggExprText, getVal);
-                } else if ((isBoolAnd || isBoolOr) && aggArgIsExpression(actualColName)) {
-                    auto getValB = [&](const std::string& tok) -> std::string {
-                        for (size_t ci2 = 0; ci2 < tbl.len; ++ci2)
-                            if (tbl.cols[ci2].dataName == tok)
-                                return logicalValue(row, ci2);
-                        if (tok.size() >= 2 && tok.front() == 39 && tok.back() == 39)
-                            return tok.substr(1, tok.size() - 2);
-                        return tok;
-                    };
                 } else {
                     if (colIdx >= tbl.len) {
                         // Bare numeric literal aggregate argument (avg(10.5)):
