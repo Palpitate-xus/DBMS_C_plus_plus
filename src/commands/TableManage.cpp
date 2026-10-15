@@ -6157,18 +6157,48 @@ bool StorageEngine::analyzeTable(const std::string& dbname,
         cs.nullCount = nullCounts[cname];
         auto& vals = allVals[cname];
         const Column& column = tbl.cols[i];
-        auto lessValue = [&column](const std::string& left, const std::string& right) {
-            // Partition non-orderable values from valid typed values before
-            // comparing. A per-pair lexical fallback would break transitivity.
-            const bool leftComparable = compareValues(column, left, false, left, false, "=")
-                != PredicateTruth::Unknown;
-            const bool rightComparable = compareValues(column, right, false, right, false, "=")
-                != PredicateTruth::Unknown;
-            if (leftComparable != rightComparable) return leftComparable;
-            if (!leftComparable) return left < right;
-            return compareValues(column, left, false, right, false, "<") == PredicateTruth::True;
-        };
-        std::sort(vals.begin(), vals.end(), lessValue);
+        if (vals.size() > 1) {
+            std::vector<size_t> order;
+            std::vector<bool> comparable;
+            order.reserve(vals.size());
+            comparable.reserve(vals.size());
+            for (size_t valueIndex = 0; valueIndex < vals.size(); ++valueIndex) {
+                // Validate once per input, reusing only an immediately
+                // preceding byte-identical value in this same column/run.
+                const auto& value = vals[valueIndex];
+                comparable.push_back(valueIndex > 0 && vals[valueIndex - 1] == value
+                    ? comparable.back()
+                    : compareValues(column, value, false, value, false, "=") != PredicateTruth::Unknown);
+                order.push_back(valueIndex);
+            }
+            std::sort(order.begin(), order.end(),
+                [&column, &vals, &comparable](size_t left, size_t right) -> bool {
+                    // Retain the orderable/non-orderable partition: a
+                    // per-pair fallback would break strict weak ordering.
+                    if (comparable[left] != comparable[right]) return comparable[left];
+                    if (!comparable[left]) return vals[left] < vals[right];
+                    // Comparability (and locale validity) was checked first.
+                    if (vals[left] == vals[right]) return false;
+                    return compareValues(column, vals[left], false, vals[right], false, "<")
+                        == PredicateTruth::True;
+                });
+            // Apply the destination-to-source permutation in place. Only
+            // indexes, comparability bits and one temporary string are extra;
+            // neither long datums nor an array of string objects are copied.
+            for (size_t start = 0; start < order.size(); ++start) {
+                if (order[start] == start) continue;
+                std::string saved = std::move(vals[start]);
+                size_t destination = start;
+                while (order[destination] != start) {
+                    const size_t source = order[destination];
+                    vals[destination] = std::move(vals[source]);
+                    order[destination] = destination;
+                    destination = source;
+                }
+                vals[destination] = std::move(saved);
+                order[destination] = destination;
+            }
+        }
         if (!vals.empty()) {
             cs.minVal = vals.front();
             cs.maxVal = vals.back();

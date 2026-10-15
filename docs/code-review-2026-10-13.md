@@ -7,6 +7,8 @@
 1368入口、1361实际通过/1 TLS环境skip/6失败，无漏跑/重复；原冻结历史保持不变。
 后续固定float8签名及原生callback所有权修复见[R83](issue-review-r83-float8-scalar-signatures.md)，
 其定向门禁不替代最新全注册组合验收。
+后续[R88统计比较开销](issue-review-r88-analyze-sort-comparison-cost.md)已有
+真实243→1操作次数及完整邻居验证；原完整COPY仍超时，未关闭原六项失败。
 下文的原始失败和统计不代表后续修复仍未完成，也不由局部通过改写。
 
 审查基准为 `a502ffa30df379c88f176c377cdd0f1dae4f3cd4`，产品源码末次提交 `2dc9554e`。
