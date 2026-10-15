@@ -83,6 +83,16 @@ receipt、生产/测试cache stamp、上述binary、源码及两个最终测试�
 盘点、504唯一注册/486 standalone、文档/契约/版本及六个总账单测均通过。
 r92-require-complete.log实际退出1，明确保留原273未完状态。
 
+## 提交后一次性普通DDL观察
+
+本项源码、测试与文档独立提交为`4a4c7254`。保持同一程序和原15秒socket
+期限，对两个失败入口分别预定一次完整外部观察，均实际0：
+r93-transaction-ddl-current-1-client.log及r93-copy-ddl-current-1-client.log。
+未出现原TimeoutError，未发送取栈信号，也未获得失败线程；事务隔离中原ALTER
+本次约224ms。前后独立输入/binary/58 receipt/57 test库字节核对均0。
+观察器/真实fsync转发器会扰动时序，这两个0不计入上述18/20无插桩验收，不改写
+两个原FAILED，不作为DDL超时修复；不再围绕同一输入重试到绿。
+
 ## 未完成范围
 
 继续原完整普通DDL超时观测、并行布尔聚合表达式和其它未完要求；仅在确证
