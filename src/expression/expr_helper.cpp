@@ -216,8 +216,42 @@ struct RoutineResultTypes {
     // Native registration supplies no return declaration. Retain its old
     // input-derived fallback without confusing it with the genuine builtin.
     std::set<const Expr*> opaqueIntegralCalls;
-    bool empty() const {return declarations.empty() && opaqueIntegralCalls.empty();}
+    std::set<const Expr*> opaqueModCalls;
+    bool empty() const {
+        return declarations.empty() && opaqueIntegralCalls.empty() && opaqueModCalls.empty();
+    }
 };
+
+// A finite MOD result-domain rule must not turn an opaque native input's
+// legacy TEXT fallback into a new static arithmetic/CASE error. Only inspect
+// a newly needed operand when its result shape has actual type information.
+// This also applies to standalone metadata calls with no database/evaluator.
+bool hasDeclaredModInputShape(
+    const Expr* expression, const std::map<std::string, std::string>& typeHints,
+    const RoutineResultTypes* routineTypes) {
+    if (!expression) return true;
+    if (routineTypes && routineTypes->declarations.count(expression)) return true;
+    if (expression->preparedSubquery) return false;
+    if (dynamic_cast<const LiteralExpr*>(expression)) return true;
+    if (const auto* parameter = dynamic_cast<const ParameterExpr*>(expression))
+        return !parameter->declaredType.empty();
+    if (const auto* column = dynamic_cast<const ColumnRefExpr*>(expression))
+        return column->binding || typeHints.count(column->toString()) ||
+            typeHints.count(column->column);
+    if (dynamic_cast<const CastExpr*>(expression)) return true;
+    if (const auto* call = dynamic_cast<const FunctionCallExpr*>(expression))
+        return !call->resolvedResultType.empty() ||
+            call->sqlValue != FunctionCallExpr::SqlValue::None || bool(call->setReturning);
+    if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(expression))
+        return hasDeclaredModInputShape(unary->operand.get(), typeHints, routineTypes);
+    if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(expression))
+        return binary->op == "::" ||
+            (hasDeclaredModInputShape(binary->left.get(), typeHints, routineTypes) &&
+             hasDeclaredModInputShape(binary->right.get(), typeHints, routineTypes));
+    // Native CASE may intentionally evaluate only its selected arm without
+    // SQL common-type analysis. Do not add that analysis through MOD here.
+    return false;
+}
 
 std::string inferAstResultType(
     const Expr* expression,
@@ -537,10 +571,23 @@ std::string inferAstResultType(
                 result = mergeProtocolTypes(result, argType(i));
             return result == "unknown" ? "text" : result;
         }
+        if (name == "mod") {
+            const auto left = argType(0);
+            if (routineTypes && routineTypes->opaqueModCalls.count(call)) return left;
+            const auto declaredIntegralOrNumeric = [](const std::string& type) {
+                return arithmetic_detail::integerWidth(type) || type == "numeric";
+            };
+            if (!declaredIntegralOrNumeric(left) || call->args.size() < 2 ||
+                !hasDeclaredModInputShape(call->args[1].get(), typeHints, routineTypes)) return left;
+            const auto right = argType(1);
+            if (declaredIntegralOrNumeric(right))
+                return *arithmetic_detail::resultType("%", left, right);
+            return left;
+        }
         if (name == "min" || name == "max" || name == "lag" ||
             name == "lead" || name == "first_value" || name == "last_value" ||
             name == "nth_value" || name == "nullif" || name == "abs" ||
-            name == "round" || name == "trunc" || name == "mod")
+            name == "round" || name == "trunc")
             return argType(0);
         if (name == "div") return "numeric";
         if (name == "power") {
@@ -598,9 +645,11 @@ RoutineResultTypes collectRoutineResultTypes(
                 else {
                     CatalogManager::QualifiedName name;
                     if(CatalogManager::parseQualifiedName(call->funcName,name,true) && name.schema.empty() &&
-                       (name.name=="ceil" || name.name=="ceiling" || name.name=="floor") &&
-                       evaluator.scalarFunctionIdentity(call,functionEngine).rfind("native",0)==0)
-                        routineTypes.opaqueIntegralCalls.insert(call);
+                       (name.name=="ceil" || name.name=="ceiling" || name.name=="floor" || name.name=="mod") &&
+                       evaluator.scalarFunctionIdentity(call,functionEngine).rfind("native",0)==0) {
+                        if(name.name=="mod")routineTypes.opaqueModCalls.insert(call);
+                        else routineTypes.opaqueIntegralCalls.insert(call);
+                    }
                 }
             }
             for (const auto& arg : call->args) inspect(arg.get());

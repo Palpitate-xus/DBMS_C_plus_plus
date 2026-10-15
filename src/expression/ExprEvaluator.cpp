@@ -5136,6 +5136,12 @@ struct IntegralRoundingScalarFunction {
         return callback(args);
     }
 };
+struct ModResultScalarFunction {
+    ScalarFunction callback;
+    ExprValue operator()(const std::vector<ExprValue>& args) const {
+        return callback(args);
+    }
+};
 bool ownsScalarSignatures(const std::string& name,const ScalarFunction* callback) {
     // Preserve the existing four R62 families; this patch only distinguishes
     // ownership for the newly declared eighteen float8 callbacks.
@@ -5563,7 +5569,7 @@ std::string ExprEvaluator::scalarFunctionIdentity(const FunctionCallExpr* call,
             (call ? call->funcName : std::string{}));
     std::string database = currentDB_;
     engine = engine ? engine : &g_engine;
-    bool opaqueIntegral=false;
+    bool opaqueResultDomain=false;
     if (!resolved.stored) {
         const auto callback = functions_.find(toLower(resolved.name));
         if (callback != functions_.end()) {
@@ -5571,15 +5577,17 @@ std::string ExprEvaluator::scalarFunctionIdentity(const FunctionCallExpr* call,
                 resolved = bound->resolved;
                 database = bound->database;
                 engine = bound->engine;
-            } else if(isIntegralRoundingScalarName(resolved.name) &&
-                      !callback->second.target<IntegralRoundingScalarFunction>())
-                opaqueIntegral=true;
+            } else if((isIntegralRoundingScalarName(resolved.name) &&
+                       !callback->second.target<IntegralRoundingScalarFunction>()) ||
+                      (resolved.name=="mod" &&
+                       !callback->second.target<ModResultScalarFunction>()))
+                opaqueResultDomain=true;
         }
     }
     const auto field = [](const std::string& value) {
         return std::to_string(value.size()) + ":" + value;
     };
-    std::string key = resolved.stored ? "stored" : opaqueIntegral ? "native" : "builtin";
+    std::string key = resolved.stored ? "stored" : opaqueResultDomain ? "native" : "builtin";
     key += field(std::to_string(reinterpret_cast<uintptr_t>(engine)));
     key += field(database) + field(resolved.schema) + field(resolved.name);
     key += field(std::to_string(call->args.size())) + field(std::to_string(call->namedArgs.size()));
@@ -9373,8 +9381,21 @@ void ExprEvaluator::registerBuiltins() {
         return ExprValue(resultType, out.str(), false);
     };
     functions_["mod"] = [](const std::vector<ExprValue>& a) {
+        std::string resultType = "integer";
+        if (a.size() >= 2) {
+            const auto left = arithmetic_detail::numericTypeName(a[0].typeName);
+            const auto right = arithmetic_detail::numericTypeName(a[1].typeName);
+            const auto declaredIntegralOrNumeric = [](const std::string& type) {
+                return arithmetic_detail::integerWidth(type) || type == "numeric";
+            };
+            // Pick the finite declared result domain before strict NULL
+            // handling, without parsing NULL payloads or tightening the
+            // existing permissive native float/TEXT fallback.
+            if (declaredIntegralOrNumeric(left) && declaredIntegralOrNumeric(right))
+                resultType = *arithmetic_detail::resultType("%", left, right);
+        }
         if (a.size() < 2 || a[0].isNull || a[1].isNull)
-            return ExprValue("integer", "", true);
+            return ExprValue(resultType, "", true);
         auto isDecimal = [](const ExprValue& value) {
             const std::string type = toLower(value.typeName);
             return type == "numeric" || type == "decimal" ||
@@ -9424,7 +9445,7 @@ void ExprEvaluator::registerBuiltins() {
         const long long remainder =
             left == std::numeric_limits<int64_t>::lowest() && right == -1
                 ? 0 : left % right;
-        return ExprValue("integer", std::to_string(remainder), false);
+        return ExprValue(resultType, std::to_string(remainder), false);
     };
     functions_["sign"] = [](const std::vector<ExprValue>& a) {
         if (a.empty())
@@ -12495,6 +12516,8 @@ void ExprEvaluator::registerBuiltins() {
             entry.second=DeclaredFloat8ScalarFunction{std::move(entry.second)};
         else if(isIntegralRoundingScalarName(entry.first))
             entry.second=IntegralRoundingScalarFunction{std::move(entry.second)};
+        else if(entry.first=="mod")
+            entry.second=ModResultScalarFunction{std::move(entry.second)};
     }
 
     // Volatility metadata for builtins (safe default is 'v' set by registerFunction).
