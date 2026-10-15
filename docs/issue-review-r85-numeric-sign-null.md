@@ -50,9 +50,10 @@ math functions/projection、numeric sqrt、R84取整310、R83签名906/回调237
 取消协议和CLI超时；生产输入/binary/全部58份receipt首尾一致。这里未重跑
 原完整PG、COPY或全注册组合，不将八项定向通过扩大为全量全绿。
 
-507份Markdown、848个本地inline目标、521 Python AST、13 shell语法、501
+本项提交前507份Markdown、848个本地inline目标、521 Python AST、13 shell语法、501
 unique注册/483 standalone E2E、文档状态、兼容性契约及六个总账单测通过。
 最新注册组合为864 native + 3真实Main frontend + 501 Python =1368入口，
-尚未运行这套新组合；原273总账仍22 complete/166 partial/70 unverified/15 deferred。
+本项定向验收未运行这套新组合全量，后续运行状态见[执行计划](review-closeout-plan.md)
+及新的冻结证据；原273总账仍22 complete/166 partial/70 unverified/15 deferred。
 原冻结全量、R83完整PG超时及R84清理/COPY准备超时均继续保留，不以本项
 定向通过改写。用户暂缓范围、不push、禁用Actions约束保持不变。

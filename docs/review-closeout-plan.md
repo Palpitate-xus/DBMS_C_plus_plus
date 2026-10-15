@@ -58,7 +58,13 @@ frontend + 500 Python = 1365入口，尚未执行这套新组合全量。Markdow
 [R85 SIGN typed numeric NULL](issue-review-r85-numeric-sign-null.md)的新25原生、
 十一完整native、八完整协议和对应20 PG/Root协议已通过。
 最新实际组合为864 native + 3真实Main frontend + 501 Python = 1368入口；
-待产品输入和文档提交稳定后再冻结。前述1365组合没有启动，不标成运行中或通过。
+下一步在本段文档提交后以清洁HEAD启动原始 `bash scripts/build_tests.sh`，不
+过滤入口、改断言或期限；先逐字节复制当前Root57个库对象并fresh编译stubs，
+全58个receipt及主binary/build stamp复核后冻结，运行期间不改tracked输入/HEAD。
+预留证据目录 `/tmp/dbms-review-full-20261015-r85.6HbDjOD6/`；实际运行/终态以
+该目录原始runner日志为准，本计划不是已通过证明。前述1365组合没有启动。
+新增COPY fsync只读诊断记录见[R82后续观测](issue-full-registered-d974c80d.md)，
+插桩通过不代替无插桩验收，未捕获真实超时时的根因。
 
 按[准确暂缓范围](deferred-scope.md)保持已跳过模块，不自动扩展到普通SQL或存储错误。
 新组合需要重新运行全注册入口；本轮定向通过不能完成原273总账或把历史FAILED改绿。

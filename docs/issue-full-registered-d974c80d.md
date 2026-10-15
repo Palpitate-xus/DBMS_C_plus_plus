@@ -77,3 +77,32 @@ R78轮询负控及完整DIV14入口也实际通过；不将这些局部结果扩
 日志目录，生产输入/binary/全部58 receipt首尾一致。binary仍为本页冻结摘要。
 这两项间歇性超时保持未解决；继续捕获失败当时的具体SQL/调用链，不增加期限、
 改断言或据此关闭原273项。其他可确定复现的普通函数签名问题继续独立修复。
+
+## R83/R84之后的新增CREATE超时观测
+
+以下输入已经包含后续产品修复，不是本页d974c80d冻结全量的重复运行；原
+1362入口及三个FAILED不改写。[R83](issue-review-r83-float8-scalar-signatures.md)
+的完整PG在line860 `CREATE TABLE toasted_unicode_varchar (v VARCHAR(3000))`
+等待响应超时，原socket期限10秒；[R84](issue-review-r84-integral-rounding-result-types.md)
+的COPY error/lock release驱动在line53首个CREATE TABLE等待响应超时，尚未
+进入COPY主体，原socket期限15秒。两个批次和原SQL/断言均保留，没有证明
+它们与JOIN/ROLLBACK TO共享根因，也不将其归为数学结果类型错误。
+
+R84二进制（SHA256 `e4d49ecef2907d1a94c8fe94339c14c19cb0bea42b4704fa315ac3b1890f5688`）
+随后在无生产构建/其他Root测试并行的情况下运行原完整COPY诊断：106次query
+响应，原驱动全部断言通过，进程正常退出0；证据为
+`r82-copy-fsync-1-client.log` 和 `r82-copy-fsync-1-server.log`。
+这是有插桩诊断，不计无插桩验收，更不表示超时已修复。两个初始CREATE分别
+约0.130/0.161秒，没有捕获超时，故没有发送取栈信号或取得失败线程栈。
+
+临时preload只记录50ms以上的fsync/fdatasync，保持实际调用返回值与errno，
+没有跳过同步、改持久化策略或重试SQL。这次记录到三个成功fsync：pg_xact
+临时文件约52ms、索引文件约271ms、WAL约224ms；调用均返回0，成功时残留的
+非零errno不能当作I/O失败。这里只能说明当次文件同步耗时，不能从通过的
+观测推断此前socket超时根因。新外部观察器支持直接加载原PG主模块后hook，
+严格核对exact Popen子进程的PID/start-time/exe和preload，仅真实TimeoutError
+才观察其线程并取栈；没有对其他已有服务器发信号。工具没有合入产品。
+
+R82及这两项新的超时观测继续保持未解决。原生prepared DML和后续stored
+function metadata末尾DROP清理断言失败另行保留；不猜实际返回状态，也不以
+普通“继续”重开已暂缓的DROP/cache专项。
