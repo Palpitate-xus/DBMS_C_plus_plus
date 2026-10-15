@@ -9427,9 +9427,12 @@ void ExprEvaluator::registerBuiltins() {
         return ExprValue("integer", std::to_string(remainder), false);
     };
     functions_["sign"] = [](const std::vector<ExprValue>& a) {
-        if (a.empty() || a[0].isNull)
+        if (a.empty())
             return ExprValue("double precision", "", true);
         const std::string type = toLower(a[0].typeName);
+        if (a[0].isNull)
+            return ExprValue(type == "numeric" || type == "decimal"
+                                 ? "numeric" : "double precision", "", true);
         if (type == "numeric" || type == "decimal") {
             const auto value = tryParseNumeric(a[0].value);
             if (!value) return ExprValue("numeric", "", true);

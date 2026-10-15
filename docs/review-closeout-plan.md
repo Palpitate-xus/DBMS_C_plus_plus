@@ -54,9 +54,11 @@ frontend + 500 Python = 1365入口，尚未执行这套新组合全量。Markdow
 
 后续[R84取整结果声明](issue-review-r84-integral-rounding-result-types.md)已通过
 新310 native及Root/PG266协议；21个不同native均有完整通过记录（首批DROP清理
-失败保留），完整协议16/17通过（COPY建表准备超时）。另已复现sign的typed
-numeric NULL结果域问题，按下一独立修复提交。待这些产品输入稳定后，再冻结
-最新实际注册组合；前述1365组合没有启动，不能标成正在运行或通过。
+失败保留），完整协议16/17通过（COPY建表准备超时）。
+[R85 SIGN typed numeric NULL](issue-review-r85-numeric-sign-null.md)的新25原生、
+十一完整native、八完整协议和对应20 PG/Root协议已通过。
+最新实际组合为864 native + 3真实Main frontend + 501 Python = 1368入口；
+待产品输入和文档提交稳定后再冻结。前述1365组合没有启动，不标成运行中或通过。
 
 按[准确暂缓范围](deferred-scope.md)保持已跳过模块，不自动扩展到普通SQL或存储错误。
 新组合需要重新运行全注册入口；本轮定向通过不能完成原273总账或把历史FAILED改绿。
