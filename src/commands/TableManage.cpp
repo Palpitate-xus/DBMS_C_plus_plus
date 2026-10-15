@@ -39902,6 +39902,39 @@ std::vector<std::string> StorageEngine::groupAggregate(
                 }
             }
         }
+        if ((isBoolAnd || isBoolOr) && colIdx >= tbl.len) {
+            try {
+                aggregate_type_detail::BooleanArgument argument(tbl, this, dbname, actualColName);
+                const auto parsedFilters = parseConditions(filterConds);
+                struct ArgumentRow { std::vector<std::string> values; std::vector<bool> nulls; };
+                for (const auto rid : gids) {
+                    std::string row;
+                    if (!readRowByRid(pa, rid, row, tbl)) continue;
+                    NullRowBinding binding(this, dbname, tablename, rid, tbl.len);
+                    bool passes = true;
+                    for (const auto& filter : parsedFilters) {
+                        if (!evalConditionOnRow(filter, row, tbl)) { passes = false; break; }
+                    }
+                    if (!passes) continue;
+                    ArgumentRow input;
+                    for (size_t i = 0; i < tbl.len; ++i) {
+                        bool isNull = false;
+                        input.values.push_back(logicalValue(row, i, &isNull));
+                        input.nulls.push_back(isNull);
+                    }
+                    const auto evaluated = argument.evaluate(input);
+                    if (evaluated.isNull) continue;
+                    boolSeen = true;
+                    const bool truth = evaluated.value == "t" || evaluated.value == "true" || evaluated.value == "1";
+                    if (isBoolAnd) boolResult = boolResult && truth;
+                    else boolResult = boolResult || truth;
+                }
+                return boolSeen ? (boolResult ? "t" : "f") : "NULL";
+            } catch (...) {
+                lockManager_.unlock(tablename);
+                throw;
+            }
+        }
         // Aggregate over an arithmetic expression (see aggregate()).
         const bool aggArgExpr = (colIdx >= tbl.len) && !isPercentile &&
             (func == "sum" || func == "avg" || func == "min" || func == "max" ||
@@ -40025,15 +40058,6 @@ std::unordered_set<std::string> arraySeen;
                         return tok;
                     };
                     val = evalAggArgExpr(aggExprText, getVal);
-                } else if ((isBoolAnd || isBoolOr) && aggArgIsExpression(actualColName)) {
-                    auto getValB = [&](const std::string& tok) -> std::string {
-                        for (size_t ci2 = 0; ci2 < tbl.len; ++ci2)
-                            if (tbl.cols[ci2].dataName == tok)
-                                return logicalValue(row, ci2);
-                        if (tok.size() >= 2 && tok.front() == 39 && tok.back() == 39)
-                            return tok.substr(1, tok.size() - 2);
-                        return tok;
-                    };
                 } else {
                     if (colIdx >= tbl.len) {
                         // Bare numeric literal aggregate argument (avg(10.5)):
@@ -40160,6 +40184,7 @@ std::unordered_set<std::string> arraySeen;
             arr += "}";
             return arr;
         }
+        if (isBoolAnd || isBoolOr) return boolSeen ? (boolResult ? "t" : "f") : "NULL";
         if (func == "max") {
             if (!hasMax) return "NULL";
             if (isInt || aggArgExpr) return transstr(maxInt);

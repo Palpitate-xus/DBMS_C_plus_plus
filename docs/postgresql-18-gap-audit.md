@@ -1,5 +1,10 @@
 # 2026-10-13 全仓库审查
 
+后续[R93布尔聚合参数](issue-review-r93-boolean-aggregate-arguments.md)核心
+408+68控制、21个不同完整native及18个完整协议邻居通过；原152协议150通过，
+仅独立SHOW两项失败保留，本范围修复不代表整套全绿。
+新879 native+3 Main+505 Python=1387组合未全量运行，不修改原273完成状态。
+
 后续[R92](issue-review-r92-toast-missing-counter.md)修复缺失TOAST计数器导致
 写入报错仍破坏已提交长值的问题；30完整native/18of20完整协议通过，两个普通
 DDL超时保留。新877 native+3 Main+504 Python=1384组合尚未全量运行，STO-06

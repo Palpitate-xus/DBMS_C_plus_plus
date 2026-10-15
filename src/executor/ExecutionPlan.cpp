@@ -5192,6 +5192,7 @@ bool ParallelGroupAggregateOp::open() try {
     pos_ = 0;
     usedParallelWorkers_ = false;
     if (!child_->open()) return false;
+    const auto expressionOrigin = child_->scanOrigin();
 
     struct InputRow {
         std::string raw;
@@ -5319,6 +5320,10 @@ bool ParallelGroupAggregateOp::open() try {
             item.arg.substr(0, 9) == "distinct ";
         std::string arg = distinct ? item.arg.substr(9) : item.arg;
         const size_t argIndex = arg == "*" ? tbl_.len : columnIndex(arg);
+        std::optional<aggregate_type_detail::BooleanArgument> booleanArgument;
+        if (argIndex >= tbl_.len && arg != "*" && !arg.empty() &&
+            (func == "bool_and" || func == "bool_or" || func == "every"))
+            booleanArgument.emplace(tbl_, expressionOrigin.engine, expressionOrigin.dbname, arg);
         // Aggregate over an arithmetic expression ("sum(amt * 2)"): resolve
         // operands per row when the arg is not a bare column.
         const bool argIsExpr = argIndex >= tbl_.len && arg != "*" &&
@@ -5401,14 +5406,17 @@ bool ParallelGroupAggregateOp::open() try {
             }
             if (!passes) continue;
             std::string value;
-            if (argIsExpr) {
+            bool valueIsNull = false;
+            if (booleanArgument) {
+                const auto evaluated = booleanArgument->evaluate(row);
+                value = evaluated.value; valueIsNull = evaluated.isNull;
+            } else if (argIsExpr) {
                 value = exprVal(arg, row.values);
+                valueIsNull = value.empty();
             } else {
                 value = argIndex < tbl_.len ? row.values[argIndex] : "";
+                valueIsNull = argIndex < row.nulls.size() && row.nulls[argIndex];
             }
-            const bool valueIsNull = argIsExpr
-                ? value.empty()
-                : (argIndex < row.nulls.size() && row.nulls[argIndex]);
             if (func == "count") {
                 if (distinct) {
                     if (!valueIsNull)
@@ -5987,6 +5995,7 @@ bool GroupAggregateOp::open() try {
     structuredNulls_.clear();
     pos_ = 0;
     if (!child_->open()) return false;
+    const auto expressionOrigin = child_->scanOrigin();
 
     struct InputRow {
         std::string raw;
@@ -6073,6 +6082,10 @@ bool GroupAggregateOp::open() try {
         std::string arg = distinct ? item.arg.substr(9) : item.arg;
         const size_t argIndex = arg == "*" ? tbl_.len : columnIndex(arg);
         const auto filters = StorageEngine::parseConditions(item.filterConds);
+        std::optional<aggregate_type_detail::BooleanArgument> booleanArgument;
+        if (argIndex >= tbl_.len && arg != "*" && !arg.empty() &&
+            (func == "bool_and" || func == "bool_or" || func == "every"))
+            booleanArgument.emplace(tbl_, expressionOrigin.engine, expressionOrigin.dbname, arg);
         if (func == "string_agg" || func == "array_agg")
             return collectionAggregate(
                 tbl_, input, rowIds, item, func, resultIsNull);
@@ -6099,36 +6112,15 @@ bool GroupAggregateOp::open() try {
             if (!passes) continue;
 
             std::string value;
-            if (argIndex >= tbl_.len && arg != "*" && !arg.empty() &&
-                arg.find(' ') != std::string::npos &&
-                (func == "bool_and" || func == "bool_or" || func == "every")) {
-                // Per-row comparison evaluation ("v > 5"): substitute column
-                // tokens with this row's values, then evaluate the predicate.
-                std::string synth;
-                std::string token;
-                const auto& rowVals = row.values;
-                auto flushTok = [&]() {
-                    if (token.empty()) return;
-                    size_t ci4 = 0;
-                    for (; ci4 < tbl_.len; ++ci4)
-                        if (tbl_.cols[ci4].dataName == token) break;
-                    if (ci4 < tbl_.len) { synth += rowVals[ci4]; token.clear(); return; }
-                    synth += token;
-                    token.clear();
-                };
-                for (char ch3 : arg) {
-                    if (ch3 == ' ') { flushTok(); synth += ' '; continue; }
-                    token += ch3;
-                }
-                flushTok();
-                auto r3 = dbms::ExprHelper::evalString(synth, {}, {}, "");
-                value = (r3.ok && !r3.isNull) ? r3.value : std::string{};
+            bool valueIsNull = false;
+            if (booleanArgument) {
+                const auto evaluated = booleanArgument->evaluate(row);
+                value = evaluated.value; valueIsNull = evaluated.isNull;
             } else {
                 value = argIndex < tbl_.len ? row.values[argIndex] : std::string{};
+                valueIsNull = argIndex < tbl_.len
+                    ? (argIndex < row.nulls.size() && row.nulls[argIndex]) : value.empty();
             }
-            const bool valueIsNull = argIndex < tbl_.len
-                ? (argIndex < row.nulls.size() && row.nulls[argIndex])
-                : value.empty();
             if (func == "count") {
                 if (distinct) {
                     if (!valueIsNull)

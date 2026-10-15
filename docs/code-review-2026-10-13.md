@@ -2,6 +2,11 @@
 
 ## 输入与结论范围
 
+后续[R93布尔聚合参数](issue-review-r93-boolean-aggregate-arguments.md)核心
+408+68控制、21个不同完整native及18个完整协议邻居通过；原152协议150通过，
+仅独立SHOW两项失败保留，本范围修复不代表整套全绿。
+新879 native+3 Main+505 Python=1387组合未全量运行，不修改原273完成状态。
+
 后续[R92缺失TOAST计数器](issue-review-r92-toast-missing-counter.md)已修复
 写入报错仍破坏原长值的有限问题，补齐ADD/DROP初始化；30完整native通过、
 18/20协议通过，CREATE和定长ALTER超时保留。新1384组合未全量运行，不把本项

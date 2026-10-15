@@ -15,6 +15,11 @@
 
 用户此前暂缓的安全/TDE及CTAS/后台checkpoint专项仍暂缓；本轮普通数据完整性与现有回归失败照常修复。CMake、TLS及sanitizer的实际验证范围按结果记录。
 
+后续[R93布尔聚合参数](issue-review-r93-boolean-aggregate-arguments.md)核心
+408+68控制、21个不同完整native及18个完整协议邻居通过；原152协议150通过，
+仅独立SHOW两项失败保留，本范围修复不代表整套全绿。
+新879 native+3 Main+505 Python=1387组合未全量运行，不修改原273完成状态。
+
 后续[R92缺失TOAST计数器](issue-review-r92-toast-missing-counter.md)已修复实际
 写入报错仍破坏已提交长值的问题，补齐合法ADD/DROP重写初始化；30个完整native
 通过，协议邻居18/20通过，CREATE/定长ALTER两个超时保留。新877 native+3 Main+
@@ -144,6 +149,7 @@ socket超时，精确SQL/栈和原期限保留，尚未确定根因，不称新�
 | R90 | TOAST ID 持久化区间预留 | 本范围已修复 | `66df32ec`；旧64次分配/64次发布→1次；首版UINT64尾部断言失败保留并修正；21不同完整native、原完整COPY固定三次及七完整协议邻居全0，另四历史失败入口三过一SAVEPOINT超时；不扩完整持久性，见[记录](issue-review-r90-toast-durable-id-reservations.md) |
 | R91 | 合法非事务序列运行态与保存点映像复用 | 本范围已修复 | `332bcff4`；旧native16份/真实前端71份→当前各1份，保持nextval/setval不回滚及坏状态拒绝；23完整native及18不同完整协议通过；1382组合已完整终1，本项新增与MV通过、两项其它失败保留，见[记录](issue-review-r91-savepoint-sequence-runtime-images.md) |
 | R92 | TOAST计数器缺失破坏已提交长值 | 本范围已修复，整体回归未全绿 | `4a4c7254`；原IO_ERROR仍重建计数器且原查询1→0行；当前INSERT/UPDATE拒绝而旧值不变，合法ADD/DROP五次重写通过；30完整native、18/20完整协议通过，两个普通DDL超时保留，见[记录](issue-review-r92-toast-missing-counter.md) |
+| R93 | 串行/并行及旧GROUP BY布尔参数 | 本范围已修复，SHOW另待 | 旧408/213、68/36及152/56失败；当前408+68全过、21完整native/18完整协议邻居通过，协议150/152两个SHOW失败保留，见[记录](issue-review-r93-boolean-aggregate-arguments.md) |
 | O01 | owner健康重试及测试覆盖 | 已修复 | `c9a1e3c3`；原全部owner断言、新真实peer/dirty冲突及10完整native提交前/后通过；Root R14集成fresh58后两完整owner再次通过，见[验证](issue-review-o01-table-owner-health-retry.md) |
 | O02 | EXISTS索引错误的访问计划/断言 | 已修正回归夹具 | 原完整协议exit 1→0，保留六严格XX001，新增精确t/f，完整EXISTS协议/19native通过；未改产品，见[验证](issue-review-o02-index-access-path-expectations.md) |
 | O03 | EXPLAIN JOIN图及过时断言 | 已修复 | 实际执行的source/cache/join/scan图及相关重绑；最终完整60控制、十二native/十协议CLI全过，OFFSET阳性及42601原/PG对照保留，见[验证](issue-review-o03-explain-join-source-graph.md) |

@@ -1,5 +1,10 @@
 # 2026-10-13 审查与验证入口
 
+后续[R93布尔聚合参数](issue-review-r93-boolean-aggregate-arguments.md)核心
+408+68控制、21个不同完整native及18个完整协议邻居通过；原152协议150通过，
+仅独立SHOW两项失败保留，本范围修复不代表整套全绿。
+新879 native+3 Main+505 Python=1387组合未全量运行，不修改原273完成状态。
+
 2026-10-14：R13逻辑预览原native64/61fail、wire53/50fail已保留；Root最终
 77native/53wire及十二完整native/七完整协议全0。真实fresh58后针对虚拟列
 再编译TableManage，全部58receipts与终态输入一致。逐列版本化JSON保存

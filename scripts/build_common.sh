@@ -239,6 +239,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/scalar_limit_zero_effects_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/aggregate_arithmetic_scope_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/aggregate_expression_scope_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/boolean_aggregate_expression_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/aggregate_result_type_describe_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/fetch_clause_boundary_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/scalar_fetch_ties_protocol_e2e_test.py)
