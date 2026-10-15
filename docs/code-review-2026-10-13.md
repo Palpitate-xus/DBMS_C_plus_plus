@@ -3,7 +3,8 @@
 ## 输入与结论范围
 
 本页保留原始审查基准；后续实现状态见[逐项修复](review-fixes-2026-10-13.md)，
-新组合的实际全量终态见[冻结d974c80d记录](issue-full-registered-d974c80d.md)。
+新组合的实际全量终态见[冻结27bac6ee记录](issue-full-registered-27bac6ee.md)：
+1368入口、1361实际通过/1 TLS环境skip/6失败，无漏跑/重复；原冻结历史保持不变。
 后续固定float8签名及原生callback所有权修复见[R83](issue-review-r83-float8-scalar-signatures.md)，
 其定向门禁不替代最新全注册组合验收。
 下文的原始失败和统计不代表后续修复仍未完成，也不由局部通过改写。

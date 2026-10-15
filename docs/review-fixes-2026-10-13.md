@@ -15,7 +15,13 @@
 
 用户此前暂缓的安全/TDE及CTAS/后台checkpoint专项仍暂缓；本轮普通数据完整性与现有回归失败照常修复。CMake、TLS及sanitizer的实际验证范围按结果记录。
 
-最近完整终态为[冻结d974c80d](issue-full-registered-d974c80d.md)：2026-10-15
+最近完整终态为[冻结27bac6ee](issue-full-registered-27bac6ee.md)：1368入口，
+1361实际通过、1个TLS环境skip、6失败，无遗漏/重复；全部冻结检查、58份
+生产receipt及57份test库对象逐字节独立复核一致。R83/R84/R85六个新增入口均0。
+一个末尾DROP清理断言和五个普通协议超时仍未解决；先记录完整COPY直接读取
+路径的失败现场，再独立修复普通数组/数值/聚合问题，不调期限或重开暂缓专项。
+
+前次完整终态[冻结d974c80d](issue-full-registered-d974c80d.md)：2026-10-15
 01:25 UTC，1362入口、1359 PASSED退出（含1个TLS环境skip）、3 FAILED，
 无遗漏/重复，全部冻结fence及独立58 receipt复核一致。上一轮两个失败经
 R80 `6456ad4f`、R79 `7c294fe7`修复后，本轮原完整入口均0；R81 `a7f0e404`
@@ -114,7 +120,7 @@ socket超时，精确SQL/栈和原期限保留，尚未确定根因，不称新�
 | R79 | LENGTH原生二进制别名的签名身份 | 本范围已修复 | 新30控制19失败→0，原九控制及十三完整native/十完整协议0；PG六组语义对照0，签名身份与raw codec分离，见[记录](issue-review-r79-native-binary-length.md) |
 | R80 | 未绑定列保护晚于参数类型推断 | 本范围已修复 | 新17 native原8失败→0，原窗口44 PG/Root全0；十一完整native/八完整协议0，不放宽真实TEXT算术，见[记录](issue-review-r80-unbound-scalar-inference.md) |
 | R81 | staging消失被当成恢复作业完成 | 已修正并验收夹具 | 首轮三入口、五次真实恢复及七个完整串行协议全0，复用R78精确轮询，保留20秒/真实窗口/数据断言；未改产品，见[记录](issue-review-r81-restore-stage-completion.md) |
-| R82 | 新冻结中的普通协议间歇性超时 | 未解决，继续定位 | JOIN setup/ROLLBACK TO失败保留；后续完整PG与COPY各在CREATE超时；COPY插桩106响应通过但未复现失败，只捕获成功同步耗时，不算修复；未改期限或证明同一根因，见[冻结及后续观测](issue-full-registered-d974c80d.md) |
+| R82 | 新冻结中的普通协议间歇性超时 | 未解决，继续定位 | 原JOIN/ROLLBACK TO及CREATE失败保留；最新全量有PG CREATE、TEMP保护步骤、COPY完成、SAVEPOINT和extended ALTER五处超时；不改期限或假定同根因，见[最新全量及方法](issue-full-registered-27bac6ee.md)和[原后续观测](issue-full-registered-d974c80d.md) |
 | R83 | 十八个固定float8标量的声明/回调所有权 | 本范围已修复，整体回归未全绿 | 新906签名/237回调控制及二十完整native全0；实际PG18.6与Root新951协议全0；完整协议16/17通过，完整PG在CREATE超时未解决；保留中间OID/前端UDF失败，见[记录](issue-review-r83-float8-scalar-signatures.md) |
 | R84 | CEIL/CEILING/FLOOR输出类型与opaque回调 | 本范围已修复，整体回归未全绿 | 旧274/144及266/138失败保留；当前310回调/metadata与Root/PG266通过；21个不同native均有完整通过记录，首批DROP清理134保留；完整协议16/17通过，COPY的CREATE超时未定因，见[记录](issue-review-r84-integral-rounding-result-types.md) |
 | R85 | SIGN的numeric/decimal NULL结果域 | 本范围已修复 | 旧21/4失败、加强25/6失败保留；当前25与十一完整native/八完整协议全0，PG/Root对应20协议全0；原完整PG/COPY超时和全注册组合独立保留，不扩为通用SIGN签名完成，见[记录](issue-review-r85-numeric-sign-null.md) |

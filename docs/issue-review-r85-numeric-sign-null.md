@@ -57,3 +57,7 @@ unique注册/483 standalone E2E、文档状态、兼容性契约及六个总账�
 及新的冻结证据；原273总账仍22 complete/166 partial/70 unverified/15 deferred。
 原冻结全量、R83完整PG超时及R84清理/COPY准备超时均继续保留，不以本项
 定向通过改写。用户暂缓范围、不push、禁用Actions约束保持不变。
+
+后续[冻结27bac6ee完整回归](issue-full-registered-27bac6ee.md)已经结束：1368入口、
+1361实际通过/1环境skip/6失败。本项原生25控制及R83/R84新增入口全部通过；
+这不消除五个协议超时和末尾DROP失败，也不完成原273项或通用SIGN签名。
