@@ -5577,7 +5577,8 @@ std::string ExprEvaluator::scalarFunctionIdentity(const FunctionCallExpr* call,
                 resolved = bound->resolved;
                 database = bound->database;
                 engine = bound->engine;
-            } else if((isIntegralRoundingScalarName(resolved.name) &&
+            } else if(((isIntegralRoundingScalarName(resolved.name) ||
+                        (resolved.name=="round" && call->args.size()==1)) &&
                        !callback->second.target<IntegralRoundingScalarFunction>()) ||
                       (resolved.name=="mod" &&
                        !callback->second.target<ModResultScalarFunction>()))
@@ -12514,7 +12515,7 @@ void ExprEvaluator::registerBuiltins() {
     for(auto& entry:functions_) {
         if(isFixedFloat8ScalarName(entry.first))
             entry.second=DeclaredFloat8ScalarFunction{std::move(entry.second)};
-        else if(isIntegralRoundingScalarName(entry.first))
+        else if(isIntegralRoundingScalarName(entry.first) || entry.first=="round")
             entry.second=IntegralRoundingScalarFunction{std::move(entry.second)};
         else if(entry.first=="mod")
             entry.second=ModResultScalarFunction{std::move(entry.second)};

@@ -69,3 +69,7 @@ whole-query绑定，不能以未绑定列的legacy探测结果覆盖它。原100
 [R84](issue-review-r84-integral-rounding-result-types.md)另修正CEIL/CEILING/FLOOR
 的numeric/float8输出域，并区分实际builtin与opaque原生replacement；它修复
 结果声明，不等于补齐这三个名字的完整arity、输入签名或所有重载/接收器。
+
+[R89](issue-review-r89-round-single-result-domains.md)独立修正ROUND单参数的
+有限numeric/float8结果声明，保留native TEXT、零/双参数及opaque回调行为。
+它不补齐双参数整数转numeric精度或TRUNC的MAC/UNKNOWN重载，通用范围仍partial。

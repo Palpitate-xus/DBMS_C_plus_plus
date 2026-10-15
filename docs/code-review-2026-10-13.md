@@ -9,6 +9,8 @@
 其定向门禁不替代最新全注册组合验收。
 后续[R88统计比较开销](issue-review-r88-analyze-sort-comparison-cost.md)已有
 真实243→1操作次数及完整邻居验证；原完整COPY仍超时，未关闭原六项失败。
+[R89 ROUND单参数声明](issue-review-r89-round-single-result-domains.md)另有独立
+旧实现失败及PG对照；完整签名/双参数/TRUNC范围仍未完成。
 下文的原始失败和统计不代表后续修复仍未完成，也不由局部通过改写。
 
 审查基准为 `a502ffa30df379c88f176c377cdd0f1dae4f3cd4`，产品源码末次提交 `2dc9554e`。

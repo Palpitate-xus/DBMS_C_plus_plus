@@ -561,9 +561,18 @@ std::string inferAstResultType(
         }
         // Integral rounding has numeric and float8 return domains, not an
         // integer/real overload that inherits its input declaration.
-        if (name == "ceil" || name == "ceiling" || name == "floor") {
+        // ROUND's one-argument numeric/float8 forms share these domains;
+        // leave its separate multi-argument/native contracts unchanged.
+        if (name == "ceil" || name == "ceiling" || name == "floor" ||
+            (name == "round" && call->args.size() == 1)) {
             if(routineTypes && routineTypes->opaqueIntegralCalls.count(call))return argType(0);
-            return argType(0) == "numeric" ? "numeric" : "double precision";
+            const auto input = argType(0);
+            // This finite ROUND repair must not widen legacy native TEXT,
+            // other non-numeric inputs or their outer-expression contracts.
+            if (name == "round" && input != "numeric" && input != "smallint" &&
+                input != "integer" && input != "bigint" && input != "real" &&
+                input != "double precision" && input != "unknown") return input;
+            return input == "numeric" ? "numeric" : "double precision";
         }
         if (name == "coalesce" || name == "greatest" || name == "least") {
             std::string result = "unknown";
@@ -645,7 +654,8 @@ RoutineResultTypes collectRoutineResultTypes(
                 else {
                     CatalogManager::QualifiedName name;
                     if(CatalogManager::parseQualifiedName(call->funcName,name,true) && name.schema.empty() &&
-                       (name.name=="ceil" || name.name=="ceiling" || name.name=="floor" || name.name=="mod") &&
+                       (name.name=="ceil" || name.name=="ceiling" || name.name=="floor" || name.name=="mod" ||
+                        (name.name=="round" && call->args.size()==1)) &&
                        evaluator.scalarFunctionIdentity(call,functionEngine).rfind("native",0)==0) {
                         if(name.name=="mod")routineTypes.opaqueModCalls.insert(call);
                         else routineTypes.opaqueIntegralCalls.insert(call);
