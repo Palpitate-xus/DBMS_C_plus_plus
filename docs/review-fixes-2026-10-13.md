@@ -129,7 +129,8 @@ socket超时，精确SQL/栈和原期限保留，尚未确定根因，不称新�
 | R87 | MOD的有限整数宽度/numeric NULL结果域 | 本范围已修复 | 旧254/126失败、10查询/4失败；最终254+153、十四完整native/十一完整协议及PG130全0；首版121/90个native回归保留，最终保护无声明复杂输入，不扩完整签名，见[记录](issue-review-r87-mod-result-domains.md) |
 | R88 | ANALYZE 重复验证/相同长文本比较开销 | 本范围已修复，COPY 未关闭 | `813f5105`；同32长值的真实locale比较243→1，全部统计值不变；96列/运行控制、十四完整native及六完整统计协议通过；原完整COPY仍line262超时，见[记录](issue-review-r88-analyze-sort-comparison-cost.md) |
 | R89 | ROUND 单参数的有限结果声明 | 本范围已修复 | 旧124/48失败、91协议/44失败；最终124+97、十七完整native/十二完整协议及PG91全0；首版native97/6回归保留并收窄输入域，不扩完整签名/双参数/TRUNC范围，见[记录](issue-review-r89-round-single-result-domains.md) |
-| R90 | TOAST ID 持久化区间预留 | 本范围已修复 | 旧64次分配/64次发布→1次；首版UINT64尾部断言失败保留并修正；21不同完整native、原完整COPY固定三次及七完整协议邻居全0，另四历史失败入口三过一SAVEPOINT超时；不扩完整持久性，见[记录](issue-review-r90-toast-durable-id-reservations.md) |
+| R90 | TOAST ID 持久化区间预留 | 本范围已修复 | `66df32ec`；旧64次分配/64次发布→1次；首版UINT64尾部断言失败保留并修正；21不同完整native、原完整COPY固定三次及七完整协议邻居全0，另四历史失败入口三过一SAVEPOINT超时；不扩完整持久性，见[记录](issue-review-r90-toast-durable-id-reservations.md) |
+| R91 | 合法非事务序列运行态与保存点映像复用 | 本范围已修复 | 旧native16份/真实前端71份→当前各1份，保持nextval/setval不回滚及坏状态拒绝；23完整native、原失败顺序四完整协议、MV固定三次和十四完整协议邻居全0；新1382全量尚待冻结运行，见[记录](issue-review-r91-savepoint-sequence-runtime-images.md) |
 | O01 | owner健康重试及测试覆盖 | 已修复 | `c9a1e3c3`；原全部owner断言、新真实peer/dirty冲突及10完整native提交前/后通过；Root R14集成fresh58后两完整owner再次通过，见[验证](issue-review-o01-table-owner-health-retry.md) |
 | O02 | EXISTS索引错误的访问计划/断言 | 已修正回归夹具 | 原完整协议exit 1→0，保留六严格XX001，新增精确t/f，完整EXISTS协议/19native通过；未改产品，见[验证](issue-review-o02-index-access-path-expectations.md) |
 | O03 | EXPLAIN JOIN图及过时断言 | 已修复 | 实际执行的source/cache/join/scan图及相关重绑；最终完整60控制、十二native/十协议CLI全过，OFFSET阳性及42601原/PG对照保留，见[验证](issue-review-o03-explain-join-source-graph.md) |

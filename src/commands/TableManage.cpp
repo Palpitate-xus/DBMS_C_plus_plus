@@ -45667,6 +45667,52 @@ static std::shared_ptr<SavepointImageReceipt> captureSavepointImageReceipt(
     return receipt;
 }
 
+static bool savepointSequenceRuntimeFile(const std::string& name) {
+    static const std::string prefix = std::string(SEQUENCE_RUNTIME_DIRECTORY) + "/";
+    return name.rfind(prefix, 0) == 0 &&
+        validSequenceGeneration(name.substr(prefix.size()));
+}
+
+// SQL rollback deliberately preserves the current nontransactional runtime
+// forks. Validate them before treating their changes as a reusable preimage;
+// declarations, fork names and every other file still require the old proof.
+static bool validSavepointSequenceRuntime(const std::filesystem::path& database) {
+    // Do not introduce a blocking cache-mutex -> sequence-mutex dependency.
+    std::unique_lock<std::mutex> sequenceLock(g_sequenceMutex, std::try_to_lock);
+    if (!sequenceLock.owns_lock()) return false;
+    const auto runtime = database / SEQUENCE_RUNTIME_DIRECTORY;
+    std::error_code error;
+    const auto status = std::filesystem::symlink_status(runtime, error);
+    if (error || !std::filesystem::is_directory(status)) return false;
+    for (const auto& entry : std::filesystem::directory_iterator(runtime)) {
+        const auto generation = entry.path().filename().string();
+        int64_t next = 0, allocated = 0;
+        bool exhausted = false;
+        if (!readSequenceRuntime(entry.path(), generation, next, allocated, exhausted))
+            return false;
+    }
+    // Parsing the runtime header alone is insufficient: active forks must
+    // also satisfy their declaration's generation, range and call-state rules.
+    for (const auto& entry : std::filesystem::directory_iterator(database)) {
+        const auto extension = entry.path().extension();
+        if (!entry.is_regular_file() || (extension != ".seq" && extension != ".seqv2"))
+            continue;
+        if (extension == ".seq") {
+            std::ifstream input(entry.path());
+            std::string magic;
+            // Legacy per-table AUTO_INCREMENT files are not SQL sequences.
+            if (!(input >> magic) || magic.rfind("DBMSSEQ", 0) != 0) continue;
+        }
+        SequenceInfo info;
+        int64_t next = 0, allocated = 0;
+        bool exhausted = false;
+        std::string generation;
+        if (!readSequenceFile(entry.path(), info, next, allocated, &exhausted, &generation) ||
+            generation.empty()) return false;
+    }
+    return true;
+}
+
 static bool matchesSavepointImageReceipt(
     const SavepointImageReceipt& receipt, const std::string& database,
     const std::string& backup, const std::filesystem::path& source,
@@ -45679,10 +45725,20 @@ static bool matchesSavepointImageReceipt(
         !collectSavepointGenerations(backup, image, false) ||
         image != receipt.backupGenerations || current.size() != receipt.sourceGenerations.size())
         return false;
+    bool sequenceRuntimeChanged = false;
     for (const auto& [name, previous] : receipt.sourceGenerations) {
         const auto now = current.find(name);
         if (now == current.end()) return false;
         if (now->second == previous) continue;
+        if ((name == SEQUENCE_RUNTIME_DIRECTORY && S_ISDIR(previous.mode) &&
+             S_ISDIR(now->second.mode) && now->second.device == previous.device &&
+             now->second.inode == previous.inode && now->second.mode == previous.mode) ||
+            (savepointSequenceRuntimeFile(name) && S_ISREG(previous.mode) &&
+             S_ISREG(now->second.mode) && now->second.device == previous.device &&
+             now->second.mode == previous.mode)) {
+            sequenceRuntimeChanged = true;
+            continue;
+        }
         // OidGenerator currently rewrites its unchanged counter on persist.
         // Require the same physical file and the actual complete preimage,
         // not a value-shaped/epoch-based exemption for any other catalog file.
@@ -45694,6 +45750,7 @@ static bool matchesSavepointImageReceipt(
         if (expected == receipt.files.end() || !digestBackupFile(source / name, bytes) ||
             !(bytes == expected->second)) return false;
     }
+    if (sequenceRuntimeChanged && !validSavepointSequenceRuntime(source)) return false;
     SavepointImageReceipt::Generations sourceAfter, imageAfter;
     return collectSavepointGenerations(source, sourceAfter, true) &&
         collectSavepointGenerations(backup, imageAfter, false) &&

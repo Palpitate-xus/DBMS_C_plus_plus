@@ -120,3 +120,7 @@ DROP/cache 专项继续暂缓，不因本次复查重开。
 这不是所有存储/WAL/catalog/统计状态的系统掉电持久性证明，也不是原六项
 冻结失败的自动关闭。新组合未全量运行，原 273 状态保持，暂缓专项不重开，
 逐项本地提交、不 push，GitHub Actions 禁用。
+
+后续[R91](issue-review-r91-savepoint-sequence-runtime-images.md)独立处理合法序列
+推进导致的保存点映像复制；原MV目标协议固定三次通过。本页R90输入下的真实
+SAVEPOINT失败继续保留，不用后续通过改写旧日志或推断所有超时共享根因。

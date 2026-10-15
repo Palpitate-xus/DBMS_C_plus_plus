@@ -14,6 +14,8 @@
 [R90 TOAST计数发布](issue-review-r90-toast-durable-id-reservations.md)已有
 21不同native、原完整COPY固定三次和七协议邻居通过；其余历史失败入口复查
 三过一SAVEPOINT超时，原冻结结果不改写，新1380组合尚未全量运行。
+后续[R91](issue-review-r91-savepoint-sequence-runtime-images.md)保留校验、减少
+非事务序列推进的映像复制，原MV目标固定三次通过；新1382组合将另行冻结运行。
 下文的原始失败和统计不代表后续修复仍未完成，也不由局部通过改写。
 
 审查基准为 `a502ffa30df379c88f176c377cdd0f1dae4f3cd4`，产品源码末次提交 `2dc9554e`。
