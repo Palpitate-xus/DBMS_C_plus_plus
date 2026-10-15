@@ -58,3 +58,22 @@ R78轮询负控及完整DIV14入口也实际通过；不将这些局部结果扩
 通用回调/UDF签名覆盖的R62仍partial。原273功能账仍22 complete、166 partial、
 70 unverified、15 deferred_by_user；没有用本轮注册通过数替代完整要求验收。
 全部修复保留独立本地commit，未push，GitHub Actions保持禁用。
+
+## 终态后的原样复验，不是修复证明
+
+产品源码和binary未改变。`r82-original-timeouts.log`的串行批次再次在JOIN的
+第94行setup等待响应超时；批次遇错即停，bound DML没有在该批次执行。
+另行完整运行bound DML的37项矩阵退出0，`r82-original-bound.log`及同名逐项
+日志目录；生产输入/binary/全部58 receipt首尾一致。不能用这次通过抹去原回滚超时。
+
+外部观测器只记录原JOIN驱动的SQL/响应/实际15秒socket期限和耗时，未重试SQL
+或更改断言。诊断加载了仅在失败时取栈的临时preload，不计为无插桩验收；
+`r82-join-observed-1.log`记录175次实际响应，完整退出0，最长CREATE TABLE约
+10.86秒，未触发超时，因而没有捕获到失败线程栈。一次独立线程采样看到工作线程
+处于`jbd2_log_wait_commit`，只是当时文件系统等待的线索，不证明全部超时的根因。
+临时观测器及服务端日志均在前述本机证据目录，没有合入产品。
+
+随后无观测的原完整JOIN再次退出0，`r82-original-join-second.log`及同名逐项
+日志目录，生产输入/binary/全部58 receipt首尾一致。binary仍为本页冻结摘要。
+这两项间歇性超时保持未解决；继续捕获失败当时的具体SQL/调用链，不增加期限、
+改断言或据此关闭原273项。其他可确定复现的普通函数签名问题继续独立修复。
