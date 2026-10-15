@@ -1,5 +1,10 @@
 # 2026-10-13 全仓库审查
 
+后续[R92](issue-review-r92-toast-missing-counter.md)修复缺失TOAST计数器导致
+写入报错仍破坏已提交长值的问题；30完整native/18of20完整协议通过，两个普通
+DDL超时保留。新877 native+3 Main+504 Python=1384组合尚未全量运行，STO-06
+继续partial，原273状态不变；逐项修复/本地commit，不push。
+
 最新[冻结332bcff4完整回归](issue-full-registered-332bcff4.md)已于2026-10-15
 15:15 UTC实际终1：1382入口各一次，1379实际通过/1 TLS环境skip/2失败，全部
 冻结输入及58 receipt/57 test库字节独立核对0。新增14入口和旧六失败入口本轮

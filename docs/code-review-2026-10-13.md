@@ -2,6 +2,11 @@
 
 ## 输入与结论范围
 
+后续[R92缺失TOAST计数器](issue-review-r92-toast-missing-counter.md)已修复
+写入报错仍破坏原长值的有限问题，补齐ADD/DROP初始化；30完整native通过、
+18/20协议通过，CREATE和定长ALTER超时保留。新1384组合未全量运行，不把本项
+或下述1382历史终态推广为当前源码全绿、完整TOAST或原273完成。
+
 最新[冻结332bcff4完整终态](issue-full-registered-332bcff4.md)于2026-10-15
 15:15 UTC确认实际退出1：1382入口各一次，1379实际通过/1 TLS环境skip/2失败。
 源码/产物及58 receipt、57 test库字节独立核对0。旧六失败入口与新增14入口

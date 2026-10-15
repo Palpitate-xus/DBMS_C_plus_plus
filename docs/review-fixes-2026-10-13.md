@@ -15,12 +15,17 @@
 
 用户此前暂缓的安全/TDE及CTAS/后台checkpoint专项仍暂缓；本轮普通数据完整性与现有回归失败照常修复。CMake、TLS及sanitizer的实际验证范围按结果记录。
 
+后续[R92缺失TOAST计数器](issue-review-r92-toast-missing-counter.md)已修复实际
+写入报错仍破坏已提交长值的问题，补齐合法ADD/DROP重写初始化；30个完整native
+通过，协议邻居18/20通过，CREATE/定长ALTER两个超时保留。新877 native+3 Main+
+504 Python=1384组合未全量运行，下一项继续原完整普通DDL超时与其余未完要求。
+
 最近完整终态为[冻结332bcff4](issue-full-registered-332bcff4.md)：2026-10-15
 15:15 UTC实际退出1，1382入口全部各一次，1379实际通过/1 TLS环境skip/2失败。
 全部冻结输入、58 receipt及57份test库字节独立复核0；新增14入口和旧六失败入口
 本轮均通过。新失败是stored-function-owner末尾DROP断言和SQRT准备阶段CREATE
-SCHEMA超时，不猜测为算法错误或同根因，不重开R51。原273状态不变，继续按新
-终态页计划先复现TOAST缺失计数器等普通问题，逐项修复/验证/本地commit。
+SCHEMA超时，不猜测为算法错误或同根因，不重开R51。原273状态不变，后续有限
+TOAST修复见R92，普通DDL超时及其余原未完要求继续逐项修复/验证/本地commit。
 
 前次完整终态为[冻结27bac6ee](issue-full-registered-27bac6ee.md)：1368入口，
 1361实际通过、1个TLS环境skip、6失败，无遗漏/重复；全部冻结检查、58份
@@ -137,7 +142,8 @@ socket超时，精确SQL/栈和原期限保留，尚未确定根因，不称新�
 | R88 | ANALYZE 重复验证/相同长文本比较开销 | 本范围已修复，COPY 未关闭 | `813f5105`；同32长值的真实locale比较243→1，全部统计值不变；96列/运行控制、十四完整native及六完整统计协议通过；原完整COPY仍line262超时，见[记录](issue-review-r88-analyze-sort-comparison-cost.md) |
 | R89 | ROUND 单参数的有限结果声明 | 本范围已修复 | 旧124/48失败、91协议/44失败；最终124+97、十七完整native/十二完整协议及PG91全0；首版native97/6回归保留并收窄输入域，不扩完整签名/双参数/TRUNC范围，见[记录](issue-review-r89-round-single-result-domains.md) |
 | R90 | TOAST ID 持久化区间预留 | 本范围已修复 | `66df32ec`；旧64次分配/64次发布→1次；首版UINT64尾部断言失败保留并修正；21不同完整native、原完整COPY固定三次及七完整协议邻居全0，另四历史失败入口三过一SAVEPOINT超时；不扩完整持久性，见[记录](issue-review-r90-toast-durable-id-reservations.md) |
-| R91 | 合法非事务序列运行态与保存点映像复用 | 本范围已修复 | 旧native16份/真实前端71份→当前各1份，保持nextval/setval不回滚及坏状态拒绝；23完整native、原失败顺序四完整协议、MV固定三次和十四完整协议邻居全0；新1382全量尚待冻结运行，见[记录](issue-review-r91-savepoint-sequence-runtime-images.md) |
+| R91 | 合法非事务序列运行态与保存点映像复用 | 本范围已修复 | `332bcff4`；旧native16份/真实前端71份→当前各1份，保持nextval/setval不回滚及坏状态拒绝；23完整native及18不同完整协议通过；1382组合已完整终1，本项新增与MV通过、两项其它失败保留，见[记录](issue-review-r91-savepoint-sequence-runtime-images.md) |
+| R92 | TOAST计数器缺失破坏已提交长值 | 本范围已修复，整体回归未全绿 | 本次独立提交；原IO_ERROR仍重建计数器且原查询1→0行；当前INSERT/UPDATE拒绝而旧值不变，合法ADD/DROP五次重写通过；30完整native、18/20完整协议通过，两个普通DDL超时保留，见[记录](issue-review-r92-toast-missing-counter.md) |
 | O01 | owner健康重试及测试覆盖 | 已修复 | `c9a1e3c3`；原全部owner断言、新真实peer/dirty冲突及10完整native提交前/后通过；Root R14集成fresh58后两完整owner再次通过，见[验证](issue-review-o01-table-owner-health-retry.md) |
 | O02 | EXISTS索引错误的访问计划/断言 | 已修正回归夹具 | 原完整协议exit 1→0，保留六严格XX001，新增精确t/f，完整EXISTS协议/19native通过；未改产品，见[验证](issue-review-o02-index-access-path-expectations.md) |
 | O03 | EXPLAIN JOIN图及过时断言 | 已修复 | 实际执行的source/cache/join/scan图及相关重绑；最终完整60控制、十二native/十协议CLI全过，OFFSET阳性及42601原/PG对照保留，见[验证](issue-review-o03-explain-join-source-graph.md) |

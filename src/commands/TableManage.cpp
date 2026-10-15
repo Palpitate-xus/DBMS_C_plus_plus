@@ -16277,7 +16277,10 @@ uint64_t StorageEngine::allocToastId(const std::string& dbname, const std::strin
     bool canonicalCounter = false;
     std::error_code ec;
     const bool exists = std::filesystem::exists(metaPath, ec);
-    if (ec) return invalidCounter();
+    // Only the owner of a new TOAST generation may initialize its counter.
+    // Restarting an existing relation at ID 1 can collide with live chunks;
+    // failed-write cleanup would then delete the old value's chunks as well.
+    if (ec || !exists) return invalidCounter();
     if (exists) {
         const uintmax_t fileSize = std::filesystem::file_size(metaPath, ec);
         if (ec || (fileSize != TOAST_COUNTER_LEGACY_SIZE &&
@@ -18148,15 +18151,15 @@ DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
     if (hasVarLen) {
         auto toastPa = std::make_unique<PageAllocator>(
             toastDataPath(dbname, tablename).string(), 0, 8192, DATA_FILE_FORMAT_VERSION);
-        toastPa->open();
-        toastPa->close();
         BPTree toastIdx(toastIndexPath(dbname, tablename));
-        toastIdx.open();
-        toastIdx.close();
-        if (allocToastId(dbname, tablename) == 0) {
+        if (!toastPa->open() || !toastPa->flush() ||
+            !toastIdx.open() || !toastIdx.flush() ||
+            !persistToastCounter(toastMetaPath(dbname, tablename), 1)) {
             lockManager_.unlock(tablename);
             return DBStatus::IO_ERROR;
         }
+        toastPa->close();
+        toastIdx.close();
     }
 
     // This DDL path deliberately removed the physical trees. Runtime getters
@@ -18463,15 +18466,15 @@ DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
     if (hasVarLen) {
         auto toastPa = std::make_unique<PageAllocator>(
             toastDataPath(dbname, tablename).string(), 0, 8192, DATA_FILE_FORMAT_VERSION);
-        toastPa->open();
-        toastPa->close();
         BPTree toastIdx(toastIndexPath(dbname, tablename));
-        toastIdx.open();
-        toastIdx.close();
-        if (allocToastId(dbname, tablename) == 0) {
+        if (!toastPa->open() || !toastPa->flush() ||
+            !toastIdx.open() || !toastIdx.flush() ||
+            !persistToastCounter(toastMetaPath(dbname, tablename), 1)) {
             lockManager_.unlock(tablename);
             return DBStatus::IO_ERROR;
         }
+        toastPa->close();
+        toastIdx.close();
     }
 
     const DBStatus emptyIndexStatus = reindex(dbname, tablename);
