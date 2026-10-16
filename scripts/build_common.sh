@@ -450,6 +450,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/case_else_projection_label_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/case_integer_literal_binding_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/geometric_typed_literal_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/geometric_delimiter_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/geometric_cast_input_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/geometric_equality_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/distinct_equality_operator_protocol_e2e_test.py)

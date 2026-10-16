@@ -2,6 +2,19 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R100 geometric coordinate delimiter positions validated with a cursor; invalid inputs no longer normalize into committed values",
+      "gap_ids": ["SQL-02", "SQL-11", "TYPE-09", "PROTO-04"],
+      "status": "partial",
+      "evidence": ["docs/issue-review-r100-geometric-coordinate-delimiters.md"],
+      "tests": ["tests/geometric_delimiter_test.cpp", "tests/geometric_delimiter_protocol_e2e_test.py", "tests/geometric_test.cpp"],
+      "verification": {
+        "reproduction": "Final old component232/104 and fixed old wire230/135 actually exit1; first old wire setup timeout and first native neighbor abort134 retained. Actual PG18.6 verifies the old PATH closer fixture is legal, with equivalent INSERT and exact canonical output.",
+        "focused_tests": "Final component232, ASan/UBSan232 without engine symbols, actual180006/reference230 and current230 pass. Ten whole native and seven whole wire entries including default protocol pass. Public geometry API and binary layout unchanged; only GeometryValue.cpp production TU recompiled and normal/repeat builds pass.",
+        "full_suite": "No new full registered suite. R100-only accepted registry1394 and working registry1398 including preserved uncommitted R98 are distinct; old frozen1391 result does not cover them. Current full-engine focused proof includes R98; the two-TU component is independent of it.",
+        "scope": "All273 original items and statuses unchanged22complete166partial70unverified15deferred. R98/R99 skip scope awaits user clarification; do not discard or commit those candidates. Existing explicit deferrals preserved, no push and Actions remain disabled."
+      }
+    },
+    {
       "issue": "USER grammar identity and version typed scalar independently committed; original fromless passes in matching private publication",
       "gap_ids": ["SQL-04", "QRY-01", "FUNC-01", "FUNC-05", "PROTO-04"],
       "status": "partial",

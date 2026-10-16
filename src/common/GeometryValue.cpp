@@ -96,77 +96,95 @@ bool unwrapQuotedGeometry(std::string& text) {
     return !text.empty();
 }
 
-bool splitGeometry(const std::string& input, std::vector<double>& numbers,
-                   std::string& skeleton) {
-    std::string flattened;
-    flattened.reserve(input.size());
-    std::vector<char> closers;
-    for (char c : input) {
-        switch (c) {
-            case '(':
-                closers.push_back(')');
-                skeleton.push_back(c);
-                flattened.push_back(' ');
-                break;
-            case '[':
-                closers.push_back(']');
-                skeleton.push_back(c);
-                flattened.push_back(' ');
-                break;
-            case '{':
-                closers.push_back('}');
-                skeleton.push_back(c);
-                flattened.push_back(' ');
-                break;
-            case '<':
-                closers.push_back('>');
-                skeleton.push_back(c);
-                flattened.push_back(' ');
-                break;
-            case ')': case ']': case '}': case '>':
-                if (closers.empty() || closers.back() != c) return false;
-                closers.pop_back();
-                skeleton.push_back(c);
-                flattened.push_back(' ');
-                break;
-            default:
-                flattened.push_back(c);
-                break;
-        }
+// Delimiters have to be consumed at the coordinate they delimit. A separate
+// bracket skeleton cannot distinguish "(1,2)" from "(1),2".
+class GeometryTextReader {
+public:
+    explicit GeometryTextReader(const std::string& text) : text_(text) {}
+
+    char peek() {
+        skipSpace();
+        return position_ < text_.size() ? text_[position_] : '\0';
     }
-    if (!closers.empty()) return false;
-
-    size_t start = 0;
-    while (start <= flattened.size()) {
-        const size_t comma = flattened.find(',', start);
-        const size_t end = comma == std::string::npos ? flattened.size() : comma;
-        double number = 0.0;
-        if (!parseGeometryNumber(flattened.substr(start, end - start), number)) {
-            return false;
-        }
-        numbers.push_back(number);
-        if (comma == std::string::npos) break;
-        start = comma + 1;
-    }
-    return !numbers.empty();
-}
-
-std::string pointSkeleton(size_t count) {
-    std::string result;
-    result.reserve(count * 2);
-    for (size_t i = 0; i < count; ++i) result += "()";
-    return result;
-}
-
-bool isPointListSkeleton(const std::string& skeleton, size_t count,
-                         bool allowOpenOuter) {
-    const std::string points = pointSkeleton(count);
-    if (skeleton.empty() || skeleton == points || skeleton == "()" ||
-        skeleton == "(" + points + ")") {
+    bool take(char expected) {
+        skipSpace();
+        if (position_ == text_.size() || text_[position_] != expected) return false;
+        ++position_;
         return true;
     }
-    return allowOpenOuter &&
-           (skeleton == "[]" || skeleton == "[" + points + "]");
+    bool done() {
+        skipSpace();
+        return position_ == text_.size();
+    }
+    bool startsNestedPoint() {
+        skipSpace();
+        size_t next = position_ + 1;
+        while (next < text_.size() &&
+               std::isspace(static_cast<unsigned char>(text_[next]))) ++next;
+        return peek() == '(' && next < text_.size() && text_[next] == '(';
+    }
+    bool onlyOpeningParen() {
+        return peek() == '(' && text_.find('(', position_ + 1) == std::string::npos;
+    }
+    bool number(double& value) {
+        skipSpace();
+        const size_t first = position_;
+        const size_t delimiter = text_.find_first_of(",()[]{}<>", first);
+        position_ = delimiter == std::string::npos ? text_.size() : delimiter;
+        return parseGeometryNumber(text_.substr(first, position_ - first), value);
+    }
+    bool point(std::vector<double>& numbers) {
+        const bool wrapped = take('(');
+        double x = 0.0, y = 0.0;
+        if (!number(x) || !take(',') || !number(y) ||
+            (wrapped && !take(')'))) return false;
+        numbers.push_back(x);
+        numbers.push_back(y);
+        return true;
+    }
+
+private:
+    void skipSpace() {
+        while (position_ < text_.size() &&
+               std::isspace(static_cast<unsigned char>(text_[position_]))) ++position_;
+    }
+    const std::string& text_;
+    size_t position_ = 0;
+};
+
+bool parsePointListForm(const std::string& text, const std::string& type,
+                        GeometryValue& value) {
+    const bool fixedPair = type == "line" || type == "lseg" || type == "box";
+    size_t count = 2;
+    if (!fixedPair) {
+        const size_t commas = std::count(text.begin(), text.end(), ',');
+        if (commas % 2 == 0) return false;
+        count = commas / 2 + 1;
+        if (count > kMaximumGeometryPoints) return false;
+    }
+    GeometryTextReader reader(text);
+    // The legacy PATH spelling permits one additional enclosing round pair.
+    const bool pathWrapper = type == "path" && reader.onlyOpeningParen();
+    if (pathWrapper) reader.take('(');
+    const bool open = reader.peek() == '[';
+    const bool wrapped = open || (reader.peek() == '(' &&
+                                  (reader.startsNestedPoint() || reader.onlyOpeningParen()));
+    if (open && type != "path" && type != "lseg" && type != "line") return false;
+    if (wrapped) reader.take(open ? '[' : '(');
+    std::vector<double> numbers;
+    numbers.reserve(count * 2);
+    for (size_t i = 0; i < count; ++i) {
+        if (!reader.point(numbers)) return false;
+        // The fixed-width input spellings accept adjacent wrapped points, and
+        // an optional final comma; variable-width types count commas above.
+        reader.take(',');
+    }
+    if (wrapped && !reader.take(')') && !(open && reader.take(']'))) return false;
+    if (pathWrapper && !reader.take(')')) return false;
+    if (!reader.done()) return false;
+    value.openPath = type == "path" && open;
+    value.coordinates = std::move(numbers);
+    return true;
 }
 
 bool parsePointForm(std::string text, GeometryValue& value) {
@@ -176,11 +194,8 @@ bool parsePointForm(std::string text, GeometryValue& value) {
         text = trimGeometry(std::string_view(text).substr(5));
     }
     std::vector<double> numbers;
-    std::string skeleton;
-    if (!splitGeometry(text, numbers, skeleton) || numbers.size() != 2 ||
-        (skeleton != "" && skeleton != "()")) {
-        return false;
-    }
+    GeometryTextReader reader(text);
+    if (!reader.point(numbers) || !reader.done()) return false;
     // The current packed point datum is also the key source for the local
     // SP-GiST implementation, whose bounding-box invariants require finite
     // coordinates.  Fail closed until that opclass has explicit NaN/infinity
@@ -191,17 +206,17 @@ bool parsePointForm(std::string text, GeometryValue& value) {
 }
 
 bool parseLineForm(const std::string& text, GeometryValue& value) {
-    std::vector<double> numbers;
-    std::string skeleton;
-    if (!splitGeometry(text, numbers, skeleton)) return false;
-    if (numbers.size() == 3 && skeleton == "{}") {
-        if (numbers[0] == 0.0 && numbers[1] == 0.0) return false;
-        value.coordinates = std::move(numbers);
+    GeometryTextReader reader(text);
+    if (reader.take('{')) {
+        double a = 0.0, b = 0.0, c = 0.0;
+        if (!reader.number(a) || !reader.take(',') || !reader.number(b) ||
+            !reader.take(',') || !reader.number(c) || !reader.take('}') ||
+            !reader.done() || (a == 0.0 && b == 0.0)) return false;
+        value.coordinates = {a,b,c};
         return true;
     }
-    if (numbers.size() != 4 || !isPointListSkeleton(skeleton, 2, true)) {
-        return false;
-    }
+    if (!parsePointListForm(text,"line",value)) return false;
+    const auto& numbers = value.coordinates;
     const double x1 = numbers[0];
     const double y1 = numbers[1];
     const double x2 = numbers[2];
@@ -218,36 +233,20 @@ bool parseLineForm(const std::string& text, GeometryValue& value) {
     return true;
 }
 
-bool parsePointListForm(const std::string& text, const std::string& type,
-                        GeometryValue& value) {
-    std::vector<double> numbers;
-    std::string skeleton;
-    if (!splitGeometry(text, numbers, skeleton) || numbers.size() % 2 != 0) {
-        return false;
-    }
-    const size_t count = numbers.size() / 2;
-    if (count == 0 || count > kMaximumGeometryPoints) return false;
-    const bool allowOpen = type == "lseg" || type == "path";
-    if (!isPointListSkeleton(skeleton, count, allowOpen)) return false;
-    if ((type == "lseg" || type == "box") && count != 2) return false;
-    value.openPath = type == "path" && !skeleton.empty() && skeleton.front() == '[';
-    value.coordinates = std::move(numbers);
-    return true;
-}
-
 bool parseCircleForm(const std::string& text, GeometryValue& value) {
+    GeometryTextReader reader(text);
+    const bool wrapped = reader.peek() == '<' || reader.startsNestedPoint();
+    if (wrapped) reader.take(reader.peek());
     std::vector<double> numbers;
-    std::string skeleton;
-    if (!splitGeometry(text, numbers, skeleton) || numbers.size() != 3) {
-        return false;
-    }
-    if (skeleton != "" && skeleton != "()" && skeleton != "(())" &&
-        skeleton != "<>" && skeleton != "<()>") {
-        return false;
-    }
+    if (!reader.point(numbers)) return false;
+    reader.take(',');
+    double radius = 0.0;
+    if (!reader.number(radius) ||
+        (wrapped && !reader.take(')') && !reader.take('>')) || !reader.done()) return false;
     // PostgreSQL deliberately accepts NaN radii, but rejects negative finite
     // values and negative infinity.
-    if (numbers[2] < 0.0) return false;
+    if (radius < 0.0) return false;
+    numbers.push_back(radius);
     value.coordinates = std::move(numbers);
     return true;
 }

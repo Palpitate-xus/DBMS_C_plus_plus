@@ -2,6 +2,10 @@
 
 ## 输入与结论范围
 
+后续[R100几何分隔符](issue-review-r100-geometric-coordinate-delimiters.md)修复非法
+坐标被当成合法输入提交的问题。旧232组件104失败、230协议135失败，当前232、
+PG/Root230及十个完整native/七个完整协议通过。原273状态不变。
+
 后续[R97 BEFORE行赋值](issue-review-r97-typed-before-row-assignments.md)修复
 原生API的NEW/OLD文本、相似列名与NULL错值；原106/65失败，当前154、15个
 完整native及十个完整协议通过。新1392组合未全量，不挪用下述1391结果。

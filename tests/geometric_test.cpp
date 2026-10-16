@@ -116,8 +116,15 @@ static void test_path_polygon() {
         {"po","[(0,0),(1,1),(2)]"},
         {"pc","((0,0),(1,1))"},
         {"pg","((0,0),(1,1),(2,2))"}}) == dbms::DBStatus::INVALID_VALUE);
+    // PostgreSQL's legacy open-path input also accepts ')' here. This is a
+    // valid input, unlike closing a point before its second coordinate.
     assert(g_engine.insert(db, "g", {{"id","3"},
         {"po","[(0,0),(1,1))"},
+        {"pc","((0,0),(1,1))"},
+        {"pg","((0,0),(1,1),(2,2))"}}) == dbms::DBStatus::OK);
+    assert(fetchOne(db, "g", {"=id 3"}, "po") == "[(0,0),(1,1)]");
+    assert(g_engine.insert(db, "g", {{"id","5"},
+        {"po","[(0,0),(1,1)]extra"},
         {"pc","((0,0),(1,1))"},
         {"pg","((0,0),(1,1),(2,2))"}}) == dbms::DBStatus::INVALID_VALUE);
     assert(g_engine.insert(db, "g", {{"id","4"},

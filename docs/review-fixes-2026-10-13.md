@@ -15,6 +15,10 @@
 
 用户此前暂缓的安全/TDE及CTAS/后台checkpoint专项仍暂缓；本轮普通数据完整性与现有回归失败照常修复。CMake、TLS及sanitizer的实际验证范围按结果记录。
 
+后续[R100几何分隔符](issue-review-r100-geometric-coordinate-delimiters.md)旧最终
+232组件104失败、230协议135失败；当前232、PG/Root230及十个完整native、七个
+完整协议通过。初次准备超时和旧夹具134保留；不混入R98候选，原273状态不变。
+
 后续[R97 BEFORE行赋值](issue-review-r97-typed-before-row-assignments.md)原106/65
 失败保留；当前154、15个完整native及十个完整协议通过。新1392尚未全量验收，
 原273状态不变，R96明确暂缓。下方1391完整终态不包含R97。
@@ -171,6 +175,7 @@ socket超时，精确SQL/栈和原期限保留，尚未确定根因，不称新�
 | R95 | 旧全局BOOL表达式及混合JSON聚合 | 本范围已修复 | 旧native118/56及观察60/15失败；当前118、PG/Root60、十个完整native及十个完整协议通过，原setup超时与C warning保留，见[记录](issue-review-r95-legacy-global-boolean-arguments.md) |
 | R96 | 内置collation退出期生命周期 | 用户明确暂缓，未修复 | 原纯组件ASan退出1/heap-use-after-free保留，无生产修复；不等同R95 warning或R15，不扩大至全部类型，generic continue不恢复，见[记录](issue-review-r96-collation-exit-user-deferred.md) |
 | R97 | 显式BEFORE行赋值的NEW/OLD类型与NULL | 本范围已修复 | 旧106/65失败，当前154及15个完整native/十个完整协议通过；这是StorageEngine扩展，不冒称完整PG触发器/1392组合验收，见[记录](issue-review-r97-typed-before-row-assignments.md) |
+| R100 | 几何坐标分隔符的位置验证 | 本范围已修复，独立本地commit | 旧232/104与230/135失败；当前232及PG/Root230通过，十个完整native/七个完整协议通过；旧准备超时/134保留，见[记录](issue-review-r100-geometric-coordinate-delimiters.md) |
 | O01 | owner健康重试及测试覆盖 | 已修复 | `c9a1e3c3`；原全部owner断言、新真实peer/dirty冲突及10完整native提交前/后通过；Root R14集成fresh58后两完整owner再次通过，见[验证](issue-review-o01-table-owner-health-retry.md) |
 | O02 | EXISTS索引错误的访问计划/断言 | 已修正回归夹具 | 原完整协议exit 1→0，保留六严格XX001，新增精确t/f，完整EXISTS协议/19native通过；未改产品，见[验证](issue-review-o02-index-access-path-expectations.md) |
 | O03 | EXPLAIN JOIN图及过时断言 | 已修复 | 实际执行的source/cache/join/scan图及相关重绑；最终完整60控制、十二native/十协议CLI全过，OFFSET阳性及42601原/PG对照保留，见[验证](issue-review-o03-explain-join-source-graph.md) |

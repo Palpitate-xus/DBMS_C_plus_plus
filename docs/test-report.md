@@ -2,6 +2,11 @@
 
 当前运行结果、失败明细和复现方法见[代码审查索引](review-index.md)。验证入口为 `bash scripts/build_tests.sh`，只运行其已注册集合；未注册测试需单独运行或补入入口。
 
+2026-10-16后续[R100几何输入](issue-review-r100-geometric-coordinate-delimiters.md)
+最终232组件、PG/Root230、十个完整native及七个完整协议通过，纯组件ASan/UBSan
+通过；旧232/104、230/135、首轮准备超时与旧夹具134均保留。只证明本项范围，
+不把下列1391历史全量用于本项后的1394或含未提交R98的1398组合。
+
 2026-10-15最新[冻结5091b39c完整回归](issue-full-registered-5091b39c.md)实际退出0：
 881 native、3真实Main及507 Python共1391入口各一次，1390实际通过、1 TLS环境
 skip、0失败。源码/生产产物及全部58 receipt、57 test库字节独立终态核对0。

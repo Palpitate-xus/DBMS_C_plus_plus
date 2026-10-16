@@ -1,5 +1,9 @@
 # 2026-10-13 全仓库审查
 
+后续[R100几何坐标分隔符](issue-review-r100-geometric-coordinate-delimiters.md)旧最终
+232组件104失败、230协议135失败；当前232、PG/Root230、十个完整native/七个
+完整协议通过。TYPE-09仍partial，原273状态不因局部修复提升。
+
 后续[R95旧全局BOOL参数](issue-review-r95-legacy-global-boolean-arguments.md)
 118控制、PG/Root60、十个完整native及十个完整协议通过；原setup超时与C warning保留。
 新881 native+3 Main+507 Python=1391尚未取得全量终态，原273状态不变。
