@@ -189,8 +189,9 @@ socket超时，精确SQL/栈和原期限保留，尚未确定根因，不称新�
 | R100 | 几何坐标分隔符的位置验证 | 本范围已修复，独立本地commit | 旧232/104与230/135失败；当前232及PG/Root230通过，十个完整native/七个完整协议通过；旧准备超时/134保留，见[记录](issue-review-r100-geometric-coordinate-delimiters.md) |
 | R101 | MAC输入、EUI宽度转换与SQLSTATE | 本范围已修复，独立本地commit | 旧75/38、328/186；当前75、PG/Root328、236差分及20native/15协议/3真实Main通过；头缺陷修正后全58重编/产物逐字节相同/新核心2与328/fence均0，未冒新全量；首版314/5保留，见[记录](issue-review-r101-macaddr-input-and-widths.md) |
 | R102 | INET/CIDR输入格式与类型边界 | 本范围已修复，独立本地commit | 旧188/72、672/389；当前188/ASan/UBSan、PG/Root672、2558对照及21native/16协议/3真实Main通过；最终真实全58/匹配核心/fence均0，首版672/23保留，不冒新全量，见[记录](issue-review-r102-network-input-notation.md) |
-| R103 | NAME→MAC显式输入回归 | 已复现，待修复 | R101新白名单遗漏NAME，实际PG允许而固定fb6对值/NULL/零行均42846；独立修复排队，见[R102后续观察](issue-review-r102-network-input-notation.md#后续独立问题未计入本项修复) |
-| R104 | typed INET→CIDR网络值转换 | 已复现，待修复 | 固定fb6对IPv4/IPv6 host bits报22P02，实际PG清除host bits后成功；不是放松unknown CIDR校验，见[R102后续观察](issue-review-r102-network-input-notation.md#后续独立问题未计入本项修复) |
+| R103 | NAME→MAC显式输入回归 | 本范围已修复，独立本地commit | 最终PG/Root366、完整SDK与21native/16协议/3真实Main通过；最终自身全58/normal/repeat/fence全0，旧366/30、SDK134及首版358/6、366/12保留，见[记录](issue-review-r103-macaddr-name-input.md) |
+| R104 | 网络typed值转换与共同值结果 | 已复现，待修复 | 原INET→CIDR错误拒绝；实际PG/固定b172各23观察另确认typed赋值22023、COALESCE仅改OID而值仍带/32、混合VALUES42804；既有CASE为阳性，不能只改OID或放松unknown校验，见[R102后续观察](issue-review-r102-network-input-notation.md#后续独立问题未计入本项修复) |
+| R105 | 限定NAME→INET/CIDR源身份遗漏 | 已复现，待修复 | 实际PG/固定8d3e各四个表达式中两处差异：普通name成功但真正限定pg_catalog.name报42846；网络消费者未因R103的MAC修复而改变，见[R103后续观察](issue-review-r103-macaddr-name-input.md) |
 | O01 | owner健康重试及测试覆盖 | 已修复 | `c9a1e3c3`；原全部owner断言、新真实peer/dirty冲突及10完整native提交前/后通过；Root R14集成fresh58后两完整owner再次通过，见[验证](issue-review-o01-table-owner-health-retry.md) |
 | O02 | EXISTS索引错误的访问计划/断言 | 已修正回归夹具 | 原完整协议exit 1→0，保留六严格XX001，新增精确t/f，完整EXISTS协议/19native通过；未改产品，见[验证](issue-review-o02-index-access-path-expectations.md) |
 | O03 | EXPLAIN JOIN图及过时断言 | 已修复 | 实际执行的source/cache/join/scan图及相关重绑；最终完整60控制、十二native/十协议CLI全过，OFFSET阳性及42601原/PG对照保留，见[验证](issue-review-o03-explain-join-source-graph.md) |

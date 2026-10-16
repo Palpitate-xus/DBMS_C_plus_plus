@@ -9,7 +9,7 @@
 
 namespace dbms::macaddr_input_detail {
 
-inline std::string builtinType(const std::string& spelling) {
+inline std::string builtinIdentity(const std::string& spelling) {
     const auto tokens = SQLParser::tokenize(spelling);
     if (tokens.size()!=1 && !(tokens.size()==3 && tokens[1]==".")) return {};
     std::string name;
@@ -17,13 +17,18 @@ inline std::string builtinType(const std::string& spelling) {
     CatalogManager::QualifiedName qualified;
     if (!CatalogManager::parseQualifiedName(name,qualified,true) ||
         (!qualified.schema.empty() && qualified.schema!="pg_catalog")) return {};
-    return qualified.name=="macaddr" || qualified.name=="macaddr8" ? qualified.name : std::string{};
+    return qualified.name;
+}
+
+inline std::string builtinType(const std::string& spelling) {
+    const auto type=builtinIdentity(spelling);
+    return type=="macaddr" || type=="macaddr8" ? type : std::string{};
 }
 
 inline void validateCast(const std::string& source,const std::string& target) {
     const auto input = ExprHelper::canonicalResultTypeName(source);
     if (input!="unknown" && input!="text" && input!="character varying" && input!="character" &&
-        input!="macaddr" && input!="macaddr8")
+        builtinIdentity(source)!="name" && input!="macaddr" && input!="macaddr8")
         throw DbError("42846","cannot cast type " + input + " to " + target);
 }
 

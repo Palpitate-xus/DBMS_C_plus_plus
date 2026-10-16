@@ -127,6 +127,35 @@ def main():
             parameter(kind,oid,bad[0],"22P02",None,25)
             parameter(kind,oid,"100:00:2b:01:02:03","22003" if kind=="macaddr" else "22P02",None,25)
             expect(kind + " typed NULL","SELECT CAST(NULL AS " + kind + ")",rows=[[None]],oid=oid)
+            name_value = MAC6 if kind=="macaddr" else EXPANDED
+            name_cast = "CAST(" + literal(MAC6) + "::name AS " + kind + ")"
+            expect(kind+" explicit NAME value","SELECT "+name_cast,rows=[[name_value]],oid=oid)
+            expect(kind+" explicit NAME NULL","SELECT NULL::name::"+kind,rows=[[None]],oid=oid)
+            expect(kind+" qualified NAME source","SELECT "+literal(MAC6)+"::pg_catalog.name::"+kind,
+                   rows=[[name_value]],oid=oid)
+            expect(kind+" quoted qualified NAME source","SELECT "+literal(MAC6)+'::"pg_catalog"."name"::'+kind,
+                   rows=[[name_value]],oid=oid)
+            expect(kind+" quoted qualified NAME NULL",'SELECT NULL::"pg_catalog"."name"::'+kind,
+                   rows=[[None]],oid=oid)
+            expect(kind+" invalid qualified NAME content",'SELECT \'invalid\'::"pg_catalog"."name"::'+kind,"22P02")
+            expect(kind+" qualified NAME cast target",
+                   "SELECT CAST("+literal(MAC6)+"::name AS pg_catalog.\""+kind+"\")",rows=[[name_value]],oid=oid)
+            expect(kind+" NAME zero rows","SELECT "+name_cast+" WHERE false",rows=[],oid=oid)
+            expect(kind+" discarded NAME branch",
+                   "SELECT CASE WHEN false THEN "+name_cast+" ELSE NULL::"+kind+" END",rows=[[None]],oid=oid)
+            expect(kind+" invalid NAME content","SELECT 'invalid'::name::"+kind,"22P02")
+            parameter(kind,oid,MAC6,None,name_value,19)
+            parameter(kind,oid,"invalid","22P02",None,19)
+            parameter(kind,oid,"100:00:2b:01:02:03","22003" if kind=="macaddr" else "22P02",None,19)
+            expect(kind+" NAME not implicit assignment",
+                   "INSERT INTO "+table+" VALUES(10000,"+literal(MAC6)+"::name)","42804")
+            expect(kind+" NAME NULL not implicit assignment",
+                   "INSERT INTO "+table+" VALUES(10001,NULL::name)","42804")
+            expect(kind+" explicit NAME assignment","INSERT INTO "+table+" VALUES(10002,"+name_cast+")")
+            expect(kind+" stored NAME bytes","SELECT v FROM "+table+" WHERE id=10002",rows=[[name_value]],oid=oid)
+            expect(kind+" failed NAME assignments absent",
+                   "SELECT count(*) FROM "+table+" WHERE id IN(10000,10001)",rows=[["0"]],oid=20)
+            expect(kind+" absent BYTEA cast retained","SELECT NULL::bytea::"+kind+" WHERE false","42846")
             for operation,expected in (("=","t"),("<>","f"),("<=","t"),(">=","t"),("<","f"),(">","f")):
                 value = literal(canonical) + "::" + kind
                 expect(kind + " same-type operator " + operation,"SELECT " + value + operation + value,rows=[[expected]],oid=16)

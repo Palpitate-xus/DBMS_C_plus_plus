@@ -2,6 +2,11 @@
 
 当前运行结果、失败明细和复现方法见[代码审查索引](review-index.md)。验证入口为 `bash scripts/build_tests.sh`，只运行其已注册集合；未注册测试需单独运行或补入入口。
 
+2026-10-16后续[R103 NAME→MAC](issue-review-r103-macaddr-name-input.md)实际参考
+最终PG/Root366、完整SDK及21native/16协议/3真实Main通过，真实全58/normal/
+repeat和独立终态fence全0，单项本地提交。旧366/30、SDK134及首版358/6与
+366/12失败保留；75纯组件sanitizer不冒整库证明，无新1398/1402全量。
+
 2026-10-16后续[R102 INET/CIDR输入](issue-review-r102-network-input-notation.md)
 最终旧188组件72失败、672协议389失败；当前188/纯组件ASan/UBSan、PG/Root672、
 2558对照及21native/16协议/3真实Main通过；最终真实全58/normal/repeat、匹配

@@ -96,12 +96,23 @@ source/test/script封印为
 有8条结果不同；采集成功不代表数据库行为正确。日志为
 `r103-followup-reference.log`与`r103-followup-old.log`，同在上述证据目录。
 
-| 编号 | 未修复行为 | 实际参考及修改方向 |
+| 编号 | 发现行为及后续状态 | 实际参考及修改方向 |
 | --- | --- | --- |
-| R103 | R101新增源类型白名单拒绝NAME→MACADDR/MACADDR8，包括NULL | 参考允许NAME显式字符串输入，非法NAME内容为22P02；应补真实NAME边并保留INTEGER/内部char拒绝，独立测试/提交，不回改旧通过记录 |
+| R103 | R101新增白名单遗漏普通/限定NAME，包括NULL；后续已修复 | [R103](issue-review-r103-macaddr-name-input.md)独立补真实源身份，PG/Root366与40个定向入口通过，保留INTEGER/内部char拒绝，不回改旧记录 |
 | R104 | typed INET→CIDR把host bits当作非法文本拒绝 | `192.0.2.1/24`应转为`192.0.2.0/24`，IPv6同理；应区分已有网络datum转换与unknown CIDR输入，前者清除host bits，后者仍严格拒绝非网络地址 |
 
 R103是复查发现的真实回归，R104是既有值转换遗漏；均未因R102格式修复而关闭。
+R103现由其后续独立修复与验收关闭，R104仍开放；限定NAME到INET/CIDR的
+同类消费者遗漏另列R105，不由MAC修复覆盖。
+
+R104后续只读预检在实际180006与固定b172程序各完整采集23条，日志为
+`r104-conversion-preflight-reference.log`和`r104-conversion-preflight-old-b172.log`。
+typed INET→CIDR的值转换、INSERT VALUES/SELECT及UPDATE均有差异；此外
+`COALESCE(NULL::inet,'192.0.2.129/32'::cidr)`在旧程序中声明INET却仍输出带/32
+的CIDR文本，混合CIDR/INET的VALUES报42804。相同CASE和显式CIDR→INET是
+已通过的阳性控制，unknown/TEXT CIDR的非法host bits仍应22P02。R104应修复
+实际datum转换及已确认的共同值场景，不只更改结果OID或放松CIDR文本校验；
+既有共同类型图已含CIDR→INET隐式边，不能误加INET→CIDR隐式边。
 
 ## 日志与永久复现
 
@@ -134,4 +145,5 @@ R103是复查发现的真实回归，R104是既有值转换遗漏；均未因R10
 R98时为887+3+512=1402。两者无新完整注册终态，不借旧1391或R101的38入口
 证明本项。仅提交本项22个文件，registry与文档inventory按块隔离，不混入
 R98/R99；四份用法/历史对照文档补充当前范围，不重写历史PASS。原273未完成，
-R103/R104保持待修复；本项不是整个网络类型家族或仅本项HEAD整仓验收。
+R103后续已独立修复，R104/R105仍待修复；本项不是整个网络类型家族或仅
+本项HEAD整仓验收。

@@ -140,8 +140,9 @@ USE DATABASE mydb;
 推断整个PostgreSQL网络函数族已完成。INET无掩码要求完整IPv4地址，`'10/8'`
 是带掩码缩写；CIDR输入不允许非零host bits，`'10.1'`表示`10.1.0.0/16`。
 MACADDR8接受六字节EUI-48时会插入FF:FE，而不是在末尾补零。文本列/参数可
-通过显式CAST输入，typed TEXT不能直接当作网络列的隐式赋值。NAME→MAC及
-typed INET→CIDR的已知转换问题另列R103/R104，未因输入解析修复而关闭。
+通过显式CAST输入，typed TEXT不能直接当作网络列的隐式赋值。NAME→MAC源
+身份已由[R103](issue-review-r103-macaddr-name-input.md)独立修复；typed
+INET→CIDR及限定NAME→INET/CIDR仍列R104/R105待修，不等同整族兼容完成。
 
 ---
 

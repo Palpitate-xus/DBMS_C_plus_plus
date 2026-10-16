@@ -190,6 +190,22 @@ static void test_typed_macaddr_casts() {
         {"integer","",true,"macaddr8","","42846"},
         {"macaddr8","",true,"macaddr","",""},
         {"text","",true,"macaddr8","",""},
+        {"name","08:00:2b:01:02:03",false,"macaddr","08:00:2b:01:02:03",""},
+        {"name","08:00:2b:01:02:03",false,"macaddr8","08:00:2b:ff:fe:01:02:03",""},
+        {"name","08:00:2b:01:02:03:04:05",false,"macaddr8","08:00:2b:01:02:03:04:05",""},
+        {"name","invalid",false,"macaddr","","22P02"},
+        {"name","invalid",false,"macaddr8","","22P02"},
+        {"name","100:00:2b:01:02:03",false,"macaddr","","22003"},
+        {"name","100:00:2b:01:02:03",false,"macaddr8","","22P02"},
+        {"name","",true,"macaddr","",""},
+        {"name","",true,"macaddr8","",""},
+        {"name","08:00:2b:01:02:03",false,"pg_catalog.\"macaddr8\"","08:00:2b:ff:fe:01:02:03",""},
+        {"pg_catalog.name","08:00:2b:01:02:03",false,"macaddr","08:00:2b:01:02:03",""},
+        {"\"pg_catalog\".\"name\"","08:00:2b:01:02:03",false,"macaddr8","08:00:2b:ff:fe:01:02:03",""},
+        {"\"pg_catalog\".\"name\"","",true,"macaddr","",""},
+        {"\"pg_catalog\".\"name\"","invalid",false,"macaddr8","","22P02"},
+        {"other.name","08:00:2b:01:02:03",false,"macaddr","","42846"},
+        {"pg_catalog.\"Name\"","",true,"macaddr8","","42846"},
     };
     dbms::ExprEvaluator evaluator;
     for (const auto& item : cases) {

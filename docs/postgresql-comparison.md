@@ -4,8 +4,9 @@
 
 网络类型的历史勾选不表示完整兼容：当前输入格式、EUI宽度与错误状态的实际
 范围见[R101](issue-review-r101-macaddr-input-and-widths.md)和
-[R102](issue-review-r102-network-input-notation.md)；NAME→MAC回归及typed
-INET→CIDR值转换仍列R103/R104待修复，完整网络函数族也未关闭。
+[R102](issue-review-r102-network-input-notation.md)。NAME→MAC源身份回归已由
+[R103](issue-review-r103-macaddr-name-input.md)修复，typed网络值转换与网络
+限定NAME源遗漏仍列R104/R105待修复，完整网络函数族也未关闭。
 
 > 生成日期: 2026-08-14；2026-08-16 复核修正若干过高标注（EXPLAIN ANALYZE、TSVECTOR/TSQUERY、INTERVAL、INHERITS、统计信息消费）并补充文件级差距说明；2026-08-17 批量补齐 P1-10~13 / P2-9~13 / P3-7 共 10 项差距（PG 语法 PREPARE/EXECUTE、EXPLAIN ANALYZE 每节点统计、统计驱动选择率与 join 成本、并行 HashJoin/聚合/GatherMerge、deferrable UNIQUE/FK、数组构造/切片/包含、CREATE INHERITS+ONLY、interval 算术+AT TIME ZONE、dollar-quoting、全文检索 @@/to_tsvector/to_tsquery/ts_rank）；2026-08-20 第二批 8 项（PL/pgSQL 最小解释器、VACUUM PARALLEL、pg_stats/pg_statistic 视图、unnest 表函数、TimeZone GUC 渲染、多表 join 贪心搜索、deferrable EXCLUDE、ts_rank weights+`<->` 短语）；2026-08-20 续：P1-9 自定义成本函数（CostModel+GUC+hook）；P2-2 Bloom 索引
 > 本 DBMS 代码规模: ~66,000 行 C++ (44 .cpp + 56 .h)
