@@ -179,6 +179,53 @@ static void test_inet_update() {
     std::cout << "[INET] update enforce/reject OK" << std::endl;
 }
 
+static void test_name_network_casts() {
+    struct Case {
+        const char* source;
+        const char* value;
+        bool null;
+        const char* target;
+        const char* expected;
+        const char* state;
+    };
+    const Case cases[] = {
+        {"name","192.0.2.129/24",false,"inet","192.0.2.129/24",""},
+        {"name","192.0.2.0/24",false,"cidr","192.0.2.0/24",""},
+        {"pg_catalog.name","192.0.2.129/24",false,"inet","192.0.2.129/24",""},
+        {"pg_catalog.name","192.0.2.0/24",false,"cidr","192.0.2.0/24",""},
+        {"\"pg_catalog\".\"name\"","2001:db8::/32",false,"inet","2001:db8::/32",""},
+        {"\"pg_catalog\".\"name\"","2001:db8::/32",false,"pg_catalog.\"cidr\"","2001:db8::/32",""},
+        {"\"pg_catalog\".\"name\"","",true,"inet","",""},
+        {"\"pg_catalog\".\"name\"","",true,"cidr","",""},
+        {"\"pg_catalog\".\"name\"","invalid",false,"inet","","22P02"},
+        {"\"pg_catalog\".\"name\"","invalid",false,"cidr","","22P02"},
+        {"\"pg_catalog\".\"name\"","192.0.2.129/24",false,"cidr","","22P02"},
+        {"bytea","192.0.2.129/24",false,"inet","","42846"},
+        {"integer","",true,"cidr","","42846"},
+        // Raw SDK spellings must not impersonate the catalog's builtin NAME.
+        {"other.name","192.0.2.129/24",false,"inet","","42846"},
+        {"pg_catalog.\"Name\"","",true,"cidr","","42846"},
+    };
+    dbms::ExprEvaluator evaluator;
+    for (const auto& item : cases) {
+        dbms::CastExpr cast;
+        cast.typeName=item.target;
+        auto parameter=std::make_unique<dbms::ParameterExpr>();
+        parameter->slot=0; parameter->declaredType=item.source;
+        cast.operand=std::move(parameter);
+        dbms::RowContext row;
+        row.setParameters({dbms::ExprValue(item.source,item.value,item.null)});
+        std::string state;
+        try {
+            const auto result=evaluator.eval(&cast,row);
+            assert(result.isNull==item.null);
+            assert(result.value==item.expected);
+        } catch(const dbms::DbError& error) { state=error.sqlState(); }
+        assert(state==item.state);
+    }
+    std::cout << "[INET] NAME identities/NULL/input errors/absent casts OK (15 cases)" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_inet_ipv4();
@@ -186,6 +233,7 @@ int main() {
     test_inet_invalid();
     test_inet_update();
     test_cidr_host_bits_and_network_operators();
+    test_name_network_casts();
     std::cout << "[INET] all passed" << std::endl;
     return 0;
 }

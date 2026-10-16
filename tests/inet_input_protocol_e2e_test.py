@@ -144,9 +144,11 @@ def main():
             if oids is not None: ok = ok and result[5] == oids
         check(label,ok,result)
 
-    def parameter(kind,oid,value,canonical,binary=False):
+    def parameter(kind,oid,value,canonical,binary=False,input_oid=None):
         raw = value.encode()
-        parse = b"\0" + ("SELECT $1::" + kind).encode() + b"\0" + struct.pack("!HI",1,oid)
+        declared_oid = oid if input_oid is None else input_oid
+        label = kind + (" NAME" if declared_oid == 19 else "")
+        parse = b"\0" + ("SELECT $1::" + kind).encode() + b"\0" + struct.pack("!HI",1,declared_oid)
         bind = (b"\0\0" + struct.pack("!HH",0,1) + struct.pack("!i",len(raw)) + raw +
                 struct.pack("!HH",1,1 if binary else 0))
         sock.sendall(client.typed(b"P",parse) + client.typed(b"B",bind) +
@@ -161,12 +163,12 @@ def main():
             errors = [client.diagnostic_fields(body) for tag,body in messages if tag == b"E"]
             rows = [body for tag,body in messages if tag == b"D"]
             fields = client.row_description_fields(messages) if any(tag==b"T" for tag,_ in messages) else []
-            check(kind + " binary result " + value,not errors and
+            check(label + " binary result " + value,not errors and
                   rows == [struct.pack("!Hi",1,len(wire))+wire] and
                   len(fields)==1 and fields[0][3]==oid and fields[0][6]==1,(errors,rows,fields))
         else:
             result = runner.decode_wire_result(messages,include_types=True)
-            check(kind + " text parameter " + value,
+            check(label + " text parameter " + value,
                   result[1] == ("22P02" if canonical is None else None) and
                   (result[0] == [] if canonical is None else
                    result[0] == [[canonical]] and result[5] == [oid]),result)
@@ -236,6 +238,46 @@ def main():
             expect(kind+" legal unknown discarded branch",
                    "SELECT CASE WHEN false THEN '10/8'::"+kind+" ELSE NULL::"+kind+" END",rows=[[None]],oids=[oid])
             expect(kind+" qualified input","SELECT '10/8'::pg_catalog."+kind,rows=[["10.0.0.0/8"]],oids=[oid])
+            # NAME is a legal explicit input type, including its catalog-qualified
+            # identity carried by Bind parameters. It is not an implicit column cast.
+            name_value = "192.0.2.129/24" if kind=="inet" else "192.0.2.0/24"
+            name_rows = []
+            for ordinal,source in enumerate(("name","pg_catalog.name",'"pg_catalog"."name"')):
+                expression = literal(name_value)+"::"+source+"::"+kind
+                expect(kind+" NAME source "+source,"SELECT "+expression,rows=[[name_value]],oids=[oid])
+                expect(kind+" NAME NULL source "+source,"SELECT NULL::"+source+"::"+kind,
+                       rows=[[None]],oids=[oid])
+                expect(kind+" NAME zero rows "+source,"SELECT "+expression+" WHERE false",rows=[],oids=[oid])
+                expect(kind+" NAME discarded branch "+source,
+                       "SELECT CASE WHEN false THEN "+expression+" ELSE NULL::"+kind+" END",
+                       rows=[[None]],oids=[oid])
+                expect(kind+" NAME invalid input "+source,
+                       "SELECT 'invalid'::"+source+"::"+kind,"22P02",[])
+                expect(kind+" NAME implicit NULL assignment "+source,
+                       "INSERT INTO "+table+" VALUES ("+str(2300+ordinal)+",NULL::"+source+")","42804",[])
+                expect(kind+" NAME implicit value assignment "+source,
+                       "INSERT INTO "+table+" VALUES ("+str(2400+ordinal)+","+literal(name_value)+
+                       "::"+source+")","42804",[])
+                expect(kind+" NAME explicit value insert "+source,
+                       "INSERT INTO "+table+" VALUES ("+str(3000+ordinal)+","+expression+")",rows=[])
+                name_rows.append([str(3000+ordinal),name_value])
+            expect(kind+" NAME explicit persisted values","SELECT id,v FROM "+table+" WHERE id>=3000 ORDER BY id",
+                   rows=name_rows,oids=[23,oid])
+            expect(kind+" NAME qualified target",
+                   "SELECT "+literal(name_value)+'::"pg_catalog"."name"::"pg_catalog"."'+kind+'"',
+                   rows=[[name_value]],oids=[oid])
+            host_value = "192.0.2.129/24"
+            expect(kind+" NAME host-bit input",
+                   "SELECT "+literal(host_value)+'::"pg_catalog"."name"::'+kind,
+                   "22P02" if kind=="cidr" else None,[] if kind=="cidr" else [[host_value]],
+                   None if kind=="cidr" else [oid])
+            parameter(kind,oid,name_value,name_value,input_oid=19)
+            parameter(kind,oid,"2001:db8::/32","2001:db8::/32",input_oid=19)
+            parameter(kind,oid,"invalid",None,input_oid=19)
+            parameter(kind,oid,host_value,None if kind=="cidr" else host_value,input_oid=19)
+            parameter(kind,oid,name_value,name_value,binary=True,input_oid=19)
+            expect(kind+" NAME failed assignments write no rows","SELECT count(*) FROM "+table,
+                   rows=[[str(len(stored)+6)]],oids=[20])
         print("INET_INPUT_COMPLETE",checks,"FAILURES",len(failures),flush=True)
         assert not failures,failures
     finally:

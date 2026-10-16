@@ -4,7 +4,7 @@
 完整SDK、21native/16协议/3真实Main均通过；最终真实全58正常/repeat及核心/
 组合后独立fence均0。旧366/30、SDK134及首版358/6、366/12失败全部保留。
 没有新完整注册回归，不宣称整个类型家族或原273完成。原TYPE-10、SQL-08、
-SQL-11、PROTO-04状态不变；R104/R105仍未修复。
+SQL-11、PROTO-04状态不变；R104待修，R105后续已独立修复，见文末。
 
 ## 问题与修改方法
 
@@ -104,7 +104,9 @@ COALESCE错值、混合VALUES及typed赋值也属于R104后续值转换范围，
 
 另以实际180006与固定首版8d3e程序各采集四个NAME→INET/CIDR表达式，确认
 网络输入辅助头也遗漏限定NAME：普通name源成功，`"pg_catalog"."name"`源
-错误42846，参考两者都成功。单列R105待修复，日志为
+错误42846，参考两者都成功。单列[R105](issue-review-r105-network-name-input.md)
+已独立修复：PG/Root738、自身全58及40个邻接入口与最终核对均0，不当作
+R103本项修复。原四观察日志为
 `r105-qualified-name-network-reference.log`和`r105-qualified-name-network-old.log`。
 本项仅修改MAC消费者，不把网络消费者的相同遗漏一并写成已修复；后续仍须
 保持精确内置身份、非法源拒绝和隐式赋值边界，不能简单剥离任意schema。

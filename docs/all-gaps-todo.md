@@ -6,8 +6,9 @@
 网络类型的当前发现与修复范围另见[R101](issue-review-r101-macaddr-input-and-widths.md)
 和[R102](issue-review-r102-network-input-notation.md)。旧Wave的分隔符剥离、固定
 输入宽度及全零即NULL描述不再是现行契约；NAME→MAC回归已由
-[R103](issue-review-r103-macaddr-name-input.md)独立修复，typed网络值转换和
-限定NAME→INET/CIDR仍列R104/R105待修；不修改历史PASS或据旧勾选关闭原273项。
+[R103](issue-review-r103-macaddr-name-input.md)独立修复，typed网络值转换仍列R104。
+限定NAME→INET/CIDR已由[R105](issue-review-r105-network-name-input.md)独立修复
+并验收；R104仍开放，不修改历史PASS或据旧勾选关闭原273项。
 
 > 生成日期：2026-06-10 | 当前审计：2026-08-14
 > 来源：基于 `postgresql-complete-gap-analysis.md` 逐条提取，**无一遗漏**

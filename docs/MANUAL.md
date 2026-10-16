@@ -142,7 +142,8 @@ USE DATABASE mydb;
 MACADDR8接受六字节EUI-48时会插入FF:FE，而不是在末尾补零。文本列/参数可
 通过显式CAST输入，typed TEXT不能直接当作网络列的隐式赋值。NAME→MAC源
 身份已由[R103](issue-review-r103-macaddr-name-input.md)独立修复；typed
-INET→CIDR及限定NAME→INET/CIDR仍列R104/R105待修，不等同整族兼容完成。
+INET→CIDR仍列R104待修。限定NAME→INET/CIDR已按独立[R105](issue-review-r105-network-name-input.md)
+修复并验证；NAME同样只能显式CAST，不能直接隐式赋给网络列。整族兼容未完成。
 
 ---
 

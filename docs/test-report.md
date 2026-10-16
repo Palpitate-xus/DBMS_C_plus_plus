@@ -2,6 +2,11 @@
 
 当前运行结果、失败明细和复现方法见[代码审查索引](review-index.md)。验证入口为 `bash scripts/build_tests.sh`，只运行其已注册集合；未注册测试需单独运行或补入入口。
 
+2026-10-16后续[R105 限定NAME→INET/CIDR](issue-review-r105-network-name-input.md)
+PG/Root738、完整SDK及21native/16协议/3真实Main全过，自身真实全58/
+normal/repeat、核心与最终独立核对均0，按单项本地提交。旧738/34、SDK134
+保留；无新1398/1402全量，R104及原273未关闭。
+
 2026-10-16后续[R103 NAME→MAC](issue-review-r103-macaddr-name-input.md)实际参考
 最终PG/Root366、完整SDK及21native/16协议/3真实Main通过，真实全58/normal/
 repeat和独立终态fence全0，单项本地提交。旧366/30、SDK134及首版358/6与
@@ -11,7 +16,7 @@ repeat和独立终态fence全0，单项本地提交。旧366/30、SDK134及首�
 最终旧188组件72失败、672协议389失败；当前188/纯组件ASan/UBSan、PG/Root672、
 2558对照及21native/16协议/3真实Main通过；最终真实全58/normal/repeat、匹配
 核心及最终fence全0，单项本地提交。首版672/23保留；无新1398/1402全量，
-R103/R104独立待修，不把本项写成所有网络类型问题均已完成。
+R103/R105后续已独立修复、R104待修，不把本项写成所有网络类型问题均已完成。
 
 2026-10-16后续[R101 MAC输入](issue-review-r101-macaddr-input-and-widths.md)核心75、
 PG/Root328及236额外codec差分通过，纯头ASan/UBSan75通过；二十完整native和

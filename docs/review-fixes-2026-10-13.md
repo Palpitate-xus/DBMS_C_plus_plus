@@ -15,10 +15,15 @@
 
 用户此前暂缓的安全/TDE及CTAS/后台checkpoint专项仍暂缓；本轮普通数据完整性与现有回归失败照常修复。CMake、TLS及sanitizer的实际验证范围按结果记录。
 
+后续[R105 限定NAME→INET/CIDR](issue-review-r105-network-name-input.md)最终
+PG/Root738、完整SDK及21native/16协议/3真实Main全过，自身真实全58/
+normal/repeat、核心与最终独立核对均0，按单项本地提交。旧738/34、SDK134
+保留；无新全量，R104及原273未关闭，R98/R99候选不混入。
+
 后续[R102 INET/CIDR输入](issue-review-r102-network-input-notation.md)最终旧188/72、
 672/389失败；当前188/ASan/UBSan、PG/Root672、2558对照及21native/16协议/3真实
 Main通过，最终真实全58/匹配核心/fence均0，单项本地提交。首版672/23保留；
-R98/R99不混入、R103/R104待修、原273不变，无新全量或借用R101证明。
+R98/R99不混入；R103/R105后续已独立修复、R104待修，原273不变，无新全量或借用R101证明。
 
 后续[R101 MAC输入/宽度](issue-review-r101-macaddr-input-and-widths.md)旧75/38、
 328/186失败，当前75、PG/Root328及236派生输入通过，二十完整native与十五完整
@@ -191,7 +196,7 @@ socket超时，精确SQL/栈和原期限保留，尚未确定根因，不称新�
 | R102 | INET/CIDR输入格式与类型边界 | 本范围已修复，独立本地commit | 旧188/72、672/389；当前188/ASan/UBSan、PG/Root672、2558对照及21native/16协议/3真实Main通过；最终真实全58/匹配核心/fence均0，首版672/23保留，不冒新全量，见[记录](issue-review-r102-network-input-notation.md) |
 | R103 | NAME→MAC显式输入回归 | 本范围已修复，独立本地commit | 最终PG/Root366、完整SDK与21native/16协议/3真实Main通过；最终自身全58/normal/repeat/fence全0，旧366/30、SDK134及首版358/6、366/12保留，见[记录](issue-review-r103-macaddr-name-input.md) |
 | R104 | 网络typed值转换与共同值结果 | 已复现，待修复 | 原INET→CIDR错误拒绝；实际PG/固定b172各23观察另确认typed赋值22023、COALESCE仅改OID而值仍带/32、混合VALUES42804；既有CASE为阳性，不能只改OID或放松unknown校验，见[R102后续观察](issue-review-r102-network-input-notation.md#后续独立问题未计入本项修复) |
-| R105 | 限定NAME→INET/CIDR源身份遗漏 | 已复现，待修复 | 实际PG/固定8d3e各四个表达式中两处差异：普通name成功但真正限定pg_catalog.name报42846；网络消费者未因R103的MAC修复而改变，见[R103后续观察](issue-review-r103-macaddr-name-input.md) |
+| R105 | 限定NAME→INET/CIDR源身份遗漏 | 本范围已修复，独立本地commit | PG/Root738、完整SDK及21native/16协议/3真实Main全过；自身真实全58/normal/repeat、核心与最终核对均0。精准NAME身份不放宽隐式赋值，旧738/34与SDK134保留，见[记录](issue-review-r105-network-name-input.md) |
 | O01 | owner健康重试及测试覆盖 | 已修复 | `c9a1e3c3`；原全部owner断言、新真实peer/dirty冲突及10完整native提交前/后通过；Root R14集成fresh58后两完整owner再次通过，见[验证](issue-review-o01-table-owner-health-retry.md) |
 | O02 | EXISTS索引错误的访问计划/断言 | 已修正回归夹具 | 原完整协议exit 1→0，保留六严格XX001，新增精确t/f，完整EXISTS协议/19native通过；未改产品，见[验证](issue-review-o02-index-access-path-expectations.md) |
 | O03 | EXPLAIN JOIN图及过时断言 | 已修复 | 实际执行的source/cache/join/scan图及相关重绑；最终完整60控制、十二native/十协议CLI全过，OFFSET阳性及42601原/PG对照保留，见[验证](issue-review-o03-explain-join-source-graph.md) |
