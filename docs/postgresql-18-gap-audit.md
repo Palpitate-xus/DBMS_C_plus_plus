@@ -1,5 +1,10 @@
 # 2026-10-13 全仓库审查
 
+后续[R101 MAC输入与宽度](issue-review-r101-macaddr-input-and-widths.md)旧75/38、
+328/186失败，当前75、PG/Root328、236差分及二十完整native/十五完整协议/
+三个真实Main通过。独立头缺陷修正后全58重编0，所有对象/程序字节相同，
+新匹配核心2/328和fence全0；单项本地提交，未运行新全量。TYPE-10及原273状态不变。
+
 后续[R100几何坐标分隔符](issue-review-r100-geometric-coordinate-delimiters.md)旧最终
 232组件104失败、230协议135失败；当前232、PG/Root230、十个完整native/七个
 完整协议通过。TYPE-09仍partial，原273状态不因局部修复提升。

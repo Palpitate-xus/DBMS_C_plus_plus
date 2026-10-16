@@ -8,6 +8,8 @@
 #include "commands/TableManage.h"
 #include "Session.h"
 #include "catalog/type_registry.h"
+#include "common/DbError.h"
+#include "expression/ExprEvaluator.h"
 #include <cassert>
 #include <filesystem>
 #include <iostream>
@@ -86,12 +88,14 @@ static void test_macaddr_invalid() {
     assert(g_engine.insert(db, "m", {{"id", "2"}, {"a", "08:00:2b:01:02"}}) == dbms::DBStatus::INVALID_VALUE);
     // Too many bytes (7).
     assert(g_engine.insert(db, "m", {{"id", "3"}, {"a", "08:00:2b:01:02:03:04"}}) == dbms::DBStatus::INVALID_VALUE);
-    // Whitespace is not part of PostgreSQL macaddr input syntax.
-    assert(g_engine.insert(db, "m", {{"id", "4"}, {"a", "08:00:2b: 01:02:03"}}) == dbms::DBStatus::INVALID_VALUE);
+    // PostgreSQL permits whitespace before a complete hexadecimal octet.
+    assert(g_engine.insert(db, "m", {{"id", "4"}, {"a", "08:00:2b: 01:02:03"}}) == dbms::DBStatus::OK);
+    assert(fetchOne(db, "m", {"=id 4"}, "a") == "08:00:2b:01:02:03");
+    assert(g_engine.insert(db, "m", {{"id", "5"}, {"a", "08:00-2b:01:02:03"}}) == dbms::DBStatus::INVALID_VALUE);
 
-    // After rejected inserts the table is empty.
+    // Only the valid whitespace input was stored.
     auto rows = g_engine.query(db, "m", {}, {"id"}, {});
-    assert(rows.empty());
+    assert(rows.size() == 1);
 
     cleanup(db);
     std::cout << "[MACADDR] invalid input rejected OK" << std::endl;
@@ -111,8 +115,9 @@ static void test_macaddr8() {
     assert(g_engine.insert(db, "m", {{"id", "1"}, {"a", "08-00-2b-01-02-03-04-05"}}) == dbms::DBStatus::OK);
     assert(fetchOne(db, "m", {"=id 1"}, "a") == "08:00:2b:01:02:03:04:05");
 
-    // 6-byte address into macaddr8 column is wrong length → rejected.
-    assert(g_engine.insert(db, "m", {{"id", "2"}, {"a", "08:00:2b:01:02:03"}}) == dbms::DBStatus::INVALID_VALUE);
+    // A six-byte input is a genuine EUI-48 value and expands with FF:FE.
+    assert(g_engine.insert(db, "m", {{"id", "2"}, {"a", "08:00:2b:01:02:03"}}) == dbms::DBStatus::OK);
+    assert(fetchOne(db, "m", {"=id 2"}, "a") == "08:00:2b:ff:fe:01:02:03");
 
     cleanup(db);
     std::cout << "[MACADDR] macaddr8 8-byte OK" << std::endl;
@@ -163,6 +168,55 @@ static void test_macaddr_with_varlen() {
     std::cout << "[MACADDR] mixed varlen encode OK" << std::endl;
 }
 
+static void test_typed_macaddr_casts() {
+    struct Case {
+        const char* source;
+        const char* value;
+        bool null;
+        const char* target;
+        const char* expected;
+        const char* state;
+    };
+    const Case cases[] = {
+        {"text","08:00:2b:01:02:03",false,"macaddr","08:00:2b:01:02:03",""},
+        {"text","08:00:2b:01:02:03",false,"macaddr8","08:00:2b:ff:fe:01:02:03",""},
+        {"macaddr","08:00:2b:01:02:03",false,"macaddr8","08:00:2b:ff:fe:01:02:03",""},
+        {"macaddr8","08:00:2b:ff:fe:01:02:03",false,"macaddr","08:00:2b:01:02:03",""},
+        {"macaddr8","08:00:2b:01:02:03:04:05",false,"macaddr","","22003"},
+        {"text","100:00:2b:01:02:03",false,"macaddr","","22003"},
+        {"text","08:00-2b:01:02:03",false,"macaddr","","22P02"},
+        {"text","08:00:2b:01:02:03",false,"pg_catalog.\"macaddr8\"","08:00:2b:ff:fe:01:02:03",""},
+        {"integer","1",false,"macaddr","","42846"},
+        {"integer","",true,"macaddr8","","42846"},
+        {"macaddr8","",true,"macaddr","",""},
+        {"text","",true,"macaddr8","",""},
+    };
+    dbms::ExprEvaluator evaluator;
+    for (const auto& item : cases) {
+        dbms::CastExpr cast;
+        cast.typeName=item.target;
+        auto parameter=std::make_unique<dbms::ParameterExpr>();
+        parameter->slot=0; parameter->declaredType=item.source;
+        cast.operand=std::move(parameter);
+        dbms::RowContext row;
+        row.setParameters({dbms::ExprValue(item.source,item.value,item.null)});
+        std::string state;
+        try {
+            const auto result=evaluator.eval(&cast,row);
+            assert(result.isNull==item.null);
+            assert(result.value==item.expected);
+        } catch(const dbms::DbError& error) { state=error.sqlState(); }
+        assert(state==item.state);
+    }
+    const auto same=dbms::ExprEvaluator::resolveComparison("=","macaddr","macaddr");
+    assert(same.strict && !same.identity.empty());
+    bool ambiguous=false;
+    try { (void)dbms::ExprEvaluator::resolveComparison("=","macaddr","macaddr8"); }
+    catch(const dbms::DbError& error) { ambiguous=error.sqlState()=="42725"; }
+    assert(ambiguous);
+    std::cout << "[MACADDR] typed CAST values/NULL/errors and binding OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_macaddr_input_formats();
@@ -170,6 +224,7 @@ int main() {
     test_macaddr8();
     test_macaddr_update();
     test_macaddr_with_varlen();
+    test_typed_macaddr_casts();
     std::cout << "[MACADDR] all passed" << std::endl;
     return 0;
 }

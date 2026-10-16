@@ -9185,9 +9185,9 @@ BPTree* StorageEngine::getCompositeIndexTree(const std::string& dbname,
 // ========================================================================
 // MAC address (macaddr / macaddr8) helpers
 // Storage: fixed 6 bytes (macaddr) or 8 bytes (macaddr8), raw network order.
-// Input accepts PostgreSQL formats: colon, hyphen, dot, or bare hex; the
-// separators only group hex digits, so we strip them all and require exactly
-// 2*numBytes hex digits. Canonical output is lowercase colon-separated.
+// The shared codec validates each PostgreSQL notation, including grouping,
+// octet widths and MAC48-to-EUI64 expansion. It never discards arbitrary
+// separators. Canonical output is lowercase colon-separated.
 // ========================================================================
 static bool normalizeMacAddr(const std::string& in, int numBytes, uint8_t* out) {
     std::array<uint8_t, 8> bytes{};

@@ -2,6 +2,19 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R101 MAC grammar, EUI width coercions and error metadata independently fixed with final header closure",
+      "gap_ids": ["TYPE-10", "SQL-08", "SQL-11", "PROTO-04"],
+      "status": "partial",
+      "evidence": ["docs/issue-review-r101-macaddr-input-and-widths.md"],
+      "tests": ["tests/macaddr_input_codec_test.cpp", "tests/macaddr_input_protocol_e2e_test.py", "tests/macaddr_test.cpp"],
+      "verification": {
+        "reproduction": "Old codec75/38 and final wire328/186 actually exit1; earlier314/172 retained. Initial PG helper Parse-only wait times out; proper P/B/E/Sync preserves SQL/assertions/deadlines. Actual180006 verifies legacy whitespace, EUI48 input, both implicit MAC cast edges and suffix forms.",
+        "focused_tests": "Pure header O2/ASan/UBSan75 pass without engine symbols; actualPG328/current328 and additional codec236 differential pass. First own fresh58 core SDK compile1 and wire314/5 retained. Second4CPP/repeat builds, full20native/15wire/3realMain and old-input fence0. Subsequent isolated header include1 fixed with direct DbError include; final standalone0 and actualfresh58/repeat0. All58 objects and binary byte-identical to the verified second image, compared BEFORE testcache update. New matching cache/freshstubs, wholecore2native/328wire and new-input independent terminal fence all0. Prior38 proof is same-image evidence, not a second38 execution under the new signature.",
+        "full_suite": "No new complete registered suite. Expected R101-only HEAD1396 versus worktree1400 including preserved R98 are distinct; old frozen1391 does not cover them. Full-engine focused proof includes R98, pure header proof is independent.",
+        "scope": "Original273 items/statuses remain22complete166partial70unverified15deferred. R98/R99 skip scope awaits clarification, candidates preserved and excluded from this item commit. Explicit deferrals unchanged; no push, Actions remain disabled."
+      }
+    },
+    {
       "issue": "R100 geometric coordinate delimiter positions validated with a cursor; invalid inputs no longer normalize into committed values",
       "gap_ids": ["SQL-02", "SQL-11", "TYPE-09", "PROTO-04"],
       "status": "partial",

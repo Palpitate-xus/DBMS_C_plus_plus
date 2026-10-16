@@ -10,6 +10,7 @@
 #include "expression/array_type.h"
 #include "expression/arithmetic_type.h"
 #include "expression/geometric_input.h"
+#include "expression/macaddr_input.h"
 #include "expression/between_input.h"
 #include "expression/regtype_cast.h"
 #include "expression/record_cast.h"
@@ -216,6 +217,15 @@ public:
             }
         }
         input = std::move(cast);
+    }
+
+    void coerceMacAssignment(ExprPtr& input,const std::string& sourceType,
+                              const std::string& targetType) {
+        const auto source=common_type_detail::canonical(sourceType);
+        const auto target=common_type_detail::canonical(targetType);
+        if ((source=="macaddr" || source=="macaddr8") &&
+            (target=="macaddr" || target=="macaddr8") && source!=target)
+            coerceCaseInput(input,source,target);
     }
 
     std::vector<QueryComparisonBinding> rowPairBindings(RowExpr& left, RowExpr& right,
@@ -546,6 +556,10 @@ public:
             validateRegtypeInputCast(input,type);
             validateRecordInputCast(input,type,cast->operand.get());
             geometric_input_detail::validateUnknownInput(cast->operand.get(),cast->typeName);
+            if (const auto mac=macaddr_input_detail::builtinType(cast->typeName);!mac.empty()) {
+                macaddr_input_detail::validateCast(input,mac);
+                macaddr_input_detail::validateUnknownInput(cast->operand.get(),cast->typeName);
+            }
             if (metadata.assignmentInput) metadata.assignmentInput({"", cast->typeName}, cast, cast->typeName);
             bindEnumCast(cast,cast->operand.get(),cast->typeName);
             if(const auto geometry=geometric_input_detail::builtinType(cast->typeName);!geometry.empty())
@@ -597,6 +611,10 @@ public:
                 validateRegtypeInputCast(left,castType);
                 validateRecordInputCast(left,castType,binary->left.get());
                 geometric_input_detail::validateUnknownInput(binary->left.get(),type->value);
+                if (const auto mac=macaddr_input_detail::builtinType(type->value);!mac.empty()) {
+                    macaddr_input_detail::validateCast(left,mac);
+                    macaddr_input_detail::validateUnknownInput(binary->left.get(),type->value);
+                }
                 if (metadata.assignmentInput) metadata.assignmentInput({"", type->value}, binary, type->value);
                 bindEnumCast(binary,binary->left.get(),type->value);
                 if(const auto geometry=geometric_input_detail::builtinType(type->value);!geometry.empty())
@@ -1463,8 +1481,8 @@ public:
         result.statementOutputs[&node] = columns;
         return columns;
     }
-    void coerceSetUnknown(Stmt* statement,size_t ordinal,const std::string& targetType,
-                          int32_t targetTypeMod = -1) {
+    void coerceSetInput(Stmt* statement,size_t ordinal,const std::string& sourceType,
+                        const std::string& targetType,int32_t targetTypeMod = -1) {
         auto* select=dynamic_cast<SelectStmt*>(statement);
         if(!select)throw DbError("XX000","set operand lost its prepared SELECT");
         auto bindings=result.projectionBindings.find(select);
@@ -1473,26 +1491,34 @@ public:
         const auto* original=bindings->second[ordinal].expression;
         auto item=std::find_if(select->selectList.begin(),select->selectList.end(),
             [&](const auto& value){return value.expr.get()==original;});
-        if(item==select->selectList.end() || bindings->second[ordinal].column)
+        if(item==select->selectList.end() || (sourceType=="unknown" && bindings->second[ordinal].column))
             throw DbError("XX000","unknown set output has no direct value site");
         // Scalar UNKNOWN INTERVAL input is parsed in the target's field
         // range: '4' can mean years or minutes, not necessarily seconds.
         // Array input deliberately keeps its generic element-input stage;
         // PostgreSQL applies element typmods only after that parsing stage.
         const bool interval = common_type_detail::canonical(targetType) == "interval";
-        coerceCaseInput(item->expr,"unknown",targetType,
+        coerceCaseInput(item->expr,sourceType,targetType,
             interval ? interval_type_detail::unpack(targetTypeMod) : std::vector<std::string>{});
         // Replacing the genuine value root must preserve expanded-output
         // identity. Source bytes/parameter uses and output labels stay put.
         for(auto& binding:bindings->second)
-            if(binding.expression==original)binding.expression=item->expr.get();
+            if(binding.expression==original) {
+                binding.expression=item->expr.get();
+                if(sourceType!="unknown")binding.column.reset();
+            }
         auto& leaves=projectionLeaves[select];
         for(auto& leaf:leaves)if(leaf==original)leaf=item->expr.get();
+        if(sourceType!="unknown")(void)declaredType(targetType,item->expr.get());
         if(auto output=result.statementOutputs.find(statement);output!=result.statementOutputs.end()) {
             output->second.at(ordinal).type=targetType;
-            output->second.at(ordinal).typeOid=0;
+            output->second.at(ordinal).typeOid=sourceType=="unknown"?0:expressionTypeOid(item->expr.get());
             output->second.at(ordinal).typeMod=interval ? targetTypeMod : -1;
         }
+    }
+    void coerceSetUnknown(Stmt* statement,size_t ordinal,const std::string& targetType,
+                          int32_t targetTypeMod = -1) {
+        coerceSetInput(statement,ordinal,"unknown",targetType,targetTypeMod);
     }
     QueryRowDescriptor setColumns(SelectStmt& select,QueryRowDescriptor left,QueryRowDescriptor right) {
         if(left.size()!=right.size())throw DbError("42601","set query column count mismatch");
@@ -1795,6 +1821,7 @@ public:
                             if (assignments[i].generated || (assignments[i].identity == 'a' && insert->override_.empty()))
                                 throw DbError("428C9", "cannot insert a non-DEFAULT value into column " + assignments[i].name);
                             if (metadata.assignmentInput) metadata.assignmentInput(assignments[i],row[i].get(),types[i]);
+                            coerceMacAssignment(row[i],types[i],assignments[i].type);
                     }
             }
             if (insert->selectSource) {
@@ -1823,6 +1850,13 @@ public:
                         if (inputs[i].type == "unknown")
                             coerceSetUnknown(insert->selectSource.get(), i, assignments[i].type,
                                              assignments[i].typeMod);
+                        else if ((common_type_detail::canonical(inputs[i].type)=="macaddr" ||
+                                  common_type_detail::canonical(inputs[i].type)=="macaddr8") &&
+                                 (common_type_detail::canonical(assignments[i].type)=="macaddr" ||
+                                  common_type_detail::canonical(assignments[i].type)=="macaddr8") &&
+                                 common_type_detail::canonical(inputs[i].type)!=common_type_detail::canonical(assignments[i].type))
+                            coerceSetInput(insert->selectSource.get(),i,inputs[i].type,
+                                           assignments[i].type,assignments[i].typeMod);
             }
             auto scopes = outer; scopes.insert(scopes.begin(), {target});
             auto conflictScopes = scopes;
@@ -1833,7 +1867,12 @@ public:
                 // ambiguity), but the row is not visible in RETURNING.
                 conflictScopes.front().push_back(registerSource({"","excluded",target.columns}));
             }
-            for (auto& value : insert->conflictUpdateSet) expression(value.second, conflictScopes);
+            for (auto& value : insert->conflictUpdateSet) {
+                const auto source=expression(value.second,conflictScopes);
+                const auto column=std::find_if(target.columns.begin(),target.columns.end(),
+                    [&](const auto& candidate){return candidate.name==identifier(value.first);});
+                if(column!=target.columns.end())coerceMacAssignment(value.second,source,column->type);
+            }
             const auto conflictCondition = expression(insert->conflictWhere, conflictScopes);
             if (insert->conflictWhere) {
                 const auto base = metadata.baseType
@@ -1919,12 +1958,13 @@ public:
                 coerceCaseInput(update->whereClause,condition,"boolean");
             }
             auto output = returning(update->returning,update->returningOptions,scopes.front().front(),scopes);
-            if (metadata.assignmentInput)
-                for (size_t i=0;i<update->setClauses.size();++i) {
+            for (size_t i=0;i<update->setClauses.size();++i) {
                     const auto name = identifier(update->setClauses[i].first);
                     const auto column = std::find_if(target.columns.begin(),target.columns.end(),
                         [&](const auto& candidate) { return candidate.name == name; });
-                    metadata.assignmentInput(*column,update->setClauses[i].second.get(),assignmentTypes[i]);
+                    if (metadata.assignmentInput)
+                        metadata.assignmentInput(*column,update->setClauses[i].second.get(),assignmentTypes[i]);
+                    coerceMacAssignment(update->setClauses[i].second,assignmentTypes[i],column->type);
                 }
             return output;
         }

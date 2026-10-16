@@ -3,6 +3,7 @@
 #include "common/DbError.h"
 #include "expression/ExprEvaluator.h"
 #include "expression/expr_helper.h"
+#include "expression/macaddr_input.h"
 #include "parser/query_binding.h"
 #include "parser/parser.h"
 #include "utils/interval.h"
@@ -70,6 +71,15 @@ inline void validateAssignmentInput(const QueryOutputColumn& target,
                                     const Expr* source,
                                     const std::string& sourceType) {
     const auto targetType = ExprHelper::canonicalResultTypeName(target.type);
+    if (targetType=="macaddr" || targetType=="macaddr8") {
+        const auto inputType=ExprHelper::canonicalResultTypeName(sourceType);
+        if (inputType.empty() || inputType=="unknown")
+            macaddr_input_detail::validateUnknownInput(source,targetType);
+        else if (inputType!=targetType && inputType!="macaddr" && inputType!="macaddr8")
+            throw DbError("42804","column \"" + target.name + "\" is of type " + targetType +
+                          " but expression is of type " + inputType);
+        return;
+    }
     if (targetType == "numeric" || targetType == "numeric[]") {
         const auto type = ExprHelper::canonicalResultTypeName(sourceType);
         const auto* literal = dynamic_cast<const LiteralExpr*>(source);

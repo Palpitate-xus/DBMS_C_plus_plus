@@ -2,6 +2,11 @@
 
 状态入口更新：2026-10-16。当前发现及验证范围见[代码审查报告](code-review-2026-10-13.md)与[逐项修复](review-fixes-2026-10-13.md)；下方工程批次记录截至其各自标注日期。
 
+后续[R101 MAC输入/宽度](issue-review-r101-macaddr-input-and-widths.md)核心及
+二十完整native/十五协议/三个真实Main已通过；独立头缺陷修正后真实重编全部
+58TU，所有对象/程序字节相同，新匹配核心2/328与最终fence全0。本项独立本地
+提交，不冒新全量。TYPE-10与原273状态不变，R98/R99待确认候选不混入版本记录。
+
 后续[R100几何坐标输入](issue-review-r100-geometric-coordinate-delimiters.md)已按
 独立问题修复：232组件、PG/Root230、十个完整native/七个完整协议通过，历史
 失败保留。新组合未全量验收，不提升TYPE-09或原273状态；R98/R99跳过范围仍

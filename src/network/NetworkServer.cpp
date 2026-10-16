@@ -905,8 +905,11 @@ std::string binaryProtocolParameterLiteral(uint32_t typeOid,
         }
         case 829: case 774: {
             const size_t length = typeOid == 829 ? 6 : 8;
-            if (raw.size() != length) break;
-            return quoteProtocolText(formatMacAddress(raw.data(), length), error);
+            if (raw.size() != length && !(typeOid==774 && raw.size()==6)) break;
+            std::array<uint8_t,8> address{};
+            std::copy(raw.begin(),raw.end(),address.begin());
+            if (typeOid==774 && raw.size()==6) address=expandMacAddress48(address);
+            return quoteProtocolText(formatMacAddress(address.data(), length), error);
         }
         case 2950: {
             if (raw.size() != 16) break;
@@ -942,7 +945,9 @@ std::string protocolParameterLiteral(uint32_t typeOid,
                                      const std::vector<uint8_t>& raw,
                                      bool binary,
                                      const std::string& moneyLocale,
-                                     std::string& error) {
+                                     std::string& error,
+                                     std::string& inputSqlState) {
+    inputSqlState.clear();
     if (binary) {
         return binaryProtocolParameterLiteral(
             typeOid, raw, moneyLocale, error);
@@ -1012,7 +1017,9 @@ std::string protocolParameterLiteral(uint32_t typeOid,
     if (typeOid == 829 || typeOid == 774) {
         const size_t length = typeOid == 829 ? 6 : 8;
         std::array<uint8_t, 8> address{};
-        if (!parseMacAddress(value, length, address)) {
+        MacAddressInputError failure;
+        if (!parseMacAddress(value, length, address,&failure)) {
+            inputSqlState=failure==MacAddressInputError::OutOfRange?"22003":"22P02";
             error = std::string("invalid input syntax for type ") +
                     (typeOid == 829 ? "macaddr" : "macaddr8");
             return {};
@@ -6325,13 +6332,14 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                         message.payload.begin() + static_cast<std::ptrdiff_t>(offset),
                         message.payload.begin() + static_cast<std::ptrdiff_t>(offset + valueLength));
                     offset += static_cast<size_t>(valueLength);
+                    std::string inputSqlState;
                     std::string literal = protocolParameterLiteral(
                         preparedParameterTypes[i], raw, format == 1,
-                        session.lcMonetary, bindErrorMessage);
+                        session.lcMonetary, bindErrorMessage,inputSqlState);
                     if (!bindErrorMessage.empty()) {
                         bindError = true;
                         bindErrorSqlstate =
-                            protocolParameterErrorSqlstate(bindErrorMessage);
+                            inputSqlState.empty()?protocolParameterErrorSqlstate(bindErrorMessage):inputSqlState;
                         break;
                     }
                     literals.push_back(std::move(literal));

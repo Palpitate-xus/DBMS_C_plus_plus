@@ -1168,6 +1168,12 @@ bool ExprHelper::resolveValuesResultType(
         return true;
     }
     resultType = known.front();
+    if (std::all_of(known.begin(),known.end(),[](const auto& type) {
+            return type=="macaddr" || type=="macaddr8";
+        })) {
+        resultType=selectCommonType(known,"VALUES");
+        return true;
+    }
     const auto numericRank = [](const std::string& type) {
         if (type == "smallint") return 0;
         if (type == "integer") return 1;

@@ -7,6 +7,7 @@
 #include <cctype>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <string>
 
 namespace dbms {
@@ -145,27 +146,120 @@ inline bool networkOverlaps(const NetworkAddressValue& left,
            networkContains(right, left, true);
 }
 
+enum class MacAddressInputError { None, InvalidSyntax, OutOfRange };
+
+inline std::array<uint8_t,8> expandMacAddress48(const std::array<uint8_t,8>& value) {
+    return {value[0],value[1],value[2],0xff,0xfe,value[3],value[4],value[5]};
+}
+
+namespace mac_codec_detail {
+inline int hexDigit(unsigned char ch) {
+    if (ch >= '0' && ch <= '9') return ch - '0';
+    if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+    if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+    return -1;
+}
+inline void spaces(const std::string& input,size_t& position) {
+    while (position < input.size() &&
+           std::isspace(static_cast<unsigned char>(input[position]))) ++position;
+}
+// EUI-48's historical hex fields support signs, 0x and a maximum field width
+// in the grouped spellings. Accumulation saturates safely before converting
+// to the 32-bit field, rather than overflowing a signed scanf destination.
+inline bool field(const std::string& input,size_t& position,size_t width,uint32_t& value) {
+    spaces(input,position);
+    const size_t end = width ? position + std::min(width,input.size()-position) : input.size();
+    bool negative = false;
+    if (position < end && (input[position] == '+' || input[position] == '-'))
+        negative = input[position++] == '-';
+    const bool prefix = end-position >= 2 && input[position] == '0' &&
+                        (input[position+1] == 'x' || input[position+1] == 'X');
+    if (prefix) position += 2;
+    const size_t firstDigit = position;
+    uint64_t magnitude = 0;
+    bool overflow = false;
+    while (position < end) {
+        const int digit = hexDigit(static_cast<unsigned char>(input[position]));
+        if (digit < 0) break;
+        if (magnitude > (std::numeric_limits<uint64_t>::max()-static_cast<unsigned>(digit))/16U) {
+            magnitude = std::numeric_limits<uint64_t>::max();
+            overflow = true;
+        } else magnitude = magnitude*16U + static_cast<unsigned>(digit);
+        ++position;
+    }
+    if (position == firstDigit && !prefix) return false;
+    value = static_cast<uint32_t>(negative && !overflow ? uint64_t{0}-magnitude : magnitude);
+    return true;
+}
+} // namespace mac_codec_detail
+
 inline bool parseMacAddress(const std::string& input, size_t byteCount,
-                            std::array<uint8_t, 8>& output) {
+                            std::array<uint8_t, 8>& output,
+                            MacAddressInputError* failure = nullptr) {
     output.fill(0);
-    if (byteCount != 6 && byteCount != 8) return false;
-    std::string hex;
-    hex.reserve(byteCount * 2);
-    for (unsigned char c : input) {
-        if (c == ':' || c == '-' || c == '.') continue;
-        if (!std::isxdigit(c)) return false;
-        hex.push_back(static_cast<char>(c));
+    if (failure) *failure = MacAddressInputError::InvalidSyntax;
+    if ((byteCount != 6 && byteCount != 8) || input.find('\0') != std::string::npos) return false;
+    std::array<uint8_t,8> parsed{};
+    if (byteCount == 6) {
+        // Seven distinct formats: separators cannot be deleted or mixed.
+        for (size_t layout = 0; layout < 7; ++layout) {
+            const size_t group = layout < 2 ? 1 : layout < 4 ? 3 : layout < 6 ? 2 : 6;
+            const char separator = layout == 0 || layout == 2 ? ':' : layout == 4 ? '.' : '-';
+            size_t position = 0;
+            std::array<uint32_t,6> fields{};
+            bool matched = true;
+            for (size_t i = 0; i < fields.size(); ++i) {
+                if (!mac_codec_detail::field(input,position,layout < 2 ? 0 : 2,fields[i])) {
+                    matched = false; break;
+                }
+                if (i+1 < fields.size() && (i+1)%group == 0) {
+                    if (position == input.size() || input[position++] != separator) {
+                        matched = false; break;
+                    }
+                }
+            }
+            mac_codec_detail::spaces(input,position);
+            if (!matched || position != input.size()) continue;
+            for (size_t i = 0; i < fields.size(); ++i) {
+                if (fields[i] > 255) {
+                    if (failure) *failure = MacAddressInputError::OutOfRange;
+                    return false;
+                }
+                parsed[i] = static_cast<uint8_t>(fields[i]);
+            }
+            output = parsed;
+            if (failure) *failure = MacAddressInputError::None;
+            return true;
+        }
+        return false;
     }
-    if (hex.size() != byteCount * 2) return false;
-    auto digit = [](char c) -> uint8_t {
-        if (c >= '0' && c <= '9') return static_cast<uint8_t>(c - '0');
-        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        return static_cast<uint8_t>(c - 'a' + 10);
-    };
-    for (size_t i = 0; i < byteCount; ++i) {
-        output[i] = static_cast<uint8_t>(digit(hex[i * 2]) * 16U +
-                                         digit(hex[i * 2 + 1]));
+    size_t position = 0, count = 0;
+    char separator = '\0';
+    mac_codec_detail::spaces(input,position);
+    while (position < input.size() && input.size()-position >= 2) {
+        if (count == parsed.size()) return false;
+        const int high = mac_codec_detail::hexDigit(static_cast<unsigned char>(input[position]));
+        const int low = mac_codec_detail::hexDigit(static_cast<unsigned char>(input[position+1]));
+        if (high < 0 || low < 0) return false;
+        parsed[count++] = static_cast<uint8_t>(high*16 + low);
+        position += 2;
+        if (position < input.size() &&
+            (input[position] == ':' || input[position] == '-' || input[position] == '.')) {
+            if (separator && separator != input[position]) return false;
+            separator = input[position++];
+        }
+        if ((count == 6 || count == 8) && position < input.size() &&
+            std::isspace(static_cast<unsigned char>(input[position]))) {
+            mac_codec_detail::spaces(input,position);
+            if (position != input.size()) return false;
+        }
     }
+    // Preserve the input function's legacy single-character suffix behavior
+    // after a complete EUI value, as verified against actual PostgreSQL 18.6.
+    if (count == 6) parsed = expandMacAddress48(parsed);
+    else if (count != 8) return false;
+    output = parsed;
+    if (failure) *failure = MacAddressInputError::None;
     return true;
 }
 

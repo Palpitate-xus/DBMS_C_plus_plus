@@ -2,6 +2,12 @@
 
 当前运行结果、失败明细和复现方法见[代码审查索引](review-index.md)。验证入口为 `bash scripts/build_tests.sh`，只运行其已注册集合；未注册测试需单独运行或补入入口。
 
+2026-10-16后续[R101 MAC输入](issue-review-r101-macaddr-input-and-widths.md)核心75、
+PG/Root328及236额外codec差分通过，纯头ASan/UBSan75通过；二十完整native和
+十五协议及三个真实Main全0。头依赖修正后全58真实重编0，所有对象/程序字节
+相同，新匹配核心2/328及最终fence全0；单项本地提交，不冒新1396或工作区1400
+全量。旧75/38、328/186及首版314/5失败保留，不挪用旧1391全量结果。
+
 2026-10-16后续[R100几何输入](issue-review-r100-geometric-coordinate-delimiters.md)
 最终232组件、PG/Root230、十个完整native及七个完整协议通过，纯组件ASan/UBSan
 通过；旧232/104、230/135、首轮准备超时与旧夹具134均保留。只证明本项范围，

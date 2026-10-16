@@ -15,6 +15,7 @@
 #include "common/NetworkValue.h"
 #include "common/GeometryValue.h"
 #include "expression/geometric_input.h"
+#include "expression/macaddr_input.h"
 #include "expression/between_input.h"
 #include "expression/regtype_input.h"
 #include "expression/record_cast.h"
@@ -1864,6 +1865,7 @@ int ExprEvaluator::compareValues(const ExprValue& a, const ExprValue& b) {
     const bool macA = ta == "macaddr" || ta == "macaddr8";
     const bool macB = tb == "macaddr" || tb == "macaddr8";
     if (macA && macB) {
+        if (ta != tb) throw DbError("42725","operator is not unique: " + ta + " = " + tb);
         const size_t leftLength = ta == "macaddr" ? 6 : 8;
         const size_t rightLength = tb == "macaddr" ? 6 : 8;
         std::array<uint8_t, 8> left{};
@@ -2090,6 +2092,11 @@ QueryComparisonBinding ExprEvaluator::resolveComparison(const std::string& rawOp
     const std::string& rawLeft, const std::string& rawRight) {
     QueryComparisonBinding binding;
     binding.op = rawOp == "!=" ? "<>" : rawOp;
+    const auto macLeft = common_type_detail::canonical(rawLeft);
+    const auto macRight = common_type_detail::canonical(rawRight);
+    if ((macLeft=="macaddr" || macLeft=="macaddr8") &&
+        (macRight=="macaddr" || macRight=="macaddr8") && macLeft!=macRight)
+        throw DbError("42725","operator is not unique: " + macLeft + " " + binding.op + " " + macRight);
     const auto types=resolveBuiltinEquality(rawLeft,rawRight);
     binding.leftType=types.first;binding.rightType=types.second;
     static const std::set<std::string> operations={"=","<>","<",">","<=",">="};
@@ -2102,6 +2109,7 @@ QueryComparisonBinding ExprEvaluator::resolveComparison(const std::string& rawOp
     const bool same=binding.leftType==binding.rightType &&
         (binding.leftType=="oid" || binding.leftType=="boolean" || binding.leftType=="\"char\"" || binding.leftType=="uuid" || binding.leftType=="bytea" ||
          binding.leftType=="time" || binding.leftType=="interval" || binding.leftType=="record" ||
+         binding.leftType=="macaddr" || binding.leftType=="macaddr8" ||
          isBitStringTypeName(binding.leftType) || common_type_detail::array(binding.leftType));
     if (!operations.count(binding.op) || (!numbers && !strings && !timestamps && !same))
         throw DbError("42883","operator does not exist: " + binding.leftType + " " + rawOp + " " + binding.rightType);
@@ -4806,6 +4814,11 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
         }
     }
     const auto geometryTarget=geometric_input_detail::builtinType(targetTypeName);
+    const auto macTarget=macaddr_input_detail::builtinType(targetTypeName);
+    if (!macTarget.empty()) {
+        macaddr_input_detail::validateCast(v.typeName,macTarget);
+        target=macTarget;
+    }
     const auto sourceType=ExprHelper::canonicalResultTypeName(v.typeName);
     const auto targetBase=ExprHelper::canonicalResultTypeName(target);
     // These catalog cast relationships are type checks, not value checks:
@@ -5041,8 +5054,16 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
     if (target == "macaddr" || target == "macaddr8") {
         const size_t length = target == "macaddr" ? 6 : 8;
         std::array<uint8_t, 8> address{};
-        if (!parseMacAddress(v.value, length, address)) {
-            throw DbError("22P02", "invalid input syntax for type " + target);
+        MacAddressInputError failure;
+        if (target=="macaddr" && sourceType=="macaddr8") {
+            if (!parseMacAddress(v.value,8,address,&failure))
+                throw DbError("22P02","invalid input syntax for type macaddr8");
+            if (address[3]!=0xff || address[4]!=0xfe)
+                throw DbError("22003","macaddr8 data out of range to convert to macaddr");
+            address={address[0],address[1],address[2],address[5],address[6],address[7],0,0};
+        } else if (!parseMacAddress(v.value, length, address,&failure)) {
+            throw DbError(failure==MacAddressInputError::OutOfRange?"22003":"22P02",
+                          "invalid input syntax for type " + target);
         }
         return ExprValue(target, formatMacAddress(address.data(), length), false);
     }
@@ -5768,10 +5789,15 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
             if (!value.isNull) {
                 value.collation = mergeExplicitCollations(
                     value.collation, resultCollation);
+                const auto target=common_type_detail::canonical(declaredResult);
+                const auto source=common_type_detail::canonical(value.typeName);
+                if ((target=="macaddr" || target=="macaddr8") && source!=target)
+                    value=evalCast(nullptr,ctx,value,target);
                 return value;
             }
         }
         ExprValue result("unknown", "", true);
+        if (declaredResult=="macaddr" || declaredResult=="macaddr8")result.typeName=declaredResult;
         result.collation = resultCollation;
         return result;
     }
