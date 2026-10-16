@@ -1,5 +1,9 @@
 # 2026-10-13 审查与验证入口
 
+最新[冻结5091b39c完整终态](issue-full-registered-5091b39c.md)：1391入口各一次，
+1390实际通过、1 TLS环境skip、0失败，实际退出0；全部冻结输入、58 receipt及
+57 test库字节独立终态核对0。原273状态不变，旧失败保留；下方为历史时点。
+
 后续[R95旧全局BOOL参数](issue-review-r95-legacy-global-boolean-arguments.md)
 118控制、PG/Root60、十个完整native及十个完整协议通过；原setup超时与C warning保留。
 新881 native+3 Main+507 Python=1391尚未取得全量终态，原273状态不变。

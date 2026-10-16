@@ -1,8 +1,8 @@
 # 生产化状态
 
-状态入口更新：2026-10-13。当前发现及验证范围见[代码审查报告](code-review-2026-10-13.md)；下方工程批次记录截至其各自标注日期。
+状态入口更新：2026-10-15。当前发现及验证范围见[代码审查报告](code-review-2026-10-13.md)与[逐项修复](review-fixes-2026-10-13.md)；下方工程批次记录截至其各自标注日期。
 
-当前审查已通过正常API复现页压缩的数据完整性错误，并通过SQL对照复现RETURNING写入、EXECUTE求值次数及窗口/数值错误。这些问题尚未修复；验证或试用请使用独立数据副本，不要依赖本项目保存重要数据的唯一副本。
+原审查的页压缩、RETURNING、EXECUTE及窗口/数值问题已按逐项修复记录推进，不能继续把原始失败表当作当前未修复清单。最新[冻结5091b39c完整注册回归](issue-full-registered-5091b39c.md)为1390实际通过、1 TLS环境skip、0失败，输入/产物独立终态核对0；真实TLS、完整兼容性、历史间歇性超时和原273未完成范围仍未关闭。验证或试用请使用独立数据副本，不要依赖本项目保存重要数据的唯一副本。
 
 当前发行标识为 v0.2.0，但仍处于生产化重构阶段，不能宣称已达到 PostgreSQL 的生产级完整度。实时范围和完成状态只取自 [`postgresql-18-gap-audit.md`](postgresql-18-gap-audit.md) 与 [`gap-progress.json`](gap-progress.json)，由 `python3 scripts/check_gap_progress.py` 校验。[`compatibility-contract.md`](compatibility-contract.md) 独立定义产品版本、PostgreSQL 18.6 行为目标、wire protocol 3.0 上限和 extended 模式；当前“客户端可连接”和“PG18 行为兼容”两级验收均未宣告通过。本文其余 PASS、sanitizer、崩溃矩阵、soak 和性能数字都是带日期的历史证据，不代表当前 HEAD 已运行同一全量矩阵。GitHub Actions 当前全部禁用（仅保留 `.github/workflows/ci.yml.disabled`）；本地构建、测试、sanitizer 和打包脚本仍可手动运行。
 

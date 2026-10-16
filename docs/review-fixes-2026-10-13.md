@@ -15,6 +15,11 @@
 
 用户此前暂缓的安全/TDE及CTAS/后台checkpoint专项仍暂缓；本轮普通数据完整性与现有回归失败照常修复。CMake、TLS及sanitizer的实际验证范围按结果记录。
 
+最新[冻结5091b39c完整终态](issue-full-registered-5091b39c.md)：1391入口各一次，
+1390实际通过、1 TLS环境skip、0失败，实际退出0；全部冻结输入、58 receipt及
+57 test库字节独立终态核对0。R92–R95合入后的组合已验证，不抹除原失败或
+宣称真实TLS、间歇性超时根因及原273完成。下述未全量/失败均保留历史时点。
+
 后续[R95旧全局BOOL参数](issue-review-r95-legacy-global-boolean-arguments.md)
 118控制、PG/Root60、十个完整native及十个完整协议通过；原setup超时与C warning保留。
 新881 native+3 Main+507 Python=1391尚未取得全量终态，原273状态不变。
@@ -33,7 +38,7 @@
 通过，协议邻居18/20通过，CREATE/定长ALTER两个超时保留。新877 native+3 Main+
 504 Python=1384组合未全量运行，下一项继续原完整普通DDL超时与其余未完要求。
 
-最近完整终态为[冻结332bcff4](issue-full-registered-332bcff4.md)：2026-10-15
+前次完整终态为[冻结332bcff4](issue-full-registered-332bcff4.md)：2026-10-15
 15:15 UTC实际退出1，1382入口全部各一次，1379实际通过/1 TLS环境skip/2失败。
 全部冻结输入、58 receipt及57份test库字节独立复核0；新增14入口和旧六失败入口
 本轮均通过。新失败是stored-function-owner末尾DROP断言和SQRT准备阶段CREATE

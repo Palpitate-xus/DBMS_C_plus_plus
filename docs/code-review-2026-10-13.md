@@ -2,6 +2,11 @@
 
 ## 输入与结论范围
 
+最新[冻结5091b39c完整终态](issue-full-registered-5091b39c.md)：2026-10-15
+1391入口全部各一次，1390实际通过、1 TLS环境skip、0失败，实际退出0。
+清洁HEAD、全部tracked输入、58 receipt及57份test库字节独立终态核对0。
+该结果不证明真实TLS、间歇性超时根因已修复或原273完成；下述未全量/失败为历史输入。
+
 后续[R95旧全局BOOL参数](issue-review-r95-legacy-global-boolean-arguments.md)
 118控制、PG/Root60、十个完整native及十个完整协议通过；原setup超时与C warning保留。
 新881 native+3 Main+507 Python=1391尚未取得全量终态，原273状态不变。
@@ -20,7 +25,7 @@
 18/20协议通过，CREATE和定长ALTER超时保留。新1384组合未全量运行，不把本项
 或下述1382历史终态推广为当前源码全绿、完整TOAST或原273完成。
 
-最新[冻结332bcff4完整终态](issue-full-registered-332bcff4.md)于2026-10-15
+前次[冻结332bcff4完整终态](issue-full-registered-332bcff4.md)于2026-10-15
 15:15 UTC确认实际退出1：1382入口各一次，1379实际通过/1 TLS环境skip/2失败。
 源码/产物及58 receipt、57 test库字节独立核对0。旧六失败入口与新增14入口
 本轮均通过；新失败为末尾DROP断言和SQRT准备CREATE SCHEMA超时，未冒称全绿。
