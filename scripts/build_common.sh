@@ -323,6 +323,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/bit_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/network_types_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/macaddr_input_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/inet_input_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/geometric_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/xml_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/prepared_statement_lifecycle_e2e_test.py)

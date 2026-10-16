@@ -125,6 +125,7 @@ USE DATABASE mydb;
 | `INET` | IPv4/IPv6 地址，如 `'192.168.1.1'` |
 | `CIDR` | 网络地址，如 `'192.168.0.0/24'` |
 | `MACADDR` | MAC 地址，如 `'08:00:2b:01:02:03'` |
+| `MACADDR8` | 八字节EUI地址，如 `'08:00:2b:01:02:03:04:05'` |
 | `ARRAY` | 数组，如 `INT[]` |
 | `POINT` | 几何点 |
 | `LINE` / `LSEG` / `BOX` / `PATH` / `POLYGON` / `CIRCLE` | 几何类型 |
@@ -133,6 +134,14 @@ USE DATABASE mydb;
 | `ENUM` | 枚举类型 (CREATE TYPE ... AS ENUM) |
 | `RANGE` | 范围类型，如 `INT4RANGE` |
 | `DOMAIN` | 域类型 |
+
+网络类型的格式、CAST源类型和协议验收范围见[R102输入检查](issue-review-r102-network-input-notation.md)
+与[R101 MAC检查](issue-review-r101-macaddr-input-and-widths.md)，不能据类型存在
+推断整个PostgreSQL网络函数族已完成。INET无掩码要求完整IPv4地址，`'10/8'`
+是带掩码缩写；CIDR输入不允许非零host bits，`'10.1'`表示`10.1.0.0/16`。
+MACADDR8接受六字节EUI-48时会插入FF:FE，而不是在末尾补零。文本列/参数可
+通过显式CAST输入，typed TEXT不能直接当作网络列的隐式赋值。NAME→MAC及
+typed INET→CIDR的已知转换问题另列R103/R104，未因输入解析修复而关闭。
 
 ---
 

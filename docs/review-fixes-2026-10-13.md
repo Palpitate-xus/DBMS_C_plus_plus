@@ -15,6 +15,11 @@
 
 用户此前暂缓的安全/TDE及CTAS/后台checkpoint专项仍暂缓；本轮普通数据完整性与现有回归失败照常修复。CMake、TLS及sanitizer的实际验证范围按结果记录。
 
+后续[R102 INET/CIDR输入](issue-review-r102-network-input-notation.md)最终旧188/72、
+672/389失败；当前188/ASan/UBSan、PG/Root672、2558对照及21native/16协议/3真实
+Main通过，最终真实全58/匹配核心/fence均0，单项本地提交。首版672/23保留；
+R98/R99不混入、R103/R104待修、原273不变，无新全量或借用R101证明。
+
 后续[R101 MAC输入/宽度](issue-review-r101-macaddr-input-and-widths.md)旧75/38、
 328/186失败，当前75、PG/Root328及236派生输入通过，二十完整native与十五完整
 协议及三个真实Main通过；头缺陷修正后真实全58重编0，所有产物字节相同，
@@ -183,6 +188,9 @@ socket超时，精确SQL/栈和原期限保留，尚未确定根因，不称新�
 | R97 | 显式BEFORE行赋值的NEW/OLD类型与NULL | 本范围已修复 | 旧106/65失败，当前154及15个完整native/十个完整协议通过；这是StorageEngine扩展，不冒称完整PG触发器/1392组合验收，见[记录](issue-review-r97-typed-before-row-assignments.md) |
 | R100 | 几何坐标分隔符的位置验证 | 本范围已修复，独立本地commit | 旧232/104与230/135失败；当前232及PG/Root230通过，十个完整native/七个完整协议通过；旧准备超时/134保留，见[记录](issue-review-r100-geometric-coordinate-delimiters.md) |
 | R101 | MAC输入、EUI宽度转换与SQLSTATE | 本范围已修复，独立本地commit | 旧75/38、328/186；当前75、PG/Root328、236差分及20native/15协议/3真实Main通过；头缺陷修正后全58重编/产物逐字节相同/新核心2与328/fence均0，未冒新全量；首版314/5保留，见[记录](issue-review-r101-macaddr-input-and-widths.md) |
+| R102 | INET/CIDR输入格式与类型边界 | 本范围已修复，独立本地commit | 旧188/72、672/389；当前188/ASan/UBSan、PG/Root672、2558对照及21native/16协议/3真实Main通过；最终真实全58/匹配核心/fence均0，首版672/23保留，不冒新全量，见[记录](issue-review-r102-network-input-notation.md) |
+| R103 | NAME→MAC显式输入回归 | 已复现，待修复 | R101新白名单遗漏NAME，实际PG允许而固定fb6对值/NULL/零行均42846；独立修复排队，见[R102后续观察](issue-review-r102-network-input-notation.md#后续独立问题未计入本项修复) |
+| R104 | typed INET→CIDR网络值转换 | 已复现，待修复 | 固定fb6对IPv4/IPv6 host bits报22P02，实际PG清除host bits后成功；不是放松unknown CIDR校验，见[R102后续观察](issue-review-r102-network-input-notation.md#后续独立问题未计入本项修复) |
 | O01 | owner健康重试及测试覆盖 | 已修复 | `c9a1e3c3`；原全部owner断言、新真实peer/dirty冲突及10完整native提交前/后通过；Root R14集成fresh58后两完整owner再次通过，见[验证](issue-review-o01-table-owner-health-retry.md) |
 | O02 | EXISTS索引错误的访问计划/断言 | 已修正回归夹具 | 原完整协议exit 1→0，保留六严格XX001，新增精确t/f，完整EXISTS协议/19native通过；未改产品，见[验证](issue-review-o02-index-access-path-expectations.md) |
 | O03 | EXPLAIN JOIN图及过时断言 | 已修复 | 实际执行的source/cache/join/scan图及相关重绑；最终完整60控制、十二native/十协议CLI全过，OFFSET阳性及42601原/PG对照保留，见[验证](issue-review-o03-explain-join-source-graph.md) |

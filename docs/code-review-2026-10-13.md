@@ -2,6 +2,11 @@
 
 ## 输入与结论范围
 
+后续[R102 INET/CIDR输入](issue-review-r102-network-input-notation.md)最终旧188/72、
+672/389失败；当前188/ASan/UBSan、PG/Root672、2558对照及21native/16协议/3真实
+Main通过；最终真实全58/normal/repeat、匹配核心与fence全0，单项本地提交。
+首版672/23保留，无新全量；原273不变，R103/R104保持独立待修复。
+
 后续[R101 MAC输入与宽度](issue-review-r101-macaddr-input-and-widths.md)纠正输入
 格式、MAC48/EUI64转换、共同类型值转换及SQLSTATE。旧75/38、328/186失败，
 当前75、PG/Root328、236差分及20native/15协议/3真实Main通过；独立头包含缺陷

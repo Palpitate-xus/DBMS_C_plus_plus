@@ -2,6 +2,12 @@
 
 当前运行结果、失败明细和复现方法见[代码审查索引](review-index.md)。验证入口为 `bash scripts/build_tests.sh`，只运行其已注册集合；未注册测试需单独运行或补入入口。
 
+2026-10-16后续[R102 INET/CIDR输入](issue-review-r102-network-input-notation.md)
+最终旧188组件72失败、672协议389失败；当前188/纯组件ASan/UBSan、PG/Root672、
+2558对照及21native/16协议/3真实Main通过；最终真实全58/normal/repeat、匹配
+核心及最终fence全0，单项本地提交。首版672/23保留；无新1398/1402全量，
+R103/R104独立待修，不把本项写成所有网络类型问题均已完成。
+
 2026-10-16后续[R101 MAC输入](issue-review-r101-macaddr-input-and-widths.md)核心75、
 PG/Root328及236额外codec差分通过，纯头ASan/UBSan75通过；二十完整native和
 十五协议及三个真实Main全0。头依赖修正后全58真实重编0，所有对象/程序字节

@@ -16,6 +16,7 @@
 #include "common/GeometryValue.h"
 #include "expression/geometric_input.h"
 #include "expression/macaddr_input.h"
+#include "expression/network_input.h"
 #include "expression/between_input.h"
 #include "expression/regtype_input.h"
 #include "expression/record_cast.h"
@@ -4818,6 +4819,11 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
     if (!macTarget.empty()) {
         macaddr_input_detail::validateCast(v.typeName,macTarget);
         target=macTarget;
+    }
+    const auto networkTarget=network_input_detail::builtinType(targetTypeName);
+    if (!networkTarget.empty()) {
+        network_input_detail::validateCast(v.typeName,networkTarget);
+        target=networkTarget;
     }
     const auto sourceType=ExprHelper::canonicalResultTypeName(v.typeName);
     const auto targetBase=ExprHelper::canonicalResultTypeName(target);

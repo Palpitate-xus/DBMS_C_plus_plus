@@ -2,6 +2,12 @@
 
 > 本文件是按旧 TODO 编排的历史计划。当前范围以[273项总账](postgresql-18-gap-audit.md)为准；本轮新增 bug 的修复顺序、方法和验收条件见[审查报告](code-review-2026-10-13.md)。
 
+旧Wave4的MAC“剥离分隔符”及“全零即NULL”描述是历史实现，不是现行输入或
+NULL契约。当前MAC分组/EUI宽度与INET/CIDR格式检查见
+[R101](issue-review-r101-macaddr-input-and-widths.md)、
+[R102](issue-review-r102-network-input-notation.md)及各自验收状态；R103/R104
+类型转换问题仍待修复，不能据旧勾选宣称网络类型家族全部完成。
+
 > 原则：只排顺序，不估时间；每一阶段完成后，下一阶段方可启动。  
 > 引用格式：`X.Y` = all-gaps-todo.md 第 X 章第 Y 条；`16.X` = 架构级根本差距。
 

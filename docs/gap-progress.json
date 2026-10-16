@@ -2,6 +2,19 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R102 INET/CIDR input grammar and source boundaries fixed with final fresh58 and independent finite40 acceptance",
+      "gap_ids": ["TYPE-10", "SQL-08", "SQL-11", "PROTO-04"],
+      "status": "partial",
+      "evidence": ["docs/issue-review-r102-network-input-notation.md"],
+      "tests": ["tests/network_address_input_codec_test.cpp", "tests/inet_input_protocol_e2e_test.py"],
+      "verification": {
+        "reproduction": "Old initial codec158/65, complete468/259 and582/345 actually1; initial collector missing RowDescription abort retained. Additional realPG tail30/7 reveals first candidate still wrong. Final immutable old header188/72 and binary672/389 actually1; actual180006 reference672 all0. All original SQL/assertions retained, source/castcontext separately verified.",
+        "focused_tests": "First own fresh58/repeat0 and whole inet SDK0, but finalwire672/23 actually1 retained (seven INET tail forms in three paths plus two stored-result effects). Final O2/ASan/UBSan188 and purecodec2558 differential all0 without engine symbols; final helper standalone0. Second own genuinefresh58/normal/repeat0, new matchingcache/freshstubs/wholecore2native and672wire0; full21native/16wire/3realMain all0 (40 unique entries). Core and final independent binary/cache/dualstamps/all58receipts/57testbytes/source-test-scriptseal fences0. Explain/session testTU O0, window O2, production57 O2; no full-engine sanitizer, value/provider lifecycle rewrite or borrowed R101 proof.",
+        "full_suite": "No new complete registered suite. Expected R102-only HEAD1398 and working1402 incl preserved R98 are distinct; old frozen1391 and R101 finite38 do not cover this candidate.",
+        "scope": "Original273 statuses unchanged22complete166partial70unverified15deferred. R98/R99 skip scope awaits clarification; candidates preserved and excluded. Additional read-only actualPG/old10 observations have8 mismatches: R103 introduced NAME->MAC source omission and R104 preexisting typedINET->CIDR hostbits, both documented and unfixed, not counted in R102. Explicit deferrals unchanged; no push, Actions disabled."
+      }
+    },
+    {
       "issue": "R101 MAC grammar, EUI width coercions and error metadata independently fixed with final header closure",
       "gap_ids": ["TYPE-10", "SQL-08", "SQL-11", "PROTO-04"],
       "status": "partial",

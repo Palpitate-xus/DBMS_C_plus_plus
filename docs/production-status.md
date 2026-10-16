@@ -2,6 +2,11 @@
 
 状态入口更新：2026-10-16。当前发现及验证范围见[代码审查报告](code-review-2026-10-13.md)与[逐项修复](review-fixes-2026-10-13.md)；下方工程批次记录截至其各自标注日期。
 
+后续[R102 INET/CIDR输入](issue-review-r102-network-input-notation.md)最终旧188/72、
+672/389失败；当前188/ASan/UBSan、PG/Root672、2558对照及21native/16协议/3真实
+Main通过，最终真实全58/normal/repeat与独立终态fence全0，单项本地提交。
+首版672/23保留，无新全量。R98/R99保留、R103/R104待修，原273状态不变。
+
 后续[R101 MAC输入/宽度](issue-review-r101-macaddr-input-and-widths.md)核心及
 二十完整native/十五协议/三个真实Main已通过；独立头缺陷修正后真实重编全部
 58TU，所有对象/程序字节相同，新匹配核心2/328与最终fence全0。本项独立本地

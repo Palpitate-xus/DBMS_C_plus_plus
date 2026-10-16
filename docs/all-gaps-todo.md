@@ -3,6 +3,11 @@
 > **已于 2026-08-23 被 [`postgresql-18-gap-audit.md`](postgresql-18-gap-audit.md) 取代；逐项落地方法见 [`postgresql-18-implementation-blueprint.md`](postgresql-18-implementation-blueprint.md)。**
 > 本文件保留早期 Wave、提交和状态变化记录，不再是当前差距的权威来源；其中的日期、PASS 数和“已完成”状态可能已过时。
 
+网络类型的当前发现与修复范围另见[R101](issue-review-r101-macaddr-input-and-widths.md)
+和[R102](issue-review-r102-network-input-notation.md)。旧Wave的分隔符剥离、固定
+输入宽度及全零即NULL描述不再是现行契约；NAME→MAC回归、typed INET→CIDR
+值转换等已列R103/R104待修复，不修改下方历史PASS或据旧勾选关闭原273项。
+
 > 生成日期：2026-06-10 | 当前审计：2026-08-14
 > 来源：基于 `postgresql-complete-gap-analysis.md` 逐条提取，**无一遗漏**
 > 历史原则：本文件曾作为唯一 TODO 来源；当前状态请以新审计为准

@@ -1,5 +1,10 @@
 # 2026-10-13 全仓库审查
 
+后续[R102网络类型输入](issue-review-r102-network-input-notation.md)最终旧188/72、
+672/389失败，当前188/纯组件sanitizer、PG/Root672、2558对照及21native/16协议/
+3真实Main通过；最终真实全58/匹配核心/fence全0，单项本地提交。首版672/23
+保留，不冒新全量；R103/R104待修，原273状态不变。
+
 后续[R101 MAC输入与宽度](issue-review-r101-macaddr-input-and-widths.md)旧75/38、
 328/186失败，当前75、PG/Root328、236差分及二十完整native/十五完整协议/
 三个真实Main通过。独立头缺陷修正后全58重编0，所有对象/程序字节相同，

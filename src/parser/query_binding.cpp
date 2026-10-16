@@ -11,6 +11,7 @@
 #include "expression/arithmetic_type.h"
 #include "expression/geometric_input.h"
 #include "expression/macaddr_input.h"
+#include "expression/network_input.h"
 #include "expression/between_input.h"
 #include "expression/regtype_cast.h"
 #include "expression/record_cast.h"
@@ -560,6 +561,10 @@ public:
                 macaddr_input_detail::validateCast(input,mac);
                 macaddr_input_detail::validateUnknownInput(cast->operand.get(),cast->typeName);
             }
+            if (const auto network=network_input_detail::builtinType(cast->typeName);!network.empty()) {
+                network_input_detail::validateCast(input,network);
+                network_input_detail::validateUnknownInput(cast->operand.get(),cast->typeName);
+            }
             if (metadata.assignmentInput) metadata.assignmentInput({"", cast->typeName}, cast, cast->typeName);
             bindEnumCast(cast,cast->operand.get(),cast->typeName);
             if(const auto geometry=geometric_input_detail::builtinType(cast->typeName);!geometry.empty())
@@ -614,6 +619,10 @@ public:
                 if (const auto mac=macaddr_input_detail::builtinType(type->value);!mac.empty()) {
                     macaddr_input_detail::validateCast(left,mac);
                     macaddr_input_detail::validateUnknownInput(binary->left.get(),type->value);
+                }
+                if (const auto network=network_input_detail::builtinType(type->value);!network.empty()) {
+                    network_input_detail::validateCast(left,network);
+                    network_input_detail::validateUnknownInput(binary->left.get(),type->value);
                 }
                 if (metadata.assignmentInput) metadata.assignmentInput({"", type->value}, binary, type->value);
                 bindEnumCast(binary,binary->left.get(),type->value);

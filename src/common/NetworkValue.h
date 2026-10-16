@@ -67,7 +67,7 @@ inline bool parseNetworkAddress(const std::string& input,
                                 NetworkAddressValue& output,
                                 bool requireNetworkAddress = false) {
     output = {};
-    if (input.empty() ||
+    if (input.empty() || input.find('\0') != std::string::npos ||
         std::any_of(input.begin(), input.end(), [](unsigned char c) {
             return std::isspace(c) != 0;
         })) {
@@ -81,14 +81,63 @@ inline bool parseNetworkAddress(const std::string& input,
 
     const bool ipv6 = addressText.find(':') != std::string::npos;
     output.family = ipv6 ? kPgNetworkFamilyInet6 : kPgNetworkFamilyInet;
-    const int af = ipv6 ? AF_INET6 : AF_INET;
     const uint8_t maximum = ipv6 ? 128 : 32;
-    if (inet_pton(af, addressText.c_str(), output.address.data()) != 1) return false;
+    size_t octets = 0;
+    if (ipv6) {
+        if (inet_pton(AF_INET6, addressText.c_str(), output.address.data()) != 1) return false;
+    } else {
+        size_t position = 0;
+        const auto decimal = [](char c) { return c >= '0' && c <= '9'; };
+        const auto hexadecimal = [](char c) -> int {
+            if (c >= '0' && c <= '9') return c - '0';
+            if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+            if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+            return -1;
+        };
+        // CIDR also has a legacy packed hexadecimal network notation.
+        // An odd final nibble occupies the high half of its byte.
+        if (requireNetworkAddress && addressText.size() >= 2 && addressText[0] == '0' &&
+            (addressText[1] == 'x' || addressText[1] == 'X')) {
+            position = 2;
+            while (position < addressText.size()) {
+                if (octets == 4) return false;
+                const int high = hexadecimal(addressText[position++]);
+                if (high < 0) return false;
+                unsigned value = static_cast<unsigned>(high) << 4;
+                if (position < addressText.size()) {
+                    const int low = hexadecimal(addressText[position++]);
+                    if (low < 0) return false;
+                    value |= static_cast<unsigned>(low);
+                }
+                output.address[octets++] = static_cast<uint8_t>(value);
+            }
+        } else {
+            while (position < addressText.size()) {
+                if (octets == 4 || !decimal(addressText[position])) return false;
+                unsigned value = 0;
+                while (position < addressText.size() && decimal(addressText[position])) {
+                    const unsigned digit = static_cast<unsigned>(addressText[position++] - '0');
+                    if (value > (255U - digit) / 10U) return false;
+                    value = value * 10U + digit;
+                }
+                output.address[octets++] = static_cast<uint8_t>(value);
+                if (position == addressText.size()) break;
+                if (addressText[position++] != '.') return false;
+                if (position == addressText.size()) {
+                    // INET's legacy input permits a final dot; the ordinary
+                    // octet-count/mask checks still apply. CIDR does not.
+                    if (requireNetworkAddress) return false;
+                    break;
+                }
+            }
+        }
+        if (octets == 0) return false;
+    }
     output.bits = maximum;
 
     if (slash != std::string::npos) {
         const std::string prefix = input.substr(slash + 1);
-        if (prefix.empty() ||
+        if (prefix.empty() || (ipv6 && prefix.size() > 1 && prefix[0] == '0') ||
             !std::all_of(prefix.begin(), prefix.end(), [](unsigned char c) {
                 return std::isdigit(c) != 0;
             })) {
@@ -102,7 +151,19 @@ inline bool parseNetworkAddress(const std::string& input,
             parsed = parsed * 10U + digit;
         }
         output.bits = static_cast<uint8_t>(parsed);
+    } else if (!ipv6) {
+        if (!requireNetworkAddress && octets != 4) return false;
+        if (requireNetworkAddress) {
+            const auto first = output.address[0];
+            const unsigned inferred = first >= 240 ? 32 : first >= 224 ? 8 :
+                                      first >= 192 ? 24 : first >= 128 ? 16 : 8;
+            output.bits = static_cast<uint8_t>(std::max<size_t>(inferred, octets * 8));
+            if (output.bits == 8 && first == 224) output.bits = 4;
+        }
     }
+    // INET accepts an abbreviated host only when an explicit mask does not
+    // demand additional whole octets. Unspecified address bytes remain zero.
+    if (!ipv6 && !requireNetworkAddress && output.bits / 8 > octets) return false;
     return !requireNetworkAddress || !output.hasHostBits();
 }
 
