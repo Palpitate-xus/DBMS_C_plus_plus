@@ -25,6 +25,15 @@ generic continuation does not resume this module. Ordinary view replacement and
 other independent SQL correctness issues remain in scope. The original273-item
 ledger and its15 deferred items are unchanged by this separate investigation.
 
+On 2026-10-15 the user explicitly said "skip it, then continue" while R96's
+builtin collation exit-lifetime investigation was active. R96 remains unresolved;
+the pure component sanitizer failure is preserved in [its record](issue-review-r96-collation-exit-user-deferred.md).
+There is no accepted product fix. Do not resume, rename or bypass this specific
+investigation on a generic continuation, and do not broaden the skip to all
+collations, types, or ordinary query correctness. The component evidence does
+not prove the R95 warning has the same runtime stack. This additional deferral
+does not change the original273 ledger or its15 original deferred entries.
+
 The original273-item ledger explicitly defers15 items: P0-13 (unified permission
 boundaries), STO-08 (TDE), and SEC-01 through SEC-13. These remain
 deferred_by_user, unchecked and outside the repair workflow. Do not implement or

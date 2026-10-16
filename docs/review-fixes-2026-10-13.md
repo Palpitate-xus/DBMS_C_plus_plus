@@ -165,6 +165,7 @@ socket超时，精确SQL/栈和原期限保留，尚未确定根因，不称新�
 | R93 | 串行/并行及旧GROUP BY布尔参数 | 本范围已修复 | `9fa6a39d`；旧408/213、68/36及152/56失败；408+68、21完整native/18完整协议邻居通过，原协议150/152两个SHOW失败由后续R94补齐，见[记录](issue-review-r93-boolean-aggregate-arguments.md) |
 | R94 | 并行配置SHOW结果与Describe | 本范围已修复 | `ccaf0ac5`；旧10/5、40/33失败；当前10、PG/Root40、原完整152、六个完整native及十个完整协议通过，见[记录](issue-review-r94-show-parallel-workers.md) |
 | R95 | 旧全局BOOL表达式及混合JSON聚合 | 本范围已修复 | 旧native118/56及观察60/15失败；当前118、PG/Root60、十个完整native及十个完整协议通过，原setup超时与C warning保留，见[记录](issue-review-r95-legacy-global-boolean-arguments.md) |
+| R96 | 内置collation退出期生命周期 | 用户明确暂缓，未修复 | 原纯组件ASan退出1/heap-use-after-free保留，无生产修复；不等同R95 warning或R15，不扩大至全部类型，generic continue不恢复，见[记录](issue-review-r96-collation-exit-user-deferred.md) |
 | O01 | owner健康重试及测试覆盖 | 已修复 | `c9a1e3c3`；原全部owner断言、新真实peer/dirty冲突及10完整native提交前/后通过；Root R14集成fresh58后两完整owner再次通过，见[验证](issue-review-o01-table-owner-health-retry.md) |
 | O02 | EXISTS索引错误的访问计划/断言 | 已修正回归夹具 | 原完整协议exit 1→0，保留六严格XX001，新增精确t/f，完整EXISTS协议/19native通过；未改产品，见[验证](issue-review-o02-index-access-path-expectations.md) |
 | O03 | EXPLAIN JOIN图及过时断言 | 已修复 | 实际执行的source/cache/join/scan图及相关重绑；最终完整60控制、十二native/十协议CLI全过，OFFSET阳性及42601原/PG对照保留，见[验证](issue-review-o03-explain-join-source-graph.md) |
