@@ -2,6 +2,7 @@
 #include "arithmetic_type.h"
 #include "equality_type.h"
 #include "expr_helper.h"
+#include "array_type.h"
 #include "SqlPattern.h"
 #include "function_namespace.h"
 #include "common/QueryHostProvider.h"
@@ -109,9 +110,11 @@ static int compareTextWithCollation(const std::string& left,
 
 static bool isCollatableExprType(const std::string& typeName) {
     const std::string type = toLower(typeName);
+    if (type.size() >= 2 && type.compare(type.size()-2,2,"[]") == 0)
+        return isCollatableExprType(type.substr(0,type.size()-2));
     return type == "text" || type == "unknown" || type == "varchar" ||
            type == "character varying" || type == "char" ||
-           type == "character" || type == "bpchar";
+           type == "character" || type == "bpchar" || type == "name";
 }
 
 static bool isCollatableCastTarget(std::string typeName) {
@@ -5174,6 +5177,12 @@ struct DeclaredStringLengthScalarFunction {
         return callback(args);
     }
 };
+struct DeclaredArrayPositionScalarFunction {
+    ScalarFunction callback;
+    ExprValue operator()(const std::vector<ExprValue>& args) const {
+        return callback(args);
+    }
+};
 // These callbacks have operand-dependent numeric/float8 result metadata.
 // Replacing one through registerFunction must not inherit that builtin rule.
 struct IntegralRoundingScalarFunction {
@@ -5189,6 +5198,8 @@ struct ModResultScalarFunction {
     }
 };
 bool ownsScalarSignatures(const std::string& name,const ScalarFunction* callback) {
+    if(name=="array_position")
+        return callback && callback->target<DeclaredArrayPositionScalarFunction>();
     if(isStringLengthScalarName(name))
         return callback && callback->target<DeclaredStringLengthScalarFunction>();
     // Preserve ownership of the existing R62 and fixed-float8 families.
@@ -5220,6 +5231,7 @@ struct SqlVersionFunction {
 struct ResolvedScalarFunction {
     bool found = false;
     bool stored = false;
+    bool polymorphic = false;
     std::string name;
     std::string schema;
     const QueryHostSetReturningProvider* provider=nullptr;
@@ -5236,6 +5248,9 @@ struct ScalarSignature {
     std::string output;
 };
 std::vector<ScalarSignature> scalarSignatures(const std::string& name) {
+    if(name=="array_position")return {
+        {{"anycompatiblearray","anycompatible"},"integer"},
+        {{"anycompatiblearray","anycompatible","integer"},"integer"}};
     if(name=="abs") {
         std::vector<ScalarSignature> result;
         for(const auto* type:{"smallint","integer","bigint","numeric","real","double precision"})
@@ -5267,6 +5282,47 @@ std::string scalarSignatureInputType(const std::string& type) {
     return canonical;
 }
 
+bool legacyNativeTextArray(const FunctionCallExpr* call) {
+    if(!call || call->sourceBegin!=std::string::npos || call->args.empty())return false;
+    for(const auto& argument:call->args) {
+        const auto* literal=dynamic_cast<const LiteralExpr*>(argument.get());
+        if(!literal || literal->sourceBegin!=std::string::npos)return false;
+    }
+    const auto* first=static_cast<const LiteralExpr*>(call->args.front().get());
+    const auto value=trimStr(first->value);
+    // Old native callers pass raw array bytes in TEXT literal cells. This
+    // is not a parsed SQL TEXT argument, quoted SQL literal or runtime row.
+    return scalarSignatureInputType(first->typeName)=="text" && !value.empty() &&
+        (value.front()=='{' || value.front()=='[');
+}
+
+std::vector<ScalarSignature> arrayPositionSignatures(
+    const std::vector<std::string>& inputs,const FunctionCallExpr* call) {
+    using namespace common_type_detail;
+    if(inputs.size()!=2 && inputs.size()!=3)return {};
+    const bool legacyText=inputs[0]=="text" && legacyNativeTextArray(call);
+    if(inputs[0]!="unknown" && !array(inputs[0]) && !legacyText)return {};
+    if(array(inputs[1]))return {};
+    const auto element=legacyText?"text":inputs[0]=="unknown"?"unknown":inputs[0].substr(0,inputs[0].size()-2);
+    std::string common;
+    try {common=selectCommonType({element,inputs[1]},"array_position");}
+    catch(const DbError& error) {
+        if(error.sqlState()=="42804" || error.sqlState()=="42846")return {};
+        throw;
+    }
+    ScalarSignature signature{{common+"[]",common},"integer"};
+    if(inputs.size()==3) {
+        // Public cell-based native calls historically apply the int4 input
+        // codec inside the callback. SQL-origin calls use real declarations.
+        const bool nativeCells=call && call->sourceBegin==std::string::npos &&
+            std::all_of(call->args.begin(),call->args.end(),[](const auto& argument){
+                return dynamic_cast<const ParameterExpr*>(argument.get())!=nullptr;
+            });
+        signature.inputs.push_back(nativeCells && category(inputs[2])=='S'?inputs[2]:"integer");
+    }
+    return {std::move(signature)};
+}
+
 bool hasUnboundScalarInput(const Expr* expression) {
     if(!expression)return false;
     if(const auto* column=dynamic_cast<const ColumnRefExpr*>(expression))return !column->binding;
@@ -5293,16 +5349,22 @@ ResolvedScalarFunction resolveTypedScalar(const std::string& name,
     std::vector<ResolvedScalarFunction> candidates;
     const auto append=[&](ResolvedScalarFunction candidate) {
         if(candidate.inputs.size()!=inputs.size() || !call->namedArgs.empty())return;
-        for(size_t i=0;i<inputs.size();++i)
-            if(!common_type_detail::implicit(inputs[i],candidate.inputs[i]))return;
+        for(size_t i=0;i<inputs.size();++i) {
+            const bool legacyArray=i==0 && candidate.polymorphic && inputs[i]=="text" &&
+                candidate.inputs[i]=="text[]" && legacyNativeTextArray(call);
+            if(!legacyArray && !common_type_detail::implicit(inputs[i],candidate.inputs[i]))return;
+        }
         // Identical signatures in later namespaces are hidden, not ambiguous.
-        for(const auto& earlier:candidates)if(earlier.inputs==candidate.inputs)return;
+        for(const auto& earlier:candidates)
+            if(earlier.inputs==candidate.inputs && earlier.polymorphic==candidate.polymorphic)return;
         candidates.push_back(std::move(candidate));
     };
     for(const auto& ns:path) {
         if(ns=="pg_catalog") {
-            for(const auto& signature:scalarSignatures(name)) {
+            const auto signatures=name=="array_position"?arrayPositionSignatures(inputs,call):scalarSignatures(name);
+            for(const auto& signature:signatures) {
                 ResolvedScalarFunction candidate;candidate.found=true;candidate.name=name;candidate.schema=ns;
+                candidate.polymorphic=name=="array_position";
                 candidate.inputs=signature.inputs;candidate.output=signature.output;append(std::move(candidate));
             }
         } else if(!database.empty()) {
@@ -5320,17 +5382,35 @@ ResolvedScalarFunction resolveTypedScalar(const std::string& name,
         int best=-1;for(const auto& candidate:candidates)best=std::max(best,score(candidate));
         candidates.erase(std::remove_if(candidates.begin(),candidates.end(),[&](const auto& candidate){return score(candidate)!=best;}),candidates.end());
     };
-    retainBest([&](const auto& candidate){int count=0;for(size_t i=0;i<inputs.size();++i)if(inputs[i]==candidate.inputs[i])++count;return count;});
+    const auto placeholder=[](const auto& candidate,size_t index) {
+        return candidate.polymorphic && index<2;
+    };
+    const auto inputCategory=[&](const auto& candidate,size_t index) {
+        // The inferred TEXT/element type is a coercion target, not the
+        // polymorphic declaration used to choose between overloads.
+        return placeholder(candidate,index)?'P':common_type_detail::category(candidate.inputs[index]);
+    };
+    retainBest([&](const auto& candidate){
+        int count=0;
+        for(size_t i=0;i<inputs.size();++i)
+            if(!placeholder(candidate,i) && inputs[i]==candidate.inputs[i])++count;
+        return count;
+    });
     retainBest([&](const auto& candidate){int count=0;for(size_t i=0;i<inputs.size();++i)
-        if(inputs[i]!="unknown" && common_type_detail::category(inputs[i])==common_type_detail::category(candidate.inputs[i]) && common_type_detail::preferred(candidate.inputs[i]))++count;return count;});
+        if(!placeholder(candidate,i) && inputs[i]!="unknown" && common_type_detail::category(inputs[i])==inputCategory(candidate,i) && common_type_detail::preferred(candidate.inputs[i]))++count;return count;});
     for(size_t i=0;i<inputs.size() && candidates.size()>1;++i)if(inputs[i]=="unknown") {
-        std::set<char> categories;for(const auto& candidate:candidates)categories.insert(common_type_detail::category(candidate.inputs[i]));
+        std::set<char> categories;for(const auto& candidate:candidates)categories.insert(inputCategory(candidate,i));
         const char category=categories.count('S')?'S':categories.size()==1?*categories.begin():0;
         if(!category)throw DbError("42725","function "+name+" is not unique");
-        candidates.erase(std::remove_if(candidates.begin(),candidates.end(),[&](const auto& candidate){return common_type_detail::category(candidate.inputs[i])!=category;}),candidates.end());
-        const bool preferred=std::any_of(candidates.begin(),candidates.end(),[&](const auto& candidate){return common_type_detail::preferred(candidate.inputs[i]);});
-        if(preferred)candidates.erase(std::remove_if(candidates.begin(),candidates.end(),[&](const auto& candidate){return !common_type_detail::preferred(candidate.inputs[i]);}),candidates.end());
+        candidates.erase(std::remove_if(candidates.begin(),candidates.end(),[&](const auto& candidate){return inputCategory(candidate,i)!=category;}),candidates.end());
+        const auto preferredInput=[&](const auto& candidate){return !placeholder(candidate,i) && common_type_detail::preferred(candidate.inputs[i]);};
+        const bool preferred=std::any_of(candidates.begin(),candidates.end(),preferredInput);
+        if(preferred)candidates.erase(std::remove_if(candidates.begin(),candidates.end(),[&](const auto& candidate){return !preferredInput(candidate);}),candidates.end());
     }
+    if(candidates.size()>1 && std::all_of(candidates.begin(),candidates.end(),[&](const auto& candidate){
+            return candidate.inputs==candidates.front().inputs;
+        }) && std::any_of(candidates.begin(),candidates.end(),[](const auto& candidate){return !candidate.polymorphic;}))
+        candidates.erase(std::remove_if(candidates.begin(),candidates.end(),[](const auto& candidate){return candidate.polymorphic;}),candidates.end());
     if(candidates.size()>1)throw DbError("42725","function "+name+" is not unique");
     if(candidates.empty())return {};
     // After signature selection, an invalid scalar OVER role precedes input
@@ -5635,7 +5715,9 @@ std::string ExprEvaluator::scalarFunctionIdentity(const FunctionCallExpr* call,
                       (resolved.name=="mod" &&
                        !callback->second.target<ModResultScalarFunction>()) ||
                       (isStringLengthScalarName(resolved.name) &&
-                       !callback->second.target<DeclaredStringLengthScalarFunction>()))
+                       !callback->second.target<DeclaredStringLengthScalarFunction>()) ||
+                      (resolved.name=="array_position" &&
+                       !callback->second.target<DeclaredArrayPositionScalarFunction>()))
                 opaqueResultDomain=true;
         }
     }
@@ -6936,6 +7018,110 @@ static bool jsonTopLevelSplit(const std::string& s, char open, char close,
         }
     }
     out.push_back(trimStr(cur));
+    return true;
+}
+
+// JSONB equality is structural, not output-text equality. Parse with an
+// explicit stack so deeply nested, valid values cannot recurse in C++.
+static bool jsonbArrayElementEqual(const std::string& first,const std::string& second) {
+    struct Node {
+        char kind = 0;
+        std::string scalar;
+        std::vector<size_t> values;
+        std::map<std::string,size_t> members;
+    };
+    struct Tree {std::vector<Node> nodes;size_t root=0;};
+    const auto parse=[](const std::string& input) {
+        Tree tree;size_t cursor=0;
+        struct Frame {size_t node;bool afterValue=false;bool afterComma=false;};
+        std::vector<Frame> frames;
+        const auto bad=[](){throw DbError("22P02","invalid input syntax for jsonb array element");};
+        const auto whitespace=[&](){
+            while(cursor<input.size() && std::isspace(static_cast<unsigned char>(input[cursor])))++cursor;
+        };
+        const auto string=[&]() {
+            if(cursor>=input.size() || input[cursor]!='"')bad();
+            const auto begin=cursor++;
+            bool closed=false;
+            while(cursor<input.size()) {
+                const char ch=input[cursor++];
+                if(ch=='\\') {if(cursor==input.size())bad();++cursor;}
+                else if(ch=='"'){closed=true;break;}
+            }
+            std::string decoded;
+            if(!closed || !jsonUnquoteString(input.substr(begin,cursor-begin),decoded))bad();
+            return decoded;
+        };
+        const auto value=[&]() {
+            whitespace();if(cursor==input.size())bad();
+            Node node;const char token=input[cursor];
+            if(token=='{' || token=='[') {node.kind=token;++cursor;}
+            else if(token=='"') {node.kind='"';node.scalar=string();}
+            else {
+                const auto begin=cursor;
+                while(cursor<input.size() && input[cursor]!=',' && input[cursor]!=']' &&
+                      input[cursor]!='}' && !std::isspace(static_cast<unsigned char>(input[cursor])))++cursor;
+                node.scalar=input.substr(begin,cursor-begin);
+                if(node.scalar=="true" || node.scalar=="false")node.kind='b';
+                else if(node.scalar=="null")node.kind='z';
+                else {
+                    const auto number=tryParseNumeric(node.scalar);
+                    if(!number)bad();
+                    node.kind='d';
+                }
+            }
+            const auto index=tree.nodes.size();tree.nodes.push_back(std::move(node));
+            if(token=='{' || token=='[')frames.push_back({index});
+            return index;
+        };
+        tree.root=value();
+        while(!frames.empty()) {
+            whitespace();if(cursor==input.size())bad();
+            const auto parent=frames.back().node;
+            const bool object=tree.nodes[parent].kind=='{';
+            const char close=object?'}':']';
+            if(input[cursor]==close) {
+                if(frames.back().afterComma)bad();
+                ++cursor;frames.pop_back();continue;
+            }
+            if(frames.back().afterValue) {
+                if(input[cursor++]!=',')bad();
+                frames.back().afterValue=false;frames.back().afterComma=true;continue;
+            }
+            std::string key;
+            if(object) {
+                key=string();whitespace();
+                if(cursor==input.size() || input[cursor++]!=':')bad();
+            }
+            frames.back().afterValue=true;frames.back().afterComma=false;
+            const auto child=value();
+            if(object)tree.nodes[parent].members[std::move(key)]=child; // last duplicate wins
+            else tree.nodes[parent].values.push_back(child);
+        }
+        whitespace();if(cursor!=input.size())bad();
+        return tree;
+    };
+    const auto left=parse(first),right=parse(second);
+    std::vector<std::pair<size_t,size_t>> pending={{left.root,right.root}};
+    while(!pending.empty()) {
+        const auto indices=pending.back();pending.pop_back();
+        const auto& a=left.nodes[indices.first];const auto& b=right.nodes[indices.second];
+        if(a.kind!=b.kind)return false;
+        if(a.kind=='d') {
+            const auto x=tryParseNumeric(a.scalar),y=tryParseNumeric(b.scalar);
+            if(!x || !y || *x!=*y)return false;
+        } else if(a.kind=='[') {
+            if(a.values.size()!=b.values.size())return false;
+            for(size_t i=0;i<a.values.size();++i)pending.emplace_back(a.values[i],b.values[i]);
+        } else if(a.kind=='{') {
+            if(a.members.size()!=b.members.size())return false;
+            auto x=a.members.begin(),y=b.members.begin();
+            for(;x!=a.members.end();++x,++y) {
+                if(x->first!=y->first)return false;
+                pending.emplace_back(x->second,y->second);
+            }
+        } else if(a.scalar!=b.scalar)return false;
+    }
     return true;
 }
 
@@ -11089,6 +11275,12 @@ void ExprEvaluator::registerBuiltins() {
                     "not supported (SQLSTATE 0A000)");
             }
         }
+        const bool hasNull=std::any_of(elems.begin(),elems.end(),[](const auto& token){
+            return toLower(trimStr(token))=="null";
+        });
+        // No NULL bitmap means a NULL needle cannot match. This shortcut
+        // precedes NULL-start validation and default equality lookup.
+        if(a[1].isNull && !hasNull)return ExprValue("integer","",true);
         long long initialPosition = lower;
         if (a.size() >= 3) {
             if (a[2].isNull) {
@@ -11100,6 +11292,52 @@ void ExprEvaluator::registerBuiltins() {
             }
             initialPosition = parseInt32Argument(a[2]);
         }
+        if(elems.empty())return ExprValue("integer","",true);
+        const auto elementType=array_detail::elementType(a[0].typeName);
+        static const std::set<std::string> noDefaultEquality={
+            "point","line","lseg","box","path","polygon","circle","json","xml"};
+        if(noDefaultEquality.count(elementType))
+            throw DbError("42883","could not identify an equality operator for type "+elementType);
+        const auto elements=arrayElements(a[0]);
+        const auto equal=[&](const ExprValue& left,const ExprValue& right) {
+            const auto type=common_type_detail::canonical(left.typeName);
+            if(type=="jsonb")return jsonbArrayElementEqual(left.value,right.value);
+            if(type=="numrange" || type=="int4range" || type=="int8range" ||
+               type=="daterange" || type=="tsrange" || type=="tstzrange") {
+                const auto x=parseRangeLiteral(left.value),y=parseRangeLiteral(right.value);
+                if(!x.valid || !y.valid)throw DbError("22P02","malformed range array element");
+                if(x.empty || y.empty)return x.empty==y.empty;
+                if(x.loInf!=y.loInf || x.hiInf!=y.hiInf)return false;
+                const auto bound=rangeBoundType(type);
+                const auto same=[&](const std::string& first,const std::string& second){
+                    return compareValues(ExprValue(bound,first),ExprValue(bound,second))==0;
+                };
+                return (x.loInf || (x.loInc==y.loInc && same(x.lo,y.lo))) &&
+                       (x.hiInf || (x.hiInc==y.hiInc && same(x.hi,y.hi)));
+            }
+            if(type=="time" || type=="timetz") {
+                const auto clock=[](std::string text) {
+                    size_t zone=text.find_first_of("+-",1);
+                    if(zone==std::string::npos && !text.empty() && (text.back()=='Z' || text.back()=='z'))zone=text.size()-1;
+                    const auto body=text.substr(0,zone);
+                    if(std::count(body.begin(),body.end(),':')==1)text.insert(body.size(),":00");
+                    return parseTimeForExtract(text);
+                };
+                const auto x=clock(left.value),y=clock(right.value);
+                if(x && y)return x->hour==y->hour && x->minute==y->minute &&
+                    x->secondMicros==y->secondMicros && (type=="time" || x->offsetMinutes==y->offsetMinutes);
+            }
+            if(type=="real" || type=="double precision") {
+                const double x=type=="real"?static_cast<double>(parseRealCastValue(left)):parseDoubleCastValue(left);
+                const double y=type=="real"?static_cast<double>(parseRealCastValue(right)):parseDoubleCastValue(right);
+                return (std::isnan(x) && std::isnan(y)) || x==y;
+            }
+            // Named user types without a primitive descriptor must not turn
+            // digit-looking enum labels into numeric values.
+            if(!TypeRegistry::instance().findType(type) && !common_type_detail::oidType(type))
+                return left.value==right.value;
+            return applyComparison("=",left,right).asBool();
+        };
         size_t first = 0;
         if (initialPosition > lower) {
             if (static_cast<unsigned long long>(initialPosition-lower) >= elems.size())
@@ -11107,15 +11345,9 @@ void ExprEvaluator::registerBuiltins() {
             first = static_cast<size_t>(initialPosition - lower);
         }
         for (size_t i = first; i < elems.size(); ++i) {
-            const std::string token = trimStr(elems[i]);
-            const bool quoted = token.size() >= 2 &&
-                token.front() == '"' && token.back() == '"';
-            const bool elementIsNull =
-                !quoted && toLower(token) == "null";
-            const std::string value = arrayElemUnquote(token);
-            if ((a[1].isNull && elementIsNull) ||
-                (!a[1].isNull && !elementIsNull &&
-                 value == a[1].value)) {
+            const auto& element=elements[i];
+            if ((a[1].isNull && element.isNull) ||
+                (!a[1].isNull && !element.isNull && equal(element,a[1]))) {
                 return ExprValue("integer", std::to_string(static_cast<int64_t>(i)+lower), false);
             }
         }
@@ -12584,6 +12816,8 @@ void ExprEvaluator::registerBuiltins() {
             entry.second=DeclaredFloat8ScalarFunction{std::move(entry.second)};
         else if(isStringLengthScalarName(entry.first))
             entry.second=DeclaredStringLengthScalarFunction{std::move(entry.second)};
+        else if(entry.first=="array_position")
+            entry.second=DeclaredArrayPositionScalarFunction{std::move(entry.second)};
         else if(isIntegralRoundingScalarName(entry.first) || entry.first=="round")
             entry.second=IntegralRoundingScalarFunction{std::move(entry.second)};
         else if(entry.first=="mod")
@@ -12593,6 +12827,7 @@ void ExprEvaluator::registerBuiltins() {
     // Volatility metadata for builtins (safe default is 'v' set by registerFunction).
     volatility_["abs"] = 'i';
     volatility_["length"] = 'i';
+    volatility_["array_position"] = 'i';
     volatility_["lower"] = 'i';
     volatility_["upper"] = 'i';
     volatility_["substring"] = 'i';

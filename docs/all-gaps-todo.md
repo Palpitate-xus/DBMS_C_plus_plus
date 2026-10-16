@@ -3,6 +3,10 @@
 > **已于 2026-08-23 被 [`postgresql-18-gap-audit.md`](postgresql-18-gap-audit.md) 取代；逐项落地方法见 [`postgresql-18-implementation-blueprint.md`](postgresql-18-implementation-blueprint.md)。**
 > 本文件保留早期 Wave、提交和状态变化记录，不再是当前差距的权威来源；其中的日期、PASS 数和“已完成”状态可能已过时。
 
+数组查找不能以解码后字符串是否相同判断元素相等；typed值、多态输入与同名
+用户重载的有限实现/验收见[R108](issue-review-r108-array-position-typed-equality.md)。
+ARRAY_POSITIONS和原TYPE-16/FUNC-01仍未完成，不据历史Wave勾选关闭。
+
 四个字符串长度函数的真实签名、字符/字节/位单位及用户重载范围见
 [R107](issue-review-r107-string-length-signatures.md)；旧Wave的函数存在性不等于
 全部签名或原273完成。[R106](issue-review-r106-coalesce-explicit-input-analysis.md)

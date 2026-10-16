@@ -142,6 +142,15 @@ USE DATABASE mydb;
 | `RANGE` | 范围类型，如 `INT4RANGE` |
 | `DOMAIN` | 域类型 |
 
+`array_position(array, needle [, start])`返回首个匹配元素的真实下标，未找到时
+为INTEGER SQL NULL（不是0）；显式数组下界保留，start必须匹配INTEGER声明。
+查找按共同元素类型比较，`array_position('{1.00,2}'::numeric[],1::numeric)`
+返回1，TEXT中的01/1仍不同。CHAR填充、精确数值、浮点NaN/±0、JSONB/range等
+已验证范围及NULL/start顺序见[R108](issue-review-r108-array-position-typed-equality.md)。
+非空JSON/几何数组的非NULL查找没有默认相等操作符，不能把任意文本比较当作
+实现。用户同名重载保留真实返回声明；明确需要builtin可使用`pg_catalog.array_position`。
+`array_positions`和通用复合/域多态能力尚未完成。
+
 网络类型的格式、CAST源类型和协议验收范围见[R102输入检查](issue-review-r102-network-input-notation.md)
 与[R101 MAC检查](issue-review-r101-macaddr-input-and-widths.md)，不能据类型存在
 推断整个PostgreSQL网络函数族已完成。INET无掩码要求完整IPv4地址，`'10/8'`

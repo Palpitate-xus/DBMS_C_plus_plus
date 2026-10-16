@@ -1,5 +1,10 @@
 # PostgreSQL 18 vs 本 DBMS 功能对比
 
+数组函数存在不等于元素相等和多态声明兼容；ARRAY_POSITION的已验证类型、
+NULL/起点、用户重载及真实参数元数据范围见
+[R108](issue-review-r108-array-position-typed-equality.md)。ARRAY_POSITIONS与
+原TYPE-16/FUNC-01仍未完成，不把本项扩为完整PostgreSQL数组能力。
+
 四个字符串长度名字的真实11签名、不同计量单位和用户重载的有限范围见
 [R107](issue-review-r107-string-length-signatures.md)，不能把旧函数存在性勾选
 扩大为完整FUNC-01/SQL-09。[R106](issue-review-r106-coalesce-explicit-input-analysis.md)

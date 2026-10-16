@@ -2034,16 +2034,23 @@ void validatePreparedStoredSignatures(const std::string& sql,Session& session,
     const auto parsed=parser.parseForBinding(sql);
     const auto* select=parsed.isValid()?dynamic_cast<const SelectStmt*>(parsed.stmt.get()):nullptr;
     if(!select || select->fromClause)return;
+    auto* previous=currentSession();setCurrentSession(&session);
+    struct Restore {Session* previous;~Restore(){setCurrentSession(previous);}} restore{previous};
     ExprEvaluator resolver;resolver.setCurrentDB(session.currentDB);
     std::function<bool(const Expr*)> missing=[&](const Expr* value) {
         if(!value)return false;
         if(const auto* call=dynamic_cast<const FunctionCallExpr*>(value)) {
-            if(call->schema.empty() && !resolver.hasScalarFunction(call,&g_engine)) {
+            if(call->schema.empty()) {
+                bool storedName=false;
                 CatalogManager::QualifiedName name;
                 if(CatalogManager::parseQualifiedName(call->funcName,name,true) && name.schema.empty())
                     for(const auto& schema:functionNamespaceSearchPath(g_engine,session.currentDB))
                         if(schema!="pg_catalog" && !g_engine.getUDF(session.currentDB,name.name,schema).expression.empty())
-                            return true;
+                            storedName=true;
+                // An unbound $n is not an UNKNOWN argument. Use the supplied
+                // OIDs before choosing among this stored name and builtins.
+                if(storedName && !parameterOids.empty())return true;
+                if(!resolver.hasScalarFunction(call,&g_engine) && storedName)return true;
             }
             for(const auto& arg:call->args)if(missing(arg.get()))return true;
             for(const auto& arg:call->namedArgs)if(missing(arg.value.get()))return true;
@@ -2061,18 +2068,10 @@ void validatePreparedStoredSignatures(const std::string& sql,Session& session,
     for(const auto& item:select->selectList)candidate=candidate || missing(item.expr.get());
     for(const auto& item:select->orderBy)candidate=candidate || missing(item.expr.get());
     if(!candidate)return;
-    std::vector<QueryBindingDatum> parameters;
-    for(size_t i=0;i<parameterOids.size();++i) {
-        const auto* type=valuesParameterCastType(parameterOids[i]);
-        if(parameterOids[i] && !type)return; // existing custom-type owner
-        QueryBindingDatum datum;datum.identity="protocol-parameter-"+std::to_string(i+1);
-        datum.origin=ParameterOrigin::MetadataPlaceholder;
-        datum.position=i+1;datum.type=type?type:"unknown";parameters.push_back(std::move(datum));
-    }
-    (void)g_engine.prepareBoundQuery(session.currentDB,sql,parameters);
+    (void)g_engine.prepareBoundQuery(session.currentDB,sql,protocolMetadataParameters(session,parameterOids));
 }
 
-// Scalar arithmetic and the finite length overloads own signatures at Parse,
+// Scalar arithmetic and the finite declared functions own signatures at Parse,
 // before a named
 // statement is published. Reuse the metadata binder with real parameter OIDs;
 // do not substitute NULL SQL or evaluate inputs to discover operand types.
@@ -2096,11 +2095,11 @@ void validatePreparedScalarArithmetic(const std::string& sql,Session& session,
                 if(contains(arm.first.get()) || contains(arm.second.get()))return true;
         }
         if(const auto* call=dynamic_cast<const FunctionCallExpr*>(expression)) {
-            static const std::set<std::string> lengths={
-                "char_length","character_length","octet_length","bit_length"};
+            static const std::set<std::string> declarations={
+                "char_length","character_length","octet_length","bit_length","array_position"};
             CatalogManager::QualifiedName name;
             if(CatalogManager::parseQualifiedName(call->funcName,name,true) &&
-               name.schema.empty() && lengths.count(name.name))return true;
+               name.schema.empty() && declarations.count(name.name))return true;
             for(const auto& argument:call->args)if(contains(argument.get()))return true;
             for(const auto& argument:call->namedArgs)if(contains(argument.value.get()))return true;
             return contains(call->filter.get());
@@ -2459,20 +2458,16 @@ bool describePreparedResult(const std::string& sql, Session& session,
     }
     if (select && !parameterOids.empty() &&
         std::all_of(parameterOids.begin(), parameterOids.end(),
-            [](uint32_t oid) { return oid != 0 && valuesParameterCastType(oid); })) {
+            [](uint32_t oid) { return oid != 0; })) {
         // An expression containing a declared parameter (e.g. sqrt($1))
         // cannot infer its overload from the unbound "$1" text. Use the
         // existing whole-query binder with genuine typed metadata cells;
         // Describe must not evaluate a value, call a function or read rows.
-        std::vector<QueryBindingDatum> parameters;
-        for (size_t i = 0; i < parameterOids.size(); ++i) {
-            QueryBindingDatum parameter;
-            parameter.identity = "protocol-parameter-" + std::to_string(i + 1);
-            parameter.position = i + 1;
-            parameter.origin = ParameterOrigin::MetadataPlaceholder;
-            parameter.type = valuesParameterCastType(parameterOids[i]);
-            parameters.push_back(std::move(parameter));
-        }
+        // Arrays and catalog types need the same real OID descriptor, not
+        // the fallback's unbound UNKNOWN sites and builtin result guesses.
+        const auto parameters=protocolMetadataParameters(session,parameterOids);
+        auto* previous=currentSession();setCurrentSession(&session);
+        struct Restore {Session* previous;~Restore(){setCurrentSession(previous);}} restore{previous};
         const auto prepared = g_engine.prepareBoundQuery(session.currentDB, sql, parameters);
         QueryResult shape;
         for (const auto& field : prepared.output) {

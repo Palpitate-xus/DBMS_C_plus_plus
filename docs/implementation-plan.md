@@ -2,6 +2,11 @@
 
 > 本文件是按旧 TODO 编排的历史计划。当前范围以[273项总账](postgresql-18-gap-audit.md)为准；本轮新增 bug 的修复顺序、方法和验收条件见[审查报告](code-review-2026-10-13.md)。
 
+数组查找的typed相等、真实多态声明与用户callee边界见
+[R108](issue-review-r108-array-position-typed-equality.md)；按自身354原生/258协议
+及相关入口验收，不把R86的空数组修复或旧全量作为本项证明。TYPE-16/FUNC-01
+仍partial，ARRAY_POSITIONS及一般复合/域多态继续另项处理。
+
 四个长度函数的有限签名修复与验收记录见[R107](issue-review-r107-string-length-signatures.md)。
 原FUNC-01/SQL-09仍partial；该局部工作不关闭通用函数解析，也不恢复已由用户
 跳过的[R106](issue-review-r106-coalesce-explicit-input-analysis.md)。

@@ -2,6 +2,19 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R108 typed ARRAY_POSITION equality, real polymorphic declarations and routine ownership",
+      "gap_ids": ["TYPE-16", "FUNC-01", "SQL-09", "PROTO-04"],
+      "status": "partial",
+      "evidence": ["docs/issue-review-r108-array-position-typed-equality.md"],
+      "tests": ["tests/array_position_typed_equality_test.cpp", "tests/array_position_typed_equality_protocol_e2e_test.py"],
+      "verification": {
+        "reproduction": "Actual180006 initial24 observations/10 differences and48 capability controls; XML inputs unavailable in that reference build, not XML equality proof. Initial239 reference0/old153fail; final258 reference0/old158fail actually1. Old native320/183fail actually1, earlier319 retained; final354 adds real planning/ownership, raw-datum calibration and legacy native TEXT-array boundaries, not claimed to have run on old libraries.",
+        "focused_tests": "FiveCPP cumulative; normal/repeat iterations compile5/2/1/1/1 versus repeats0, no public headers or fresh58 claim. DevC1 missing existingheader compile failure/no tests; DevC2 new320/2fail and old208/scalar100/length6070; DevC3 same4complete entries0. ProductionC1 native320+2080,239/2fail andexpanded258/7fail, original80/654 andartifactfence0; C2 immutable258/1fail; C3 buildonly; C4 protocol258/80/6540 but newnative fixture342/1 then344/1 failures preserved and corrected against actual raw interface, originalwireSQL unchanged. C4 finalcore344/208/258/80/6540; finitebatch native2pass thenwholelegacyarraylibrary134, all26protocols0/fence0. Owncontroller143 beforeMain andalllogs preserved. C5 preserves rawliteral TEXT native arraycarriers without loosening SQL signatures or implicitgraph. Own matchingfreshstubs wholecore3native354/208/unchangedarraylibrary and258/80/654 all0. Finite29native/26wire/3realMain plus disjoint3native/3wire numericdomains =32native/29wire/3Main=64 unique wholeentries all actually0; window58/session14/EXPLAIN0. Explain/sessiondrivers O0, window and57productionlibs O2, no teststubs/originalmain in realfrontend. Additionalactual180006/current JSONBedges28each0 are temporary controls not registered/whole-entry counts. Core/full/supplemental/final independent binary/cache/dualstamps/all58receipts/57testbytes/prebuildsource-test-scriptseal andunchangedheader fences all0. Own24file index isolates Main/Network/registry/inventory, excludes R98/R99/R106draft.",
+        "full_suite": "Two new entries: acceptedmanifest887native+3Main+513Python=1403 versus working889+3+515=1407 including preserved R98. No new complete registered suite, full-engine sanitizer or realTLS proof. All claimed finite gates use the same frozen candidate and matching artifacts; not cleanHEAD full-suite proof.",
+        "scope": "Original273 items unchanged22complete166partial70unverified15deferred. No implicit-graph, input-codec, provider-lifetime or protocol-byte rewrite. Actual builtin ownership only; concrete user routines and opaque native replacements keep their owners. ARRAY_POSITIONS/general composite/domain polymorphism not closed. R106 and other explicit deferrals not resumed; R98/R99 preserved/excluded. No push, Actions disabled."
+      }
+    },
+    {
       "issue": "R107 four string-length builtin names receive their actual11 overloads and callback ownership",
       "gap_ids": ["SQL-07", "SQL-09", "TYPE-04", "FUNC-01", "PROTO-04"],
       "status": "partial",

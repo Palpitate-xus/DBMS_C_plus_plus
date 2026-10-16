@@ -2,6 +2,11 @@
 
 ## 输入与结论范围
 
+后续[R108数组元素相等](issue-review-r108-array-position-typed-equality.md)新增
+typed ARRAY_POSITION、真实输入声明/UNKNOWN身份、用户callee及数组参数元数据
+控制。最终参考258零失败、旧258/158失败，首两版协议失败与新增原生夹具的
+校正证据均保留；最终354/258和相关完整入口的真实终态以该记录为准，不借旧全量。
+
 后续[R107长度函数签名](issue-review-r107-string-length-signatures.md)记录四名
 11条真实声明、UTF8字符/字节/位单位、空结果与Parse前置分析，以及同名用户
 函数/原生回调的所有权。旧654协议392失败、607原生440失败及前两版失败保留；

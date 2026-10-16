@@ -649,6 +649,7 @@ RoutineResultTypes collectRoutineResultTypes(
         functionEvaluator=&*fallback;
     }
     const auto& evaluator=*functionEvaluator;
+    std::optional<ExprEvaluator> builtinCallbackNames;
     std::function<void(const Expr*)> inspect = [&](const Expr* node) {
         if (!node) return;
         if(const auto* literal=dynamic_cast<const LiteralExpr*>(node)) {
@@ -669,11 +670,20 @@ RoutineResultTypes collectRoutineResultTypes(
                         else routineTypes.opaqueIntegralCalls.insert(call);
                     } else if(CatalogManager::parseQualifiedName(call->funcName,name,true) && name.schema.empty() &&
                               (name.name=="char_length" || name.name=="character_length" ||
-                               name.name=="octet_length" || name.name=="bit_length") &&
+                               name.name=="octet_length" || name.name=="bit_length" || name.name=="array_position") &&
                               evaluator.scalarFunctionIdentity(call,functionEngine).rfind("native",0)==0) {
                         // An opaque replacement does not inherit INTEGER from
                         // the builtin name or execute to discover a result type.
                         routineTypes.declarations[call]="unknown";
+                    } else if(!fallback && CatalogManager::parseQualifiedName(call->funcName,name,true) &&
+                              name.schema.empty() && evaluator.hasFunction(name.name)) {
+                        // A caller-owned callback with no return declaration
+                        // must not become TEXT just because it has no args.
+                        // Probe names only: never resolve its inputs through
+                        // a different evaluator or execute it to learn a type.
+                        if(!builtinCallbackNames)builtinCallbackNames.emplace();
+                        if(!builtinCallbackNames->hasFunction(name.name))
+                            routineTypes.declarations[call]="unknown";
                     }
                 }
             }

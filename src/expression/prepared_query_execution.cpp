@@ -439,7 +439,14 @@ std::optional<ExprValue> simplifyCaseConstants(ExprPtr& expression,
             ?roles->immutableBuiltin(call):std::string{};
         if(!builtin.empty()) {
             FunctionCallExpr operation;operation.funcName=builtin;operation.schema="pg_catalog";
-            for(const auto& value:constants) {
+            for(size_t i=0;i<constants.size();++i) {
+                auto value=constants[i];
+                // A SQL UNKNOWN string remains UNKNOWN while resolving a
+                // polymorphic call. The literal evaluator's VARCHAR datum
+                // must not become a new, incompatible input declaration.
+                if(builtin=="array_position" &&
+                   ExprHelper::inferParsedInputType(call->args[i].get())=="unknown")
+                    value.typeName="unknown";
                 auto argument=constantExpression(value,nullptr);
                 // ABS's input/output declarations are identical. Its UNKNOWN
                 // SQL string has selected a numeric overload, not VARCHAR
@@ -862,16 +869,22 @@ void PreparedQueryExecution::planCompiledConstants(ExprPtr& expression,
         },
         [&](const FunctionCallExpr* call)->std::string {
             CatalogManager::QualifiedName name;
-            if(!CatalogManager::parseQualifiedName(call->funcName,name,true) || name.name!="abs" ||
-               call->args.size()!=1 || !call->namedArgs.empty() || call->hasOver || call->filter ||
+            if(!CatalogManager::parseQualifiedName(call->funcName,name,true) ||
+               (name.name!="abs" && name.name!="array_position") ||
+               (name.name=="abs" && call->args.size()!=1) ||
+               (name.name=="array_position" && call->args.size()!=2 && call->args.size()!=3) ||
+               !call->namedArgs.empty() || call->hasOver || call->filter ||
                call->distinct || !call->orderBy.empty() || !evaluator_.hasScalarFunction(call,engine_))return {};
-            FunctionCallExpr builtin;builtin.funcName="abs";builtin.schema="pg_catalog";
-            auto declaration=std::make_unique<ParameterExpr>();
-            declaration->declaredType=ExprHelper::inferParsedInputType(call->args.front().get(),{},database_,engine_);
-            declaration->origin=ParameterOrigin::MetadataPlaceholder;builtin.args.push_back(std::move(declaration));
+            FunctionCallExpr builtin;builtin.funcName=name.name;builtin.schema="pg_catalog";
+            for(const auto& argument:call->args) {
+                auto declaration=std::make_unique<ParameterExpr>();
+                declaration->declaredType=ExprHelper::inferParsedInputType(argument.get(),{},database_,engine_);
+                declaration->origin=ParameterOrigin::MetadataPlaceholder;builtin.args.push_back(std::move(declaration));
+            }
+            if(name.name=="array_position" && evaluator_.scalarFunctionIdentity(call,engine_).rfind("builtin",0)!=0)return {};
             if(!evaluator_.hasScalarFunction(&builtin,engine_) ||
                evaluator_.scalarFunctionIdentity(call,engine_)!=evaluator_.scalarFunctionIdentity(&builtin,engine_))return {};
-            return "abs";
+            return name.name;
         }
     };
     simplifyCaseConstants(expression, evaluator_, &roles);

@@ -5,6 +5,9 @@
 其他回调及任意名称stored routine的完整通用签名覆盖仍未完成，R62广义范围保持partial。
 四个字符串长度函数的11条声明及同名原生回调/用户函数身份另列
 [R107](issue-review-r107-string-length-signatures.md)，不因此关闭全部函数签名。
+ARRAY_POSITION的有限anycompatible声明、UNKNOWN输入、同名用户/原生回调及
+数组参数元数据由[R108](issue-review-r108-array-position-typed-equality.md)
+另项修复并验收；不能据此关闭一般多态或原TYPE-16/FUNC-01。
 R60修正窗口routine身份，不等于完成全部标量签名校验。
 
 实际PostgreSQL18.6/180006对upper(1)、upper()、upper(text,text)、abs(text)、

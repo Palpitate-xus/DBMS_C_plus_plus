@@ -59,10 +59,16 @@ concat、nullable character array、COPY error/lock release、真实取消与CLI
 
 ## 独立未完成范围
 
+以下是R86原先未覆盖的范围，不把R86原验收改写成已证明这些行为：
 非空无NULL元素的NULL-needle/NULL-start快捷路径、NULL数组的bare UNKNOWN
 start输入转换、UNKNOWN needle隐式转换及TEXT start应拒绝等另需真实多态
 声明分析。numeric元素1.00与needle 1的typed相等、ARRAY_POSITIONS缺失也未修。
 当前没有这些范围的完整Root基线，不能把源码/PG观察写成已验收的Root结论。
+
+后续[R108](issue-review-r108-array-position-typed-equality.md)独立修复并验收其实际
+矩阵中的typed相等、多态输入、NULL bitmap/能力顺序及用户callee，保留原R86
+208/80断言不变。R86此处的“未修”是历史边界；新范围的真实验证以R108为准。
+ARRAY_POSITIONS、任意复合/域及通用多态能力仍未完成，不由任一局部修复关闭。
 
 [最新冻结全量](issue-full-registered-27bac6ee.md)的六个失败及捕获到的COPY
 超时保持未解决。新组合为865 native +3真实Main frontend +502 Python =1370
