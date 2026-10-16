@@ -34,6 +34,16 @@ collations, types, or ordinary query correctness. The component evidence does
 not prove the R95 warning has the same runtime stack. This additional deferral
 does not change the original273 ledger or its15 original deferred entries.
 
+On 2026-10-16 the user explicitly said "skip it" while R106's unselected explicit
+CAST input-analysis investigation was active. R106 is unresolved and deferred;
+its four original observations and full 612-control reference/old-program test
+logs remain in [its record](issue-review-r106-coalesce-explicit-input-analysis.md).
+There are no R106 product edits or accepted registered tests. The unregistered
+test draft is preserved, not committed as an accepted fix. Do not reopen this
+specific investigation on a generic continuation or broaden it to all address
+types, expressions, input checks, or ordinary SQL correctness. This separate
+deferral does not change the original273 ledger or its15 original deferred items.
+
 The original273-item ledger explicitly defers15 items: P0-13 (unified permission
 boundaries), STO-08 (TDE), and SEC-01 through SEC-13. These remain
 deferred_by_user, unchecked and outside the repair workflow. Do not implement or

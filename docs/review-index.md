@@ -4,6 +4,7 @@
 
 | 审查 | 输入 | 内容 |
 | --- | --- | --- |
+| [R106 COALESCE显式CAST输入分析](issue-review-r106-coalesce-explicit-input-analysis.md) | `2556a3d8`后只读复查 | 用户2026-10-16明确跳过，未修复；四条观察及未注册612控制（参考零失败/旧168失败）保留，无生产改动，不扩R104证明或重开专项 |
 | [R104 网络实际值转换](issue-review-r104-network-value-conversions.md) | `b6595d2e`后五CPP增量修复 | PG/Root649、原738及完整SDK、21native/17协议/3真实Main通过；4/3/2增量normal/repeat与核心/最终核对0，单项提交。旧649/419、SDK134及首两版失败保留，不冒新全量 |
 | [R105 限定NAME→INET/CIDR](issue-review-r105-network-name-input.md) | `fb131c02`后精准NAME源身份 | PG/Root738、完整SDK及21native/16协议/3真实Main全过，自身真实全58/normal/repeat/核心及最终核对0，单项提交；旧738/34与SDK134保留，R104后续独立关闭 |
 | [R103 NAME→MAC显式输入](issue-review-r103-macaddr-name-input.md) | `e1f8cf4a`后精准NAME源身份 | 最终PG/Root366、完整SDK及21native/16协议/3真实Main通过；最终自身全58/repeat/fence0，单项提交；旧366/30、SDK134及首版失败保留，R104/R105后续独立关闭 |
