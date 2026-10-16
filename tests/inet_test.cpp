@@ -12,6 +12,7 @@
 #include "catalog/systables.h"
 #include "common/DbError.h"
 #include "expression/ExprEvaluator.h"
+#include "expression/common_type.h"
 #include "parser/parser.h"
 #include <cassert>
 #include <filesystem>
@@ -179,7 +180,7 @@ static void test_inet_update() {
     std::cout << "[INET] update enforce/reject OK" << std::endl;
 }
 
-static void test_name_network_casts() {
+static void test_typed_network_casts() {
     struct Case {
         const char* source;
         const char* value;
@@ -205,6 +206,23 @@ static void test_name_network_casts() {
         // Raw SDK spellings must not impersonate the catalog's builtin NAME.
         {"other.name","192.0.2.129/24",false,"inet","","42846"},
         {"pg_catalog.\"Name\"","",true,"cidr","","42846"},
+        {"inet","192.0.2.129/24",false,"cidr","192.0.2.0/24",""},
+        {"inet","192.0.2.129/25",false,"cidr","192.0.2.128/25",""},
+        {"inet","192.0.2.129/31",false,"cidr","192.0.2.128/31",""},
+        {"inet","255.255.255.255/0",false,"cidr","0.0.0.0/0",""},
+        {"inet","192.0.2.129",false,"cidr","192.0.2.129/32",""},
+        {"inet","2001:db8::1234/64",false,"cidr","2001:db8::/64",""},
+        {"inet","2001:db8::1235/127",false,"cidr","2001:db8::1234/127",""},
+        {"inet","2001:db8::1234/0",false,"cidr","::/0",""},
+        {"inet","2001:db8::1234",false,"cidr","2001:db8::1234/128",""},
+        {"inet","::ffff:192.0.2.129/120",false,"cidr","::ffff:192.0.2.0/120",""},
+        {"cidr","192.0.2.129/32",false,"inet","192.0.2.129",""},
+        {"cidr","2001:db8::1234/128",false,"inet","2001:db8::1234",""},
+        {"inet","",true,"cidr","",""},
+        {"cidr","",true,"inet","",""},
+        {"text","192.0.2.129/24",false,"cidr","","22P02"},
+        {"name","192.0.2.129/24",false,"cidr","","22P02"},
+        {"integer","",true,"cidr","","42846"},
     };
     dbms::ExprEvaluator evaluator;
     for (const auto& item : cases) {
@@ -220,10 +238,42 @@ static void test_name_network_casts() {
             const auto result=evaluator.eval(&cast,row);
             assert(result.isNull==item.null);
             assert(result.value==item.expected);
+            if (item.null) assert(result.typeName==item.target);
         } catch(const dbms::DbError& error) { state=error.sqlState(); }
         assert(state==item.state);
     }
-    std::cout << "[INET] NAME identities/NULL/input errors/absent casts OK (15 cases)" << std::endl;
+    dbms::SQLParser parser;
+    const auto parsed=parser.parse(
+        "SELECT COALESCE(NULL::inet,'192.0.2.129/32'::cidr), "
+        "COALESCE(NULL::cidr,NULL::inet), COALESCE(NULL::cidr,NULL::cidr), "
+        "COALESCE('192.0.2.129/32'::cidr,NULL::inet), "
+        "COALESCE('2001:db8::1234/128'::cidr,NULL::inet)");
+    assert(parsed.success);
+    const auto* select=dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get());
+    assert(select && select->selectList.size()==5);
+    const std::vector<std::string> coalesceValues={"192.0.2.129","","","192.0.2.129","2001:db8::1234"};
+    for (size_t i=0;i<5;++i) {
+        const auto value=evaluator.eval(select->selectList[i].expr.get(),{});
+        assert(value.typeName==(i==2?"cidr":"inet"));
+        assert(value.isNull==(i==1 || i==2));
+        assert(value.value==coalesceValues[i]);
+    }
+    int laterCalls=0;
+    evaluator.registerFunction("later_network_input",[&](const std::vector<dbms::ExprValue>&) -> dbms::ExprValue {
+        ++laterCalls;
+        throw dbms::DbError("XX000","unselected network input executed");
+    });
+    const auto lazy=parser.parse("SELECT COALESCE('192.0.2.129'::inet,later_network_input()::inet)");
+    assert(lazy.success);
+    const auto* lazySelect=dynamic_cast<const dbms::SelectStmt*>(lazy.stmt.get());
+    assert(lazySelect && lazySelect->selectList.size()==1);
+    const auto lazyValue=evaluator.eval(lazySelect->selectList[0].expr.get(),{});
+    assert(lazyValue.typeName=="inet" && lazyValue.value=="192.0.2.129" && laterCalls==0);
+    assert(dbms::common_type_detail::implicit("cidr","inet"));
+    assert(!dbms::common_type_detail::implicit("inet","cidr"));
+    assert(dbms::selectCommonType({"cidr","inet"},"VALUES")=="inet");
+    assert(dbms::selectCommonType({"inet","cidr"},"VALUES")=="inet");
+    std::cout << "[INET] typed network CAST/NULL/errors/NAME (32 cases), COALESCE(5)/lazy and cast graph OK" << std::endl;
 }
 
 int main() {
@@ -233,7 +283,7 @@ int main() {
     test_inet_invalid();
     test_inet_update();
     test_cidr_host_bits_and_network_operators();
-    test_name_network_casts();
+    test_typed_network_casts();
     std::cout << "[INET] all passed" << std::endl;
     return 0;
 }

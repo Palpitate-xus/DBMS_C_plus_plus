@@ -99,11 +99,11 @@ source/test/script封印为
 | 编号 | 发现行为及后续状态 | 实际参考及修改方向 |
 | --- | --- | --- |
 | R103 | R101新增白名单遗漏普通/限定NAME，包括NULL；后续已修复 | [R103](issue-review-r103-macaddr-name-input.md)独立补真实源身份，PG/Root366与40个定向入口通过，保留INTEGER/内部char拒绝，不回改旧记录 |
-| R104 | typed INET→CIDR把host bits当作非法文本拒绝 | `192.0.2.1/24`应转为`192.0.2.0/24`，IPv6同理；应区分已有网络datum转换与unknown CIDR输入，前者清除host bits，后者仍严格拒绝非网络地址 |
+| R104 | typed INET→CIDR及赋值/共同结果值转换缺失；后续独立修复 | [R104](issue-review-r104-network-value-conversions.md)PG/Root649、原738、SDK及41个完整邻接入口/最终核对均0；typed datum按掩码清位，unknown CIDR文本仍严格拒绝host bits，不回改R102旧证据 |
 | R105 | 网络消费者遗漏限定NAME，普通NAME成功但参数/限定源被拒；后续已修复 | [R105](issue-review-r105-network-name-input.md)独立补真实源身份，PG/Root738、自身真实全58及40个邻接入口/最终核对均0；不回改旧证据或放宽隐式赋值 |
 
-R103是复查发现的真实回归，R104是既有值转换遗漏；均未因R102格式修复而关闭。
-R103现由其后续独立修复与验收关闭，R104仍开放；限定NAME到INET/CIDR的
+R103是复查发现的真实回归，R104是既有值转换遗漏；均不是R102格式修复的验收内容。
+R103/R104现由各自后续独立修复与验收关闭；限定NAME到INET/CIDR的
 同类消费者遗漏另列R105，经独立修复与验收关闭，不由MAC修复覆盖。
 
 R104后续只读预检在实际180006与固定b172程序各完整采集23条，日志为
@@ -146,5 +146,5 @@ typed INET→CIDR的值转换、INSERT VALUES/SELECT及UPDATE均有差异；此�
 R98时为887+3+512=1402。两者无新完整注册终态，不借旧1391或R101的38入口
 证明本项。仅提交本项22个文件，registry与文档inventory按块隔离，不混入
 R98/R99；四份用法/历史对照文档补充当前范围，不重写历史PASS。原273未完成，
-R103/R105后续已独立修复，R104仍待修复；本项不是整个网络类型家族或仅
+R103/R104/R105后续各独立修复；本项不是整个网络类型家族或仅
 本项HEAD整仓验收。

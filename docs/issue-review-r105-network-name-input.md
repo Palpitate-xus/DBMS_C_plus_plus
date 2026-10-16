@@ -3,9 +3,9 @@
 状态：本范围修复与定向验收完成，按单项独立本地commit保存。自身全部58TU
 生产重编及normal/repeat、匹配核心2native/738协议、21native/16协议/3真实
 Main组合及核心/最终独立核对均实际0。无新完整注册回归，不宣称整族或原273
-完成。原失败保留；R104仍开放，R98/R99候选不混入提交。
+完成。原失败保留；R104后续独立修复，R98/R99候选不混入提交。
 实际PostgreSQL 18.6的最终738控制全过；相同738在固定旧程序中34失败，
-旧完整SDK在首个限定NAME控制处退出134。原273项状态不提升；R104仍开放。
+旧完整SDK在首个限定NAME控制处退出134。原273项状态不提升；R104后续独立修复。
 
 ## 问题与修改方法
 
@@ -82,6 +82,8 @@ O0，窗口驱动为O2，57库对象均为当前正式O2；不用test_stubs或�
 
 只扩展已有测试，注册数量仍为885native+3真实Main+510Python=1398；工作区
 含R98候选时为887+3+512=1402。没有新完整注册回归、全库sanitizer或真实TLS。
-R104的typed INET→CIDR host-bit清除、实际赋值和COALESCE/VALUES值转换仍未
-修复；本项不能放松CIDR文本校验来掩盖它。原273仍为22complete、166partial、
+R104的typed INET→CIDR host-bit清除、实际赋值和COALESCE/VALUES值转换另见
+[R104独立修复](issue-review-r104-network-value-conversions.md)：PG/Root649、原
+738、完整SDK及41邻接/最终核对均0，不计入R105历史证明。严格CIDR
+文本输入不因datum转换而放松。原273仍为22complete、166partial、
 70unverified、15deferred_by_user。既有明确暂缓项不恢复，不push、不启用Actions。

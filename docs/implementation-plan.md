@@ -8,7 +8,8 @@ NULL契约。当前MAC分组/EUI宽度与INET/CIDR格式检查见
 [R102](issue-review-r102-network-input-notation.md)及各自验收状态。NAME→MAC
 源身份回归已由[R103](issue-review-r103-macaddr-name-input.md)修复；限定网络NAME
 源遗漏已由[R105](issue-review-r105-network-name-input.md)独立修复并通过自身
-构建/运行时验收。R104仍待修，不能据旧勾选宣称网络类型家族全部完成。
+构建/运行时验收。[R104值转换](issue-review-r104-network-value-conversions.md)
+也已独立修复并经649/原738与41邻接验收，不能据旧勾选宣称网络类型家族全部完成。
 
 > 原则：只排顺序，不估时间；每一阶段完成后，下一阶段方可启动。  
 > 引用格式：`X.Y` = all-gaps-todo.md 第 X 章第 Y 条；`16.X` = 架构级根本差距。

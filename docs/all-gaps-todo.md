@@ -8,7 +8,8 @@
 输入宽度及全零即NULL描述不再是现行契约；NAME→MAC回归已由
 [R103](issue-review-r103-macaddr-name-input.md)独立修复，typed网络值转换仍列R104。
 限定NAME→INET/CIDR已由[R105](issue-review-r105-network-name-input.md)独立修复
-并验收；R104仍开放，不修改历史PASS或据旧勾选关闭原273项。
+并验收；[R104值转换](issue-review-r104-network-value-conversions.md)也已独立
+修复并经649/原738与41邻接验收，不修改历史PASS或据旧勾选关闭原273项。
 
 > 生成日期：2026-06-10 | 当前审计：2026-08-14
 > 来源：基于 `postgresql-complete-gap-analysis.md` 逐条提取，**无一遗漏**

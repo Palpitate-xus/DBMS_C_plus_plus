@@ -2,20 +2,25 @@
 
 ## 输入与结论范围
 
+后续[R104 网络值转换](issue-review-r104-network-value-conversions.md)实际PG/
+Root649、原738及完整SDK、21native/17协议/3真实Main通过；五CPP实际4/3/2
+增量normal/repeat及核心/最终独立核对均0，按单项本地提交。旧649/419、SDK134、
+首版582/3与649/58、第二版649/1保留；无新全量，原273不变，R98/R99不混入。
+
 后续[R105 限定NAME→INET/CIDR](issue-review-r105-network-name-input.md)最终
 PG/Root738、完整SDK及21native/16协议/3真实Main全过，自身真实全58/
 normal/repeat、核心与最终独立核对均0，按单项本地提交。旧738/34、SDK134
-保留；无新全量，R104及原273未关闭，R98/R99候选不混入。
+保留；无新全量；R104后续独立修复，原273未关闭，R98/R99候选不混入。
 
 后续[R103 NAME→MAC](issue-review-r103-macaddr-name-input.md)已复现R101回归：
 最终PG/Root366、完整SDK及21native/16协议/3真实Main通过；最终自身真实全58/
 normal/repeat与独立终态fence全0，单项本地提交。旧366/30、SDK134、首版358/6
-和366/12均保留；75纯组件sanitizer不冒整库证明，无新全量；R105后续独立修复，R104及原273未关闭。
+和366/12均保留；75纯组件sanitizer不冒整库证明，无新全量；R104/R105后续独立修复，原273未关闭。
 
 后续[R102 INET/CIDR输入](issue-review-r102-network-input-notation.md)最终旧188/72、
 672/389失败；当前188/ASan/UBSan、PG/Root672、2558对照及21native/16协议/3真实
 Main通过；最终真实全58/normal/repeat、匹配核心与fence全0，单项本地提交。
-首版672/23保留，无新全量；R103/R105后续已独立修复，R104待修，原273不变。
+首版672/23保留，无新全量；R103/R104/R105后续各独立修复，原273不变。
 
 后续[R101 MAC输入与宽度](issue-review-r101-macaddr-input-and-widths.md)纠正输入
 格式、MAC48/EUI64转换、共同类型值转换及SQLSTATE。旧75/38、328/186失败，

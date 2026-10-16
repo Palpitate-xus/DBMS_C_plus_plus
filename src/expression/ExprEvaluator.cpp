@@ -5052,9 +5052,15 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
     if (target == "inet" || target == "cidr") {
         NetworkAddressValue address;
         const bool cidr = target == "cidr";
-        if (!parseNetworkAddress(v.value, address, cidr)) {
+        const bool inetToCidr = cidr && sourceType == "inet";
+        if (!parseNetworkAddress(v.value, address, cidr && !inetToCidr)) {
             throw DbError("22P02", "invalid input syntax for type " + target);
         }
+        // A typed INET datum is converted to its network. UNKNOWN, TEXT and
+        // NAME still use strict CIDR input; this is not a relaxed text parser.
+        if (inetToCidr)
+            for (unsigned bit = address.bits; bit < address.maxBits(); ++bit)
+                address.address[bit / 8] &= static_cast<uint8_t>(~(1U << (7U - bit % 8)));
         return ExprValue(target, address.toString(cidr), false);
     }
     if (target == "macaddr" || target == "macaddr8") {
@@ -5790,20 +5796,28 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
     // argument is found, so unused arguments are never evaluated.
     if (name == "coalesce") {
         const std::string resultCollation = explicitResultCollation(e);
+        const auto target=common_type_detail::canonical(declaredResult);
+        const bool addressTarget=target=="macaddr" || target=="macaddr8" ||
+                                 target=="inet" || target=="cidr";
+        // Legacy scalar SELECT hosts do not always run query transformation.
+        // Validate only genuine UNKNOWN string constants, including unused
+        // peers; parameters, functions and prepared children stay lazy.
+        if (target=="inet" || target=="cidr")
+            for (const auto& argument : e->args)
+                network_input_detail::validateUnknownInput(argument.get(),target);
         for (const auto& argument : e->args) {
             ExprValue value = eval(argument.get(), ctx);
             if (!value.isNull) {
                 value.collation = mergeExplicitCollations(
                     value.collation, resultCollation);
-                const auto target=common_type_detail::canonical(declaredResult);
                 const auto source=common_type_detail::canonical(value.typeName);
-                if ((target=="macaddr" || target=="macaddr8") && source!=target)
+                if (addressTarget && source!=target)
                     value=evalCast(nullptr,ctx,value,target);
                 return value;
             }
         }
         ExprValue result("unknown", "", true);
-        if (declaredResult=="macaddr" || declaredResult=="macaddr8")result.typeName=declaredResult;
+        if (addressTarget)result.typeName=target;
         result.collation = resultCollation;
         return result;
     }

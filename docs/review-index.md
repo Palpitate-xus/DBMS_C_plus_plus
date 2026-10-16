@@ -4,9 +4,10 @@
 
 | 审查 | 输入 | 内容 |
 | --- | --- | --- |
-| [R105 限定NAME→INET/CIDR](issue-review-r105-network-name-input.md) | `fb131c02`后精准NAME源身份 | PG/Root738、完整SDK及21native/16协议/3真实Main全过，自身真实全58/normal/repeat/核心及最终核对0，单项提交；旧738/34与SDK134保留，R104仍开放 |
-| [R103 NAME→MAC显式输入](issue-review-r103-macaddr-name-input.md) | `e1f8cf4a`后精准NAME源身份 | 最终PG/Root366、完整SDK及21native/16协议/3真实Main通过；最终自身全58/repeat/fence0，单项提交；旧366/30、SDK134及首版失败保留，R105后续独立关闭、R104仍开放 |
-| [R102 INET/CIDR输入](issue-review-r102-network-input-notation.md) | `7533f27e`后共享codec与真实源类型预检查 | 旧188/72、672/389；当前188/纯组件sanitizer、PG/Root672、2558对照及21native/16协议/3真实Main通过；最终全58/匹配核心/fence全0，单项提交，首版672/23保留；R103/R105后续已独立修复，R104待修 |
+| [R104 网络实际值转换](issue-review-r104-network-value-conversions.md) | `b6595d2e`后五CPP增量修复 | PG/Root649、原738及完整SDK、21native/17协议/3真实Main通过；4/3/2增量normal/repeat与核心/最终核对0，单项提交。旧649/419、SDK134及首两版失败保留，不冒新全量 |
+| [R105 限定NAME→INET/CIDR](issue-review-r105-network-name-input.md) | `fb131c02`后精准NAME源身份 | PG/Root738、完整SDK及21native/16协议/3真实Main全过，自身真实全58/normal/repeat/核心及最终核对0，单项提交；旧738/34与SDK134保留，R104后续独立关闭 |
+| [R103 NAME→MAC显式输入](issue-review-r103-macaddr-name-input.md) | `e1f8cf4a`后精准NAME源身份 | 最终PG/Root366、完整SDK及21native/16协议/3真实Main通过；最终自身全58/repeat/fence0，单项提交；旧366/30、SDK134及首版失败保留，R104/R105后续独立关闭 |
+| [R102 INET/CIDR输入](issue-review-r102-network-input-notation.md) | `7533f27e`后共享codec与真实源类型预检查 | 旧188/72、672/389；当前188/纯组件sanitizer、PG/Root672、2558对照及21native/16协议/3真实Main通过；最终全58/匹配核心/fence全0，单项提交，首版672/23保留；R103/R104/R105后续各独立修复 |
 | [R101 MAC输入与宽度](issue-review-r101-macaddr-input-and-widths.md) | `3d2e49f6`后共享codec、真实CAST/赋值/COALESCE/VALUES | 旧75/38、328/186；当前75、PG/Root328、236差分、20native/15协议/3真实Main通过；头修正后全58重编及产物相同证明、新核心2/328/fence全0，单项提交不混入R98/R99，不冒新全量 |
 | [R100几何坐标分隔符](issue-review-r100-geometric-coordinate-delimiters.md) | `0c7b86c3`后独立GeometryValue.cpp修复 | 旧232/104、230/135失败；当前232、PG/Root230、十个完整native/七个完整协议通过；不混入R98/R99待确认候选提交 |
 | [R97 BEFORE行赋值的typed NEW/OLD](issue-review-r97-typed-before-row-assignments.md) | `20db4d58`后本工作区TableManage自有O2重编 | 旧106/65失败，当前154、15个完整native/十个完整协议通过；新1392未全量，不扩完整PG触发器兼容 |

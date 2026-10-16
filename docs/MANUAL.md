@@ -138,11 +138,14 @@ USE DATABASE mydb;
 网络类型的格式、CAST源类型和协议验收范围见[R102输入检查](issue-review-r102-network-input-notation.md)
 与[R101 MAC检查](issue-review-r101-macaddr-input-and-widths.md)，不能据类型存在
 推断整个PostgreSQL网络函数族已完成。INET无掩码要求完整IPv4地址，`'10/8'`
-是带掩码缩写；CIDR输入不允许非零host bits，`'10.1'`表示`10.1.0.0/16`。
+是带掩码缩写；CIDR文本输入不允许非零host bits，`'10.1'`表示`10.1.0.0/16`。
 MACADDR8接受六字节EUI-48时会插入FF:FE，而不是在末尾补零。文本列/参数可
 通过显式CAST输入，typed TEXT不能直接当作网络列的隐式赋值。NAME→MAC源
 身份已由[R103](issue-review-r103-macaddr-name-input.md)独立修复；typed
-INET→CIDR仍列R104待修。限定NAME→INET/CIDR已按独立[R105](issue-review-r105-network-name-input.md)
+INET→CIDR及网络赋值/共同值转换已按[R104](issue-review-r104-network-value-conversions.md)
+独立修复并经649/原738及41邻接验收；typed INET按掩码清除host bits，
+共同型优选INET，反向边只用于explicit/assignment，不扩为普通隐式转换。
+限定NAME→INET/CIDR已按独立[R105](issue-review-r105-network-name-input.md)
 修复并验证；NAME同样只能显式CAST，不能直接隐式赋给网络列。整族兼容未完成。
 
 ---

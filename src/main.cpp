@@ -1818,7 +1818,7 @@ static bool isSupportedValuesTarget(const string& type) {
         "double precision", "character", "character varying", "text",
         "date", "timestamp", "timestamptz", "uuid", "bytea",
         "int4range", "int8range", "numrange", "daterange", "tsrange",
-        "tstzrange", "name", "macaddr", "macaddr8"
+        "tstzrange", "name", "macaddr", "macaddr8", "inet", "cidr"
     };
     return supported.count(type) != 0;
 }

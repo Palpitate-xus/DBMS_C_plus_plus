@@ -220,13 +220,21 @@ public:
         input = std::move(cast);
     }
 
-    void coerceMacAssignment(ExprPtr& input,const std::string& sourceType,
-                              const std::string& targetType) {
+    bool needsAddressAssignmentCast(const std::string& sourceType,const std::string& targetType) {
         const auto source=common_type_detail::canonical(sourceType);
         const auto target=common_type_detail::canonical(targetType);
-        if ((source=="macaddr" || source=="macaddr8") &&
-            (target=="macaddr" || target=="macaddr8") && source!=target)
-            coerceCaseInput(input,source,target);
+        const bool mac=(source=="macaddr" || source=="macaddr8") &&
+                       (target=="macaddr" || target=="macaddr8");
+        const bool network=(source=="inet" || source=="cidr") &&
+                           (target=="inet" || target=="cidr");
+        return source!=target && (mac || network);
+    }
+
+    void coerceAddressAssignment(ExprPtr& input,const std::string& sourceType,
+                                 const std::string& targetType) {
+        if (needsAddressAssignmentCast(sourceType,targetType))
+            coerceCaseInput(input,common_type_detail::canonical(sourceType),
+                            common_type_detail::canonical(targetType));
     }
 
     std::vector<QueryComparisonBinding> rowPairBindings(RowExpr& left, RowExpr& right,
@@ -940,6 +948,11 @@ public:
             // just like CAST and CASE. Returning only its spelling loses the
             // OID at query-output/child boundaries; never run it to infer one.
             call->resolvedResultType=declaredType(type.empty() ? first : type,call);
+            const auto common=common_type_detail::canonical(call->resolvedResultType);
+            if (call->schema.empty() && grammarOperation=="coalesce" &&
+                (common=="inet" || common=="cidr"))
+                for (size_t i=0;i<call->args.size();++i)
+                    coerceCaseInput(call->args[i],argumentTypes[i].first,common);
             CatalogManager::QualifiedName windowRoutine;
             const auto windowSpelling=call->schema.empty()?call->funcName:call->schema+"."+call->funcName;
             if(call->hasOver && CatalogManager::parseQualifiedName(windowSpelling,windowRoutine,true) &&
@@ -1830,7 +1843,7 @@ public:
                             if (assignments[i].generated || (assignments[i].identity == 'a' && insert->override_.empty()))
                                 throw DbError("428C9", "cannot insert a non-DEFAULT value into column " + assignments[i].name);
                             if (metadata.assignmentInput) metadata.assignmentInput(assignments[i],row[i].get(),types[i]);
-                            coerceMacAssignment(row[i],types[i],assignments[i].type);
+                            coerceAddressAssignment(row[i],types[i],assignments[i].type);
                     }
             }
             if (insert->selectSource) {
@@ -1859,11 +1872,7 @@ public:
                         if (inputs[i].type == "unknown")
                             coerceSetUnknown(insert->selectSource.get(), i, assignments[i].type,
                                              assignments[i].typeMod);
-                        else if ((common_type_detail::canonical(inputs[i].type)=="macaddr" ||
-                                  common_type_detail::canonical(inputs[i].type)=="macaddr8") &&
-                                 (common_type_detail::canonical(assignments[i].type)=="macaddr" ||
-                                  common_type_detail::canonical(assignments[i].type)=="macaddr8") &&
-                                 common_type_detail::canonical(inputs[i].type)!=common_type_detail::canonical(assignments[i].type))
+                        else if (needsAddressAssignmentCast(inputs[i].type,assignments[i].type))
                             coerceSetInput(insert->selectSource.get(),i,inputs[i].type,
                                            assignments[i].type,assignments[i].typeMod);
             }
@@ -1880,7 +1889,12 @@ public:
                 const auto source=expression(value.second,conflictScopes);
                 const auto column=std::find_if(target.columns.begin(),target.columns.end(),
                     [&](const auto& candidate){return candidate.name==identifier(value.first);});
-                if(column!=target.columns.end())coerceMacAssignment(value.second,source,column->type);
+                if(column!=target.columns.end()) {
+                    const auto targetType=common_type_detail::canonical(column->type);
+                    if ((targetType=="inet" || targetType=="cidr") && metadata.assignmentInput)
+                        metadata.assignmentInput(*column,value.second.get(),source);
+                    coerceAddressAssignment(value.second,source,column->type);
+                }
             }
             const auto conflictCondition = expression(insert->conflictWhere, conflictScopes);
             if (insert->conflictWhere) {
@@ -1973,7 +1987,7 @@ public:
                         [&](const auto& candidate) { return candidate.name == name; });
                     if (metadata.assignmentInput)
                         metadata.assignmentInput(*column,update->setClauses[i].second.get(),assignmentTypes[i]);
-                    coerceMacAssignment(update->setClauses[i].second,assignmentTypes[i],column->type);
+                    coerceAddressAssignment(update->setClauses[i].second,assignmentTypes[i],column->type);
                 }
             return output;
         }

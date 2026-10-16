@@ -576,8 +576,16 @@ std::string inferAstResultType(
         }
         if (name == "coalesce" || name == "greatest" || name == "least") {
             std::string result = "unknown";
-            for (size_t i = 0; i < call->args.size(); ++i)
-                result = mergeProtocolTypes(result, argType(i));
+            std::vector<std::string> inputs;
+            bool network = false;
+            for (size_t i = 0; i < call->args.size(); ++i) {
+                const auto input = argType(i);
+                inputs.push_back(input);
+                network = network || input=="inet" || input=="cidr";
+                result = mergeProtocolTypes(result, input);
+            }
+            if (name=="coalesce" && network)
+                return selectCommonType(inputs,"COALESCE");
             return result == "unknown" ? "text" : result;
         }
         if (name == "mod") {
@@ -1170,6 +1178,8 @@ bool ExprHelper::resolveValuesResultType(
     resultType = known.front();
     if (std::all_of(known.begin(),known.end(),[](const auto& type) {
             return type=="macaddr" || type=="macaddr8";
+        }) || std::all_of(known.begin(),known.end(),[](const auto& type) {
+            return type=="inet" || type=="cidr";
         })) {
         resultType=selectCommonType(known,"VALUES");
         return true;

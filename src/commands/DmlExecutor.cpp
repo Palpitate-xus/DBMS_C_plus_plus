@@ -687,7 +687,7 @@ bool checkInsertColumns(Session& s, const std::string& table,
 }
 
 bool evaluateValue(const ExprPtr& expr, const std::string& currentDB,
-                   SqlCell& value);
+                   SqlCell& value, const std::string& assignmentType = {});
 bool evaluateValue(const ExprPtr& expr, const std::string& currentDB,
                    std::string& value);
 bool referencesColumn(const Expr* expr);
@@ -699,6 +699,12 @@ bool findTableColumn(const TableSchema& table, const std::string& column) {
         if (table.cols[i].dataName == column) return true;
     }
     return false;
+}
+
+std::string conflictAssignmentType(const TableSchema& table, const std::string& column) {
+    for (size_t i=0;i<table.len;++i)
+        if (table.cols[i].dataName==column) return table.cols[i].dataType;
+    return {};
 }
 
 // Storage's public primitive API deliberately reports INVALID_VALUE. SQL
@@ -1140,7 +1146,7 @@ bool buildConflictUpdatePlan(const InsertStmt& stmt, const TableSchema& table,
         }
 
         SqlCell value;
-        if (!evaluateValue(expr, currentDB, value)) return false;
+        if (!evaluateValue(expr, currentDB, value, conflictAssignmentType(table,column))) return false;
         updates[column] = std::move(value);
     }
     if (stmt.conflictWhere) {
@@ -2566,13 +2572,36 @@ bool usesVersionedReturning(const std::vector<SelectItem>& returning,
     return false;
 }
 
+// The narrow conflict path owns an already-evaluated datum, not the prepared
+// tree's assignment CAST. Convert before erasing its actual type into SqlCell;
+// the source expression is never re-executed or inferred from value bytes.
+ExprValue coerceConflictNetworkValue(ExprValue value, const std::string& assignmentType,
+                                     const std::string& currentDB) {
+    if (assignmentType.empty()) return value;
+    const auto target=ExprHelper::canonicalResultTypeName(assignmentType);
+    if (target!="inet" && target!="cidr") return value;
+    const auto source=ExprHelper::canonicalResultTypeName(value.typeName);
+    if (source==target || (source!="inet" && source!="cidr")) return value;
+    ExprEvaluator evaluator;
+    evaluator.setCurrentDB(currentDB);
+    CastExpr cast;
+    cast.typeName=target;
+    auto parameter=std::make_unique<ParameterExpr>();
+    parameter->slot=0; parameter->declaredType=source;
+    cast.operand=std::move(parameter);
+    RowContext context;
+    context.setParameters({std::move(value)});
+    return evaluator.eval(&cast,context);
+}
+
 bool evaluateValue(const ExprPtr& expr, const std::string& currentDB,
-                   SqlCell& value) {
+                   SqlCell& value, const std::string& assignmentType) {
     if (referencesColumn(expr.get())) return false;
     ExprEvaluator evaluator;
     evaluator.setCurrentDB(currentDB);
     RowContext emptyContext;
     ExprValue result = evaluator.eval(expr, emptyContext);
+    result=coerceConflictNetworkValue(std::move(result),assignmentType,currentDB);
     if (result.isUnknown()) return false;
     if (result.isNull) {
         value = std::nullopt;
@@ -2601,7 +2630,8 @@ bool evaluateConflictExpression(
     const Expr* expr, const TableSchema& table, const SqlRow& values,
     const std::string& currentDB, SqlCell& value,
     const SqlRow* targetRow = nullptr,
-    const std::string& targetTable = {}) {
+    const std::string& targetTable = {},
+    const std::string& assignmentType = {}) {
     ExprEvaluator evaluator;
     evaluator.setCurrentDB(currentDB);
     RowContext context;
@@ -2628,7 +2658,8 @@ bool evaluateConflictExpression(
                       excludedNull ? std::string{} : *excluded->second,
                       excludedNull));
     }
-    const ExprValue result = evaluator.eval(expr, context);
+    ExprValue result = evaluator.eval(expr, context);
+    result=coerceConflictNetworkValue(std::move(result),assignmentType,currentDB);
     if (result.isUnknown()) return false;
     if (result.isNull) {
         value = std::nullopt;
@@ -3307,7 +3338,8 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
                 for (const auto& [updateColumn, expression] : conflictExpressionUpdates) {
                     SqlCell value;
                     if (!evaluateConflictExpression(expression, table, values,
-                                                    s.currentDB, value)) {
+                                                    s.currentDB, value, nullptr, {},
+                                                    conflictAssignmentType(table,updateColumn))) {
                         std::cout << "ON CONFLICT expression evaluation failed" << std::endl;
                         return true;
                     }
