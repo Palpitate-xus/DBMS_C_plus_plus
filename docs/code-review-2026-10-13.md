@@ -2,6 +2,11 @@
 
 ## 输入与结论范围
 
+后续[R107长度函数签名](issue-review-r107-string-length-signatures.md)记录四名
+11条真实声明、UTF8字符/字节/位单位、空结果与Parse前置分析，以及同名用户
+函数/原生回调的所有权。旧654协议392失败、607原生440失败及前两版失败保留；
+每版验收范围见该记录，不借旧全量或据局部修复关闭原273。R106按用户要求暂缓。
+
 后续[R104 网络值转换](issue-review-r104-network-value-conversions.md)实际PG/
 Root649、原738及完整SDK、21native/17协议/3真实Main通过；五CPP实际4/3/2
 增量normal/repeat及核心/最终独立核对均0，按单项本地提交。旧649/419、SDK134、

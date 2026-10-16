@@ -2,6 +2,10 @@
 
 > 本文件是按旧 TODO 编排的历史计划。当前范围以[273项总账](postgresql-18-gap-audit.md)为准；本轮新增 bug 的修复顺序、方法和验收条件见[审查报告](code-review-2026-10-13.md)。
 
+四个长度函数的有限签名修复与验收记录见[R107](issue-review-r107-string-length-signatures.md)。
+原FUNC-01/SQL-09仍partial；该局部工作不关闭通用函数解析，也不恢复已由用户
+跳过的[R106](issue-review-r106-coalesce-explicit-input-analysis.md)。
+
 旧Wave4的MAC“剥离分隔符”及“全零即NULL”描述是历史实现，不是现行输入或
 NULL契约。当前MAC分组/EUI宽度与INET/CIDR格式检查见
 [R101](issue-review-r101-macaddr-input-and-widths.md)、

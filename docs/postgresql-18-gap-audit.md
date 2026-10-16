@@ -1,5 +1,10 @@
 # 2026-10-13 全仓库审查
 
+后续[R107长度函数签名](issue-review-r107-string-length-signatures.md)记录四名
+11条声明及字符/字节/位区别、空结果/Parse阶段检查、同名用户函数与原生回调
+所有权的有限修复与验收。其607/654专项不能关闭SQL-09/FUNC-01或整个原273；
+首两版失败保留，R106按用户要求另行暂缓，不改原15项deferred账目。
+
 后续[R104 网络值转换](issue-review-r104-network-value-conversions.md)实际PG/
 Root649、原738及完整SDK、21native/17协议/3真实Main通过；五CPP实际4/3/2
 增量normal/repeat及核心/最终独立核对均0，按单项本地提交。旧649/419、SDK134、

@@ -2,6 +2,19 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R107 four string-length builtin names receive their actual11 overloads and callback ownership",
+      "gap_ids": ["SQL-07", "SQL-09", "TYPE-04", "FUNC-01", "PROTO-04"],
+      "status": "partial",
+      "evidence": ["docs/issue-review-r107-string-length-signatures.md"],
+      "tests": ["tests/string_length_signature_test.cpp", "tests/string_length_signature_protocol_e2e_test.py"],
+      "verification": {
+        "reproduction": "Actual180006 pg_proc declares11 overloads across char_length/character_length/octet_length/bit_length. Final654 protocol reference0 versus fixedold d697392fail actually1; native607/440fail actually1. Earlier638/384 and606/440 retained. Additional16 protect real row-input user INTEGER overloads, nested ABS, empty result metadata and builtin TEXT selection.",
+        "focused_tests": "Four CPP cumulative, actual normal/repeat iterations2/1/1 compiled sources, all0, no fresh58 claim or public-header changes. C1 native607+whole string functions0,638/104fail andexpanded654/112fail, original1320/artifactfence0; C2 native607+string0,654/16fail,1320/fence0; neither accepted. C3 matches own currentcache/freshstubs and whole2native plus654 and132 all0, including real parameter OIDs, no ParseComplete on invalid signatures and metadata-only callback demand. Finite24native/18wire/3realMain=45 unique whole entries all actually0, including original default protocol; real window58controls/session14/EXPLAIN0. Explain/session drivers O0, window and57productionlibraries O2; no teststubs/originalprogramentry in realMain. Core/final binary/cache/dualstamps/all58receipts/57testbytes/prebuildsource-test-scriptseal and unchanged-header fences0. Own22files isolate Main/Network/registry/inventory, excluding R98/R99 and deferred R106 draft.",
+        "full_suite": "Two new registered entries: expected accepted886native+3Main+512Python=1401 versus working888+3+514=1405 including preserved R98. No new full registered suite or full-engine sanitizer. R106 draft remains unregistered and untouched in content.",
+        "scope": "Original273 unchanged22complete166partial70unverified15deferred. No input-codec, implicit-graph, provider-lifetime, security or transport rewrite. Genuine builtin11 signatures only; typed user routines and opaque native replacements retain their owners. R106 explicitly deferred by user on2026-10-16 and not resumed; existing deferrals and R98/R99 candidates preserved/excluded. No push, Actions disabled."
+      }
+    },
+    {
       "issue": "R104 typed network value conversion/assignment/common results independently fixed with candidate3 own finite41 acceptance",
       "gap_ids": ["TYPE-10", "SQL-08", "SQL-11", "PROTO-04"],
       "status": "partial",

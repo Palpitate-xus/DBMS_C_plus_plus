@@ -3,6 +3,8 @@
 状态：本次已复现的ABS、upper/lower、length签名已修复并通过定向门禁；
 后续十八个固定float8名字由[R83](issue-review-r83-float8-scalar-signatures.md)独立扩展。
 其他回调及任意名称stored routine的完整通用签名覆盖仍未完成，R62广义范围保持partial。
+四个字符串长度函数的11条声明及同名原生回调/用户函数身份另列
+[R107](issue-review-r107-string-length-signatures.md)，不因此关闭全部函数签名。
 R60修正窗口routine身份，不等于完成全部标量签名校验。
 
 实际PostgreSQL18.6/180006对upper(1)、upper()、upper(text,text)、abs(text)、

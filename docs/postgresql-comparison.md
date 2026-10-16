@@ -1,5 +1,10 @@
 # PostgreSQL 18 vs 本 DBMS 功能对比
 
+四个字符串长度名字的真实11签名、不同计量单位和用户重载的有限范围见
+[R107](issue-review-r107-string-length-signatures.md)，不能把旧函数存在性勾选
+扩大为完整FUNC-01/SQL-09。[R106](issue-review-r106-coalesce-explicit-input-analysis.md)
+按用户要求暂缓，不由普通继续恢复。
+
 > 以下是按日期保留的历史对比，代码规模、测试数量和完成标记不代表当前 HEAD。当前能力声明见[兼容性契约](compatibility-contract.md)，实际 bug、检测范围和修复方法见[代码审查报告](code-review-2026-10-13.md)。
 
 网络类型的历史勾选不表示完整兼容：当前输入格式、EUI宽度与错误状态的实际

@@ -101,6 +101,13 @@ USE DATABASE mydb;
 | `CHAR(n)` | 定长字符串 |
 | `TEXT` | 长文本 |
 
+长度函数的输入签名和验证范围见[R107](issue-review-r107-string-length-signatures.md)。
+`char_length`/`character_length`接收TEXT或CHAR，按字符计数；`octet_length`
+按字节计数，`bit_length`按位计数，后两者还接收BYTEA和BIT。UTF8文本`你好é`
+分别为3字符、8字节、64位；CHAR的字符数忽略末尾填充，OCTET_LENGTH的CHAR
+重载计入填充，BIT_LENGTH则经TEXT转换去除填充。整数/BOOL等不能因可转为
+可打印文本就直接调用这些函数，应显式转换为适当输入类型。
+
 ### 日期时间类型
 | 类型 | 说明 | 特殊值 |
 |------|------|--------|

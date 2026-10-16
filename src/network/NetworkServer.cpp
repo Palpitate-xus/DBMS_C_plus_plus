@@ -2072,7 +2072,8 @@ void validatePreparedStoredSignatures(const std::string& sql,Session& session,
     (void)g_engine.prepareBoundQuery(session.currentDB,sql,parameters);
 }
 
-// Ordinary scalar arithmetic owns its signatures at Parse, before a named
+// Scalar arithmetic and the finite length overloads own signatures at Parse,
+// before a named
 // statement is published. Reuse the metadata binder with real parameter OIDs;
 // do not substitute NULL SQL or evaluate inputs to discover operand types.
 void validatePreparedScalarArithmetic(const std::string& sql,Session& session,
@@ -2095,6 +2096,11 @@ void validatePreparedScalarArithmetic(const std::string& sql,Session& session,
                 if(contains(arm.first.get()) || contains(arm.second.get()))return true;
         }
         if(const auto* call=dynamic_cast<const FunctionCallExpr*>(expression)) {
+            static const std::set<std::string> lengths={
+                "char_length","character_length","octet_length","bit_length"};
+            CatalogManager::QualifiedName name;
+            if(CatalogManager::parseQualifiedName(call->funcName,name,true) &&
+               name.schema.empty() && lengths.count(name.name))return true;
             for(const auto& argument:call->args)if(contains(argument.get()))return true;
             for(const auto& argument:call->namedArgs)if(contains(argument.value.get()))return true;
             return contains(call->filter.get());

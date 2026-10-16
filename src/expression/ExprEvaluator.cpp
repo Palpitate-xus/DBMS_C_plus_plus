@@ -90,6 +90,11 @@ static bool isIntegralRoundingScalarName(const std::string& name) {
     return name=="ceil" || name=="ceiling" || name=="floor";
 }
 
+static bool isStringLengthScalarName(const std::string& name) {
+    return name=="char_length" || name=="character_length" ||
+           name=="octet_length" || name=="bit_length";
+}
+
 static int compareTextWithCollation(const std::string& left,
                                     const std::string& right,
                                     const std::string& requested) {
@@ -5161,6 +5166,14 @@ struct DeclaredFloat8ScalarFunction {
         return callback(args);
     }
 };
+// These overloads belong to the actual builtin callback, not an opaque
+// registerFunction replacement that happens to reuse its SQL name.
+struct DeclaredStringLengthScalarFunction {
+    ScalarFunction callback;
+    ExprValue operator()(const std::vector<ExprValue>& args) const {
+        return callback(args);
+    }
+};
 // These callbacks have operand-dependent numeric/float8 result metadata.
 // Replacing one through registerFunction must not inherit that builtin rule.
 struct IntegralRoundingScalarFunction {
@@ -5176,8 +5189,9 @@ struct ModResultScalarFunction {
     }
 };
 bool ownsScalarSignatures(const std::string& name,const ScalarFunction* callback) {
-    // Preserve the existing four R62 families; this patch only distinguishes
-    // ownership for the newly declared eighteen float8 callbacks.
+    if(isStringLengthScalarName(name))
+        return callback && callback->target<DeclaredStringLengthScalarFunction>();
+    // Preserve ownership of the existing R62 and fixed-float8 families.
     return !isFixedFloat8ScalarName(name) ||
         (callback && callback->target<DeclaredFloat8ScalarFunction>());
 }
@@ -5231,6 +5245,11 @@ std::vector<ScalarSignature> scalarSignatures(const std::string& name) {
     if(name=="length")return {{{"text"},"integer"},{{"bpchar"},"integer"},
         {{"bytea"},"integer"},{{"bytea","name"},"integer"},{{"bit"},"integer"},
         {{"tsvector"},"integer"},{{"lseg"},"double precision"},{{"path"},"double precision"}};
+    if(name=="char_length" || name=="character_length")
+        return {{{"text"},"integer"},{{"bpchar"},"integer"}};
+    if(name=="octet_length")return {{{"text"},"integer"},{{"bpchar"},"integer"},
+        {{"bytea"},"integer"},{{"bit"},"integer"}};
+    if(name=="bit_length")return {{{"text"},"integer"},{{"bytea"},"integer"},{{"bit"},"integer"}};
     if(name=="upper" || name=="lower")return {{{"text"},"text"},
         {{"int4range"},"integer"},{{"int8range"},"bigint"},{{"numrange"},"numeric"},
         {{"daterange"},"date"},{{"tsrange"},"timestamp"},{{"tstzrange"},"timestamptz"}};
@@ -5614,7 +5633,9 @@ std::string ExprEvaluator::scalarFunctionIdentity(const FunctionCallExpr* call,
                         (resolved.name=="round" && call->args.size()==1)) &&
                        !callback->second.target<IntegralRoundingScalarFunction>()) ||
                       (resolved.name=="mod" &&
-                       !callback->second.target<ModResultScalarFunction>()))
+                       !callback->second.target<ModResultScalarFunction>()) ||
+                      (isStringLengthScalarName(resolved.name) &&
+                       !callback->second.target<DeclaredStringLengthScalarFunction>()))
                 opaqueResultDomain=true;
         }
     }
@@ -12561,6 +12582,8 @@ void ExprEvaluator::registerBuiltins() {
     for(auto& entry:functions_) {
         if(isFixedFloat8ScalarName(entry.first))
             entry.second=DeclaredFloat8ScalarFunction{std::move(entry.second)};
+        else if(isStringLengthScalarName(entry.first))
+            entry.second=DeclaredStringLengthScalarFunction{std::move(entry.second)};
         else if(isIntegralRoundingScalarName(entry.first) || entry.first=="round")
             entry.second=IntegralRoundingScalarFunction{std::move(entry.second)};
         else if(entry.first=="mod")

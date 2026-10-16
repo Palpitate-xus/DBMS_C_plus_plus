@@ -5955,6 +5955,11 @@ static bool isFixedFloat8ScalarName(const string& name) {
     return names.count(name)!=0;
 }
 
+static bool isStringLengthScalarName(const string& name) {
+    return name=="char_length" || name=="character_length" ||
+           name=="octet_length" || name=="bit_length";
+}
+
 static bool requiresParsedValueBinding(const dbms::Stmt* root,bool constantScalarOnly) {
     // These names own concrete overload declarations. This is an analysis
     // route, not permission to execute their arguments during preparation.
@@ -5973,7 +5978,8 @@ static bool requiresParsedValueBinding(const dbms::Stmt* root,bool constantScala
             dbms::CatalogManager::QualifiedName routine;
             if(dbms::CatalogManager::parseQualifiedName(call->funcName,routine,true) &&
                (routine.name=="abs" || (!constantScalarOnly &&
-                (declaredScalars.count(routine.name) || isFixedFloat8ScalarName(routine.name)))))
+                (declaredScalars.count(routine.name) || isFixedFloat8ScalarName(routine.name) ||
+                 isStringLengthScalarName(routine.name)))))
                 return true; // Validate real overloads even if no row/branch will execute.
             for(const auto& argument:call->args)if(expression(argument.get()))return true;
             for(const auto& argument:call->namedArgs)if(expression(argument.value.get()))return true;
@@ -21181,7 +21187,7 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
             if(call->schema.empty()) {
                 dbms::CatalogManager::QualifiedName name;
                 if(dbms::CatalogManager::parseQualifiedName(call->funcName,name,true) && name.schema.empty() &&
-                   (!resolved || isFixedFloat8ScalarName(name.name))) {
+                   (!resolved || isFixedFloat8ScalarName(name.name) || isStringLengthScalarName(name.name))) {
                     for(const auto& schema:dbms::functionNamespaceSearchPath(g_engine,session.currentDB))
                         if(schema!="pg_catalog" && !g_engine.getUDF(session.currentDB,name.name,schema).expression.empty())
                             return true;

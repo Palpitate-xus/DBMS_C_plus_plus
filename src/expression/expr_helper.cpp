@@ -667,6 +667,13 @@ RoutineResultTypes collectRoutineResultTypes(
                        evaluator.scalarFunctionIdentity(call,functionEngine).rfind("native",0)==0) {
                         if(name.name=="mod")routineTypes.opaqueModCalls.insert(call);
                         else routineTypes.opaqueIntegralCalls.insert(call);
+                    } else if(CatalogManager::parseQualifiedName(call->funcName,name,true) && name.schema.empty() &&
+                              (name.name=="char_length" || name.name=="character_length" ||
+                               name.name=="octet_length" || name.name=="bit_length") &&
+                              evaluator.scalarFunctionIdentity(call,functionEngine).rfind("native",0)==0) {
+                        // An opaque replacement does not inherit INTEGER from
+                        // the builtin name or execute to discover a result type.
+                        routineTypes.declarations[call]="unknown";
                     }
                 }
             }

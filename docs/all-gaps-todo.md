@@ -3,6 +3,11 @@
 > **已于 2026-08-23 被 [`postgresql-18-gap-audit.md`](postgresql-18-gap-audit.md) 取代；逐项落地方法见 [`postgresql-18-implementation-blueprint.md`](postgresql-18-implementation-blueprint.md)。**
 > 本文件保留早期 Wave、提交和状态变化记录，不再是当前差距的权威来源；其中的日期、PASS 数和“已完成”状态可能已过时。
 
+四个字符串长度函数的真实签名、字符/字节/位单位及用户重载范围见
+[R107](issue-review-r107-string-length-signatures.md)；旧Wave的函数存在性不等于
+全部签名或原273完成。[R106](issue-review-r106-coalesce-explicit-input-analysis.md)
+按用户要求暂缓，普通继续不重开其专项。
+
 网络类型的当前发现与修复范围另见[R101](issue-review-r101-macaddr-input-and-widths.md)
 和[R102](issue-review-r102-network-input-notation.md)。旧Wave的分隔符剥离、固定
 输入宽度及全零即NULL描述不再是现行契约；NAME→MAC回归已由
