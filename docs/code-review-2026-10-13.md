@@ -2,6 +2,10 @@
 
 ## 输入与结论范围
 
+后续[R97 BEFORE行赋值](issue-review-r97-typed-before-row-assignments.md)修复
+原生API的NEW/OLD文本、相似列名与NULL错值；原106/65失败，当前154、15个
+完整native及十个完整协议通过。新1392组合未全量，不挪用下述1391结果。
+
 最新[冻结5091b39c完整终态](issue-full-registered-5091b39c.md)：2026-10-15
 1391入口全部各一次，1390实际通过、1 TLS环境skip、0失败，实际退出0。
 清洁HEAD、全部tracked输入、58 receipt及57份test库字节独立终态核对0。

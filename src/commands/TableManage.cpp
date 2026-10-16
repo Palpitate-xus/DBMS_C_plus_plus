@@ -10587,6 +10587,45 @@ struct TriggerRowAssignment {
     std::string expression;
 };
 
+// Evaluate the storage API's explicit row-assignment RHS as SQL over typed
+// datums. Textual NEW/OLD replacement changes literals and prefix column names,
+// loses SQL NULL, and reparses ordinary text as code. Bind each row image instead.
+static bool evalTriggerRowAssignment(
+        StorageEngine& engine, const std::string& database,
+        const TableSchema& table, const std::string& expression,
+        const std::map<std::string, std::string>& newValues,
+        const std::set<std::string>& newNulls,
+        const std::map<std::string, std::string>* oldValues,
+        const std::set<std::string>* oldNulls,
+        std::string& value, bool& isNull) {
+    std::map<std::string, std::string> values, types, collations;
+    std::set<std::string> nulls;
+    for (size_t i = 0; i < table.len; ++i) {
+        const auto& column = table.cols[i];
+        const auto bind = [&](const std::string& prefix,
+                              const std::map<std::string, std::string>* row,
+                              const std::set<std::string>* rowNulls) {
+            const auto key = prefix + column.dataName;
+            const bool missing = !row || row->count(column.dataName) == 0;
+            values[key] = missing ? std::string{} : row->at(column.dataName);
+            types[key] = column.dataType + (column.isArray ? "[]" : "");
+            collations[key] = column.resolvedCollation.empty()
+                ? column.collation : column.resolvedCollation;
+            if (missing || (rowNulls && rowNulls->count(column.dataName)))
+                nulls.insert(key);
+        };
+        bind("", &newValues, &newNulls);
+        bind("new.", &newValues, &newNulls);
+        bind("old.", oldValues, oldNulls);
+    }
+    const auto result = ExprHelper::evalStringWithNulls(expression, values,
+        nulls, types, database, "", &engine, collations);
+    if (!result.ok) return false;
+    value = result.value;
+    isNull = result.isNull;
+    return true;
+}
+
 bool triggerTokenEquals(std::string_view token, std::string_view expected) {
     if (token.size() != expected.size()) return false;
     for (size_t i = 0; i < token.size(); ++i) {
@@ -25684,31 +25723,18 @@ DBStatus StorageEngine::insertInternal(
             {
                 for (const auto& assignment :
                      parseTriggerRowAssignments(trg.action)) {
-                    std::string rawVal = assignment.expression;
-                    for (const auto& [col, currentValue] : actualValues) {
-                        const std::string placeholder = "NEW." + col;
-                        size_t pos = 0;
-                        while ((pos = rawVal.find(placeholder, pos)) !=
-                               std::string::npos) {
-                            rawVal.replace(pos, placeholder.size(), currentValue);
-                            pos += currentValue.size();
-                        }
-                    }
-                    std::string val = rawVal;
+                    std::string val;
                     bool evaluatedNull = false;
-                    const bool evaluated = evalExpressionSqlValue(
-                        rawVal, actualValues, typeHints, dbname, val,
-                        evaluatedNull, nullptr, this);
-                    // Strip surrounding quotes
-                    if (!evaluated && val.size() >= 2 &&
-                        ((val.front() == '\'' && val.back() == '\'') ||
-                         (val.front() == '"' && val.back() == '"'))) {
-                        val = val.substr(1, val.size() - 2);
+                    if (!evalTriggerRowAssignment(*this, dbname, tbl,
+                            assignment.expression, actualValues,
+                            actualNullColumns, nullptr, nullptr, val, evaluatedNull)) {
+                        lockManager_.unlock(tablename);
+                        return DBStatus::INVALID_VALUE;
                     }
                     for (size_t i = 0; i < tbl.len; ++i) {
                         if (tbl.cols[i].dataName == assignment.column) {
                             actualValues[assignment.column] = val;
-                            if (evaluated && evaluatedNull) {
+                            if (evaluatedNull) {
                                 actualNullColumns.insert(assignment.column);
                             } else {
                                 actualNullColumns.erase(assignment.column);
@@ -29561,6 +29587,14 @@ DBStatus StorageEngine::updateInternal(
         // BEFORE UPDATE triggers have access to both OLD (current row) and NEW (pending update) values.
         // They can modify NEW column values via "SET col = val" in the trigger action.
         if (triggerExecutor_) {
+            std::set<std::string> oldTriggerNulls, newTriggerNulls;
+            for (size_t i = 0; i < tbl.len; ++i) {
+                const bool wasNull = i < oldNullColumns.size() && oldNullColumns[i];
+                if (wasNull) oldTriggerNulls.insert(tbl.cols[i].dataName);
+                const bool isNull = assignedColumnIndices.count(i)
+                    ? assignedNullColumnIndices.count(i) != 0 : wasNull;
+                if (isNull) newTriggerNulls.insert(tbl.cols[i].dataName);
+            }
             auto beforeUpdateTriggers = filterTriggers(
                 operationTriggers, tablename, "before", "update");
             // BEFORE triggers must see the logical OLD image, never the
@@ -29636,46 +29670,26 @@ DBStatus StorageEngine::updateInternal(
                 {
                     for (const auto& assignment :
                          parseTriggerRowAssignments(trg.action)) {
-                        std::string rawVal = assignment.expression;
-                        for (const auto& [col, currentValue] : rowValues) {
-                            const std::string placeholder = "NEW." + col;
-                            size_t pos = 0;
-                            while ((pos = rawVal.find(placeholder, pos)) !=
-                                   std::string::npos) {
-                                rawVal.replace(pos, placeholder.size(), currentValue);
-                                pos += currentValue.size();
-                            }
-                        }
-                        for (const auto& [col, oldValue] : oldRowValues) {
-                            const std::string placeholder = "OLD." + col;
-                            size_t pos = 0;
-                            while ((pos = rawVal.find(placeholder, pos)) !=
-                                   std::string::npos) {
-                                rawVal.replace(pos, placeholder.size(), oldValue);
-                                pos += oldValue.size();
-                            }
-                        }
-                        std::string val = rawVal;
+                        std::string val;
                         bool evaluatedNull = false;
-                        const bool evaluated = evalExpressionSqlValue(
-                            rawVal, rowValues, updateTypeHints, dbname, val,
-                            evaluatedNull, nullptr, this);
-                        if (!evaluated && val.size() >= 2 &&
-                            ((val.front() == '\'' && val.back() == '\'') ||
-                             (val.front() == '"' && val.back() == '"'))) {
-                            val = val.substr(1, val.size() - 2);
+                        if (!evalTriggerRowAssignment(*this, dbname, tbl,
+                                assignment.expression, rowValues, newTriggerNulls,
+                                &oldRowValues, &oldTriggerNulls, val, evaluatedNull)) {
+                            lockManager_.unlock(tablename);
+                            return DBStatus::INVALID_VALUE;
                         }
                         for (size_t i = 0; i < tbl.len; ++i) {
                             if (tbl.cols[i].dataName == assignment.column) {
-                                const bool assignsNull =
-                                    evaluated && evaluatedNull;
+                                const bool assignsNull = evaluatedNull;
                                 rowValues[assignment.column] =
                                     assignsNull ? std::string() : val;
                                 assignedColumnIndices.insert(i);
                                 if (assignsNull) {
                                     assignedNullColumnIndices.insert(i);
+                                    newTriggerNulls.insert(assignment.column);
                                 } else {
                                     assignedNullColumnIndices.erase(i);
+                                    newTriggerNulls.erase(assignment.column);
                                 }
                                 break;
                             }
