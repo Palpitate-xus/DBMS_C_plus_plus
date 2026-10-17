@@ -1,5 +1,10 @@
 # DBMS 功能测试报告
 
+新增[R115 标量别名投影](issue-review-r115-scalar-alias-projection-metadata.md)228条
+完整协议控制：实际180006全过、旧13失败。有限匹配产物回归及逐版失败见记录；
+本项接受组合888native+3Main+516Python=1407，R114另项。工作区892+3+521=1416
+含未接受候选及R113，未跑新完整注册集合，不证明真实TLS或整库sanitizer。
+
 新增[R110 数组二进制结果](issue-review-r110-array-binary-result.md)110条
 协议和182条低层控制，实际180006参考110零失败、旧75失败。有限回归和逐版
 失败见记录；本项提交后接受组合888native+3Main+515Python=1406，含保留候选

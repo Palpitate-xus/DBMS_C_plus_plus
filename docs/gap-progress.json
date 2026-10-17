@@ -2,6 +2,26 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R115 physical star projections preserve scalar alias typmods",
+      "gap_ids": [
+        "TYPE-02",
+        "PROTO-04"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r115-scalar-alias-projection-metadata.md"
+      ],
+      "tests": [
+        "tests/type_alias_projection_metadata_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "reproduction": "Actual180006 reference228all0; immutable5105old22813failures actual1. Initial54/108 green controls did not reproduce; mixed120onefailure and34observations locate array-star path. All evidence retained.",
+        "focused_tests": "Whitelist canonical scalar identity only in existing physical provenance adapter; no execution guesses, fake alias origins, new headers or storage changes. Permanent228 retains original120 controls and adds108 minimal array companions. Matching O2 production, fresh-stub isolated native and whole protocol gates recorded in issue document.",
+        "full_suite": "IndependentR115 projection accepted888native+3Main+516Python=1407; R114 separately adds one native and protocol next. Working892native+3Main+521Python=1416 includes preserved candidates and R113. No new complete registered suite, actualTLS or full-engine sanitizer claim.",
+        "scope": "Original273 items/checkboxes unchanged22complete166partial70unverified15deferred. R109 user-skipped preserved/uncommitted. R114 logical width scope separately committed; R113 send codec, R111 planning and catalog/view findings ordinary pending. No push, Actions disabled."
+      }
+    },
+    {
       "issue": "R110 builtin array binary result envelopes and real element send codecs",
       "gap_ids": [
         "TYPE-16",

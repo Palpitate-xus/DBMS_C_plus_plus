@@ -1,5 +1,8 @@
 # 2026-10-13 全仓库审查
 
+物理星号投影的字符标量别名/typmod问题见[R115](issue-review-r115-scalar-alias-projection-metadata.md)，
+逻辑长度R114另项验收。原273项勾选和统计不变，局部协议修复不代表全量完成。
+
 数组二进制结果的独立修复与尚缺标量 codec 等边界见
 [R110](issue-review-r110-array-binary-result.md)。它处理真实内置数组封套，不是
 全数组 I/O、完整 record/domain 支持或原273项完成；R109 候选仍跳过不提交。

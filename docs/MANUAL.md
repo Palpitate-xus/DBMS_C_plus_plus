@@ -135,6 +135,9 @@ USE DATABASE mydb;
 INTERVAL、TIMETZ、JSON/JSONB、TSVECTOR、range 等缺失标量发送 codec 的非 NULL
 数组元素仍未支持。具体边界见[R110](issue-review-r110-array-binary-result.md)。
 
+CHAR/VARCHAR与数组共存时，SELECT *仍应保留字符列声明长度；普通表、TEMP、
+空结果和NULL不应改变typmod或真实列来源。修复和边界见[R115](issue-review-r115-scalar-alias-projection-metadata.md)。
+
 ### 其他类型
 | 类型 | 说明 |
 |------|------|

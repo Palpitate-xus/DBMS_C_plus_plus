@@ -1,5 +1,9 @@
 # 生产化状态
 
+含数组表星号投影的CHAR/VARCHAR修饰符丢失见[R115](issue-review-r115-scalar-alias-projection-metadata.md)。
+仅修声明别名身份比较；逻辑长度R114另项、INTERVAL发送R113仍待做，
+原273和用户暂缓范围不变，未获得新完整注册回归。
+
 内置数组的二进制结果输出见[R110](issue-review-r110-array-binary-result.md)。
 仅扩展真实已有元素发送 codec 的数组封套，不把缺失标量 codec 的文本当作
 二进制。R112 输入修复先独立提交；原273仍未完成，R109 候选继续保留未提交。

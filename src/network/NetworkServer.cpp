@@ -1693,10 +1693,12 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
                  physicalTypeName == "macaddr" ||
                  physicalTypeName == "macaddr8" ||
                  isGeometryTypeName(physicalTypeName)) &&
-                (column.isArray || !column.domainName.empty()
-                    ? ExprHelper::canonicalResultTypeName(result.columnTypes[columnIndex]) ==
-                        ExprHelper::canonicalResultTypeName(physicalTypeName)
-                    : lowerProtocolText(result.columnTypes[columnIndex]) == physicalTypeName));
+                // ARRAY-containing star projections publish canonical scalar
+                // spellings too (character/character varying, not char/varchar).
+                // Match the declared identity before preserving its typmod;
+                // projection provenance above still excludes expressions.
+                ExprHelper::canonicalResultTypeName(result.columnTypes[columnIndex]) ==
+                    ExprHelper::canonicalResultTypeName(physicalTypeName));
             if (!hasStructuredType || structuredMatchesPhysical) {
                 const std::string typeName = physicalTypeName;
                 description.typeOid = isByteaTypeName(typeName)
