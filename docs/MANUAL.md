@@ -157,6 +157,11 @@ INTERVAL二进制结果为网络字节序int64微秒、int32天、int32月，共
 12/4/4/8/8不同于对外逻辑长度，修正范围与验收见[R118](issue-review-r118-temporal-view-materialization.md)。
 这不代表已有TIME整秒物理格式已升级到完整微秒存储。
 
+TIME二进制结果为网络字节序int64微秒，范围0至86400000000（含24:00:00）；
+TIME[]元素使用同一真实codec，保留维度/下界/NULL。修复与有限验证见
+[R117](issue-review-r117-time-binary-result.md)。这不同于binary Bind接收、文本输入规范化
+和现有4字节整秒标量heap；这些边界不由发送器自动补齐。
+
 ### 其他类型
 | 类型 | 说明 |
 |------|------|

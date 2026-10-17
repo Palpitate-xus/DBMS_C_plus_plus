@@ -1,5 +1,9 @@
 # 2026-10-13 全仓库审查
 
+TIME标量及数组的真实微秒/24时binary发送修复见[R117](issue-review-r117-time-binary-result.md)。
+它不升级旧heap、不完成输入/文本/所有时态语义；原273勾选和统计不变，
+未完能力仍普通待做，明确暂缓的模块不恢复。
+
 时态视图的内部物化列误用VARCHAR布局见[R118](issue-review-r118-temporal-view-materialization.md)。
 只用真实既有工厂修正临时结果描述，验证以记录的冻结有限终态为准，不迁移表行，
 不宣称通用view rewrite、时态精度、原273项或用户暂缓模块已完成。

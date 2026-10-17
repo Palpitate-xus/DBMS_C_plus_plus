@@ -91,7 +91,11 @@ src/tests/scripts seal：
 0–23小时、整秒的物理parseTimeToSeconds；高精度输入文本规范化独立待查。
 这不是INTERVAL修复失败，也不能写成TIME或整个时态支持已经完成。
 
-## 仍未完成
+## 后续状态及仍未完成范围
+
+R113原32条TIME观察中的binary问题后由[R117](issue-review-r117-time-binary-result.md)
+单项实现真实微秒sender；输入/文本规范化和旧heap精度仍另项开放，不改写
+本页原始16差异或INTERVAL验收证据。后续终态以R117记录为准。
 
 | 范围 | 后续修改方法 |
 | --- | --- |

@@ -1,5 +1,10 @@
 # DBMS 功能测试报告
 
+新增[R117 TIME binary](issue-review-r117-time-binary-result.md)121低层/144协议
+控制，实际PG144全过、旧114协议/58低层失败。最终有限匹配终态见记录；本项
+提交后891native+3Main+521Python=1415，工作区894+3+524=1421含保留候选，无新
+完整注册、真实TLS或整库sanitizer证明，R118真实Main结果不冒充本项重跑。
+
 新增[R118 时态物化布局](issue-review-r118-temporal-view-materialization.md)186条
 协议控制，实际PG全过、固定旧60失败、首版仍36失败均保留。最终匹配回归/真实
 Main终态见记录。本项提交后的接受组合为890native+3Main+520Python=1413，

@@ -271,9 +271,33 @@ bool encodeBinaryValue(const std::string& value, const PgColumnDescription& colu
                 return true;
             }
             case 1083: {
-                const int32_t seconds = parseTimeToSeconds(value);
-                if (seconds < 0) return false;
-                appendRawUInt64(encoded, static_cast<uint64_t>(seconds) * 1000000);
+                // The legacy heap helper stores whole seconds and rejects
+                // 24h. PostgreSQL's wire datum is a microsecond clock instead.
+                const auto first = value.find_first_not_of(" \t\r\n\f\v");
+                if (first == std::string::npos) return false;
+                const auto last = value.find_last_not_of(" \t\r\n\f\v");
+                const std::string clock = value.substr(first, last - first + 1);
+                const size_t colon = clock.find(':');
+                if (colon == std::string::npos) return false;
+                const size_t secondColon = clock.find(':', colon + 1);
+                if (secondColon != std::string::npos &&
+                    clock.find(':', secondColon + 1) != std::string::npos) return false;
+                int hours = 0, minutes = 0, seconds = 0;
+                const size_t minuteEnd = secondColon == std::string::npos ? clock.size() : secondColon;
+                if (!parseTemporalUnsigned(clock.substr(0, colon), 2, hours) ||
+                    !parseTemporalUnsigned(clock.substr(colon + 1, minuteEnd - colon - 1), 2, minutes)) return false;
+                if (secondColon != std::string::npos) {
+                    const std::string tail = clock.substr(secondColon + 1);
+                    const size_t dot = tail.find('.');
+                    if (!parseTemporalUnsigned(tail.substr(0, dot), 2, seconds)) return false;
+                    if (dot != std::string::npos && (dot + 1 == tail.size() ||
+                        tail.find_first_not_of("0123456789", dot + 1) != std::string::npos)) return false;
+                }
+                if (hours > 24 || minutes > 59 || seconds > 60) return false;
+                const auto parts = parseIntervalInput(clock);
+                if (!intervalInputSqlState(parts).empty() || parts.months || parts.days ||
+                    parts.micros < 0 || parts.micros > 86400000000LL) return false;
+                appendRawUInt64(encoded, static_cast<uint64_t>(parts.micros));
                 return true;
             }
             case 1114: case 1184: {

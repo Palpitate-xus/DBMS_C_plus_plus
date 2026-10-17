@@ -204,6 +204,7 @@ socket超时，精确SQL/栈和原期限保留，尚未确定根因，不称新�
 | R105 | 限定NAME→INET/CIDR源身份遗漏 | 本范围已修复，独立本地commit | PG/Root738、完整SDK及21native/16协议/3真实Main全过；自身真实全58/normal/repeat、核心与最终核对均0。精准NAME身份不放宽隐式赋值，旧738/34与SDK134保留，见[记录](issue-review-r105-network-name-input.md) |
 | R106 | COALESCE未选显式CAST的UNKNOWN输入分析遗漏 | 用户暂缓，未修复 | 2026-10-16“skip it”；原四条观察及未注册612控制（PG零失败/旧程序168失败）保留，无生产代码改动，不提交测试草稿为已验收修复；普通继续不重开，见[记录](issue-review-r106-coalesce-explicit-input-analysis.md) |
 | R107 | 四个字符串长度函数的真实签名与计量单位 | 本范围已修复，独立本地commit | PG/Root654、607原生与24native/18协议/3真实Main均0；四CPP实际2/1/1增量normal/repeat及核心/最终核对0。旧654/392、607/440与首两版失败保留，不扩为通用签名或原273完成，见[记录](issue-review-r107-string-length-signatures.md) |
+| R117 | TIME微秒/24时及相应数组binary结果报0A000 | 本项单独修复与验收 | 真实int64微秒、严格clock范围与整数舍入；PG144/121低层及有限终态见[记录](issue-review-r117-time-binary-result.md)，文本/typmod/4字节heap另项，不伪装全时态完成 |
 | R118 | 时态视图物化沿用VARCHAR布局，NULL插入也报INVALID_VALUE/XX000 | 本项单独修复与验收 | 五种时态类型使用真实工厂，PG186全过、旧60/首版36失败；当前实现、有限终态和独立版本见[记录](issue-review-r118-temporal-view-materialization.md)，不放宽存储校验或迁移表行 |
 | R116 | TEMP VIEW完成标签错误返回CREATE TEMP/OR或注释词 | 本项单独修复与验收 | 纯解析真实非物化CreateViewStmt，PG54全过、旧14失败；有限回归与版本见[记录](issue-review-r116-view-command-tags.md)，CTAS/物化与其他视图问题不扩大处理 |
 | R113 | INTERVAL及非NULL元素数组binary结果报0A000 | 本项单独修复与验收 | 真实16字节独立时钟/天/月，checked parser和双向无限；PG171/117原生及有限回归见[记录](issue-review-r113-interval-binary-result.md)，binary Bind与其他codec仍开放 |

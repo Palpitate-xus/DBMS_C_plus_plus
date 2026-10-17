@@ -1,5 +1,9 @@
 # 生产化状态
 
+TIME/TIME[]的微秒、24时及合法clock归一后的真实binary输出见
+[R117](issue-review-r117-time-binary-result.md)，不再借用仅整秒heap解析器。输入/文本
+规范化、typmod和旧4字节标量存储仍普通待做，原273不提升，无新完整注册终态。
+
 时态视图/内部结果物化的真实heap布局修正见[R118](issue-review-r118-temporal-view-materialization.md)。
 不把改dataType名称当作物理格式转换，实际验收终态以记录为准；R117精度/binary、
 目录SQL与视图origin仍普通待做。原273不提升，不重开CTAS/物化等暂缓专项。

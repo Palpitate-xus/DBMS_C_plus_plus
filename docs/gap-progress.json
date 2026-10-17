@@ -2,6 +2,29 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R117 real TIME scalar and inherited array binary results",
+      "gap_ids": [
+        "TYPE-06",
+        "TYPE-16",
+        "PROTO-04",
+        "PROTO-05"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r117-time-binary-result.md"
+      ],
+      "tests": [
+        "tests/time_binary_result_test.cpp",
+        "tests/time_binary_result_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "reproduction": "Actual180006/current initial32each16differences12binaryfailures+4textnormalization mismatches, collection0 not allpass. ActualPGpermanent144all0 versusimmutable746c144114failures actual1. Completeoldnative12158failures actual1, no compiler/coverage failure substituted.",
+        "focused_tests": "OnlyPostgresProtocol real1083send: basicclockgrammar/hour<=24/minute<=59/second<=60, checkedexistinginteger clockparser and0..86400000000microsecond range, signedint64network order. Existingreal1183array envelope delegates scalar. Native121+wire144 cover30PGconfirmed clocks/half-even/carry/shortclock/whitespace/leapsecond/24h/null/dimensions/mixed/no partialframe andrealphysicalcoarseTIME+microTIMEarrayRETURNING. Normal1CPP/repeat0 actual0; final16native20wire36distinctwholeentries allactual0, TIME121native144wire/INTERVAL117native171wire included. All58receipts/dualcache/57testbytes/seal0. Extraoriginal32actualreferencecomparison now0binarydifferences,4textdifferences retained; collection0 isnotallpass. No Main/header edits, no newMainrun.",
+        "full_suite": "One native/one protocol added: acceptedprojection891native+3Main+521Python=1415 versusworking894+3+524=1421 including preservedR98/R109 candidates. No new complete registered suite, actualTLS or full-engine sanitizer proof. R118threeMain34entry proof not relabelled asnewR117Mainrun.",
+        "scope": "Original273items/checkboxes unchanged22complete166partial70unverified15deferred. TIMEinput/text/typmod normalization andwholemicrosecond scalarheap storage remain ordinaryopen, asdo binaryBind input/TIMETZandothercodecs/catalogSQL/vieworigin/planning. No heapmigration, guessed userOIDs, publicheader, provider-lifetime or userdeferral rewrite. R109user-skipped/R98/R99/R106draft preservedexcluded. No push; Actionsdisabled."
+      }
+    },
+    {
       "issue": "R118 temporal query materialization uses real heap factories",
       "gap_ids": [
         "TYPE-06",
