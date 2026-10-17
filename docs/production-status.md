@@ -1,5 +1,9 @@
 # 生产化状态
 
+闰年年初的共享日期逆换算修正及全域独立枚举见[R120](issue-review-r120-date-cycle-inverse.md)。
+它是时间戳跨日输入的上游问题，不混同R119 binary发送器；共享头重建和最终有限
+验收按记录实际终态读取。原273不提升，BC/大年份和完整时态精度仍普通开放。
+
 TIME/TIME[]的微秒、24时及合法clock归一后的真实binary输出见
 [R117](issue-review-r117-time-binary-result.md)，不再借用仅整秒heap解析器。输入/文本
 规范化、typmod和旧4字节标量存储仍普通待做，原273不提升，无新完整注册终态。

@@ -104,14 +104,28 @@ struct Date {
 };
 
 inline Date DISCONV(int64_t num) {
-    Date t = {0, 12, 31};
-    if (num <= 0 || num > 3652059) return t;
-    if (num >= 146097) t.year += num / 146097 * 400;
+    if (num <= 0 || num > 3652059) return Date(0, 12, 31);
+    // Zero-based days within Gregorian cycles. Cap the last century/year:
+    // its extra leap day still belongs to that cycle, not the next one.
+    --num;
+    const int cycles400 = static_cast<int>(num / 146097);
     num %= 146097;
-    while (num > 0) t.year++, num -= (365 + t.isleap());
-    while (num + DAYS[t.month] <= 0) t.month--;
-    t.day = num + DAYS[t.month] + (t.month <= 2) * t.isleap();
-    return t;
+    const int centuries = static_cast<int>(std::min<int64_t>(num / 36524, 3));
+    num -= centuries * 36524;
+    const int cycles4 = static_cast<int>(num / 1461);
+    num %= 1461;
+    const int years = static_cast<int>(std::min<int64_t>(num / 365, 3));
+    num -= years * 365;
+    const int year = cycles400 * 400 + centuries * 100 + cycles4 * 4 + years + 1;
+    const bool leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    int month = 1;
+    while (month < 12) {
+        const int length = DAYS[month] - DAYS[month + 1] + (month == 2 && leap);
+        if (num < length) break;
+        num -= length;
+        ++month;
+    }
+    return Date(year, month, static_cast<int>(num) + 1);
 }
 
 inline int64_t CONVERT(Date t) {

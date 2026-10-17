@@ -2,6 +2,26 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R120 bounded Gregorian inverse conversion for every supported civil day",
+      "gap_ids": [
+        "TYPE-06"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r120-date-cycle-inverse.md"
+      ],
+      "tests": [
+        "tests/date_cycle_inverse_test.cpp",
+        "tests/date_cycle_inverse_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "reproduction": "ActualPG180006152all0 versusimmutablec1b020R119candidateold15248failures actual1. Matchingoldnative firstmismatchordinal1096 expected0004-01-01 actualillegalmonth; not fullold3652059completion. Initial11pureobservations4badcycleboundaries collection0 notpass. R119C1timestamp232 still8preexistingdaycarryinputfailures retained, notnewsendregression.",
+        "focused_tests": "OnlysharedDISCONV usesbounded400/100/4/1yearcycledecomposition thenforwardmonths, same1..9999civilrange/invalidsentinel/storage. PureindependentGregorian enumeration3652059days+22boundaryshiftcontrols0. All58RootproductionO2fresh CPP actual0 thenstandardlink/repeatand officialnormal/repeat0, sameflags/atomicreceipts. Final17native21wire3realMain41distinctwholeentries allactual0, date3652059days22controls andSQL152/timestamp235native232wire included. Real3MainTUs compiledcurrentSource: explain/sessionO0testTUs, window/prodO2; onlylinkafterall58current/57matchedlibraries/no stubs, actualisolatedrunsall0. Dualcache/58receipts/57testbytes/seal0. No compiled0 astestpass.",
+        "full_suite": "One native/one protocol added. Ownacceptedprojection892native+3Main+522Python=1417; working896+3+526=1425includesunacceptedR119andpreservedR98/R109. No newcomplete registeredsuite, actualTLS orwholeenginesanitizerclaim. ComponentASAN/UBSAN scope andactualstatus in issue record.",
+        "scope": "Original273items/checkboxes unchanged22complete166partial70unverified15deferred. DoesnotcompletefullPostgreSQLBC/largeyearrange/alltimeinputprecision/typmod/heapcodec. R119binarysendercandidateheldseparate, no mixedcommit. SQLDATE+intgreencontrolsnotmisreported asbroken; nativeDateoperatorsandtimestampdaycarry areaffected. Userdeferredsecurity/TDE/CTAS/lifetimeandR109notreopened; no push, Actionsdisabled."
+      }
+    },
+    {
       "issue": "R117 real TIME scalar and inherited array binary results",
       "gap_ids": [
         "TYPE-06",

@@ -1,5 +1,10 @@
 # DBMS 功能测试报告
 
+新增[R120 日期逆换算](issue-review-r120-date-cycle-inverse.md)独立枚举3652059天
+及152协议控制，实际PG152全过、旧48失败；匹配58单元/三真实Main及有限终态见记录。
+本项独立提交后892native+3Main+522Python=1417，工作区896+3+526=1425含尚未提交
+R119及原候选；无新完整注册、真实TLS或整库sanitizer证明，组件sanitizer不冒充整库。
+
 新增[R117 TIME binary](issue-review-r117-time-binary-result.md)121低层/144协议
 控制，实际PG144全过、旧114协议/58低层失败。最终有限匹配终态见记录；本项
 提交后891native+3Main+521Python=1415，工作区894+3+524=1421含保留候选，无新

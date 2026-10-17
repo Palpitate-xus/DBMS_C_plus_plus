@@ -162,6 +162,10 @@ TIME[]元素使用同一真实codec，保留维度/下界/NULL。修复与有限
 [R117](issue-review-r117-time-binary-result.md)。这不同于binary Bind接收、文本输入规范化
 和现有4字节整秒标量heap；这些边界不由发送器自动补齐。
 
+共享民用日期逆换算在现有1–9999年域内使用有界Gregorian周期分解，闰年年初
+和400年边界不得产生非法月份；独立全域枚举与SQL跨日验证见
+[R120](issue-review-r120-date-cycle-inverse.md)。这不等于完整PostgreSQL BC/大年份支持。
+
 ### 其他类型
 | 类型 | 说明 |
 |------|------|
