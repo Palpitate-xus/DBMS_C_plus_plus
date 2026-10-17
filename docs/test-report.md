@@ -1,5 +1,10 @@
 # DBMS 功能测试报告
 
+新增[R110 数组二进制结果](issue-review-r110-array-binary-result.md)110条
+协议和182条低层控制，实际180006参考110零失败、旧75失败。有限回归和逐版
+失败见记录；本项提交后接受组合888native+3Main+515Python=1406，含保留候选
+的工作区891+3+518=1412，均无新完整注册回归。未证明真实TLS或整库sanitizer。
+
 新增[R112 具名数组输入](issue-review-r112-unconstrained-named-array-input.md)
 57条协议控制，实际参考180006零失败、固定旧程序44失败；逐版失败、正常/repeat
 与有限门禁见记录。只新增一个协议注册入口，本项提交后的注册组合为887native+3Main+

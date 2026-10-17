@@ -2,6 +2,27 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R110 builtin array binary result envelopes and real element send codecs",
+      "gap_ids": [
+        "TYPE-16",
+        "PROTO-04"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r110-array-binary-result.md"
+      ],
+      "tests": [
+        "tests/array_binary_result_test.cpp",
+        "tests/array_binary_result_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "reproduction": "Actual180006/immutablec1f5 initial10 observations2differences; expanded90each49semantic differences include separate input/text/scalarcodec gaps. Observers0 are collection, not passes. Actualpermanent110 reference0 versusold75failures actually1; R112 namedinput dependency independently fixed first.",
+        "focused_tests": "Only PostgresProtocol.cpp internal array result encoder and immutable real builtin identity map. Existing scalar send reused, dimensions/lowerbounds/nullbitmap/row-major lengths honored, no guessed userOIDs or fake text-as-binary. Native182 covers49 actual regular builtin array identities (record categoryP intentionallyseparate) and scalar/rawgeometry contract calibration; wire110 covers30 real scalar codecs, shapes, mixedformats, physicalSELECT/RETURNING/UPDATE. All finite matching-artifact terminal gates and source snapshots recorded in issue document.",
+        "full_suite": "Adds one native and one registered protocol entry after separateR112: accepted888native+3Main+515Python=1406 versusworking891+3+518=1412 including preservedR98/R109 candidates. No new complete registered run, realTLS or full-engine sanitizer proof.",
+        "scope": "Original273 items/checkboxes unchanged22complete166partial70unverified15deferred. Binaryarrayinput, nonNULLmissing scalar codecs, namedcomposite/domain/userarray support and observedBOX/textnormalization remain ordinary pendingwork, not automatically deferred. R111 selectedARRAYconstructorplanning remains open. R109 user-skipped candidates and R98/R99/R106draft preserved/excluded. No push, Actionsdisabled."
+      }
+    },
+    {
       "issue": "R112 unconstrained named BPCHAR/BIT array input",
       "gap_ids": [
         "TYPE-04",

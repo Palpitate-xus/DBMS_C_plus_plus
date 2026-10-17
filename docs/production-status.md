@@ -1,5 +1,9 @@
 # 生产化状态
 
+内置数组的二进制结果输出见[R110](issue-review-r110-array-binary-result.md)。
+仅扩展真实已有元素发送 codec 的数组封套，不把缺失标量 codec 的文本当作
+二进制。R112 输入修复先独立提交；原273仍未完成，R109 候选继续保留未提交。
+
 具名 BPCHAR/BIT 数组省略 typmod 时的输入截断见
 [R112](issue-review-r112-unconstrained-named-array-input.md)：参考57零失败、旧44失败，
 关键字默认长度和显式 typmod 保留。验证终态与独立版本以记录为准；R109 用户跳过，

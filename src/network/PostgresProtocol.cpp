@@ -6,6 +6,8 @@
 #include "common/GeometryValue.h"
 #include "types/money.h"
 #include "types/xml.h"
+#include "catalog/catalog.h"
+#include "common/SqlArrayText.h"
 
 #include <algorithm>
 #include <cctype>
@@ -15,6 +17,7 @@
 #include <cstring>
 #include <limits>
 #include <string>
+#include <unordered_map>
 
 namespace dbms {
 
@@ -106,8 +109,87 @@ bool parseUuidBytes(const std::string& value, std::vector<uint8_t>& bytes) {
 }
 
 bool encodeBinaryValue(const std::string& value, const PgColumnDescription& column,
+                       std::vector<uint8_t>& encoded);
+
+bool encodeBinaryArray(const std::string& value, const PgColumnDescription& column,
+                       uint32_t elementOid, std::vector<uint8_t>& encoded) {
+    const auto array = sql_array_text::parse(value);
+    size_t count = array.dimensions.empty() ? 0 : 1;
+    for (const auto& dimension : array.dimensions) {
+        if (dimension.length <= 0 || count >
+                static_cast<size_t>(std::numeric_limits<int32_t>::max()) /
+                    static_cast<size_t>(dimension.length)) return false;
+        count *= static_cast<size_t>(dimension.length);
+    }
+    PgColumnDescription element = column;
+    element.typeOid = elementOid;
+    std::vector<uint8_t> data;
+    bool hasNull = false;
+    size_t seen = 0;
+    const auto appendElements = [&](const auto& self,
+                                    const sql_array_text::Literal& part,
+                                    size_t depth) -> bool {
+        for (const auto& token : part.elements) {
+            if (depth + 1 < array.dimensions.size()) {
+                if (!self(self, sql_array_text::parse(token), depth + 1)) return false;
+                continue;
+            }
+            if (seen++ >= count) return false;
+            if (token == "NULL") {
+                hasNull = true;
+                appendRawUInt32(data, UINT32_MAX);
+            } else {
+                // The structural parser has already distinguished unquoted
+                // SQL NULL from quoted/escaped text, including literal NULL.
+                std::string scalar;
+                if (token.size() >= 2 && token.front() == '"') {
+                    for (size_t i = 1; i + 1 < token.size(); ++i) {
+                        if (token[i] == '\\') ++i;
+                        scalar.push_back(token[i]);
+                    }
+                } else {
+                    scalar = token;
+                }
+                std::vector<uint8_t> bytes;
+                if (!encodeBinaryValue(scalar, element, bytes) || bytes.size() >
+                        static_cast<size_t>(std::numeric_limits<int32_t>::max())) return false;
+                appendRawUInt32(data, static_cast<uint32_t>(bytes.size()));
+                data.insert(data.end(), bytes.begin(), bytes.end());
+            }
+            if (data.size() > static_cast<size_t>(std::numeric_limits<int32_t>::max())) return false;
+        }
+        return true;
+    };
+    if (!appendElements(appendElements, array, 0) || seen != count) return false;
+    appendRawUInt32(encoded, static_cast<uint32_t>(array.dimensions.size()));
+    appendRawUInt32(encoded, hasNull ? 1 : 0);
+    appendRawUInt32(encoded, elementOid);
+    for (const auto& dimension : array.dimensions) {
+        appendRawUInt32(encoded, static_cast<uint32_t>(dimension.length));
+        appendRawUInt32(encoded, static_cast<uint32_t>(dimension.lower));
+    }
+    encoded.insert(encoded.end(), data.begin(), data.end());
+    return encoded.size() <= static_cast<size_t>(std::numeric_limits<int32_t>::max());
+}
+
+bool encodeBinaryValue(const std::string& value, const PgColumnDescription& column,
                        std::vector<uint8_t>& encoded) {
     try {
+        // Only genuine immutable builtin catalog identities are admitted here.
+        // A result name or an arbitrary user OID cannot select an array codec.
+        // This shared bootstrap producer does not acquire a live catalog or do I/O.
+        static const auto arrayElements = [] {
+            std::unordered_map<uint32_t, uint32_t> result;
+            for (const auto& row : CatalogManager::builtinTypeRows()) {
+                if (row.typnamespace == 11 && row.typcategory == 'A' && row.typelem)
+                    result.emplace(row.oid, row.typelem);
+            }
+            return result;
+        }();
+        const auto array = arrayElements.find(column.typeOid);
+        if (array != arrayElements.end()) {
+            return encodeBinaryArray(value, column, array->second, encoded);
+        }
         if (geometryTypeNameForOid(column.typeOid)) {
             return encodeGeometryBinary(value, column.typeOid, encoded);
         }

@@ -1,5 +1,9 @@
 # 2026-10-13 全仓库审查
 
+数组二进制结果的独立修复与尚缺标量 codec 等边界见
+[R110](issue-review-r110-array-binary-result.md)。它处理真实内置数组封套，不是
+全数组 I/O、完整 record/domain 支持或原273项完成；R109 候选仍跳过不提交。
+
 具名 BPCHAR/BIT 数组输入的独立修复见
 [R112](issue-review-r112-unconstrained-named-array-input.md)，参考57零失败、旧44失败；
 真实无 typmod 声明和关键字默认长度分开处理。原273项状态与勾选不提升，

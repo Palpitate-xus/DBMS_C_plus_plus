@@ -129,6 +129,12 @@ USE DATABASE mydb;
 | `BYTEA` | 二进制数据，支持 hex (`\xDEADBEEF`) 和 escape 格式 |
 | `BLOB` | 大字节对象 (MySQL 兼容) |
 
+数组请求 PostgreSQL 二进制结果格式时，已有标量二进制发送 codec 的内置
+元素可作为数组输出，保留维度、真实下界、元素 OID、SQL NULL 和空数组的
+区别；不要把二进制结果与二进制 Bind 输入混同，后者不由本项实现。
+INTERVAL、TIMETZ、JSON/JSONB、TSVECTOR、range 等缺失标量发送 codec 的非 NULL
+数组元素仍未支持。具体边界见[R110](issue-review-r110-array-binary-result.md)。
+
 ### 其他类型
 | 类型 | 说明 |
 |------|------|
