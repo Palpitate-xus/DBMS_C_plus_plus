@@ -1,5 +1,9 @@
 # 生产化状态
 
+真实1083的TIME binary Bind微秒/24时与错误传播修复见[R128](issue-review-r128-time-binary-parameter.md)。
+PG158全过、旧完整132失败，最终55入口全0；原接收分支仅接受整秒，不把本项
+误称完全新增接收器。旧4字节TIME heap不升级，其他时间/数组receiver仍普通开放。
+
 直接SELECT的TIME高precision截断与一次声明通知见[R127](issue-review-r127-time-excess-precision.md)。
 252/276及有限54入口全0；原122的值/metadata/通知核心字段全部匹配，仍保留两条
 PG内部诊断来源字段差异。DDL/其他表达式、消息过滤GUC及完整转换资格仍开放。

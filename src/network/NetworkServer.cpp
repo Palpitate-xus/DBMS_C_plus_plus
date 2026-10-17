@@ -45,6 +45,7 @@
 #include <cerrno>
 #include <cmath>
 #include <condition_variable>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -769,7 +770,8 @@ std::string binaryFloatingParameterLiteral(Floating value, std::string& error) {
 std::string binaryProtocolParameterLiteral(uint32_t typeOid,
                                            const std::vector<uint8_t>& raw,
                                            const std::string& moneyLocale,
-                                           std::string& error) {
+                                           std::string& error,
+                                           std::string& inputSqlState) {
     uint64_t bits = 0;
     if (geometryTypeNameForOid(typeOid)) {
         std::string value;
@@ -834,10 +836,39 @@ std::string binaryProtocolParameterLiteral(uint32_t typeOid,
             return quoteProtocolText(str(date), error);
         }
         case 1083: {
-            if (!decodeBinaryUnsigned(raw, 8, bits)) break;
-            const int64_t micros = static_cast<int64_t>(bits);
-            if (micros < 0 || micros % 1000000 != 0 || micros >= 86400LL * 1000000) break;
-            return quoteProtocolText(formatTimeSeconds(static_cast<int32_t>(micros / 1000000)), error);
+            if (raw.size() < 8) {
+                inputSqlState = "08P01";
+                error = "insufficient data left in message";
+                return {};
+            }
+            // Read the TIME datum first; range errors precede trailing-data
+            // errors. Unsigned bits avoid implementation-defined negative
+            // conversion, and every signed negative is above this bound.
+            bits = 0;
+            for (size_t i = 0; i < 8; ++i) bits = (bits << 8) | raw[i];
+            if (bits > 86400000000ULL) {
+                inputSqlState = "22008";
+                error = "time out of range";
+                return {};
+            }
+            if (raw.size() != 8) {
+                inputSqlState = "22P03";
+                error = "invalid binary input length for parameter type";
+                return {};
+            }
+            char clock[32];
+            std::snprintf(clock, sizeof(clock), "%02llu:%02llu:%02llu",
+                static_cast<unsigned long long>(bits / 3600000000ULL),
+                static_cast<unsigned long long>((bits / 60000000ULL) % 60),
+                static_cast<unsigned long long>((bits / 1000000ULL) % 60));
+            std::string value(clock);
+            if (const auto fraction = bits % 1000000ULL) {
+                auto digits = std::to_string(fraction);
+                digits.insert(digits.begin(), 6 - digits.size(), '0');
+                while (digits.back() == '0') digits.pop_back();
+                value += "." + digits;
+            }
+            return quoteProtocolText(value, error);
         }
         case 1114: case 1184: {
             if (!decodeBinaryUnsigned(raw, 8, bits)) break;
@@ -950,7 +981,7 @@ std::string protocolParameterLiteral(uint32_t typeOid,
     inputSqlState.clear();
     if (binary) {
         return binaryProtocolParameterLiteral(
-            typeOid, raw, moneyLocale, error);
+            typeOid, raw, moneyLocale, error, inputSqlState);
     }
     std::string value(raw.begin(), raw.end());
     if (value.find('\0') != std::string::npos) {

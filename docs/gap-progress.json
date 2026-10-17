@@ -2,6 +2,27 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R128 scalar TIME binary Bind rejects legal microseconds and 24h and conflates receiver error states",
+      "gap_ids": [
+        "TYPE-06",
+        "PROTO-04",
+        "PROTO-05"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r128-time-binary-parameter.md"
+      ],
+      "tests": [
+        "tests/time_binary_parameter_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "reproduction": "Actual PG18.6 (180006) final permanent158 all0; same158 against immutable accepted R127 binarybd35ec36 completes with132 failures, actual1. Existing1083 receiver accepted only whole seconds below24h and rejected fractional/24h as22P03, not absent and not silent truncation. Initial old run stopped after112 on missing RowDescription in named rebind fixture; incomplete log preserved, only failure aggregation guarded then PG/old final158 repeated; no initial complete158 red claim.",
+        "focused_tests": "Only NetworkServer.cpp and own registration. Private binary receiver now carries inputSqlState, reads eight big-endian unsigned bytes, validates0..86400000000 including24h, preserves canonical integer microsecond clock without double or signed conversion. Short08P01, out-of-range22008 before trailing22P03; all other codecs unchanged. Normal1/repeat0 both0, current158 all0 including actual1083, NULL, text/binary outputs, fixed0..6 quantization vectors, named Parse/Describe/eight rebinds, negative/too-large/short/trailing codec data, post-error recovery and BOOL/INT4/FLOAT8 neighbors. Final24native28wire3 verified relinked realMain=55 distinct whole entries all0 and independent checker0; unchanged R124 TU/source/header/flags/compiler/Main receipt/object bytes verified then new links57 CURRENT O2 libraries/no stubs/actual3 isolated runs0, not Main TU recompile.",
+        "full_suite": "No new full registered/TLS/whole-engine sanitizer proof. Binaryb25a7eb42ab2ccbd8927177f9a944e8dbf1f9c61484bbe307285c2ed30299441 cacheb6c2916ab67c3ff0da953101b691c2d0103064d882f55b57b7b30c4c22da3c8e seal921fdfe6b04c332c67bbcd180cb777ba7f66cb5eef7807a818dd213a52d80353 compile739bf42b71ae53b6f0cfe5e817aec5e81edb16ef16893f6616d93f026f9594c8. Dual-cache/all58 receipts/57 test-library bytes final0. Original122 core values/metadata/notice SVCM allmatch with raw2 optional PG P/F/L/R provenance differences retained, column4 exact; original97 exact. Accepted549MD898native530Python3Main1431 vs working552MD901+533+3=1437 with six original pending runtime entries;554 PythonAST/13Bash static.",
+        "scope": "Scalar actual1083 receiver only; no new native driver and no public header/Main/heap change. Does not migrate4-byte whole-second TIME storage or claim TIME[]/TIMETZ/timestamp microsecond receivers/all temporal semantics/outer malformed wire framing. Original273 items/checkboxes unchanged22complete166partial70unverified15deferred, ordinary remaining modules stay open, not user-deferred. Original56933-byte candidate and three draft bytes preserved, no push, Actions disabled."
+      }
+    },
+    {
       "issue": "R127 excessive TIME precision in direct SELECT projections: effective precision and once-per-declaration wire notice",
       "gap_ids": [
         "TYPE-06",

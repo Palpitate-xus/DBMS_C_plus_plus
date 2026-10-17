@@ -4,6 +4,10 @@
 按本项独立本地提交，不push。
 来自[R122](issue-review-r122-time-explicit-precision.md)在R126后的两条剩余观察。
 
+后续实际1083的scalar binary Bind微秒/24时及错误状态见[R128](issue-review-r128-time-binary-parameter.md)。
+158/55和原122核心、原97匹配另作验收；本项仍为直接投影精度/通知，旧heap、
+其他表达式角色及其他receiver保持各自所有权。
+
 ## 实际缺陷与修改计划
 
 实际PostgreSQL18.6（180006）将直接TIME(7)声明的precision截断为6，并发送

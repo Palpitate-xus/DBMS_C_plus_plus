@@ -205,6 +205,13 @@ Simple Q或Extended Parse各对真实声明发送一次WARNING/22023，Describe�
 边界见[R127](issue-review-r127-time-excess-precision.md)：不表示DDL、SQL PREPARE、嵌套或
 其他表达式、消息过滤GUC、其他时态类型和完整转换资格已完成；旧heap不升级。
 
+实际声明OID1083的TIME参数支持八字节大端整数微秒binary Bind，范围
+0–86400000000（包含24:00:00）；保留完整微秒后再由实际SQL声明执行0–6舍入。
+不足八字节报08P01、越界22008，合法前八字节后有多余字节报22P03；错误后
+连接可继续使用。范围优先于尾部检查，详见[R128](issue-review-r128-time-binary-parameter.md)。
+这仅修接收codec，不迁移旧4字节TIME表行；不要据此认为旧表可保存全部微秒，
+TIME[]、TIMETZ及时间戳微秒binary接收也不由此项声明完成。
+
 ### 其他类型
 | 类型 | 说明 |
 |------|------|

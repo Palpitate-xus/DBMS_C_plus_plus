@@ -2,6 +2,10 @@
 
 状态：实现及匹配产物的36入口有限验收全部通过；按本项独立本地提交，不push。
 
+后续实际1083的scalar binary Bind微秒/24时接收见[R128](issue-review-r128-time-binary-parameter.md)，
+158协议及55入口全0。原接收器只接受整秒，不是完全缺失；本项仍只负责结果
+发送，旧heap和其他receiver不因后续局部修复被冒称完成。
+
 ## 问题与影响
 
 TIME已有发送分支却调用仅服务旧heap的parseTimeToSeconds：只支持整秒和

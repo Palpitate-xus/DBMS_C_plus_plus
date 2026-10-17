@@ -4,6 +4,7 @@
 
 | 审查 | 输入 | 内容 |
 | --- | --- | --- |
+| [R128 TIME二进制参数](issue-review-r128-time-binary-parameter.md) | 接收器整秒/24时限制及错误状态 | PG158全过/旧完整132失败；修复微秒与24时接收，08P01/22008/22P03和错误后恢复，最终55入口全0，不迁移整秒heap或冒其他receiver完成 |
 | [R127 直接TIME过高精度](issue-review-r127-time-excess-precision.md) | 有效6与声明一次warning | PG276/旧246失败、252原生旧225失败；最终54入口全0，原122核心值/metadata/通知匹配，PG内部诊断来源不冒充；DDL/其他表达式及完整资格另项 |
 | [R126 TIME精度关键字语法](issue-review-r126-time-precision-grammar.md) | 无符号int32 token与结构化42601 | PG326/旧296失败、严格549原生旧217失败；首版DDL Parse重置已修，最终52入口全0、原122仍2条TIME(7)通知/typmod差异 |
 | [R125 合法TIME显式精度](issue-review-r125-time-precision-value.md) | 基本clock两阶段舍入与真实AST声明 | PG830/旧830失败、339原生旧317失败；最终50入口全0、原97全匹配/122仍12边界差异，不等于grammar/warning/完整heap完成 |

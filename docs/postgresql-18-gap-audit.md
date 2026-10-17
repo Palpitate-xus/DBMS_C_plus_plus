@@ -1,5 +1,9 @@
 # 2026-10-13 全仓库审查
 
+TIME真实1083的微秒/24时binary Bind接收及错误状态见[R128](issue-review-r128-time-binary-parameter.md)。
+158及有限55完整入口全0；只修实际接收codec，不等于TIME[]/其他时态receiver或
+旧4字节整秒heap迁移。原273统计/勾选不提升，普通剩余不改为用户暂缓。
+
 直接TIME高precision的有效6、归一化与Q/P一次通知见[R127](issue-review-r127-time-excess-precision.md)。
 252/276及有限54入口全0，原122核心行为匹配；PG内部诊断来源不冒充同一实现。
 DDL/其他表达式、消息GUC、完整转换资格和旧heap仍普通开放，原273统计/勾选不提升。

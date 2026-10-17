@@ -1,5 +1,13 @@
 # DBMS 功能测试报告
 
+新增[R128 TIME二进制参数](issue-review-r128-time-binary-parameter.md)158协议控制全过，实际PG158
+全过、旧完整132失败；初版旧fixture112项后缺RowDescription中断保留、强化失败
+收集后按同一158期望重跑。NetworkServer实际normal1/repeat0均0，最终24native+
+28协议+3核对后新链接当前57库并实际执行的真实Main=55不同完整入口全0。
+原122核心匹配（原始2条PG内部来源字段不同保留）、原97精确匹配；本项接受
+898native+530Python+3Main=1431，工作区901+533+3=1437含原六候选，554AST/13Bash
+另检。无新完整注册/TLS/整库sanitizer证明，不冒重编Main或旧heap升级。
+
 新增[R127 直接TIME过高精度](issue-review-r127-time-excess-precision.md)252原生/276协议全过，
 PG276全过、固定旧原生225/协议246失败；2/0及复查1/0增量normal/repeat均0。
 最终24native+27协议+3核对后重新链接当前57库并执行的真实Main=54不同完整入口
