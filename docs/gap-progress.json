@@ -2,6 +2,29 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R125 valid TIME precision value conversion and genuine declaration metadata",
+      "gap_ids": [
+        "TYPE-06",
+        "TYPE-16",
+        "PROTO-04",
+        "PROTO-05"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r125-time-precision-value.md"
+      ],
+      "tests": [
+        "tests/time_precision_value_test.cpp",
+        "tests/time_precision_value_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "reproduction": "ActualPG180006permanent830all0 versusimmutableR123R124artifacte593e92a830with830failuresactual1; completeoldnative339317failuresactual1. Literalexpectedintegervectorsverifiedbeforeproductedits; failuresincludevalue/metadata/not830independentbugs.",
+        "focused_tests": "OnlyExprEvaluator.cpp basicTIMEtext/declaredTIME0..6input plusNetworkServeractualASTtimeprecision andownregistration. Integerinputhalf-even thenpositiveprecisionhalf-up, real1083/1183read-onlycatalogidentity no row/UDTguess. Firstnormal2/repeat0/native339/wire830all0; narrowdeclarationcatchsoIO/cancellation/corruptmetadata propagate, finalnormal1Network/repeat0both0. Final22native25wire3verifiedrealMain50distinctwholeentriesall0. UnchangedR124TUsource/header/flags/compiler/Mainreceipt/objectbytes verified thennewlinks57CURRENT O2libraries/no stubs/actualisolatedruns0, NOTnewTUcompile.",
+        "full_suite": "No newcomplete registered/TLS/wholeengine sanitizer proof. Frozenbinary 1a1d677ead64f7507f382ee9a3214709f941a39bc0cb40a66adf22d68b89786d cache 017c0e1894a5ea8d32ccf1fd5d5d9fe3259c23a1ea6b412c5818d2de7c8d39b3 seal 9c8ce865cc24ce8da4ce4ea8f65deeab1536061214c5f4f1c20ea1b02791a10b compile 739bf42b71ae53b6f0cfe5e817aec5e81edb16ef16893f6616d93f026f9594c8; dualcache58receipts57testbytes0. Extraoriginal122110match/12remainingprecision_boundary10+null_bad_precision2,physicalcolumn4stillmatch; original97all0differences, notall122pass. Accepted546MD896native527Python3Main1426 versusworking549MD899+530+3=1432originalpending6runtimeentries,551PythonAST13Bashstatic0.",
+        "scope": "Valid0..6basicclockvalueandtop-levelrealCAST/::/typedliteral scalar/array declaration only; NULL/empty/Describe/textBind/binaryresult/dimensions/lowerbounds/aliases. Notinvalidprecisiongrammar/warnings/constantanalysisstage/allcommonexprtypmods/fullinput/casteligibility/heapmigration/binaryBind. Original273items/checkboxes unchanged22complete166partial70unverified15deferred; R122remaining12ordinaryopen, user-skippedmodulesnotreopened, original56933bytepatchandthreedrafts preserved; nopush/Actionsdisabled."
+      }
+    },
+    {
       "issue": "R123 temporal column precision lost across registry schema catalog and physical projection",
       "gap_ids": [
         "TYPE-06",

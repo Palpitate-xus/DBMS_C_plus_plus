@@ -1,13 +1,17 @@
 # R122：显式TIME精度的值、描述符和边界行为缺失
 
-状态：显式CAST值/AST precision与边界仍未实现，不计完成。列声明元数据
-后续拆分为[R123](issue-review-r123-temporal-column-precision.md)，其中独立投影路由由
-R124另项处理；验收以各自记录为准，不把列元数据等同本项全部修复。
-继续独立本地提交，不push，不恢复用户已明确跳过的模块。
+状态：列声明元数据[R123](issue-review-r123-temporal-column-precision.md)及合法TIME(0–6)的
+转换/声明描述[R125](issue-review-r125-time-precision-value.md)已分项修复。precision边界、
+warning及分析时机仍普通开放，不计本组合问题全部完成。独立本地提交，
+不push，不恢复用户已明确跳过的模块。
 
 R123后完整重采原122条观察，真实TEMP列空/NULL的四条元数据观察已匹配，
 其余118条仍有差异；当前采集/比较0不等于122条全过。值/AST声明、边界和
 warning仍待继续修复，原始122条旧差异日志保留。
+
+R125后再完整重采122条，110条已匹配，剩余12条仅为precision_boundary的
+10条及NULL坏precision的两条；原97条基本clock/合法precision则全匹配。
+语法/通知和剩余分析阶段继续单独修复，不以122采集/比较0声称122全过。
 
 ## 实际证据
 

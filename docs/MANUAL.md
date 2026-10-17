@@ -186,7 +186,13 @@ TIME/TIMETZ/TIMESTAMP/TIMESTAMPTZ及数组列的合法precision会保存到schem
 声明。新有modifier的schema使用既有0x4442000c扩展，无modifier仍用旧格式，
 物理槽宽不变。旧声明没有保存的precision无法从值推回；备份后按可信原DDL
 在副本验证重建/导入。边界见[R123](issue-review-r123-temporal-column-precision.md)，
-这不表示CAST值已按precision舍入或TIME旧整秒heap已升级。
+列元数据本身不完成值转换；合法TIME精度转换后续见下方R125，旧整秒heap仍未升级。
+
+显式TIME(p)（0–6）的基本clock转换会先按整数微秒规范输入，再按声明
+precision单独舍入；例如0.500000在p=0为1秒，0.0004996先成为500微秒、
+在p=3再成为1000微秒。NULL、空结果和Describe也保留实际声明precision，
+不从首行或同名列猜元数据。验证及边界见[R125](issue-review-r125-time-precision-value.md)，
+这不升级旧4字节整秒heap；语法/通知和完整转换资格仍有未完项。
 
 ### 其他类型
 | 类型 | 说明 |

@@ -1,5 +1,11 @@
 # DBMS 功能测试报告
 
+新增[R125 合法TIME显式精度](issue-review-r125-time-precision-value.md)339原生/830协议，
+PG830全过、旧830协议/317原生失败；最终22native+25协议+3真实Main=50完整入口
+均0。未改Main TU核对后重连当前57库并执行，不冒重新编译。原97全匹配、122
+仍12边界差异；本项接受896native+527Python+3Main=1426，工作区899+530+3=1432
+含原候选，无新完整注册/TLS/整库sanitizer证明。
+
 新增[R123 时间列precision](issue-review-r123-temporal-column-precision.md)782项原生/104项协议，
 实际PG104全过、旧218原生/94协议失败；首版原生全过、协议六个R124路由失败保留。
 最终匹配产物的有限回归见记录；不把metadata检查当微秒heap、CAST值舍入或新全量证明。

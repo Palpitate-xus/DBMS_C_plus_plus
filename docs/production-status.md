@@ -1,5 +1,9 @@
 # 生产化状态
 
+合法TIME(0–6)基本clock转换与静态声明描述修复见[R125](issue-review-r125-time-precision-value.md)。
+先按微秒输入规则规范，再单独按precision舍入，NULL/空/Describe保留真实typmod；
+原97观察全匹配、122仍12个边界/NULL坏precision差异，语法/warning及旧heap仍开放。
+
 时间类型及数组列的合法precision保存和物理投影修复见[R123](issue-review-r123-temporal-column-precision.md)。
 声明0/3/6与省略(-1)分开，冷热schema/目录不从物理宽度猜precision；无关ALTER
 和NULL/空结果保留声明。CAST值舍入、语法边界/warning及旧秒heap仍普通开放。

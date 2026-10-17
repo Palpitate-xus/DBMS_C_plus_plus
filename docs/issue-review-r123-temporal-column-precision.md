@@ -6,6 +6,10 @@
 上游独立提交为`3d45bd1e68ae8ceddd74fd53b722e4c082ac816c`；其提交前后只读
 复核均0，本项四CPP、两个测试及所属文档随后独立提交，不混入该上游版本。
 
+后续合法TIME(0–6)的值转换与真实表达式声明见[R125](issue-review-r125-time-precision-value.md)。
+本项仍是列元数据范围；后续原122观察已从118剩至12个边界/通知差异，
+不修改下方R123当时的失败证据或声称旧heap已升级。
+
 ## 实际发现及修改方法
 
 TIME、TIMETZ、TIMESTAMP、TIMESTAMPTZ及数组的合法声明精度被当作未指定

@@ -1,5 +1,9 @@
 # 2026-10-13 全仓库审查
 
+合法TIME(0–6)的基本输入precision转换与真实表达式声明见[R125](issue-review-r125-time-precision-value.md)。
+339/830及有限50入口已验收，原97全匹配、原122剩12个声明边界/通知差异；
+不等于完整TIME grammar、CAST资格、分析阶段、所有表达式typmod或旧heap升级。
+
 TIME/TIMETZ/TIMESTAMP/TIMESTAMPTZ及数组列的合法precision丢失见
 [R123](issue-review-r123-temporal-column-precision.md)，只修schema、目录和真实列投影元数据；
 CAST值/AST声明、precision语法/warning和旧秒heap仍普通待修，原273不提升。

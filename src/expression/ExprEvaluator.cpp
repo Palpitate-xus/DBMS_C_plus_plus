@@ -4380,7 +4380,7 @@ static bool resemblesTemporalFieldText(const std::string& text) {
         "cannot cast type " + sourceType + " to " + targetType);
 }
 
-static std::string normalizeDefaultTimeInput(const std::string& input) {
+static std::string normalizeDefaultTimeInput(const std::string& input, int precision = -1) {
     std::string clock = trimStr(input);
     const auto fail = [](const char* state) -> void {
         throw DbError(state, "invalid input syntax or range for type time");
@@ -4444,7 +4444,14 @@ static std::string normalizeDefaultTimeInput(const std::string& input) {
         fail("22008");
     // Integer input rounding includes half-even and carries through 24h.
     // Formatting must not retain unrounded text or pass the clock via double.
-    const int64_t micros = parts.micros;
+    int64_t micros = parts.micros;
+    if (precision >= 0 && precision < 6) {
+        int64_t scale = 1;
+        for (int digit = precision; digit < 6; ++digit) scale *= 10;
+        // Typmod rounding is a separate stage from input half-even. Valid
+        // TIME clocks are nonnegative; a positive half rounds upward.
+        micros = ((micros + scale / 2) / scale) * scale;
+    }
     char buffer[32];
     std::snprintf(buffer, sizeof(buffer), "%02lld:%02lld:%02lld",
         static_cast<long long>(micros / 3600000000LL),
@@ -5210,9 +5217,15 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
         result.collation = v.collation;
         return result;
     }
-    if ((target == "time" || target == "time without time zone") &&
-        (isTextCastSourceType(sourceType) || sourceType == "time"))
-        return ExprValue("time", normalizeDefaultTimeInput(v.value), false);
+    if (targetBase == "time" &&
+        (isTextCastSourceType(sourceType) || sourceType == "time")) {
+        const auto declaration = SQLParser::parseTypeSpecification(target);
+        if (declaration.typeMods.empty())
+            return ExprValue("time", normalizeDefaultTimeInput(v.value), false);
+        const auto modifier = TypeRegistry::instance().applyTypeMods("time", declaration.typeMods);
+        if (modifier.ok())
+            return ExprValue("time", normalizeDefaultTimeInput(v.value, modifier.typmod), false);
+    }
     if (target == "date") return castToDate(v);
     if (target == "timestamp" || target == "timestamp without time zone")
         return castToTimestamp(v, "timestamp");

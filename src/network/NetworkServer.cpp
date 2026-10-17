@@ -1541,7 +1541,55 @@ int16_t protocolTypeSize(uint32_t typeOid, const Column& column) {
     return column.isVariableLength ? -1 : static_cast<int16_t>(column.dsize);
 }
 
-int32_t protocolDeclaredCastModifier(const Expr* expression) {
+int32_t protocolDeclaredTimePrecision(const Expr* expression, const Session& session) {
+    std::string spelling;
+    if (const auto* cast = dynamic_cast<const CastExpr*>(expression)) {
+        if (cast->implicit) return -1;
+        spelling = cast->typeName;
+        if (!cast->typeMods.empty()) {
+            std::string arraySuffix;
+            while (spelling.size() >= 2 && spelling.compare(spelling.size() - 2, 2, "[]") == 0) {
+                spelling.resize(spelling.size() - 2);
+                arraySuffix += "[]";
+            }
+            spelling += '(';
+            for (size_t i = 0; i < cast->typeMods.size(); ++i)
+                spelling += (i ? "," : "") + cast->typeMods[i];
+            spelling += ')' + arraySuffix;
+        }
+    } else if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(expression);
+               binary && binary->op == "::" && binary->right) {
+        spelling = binary->right->toString();
+    } else if (const auto* literal = dynamic_cast<const LiteralExpr*>(expression)) {
+        spelling = literal->typeName;
+    }
+    if (spelling.empty()) return -1;
+    try {
+        const auto declaration = SQLParser::parseTypeSpecification(spelling);
+        if (declaration.typeMods.empty()) return -1;
+        CatalogManager::QualifiedName requested;
+        if (!CatalogManager::parseQualifiedName(declaration.typeName, requested, true) ||
+            (requested.name != "time" && requested.name != "_time")) return -1;
+        // Spelling only selects candidates: the actual scalar/array OID
+        // owns precision. Never infer a user type from a familiar name.
+        const auto catalog = regtype_detail::metadata(g_engine, session.currentDB);
+        const auto declared = resolveDeclaredTypeName(spelling, &catalog, &session);
+        if (declared.typeOid != 1083 && declared.typeOid != 1183) return -1;
+        const auto modifier = TypeRegistry::instance().applyTypeMods("time", declaration.typeMods);
+        return modifier.ok() ? modifier.typmod : -1;
+    } catch (const DbError& failure) {
+        const auto& state = failure.sqlState();
+        // Existing analysis owns invalid declarations. I/O, cancellation
+        // and corrupt metadata must never become an unconstrained typmod.
+        if (state == "42601" || state == "42704" || state == "3F000" || state == "22023")
+            return -1;
+        throw;
+    }
+}
+
+int32_t protocolDeclaredCastModifier(const Expr* expression, const Session& session) {
+    const int32_t timePrecision = protocolDeclaredTimePrecision(expression, session);
+    if (timePrecision >= 0) return timePrecision;
     if (!expression) return -1;
     std::string typeName;
     std::vector<std::string> modifiers;
@@ -1595,7 +1643,8 @@ int32_t protocolDeclaredCastModifier(const Expr* expression) {
 
 bool protocolHasLengthModifier(uint32_t oid) {
     return oid == 1042 || oid == 1043 || oid == 1014 || oid == 1015 ||
-           oid == 1560 || oid == 1561 || oid == 1562 || oid == 1563;
+           oid == 1560 || oid == 1561 || oid == 1562 || oid == 1563 ||
+           oid == 1083 || oid == 1183;
 }
 
 std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& result,
@@ -1767,7 +1816,7 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
                     if (!protocolHasLengthModifier(descriptions[i].typeOid) ||
                         descriptions[i].tableOid != INVALID_OID) continue;
                     const int32_t modifier = protocolDeclaredCastModifier(
-                        select->selectList[i].expr.get());
+                        select->selectList[i].expr.get(), session);
                     if (modifier >= 0) descriptions[i].typeModifier = modifier;
                 }
             }
@@ -2824,7 +2873,7 @@ bool describePreparedResult(const std::string& sql, Session& session,
         directParameterOids.push_back(parameterOid);
         // The physical-descriptor adapter below uses SELECT * and cannot
         // retain a projection cast. Read typmods from the original live AST.
-        projectionTypeModifiers.push_back(protocolDeclaredCastModifier(item.expr.get()));
+        projectionTypeModifiers.push_back(protocolDeclaredCastModifier(item.expr.get(), session));
     }
     if (shape.columns.empty()) return false;
     const std::string descriptionSql =

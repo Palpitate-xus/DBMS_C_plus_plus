@@ -4,6 +4,7 @@
 
 | 审查 | 输入 | 内容 |
 | --- | --- | --- |
+| [R125 合法TIME显式精度](issue-review-r125-time-precision-value.md) | 基本clock两阶段舍入与真实AST声明 | PG830/旧830失败、339原生旧317失败；最终50入口全0、原97全匹配/122仍12边界差异，不等于grammar/warning/完整heap完成 |
 | [R123 时间列precision持久化](issue-review-r123-temporal-column-precision.md) | 四类型及数组的schema/目录/物理投影 | 旧782原生218失败、PG104全过/旧94失败；首版六个42703由R124另项，冷热加载/格式与有限终态见记录，不等于CAST舍入或heap升级 |
 | [R124 TIMETZ后缀表投影](issue-review-r124-timetz-postfix-projection.md) | NULL转换被误判列名42703 | 实际PG96全过、旧24失败；仅补既有投影路由的TIMETZ，有限验收与独立版本见记录，不等于完整TIMETZ codec/grammar |
 | [R122 显式TIME精度复现与计划](issue-review-r122-time-explicit-precision.md) | 122个实际参考/当前观察 | 仅保存缺陷与修改方法，尚未实现；值/描述符、schema元数据、声明边界与warning分项，采集0不作通过或完成证明 |
