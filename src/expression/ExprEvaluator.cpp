@@ -4994,8 +4994,19 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
         return result;
     }
     if (target.size()>=2 && target.compare(target.size()-2,2,"[]")==0) {
-        const auto elementTarget = target.substr(0,target.size()-2);
+        auto elementTarget = target.substr(0,target.size()-2);
         const auto elementType = ExprHelper::canonicalResultTypeName(elementTarget);
+        // Canonical array input loses the original catalog spelling. Keep
+        // named, unconstrained BPCHAR/BIT element input distinct from the
+        // SQL CHAR/CHARACTER/BIT keywords' default length of one, just as
+        // scalar named input below does. Explicit element typmods still win.
+        if (elementType == "character" || elementType == "bpchar" || elementType == "bit") {
+            const auto declaration = SQLParser::parseTypeSpecification(targetTypeName);
+            const auto spelling = toLower(declaration.typeName);
+            if (declaration.typeMods.empty() && spelling != "char" &&
+                spelling != "character" && spelling != "bit")
+                elementTarget = elementType == "bit" ? "pg_catalog.\"bit\"" : "pg_catalog.bpchar";
+        }
         const auto sourceArrayType=common_type_detail::canonical(sourceType);
         const bool oidElements=elementType=="regtype" ||
             (common_type_detail::array(sourceArrayType) && sourceArrayType=="regtype[]");

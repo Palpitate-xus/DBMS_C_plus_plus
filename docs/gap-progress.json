@@ -2,6 +2,27 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R112 unconstrained named BPCHAR/BIT array input",
+      "gap_ids": [
+        "TYPE-04",
+        "TYPE-16",
+        "PROTO-04"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r112-unconstrained-named-array-input.md"
+      ],
+      "tests": [
+        "tests/unconstrained_named_array_input_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "reproduction": "Actual180006 reference57 zero failures; immutablec1f5 old57 has44failures actually1. Real namedtype/arrayidentity, lowerbounds/multidim, keyword/modifier controls and wireOID1014/1561 Bind use text output, independent of R110 candidate binarysend.",
+        "focused_tests": "Own ExprEvaluator.cpp only; two iterations normal1CPP/repeat0 each actually0. Candidate1 missed CHARACTER canonical name: all24/57 BPCHAR failures and R110one/110 retained. Candidate2 fixes both named inputs, complete57/110 and22wholewire0; newnative fixture count134 retained separately. Final frozen15native+22wire=37unique wholeentries all actual0; new182/110 andown57 all0. Final normal/repeat0 productionCPP unchanged. Matching binary/cache dualstamps/all58receipts/57testbytes/source-test-scriptseal and unchanged header fences0. Full working static and own12path projectedindex532MD/887native/514Python zero; not cleanHEAD/full registered/TLS/sanitizer proof.",
+        "full_suite": "One new registered protocol driver; independent index887native+3Main+514Python=1404, not a new complete registered run. Working tree also contains preserved R98/R99/R109 and R110 candidates; their source/tests/docs excluded from this item. Only own12path projected changes accepted.",
+        "scope": "Original273 item states and checkboxes unchanged22complete166partial70unverified15deferred. No implicit graph, public header, provider lifetime, wire byte or user-defined array rewrite in this issue. R106 and other explicit deferrals not resumed. CurrentR109 skipped/preserved/uncommitted. R110 binary result output independently validated/committed next. No push; Actions disabled."
+      }
+    },
+    {
       "issue": "R108 typed ARRAY_POSITION equality, real polymorphic declarations and routine ownership",
       "gap_ids": ["TYPE-16", "FUNC-01", "SQL-09", "PROTO-04"],
       "status": "partial",

@@ -108,6 +108,12 @@ USE DATABASE mydb;
 重载计入填充，BIT_LENGTH则经TEXT转换去除填充。整数/BOOL等不能因可转为
 可打印文本就直接调用这些函数，应显式转换为适当输入类型。
 
+具名数组输入省略长度时，`pg_catalog.bpchar[]` 和 `pg_catalog.bit[]` 保留
+元素原长度；例如 `CAST('{abcd}' AS pg_catalog.bpchar[])` 返回 `{abcd}`。
+普通 SQL 关键字 `CHARACTER[]` / `BIT[]` 仍默认长度 1，显式 `(n)` 仍生效；
+协议数组参数声明只有 OID，没有隐含长度 1。边界和回归见
+[R112](issue-review-r112-unconstrained-named-array-input.md)。
+
 ### 日期时间类型
 | 类型 | 说明 | 特殊值 |
 |------|------|--------|

@@ -1,5 +1,10 @@
 # 2026-10-13 全仓库审查
 
+具名 BPCHAR/BIT 数组输入的独立修复见
+[R112](issue-review-r112-unconstrained-named-array-input.md)，参考57零失败、旧44失败；
+真实无 typmod 声明和关键字默认长度分开处理。原273项状态与勾选不提升，
+不把本项验收扩为通用数组、二进制能力或所有问题完成。
+
 后续[R108数组查找](issue-review-r108-array-position-typed-equality.md)处理真实
 元素相等、多态输入与用户重载/数组参数元数据；参考258零失败、旧258/158失败，
 354原生/258协议及完整邻接入口的验收以该记录为准。ARRAY_POSITIONS、通用

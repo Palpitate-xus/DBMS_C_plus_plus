@@ -1,5 +1,10 @@
 # DBMS 功能测试报告
 
+新增[R112 具名数组输入](issue-review-r112-unconstrained-named-array-input.md)
+57条协议控制，实际参考180006零失败、固定旧程序44失败；逐版失败、正常/repeat
+与有限门禁见记录。只新增一个协议注册入口，本项提交后的注册组合为887native+3Main+
+514Python=1404，无新完整注册回归；R109/R110 候选另计，不复用旧全量证明。
+
 当前运行结果、失败明细和复现方法见[代码审查索引](review-index.md)。验证入口为 `bash scripts/build_tests.sh`，只运行其已注册集合；未注册测试需单独运行或补入入口。
 
 后续[R108数组元素相等](issue-review-r108-array-position-typed-equality.md)新增
