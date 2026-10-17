@@ -1,5 +1,15 @@
 # DBMS 功能测试报告
 
+2026-10-17[干净ecf632e9完整注册回归](issue-full-registered-ecf632e9.md)已结束：
+1436个入口各一次、有序唯一、无漏跑/重复；1433实际通过、2失败、1 TLS环境skip。
+标准runner/summary/driver及独立终态检查器均实际1；输入与产物独立核对0，不冒全绿。
+全部58生产TU fresh O2/repeat0、3真实Main fresh测试TU/新链接57匹配库/无stubs并实际
+隔离执行通过。两失败为background_worker的55P03异常和stored_function_engine_owner
+末尾DROP断言，分别按原后台专项/R51范围只登记，不删除断言或猜同根因。
+R129/R130原完整失败入口本轮通过，R129/R131/R132/R133新增协议入口也全过；
+不由此关闭旧R51、普通其余缺口或原273。原状态22/166/70/15保持；下方各轮
+“未全量”等保留当时历史，以本节新终态为准。不push，Actions仍禁用。
+
 后续[R133 timestamp binary微秒](issue-review-r133-timestamp-binary-microseconds.md)修复合法
 1114/1184非整秒被22P03拒绝：PG266全过、冻结旧版266/204失败，整数解码及负epoch
 向下拆分保留精确微秒与R131 UTC标记。正常1/repeat0、核心266和12native+16wire+

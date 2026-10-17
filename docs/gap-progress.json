@@ -2,6 +2,25 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Clean accepted ecf632e9 full registered regression terminal with two real failures and one TLS environment skip",
+      "gap_ids": [],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-full-registered-ecf632e9.md"
+      ],
+      "tests": [
+        "scripts/build_tests.sh",
+        "tests/background_worker_test.cpp",
+        "tests/stored_function_engine_owner_test.cpp"
+      ],
+      "verification": {
+        "full_suite": "Actual1436 ordered distinct complete:899native897pass2fail;3fresh realMain pass;534Python533actualpass1OpenSSL-absentTLSskip0fail. Total1433actualpasses2fail1skip;1434PASSED exits minus1skip. Canonical/summary/driver/independent final1 preserves real failures. Independent completeness/source/artifact audit0; no missing/extra/duplicate/out-of-order IDs. Fresh58productionO2 normal0/repeat0CPP0;3fresh Main testTUs(explain/sessionO0,windowO2) newlinked57matchedO2libraries,no stubs,actualisolatedruns0. Clean alltrackedHEAD/status/input/binary/dualcache/all58receipts/57prehashedproductionbytes unchanged.",
+        "failures": "FECF-01 background_worker_test uncaughtDbError cold domain catalog read conflicts with an active DDL owner SQLSTATE55P03,abort. User-deferred background/checkpoint scope record only; exact thread/operation/rootcause not proven. FECF-02 stored_function_engine_owner_test originalline126 local.dropDatabase(db)!=OK assertion,abort; all preceding original owner/privatewrites/rollback/generated/default/nested/value assertions passed. User-deferredR51 DROP path record only; no assertion removal or diagnosis of returnstatus/locks/historicalsamecause. Ordinary domain/stored-function families not broadly deferred.",
+        "followup": "R129 array_inspection_projection native+new51wire,R130 originalpg_typeof+new168native,R131158wire,R132112wire,R133266wire all actually passed in clean combination. Historical8f3fail remain historical; analyze_null_statistics originalfull nowpasses does not closeR51 or prove causefixed. Ordinary native R62 ownership and temporalheapmicrosecond candidates await separate behavior reproduction, not counted as confirmed or passed.",
+        "scope": "Clean detachedecf excludes six original pending runtime drivers and unregistered draft; no source edits or second DB batch during fullrun. Started2026-10-17T10:23:26Z ended13:02:22Z. Full logb40536e9dbcb03ce7f386c6bdd519708ba027fc088cfd726a8418349180cb806;binary72ee373b9e72f1e799fcc87386d4bc06dd8aaa05e209be1221852ea7567323be cachebba6347dff4512d5c5fccd2ce4e37783e0cbe3cb4eee5e333df59f07d299e6ae compile8c8fe094583501824c98a09b12668b3db1c6c467c4debed304c7b5d4b0cdb5cd(path-dependent) input0ad4e0783c7e1a59a8306525143459c911ddaf45f48114eae7715fa0e6f5eacb. Not Root302c/R132TU reuse, no realTLS/whole-engine sanitizer/allPGfeaturecompletion proof. Original273items/checkboxes22complete166partial70unverified15deferred unchanged;original56933-byte candidate patch and three deferred drafts preserved. No push,Actions disabled."
+      }
+    },
+    {
       "issue": "R133 legal fractional TIMESTAMP/TIMESTAMPTZ binary parameter microseconds rejected22P03",
       "gap_ids": [
         "TYPE-06",
