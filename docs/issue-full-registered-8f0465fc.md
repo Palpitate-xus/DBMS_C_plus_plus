@@ -84,7 +84,7 @@ binary、双缓存、58个source/header/flags receipt和预先记录的57份库�
 | 记录 | 入口及实际失败点 | 已确认与修改方法 | 范围/状态 |
 | --- | --- | --- | --- |
 | F8F-01 | analyze_null_statistics_test，测试第87行dropDatabase(db) != OK，进程abort，完整入口FAILED | 所有先前NULL统计/分区断言已执行通过；当前未打印具体DBStatus，不能猜原因或说成统计值错误。先保留日志；若以后恢复DROP DB专项，再记录状态码及目录/缓存生命周期，修复所有者路径并回归，不能删除清理断言换通过 | 落在已暂缓R51的DROP DB路径，本轮只登记，不重开/不修复，不计通过 |
-| F8F-02 | array_inspection_projection_test，array_position抛SQLSTATE42883，未捕获导致abort | 该fixture把序列化数组存入普通TEXT列；先确认内部projection API与SQL类型契约，并用实际PG对照TEXT/真实array声明，再优先改为真实array fixture或修复已承诺的API行为。保留NULL/范围/多维控制，不放宽SQL签名来换通过 | 普通待复现/修复；是单数ARRAY_POSITION，不是已跳过的R109 ARRAY_POSITIONS，不混入其候选 |
+| F8F-02 | array_inspection_projection_test，array_position抛SQLSTATE42883，未捕获导致abort | 后续R129确认两层问题：旧TEXT夹具与原生类型提示丢isArray；真实INTEGER[]最终夹具在干净旧库也实际134，普通SQL参考/干净程序51均0。复用真实类型提示并校正夹具，保留NULL/范围/多维及TEXT拒绝控制，不放宽SQL签名 | 本轮FAILED不改写；[R129](issue-review-r129-native-array-projection-types.md)后续26有限完整入口及独立核对0，不等于新1432全量；不是已跳过的R109 |
 | F8F-03 | pg_typeof_test第37行，pg_typeof(tick())的objectOid==21且effects==1组合断言失败 | tick的AST显式声明smallint，callback返回typed NULL；绑定和类型查询前的零副作用断言已过。先分别打印OID/effects并追踪绑定前后resolvedResultType，比较native callback和stored声明所有权；保留类型分析不执行、执行只调用一次的契约，不靠改期望OID掩盖问题 | 普通待复现/修复；组合断言未区分类型错误或调用次数，尚不猜根因 |
 
 `full-regression.log`中该轮完整输出包含上述断言及FAILED标记；标准runner
@@ -93,7 +93,8 @@ binary、双缓存、58个source/header/flags receipt和预先记录的57份库�
 `pre-full-fence.log`、`full-regression.log`、`driver-summary.log`及
 `post-full-fence.log`均已实际产生；后者及独立输入/产物核对实际0。
 
-接下来先对F8F-02做真实PG/内部API对照并独立提交夹具修正，再分别复现
+后续F8F-02的原生声明缺陷与旧夹具已由[R129](issue-review-r129-native-array-projection-types.md)
+修复，并经26个有限完整入口核对通过；不是重新执行本轮1431。接下来分别复现
 F8F-03的OID和执行次数、修复真实声明所有权、添加永久回归并独立commit。
 后续定向通过不会倒改本轮三项FAILED，也不等于重新跑过整套1431。
 

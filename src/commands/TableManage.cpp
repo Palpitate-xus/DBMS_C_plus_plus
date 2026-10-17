@@ -34978,7 +34978,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     // bound as column context.
     if (expr.funcName == "expreval" && !expr.funcArgs.empty()) {
         std::map<std::string, std::string> rowCtx;
-        std::map<std::string, std::string> typeHints;
+        const auto typeHints = buildTypeHints(tbl);
         std::set<std::string> nullColumns;
         for (size_t i = 0; i < tbl.len; ++i) {
             bool valueIsNull = false;
@@ -34987,7 +34987,6 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                       rowBuffer, tbl, i, dbname, true, &valueIsNull)
                 : StorageEngine::extractColumnValueStatic(rowBuffer, tbl, i);
             rowCtx[tbl.cols[i].dataName] = v;
-            typeHints[tbl.cols[i].dataName] = tbl.cols[i].dataType;
             if (valueIsNull || (!engine && v.empty()))
                 nullColumns.insert(tbl.cols[i].dataName);
         }
@@ -37897,7 +37896,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
          expr.funcName == "array_position") &&
         !expr.funcArgs.empty()) {
         std::map<std::string, std::string> rowContext;
-        std::map<std::string, std::string> typeHints;
+        const auto typeHints = buildTypeHints(tbl);
         std::set<std::string> nullColumns;
         for (size_t i = 0; i < tbl.len; ++i) {
             bool valueIsNull = false;
@@ -37907,7 +37906,6 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 : StorageEngine::extractColumnValueStatic(
                       rowBuffer, tbl, i);
             rowContext[tbl.cols[i].dataName] = value;
-            typeHints[tbl.cols[i].dataName] = tbl.cols[i].dataType;
             if (valueIsNull || (!engine && value.empty()))
                 nullColumns.insert(tbl.cols[i].dataName);
         }
@@ -37958,7 +37956,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     }
     if (expr.funcName == "array_length" && !expr.funcArgs.empty()) {
         std::map<std::string, std::string> rowContext;
-        std::map<std::string, std::string> typeHints;
+        const auto typeHints = buildTypeHints(tbl);
         std::set<std::string> nullColumns;
         for (size_t i = 0; i < tbl.len; ++i) {
             bool valueIsNull = false;
@@ -37968,7 +37966,6 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 : StorageEngine::extractColumnValueStatic(
                       rowBuffer, tbl, i);
             rowContext[tbl.cols[i].dataName] = value;
-            typeHints[tbl.cols[i].dataName] = tbl.cols[i].dataType;
             if (valueIsNull || (!engine && value.empty()))
                 nullColumns.insert(tbl.cols[i].dataName);
         }
@@ -38847,14 +38844,13 @@ std::vector<std::string> StorageEngine::queryExpr(
             if (knownNull.has_value()) valueIsNull = *knownNull;
             if (!knownNull.has_value() && val == "NULL") {
                 std::map<std::string, std::string> rowContext;
-                std::map<std::string, std::string> typeHints;
+                const auto typeHints = buildTypeHints(tbl);
                 std::set<std::string> nullColumns;
                 for (size_t i = 0; i < tbl.len; ++i) {
                     bool columnIsNull = false;
                     const std::string value = extractColumnValue(
                         mr.second, tbl, i, dbname, true, &columnIsNull);
                     rowContext[tbl.cols[i].dataName] = value;
-                    typeHints[tbl.cols[i].dataName] = tbl.cols[i].dataType;
                     if (columnIsNull) nullColumns.insert(tbl.cols[i].dataName);
                 }
                 std::string expression;

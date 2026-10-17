@@ -2,6 +2,28 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R129 native array scalar projection loses isArray in declaration hints; stale TEXT fixture and BIGINT start control corrected",
+      "gap_ids": [
+        "TYPE-16",
+        "FUNC-01"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r129-native-array-projection-types.md",
+        "docs/issue-full-registered-8f0465fc.md"
+      ],
+      "tests": [
+        "tests/array_inspection_projection_test.cpp",
+        "tests/array_inspection_projection_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "reproduction": "Original clean8f1431 F8F-02 aborts42883 on TEXT fixture. Correctly declared INTEGER[] fixture, including final51-compatible bare BIGINT/explicit INTEGER split, still aborts134 on first array_position(flat_array,20) against verified clean57 O2 libraries/fresh stubs/pre-global isolation; stored integer/isArray assertion passed. Actual PG18.6 (180006) final51 and clean accepted binary51 both all0: ordinary SQL already correct, no false old-wire-red claim. Initial PG50 had2 fixture-only runtime-T prohibitions, preserved and corrected without changing SQLSTATE/value expectations. Initial development later failed134 at old BIGINT22003 expectation, kept; now original bare2147483648 explicitly42883 and explicit2147483648::integer22003 both asserted. Temporary reuse driver initial shell error2 did not execute fixture and is preserved.",
+        "focused_tests": "Four TableManage declaration builders reuse buildTypeHints: expreval, array inspection, array_length, NULL projection check. No header/Main/heap/signature change; real TEXT and NULL TEXT stay42883. Clean developer final fixture all0 with own one O2 TableManage object,56 verified donors and fresh stubs; reused successful unchanged object after fixture-only correction, not a fresh normal build. Root normal1TableManage/repeat0 both0; final14native9wire3 verified relinked realMain=26 distinct whole entries all0, independent0. Current58 receipts/dual-cache/57 bytes/seal0; unchanged R124 TU/header/source/flags/compiler/object hashes verified before new57 CURRENT O2 links/no stubs/actual3 isolated runs, not TU recompile.",
+        "full_suite": "No new full1432 run after this fix. Prior clean8f1431 terminal1427 actual pass/3 fail/1 TLS skip remains unchanged; F8F-02 fixed only within this26-entry gate, F8F-01 user-deferred R51 and F8F-03 separate. Binary600a5f1dc8bb00776519f3cdf70cfaf423174c06eec20e92546951dae0ccd3f9 cache9767ad7ce87cda03a85b7d1d685b332889945e1d9e2849ee74ea5f442d0bbfc9 seal3b03dfd9e9e240e18d75e6b737b902611beb5ad0d059cc99511c181a6be4b1b0; Root compile739bf42b distinct from clean0b2ff036. Accepted551MD898native531Python3Main1432 vs working554MD901+534+3=1438;555AST/13Bash static, no whole-engine sanitizer/real TLS proof.",
+        "scope": "Singular ARRAY_POSITION native row declaration, not skipped plural R109. Only four builders, not all legacy projection metadata. Original273 items/checkboxes22complete166partial70unverified15deferred unchanged; original56933-byte source candidate patch and three skipped draft bytes preserved; no push, Actions disabled."
+      }
+    },
+    {
       "issue": "Clean accepted 8f0465fc full registered regression terminal (not a passing or feature-completion claim)",
       "gap_ids": [],
       "status": "partial",

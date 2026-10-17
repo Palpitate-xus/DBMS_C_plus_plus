@@ -238,6 +238,11 @@ TIME[]、TIMETZ及时间戳微秒binary接收也不由此项声明完成。
 已验证范围及NULL/start顺序见[R108](issue-review-r108-array-position-typed-equality.md)。
 非空JSON/几何数组的非NULL查找没有默认相等操作符，不能把任意文本比较当作
 实现。用户同名重载保留真实返回声明；明确需要builtin可使用`pg_catalog.array_position`。
+
+原生SelectExpr/queryExpr同样依赖真实数组列声明，不能把序列化数组的TEXT列
+当作INTEGER[]。用TypeRegistry的resolveColumnType创建数组列可保留isArray；
+四处原生投影类型提示修复及永久验证见[R129](issue-review-r129-native-array-projection-types.md)。
+起点裸2147483648是BIGINT，按签名拒绝42883；显式INTEGER转换溢出为22003。
 `array_positions`和通用复合/域多态能力尚未完成。
 
 网络类型的格式、CAST源类型和协议验收范围见[R102输入检查](issue-review-r102-network-input-notation.md)

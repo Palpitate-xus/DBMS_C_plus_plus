@@ -1,5 +1,11 @@
 # DBMS 功能测试报告
 
+后续[R129 原生数组投影声明](issue-review-r129-native-array-projection-types.md)修复四处类型提示
+丢失isArray，并校正旧TEXT夹具；最终typed夹具在干净旧库实际134，PG/干净旧程序
+51协议均全过，证明SQL契约与原生API缺陷须分开。正常1/repeat0及14native+
+9wire+3核对后新链接当前库并执行的真实Main=26完整入口全0，独立复核0，不冒Main
+TU重编或新1432全量。原8f完整三失败保留，F8F-03继续处理，R51不重开。
+
 2026-10-17[干净8f0465fc完整注册回归](issue-full-registered-8f0465fc.md)已结束，实际退出1：
 1431入口各一次、按预期顺序无漏跑/重复，1427实际通过、3失败、1 TLS环境skip。
 全58 fresh O2/重复0、三真实Main fresh编译执行及输入/产物终态核对完成；
