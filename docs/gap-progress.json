@@ -2,6 +2,26 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R122 recorded explicit TIME precision reproduction and repair plan (not implemented)",
+      "gap_ids": [
+        "TYPE-06",
+        "TYPE-16",
+        "PROTO-04",
+        "PROTO-05"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r122-time-explicit-precision.md"
+      ],
+      "tests": [],
+      "verification": {
+        "reproduction": "ActualPG180006/currentR121dd282 each122observationcollection0, all122normalizedobservationsdiffer acrossvalue/metadata/boundaries/notices; NOT122independentbugs orallwrongvalues. Original97remaining21explicitTIME(0..6)differences. Detailedtemporaryobserverandcomparison inissue record; no permanenttests orproductchanges yet.",
+        "focused_tests": "Documentation-only diagnosis. RecordCAST/::/typedliteral/arrays/null/no rows/qualifiedtypes/textbinary/TEMPemptyNULLmetadata. Confirmkeywordnegative/float/arity/plus syntax reference42601 andTIME7clamp6WARNINGSQLSTATE22023, do notguessgenericnamedtypeboundaryrules. Planindependentphysicalschema/catalog/projectionrepair thenvalue/exprmetadata anddeclaration/warningchannels; do notdependonunacceptedR98emitWarning API.",
+        "full_suite": "No newregistered/nativeentry orruntimevalidationclaim. Source/test/script/binary/cache remainlastacceptedR12143entryartifact; no rerun43invented, no complete registered/TLS/wholeengine sanitizer proof.",
+        "scope": "Original273items/checkboxes unchanged22complete166partial70unverified15deferred; R122remainsnotimplemented. No source/Main/headers/storage/data edits; existingTIME4byteheap/fullµs/castgrammar/binaryBind andothergaps ordinaryopen. User-skippedR109/security/CTAS/lifetimesnotreopened, R98/R99/R106candidates preserved; no push, Actionsdisabled."
+      }
+    },
+    {
       "issue": "R121 default basic TIME text input validation and canonicalization",
       "gap_ids": [
         "TYPE-06",
