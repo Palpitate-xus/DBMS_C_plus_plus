@@ -48,13 +48,59 @@
 ## 当前实际阶段
 
 干净工作树已核对HEAD、空git status及预期899native/534Python/58生产/57库。
-正常O2构建已启动，首个生产TU为Main；未报告任何生产构建成功、完整入口通过
-或最终结果。重复构建、cache准备、1436标准入口及终态核对仍待真正到达。
+正常O2已实际重编全部58个生产TU、实际0，repeat为0个CPP、实际0；57份匹配
+生产对象、当前头下fresh stubs、全部58 receipt/双缓存/库字节及运行前fence
+实际0。标准1436入口已启动；本条进度观察为1065个完整入口结束、1063实际通过/
+2失败（见下表）。899个native均已结束（897过/2失败），3个真实Main均fresh
+测试TU编译、新链接57匹配生产库、无stubs并实际隔离执行通过；534Python已结束
+163个入口，余项仍在运行。尚未观察到环境skip，尚无完整终态。
+不把已完成数当全部通过。
 
-`driver.log`、`normal-build.log`已实际产生。`repeat-build.log`、
-`cache-preparation.log`、`pre-full-fence.log`、`full-regression.log`、
-`driver-summary.log`及`post-full-fence.log`只在对应阶段实际执行后才成立。
+本轮干净程序SHA256为
+`72ee373b9e72f1e799fcc87386d4bc06dd8aaa05e209be1221852ea7567323be`，
+cache为`bba6347dff4512d5c5fccd2ce4e37783e0cbe3cb4eee5e333df59f07d299e6ae`，
+本目录compile签名仍8c8fe094。Root的302c程序/R132 TU不混入本轮证明。
+
+`driver.log`、`normal-build.log`、`repeat-build.log`、`cache-preparation.log`、
+`pre-full-fence.log`及仍在写入的`full-regression.log`已实际产生。
+`driver-summary.log`及`post-full-fence.log`须待完整标准runner结束后实际产生，
+不能把计划文件视为已经执行的终态证据。
 进度工具输出PROGRESS_ONLY，不是终态，也不能把预期1436当观察数。
+Root运行中另做只读fence及alternate-index原候选保护检查，两者实际0，分别保存
+`root-midrun-fence.log`、`root-midrun-preservation.log`；原56933字节候选源码差异
+及三个暂缓draft字节未变。它们不是干净整批行为通过证明，也不代替终态核对。
+
+### 运行中实际失败（不是最终失败总数）
+
+| 记录 | 入口及实际失败 | 已确认、未确认与修改方法 | 范围/状态 |
+| --- | --- | --- | --- |
+| FECF-01 | background_worker_test抛出未捕获DbError：cold domain catalog read conflicts with an active DDL owner，SQLSTATE55P03，进程abort，完整入口FAILED | 不能仅凭消息猜测前台/后台线程或哪一操作失败，也未证明与旧R51同根因。若用户恢复专项，再采集线程/栈、DDL owner与冷热目录状态，验证所有者传递、锁顺序及可重试冲突策略；不得删除数据断言、吞异常或简单放宽sleep换绿 | 属于已暂缓的后台worker/checkpoint入口，本轮只登记、不重开/不修复；不把普通domain家族全部改为用户暂缓 |
+| FECF-02 | stored_function_engine_owner_test在原第126行assert(local.dropDatabase(db) == DBStatus::OK)失败，进程abort，完整入口FAILED | 该断言之前的原owner/私有写入/回滚/默认值/生成列/嵌套调用及另一engine的999结果断言均已经过；不能把清理失败说成这些行为失败，也不能猜测DBStatus、锁或与历史DROP的具体同根因。恢复专项后应保留原完整入口，采集实际状态/调用栈及清理前目录与所有者，再验证释放顺序，不删除DROP断言 | 落在原已暂缓R51 DROP DATABASE路径，仅登记；不把stored routine/独立engine普通范围整体列为暂缓 |
+
+该轮`full-regression.log`第623–626行保存原异常及FAILED；标准runner继续后续
+入口，没有终止、重启整批或把失败忽略为通过。此前8f的该入口曾通过，不据此
+猜为负载/竞态或新改动所致；本轮完整实际结果还须等待所有入口结束。
+FECF-02原断言与FAILED保存在同一log第15050–15052行；失败后原runner继续，
+没有修改夹具或重跑换绿。该完整入口仍计失败，不能拆取先前通过断言算入口通过。
+
+`analyze_null_statistics_test`本轮已原样PASSED（旧失败是其末尾DROP断言），
+`array_inspection_projection_test`也已PASSED。前者不关闭未归因、用户已暂缓的
+旧R51问题，后者才是R129干净组合的一个真实完整入口证明；不借此代替1436。
+R130新增native_function_result_hint完整入口亦已PASSED、168控制零失败，原
+pg_typeof入口也实际PASSED；这两个入口的旧声明/执行次数断言未放宽，其余
+批次仍以实际运行记录为准，不提前报告整项全量完成。
+
+## 冻结期间只读复查队列
+
+这些是后续验证候选，不计为已复现bug、修复完成或额外测试通过；未启动第二个
+数据库/参考批次，也未改变冻结源码。完整运行结束后再逐项复现/归因/修改。
+
+| 候选 | 当前只读证据与不确定性 | 后续验证/修改方法 |
+| --- | --- | --- |
+| 普通R62名字被原生回调替换的所有权 | 干净ecf的ownsScalarSignatures仅为数组查找/四个字符串长度名/固定float8检查实际marker，其余默认按名字拥有签名；abs/length/upper/lower的replacement是否继承不属于它的参数/结果仍待原生行为核实，不能借R130的固定float8证明全部名字。注册循环也未给这四个名字独立所有权marker，length不在现有四个字符串长度名集合中 | 隔离原生测试同名替换、typed NULL/显式提示/原始参数/arity与零分析副作用；保留真正builtin/stored签名和命名空间，确认契约后才扩真实callback marker，不按熟悉名字套类型 |
+| 物理时间戳微秒持久化 | R133只改接收器；固定宽度extract路径仍有formatTimestampSeconds，需跟踪真实DDL列元数据、实际编码与所有读写路径，不能只看dsize或把某个辅助微秒函数当heap已经升级 | 完整运行后按PG做INSERT/UPDATE/RETURNING、冷热扫描、索引与数组的精确微秒对照；确认单位/格式版本后设计向后兼容codec，不静默把旧秒数据解释成微秒、不操作真实用户数据 |
+
+这些普通未完范围没有改记用户暂缓，原273状态也不因此上调。
 
 ## 历史与未完成范围
 
