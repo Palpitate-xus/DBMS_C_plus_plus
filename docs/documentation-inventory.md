@@ -1,6 +1,6 @@
 # 全部文档检查清单
 
-审查输入和发现见[代码审查报告](code-review-2026-10-13.md)。基准提交 `a502ffa3` 包含 412 份已跟踪 Markdown；首次审查含新增报告共 417 份。当前本轮逐文件复查 549 份 Markdown，下表覆盖全部；历史数量不改写。
+审查输入和发现见[代码审查报告](code-review-2026-10-13.md)。基准提交 `a502ffa3` 包含 412 份已跟踪 Markdown；首次审查含新增报告共 417 份。当前本轮逐文件复查 550 份 Markdown，下表覆盖全部；历史数量不改写。
 
 检查逐文件读取 UTF-8 内容并验证 Markdown 内联链接的本地文件目标是否存在。它不验证外部网址、锚点、所有引用式链接，也不证明文中每个历史技术结论在当前版本成立。
 使用手册、部署、命令参考、模块 README 和状态入口另作人工一致性核查；`issue-*.md` 保留原始提交和运行证据，其结论须按对应输入读取。
@@ -175,6 +175,7 @@
 | [docs/issue-full-registered-27bac6ee.md](issue-full-registered-27bac6ee.md) | 完整回归与后续方法 | 通过 |
 | [docs/issue-full-registered-332bcff4.md](issue-full-registered-332bcff4.md) | 完整回归与后续方法 | 通过 |
 | [docs/issue-full-registered-5091b39c.md](issue-full-registered-5091b39c.md) | 完整回归与后续方法 | 通过 |
+| [docs/issue-full-registered-8f0465fc.md](issue-full-registered-8f0465fc.md) | 完整回归与后续方法 | 通过 |
 | [docs/issue-full-registered-795479c6.md](issue-full-registered-795479c6.md) | 历史问题证据 | 通过 |
 | [docs/issue-full-registered-a85e653e.md](issue-full-registered-a85e653e.md) | 历史问题证据 | 通过 |
 | [docs/issue-full-registered-b2b376a3.md](issue-full-registered-b2b376a3.md) | 历史问题证据 | 通过 |
