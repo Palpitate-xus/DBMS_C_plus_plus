@@ -166,6 +166,11 @@ TIME[]元素使用同一真实codec，保留维度/下界/NULL。修复与有限
 和400年边界不得产生非法月份；独立全域枚举与SQL跨日验证见
 [R120](issue-review-r120-date-cycle-inverse.md)。这不等于完整PostgreSQL BC/大年份支持。
 
+TIMESTAMP/TIMESTAMPTZ的binary结果是相对2000年epoch的网络字节序int64微秒；
+正负infinity为max/min，真实数组元素使用同一codec。TIMESTAMP忽略已校验offset、
+TIMESTAMPTZ按offset转UTC，不能把整秒parser的失败值发作日期；见
+[R119](issue-review-r119-timestamp-binary-result.md)。输入/typmod、既有秒heap和BC/大年份范围仍有边界。
+
 ### 其他类型
 | 类型 | 说明 |
 |------|------|

@@ -68,18 +68,55 @@ bool parseDateDays(const std::string& value, int32_t& days) {
     return true;
 }
 
-bool parseTimestampMicros(const std::string& value, int64_t& micros) {
-    const int64_t seconds = parseTimestampToSeconds(value);
-    if (seconds == TIMESTAMP_POSITIVE_INFINITY) {
+bool parseTimestampMicros(const std::string& value, bool withTimeZone,
+                          int64_t& micros) {
+    const auto first = value.find_first_not_of(" \t\r\n\f\v");
+    if (first == std::string::npos) return false;
+    const auto last = value.find_last_not_of(" \t\r\n\f\v");
+    std::string text = value.substr(first, last - first + 1);
+    std::string lowered = text;
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (lowered == "infinity") {
         micros = INT64_MAX;
         return true;
     }
-    if (seconds == TIMESTAMP_NEGATIVE_INFINITY) {
+    if (lowered == "-infinity") {
         micros = INT64_MIN;
         return true;
     }
+    const size_t separator = text.find_first_of(" Tt");
+    if (separator != std::string::npos) text[separator] = ' ';
+    const size_t timeStart = separator == std::string::npos ? text.size() : separator + 1;
+    int64_t fraction = 0;
+    const size_t dot = text.find('.', timeStart);
+    if (dot != std::string::npos) {
+        size_t end = text.find_first_not_of("0123456789", dot + 1);
+        if (end == std::string::npos) end = text.size();
+        if (end == dot + 1) return false;
+        // Keep fractional seconds out of the legacy whole-second parser.
+        // Checked integer rounding may carry exactly one second, including
+        // across the 2000 wire epoch; it must not pass through double.
+        const auto parts = parseIntervalInput("00:00:00" + text.substr(dot, end - dot));
+        if (!intervalInputSqlState(parts).empty() || parts.months || parts.days ||
+            parts.micros < 0 || parts.micros > 1000000) return false;
+        fraction = parts.micros;
+        text.erase(dot, end - dot);
+    }
+    int64_t seconds = parseTimestampToSeconds(text);
+    // In the existing 1..9999 civil domain, zero means invalid input, not
+    // the 2000 wire epoch. Never encode that failure sentinel as a date.
+    if (seconds == 0 || isInfiniteTimestamp(seconds)) return false;
+    if (!withTimeZone) {
+        const size_t zone = text.find_first_of("+-", timeStart);
+        if (zone != std::string::npos) text.erase(zone);
+        else if (text.back() == 'Z' || text.back() == 'z') text.pop_back();
+        // TIMESTAMP ignores a valid offset; TIMESTAMPTZ subtracts it.
+        seconds = parseTimestampToSeconds(text);
+        if (seconds == 0 || isInfiniteTimestamp(seconds)) return false;
+    }
     const int64_t epoch = parseTimestampToSeconds("2000-01-01 00:00:00");
-    const __int128 result = (static_cast<__int128>(seconds) - epoch) * 1000000;
+    const __int128 result = (static_cast<__int128>(seconds) - epoch) * 1000000 + fraction;
     if (result < std::numeric_limits<int64_t>::min() ||
         result > std::numeric_limits<int64_t>::max()) return false;
     micros = static_cast<int64_t>(result);
@@ -302,7 +339,7 @@ bool encodeBinaryValue(const std::string& value, const PgColumnDescription& colu
             }
             case 1114: case 1184: {
                 int64_t micros = 0;
-                if (!parseTimestampMicros(value, micros)) return false;
+                if (!parseTimestampMicros(value, column.typeOid == 1184, micros)) return false;
                 appendRawUInt64(encoded, static_cast<uint64_t>(micros));
                 return true;
             }

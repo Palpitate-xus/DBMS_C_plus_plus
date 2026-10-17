@@ -76,6 +76,9 @@ INTERVAL及102物理长度）、21个协议及3个真实Main共41个不同完整
 原273清单仍22complete/166partial/70unverified/15deferred；本项不提升勾选。
 全范围时间精度/输入/typmod/BC、R111规划、目录SQL及视图origin等仍普通开放。
 
+本页记录的R119首版候选及依赖关系保留；后续sender另由
+[R119](issue-review-r119-timestamp-binary-result.md)独立验收、提交，不改写本项原终态及接受计数。
+
 ## 本轮同时记录的后续普通问题
 
 TIME输入默认落入evalCast的原文透传，binary sender严格解析不等于输入已校验。

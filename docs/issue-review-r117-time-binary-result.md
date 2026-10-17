@@ -68,7 +68,8 @@ text格式舍入差异。`r117-time-after-binary32.log`及
 `r117-r119-observations-comparison.log`保留该边界；比较脚本修正过一次AST元组
 参数计数假设，未改产品、参考数据或重跑测试冒充旧问题修复。额外时间戳64条
 观察发现12个独立binary差异，保留`r119-timestamp-{reference,current}64.log`，
-另项修复，不混入本项36入口全过结论。
+后由[R119](issue-review-r119-timestamp-binary-result.md)单独修复并验收；原始发现
+及本项36入口结论不改写。TIME输入/文本规范化仍普通开放。
 
 全部工作区静态检查542MD/545Python AST/13Bash及本地链接/清单一致性实际0。
 本项提交接受组合为539MD、891native+3Main+521Python=1415；工作区包含保留

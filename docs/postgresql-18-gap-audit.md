@@ -1,5 +1,9 @@
 # 2026-10-13 全仓库审查
 
+时间戳小数秒被编码成固定错误epoch的修复见[R119](issue-review-r119-timestamp-binary-result.md)。
+真实类型/时区、微秒及数组按实际PG验证，上游跨日问题另由R120独立提交；
+不将binary sender等同完整输入/typmod/heap/BC/大年份，原273勾选及暂缓范围不变。
+
 闰年日期逆换算的非法月份及时间戳跨日失败见[R120](issue-review-r120-date-cycle-inverse.md)。
 共享DateType.h只修现有民用日期域的数学逆转换，不升级BC/大年份/heap格式，
 不提升原273勾选；R119输出发送器保持单独版本管理，明确暂缓项不恢复。

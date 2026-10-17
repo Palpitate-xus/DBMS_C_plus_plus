@@ -1,5 +1,9 @@
 # 生产化状态
 
+TIMESTAMP/TIMESTAMPTZ及真实数组的微秒binary结果修正见[R119](issue-review-r119-timestamp-binary-result.md)。
+不把整秒parser的0失败值编码成日期，时区按真实类型解释；上游日期R120独立版本，
+最终共享41终态/额外64精确匹配不等于整秒heap、输入typmod或所有BC/大年份已完成。
+
 闰年年初的共享日期逆换算修正及全域独立枚举见[R120](issue-review-r120-date-cycle-inverse.md)。
 它是时间戳跨日输入的上游问题，不混同R119 binary发送器；共享头重建和最终有限
 验收按记录实际终态读取。原273不提升，BC/大年份和完整时态精度仍普通开放。

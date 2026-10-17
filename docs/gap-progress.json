@@ -2,6 +2,29 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R119 exact TIMESTAMP and TIMESTAMPTZ scalar and inherited array binary results",
+      "gap_ids": [
+        "TYPE-06",
+        "TYPE-16",
+        "PROTO-04",
+        "PROTO-05"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r119-timestamp-binary-result.md"
+      ],
+      "tests": [
+        "tests/timestamp_binary_result_test.cpp",
+        "tests/timestamp_binary_result_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "reproduction": "Actual180006old64observations12binarydifferences, collection0notpass. ActualPGpermanent232all0 versusimmutable0579474b232144failuresactual1, completeoldnative235192failuresactual1. C1normal1CPP/repeat0 actual0/native235all0 butfull36gateactual1 as232still8preexisting22008daycarryinputfailures; retainedallassertionsandlogs. R120dateinverseupstreamfixedandcommittedseparatelybeforeR119.",
+        "focused_tests": "OnlyPostgresProtocolhelper andreal1114/1184typeflag. Checkedintegerfraction/roundcarry, validwholesecondparse with0failureguard, __int128delta2000epoch+fraction/networkint64. TIMESTAMPignoresvalidatedoffset, TIMESTAMPTZsubtracts; infinitiesmax/min. Genuine1115/1185arrayenvelopedelegation. AfterR120fresh58allactual0, samefrozenartifactfinal17native21wire3realMain41distinctwholeentriesall0 incl235native232wire; dualcache/58receipts/57testbytes/seal0. Real3MainTUs directlycompiledcurrentSource/O0explain/sessiontestTUs/O2windowandprod/57matchedlibraries/no stubs, actualruns0. Extraoriginal64exactreferencecomparison now0differences. No newCPPcompile or41rerun invented afterR120.",
+        "full_suite": "One native/one protocol accepted:893native+3Main+523Python=1419, working896+3+526=1425contains preservedR98/R109. No newcomplete registeredsuite/cleanHEADfullrun/actualTLS/wholeenginesanitizer. R120puredatecomponentASAN/UBSAN notrelabeled asbinarysenderorwholeengineproof.",
+        "scope": "Original273items/checkboxes unchanged22complete166partial70unverified15deferred. No heapmigration/publicheaders/inputtypmod/sessiontimezone/userOID/binaryBind change inR119; existing1..9999ISOcarrieronly, notfullBC/largeyears. R120DateTypeheader isindependentcommit, commonartifactalsoincludespreservedcandidates. TIMEinputnormalization/typmod/scalarmicroheap/othercodecs/catalogSQL/vieworigin/R111 ordinaryopen. R109user-skipped/R98/R99/R106draft preservedexcluded, no push, Actionsdisabled."
+      }
+    },
+    {
       "issue": "R120 bounded Gregorian inverse conversion for every supported civil day",
       "gap_ids": [
         "TYPE-06"
