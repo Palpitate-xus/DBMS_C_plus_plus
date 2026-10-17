@@ -2,6 +2,27 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R124 TIMETZ postfix casts misrouted as column names in table projections",
+      "gap_ids": [
+        "TYPE-06",
+        "PROTO-04",
+        "PROTO-05"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r124-timetz-postfix-projection.md"
+      ],
+      "tests": [
+        "tests/timetz_postfix_projection_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "reproduction": "ActualPG180006 permanent96all0 versusimmutableR121dd28296with24failuresactual1; Simple/ExtendedNULL::timetz tableprojection42703, Parse/Describealreadytypedcorrect. R123C1full104retains6samefailures; no assertiondeletion.",
+        "focused_tests": "OwnMainone-lineexistingpostfixcastTypes omission only. ProductionMainO2normal1CPP/repeat0 both0; allthreeactualcurrentMainTUs recompiled(explain/sessiontestO0,window/prodO2), linked57currentverifiedlibraries/nostubs/actualisolatedruns0. SharedR123/R12421native24wire3Main48distinctwholeentriesall0 includingnative782/wire104 andown96. R1234CPPmetadata remainsseparatecandidateuntilitsowncommit; noinventedcleanHEADorpercommitnew48run.",
+        "full_suite": "No newcomplete registered/TLS/wholeengine sanitizer proof. Frozencombinedartifact e593e92a7ea662f97e8d47f5c277d7deb6e58a54c3d5ee2030c25630077b194b cache 26b6ac52029eec3ec463279d16ade9a78e57110697b7d326eeca4125e3246796 source/tests/scripts 2c34b2a40cd35c01f1c606d4a506268cb0ecbe44309936c9e7fb96fbaa014478; dualcache58receipts57testbytes0. AcceptedR124894native525Python3Main1422; working898+529+3=1430 includesR123candidate2runtimeentriesandoriginal6pendingentries.",
+        "scope": "OnlyTIMETZpostfixprojectionroute, notfullcasteligibility/nonNULLTIMETZinput/codec/physicalprecision. Original273itemsandcheckboxes unchanged22complete166partial70unverified15deferred. R122ordinaryopen, R123schemaindependent; skippedmodulespreserved, R98/R99/R109/R106notmixed; Actionsdisabled,nopush."
+      }
+    },
+    {
       "issue": "R122 recorded explicit TIME precision reproduction and repair plan (not implemented)",
       "gap_ids": [
         "TYPE-06",

@@ -176,6 +176,11 @@ text Bind也须在Bind阶段拒绝坏输入；短时钟、半偶舍入/进位和
 [R121](issue-review-r121-time-input-normalization.md)。显式精度/完整grammar/cast eligibility、
 旧4字节整秒heap及binary Bind仍有边界，输入修复不迁移既有表行。
 
+表上的NULL::timetz应作为CAST表达式返回SQL NULL或空结果，不能被误判为
+列名42703；其声明为TIMETZ、逻辑长度12，表达式不借同名列的来源。路由修正
+和验证范围见[R124](issue-review-r124-timetz-postfix-projection.md)，不表示非NULL TIMETZ
+binary发送、完整时区/转换资格或物理精度已经支持。
+
 ### 其他类型
 | 类型 | 说明 |
 |------|------|

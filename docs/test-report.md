@@ -1,5 +1,9 @@
 # DBMS 功能测试报告
 
+新增[R124 TIMETZ后缀表投影](issue-review-r124-timetz-postfix-projection.md)96项协议控制，
+实际PG96全过、旧24失败，原schema回归暴露的六个42703断言保留。
+本项重编与匹配产物的有限终态见记录，不冒新完整注册、真实TLS或整库sanitizer证明。
+
 新增[R121 默认TIME文本输入](issue-review-r121-time-input-normalization.md)90native/177协议，
 实际PG177全过、旧130协议/65native失败。最终18native+22协议+3真实Main=43入口
 均0，Main是核对未改单元后重连当前57库并实际执行，未重编TU。原32对照全匹配，

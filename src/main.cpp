@@ -32887,7 +32887,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             size_t pp = rhsC.find('(');
                             string tname = (pp == string::npos) ? rhsC : rhsC.substr(0, pp);
                             for (auto& tc2 : tname) tc2 = static_cast<char>(tolower(static_cast<unsigned char>(tc2)));
-                            static const set<string> castTypes = {"int","integer","bigint","smallint","text","varchar","char","numeric","decimal","float","double","real","boolean","bool","date","timestamp","timestamptz","time","interval","json","jsonb"};
+                            static const set<string> castTypes = {"int","integer","bigint","smallint","text","varchar","char","numeric","decimal","float","double","real","boolean","bool","date","timestamp","timestamptz","time","timetz","interval","json","jsonb"};
                             bool okLhs = !lhsC.empty();
                             {
                                 int d4 = 0; bool inQ4 = false;

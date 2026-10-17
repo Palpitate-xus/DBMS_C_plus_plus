@@ -1,5 +1,9 @@
 # 2026-10-13 全仓库审查
 
+普通/TEMP表的NULL::timetz投影被误判列名见[R124](issue-review-r124-timetz-postfix-projection.md)。
+独立补齐既有转换路由，实际PG96/旧24失败及有限验收见记录；不等同完整TIMETZ
+输入/codec、TIME显式精度或原273完成，明确暂缓项不恢复。
+
 TIME默认基本clock文本及text Bind的非法接受/未舍入透传见[R121](issue-review-r121-time-input-normalization.md)。
 有限43入口、原32对照已过；显式精度21差异及完整语法、cast eligibility、
 heap/binary Bind等仍普通待做，不能把本项等同所有TIME语义或原273全部完成。

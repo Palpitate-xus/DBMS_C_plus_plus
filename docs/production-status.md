@@ -1,5 +1,9 @@
 # 生产化状态
 
+表查询中NULL::timetz被当作列名的路由遗漏见[R124](issue-review-r124-timetz-postfix-projection.md)。
+只补既有后缀CAST路由，复现、修改及有限验收按记录读取；不等于TIMETZ完整
+输入/存储/二进制codec或TIME显式precision完成，原273不提升。
+
 默认TIME基本clock文本输入及真实1083/1183text Bind修复见[R121](issue-review-r121-time-input-normalization.md)。
 43入口有限验收/原32text-binary对照全过；97输入对照仍有21个显式精度差异，
 完整语法/cast eligibility、旧4字节heap与binary Bind等仍普通开放，原273不提升。
