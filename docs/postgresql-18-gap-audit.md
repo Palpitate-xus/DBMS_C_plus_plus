@@ -1,5 +1,9 @@
 # 2026-10-13 全仓库审查
 
+TIME关键字精度的解析阶段与合法整数token修复见[R126](issue-review-r126-time-precision-grammar.md)。
+严格549/326及有限52入口全0；原122现120匹配、仅TIME(7)两条warning/typmod差异。
+具名modifier语义、其他类型grammar/精度及旧heap仍普通开放，原273统计/勾选不提升。
+
 合法TIME(0–6)的基本输入precision转换与真实表达式声明见[R125](issue-review-r125-time-precision-value.md)。
 339/830及有限50入口已验收，原97全匹配、原122剩12个声明边界/通知差异；
 不等于完整TIME grammar、CAST资格、分析阶段、所有表达式typmod或旧heap升级。

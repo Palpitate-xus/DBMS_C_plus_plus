@@ -2,6 +2,7 @@
 #include "catalog/catalog.h"
 #include "common/SqlTrivia.h"
 #include "common/DbError.h"
+#include "common/IntegerTextCodec.h"
 #include "expression/sql_value.h"
 #include "utils/interval_type.h"
 #include <charconv>
@@ -297,6 +298,25 @@ static ColumnDef consumeDeclaredType(const std::vector<std::string>& tokens,
         for (const char* entry : noModifierGrammar)
             if(name==entry)
                 throw DbError("42601","type declaration does not allow modifiers");
+        if (initial == "time") {
+            const auto syntaxError = [] {
+                const DbError error("42601", "TIME precision requires one unsigned integer constant");
+                // Full statement parsing owns a structured syntax result;
+                // standalone type-envelope callers still receive DbError.
+                retainDeclarationSyntaxError(error);
+                throw error;
+            };
+            const auto& modifier = definition.typeMods.front();
+            if (definition.typeMods.size() != 1 || modifier.empty() ||
+                !std::isdigit(static_cast<unsigned char>(modifier.front())))
+                syntaxError();
+            const auto precision = parsePostgresIntegerText(modifier, 32);
+            if (precision.error != IntegerTextError::None)
+                syntaxError();
+            // The SQL lexer accepts integer bases and digit separators.
+            // Keep their integer value in the AST, not an opaque spelling.
+            definition.typeMods.front() = std::to_string(precision.value);
+        }
         if(initial=="char" || initial=="character" || initial=="varchar") {
             const auto& modifier=definition.typeMods.front();
             if(definition.typeMods.size()!=1 || modifier.empty() ||

@@ -2,6 +2,29 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R126 TIME keyword precision integer grammar and structured syntax-error boundary",
+      "gap_ids": [
+        "TYPE-06",
+        "TYPE-16",
+        "PROTO-04",
+        "PROTO-05"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r126-time-precision-grammar.md"
+      ],
+      "tests": [
+        "tests/time_precision_grammar_test.cpp",
+        "tests/time_precision_grammar_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "reproduction": "Actual PG18.6 (180006): all permanent 326 wire controls pass. Immutable accepted R125 binary 1a1d677e: complete326 with296 failures, actual1. Same strengthened549 native fixture against independently byte-verified frozen57 R125 O2 libraries, identical739 headers/flags/compiler, fresh stubs and pre-global isolation:217 failures, actual1. Lexical14 verified legal bases/separators/int32 boundary; initial185/260 observations retained.",
+        "focused_tests": "Parser.cpp only plus own registration: unquoted unqualified TIME requires one unsigned int32 token, existing integer codec canonicalizes valid decimal/base/separator values, structured declaration-error bridge preserves parse/parseForBinding results. C1 normal1/repeat0/native549=0 but wire aborts after19 with DDL Parse reset (actual1, not complete326); C2 normal1/repeat0/strict549/wire326 all0. Final23native+26wire+3 verified relinked realMain=52 distinct whole entries all0, independent checker0. R124 unchanged TU/source/header/flags/compiler/Main receipt/object bytes verified, new links57 CURRENT O2 libraries/no stubs, actual isolated3 runs0; no new Main TU compile.",
+        "full_suite": "No new full registered/TLS/whole-engine sanitizer proof. Binary97890f1d8edfe73d8984c02a38f7c4e85374820d6d0ebda800f61df7ef4e892f cache320efc2440f7650364c9084554b45d82e3e929154197318dfa8e26e9bbdeaced seal d2fdf5836dd5b8bb92b70037da02fe6da08c0f8a993403a0dc613dfa326a3c2c compile739bf42b71ae53b6f0cfe5e817aec5e81edb16ef16893f6616d93f026f9594c8. Dual-cache/all58 receipts/57 test-library bytes final0. Original122 now120 exact/2 remaining TIME(7) warning+typmod, physical-column4 exact; original97 all exact. Accepted547MD897native528Python3Main1428 versus working550MD900+531+3=1434 with six preserved pending entries;552 PythonAST/13Bash static.",
+        "scope": "Only TIME keyword precision grammar, canonical integer AST and structured syntax boundary across CAST/::/typed literal/DDL. High7/30/INT_MAX Parse-only controls prove syntax only, not clamp/warning/typmod. Qualified/quoted negative syntax controls do not prove semantic validity. Remaining warning/clamp/named modifier/other types grammar/all constant analysis/heap/binary Bind stay ordinary open. Original273 items and checkboxes unchanged22complete166partial70unverified15deferred, original56933-byte candidate and three drafts preserved, exclusions not reopened, no push, Actions disabled."
+      }
+    },
+    {
       "issue": "R125 valid TIME precision value conversion and genuine declaration metadata",
       "gap_ids": [
         "TYPE-06",

@@ -5,6 +5,10 @@
 本项从[R122](issue-review-r122-time-explicit-precision.md)拆出合法0–6的值与
 真实声明描述；R123列schema元数据、R124表投影路由已有独立提交。
 
+后续关键字精度语法修复见[R126](issue-review-r126-time-precision-grammar.md)，严格549/326及
+52入口全0。再次重采原122仅剩TIME(7)两条warning/typmod差异，原97仍全匹配。
+下方保留本项当时12个剩余差异及其范围，不把后续语法修复等同高精度通知完成。
+
 ## 缺陷及修改方法
 
 TIME(p)被通用透传，结果文本保留未舍入输入；即使p=6的部分binary datum

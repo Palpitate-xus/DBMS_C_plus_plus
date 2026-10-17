@@ -1,8 +1,9 @@
 # R122：显式TIME精度的值、描述符和边界行为缺失
 
-状态：列声明元数据[R123](issue-review-r123-temporal-column-precision.md)及合法TIME(0–6)的
-转换/声明描述[R125](issue-review-r125-time-precision-value.md)已分项修复。precision边界、
-warning及分析时机仍普通开放，不计本组合问题全部完成。独立本地提交，
+状态：列声明元数据[R123](issue-review-r123-temporal-column-precision.md)、合法TIME(0–6)的
+转换/声明描述[R125](issue-review-r125-time-precision-value.md)及关键字精度语法
+[R126](issue-review-r126-time-precision-grammar.md)已分项修复。TIME(7)的截断/warning
+以及完整分析资格仍普通开放，不计本组合问题全部完成。独立本地提交，
 不push，不恢复用户已明确跳过的模块。
 
 R123后完整重采原122条观察，真实TEMP列空/NULL的四条元数据观察已匹配，
@@ -12,6 +13,10 @@ warning仍待继续修复，原始122条旧差异日志保留。
 R125后再完整重采122条，110条已匹配，剩余12条仅为precision_boundary的
 10条及NULL坏precision的两条；原97条基本clock/合法precision则全匹配。
 语法/通知和剩余分析阶段继续单独修复，不以122采集/比较0声称122全过。
+
+R126后再次完整重采122条，120条精确匹配，仅TIME(7)的text/binary两条
+在warning/typmod上仍有差异；原四条表列及原97条均保持匹配。下方与上方历史
+轮次保留当时输入和结果，不用采集/比较0冒称原122已全过。
 
 ## 实际证据
 

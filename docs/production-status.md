@@ -1,5 +1,9 @@
 # 生产化状态
 
+TIME关键字precision语法修复见[R126](issue-review-r126-time-precision-grammar.md)：
+非法modifier在解析阶段返回42601，合法进制/分隔符仍接受；549/326及有限52入口全0。
+原122观察现120匹配，TIME(7)的warning/typmod两条仍开放，不表示全部时间类型完成。
+
 合法TIME(0–6)基本clock转换与静态声明描述修复见[R125](issue-review-r125-time-precision-value.md)。
 先按微秒输入规则规范，再单独按precision舍入，NULL/空/Describe保留真实typmod；
 原97观察全匹配、122仍12个边界/NULL坏precision差异，语法/warning及旧heap仍开放。

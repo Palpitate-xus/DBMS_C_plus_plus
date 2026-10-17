@@ -1,5 +1,12 @@
 # DBMS 功能测试报告
 
+新增[R126 TIME关键字精度语法](issue-review-r126-time-precision-grammar.md)严格549原生/326协议，
+实际PG326全过，固定旧原生217/协议296失败。首版协议只完成19项后重置的实际1
+保留并修正；末版23native+26协议+3核对后重连的真实Main=52不同完整入口全0。
+原122现120匹配/2条TIME(7)通知及typmod差异，原97全匹配。本项接受897native+
+528Python+3Main=1428，工作区900+531+3=1434含原六候选；552AST/13Bash另检，
+无新完整注册/TLS/整库sanitizer证明，Main对象复用不冒称新TU编译。
+
 新增[R125 合法TIME显式精度](issue-review-r125-time-precision-value.md)339原生/830协议，
 PG830全过、旧830协议/317原生失败；最终22native+25协议+3真实Main=50完整入口
 均0。未改Main TU核对后重连当前57库并执行，不冒重新编译。原97全匹配、122
