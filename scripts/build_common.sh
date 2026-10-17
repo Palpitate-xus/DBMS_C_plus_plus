@@ -212,6 +212,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/protocol_metadata_session_scope_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/binary_float_parameter_roundtrip_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/array_binary_result_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/interval_binary_result_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/physical_attribute_length_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/type_alias_projection_metadata_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/floating_arithmetic_width_protocol_e2e_test.py)

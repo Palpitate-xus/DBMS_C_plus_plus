@@ -1,5 +1,9 @@
 # 生产化状态
 
+INTERVAL及其内置数组的真实二进制结果见[R113](issue-review-r113-interval-binary-result.md)。
+保持独立月/天/微秒与无限标记，不把文本当binary；其输入和其他缺失标量codec
+仍未完成。R114/R115先各自独立提交，原273不提升，未获新完整注册终态。
+
 DATE/TIME/TIMETZ/INTERVAL及数组的逻辑字段长度修复见[R114](issue-review-r114-physical-attribute-length.md)。
 只更正声明metadata和已知旧目录签名，不修改heap行布局或提供者生命周期。
 目录SQL与视图执行/origin/tag独立失败仍开放，原273未完成，无新完整注册终态。

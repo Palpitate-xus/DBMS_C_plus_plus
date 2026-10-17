@@ -1,5 +1,10 @@
 # DBMS 功能测试报告
 
+新增[R113 INTERVAL binary结果](issue-review-r113-interval-binary-result.md)117低层
+及171协议控制，实际PG171全过、依赖修复后旧149失败/原生78失败。最终有限回归
+与失败原文见记录；接受890native+3Main+518Python=1411，工作区893+3+521=1417
+含未接受R98/R109候选，无新完整注册运行，不证明真实TLS或整库sanitizer。
+
 新增[R114 逻辑长度](issue-review-r114-physical-attribute-length.md)102原生及28协议
 控制，PG28全过、旧22失败；候选曾剩5个既有CHAR失败，R115另项修复。最终有限
 匹配回归见记录。本项接受889native+3Main+517Python=1409，工作区892+3+521=1416，

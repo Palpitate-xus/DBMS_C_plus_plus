@@ -8,6 +8,7 @@
 #include "types/xml.h"
 #include "catalog/catalog.h"
 #include "common/SqlArrayText.h"
+#include "utils/interval.h"
 
 #include <algorithm>
 #include <cctype>
@@ -279,6 +280,34 @@ bool encodeBinaryValue(const std::string& value, const PgColumnDescription& colu
                 int64_t micros = 0;
                 if (!parseTimestampMicros(value, micros)) return false;
                 appendRawUInt64(encoded, static_cast<uint64_t>(micros));
+                return true;
+            }
+            case 1186: {
+                // interval_send preserves calendar fields independently from
+                // the signed microsecond clock. Do not flatten days/months
+                // into elapsed time or round the int64 clock through double.
+                const auto first = value.find_first_not_of(" \t\r\n\f\v");
+                if (first == std::string::npos) return false;
+                const auto last = value.find_last_not_of(" \t\r\n\f\v");
+                std::string token = value.substr(first, last - first + 1);
+                std::transform(token.begin(), token.end(), token.begin(),
+                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                int64_t micros;
+                int32_t days, months;
+                if (token == "infinity" || token == "+infinity" || token == "-infinity") {
+                    const bool negative = token.front() == '-';
+                    micros = negative ? std::numeric_limits<int64_t>::min() : std::numeric_limits<int64_t>::max();
+                    days = months = negative ? std::numeric_limits<int32_t>::min() : std::numeric_limits<int32_t>::max();
+                } else {
+                    const auto parts = parseIntervalInput(value);
+                    if (!intervalInputSqlState(parts).empty()) return false;
+                    micros = parts.micros;
+                    days = static_cast<int32_t>(parts.days);
+                    months = static_cast<int32_t>(parts.months);
+                }
+                appendRawUInt64(encoded, static_cast<uint64_t>(micros));
+                appendRawUInt32(encoded, static_cast<uint32_t>(days));
+                appendRawUInt32(encoded, static_cast<uint32_t>(months));
                 return true;
             }
             case 1700:

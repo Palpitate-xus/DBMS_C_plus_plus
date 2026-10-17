@@ -132,8 +132,9 @@ USE DATABASE mydb;
 数组请求 PostgreSQL 二进制结果格式时，已有标量二进制发送 codec 的内置
 元素可作为数组输出，保留维度、真实下界、元素 OID、SQL NULL 和空数组的
 区别；不要把二进制结果与二进制 Bind 输入混同，后者不由本项实现。
-INTERVAL、TIMETZ、JSON/JSONB、TSVECTOR、range 等缺失标量发送 codec 的非 NULL
-数组元素仍未支持。具体边界见[R110](issue-review-r110-array-binary-result.md)。
+TIMETZ、JSON/JSONB、TSVECTOR、range 等缺失标量发送 codec 的非 NULL
+数组元素仍未支持。数组封套边界见[R110](issue-review-r110-array-binary-result.md)，
+INTERVAL的后续真实发送实现见[R113](issue-review-r113-interval-binary-result.md)。
 
 CHAR/VARCHAR与数组共存时，SELECT *仍应保留字符列声明长度；普通表、TEMP、
 空结果和NULL不应改变typmod或真实列来源。修复和边界见[R115](issue-review-r115-scalar-alias-projection-metadata.md)。
@@ -141,6 +142,11 @@ CHAR/VARCHAR与数组共存时，SELECT *仍应保留字符列声明长度；普
 DATE/TIME/TIMETZ/INTERVAL对外逻辑长度分别为4/8/12/16，数组为-1；这不等于
 本引擎内部存储槽宽度。已知旧目录在读取模型中升级，冷读不发布文件，显式目录
 持久化后才落盘。细节与尚存独立目录/视图问题见[R114](issue-review-r114-physical-attribute-length.md)。
+
+INTERVAL二进制结果为网络字节序int64微秒、int32天、int32月，共16字节，
+日历字段不会折成总秒；正负无限使用对应三个字段全最大/最小值。INTERVAL[]
+保留维度、下界和NULL，复用真实元素发送；binary Bind输入仍不由此实现。
+详见[R113](issue-review-r113-interval-binary-result.md)。
 
 ### 其他类型
 | 类型 | 说明 |

@@ -1,5 +1,9 @@
 # 2026-10-13 全仓库审查
 
+[R113](issue-review-r113-interval-binary-result.md)修复INTERVAL/数组的真实二进制结果，
+与已独立提交的逻辑长度/字符修饰符分开记录；其余codec、目录/视图及原273项
+仍开放，不把普通未完问题改记为用户暂缓或总账完成。
+
 逻辑字段长度与旧目录升级见[R114](issue-review-r114-physical-attribute-length.md)，
 仅更正元数据；检测新增的目录SQL、NULL视图、来源和命令tag缺陷按表保留。
 原273项勾选不变，不把这些普通待修复项改成用户暂缓。

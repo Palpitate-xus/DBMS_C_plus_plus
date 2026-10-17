@@ -2,9 +2,32 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R113 real INTERVAL scalar and inherited array binary results",
+      "gap_ids": [
+        "TYPE-06",
+        "TYPE-16",
+        "PROTO-04"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r113-interval-binary-result.md"
+      ],
+      "tests": [
+        "tests/interval_binary_result_test.cpp",
+        "tests/interval_binary_result_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "reproduction": "Actual180006 initial48each observations22binary differences collectors0 not pass. Permanent171 actualreference0; initialimmutable5958old152failures actual1. After separateR115/R114, immutableb4128old171149failures actual1 and complete117native78failures actual1. Initial reference fixture159 abort from string/list Bind construction retained, corrected fixture171 before production change.",
+        "focused_tests": "Only PostgresProtocol internal1186 send branch reuses existing pure checked interval parser, int64micros/int32days/int32months network order, independent calendar fields and symbolic allmax/allmin infinity. Existing real1187 envelope delegates scalarcodec. Native117 andwire171 strict size16/typmod/bounds/NULL/dimensions/rawinfinity/mixedrows/rejection/textscalars controls. Finite matching-artifact O2/fresh-stub isolation gates and terminal evidence in issue document.",
+        "full_suite": "Adds one native and one protocol registration only: accepted890native+3Main+518Python=1411 versusworking893+3+521=1417 including preservedR98/R109 candidates. No new complete registered suite, actualTLS or full-engine sanitizer proof.",
+        "scope": "Original273items/checkboxes unchanged22complete166partial70unverified15deferred. BinaryBind input, TIMETZ/JSON/JSONB/TSVECTOR/range codecs, BOXarray input/text normalization and nameduserarray general support remain ordinary pending, as do R111planning and R114catalog/view/tag findings. R109user-skipped/R98/R99/R106draft preserved excluded. No push; Actionsdisabled."
+      }
+    },
+    {
       "issue": "R114 declared attribute lengths independent of heap widths",
       "gap_ids": [
-        "TYPE-02",
+        "TYPE-06",
+        "TYPE-16",
         "CAT-03",
         "PROTO-04"
       ],
@@ -26,7 +49,7 @@
     {
       "issue": "R115 physical star projections preserve scalar alias typmods",
       "gap_ids": [
-        "TYPE-02",
+        "TYPE-04",
         "PROTO-04"
       ],
       "status": "partial",
