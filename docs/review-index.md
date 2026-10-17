@@ -1,5 +1,14 @@
 # 代码审查索引
 
+后续[R135 RETURNING时区呈现](issue-review-r135-timestamptz-returning-timezone.md)已有限修复：
+PG最终134全过，冻结旧Root/干净旧版各134中73失败，当前134及原微秒266全过。
+只在每条语句的协议结果中按OID1184/日期/会话时区呈现，不改DmlResult或heap，
+同一Simple Query批次后续SET不能重画先前结果。正常1/repeat0，干净两O2 CPP+
+56生产donor含Main的真实server两入口0；最终18native+24Python（23协议/1CLI）+
+3核对R132未变TU后新链接当前库并执行的Main=45完整入口全0，独立0，不冒fresh TU。
+新1438未全量，旧1436两失败/1TLSskip保留。新表三标量微秒INSERT/UPDATE22023
+已另记为普通未修复，不由呈现修复关闭；原273仍22/166/70/15，不push、Actions禁用。
+
 后续[R134 原生回调签名归属](issue-review-r134-core-native-callback-ownership.md)已有限修复：
 干净旧实现1320控制/922失败，同一夹具修正后1320全过；只给实际ABS/LENGTH/UPPER/
 LOWER builtin callback声明所有权，opaque替换保留原始参数和caller结果提示。
@@ -59,6 +68,7 @@ TU重编或新1432全量。原8f完整三失败保留，F8F-03继续处理，R51
 
 | 审查 | 输入 | 内容 |
 | --- | --- | --- |
+| [R135 RETURNING时区](issue-review-r135-timestamptz-returning-timezone.md) | 结构化TSTZ行像未呈现 | PG134/两个旧程序73失败；按每语句/日期的协议呈现，正常1/repeat0、45完整入口全0，微秒heap普通未修复另记 |
 | [R134 原生回调归属](issue-review-r134-core-native-callback-ownership.md) | 干净ecf四组名字被替换 | 旧1320/922失败；真实callback marker、caller声明和原始参数，正常1/repeat0、37完整入口全0，R132 TU核对后重连执行，不冒新1437全量 |
 | [R133 timestamp binary微秒](issue-review-r133-timestamp-binary-microseconds.md) | R132后的冻结接收器 | PG266/旧204失败；整数向下拆分及UTC标记，正常1/repeat0、31完整入口全0，R132 Main TU核对复用而非重编，旧heap/全日期域仍开放 |
 | [R132 TimeZone TO](issue-review-r132-timezone-set-to.md) | 通用SET分隔符被Main当成值 | PG112/旧44失败；消费独立TO且保留引号数据，正常1/repeat0、fresh三Main及30完整入口全0，GUC其余范围仍开放 |

@@ -2,6 +2,29 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R135 scalar TIMESTAMPTZ RETURNING does not render session timezone; separate fractional heap rejections remain open",
+      "gap_ids": [
+        "TYPE-06",
+        "PROTO-04",
+        "PROTO-05"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r135-timestamptz-returning-timezone.md",
+        "docs/issue-full-registered-ecf632e9.md"
+      ],
+      "tests": [
+        "tests/timestamptz_returning_timezone_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "reproduction": "ActualPG18.6 initial133all0,immutableRootca37initial133/72fail; final134 includes same-Simple-batchSET boundary,PG134all0 andimmutableRootca37/cleanecf72ee each134complete73fail1. Old storedTSTZ RETURNING has no+00 evenUTC/unshifted nonUTC;ordinary SELECT already renders. Preserve initial/final logs, not fixture weakening.",
+        "focused_tests": "Only privateNet protocol-result presentation after each executed SQL statement by actualOID1184/NULLmap; canonical unzoned row image isUTC, explicit offsets retain instant, exactfraction before date-specificIANA offset; integer-seconds roundtrip guard preserves existing binary-compatible civil boundaries. No DmlResult/heap/parser/Main/public-header or binaryencoder changes. Rootnormal1Net/repeat0 both0;focused1340 andold2660. Clean acceptedR134Expr+R135Net2freshO2CPP+56verifiedproductiondonors inclMain/no stubs realisolatedserver134+266 both0, not normal build. Final18native24Python(23protocol1CLI)3verifiedR132TU-newlinkedrealMain=45distinctwholeentriesall0,independent0;source/header/compiler/flags/Mainreceipt/TUobjectbytes checked before new57currentO2libs/no stubs/actual3runs,not fresh TU. All58receipts/dualcache/57bytes/seal0.",
+        "full_suite": "No newfull1438/realTLS/whole-engine sanitizer proof. Binary15501fa37b57ff2df009dd148027c9c89ca44d03cf999c6d89e54e3d968d2eca cachea17133049dbe9a56fd999e04d9a3ec620540967b9edd71697d0e25829316646f seala5b8b7be5169aca04eafbb779d789cb7f7c386c6024268a520e71188361f3a0d Rootheaderflags739bf42b unchanged. Accepted558MD900native535Python3Main1438 vsworking561MD903native538Python3Main1444 withsixoriginalpendingentries;559AST13Bash/localtargets static. Historicalecf1436 full1433actualpass2fail1TLSskip retained;no closure of user-deferredbackground/R51.",
+        "ordinary_open": "Separate actual fractional storage observations:PG40queries valid;cleanecf/RootR134 each37observations, standalone casts/arrays/whole-second rows work buttimestamp/timestamptz/time scalar fractionINSERT+UPDATE reject22023(six observed rejections). Observation process0 is NOT pass. Warm only,index queries after missing rows not independent extra bugs or proof of microsecondindex/cold behavior. Must design versioned oldseconds/newmicroseconds codec, not silently reinterpret8byte old values;unify storage/read/write/RETURNING/comparison/index/constraint/precision and legacy compat tests. Not user-deferred or fixed by presentation.",
+        "scope": "BaseOID1184 tested modern winter/summer dates andsixzones,Simple/exttext/extbinary,3DML,SELECTcontrols,NULL/infinities,TIMESTAMP/TEXT,fractionalcomputedoutputs,per-statement batchSET;not allBC/large ranges/historicalsecondoffsets/domain/arrayoutput/DateStyle/portal-midExecute timezone changes. Original273items/checkboxes22complete166partial70unverified15deferred unchanged;original56933-byte candidate patch andthree deferred draft bytes preserved,R98/R99/R109 excluded,no push,Actionsdisabled."
+      }
+    },
+    {
       "issue": "R134 ABS/LENGTH/UPPER/LOWER native callback replacements inherit displaced builtin signatures",
       "gap_ids": [
         "TYPE-16",

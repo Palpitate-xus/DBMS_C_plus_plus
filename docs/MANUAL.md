@@ -222,6 +222,12 @@ R131只验收整秒时区，后续fractional输入的有限支持见下。
 三时区/正负微秒/跨日/边界及named rebind验证见[R133](issue-review-r133-timestamp-binary-microseconds.md)。
 这不迁移旧整秒heap，也不声明所有BC/大年份、typmod或错误状态边界完成。
 
+基础TIMESTAMPTZ标量的DML RETURNING会按语句执行时会话TimeZone呈现时间和偏移，
+同批后续SET不追溯修改先前结果；binary保持UTC时刻，NULL/infinity及TIMESTAMP/
+TEXT对照不变。有限范围见[R135](issue-review-r135-timestamptz-returning-timezone.md)。
+当前新建普通表的TIMESTAMP/TIMESTAMPTZ/TIME微秒INSERT/UPDATE仍报22023，
+独立CAST和数组微秒成功不等于标量heap支持；该普通缺口及兼容codec方法也见R135。
+
 通用`SET TimeZone TO 'Asia/Shanghai'`支持TO分隔符，也保留等号和专用
 `SET TIME ZONE 'Asia/Shanghai'`写法。TO在引号内仍是值的一部分，无效设置
 不会改变原时区。Simple/Extended及六时区验证见[R132](issue-review-r132-timezone-set-to.md)。

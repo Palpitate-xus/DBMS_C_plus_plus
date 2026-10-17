@@ -61,3 +61,7 @@ hunk、逐项本地commit，原56933字节候选patch及三个跳过草稿逐字
 不push、Actions禁用；R98/R99/R109候选与跳过草稿保留且不混入本项提交。
 原273状态/勾选仍22complete/166partial/70unverified/15deferred，没有新完整
 注册、真实TLS或整库sanitizer证明。
+
+后续[R135](issue-review-r135-timestamptz-returning-timezone.md)只修复TSTZ RETURNING协议
+时区呈现，最终45入口包含本项原266并全0，不把它当微秒heap升级。新建普通表
+的三种时间标量微秒INSERT/UPDATE已实际报22023，具体观察和兼容codec方法另列R135。

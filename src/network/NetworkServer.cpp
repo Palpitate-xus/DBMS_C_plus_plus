@@ -17,6 +17,7 @@
 #include "catalog/systables.h"
 #include "expression/regtype_input.h"
 #include "common/DateType.h"
+#include "common/TimeZoneRules.h"
 #include "common/BooleanCodec.h"
 #include "common/IntegerTextCodec.h"
 #include "common/NetworkValue.h"
@@ -5140,6 +5141,61 @@ bool establishClientTransport(int clientFd, TLSServerContext& tlsContext,
     return true;
 }
 
+// Render protocol presentation only. DmlResult/heap row images keep their
+// original UTC datums, while RETURNING may bypass Main's SELECT formatter.
+static std::string renderProtocolTimestamptzText(
+    const std::string& value, const Session& session) {
+    if (value == "infinity" || value == "-infinity") return value;
+    const size_t timeStart = value.find(' ');
+    if (timeStart == std::string::npos) return value;
+    std::string whole = value, fraction;
+    const size_t dot = whole.find('.', timeStart + 1);
+    if (dot != std::string::npos) {
+        size_t end = dot + 1;
+        while (end < whole.size() &&
+               std::isdigit(static_cast<unsigned char>(whole[end]))) ++end;
+        if (end == dot + 1) return value;
+        fraction = whole.substr(dot, end - dot);
+        whole.erase(dot, end - dot);
+        while (!fraction.empty() && fraction.back() == '0') fraction.pop_back();
+        if (fraction == ".") fraction.clear();
+    }
+    // A zone-less internal TIMESTAMPTZ row image denotes UTC, not the
+    // session's local input timezone. Explicit offsets remain authoritative.
+    const int64_t utcSeconds = parseTimestampToSeconds(whole);
+    if (utcSeconds == 0 || isInfiniteTimestamp(utcSeconds)) return value;
+    int offset = session.timezoneOffsetMinutes;
+    if (const auto named = dbms::ianaTimezoneOffsetMinutes(session.timeZone, utcSeconds))
+        offset = *named;
+    std::string rendered = formatTimestampWithTz(utcSeconds, offset);
+    // Do not turn a binary-compatible boundary datum into an unsupported
+    // civil date merely because presentation crosses the formatter's range.
+    if (rendered.empty() || parseTimestampToSeconds(rendered) != utcSeconds)
+        return value;
+    if (!fraction.empty()) {
+        const size_t renderedTime = rendered.find(' ');
+        const size_t sign = renderedTime == std::string::npos
+            ? std::string::npos : rendered.find_first_of("+-", renderedTime + 1);
+        if (sign == std::string::npos) return value;
+        rendered.insert(sign, fraction);
+    }
+    return rendered;
+}
+
+static void renderProtocolTimestamptzRows(QueryResult& result, const Session& session) {
+    if (!result.resultSet || result.columnDescriptions.size() != result.columns.size())
+        return;
+    for (size_t rowIndex = 0; rowIndex < result.rows.size(); ++rowIndex) {
+        auto& row = result.rows[rowIndex];
+        for (size_t i = 0; i < row.size() && i < result.columnDescriptions.size(); ++i) {
+            const bool isNull = rowIndex < result.nulls.size() && i < result.nulls[rowIndex].size()
+                ? result.nulls[rowIndex][i] : row[i] == "NULL";
+            if (!isNull && result.columnDescriptions[i].typeOid == 1184)
+                row[i] = renderProtocolTimestamptzText(row[i], session);
+        }
+    }
+}
+
 void sendQueryResult(PostgresProtocol& protocol, const QueryResult& result,
                      char transactionStatus, bool sendReady = true) {
     for (const auto& notice : result.notices) {
@@ -5688,6 +5744,9 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             extendedImplicitTransaction = false;
             extendedImplicitExecuted = false;
         }
+        // Capture each statement before a later SET in a buffered Simple
+        // Query batch can change the connection timezone. Not during Parse.
+        renderProtocolTimestamptzRows(result, session);
         return result;
     };
     const auto prepareExtendedQuerySnapshot = [&](const std::string& sql) -> bool {

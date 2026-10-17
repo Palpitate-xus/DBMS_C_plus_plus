@@ -1,5 +1,14 @@
 # 2026-10-13 审查问题修复进度
 
+后续[R135 RETURNING时区呈现](issue-review-r135-timestamptz-returning-timezone.md)已有限修复：
+PG最终134全过，冻结旧Root/干净旧版各134中73失败，当前134及原微秒266全过。
+只在每条语句的协议结果中按OID1184/日期/会话时区呈现，不改DmlResult或heap，
+同一Simple Query批次后续SET不能重画先前结果。正常1/repeat0，干净两O2 CPP+
+56生产donor含Main的真实server两入口0；最终18native+24Python（23协议/1CLI）+
+3核对R132未变TU后新链接当前库并执行的Main=45完整入口全0，独立0，不冒fresh TU。
+新1438未全量，旧1436两失败/1TLSskip保留。新表三标量微秒INSERT/UPDATE22023
+已另记为普通未修复，不由呈现修复关闭；原273仍22/166/70/15，不push、Actions禁用。
+
 后续[R134 原生回调签名归属](issue-review-r134-core-native-callback-ownership.md)已有限修复：
 干净旧实现1320控制/922失败，同一夹具修正后1320全过；只给实际ABS/LENGTH/UPPER/
 LOWER builtin callback声明所有权，opaque替换保留原始参数和caller结果提示。
@@ -259,7 +268,8 @@ socket超时，精确SQL/栈和原期限保留，尚未确定根因，不称新�
 | R105 | 限定NAME→INET/CIDR源身份遗漏 | 本范围已修复，独立本地commit | PG/Root738、完整SDK及21native/16协议/3真实Main全过；自身真实全58/normal/repeat、核心与最终核对均0。精准NAME身份不放宽隐式赋值，旧738/34与SDK134保留，见[记录](issue-review-r105-network-name-input.md) |
 | R106 | COALESCE未选显式CAST的UNKNOWN输入分析遗漏 | 用户暂缓，未修复 | 2026-10-16“skip it”；原四条观察及未注册612控制（PG零失败/旧程序168失败）保留，无生产代码改动，不提交测试草稿为已验收修复；普通继续不重开，见[记录](issue-review-r106-coalesce-explicit-input-analysis.md) |
 | R107 | 四个字符串长度函数的真实签名与计量单位 | 本范围已修复，独立本地commit | PG/Root654、607原生与24native/18协议/3真实Main均0；四CPP实际2/1/1增量normal/repeat及核心/最终核对0。旧654/392、607/440与首两版失败保留，不扩为通用签名或原273完成，见[记录](issue-review-r107-string-length-signatures.md) |
-| R134 | 同名原生回调错误继承四组内置签名 | 本项有限修复完成 | 旧1320/922失败、修正后1320全过，正常1/repeat0、37完整入口全0，见[记录](issue-review-r134-core-native-callback-ownership.md)，通用其他callback仍开放 |
+| R135 | TIMESTAMPTZ RETURNING缺偏移且非会话墙钟 | 本项有限修复完成 | PG134/旧73失败、正常1/repeat0、45完整入口全0，见[记录](issue-review-r135-timestamptz-returning-timezone.md)，仅协议呈现，标量微秒持久化仍开放 |
+| R134 | 同名原生回调错误继承四组内置签名 | 已独立提交 | `4d4d1b39`；旧1320/922失败、修正后1320全过，正常1/repeat0、37完整入口全0，见[记录](issue-review-r134-core-native-callback-ownership.md)，通用其他callback仍开放 |
 | R133 | 时间戳binary输入拒绝合法微秒 | 已独立提交 | `ecf632e9`；PG266/旧204失败，正常1/repeat0、核心266及31完整入口全0，见[记录](issue-review-r133-timestamp-binary-microseconds.md)，不升级旧heap或冒全日期域完成 |
 | R132 | 通用SET TimeZone的TO被当成值 | 已独立提交 | `61cb28f6`；PG112/旧44失败，正常1/repeat0、fresh三Main及30完整入口全0，见[记录](issue-review-r132-timezone-set-to.md)，非全部GUC语法/事务完成 |
 | R131 | TIMESTAMPTZ binary输入按session再次偏移 | 已独立提交 | `e782cda1`；PG158/两旧版各45失败，29完整入口全0，见[记录](issue-review-r131-timestamptz-binary-timezone.md)，非fractional receiver或heap升级 |

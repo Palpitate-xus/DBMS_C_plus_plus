@@ -78,3 +78,7 @@ hunk、独立本地commit；原56933字节候选patch及三个跳过草稿逐字
 PG112/旧112中44失败与最终30入口有限验收见该记录。R131最初六个SET错误
 保留为历史，不把替换setup当成修复；更宽的GUC语法/LOCAL/DEFAULT/事务语义
 仍普通开放，未因R132的有限落地关闭。
+
+后续[R135](issue-review-r135-timestamptz-returning-timezone.md)另修复RETURNING输出未呈现
+会话时区的问题，PG134/旧73失败及最终45入口含原158均过；不改写本项接收器历史，
+也不因此关闭微秒持久化、所有时区历史或完整I/O。

@@ -1,5 +1,14 @@
 # 2026-10-13 全仓库审查
 
+后续[R135 RETURNING时区呈现](issue-review-r135-timestamptz-returning-timezone.md)已有限修复：
+PG最终134全过，冻结旧Root/干净旧版各134中73失败，当前134及原微秒266全过。
+只在每条语句的协议结果中按OID1184/日期/会话时区呈现，不改DmlResult或heap，
+同一Simple Query批次后续SET不能重画先前结果。正常1/repeat0，干净两O2 CPP+
+56生产donor含Main的真实server两入口0；最终18native+24Python（23协议/1CLI）+
+3核对R132未变TU后新链接当前库并执行的Main=45完整入口全0，独立0，不冒fresh TU。
+新1438未全量，旧1436两失败/1TLSskip保留。新表三标量微秒INSERT/UPDATE22023
+已另记为普通未修复，不由呈现修复关闭；原273仍22/166/70/15，不push、Actions禁用。
+
 后续[R134 原生回调签名归属](issue-review-r134-core-native-callback-ownership.md)已有限修复：
 干净旧实现1320控制/922失败，同一夹具修正后1320全过；只给实际ABS/LENGTH/UPPER/
 LOWER builtin callback声明所有权，opaque替换保留原始参数和caller结果提示。
