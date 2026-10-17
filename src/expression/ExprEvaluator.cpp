@@ -2947,7 +2947,8 @@ static std::string arrayExpressionType(const Expr* expression, const RowContext&
         // An undeclared native replacement has no builtin result metadata.
         // Do not rediscover this call through a new default evaluator below.
         CatalogManager::QualifiedName name;
-        if(CatalogManager::parseQualifiedName(function->funcName,name,true) &&
+        if(function->resolvedResultType.empty() &&
+           CatalogManager::parseQualifiedName(function->funcName,name,true) &&
            name.schema.empty() && isFixedFloat8ScalarName(name.name) &&
            evaluator->hasFunction(name.name))return "unknown";
     }
@@ -5825,7 +5826,9 @@ std::string ExprEvaluator::scalarFunctionIdentity(const FunctionCallExpr* call,
                 resolved = bound->resolved;
                 database = bound->database;
                 engine = bound->engine;
-            } else if(((isIntegralRoundingScalarName(resolved.name) ||
+            } else if((isFixedFloat8ScalarName(resolved.name) &&
+                       !callback->second.target<DeclaredFloat8ScalarFunction>()) ||
+                      ((isIntegralRoundingScalarName(resolved.name) ||
                         (resolved.name=="round" && call->args.size()==1)) &&
                        !callback->second.target<IntegralRoundingScalarFunction>()) ||
                       (resolved.name=="mod" &&

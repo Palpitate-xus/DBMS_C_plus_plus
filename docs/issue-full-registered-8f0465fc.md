@@ -85,7 +85,7 @@ binary、双缓存、58个source/header/flags receipt和预先记录的57份库�
 | --- | --- | --- | --- |
 | F8F-01 | analyze_null_statistics_test，测试第87行dropDatabase(db) != OK，进程abort，完整入口FAILED | 所有先前NULL统计/分区断言已执行通过；当前未打印具体DBStatus，不能猜原因或说成统计值错误。先保留日志；若以后恢复DROP DB专项，再记录状态码及目录/缓存生命周期，修复所有者路径并回归，不能删除清理断言换通过 | 落在已暂缓R51的DROP DB路径，本轮只登记，不重开/不修复，不计通过 |
 | F8F-02 | array_inspection_projection_test，array_position抛SQLSTATE42883，未捕获导致abort | 后续R129确认两层问题：旧TEXT夹具与原生类型提示丢isArray；真实INTEGER[]最终夹具在干净旧库也实际134，普通SQL参考/干净程序51均0。复用真实类型提示并校正夹具，保留NULL/范围/多维及TEXT拒绝控制，不放宽SQL签名 | 本轮FAILED不改写；[R129](issue-review-r129-native-array-projection-types.md)后续26有限完整入口及独立核对0，不等于新1432全量；不是已跳过的R109 |
-| F8F-03 | pg_typeof_test第37行，pg_typeof(tick())的objectOid==21且effects==1组合断言失败 | tick的AST显式声明smallint，callback返回typed NULL；绑定和类型查询前的零副作用断言已过。先分别打印OID/effects并追踪绑定前后resolvedResultType，比较native callback和stored声明所有权；保留类型分析不执行、执行只调用一次的契约，不靠改期望OID掩盖问题 | 普通待复现/修复；组合断言未区分类型错误或调用次数，尚不猜根因 |
+| F8F-03 | pg_typeof_test第37行，pg_typeof(tick())的objectOid==21且effects==1组合断言失败 | 后续R130干净旧库实际705/1/smallint，确认是声明被unknown回退覆盖而非重复调用。修复结果提示与固定float8替换的元数据/身份所有权，保留真实callee优先、零分析副作用和一次执行 | 本轮FAILED不改写；[R130](issue-review-r130-native-result-hint-precedence.md)后续168全过、35有限完整入口及独立核对0，不等于新1433全量 |
 
 `full-regression.log`中该轮完整输出包含上述断言及FAILED标记；标准runner
 继续并完成全部后续入口。记录失败位置不等于已证明与R51历史问题同一根因。
@@ -94,8 +94,10 @@ binary、双缓存、58个source/header/flags receipt和预先记录的57份库�
 `post-full-fence.log`均已实际产生；后者及独立输入/产物核对实际0。
 
 后续F8F-02的原生声明缺陷与旧夹具已由[R129](issue-review-r129-native-array-projection-types.md)
-修复，并经26个有限完整入口核对通过；不是重新执行本轮1431。接下来分别复现
-F8F-03的OID和执行次数、修复真实声明所有权、添加永久回归并独立commit。
+修复，并经26个有限完整入口核对通过；F8F-03由[R130](issue-review-r130-native-result-hint-precedence.md)
+修复，原断言及新增168控制、35个有限完整入口核对通过。各项独立本地版本保存，
+均不是重新执行本轮1431，也不是新1433全量。F8F-01仍按用户原R51要求暂缓，
+其它原273普通未完要求继续逐项处理，不把它们改记为用户暂缓。
 后续定向通过不会倒改本轮三项FAILED，也不等于重新跑过整套1431。
 
 原273项目及勾选仍为22complete/166partial/70unverified/15deferred；

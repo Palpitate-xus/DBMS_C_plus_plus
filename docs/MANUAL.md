@@ -243,6 +243,11 @@ TIME[]、TIMETZ及时间戳微秒binary接收也不由此项声明完成。
 当作INTEGER[]。用TypeRegistry的resolveColumnType创建数组列可保留isArray；
 四处原生投影类型提示修复及永久验证见[R129](issue-review-r129-native-array-projection-types.md)。
 起点裸2147483648是BIGINT，按签名拒绝42883；显式INTEGER转换溢出为22003。
+
+`pg_typeof(expr)`返回声明类型的regtype，包括typed NULL；分析/Describe不执行
+参数，真正求值仍执行参数一次并保留其错误。原生AST的resolvedResultType不能
+被opaque回调的unknown回退覆盖；真实builtin/stored声明优先，同名原生替换
+不继承builtin固定类型。有限范围及验证见[R130](issue-review-r130-native-result-hint-precedence.md)。
 `array_positions`和通用复合/域多态能力尚未完成。
 
 网络类型的格式、CAST源类型和协议验收范围见[R102输入检查](issue-review-r102-network-input-notation.md)

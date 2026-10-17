@@ -660,7 +660,9 @@ RoutineResultTypes collectRoutineResultTypes(
             if (evaluator.hasScalarFunction(call, functionEngine)) {
                 const std::string type = evaluator.scalarFunctionResultType(call, functionEngine);
                 if (!type.empty()) routineTypes.declarations[call] = type;
-                else {
+                // Only an undeclared call needs the opaque fallback. A real
+                // AST result declaration must not be replaced by UNKNOWN.
+                else if (call->resolvedResultType.empty()) {
                     CatalogManager::QualifiedName name;
                     if(CatalogManager::parseQualifiedName(call->funcName,name,true) && name.schema.empty() &&
                        (name.name=="ceil" || name.name=="ceiling" || name.name=="floor" || name.name=="mod" ||
@@ -674,6 +676,12 @@ RoutineResultTypes collectRoutineResultTypes(
                               evaluator.scalarFunctionIdentity(call,functionEngine).rfind("native",0)==0) {
                         // An opaque replacement does not inherit INTEGER from
                         // the builtin name or execute to discover a result type.
+                        routineTypes.declarations[call]="unknown";
+                    } else if(CatalogManager::parseQualifiedName(call->funcName,name,true) &&
+                              name.schema.empty() && evaluator.hasFunction(name.name) &&
+                              evaluator.scalarFunctionIdentity(call,functionEngine).rfind("native",0)==0) {
+                        // Opaque fixed-result builtin replacements have no
+                        // return declaration, regardless of their SQL name.
                         routineTypes.declarations[call]="unknown";
                     } else if(!fallback && CatalogManager::parseQualifiedName(call->funcName,name,true) &&
                               name.schema.empty() && evaluator.hasFunction(name.name)) {

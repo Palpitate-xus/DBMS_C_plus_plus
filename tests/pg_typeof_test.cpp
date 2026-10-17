@@ -34,7 +34,12 @@ int main() {
     evaluator.registerFunction("tick",[&](const std::vector<ExprValue>&){++effects;return ExprValue("smallint","",true);});
     evaluator.bindScalarFunctions(outer);
     assert(effects==0 && evaluator.scalarFunctionResultType(outer)=="regtype");
-    assert(evaluator.eval(outer,{}).objectOid==21 && effects==1);
+    const auto tickType=evaluator.eval(outer,{});
+    if(tickType.objectOid!=21 || effects!=1)
+        std::cerr<<"PG_TYPEOF_TICK oid="<<tickType.objectOid.value_or(0)<<" effects="<<effects
+                 <<" declared="<<static_cast<FunctionCallExpr*>(outer->args.front().get())->resolvedResultType<<'\n';
+    assert(tickType.objectOid==21);
+    assert(effects==1);
     auto bad=SQLParser().parseForBinding("SELECT pg_typeof(1/0)");
     assert(bad.success);
     std::string state;

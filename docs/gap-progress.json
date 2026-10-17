@@ -2,6 +2,28 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R130 native function result hint precedence and fixed-float8 replacement ownership in pg_typeof/type metadata",
+      "gap_ids": [
+        "FUNC-01"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r130-native-result-hint-precedence.md",
+        "docs/issue-full-registered-8f0465fc.md"
+      ],
+      "tests": [
+        "tests/native_function_result_hint_test.cpp",
+        "tests/pg_typeof_test.cpp",
+        "tests/pg_typeof_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "reproduction": "Clean accepted8f57 O2 libraries/fresh stubs/pre-global isolated original diagnostic:oid705 effects1 declared smallint then134, not repeated execution. Final native168 complete53 failures/actual1. Initial diagnostic optional stream compile1 never ran; initial168/59 fixture included non-fixed SQRT/MOD assumptions, corrected to actual fixed sin/pi and rerun; logs preserved. Existing actual PG18.6(180006) pg_typeof wire56 all0, not native callback API oracle.",
+        "focused_tests": "Two CPP only: expr_helper preserves AST declaration before opaque fallback and recognizes actual native fixed-result replacement identity; ExprEvaluator early unknown fallback respects explicit hint and distinguishes fixed-float8 native replacement identity. Real builtin/stored metadata stays first; unhinted calls do not execute to discover type; ceil/mod/round legacy fallback retained. New168 covers eight types times NULL/value, metadata purity, binding, native replacements and real callee precedence; original pg_typeof keeps OID21/effects1 split, zero-division and independent engine/stored typedNULL/query descriptors/drop assertions. Clean two own O2 CPP plus55 verified donors/fresh stubs completeboth0. Root normal2/repeat0 both0;20native12wire3 verified relinked realMain=35 distinct whole entries all0, independent0. R124 unchanged TU/source/header/flags/compiler/object bytes checked before new57 current O2 links/no stubs/actual isolated3 runs, not Main TU compile.",
+        "full_suite": "No new full1433 run. Prior clean8f1431 remains1427 actual passes/3 failures/1 TLS skip; F8F-03 fixed in35-entry finite gate, F8F-02 R129 finite26 and F8F-01 R51 user-deferred. Root binary62888353d361d91c08bcfbf0474ea5594f69edb2e34949227b9b59242c37da72 cache84866a7f64fab8734ff20eb2a85f30d98bdb7d7e221b58f93a3f1bf00691c6c1 seal42df1eaf83f3bfce49a2fe2b776b0ab167c28fea1dbc8148178de3ea2d1484a1; current58 receipts/dual-cache/57 bytes/frozen source0, Root739 signature separate from clean0b2. Accepted552MD899native531Python3Main1433 vs working555MD902+534+3=1439;555AST/13Bash static, no whole-engine sanitizer/real TLS proof.",
+        "scope": "AST/native callback metadata only, no public header/Main/heap/SQL syntax change; not all dynamic function result signatures or PG semantics. Original273 items/checkboxes22complete166partial70unverified15deferred unchanged; original56933-byte source candidate patch/three skipped drafts preserved, R98/R99/R109 excluded. No push, Actions disabled."
+      }
+    },
+    {
       "issue": "R129 native array scalar projection loses isArray in declaration hints; stale TEXT fixture and BIGINT start control corrected",
       "gap_ids": [
         "TYPE-16",

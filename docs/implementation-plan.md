@@ -1,5 +1,11 @@
 # DBMS 修改计划表（按 all-gaps-todo.md）
 
+后续[R130 原生函数结果声明](issue-review-r130-native-result-hint-precedence.md)已修复：干净旧库
+实际705/1/smallint、168矩阵53失败，当前168全过；PG56参考全过。显式声明不被
+UNKNOWN覆盖，真实callee优先，同名原生替换保留自身所有权。正常2/repeat0及
+20native+12wire+3核对后新链接当前库并执行的真实Main=35完整入口全0，独立复核0。
+F8F-03本项有限修复，旧完整三失败不改写；新1433未全量，R51仍暂缓。
+
 后续[R129 原生数组投影声明](issue-review-r129-native-array-projection-types.md)修复四处类型提示
 丢失isArray，并校正旧TEXT夹具；最终typed夹具在干净旧库实际134，PG/干净旧程序
 51协议均全过，证明SQL契约与原生API缺陷须分开。正常1/repeat0及14native+
