@@ -263,6 +263,9 @@ R131只验收整秒时区，后续fractional输入的有限支持见下。
 参数，真正求值仍执行参数一次并保留其错误。原生AST的resolvedResultType不能
 被opaque回调的unknown回退覆盖；真实builtin/stored声明优先，同名原生替换
 不继承builtin固定类型。有限范围及验证见[R130](issue-review-r130-native-result-hint-precedence.md)。
+ABS/LENGTH/UPPER/LOWER也按实际callback拥有签名；C++ registerFunction同名替换
+不继承被替换函数的arity/参数转换/结果类型。未声明结果为UNKNOWN，显式AST
+结果提示保留，分析不执行callback；有限验证见[R134](issue-review-r134-core-native-callback-ownership.md)。
 `array_positions`和通用复合/域多态能力尚未完成。
 
 网络类型的格式、CAST源类型和协议验收范围见[R102输入检查](issue-review-r102-network-input-notation.md)

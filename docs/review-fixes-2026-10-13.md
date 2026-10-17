@@ -1,5 +1,13 @@
 # 2026-10-13 审查问题修复进度
 
+后续[R134 原生回调签名归属](issue-review-r134-core-native-callback-ownership.md)已有限修复：
+干净旧实现1320控制/922失败，同一夹具修正后1320全过；只给实际ABS/LENGTH/UPPER/
+LOWER builtin callback声明所有权，opaque替换保留原始参数和caller结果提示。
+实际PG原132协议全过，干净一CPP+56匹配库的4完整入口0；Root正常1/repeat0，
+22native+12wire+3核对R132未变测试TU后新链接当前库并执行的Main=37完整入口全0，
+独立核对0。不是fresh Main TU或新1437全量；旧1436的两真实失败/1TLSskip保留。
+原273仍22/166/70/15；通用其他callback和微秒heap仍普通开放，不push、Actions禁用。
+
 2026-10-17[干净ecf632e9完整注册回归](issue-full-registered-ecf632e9.md)已结束：
 1436个入口各一次、有序唯一、无漏跑/重复；1433实际通过、2失败、1 TLS环境skip。
 标准runner/summary/driver及独立终态检查器均实际1；输入与产物独立核对0，不冒全绿。
@@ -251,7 +259,8 @@ socket超时，精确SQL/栈和原期限保留，尚未确定根因，不称新�
 | R105 | 限定NAME→INET/CIDR源身份遗漏 | 本范围已修复，独立本地commit | PG/Root738、完整SDK及21native/16协议/3真实Main全过；自身真实全58/normal/repeat、核心与最终核对均0。精准NAME身份不放宽隐式赋值，旧738/34与SDK134保留，见[记录](issue-review-r105-network-name-input.md) |
 | R106 | COALESCE未选显式CAST的UNKNOWN输入分析遗漏 | 用户暂缓，未修复 | 2026-10-16“skip it”；原四条观察及未注册612控制（PG零失败/旧程序168失败）保留，无生产代码改动，不提交测试草稿为已验收修复；普通继续不重开，见[记录](issue-review-r106-coalesce-explicit-input-analysis.md) |
 | R107 | 四个字符串长度函数的真实签名与计量单位 | 本范围已修复，独立本地commit | PG/Root654、607原生与24native/18协议/3真实Main均0；四CPP实际2/1/1增量normal/repeat及核心/最终核对0。旧654/392、607/440与首两版失败保留，不扩为通用签名或原273完成，见[记录](issue-review-r107-string-length-signatures.md) |
-| R133 | 时间戳binary输入拒绝合法微秒 | 本项有限修复完成 | PG266/旧204失败，正常1/repeat0、核心266及31完整入口全0，见[记录](issue-review-r133-timestamp-binary-microseconds.md)，不升级旧heap或冒全日期域完成 |
+| R134 | 同名原生回调错误继承四组内置签名 | 本项有限修复完成 | 旧1320/922失败、修正后1320全过，正常1/repeat0、37完整入口全0，见[记录](issue-review-r134-core-native-callback-ownership.md)，通用其他callback仍开放 |
+| R133 | 时间戳binary输入拒绝合法微秒 | 已独立提交 | `ecf632e9`；PG266/旧204失败，正常1/repeat0、核心266及31完整入口全0，见[记录](issue-review-r133-timestamp-binary-microseconds.md)，不升级旧heap或冒全日期域完成 |
 | R132 | 通用SET TimeZone的TO被当成值 | 已独立提交 | `61cb28f6`；PG112/旧44失败，正常1/repeat0、fresh三Main及30完整入口全0，见[记录](issue-review-r132-timezone-set-to.md)，非全部GUC语法/事务完成 |
 | R131 | TIMESTAMPTZ binary输入按session再次偏移 | 已独立提交 | `e782cda1`；PG158/两旧版各45失败，29完整入口全0，见[记录](issue-review-r131-timestamptz-binary-timezone.md)，非fractional receiver或heap升级 |
 | R130 | 原生结果提示被UNKNOWN覆盖/浮点替换所有权 | 已独立提交 | `3c8c85d3`；旧705/1/smallint和168/53失败，当前168及35完整入口全0，见[记录](issue-review-r130-native-result-hint-precedence.md) |

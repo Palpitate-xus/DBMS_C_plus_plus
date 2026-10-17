@@ -88,6 +88,10 @@ static bool isFixedFloat8ScalarName(const std::string& name) {
     return names.count(name)!=0;
 }
 
+static bool isCoreOverloadedScalarName(const std::string& name) {
+    return name=="abs" || name=="length" || name=="upper" || name=="lower";
+}
+
 static bool isIntegralRoundingScalarName(const std::string& name) {
     return name=="ceil" || name=="ceiling" || name=="floor";
 }
@@ -5278,6 +5282,14 @@ char ExprEvaluator::volatility(const std::string& name) const {
 }
 
 namespace {
+// Only these actual catalog callbacks own their concrete overload table.
+// A caller may replace the name without accepting its arity or coercions.
+struct DeclaredCoreScalarFunction {
+    ScalarFunction callback;
+    ExprValue operator()(const std::vector<ExprValue>& args) const {
+        return callback(args);
+    }
+};
 // Registration may replace a builtin by name. Only the actual catalog
 // implementation owns the new fixed-float8 declarations and coercion rules.
 struct DeclaredFloat8ScalarFunction {
@@ -5315,6 +5327,8 @@ struct ModResultScalarFunction {
     }
 };
 bool ownsScalarSignatures(const std::string& name,const ScalarFunction* callback) {
+    if(isCoreOverloadedScalarName(name))
+        return callback && callback->target<DeclaredCoreScalarFunction>();
     if(name=="array_position")
         return callback && callback->target<DeclaredArrayPositionScalarFunction>();
     if(isStringLengthScalarName(name))
@@ -5826,7 +5840,9 @@ std::string ExprEvaluator::scalarFunctionIdentity(const FunctionCallExpr* call,
                 resolved = bound->resolved;
                 database = bound->database;
                 engine = bound->engine;
-            } else if((isFixedFloat8ScalarName(resolved.name) &&
+            } else if((isCoreOverloadedScalarName(resolved.name) &&
+                       !callback->second.target<DeclaredCoreScalarFunction>()) ||
+                      (isFixedFloat8ScalarName(resolved.name) &&
                        !callback->second.target<DeclaredFloat8ScalarFunction>()) ||
                       ((isIntegralRoundingScalarName(resolved.name) ||
                         (resolved.name=="round" && call->args.size()==1)) &&
@@ -12931,7 +12947,9 @@ void ExprEvaluator::registerBuiltins() {
     };
 
     for(auto& entry:functions_) {
-        if(isFixedFloat8ScalarName(entry.first))
+        if(isCoreOverloadedScalarName(entry.first))
+            entry.second=DeclaredCoreScalarFunction{std::move(entry.second)};
+        else if(isFixedFloat8ScalarName(entry.first))
             entry.second=DeclaredFloat8ScalarFunction{std::move(entry.second)};
         else if(isStringLengthScalarName(entry.first))
             entry.second=DeclaredStringLengthScalarFunction{std::move(entry.second)};

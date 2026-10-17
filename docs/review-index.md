@@ -1,5 +1,13 @@
 # 代码审查索引
 
+后续[R134 原生回调签名归属](issue-review-r134-core-native-callback-ownership.md)已有限修复：
+干净旧实现1320控制/922失败，同一夹具修正后1320全过；只给实际ABS/LENGTH/UPPER/
+LOWER builtin callback声明所有权，opaque替换保留原始参数和caller结果提示。
+实际PG原132协议全过，干净一CPP+56匹配库的4完整入口0；Root正常1/repeat0，
+22native+12wire+3核对R132未变测试TU后新链接当前库并执行的Main=37完整入口全0，
+独立核对0。不是fresh Main TU或新1437全量；旧1436的两真实失败/1TLSskip保留。
+原273仍22/166/70/15；通用其他callback和微秒heap仍普通开放，不push、Actions禁用。
+
 2026-10-17[干净ecf632e9完整注册回归](issue-full-registered-ecf632e9.md)已结束：
 1436个入口各一次、有序唯一、无漏跑/重复；1433实际通过、2失败、1 TLS环境skip。
 标准runner/summary/driver及独立终态检查器均实际1；输入与产物独立核对0，不冒全绿。
@@ -51,6 +59,7 @@ TU重编或新1432全量。原8f完整三失败保留，F8F-03继续处理，R51
 
 | 审查 | 输入 | 内容 |
 | --- | --- | --- |
+| [R134 原生回调归属](issue-review-r134-core-native-callback-ownership.md) | 干净ecf四组名字被替换 | 旧1320/922失败；真实callback marker、caller声明和原始参数，正常1/repeat0、37完整入口全0，R132 TU核对后重连执行，不冒新1437全量 |
 | [R133 timestamp binary微秒](issue-review-r133-timestamp-binary-microseconds.md) | R132后的冻结接收器 | PG266/旧204失败；整数向下拆分及UTC标记，正常1/repeat0、31完整入口全0，R132 Main TU核对复用而非重编，旧heap/全日期域仍开放 |
 | [R132 TimeZone TO](issue-review-r132-timezone-set-to.md) | 通用SET分隔符被Main当成值 | PG112/旧44失败；消费独立TO且保留引号数据，正常1/repeat0、fresh三Main及30完整入口全0，GUC其余范围仍开放 |
 | [R131 TIMESTAMPTZ binary时区](issue-review-r131-timestamptz-binary-timezone.md) | `e782cda1` | PG158/干净与冻结旧版各45失败；仅标明UTC，29完整入口全0，非fractional receiver或heap升级 |

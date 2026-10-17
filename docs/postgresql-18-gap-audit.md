@@ -1,5 +1,13 @@
 # 2026-10-13 全仓库审查
 
+后续[R134 原生回调签名归属](issue-review-r134-core-native-callback-ownership.md)已有限修复：
+干净旧实现1320控制/922失败，同一夹具修正后1320全过；只给实际ABS/LENGTH/UPPER/
+LOWER builtin callback声明所有权，opaque替换保留原始参数和caller结果提示。
+实际PG原132协议全过，干净一CPP+56匹配库的4完整入口0；Root正常1/repeat0，
+22native+12wire+3核对R132未变测试TU后新链接当前库并执行的Main=37完整入口全0，
+独立核对0。不是fresh Main TU或新1437全量；旧1436的两真实失败/1TLSskip保留。
+原273仍22/166/70/15；通用其他callback和微秒heap仍普通开放，不push、Actions禁用。
+
 2026-10-17[干净ecf632e9完整注册回归](issue-full-registered-ecf632e9.md)已结束：
 1436个入口各一次、有序唯一、无漏跑/重复；1433实际通过、2失败、1 TLS环境skip。
 标准runner/summary/driver及独立终态检查器均实际1；输入与产物独立核对0，不冒全绿。

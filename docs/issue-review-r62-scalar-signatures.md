@@ -9,6 +9,9 @@ ARRAY_POSITION的有限anycompatible声明、UNKNOWN输入、同名用户/原生
 数组参数元数据由[R108](issue-review-r108-array-position-typed-equality.md)
 另项修复并验收；不能据此关闭一般多态或原TYPE-16/FUNC-01。
 R60修正窗口routine身份，不等于完成全部标量签名校验。
+后续[R134](issue-review-r134-core-native-callback-ownership.md)修正ABS/LENGTH/UPPER/LOWER
+被registerFunction替换后错误继承内置签名的所有权，旧1320/922失败、同夹具修正后
+1320全过。原R62的100/132历史数字不改写，真实SQL签名保留，通用其余范围仍partial。
 
 实际PostgreSQL18.6/180006对upper(1)、upper()、upper(text,text)、abs(text)、
 length(1)报42883；无FROM、空表WHERE false和LIMIT 0均如此。加OVER仍先报

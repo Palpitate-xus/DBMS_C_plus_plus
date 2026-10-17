@@ -2,6 +2,28 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R134 ABS/LENGTH/UPPER/LOWER native callback replacements inherit displaced builtin signatures",
+      "gap_ids": [
+        "TYPE-16",
+        "FUNC-01"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r134-core-native-callback-ownership.md",
+        "docs/issue-review-r62-scalar-signatures.md"
+      ],
+      "tests": [
+        "tests/native_scalar_signature_ownership_test.cpp",
+        "tests/scalar_signature_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "reproduction": "Clean ecf57O2libs/fresh stubs/pre-global isolated identical permanentfixture1320complete922fail/actual1; compile/link0 and old input/binary/fixture unchanged. Native same-name abs() callback still rejected42883; wrong metadata/identity/input coercion across fourR62names. Not922 separate bugs. ActualPG18.6 original132SQL signature controls all0;not nativeC++API oracle.",
+        "focused_tests": "Private ExprEvaluator.cpp four-name realcallback marker owns overloads/coercions; displaced callbacks native identity reuseR130pure fallback and explicit AST hints, UNKNOWN when undeclared, zero analysis effects, exactlyonce evaluation/raw args. No header/Main/parser/heap/table signature changes. Clean only own1O2CPP+56verifiedcleanO2donors/freshstubs4wholeentries0 incl new1320,old168,originalpg_typeof andR62native100. Rootnormal1Expr/repeat0 actual0;final22native12wire3verifiedR132TU-newlinkedrealMain=37 distinct complete ordered actual0, independent0. Record-all every native/wire, all58receipts/dualcache/57bytes/seal unchanged. Main source/test/header/flags/compiler/receipt/objectbytes verified then new57currentO2links/no stubs/actual3isolatedruns, NOT fresh TU or old linked binaries.",
+        "full_suite": "No newfull1437/TLS/whole-engine sanitizer proof. Binaryca37ee38f007890b725e99db7b3a54f460102b0a2df845ccff71ade947a54f93 cacheb559fe827c476e024999ff8e55ecaff4fe2526f24bd0d97ede9a3e452c659a2d seal2d29e0a49f60b0fb37195e618108d38c8060b1e3e7fff4a9032dcb393237fc4d Rootheaderflags739bf42b unchanged. Accepted557MD900native534Python3Main1437 vsworking560MD903native537Python3Main1443 withsixoriginalpendingentries;558AST13Bash/localtargets static. Oldcleanecf1436 full1433actualpass2fail1TLSskip retained;matching finite storedengineowner pass does not close historicalR51 cleanup failure.",
+        "scope": "Only four scoped callback identities/signature ownership;not all opaque builtin fallback names,all SQL/UDF overloads/roles/receivers or temporalheap microseconds. Original273items/checkboxes22complete166partial70unverified15deferred unchanged. Original56933-byte candidate patch/three deferred draft bytes preserved;R98/R99/R109 excluded from acceptance,no push,Actionsdisabled."
+      }
+    },
+    {
       "issue": "Clean accepted ecf632e9 full registered regression terminal with two real failures and one TLS environment skip",
       "gap_ids": [],
       "status": "partial",
