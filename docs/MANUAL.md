@@ -212,6 +212,11 @@ Simple Q或Extended Parse各对真实声明发送一次WARNING/22023，Describe�
 这仅修接收codec，不迁移旧4字节TIME表行；不要据此认为旧表可保存全部微秒，
 TIME[]、TIMETZ及时间戳微秒binary接收也不由此项声明完成。
 
+TIMESTAMPTZ已支持的整秒binary参数按UTC时刻解释，不再被会话TimeZone二次
+偏移；普通TIMESTAMP仍保留无时区时钟值，infinity/NULL行为保持。六时区、
+text对照及named rebind的158控制见[R131](issue-review-r131-timestamptz-binary-timezone.md)。
+这不表示fractional timestamp binary输入或整秒heap升级已完成。
+
 ### 其他类型
 | 类型 | 说明 |
 |------|------|

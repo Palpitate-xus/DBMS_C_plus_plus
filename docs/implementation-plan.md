@@ -1,5 +1,11 @@
 # DBMS 修改计划表（按 all-gaps-todo.md）
 
+后续[R131 TIMESTAMPTZ binary时区](issue-review-r131-timestamptz-binary-timezone.md)已修复UTC
+时刻被再次按会话本地解释：实际PG158全过、干净旧版和冻结Root各158/45失败。
+仅在有限1184中间文本明确+00，1114与infinity/NULL不变；正常1/repeat0及12native+
+14wire+3核对后新链接当前库并执行的真实Main=29完整入口全0，独立核对0。
+新1434未全量；合法SET TimeZone TO拒绝另列普通R132继续，不冒本项已修。
+
 后续[R130 原生函数结果声明](issue-review-r130-native-result-hint-precedence.md)已修复：干净旧库
 实际705/1/smallint、168矩阵53失败，当前168全过；PG56参考全过。显式声明不被
 UNKNOWN覆盖，真实callee优先，同名原生替换保留自身所有权。正常2/repeat0及

@@ -884,7 +884,10 @@ std::string binaryProtocolParameterLiteral(uint32_t typeOid,
                 seconds > std::numeric_limits<int64_t>::max()) break;
             const std::string formatted = formatTimestampSeconds(static_cast<int64_t>(seconds));
             if (formatted.empty()) break;
-            return quoteProtocolText(formatted, error);
+            // Binary timestamptz is already a UTC instant. Preserve that
+            // offset when the typed parameter passes through text casting;
+            // an unzoned clock would be reinterpreted in session TimeZone.
+            return quoteProtocolText(typeOid == 1184 ? formatted + "+00" : formatted, error);
         }
         case 1700: {
             std::string numeric;

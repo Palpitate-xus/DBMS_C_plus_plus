@@ -2,6 +2,27 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R131 TIMESTAMPTZ binary UTC instant is reinterpreted in session TimeZone",
+      "gap_ids": [
+        "TYPE-06",
+        "PROTO-04",
+        "PROTO-05"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r131-timestamptz-binary-timezone.md"
+      ],
+      "tests": [
+        "tests/timestamptz_binary_timezone_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "reproduction": "Actual PG18.6(180006) final158 all0; clean8f binary1e305110 and frozen Root62888353 each complete158 with45 failures/actual1. Six zones,1114/1184,exact signed whole seconds around epoch/cross-day/leap/DST dates,infinities,NULL,text controls,named Parse/Describe/rebind; precise8-byte outputs/OID/length/format/tag/ready. Initial legal SET TimeZone TO setup:PG158all0,clean old158/6fail at six SET commands leavingUTC, not receiver reproduction. Initial logs preserved; switched to equivalent supported SET TIME ZONE then reran PG158all0 and both old158/45. Separate ordinary R132 TO syntax remains open.",
+        "focused_tests": "Private NetworkServer finite1184 intermediate literal now appends +00 so typed casting preserves UTC;1114,early infinity,NULL and other codecs unchanged. Normal1NetworkServer/repeat0 both0;12native14wire3 verified relinked realMain=29 distinct whole entries all0, independent exact-name/order count and artifact checker0. R124 unchanged TU/source/header/flags/compiler/object bytes verified before new links57 current O2 libs/no stubs/actual3 isolated runs; not TU recompile. All58 receipts/dual-cache/57 library bytes/frozen input0.",
+        "full_suite": "No new full1434/TLS/whole-engine sanitizer proof. Binary4ed66b3fbea69226b8372b8e59d387abffca867b8272725c87b0ddd76fedfc7d cache529c9c8fbc0c9d26ced653e66ab77a783b8c897b4600d71b3cc5fdd0c39b9b22 sealb734dfdba5b094dcf9e4f6b365f551b1d573f1ee7463e228e0ed6900698be7de compile739bf42b unchanged. Accepted553MD899native532Python3Main1434 vs working556MD902+535+3=1440 including six original candidates;556AST/13Bash/local inline target static. Prior clean8f1431 real3 failures retained, R129/R130 separate finite fixes, R51 deferred.",
+        "scope": "Receiver timezone of supported whole-second timestamps only; no fractional binary timestamp receiver, heap upgrade, all date domains/error precedence/outer wire-frame completeness. No public header/Main change. R132 SET TimeZone TO is ordinary open, not user-deferred; original273 items/checkboxes22complete166partial70unverified15deferred unchanged. Original56933-byte candidate source patch/three draft bytes preserved, excludesR98/R99/R109, no push, Actions disabled."
+      }
+    },
+    {
       "issue": "R130 native function result hint precedence and fixed-float8 replacement ownership in pg_typeof/type metadata",
       "gap_ids": [
         "FUNC-01"
