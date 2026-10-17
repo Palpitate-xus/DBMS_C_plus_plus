@@ -215,7 +215,12 @@ TIME[]、TIMETZ及时间戳微秒binary接收也不由此项声明完成。
 TIMESTAMPTZ已支持的整秒binary参数按UTC时刻解释，不再被会话TimeZone二次
 偏移；普通TIMESTAMP仍保留无时区时钟值，infinity/NULL行为保持。六时区、
 text对照及named rebind的158控制见[R131](issue-review-r131-timestamptz-binary-timezone.md)。
-这不表示fractional timestamp binary输入或整秒heap升级已完成。
+R131只验收整秒时区，后续fractional输入的有限支持见下。
+
+实际OID1114/1184的binary参数在基础civil范围（1..9999）支持精确整数微秒；
+负epoch向下拆成整秒和正余数，`-1µs`仍是前一秒加999999µs，1184保持UTC时刻。
+三时区/正负微秒/跨日/边界及named rebind验证见[R133](issue-review-r133-timestamp-binary-microseconds.md)。
+这不迁移旧整秒heap，也不声明所有BC/大年份、typmod或错误状态边界完成。
 
 通用`SET TimeZone TO 'Asia/Shanghai'`支持TO分隔符，也保留等号和专用
 `SET TIME ZONE 'Asia/Shanghai'`写法。TO在引号内仍是值的一部分，无效设置

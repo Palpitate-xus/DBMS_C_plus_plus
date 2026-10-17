@@ -2,6 +2,27 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R133 legal fractional TIMESTAMP/TIMESTAMPTZ binary parameter microseconds rejected22P03",
+      "gap_ids": [
+        "TYPE-06",
+        "PROTO-04",
+        "PROTO-05"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r133-timestamp-binary-microseconds.md"
+      ],
+      "tests": [
+        "tests/timestamp_binary_microsecond_parameter_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "reproduction": "Actual PG18.6(180006) final266all0; immutable RootR132c3deb2ad266complete204fail/actual1.41 independent integer/datetime vectors,1114/1184,UTC/Kathmandu/NewYork,negative epoch/cross-second/day/leap/DST/civil1..9999,infinities,NULL,text controls,named Parse/Describe/rebind,exact8 bytes plus descriptor/tag/ready. Old modulo1000000 guard rejected fractional values; not sender-only or successful-value display mismatch.",
+        "focused_tests": "Private Net receiver signed numeric two-complement decode avoids out-of-range unsigned cast; earlyinfinities unchanged, floor seconds plus0..999999 remainder uses integer formatting exactsix digits/trim,retainsR131UTC+00 on1184. No public header/Main/heap change. Actualnormal1Net/repeat0 both0;focused266all0 then12native16wire3verifiedR132TU-relinkedrealMain=31 distinct whole entries all0,independent0. Main/test source/header/flags/compiler/normalMainreceipt/objectbytes from NEW R132 receipt checked before new57 currentO2links/no stubs/actual3isolated runs;not R124 reuse or fresh TU compile. All58 receipts/dual-cache/57 bytes/seal0. Finite helper initial over-escaped guard2 stopped beforecache/link/tests;emptylog+status preserved,only helperfixed thenfull31rerun0,no counterfeitpass.",
+        "full_suite": "No new full1436/realTLS/whole-engine sanitizer proof. Binary302c030b0480d20852643bedda7c8328989fd01c366a9831da346d9942656dd6 cached87779f01b5656069001074c9bb55417b6c0e3ac3566f17f79e8b21243c3e5a4 sealf18432b1d0e886f56eaefcd7394753d9edeaad584fd7bc942694ccb74e17130d headerflags739bf42b unchanged. Accepted555MD899native534Python3Main1436 vs working558MD902+537+3=1442 withsixoriginalpendingentries;558AST13Bash/localtargets static. Old8f1431 real3failures retained, R129/R130 finite fixes separate andR51deferred.",
+        "scope": "Basic existingcivil1..9999 direct scalar receiver only;not allBC/large date domains, timestamp CAST typmods/rounding,old whole-secondheap,arrayreceivers,error precedence/outer framing. Original273items/checkboxes22complete166partial70unverified15deferred unchanged. Original56933-byte sourcecandidate andthree skipped draft bytes preserved,excludesR98/R99/R109,no push,Actionsdisabled."
+      }
+    },
+    {
       "issue": "R132 generic SET TimeZone TO separator is passed into timezone value by legacy Main route",
       "gap_ids": [
         "OPS-02",

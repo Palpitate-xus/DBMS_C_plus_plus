@@ -1,5 +1,11 @@
 # 代码审查索引
 
+后续[R133 timestamp binary微秒](issue-review-r133-timestamp-binary-microseconds.md)修复合法
+1114/1184非整秒被22P03拒绝：PG266全过、冻结旧版266/204失败，整数解码及负epoch
+向下拆分保留精确微秒与R131 UTC标记。正常1/repeat0、核心266和12native+16wire+
+3核对R132未变TU后新链接当前库并执行的真实Main=31完整入口全0，独立核对0。
+不冒fresh Main、整秒heap升级或完整时间输入域/错误阶段完成；新1436尚未全量。
+
 后续[R132 SET TimeZone TO](issue-review-r132-timezone-set-to.md)已修复旧Main把TO当值：
 PG112全过、冻结旧版112/44失败。只消费通用SET的独立TO，不改引号内数据或专用
 TIME ZONE值。正常1/repeat0、三个真实Main fresh TU编译/新链接/隔离运行，以及
@@ -35,6 +41,7 @@ TU重编或新1432全量。原8f完整三失败保留，F8F-03继续处理，R51
 
 | 审查 | 输入 | 内容 |
 | --- | --- | --- |
+| [R133 timestamp binary微秒](issue-review-r133-timestamp-binary-microseconds.md) | R132后的冻结接收器 | PG266/旧204失败；整数向下拆分及UTC标记，正常1/repeat0、31完整入口全0，R132 Main TU核对复用而非重编，旧heap/全日期域仍开放 |
 | [R132 TimeZone TO](issue-review-r132-timezone-set-to.md) | 通用SET分隔符被Main当成值 | PG112/旧44失败；消费独立TO且保留引号数据，正常1/repeat0、fresh三Main及30完整入口全0，GUC其余范围仍开放 |
 | [R131 TIMESTAMPTZ binary时区](issue-review-r131-timestamptz-binary-timezone.md) | `e782cda1` | PG158/干净与冻结旧版各45失败；仅标明UTC，29完整入口全0，非fractional receiver或heap升级 |
 | [R130 原生结果声明](issue-review-r130-native-result-hint-precedence.md) | `3c8c85d3` | 旧705/1/smallint和168/53失败；声明/回调所有权修复，35完整入口全0，旧全量红不抹除 |

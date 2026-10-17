@@ -70,6 +70,10 @@ hunk、独立本地commit；原56933字节候选patch及三个跳过草稿逐字
 原273统计/勾选仍为22complete/166partial/70unverified/15deferred。
 不push，GitHub Actions保持禁用。
 
+后续[R133](issue-review-r133-timestamp-binary-microseconds.md)补基础civil范围的1114/1184
+精确微秒接收，PG266/旧204失败及最终31完整入口有限验收见该记录。R131仍只
+证明其当时的整秒时区修复，旧heap、全部日期域/typmod/错误状态仍普通开放。
+
 后续[R132](issue-review-r132-timezone-set-to.md)已独立修复通用SET TimeZone的TO消费，
 PG112/旧112中44失败与最终30入口有限验收见该记录。R131最初六个SET错误
 保留为历史，不把替换setup当成修复；更宽的GUC语法/LOCAL/DEFAULT/事务语义

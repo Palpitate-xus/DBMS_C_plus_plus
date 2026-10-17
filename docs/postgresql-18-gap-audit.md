@@ -1,5 +1,11 @@
 # 2026-10-13 全仓库审查
 
+后续[R133 timestamp binary微秒](issue-review-r133-timestamp-binary-microseconds.md)修复合法
+1114/1184非整秒被22P03拒绝：PG266全过、冻结旧版266/204失败，整数解码及负epoch
+向下拆分保留精确微秒与R131 UTC标记。正常1/repeat0、核心266和12native+16wire+
+3核对R132未变TU后新链接当前库并执行的真实Main=31完整入口全0，独立核对0。
+不冒fresh Main、整秒heap升级或完整时间输入域/错误阶段完成；新1436尚未全量。
+
 后续[R132 SET TimeZone TO](issue-review-r132-timezone-set-to.md)已修复旧Main把TO当值：
 PG112全过、冻结旧版112/44失败。只消费通用SET的独立TO，不改引号内数据或专用
 TIME ZONE值。正常1/repeat0、三个真实Main fresh TU编译/新链接/隔离运行，以及

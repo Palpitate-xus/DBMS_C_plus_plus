@@ -872,18 +872,30 @@ std::string binaryProtocolParameterLiteral(uint32_t typeOid,
         }
         case 1114: case 1184: {
             if (!decodeBinaryUnsigned(raw, 8, bits)) break;
-            const int64_t micros = static_cast<int64_t>(bits);
+            const int64_t micros = bits <= static_cast<uint64_t>(INT64_MAX)
+                ? static_cast<int64_t>(bits)
+                : -1 - static_cast<int64_t>(std::numeric_limits<uint64_t>::max() - bits);
             if (micros == INT64_MAX)
                 return quoteProtocolText("infinity", error);
             if (micros == INT64_MIN)
                 return quoteProtocolText("-infinity", error);
-            if (micros % 1000000 != 0) break;
+            // Floor before the epoch so -1us is the preceding second plus
+            // 999999us, not epoch+1us or a truncated whole-second datum.
+            int64_t deltaSeconds = micros / 1000000;
+            int64_t fraction = micros % 1000000;
+            if (fraction < 0) { fraction += 1000000; --deltaSeconds; }
             const int64_t epoch = parseTimestampToSeconds("2000-01-01 00:00:00");
-            const __int128 seconds = static_cast<__int128>(epoch) + micros / 1000000;
+            const __int128 seconds = static_cast<__int128>(epoch) + deltaSeconds;
             if (seconds < std::numeric_limits<int64_t>::min() ||
                 seconds > std::numeric_limits<int64_t>::max()) break;
-            const std::string formatted = formatTimestampSeconds(static_cast<int64_t>(seconds));
+            std::string formatted = formatTimestampSeconds(static_cast<int64_t>(seconds));
             if (formatted.empty()) break;
+            if (fraction) {
+                auto digits = std::to_string(fraction);
+                digits.insert(digits.begin(), 6 - digits.size(), '0');
+                while (digits.back() == '0') digits.pop_back();
+                formatted += "." + digits;
+            }
             // Binary timestamptz is already a UTC instant. Preserve that
             // offset when the typed parameter passes through text casting;
             // an unzoned clock would be reinterpreted in session TimeZone.

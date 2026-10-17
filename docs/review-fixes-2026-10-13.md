@@ -1,5 +1,11 @@
 # 2026-10-13 审查问题修复进度
 
+后续[R133 timestamp binary微秒](issue-review-r133-timestamp-binary-microseconds.md)修复合法
+1114/1184非整秒被22P03拒绝：PG266全过、冻结旧版266/204失败，整数解码及负epoch
+向下拆分保留精确微秒与R131 UTC标记。正常1/repeat0、核心266和12native+16wire+
+3核对R132未变TU后新链接当前库并执行的真实Main=31完整入口全0，独立核对0。
+不冒fresh Main、整秒heap升级或完整时间输入域/错误阶段完成；新1436尚未全量。
+
 后续[R132 SET TimeZone TO](issue-review-r132-timezone-set-to.md)已修复旧Main把TO当值：
 PG112全过、冻结旧版112/44失败。只消费通用SET的独立TO，不改引号内数据或专用
 TIME ZONE值。正常1/repeat0、三个真实Main fresh TU编译/新链接/隔离运行，以及
@@ -235,7 +241,8 @@ socket超时，精确SQL/栈和原期限保留，尚未确定根因，不称新�
 | R105 | 限定NAME→INET/CIDR源身份遗漏 | 本范围已修复，独立本地commit | PG/Root738、完整SDK及21native/16协议/3真实Main全过；自身真实全58/normal/repeat、核心与最终核对均0。精准NAME身份不放宽隐式赋值，旧738/34与SDK134保留，见[记录](issue-review-r105-network-name-input.md) |
 | R106 | COALESCE未选显式CAST的UNKNOWN输入分析遗漏 | 用户暂缓，未修复 | 2026-10-16“skip it”；原四条观察及未注册612控制（PG零失败/旧程序168失败）保留，无生产代码改动，不提交测试草稿为已验收修复；普通继续不重开，见[记录](issue-review-r106-coalesce-explicit-input-analysis.md) |
 | R107 | 四个字符串长度函数的真实签名与计量单位 | 本范围已修复，独立本地commit | PG/Root654、607原生与24native/18协议/3真实Main均0；四CPP实际2/1/1增量normal/repeat及核心/最终核对0。旧654/392、607/440与首两版失败保留，不扩为通用签名或原273完成，见[记录](issue-review-r107-string-length-signatures.md) |
-| R132 | 通用SET TimeZone的TO被当成值 | 本项有限修复完成 | PG112/旧44失败，正常1/repeat0、fresh三Main及30完整入口全0，见[记录](issue-review-r132-timezone-set-to.md)，非全部GUC语法/事务完成 |
+| R133 | 时间戳binary输入拒绝合法微秒 | 本项有限修复完成 | PG266/旧204失败，正常1/repeat0、核心266及31完整入口全0，见[记录](issue-review-r133-timestamp-binary-microseconds.md)，不升级旧heap或冒全日期域完成 |
+| R132 | 通用SET TimeZone的TO被当成值 | 已独立提交 | `61cb28f6`；PG112/旧44失败，正常1/repeat0、fresh三Main及30完整入口全0，见[记录](issue-review-r132-timezone-set-to.md)，非全部GUC语法/事务完成 |
 | R131 | TIMESTAMPTZ binary输入按session再次偏移 | 已独立提交 | `e782cda1`；PG158/两旧版各45失败，29完整入口全0，见[记录](issue-review-r131-timestamptz-binary-timezone.md)，非fractional receiver或heap升级 |
 | R130 | 原生结果提示被UNKNOWN覆盖/浮点替换所有权 | 已独立提交 | `3c8c85d3`；旧705/1/smallint和168/53失败，当前168及35完整入口全0，见[记录](issue-review-r130-native-result-hint-precedence.md) |
 | R129 | 原生投影类型提示丢isArray与旧TEXT夹具 | 已独立提交 | `c02aa584`；真实数组旧原生134、PG/旧SQL51均0，四处提示及夹具修复、26完整入口全0，见[记录](issue-review-r129-native-array-projection-types.md)，R109未重开 |
