@@ -2819,6 +2819,15 @@ bool describePreparedResult(const std::string& sql, Session& session,
 std::string commandTagFor(const std::string& sql, const std::vector<std::string>& lines,
                           size_t rowCount) {
     std::string keyword = firstSqlKeyword(sql);
+    if (keyword == "create") {
+        SQLParser parser;
+        const auto parsed = parser.parseForBinding(sql);
+        const auto* view = parsed.isValid()
+            ? dynamic_cast<const CreateViewStmt*>(parsed.stmt.get()) : nullptr;
+        // TEMP/TEMPORARY, OR REPLACE and trivia are syntax, not the object
+        // named in CommandComplete. Materialized/CTAS tags retain their owner.
+        if (view && !view->materialized) return "CREATE VIEW";
+    }
     if (startsWithSqlPhrase(sql, "prepare transaction")) {
         return "PREPARE TRANSACTION";
     }

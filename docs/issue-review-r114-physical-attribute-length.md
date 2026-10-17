@@ -76,7 +76,10 @@ DdlExecutor.cpp目录长度hunk、NetworkServer.cpp逻辑长度函数、两个�
 difflib/git hunk分割差异不代表源码变化，修正比较方法后的0与原失败日志都保留。
 没有新完整注册集合、clean HEAD全量、真实TLS或整库sanitizer证明。
 
-## 检测中发现、尚未修复的独立问题
+## 检测中发现的独立问题及后续状态
+
+下表保留R114的原始发现和方法；其中非物化TEMP VIEW命令tag后由
+[R116](issue-review-r116-view-command-tags.md)单独修复，目录SQL、NULL视图执行和来源仍开放。
 
 | 问题 | 实际证据 | 后续修改方法 |
 | --- | --- | --- |

@@ -148,6 +148,10 @@ INTERVAL二进制结果为网络字节序int64微秒、int32天、int32月，共
 保留维度、下界和NULL，复用真实元素发送；binary Bind输入仍不由此实现。
 详见[R113](issue-review-r113-interval-binary-result.md)。
 
+普通非物化视图的CREATE、CREATE TEMP/TEMPORARY和CREATE OR REPLACE语法
+均以CREATE VIEW命令标签完成；合法注释不改变对象类型。Simple和Extended行为
+一致，修复及边界见[R116](issue-review-r116-view-command-tags.md)，不据此声称物化/CTAS完成。
+
 ### 其他类型
 | 类型 | 说明 |
 |------|------|

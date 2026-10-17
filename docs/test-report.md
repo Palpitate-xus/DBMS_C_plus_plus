@@ -1,5 +1,10 @@
 # DBMS 功能测试报告
 
+新增[R116 视图完成tag](issue-review-r116-view-command-tags.md)54条完整协议
+控制，实际180006全过、旧14tag失败。有限匹配回归与真实终态见记录；接受
+890native+3Main+519Python=1412，工作区893+3+522=1418含保留候选，无新完整注册、
+真实TLS或整库sanitizer证明。原273统计不提升。
+
 新增[R113 INTERVAL binary结果](issue-review-r113-interval-binary-result.md)117低层
 及171协议控制，实际PG171全过、依赖修复后旧149失败/原生78失败。最终有限回归
 与失败原文见记录；接受890native+3Main+518Python=1411，工作区893+3+521=1417

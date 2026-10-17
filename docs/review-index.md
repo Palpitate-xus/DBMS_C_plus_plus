@@ -4,6 +4,7 @@
 
 | 审查 | 输入 | 内容 |
 | --- | --- | --- |
+| [R116 非物化视图完成tag](issue-review-r116-view-command-tags.md) | TEMP/TEMPORARY/OR REPLACE与注释 | 实际PG54零失败、旧14tag失败；只按真实语法对象修命令标签，完整有限门禁及独立版本见记录，物化/CTAS不重开 |
 | [R113 INTERVAL二进制结果](issue-review-r113-interval-binary-result.md) | 16字节时钟/天/月与真实数组封套 | PG171零失败、依赖修复后旧149失败；117低层控制与有限匹配验收见记录，不等同binary Bind或其他codec完成 |
 | [R114 物理字段逻辑长度](issue-review-r114-physical-attribute-length.md) | DDL属性、冷暖目录与协议长度 | PG28零失败、旧22失败；102原生控制；R115先独立提交，其他目录/视图失败及方法保留，非完整注册验收 |
 | [R115 标量别名投影metadata](issue-review-r115-scalar-alias-projection-metadata.md) | 含数组表的星号展开与真实列身份 | 实际参考228零失败、固定旧13失败；只修规范类型拼写与typmod，有限回归/独立版本见记录，R114另项 |

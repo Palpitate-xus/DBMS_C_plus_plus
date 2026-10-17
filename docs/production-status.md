@@ -1,5 +1,9 @@
 # 生产化状态
 
+非物化TEMP/TEMPORARY/OR REPLACE视图的CommandComplete已按真实解析对象
+修正为CREATE VIEW，见[R116](issue-review-r116-view-command-tags.md)。仅修tag，不重开
+物化/CTAS等暂缓范围；目录SQL、NULL视图、来源与TIME精度仍普通待做，原273不提升。
+
 INTERVAL及其内置数组的真实二进制结果见[R113](issue-review-r113-interval-binary-result.md)。
 保持独立月/天/微秒与无限标记，不把文本当binary；其输入和其他缺失标量codec
 仍未完成。R114/R115先各自独立提交，原273不提升，未获新完整注册终态。

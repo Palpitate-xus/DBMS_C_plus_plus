@@ -1,5 +1,9 @@
 # 2026-10-13 全仓库审查
 
+R114观察到的非物化TEMP VIEW完成tag错误后续按[R116](issue-review-r116-view-command-tags.md)
+单独修复；实际54参考与有限门禁不等于所有视图、物化/CTAS或原273项完成。
+其他目录/视图与TIME精度缺陷仍按普通未完记录，不恢复用户暂缓模块。
+
 [R113](issue-review-r113-interval-binary-result.md)修复INTERVAL/数组的真实二进制结果，
 与已独立提交的逻辑长度/字符修饰符分开记录；其余codec、目录/视图及原273项
 仍开放，不把普通未完问题改记为用户暂缓或总账完成。
