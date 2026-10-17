@@ -2,6 +2,26 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R118 temporal query materialization uses real heap factories",
+      "gap_ids": [
+        "TYPE-06",
+        "QRY-12"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r118-temporal-view-materialization.md"
+      ],
+      "tests": [
+        "tests/temporal_view_materialization_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "reproduction": "Actual180006 initial150all0 versusfixed3d4old15044failures actual1. Expanded186includesTIMESTAMP/TIMESTAMPTZ, actualreference0 old60failures actual1. Isolatedoriginal6 and matching-library10observations show legacyvarlen65535NULLinsert12 versusrealDate12/Time4/Timetz4/Timestamp8/Timestamptz8NULLinsert0. Collection0 is not oldlayoutpass. C1normal1MainCPP/repeat0 actual0 but186still36failures actual1, retained.",
+        "focused_tests": "MaincreateTempTableFromRows only9factory-selection lines forfivecanonicaltemporaltypes, no heapmigration/publicheaders/provider-lifetime/schema identity changes. Permanent186actualRoot0; finalfinite10native21wire3genuineMain34whole entries allactual0. ActualthreeMainTUs directlycompile currentSource with57matchednormalO2libraries/no stubs, onlyexplain/sessiontestTUs O0 andwindow/prodO2. C2normal1MainCPP/repeat0, cachedualstamps/all58receipts/all57testbytes/frozeninputs terminal0. Extraactualreference/old/current8coarseTS observations compared old3differences/current0, includingnonnullview/derived/CTE; originalsecondary42P01 disappears withlayoutfix, no speculative separate routebug closure.",
+        "full_suite": "One protocol entry added, no new native: acceptedprojection890native+3Main+520Python=1413 versusworking893+3+523=1419 including preservedR98/R109 candidates. No new complete registered suite, actualTLS or full-engine sanitizer proof.",
+        "scope": "Original273items/checkboxes unchanged22complete166partial70unverified15deferred. R117TIMEprecision/binary, catalogSQLsource andvieworigin remain ordinaryopen. Does not complete generalviewrewrite/lazydemand/alltimeprecision/domains or userdeferredCTAS/materialized/security/TDE/lifetime scopes. R109user-skipped/R98/R99/R106draft preservedexcluded. No push; Actionsdisabled."
+      }
+    },
+    {
       "issue": "R116 parsed nonmaterialized view completion tags",
       "gap_ids": [
         "PROTO-02",

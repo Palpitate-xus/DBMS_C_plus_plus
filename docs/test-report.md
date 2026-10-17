@@ -1,5 +1,10 @@
 # DBMS 功能测试报告
 
+新增[R118 时态物化布局](issue-review-r118-temporal-view-materialization.md)186条
+协议控制，实际PG全过、固定旧60失败、首版仍36失败均保留。最终匹配回归/真实
+Main终态见记录。本项提交后的接受组合为890native+3Main+520Python=1413，
+工作区893+3+523=1419含保留候选；未获新完整注册回归、真实TLS或整库sanitizer证明。
+
 新增[R116 视图完成tag](issue-review-r116-view-command-tags.md)54条完整协议
 控制，实际180006全过、旧14tag失败。有限匹配回归与真实终态见记录；接受
 890native+3Main+519Python=1412，工作区893+3+522=1418含保留候选，无新完整注册、

@@ -12883,6 +12883,15 @@ static std::string createTempTableFromRows(Session& s,
             col = makeIntColumn(cname, true, 2);
         } else if (type == "bigint" || type == "int8") {
             col = makeIntColumn(cname, true, 3);
+        } else if (type == "date") {
+            col = makeDateColumn(cname, true);
+        } else if (type == "time" || type == "timetz") {
+            col = makeTimeColumn(cname, true);
+            if (type == "timetz") col.dataType = type;
+        } else if (type == "timestamp") {
+            col = makeTimestampColumn(cname, true);
+        } else if (type == "timestamptz") {
+            col = makeTimestamptzColumn(cname, true);
         } else {
             col = makeVarCharColumn(cname, true, 65535);
             if (!type.empty()) col.dataType = type;

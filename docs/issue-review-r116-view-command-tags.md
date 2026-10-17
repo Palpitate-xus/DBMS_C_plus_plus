@@ -69,6 +69,7 @@ src/tests/scripts seal：
 后的源码与三个暂缓草稿逐字节核对0，原R98/R99/R109代码未混入本项。
 
 原273仍22complete/166partial/70unverified/15deferred，勾选不提升。
-R114目录SQL/NULL视图/来源问题、R117 TIME binary/文本舍入及其余codec仍普通
-开放；不转换成用户暂缓。无新完整注册、clean HEAD全量、真实TLS或整库
+R114目录SQL/来源、R117 TIME binary/文本舍入及其余codec仍普通开放；时态
+NULL视图物化布局的后续实现与验收见[R118](issue-review-r118-temporal-view-materialization.md)。
+不转换成用户暂缓。无新完整注册、clean HEAD全量、真实TLS或整库
 sanitizer证明。R98/R99/R109候选和R106草稿不混入；不push，Actions禁用。

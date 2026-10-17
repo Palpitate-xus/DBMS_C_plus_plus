@@ -101,8 +101,9 @@ src/tests/scripts seal：
 | 通用具名复合/域/用户数组 | 由真实目录身份和所属codec控制，不通过内置OID表假装全支持 |
 | R117 TIME微秒/24时binary及超微秒规范文本 | 采用真实微秒TIME发送、检查0至24时边界；输入舍入另按真实datum契约修复，不能粗改4字节存储或静默丢精度 |
 
-R111规划及R114记录的目录SQL、NULL视图和来源问题仍普通开放；非物化TEMP
-VIEW tag后由[R116](issue-review-r116-view-command-tags.md)独立修复。未完问题不是用户暂缓。
+R111规划及目录SQL/来源问题仍普通开放；时态NULL视图物化布局的后续实现
+和验收见[R118](issue-review-r118-temporal-view-materialization.md)。非物化TEMP VIEW tag后由
+[R116](issue-review-r116-view-command-tags.md)独立修复。未完问题不是用户暂缓。
 原273仍22complete/166partial/70unverified/15deferred；未获得新
 完整注册回归、真实TLS或整库sanitizer证明。R98/R99/R109候选和R106草稿不混入；
 不push，Actions禁用。

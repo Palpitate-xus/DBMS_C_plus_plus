@@ -1,5 +1,9 @@
 # 生产化状态
 
+时态视图/内部结果物化的真实heap布局修正见[R118](issue-review-r118-temporal-view-materialization.md)。
+不把改dataType名称当作物理格式转换，实际验收终态以记录为准；R117精度/binary、
+目录SQL与视图origin仍普通待做。原273不提升，不重开CTAS/物化等暂缓专项。
+
 非物化TEMP/TEMPORARY/OR REPLACE视图的CommandComplete已按真实解析对象
 修正为CREATE VIEW，见[R116](issue-review-r116-view-command-tags.md)。仅修tag，不重开
 物化/CTAS等暂缓范围；目录SQL、NULL视图、来源与TIME精度仍普通待做，原273不提升。

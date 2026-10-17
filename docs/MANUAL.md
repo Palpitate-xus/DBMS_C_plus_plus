@@ -152,6 +152,11 @@ INTERVAL二进制结果为网络字节序int64微秒、int32天、int32月，共
 均以CREATE VIEW命令标签完成；合法注释不改变对象类型。Simple和Extended行为
 一致，修复及边界见[R116](issue-review-r116-view-command-tags.md)，不据此声称物化/CTAS完成。
 
+视图/派生结果内部的DATE/TIME/TIMETZ/TIMESTAMP/TIMESTAMPTZ列应使用真实
+存储布局，不能只把VARCHAR列改名为时态类型；NULL也遵守codec布局。内部宽度
+12/4/4/8/8不同于对外逻辑长度，修正范围与验收见[R118](issue-review-r118-temporal-view-materialization.md)。
+这不代表已有TIME整秒物理格式已升级到完整微秒存储。
+
 ### 其他类型
 | 类型 | 说明 |
 |------|------|

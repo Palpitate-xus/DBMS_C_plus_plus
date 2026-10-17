@@ -1,5 +1,9 @@
 # 2026-10-13 全仓库审查
 
+时态视图的内部物化列误用VARCHAR布局见[R118](issue-review-r118-temporal-view-materialization.md)。
+只用真实既有工厂修正临时结果描述，验证以记录的冻结有限终态为准，不迁移表行，
+不宣称通用view rewrite、时态精度、原273项或用户暂缓模块已完成。
+
 R114观察到的非物化TEMP VIEW完成tag错误后续按[R116](issue-review-r116-view-command-tags.md)
 单独修复；实际54参考与有限门禁不等于所有视图、物化/CTAS或原273项完成。
 其他目录/视图与TIME精度缺陷仍按普通未完记录，不恢复用户暂缓模块。
