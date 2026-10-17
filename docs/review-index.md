@@ -4,6 +4,7 @@
 
 | 审查 | 输入 | 内容 |
 | --- | --- | --- |
+| [R127 直接TIME过高精度](issue-review-r127-time-excess-precision.md) | 有效6与声明一次warning | PG276/旧246失败、252原生旧225失败；最终54入口全0，原122核心值/metadata/通知匹配，PG内部诊断来源不冒充；DDL/其他表达式及完整资格另项 |
 | [R126 TIME精度关键字语法](issue-review-r126-time-precision-grammar.md) | 无符号int32 token与结构化42601 | PG326/旧296失败、严格549原生旧217失败；首版DDL Parse重置已修，最终52入口全0、原122仍2条TIME(7)通知/typmod差异 |
 | [R125 合法TIME显式精度](issue-review-r125-time-precision-value.md) | 基本clock两阶段舍入与真实AST声明 | PG830/旧830失败、339原生旧317失败；最终50入口全0、原97全匹配/122仍12边界差异，不等于grammar/warning/完整heap完成 |
 | [R123 时间列precision持久化](issue-review-r123-temporal-column-precision.md) | 四类型及数组的schema/目录/物理投影 | 旧782原生218失败、PG104全过/旧94失败；首版六个42703由R124另项，冷热加载/格式与有限终态见记录，不等于CAST舍入或heap升级 |

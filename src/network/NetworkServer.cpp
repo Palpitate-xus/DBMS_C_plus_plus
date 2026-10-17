@@ -1541,7 +1541,8 @@ int16_t protocolTypeSize(uint32_t typeOid, const Column& column) {
     return column.isVariableLength ? -1 : static_cast<int16_t>(column.dsize);
 }
 
-int32_t protocolDeclaredTimePrecision(const Expr* expression, const Session& session) {
+int32_t protocolDeclaredTimePrecision(const Expr* expression, const Session& session,
+                                      int32_t* requestedPrecision = nullptr) {
     std::string spelling;
     if (const auto* cast = dynamic_cast<const CastExpr*>(expression)) {
         if (cast->implicit) return -1;
@@ -1575,8 +1576,14 @@ int32_t protocolDeclaredTimePrecision(const Expr* expression, const Session& ses
         const auto catalog = regtype_detail::metadata(g_engine, session.currentDB);
         const auto declared = resolveDeclaredTypeName(spelling, &catalog, &session);
         if (declared.typeOid != 1083 && declared.typeOid != 1183) return -1;
-        const auto modifier = TypeRegistry::instance().applyTypeMods("time", declaration.typeMods);
-        return modifier.ok() ? modifier.typmod : -1;
+        if (declaration.typeMods.size() != 1) return -1;
+        const auto precision = parsePostgresIntegerText(declaration.typeMods.front(), 32);
+        if (precision.error != IntegerTextError::None || precision.value < 0) return -1;
+        const auto modifier = TypeRegistry::instance().applyTypeMods(
+            "time", {std::to_string(std::min<int64_t>(precision.value, 6))});
+        if (!modifier.ok()) return -1;
+        if (requestedPrecision) *requestedPrecision = static_cast<int32_t>(precision.value);
+        return modifier.typmod;
     } catch (const DbError& failure) {
         const auto& state = failure.sqlState();
         // Existing analysis owns invalid declarations. I/O, cancellation
@@ -1585,6 +1592,28 @@ int32_t protocolDeclaredTimePrecision(const Expr* expression, const Session& ses
             return -1;
         throw;
     }
+}
+
+std::vector<QueryNotice> protocolTimePrecisionNotices(const std::string& sql,
+                                                     const Session& session) {
+    std::vector<QueryNotice> notices;
+    if (SQLParser::classify(sql) != SqlCommand::Select) return notices;
+    SQLParser parser;
+    const auto parsed = parser.parseForBinding(sql);
+    const auto* select = parsed.isValid()
+        ? dynamic_cast<const SelectStmt*>(parsed.stmt.get()) : nullptr;
+    if (!select) return notices;
+    // Only actual direct projection declarations own these notices. Do not
+    // search text/comments, evaluate a datum, or guess an unresolved type.
+    for (const auto& item : select->selectList) {
+        int32_t precision = -1;
+        (void)protocolDeclaredTimePrecision(item.expr.get(), session, &precision);
+        if (precision > 6)
+            notices.push_back(QueryNotice{"WARNING", "22023",
+                "TIME(" + std::to_string(precision) +
+                ") precision reduced to maximum allowed, 6"});
+    }
+    return notices;
 }
 
 int32_t protocolDeclaredCastModifier(const Expr* expression, const Session& session) {
@@ -4328,7 +4357,8 @@ CopyStreamResult sendCopyOut(PostgresProtocol& protocol,
 } // namespace
 
 QueryResult executeProtocolQuery(const std::string& sql, Session& session,
-                                 int statementTimeoutOverrideMs = -1) {
+                                 int statementTimeoutOverrideMs = -1,
+                                 bool emitTimeDeclarationNotices = true) {
     QueryResult result;
     dbms::clearLastDmlResult();
     // Stored-NULL row bindings must not leak across statements (a sort
@@ -4424,6 +4454,10 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
         std::ostringstream output;
         dbms::ScopedOutputCapture capture(output);
         try {
+            if (emitTimeDeclarationNotices) {
+                const auto notices = protocolTimePrecisionNotices(sql, session);
+                result.notices.insert(result.notices.end(), notices.begin(), notices.end());
+            }
             // Bind EXPLAIN's actual output and inner input types before any
             // analyzed effects; keep this descriptor through execution.
             const bool typedExplain=describePreparedExplainResult(sql,session,explainColumns);
@@ -5464,7 +5498,8 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         extendedQueryError = true;
         return protocol.sendErrorResponse("ERROR", sqlState, errorMessage);
     };
-    const auto executeForProtocol = [&](const std::string& sql) -> QueryResult {
+    const auto executeForProtocol = [&](const std::string& sql,
+                                        bool typeDeclarationsAnalyzed = false) -> QueryResult {
         // Portal objects live in this connection loop rather than Session.
         // Mirror their count while a command executes so a database-context
         // replacement cannot leave a portal bound to the previous database.
@@ -5548,7 +5583,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         }
         QueryResult result = executeProtocolQuery(
             effectiveSql, *execSession,
-            remainingExtendedQueryTimeoutMs());
+            remainingExtendedQueryTimeoutMs(), !typeDeclarationsAnalyzed);
         if (!result.error && (!wasInTransaction || extendedImplicitTransaction) &&
             SQLParser::isSetTransactionStatement(sql)) {
             SQLParser parser;
@@ -6273,6 +6308,8 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                     if (!describePreparedSetResult(sql,session,staticColumns))
                         (void)describePreparedQueryHostResult(sql,session,staticColumns);
                 }
+                for (const auto& notice : protocolTimePrecisionNotices(sql, session))
+                    protocol.sendNoticeResponse(notice.message, notice.severity, notice.sqlState);
             } catch (const DbError& error) {
                 sendExtendedProtocolError(error.sqlState(), error.message());
                 continue;
@@ -6650,7 +6687,9 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 if (extendedImplicitTransaction) extendedImplicitExecuted = true;
                 updateProcessInfo(pid, "Query", "active",
                                   trimText(portalState.sql));
-                portalState.result = executeForProtocol(portalState.sql);
+                // Extended Parse already analyzed direct type declarations.
+                // Rebinding/executing the portal must not repeat their notice.
+                portalState.result = executeForProtocol(portalState.sql, true);
                 updateProcessIdle();
                 portalState.executed = true;
             }

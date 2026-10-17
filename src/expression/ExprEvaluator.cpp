@@ -23,6 +23,7 @@
 #include "expression/record_cast.h"
 #include "expression/sql_value.h"
 #include "common/DbError.h"
+#include "common/IntegerTextCodec.h"
 #include "common/version.h"
 #include "common/SqlArrayText.h"
 #include "common/NotificationManager.h"
@@ -5222,7 +5223,15 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
         const auto declaration = SQLParser::parseTypeSpecification(target);
         if (declaration.typeMods.empty())
             return ExprValue("time", normalizeDefaultTimeInput(v.value), false);
-        const auto modifier = TypeRegistry::instance().applyTypeMods("time", declaration.typeMods);
+        auto precisionMods = declaration.typeMods;
+        if (precisionMods.size() == 1) {
+            const auto precision = parsePostgresIntegerText(precisionMods.front(), 32);
+            if (precision.error == IntegerTextError::None && precision.value > 6)
+                precisionMods.front() = "6";
+        }
+        // SQL declaration analysis clamps excess precision; the persistent
+        // registry remains strict about already-normalized schema metadata.
+        const auto modifier = TypeRegistry::instance().applyTypeMods("time", precisionMods);
         if (modifier.ok())
             return ExprValue("time", normalizeDefaultTimeInput(v.value, modifier.typmod), false);
     }

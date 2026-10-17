@@ -196,9 +196,14 @@ precision单独舍入；例如0.500000在p=0为1秒，0.0004996先成为500微�
 
 未引号、未限定schema的TIME关键字precision须为一个无符号32位整数token；
 允许0x/0b/0o及合法数字分隔符，负数/负零、+号、小数、多参数、引号、NULL和
-超int32范围在解析阶段报42601。合法整数7、30等可被解析，但其截断到6和
-warning仍未完成；不要将此语法支持理解为这些声明已可正确使用。qualified/
-quoted类型保留具名语法区别，详见[R126](issue-review-r126-time-precision-grammar.md)。
+超int32范围在解析阶段报42601。qualified/quoted类型保留具名语法区别，详见
+[R126](issue-review-r126-time-precision-grammar.md)。
+
+直接SELECT投影声明中，合法整数精度超过6时按有效6归一化text并描述结果；
+Simple Q或Extended Parse各对真实声明发送一次WARNING/22023，Describe、Bind、
+重复Execute及多行不重复通知。NULL和空结果也保留有效6，scalar/array均适用。
+边界见[R127](issue-review-r127-time-excess-precision.md)：不表示DDL、SQL PREPARE、嵌套或
+其他表达式、消息过滤GUC、其他时态类型和完整转换资格已完成；旧heap不升级。
 
 ### 其他类型
 | 类型 | 说明 |

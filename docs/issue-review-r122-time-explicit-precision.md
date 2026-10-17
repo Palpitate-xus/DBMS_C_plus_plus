@@ -1,10 +1,11 @@
 # R122：显式TIME精度的值、描述符和边界行为缺失
 
 状态：列声明元数据[R123](issue-review-r123-temporal-column-precision.md)、合法TIME(0–6)的
-转换/声明描述[R125](issue-review-r125-time-precision-value.md)及关键字精度语法
-[R126](issue-review-r126-time-precision-grammar.md)已分项修复。TIME(7)的截断/warning
-以及完整分析资格仍普通开放，不计本组合问题全部完成。独立本地提交，
-不push，不恢复用户已明确跳过的模块。
+转换/声明描述[R125](issue-review-r125-time-precision-value.md)、关键字语法
+[R126](issue-review-r126-time-precision-grammar.md)及直接投影高精度截断/一次通知
+[R127](issue-review-r127-time-excess-precision.md)已分项修复。原122的核心值/metadata/通知
+行为已匹配；DDL/其他表达式及完整分析资格仍普通开放，不等于完整TIME语义。
+独立本地提交，不push，不恢复用户已明确跳过的模块。
 
 R123后完整重采原122条观察，真实TEMP列空/NULL的四条元数据观察已匹配，
 其余118条仍有差异；当前采集/比较0不等于122条全过。值/AST声明、边界和
@@ -17,6 +18,11 @@ R125后再完整重采122条，110条已匹配，剩余12条仅为precision_boun
 R126后再次完整重采122条，120条精确匹配，仅TIME(7)的text/binary两条
 在warning/typmod上仍有差异；原四条表列及原97条均保持匹配。下方与上方历史
 轮次保留当时输入和结果，不用采集/比较0冒称原122已全过。
+
+R127后再次完整重采122条，值、NULL、OID/长度/precision、来源、完成状态及
+通知S/V/C/M均匹配；原始比较仍有两条TIME(7)诊断P/F/L/R实现来源字段差异。
+明确只在核心语义比较中排除这四种可选来源字段，不伪造PG文件/行号，不声称
+原始字段字节相同。原97仍精确匹配；所有此前轮次的原始差异保留。
 
 ## 实际证据
 

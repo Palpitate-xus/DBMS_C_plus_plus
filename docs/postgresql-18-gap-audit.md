@@ -1,5 +1,9 @@
 # 2026-10-13 全仓库审查
 
+直接TIME高precision的有效6、归一化与Q/P一次通知见[R127](issue-review-r127-time-excess-precision.md)。
+252/276及有限54入口全0，原122核心行为匹配；PG内部诊断来源不冒充同一实现。
+DDL/其他表达式、消息GUC、完整转换资格和旧heap仍普通开放，原273统计/勾选不提升。
+
 TIME关键字精度的解析阶段与合法整数token修复见[R126](issue-review-r126-time-precision-grammar.md)。
 严格549/326及有限52入口全0；原122现120匹配、仅TIME(7)两条warning/typmod差异。
 具名modifier语义、其他类型grammar/精度及旧heap仍普通开放，原273统计/勾选不提升。

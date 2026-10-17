@@ -1,5 +1,10 @@
 # 生产化状态
 
+直接SELECT的TIME高precision截断与一次声明通知见[R127](issue-review-r127-time-excess-precision.md)。
+252/276及有限54入口全0；原122的值/metadata/通知核心字段全部匹配，仍保留两条
+PG内部诊断来源字段差异。DDL/其他表达式、消息过滤GUC及完整转换资格仍开放。
+以下各轮说明保留当时计数和范围，最新进展按对应后续记录读取；没有新全量证明。
+
 TIME关键字precision语法修复见[R126](issue-review-r126-time-precision-grammar.md)：
 非法modifier在解析阶段返回42601，合法进制/分隔符仍接受；549/326及有限52入口全0。
 原122观察现120匹配，TIME(7)的warning/typmod两条仍开放，不表示全部时间类型完成。

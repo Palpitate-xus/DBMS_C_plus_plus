@@ -2,6 +2,29 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R127 excessive TIME precision in direct SELECT projections: effective precision and once-per-declaration wire notice",
+      "gap_ids": [
+        "TYPE-06",
+        "TYPE-16",
+        "PROTO-04",
+        "PROTO-05"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r127-time-excess-precision.md"
+      ],
+      "tests": [
+        "tests/time_excess_precision_test.cpp",
+        "tests/time_excess_precision_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "reproduction": "Permanent actual PG18.6 (180006) wire276 all0. Frozen accepted R126 artifact97890f1d completewire276 with246 failures, actual1; complete native252 with225 failures, actual1, against pre-edit all58-verified57 O2 libraries/fresh stubs/pre-global isolation. Initial reference fixture used wrong array helper signature and failed before control1 (TypeError, actual1), preserved separately then same intended276 rerun all0.",
+        "focused_tests": "Two CPP only plus own registration: Expr TIME nonnegative int32 excess modifier uses6 for clock normalization; Network actual direct CAST/::/typed-literal AST and current catalog1083/1183 resolves requested precision/effective6. New direct SELECT notice vector Q/P WARNING22023, before ParseComplete and not Describe/Bind/repeatedExecute/per-row. No R98 diagnostic-channel dependency; TypeRegistry persistent0..6 guard and heap/Main/public headers unchanged. Firstnormal2/repeat0 both0 (no first-focused run claimed); review gates collector to SELECT, finalnormal1Network/repeat0/current252/276 all0. Final24native27wire3 verified relinked realMain=54 distinct whole entries all0 and independent checker0. Unchanged R124 TU/source/header/flags/compiler/Main receipt/object bytes verified, new links57 CURRENT O2 libraries/no stubs/actual isolated3 runs0; not new Main TU compile.",
+        "full_suite": "No new full registered/TLS/whole-engine sanitizer proof. Frozen binarybd35ec36787917ff93b5d612edef31bd4ff8f4a7b13b35c07b42e6f187f79a89 cache32e6751381ab24a18313391e38ecd4bb9c8bcbbfaaed7723124ea746bb29bdef seal c73a69e5ab68471f34e16a77743cd8b2b8e0b5ae2ced8d9f6dfe4a20a3234679 compile739bf42b71ae53b6f0cfe5e817aec5e81edb16ef16893f6616d93f026f9594c8; dual-cache/all58 receipts/57 test-library bytes final0. Extra original122 core values/metadata/notices SVCM allmatch, raw2 TIME7 optional P/F/L/R implementation-provenance differences retained, no forged PG internals; physical-column4 exact and original97 all exact. Accepted548MD898native529Python3Main1430 vs working551MD901+532+3=1436 with six original pending entries;553 PythonAST/13Bash static.",
+        "scope": "Direct SELECT declarations only for once Q/P notice timing; basic TIME values/effective descriptors and scalar/array/NULL/empty/lowerbounds tested. Not DDL/SQL PREPARE/nested or other expression roles/WITH/subqueries/message-filter GUCs/other temporal types/full declaration or cast eligibility/heap migration/binary Bind. Original273 items/checkboxes unchanged22complete166partial70unverified15deferred; ordinary unimplemented roles remain open, not user-deferred. Original56933-byte pending patch and three draft bytes preserved, no push, Actions disabled."
+      }
+    },
+    {
       "issue": "R126 TIME keyword precision integer grammar and structured syntax-error boundary",
       "gap_ids": [
         "TYPE-06",

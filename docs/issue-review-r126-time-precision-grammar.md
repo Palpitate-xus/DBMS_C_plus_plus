@@ -5,6 +5,10 @@
 本项从[R122](issue-review-r122-time-explicit-precision.md)拆出关键字语法和整数
 token范围；合法值转换/声明描述已由[R125](issue-review-r125-time-precision-value.md)单独修复。
 
+后续直接SELECT投影的过高precision截断/一次通知见[R127](issue-review-r127-time-excess-precision.md)。
+原122的核心值/metadata/通知已匹配，仍有两条PG内部诊断来源字段不同。
+下方保留本项当时的两条剩余及语法边界；DDL/其他表达式通知等不由本项冒充完成。
+
 ## 实际发现与方法
 
 未加引号、未限定schema的TIME关键字精度只接受一个不带符号的32位整数
