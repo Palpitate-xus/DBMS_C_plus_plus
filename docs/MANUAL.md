@@ -138,6 +138,10 @@ INTERVAL、TIMETZ、JSON/JSONB、TSVECTOR、range 等缺失标量发送 codec �
 CHAR/VARCHAR与数组共存时，SELECT *仍应保留字符列声明长度；普通表、TEMP、
 空结果和NULL不应改变typmod或真实列来源。修复和边界见[R115](issue-review-r115-scalar-alias-projection-metadata.md)。
 
+DATE/TIME/TIMETZ/INTERVAL对外逻辑长度分别为4/8/12/16，数组为-1；这不等于
+本引擎内部存储槽宽度。已知旧目录在读取模型中升级，冷读不发布文件，显式目录
+持久化后才落盘。细节与尚存独立目录/视图问题见[R114](issue-review-r114-physical-attribute-length.md)。
+
 ### 其他类型
 | 类型 | 说明 |
 |------|------|

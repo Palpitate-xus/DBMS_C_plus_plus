@@ -1,5 +1,9 @@
 # 生产化状态
 
+DATE/TIME/TIMETZ/INTERVAL及数组的逻辑字段长度修复见[R114](issue-review-r114-physical-attribute-length.md)。
+只更正声明metadata和已知旧目录签名，不修改heap行布局或提供者生命周期。
+目录SQL与视图执行/origin/tag独立失败仍开放，原273未完成，无新完整注册终态。
+
 含数组表星号投影的CHAR/VARCHAR修饰符丢失见[R115](issue-review-r115-scalar-alias-projection-metadata.md)。
 仅修声明别名身份比较；逻辑长度R114另项、INTERVAL发送R113仍待做，
 原273和用户暂缓范围不变，未获得新完整注册回归。

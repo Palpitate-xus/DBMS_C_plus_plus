@@ -1516,34 +1516,15 @@ std::string protocolPhysicalTypeName(const Column& column) {
 
 int16_t protocolTypeSize(uint32_t typeOid, const Column& column) {
     if (column.isArray) return -1;
-    const int16_t geometryLength = geometryTypeLengthForOid(typeOid);
-    if (geometryLength != 0) return geometryLength;
-    switch (typeOid) {
-        case 16: return 1;   // bool
-        case 18: return 1;   // internal char
-        case 19: return 64;  // name (NAMEDATALEN)
-        case 20: return 8;   // int8
-        case 21: return 2;   // int2
-        case 23: return 4;   // int4
-        case 25: return -1;  // text (builtin variable-width identity)
-        case 24: case 26: case 28: case 29: case 2206: return 4;
-        case 27: return 6;   // tid
-        case 700: return 4;  // float4
-        case 701: return 8;  // float8
-        case 790: return 8;  // money
-        case 1082: return 4; // date
-        case 1083: return 8; // time
-        case 1114: case 1184: return 8; // timestamp/timestamptz
-        case 1186: return 16; // interval
-        case 1042: case 1043: return -1; // bpchar/varchar
-        case 1700: return -1; // numeric
-        case 650: case 869: return -1; // cidr/inet
-        case 774: return 8;   // macaddr8
-        case 829: return 6;   // macaddr
-        case 2278: return 4;  // void
-        case 2950: return 16; // uuid
-        default: return column.isVariableLength ? -1 : static_cast<int16_t>(column.dsize);
-    }
+    static const auto lengths = [] {
+        std::unordered_map<uint32_t, int16_t> result;
+        for (const auto& type : CatalogManager::builtinTypeRows())
+            if (type.typnamespace == 11) result.emplace(type.oid, type.typlen);
+        return result;
+    }();
+    const auto declared = lengths.find(typeOid);
+    if (declared != lengths.end()) return declared->second;
+    return column.isVariableLength ? -1 : static_cast<int16_t>(column.dsize);
 }
 
 int32_t protocolDeclaredCastModifier(const Expr* expression) {

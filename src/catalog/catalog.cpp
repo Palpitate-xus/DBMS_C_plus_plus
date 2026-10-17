@@ -298,6 +298,37 @@ static bool writeCatalogFileAtomically(
 // 构造函数 / 析构函数
 // ============================================================================
 
+namespace {
+void upgradeLegacyAttributeLengths(std::vector<PgAttributeRow>& attributes,
+    const std::vector<PgTypeRow>& types, const std::unordered_map<Oid,size_t>& index) {
+    struct LegacyLength {Oid oid;const char* name;int16_t stored;int16_t logical;};
+    static constexpr LegacyLength legacy[]={{1082,"date",12,4},{1083,"time",4,8},
+        {1266,"timetz",4,12},{1186,"interval",-1,16}};
+    for (auto& attribute : attributes) {
+        if (attribute.attisdropped || attribute.attnum <= 0) continue;
+        const auto declared = index.find(attribute.atttypid);
+        if (declared == index.end()) continue;
+        if (attribute.attndims > 0) {attribute.attlen=-1;continue;}
+        const auto& type=types[declared->second];
+        const PgTypeRow* base=&type;
+        std::set<Oid> seen;
+        while (base->typtype=='d') {
+            if (!seen.insert(base->oid).second) {base=nullptr;break;}
+            const auto parent=index.find(base->typbasetype);
+            if (parent==index.end()) {base=nullptr;break;}
+            base=&types[parent->second];
+        }
+        if (!base) continue;
+        for (const auto& known : legacy) {
+            if (base->oid==known.oid && base->typnamespace==11 &&
+                base->typname==known.name && base->typtype=='b' &&
+                base->typlen==known.logical && type.typlen==known.logical &&
+                attribute.attlen==known.stored) attribute.attlen=known.logical;
+        }
+    }
+}
+} // namespace
+
 CatalogManager::CatalogManager(const std::string& dbPath)
     : CatalogManager(dbPath, true) {}
 
@@ -1942,6 +1973,7 @@ void CatalogManager::bootstrapSystemTypes() {
             element.typarray=definition.oid;
         }
     }
+    upgradeLegacyAttributeLengths(attributes_,types_,typeByOid_);
 }
 
 // ============================================================================
@@ -2679,6 +2711,10 @@ void CatalogManager::loadAllLocked() {
     }
 
     rebuildIndexes();
+    // Upgrade only known storage-width signatures after all rows are parsed.
+    // No files/OIDs are changed by a cold read, and cached dirty edits remain
+    // observable: snapshots themselves never normalize caller-owned changes.
+    upgradeLegacyAttributeLengths(attributes_,types_,typeByOid_);
     auto images = serializeAllLocked();
     std::map<std::string, CatalogFileGeneration> observed;
     for (const auto& image : images) {

@@ -1,5 +1,9 @@
 # 2026-10-13 全仓库审查
 
+逻辑字段长度与旧目录升级见[R114](issue-review-r114-physical-attribute-length.md)，
+仅更正元数据；检测新增的目录SQL、NULL视图、来源和命令tag缺陷按表保留。
+原273项勾选不变，不把这些普通待修复项改成用户暂缓。
+
 物理星号投影的字符标量别名/typmod问题见[R115](issue-review-r115-scalar-alias-projection-metadata.md)，
 逻辑长度R114另项验收。原273项勾选和统计不变，局部协议修复不代表全量完成。
 

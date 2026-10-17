@@ -1014,21 +1014,12 @@ static PgAttributeRow catalogAttributeForColumn(
             throw DbError("XX001", "domain has no catalog identity");
         attribute.atttypid = type->oid;
     }
-    const bool postgresVarlenaNetwork =
-        column.dataType == "inet" || column.dataType == "cidr";
-    const int16_t postgresGeometryLength =
-        geometryTypeLengthForOid(attribute.atttypid);
-    if (attribute.atttypid == 1042) {
-        // SQL CHAR is bpchar, a varlena protocol type even when our storage
-        // column has a fixed declared width.
-        attribute.attlen = -1;
-    } else {
-        attribute.attlen = postgresGeometryLength != 0
-            ? postgresGeometryLength
-            : (column.isVariableLength || postgresVarlenaNetwork
-                   ? static_cast<int16_t>(-1)
-                   : static_cast<int16_t>(column.dsize));
-    }
+    const auto declaredType = cat.getType(attribute.atttypid);
+    if (!declaredType) throw DbError("XX001", "column has no declared catalog type");
+    // PostgreSQL attlen copies the declared type, not this engine's heap
+    // codec width (DATE/TIME/TIMETZ/INTERVAL deliberately use other layouts).
+    // Legacy physical arrays can still name their element plus attndims.
+    attribute.attlen = column.isArray ? static_cast<int16_t>(-1) : declaredType->typlen;
     attribute.attndims = column.isArray ? 1 : 0;
     attribute.atttypmod = -1;
     if (column.dataType == "interval" || column.dataType == "numeric") attribute.atttypmod = column.typeMod;

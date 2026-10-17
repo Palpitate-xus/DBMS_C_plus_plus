@@ -2,6 +2,28 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R114 declared attribute lengths independent of heap widths",
+      "gap_ids": [
+        "TYPE-02",
+        "CAT-03",
+        "PROTO-04"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r114-physical-attribute-length.md"
+      ],
+      "tests": [
+        "tests/physical_attribute_length_test.cpp",
+        "tests/physical_attribute_length_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "reproduction": "Actual180006 focusedwire28all0, immutable5958old28with22failures actual1. Oldnative98/38 then101/41failures actual1; OID IO fixture subsequently corrected from nonexistent name to real.oid_counter with additionalnonempty guard, finalnative102. Initialmixed36PG0old30failure andextra19each observations retain independentcatalog/view issues.",
+        "focused_tests": "DDL attlen from realdeclaredtyplen,array-1; guardedlegacy fourbuiltin/domain/activearray load upgrade with coldnoIO/noOID/no snapshot dirtynormalization; protocolimmutablebuiltin widths. Candidatecore native102/catalogservice/complete691pass butwire28had5preexistingCHARtypmodfailures overall1, R115independentlyfixed. Final finite matching-artifact gates recorded in issue document, no heaplayout/send/provider/publicheader rewrite.",
+        "full_suite": "After separateR115 one native/one protocol added: accepted889native+3Main+517Python=1409 versusworking892+3+521=1416 including preservedR98/R109 and pendingR113. No new complete registered suite, actualTLS or full-engine sanitizer proof.",
+        "scope": "Original273items/checkboxes unchanged22complete166partial70unverified15deferred. CatalogattributeSQLsource42P01, nullabledate/time/timetzviewXX000, vieworigin0 andTEMPVIEWtag mismatch remain ordinary pending with methods and full evidence. R113binarysend andR111planning open; R109user-skipped candidates/R98/R99/R106draft preserved excluded. No push; Actionsdisabled."
+      }
+    },
+    {
       "issue": "R115 physical star projections preserve scalar alias typmods",
       "gap_ids": [
         "TYPE-02",

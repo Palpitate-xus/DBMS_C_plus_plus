@@ -4,6 +4,7 @@
 
 | 审查 | 输入 | 内容 |
 | --- | --- | --- |
+| [R114 物理字段逻辑长度](issue-review-r114-physical-attribute-length.md) | DDL属性、冷暖目录与协议长度 | PG28零失败、旧22失败；102原生控制；R115先独立提交，其他目录/视图失败及方法保留，非完整注册验收 |
 | [R115 标量别名投影metadata](issue-review-r115-scalar-alias-projection-metadata.md) | 含数组表的星号展开与真实列身份 | 实际参考228零失败、固定旧13失败；只修规范类型拼写与typmod，有限回归/独立版本见记录，R114另项 |
 | [R110 数组二进制结果](issue-review-r110-array-binary-result.md) | 类型 OID、维度/下界与元素 codec | 实际参考110零失败、旧75失败；182低层控制、有限回归与独立版本见记录，不等同数组二进制输入或所有元素 codec 完成 |
 | [R112 无 typmod 具名数组输入](issue-review-r112-unconstrained-named-array-input.md) | BPCHAR/BIT 真实声明与 wire Bind | 实际180006参考57零失败、旧44失败；逐版修复、有限回归和版本范围见记录，不关闭原TYPE-16或原273 |

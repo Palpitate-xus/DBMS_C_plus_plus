@@ -1,5 +1,10 @@
 # DBMS 功能测试报告
 
+新增[R114 逻辑长度](issue-review-r114-physical-attribute-length.md)102原生及28协议
+控制，PG28全过、旧22失败；候选曾剩5个既有CHAR失败，R115另项修复。最终有限
+匹配回归见记录。本项接受889native+3Main+517Python=1409，工作区892+3+521=1416，
+含保留候选和未接受R113；尚无新完整注册回归，原273统计不提升。
+
 新增[R115 标量别名投影](issue-review-r115-scalar-alias-projection-metadata.md)228条
 完整协议控制：实际180006全过、旧13失败。有限匹配产物回归及逐版失败见记录；
 本项接受组合888native+3Main+516Python=1407，R114另项。工作区892+3+521=1416
