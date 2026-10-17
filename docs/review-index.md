@@ -4,6 +4,7 @@
 
 | 审查 | 输入 | 内容 |
 | --- | --- | --- |
+| [R121 TIME基本文本输入](issue-review-r121-time-input-normalization.md) | 非法值/超微秒透传、真实text Bind | PG177/旧130失败、90低层；43完整入口及原32对照全过，97仍21显式精度差异。基本clock修复不等于完整TIME grammar/cast/旧heap升级 |
 | [R119 时间戳微秒binary](issue-review-r119-timestamp-binary-result.md) | 固定错误epoch字节、时区与真实数组 | PG232全过、旧144失败/235低层；首版8个跨日输入失败由R120独立修复，最终共享41入口及64对照终态见记录，不升级秒heap或所有日期域 |
 | [R120 闰年日期逆换算](issue-review-r120-date-cycle-inverse.md) | 0004年起的非法月份及时间戳跨日 | 逐日独立枚举3652059天、PG152/旧48失败；共享头重编、有限回归及真实Main终态见记录，R119发送器保持独立版本 |
 | [R117 TIME微秒binary结果](issue-review-r117-time-binary-result.md) | 真正8字节时钟、24时与数组 | PG144全过、旧114失败；121低层控制、完整有限终态与版本见记录，不把sender修复等同输入/文本/旧heap升级 |

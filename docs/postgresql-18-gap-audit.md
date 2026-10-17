@@ -1,5 +1,9 @@
 # 2026-10-13 全仓库审查
 
+TIME默认基本clock文本及text Bind的非法接受/未舍入透传见[R121](issue-review-r121-time-input-normalization.md)。
+有限43入口、原32对照已过；显式精度21差异及完整语法、cast eligibility、
+heap/binary Bind等仍普通待做，不能把本项等同所有TIME语义或原273全部完成。
+
 时间戳小数秒被编码成固定错误epoch的修复见[R119](issue-review-r119-timestamp-binary-result.md)。
 真实类型/时区、微秒及数组按实际PG验证，上游跨日问题另由R120独立提交；
 不将binary sender等同完整输入/typmod/heap/BC/大年份，原273勾选及暂缓范围不变。

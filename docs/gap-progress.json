@@ -2,6 +2,29 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R121 default basic TIME text input validation and canonicalization",
+      "gap_ids": [
+        "TYPE-06",
+        "TYPE-16",
+        "PROTO-04",
+        "PROTO-05"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r121-time-input-normalization.md"
+      ],
+      "tests": [
+        "tests/time_input_normalization_test.cpp",
+        "tests/time_input_normalization_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "reproduction": "Actual180006/old0579474b/current24b each97observations:89differences/28invalidinputsaccepted/21explicittypmoddifferences, collection0notpass. PermanentactualPG177all0 versusimmutable24b177130failuresactual1; completeoldnative9065failuresactual1. No compiler/countfailure substituted.",
+        "focused_tests": "OnlyExprEvaluator internaldefaultbasicTIMEclock text/declaredTIME andNetworkServerreal1083/1183textBind input: boundedfields/integercheckedmicrosecondhalf-even/carry/canonicaltext andactualSQLSTATE atBind. Native90/wire177 actual0, normal2CPP/repeat0 actual0. Final18native22wire3genuineMain43distinctwholeentriesall0; unchangedMain/test/header/flags andoriginalTUobject/source/Mainreceipt verified, relink57currentO2libraries/no stubs/actualisolatedruns0, NOTnewTUcompile. Dualcache/58receipts/57testbytes/seal0. Extra97default76allmatch/21remainingexplicittypmod, originalTime32textbinaryallmatch; notall97pass.",
+        "full_suite": "One native/one protocol acceptedprojection894native+3Main+524Python=1421 versusworking897+3+527=1427 inclpreservedR98/R109. No newcompleteregisteredsuite/cleanHEADfullrun/actualTLS/wholeenginesanitizer. R120puredatecomponent sanitizer notnewTimeorwholeengineproof.",
+        "scope": "Original273items/checkboxes unchanged22complete166partial70unverified15deferred. Defaultbasicclockonly, notfullsourcecasteligibility/constantanalysistiming/dateprefix/AMPM/namedtimezone/allPGinputgrammar. Explicitprecision/metadata21diff, legacy4bytescalarmicroheap/binaryBind/TIMETZ/othercodecs/planning/catalogSQL/vieworigin remain ordinaryopen. No publicheader/Main/heap/UserOID guesses. R109skipped/R98/R99/R106draft preservedexcluded, no push, Actionsdisabled."
+      }
+    },
+    {
       "issue": "R119 exact TIMESTAMP and TIMESTAMPTZ scalar and inherited array binary results",
       "gap_ids": [
         "TYPE-06",

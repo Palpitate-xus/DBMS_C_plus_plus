@@ -89,3 +89,5 @@ PG拒绝而旧程序成功接受，21条涉及显式精度修饰；采集/比较
 后续方法：实现所属类型真实输入校验、整数微秒舍入/进位和typmod阶段的规范化，
 分别测试scalar/array/常量/text Bind；4字节标量heap升级仍另项，不能依赖输出器
 拒绝坏值。用户暂缓项不扩大到这些普通问题，也不与R120日期提交混合处理。
+后续默认基本clock/text Bind由[R121](issue-review-r121-time-input-normalization.md)
+单独修复，97重采仅余21个显式精度差异；完整grammar/cast eligibility和物理升级仍普通开放。

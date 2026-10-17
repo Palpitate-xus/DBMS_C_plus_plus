@@ -957,6 +957,20 @@ std::string protocolParameterLiteral(uint32_t typeOid,
         error = "parameter contains a NUL byte";
         return {};
     }
+    if (typeOid == 1083 || typeOid == 1183) {
+        try {
+            LiteralExpr input;
+            input.typeName = typeOid == 1083 ? "time" : "time[]";
+            input.value = quoteProtocolText(value, error);
+            ExprEvaluator codec;
+            value = codec.eval(&input, RowContext{}).value;
+        } catch (const DbError& failure) {
+            inputSqlState = failure.sqlState();
+            error = failure.what();
+            return {};
+        }
+        return quoteProtocolText(value, error);
+    }
     if (typeOid == 16) {
         const auto parsed = parsePostgresBoolean(value);
         if (parsed) return *parsed ? "TRUE" : "FALSE";

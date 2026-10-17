@@ -4380,6 +4380,86 @@ static bool resemblesTemporalFieldText(const std::string& text) {
         "cannot cast type " + sourceType + " to " + targetType);
 }
 
+static std::string normalizeDefaultTimeInput(const std::string& input) {
+    std::string clock = trimStr(input);
+    const auto fail = [](const char* state) -> void {
+        throw DbError(state, "invalid input syntax or range for type time");
+    };
+    if (clock.empty()) fail("22007");
+    const size_t zonePosition = clock.find_first_of("+-", 1);
+    std::string zone;
+    if (zonePosition != std::string::npos) {
+        zone = trimStr(clock.substr(zonePosition));
+        clock = trimStr(clock.substr(0, zonePosition));
+    } else if (clock.back() == 'Z' || clock.back() == 'z') {
+        zone = clock.substr(clock.size() - 1);
+        clock = trimStr(clock.substr(0, clock.size() - 1));
+    }
+    // TIME keeps the local clock but still validates an explicit offset.
+    if (!zone.empty()) {
+        if (zone.size() == 5 && (zone.front() == '+' || zone.front() == '-') &&
+            zone.find_first_not_of("0123456789", 1) == std::string::npos)
+            zone.insert(3, ":");
+        if (parseTimestampToSeconds("2000-01-01 00:00:00" + zone) == 0) {
+            const bool numeric = zone.find_first_not_of("+-0123456789:") == std::string::npos;
+            fail(numeric ? "22009" : "22007");
+        }
+    }
+    const auto field = [&](const std::string& text, int maximum) {
+        if (text.empty() || text.find_first_not_of("0123456789") != std::string::npos)
+            fail("22007");
+        int number = 0;
+        for (const char digit : text) {
+            if (number > maximum) fail("22008");
+            number = number * 10 + (digit - '0');
+        }
+        if (number > maximum) fail("22008");
+        return number;
+    };
+    const size_t firstColon = clock.find(':');
+    if (firstColon == std::string::npos) fail("22007");
+    const size_t secondColon = clock.find(':', firstColon + 1);
+    if (secondColon != std::string::npos &&
+        clock.find(':', secondColon + 1) != std::string::npos) fail("22007");
+    const int hours = field(clock.substr(0, firstColon), 24);
+    const size_t minuteEnd = secondColon == std::string::npos ? clock.size() : secondColon;
+    const int minutes = field(clock.substr(firstColon + 1, minuteEnd - firstColon - 1), 59);
+    int seconds = 0;
+    std::string fraction;
+    if (secondColon != std::string::npos) {
+        const std::string tail = clock.substr(secondColon + 1);
+        const size_t dot = tail.find('.');
+        seconds = field(tail.substr(0, dot), 60);
+        if (dot != std::string::npos) {
+            if (dot + 1 == tail.size() ||
+                tail.find_first_not_of("0123456789", dot + 1) != std::string::npos) fail("22007");
+            fraction = tail.substr(dot);
+        }
+    }
+    const auto parts = parseIntervalInput(std::to_string(hours) + ":" +
+        std::to_string(minutes) + ":" + std::to_string(seconds) + fraction);
+    const auto state = intervalInputSqlState(parts);
+    if (!state.empty()) fail(state == "22015" ? "22008" : "22007");
+    if (parts.months || parts.days || parts.micros < 0 || parts.micros > 86400000000LL)
+        fail("22008");
+    // Integer input rounding includes half-even and carries through 24h.
+    // Formatting must not retain unrounded text or pass the clock via double.
+    const int64_t micros = parts.micros;
+    char buffer[32];
+    std::snprintf(buffer, sizeof(buffer), "%02lld:%02lld:%02lld",
+        static_cast<long long>(micros / 3600000000LL),
+        static_cast<long long>((micros / 60000000LL) % 60),
+        static_cast<long long>((micros / 1000000LL) % 60));
+    std::string result = buffer;
+    if (const int64_t remainder = micros % 1000000) {
+        std::string digits = std::to_string(remainder);
+        digits.insert(digits.begin(), 6 - digits.size(), '0');
+        while (digits.back() == '0') digits.pop_back();
+        result += "." + digits;
+    }
+    return result;
+}
+
 static ExprValue castToDate(const ExprValue& value) {
     const std::string sourceType = toLower(value.typeName);
     const bool dateSource = sourceType == "date";
@@ -5130,6 +5210,9 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
         result.collation = v.collation;
         return result;
     }
+    if ((target == "time" || target == "time without time zone") &&
+        (isTextCastSourceType(sourceType) || sourceType == "time"))
+        return ExprValue("time", normalizeDefaultTimeInput(v.value), false);
     if (target == "date") return castToDate(v);
     if (target == "timestamp" || target == "timestamp without time zone")
         return castToTimestamp(v, "timestamp");

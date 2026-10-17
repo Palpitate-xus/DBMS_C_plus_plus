@@ -90,7 +90,8 @@ R120纯日期组件sanitizer不作为整个数据库或本sender的sanitizer证�
 一致性保持0、require-complete仍实际1。本项只暂存15个路径和所属hunk，不纳入
 原56933字节候选补丁及三个保留草稿，提交前后均复核。
 
-TIME输入/文本/显式精度、scalar完整微秒heap、binary Bind、TIMETZ及其他codec、
+TIME默认基本clock输入/text Bind后由[R121](issue-review-r121-time-input-normalization.md)
+单独修复；完整grammar/cast eligibility、显式精度、scalar微秒heap、binary Bind、TIMETZ及其他codec、
 BC/大年份、目录SQL/view origin及R111规划仍普通开放，按各自方法继续复现修复。
 原273仍22complete/166partial/70unverified/15deferred，不提升勾选；R98/R99/R109
 候选及R106草稿保留且不混入提交，用户已明确暂缓的范围不恢复。Actions保持禁用。

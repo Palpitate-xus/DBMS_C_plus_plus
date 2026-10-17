@@ -1,5 +1,9 @@
 # 生产化状态
 
+默认TIME基本clock文本输入及真实1083/1183text Bind修复见[R121](issue-review-r121-time-input-normalization.md)。
+43入口有限验收/原32text-binary对照全过；97输入对照仍有21个显式精度差异，
+完整语法/cast eligibility、旧4字节heap与binary Bind等仍普通开放，原273不提升。
+
 TIMESTAMP/TIMESTAMPTZ及真实数组的微秒binary结果修正见[R119](issue-review-r119-timestamp-binary-result.md)。
 不把整秒parser的0失败值编码成日期，时区按真实类型解释；上游日期R120独立版本，
 最终共享41终态/额外64精确匹配不等于整秒heap、输入typmod或所有BC/大年份已完成。

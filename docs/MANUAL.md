@@ -171,6 +171,11 @@ TIMESTAMP/TIMESTAMPTZ的binary结果是相对2000年epoch的网络字节序int64
 TIMESTAMPTZ按offset转UTC，不能把整秒parser的失败值发作日期；见
 [R119](issue-review-r119-timestamp-binary-result.md)。输入/typmod、既有秒heap和BC/大年份范围仍有边界。
 
+默认TIME的基本clock文本输入按整数微秒校验及规范化，真实TIME/TIME[]的
+text Bind也须在Bind阶段拒绝坏输入；短时钟、半偶舍入/进位和24时见
+[R121](issue-review-r121-time-input-normalization.md)。显式精度/完整grammar/cast eligibility、
+旧4字节整秒heap及binary Bind仍有边界，输入修复不迁移既有表行。
+
 ### 其他类型
 | 类型 | 说明 |
 |------|------|

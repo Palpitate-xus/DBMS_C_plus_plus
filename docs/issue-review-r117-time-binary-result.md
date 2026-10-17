@@ -80,7 +80,7 @@ Main和公共头未改，不复用R118的三真实Main结果宣称本项重跑�
 
 | 普通未完范围 | 后续方法 |
 | --- | --- |
-| TIME默认/显式精度的输入/文本规范化 | 在真实datum输入与typmod阶段处理舍入/进位/格式，不靠binary sender修改文本结果 |
+| TIME显式精度/完整输入语法与cast eligibility | 默认基本clock及text Bind后由[R121](issue-review-r121-time-input-normalization.md)单独修复，原32对照现全匹配；97仍21显式精度差异，原始日志不改写 |
 | 标量TIME完整微秒存储 | 明确兼容旧4字节行、引入真实微秒存储codec和迁移/重载验证，不静默丢精度 |
 | binary Bind接收、TIMETZ等缺失codec | 实现所属类型真实接收/发送并做实际参考字节测试，不猜用户OID |
 | 目录SQL/视图origin及其他规划能力 | 保留既有清单方法，各自复现/修复/验证，不计入本项完成 |

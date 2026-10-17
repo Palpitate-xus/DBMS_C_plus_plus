@@ -1,5 +1,11 @@
 # DBMS 功能测试报告
 
+新增[R121 默认TIME文本输入](issue-review-r121-time-input-normalization.md)90native/177协议，
+实际PG177全过、旧130协议/65native失败。最终18native+22协议+3真实Main=43入口
+均0，Main是核对未改单元后重连当前57库并实际执行，未重编TU。原32对照全匹配，
+97仍21显式精度差异。本项接受894native+3Main+524Python=1421，工作区897+3+527
+=1427含原候选，无新完整注册回归、真实TLS或整库sanitizer证明。
+
 新增[R119 时间戳binary](issue-review-r119-timestamp-binary-result.md)235低层/232协议，
 实际PG232全过、旧144协议/192低层失败；保留首版完整36终态1及8个上游输入失败，
 R120独立修复后共享41完整入口全0，原64条观察当前全匹配。本项接受组合
