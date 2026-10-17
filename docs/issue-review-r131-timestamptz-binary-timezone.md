@@ -69,3 +69,8 @@ hunk、独立本地commit；原56933字节候选patch及三个跳过草稿逐字
 
 原273统计/勾选仍为22complete/166partial/70unverified/15deferred。
 不push，GitHub Actions保持禁用。
+
+后续[R132](issue-review-r132-timezone-set-to.md)已独立修复通用SET TimeZone的TO消费，
+PG112/旧112中44失败与最终30入口有限验收见该记录。R131最初六个SET错误
+保留为历史，不把替换setup当成修复；更宽的GUC语法/LOCAL/DEFAULT/事务语义
+仍普通开放，未因R132的有限落地关闭。

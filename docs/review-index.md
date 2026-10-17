@@ -1,5 +1,11 @@
 # 代码审查索引
 
+后续[R132 SET TimeZone TO](issue-review-r132-timezone-set-to.md)已修复旧Main把TO当值：
+PG112全过、冻结旧版112/44失败。只消费通用SET的独立TO，不改引号内数据或专用
+TIME ZONE值。正常1/repeat0、三个真实Main fresh TU编译/新链接/隔离运行，以及
+12native+15wire+3Main=30完整入口均0，独立核对0；旧R124对象此次未复用。
+新1435未全量；LOCAL/SESSION/DEFAULT及完整GUC事务/严格语法仍普通开放。
+
 后续[R131 TIMESTAMPTZ binary时区](issue-review-r131-timestamptz-binary-timezone.md)已修复UTC
 时刻被再次按会话本地解释：实际PG158全过、干净旧版和冻结Root各158/45失败。
 仅在有限1184中间文本明确+00，1114与infinity/NULL不变；正常1/repeat0及12native+
@@ -29,6 +35,10 @@ TU重编或新1432全量。原8f完整三失败保留，F8F-03继续处理，R51
 
 | 审查 | 输入 | 内容 |
 | --- | --- | --- |
+| [R132 TimeZone TO](issue-review-r132-timezone-set-to.md) | 通用SET分隔符被Main当成值 | PG112/旧44失败；消费独立TO且保留引号数据，正常1/repeat0、fresh三Main及30完整入口全0，GUC其余范围仍开放 |
+| [R131 TIMESTAMPTZ binary时区](issue-review-r131-timestamptz-binary-timezone.md) | `e782cda1` | PG158/干净与冻结旧版各45失败；仅标明UTC，29完整入口全0，非fractional receiver或heap升级 |
+| [R130 原生结果声明](issue-review-r130-native-result-hint-precedence.md) | `3c8c85d3` | 旧705/1/smallint和168/53失败；声明/回调所有权修复，35完整入口全0，旧全量红不抹除 |
+| [R129 原生数组声明](issue-review-r129-native-array-projection-types.md) | `c02aa584` | 真实数组旧原生仍134，PG/旧SQL51均0；四处提示及夹具修复，26完整入口全0，不是跳过的R109 |
 | [R128 TIME二进制参数](issue-review-r128-time-binary-parameter.md) | 接收器整秒/24时限制及错误状态 | PG158全过/旧完整132失败；修复微秒与24时接收，08P01/22008/22P03和错误后恢复，最终55入口全0，不迁移整秒heap或冒其他receiver完成 |
 | [R127 直接TIME过高精度](issue-review-r127-time-excess-precision.md) | 有效6与声明一次warning | PG276/旧246失败、252原生旧225失败；最终54入口全0，原122核心值/metadata/通知匹配，PG内部诊断来源不冒充；DDL/其他表达式及完整资格另项 |
 | [R126 TIME精度关键字语法](issue-review-r126-time-precision-grammar.md) | 无符号int32 token与结构化42601 | PG326/旧296失败、严格549原生旧217失败；首版DDL Parse重置已修，最终52入口全0、原122仍2条TIME(7)通知/typmod差异 |

@@ -2,6 +2,27 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R132 generic SET TimeZone TO separator is passed into timezone value by legacy Main route",
+      "gap_ids": [
+        "OPS-02",
+        "SQL-09"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r132-timezone-set-to.md",
+        "docs/issue-review-r131-timestamptz-binary-timezone.md"
+      ],
+      "tests": [
+        "tests/timezone_set_to_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "reproduction": "Actual PG18.6(180006)112all0; frozen Root4ed66b3f112 complete44fail/actual1:TO rejected22023 thenSHOW retains prior zone. Six named zones,TO/mixed-case/tab-newline/= /specialTIME ZONE,Simple/Extended,noData/commands/SHOW metadata,invalid literal TO/bad names/empty input preserve session andReady. Earlier clean8f legalTO setup6fail inR131 retained, not claimed as this112 clean run.",
+        "focused_tests": "Only Main generic normalized set timezone independent leading to-space token is consumed, not off14 legacyTIME ZONE or quoted data;parser already understandsTO, no public header/parser/heap changes. Normal1Main/repeat0 both0. Main source changed so NO R124 TU reuse:all3 realMain TUs truly fresh (explain/sessiontestO0,window+prodO2),after compiles newlinks57 current O2 libraries/no stubs/actual3 isolated runs0. Final12native15wire3freshMain=30 distinct whole entries all0, independent ordered-ID/object/link-hash/source-artifact checker0. New112 and priorR131158 both0,all58 receipts/dual-cache/57 bytes/frozen input0. Current fresh TU provenance savedr132-reusable-main-unit-receipt.json for future guarded reuse, not fresh-recompile claims on later uses.",
+        "full_suite": "No new full1435,real TLS or whole-engine sanitizer proof. Binaryc3deb2adf12aa29479d372ea86a1846c38fd117fa02aa0ad2f5a4ff4c96d40e7 cachefce78c013ca8bee1b4b0cce74524b15fc4d06593f380c23ab4d9b4e9674d4728 seal3dda78497ce2876681b5c15dcfc488a7fb09f4800a7c9285f23f77bc027ee3fb headerflags739bf42b;Main source1c91b14a4e20b1f4522cceaf8c39735be891ecb130377421ce2b1ee7e2e92e35;actualMainreceiptcce0c1a0a8722b48edd9382c234f9af3de0b69d8a7991a8c97b0b2b06f886607. Accepted554MD899native533Python3Main1435 vs working557MD902+536+3=1441 including six original candidates;557AST/13Bash static. Old8f1431 actual3fail retained;R129/R130 finite fixes separate,R51 user-deferred.",
+        "scope": "Only generic unqualified SET TimeZone TO value-adapter bug. LOCAL/SESSION/DEFAULT,all malformed-separator Parse boundaries,INTERVAL and complete transactional GUC behavior remain ordinary open,not deferred. Original273 items/checkboxes22complete166partial70unverified15deferred unchanged;original56933-byte patch/three skipped drafts byte-preserved,R98/R99/R109 excluded,no push,Actions disabled."
+      }
+    },
+    {
       "issue": "R131 TIMESTAMPTZ binary UTC instant is reinterpreted in session TimeZone",
       "gap_ids": [
         "TYPE-06",

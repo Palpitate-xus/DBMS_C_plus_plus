@@ -3574,7 +3574,12 @@ static bool handleSetCommand(const string& sql, Session& s) {
     if (sql.substr(0, 13) == "set timezone " || sql.substr(0, 14) == "set time zone ") {
         size_t off = (sql.substr(0, 13) == "set timezone ") ? 13 : 14;
         string tzVal = trim(sql.substr(off));
-        if (!tzVal.empty() && tzVal[0] == '=') tzVal = trim(tzVal.substr(1));
+        // sqlProcessor has normalized keyword whitespace without changing
+        // quoted data. TO belongs to generic SET TimeZone, not to the
+        // legacy SET TIME ZONE value or a quoted name starting with "TO".
+        if (off == 13 && tzVal.compare(0, 3, "to ") == 0)
+            tzVal = trim(tzVal.substr(3));
+        else if (!tzVal.empty() && tzVal[0] == '=') tzVal = trim(tzVal.substr(1));
         const bool quoted = tzVal.size() >= 2 &&
             (tzVal.front() == '\'' || tzVal.front() == '"') &&
             tzVal.back() == tzVal.front();

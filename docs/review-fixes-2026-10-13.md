@@ -1,5 +1,11 @@
 # 2026-10-13 审查问题修复进度
 
+后续[R132 SET TimeZone TO](issue-review-r132-timezone-set-to.md)已修复旧Main把TO当值：
+PG112全过、冻结旧版112/44失败。只消费通用SET的独立TO，不改引号内数据或专用
+TIME ZONE值。正常1/repeat0、三个真实Main fresh TU编译/新链接/隔离运行，以及
+12native+15wire+3Main=30完整入口均0，独立核对0；旧R124对象此次未复用。
+新1435未全量；LOCAL/SESSION/DEFAULT及完整GUC事务/严格语法仍普通开放。
+
 后续[R131 TIMESTAMPTZ binary时区](issue-review-r131-timestamptz-binary-timezone.md)已修复UTC
 时刻被再次按会话本地解释：实际PG158全过、干净旧版和冻结Root各158/45失败。
 仅在有限1184中间文本明确+00，1114与infinity/NULL不变；正常1/repeat0及12native+
@@ -229,6 +235,10 @@ socket超时，精确SQL/栈和原期限保留，尚未确定根因，不称新�
 | R105 | 限定NAME→INET/CIDR源身份遗漏 | 本范围已修复，独立本地commit | PG/Root738、完整SDK及21native/16协议/3真实Main全过；自身真实全58/normal/repeat、核心与最终核对均0。精准NAME身份不放宽隐式赋值，旧738/34与SDK134保留，见[记录](issue-review-r105-network-name-input.md) |
 | R106 | COALESCE未选显式CAST的UNKNOWN输入分析遗漏 | 用户暂缓，未修复 | 2026-10-16“skip it”；原四条观察及未注册612控制（PG零失败/旧程序168失败）保留，无生产代码改动，不提交测试草稿为已验收修复；普通继续不重开，见[记录](issue-review-r106-coalesce-explicit-input-analysis.md) |
 | R107 | 四个字符串长度函数的真实签名与计量单位 | 本范围已修复，独立本地commit | PG/Root654、607原生与24native/18协议/3真实Main均0；四CPP实际2/1/1增量normal/repeat及核心/最终核对0。旧654/392、607/440与首两版失败保留，不扩为通用签名或原273完成，见[记录](issue-review-r107-string-length-signatures.md) |
+| R132 | 通用SET TimeZone的TO被当成值 | 本项有限修复完成 | PG112/旧44失败，正常1/repeat0、fresh三Main及30完整入口全0，见[记录](issue-review-r132-timezone-set-to.md)，非全部GUC语法/事务完成 |
+| R131 | TIMESTAMPTZ binary输入按session再次偏移 | 已独立提交 | `e782cda1`；PG158/两旧版各45失败，29完整入口全0，见[记录](issue-review-r131-timestamptz-binary-timezone.md)，非fractional receiver或heap升级 |
+| R130 | 原生结果提示被UNKNOWN覆盖/浮点替换所有权 | 已独立提交 | `3c8c85d3`；旧705/1/smallint和168/53失败，当前168及35完整入口全0，见[记录](issue-review-r130-native-result-hint-precedence.md) |
+| R129 | 原生投影类型提示丢isArray与旧TEXT夹具 | 已独立提交 | `c02aa584`；真实数组旧原生134、PG/旧SQL51均0，四处提示及夹具修复、26完整入口全0，见[记录](issue-review-r129-native-array-projection-types.md)，R109未重开 |
 | R128 | TIME binary Bind拒绝微秒和24时，范围/长度状态混淆 | 私有接收codec及结构化inputSqlState独立修复 | PG158全过/旧完整132失败；初版旧fixture112项后缺描述符中断保留并强化聚合，最终55完整入口全0，见[记录](issue-review-r128-time-binary-parameter.md)，不升级旧heap或TIME[]/其他时态接收 |
 | R127 | 直接TIME投影过高precision无截断/通知，text未归一 | 值及真实AST声明有效6、Q/P结构化通知独立修复 | PG276/旧246失败、252原生旧225失败，54完整入口全0；Parse一次、Describe/Bind/重复Execute/多行不重发，原122核心语义匹配但不伪造PG内部诊断来源，见[记录](issue-review-r127-time-excess-precision.md)，DDL/组合角色另项 |
 | R126 | 非法TIME关键字precision晚报错或错误接受 | 单个无符号int32语法及解析错误桥独立修复 | PG326/旧296失败、严格549原生旧217失败，首版协议19项后重置保留并修正；最终52完整入口全0，原122剩2条TIME(7)通知/typmod，见[记录](issue-review-r126-time-precision-grammar.md)，不混同具名语义或高精度warning |

@@ -1,5 +1,11 @@
 # 2026-10-13 全仓库审查
 
+后续[R132 SET TimeZone TO](issue-review-r132-timezone-set-to.md)已修复旧Main把TO当值：
+PG112全过、冻结旧版112/44失败。只消费通用SET的独立TO，不改引号内数据或专用
+TIME ZONE值。正常1/repeat0、三个真实Main fresh TU编译/新链接/隔离运行，以及
+12native+15wire+3Main=30完整入口均0，独立核对0；旧R124对象此次未复用。
+新1435未全量；LOCAL/SESSION/DEFAULT及完整GUC事务/严格语法仍普通开放。
+
 后续[R131 TIMESTAMPTZ binary时区](issue-review-r131-timestamptz-binary-timezone.md)已修复UTC
 时刻被再次按会话本地解释：实际PG158全过、干净旧版和冻结Root各158/45失败。
 仅在有限1184中间文本明确+00，1114与infinity/NULL不变；正常1/repeat0及12native+

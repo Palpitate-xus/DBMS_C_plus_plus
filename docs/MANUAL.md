@@ -217,6 +217,11 @@ TIMESTAMPTZ已支持的整秒binary参数按UTC时刻解释，不再被会话Tim
 text对照及named rebind的158控制见[R131](issue-review-r131-timestamptz-binary-timezone.md)。
 这不表示fractional timestamp binary输入或整秒heap升级已完成。
 
+通用`SET TimeZone TO 'Asia/Shanghai'`支持TO分隔符，也保留等号和专用
+`SET TIME ZONE 'Asia/Shanghai'`写法。TO在引号内仍是值的一部分，无效设置
+不会改变原时区。Simple/Extended及六时区验证见[R132](issue-review-r132-timezone-set-to.md)。
+该项不等于SET LOCAL/SESSION、DEFAULT或所有GUC事务/严格语法已完成。
+
 ### 其他类型
 | 类型 | 说明 |
 |------|------|
