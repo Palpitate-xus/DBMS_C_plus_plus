@@ -223,6 +223,8 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/timestamptz_binary_timezone_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/timestamp_binary_microsecond_parameter_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/timestamptz_returning_timezone_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/temporal_heap_microseconds_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/temporal_heap_microseconds_cli_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/temporal_column_precision_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/date_cycle_inverse_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/timestamp_binary_result_protocol_e2e_test.py)

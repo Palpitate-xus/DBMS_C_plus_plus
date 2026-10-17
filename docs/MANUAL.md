@@ -183,8 +183,9 @@ binary发送、完整时区/转换资格或物理精度已经支持。
 
 TIME/TIMETZ/TIMESTAMP/TIMESTAMPTZ及数组列的合法precision会保存到schema、
 目录和真实列结果描述中，省略仍为-1、显式0与6分别保留；空结果和NULL不改变
-声明。新有modifier的schema使用既有0x4442000c扩展，无modifier仍用旧格式，
-物理槽宽不变。旧声明没有保存的precision无法从值推回；备份后按可信原DDL
+声明。Legacy列的modifier可保存在0x4442000c扩展；显式微秒codec的schema-D
+同时保存ITM1和TCM1，不能把precision或槽宽当成单位标记。
+旧声明没有保存的precision无法从值推回；备份后按可信原DDL
 在副本验证重建/导入。边界见[R123](issue-review-r123-temporal-column-precision.md)，
 列元数据本身不完成值转换；合法TIME精度转换后续见下方R125，旧整秒heap仍未升级。
 
@@ -225,8 +226,16 @@ R131只验收整秒时区，后续fractional输入的有限支持见下。
 基础TIMESTAMPTZ标量的DML RETURNING会按语句执行时会话TimeZone呈现时间和偏移，
 同批后续SET不追溯修改先前结果；binary保持UTC时刻，NULL/infinity及TIMESTAMP/
 TEXT对照不变。有限范围见[R135](issue-review-r135-timestamptz-returning-timezone.md)。
-当前新建普通表的TIMESTAMP/TIMESTAMPTZ/TIME微秒INSERT/UPDATE仍报22023，
-独立CAST和数组微秒成功不等于标量heap支持；该普通缺口及兼容codec方法也见R135。
+新SQL普通表的TIME/TIMESTAMP/TIMESTAMPTZ标量使用显式TemporalMicros列codec，
+支持小数秒INSERT/UPDATE；TIME是八字节微秒（含24:00:00），timestamp是相对2000年
+epoch的有符号微秒，epoch0不是NULL。声明precision在标量写入时舍入，TSTZ按UTC保存、
+按会话时区显示；比较/索引查询不把查询值重新舍入到列precision。方法、证据与限制见
+[R136](issue-review-r136-temporal-microsecond-storage.md)。
+
+旧schema9/A/B/C列及既有native工厂继续使用Legacy秒codec，不自动迁移旧行。
+同SQL类型的ALTER也会重写被转换列，不能只改标签后按微秒解释旧八字节；操作前备份，
+在副本上验证。新表的TCM1单位扩展不能由旧程序读取；TIMETZ、数组precision、
+BC/完整大年份及所有日期函数输入不由此声明完成。上方各R117–R133描述保留各自范围。
 
 通用`SET TimeZone TO 'Asia/Shanghai'`支持TO分隔符，也保留等号和专用
 `SET TIME ZONE 'Asia/Shanghai'`写法。TO在引号内仍是值的一部分，无效设置

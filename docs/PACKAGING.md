@@ -19,6 +19,17 @@ cd dbms-<version>
 
 依赖：g++ (C++17)、make/cmake（按构建脚本）、Python 3（E2E 测试）、zlib 开发库（TOAST 压缩存储格式必需）、ICU i18n/uc/data 开发库（IANA 时区和夏令时规则必需）。运行时还须安装匹配的 zlib 和 ICU 共享库。OpenSSL 开发库用于网络 TLS；生产部署必须启用真实 TLS。
 
+## 时间列存储与版本边界
+
+新SQL标量TIME/TIMESTAMP/TIMESTAMPTZ列使用schema-D（0x4442000D）与TCM1逐列
+单位标签；物理数据为int64微秒，timestamp基准为2000-01-01，TIME范围含24:00。
+已有schema9/A/B/C及native工厂的Legacy秒列保持原单位，不自动重解释原八字节数据。
+同类型ALTER必须解码后重写，修改schema字节或改列标签不能代替数据转换。
+旧程序不识别D；升级前保留可恢复备份，并在数据副本验证导出、重建/转换、冷启动及索引。
+项目磁盘格式仍不兼容PostgreSQL；有限验证与未完成范围见
+[R136](issue-review-r136-temporal-microsecond-storage.md)，不能据此推导整个数据目录的升级/
+降级或崩溃恢复已全面验收。
+
 ## 目录约定（显式 data directory）
 
 每次正常启动都必须用 `-D/--data-dir` 或 `DBMS_DATA_DIR` 显式选择数据根；

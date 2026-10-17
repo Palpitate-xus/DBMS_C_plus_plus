@@ -3113,8 +3113,15 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                                 break;
                             }
                         }
+                        const bool sameTemporalStorageType = actual && !actual->isArray &&
+                            !expected.isArray && actual->dataType == "time" && expected.dataType == "time" &&
+                            !actual->isVariableLength && !expected.isVariableLength &&
+                            ((actual->dsize == 4 && actual->storageCodec == Column::StorageCodec::Legacy &&
+                              expected.dsize == 8 && expected.storageCodec == Column::StorageCodec::TemporalMicros) ||
+                             (expected.dsize == 4 && expected.storageCodec == Column::StorageCodec::Legacy &&
+                              actual->dsize == 8 && actual->storageCodec == Column::StorageCodec::TemporalMicros));
                         if (!actual || actual->dataType != expected.dataType ||
-                            actual->dsize != expected.dsize ||
+                            (actual->dsize != expected.dsize && !sameTemporalStorageType) ||
                             actual->isVariableLength != expected.isVariableLength ||
                             actual->isUnsigned != expected.isUnsigned ||
                             actual->isArray != expected.isArray ||
@@ -4774,6 +4781,13 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
     }
     col.isUnique = cd.isUnique;
     col.isArray = cd.isArray;
+    // New SQL scalar temporal columns use an explicit microsecond codec.
+    // Existing schemas/native factories retain their legacy second layout.
+    if (!col.isArray && (col.dataType == "time" || col.dataType == "timestamp" ||
+                         col.dataType == "timestamptz")) {
+        col.storageCodec = Column::StorageCodec::TemporalMicros;
+        col.dsize = sizeof(int64_t);
+    }
     col.enumValues = enumValues;
     // Keep the declared enum type as the column's persisted type identity.
     // The varchar factory above still supplies the variable-length physical
@@ -5690,8 +5704,12 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         std::string mergeError;
         const auto columnsHaveCompatibleTypes = [](const Column& left,
                                                    const Column& right) {
+            const bool temporalScalar = !left.isArray && !right.isArray &&
+                !left.isVariableLength && !right.isVariableLength &&
+                (left.dataType == "time" || left.dataType == "timestamp" ||
+                 left.dataType == "timestamptz");
             return left.dataType == right.dataType &&
-                   left.dsize == right.dsize &&
+                   (left.dsize == right.dsize || temporalScalar) &&
                    left.isVariableLength == right.isVariableLength &&
                    left.isUnsigned == right.isUnsigned &&
                    left.isArray == right.isArray &&
@@ -5878,6 +5896,16 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             merged.additionalCheckConstraints.end(),
             localSchema.additionalCheckConstraints.begin(),
             localSchema.additionalCheckConstraints.end());
+        // This is a new child heap: inherited SQL types need not inherit the
+        // parent's physical units. Each parent's existing rows keep its codec.
+        for (size_t i = 0; i < merged.len; ++i) {
+            auto& column = merged.cols[i];
+            if (!column.isArray && (column.dataType == "time" ||
+                column.dataType == "timestamp" || column.dataType == "timestamptz")) {
+                column.storageCodec = Column::StorageCodec::TemporalMicros;
+                column.dsize = sizeof(int64_t);
+            }
+        }
         tbl = merged;
     }
 

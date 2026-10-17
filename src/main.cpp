@@ -53,6 +53,7 @@
 #include "expression/ExpressionVolatility.h"
 #include "common/DateType.h"
 #include "common/TimeZoneRules.h"
+#include "common/TemporalStorageCodec.h"
 #include <fcntl.h>
 #include <unistd.h>
 #include "Config.h"
@@ -18266,16 +18267,14 @@ static bool extractUnnestLiteral(const string& rawSql, string& outLiteral) {
 }
 
 
-// Re-render TIMESTAMPTZ answer values in the session's TimeZone.
-// `answers` rows are space-terminated formatted values ordered as
-// projCols (schema order when the projection is empty).  Values for
-// timestamptz columns were produced in UTC by the executor paths; this
-// converts "YYYY-MM-DD HH:MM:SS" back to epoch seconds and re-formats
-// with the session offset (+HH or +HH:MM suffix).
+// Re-render logical TIMESTAMPTZ cells in the session TimeZone. Prefer typed
+// cells so fractional timestamps and quoted/spaced siblings retain boundaries.
 static void applySessionTimezoneToAnswers(
     std::vector<std::string>& answers,
     const std::vector<std::pair<std::string, std::string>>& projCols,
-    int tzOffsetMinutes) {
+    int tzOffsetMinutes,
+    const std::vector<std::vector<std::string>>* typedRows = nullptr,
+    const std::vector<std::vector<bool>>* typedNulls = nullptr) {
     if (answers.empty() || projCols.empty()) return;
     std::vector<size_t> tzPositions;
     for (size_t i = 0; i < projCols.size(); ++i) {
@@ -18287,6 +18286,44 @@ static void applySessionTimezoneToAnswers(
         }
     }
     if (tzPositions.empty()) return;
+    const auto render = [&](std::string& value) {
+        using namespace dbms::temporal_storage_detail;
+        const auto micros = parseTimestampMicros(value);
+        if (!micros || isInfiniteTimestamp(*micros)) return false;
+        int64_t seconds = *micros / MicrosPerSecond;
+        if (*micros % MicrosPerSecond < 0) --seconds;
+        seconds += postgresEpochSeconds();
+        int offset = tzOffsetMinutes;
+        if (const Session* session = dbms::currentSession()) {
+            if (const auto named = dbms::ianaTimezoneOffsetMinutes(session->timeZone, seconds))
+                offset = *named;
+        }
+        const std::string formatted = formatTimestampMicrosWithOffset(*micros, offset);
+        if (formatted.empty()) return false;
+        value = formatted;
+        return true;
+    };
+    if (typedRows && typedNulls && typedRows->size() == answers.size() &&
+        typedNulls->size() == answers.size()) {
+        for (size_t row = 0; row < answers.size(); ++row) {
+            auto cells = typedRows->at(row);
+            const auto& nulls = typedNulls->at(row);
+            if (cells.size() != projCols.size() || nulls.size() != cells.size()) continue;
+            bool changed = false;
+            for (const size_t pos : tzPositions)
+                if (!nulls[pos]) changed = render(cells[pos]) || changed;
+            if (!changed) continue;
+            std::string text;
+            for (size_t col = 0; col < cells.size(); ++col) {
+                if (nulls[col]) text += "NULL ";
+                else if (cells[col].find(' ') != std::string::npos)
+                    text += "\"" + cells[col] + "\" ";
+                else text += cells[col] + ' ';
+            }
+            answers[row] = std::move(text);
+        }
+        return;
+    }
     for (auto& row : answers) {
         // split on spaces (values themselves carry no inner spaces in this
         // row format: timestamps render as one token only when the space
@@ -18331,6 +18368,7 @@ static void applySessionTimezoneToAnswers(
                     for (size_t n = 0; n < x.size(); ++n) {
                         char c = x[n];
                         if (c == ':') ++colons;
+                        else if (c == '.' && colons == 2) continue;
                         else if ((c == '+' || c == '-') && colons >= 2) {
                             const std::string suffix = x.substr(n + 1);
                             if (suffix.size() != 2 && suffix.size() != 5)
@@ -18373,59 +18411,7 @@ static void applySessionTimezoneToAnswers(
         }
         for (size_t p : tzPositions) {
             if (p >= logical.size()) continue;
-            const std::string& v = logical[p];
-            // Already rendered with an offset suffix by the storage path.
-            const size_t timeStart = v.find(' ');
-            const size_t sign = timeStart == std::string::npos
-                ? std::string::npos : v.find_first_of("+-", timeStart + 1);
-            if (sign != std::string::npos) {
-                const std::string suffix = v.substr(sign + 1);
-                if ((suffix.size() == 2 || suffix.size() == 5) &&
-                    std::isdigit(static_cast<unsigned char>(suffix[0])) &&
-                    std::isdigit(static_cast<unsigned char>(suffix[1])) &&
-                    (suffix.size() == 2 ||
-                     (suffix[2] == ':' &&
-                      std::isdigit(static_cast<unsigned char>(suffix[3])) &&
-                      std::isdigit(static_cast<unsigned char>(suffix[4])))))
-                    continue;
-            }
-            // parse [Y]YYY-M-D H:M:S (components may be unpadded) -> epoch
-            size_t sp = v.find(' ');
-            if (sp == std::string::npos) continue;
-            std::string dpart = v.substr(0, sp);
-            std::string tpart = v.substr(sp + 1);
-            auto splitNum = [](const std::string& x, char sep,
-                               int out[3]) {
-                int n = 0;
-                size_t p = 0;
-                while (n < 3 && p <= x.size()) {
-                    size_t c = x.find(sep, p);
-                    std::string tok = x.substr(p, c == std::string::npos
-                                                        ? std::string::npos : c - p);
-                    out[n++] = tok.empty() ? 0 : atoi(tok.c_str());
-                    if (c == std::string::npos) break;
-                    p = c + 1;
-                }
-                while (n < 3) out[n++] = 0;
-            };
-            int dc[3], tc[3];
-            splitNum(dpart, '-', dc);
-            splitNum(tpart, ':', tc);
-            if (dc[0] <= 0 || dc[1] <= 0 || dc[2] <= 0) continue;
-            Date d;
-            d.year = dc[0];
-            d.month = dc[1];
-            d.day = dc[2];
-            int hh = tc[0], mm = tc[1], ss = tc[2];
-            int64_t epoch = CONVERT(d) * 86400LL + hh * 3600 + mm * 60 + ss;
-            int renderOffset = tzOffsetMinutes;
-            if (const Session* session = dbms::currentSession()) {
-                if (const auto namedOffset = dbms::ianaTimezoneOffsetMinutes(
-                        session->timeZone, epoch))
-                    renderOffset = *namedOffset;
-            }
-            logical[p] = formatTimestampWithTz(epoch, renderOffset);
-            changed = true;
+            changed = render(logical[p]) || changed;
         }
         if (changed) {
             std::string out;
@@ -38272,11 +38258,13 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 for (size_t i = 0; i < tbl.len; ++i) {
                     if (selectCols.empty() || selectCols.count(tbl.cols[i].dataName)) {
                         projCols.emplace_back(tbl.cols[i].dataName,
-                                              tbl.cols[i].dataType);
+                            tbl.cols[i].dataType + (tbl.cols[i].isArray ? "[]" : ""));
                     }
                 }
                 applySessionTimezoneToAnswers(answers, projCols,
-                                              s.timezoneOffsetMinutes);
+                    s.timezoneOffsetMinutes,
+                    canSliceStructuredPlain ? slicedRows : nullptr,
+                    canSliceStructuredPlain ? slicedNulls : nullptr);
             }
         }
         // PG projects plain columns in SELECT-list order; the engine emits

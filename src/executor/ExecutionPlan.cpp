@@ -1,5 +1,6 @@
 #include "ExecutionPlan.h"
 #include "common/DbError.h"
+#include "common/TemporalStorageCodec.h"
 #include "access/BPTree.h"
 #include "access/HashIndex.h"
 #include "access/BloomIndex.h"
@@ -4566,6 +4567,10 @@ bool SortOp::open() {
                 it.s = val;
             } else if (scol.dataType == "date") {
                 it.d = val.empty() ? Date{} : Date(val.c_str());
+            } else if (scol.storageCodec == Column::StorageCodec::TemporalMicros) {
+                it.n = val.empty() ? 0 : (scol.dataType == "time"
+                    ? temporal_storage_detail::parseTimeMicros(val).value_or(0)
+                    : temporal_storage_detail::parseTimestampMicros(val).value_or(0));
             } else if (scol.dataType == "timestamp") {
                 it.n = val.empty() ? 0 : parseTimestampToSeconds(val);
             } else if (scol.dataType == "float" || scol.dataType == "double" || scol.dataType == "decimal") {

@@ -56,6 +56,10 @@ struct Column {
     // Actual persisted declaration modifier, independent of physical width.
     // Used by interval/numeric scalar and array-element assignment.
     int32_t typeMod = -1;
+    // Physical temporal units are explicit. Old schema9/A/B/C and native
+    // factories retain Legacy; never infer microseconds from an 8-byte slot.
+    enum class StorageCodec : uint8_t { Legacy = 0, TemporalMicros = 1 };
+    StorageCodec storageCodec = StorageCodec::Legacy;
 
     void print() const;
 };

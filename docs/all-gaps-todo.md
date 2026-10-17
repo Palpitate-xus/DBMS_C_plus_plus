@@ -1,5 +1,9 @@
 # DBMS 全部 Gap TODO（历史记录）
 
+后续标量时间的小数秒持久化、Legacy/TemporalMicros单位与schema-D验证见
+[R136](issue-review-r136-temporal-microsecond-storage.md)。这只对应有限普通缺陷修复，
+不改本历史清单或原273完成状态，暂缓项继续保持。
+
 > **已于 2026-08-23 被 [`postgresql-18-gap-audit.md`](postgresql-18-gap-audit.md) 取代；逐项落地方法见 [`postgresql-18-implementation-blueprint.md`](postgresql-18-implementation-blueprint.md)。**
 > 本文件保留早期 Wave、提交和状态变化记录，不再是当前差距的权威来源；其中的日期、PASS 数和“已完成”状态可能已过时。
 

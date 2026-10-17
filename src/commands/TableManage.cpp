@@ -42,6 +42,7 @@
 #include "permissions.h"
 #include "utils/Session.h"
 #include "common/TimeZoneRules.h"
+#include "common/TemporalStorageCodec.h"
 #include "process/RuntimeStats.h"
 #include "process/SqlStats.h"
 #include "access/BrinIndexFormat.h"
@@ -839,9 +840,65 @@ static std::optional<int64_t> parseStoredInteger(const std::string& value) {
     return result;
 }
 
+// Semantic input is normalized before physical encoding. A zoned datum keeps
+// its explicit UTC suffix so trigger/final validation cannot apply TimeZone twice.
+// Key lookups intentionally do NOT round to the column's declaration precision.
+static bool normalizeTemporalColumn(const Column& column, const std::string& value,
+                                    std::string& canonical, bool applyPrecision = true) {
+    try {
+        CastExpr cast;
+        cast.typeName = column.dataType == "datetime" ? "timestamp" : column.dataType;
+        auto parameter = std::make_unique<ParameterExpr>();
+        parameter->origin = ParameterOrigin::RuntimeCell;
+        parameter->declaredType = "unknown";
+        cast.operand = std::move(parameter);
+        RowContext context;
+        context.setParameters({ExprValue("unknown", value, false)});
+        ExprEvaluator evaluator;
+        const auto datum = evaluator.eval(&cast, context);
+        if (datum.isNull) return false;
+        const bool time = column.dataType == "time";
+        const auto parsed = time ? temporal_storage_detail::parseTimeMicros(datum.value)
+                                 : temporal_storage_detail::parseTimestampMicros(datum.value);
+        if (!parsed) return false;
+        const auto rounded = time
+            ? temporal_storage_detail::roundTimeMicros(*parsed, applyPrecision ? column.typeMod : -1)
+            : temporal_storage_detail::roundTimestampMicros(*parsed, applyPrecision ? column.typeMod : -1);
+        if (!rounded) return false;
+        canonical = time ? temporal_storage_detail::formatTimeMicros(*rounded)
+                         : temporal_storage_detail::formatTimestampMicros(
+                               *rounded, column.dataType == "timestamptz");
+        return !canonical.empty();
+    } catch (const DbError&) { return false; }
+}
+
+static std::optional<int64_t> temporalColumnMicros(const Column& column,
+                                                  const std::string& value) {
+    return column.dataType == "time"
+        ? temporal_storage_detail::parseTimeMicros(value)
+        : temporal_storage_detail::parseTimestampMicros(value);
+}
+
 static std::string canonicalColumnKeyValue(const Column& column,
                                            const std::string& value) {
     if (value.empty()) return {};
+    if (column.storageCodec == Column::StorageCodec::TemporalMicros) {
+        std::string canonical;
+        if (!normalizeTemporalColumn(column, value, canonical, false)) return value;
+        const auto micros = temporalColumnMicros(column, canonical);
+        if (!micros) return value;
+        // B+Tree stores only 20 bytes: ISO timestamp text loses all fractional
+        // digits at that boundary. Bias the signed int64 then use 16 fixed hex
+        // digits, preserving exact equality AND chronological byte ordering.
+        uint64_t ordered = static_cast<uint64_t>(*micros) ^ (uint64_t{1} << 63);
+        std::string key(16, '0');
+        constexpr char hex[] = "0123456789abcdef";
+        for (size_t digit = key.size(); digit-- > 0;) {
+            key[digit] = hex[ordered & 15];
+            ordered >>= 4;
+        }
+        return key;
+    }
     if (!column.isArray && isIntegerStorageType(column.dataType)) {
         // Heap encoding parses the integer datum, so index writes and unique
         // checks must not preserve alternate lexical spellings of that datum.
@@ -10244,6 +10301,13 @@ std::string StorageEngine::extractColumnValueStatic(const std::string& rowBuffer
         Date d;
         std::memcpy(&d, rowBuffer.data() + offset, DATE_SIZE);
         return (d.year == 0) ? "" : str(d);
+    } else if (col.storageCodec == Column::StorageCodec::TemporalMicros) {
+        int64_t value = 0;
+        std::memcpy(&value, rowBuffer.data() + offset, sizeof(value));
+        if (col.dataType == "time")
+            return value == -1 ? "" : temporal_storage_detail::formatTimeMicros(value);
+        return value == INF ? "" : temporal_storage_detail::formatTimestampMicros(
+            value, col.dataType == "timestamptz");
     } else if (col.dataType == "timestamp" || col.dataType == "timestamptz" || col.dataType == "datetime") {
         int64_t val = 0;
         std::memcpy(&val, rowBuffer.data() + offset, TIMESTAMP_SIZE);
@@ -15074,6 +15138,8 @@ constexpr int32_t SCHEMA_FORMAT_VERSION = 0x44420009;  // "DB" + 64-byte identif
 constexpr int32_t SCHEMA_PHYSICAL_ID_FORMAT_VERSION = 0x4442000A;
 constexpr int32_t SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION = 0x4442000B;
 constexpr int32_t SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION = 0x4442000C;
+constexpr int32_t SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION = 0x4442000D;
+constexpr uint32_t SCHEMA_TEMPORAL_CODEC_MAGIC = 0x314D4354; // "TCM1"
 constexpr uint32_t SCHEMA_COLUMN_TYPEMOD_MAGIC = 0x314D5449; // "ITM1"
 constexpr uint32_t SCHEMA_PHYSICAL_ID_MAGIC = 0x31444952;  // "RID1"
 constexpr uint32_t SCHEMA_DEFAULT_ORIGIN_MAGIC = 0x314F5344; // "DSO1"
@@ -15095,6 +15161,15 @@ static bool isValidTemporalColumnModifier(const Column& column) {
         type.resize(type.size() - 2);
     return (type == "time" || type == "timetz" || type == "timestamp" ||
             type == "timestamptz") && column.typeMod >= 0 && column.typeMod <= 6;
+}
+
+static bool isValidColumnStorageCodec(const Column& column) {
+    if (column.storageCodec == Column::StorageCodec::Legacy) return true;
+    return column.storageCodec == Column::StorageCodec::TemporalMicros &&
+        !column.isArray && !column.isVariableLength && !column.isUnsigned &&
+        column.dsize == sizeof(int64_t) &&
+        (column.dataType == "time" || column.dataType == "timestamp" ||
+         column.dataType == "timestamptz" || column.dataType == "datetime");
 }
 
 void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
@@ -15137,7 +15212,13 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
     }
     bool hasDefaultOrigins = false;
     bool hasColumnTypeMods = false;
+    bool hasTemporalCodecs = false;
     for (size_t i = 0; i < tbl.len; ++i) {
+        if (!isValidColumnStorageCodec(tbl.cols[i])) {
+            out.setstate(std::ios::failbit); return;
+        }
+        hasTemporalCodecs = hasTemporalCodecs ||
+            tbl.cols[i].storageCodec != Column::StorageCodec::Legacy;
         if (tbl.cols[i].typeMod != -1) {
             try {
                 if (tbl.cols[i].dataType == "interval") (void)interval_type_detail::unpack(tbl.cols[i].typeMod);
@@ -15162,7 +15243,7 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
     }
     // Old readers reject B before consuming it rather than treating an
     // implicit domain default as a frozen SQL column expression.
-    const int32_t schemaFormat = hasColumnTypeMods ? SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION : hasDefaultOrigins ? SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION : tbl.physicalRelationId == 0
+    const int32_t schemaFormat = hasTemporalCodecs ? SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION : hasColumnTypeMods ? SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION : hasDefaultOrigins ? SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION : tbl.physicalRelationId == 0
         ? SCHEMA_FORMAT_VERSION : SCHEMA_PHYSICAL_ID_FORMAT_VERSION;
     out.write(reinterpret_cast<const char*>(&schemaFormat), sizeof(schemaFormat));
     int32_t len = static_cast<int32_t>(tbl.len);
@@ -15381,7 +15462,7 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
     uint16_t longDefaultCount = 0;
     for (size_t i = 0; i < tbl.len; ++i)
         if (tbl.cols[i].defaultValue.size() > MAX_COL_NAME_LEN) ++longDefaultCount;
-    if (longDefaultCount != 0 || !tbl.rangePartitions.empty() || tbl.physicalRelationId != 0 || hasDefaultOrigins || hasColumnTypeMods) {
+    if (longDefaultCount != 0 || !tbl.rangePartitions.empty() || tbl.physicalRelationId != 0 || hasDefaultOrigins || hasColumnTypeMods || hasTemporalCodecs) {
         out.write(reinterpret_cast<const char*>(&SCHEMA_LONG_DEFAULT_MAGIC),
                   sizeof(SCHEMA_LONG_DEFAULT_MAGIC));
         out.write(reinterpret_cast<const char*>(&longDefaultCount),
@@ -15398,7 +15479,7 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
 
     // Persist lower endpoints without changing the legacy schema prefix. Old
     // schemas infer them as MINVALUE followed by the preceding upper bound.
-    if (!tbl.rangePartitions.empty() || tbl.physicalRelationId != 0 || hasDefaultOrigins || hasColumnTypeMods) {
+    if (!tbl.rangePartitions.empty() || tbl.physicalRelationId != 0 || hasDefaultOrigins || hasColumnTypeMods || hasTemporalCodecs) {
         out.write(reinterpret_cast<const char*>(&SCHEMA_RANGE_LOWER_BOUNDS_MAGIC),
                   sizeof(SCHEMA_RANGE_LOWER_BOUNDS_MAGIC));
         const int32_t lowerBoundCount =
@@ -15413,13 +15494,13 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
             writeFixedString(out, lower, MAX_COL_NAME_LEN);
         }
     }
-    if (tbl.physicalRelationId != 0 || hasDefaultOrigins || hasColumnTypeMods) {
+    if (tbl.physicalRelationId != 0 || hasDefaultOrigins || hasColumnTypeMods || hasTemporalCodecs) {
         out.write(reinterpret_cast<const char*>(&SCHEMA_PHYSICAL_ID_MAGIC),
                   sizeof(SCHEMA_PHYSICAL_ID_MAGIC));
         out.write(reinterpret_cast<const char*>(&tbl.physicalRelationId),
                   sizeof(tbl.physicalRelationId));
     }
-    if (hasDefaultOrigins || hasColumnTypeMods) {
+    if (hasDefaultOrigins || hasColumnTypeMods || hasTemporalCodecs) {
         out.write(reinterpret_cast<const char*>(&SCHEMA_DEFAULT_ORIGIN_MAGIC),sizeof(SCHEMA_DEFAULT_ORIGIN_MAGIC));
         const uint16_t count = static_cast<uint16_t>(tbl.len);
         out.write(reinterpret_cast<const char*>(&count),sizeof(count));
@@ -15434,12 +15515,21 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
             out.write(tbl.cols[i].domainName.data(),length);
         }
     }
-    if (hasColumnTypeMods) {
+    if (hasColumnTypeMods || hasTemporalCodecs) {
         out.write(reinterpret_cast<const char*>(&SCHEMA_COLUMN_TYPEMOD_MAGIC), sizeof(SCHEMA_COLUMN_TYPEMOD_MAGIC));
         const uint16_t count = static_cast<uint16_t>(tbl.len);
         out.write(reinterpret_cast<const char*>(&count), sizeof(count));
         for (size_t i = 0; i < tbl.len; ++i)
             out.write(reinterpret_cast<const char*>(&tbl.cols[i].typeMod), sizeof(tbl.cols[i].typeMod));
+    }
+    if (hasTemporalCodecs) {
+        out.write(reinterpret_cast<const char*>(&SCHEMA_TEMPORAL_CODEC_MAGIC), sizeof(SCHEMA_TEMPORAL_CODEC_MAGIC));
+        const uint16_t count = static_cast<uint16_t>(tbl.len);
+        out.write(reinterpret_cast<const char*>(&count), sizeof(count));
+        for (size_t i = 0; i < tbl.len; ++i) {
+            const auto codec = static_cast<uint8_t>(tbl.cols[i].storageCodec);
+            out.write(reinterpret_cast<const char*>(&codec), sizeof(codec));
+        }
     }
 }
 
@@ -15450,7 +15540,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     in.read(reinterpret_cast<char*>(&firstInt), 4);
     if (!in) return {};
 
-    if (firstInt != SCHEMA_FORMAT_VERSION && firstInt != SCHEMA_PHYSICAL_ID_FORMAT_VERSION && firstInt != SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION && firstInt != SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION) {
+    if (firstInt != SCHEMA_FORMAT_VERSION && firstInt != SCHEMA_PHYSICAL_ID_FORMAT_VERSION && firstInt != SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION && firstInt != SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION && firstInt != SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION) {
         std::cerr << "[catalog] unsupported schema format for table " << tablename
                   << "; recreate the database with the current binary" << std::endl;
         return {};
@@ -15759,7 +15849,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     if (!in) return {};
     if (in.peek() == std::char_traits<char>::eof()) {
         if (!in.eof()) return {};
-        if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION || firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION || firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION) return {};
+        if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION || firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION || firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION || firstInt == SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION) return {};
         in.clear();
         return tbl;
     }
@@ -15805,7 +15895,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     // them as SERIAL-like auto-increment columns (identityKind == 0).
     if (in.peek() == std::char_traits<char>::eof()) {
         if (!in.eof()) return {};
-        if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION || firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION || firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION) return {};
+        if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION || firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION || firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION || firstInt == SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION) return {};
         in.clear();
         return tbl;
     }
@@ -15826,7 +15916,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     }
     if (in.peek() == std::char_traits<char>::eof()) {
         if (!in.eof()) return {};
-        if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION || firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION || firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION) return {};
+        if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION || firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION || firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION || firstInt == SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION) return {};
         in.clear();
         return tbl;
     }
@@ -15854,7 +15944,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     }
     if (in.peek() == std::char_traits<char>::eof()) {
         if (!in.eof()) return {};
-        if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION || firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION || firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION) return {};
+        if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION || firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION || firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION || firstInt == SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION) return {};
         // A zero-entry DFT1 block is emitted only with the new RANGE-bound
         // extension; an EOF here therefore means a truncated new schema.
         if (defaultCount == 0 && !tbl.rangePartitions.empty()) return {};
@@ -15892,7 +15982,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
         }
         persistedLowerBounds.push_back(std::move(lower));
     }
-    if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION || firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION || firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION) {
+    if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION || firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION || firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION || firstInt == SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION) {
         uint32_t physicalIdMagic = 0;
         in.read(reinterpret_cast<char*>(&physicalIdMagic), sizeof(physicalIdMagic));
         in.read(reinterpret_cast<char*>(&tbl.physicalRelationId), sizeof(tbl.physicalRelationId));
@@ -15900,7 +15990,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
             (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION && tbl.physicalRelationId == 0))
             return {};
     }
-    if (firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION || firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION) {
+    if (firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION || firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION || firstInt == SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION) {
         uint32_t magic = 0; uint16_t count = 0;
         in.read(reinterpret_cast<char*>(&magic),sizeof(magic));
         in.read(reinterpret_cast<char*>(&count),sizeof(count));
@@ -15922,7 +16012,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
             }
         }
     }
-    if (firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION) {
+    if (firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION || firstInt == SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION) {
         uint32_t magic = 0; uint16_t count = 0;
         in.read(reinterpret_cast<char*>(&magic), sizeof(magic));
         in.read(reinterpret_cast<char*>(&count), sizeof(count));
@@ -15939,6 +16029,23 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
                 catch (const DbError&) { return {}; }
             }
         }
+    }
+    if (firstInt == SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION) {
+        uint32_t magic = 0; uint16_t count = 0;
+        in.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+        in.read(reinterpret_cast<char*>(&count), sizeof(count));
+        if (!in || magic != SCHEMA_TEMPORAL_CODEC_MAGIC || count != tbl.len) return {};
+        bool hasTemporalCodec = false;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            uint8_t codec = 0;
+            in.read(reinterpret_cast<char*>(&codec), sizeof(codec));
+            if (!in) return {};
+            tbl.cols[i].storageCodec = static_cast<Column::StorageCodec>(codec);
+            if (!isValidColumnStorageCodec(tbl.cols[i])) return {};
+            hasTemporalCodec = hasTemporalCodec ||
+                tbl.cols[i].storageCodec != Column::StorageCodec::Legacy;
+        }
+        if (!hasTemporalCodec) return {};
     }
     if (in.peek() != std::char_traits<char>::eof() || !in.eof()) return {};
     tbl.rangePartitionLowerBounds = std::move(persistedLowerBounds);
@@ -18733,6 +18840,25 @@ DBStatus StorageEngine::alterTableAlterColumnType(const std::string& dbname,
                 lockManager_.unlock(tablename);
                 throw;
             }
+        } else if (target.storageCodec == Column::StorageCodec::TemporalMicros) {
+            std::string canonical;
+            std::string temporalInput = *it->second;
+            if (target.dataType == "timestamptz" &&
+                tbl.cols[colIdx].dataType == "timestamptz" &&
+                tbl.cols[colIdx].storageCodec == Column::StorageCodec::Legacy &&
+                temporalInput != "infinity" && temporalInput != "-infinity") {
+                // A legacy heap decodes UTC without a suffix. It is an instant,
+                // not an unknown local wall clock in ALTER's current TimeZone.
+                const auto time = temporalInput.find(' ');
+                if (time != std::string::npos &&
+                    temporalInput.find_first_of("+-Zz", time + 1) == std::string::npos)
+                    temporalInput += "+00";
+            }
+            if (!normalizeTemporalColumn(target, temporalInput, canonical)) {
+                lockManager_.unlock(tablename);
+                return DBStatus::INVALID_VALUE;
+            }
+            it->second = std::move(canonical);
         } else if (!valueConvertibleToType(*it->second, target.dataType)) {
             lockManager_.unlock(tablename);
             return DBStatus::INVALID_VALUE;
@@ -18749,6 +18875,7 @@ DBStatus StorageEngine::alterTableAlterColumnType(const std::string& dbname,
     updated.isVariableLength = target.isVariableLength;
     updated.isArray = target.isArray;
     updated.typeMod = target.typeMod;
+    updated.storageCodec = target.storageCodec;
     updated.isUnsigned = target.isUnsigned;
     updated.enumValues = target.enumValues;
     tbl.cols[colIdx] = updated;
@@ -23380,6 +23507,16 @@ StorageEngine::PredicateTruth StorageEngine::compareValues(
         if (!l.year || !r.year) return PredicateTruth::Unknown;
         return fromCompare(l < r ? -1 : (r < l ? 1 : 0));
     }
+    if (col.storageCodec == Column::StorageCodec::TemporalMicros) {
+        std::string canonicalLeft, canonicalRight;
+        if (!normalizeTemporalColumn(col, left, canonicalLeft, false) ||
+            !normalizeTemporalColumn(col, right, canonicalRight, false))
+            return PredicateTruth::Unknown;
+        const auto l = temporalColumnMicros(col, canonicalLeft);
+        const auto r = temporalColumnMicros(col, canonicalRight);
+        if (!l || !r) return PredicateTruth::Unknown;
+        return fromCompare(*l < *r ? -1 : (*r < *l ? 1 : 0));
+    }
     if (col.dataType == "timestamp" || col.dataType == "timestamptz" ||
         col.dataType == "datetime") {
         const int64_t l = parseTimestampToSeconds(left);
@@ -24010,6 +24147,9 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
         if (cond.op == "<=" && v.year && (d > v))   return false;
         if (cond.op == ">=" && v.year && (d < v))   return false;
         if (cond.op == "!=" && v.year && d == v)    return false;
+    } else if (col.storageCodec == Column::StorageCodec::TemporalMicros) {
+        return compareValues(col, val, val.empty(), cond.value, false, cond.op) ==
+            PredicateTruth::True;
     } else if (col.dataType == "timestamp" || col.dataType == "timestamptz" || col.dataType == "datetime") {
         int64_t num = val.empty() ? 0 : parseTimestampToSeconds(val);
         int64_t cmp = parseTimestampToSeconds(cond.value);
@@ -24352,6 +24492,12 @@ static std::string buildRowBuffer(const TableSchema& tbl,
                     Date d(val.c_str());
                     std::memcpy(&rowBuffer[offset], &d, DATE_SIZE);
                 }
+            } else if (col.storageCodec == Column::StorageCodec::TemporalMicros) {
+                const auto parsed = val.empty() ? std::optional<int64_t>{} : temporalColumnMicros(col, val);
+                if (!val.empty() && !parsed)
+                    throw DbError("22007", "invalid canonical temporal storage datum");
+                const int64_t num = parsed ? *parsed : (col.dataType == "time" ? -1 : INF);
+                std::memcpy(&rowBuffer[offset], &num, sizeof(num));
             } else if (col.dataType == "timestamp" || col.dataType == "timestamptz" || col.dataType == "datetime") {
                 int64_t num = val.empty() ? INF : parseTimestampToSeconds(val);
                 std::memcpy(&rowBuffer[offset], &num, TIMESTAMP_SIZE);
@@ -24447,6 +24593,12 @@ static std::string buildRowBuffer(const TableSchema& tbl,
                         Date d(val.c_str());
                         std::memcpy(&fixedData[fixedOff], &d, DATE_SIZE);
                     }
+                } else if (col.storageCodec == Column::StorageCodec::TemporalMicros) {
+                    const auto parsed = val.empty() ? std::optional<int64_t>{} : temporalColumnMicros(col, val);
+                    if (!val.empty() && !parsed)
+                        throw DbError("22007", "invalid canonical temporal storage datum");
+                    const int64_t num = parsed ? *parsed : (col.dataType == "time" ? -1 : INF);
+                    std::memcpy(&fixedData[fixedOff], &num, sizeof(num));
                 } else if (col.dataType == "timestamp" || col.dataType == "timestamptz" || col.dataType == "datetime") {
                     int64_t num = val.empty() ? INF : parseTimestampToSeconds(val);
                     std::memcpy(&fixedData[fixedOff], &num, TIMESTAMP_SIZE);
@@ -25431,6 +25583,17 @@ DBStatus StorageEngine::insertInternal(
             if (!val.empty()) {
                 std::string canonical;
                 if (!(col.dataType == "interval" || col.dataType == "numeric" ? normalizeModifiedColumn(col, val, canonical) : normalizeArray(val, col.dataType, canonical))) {
+                    lockManager_.unlock(tablename);
+                    return DBStatus::INVALID_VALUE;
+                }
+                actualValues[col.dataName] = std::move(canonical);
+            }
+            continue;
+        }
+        if (col.storageCodec == Column::StorageCodec::TemporalMicros) {
+            if (!val.empty()) {
+                std::string canonical;
+                if (!normalizeTemporalColumn(col, val, canonical)) {
                     lockManager_.unlock(tablename);
                     return DBStatus::INVALID_VALUE;
                 }
@@ -29107,7 +29270,9 @@ DBStatus StorageEngine::updateInternal(
                         return DBStatus::INVALID_VALUE;
                     }
                     std::string storeVal = kv.second;
-                    if (col.isArray && col.dataType == "numeric") {
+                    if (col.storageCodec == Column::StorageCodec::TemporalMicros) {
+                        if (!normalizeTemporalColumn(col, kv.second, storeVal)) return DBStatus::INVALID_VALUE;
+                    } else if (col.isArray && col.dataType == "numeric") {
                         if (!normalizeModifiedColumn(col, kv.second, storeVal)) return DBStatus::INVALID_VALUE;
                     } else if (col.dataType == "date") {
                         Date d(kv.second.c_str());
@@ -32625,11 +32790,17 @@ std::vector<std::string> StorageEngine::query(
                                scol.dataType == "timestamptz" ||
                                scol.dataType == "datetime") {
                         k.vals.emplace_back(
-                            "", val.empty() ? 0 : parseTimestampToSeconds(val),
+                            "", val.empty() ? 0 :
+                                (scol.storageCodec == Column::StorageCodec::TemporalMicros
+                                    ? temporalColumnMicros(scol, val).value_or(0)
+                                    : parseTimestampToSeconds(val)),
                             0.0, Date{}, Numeric{});
                     } else if (scol.dataType == "time") {
                         k.vals.emplace_back(
-                            "", val.empty() ? 0 : parseTimeToSeconds(val),
+                            "", val.empty() ? 0 :
+                                (scol.storageCodec == Column::StorageCodec::TemporalMicros
+                                    ? temporalColumnMicros(scol, val).value_or(0)
+                                    : parseTimeToSeconds(val)),
                             0.0, Date{}, Numeric{});
                     } else if (scol.dataType == "money") {
                         int64_t minorUnits = 0;
@@ -33044,23 +33215,24 @@ std::vector<std::string> StorageEngine::query(
                 (col.generatedKind != 'v' && isColumnNullByRid(
                     dbname, tbl.tablename, mr.first, i));
             // Apply session timezone for TIMESTAMPTZ columns
-            if (col.dataType == "timestamptz" && !resultIsNull && !val.empty()) {
-                // Read raw seconds directly from row buffer (extractColumnValue already formats it)
-                size_t offset = 0;
-                for (size_t j = 0; j < i; ++j) {
-                    if (!tbl.cols[j].isVariableLength) offset += tbl.cols[j].dsize;
-                }
-                if (offset + TIMESTAMP_SIZE <= mr.second.size()) {
-                    int64_t utcSec = 0;
-                    std::memcpy(&utcSec, mr.second.data() + offset, TIMESTAMP_SIZE);
-                    int renderOffset = timezoneOffsetMinutes;
-                    if (const Session* session = currentSession()) {
-                        if (const auto namedOffset =
-                                dbms::ianaTimezoneOffsetMinutes(
+            if (col.dataType == "timestamptz" && !col.isArray &&
+                !resultIsNull && !val.empty()) {
+                // Render the logical datum, never reinterpret physical row bytes:
+                // legacy seconds and tagged microseconds use different epochs.
+                if (const auto micros = temporal_storage_detail::parseTimestampMicros(val)) {
+                    if (!isInfiniteTimestamp(*micros)) {
+                        int64_t utcSec = *micros / temporal_storage_detail::MicrosPerSecond;
+                        if (*micros % temporal_storage_detail::MicrosPerSecond < 0) --utcSec;
+                        utcSec += temporal_storage_detail::postgresEpochSeconds();
+                        int renderOffset = timezoneOffsetMinutes;
+                        if (const Session* session = currentSession()) {
+                            if (const auto namedOffset = dbms::ianaTimezoneOffsetMinutes(
                                     session->timeZone, utcSec))
-                            renderOffset = *namedOffset;
+                                renderOffset = *namedOffset;
+                        }
+                        val = temporal_storage_detail::formatTimestampMicrosWithOffset(
+                            *micros, renderOffset);
                     }
-                    val = formatTimestampWithTz(utcSec, renderOffset);
                 }
             }
             if (resultIsNull) rowStr += "NULL ";
@@ -38711,11 +38883,17 @@ std::vector<std::string> StorageEngine::queryExpr(
                                scol.dataType == "timestamptz" ||
                                scol.dataType == "datetime") {
                         k.vals.emplace_back(
-                            "", val.empty() ? 0 : parseTimestampToSeconds(val),
+                            "", val.empty() ? 0 :
+                                (scol.storageCodec == Column::StorageCodec::TemporalMicros
+                                    ? temporalColumnMicros(scol, val).value_or(0)
+                                    : parseTimestampToSeconds(val)),
                             0.0, Date{}, Numeric{});
                     } else if (scol.dataType == "time") {
                         k.vals.emplace_back(
-                            "", val.empty() ? 0 : parseTimeToSeconds(val),
+                            "", val.empty() ? 0 :
+                                (scol.storageCodec == Column::StorageCodec::TemporalMicros
+                                    ? temporalColumnMicros(scol, val).value_or(0)
+                                    : parseTimeToSeconds(val)),
                             0.0, Date{}, Numeric{});
                     } else if (scol.dataType == "money") {
                         int64_t minorUnits = 0;

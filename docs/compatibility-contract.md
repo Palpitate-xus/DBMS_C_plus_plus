@@ -43,6 +43,15 @@ wire protocol 不能自动提升行为兼容声明；增加 extended 命令也�
 身份，不代表磁盘格式与 PostgreSQL 兼容；含 `PG_VERSION` 的 PostgreSQL cluster
 会被拒绝，运行状态不会写入调用者的启动 CWD。
 
+## 本项目时间列的物理版本
+
+schema9/A/B/C中的Legacy秒列保持原物理单位；新SQL标量TIME/TIMESTAMP/
+TIMESTAMPTZ使用schema-D的TCM1逐列标签及int64微秒。timestamp基准为2000年，
+不能按槽宽或typmod猜单位，也不能用旧程序打开新格式后静默降级解释。
+具体写入、转换、索引及冷读的限定验证见[R136](issue-review-r136-temporal-microsecond-storage.md)；
+完整升级/降级、TIMETZ、数组precision与全部时间输入域仍不得推导为已验收。
+这不改变产品0.2.0、wire3.0、目标18.6或A/B门状态。
+
 ## 两级验收标准
 
 ### A. “PostgreSQL 客户端可连接”

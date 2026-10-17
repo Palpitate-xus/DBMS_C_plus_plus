@@ -2,6 +2,32 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R136 scalar temporal microsecond heap storage with explicit per-column units",
+      "gap_ids": [
+        "TYPE-06",
+        "PROTO-04",
+        "PROTO-05"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r136-temporal-microsecond-storage.md",
+        "docs/issue-full-registered-ecf632e9.md"
+      ],
+      "tests": [
+        "tests/temporal_storage_codec_test.cpp",
+        "tests/temporal_storage_layout_test.cpp",
+        "tests/temporal_column_precision_test.cpp",
+        "tests/temporal_heap_microseconds_protocol_e2e_test.py",
+        "tests/temporal_heap_microseconds_cli_e2e_test.py"
+      ],
+      "verification": {
+        "reproduction": "ActualPG18.6 final412all0; immutableR135 oldprogram same408controls281fail1. Initialreference412/3 false negatives were bytes diagnostic field decoder and preserved; strict final412/0 andold408/281 rerun withcountguard. FirstnewRoot59complete57actualpass2fail retained:782native1fail onlyobsoleteC-scalar-format expectation,408protocol2fail revealactual20-byteBtreePK/FKfractioncollisions. StrictnewscalarD/arrayC+codecinvariance782,16hex biasedint64keys,no value/SQLSTATE weakening.",
+        "focused_tests": "Final Root28native28Python3freshR136ABI-verified-TU/current57O2-newlinked/no-stubs actualMain=59ordereduniquecomplete0;independent0. Core916codec92layout782precision408protocol4realCLI0; clean2native4Python=6wholeentries0. BothRoot/clean normalfresh58O2/repeat0 thentwoownTM1normal/repeat0 all0,all58currentreceipts/dualcache57bytes/sourceframes0. Drequired-prefix fourfalseacceptancecontrols reproduced thenfixed; sameTypeLegacyTSTZ ALTER underNY retainsUTCinstant;16hex biasedint64keys exactfitsactualBtree20bytecap, noHeaderBtreewidthchange. PublicColumn/header changeforcesfresh58andfresh3MainTU;nooldR132reuse. PrivateTM/nativefixturefollowups didnotchangeMain,threefrontendfiles orfullheaderflags348;fourexactsourcehashes+originalprep/globalframe+objectbytes verified thennewcurrent57linksandthreeactualruns. Finalstagedwhitespacecheck removesonlyoneEOFblankLF fromnewCLIfixture; botholdRoot/cleanwhole-sourceframes reconstructexactbyaddingthatLF,allotherbytesunchanged,ASTequal. BothCLIfourcontrols rerun0;independentpostformat0. Productionbinary83c5c094/cache1b06d2c8/headerflags348unchanged;testedRootsourceframeD73c finalpostformatA0cd,neverrewrite59runtimeevidence.",
+        "full_suite": "No newfull1442/realTLS/whole-engine sanitizer proof. Accepted559MD902native537Python3Main1442 versusworking562MD905native540Python3Main1448 (six original pending entries). Accepted/working inventory distinction preserved;561workingPythonAST13Bash separate. Historicalecf1436 remains1433actualpass2fail1TLSskip withcanonical/independentfinal1;frozenoldinputs/logs unchanged. No closure of background/R51.",
+        "scope": "Finitebasiccivil1..9999,scalarbaseTIME/TIMESTAMP/TIMESTAMPTZ;physicalunitsPG2000epochint64micro,TIME24h,epoch0notNULL,infinities distinct. Legacy9/A/B/C/nativefactories unitsunchanged,newD strictTCM1 andrequiredextensionprefix. Legacy9/B/C synthetic parser/rawdecoder not genuineoldWALrecovery;realA/Dcoldreads+actualsixnewSQLlayoutcoldrestart. No globalBtreeformat/header-width change;genericcompositekeys>20bytes,TIMETZ,arrayprecision,allBC/largeyears/historicalsecondoffsets/functions/errors remain ordinaryopen. Original273items22complete166partial70unverified15deferred unchanged,56933-bytecandidatepatch+3draftsprotected,R98/R99/R109excluded,no push,Actionsdisabled."
+      }
+    },
+    {
       "issue": "R135 scalar TIMESTAMPTZ RETURNING does not render session timezone; separate fractional heap rejections remain open",
       "gap_ids": [
         "TYPE-06",

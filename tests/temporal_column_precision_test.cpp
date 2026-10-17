@@ -69,7 +69,10 @@ int main() {
             const Column* omitted=field.defaultIndex<schema.len?&schema.cols[field.defaultIndex]:nullptr;
             check(column && column->typeMod==field.precision,phase+" schema modifier "+field.name);
             check(column && omitted && column->dsize==omitted->dsize &&
-                column->isVariableLength==omitted->isVariableLength && column->isArray==field.array,
+                column->isVariableLength==omitted->isVariableLength && column->isArray==field.array &&
+                column->storageCodec==omitted->storageCodec &&
+                column->storageCodec==((field.array || std::string(field.family.name)=="timetz")
+                    ? Column::StorageCodec::Legacy : Column::StorageCodec::TemporalMicros),
                 phase+" no precision-based physical width "+field.name);
             check(attribute && attribute->atttypmod==field.precision,phase+" attribute modifier "+field.name);
             check(attribute && attribute->attlen==(field.array?-1:field.family.logical),phase+" logical width "+field.name);
@@ -112,9 +115,10 @@ int main() {
         std::ifstream input(g_engine.dbPath(database)/(table+".stc"),std::ios::binary);
         int32_t value=0;input.read(reinterpret_cast<char*>(&value),sizeof(value));return input?value:0;
     };
-    check(format("legacy_defaults")!=0 && format("legacy_defaults")!=0x4442000c,"omitted declarations retain previous schema format");
+    check(format("legacy_defaults")==0x4442000d,"new scalar codec requires D even without precision");
     for(const auto& table:tables)
-        check(format(table)==0x4442000c,"precision uses existing typed-modifier schema extension "+table);
+        check(format(table)==(table=="scalar_precisions"?0x4442000d:0x4442000c),
+              "scalar D and legacy-array C retain typed modifiers "+table);
     for(const auto& family:families)for(const bool array:{false,true})
         for(const auto invalid:{"-2","7","2147483647"}) {
             Column column;

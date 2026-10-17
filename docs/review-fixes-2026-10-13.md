@@ -1,5 +1,15 @@
 # 2026-10-13 审查问题修复进度
 
+后续[R136 标量微秒持久化](issue-review-r136-temporal-microsecond-storage.md)已有限修复：
+新SQL标量TIME/TIMESTAMP/TIMESTAMPTZ采用显式schema-D微秒codec，旧9/A/B/C与native
+工厂保持秒；同类型ALTER重写，索引/排序/NULL/epoch0/时区与实际冷重启纳入验证。
+PG412全过、冻结旧408/281失败；新916 codec、92布局（同夹具补齐前四处截断失败）、
+408协议与4真实CLI全过。两份fresh58 O2后各补两次私有TM/repeat0，干净6入口0；
+最终28native+28Python+3本轮新ABI后fresh、核对未变TU再链接当前57库的Main=59
+完整入口全0、独立核对0。未跑新1442全量，旧1436的两失败/1TLSskip保留；
+原273仍22/166/70/15，不扩大为TIMETZ/数组precision/全部civil范围或安全专项完成。
+不push，Actions禁用。
+
 后续[R135 RETURNING时区呈现](issue-review-r135-timestamptz-returning-timezone.md)已有限修复：
 PG最终134全过，冻结旧Root/干净旧版各134中73失败，当前134及原微秒266全过。
 只在每条语句的协议结果中按OID1184/日期/会话时区呈现，不改DmlResult或heap，
