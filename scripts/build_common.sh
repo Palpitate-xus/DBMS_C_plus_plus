@@ -215,6 +215,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/interval_binary_result_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/time_binary_result_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/time_input_normalization_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/temporal_column_precision_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/date_cycle_inverse_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/timestamp_binary_result_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/physical_attribute_length_protocol_e2e_test.py)

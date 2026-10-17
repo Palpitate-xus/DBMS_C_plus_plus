@@ -204,6 +204,7 @@ socket超时，精确SQL/栈和原期限保留，尚未确定根因，不称新�
 | R105 | 限定NAME→INET/CIDR源身份遗漏 | 本范围已修复，独立本地commit | PG/Root738、完整SDK及21native/16协议/3真实Main全过；自身真实全58/normal/repeat、核心与最终核对均0。精准NAME身份不放宽隐式赋值，旧738/34与SDK134保留，见[记录](issue-review-r105-network-name-input.md) |
 | R106 | COALESCE未选显式CAST的UNKNOWN输入分析遗漏 | 用户暂缓，未修复 | 2026-10-16“skip it”；原四条观察及未注册612控制（PG零失败/旧程序168失败）保留，无生产代码改动，不提交测试草稿为已验收修复；普通继续不重开，见[记录](issue-review-r106-coalesce-explicit-input-analysis.md) |
 | R107 | 四个字符串长度函数的真实签名与计量单位 | 本范围已修复，独立本地commit | PG/Root654、607原生与24native/18协议/3真实Main均0；四CPP实际2/1/1增量normal/repeat及核心/最终核对0。旧654/392、607/440与首两版失败保留，不扩为通用签名或原273完成，见[记录](issue-review-r107-string-length-signatures.md) |
+| R123 | 时间类型scalar/array列precision在schema/目录/结果中丢失 | 合法声明元数据独立修复 | 782原生及104协议，首版六个R124失败保留；不改变4/4/8/8物理宽度，有限终态见[记录](issue-review-r123-temporal-column-precision.md)，显式CAST/过高precision通知/旧行小数另项 |
 | R124 | 表投影NULL::timetz被误作列名，报42703 | 单项路由版本与验收见记录 | 实际PG96全过、旧24失败；只补既有TIMETZ后缀路由，原R123六个失败断言保留，见[记录](issue-review-r124-timetz-postfix-projection.md)，非完整TIMETZ存储/codec |
 | R121 | TIME默认基本clock输入透传非法/未舍入文本 | 类型输入及text Bind独立修复 | PG177/旧130失败、90native、最终43完整入口全0；原32全匹配/97仍21精度差异，见[记录](issue-review-r121-time-input-normalization.md)，完整语法、显式精度、cast eligibility/heap另项 |
 | R119 | 时间戳小数秒失败哨兵被编码成固定远古epoch | 发送器独立修复与验收 | checked整数微秒/时区与真实数组；PG232/旧144失败、235低层及共享41终态见[记录](issue-review-r119-timestamp-binary-result.md)，跨日依赖先由R120单独修复，旧失败不删 |

@@ -1,5 +1,9 @@
 # 生产化状态
 
+时间类型及数组列的合法precision保存和物理投影修复见[R123](issue-review-r123-temporal-column-precision.md)。
+声明0/3/6与省略(-1)分开，冷热schema/目录不从物理宽度猜precision；无关ALTER
+和NULL/空结果保留声明。CAST值舍入、语法边界/warning及旧秒heap仍普通开放。
+
 表查询中NULL::timetz被当作列名的路由遗漏见[R124](issue-review-r124-timetz-postfix-projection.md)。
 只补既有后缀CAST路由，复现、修改及有限验收按记录读取；不等于TIMETZ完整
 输入/存储/二进制codec或TIME显式precision完成，原273不提升。

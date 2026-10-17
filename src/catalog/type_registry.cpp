@@ -207,6 +207,10 @@ std::string TypeRegistry::resolveColumnType(Column& col,
         return "";
     }
 
+    const bool retainsModifier = canonical == "interval" || canonical == "numeric" ||
+        canonical == "decimal" || canonical == "time" || canonical == "timetz" ||
+        canonical == "timestamp" || canonical == "timestamptz";
+
     // 数组：先解析基类型，再标记为数组
     if (isArray) {
         TypeModResult base = applyTypeMods(canonical, typeMods);
@@ -215,7 +219,7 @@ std::string TypeRegistry::resolveColumnType(Column& col,
         col.dsize = base.dsize;
         col.isVariableLength = true;
         col.isArray = true;
-        col.typeMod = canonical == "interval" || canonical == "numeric" || canonical == "decimal" ? base.typmod : -1;
+        col.typeMod = retainsModifier ? base.typmod : -1;
         return "";
     }
 
@@ -226,7 +230,7 @@ std::string TypeRegistry::resolveColumnType(Column& col,
     col.dsize = r.dsize;
     col.isVariableLength = r.isVariableLength;
     col.isArray = false;
-    col.typeMod = canonical == "interval" || canonical == "numeric" || canonical == "decimal" ? r.typmod : -1;
+    col.typeMod = retainsModifier ? r.typmod : -1;
 
     // 同步 dataName（列名）不应由类型系统设置，但保留调用者已设置的值
     return "";
@@ -253,7 +257,11 @@ std::string TypeRegistry::validateColumn(Column& col) const {
         try {
             if (canonical == "interval") (void)interval_type_detail::unpack(col.typeMod);
             else if (canonical == "numeric" || canonical == "decimal") (void)numeric_type_detail::unpack(col.typeMod);
-            else return "unsupported persisted column modifier";
+            else if (canonical == "time" || canonical == "timetz" ||
+                     canonical == "timestamp" || canonical == "timestamptz") {
+                if (col.typeMod < 0 || col.typeMod > 6)
+                    return "invalid temporal column precision";
+            } else return "unsupported persisted column modifier";
         }
         catch (const DbError& error) { return error.message(); }
     }

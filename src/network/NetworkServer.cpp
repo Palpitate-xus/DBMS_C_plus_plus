@@ -1717,6 +1717,20 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
                      column.dsize != 8388608))
                     description.typeModifier = static_cast<int32_t>(column.dsize);
             }
+            std::string temporalBaseType = physicalTypeName;
+            if (column.isArray && temporalBaseType.size() >= 2 &&
+                temporalBaseType.compare(temporalBaseType.size() - 2, 2, "[]") == 0)
+                temporalBaseType.resize(temporalBaseType.size() - 2);
+            const bool temporalPrecisionMatchesPhysical = column.domainName.empty() &&
+                (temporalBaseType == "time" || temporalBaseType == "timetz" ||
+                 temporalBaseType == "timestamp" || temporalBaseType == "timestamptz") &&
+                (!hasStructuredType || ExprHelper::canonicalResultTypeName(result.columnTypes[columnIndex]) ==
+                    ExprHelper::canonicalResultTypeName(physicalTypeName));
+            // Only real column projections inherit declaration precision.
+            // Preserve the authoritative logical OID/length rather than
+            // leaking a TIME/TIMETZ storage width through the catalog path.
+            if (temporalPrecisionMatchesPhysical)
+                description.typeModifier = column.typeMod;
             description.tableOid = relationOid;
             description.attributeNumber = static_cast<uint16_t>(i + 1);
             for (const auto& attribute : catalogAttributes) {
@@ -1734,6 +1748,8 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
                             description.typeSize = attribute.attlen;
                         description.typeModifier = attribute.atttypmod;
                     }
+                    if (temporalPrecisionMatchesPhysical)
+                        description.typeModifier = column.typeMod;
                     break;
                 }
             }

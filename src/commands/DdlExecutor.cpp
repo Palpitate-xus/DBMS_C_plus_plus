@@ -161,7 +161,9 @@ bool declaredColumnTypeMod(const ColumnDef& definition, int32_t& modifier) {
     const bool numeric = type == "numeric" || type == "decimal";
     const bool fixedBit = type == "bit";
     const bool varyingBit = type == "varbit" || type == "bit varying";
-    if (!varying && !fixed && !numeric && !fixedBit && !varyingBit) return false;
+    const bool temporal = type == "time" || type == "timetz" ||
+        type == "timestamp" || type == "timestamptz" || type == "datetime";
+    if (!varying && !fixed && !numeric && !fixedBit && !varyingBit && !temporal) return false;
     if (definition.typeMods.empty()) {
         modifier = fixed ? 5 : fixedBit ? 1 : -1;
         return true;
@@ -172,7 +174,10 @@ bool declaredColumnTypeMod(const ColumnDef& definition, int32_t& modifier) {
     };
     int32_t first = 0;
     if (!integer(definition.typeMods.front(), first)) return false;
-    if (numeric) {
+    if (temporal) {
+        if (definition.typeMods.size() != 1 || first < 0 || first > 6) return false;
+        modifier = first;
+    } else if (numeric) {
         int32_t scale = 0;
         if (definition.typeMods.size() > 2 || first < 1 || first > 1000 ||
             (definition.typeMods.size() == 2 && !integer(definition.typeMods[1], scale)) ||
@@ -1022,7 +1027,10 @@ static PgAttributeRow catalogAttributeForColumn(
     attribute.attlen = column.isArray ? static_cast<int16_t>(-1) : declaredType->typlen;
     attribute.attndims = column.isArray ? 1 : 0;
     attribute.atttypmod = -1;
-    if (column.dataType == "interval" || column.dataType == "numeric") attribute.atttypmod = column.typeMod;
+    if (column.dataType == "interval" || column.dataType == "numeric" ||
+        column.dataType == "time" || column.dataType == "timetz" ||
+        column.dataType == "timestamp" || column.dataType == "timestamptz")
+        attribute.atttypmod = column.typeMod;
     std::string bitBaseType = column.dataType;
     if (bitBaseType.size() >= 2 && bitBaseType.compare(bitBaseType.size() - 2, 2, "[]") == 0)
         bitBaseType.resize(bitBaseType.size() - 2);
@@ -4737,6 +4745,13 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
         error = "unknown type '" + cd.typeName + "' (SQLSTATE 42704)";
         return false;
     }
+
+    // Temporal precision is declaration metadata, not a heap-slot width.
+    // Keep the omitted -1 distinct from an explicit maximum precision of 6.
+    if ((baseType == "time" || baseType == "timetz" || baseType == "timestamp" ||
+         baseType == "timestamptz") && typeMods.size() == 1 &&
+        typeMod1 >= 0 && typeMod1 <= 6)
+        col.typeMod = typeMod1;
 
     // Factory functions replace the whole Column; restore metadata they don't set.
     col.defaultValue = cd.defaultValue ? cd.defaultValue->toString() : "";

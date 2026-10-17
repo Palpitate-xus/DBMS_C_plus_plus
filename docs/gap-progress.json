@@ -2,6 +2,29 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R123 temporal column precision lost across registry schema catalog and physical projection",
+      "gap_ids": [
+        "TYPE-06",
+        "TYPE-16",
+        "PROTO-04",
+        "PROTO-05"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r123-temporal-column-precision.md"
+      ],
+      "tests": [
+        "tests/temporal_column_precision_test.cpp",
+        "tests/temporal_column_precision_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "reproduction": "ActualPG180006permanent104all0 versusimmutabledd282104with94failuresactual1; fulloldnative782218failuresactual1. Original776fixturecompile/rawarray/MAX_COLUMNSissuesretainedandcorrected, notproductred. R123C1native7820/wire1046failuresactual1 retained; independentR124NULL::timetzroutefixedandcommittedfirst.",
+        "focused_tests": "4ownCPP TypeRegistry,DdlExecutor,TableManage,Network: validtemporal0..6/-1schema/catalog/physicalprojection, noheapwidthchange. Normal4CPP/repeat0both0. Shared48entryfrozenfinal21native24wire3freshactualMainall0 inclnative782/wire104 andR12496. GenuineMaincompilation belongsR124sourcechange, samecombinedgateNOTinventednewMaincompileor48rerunafterR124commit. Source/test/script unchangedwithdoc-onlyacceptancesteps; dualcache58receipts57testbytes0. Extraoriginal122resampledcollection/comparison0:physicalTEMPcolumn4observationsallexactmatch,118noncolumnobservationsstilldiffer; notall122pass.",
+        "full_suite": "No newcomplete registered/TLS/wholeengine sanitizer proof. Combinedartifact e593e92a7ea662f97e8d47f5c277d7deb6e58a54c3d5ee2030c25630077b194b cache 26b6ac52029eec3ec463279d16ade9a78e57110697b7d326eeca4125e3246796 seal 2c34b2a40cd35c01f1c606d4a506268cb0ecbe44309936c9e7fb96fbaa014478; accepted895native526Python3Main1424 versusworking898+529+3=1430originalpending6runtimeentries. Working548MD550PythonAST13Bash static0; original273requirecomplete actual1notpass.",
+        "scope": "Validcolumnprecisionmetadataonly; omitted-1versusexplicit6and0retained, scalar/array/ordinaryTEMP/emptyNULL/ALTER/LIKE/coldformat. Physical4/4/8/8 andlogical8/12/8/8unchanged; existing0x4442000cmodifierextension, unmodifiedschemasoldformat. Lostolddeclarations/fractioncannotbeinferredormigratedautomatically. R122castvalue/exprtypmod, grammar/warning/binaryBind/fullstorage ordinaryopen. Original273unchanged22complete166partial70unverified15deferred, explicituserskipsnotreopened, nopush/Actionsdisabled."
+      }
+    },
+    {
       "issue": "R124 TIMETZ postfix casts misrouted as column names in table projections",
       "gap_ids": [
         "TYPE-06",

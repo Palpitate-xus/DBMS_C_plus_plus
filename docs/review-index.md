@@ -4,6 +4,7 @@
 
 | 审查 | 输入 | 内容 |
 | --- | --- | --- |
+| [R123 时间列precision持久化](issue-review-r123-temporal-column-precision.md) | 四类型及数组的schema/目录/物理投影 | 旧782原生218失败、PG104全过/旧94失败；首版六个42703由R124另项，冷热加载/格式与有限终态见记录，不等于CAST舍入或heap升级 |
 | [R124 TIMETZ后缀表投影](issue-review-r124-timetz-postfix-projection.md) | NULL转换被误判列名42703 | 实际PG96全过、旧24失败；仅补既有投影路由的TIMETZ，有限验收与独立版本见记录，不等于完整TIMETZ codec/grammar |
 | [R122 显式TIME精度复现与计划](issue-review-r122-time-explicit-precision.md) | 122个实际参考/当前观察 | 仅保存缺陷与修改方法，尚未实现；值/描述符、schema元数据、声明边界与warning分项，采集0不作通过或完成证明 |
 | [R121 TIME基本文本输入](issue-review-r121-time-input-normalization.md) | 非法值/超微秒透传、真实text Bind | PG177/旧130失败、90低层；43完整入口及原32对照全过，97仍21显式精度差异。基本clock修复不等于完整TIME grammar/cast/旧heap升级 |

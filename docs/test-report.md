@@ -1,5 +1,9 @@
 # DBMS 功能测试报告
 
+新增[R123 时间列precision](issue-review-r123-temporal-column-precision.md)782项原生/104项协议，
+实际PG104全过、旧218原生/94协议失败；首版原生全过、协议六个R124路由失败保留。
+最终匹配产物的有限回归见记录；不把metadata检查当微秒heap、CAST值舍入或新全量证明。
+
 新增[R124 TIMETZ后缀表投影](issue-review-r124-timetz-postfix-projection.md)96项协议控制，
 实际PG96全过、旧24失败，原schema回归暴露的六个42703断言保留。
 本项重编与匹配产物的有限终态见记录，不冒新完整注册、真实TLS或整库sanitizer证明。

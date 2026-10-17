@@ -15089,6 +15089,14 @@ constexpr uint32_t MAX_PERSISTED_DEFAULT_EXPRESSION = 1024 * 1024;
 // generation changes. Logical defaults are not inputs to that byte operation.
 static thread_local const StorageEngine* physicalSchemaReader = nullptr;
 
+static bool isValidTemporalColumnModifier(const Column& column) {
+    std::string type = column.dataType;
+    if (type.size() >= 2 && type.compare(type.size() - 2, 2, "[]") == 0)
+        type.resize(type.size() - 2);
+    return (type == "time" || type == "timetz" || type == "timestamp" ||
+            type == "timestamptz") && column.typeMod >= 0 && column.typeMod <= 6;
+}
+
 void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
     if (tbl.len > MAX_COLUMNS) {
         out.setstate(std::ios::failbit);
@@ -15134,7 +15142,7 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
             try {
                 if (tbl.cols[i].dataType == "interval") (void)interval_type_detail::unpack(tbl.cols[i].typeMod);
                 else if (tbl.cols[i].dataType == "numeric") (void)numeric_type_detail::unpack(tbl.cols[i].typeMod);
-                else { out.setstate(std::ios::failbit); return; }
+                else if (!isValidTemporalColumnModifier(tbl.cols[i])) { out.setstate(std::ios::failbit); return; }
             }
             catch (const DbError&) { out.setstate(std::ios::failbit); return; }
             hasColumnTypeMods = true;
@@ -15926,7 +15934,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
                 try {
                     if (tbl.cols[i].dataType == "interval") (void)interval_type_detail::unpack(tbl.cols[i].typeMod);
                     else if (tbl.cols[i].dataType == "numeric") (void)numeric_type_detail::unpack(tbl.cols[i].typeMod);
-                    else return {};
+                    else if (!isValidTemporalColumnModifier(tbl.cols[i])) return {};
                 }
                 catch (const DbError&) { return {}; }
             }

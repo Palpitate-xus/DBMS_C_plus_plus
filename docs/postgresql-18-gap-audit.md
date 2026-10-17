@@ -1,5 +1,9 @@
 # 2026-10-13 全仓库审查
 
+TIME/TIMETZ/TIMESTAMP/TIMESTAMPTZ及数组列的合法precision丢失见
+[R123](issue-review-r123-temporal-column-precision.md)，只修schema、目录和真实列投影元数据；
+CAST值/AST声明、precision语法/warning和旧秒heap仍普通待修，原273不提升。
+
 普通/TEMP表的NULL::timetz投影被误判列名见[R124](issue-review-r124-timetz-postfix-projection.md)。
 独立补齐既有转换路由，实际PG96/旧24失败及有限验收见记录；不等同完整TIMETZ
 输入/codec、TIME显式精度或原273完成，明确暂缓项不恢复。

@@ -181,6 +181,13 @@ text Bind也须在Bind阶段拒绝坏输入；短时钟、半偶舍入/进位和
 和验证范围见[R124](issue-review-r124-timetz-postfix-projection.md)，不表示非NULL TIMETZ
 binary发送、完整时区/转换资格或物理精度已经支持。
 
+TIME/TIMETZ/TIMESTAMP/TIMESTAMPTZ及数组列的合法precision会保存到schema、
+目录和真实列结果描述中，省略仍为-1、显式0与6分别保留；空结果和NULL不改变
+声明。新有modifier的schema使用既有0x4442000c扩展，无modifier仍用旧格式，
+物理槽宽不变。旧声明没有保存的precision无法从值推回；备份后按可信原DDL
+在副本验证重建/导入。边界见[R123](issue-review-r123-temporal-column-precision.md)，
+这不表示CAST值已按precision舍入或TIME旧整秒heap已升级。
+
 ### 其他类型
 | 类型 | 说明 |
 |------|------|
