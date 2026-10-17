@@ -1,5 +1,12 @@
 # 2026-10-13 全仓库审查
 
+2026-10-17[干净8f0465fc完整注册回归](issue-full-registered-8f0465fc.md)已结束，实际退出1：
+1431入口各一次、按预期顺序无漏跑/重复，1427实际通过、3失败、1 TLS环境skip。
+全58 fresh O2/重复0、三真实Main fresh编译执行及输入/产物终态核对完成；
+不把环境skip或运行完整当作通过。三项失败及修改方法已登记，普通数组投影
+夹具与pg_typeof声明问题分别处理/提交，DROP DATABASE路径按原R51暂缓。
+原273状态/勾选不提升，不push，Actions仍禁用；下方各轮保留其历史范围。
+
 TIME真实1083的微秒/24时binary Bind接收及错误状态见[R128](issue-review-r128-time-binary-parameter.md)。
 158及有限55完整入口全0；只修实际接收codec，不等于TIME[]/其他时态receiver或
 旧4字节整秒heap迁移。原273统计/勾选不提升，普通剩余不改为用户暂缓。

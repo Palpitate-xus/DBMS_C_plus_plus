@@ -1,5 +1,12 @@
 # 2026-10-13 审查与验证入口
 
+2026-10-17[干净8f0465fc完整注册回归](issue-full-registered-8f0465fc.md)已结束，实际退出1：
+1431入口各一次、按预期顺序无漏跑/重复，1427实际通过、3失败、1 TLS环境skip。
+全58 fresh O2/重复0、三真实Main fresh编译执行及输入/产物终态核对完成；
+不把环境skip或运行完整当作通过。三项失败及修改方法已登记，普通数组投影
+夹具与pg_typeof声明问题分别处理/提交，DROP DATABASE路径按原R51暂缓。
+原273状态/勾选不提升，不push，Actions仍禁用；下方各轮保留其历史范围。
+
 本轮按用户要求进行全仓库审查、复现和文档整理，结果与逐项修复方法见[审查报告](code-review-2026-10-13.md)，文件覆盖见[文档清单](documentation-inventory.md)。
 下方批次中的“当前”“正在运行”和 PASS 数均属于对应记录日期。此前 Root 60 native / 46 wire 验证已经终止：60/60、45/46 通过，唯一失败为 ALTER ARRAY 超时；不能继续标成运行中或全绿。
 原 273 项状态仍为 22 complete、166 partial、70 unverified、15 deferred_by_user；CTAS／后台 checkpoint 另按用户要求暂缓，详见[范围说明](deferred-scope.md)。

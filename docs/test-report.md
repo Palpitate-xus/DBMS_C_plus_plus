@@ -1,5 +1,12 @@
 # DBMS 功能测试报告
 
+2026-10-17[干净8f0465fc完整注册回归](issue-full-registered-8f0465fc.md)已结束，实际退出1：
+1431入口各一次、按预期顺序无漏跑/重复，1427实际通过、3失败、1 TLS环境skip。
+全58 fresh O2/重复0、三真实Main fresh编译执行及输入/产物终态核对完成；
+不把环境skip或运行完整当作通过。三项失败及修改方法已登记，普通数组投影
+夹具与pg_typeof声明问题分别处理/提交，DROP DATABASE路径按原R51暂缓。
+原273状态/勾选不提升，不push，Actions仍禁用；下方各轮保留其历史范围。
+
 新增[R128 TIME二进制参数](issue-review-r128-time-binary-parameter.md)158协议控制全过，实际PG158
 全过、旧完整132失败；初版旧fixture112项后缺RowDescription中断保留、强化失败
 收集后按同一158期望重跑。NetworkServer实际normal1/repeat0均0，最终24native+

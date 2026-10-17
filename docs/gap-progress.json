@@ -2,6 +2,25 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Clean accepted 8f0465fc full registered regression terminal (not a passing or feature-completion claim)",
+      "gap_ids": [],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-full-registered-8f0465fc.md"
+      ],
+      "tests": [
+        "scripts/build_tests.sh",
+        "tests/analyze_null_statistics_test.cpp",
+        "tests/array_inspection_projection_test.cpp",
+        "tests/pg_typeof_test.cpp"
+      ],
+      "verification": {
+        "full_suite": "Actual canonical1431 ordered unique complete:1427 actual passes,3 failures,1 OpenSSL-absent TLS environment skip;1428 PASSED exits minus actual skip. Native895/898 pass,3 fail; all3 freshly compiled realMain pass; Python529 actual pass plus1 skip. Canonical/summary/driver1, independent input/artifact audit successful but independent checker final1 preserves3 failures. Normal fresh58 O2/repeat0; no R124 TU reuse or Root pending candidate input. Clean HEAD/input/binary/dual-cache/all58 receipts/57 prehashed library bytes unchanged before/after.",
+        "failures": "F8F-01 analyze_null_statistics_test aborts on final dropDatabase status, all prior statistics assertions passed; user-deferred R51 path recorded only, exact historical cause not proven. F8F-02 array_inspection_projection_test uses TEXT row columns for serialized arrays and throws singular array_position42883, ordinary API/PG confirmation then fixture correction planned, not skipped plural R109. F8F-03 pg_typeof_test explicit native smallint hint returns wrong OID or effect-count at combined assertion, not yet separated; preserve zero analysis effects and once runtime.",
+        "scope": "Clean detached8f worktree excludes six original pending runtime drivers and unregistered draft; no source modifications during frozen whole run, no whole-engine sanitizer/real TLS/all PostgreSQL semantics proof. Full logfile fcb2f423c8c2c18542bbdbbf7b1da134b206326019e3f15507e9719c6339e241. Original273 items/checkboxes22complete166partial70unverified15deferred unchanged; ordinary failures stay open, skipped modules not reopened, no push, Actions disabled."
+      }
+    },
+    {
       "issue": "R128 scalar TIME binary Bind rejects legal microseconds and 24h and conflates receiver error states",
       "gap_ids": [
         "TYPE-06",
