@@ -81,6 +81,7 @@ R140六路径archive按只撤回本项及已接受R141/R143自身块后逐字节
 R137 TM/两测试及R98/R99/R109等候选继续保留，不混入提交。
 已接受566MD、902native+541Python+3Main=1446；
 工作区569MD、907native+546Python+3Main=1456还含十项未接受入口。
-完整GUC语法/值域/其它事务政策、R144应用名规范化、R145路径Sconst列表语义仍普通开放。
+完整GUC语法/值域/其它事务政策、R145路径Sconst列表语义仍普通开放；
+R144应用名规范化后续已按用户要求暂缓，未修改实现、未接受或宣称修复。
 无新1446全注册/TLS/整库sanitizer证明；旧1436两失败/1TLSskip不改写。
 原273及22complete/166partial/70unverified/15deferred不变。不push，Actions保持禁用。
