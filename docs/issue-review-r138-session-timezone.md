@@ -1,5 +1,10 @@
 # R138：显式SESSION的TimeZone设置误走普通配置路径
 
+后续[R139](issue-review-r139-timezone-default.md)修复合法DEFAULT、专用LOCAL值和
+RESET的默认名称/offset恢复；原224保持，当前真实session夹具另增控制至290。
+本页17/30/clean4等是原输入的历史证据，不替代R139本轮31/clean5；严格语法
+仍有实测R140问题，包括DEFAULT非法语法被放行，不能宣称整个时区/GUC完成。
+
 状态：本项有限修复和验证完成。最终Root30个不同完整入口、干净候选四入口及独立核对均实际0。
 本项独立于按用户要求暂缓的[R137](issue-review-r137-foreign-key-full-value.md)，
 不恢复其外键实现或验证。

@@ -50,6 +50,44 @@ int main() {
     assert(caller.timeZone == "UTC" && caller.timezoneOffsetMinutes == 0);
     run("SET SESSION TimeZone TO 'Invalid/No_Such_Zone'", "22023", true);
     assert(caller.timeZone == "UTC" && parent.timeZone == parentTimeZone);
+    const int64_t nowSeconds = static_cast<int64_t>(std::chrono::system_clock::to_time_t(
+        std::chrono::system_clock::now())) + Date(1970, 1, 1).convert() * 86400LL;
+    const auto newYorkOffset = dbms::ianaTimezoneOffsetMinutes("America/New_York", nowSeconds);
+    assert(newYorkOffset);
+    const std::vector<std::pair<std::string, int>> savedZones = {
+        {"UTC", 0}, {"Asia/Shanghai", 480}, {"Asia/Kathmandu", 345},
+        {"America/New_York", *newYorkOffset}, {"+05:30", -330}, {"-03:30", 210},
+        {"<+05:30>-05:30", 330}, {"<-03:30>+03:30", -210}, {"<+00>-00", 0},
+        {"<+05>-05", 300}, {"<-06>+06", -360}
+    };
+    const std::vector<std::string> resetZones = {
+        "SET TimeZone TO DEFAULT", "SET TimeZone = DEFAULT", "SET TIME ZONE DEFAULT",
+        "SET SESSION TimeZone TO DEFAULT", "SET SESSION TimeZone = DEFAULT",
+        "SET SESSION TIME ZONE DEFAULT", "SET TIME ZONE LOCAL", "SET SESSION TIME ZONE LOCAL",
+        "RESET TimeZone", "RESET TIME ZONE", "RESET ALL"
+    };
+    for (const auto& saved : savedZones) {
+        caller.defaultTimeZone = saved.first;
+        for (const auto& command : resetZones) {
+            run("SET TimeZone TO 'Pacific/Kiritimati'");
+            assert(caller.timezoneOffsetMinutes == 840);
+            run(command);
+            assert(caller.timeZone == saved.first && caller.timezoneOffsetMinutes == saved.second);
+            assert(caller.defaultTimeZone == saved.first && parent.timeZone == parentTimeZone);
+        }
+    }
+    for (const std::string invalid : {"Invalid/No_Such_Zone", "<+05>-06", "<+05>garbage", "", "DEFAULT"}) {
+        caller.defaultTimeZone = invalid;
+        for (const std::string command : {"RESET TimeZone", "RESET ALL", "SET TimeZone TO DEFAULT"}) {
+            run("SET TimeZone TO 'UTC'");
+            caller.applicationName = "keep-default-error";
+            run(command, "22023", true);
+            assert(caller.timeZone == "UTC" && caller.timezoneOffsetMinutes == 0);
+            assert(caller.applicationName == "keep-default-error" && parent.timeZone == parentTimeZone);
+        }
+    }
+    caller.defaultTimeZone = "UTC";
+    run("SET TimeZone TO 'UTC'");
     run("SELECT 1");
     // The native dispatcher reports this legacy error as bool + diagnostic;
     // lexical and prepared trigger failures below are real DbError throws.

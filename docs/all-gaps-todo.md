@@ -1,5 +1,9 @@
 # DBMS 全部 Gap TODO（历史记录）
 
+时区默认值和offset恢复见[R139](issue-review-r139-timezone-default.md)：
+280协议/290真实前端/最终31完整入口及clean5通过。R140语法边界仍未修复，
+包括新DEFAULT对两种非法输入的放行；不因局部通过改历史勾选或总账状态。
+
 显式SESSION的TimeZone设置见[R138](issue-review-r138-session-timezone.md)：
 224协议、最终30完整入口及clean4全过，首次wrapper路径错误终态1另保留。
 DEFAULT仍普通开放；R137仍按用户要求暂缓，不改历史勾选。

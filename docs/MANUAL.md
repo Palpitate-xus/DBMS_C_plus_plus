@@ -242,8 +242,13 @@ BC/完整大年份及所有日期函数输入不由此声明完成。上方各R1
 不会改变原时区。Simple/Extended及六时区验证见[R132](issue-review-r132-timezone-set-to.md)。
 显式`SET SESSION TimeZone TO 'Asia/Shanghai'`、等号及`SET SESSION TIME ZONE`
 复用相同时区处理，见[R138](issue-review-r138-session-timezone.md)的224协议与真实前端验证。
-这不代表SET LOCAL、DEFAULT、其它SESSION参数或所有GUC事务/严格语法已完成；
-TimeZone DEFAULT仍有已确认的拒绝合法命令问题，修复方法另见R138的后续记录。
+合法的TimeZone `TO DEFAULT`、`= DEFAULT`及`TIME ZONE DEFAULT`（含SESSION）
+恢复已保存默认值；专用`SET TIME ZONE LOCAL`也重置，而通用`SET TimeZone TO LOCAL`
+仍报22023。带引号的DEFAULT/LOCAL不是关键字。RESET TimeZone/TIME ZONE/ALL按
+已保存时区恢复名称和offset，见[R139](issue-review-r139-timezone-default.md)。
+严格语法仍有R140已知问题：紧贴参数名的等号写法被拒，缺分隔符或专用等号
+可能被错误接受，DEFAULT也存在两条非法语法放行，不能据上述功能宣称完整兼容。
+事务级SET LOCAL、其它SESSION参数、非UTC startup和完整GUC事务语义仍有限。
 
 ### 其他类型
 | 类型 | 说明 |

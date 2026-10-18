@@ -3263,6 +3263,112 @@ static bool handleRollbackToSavepoint(const string& sql, Session& s) {
 // ========================================================================
 // SET / RESET / ALTER SYSTEM command handlers
 // ========================================================================
+// SET and reset use the same validated value-to-offset conversion. No
+// caller may reset just the displayed name while retaining a stale offset.
+static bool applySessionTimeZoneValue(const string& tzVal, Session& s) {
+    const bool quoted = tzVal.size() >= 2 &&
+        (tzVal.front() == '\'' || tzVal.front() == '"') &&
+        tzVal.back() == tzVal.front();
+    const string zone = quoted ? tzVal.substr(1, tzVal.size() - 2) : tzVal;
+    char* numberEnd = nullptr;
+    const double numericHours = std::strtod(zone.c_str(), &numberEnd);
+    const bool numeric = !zone.empty() && numberEnd != zone.c_str() &&
+        *numberEnd == '\0' && std::isfinite(numericHours);
+    int offsetMinutes = 0;
+    string displayZone = zone;
+    if (numeric) {
+        if (std::abs(numericHours) > 15.99) {
+            cout << "ERROR: invalid value for parameter TimeZone (SQLSTATE 22023)" << endl;
+            return true;
+        }
+        offsetMinutes = static_cast<int>(std::lround(numericHours * 60));
+        const bool posixOffset = quoted &&
+            (zone.front() == '+' || zone.front() == '-');
+        if (posixOffset) {
+            offsetMinutes = -offsetMinutes;
+        } else {
+            const int absolute = std::abs(offsetMinutes);
+            char east[16], west[16];
+            snprintf(east, sizeof(east), "%c%02d", offsetMinutes >= 0 ? '+' : '-', absolute / 60);
+            snprintf(west, sizeof(west), "%c%02d", offsetMinutes >= 0 ? '-' : '+', absolute / 60);
+            displayZone = string("<") + east;
+            if (absolute % 60) {
+                char minutes[8];
+                snprintf(minutes, sizeof(minutes), ":%02d", absolute % 60);
+                displayZone += minutes;
+            }
+            displayZone += ">";
+            displayZone += west;
+            if (absolute % 60) {
+                char minutes[8];
+                snprintf(minutes, sizeof(minutes), ":%02d", absolute % 60);
+                displayZone += minutes;
+            }
+        }
+    } else {
+        const int64_t nowSeconds = static_cast<int64_t>(
+            std::chrono::system_clock::to_time_t(
+                std::chrono::system_clock::now())) +
+            Date(1970, 1, 1).convert() * 86400LL;
+        const auto resolvedZone = dbms::resolveIanaTimezoneName(zone);
+        const auto namedOffset = resolvedZone
+            ? dbms::ianaTimezoneOffsetMinutes(*resolvedZone, nowSeconds)
+            : std::optional<int>{};
+        if (namedOffset) {
+            offsetMinutes = *namedOffset;
+            displayZone = *resolvedZone;
+        } else {
+            // The legacy parser contains approximate mappings for a few
+            // non-existent names (for example Asia/Osaka). Only explicit
+            // fixed offsets and universal names may bypass IANA lookup.
+            const string lowerZone = toLower(zone);
+            const bool fixedZone = !zone.empty() &&
+                (zone.front() == '+' || zone.front() == '-' ||
+                 lowerZone == "utc" || lowerZone == "gmt");
+            const auto parsedOffset = fixedZone
+                ? parseTimezoneOffset(zone) : std::optional<int>{};
+            if (!parsedOffset) {
+                cout << "ERROR: invalid value for parameter TimeZone "
+                        "(SQLSTATE 22023)" << endl;
+                return true;
+            }
+            offsetMinutes = *parsedOffset;
+            if (quoted && !zone.empty() &&
+                (zone.front() == '+' || zone.front() == '-'))
+                offsetMinutes = -offsetMinutes;
+        }
+        if (toLower(zone) == "utc") displayZone = "UTC";
+        if (toLower(zone) == "gmt") displayZone = "GMT";
+    }
+    s.timezoneOffsetMinutes = offsetMinutes;
+    s.timeZone = displayZone;
+    return false;
+}
+
+static bool restoreSessionTimeZone(Session& s) {
+    string value = s.defaultTimeZone;
+    // Numeric SET emits this fixed POSIX display spelling. Decode its two
+    // opposite offsets when it is the saved default; do not guess from a
+    // stale current offset or replace the saved display name.
+    if (!value.empty() && value.front() == '<') {
+        const size_t close = value.find('>');
+        const string east = close == string::npos ? "" : value.substr(1, close - 1);
+        const string west = close == string::npos ? "" : value.substr(close + 1);
+        const auto eastOffset = !east.empty() && (east.front() == '+' || east.front() == '-')
+            ? parseTimezoneOffset(east) : std::optional<int>{};
+        const auto westOffset = !west.empty() && (west.front() == '+' || west.front() == '-')
+            ? parseTimezoneOffset(west) : std::optional<int>{};
+        if (!eastOffset || !westOffset || *eastOffset != -*westOffset) {
+            cout << "ERROR: invalid value for parameter TimeZone (SQLSTATE 22023)" << endl;
+            return true;
+        }
+        value = west;
+    }
+    if (applySessionTimeZoneValue("'" + value + "'", s)) return true;
+    s.timeZone = s.defaultTimeZone;
+    return false;
+}
+
 static bool handleResetCommand(const string& sql, Session& s) {
     // RESET ROLE
     if (sql == "reset role") {
@@ -3287,6 +3393,7 @@ static bool handleResetCommand(const string& sql, Session& s) {
     };
     string rest = (sql == "reset all") ? "all" : trim(sql.substr(6));
     if (rest == "all") {
+        if (restoreSessionTimeZone(s)) return true;
         string authUser = s.authenticatedUser.empty() ? s.username : s.authenticatedUser;
         int authPerm = s.authenticatedUser.empty() ? s.permission : s.authenticatedPermission;
         s.username = authUser;
@@ -3294,11 +3401,9 @@ static bool handleResetCommand(const string& sql, Session& s) {
         s.currentRole = s.originalRole;
         s.originalRole = authUser;
         s.currentRole.clear();
-        s.timezoneOffsetMinutes = 0;
         s.applicationName = s.defaultApplicationName;
         s.clientEncoding = s.defaultClientEncoding;
         s.searchPathTransaction.assign(s.searchPath,s.defaultSearchPath,false);
-        s.timeZone = s.defaultTimeZone;
         s.lcMonetary = s.defaultLcMonetary;
         s.statementTimeoutMs = s.defaultStatementTimeoutMs;
         s.lockTimeoutMs = g_config.lockTimeoutMs;
@@ -3311,8 +3416,7 @@ static bool handleResetCommand(const string& sql, Session& s) {
         return false;
     }
     if (rest == "timezone" || rest == "time zone") {
-        s.timezoneOffsetMinutes = 0;
-        s.timeZone = s.defaultTimeZone;
+        if (restoreSessionTimeZone(s)) return true;
         cout << "RESET " << rest << endl;
         return false;
     }
@@ -3587,83 +3691,12 @@ static bool handleSetCommand(const string& sql, Session& s) {
         if (off == 13 && tzVal.compare(0, 3, "to ") == 0)
             tzVal = trim(tzVal.substr(3));
         else if (!tzVal.empty() && tzVal[0] == '=') tzVal = trim(tzVal.substr(1));
-        const bool quoted = tzVal.size() >= 2 &&
-            (tzVal.front() == '\'' || tzVal.front() == '"') &&
-            tzVal.back() == tzVal.front();
-        const string zone = quoted ? tzVal.substr(1, tzVal.size() - 2) : tzVal;
-        char* numberEnd = nullptr;
-        const double numericHours = std::strtod(zone.c_str(), &numberEnd);
-        const bool numeric = !zone.empty() && numberEnd != zone.c_str() &&
-            *numberEnd == '\0' && std::isfinite(numericHours);
-        int offsetMinutes = 0;
-        string displayZone = zone;
-        if (numeric) {
-            if (std::abs(numericHours) > 15.99) {
-                cout << "ERROR: invalid value for parameter TimeZone (SQLSTATE 22023)" << endl;
-                return true;
-            }
-            offsetMinutes = static_cast<int>(std::lround(numericHours * 60));
-            const bool posixOffset = quoted &&
-                (zone.front() == '+' || zone.front() == '-');
-            if (posixOffset) {
-                offsetMinutes = -offsetMinutes;
-            } else {
-                const int absolute = std::abs(offsetMinutes);
-                char east[16], west[16];
-                snprintf(east, sizeof(east), "%c%02d", offsetMinutes >= 0 ? '+' : '-', absolute / 60);
-                snprintf(west, sizeof(west), "%c%02d", offsetMinutes >= 0 ? '-' : '+', absolute / 60);
-                displayZone = string("<") + east;
-                if (absolute % 60) {
-                    char minutes[8];
-                    snprintf(minutes, sizeof(minutes), ":%02d", absolute % 60);
-                    displayZone += minutes;
-                }
-                displayZone += ">";
-                displayZone += west;
-                if (absolute % 60) {
-                    char minutes[8];
-                    snprintf(minutes, sizeof(minutes), ":%02d", absolute % 60);
-                    displayZone += minutes;
-                }
-            }
-        } else {
-            const int64_t nowSeconds = static_cast<int64_t>(
-                std::chrono::system_clock::to_time_t(
-                    std::chrono::system_clock::now())) +
-                Date(1970, 1, 1).convert() * 86400LL;
-            const auto resolvedZone = dbms::resolveIanaTimezoneName(zone);
-            const auto namedOffset = resolvedZone
-                ? dbms::ianaTimezoneOffsetMinutes(*resolvedZone, nowSeconds)
-                : std::optional<int>{};
-            if (namedOffset) {
-                offsetMinutes = *namedOffset;
-                displayZone = *resolvedZone;
-            } else {
-                // The legacy parser contains approximate mappings for a few
-                // non-existent names (for example Asia/Osaka). Only explicit
-                // fixed offsets and universal names may bypass IANA lookup.
-                const string lowerZone = toLower(zone);
-                const bool fixedZone = !zone.empty() &&
-                    (zone.front() == '+' || zone.front() == '-' ||
-                     lowerZone == "utc" || lowerZone == "gmt");
-                const auto parsedOffset = fixedZone
-                    ? parseTimezoneOffset(zone) : std::optional<int>{};
-                if (!parsedOffset) {
-                    cout << "ERROR: invalid value for parameter TimeZone "
-                            "(SQLSTATE 22023)" << endl;
-                    return true;
-                }
-                offsetMinutes = *parsedOffset;
-                if (quoted && !zone.empty() &&
-                    (zone.front() == '+' || zone.front() == '-'))
-                    offsetMinutes = -offsetMinutes;
-            }
-            if (toLower(zone) == "utc") displayZone = "UTC";
-            if (toLower(zone) == "gmt") displayZone = "GMT";
-        }
-        s.timezoneOffsetMinutes = offsetMinutes;
-        s.timeZone = displayZone;
-        cout << "Timezone set to " << displayZone << endl;
+        // DEFAULT is a generic SET keyword; LOCAL has reset semantics only
+        // in the dedicated TIME ZONE grammar. Quoted spellings remain data.
+        const bool reset = tzVal == "default" || (off == 14 && tzVal == "local");
+        if (reset ? restoreSessionTimeZone(s) : applySessionTimeZoneValue(tzVal, s))
+            return true;
+        cout << "Timezone set to " << s.timeZone << endl;
         return false;
     }
 

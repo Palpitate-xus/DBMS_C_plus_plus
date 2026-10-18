@@ -1,5 +1,16 @@
 # 生产化状态
 
+[R139 TimeZone默认恢复](issue-review-r139-timezone-default.md)完成有限修复：
+DEFAULT和专用TIME ZONE LOCAL复用默认值解析，RESET恢复名称及真实offset，
+通用TO LOCAL与带引号关键字仍22023。PG280全过，旧Root/干净旧版各280/48失败；
+旧Main五观察确认非UTC默认被清成0，原生扩大到290次命令且原17控制保留。
+正常1Main/repeat0、三fresh真实Main TU/当前57库新链接/隔离执行、最终12native+
+16wire+3Main=31完整入口与clean5均0，独立核对0，原224协议全过。
+R140另有22条实际语法观察：合法紧贴等号仍被拒，缺分隔符/专用等号误接受；
+新增DEFAULT还放行两条非法语法，明确保留未修复，不冒完整语法/GUC完成。
+R137仍用户暂缓；无新1443全量/TLS/整库sanitizer证明，原273的22/166/70/15不变。
+不push，Actions禁用。
+
 [R138 SESSION TimeZone](issue-review-r138-session-timezone.md)已有限修复：
 显式SESSION仅在时区路由复用既有值解析，其余SET分派不改。PG224全过，
 冻结旧Root/干净旧版各224完整/56失败；原112断言保留并增加112个SESSION控制。

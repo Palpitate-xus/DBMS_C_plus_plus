@@ -2,6 +2,29 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R139 TimeZone DEFAULT/dedicated LOCAL and RESET restore saved name plus actual offset",
+      "gap_ids": [
+        "OPS-02",
+        "SQL-09"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r139-timezone-default.md",
+        "docs/issue-review-r138-session-timezone.md"
+      ],
+      "tests": [
+        "tests/timezone_default_protocol_e2e_test.py",
+        "tests/frontend/session_execution_lifetime.cpp"
+      ],
+      "verification": {
+        "reproduction": "ActualPG18.6/180006280all0; frozenb6Rootcb786 and acceptedclean23ee879 each280complete48fail1.48includesdependentSHOW/TSTZassertions,not48independentbugs. ActualMainO0TU+57currentO2libs/no-stubs/isolation native5observations0=collectiononly:UTC0correct,Shanghai/NY/+05:30/-03:30 resetnamesbutoffsetall0.",
+        "focused_tests": "PrivateMainsharesunchangedoldvalueparser; DEFAULTall6forms andLOCALonlydedicatedTIMEZONE restorevalidatedsaveddefault; genericTOLOCAL/quotedkeywords22023. RESETtimezone/TIMEZONE/ALL recomputeoffset; ownnumericSETcanonicalPOSIXdisplayvalidatesoppositeoffsets,preservesname; invaliddefaultvalidatedbeforeotherRESETALLfields. Noheaders/heap/ABI/auth/txnLOCALchange. Realfrontend11defaulttypes11commands+invalid5defaults3commands:290actualruns0,old17controlsretained. Original224wireunchangedandrerun0. Normal1MainO2/repeat0;all3realMainTUsfresh(explain/sessionO0,windowO2),current57productionO2newlinks/no-stubs/actualisolatedruns. Final12native16wire3Main31ordereduniquecomplete0. Acceptedb6+own4paths fresh1MainO2+57verifiedR136donorlibs realserver/no-stubs clean5complete0,notnormalfresh58build. Independent0 checksheaders/57CPP/all58donorreceipts/prehashed57bytes/current58receipts/dualcache/current57testbytes/Main4sourcehash/objectandbinaryhashes/frozenalltrackedcandidate.",
+        "next_open": "R140ordinaryopen:22PG/oldcb786/currentbabbobservations eachcollection0notpass. Compacttimezone='UTC' andSESSIONvariant validPG butbothRootXX000;missinggenericseparatoranddedicated= 'UTC' acceptedbothRootvsPG42601;dedicatedTO 'UTC'22023vs42601. NewDEFAULTadditionallyacceptsSET TimeZone DEFAULT/SET TIME ZONE = DEFAULT,oldRoot22023,PG42601. Explicitnewinvalid-inputacceptance,notonlyhistoricalbug. Nextfixmustenforceidentifierboundary/genericTO-or-equals/dedicatedno-separator/analysiserrorpriority/quote-preservation andverifyfailedcommandsleavestate. NoR140productionfixorclaimhere.",
+        "full_suite": "No newfull1443/TLS/whole-engine sanitizer proof. Rootbinarybabb333cae22090fdc0b12172062c4b5293546da11cf1794ab159f364b49838f cache5c8c60d59afe03deabcaa7d7413b49e37a18a268d2de148f6e0c4ee73fc72dcf seal66f05bc245758c2b7d0df0ce10ec8f20072e94179cbe3662dd4631428644d772 fullheaders348unchanged. Accepted562MD902native538Python3Main1443,working565MD906native542Python3Main1451(original6+R137two candidates);563AST13Bash separate. Historicalecf1436 actual1433pass2fail1TLSskip final1 retained.",
+        "scope": "Original273items/checkboxes22complete166partial70unverified15deferredunchanged. R137skippedTM/testbytesmatcharchive;scriptarchivecomparisonreversesonlyownR139registryentry;old56933-bytepatch/threeskippeddraftspreserved. Acceptedcleanand20path/hunkscopeexcludeR98/R99/R109/R137candidates. NonUTCwirestartupstilllimited;nativecustomsaveddefaultsarenotnewstartupimplementation. No push, Actionsdisabled."
+      }
+    },
+    {
       "issue": "R138 explicit SESSION TimeZone dispatch falls through to generic Config instead of session timezone",
       "gap_ids": [
         "OPS-02",
