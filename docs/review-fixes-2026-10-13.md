@@ -1,5 +1,16 @@
 # 2026-10-13 审查问题修复进度
 
+[R148日期算术结果类型](issue-review-r148-temporal-arithmetic-result-types.md)完成有限修复：
+共享的已声明运算签名统一DATE/时间戳与INTERVAL、差值及int4天数的结果类型，
+不再继承操作数OID或在NULL/零行时猜值。PG552全过，两旧版各259断言失败、
+旧147原生70失败均保留；最终147/552、Root48完整入口与独立clean14通过。
+共享头改变后双方均58 fresh生产O2/repeat0，三真实Main本轮fresh O0/O2/O0，
+新链接57当前O2库、不用stubs并隔离实际执行。相同对象SHA不改写fresh编译事实。
+仅本项类型修复独立提交；R147日历字段顺序候选和两夹具/注册不混入本项。
+已接受569MD、904native+543Python+3Main=1450；工作区572MD、910+549+3=1462，
+仍含原十个及R147两个未接受入口。无新1450全注册/TLS/整库sanitizer证明。
+R146/R137/R140及其它用户暂缓保持；原273的22/166/70/15不变，不push、Actions禁用。
+
 [R145搜索路径参数语义](issue-review-r145-search-path-value-identity.md)完成有限修复：
 SQL SET按raw AST的独立参数逐项list-quote，不再把Sconst当已格式化列表；
 保留逗号、大小写、单双引号、空名字与关键字语义。FROM CURRENT走真实

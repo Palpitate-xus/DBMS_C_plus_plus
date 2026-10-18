@@ -2300,7 +2300,7 @@ std::string ExprHelper::inferResultType(
         const bool rangePredicate = grammar && grammar->schema.empty() && grammar->args.size() == 3 &&
             (grammar->funcName == "BETWEEN" || grammar->funcName == "NOT BETWEEN");
         const std::string type = inferAstResultType(structural, typeHints);
-        const bool numericOperator = binary && arithmetic_detail::resultType(
+        const bool resolvedArithmetic = binary && arithmetic_detail::resultType(
             toLower(binary->op), inferAstResultType(binary->left.get(), typeHints),
             inferAstResultType(binary->right.get(), typeHints)).has_value();
         // A predicate inside an aggregate argument/FILTER (or a string value)
@@ -2309,7 +2309,7 @@ std::string ExprHelper::inferResultType(
         if (rangePredicate || !builtinReductionName(dynamic_cast<const FunctionCallExpr*>(structural)).empty() ||
             dynamic_cast<const UnaryOpExpr*>(structural) || dynamic_cast<const ArrayExpr*>(structural) ||
             (binary && (type == "boolean" || binary->op == "::" ||
-                        binary->op == "||" || numericOperator))) {
+                        binary->op == "||" || resolvedArithmetic))) {
             return type.empty() || type == "unknown" ? "text" : type;
         }
     }

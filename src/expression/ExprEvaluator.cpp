@@ -2351,12 +2351,12 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
     const int rightFloatingWidth = floatingWidth(r.typeName);
     const bool floatingOperands = (leftFloatingWidth || rightFloatingWidth) &&
         numericFloatingOperand(l.typeName) && numericFloatingOperand(r.typeName);
-    const auto numericResultType = arithmetic_detail::resultType(op, l.typeName, r.typeName, true);
-    const bool singlePrecision = numericResultType && *numericResultType == "real";
+    const auto arithmeticResultType = arithmetic_detail::resultType(op, l.typeName, r.typeName, true);
+    const bool singlePrecision = arithmeticResultType && *arithmeticResultType == "real";
     if ((leftFloatingWidth || rightFloatingWidth) && op == "%")
         throw DbError("42883", "operator does not exist for floating operands");
     if (l.isNull || r.isNull) {
-        if (numericResultType) return ExprValue(*numericResultType, "", true);
+        if (arithmeticResultType) return ExprValue(*arithmeticResultType, "", true);
         return ExprValue(l.typeName, "", true);
     }
 

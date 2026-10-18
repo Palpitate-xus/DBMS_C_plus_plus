@@ -2,6 +2,28 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R148 declared temporal arithmetic result-type ownership across NULL, binding and binary output",
+      "gap_ids": [
+        "TYPE-06",
+        "P0-16"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r148-temporal-arithmetic-result-types.md"
+      ],
+      "tests": [
+        "tests/temporal_arithmetic_result_type_test.cpp",
+        "tests/temporal_arithmetic_result_type_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "reproduction": "ActualPG18.6/180006552complete0. FrozenRootc1 and acceptedef39 eachsame552complete259assertionfail1; native147complete70fail1. Month/day fieldsallzero innewTypefixture, so red/greenindependent ofpendingR147calendarvaluechange. ExactfixtureSHA662cf/f39ddbefore/after;noassertionsremoved.",
+        "focused_tests": "19declaredsignatures; shared/text/ASTmetadata+NULLleft/right/both+nonnullnative,4aliases5noguesses5oldnumeric147. Wire552Simple/Extendedtext/binaryRESULT,typedOIDtextBind,zeroRows,NULLs,Statement/Portalmetadata-only,preciseOIDsizeModformatrawDatum/tag/Ready. Root22native23wire3Main48whole0;accepted-onlyclean6native8wire14whole0;new147/552all0. No newbinaryparameterreceiver.",
+        "build": "Sharedarithmetic_type.h changes=>Root and accepted-onlyclean genuinefreshALL58normalproductionO2/repeat0/currentreceipts. All3realMainTUsfreshAFTERnewheader(O0explain/O2window/O0session320),newlinks57CURRENTfreshO2/no teststubs/actualpre-globalisolation. ReusedonlyimmutableinputSOURCEbytes(notR145/R147objects);freshprocessesmayproduceidenticalSHAs. Rootsource625/headercompile04116;cleanalltrackedfc31/source5136foreverfrozen.",
+        "scope": "ExistingresultTypeexplicitfinitecalendar/interval/int4date/differences resolvesbeforeUNKNOWNnumericfallback;privateCPPonlyrenamevariablesfromnumerictoarith. No value sampling, newpubliclayout orheapformat. Cleanbase0f1949+ONLYown4partial2full;R147calendar7lines/twofixtures/registryEXCLUDED and remainsindependentpendingcandidate. Original2175source exactafterundoR148;reconstructR147d467thenpriorR145055chain;allR98/R99/R109/R137/R140bytesretainedandnotaccepted. Docsworkingoriginalpatch28pathsreconstructed. Original273items/checkboxes22complete166partial70unverified15deferredunchanged.",
+        "full_suite": "Accepted569MD904native543Python3Main1450;working572MD910native549Python3Main1462includesoriginal10pendingandR1472.571PythonAST13Bashseparate.No newfull1450/TLS/whole-enginesanitizer,historicalecf1436final1(1433pass2fail1TLSskip)retained. TIME/TIMETZoperators,unknownoverloads,fullcastgraph,civildomain/BC/infinity/DST andentireTYPE06notcompleted.No push,Actionsdisabled."
+      }
+    },
+    {
       "issue": "R145 SQL SET search_path argument identity and FROM CURRENT transaction assignment",
       "gap_ids": [
         "OPS-02"

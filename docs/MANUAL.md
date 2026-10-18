@@ -1,5 +1,11 @@
 # DBMS 使用手册
 
+日期算术的结果类型按完整已声明的运算决定：DATE加/减INTERVAL为TIMESTAMP，
+INTERVAL加DATE或时间戳同样返回对应时间戳；DATE差值为integer，时间戳差值为interval。
+SQL NULL和零行结果不改变这些类型，明确类型的text Bind及text/binary结果沿用同一声明。
+有限范围及未完成边界见[R148](issue-review-r148-temporal-arithmetic-result-types.md)；
+这不等于完整时间类型运算、UNKNOWN重载或所有时区行为已实现。
+
 `SET search_path TO 'a,b'`设置名称为`a,b`的一个schema；
 `SET search_path TO a,b`才是两个schema。Sconst内的大小写和引号属于名字数据，
 例如`'Upper'`不折成`upper`，空串设置的GUC显示为`""`。

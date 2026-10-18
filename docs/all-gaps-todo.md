@@ -1,5 +1,9 @@
 # DBMS 全部 Gap TODO（历史记录）
 
+[R148](issue-review-r148-temporal-arithmetic-result-types.md)有限修复日期算术结果类型。
+147/552、Root48和独立clean14通过，原259/70失败保留；共享头后全58和三Main均fresh。
+R147仍独立待验收，不把其候选混入本项；R146及其它暂缓不重开，原273状态不变。
+
 [R145](issue-review-r145-search-path-value-identity.md)有限修复SET路径参数身份及FROM CURRENT事务赋值。
 3573专项、18完整入口/clean10和独立复核通过，原始失败记录不改写；
 R144与其它用户暂缓未关闭，原273保持22/166/70/15，仍未全部完成。

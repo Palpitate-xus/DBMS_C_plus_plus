@@ -54,6 +54,35 @@ inline std::optional<std::string> resultType(
         return std::nullopt;
     left = numericTypeName(std::move(left));
     right = numericTypeName(std::move(right));
+    const auto temporalName = [](std::string type) {
+        if (type == "timestamp without time zone" || type == "datetime")
+            return std::string("timestamp");
+        if (type == "timestamp with time zone") return std::string("timestamptz");
+        return type;
+    };
+    left = temporalName(std::move(left));
+    right = temporalName(std::move(right));
+    const auto timestamp = [](const std::string& type) {
+        return type == "timestamp" || type == "timestamptz";
+    };
+    // Resolve supported declared temporal signatures before UNKNOWN numeric
+    // inference. Neither operand values nor a peer's sampled value own this
+    // result type; DATE +/- INTERVAL promotes even for NULL and zero rows.
+    if (operation == "+" || operation == "-") {
+        if (right == "interval" && (left == "date" || timestamp(left)))
+            return left == "date" ? "timestamp" : left;
+        if (operation == "+" && left == "interval" &&
+            (right == "date" || timestamp(right)))
+            return right == "date" ? "timestamp" : right;
+        if (operation == "-" && left == "date" && right == "date")
+            return "integer";
+        if (operation == "-" && timestamp(left) && timestamp(right))
+            return "interval";
+        if ((left == "date" && right == "integer") ||
+            (operation == "+" && left == "integer" && right == "date"))
+            return "date";
+        if (left == "interval" && right == "interval") return "interval";
+    }
     const auto unknown = [&](const std::string& type) {
         return type.empty() || type == "unknown" ||
             (evaluatorUnknownStringMarker && type == "character varying");
