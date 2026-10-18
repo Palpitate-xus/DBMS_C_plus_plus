@@ -1,5 +1,18 @@
 # DBMS 使用手册
 
+[R155 枚举辅助名称归属](issue-review-r155-enum-namespace-owner.md)完成有限修复：
+DROP SCHEMA 按真实目录 OID 关联识别解码后的标量枚举名，不再重解析/折叠大小写；
+public 带点名称保留实际 owner，竞争身份先报 XX001，旧 native fallback 不变。
+PG87全过，旧两端各87/25失败、旧native142/42失败；最终两端142/87全0，
+Root24完整入口、独立clean10及归属复核通过。仅私有DDL正常1CPP O2/repeat0；
+六Main源/全头flags/对象核对后复用R148三Main对象，新链接57当前O2库并隔离执行，
+不冒fresh TU。clean fresh1DDL+56已核对R148对象+当前R149 evaluator，无server stubs。
+[R152 REGTYPE显示](issue-review-r152-regtype-identifier-output.md)另记开放：
+PG1675全过，旧两端各69失败、native5197/1718失败，夹具/注册未接受，尚无生产修复。
+R151按用户要求暂缓、不恢复；R150仍开放。已接受575MD、907+546+3=1456，
+工作区578MD、914+553+3=1470仍含14未接受入口；无新1456全量/TLS/整库sanitizer。
+原273仍22/166/70/15，总清单未完成，不push、Actions禁用。
+
 [R150阈值重载](issue-review-r150-threshold-width-bucket.md)仍开放；实际PG/Root各完成61条
 广泛类型观察，保留非数字类型与XML参考构建能力差异，不冒充61项通过。
 [R151枚举数组目录](issue-review-r151-enum-array-catalog.md)按用户“skip it”暂缓：

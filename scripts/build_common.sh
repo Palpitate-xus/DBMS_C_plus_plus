@@ -65,6 +65,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/order_by_duplicate_alias_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/window_aggregate_arguments_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/schema_namespace_atomicity_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/enum_namespace_owner_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/bit_integer_cast_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/bit_integer_cast_descriptor_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/bit_type_modifier_protocol_e2e_test.py)

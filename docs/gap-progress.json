@@ -2,6 +2,31 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R155 DROP SCHEMA catalog-owned decoded enum namespace; R152 display remains open",
+      "gap_ids": [
+        "CAT-04",
+        "TYPE-08",
+        "P0-16"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r155-enum-namespace-owner.md",
+        "docs/issue-review-r152-regtype-identifier-output.md"
+      ],
+      "tests": [
+        "tests/enum_namespace_owner_test.cpp",
+        "tests/enum_namespace_owner_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "reproduction": "ActualPG18.6/180006 final87all0; frozenRoot/R149accepted-only each87complete25fail1. Nativefinal142old42fail1; earlier136old40fail andintermediateexplicitDbErrorincludecompile1 retained. Wireoldv1erroneouslydemandedRowDescriptionaftererrorstopped1; v2keepsall87SQL/expectedandrecordsabsentdescriptionfalse, actualPG0/oldboth25fail1.",
+        "focused_tests": "Rootandaccepted-onlyclean each142native87wire0. NativeactualDDL/catalog/sidecar namespacescase/quotes/dot/space/UTF8/literalbrackets/PUBLICdottedname, trueRESTRICT/CASCADE,coldmetadata,unregisterednativefallback; deliberatecompetingcatalogidentityXX001beforemutation andremovalseedonly. Protocol87actualSimpleDDL/savepointrollback/recreate/errors/OIDlenmod/Ready. FinalRoot12native9wire3Main24whole0; clean6native4wire10whole0; independentproof0.",
+        "build": "PrivateDDL only:Rootnormal1DdlO2/repeat0,currentall58receipts/dualcache57testbytes. UnchangedMain/sharedheaders;exact6source inputs/allheadersflags041/objectSHAs verifyR148threeMainobjects beforeREUSE,newlinks57CURRENT O2/no stubs/actualpre-globalisolated execution,NOTfreshTUthisround. Cleanbase46a4+ONLYown2partial2full,fresh1DDL O2+56verifiedR148fresh58productionobjects+currentR149Evaluator=e65;allheaders/flags/unchangedCPP/orig58receipts/prepostobjectbytesverified,realservernostubs/no fakecache. Allold/newclean/donorALLtrackedforeverimmutable.",
+        "scope": "Catalogcopy correlates decodedenumsidecar keyswith actualpg_type/pg_namespace OID owner; no SQLreparse/casefold/prefixguessforregistered-enums. Publicdotnamepreserved,ambiguousidentityXX001failclosed;ordinarylegacyunregisteredfallbackandnon-enumformatsunchanged. No Main/header/cataloggenerator/array/schema/heap/auth edits. InverseONLYown2partialsource recoversall2183priorSource3dc; original29pendingtrackedpaths exactafterundoONLYownsource/docs; priorR151andR152candidates remainunaccepted. Original273items/checkboxes22complete166partial70unverified15deferredunchanged.",
+        "orthogonal_open": "R151user-deferredby46a4,doNOTresume/accept. R152NOproductionfixapplied; pendingregistry/twofixturesNOTaccepted. ActualPG16750; oldRoot/R149each167569fail1 incl3namespacecleanupfail; nativefinal51971718fail1. Initialtwonativecompile1 andthird51971719withwrongexception-typecontrolretained; adaptlegacycallbackSQLSTATEonly,wirechecksactual22004. PostR155R152full1675NOT rerun,doNOTinfer69minus3asactualevidence. Full494keywords/22specials/threewiremodes/scalarenumvisibility controls preserved.",
+        "full_suite": "Accepted575MD907native546Python3Main1456; working578MD914native553Python3Main1470 still14unacceptedentries(original10+R1512+R1522). PythonAST575/Bash13separate. No newfull1456/TLS/wholeenginesanitizer; historicalecf1436 actual1433pass2fail1TLSskipfinal1retained. Original27322/166/70/15 unchanged,totalNOTcomplete. NoPush/Actionsdisabled."
+      }
+    },
+    {
       "issue": "R150 threshold width_bucket open; R151 enum array catalog user deferred",
       "gap_ids": [
         "TYPE-08",

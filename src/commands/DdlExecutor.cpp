@@ -4093,7 +4093,29 @@ SchemaNamespaceResult dropSchemaNamespace(StorageEngine& engine,
                       TableFunction, Procedure, Collation };
     struct Auxiliary { Kind kind; std::string name; std::string schema; };
     std::vector<Auxiliary> auxiliary;
-    const auto belongs = [&](const std::string& spelling) {
+    // Enum sidecars store decoded names (schema + "." + name), not SQL.
+    // Quotes, dots and case in either component must retain their actual
+    // catalog namespace; reparsing these bytes can reject or steal an owner.
+    const auto enumMetadata = engine.catalogService().metadataSnapshot(database);
+    std::map<std::string, std::string> enumNamespaces;
+    for (const auto& type : enumMetadata.types) {
+        if (type.typtype != 'e') continue;
+        const auto space = std::find_if(enumMetadata.namespaces.begin(), enumMetadata.namespaces.end(),
+            [&](const auto& row) { return row.oid == type.typnamespace; });
+        if (space == enumMetadata.namespaces.end())
+            throw DbError("XX001", "enum has no namespace metadata");
+        const auto physical = space->nspname == "public"
+            ? type.typname : space->nspname + "." + type.typname;
+        if (!enumNamespaces.emplace(physical, space->nspname).second)
+            throw DbError("XX001", "ambiguous enum auxiliary namespace identity");
+    }
+    const auto belongs = [&](const std::string& spelling, bool enumName = false) {
+        if (enumName) {
+            const auto actual = enumNamespaces.find(spelling);
+            if (actual != enumNamespaces.end()) return actual->second == name;
+        }
+        // Preserve legacy unregistered auxiliary objects and the existing
+        // SQL-spelling contract for the other sidecar formats.
         CatalogManager::QualifiedName identity;
         if (!CatalogManager::parseQualifiedName(spelling, identity, true) ||
             identity.name.empty()) throw DbError("XX001", "invalid auxiliary namespace identity");
@@ -4101,7 +4123,7 @@ SchemaNamespaceResult dropSchemaNamespace(StorageEngine& engine,
     };
     const auto add = [&](const std::vector<std::string>& names, Kind kind) {
         for (const auto& spelling : names)
-            if (belongs(spelling)) auxiliary.push_back({kind, spelling, {}});
+            if (belongs(spelling, kind == Kind::Enum)) auxiliary.push_back({kind, spelling, {}});
     };
     std::vector<std::string> shells;
     DBStatus status = loadShellTypes(database, shells);
