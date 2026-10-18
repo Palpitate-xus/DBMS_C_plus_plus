@@ -78,7 +78,8 @@ fresh Main O2链接57个逐一核对全部头、flags、CPP、原58编译receipt
 初稿clean生产donor，无test stubs；不是v2 normal fresh58。两clean全部tracked及
 src/tests/scripts保持冻结。
 
-最终Root binary：
+R145功能提交61d9053b产物：
+Root binary：
 519efdaa56d3ed766c8d0a4a2d002d77a92f7f8eece2353c3b7c8cfc5ed8e143；
 cache：
 bceb334e861ea293fa8b75b841c4e7fb0dad186871294861f9bc3b082cd31d07；
@@ -103,3 +104,13 @@ normal/repeat/freshMain、final-gates、独立及提交后日志。
 完整GUC、startup raw格式、全部数字/Unicode标识符/截断、quote_all_identifiers、
 其它参数事务语义不据此完成。R144及其它用户暂缓保持未修复。
 原273及22complete/166partial/70unverified/15deferred不变。不push，Actions禁用。
+
+## 后续测试格式清理
+
+功能修复已独立提交61d9053b，提交后scope与独立复核均实际0。
+随后仅删除新native夹具末尾一个多余空行，fresh重编、隔离重复执行完整254检查通过。
+其余17入口及clean10不冒称重新执行，生产Main/头/三Main测试输入和全部58对象字节均未变，
+binary519efdaa/cachebceb仍有效，当前receipt与57测试库字节重新核对通过。
+R145上方bffe源封印保留为61d9053b的历史验收帧；格式清理后源封印为
+05528caf5812863090cf33f66ea5dd9d644d7e6f1a407bb0852349f78998411b。
+冻结clean候选、原3573夹具、原失败及验收日志不改写。最终暂存空白检查通过。
