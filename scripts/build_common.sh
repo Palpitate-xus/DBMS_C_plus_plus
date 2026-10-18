@@ -149,6 +149,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/regtype_cast_graph_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/regtype_array_graph_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/regtype_identity_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/regtype_identifier_output_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/declared_modifier_owner_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/named_array_modifier_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/unconstrained_named_array_input_protocol_e2e_test.py)

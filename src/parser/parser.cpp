@@ -5858,7 +5858,7 @@ ParseResult SQLParser::parseRelease(const std::string& sql) {
 
 // PostgreSQL 18.6 kwlist.h categories: quote non-unreserved keywords;
 // generic SET accepts nonreserved words plus the boolean TRUE/FALSE/ON.
-static int searchPathKeywordKind(const std::string& word) {
+static int identifierKeywordKind(const std::string& word) {
     static const std::unordered_map<std::string, int> keywords = {
         {"all", 2}, {"analyse", 2}, {"analyze", 2}, {"and", 2},
         {"any", 2}, {"array", 2}, {"as", 2}, {"asc", 2},
@@ -5906,13 +5906,13 @@ static int searchPathKeywordKind(const std::string& word) {
     return found == keywords.end() ? 0 : found->second;
 }
 
-static std::string quoteSearchPathArgument(const std::string& value) {
+std::string SQLParser::quoteIdentifier(const std::string& value) {
     bool safe = !value.empty() &&
         ((value.front() >= 'a' && value.front() <= 'z') || value.front() == '_');
     for (const unsigned char ch : value)
         if (!((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '_'))
             safe = false;
-    if (safe && searchPathKeywordKind(value) == 0) return value;
+    if (safe && identifierKeywordKind(value) == 0) return value;
     std::string quoted = "\"";
     for (const char ch : value) {
         if (ch == '"') quoted += '"';
@@ -6011,14 +6011,14 @@ ParseResult SQLParser::parseSet(const std::string& sql) {
                     literal += next.substr(1);
                     ++at;
                 }
-                argument = quoteSearchPathArgument(stripQuotes(literal));
+                argument = quoteIdentifier(stripQuotes(literal));
             } else if (identifier(values[at])) {
                 const bool quoted = values[at].front() == '"';
                 const std::string word = toLower(values[at]);
-                if (!quoted && searchPathKeywordKind(word) == 2 &&
+                if (!quoted && identifierKeywordKind(word) == 2 &&
                     word != "true" && word != "false" && word != "on")
                     return syntax("reserved keyword is not a search_path value");
-                argument = quoteSearchPathArgument(parseRoutineIdentifier(values[at++]));
+                argument = quoteIdentifier(parseRoutineIdentifier(values[at++]));
             } else {
                 std::string sign;
                 if (values[at] == "+" || values[at] == "-") sign = values[at++];

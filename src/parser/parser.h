@@ -52,6 +52,9 @@ public:
     // Complete SQL type envelope, retaining quoted/qualified type identities.
     static ColumnDef parseTypeSpecification(const std::string& sql);
     static bool isKeyword(const std::string& s);
+    // PG identifier output: ASCII lexical safety, keyword category and doubled quotes.
+    // This renders one identifier; it does not parse a qualified name or SQL literal.
+    static std::string quoteIdentifier(const std::string& value);
 
 private:
     static std::vector<std::string> tokenizeImpl(const std::string& sql, std::string* error);

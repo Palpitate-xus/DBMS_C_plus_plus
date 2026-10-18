@@ -2,6 +2,34 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R152 canonical user REGTYPE identifier display; R156 physical identity and R157 ordinary SET AST remain open",
+      "gap_ids": [
+        "TYPE-08",
+        "CAT-04",
+        "FUNC-01",
+        "P0-16"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r152-regtype-identifier-output.md",
+        "docs/issue-review-r156-regtype-physical-constants.md",
+        "docs/issue-review-r157-dotted-set-target.md"
+      ],
+      "tests": [
+        "tests/regtype_identifier_output_test.cpp",
+        "tests/regtype_identifier_output_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "reproduction": "FreshactualPG18.6/180006 full1675wire0; postR155oldRootandaccepted-onlyeach1675complete66fail1. Checkedoldnative5197complete1718fail1. Historical69incl3R155cleanupfailkept,notderivedby69minus3. Initialtwofixturecompile1 and5197/1719legacyexceptionexpectationerrorretained; final5197/1718 preservesallcontrols,wirechecksactual22004.",
+        "focused_tests": "BothRootandnewaccepted-onlyclean5197native1675wireall0 withUNCHANGEDfixturebytes4bc87/f75e4. Complete494keywordfacts22specials5schemanativevisibility/physicalroundtrips,actualscalarDDL/threewiremodes/rawTEXT25/len/mod/format/rows/tag/Ready. Nativearrayonlylegitimatecopiedmetadata,NO R151autoarrayfactory orarrayDDL. Root24native18wire3Main45all0. Clean15native12wire3Main30EXACT29pass1nativeSearchPathGrammar134;fullwholegate1NOTgreen,strictall75checker1retained. Everyentryexecuted;noassertiondeletedorretriedaway.",
+        "preexisting_failure": "R157 frozenacceptedR155sameUNCHANGEDsearch_path_values_grammar_test matchedoldheaders/flags/57productionlibraries sameassertline86actual134;no254footer. RootoldpendingR140fulltargetloopmasksordinaryASTbug;notintroducedbyR152. Separatecontext/sourceaudit0validatesEXACT74pass1preexistingfailureandinputownership,DOESNOTturncontextgate1intopass. R157ordinaryfullvar_nameASTneedsownfix;R140TimeZoneVALUEgrammarremainsuserdeferred.",
+        "build": "SharedParserHeaderchanged:RootandnewcleanBOTHgenuine58freshnormalproductionO2/repeat0/all58currentreceipts,NO donorcopies/fakecachestamps. AllSIXrealMainTUsfreshafternewheaders,accepted0209fixturebodiesandabsoluteMainincludeonly,session320notR140341. O0explain/sessionO2windowTESTONLY;allproductionO2. New57CURRENTfreshO2linksandall6isolatedactualMainruntimes0. EqualobjectSHAdoesnotmeanreuse;freshprocess/newemptydirectory/receiptretained. ServernoTESTstubs;existingproductionTLSfallbacknotnewTLSproof. Allnew/oldclean/donorALLtrackedforeverimmutable.",
+        "scope": "Onlyown5partialsrc/registry plus2fullfixturesandrelateddocs. UnifiedexistingquoteIdentifierASCII/keywordowner;alwaysquotedEXACTlookups separateminimaldisplay;builtinidentitybranchesunchanged. Inverseonly4newsource edits(notpreexistingregistryline)recoversall2185priorRootSource680dc;original29pendingtrackedbytesafterundoonlyownsource/docsunchanged. OriginalR151CatalogDDL/fixturesregistry andR140/R137/R109etcunaccepted. Original273itemsandcheckboxes22complete166partial70unverified15deferredUNCHANGED.",
+        "orthogonal_open": "R151USERDEFERRED46a4donotresume. R150full61typescopeopen. R156actualPG/oldacceptedR155/newR152cleanEACH34collectionobservations,newandoldeach14semanticdifferencesNOT34passes/14independentroots:OID25/18REGTYPEroundtripfalse,1009array42704,namespacevisibility/timecanonicalaliases/JSONkeywordidentity. CodeconstantExpressiondropsobjectOid/elementOids/recordFields,evalLiteralreparsesdisplay:needqueryownedFULLtypedconstantcarrierplusbuiltinOIDformatrules/separateJSONowner;NOTjuststringquotepatch. R157ordinaryASToldfailureopen;PGmultivalue22023versussingleunknown42704/customdottedSETsuccess keptdistinct.",
+        "full_suite": "Accepted577MD908native547Python3Main1458;working580MD914native553Python3Main1470still12unacceptedentries. No currentfull1458/TLS/wholeenginesanitizerproof;historicalecf1436final1with2realfailures1TLSskipretained. FiniteR152corepassONLY;fullcontext1andoriginal273NOTcomplete. NoPush/Actionsdisabled."
+      }
+    },
+    {
       "issue": "R155 DROP SCHEMA catalog-owned decoded enum namespace; R152 display remains open",
       "gap_ids": [
         "CAT-04",

@@ -1,5 +1,23 @@
 # 2026-10-13 全仓库审查
 
+[R152 REGTYPE 最小引用](issue-review-r152-regtype-identifier-output.md)完成独立显示修复：
+精确查找串与显示串分离，quote_ident/format %I/路径列表共用既有 ASCII、关键字引用规则。
+PG1675全0；修复前两端各1675/66失败、native5197/1718失败；修复后两端5197/1675全0。
+Root45完整相邻入口全0；accepted-only clean30完成29通过、1个旧搜索路径AST断言134，
+整批终态1，不称全绿。冻结R155旧版同一未改夹具也在第86行退出134，
+另列[R157 普通SET目标](issue-review-r157-dotted-set-target.md)开放，原失败/严格检查器终态1保留。
+[R156 REGTYPE物理常量](issue-review-r156-regtype-physical-constants.md)另列开放：
+PG/旧已接受版/新clean各34条观察，后两者各14条语义差异，不是34项通过；
+OID往返身份丢失、内置呈现与JSON语法身份仍需独立修复，不能用本项显示通过关闭。
+共享头改变后两端各正常fresh58生产O2/repeat0、各三个真实Main TU fresh，
+新链接各自57当前O2库并隔离执行；输入/提交边界审计通过不代表相邻整批通过。
+只接受本项五处源/注册、两个完整夹具及文档；R151继续用户暂缓，不重开R140等专项。
+已接受577MD、908native+547Python+3Main=1458；工作区580MD、914+553+3=1470，
+仍有12个未接受入口。无新1458全量/TLS/整库sanitizer；原273仍22/166/70/15，
+总清单未完成，不push、Actions禁用。
+
+以下各轮摘要保留该轮输入和历史计数；后续状态以本段及各问题文档为准。
+
 [R155 枚举辅助名称归属](issue-review-r155-enum-namespace-owner.md)完成有限修复：
 DROP SCHEMA 按真实目录 OID 关联识别解码后的标量枚举名，不再重解析/折叠大小写；
 public 带点名称保留实际 owner，竞争身份先报 XX001，旧 native fallback 不变。

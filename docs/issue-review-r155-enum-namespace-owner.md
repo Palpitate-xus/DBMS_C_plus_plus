@@ -58,10 +58,11 @@ clean 只含本项两个 partial 源/注册和两个完整夹具：一个 fresh 
 56 个已核对 R148 fresh58 的生产对象和当前 R149 evaluator；真实 server 无 stubs。
 所有旧/新 clean 与 donor 的已跟踪文件永久冻结。
 
-仅本项生产代码、注册、两个夹具及相关文档进入本地 commit。
-[R152 显示差异](issue-review-r152-regtype-identifier-output.md)只保存问题与方法，
-其两个夹具和注册保持未接受；R151 源码/夹具/注册及其它原有待定改动不混入。
-已接受 575 MD、907 native + 546 Python + 3 Main = 1456；
-工作区 578 MD、914 + 553 + 3 = 1470，仍有 14 个未接受入口。
+R155 原始提交只纳入本项生产代码、注册、两个夹具及相关文档。
+当轮 [R152 显示差异](issue-review-r152-regtype-identifier-output.md)只记录问题与方法，
+当时其两个夹具和注册未接受；这些是 R155 当轮的状态，R152 后续修复见其独立报告。
+R151 源码/夹具/注册及其它原有待定改动不混入。
+R155 当轮已接受 575 MD、907 native + 546 Python + 3 Main = 1456；
+当轮工作区 578 MD、914 + 553 + 3 = 1470，仍有 14 个未接受入口。
 无新 1456 全量回归、TLS 或整库 sanitizer 证明；原 273 状态仍 22/166/70/15，
 总清单未完成，不 push，Actions 仍禁用。

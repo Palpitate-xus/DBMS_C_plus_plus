@@ -66,9 +66,12 @@ inline std::string outputImpl(Oid oid,const CatalogManager::MetadataSnapshot& ca
         if(const auto alias=aliases.find(found->typname);alias!=aliases.end())return alias->second;
         return found->typname;
     }
-    const auto name=quoted(found->typname);
-    try {if(resolveDeclaredTypeName(name,&catalog,session).typeOid==oid)return name;}catch(const DbError&) {}
-    for(const auto& space:catalog.namespaces)if(space.oid==found->typnamespace)return quoted(space.nspname)+"."+name;
+    // Lookup always quotes the exact catalog spelling; display only quotes
+    // when SQL requires it. Never feed the rendered alias back into visibility.
+    const auto lookup=quoted(found->typname);
+    const auto name=SQLParser::quoteIdentifier(found->typname);
+    try {if(resolveDeclaredTypeName(lookup,&catalog,session).typeOid==oid)return name;}catch(const DbError&) {}
+    for(const auto& space:catalog.namespaces)if(space.oid==found->typnamespace)return SQLParser::quoteIdentifier(space.nspname)+"."+name;
     throw DbError("XX001","type reference has no namespace metadata");
 }
 inline std::string output(Oid oid,const CatalogManager::MetadataSnapshot& catalog,const Session* session) {
