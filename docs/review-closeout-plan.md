@@ -1,5 +1,16 @@
 # 2026-10-13 审查与验证入口
 
+[R150阈值重载](issue-review-r150-threshold-width-bucket.md)仍开放；实际PG/Root各完成61条
+广泛类型观察，保留非数字类型与XML参考构建能力差异，不冒充61项通过。
+[R151枚举数组目录](issue-review-r151-enum-array-catalog.md)为前置候选：PG103全过，
+旧Root/accepted clean各103/86失败，旧native341/280失败；候选两端native341全0，
+但完整103协议各仍60失败、四入口终态1，因此未验收、未提交生产代码/夹具/注册。
+下一步修复REGTYPE名称引用、目录类型wire OID和限定枚举名长度校验，
+再重跑全部103断言，之后才接入完整阈值比较器。本次仅保存问题、计划和证据，不把候选当已修复。
+已接受573MD、906native+545Python+3Main=1454不变；工作区576MD、912+551+3=1466，
+另含R151两个未接受入口。原273仍22/166/70/15；无新1454全量/TLS/整库sanitizer。
+用户暂缓不重开、不push、Actions禁用。
+
 [R149 WIDTH_BUCKET边界与精度](issue-review-r149-width-bucket-boundaries.md)完成四参数路径修复：
 按方向处理包含端点，NUMERIC保持十进制精确商，float8保留自身舍入，
 count+1超过int4报22003；已声明重载只归实际builtin，原生同名替换不受影响。
