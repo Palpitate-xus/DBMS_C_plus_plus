@@ -1,5 +1,8 @@
 # DBMS 全部 Gap TODO（历史记录）
 
+[R140](issue-review-r140-timezone-set-grammar.md)按用户要求暂缓；实现、两测试和注册
+仅保留工作区，未接受为修复。已完成门禁日志保留，不追加跳过项验收或改变历史勾选。
+
 时区默认值和offset恢复见[R139](issue-review-r139-timezone-default.md)：
 280协议/290真实前端/最终31完整入口及clean5通过。R140语法边界仍未修复，
 包括新DEFAULT对两种非法输入的放行；不因局部通过改历史勾选或总账状态。

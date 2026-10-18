@@ -2,6 +2,24 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R140 TimeZone SET grammar and Parse/Execute phases: user-deferred candidate",
+      "gap_ids": [
+        "OPS-02",
+        "SQL-09"
+      ],
+      "status": "deferred_by_user",
+      "evidence": [
+        "docs/issue-review-r140-timezone-set-grammar.md"
+      ],
+      "tests": [],
+      "verification": {
+        "reproduction": "ActualPG18.6/180006 final6403 controls0; frozenacceptedf8Rootbabb333c and clean6850729b each6403complete1316assertionfail actual1. Oldnative4090complete2384fail1 includes ASTrepresentation contracts; dependent assertions are not independent bugs. ValidcompactSET rejected; missinggenericseparator/dedicatedequals accepted, including two R139DEFAULT shapes. PG keyword/source evidence and original failures retained.",
+        "candidate": "UnacceptedprivateParser/Main ASTroute plus native4090/wire6403 fixtures, Main311 controls and registration preserved. Focus3 actual0; Root17native23wire3freshMain=43orderedcomplete0; clean1native6wire=7complete0. Independentfinal checker was prepared but not executed before user skip: no independent acceptance claim. No targeted R140 implementation or validation resumes without explicit reopening.",
+        "build": "ActualnormalO2Main+Parser2CPP build0; old count1 wrapper actual2 retained unchanged. Separate finish verifies original2CPP then actualrepeat0/current58receipts/frozeninputs0. Mainthree fresh TUs/no-stubs/current57productionlibraries/actualisolation. Clean2freshO2CPP+56verifiedR136donors realserver, notnormalfresh58. This is historical candidate evidence, not a committed product fix.",
+        "scope": "User said skip it on2026-10-18. Candidate source/tests/registry retained byte-exact outside accepted index in r140-user-skip-candidate.tar.gz and original working diff. Documentation-only deferral; accepted563MD902native538Python3Main1443 vsworking566MD907native543Python3Main1453. Original273 item states/checkboxes22complete166partial70unverified15deferred unchanged. R137 and older skips not reopened; no push, Actions disabled."
+      }
+    },
+    {
       "issue": "R139 TimeZone DEFAULT/dedicated LOCAL and RESET restore saved name plus actual offset",
       "gap_ids": [
         "OPS-02",

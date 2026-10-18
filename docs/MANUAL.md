@@ -1,5 +1,9 @@
 # DBMS 使用手册
 
+[R140时区语法候选](issue-review-r140-timezone-set-grammar.md)已按用户要求暂缓，
+不能因工作区保留候选就视为发布能力。HEAD仍保留紧贴等号被拒、非法分隔符
+被接受等已记录边界；不承诺完整SET语法或事务级LOCAL。本次没有接受代码修复。
+
 > 本手册说明用法，不作为全功能兼容或测试通过的证明。当前边界见[兼容性契约](compatibility-contract.md)，已发现的问题与修复方法见[代码审查索引](review-index.md)。
 > 产品版本由 `src/common/version.h` 定义；存储和升级边界见[打包与部署](PACKAGING.md)。
 

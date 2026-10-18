@@ -1,5 +1,11 @@
 # 2026-10-13 审查问题修复进度
 
+[R140 TimeZone设置语法](issue-review-r140-timezone-set-grammar.md)按用户“skip it”暂缓。
+候选实现、4090原生/6403协议夹具及注册保留，但未提交、未验收，不计已修复。
+跳过前专项、Root43和clean7完整入口实际全0；独立终态验收未运行，不补作通过。
+本次只提交暂缓记录，已接受902native+538Python+3Main=1443不变；工作区另有
+未接受候选。R137及其它暂缓项不重开，原273的22/166/70/15不变，不push、Actions禁用。
+
 [R139 TimeZone默认恢复](issue-review-r139-timezone-default.md)完成有限修复：
 DEFAULT和专用TIME ZONE LOCAL复用默认值解析，RESET恢复名称及真实offset，
 通用TO LOCAL与带引号关键字仍22023。PG280全过，旧Root/干净旧版各280/48失败；
