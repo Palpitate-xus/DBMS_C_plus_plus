@@ -42,6 +42,14 @@ int main() {
     run("/* unterminated", "42601");
     run("SET application_name='caller setting'");
     assert(caller.applicationName == "caller setting" && parent.applicationName.empty());
+    const std::string parentTimeZone = parent.timeZone;
+    run("SET SESSION TimeZone TO 'Asia/Shanghai'");
+    assert(caller.timeZone == "Asia/Shanghai" && caller.timezoneOffsetMinutes == 480);
+    assert(parent.timeZone == parentTimeZone);
+    run("SET SESSION TIME ZONE 'UTC'");
+    assert(caller.timeZone == "UTC" && caller.timezoneOffsetMinutes == 0);
+    run("SET SESSION TimeZone TO 'Invalid/No_Such_Zone'", "22023", true);
+    assert(caller.timeZone == "UTC" && parent.timeZone == parentTimeZone);
     run("SELECT 1");
     // The native dispatcher reports this legacy error as bool + diagnostic;
     // lexical and prepared trigger failures below are real DbError throws.

@@ -2,6 +2,30 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R138 explicit SESSION TimeZone dispatch falls through to generic Config instead of session timezone",
+      "gap_ids": [
+        "OPS-02",
+        "SQL-09"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r138-session-timezone.md",
+        "docs/issue-review-r132-timezone-set-to.md"
+      ],
+      "tests": [
+        "tests/timezone_set_to_protocol_e2e_test.py",
+        "tests/frontend/session_execution_lifetime.cpp"
+      ],
+      "verification": {
+        "reproduction": "ActualPG18.6/180006224all0; frozenRoot83c and acceptedR136cleanold each224complete56fail1. LegalSESSIONTimeZoneTO/=andSESSIONTIMEZONE failXX000; invalidvaluesalsoXX000instead22023. Original112controls retained,112SESSIONcontrols added. Diagnostic12 completion0 is collection, not pass.",
+        "focused_tests": "Only privateMainCPP timezone-branch spelling consumes explicit SESSION, reusing old value parsing and writes; all other SET dispatch remains original. Root normal1MainO2/repeat0 actual0. All3real Main testTUs fresh after Main change: explain/sessionO0, windowO2; current57O2 libs/new links/no stubs, actual isolated execution. Final12native15wire3Main=30ordereduniquecomplete0; cleanaccepted2f+only own3paths onefreshO2Main+57verifiedR136donorlibs, no stubs realserver,4protocolcomplete0. Allheaders/other57CPP bytes/all58donor receipts/prehashed57objectbytes and frozen alltracked inputs checked; not normalfresh58build. Independent0 including current58 receipts/dualcache/57testbytes/Main4sourcehashes/objectandbinaryhashes.",
+        "retained_harness_failure": "InitialRootgate actual1:12native15protocol actual0 but all3Main wrappers actual2 before driver execution because nonexistent r138-real-main-link.log vs generated r138-main-link.log. All logs retained; not productfailure, not3passes. Only external wrapper/log destinations fixed, same frozen Root source/tests/scripts/binary/cache/TUs fully rerun in v2 directories; canonicalfinal0, independent0.",
+        "next_open": "R139timezoneDEFAULT ordinaryopen:13 actualPG/old83c observations, all4DEFAULT reference commands restore own startup setting, oldbare22023 andSESSIONXX000 retainShanghai. RootUTC vsPGetcUTC ambientdefault is not itself bug. Method: unquotedDEFAULT keyword -> Session.defaultTimeZone -> same resolver and offset computation, retain quotedliteral errors; testRESET/sessionisolation/SimpleExtended/timevalues; no implicit LOCAL/transaction completion.",
+        "full_suite": "No newfull1442/TLS/whole-engine sanitizer proof. Rootbinarycb786166796fb95e576524aa4ca7c6a1f9598a6f7e6e6593b148302ac02b8cf9 cache0c076de31ab5a3473f0af04c5c33e4b0d91b8d168f284842af4bf88128223cc1 seal4bcbd8bf644c39ce361fb8e2a761e5930e24cf270d14cd04026367e4a60a2535 compile348unchanged. Accepted561MD902native537Python3Main1442; working564MD906native541Python3Main1450 includes original6plusR137two unacceptedentries. Historicalecf1436 actual1433pass2fail1TLSskip final1 retained.",
+        "scope": "Original273 items/checkboxes22complete166partial70unverified15deferred unchanged. No publicheader/parser/heap/auth/LOCAL/DEFAULT/transactionGUC change. Original56933-byte source candidates/three skipped drafts preserved; skipped R137 TM/tests/registry bytes equal archived snapshot and excluded clean candidate/commit; R98/R99/R109 unaccepted also excluded. Only own18 paths/hunks; no push, Actionsdisabled."
+      }
+    },
+    {
       "issue": "R137 ordinary INSERT single-PK foreign key full-value check: user-deferred, candidate unaccepted",
       "gap_ids": [
         "CONS-02"

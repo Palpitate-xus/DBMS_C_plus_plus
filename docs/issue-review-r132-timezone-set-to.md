@@ -1,5 +1,9 @@
 # R132 通用SET TimeZone的TO被当作时区值
 
+显式SESSION的TimeZone路由后由[R138](issue-review-r138-session-timezone.md)单独修复。
+本页112控制和旧日志保留；当前夹具另增112项SESSION控制，总224，并按本轮30/clean4
+验收，不反向改写R132输入。DEFAULT、LOCAL及完整GUC事务/严格语法仍未完成。
+
 状态：本项修复及30入口有限验收完成，不等于整个GUC或原273总账完成。
 来源为[R131](issue-review-r131-timestamptz-binary-timezone.md)初版setup发现，独立处理。
 

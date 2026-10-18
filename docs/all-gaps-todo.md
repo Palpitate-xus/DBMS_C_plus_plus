@@ -1,5 +1,9 @@
 # DBMS 全部 Gap TODO（历史记录）
 
+显式SESSION的TimeZone设置见[R138](issue-review-r138-session-timezone.md)：
+224协议、最终30完整入口及clean4全过，首次wrapper路径错误终态1另保留。
+DEFAULT仍普通开放；R137仍按用户要求暂缓，不改历史勾选。
+
 [R137 外键完整父值核对](issue-review-r137-foreign-key-full-value.md)按用户要求暂缓；
 候选实现与两测试保留但未提交、未验收，不计已修复。初稿扩展测试存在真实失败，
 修订版只有构建证明。通用长PK写入及其它普通问题仍未完成，不改历史勾选。

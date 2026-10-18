@@ -240,7 +240,10 @@ BC/完整大年份及所有日期函数输入不由此声明完成。上方各R1
 通用`SET TimeZone TO 'Asia/Shanghai'`支持TO分隔符，也保留等号和专用
 `SET TIME ZONE 'Asia/Shanghai'`写法。TO在引号内仍是值的一部分，无效设置
 不会改变原时区。Simple/Extended及六时区验证见[R132](issue-review-r132-timezone-set-to.md)。
-该项不等于SET LOCAL/SESSION、DEFAULT或所有GUC事务/严格语法已完成。
+显式`SET SESSION TimeZone TO 'Asia/Shanghai'`、等号及`SET SESSION TIME ZONE`
+复用相同时区处理，见[R138](issue-review-r138-session-timezone.md)的224协议与真实前端验证。
+这不代表SET LOCAL、DEFAULT、其它SESSION参数或所有GUC事务/严格语法已完成；
+TimeZone DEFAULT仍有已确认的拒绝合法命令问题，修复方法另见R138的后续记录。
 
 ### 其他类型
 | 类型 | 说明 |

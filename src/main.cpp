@@ -3570,11 +3570,17 @@ static bool handleSetCommand(const string& sql, Session& s) {
         return false;
     }
 
+    // An explicit SESSION modifier selects this same session-level setting,
+    // not the generic Config fallback. Only use the normalized spelling for
+    // this TimeZone branch; other SET forms retain their existing dispatch.
+    const string timezoneSql = sql.rfind("set session ", 0) == 0
+        ? "set " + trim(sql.substr(12)) : sql;
     // PostgreSQL interprets signed string offsets using POSIX's west-positive
     // convention, while numeric hours are east-positive.
-    if (sql.substr(0, 13) == "set timezone " || sql.substr(0, 14) == "set time zone ") {
-        size_t off = (sql.substr(0, 13) == "set timezone ") ? 13 : 14;
-        string tzVal = trim(sql.substr(off));
+    if (timezoneSql.substr(0, 13) == "set timezone " ||
+        timezoneSql.substr(0, 14) == "set time zone ") {
+        size_t off = (timezoneSql.substr(0, 13) == "set timezone ") ? 13 : 14;
+        string tzVal = trim(timezoneSql.substr(off));
         // sqlProcessor has normalized keyword whitespace without changing
         // quoted data. TO belongs to generic SET TimeZone, not to the
         // legacy SET TIME ZONE value or a quoted name starting with "TO".

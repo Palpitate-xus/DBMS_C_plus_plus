@@ -62,7 +62,9 @@ def main():
         report(good, "SHOW expected=" + expected, result)
 
     try:
-        forms = ("SET TimeZone TO {}", "set timezone\tto\n{}", "SET TimeZone = {}", "SET TIME ZONE {}")
+        forms = ("SET TimeZone TO {}", "set timezone\tto\n{}", "SET TimeZone = {}", "SET TIME ZONE {}",
+                 "SET SESSION TimeZone TO {}", "set\tSESSION\tTimeZone\tto\n{}",
+                 "SET SESSION TimeZone = {}", "SET SESSION TIME ZONE {}")
         for zone in ("UTC", "Asia/Shanghai", "America/New_York", "Asia/Kathmandu",
                      "Pacific/Kiritimati", "Europe/Berlin"):
             for form in forms:
@@ -72,11 +74,12 @@ def main():
         # TO within a quoted datum is not a separator. Every failed SET
         # must preserve the previous session value and ready/idle recovery.
         for bad in ("TO UTC", "to Europe/Berlin", "Invalid/No_Such_Zone", ""):
-            for extended in (False, True):
-                set_zone("SET TimeZone TO '" + bad + "'", extended, state="22023")
-                show_zone("Europe/Berlin")
+            for prefix in ("SET TimeZone TO ", "SET SESSION TimeZone TO "):
+                for extended in (False, True):
+                    set_zone(prefix + "'" + bad + "'", extended, state="22023")
+                    show_zone("Europe/Berlin")
         print("TIMEZONE_SET_TO_COMPLETE", checks, "FAILURES", len(failures), flush=True)
-        assert checks == 112 and not failures, (checks, failures)
+        assert checks == 224 and not failures, (checks, failures)
     finally:
         if server:
             runner.stop_ours(server)

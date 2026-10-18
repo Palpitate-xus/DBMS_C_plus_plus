@@ -1,5 +1,14 @@
 # 生产化状态
 
+[R138 SESSION TimeZone](issue-review-r138-session-timezone.md)已有限修复：
+显式SESSION仅在时区路由复用既有值解析，其余SET分派不改。PG224全过，
+冻结旧Root/干净旧版各224完整/56失败；原112断言保留并增加112个SESSION控制。
+正常1Main/repeat0、三个fresh真实Main TU及当前57库新链接/隔离执行通过；
+最终12native+15wire+3Main=30完整入口全0、clean4全0，独立核对0。
+首次三Main因wrapper日志路径错误未运行、整批1的记录保留，不冒产品失败或通过。
+R137仍用户暂缓/未接受；DEFAULT另有13条观察与方法记录、仍普通未修复。
+无新1442全量/TLS/整库sanitizer证明，原273的22/166/70/15不变，不push，Actions禁用。
+
 [R137 外键完整父值核对](issue-review-r137-foreign-key-full-value.md)按用户“skip it”暂缓：
 候选实现、测试及原始失败保留，未提交、未验收，不计已修复。初稿57/208及clean7
 通过不足以验收；扩展后PG364全过，旧版364/96失败，初稿364/48失败、native89/4失败，
