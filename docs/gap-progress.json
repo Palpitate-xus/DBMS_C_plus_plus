@@ -2,6 +2,23 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R137 ordinary INSERT single-PK foreign key full-value check: user-deferred, candidate unaccepted",
+      "gap_ids": [
+        "CONS-02"
+      ],
+      "status": "deferred_by_user",
+      "evidence": [
+        "docs/issue-review-r137-foreign-key-full-value.md"
+      ],
+      "tests": [],
+      "verification": {
+        "reproduction": "Actual PostgreSQL18.6/180006 expanded364 controls pass; immutable8b50 binary364 complete96fail1. Initial208 pass reference/84fail old, native57 old12fail preserved. Prefix-equal nonexistent parents can leave orphan rows. Diagnostic12 collection exit0 is not behavioral pass. Long/composite PK write collisions remain separately ordinary open.",
+        "candidate": "Initial private TM checked index/visible heap/universal compare candidate passed57/208 and clean7, but expanded364 has48fail and native89 has4fail: legal INET/CIDR/MACADDR/MACADDR8 values may be rejected. Positive-only diagnostics and intermediate312 failures retained. Revised helper and expanded89/364 fixtures stay pending; revised normal1TM O2/repeat0 actual0 ONLY, no revised runtime or clean acceptance.",
+        "retained_failure": "Initial full45 entries:44 actualpass1failure; foreign_key_empty_text_test actual134 at original terminal DROP assertion line51. Canonical and independent final1 retained, no assertion deletion, retry-to-green, or R51 investigation. Initial proof never establishes revised source acceptance.",
+        "scope": "User said skip it on2026-10-18. No further R137 implementation/validation until explicit reopening. All candidate source/test/registration bytes retained outside accepted index, snapshot r137-user-skip-candidate.tar.gz plus initial staged patch in local evidence directory. Documentation-only deferral; accepted902native537Python3Main1442 unchanged; Markdown560 after this record vsworking563, original six pending entries plus two R137 candidates. Original273 items/checkboxes22complete166partial70unverified15deferred unchanged; no push, Actions disabled."
+      }
+    },
+    {
       "issue": "R136 scalar temporal microsecond heap storage with explicit per-column units",
       "gap_ids": [
         "TYPE-06",

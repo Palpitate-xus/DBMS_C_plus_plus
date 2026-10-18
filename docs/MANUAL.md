@@ -482,6 +482,12 @@ ALTER TABLE events DETACH PARTITION events_p2024;
 ALTER TABLE users ALTER COLUMN ID SET DEFAULT 42;
 ```
 
+已知限制：普通INSERT的单列PRIMARY KEY外键检查仍可能把20字节索引前缀
+命中误当成完整父键存在，造成无效引用。候选修复与扩展测试见
+[R137](issue-review-r137-foreign-key-full-value.md)，本项按用户要求暂缓，
+未进入已接受实现；不能据初稿有限通过宣称外键完整性已修复。通用长PK写入、
+全部复合/MATCH/deferred/partitioned/concurrent FK也不因该候选完成。
+
 ### 删除表
 
 ```sql

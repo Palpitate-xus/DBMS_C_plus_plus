@@ -1,5 +1,13 @@
 # 2026-10-13 审查与验证入口
 
+[R137 外键完整父值核对](issue-review-r137-foreign-key-full-value.md)按用户“skip it”暂缓：
+候选实现、测试及原始失败保留，未提交、未验收，不计已修复。初稿57/208及clean7
+通过不足以验收；扩展后PG364全过，旧版364/96失败，初稿364/48失败、native89/4失败，
+暴露合法网络类型被误拒绝。修订版仅正常1TM/repeat0构建通过，未运行其最终门禁。
+旧Root45保留44通过/1末尾DROP断言134、终态1；不改R51断言、不重试覆盖。
+候选代码/两测试/注册不进入接受版本；只记录暂缓。通用长文本/复合PK写入及
+其它普通问题仍未完成，原273的22/166/70/15不变，不push，Actions禁用。
+
 后续[R136 标量微秒持久化](issue-review-r136-temporal-microsecond-storage.md)已有限修复：
 新SQL标量TIME/TIMESTAMP/TIMESTAMPTZ采用显式schema-D微秒codec，旧9/A/B/C与native
 工厂保持秒；同类型ALTER重写，索引/排序/NULL/epoch0/时区与实际冷重启纳入验证。

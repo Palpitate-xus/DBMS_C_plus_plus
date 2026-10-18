@@ -1,5 +1,9 @@
 # DBMS 全部 Gap TODO（历史记录）
 
+[R137 外键完整父值核对](issue-review-r137-foreign-key-full-value.md)按用户要求暂缓；
+候选实现与两测试保留但未提交、未验收，不计已修复。初稿扩展测试存在真实失败，
+修订版只有构建证明。通用长PK写入及其它普通问题仍未完成，不改历史勾选。
+
 后续标量时间的小数秒持久化、Legacy/TemporalMicros单位与schema-D验证见
 [R136](issue-review-r136-temporal-microsecond-storage.md)。这只对应有限普通缺陷修复，
 不改本历史清单或原273完成状态，暂缓项继续保持。
