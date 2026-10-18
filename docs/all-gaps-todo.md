@@ -1,5 +1,9 @@
 # DBMS 全部 Gap TODO（历史记录）
 
+[R143 SHOW协议结果](issue-review-r143-show-guc-protocol-results.md)有限修复四个标量
+GUC的描述与空/NULL字面量/多行值传输，150专项及最终14/clean5通过。
+R142候选不混入，R144/R145普通缺口与用户暂缓项不据此关闭，不改历史勾选。
+
 [R141普通SET参数身份/分隔符](issue-review-r141-set-parameter-identity.md)的有限修复与
 389专项、最终13完整入口/clean4见报告；两稿真实失败保留，不据此改历史勾选。
 R140、R137仍用户暂缓，模式参数完整语法及更多管线交互仍不冒完成。

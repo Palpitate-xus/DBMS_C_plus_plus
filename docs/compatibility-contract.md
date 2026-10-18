@@ -43,6 +43,11 @@ wire protocol 不能自动提升行为兼容声明；增加 extended 命令也�
 [R141](issue-review-r141-set-parameter-identity.md)仅验证这些有限边界，不代表完整GUC
 语法、参数域、quoted模式值或事务级LOCAL已经实现。
 
+[R143](issue-review-r143-show-guc-protocol-results.md)仅覆盖application_name、
+client_encoding、search_path、lc_monetary四个已实现标量SHOW的固定text结构与值传输：
+支持Simple及已Describe的Extended text/binary，空串与文字NULL不冒SQL NULL，
+路径换行不拆行。这不代表完整SHOW族、应用名值规范化或全部GUC事务语义完成。
+
 进程启动必须通过 `-D/--data-dir` 或 `DBMS_DATA_DIR` 显式选择本项目数据根。
 `DBMS_CONTROL` 的项目 magic 和 system identifier 只声明 DBMS-C++ 自有 cluster
 身份，不代表磁盘格式与 PostgreSQL 兼容；含 `PG_VERSION` 的 PostgreSQL cluster

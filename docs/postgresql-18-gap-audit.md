@@ -1,5 +1,15 @@
 # 2026-10-13 全仓库审查
 
+[R143 普通SHOW协议结果](issue-review-r143-show-guc-protocol-results.md)完成有限修复：
+application_name/client_encoding/search_path/lc_monetary固定text描述不再误报NoData；
+结构化单行与显式非NULL位保留空串、字面量NULL及路径中的换行/UTF8，不从stdout猜行。
+PG150全过，冻结Root/已接受干净旧版各150/111失败；最终Root14完整入口、clean5
+与独立核对均0。正常2CPP O2/repeat0，三fresh真实Main TU/当前57库新链接/隔离运行，
+session原290控制；未运行R142待定8或R140待定21扩展。检查器跨行标签/转义错误的
+首次1保留，独立v2按完整150控制核对0，未改产品/夹具。R142仍为独立待定候选，
+R144应用名规范化、R145路径Sconst列表语义另记普通开放及方法，不冒已修复。
+原273的22/166/70/15不变，无新1445全量/TLS/整库sanitizer证明；不push，Actions禁用。
+
 [R141 SET参数身份与分隔符](issue-review-r141-set-parameter-identity.md)完成有限修复：
 普通值不再误入compatibility_mode分支，相似/带点名称不改模式，TO值内等号不作分隔符；
 独立Extended模式设置不再把未执行的规划事务误当BEGIN，真实事务限制保留。

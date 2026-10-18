@@ -2590,10 +2590,15 @@ bool describePreparedResult(const std::string& sql, Session& session,
     ParseResult parsed = parser.parse(sql);
     if (!parsed.isValid()) return false;
     if (const auto* shown = dynamic_cast<const SetStmt*>(parsed.stmt.get())) {
-        if (shown->isShow && (shown->name == "transaction_isolation" ||
-                              shown->name == "max_parallel_workers_per_gather")) {
+        const auto name = SQLParser::toLower(shown->name);
+        if (shown->isShow && (name == "transaction_isolation" ||
+                              name == "max_parallel_workers_per_gather" ||
+                              name == "application_name" || name == "client_encoding" ||
+                              name == "search_path" || name == "lc_monetary")) {
+            // These scalar GUCs have a fixed text schema. Describe must not
+            // execute SHOW, sample its value, or infer columns from stdout.
             QueryResult shape;
-            shape.columns = {shown->name};
+            shape.columns = {name};
             shape.columnTypes = {"text"};
             columns = describeProtocolColumns(shape, sql, session);
             return !columns.empty();

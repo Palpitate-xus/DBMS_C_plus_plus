@@ -2,6 +2,27 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R143 scalar SHOW GUC protocol schema and lossless structured results",
+      "gap_ids": [
+        "OPS-02",
+        "PROTO-04"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r143-show-guc-protocol-results.md"
+      ],
+      "tests": [
+        "tests/show_guc_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "reproduction": "ActualPG18.6/180006150complete0; frozenRoot61db3add and acceptedclean878094b7 each150complete111assertionfail actual1. MissingExtendedRowDescription(OID25), emptyappnamezeroRows, literalNULLdecodedasSQLNULL andquotedsearchpathnewlineassplitrows confirmed. No111independentbugs claim. Observers21/10/10 collection0notpass; appnameASCIIcleaning R144 andSconstlistquote R145 remain ordinaryOPEN withmethods.",
+        "focused_tests": "MainSHOW4 publishstructuredrows/types/non-nullbits; Networkstaticknowntextschema for4GUCs withoutSHOWexecution orvalue sampling andcasefoldidentity. Same150fixtureSHA1832a6e14334ae5bcfbf1bbb16d686594ec3623a22e2fed46fd6001a727b95a0;15cases10requests each fullSimple/Extendedtext/binary/uppercasenames/StatementandPortalDescribeOnly withprecisetableOID0attnum0typeOID25size-1mod-1format/rawbytes/tag/Ready. Root4native7wire3Main14ordereduniquecomplete0; clean5complete0; priorR141389rerun0. Independentv2actual0 verifieswholecontrols/frames/58receipts/current57testbytes/Main4sources+objects+binaries andskippedarchives. Firstindependent1 retained: matcher skippedmultilineutilitylabels andoverescapedregex; newv2segmentsall150IDs/statuses,productandfixtureunchanged.",
+        "build": "Normal2CPPMain/NetworkO2 thenrepeat0actual0. All3realMainTUsfresh(explain/sessionbaselineO0,windowO2), fourMain/testsourcehash/fullheaders/compilerflags348 verified, newlinks57CURRENTproductionO2libraries/no teststubs, actualisolatedruns. Projectaccepted0cHEADfixturebody onlyincludePathrewritten; actualsession290 excludespendingR1428 andR14021. Clean0c+ONLYownMain/Network/reg/new150 noR142 code, fresh2O2CPP+56R136donors fullheaders/56CPP/all58donorreceipts/preSHA,notnormalfresh58. Alltrackedold/newcleananddonorremainimmutable.",
+        "candidate_boundaries": "R142quotedSETcandidate Main2/native8/new544/reg/doc/inventoryrow retained outsideaccepted index. ItsinitialRoot14 exact13pass1fail/clean5exact4pass1fail/new544136metadataerrors preserved; initialcompletenesschecker overescapedregexactual1 retained, correctedv2complete14/5counts0andrealfailedoverall1. R142notuserdeferredandmustbeacceptedseparately. Sourcepubheaders/ABI/heap/auth unchanged. R140user-skip6archivebytes exactafterundoR143/R142/R141ownMain/reg+R142native8;R137TM/tests unchanged; original56933patch/threedrafts0.",
+        "full_suite": "Accepted565MD902native540Python3Main1445 vsworking569MD907native546Python3Main1456 (original6+R1372+R1402+R142onePython pending);567AST13Bash separate. No newfull1445/TLS/whole-engine sanitizer proof,ecf1436old1433pass2fail1TLSskip actual1retained. Original273items/checkboxes22complete166partial70unverified15deferred unchanged. No push,Actionsdisabled."
+      }
+    },
+    {
       "issue": "R141 ordinary SET parameter identity, quoted delimiter scan and standalone Extended compatibility-mode utility",
       "gap_ids": [
         "OPS-02"

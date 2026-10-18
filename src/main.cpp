@@ -25054,21 +25054,29 @@ static bool executeInternal(const string& rawSql, Session& s) {
             return false;
         }
         if (rest == "application_name") {
+            publishStructuredUtilityResult(
+                {"application_name"}, {"text"}, {{s.applicationName}}, {{false}}, "SHOW");
             cout << "application_name" << endl;
             cout << s.applicationName << endl;
             return false;
         }
         if (rest == "client_encoding") {
+            publishStructuredUtilityResult(
+                {"client_encoding"}, {"text"}, {{s.clientEncoding}}, {{false}}, "SHOW");
             cout << "client_encoding" << endl;
             cout << s.clientEncoding << endl;
             return false;
         }
         if (rest == "search_path") {
+            publishStructuredUtilityResult(
+                {"search_path"}, {"text"}, {{s.searchPath}}, {{false}}, "SHOW");
             cout << "search_path" << endl;
             cout << s.searchPath << endl;
             return false;
         }
         if (rest == "lc_monetary") {
+            publishStructuredUtilityResult(
+                {"lc_monetary"}, {"text"}, {{s.lcMonetary}}, {{false}}, "SHOW");
             cout << "lc_monetary" << endl;
             cout << s.lcMonetary << endl;
             return false;

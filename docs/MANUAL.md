@@ -1,5 +1,10 @@
 # DBMS 使用手册
 
+`SHOW application_name`、`SHOW client_encoding`、`SHOW search_path`与
+`SHOW lc_monetary`的协议结果为一列text；空串是一行空值，不是零行或SQL NULL，
+字符串NULL仍是普通文字。Describe只提供固定结构，不执行查询；路径值中的换行
+保留在一个字段里。范围与未完成边界见[R143](issue-review-r143-show-guc-protocol-results.md)。
+
 [R140时区语法候选](issue-review-r140-timezone-set-grammar.md)已按用户要求暂缓，
 不能因工作区保留候选就视为发布能力。HEAD仍保留紧贴等号被拒、非法分隔符
 被接受等已记录边界；不承诺完整SET语法或事务级LOCAL。本次没有接受代码修复。

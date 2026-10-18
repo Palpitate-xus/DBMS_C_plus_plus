@@ -1,5 +1,9 @@
 # R141：SET参数身份、引号内分隔符与独立模式设置
 
+后续[R143](issue-review-r143-show-guc-protocol-results.md)独立修复四个普通SHOW的
+Extended描述及空串/NULL字面量/路径多行值传输；R141的389控制在本轮重新全过。
+R142带引号参数名仍独立待定，不能用SHOW修复替它验收，也不改写本页历史输入。
+
 状态：完成有限修复。最终389专项、Root13完整入口、clean4及独立核对均实际0。
 初稿81失败、第二稿21失败及各批完整终态1保留，没有删断言或改写旧日志。
 [R140](issue-review-r140-timezone-set-grammar.md)与[R137](issue-review-r137-foreign-key-full-value.md)
