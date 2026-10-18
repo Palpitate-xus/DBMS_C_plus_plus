@@ -1,5 +1,11 @@
 # DBMS 使用手册
 
+已实现普通参数的完整双引号名称按GUC大小写无关规则查找，例如
+`SET "APPLICATION_NAME" TO 'client'`与`SET application_name TO 'client'`设置同一字段。
+事务内`SET LOCAL "search_path" TO pg_catalog`沿用已有搜索路径作用域。
+quoted `"@name"`是参数标识符，不是项目`@变量`赋值；完整语法和值域不据此扩展。
+验证边界见[R142](issue-review-r142-quoted-set-parameter.md)。
+
 `SHOW application_name`、`SHOW client_encoding`、`SHOW search_path`与
 `SHOW lc_monetary`的协议结果为一列text；空串是一行空值，不是零行或SQL NULL，
 字符串NULL仍是普通文字。Describe只提供固定结构，不执行查询；路径值中的换行

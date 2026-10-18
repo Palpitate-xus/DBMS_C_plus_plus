@@ -1,5 +1,15 @@
 # 生产化状态
 
+[R142 quoted SET参数名](issue-review-r142-quoted-set-parameter.md)完成有限修复：
+完整单token双引号名称按GUC大小写无关规则解码，LOCAL搜索路径按规范名判断，
+原始@变量分支仍用原语法，quoted @目标不改已有变量。PG530全过，原旧版各544/322
+失败，初稿136项SHOW metadata失败/14与clean5终态1保留；SHOW先由R143独立提交，
+仅含该修复的干净版本仍544/216失败。最终Root/clean544均0，15完整入口/clean6/
+独立核对全0。最新Main/头未变，核对后复用R143两fresh前端对象、新编session298
+O0，再链接当前57匹配O2库并隔离运行；不冒全3本轮fresh或生产重编。
+R140/R137及其它用户暂缓项保留；R144/R145普通开放不关闭，原273的22/166/70/15
+不变，无新1446全量/TLS/整库sanitizer证明。不push，Actions禁用。
+
 [R143 普通SHOW协议结果](issue-review-r143-show-guc-protocol-results.md)完成有限修复：
 application_name/client_encoding/search_path/lc_monetary固定text描述不再误报NoData；
 结构化单行与显式非NULL位保留空串、字面量NULL及路径中的换行/UTF8，不从stdout猜行。

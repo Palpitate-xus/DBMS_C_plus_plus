@@ -3786,7 +3786,12 @@ static bool handleSetCommand(const string& sql, Session& s) {
         }
         string param = trim(rest.substr(0, separatorPos));
         string val = trim(rest.substr(separatorPos + separatorLength));
-        if(isLocal && param!="search_path")
+        // GUC lookup is case-insensitive even for a quoted identifier.
+        // Keep raw @variable syntax separate until after its own branch.
+        const string settingParam = param.size() >= 2 && param.front() == '"' &&
+            param.back() == '"' && dbms::SQLParser::tokenize(param).size() == 1
+            ? dbms::SQLParser::toLower(decodeQuotedIdentifier(param)) : param;
+        if(isLocal && settingParam!="search_path")
             throw dbms::DbError("0A000","transaction-local settings for this parameter are not supported");
         // User-defined variable: SET @var = value
         if (!param.empty() && param[0] == '@') {
@@ -3798,6 +3803,7 @@ static bool handleSetCommand(const string& sql, Session& s) {
             cout << "Set variable " << param << " = " << val << endl;
             return false;
         }
+        param = settingParam;
         if (!isGlobal && param == "application_name") {
             s.applicationName = stripQuotes(val);
             cout << "SET" << endl;

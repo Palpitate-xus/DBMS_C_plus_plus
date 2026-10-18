@@ -1,5 +1,9 @@
 # DBMS 全部 Gap TODO（历史记录）
 
+[R142](issue-review-r142-quoted-set-parameter.md)有限修复quoted普通参数名与LOCAL路径名；
+SHOW依赖先由R143独立提交，最终544/15完整入口/clean6及独立复核通过。
+保留原始失败与历史勾选，R140/R137用户暂缓及R144/R145普通开放不关闭。
+
 [R143 SHOW协议结果](issue-review-r143-show-guc-protocol-results.md)有限修复四个标量
 GUC的描述与空/NULL字面量/多行值传输，150专项及最终14/clean5通过。
 R142候选不混入，R144/R145普通缺口与用户暂缓项不据此关闭，不改历史勾选。

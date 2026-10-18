@@ -1,5 +1,9 @@
 # R143：普通SHOW的列描述缺失与值损坏
 
+后续[R142](issue-review-r142-quoted-set-parameter.md)在本项独立提交基础上完成quoted
+参数名有限修复；原Meta-only程序544/216失败继续保留作其旧红，不改写本项来源。
+R142最终15/clean6含本项150回归全过；本页290前端仍为本项原输入，不改作298。
+
 状态：完成有限修复。Root14完整入口、clean5、150专项及独立v2核对均实际0。
 仅修复application_name、
 client_encoding、search_path、lc_monetary四个已实现的标量SHOW。

@@ -48,6 +48,11 @@ client_encoding、search_path、lc_monetary四个已实现标量SHOW的固定tex
 支持Simple及已Describe的Extended text/binary，空串与文字NULL不冒SQL NULL，
 路径换行不拆行。这不代表完整SHOW族、应用名值规范化或全部GUC事务语义完成。
 
+[R142](issue-review-r142-quoted-set-parameter.md)将完整单token的quoted普通SET目标
+按GUC大小写无关规则解码，覆盖已实现应用名/编码/路径/locale与LOCAL搜索路径；
+原始@变量语法不由quoted目标进入。值解析、未知参数错误映射与其它事务作用域
+没有扩展，不意味着完整GUC或TimeZone暂缓语法完成。
+
 进程启动必须通过 `-D/--data-dir` 或 `DBMS_DATA_DIR` 显式选择本项目数据根。
 `DBMS_CONTROL` 的项目 magic 和 system identifier 只声明 DBMS-C++ 自有 cluster
 身份，不代表磁盘格式与 PostgreSQL 兼容；含 `PG_VERSION` 的 PostgreSQL cluster

@@ -42,6 +42,31 @@ int main() {
     run("/* unterminated", "42601");
     run("SET application_name='caller setting'");
     assert(caller.applicationName == "caller setting" && parent.applicationName.empty());
+    run("SET \"APPLICATION_NAME\" TO 'r142 quoted a=b compatibility_mode'");
+    assert(caller.applicationName == "r142 quoted a=b compatibility_mode" && parent.applicationName.empty());
+    run("SET SESSION \"CLIENT_ENCODING\" TO 'UTF8'");
+    assert(caller.clientEncoding == "UTF8");
+    run("SET \"SEARCH_PATH\" TO pg_catalog");
+    assert(caller.searchPath == "pg_catalog" && parent.searchPath == "public");
+    run("SET \"LC_MONETARY\" TO 'C'");
+    assert(caller.lcMonetary == "C");
+    run("SET \"search_path\" TO public");
+    const auto compatibilityBeforeQuotedSetting = caller.compatibilityMode;
+    caller.compatibilityMode = "extended";
+    run("SET @r142_quote_guard = 7");
+    assert(caller.userVariables.at("r142_quote_guard") == "7");
+    {
+        std::ostringstream output;
+        dbms::ScopedOutputCapture capture(output);
+        assert(execute("SET \"@r142_quote_guard\" = 9", caller));
+        assert(output.str().find("Invalid value for parameter") != std::string::npos);
+    }
+    assert(caller.userVariables.at("r142_quote_guard") == "7");
+    assert(caller.compatibilityMode == "extended" && dbms::currentSession() == &parent);
+    ++checks; // the direct legacy bool-error call above executed one command
+    caller.userVariables.erase("r142_quote_guard");
+    caller.compatibilityMode = compatibilityBeforeQuotedSetting;
+    run("SET application_name='caller setting'");
     const std::string parentTimeZone = parent.timeZone;
     run("SET SESSION TimeZone TO 'Asia/Shanghai'");
     assert(caller.timeZone == "Asia/Shanghai" && caller.timezoneOffsetMinutes == 480);

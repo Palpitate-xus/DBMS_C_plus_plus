@@ -2,6 +2,27 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R142 complete quoted ordinary SET target identity and existing LOCAL search_path scope",
+      "gap_ids": [
+        "OPS-02"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r142-quoted-set-parameter.md"
+      ],
+      "tests": [
+        "tests/quoted_set_parameter_protocol_e2e_test.py",
+        "tests/frontend/session_execution_lifetime.cpp"
+      ],
+      "verification": {
+        "reproduction": "ActualPG18.6/180006530complete0. Originalaccepted0cRoot90b/clean8780 each544complete322assertionfail1; initialquote-candidateNamefixdata/native298pass butRoot14exact13pass1failure/clean5exact4pass1failure/core544136fail frompreexistingExtendedSHOWmetadata. Originallogs/oldcandidatesretained, noassertionremoval. R143independentb3ecommit fixesSHOW; MetaONLYclean153dc same544complete216fail1 nowisolatesquote-targetbug. NewRoot/clean5440 samefixture9fb717d7f7e84cc57824e909e3dd17af28b6708304441dfd8aafe38a7002d47d.",
+        "focused_tests": "Main2privatehunks normalizesinglecompletequotedGUCidentifier usingexistingdecodeQuotedIdentifier/SQLParser::toLower(unsignedcharsafe),LOCALcheckcanonicalsearch_path only. Raw@variable branchcontinuesusingRAWtarget; assignnormalizedGUCnameonlyAFTERthatbranch topreventquoted@ writes. CXXactual8newcommands retain290basis=>298 incltrue@7/quoted@9legacyboolfailure/value7/parentownerrestored. Wire530common +14projectcontrols544:fournameforms,bare/session,TO/=,Simple/Extended,fourGUCs,negativepartial/doublequote names,realLOCALrollback,quoted@guard. Final4native8wire3actualMain15ordereduniquecomplete0; clean6complete0; Meta150/R141389bothrerun0; independentv2full0.",
+        "build": "Initialnormal1MainO2/repeat0 andall3freshTUswerebeforeSHOWdependency. R143thennormal2MainNetworkO2/repeat0/all3freshlatestMainb8c. FinalR142RootCPPUNCHANGED (Mainb8c/Network999/header348), actualnormalrepeat0/noCPPcompile/current58receipts; validate4sources/headers/objectSHA/producercache6f13/source97bf, reuseR143latestMainfreshExplainO0+WindowO2 objects andfreshcompileSession298O0 afterlatestMain; newlinkCURRENT57productionO2/no teststubs/actualisolation. Notall3v2fresh ornewproductionMaincompile. Cleanbaseb3e+ONLYown4source/testpaths freshMainO2+verifiedR143Network07b6/56verifiedR136donors(allheaders/CPP/58originalreceipts/preSHA),notnormalfresh58. Old/newcleantrackedallfrozen.",
+        "full_suite": "Accepted566MD902native541Python3Main1446 vsworking569MD907native546Python3Main1456, original6+R137two+R140two pending;567PythonAST13Bash separate. No newfull1446/TLS/whole-engine sanitizer; historicalecf1436final1/tworealfailures/oneTLSskip retained. UnknownparameterlegacyXX000mapping,fullGUCgrammar/value domains/otherLOCAL-GLOBALpolicies/R144appASCIIcleaning/R145searchpathSconstquote-listnotcompleted.",
+        "scope": "OnlyMain2/privatefrontend8controlblock/oneprotocolregistry/new544fixture/scopedrelateddocs. No publicheaders/ABI/heap/auth changes. R140sixarchivebytes exactafterundoR142thenR143thenR141ownMain/registry andR142frontend8,Rootphysical319toarchived311; selectedlatestnative298neverexecutesR14021. R137TM/testsunchanged,old56933patch/threedrafts0. IndexexcludesR98/R99/R109/R137/R140candidates. Original273states/checkboxes22complete166partial70unverified15deferredunchanged.No push,Actionsdisabled."
+      }
+    },
+    {
       "issue": "R143 scalar SHOW GUC protocol schema and lossless structured results",
       "gap_ids": [
         "OPS-02",
