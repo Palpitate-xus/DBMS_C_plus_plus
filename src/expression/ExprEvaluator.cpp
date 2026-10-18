@@ -1121,8 +1121,7 @@ static std::string timestampShift(const std::string& ts, const IntervalParts& iv
     };
 
     __int128 totalDays = static_cast<__int128>(civilToDays(
-        inputDate.year, inputDate.month, inputDate.day)) + inputDayCarry +
-        direction * iv.days;
+        inputDate.year, inputDate.month, inputDate.day)) + inputDayCarry;
     if (!dayInDomain(totalDays)) return "";
     if (iv.months != 0) {
         auto [y2, m2, d2] =
@@ -1142,6 +1141,10 @@ static std::string timestampShift(const std::string& ts, const IntervalParts& iv
         if (d2 > static_cast<unsigned>(ml)) d2 = static_cast<unsigned>(ml);
         totalDays = civilToDays(ny, static_cast<unsigned>(nm + 1), d2);
     }
+    // PostgreSQL applies calendar months (with month-end clamping) before
+    // calendar days. Reversing these steps changes mixed-field intervals.
+    totalDays += direction * iv.days;
+    if (!dayInDomain(totalDays)) return "";
 
     constexpr long long MICROS_PER_DAY = 86400000000LL;
     __int128 totalMicros =

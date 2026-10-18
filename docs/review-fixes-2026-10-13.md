@@ -1,5 +1,16 @@
 # 2026-10-13 审查问题修复进度
 
+[R147日历间隔顺序](issue-review-r147-interval-calendar-order.md)完成有限修复：
+日期先按月份调整并截断到月底，再加天，最后处理微秒与跨日；修正月底、闰年、
+混合正负间隔及DML中的错值。PG943全过，旧各507/原生890失败与首版11失败保留。
+类型依赖先独立提交f59a1098；当前同一Source625帧的Root48完整入口全部通过，
+本项核对后复用该证据，不冒再次运行或重编Main。新accepted-base clean4native+
+6wire=10全过，原生2043/协议943及类型552全0。clean为fresh1Evaluator O2+
+57个核对全头/flags/CPP/原58receipt及前后字节的R148生产donor，server无stubs。
+已接受570MD、905native+544Python+3Main=1452；工作区573MD、910+549+3=1462。
+原十个未接受入口及R146等用户暂缓不混入；无新1452全注册/TLS/整库sanitizer证明。
+完整civil/DST/其它时间算术仍开放，原273的22/166/70/15不变，不push、Actions禁用。
+
 [R148日期算术结果类型](issue-review-r148-temporal-arithmetic-result-types.md)完成有限修复：
 共享的已声明运算签名统一DATE/时间戳与INTERVAL、差值及int4天数的结果类型，
 不再继承操作数OID或在NULL/零行时猜值。PG552全过，两旧版各259断言失败、

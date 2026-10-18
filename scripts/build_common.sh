@@ -198,6 +198,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/unary_overflow_sqlstate_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/unary_builtin_binding_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/interval_format_sign_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/interval_calendar_order_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/unary_interval_value_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/prepared_read_root_planning_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/explain_root_constant_planning_protocol_e2e_test.py)

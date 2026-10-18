@@ -1,5 +1,10 @@
 # DBMS 使用手册
 
+DATE/时间戳加减同时含月份、天数的INTERVAL时，先调整月份并截断到目标月底，
+再加天，最后处理微秒和跨日。例如2024-01-30加1月1天得到2024-03-01，
+不是2024-02-29。实际表写入、返回值和保存点撤销亦有有限回归；
+范围与尚未完成的civil/DST等边界见[R147](issue-review-r147-interval-calendar-order.md)。
+
 日期算术的结果类型按完整已声明的运算决定：DATE加/减INTERVAL为TIMESTAMP，
 INTERVAL加DATE或时间戳同样返回对应时间戳；DATE差值为integer，时间戳差值为interval。
 SQL NULL和零行结果不改变这些类型，明确类型的text Bind及text/binary结果沿用同一声明。

@@ -2,6 +2,29 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R147 apply interval calendar months before days and clock microseconds",
+      "gap_ids": [
+        "TYPE-06",
+        "FUNC-01",
+        "P0-16"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r147-interval-calendar-order.md"
+      ],
+      "tests": [
+        "tests/interval_calendar_order_test.cpp",
+        "tests/interval_calendar_order_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "reproduction": "ActualPG18.6/180006943complete0; oldRoot519/acceptedef39 each943complete507assertionfail1; oldnative2043complete890fail1. Counter-onlyfirstPG943EXPECTED946actual1(943allmatch)retained; fixedonlycount943. FirstcalendarcandidateRootc1/cleand9 native2043zero butsame943exact11type/binaryfail1; Root35exact34pass1fail1 andclean9exact8pass1fail1 retained.",
+        "focused_tests": "R148 dependencyfirstseparatef59 resolvesdeclaredtemporaltypes;permanent147/552actualPG/accepted-onlycleanalready0. CalendarprivatehelpermonthsclampBEFOREdays,thenmicrodaycarry;all943SQL/expected/rawbinary/tag/Ready unchanged. Native2043independentlibcUTCmodel,9dates5month5day3kinds3directions2025+8micro/24/compound+6NULL+4existingdomain. Wire3modes270expr+8special+3castcommuted+4NULL+6realtextBind+23table/DMLcontrols each=943total. Newaccepted-f59-onlyclean4native6wire10whole0,core2043/943 andtype552zero.",
+        "build": "Initialcalendarnormal1EvaluatorO2/repeat0 andclean1freshCPP+57donors remainhistoricalmetadata-red. R148changedsharedheader=>RootandType-onlycleanfreshALL58normalO2/repeat0,all3freshMainTUsO0/O2/O0/new57CURRENTfreshO2links/no teststubs/pre-globalisolation. Rootalreadyincludedpendingcalendar;itsSource625/binary474/cache0adb/current58receipts/57testbytes/6Maininputs/producerobjects/binariesUNCHANGED;R147normalcheckactual0compiles, reusewholeRoot48complete0HONESTLY,notrerun/freshMainclaimed. Newcalendarcleanbasef59+only2partial2full,freshEvaluatorO2+57verifiedR148newheadercleanproductiondonors(allheaders/flags/CPP/original58receipts/prepostSHA),serverNOstubs/no fakecache/notfresh58. Allold/newclean/donorALLtrackedforeverimmutable.",
+        "scope": "OnlyprivateEvaluatorcalendar2hunks,oneprotocolregistry,twofullfixturesandrelateddocs. No publicheader/heap/schema/indexformat changehere. FinalacceptedTypeOwnR148undoneplusonlycalendarOwn reconstructsall2173originalsrc/tests/scriptsandpriorR145055afterexcludingexactknownR146draft; originalR109/R98/R99/R137/R140bytesunchanged/unaccepted. Pre-doc28workingpathsreconstructedafterundoonlynewDocedits. Original273items/checkboxes22complete166partial70unverified15deferredunchanged.",
+        "full_suite": "Accepted570MD905native544Python3Main1452;working573MD910native549Python3Main1462stilloriginal10pendingentries.571PythonAST13Bashseparate.No newfull1452/TLS/whole-enginesanitizer;historicalecf1436final1/tworealfailures/oneTLSskipretained. UTCtimestamptzonly,completecivil/BC/infinity/error-domain/namedtimezoneDST/TIME/TIMETZ/entireTYPE06notcompleted.R146andothersuserdeferrednotreopened.No push,Actionsdisabled."
+      }
+    },
+    {
       "issue": "R148 declared temporal arithmetic result-type ownership across NULL, binding and binary output",
       "gap_ids": [
         "TYPE-06",

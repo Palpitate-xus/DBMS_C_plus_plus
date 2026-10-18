@@ -1,6 +1,6 @@
 # 全部文档检查清单
 
-审查输入和发现见[代码审查报告](code-review-2026-10-13.md)。基准提交 `a502ffa3` 包含 412 份已跟踪 Markdown；首次审查含新增报告共 417 份。当前本轮逐文件复查 569 份 Markdown，下表覆盖全部；历史数量不改写。
+审查输入和发现见[代码审查报告](code-review-2026-10-13.md)。基准提交 `a502ffa3` 包含 412 份已跟踪 Markdown；首次审查含新增报告共 417 份。当前本轮逐文件复查 570 份 Markdown，下表覆盖全部；历史数量不改写。
 
 检查逐文件读取 UTF-8 内容并验证 Markdown 内联链接的本地文件目标是否存在。它不验证外部网址、锚点、所有引用式链接，也不证明文中每个历史技术结论在当前版本成立。
 使用手册、部署、命令参考、模块 README 和状态入口另作人工一致性核查；`issue-*.md` 保留原始提交和运行证据，其结论须按对应输入读取。
@@ -457,6 +457,7 @@
 | [docs/issue-review-r143-show-guc-protocol-results.md](issue-review-r143-show-guc-protocol-results.md) | 问题、修复与验证 | 通过 |
 | [docs/issue-review-r145-search-path-value-identity.md](issue-review-r145-search-path-value-identity.md) | 问题、修复与验证 | 通过 |
 | [docs/issue-review-r146-primary-key-full-value.md](issue-review-r146-primary-key-full-value.md) | 问题、方法与暂缓记录 | 通过 |
+| [docs/issue-review-r147-interval-calendar-order.md](issue-review-r147-interval-calendar-order.md) | 问题、修复与验证 | 通过 |
 | [docs/issue-review-r148-temporal-arithmetic-result-types.md](issue-review-r148-temporal-arithmetic-result-types.md) | 问题、修复与验证 | 通过 |
 | [docs/issue-root-numeric-publication.md](issue-root-numeric-publication.md) | 历史问题证据 | 通过 |
 | [docs/issue-root-row-publication.md](issue-root-row-publication.md) | 历史问题证据 | 通过 |

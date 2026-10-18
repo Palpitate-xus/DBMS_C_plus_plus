@@ -1,5 +1,9 @@
 # DBMS 全部 Gap TODO（历史记录）
 
+[R147](issue-review-r147-interval-calendar-order.md)有限修复月份/天数/微秒的应用顺序。
+R148类型依赖先独立提交；原2043/943全部断言保留，当前Root48与新clean10全过。
+本轮Root复用同一冻结验收帧，不冒重跑；不改历史勾选、原273状态或用户暂缓。
+
 [R148](issue-review-r148-temporal-arithmetic-result-types.md)有限修复日期算术结果类型。
 147/552、Root48和独立clean14通过，原259/70失败保留；共享头后全58和三Main均fresh。
 R147仍独立待验收，不把其候选混入本项；R146及其它暂缓不重开，原273状态不变。
