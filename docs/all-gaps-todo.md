@@ -1,5 +1,18 @@
 # DBMS 全部 Gap TODO（历史记录）
 
+[R149 WIDTH_BUCKET边界与精度](issue-review-r149-width-bucket-boundaries.md)完成四参数路径修复：
+按方向处理包含端点，NUMERIC保持十进制精确商，float8保留自身舍入，
+count+1超过int4报22003；已声明重载只归实际builtin，原生同名替换不受影响。
+PG804+5全过，冻结旧Root/accepted各804/200失败、旧native515/78失败保留；
+最终515/804、Root36、accepted-only clean11及定向执行器UBSan515全0。
+首轮Root36两处、clean10一处旧SQLSTATE预期错误均保留终态1；按PG核验
+校正预期并补quoted超范围22003断言，没有删断言。生产仅1Evaluator O2/repeat0，
+fixture修正后正常0/repeat0；核对六Main源输入、全部头/flags及对象字节后
+复用R148真实Main对象，新链接当前57 O2库并隔离执行，不冒本轮fresh TU。
+已接受571MD、906native+545Python+3Main=1454；工作区574MD、911+550+3=1464。
+原273仍22/166/70/15；二参数阈值重载、完整numeric域与其余缺口仍开放。
+无新1454全注册/TLS/整库sanitizer证明；用户暂缓不重开、不push、Actions禁用。
+
 [R147](issue-review-r147-interval-calendar-order.md)有限修复月份/天数/微秒的应用顺序。
 R148类型依赖先独立提交；原2043/943全部断言保留，当前Root48与新clean10全过。
 本轮Root复用同一冻结验收帧，不冒重跑；不改历史勾选、原273状态或用户暂缓。

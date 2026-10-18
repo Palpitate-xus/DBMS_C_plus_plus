@@ -505,18 +505,20 @@ static void test_width_bucket() {
     assert(callFn(eval, "width_bucket",
                   {D(std::numeric_limits<double>::infinity()), D(0), D(10),
                    I(4)}).value == "5");
-    bool overflowRejected = false;
+    // The int8 count has no SQL overload; int4 result overflow is tested
+    // separately by width_bucket_boundaries_test.
+    bool signatureRejected = false;
     try {
         (void)callFn(
             eval, "width_bucket",
             {D(20), D(0), D(10),
              I(std::numeric_limits<int64_t>::max())});
     } catch (const std::runtime_error& error) {
-        overflowRejected =
-            std::string(error.what()).find("SQLSTATE 22003") !=
+        signatureRejected =
+            std::string(error.what()).find("SQLSTATE 42883") !=
             std::string::npos;
     }
-    assert(overflowRejected);
+    assert(signatureRejected);
     std::cout << "[MATHFN] width_bucket OK" << std::endl;
 }
 

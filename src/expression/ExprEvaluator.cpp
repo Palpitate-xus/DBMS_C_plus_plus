@@ -376,6 +376,20 @@ static int compareDecimalMagnitudes(const std::string& left,
     return left < right ? -1 : 1;
 }
 
+static std::string addDecimalMagnitudes(const std::string& left,
+                                        const std::string& right) {
+    std::string result(std::max(left.size(), right.size()) + 1, '0');
+    size_t a = left.size(), b = right.size(), out = result.size();
+    int carry = 0;
+    while (out > 0) {
+        const int sum = carry + (a ? left[--a] - '0' : 0) +
+                                (b ? right[--b] - '0' : 0);
+        result[--out] = static_cast<char>('0' + sum % 10);
+        carry = sum / 10;
+    }
+    return normalizeDecimalMagnitude(std::move(result));
+}
+
 // Subtract two normalized unsigned decimal integers, with left >= right.
 static std::string subtractDecimalMagnitudes(const std::string& left,
                                              const std::string& right) {
@@ -5317,6 +5331,12 @@ struct DeclaredArrayPositionScalarFunction {
 };
 // These callbacks have operand-dependent numeric/float8 result metadata.
 // Replacing one through registerFunction must not inherit that builtin rule.
+struct DeclaredWidthBucketScalarFunction {
+    ScalarFunction callback;
+    ExprValue operator()(const std::vector<ExprValue>& args) const {
+        return callback(args);
+    }
+};
 struct IntegralRoundingScalarFunction {
     ScalarFunction callback;
     ExprValue operator()(const std::vector<ExprValue>& args) const {
@@ -5336,6 +5356,8 @@ bool ownsScalarSignatures(const std::string& name,const ScalarFunction* callback
         return callback && callback->target<DeclaredArrayPositionScalarFunction>();
     if(isStringLengthScalarName(name))
         return callback && callback->target<DeclaredStringLengthScalarFunction>();
+    if(name=="width_bucket")
+        return callback && callback->target<DeclaredWidthBucketScalarFunction>();
     // Preserve ownership of the existing R62 and fixed-float8 families.
     return !isFixedFloat8ScalarName(name) ||
         (callback && callback->target<DeclaredFloat8ScalarFunction>());
@@ -5402,6 +5424,9 @@ std::vector<ScalarSignature> scalarSignatures(const std::string& name) {
     if(name=="upper" || name=="lower")return {{{"text"},"text"},
         {{"int4range"},"integer"},{{"int8range"},"bigint"},{{"numrange"},"numeric"},
         {{"daterange"},"date"},{{"tsrange"},"timestamp"},{{"tstzrange"},"timestamptz"}};
+    if(name=="width_bucket")return {
+        {{"numeric","numeric","numeric","integer"},"integer"},
+        {{"double precision","double precision","double precision","integer"},"integer"}};
     if(name=="atan2")return {{{"double precision","double precision"},"double precision"}};
     if(name=="pi")return {{{},"double precision"}};
     if(isFixedFloat8ScalarName(name))return {{{"double precision"},"double precision"}};
@@ -5854,6 +5879,8 @@ std::string ExprEvaluator::scalarFunctionIdentity(const FunctionCallExpr* call,
                        !callback->second.target<ModResultScalarFunction>()) ||
                       (isStringLengthScalarName(resolved.name) &&
                        !callback->second.target<DeclaredStringLengthScalarFunction>()) ||
+                      (resolved.name=="width_bucket" &&
+                       !callback->second.target<DeclaredWidthBucketScalarFunction>()) ||
                       (resolved.name=="array_position" &&
                        !callback->second.target<DeclaredArrayPositionScalarFunction>()))
                 opaqueResultDomain=true;
@@ -10144,53 +10171,99 @@ void ExprEvaluator::registerBuiltins() {
         }
         return ExprValue("numeric", result.toString(), false);
     };
-    // width_bucket(operand, low, high, count) — histogram bucket index (1..count)
+    // Four-argument width_bucket has distinct exact-decimal and float8 callees.
     functions_["width_bucket"] = [](const std::vector<ExprValue>& a) {
-        if (a.size() < 4 || a[0].isNull || a[1].isNull || a[2].isNull || a[3].isNull)
+        if (a.size() != 4)
+            throw DbError("42883", "function does not exist: width_bucket");
+        if (a[0].isNull || a[1].isNull || a[2].isNull || a[3].isNull)
             return ExprValue("integer", "", true);
-        double v = a[0].asDouble(), lo = a[1].asDouble(), hi = a[2].asDouble();
-        const int64_t count = parseInt32Argument(a[3]);
-        if (count <= 0) {
-            throw std::runtime_error(
-                "count must be greater than zero (SQLSTATE 2201G)");
-        }
-        if (std::isnan(v) || std::isnan(lo) || std::isnan(hi)) {
-            throw std::runtime_error(
-                "operand, lower bound, and upper bound cannot be NaN "
-                "(SQLSTATE 2201G)");
-        }
-        if (!std::isfinite(lo) || !std::isfinite(hi)) {
-            throw std::runtime_error(
-                "lower and upper bounds must be finite (SQLSTATE 2201G)");
-        }
-        if (lo == hi) {
-            throw std::runtime_error(
-                "lower bound cannot equal upper bound (SQLSTATE 2201G)");
-        }
-        bool reversed = lo > hi;
-        if (reversed) std::swap(lo, hi);
-        auto pastLastBucket = [count]() -> int64_t {
-            if (count == std::numeric_limits<int64_t>::max()) {
-                throw std::runtime_error(
-                    "integer out of range (SQLSTATE 22003)");
-            }
+        const int32_t count = parseInt32Argument(a[3]);
+        if (count <= 0)
+            throw DbError("2201G", "count must be greater than zero");
+        const auto result = [](int64_t bucket) {
+            return ExprValue("integer", std::to_string(bucket), false);
+        };
+        const auto pastLast = [count]() {
+            if (count == std::numeric_limits<int32_t>::max())
+                throw DbError("22003", "integer out of range");
             return count + 1;
         };
-        int64_t bucket;
-        if (v < lo) bucket = reversed ? pastLastBucket() : 0;
-        else if (v >= hi) bucket = reversed ? 0 : pastLastBucket();
-        else {
-            long double rawBucket = std::floor(
-                (static_cast<long double>(v) - lo) /
-                (static_cast<long double>(hi) - lo) * count) + 1;
-            if (!std::isfinite(rawBucket))
-                return ExprValue("integer", "", true);
-            rawBucket = std::max(
-                1.0L, std::min(rawBucket, static_cast<long double>(count)));
-            int64_t b = static_cast<int64_t>(rawBucket);
-            bucket = reversed ? count - b + 1 : b;
+
+        // Resolution has coerced all three values to the selected overload.
+        // Never pass NUMERIC through binary floating point: nearby endpoints,
+        // very small values and finite large exponents must remain distinct.
+        if (common_type_detail::canonical(a[0].typeName) == "numeric") {
+            std::array<Numeric, 3> values;
+            for (size_t i = 0; i < values.size(); ++i) {
+                const auto parsed = tryParseNumeric(a[i].value);
+                if (!parsed)
+                    throw DbError("22P02", "invalid input syntax for type numeric");
+                values[i] = *parsed;
+            }
+            const auto& operand = values[0];
+            const auto& low = values[1];
+            const auto& high = values[2];
+            if (operand.isNaN() || low.isNaN() || high.isNaN())
+                throw DbError("2201G",
+                    "operand, lower bound, and upper bound cannot be NaN");
+            if (low.isInfinite() || high.isInfinite())
+                throw DbError("2201G", "lower and upper bounds must be finite");
+            if (low == high)
+                throw DbError("2201G", "lower bound cannot equal upper bound");
+            const bool reversed = low > high;
+            if (reversed ? operand > low : operand < low) return result(0);
+            if (reversed ? operand <= high : operand >= high)
+                return result(pastLast());
+
+            // Scaled unsigned distances avoid rounding the quotient or
+            // overflowing the precision cap in an intermediate subtraction.
+            // Even a 1000-digit endpoint can have a wider temporary distance.
+            const int scale = std::max({operand.scale(), low.scale(), high.scale()});
+            const auto distance = [scale](const Numeric& upper, const Numeric& lower) {
+                const auto x = numericMagnitudeAtScale(upper, scale);
+                const auto y = numericMagnitudeAtScale(lower, scale);
+                if (upper.sign() >= 0 && lower.sign() < 0)
+                    return addDecimalMagnitudes(x, y);
+                return upper.sign() < 0
+                    ? subtractDecimalMagnitudes(y, x)
+                    : subtractDecimalMagnitudes(x, y);
+            };
+            const auto numerator = multiplyDecimalMagnitudes(
+                reversed ? distance(low, operand) : distance(operand, low),
+                std::to_string(count));
+            const auto denominator = reversed ? distance(low, high) : distance(high, low);
+            const auto quotient = divideDecimalMagnitudes(numerator, denominator).first;
+            long long bucket = 0;
+            if (!parseInt64Exact(quotient, bucket) || bucket >= count)
+                throw DbError("22003", "integer out of range");
+            return result(bucket + 1);
         }
-        return ExprValue("integer", std::to_string(bucket), false);
+
+        const double operand = parseDoubleCastValue(a[0]);
+        const double low = parseDoubleCastValue(a[1]);
+        const double high = parseDoubleCastValue(a[2]);
+        if (std::isnan(operand) || std::isnan(low) || std::isnan(high))
+            throw DbError("2201G",
+                "operand, lower bound, and upper bound cannot be NaN");
+        if (!std::isfinite(low) || !std::isfinite(high))
+            throw DbError("2201G", "lower and upper bounds must be finite");
+        if (low == high)
+            throw DbError("2201G", "lower bound cannot equal upper bound");
+        const bool reversed = low > high;
+        if (reversed ? operand > low : operand < low) return result(0);
+        if (reversed ? operand <= high : operand >= high)
+            return result(pastLast());
+
+        // Use float8 operations for the float8 overload, including its
+        // rounding at bucket edges. Halve finite inputs if their span overflows.
+        const double span = reversed ? low - high : high - low;
+        const double fraction = std::isinf(span)
+            ? (reversed ? (low / 2 - operand / 2) / (low / 2 - high / 2)
+                        : (operand / 2 - low / 2) / (high / 2 - low / 2))
+            : (reversed ? (low - operand) / span : (operand - low) / span);
+        const auto bucket = std::min<int64_t>(
+            static_cast<int64_t>(count * fraction), count - 1);
+        return result(bucket + 1);
     };
 
     // ------------------------------------------------------------------------
@@ -12956,6 +13029,8 @@ void ExprEvaluator::registerBuiltins() {
             entry.second=DeclaredFloat8ScalarFunction{std::move(entry.second)};
         else if(isStringLengthScalarName(entry.first))
             entry.second=DeclaredStringLengthScalarFunction{std::move(entry.second)};
+        else if(entry.first=="width_bucket")
+            entry.second=DeclaredWidthBucketScalarFunction{std::move(entry.second)};
         else if(entry.first=="array_position")
             entry.second=DeclaredArrayPositionScalarFunction{std::move(entry.second)};
         else if(isIntegralRoundingScalarName(entry.first) || entry.first=="round")

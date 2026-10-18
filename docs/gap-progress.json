@@ -2,6 +2,32 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R149 four-argument width_bucket directional boundaries, decimal precision and int4 overflow",
+      "gap_ids": [
+        "TYPE-01",
+        "TYPE-02",
+        "FUNC-01",
+        "P0-16"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r149-width-bucket-boundaries.md"
+      ],
+      "tests": [
+        "tests/width_bucket_boundaries_test.cpp",
+        "tests/width_bucket_boundaries_protocol_e2e_test.py",
+        "tests/math_functions_test.cpp",
+        "tests/math_projection_error_test.cpp"
+      ],
+      "verification": {
+        "reproduction": "ActualPG18.6/180006 same804 complete0; oldRoot474/accepted415 each804complete200assertionfail1; oldnative515complete78fail1. Addednative EOF-only whitespace cleanup is exactoneblankline, no changed assertion. Extra5actualPG controls prove int8 count no-overload42883 versus UNKNOWN-to-int4 input and genuine int4 result overflow22003.",
+        "focused_tests": "249 numerical cases cover forward/reversed bounds, precise boundaries, maximumint4count,NUMERIC beyond2^53 and1e±999, opposite-sign/intermediate distances, float8 edge rounding/large-span/subnormal/NaN/Infinity/NULL. Native249value+249metadata+5invalidsignatures+12opaqueownership=515. Wire249*3+24invalid/zeroRow+14typed/binaryBind+8TEMP+11transaction/DMLrecovery=804, rawint4OID/size/typmod/format/rows/tag/Ready verified. FinalRoot18native15wire3Main=36whole0;newclean6native5wire=11whole0; changedEvaluator+native O2 UBSan515zero, NOT whole-engine instrumentation.",
+        "build": "PrivateEvaluator only; RootnormaloneEvaluatorO2/repeat0/current58receipts. FirstRoot36actual34pass2fail andclean10actual9pass1fail preserve oldmathfixtureSQLSTATE mismatches; actualPG5 verified42883forint8counts,22003quotedinput/genuineint4result. Correct2expectations AND addquoted22003control after allhealthycompilers/serialgatesfinished. FinalRootnormal0/repeat0 samebinaryacc/cachebc/headerflags041; reused R148realMain3objects ONLY after exactsixsource inputs/allheaders/flags/objectSHAs thennewlinks57CURRENT O2/no stubs/pre-globalisolation. Newcleanaccepted69+only4partial2full, freshEvaluatorO2+57R148fresh58productiondonors inclMain afterallheaders/flags/57CPP/orig58receipts/prepostbytes. Every old/new clean/donor ALLtracked foreverimmutable; knownarchiveignored-but-base-trackedpyc exactbaselinebytechecked, not reindexed or edited after build.",
+        "scope": "OnlyprivateEvaluator unsigned decimal helper/overload-owned signatures/value branches, oneprotocolregistry, twofullfixtures, twoexistingmathfixtures withreference-corrected SQLSTATEs andrelateddocs. No Main/header/schema/heap/index format edits. Undoonlyown4partialsource/test/registry recoversall2177original sourcefiles andprior625frame; original28pendingworkingpaths exact afterundoownsource/docs. Firstserialsummary wrongcleanprefixactual1 andsourcecheckerignoredpyc-setactual1 retained; correctedindependentchecks actual0 without rerunningfailedassertions away. OriginalR98/R99/R109/R137/R140 andR146draft unchanged/unaccepted. Original273items/checkboxes22complete166partial70unverified15deferredunchanged.",
+        "full_suite": "Accepted571MD906native545Python3Main1454; working574MD911native550Python3Main1464 still10originalunacceptedentries.572PythonAST13Bashseparate. No newfull1454/TLS/whole-engine sanitizer; historicalecf1436 actual1433pass2fail1TLSskipfinal1retained. Two-argthreshold overload/fullPGnumericdomain/defaults/named-argument support/allFUNC01 not completed. User-skippedmodules not reopened. No push,Actionsdisabled."
+      }
+    },
+    {
       "issue": "R147 apply interval calendar months before days and clock microseconds",
       "gap_ids": [
         "TYPE-06",
