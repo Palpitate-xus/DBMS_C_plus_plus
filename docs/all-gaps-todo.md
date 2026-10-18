@@ -1,5 +1,9 @@
 # DBMS 全部 Gap TODO（历史记录）
 
+[R141普通SET参数身份/分隔符](issue-review-r141-set-parameter-identity.md)的有限修复与
+389专项、最终13完整入口/clean4见报告；两稿真实失败保留，不据此改历史勾选。
+R140、R137仍用户暂缓，模式参数完整语法及更多管线交互仍不冒完成。
+
 [R140](issue-review-r140-timezone-set-grammar.md)按用户要求暂缓；实现、两测试和注册
 仅保留工作区，未接受为修复。已完成门禁日志保留，不追加跳过项验收或改变历史勾选。
 

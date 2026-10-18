@@ -1,5 +1,15 @@
 # DBMS 功能测试报告
 
+[R141 SET参数身份与分隔符](issue-review-r141-set-parameter-identity.md)完成有限修复：
+普通值不再误入compatibility_mode分支，相似/带点名称不改模式，TO值内等号不作分隔符；
+独立Extended模式设置不再把未执行的规划事务误当BEGIN，真实事务限制保留。
+PG普通参数160全过；冻结旧版各389/235失败。初稿81失败、第二稿21失败及各自
+Root13/clean4/独立终态1保留，未删断言；最终389、13完整入口、clean4与独立核对均0。
+最终仅Network重编O2/repeat0；三个v2fresh真实Main TU经源/头/依赖核对后新链接当前
+57库并隔离执行，session为已接受夹具290，不冒最终fresh或重跑R140待定311。
+R140/R137继续用户暂缓、候选不混入；原273的22/166/70/15不变，无新1444全量/
+TLS/整库sanitizer证明。不push，Actions禁用。
+
 [R140 TimeZone设置语法](issue-review-r140-timezone-set-grammar.md)按用户“skip it”暂缓。
 候选实现、4090原生/6403协议夹具及注册保留，但未提交、未验收，不计已修复。
 跳过前专项、Root43和clean7完整入口实际全0；独立终态验收未运行，不补作通过。

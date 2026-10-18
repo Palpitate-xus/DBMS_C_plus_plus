@@ -38,6 +38,11 @@ wire protocol 不能自动提升行为兼容声明；增加 extended 命令也�
 运行时的 PostgreSQL 对象变成成功操作。切换模式不改变产品版本、wire protocol
 版本、数据格式或当前 database。
 
+模式分派只匹配完整目标参数名，不扫描普通SET的值内容；相似或带点名称
+不是该builtin。普通参数的TO/等号分隔符从引号外定位，不把数据中的等号当语法。
+[R141](issue-review-r141-set-parameter-identity.md)仅验证这些有限边界，不代表完整GUC
+语法、参数域、quoted模式值或事务级LOCAL已经实现。
+
 进程启动必须通过 `-D/--data-dir` 或 `DBMS_DATA_DIR` 显式选择本项目数据根。
 `DBMS_CONTROL` 的项目 magic 和 system identifier 只声明 DBMS-C++ 自有 cluster
 身份，不代表磁盘格式与 PostgreSQL 兼容；含 `PG_VERSION` 的 PostgreSQL cluster

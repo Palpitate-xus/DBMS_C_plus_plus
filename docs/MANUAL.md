@@ -1408,15 +1408,15 @@ ALTER SYSTEM SET max_connections = 128; -- 启动参数，重启后生效
 
 -- extended 模式中的 SET GLOBAL 是 ALTER SYSTEM SET 的持久化别名；
 -- 同样需要 reload 或重启，且不能在事务中执行
-SET compatibility_mode = 'extended';
+SET compatibility_mode = extended;
 SET GLOBAL AUTO_VACUUM = ON;
 SET GLOBAL AUTO_VACUUM_THRESHOLD = 1000;
 SHOW VARIABLES;                          -- 仅 extended 模式提供
 
 -- 兼容模式（DIV 框架；会话开始处受限，事务中不可更改）
 SHOW compatibility_mode;                     -- 默认 postgresql18
-SET compatibility_mode = 'extended';         -- 显式启用项目扩展层
-SET compatibility_mode = 'postgresql18';     -- 回到 PostgreSQL 18 语义
+SET compatibility_mode = extended;           -- 显式启用项目扩展层
+SET compatibility_mode = postgresql18;       -- 回到 PostgreSQL 18 语义
 SHOW dbms.extensions;                        -- 审计当前会话启用的偏移
 ```
 
@@ -1433,9 +1433,16 @@ SHOW dbms.extensions;                        -- 审计当前会话启用的偏�
 - `LOAD 'library'`（无动态加载运行时）
 
 其中 `ASSERTION` 在两种模式下都返回 `0A000`（PostgreSQL 18 本身也未实现
-SQL assertion）。显式 `SET compatibility_mode = 'extended'` 只启用已有真实运行时的
+SQL assertion）。显式 `SET compatibility_mode = extended` 只启用已有真实运行时的
 项目 SQL 扩展；上述没有运行时的对象命令仍返回 `0A000`。旧的兼容对象记录层及其
 SHOW 入口已经删除。该模式是会话级设置，进入事务后不可切换。
+
+普通SET按完整参数名分派，不从值内容识别模式。例如
+`SET application_name TO 'compatibility_mode=extended'`只设置应用名称；
+`SET search_path TO compatibility_mode`只设置schema查找路径。
+`compatibility_mode_extra`及`compatibility_mode.extra`都不是模式参数。
+TO值中的等号仍是数据。这里不承诺完整GUC语法/参数域或事务级LOCAL，
+模式值示例沿用已支持的不带引号写法；有限修复见[R141](issue-review-r141-set-parameter-identity.md)。
 
 同一批门控的项目语法（`postgresql18` 模式下的行为）：
 

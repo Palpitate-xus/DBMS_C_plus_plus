@@ -3700,10 +3700,22 @@ static bool handleSetCommand(const string& sql, Session& s) {
         return false;
     }
 
+    // Match the parameter identifier, never bytes in a value or a
+    // qualified/custom name such as compatibility_mode.extra.
+    const bool setsCompatibilityMode = [&] {
+        const auto tokens = dbms::SQLParser::tokenize(sql);
+        if (tokens.size() < 2 || tokens.front() != "set") return false;
+        size_t parameter = 1;
+        if (tokens[parameter] == "session" || tokens[parameter] == "local" ||
+            tokens[parameter] == "global") ++parameter;
+        if (parameter == tokens.size()) return false;
+        const string name = toLowerSql(tokens[parameter]);
+        return (name == "compatibility_mode" || name == "\"compatibility_mode\"") &&
+            (parameter + 1 == tokens.size() || tokens[parameter + 1] != ".");
+    }();
     // SET compatibility_mode = postgresql18 | extended  (DIV framework)
     // Session-start restricted: refuse to change semantics mid-transaction.
-    if (sql.substr(0, 3) == "set" &&
-        sql.find("compatibility_mode") != string::npos) {
+    if (setsCompatibilityMode) {
         size_t eqPos = sql.find('=');
         if (eqPos == string::npos) {
             cout << "SQL syntax error: SET compatibility_mode = postgresql18|extended"
@@ -3760,10 +3772,12 @@ static bool handleSetCommand(const string& sql, Session& s) {
             cout << "NOTICE: SET GLOBAL is mapped to ALTER SYSTEM semantics in "
                     "extended compatibility mode" << endl;
         }
-        size_t separatorPos = rest.find('=');
+        // Delimiters inside a datum or quoted identifier are not SET syntax.
+        // In particular, TO 'a=b' must not select the literal's equals sign.
+        size_t separatorPos = findTextOutsideQuotes(rest, "=");
         size_t separatorLength = 1;
         if (separatorPos == string::npos) {
-            separatorPos = toLowerSql(rest).find(" to ");
+            separatorPos = findTextOutsideQuotes(toLowerSql(rest), " to ");
             separatorLength = 4;
         }
         if (separatorPos == string::npos) {

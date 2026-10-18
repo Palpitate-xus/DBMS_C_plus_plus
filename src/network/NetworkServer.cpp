@@ -1323,6 +1323,23 @@ bool isStandaloneDiscardAllStatement(const std::string& sql) {
            firstSqlKeyword(tokens[1]) == "all";
 }
 
+// A first, independent mode utility must not mistake Parse/Bind's internal
+// planning snapshot for a user BEGIN. Keep the supported value grammar
+// deliberately narrow and preserve the explicit-block restriction in Main.
+bool isStandaloneCompatibilityModeSetting(const std::string& sql) {
+    auto tokens = SQLParser::tokenize(sql);
+    if (!tokens.empty() && tokens.back() == ";") tokens.pop_back();
+    if (tokens.empty() || SQLParser::toLower(tokens.front()) != "set") return false;
+    size_t parameter = 1;
+    if (parameter < tokens.size() &&
+        SQLParser::toLower(tokens[parameter]) == "session") ++parameter;
+    if (tokens.size() != parameter + 3 || tokens[parameter + 1] != "=") return false;
+    const auto name = SQLParser::toLower(tokens[parameter]);
+    const auto value = SQLParser::toLower(tokens[parameter + 2]);
+    return (name == "compatibility_mode" || name == "\"compatibility_mode\"") &&
+        (value == "postgresql18" || value == "extended");
+}
+
 std::vector<std::string> splitProtocolFields(const std::string& line) {
     std::vector<std::string> fields;
     // Double-quoted segments are single fields (multi-word column headers
@@ -6159,7 +6176,8 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             }
 
             if (statements.size() == 1 &&
-                isStandaloneDiscardAllStatement(statements.front()) &&
+                (isStandaloneDiscardAllStatement(statements.front()) ||
+                 isStandaloneCompatibilityModeSetting(statements.front())) &&
                 extendedImplicitTransaction && !extendedImplicitExecuted &&
                 !transactionFailed) {
                 const QueryResult completion = finishExtendedImplicitTransaction(false);
@@ -6685,7 +6703,8 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 continue;
             }
             if (!portalIt->second.executed &&
-                isStandaloneDiscardAllStatement(portalIt->second.sql) &&
+                (isStandaloneDiscardAllStatement(portalIt->second.sql) ||
+                 isStandaloneCompatibilityModeSetting(portalIt->second.sql)) &&
                 extendedImplicitTransaction && !extendedImplicitExecuted &&
                 !transactionFailed) {
                 // Finishing the planning transaction expires all its
@@ -6777,7 +6796,8 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 if (!g_engine.inTransaction() &&
                     !isTransactionControlStatement(portalState.sql) &&
                     !SQLParser::isSetTransactionStatement(portalState.sql) &&
-                    !isStandaloneDiscardAllStatement(portalState.sql)) {
+                    !isStandaloneDiscardAllStatement(portalState.sql) &&
+                    !isStandaloneCompatibilityModeSetting(portalState.sql)) {
                     QueryResult beginResult = executeForProtocol("BEGIN");
                     if (beginResult.error) {
                         protocol.sendErrorResponse(

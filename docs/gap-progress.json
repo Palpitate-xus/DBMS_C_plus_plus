@@ -2,6 +2,27 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R141 ordinary SET parameter identity, quoted delimiter scan and standalone Extended compatibility-mode utility",
+      "gap_ids": [
+        "OPS-02"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r141-set-parameter-identity.md"
+      ],
+      "tests": [
+        "tests/set_parameter_identity_protocol_e2e_test.py",
+        "tests/frontend/session_execution_lifetime.cpp"
+      ],
+      "verification": {
+        "reproduction": "ActualPG18.6/180006 ordinaryapplication_name/search_path160controls0. FrozenRootfa7af302 and acceptedclean6850729b same389complete235assertionfail actual1; dependentSHOWassertions are not235independentbugs.28/12observations0 collectiononly. Firstold389collection overlappedcandidateMain editing so retainedasobservation; frozen-program/input389reruns each235fail1 are finaloldcontrols.",
+        "focused_tests": "Whole389fixtureunchangedSHA6f36cd977856913b852e85de8ec4910a39a3066471c5830d8d2d2df5406e39b6. V1identityguard fixesneedle-routing but ordinaryTO-stringequals stillwrong:389/81fail bothRootandclean. V2quoteprotectedseparator reduces to389/21fail, exposinginternalExtendedplanningtransaction wronglyrejectingstandalonemodeutility. BothversionsRoot13exact12pass1failure/clean4exact3pass1failure andindependent1 retained. V3privateNetwork predicate recognizesonlyexistingbare/session exactmode=postgresql18|extended, completesonlyunexecutedplanningtransaction,avoidsrecreatingimplicittransactionforutility; explicitBEGINrestrictionunchangedandtested. V3Root3890/clean3890,4native6wire3realMain13ordereduniquecomplete0; clean4complete0; independent0.",
+        "build": "V1andV2 eachnormal1MainO2/repeat0 andall3MainTUsfresh(explain/sessionbaselineO0,windowO2). FinalV3onlyprivateNetworkCPP changed,normal1NetworkO2/repeat0; Main.cpp3066209b andfullheaders/compiler/flags348unchanged,productionMainobject947bb unchanged. ReconstructoldRoot34c framebyundoingONLYNetwork4ownhunks; fourMain/testsourcehashes,oldfreshobjectsandfresh-MMnoNetworkCPPdependencies verified. ReuseV2freshTUobjects thennewlink57CURRENTproductionO2libs/no teststubs/actualisolatedruns,notV3freshTUs. Allthreefixturesprojectacceptedc63HEADonlyincludePathrewritten; actualsession290 excludesR140pending311. CleanV3c63+own4source/testpaths usesfreshO2Network+validatedV2cleanMainobject07689393+56verifiedR136donorproductionobjects; fullheaders/56CPP/all58donorreceipts/prehashed56bytes validated. Notnormalfresh58.",
+        "full_suite": "No newfull1444/TLS/whole-enginesanitizer proof. Accepted564MD902native539Python3Main1444; working567MD907native544Python3Main1454 withoriginal6/R137two/R140two pendingentries;565PythonAST13Bash separate. Historicalecf1436complete1433pass2fail1TLSskip final1 retained. Rootbinary90b3f70a2ffbaa723380febda8bb4607889da35d7568f6dd1c450953389965d1/cache9acf2235904976f41311ebb3cf9aa8bc02e0535ec0be7fb1129c09c53a8e71d2/source8ddaaf74b3d057715aec3dbe47ad67a4c155a89182076b21c0a6e597b44e9d68.",
+        "scope": "OnlyMain2privatehunks,Network4privatehunks,oneprotocolregistryline,new389wirefixture andscopedrelateddocs. No publicheaders/ABI/heap/auth changes. FullGUCgrammar/quotedmodevalues/LOCAL-GLOBALpolicy/morepipeline-DDLinteractions notcompleted. Manualquotesamples alignexistingbarevaluecontract,notnewquotedvalueimplementation. R140archive6source/testbytes exactafterundoONLYownMain2/registry; R137TM/twotestbytes exact,old56933patch/threedrafts preserved. AcceptedindexexcludesR98/R99/R109/R137/R140candidates. Original273items/checkboxes22complete166partial70unverified15deferred unchanged. No push,Actionsdisabled."
+      }
+    },
+    {
       "issue": "R140 TimeZone SET grammar and Parse/Execute phases: user-deferred candidate",
       "gap_ids": [
         "OPS-02",
