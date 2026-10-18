@@ -461,7 +461,7 @@
 | [docs/issue-review-r148-temporal-arithmetic-result-types.md](issue-review-r148-temporal-arithmetic-result-types.md) | 问题、修复与验证 | 通过 |
 | [docs/issue-review-r149-width-bucket-boundaries.md](issue-review-r149-width-bucket-boundaries.md) | 问题、修复与验证 | 通过 |
 | [docs/issue-review-r150-threshold-width-bucket.md](issue-review-r150-threshold-width-bucket.md) | 开放问题、方法与观察 | 通过 |
-| [docs/issue-review-r151-enum-array-catalog.md](issue-review-r151-enum-array-catalog.md) | 未验收候选与失败证据 | 通过 |
+| [docs/issue-review-r151-enum-array-catalog.md](issue-review-r151-enum-array-catalog.md) | 用户暂缓、未验收候选与失败证据 | 通过 |
 | [docs/issue-root-numeric-publication.md](issue-root-numeric-publication.md) | 历史问题证据 | 通过 |
 | [docs/issue-root-row-publication.md](issue-root-row-publication.md) | 历史问题证据 | 通过 |
 | [docs/issue-root-sql-value-publication.md](issue-root-sql-value-publication.md) | 历史问题证据 | 通过 |

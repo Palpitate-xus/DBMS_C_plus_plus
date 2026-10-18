@@ -2,7 +2,7 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
-      "issue": "R150 threshold width_bucket and R151 enum array catalog dependencies remain open",
+      "issue": "R150 threshold width_bucket open; R151 enum array catalog user deferred",
       "gap_ids": [
         "TYPE-08",
         "CAT-04",
@@ -18,7 +18,7 @@
         "reproduction": "ActualPG18.6/Root each61collectionobservations,fullnumeric/text/time/network/JSONB/range/textsearch/enum scope retained; NOT61pass. PGenum2args2/3,oldRootenumarray42704. ReferenceXML0A000isbuildcapabilitynotuniversalnorm.",
         "focused_tests": "R151permanentcandidate native341/protocol103 preservedunaccepted. PG1030; oldRootandacceptedR149clean each10386fail1;oldnative341280fail1. CandidateRootandclean native3410 BUTsamefull103each60fail1;whole4smokeactual1. Do NOTacceptnativeonly/shrinkfixtures. FirstnativecompileDropBehaviorqualifiedfix1 andfirstreference103expected99counteronly1 retained.",
         "candidate": "UncommittedCatalog/Ddlprivatehelpers autoarrayOID/nameUTF8collision/internaldeps/pairlifecycle/mutablelegacyrepair; readonlynoOIDallocation. Rootnormal2O2/repeat0/current58receipt,clean2freshO2+55verifiedR148donors+currentR149evaluator/no serverstubs. Allcandidate/donortrackedforeverimmutable. No newMaincompile/link/runtime/fullsuite/sanitizerclaim.",
-        "next": "IndependentREGTYPE minimalquoting, actualcatalog wireOID vsfallbackTEXT andqualified63byte/UTF8enumnamestoragevalidation fixes requiredbeforeR151all103green; thenfullanycompatiblearraythresholdfunction+all61types/params/rows/binary. Main/headerchanges requirefresh58/fresh3Main. No productioncandidate/test/registry accepted inthisdocumentationcommit.",
+        "next": "User2026-10-18 skipit: R151deferred, notfixed/notaccepted. Preservecandidate source/twofixtures/registry andall103assertions;ordinarycontinue doesnotresumeR151. R150full61scope remainsopen. IndependentREGTYPEdisplay mayproceed separately, notR151acceptance. Ifexplicitlyresumed, allthreecausesandfull341/103gates remainrequired. Main/headerchanges requirefresh58/fresh3Main. Documentationonly,noproductioncandidate/test/registryaccepted.",
         "full_suite": "Accepted573MD906native545Python3Main1454 unchangedentrycount;working576MD912native551Python3Main1466 includesoriginal10+R1512unacceptedentries.573PythonAST13Bashseparate. No new1454full/TLS/wholeenginesanitizer;historicalecf1436twofail1TLSskipfinal1retained. Original273items/checkboxes22complete166partial70unverified15deferredunchanged;NoPush/Actionsdisabled."
       }
     },

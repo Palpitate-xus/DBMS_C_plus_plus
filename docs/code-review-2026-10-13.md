@@ -2,11 +2,11 @@
 
 [R150阈值重载](issue-review-r150-threshold-width-bucket.md)仍开放；实际PG/Root各完成61条
 广泛类型观察，保留非数字类型与XML参考构建能力差异，不冒充61项通过。
-[R151枚举数组目录](issue-review-r151-enum-array-catalog.md)为前置候选：PG103全过，
-旧Root/accepted clean各103/86失败，旧native341/280失败；候选两端native341全0，
-但完整103协议各仍60失败、四入口终态1，因此未验收、未提交生产代码/夹具/注册。
-下一步修复REGTYPE名称引用、目录类型wire OID和限定枚举名长度校验，
-再重跑全部103断言，之后才接入完整阈值比较器。本次仅保存问题、计划和证据，不把候选当已修复。
+[R151枚举数组目录](issue-review-r151-enum-array-catalog.md)按用户“skip it”暂缓：
+PG103全过，旧Root/accepted clean各103/86失败，旧native341/280失败；
+候选两端native341全0，但完整103协议各仍60失败、四入口终态1。
+候选源码、两个夹具及注册原样保留，未验收、未提交；普通继续不恢复本项。
+独立REGTYPE名称显示问题可另行复现、修复与提交，不以此重开枚举数组或宣称R150完成。
 已接受573MD、906native+545Python+3Main=1454不变；工作区576MD、912+551+3=1466，
 另含R151两个未接受入口。原273仍22/166/70/15；无新1454全量/TLS/整库sanitizer。
 用户暂缓不重开、不push、Actions禁用。
