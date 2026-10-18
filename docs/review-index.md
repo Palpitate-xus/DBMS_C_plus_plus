@@ -1,5 +1,11 @@
 # 代码审查索引
 
+[R146主键完整值/前缀碰撞](issue-review-r146-primary-key-full-value.md)按用户“skip it”暂缓。
+实际PG1347全过；冻结Root和已接受组合各1365完整控制/696断言失败，原日志保留。
+本项未实施生产源码修改，协议草稿未注册、未提交，不计已修复；普通继续不重开。
+本次只提交暂缓记录，测试仍903native+542Python+3Main=1448，已接受MD568，
+工作区MD571另含未接受草稿。R137等暂缓仍有效，原273状态不变，不push、Actions禁用。
+
 [R145搜索路径参数语义](issue-review-r145-search-path-value-identity.md)完成有限修复：
 SQL SET按raw AST的独立参数逐项list-quote，不再把Sconst当已格式化列表；
 保留逗号、大小写、单双引号、空名字与关键字语义。FROM CURRENT走真实
