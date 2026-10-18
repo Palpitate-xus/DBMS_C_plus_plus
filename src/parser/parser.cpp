@@ -5856,6 +5856,71 @@ ParseResult SQLParser::parseRelease(const std::string& sql) {
 // SET / SHOW / RESET / USE / DISCARD
 // ------------------------------------------------------------------------
 
+// PostgreSQL 18.6 kwlist.h categories: quote non-unreserved keywords;
+// generic SET accepts nonreserved words plus the boolean TRUE/FALSE/ON.
+static int searchPathKeywordKind(const std::string& word) {
+    static const std::unordered_map<std::string, int> keywords = {
+        {"all", 2}, {"analyse", 2}, {"analyze", 2}, {"and", 2},
+        {"any", 2}, {"array", 2}, {"as", 2}, {"asc", 2},
+        {"asymmetric", 2}, {"authorization", 1}, {"between", 1}, {"bigint", 1},
+        {"binary", 1}, {"bit", 1}, {"boolean", 1}, {"both", 2},
+        {"case", 2}, {"cast", 2}, {"char", 1}, {"character", 1},
+        {"check", 2}, {"coalesce", 1}, {"collate", 2}, {"collation", 1},
+        {"column", 2}, {"concurrently", 1}, {"constraint", 2}, {"create", 2},
+        {"cross", 1}, {"current_catalog", 2}, {"current_date", 2}, {"current_role", 2},
+        {"current_schema", 1}, {"current_time", 2}, {"current_timestamp", 2}, {"current_user", 2},
+        {"dec", 1}, {"decimal", 1}, {"default", 2}, {"deferrable", 2},
+        {"desc", 2}, {"distinct", 2}, {"do", 2}, {"else", 2},
+        {"end", 2}, {"except", 2}, {"exists", 1}, {"extract", 1},
+        {"false", 2}, {"fetch", 2}, {"float", 1}, {"for", 2},
+        {"foreign", 2}, {"freeze", 1}, {"from", 2}, {"full", 1},
+        {"grant", 2}, {"greatest", 1}, {"group", 2}, {"grouping", 1},
+        {"having", 2}, {"ilike", 1}, {"in", 2}, {"initially", 2},
+        {"inner", 1}, {"inout", 1}, {"int", 1}, {"integer", 1},
+        {"intersect", 2}, {"interval", 1}, {"into", 2}, {"is", 1},
+        {"isnull", 1}, {"join", 1}, {"json", 1}, {"json_array", 1},
+        {"json_arrayagg", 1}, {"json_exists", 1}, {"json_object", 1}, {"json_objectagg", 1},
+        {"json_query", 1}, {"json_scalar", 1}, {"json_serialize", 1}, {"json_table", 1},
+        {"json_value", 1}, {"lateral", 2}, {"leading", 2}, {"least", 1},
+        {"left", 1}, {"like", 1}, {"limit", 2}, {"localtime", 2},
+        {"localtimestamp", 2}, {"merge_action", 1}, {"national", 1}, {"natural", 1},
+        {"nchar", 1}, {"none", 1}, {"normalize", 1}, {"not", 2},
+        {"notnull", 1}, {"null", 2}, {"nullif", 1}, {"numeric", 1},
+        {"offset", 2}, {"on", 2}, {"only", 2}, {"or", 2},
+        {"order", 2}, {"out", 1}, {"outer", 1}, {"overlaps", 1},
+        {"overlay", 1}, {"placing", 2}, {"position", 1}, {"precision", 1},
+        {"primary", 2}, {"real", 1}, {"references", 2}, {"returning", 2},
+        {"right", 1}, {"row", 1}, {"select", 2}, {"session_user", 2},
+        {"setof", 1}, {"similar", 1}, {"smallint", 1}, {"some", 2},
+        {"substring", 1}, {"symmetric", 2}, {"system_user", 2}, {"table", 2},
+        {"tablesample", 1}, {"then", 2}, {"time", 1}, {"timestamp", 1},
+        {"to", 2}, {"trailing", 2}, {"treat", 1}, {"trim", 1},
+        {"true", 2}, {"union", 2}, {"unique", 2}, {"user", 2},
+        {"using", 2}, {"values", 1}, {"varchar", 1}, {"variadic", 2},
+        {"verbose", 1}, {"when", 2}, {"where", 2}, {"window", 2},
+        {"with", 2}, {"xmlattributes", 1}, {"xmlconcat", 1}, {"xmlelement", 1},
+        {"xmlexists", 1}, {"xmlforest", 1}, {"xmlnamespaces", 1}, {"xmlparse", 1},
+        {"xmlpi", 1}, {"xmlroot", 1}, {"xmlserialize", 1}, {"xmltable", 1},
+    };
+    const auto found = keywords.find(word);
+    return found == keywords.end() ? 0 : found->second;
+}
+
+static std::string quoteSearchPathArgument(const std::string& value) {
+    bool safe = !value.empty() &&
+        ((value.front() >= 'a' && value.front() <= 'z') || value.front() == '_');
+    for (const unsigned char ch : value)
+        if (!((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '_'))
+            safe = false;
+    if (safe && searchPathKeywordKind(value) == 0) return value;
+    std::string quoted = "\"";
+    for (const char ch : value) {
+        if (ch == '"') quoted += '"';
+        quoted += ch;
+    }
+    return quoted + '"';
+}
+
 ParseResult SQLParser::parseSet(const std::string& sql) {
     if (isSetTransactionStatement(sql)) return parseBegin(sql);
     ParseResult r;
@@ -5872,6 +5937,123 @@ ParseResult SQLParser::parseSet(const std::string& sql) {
         stmt->scope = SetStmt::Scope::Session; ++pos;
     } else if (pos < tokens.size() && toLower(tokens[pos]) == "local") {
         stmt->scope = SetStmt::Scope::Local; ++pos;
+    }
+
+    // SQL SET's var_list is a list of separate values, not an already
+    // formatted GUC string. Retain each flattened argument in the AST.
+    if (pos < tokens.size() &&
+        toLower(parseRoutineIdentifier(tokens[pos])) == "search_path" &&
+        (pos + 1 == tokens.size() || tokens[pos + 1] != ".")) {
+        BindingParseContext context{sql};
+        auto* previous = bindingParse;
+        bindingParse = &context;
+        struct Restore { BindingParseContext* previous; ~Restore() { bindingParse = previous; } } restore{previous};
+        const auto values = tokenize(sql);
+        const auto& spans = context.tokens.at(values.data()).spans;
+        size_t end = values.size();
+        if (end && values[end - 1] == ";") --end;
+        size_t at = pos + 1;
+        const auto syntax = [](const char* message) {
+            ParseResult failed;
+            failed.error = message;
+            failed.sqlState = "42601";
+            return failed;
+        };
+        stmt->name = "search_path";
+        if (at + 2 == end && toLower(values[at]) == "from" &&
+            toLower(values[at + 1]) == "current") {
+            r.success = true; r.stmt = std::move(stmt); return r;
+        }
+        if (at == end || (values[at] != "=" && toLower(values[at]) != "to"))
+            return syntax("SET search_path requires TO or =");
+        if (++at == end) return syntax("SET search_path requires a value");
+        if (toLower(values[at]) == "default") {
+            if (at + 1 != end) return syntax("unexpected tokens after search_path DEFAULT");
+            stmt->values = {"default"};
+            r.success = true; r.stmt = std::move(stmt); return r;
+        }
+        const auto continuation = [&](size_t before, size_t after) {
+            if (sql[spans[after].first] != '\'') return false;
+            bool newline = false;
+            for (size_t i = spans[before].second; i < spans[after].first;) {
+                if (std::isspace(static_cast<unsigned char>(sql[i]))) {
+                    newline = newline || sql[i] == '\n' || sql[i] == '\r';
+                    ++i;
+                } else if (sql[i] == '-' && i + 1 < spans[after].first && sql[i + 1] == '-') {
+                    i += 2;
+                    while (i < spans[after].first && sql[i] != '\n' && sql[i] != '\r') ++i;
+                } else return false;
+            }
+            return newline;
+        };
+        const auto identifier = [](const std::string& token) {
+            if (token.size() >= 2 && token.front() == '"' && token.back() == '"')
+                return token.size() > 2;
+            if (token.empty()) return false;
+            const unsigned char first = token.front();
+            if (!std::isalpha(first) && first != '_' && first < 0x80) return false;
+            for (const unsigned char ch : token)
+                if (!std::isalnum(ch) && ch != '_' && ch != '$' && ch < 0x80) return false;
+            return true;
+        };
+        for (;;) {
+            std::string argument;
+            if (isStringLiteralToken(values[at])) {
+                const size_t raw = spans[at].first;
+                const bool escape = (sql[raw] == 'e' || sql[raw] == 'E') &&
+                    raw + 1 < sql.size() && sql[raw + 1] == '\'';
+                const bool canContinue = escape || sql[raw] == '\'';
+                std::string literal = values[at++];
+                while (canContinue && at < end && isStringLiteralToken(values[at]) &&
+                       continuation(at - 1, at)) {
+                    const auto next = escape ? normalizeEscapeStringToken("E" + values[at]) : values[at];
+                    literal.pop_back();
+                    literal += next.substr(1);
+                    ++at;
+                }
+                argument = quoteSearchPathArgument(stripQuotes(literal));
+            } else if (identifier(values[at])) {
+                const bool quoted = values[at].front() == '"';
+                const std::string word = toLower(values[at]);
+                if (!quoted && searchPathKeywordKind(word) == 2 &&
+                    word != "true" && word != "false" && word != "on")
+                    return syntax("reserved keyword is not a search_path value");
+                argument = quoteSearchPathArgument(parseRoutineIdentifier(values[at++]));
+            } else {
+                std::string sign;
+                if (values[at] == "+" || values[at] == "-") sign = values[at++];
+                if (at == end) return syntax("search_path sign requires a numeric constant");
+                const auto& number = values[at++];
+                const auto integer = parsePostgresIntegerText(sign + number, 32);
+                if (integer.error == IntegerTextError::None) {
+                    argument = std::to_string(integer.value);
+                } else {
+                    const bool based = number.size() > 2 && number[0] == '0' &&
+                        (number[1] == 'x' || number[1] == 'X' || number[1] == 'o' ||
+                         number[1] == 'O' || number[1] == 'b' || number[1] == 'B');
+                    const auto wide = parsePostgresIntegerText(sign + number, 64);
+                    if (based && wide.error == IntegerTextError::None) {
+                        argument = std::to_string(wide.value);
+                    } else {
+                        std::string decimal;
+                        for (size_t i = 0; i < number.size(); ++i) {
+                            if (number[i] != '_') decimal += number[i];
+                            else if (!i || i + 1 == number.size() ||
+                                     !std::isdigit(static_cast<unsigned char>(number[i - 1])) ||
+                                     !std::isdigit(static_cast<unsigned char>(number[i + 1])))
+                                return syntax("invalid numeric search_path value");
+                        }
+                        if (!isNumericToken(decimal)) return syntax("invalid search_path value");
+                        argument = (sign == "-" ? sign : "") + decimal;
+                    }
+                }
+            }
+            stmt->values.push_back(std::move(argument));
+            if (at == end) break;
+            if (values[at++] != "," || at == end)
+                return syntax("unexpected tokens after search_path value");
+        }
+        r.success = true; r.stmt = std::move(stmt); return r;
     }
 
     // Handle special SET ROLE / SESSION AUTHORIZATION forms

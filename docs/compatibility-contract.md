@@ -1,5 +1,11 @@
 # 兼容版本契约
 
+[R145](issue-review-r145-search-path-value-identity.md)有限支持SQL SET search_path的
+逐参数list-quote、原样名字数据、空名字及FROM CURRENT真实事务赋值。
+PG3573、Root18/clean10及独立复核通过；不据此宣称startup raw GUC格式、
+全部数字/Unicode标识符语法、quote_all_identifiers或其它参数事务语义完整。
+R144应用名规范化按用户要求暂缓，没有在本项接受。
+
 本契约定义 DBMS_C_plus_plus 可以对外作出的兼容性声明。它把产品版本、
 PostgreSQL 行为目标、wire protocol 和项目扩展分开版本化，避免把“psql 能连接”
 误写成“与 PostgreSQL 等价”。当前总账状态仍只取自

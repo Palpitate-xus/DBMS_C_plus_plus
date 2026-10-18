@@ -1,5 +1,18 @@
 # 2026-10-13 审查与验证入口
 
+[R145搜索路径参数语义](issue-review-r145-search-path-value-identity.md)完成有限修复：
+SQL SET按raw AST的独立参数逐项list-quote，不再把Sconst当已格式化列表；
+保留逗号、大小写、单双引号、空名字与关键字语义。FROM CURRENT走真实
+persistent/LOCAL赋值栈，避免把LOCAL可见值错误当无操作。PG3573全过，
+原版各1098断言失败；初稿各4个事务断言失败，均保留原日志。最终Root/clean3573、
+Root18完整入口/clean10及独立复核通过，native254和真实session320全过。
+共享头改动后首轮Root/clean均fresh58 O2；最后Main修正再正常1Main O2/repeat0，
+核对57库未变，fresh三Main TU O0/O2/O0后新链接当前57 O2库、隔离实际运行。
+新clean为fresh Main O2+57逐一核对头/flags/CPP/原receipt/字节的生产donor，无stubs。
+已接受567MD、903native+542Python+3Main=1448；工作区570MD、908+547+3=1458。
+R144/R140/R137与其它用户暂缓保持未修复，原273的22/166/70/15不变；
+无新1448全注册/TLS/整库sanitizer证明，不push，Actions禁用。
+
 [R142 quoted SET参数名](issue-review-r142-quoted-set-parameter.md)完成有限修复：
 完整单token双引号名称按GUC大小写无关规则解码，LOCAL搜索路径按规范名判断，
 原始@变量分支仍用原语法，quoted @目标不改已有变量。PG530全过，原旧版各544/322

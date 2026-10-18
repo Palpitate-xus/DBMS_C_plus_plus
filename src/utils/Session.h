@@ -12,7 +12,7 @@
 namespace dbms {
 
 // Parse the list-valued search_path GUC without flattening quoted identifiers
-// or accepting empty/malformed elements.  Entries are stored without quotes;
+// or accepting empty unquoted/malformed elements. Entries are stored without quotes;
 // unquoted identifiers follow PostgreSQL's lower-case folding rule.  "$user",
 // pg_temp and pg_catalog are resolved by relation lookup rather than here.
 inline bool parseSessionSearchPath(const std::string& value,
@@ -34,7 +34,7 @@ inline bool parseSessionSearchPath(const std::string& value,
                        static_cast<unsigned char>(current[last - 1]))) --last;
         }
         std::string entry = current.substr(first, last - first);
-        if (entry.empty() || entry.find('\0') != std::string::npos)
+        if ((entry.empty() && !currentWasQuoted) || entry.find('\0') != std::string::npos)
             return false;
         if (!currentWasQuoted) {
             for (char& ch : entry) {
@@ -84,7 +84,7 @@ inline bool parseSessionSearchPath(const std::string& value,
     for (size_t index = 0; index < entries.size(); ++index) {
         if (index != 0) canonical += ", ";
         const std::string& entry = entries[index];
-        bool needsQuotes = entry == "$user";
+        bool needsQuotes = entry.empty() || entry == "$user";
         for (const unsigned char ch : entry) {
             if (!(std::islower(ch) || std::isdigit(ch) || ch == '_')) {
                 needsQuotes = true;

@@ -52,11 +52,11 @@ fresh O2 Main、Network加56个逐一核对CPP/头/58原receipt/SHA的R136生产
 | 项目 | 实测事实与后续修改方法 |
 | --- | --- |
 | R144应用名规范化（用户暂缓） | PG将控制字符/非ASCII转ASCII转义，旧项目保留原字节；用户要求跳过，未修改实现或执行专项验收。重新开启时需核对SET、startup、SHOW/current_setting与ParameterStatus，在赋值边界统一规范，不能仅在SHOW掩饰 |
-| R145路径列表语法 | SET search_path TO Sconst含双引号时PG按一个名字做list-quote，旧版把它当已经格式化路径；应从AST参数的类型/列表逐项quote_identifier，不能stripQuotes后再切同一字符串 |
+| R145路径列表语法 | 后由[R145](issue-review-r145-search-path-value-identity.md)独立有限修复：raw AST逐项list-quote，保留Sconst身份及FROM CURRENT事务赋值；本项SHOW历史范围不回写 |
 
 21条应用名、10条Sconst路径与10条直接标识符观察保留在本机证据目录，
 其退出0是采集完成而非兼容通过。R144后续已按用户要求暂缓，未修复；
-R145仍是下一项普通开放问题，不属于本项已修复范围。
+R145后由其独立提交有限修复，不属于本项SHOW已修复范围；其它GUC语法仍开放。
 
 ## 检查器记录与产物
 

@@ -1,5 +1,12 @@
 # DBMS 使用手册
 
+`SET search_path TO 'a,b'`设置名称为`a,b`的一个schema；
+`SET search_path TO a,b`才是两个schema。Sconst内的大小写和引号属于名字数据，
+例如`'Upper'`不折成`upper`，空串设置的GUC显示为`""`。
+`SET search_path FROM CURRENT`是普通会话赋值：事务中当前LOCAL可见值可由此保留至COMMIT后；
+`SET LOCAL search_path FROM CURRENT`仍随事务结束恢复，ROLLBACK撤销普通赋值。
+普通DEFAULT重置与带引号的`'default'`名字不同。验证范围见[R145](issue-review-r145-search-path-value-identity.md)。
+
 已实现普通参数的完整双引号名称按GUC大小写无关规则查找，例如
 `SET "APPLICATION_NAME" TO 'client'`与`SET application_name TO 'client'`设置同一字段。
 事务内`SET LOCAL "search_path" TO pg_catalog`沿用已有搜索路径作用域。

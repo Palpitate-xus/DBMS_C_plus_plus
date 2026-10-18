@@ -2,6 +2,28 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R145 SQL SET search_path argument identity and FROM CURRENT transaction assignment",
+      "gap_ids": [
+        "OPS-02"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r145-search-path-value-identity.md"
+      ],
+      "tests": [
+        "tests/search_path_values_grammar_test.cpp",
+        "tests/search_path_values_protocol_e2e_test.py",
+        "tests/frontend/session_execution_lifetime.cpp"
+      ],
+      "verification": {
+        "reproduction": "ActualPG18.6/180006 final3573complete0. OriginalRoot907 and accepted a799 eachfinal3573/1098assertionfail1; original3519 each1074fail preserved. First candidate Rootc69/clean d74 passesoriginal3519 but expanded3573 hasexact4fail at3526/3533/3553/3560:SET/SESSION FROMCURRENT failedtopersistLOCALvisiblevalue. Samefinalfixture79a8... usedbefore/after correction; finalRoot/clean3573all0. Initialoverlappedoldrednotusedasacceptance;serialoldrecheckscomplete, nofailuredeleted.",
+        "focused_tests": "Raw SET path AST flattens individualSconst/quotedID/nonreserved/numericargs withPG18.6listquote;all494keywordquoted/bare golden controls verifiedactualPG. SQLstringcommas/case/doubledquotes/empty/E/dollar/newlinecontinuation; malformedinput42601doesnotmutatepath; DEFAULT distinctliteraldefault. FROMCURRENTassignscurrentvalue throughpersistent/LOCALstack,commitsandrollbacks; rawadapterbeforelegacyfallback doesnotrewritependingdiagnostics. Newnative254;realMain12+10commandsretain298=>320 andparentownerrestoration. Root5native10wire3Main18wholeentries0;clean10wirewholeentries0;independent0.",
+        "build": "ChangedSessionheader(e660)forcesfirstnormalRoot/clean58freshproductionO2 each/repeat0. Auditfinds4FROMCURRENTfails,correctprivateMain0f5 afterallhealthycompilesandserialredgatescomplete;finalRootnormal1MainO2/repeat0,headerflagsb1unchanged/57productionobjectbytesunchanged/all58currentreceipts. Freshall3MainTUs AFTERlatestMain (O0explain/O2window/O0session320),newlinks57currentO2/no teststubs/actualisolation. Newcleanbase9412+onlyown5partial2fullpaths,freshMainO2+57verifiedpost-headerdonorCPP/allheaders/flags/original58receipts/objectSHAs fromimmutablefirstclean;notv2fresh58. Allcleantrackedforeverfrozen.",
+        "full_suite": "Accepted567MD903native542Python3Main1448;working570MD908native547Python3Main1458 includes10pendingentries(original6/R137two/R140two).568PythonAST13Bash separate. No newfull1448/TLS/whole-engine sanitizer proof;historicalecf1436 actual1433pass2fail1TLSskip final1retained. FullGUCstartupformat/allnumericbases>64/U&/identifiertruncation/quoteallidentifiers/otherGUCscopes notcompleted.",
+        "scope": "OnlyprivateMainrawadapter/Setcase,parserpathgrammar+164keywordfacts,Sessionquotedemptyparse3hunks,new254native/new3573wire/22Maincommands/one registry/scoped docs. NoSessionlayout/ABI/heap/auth change. Original2171pre-feature sourcefiles exactafterundoownbytes;ownfixture-onlyEOFrestorationexplicit,notloosetrimming. R137/R140archivesexactafterundoonlynewerownacceptedhunks;R98/R99/R109 andthree drafts preserved/excluded. R144userdeferredby9412documentation-only,notreopened. Original273items/checkboxes22complete166partial70unverified15deferredunchanged.No push,Actionsdisabled."
+      }
+    },
+    {
       "issue": "R142 complete quoted ordinary SET target identity and existing LOCAL search_path scope",
       "gap_ids": [
         "OPS-02"

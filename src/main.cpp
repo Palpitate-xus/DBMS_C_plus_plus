@@ -3870,6 +3870,51 @@ static bool handleSetCommand(const string& sql, Session& s) {
     return true;
 }
 
+// SQL SET list arguments are parsed from raw bytes before scalar fallbacks.
+static std::optional<bool> handleSearchPathSetCommand(const string& rawSql, Session& s) {
+    const auto tokens = dbms::SQLParser::tokenize(rawSql);
+    size_t target = 1;
+    if (target < tokens.size() &&
+        (dbms::SQLParser::toLower(tokens[target]) == "session" ||
+         dbms::SQLParser::toLower(tokens[target]) == "local")) ++target;
+    if (target >= tokens.size() ||
+        dbms::SQLParser::toLower(decodeQuotedIdentifier(tokens[target])) != "search_path" ||
+        (target + 1 < tokens.size() && tokens[target + 1] == "."))
+        return std::nullopt;
+    dbms::SQLParser parser;
+    const auto parsed = parser.parseForBinding(rawSql);
+    const auto* setting = parsed.success
+        ? dynamic_cast<const dbms::SetStmt*>(parsed.stmt.get()) : nullptr;
+    if (!setting || setting->name != "search_path")
+        throw dbms::DbError("42601", parsed.error.empty()
+            ? "invalid SET search_path" : parsed.error);
+    string value;
+    // FROM CURRENT is an assignment, including the persistent/local GUC stack.
+    if (setting->values.empty())
+        value = s.searchPath;
+    else if (setting->values.size() == 1 && setting->values.front() == "default")
+        value = s.defaultSearchPath;
+    else for (const auto& argument : setting->values) {
+        if (!value.empty()) value += ", ";
+        value += argument;
+    }
+    std::vector<std::string> entries;
+    std::string canonical;
+    if (!dbms::parseSessionSearchPath(value, entries, canonical))
+        throw dbms::DbError("22023", "invalid value for parameter \"search_path\"");
+    const bool local = setting->scope == dbms::SetStmt::Scope::Local;
+    if (local && !g_engine.inTransaction()) {
+        cout << "WARNING: SET LOCAL can only be used in transaction blocks (SQLSTATE 25P01)" << endl;
+    } else {
+        if (g_engine.inTransaction()) s.searchPathTransaction.begin(s.searchPath);
+        // Values already carry GUC_LIST_QUOTE; reformatting would lose
+        // keyword/numeric/string argument distinctions.
+        s.searchPathTransaction.assign(s.searchPath, value, local);
+    }
+    cout << "SET" << endl;
+    return false;
+}
+
 static bool handleAlterSystem(const string& sql, Session& s) {
     if (!checkAdmin(s)) return true;
     if (g_engine.inTransaction()) {
@@ -22188,6 +22233,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
             return handleRollbackToSavepoint(sql, s);
 
         case dbms::SqlCommand::Set:
+            if (const auto pathResult = handleSearchPathSetCommand(effectiveRawSql, s))
+                return *pathResult;
+            [[fallthrough]];
         case dbms::SqlCommand::SetTransaction:
         case dbms::SqlCommand::SetRole:
         case dbms::SqlCommand::SetSessionAuthorization:

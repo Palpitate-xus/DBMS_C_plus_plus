@@ -1,5 +1,9 @@
 # DBMS 全部 Gap TODO（历史记录）
 
+[R145](issue-review-r145-search-path-value-identity.md)有限修复SET路径参数身份及FROM CURRENT事务赋值。
+3573专项、18完整入口/clean10和独立复核通过，原始失败记录不改写；
+R144与其它用户暂缓未关闭，原273保持22/166/70/15，仍未全部完成。
+
 [R142](issue-review-r142-quoted-set-parameter.md)有限修复quoted普通参数名与LOCAL路径名；
 SHOW依赖先由R143独立提交，最终544/15完整入口/clean6及独立复核通过。
 保留原始失败与历史勾选，R140/R137用户暂缓及R144/R145普通开放不关闭。
