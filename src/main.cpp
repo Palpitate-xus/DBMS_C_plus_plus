@@ -21299,9 +21299,15 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
             }
             // An explicit routine namespace is executable identity, not a
             // spelling the legacy FROM-less string dispatch may discard.
-            // Bind the complete source-free projection before evaluating
-            // any target, predicate or row-count expression.
-            if(!select->fromClause && !call->schema.empty() &&
+            // Bind complete projections, including table sources. Preserve
+            // the original FROM-less admission; only the table extension
+            // requires a scalar owner instead of aggregate/window/SRF roles.
+            if(!call->schema.empty() &&
+                (!select->fromClause ||
+                 (!call->hasOver && !call->distinct && !call->filter &&
+                  call->orderBy.empty() && !call->setReturning &&
+                  dbms::aggregate_type_detail::builtinName(call).empty() &&
+                  !g_engine.ownsPreparedSetReturningCall(session.currentDB,call))) &&
                 call->sourceBegin!=string::npos && call->sourceEnd<=rawSql.size()) {
                 const auto origin=dbms::SQLParser::tokenize(rawSql.substr(
                     call->sourceBegin,call->sourceEnd-call->sourceBegin));

@@ -1,5 +1,7 @@
 # 代码审查索引
 
+本地 R161-V5 有限修复：见[issue-review-r161-qualified-projection-routine-identity](issue-review-r161-qualified-projection-routine-identity.md)。未新增专属 native fixture；专属 wire 637。本次证据为九项候选组合的 Root/accepted-only clean 两端各 58 项（26 native、29 wire、3 real Main）实际退出全 0，完整源文件与产物 fence 复核 0；不表示本项中间提交单独跑过全矩阵。本项接受后 589 Markdown、911 native、552 Python、3 Main，共 1466 注册入口；不是该总数的全套运行声明。原 273 项 22 complete / 166 partial / 70 unverified / 15 deferred 不变，整体未完成；保留历史失败与未接受边界，不恢复用户跳过模块。No push；Actions disabled。
+
 本地 R158 有限修复：见[issue-review-r158-angle-conversion-range](issue-review-r158-angle-conversion-range.md)。专属 native 603；专属 wire 1449。本次证据为九项候选组合的 Root/accepted-only clean 两端各 58 项（26 native、29 wire、3 real Main）实际退出全 0，完整源文件与产物 fence 复核 0；不表示本项中间提交单独跑过全矩阵。本项接受后 588 Markdown、911 native、551 Python、3 Main，共 1465 注册入口；不是该总数的全套运行声明。原 273 项 22 complete / 166 partial / 70 unverified / 15 deferred 不变，整体未完成；保留历史失败与未接受边界，不恢复用户跳过模块。No push；Actions disabled。
 
 [R169 多语句语法检查](issue-review-r169-simple-query-raw-syntax.md)登记实际开放问题：
