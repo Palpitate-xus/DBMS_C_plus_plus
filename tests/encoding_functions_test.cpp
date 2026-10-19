@@ -96,10 +96,10 @@ static void test_escape() {
     dbms::ExprEvaluator eval;
     // Backslash is doubled; printable text is unchanged.
     assert(callFn(eval, "encode", {S("a\\b"), S("escape")}).value == "a\\\\b");
-    // A control byte becomes an octal escape; round-trips through decode.
+    // Nonzero ASCII controls remain literal; BEL still round-trips.
     std::string raw = std::string("x") + '\007' + "y";  // 0x07 = \007
     auto enc = callFn(eval, "encode", {S(raw), S("escape")});
-    assert(enc.value == "x\\007y");
+    assert(enc.value == raw);
     const auto decoded = callFn(eval, "decode", {S(enc.value), S("escape")});
     assert(callFn(eval, "encode", {decoded, S("escape")}).value == enc.value);
     const auto zero = callFn(eval, "decode", {S("\\000"), S("escape")});

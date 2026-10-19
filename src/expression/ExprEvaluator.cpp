@@ -11056,7 +11056,7 @@ void ExprEvaluator::registerBuiltins() {
             std::string out;
             for (unsigned char c : data) {
                 if (c == '\\') out += "\\\\";
-                else if (c < 0x20 || c > 0x7e) {
+                else if (c == 0 || c >= 0x80) {
                     char buf[5];
                     std::snprintf(buf, sizeof(buf), "\\%03o", c);
                     out += buf;
