@@ -1,6 +1,6 @@
 # R168：复合类型sidecar缺少可用的namespace身份（开放）
 
-状态：已复现合法DROP SCHEMA失败；尚无生产修复或验收提交。
+状态：修复候选及完整夹具已准备；尚无生产修复或最终验收提交。
 
 ## 实测与原因
 
@@ -37,3 +37,47 @@ dotted旧记录涉及破坏性操作时应明确失败，等待有依据的身�
 
 证据：`/tmp/dbms-review-r46.ifu6SWLp/r162-v6-root-results/`
 下的custom_scalar_routine_declaration_protocol_e2e_test.log，三条DROP SCHEMA错误完整保留。
+
+## 候选与当前验证
+
+候选在真实CREATE TYPE中记录decoded schema/localName；同一.types文件以不会与合法旧名
+混淆的`DBMS_COMPOSITE_V2:`前缀及hex字段保存该对身份，继续使用现有原子写入。
+ALTER字段、改名及DDL快照保存这对身份；SQL DROP TYPE、schema收集器及R164声明入口
+核对owner，旧的点号物理名在破坏性操作中明确失败，不猜测迁移或添加pg_type行。
+原生物理get/drop API保留精确键语义；普通getter也保留旧的探测错误返回空值约定，
+因为既有持锁调用者不能因本项新增throw而越过解锁。checked枚举明确报XX001/58030，
+相关SQL破坏性路径先检查它，不把坏文件当作空列表。这不修改用户暂缓的R51锁流程。
+
+固定207项native覆盖两种独立历史、冷读、字段及改名、回滚/保存点、坏V2与旧记录歧义；
+固定332项协议夹具在PG18.6实际全0（`r168-v1-reference-protocol.log`），未减少原260项，
+新增72项真实属性rename/type/drop/re-add。产品结果仍待全量构建后实际运行。
+
+首轮Root fresh构建在第一个Main编译失败：误将全局sessionTempSchemaName写成dbms限定。
+`r168-v1-root-normal-build.log`保留；仅移除该处错误限定后重新冻结V2，
+没有在健康编译中修改输入或将失败日志写成通过。V1 clean投影也在编译前拒绝R167
+过宽的函数hunk，因为它夹带既有NOTICE通道改动；现收窄为独立目标hunk，不接受无关修改。
+两端新58个生产O2及六个真实Main TU的最终状态尚待检查，不复用旧共享头ABI对象。
+
+同一332项在冻结旧Root二进制实际完成，199失败，
+见`r167-r168-old-composite_namespace_owner_protocol_e2e_test.log`；原旧结果完整保存。
+V2六个真实Main TU现已全部fresh编译成功，并核对accepted前端源码投影、Main及全部共享头；
+两端各23个native TU也已编译成功。尚未将编译成功称为执行通过，
+最终生产fresh58和每端52个完整入口仍待运行。
+
+## V2/V3检查点
+
+Root的genuine fresh58生产O2/repeat0、六个真实Main TU及输入收据实际通过；
+本项207项native全0，原R164完整956协议也全0，尚不替代整轮52入口终态。
+V2 clean在第38个CPP（DdlExecutor）失败：本项新分支误用未接受的`emitNotice`接口，
+不能为让构建通过而接受原R98的整套通道改动。失败日志
+`r168-v2-clean-normal-build.log`完整保留，原built clean永久不改。
+
+新的V3 clean仅将该新分支改为既有NOTICE输出，并加入R167空目标Parse检查。
+与V2的全部新共享头/Main及flags逐字节相同：36个本轮V2已真实fresh编译对象按源、
+头、配置和原始对象收据复核，另22个CPP真实fresh O2，组成全部58个当前ABI对象。
+没有使用R168共享头修改之前的生产对象，也不谎称V3单独重新fresh58。
+V2首轮已成功37个CPP，其中parser因本次修正重新编译；失败的DDL没有对象可复用。
+V3新链接当前57库及23个已复核native TU；三个真实V2 clean Main TU在Main/全部头/
+accepted输入/flags/原对象核对后新链接当前57，不冒称V3 fresh TU。V3尚未运行52入口。
+V3首次包装器因跨目录签名检查未重置source root而在首个复用前退出1；
+修正包装器后的实际22/36构建通过，两个日志均保留，没有改写第一次失败。

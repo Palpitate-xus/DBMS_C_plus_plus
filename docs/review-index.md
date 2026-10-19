@@ -1,5 +1,15 @@
 # 代码审查索引
 
+[R167](issue-review-r167-domain-drop-targets.md)/[R168](issue-review-r168-composite-namespace-owner.md)补充实际构建和运行检查点：
+Root genuine fresh58生产O2/repeat0，六真实Main TU均fresh成功；23项native中22入口通过，
+仅R167固定189有一个空quoted目标Parse失败。本项207及原R164完整956全0，52整轮仍运行。
+V2 clean因新NOTICE调用依赖未接受接口而在DDL编译失败，原树/日志不改；
+新V3 clean以既有输出接口及空目标修正，真实fresh22 O2+核对36个本轮新共享头V2对象，
+组成当前58，不使用旧ABI或冒称V3独自fresh58。23native及三真实V2 Main核对后新链57库，
+尚未运行V3整轮。包装器首次签名检查错误及后续改正构建证据分别保留。
+本次只提交两个报告和索引，没有验收候选源码；已跟踪586MD、909+549+3=1461，
+Root591MD、920+563+3=1486，仍25入口未接受；原273仍22/166/70/15，不push、Actions禁用。
+
 [R159 编码边界](issue-review-r159-encoding-boundaries.md)和
 [R160 角度常量规划时机](issue-review-r160-angle-constant-demand.md)补入已跟踪的开放问题记录。
 三端原20条发现记录完整保留：四个编码差异、十个常量错误时机差异分别列根因和修改方法；
