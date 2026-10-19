@@ -28,6 +28,10 @@ public:
     // Strict reached-statement parsing with raw-byte expression provenance.
     // This has no catalog, planner, evaluator or execution dependency.
     ParseResult parseForBinding(const std::string& sql);
+    // Finite error-only proof for Simple Query: lexical errors, impossible
+    // command heads, and strict DROP DOMAIN grammar only. Other known heads
+    // are not parsed/analyzed here; empty is not full SQL grammar admission.
+    std::optional<std::string> parseRawSyntax(const std::string& sql);
 
     // 快速命令分类（不构建完整 AST）
     // 用于 execute() 迁移期：先替换分类逻辑

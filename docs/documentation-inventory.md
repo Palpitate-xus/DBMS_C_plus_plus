@@ -477,7 +477,7 @@
 | [docs/issue-review-r166-scalar-protocol-parameter-inference.md](issue-review-r166-scalar-protocol-parameter-inference.md) | 整式标量参数推断有限修复与组合回归证据 | 通过 |
 | [docs/issue-review-r167-domain-drop-targets.md](issue-review-r167-domain-drop-targets.md) | DROP DOMAIN目标有限修复与组合回归证据 | 通过 |
 | [docs/issue-review-r168-composite-namespace-owner.md](issue-review-r168-composite-namespace-owner.md) | composite命名空间归属有限修复与组合回归证据 | 通过 |
-| [docs/issue-review-r169-simple-query-raw-syntax.md](issue-review-r169-simple-query-raw-syntax.md) | 开放的多语句语法时机与非法片段遗漏问题 | 通过 |
+| [docs/issue-review-r169-simple-query-raw-syntax.md](issue-review-r169-simple-query-raw-syntax.md) | Simple Query有限原始语法修复与组合回归证据 | 通过 |
 | [docs/issue-root-numeric-publication.md](issue-root-numeric-publication.md) | 历史问题证据 | 通过 |
 | [docs/issue-root-row-publication.md](issue-root-row-publication.md) | 历史问题证据 | 通过 |
 | [docs/issue-root-sql-value-publication.md](issue-root-sql-value-publication.md) | 历史问题证据 | 通过 |

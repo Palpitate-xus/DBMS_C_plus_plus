@@ -1992,6 +1992,47 @@ ParseResult SQLParser::parseForBinding(const std::string& sql) {
     return parsed;
 }
 
+std::optional<std::string> SQLParser::parseRawSyntax(const std::string& sql) {
+    const auto lexical = lexicalError(sql);
+    if (!lexical.empty()) return lexical;
+    const auto tokens = tokenize(sql);
+    if (tokens.empty()) return std::nullopt;
+    // This partial classifier cannot prove failures for every known SQL
+    // command. Keep existing Main/compatibility receivers reached; an
+    // arbitrary identifier, number or string is not a statement head.
+    static const std::vector<std::string> commandHeads = {
+        "abort","alter","analyse","analyze","begin","call","checkpoint",
+        "close","cluster","comment","commit","copy","create","deallocate",
+        "declare","delete","discard","do","drop","end","execute","explain",
+        "fetch","grant","import","insert","listen","load","lock","merge",
+        "move","notify","prepare","reassign","refresh","reindex","release",
+        "reset","revoke","rollback","savepoint","security","select","set",
+        "show","start","table","truncate","unlisten","update","vacuum",
+        "values","with","use","desc","describe","view","replace","help",
+        "exit","quit","source","restore","clear","backup","cancel",
+        "dump","pg_switch_wal","switch"};
+    size_t head = 0;
+    while (head < tokens.size() && tokens[head] == "(") ++head;
+    if (head == tokens.size() ||
+        std::find(commandHeads.begin(),commandHeads.end(),toLower(tokens[head])) == commandHeads.end())
+        return std::string("unknown SQL command");
+    // The regular classifier needs a target token. Recognize this raw
+    // grammar head even when its required target is missing.
+    if (tokens.size() < 2 || toLower(tokens[0]) != "drop" ||
+        toLower(tokens[1]) != "domain") return std::nullopt;
+    // This audited owner only parses the target envelope/tail. It leaves
+    // namespace existence, domain-kind checks and dependencies to execution.
+    // A general 42601 catch is not a raw-phase proof: CREATE DOMAIN's NULL
+    // conflicts, for example, are valid raw grammar and fail at execution.
+    try {
+        const auto parsed = parseForBinding(sql);
+        if (!parsed.success) return parsed.error;
+    } catch (const DbError& error) {
+        if (error.sqlState() == "42601") return error.message();
+    }
+    return std::nullopt;
+}
+
 // ============================================================================
 // 各命令类型的解析实现（Phase 1 简化版：先分类，后续逐步完善参数解析）
 // ============================================================================

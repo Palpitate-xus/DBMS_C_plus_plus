@@ -1410,11 +1410,11 @@ std::vector<std::string> splitSimpleQueryStatements(const std::string& sql) {
         if (c != ';') continue;
         const std::string statement = trimText(
             sql.substr(statementStart, i - statementStart));
-        if (!firstSqlKeyword(statement).empty()) statements.push_back(statement);
+        if (!SQLParser::tokenize(statement).empty()) statements.push_back(statement);
         statementStart = i + 1;
     }
     const std::string statement = trimText(sql.substr(statementStart));
-    if (!firstSqlKeyword(statement).empty()) statements.push_back(statement);
+    if (!SQLParser::tokenize(statement).empty()) statements.push_back(statement);
     return statements;
 }
 
@@ -6450,6 +6450,34 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 updateProcessIdle();
                 QueryResult empty;
                 sendQueryResult(protocol, completion.error ? completion : empty, readyStatus());
+                continue;
+            }
+
+            // PostgreSQL raw-parses the entire Query message before reaching
+            // any statement. This proof-only pass has no catalog/binding or
+            // execution dependency, so CREATE-then-use and analysis errors
+            // retain their existing per-statement phase and transaction owner.
+            std::optional<std::string> rawSyntaxError;
+            SQLParser rawParser;
+            for (const auto& statement : statements) {
+                rawSyntaxError = rawParser.parseRawSyntax(statement);
+                if (rawSyntaxError) break;
+            }
+            if (rawSyntaxError) {
+                // Match the existing Q lexical-error boundary, without
+                // executing a prefix or introducing a new transaction.
+                if (g_engine.inTransaction()) {
+                    (void)abortActiveTransaction();
+                    transactionFailed = true;
+                    session.failedTransactionBlock = true;
+                }
+                QueryResult error;
+                error.error = true;
+                error.sqlState = "42601";
+                error.errorMessage = *rawSyntaxError;
+                (void)finishExtendedImplicitTransaction(true);
+                updateProcessIdle();
+                sendQueryResult(protocol,error,readyStatus());
                 continue;
             }
 
