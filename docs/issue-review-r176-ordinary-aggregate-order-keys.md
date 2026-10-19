@@ -60,9 +60,35 @@ OID/宽度/格式/来源、NULL、命名statement/portal、重复执行及序列
 尾逗号等报42601，`USING =`报42809，嵌套聚合/窗口键报42803，SRF键及窗口聚合内ORDER报0A000。
 这些不是生产修复通过结果。
 
-候选实现只在独立临时副本冻结，尚未安装到生产工作区。第一阶段compiler-only验证目标为
-全新58个生产对象、一个native测试TU和stub；public AST头已变化，不能混用旧对象。
-53项native检查及132项候选协议检查尚未运行；没有最终双侧回归或修复验收声明。
+## 扩大190次回归与候选失败记录
+
+第二版严格夹具保留原132次操作，新增58次边界操作：三种协议下的计算式、方向身份、
+歧义输出别名、多键、NULL位置、`USING >`、DISTINCT、缺失键、非法operator及窗口/SRF角色。
+原132次的SQL、顺序、命名statement/portal与期望经UUID归一化逐项核对，均未删除或更换。
+完整夹具的真实对照结果：PG外层0、190次全部观察且190次通过；旧 accepted-only clean
+外层1、190次完整观察，59次通过、131次失败，无传输/结构失败，三个私有schema均清理成功。
+
+这些是对照基线，不是候选通过。第一版候选已实际运行，结果如下：
+
+| 候选检查 | 真实结果 | 定位及修改方法 |
+| --- | --- | --- |
+| 53项native夹具 | SIGABRT（进程结果-6），无完整成功footer | 聚合角色准备早于物理范围初始化，不能调用依赖物理schema的排序身份函数；改用已分析的scope/range/column身份 |
+| 完整132次协议夹具 | 外层1；132次均完整观察，58次通过、74次失败，无采集失败 | 保留完整失败证据，不将成功编译当成执行正确 |
+| 扩大190次夹具对第一版 | 外层1；172次完整观察，1次发送后连接重置、17次未发送；69次断言通过 | 第173次为扩展协议的`USING =`；不能把121次总失败都称为已执行的SQL差异 |
+
+连接重置来自候选在raw parser中直接抛出语义异常。第三版将USING符号保留为真正AST字段，
+在受保护的纯绑定阶段发布42809；解析器只负责语法。它也修正上述早期身份调用，并保留
+计算式入口、ASC/DESC身份以及unsupported shape中真实排序键的纯角色校验。
+native草稿增至61项；已验证的190项协议夹具未降断言、未增加超时或改动持久化策略。
+
+第一版实际fresh58生产对象、native TU和stub均编译成功，normal build repeat无新编译；
+第二版仅有编译/链接结果，没有运行或通过声明。其两个显式生产TU实参额外含`-Itests`，
+四次预处理对照证明两个单元与普通生产include列表的预处理字节完全一致，但没有伪造
+normal-wrapper cache stamp或声称它执行过常规repeat。
+
+所有候选源码、对象与失败日志保持冻结。第三版public AST再次变化，正在以两个编译worker
+从头生成58个生产对象，禁止复用第一、二版对象；61项native和190项第三版协议检查待实际运行。
+候选仍只存在独立临时副本，未安装生产工作区，没有最终双侧回归或修复验收声明。
 
 ## 固定证据
 
@@ -76,6 +102,12 @@ SHA256 `bdc1876eeecd1078961933fe82c69122ce8a3253d8433828a4fb0a1000447d6e`。
 - `r176-shared-keys-old-accepted-clean31-discovery.log`，SHA256 `327f3807cf3e7a6ec2256aad4f4b5d4a504111b2b81451a4cfad6f3f3cec9df5`。
 - `r176-strict132-reference-v1.log`，SHA256 `0b18de9e9aaa830ddc6f84c8ef8f71c7267d0c11dc63e8a03b13b2da7b956974`。
 - `r176-strict132-old-accepted-v1.log`，SHA256 `1360e6faa38c334b3cbdbb9121e1c6621eb96323caa232ab10ac45f70d2b7a5b`。
+- `r176-strict190-reference-v2.log`，SHA256 `2a686e8881470f01796dd7c198f2383c647f3ccd8696b68891dbd2e9c59b8bcb`。
+- `r176-strict190-old-accepted-v2.log`，SHA256 `56e858076798dbbfebba4bf0884d7add872fee815026702574370ab1b6ecefc1`。
+
+第一版候选完整runtime receipt位于`/tmp/dbms-r176-v1-smoke-runtime.u72ordcc/completed-runtime-receipt.json`，
+SHA256 `5185f42baf948fac228fab7dc3941e945a81921125765aa906ce17fadcd42d84`，固定全部三项失败结果及日志hash；
+private native DATA保留于`/tmp/dbms-test-r176-v1-native.9qcxd1ds`，没有删除失败证据。
 
 完整原始帧、RowDescription、DataRow二进制字节、错误阶段、操作顺序与序列观察均保留。
 24次缺失键等是模式组合，不是24个独立根因；本轮未改生产源码，没有新修复通过声明。
