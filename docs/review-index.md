@@ -1,5 +1,14 @@
 # 代码审查索引
 
+[R169 多语句语法检查](issue-review-r169-simple-query-raw-syntax.md)登记实际开放问题：
+PG完整102/0、冻结旧Root102/27失败；原garbage两例DDL会回滚，但新增被遗漏的字符串等尾片段
+会仅返回C/Z并实际删除私有UUID域，另有数字XX000、前缀nextval执行与事务状态差异。
+有限候选只证明词法、不可能的命令头和严格DROP DOMAIN语法；不提前分析其他已知命令。
+保留全部原控制并补充执行期42601和七类项目维护命令不误拦控制，native104/wire102待验收。
+干净版本正以明确已接受base+owned hunks构建；未提交本项源码或夹具，无新产品通过声明。
+已跟踪587MD、910+550+3=1463，Root592MD、921+564+3=1488，仍25入口未接受；
+原273仍22/166/70/15，总清单未完成，不push、Actions禁用。
+
 [R159 编码边界](issue-review-r159-encoding-boundaries.md)完成三根因有限修复：
 hex仅允许完整byte pair之间的四类空白；escape保留非零ASCII控制符和DEL；
 base64完整三字节组每76列加LF，保留padding和原解码策略。
