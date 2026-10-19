@@ -1,6 +1,6 @@
 # R176：普通聚合调用内 ORDER BY 的分析与执行
 
-状态：Open，已实际复现，尚未修复。[R175](issue-review-r175-ordinary-aggregate-identity.md)只修复输入身份，整数求和正确不等于排序正确。
+状态：Open，专项修复已通过两侧冒烟验证，完整回归及源码提交待验收。首次工作区72项有69项通过、三个Main入口因测试环境缺少显式数据目录而启动失败；已保留失败并重跑完整矩阵，不宣称全部问题已解决。[R175](issue-review-r175-ordinary-aggregate-identity.md)只修复输入身份，整数求和正确不等于排序正确。
 
 ## 完整101次发现观察
 
@@ -86,9 +86,40 @@ native草稿增至61项；已验证的190项协议夹具未降断言、未增加
 四次预处理对照证明两个单元与普通生产include列表的预处理字节完全一致，但没有伪造
 normal-wrapper cache stamp或声称它执行过常规repeat。
 
-所有候选源码、对象与失败日志保持冻结。第三版public AST再次变化，正在以两个编译worker
-从头生成58个生产对象，禁止复用第一、二版对象；61项native和190项第三版协议检查待实际运行。
-候选仍只存在独立临时副本，未安装生产工作区，没有最终双侧回归或修复验收声明。
+所有候选源码、对象与失败日志保持冻结。第三版public AST再次变化，实际全新编译58个生产对象，
+没有复用第一、二版对象。其native检查仍因所有权索引漏访排序键而中止；协议190次全部完整观察，
+83次通过、107次失败。连接重置已经消除，但窗口聚合内ORDER仍错误延迟到Execute发布0A000，
+不能只比较SQLSTATE相同而忽略PG在Parse阶段拒绝。
+
+## 当前工作区修复与验收边界
+
+第四版补齐`indexExpression`对排序键的所有权登记，并在受保护的协议Parse入口纯绑定真实键，
+使窗口聚合内ORDER的错误先于statement发布。全部190次SQL、顺序、期望与协议操作未改；
+新的夹具另修正终端汇总，使其反映所有190次操作及两组真实序列基线，而不是最后一个采集器。
+该夹具完整PG对照仍为190/190；旧accepted-only版本完整观察190次、59次通过、131次失败。
+
+| 当前有限验证 | 实际结果 | 限制 |
+| --- | --- | --- |
+| accepted-only clean第四版 | native 61项与完整协议190次均外层0、完整成功footer；无采集失败 | 不是全部注册测试或原273清单验收 |
+| 保留既有未提交改动的工作区版本 | 同样native61及协议190完整通过，源码/对象/签名/二进制前后核对通过 | 仍需完整相邻回归 |
+| 工作区合并 | apply_patch安装13个源码/测试/脚本路径、51个唯一修改片段；全部2317个源文件符合原快照加本项变更 | 未夹带既有foreign修改，暂存区仍空，源码尚未commit |
+| 工作区构建 | 实际fresh58生产对象、native TU和stub；常规wrapper复用当前58对象链接，repeat零编译/零链接 | 仅plain TCP配置，未声明TLS/sanitizer覆盖 |
+
+回归矩阵保留已验收的全部70项，新增本项native与协议入口，每侧共72项：35 native、34协议、
+3个真实Main入口。真实Main的accepted测试体只替换源码include路径；工作区原有session driver
+未提交内容保留且不替代accepted测试体。两侧补充编译均完成，每侧固定97个对象和39个程序，
+74条补充编译/链接命令均成功；编译成功不是72项运行通过声明。
+
+首次工作区完整72项实际外层1：35个native、34个协议入口全部通过，包括native61及协议190；
+最后三个Main入口在运行断言前均报`FATAL: an explicit data directory is required`，实际退出1。
+它们没有执行成功断言，不能算作产品通过或产品回归；失败receipt和日志完整保留。
+修正仅限外部测试启动环境：分别创建私有数据目录并显式传入`DBMS_DATA_DIR`，不改产品源码、
+测试体、断言、超时、持久化策略或入口顺序。随后工作区及clean各三个Main预检均实际0。
+该六项预检不能替代完整矩阵；现在重新从第一项完整执行工作区72项，之后串行执行clean72项。
+
+当前证据覆盖夹具中的全局SUM/COUNT、计算式、键分析与错误阶段、元数据纯度、重复执行、
+FILTER/NULL/空输入、多键/方向/NULL位置及共享生产者。它不证明GROUP BY内排序、全部自定义
+类型/算子、全部参数推断或任意嵌套query owner；原273状态不提升，待验证边界不能标为全部完成。
 
 ## 固定证据
 
@@ -104,12 +135,24 @@ SHA256 `bdc1876eeecd1078961933fe82c69122ce8a3253d8433828a4fb0a1000447d6e`。
 - `r176-strict132-old-accepted-v1.log`，SHA256 `1360e6faa38c334b3cbdbb9121e1c6621eb96323caa232ab10ac45f70d2b7a5b`。
 - `r176-strict190-reference-v2.log`，SHA256 `2a686e8881470f01796dd7c198f2383c647f3ccd8696b68891dbd2e9c59b8bcb`。
 - `r176-strict190-old-accepted-v2.log`，SHA256 `56e858076798dbbfebba4bf0884d7add872fee815026702574370ab1b6ecefc1`。
+- `r176-strict190-reference-v4.log`，SHA256 `cc39d00450f1799990c4637912ad12072e63282a7b394ae5e6210dfa1ad617d0`。
+- `r176-strict190-old-accepted-v4.log`，SHA256 `19fdbcea1317229dab93d577563987dfd45c8e92e41696af3f0e6177da62cc57`。
 
 第一版候选完整runtime receipt位于`/tmp/dbms-r176-v1-smoke-runtime.u72ordcc/completed-runtime-receipt.json`，
 SHA256 `5185f42baf948fac228fab7dc3941e945a81921125765aa906ce17fadcd42d84`，固定全部三项失败结果及日志hash；
 private native DATA保留于`/tmp/dbms-test-r176-v1-native.9qcxd1ds`，没有删除失败证据。
 
+第四版clean专项runtime receipt：`/tmp/dbms-r176-v4-smoke-runtime.7e0jqvsu/completed-runtime-receipt.json`，
+SHA256 `2f00739807de0e27f4b52da361bc0b9cd96174a314df6ef8a7815d19b6626bd0`。
+工作区专项receipt：`/tmp/dbms-r176-root-smoke-runtime.xqbnndrd/completed-runtime-receipt.json`，
+SHA256 `97ac8f148f9cea05a46a84be3b7f1b303279caf33a45730218a275a74f9e4523`。
+
+首次工作区72项失败receipt：`/tmp/dbms-r176-root-full72-runtime.7zxeuezo/completed-runtime-receipt.json`，
+SHA256 `cc20d7259381d34d5ff5ddcb02c70ac56684391645e4394095e9fa9927b46525`，实际69项通过、三个Main启动失败。
+显式私有数据目录的六项Main预检receipt：`/tmp/dbms-r176-main-data-dir-preflight.wf0vxkm7/completed-runtime-receipt.json`，
+SHA256 `ff20ea1098d39a0d15d8e3a8508874d752ec6e213b2e1492365a7aaa545705f4`，六项实际0，非完整72项结果。
+
 完整原始帧、RowDescription、DataRow二进制字节、错误阶段、操作顺序与序列观察均保留。
-24次缺失键等是模式组合，不是24个独立根因；本轮未改生产源码，没有新修复通过声明。
+24次缺失键等是模式组合，不是24个独立根因；生产修改尚未完成完整回归验收，不作已提交修复声明。
 原273状态不提升；[R173](issue-review-r173-routine-signature-type-dependencies.md)当前分支保持未验收，
 其他用户暂缓模块不恢复，不push，Actions保持禁用。
