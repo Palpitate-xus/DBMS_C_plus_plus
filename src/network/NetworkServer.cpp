@@ -2199,6 +2199,146 @@ std::vector<QueryBindingDatum> protocolMetadataParameters(Session& session,
     return parameters;
 }
 
+// A finite computed-output query host, separate from scalar-signature and
+// wire-parameter inference. Source columns retain their existing origin owner.
+bool describePreparedOrdinarySourceResult(const std::string& sql, Session& session,
+    std::vector<PgColumnDescription>& columns) {
+    SQLParser parser;
+    const auto parsed=parser.parseForBinding(sql);
+    const auto* root=parsed.isValid()?dynamic_cast<const SelectStmt*>(parsed.stmt.get()):nullptr;
+    if(!root || root->selectList.size()!=1)return false;
+    const auto routineName=[](const FunctionCallExpr* call) {
+        CatalogManager::QualifiedName name;
+        const auto spelling=call->schema.empty()?call->funcName:call->schema+"."+call->funcName;
+        if(!CatalogManager::parseQualifiedName(spelling,name,true) ||
+           (!name.schema.empty() && name.schema!="pg_catalog"))return std::string{};
+        return name.name;
+    };
+    const auto aggregate=[&](const FunctionCallExpr* call) {
+        const auto name=routineName(call);
+        return name=="count" || name=="sum" || name=="avg" || name=="min" ||
+            name=="max" || name=="bool_and" || name=="bool_or" || name=="every";
+    };
+    size_t expressionDepth=0;
+    std::function<bool(const Expr*,bool)> ordinary=[&](const Expr* value,bool aggregateTarget) {
+        if(!value)return true;
+        if(expressionDepth>=128)return false;
+        ++expressionDepth;
+        struct Depth {size_t& value;~Depth(){--value;}} depth{expressionDepth};
+        if(value->preparedSubquery || value->type==ExprType::Subquery)return false;
+        if(const auto* call=dynamic_cast<const FunctionCallExpr*>(value)) {
+            if(call->hasOver || call->setReturning || call->distinct || call->filter ||
+               !call->orderBy.empty() || !call->namedArgs.empty())return false;
+            if(aggregateTarget && aggregate(call) && call->args.size()!=1)return false;
+            static const std::set<std::string> queryRoles={
+                "count","sum","avg","min","max","bool_and","bool_or","every",
+                "stddev","stddev_samp","stddev_pop","variance","var_samp","var_pop",
+                "array_agg","string_agg","json_agg","jsonb_agg","json_object_agg",
+                "jsonb_object_agg","bit_and","bit_or","bit_xor","xmlagg","mode",
+                "rank","dense_rank","percentile_cont","percentile_disc","grouping",
+                "row_number","percent_rank","cume_dist","ntile","lag","lead",
+                "first_value","last_value","nth_value","unnest","generate_series",
+                "pg_listening_channels","corr","covar_pop","covar_samp"};
+            if(queryRoles.count(routineName(call)) && !(aggregateTarget && aggregate(call)))
+                return false;
+            for(const auto& argument:call->args)if(!ordinary(argument.get(),false))return false;
+            return true;
+        }
+        if(const auto* column=dynamic_cast<const ColumnRefExpr*>(value))return column->column!="*";
+        if(const auto* literal=dynamic_cast<const LiteralExpr*>(value)) {
+            const auto origin=SQLParser::tokenize(literal->value);
+            return literal->value!="*" && !(origin.size()>1 && origin.front()=="(" &&
+                (SQLParser::toLower(origin[1])=="select" || SQLParser::toLower(origin[1])=="with"));
+        }
+        if(const auto* cast=dynamic_cast<const CastExpr*>(value))return ordinary(cast->operand.get(),false);
+        if(const auto* unary=dynamic_cast<const UnaryOpExpr*>(value))return ordinary(unary->operand.get(),false);
+        if(const auto* binary=dynamic_cast<const BinaryOpExpr*>(value))
+            return ordinary(binary->left.get(),false) && (binary->op=="::" || ordinary(binary->right.get(),false));
+        // CASE, arrays, rows, quantified/SQL children and parameters retain
+        // their existing preparation/demand owners at this finite boundary.
+        return false;
+    };
+    std::function<bool(const SelectStmt*,bool,size_t)> supported=
+        [&](const SelectStmt* query,bool outer,size_t depth) {
+        if(!query || depth>128 || query->command!=SqlCommand::Select ||
+           query->setOp!=SetOp::None || query->setOpLhs || query->setOpRhs ||
+           !query->valuesRows.empty() || !query->groupBy.empty() ||
+           !query->groupByElems.empty() || query->having || query->distinct ||
+           !query->distinctOn.empty() || !query->windowDefs.empty() ||
+           !query->locking.empty() || query->withTies || query->signedFetchCount ||
+           query->selectList.empty())return false;
+        for(const auto& cte:query->ctes)
+            if(cte.recursive || !supported(dynamic_cast<const SelectStmt*>(cte.query.get()),false,depth+1))
+                return false;
+        if(query->fromClause) {
+            const auto* source=query->fromClause.get();
+            if(source->type==FromItem::Type::Subquery) {
+                if(!supported(dynamic_cast<const SelectStmt*>(source->subquery.get()),false,depth+1))return false;
+            } else if(source->type!=FromItem::Type::Table)return false;
+        }
+        for(const auto& target:query->selectList)
+            if(!target.expr || !ordinary(target.expr.get(),outer))return false;
+        if(!ordinary(query->whereClause.get(),false))return false;
+        for(const auto& key:query->orderBy)
+            if(!key.usingOp.empty() || !ordinary(key.expr.get(),false))return false;
+        return true;
+    };
+    if(!supported(root,true,0))return false;
+    std::function<bool(const Expr*)> computed=[&](const Expr* value) {
+        if(dynamic_cast<const FunctionCallExpr*>(value))return true;
+        if(const auto* literal=dynamic_cast<const LiteralExpr*>(value))return literal->value!="*";
+        if(const auto* cast=dynamic_cast<const CastExpr*>(value))return computed(cast->operand.get());
+        if(const auto* unary=dynamic_cast<const UnaryOpExpr*>(value))return computed(unary->operand.get());
+        if(const auto* binary=dynamic_cast<const BinaryOpExpr*>(value);binary && binary->op=="::")
+            return computed(binary->left.get());
+        return false;
+    };
+    const auto* target=root->selectList.front().expr.get();
+    const auto* targetCall=dynamic_cast<const FunctionCallExpr*>(target);
+    const bool host=!root->ctes.empty() || (root->fromClause &&
+        root->fromClause->type==FromItem::Type::Subquery);
+    if(!host && !(root->fromClause && targetCall && aggregate(targetCall)))return false;
+    bool computedOutput=computed(target);
+    if(!computedOutput && root->fromClause && root->fromClause->type==FromItem::Type::Subquery) {
+        const auto* column=dynamic_cast<const ColumnRefExpr*>(target);
+        const auto* source=root->fromClause.get();
+        const auto* child=dynamic_cast<const SelectStmt*>(source->subquery.get());
+        if(column && column->schema.empty() && child && child->selectList.size()==1 &&
+           computed(child->selectList.front().expr.get())) {
+            const auto decoded=[](const std::string& spelling) {
+                CatalogManager::QualifiedName name;
+                return CatalogManager::parseQualifiedName(spelling,name,true) && name.schema.empty()
+                    ?name.name:std::string{};
+            };
+            const auto output=source->columnAliases.size()==1?decoded(source->columnAliases.front()):
+                decoded(child->selectList.front().alias);
+            const auto alias=decoded(source->alias);
+            computedOutput=!output.empty() && column->column==output &&
+                (column->table.empty() || (!alias.empty() && column->table==alias));
+        }
+    }
+    if(!computedOutput)return false;
+    auto* previous=currentSession();setCurrentSession(&session);
+    struct Restore {Session* previous;~Restore(){setCurrentSession(previous);}} restore{previous};
+    // Pure whole binding only: no plan construction, constant planning,
+    // producer opening, row demand or scalar/stored routine invocation.
+    const auto prepared=g_engine.prepareBoundQuery(session.currentDB,sql,{},true);
+    if(prepared.output.size()!=1)throw DbError("XX000","computed query output width differs from its descriptor");
+    const auto& field=prepared.output.front();
+    const auto oid=mapBuiltinTypeNameToOid(field.type);
+    // User/domain identities and their codecs retain their existing owners.
+    // A same-spelled user type must never be relabeled as a physical builtin.
+    if(!oid || (field.typeOid && field.typeOid!=oid))return false;
+    QueryResult shape;shape.columns.push_back(field.name);shape.columnTypes.push_back(field.type);
+    columns=describeProtocolColumns(shape,std::string{},session);
+    if(columns.size()!=1)throw DbError("XX000","computed protocol output width differs from its descriptor");
+    columns.front().typeOid=oid;
+    columns.front().typeModifier=field.typeMod;
+    Column declared;declared.dataType=field.type;declared.isVariableLength=true;
+    columns.front().typeSize=protocolTypeSize(oid,declared);
+    return true;
+}
+
 bool describePreparedHavingResult(const std::string& sql, Session& session,
     std::vector<PgColumnDescription>& columns, const std::vector<uint32_t>& parameterOids = {}) {
     SQLParser parser;
@@ -2957,6 +3097,7 @@ bool describePreparedResult(const std::string& sql, Session& session,
         // an element type from a scalar callback/fallback TEXT result.
         if(describePreparedQueryHostResult(sql,session,columns))return true;
     }
+    if(parameterOids.empty() && describePreparedOrdinarySourceResult(sql,session,columns))return true;
     if (select && select->command == SqlCommand::Values) {
         if (select->valuesRows.empty() ||
             select->valuesRows.front().empty()) return false;
@@ -4741,7 +4882,8 @@ CopyStreamResult sendCopyOut(PostgresProtocol& protocol,
 
 QueryResult executeProtocolQuery(const std::string& sql, Session& session,
                                  int statementTimeoutOverrideMs = -1,
-                                 bool emitTimeDeclarationNotices = true) {
+                                 bool emitTimeDeclarationNotices = true,
+                                 bool retainOrdinarySourceDeclaration = true) {
     QueryResult result;
     dbms::clearLastDmlResult();
     // Stored-NULL row bindings must not leak across statements (a sort
@@ -4762,6 +4904,7 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
 
     bool executionError = false;
     std::vector<PgColumnDescription> explainColumns;
+    std::vector<PgColumnDescription> ordinarySourceColumns;
     bool structuredError = false;
     bool statementCommitError = false;
     std::string outputText;
@@ -4864,6 +5007,12 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
                 const auto functionError = whereUnknownFunctionError(sql, session);
                 if (!functionError.empty()) throw DbError("42883", functionError);
             }
+            // Retain the same finite computed declaration for Simple Query
+            // and genuinely parameter-free portals. The legacy value carrier
+            // loses derived computed typmods. Bind before execution effects,
+            // and retain the original portal parameter owner after expansion.
+            if (retainOrdinarySourceDeclaration && !typedExplain)
+                (void)describePreparedOrdinarySourceResult(sql, session, ordinarySourceColumns);
             executionError = execute(sql, session);
         } catch (const dbms::StatementCommitError& e) {
             executionError = true;
@@ -4885,6 +5034,9 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
         }
         outputText = output.str();
     }
+    // Keep the declaration fixed, but preserve the existing post-execution
+    // session context used by wire codecs; this is not catalog reanalysis.
+    for (auto& column : ordinarySourceColumns) column.moneyLocale = session.lcMonetary;
     const dbms::DmlResult structuredDml = dbms::takeLastDmlResult();
     auto end = std::chrono::steady_clock::now();
     double elapsedMs = std::chrono::duration<double, std::milli>(end - start).count();
@@ -5107,7 +5259,8 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
         result.columnTypes = structuredDml.columnTypes;
         result.rows = structuredDml.rows;
         result.nulls = structuredDml.nulls;
-        result.columnDescriptions = describeProtocolColumns(result, sql, session);
+        result.columnDescriptions = ordinarySourceColumns.empty()
+            ? describeProtocolColumns(result, sql, session) : ordinarySourceColumns;
         result.commandTag = structuredDml.commandTag;
         dbms::recordQueryExecution(sql, elapsedMs, session.currentDB, true,
                                    result.rows.size());
@@ -5185,7 +5338,8 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
             }
         }
         result.columnDescriptions = !explainColumns.empty()
-            ? explainColumns : describeProtocolColumns(result, sql, session);
+            ? explainColumns : !ordinarySourceColumns.empty()
+                ? ordinarySourceColumns : describeProtocolColumns(result, sql, session);
     }
     result.commandTag =
         structuredDml.available && structuredDml.metadataOnly &&
@@ -5937,7 +6091,8 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         return protocol.sendErrorResponse("ERROR", sqlState, errorMessage);
     };
     const auto executeForProtocol = [&](const std::string& sql,
-                                        bool typeDeclarationsAnalyzed = false) -> QueryResult {
+                                        bool typeDeclarationsAnalyzed = false,
+                                        bool retainOrdinarySourceDeclaration = true) -> QueryResult {
         // Portal objects live in this connection loop rather than Session.
         // Mirror their count while a command executes so a database-context
         // replacement cannot leave a portal bound to the previous database.
@@ -6021,7 +6176,8 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         }
         QueryResult result = executeProtocolQuery(
             effectiveSql, *execSession,
-            remainingExtendedQueryTimeoutMs(), !typeDeclarationsAnalyzed);
+            remainingExtendedQueryTimeoutMs(), !typeDeclarationsAnalyzed,
+            retainOrdinarySourceDeclaration);
         if (!result.error && (!wasInTransaction || extendedImplicitTransaction) &&
             SQLParser::isSetTransactionStatement(sql)) {
             SQLParser parser;
@@ -6786,8 +6942,9 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                     // statement. A failed call never leaves a named object
                     // behind or turns its next Parse into spurious 42P05.
                     std::vector<PgColumnDescription> staticColumns;
-                    if (!describePreparedSetResult(sql,session,staticColumns))
-                        (void)describePreparedQueryHostResult(sql,session,staticColumns);
+                    if (!describePreparedSetResult(sql,session,staticColumns) &&
+                        !describePreparedQueryHostResult(sql,session,staticColumns))
+                        (void)describePreparedOrdinarySourceResult(sql,session,staticColumns);
                 }
                 for (const auto& notice : protocolTimePrecisionNotices(sql, session))
                     protocol.sendNoticeResponse(notice.message, notice.severity, notice.sqlState);
@@ -7172,7 +7329,8 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                                   trimText(portalState.sql));
                 // Extended Parse already analyzed direct type declarations.
                 // Rebinding/executing the portal must not repeat their notice.
-                portalState.result = executeForProtocol(portalState.sql, true);
+                portalState.result = executeForProtocol(portalState.sql, true,
+                    portalState.parameterOids.empty());
                 updateProcessIdle();
                 portalState.executed = true;
             }

@@ -582,6 +582,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/qualified_projection_routine_identity_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/quoted_unqualified_scalar_projection_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/abs_column_identity_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/computed_query_host_metadata_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/bound_dml_query_children_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/on_conflict_constraint_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/checksum_verification_e2e_test.py)
