@@ -1,5 +1,18 @@
 # 代码审查索引
 
+[R165 五种内置数组binary输入](issue-review-r165-builtin-array-binary-bind.md)独立有限验收：
+PG、Root、组合clean及accepted-base-only本项clean均完整1852/0；
+独立clean六协议+三真实Main入口共9项全0。只接收既有int2/int4/int8/text/varchar数组身份，
+其他数组和用户暂缓模块不扩展。独立clean实际fresh1 Network O2+57已逐一核对生产对象；
+Main输入/全头flags/原始对象核对后复用真实TU，新链接当前57库并隔离运行，不冒fresh TU。
+首次Main链接检查错用聚合hash而在链接前失败，修正后的实际链接/运行通过，原日志保留。
+组合V6 Root/clean各29入口仍1，仅R164完整956的DROP DOMAIN/SCHEMA四项清理失败；
+[R167](issue-review-r167-domain-drop-targets.md)/[R168](issue-review-r168-composite-namespace-owner.md)继续开放。
+本次只提交R165一个源码hunk、注册、完整1852夹具及文档，其他生产候选仍未提交。
+已跟踪584MD、909native+549Python+3Main=1461；Root591MD、918+561+3=1482，
+尚有21个未接受入口。无新1461全量/TLS/整库sanitizer；原273仍22/166/70/15，
+总清单未完成，不push，Actions禁用。
+
 [R167 DROP DOMAIN目标](issue-review-r167-domain-drop-targets.md)、
 [R168 composite namespace归属](issue-review-r168-composite-namespace-owner.md)登记为新开放问题。
 R164完整956的Root候选实际四失败：一个DROP DOMAIN及三个DROP SCHEMA；整轮29终态1保留。

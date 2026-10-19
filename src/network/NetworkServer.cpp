@@ -773,6 +773,124 @@ std::string binaryProtocolParameterLiteral(uint32_t typeOid,
                                            const std::string& moneyLocale,
                                            std::string& error,
                                            std::string& inputSqlState) {
+    // Existing builtin arrays use PostgreSQL's dimension/element wire
+    // envelope, not their text input codec. No user-type lookup or automatic
+    // array catalog construction belongs to this finite binary receiver.
+    const uint32_t arrayElement=typeOid==1005?21:typeOid==1007?23:
+        typeOid==1016?20:typeOid==1009?25:typeOid==1015?1043:0;
+    if(arrayElement) {
+        const auto invalid=[&](const char* state,const char* message) {
+            inputSqlState=state;error=message;return std::string{};
+        };
+        size_t offset=0;
+        const auto word=[&](uint32_t& output) {
+            if(raw.size()-offset<4) {
+                inputSqlState="08P01";error="insufficient data left in message";return false;
+            }
+            output=0;
+            for(size_t byte=0;byte<4;++byte)output=(output<<8)|raw[offset++];
+            return true;
+        };
+        const auto signedWord=[](uint32_t value)->int64_t {
+            return value<=uint32_t(INT32_MAX)?int64_t(value):-1-int64_t(~value);
+        };
+        uint32_t dimensionCount=0,flags=0,element=0;
+        if(!word(dimensionCount))return {};
+        if(dimensionCount>uint32_t(INT32_MAX))return invalid("22P03","invalid number of array dimensions");
+        if(dimensionCount>6)return invalid("54000","number of array dimensions exceeds the maximum allowed (6)");
+        if(!word(flags))return {};
+        if(flags>1)return invalid("22P03","invalid array flags");
+        if(!word(element))return {};
+        // PostgreSQL diagnoses a disagreement between stable builtin OIDs.
+        // A non-builtin payload OID is not a portable identity: the declared
+        // builtin array still owns the receiver, without loading that OID.
+        if(element!=arrayElement && element<10000)
+            return invalid("42804","binary data has an unexpected array element type");
+        std::array<int64_t,6> lengths{},lowers{};
+        for(size_t dimension=0;dimension<dimensionCount;++dimension) {
+            uint32_t length=0,lower=0;
+            if(!word(length) || !word(lower))return {};
+            lengths[dimension]=signedWord(length);lowers[dimension]=signedWord(lower);
+        }
+        int64_t items=dimensionCount?1:0;
+        for(size_t dimension=0;dimension<dimensionCount;++dimension) {
+            if(lengths[dimension]<0 || items*lengths[dimension]>INT32_MAX)
+                return invalid("54000","array size exceeds the maximum allowed");
+            items*=lengths[dimension];
+        }
+        // Match the 64-bit PostgreSQL array datum-count allocation bound;
+        // do not allocate from this count before consuming actual elements.
+        if(items>134217727)return invalid("54000","array size exceeds the maximum allowed");
+        for(size_t dimension=0;dimension<dimensionCount;++dimension)
+            if(lowers[dimension]+lengths[dimension]>INT32_MAX)
+                return invalid("54000","array lower bound is too large");
+        if(!items) {
+            if(offset!=raw.size())return invalid("22P03","invalid binary input length for array parameter");
+            return quoteProtocolText("{}",error);
+        }
+        std::string text;
+        if(std::any_of(lowers.begin(),lowers.begin()+dimensionCount,[](int64_t lower){return lower!=1;})) {
+            for(size_t dimension=0;dimension<dimensionCount;++dimension)
+                text+='['+std::to_string(lowers[dimension])+':'+
+                    std::to_string(lowers[dimension]+lengths[dimension]-1)+']';
+            text+='=';
+        }
+        const auto validText=[](const std::string& value) {
+            for(size_t at=0;at<value.size();) {
+                const uint8_t lead=static_cast<uint8_t>(value[at]);
+                if(lead<0x80){if(!lead)return false;++at;continue;}
+                const size_t count=(lead&0xe0)==0xc0?2:(lead&0xf0)==0xe0?3:(lead&0xf8)==0xf0?4:0;
+                if(!count || count>value.size()-at)return false;
+                uint32_t point=lead&((1U<<(7-count))-1);
+                for(size_t next=1;next<count;++next) {
+                    const uint8_t byte=static_cast<uint8_t>(value[at+next]);
+                    if((byte&0xc0)!=0x80)return false;
+                    point=(point<<6)|(byte&0x3f);
+                }
+                if((count==2 && point<0x80) || (count==3 && point<0x800) ||
+                   (count==4 && point<0x10000) || point>0x10ffff ||
+                   (point>=0xd800 && point<=0xdfff))return false;
+                at+=count;
+            }
+            return true;
+        };
+        std::function<bool(size_t)> append=[&](size_t dimension) {
+            text+='{';
+            for(int64_t index=0;index<lengths[dimension];++index) {
+                if(index)text+=',';
+                if(dimension+1<dimensionCount) {
+                    if(!append(dimension+1))return false;
+                    continue;
+                }
+                uint32_t length=0;
+                if(!word(length))return false;
+                if(length==UINT32_MAX){text+="NULL";continue;}
+                if(length>uint32_t(INT32_MAX) || length>raw.size()-offset) {
+                    invalid("22P03","insufficient data left in array element");return false;
+                }
+                const std::vector<uint8_t> cell(raw.begin()+offset,raw.begin()+offset+length);
+                offset+=length;
+                if(arrayElement==25 || arrayElement==1043) {
+                    const std::string value(cell.begin(),cell.end());
+                    if(!validText(value)){invalid("22021","invalid byte sequence for encoding UTF8");return false;}
+                    text+='"';
+                    for(char byte:value){if(byte=='"' || byte=='\\')text+='\\';text+=byte;}
+                    text+='"';
+                } else {
+                    const size_t width=arrayElement==21?2:arrayElement==23?4:8;
+                    if(length<width){invalid("08P01","insufficient data left in message");return false;}
+                    if(length>width){invalid("22P03","improper binary format in array element");return false;}
+                    const auto value=binaryProtocolParameterLiteral(arrayElement,cell,moneyLocale,error,inputSqlState);
+                    if(!error.empty())return false;
+                    text+=value;
+                }
+            }
+            text+='}';return true;
+        };
+        if(!append(0))return {};
+        if(offset!=raw.size())return invalid("22P03","invalid binary input length for array parameter");
+        return quoteProtocolText(text,error);
+    }
     uint64_t bits = 0;
     if (geometryTypeNameForOid(typeOid)) {
         std::string value;

@@ -469,7 +469,7 @@
 | [docs/issue-review-r162-generic-stored-signatures.md](issue-review-r162-generic-stored-signatures.md) | 已复现的开放签名问题与方法 | 通过 |
 | [docs/issue-review-r163-qualified-parse-validation.md](issue-review-r163-qualified-parse-validation.md) | 已复现的开放协议校验问题与方法 | 通过 |
 | [docs/issue-review-r164-routine-custom-type-declarations.md](issue-review-r164-routine-custom-type-declarations.md) | 开放的标量UDT函数声明归属问题 | 通过 |
-| [docs/issue-review-r165-builtin-array-binary-bind.md](issue-review-r165-builtin-array-binary-bind.md) | 开放的内置数组binary输入缺口 | 通过 |
+| [docs/issue-review-r165-builtin-array-binary-bind.md](issue-review-r165-builtin-array-binary-bind.md) | 五种内置数组输入有限修复与独立实测 | 通过 |
 | [docs/issue-review-r166-scalar-protocol-parameter-inference.md](issue-review-r166-scalar-protocol-parameter-inference.md) | 开放的函数wire参数OID推断问题 | 通过 |
 | [docs/issue-review-r167-domain-drop-targets.md](issue-review-r167-domain-drop-targets.md) | 开放的DROP DOMAIN目标语法问题 | 通过 |
 | [docs/issue-review-r168-composite-namespace-owner.md](issue-review-r168-composite-namespace-owner.md) | 开放的composite持久化身份问题 | 通过 |
