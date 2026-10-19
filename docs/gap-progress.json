@@ -2,6 +2,26 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R173 signature dependency branch skipped unaccepted; R176 ordinary aggregate ORDER keys confirmed open",
+      "gap_ids": [
+        "FUNC-01",
+        "SQL-04",
+        "PROTO-04"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r173-routine-signature-type-dependencies.md",
+        "docs/issue-review-r176-ordinary-aggregate-order-keys.md"
+      ],
+      "tests": [],
+      "verification": {
+        "reproduction": "R173 fullPG3121 actual0; old first3121 records919fail with336 SQL observations and583 transport/not-sent; identical retry3098fail with4 SQL observations and3094 transport/not-sent, both actual1. Old native twoTU/fourcompilercommands0, first native interrupted143/nofooter; second not started. Candidate CR declaration regression found statically; no candidate installed or accepted.",
+        "focused_tests": "Independent R176 frozen discovery101 PG and old accepted CleanV2 each101 actual sends, healthy observer/setup/cleanup, no transport/structure failure; outer0 means collection not behavior acceptance. PG24 missing-key42703 including empty/false/LIMIT0,old allsuccess; perExecute nextval3 versus0 after observer-own1 subtraction; four FILTERfalse/NULL queries PGsuccess/old0A000; float8 ASC PG0 old1 all3modes,DESC both1.",
+        "full_suite": "No new production source or test registrations, no full1482/TLS/sanitizer claim. Raw failure/interrupted logs preserved. R173 old-only dedicated fixture stopped after skip; private temporary data retained and user servers untouched. New R176 implementation remains open.",
+        "scope": "Accepted596MD916native563wire3Main1482;Root599MD922native569wire3Main1494. Original273 items/checkboxes unchanged22complete166partial70unverified15deferred. Five earlier source commits remain accepted; current branch skipped without rewriting original ledger states. No push; Actions disabled."
+      }
+    },
+    {
       "issue": "R170 R171 R172 R174 R175 finite scalar identity, protocol declarations and SUM COUNT execution",
       "gap_ids": [
         "FUNC-01",

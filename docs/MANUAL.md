@@ -7,7 +7,7 @@
 完整791/314/331/906及原956均0，已接受源2195文件与实际测试clean逐字节对应。
 首次Root70实际1的清理超时仍保留、原因未确定，复测0不等于超时根因已修；
 源码、58生产对象、server及每端96对象/38程序均独立核对，详见[R170最终证据](issue-review-r170-quoted-unqualified-scalar-projection.md)。
-已接受594MD、916native+563已注册Python+3Main=1482；工作区597MD、922+569+3=1494，
+已接受596MD、916native+563已注册Python+3Main=1482；工作区599MD、922+569+3=1494，
 原12个未接受入口和三份文档保持分离。这不是1482全量、TLS/整库sanitizer或各中间提交独立全矩阵。
 原273仍22 complete /166 partial /70 unverified /15 deferred，总目标未完成。
 R173函数签名类型依赖及R176真实聚合排序仍独立开放；R156等用户暂缓模块不恢复，不push，Actions禁用。

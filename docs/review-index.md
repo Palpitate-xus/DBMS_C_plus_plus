@@ -1,5 +1,11 @@
 # 代码审查索引
 
+最新开放记录：[R173类型/函数签名依赖](issue-review-r173-routine-signature-type-dependencies.md)
+当前分支跳过，候选未安装/编译/验收，旧版超时与不完整原生反证原样保留；
+[R176普通聚合排序键](issue-review-r176-ordinary-aggregate-order-keys.md)已完成PG/旧版各101次健康采集，
+确认缺失键未分析、排序键未求值、特定需求被拒和ASC浮点结果差异；尚无生产修复。
+两份报告只增加发现/方法文档，不增加测试注册或提升原273状态；以下五项已提交修复仍有效。
+
 ## 当前接受状态：R170/R171/R172/R174/R175
 
 五项有限修复已分别本地提交，版本对应见[审查索引](review-index.md)。
@@ -7,7 +13,7 @@
 完整791/314/331/906及原956均0，已接受源2195文件与实际测试clean逐字节对应。
 首次Root70实际1的清理超时仍保留、原因未确定，复测0不等于超时根因已修；
 源码、58生产对象、server及每端96对象/38程序均独立核对，详见[R170最终证据](issue-review-r170-quoted-unqualified-scalar-projection.md)。
-已接受594MD、916native+563已注册Python+3Main=1482；工作区597MD、922+569+3=1494，
+已接受596MD、916native+563已注册Python+3Main=1482；工作区599MD、922+569+3=1494，
 原12个未接受入口和三份文档保持分离。这不是1482全量、TLS/整库sanitizer或各中间提交独立全矩阵。
 原273仍22 complete /166 partial /70 unverified /15 deferred，总目标未完成。
 R173函数签名类型依赖及R176真实聚合排序仍独立开放；R156等用户暂缓模块不恢复，不push，Actions禁用。
