@@ -1,5 +1,11 @@
 # 代码审查索引
 
+[R175普通聚合](issue-review-r175-ordinary-aggregate-identity.md)记录无FROM入口、SQL列身份及DISTINCT正确owner。
+组合V1 clean完整791仍26失败（R174八项metadata、R175十八项执行），314全部通过；
+两端编译均完成但不宣称完整62入口通过，原失败断言保留，两个新专项仍待PG参考/产品验收。
+本次仅登记开放问题：已接受594MD、916native+559Python+3Main=1478；
+Root597MD、922+567+3=1492，原273仍22/166/70/15，总目标未完成；不push、Actions禁用。
+
 [R174普通来源描述符](issue-review-r174-ordinary-source-descriptor.md)另记四种既有791形态的独立metadata缺口。
 不移除原791/314断言，不假定三候选即可全通过；生产编译/链接完成与Main回归编译/完整运行分开记录。
 本次仅登记开放问题：已接受593MD、916native+559Python+3Main=1478；
