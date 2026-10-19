@@ -1,5 +1,13 @@
 # 代码审查索引
 
+[R156 类型化常量](issue-review-r156-regtype-physical-constants.md)按用户要求暂缓，不恢复。
+R158 数值与 R161 限定调用仍为未验收候选；完整失败断言和历史版本均保留。
+新复现的 [R162 通用存储函数签名](issue-review-r162-generic-stored-signatures.md)、
+[R163 协议准备校验](issue-review-r163-qualified-parse-validation.md)分别记录根因与修改方法。
+R161 V5 两端完整637各18失败（九个执行签名、九个元数据），PG同一637全0；
+Root 的 R158 完整1449现已全0，但独立验收与依赖修复尚未完成，不能宣称总清单完成。
+本次只提交两个开放问题报告与索引；不提交候选源码/夹具，不push，Actions禁用。
+
 [R157 普通SET点号目标](issue-review-r157-dotted-set-target.md)完成独立有限修复：
 完整目标先于内建分派，LOCAL/SESSION/transaction相似前缀不改变身份；
 引用分量保留原拼写，ColId分类、缺失分量、分隔符与FROM CURRENT边界均验证。
