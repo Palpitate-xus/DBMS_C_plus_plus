@@ -1,5 +1,10 @@
 # R165：五种内置数组二进制Bind输入（有限完成）
 
+后续依赖更新：原R164清理错误经[R167](issue-review-r167-domain-drop-targets.md)、
+[R168](issue-review-r168-composite-namespace-owner.md)、[R169](issue-review-r169-simple-query-raw-syntax.md)有限修复后，
+最终Root/clean各完整58入口均0，本项1852仍全0。下方V6整轮29/1及独立本项9/0按原输入保留，
+不改写为当时已全绿，也不扩展本项五数组输入范围。
+
 状态：int2[]、int4[]、int8[]、text[]、varchar[]完成独立有限修复与验收。
 其他数组输入、R164清理问题及原273总账不由本项关闭。
 

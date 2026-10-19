@@ -38,7 +38,7 @@ dotted旧记录涉及破坏性操作时应明确失败，等待有依据的身�
 证据：`/tmp/dbms-review-r46.ifu6SWLp/r162-v6-root-results/`
 下的custom_scalar_routine_declaration_protocol_e2e_test.log，三条DROP SCHEMA错误完整保留。
 
-## 候选与当前验证
+## 候选形成与历史验证
 
 候选在真实CREATE TYPE中记录decoded schema/localName；同一.types文件以不会与合法旧名
 混淆的`DBMS_COMPOSITE_V2:`前缀及hex字段保存该对身份，继续使用现有原子写入。

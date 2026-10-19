@@ -1,5 +1,24 @@
 # 代码审查索引
 
+九项有限修复已逐项本地提交；问题/修改方法/专项数量见[R169总表](issue-review-r169-simple-query-raw-syntax.md)。
+
+| 项目 | 本地提交 | 范围 |
+| --- | --- | --- |
+| R158 | 7648c6ea | 角度数值边界 |
+| R161 | 24f10c9d | 限定投影身份 |
+| R162 | d27b0af7 | 通用存储签名 |
+| R163 | 45a81c0e | Parse签名校验 |
+| R164 | 084a171e | 自定义标量声明 |
+| R166 | 8461466c | 整式调用参数OID |
+| R167 | e6fdb953 | 单目标域删除 |
+| R168 | e39636bf | 复合类型owner |
+| R169 | c580c8c0 | 有限原始语法预检 |
+
+工作区与accepted-only clean各58完整入口实际全0；接受源码/夹具24路径与实际测试clean逐字节对应。
+589MD、916native+559已注册Python+三个Main=1478；Root1490的原12个外来入口仍未接受。
+这不是1478全量运行或各中间提交独立全矩阵；当前手册/状态入口同步有限边界，旧失败记录原样保留。
+原273仍22/166/70/15，总目标未完成，不恢复用户暂缓模块、不push、Actions保持禁用。
+
 本地 R169 有限修复：见[issue-review-r169-simple-query-raw-syntax](issue-review-r169-simple-query-raw-syntax.md)。专属 native 106；专属 wire 104。本次证据为九项候选组合的 Root/accepted-only clean 两端各 58 项（26 native、29 wire、3 real Main）实际退出全 0，完整源文件与产物 fence 复核 0；不表示本项中间提交单独跑过全矩阵。本项接受后 589 Markdown、916 native、559 Python、3 Main，共 1478 注册入口；不是该总数的全套运行声明。原 273 项 22 complete / 166 partial / 70 unverified / 15 deferred 不变，整体未完成；保留历史失败与未接受边界，不恢复用户跳过模块。No push；Actions disabled。
 
 本地 R168 有限修复：见[issue-review-r168-composite-namespace-owner](issue-review-r168-composite-namespace-owner.md)。专属 native 207；专属 wire 332。本次证据为九项候选组合的 Root/accepted-only clean 两端各 58 项（26 native、29 wire、3 real Main）实际退出全 0，完整源文件与产物 fence 复核 0；不表示本项中间提交单独跑过全矩阵。本项接受后 589 Markdown、915 native、558 Python、3 Main，共 1476 注册入口；不是该总数的全套运行声明。原 273 项 22 complete / 166 partial / 70 unverified / 15 deferred 不变，整体未完成；保留历史失败与未接受边界，不恢复用户跳过模块。No push；Actions disabled。

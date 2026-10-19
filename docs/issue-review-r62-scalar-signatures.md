@@ -1,5 +1,10 @@
 # R62：标量函数必须先解析真实参数签名
 
+后续有限更新：[R162](issue-review-r162-generic-stored-signatures.md)补通用存储标量声明绑定，
+[R163](issue-review-r163-qualified-parse-validation.md)/[R166](issue-review-r166-scalar-protocol-parameter-inference.md)补有限协议准备及参数OID。
+两端58组合验收见[R169](issue-review-r169-simple-query-raw-syntax.md)；通用重载、所有形状及原功能族仍partial，
+不重写本报告原100/132历史结果，也不恢复用户暂缓的R109等模块。
+
 状态：本次已复现的ABS、upper/lower、length签名已修复并通过定向门禁；
 后续十八个固定float8名字由[R83](issue-review-r83-float8-scalar-signatures.md)独立扩展。
 其他回调及任意名称stored routine的完整通用签名覆盖仍未完成，R62广义范围保持partial。

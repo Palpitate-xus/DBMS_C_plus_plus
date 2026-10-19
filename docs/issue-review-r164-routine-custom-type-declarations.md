@@ -23,7 +23,7 @@ typed TEXT负向控制当时因缺少callee而通过，不能作为枚举类型�
 composite仍有真实sidecar但缺少完整pg_type登记，不能用目录查找替换后丢掉旧的合法声明，
 也不能伪造目录行或把DDL通过说成复合值执行已实现。
 
-## 验证及证据
+## 首轮待验收要求与证据
 
 待验证enum/domain/composite、SQL/PLpgSQL、参数/返回声明、qualified/bare/quoted名字、
 搜索路径竞争、同身份替换、失败替换原子性、缺失类型及纯metadata等边界。

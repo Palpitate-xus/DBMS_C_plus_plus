@@ -1,5 +1,14 @@
 # DBMS 使用手册
 
+当前接受版本包含[R169组合记录](issue-review-r169-simple-query-raw-syntax.md)所列九项有限修复，已逐项本地提交。
+Root和accepted-only clean各完整58入口（26native、29协议、三个真实Main）实际全0；
+这是组合定向回归，不是每个中间提交独立全矩阵，也不是全部1478入口运行或TLS/整库sanitizer验收。
+已接受589MD、916native+559已注册Python+三个Main=1478；工作区592MD、922+565+3=1490，
+原12个未接受入口及三份文档仍分开保留。原273仍22 complete /166 partial /70 unverified /15 deferred，
+总目标未完成；R156、R151、R106及其他用户暂缓模块不恢复，不push，Actions保持禁用。
+用法与限制见[手册](MANUAL.md)，实际错误、修改方法及日志见各专属报告。
+以下旧轮次按原输入保留，历史计数、失败和待办不被本次改写。
+
 [R157 普通SET点号目标](issue-review-r157-dotted-set-target.md)完成独立有限修复：
 完整目标先于内建分派，LOCAL/SESSION/transaction相似前缀不改变身份；
 引用分量保留原拼写，ColId分类、缺失分量、分隔符与FROM CURRENT边界均验证。
@@ -371,6 +380,18 @@ BC/完整大年份及所有日期函数输入不由此声明完成。上方各R1
 | `ENUM` | 枚举类型 (CREATE TYPE ... AS ENUM) |
 | `RANGE` | 范围类型，如 `INT4RANGE` |
 | `DOMAIN` | 域类型 |
+
+`DROP DOMAIN [IF EXISTS] schema.name [RESTRICT|CASCADE]`保留限定及quoted标识符，按实际选中的域身份执行。
+当前只支持单目标；逗号多目标在事务和任何修改前报`0A000`，所有目标保留，不能当作PG多目标实现。
+依赖对象的CASCADE仍有限，详见[R167](issue-review-r167-domain-drop-targets.md)。
+
+新SQL composite定义在同一原子`.types`记录内保存decoded schema/localName及字段；
+`DBMS_COMPOSITE_V2:`版本记录用hex封装身份和字段，不是heap格式升级、完整pg_type登记或通用wire复合值codec。
+旧无点号physical-only记录可证明归public；旧带点号记录无法区分public."s.t"与s.t，
+破坏性操作对歧义报`XX001`，不拆点号猜owner或自动迁移。先备份，在副本上确认真实身份；
+不能保证导出或新建目录会自动解决歧义。两种SQL身份共用同一物理键的冲突仍不承诺支持。
+原生`StorageEngine::CompositeType.name`仍是精确物理键；schema/localName须同时为空或同时合法，
+同时为空只表示旧physical-only语义。详见[R168](issue-review-r168-composite-namespace-owner.md)。
 
 `array_position(array, needle [, start])`返回首个匹配元素的真实下标，未找到时
 为INTEGER SQL NULL（不是0）；显式数组下界保留，start必须匹配INTEGER声明。
@@ -1127,6 +1148,17 @@ ALTER ROLE bob RENAME TO robert;
 
 ## 13. 存储过程与函数
 
+受支持的schema-qualified标量表查询保留完整AST与callee身份，不把schema.name整体当作单个函数名。
+原生`SelectExpr.funcName`仍是已解码名称，不是含SQL双引号的片段；不可全局strip、lowercase或拆分其中点号。
+未限定quoted builtin表投影仍有已记录缺口，不能从[R161](issue-review-r161-qualified-projection-routine-identity.md)推广为已修复。
+
+普通命名存储标量函数按实际输入声明选择及转换，metadata/Describe不执行函数体来猜类型；
+范围见[R162](issue-review-r162-generic-stored-signatures.md)。普通enum/domain/composite的SQL/PLpgSQL
+标量声明及canonical namespace身份见[R164](issue-review-r164-routine-custom-type-declarations.md)，
+不等于通用复合值执行、全部重载/typmod或用户数组工厂完成。
+`degrees`/`radians`的实际builtin数值范围与次正规数修复见[R158](issue-review-r158-angle-conversion-range.md)；
+纯常量的完整规划错误时机仍由[R160](issue-review-r160-angle-constant-demand.md)独立跟踪。
+
 ```sql
 -- 创建函数
 CREATE FUNCTION add_one(INT) RETURNS INT AS 'return $1 + 1;' LANGUAGE sql;
@@ -1313,6 +1345,10 @@ Simple Query 的一个 `Q` 消息可以包含多条顶层分号分隔语句；�
 一次 ReadyForQuery。空串、纯注释或只有分号的消息返回一次
 EmptyQueryResponse，不伪造 command tag。
 
+执行首句前的原始语法预检目前仅证明词法错误、不可能命令头和严格DROP DOMAIN目标语法；
+其他已知命令仍交原接收者，不是完整SQL raw grammar。CREATE-then-use及到达执行阶段的语义错误
+不提前猜拒绝，不能仅因42601就将错误前移。范围见[R169](issue-review-r169-simple-query-raw-syntax.md)。
+
 Extended Query 的 named statement/portal 禁止被同名 Parse/Bind 覆盖，空名称仍按
 协议替换。Parse 只接受一条语句；发生错误后丢弃消息直到 Sync。关闭不存在的
 statement/portal 仍返回 CloseComplete。一个 Sync group 内的 Execute 共用隐式
@@ -1320,6 +1356,12 @@ statement/portal 仍返回 CloseComplete。一个 Sync group 内的 Execute 共�
 前继续 Execute。空 prepared query 的 Execute 返回 EmptyQueryResponse。
 当前 Describe 的结果列分析和大型 portal 的真正流式执行仍未完成，因此客户端
 不应把这一子集当作完整的 PostgreSQL Extended Query 实现。
+
+[R163](issue-review-r163-qualified-parse-validation.md)在发布statement前纯绑定受支持的已知签名标量形状；
+不是任意SQL的完整Parse分析，也不为取描述执行callee。
+[R166](issue-review-r166-scalar-protocol-parameter-inference.md)只对source-free、无ORDER/LIMIT/OFFSET/FETCH等容器的
+整式标量调用中直接$n从真实输入声明推断OID，保留显式OID及冲突/编号缺口错误。
+带表、排序、分页和跨表达式统一推断仍开放；额外八条范围外收集不是兼容通过。
 
 ---
 

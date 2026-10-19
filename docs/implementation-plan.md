@@ -1,5 +1,14 @@
 # DBMS 修改计划表（按 all-gaps-todo.md）
 
+当前接受版本包含[R169组合记录](issue-review-r169-simple-query-raw-syntax.md)所列九项有限修复，已逐项本地提交。
+Root和accepted-only clean各完整58入口（26native、29协议、三个真实Main）实际全0；
+这是组合定向回归，不是每个中间提交独立全矩阵，也不是全部1478入口运行或TLS/整库sanitizer验收。
+已接受589MD、916native+559已注册Python+三个Main=1478；工作区592MD、922+565+3=1490，
+原12个未接受入口及三份文档仍分开保留。原273仍22 complete /166 partial /70 unverified /15 deferred，
+总目标未完成；R156、R151、R106及其他用户暂缓模块不恢复，不push，Actions保持禁用。
+用法与限制见[手册](MANUAL.md)，实际错误、修改方法及日志见各专属报告。
+以下旧轮次按原输入保留，历史计数、失败和待办不被本次改写。
+
 [R157 普通SET点号目标](issue-review-r157-dotted-set-target.md)完成独立有限修复：
 完整目标先于内建分派，LOCAL/SESSION/transaction相似前缀不改变身份；
 引用分量保留原拼写，ColId分类、缺失分量、分隔符与FROM CURRENT边界均验证。
@@ -373,6 +382,11 @@ ACL 检查已统一覆盖会话用户、递归继承角色、`PUBLIC` 和表 own
 TCL 解析与路由已进一步统一：事务 AST 现在保留 `BEGIN`/`START TRANSACTION` 的 isolation/read-only/deferrable 选项及 savepoint 名称，执行器消费 AST；修复 `ROLLBACK TO`、`COMMIT PREPARED`、`ROLLBACK PREPARED` 被通用前缀提前匹配的问题。`DEFERRABLE` 仍在执行层 fail-closed 拒绝，待安全快照语义完成后再开放。
 
 ### 当前代码路径审计覆盖层
+
+现行有限更新：九项修复的组合验收见[R169](issue-review-r169-simple-query-raw-syntax.md)，
+用法见[手册](MANUAL.md)。R164只补普通自定义标量声明身份，R168只补版本化composite owner；
+下方历史“composite作为函数参数/返回类型已就绪”不证明通用SQL复合值、pg_type或wire codec完成。
+完整类型/函数/依赖与原273条待办继续保留，不据局部声明通过勾选整类。
 
 下表优先于后续历史 Wave 的 `✅` 标记；只有同时具备真实运行时路径和回归/故障验证，才可标记为已完成。
 

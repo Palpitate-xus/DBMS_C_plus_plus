@@ -41,7 +41,7 @@ V1的广泛42601方案因这一静态反例被否决，原草稿冻结保留；V
 维护命令头可能被误拦，V3补全backup、restore、cancel、dump、clear、pg_switch_wal、switch。
 这些维护命令仅做native解析不拒绝检查，没有执行备份、恢复或其他维护操作。
 
-## 验证计划与边界
+## V3验证计划与边界
 
 V3固定native104、wire102；保留原两个失败批次，覆盖非法片段、词法错误、
 nextval前缀不执行、CREATE后引用、函数body/注释/引用分隔、空消息、
