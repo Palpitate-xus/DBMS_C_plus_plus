@@ -1,5 +1,12 @@
 # 代码审查索引
 
+[R159 编码边界](issue-review-r159-encoding-boundaries.md)和
+[R160 角度常量规划时机](issue-review-r160-angle-constant-demand.md)补入已跟踪的开放问题记录。
+三端原20条发现记录完整保留：四个编码差异、十个常量错误时机差异分别列根因和修改方法；
+其余类型目录线索仍仅为静态待核实项。没有将发现记录当成通过，也不恢复R156暂缓模块。
+本次只提交两份问题报告和文档索引，无新源码验收；已跟踪586MD，
+909native+549Python+3Main=1461，原273仍22/166/70/15，不push、Actions禁用。
+
 [R165 五种内置数组binary输入](issue-review-r165-builtin-array-binary-bind.md)独立有限验收：
 PG、Root、组合clean及accepted-base-only本项clean均完整1852/0；
 独立clean六协议+三真实Main入口共9项全0。只接收既有int2/int4/int8/text/varchar数组身份，

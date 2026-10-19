@@ -1,6 +1,6 @@
 # 全部文档检查清单
 
-审查输入和发现见[代码审查报告](code-review-2026-10-13.md)。基准提交 `a502ffa3` 包含 412 份已跟踪 Markdown；首次审查含新增报告共 417 份。当前本轮逐文件复查 584 份 Markdown，下表覆盖全部；历史数量不改写。
+审查输入和发现见[代码审查报告](code-review-2026-10-13.md)。基准提交 `a502ffa3` 包含 412 份已跟踪 Markdown；首次审查含新增报告共 417 份。当前本轮逐文件复查 586 份 Markdown，下表覆盖全部；历史数量不改写。
 
 检查逐文件读取 UTF-8 内容并验证 Markdown 内联链接的本地文件目标是否存在。它不验证外部网址、锚点、所有引用式链接，也不证明文中每个历史技术结论在当前版本成立。
 使用手册、部署、命令参考、模块 README 和状态入口另作人工一致性核查；`issue-*.md` 保留原始提交和运行证据，其结论须按对应输入读取。
@@ -466,6 +466,8 @@
 | [docs/issue-review-r155-enum-namespace-owner.md](issue-review-r155-enum-namespace-owner.md) | 问题、修复与验证 | 通过 |
 | [docs/issue-review-r156-regtype-physical-constants.md](issue-review-r156-regtype-physical-constants.md) | 用户暂缓、物理身份与未验证草稿 | 通过 |
 | [docs/issue-review-r157-dotted-set-target.md](issue-review-r157-dotted-set-target.md) | 普通点号目标有限修复与完整验证 | 通过 |
+| [docs/issue-review-r159-encoding-boundaries.md](issue-review-r159-encoding-boundaries.md) | 开放编码问题与修改方法 | 通过 |
+| [docs/issue-review-r160-angle-constant-demand.md](issue-review-r160-angle-constant-demand.md) | 开放规划时机与完整观察 | 通过 |
 | [docs/issue-review-r162-generic-stored-signatures.md](issue-review-r162-generic-stored-signatures.md) | 已复现的开放签名问题与方法 | 通过 |
 | [docs/issue-review-r163-qualified-parse-validation.md](issue-review-r163-qualified-parse-validation.md) | 已复现的开放协议校验问题与方法 | 通过 |
 | [docs/issue-review-r164-routine-custom-type-declarations.md](issue-review-r164-routine-custom-type-declarations.md) | 开放的标量UDT函数声明归属问题 | 通过 |
