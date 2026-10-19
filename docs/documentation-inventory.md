@@ -465,7 +465,7 @@
 | [docs/issue-review-r152-regtype-identifier-output.md](issue-review-r152-regtype-identifier-output.md) | 有限修复、专项通过与未全绿门禁 | 通过 |
 | [docs/issue-review-r155-enum-namespace-owner.md](issue-review-r155-enum-namespace-owner.md) | 问题、修复与验证 | 通过 |
 | [docs/issue-review-r156-regtype-physical-constants.md](issue-review-r156-regtype-physical-constants.md) | 开放问题、物理身份与修改方法 | 通过 |
-| [docs/issue-review-r157-dotted-set-target.md](issue-review-r157-dotted-set-target.md) | 开放问题、旧门禁失败与修改方法 | 通过 |
+| [docs/issue-review-r157-dotted-set-target.md](issue-review-r157-dotted-set-target.md) | 普通点号目标有限修复与完整验证 | 通过 |
 | [docs/issue-root-numeric-publication.md](issue-root-numeric-publication.md) | 历史问题证据 | 通过 |
 | [docs/issue-root-row-publication.md](issue-root-row-publication.md) | 历史问题证据 | 通过 |
 | [docs/issue-root-sql-value-publication.md](issue-root-sql-value-publication.md) | 历史问题证据 | 通过 |

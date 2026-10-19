@@ -1,5 +1,20 @@
 # 2026-10-13 全仓库审查
 
+[R157 普通SET点号目标](issue-review-r157-dotted-set-target.md)完成独立有限修复：
+完整目标先于内建分派，LOCAL/SESSION/transaction相似前缀不改变身份；
+引用分量保留原拼写，ColId分类、缺失分量、分隔符与FROM CURRENT边界均验证。
+PG1538全0；修复前两端各1538/226失败，native Root3075/474、clean3075/3072失败。
+修复后两端3075/1538全0，Root52及accepted-only clean37完整入口、严格输入/归属复核全0。
+原search_path_values_grammar夹具未改，两端完整跑到254；R152的5197/1675也重新全过，
+R152历史clean30终态1及旧R155断言134仍保留，不把旧输入失败改写成通过。
+仅一个Parser CPP：Root正常1O2/repeat0，clean fresh1+57已核对R152生产对象；
+六Main源/全头flags/对象核对后复用R152三个真实Main对象，新链接当前57库并隔离运行，
+不冒fresh TU。未实现全部通用SET值语法或自定义GUC存储，R140/R151等暂缓项不重开。
+[R156 REGTYPE物理常量](issue-review-r156-regtype-physical-constants.md)与R150仍开放；
+已接受577MD、909native+548Python+3Main=1460；工作区580MD、915+554+3=1472，
+仍有12个未接受入口，无新1460全量/TLS/整库sanitizer。
+原273仍22/166/70/15，总清单未完成，不push、Actions禁用。
+
 [R152 REGTYPE 最小引用](issue-review-r152-regtype-identifier-output.md)完成独立显示修复：
 精确查找串与显示串分离，quote_ident/format %I/路径列表共用既有 ASCII、关键字引用规则。
 PG1675全0；修复前两端各1675/66失败、native5197/1718失败；修复后两端5197/1675全0。

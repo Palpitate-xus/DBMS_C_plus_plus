@@ -1311,7 +1311,8 @@ bool SQLParser::isKeyword(const std::string& s) {
 bool SQLParser::isSetTransactionStatement(const std::string& sql) {
     const auto tokens = tokenize(sql);
     return tokens.size() >= 2 && toLower(tokens[0]) == "set" &&
-           toLower(tokens[1]) == "transaction";
+           toLower(tokens[1]) == "transaction" &&
+           (tokens.size() < 3 || tokens[2].empty() || tokens[2].front() != '.');
 }
 
 bool SQLParser::requiresQuerySnapshot(const std::string& sql) {
@@ -1654,6 +1655,16 @@ SqlCommand SQLParser::classify(const std::string& sql) {
 
     // Session / GUC
     if (lsql.substr(0, 3) == "set") {
+        const auto tokens = tokenize(sql);
+        size_t target = 1;
+        const auto dotted = [&](size_t at) {
+            return at + 1 < tokens.size() && !tokens[at + 1].empty() &&
+                tokens[at + 1].front() == '.';
+        };
+        if (target < tokens.size() && !dotted(target) &&
+            (toLower(tokens[target]) == "session" || toLower(tokens[target]) == "local"))
+            ++target;
+        if (dotted(target)) return SqlCommand::Set;
         size_t pos = 3;
         while (pos < lsql.size() && std::isspace(static_cast<unsigned char>(lsql[pos]))) ++pos;
         std::string rest = lsql.substr(pos);
@@ -5857,47 +5868,48 @@ ParseResult SQLParser::parseRelease(const std::string& sql) {
 // ------------------------------------------------------------------------
 
 // PostgreSQL 18.6 kwlist.h categories: quote non-unreserved keywords;
-// generic SET accepts nonreserved words plus the boolean TRUE/FALSE/ON.
+// 0 = IDENT/unreserved, 1 = column-name, 2 = reserved, 3 = type/function-name.
+// Generic SET values allow 0/1/3 plus TRUE/FALSE/ON; target ColId allows 0/1.
 static int identifierKeywordKind(const std::string& word) {
     static const std::unordered_map<std::string, int> keywords = {
         {"all", 2}, {"analyse", 2}, {"analyze", 2}, {"and", 2},
         {"any", 2}, {"array", 2}, {"as", 2}, {"asc", 2},
-        {"asymmetric", 2}, {"authorization", 1}, {"between", 1}, {"bigint", 1},
-        {"binary", 1}, {"bit", 1}, {"boolean", 1}, {"both", 2},
+        {"asymmetric", 2}, {"authorization", 3}, {"between", 1}, {"bigint", 1},
+        {"binary", 3}, {"bit", 1}, {"boolean", 1}, {"both", 2},
         {"case", 2}, {"cast", 2}, {"char", 1}, {"character", 1},
-        {"check", 2}, {"coalesce", 1}, {"collate", 2}, {"collation", 1},
-        {"column", 2}, {"concurrently", 1}, {"constraint", 2}, {"create", 2},
-        {"cross", 1}, {"current_catalog", 2}, {"current_date", 2}, {"current_role", 2},
-        {"current_schema", 1}, {"current_time", 2}, {"current_timestamp", 2}, {"current_user", 2},
+        {"check", 2}, {"coalesce", 1}, {"collate", 2}, {"collation", 3},
+        {"column", 2}, {"concurrently", 3}, {"constraint", 2}, {"create", 2},
+        {"cross", 3}, {"current_catalog", 2}, {"current_date", 2}, {"current_role", 2},
+        {"current_schema", 3}, {"current_time", 2}, {"current_timestamp", 2}, {"current_user", 2},
         {"dec", 1}, {"decimal", 1}, {"default", 2}, {"deferrable", 2},
         {"desc", 2}, {"distinct", 2}, {"do", 2}, {"else", 2},
         {"end", 2}, {"except", 2}, {"exists", 1}, {"extract", 1},
         {"false", 2}, {"fetch", 2}, {"float", 1}, {"for", 2},
-        {"foreign", 2}, {"freeze", 1}, {"from", 2}, {"full", 1},
+        {"foreign", 2}, {"freeze", 3}, {"from", 2}, {"full", 3},
         {"grant", 2}, {"greatest", 1}, {"group", 2}, {"grouping", 1},
-        {"having", 2}, {"ilike", 1}, {"in", 2}, {"initially", 2},
-        {"inner", 1}, {"inout", 1}, {"int", 1}, {"integer", 1},
-        {"intersect", 2}, {"interval", 1}, {"into", 2}, {"is", 1},
-        {"isnull", 1}, {"join", 1}, {"json", 1}, {"json_array", 1},
+        {"having", 2}, {"ilike", 3}, {"in", 2}, {"initially", 2},
+        {"inner", 3}, {"inout", 1}, {"int", 1}, {"integer", 1},
+        {"intersect", 2}, {"interval", 1}, {"into", 2}, {"is", 3},
+        {"isnull", 3}, {"join", 3}, {"json", 1}, {"json_array", 1},
         {"json_arrayagg", 1}, {"json_exists", 1}, {"json_object", 1}, {"json_objectagg", 1},
         {"json_query", 1}, {"json_scalar", 1}, {"json_serialize", 1}, {"json_table", 1},
         {"json_value", 1}, {"lateral", 2}, {"leading", 2}, {"least", 1},
-        {"left", 1}, {"like", 1}, {"limit", 2}, {"localtime", 2},
-        {"localtimestamp", 2}, {"merge_action", 1}, {"national", 1}, {"natural", 1},
+        {"left", 3}, {"like", 3}, {"limit", 2}, {"localtime", 2},
+        {"localtimestamp", 2}, {"merge_action", 1}, {"national", 1}, {"natural", 3},
         {"nchar", 1}, {"none", 1}, {"normalize", 1}, {"not", 2},
-        {"notnull", 1}, {"null", 2}, {"nullif", 1}, {"numeric", 1},
+        {"notnull", 3}, {"null", 2}, {"nullif", 1}, {"numeric", 1},
         {"offset", 2}, {"on", 2}, {"only", 2}, {"or", 2},
-        {"order", 2}, {"out", 1}, {"outer", 1}, {"overlaps", 1},
+        {"order", 2}, {"out", 1}, {"outer", 3}, {"overlaps", 3},
         {"overlay", 1}, {"placing", 2}, {"position", 1}, {"precision", 1},
         {"primary", 2}, {"real", 1}, {"references", 2}, {"returning", 2},
-        {"right", 1}, {"row", 1}, {"select", 2}, {"session_user", 2},
-        {"setof", 1}, {"similar", 1}, {"smallint", 1}, {"some", 2},
+        {"right", 3}, {"row", 1}, {"select", 2}, {"session_user", 2},
+        {"setof", 1}, {"similar", 3}, {"smallint", 1}, {"some", 2},
         {"substring", 1}, {"symmetric", 2}, {"system_user", 2}, {"table", 2},
-        {"tablesample", 1}, {"then", 2}, {"time", 1}, {"timestamp", 1},
+        {"tablesample", 3}, {"then", 2}, {"time", 1}, {"timestamp", 1},
         {"to", 2}, {"trailing", 2}, {"treat", 1}, {"trim", 1},
         {"true", 2}, {"union", 2}, {"unique", 2}, {"user", 2},
         {"using", 2}, {"values", 1}, {"varchar", 1}, {"variadic", 2},
-        {"verbose", 1}, {"when", 2}, {"where", 2}, {"window", 2},
+        {"verbose", 3}, {"when", 2}, {"where", 2}, {"window", 2},
         {"with", 2}, {"xmlattributes", 1}, {"xmlconcat", 1}, {"xmlelement", 1},
         {"xmlexists", 1}, {"xmlforest", 1}, {"xmlnamespaces", 1}, {"xmlparse", 1},
         {"xmlpi", 1}, {"xmlroot", 1}, {"xmlserialize", 1}, {"xmltable", 1},
@@ -5933,10 +5945,67 @@ ParseResult SQLParser::parseSet(const std::string& sql) {
     auto stmt = std::make_unique<SetStmt>();
 
     // SET [SESSION | LOCAL] name TO|=' value(s)
-    if (pos < tokens.size() && toLower(tokens[pos]) == "session") {
+    // SESSION/LOCAL can themselves be the first component of an ordinary target.
+    const auto startsDot = [](const std::string& token) {
+        return !token.empty() && token.front() == '.';
+    };
+    if (pos < tokens.size() && toLower(tokens[pos]) == "session" &&
+        (pos + 1 == tokens.size() || !startsDot(tokens[pos + 1]))) {
         stmt->scope = SetStmt::Scope::Session; ++pos;
-    } else if (pos < tokens.size() && toLower(tokens[pos]) == "local") {
+    } else if (pos < tokens.size() && toLower(tokens[pos]) == "local" &&
+               (pos + 1 == tokens.size() || !startsDot(tokens[pos + 1]))) {
         stmt->scope = SetStmt::Scope::Local; ++pos;
+    }
+
+    // A qualified target is one complete var_name, never a builtin named by
+    // its first token. Parse it before any dedicated builtin dispatch.
+    if (pos < tokens.size() && (startsDot(tokens[pos]) ||
+        (pos + 1 < tokens.size() && startsDot(tokens[pos + 1])))) {
+        const auto syntax = [](const char* message) {
+            ParseResult failed;
+            failed.error = message;
+            failed.sqlState = "42601";
+            return failed;
+        };
+        const auto component = [](const std::string& token) {
+            if (token.size() >= 2 && token.front() == '"' && token.back() == '"')
+                return token.size() > 2;
+            if (token.empty()) return false;
+            const auto letter = [](unsigned char ch) {
+                return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+                    ch == '_' || ch >= 0x80;
+            };
+            if (!letter(static_cast<unsigned char>(token.front()))) return false;
+            for (const unsigned char ch : token)
+                if (!letter(ch) && !(ch >= '0' && ch <= '9') && ch != '$') return false;
+            const int category = identifierKeywordKind(SQLParser::toLower(token));
+            return category == 0 || category == 1;
+        };
+        size_t end = tokens.size();
+        while (end && tokens[end - 1] == ";") --end;
+        size_t at = pos;
+        if (at == end || !component(tokens[at]))
+            return syntax("qualified SET target requires an identifier");
+        std::string name = tokens[at++];
+        while (at < end && tokens[at] == ".") {
+            if (++at == end || !component(tokens[at]))
+                return syntax("qualified SET target has an invalid component");
+            name += "." + tokens[at++];
+        }
+        if (at == end) return syntax("qualified SET target requires TO, = or FROM CURRENT");
+        if (toLower(tokens[at]) == "from") {
+            if (at + 2 != end || toLower(tokens[at + 1]) != "current")
+                return syntax("SET FROM requires CURRENT");
+        } else {
+            if (at + 1 >= end || (toLower(tokens[at]) != "to" && tokens[at] != "="))
+                return syntax("qualified SET target requires TO or = and a value");
+            for (++at; at < end; ++at) {
+                if (tokens[at] == ";") return syntax("unexpected statement after SET");
+                stmt->values.push_back(tokens[at]);
+            }
+        }
+        stmt->name = std::move(name);
+        r.success = true; r.stmt = std::move(stmt); return r;
     }
 
     // SQL SET's var_list is a list of separate values, not an already

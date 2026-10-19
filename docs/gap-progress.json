@@ -2,6 +2,35 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R157 qualified ordinary SET target identity, ColId grammar and Parse-only non-execution",
+      "gap_ids": [
+        "FUNC-01",
+        "CAT-04",
+        "TYPE-08",
+        "P0-16"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r157-dotted-set-target.md",
+        "docs/issue-review-r152-regtype-identifier-output.md",
+        "docs/issue-review-r156-regtype-physical-constants.md"
+      ],
+      "tests": [
+        "tests/set_qualified_target_test.cpp",
+        "tests/set_qualified_target_protocol_e2e_test.py",
+        "tests/search_path_values_grammar_test.cpp"
+      ],
+      "verification": {
+        "reproduction": "FinalactualPG18.6/180006 full1538wire0; unchangedfinalfixturesoldRootandacceptedR152each1538/226fail1. OldRoot3075native474fail1;oldaccepted3075/3072fail1. Earlierwirev1fixeddefaultpathmisassumption229fail,referenceendpointPG17.2rejectedBEFOREtesting;v2usesproperprivatePG18.6 andrealbaseline1538/1referencefail duewrongtrailingemptysemicolonexpectation,oldboth227fail/nativeRoot476. SameSQLcase;; movedinvalid->valid,NO testcase/assertdeleted,countsunmodified;finaloldactualfullrerunnotarithmetic.",
+        "focused_tests": "BothRoot/newaccepted-only3075native1538wire0;all494goldenkeywordsthreeforms*twoAPIs2964native +28valid25invalid*twoAPI106+keywordcount1+transactionowner4. Wire1482keywordParseDescribe+28valid25invalid+3state1538. StrictParseComplete/zeroParameterDescription/NoData/ReadyI ORsingle42601/ReadyI;NO Bind/Execute;trueSearchPathunchangedandfollowupSELECTsync. Scope/quotedcomponents/UTF8/multilevel/embedded-dot-equals/doubledquotes/malformedtarget/fromcurrent/trailingemptysemicolonscomplete. FullRoot27native22wire3Main52andclean18native16wire3Main37all0. OriginalUNCHANGEDsearchpathfixture254andR1525197/1675bothvariants0.",
+        "build": "CPP-onlyParser. Rootnormal1ParserO2/repeat0,current58receipt/allother57originalR152productionobjectbytesunchanged. NewcleanbaseD65+ONLY2partialsrc/registry2fullfixtures,freshParserO2+57verifiedR152fresh58productionobjects inclMain/allheadersflags/unchangedCPP/original58receipts/prepostobjectbytes. ServerNOteststubs/nofakecache. SixMainSOURCEinputs/allheaders/flags/objectbytesverifyR152threeactualMainobjectsBEFOREREUSE,new57CURRENT O2links/isolation/actualall6runtimes0,NOTfreshTU. Sessionaccepted320NOTR140341. Allnew/oldclean/donorALLtrackedpermanentlyimmutable.",
+        "historical_failures": "R152clean30actual29pass1searchpathnative134whole1andfrozenR155samefixture134remainhistorical;R157doesNOToverwritepastfailurebutnewsourcewhole89green. OuterRootbuildwrapperinitial1fromrelative-vsabsoluteobjectreceiptcheck,actualcompile/link0;separatecorrectedreadonlyreceipt audit0withoutrecompile. InitialMainproofregexoverescapeboth1BEFORElink,originalscript/logsretained;correctedcheckerthenv4newlinksandactualruntimes0. No production/testexpectationchangefortheseauditmistakes.",
+        "scope": "Qualifiedvar_name parsedBEFOREdedicatedbuiltinbranches,scopeandtransactionclassificationdotboundariesstable,allcomponentsvalidated;existingclassifier23typeFuncfacts distinguishkind3withoutchangingquote-or-searchpathvaluebehavior. Rawquote/name/value-tokenAPIpreserved;fullgenericSETvalues/customGUCstoreNOTimplemented. OnlyprivateParserandregistry plus2fullfixtures/docs; oldR1406linegenericloop/source/21frontendextensionsUNACCEPTEDUNCHANGED. Inverse2ownsourceeditsrecoversall2185priorSource3207;all29originalpendingtrackedbytes/source/17untrackedpreserved. Original273items/checkboxes22complete166partial70unverified15deferredunchanged.",
+        "orthogonal_open": "R156fulltypedconstantcarrier/builtinvisibility-timealiases/JSONsyntaxidentitystillOPEN;R150thresholdfull61scopeOPEN. R151USERDEFERRED46a4,NO341/103rerunoracceptance. R140TimeZoneVALUEgrammarandallotherskippedmodulesnotreopened. FinitequalifiedtargetfixnotallGUC/customsetterimplementation.",
+        "full_suite": "Accepted577MD909native548Python3Main1460;working580MD915native554Python3Main1472still12unacceptedentries. Whole52+37actual0ONLY,notnew1460full/TLS/wholeenginesanitizer. Historicalecf1436final1retained. Original27322/166/70/15NOTcomplete. NoPush/Actionsdisabled."
+      }
+    },
+    {
       "issue": "R152 canonical user REGTYPE identifier display; R156 physical identity and R157 ordinary SET AST remain open",
       "gap_ids": [
         "TYPE-08",
