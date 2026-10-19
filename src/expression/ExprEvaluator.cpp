@@ -9945,16 +9945,19 @@ void ExprEvaluator::registerBuiltins() {
     // pow — alias of power; ceiling — alias of ceil
     functions_["pow"] = functions_["power"];
     functions_["ceiling"] = [integralRound](const auto& a) { return integralRound(a, true); };
-    // degrees / radians
-    functions_["degrees"] = [float8Text](const std::vector<ExprValue>& a) {
+    // A single binary64 operation avoids overflowing an intermediate x*pi
+    // or x*180 when the converted angle is finite. Preserve nonzero
+    // subnormals on input; asDouble()'s stod fallback would turn them into 0.
+    constexpr double radiansPerDegree = 0.0174532925199432957692;
+    functions_["degrees"] = [float8Text, radiansPerDegree](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("double precision", "", true);
-        return ExprValue("double precision",
-                         float8Text(a[0].asDouble() * 180.0 / (std::atan(1.0) * 4.0)), false);
+        return ExprValue("double precision", float8Text(geometricFloatOperation(
+            parseDoubleCastValue(a[0]), radiansPerDegree, true)), false);
     };
-    functions_["radians"] = [float8Text](const std::vector<ExprValue>& a) {
+    functions_["radians"] = [float8Text, radiansPerDegree](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("double precision", "", true);
-        return ExprValue("double precision",
-                         float8Text(a[0].asDouble() * (std::atan(1.0) * 4.0) / 180.0), false);
+        return ExprValue("double precision", float8Text(geometricFloatOperation(
+            parseDoubleCastValue(a[0]), radiansPerDegree)), false);
     };
     // cot — cotangent
     functions_["cot"] = [finiteFloat8](const std::vector<ExprValue>& a) {

@@ -1,5 +1,7 @@
 # 代码审查索引
 
+本地 R158 有限修复：见[issue-review-r158-angle-conversion-range](issue-review-r158-angle-conversion-range.md)。专属 native 603；专属 wire 1449。本次证据为九项候选组合的 Root/accepted-only clean 两端各 58 项（26 native、29 wire、3 real Main）实际退出全 0，完整源文件与产物 fence 复核 0；不表示本项中间提交单独跑过全矩阵。本项接受后 588 Markdown、911 native、551 Python、3 Main，共 1465 注册入口；不是该总数的全套运行声明。原 273 项 22 complete / 166 partial / 70 unverified / 15 deferred 不变，整体未完成；保留历史失败与未接受边界，不恢复用户跳过模块。No push；Actions disabled。
+
 [R169 多语句语法检查](issue-review-r169-simple-query-raw-syntax.md)登记实际开放问题：
 PG完整102/0、冻结旧Root102/27失败；原garbage两例DDL会回滚，但新增被遗漏的字符串等尾片段
 会仅返回C/Z并实际删除私有UUID域，另有数字XX000、前缀nextval执行与事务状态差异。
