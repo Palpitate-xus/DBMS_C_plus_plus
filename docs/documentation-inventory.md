@@ -475,7 +475,7 @@
 | [docs/issue-review-r164-routine-custom-type-declarations.md](issue-review-r164-routine-custom-type-declarations.md) | 自定义标量声明有限修复与组合回归证据 | 通过 |
 | [docs/issue-review-r165-builtin-array-binary-bind.md](issue-review-r165-builtin-array-binary-bind.md) | 五种内置数组输入有限修复与独立实测 | 通过 |
 | [docs/issue-review-r166-scalar-protocol-parameter-inference.md](issue-review-r166-scalar-protocol-parameter-inference.md) | 整式标量参数推断有限修复与组合回归证据 | 通过 |
-| [docs/issue-review-r167-domain-drop-targets.md](issue-review-r167-domain-drop-targets.md) | 开放的DROP DOMAIN目标语法问题 | 通过 |
+| [docs/issue-review-r167-domain-drop-targets.md](issue-review-r167-domain-drop-targets.md) | DROP DOMAIN目标有限修复与组合回归证据 | 通过 |
 | [docs/issue-review-r168-composite-namespace-owner.md](issue-review-r168-composite-namespace-owner.md) | 开放的composite持久化身份问题 | 通过 |
 | [docs/issue-review-r169-simple-query-raw-syntax.md](issue-review-r169-simple-query-raw-syntax.md) | 开放的多语句语法时机与非法片段遗漏问题 | 通过 |
 | [docs/issue-root-numeric-publication.md](issue-root-numeric-publication.md) | 历史问题证据 | 通过 |

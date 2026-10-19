@@ -9306,6 +9306,26 @@ bool DdlExecutor::executeDropDomain(const DropStmt* stmt, Session& s) {
     if (!stmt) return rejectMalformedDdlAst();
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
+    if (stmt->objectNames.empty())
+        throw DbError("42601", "DROP DOMAIN requires a name");
+    // Multi-target DROP requires a dependency plan covering every target.
+    // Reject it before opening a transaction or mutating either sidecar.
+    if (stmt->objectNames.size() != 1)
+        throw DbError("0A000", "multi-target DROP DOMAIN is not supported; no objects were dropped");
+    const std::string& name = stmt->objectNames.front();
+    std::string lookupName = name;
+    bool arrayTarget = false;
+    while (lookupName.size() >= 2 && lookupName.compare(lookupName.size()-2, 2, "[]") == 0) {
+        lookupName.resize(lookupName.size()-2);
+        arrayTarget = true;
+    }
+    const auto components = SQLParser::tokenize(lookupName);
+    if (components.size() == 5 && components[1] == "." && components[3] == ".")
+        throw DbError("0A000", "cross-database DROP DOMAIN references are not supported");
+    CatalogManager::QualifiedName requested;
+    if (!CatalogManager::parseQualifiedName(lookupName, requested, true) ||
+        requested.name.empty())
+        throw DbError("42601", "invalid DROP DOMAIN target");
 
     DdlTransaction txn(s);
     txn.enableSnapshotRollback();
@@ -9314,12 +9334,7 @@ bool DdlExecutor::executeDropDomain(const DropStmt* stmt, Session& s) {
         return true;
     }
 
-    if (stmt->objectNames.empty()) {
-        std::cout << "SQL syntax error: DROP DOMAIN name" << std::endl;
-        return true;
-    }
-    std::string name = stmt->objectNames.front();
-    const auto info = g_engine.getDomain(s.currentDB, name);
+    const auto info = g_engine.getDomain(s.currentDB, lookupName);
     if (info.name.empty()) {
         if (stmt->ifExists) {
             if (!txn.commit()) return true;
@@ -9328,6 +9343,7 @@ bool DdlExecutor::executeDropDomain(const DropStmt* stmt, Session& s) {
         }
         throw DbError("42704", "domain does not exist: " + name);
     }
+    if (arrayTarget) throw DbError("42809", "type is not a domain: " + name);
     CatalogManager::QualifiedName declared;
     CatalogManager::parseQualifiedName(info.name, declared, true);
     auto& catalog = g_engine.catalogService().get(s.currentDB);
@@ -9344,8 +9360,10 @@ bool DdlExecutor::executeDropDomain(const DropStmt* stmt, Session& s) {
             stmt->cascade ? "dependent domain CASCADE is not supported" : "cannot drop domain because objects depend on it");
     }
     txn.markSnapshotDirty();
-    txn.recordDrop(DdlObjectKind::Domain, name);
-    DBStatus res = g_engine.dropDomain(s.currentDB, name);
+    // The lookup selected a canonical SQL identity using the current path.
+    // Retain it for both mutation and transaction bookkeeping.
+    txn.recordDrop(DdlObjectKind::Domain, info.name);
+    DBStatus res = g_engine.dropDomain(s.currentDB, info.name);
     if (res != DBStatus::OK) {
         std::cout << "DROP DOMAIN failed" << std::endl;
         return true;

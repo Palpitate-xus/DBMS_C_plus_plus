@@ -5174,6 +5174,7 @@ ParseResult SQLParser::parseDrop(const std::string& sql) {
     } else if (match(tokens, pos, "domain")) {
         pos++;
         r.stmt = parseDropDomain(tokens, pos);
+        if (!r.stmt) r.sqlState = "42601";
     } else if (match(tokens, pos, "type")) {
         pos++;
         r.stmt = parseDropType(tokens, pos);
@@ -9679,13 +9680,47 @@ StmtPtr SQLParser::parseDropDomain(const std::vector<std::string>& tokens, size_
     if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
         stmt->ifExists = true; pos += 2;
     }
+    bool expectName = true;
     while (pos < tokens.size() && tokens[pos] != ";") {
-        std::string w = toLower(tokens[pos]);
-        if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
-        if (w == "restrict") { ++pos; continue; }
-        if (w == ",") { ++pos; continue; }
-        stmt->objectNames.push_back(tokens[pos++]);
+        const std::string word = toLower(tokens[pos]);
+        if (!expectName && (word == "cascade" || word == "restrict")) {
+            stmt->cascade = word == "cascade";
+            ++pos;
+            break;
+        }
+        if (expectName) {
+            // CASCADE/RESTRICT and a lone IF are valid unreserved names
+            // in this position; only a following option changes behavior.
+            if (word == "exists") return nullptr;
+            std::string name;
+            if (!parseQualifiedRoutineName(tokens, pos, name)) return nullptr;
+            CatalogManager::QualifiedName target;
+            if (!CatalogManager::parseQualifiedName(name, target, true) || target.name.empty())
+                return nullptr;
+            if (pos < tokens.size() && tokens[pos] == ".") {
+                ++pos;
+                std::string component;
+                CatalogManager::QualifiedName decoded;
+                if (!parseQualifiedRoutineName(tokens, pos, component) ||
+                    !CatalogManager::parseQualifiedName(component, decoded, true) ||
+                    decoded.name.empty() || !decoded.schema.empty()) return nullptr;
+                name += "." + component;
+            }
+            while (pos + 1 < tokens.size() && tokens[pos] == "[" && tokens[pos + 1] == "]") {
+                name += "[]";
+                pos += 2;
+            }
+            stmt->objectNames.push_back(std::move(name));
+            expectName = false;
+        } else {
+            if (tokens[pos] != ",") return nullptr;
+            ++pos;
+            expectName = true;
+        }
     }
+    if (expectName || stmt->objectNames.empty()) return nullptr;
+    if (pos < tokens.size() && tokens[pos] == ";") ++pos;
+    if (pos != tokens.size()) return nullptr;
     return stmt;
 }
 
