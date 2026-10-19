@@ -6751,12 +6751,21 @@ static bool hexDecode(const std::string& in, std::string& out) {
         return -1;
     };
     out.clear();
-    std::string clean;
-    for (char c : in) if (!std::isspace(static_cast<unsigned char>(c))) clean.push_back(c);
-    if (clean.size() % 2 != 0) return false;
-    for (size_t i = 0; i < clean.size(); i += 2) {
-        int hi = nib(clean[i]), lo = nib(clean[i + 1]);
-        if (hi < 0 || lo < 0) return false;
+    auto fail = [&]() {
+        out.clear();
+        return false;
+    };
+    for (size_t i = 0; i < in.size();) {
+        const char c = in[i];
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+            ++i;
+            continue;
+        }
+        // Whitespace is legal only between complete bytes, never nibbles.
+        const int hi = nib(in[i++]);
+        if (hi < 0 || i == in.size()) return fail();
+        const int lo = nib(in[i++]);
+        if (lo < 0) return fail();
         out.push_back(static_cast<char>((hi << 4) | lo));
     }
     return true;
