@@ -1,5 +1,12 @@
 # 代码审查索引
 
+[R167 DROP DOMAIN目标](issue-review-r167-domain-drop-targets.md)、
+[R168 composite namespace归属](issue-review-r168-composite-namespace-owner.md)登记为新开放问题。
+R164完整956的Root候选实际四失败：一个DROP DOMAIN及三个DROP SCHEMA；整轮29终态1保留。
+内置数组1852、whole-scalar参数263、通用签名1705、准备校验1017及限定投影637已在Root全0，
+不能替代R164清理控制；clean整轮仍运行，尚未验收或提交这些生产候选。
+本次只提交两个新问题报告与索引，原273及所有用户暂缓状态不变，不push、Actions禁用。
+
 新增三项已复现的开放问题：[R164 自定义标量函数声明](issue-review-r164-routine-custom-type-declarations.md)、
 [R165 内置数组binary Bind](issue-review-r165-builtin-array-binary-bind.md)、
 [R166 函数wire参数OID推断](issue-review-r166-scalar-protocol-parameter-inference.md)。
