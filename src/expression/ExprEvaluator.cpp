@@ -5394,6 +5394,11 @@ struct ResolvedScalarFunction {
     StorageEngine::UDFInfo routine;
     std::vector<std::string> inputs;
     std::string output;
+    // A legacy row caller has no query-owned argument declarations yet.
+    // Retain the whole candidate path, not an arity-selected callee, until
+    // the actual typed cells arrive. Opaque callbacks keep their own rules.
+    std::vector<std::string> deferredStoredPath;
+    ScalarFunction deferredCatalogCallback;
 };
 
 // Concrete overload declarations, shared by static resolution and runtime
@@ -5494,7 +5499,12 @@ bool hasUnboundScalarInput(const Expr* expression) {
     if(const auto* call=dynamic_cast<const FunctionCallExpr*>(expression)) {
         if(!call->resolvedResultType.empty())return false;
         for(const auto& argument:call->args)if(hasUnboundScalarInput(argument.get()))return true;
+        for(const auto& argument:call->namedArgs)if(hasUnboundScalarInput(argument.value.get()))return true;
     }
+    if(const auto* array=dynamic_cast<const ArrayExpr*>(expression))
+        for(const auto& element:array->elements)if(hasUnboundScalarInput(element.get()))return true;
+    if(const auto* row=dynamic_cast<const RowExpr*>(expression))
+        for(const auto& field:row->elements)if(hasUnboundScalarInput(field.get()))return true;
     if(const auto* conditional=dynamic_cast<const CaseExpr*>(expression)) {
         if(hasUnboundScalarInput(conditional->elseExpr.get()))return true;
         for(const auto& arm:conditional->whenClauses)if(hasUnboundScalarInput(arm.second.get()))return true;
@@ -5581,9 +5591,58 @@ ResolvedScalarFunction resolveTypedScalar(const std::string& name,
            !isQuotedString(literal->value))continue;
         CastExpr conversion;conversion.typeName=candidates.front().inputs[i];conversion.implicit=true;
         conversion.operand=std::make_unique<LiteralExpr>(*literal);
-        ExprEvaluator pure;(void)pure.eval(&conversion,RowContext{});
+        ExprEvaluator pure;pure.setCurrentDB(database);
+        pure.bindScalarFunctions(&conversion,engine);
+        (void)pure.eval(&conversion,RowContext{});
     }
     return candidates.front();
+}
+
+// Generic stored names have the same declaration/implicit-cast rules as
+// table-listed builtin overloads. A metadata-only legacy caller, however,
+// cannot infer an unbound column as TEXT or execute it to choose a routine.
+ResolvedScalarFunction resolveGenericStoredScalar(const std::string& name,
+    const FunctionCallExpr* call,const std::vector<std::string>& path,
+    StorageEngine* engine,const std::string& database,const ExprEvaluator& evaluator,
+    ScalarFunction catalogCallback={},char catalogVolatility='i') {
+    const bool unbound=std::any_of(call->args.begin(),call->args.end(),
+        [](const auto& argument){return hasUnboundScalarInput(argument.get());});
+    if(!unbound) {
+        std::vector<std::string> inputs;
+        for(const auto& argument:call->args)
+            inputs.push_back(scalarSignatureInputType(ExprHelper::inferParsedInputType(
+                argument.get(),{},database,engine,&evaluator)));
+        return resolveTypedScalar(name,inputs,call,path,engine,database);
+    }
+    ResolvedScalarFunction pending;
+    for(const auto& schema:path) {
+        if(schema=="pg_catalog")continue;
+        auto routine=engine->getUDF(database,name,schema);
+        size_t arity=routine.paramNames.size();
+        if(arity==1 && routine.paramNames.front().empty() &&
+           (routine.paramTypes.empty() || routine.paramTypes.front().empty()))arity=0;
+        if(routine.expression.empty() || !call->namedArgs.empty() || call->args.size()!=arity)continue;
+        if(!pending.found) {
+            pending.found=pending.stored=true;pending.name=name;pending.schema=schema;
+            pending.routine=std::move(routine);
+        } else {
+            if(ExprHelper::canonicalResultTypeName(pending.routine.returnType)!=
+               ExprHelper::canonicalResultTypeName(routine.returnType))
+                pending.routine.returnType="unknown";
+            pending.routine.provolatile=std::max(pending.routine.provolatile,routine.provolatile);
+        }
+    }
+    if(pending.found) {
+        pending.deferredStoredPath=path;
+        pending.deferredCatalogCallback=std::move(catalogCallback);
+        if(pending.deferredCatalogCallback) {
+            pending.routine.returnType="unknown";
+            pending.routine.provolatile=std::max(pending.routine.provolatile,catalogVolatility);
+        }
+        // inputs intentionally stays empty: bindScalarFunctions must not
+        // manufacture casts from an unavailable legacy column declaration.
+    }
+    return pending;
 }
 
 // A named callable keeps declaration metadata available after an AST call
@@ -5595,17 +5654,60 @@ struct BoundScalarRoutine {
     const FunctionCallExpr* site;
 
     ExprValue operator()(const std::vector<ExprValue>& args) const {
+        std::vector<std::string> inputs;
+        for(size_t i=0;i<args.size();++i) {
+            std::string type=scalarSignatureInputType(args[i].typeName);
+            // Evaluation renders a bare UNKNOWN string as a string datum;
+            // its original grammar still owns UNKNOWN overload selection.
+            if(site && i<site->args.size()) {
+                const auto* literal=dynamic_cast<const LiteralExpr*>(site->args[i].get());
+                if(literal && literal->typeName.empty() && !literal->preparedSubquery &&
+                   (isQuotedString(literal->value) || toLower(literal->value)=="null"))type="unknown";
+            }
+            inputs.push_back(std::move(type));
+        }
+        auto selected=resolved;
+        if(!resolved.deferredStoredPath.empty()) {
+            selected=resolveTypedScalar(resolved.name,inputs,site,
+                resolved.deferredStoredPath,engine,database);
+            if(!selected.found) {
+                if(resolved.deferredCatalogCallback)return resolved.deferredCatalogCallback(args);
+                throw DbError("42883","function does not exist: "+resolved.name);
+            }
+        }
+        if(selected.inputs.empty() && !args.empty())
+            for(const auto& declaration:selected.routine.paramTypes)
+                selected.inputs.push_back(scalarSignatureInputType(declaration));
+        if(selected.inputs.size()!=args.size())
+            throw DbError("42883","function does not exist: "+resolved.name);
+        std::vector<ExprValue> converted;
+        ExprEvaluator converter;converter.setCurrentDB(database);
+        for(size_t i=0;i<args.size();++i) {
+            if(!common_type_detail::implicit(inputs[i],selected.inputs[i]))
+                throw DbError("42883","function does not exist: "+resolved.name);
+            if(inputs[i]==selected.inputs[i]) {converted.push_back(args[i]);continue;}
+            // Do not reconstruct a constant from its rendered SQL text.
+            // The parameter retains NULL, collation and physical metadata.
+            CastExpr cast;cast.typeName=selected.inputs[i];cast.implicit=true;
+            auto parameter=std::make_unique<ParameterExpr>();parameter->slot=0;
+            parameter->declaredType=args[i].typeName;parameter->origin=ParameterOrigin::RuntimeCell;
+            cast.operand=std::move(parameter);
+            RowContext row;row.setParameters({args[i]});
+            converter.bindScalarFunctions(&cast,engine);
+            converted.push_back(converter.eval(&cast,row));
+        }
+        if(!selected.stored) {
+            if(resolved.deferredCatalogCallback)return resolved.deferredCatalogCallback(converted);
+            throw DbError("42883","function does not exist: "+resolved.name);
+        }
         std::vector<std::string> values;
         std::vector<bool> nulls;
-        for (const auto& arg : args) {
-            values.push_back(arg.value);
-            nulls.push_back(arg.isNull);
-        }
+        for(const auto& arg:converted) {values.push_back(arg.value);nulls.push_back(arg.isNull);}
         std::string value;
         bool isNull = false;
-        if (!engine->callUDF(database, resolved.name, values, value, &isNull, &nulls,resolved.schema))
-            throw DbError("22023", "stored-function evaluation failed: " + resolved.name);
-        return ExprValue(ExprHelper::canonicalResultTypeName(resolved.routine.returnType),
+        if (!engine->callUDF(database, selected.name, values, value, &isNull, &nulls,selected.schema))
+            throw DbError("22023", "stored-function evaluation failed: " + selected.name);
+        return ExprValue(ExprHelper::canonicalResultTypeName(selected.routine.returnType),
                          value, isNull);
     }
 };
@@ -5772,6 +5874,28 @@ ResolvedScalarFunction resolveScalarFunction(
                     }
                 }
                 if(matches) {
+                    if(!(schema.empty() && (polymorphicTypeOf || polymorphic))) {
+                        std::vector<std::string> storedPath;
+                        ScalarFunction catalogCallback;
+                        char catalogVolatility='i';
+                        for(const auto& ns:path) {
+                            if(ns!="pg_catalog") {storedPath.push_back(ns);continue;}
+                            const auto callback=registry.find(result.name);
+                            const bool callable=result.name==toLower(result.name) && callback!=registry.end() &&
+                                !callback->second.target<BoundScalarRoutine>();
+                            if(!callable)continue;
+                            catalogCallback=callback->second;
+                            catalogVolatility=evaluator.volatility(result.name);
+                            if(!scalarSignatures(result.name).empty() &&
+                               ownsScalarSignatures(result.name,&callback->second))
+                                storedPath.push_back(ns);
+                            else break; // An opaque callback keeps its existing namespace precedence.
+                        }
+                        auto selected=resolveGenericStoredScalar(result.name,call,storedPath,
+                            engine,database,evaluator,std::move(catalogCallback),catalogVolatility);
+                        if(selected.found)return selected;
+                        continue; // A later real catalog callback may still own the call.
+                    }
                     result.routine=std::move(routine);result.schema=candidateSchema;
                     result.found = result.stored = true;return result;
                 }

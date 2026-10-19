@@ -632,12 +632,85 @@ std::string inferAstResultType(
     return "text";
 }
 
+// Build only a declaration probe, never SQL text or execution cells. Caller
+// hints can supply legacy column declarations without mutating the live AST.
+// Literal UNKNOWN syntax stays literal so its selected input codec is checked.
+std::unique_ptr<FunctionCallExpr> hintedRoutineSignature(const FunctionCallExpr& call,
+    const std::map<std::string,std::string>& hints,const RoutineResultTypes& routines,
+    std::unique_ptr<FunctionCallExpr>* unboundSignature=nullptr) {
+    if(hints.empty())return {};
+    bool complete=true,usedHint=false;
+    const ColumnRefExpr* unboundColumn=nullptr;
+    std::function<void(const Expr*)> inspect=[&](const Expr* node) {
+        if(!node || !complete)return;
+        if(node->preparedSubquery || node->type==ExprType::Subquery) {complete=false;return;}
+        if(const auto* column=dynamic_cast<const ColumnRefExpr*>(node)) {
+            if(column->binding)return;
+            auto hint=hints.find(column->toString());
+            if(hint==hints.end())hint=hints.find(column->column);
+            if(hint==hints.end() || hint->second.empty())complete=false;
+            else {usedHint=true;if(!unboundColumn)unboundColumn=column;}
+        } else if(const auto* binary=dynamic_cast<const BinaryOpExpr*>(node)) {
+            inspect(binary->left.get());
+            if(binary->op!="::" && toLower(binary->op)!="collate")inspect(binary->right.get());
+        } else if(const auto* unary=dynamic_cast<const UnaryOpExpr*>(node))inspect(unary->operand.get());
+        else if(const auto* cast=dynamic_cast<const CastExpr*>(node))inspect(cast->operand.get());
+        else if(const auto* nested=dynamic_cast<const FunctionCallExpr*>(node)) {
+            for(const auto& argument:nested->args)inspect(argument.get());
+            for(const auto& argument:nested->namedArgs)inspect(argument.value.get());
+        } else if(const auto* conditional=dynamic_cast<const CaseExpr*>(node)) {
+            inspect(conditional->switchExpr.get());inspect(conditional->elseExpr.get());
+            for(const auto& arm:conditional->whenClauses){inspect(arm.first.get());inspect(arm.second.get());}
+        } else if(const auto* array=dynamic_cast<const ArrayExpr*>(node))
+            for(const auto& element:array->elements)inspect(element.get());
+        else if(const auto* row=dynamic_cast<const RowExpr*>(node))
+            for(const auto& field:row->elements)inspect(field.get());
+        else if(const auto* quantified=dynamic_cast<const QuantifiedComparisonExpr*>(node)) {
+            inspect(quantified->left.get());inspect(quantified->right.get());
+        }
+    };
+    for(const auto& argument:call.args)inspect(argument.get());
+    for(const auto& argument:call.namedArgs)inspect(argument.value.get());
+    if(!complete || !usedHint)return {};
+    const auto declaration=[&](const Expr* argument)->ExprPtr {
+        if(const auto* literal=dynamic_cast<const LiteralExpr*>(argument))
+            return std::make_unique<LiteralExpr>(*literal);
+        auto parameter=std::make_unique<ParameterExpr>();
+        parameter->declaredType=inferAstResultType(argument,hints,&routines);
+        if(parameter->declaredType.empty())parameter->declaredType="unknown";
+        parameter->origin=ParameterOrigin::MetadataPlaceholder;
+        return parameter;
+    };
+    const auto signature=[&] {
+        auto result=std::make_unique<FunctionCallExpr>();
+        result->funcName=call.funcName;result->schema=call.schema;
+        result->sourceBegin=call.sourceBegin;result->sourceEnd=call.sourceEnd;
+        result->distinct=call.distinct;result->hasOver=call.hasOver;
+        result->orderBy=call.orderBy;result->setReturning=call.setReturning;
+        for(const auto& argument:call.args)result->args.push_back(declaration(argument.get()));
+        for(const auto& argument:call.namedArgs)
+            result->namedArgs.push_back({argument.name,declaration(argument.value.get())});
+        if(call.filter)result->filter=declaration(call.filter.get());
+        return result;
+    };
+    if(unboundSignature && unboundColumn && !call.args.empty()) {
+        *unboundSignature=signature();
+        // One real unresolved column is sufficient to retain the ordinary
+        // generic call's deferred arity/path identity, regardless of its
+        // position. A private callback belongs only to the original node,
+        // so a sibling with its SQL spelling cannot impersonate that site.
+        (*unboundSignature)->args.front()=std::make_unique<ColumnRefExpr>(*unboundColumn);
+    }
+    return signature();
+}
+
 // Keep routine result metadata associated with the exact live AST node, not
 // with strings which could collide with user column names. This walk resolves
 // declarations only: it does not bind callbacks or execute any expression.
 RoutineResultTypes collectRoutineResultTypes(
     const Expr* expression, const std::string& currentDB,
-    StorageEngine* functionEngine,const ExprEvaluator* functionEvaluator = nullptr) {
+    StorageEngine* functionEngine,const ExprEvaluator* functionEvaluator = nullptr,
+    const std::map<std::string,std::string>* typeHints = nullptr) {
     RoutineResultTypes routineTypes;
     if (currentDB.empty() && !functionEvaluator) return routineTypes;
     // A caller's native callback replacements belong to that evaluator.
@@ -657,8 +730,48 @@ RoutineResultTypes collectRoutineResultTypes(
             else if(!literal->typeName.empty() && !legacyNullLiteral(literal))
                 routineTypes.declarations[node]=ExprHelper::declaredTypeInput(literal->typeName,currentDB,functionEngine);
         } else if (const auto* call = dynamic_cast<const FunctionCallExpr*>(node)) {
-            if (evaluator.hasScalarFunction(call, functionEngine)) {
-                const std::string type = evaluator.scalarFunctionResultType(call, functionEngine);
+            // Child declarations precede the parent signature probe, so a
+            // nested generic routine consumes the same caller hints.
+            for(const auto& argument:call->args)inspect(argument.get());
+            for(const auto& argument:call->namedArgs)inspect(argument.value.get());
+            const FunctionCallExpr* metadataCall=call;
+            std::unique_ptr<FunctionCallExpr> signature;
+            const bool resolved=evaluator.hasScalarFunction(call,functionEngine);
+            CatalogManager::QualifiedName name,schema;
+            const bool ordinaryName=CatalogManager::parseQualifiedName(call->funcName,name,true) && name.schema.empty();
+            const bool ownRegistrySite=call->schema.empty() && ordinaryName &&
+                name.name==toLower(name.name) && evaluator.hasFunction(name.name);
+            const bool catalogSchema=!call->schema.empty() &&
+                CatalogManager::parseQualifiedName(call->schema,schema,true) && schema.name=="pg_catalog";
+            // A registered name alone does not own this SQL occurrence: a
+            // real stored overload can precede ABS/UPPER in search_path.
+            // Compare an unresolved sibling before using caller hints; an
+            // actual private bound callback keeps its original node identity.
+            const auto identity=resolved && typeHints && !catalogSchema
+                ?evaluator.scalarFunctionIdentity(call,functionEngine):std::string{};
+            if(resolved && typeHints && !catalogSchema && identity.rfind("stored",0)==0) {
+                std::unique_ptr<FunctionCallExpr> unboundSignature;
+                signature=hintedRoutineSignature(*call,*typeHints,routineTypes,
+                    ownRegistrySite?&unboundSignature:nullptr);
+                if(signature && ownRegistrySite) {
+                    bool ordinarySite=false;
+                    try {
+                        ordinarySite=unboundSignature &&
+                            evaluator.hasScalarFunction(unboundSignature.get(),functionEngine) &&
+                            evaluator.scalarFunctionIdentity(unboundSignature.get(),functionEngine)==identity;
+                    } catch(const DbError& error) {
+                        if(error.sqlState()!="42883" && error.sqlState()!="42725")throw;
+                    }
+                    if(!ordinarySite)signature.reset();
+                }
+                if(signature) {
+                    metadataCall=signature.get();
+                    if(!evaluator.hasScalarFunction(metadataCall,functionEngine))
+                        throw DbError("42883","function does not exist: "+call->funcName);
+                }
+            }
+            if (resolved) {
+                const std::string type = evaluator.scalarFunctionResultType(metadataCall, functionEngine);
                 if (!type.empty()) routineTypes.declarations[call] = type;
                 // Only an undeclared call needs the opaque fallback. A real
                 // AST result declaration must not be replaced by UNKNOWN.
@@ -695,8 +808,6 @@ RoutineResultTypes collectRoutineResultTypes(
                     }
                 }
             }
-            for (const auto& arg : call->args) inspect(arg.get());
-            for (const auto& arg : call->namedArgs) inspect(arg.value.get());
         } else if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(node)) {
             inspect(unary->operand.get());
         } else if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(node)) {
@@ -1931,7 +2042,7 @@ std::string ExprHelper::inferParsedInputType(
     const std::map<std::string, std::string>& typeHints,
     const std::string& currentDB,
     StorageEngine* functionEngine,const ExprEvaluator* functionEvaluator) {
-    const auto routineTypes = collectRoutineResultTypes(expression, currentDB, functionEngine,functionEvaluator);
+    const auto routineTypes = collectRoutineResultTypes(expression, currentDB, functionEngine,functionEvaluator,&typeHints);
     const std::string type = protocolTypeName(inferAstResultType(expression, typeHints, &routineTypes));
     return type.empty() ? "unknown" : type;
 }
@@ -1978,7 +2089,7 @@ std::optional<ArrayConcatBinding> ExprHelper::resolveArrayConcatTypes(
 void ExprHelper::prepareArrayTypes(Expr* expression,
     const std::map<std::string, std::string>& hints, const std::string& database,
     StorageEngine* owner) {
-    const auto routines = collectRoutineResultTypes(expression, database, owner);
+    const auto routines = collectRoutineResultTypes(expression, database, owner,nullptr,&hints);
     const auto type = [&](const Expr* node) { return inferAstResultType(node,hints,&routines); };
     const auto patternType = [&](std::string operation,const std::vector<const Expr*>& operands) {
         const auto op=toLower(operation);
@@ -2253,7 +2364,7 @@ std::string ExprHelper::inferResultType(
         const auto* select = parsed.success ? dynamic_cast<const SelectStmt*>(parsed.stmt.get()) : nullptr;
         if (select && select->selectList.size() == 1) {
             const auto routineTypes = collectRoutineResultTypes(
-                select->selectList.front().expr.get(), currentDB, functionEngine);
+                select->selectList.front().expr.get(), currentDB, functionEngine,nullptr,&typeHints);
             if (!routineTypes.empty()) {
                 const std::string type = inferAstResultType(
                     select->selectList.front().expr.get(), typeHints, &routineTypes);

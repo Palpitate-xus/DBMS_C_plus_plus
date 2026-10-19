@@ -1,6 +1,6 @@
-# R162：普通命名存储函数仅按参数个数匹配（开放）
+# R162：普通命名存储函数的类型签名（有限修复）
 
-状态：已复现、未修复。[R62](issue-review-r62-scalar-signatures.md)明确保留的
+状态：通用存储标量签名的有限修复已通过两端组合验收。以下为[R62](issue-review-r62-scalar-signatures.md)原先保留的
 任意名字存储函数通用签名缺口，不能由少数 builtin 同名重载通过代替。
 
 ## 复现与错误
@@ -52,4 +52,14 @@ qualified/quoted/unqualified名字与路径竞争、SQL及PLpgSQL函数、真实
 完整证据 /tmp/dbms-review-r46.ifu6SWLp/r161-v4-*-full637-protocol.log
 与r161-v5-{root,clean}-protocol.log；R161 V5两端637各18失败：九个本项执行控制，
 九个R163元数据控制。PG同一637项全0。没有删除任何原有输入。
-本项没有生产修复、验收或修复提交；总清单仍未完成，不push，Actions禁用。
+以上为首次登记及修复前证据，不是最终候选的运行结论；总清单仍未完成，不push，Actions禁用。
+
+## 最终候选的完整运行检查点
+
+R169 V4工作区完整58入口实际全部通过；本项native343、协议1705及共享637均0失败。
+已按上述声明规则选择并保存真实输入类型，批准的隐式转换在typed owner内执行；
+UNKNOWN、NULL、未绑定原生列及opaque callback归属控制保留，不全局修改asDouble或共享头。
+R164消除了原生32及328–333缺失声明的原因。原295控制仍在，按既有C/c规范化契约比较，
+没有以删除输入或改函数匹配预期掩盖生产错误；此项不宣称修复collation生命周期。
+独立干净版本亦完整58实际退出0；两端各26native、29协议、三个真实Main全部通过。
+组合构建、依赖及原始日志索引见[R169](issue-review-r169-simple-query-raw-syntax.md)。
