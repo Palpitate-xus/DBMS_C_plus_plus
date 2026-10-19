@@ -1,5 +1,13 @@
 # 代码审查索引
 
+已复现的三个独立开放问题：见[R170 quoted投影](issue-review-r170-quoted-unqualified-scalar-projection.md)、[R171 Parse/Describe](issue-review-r171-quoted-scalar-protocol-analysis.md)、[R172列参数引用](issue-review-r172-qualified-column-scalar-argument.md)。
+V2和V3各自实际完成PG18.6完整791/0、冻结accepted-only旧产品791/343，外层退出0/1；
+343含重复与连带失败，不是343独立bug；新源码/夹具尚未安装、编译或验收。
+V1 Describe缺少sourceSpan的静态否决和首次V3启动路径错误均保留，不削减原791。
+本次仅登记报告与索引：592MD，916native+559已注册Python+三个Main=1478；
+Root595MD、1490入口中的原12个外来入口仍未接受，源文件与注册不变。
+原273仍22/166/70/15，总目标未完成；不恢复用户暂缓模块，不push，Actions禁用。
+
 九项有限修复已逐项本地提交；问题/修改方法/专项数量见[R169总表](issue-review-r169-simple-query-raw-syntax.md)。
 
 | 项目 | 本地提交 | 范围 |

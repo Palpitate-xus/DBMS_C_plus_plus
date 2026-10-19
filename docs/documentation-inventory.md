@@ -1,6 +1,6 @@
 # 全部文档检查清单
 
-审查输入和发现见[代码审查报告](code-review-2026-10-13.md)。基准提交 `a502ffa3` 包含 412 份已跟踪 Markdown；首次审查含新增报告共 417 份。当前本轮逐文件复查 589 份 Markdown，下表覆盖全部；历史数量不改写。
+审查输入和发现见[代码审查报告](code-review-2026-10-13.md)。基准提交 `a502ffa3` 包含 412 份已跟踪 Markdown；首次审查含新增报告共 417 份。当前本轮逐文件复查 592 份 Markdown，下表覆盖全部；历史数量不改写。
 
 检查逐文件读取 UTF-8 内容并验证 Markdown 内联链接的本地文件目标是否存在。它不验证外部网址、锚点、所有引用式链接，也不证明文中每个历史技术结论在当前版本成立。
 使用手册、部署、命令参考、模块 README 和状态入口另作人工一致性核查；`issue-*.md` 保留原始提交和运行证据，其结论须按对应输入读取。
@@ -340,6 +340,9 @@
 | [docs/issue-review-r16-catalog-complete-read.md](issue-review-r16-catalog-complete-read.md) | 历史问题证据 | 通过 |
 | [docs/issue-review-r16-optional-catalog-directory.md](issue-review-r16-optional-catalog-directory.md) | 历史问题证据 | 通过 |
 | [docs/issue-review-r17-rollback-recovery-ownership.md](issue-review-r17-rollback-recovery-ownership.md) | 历史问题证据 | 通过 |
+| [docs/issue-review-r170-quoted-unqualified-scalar-projection.md](issue-review-r170-quoted-unqualified-scalar-projection.md) | 已复现开放问题、修改方法和未验收边界 | 通过 |
+| [docs/issue-review-r171-quoted-scalar-protocol-analysis.md](issue-review-r171-quoted-scalar-protocol-analysis.md) | 已复现开放问题、修改方法和未验收边界 | 通过 |
+| [docs/issue-review-r172-qualified-column-scalar-argument.md](issue-review-r172-qualified-column-scalar-argument.md) | 已复现开放问题、修改方法和未验收边界 | 通过 |
 | [docs/issue-review-r18-catalog-value-snapshots.md](issue-review-r18-catalog-value-snapshots.md) | 历史问题证据 | 通过 |
 | [docs/issue-review-r19-stale-temp-startup.md](issue-review-r19-stale-temp-startup.md) | 历史问题证据 | 通过 |
 | [docs/issue-review-r20-returning-query-owner.md](issue-review-r20-returning-query-owner.md) | 历史问题证据 | 通过 |
