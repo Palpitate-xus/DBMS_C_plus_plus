@@ -1,5 +1,7 @@
 # 代码审查索引
 
+本地 R166 有限修复：见[issue-review-r166-scalar-protocol-parameter-inference](issue-review-r166-scalar-protocol-parameter-inference.md)。未新增专属 native fixture；专属 wire 263。本次证据为九项候选组合的 Root/accepted-only clean 两端各 58 项（26 native、29 wire、3 real Main）实际退出全 0，完整源文件与产物 fence 复核 0；不表示本项中间提交单独跑过全矩阵。本项接受后 589 Markdown、913 native、556 Python、3 Main，共 1472 注册入口；不是该总数的全套运行声明。原 273 项 22 complete / 166 partial / 70 unverified / 15 deferred 不变，整体未完成；保留历史失败与未接受边界，不恢复用户跳过模块。No push；Actions disabled。
+
 本地 R164 有限修复：见[issue-review-r164-routine-custom-type-declarations](issue-review-r164-routine-custom-type-declarations.md)。专属 native 570；专属 wire 956。本次证据为九项候选组合的 Root/accepted-only clean 两端各 58 项（26 native、29 wire、3 real Main）实际退出全 0，完整源文件与产物 fence 复核 0；不表示本项中间提交单独跑过全矩阵。本项接受后 589 Markdown、913 native、555 Python、3 Main，共 1471 注册入口；不是该总数的全套运行声明。原 273 项 22 complete / 166 partial / 70 unverified / 15 deferred 不变，整体未完成；保留历史失败与未接受边界，不恢复用户跳过模块。No push；Actions disabled。
 
 本地 R163 有限修复：见[issue-review-r163-qualified-parse-validation](issue-review-r163-qualified-parse-validation.md)。未新增专属 native fixture；专属 wire 1017。本次证据为九项候选组合的 Root/accepted-only clean 两端各 58 项（26 native、29 wire、3 real Main）实际退出全 0，完整源文件与产物 fence 复核 0；不表示本项中间提交单独跑过全矩阵。本项接受后 589 Markdown、912 native、554 Python、3 Main，共 1469 注册入口；不是该总数的全套运行声明。原 273 项 22 complete / 166 partial / 70 unverified / 15 deferred 不变，整体未完成；保留历史失败与未接受边界，不恢复用户跳过模块。No push；Actions disabled。

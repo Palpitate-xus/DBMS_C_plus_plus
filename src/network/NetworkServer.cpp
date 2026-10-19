@@ -2436,6 +2436,69 @@ void validatePreparedStoredSignatures(const std::string& sql,Session& session,
     (void)g_engine.prepareBoundQuery(session.currentDB,sql,protocolMetadataParameters(session,parameterOids));
 }
 
+// A whole, source-free scalar call has one selected input signature. Infer
+// its direct wire parameters from those declarations without evaluating a
+// callback, rendering a NULL literal, or treating occurrence slots as $n.
+// Other expression/query shapes keep their existing inference owners.
+void inferProtocolWholeScalarParameters(const std::string& sql,Session& session,
+                                       std::vector<uint32_t>& parameterOids) {
+    if(std::find(parameterOids.begin(),parameterOids.end(),0)==parameterOids.end())return;
+    SQLParser parser;const auto parsed=parser.parseForBinding(sql);
+    const auto* select=parsed.isValid()?dynamic_cast<const SelectStmt*>(parsed.stmt.get()):nullptr;
+    if(!select || select->fromClause || select->whereClause || select->selectList.size()!=1 ||
+       !select->orderBy.empty() || select->limit.has_value() || select->offset.has_value() ||
+       select->signedFetchCount.has_value() || select->fetchFirst || select->withTies ||
+       !hasProtocolScalarSignatureCall(select,session.currentDB))return;
+    const auto* call=dynamic_cast<const FunctionCallExpr*>(select->selectList.front().expr.get());
+    if(!call || call->args.empty() || !call->namedArgs.empty())return;
+    // This finite boundary does not pretend to unify parameter constraints
+    // across independent expressions or explicit casts.
+    for(const auto& argument:call->args)
+        if(!dynamic_cast<const ParameterExpr*>(argument.get()))return;
+    auto* previous=currentSession();setCurrentSession(&session);
+    struct Restore {Session* previous;~Restore(){setCurrentSession(previous);}} restore{previous};
+    auto prepared=g_engine.prepareBoundQuery(session.currentDB,sql,
+        protocolMetadataParameters(session,parameterOids));
+    auto* boundSelect=dynamic_cast<SelectStmt*>(prepared.ast.get());
+    auto* boundCall=boundSelect?dynamic_cast<FunctionCallExpr*>(boundSelect->selectList.front().expr.get()):nullptr;
+    if(!boundCall)throw DbError("XX000","scalar parameter query lost its call");
+    ExprEvaluator declarations;declarations.setCurrentDB(session.currentDB);
+    declarations.bindScalarFunctions(boundCall,&g_engine); // declaration binding only
+    auto inferred=parameterOids;
+    const auto catalog=regtype_detail::metadata(g_engine,session.currentDB);
+    for(const auto& argument:boundCall->args) {
+        const auto* cast=dynamic_cast<const CastExpr*>(argument.get());
+        const auto* parameter=dynamic_cast<const ParameterExpr*>(
+            cast?cast->operand.get():argument.get());
+        if(!parameter)throw DbError("XX000","scalar parameter lost its source");
+        const auto use=std::find_if(prepared.uses.begin(),prepared.uses.end(),[&](const auto& use) {
+            return use.slot==parameter->slot && use.begin==parameter->sourceBegin &&
+                   use.end==parameter->sourceEnd;
+        });
+        if(use==prepared.uses.end())throw DbError("XX000","scalar parameter has no source provenance");
+        const auto spelling=prepared.source.substr(use->begin,use->end-use->begin);
+        if(spelling.size()<2 || spelling.front()!='$' ||
+           !std::all_of(spelling.begin()+1,spelling.end(),[](unsigned char c){return std::isdigit(c);}))
+            throw DbError("XX000","invalid scalar parameter provenance");
+        const auto position=std::stoul(spelling.substr(1));
+        if(!position || position>parameterOids.size())throw DbError("42P02","invalid scalar parameter");
+        if(parameterOids[position-1])continue; // explicitly supplied OIDs own their inputs
+        const auto type=cast?cast->typeName:parameter->declaredType;
+        if(type.empty() || ExprHelper::canonicalResultTypeName(type)=="unknown")return;
+        const auto oid=resolveDeclaredTypeName(type,&catalog,&session).typeOid;
+        if(!oid || oid==705)continue;
+        if(inferred[position-1] && inferred[position-1]!=oid)
+            throw DbError("42P08","inconsistent types deduced for parameter "+spelling);
+        inferred[position-1]=oid;
+    }
+    if(std::find(inferred.begin(),inferred.end(),0)!=inferred.end())
+        throw DbError("42P18","could not determine data type of scalar parameter");
+    // Validate the final shared wire declarations before publishing any of
+    // them. A failed inference cannot leave partially typed retained state.
+    (void)g_engine.prepareBoundQuery(session.currentDB,sql,protocolMetadataParameters(session,inferred));
+    parameterOids=std::move(inferred);
+}
+
 // Scalar arithmetic and the finite declared functions own signatures at Parse,
 // before a named
 // statement is published. Reuse the metadata binder with real parameter OIDs;
@@ -6638,6 +6701,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             }
             try {
                 notePreparedTemporaryObjectAccess(sql, session);
+                inferProtocolWholeScalarParameters(sql,session,parameterTypes);
                 validatePreparedStoredSignatures(sql,session,parameterTypes);
                 validatePreparedScalarArithmetic(sql,session,parameterTypes);
                 validatePreparedIntegerInputs(sql,session,parameterTypes);

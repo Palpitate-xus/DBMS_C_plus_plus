@@ -77,6 +77,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/scalar_signature_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/generic_stored_signature_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/custom_scalar_routine_declaration_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/whole_scalar_parameter_inference_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/binary_builtin_array_parameter_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/encoding_boundaries_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/qualified_scalar_parse_validation_protocol_e2e_test.py)
