@@ -1,6 +1,6 @@
 # R170：quoted 未限定标量函数的表投影身份
 
-状态：Open。已复现，候选尚未安装、编译或验收；不把草稿当作修复完成。
+状态：有限修复已验收，按独立本地提交纳入。五项联合最终源码在工作区及独立干净版本各完整70入口通过；不代表全部数据库问题完成。
 
 ## 已复现的问题
 
@@ -18,7 +18,7 @@
 
 ## 根因与修改方法
 
-[Main](../src/main.cpp) 的完整 AST 入口目前只为真实限定 callee 扩展表投影；
+修复前[Main](../src/main.cpp)的完整 AST 入口只为真实限定 callee 扩展表投影；
 旧文本入口将 SQL quoted callee 原片段拷入 `SelectExpr.funcName`。
 原生 API 的该字段本来就是已解码身份，[TableManage](../src/commands/TableManage.cpp)
 据此再引用一次是正确的，不能为修 SQL 入口而破坏原生 API。
@@ -51,3 +51,37 @@ Main 修改后必须在 Root 和新 accepted-base-only clean 各新编译三个�
 旧 Main 对象不得作为本轮 fresh 证据。共享头未改时可逐一证明其他生产对象来源后复用。
 完整 791 及原 58 相邻入口、两个既有原生参数契约检查计划保留，不以编译成功替代运行。
 不恢复用户暂缓模块；原 273 项状态不变，不 push，Actions 保持禁用。
+
+## 联合候选的历史失败与最终验收
+
+最初三项组合 V1 clean 实际完整791仍有26项失败：8项另属
+[R174描述符](issue-review-r174-ordinary-source-descriptor.md)，18项另属
+[R175聚合执行](issue-review-r175-ordinary-aggregate-identity.md)。V1 的完整314及28native+
+3真实Main各已通过；未执行的完整62不冒称通过，所有旧失败日志继续保存。
+最终五项组合 V2 的两端编译实际0，Root48条/clean49条命令均0：每端fresh2生产TU、
+核对复用56生产TU、fresh6/复用28原生TU、复用stub、三个真正fresh Main TU并重新链接当前库。
+每端96对象/38程序，源及产物清单复核0。Root首轮70个入口实际退出1：
+34native、三个真实Main及791/314/331/906均0，合计69个入口通过；唯一未通过的是
+既有R164完整956夹具的finally清理阶段。它已记录834次match True、零match False，
+随后等待下一条DROP FUNCTION响应发生15秒socket超时，无956完成footer。
+实际原因尚未确定，不把I/O长尾假设写成结论，也不把这次退出1算作通过。
+原始失败日志`r170-r175-v2-root-runtime-results/custom_scalar_routine_declaration_protocol_e2e_test.log`
+及整轮`r170-r175-v2-root-runtime.log`完整保留，后续原样串行复测，不改断言、timeout或持久化设置。
+随后独立clean的同一完整956已实际0、footer956/0；既有失败位置也已通过。
+clean期间只读线程采样多次观察到`jbd2_log_wait_commit`，但不能倒推Root首轮超时原因。
+独立clean完整70已实际全0，34native+33wire+3真实Main及源/58生产对象/server/96对象/38程序
+均经独立复核0。随后Root保持同一源及产物，原样完整70的retry1也实际退出0：
+34native+33wire+3真实Main全部通过，完整791/314/331/906及原956均为零失败。
+首轮失败日志不覆盖；复测成功不代表原超时原因已查明或修复。
+最终独立复核两端完整源字节及src/tests/scripts路径集合、58生产对象、server、
+96对象/38程序与冻结receipt精确映射全部0；Root还复核58缓存stamp。
+clean使用显式fresh2+核对复用56，不宣称运行正常构建包装器/repeat或新生成58缓存stamp。
+
+最终证据为同目录`r170-r175-v2-final-two-sided-runtime-evidence.json`。
+Root通过日志`r170-r175-v2-root-retry1-runtime.log` SHA256
+`8f81ad973b17690dadb6fbf26bfafeea4ffca48fcbd485bdc8c16bd29e1aa972`；
+clean通过日志`r170-r175-v2-clean-runtime.log` SHA256
+`075ae568dde142c80cd017acf6e3938080e20c3dde41a100af145b71d944a00f`。
+本项只接受上述有限SQL身份修复；两端旧源/产物保持冻结。
+这是五项最终组合的定向70入口，不是1482注册入口全量、TLS/整库sanitizer，
+也不是每个中间提交独立完整运行。R173依赖和R176真实聚合排序仍独立开放，原273不提升。

@@ -21367,12 +21367,12 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
                             return true;
                 }
             }
-            // An explicit routine namespace is executable identity, not a
-            // spelling the legacy FROM-less string dispatch may discard.
+            // Explicit namespaces and quoted SQL callee tokens carry identity,
+            // not a spelling to copy into the decoded native SelectExpr API.
             // Bind complete projections, including table sources. Preserve
             // the original FROM-less admission; only the table extension
             // requires a scalar owner instead of aggregate/window/SRF roles.
-            if(!call->schema.empty() &&
+            if((!call->schema.empty() || select->fromClause) &&
                 (!select->fromClause ||
                  (!call->hasOver && !call->distinct && !call->filter &&
                   call->orderBy.empty() && !call->setReturning &&
@@ -21382,9 +21382,14 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
                 const auto origin=dbms::SQLParser::tokenize(rawSql.substr(
                     call->sourceBegin,call->sourceEnd-call->sourceBegin));
                 // parseForBinding also represents SQL value keywords as
-                // implicit pg_catalog calls. Only a genuine qualified-call
-                // grammar origin requests this new routine entry.
-                if(origin.size()>=3 && origin[1]==".")return true;
+                // implicit pg_catalog calls. Qualified grammar retains its
+                // original entry. A new unqualified entry needs FROM and one
+                // quoted identifier token immediately followed by '('. Dots
+                // and doubled quotes inside that token are not qualification.
+                if(!call->schema.empty() && origin.size()>=3 && origin[1]==".")return true;
+                if(call->schema.empty() && select->fromClause && origin.size()>=2 &&
+                   origin[0].size()>=2 && origin[0].front()=='"' &&
+                   origin[0].back()=='"' && origin[1]=="(")return true;
             }
             for(const auto& arg:call->args)if(requiresPreparedValue(arg.get()))return true;
             for(const auto& arg:call->namedArgs)if(requiresPreparedValue(arg.value.get()))return true;
