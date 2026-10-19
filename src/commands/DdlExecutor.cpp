@@ -4132,7 +4132,23 @@ SchemaNamespaceResult dropSchemaNamespace(StorageEngine& engine,
     status = loadUdtMeta(database, udts);
     if (status != DBStatus::OK) return {status, "UDT preflight failed", {}};
     add(engine.getDomainNames(database), Kind::Domain);
-    add(engine.getCompositeTypeNames(database), Kind::Composite);
+    // Composite names are decoded physical keys, not SQL spellings. New
+    // records retain the producer's actual pair in the same atomic file.
+    // Dotted V1 keys cannot distinguish public."s.t" from s.t; no prefix
+    // or live-schema heuristic can safely authorize their destruction.
+    for (const auto& physical : engine.getCompositeTypeNames(database)) {
+        const auto composite=engine.getCompositeType(database,physical);
+        if (composite.name.empty())
+            throw DbError("XX001","composite auxiliary metadata disappeared");
+        std::string owner=composite.schema;
+        if (owner.empty()) {
+            if (physical.find('.')!=std::string::npos)
+                throw DbError("XX001","ambiguous legacy composite namespace identity");
+            owner="public";
+        } else if (!engine.schemaExists(database,owner))
+            throw DbError("XX001","composite auxiliary namespace does not exist");
+        if (owner==name) auxiliary.push_back({Kind::Composite,physical,{}});
+    }
     add(engine.getEnumTypeNames(database), Kind::Enum);
     add(shells, Kind::Shell);
     for (const auto& value : udts)
@@ -9548,6 +9564,8 @@ bool DdlExecutor::executeCreateType(const CreateObjectStmt* stmt, Session& s) {
     // Composite type (existing behavior)
     StorageEngine::CompositeType ct;
     ct.name = typeName;
+    ct.schema = typeSchema;
+    ct.localName = stmt->objectName;
     auto it = stmt->options.find("fields");
     if (it != stmt->options.end()) {
         std::stringstream ss(it->second);
@@ -9610,6 +9628,25 @@ bool DdlExecutor::executeDropType(const DropStmt* stmt, Session& s) {
         ? "public" : qualifiedName.schema;
     const std::string name = schemaName == "public"
         ? qualifiedName.name : schemaName + "." + qualifiedName.name;
+
+    (void)g_engine.getCompositeTypeNames(s.currentDB); // checked before any destructive absence interpretation
+    // A physical-key match is not proof of SQL namespace ownership.
+    // In particular public."s.t" must survive a DROP TYPE s.t request.
+    const auto composite=g_engine.getCompositeType(s.currentDB,name);
+    if (!composite.name.empty()) {
+        if (composite.schema.empty() && name.find('.')!=std::string::npos)
+            throw DbError("XX001","ambiguous legacy composite namespace identity");
+        const auto owner=composite.schema.empty()?std::string("public"):composite.schema;
+        const auto local=composite.localName.empty()?composite.name:composite.localName;
+        if (owner!=schemaName || local!=qualifiedName.name) {
+            if (stmt->ifExists) {
+                if (!txn.commit()) return true;
+                std::cout << "NOTICE: type does not exist, skipping" << std::endl;
+                return false;
+            }
+            throw DbError("42704","type does not exist: "+stmt->objectNames.front());
+        }
+    }
 
     // Enum dependencies are represented in the physical table schemas.  A
     // previous DROP TYPE path removed only the enum sidecar and left those
@@ -11101,8 +11138,13 @@ bool DdlExecutor::executeCreateFunction(const CreateFunctionStmt* stmt, Session&
             const std::string physical = schema == "public"
                 ? requested.name : schema + "." + requested.name;
             if (!g_engine.getDomain(s.currentDB, identity).name.empty() ||
-                !g_engine.getEnumType(s.currentDB, physical).name.empty() ||
-                g_engine.isCompositeType(s.currentDB, physical))
+                !g_engine.getEnumType(s.currentDB, physical).name.empty())
+                return identity;
+            const auto composite=g_engine.getCompositeType(s.currentDB,physical);
+            // V1 declarations retain their legacy non-destructive physical
+            // lookup contract; they do not certify an unavailable owner.
+            if (!composite.name.empty() && (composite.schema.empty() ||
+                (composite.schema==schema && composite.localName==requested.name)))
                 return identity;
         }
         return std::string{};

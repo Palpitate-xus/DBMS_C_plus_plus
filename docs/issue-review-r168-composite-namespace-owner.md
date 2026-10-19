@@ -1,6 +1,6 @@
-# R168：复合类型sidecar缺少可用的namespace身份（开放）
+# R168：复合类型sidecar的namespace身份（归属修复与旧格式限制）
 
-状态：修复候选及完整夹具已准备；尚无生产修复或最终验收提交。
+状态：版本化复合类型归属修复已通过两端组合验收；旧歧义记录与物理键限制保留。
 
 ## 实测与原因
 
@@ -81,3 +81,14 @@ V3新链接当前57库及23个已复核native TU；三个真实V2 clean Main TU�
 accepted输入/flags/原对象核对后新链接当前57，不冒称V3 fresh TU。V3尚未运行52入口。
 V3首次包装器因跨目录签名检查未重置source root而在首个复用前退出1；
 修正包装器后的实际22/36构建通过，两个日志均保留，没有改写第一次失败。
+
+## 最终候选的完整运行检查点
+
+上述V2/V3为历史检查点。R169 V4工作区完整58入口实际全部通过；
+本项native207、协议332及原R164完整956均0失败，字段ALTER/rename/drop/re-add等原控制均保留。
+真实CREATE保存decoded owner/localName，版本化hex记录与字段在同一原子.types文件；
+SQL破坏性路径使用checked枚举，坏记录XX001、I/O58030，不把错误当不存在。
+旧无点号记录可证明为public；dotted旧记录拒绝猜迁移，物理键冲突也不宣称全面支持。
+原生精确键及旧探测getter的不抛异常约定保留，不改用户暂缓的R51持锁流程。
+独立干净版本亦完整58实际退出0；两端各26native、29协议、三个真实Main全部通过。
+组合fresh58/当前ABI、真实Main来源与完整日志索引见[R169](issue-review-r169-simple-query-raw-syntax.md)。

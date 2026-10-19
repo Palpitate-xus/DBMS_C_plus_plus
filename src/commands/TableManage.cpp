@@ -53489,6 +53489,12 @@ static bool validCompositeTypeDefinition(
         type.fields.size() > MAX_COLUMNS) {
         return false;
     }
+    if (type.schema.empty() != type.localName.empty()) return false;
+    if (!type.schema.empty() &&
+        (!validMetadataObjectName(type.schema) ||
+         !validMetadataObjectName(type.localName) ||
+         type.name != (type.schema == "public" ? type.localName
+             : type.schema + "." + type.localName))) return false;
     for (const auto& field : type.fields) {
         if (!validMetadataObjectName(field.first) || field.second.empty() ||
             field.second.find('|') != std::string::npos ||
@@ -53500,23 +53506,45 @@ static bool validCompositeTypeDefinition(
     return true;
 }
 
-static bool loadCompositeTypes(
+// ':' cannot occur in an old physical name, so no valid V1 record can
+// accidentally claim this version marker. Owner and fields share one atomic
+// file; a rewrite preserves every V1 record's unavailable owner as unavailable.
+static constexpr const char* COMPOSITE_METADATA_V2_PREFIX = "DBMS_COMPOSITE_V2:";
+
+static DBStatus loadCompositeTypes(
     const std::filesystem::path& path,
     std::vector<StorageEngine::CompositeType>& types) {
     types.clear();
-    if (!std::filesystem::exists(path)) return true;
+    std::error_code error;
+    const bool exists = std::filesystem::exists(path, error);
+    if (error) return DBStatus::IO_ERROR;
+    if (!exists) return DBStatus::OK;
+    if (!std::filesystem::is_regular_file(path, error) || error)
+        return DBStatus::IO_ERROR;
     std::ifstream input(path);
-    if (!input) return false;
+    if (!input) return DBStatus::IO_ERROR;
+    std::set<std::string> physicalNames;
+    std::set<std::pair<std::string,std::string>> owners;
     std::string line;
     while (std::getline(input, line)) {
         if (line.empty()) continue;
-        const size_t firstSeparator = line.find('|');
-        if (firstSeparator == std::string::npos || firstSeparator == 0) {
-            return false;
-        }
         StorageEngine::CompositeType type;
-        type.name = line.substr(0, firstSeparator);
-        size_t position = firstSeparator + 1;
+        const bool version2 = line.rfind(COMPOSITE_METADATA_V2_PREFIX,0) == 0;
+        // Atomic V2 writers always terminate records. Do not accept a torn
+        // last line merely because its surviving hex bytes happen to parse.
+        if (version2 && input.eof()) return DBStatus::CORRUPTED_DATA;
+        size_t position = version2 ? std::char_traits<char>::length(COMPOSITE_METADATA_V2_PREFIX) : 0;
+        const auto header = [&](std::string& value) {
+            const auto separator = line.find('|',position);
+            if (separator == std::string::npos || separator == position) return false;
+            const auto encoded = line.substr(position,separator-position);
+            position = separator+1;
+            if (version2) return domainUnhex(encoded,value);
+            value = encoded;return true;
+        };
+        if (!header(type.name) || (version2 &&
+            (!header(type.schema) || !header(type.localName))))
+            return DBStatus::CORRUPTED_DATA;
         while (position < line.size()) {
             const size_t nextSeparator = line.find('|', position);
             const std::string field = nextSeparator == std::string::npos
@@ -53525,26 +53553,42 @@ static bool loadCompositeTypes(
             const size_t colon = field.find(':');
             if (colon == std::string::npos || colon == 0 ||
                 colon + 1 >= field.size()) {
-                return false;
+                return DBStatus::CORRUPTED_DATA;
             }
-            type.fields.emplace_back(
-                field.substr(0, colon), field.substr(colon + 1));
+            std::string fieldName=field.substr(0,colon),fieldType=field.substr(colon+1);
+            if (version2) {
+                std::string decodedName,decodedType;
+                if (!domainUnhex(fieldName,decodedName) || !domainUnhex(fieldType,decodedType))
+                    return DBStatus::CORRUPTED_DATA;
+                fieldName=std::move(decodedName);fieldType=std::move(decodedType);
+            }
+            type.fields.emplace_back(std::move(fieldName),std::move(fieldType));
+            if (nextSeparator != std::string::npos && nextSeparator+1 == line.size())
+                return DBStatus::CORRUPTED_DATA;
             position = nextSeparator == std::string::npos
                 ? line.size() : nextSeparator + 1;
         }
-        if (!validCompositeTypeDefinition(type)) return false;
+        if (!validCompositeTypeDefinition(type) ||
+            !physicalNames.insert(type.name).second ||
+            (version2 && !owners.emplace(type.schema,type.localName).second))
+            return DBStatus::CORRUPTED_DATA;
         types.push_back(std::move(type));
     }
-    return !input.bad();
+    return input.bad() ? DBStatus::IO_ERROR : DBStatus::OK;
 }
 
 static std::string serializeCompositeTypes(
     const std::vector<StorageEngine::CompositeType>& types) {
     std::ostringstream serialized;
     for (const auto& type : types) {
-        serialized << type.name;
+        const bool version2 = !type.schema.empty();
+        if (version2)
+            serialized << COMPOSITE_METADATA_V2_PREFIX << domainHex(type.name)
+                       << '|' << domainHex(type.schema) << '|' << domainHex(type.localName);
+        else serialized << type.name;
         for (const auto& field : type.fields) {
-            serialized << '|' << field.first << ':' << field.second;
+            serialized << '|' << (version2 ? domainHex(field.first) : field.first)
+                       << ':' << (version2 ? domainHex(field.second) : field.second);
         }
         serialized << '\n';
     }
@@ -53554,9 +53598,12 @@ static std::string serializeCompositeTypes(
 DBStatus StorageEngine::createCompositeType(const std::string& dbname, const CompositeType& ct) {
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     if (!validCompositeTypeDefinition(ct)) return DBStatus::INVALID_ARGUMENT;
+    if (!ct.schema.empty() && !schemaExists(dbname,ct.schema))
+        return DBStatus::TABLE_NOT_FOUND;
     const auto path = compositeTypePath(dbname);
     std::vector<CompositeType> types;
-    if (!loadCompositeTypes(path, types)) return DBStatus::IO_ERROR;
+    const auto loaded = loadCompositeTypes(path,types);
+    if (loaded != DBStatus::OK) return loaded;
     for (const auto& existing : types) {
         if (existing.name == ct.name) return DBStatus::TABLE_ALREADY_EXISTS;
     }
@@ -53573,9 +53620,9 @@ DBStatus StorageEngine::alterCompositeType(const std::string& dbname, const std:
         return DBStatus::INVALID_ARGUMENT;
     }
     const auto path = compositeTypePath(dbname);
-    if (!std::filesystem::exists(path)) return DBStatus::TABLE_NOT_FOUND;
     std::vector<CompositeType> types;
-    if (!loadCompositeTypes(path, types)) return DBStatus::IO_ERROR;
+    const auto loaded = loadCompositeTypes(path,types);
+    if (loaded != DBStatus::OK) return loaded;
     if (ct.name != name &&
         std::any_of(types.begin(), types.end(), [&](const CompositeType& type) {
             return type.name == ct.name;
@@ -53585,7 +53632,20 @@ DBStatus StorageEngine::alterCompositeType(const std::string& dbname, const std:
     bool found = false;
     for (auto& type : types) {
         if (type.name == name) {
-            type = ct;
+            auto replacement=ct;
+            if (!type.schema.empty()) {
+                if (replacement.schema.empty()) {
+                    if (replacement.name != name) return DBStatus::INVALID_ARGUMENT;
+                    replacement.schema=type.schema;replacement.localName=type.localName;
+                } else if (replacement.schema != type.schema)
+                    return DBStatus::FEATURE_NOT_SUPPORTED;
+            } else if (!replacement.schema.empty() &&
+                       (name.find('.') != std::string::npos || replacement.schema != "public"))
+                return DBStatus::CORRUPTED_DATA;
+            if (!replacement.schema.empty() && !schemaExists(dbname,replacement.schema))
+                return DBStatus::TABLE_NOT_FOUND;
+            if (!validCompositeTypeDefinition(replacement)) return DBStatus::INVALID_ARGUMENT;
+            type = std::move(replacement);
             found = true;
         }
     }
@@ -53598,9 +53658,9 @@ DBStatus StorageEngine::dropCompositeType(const std::string& dbname, const std::
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     if (!validMetadataObjectName(name)) return DBStatus::INVALID_ARGUMENT;
     const auto path = compositeTypePath(dbname);
-    if (!std::filesystem::exists(path)) return DBStatus::TABLE_NOT_FOUND;
     std::vector<CompositeType> types;
-    if (!loadCompositeTypes(path, types)) return DBStatus::IO_ERROR;
+    const auto loaded = loadCompositeTypes(path,types);
+    if (loaded != DBStatus::OK) return loaded;
     bool found = false;
     std::vector<CompositeType> retained;
     retained.reserve(types.size());
@@ -53620,7 +53680,11 @@ DBStatus StorageEngine::dropCompositeType(const std::string& dbname, const std::
 StorageEngine::CompositeType StorageEngine::getCompositeType(const std::string& dbname, const std::string& name) const {
     CompositeType result;
     std::vector<CompositeType> types;
-    if (!loadCompositeTypes(compositeTypePath(dbname), types)) return result;
+    const auto loaded=loadCompositeTypes(compositeTypePath(dbname),types);
+    // This old physical-key probe is also used inside existing row writers'
+    // manual table locks. Keep its no-throw absence contract; destructive SQL
+    // consumers first use checked getCompositeTypeNames, outside those locks.
+    if (loaded != DBStatus::OK) return result;
     for (auto& type : types) {
         if (type.name == name) return type;
     }
@@ -53630,7 +53694,10 @@ StorageEngine::CompositeType StorageEngine::getCompositeType(const std::string& 
 std::vector<std::string> StorageEngine::getCompositeTypeNames(const std::string& dbname) const {
     std::vector<std::string> result;
     std::vector<CompositeType> types;
-    if (!loadCompositeTypes(compositeTypePath(dbname), types)) return result;
+    const auto loaded=loadCompositeTypes(compositeTypePath(dbname),types);
+    if (loaded != DBStatus::OK)
+        throw DbError(loaded==DBStatus::CORRUPTED_DATA?"XX001":"58030",
+                      "could not read composite type metadata");
     for (const auto& type : types) result.push_back(type.name);
     return result;
 }

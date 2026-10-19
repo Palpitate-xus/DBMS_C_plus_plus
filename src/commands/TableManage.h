@@ -339,6 +339,10 @@ public:
     struct CompositeType {
         std::string name;
         std::vector<std::pair<std::string, std::string>> fields; // (fieldName, fieldType)
+        // Empty together means an old physical-only record. Never recover
+        // a namespace by splitting its decoded physical name on a dot.
+        std::string schema;
+        std::string localName;
     };
     DBStatus createCompositeType(const std::string& dbname, const CompositeType& ct);
     DBStatus alterCompositeType(const std::string& dbname, const std::string& name,

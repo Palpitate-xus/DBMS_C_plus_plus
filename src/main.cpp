@@ -59,6 +59,7 @@
 #include "Config.h"
 #include "parser/parser.h"
 #include "commands/DdlExecutor.h"
+#include "commands/DdlTransaction.h"
 #include "commands/DmlExecutor.h"
 #include "catalog/CatalogService.h"
 #include "catalog/collation.h"
@@ -16779,31 +16780,97 @@ static bool handleAlterType(const string& sql, Session& s) {
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
     string rest = trim(sql.substr(10)); // after "alter type"
-    string typeName = firstCompatNameToken(rest);
-    if (typeName.empty()) {
+    // Keep the actual existing enum receiver ahead of the new composite-only
+    // identifier scanner. Its legacy quoted/unqualified spelling and action
+    // rules are not changed by composite owner metadata.
+    const string compatibilityName=firstCompatNameToken(rest);
+    if(!compatibilityName.empty() && g_engine.getCompositeType(s.currentDB,compatibilityName).name.empty()) {
+        auto et=g_engine.getEnumType(s.currentDB,compatibilityName);
+        if(!et.name.empty())
+            return handleAlterEnumValue(et,trim(rest.substr(compatibilityName.size())),compatibilityName,s);
+    }
+    (void)g_engine.getCompositeTypeNames(s.currentDB); // checked before composite ALTER can interpret absence
+    // Preserve quoted identifier bytes, including spaces/dots/escaped quotes.
+    // The returned spelling is SQL; only the copied decoded pair selects a
+    // composite physical key. Other compatibility object routes stay below.
+    const auto takeTypeName=[](string& source) {
+        size_t position=0;
+        const auto identifier=[&]() {
+            while(position<source.size() && isspace(static_cast<unsigned char>(source[position])))++position;
+            const auto begin=position;
+            if(position<source.size() && source[position]=='"') {
+                ++position;bool closed=false;
+                while(position<source.size()) {
+                    if(source[position++]!='"')continue;
+                    if(position<source.size() && source[position]=='"'){++position;continue;}
+                    closed=true;break;
+                }
+                if(!closed)throw dbms::DbError("42601","unterminated type identifier");
+            } else {
+                while(position<source.size() && !isspace(static_cast<unsigned char>(source[position])) &&
+                      source[position]!='.' && source[position]!=';')++position;
+            }
+            if(position==begin)throw dbms::DbError("42601","type identifier is required");
+            return source.substr(begin,position-begin);
+        };
+        string result=identifier();
+        while(position<source.size() && isspace(static_cast<unsigned char>(source[position])))++position;
+        if(position<source.size() && source[position]=='.') {++position;result+='.';result+=identifier();}
+        source=trim(source.substr(position));return result;
+    };
+    string action=rest;
+    const string spelling=takeTypeName(action);
+    dbms::CatalogManager::QualifiedName requested;
+    if (!dbms::CatalogManager::parseQualifiedName(spelling,requested,true) || requested.name.empty()) {
         cout << "SQL syntax error: ALTER TYPE requires a type name" << endl;
         return true;
     }
-    string action = trim(rest.substr(typeName.size()));
-    auto ct = g_engine.getCompositeType(s.currentDB, typeName);
+    vector<string> schemas;
+    if(!requested.schema.empty())schemas.push_back(requested.schema);
+    else {
+        string canonical;
+        if(!dbms::parseSessionSearchPath(s.searchPath,schemas,canonical))
+            throw dbms::DbError("22023","invalid search_path");
+        for(auto& schema:schemas)schema=dbms::expandSessionSearchPathEntry(schema,s.username);
+    }
+    dbms::StorageEngine::CompositeType ct;
+    bool conflictingComposite=false;
+    for(auto schema:schemas) {
+        if(schema=="pg_temp")schema=sessionTempSchemaName(s);
+        if(!g_engine.schemaExists(s.currentDB,schema))continue;
+        const string physical=schema=="public"?requested.name:schema+"."+requested.name;
+        auto candidate=g_engine.getCompositeType(s.currentDB,physical);
+        if(candidate.name.empty())continue;
+        if(candidate.schema.empty() && physical.find('.')!=string::npos)
+            throw dbms::DbError("XX001","ambiguous legacy composite namespace identity");
+        const auto owner=candidate.schema.empty()?string("public"):candidate.schema;
+        const auto local=candidate.localName.empty()?candidate.name:candidate.localName;
+        if(owner!=schema || local!=requested.name){conflictingComposite=true;continue;}
+        ct=std::move(candidate);break;
+    }
+    string typeName=ct.name;
     if (ct.name.empty()) {
-        // Not a composite type — it may be an enum (ALTER TYPE ... ADD/RENAME VALUE).
-        auto et = g_engine.getEnumType(s.currentDB, typeName);
-        if (!et.name.empty()) {
-            return handleAlterEnumValue(et, action, typeName, s);
-        }
+        if(conflictingComposite)
+            throw dbms::DbError("42704","type does not exist: "+spelling);
+        // Preserve the existing non-composite compatibility receiver.
         return handleAlterCompatObject(sql, s);
     }
 
+    dbms::DdlTransaction txn(s);
+    if(!txn.enableSnapshotRollback() || !txn.begin())
+        throw dbms::DbError("58030","could not begin composite alteration");
     string message;
     if (startsWithKeyword(action, "rename to")) {
-        string newName = firstCompatNameToken(trim(action.substr(9)));
-        if (newName.empty()) {
-            cout << "SQL syntax error: ALTER TYPE name RENAME TO newname" << endl;
-            return true;
-        }
-        ct.name = newName;
-        message = "Type " + typeName + " renamed to " + newName;
+        string remaining=trim(action.substr(9));
+        const auto newSpelling=takeTypeName(remaining);
+        dbms::CatalogManager::QualifiedName renamed;
+        if(!dbms::CatalogManager::parseQualifiedName(newSpelling,renamed,true) ||
+           !renamed.schema.empty() || renamed.name.empty() || (!remaining.empty() && remaining!=";"))
+            throw dbms::DbError("42601","RENAME TO requires one local type name");
+        if(ct.schema.empty())ct.schema="public"; // only a provable dot-free V1 target reaches here
+        ct.localName=renamed.name;
+        ct.name=ct.schema=="public"?ct.localName:ct.schema+"."+ct.localName;
+        message = "Type " + typeName + " renamed to " + ct.name;
     } else if (startsWithKeyword(action, "add attribute")) {
         string fieldDef = trim(action.substr(13));
         vector<string> parts = tokenize(fieldDef);
@@ -16903,6 +16970,7 @@ static bool handleAlterType(const string& sql, Session& s) {
         return handleAlterCompatObject(sql, s);
     }
 
+    txn.markSnapshotDirty();
     auto res = g_engine.alterCompositeType(s.currentDB, typeName, ct);
     if (res == DBStatus::TABLE_ALREADY_EXISTS) {
         cout << "Type " << ct.name << " already exists" << endl;
@@ -16913,9 +16981,11 @@ static bool handleAlterType(const string& sql, Session& s) {
         return true;
     }
     if (res != DBStatus::OK) {
-        cout << "Alter type failed" << endl;
+        cout << "Alter type failed (SQLSTATE " << dbms::sqlstateForDBStatus(res) << ")" << endl;
         return true;
     }
+    txn.recordUpdate(dbms::DdlObjectKind::Type,typeName);
+    if(!txn.commit())return true;
     cout << message << endl;
     return false;
 }
