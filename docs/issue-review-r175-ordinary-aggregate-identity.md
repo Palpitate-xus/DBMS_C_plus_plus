@@ -1,6 +1,6 @@
 # R175：普通聚合的执行入口与列参数身份
 
-状态：Open。实际完整协议帧已确认问题；离线候选未安装、未编译、未验收。
+状态：有限修复已验收，按独立本地提交纳入。最终V2随五项组合两端各完整70入口通过，真实ORDER排序仍属开放R176。
 
 ## 已复现的问题
 
@@ -32,7 +32,7 @@ R170/R171/R172 组合 V1 clean 仍有26项失败，其中18项属于本项，另
    完整查询聚合算子已有 FILTER、NULL 跳过、DISTINCT 及空输入规则，应保留这些所有权。
    真实 stored scalar `sum`、显式 `pg_catalog.sum` 与 search_path 的选择也必须保留。
 
-候选仅两个 Main CPP hunk，不修改共享头、wire unknown-$n 推断、native 参数契约或
+初版仅两个Main CPP hunk，同行审查后最终为五个，不修改共享头、wire unknown-$n 推断、native 参数契约或
 R163/R171 Parse guards。新 Main 字节意味着后续每端三个真实 Main 回归 TU 必须重新编译；
 不能把 V1 的 Main 对象复用冒充本轮 fresh 编译。
 
@@ -43,7 +43,8 @@ R163/R171 Parse guards。新 Main 字节意味着后续每端三个真实 Main �
 8种列身份、普通/重复值 DISTINCT/FILTER/COUNT、三种模式、空表/全NULL/WHERE false/
 LIMIT0、重复 Bind、负例后恢复、真实 stored scalar shadowing 及显式内建选择。
 新数据故意重复，SUM=-5、DISTINCT SUM=-3，防止原数据无重复掩盖 DISTINCT 错误。
-这906尚未运行，必须先获得完整 PostgreSQL 参考，再运行旧产品和最终候选。
+这906已实际完成PG18.6全0、未包含R175修复的V1 clean为441项失败，外层分别0/1；
+完整906字节未改，最终候选两端完整运行均为906/0。
 native 合约仍需既有原生驱动验证，不能由 wire SQL 代替。
 
 R176 普通调用内 ORDER 的真实排序语义另留开放：parser 用第二个 synthetic 参数承载
@@ -62,5 +63,30 @@ ORDER BY；当前 typed aggregate reducer 没有独立排序键 owner。整数 S
 
 V1 两端生产及三个真实 Main TU 均已编译完成；完整62入口并未全部运行。
 已建立独立、逐文件校验的 V1 Root 恢复副本，后续不得改写 V1 clean 或旧产物。
-本次只提交问题和方法，不把未安装的候选算作修复；后续通过后逐项本地 commit。
+首次报告提交仅包含问题和方法；不把候选安装或编译算作修复验收，完整通过后再逐项本地 commit。
 原273项状态不变，总目标未完成；用户跳过模块不恢复，不 push，Actions 保持禁用。
+
+## 最终V2有限候选及当前验收范围
+
+新增whole-query入口仅SUM/COUNT，其他六种聚合仍由原Main owner消费，不能从906推定它们完成。
+legacy调用内ORDER只在实际single TABLE/single projection、无window/set/group等角色、
+真实可见物理整数ColumnRef及synthetic ORDER参数/源token证据成立时，降低SQL列身份。
+FILTER进一步限定为可见整数列在左、单个整数literal在右的简单比较，通过已有source scope
+降低到物理列名，不全局改native条件解释器，不猜TEXT/collation/array/domain比较。
+同一flag下SUM的完整decoded物理key先精确取类型，避免`n.dot`被再次拆成`dot`而丢声明。
+
+这些补充有真实旧906观察：ORDER+FILTER24项失败；另一个quoted dotted列LIMIT0的Simple Query
+错误声明TEXT25，应为BIGINT20。它们是未修V1产品结果，不假装两个离线R175源码版本已经运行。
+旧906日志`r175-v1-old-v1-clean-full906-protocol.log`、参考日志
+`r175-v1-reference-full906-protocol.log`均完整保留。真实排序键求值、浮点顺序等R176仍Open。
+
+最终五项联合V2两端编译实际0，Root48/clean49命令全部0；每端fresh2生产/核对复用56、
+fresh6/复用28原生TU、复用stub、真正fresh3Main TU，96对象/38程序及完整源/产物清单复核0。
+定向回归每端70入口=34native+33wire+3Main；Root完整906/791/314/331、34native与3Main实际全0。
+Root首轮70仍因既有R164 finally清理socket超时而实际退出1，不能写成整轮通过；
+干净版完整70已实际全0，完整906/791/314/331及源/产物独立复核均0；
+Root保持同一源/产物原样完整70复测最终也实际全0，原956亦完整0。
+两端源/58生产对象/server/96对象/38程序独立复核0，据此验收五项最终组合的有限修复，分别本地提交。
+首次超时原因仍未确定，失败证据与最终日志SHA见
+[R170最终证据](issue-review-r170-quoted-unqualified-scalar-projection.md)。
+这不是完整注册1482入口运行或每个中间提交独立全矩阵；R176排序键求值/排序并未因此完成。

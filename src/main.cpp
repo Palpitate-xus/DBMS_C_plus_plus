@@ -21349,6 +21349,21 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
         }
         if(const auto* call=dynamic_cast<const dbms::FunctionCallExpr*>(value)) {
             if(call->sqlValue!=dbms::FunctionCallExpr::SqlValue::None)return true;
+            // Direct SUM/COUNT reductions belong to the existing whole-query
+            // aggregate operator. In-call ORDER has a second synthetic
+            // parser argument and retains its separate legacy owner.
+            if(select->command==dbms::SqlCommand::Select &&
+               (!select->fromClause || select->fromClause->type==dbms::FromItem::Type::Table) &&
+               select->selectList.size()==1 && select->selectList.front().expr.get()==call &&
+               select->ctes.empty() && select->setOp==dbms::SetOp::None &&
+               !select->setOpLhs && !select->setOpRhs && select->valuesRows.empty() &&
+               select->groupBy.empty() && select->groupByElems.empty() && !select->having &&
+               !select->distinct && select->distinctOn.empty() && select->windowDefs.empty() &&
+               select->locking.empty() && !select->withTies && select->orderBy.empty() &&
+               call->args.size()==1 && call->namedArgs.empty() &&
+               !call->hasOver && !call->setReturning && call->orderBy.empty() &&
+               (dbms::aggregate_type_detail::builtinName(call)=="sum" ||
+                dbms::aggregate_type_detail::builtinName(call)=="count"))return true;
             // A direct SQL ABS column target must retain its identifier AST.
             // The legacy scalar adapter treats a double-quoted argument as
             // string data before resolving its source or stored NULL bit.
@@ -32549,12 +32564,89 @@ static bool executeInternal(const string& rawSql, Session& s) {
         vector<string> typedAggregateHeaders;
         vector<vector<string>> typedAggregateConditions;
         string typedAggregateSourceAlias;
+        bool legacyOrderedSumCount = false;
         if (groupPos == string::npos && havingPos == string::npos &&
             windowPos == string::npos) {
             dbms::SQLParser aggregateParser;
             auto parsedAggregate = aggregateParser.parseForBinding(effectiveRawSql);
             const auto* aggregateSelect = parsedAggregate.isValid()
                 ? dynamic_cast<const dbms::SelectStmt*>(parsedAggregate.stmt.get()) : nullptr;
+            // Only this genuine single-table SQL boundary lowers legacy
+            // ordered SUM/COUNT column identities. No native key is reparsed.
+            const auto* orderedCall = aggregateSelect && aggregateSelect->selectList.size()==1
+                ? dynamic_cast<const dbms::FunctionCallExpr*>(aggregateSelect->selectList.front().expr.get())
+                : nullptr;
+            const auto* orderedValue = orderedCall && orderedCall->args.size()==2
+                ? dynamic_cast<const dbms::ColumnRefExpr*>(orderedCall->args.front().get()) : nullptr;
+            const auto* orderGrammar = orderedCall && orderedCall->args.size()==2
+                ? dynamic_cast<const dbms::LiteralExpr*>(orderedCall->args.back().get()) : nullptr;
+            const string orderedRole = dbms::aggregate_type_detail::builtinName(orderedCall);
+            if(aggregateSelect && aggregateSelect->command==dbms::SqlCommand::Select &&
+               aggregateSelect->fromClause && aggregateSelect->fromClause->type==dbms::FromItem::Type::Table &&
+               aggregateSelect->fromClause->columnAliases.empty() && aggregateSelect->ctes.empty() &&
+               aggregateSelect->setOp==dbms::SetOp::None && !aggregateSelect->setOpLhs &&
+               !aggregateSelect->setOpRhs && aggregateSelect->valuesRows.empty() &&
+               aggregateSelect->groupBy.empty() && aggregateSelect->groupByElems.empty() &&
+               !aggregateSelect->having && !aggregateSelect->distinct && aggregateSelect->distinctOn.empty() &&
+               aggregateSelect->windowDefs.empty() && aggregateSelect->locking.empty() &&
+               !aggregateSelect->withTies && !aggregateSelect->signedFetchCount && aggregateSelect->orderBy.empty() &&
+               orderedCall && !orderedCall->hasOver && !orderedCall->setReturning &&
+               !orderedCall->distinct && orderedCall->namedArgs.empty() &&
+               orderedCall->orderBy.empty() && (orderedRole=="sum" || orderedRole=="count") &&
+               orderedValue && sourceRange.contains(*orderedValue) && sourceRange.columns.count(orderedValue->column) &&
+               orderGrammar && orderGrammar->typeName.empty() && !orderGrammar->preparedSubquery &&
+               orderGrammar->sourceBegin==string::npos && orderGrammar->sourceEnd==string::npos &&
+               orderedCall->sourceBegin!=string::npos && orderedCall->sourceBegin<orderedCall->sourceEnd &&
+               orderedCall->sourceEnd<=effectiveRawSql.size()) {
+                // The parser creates the second literal for ORDER syntax;
+                // require its actual token role too, never its string value.
+                const auto origin=dbms::SQLParser::tokenize(effectiveRawSql.substr(
+                    orderedCall->sourceBegin,orderedCall->sourceEnd-orderedCall->sourceBegin));
+                int depth=0;
+                for(size_t i=0;i+1<origin.size();++i) {
+                    if(origin[i]=="("){++depth;continue;}
+                    if(origin[i]==")"){--depth;continue;}
+                    if(depth==1 && dbms::SQLParser::toLower(origin[i])=="order" &&
+                       dbms::SQLParser::toLower(origin[i+1])=="by")legacyOrderedSumCount=true;
+                }
+                const auto& valueColumn=tbl.cols[sourceRange.columns.at(orderedValue->column)];
+                const auto valueType=dbms::ExprHelper::canonicalResultTypeName(valueColumn.dataType);
+                legacyOrderedSumCount=legacyOrderedSumCount && !valueColumn.isArray && valueColumn.domainName.empty() &&
+                    (valueType=="smallint" || valueType=="integer" || valueType=="bigint");
+                // Compact legacy FILTER accepts a single physical-column/
+                // literal comparison here, not a new boolean-expression
+                // evaluator. Defer every other predicate with its whole call.
+                if(legacyOrderedSumCount && orderedCall->filter) {
+                    const auto* comparison=dynamic_cast<const dbms::BinaryOpExpr*>(orderedCall->filter.get());
+                    const auto* column=comparison?dynamic_cast<const dbms::ColumnRefExpr*>(comparison->left.get()):nullptr;
+                    const auto* literal=comparison?dynamic_cast<const dbms::LiteralExpr*>(comparison->right.get()):nullptr;
+                    static const set<string> comparisons={"=","<>","!=","<",">","<=",">="};
+                    legacyOrderedSumCount=comparison && comparisons.count(comparison->op) && column &&
+                        sourceRange.contains(*column) && sourceRange.columns.count(column->column) &&
+                        literal && literal->typeName.empty() && !literal->preparedSubquery &&
+                        dbms::SQLParser::tokenize(literal->value).size()==1;
+                    if(legacyOrderedSumCount) {
+                        const auto& filterColumn=tbl.cols[sourceRange.columns.at(column->column)];
+                        const auto filterType=dbms::ExprHelper::canonicalResultTypeName(filterColumn.dataType);
+                        const auto inputType=dbms::ExprHelper::canonicalResultTypeName(
+                            dbms::ExprHelper::inferValuesResultType(literal->value));
+                        const auto integer=[](const string& type) {
+                            return type=="smallint" || type=="integer" || type=="bigint";
+                        };
+                        legacyOrderedSumCount=!filterColumn.isArray && filterColumn.domainName.empty() &&
+                            integer(filterType) && integer(inputType);
+                    }
+                }
+                // Conservatively leave every visible stored name to its
+                // existing scalar owner; discovery never guesses column
+                // input types or invokes a stored/native routine.
+                if(legacyOrderedSumCount && orderedCall->schema.empty())
+                    for(const auto& schemaName:dbms::functionNamespaceSearchPath(g_engine,s.currentDB))
+                        if(schemaName!="pg_catalog" &&
+                           !g_engine.getUDF(s.currentDB,orderedRole,schemaName).expression.empty()) {
+                            legacyOrderedSumCount=false;break;
+                        }
+            }
             bool expressionArgument = false;
             const set<string> typedAggregates = {
                 "count", "sum", "avg", "min", "max", "bool_and", "bool_or", "every"
@@ -33068,6 +33160,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             // legacy predicate form, as in WHERE. Whitespace
                             // inside quoted SQL literals must remain intact.
                             if (typedAggregateTargets.empty()) {
+                                // A proven SQL ColumnRef/literal comparison
+                                // lowers through the same real source scope.
+                                // Unsupported predicates keep their old owner.
+                                if(legacyOrderedSumCount)filterStr=lowerSourceComparison(filterStr);
                                 string parseStr = modifyLogic(normalizeConditionStr(filterStr));
                                 if (parseStr.empty() || StorageEngine::parseConditions({parseStr}).empty())
                                     throw dbms::DbError("0A000", "unsupported aggregate FILTER predicate");
@@ -33429,6 +33525,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             dbms::StorageEngine::AggItem ai;
                             ai.func = func;
                             ai.arg = arg;
+                            // SQL-only adaptation; native AggItem/SelectExpr
+                            // keys and the actual raw ORDER text are unchanged.
+                            if(legacyOrderedSumCount)ai.arg=sourceColumnName(arg);
                             ai.orderBy = aggOrderBy;
                             ai.filterConds = filterConds;
                             aggItems.push_back(ai);
@@ -34166,8 +34265,14 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 arg = trim(arg.substr(9));
 
             string inputType;
+            // This SQL-only boundary already lowered a proven ColumnRef
+            // to its decoded native key. A literal dot or :: in that real
+            // physical name must not become qualification/cast syntax again.
+            if(legacyOrderedSumCount && func=="sum")
+                for(size_t i=0;i<tbl.len;++i)
+                    if(tbl.cols[i].dataName==arg){inputType=tbl.cols[i].dataType;break;}
             // A PostgreSQL-style cast controls the aggregate overload.
-            size_t castAt = arg.rfind("::");
+            size_t castAt = inputType.empty()?arg.rfind("::"):string::npos;
             if (castAt != string::npos) {
                 inputType = trim(arg.substr(castAt + 2));
                 size_t paren = inputType.find('(');
