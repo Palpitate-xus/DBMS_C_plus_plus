@@ -466,7 +466,7 @@
 | [docs/issue-review-r155-enum-namespace-owner.md](issue-review-r155-enum-namespace-owner.md) | 问题、修复与验证 | 通过 |
 | [docs/issue-review-r156-regtype-physical-constants.md](issue-review-r156-regtype-physical-constants.md) | 用户暂缓、物理身份与未验证草稿 | 通过 |
 | [docs/issue-review-r157-dotted-set-target.md](issue-review-r157-dotted-set-target.md) | 普通点号目标有限修复与完整验证 | 通过 |
-| [docs/issue-review-r159-encoding-boundaries.md](issue-review-r159-encoding-boundaries.md) | 开放编码问题与修改方法 | 通过 |
+| [docs/issue-review-r159-encoding-boundaries.md](issue-review-r159-encoding-boundaries.md) | 三类编码边界修复、完整回归与未核实线索 | 通过 |
 | [docs/issue-review-r160-angle-constant-demand.md](issue-review-r160-angle-constant-demand.md) | 开放规划时机与完整观察 | 通过 |
 | [docs/issue-review-r162-generic-stored-signatures.md](issue-review-r162-generic-stored-signatures.md) | 已复现的开放签名问题与方法 | 通过 |
 | [docs/issue-review-r163-qualified-parse-validation.md](issue-review-r163-qualified-parse-validation.md) | 已复现的开放协议校验问题与方法 | 通过 |

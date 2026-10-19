@@ -1,5 +1,18 @@
 # 代码审查索引
 
+[R159 编码边界](issue-review-r159-encoding-boundaries.md)完成三根因有限修复：
+hex仅允许完整byte pair之间的四类空白；escape保留非零ASCII控制符和DEL；
+base64完整三字节组每76列加LF，保留padding和原解码策略。
+PG完整806/0，冻结旧版本806/164失败；独立accepted-base-only版本和Root各11入口全0，
+包括完整native676、wire806、既有编码/相邻协议及三个真实Main。
+独立版本fresh1Evaluator O2+逐一核对57生产对象；Root正常3CPP O2/repeat0/current58；
+两端native新编译、三个真实Main核对源/全头/flags/字节后复用TU并重新链接当前57库，
+不称Main本轮fresh TU，也不把有限回归当成整库全量/TLS/sanitizer通过。
+按hex、escape、base64分别提交，完整共享676/806夹具在最后一个提交加入；
+不宣称两个中间提交单独通过完整矩阵。三项类型目录线索仍未核实，R156不恢复。
+已跟踪586MD、910native+550Python+3Main=1463；Root591MD、921+564+3=1488，
+仍25个入口未接受，原273仍22/166/70/15，总清单未完成，不push、Actions禁用。
+
 [R167](issue-review-r167-domain-drop-targets.md)/[R168](issue-review-r168-composite-namespace-owner.md)补充实际构建和运行检查点：
 Root genuine fresh58生产O2/repeat0，六真实Main TU均fresh成功；23项native中22入口通过，
 仅R167固定189有一个空quoted目标Parse失败。本项207及原R164完整956全0，52整轮仍运行。

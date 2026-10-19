@@ -6656,6 +6656,7 @@ static std::string base64Encode(const std::string& in) {
     static const char* tbl = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     std::string out;
     size_t i = 0;
+    size_t column = 0;
     while (i + 2 < in.size()) {
         uint32_t n = (static_cast<uint8_t>(in[i]) << 16) |
                      (static_cast<uint8_t>(in[i + 1]) << 8) |
@@ -6665,6 +6666,12 @@ static std::string base64Encode(const std::string& in) {
         out.push_back(tbl[(n >> 6) & 63]);
         out.push_back(tbl[n & 63]);
         i += 3;
+        // PostgreSQL wraps complete triples, including an exact final line.
+        // Its final padded quartet is emitted after this wrapping loop.
+        if ((column += 4) == 76) {
+            out.push_back('\n');
+            column = 0;
+        }
     }
     size_t rem = in.size() - i;
     if (rem == 1) {
