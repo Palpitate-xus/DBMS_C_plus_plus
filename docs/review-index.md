@@ -1,5 +1,18 @@
 # 代码审查索引
 
+新增三项已复现的开放问题：[R164 自定义标量函数声明](issue-review-r164-routine-custom-type-declarations.md)、
+[R165 内置数组binary Bind](issue-review-r165-builtin-array-binary-bind.md)、
+[R166 函数wire参数OID推断](issue-review-r166-scalar-protocol-parameter-inference.md)。
+PG完整R162协议1705全0；旧Root/clean各515失败，旧native343/154失败。
+组合候选Root/clean的native343各8失败、协议1705各77失败；R163完整1017各2失败。
+77项包括六个未限定调用Parse时机、44个数组binary输入、27个OID0推断/后续binary输入。
+R163新24个GROUP BY别名正向控制均保留并通过PG；两项剩余失败为aborted Parse发布。
+R161的637、R158的603/1449及六个重新链接Main运行在两端均0，不代表整个候选已通过。
+Root完整25入口终态1，其中还含两个驱动使用不存在邻居文件的exit2；clean改正驱动后25终态仍1。
+首轮全部失败和原始343/1705/1017夹具已归档，不改写为成功。
+本次只提交三个开放问题报告与索引；无生产源码/新夹具验收，不push，Actions禁用。
+原273仍22/166/70/15，总清单未完成，所有用户暂缓模块保持暂缓。
+
 [R156 类型化常量](issue-review-r156-regtype-physical-constants.md)按用户要求暂缓，不恢复。
 R158 数值与 R161 限定调用仍为未验收候选；完整失败断言和历史版本均保留。
 新复现的 [R162 通用存储函数签名](issue-review-r162-generic-stored-signatures.md)、

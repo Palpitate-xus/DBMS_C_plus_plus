@@ -1,6 +1,6 @@
 # 全部文档检查清单
 
-审查输入和发现见[代码审查报告](code-review-2026-10-13.md)。基准提交 `a502ffa3` 包含 412 份已跟踪 Markdown；首次审查含新增报告共 417 份。当前本轮逐文件复查 579 份 Markdown，下表覆盖全部；历史数量不改写。
+审查输入和发现见[代码审查报告](code-review-2026-10-13.md)。基准提交 `a502ffa3` 包含 412 份已跟踪 Markdown；首次审查含新增报告共 417 份。当前本轮逐文件复查 582 份 Markdown，下表覆盖全部；历史数量不改写。
 
 检查逐文件读取 UTF-8 内容并验证 Markdown 内联链接的本地文件目标是否存在。它不验证外部网址、锚点、所有引用式链接，也不证明文中每个历史技术结论在当前版本成立。
 使用手册、部署、命令参考、模块 README 和状态入口另作人工一致性核查；`issue-*.md` 保留原始提交和运行证据，其结论须按对应输入读取。
@@ -468,6 +468,9 @@
 | [docs/issue-review-r157-dotted-set-target.md](issue-review-r157-dotted-set-target.md) | 普通点号目标有限修复与完整验证 | 通过 |
 | [docs/issue-review-r162-generic-stored-signatures.md](issue-review-r162-generic-stored-signatures.md) | 已复现的开放签名问题与方法 | 通过 |
 | [docs/issue-review-r163-qualified-parse-validation.md](issue-review-r163-qualified-parse-validation.md) | 已复现的开放协议校验问题与方法 | 通过 |
+| [docs/issue-review-r164-routine-custom-type-declarations.md](issue-review-r164-routine-custom-type-declarations.md) | 开放的标量UDT函数声明归属问题 | 通过 |
+| [docs/issue-review-r165-builtin-array-binary-bind.md](issue-review-r165-builtin-array-binary-bind.md) | 开放的内置数组binary输入缺口 | 通过 |
+| [docs/issue-review-r166-scalar-protocol-parameter-inference.md](issue-review-r166-scalar-protocol-parameter-inference.md) | 开放的函数wire参数OID推断问题 | 通过 |
 | [docs/issue-root-numeric-publication.md](issue-root-numeric-publication.md) | 历史问题证据 | 通过 |
 | [docs/issue-root-row-publication.md](issue-root-row-publication.md) | 历史问题证据 | 通过 |
 | [docs/issue-root-sql-value-publication.md](issue-root-sql-value-publication.md) | 历史问题证据 | 通过 |
