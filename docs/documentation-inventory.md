@@ -1,5 +1,19 @@
 # 全部文档检查清单
 
+## 当前接受状态：R170/R171/R172/R174/R175
+
+五项有限修复已分别本地提交，版本对应见[审查索引](review-index.md)。
+最终组合在工作区及accepted-only clean各完整70入口（34native、33wire、3真实Main）实际全0；
+完整791/314/331/906及原956均0，已接受源2195文件与实际测试clean逐字节对应。
+首次Root70实际1的清理超时仍保留、原因未确定，复测0不等于超时根因已修；
+源码、58生产对象、server及每端96对象/38程序均独立核对，详见[R170最终证据](issue-review-r170-quoted-unqualified-scalar-projection.md)。
+已接受594MD、916native+563已注册Python+3Main=1482；工作区597MD、922+569+3=1494，
+原12个未接受入口和三份文档保持分离。这不是1482全量、TLS/整库sanitizer或各中间提交独立全矩阵。
+原273仍22 complete /166 partial /70 unverified /15 deferred，总目标未完成。
+R173函数签名类型依赖及R176真实聚合排序仍独立开放；R156等用户暂缓模块不恢复，不push，Actions禁用。
+
+## 历史记录（以下状态与数量均指记录当时）
+
 审查输入和发现见[代码审查报告](code-review-2026-10-13.md)。基准提交 `a502ffa3` 包含 412 份已跟踪 Markdown；首次审查含新增报告共 417 份。当前本轮逐文件复查 594 份 Markdown，下表覆盖全部；历史数量不改写。
 
 检查逐文件读取 UTF-8 内容并验证 Markdown 内联链接的本地文件目标是否存在。它不验证外部网址、锚点、所有引用式链接，也不证明文中每个历史技术结论在当前版本成立。
@@ -340,11 +354,11 @@
 | [docs/issue-review-r16-catalog-complete-read.md](issue-review-r16-catalog-complete-read.md) | 历史问题证据 | 通过 |
 | [docs/issue-review-r16-optional-catalog-directory.md](issue-review-r16-optional-catalog-directory.md) | 历史问题证据 | 通过 |
 | [docs/issue-review-r17-rollback-recovery-ownership.md](issue-review-r17-rollback-recovery-ownership.md) | 历史问题证据 | 通过 |
-| [docs/issue-review-r170-quoted-unqualified-scalar-projection.md](issue-review-r170-quoted-unqualified-scalar-projection.md) | 已复现开放问题、修改方法和未验收边界 | 通过 |
-| [docs/issue-review-r171-quoted-scalar-protocol-analysis.md](issue-review-r171-quoted-scalar-protocol-analysis.md) | 已复现开放问题、修改方法和未验收边界 | 通过 |
-| [docs/issue-review-r172-qualified-column-scalar-argument.md](issue-review-r172-qualified-column-scalar-argument.md) | 已复现开放问题、修改方法和未验收边界 | 通过 |
-| [docs/issue-review-r174-ordinary-source-descriptor.md](issue-review-r174-ordinary-source-descriptor.md) | 已复现静态协议描述符缺口、修改方案与未验收边界 | 通过 |
-| [docs/issue-review-r175-ordinary-aggregate-identity.md](issue-review-r175-ordinary-aggregate-identity.md) | 已复现普通聚合执行/列身份缺口、修改方法与独立排序边界 | 通过 |
+| [docs/issue-review-r170-quoted-unqualified-scalar-projection.md](issue-review-r170-quoted-unqualified-scalar-projection.md) | quoted标量投影身份的有限修复、两端70入口证据及未完成边界 | 通过 |
+| [docs/issue-review-r171-quoted-scalar-protocol-analysis.md](issue-review-r171-quoted-scalar-protocol-analysis.md) | Parse发布前及Describe纯绑定的有限修复、两端70入口证据及未完成边界 | 通过 |
+| [docs/issue-review-r172-qualified-column-scalar-argument.md](issue-review-r172-qualified-column-scalar-argument.md) | abs参数的真实列身份的有限修复、两端70入口证据及未完成边界 | 通过 |
+| [docs/issue-review-r174-ordinary-source-descriptor.md](issue-review-r174-ordinary-source-descriptor.md) | computed来源声明及typmod的有限修复、两端70入口证据及未完成边界 | 通过 |
+| [docs/issue-review-r175-ordinary-aggregate-identity.md](issue-review-r175-ordinary-aggregate-identity.md) | SUM/COUNT入口及decoded列身份的有限修复、两端70入口证据及未完成边界 | 通过 |
 | [docs/issue-review-r18-catalog-value-snapshots.md](issue-review-r18-catalog-value-snapshots.md) | 历史问题证据 | 通过 |
 | [docs/issue-review-r19-stale-temp-startup.md](issue-review-r19-stale-temp-startup.md) | 历史问题证据 | 通过 |
 | [docs/issue-review-r20-returning-query-owner.md](issue-review-r20-returning-query-owner.md) | 历史问题证据 | 通过 |

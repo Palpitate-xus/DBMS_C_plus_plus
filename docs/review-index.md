@@ -1,5 +1,27 @@
 # 代码审查索引
 
+## 当前接受状态：R170/R171/R172/R174/R175
+
+五项有限修复已分别本地提交，版本对应见[审查索引](review-index.md)。
+最终组合在工作区及accepted-only clean各完整70入口（34native、33wire、3真实Main）实际全0；
+完整791/314/331/906及原956均0，已接受源2195文件与实际测试clean逐字节对应。
+首次Root70实际1的清理超时仍保留、原因未确定，复测0不等于超时根因已修；
+源码、58生产对象、server及每端96对象/38程序均独立核对，详见[R170最终证据](issue-review-r170-quoted-unqualified-scalar-projection.md)。
+已接受594MD、916native+563已注册Python+3Main=1482；工作区597MD、922+569+3=1494，
+原12个未接受入口和三份文档保持分离。这不是1482全量、TLS/整库sanitizer或各中间提交独立全矩阵。
+原273仍22 complete /166 partial /70 unverified /15 deferred，总目标未完成。
+R173函数签名类型依赖及R176真实聚合排序仍独立开放；R156等用户暂缓模块不恢复，不push，Actions禁用。
+
+| 问题与修改方法 | 本地提交 | 接受范围 |
+| --- | --- | --- |
+| [R170](issue-review-r170-quoted-unqualified-scalar-projection.md) | `42ab8685` | quoted标量投影身份 |
+| [R171](issue-review-r171-quoted-scalar-protocol-analysis.md) | `6a1c0642` | Parse发布前及Describe纯绑定 |
+| [R172](issue-review-r172-qualified-column-scalar-argument.md) | `95e04648` | abs参数的真实列身份 |
+| [R174](issue-review-r174-ordinary-source-descriptor.md) | `1e116fb4` | computed来源声明及typmod |
+| [R175](issue-review-r175-ordinary-aggregate-identity.md) | `3d13fab2` | SUM/COUNT入口及decoded列身份 |
+
+## 历史记录（以下状态与数量均指记录当时）
+
 [R175普通聚合](issue-review-r175-ordinary-aggregate-identity.md)记录无FROM入口、SQL列身份及DISTINCT正确owner。
 组合V1 clean完整791仍26失败（R174八项metadata、R175十八项执行），314全部通过；
 两端编译均完成但不宣称完整62入口通过，原失败断言保留，两个新专项仍待PG参考/产品验收。

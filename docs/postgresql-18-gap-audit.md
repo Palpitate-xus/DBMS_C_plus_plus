@@ -1,5 +1,19 @@
 # 2026-10-13 全仓库审查
 
+## 当前接受状态：R170/R171/R172/R174/R175
+
+五项有限修复已分别本地提交，版本对应见[审查索引](review-index.md)。
+最终组合在工作区及accepted-only clean各完整70入口（34native、33wire、3真实Main）实际全0；
+完整791/314/331/906及原956均0，已接受源2195文件与实际测试clean逐字节对应。
+首次Root70实际1的清理超时仍保留、原因未确定，复测0不等于超时根因已修；
+源码、58生产对象、server及每端96对象/38程序均独立核对，详见[R170最终证据](issue-review-r170-quoted-unqualified-scalar-projection.md)。
+已接受594MD、916native+563已注册Python+3Main=1482；工作区597MD、922+569+3=1494，
+原12个未接受入口和三份文档保持分离。这不是1482全量、TLS/整库sanitizer或各中间提交独立全矩阵。
+原273仍22 complete /166 partial /70 unverified /15 deferred，总目标未完成。
+R173函数签名类型依赖及R176真实聚合排序仍独立开放；R156等用户暂缓模块不恢复，不push，Actions禁用。
+
+## 历史记录（以下状态与数量均指记录当时）
+
 [R157 普通SET点号目标](issue-review-r157-dotted-set-target.md)完成独立有限修复：
 完整目标先于内建分派，LOCAL/SESSION/transaction相似前缀不改变身份；
 引用分量保留原拼写，ColId分类、缺失分量、分隔符与FROM CURRENT边界均验证。

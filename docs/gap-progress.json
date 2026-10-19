@@ -2,6 +2,34 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R170 R171 R172 R174 R175 finite scalar identity, protocol declarations and SUM COUNT execution",
+      "gap_ids": [
+        "FUNC-01",
+        "SQL-04",
+        "PROTO-04"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r170-quoted-unqualified-scalar-projection.md",
+        "docs/issue-review-r171-quoted-scalar-protocol-analysis.md",
+        "docs/issue-review-r172-qualified-column-scalar-argument.md",
+        "docs/issue-review-r174-ordinary-source-descriptor.md",
+        "docs/issue-review-r175-ordinary-aggregate-identity.md"
+      ],
+      "tests": [
+        "tests/quoted_unqualified_scalar_projection_protocol_e2e_test.py",
+        "tests/abs_column_identity_protocol_e2e_test.py",
+        "tests/computed_query_host_metadata_protocol_e2e_test.py",
+        "tests/ordinary_aggregate_identity_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "reproduction": "Actual PG18.6 full791/314/331/906 all0; old accepted full791343fail,31471fail,331150fail,906441fail actual1. Repeated mode and downstream observations are not independent bug counts. Historical wrong startup path and V1/static failures retained.",
+        "focused_tests": "Final combined five-fix Root and accepted-only clean each70=34native33wire3realMain all actual0. Full791314331906956 zero failures. Both fresh2production/fresh6native/fresh3genuineMain; verified donor56production28native1stub;96objects38binaries each. Root normal2/repeat0, clean explicit2 and serverlink, no clean normal/repeat claim. Whole accepted src/tests/scripts2195 files equal tested clean.",
+        "full_suite": "Not full1482 or each intermediate commit full matrix, TLS or full-engine sanitizer. Root first70 actual1 after834true/0false R164 cleanup15sec timeout with no956footer; cause UNDETERMINED, same-byte all70 retry0 does not prove cause fixed. All original logs retained. Independent source pathset/bytes and58production/server/96object38binary exact receipt maps actual0.",
+        "scope": "Five individual local commits 42ab8685,6a1c0642,95e04648,1e116fb4,3d13fab2. Original273 items/checkboxes unchanged22complete166partial70unverified15deferred. Accepted594MD916native563wire3Main1482;Root597MD922native569wire3Main1494, original12 foreign entries unaccepted. R173 signature dependencies and R176 real aggregate order remain open. Skipped R156 and other deferrals preserved. No push; Actions disabled."
+      }
+    },
+    {
       "issue": "R157 qualified ordinary SET target identity, ColId grammar and Parse-only non-execution",
       "gap_ids": [
         "FUNC-01",
