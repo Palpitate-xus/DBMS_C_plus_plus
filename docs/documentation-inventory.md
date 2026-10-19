@@ -471,7 +471,7 @@
 | [docs/issue-review-r160-angle-constant-demand.md](issue-review-r160-angle-constant-demand.md) | 开放规划时机与完整观察 | 通过 |
 | [docs/issue-review-r161-qualified-projection-routine-identity.md](issue-review-r161-qualified-projection-routine-identity.md) | 限定标量投影身份有限修复与组合回归证据 | 通过 |
 | [docs/issue-review-r162-generic-stored-signatures.md](issue-review-r162-generic-stored-signatures.md) | 存储标量签名归属有限修复与组合回归证据 | 通过 |
-| [docs/issue-review-r163-qualified-parse-validation.md](issue-review-r163-qualified-parse-validation.md) | 已复现的开放协议校验问题与方法 | 通过 |
+| [docs/issue-review-r163-qualified-parse-validation.md](issue-review-r163-qualified-parse-validation.md) | 限定标量Parse校验有限修复与组合回归证据 | 通过 |
 | [docs/issue-review-r164-routine-custom-type-declarations.md](issue-review-r164-routine-custom-type-declarations.md) | 开放的标量UDT函数声明归属问题 | 通过 |
 | [docs/issue-review-r165-builtin-array-binary-bind.md](issue-review-r165-builtin-array-binary-bind.md) | 五种内置数组输入有限修复与独立实测 | 通过 |
 | [docs/issue-review-r166-scalar-protocol-parameter-inference.md](issue-review-r166-scalar-protocol-parameter-inference.md) | 开放的函数wire参数OID推断问题 | 通过 |

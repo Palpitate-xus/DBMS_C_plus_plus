@@ -2301,14 +2301,106 @@ bool describePreparedExplainResult(const std::string& sql, Session& session,
 // A known stored name with a missing signature cannot be published as a
 // TEXT-shaped prepared statement. Admit only metadata-detected source-free
 // cases and let the ordinary whole-query binder own the actual diagnostic.
+// Only ordinary scalar SELECTs belong to this new admission boundary. The
+// existing aggregate/group/window/set/query-child owners must not acquire
+// the whole-query binder's additional shape requirements merely because an
+// unrelated call is qualified or names a stored routine. Discover roles and
+// name existence without executing a routine or guessing argument validity.
+bool hasProtocolScalarSignatureCall(const Stmt* statement,const std::string& database) {
+    const auto* select=dynamic_cast<const SelectStmt*>(statement);
+    if(!select || select->command!=SqlCommand::Select || !select->ctes.empty() ||
+       select->setOp!=SetOp::None || select->setOpLhs || select->setOpRhs ||
+       !select->valuesRows.empty() || !select->groupBy.empty() ||
+       !select->groupByElems.empty() || select->having || select->distinct ||
+       !select->distinctOn.empty() || !select->windowDefs.empty() ||
+       !select->locking.empty() || select->withTies ||
+       (select->fromClause && select->fromClause->type!=FromItem::Type::Table))return false;
+    bool candidate=false;
+    std::function<bool(const Expr*)> ordinary=[&](const Expr* expression) {
+        if(!expression)return true;
+        if(expression->preparedSubquery || expression->type==ExprType::Subquery)return false;
+        if(const auto* call=dynamic_cast<const FunctionCallExpr*>(expression)) {
+            if(call->hasOver || call->setReturning || call->distinct || call->filter ||
+               !call->orderBy.empty())return false;
+            CatalogManager::QualifiedName name;
+            const auto spelling=call->schema.empty()?call->funcName:call->schema+"."+call->funcName;
+            const bool parsedName=CatalogManager::parseQualifiedName(spelling,name,true);
+            if(parsedName && (name.schema.empty() || name.schema=="pg_catalog")) {
+                // These are the established frontend aggregate/window/SRF
+                // roles, not a second overload or function-validity resolver.
+                static const std::set<std::string> queryRoles={
+                    "count","sum","avg","min","max","bool_and","bool_or","every",
+                    "stddev","stddev_samp","stddev_pop","variance","var_samp","var_pop",
+                    "array_agg","string_agg","json_agg","jsonb_agg","bit_and","bit_or",
+                    "xmlagg","rank","dense_rank","percentile_cont","grouping",
+                    "row_number","percent_rank","cume_dist","ntile","lag","lead",
+                    "first_value","last_value","nth_value","unnest","generate_series",
+                    "pg_listening_channels"};
+                if(queryRoles.count(name.name))return false;
+            }
+            if(call->sqlValue==FunctionCallExpr::SqlValue::None) {
+                if(!call->schema.empty())candidate=true;
+                else if(parsedName && name.schema.empty() && !database.empty()) {
+                    // A known stored name requires real argument binding even
+                    // when its arity/types are wrong. An unbound column probe
+                    // cannot decide that signature or suppress Parse errors.
+                    for(const auto& schema:functionNamespaceSearchPath(g_engine,database))
+                        if(schema!="pg_catalog" && !g_engine.getUDF(database,name.name,schema).expression.empty()) {
+                            candidate=true;
+                            break;
+                        }
+                }
+            }
+            for(const auto& argument:call->args)if(!ordinary(argument.get()))return false;
+            for(const auto& argument:call->namedArgs)if(!ordinary(argument.value.get()))return false;
+            return true;
+        }
+        if(const auto* binary=dynamic_cast<const BinaryOpExpr*>(expression))
+            return ordinary(binary->left.get()) && (binary->op=="::" || ordinary(binary->right.get()));
+        if(const auto* quantified=dynamic_cast<const QuantifiedComparisonExpr*>(expression))
+            return ordinary(quantified->left.get()) && ordinary(quantified->right.get());
+        if(const auto* unary=dynamic_cast<const UnaryOpExpr*>(expression))return ordinary(unary->operand.get());
+        if(const auto* cast=dynamic_cast<const CastExpr*>(expression))return ordinary(cast->operand.get());
+        if(const auto* conditional=dynamic_cast<const CaseExpr*>(expression)) {
+            if(!ordinary(conditional->switchExpr.get()) || !ordinary(conditional->elseExpr.get()))return false;
+            for(const auto& arm:conditional->whenClauses)
+                if(!ordinary(arm.first.get()) || !ordinary(arm.second.get()))return false;
+        }
+        if(const auto* array=dynamic_cast<const ArrayExpr*>(expression))
+            for(const auto& element:array->elements)if(!ordinary(element.get()))return false;
+        if(const auto* row=dynamic_cast<const RowExpr*>(expression))
+            for(const auto& element:row->elements)if(!ordinary(element.get()))return false;
+        if(const auto* literal=dynamic_cast<const LiteralExpr*>(expression)) {
+            // Initial parser SQL children are retained literal envelopes;
+            // they are not preparedSubquery ASTs until the query host binds.
+            // Leave that owner intact, and never inspect arbitrary string data.
+            const auto origin=SQLParser::tokenize(literal->value);
+            if(origin.size()>1 && origin.front()=="(" &&
+               (SQLParser::toLower(origin[1])=="select" || SQLParser::toLower(origin[1])=="with"))return false;
+        }
+        return true;
+    };
+    if(!ordinary(select->whereClause.get()))return false;
+    for(const auto& target:select->selectList)if(!ordinary(target.expr.get()))return false;
+    for(const auto& key:select->orderBy)if(!ordinary(key.expr.get()))return false;
+    return candidate;
+}
+
 void validatePreparedStoredSignatures(const std::string& sql,Session& session,
                                      const std::vector<uint32_t>& parameterOids) {
     SQLParser parser;
     const auto parsed=parser.parseForBinding(sql);
     const auto* select=parsed.isValid()?dynamic_cast<const SelectStmt*>(parsed.stmt.get()):nullptr;
-    if(!select || select->fromClause)return;
+    if(!select)return;
     auto* previous=currentSession();setCurrentSession(&session);
     struct Restore {Session* previous;~Restore(){setCurrentSession(previous);}} restore{previous};
+    if(hasProtocolScalarSignatureCall(select,session.currentDB)) {
+        // This runs before ParseComplete and statement publication. Failure
+        // cannot leave a named object behind or be hidden by Describe TEXT.
+        (void)g_engine.prepareBoundQuery(session.currentDB,sql,protocolMetadataParameters(session,parameterOids));
+        return;
+    }
+    if(select->fromClause)return;
     ExprEvaluator resolver;resolver.setCurrentDB(session.currentDB);
     std::function<bool(const Expr*)> missing=[&](const Expr* value) {
         if(!value)return false;
@@ -6493,6 +6585,16 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                     extendedQueryError = true;
                     continue;
                 }
+            }
+            // Raw syntax remains checked above, but an aborted block cannot
+            // analyze or publish another statement. Preserve empty Parse and
+            // the existing transaction-recovery commands, including rollback
+            // to a savepoint, before duplicate-name checks and descriptor binding.
+            if (transactionFailed && !splitSimpleQueryStatements(sql).empty() &&
+                !isTransactionRecoveryCommand(sql)) {
+                const auto aborted = transactionAbortedResult();
+                sendExtendedProtocolError(aborted.sqlState, aborted.errorMessage);
+                continue;
             }
             size_t inferredParameterCount = 0;
             std::string parameterError;
