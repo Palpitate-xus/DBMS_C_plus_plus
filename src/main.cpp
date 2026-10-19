@@ -21349,6 +21349,31 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
         }
         if(const auto* call=dynamic_cast<const dbms::FunctionCallExpr*>(value)) {
             if(call->sqlValue!=dbms::FunctionCallExpr::SqlValue::None)return true;
+            // A direct SQL ABS column target must retain its identifier AST.
+            // The legacy scalar adapter treats a double-quoted argument as
+            // string data before resolving its source or stored NULL bit.
+            // Keep this finite entry separate from quoted-callee admission
+            // and from the decoded native SelectExpr contract.
+            if(select->command==dbms::SqlCommand::Select &&
+               select->fromClause && select->fromClause->type==dbms::FromItem::Type::Table &&
+               select->selectList.size()==1 && select->selectList.front().expr.get()==call &&
+               select->ctes.empty() && select->setOp==dbms::SetOp::None &&
+               !select->setOpLhs && !select->setOpRhs && select->valuesRows.empty() &&
+               select->groupBy.empty() && select->groupByElems.empty() && !select->having &&
+               !select->distinct && select->distinctOn.empty() && select->windowDefs.empty() &&
+               select->locking.empty() && !select->withTies &&
+               call->schema.empty() && dbms::SQLParser::toLower(call->funcName)=="abs" &&
+               call->args.size()==1 && call->namedArgs.empty() &&
+               dynamic_cast<const dbms::ColumnRefExpr*>(call->args.front().get()) &&
+               !call->hasOver && !call->distinct && !call->filter && call->orderBy.empty() &&
+               !call->setReturning && !g_engine.ownsPreparedSetReturningCall(session.currentDB,call) &&
+               call->sourceBegin!=string::npos && call->sourceBegin<call->sourceEnd &&
+               call->sourceEnd<=rawSql.size()) {
+                const auto origin=dbms::SQLParser::tokenize(rawSql.substr(
+                    call->sourceBegin,call->sourceEnd-call->sourceBegin));
+                if(origin.size()>=4 && dbms::SQLParser::toLower(origin[0])=="abs" &&
+                   origin[1]=="(" && origin.back()==")")return true;
+            }
             const bool resolved=routineMetadata.hasScalarFunction(call,&g_engine);
             if(resolved && routineMetadata.scalarFunctionIdentity(call,&g_engine).rfind("stored",0)==0)return true;
             // A real stored name with a nonmatching signature still needs
