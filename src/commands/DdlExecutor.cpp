@@ -11051,6 +11051,44 @@ bool DdlExecutor::executeCreateFunction(const CreateFunctionStmt* stmt, Session&
         return true;
     }
 
+    // Custom scalar declarations own their actual namespace at CREATE time.
+    // Enum/composite getters consume decoded physical names (public is
+    // compact); domains consume SQL identities. Neither lookup manufactures
+    // catalog rows, including for legacy sidecar-only composites.
+    const auto customFunctionType = [&](const std::string& spelling) {
+        CatalogManager::QualifiedName requested;
+        if (!CatalogManager::parseQualifiedName(spelling, requested, true))
+            return std::string{};
+        std::vector<std::string> schemas;
+        if (!requested.schema.empty()) {
+            if (!namespaceExists(requested.schema))
+                throw DbError("3F000", "schema \"" + requested.schema + "\" does not exist");
+            schemas.push_back(requested.schema);
+        } else {
+            std::string canonical;
+            if (!parseSessionSearchPath(s.searchPath, schemas, canonical))
+                throw DbError("22023", "invalid search_path");
+            for (auto& schema : schemas)
+                schema = expandSessionSearchPathEntry(schema, s.username);
+        }
+        const auto quote = [](const std::string& name) {
+            std::string result = "\"";
+            for (const char byte : name) { result += byte; if (byte == '"') result += byte; }
+            return result + '"';
+        };
+        for (auto schema : schemas) {
+            if (schema == "pg_temp") schema = sessionTempSchemaName(s);
+            if (!namespaceExists(schema)) continue;
+            const std::string identity = quote(schema) + "." + quote(requested.name);
+            const std::string physical = schema == "public"
+                ? requested.name : schema + "." + requested.name;
+            if (!g_engine.getDomain(s.currentDB, identity).name.empty() ||
+                !g_engine.getEnumType(s.currentDB, physical).name.empty() ||
+                g_engine.isCompositeType(s.currentDB, physical))
+                return identity;
+        }
+        return std::string{};
+    };
     const auto validateFunctionType = [&](const std::string& typeSpec,
                                           bool returnType) {
         if (trim(typeSpec).empty()) return false;
@@ -11070,9 +11108,7 @@ bool DdlExecutor::executeCreateFunction(const CreateFunctionStmt* stmt, Session&
                        column, canonical, definition.typeMods, definition.isArray).empty();
         }
         if (definition.isArray) return false; // no user-type array codec yet
-        if (!g_engine.getDomain(s.currentDB, base).name.empty()) return true;
-        if (!g_engine.getEnumType(s.currentDB, base).name.empty()) return true;
-        return g_engine.isCompositeType(s.currentDB, base);
+        return !customFunctionType(definition.typeName).empty();
     };
     const auto canonicalFunctionType = [&](const std::string& typeSpec) {
         ColumnDef definition = columnDefFromAlterType("value", typeSpec, true);
@@ -11080,6 +11116,8 @@ bool DdlExecutor::executeCreateFunction(const CreateFunctionStmt* stmt, Session&
         const std::string canonical =
             TypeRegistry::instance().normalizeTypeName(base);
         if (!canonical.empty()) base = canonical;
+        else if (const auto identity = customFunctionType(definition.typeName); !identity.empty())
+            base = identity;
         if (!definition.typeMods.empty()) {
             base += '(';
             for (size_t i = 0; i < definition.typeMods.size(); ++i) {

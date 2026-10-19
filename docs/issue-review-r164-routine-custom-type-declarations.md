@@ -1,6 +1,6 @@
-# R164：存储函数自定义标量类型声明的命名空间归属（开放）
+# R164：存储函数自定义标量类型声明的命名空间归属（有限修复）
 
-状态：已复现，候选修正未验收，尚无生产修复提交。
+状态：普通自定义标量声明身份的有限修复已通过两端组合验收，不等于通用复合值codec完成。
 
 ## 实测错误
 
@@ -33,3 +33,14 @@ composite仍有真实sidecar但缺少完整pg_type登记，不能用目录查找
 `r162-v3-{only,root,clean}-results/generic_stored_signature_test.log`。
 完整343项未删除。另一个第295项是测试错误：项目既有collation规范化把C写为c，
 V3逐字节断言过严，后续保留控制改为规范化比较；不是类型签名修复已通过343项。
+
+## 最终候选的完整运行检查点
+
+R169 V4工作区完整58入口实际全部通过；本项native570、协议956及共享签名343/1705均0失败。
+声明验证和canonical持久化共同按实际namespace解析普通enum/domain/composite身份；
+R167/R168/R169修复相邻删除/清理与语法时机后，完整956中原四条清理错误全部消除。
+原控制全部保留，search_path仅接受精确可选Status；bare返回声明保留，初始BODY使用固定
+canonical type，避免换search_path后BODY重解析改变owner，失败替换42P13控制仍在。
+不以跳过DROP或放宽任意协议消息来“通过”。自动用户数组、声明typmod及通用复合值codec仍不由本项关闭。
+独立干净版本亦完整58实际退出0；两端各26native、29协议、三个真实Main全部通过。
+组合构建、依赖与完整日志索引见[R169](issue-review-r169-simple-query-raw-syntax.md)。
