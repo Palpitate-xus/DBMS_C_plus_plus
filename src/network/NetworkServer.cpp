@@ -2306,7 +2306,9 @@ bool describePreparedExplainResult(const std::string& sql, Session& session,
 // the whole-query binder's additional shape requirements merely because an
 // unrelated call is qualified or names a stored routine. Discover roles and
 // name existence without executing a routine or guessing argument validity.
-bool hasProtocolScalarSignatureCall(const Stmt* statement,const std::string& database) {
+bool hasProtocolScalarSignatureCall(const Stmt* statement,const std::string& database,
+                                   const std::string* sourceSql=nullptr,
+                                   bool quotedUnqualifiedOnly=false) {
     const auto* select=dynamic_cast<const SelectStmt*>(statement);
     if(!select || select->command!=SqlCommand::Select || !select->ctes.empty() ||
        select->setOp!=SetOp::None || select->setOpLhs || select->setOpRhs ||
@@ -2315,7 +2317,7 @@ bool hasProtocolScalarSignatureCall(const Stmt* statement,const std::string& dat
        !select->distinctOn.empty() || !select->windowDefs.empty() ||
        !select->locking.empty() || select->withTies ||
        (select->fromClause && select->fromClause->type!=FromItem::Type::Table))return false;
-    bool candidate=false;
+    bool candidate=false,quotedCandidate=false;
     std::function<bool(const Expr*)> ordinary=[&](const Expr* expression) {
         if(!expression)return true;
         if(expression->preparedSubquery || expression->type==ExprType::Subquery)return false;
@@ -2339,6 +2341,22 @@ bool hasProtocolScalarSignatureCall(const Stmt* statement,const std::string& dat
                 if(queryRoles.count(name.name))return false;
             }
             if(call->sqlValue==FunctionCallExpr::SqlValue::None) {
+                // Parse/Describe may bind a genuine quoted SQL callee even
+                // when no stored name exists. Do not apply this new entry to
+                // the source-free wire-parameter inference caller: it has no
+                // sourceSql and retains its existing signature owners.
+                if(sourceSql && select->fromClause && call->schema.empty() &&
+                   parsedName && name.schema.empty() &&
+                   call->sourceBegin!=std::string::npos &&
+                   call->sourceBegin<call->sourceEnd && call->sourceEnd<=sourceSql->size()) {
+                    const auto origin=SQLParser::tokenize(sourceSql->substr(
+                        call->sourceBegin,call->sourceEnd-call->sourceBegin));
+                    if(origin.size()>=2 && origin[0].size()>=2 &&
+                       origin[0].front()=='"' && origin[0].back()=='"' && origin[1]=="(") {
+                        candidate=true;
+                        quotedCandidate=true;
+                    }
+                }
                 if(!call->schema.empty())candidate=true;
                 else if(parsedName && name.schema.empty() && !database.empty()) {
                     // A known stored name requires real argument binding even
@@ -2383,7 +2401,7 @@ bool hasProtocolScalarSignatureCall(const Stmt* statement,const std::string& dat
     if(!ordinary(select->whereClause.get()))return false;
     for(const auto& target:select->selectList)if(!ordinary(target.expr.get()))return false;
     for(const auto& key:select->orderBy)if(!ordinary(key.expr.get()))return false;
-    return candidate;
+    return quotedUnqualifiedOnly?quotedCandidate:candidate;
 }
 
 void validatePreparedStoredSignatures(const std::string& sql,Session& session,
@@ -2394,7 +2412,7 @@ void validatePreparedStoredSignatures(const std::string& sql,Session& session,
     if(!select)return;
     auto* previous=currentSession();setCurrentSession(&session);
     struct Restore {Session* previous;~Restore(){setCurrentSession(previous);}} restore{previous};
-    if(hasProtocolScalarSignatureCall(select,session.currentDB)) {
+    if(hasProtocolScalarSignatureCall(select,session.currentDB,&sql)) {
         // This runs before ParseComplete and statement publication. Failure
         // cannot leave a named object behind or be hidden by Describe TEXT.
         (void)g_engine.prepareBoundQuery(session.currentDB,sql,protocolMetadataParameters(session,parameterOids));
@@ -2909,6 +2927,29 @@ bool describePreparedResult(const std::string& sql, Session& session,
         }
         columns = describeProtocolColumns(shape, sql, session, &prepared.output);
         return !columns.empty();
+    }
+    if(select && select->fromClause && select->fromClause->type==FromItem::Type::Table) {
+        // Ordinary parse above intentionally keeps its established owner,
+        // but has no source spans. Only this new quoted-call probe needs a
+        // separate provenance AST; it never replaces the legacy parsed tree.
+        const auto quotedSyntax=parser.parseForBinding(sql);
+        const auto* quotedSelect=quotedSyntax.isValid()
+            ?dynamic_cast<const SelectStmt*>(quotedSyntax.stmt.get()):nullptr;
+        if(quotedSelect && hasProtocolScalarSignatureCall(quotedSelect,session.currentDB,&sql,true)) {
+            // The same pure binder owns Parse validation and actual input
+            // types. Publish its result, not quoted length/abs fallback TEXT.
+            auto* previous=currentSession();setCurrentSession(&session);
+            struct Restore {Session* previous;~Restore(){setCurrentSession(previous);}} restore{previous};
+            const auto prepared=g_engine.prepareBoundQuery(session.currentDB,sql,
+                protocolMetadataParameters(session,parameterOids));
+            QueryResult shape;
+            for(const auto& field:prepared.output) {
+                shape.columns.push_back(field.name);
+                shape.columnTypes.push_back(field.type);
+            }
+            columns=describeProtocolColumns(shape,sql,session,&prepared.output);
+            return !columns.empty();
+        }
     }
     if (select && !select->fromClause && parameterOids.empty()) {
         // Query-host providers publish their genuine whole-bound static
