@@ -1,5 +1,11 @@
 # 代码审查索引
 
+[R174普通来源描述符](issue-review-r174-ordinary-source-descriptor.md)另记四种既有791形态的独立metadata缺口。
+不移除原791/314断言，不假定三候选即可全通过；生产编译/链接完成与Main回归编译/完整运行分开记录。
+本次仅登记开放问题：已接受593MD、916native+559Python+3Main=1478；
+Root596MD、922+567+3=1492，14个尚未接受入口中含本轮2wire和原12foreign。
+原273仍22/166/70/15，总目标未完成；不push，Actions禁用。
+
 已复现的三个独立开放问题：见[R170 quoted投影](issue-review-r170-quoted-unqualified-scalar-projection.md)、[R171 Parse/Describe](issue-review-r171-quoted-scalar-protocol-analysis.md)、[R172列参数引用](issue-review-r172-qualified-column-scalar-argument.md)。
 V2和V3各自实际完成PG18.6完整791/0、冻结accepted-only旧产品791/343，外层退出0/1；
 343含重复与连带失败，不是343独立bug；新源码/夹具尚未安装、编译或验收。
