@@ -1,5 +1,12 @@
 # 2026-10-13 全仓库代码审查
 
+最新有限修复：[R184测试数据目录隔离](issue-review-r184-test-data-directory-isolation.md)使公共helper在子程序启动前选私有数据根，
+父环境/cwd不变。旧同一7控制完整4失败，候选及Root完整7通过；两侧各4native/3真实Main通过，调用者标记目录保持不变。
+只改脚本及既有测试，全部CPP/127头和匹配程序不变，不冒fresh编译或修复后新完整72；旧72另记。
+跟踪605MD/1492入口，Root608MD/1504入口；原12未接受入口与三份文档保留，原273状态22/166/70/15不变。
+总目标未完成，历史R164超时原因未定、明确暂缓不恢复；不push，不启用Actions。以下记录按当时输入解释。
+
+
 当前完整矩阵复验：[原72入口](issue-review-current-full72-revalidation.md)在accepted-only clean与工作区各72实际全0，
 原35native/34协议/3真实Main、956及190额外raw门均保留，默认15秒/持久化未弱化。
 每侧97对象39程序核对，零C++编译、38新链接，donor不冒fresh；2206accepted源码与tested clean一致，Root2325保留。

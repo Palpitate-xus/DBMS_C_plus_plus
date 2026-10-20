@@ -1,5 +1,12 @@
 # 全部文档检查清单
 
+最新有限修复：[R184测试数据目录隔离](issue-review-r184-test-data-directory-isolation.md)使公共helper在子程序启动前选私有数据根，
+父环境/cwd不变。旧同一7控制完整4失败，候选及Root完整7通过；两侧各4native/3真实Main通过，调用者标记目录保持不变。
+只改脚本及既有测试，全部CPP/127头和匹配程序不变，不冒fresh编译或修复后新完整72；旧72另记。
+跟踪605MD/1492入口，Root608MD/1504入口；原12未接受入口与三份文档保留，原273状态22/166/70/15不变。
+总目标未完成，历史R164超时原因未定、明确暂缓不恢复；不push，不启用Actions。以下记录按当时输入解释。
+
+
 当前完整矩阵复验：[原72入口](issue-review-current-full72-revalidation.md)在accepted-only clean与工作区各72实际全0，
 原35native/34协议/3真实Main、956及190额外raw门均保留，默认15秒/持久化未弱化。
 每侧97对象39程序核对，零C++编译、38新链接，donor不冒fresh；2206accepted源码与tested clean一致，Root2325保留。
@@ -123,7 +130,7 @@ R173函数签名类型依赖及R176真实聚合排序仍独立开放；R156等�
 
 ## 历史记录（以下状态与数量均指记录当时）
 
-审查输入和发现见[代码审查报告](code-review-2026-10-13.md)。基准提交 `a502ffa3` 包含 412 份已跟踪 Markdown；首次审查含新增报告共 417 份。当前本轮逐文件复查 604 份 Markdown，下表覆盖全部；历史数量不改写。
+审查输入和发现见[代码审查报告](code-review-2026-10-13.md)。基准提交 `a502ffa3` 包含 412 份已跟踪 Markdown；首次审查含新增报告共 417 份。当前本轮逐文件复查 605 份 Markdown，下表覆盖全部；历史数量不改写。
 
 检查逐文件读取 UTF-8 内容并验证 Markdown 内联链接的本地文件目标是否存在。它不验证外部网址、锚点、所有引用式链接，也不证明文中每个历史技术结论在当前版本成立。
 使用手册、部署、命令参考、模块 README 和状态入口另作人工一致性核查；`issue-*.md` 保留原始提交和运行证据，其结论须按对应输入读取。
@@ -478,6 +485,7 @@ R173函数签名类型依赖及R176真实聚合排序仍独立开放；R156等�
 | [docs/issue-review-r181-reverse-linear.md](issue-review-r181-reverse-linear.md) | REVERSE线性UTF-8码点扫描；80native/96协议与两端19入口，旧语义通过及耗时观测保留 | 部分 |
 | [docs/issue-review-r182-utf8-split-linear.md](issue-review-r182-utf8-split-linear.md) | V2共享UTF-8线性拆分；新76/329、两端23入口；原V1错误oracle和-6完整保留，R183独立修复 | 部分 |
 | [docs/issue-review-r183-string-to-array-callback-identity.md](issue-review-r183-string-to-array-callback-identity.md) | 实际callback元数据/身份；旧native60完整60失败，两端21入口全0，R182性能仍未接受 | 部分 |
+| [docs/issue-review-r184-test-data-directory-isolation.md](issue-review-r184-test-data-directory-isolation.md) | 子程序启动前显式私有数据根；旧7控制4失败，两侧7控制及各4native/3Main通过；非全1492 | 通过 |
 | [docs/issue-review-r18-catalog-value-snapshots.md](issue-review-r18-catalog-value-snapshots.md) | 历史问题证据 | 通过 |
 | [docs/issue-review-r19-stale-temp-startup.md](issue-review-r19-stale-temp-startup.md) | 历史问题证据 | 通过 |
 | [docs/issue-review-r20-returning-query-owner.md](issue-review-r20-returning-query-owner.md) | 历史问题证据 | 通过 |

@@ -2,6 +2,25 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R184 fixed public native/Main test-helper child data-directory inheritance",
+      "gap_ids": [],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r184-test-data-directory-isolation.md"
+      ],
+      "tests": [
+        "tests/build_cache_routing_test.py"
+      ],
+      "verification": {
+        "fixed": "Child DBMS_DATA_DIR=. is assigned after privatecwd before process/global initialization. Parentenvironment/cwd preserved; no realcallerdata used.",
+        "counterproof": "Same permanent7 oldactual1/4fail, candidateandRootactual0/7complete; oldboth5probe actual1/4fail retained. Onebug, not4independentbugs.",
+        "runtime": "Each4native3genuineMain throughactualfixedhelper actual0/footer/caller treeintact/privatecleanup.97objects39currentbins/127headersunchanged; zero productionCPPcompilation/linking/cacheoverwrite.",
+        "boundary": "No newfull72afterhelperpatch or full1492claim. Original273unchanged22/166/70/15; userdeferrals retained,no push,noActionsactivation.",
+        "proof": "/tmp/dbms-r184-independent-pre-proof._4vqh9d3/completed-proof.json",
+        "proof_sha256": "b68e3a146ec83326302be81d8ae51508a5450c25a35b392530656ef43f793da2"
+      }
+    },
+    {
       "issue": "Current accepted source original72 matrix clean and Root complete; historical failures retained",
       "gap_ids": [],
       "status": "partial",

@@ -759,7 +759,10 @@ dbms_run_isolated_test() {
     local status=0
 
     work_dir="$(mktemp -d "${TMPDIR:-/tmp}/dbms-test-${name}.XXXXXX")" || return 1
-    (cd "$work_dir" && "$binary") || status=$?
+    # The cwd alone does not override an inherited DBMS_DATA_DIR. Set it
+    # before the child starts (including C++ global initialization), without
+    # changing the caller's environment or selecting any caller-owned root.
+    (cd "$work_dir" && DBMS_DATA_DIR=. "$binary") || status=$?
     if ! rm -rf -- "$work_dir"; then
         echo "[test-build] Could not clean isolated directory: ${work_dir}" >&2
         status=1
