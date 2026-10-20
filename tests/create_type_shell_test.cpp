@@ -13,6 +13,7 @@
 #include "commands/DdlExecutor.h"
 #include "commands/DdlTransaction.h"
 #include "commands/TableManage.h"
+#include "common/DbError.h"
 #include "Session.h"
 #include "catalog/type_registry.h"
 #include <cassert>
@@ -418,7 +419,20 @@ static void test_type_sidecars_are_atomic_and_fail_closed() {
 
     const fs::path compositePath = fs::path(db) / ".types";
     assert(fs::create_directory(compositePath));
-    assert(ddl.executeSql("DROP TYPE legacy_shell", s));
+    // Checked metadata enumeration reports I/O separately from absence. The
+    // failed DROP must retain its precise error and every neighboring record.
+    bool rejectedUnreadableComposite = false;
+    try {
+        (void)ddl.executeSql("DROP TYPE legacy_shell", s);
+    } catch (const dbms::DbError& error) {
+        rejectedUnreadableComposite = error.sqlState() == "58030";
+    }
+    assert(rejectedUnreadableComposite);
+    assert(!g_engine.inTransaction());
+    assert(!g_engine.hasTransactionBackup());
+    assert(fs::is_directory(compositePath));
+    assert(readFile(shellPath) == shellBytes);
+    assert(readFile(udtPath) == udtBytes);
     assert(shellTypeFileContains(db, "legacy_shell"));
     assert(fs::remove(compositePath));
 

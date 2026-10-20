@@ -1,5 +1,26 @@
 # R168：复合类型sidecar的namespace身份（归属修复与旧格式限制）
 
+## R188：旧类型夹具必须接收精确的 checked-read 错误
+
+冻结 `2442e4c7` 的原规范全套中，`create_type_shell_test` 在故意将 `.types`
+替换成目录后，因未捕获的 `DbError(58030)` 实际退出 134，未到完整 footer。
+这是旧夹具仅接收 bool 错误的契约失配：本项原实现已明确要求 checked 枚举
+区分 I/O 与不存在，不能为让旧测试通过而恢复空列表或放行删除。
+
+夹具现在要求该 DROP 精确抛出 58030，保留原 shell 存活性检查，并增加完整
+shell/UDT 邻接文件字节不变、原目录仍在、事务与备份不泄漏的检查。
+原 9 组测试、所有类型创建/删除、失败提交回滚、故障注入和持久化断言均保留。
+accepted-only 与工作区两套库的完整原生夹具均实际退出 0，达到 `[CTYPE] all passed`；
+两侧分别新编译/链接该测试，核对各自 57 个生产库对象/stub、127 头及编译配置。
+工作区含原有未接受改动，不借此接受这些改动；生产代码和共享头未改。
+
+证据：`/tmp/dbms-r188-type-shell.zaddkr3f/completed-focused-receipt.json`，
+SHA256 `4129daefde4479282b075cda0730499989d5470acc29382d1e415f4f92586367`。
+原失败保留在 `/tmp/dbms-accepted2442-full1492.9obmw81r/canonical-full-registered.log`。
+原全套继续使用冻结输入，未删除或重写原失败；这不是修复后新全套、PG 差分、
+TLS/sanitizer 或原 273 项完成证明。R187 的不明退出仍开放，R185 仍跳过；不 push，
+Actions 保持禁用。下列内容是原 R168 的历史说明与证据。
+
 状态：版本化复合类型归属修复已通过两端组合验收；旧歧义记录与物理键限制保留。
 
 ## 实测与原因
