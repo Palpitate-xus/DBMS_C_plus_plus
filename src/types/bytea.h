@@ -22,13 +22,13 @@ public:
 
     static bool parse(const std::string& input, ByteaValue& output) {
         std::string bytes;
-        if (input.size() >= 2 && input[0] == '\\' &&
-            (input[1] == 'x' || input[1] == 'X')) {
+        if (input.size() >= 2 && input[0] == '\\' && input[1] == 'x') {
             int highNibble = -1;
             for (size_t index = 2; index < input.size(); ++index) {
                 const unsigned char character =
                     static_cast<unsigned char>(input[index]);
-                if (std::isspace(character)) {
+                if (character == ' ' || character == '\t' ||
+                    character == '\n' || character == '\r') {
                     // PostgreSQL permits whitespace between byte pairs, but
                     // not between the two digits of a byte.
                     if (highNibble >= 0) return false;
