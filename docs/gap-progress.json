@@ -2,6 +2,25 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R183 actual STRING_TO_ARRAY callback owns return metadata and identity",
+      "gap_ids": [
+        "FUNC-01"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r183-string-to-array-callback-identity.md"
+      ],
+      "tests": [
+        "tests/string_to_array_callback_identity_test.cpp"
+      ],
+      "verification": {
+        "reproduction": "Oldnative full60 actual1/60 failures with footer, not60independentbugs. Real builtin has text[] declaration; opaque replacements wrongly inherited builtin name/array coercion. R182 V1 distinct wrongARRAY oracle9labels and final-6 preserved, not accepted.",
+        "focused_tests": "Clean and Root each full21=13native5wire3genuineMain actual0; newnative60 plus array library and original80/96/294/80/190/654 unchanged. Positivebuiltin and54opaque combinations validate puremetadata/arity/volatility/name/returntype/inputsingleexecution, not merely noerror.",
+        "build": "Each75objects17currentbins127headers verified. Fresh1production2native;57production11native1stub3Main verifieddonors, not fresh. All newlylinked currentlibrary. Root normal1compile/link,repeat0compile0link; cleanexplicitbuild. 2204 accepted source blobs matchtestedclean; Root2323 exact2ownedsourcepaths4hunks and preinstall2322source118cache recovery preserveforeignbytes.",
+        "scope": "Finite callback return-metadata fix, no arity/type signature/AST/security changes. R182 unaccepted/futureV2 pending, original273 unchanged22complete166partial70unverified15deferred. Accepted603MD920native567wire3Main1490;Root606MD926native573wire3Main1502; same12foreignentries separated. R164 unresolved/R180 andotherdeferrals retained. No full1490/full72/TLS/sanitizer claim. No push;Actionsdisabled."
+      }
+    },
+    {
       "issue": "R182 performance candidate not accepted; oldnative abort exposes independent R183 callback identity defect",
       "gap_ids": [
         "FUNC-01"

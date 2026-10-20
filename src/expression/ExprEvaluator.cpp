@@ -5329,6 +5329,12 @@ struct DeclaredStrposScalarFunction {
         return callback(args);
     }
 };
+struct DeclaredStringToArrayScalarFunction {
+    ScalarFunction callback;
+    ExprValue operator()(const std::vector<ExprValue>& args) const {
+        return callback(args);
+    }
+};
 struct DeclaredArrayPositionScalarFunction {
     ScalarFunction callback;
     ExprValue operator()(const std::vector<ExprValue>& args) const {
@@ -5975,6 +5981,7 @@ std::string ExprEvaluator::scalarFunctionResultType(const FunctionCallExpr* call
         if(callback->second.target<SqlNameFunction>())return "name";
         if(callback->second.target<SqlTypeOfFunction>())return "regtype";
         if(callback->second.target<SqlVersionFunction>())return "text";
+        if(callback->second.target<DeclaredStringToArrayScalarFunction>())return "text[]";
         if (const auto* bound = callback->second.target<BoundScalarRoutine>())
             return ExprHelper::canonicalResultTypeName(bound->resolved.routine.returnType);
     }
@@ -6014,6 +6021,8 @@ std::string ExprEvaluator::scalarFunctionIdentity(const FunctionCallExpr* call,
                        !callback->second.target<DeclaredStringLengthScalarFunction>()) ||
                       (resolved.name=="strpos" &&
                        !callback->second.target<DeclaredStrposScalarFunction>()) ||
+                      (resolved.name=="string_to_array" &&
+                       !callback->second.target<DeclaredStringToArrayScalarFunction>()) ||
                       (resolved.name=="width_bucket" &&
                        !callback->second.target<DeclaredWidthBucketScalarFunction>()) ||
                       (resolved.name=="array_position" &&
@@ -13144,6 +13153,8 @@ void ExprEvaluator::registerBuiltins() {
             entry.second=DeclaredStringLengthScalarFunction{std::move(entry.second)};
         else if(entry.first=="strpos")
             entry.second=DeclaredStrposScalarFunction{std::move(entry.second)};
+        else if(entry.first=="string_to_array")
+            entry.second=DeclaredStringToArrayScalarFunction{std::move(entry.second)};
         else if(entry.first=="width_bucket")
             entry.second=DeclaredWidthBucketScalarFunction{std::move(entry.second)};
         else if(entry.first=="array_position")

@@ -1,5 +1,17 @@
 # 全部文档检查清单
 
+最新有限修复：[R183 STRING_TO_ARRAY回调身份](issue-review-r183-string-to-array-callback-identity.md)
+已按实际callback提供数组元数据，opaque替换保持未知声明/原生身份，不再错误强转数组。
+旧native60完整1/60失败，非60个独立bug；Root及accepted-only clean各21入口实际全0，
+含新native60、原完整数组库、80/96/294/80/190/654及三个真实Main。
+每侧75对象17当前程序/127头核对；fresh1生产2native，57生产11native/stub/3Main为匹配donor，
+全部新链接当前库；Root normal1CPP并链接、repeat零编译零链接，clean显式编译。
+2204已接受源码投影与tested clean相同，Root2323保留外来改动及2322源码/118缓存恢复副本。
+跟踪603份MD、920native+567注册Python+3Main=1490入口；Root606份MD、926+573+3=1502，
+原12未接受入口分离；[R182拆分性能](issue-review-r182-utf8-split-linear.md)仍未接受，V1失败原样保留，需新版本继续。
+R164仍未解决，R180及其他暂缓不恢复；原273仍22/166/70/15，总目标未完成。
+不是全1490/完整72/TLS/整库sanitizer验收；不push，Actions禁用。以下记录按当时状态解释。
+
 最新开放：[R182共享UTF-8拆分](issue-review-r182-utf8-split-linear.md)已完成PG329与旧版329全0对照，
 候选已编译但未验收；首轮原生检查因错误ARRAY类型期望及真实opaque回调数组强转异常而中止，完整失败保留。
 [R183 STRING_TO_ARRAY回调身份](issue-review-r183-string-to-array-callback-identity.md)单列真实缺陷，
@@ -435,7 +447,7 @@ R173函数签名类型依赖及R176真实聚合排序仍独立开放；R156等�
 | [docs/issue-review-r180-position-call-identity.md](issue-review-r180-position-call-identity.md) | 用户最新skip it暂缓；24双侧观察与方法保留，无生产修改或验收 | 用户暂缓 |
 | [docs/issue-review-r181-reverse-linear.md](issue-review-r181-reverse-linear.md) | REVERSE线性UTF-8码点扫描；80native/96协议与两端19入口，旧语义通过及耗时观测保留 | 部分 |
 | [docs/issue-review-r182-utf8-split-linear.md](issue-review-r182-utf8-split-linear.md) | PG/旧329全0，候选仅构建；原生-6中止、9错误类型期望与真实回调强转差异保留，未验收 | 部分 |
-| [docs/issue-review-r183-string-to-array-callback-identity.md](issue-review-r183-string-to-array-callback-identity.md) | opaque native回调被builtin数组元数据强转；实际callback marker方法和60项候选，未验收 | 部分 |
+| [docs/issue-review-r183-string-to-array-callback-identity.md](issue-review-r183-string-to-array-callback-identity.md) | 实际callback元数据/身份；旧native60完整60失败，两端21入口全0，R182性能仍未接受 | 部分 |
 | [docs/issue-review-r18-catalog-value-snapshots.md](issue-review-r18-catalog-value-snapshots.md) | 历史问题证据 | 通过 |
 | [docs/issue-review-r19-stale-temp-startup.md](issue-review-r19-stale-temp-startup.md) | 历史问题证据 | 通过 |
 | [docs/issue-review-r20-returning-query-owner.md](issue-review-r20-returning-query-owner.md) | 历史问题证据 | 通过 |
