@@ -48,7 +48,7 @@ order_by_duplicate_alias、scientific_numeric_column、computed_query_host_metad
 
 父提交为`2bf24e16`。两侧各fresh编译1个生产CPP和14个原生测试对象，
 其余57个生产对象及stub为逐一核对源、127公共头、编译器、flags和对象hash的donor。
-所有测试程序和服务器重新链接；Main对象是同源匹配donor，不冒称fresh Main TU或normal/repeat构建。
+所有测试程序和服务器重新链接；Main对象是同源匹配donor，上述候选阶段不冒称fresh Main TU或normal/repeat构建。
 构建最多两个编译器；运行全部串行。仅停止自有全量调度器，等待原运行子树自然结束后才工作，
 最终恢复调度器；原全量输入、每个夹具的超时和持久化设置均未改变。
 
@@ -74,3 +74,24 @@ R187未定位的原exit2原因仍开放，原273状态22complete/166partial/70un
 以上/tmp路径是本机临时证据，不是可移植发布包或CI验收。
 重复NaN/正负零的专门等价组排列、其他全部算子及整库sanitizer没有在本轮新增穷举证明。
 本项证明上述明确输入和调用路径，不替代总账要求级验收。
+
+## 提交后工作区正常构建与程序复验
+
+在修复提交`7ccfc34b`后，工作区实际执行原`scripts/build.sh`：仅重编本项1个生产CPP并链接，
+随后重复构建无编译、无链接；其余57个生产对象与127个公共头保持原字节。
+使用正常构建得到的生产库重新链接并完整执行floating_order_by、原外部104项、
+floating_key_semantics、prepared_identity_sort、temporal_storage_codec共5个原生进程，全部退出0。
+原104项及扩展旧测试的完成标记均存在；正常构建的工作区dbms_main再执行完整
+window_numeric_partition和ordinary_aggregate_order_keys协议入口，也全部退出0，
+后者原190条raw观察独立核对编号连续、兼容断言全部成立。
+原生测试对象为上述候选阶段的同源匹配对象，不冒称本次重编测试或Main TU。
+
+本批仍在原全量调度器的空闲边界串行执行，结束后已恢复原调度器。
+源码、测试和暂存区字节未被构建改变，也未接受工作区其他改动。
+旧工作区CPP对象和旧服务器在缓存更新前复制到本批证据目录，保留原hash，
+不覆盖或改写历史receipt；引用旧可变build路径的验收记录应按其原运行时点解释。
+
+正常构建及7个完整进程receipt：
+`/tmp/dbms-r191-root-normal.26natgiz/completed-normal-build-receipt.json`，
+SHA256 `4f763078c4297c93be73a83e64cf44657f9b5ff3f7bfcc5a79fd40108d11b15b`。
+这是工作区构建记录，不表示accepted-only正常构建、修复后全1492或总账已经完成。
