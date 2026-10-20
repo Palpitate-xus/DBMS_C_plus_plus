@@ -1,5 +1,13 @@
 # PostgreSQL 18 vs 本 DBMS 功能对比
 
+最新开放：[R182共享UTF-8拆分](issue-review-r182-utf8-split-linear.md)已完成PG329与旧版329全0对照，
+候选已编译但未验收；首轮原生检查因错误ARRAY类型期望及真实opaque回调数组强转异常而中止，完整失败保留。
+[R183 STRING_TO_ARRAY回调身份](issue-review-r183-string-to-array-callback-identity.md)单列真实缺陷，
+先独立修复实际callee元数据，再恢复R182严格验证；不删除失败检查、不将候选计作已修复。
+跟踪603份MD、919native+567注册Python+3Main=1489入口；Root606份MD、925+573+3=1501，
+新增文档不等于新增接受测试，原12未接受入口仍分离。R164未解决，R180等暂缓不恢复。
+原273仍22/166/70/15，总目标未完成；不push，Actions禁用。以下记录按当时状态解释。
+
 最新有限修复：[R181 REVERSE线性扫描](issue-review-r181-reverse-linear.md)消除长文本反转的平方级前缀扫描，
 保留UTF-8码点、TEXT/CHAR、NULL、BYTEA及实参求值语义；这是性能修复，不是旧版兼容性错值。
 PG完整96、旧版完整96及native80语义全0；Root及accepted-only clean各19入口实际全0，

@@ -2,6 +2,23 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R182 performance candidate not accepted; oldnative abort exposes independent R183 callback identity defect",
+      "gap_ids": [
+        "FUNC-01"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r182-utf8-split-linear.md",
+        "docs/issue-review-r183-string-to-array-callback-identity.md"
+      ],
+      "tests": [],
+      "verification": {
+        "reproduction": "PG329 and frozenoldR181329 both actual0. R182oldnative actual-6/no completion footer,9visible failure labels from incorrect rawARRAY expectation; final opaque callback triggers22P02 malformed array literal:opaque. Not a whole76 failure count or product candidate pass.",
+        "plan": "Preserve V1 fixture/logs, correct own internalARRAY-versus-canonicaltext[] oracle transparently in a separate version, retain opaque callback assertion. Fix R183 actual callback result metadata/identity first with positivebuiltin and native replacement checks; then rebase and validate all four R182 splitting paths.",
+        "scope": "No Root production edits/new accepted registrations. Original273 unchanged22complete166partial70unverified15deferred. Accepted603MD919native567wire3Main1489;Root606MD925native573wire3Main1501. R180 and other deferrals retained;R164 unresolved. No push,Actionsdisabled."
+      }
+    },
+    {
       "issue": "R181 UTF-8 REVERSE uses one backwards pass instead of repeated prefix scans",
       "gap_ids": [
         "FUNC-01"

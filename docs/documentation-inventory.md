@@ -1,5 +1,13 @@
 # 全部文档检查清单
 
+最新开放：[R182共享UTF-8拆分](issue-review-r182-utf8-split-linear.md)已完成PG329与旧版329全0对照，
+候选已编译但未验收；首轮原生检查因错误ARRAY类型期望及真实opaque回调数组强转异常而中止，完整失败保留。
+[R183 STRING_TO_ARRAY回调身份](issue-review-r183-string-to-array-callback-identity.md)单列真实缺陷，
+先独立修复实际callee元数据，再恢复R182严格验证；不删除失败检查、不将候选计作已修复。
+跟踪603份MD、919native+567注册Python+3Main=1489入口；Root606份MD、925+573+3=1501，
+新增文档不等于新增接受测试，原12未接受入口仍分离。R164未解决，R180等暂缓不恢复。
+原273仍22/166/70/15，总目标未完成；不push，Actions禁用。以下记录按当时状态解释。
+
 最新有限修复：[R181 REVERSE线性扫描](issue-review-r181-reverse-linear.md)消除长文本反转的平方级前缀扫描，
 保留UTF-8码点、TEXT/CHAR、NULL、BYTEA及实参求值语义；这是性能修复，不是旧版兼容性错值。
 PG完整96、旧版完整96及native80语义全0；Root及accepted-only clean各19入口实际全0，
@@ -74,7 +82,7 @@ R173函数签名类型依赖及R176真实聚合排序仍独立开放；R156等�
 
 ## 历史记录（以下状态与数量均指记录当时）
 
-审查输入和发现见[代码审查报告](code-review-2026-10-13.md)。基准提交 `a502ffa3` 包含 412 份已跟踪 Markdown；首次审查含新增报告共 417 份。当前本轮逐文件复查 601 份 Markdown，下表覆盖全部；历史数量不改写。
+审查输入和发现见[代码审查报告](code-review-2026-10-13.md)。基准提交 `a502ffa3` 包含 412 份已跟踪 Markdown；首次审查含新增报告共 417 份。当前本轮逐文件复查 603 份 Markdown，下表覆盖全部；历史数量不改写。
 
 检查逐文件读取 UTF-8 内容并验证 Markdown 内联链接的本地文件目标是否存在。它不验证外部网址、锚点、所有引用式链接，也不证明文中每个历史技术结论在当前版本成立。
 使用手册、部署、命令参考、模块 README 和状态入口另作人工一致性核查；`issue-*.md` 保留原始提交和运行证据，其结论须按对应输入读取。
@@ -426,6 +434,8 @@ R173函数签名类型依赖及R176真实聚合排序仍独立开放；R156等�
 | [docs/issue-review-r179-strpos-signatures.md](issue-review-r179-strpos-signatures.md) | STRPOS有限声明修复，native76/协议294、两端完整16与fresh真实Main3；旧49/140失败保留，其他边界开放 | 部分 |
 | [docs/issue-review-r180-position-call-identity.md](issue-review-r180-position-call-identity.md) | 用户最新skip it暂缓；24双侧观察与方法保留，无生产修改或验收 | 用户暂缓 |
 | [docs/issue-review-r181-reverse-linear.md](issue-review-r181-reverse-linear.md) | REVERSE线性UTF-8码点扫描；80native/96协议与两端19入口，旧语义通过及耗时观测保留 | 部分 |
+| [docs/issue-review-r182-utf8-split-linear.md](issue-review-r182-utf8-split-linear.md) | PG/旧329全0，候选仅构建；原生-6中止、9错误类型期望与真实回调强转差异保留，未验收 | 部分 |
+| [docs/issue-review-r183-string-to-array-callback-identity.md](issue-review-r183-string-to-array-callback-identity.md) | opaque native回调被builtin数组元数据强转；实际callback marker方法和60项候选，未验收 | 部分 |
 | [docs/issue-review-r18-catalog-value-snapshots.md](issue-review-r18-catalog-value-snapshots.md) | 历史问题证据 | 通过 |
 | [docs/issue-review-r19-stale-temp-startup.md](issue-review-r19-stale-temp-startup.md) | 历史问题证据 | 通过 |
 | [docs/issue-review-r20-returning-query-owner.md](issue-review-r20-returning-query-owner.md) | 历史问题证据 | 通过 |
