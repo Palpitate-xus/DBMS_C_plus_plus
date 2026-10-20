@@ -21,13 +21,13 @@ NAME 不接受类型修饰符，必须在通用数值修饰符转换前以 42601
 
 ## 新验证及参考期望纠正
 
-`tests/name_column_ddl_test.cpp` 为 165 项原生检查。
+`tests/name_column_ddl_test.cpp.draft` 为 165 项原生检查。
 覆盖七种合法拼写、真实持久化布局/OID19/OID1003、默认插入、NAME/数组实际行、
 字面量 `NULL` 与 SQL NULL 位、CHECK/NOT NULL 拒绝且不留残行、修饰符及无效身份，
 以及同名用户 domain、显式内建和内建优先时的列选择。
 原生拒绝接口检验 Boolean/DbError 和数据库状态，不将 stdout 冒充结构化 SQLSTATE。
 
-`tests/name_column_ddl_protocol_e2e_test.py` 为 279 项完整协议检查。
+`tests/name_column_ddl_protocol_draft.py` 为 279 项完整协议检查。
 检查七种拼写的真实 CREATE/INSERT/UPDATE/DEFAULT/约束/查询/删除，
 标量及数组的值、空串、SQL NULL、OID、宽度、typmod、来源、格式、tag 和成功消息顺序；
 84 条非法修饰符及无效类型身份严格核对 SQLSTATE，无数据或成功 tag。
@@ -69,3 +69,6 @@ R210 默认值、R211 实际 current_schema() 值和 R213 引号列名仍为普�
 | PG V1 完整 279 失败、原 257 通过 receipt | `/tmp/dbms-private-pg18-full-fixture._aml7a1r/completed-reference-receipt.json`，`50e203104901732f49605f28f852d2a9d29f36169ed4aeed69f3d07cebab833b` |
 | 保留 V1 279 夹具 | `v1-name_column_ddl_protocol_e2e_test.py`，`2f29263aedf27d31c045df196d3032cb66201b091f38efcc05b4a4d9cfeff057` |
 | PG 最终完整 279 +原 257 receipt | `/tmp/dbms-private-pg18-full-fixture.cm1sbctt/completed-reference-receipt.json`，`dfbd6e8c6bb2d82710aa6f63994e7e375c4f22d0e862ac72bbee6b83d5cc3bc6` |
+
+暂缓夹具已按原字节保留为上述草稿名，避免被默认原生入口扫描或独立 E2E 注册规则误纳入。
+这只是暂缓现场整理，不代表恢复 R214 修复或通过其验收；既有失败和参考记录不改写。
