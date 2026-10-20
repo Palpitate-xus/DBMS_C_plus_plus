@@ -1,5 +1,10 @@
 # DBMS 功能测试报告
 
+最新开放：[R177分组聚合排序与计算目标](issue-review-r177-grouped-aggregate-order.md)已完成PG及当前版本各128次响应采集，
+复现分组ASC浮点求和、DISTINCT SUM、键求值/重执行缺失、FILTER false拒绝及计算目标丢列；
+产品4个DataRow字段数错误仍为失败，无传输中断并确认清理。51处诊断签名差异不是51个独立缺陷。
+本项尚无生产修复或新注册测试；R164超时、R176其余边界及原273未完成状态保留，用户暂缓分支不恢复。
+
 ## 当前版本：R176有限排序修复，完整矩阵仍有失败
 
 [R176](issue-review-r176-ordinary-aggregate-order-keys.md)的有限源码修复已本地提交`a35658c0`：
@@ -13,7 +18,7 @@
 三个Main采用accepted测试体的路径投影及显式私有数据目录，不夹带工作区session测试改动。
 Root fresh58、normal wrapper复用当前58链接、repeat零编译/零链接；clean fresh2+56当前header
 donor源自独立fresh58 V3，未伪造clean常规build/repeat。提交的2198源文件与tested clean逐blob一致。
-跟踪596份MD、917native+564注册Python+3Main=1484入口；工作区599份MD、923+570+3=1496，
+跟踪597份MD、917native+564注册Python+3Main=1484入口；工作区600份MD、923+570+3=1496，
 原12个未纳入版本的测试入口和三份文档分离保留。这不是1484全量、TLS或整库sanitizer通过声明。
 R176的GROUP BY排序、更多类型/算子/参数/query owner边界仍开放；R164超时仍普通未解决，非用户暂缓。
 原273仍22 complete /166 partial /70 unverified /15 deferred，总目标未完成。

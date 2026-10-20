@@ -1,5 +1,10 @@
 # 全部文档检查清单
 
+最新开放：[R177分组聚合排序与计算目标](issue-review-r177-grouped-aggregate-order.md)已完成PG及当前版本各128次响应采集，
+复现分组ASC浮点求和、DISTINCT SUM、键求值/重执行缺失、FILTER false拒绝及计算目标丢列；
+产品4个DataRow字段数错误仍为失败，无传输中断并确认清理。51处诊断签名差异不是51个独立缺陷。
+本项尚无生产修复或新注册测试；R164超时、R176其余边界及原273未完成状态保留，用户暂缓分支不恢复。
+
 ## 当前版本：R176有限排序修复，完整矩阵仍有失败
 
 [R176](issue-review-r176-ordinary-aggregate-order-keys.md)的有限源码修复已本地提交`a35658c0`：
@@ -13,7 +18,7 @@
 三个Main采用accepted测试体的路径投影及显式私有数据目录，不夹带工作区session测试改动。
 Root fresh58、normal wrapper复用当前58链接、repeat零编译/零链接；clean fresh2+56当前header
 donor源自独立fresh58 V3，未伪造clean常规build/repeat。提交的2198源文件与tested clean逐blob一致。
-跟踪596份MD、917native+564注册Python+3Main=1484入口；工作区599份MD、923+570+3=1496，
+跟踪597份MD、917native+564注册Python+3Main=1484入口；工作区600份MD、923+570+3=1496，
 原12个未纳入版本的测试入口和三份文档分离保留。这不是1484全量、TLS或整库sanitizer通过声明。
 R176的GROUP BY排序、更多类型/算子/参数/query owner边界仍开放；R164超时仍普通未解决，非用户暂缓。
 原273仍22 complete /166 partial /70 unverified /15 deferred，总目标未完成。
@@ -35,7 +40,7 @@ R173函数签名类型依赖及R176真实聚合排序仍独立开放；R156等�
 
 ## 历史记录（以下状态与数量均指记录当时）
 
-审查输入和发现见[代码审查报告](code-review-2026-10-13.md)。基准提交 `a502ffa3` 包含 412 份已跟踪 Markdown；首次审查含新增报告共 417 份。当前本轮逐文件复查 596 份 Markdown，下表覆盖全部；历史数量不改写。
+审查输入和发现见[代码审查报告](code-review-2026-10-13.md)。基准提交 `a502ffa3` 包含 412 份已跟踪 Markdown；首次审查含新增报告共 417 份。当前本轮逐文件复查 597 份 Markdown，下表覆盖全部；历史数量不改写。
 
 检查逐文件读取 UTF-8 内容并验证 Markdown 内联链接的本地文件目标是否存在。它不验证外部网址、锚点、所有引用式链接，也不证明文中每个历史技术结论在当前版本成立。
 使用手册、部署、命令参考、模块 README 和状态入口另作人工一致性核查；`issue-*.md` 保留原始提交和运行证据，其结论须按对应输入读取。
@@ -382,6 +387,7 @@ R173函数签名类型依赖及R176真实聚合排序仍独立开放；R156等�
 | [docs/issue-review-r174-ordinary-source-descriptor.md](issue-review-r174-ordinary-source-descriptor.md) | computed来源声明及typmod的有限修复、两端70入口证据及未完成边界 | 通过 |
 | [docs/issue-review-r175-ordinary-aggregate-identity.md](issue-review-r175-ordinary-aggregate-identity.md) | SUM/COUNT入口及decoded列身份的有限修复、两端70入口证据及未完成边界 | 通过 |
 | [docs/issue-review-r176-ordinary-aggregate-order-keys.md](issue-review-r176-ordinary-aggregate-order-keys.md) | 普通SUM/COUNT排序键有限修复、61/190通过、Root72通过及两次clean72超时失败；其余边界开放 | 部分 |
+| [docs/issue-review-r177-grouped-aggregate-order.md](issue-review-r177-grouped-aggregate-order.md) | 分组聚合排序/DISTINCT/投影及4个协议字段数缺陷、双侧128次观察与修改方法；未修复 | 部分 |
 | [docs/issue-review-r18-catalog-value-snapshots.md](issue-review-r18-catalog-value-snapshots.md) | 历史问题证据 | 通过 |
 | [docs/issue-review-r19-stale-temp-startup.md](issue-review-r19-stale-temp-startup.md) | 历史问题证据 | 通过 |
 | [docs/issue-review-r20-returning-query-owner.md](issue-review-r20-returning-query-owner.md) | 历史问题证据 | 通过 |

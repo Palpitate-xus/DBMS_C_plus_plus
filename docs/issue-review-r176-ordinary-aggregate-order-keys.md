@@ -144,7 +144,7 @@ FILTER/NULL/空输入、多键/方向/NULL位置及共享生产者。它不证�
 | 仍未解决的内容 | 后续修改/验证方法 |
 | --- | --- |
 | R164普通函数DDL的两次socket超时 | 新隔离复现中分阶段记录耗时及I/O，验证普通`CREATE OR REPLACE FUNCTION`整库回滚快照的实际成本；保留事务原子性、durability和现有超时，不能靠禁用fsync或删断言完成 |
-| GROUP BY内普通聚合排序 | 与PG完整对照真实多组、空/NULL/FILTER、方向、元数据及重执行，再补typed分组消费所有者；不能以全局聚合通过关闭 |
+| [GROUP BY内普通聚合排序](issue-review-r177-grouped-aggregate-order.md) | R177已用双侧128响应复现排序/DISTINCT/投影及字段数问题；仍需补typed分组消费所有者，不能以全局聚合通过关闭 |
 | 其他类型、算子、参数与嵌套query owner | 增加对应的纯绑定、值、OID/格式、错误阶段和副作用对照，按实际证据扩展，不猜测未运行结果 |
 
 上述DDL快照是静态检查得到的耗时假设，并非已经证实的超时根因。本项没有修改该路径。

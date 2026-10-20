@@ -2,6 +2,26 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R177 grouped ordinary aggregate ORDER, DISTINCT and computed target defects observed; not fixed",
+      "gap_ids": [
+        "SQL-04",
+        "PROTO-04"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r177-grouped-aggregate-order.md"
+      ],
+      "tests": [],
+      "verification": {
+        "baseline_source_commit": "a35658c0e3191fc6d8e37b0a52480b945cba7b6d",
+        "production_fix": false,
+        "reproduction": "PG V3 actual0/128sent128framed/0protocol defects; product V3 actual1/128sent128framed/4field-count defects, no broken stream; both sequence baseline1,2 and UUID cleanup confirmed. V2 product41normal1framedbad86NOTSENT preserved.",
+        "observed": "Grouped floatASC PG0 vs product1; DISTINCT SUM PG1 vs product0; computed target dropped and extended/binary describe2 but return1. ORDER nextval executes6 in PG and0 in product, including null inputs and rebind. FILTERfalse unsupported, while correct missing-key/DISTINCT-membership/metadata-purity controls must remain.",
+        "comparison": "77 matching/51 differing offline diagnostic signatures, not51 independent defects or candidate test passes. Physical table OID normalized to positive source role; cleanup NOTICE text excluded. No acceptance oracle supplied.",
+        "scope": "No R177 production edits or registered tests. R164 timeout unknown and R176 GROUP/other boundaries open. Original273 unchanged22complete166partial70unverified15deferred; skipped branches not resumed. No push; Actions disabled."
+      }
+    },
+    {
       "issue": "R176 finite ordinary aggregate ORDER key binding and execution; clean matrix failures retained",
       "gap_ids": [
         "SQL-04",
