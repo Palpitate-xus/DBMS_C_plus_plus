@@ -450,6 +450,18 @@ struct FunctionCallExpr : public Expr {
     // or a second reconstruction of the routine's argument context.
     std::string resolvedResultType;
 
+    // Original typed ORDER expressions for the ordinary SUM/COUNT binding
+    // receiver. These are not function arguments or rendered SQL literals.
+    // The legacy parse API keeps its existing synthetic argument contract.
+    struct AggregateOrderKey {
+        ExprPtr expr;
+        bool ascending = true;
+        bool nullsFirst = false;
+        std::optional<QueryComparisonBinding> enumComparison;
+        std::string usingOperator;
+    };
+    std::vector<AggregateOrderKey> aggregateOrderKeys;
+
     FunctionCallExpr() { type = ExprType::FunctionCall; }
     std::string toString() const override;
 };

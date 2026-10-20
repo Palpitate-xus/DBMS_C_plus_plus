@@ -928,6 +928,23 @@ public:
                     throw DbError("42804", "argument of FILTER must be type boolean");
                 coerceCaseInput(call->filter, filterType, "boolean");
             }
+            for (auto& key : call->aggregateOrderKeys) {
+                auto type = expression(key.expr, scopes);
+                // Operator resolution is analysis, not raw parsing. Shape
+                // probes retain a real AST; the protected query binder owns
+                // publication of this semantic error and its SQLSTATE.
+                if (!key.usingOperator.empty() && key.usingOperator != "<" && key.usingOperator != ">") {
+                    if (key.usingOperator == "=" || key.usingOperator == "<=" || key.usingOperator == ">=" ||
+                        key.usingOperator == "<>" || key.usingOperator == "!=")
+                        throw DbError("42809", "operator is not a valid ordering operator");
+                    throw DbError("0A000", "aggregate ORDER USING requires additional operator binding");
+                }
+                if (ExprHelper::canonicalResultTypeName(type) == "unknown") {
+                    coerceCaseInput(key.expr, type, "text");
+                    type = "text";
+                }
+                key.enumComparison = enumSortComparison(type, expressionTypeOid(key.expr.get()));
+            }
             window(call->over, scopes);
             if (call->schema.empty() && SQLParser::toLower(call->funcName) == "exists" &&
                 call->args.size() == 1 && call->args.front()->preparedSubquery) {
@@ -948,6 +965,29 @@ public:
             // just like CAST and CASE. Returning only its spelling loses the
             // OID at query-output/child boundaries; never run it to infer one.
             call->resolvedResultType=declaredType(type.empty() ? first : type,call);
+            if (call->distinct && !call->aggregateOrderKeys.empty()) {
+                const auto* owner = statementOwners.empty() ? nullptr
+                    : dynamic_cast<const SelectStmt*>(statementOwners.back());
+                const auto identity = [&](const Expr* value) {
+                    if (metadata.outputExpressionIdentity)
+                        return metadata.outputExpressionIdentity(value, result, owner);
+                    return ExprHelper::preparedSortExpressionIdentity(value, result,
+                        [](const ColumnRefExpr& column) {
+                            if (!column.binding) throw DbError("XX000", "aggregate order lost source binding");
+                            const auto& binding = *column.binding;
+                            return std::to_string(binding.scopeDepth) + ":" +
+                                std::to_string(binding.sourceOrdinal) + ":" +
+                                std::to_string(binding.columnOrdinal) + ":" + binding.declaredType;
+                        }, "", nullptr, false, owner);
+                };
+                for (const auto& key : call->aggregateOrderKeys) {
+                    const auto orderIdentity = identity(key.expr.get());
+                    if (std::none_of(call->args.begin(), call->args.end(), [&](const auto& argument) {
+                            return identity(argument.get()) == orderIdentity;
+                        }))
+                        throw DbError("42P10", "in an aggregate with DISTINCT, ORDER BY expressions must appear in argument list");
+                }
+            }
             const auto common=common_type_detail::canonical(call->resolvedResultType);
             if (call->schema.empty() && grammarOperation=="coalesce" &&
                 (common=="inet" || common=="cidr"))
@@ -1205,6 +1245,7 @@ public:
                 for(const auto& arg:call->args)rejectVariables(arg.get());
                 for(const auto& arg:call->namedArgs)rejectVariables(arg.value.get());
                 rejectVariables(call->filter.get());
+                for(const auto& key:call->aggregateOrderKeys)rejectVariables(key.expr.get());
                 for(const auto& field:call->over.partitionBy)rejectVariables(field.get());
                 for(const auto& order:call->over.orderBy)rejectVariables(order.first.get());
                 rejectVariables(call->over.frameStart.get());rejectVariables(call->over.frameEnd.get());
@@ -2054,7 +2095,9 @@ void Binder::rebase(Stmt& root, size_t offset) {
         else if (auto* e = dynamic_cast<FunctionCallExpr*>(value.get())) {
             for (auto& arg : e->args) expr(arg);
             for (auto& arg : e->namedArgs) expr(arg.value);
-            expr(e->filter); window(e->over);
+            expr(e->filter);
+            for (auto& key : e->aggregateOrderKeys) expr(key.expr);
+            window(e->over);
         } else if (auto* e = dynamic_cast<CaseExpr*>(value.get())) {
             expr(e->switchExpr); expr(e->elseExpr);
             for (auto& arm : e->whenClauses) { expr(arm.first); expr(arm.second); }

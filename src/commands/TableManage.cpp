@@ -33822,6 +33822,12 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
             // routines shadowing builtin window names on the search path.
             // Its arguments have already been bound, so ordinary missing
             // column/routine diagnostics retain their preparation priority.
+            if (!function->aggregateOrderKeys.empty() &&
+                evaluator.hasScalarFunction(function, const_cast<StorageEngine*>(this)))
+                throw DbError("42809", "ORDER BY specified, but " + spelling +
+                    " is not an aggregate function");
+            if (!function->aggregateOrderKeys.empty() && function->hasOver)
+                throw DbError("0A000", "aggregate ORDER BY is not implemented for window functions");
             if (function->hasOver &&
                 evaluator.hasScalarFunction(function, const_cast<StorageEngine*>(this)))
                 throw DbError("42809", "OVER specified, but " + spelling +
@@ -33921,6 +33927,44 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
                     !evaluator.hasScalarFunction(function, const_cast<StorageEngine*>(this))) {
                     if(function->hasOver && function->distinct)
                         throw DbError("0A000","DISTINCT is not implemented for window aggregates");
+                    if (!function->aggregateOrderKeys.empty()) {
+                        std::function<void(const Expr*)> validateInput = [&](const Expr* value) {
+                            if (!value || value->preparedSubquery) return;
+                            if (const auto* call = dynamic_cast<const FunctionCallExpr*>(value)) {
+                                if (call->setReturning)
+                                    throw DbError("0A000", "aggregate function calls cannot contain set-returning function calls");
+                                if (call->hasOver)
+                                    throw DbError("42803", "aggregate function calls cannot contain window function calls");
+                                if (!aggregate_type_detail::builtinName(call).empty() &&
+                                    !evaluator.hasScalarFunction(call, const_cast<StorageEngine*>(this)))
+                                    throw DbError("42803", "aggregate function calls cannot be nested");
+                                for (const auto& argument : call->args) validateInput(argument.get());
+                                for (const auto& argument : call->namedArgs) validateInput(argument.value.get());
+                                for (const auto& key : call->aggregateOrderKeys) validateInput(key.expr.get());
+                                validateInput(call->filter.get());
+                            } else if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(value))
+                                validateInput(unary->operand.get());
+                            else if (const auto* cast = dynamic_cast<const CastExpr*>(value))
+                                validateInput(cast->operand.get());
+                            else if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(value)) {
+                                validateInput(binary->left.get());
+                                if (binary->op != "::" && binary->op != "COLLATE") validateInput(binary->right.get());
+                            } else if (const auto* quantified = dynamic_cast<const QuantifiedComparisonExpr*>(value)) {
+                                validateInput(quantified->left.get()); validateInput(quantified->right.get());
+                            } else if (const auto* conditional = dynamic_cast<const CaseExpr*>(value)) {
+                                validateInput(conditional->switchExpr.get()); validateInput(conditional->elseExpr.get());
+                                for (const auto& arm : conditional->whenClauses) {
+                                    validateInput(arm.first.get()); validateInput(arm.second.get());
+                                }
+                            } else if (const auto* array = dynamic_cast<const ArrayExpr*>(value))
+                                for (const auto& element : array->elements) validateInput(element.get());
+                            else if (const auto* row = dynamic_cast<const RowExpr*>(value))
+                                for (const auto& element : row->elements) validateInput(element.get());
+                        };
+                        for (const auto& argument : function->args) validateInput(argument.get());
+                        for (const auto& key : function->aggregateOrderKeys) validateInput(key.expr.get());
+                        validateInput(function->filter.get());
+                    }
                     const auto input = function->args.empty() ? std::string("unknown") :
                         ExprHelper::inferParsedInputType(function->args.front().get(), {}, dbname,
                                                        const_cast<StorageEngine*>(this));

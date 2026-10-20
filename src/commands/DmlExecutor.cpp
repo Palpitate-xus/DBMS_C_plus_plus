@@ -851,7 +851,7 @@ bool validateConflictExpression(const Expr* expr, const TableSchema& table,
     }
     if (const auto* call = dynamic_cast<const FunctionCallExpr*>(expr)) {
         if (!evaluator.hasFunction(call->funcName) || call->distinct || call->filter ||
-            call->hasOver || !call->namedArgs.empty() || !call->orderBy.empty()) {
+            call->hasOver || !call->namedArgs.empty() || !call->orderBy.empty() || !call->aggregateOrderKeys.empty()) {
             return false;
         }
         for (const auto& arg : call->args) {
@@ -1409,7 +1409,7 @@ bool supportsReturningExpression(const Expr* expr, const TableSchema& table,
             return false;
         }
         if (!evaluator.hasFunction(call->funcName) || call->distinct || call->filter ||
-            call->hasOver || !call->namedArgs.empty() || !call->orderBy.empty()) {
+            call->hasOver || !call->namedArgs.empty() || !call->orderBy.empty() || !call->aggregateOrderKeys.empty()) {
             return false;
         }
         for (const auto& arg : call->args) {
@@ -1499,7 +1499,7 @@ bool buildReturningProjections(const std::vector<SelectItem>& returning,
         if (mergeAction) {
             if (!binding.allowMergeAction || !call->args.empty() ||
                 call->distinct || call->filter || call->hasOver ||
-                !call->namedArgs.empty() || !call->orderBy.empty()) {
+                !call->namedArgs.empty() || !call->orderBy.empty() || !call->aggregateOrderKeys.empty()) {
                 return false;
             }
         } else if (!supportsReturningExpression(
@@ -1563,6 +1563,7 @@ void checkPreparedInsertSources(const PreparedQuery& query, Session& session) {
         else if (const auto* call = dynamic_cast<const FunctionCallExpr*>(value)) {
             for (const auto& argument : call->args) expression(argument.get());
             for (const auto& argument : call->namedArgs) expression(argument.value.get());
+            for (const auto& key : call->aggregateOrderKeys) expression(key.expr.get());
             expression(call->filter.get()); if (call->hasOver) window(call->over);
         } else if (const auto* conditional = dynamic_cast<const CaseExpr*>(value)) {
             expression(conditional->switchExpr.get()); expression(conditional->elseExpr.get());
@@ -1878,7 +1879,7 @@ bool validateStructuredExpression(
     }
     if (const auto* call = dynamic_cast<const FunctionCallExpr*>(expr)) {
         if (!evaluator.hasFunction(call->funcName) || call->distinct || call->filter ||
-            call->hasOver || !call->namedArgs.empty() || !call->orderBy.empty()) {
+            call->hasOver || !call->namedArgs.empty() || !call->orderBy.empty() || !call->aggregateOrderKeys.empty()) {
             return false;
         }
         for (const auto& arg : call->args) {
@@ -2516,6 +2517,8 @@ bool usesReturningRowImage(const Expr* expr,
             if (usesReturningRowImage(arg.value.get(), qualifiers)) return true;
         }
         if (usesReturningRowImage(call->filter.get(), qualifiers)) return true;
+        for (const auto& key : call->aggregateOrderKeys)
+            if (usesReturningRowImage(key.expr.get(), qualifiers)) return true;
         if (call->hasOver) {
             for (const auto& partition : call->over.partitionBy) {
                 if (usesReturningRowImage(
@@ -3921,6 +3924,7 @@ bool rejectDuplicateUpdateAssignments(const UpdateStmt& statement, Session& sess
         } else if (auto* node = dynamic_cast<FunctionCallExpr*>(expression)) {
             for (auto& argument : node->args) inputConversions(argument.get());
             for (auto& argument : node->namedArgs) inputConversions(argument.value.get());
+            for (auto& key : node->aggregateOrderKeys) inputConversions(key.expr.get());
             inputConversions(node->filter.get());
             if (node->hasOver) windowInputs(node->over);
         } else if (auto* node = dynamic_cast<ArrayExpr*>(expression)) {
@@ -6175,6 +6179,7 @@ void notePreparedTemporaryObjectAccess(const std::string& sql, Session& session)
         } else if (const auto* function = dynamic_cast<const FunctionCallExpr*>(expression)) {
             for (const auto& argument : function->args) visitExpression(argument.get(), ctes);
             for (const auto& argument : function->namedArgs) visitExpression(argument.value.get(), ctes);
+            for (const auto& key : function->aggregateOrderKeys) visitExpression(key.expr.get(), ctes);
             visitExpression(function->filter.get(), ctes);
             if (function->hasOver) visitWindow(function->over, ctes);
         } else if (const auto* cast = dynamic_cast<const CastExpr*>(expression)) {

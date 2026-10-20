@@ -3113,6 +3113,62 @@ static ExprPtr parsePrimaryExprImpl(const std::vector<std::string>& tokens, size
             }
             // ORDER BY inside aggregate (e.g., ARRAY_AGG(x ORDER BY y))
             if (SQLParser::toLower(tokens[pos]) == "order") {
+                CatalogManager::QualifiedName orderRoutine;
+                const auto spelling = func->schema.empty() ? func->funcName
+                    : func->schema + "." + func->funcName;
+                const bool structured = bindingParse &&
+                    CatalogManager::parseQualifiedName(spelling, orderRoutine, true) &&
+                    (orderRoutine.schema.empty() || orderRoutine.schema == "pg_catalog") &&
+                    (orderRoutine.name == "sum" || orderRoutine.name == "count");
+                if (structured) {
+                    const auto syntax = [](const std::string& message) -> void {
+                        const DbError error("42601", message);
+                        retainDeclarationSyntaxError(error);
+                        throw error;
+                    };
+                    if (func->args.empty()) syntax("aggregate ORDER BY requires an argument");
+                    if (const auto* star = dynamic_cast<const LiteralExpr*>(func->args.front().get());
+                        star && star->value == "*") syntax("aggregate star cannot be combined with ORDER BY");
+                    if (!func->aggregateOrderKeys.empty()) syntax("multiple aggregate ORDER BY clauses");
+                    ++pos;
+                    if (pos >= tokens.size() || SQLParser::toLower(tokens[pos]) != "by")
+                        syntax("aggregate ORDER requires BY");
+                    ++pos;
+                    for (;;) {
+                        if (pos >= tokens.size() || tokens[pos] == ")" || tokens[pos] == "," || tokens[pos] == ";")
+                            syntax("aggregate ORDER BY requires an expression");
+                        const size_t begin = pos;
+                        auto key = parseExpr(tokens, pos);
+                        if (!key || pos == begin) syntax("aggregate ORDER BY requires an expression");
+                        bool ascending = true;
+                        std::string usingOperator;
+                        if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "using") {
+                            ++pos;
+                            if (pos >= tokens.size() || tokens[pos] == ")" || tokens[pos] == ",")
+                                syntax("aggregate ORDER USING requires an operator");
+                            usingOperator = tokens[pos++];
+                            ascending = usingOperator != ">";
+                        } else if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "asc") ++pos;
+                        else if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "desc") {
+                            ascending = false; ++pos;
+                        }
+                        bool nullsFirst = !ascending;
+                        if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "nulls") {
+                            ++pos;
+                            if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "first") nullsFirst = true;
+                            else if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "last") nullsFirst = false;
+                            else syntax("aggregate NULLS requires FIRST or LAST");
+                            ++pos;
+                        }
+                        func->aggregateOrderKeys.push_back({std::move(key), ascending, nullsFirst,
+                                                           std::nullopt, std::move(usingOperator)});
+                        if (pos < tokens.size() && tokens[pos] == ",") { ++pos; continue; }
+                        if (pos >= tokens.size() || tokens[pos] != ")")
+                            syntax("invalid aggregate ORDER BY clause");
+                        break;
+                    }
+                    continue;
+                }
                 ++pos;
                 if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "by") ++pos;
                 auto orderExpr = parseExpr(tokens, pos);
@@ -12233,6 +12289,17 @@ std::string FunctionCallExpr::toString() const {
     for (size_t i = 0; i < args.size(); ++i) {
         if (i > 0) s += ", ";
         s += (args[i] ? args[i]->toString() : "?");
+    }
+    if (!aggregateOrderKeys.empty()) {
+        s += " ORDER BY ";
+        for (size_t i = 0; i < aggregateOrderKeys.size(); ++i) {
+            if (i) s += ", ";
+            const auto& key = aggregateOrderKeys[i];
+            s += key.expr ? key.expr->toString() : "?";
+            if (!key.usingOperator.empty()) s += " USING " + key.usingOperator;
+            else s += key.ascending ? " ASC" : " DESC";
+            s += key.nullsFirst ? " NULLS FIRST" : " NULLS LAST";
+        }
     }
     s += ")";
     if (filter) s += " FILTER (WHERE " + filter->toString() + ")";

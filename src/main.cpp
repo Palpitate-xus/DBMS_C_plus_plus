@@ -21349,9 +21349,13 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
         }
         if(const auto* call=dynamic_cast<const dbms::FunctionCallExpr*>(value)) {
             if(call->sqlValue!=dbms::FunctionCallExpr::SqlValue::None)return true;
+            // Structured aggregate keys cannot fall through a text adapter
+            // when the call is nested in an arithmetic/projection expression.
+            // The existing whole-query shape gate still owns admissibility.
+            if(!call->aggregateOrderKeys.empty())return true;
             // Direct SUM/COUNT reductions belong to the existing whole-query
-            // aggregate operator. In-call ORDER has a second synthetic
-            // parser argument and retains its separate legacy owner.
+            // aggregate operator. Binding parses retain in-call ORDER keys
+            // independently from the actual function argument.
             if(select->command==dbms::SqlCommand::Select &&
                (!select->fromClause || select->fromClause->type==dbms::FromItem::Type::Table) &&
                select->selectList.size()==1 && select->selectList.front().expr.get()==call &&
@@ -21482,7 +21486,42 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
         auto definitions=std::move(select->ctes);
         const bool supported=dbms::QueryPlanner::supportsPreparedSourceSelectPlan(*select);
         select->ctes=std::move(definitions);
-        if(!supported)return false;
+        if(!supported) {
+            // Unsupported execution shapes must still publish errors owned
+            // by actual aggregate keys (window/SRF/nested aggregate roles)
+            // before a legacy dispatcher can suppress them with LIMIT 0.
+            function<bool(const dbms::Expr*)> orderedInput=[&](const dbms::Expr* value) {
+                if(!value)return false;
+                if(const auto* call=dynamic_cast<const dbms::FunctionCallExpr*>(value)) {
+                    if(!call->aggregateOrderKeys.empty())return true;
+                    for(const auto& argument:call->args)if(orderedInput(argument.get()))return true;
+                    for(const auto& argument:call->namedArgs)if(orderedInput(argument.value.get()))return true;
+                    return orderedInput(call->filter.get());
+                }
+                if(const auto* binary=dynamic_cast<const dbms::BinaryOpExpr*>(value))
+                    return orderedInput(binary->left.get()) ||
+                        ((binary->op!="::" && binary->op!="COLLATE") && orderedInput(binary->right.get()));
+                if(const auto* unary=dynamic_cast<const dbms::UnaryOpExpr*>(value))return orderedInput(unary->operand.get());
+                if(const auto* cast=dynamic_cast<const dbms::CastExpr*>(value))return orderedInput(cast->operand.get());
+                if(const auto* quantified=dynamic_cast<const dbms::QuantifiedComparisonExpr*>(value))
+                    return orderedInput(quantified->left.get()) || orderedInput(quantified->right.get());
+                if(const auto* conditional=dynamic_cast<const dbms::CaseExpr*>(value)) {
+                    if(orderedInput(conditional->switchExpr.get()) || orderedInput(conditional->elseExpr.get()))return true;
+                    for(const auto& arm:conditional->whenClauses)
+                        if(orderedInput(arm.first.get()) || orderedInput(arm.second.get()))return true;
+                }
+                if(const auto* array=dynamic_cast<const dbms::ArrayExpr*>(value))
+                    for(const auto& item:array->elements)if(orderedInput(item.get()))return true;
+                if(const auto* row=dynamic_cast<const dbms::RowExpr*>(value))
+                    for(const auto& item:row->elements)if(orderedInput(item.get()))return true;
+                return false;
+            };
+            bool validate=orderedInput(select->whereClause.get()) || orderedInput(select->having.get());
+            for(const auto& item:select->selectList)validate=validate || orderedInput(item.expr.get());
+            for(const auto& item:select->orderBy)validate=validate || orderedInput(item.expr.get());
+            if(validate)(void)g_engine.prepareBoundQuery(session.currentDB,rawSql);
+            return false;
+        }
     }
     auto query=make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(session.currentDB,rawSql));
     if(!required) {

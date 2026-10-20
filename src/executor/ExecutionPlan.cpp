@@ -151,6 +151,9 @@ struct PreparedSelectState {
         FunctionCallExpr* call;
         std::string name, argumentType, resultType;
         QueryColumnBinding column;
+        // noTarget means a new producer; noTarget-1 reuses the argument;
+        // another index reuses an earlier analyzed equivalent ORDER key.
+        std::vector<size_t> keyOwners;
     };
     std::vector<Aggregate> aggregates;
     StorageEngine* engine;
@@ -274,6 +277,8 @@ struct PreparedSelectState {
             if (!literal || literal->value != "*")
                 execution->prepareExpression(aggregate.call->args.front().get());
             execution->prepareExpression(aggregate.call->filter.get());
+            for (const auto& key : aggregate.call->aggregateOrderKeys)
+                execution->prepareExpression(key.expr.get());
         }
         // Only the execution root opts into whole-query planning. Child
         // graph construction must not reacquire outputs that root demand
@@ -510,10 +515,37 @@ public:
 // Aggregates consume the original typed source graph. Each original call has
 // an execution-owned result column; shared SQL ASTs and parameter frames are
 // never rewritten to a rendered SQL query or to per-row text placeholders.
+static std::optional<int> comparePreparedIdentityKeys(ExprEvaluator& evaluator,
+    const ExprValue& left, const ExprValue& right);
+
+// A single typed comparison owner for top-level and inside-aggregate sorting.
+// Callers handle NULL placement/direction; this function never evaluates keys.
+static int comparePreparedOrderValues(ExprEvaluator& evaluator,
+    const ExprValue& left, const ExprValue& right,
+    const std::optional<QueryComparisonBinding>& enumComparison) {
+    if (enumComparison) {
+        if (evaluator.comparePrepared(*enumComparison, left, right).asBool()) return -1;
+        if (evaluator.comparePrepared(*enumComparison, right, left).asBool()) return 1;
+        return 0;
+    }
+    if (const auto comparison = comparePreparedIdentityKeys(evaluator, left, right))
+        return *comparison;
+    Column column;
+    const auto error = TypeRegistry::instance().resolveColumnType(column, left.typeName, {}, false);
+    if (!error.empty()) throw DbError("0A000", "unsupported prepared sort type: " + left.typeName);
+    column.collation = left.collation;
+    const auto less = StorageEngine::compareValues(column, left.value, false, right.value, false, "<");
+    const auto greater = StorageEngine::compareValues(column, left.value, false, right.value, false, ">");
+    if (less == StorageEngine::PredicateTruth::Unknown || greater == StorageEngine::PredicateTruth::Unknown)
+        throw DbError("0A000", "unsupported prepared sort comparison");
+    return less == StorageEngine::PredicateTruth::True ? -1 :
+           greater == StorageEngine::PredicateTruth::True ? 1 : 0;
+}
+
 class PreparedAggregateOp final : public Operator {
     OpPtr child_;
     std::shared_ptr<PreparedSelectState> state_;
-    struct Entry { ExprValue value; };
+    struct Entry { ExprValue value; std::vector<ExprValue> keys; };
     std::vector<std::vector<Entry>> inputs_;
     RowContext result_;
     bool emitted_ = false, opened_ = false;
@@ -541,6 +573,22 @@ class PreparedAggregateOp final : public Operator {
     ExprValue finish(size_t index) {
         const auto& aggregate = state_->aggregates[index];
         auto& inputs = inputs_[index];
+        if (!aggregate.call->aggregateOrderKeys.empty()) {
+            std::stable_sort(inputs.begin(), inputs.end(), [&](const Entry& left, const Entry& right) {
+                for (size_t i = 0; i < aggregate.call->aggregateOrderKeys.size(); ++i) {
+                    const auto& key = aggregate.call->aggregateOrderKeys[i];
+                    const auto& a = left.keys.at(i);
+                    const auto& b = right.keys.at(i);
+                    if (a.isNull || b.isNull) {
+                        if (a.isNull == b.isNull) continue;
+                        return a.isNull == key.nullsFirst;
+                    }
+                    const int order = comparePreparedOrderValues(state_->evaluator, a, b, key.enumComparison);
+                    if (order) return key.ascending ? order < 0 : order > 0;
+                }
+                return false;
+            });
+        }
         int64_t count = 0;
         ExprValue value(aggregate.resultType, "", true);
         std::vector<ExprValue> distinct;
@@ -598,6 +646,14 @@ public:
                 Entry input;
                 input.value = literal && literal->value == "*" ? ExprValue("boolean", "t") :
                     state_->evaluate(aggregate.call->args.front().get(), row);
+                for (size_t key = 0; key < aggregate.call->aggregateOrderKeys.size(); ++key) {
+                    const auto owner = aggregate.keyOwners.at(key);
+                    if (owner == PreparedSelectState::noTarget - 1)
+                        input.keys.push_back(input.value);
+                    else if (owner != PreparedSelectState::noTarget)
+                        input.keys.push_back(input.keys.at(owner));
+                    else input.keys.push_back(state_->evaluate(aggregate.call->aggregateOrderKeys[key].expr.get(), row));
+                }
                 inputs_[i].push_back(std::move(input));
             }
         }
@@ -706,25 +762,8 @@ public:
                     if (a.isNull == b.isNull) continue;
                     return a.isNull == key.nullsFirst;
                 }
-                if(key.enumComparison) {
-                    if(state_->evaluator.comparePrepared(*key.enumComparison,a,b).asBool())return key.asc;
-                    if(state_->evaluator.comparePrepared(*key.enumComparison,b,a).asBool())return !key.asc;
-                    continue;
-                }
-                if(const auto comparison=comparePreparedIdentityKeys(state_->evaluator,a,b)) {
-                    if(*comparison)return key.asc?*comparison<0:*comparison>0;
-                    continue;
-                }
-                Column column;
-                const auto error = TypeRegistry::instance().resolveColumnType(column, a.typeName, {}, false);
-                if (!error.empty()) throw DbError("0A000", "unsupported prepared sort type: " + a.typeName);
-                column.collation = a.collation;
-                const auto less = StorageEngine::compareValues(column, a.value, false, b.value, false, "<");
-                const auto greater = StorageEngine::compareValues(column, a.value, false, b.value, false, ">");
-                if (less == StorageEngine::PredicateTruth::Unknown || greater == StorageEngine::PredicateTruth::Unknown)
-                    throw DbError("0A000", "unsupported prepared sort comparison");
-                if (less == StorageEngine::PredicateTruth::True) return key.asc;
-                if (greater == StorageEngine::PredicateTruth::True) return !key.asc;
+                const int order = comparePreparedOrderValues(state_->evaluator, a, b, key.enumComparison);
+                if (order) return key.asc ? order < 0 : order > 0;
             }
             return false;
         });
@@ -1187,6 +1226,7 @@ static bool supportsPreparedSelectShape(const SelectStmt& select, bool allowCtes
                 // Do not accept that clause and silently discard its role.
                 if (!call->orderBy.empty()) return false;
                 for (const auto& argument : call->args) if (!scalar(argument.get())) return false;
+                for (const auto& key : call->aggregateOrderKeys) if (!scalar(key.expr.get())) return false;
                 if (!scalar(call->filter.get())) return false;
                 return true;
             }
@@ -1227,6 +1267,7 @@ static void visitPreparedAggregateExpression(Expr* expression,
     if (auto* call = dynamic_cast<FunctionCallExpr*>(expression)) {
         for (auto& argument : call->args) child(argument.get());
         for (auto& argument : call->namedArgs) child(argument.value.get());
+        for (auto& key : call->aggregateOrderKeys) child(key.expr.get());
         child(call->filter.get());
     } else if (auto* unary = dynamic_cast<UnaryOpExpr*>(expression)) child(unary->operand.get());
     else if (auto* binary = dynamic_cast<BinaryOpExpr*>(expression)) {
@@ -1242,6 +1283,20 @@ static void visitPreparedAggregateExpression(Expr* expression,
 }
 
 static void prepareAggregateRoles(PreparedSelectState& state) {
+    // Role preparation precedes physical-source lowering. Producer equality
+    // uses the already analyzed range/ordinal identities, never the not-yet
+    // populated physical schema/sourceOrdinal used by the later sort operator.
+    const auto inputIdentity = [&](const Expr* value) {
+        return ExprHelper::preparedSortExpressionIdentity(value, *state.query,
+            [](const ColumnRefExpr& column) {
+                if (!column.binding) throw DbError("XX000", "aggregate input has no analyzed source identity");
+                const auto& binding = *column.binding;
+                return std::to_string(binding.scopeDepth) + ":" +
+                    std::to_string(binding.sourceOrdinal) + ":" +
+                    std::to_string(binding.columnOrdinal) + ":" + binding.declaredType + ":" +
+                    (binding.mergedUsing ? "merged" : "ordinary");
+            }, state.dbname, state.engine);
+    };
     const auto forbidAggregate = [&](Expr* root) {
         visitPreparedAggregateExpression(root, [&](Expr* expression) {
             if (const auto* call = dynamic_cast<FunctionCallExpr*>(expression);
@@ -1263,8 +1318,24 @@ static void prepareAggregateRoles(PreparedSelectState& state) {
                     call->args.front().get(), {}, state.dbname, state.engine));
             const auto resultType = aggregate_type_detail::resultType(call, name, type);
             for (const auto& argument : call->args) forbidAggregate(argument.get());
+            for (const auto& key : call->aggregateOrderKeys) forbidAggregate(key.expr.get());
             forbidAggregate(call->filter.get());
-            state.aggregates.push_back({call, name, type, resultType, {}});
+            std::vector<size_t> keyOwners;
+            std::vector<std::string> keyIdentities;
+            const auto argumentIdentity = call->aggregateOrderKeys.empty() || call->args.empty()
+                ? std::string{} : inputIdentity(call->args.front().get());
+            for (const auto& key : call->aggregateOrderKeys) {
+                const auto identity = inputIdentity(key.expr.get());
+                if (call->distinct && identity != argumentIdentity)
+                    throw DbError("42P10", "in an aggregate with DISTINCT, ORDER BY expressions must appear in argument list");
+                size_t owner = PreparedSelectState::noTarget;
+                if (identity == argumentIdentity) owner = PreparedSelectState::noTarget - 1;
+                else for (size_t i = 0; i < keyIdentities.size(); ++i)
+                    if (identity == keyIdentities[i]) { owner = i; break; }
+                keyOwners.push_back(owner);
+                keyIdentities.push_back(identity);
+            }
+            state.aggregates.push_back({call, name, type, resultType, {}, std::move(keyOwners)});
             return false;
         });
     };

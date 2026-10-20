@@ -2544,6 +2544,51 @@ bool hasProtocolScalarSignatureCall(const Stmt* statement,const std::string& dat
     return quotedUnqualifiedOnly?quotedCandidate:candidate;
 }
 
+void validatePreparedAggregateOrderInputs(const std::string& sql,Session& session,
+                                         const std::vector<uint32_t>& parameterOids) {
+    SQLParser parser;
+    const auto parsed=parser.parseForBinding(sql);
+    const auto* select=parsed.isValid()?dynamic_cast<const SelectStmt*>(parsed.stmt.get()):nullptr;
+    if(!select)return;
+    std::function<bool(const Expr*)> ordered=[&](const Expr* value) {
+        if(!value)return false;
+        if(const auto* call=dynamic_cast<const FunctionCallExpr*>(value)) {
+            if(!call->aggregateOrderKeys.empty())return true;
+            for(const auto& argument:call->args)if(ordered(argument.get()))return true;
+            for(const auto& argument:call->namedArgs)if(ordered(argument.value.get()))return true;
+            if(ordered(call->filter.get()))return true;
+            for(const auto& key:call->over.partitionBy)if(ordered(key.get()))return true;
+            for(const auto& key:call->over.orderBy)if(ordered(key.first.get()))return true;
+            return ordered(call->over.frameStart.get()) || ordered(call->over.frameEnd.get());
+        }
+        if(const auto* binary=dynamic_cast<const BinaryOpExpr*>(value))
+            return ordered(binary->left.get()) || ((binary->op!="::" && binary->op!="COLLATE") && ordered(binary->right.get()));
+        if(const auto* unary=dynamic_cast<const UnaryOpExpr*>(value))return ordered(unary->operand.get());
+        if(const auto* cast=dynamic_cast<const CastExpr*>(value))return ordered(cast->operand.get());
+        if(const auto* quantified=dynamic_cast<const QuantifiedComparisonExpr*>(value))
+            return ordered(quantified->left.get()) || ordered(quantified->right.get());
+        if(const auto* conditional=dynamic_cast<const CaseExpr*>(value)) {
+            if(ordered(conditional->switchExpr.get()) || ordered(conditional->elseExpr.get()))return true;
+            for(const auto& arm:conditional->whenClauses)
+                if(ordered(arm.first.get()) || ordered(arm.second.get()))return true;
+        }
+        if(const auto* array=dynamic_cast<const ArrayExpr*>(value))
+            for(const auto& item:array->elements)if(ordered(item.get()))return true;
+        if(const auto* row=dynamic_cast<const RowExpr*>(value))
+            for(const auto& item:row->elements)if(ordered(item.get()))return true;
+        return false;
+    };
+    bool required=ordered(select->whereClause.get()) || ordered(select->having.get());
+    for(const auto& item:select->selectList)required=required || ordered(item.expr.get());
+    for(const auto& key:select->orderBy)required=required || ordered(key.expr.get());
+    if(!required)return;
+    auto* previous=currentSession();setCurrentSession(&session);
+    struct Restore {Session* previous;~Restore(){setCurrentSession(previous);}} restore{previous};
+    // Actual structured keys own Parse analysis even for an unsupported
+    // window role. Never publish a statement/ParseComplete before this error.
+    (void)g_engine.prepareBoundQuery(session.currentDB,sql,protocolMetadataParameters(session,parameterOids));
+}
+
 void validatePreparedStoredSignatures(const std::string& sql,Session& session,
                                      const std::vector<uint32_t>& parameterOids) {
     SQLParser parser;
@@ -6927,6 +6972,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             try {
                 notePreparedTemporaryObjectAccess(sql, session);
                 inferProtocolWholeScalarParameters(sql,session,parameterTypes);
+                validatePreparedAggregateOrderInputs(sql,session,parameterTypes);
                 validatePreparedStoredSignatures(sql,session,parameterTypes);
                 validatePreparedScalarArithmetic(sql,session,parameterTypes);
                 validatePreparedIntegerInputs(sql,session,parameterTypes);

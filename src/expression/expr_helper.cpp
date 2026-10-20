@@ -658,6 +658,7 @@ std::unique_ptr<FunctionCallExpr> hintedRoutineSignature(const FunctionCallExpr&
         else if(const auto* nested=dynamic_cast<const FunctionCallExpr*>(node)) {
             for(const auto& argument:nested->args)inspect(argument.get());
             for(const auto& argument:nested->namedArgs)inspect(argument.value.get());
+            for(const auto& key:nested->aggregateOrderKeys)inspect(key.expr.get());
         } else if(const auto* conditional=dynamic_cast<const CaseExpr*>(node)) {
             inspect(conditional->switchExpr.get());inspect(conditional->elseExpr.get());
             for(const auto& arm:conditional->whenClauses){inspect(arm.first.get());inspect(arm.second.get());}
@@ -671,6 +672,7 @@ std::unique_ptr<FunctionCallExpr> hintedRoutineSignature(const FunctionCallExpr&
     };
     for(const auto& argument:call.args)inspect(argument.get());
     for(const auto& argument:call.namedArgs)inspect(argument.value.get());
+    for(const auto& key:call.aggregateOrderKeys)inspect(key.expr.get());
     if(!complete || !usedHint)return {};
     const auto declaration=[&](const Expr* argument)->ExprPtr {
         if(const auto* literal=dynamic_cast<const LiteralExpr*>(argument))
@@ -691,6 +693,8 @@ std::unique_ptr<FunctionCallExpr> hintedRoutineSignature(const FunctionCallExpr&
         for(const auto& argument:call.namedArgs)
             result->namedArgs.push_back({argument.name,declaration(argument.value.get())});
         if(call.filter)result->filter=declaration(call.filter.get());
+        for(const auto& key:call.aggregateOrderKeys)
+            result->aggregateOrderKeys.push_back({declaration(key.expr.get()),key.ascending,key.nullsFirst,key.enumComparison,key.usingOperator});
         return result;
     };
     if(unboundSignature && unboundColumn && !call.args.empty()) {
@@ -734,6 +738,7 @@ RoutineResultTypes collectRoutineResultTypes(
             // nested generic routine consumes the same caller hints.
             for(const auto& argument:call->args)inspect(argument.get());
             for(const auto& argument:call->namedArgs)inspect(argument.value.get());
+            for(const auto& key:call->aggregateOrderKeys)inspect(key.expr.get());
             const FunctionCallExpr* metadataCall=call;
             std::unique_ptr<FunctionCallExpr> signature;
             const bool resolved=evaluator.hasScalarFunction(call,functionEngine);
@@ -883,6 +888,8 @@ bool countParsedColumnReferences(
                 if (!countParsedColumnReferences(
                         argument.value.get(), columnName, count)) return false;
             }
+            for (const auto& order : function->aggregateOrderKeys)
+                if (!countParsedColumnReferences(order.expr.get(), columnName, count)) return false;
             if (!countParsedColumnReferences(
                     function->filter.get(), columnName, count)) return false;
             for (const auto& partition : function->over.partitionBy) {
@@ -1512,7 +1519,8 @@ std::string ExprHelper::scalarExpressionIdentity(
             return result + field(key(conditional->elseExpr.get()));
         }
         if (const auto* function = dynamic_cast<const FunctionCallExpr*>(node)) {
-            if (function->hasOver || function->filter || function->distinct || !function->orderBy.empty())
+            if (function->hasOver || function->filter || function->distinct || !function->orderBy.empty() ||
+                !function->aggregateOrderKeys.empty())
                 throw DbError("0A000", "aggregate/window identity requires a prepared query");
             const std::string routine = function->setReturning?function->setReturning->identity:
                 evaluator.scalarFunctionIdentity(function, functionEngine);
@@ -1602,6 +1610,7 @@ std::string ExprHelper::preparedSortExpressionIdentity(
             } else if (const auto* call = dynamic_cast<const FunctionCallExpr*>(node)) {
                 for (const auto& argument : call->args) gatherExpression(argument.get());
                 for (const auto& argument : call->namedArgs) gatherExpression(argument.value.get());
+                for (const auto& order : call->aggregateOrderKeys) gatherExpression(order.expr.get());
                 gatherExpression(call->filter.get());
                 for (const auto& value : call->over.partitionBy) gatherExpression(value.get());
                 for (const auto& value : call->over.orderBy) gatherExpression(value.first.get());
@@ -1739,6 +1748,11 @@ std::string ExprHelper::preparedSortExpressionIdentity(
                         else key += field(expressionKey(call->args[i].get()));
                     }
                     for (const auto& argument : call->namedArgs) key += field(argument.name) + field(expressionKey(argument.value.get()));
+                    for (const auto& order : call->aggregateOrderKeys)
+                        key += field("aggregate-order") + field(expressionKey(order.expr.get())) +
+                            field(order.ascending ? "asc" : "desc") +
+                            field(order.nullsFirst ? "nulls-first" : "nulls-last") +
+                            field(order.enumComparison ? order.enumComparison->identity : "builtin-order");
                     return key;
                 });
         };
@@ -1947,6 +1961,11 @@ std::string ExprHelper::preparedSortExpressionIdentity(
                     field(call->resolvedResultType) + field(call->distinct ? "distinct" : "all");
                 for (const auto& argument : call->args) result += field(identity(argument.get()));
                 result += field(identity(call->filter.get()));
+                for (const auto& order : call->aggregateOrderKeys)
+                    result += field("aggregate-order") + field(identity(order.expr.get())) +
+                        field(order.ascending ? "asc" : "desc") +
+                        field(order.nullsFirst ? "nulls-first" : "nulls-last") +
+                        field(order.enumComparison ? order.enumComparison->identity : "builtin-order");
                 return result;
             }
             try { return childKey(node); }
@@ -2331,6 +2350,7 @@ void ExprHelper::prepareArrayTypes(Expr* expression,
                 }
             }
             for (auto& arg : call->namedArgs) visit(arg.value.get(),{});
+            for (auto& key : call->aggregateOrderKeys) visit(key.expr.get(),{});
             visit(call->filter.get(),{});
             for (auto& arg : call->over.partitionBy) visit(arg.get(),{});
             for (auto& arg : call->over.orderBy) visit(arg.first.get(),{});
@@ -2894,6 +2914,7 @@ static ExprEvalResult evalStringImpl(
             }
             for (auto& argument : call->namedArgs)
                 visitValueReferences(argument.value.get());
+            for (auto& key : call->aggregateOrderKeys) visitValueReferences(key.expr.get());
             visitValueReferences(call->filter.get());
             for (auto& item : call->over.partitionBy) visitValueReferences(item.get());
             for (auto& item : call->over.orderBy) visitValueReferences(item.first.get());

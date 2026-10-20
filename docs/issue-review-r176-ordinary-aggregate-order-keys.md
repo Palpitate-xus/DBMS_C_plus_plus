@@ -1,6 +1,6 @@
 # R176：普通聚合调用内 ORDER BY 的分析与执行
 
-状态：Open，专项修复已通过两侧冒烟验证，工作区完整72项重测也已通过；clean首轮在R164入口socket超时，完整验收及源码提交仍待完成。已有失败完整保留，不宣称全部问题已解决。[R175](issue-review-r175-ordinary-aggregate-identity.md)只修复输入身份，整数求和正确不等于排序正确。
+状态：有限源码修复随本报告独立纳入版本控制，完整矩阵未通过。两侧native61/协议190通过，工作区完整72项通过；clean两次完整72均为71项通过、R164超时失败，原因未定。GROUP BY等边界仍开放，不宣称全部问题已解决。[R175](issue-review-r175-ordinary-aggregate-identity.md)只修复输入身份，整数求和正确不等于排序正确。
 
 ## 完整101次发现观察
 
@@ -100,9 +100,9 @@ normal-wrapper cache stamp或声称它执行过常规repeat。
 
 | 当前有限验证 | 实际结果 | 限制 |
 | --- | --- | --- |
-| accepted-only clean第四版 | native 61项与完整协议190次均外层0、完整成功footer；无采集失败 | 不是全部注册测试或原273清单验收 |
-| 保留既有未提交改动的工作区版本 | 完整72入口重测全0，包括native61、协议190和三个Main；源码/对象/签名/二进制前后核对通过 | clean完整72尚待结束，不是全部注册测试 |
-| 工作区合并 | apply_patch安装13个源码/测试/脚本路径、51个唯一修改片段；全部2317个源文件符合原快照加本项变更 | 未夹带既有foreign修改，暂存区仍空，源码尚未commit |
+| accepted-only clean第四版 | 专项native61与协议190均0；另两次完整72各71项通过、R164超时退出1，无956成功footer | 完整矩阵失败，不是全部注册测试或原273清单验收 |
+| 保留既有未提交改动的工作区版本 | 完整72入口重测全0，包括native61、协议190和三个Main；源码/对象/签名/二进制前后核对通过 | 不用工作区通过代替clean失败，不是全部注册测试 |
+| 工作区合并及提交范围 | apply_patch安装13个源码/测试/脚本路径、51个唯一修改片段；全部2317个源文件符合原快照加本项变更 | 本项源码、两份新测试、注册入口与本报告独立提交，既有foreign修改不纳入 |
 | 工作区构建 | 实际fresh58生产对象、native TU和stub；常规wrapper复用当前58对象链接，repeat零编译/零链接 | 仅plain TCP配置，未声明TLS/sanitizer覆盖 |
 
 回归矩阵保留已验收的全部70项，新增本项native与协议入口，每侧共72项：35 native、34协议、
@@ -120,14 +120,34 @@ normal-wrapper cache stamp或声称它执行过常规repeat。
 工作区完整结果返回0之后才启动clean完整72项。clean的第39项R164实际退出1：在472个匹配结果后，
 扩展协议读取等待发生socket超时；finally清理随后读到延迟的上一条CREATE FUNCTION和SET响应，
 产生两个错位断言，再次超时，无完整956成功footer。不能把这两个错位解释为两个已证明的SQL语义缺陷。
-超时根因尚未确定，不先归于R176排序修改；本轮其余入口继续收集，完整结果不能提前写成通过。
-之后只允许同一源码/产物/断言/超时/持久化设置的完整矩阵复测，不用单项补跑拼接72项结果。
+超时根因尚未确定，不先归于R176排序修改。clean首轮随后完整收集72项，实际外层1：71项通过，
+仅R164实际1；native61、协议190/791/314/331/906及三个Main均完整通过，源文件/97对象/39程序前后核对通过。
+已在首轮完整退出1后启动同一源码/产物/断言/超时/持久化设置的完整72项复测，不用单项补跑拼接结果。
 00:04 UTC的只读系统观察显示I/O压力较高、磁盘仍有约1.2T可用；这不是超时发生时的完整追踪，
 不能据此确定根因。未调整系统参数、提高超时或停止其他用户进程。
+
+第二次clean完整72实际也退出1：其余71项均通过，R164仍超时失败。此次首个错位前有475个匹配结果，
+最终620个匹配结果包含后续清理，另有7个错位断言，无完整956footer。它们不是620个核心声明均完成，
+也不是7个独立SQL缺陷；原始CommandComplete显示延迟响应沿清理请求错位。超时根因仍未确定，
+不能宣称已证明与R176无关。两轮native61、完整协议190/791/314/331/906及三个Main均通过。
+
+独立只读核对逐项检查两侧完整源文件/目录、127头文件、97对象/39程序、编译/运行日志hash、
+真实Main accepted测试体、原70项入口顺序与断言、完整190条原始记录及首次Main启动失败。
+它明确记录`twoSidedFullMatrixAcceptance=false`；核对程序退出0只表示证据一致，不是产品矩阵全绿。
+据专项通过证据和上述真实失败边界，按用户的逐项版本管理要求提交有限源码；不将R164移入用户暂缓，
+不提高原273状态，不把未通过的完整矩阵描述成已验收。
 
 当前证据覆盖夹具中的全局SUM/COUNT、计算式、键分析与错误阶段、元数据纯度、重复执行、
 FILTER/NULL/空输入、多键/方向/NULL位置及共享生产者。它不证明GROUP BY内排序、全部自定义
 类型/算子、全部参数推断或任意嵌套query owner；原273状态不提升，待验证边界不能标为全部完成。
+
+| 仍未解决的内容 | 后续修改/验证方法 |
+| --- | --- |
+| R164普通函数DDL的两次socket超时 | 新隔离复现中分阶段记录耗时及I/O，验证普通`CREATE OR REPLACE FUNCTION`整库回滚快照的实际成本；保留事务原子性、durability和现有超时，不能靠禁用fsync或删断言完成 |
+| GROUP BY内普通聚合排序 | 与PG完整对照真实多组、空/NULL/FILTER、方向、元数据及重执行，再补typed分组消费所有者；不能以全局聚合通过关闭 |
+| 其他类型、算子、参数与嵌套query owner | 增加对应的纯绑定、值、OID/格式、错误阶段和副作用对照，按实际证据扩展，不猜测未运行结果 |
+
+上述DDL快照是静态检查得到的耗时假设，并非已经证实的超时根因。本项没有修改该路径。
 
 ## 固定证据
 
@@ -163,8 +183,16 @@ SHA256 `ff20ea1098d39a0d15d8e3a8508874d752ec6e213b2e1492365a7aaa545705f4`，六�
 SHA256 `fd4b57b7d6bf43f22bdc6b71ce729951c3a5000b7c95e210b3d34153e7caaf2f`，72项实际全0。
 clean首轮R164失败日志：`/tmp/dbms-r176-clean-full72-runtime-v2.071923sh/protocol-custom_scalar_routine_declaration_protocol_e2e_test.log`，
 SHA256 `cbd0f570d4f89a0eaf953bee72318e6e71acc748ea29374a0d35e6385aee336b`，实际退出1，无956成功footer。
+clean首轮完整72项receipt：`/tmp/dbms-r176-clean-full72-runtime-v2.071923sh/completed-runtime-receipt.json`，
+SHA256 `4511ad6afb50984357076a1f92a99625b48e4727d8702e34e2161f8d3b1071d2`，外层1、71项通过、R164超时失败。
+clean第二次完整72项receipt：`/tmp/dbms-r176-clean-full72-runtime-v2.4vkvqf1c/completed-runtime-receipt.json`，
+SHA256 `187f1503353187714bc5969acec7c8ee06f0f22fce7010e8c0003525a55c6375`，外层1、71项通过、R164再次超时失败。
+第二次R164日志：`/tmp/dbms-r176-clean-full72-runtime-v2.4vkvqf1c/protocol-custom_scalar_routine_declaration_protocol_e2e_test.log`，
+SHA256 `ce88a3426fa9bf0b883566646f921b505c4e914599c3b56c85b8d16dd61be0be`。
+独立有限证据核对receipt：`/tmp/dbms-r176-independent-bounded-matrix-proof.f0r93zfk/completed-proof.json`，
+SHA256 `a688fb65a0c350a42ce3205adde81bdf164113896ef0f89233cbd23c1c540cdd`，明确保留两次clean失败，不宣称完整矩阵通过。
 
 完整原始帧、RowDescription、DataRow二进制字节、错误阶段、操作顺序与序列观察均保留。
-24次缺失键等是模式组合，不是24个独立根因；生产修改尚未完成完整回归验收，不作已提交修复声明。
+24次缺失键等是模式组合，不是24个独立根因；源码仅按有限专项范围提交，完整矩阵验收未通过。
 原273状态不提升；[R173](issue-review-r173-routine-signature-type-dependencies.md)当前分支保持未验收，
 其他用户暂缓模块不恢复，不push，Actions保持禁用。

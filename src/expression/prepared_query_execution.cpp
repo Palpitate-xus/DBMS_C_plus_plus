@@ -72,6 +72,8 @@ ExprPtr copyExpression(const Expr* source, std::map<const Expr*, const Expr*>& s
         target->setReturning = node->setReturning;
         target->resolvedResultType = node->resolvedResultType;
         target->distinct = node->distinct; target->orderBy = node->orderBy; target->hasOver = node->hasOver;
+        for (const auto& key : node->aggregateOrderKeys)
+            target->aggregateOrderKeys.push_back({copy(key.expr), key.ascending, key.nullsFirst, key.enumComparison, key.usingOperator});
         for (const auto& arg : node->args) target->args.push_back(copy(arg));
         const auto operation = SQLParser::toLower(node->funcName);
         if (node->schema.empty() && node->args.size() == 3 &&
@@ -435,6 +437,7 @@ std::optional<ExprValue> simplifyCaseConstants(ExprPtr& expression,
             if(value)constants.push_back(*value);else allConstant=false;
         }
         for (auto& arg : call->namedArgs) simplifyCaseConstants(arg.value,evaluator,roles);
+        for (auto& key : call->aggregateOrderKeys) simplifyCaseConstants(key.expr,evaluator,roles);
         const auto builtin=allConstant && roles && roles->immutableBuiltin
             ?roles->immutableBuiltin(call):std::string{};
         if(!builtin.empty()) {
@@ -490,6 +493,7 @@ void planCaseConstants(ExprPtr& expression, const ExprEvaluator& evaluator) {
     } else if (auto* call=dynamic_cast<FunctionCallExpr*>(expression.get())) {
         for(auto& arg:call->args)planCaseConstants(arg,evaluator);
         for(auto& arg:call->namedArgs)planCaseConstants(arg.value,evaluator);
+        for(auto& key:call->aggregateOrderKeys)planCaseConstants(key.expr,evaluator);
     } else if(auto* array=dynamic_cast<ArrayExpr*>(expression.get())) {
         for(auto& element:array->elements)planCaseConstants(element,evaluator);
     } else if(auto* row=dynamic_cast<RowExpr*>(expression.get())) {
@@ -516,6 +520,7 @@ void visitStructuredValue(const Expr* expression,
     } else if (const auto* node = dynamic_cast<const FunctionCallExpr*>(expression)) {
         for (const auto& arg : node->args) value(arg);
         for (const auto& arg : node->namedArgs) value(arg.value);
+        for (const auto& key : node->aggregateOrderKeys) value(key.expr);
         value(node->filter);
         for (const auto& arg : node->over.partitionBy) value(arg);
         for (const auto& arg : node->over.orderBy) value(arg.first);
@@ -711,6 +716,7 @@ void lowerAggregateColumns(ExprPtr& expression,
     if (auto* call = dynamic_cast<FunctionCallExpr*>(expression.get())) {
         for (auto& argument : call->args) lower(argument);
         for (auto& argument : call->namedArgs) lower(argument.value);
+        for (auto& key : call->aggregateOrderKeys) lower(key.expr);
         lower(call->filter);
     } else if (auto* unary = dynamic_cast<UnaryOpExpr*>(expression.get())) lower(unary->operand);
     else if (auto* binary = dynamic_cast<BinaryOpExpr*>(expression.get())) {
@@ -912,6 +918,7 @@ void PreparedQueryExecution::planCompiledConstants(ExprPtr& expression,
     } else if (auto* node = dynamic_cast<FunctionCallExpr*>(expression.get())) {
         for (auto& item : node->args) value(item);
         for (auto& item : node->namedArgs) value(item.value);
+        for (auto& key : node->aggregateOrderKeys) value(key.expr);
         value(node->filter); window(node->over);
     } else if (auto* node = dynamic_cast<ArrayExpr*>(expression.get())) {
         for (auto& item : node->elements) value(item);
@@ -1275,6 +1282,7 @@ std::vector<Operator*> PreparedQueryExecution::childPlans(const Expr* scope) con
             for(const auto& arm:conditional->whenClauses){gather(arm.first.get());gather(arm.second.get());}
         } else if(const auto* call=dynamic_cast<const FunctionCallExpr*>(node)) {
             for(const auto& arg:call->args)gather(arg.get());for(const auto& arg:call->namedArgs)gather(arg.value.get());
+            for(const auto& key:call->aggregateOrderKeys)gather(key.expr.get());
         } else if(const auto* array=dynamic_cast<const ArrayExpr*>(node))for(const auto& value:array->elements)gather(value.get());
     };
     gather(scope);
@@ -1493,6 +1501,7 @@ void PreparedQueryExecution::indexExpression(const Expr* expression, const Stmt*
         for (const auto& arg : node->args) value(arg);
         for (const auto& arg : node->namedArgs) value(arg.value);
         value(node->filter);
+        for (const auto& key : node->aggregateOrderKeys) value(key.expr);
         for (const auto& arg : node->over.partitionBy) value(arg);
         for (const auto& arg : node->over.orderBy) value(arg.first);
         value(node->over.frameStart); value(node->over.frameEnd);
