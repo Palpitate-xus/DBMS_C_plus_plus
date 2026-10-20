@@ -1,5 +1,13 @@
 # 生产化状态
 
+最新总清单复查：accepted-only 17f06229的R164原完整956项实际0，保持默认15秒/原断言，
+仅监视本次自有进程；不是当前完整72通过，历史两次超时原因仍未确定，未冒称R164全部关闭。
+原273项全文、状态与证据引用已建立逐项映射；22 complete/166 partial/70 unverified/15 deferred，
+22个勾选与JSON一致、引用均已跟踪，但文件存在或既有complete标签本身不是当前充分证明。
+明确未完成示例：OPT-08执行计划仍注明index-only scan未实现，VisibilityMap头注释不能替代执行证据。
+下一阶段先复验完整矩阵，再按P0及原未验证/部分项分解原子要求、补实现与回归，逐项有证据后更新状态。
+本轮原功能项未重写；R180等用户暂缓不恢复，总目标未完成。不push，Actions禁用。
+
 最新有限修复：[R182共享UTF-8拆分](issue-review-r182-utf8-split-linear.md)统一修复TRIM、LPAD/RPAD、
 TRANSLATE各实参和STRING_TO_ARRAY(NULL delimiter)的平方级前缀扫描，保留各自规则。
 PG完整329、旧R183完整329及V2 native76语义全0；这是性能修复，不是旧兼容性错值。

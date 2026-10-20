@@ -2,6 +2,23 @@
 
 状态：普通自定义标量声明身份的有限修复已通过两端组合验收，不等于通用复合值codec完成。
 
+## 2026-10-20：当前accepted-only原956独立复验
+
+accepted源码17f06229（与R182 V2 clean逐blob相同）运行原完整协议夹具，
+实际exit0、完整CUSTOM_SCALAR_ROUTINE_DECLARATION_PROTOCOL_COMPLETE 956 FAILURES0。
+默认socket15秒、全部断言、956控制和清理顺序未改，没有提高超时或修改持久化。
+测试约283.14秒、281次外层只读采样，仅观察本次自有fixture/backend PID；
+不发送额外SQL、不停止调试线程，也不向用户既有服务器发信号。
+源码2206文件、127头及当前对象/程序hash在运行前后核对；没有新编译或生产修改。
+
+该次有jbd2_log_wait_commit等待样本，但测试完整通过；这既不证明死锁，也不能
+倒推历史两次full72超时的原因。单项通过不等于完整矩阵通过，不能宣称与R176无关。
+历史两次失败仍保留，下一步需在完整矩阵上下文复验并保存所有失败/终态。
+
+复验receipt：`/tmp/dbms-r164-current-r182-runtime.u6agy187/completed-recheck-receipt.json`，SHA256 `ce4aca1dfa998b3a6a5ae0db44b2c019055a93b0a3b9509c1399d2014155b4c8`。
+原日志：`/tmp/dbms-r164-current-r182-runtime.u6agy187/original-full956.log`，SHA256 `8f465088e398d4a1a2aa3749531812c68bedbd6cc188bf9769f56ac15c69f703`。
+只读采样driver：`/tmp/dbms-review-r46.ifu6SWLp/r164-current-r182-monitored-driver.log`，SHA256 `43badecff3eb796e26cbbfbc334865bf396fa823e3560f121cc4f0b313e57c09`。
+
 ## 实测错误
 
 合法的 `CREATE TYPE public.r162_color AS ENUM('red','blue')` 成功后，

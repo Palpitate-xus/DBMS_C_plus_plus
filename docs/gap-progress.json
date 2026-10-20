@@ -2,6 +2,36 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R164 current accepted-only full956 monitored revalidation passes; historical full72 timeouts still unresolved",
+      "gap_ids": [],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r164-routine-custom-type-declarations.md",
+        "docs/review-closeout-plan.md"
+      ],
+      "tests": [
+        "tests/custom_scalar_routine_declaration_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "current": "17f06229 accepted-only full956 actual0/footer956failures0; default15seconds/no fixture/assertion/durability changes. 281readonlysamples only ownfixture/backend; all2206sources/currentproducts verifiedbeforeafter.",
+        "boundary": "No Root/currentfull72 result, no causal conclusion for two historical cleanfull72 timeouts; observedjbd2wait notdeadlockproof. No production change or total completion claim."
+      }
+    },
+    {
+      "issue": "Original273 exact-requirement and evidence-reference preflight; next audit must prove each atomic clause",
+      "gap_ids": [],
+      "status": "partial",
+      "evidence": [
+        "docs/review-closeout-plan.md"
+      ],
+      "tests": [],
+      "verification": {
+        "map": "273 original requirement lines matched all273JSON IDs, including P0 colon/bold headings. Claimed22complete166partial70unverified15deferred;22checkboxes agree. All listed evidence/test paths tracked, existence not implementation/runtime proof.",
+        "missing": "OPT-08 source explicitly saysindex-onlyscan notimplemented; VisibilityMap header alone notproof. Other atomic clauses stillunverified. R182 arraycombined latency remainsunresolved.",
+        "scope": "Requirements/IDs not shrunk; no source edits or originalstatus changes at this preflight. Future scopedledgerupdates permitted only when broad matchingevidence supports them. Userdeferrals retained,no push,Actionsdisabled."
+      }
+    },
+    {
       "issue": "R182 shared linear UTF-8 splitting replaces all four repeated-prefix splitting loops",
       "gap_ids": [
         "FUNC-01"
