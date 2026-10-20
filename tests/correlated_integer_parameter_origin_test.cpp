@@ -12,7 +12,14 @@ int main() {
     using namespace dbms;
     TypeRegistry::instance().bootstrap();
     const auto database = testDbPath("correlated_true_integer_origin");
-    if (g_engine.createDatabase(database, "utf8") != DBStatus::OK) return 2;
+    const auto operationOk = [&](DBStatus status, const std::string& operation) {
+        if (status == DBStatus::OK) return true;
+        std::cerr << "[TRUE INTEGER ORIGIN OPERATION FAIL] " << operation
+                  << " status=" << static_cast<int>(status)
+                  << " sqlstate=" << sqlstateForDBStatus(status) << '\n';
+        return false;
+    };
+    if (!operationOk(g_engine.createDatabase(database, "utf8"), "create database")) return 2;
     size_t controls = 0, failures = 0, cases = 0;
     const auto require = [&](bool good, const std::string& label) {
         ++controls;
@@ -25,22 +32,28 @@ int main() {
     TableSchema input; input.tablename = "rows";
     input.append(makeIntColumn("id", false, 2, true));
     Column integer; integer.dataName = "i"; integer.isNull = true;
-    if (!TypeRegistry::instance().resolveColumnType(integer, "integer", {}, false).empty()) return 2;
+    const auto integerError = TypeRegistry::instance().resolveColumnType(integer, "integer", {}, false);
+    if (!integerError.empty()) {
+        std::cerr << "[TRUE INTEGER ORIGIN OPERATION FAIL] resolve INTEGER: " << integerError << '\n';
+        return 2;
+    }
     require(ExprHelper::canonicalResultTypeName(integer.dataType) == "integer" && integer.dsize == 4,
             "real INTEGER registry descriptor and physical width");
     input.append(integer);
     TableSchema calls; calls.tablename = "calls"; calls.append(makeIntColumn("id", false, 2));
-    if (g_engine.createTable(database, input) != DBStatus::OK ||
-        g_engine.createTable(database, calls) != DBStatus::OK ||
-        g_engine.createUDF(database, "integer_writer", {"p"}, {"integer"},
-            "BEGIN INSERT INTO calls VALUES(1); RETURN p; END;", 'v', "plpgsql", "integer") != DBStatus::OK) return 2;
+    if (!operationOk(g_engine.createTable(database, input), "create input table") ||
+        !operationOk(g_engine.createTable(database, calls), "create calls table") ||
+        !operationOk(g_engine.createUDF(database, "integer_writer", {"p"}, {"integer"},
+            "BEGIN INSERT INTO calls VALUES(1); RETURN p; END;", 'v', "plpgsql", "integer"),
+            "create integer writer")) return 2;
     const auto stored = g_engine.getTableSchema(database, "rows");
     require(stored.len == 2 && stored.cols[1].dataName == "i" &&
             ExprHelper::canonicalResultTypeName(stored.cols[1].dataType) == "integer" && stored.cols[1].dsize == 4,
             "persisted physical input is true INTEGER, not a labelled BIGINT datum");
     for (int id = 1; id <= 3; ++id)
-        if (g_engine.insertRow(database, "rows", {{"id", std::to_string(id)},
-            {"i", id == 1 ? std::optional<std::string>{} : std::optional<std::string>{std::to_string(id - 2)}}}) != DBStatus::OK) return 2;
+        if (!operationOk(g_engine.insertRow(database, "rows", {{"id", std::to_string(id)},
+            {"i", id == 1 ? std::optional<std::string>{} : std::optional<std::string>{std::to_string(id - 2)}}}),
+            "insert input row " + std::to_string(id))) return 2;
     const auto count = [&] { return g_engine.query(database, "calls", {}, {"id"}, {}).size(); };
     for (int id = 1; id <= 3; ++id)
         for (const auto& operation : {" BETWEEN ", " NOT BETWEEN "})
@@ -56,7 +69,10 @@ int main() {
                         [&](const auto& value) { return value.name == "i" && ExprHelper::canonicalResultTypeName(value.type) == "integer"; });
                     require(typed && query->output.size() == 1 && query->output[0].type == "boolean" && count() == before,
                             "actual bound source/result metadata and pure admission");
-                    if (!typed) return 2;
+                    if (!typed) {
+                        std::cerr << "[TRUE INTEGER ORIGIN OPERATION FAIL] missing bound INTEGER source descriptor\n";
+                        return 2;
+                    }
                     const auto good = [&](const ExprValue& value) {
                         return value.typeName == "boolean" && value.isNull == (id == 1) &&
                             (value.isNull || value.asBool() == (std::string(operation) == " BETWEEN "));
@@ -85,7 +101,7 @@ int main() {
                         " effects=" + std::to_string(count() - before));
             }
     require(cases == 12 && controls == 27, "all twelve genuine INTEGER cursor/fallback/NULL/operator cases reached");
-    if (g_engine.dropDatabase(database) != DBStatus::OK) return 2;
+    if (!operationOk(g_engine.dropDatabase(database), "drop database")) return 2;
     std::cout << "[TRUE INTEGER CORRELATED ORIGIN] complete controls=" << controls << " failures=" << failures << '\n';
     return failures ? 1 : 0;
 }
