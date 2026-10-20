@@ -2,6 +2,24 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R180 complete24 observations on accepted99722; parser/adaptor identity defects remain open",
+      "gap_ids": [
+        "FUNC-01",
+        "PROTO-04"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r180-position-call-identity.md"
+      ],
+      "tests": [],
+      "verification": {
+        "reproduction": "PG and accepted-only R179 each24 actual0 collector completion,allReadyI,no compatibility acceptance;8matching16differing value/SQLSTATE/OID diagnostic signatures,not16independentbugs.",
+        "observed": "DirectSQL POSITION TEXT/BYTEA/BIT/VARBIT returns0 instead2/3; unsupportedint/arity wronglyaccepted. BarePOSITION comma/empty/single,STRPOS IN/FROM andPOSITION FROM should42601 but succeed; nestedPOSITION returnsNULL instead2. ValidIN/nestedreverse/realINexpression/quotedcase controls retained.",
+        "plan": "Use actualAST grammar andSQL-vs-native parameter convention; preserveTEXT/BYTEA/BIT declarations andopaque/nativeoverrides. IfpublicASTchanges, update bothmanualclones/toString andfresh58+matchingnative/realMain3. No R180 product candidate, objects, registrations or acceptedfix.",
+        "scope": "R179 remains finiteaccepted99722,original273unchanged22complete166partial70unverified15deferred. Accepted600MD918native566wire3Main1487;Root603MD924native572wire3Main1499. R164 unresolved;R177 andotherdeferralskept. No push;Actionsdisabled."
+      }
+    },
+    {
       "issue": "R179 finite STRPOS declaration and pure protocol analysis fix accepted after both full focused16",
       "gap_ids": [
         "FUNC-01",

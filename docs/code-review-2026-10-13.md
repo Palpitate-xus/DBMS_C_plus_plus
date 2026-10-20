@@ -1,5 +1,10 @@
 # 2026-10-13 全仓库代码审查
 
+最新开放：[R180 POSITION语法/参数约定](issue-review-r180-position-call-identity.md)在99722bd2上已完成两侧各24次观察，
+确认真实callee换参、错误签名、非法IN/FROM/逗号准入及嵌套NULL问题；8匹配/16差异不是候选验收或独立缺陷数。
+修改方法及AST/clone/toString、fresh58/真实Main门禁已保存，本项尚无生产候选或新增注册测试。
+已接受仍为下述R179有限修复；R164及总273继续未完成，R177等暂缓不恢复。不push，Actions禁用。
+
 最新有限修复：[R179 STRPOS声明](issue-review-r179-strpos-signatures.md)已完成真实TEXT/TEXT签名、
 错误阶段/空输入/参数推断/同名重载及opaque native覆盖修复。PG294全0；旧294有140断言差异、
 旧native76有49失败，均完整记录，非140/49个独立缺陷。Root及accepted-only clean各16入口实际全0，

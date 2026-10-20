@@ -50,6 +50,9 @@ V1曾完成四次syntax-only0，没有对象或候选DB运行；V2沿用完整�
 最初source-only把四setup漏计为290，在任何DB启动前已被库存断言拒绝；第一次PG运行前校正为294，
 也校正了既有Wire.command参数形式。没有改已运行断言以取得通过，旧失败与V1输入均保留。
 
+[R180](issue-review-r180-position-call-identity.md)后续24次观察确认STRPOS的非法IN/FROM语法仍被接受；
+本项仅修声明绑定，没有修改parser准入，不能把这些剩余语法问题写成已解决。
+
 域/自定义隐式转换及更多query owner/类型边界未在此宣称完成。R164两次完整矩阵超时仍未确定原因，
 不因本项变为通过或用户暂缓。R177及R173/R156等跳过模块不恢复；R180仍开放。
 原273仍22complete/166partial/70unverified/15deferred，总目标未完成。不push，Actions禁用。

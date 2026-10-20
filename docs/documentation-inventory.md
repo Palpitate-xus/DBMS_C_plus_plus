@@ -1,5 +1,10 @@
 # 全部文档检查清单
 
+最新开放：[R180 POSITION语法/参数约定](issue-review-r180-position-call-identity.md)在99722bd2上已完成两侧各24次观察，
+确认真实callee换参、错误签名、非法IN/FROM/逗号准入及嵌套NULL问题；8匹配/16差异不是候选验收或独立缺陷数。
+修改方法及AST/clone/toString、fresh58/真实Main门禁已保存，本项尚无生产候选或新增注册测试。
+已接受仍为下述R179有限修复；R164及总273继续未完成，R177等暂缓不恢复。不push，Actions禁用。
+
 最新有限修复：[R179 STRPOS声明](issue-review-r179-strpos-signatures.md)已完成真实TEXT/TEXT签名、
 错误阶段/空输入/参数推断/同名重载及opaque native覆盖修复。PG294全0；旧294有140断言差异、
 旧native76有49失败，均完整记录，非140/49个独立缺陷。Root及accepted-only clean各16入口实际全0，
@@ -407,7 +412,7 @@ R173函数签名类型依赖及R176真实聚合排序仍独立开放；R156等�
 | [docs/issue-review-r177-grouped-aggregate-order.md](issue-review-r177-grouped-aggregate-order.md) | 用户暂缓；128/扩展142观察及未验收候选保留，无生产修复或新增注册测试 | 暂缓 |
 | [docs/issue-review-r178-repeat-empty-input.md](issue-review-r178-repeat-empty-input.md) | REPEAT空输入省去按次数空追加；4个原生边界、PG80及两端11定向入口，历史启动失败保留 | 部分 |
 | [docs/issue-review-r179-strpos-signatures.md](issue-review-r179-strpos-signatures.md) | STRPOS有限声明修复，native76/协议294、两端完整16与fresh真实Main3；旧49/140失败保留，其他边界开放 | 部分 |
-| [docs/issue-review-r180-position-call-identity.md](issue-review-r180-position-call-identity.md) | POSITION语法/真实callee/原生API实参顺序混淆及签名缺失，已观察未修复 | 部分 |
+| [docs/issue-review-r180-position-call-identity.md](issue-review-r180-position-call-identity.md) | 99722双侧24观察、8匹配16差异，换参/签名/非法IN-FROM及嵌套问题；AST与fresh58方法待实现 | 部分 |
 | [docs/issue-review-r18-catalog-value-snapshots.md](issue-review-r18-catalog-value-snapshots.md) | 历史问题证据 | 通过 |
 | [docs/issue-review-r19-stale-temp-startup.md](issue-review-r19-stale-temp-startup.md) | 历史问题证据 | 通过 |
 | [docs/issue-review-r20-returning-query-owner.md](issue-review-r20-returning-query-owner.md) | 历史问题证据 | 通过 |

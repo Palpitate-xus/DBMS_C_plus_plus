@@ -2,6 +2,69 @@
 
 状态：Open，已观察；没有生产修改、注册测试或通过声明。与STRPOS签名R179分项处理。
 
+## 最新：99722bd2上的完整24次双侧观察
+
+同一冻结采集器在PG18.6及accepted-only R179版本各完整执行24次，均到ReadyI。
+两侧采集进程外层0仅说明采集完成，没有兼容性验收oracle；8处诊断签名匹配、16处差异，
+比较的是值/SQLSTATE/OID，不比较消息文本。不是16个独立缺陷，也不是8项候选通过。
+R180目前仍没有生产修改或注册回归；R179的声明修复不解决这里的语法准入问题。
+
+| # | 实际SQL | PG | 当前accepted产品 | 分类 |
+| --- | --- | --- | --- | --- |
+| 1 | `SELECT position('b' IN 'abc') AS v;` | `[["2"]]` | `[["2"]]` | 匹配控制 |
+| 2 | `SELECT pg_catalog.position('abc'::text,'b'::text) AS v;` | `[["2"]]` | `[["0"]]` | 差异 |
+| 3 | `SELECT "position"('abc'::text,'b'::text) AS v;` | `[["2"]]` | `[["0"]]` | 差异 |
+| 4 | `SELECT pg_catalog.position('\x006100'::bytea,'\x61'::bytea) AS v;` | `[["2"]]` | `[["0"]]` | 差异 |
+| 5 | `SELECT position('\x61'::bytea IN '\x006100'::bytea) AS v;` | `[["2"]]` | `[["2"]]` | 匹配控制 |
+| 6 | `SELECT pg_catalog.position(B'1001',B'01') AS v;` | `[["3"]]` | `[["0"]]` | 差异 |
+| 7 | `SELECT position(B'01' IN B'1001') AS v;` | `[["3"]]` | `[["3"]]` | 匹配控制 |
+| 8 | `SELECT pg_catalog.position(B'1001'::bit varying,B'01'::bit varying) AS v;` | `[["3"]]` | `[["0"]]` | 差异 |
+| 9 | `SELECT position(B'01'::bit varying IN B'1001'::bit varying) AS v;` | `[["3"]]` | `[["3"]]` | 匹配控制 |
+| 10 | `SELECT position(1 IN 123) AS v;` | `ERROR 42883` | `[["1"]]` | 差异 |
+| 11 | `SELECT "position"(1,2) AS v;` | `ERROR 42883` | `[["0"]]` | 差异 |
+| 12 | `SELECT "position"('abc') AS v;` | `ERROR 42883` | `[[null]]` | 差异 |
+| 13 | `SELECT "position"('abc','b','x') AS v;` | `ERROR 42883` | `[["0"]]` | 差异 |
+| 14 | `SELECT position('abc','b') AS v;` | `ERROR 42601` | `[["0"]]` | 差异 |
+| 15 | `SELECT position() AS v;` | `ERROR 42601` | `[[null]]` | 差异 |
+| 16 | `SELECT position('abc') AS v;` | `ERROR 42601` | `[[null]]` | 差异 |
+| 17 | `SELECT strpos('b' IN 'abc') AS v;` | `ERROR 42601` | `[["0"]]` | 差异 |
+| 18 | `SELECT strpos('abc' FROM 'b') AS v;` | `ERROR 42601` | `[["2"]]` | 差异 |
+| 19 | `SELECT position('b' FROM 'abc') AS v;` | `ERROR 42601` | `[["2"]]` | 差异 |
+| 20 | `SELECT position('b' IN reverse('cba')) AS v;` | `[["2"]]` | `[["2"]]` | 匹配控制 |
+| 21 | `SELECT position(position('b' IN 'abc')::text IN '123') AS v;` | `[["2"]]` | `[[null]]` | 差异 |
+| 22 | `SELECT strpos(('b' IN ('abc','b'))::text,'true') AS v;` | `[["1"]]` | `[["1"]]` | 匹配控制 |
+| 23 | `SELECT position(('b' IN ('abc','b'))::text IN 'true-false') AS v;` | `[["1"]]` | `[["1"]]` | 匹配控制 |
+| 24 | `SELECT "POSITION"('abc','b') AS v;` | `ERROR 42883` | `ERROR 42883` | 匹配控制 |
+
+除原有换参/声明问题，还确认：裸POSITION的逗号/空/单参数形式应42601却被接受；
+非法STRPOS IN/FROM及POSITION FROM扩展应42601却成功；嵌套POSITION应2却返回NULL。
+合法BIT/VARBIT/BYTEA IN形式、普通嵌套reverse、括号内真正IN表达式及quoted大写不存在的控制必须保留。
+
+已定位[parser.cpp](../src/parser/parser.cpp)的全局tokenizer把POSITION/STRPOS顶层IN改成逗号，
+丢掉原始语法角色；generic function parser还错误接受这些函数的FROM分隔符。
+直接重排字符串或统一交换callback会破坏原生API和真正的IN表达式，不作为修复方案。
+
+### 后续实现门禁
+
+1. 仅在实际POSITION关键字语法的AST解析中处理其顶层IN边界，规范化为真实routine的haystack/needle顺序；
+   直接quoted/qualified routine保留普通调用语法，非法扩展42601，真正嵌套IN表达式不重写。
+2. 用明确的AST语义保留SQL调用与原生API参数约定，并维护真实callee的TEXT/BYTEA/BIT声明及namespace身份；
+   不从显示文本或callee名字猜当前callback是否builtin，opaque替换不继承签名/换参规则。
+3. 若增AST字段，两个实际手工clone路径及toString也必须维护语义：expr_helper.cpp、
+   prepared_query_execution.cpp和FunctionCallExpr::toString。不能只改解析器。
+4. 公共AST变化需两端genuine fresh58、fresh匹配native和三个真实Main；不能复用旧ABI对象。
+   完整原生/三协议回归应包含全部24观察、错误优先级、NULL/空/typed参数/重绑定、namespace/同名覆盖及副作用。
+5. 先PG完整对照及旧版反证，再候选/Root及原16相邻入口；通过后才按R180独立commit，不与R179混为已完成。
+
+固定采集器`/tmp/dbms-review-r46.ifu6SWLp/r180-position-call-discovery-v1.py`。
+参考日志`r180-position-call-reference24.log`：
+`c3ea80dc0e2547efdf175b386261b8ca44d6fdedc360bc35abb3aafa4719e875`；
+产品日志`r180-position-call-accepted24.log`：
+`a8574e1e1f5e487ce41d7d847bbd59b61f1f20571e34d5cb41b8cd1e52d95a51`。
+本地证据非可移植release依赖；目前未生成R180生产候选、对象或通过声明。
+
+## 历史基础观察：1430b578
+
 | 调用形式 | PG18.6 | 当前accepted R178产品 | 事实/修改方法 |
 | --- | --- | --- | --- |
 | `position('b'::text IN 'abc'::text)` | 2 | 2 | SQL关键字语法先写needle，后写haystack；保留正确控制 |
