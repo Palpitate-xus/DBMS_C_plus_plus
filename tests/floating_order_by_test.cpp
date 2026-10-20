@@ -1,9 +1,12 @@
 #include "catalog/type_registry.h"
 #include "commands/TableManage.h"
+#include "executor/ExecutionPlan.h"
 #include "test_utils.h"
 
+#include <algorithm>
 #include <cassert>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -39,6 +42,136 @@ void assertQueryOrder(const std::string& database, const std::string& column,
     idExpression.colName = "id";
     assert(g_engine.queryExpr(database, "values_to_sort", {},
                               {idExpression}, order) == expected);
+}
+
+// Reorder real scan buffers without discarding their physical NULL metadata.
+// MaterializedRowsOp intentionally has no origin and is not a nullable heap
+// stream, so it would not be a valid source for this NULL-ordering check.
+class ReplayRowsOp final : public dbms::Operator {
+public:
+    struct Row { std::string raw; ScanOrigin origin; };
+    explicit ReplayRowsOp(std::vector<Row> rows) : rows_(std::move(rows)) {}
+    bool open() override { position_ = 0; return true; }
+    bool next(std::string& raw) override {
+        if (position_ == rows_.size()) return false;
+        raw = rows_[position_++].raw;
+        return true;
+    }
+    void close() override { position_ = 0; }
+    ScanOrigin scanOrigin() const override {
+        return position_ ? rows_[position_ - 1].origin : ScanOrigin{};
+    }
+    bool lastColumnIsNull(size_t ordinal) const override {
+        const auto origin = scanOrigin();
+        return origin.engine && origin.engine->isColumnNullByRid(
+            origin.dbname, origin.tablename, origin.rid, ordinal);
+    }
+private:
+    std::vector<Row> rows_;
+    size_t position_ = 0;
+};
+
+bool checkExecutorFloatingSpecialOrder() {
+    using namespace dbms;
+    TypeRegistry::instance().bootstrap();
+    const auto database = testDbPath("executor_floating_special_order");
+    assert(g_engine.createDatabase(database) == DBStatus::OK);
+    TableSchema schema;
+    schema.tablename = "floats";
+    schema.formatVersion = DATA_FILE_FORMAT_VERSION;
+    schema.append(makeIntColumn("id", false, 4));
+    schema.append(makeFloatColumn("single_value", true));
+    schema.append(makeDoubleColumn("double_value", true));
+    assert(g_engine.createTable(database, schema) == DBStatus::OK);
+    // Explicit expected order, not an oracle using the production comparator.
+    const std::vector<std::optional<std::string>> values = {
+        "-Infinity", "-2.25", "0", "1.75", "3.5", "Infinity", "NaN", std::nullopt};
+    for (size_t id = 0; id < values.size(); ++id)
+        assert(g_engine.insertRow(database, schema.tablename,
+            {{"id", std::to_string(id)}, {"single_value", values[id]},
+             {"double_value", values[id]}}) == DBStatus::OK);
+    TableScanOp scan(&g_engine, database, schema.tablename);
+    assert(scan.open());
+    std::vector<ReplayRowsOp::Row> raw;
+    std::string row;
+    while (scan.next(row)) {
+        assert(scan.scanOrigin().engine && scan.scanOrigin().rid != 0);
+        raw.push_back({row, scan.scanOrigin()});
+    }
+    assert(!scan.hasError() && raw.size() == values.size());
+    scan.close();
+
+    size_t checked = 0, failures = 0;
+    const auto check = [&](const std::string& label,
+                           const std::vector<std::string>& actual,
+                           const std::vector<std::string>& expected) {
+        ++checked;
+        if (actual != expected) {
+            ++failures;
+            std::cout << "SORT_FLOATING_SPECIAL_FAILURE " << label << " actual=";
+            for (const auto& value : actual) std::cout << value << ',';
+            std::cout << " expected=";
+            for (const auto& value : expected) std::cout << value << ',';
+            std::cout << '\n';
+        }
+    };
+    for (const std::string column : {"single_value", "double_value"}) {
+        for (size_t permutation = 0; permutation < 8; ++permutation) {
+            auto input = raw;
+            std::rotate(input.begin(), input.begin() + permutation, input.end());
+            // The last four input shapes also reverse all finite/NaN/NULL
+            // positions. No order requirement is imposed on equal values.
+            if (permutation >= 4) std::reverse(input.begin(), input.end());
+            for (const bool ascending : {true, false}) {
+                for (const int nullMode : {-1, 0, 1}) {
+                    const bool nullsFirst = nullMode < 0 ? !ascending : nullMode != 0;
+                    std::vector<std::string> expected;
+                    if (nullsFirst) expected.push_back("7");
+                    for (size_t i = 0; i < 7; ++i)
+                        expected.push_back(std::to_string(ascending ? i : 6 - i));
+                    if (!nullsFirst) expected.push_back("7");
+                    SortOp sort(std::make_unique<ReplayRowsOp>(input), schema,
+                                column, ascending, nullsFirst, nullMode >= 0);
+                    assert(sort.open());
+                    std::vector<std::string> actual;
+                    while (sort.next(row)) actual.push_back(
+                        StorageEngine::extractColumnValueStatic(row, schema, 0));
+                    assert(!sort.hasError());
+                    sort.close();
+                    check(column + " permutation=" + std::to_string(permutation) +
+                          " asc=" + std::to_string(ascending) +
+                          " nullMode=" + std::to_string(nullMode), actual, expected);
+                }
+            }
+        }
+        for (const bool ascending : {true, false}) {
+            for (const bool nullsFirst : {true, false}) {
+                PlanContext context;
+                context.dbname = database;
+                context.tablename = schema.tablename;
+                context.selectCols = {"id"};
+                context.orderByCol = column;
+                context.orderByAsc = ascending;
+                context.orderByNullsFirst = nullsFirst;
+                context.hasExplicitOrderNulls = true;
+                const auto result = QueryPlanner::executePlanChecked(
+                    QueryPlanner::buildSelectPlan(&g_engine, context));
+                result.throwIfFailed();
+                std::vector<std::string> expected;
+                if (nullsFirst) expected.push_back("7 ");
+                for (size_t i = 0; i < 7; ++i)
+                    expected.push_back(std::to_string(ascending ? i : 6 - i) + " ");
+                if (!nullsFirst) expected.push_back("7 ");
+                check(column + " planner asc=" + std::to_string(ascending) +
+                      " nullsFirst=" + std::to_string(nullsFirst), result.rows, expected);
+            }
+        }
+    }
+    assert(checked == 104);
+    assert(g_engine.dropDatabase(database) == DBStatus::OK);
+    std::cout << "SORT_FLOATING_SPECIAL_NATIVE_COMPLETE " << checked
+              << " FAILURES " << failures << std::endl;
+    return failures == 0;
 }
 
 }  // namespace
@@ -291,6 +424,8 @@ int main() {
     functionSort.expressionSql = "least(v, 'z')";
     assert(g_engine.query(database, "polymorphic_text_order", {}, {"v"},
                           {functionSort}) == ids({"a", "b"}));
+
+    assert(checkExecutorFloatingSpecialOrder());
 
     cleanupTestDb(testName);
     finalCleanupTestData();

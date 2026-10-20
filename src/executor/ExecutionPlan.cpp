@@ -4664,7 +4664,15 @@ bool SortOp::open() {
                        StorageEngine::PredicateTruth::True;
             }
             if (scol.dataType == "date") return asc_ ? (a.second.d < b.second.d) : (b.second.d < a.second.d);
-            if (scol.dataType == "float" || scol.dataType == "double" || scol.dataType == "decimal") return asc_ ? (a.second.f < b.second.f) : (b.second.f < a.second.f);
+            if (scol.dataType == "float" || scol.dataType == "double" || scol.dataType == "decimal") {
+                const double left = asc_ ? a.second.f : b.second.f;
+                const double right = asc_ ? b.second.f : a.second.f;
+                // SQL orders NaN after every non-NaN value. Native floating
+                // '<' alone makes NaN equivalent to every value, violating
+                // the strict weak ordering required by the sorting algorithm.
+                if (std::isnan(left)) return false;
+                return std::isnan(right) || left < right;
+            }
             return asc_ ? (a.second.n < b.second.n) : (b.second.n < a.second.n);
         });
         buffer_.clear();
