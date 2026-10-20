@@ -1,6 +1,7 @@
 #include "commands/DdlExecutor.h"
 #include "parser/parser.h"
 #include "commands/TableManage.h"
+#include "common/DbError.h"
 #include "catalog/CatalogService.h"
 #include "catalog/systables.h"
 #include "Session.h"
@@ -415,8 +416,13 @@ static void test_drop_schema_handles_auxiliary_objects() {
     assert(g_engine.createDomain(db, domain) == dbms::DBStatus::OK);
     dbms::StorageEngine::CompositeType composite;
     composite.name = "app_aux.coordinate";
+    composite.schema = "app_aux";
+    composite.localName = "coordinate";
     composite.fields = {{"x", "int"}, {"y", "int"}};
     assert(g_engine.createCompositeType(db, composite) == dbms::DBStatus::OK);
+    const auto persistedComposite = g_engine.getCompositeType(db, composite.name);
+    assert(persistedComposite.schema == composite.schema &&
+           persistedComposite.localName == composite.localName);
     dbms::StorageEngine::EnumType enumeration;
     enumeration.name = "app_aux.mood";
     enumeration.labels = {"ok", "sad"};
@@ -495,6 +501,48 @@ static void test_drop_schema_handles_auxiliary_objects() {
     cleanup(db);
     std::cout << "[DROP-CASCADE] schema handles auxiliary objects OK"
               << std::endl;
+}
+
+static void test_drop_schema_rejects_ambiguous_legacy_composite() {
+    const std::string db = testDbPath("drop_schema_legacy_composite");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    Session s; setupSession(s, db);
+    dbms::DdlExecutor ddl;
+    assert(!ddl.executeSql("CREATE SCHEMA app_aux", s));
+    assert(!ddl.executeSql("CREATE SCHEMA app_auxiliary", s));
+    dbms::StorageEngine::CompositeType legacy;
+    legacy.name = "app_aux.coordinate";
+    legacy.fields = {{"x", "int"}, {"y", "int"}};
+    assert(legacy.schema.empty() && legacy.localName.empty());
+    assert(g_engine.createCompositeType(db, legacy) == dbms::DBStatus::OK);
+    const fs::path path = fs::path(db) / ".types";
+    assert(fs::is_regular_file(path));
+    const auto readBytes = [&]() {
+        std::ifstream input(path, std::ios::binary);
+        assert(input);
+        return std::string(std::istreambuf_iterator<char>(input),
+                           std::istreambuf_iterator<char>());
+    };
+    const std::string before = readBytes();
+    std::string state;
+    try {
+        (void)ddl.executeSql("DROP SCHEMA app_aux CASCADE", s);
+    } catch (const dbms::DbError& error) {
+        state = error.sqlState();
+    }
+    assert(state == "XX001");
+    assert(!g_engine.inTransaction());
+    assert(!g_engine.hasTransactionBackup());
+    assert(g_engine.schemaExists(db, "app_aux"));
+    assert(g_engine.schemaExists(db, "app_auxiliary"));
+    assert(readBytes() == before);
+    const auto retained = g_engine.getCompositeType(db, legacy.name);
+    assert(retained.name == legacy.name && retained.fields == legacy.fields);
+    assert(retained.schema.empty() && retained.localName.empty());
+    g_engine.catalogService().evict(db);
+    cleanup(db);
+    std::cout << "[DROP-CASCADE] legacy ambiguous composite rejects XX001 without mutation OK" << std::endl;
 }
 
 static void test_drop_schema_validates_both_catalogs() {
@@ -710,6 +758,7 @@ int main() {
     test_drop_schema_catalog_preflight_fails_closed();
     test_drop_schema_auxiliary_preflight_fails_closed();
     test_drop_schema_handles_auxiliary_objects();
+    test_drop_schema_rejects_ambiguous_legacy_composite();
     test_drop_schema_validates_both_catalogs();
     test_multi_schema_drop_fails_before_mutation();
     test_multi_table_drop_is_atomic();

@@ -1,5 +1,29 @@
 # R168：复合类型sidecar的namespace身份（归属修复与旧格式限制）
 
+## R189：级联删除的正向夹具必须提供真实 composite owner
+
+冻结 `2442e4c7` 原全套的 `drop_cascade_test` 实际因未捕获的 XX001 退出 134：
+其正向场景用原生精确键 API 创建 `app_aux.coordinate`，却未填 schema/localName，
+因此产生的正是 R168 不允许猜测归属的歧义旧记录，而不是已知属于 app_aux 的对象。
+将异常改成成功或依点号猜 owner 会破坏原数据保留规则，不能这样修复。
+
+正向夹具现在显式提供 `app_aux`/`coordinate`，并回读验证该身份；原有 13 组场景和
+全部删除、邻接 schema、同前缀 quoted routine、事务/文件/对象存活断言保留。
+另加独立旧记录负向场景：有意省略 owner，必须准确抛 XX001，两个 schema、完整
+`.types` 字节与原记录字段均保留，事务和备份不泄漏。没有删除旧歧义行为的覆盖。
+
+两套库均实际完成原 13 组与新增负向场景，分别达到新增 XX001 存活性 footer 和
+`[DROP-CASCADE] all passed`，退出 0。每侧新编译/链接该测试，核对各自 57 个生产库
+对象/stub、127 头与编译配置；生产代码/头/注册入口未变，工作区原未接受改动不借此接受。
+首版新增负向场景因缺少本地文件读取 helper 编译失败，源和日志保留；V2 补齐读取，
+未改 SQL、错误码、存活性或原检查。原全套也未换输入或改写其失败。
+
+证据：`/tmp/dbms-r189-drop-cascade-v2.bkmendrs/completed-focused-receipt.json`，
+SHA256 `872fde297bab06daf9e9c30a22b2adb93f68a7246f072d26a6dcdb55bd013362`。
+原失败仍在 `/tmp/dbms-accepted2442-full1492.9obmw81r/canonical-full-registered.log`。
+这不是修复后新全套、PG 差分、TLS/sanitizer 或原 273 项闭合证明；R187 不明退出仍开放，
+R185 继续跳过，不 push、不启用 Actions。以下 R188 与 R168 记录按各自当时输入解释。
+
 ## R188：旧类型夹具必须接收精确的 checked-read 错误
 
 冻结 `2442e4c7` 的原规范全套中，`create_type_shell_test` 在故意将 `.types`
