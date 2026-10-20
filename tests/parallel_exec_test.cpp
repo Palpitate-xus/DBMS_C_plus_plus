@@ -16,6 +16,9 @@
 #include "catalog/type_registry.h"
 
 #include <algorithm>
+#include <optional>
+#include <memory>
+#include <array>
 #include <cassert>
 #include <filesystem>
 #include <iostream>
@@ -56,6 +59,201 @@ static std::vector<std::string> runPlan(dbms::Operator* op) {
 static std::vector<std::string> sorted(std::vector<std::string> v) {
     std::sort(v.begin(), v.end());
     return v;
+}
+
+class MinMaxReplayRows final : public dbms::Operator {
+public:
+    struct Row { std::string raw; ScanOrigin origin; };
+    explicit MinMaxReplayRows(std::vector<Row> rows) : rows_(std::move(rows)) {}
+    bool open() override { position_ = 0; return true; }
+    bool next(std::string& raw) override {
+        if (position_ == rows_.size()) return false;
+        raw = rows_[position_++].raw;
+        return true;
+    }
+    void close() override { position_ = 0; }
+    ScanOrigin scanOrigin() const override {
+        return position_ ? rows_[position_ - 1].origin : ScanOrigin{};
+    }
+    bool lastColumnIsNull(size_t ordinal) const override {
+        const auto origin = scanOrigin();
+        return origin.engine && origin.engine->isColumnNullByRid(
+            origin.dbname, origin.tablename, origin.rid, ordinal);
+    }
+private:
+    std::vector<Row> rows_;
+    size_t position_ = 0;
+};
+
+static bool testDeclaredMinMaxComparison() {
+    using namespace dbms;
+    using Value = std::optional<std::string>;
+    using Bounds = std::pair<Value, Value>;
+    struct Case {
+        Column column;
+        std::array<Value, 4> inputs;
+        // Explicit global, group0, group1 MIN/MAX expectations. Do not derive
+        // the oracle using the implementation's numeric/string comparator.
+        std::array<Bounds, 3> expected;
+    };
+    TypeRegistry::instance().bootstrap();
+    Column integerArray;
+    integerArray.dataName = "integer_array";
+    assert(TypeRegistry::instance().resolveColumnType(integerArray, "integer", {}, true).empty());
+    integerArray.isNull = true;
+    const std::string database = testDbPath("minmax_declared_comparison_probe_v4");
+    assert(g_engine.createDatabase(database) == DBStatus::OK);
+    // Use an actual SQL enum declaration, not the internal generic ENUM
+    // placeholder, whose fixed index carrier is not a named label type.
+    Session declarationSession;
+    declarationSession.username = "testuser";
+    declarationSession.permission = 1;
+    declarationSession.currentDB = database;
+    DdlExecutor declarations;
+    assert(!declarations.executeSql("CREATE TYPE r192_enum AS ENUM ('z','a','')", declarationSession));
+    assert(!declarations.executeSql("CREATE TABLE enum_declaration_probe(declared_value r192_enum)", declarationSession));
+    const auto declared = g_engine.getTableSchema(database, "enum_declaration_probe");
+    const std::vector<std::string> enumLabels{"z", "a", ""};
+    assert(declared.len == 1 && declared.cols[0].enumValues == enumLabels);
+    Column enumColumn = declared.cols[0];
+    enumColumn.dataName = "enum_order";
+    assert(enumColumn.isNull && !enumColumn.isArray);
+    const Bounds numericText{"10", "2"};
+    const Bounds nanText{"Infinity", "NaN"};
+    const Bounds positive{"9007199254740992", "9007199254740993"};
+    const Bounds negative{"-9007199254740993", "-9007199254740992"};
+    const Bounds decimal{"9007199254740993.0000", "9007199254740993.0001"};
+    const Bounds real{"-Infinity", "NaN"};
+    const Bounds dbl{"1.5", "NaN"};
+    const Bounds ordinary{"-10", "2"};
+    const Bounds onlyNull{std::nullopt, std::nullopt};
+    const Bounds onlyNan{"NaN", "NaN"};
+    std::vector<Case> cases = {
+        {makeTextColumn("numeric_text", true), {"2", "10", "10", "2"}, {numericText, numericText, numericText}},
+        {makeTextColumn("special_text", true), {"NaN", "Infinity", "Infinity", "NaN"}, {nanText, nanText, nanText}},
+        {makeTextColumn("empty_text", true), {"", "0", "NULL", std::nullopt},
+            {Bounds{"", "NULL"}, Bounds{"", "NULL"}, Bounds{"0", "0"}}},
+        {makeIntColumn("positive_bigint", true, 4),
+            {"9007199254740993", "9007199254740992", "9007199254740992", "9007199254740993"},
+            {positive, positive, positive}},
+        {makeIntColumn("negative_bigint", true, 4),
+            {"-9007199254740992", "-9007199254740993", "-9007199254740993", "-9007199254740992"},
+            {negative, negative, negative}},
+        {makeDecimalColumn("exact_decimal", true, 20, 4),
+            {"9007199254740993.0001", "9007199254740993.0000", "9007199254740993.0000", "9007199254740993.0001"},
+            {decimal, decimal, decimal}},
+        {makeFloatColumn("real_value", true), {"-Infinity", "Infinity", "NaN", "1.5"},
+            {real, real, Bounds{"1.5", "Infinity"}}},
+        {makeDoubleColumn("double_value", true), {"1.5", "NaN", "NaN", "1.5"}, {dbl, dbl, dbl}},
+        {makeIntColumn("ordinary_integer", true, 2), {"2", "-10", "-10", "2"}, {ordinary, ordinary, ordinary}},
+        {makeTextColumn("only_null", true), {std::nullopt, std::nullopt, std::nullopt, std::nullopt},
+            {onlyNull, onlyNull, onlyNull}},
+        {makeDoubleColumn("only_nan", true), {"NaN", "NaN", "NaN", "NaN"}, {onlyNan, onlyNan, onlyNan}},
+        {makeDecimalColumn("collapsed_decimal", true, 20, 4),
+            {"9007199254740992.0001", "9007199254740992.0000", "9007199254740992.0000", "9007199254740992.0001"},
+            {Bounds{"9007199254740992.0000", "9007199254740992.0001"},
+             Bounds{"9007199254740992.0000", "9007199254740992.0001"},
+             Bounds{"9007199254740992.0000", "9007199254740992.0001"}}},
+        {integerArray, {"{2}", "{10}", "{10}", "{2}"},
+            {Bounds{"{2}", "{10}"}, Bounds{"{2}", "{10}"}, Bounds{"{2}", "{10}"}}},
+        {enumColumn, {"z", "a", "", "z"},
+            {Bounds{"z", ""}, Bounds{"z", ""}, Bounds{"z", "a"}}},
+    };
+    TableSchema schema;
+    schema.tablename = "inputs";
+    schema.formatVersion = DATA_FILE_FORMAT_VERSION;
+    schema.append(makeIntColumn("id", false, 2));
+    schema.append(makeIntColumn("grp", false, 2));
+    for (auto& item : cases) {
+        if (item.column.dataType == "text") item.column.collation = "C";
+        schema.append(item.column);
+    }
+    assert(cases[3].column.dsize == 8 && cases[5].column.dataType == "numeric");
+    assert(g_engine.createTable(database, schema) == DBStatus::OK);
+    schema = g_engine.getTableSchema(database, schema.tablename);
+    assert(schema.len == 16 && schema.cols[schema.len - 1].enumValues == enumLabels);
+    assert(schema.cols[schema.len - 2].isArray);
+    for (size_t id = 0; id < 4; ++id) {
+        std::map<std::string, Value> row{{"id", std::to_string(id)}, {"grp", std::to_string(id % 2)}};
+        for (const auto& item : cases) row[item.column.dataName] = item.inputs[id];
+        const auto inserted = g_engine.insertRow(database, schema.tablename, row);
+        if (inserted != DBStatus::OK)
+            std::cerr << "MINMAX_SETUP_INSERT_FAILED id=" << id
+                      << " status=" << static_cast<int>(inserted) << std::endl;
+        assert(inserted == DBStatus::OK);
+    }
+    TableScanOp scan(&g_engine, database, schema.tablename);
+    assert(scan.open());
+    std::vector<MinMaxReplayRows::Row> originals;
+    std::string raw;
+    while (scan.next(raw)) {
+        assert(scan.scanOrigin().engine && scan.scanOrigin().rid);
+        originals.push_back({raw, scan.scanOrigin()});
+    }
+    assert(!scan.hasError() && originals.size() == 4);
+    scan.close();
+    std::vector<StorageEngine::AggItem> aggregates;
+    for (const auto& item : cases)
+        for (const std::string function : {"min", "max"})
+            aggregates.push_back({function, item.column.dataName, {}});
+    size_t controls = 0, failures = 0;
+    const auto check = [&](const std::string& label, bool valid,
+                           const std::string& actual, const std::string& expected) {
+        ++controls;
+        if (!valid) {
+            ++failures;
+            std::cout << "MINMAX_DECLARED_FAILURE " << label << " actual=" << actual
+                      << " expected=" << expected << '\n';
+        }
+    };
+    for (size_t permutation = 0; permutation < 4; ++permutation) {
+        std::vector<MinMaxReplayRows::Row> inputs;
+        for (size_t row = 0; row < 512; ++row) inputs.push_back(originals[(row + permutation) % 4]);
+        for (const bool parallel : {false, true}) {
+            for (const bool grouped : {false, true}) {
+                const std::vector<std::string> keys = grouped ? std::vector<std::string>{"grp"} : std::vector<std::string>{};
+                const std::string label = "p=" + std::to_string(permutation) + " parallel=" + std::to_string(parallel) +
+                                          " grouped=" + std::to_string(grouped);
+                OpPtr child = std::make_unique<MinMaxReplayRows>(inputs);
+                OpPtr aggregate;
+                if (parallel) aggregate = std::make_unique<ParallelGroupAggregateOp>(
+                    std::move(child), schema, keys, aggregates, std::vector<std::string>{}, 4);
+                else aggregate = std::make_unique<GroupAggregateOp>(std::move(child), schema, keys,
+                    std::vector<std::vector<std::string>>{}, aggregates, std::vector<std::string>{});
+                assert(aggregate->open());
+                if (parallel) check(label + " actual worker activation",
+                    dynamic_cast<ParallelGroupAggregateOp*>(aggregate.get())->usedParallelWorkers(), "used", "used");
+                size_t rows = 0;
+                while (aggregate->next(raw)) {
+                    std::vector<std::string> values;
+                    std::vector<bool> nulls;
+                    assert(aggregate->lastStructuredRow(values, nulls));
+                    assert(values.size() == keys.size() + cases.size() * 2 && nulls.size() == values.size());
+                    const size_t expectation = grouped ? size_t(std::stoul(values[0])) + 1 : 0;
+                    assert(expectation < 3);
+                    for (size_t item = 0; item < cases.size(); ++item) {
+                        for (size_t bound = 0; bound < 2; ++bound) {
+                            const auto& expected = bound ? cases[item].expected[expectation].second : cases[item].expected[expectation].first;
+                            const size_t column = keys.size() + item * 2 + bound;
+                            check(label + " group=" + std::to_string(expectation) + " " + cases[item].column.dataName +
+                                  (bound ? " MAX" : " MIN"), nulls[column] == !expected &&
+                                  (expected ? values[column] == *expected : values[column].empty()),
+                                  (nulls[column] ? "SQL_NULL:" : "VALUE:") + values[column],
+                                  expected ? "VALUE:" + *expected : "SQL_NULL:");
+                        }
+                    }
+                    ++rows;
+                }
+                assert(!aggregate->hasError());
+                aggregate->close();
+                check(label + " output row count", rows == (grouped ? 2U : 1U), std::to_string(rows), grouped ? "2" : "1");
+            }
+        }
+    }
+    assert(controls == 696);
+    assert(g_engine.dropDatabase(database) == DBStatus::OK);
+    std::cout << "MINMAX_DECLARED_NATIVE_COMPLETE " << controls << " FAILURES " << failures << std::endl;
+    return failures == 0;
 }
 
 int main() {
@@ -345,6 +543,7 @@ int main() {
     dbms::QueryPlanner::setParallelWorkers(0);
 
     cleanupDb(db);
+    assert(testDeclaredMinMaxComparison());
     std::cout << "[PAR] all tests passed" << std::endl;
     return 0;
 }

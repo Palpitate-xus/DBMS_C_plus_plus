@@ -3887,6 +3887,53 @@ static int compareNonNullAggregateValue(const std::string& left,
     return 0;
 }
 
+// Plain-column MIN/MAX uses the same typed runtime-cell comparison as
+// prepared aggregates. Numeric-looking text is still text; bigint/numeric
+// must not round through double, and floating NaNs retain SQL ordering.
+class DeclaredAggregateLess {
+public:
+    DeclaredAggregateLess(const Column& column, const ExprEvaluator& evaluator)
+        : column_(column), evaluator_(evaluator),
+          type_([&column] {
+              std::string type = column.dataType;
+              // Native/SQL schemas can already carry the array suffix.
+              if (column.isArray && (type.size() < 2 || type.compare(type.size() - 2, 2, "[]") != 0))
+                  type += "[]";
+              return ExprHelper::canonicalResultTypeName(type);
+          }()) {
+        expression_.op = "<";
+        auto left = std::make_unique<ParameterExpr>();
+        left->slot = 0; left->origin = ParameterOrigin::RuntimeCell; left->declaredType = type_;
+        auto right = std::make_unique<ParameterExpr>();
+        right->slot = 1; right->origin = ParameterOrigin::RuntimeCell; right->declaredType = type_;
+        expression_.left = std::move(left); expression_.right = std::move(right);
+    }
+    bool less(const std::string& left, const std::string& right) const {
+        if (!column_.isArray && !column_.enumValues.empty()) {
+            const auto rank = [&](const std::string& value) {
+                const auto found = std::find(column_.enumValues.begin(), column_.enumValues.end(), value);
+                if (found == column_.enumValues.end())
+                    throw DbError("22P02", "invalid input value for enum: " + value);
+                return found - column_.enumValues.begin();
+            };
+            return rank(left) < rank(right);
+        }
+        ExprValue first(type_, left), second(type_, right);
+        first.collation = second.collation = column_.resolvedCollation.empty()
+            ? column_.collation : column_.resolvedCollation;
+        RowContext row; row.setParameters({std::move(first), std::move(second)});
+        const auto result = evaluator_.eval(&expression_, row);
+        if (result.isNull || ExprHelper::canonicalResultTypeName(result.typeName) != "boolean")
+            throw DbError("XX000", "non-NULL aggregate comparison lost its boolean result");
+        return result.asBool();
+    }
+private:
+    const Column& column_;
+    const ExprEvaluator& evaluator_;
+    std::string type_;
+    BinaryOpExpr expression_;
+};
+
 static int compareWindowCell(const std::string& left, bool leftIsNull,
                              const std::string& right, bool rightIsNull,
                              bool nullsLast = true) {
@@ -5277,6 +5324,8 @@ bool ParallelGroupAggregateOp::open() try {
     usedParallelWorkers_ = false;
     if (!child_->open()) return false;
     const auto expressionOrigin = child_->scanOrigin();
+    ExprEvaluator aggregateComparator;
+    aggregateComparator.setCurrentDB(expressionOrigin.dbname);
 
     struct InputRow {
         std::string raw;
@@ -5480,6 +5529,9 @@ bool ParallelGroupAggregateOp::open() try {
         std::string selected;
         bool boolSeen = false;
         bool boolValue = func == "bool_and" || func == "every";
+        std::optional<DeclaredAggregateLess> declaredOrder;
+        if ((func == "min" || func == "max") && argIndex < tbl_.len)
+            declaredOrder.emplace(tbl_.cols[argIndex], aggregateComparator);
         for (size_t rowId : rowIds) {
             const auto& row = input[rowId];
             bool passes = true;
@@ -5530,9 +5582,12 @@ bool ParallelGroupAggregateOp::open() try {
                     }
                 }
             } else if (func == "min" || func == "max") {
-                if (!hasValue || (func == "min"
-                        ? compareNonNullAggregateValue(value, selected) < 0
-                        : compareNonNullAggregateValue(value, selected) > 0)) {
+                const bool replaces = hasValue && (declaredOrder
+                    ? (func == "min" ? declaredOrder->less(value, selected)
+                                     : declaredOrder->less(selected, value))
+                    : (func == "min" ? compareNonNullAggregateValue(value, selected) < 0
+                                     : compareNonNullAggregateValue(value, selected) > 0));
+                if (!hasValue || replaces) {
                     selected = value; hasValue = true;
                 }
             } else if (func == "bool_and" || func == "every" || func == "bool_or") {
@@ -6080,6 +6135,8 @@ bool GroupAggregateOp::open() try {
     pos_ = 0;
     if (!child_->open()) return false;
     const auto expressionOrigin = child_->scanOrigin();
+    ExprEvaluator aggregateComparator;
+    aggregateComparator.setCurrentDB(expressionOrigin.dbname);
 
     struct InputRow {
         std::string raw;
@@ -6183,6 +6240,9 @@ bool GroupAggregateOp::open() try {
         std::string selected;
         bool boolSeen = false;
         bool boolValue = func == "bool_and" || func == "every";
+        std::optional<DeclaredAggregateLess> declaredOrder;
+        if ((func == "min" || func == "max") && argIndex < tbl_.len)
+            declaredOrder.emplace(tbl_.cols[argIndex], aggregateComparator);
 
         for (size_t rowId : rowIds) {
             const auto& row = input[rowId];
@@ -6234,9 +6294,12 @@ bool GroupAggregateOp::open() try {
                     catch (...) { exactSumOk = false; }
                 }
             } else if (func == "min" || func == "max") {
-                if (!hasValue || (func == "min"
-                        ? compareNonNullAggregateValue(value, selected) < 0
-                        : compareNonNullAggregateValue(value, selected) > 0)) {
+                const bool replaces = hasValue && (declaredOrder
+                    ? (func == "min" ? declaredOrder->less(value, selected)
+                                     : declaredOrder->less(selected, value))
+                    : (func == "min" ? compareNonNullAggregateValue(value, selected) < 0
+                                     : compareNonNullAggregateValue(value, selected) > 0));
+                if (!hasValue || replaces) {
                     selected = value;
                     hasValue = true;
                 }
