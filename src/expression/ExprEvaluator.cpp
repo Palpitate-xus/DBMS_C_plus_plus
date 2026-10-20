@@ -10540,11 +10540,16 @@ void ExprEvaluator::registerBuiltins() {
         const std::string input = textArgumentValue(a[0]);
         std::string result;
         result.reserve(input.size());
-        const size_t characters = utf8CharCount(input);
-        for (size_t i = characters; i > 0; --i) {
-            const size_t begin = utf8ByteAt(input, i - 1);
-            const size_t end = utf8ByteAt(input, i);
+        // Walk validated UTF-8 code points once, from the end. Repeated
+        // character-index lookups would rescan every prefix (quadratic work).
+        // Reverse code points, not bytes or user-perceived grapheme clusters.
+        for (size_t end = input.size(); end > 0;) {
+            size_t begin = end - 1;
+            while (begin > 0 &&
+                   (static_cast<unsigned char>(input[begin]) & 0xc0) == 0x80)
+                --begin;
             result.append(input, begin, end - begin);
+            end = begin;
         }
         return ExprValue("text", result, false);
     };

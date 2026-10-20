@@ -2,6 +2,26 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R181 UTF-8 REVERSE uses one backwards pass instead of repeated prefix scans",
+      "gap_ids": [
+        "FUNC-01"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r181-reverse-linear.md"
+      ],
+      "tests": [
+        "tests/reverse_linear_test.cpp",
+        "tests/reverse_linear_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "reproduction": "Old80native and96protocol semantics both pass; O(n squared) prefix scans show large-input latency. Not a compatibility-value failure; timings have no threshold assertions.",
+        "focused_tests": "PG complete96 actual0. Root and accepted-only clean each full19=11native+5wire+3genuineMain actual0. New80/96, old full294/80/190/654 retained; no test, timeout, durability or error oracle weakened.",
+        "build": "Each73objects15currentbinaries127headers verified. Fresh1production2native;57production9native1stub verifieddonors, not fresh. Clean genuineMain fresh3, Root genuineMain3 verifieddonors, both newlylinked currentlibrary with acceptedtestbody provenance. Root normal1compile/link and repeat0compile0link. Clean explicit compile/link only. All2203 accepted source blobs equal testedclean; Root2322 preserves foreign bytes and preinstall2320source118cache recovery.",
+        "scope": "Finite performance fix only. Accepted601MD919native567wire3Main1489;Root604MD925native573wire3Main1501. Original12foreignentries separated; original273 unchanged22complete166partial70unverified15deferred. R180 user-deferred, other skips not resumed; R164 remains unresolved. No full1489/full72/TLS/full-engine sanitizer claim. No push, Actions disabled."
+      }
+    },
+    {
       "issue": "R180 explicitly skipped by user; unresolved, no product fix",
       "gap_ids": [
         "FUNC-01",

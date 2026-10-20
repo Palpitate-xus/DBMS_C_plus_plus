@@ -1,5 +1,17 @@
 # 2026-10-13 全仓库代码审查
 
+最新有限修复：[R181 REVERSE线性扫描](issue-review-r181-reverse-linear.md)消除长文本反转的平方级前缀扫描，
+保留UTF-8码点、TEXT/CHAR、NULL、BYTEA及实参求值语义；这是性能修复，不是旧版兼容性错值。
+PG完整96、旧版完整96及native80语义全0；Root及accepted-only clean各19入口实际全0，
+包含新80/96、原294/80/190/654及三个新链接当前库的真实Main，clean本轮fresh3、Root验证复用3。
+每侧73对象15程序/127头已核对；fresh1生产/2native，57生产/9native/stub为已验证donor。
+Root normal1CPP并链接、repeat零编译零链接；clean显式编译，未冒称normal/repeat或donor fresh。
+全部2203已接受源码投影与tested clean一致；Root2322保留其他改动及2320源码/118缓存恢复副本。
+跟踪601份MD、919native+567注册Python+3Main=1489入口；工作区604份MD、925+573+3=1501，
+原12未接受入口和三份文档仍分离；不是1489全量、完整72、TLS或整库sanitizer验收。
+R180按最新skip it暂缓，其他暂缓不恢复；R164超时仍未解决。原273仍22/166/70/15，总目标未完成。
+不push，Actions禁用。以下记录中的状态和数量均指记录当时。
+
 最新用户暂缓：[R180 POSITION语法/参数约定](issue-review-r180-position-call-identity.md)按最新“skip it”停止实现。
 两侧各24次观察及修改方法继续保留；没有生产修改、注册测试或修复通过声明，普通continue不恢复本项。
 下一项独立审查为字符串REVERSE的重复UTF-8前缀扫描；目前仅源码观察，尚未验收修复。
