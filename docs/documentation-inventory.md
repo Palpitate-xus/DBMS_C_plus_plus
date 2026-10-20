@@ -1,9 +1,10 @@
 # 全部文档检查清单
 
-最新开放：[R177分组聚合排序与计算目标](issue-review-r177-grouped-aggregate-order.md)已完成PG及当前版本各128次响应采集，
-复现分组ASC浮点求和、DISTINCT SUM、键求值/重执行缺失、FILTER false拒绝及计算目标丢列；
-产品4个DataRow字段数错误仍为失败，无传输中断并确认清理。51处诊断签名差异不是51个独立缺陷。
-本项尚无生产修复或新注册测试；R164超时、R176其余边界及原273未完成状态保留，用户暂缓分支不恢复。
+用户已暂缓：[R177分组聚合排序与计算目标](issue-review-r177-grouped-aggregate-order.md)。
+原始128/扩展142观察、4个协议字段数失败及独立候选保留；候选只有语法检查，
+没有本项候选运行验收、生产修复提交或新注册入口，不把跳过写成已修复。
+继续其他独立普通SQL问题，不恢复R177、R173、R156等用户暂缓分支。
+R164超时及原273未完成状态不变；不push，Actions禁用。
 
 ## 当前版本：R176有限排序修复，完整矩阵仍有失败
 
@@ -387,7 +388,7 @@ R173函数签名类型依赖及R176真实聚合排序仍独立开放；R156等�
 | [docs/issue-review-r174-ordinary-source-descriptor.md](issue-review-r174-ordinary-source-descriptor.md) | computed来源声明及typmod的有限修复、两端70入口证据及未完成边界 | 通过 |
 | [docs/issue-review-r175-ordinary-aggregate-identity.md](issue-review-r175-ordinary-aggregate-identity.md) | SUM/COUNT入口及decoded列身份的有限修复、两端70入口证据及未完成边界 | 通过 |
 | [docs/issue-review-r176-ordinary-aggregate-order-keys.md](issue-review-r176-ordinary-aggregate-order-keys.md) | 普通SUM/COUNT排序键有限修复、61/190通过、Root72通过及两次clean72超时失败；其余边界开放 | 部分 |
-| [docs/issue-review-r177-grouped-aggregate-order.md](issue-review-r177-grouped-aggregate-order.md) | 分组聚合排序/DISTINCT/投影及4个协议字段数缺陷、双侧128次观察与修改方法；未修复 | 部分 |
+| [docs/issue-review-r177-grouped-aggregate-order.md](issue-review-r177-grouped-aggregate-order.md) | 用户暂缓；128/扩展142观察及未验收候选保留，无生产修复或新增注册测试 | 暂缓 |
 | [docs/issue-review-r18-catalog-value-snapshots.md](issue-review-r18-catalog-value-snapshots.md) | 历史问题证据 | 通过 |
 | [docs/issue-review-r19-stale-temp-startup.md](issue-review-r19-stale-temp-startup.md) | 历史问题证据 | 通过 |
 | [docs/issue-review-r20-returning-query-owner.md](issue-review-r20-returning-query-owner.md) | 历史问题证据 | 通过 |

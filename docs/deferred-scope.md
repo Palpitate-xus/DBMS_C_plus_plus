@@ -1,5 +1,14 @@
 # User-deferred scope and ordinary incomplete work
 
+On 2026-10-20 the user explicitly said "skip it" while R177 grouped ordinary
+aggregate ORDER/DISTINCT/projection work was active. This investigation remains
+unresolved and deferred; its observed failures and isolated unaccepted candidate
+are preserved in [the R177 record](issue-review-r177-grouped-aggregate-order.md).
+No R177 production fix or registered regression is accepted. A generic continuation
+does not resume this module. Independent ordinary SQL correctness remains in
+scope, R164 remains unresolved rather than deferred, and the original273 ledger
+and its15 original deferred items are unchanged.
+
 The user subsequently also asked to skip the CTAS / background checkpoint investigation. That specific investigation remains unresolved and deferred separately from the original 15 ledger entries; it does not defer all catalog, storage, recovery or ordinary query correctness work. Existing regression observations remain evidence, not a completion claim. Current review findings are recorded in [the review index](review-index.md).
 
 The user also separately deferred R15 (shutdown wake-order). On 2026-10-14 the

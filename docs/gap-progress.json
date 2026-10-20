@@ -2,6 +2,23 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R177 grouped aggregate investigation explicitly skipped by user; unresolved",
+      "gap_ids": [
+        "SQL-04",
+        "PROTO-04"
+      ],
+      "status": "deferred_by_user",
+      "evidence": [
+        "docs/issue-review-r177-grouped-aggregate-order.md",
+        "docs/deferred-scope.md"
+      ],
+      "tests": [],
+      "verification": {
+        "production_fix": false,
+        "scope": "Additional investigation deferral only; original273 item states unchanged. R177 draft remains outside Root, syntax-only/no candidate DB execution; not accepted or committed as a product fix. Original V3 128 and V4 142 observations and4 protocol defects retained. No generic continue resumes R177. R164 remains ordinary unresolved, no push, Actions disabled."
+      }
+    },
+    {
       "issue": "R177 grouped ordinary aggregate ORDER, DISTINCT and computed target defects observed; not fixed",
       "gap_ids": [
         "SQL-04",
