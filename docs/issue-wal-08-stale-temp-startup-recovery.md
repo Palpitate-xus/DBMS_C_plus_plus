@@ -32,8 +32,30 @@ existing fail-closed rebuild path.
   temporary owned-sequence setup and cleanup remain unchanged.
 - `git diff --check` — passed before commit.
 
-No full registered suite, standalone executable build, WAL-bearing temp crash
-matrix, or PostgreSQL 18.6 differential was run for this fix.
+At the initial isolated fix, no full registered suite, standalone executable
+build, WAL-bearing temp crash matrix, or PostgreSQL 18.6 differential was run.
+
+## Subsequent frozen full-suite observation
+
+The original registered 1492-entry run on frozen
+`2442e4c77030e3ba9fd9a7ff86ee270245fb1770` has now terminated. It recorded
+`stale_temp_startup_recovery_test`, `temp_table_ddl_test`, and
+`temp_serial_owned_sequence_test` as PASS in that same run. The native fixtures
+were freshly compiled and linked against byte-verified matching production
+objects. This supersedes treating an older startup abort as the latest result
+for this fixture; it does not change or erase the older failure evidence.
+
+The overall run returned 1: 1481 PASS and 11 FAIL, with all 1492 entries observed.
+It is not a current-HEAD full-suite pass, a fresh compilation of all production
+units, or evidence for the missing crash/recovery matrix below.
+
+Terminal receipt:
+`/tmp/dbms-accepted2442-full1492.9obmw81r/completed-canonical-receipt.json`,
+SHA256 `4005e670928e604302ca4b9073b24bb87064d3d136feea03a7a962e5ac6650ca`.
+Original log:
+`/tmp/dbms-accepted2442-full1492.9obmw81r/canonical-full-registered.log`,
+SHA256 `66d5b5ffd1e20f8c1cbce0c827079fc37804f0a951f6db7d2866bb5f313f15ba`.
+These are local temporary evidence, not a portable release artifact.
 
 ## Remaining gaps
 
