@@ -3343,19 +3343,41 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
 
     // String concatenation; SQL arrays concatenate as arrays (PG ||).
     if (op == "||") {
+        // Raw primitive Bind evaluation also owns genuine UNKNOWN SQL
+        // literals. Convert already-evaluated datums, never invoke an
+        // operand twice or reinterpret typed/native cells as literals.
+        const auto unknownLiteral=[](const Expr* expression) {
+            const auto* literal=dynamic_cast<const LiteralExpr*>(expression);
+            return literal && literal->typeName.empty() && !literal->preparedSubquery &&
+                !literal->analyzedPrimitiveConstant && ExprHelper::inferParsedInputType(literal)=="unknown";
+        };
+        const auto codec=[](const ExprValue& other) {
+            const auto type=ExprHelper::canonicalResultTypeName(other.typeName);
+            return type=="bytea"?std::string("bytea"):
+                (type=="bit" || type=="bit varying")?std::string("bit varying"):std::string();
+        };
+        if (unknownLiteral(e->left.get())) {
+            const auto target=codec(r);if(!target.empty())l=evalCast(nullptr,ctx,l,target);
+        }
+        if (unknownLiteral(e->right.get())) {
+            const auto target=codec(l);if(!target.empty())r=evalCast(nullptr,ctx,r,target);
+        }
         const bool leftBit = isBitStringTypeName(l.typeName);
         const bool rightBit = isBitStringTypeName(r.typeName);
-        if (leftBit || rightBit) {
-            if (!leftBit || !rightBit) {
+        if (leftBit != rightBit) {
+            const auto other=ExprHelper::canonicalResultTypeName(leftBit?r.typeName:l.typeName);
+            if (other!="text" && other!="character varying" && other!="character" &&
+                other!="name" && other!="\"char\"")
                 throw DbError("42883", "operator does not exist for bit and non-bit operands");
-            }
-            if (l.isNull || r.isNull) return ExprValue("bit", "", true);
+        }
+        if (leftBit && rightBit) {
+            if (l.isNull || r.isNull) return ExprValue("bit varying", "", true);
             if (l.value.size() > kMaxSupportedBitStringLength ||
                 r.value.size() >
                     kMaxSupportedBitStringLength - l.value.size()) {
                 throw DbError("54000", "bit string is too long");
             }
-            return ExprValue("bit", l.value + r.value, false);
+            return ExprValue("bit varying", l.value + r.value, false);
         }
         const bool byteaResult = isCanonicalByteaType(l.typeName) &&
                                  isCanonicalByteaType(r.typeName);

@@ -19845,6 +19845,32 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
         for(const auto& item:query->orderBy)if(arrayExpression(item.expr.get(),prepared))return true;
         return false;
     };
+    // A single physical bit-negation target has an existing scalar AST
+    // plan. Keep it out of the legacy string/callee adapter, but do not
+    // admit routines, SRFs, windows or arbitrary physical ProjectSet here.
+    function<bool(const dbms::Expr*)> bitSyntax = [&](const dbms::Expr* value) {
+        if (!value || value->preparedSubquery) return false;
+        if (dynamic_cast<const dbms::ColumnRefExpr*>(value) ||
+            dynamic_cast<const dbms::LiteralExpr*>(value) ||
+            dynamic_cast<const dbms::ParameterExpr*>(value)) return true;
+        if (const auto* cast=dynamic_cast<const dbms::CastExpr*>(value))
+            return bitSyntax(cast->operand.get());
+        if (const auto* unary=dynamic_cast<const dbms::UnaryOpExpr*>(value))
+            return unary->op=="~" && bitSyntax(unary->operand.get());
+        if (const auto* binary=dynamic_cast<const dbms::BinaryOpExpr*>(value)) {
+            static const set<string> operators={"::","||","&","|","#","<<",">>"};
+            return operators.count(binary->op) && bitSyntax(binary->left.get()) && bitSyntax(binary->right.get());
+        }
+        return false;
+    };
+    const auto bitNegation = [&](const dbms::SelectStmt* query,bool bound) {
+        if (!query || query->selectList.size()!=1) return false;
+        const auto* unary=dynamic_cast<const dbms::UnaryOpExpr*>(query->selectList.front().expr.get());
+        if (!unary || unary->op!="~" || !bitSyntax(unary->operand.get())) return false;
+        if (!bound) return true;
+        const auto type=dbms::ExprHelper::inferParsedInputType(unary->operand.get(),{},session.currentDB,&g_engine);
+        return type=="bit" || type=="bit varying";
+    };
     const bool possibleArray = queryArrays(candidate,false);
     if(possibleArray && dbms::SQLParser::isDatabaseIndependentQuery(*candidate))return false;
     const auto roles = scalarQueryRoles(candidate->whereClause.get());
@@ -19863,6 +19889,10 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
         (candidate->whereClause || candidate->limit || candidate->offset);
     const bool physicalColumnCandidate = candidate->fromClause &&
         candidate->fromClause->type == dbms::FromItem::Type::Table;
+    const bool possibleBitNegation=physicalColumnCandidate && candidate->ctes.empty() &&
+        candidate->setOp==dbms::SetOp::None && candidate->groupBy.empty() &&
+        candidate->groupByElems.empty() && !candidate->having && candidate->windowDefs.empty() &&
+        candidate->locking.empty() && bitNegation(candidate,false);
     if ((!roles.first && !scalarOrder && !possibleArray && !fromlessDemand &&
          !physicalColumnCandidate) || roles.second) return false;
     // Additional multirow roles in targets/order also need their own lowering;
@@ -19877,7 +19907,7 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
         // aliases retain their established consumers. This plan lowers a
         // single actual base range; no alternate namespace is fabricated.
         if (!g_engine.tableExists(session.currentDB, physical)) return false;
-        if (!roles.first && !scalarOrder && !possibleArray && !fromlessDemand) {
+        if (!roles.first && !scalarOrder && !possibleArray && !fromlessDemand && !possibleBitNegation) {
             const auto schema = g_engine.getTableSchema(session.currentDB, physical);
             if (none_of(schema.cols, schema.cols + schema.len,
                         [](const dbms::Column& column) { return column.isArray; })) return false;
@@ -19899,7 +19929,8 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
     auto* select = static_cast<dbms::SelectStmt*>(prepared.ast.get());
     const bool arrayOutput = any_of(prepared.output.begin(), prepared.output.end(),
         [](const dbms::QueryOutputColumn& column) { return dbms::array_detail::isArray(column.type); });
-    if(!roles.first && !scalarOrder && !queryArrays(select,true) && !arrayOutput && !fromlessDemand)return false;
+    const bool bitNegationOutput=possibleBitNegation && bitNegation(select,true);
+    if(!roles.first && !scalarOrder && !queryArrays(select,true) && !arrayOutput && !fromlessDemand && !bitNegationOutput)return false;
     // Preserve column grants on precisely the bound source cells used by
     // this query (including correlated child references), not SELECT *.
     if (select->fromClause && !sessionIsAdmin(session)) {

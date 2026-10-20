@@ -608,6 +608,9 @@ public:
                 coerceCaseInput(unary->operand,type,target);
                 return target;
             }
+            const auto unaryType=common_type_detail::canonical(type);
+            if (op=="~" && (unaryType=="bit" || unaryType=="bit varying"))
+                return declaredType("bit",unary);
             return op == "not" || op.rfind("is ", 0) == 0 ? "boolean" : type;
         }
         case ExprType::BinaryOp: {
@@ -689,13 +692,43 @@ public:
                         metadata.assignmentInput({"",binary->arrayConcat->leftType},binary->left.get(),left);
                         metadata.assignmentInput({"",binary->arrayConcat->rightType},binary->right.get(),right);
                     }
-                    return binary->arrayConcat->elementType + "[]";
+                    return declaredType(binary->arrayConcat->elementType + "[]",binary);
                 }
-                // A surviving internal-char scalar concatenation selects
-                // text's non-array overload, not the left operand's type.
-                if (common_type_detail::canonical(left)=="\"char\"" ||
-                    common_type_detail::canonical(right)=="\"char\"")
-                    return declaredType("text",binary);
+                auto concatLeft=common_type_detail::canonical(left);
+                auto concatRight=common_type_detail::canonical(right);
+                const auto bit=[](const std::string& type) {
+                    return type=="bit" || type=="bit varying";
+                };
+                const auto unknownLeaf=[](const Expr* expression) {
+                    const auto* literal=dynamic_cast<const LiteralExpr*>(expression);
+                    return dynamic_cast<const ParameterExpr*>(expression) ||
+                        (literal && literal->typeName.empty() && !literal->preparedSubquery);
+                };
+                // A genuine UNKNOWN literal/parameter takes the other known
+                // byte/bit input codec. Never evaluate a routine or query to
+                // discover a type, nor treat an opaque callback as a literal.
+                if (concatLeft=="unknown" && unknownLeaf(binary->left.get()) &&
+                    (concatRight=="bytea" || bit(concatRight))) {
+                    concatLeft=bit(concatRight)?"bit varying":"bytea";
+                    coerceCaseInput(binary->left,left,concatLeft);
+                }
+                if (concatRight=="unknown" && unknownLeaf(binary->right.get()) &&
+                    (concatLeft=="bytea" || bit(concatLeft))) {
+                    concatRight=bit(concatLeft)?"bit varying":"bytea";
+                    coerceCaseInput(binary->right,right,concatRight);
+                }
+                if (bit(concatLeft) && bit(concatRight))
+                    return declaredType("bit varying",binary);
+                if (concatLeft=="bytea" && concatRight=="bytea")
+                    return declaredType("bytea",binary);
+                // Structured || execution has separate existing gaps; retain
+                // its prior descriptor instead of relabelling it as TEXT.
+                if ((concatLeft=="jsonb" || concatLeft=="tsvector" ||
+                     concatRight=="jsonb" || concatRight=="tsvector") &&
+                    common_type_detail::category(concatLeft)!='S' &&
+                    common_type_detail::category(concatRight)!='S')
+                    return left;
+                return declaredType("text",binary);
             }
             static const std::set<std::string> predicates = {"=", "<>", "!=", "<", ">", "<=", ">=",
                 "AND", "OR", "LIKE", "NOT LIKE", "ILIKE", "NOT ILIKE",
@@ -790,6 +823,13 @@ public:
                     coerceCaseInput(member,memberType,comparison.rightType);
                 }
             }
+            // VARBIT concatenation can feed fixed-result bit operators.
+            // Their output declaration does not inherit a VARBIT operand.
+            const bool leftBits=leftBase=="bit" || leftBase=="bit varying";
+            const bool rightBits=rightBase=="bit" || rightBase=="bit varying";
+            if ((leftBits && rightBits && (operation=="&" || operation=="|" || operation=="#")) ||
+                (leftBits && (operation=="<<" || operation==">>")))
+                return declaredType("bit",binary);
             // A predicate's result identity is the catalog-owned boolean,
             // not either input OID (and not an untyped label with OID zero).
             if(const auto type=arithmetic_detail::resultType(binary->op,left,right))

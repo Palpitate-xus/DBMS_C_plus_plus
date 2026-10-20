@@ -2656,6 +2656,115 @@ void validatePreparedStoredSignatures(const std::string& sql,Session& session,
 // its direct wire parameters from those declarations without evaluating a
 // callback, rendering a NULL literal, or treating occurrence slots as $n.
 // Other expression/query shapes keep their existing inference owners.
+// Derive selected concatenation input codecs from the ordinary metadata
+// binder. Source spans identify wire parameters; values and routines are
+// never executed. Explicit wire OIDs keep ownership of their declarations.
+void inferProtocolConcatParameters(const std::string& sql,Session& session,
+                                   std::vector<uint32_t>& parameterOids) {
+    if(std::find(parameterOids.begin(),parameterOids.end(),0)==parameterOids.end())return;
+    SQLParser parser;const auto parsed=parser.parseForBinding(sql);
+    if(!parsed.isValid() || !dynamic_cast<const SelectStmt*>(parsed.stmt.get()))return;
+    std::function<void(const Expr*)> observe;
+    std::function<void(const Expr*)> expression;
+    std::function<void(const Stmt*)> statement;
+    std::function<void(const FromItem*)> source;
+    expression=[&](const Expr* value) {
+        if(!value)return;
+        observe(value);
+        if(value->preparedSubquery)statement(value->preparedSubquery.get());
+        if(const auto* binary=dynamic_cast<const BinaryOpExpr*>(value)) {
+            expression(binary->left.get());if(binary->op!="::")expression(binary->right.get());
+        } else if(const auto* cast=dynamic_cast<const CastExpr*>(value))expression(cast->operand.get());
+        else if(const auto* unary=dynamic_cast<const UnaryOpExpr*>(value))expression(unary->operand.get());
+        else if(const auto* call=dynamic_cast<const FunctionCallExpr*>(value)) {
+            for(const auto& argument:call->args)expression(argument.get());
+            for(const auto& argument:call->namedArgs)expression(argument.value.get());
+            for(const auto& key:call->aggregateOrderKeys)expression(key.expr.get());
+            expression(call->filter.get());
+        } else if(const auto* conditional=dynamic_cast<const CaseExpr*>(value)) {
+            expression(conditional->switchExpr.get());expression(conditional->elseExpr.get());
+            for(const auto& arm:conditional->whenClauses){expression(arm.first.get());expression(arm.second.get());}
+        } else if(const auto* array=dynamic_cast<const ArrayExpr*>(value))
+            for(const auto& member:array->elements)expression(member.get());
+        else if(const auto* row=dynamic_cast<const RowExpr*>(value))
+            for(const auto& member:row->elements)expression(member.get());
+        else if(const auto* quantified=dynamic_cast<const QuantifiedComparisonExpr*>(value)) {
+            expression(quantified->left.get());expression(quantified->right.get());
+        }
+    };
+    source=[&](const FromItem* value) {
+        if(!value)return;
+        source(value->left.get());source(value->right.get());expression(value->joinCondition.get());
+        if(value->subquery)statement(value->subquery.get());
+    };
+    statement=[&](const Stmt* value) {
+        const auto* select=dynamic_cast<const SelectStmt*>(value);if(!select)return;
+        for(const auto& cte:select->ctes)statement(cte.query.get());
+        statement(select->setOpLhs.get());statement(select->setOpRhs.get());source(select->fromClause.get());
+        for(const auto& item:select->selectList)expression(item.expr.get());
+        expression(select->whereClause.get());expression(select->having.get());
+        for(const auto& key:select->groupBy)expression(key.get());
+        for(const auto& key:select->orderBy)expression(key.expr.get());
+        for(const auto& row:select->valuesRows)for(const auto& member:row)expression(member.get());
+    };
+    bool concatenation=false;
+    observe=[&](const Expr* value) {
+        if(const auto* binary=dynamic_cast<const BinaryOpExpr*>(value))
+            concatenation=concatenation || binary->op=="||";
+    };
+    statement(parsed.stmt.get());if(!concatenation)return;
+    auto* previous=currentSession();setCurrentSession(&session);
+    struct Restore {Session* previous;~Restore(){setCurrentSession(previous);}} restore{previous};
+    const auto prepared=g_engine.prepareBoundQuery(session.currentDB,sql,
+        protocolMetadataParameters(session,parameterOids));
+    struct Input {size_t begin,position;uint32_t oid;};
+    std::vector<Input> selected;
+    const auto capture=[&](const Expr* input,std::string target) {
+        if(const auto* cast=dynamic_cast<const CastExpr*>(input)) {
+            if(!cast->implicit)return;
+            target=cast->typeName;input=cast->operand.get();
+        }
+        const auto* parameter=dynamic_cast<const ParameterExpr*>(input);
+        if(!parameter || parameter->origin!=ParameterOrigin::MetadataPlaceholder)return;
+        const auto canonical=ExprHelper::canonicalResultTypeName(target);
+        const auto oid=mapBuiltinTypeNameToOid(canonical);
+        if(!oid || oid==705)return; // do not invent a catalog OID for a custom input
+        const auto use=std::find_if(prepared.uses.begin(),prepared.uses.end(),[&](const auto& use) {
+            return use.slot==parameter->slot && use.begin==parameter->sourceBegin && use.end==parameter->sourceEnd;
+        });
+        if(use==prepared.uses.end())throw DbError("XX000","concat parameter has no source provenance");
+        const auto spelling=prepared.source.substr(use->begin,use->end-use->begin);
+        if(spelling.size()<2 || spelling.front()!='$' ||
+           !std::all_of(spelling.begin()+1,spelling.end(),[](unsigned char c){return std::isdigit(c);}))
+            throw DbError("XX000","invalid concat parameter provenance");
+        const auto position=std::stoul(spelling.substr(1));
+        if(!position || position>parameterOids.size())throw DbError("42P02","invalid concat parameter");
+        if(!parameterOids[position-1])selected.push_back({use->begin,position,oid});
+    };
+    observe=[&](const Expr* value) {
+        const auto* binary=dynamic_cast<const BinaryOpExpr*>(value);
+        if(!binary || binary->op!="||")return;
+        if(binary->arrayConcat) {
+            capture(binary->left.get(),binary->arrayConcat->leftType);
+            capture(binary->right.get(),binary->arrayConcat->rightType);
+        } else {
+            const auto output=ExprHelper::inferParsedInputType(binary,{},session.currentDB,&g_engine);
+            if(output=="text" || output=="bytea" || output=="bit varying") {
+                capture(binary->left.get(),output);capture(binary->right.get(),output);
+            }
+        }
+    };
+    statement(prepared.ast.get());
+    std::stable_sort(selected.begin(),selected.end(),[](const auto& left,const auto& right){return left.begin<right.begin;});
+    auto inferred=parameterOids;
+    for(const auto& input:selected)if(!inferred[input.position-1])inferred[input.position-1]=input.oid;
+    if(inferred==parameterOids)return;
+    // The final shared declarations are validated together before publishing;
+    // a failed preparation cannot partially mutate the retained statement.
+    (void)g_engine.prepareBoundQuery(session.currentDB,sql,protocolMetadataParameters(session,inferred));
+    parameterOids=std::move(inferred);
+}
+
 void inferProtocolWholeScalarParameters(const std::string& sql,Session& session,
                                        std::vector<uint32_t>& parameterOids) {
     if(std::find(parameterOids.begin(),parameterOids.end(),0)==parameterOids.end())return;
@@ -3064,9 +3173,48 @@ bool protocolConstantBitBetween(const Stmt& statement,Session& session) {
     return std::all_of(range->args.begin(), range->args.end(), [&](const auto& input) {return primitive(input.get());});
 }
 
+bool describePreparedBitNegation(const std::string& sql,Session& session,
+    std::vector<PgColumnDescription>& columns,const std::vector<uint32_t>& parameterOids) {
+    SQLParser parser;const auto parsed=parser.parseForBinding(sql);
+    const auto* select=parsed.isValid()?dynamic_cast<const SelectStmt*>(parsed.stmt.get()):nullptr;
+    if(!select || !select->fromClause || select->fromClause->type!=FromItem::Type::Table ||
+       select->selectList.size()!=1 || !select->ctes.empty() || select->setOp!=SetOp::None ||
+       !select->groupBy.empty() || !select->groupByElems.empty() || select->having ||
+       !select->windowDefs.empty() || !select->locking.empty())return false;
+    const auto* unary=dynamic_cast<const UnaryOpExpr*>(select->selectList.front().expr.get());
+    if(!unary || unary->op!="~")return false;
+    std::function<bool(const Expr*)> syntax=[&](const Expr* value) {
+        if(!value || value->preparedSubquery)return false;
+        if(dynamic_cast<const ColumnRefExpr*>(value) || dynamic_cast<const LiteralExpr*>(value) ||
+           dynamic_cast<const ParameterExpr*>(value))return true;
+        if(const auto* cast=dynamic_cast<const CastExpr*>(value))return syntax(cast->operand.get());
+        if(const auto* child=dynamic_cast<const UnaryOpExpr*>(value))return child->op=="~" && syntax(child->operand.get());
+        if(const auto* binary=dynamic_cast<const BinaryOpExpr*>(value)) {
+            static const std::set<std::string> operators={"::","||","&","|","#","<<",">>"};
+            return operators.count(binary->op) && syntax(binary->left.get()) && syntax(binary->right.get());
+        }
+        return false;
+    };
+    if(!syntax(unary->operand.get()))return false;
+    auto* previous=currentSession();setCurrentSession(&session);
+    struct Restore {Session* previous;~Restore(){setCurrentSession(previous);}} restore{previous};
+    const auto prepared=g_engine.prepareBoundQuery(session.currentDB,sql,
+        protocolMetadataParameters(session,parameterOids));
+    const auto* bound=static_cast<const SelectStmt*>(prepared.ast.get());
+    const auto* target=dynamic_cast<const UnaryOpExpr*>(bound->selectList.front().expr.get());
+    if(!target)return false;
+    const auto input=ExprHelper::inferParsedInputType(target->operand.get(),{},session.currentDB,&g_engine);
+    if(input!="bit" && input!="bit varying")return false;
+    QueryResult shape;
+    for(const auto& field:prepared.output){shape.columns.push_back(field.name);shape.columnTypes.push_back(field.type);}
+    columns=describeProtocolColumns(shape,sql,session,&prepared.output);
+    return !columns.empty();
+}
+
 bool describePreparedResult(const std::string& sql, Session& session,
                             std::vector<PgColumnDescription>& columns,
                             const std::vector<uint32_t>& parameterOids = {}) {
+    if (describePreparedBitNegation(sql,session,columns,parameterOids)) return true;
     if (describePreparedHavingResult(sql, session, columns, parameterOids)) return true;
     if (describePreparedConflictPredicateResult(sql, session, columns, parameterOids)) return true;
     if(describePreparedRecursiveCteResult(sql,session,columns,parameterOids))return true;
@@ -6994,6 +7142,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             }
             try {
                 notePreparedTemporaryObjectAccess(sql, session);
+                inferProtocolConcatParameters(sql,session,parameterTypes);
                 inferProtocolWholeScalarParameters(sql,session,parameterTypes);
                 validatePreparedAggregateOrderInputs(sql,session,parameterTypes);
                 validatePreparedStoredSignatures(sql,session,parameterTypes);

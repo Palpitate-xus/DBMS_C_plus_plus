@@ -3,6 +3,7 @@
 
 import importlib.util
 import struct
+import sys
 from pathlib import Path
 
 
@@ -13,10 +14,21 @@ def main():
     runner = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(runner)
     client = runner.load_protocol_client()
-    server = runner.start_ours(client)
+    reference = sys.argv[1:] in (['--reference'], ['--reference18'])
+    assert not sys.argv[1:] or reference
+    server = None
+    if reference:
+        import socket
+        host, port, user, database, password = runner._reference_connection_settings()
+        sock = socket.create_connection((host, port), timeout=runner.wire_timeout())
+        client.startup_reference(sock, user, database, password)
+        runner.verify_reference_version(client, sock)
+    else:
+        server = runner.start_ours(client)
+        sock = server['sock']
 
     def execute(sql):
-        messages = client.simple_query(server["sock"], sql)
+        messages = client.simple_query(sock, sql)
         return messages, runner.decode_wire_result(messages, include_types=True)
 
     def expect_error(sql, expected):
@@ -59,7 +71,7 @@ def main():
             "1001", "1", "1010", "4", "2", "010",
         ]], rows
         assert type_oids == [
-            1560, 1560, 1560, 1560, 1560, 1560, 1560, 23, 1560, 20, 23, 1560,
+            1560, 1560, 1560, 1560, 1560, 1560, 1562, 23, 1560, 20, 23, 1560,
         ], type_oids
         assert tag == "SELECT 1", tag
 
@@ -68,11 +80,24 @@ def main():
         expect_error("CREATE TABLE bad_bit (v BIT(0));", "22023")
 
         raw = struct.pack("!I", 5) + bytes([0b10101000])
+        # The shared legacy helper reads each Extended response before
+        # sending the next message. PostgreSQL buffers those responses until
+        # Flush/Sync; add Flush without changing its scenario or assertions.
+        class FlushedSocket:
+            def sendall(self, packet):
+                sock.sendall(packet + client.typed(b"H"))
+
+            def __getattr__(self, name):
+                return getattr(sock, name)
+
         client.extended_query_binary_parameter(
-            server["sock"], "bit", "SELECT $1::bit varying", 1562, raw, raw)
+            FlushedSocket(), "bit", "SELECT $1::bit varying", 1562, raw, raw)
         print("[BIT PROTOCOL E2E] passed")
     finally:
-        runner.stop_ours(server)
+        if server:
+            runner.stop_ours(server)
+        else:
+            sock.close()
 
 
 if __name__ == "__main__":

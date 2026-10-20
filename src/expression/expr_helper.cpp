@@ -322,7 +322,8 @@ std::string inferAstResultType(
                     "-" + literal->value);
             }
         }
-        return inferAstResultType(unary->operand.get(), typeHints, routineTypes);
+        const auto operandType=inferAstResultType(unary->operand.get(), typeHints, routineTypes);
+        return op=="~" && (operandType=="bit" || operandType=="bit varying")?"bit":operandType;
     }
     if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(expression)) {
         const std::string op = toLower(binary->op);
@@ -362,8 +363,20 @@ std::string inferAstResultType(
                 return binding->elementType + "[]";
             if ((left == "bit" || left == "bit varying") &&
                 (right == "bit" || right == "bit varying")) {
-                return "bit";
+                return "bit varying";
             }
+            const auto unknownLeaf=[](const Expr* expression) {
+                const auto* literal=dynamic_cast<const LiteralExpr*>(expression);
+                return dynamic_cast<const ParameterExpr*>(expression) ||
+                    (literal && literal->typeName.empty() && !literal->preparedSubquery);
+            };
+            const bool leftUnknown=left=="unknown" && unknownLeaf(binary->left.get());
+            const bool rightUnknown=right=="unknown" && unknownLeaf(binary->right.get());
+            if ((leftUnknown && right=="bytea") || (rightUnknown && left=="bytea"))
+                return "bytea";
+            if ((leftUnknown && (right=="bit" || right=="bit varying")) ||
+                (rightUnknown && (left=="bit" || left=="bit varying")))
+                return "bit varying";
             return left == "bytea" && right == "bytea" ? "bytea" : "text";
         }
         if (op == "&" || op == "|" || op == "#" ||
@@ -372,7 +385,7 @@ std::string inferAstResultType(
                 (left == "inet" || left == "cidr")) {
                 return "boolean";
             }
-            return left;
+            return left=="bit" || left=="bit varying"?"bit":left;
         }
         if (op == "+" || op == "-") {
             if (left == "money" && right == "money") return "money";
@@ -2287,6 +2300,24 @@ void ExprHelper::prepareArrayTypes(Expr* expression,
                 if (binary->arrayConcat) {
                     validateConst(binary->left.get(),binary->arrayConcat->leftType);
                     validateConst(binary->right.get(),binary->arrayConcat->rightType);
+                } else {
+                    const auto codec=[](const std::string& other) {
+                        return other=="bytea"?std::string("bytea"):
+                            (other=="bit" || other=="bit varying")?std::string("bit varying"):std::string();
+                    };
+                    const auto unknownLeaf=[](const Expr* expression) {
+                        const auto* literal=dynamic_cast<const LiteralExpr*>(expression);
+                        return dynamic_cast<const ParameterExpr*>(expression) ||
+                            (literal && literal->typeName.empty() && !literal->preparedSubquery);
+                    };
+                    if (leftType=="unknown" && unknownLeaf(binary->left.get())) {
+                        const auto target=codec(rightType);
+                        if (!target.empty())unknownInput(binary->left,leftType,target);
+                    }
+                    if (rightType=="unknown" && unknownLeaf(binary->right.get())) {
+                        const auto target=codec(leftType);
+                        if (!target.empty())unknownInput(binary->right,rightType,target);
+                    }
                 }
             }
             return;
