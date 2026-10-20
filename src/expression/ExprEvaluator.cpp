@@ -546,6 +546,14 @@ double ExprValue::asDouble() const {
     if (isNull || value.empty()) return 0.0;
     try {
         return std::stod(value);
+    } catch (const std::out_of_range&) {
+        // stod also reports ERANGE for representable subnormal values.
+        // Preserve the existing prefix parser and zero fallback, but retain
+        // finite nonzero results instead of silently discarding their value.
+        char* end = nullptr;
+        const double parsed = std::strtod(value.c_str(), &end);
+        return end != value.c_str() && std::isfinite(parsed) && parsed != 0.0
+            ? parsed : 0.0;
     } catch (...) {
         return 0.0;
     }
