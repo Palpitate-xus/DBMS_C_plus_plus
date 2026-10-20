@@ -34,7 +34,7 @@
 | `tests/postgres_protocol_test.py` | search_path 错误码预期 22023，实际 42601 | 用户明确跳过；不修改、不重试、不冒称通过。 |
 | `tests/transaction_begin_grammar_protocol_e2e_test.py` | aborted savepoint 内非法 BEGIN 预期 42601，实际 25P02 | 待核实：分别验证简单/扩展协议及 PostgreSQL 18 语法检查优先级，再定位状态门与解析分支；不能直接翻转预期。 |
 | `tests/copy_protocol_e2e_test.py` | 本连接 COPY 等待自身有效 CancelRequest 的 57014，读取超时 | 待核实会话中断状态生命周期和读等待唤醒；保留该测试及其原 15 秒超时，不以调大超时代替修复。 |
-| `tests/index_corruption_protocol_e2e_test.py` | COUNT 查询预期 XX001，实际返回精确堆结果 `1` | 待收集全部查询的真实执行计划；区分读取坏索引与独立堆读取，不让未使用该索引的堆查询无条件报错。 |
+| `tests/index_corruption_protocol_e2e_test.py` | 独立 COUNT 被错分为索引读取者，预期 XX001，实际返回精确堆结果 `1` | R194 以实际计划区分来源：五个索引读取者仍精确 XX001；独立 COUNT 精确 1/0，原 EXISTS 和全表结果保留，两套完整夹具通过。见 [夹具修复](issue-review-r194-index-reader-fixture.md)。 |
 | `tests/pg_class_query_protocol_e2e_test.py` | pg_class 的普通 COUNT 报 XX000：`mutation source descriptor differs from physical relation` | R193 接入真实七列虚拟来源，保留物理关系描述检查；未改原完整夹具，两套服务器定向通过。见 [修复及其他开放探针](issue-review-r193-pg-class-typed-source.md)。 |
 | `tests/temp_index_catalog_protocol_e2e_test.py` | 临时索引目录 COUNT 同样报上述 XX000 | R193 同一来源修复；完整发布、删除、savepoint/事务回滚和 DISCARD TEMP 均通过，每个原 COUNT 另查精确目录行值。见 [来源记录](issue-review-r193-pg-class-typed-source.md)。 |
 

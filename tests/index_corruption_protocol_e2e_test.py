@@ -53,12 +53,18 @@ def main():
         )
         for sql, rows in other_queries:
             assert expect(sql) == rows
-        index_queries = queries + tuple(sql for sql, _ in other_queries[:-1])
-        for sql in queries[:3]:
+        index_queries = queries[:3] + tuple(sql for sql, _ in other_queries[:-1])
+        for sql in index_queries:
             plan = expect("EXPLAIN " + sql)
             assert any(node in str(plan) for node in ("IndexScan", "BitmapHeapScan")), (sql, plan)
-        heap_queries = (other_queries[-1],
+        heap_queries = ((queries[3], [["1"]]),
+                        ("SELECT count(*) FROM corrupt_items WHERE state=99;", [["0"]]),
+                        other_queries[-1],
                         ("SELECT EXISTS(SELECT 1 FROM corrupt_items WHERE state=99);", [["f"]]))
+        for sql, _ in heap_queries[:2]:
+            plan = expect("EXPLAIN " + sql)
+            assert "TableScan(table=corrupt_items)" in str(plan), (sql, plan)
+            assert not any(node in str(plan) for node in ("IndexScan", "BitmapHeapScan")), (sql, plan)
         for sql, rows in heap_queries:
             assert expect(sql) == rows
 
@@ -68,14 +74,16 @@ def main():
         corrupt(database / "corrupt_items_state.idx")
         for sql in index_queries:
             assert expect(sql, "XX001") == []
-        # EXISTS' prepared child uses its actual heap scan, not the legacy
-        # IndexScan receiver above. It must not inspect an unused index, nor
+        # Direct COUNT and EXISTS' prepared child use their actual heap
+        # scans, unlike the five verified index readers (including grouped
+        # COUNT/HAVING) above. They must not inspect an unused index, nor
         # hide a row/error behind successful empty results: keep both exact
         # matching and nonmatching Boolean controls after corruption.
         for sql, rows in heap_queries:
             assert expect(sql) == rows
         assert expect("SELECT id FROM corrupt_items;") == [["1"]]
         assert expect("SELECT 42;") == [["42"]]
+        print("INDEX_READER_ROUTE_COMPLETE 5 INDEX_ERRORS 4 EXACT_HEAP_CONTROLS")
         print("[INDEX CORRUPTION PROTOCOL E2E] passed")
     finally:
         runner.stop_ours(server)
