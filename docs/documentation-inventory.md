@@ -1,10 +1,15 @@
 # 全部文档检查清单
 
-用户已暂缓：[R177分组聚合排序与计算目标](issue-review-r177-grouped-aggregate-order.md)。
-原始128/扩展142观察、4个协议字段数失败及独立候选保留；候选只有语法检查，
-没有本项候选运行验收、生产修复提交或新注册入口，不把跳过写成已修复。
-继续其他独立普通SQL问题，不恢复R177、R173、R156等用户暂缓分支。
-R164超时及原273未完成状态不变；不push，Actions禁用。
+最新有限修复：[R178空字符串REPEAT](issue-review-r178-repeat-empty-input.md)在参数校验后直接返回，
+避免按次数进行空追加；不是兼容性错值修复，PG也有相似旧耗时。PG完整80项通过，
+工作区及accepted-only clean各11入口（8native/3协议）实际全0，包含80/190/654完整协议。
+原生增加4个空输入边界控制；首轮8通过/3启动失败及数据目录驱动修正记录保留。
+跟踪598份MD、917native+565注册Python+3Main=1485入口；工作区601份MD、923+571+3=1497，
+原12个未接受入口及三份文档仍分开保留；这不是1485全量、完整72、TLS或整库sanitizer验收。
+R177按用户要求暂缓，不恢复R173/R156等分支；R164超时仍未解决，非新增暂缓。
+原273仍22 complete /166 partial /70 unverified /15 deferred，总目标未完成；不push，Actions禁用。
+
+## 历史记录（以下状态与数量均指记录当时）
 
 ## 当前版本：R176有限排序修复，完整矩阵仍有失败
 
@@ -41,7 +46,7 @@ R173函数签名类型依赖及R176真实聚合排序仍独立开放；R156等�
 
 ## 历史记录（以下状态与数量均指记录当时）
 
-审查输入和发现见[代码审查报告](code-review-2026-10-13.md)。基准提交 `a502ffa3` 包含 412 份已跟踪 Markdown；首次审查含新增报告共 417 份。当前本轮逐文件复查 597 份 Markdown，下表覆盖全部；历史数量不改写。
+审查输入和发现见[代码审查报告](code-review-2026-10-13.md)。基准提交 `a502ffa3` 包含 412 份已跟踪 Markdown；首次审查含新增报告共 417 份。当前本轮逐文件复查 598 份 Markdown，下表覆盖全部；历史数量不改写。
 
 检查逐文件读取 UTF-8 内容并验证 Markdown 内联链接的本地文件目标是否存在。它不验证外部网址、锚点、所有引用式链接，也不证明文中每个历史技术结论在当前版本成立。
 使用手册、部署、命令参考、模块 README 和状态入口另作人工一致性核查；`issue-*.md` 保留原始提交和运行证据，其结论须按对应输入读取。
@@ -389,6 +394,7 @@ R173函数签名类型依赖及R176真实聚合排序仍独立开放；R156等�
 | [docs/issue-review-r175-ordinary-aggregate-identity.md](issue-review-r175-ordinary-aggregate-identity.md) | SUM/COUNT入口及decoded列身份的有限修复、两端70入口证据及未完成边界 | 通过 |
 | [docs/issue-review-r176-ordinary-aggregate-order-keys.md](issue-review-r176-ordinary-aggregate-order-keys.md) | 普通SUM/COUNT排序键有限修复、61/190通过、Root72通过及两次clean72超时失败；其余边界开放 | 部分 |
 | [docs/issue-review-r177-grouped-aggregate-order.md](issue-review-r177-grouped-aggregate-order.md) | 用户暂缓；128/扩展142观察及未验收候选保留，无生产修复或新增注册测试 | 暂缓 |
+| [docs/issue-review-r178-repeat-empty-input.md](issue-review-r178-repeat-empty-input.md) | REPEAT空输入省去按次数空追加；4个原生边界、PG80及两端11定向入口，历史启动失败保留 | 部分 |
 | [docs/issue-review-r18-catalog-value-snapshots.md](issue-review-r18-catalog-value-snapshots.md) | 历史问题证据 | 通过 |
 | [docs/issue-review-r19-stale-temp-startup.md](issue-review-r19-stale-temp-startup.md) | 历史问题证据 | 通过 |
 | [docs/issue-review-r20-returning-query-owner.md](issue-review-r20-returning-query-owner.md) | 历史问题证据 | 通过 |

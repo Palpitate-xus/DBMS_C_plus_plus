@@ -31,10 +31,11 @@ std::string projectRepeat(const std::string& database,
 
 void expectSqlState(const std::string& database,
                     const std::string& count,
-                    const std::string& sqlState) {
+                    const std::string& sqlState,
+                    const std::string& input = "'x'") {
     bool rejected = false;
     try {
-        (void)projectRepeat(database, "'x'", count);
+        (void)projectRepeat(database, input, count);
     } catch (const std::runtime_error& error) {
         rejected = std::string(error.what()).find(
             "SQLSTATE " + sqlState) != std::string::npos;
@@ -82,6 +83,13 @@ int main() {
     expectSqlState(database, "'2x'", "22P02");
     expectSqlState(database, "'2147483648'", "22003");
     expectSqlState(database, "1073741824", "54000");
+
+    // Empty input has no output work even for the largest legal int4 count.
+    // Keep count validation before that fast path, for row and literal input.
+    assert(projectRepeat(database, "empty_text", "2147483647").empty());
+    assert(projectRepeat(database, "''", "2147483647").empty());
+    expectSqlState(database, "'2x'", "22P02", "empty_text");
+    expectSqlState(database, "'2147483648'", "22003", "''");
 
     cleanupTestDb(testName);
     finalCleanupTestData();

@@ -10502,8 +10502,10 @@ void ExprEvaluator::registerBuiltins() {
         const int32_t n = parseInt32Argument(a[1]);
         if (n <= 0) return ExprValue("text", "", false);
         const std::string input = textArgumentValue(a[0]);
-        if (!input.empty() &&
-            static_cast<size_t>(n) > kMaxTextPayload / input.size()) {
+        // The result of repeating empty text is known after argument
+        // validation, regardless of n. Do not perform n empty appends.
+        if (input.empty()) return ExprValue("text", "", false);
+        if (static_cast<size_t>(n) > kMaxTextPayload / input.size()) {
             throw std::runtime_error(
                 "requested text length exceeds the limit (SQLSTATE 54000)");
         }

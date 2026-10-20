@@ -2,6 +2,27 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R178 validated empty REPEAT avoids count-sized empty append loop",
+      "gap_ids": [
+        "FUNC-01"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r178-repeat-empty-input.md"
+      ],
+      "tests": [
+        "tests/repeat_projection_semantics_test.cpp",
+        "tests/repeat_empty_input_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "reproduction": "Old product int4-max empty REPEAT actual9.360704853s, PG7.908236603s, identical correct empty text. Performance inefficiency, not a compatibility result mismatch; all timing observations have no threshold assertion.",
+        "focused_tests": "PG complete80 actual0. Current Root and accepted-only clean each complete11=8native+3wire actual0, original80/190/654 footers and raw checks retained. Four added native controls preserve empty literal/column int4-max and invalid count validation. Effects and Parse/Bind metadata controls pass.",
+        "history": "First clean11 actual1:8native pass,3wire startup failure due conflicting DBMS_DATA_DIR vs runner --data-dir, no SQL observation. Explicit conflict diagnostic actual1 retained. Environment-only V2 full11 rerun0; no assertion, timeout or product durability weakening.",
+        "build": "Each67objects9programs/127headers verified. Fresh1 production evaluator+7native;57 current production donors,1native and1stub donor explicitly verified, not called fresh. Root normal1compile/link,repeat0compile0link;clean explicit compile/link, no normal/repeat claim. Accepted2199 source projection equals tested clean; Root2318 keeps foreign source bytes and preinstall2317source118cache recovery.",
+        "scope": "Finite string performance fix only. Accepted598MD917native565wire3Main1485;Root601MD923native571wire3Main1497. Original273 unchanged22complete166partial70unverified15deferred. No full1485/full72/TLS/full-engine sanitizer claim. R164 remains unresolved, R177/R173/R156 and other user deferrals not resumed. No push;Actions disabled."
+      }
+    },
+    {
       "issue": "R177 grouped aggregate investigation explicitly skipped by user; unresolved",
       "gap_ids": [
         "SQL-04",
