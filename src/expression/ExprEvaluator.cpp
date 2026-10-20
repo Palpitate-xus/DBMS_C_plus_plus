@@ -3941,14 +3941,17 @@ static ExprValue castToInteger(const ExprValue& value,
         const std::string text = trimStr(value.value);
         double parsed = 0.0;
         try {
-            size_t consumed = 0;
-            parsed = std::stod(text, &consumed);
-            if (consumed != text.size())
+            // Recover the actual float4/float8 datum before rounding it to an
+            // integer; float4's shortest text is not an independent float8.
+            parsed = sourceType == "real"
+                ? static_cast<double>(parseRealCastValue(value))
+                : parseDoubleCastValue(value);
+        } catch (const DbError& error) {
+            if (error.sqlState() == "22P02")
                 throwIntegerCastSyntaxError(target, text);
-        } catch (const std::invalid_argument&) {
-            throwIntegerCastSyntaxError(target, text);
-        } catch (const std::out_of_range&) {
-            throwIntegerCastRangeError(target);
+            if (error.sqlState() == "22003")
+                throwIntegerCastRangeError(target);
+            throw;
         }
 
         const long double rounded =
@@ -4054,8 +4057,6 @@ static float parseRealCastValue(const ExprValue& value) {
     char* end = nullptr;
     const float parsed = std::strtof(text.c_str(), &end);
     const int parseError = errno;
-    if (end == text.c_str() || !end || *end != '\0')
-        throwFloatingCastSyntaxError("real", text);
     // ERANGE is also reported for representable subnormal values. PostgreSQL
     // preserves those, but rejects finite input that overflows to infinity or
     // underflows all the way to zero.
@@ -4063,6 +4064,8 @@ static float parseRealCastValue(const ExprValue& value) {
         (parsed == 0.0f || std::isinf(parsed))) {
         throwFloatingCastRangeError("real");
     }
+    if (end == text.c_str() || !end || end != text.c_str() + text.size())
+        throwFloatingCastSyntaxError("real", text);
     return parsed;
 }
 
@@ -4076,12 +4079,12 @@ static double parseDoubleCastValue(const ExprValue& value) {
     char* end = nullptr;
     const double parsed = std::strtod(text.c_str(), &end);
     const int parseError = errno;
-    if (end == text.c_str() || !end || *end != '\0')
-        throwFloatingCastSyntaxError("double precision", text);
     if (parseError == ERANGE &&
         (parsed == 0.0 || std::isinf(parsed))) {
         throwFloatingCastRangeError("double precision");
     }
+    if (end == text.c_str() || !end || end != text.c_str() + text.size())
+        throwFloatingCastSyntaxError("double precision", text);
     return parsed;
 }
 
