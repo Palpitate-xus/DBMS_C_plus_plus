@@ -4020,7 +4020,11 @@ static ExprValue castToBytea(const ExprValue& value) {
 
     ByteaValue bytes;
     if (!ByteaValue::parse(value.value, bytes)) {
-        throw DbError("22P02",
+        // PostgreSQL's lowercase hex input decoder reports invalid parameter
+        // value; malformed traditional backslash/octal input is text syntax.
+        const bool hexInput = value.value.size() >= 2 &&
+            value.value[0] == '\\' && value.value[1] == 'x';
+        throw DbError(hexInput ? "22023" : "22P02",
             "invalid input syntax for type bytea");
     }
     return ExprValue("bytea", bytes.toString(), false);
