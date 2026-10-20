@@ -3448,7 +3448,9 @@ bool describePreparedResult(const std::string& sql, Session& session,
             const auto* binary =
                 dynamic_cast<const BinaryOpExpr*>(item.expr.get());
             if (call) {
-                outputName = lowerProtocolText(call->funcName);
+                CatalogManager::QualifiedName callee;
+                outputName = CatalogManager::parseQualifiedName(call->funcName, callee, true)
+                    ? callee.name : lowerProtocolText(call->funcName);
             } else if (cast || (binary && binary->op == "::") ||
                        (literal && !literal->typeName.empty())) {
                 outputName = ExprHelper::projectionLabel(item.expr.get(),

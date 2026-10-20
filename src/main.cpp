@@ -9200,7 +9200,8 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
                 const auto* binary = dynamic_cast<const dbms::BinaryOpExpr*>(rootExpression);
                 const auto* unary = dynamic_cast<const dbms::UnaryOpExpr*>(rootExpression);
                 const auto* literal = dynamic_cast<const dbms::LiteralExpr*>(rootExpression);
-                if (dynamic_cast<const dbms::CastExpr*>(rootExpression) ||
+                if (dynamic_cast<const dbms::FunctionCallExpr*>(rootExpression) ||
+                    dynamic_cast<const dbms::CastExpr*>(rootExpression) ||
                     (binary && binary->op == "::") ||
                     (literal && !literal->typeName.empty())) {
                     const auto label = dbms::ExprHelper::projectionLabel(rootExpression,
@@ -33475,6 +33476,15 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                     if (tn != pgTypeNames.end()) headerName = tn->second;
                                     }
                                 }
+                            }
+                            // A cast preserves a strong source name, including
+                            // a function call, rather than naming it by its type.
+                            if (func == "cast" && extractSelect &&
+                                extractSelect->selectList.size() == 1) {
+                                const auto label = dbms::ExprHelper::projectionLabel(
+                                    extractSelect->selectList.front().expr.get());
+                                if (label.second == 2 && !label.first.empty())
+                                    headerName = label.first;
                             }
                             expr.displayName = itemAlias.empty() ? headerName : itemAlias;
                             expr.isScalar = true;
