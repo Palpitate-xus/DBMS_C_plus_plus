@@ -1,5 +1,13 @@
 # PostgreSQL 18 vs 本 DBMS 功能对比
 
+最新开放：[R179 STRPOS签名](issue-review-r179-strpos-signatures.md)已完成严格PG294全0，
+旧accepted版完整294响应有154匹配/140断言差异，非140个独立缺陷；候选尚未安装或验收。
+[R180 POSITION语法/实参顺序](issue-review-r180-position-call-identity.md)已另列真实错值及修改方法，未修复。
+已接受仍为R178有限修复；跟踪600份MD、917native+565注册Python+3Main=1485入口，
+工作区603份MD、923+571+3=1497；原12未接受入口和三份文档不混入提交。
+R177及其他用户暂缓分支不恢复，R164超时仍未解决；原273仍22/166/70/15，总目标未完成。
+本次为发现/计划文档，不是新生产修复、全量/TLS/sanitizer或完整矩阵通过；不push，Actions禁用。
+
 最新有限修复：[R178空字符串REPEAT](issue-review-r178-repeat-empty-input.md)在参数校验后直接返回，
 避免按次数进行空追加；不是兼容性错值修复，PG也有相似旧耗时。PG完整80项通过，
 工作区及accepted-only clean各11入口（8native/3协议）实际全0，包含80/190/654完整协议。

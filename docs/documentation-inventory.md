@@ -1,5 +1,13 @@
 # 全部文档检查清单
 
+最新开放：[R179 STRPOS签名](issue-review-r179-strpos-signatures.md)已完成严格PG294全0，
+旧accepted版完整294响应有154匹配/140断言差异，非140个独立缺陷；候选尚未安装或验收。
+[R180 POSITION语法/实参顺序](issue-review-r180-position-call-identity.md)已另列真实错值及修改方法，未修复。
+已接受仍为R178有限修复；跟踪600份MD、917native+565注册Python+3Main=1485入口，
+工作区603份MD、923+571+3=1497；原12未接受入口和三份文档不混入提交。
+R177及其他用户暂缓分支不恢复，R164超时仍未解决；原273仍22/166/70/15，总目标未完成。
+本次为发现/计划文档，不是新生产修复、全量/TLS/sanitizer或完整矩阵通过；不push，Actions禁用。
+
 最新有限修复：[R178空字符串REPEAT](issue-review-r178-repeat-empty-input.md)在参数校验后直接返回，
 避免按次数进行空追加；不是兼容性错值修复，PG也有相似旧耗时。PG完整80项通过，
 工作区及accepted-only clean各11入口（8native/3协议）实际全0，包含80/190/654完整协议。
@@ -46,7 +54,7 @@ R173函数签名类型依赖及R176真实聚合排序仍独立开放；R156等�
 
 ## 历史记录（以下状态与数量均指记录当时）
 
-审查输入和发现见[代码审查报告](code-review-2026-10-13.md)。基准提交 `a502ffa3` 包含 412 份已跟踪 Markdown；首次审查含新增报告共 417 份。当前本轮逐文件复查 598 份 Markdown，下表覆盖全部；历史数量不改写。
+审查输入和发现见[代码审查报告](code-review-2026-10-13.md)。基准提交 `a502ffa3` 包含 412 份已跟踪 Markdown；首次审查含新增报告共 417 份。当前本轮逐文件复查 600 份 Markdown，下表覆盖全部；历史数量不改写。
 
 检查逐文件读取 UTF-8 内容并验证 Markdown 内联链接的本地文件目标是否存在。它不验证外部网址、锚点、所有引用式链接，也不证明文中每个历史技术结论在当前版本成立。
 使用手册、部署、命令参考、模块 README 和状态入口另作人工一致性核查；`issue-*.md` 保留原始提交和运行证据，其结论须按对应输入读取。
@@ -395,6 +403,8 @@ R173函数签名类型依赖及R176真实聚合排序仍独立开放；R156等�
 | [docs/issue-review-r176-ordinary-aggregate-order-keys.md](issue-review-r176-ordinary-aggregate-order-keys.md) | 普通SUM/COUNT排序键有限修复、61/190通过、Root72通过及两次clean72超时失败；其余边界开放 | 部分 |
 | [docs/issue-review-r177-grouped-aggregate-order.md](issue-review-r177-grouped-aggregate-order.md) | 用户暂缓；128/扩展142观察及未验收候选保留，无生产修复或新增注册测试 | 暂缓 |
 | [docs/issue-review-r178-repeat-empty-input.md](issue-review-r178-repeat-empty-input.md) | REPEAT空输入省去按次数空追加；4个原生边界、PG80及两端11定向入口，历史启动失败保留 | 部分 |
+| [docs/issue-review-r179-strpos-signatures.md](issue-review-r179-strpos-signatures.md) | STRPOS声明校验/错误阶段与同名覆盖；PG294通过、旧294有140断言差异，候选未验收 | 部分 |
+| [docs/issue-review-r180-position-call-identity.md](issue-review-r180-position-call-identity.md) | POSITION语法/真实callee/原生API实参顺序混淆及签名缺失，已观察未修复 | 部分 |
 | [docs/issue-review-r18-catalog-value-snapshots.md](issue-review-r18-catalog-value-snapshots.md) | 历史问题证据 | 通过 |
 | [docs/issue-review-r19-stale-temp-startup.md](issue-review-r19-stale-temp-startup.md) | 历史问题证据 | 通过 |
 | [docs/issue-review-r20-returning-query-owner.md](issue-review-r20-returning-query-owner.md) | 历史问题证据 | 通过 |

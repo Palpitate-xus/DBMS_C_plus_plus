@@ -2,6 +2,24 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R179 STRPOS signatures and R180 POSITION SQL call identity observed; not accepted fixes",
+      "gap_ids": [
+        "FUNC-01",
+        "PROTO-04"
+      ],
+      "status": "partial",
+      "tests": [],
+      "evidence": [
+        "docs/issue-review-r179-strpos-signatures.md",
+        "docs/issue-review-r180-position-call-identity.md"
+      ],
+      "verification": {
+        "reproduction": "PG294 actual0, old accepted294 actual1/154matching140failing assertions; all294 raw responses reachReadyI and UUID cleanup confirmed. Not140 independent bugs. Separate initial12 and6declaration observations preserve text/bytea/bit controls and POSITION direct-call PG2/3 vs product0.",
+        "implementation": "R179 independent V1 syntax-only four commands0/no objects or candidate runtime. V2 threeCPP/native76/wire294 candidate remains outsideRoot, pending actual build/runtime and fresh genuineMain tests. R180 has no production candidate. No new accepted test registrations or source changes.",
+        "scope": "Accepted600MD917native565wire3Main1485;Root603MD923native571wire3Main1497, original12 foreign entries separated. Original273 unchanged22complete166partial70unverified15deferred. R164 unresolved, R177/R173/R156 and other skips preserved. No push or Actions activation."
+      }
+    },
+    {
       "issue": "R178 validated empty REPEAT avoids count-sized empty append loop",
       "gap_ids": [
         "FUNC-01"
