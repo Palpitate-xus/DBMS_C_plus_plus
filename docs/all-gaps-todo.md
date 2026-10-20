@@ -1,12 +1,15 @@
 # DBMS 全部 Gap TODO（历史记录）
 
-最新开放：[R179 STRPOS签名](issue-review-r179-strpos-signatures.md)已完成严格PG294全0，
-旧accepted版完整294响应有154匹配/140断言差异，非140个独立缺陷；候选尚未安装或验收。
-[R180 POSITION语法/实参顺序](issue-review-r180-position-call-identity.md)已另列真实错值及修改方法，未修复。
-已接受仍为R178有限修复；跟踪600份MD、917native+565注册Python+3Main=1485入口，
-工作区603份MD、923+571+3=1497；原12未接受入口和三份文档不混入提交。
-R177及其他用户暂缓分支不恢复，R164超时仍未解决；原273仍22/166/70/15，总目标未完成。
-本次为发现/计划文档，不是新生产修复、全量/TLS/sanitizer或完整矩阵通过；不push，Actions禁用。
+最新有限修复：[R179 STRPOS声明](issue-review-r179-strpos-signatures.md)已完成真实TEXT/TEXT签名、
+错误阶段/空输入/参数推断/同名重载及opaque native覆盖修复。PG294全0；旧294有140断言差异、
+旧native76有49失败，均完整记录，非140/49个独立缺陷。Root及accepted-only clean各16入口实际全0，
+含native76、完整294/80/190/654和三个本轮fresh编译、新链接当前库的真实Main。
+每侧71对象13程序/127头独立核对；Root normal3CPP并链接、repeat零编译/零链接，clean显式3CPP加55已核对donor，
+未冒称clean normal/repeat或donor fresh；全部2201已接受源码投影与tested clean一致，Root2320保留原有其他改动。
+跟踪600份MD、918native+566注册Python+3Main=1487入口；工作区603份MD、924+572+3=1499，
+原12未接受入口及三份文档仍分离。[R180 POSITION](issue-review-r180-position-call-identity.md)仍开放，不用本项关闭。
+这不是1487全量/完整72/TLS/整库sanitizer验收；R164两次超时仍未解决，R177等用户暂缓不恢复。
+原273仍22 complete/166 partial/70 unverified/15 deferred，总目标未完成；不push，Actions禁用。
 
 最新有限修复：[R178空字符串REPEAT](issue-review-r178-repeat-empty-input.md)在参数校验后直接返回，
 避免按次数进行空追加；不是兼容性错值修复，PG也有相似旧耗时。PG完整80项通过，

@@ -2,6 +2,27 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R179 finite STRPOS declaration and pure protocol analysis fix accepted after both full focused16",
+      "gap_ids": [
+        "FUNC-01",
+        "PROTO-04"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r179-strpos-signatures.md"
+      ],
+      "tests": [
+        "tests/strpos_signature_test.cpp",
+        "tests/strpos_signature_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "reproduction": "CompletePG294 actual0; frozenoldaccepted294 actual1/154matching140failing, allReadyI/cleanup. Oldnative76 actual1/49fail. These are repeated assertions, not independentbugcounts.",
+        "focused_tests": "Root and accepted-only clean each16=9native4wire3genuineMain actual0, including76 and full294/80/190/654. No assertion, timeout or durability weakening. V1 syntax4 actual0 only; V2 preserves same tested fixtures and adds pure name-family analysis routing, not callee case folding.",
+        "build": "Each71objects13binaries/127headers verified. Fresh3production+1native+3genuineMain,55currentproduction/8native/stub verifieddonors, not calledfresh. Rootnormal3compile/link,repeat0compile0link. Cleanexplicit3+verified55, no normal/repeatclaim. All2201acceptedsourceprojection equal testedclean; Root2320 only12ownedhunks and2newfixtures, foreignbytes and preinstall2318source118cache recovery verified.",
+        "scope": "FiniteSTRPOS(TEXT,TEXT) only; POSITION R180 remainsopen, domains/customimplicitcasts/otherboundaryowners not claimed complete. Original273 unchanged22complete166partial70unverified15deferred. Accepted600MD918native566wire3Main1487;Root603MD924native572wire3Main1499, original12foreignentries separated. No full1487/full72/TLS/full-engine sanitizer claim. R164 unresolved; R177/R173/R156 and other skips not resumed. No push, Actions disabled."
+      }
+    },
+    {
       "issue": "R179 STRPOS signatures and R180 POSITION SQL call identity observed; not accepted fixes",
       "gap_ids": [
         "FUNC-01",

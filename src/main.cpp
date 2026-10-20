@@ -6074,7 +6074,7 @@ static bool isStringLengthScalarName(const string& name) {
 static bool requiresParsedValueBinding(const dbms::Stmt* root,bool constantScalarOnly) {
     // These names own concrete overload declarations. This is an analysis
     // route, not permission to execute their arguments during preparation.
-    static const set<string> declaredScalars={"upper","lower","length"};
+    static const set<string> declaredScalars={"upper","lower","length","strpos"};
     function<bool(const dbms::Expr*)> expression;
     function<bool(const dbms::Stmt*)> statement;
     function<bool(const dbms::FromItem*)> source;
@@ -6089,7 +6089,7 @@ static bool requiresParsedValueBinding(const dbms::Stmt* root,bool constantScala
             dbms::CatalogManager::QualifiedName routine;
             if(dbms::CatalogManager::parseQualifiedName(call->funcName,routine,true) &&
                (routine.name=="abs" || routine.name=="array_position" || (!constantScalarOnly &&
-                (declaredScalars.count(routine.name) || isFixedFloat8ScalarName(routine.name) ||
+                (declaredScalars.count(routine.name) || toLower(routine.name)=="strpos" || isFixedFloat8ScalarName(routine.name) ||
                  isStringLengthScalarName(routine.name)))))
                 return true; // Validate real overloads even if no row/branch will execute.
             for(const auto& argument:call->args)if(expression(argument.get()))return true;
@@ -21405,7 +21405,7 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
             if(call->schema.empty()) {
                 dbms::CatalogManager::QualifiedName name;
                 if(dbms::CatalogManager::parseQualifiedName(call->funcName,name,true) && name.schema.empty() &&
-                   (!resolved || isFixedFloat8ScalarName(name.name) || isStringLengthScalarName(name.name) || name.name=="array_position")) {
+                   (!resolved || isFixedFloat8ScalarName(name.name) || isStringLengthScalarName(name.name) || name.name=="strpos" || name.name=="array_position")) {
                     for(const auto& schema:dbms::functionNamespaceSearchPath(g_engine,session.currentDB))
                         if(schema!="pg_catalog" && !g_engine.getUDF(session.currentDB,name.name,schema).expression.empty())
                             return true;

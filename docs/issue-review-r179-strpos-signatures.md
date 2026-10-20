@@ -1,54 +1,70 @@
 # R179：STRPOS声明签名、错误阶段与同名覆盖
 
-状态：Open，已完整复现；候选尚未安装、运行验收或提交为生产修复。
-基线为R178源码提交`1430b578`，不恢复R177或其他用户暂缓模块。
+状态：有限修复，已完成双侧定向验收；不关闭整个FUNC-01/PROTO-04或原273总目标。
+基线为R178源码提交`1430b578`及发现文档`9bc172b9`；[R180](issue-review-r180-position-call-identity.md)另列未修复。
 
-## 实际问题
+## 实际问题与修改方法
 
-| SQL/场景 | PG18.6 | 当前accepted产品 | 修改方法 |
-| --- | --- | --- | --- |
-| `strpos(123,1)` | 42883 | 1 | 只给真实builtin绑定TEXT/TEXT→INTEGER签名，禁止把任意值字符串化后接受 |
-| `strpos(NULL::uuid,NULL::uuid)` | 42883 | NULL | typed NULL仍参与声明解析，不能以strict NULL绕过无重载错误 |
-| BYTEA/BYTEA调用STRPOS | 42883，无该重载 | 0 | 不把合法的BYTEA POSITION重载移植到STRPOS |
-| `strpos()`、一个实参、三个实参 | 42883 | NULL或忽略额外实参返回值 | 准备阶段验证精确arity及named arguments |
-| 空表、WHERE false、LIMIT0、未选CASE/COALESCE分支 | 错误仍在分析阶段 | 多处错误被抑制 | 共享真实查询绑定，不能执行输入来猜签名 |
-| 同名schema的INTEGER/INTEGER重载，catalog优先路径 | 选择真实typed用户重载，103 | 部分走builtin返回0或给TEXT描述 | 解析实际声明/namespace，结果描述与执行使用同一callee |
-| 不存在的quoted大写STRPOS，extended/binary | Parse失败42883 | Parse成功后Execute才失败 | 入口可按名称族进入分析，但实际callee身份不折叠、不改写 |
+| 问题 | 旧产品/PG实际差异 | 已实现的修改方法 |
+| --- | --- | --- |
+| INTEGER、UUID NULL、BYTEA等被错误接受 | 旧返回1/NULL/0，PG42883 | 只给真实STRPOS callback绑定TEXT/TEXT→INTEGER声明，拒绝无隐式转换的输入 |
+| 缺失/多余实参及named arguments | 旧返回NULL或忽略多余实参，PG42883 | 准备阶段精确验证arity/声明，不因NULL或零行绕过 |
+| 空表/WHERE false/LIMIT0及未选分支 | 多处未报分析错误 | Main与Parse前置接入同一纯查询绑定，不执行输入猜签名 |
+| 同名INTEGER/INTEGER用户重载 | 旧部分走builtin返回0，描述也可误为TEXT；PG103/int4 | 从实际namespace和typed声明选择callee，metadata与执行一致 |
+| quoted大写STRPOS不存在 | 旧extended/binary在Execute才报42883，PG Parse失败 | 名称族只负责进入分析；实际quoted/schema身份不折叠、不改写 |
+| UNKNOWN wire参数 | 不能由执行值或NULL SQL猜类型 | 从绑定声明及真实源参数位置推断两个OID25，再验证最终共享声明 |
+| native registerFunction替换 | 不能继承同名builtin的类型/arity/metadata或volatility | 私有真实callback marker识别声明所有者，opaque replacement仍完全拥有自身规则 |
 
-UTF8文本搜索、空needle/空haystack、合法NULL及NAME/VARCHAR/CHAR的控制一并保留。
-PG目录实查STRPOS只有TEXT/TEXT→INTEGER；POSITION另有TEXT、BYTEA及BIT重载，见[R180](issue-review-r180-position-call-identity.md)。
+仅改ExprEvaluator/Main/NetworkServer三个CPP及注册；无共享头变化。
+保留原UTF8搜索、空needle/haystack、合法NULL及NAME/VARCHAR/CHAR转TEXT的语义。
+STRPOS没有BYTEA重载，POSITION有TEXT/BYTEA/BIT三种，不能混同；POSITION与原生API换参规则未在本项修改。
 
-## 完整严格294项观察
+## 完整验证结果
 
-- 同一冻结夹具在PG18.6实际外层0、294项全通过。
-- 旧accepted-only R178产品实际外层1；完整294项中154匹配、140断言差异，全部raw响应到达ReadyI，UUID清理确认。
-  这些是多种协议/需求/错误阶段的重复控制，不是140个独立缺陷或154项候选通过。
-- 范围包括三协议、错误arity/类型、未选分支、空输入、严格输出字段/NULL/binary datum、typed参数、
-  UNKNOWN wire参数真实推断、重Bind/Execute、用户同名重载、quoted身份、真实nextval及metadata纯度。
-- 原生76项目前为草稿，覆盖静态绑定、真实evaluator、legacy typed cells及opaque native replacement。
-  V1三个生产CPP及原生夹具四次syntax-only均0；没有对象或候选数据库通过。
-- 静态清单最初把四个setup漏计为290，source-only检查在启动任何数据库前失败；修正为实际294。
-  在第一次PG运行前也校正了既有Wire.command接口的参数形式，未改已运行断言来取得通过。
+| 输入/版本 | 实际结果 | 证据边界 |
+| --- | --- | --- |
+| PG18.6严格协议294 | 外层0，294全通过 | 值/字段/原始binary/错误阶段/参数/副作用完整参考 |
+| 冻结旧accepted R178协议294 | 外层1，154匹配/140断言失败，294 raw均到ReadyI，UUID清理确认 | 不是140个独立缺陷或154项候选通过 |
+| 旧native76 | 外层1、完整76、49失败 | 同一新增夹具，未在首错停止或改旧断言 |
+| 新accepted-only clean完整16 | 9native/4wire/3真实Main均实际0 | 新native76/完整294及旧80/190/654、原聚合61均保留 |
+| 新Root完整16 | 同一16入口均实际0 | 工作区其他改动保留；结果不与clean拼接 |
 
-## 候选与验收计划
+native76覆盖20个描述/值、36个非法参数/空输入、3个未选/缺失列、8个opaque覆盖、
+2个lazy输入及7个legacy typed-cell控制。协议294覆盖三模式、Parse错误、空输入/未选分支、
+严格输出名称/来源/OID/宽度/typmod/格式/NULL/原始datum、typed与UNKNOWN参数、
+重复Bind/Execute、真实同名重载、quoted身份、nextval及metadata不执行。
 
-1. 真实STRPOS callback拥有具体声明；`registerFunction`替换仍保留自己的arity、输入、metadata与volatility。
-2. Main及Parse前置只接入纯声明绑定，保留实际quoted/schema身份；UNKNOWN参数从声明推断，不替换成NULL SQL。
-3. 独立V2候选仅改Main、ExprEvaluator、NetworkServer三个CPP，无共享头变更。
-   路径`/tmp/dbms-r179-strpos-signature-candidate-v2.THVaotzb`；V1及原输入不再改写。
-4. 先完成实际旧native反证、新native76及完整候选294，再运行原80/190/654与相邻原生。
-   Main改变后，三个真实Main测试体必须fresh编译、新链接当前库、隔离运行，不复用旧Main对象。
-5. 候选通过后才安装Root，按拥有hunk保留原有改动，正常/repeat构建及双侧定向验证后逐项本地commit。
+## 源码、构建与版本边界
 
-本计划不代表已经通过。R180、完整FUNC-01、R164超时及原273未完成状态继续保留；不push，Actions禁用。
+- 双侧各71对象/13当前程序、127头独立核对；fresh3生产CPP、fresh1原生及fresh3真实Main。
+  其余55生产/8原生/1stub为输入/全头/flags/对象已核对的donor，未冒称fresh。
+- 三个真实Main采用accepted git测试体，仅投影include路径，本轮fresh编译；
+  新链接当前57个库对象，绝不链接test_stubs。未使用Root的未接受session测试体。
+- Root正常实际编3CPP并链接，repeat零编译/零链接；clean显式3CPP+55donor及链接，未声称normal/repeat。
+- 全部2201已接受源码投影与实际测试clean逐blob对应。Root2320仅安装12个拥有hunk及两个新夹具，
+  原有其他修改不提交；安装前2318源码/118cache/server文件的独立恢复快照已核对。
+- 当前已跟踪600MD、918native+566已注册Python+3Main=1487；Root603MD、924+572+3=1499，
+  原12个未接受入口和三份文档继续分开。不是1487全量、完整72、TLS或整库sanitizer声明。
+
+V1曾完成四次syntax-only0，没有对象或候选DB运行；V2沿用完整同字节夹具，只补纯名称族分析入口。
+最初source-only把四setup漏计为290，在任何DB启动前已被库存断言拒绝；第一次PG运行前校正为294，
+也校正了既有Wire.command参数形式。没有改已运行断言以取得通过，旧失败与V1输入均保留。
+
+域/自定义隐式转换及更多query owner/类型边界未在此宣称完成。R164两次完整矩阵超时仍未确定原因，
+不因本项变为通过或用户暂缓。R177及R173/R156等跳过模块不恢复；R180仍开放。
+原273仍22complete/166partial/70unverified/15deferred，总目标未完成。不push，Actions禁用。
 
 ## 固定证据
 
-证据目录`/tmp/dbms-review-r46.ifu6SWLp/`。
+本地证据目录`/tmp/dbms-review-r46.ifu6SWLp/`，不是可移植release依赖。
 
-- `r179-reference294.log`：`9871aee8ebfb4c02b7f6f648cd03d5ddc22e4aff80f1e10740085151529099a4`，实际0。
-- `r179-old-accepted294.log`：`e1c5b2fb9ffa592f42822372e8bf50499b714c1b8140a7343c1004a62a9787f3`，实际1/140断言差异。
-- V1 syntax receipt：`/tmp/dbms-r179-syntax76.nx900vgv/completed-syntax-receipt.json`，
-  `126679e4989a1b8d5cea591614520a9805f871bb68b9a84b81277c70c501afda`，四命令0，仅语法。
-- 初始12条观察及6条目录/调用观察为`r179-string-search-*-discovery.log`、`r179-*-search-declarations.log`。
-  产品的目录反射查询实际42P01，不把它写成目录反射成功或本项新增修复。
+独立核对：`/tmp/dbms-r179-independent-proof.nf8t4zak/completed-proof.json`，SHA256 `80ba1b21ee81e3cebcd5ba7aebfd0ec145cbb4301a17816691f7655c79787765`，实际0；这是证据一致性通过，不是整库通过。
+
+- `/tmp/dbms-r179-clean-main-matrix.pqigwv5g/completed-matrix-compiler-receipt.json`：`3f5b9feb956565676d44b01edf9f7b37e97f9dabaf01573b0eb662a1c9edc0d3`。
+- `/tmp/dbms-r179-root-main-matrix.vuy4yy56/completed-matrix-compiler-receipt.json`：`f2581d84d9b662d0a4147cecffc25c055cf33f0a5a2af8d65af85f5de7bc47be`。
+- `/tmp/dbms-r179-focused-runtime.m2eibyls/completed-runtime-receipt.json`：`584f607ccc9f03349abe47b525ccf23cdae3c8d5c24525b5f1e9ec8230adc644`。
+- `/tmp/dbms-r179-focused-runtime.0rmzsp8n/completed-runtime-receipt.json`：`5097126d1ae1d82acd700770f98931ccfa728313a5efa08357c9a0bac1ac8755`。
+- `/tmp/dbms-r179-old-native76.0y49djba/completed-counterproof-receipt.json`：`7fa48845370e8a5e6e5f497e85e22332a05ea22ebd68ddf417be63ad6b7981f8`。
+
+PG294日志`r179-reference294.log`的SHA256为`9871aee8ebfb4c02b7f6f648cd03d5ddc22e4aff80f1e10740085151529099a4`；
+旧294日志`r179-old-accepted294.log`为`e1c5b2fb9ffa592f42822372e8bf50499b714c1b8140a7343c1004a62a9787f3`。

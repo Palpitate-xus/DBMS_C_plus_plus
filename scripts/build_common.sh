@@ -586,6 +586,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/ordinary_aggregate_identity_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/ordinary_aggregate_order_keys_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/repeat_empty_input_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/strpos_signature_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/bound_dml_query_children_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/on_conflict_constraint_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/checksum_verification_e2e_test.py)
