@@ -6959,6 +6959,40 @@ static std::string textArgumentValue(const ExprValue& value) {
     return value.value.substr(0, logicalCharacterByteLength(value));
 }
 
+enum class TextCaseConversion { Lower, Upper, Initial };
+
+static std::string convertTextCase(const std::string& input,
+                                   const std::string& collationName,
+                                   TextCaseConversion conversion) {
+    std::vector<uint32_t> characters;
+    if (!decodeUtf8(input, characters))
+        throw DbError("22021", "invalid byte sequence for encoding UTF8");
+    const std::string name = collation::normalizeName(collationName);
+    const bool ascii = name == "c" || name == "posix" || name == "ucs_basic";
+    const bool unicode = name == "c.utf8" || name == "en_us.utf8";
+    // An explicit character locale is independent of the backend's ambient
+    // LC_CTYPE. Unspecified locales retain the existing table-path setting.
+    const locale_t locale = ascii || unicode
+        ? sql_pattern::unicodeLocale(ascii) : nullptr;
+    const auto lower = [&](uint32_t c) {
+        return static_cast<uint32_t>(locale ? towlower_l(c, locale) : std::towlower(c));
+    };
+    const auto upper = [&](uint32_t c) {
+        return static_cast<uint32_t>(locale ? towupper_l(c, locale) : std::towupper(c));
+    };
+    std::string result;
+    result.reserve(input.size());
+    bool startWord = true;
+    for (const auto character : characters) {
+        const bool capitalize = conversion == TextCaseConversion::Upper ||
+            (conversion == TextCaseConversion::Initial && startWord);
+        appendUtf8CodePoint(capitalize ? upper(character) : lower(character), result);
+        if (conversion == TextCaseConversion::Initial)
+            startWord = !(locale ? iswalnum_l(character, locale) : std::iswalnum(character));
+    }
+    return result;
+}
+
 static size_t utf8ByteAt(const std::string& s, size_t charIdx) {
     size_t n = 0, b = 0;
     while (b < s.size()) {
@@ -9402,8 +9436,9 @@ void ExprEvaluator::registerBuiltins() {
                 return ExprValue(boundType, "", true);
             return ExprValue(boundType, r.lo, false);
         }
-        ExprValue result("text", a[0].isNull
-            ? "" : toLower(textArgumentValue(a[0])), a[0].isNull);
+        ExprValue result("text", a[0].isNull ? "" :
+            convertTextCase(textArgumentValue(a[0]), a[0].collation,
+                            TextCaseConversion::Lower), a[0].isNull);
         result.collation = a[0].collation;
         return result;
     };
@@ -9418,8 +9453,9 @@ void ExprEvaluator::registerBuiltins() {
                 return ExprValue(boundType, "", true);
             return ExprValue(boundType, r.hi, false);
         }
-        std::string s = a[0].isNull ? "" : textArgumentValue(a[0]);
-        for (char& c : s) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        std::string s = a[0].isNull ? "" :
+            convertTextCase(textArgumentValue(a[0]), a[0].collation,
+                            TextCaseConversion::Upper);
         ExprValue result("text", std::move(s), a[0].isNull);
         result.collation = a[0].collation;
         return result;
@@ -10695,22 +10731,13 @@ void ExprEvaluator::registerBuiltins() {
             "integer", std::to_string(utf8CharCount(input.substr(0, pos)) + 1),
             false);
     };
-    // initcap — capitalize the first letter of each word, lowercase the rest
+    // INITCAP classifies complete characters in the selected character locale.
     functions_["initcap"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
-        std::string s = textArgumentValue(a[0]);
-        bool startWord = true;
-        for (char& c : s) {
-            unsigned char uc = static_cast<unsigned char>(c);
-            if (std::isalnum(uc)) {
-                c = startWord ? static_cast<char>(std::toupper(uc))
-                              : static_cast<char>(std::tolower(uc));
-                startWord = false;
-            } else {
-                startWord = true;
-            }
-        }
-        return ExprValue("text", s, false);
+        ExprValue result("text", convertTextCase(textArgumentValue(a[0]),
+            a[0].collation, TextCaseConversion::Initial), false);
+        result.collation = a[0].collation;
+        return result;
     };
     // to_hex(int) — render the two's-complement width of the selected int4
     // or int8 overload, matching PostgreSQL for negative values.
