@@ -9027,8 +9027,13 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
             }
         }
         if (lowItem == "current_schema()" || lowItem == "current_schema ( )") {
+            const auto value = dbms::ExprHelper::evalString(
+                expr, {}, {}, s.currentDB, s.username, &g_engine);
+            if (!value.ok)
+                throw dbms::DbError(value.sqlState.empty() ? "XX000" : value.sqlState,
+                                    value.error);
             headers.push_back(disp == item ? "current_schema" : disp);
-            appendValue("public", false, "name");
+            appendValue(value.value, value.isNull, value.typeName);
             continue;
         }
         if (lowItem == "user" || lowItem == "current_user" || lowItem == "session_user") {
