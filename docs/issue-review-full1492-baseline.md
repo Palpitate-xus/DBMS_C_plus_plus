@@ -32,7 +32,7 @@
 | `drop_cascade_test` | 旧夹具缺失 native owner，实际受检查的 XX001 | R189 补足真实所有者夹具并定向验证；所有者完整性检查保留。见 [所有者记录](issue-review-r168-composite-namespace-owner.md)。 |
 | `physical_attribute_length_test` | 102 项检查中 1 项仍把当前 TIME 长度写成旧 4 字节 | R190 分开当前存储与旧格式兼容边界；定向验证已通过。 |
 | `tests/postgres_protocol_test.py` | search_path 错误码预期 22023，实际 42601 | 用户明确跳过；不修改、不重试、不冒称通过。 |
-| `tests/transaction_begin_grammar_protocol_e2e_test.py` | aborted savepoint 内非法 BEGIN 预期 42601，实际 25P02 | 待核实：分别验证简单/扩展协议及 PostgreSQL 18 语法检查优先级，再定位状态门与解析分支；不能直接翻转预期。 |
+| `tests/transaction_begin_grammar_protocol_e2e_test.py` | 扩展 Parse 漏接旧事务解析器的空 SQLSTATE，非法 BEGIN 被中止状态门改成 25P02 | R195 保留原始语法错误 42601，合法 BEGIN 仍为 25P02；两套完整原夹具加 52 项、PG 参考及正常默认服务器均通过。见 [优先级修复](issue-review-r195-aborted-begin-syntax-priority.md)。 |
 | `tests/copy_protocol_e2e_test.py` | 本连接 COPY 等待自身有效 CancelRequest 的 57014，读取超时 | 待核实会话中断状态生命周期和读等待唤醒；保留该测试及其原 15 秒超时，不以调大超时代替修复。 |
 | `tests/index_corruption_protocol_e2e_test.py` | 独立 COUNT 被错分为索引读取者，预期 XX001，实际返回精确堆结果 `1` | R194 以实际计划区分来源：五个索引读取者仍精确 XX001；独立 COUNT 精确 1/0，原 EXISTS 和全表结果保留，两套完整夹具通过。见 [夹具修复](issue-review-r194-index-reader-fixture.md)。 |
 | `tests/pg_class_query_protocol_e2e_test.py` | pg_class 的普通 COUNT 报 XX000：`mutation source descriptor differs from physical relation` | R193 接入真实七列虚拟来源，保留物理关系描述检查；未改原完整夹具，两套服务器定向通过。见 [修复及其他开放探针](issue-review-r193-pg-class-typed-source.md)。 |

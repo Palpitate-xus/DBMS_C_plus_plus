@@ -39,7 +39,7 @@ def main():
         else:
             messages = client.simple_query(sock, sql)
         result = runner.decode_wire_result(messages)
-        assert result[1] == state, (sql, result)
+        assert result[1] == state, (sql, result, dict(extended=extended, expectedState=state))
         assert messages[-1] == (b"Z", ready), (sql, messages[-1])
         if rows is not None:
             assert result[0] == rows, (sql, result, rows)
@@ -69,6 +69,7 @@ def main():
         ("DEFERRABLE NOT DEFERRABLE", False),
         ("READ ONLY, READ WRITE ISOLATION LEVEL REPEATABLE READ, NOT DEFERRABLE", False),
     )
+    extra_checks = 0
     try:
         query(f"CREATE TABLE {table}(id INT PRIMARY KEY);", ready=b"I")
         created = True
@@ -92,6 +93,10 @@ def main():
             query(f"SELECT id FROM {table};", extended, "25P02", b"E")
             for options in invalid_options:
                 query("BEGIN " + options + ";", extended, "42601", b"E")
+            for prefix in ("START TRANSACTION", "/* leading raw syntax */ BEGIN"):
+                for options in invalid_options:
+                    query(prefix + " " + options + ";", extended, "42601", b"E")
+                    extra_checks += 1
             query("BEGIN READ ONLY;", extended, "25P02", b"E")
             query("ROLLBACK TO parent;", extended)
             query(f"SELECT id FROM {table} ORDER BY id;", extended, rows=[["1"]])
@@ -99,6 +104,8 @@ def main():
             query(f"SELECT id FROM {table};", extended, ready=b"I", rows=[])
         query(f"DROP TABLE {table};", ready=b"I")
         created = False
+        assert extra_checks == 52, extra_checks
+        print("BEGIN_RAW_SYNTAX_PRIORITY_EXTRA_COMPLETE", extra_checks)
         print("[TRANSACTION BEGIN GRAMMAR " +
               ("PG18 ORACLE" if reference else "PROTOCOL E2E") + "] passed")
     finally:

@@ -39,7 +39,7 @@ aggregate_argument_expression、cte_prepared_owner、temp_alter_column_catalog�
 
 本项两套 Main TU 各实际 fresh 编译、链接一次；每套其余 57 个生产对象、127 个公共头、
 编译器与参数均逐字节核对。未改共享头或存储格式；未声称 fresh 编译全部生产代码，
-也未声称已经运行修复后的正常增量构建或全 1492。工作区构建包含原有未接受改动，
+该候选阶段未声称正常增量构建或修复后全 1492；后续正常构建见末节。工作区构建包含原有未接受改动，
 定向通过不代表接受它们。两个真实服务器均在私有测试数据目录中运行。
 
 新建私有 PostgreSQL 18.6 实例实际通过两个完整最终夹具；确认版本 180006，
@@ -78,3 +78,16 @@ V2 以每项固定 footer、190/30 条原始记录独立核对，没有把分类
 提交只包含本项 Main hunk、临时索引夹具和自有文档；原有工作区 Main 改动逐字节保留。
 R185、默认协议 search_path 错误码及其他用户已跳过项目不恢复。没有关闭原 273 项中的任何整项，
 没有完整 TLS、sanitizer、native DML 目录来源或全部目录列证明。不 push，Actions 保持禁用。
+
+## 后续正常工作区构建
+
+R193 提交后的工作区实际执行原 `scripts/build.sh`，只 fresh 编译 Main 并链接，
+重复构建零编译/零链接；其余 57 个生产对象、全部头、源码及暂存内容字节保持不变。
+正常生成的默认 `dbms_main` 完整执行原 pg_class 与增强临时索引两个入口，均退出 0。
+receipt：`/tmp/dbms-r193-root-normal.10u_a247/completed-normal-build-receipt.json`，
+SHA256 `8e87469a18202cb5b6412ef32a91bc1be02d52659af4d699ef2ef7b219b75d5d`。
+
+随后 R195 正常构建只更新 NetworkServer；该默认服务器再次完整通过这两个目录入口。
+见 [R195 正常构建记录](issue-review-r195-aborted-begin-syntax-priority.md)。
+两个正常构建阶段的历史对象/服务器已先保存副本，原 receipt 的历史 hash 不改写。
+工作区原有未接受改动仍不因此接受；开放的 COUNT 算术目标/派生来源探针也未据此修复。

@@ -6917,7 +6917,15 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             {
                 SQLParser parser;
                 const auto parsed = parser.parseForBinding(sql);
-                if (!parsed.success && parsed.sqlState == "42601") {
+                // Transaction grammar failures predate explicit ParseResult
+                // SQLSTATEs. They are still raw syntax errors, including in
+                // an aborted block; do not analyze or execute the statement.
+                const std::string keyword = firstSqlKeyword(sql);
+                const bool transactionGrammar = keyword == "begin" ||
+                    startsWithSqlPhrase(sql, "start transaction") ||
+                    (keyword == "set" && SQLParser::isSetTransactionStatement(sql));
+                if (!parsed.success && (parsed.sqlState == "42601" ||
+                    (parsed.sqlState.empty() && transactionGrammar))) {
                     sendExtendedProtocolError("42601", parsed.error);
                     extendedQueryError = true;
                     continue;
