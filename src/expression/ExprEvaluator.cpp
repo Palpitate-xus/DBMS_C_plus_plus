@@ -9567,14 +9567,14 @@ void ExprEvaluator::registerBuiltins() {
     auto float8Unary = [float8Text](const std::vector<ExprValue>& a,
                                     double (*fn)(double)) {
         if (a.empty() || a[0].isNull) return ExprValue("double precision", "", true);
-        return ExprValue("double precision", float8Text(fn(a[0].asDouble())), false);
+        return ExprValue("double precision", float8Text(fn(parseDoubleCastValue(a[0]))), false);
     };
     auto boundedFloat8 = [float8Text](const std::vector<ExprValue>& a,
                                       double (*fn)(double), double lower,
                                       double upper) {
         if (a.empty() || a[0].isNull)
             return ExprValue("double precision", "", true);
-        const double argument = a[0].asDouble();
+        const double argument = parseDoubleCastValue(a[0]);
         if (argument < lower || argument > upper) {
             throw std::runtime_error(
                 "input is out of range (SQLSTATE 22003)");
@@ -9852,7 +9852,7 @@ void ExprEvaluator::registerBuiltins() {
         if (a.size() < 2 || a[0].isNull || a[1].isNull)
             return ExprValue("double precision", "", true);
         return ExprValue("double precision",
-                         float8Text(std::atan2(a[0].asDouble(), a[1].asDouble())), false);
+                         float8Text(std::atan2(parseDoubleCastValue(a[0]), parseDoubleCastValue(a[1]))), false);
     };
     // power(a, b): PG numeric-power semantics. Both args integral and the
     // result exact -> bare integer; otherwise 16 fractional digits (PG's

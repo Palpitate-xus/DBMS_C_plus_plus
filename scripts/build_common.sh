@@ -89,6 +89,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/string_length_signature_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/float8_scalar_signature_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/angle_conversion_range_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/trigonometric_subnormal_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/integral_rounding_result_type_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/round_result_type_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/mod_result_domain_protocol_e2e_test.py)
