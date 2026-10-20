@@ -34705,6 +34705,10 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                                     const std::string& dbname,
                                     std::optional<bool>* knownNull) {
     if (knownNull) knownNull->reset();
+    const auto publishScalarResult = [&](const auto& value) {
+        if (knownNull) *knownNull = value.isNull;
+        return value.isNull ? std::string("NULL") : value.value;
+    };
     auto scaleOf = [](const std::string& v) -> int {
         size_t dot = v.find('.');
         if (dot == std::string::npos) return -1;
@@ -34960,6 +34964,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             for (const auto& arg : expr.funcArgs) {
                 const std::string av = getVal(arg);
                 if (scalarValueIsNull(arg, av)) {
+                    if (knownNull) *knownNull = true;
                     return "NULL";
                 }
             }
@@ -35180,7 +35185,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         auto res = dbms::ExprHelper::evalStringWithNulls(
             expressionSql, rowContext, nullColumns, typeHints, dbname,
             expr.sessionUser, engine);
-        if (res.ok) return res.isNull ? "NULL" : res.value;
+        if (res.ok) return publishScalarResult(res);
         throw std::runtime_error(
             res.error.empty() ? "failed to evaluate math function"
                               : res.error);
@@ -35220,8 +35225,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 const auto failure = plpgsqlScalarResult(value);
                 throw DbError(failure.sqlState, failure.message);
             }
-            if (knownNull) *knownNull = value.isNull;
-            return value.isNull ? "NULL" : value.value;
+            return publishScalarResult(value);
         }
         // CASE may contain IS NULL, AND or OR inside an arm. Those tokens
         // are not top-level boolean atoms; evaluate the complete CASE AST
@@ -35242,8 +35246,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 const auto result = ExprHelper::evalStringWithNulls(
                     expr.funcArgs[0], rowCtx, nullColumns, typeHints, dbname, expr.sessionUser, engine);
                 if (!result.ok) throw std::runtime_error(result.error);
-                if (knownNull) *knownNull = result.isNull;
-                return result.isNull ? "NULL" : result.value;
+                return publishScalarResult(result);
             }
         }
         // Strip redundant outer parens once, up front: "(a = b)" evaluates
@@ -35440,8 +35443,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 throw std::runtime_error(r2.error);
             return "";
         }
-        if (knownNull) *knownNull = r2.isNull;
-        return r2.isNull ? "NULL" : r2.value;
+        return publishScalarResult(r2);
     }
     // Aggregate-call operands inside arithmetic items
     // ("count(*) - count(v)"): resolve each aggregate sub-call once
@@ -35522,8 +35524,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             const auto error = plpgsqlScalarResult(result);
             throw DbError(error.sqlState, error.message);
         }
-        if (knownNull) *knownNull = result.isNull;
-        return result.isNull ? "NULL" : result.value;
+        return publishScalarResult(result);
     }
 
     if (expr.funcName == "arith" && expr.funcArgs.size() == 3) {
@@ -35752,8 +35753,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                         ? "failed to evaluate typed expression"
                         : evaluated.error);
             }
-            if (knownNull) *knownNull = evaluated.isNull;
-            return evaluated.isNull ? "NULL" : evaluated.value;
+            return publishScalarResult(evaluated);
         }
         double acc = 0.0;
         bool accSet = false;
@@ -36012,7 +36012,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                     ? "failed to evaluate string length"
                     : evaluated.error);
         }
-        return evaluated.isNull ? "NULL" : evaluated.value;
+        return publishScalarResult(evaluated);
     }
     if ((expr.funcName == "upper" || expr.funcName == "lower" ||
          expr.funcName == "initcap") && !expr.funcArgs.empty()) {
@@ -36038,7 +36038,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             throw std::runtime_error(evaluated.error.empty()
                 ? "failed to evaluate character case" : evaluated.error);
         }
-        return evaluated.isNull ? "NULL" : evaluated.value;
+        return publishScalarResult(evaluated);
     }
     if ((expr.funcName == "trim" || expr.funcName == "btrim" ||
          expr.funcName == "ltrim" || expr.funcName == "rtrim") &&
@@ -36073,7 +36073,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                     ? "failed to evaluate trim"
                     : evaluated.error);
         }
-        return evaluated.isNull ? "NULL" : evaluated.value;
+        return publishScalarResult(evaluated);
     }
     if ((expr.funcName == "substring" || expr.funcName == "substr") &&
         expr.funcArgs.size() >= 2) {
@@ -36107,7 +36107,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                     ? "failed to evaluate substring"
                     : evaluated.error);
         }
-        return evaluated.isNull ? "NULL" : evaluated.value;
+        return publishScalarResult(evaluated);
     }
     if (expr.funcName == "concat" || expr.funcName == "concat_ws") {
         std::map<std::string, std::string> rowContext;
@@ -36140,7 +36140,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                     ? "failed to evaluate concatenation"
                     : evaluated.error);
         }
-        return evaluated.isNull ? "NULL" : evaluated.value;
+        return publishScalarResult(evaluated);
     }
     if (expr.funcName == "sign" && !expr.funcArgs.empty()) {
         std::string val = getVal(expr.funcArgs[0]);
@@ -36230,7 +36230,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                     ? "failed to evaluate translate"
                     : evaluated.error);
         }
-        return evaluated.isNull ? "NULL" : evaluated.value;
+        return publishScalarResult(evaluated);
     }
     if (expr.funcName == "strpos" && expr.funcArgs.size() >= 2) {
         // PG: strpos(s, sub) = 1-based position or 0.
@@ -36273,7 +36273,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                     ? "failed to evaluate overlay"
                     : evaluated.error);
         }
-        return evaluated.isNull ? "NULL" : evaluated.value;
+        return publishScalarResult(evaluated);
     }
     if ((expr.funcName == "left" || expr.funcName == "right") &&
         expr.funcArgs.size() >= 2) {
@@ -36303,7 +36303,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                     ? "failed to evaluate string slice"
                     : evaluated.error);
         }
-        return evaluated.isNull ? "NULL" : evaluated.value;
+        return publishScalarResult(evaluated);
     }
     if (expr.funcName == "repeat" && expr.funcArgs.size() >= 2) {
         std::map<std::string, std::string> rowContext;
@@ -36331,7 +36331,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                     ? "failed to evaluate repeat"
                     : evaluated.error);
         }
-        return evaluated.isNull ? "NULL" : evaluated.value;
+        return publishScalarResult(evaluated);
     }
     if ((expr.funcName == "gcd" || expr.funcName == "lcm") &&
         expr.funcArgs.size() >= 2) {
@@ -36361,7 +36361,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                     ? "failed to evaluate gcd/lcm"
                     : evaluated.error);
         }
-        return evaluated.isNull ? "NULL" : evaluated.value;
+        return publishScalarResult(evaluated);
     }
     if (expr.funcName == "width_bucket" && expr.funcArgs.size() >= 4) {
         std::string os = getVal(expr.funcArgs[0]);
@@ -36478,8 +36478,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             const auto failure = plpgsqlScalarResult(result);
             throw DbError(failure.sqlState, failure.message);
         }
-        if (knownNull) *knownNull = result.isNull;
-        return result.isNull ? "NULL" : result.value;
+        return publishScalarResult(result);
     }
     // YEAR / MONTH / DAY - date extraction functions
     if ((expr.funcName == "year" || expr.funcName == "month" || expr.funcName == "day") && !expr.funcArgs.empty()) {
@@ -36928,7 +36927,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                     ? "failed to evaluate coalesce"
                     : evaluated.error);
         }
-        return evaluated.isNull ? "NULL" : evaluated.value;
+        return publishScalarResult(evaluated);
     }
     if (expr.funcName == "nullif" && expr.funcArgs.size() >= 2) {
         std::map<std::string, std::string> rowContext;
@@ -36956,12 +36955,13 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 evaluated.error.empty() ? "failed to evaluate nullif"
                                         : evaluated.error);
         }
-        return evaluated.isNull ? "NULL" : evaluated.value;
+        return publishScalarResult(evaluated);
     }
     if (expr.funcName == "replace" && expr.funcArgs.size() >= 3) {
         std::string str = getVal(expr.funcArgs[0]);
         std::string from = getVal(expr.funcArgs[1]);
         std::string to = getVal(expr.funcArgs[2]);
+        if (knownNull) *knownNull = false;
         if (from.empty()) return str;
         size_t pos = 0;
         while ((pos = str.find(from, pos)) != std::string::npos) {
@@ -37019,7 +37019,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 evaluated.error.empty() ? "failed to evaluate padding"
                                         : evaluated.error);
         }
-        return evaluated.isNull ? "NULL" : evaluated.value;
+        return publishScalarResult(evaluated);
     }
     if (expr.funcName == "reverse" && !expr.funcArgs.empty()) {
         std::string str = getVal(expr.funcArgs[0]);
@@ -37037,6 +37037,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         result.reserve(str.size());
         for (auto it = characters.rbegin(); it != characters.rend(); ++it)
             result += *it;
+        if (knownNull) *knownNull = false;
         return result;
     }
     if ((expr.funcName == "greatest" || expr.funcName == "least") &&
@@ -37071,7 +37072,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                     ? "failed to evaluate greatest/least"
                     : evaluated.error);
         }
-        return evaluated.isNull ? "NULL" : evaluated.value;
+        return publishScalarResult(evaluated);
     }
     if ((expr.funcName == "if" || expr.funcName == "iif") &&
         expr.funcArgs.size() >= 3) {
@@ -37101,7 +37102,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                     ? "failed to evaluate conditional function"
                     : evaluated.error);
         }
-        return evaluated.isNull ? "NULL" : evaluated.value;
+        return publishScalarResult(evaluated);
     }
     if (expr.funcName == "power" && expr.funcArgs.size() >= 2) {
         try {
@@ -37199,7 +37200,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 evaluated.error.empty() ? "failed to evaluate split_part"
                                         : evaluated.error);
         }
-        return evaluated.isNull ? "NULL" : evaluated.value;
+        return publishScalarResult(evaluated);
     }
     if (expr.funcName == "gen_random_uuid" || expr.funcName == "uuidv4" ||
         expr.funcName == "uuidv7" ||
@@ -37235,7 +37236,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                     ? "failed to evaluate UUID function"
                     : evaluated.error);
         }
-        return evaluated.isNull ? "NULL" : evaluated.value;
+        return publishScalarResult(evaluated);
     }
     if (expr.funcName == "uuid_generate") {
         return UuidValue::generateV4().toString();
@@ -38067,7 +38068,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                     ? "failed to evaluate array inspection function"
                     : evaluated.error);
         }
-        return evaluated.isNull ? "NULL" : evaluated.value;
+        return publishScalarResult(evaluated);
     }
     if (expr.funcName == "array_get" && expr.funcArgs.size() >= 2) {
         std::string arr = getVal(expr.funcArgs[0]);
@@ -38127,7 +38128,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                     ? "failed to evaluate array length"
                     : evaluated.error);
         }
-        return evaluated.isNull ? "NULL" : evaluated.value;
+        return publishScalarResult(evaluated);
     }
     if (expr.funcName == "array_contains" && expr.funcArgs.size() >= 2) {
         std::string arr = getVal(expr.funcArgs[0]);
@@ -38247,8 +38248,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             const auto failure = plpgsqlScalarResult(evaluated);
             throw DbError(failure.sqlState, failure.message);
         }
-        if (knownNull) *knownNull = evaluated.isNull;
-        return evaluated.isNull ? "NULL" : evaluated.value;
+        return publishScalarResult(evaluated);
     }
     // PG 42883: undefined function over table columns aborts the
     // statement (previously returned empty silently).
