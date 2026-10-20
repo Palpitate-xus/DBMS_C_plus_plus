@@ -2,6 +2,22 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R180 explicitly skipped by user; unresolved, no product fix",
+      "gap_ids": [
+        "FUNC-01",
+        "PROTO-04"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/deferred-scope.md",
+        "docs/issue-review-r180-position-call-identity.md"
+      ],
+      "tests": [],
+      "verification": {
+        "scope": "Additional investigation deferral only; original273 and15 deferred ledger entries unchanged. No generic continue resumes R180. All24 observations retained; no production changes, compiled candidate or accepted regression. R164 remains unresolved. No push, Actions disabled."
+      }
+    },
+    {
       "issue": "R180 complete24 observations on accepted99722; parser/adaptor identity defects remain open",
       "gap_ids": [
         "FUNC-01",

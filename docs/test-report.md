@@ -1,9 +1,9 @@
 # DBMS 功能测试报告
 
-最新开放：[R180 POSITION语法/参数约定](issue-review-r180-position-call-identity.md)在99722bd2上已完成两侧各24次观察，
-确认真实callee换参、错误签名、非法IN/FROM/逗号准入及嵌套NULL问题；8匹配/16差异不是候选验收或独立缺陷数。
-修改方法及AST/clone/toString、fresh58/真实Main门禁已保存，本项尚无生产候选或新增注册测试。
-已接受仍为下述R179有限修复；R164及总273继续未完成，R177等暂缓不恢复。不push，Actions禁用。
+最新用户暂缓：[R180 POSITION语法/参数约定](issue-review-r180-position-call-identity.md)按最新“skip it”停止实现。
+两侧各24次观察及修改方法继续保留；没有生产修改、注册测试或修复通过声明，普通continue不恢复本项。
+下一项独立审查为字符串REVERSE的重复UTF-8前缀扫描；目前仅源码观察，尚未验收修复。
+已接受仍为下述R179有限修复；R164及总273继续未完成，其他用户暂缓不恢复。不push，Actions禁用。
 
 最新有限修复：[R179 STRPOS声明](issue-review-r179-strpos-signatures.md)已完成真实TEXT/TEXT签名、
 错误阶段/空输入/参数推断/同名重载及opaque native覆盖修复。PG294全0；旧294有140断言差异、

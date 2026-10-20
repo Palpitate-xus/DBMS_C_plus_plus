@@ -1,5 +1,13 @@
 # User-deferred scope and ordinary incomplete work
 
+On 2026-10-20 the user again said "skip it" while R180 POSITION grammar,
+SQL routine identity and native argument conventions were active. R180 is
+unresolved and user-deferred. Its complete24 observations and proposed repair
+remain in [the R180 record](issue-review-r180-position-call-identity.md).
+No R180 production edits, compiled candidate, registered tests or accepted
+fix exist. A generic continuation does not resume this investigation. This
+does not defer other string functions or change the original273 ledger.
+
 On 2026-10-20 the user explicitly said "skip it" while R177 grouped ordinary
 aggregate ORDER/DISTINCT/projection work was active. This investigation remains
 unresolved and deferred; its observed failures and isolated unaccepted candidate
