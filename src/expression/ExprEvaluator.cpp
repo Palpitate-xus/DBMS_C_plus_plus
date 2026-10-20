@@ -10878,6 +10878,13 @@ void ExprEvaluator::registerBuiltins() {
             ? characters : static_cast<size_t>(requestedBegin);
         const __int128 suffixStart =
             static_cast<__int128>(start) + count;
+        // OVERLAY uses an int4 suffix position even when the input is short.
+        // Do not silently clamp a sum that PostgreSQL rejects as overflow.
+        if (suffixStart < std::numeric_limits<int32_t>::min() ||
+            suffixStart > std::numeric_limits<int32_t>::max()) {
+            throw std::runtime_error(
+                "integer out of range (SQLSTATE 22003)");
+        }
         size_t suffixCharacter = 0;
         if (suffixStart > 1) {
             const __int128 zeroBased = suffixStart - 1;

@@ -91,6 +91,27 @@ int main() {
     expectSqlState(database,
                    {"'abcdef'", "'X'", "2", "-2147483649"}, "22003");
 
+    // Each position/count fits int4; the computed suffix must fit it too.
+    expectSqlState(database, {"'abc'", "'X'", "2147483647", "1"}, "22003");
+    expectSqlState(database, {"'abc'", "'X'", "2147483646", "2"}, "22003");
+    expectSqlState(database, {"'abc'", "'X'", "1", "2147483647"}, "22003");
+    expectSqlState(database, {"'abc'", "'X'", "2", "2147483646"}, "22003");
+    expectSqlState(database, {"'abc'", "'X'", "2147483647"}, "22003");
+    expectSqlState(database, {"'abc'", "'界界'", "2147483646"}, "22003");
+    assert(projectOverlay(database, {"'abc'", "'X'", "2147483647", "0"}) ==
+           "abcX");
+    assert(projectOverlay(database, {"'abc'", "'X'", "2147483647", "-1"}) ==
+           "abcX");
+    assert(projectOverlay(database,
+                          {"'abc'", "'X'", "2147483647", "-2147483648"}) ==
+           "abcXabc");
+    assert(projectOverlay(database, {"'abc'", "'X'", "1", "-2147483648"}) ==
+           "Xabc");
+    assert(projectOverlay(database, {"'abc'", "'界'", "2147483646"}) ==
+           "abc界");
+    assert(projectOverlay(database, {"'abc'", "''", "2147483647"}) == "abc");
+    std::cout << "OVERLAY_BOUNDARY_NATIVE_COMPLETE 12" << std::endl;
+
     cleanupTestDb(testName);
     finalCleanupTestData();
     std::cout << "[OVERLAY PROJECTION SEMANTICS] all passed" << std::endl;
