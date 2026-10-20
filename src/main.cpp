@@ -21373,12 +21373,10 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
             // when the call is nested in an arithmetic/projection expression.
             // The existing whole-query shape gate still owns admissibility.
             if(!call->aggregateOrderKeys.empty())return true;
-            // Direct SUM/COUNT reductions belong to the existing whole-query
-            // aggregate operator. Binding parses retain in-call ORDER keys
-            // independently from the actual function argument.
+            // SUM/COUNT reductions retain typed target expressions and
+            // logical derived/join sources. The whole-query shape gate below
+            // still owns admission; do not rebuild these ASTs as table text.
             if(select->command==dbms::SqlCommand::Select &&
-               (!select->fromClause || select->fromClause->type==dbms::FromItem::Type::Table) &&
-               select->selectList.size()==1 && select->selectList.front().expr.get()==call &&
                select->ctes.empty() && select->setOp==dbms::SetOp::None &&
                !select->setOpLhs && !select->setOpRhs && select->valuesRows.empty() &&
                select->groupBy.empty() && select->groupByElems.empty() && !select->having &&

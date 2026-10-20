@@ -45,7 +45,7 @@ R190 的修复提交为 `1eab4c69`。默认协议跳过项记录在提交 `2bf24
 
 - R191 修复浮点 NaN 的 SortOp 排序比较，并扩展原有测试；见 [排序记录](issue-review-r191-floating-executor-order.md)。
 - R192 修复 MIN/MAX 猜测字符串类型造成的错值，改用实际列声明比较；见 [聚合记录](issue-review-r192-declared-minmax-comparison.md)。
-- R193 修复已绑定 pg_class 来源，原始两个目录入口定向通过；额外 COUNT 算术目标和派生来源探针仍有独立失败，SQL、日志和后续修改方法保存在 [R193 记录](issue-review-r193-pg-class-typed-source.md)，不能合并计为已修复。
+- R193 修复已绑定 pg_class 来源，原始两个目录入口定向通过；当时额外 COUNT 算术目标和派生来源的独立失败保存在 [R193 记录](issue-review-r193-pg-class-typed-source.md)。后续 [R196](issue-review-r196-global-aggregate-source-admission.md) 修复聚合入场与派生 COUNT 的 Describe，两条有限反例通过独立参考和两套完整定向回归，未据此关闭整个聚合族。
 
 上述修复具有独立提交、旧红/新绿和定向构建证据，但冻结全量仍使用旧版本，原结果不被替换。
 用户暂缓的 R185 排序中断和其他已跳过分支不恢复，未接受的工作区改动仍不自动计入已完成。

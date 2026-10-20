@@ -48,6 +48,24 @@ def main():
             check('BEGIN')
         check('CREATE TABLE aggregate_child_rows(id INT,v NUMERIC(20,2),b BOOL,t TEXT)')
         check("INSERT INTO aggregate_child_rows VALUES(1,10,true,'NULL'),(2,20,false,''),(3,NULL,NULL,NULL),(4,10,true,'z')")
+        admission_cases = [
+            ('SELECT count(*)+1 AS n FROM aggregate_child_rows', [['5']], [20]),
+            ('SELECT count(*),count(v),sum(id) FROM aggregate_child_rows', [['4','3','10']], [20,20,20]),
+            ('SELECT count(*) FROM (SELECT id FROM aggregate_child_rows WHERE id<=2) AS d', [['2']], [20]),
+            ('SELECT sum(id) FROM (SELECT id FROM aggregate_child_rows WHERE id<=2) AS d', [['3']], [20]),
+            ('SELECT count(*) FROM (SELECT id FROM aggregate_child_rows WHERE false) AS d', [['0']], [20]),
+            ('SELECT sum(id) FROM (SELECT id FROM aggregate_child_rows WHERE false) AS d', [[None]], [20]),
+            ('SELECT count(*),count(r.v) FROM aggregate_child_rows r LEFT JOIN (SELECT 1 AS id) q ON r.id=q.id', [['4','3']], [20,20]),
+            ('SELECT count(*) FROM aggregate_child_rows a INNER JOIN aggregate_child_rows b ON a.id=b.id WHERE a.id<=2', [['2']], [20]),
+            ('SELECT count(*)+count(v) FROM aggregate_child_rows', [['7']], [20]),
+            ('SELECT sum(id)+1 FROM aggregate_child_rows', [['11']], [20]),
+            ('SELECT count(*) FROM (VALUES(1),(2),(NULL)) AS d(id)', [['3']], [20]),
+            ('SELECT count(id),sum(id) FROM (VALUES(1),(2),(NULL)) AS d(id)', [['2','3']], [20,20]),
+        ]
+        assert len(admission_cases) == 12
+        for sql, rows, oids in admission_cases:
+            check(sql, rows, oids)
+        print('GLOBAL_AGGREGATE_TOP_LEVEL_ADMISSION_COMPLETE', len(admission_cases), flush=True)
         for expression, rows, oids in [
             ('count(*)', [['4']], [20]),
             ('count(v)', [['3']], [20]),

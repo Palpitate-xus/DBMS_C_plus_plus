@@ -107,6 +107,25 @@ def main():
             query(f"SELECT count(*) FROM pg_class WHERE relname='{one}';", extended,
                   [["1"]], ["count"], [20], ready=b"T")
             query("ROLLBACK;", extended)
+            # The bound aggregate/derived-source consumer must obtain actual
+            # catalog cells, never open a heap named pg_catalog__pg_class.
+            query(f"SELECT count(oid),count(relname),count(relnamespace),count(relkind),"
+                  f"count(relnatts),count(relpersistence),count(relowner) FROM pg_catalog.pg_class "
+                  f"WHERE relname='{one}';", extended,
+                  [["1"] * 7], ["count"] * 7, [20] * 7)
+            query(f"SELECT count(*) FROM pg_catalog.pg_class WHERE relname='{one}' "
+                  f"OR relname='{two}';", extended, [["2"]], ["count"], [20])
+            query(f"SELECT count(*)+1 AS n FROM pg_catalog.pg_class WHERE relname='{one}';",
+                  extended, [["2"]], ["n"], [20])
+            query(f"SELECT (SELECT count(*) FROM pg_catalog.pg_class WHERE relname='{one}') AS n;",
+                  extended, [["1"]], ["n"], [20])
+            query(f"SELECT count(*) FROM (SELECT relname FROM pg_catalog.pg_class "
+                  f"WHERE relname='{one}' OR relname='{two}') AS c;", extended,
+                  [["2"]], ["count"], [20])
+            query(f"SELECT count(*) FROM pg_catalog.pg_class AS c "
+                  f"WHERE c.relname='{one}' AND c.relnatts=1;", extended,
+                  [["1"]], ["count"], [20])
+        print("PG_CLASS_TYPED_SOURCE_CONTROLS_COMPLETE 12")
         print("[PG CLASS QUERY " + ("PG18 ORACLE" if reference else "PROTOCOL E2E") + "] passed")
     finally:
         try:

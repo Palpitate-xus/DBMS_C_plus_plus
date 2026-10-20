@@ -2241,7 +2241,16 @@ bool describePreparedOrdinarySourceResult(const std::string& sql, Session& sessi
                 "pg_listening_channels","corr","covar_pop","covar_samp"};
             if(queryRoles.count(routineName(call)) && !(aggregateTarget && aggregate(call)))
                 return false;
-            for(const auto& argument:call->args)if(!ordinary(argument.get(),false))return false;
+            for(const auto& argument:call->args) {
+                // COUNT(*) owns a grammar star, not a wildcard projection or
+                // a quoted datum. Keep its actual bound aggregate descriptor
+                // when the source is derived; Describe must not read rows.
+                const auto* star=dynamic_cast<const LiteralExpr*>(argument.get());
+                const bool countStar=aggregateTarget && routineName(call)=="count" &&
+                    call->args.size()==1 && star && star->value=="*" &&
+                    star->typeName.empty() && !star->preparedSubquery;
+                if(!countStar && !ordinary(argument.get(),false))return false;
+            }
             return true;
         }
         if(const auto* column=dynamic_cast<const ColumnRefExpr*>(value))return column->column!="*";

@@ -45,11 +45,11 @@ aggregate_argument_expression、cte_prepared_owner、temp_alter_column_catalog�
 新建私有 PostgreSQL 18.6 实例实际通过两个完整最终夹具；确认版本 180006，
 保持默认 fsync，测试后该自有实例正常停止 0。未连接、修改或停止既有用户/参考实例。
 
-## 额外聚合探针仍开放，不能合并成已通过
+## 额外聚合探针的历史失败与后续 R196 修复
 
 最初额外扩展探针还发现两个不同的聚合入场问题：
 
-| SQL 形状 | PostgreSQL 18.6 | 本项候选 | 后续修改方法 |
+| SQL 形状 | PostgreSQL 18.6 | R193 候选（历史） | 修改方法 |
 | --- | --- | --- | --- |
 | `SELECT count(*)+1 FROM pg_catalog.pg_class WHERE relname='已建表名'` | 2 | 0A000，complex catalog aggregate | 检查已绑定全局聚合入场条件，不能让嵌套于算术目标的 COUNT 落回旧目录适配器。 |
 | `SELECT count(*) FROM (SELECT relname FROM pg_catalog.pg_class WHERE …) AS c` | 精确子查询行数 | 42P01，把整个派生来源当作关系名称 | 让既有逻辑来源执行器保留并消费派生 AST；不得把 FROM 子树重新解释为表名字符串。 |
@@ -57,7 +57,10 @@ aggregate_argument_expression、cte_prepared_owner、temp_alter_column_catalog�
 首版完整额外探针原文保存在下列 V2 目录中，PG 侧同一探针实际通过。
 V1/V2 的两个 pg_class 失败日志、执行退出码均保留，不能改写为通过。
 这些是新追加探针暴露的后续问题，不是本项原始目录来源反例的修复证明，也不是用户要求跳过的项。
-最终本项用未改动的完整原 pg_class 夹具验收；新表达式/派生表探针留待独立修复与提交。
+R193 当时用未改动的完整原 pg_class 夹具验收，未将新表达式/派生表探针计为已修复。
+后续 [R196](issue-review-r196-global-aggregate-source-admission.md) 独立处理聚合入场及派生 COUNT(*) 的 Describe，
+将原额外探针完整加入永久夹具，并取得 PostgreSQL 18.6 参考、两套完整 36 入口和永久文件验证。
+两条有限反例现在已修复，原 R193 失败证据仍保留；这不表示全部目录列或整个聚合族完成。
 V1 的通用 footer 分类器还将四类实际退出 0 的入口错误标为 footer 不匹配；
 V2 以每项固定 footer、190/30 条原始记录独立核对，没有把分类器错误当成产品 SQL 失败。
 
@@ -90,4 +93,4 @@ SHA256 `8e87469a18202cb5b6412ef32a91bc1be02d52659af4d699ef2ef7b219b75d5d`。
 随后 R195 正常构建只更新 NetworkServer；该默认服务器再次完整通过这两个目录入口。
 见 [R195 正常构建记录](issue-review-r195-aborted-begin-syntax-priority.md)。
 两个正常构建阶段的历史对象/服务器已先保存副本，原 receipt 的历史 hash 不改写。
-工作区原有未接受改动仍不因此接受；开放的 COUNT 算术目标/派生来源探针也未据此修复。
+工作区原有未接受改动仍不因此接受；该次正常构建不能用来关闭额外聚合探针，后续修复见 R196。
