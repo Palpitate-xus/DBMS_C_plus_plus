@@ -49,7 +49,9 @@ int main() {
     verify("new");
     const auto beforeSchema=g_engine.getTableSchema(db,"widths");
     check(beforeSchema.cols[0].dsize==12,"DATE retains physical 12 byte codec");
-    check(beforeSchema.cols[1].dsize==4,"TIME retains physical 4 byte codec");
+    check(beforeSchema.cols[1].dsize==8 &&
+          beforeSchema.cols[1].storageCodec==Column::StorageCodec::TemporalMicros,
+          "new SQL TIME uses explicit eight-byte microsecond codec");
     check(beforeSchema.cols[2].dsize==4,"TIMETZ retains existing physical codec");
     check(beforeSchema.cols[3].isVariableLength,"INTERVAL retains variable text storage");
     check(g_engine.insertRow(db,"widths",{{"d",std::string("2024-01-01")},
@@ -65,8 +67,66 @@ int main() {
     const auto afterSchema=g_engine.getTableSchema(db,"widths");
     for(size_t i=0;i<beforeSchema.len;++i)
         check(beforeSchema.cols[i].dsize==afterSchema.cols[i].dsize &&
-              beforeSchema.cols[i].isVariableLength==afterSchema.cols[i].isVariableLength,
+              beforeSchema.cols[i].isVariableLength==afterSchema.cols[i].isVariableLength &&
+              beforeSchema.cols[i].storageCodec==afterSchema.cols[i].storageCodec,
               "unchanged storage layout "+std::to_string(i));
+    // R136 deliberately gives NEW SQL TIME columns an explicit microsecond
+    // codec. Keep the original legacy seconds guarantee on an actual native
+    // legacy table, including unrelated metadata synchronization and cold read.
+    TableSchema legacyTimeSchema; legacyTimeSchema.tablename="legacy_time";
+    const auto legacyTimeColumn=makeTimeColumn("t",true);
+    check(legacyTimeColumn.dsize==4 && legacyTimeColumn.storageCodec==Column::StorageCodec::Legacy,
+          "native TIME factory still selects four-byte seconds explicitly");
+    legacyTimeSchema.append(legacyTimeColumn);
+    legacyTimeSchema.append(makeIntColumn("id",false,2,true));
+    check(g_engine.createTable(db,legacyTimeSchema)==DBStatus::OK,"create genuine legacy TIME table");
+    // The native storage API deliberately does not register pg_class. Seed
+    // the catalog image an actual pre-upgrade SQL table already owned; do
+    // not mistake missing fixture metadata for an attlen conversion failure.
+    {
+        auto& catalog=g_engine.catalogService().get(db);
+        const auto space=catalog.getNamespaceByName("public");
+        check(space.has_value(),"old SQL catalog fixture has a real public namespace");
+        PgClassRow relation;relation.relname="legacy_time";
+        relation.relnamespace=space?space->oid:INVALID_OID;relation.relnatts=2;
+        const Oid relationOid=catalog.createClass(relation);
+        check(relationOid!=INVALID_OID,"seed existing SQL relation identity for legacy heap");
+        PgAttributeRow timeAttribute;timeAttribute.attrelid=relationOid;
+        timeAttribute.attname="t";timeAttribute.atttypid=1083;timeAttribute.attnum=1;
+        timeAttribute.attlen=4; // Historical copied physical length, not the desired result.
+        catalog.addAttribute(timeAttribute);
+        PgAttributeRow idAttribute;idAttribute.attrelid=relationOid;
+        idAttribute.attname="id";idAttribute.atttypid=23;idAttribute.attnum=2;idAttribute.attlen=4;
+        catalog.addAttribute(idAttribute);
+        check(catalog.persistAll(),"publish the actual old SQL catalog fixture");
+    }
+    check(g_engine.insertRow(db,"legacy_time",{{"id",std::string("1")},{"t",std::string("12:34:56")}})==DBStatus::OK,
+          "insert genuine legacy TIME seconds");
+    const auto legacyTimeRows=g_engine.query(db,"legacy_time",{},{"t"},{});
+    check(legacyTimeRows==std::vector<std::string>{"12:34:56 "},"legacy TIME row has actual second-coded value");
+    check(!ddl.executeSql("ALTER TABLE legacy_time RENAME COLUMN t TO renamed",session),
+          "legacy metadata synchronization succeeds");
+    const auto legacyTimeAfter=g_engine.getTableSchema(db,"legacy_time");
+    check(legacyTimeAfter.len==2 && legacyTimeAfter.cols[0].dataName=="renamed" &&
+          legacyTimeAfter.cols[0].dsize==4 && legacyTimeAfter.cols[0].storageCodec==Column::StorageCodec::Legacy,
+          "unrelated ALTER never migrates legacy TIME width or units");
+    check(g_engine.query(db,"legacy_time",{},{"renamed"},{})==legacyTimeRows,
+          "legacy stored values survive metadata synchronization");
+    {
+        auto& catalog=g_engine.catalogService().get(db);
+        const auto space=catalog.getNamespaceByName("public");
+        const auto relation=space?catalog.getClassByName("legacy_time",space->oid):std::nullopt;
+        const auto attribute=relation?catalog.getAttribute(relation->oid,"renamed"):std::nullopt;
+        check(attribute && attribute->attlen==8,"legacy physical TIME still publishes logical eight-byte length");
+    }
+    {
+        StorageEngine cold;
+        const auto schema=cold.getTableSchema(db,"legacy_time");
+        check(schema.len==2 && schema.cols[0].dsize==4 && schema.cols[0].storageCodec==Column::StorageCodec::Legacy,
+              "cold schema retains explicit legacy TIME units");
+        check(cold.query(db,"legacy_time",{},{"renamed"},{})==legacyTimeRows,
+              "cold legacy TIME value survives without migration");
+    }
     setCurrentSession(nullptr);
 
     // An old catalog is upgraded only in the parsed model: cold metadata
@@ -132,5 +192,5 @@ int main() {
     check(fields.size()==14 && legacy.size()==8,"complete fixture identities");
     cleanupTestDb("physical_attribute_length");finalCleanupTestData();
     std::cout<<"PHYSICAL_ATTRIBUTE_LENGTH_NATIVE_COMPLETE "<<checks<<" FAILURES "<<failures<<'\n';
-    return checks==102 && !failures?0:1;
+    return checks==115 && !failures?0:1;
 }

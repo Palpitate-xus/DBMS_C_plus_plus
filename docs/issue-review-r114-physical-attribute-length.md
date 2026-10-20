@@ -1,5 +1,35 @@
 # R114：逻辑字段长度泄漏物理存储布局
 
+## R190：区分当前 SQL TIME 的微秒布局与真实旧列
+
+冻结 `2442e4c7` 原规范全套完整执行本夹具的 102 项，实际退出 1、仅 1 项失败：
+仍要求新 SQL TIME 列为 4 字节。后续已接受的[R136](issue-review-r136-temporal-microsecond-storage.md)
+明确将新 SQL 标量 TIME 改为 8 字节 TemporalMicros，旧工厂/旧 schema 保留 Legacy；
+不能为通过旧断言而倒退已实现的微秒存储，也不能删除旧列兼容性检查。
+
+当前夹具对新 SQL TIME 同时要求宽度 8 与显式 TemporalMicros；原 14 列在无关 ALTER
+前后的检查还要求 codec 不变。新增真实 4 字节 native TIME heap/整秒行，以实际
+CatalogManager API 构造其前升级 SQL catalog 输入（初始 attlen=4），验证无关 RENAME
+后物理宽度/单位和值不变、目录逻辑长度为 8，以及独立 StorageEngine 冷读保持旧值。
+这是明确构造的旧目录测试输入，不冒充从历史生产集群恢复的升级证明。
+
+原 102 项除这一过时的新列期望外均保留，并增加 13 项旧列/目录前提/存活性控制；
+两套库完整 115 项均实际退出 0、零失败。每侧新编译并链接该测试，核对各自 57 个
+生产库对象/stub、127 头与编译配置。生产代码/头/入口数量未改；工作区保留的未接受
+改动不借此验收。原全套继续冻结输入，其 102/1 失败记录未被新结果覆盖。
+
+增强夹具 V1 完整 112 项两侧各 1 失败：原生物理表 API 未自动注册 pg_class，缺少
+新增目录断言的前提。V2 显式构造上述真实 catalog 输入，仍保留而非删除目录长度
+断言；V1 源和失败日志保留。自动注册/统一 catalog 的更大缺口仍属未完成总账，
+没有通过夹具补前提而宣称 P0-03/CAT-02 完成。
+
+证据：`/tmp/dbms-r190-physical-length-v2.5krddmw0/completed-focused-receipt.json`，
+SHA256 `9d18163dafec6dc3569fa0e2c6d154f875bcf145e7ed6f883c90108425bf7785`。
+原全套日志：`/tmp/dbms-accepted2442-full1492.9obmw81r/canonical-full-registered.log`；
+V1 失败：`/tmp/dbms-r190-physical-length.gwcy769o/completed-focused-receipt.json`。
+这不是修复后全1492、PG 差分、TLS/sanitizer 或原273验收。R187 不明退出仍开放，
+R185 与其他明确暂缓项不恢复，不 push，Actions 禁用。下文数字与物理宽度按历史输入解释。
+
 状态：本范围已修复并完成有限验收，R115先行、本项随后独立本地提交。
 
 ## 问题与影响
