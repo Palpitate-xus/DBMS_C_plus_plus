@@ -9188,6 +9188,15 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
                 ? dynamic_cast<const dbms::SelectStmt*>(parsedHeader.stmt.get()) : nullptr;
             if (headerSelect && headerSelect->selectList.size() == 1) {
                 const auto* rootExpression = headerSelect->selectList.front().expr.get();
+                // TRIM keyword calls already carry their actual system callee.
+                // A string containing "leading"/"trailing" is not syntax and
+                // must not change the result label through a text search.
+                if (const auto* call = dynamic_cast<const dbms::FunctionCallExpr*>(rootExpression);
+                    call && call->schema == "pg_catalog" &&
+                    (call->funcName == "btrim" || call->funcName == "ltrim" || call->funcName == "rtrim")) {
+                    headers.push_back(call->funcName);
+                    goto headerDone;
+                }
                 const auto* binary = dynamic_cast<const dbms::BinaryOpExpr*>(rootExpression);
                 const auto* unary = dynamic_cast<const dbms::UnaryOpExpr*>(rootExpression);
                 const auto* literal = dynamic_cast<const dbms::LiteralExpr*>(rootExpression);

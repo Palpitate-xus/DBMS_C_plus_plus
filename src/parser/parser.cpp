@@ -3063,7 +3063,54 @@ static ExprPtr parsePrimaryExprImpl(const std::vector<std::string>& tokens, size
             func->funcName = first;
         }
 
-        // PG keyword-arg syntax: normalize inside overlay/trim/extract calls.
+        // TRIM is SQL grammar, not a direction encoded as an argument value.
+        // Lower only the unquoted, unqualified keyword to the actual system
+        // callee. Leave quoted/qualified function calls and nested tokens alone.
+        const bool keywordTrim = !hasSecond && !hasThird && firstLower == "trim";
+        if (keywordTrim) {
+            const auto syntax = []() -> void {
+                const DbError error("42601", "invalid TRIM syntax");
+                retainDeclarationSyntaxError(error);
+                throw error;
+            };
+            const auto keyword = [&](const std::string& word) {
+                return pos < tokens.size() && SQLParser::toLower(tokens[pos]) == word;
+            };
+            func->schema = "pg_catalog";
+            func->funcName = "btrim";
+            if (keyword("both")) ++pos;
+            else if (keyword("leading")) { func->funcName = "ltrim"; ++pos; }
+            else if (keyword("trailing")) { func->funcName = "rtrim"; ++pos; }
+            const auto argument = [&]() -> ExprPtr {
+                if (pos >= tokens.size() || tokens[pos] == ")" || tokens[pos] == "," ||
+                    keyword("from") || keyword("both") || keyword("leading") || keyword("trailing"))
+                    syntax();
+                const size_t begin = pos;
+                auto expression = parseExpr(tokens, pos);
+                if (!expression || pos == begin) syntax();
+                return expression;
+            };
+            ExprPtr characters;
+            if (!keyword("from")) {
+                auto firstArgument = argument();
+                if (keyword("from")) characters = std::move(firstArgument);
+                else func->args.push_back(std::move(firstArgument));
+            }
+            if (keyword("from")) {
+                ++pos;
+                func->args.push_back(argument());
+            }
+            while (pos < tokens.size() && tokens[pos] == ",") {
+                ++pos;
+                func->args.push_back(argument());
+            }
+            if (pos >= tokens.size() || tokens[pos] != ")") syntax();
+            // SQL's characters FROM source order becomes the routine's
+            // source, characters order, retaining each AST child exactly once.
+            if (characters) func->args.push_back(std::move(characters));
+        }
+
+        // Legacy keyword-arg normalization for ordinary function spellings.
         std::string fnLow = SQLParser::toLower(func->funcName);
         if (fnLow == "overlay" || fnLow == "trim" || fnLow == "extract") {
             std::vector<std::string>& tok2 = const_cast<std::vector<std::string>&>(tokens);
@@ -3105,7 +3152,7 @@ static ExprPtr parsePrimaryExprImpl(const std::vector<std::string>& tokens, size
             }
         };
 
-        while (pos < tokens.size() && tokens[pos] != ")") {
+        while (!keywordTrim && pos < tokens.size() && tokens[pos] != ")") {
             if (SQLParser::toLower(tokens[pos]) == "distinct") {
                 func->distinct = true;
                 ++pos;
