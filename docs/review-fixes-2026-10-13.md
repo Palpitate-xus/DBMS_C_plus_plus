@@ -1,5 +1,26 @@
 # 2026-10-13 审查问题修复进度
 
+## 当前版本：R176有限排序修复，完整矩阵仍有失败
+
+[R176](issue-review-r176-ordinary-aggregate-order-keys.md)的有限源码修复已本地提交`a35658c0`：
+保留全局SUM/COUNT真实ORDER键，纯绑定及错误阶段、FILTER/NULL需求、缓存typed排序、
+共享参数/重复键和方向身份有native61及完整协议190回归，两侧专项均0。
+完整PG190对照0；旧版本190次完整观察59通过131失败，不把这些重复模式称为131个独立缺陷。
+工作区完整72入口实际全0；干净版两次完整72均外层1，各71项通过，均在R164入口socket超时，
+无完整956成功footer，清理出现延迟响应错位。超时根因未确定，也未证明与R176无关；
+保留全部失败，不提高超时、不改持久化、不移除断言，不宣称双侧完整矩阵通过。
+每侧35native/34协议/3真实Main顺序及原70断言保留；每侧97对象/39程序及源文件独立核对。
+三个Main采用accepted测试体的路径投影及显式私有数据目录，不夹带工作区session测试改动。
+Root fresh58、normal wrapper复用当前58链接、repeat零编译/零链接；clean fresh2+56当前header
+donor源自独立fresh58 V3，未伪造clean常规build/repeat。提交的2198源文件与tested clean逐blob一致。
+跟踪596份MD、917native+564注册Python+3Main=1484入口；工作区599份MD、923+570+3=1496，
+原12个未纳入版本的测试入口和三份文档分离保留。这不是1484全量、TLS或整库sanitizer通过声明。
+R176的GROUP BY排序、更多类型/算子/参数/query owner边界仍开放；R164超时仍普通未解决，非用户暂缓。
+原273仍22 complete /166 partial /70 unverified /15 deferred，总目标未完成。
+R173、R156及其他用户暂缓分支不恢复；不push，Actions禁用。
+
+## 历史记录（以下状态与数量均指记录当时）
+
 ## 当前接受状态：R170/R171/R172/R174/R175
 
 五项有限修复已分别本地提交，版本对应见[审查索引](review-index.md)。

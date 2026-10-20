@@ -2,6 +2,29 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R176 finite ordinary aggregate ORDER key binding and execution; clean matrix failures retained",
+      "gap_ids": [
+        "SQL-04",
+        "PROTO-04"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r176-ordinary-aggregate-order-keys.md"
+      ],
+      "tests": [
+        "tests/ordinary_aggregate_order_keys_test.cpp",
+        "tests/ordinary_aggregate_order_keys_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "source_commit": "a35658c0e3191fc6d8e37b0a52480b945cba7b6d",
+        "reproduction": "PG full190 actual0; old accepted full190 actual1/59pass131fail, all190 observed. V1/V3 candidate failures and transport observations retained.",
+        "focused_tests": "Root and clean native61/wire190 actual0. Root full72 actual0. BOTH clean full72 actual1,71pass and R164 socket timeout/no956footer; cleanup response mismatches. Unknown cause, not proven unrelated to R176. No assertion/timeout/durability weakening or spliced pass.",
+        "artifact_proof": "Each97objects39binaries,127headers and exact source pathsets/directories/bytes independently verified; all2198 committed source blobs match tested accepted-only clean. Accepted Main bodies retained; foreign Root source/docs preserved.",
+        "full_suite": "NO two-sided full matrix acceptance, full1484 registered suite, TLS or full-engine sanitizer claim. R164 remains ordinary unresolved, not newly deferred.",
+        "scope": "Global SUM/COUNT tested shapes only; GROUP BY/more types/operators/parameters/query owners open. Original273 unchanged22complete166partial70unverified15deferred; R173/R156 and other deferrals kept. No push; Actions disabled."
+      }
+    },
+    {
       "issue": "R173 signature dependency branch skipped unaccepted; R176 ordinary aggregate ORDER keys confirmed open",
       "gap_ids": [
         "FUNC-01",
