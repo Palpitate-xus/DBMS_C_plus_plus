@@ -423,7 +423,17 @@ std::string inferAstResultType(
             if (routine != routineTypes->declarations.end()) return protocolTypeName(routine->second);
         }
         const std::string reduction = builtinReductionName(call);
-        const std::string name = reduction.empty() ? toLower(call->funcName) : reduction;
+        std::string name = reduction.empty() ? toLower(call->funcName) : reduction;
+        // An explicitly catalog-qualified scalar uses its decoded SQL
+        // identifier, not the quoted token spelling. Keep quoted case intact;
+        // resolved stored/opaque declarations above still take precedence.
+        CatalogManager::QualifiedName callee, catalog;
+        if (!call->schema.empty() &&
+            CatalogManager::parseQualifiedName(call->schema, catalog, true) &&
+            catalog.schema.empty() && catalog.name == "pg_catalog" &&
+            CatalogManager::parseQualifiedName(call->funcName, callee, true) &&
+            callee.schema.empty())
+            name = callee.name;
         // These names are parser-owned three-operand grammar nodes, not
         // ordinary scalar calls whose type can follow their first argument.
         if (call->schema.empty() &&

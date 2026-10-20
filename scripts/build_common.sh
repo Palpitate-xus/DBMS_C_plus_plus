@@ -596,6 +596,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/bytea_hex_sqlstate_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/bytea_input_grammar_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/quoted_function_label_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/quoted_catalog_scalar_descriptor_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/current_schema_projection_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/current_schema_demand_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/overlay_boundary_protocol_e2e_test.py)
