@@ -12,7 +12,10 @@ int main() {
     TypeRegistry::instance().bootstrap();
     const auto database=testDbPath("bit_compact_list_receiver_admission");
     if(g_engine.createDatabase(database,"utf8")!=DBStatus::OK)return 2;
-    TableSchema table;table.append(makeIntColumn("id",false,4,true));
+    // makeIntColumn takes a type selector, not a byte width: 2 is int4.
+    TableSchema table;table.append(makeIntColumn("id",false,2,true));
+    if(TypeRegistry::instance().normalizeTypeName(table.cols[0].dataType)!="integer" ||
+       table.cols[0].dsize!=4)return 2;
     Column bit;bit.dataName="b";bit.isNull=true;
     if(!TypeRegistry::instance().resolveColumnType(bit,"bit",{"2"},false).empty())return 2;
     table.append(bit);
@@ -82,13 +85,27 @@ int main() {
             require(rows.size()==(expected?1U:0U),std::string(name)+" legal empty/NULL "+condition);
         }
     }
-    TableSchema sink;sink.tablename="calls";sink.append(makeIntColumn("id",false,4));
+    TableSchema sink;sink.tablename="calls";sink.append(makeIntColumn("id",false,2));
+    if(TypeRegistry::instance().normalizeTypeName(sink.cols[0].dataType)!="integer" ||
+       sink.cols[0].dsize!=4)return 2;
     if(g_engine.createTable(database,sink)!=DBStatus::OK)return 2;
     if(g_engine.createUDF(database,"compact_effect",{"p"},{"integer"},
         "BEGIN INSERT INTO calls VALUES(p); RETURN p; END;",'v',"plpgsql","integer")!=DBStatus::OK)return 2;
     StorageEngine::SelectExpr writer;writer.displayName="effect";writer.isScalar=true;
     writer.funcName="compact_effect";writer.funcArgs={"id"};
     const auto calls=[&]{return g_engine.queryExpr(database,"calls",{},{projection}).size();};
+    // Keep an actual incompatible signature control: repairing the
+    // positive fixture must not introduce implicit bigint-to-int4 calls.
+    TableSchema wider;wider.tablename="bigint_input";
+    wider.append(makeIntColumn("id",false,4,true));
+    if(TypeRegistry::instance().normalizeTypeName(wider.cols[0].dataType)!="bigint" ||
+       wider.cols[0].dsize!=8 ||
+       g_engine.createTable(database,wider)!=DBStatus::OK ||
+       g_engine.insertRow(database,wider.tablename,{{"id","1"}})!=DBStatus::OK)return 2;
+    std::string widerState;
+    try {(void)g_engine.queryExpr(database,wider.tablename,{},{writer});}
+    catch(const DbError& error){widerState=error.sqlState();}
+    require(widerState=="42883" && calls()==0,"bigint writer argument is rejected before effects");
     for(const auto& condition:std::vector<std::pair<std::string,std::string>>{
         {"inb B'01' 1","42883"},{"inb B'01' '102'","22P02"}})
         for(const size_t cap:{size_t(0),size_t(1)}) {
@@ -100,6 +117,7 @@ int main() {
     StorageEngine::QueryExprExecutionOptions options;options.maxProjectionRows=1;
     auto valid=g_engine.queryExpr(database,"populated",{"inb B'01' NULL"},{writer},{},options);
     require(valid.size()==1 && calls()==1,"admitted real writer runs once");
+    require(controls==285,"all original 284 controls and bigint rejection reached");
     if(g_engine.dropDatabase(database)!=DBStatus::OK)return 2;
     std::cout<<"[BIT COMPACT RECEIVER ADMISSION] controls="<<controls<<" failures="<<failures<<'\n';
     return failures?1:0;

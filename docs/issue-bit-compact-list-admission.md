@@ -1,5 +1,46 @@
 # Admit every compact BIT list member before scanning
 
+## Current fixture correction (R186)
+
+The original canonical full runner on accepted source `2442e4c7` actually
+aborted `bit_compact_list_receiver_admission_test` with exit 134 and
+`42883: function does not exist: "compact_effect"`. It did not reach the
+complete footer. This is a stale test declaration, not a demonstrated new
+database function-resolution defect: `makeIntColumn(..., 4)` selects BIGINT,
+not a four-byte INTEGER, while the fixture declares `compact_effect(integer)`.
+
+The positive source and sink now use selector 2, with explicit canonical
+INTEGER/four-byte preconditions. Every original 284 check remains, including
+all six receiver/planner/filter owners, empty/NULL input, error priority and
+the actual writing routine. An additional genuine BIGINT source must still
+raise 42883 without a write; a final count guard proves that all original
+checks and this negative control were reached. The complete footer is now
+`[BIT COMPACT RECEIVER ADMISSION] controls=286 failures=0`.
+
+Both the accepted-only 2442 production library and the current workspace
+library actually passed the corrected complete 286-check native fixture.
+Each variant freshly compiled and linked this fixture against its byte-checked
+57 production-library objects and stub, with all 127 headers and compiler
+settings checked. Production code and headers were not changed. The workspace
+variant includes its pre-existing unaccepted changes, including skipped R185;
+it is not an accepted-only source or proof that those changes are approved.
+
+Evidence is `/tmp/dbms-r186-canonical-boundary.1dylg_f9/completed-focused-receipt.json`,
+SHA256 `0eb4c164ba4bd42f6a53947a0a64f193dc0363c5b016499d97f8bad9f92dc978`.
+Original failure: `/tmp/dbms-accepted2442-full1492.9obmw81r/canonical-full-registered.log`.
+For focused verification only the owned canonical scheduler was suspended;
+its running child completed normally before either compilation or runtime.
+The scheduler was then resumed with its original source, order and inputs.
+The first signal-state observation guard failed before any candidate build;
+its log is retained separately, and the corrected guard waits for actual
+stopped state. Neither failure record was overwritten.
+
+The original full 1492-entry run is still in progress on frozen 2442, so its
+original fixture failure remains part of that run. This is not a full-suite
+pass, PostgreSQL differential, TLS/sanitizer result, production repair, or
+closure of TYPE-11/the original 273 requirements. R185 remains skipped; no
+push or Actions enablement. The earlier evidence below is historical.
+
 The SQL frontend's retained typed IN expression passed its full controls,
 but that did not validate the independent native compact-condition owners.
 Both `StorageEngine::queryExpr` and `QueryPlanner` checked only the left
