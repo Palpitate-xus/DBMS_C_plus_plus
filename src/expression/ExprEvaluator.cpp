@@ -7048,10 +7048,15 @@ static std::vector<std::string> splitUtf8Characters(
     std::vector<std::string> result;
     const size_t count = utf8CharCount(text);
     result.reserve(count);
-    for (size_t i = 0; i < count; ++i) {
-        const size_t begin = utf8ByteAt(text, i);
-        const size_t end = utf8ByteAt(text, i + 1);
+    // Split validated UTF-8 in one pass; looking up every character index
+    // separately rescans all prefixes and makes long inputs quadratic.
+    for (size_t begin = 0; begin < text.size();) {
+        size_t end = begin + 1;
+        while (end < text.size() &&
+               (static_cast<unsigned char>(text[end]) & 0xc0) == 0x80)
+            ++end;
         result.push_back(text.substr(begin, end - begin));
+        begin = end;
     }
     return result;
 }
@@ -7199,14 +7204,7 @@ static ExprValue evaluateTextPad(const std::vector<ExprValue>& args,
     const std::string fill = args.size() >= 3
         ? textArgumentValue(args[2]) : " ";
     if (fill.empty()) return ExprValue("text", input, false);
-    std::vector<std::string> fillCharacters;
-    const size_t fillLength = utf8CharCount(fill);
-    fillCharacters.reserve(fillLength);
-    for (size_t i = 0; i < fillLength; ++i) {
-        const size_t begin = utf8ByteAt(fill, i);
-        const size_t end = utf8ByteAt(fill, i + 1);
-        fillCharacters.push_back(fill.substr(begin, end - begin));
-    }
+    const std::vector<std::string> fillCharacters = splitUtf8Characters(fill);
     if (fillCharacters.empty())
         return ExprValue("text", input, false);
 
@@ -10771,20 +10769,9 @@ void ExprEvaluator::registerBuiltins() {
         const std::string s = textArgumentValue(a[0]);
         const std::string from = textArgumentValue(a[1]);
         const std::string to = textArgumentValue(a[2]);
-        auto characters = [](const std::string& text) {
-            std::vector<std::string> result;
-            const size_t count = utf8CharCount(text);
-            result.reserve(count);
-            for (size_t i = 0; i < count; ++i) {
-                const size_t begin = utf8ByteAt(text, i);
-                const size_t end = utf8ByteAt(text, i + 1);
-                result.push_back(text.substr(begin, end - begin));
-            }
-            return result;
-        };
-        const std::vector<std::string> inputCharacters = characters(s);
-        const std::vector<std::string> fromCharacters = characters(from);
-        const std::vector<std::string> toCharacters = characters(to);
+        const std::vector<std::string> inputCharacters = splitUtf8Characters(s);
+        const std::vector<std::string> fromCharacters = splitUtf8Characters(from);
+        const std::vector<std::string> toCharacters = splitUtf8Characters(to);
         std::string out;
         for (const std::string& character : inputCharacters) {
             const auto match = std::find(
@@ -11730,12 +11717,7 @@ void ExprEvaluator::registerBuiltins() {
         } else if (a[1].isNull) {
             // NULL delimiter: split into individual characters, preserving
             // complete UTF-8 code points.
-            const size_t characters = utf8CharCount(s);
-            for (size_t i = 0; i < characters; ++i) {
-                const size_t begin = utf8ByteAt(s, i);
-                const size_t end = utf8ByteAt(s, i + 1);
-                parts.push_back(s.substr(begin, end - begin));
-            }
+            parts = splitUtf8Characters(s);
         } else {
             const std::string& delim = a[1].value;
             if (delim.empty()) { parts.push_back(s); }

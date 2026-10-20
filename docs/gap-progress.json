@@ -2,6 +2,26 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R182 shared linear UTF-8 splitting replaces all four repeated-prefix splitting loops",
+      "gap_ids": [
+        "FUNC-01"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r182-utf8-split-linear.md"
+      ],
+      "tests": [
+        "tests/utf8_split_linear_test.cpp",
+        "tests/utf8_split_linear_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "reproduction": "PG329, frozenoldR183329 andV2native76 semantics allpass; old repeated UTF8-prefix scans cause long-input/query latency. Timings diagnostic only, no thresholds or speed guarantees.",
+        "focused_tests": "Root and accepted-only clean each full23=14native6wire3genuineMain actual0. New76/329 plus original80/96/294/80/190/654 and whole array library retained. Full values, NULL/empty, combining and supplementary characters, duplicate translation keys, deletion, fill truncation, input/from/to/trim-set roles, metadata/parameters/realrows/effects covered.",
+        "build": "Each76objects18currentbins127headers verified. Fresh1production1native;57production13native1stub3genuineMain verifieddonors, notfresh. All new links use currentlibrary. Root normal1compile/link and repeat0compile0link. Clean explicit compile/link only. All2206 accepted source blobs equal testedclean; Root2325 preserves foreign bytes and preinstall2323source118cache recovery.",
+        "scope": "V2 from acceptedR183 preservesV1wrongARRAYoracle9labels/final-6; wire329byteidentical, native76retained/opaquecheckstrengthened, no weakenedtest. Finite splitting performance fix; trim-set/translate lookup complexity not claimed linear. Accepted603MD921native568wire3Main1492;Root606MD927native574wire3Main1504; original12foreignentries separated. Original273 unchanged22complete166partial70unverified15deferred. R180 and other skips not resumed, R164 stillunresolved. No full1492/full72/TLS/full-engine sanitizer claim. No push, Actions disabled."
+      }
+    },
+    {
       "issue": "R183 actual STRING_TO_ARRAY callback owns return metadata and identity",
       "gap_ids": [
         "FUNC-01"

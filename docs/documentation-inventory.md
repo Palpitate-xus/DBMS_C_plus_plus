@@ -1,5 +1,18 @@
 # 全部文档检查清单
 
+最新有限修复：[R182共享UTF-8拆分](issue-review-r182-utf8-split-linear.md)统一修复TRIM、LPAD/RPAD、
+TRANSLATE各实参和STRING_TO_ARRAY(NULL delimiter)的平方级前缀扫描，保留各自规则。
+PG完整329、旧R183完整329及V2 native76语义全0；这是性能修复，不是旧兼容性错值。
+Root与accepted-only clean各23完整入口实际全0，含新76/329及原80/96/294/80/190/654、三个真实Main。
+每侧76对象18当前程序/127头已核对；fresh1生产1native，57生产13native/stub/3Main为已验证donor，
+所有程序新链接当前库；Root normal1CPP并链接/repeat零编译零链接，clean显式构建。
+全部2206已接受源码投影等于tested clean；Root2325保留其他改动及2323源码/118缓存恢复副本。
+跟踪603份MD、921native+568注册Python+3Main=1492入口；工作区606份MD、927+574+3=1504，
+原12未接受入口与三份文档仍分离；V1九个错误类型期望/-6中止及R183独立修复保留，未删检查。
+这不是全1492/完整72/TLS/整库sanitizer验收。
+R180及其他用户暂缓不恢复，R164超时仍未解决；原273仍22/166/70/15，总目标未完成。
+不push，Actions禁用。以下状态与数量均指记录当时。
+
 最新有限修复：[R183 STRING_TO_ARRAY回调身份](issue-review-r183-string-to-array-callback-identity.md)
 已按实际callback提供数组元数据，opaque替换保持未知声明/原生身份，不再错误强转数组。
 旧native60完整1/60失败，非60个独立bug；Root及accepted-only clean各21入口实际全0，
@@ -446,7 +459,7 @@ R173函数签名类型依赖及R176真实聚合排序仍独立开放；R156等�
 | [docs/issue-review-r179-strpos-signatures.md](issue-review-r179-strpos-signatures.md) | STRPOS有限声明修复，native76/协议294、两端完整16与fresh真实Main3；旧49/140失败保留，其他边界开放 | 部分 |
 | [docs/issue-review-r180-position-call-identity.md](issue-review-r180-position-call-identity.md) | 用户最新skip it暂缓；24双侧观察与方法保留，无生产修改或验收 | 用户暂缓 |
 | [docs/issue-review-r181-reverse-linear.md](issue-review-r181-reverse-linear.md) | REVERSE线性UTF-8码点扫描；80native/96协议与两端19入口，旧语义通过及耗时观测保留 | 部分 |
-| [docs/issue-review-r182-utf8-split-linear.md](issue-review-r182-utf8-split-linear.md) | PG/旧329全0，候选仅构建；原生-6中止、9错误类型期望与真实回调强转差异保留，未验收 | 部分 |
+| [docs/issue-review-r182-utf8-split-linear.md](issue-review-r182-utf8-split-linear.md) | V2共享UTF-8线性拆分；新76/329、两端23入口；原V1错误oracle和-6完整保留，R183独立修复 | 部分 |
 | [docs/issue-review-r183-string-to-array-callback-identity.md](issue-review-r183-string-to-array-callback-identity.md) | 实际callback元数据/身份；旧native60完整60失败，两端21入口全0，R182性能仍未接受 | 部分 |
 | [docs/issue-review-r18-catalog-value-snapshots.md](issue-review-r18-catalog-value-snapshots.md) | 历史问题证据 | 通过 |
 | [docs/issue-review-r19-stale-temp-startup.md](issue-review-r19-stale-temp-startup.md) | 历史问题证据 | 通过 |

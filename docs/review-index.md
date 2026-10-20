@@ -1,5 +1,18 @@
 # 代码审查索引
 
+最新有限修复：[R182共享UTF-8拆分](issue-review-r182-utf8-split-linear.md)统一修复TRIM、LPAD/RPAD、
+TRANSLATE各实参和STRING_TO_ARRAY(NULL delimiter)的平方级前缀扫描，保留各自规则。
+PG完整329、旧R183完整329及V2 native76语义全0；这是性能修复，不是旧兼容性错值。
+Root与accepted-only clean各23完整入口实际全0，含新76/329及原80/96/294/80/190/654、三个真实Main。
+每侧76对象18当前程序/127头已核对；fresh1生产1native，57生产13native/stub/3Main为已验证donor，
+所有程序新链接当前库；Root normal1CPP并链接/repeat零编译零链接，clean显式构建。
+全部2206已接受源码投影等于tested clean；Root2325保留其他改动及2323源码/118缓存恢复副本。
+跟踪603份MD、921native+568注册Python+3Main=1492入口；工作区606份MD、927+574+3=1504，
+原12未接受入口与三份文档仍分离；V1九个错误类型期望/-6中止及R183独立修复保留，未删检查。
+这不是全1492/完整72/TLS/整库sanitizer验收。
+R180及其他用户暂缓不恢复，R164超时仍未解决；原273仍22/166/70/15，总目标未完成。
+不push，Actions禁用。以下状态与数量均指记录当时。
+
 最新有限修复：[R183 STRING_TO_ARRAY回调身份](issue-review-r183-string-to-array-callback-identity.md)
 已按实际callback提供数组元数据，opaque替换保持未知声明/原生身份，不再错误强转数组。
 旧native60完整1/60失败，非60个独立bug；Root及accepted-only clean各21入口实际全0，
