@@ -1,5 +1,13 @@
 # 全部文档检查清单
 
+当前完整矩阵复验：[原72入口](issue-review-current-full72-revalidation.md)在accepted-only clean与工作区各72实际全0，
+原35native/34协议/3真实Main、956及190额外raw门均保留，默认15秒/持久化未弱化。
+每侧97对象39程序核对，零C++编译、38新链接，donor不冒fresh；2206accepted源码与tested clean一致，Root2325保留。
+这不是全1492或原273验收：仅15条总账含本矩阵直接引用测试，258条不能据此关闭；require-complete两侧仍实际1。
+R164旧超时日志和未定根因保留，新通过不倒推原因已修。原22/166/70/15状态及明确暂缓不变。
+不push，Actions禁用。以下记录按当时输入和范围解释。
+
+
 最新总清单复查：accepted-only 17f06229的R164原完整956项实际0，保持默认15秒/原断言，
 仅监视本次自有进程；不是当前完整72通过，历史两次超时原因仍未确定，未冒称R164全部关闭。
 原273项全文、状态与证据引用已建立逐项映射；22 complete/166 partial/70 unverified/15 deferred，
@@ -115,7 +123,7 @@ R173函数签名类型依赖及R176真实聚合排序仍独立开放；R156等�
 
 ## 历史记录（以下状态与数量均指记录当时）
 
-审查输入和发现见[代码审查报告](code-review-2026-10-13.md)。基准提交 `a502ffa3` 包含 412 份已跟踪 Markdown；首次审查含新增报告共 417 份。当前本轮逐文件复查 603 份 Markdown，下表覆盖全部；历史数量不改写。
+审查输入和发现见[代码审查报告](code-review-2026-10-13.md)。基准提交 `a502ffa3` 包含 412 份已跟踪 Markdown；首次审查含新增报告共 417 份。当前本轮逐文件复查 604 份 Markdown，下表覆盖全部；历史数量不改写。
 
 检查逐文件读取 UTF-8 内容并验证 Markdown 内联链接的本地文件目标是否存在。它不验证外部网址、锚点、所有引用式链接，也不证明文中每个历史技术结论在当前版本成立。
 使用手册、部署、命令参考、模块 README 和状态入口另作人工一致性核查；`issue-*.md` 保留原始提交和运行证据，其结论须按对应输入读取。
@@ -438,6 +446,7 @@ R173函数签名类型依赖及R176真实聚合排序仍独立开放；R156等�
 | [docs/issue-review-o05-order-by-duplicate-alias.md](issue-review-o05-order-by-duplicate-alias.md) | 历史问题证据 | 通过 |
 | [docs/issue-review-o06-matview-refresh-revalidation.md](issue-review-o06-matview-refresh-revalidation.md) | 历史问题证据 | 通过 |
 | [docs/issue-review-o07-alter-array-revalidation.md](issue-review-o07-alter-array-revalidation.md) | 历史问题证据 | 通过 |
+| [docs/issue-review-current-full72-revalidation.md](issue-review-current-full72-revalidation.md) | 原72矩阵两侧全0；非1492或273全验收，原失败与未完成边界保留 | 部分 |
 | [docs/issue-review-r01-numeric-square-root.md](issue-review-r01-numeric-square-root.md) | 历史问题证据 | 通过 |
 | [docs/issue-review-r02-window-declared-comparisons.md](issue-review-r02-window-declared-comparisons.md) | 历史问题证据 | 通过 |
 | [docs/issue-review-r03-window-partition-equivalence.md](issue-review-r03-window-partition-equivalence.md) | 历史问题证据 | 通过 |

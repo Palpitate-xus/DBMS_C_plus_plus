@@ -1,5 +1,13 @@
 # PostgreSQL 18 vs 本 DBMS 功能对比
 
+当前完整矩阵复验：[原72入口](issue-review-current-full72-revalidation.md)在accepted-only clean与工作区各72实际全0，
+原35native/34协议/3真实Main、956及190额外raw门均保留，默认15秒/持久化未弱化。
+每侧97对象39程序核对，零C++编译、38新链接，donor不冒fresh；2206accepted源码与tested clean一致，Root2325保留。
+这不是全1492或原273验收：仅15条总账含本矩阵直接引用测试，258条不能据此关闭；require-complete两侧仍实际1。
+R164旧超时日志和未定根因保留，新通过不倒推原因已修。原22/166/70/15状态及明确暂缓不变。
+不push，Actions禁用。以下记录按当时输入和范围解释。
+
+
 最新总清单复查：accepted-only 17f06229的R164原完整956项实际0，保持默认15秒/原断言，
 仅监视本次自有进程；不是当前完整72通过，历史两次超时原因仍未确定，未冒称R164全部关闭。
 原273项全文、状态与证据引用已建立逐项映射；22 complete/166 partial/70 unverified/15 deferred，

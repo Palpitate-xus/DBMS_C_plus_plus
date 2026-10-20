@@ -2,6 +2,26 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "Current accepted source original72 matrix clean and Root complete; historical failures retained",
+      "gap_ids": [],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-current-full72-revalidation.md",
+        "docs/review-closeout-plan.md"
+      ],
+      "tests": [
+        "tests/custom_scalar_routine_declaration_protocol_e2e_test.py",
+        "tests/ordinary_aggregate_order_keys_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "current": "Each original72 actual0:35native34wire3realMain, including unmodified956 and190 raw oracle; default15seconds/durability/assertions retained.",
+        "provenance": "Each97objects39currentbinaries127headers; zeroCXXcompile38freshlinks; verified58production35native1stub3Main donors. All2206acceptedsourceblobs equaltestedclean; Root2325preserved.",
+        "boundary": "Not full1492 or273 proof; only15originalitems have directlycitedfixture in72. OldR164timeout cause unresolved. require-complete actual1 both. Userdeferrals unchanged; no push,Actionsdisabled.",
+        "runtime_proof": "/tmp/dbms-current-full72-independent-proof.80r9rv43/completed-proof.json",
+        "runtime_proof_sha256": "fe09f2be467d9c67a35ab1eb1f1e214b4bddbce0ee661fd1690cb7a69400937f"
+      }
+    },
+    {
       "issue": "R164 current accepted-only full956 monitored revalidation passes; historical full72 timeouts still unresolved",
       "gap_ids": [],
       "status": "partial",
