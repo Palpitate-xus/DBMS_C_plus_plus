@@ -35,8 +35,8 @@
 | `tests/transaction_begin_grammar_protocol_e2e_test.py` | aborted savepoint 内非法 BEGIN 预期 42601，实际 25P02 | 待核实：分别验证简单/扩展协议及 PostgreSQL 18 语法检查优先级，再定位状态门与解析分支；不能直接翻转预期。 |
 | `tests/copy_protocol_e2e_test.py` | 本连接 COPY 等待自身有效 CancelRequest 的 57014，读取超时 | 待核实会话中断状态生命周期和读等待唤醒；保留该测试及其原 15 秒超时，不以调大超时代替修复。 |
 | `tests/index_corruption_protocol_e2e_test.py` | COUNT 查询预期 XX001，实际返回精确堆结果 `1` | 待收集全部查询的真实执行计划；区分读取坏索引与独立堆读取，不让未使用该索引的堆查询无条件报错。 |
-| `tests/pg_class_query_protocol_e2e_test.py` | pg_class 的普通 COUNT 报 XX000：`mutation source descriptor differs from physical relation` | 待核对逻辑目录列与物理扫描描述，修复正确来源路径；不能全局移除描述检查或伪造查询结果。 |
-| `tests/temp_index_catalog_protocol_e2e_test.py` | 临时索引目录 COUNT 同样报上述 XX000 | 与 pg_class 失败一起调查；需保留临时索引发布、撤销、savepoint 回滚和 DISCARD TEMP 的完整验证。 |
+| `tests/pg_class_query_protocol_e2e_test.py` | pg_class 的普通 COUNT 报 XX000：`mutation source descriptor differs from physical relation` | R193 接入真实七列虚拟来源，保留物理关系描述检查；未改原完整夹具，两套服务器定向通过。见 [修复及其他开放探针](issue-review-r193-pg-class-typed-source.md)。 |
+| `tests/temp_index_catalog_protocol_e2e_test.py` | 临时索引目录 COUNT 同样报上述 XX000 | R193 同一来源修复；完整发布、删除、savepoint/事务回滚和 DISCARD TEMP 均通过，每个原 COUNT 另查精确目录行值。见 [来源记录](issue-review-r193-pg-class-typed-source.md)。 |
 
 R190 的修复提交为 `1eab4c69`。默认协议跳过项记录在提交 `2bf24e16`。
 本表保存失败证据和处理方法，不把待调查假说写成已经定位的产品原因。
@@ -45,8 +45,9 @@ R190 的修复提交为 `1eab4c69`。默认协议跳过项记录在提交 `2bf24
 
 - R191 修复浮点 NaN 的 SortOp 排序比较，并扩展原有测试；见 [排序记录](issue-review-r191-floating-executor-order.md)。
 - R192 修复 MIN/MAX 猜测字符串类型造成的错值，改用实际列声明比较；见 [聚合记录](issue-review-r192-declared-minmax-comparison.md)。
+- R193 修复已绑定 pg_class 来源，原始两个目录入口定向通过；额外 COUNT 算术目标和派生来源探针仍有独立失败，SQL、日志和后续修改方法保存在 [R193 记录](issue-review-r193-pg-class-typed-source.md)，不能合并计为已修复。
 
-二者具有独立提交、旧红/新绿和定向构建证据，但冻结全量仍使用旧版本，原结果不被替换。
+上述修复具有独立提交、旧红/新绿和定向构建证据，但冻结全量仍使用旧版本，原结果不被替换。
 用户暂缓的 R185 排序中断和其他已跳过分支不恢复，未接受的工作区改动仍不自动计入已完成。
 
 ## 总清单证据边界

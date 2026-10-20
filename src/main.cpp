@@ -18934,6 +18934,24 @@ static bool executePgStatActivityQuery(const string& rawSql,
     return false;
 }
 
+// The prepared binder exposes this seven-column catalog subset, not a
+// physical heap. Feed the same real catalog rows to typed source consumers;
+// keep the physical descriptor guard for actual heap relations.
+static dbms::PreparedQueryRows preparedPgClassRows(const Session& session) {
+    dbms::PreparedQueryRows rows;
+    for (const auto& relation : g_engine.catalogService().get(session.currentDB).listClasses()) {
+        rows.push_back({
+            dbms::ExprValue("oid", to_string(relation.oid), false),
+            dbms::ExprValue("name", relation.relname, false),
+            dbms::ExprValue("oid", to_string(relation.relnamespace), false),
+            dbms::ExprValue("\"char\"", string(1, relation.relkind), false),
+            dbms::ExprValue("smallint", to_string(relation.relnatts), false),
+            dbms::ExprValue("\"char\"", string(1, relation.relpersistence), false),
+            dbms::ExprValue("oid", to_string(relation.relowner), false)});
+    }
+    return rows;
+}
+
 // pg_settings is exposed as a deliberate typed subset.  PostgreSQL 18 has
 // seventeen columns; this server currently has reliable values only for the
 // first three.  Do not let the legacy text renderer silently ignore the
@@ -20326,6 +20344,8 @@ class PreparedWithDmlRuntime {
                 auto* select=dynamic_cast<dbms::SelectStmt*>(range.viewQuery->ast.get());
                 if(!select)throw dbms::DbError("0A000","view source requires a genuine SELECT/VALUES plan");
                 cursor=dbms::QueryPlanner::makePreparedCursor(viewRuntime->selectPlan(select,dbms::RowContext{},{}),range.columns);
+            } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_class") {
+                virtualRows=make_shared<dbms::PreparedQueryRows>(preparedPgClassRows(session_));
             } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_settings") {
                 virtualRows=make_shared<dbms::PreparedQueryRows>(preparedPgSettingsRows(session_));
             } else if(item->type==dbms::FromItem::Type::Table && !range.cteStatement) {

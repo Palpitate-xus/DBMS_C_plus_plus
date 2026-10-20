@@ -48,6 +48,10 @@ def main():
         query(f"SELECT count(*) FROM pg_class WHERE relname='{index}' "
               "AND relkind='i' AND relpersistence='t';", extended,
               [[str(expected)]], ready=ready)
+        query(f"SELECT relname::text,relkind::text,relpersistence::text "
+              f"FROM pg_catalog.pg_class WHERE relname='{index}' "
+              "AND relkind='i' AND relpersistence='t';", extended,
+              [[index, "i", "t"]] if expected else [], ready=ready)
 
     try:
         for extended in (False, True):
