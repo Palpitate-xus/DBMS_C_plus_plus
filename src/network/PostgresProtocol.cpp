@@ -416,6 +416,7 @@ bool encodeBinaryValue(const std::string& value, const PgColumnDescription& colu
             }
             case 2950:
                 return parseUuidBytes(value, encoded);
+            case 19: // namesend is variable-length text, without NUL/padding.
             case 25: case 1042: case 1043:
                 encoded.insert(encoded.end(), value.begin(), value.end());
                 return true;
