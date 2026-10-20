@@ -1,6 +1,6 @@
 # R176：普通聚合调用内 ORDER BY 的分析与执行
 
-状态：Open，专项修复已通过两侧冒烟验证，完整回归及源码提交待验收。首次工作区72项有69项通过、三个Main入口因测试环境缺少显式数据目录而启动失败；已保留失败并重跑完整矩阵，不宣称全部问题已解决。[R175](issue-review-r175-ordinary-aggregate-identity.md)只修复输入身份，整数求和正确不等于排序正确。
+状态：Open，专项修复已通过两侧冒烟验证，工作区完整72项重测也已通过；clean首轮在R164入口socket超时，完整验收及源码提交仍待完成。已有失败完整保留，不宣称全部问题已解决。[R175](issue-review-r175-ordinary-aggregate-identity.md)只修复输入身份，整数求和正确不等于排序正确。
 
 ## 完整101次发现观察
 
@@ -101,7 +101,7 @@ normal-wrapper cache stamp或声称它执行过常规repeat。
 | 当前有限验证 | 实际结果 | 限制 |
 | --- | --- | --- |
 | accepted-only clean第四版 | native 61项与完整协议190次均外层0、完整成功footer；无采集失败 | 不是全部注册测试或原273清单验收 |
-| 保留既有未提交改动的工作区版本 | 同样native61及协议190完整通过，源码/对象/签名/二进制前后核对通过 | 仍需完整相邻回归 |
+| 保留既有未提交改动的工作区版本 | 完整72入口重测全0，包括native61、协议190和三个Main；源码/对象/签名/二进制前后核对通过 | clean完整72尚待结束，不是全部注册测试 |
 | 工作区合并 | apply_patch安装13个源码/测试/脚本路径、51个唯一修改片段；全部2317个源文件符合原快照加本项变更 | 未夹带既有foreign修改，暂存区仍空，源码尚未commit |
 | 工作区构建 | 实际fresh58生产对象、native TU和stub；常规wrapper复用当前58对象链接，repeat零编译/零链接 | 仅plain TCP配置，未声明TLS/sanitizer覆盖 |
 
@@ -115,7 +115,15 @@ normal-wrapper cache stamp或声称它执行过常规repeat。
 它们没有执行成功断言，不能算作产品通过或产品回归；失败receipt和日志完整保留。
 修正仅限外部测试启动环境：分别创建私有数据目录并显式传入`DBMS_DATA_DIR`，不改产品源码、
 测试体、断言、超时、持久化策略或入口顺序。随后工作区及clean各三个Main预检均实际0。
-该六项预检不能替代完整矩阵；现在重新从第一项完整执行工作区72项，之后串行执行clean72项。
+该六项预检不能替代完整矩阵。随后从第一项重跑工作区完整72项，实际外层0、全部入口0且完整footer通过，
+源文件/目录、97对象、39程序及58个Root签名前后核对通过；旧791/314/331/906/956及新190完整通过。
+工作区完整结果返回0之后才启动clean完整72项。clean的第39项R164实际退出1：在472个匹配结果后，
+扩展协议读取等待发生socket超时；finally清理随后读到延迟的上一条CREATE FUNCTION和SET响应，
+产生两个错位断言，再次超时，无完整956成功footer。不能把这两个错位解释为两个已证明的SQL语义缺陷。
+超时根因尚未确定，不先归于R176排序修改；本轮其余入口继续收集，完整结果不能提前写成通过。
+之后只允许同一源码/产物/断言/超时/持久化设置的完整矩阵复测，不用单项补跑拼接72项结果。
+00:04 UTC的只读系统观察显示I/O压力较高、磁盘仍有约1.2T可用；这不是超时发生时的完整追踪，
+不能据此确定根因。未调整系统参数、提高超时或停止其他用户进程。
 
 当前证据覆盖夹具中的全局SUM/COUNT、计算式、键分析与错误阶段、元数据纯度、重复执行、
 FILTER/NULL/空输入、多键/方向/NULL位置及共享生产者。它不证明GROUP BY内排序、全部自定义
@@ -123,7 +131,7 @@ FILTER/NULL/空输入、多键/方向/NULL位置及共享生产者。它不证�
 
 ## 固定证据
 
-采集器冻结于 `/tmp/dbms-r176-ordered-aggregate-discovery-v1.2nCAf0ee`，
+采集器文件冻结于 `/tmp/dbms-r176-ordered-aggregate-discovery-v1.2nCAf0ee/collect_ordered_aggregate.py`，
 SHA256 `bdc1876eeecd1078961933fe82c69122ce8a3253d8433828a4fb0a1000447d6e`。
 证据目录 `/tmp/dbms-review-r46.ifu6SWLp/`：
 
@@ -151,6 +159,10 @@ SHA256 `97ac8f148f9cea05a46a84be3b7f1b303279caf33a45730218a275a74f9e4523`。
 SHA256 `cc20d7259381d34d5ff5ddcb02c70ac56684391645e4394095e9fa9927b46525`，实际69项通过、三个Main启动失败。
 显式私有数据目录的六项Main预检receipt：`/tmp/dbms-r176-main-data-dir-preflight.wf0vxkm7/completed-runtime-receipt.json`，
 SHA256 `ff20ea1098d39a0d15d8e3a8508874d752ec6e213b2e1492365a7aaa545705f4`，六项实际0，非完整72项结果。
+工作区完整72项重测receipt：`/tmp/dbms-r176-root-full72-runtime-v2.ad7ioqbn/completed-runtime-receipt.json`，
+SHA256 `fd4b57b7d6bf43f22bdc6b71ce729951c3a5000b7c95e210b3d34153e7caaf2f`，72项实际全0。
+clean首轮R164失败日志：`/tmp/dbms-r176-clean-full72-runtime-v2.071923sh/protocol-custom_scalar_routine_declaration_protocol_e2e_test.log`，
+SHA256 `cbd0f570d4f89a0eaf953bee72318e6e71acc748ea29374a0d35e6385aee336b`，实际退出1，无956成功footer。
 
 完整原始帧、RowDescription、DataRow二进制字节、错误阶段、操作顺序与序列观察均保留。
 24次缺失键等是模式组合，不是24个独立根因；生产修改尚未完成完整回归验收，不作已提交修复声明。
