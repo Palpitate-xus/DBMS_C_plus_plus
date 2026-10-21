@@ -19816,8 +19816,9 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
     auto parsed = parser.parseForBinding(rawSql);
     const auto* candidate = parsed.success ? dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()) : nullptr;
     if (!candidate || !dbms::QueryPlanner::supportsPreparedSelectPlan(*candidate)) return false;
-    // ARRAY is a value AST node. Potential || operands are bound before
-    // deciding between typed array and ordinary text/bytea/bit consumers.
+    // ARRAY values and bound JSONB concatenations retain this existing
+    // structured AST receiver. No new physical ProjectSet/SRF lowering is
+    // enabled; planner eligibility and real source/column checks still apply.
     function<bool(const dbms::Expr*,bool)> arrayExpression = [&](const dbms::Expr* value,bool prepared) {
         if(!value)return false;
         if(dynamic_cast<const dbms::ArrayExpr*>(value))return true;
@@ -19825,7 +19826,8 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
             return prepared && column->binding &&
                 dbms::array_detail::isArray(column->binding->declaredType);
         if(const auto* binary=dynamic_cast<const dbms::BinaryOpExpr*>(value))
-            return (binary->op=="||" && (!prepared || binary->arrayConcat.has_value())) ||
+            return (binary->op=="||" && (!prepared || binary->arrayConcat.has_value() ||
+                dbms::ExprHelper::inferParsedResultType(binary,{},session.currentDB,&g_engine)=="jsonb")) ||
                 arrayExpression(binary->left.get(),prepared) || (binary->op!="::" && arrayExpression(binary->right.get(),prepared));
         if(const auto* unary=dynamic_cast<const dbms::UnaryOpExpr*>(value))return arrayExpression(unary->operand.get(),prepared);
         if(const auto* cast=dynamic_cast<const dbms::CastExpr*>(value))return arrayExpression(cast->operand.get(),prepared);

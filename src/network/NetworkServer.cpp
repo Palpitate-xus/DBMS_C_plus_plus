@@ -26,6 +26,7 @@
 #include "types/bytea.h"
 #include "types/money.h"
 #include "types/xml.h"
+#include "types/jsonb.h"
 #include "process/SqlStats.h"
 #include "process/RuntimeStats.h"
 #include "process/OutputCapture.h"
@@ -768,6 +769,20 @@ std::string binaryFloatingParameterLiteral(Floating value, std::string& error) {
     return quoteProtocolText(std::string(buffer, converted.ptr), error);
 }
 
+// JSONB wire data is a version byte followed by JSON text, not our value
+// tree's private storage. This shared receiver preserves input SQLSTATE.
+std::string jsonbProtocolParameterText(const std::vector<uint8_t>& raw,bool binary,
+                                     std::string& error,std::string& inputSqlState) {
+    const auto invalid=[&](const char* state,const char* message) {
+        inputSqlState=state;error=message;return std::string{};
+    };
+    if (binary && raw.empty())return invalid("08P01","insufficient data left in message");
+    if (binary && raw.front()!=1)return invalid("XX000","unsupported jsonb version number");
+    const std::string text(raw.begin()+(binary?1:0),raw.end());
+    try {return JsonbValue::parse(text).toString();}
+    catch(const DbError& failure) {inputSqlState=failure.sqlState();error=failure.what();return {};}
+}
+
 std::string binaryProtocolParameterLiteral(uint32_t typeOid,
                                            const std::vector<uint8_t>& raw,
                                            const std::string& moneyLocale,
@@ -777,7 +792,7 @@ std::string binaryProtocolParameterLiteral(uint32_t typeOid,
     // envelope, not their text input codec. No user-type lookup or automatic
     // array catalog construction belongs to this finite binary receiver.
     const uint32_t arrayElement=typeOid==1005?21:typeOid==1007?23:
-        typeOid==1016?20:typeOid==1009?25:typeOid==1015?1043:0;
+        typeOid==1016?20:typeOid==1009?25:typeOid==1015?1043:typeOid==3807?3802:0;
     if(arrayElement) {
         const auto invalid=[&](const char* state,const char* message) {
             inputSqlState=state;error=message;return std::string{};
@@ -870,8 +885,10 @@ std::string binaryProtocolParameterLiteral(uint32_t typeOid,
                 }
                 const std::vector<uint8_t> cell(raw.begin()+offset,raw.begin()+offset+length);
                 offset+=length;
-                if(arrayElement==25 || arrayElement==1043) {
-                    const std::string value(cell.begin(),cell.end());
+                if(arrayElement==25 || arrayElement==1043 || arrayElement==3802) {
+                    const std::string value=arrayElement==3802?
+                        jsonbProtocolParameterText(cell,true,error,inputSqlState):std::string(cell.begin(),cell.end());
+                    if(!error.empty())return false;
                     if(!validText(value)){invalid("22021","invalid byte sequence for encoding UTF8");return false;}
                     text+='"';
                     for(char byte:value){if(byte=='"' || byte=='\\')text+='\\';text+=byte;}
@@ -890,6 +907,10 @@ std::string binaryProtocolParameterLiteral(uint32_t typeOid,
         if(!append(0))return {};
         if(offset!=raw.size())return invalid("22P03","invalid binary input length for array parameter");
         return quoteProtocolText(text,error);
+    }
+    if(typeOid==3802) {
+        const auto value=jsonbProtocolParameterText(raw,true,error,inputSqlState);
+        return error.empty()?quoteProtocolText(value,error):std::string{};
     }
     uint64_t bits = 0;
     if (geometryTypeNameForOid(typeOid)) {
@@ -1121,6 +1142,10 @@ std::string protocolParameterLiteral(uint32_t typeOid,
     if (value.find('\0') != std::string::npos) {
         error = "parameter contains a NUL byte";
         return {};
+    }
+    if(typeOid==3802) {
+        const auto canonical=jsonbProtocolParameterText(raw,false,error,inputSqlState);
+        return error.empty()?quoteProtocolText(canonical,error):std::string{};
     }
     if (typeOid == 1083 || typeOid == 1183) {
         try {
@@ -2661,7 +2686,9 @@ void validatePreparedStoredSignatures(const std::string& sql,Session& session,
 // never executed. Explicit wire OIDs keep ownership of their declarations.
 void inferProtocolConcatParameters(const std::string& sql,Session& session,
                                    std::vector<uint32_t>& parameterOids) {
-    if(std::find(parameterOids.begin(),parameterOids.end(),0)==parameterOids.end())return;
+    // Binding a genuine concat site is also its Parse-time type/input
+    // validation, even with no unknown parameters. Do this before emitting
+    // ParseComplete; metadata preparation never executes its routines/rows.
     SQLParser parser;const auto parsed=parser.parseForBinding(sql);
     if(!parsed.isValid() || !dynamic_cast<const SelectStmt*>(parsed.stmt.get()))return;
     std::function<void(const Expr*)> observe;
@@ -2749,7 +2776,7 @@ void inferProtocolConcatParameters(const std::string& sql,Session& session,
             capture(binary->right.get(),binary->arrayConcat->rightType);
         } else {
             const auto output=ExprHelper::inferParsedInputType(binary,{},session.currentDB,&g_engine);
-            if(output=="text" || output=="bytea" || output=="bit varying") {
+            if(output=="text" || output=="bytea" || output=="bit varying" || output=="jsonb") {
                 capture(binary->left.get(),output);capture(binary->right.get(),output);
             }
         }

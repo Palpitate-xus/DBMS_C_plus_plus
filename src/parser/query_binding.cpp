@@ -211,10 +211,13 @@ public:
             const auto tokens = SQLParser::tokenize(literal->value);
             if (tokens.size() == 1 && (SQLParser::toLower(tokens.front()) == "null" ||
                 (!tokens.front().empty() && tokens.front().front() == '\''))) {
+                ExprEvaluator evaluator;
+                // JSONB's codec owns Unicode/numeric diagnostics before a
+                // generic assignment validator can erase their SQLSTATE.
+                if (targetType=="jsonb") (void)evaluator.eval(cast.get(),RowContext{});
                 if (metadata.assignmentInput)
                     metadata.assignmentInput({"",targetType},literal,"unknown");
-                ExprEvaluator evaluator;
-                (void)evaluator.eval(cast.get(),RowContext{});
+                if (targetType!="jsonb") (void)evaluator.eval(cast.get(),RowContext{});
             }
         }
         input = std::move(cast);
@@ -708,23 +711,26 @@ public:
                 // byte/bit input codec. Never evaluate a routine or query to
                 // discover a type, nor treat an opaque callback as a literal.
                 if (concatLeft=="unknown" && unknownLeaf(binary->left.get()) &&
-                    (concatRight=="bytea" || bit(concatRight))) {
-                    concatLeft=bit(concatRight)?"bit varying":"bytea";
+                    (concatRight=="bytea" || concatRight=="jsonb" || bit(concatRight))) {
+                    concatLeft=bit(concatRight)?"bit varying":concatRight;
                     coerceCaseInput(binary->left,left,concatLeft);
                 }
                 if (concatRight=="unknown" && unknownLeaf(binary->right.get()) &&
-                    (concatLeft=="bytea" || bit(concatLeft))) {
-                    concatRight=bit(concatLeft)?"bit varying":"bytea";
+                    (concatLeft=="bytea" || concatLeft=="jsonb" || bit(concatLeft))) {
+                    concatRight=bit(concatLeft)?"bit varying":concatLeft;
                     coerceCaseInput(binary->right,right,concatRight);
                 }
                 if (bit(concatLeft) && bit(concatRight))
                     return declaredType("bit varying",binary);
                 if (concatLeft=="bytea" && concatRight=="bytea")
                     return declaredType("bytea",binary);
-                // Structured || execution has separate existing gaps; retain
-                // its prior descriptor instead of relabelling it as TEXT.
-                if ((concatLeft=="jsonb" || concatLeft=="tsvector" ||
-                     concatRight=="jsonb" || concatRight=="tsvector") &&
+                if (concatLeft=="jsonb" && concatRight=="jsonb")
+                    return declaredType("jsonb",binary);
+                if ((concatLeft=="jsonb" && common_type_detail::category(concatRight)!='S') ||
+                    (concatRight=="jsonb" && common_type_detail::category(concatLeft)!='S'))
+                    throw DbError("42883","operator does not exist for jsonb and non-jsonb operands");
+                // TSVECTOR execution remains a separate existing gap.
+                if ((concatLeft=="tsvector" || concatRight=="tsvector") &&
                     common_type_detail::category(concatLeft)!='S' &&
                     common_type_detail::category(concatRight)!='S')
                     return left;
@@ -830,6 +836,8 @@ public:
             if ((leftBits && rightBits && (operation=="&" || operation=="|" || operation=="#")) ||
                 (leftBits && (operation=="<<" || operation==">>")))
                 return declaredType("bit",binary);
+            if (leftBase=="jsonb" && (operation=="->>" || operation=="#>>"))
+                return declaredType("text",binary);
             // A predicate's result identity is the catalog-owned boolean,
             // not either input OID (and not an untyped label with OID zero).
             if(const auto type=arithmetic_detail::resultType(binary->op,left,right))
@@ -1153,7 +1161,7 @@ public:
                     metadata.assignmentInput({"array element",target},array->elements[i].get(),types[i]);
                 }
             }
-            return array->elementType + "[]";
+            return declaredType(array->elementType + "[]",array);
         }
         case ExprType::RowExpr: {
             auto* row = static_cast<RowExpr*>(node.get());

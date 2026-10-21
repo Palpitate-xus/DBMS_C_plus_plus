@@ -372,6 +372,11 @@ std::string inferAstResultType(
             };
             const bool leftUnknown=left=="unknown" && unknownLeaf(binary->left.get());
             const bool rightUnknown=right=="unknown" && unknownLeaf(binary->right.get());
+            if ((left=="jsonb" && (right=="jsonb" || rightUnknown)) ||
+                (right=="jsonb" && leftUnknown)) return "jsonb";
+            if ((left=="jsonb" && common_type_detail::category(right)!='S') ||
+                (right=="jsonb" && common_type_detail::category(left)!='S'))
+                throw DbError("42883","operator does not exist for jsonb and non-jsonb operands");
             if ((leftUnknown && right=="bytea") || (rightUnknown && left=="bytea"))
                 return "bytea";
             if ((leftUnknown && (right=="bit" || right=="bit varying")) ||
@@ -552,6 +557,7 @@ std::string inferAstResultType(
             const auto binding=ExprHelper::resolveArrayConcatTypes(argType(0),argType(1));
             return binding ? binding->elementType+"[]" : "text[]";
         }
+        if(name=="json_array_length" || name=="jsonb_array_length")return "integer";
         if(name=="array_position" || name=="array_length" || name=="array_upper" ||
             name=="array_lower" || name=="array_ndims" || name=="cardinality")return "integer";
         if (name == "array_agg") {
@@ -2302,7 +2308,7 @@ void ExprHelper::prepareArrayTypes(Expr* expression,
                     validateConst(binary->right.get(),binary->arrayConcat->rightType);
                 } else {
                     const auto codec=[](const std::string& other) {
-                        return other=="bytea"?std::string("bytea"):
+                        return other=="bytea" || other=="jsonb"?other:
                             (other=="bit" || other=="bit varying")?std::string("bit varying"):std::string();
                     };
                     const auto unknownLeaf=[](const Expr* expression) {

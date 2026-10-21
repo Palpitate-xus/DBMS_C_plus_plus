@@ -35,6 +35,7 @@
 #include "types/bytea.h"
 #include "types/encoding_conversion.h"
 #include "types/xml.h"
+#include "types/jsonb.h"
 #include "utils/Session.h"
 #include "common/TimeZoneRules.h"
 
@@ -3353,7 +3354,7 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
         };
         const auto codec=[](const ExprValue& other) {
             const auto type=ExprHelper::canonicalResultTypeName(other.typeName);
-            return type=="bytea"?std::string("bytea"):
+            return type=="bytea" || type=="jsonb"?type:
                 (type=="bit" || type=="bit varying")?std::string("bit varying"):std::string();
         };
         if (unknownLiteral(e->left.get())) {
@@ -3362,6 +3363,16 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
         if (unknownLiteral(e->right.get())) {
             const auto target=codec(l);if(!target.empty())r=evalCast(nullptr,ctx,r,target);
         }
+        const auto leftJsonType=ExprHelper::canonicalResultTypeName(l.typeName);
+        const auto rightJsonType=ExprHelper::canonicalResultTypeName(r.typeName);
+        if (leftJsonType=="jsonb" && rightJsonType=="jsonb") {
+            if (l.isNull || r.isNull) return ExprValue("jsonb","",true);
+            return ExprValue("jsonb",JsonbValue::concatenate(
+                JsonbValue::parse(l.value),JsonbValue::parse(r.value)).toString(),false);
+        }
+        if ((leftJsonType=="jsonb" && common_type_detail::category(rightJsonType)!='S') ||
+            (rightJsonType=="jsonb" && common_type_detail::category(leftJsonType)!='S'))
+            throw DbError("42883","operator does not exist for jsonb and non-jsonb operands");
         const bool leftBit = isBitStringTypeName(l.typeName);
         const bool rightBit = isBitStringTypeName(r.typeName);
         if (leftBit != rightBit) {
@@ -3415,6 +3426,8 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
             // value is t/f. Do not concatenate the latter representation.
             if (ExprHelper::canonicalResultTypeName(value.typeName)=="boolean")
                 return std::string(value.asBool()?"true":"false");
+            if (ExprHelper::canonicalResultTypeName(value.typeName)=="jsonb")
+                return JsonbValue::parse(value.value).toString();
             return value.value.substr(0,logicalCharacterByteLength(value));
         };
         ExprValue result(
@@ -4982,6 +4995,14 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
     }
     const auto sourceType=ExprHelper::canonicalResultTypeName(v.typeName);
     const auto targetBase=ExprHelper::canonicalResultTypeName(target);
+    if (targetBase=="jsonb") {
+        const auto source=common_type_detail::canonical(sourceType);
+        if (source!="unknown" && source!="json" && source!="jsonb" &&
+            common_type_detail::category(source)!='S')
+            throw DbError("42846","cannot cast type "+sourceType+" to jsonb");
+        if (v.isNull) return ExprValue("jsonb","",true);
+        return ExprValue("jsonb",JsonbValue::parse(v.value).toString(),false);
+    }
     // These catalog cast relationships are type checks, not value checks:
     // NULL cannot make an absent BIT/VARBIT numeric cast legal. PostgreSQL
     // has BIT <-> INT4/INT8, but neither INT2 nor VARBIT numeric casts.
@@ -5355,6 +5376,14 @@ struct DeclaredFloat8ScalarFunction {
 // These overloads belong to the actual builtin callback, not an opaque
 // registerFunction replacement that happens to reuse its SQL name.
 struct DeclaredStringLengthScalarFunction {
+    ScalarFunction callback;
+    ExprValue operator()(const std::vector<ExprValue>& args) const {
+        return callback(args);
+    }
+};
+// The declaration belongs to this actual builtin callback, not an
+// opaque native replacement which happens to reuse the SQL spelling.
+struct DeclaredJsonArrayLengthScalarFunction {
     ScalarFunction callback;
     ExprValue operator()(const std::vector<ExprValue>& args) const {
         return callback(args);
@@ -6019,6 +6048,7 @@ std::string ExprEvaluator::scalarFunctionResultType(const FunctionCallExpr* call
         if(callback->second.target<SqlTypeOfFunction>())return "regtype";
         if(callback->second.target<SqlVersionFunction>())return "text";
         if(callback->second.target<DeclaredStringToArrayScalarFunction>())return "text[]";
+        if(callback->second.target<DeclaredJsonArrayLengthScalarFunction>())return "integer";
         if (const auto* bound = callback->second.target<BoundScalarRoutine>())
             return ExprHelper::canonicalResultTypeName(bound->resolved.routine.returnType);
     }
@@ -6058,6 +6088,8 @@ std::string ExprEvaluator::scalarFunctionIdentity(const FunctionCallExpr* call,
                        !callback->second.target<DeclaredStringLengthScalarFunction>()) ||
                       (resolved.name=="strpos" &&
                        !callback->second.target<DeclaredStrposScalarFunction>()) ||
+                      ((resolved.name=="json_array_length" || resolved.name=="jsonb_array_length") &&
+                       !callback->second.target<DeclaredJsonArrayLengthScalarFunction>()) ||
                       (resolved.name=="string_to_array" &&
                        !callback->second.target<DeclaredStringToArrayScalarFunction>()) ||
                       (resolved.name=="width_bucket" &&
@@ -13206,6 +13238,8 @@ void ExprEvaluator::registerBuiltins() {
             entry.second=DeclaredStringLengthScalarFunction{std::move(entry.second)};
         else if(entry.first=="strpos")
             entry.second=DeclaredStrposScalarFunction{std::move(entry.second)};
+        else if(entry.first=="json_array_length" || entry.first=="jsonb_array_length")
+            entry.second=DeclaredJsonArrayLengthScalarFunction{std::move(entry.second)};
         else if(entry.first=="string_to_array")
             entry.second=DeclaredStringToArrayScalarFunction{std::move(entry.second)};
         else if(entry.first=="width_bucket")

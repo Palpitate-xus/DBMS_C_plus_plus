@@ -6,6 +6,7 @@
 #include "common/GeometryValue.h"
 #include "types/money.h"
 #include "types/xml.h"
+#include "types/jsonb.h"
 #include "catalog/catalog.h"
 #include "common/SqlArrayText.h"
 #include "utils/interval.h"
@@ -416,6 +417,12 @@ bool encodeBinaryValue(const std::string& value, const PgColumnDescription& colu
             }
             case 2950:
                 return parseUuidBytes(value, encoded);
+            case 3802: {
+                const auto json=JsonbValue::parse(value).toString();
+                encoded.push_back(1);
+                encoded.insert(encoded.end(),json.begin(),json.end());
+                return true;
+            }
             case 19: // namesend is variable-length text, without NUL/padding.
             case 25: case 1042: case 1043:
                 encoded.insert(encoded.end(), value.begin(), value.end());
