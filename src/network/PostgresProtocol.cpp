@@ -7,6 +7,7 @@
 #include "types/money.h"
 #include "types/xml.h"
 #include "types/jsonb.h"
+#include "types/tsvector.h"
 #include "catalog/catalog.h"
 #include "common/SqlArrayText.h"
 #include "utils/interval.h"
@@ -417,6 +418,11 @@ bool encodeBinaryValue(const std::string& value, const PgColumnDescription& colu
             }
             case 2950:
                 return parseUuidBytes(value, encoded);
+            case 3614: {
+                const auto vector=TsVectorValue::parse(value).toBinary();
+                encoded.insert(encoded.end(),vector.begin(),vector.end());
+                return true;
+            }
             case 3802: {
                 const auto json=JsonbValue::parse(value).toString();
                 encoded.push_back(1);

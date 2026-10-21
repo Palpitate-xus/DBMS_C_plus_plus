@@ -341,7 +341,7 @@ std::string inferAstResultType(
             "like", "not like", "ilike", "not ilike", "in", "not in",
             "between", "not between", "is distinct from",
             "is not distinct from", "similar to", "not similar to",
-            "<<=", ">>=", "&&", "@>", "<@", "~", "~*", "!~", "!~*"
+            "<<=", ">>=", "&&", "@>", "<@", "~", "~*", "!~", "!~*", "@@"
         };
         if (booleanOperators.count(op)) return "boolean";
         const std::string left = inferAstResultType(binary->left.get(), typeHints, routineTypes);
@@ -377,6 +377,11 @@ std::string inferAstResultType(
             if ((left=="jsonb" && common_type_detail::category(right)!='S') ||
                 (right=="jsonb" && common_type_detail::category(left)!='S'))
                 throw DbError("42883","operator does not exist for jsonb and non-jsonb operands");
+            if ((left=="tsvector" && (right=="tsvector" || rightUnknown)) ||
+                (right=="tsvector" && leftUnknown)) return "tsvector";
+            if ((left=="tsvector" && common_type_detail::category(right)!='S') ||
+                (right=="tsvector" && common_type_detail::category(left)!='S'))
+                throw DbError("42883","operator does not exist for tsvector and non-tsvector operands");
             if ((leftUnknown && right=="bytea") || (rightUnknown && left=="bytea"))
                 return "bytea";
             if ((leftUnknown && (right=="bit" || right=="bit varying")) ||
@@ -2308,7 +2313,7 @@ void ExprHelper::prepareArrayTypes(Expr* expression,
                     validateConst(binary->right.get(),binary->arrayConcat->rightType);
                 } else {
                     const auto codec=[](const std::string& other) {
-                        return other=="bytea" || other=="jsonb"?other:
+                        return other=="bytea" || other=="jsonb" || other=="tsvector"?other:
                             (other=="bit" || other=="bit varying")?std::string("bit varying"):std::string();
                     };
                     const auto unknownLeaf=[](const Expr* expression) {

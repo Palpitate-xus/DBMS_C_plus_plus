@@ -27,6 +27,7 @@
 #include "types/money.h"
 #include "types/xml.h"
 #include "types/jsonb.h"
+#include "types/tsvector.h"
 #include "process/SqlStats.h"
 #include "process/RuntimeStats.h"
 #include "process/OutputCapture.h"
@@ -908,6 +909,10 @@ std::string binaryProtocolParameterLiteral(uint32_t typeOid,
         if(offset!=raw.size())return invalid("22P03","invalid binary input length for array parameter");
         return quoteProtocolText(text,error);
     }
+    if(typeOid==3614) {
+        try {return quoteProtocolText(TsVectorValue::fromBinary(raw).toString(),error);}
+        catch(const DbError& failure) {inputSqlState=failure.sqlState();error=failure.what();return {};}
+    }
     if(typeOid==3802) {
         const auto value=jsonbProtocolParameterText(raw,true,error,inputSqlState);
         return error.empty()?quoteProtocolText(value,error):std::string{};
@@ -1142,6 +1147,10 @@ std::string protocolParameterLiteral(uint32_t typeOid,
     if (value.find('\0') != std::string::npos) {
         error = "parameter contains a NUL byte";
         return {};
+    }
+    if(typeOid==3614) {
+        try {return quoteProtocolText(TsVectorValue::parse(value).toString(),error);}
+        catch(const DbError& failure) {inputSqlState=failure.sqlState();error=failure.what();return {};}
     }
     if(typeOid==3802) {
         const auto canonical=jsonbProtocolParameterText(raw,false,error,inputSqlState);
@@ -2776,7 +2785,7 @@ void inferProtocolConcatParameters(const std::string& sql,Session& session,
             capture(binary->right.get(),binary->arrayConcat->rightType);
         } else {
             const auto output=ExprHelper::inferParsedInputType(binary,{},session.currentDB,&g_engine);
-            if(output=="text" || output=="bytea" || output=="bit varying" || output=="jsonb") {
+            if(output=="text" || output=="bytea" || output=="bit varying" || output=="jsonb" || output=="tsvector") {
                 capture(binary->left.get(),output);capture(binary->right.get(),output);
             }
         }

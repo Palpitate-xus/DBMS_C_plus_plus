@@ -36,6 +36,7 @@
 #include "types/encoding_conversion.h"
 #include "types/xml.h"
 #include "types/jsonb.h"
+#include "types/tsvector.h"
 #include "utils/Session.h"
 #include "common/TimeZoneRules.h"
 
@@ -3354,7 +3355,7 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
         };
         const auto codec=[](const ExprValue& other) {
             const auto type=ExprHelper::canonicalResultTypeName(other.typeName);
-            return type=="bytea" || type=="jsonb"?type:
+            return type=="bytea" || type=="jsonb" || type=="tsvector"?type:
                 (type=="bit" || type=="bit varying")?std::string("bit varying"):std::string();
         };
         if (unknownLiteral(e->left.get())) {
@@ -3373,6 +3374,14 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
         if ((leftJsonType=="jsonb" && common_type_detail::category(rightJsonType)!='S') ||
             (rightJsonType=="jsonb" && common_type_detail::category(leftJsonType)!='S'))
             throw DbError("42883","operator does not exist for jsonb and non-jsonb operands");
+        if (leftJsonType=="tsvector" && rightJsonType=="tsvector") {
+            if (l.isNull || r.isNull) return ExprValue("tsvector","",true);
+            return ExprValue("tsvector",TsVectorValue::concatenate(
+                TsVectorValue::parse(l.value),TsVectorValue::parse(r.value)).toString(),false);
+        }
+        if ((leftJsonType=="tsvector" && common_type_detail::category(rightJsonType)!='S') ||
+            (rightJsonType=="tsvector" && common_type_detail::category(leftJsonType)!='S'))
+            throw DbError("42883","operator does not exist for tsvector and non-tsvector operands");
         const bool leftBit = isBitStringTypeName(l.typeName);
         const bool rightBit = isBitStringTypeName(r.typeName);
         if (leftBit != rightBit) {
@@ -4995,6 +5004,13 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
     }
     const auto sourceType=ExprHelper::canonicalResultTypeName(v.typeName);
     const auto targetBase=ExprHelper::canonicalResultTypeName(target);
+    if (targetBase=="tsvector") {
+        const auto source=common_type_detail::canonical(sourceType);
+        if (source!="unknown" && source!="tsvector" && common_type_detail::category(source)!='S')
+            throw DbError("42846","cannot cast type "+sourceType+" to tsvector");
+        if (v.isNull) return ExprValue("tsvector","",true);
+        return ExprValue("tsvector",TsVectorValue::parse(v.value).toString(),false);
+    }
     if (targetBase=="jsonb") {
         const auto source=common_type_detail::canonical(sourceType);
         if (source!="unknown" && source!="json" && source!="jsonb" &&
@@ -5383,6 +5399,12 @@ struct DeclaredStringLengthScalarFunction {
 };
 // The declaration belongs to this actual builtin callback, not an
 // opaque native replacement which happens to reuse the SQL spelling.
+struct DeclaredTsVectorScalarFunction {
+    ScalarFunction callback;
+    ExprValue operator()(const std::vector<ExprValue>& args) const {
+        return callback(args);
+    }
+};
 struct DeclaredJsonArrayLengthScalarFunction {
     ScalarFunction callback;
     ExprValue operator()(const std::vector<ExprValue>& args) const {
@@ -6049,6 +6071,7 @@ std::string ExprEvaluator::scalarFunctionResultType(const FunctionCallExpr* call
         if(callback->second.target<SqlVersionFunction>())return "text";
         if(callback->second.target<DeclaredStringToArrayScalarFunction>())return "text[]";
         if(callback->second.target<DeclaredJsonArrayLengthScalarFunction>())return "integer";
+        if(callback->second.target<DeclaredTsVectorScalarFunction>())return "tsvector";
         if (const auto* bound = callback->second.target<BoundScalarRoutine>())
             return ExprHelper::canonicalResultTypeName(bound->resolved.routine.returnType);
     }
@@ -6088,6 +6111,8 @@ std::string ExprEvaluator::scalarFunctionIdentity(const FunctionCallExpr* call,
                        !callback->second.target<DeclaredStringLengthScalarFunction>()) ||
                       (resolved.name=="strpos" &&
                        !callback->second.target<DeclaredStrposScalarFunction>()) ||
+                      ((resolved.name=="to_tsvector" || resolved.name=="setweight") &&
+                       !callback->second.target<DeclaredTsVectorScalarFunction>()) ||
                       ((resolved.name=="json_array_length" || resolved.name=="jsonb_array_length") &&
                        !callback->second.target<DeclaredJsonArrayLengthScalarFunction>()) ||
                       (resolved.name=="string_to_array" &&
@@ -13238,6 +13263,8 @@ void ExprEvaluator::registerBuiltins() {
             entry.second=DeclaredStringLengthScalarFunction{std::move(entry.second)};
         else if(entry.first=="strpos")
             entry.second=DeclaredStrposScalarFunction{std::move(entry.second)};
+        else if(entry.first=="to_tsvector" || entry.first=="setweight")
+            entry.second=DeclaredTsVectorScalarFunction{std::move(entry.second)};
         else if(entry.first=="json_array_length" || entry.first=="jsonb_array_length")
             entry.second=DeclaredJsonArrayLengthScalarFunction{std::move(entry.second)};
         else if(entry.first=="string_to_array")

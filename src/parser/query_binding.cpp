@@ -711,12 +711,12 @@ public:
                 // byte/bit input codec. Never evaluate a routine or query to
                 // discover a type, nor treat an opaque callback as a literal.
                 if (concatLeft=="unknown" && unknownLeaf(binary->left.get()) &&
-                    (concatRight=="bytea" || concatRight=="jsonb" || bit(concatRight))) {
+                    (concatRight=="bytea" || concatRight=="jsonb" || concatRight=="tsvector" || bit(concatRight))) {
                     concatLeft=bit(concatRight)?"bit varying":concatRight;
                     coerceCaseInput(binary->left,left,concatLeft);
                 }
                 if (concatRight=="unknown" && unknownLeaf(binary->right.get()) &&
-                    (concatLeft=="bytea" || concatLeft=="jsonb" || bit(concatLeft))) {
+                    (concatLeft=="bytea" || concatLeft=="jsonb" || concatLeft=="tsvector" || bit(concatLeft))) {
                     concatRight=bit(concatLeft)?"bit varying":concatLeft;
                     coerceCaseInput(binary->right,right,concatRight);
                 }
@@ -729,16 +729,16 @@ public:
                 if ((concatLeft=="jsonb" && common_type_detail::category(concatRight)!='S') ||
                     (concatRight=="jsonb" && common_type_detail::category(concatLeft)!='S'))
                     throw DbError("42883","operator does not exist for jsonb and non-jsonb operands");
-                // TSVECTOR execution remains a separate existing gap.
-                if ((concatLeft=="tsvector" || concatRight=="tsvector") &&
-                    common_type_detail::category(concatLeft)!='S' &&
-                    common_type_detail::category(concatRight)!='S')
-                    return left;
+                if (concatLeft=="tsvector" && concatRight=="tsvector")
+                    return declaredType("tsvector",binary);
+                if ((concatLeft=="tsvector" && common_type_detail::category(concatRight)!='S') ||
+                    (concatRight=="tsvector" && common_type_detail::category(concatLeft)!='S'))
+                    throw DbError("42883","operator does not exist for tsvector and non-tsvector operands");
                 return declaredType("text",binary);
             }
             static const std::set<std::string> predicates = {"=", "<>", "!=", "<", ">", "<=", ">=",
                 "AND", "OR", "LIKE", "NOT LIKE", "ILIKE", "NOT ILIKE",
-                "SIMILAR TO", "NOT SIMILAR TO", "IN", "NOT IN", "IS DISTINCT FROM", "IS NOT DISTINCT FROM"};
+                "SIMILAR TO", "NOT SIMILAR TO", "IN", "NOT IN", "IS DISTINCT FROM", "IS NOT DISTINCT FROM", "@@"};
             static const std::set<std::string> comparisons={"=","<>","!=","<",">","<=",">=","IS DISTINCT FROM","IS NOT DISTINCT FROM"};
             if(comparisons.count(binary->op)) {
                 binary->comparison=enumComparison(binary->op,binary->left,binary->right,left,right);
