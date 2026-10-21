@@ -6588,6 +6588,26 @@ string resolveTableName(Session& s, const string& name) {
     return resolveTableName(s, name, false);
 }
 
+// SQL ACL statements and their reads must address the same physical relation.
+// Keep existence resolution separate from (and before) the unchanged grant-
+// option check; a qualified spelling is not a storage filename or a fallback
+// into another namespace.
+static string resolvePrivilegeTableName(Session& session, const string& spelling) {
+    dbms::CatalogManager::QualifiedName name;
+    if (!dbms::CatalogManager::parseQualifiedName(spelling, name, true) || name.name.empty())
+        throw dbms::DbError("42601", "invalid table name: " + spelling);
+    const bool sessionTemporary =
+        (name.schema == "pg_temp" || name.schema == sessionTempSchemaName(session)) &&
+        (session.tempTables.count(name.name) || session.transientTempTables.count(name.name));
+    if (!name.schema.empty() && !sessionTemporary &&
+        !g_engine.schemaExists(session.currentDB, name.schema))
+        throw dbms::DbError("3F000", "schema \"" + name.schema + "\" does not exist");
+    const string physical = resolveTableName(session, spelling, true);
+    if (!g_engine.tableExists(session.currentDB, physical))
+        throw dbms::DbError("42P01", "relation \"" + spelling + "\" does not exist");
+    return physical;
+}
+
 static bool isTempTable(Session& s, const string& name) {
     return s.tempTables.count(name) != 0;
 }
@@ -6857,11 +6877,11 @@ struct StructuredSetOperand {
     string tableName = resolveTableName(s, tableSpec);
     if (!g_engine.tableExists(s.currentDB, tableName)) return false;
     if (!isTempTable(s, tableSpec) &&
-        !checkTablePermission(s, tableSpec, dbms::StorageEngine::TablePrivilege::Select)) {
+        !checkTablePermission(s, tableName, dbms::StorageEngine::TablePrivilege::Select)) {
         executionError = true;
         return false;
     }
-    if (!isTempTable(s, tableSpec) && !checkSelectColumnPermission(s, tableSpec, columns)) {
+    if (!isTempTable(s, tableSpec) && !checkSelectColumnPermission(s, tableName, columns)) {
         executionError = true;
         return false;
     }
@@ -18195,7 +18215,7 @@ static bool checkTablePermission(Session& s, const string& tname,
                 if (p == target || p == "all") return true;
             }
         }
-        cout << "permission denied on table " << tname << endl;
+        cout << "permission denied on table " << tname << " (SQLSTATE 42501)" << endl;
         return false;
     }
     return true;
@@ -18228,7 +18248,7 @@ static bool checkSelectColumnPermission(Session& s, const string& tname,
             for (size_t i = 0; i < schema.len; ++i) allCols.push_back(schema.cols[i].dataName);
             if (!g_engine.hasColumnPermission(s.currentDB, tname, effectiveSessionRole(s),
                                                dbms::StorageEngine::TablePrivilege::Select, allCols)) {
-                cout << "permission denied: SELECT * requires access to all columns on table " << tname << endl;
+                cout << "permission denied: SELECT * requires access to all columns on table " << tname << " (SQLSTATE 42501)" << endl;
                 return false;
             }
         }
@@ -18258,7 +18278,7 @@ static bool checkSelectColumnPermission(Session& s, const string& tname,
     if (cols.empty()) return true;
     if (!g_engine.hasColumnPermission(s.currentDB, tname, effectiveSessionRole(s),
                                        dbms::StorageEngine::TablePrivilege::Select, cols)) {
-        cout << "permission denied: SELECT on restricted columns of table " << tname << endl;
+        cout << "permission denied: SELECT on restricted columns of table " << tname << " (SQLSTATE 42501)" << endl;
         return false;
     }
     return true;
@@ -26303,11 +26323,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
             objectType = "function";
             tname = "function:" + trim(onPart.substr(9));
         }
-        // Validate object existence
-        if (objectType == "table" && tname != "*" && !g_engine.tableExists(s.currentDB, tname)) {
-            cout << "Table " << tname << " not exist" << endl;
-            return true;
-        }
+        if (objectType == "table" && tname.compare(0, 6, "table ") == 0)
+            tname = trim(tname.substr(6));
+        if (objectType == "table" && tname != "*")
+            tname = resolvePrivilegeTableName(s, tname);
         // Permission check: admin OR user with grant option for this privilege
         bool canGrant = sessionIsAdmin(s);
         if (!canGrant) {
@@ -26438,11 +26457,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
             objectType = "function";
             tname = "function:" + trim(onPart.substr(9));
         }
-        // Validate object existence
-        if (objectType == "table" && tname != "*" && !g_engine.tableExists(s.currentDB, tname)) {
-            cout << "Table " << tname << " not exist" << endl;
-            return true;
-        }
+        if (objectType == "table" && tname.compare(0, 6, "table ") == 0)
+            tname = trim(tname.substr(6));
+        if (objectType == "table" && tname != "*")
+            tname = resolvePrivilegeTableName(s, tname);
         bool canRevoke = sessionIsAdmin(s);
         if (!canRevoke && objectType == "table" && tname != "*") {
             canRevoke = g_engine.hasGrantOption(s.currentDB, tname,
@@ -31891,9 +31909,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
             throw dbms::DbError("42P01", "relation \"" + tnameOrig + "\" does not exist");
         }
         if (queryDb != "pg_catalog" && queryDb != "information_schema" &&
-            !isTempTable(s, tnameOrig) && !checkTablePermission(s, tnameOrig, dbms::StorageEngine::TablePrivilege::Select)) return true;
+            !isTempTable(s, tnameOrig) && !checkTablePermission(s, tname, dbms::StorageEngine::TablePrivilege::Select)) return true;
         if (queryDb != "pg_catalog" && queryDb != "information_schema" &&
-            !isTempTable(s, tnameOrig) && !checkSelectColumnPermission(s, tnameOrig, columns)) return true;
+            !isTempTable(s, tnameOrig) && !checkSelectColumnPermission(s, tname, columns)) return true;
 
         TableSchema tbl = g_engine.getTableSchema(queryDb, tname);
         // Decode the raw FROM tokens exactly once. Expr column components
