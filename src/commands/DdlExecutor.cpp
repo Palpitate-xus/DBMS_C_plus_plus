@@ -4046,11 +4046,18 @@ SchemaNamespaceResult createSchemaNamespace(StorageEngine& engine,
     auto& catalog = *catalogOwner;
     if (catalog.findNamespaceByName(name))
         return {DBStatus::TABLE_ALREADY_EXISTS, "schema already exists", {}};
+    // Only an explicit SQL caller has a role owner. Native callers without
+    // that context must not borrow another thread-local session's role.
+    Oid namespaceOwner=INVALID_OID;
+    if(sqlSession) {
+        const auto role=authCatalog().getAuthIdByName(effectiveSessionRole(*sqlSession));
+        if(role)namespaceOwner=role->oid;
+    }
     // Persisting a new catalog or marker is covered by the same image.
     txn.markSnapshotDirty();
     const DBStatus marker = engine.createSchemaMarker(database, name);
     if (marker != DBStatus::OK) return {marker, "schema marker publication failed", {}};
-    catalog.createNamespace(name, INVALID_OID);
+    catalog.createNamespace(name, namespaceOwner);
     if (!catalog.persistAll())
         return {DBStatus::IO_ERROR, "schema catalog publication failed", {}};
     txn.recordCreate(DdlObjectKind::Schema, name);
