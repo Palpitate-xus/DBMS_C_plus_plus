@@ -10792,27 +10792,37 @@ void ExprEvaluator::registerBuiltins() {
         const std::string s = textArgumentValue(a[0]);
         const std::string delim = textArgumentValue(a[1]);
         const int64_t n = parseInt32Argument(a[2]);
-        std::vector<std::string> parts;
-        if (delim.empty()) {
-            parts.push_back(s);
-        } else {
-            size_t pos = 0, next;
-            while ((next = s.find(delim, pos)) != std::string::npos) {
-                parts.push_back(s.substr(pos, next - pos));
-                pos = next + delim.size();
-            }
-            parts.push_back(s.substr(pos));
-        }
-        int64_t idx;
-        if (n > 0) idx = n - 1;
-        else if (n < 0) idx = static_cast<int64_t>(parts.size()) + n;
-        else {
+        if (n == 0) {
             throw std::runtime_error(
                 "field position must not be zero (SQLSTATE 22023)");
         }
-        if (idx < 0 || idx >= static_cast<int64_t>(parts.size()))
-            return ExprValue("text", "", false);
-        return ExprValue("text", parts[static_cast<size_t>(idx)], false);
+        if (delim.empty())
+            return ExprValue("text", n == 1 || n == -1 ? s : "", false);
+
+        // Keep only offsets, not every other field. Negative positions use
+        // the same forward, nonoverlapping matches as positive positions:
+        // reverse searching would change e.g. split_part('aaa', 'aa', -1).
+        int64_t wanted = n;
+        if (n < 0) {
+            int64_t fields = 1;
+            size_t begin = 0, end;
+            while ((end = s.find(delim, begin)) != std::string::npos) {
+                ++fields;
+                begin = end + delim.size();
+            }
+            wanted = fields + n + 1;
+            if (wanted <= 0) return ExprValue("text", "", false);
+            if (n == -1) return ExprValue("text", s.substr(begin), false);
+        }
+        size_t begin = 0;
+        for (int64_t field = 1;; ++field) {
+            const size_t end = s.find(delim, begin);
+            if (field == wanted)
+                return ExprValue("text", s.substr(begin,
+                    end == std::string::npos ? end : end - begin), false);
+            if (end == std::string::npos) return ExprValue("text", "", false);
+            begin = end + delim.size();
+        }
     };
     // strpos(string, substring) — 1-based position of first match, 0 if absent
     functions_["strpos"] = [](const std::vector<ExprValue>& a) {
