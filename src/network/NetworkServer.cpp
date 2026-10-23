@@ -1873,9 +1873,52 @@ std::vector<QueryNotice> protocolTimePrecisionNotices(const std::string& sql,
     return notices;
 }
 
+int32_t protocolDeclaredIntervalModifier(const Expr* expression, const Session& session) {
+    if (!expression) return -1;
+    try {
+        ColumnDef declaration;
+        if (const auto* cast = dynamic_cast<const CastExpr*>(expression)) {
+            if (cast->implicit) return -1;
+            declaration.typeName = cast->typeName;
+            declaration.typeMods = cast->typeMods;
+            while (declaration.typeName.size() >= 2 &&
+                   declaration.typeName.compare(declaration.typeName.size()-2, 2, "[]") == 0) {
+                declaration.typeName.resize(declaration.typeName.size()-2);
+                declaration.isArray = true;
+            }
+        } else if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(expression);
+                   binary && binary->op == "::" && binary->right) {
+            declaration = SQLParser::parseTypeSpecification(binary->right->toString());
+        } else if (const auto* literal = dynamic_cast<const LiteralExpr*>(expression);
+                   literal && !literal->typeName.empty()) {
+            declaration = SQLParser::parseTypeSpecification(literal->typeName);
+        } else return -1;
+        if (declaration.typeMods.empty()) return -1;
+        CatalogManager::QualifiedName requested;
+        if (!CatalogManager::parseQualifiedName(declaration.typeName, requested, true) ||
+            (requested.name != "interval" && requested.name != "_interval")) return -1;
+        // Resolve the original base identity, not a rewritten keyword type.
+        // Qualified internal declarations carry semantic (mask, precision)
+        // arguments that must not be rendered as a new SQL declaration.
+        const auto catalog = regtype_detail::metadata(g_engine, session.currentDB);
+        const auto declared = resolveDeclaredTypeName(declaration.typeName +
+            (declaration.isArray ? "[]" : ""), &catalog, &session);
+        if (declared.typeOid != 1186 && declared.typeOid != 1187) return -1;
+        const auto modifier = TypeRegistry::instance().applyTypeMods("interval", declaration.typeMods);
+        return modifier.ok() ? modifier.typmod : -1;
+    } catch (const DbError& failure) {
+        const auto& state = failure.sqlState();
+        if (state == "42601" || state == "42704" || state == "3F000" || state == "22023")
+            return -1; // Existing declaration analysis owns these errors.
+        throw; // Never suppress I/O, cancellation or corrupt metadata.
+    }
+}
+
 int32_t protocolDeclaredCastModifier(const Expr* expression, const Session& session) {
     const int32_t timePrecision = protocolDeclaredTimePrecision(expression, session);
     if (timePrecision >= 0) return timePrecision;
+    const int32_t intervalModifier = protocolDeclaredIntervalModifier(expression, session);
+    if (intervalModifier >= 0) return intervalModifier;
     if (!expression) return -1;
     std::string typeName;
     std::vector<std::string> modifiers;
@@ -1930,7 +1973,7 @@ int32_t protocolDeclaredCastModifier(const Expr* expression, const Session& sess
 bool protocolHasLengthModifier(uint32_t oid) {
     return oid == 1042 || oid == 1043 || oid == 1014 || oid == 1015 ||
            oid == 1560 || oid == 1561 || oid == 1562 || oid == 1563 ||
-           oid == 1083 || oid == 1183;
+           oid == 1083 || oid == 1183 || oid == 1186 || oid == 1187;
 }
 
 std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& result,
