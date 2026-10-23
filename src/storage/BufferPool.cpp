@@ -449,6 +449,8 @@ bool BufferPool::publishLoadedPage(uint32_t pageId, size_t idx, bool fullPageRea
 }
 
 char* BufferPool::fetchPage(uint32_t pageId) {
+    // These values describe free/orphan frames, never caller-owned pages.
+    if (pageId >= kOrphanedPage) return nullptr;
     // Fast path: page already cached (or being loaded by a peer).
     if (char* cached = tryPinCached(pageId)) return cached;
 
@@ -458,47 +460,42 @@ char* BufferPool::fetchPage(uint32_t pageId) {
     std::unique_lock<std::mutex> lock(mutex_);
     ++misses_;
 
-    // Exactly one loader per page: if a peer is mid-load, wait for it and
-    // use its result (two loaders of one page would race to publish two
-    // frames for the same mapping).
-    while (loadingPages_.count(pageId)) {
-        std::condition_variable cv;
-        loadWaiters_[pageId].push_back(&cv);
-        cv.wait(lock);
-        // The peer published (or failed). Try the cache first.
-        auto it = pageMap_.find(pageId);
-        if (it != pageMap_.end()) {
-            Frame& pf = frames_[it->second];
-            pf.pinCount++;
-            pf.usageCount = 3;
-            return pf.data.data();
+    // A peer may have cached this page between the fast-path miss and
+    // acquiring this lock, or while an orphan wait released it. Recheck all
+    // admission state under the same lock before selecting any victim.
+    int orphanAttempts = 0;
+    while (true) {
+        // close() releases frame storage. Never index that storage after a
+        // closed/failed open, including a close that wins a lock gap.
+        if (fd_ < 0) return nullptr;
+        const auto cached = pageMap_.find(pageId);
+        if (cached != pageMap_.end()) {
+            Frame& frame = frames_[cached->second];
+            ++frame.pinCount;
+            frame.usageCount = 3;
+            return frame.data.data();
         }
-        // Peer failed: retry the load ourselves (loop re-checks loadingPages_).
-    }
-
-    // An orphaned copy of this page still has readers. unpinPage routes by
-    // the pageMap/orphanedPins mutual exclusion, so a fresh load now would
-    // let a later unpin steal the new mapping's pin. Wait for the drain.
-    // BOUNDED retry: a caller that itself holds the orphan's pin (fetch ->
-    // invalidate -> fetch on one thread) cannot succeed until it unpins, so
-    // after a grace period we report the page unavailable rather than
-    // deadlocking forever.
-    if (orphanedPins_.count(pageId)) {
-        int attempts = 0;
-        while (orphanedPins_.count(pageId)) {
-            if (++attempts > 50) return nullptr;  // ~10s of bounded waiting
+        if (loadingPages_.count(pageId)) {
+            std::condition_variable cv;
+            loadWaiters_[pageId].push_back(&cv);
+            // Keep this registered cv alive across spurious wakeups. The
+            // loader removes its waiter list before notifying it.
+            cv.wait(lock, [&] { return !loadingPages_.count(pageId); });
+            continue;
+        }
+        if (orphanedPins_.count(pageId)) {
+            // Preserve the existing bounded self-pin retry: admission cannot
+            // give a new copy the old orphan's later unpin.
+            if (++orphanAttempts > 50) return nullptr;
             std::condition_variable cv;
             orphanWaiters_.push_back(&cv);
             cv.wait_for(lock, std::chrono::milliseconds(200));
-            // Remove ourselves before touching cv's scope again.
             orphanWaiters_.erase(
                 std::remove(orphanWaiters_.begin(), orphanWaiters_.end(), &cv),
                 orphanWaiters_.end());
+            continue;
         }
-        // Drained: re-run the whole fetch path so it sees current state.
-        lock.unlock();
-        if (char* cached = tryPinCached(pageId)) return cached;
-        lock.lock();
+        break;
     }
 
     // Select a victim frame. A frame mid-load is pinned by its loader, so
