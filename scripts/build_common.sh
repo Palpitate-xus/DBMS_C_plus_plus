@@ -548,6 +548,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/to_char_exact_rounding_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/cast_explicit_alias_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/pg_class_query_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/namespace_catalog_source_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/pg_stat_activity_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/statement_timeout_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/statement_timeout_cli_e2e_test.py)

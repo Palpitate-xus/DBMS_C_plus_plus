@@ -14,6 +14,7 @@
 #include "common/FeatureGate.h"
 #include "common/NotificationManager.h"
 #include "catalog/CatalogService.h"
+#include "catalog/namespace_query.h"
 #include "catalog/systables.h"
 #include "expression/regtype_input.h"
 #include "common/DateType.h"
@@ -3247,9 +3248,25 @@ bool describePreparedBitNegation(const std::string& sql,Session& session,
     return !columns.empty();
 }
 
+bool describePreparedNamespaceCatalog(const std::string& sql,Session& session,
+    std::vector<PgColumnDescription>& columns,const std::vector<uint32_t>& parameterOids) {
+    SQLParser parser;const auto parsed=parser.parseForBinding(sql);
+    if(!parsed.success || !namespaceCatalogSourceCandidate(parsed.stmt.get()))return false;
+    auto* previous=currentSession();setCurrentSession(&session);
+    struct Restore {Session* previous;~Restore(){setCurrentSession(previous);}} restore{previous};
+    const auto query=g_engine.prepareBoundQuery(session.currentDB,sql,
+        protocolMetadataParameters(session,parameterOids));
+    if(!ownsNamespaceCatalogSource(query))return false;
+    QueryResult shape;
+    for(const auto& field:query.output) {shape.columns.push_back(field.name);shape.columnTypes.push_back(field.type);}
+    columns=describeProtocolColumns(shape,sql,session,&query.output);
+    return !columns.empty();
+}
+
 bool describePreparedResult(const std::string& sql, Session& session,
                             std::vector<PgColumnDescription>& columns,
                             const std::vector<uint32_t>& parameterOids = {}) {
+    if(describePreparedNamespaceCatalog(sql,session,columns,parameterOids))return true;
     if (describePreparedBitNegation(sql,session,columns,parameterOids)) return true;
     if (describePreparedHavingResult(sql, session, columns, parameterOids)) return true;
     if (describePreparedConflictPredicateResult(sql, session, columns, parameterOids)) return true;
@@ -7178,6 +7195,10 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             }
             try {
                 notePreparedTemporaryObjectAccess(sql, session);
+                // Catalog analysis belongs to Parse, before publishing a
+                // statement. Describe must never be its first validation.
+                std::vector<PgColumnDescription> namespaceDescriptor;
+                (void)describePreparedNamespaceCatalog(sql,session,namespaceDescriptor,parameterTypes);
                 inferProtocolConcatParameters(sql,session,parameterTypes);
                 inferProtocolWholeScalarParameters(sql,session,parameterTypes);
                 validatePreparedAggregateOrderInputs(sql,session,parameterTypes);

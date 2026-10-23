@@ -31,6 +31,7 @@
 #include "catalog/CatalogService.h"
 #include "catalog/declared_type.h"
 #include "catalog/type_catalog.h"
+#include "catalog/namespace_catalog.h"
 #include "common/SqlSyntax.h"
 #include "expression/expr_helper.h"
 #include "expression/sql_value.h"
@@ -32312,18 +32313,9 @@ std::vector<std::string> StorageEngine::queryPgCatalog(
             }
         }
     } else if (tablename == "pg_namespace" || tablename == "PG_NAMESPACE") {
-        // PostgreSQL pg_namespace: nspname
-        for (const auto& dbname : getDatabaseNames()) {
-            std::string row = dbname + " ";
-            bool match = true;
-            for (const auto& c : conds) {
-                if (c.colName == "nspname" && c.op == "=" && dbname != c.value) { match = false; break; }
-            }
-            if (match) result.push_back(row);
-        }
-        // Also add information_schema and pg_catalog as namespaces
-        result.push_back("information_schema ");
-        result.push_back("pg_catalog ");
+        // This old text API has no database owner. Database directory names
+        // are not schema rows; require the actual database-bound source.
+        throw DbError("0A000", "pg_namespace requires a database-bound catalog query");
     }
     return result;
 }
@@ -33565,6 +33557,7 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
                     static const std::map<std::string, QueryRowDescriptor> virtualTables = {
                         {"pg_class", {{"oid","oid"},{"relname","name"},{"relnamespace","oid"},
                             {"relkind","\"char\""},{"relnatts","smallint"},{"relpersistence","\"char\""},{"relowner","oid"}}},
+                        {"pg_namespace", ownedNamespaceCatalogDescriptor()},
                         {"pg_settings", {{"name","text"},{"setting","text"},{"unit","text"}}},
                         {"pg_stat_activity", {{"pid","integer"},{"datname","name"},{"usename","name"},{"state","text"},{"query","text"}}}
                     };
@@ -33575,7 +33568,8 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
                     // Explicit pg_catalog names and pg_class keep their
                     // existing catalog identity; no source is opened here.
                     const bool physicalShadow = requested.schema.empty() &&
-                        (requested.name == "pg_settings" || requested.name == "pg_stat_activity") &&
+                        (requested.name == "pg_settings" || requested.name == "pg_stat_activity" ||
+                         requested.name == "pg_namespace") &&
                         (tableExists(dbname,requested.name) || viewExists(dbname,requested.name));
                     if (found != virtualTables.end() && !physicalShadow) {
                         description.columns = found->second;

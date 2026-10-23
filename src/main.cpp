@@ -62,6 +62,8 @@
 #include "commands/DdlTransaction.h"
 #include "commands/DmlExecutor.h"
 #include "catalog/CatalogService.h"
+#include "catalog/namespace_catalog.h"
+#include "catalog/namespace_query.h"
 #include "catalog/collation.h"
 #include "catalog/systables.h"
 #include "catalog/type_registry.h"
@@ -20415,6 +20417,11 @@ class PreparedWithDmlRuntime {
                 cursor=dbms::QueryPlanner::makePreparedCursor(viewRuntime->selectPlan(select,dbms::RowContext{},{}),range.columns);
             } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_class") {
                 virtualRows=make_shared<dbms::PreparedQueryRows>(preparedPgClassRows(session_));
+            } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_namespace") {
+                virtualRows=make_shared<dbms::PreparedQueryRows>();
+                const auto metadata=g_engine.catalogService().metadataSnapshot(session_.currentDB);
+                for(const auto& row:metadata.namespaces)
+                    virtualRows->push_back(dbms::ownedNamespaceCatalogCells(row));
             } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_settings") {
                 virtualRows=make_shared<dbms::PreparedQueryRows>(preparedPgSettingsRows(session_));
             } else if(item->type==dbms::FromItem::Type::Table && !range.cteStatement) {
@@ -21625,6 +21632,23 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
     }
     PreparedWithDmlRuntime runtime(session,std::move(query));auto result=runtime.runRead();
     for(const auto& name:result.columns)cout<<name<<' ';cout<<'\n';
+    for(size_t i=0;i<result.rows.size();++i) {
+        for(size_t j=0;j<result.rows[i].size();++j)cout<<(result.nulls[i][j]?"NULL":result.rows[i][j])<<' ';
+        cout<<'\n';
+    }
+    dbms::publishLastDmlResult(std::move(result));handled=true;return false;
+}
+
+static bool handlePreparedNamespaceCatalogQuery(const string& rawSql,Session& session,bool& handled) {
+    handled=false;
+    dbms::SQLParser parser;const auto parsed=parser.parseForBinding(rawSql);
+    if(!parsed.success || !dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()) ||
+       !dbms::namespaceCatalogSourceCandidate(parsed.stmt.get()))return false;
+    auto query=make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(session.currentDB,rawSql));
+    if(!dbms::ownsNamespaceCatalogSource(*query))return false;
+    PreparedWithDmlRuntime runtime(session,std::move(query));auto result=runtime.runRead();
+    for(const auto& column:result.columns) {cout<<renderLegacyHeader(column)<<' ';}
+    cout<<'\n';
     for(size_t i=0;i<result.rows.size();++i) {
         for(size_t j=0;j<result.rows[i].size();++j)cout<<(result.nulls[i][j]?"NULL":result.rows[i][j])<<' ';
         cout<<'\n';
@@ -26783,6 +26807,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 }
             }
         }
+
+        bool namespaceCatalogHandled=false;
+        const bool namespaceCatalogFailed=handlePreparedNamespaceCatalogQuery(effectiveRawSql,s,namespaceCatalogHandled);
+        if(namespaceCatalogHandled)return namespaceCatalogFailed;
 
         bool typeCatalogHandled=false;
         const bool typeCatalogFailed=handlePreparedTypeCatalogQuery(effectiveRawSql,s,typeCatalogHandled);

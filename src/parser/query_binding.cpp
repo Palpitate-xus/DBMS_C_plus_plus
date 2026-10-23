@@ -43,6 +43,16 @@ struct Range {
     std::shared_ptr<PreparedQuery> viewQuery;
 };
 using Namespace = std::vector<Range>;
+bool incompleteNamespaceCatalog(const Range& range) {
+    // Retain physical/derived/CTE columns and alias semantics. Only this
+    // resolved catalog source has a deliberately incomplete row schema.
+    return range.relationSchema=="pg_catalog" && range.relationName=="pg_namespace" &&
+        range.columns.size()==3;
+}
+void requireCompleteStar(const Range& range) {
+    if(incompleteNamespaceCatalog(range))
+        throw DbError("0A000","SELECT * requires the complete pg_namespace schema");
+}
 void checkRangeConflicts(const Namespace& left, const Namespace& right) {
     for (const auto& a : left) for (const auto& b : right) {
         if (a.name.empty() || a.name != b.name) continue;
@@ -485,6 +495,7 @@ public:
             }
             size_t matches = 0;
             bool rangeFound = false;
+            bool unsupportedNamespaceAcl = false;
             std::string sourceType;
             QueryColumnBinding resolved;
             for (size_t scopeDepth = 0; scopeDepth < scopes.size(); ++scopeDepth) {
@@ -492,6 +503,12 @@ public:
                 for (const auto& range : scope) {
                     if (!rangeMatches(*column, range)) continue;
                     if (!column->table.empty()) rangeFound = true;
+                    if(column->column=="nspacl" && incompleteNamespaceCatalog(range)) {
+                        // The real column exists in PostgreSQL, but has no
+                        // owned storage here. Preserve SQL ambiguity/scope
+                        // precedence before reporting that capability gap.
+                        ++matches;unsupportedNamespaceAcl=true;
+                    }
                     for (size_t ordinal = 0; ordinal < range.columns.size(); ++ordinal) {
                         const auto& field = range.columns[ordinal];
                         if (field.name != column->column) continue;
@@ -506,6 +523,8 @@ public:
             if (matches > 1 || (matches && datum && !datum->columnPrecedence))
                 throw DbError("42702", "column reference \"" + column->toString() + "\" is ambiguous");
             if (matches) {
+                if(unsupportedNamespaceAcl)
+                    throw DbError("0A000","pg_namespace column nspacl is not implemented");
                 column->binding = std::move(resolved);
                 return sourceType;
             }
@@ -1379,6 +1398,7 @@ public:
             if (item.expr && item.expr->type == ExprType::Literal &&
                 static_cast<LiteralExpr*>(item.expr.get())->value == "*") {
                 if (scopes.empty()) throw DbError("42601", "SELECT * has no source");
+                for (const auto& range : scopes.front())requireCompleteStar(range);
                 for (const auto& range : scopes.front())
                     for (size_t i = 0; i < range.columns.size(); ++i) {
                         const auto& column = range.columns[i];
@@ -1395,6 +1415,7 @@ public:
                 bool found = false;
                 if (!scopes.empty()) for (const auto& range : scopes.front()) {
                     if (!rangeMatches(*star, range)) continue;
+                    requireCompleteStar(range);
                     found = true; columns.insert(columns.end(), range.columns.begin(), range.columns.end());
                     if (leaves) leaves->insert(leaves->end(), range.columns.size(), nullptr);
                     if (bindings)
@@ -1523,6 +1544,8 @@ public:
     Namespace from(FromItem* item, const std::vector<Namespace>& outer, const Ctes& ctes) {
         if (!item) return {};
         const auto aliases=[&](Range range) {
+            if(incompleteNamespaceCatalog(range) && item->columnAliases.size()==4)
+                throw DbError("0A000","pg_namespace ACL column aliases are not implemented");
             if(item->columnAliases.size()>range.columns.size())
                 throw DbError("42P10","source alias has more column names than its relation");
             for(size_t i=0;i<item->columnAliases.size();++i)range.columns[i].name=identifier(item->columnAliases[i]);
@@ -1553,6 +1576,10 @@ public:
             keys.push_back(key);
         }
         if (SQLParser::toLower(item->joinType).rfind("natural", 0) == 0) {
+            // NATURAL derives join keys from the complete source schema;
+            // omitting the unowned ACL field would change the actual join.
+            for(const auto& range:left)requireCompleteStar(range);
+            for(const auto& range:right)requireCompleteStar(range);
             for (const auto& a : left) for (const auto& x : a.columns)
                 for (const auto& b : right) for (const auto& y : b.columns)
                     if (!a.hiddenUnqualified.count(x.name) && !b.hiddenUnqualified.count(y.name) &&
@@ -1560,6 +1587,12 @@ public:
         }
         Range merged;
         for (const auto& key : keys) {
+            if(key=="nspacl") {
+                for(const auto& range:left)if(incompleteNamespaceCatalog(range))
+                    throw DbError("0A000","pg_namespace ACL JOIN key is not implemented");
+                for(const auto& range:right)if(incompleteNamespaceCatalog(range))
+                    throw DbError("0A000","pg_namespace ACL JOIN key is not implemented");
+            }
             size_t leftCount = 0, rightCount = 0; std::string leftType,rightType;
             for (auto& range : left) for (const auto& col : range.columns)
                 if (col.name == key && !range.hiddenUnqualified.count(key)) { ++leftCount; leftType = col.type; }
