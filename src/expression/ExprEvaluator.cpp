@@ -12102,12 +12102,42 @@ void ExprEvaluator::registerBuiltins() {
         std::string out = "{";
         bool first = true;
         try {
-            std::sregex_token_iterator it(s.begin(), s.end(), re, -1), end;
-            for (; it != end; ++it) {
-                if (!first) out += ",";
-                out += arrayElemQuote(*it);
-                first = false;
+            // Split on accepted match boundaries, not token_iterator's
+            // unmatched ranges: that iterator drops a final empty field and
+            // emits unwanted fields for zero-length matches at the edges.
+            size_t fieldBegin = 0, search = 0, previousMatchEnd = 0;
+            std::smatch match;
+            while (search <= s.size()) {
+                const auto options = search == 0
+                    ? std::regex_constants::match_default
+                    : std::regex_constants::match_prev_avail;
+                if (!std::regex_search(s.cbegin() + search, s.cend(),
+                                       match, re, options)) break;
+                const size_t begin = search + match.position();
+                const size_t end = begin + match.length();
+                // Ignore empty matches at the beginning/end or immediately
+                // after the previous match, as PostgreSQL's split functions
+                // do. Nonempty edge matches still produce empty fields.
+                if (begin < s.size() && end > previousMatchEnd) {
+                    if (!first) out += ",";
+                    out += arrayElemQuote(s.substr(fieldBegin, begin - fieldBegin));
+                    first = false;
+                    fieldBegin = end;
+                }
+                previousMatchEnd = end;
+                search = end;
+                if (begin == end) {
+                    if (search == s.size()) break;
+                    // Advance one complete UTF-8 character after an empty
+                    // match; advancing one byte would split a code point.
+                    ++search;
+                    while (search < s.size() &&
+                           (static_cast<unsigned char>(s[search]) & 0xc0) == 0x80)
+                        ++search;
+                }
             }
+            if (!first) out += ",";
+            out += arrayElemQuote(s.substr(fieldBegin));
         } catch (...) {
             return ExprValue("ARRAY", "", true);
         }
