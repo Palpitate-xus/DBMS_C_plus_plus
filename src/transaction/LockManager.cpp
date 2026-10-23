@@ -1,4 +1,5 @@
 #include "LockManager.h"
+#include "common/sha256.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -291,6 +292,19 @@ std::string LockManager::processLockPath(const std::string& resourceNamespace,
     if (resourceNamespace.empty()) return {};
     std::filesystem::path path(resourceNamespace);
     path /= ".lockmgr";
+    // Retain every existing short token byte-for-byte for mixed-version
+    // coordination. Hex expansion of a long resource can exceed NAME_MAX
+    // even when both SQL identifier components are legal. Bound only the
+    // file locator; in-memory/prepared ownership still uses the full name.
+    constexpr size_t maxFilenameBytes = 255;
+    const size_t hexOverhead = kind.size() + 1 + 5; // '-' and '.lock'
+    if (hexOverhead > maxFilenameBytes ||
+        resource.size() > (maxFilenameBytes - hexOverhead) / 2) {
+        // "sha256-" is outside the legacy hexadecimal alphabet, keeping the
+        // two pathname formats disjoint without truncating common prefixes.
+        path /= kind + "-sha256-" + SHA256::hash(resource) + ".lock";
+        return path.string();
+    }
     // Resource names can originate from SQL or from the low-level API. Encode
     // every byte so a name can never escape the lock directory or collide with
     // a different path spelling (for example, "a/b" versus "a_b").
