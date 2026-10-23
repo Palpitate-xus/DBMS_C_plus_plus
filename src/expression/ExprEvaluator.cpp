@@ -3167,7 +3167,7 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
                 }
             }
         }
-        return evalCast(nullptr, ctx, l, spelling);
+        return evalCast(e->left.get(), ctx, l, spelling);
     }
 
     // A scalar IN list is represented as a RowExpr so each member retains its
@@ -4833,7 +4833,7 @@ ExprValue ExprEvaluator::evalCast(const CastExpr* e, const RowContext& ctx) cons
             }
             if(arrayTarget)fullT+="[]";
         }
-        return evalCast(nullptr, ctx, v, fullT);
+        return evalCast(e->operand.get(), ctx, v, fullT);
     }
     return ExprValue{};
 }
@@ -4963,7 +4963,7 @@ ExprValue ExprEvaluator::transformUnknownIntegerInput(const ExprValue& input,
 }
 
 // Helper overload used by BinaryOpExpr "::"
-ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
+ExprValue ExprEvaluator::evalCast(const Expr* inputExpression, const RowContext&,
                                   const ExprValue& v, const std::string& targetTypeName) const {
     std::string target = ExprHelper::declaredTypeInput(targetTypeName,currentDB_);
     target=toLower(target);
@@ -5004,6 +5004,14 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
     }
     const auto sourceType=ExprHelper::canonicalResultTypeName(v.typeName);
     const auto targetBase=ExprHelper::canonicalResultTypeName(target);
+    // The generic literal evaluator returns VARCHAR bytes. Only the original
+    // untyped SQL leaf (or an explicitly UNKNOWN native datum) owns contextual
+    // interval input; typed/planned values must keep their declared role.
+    const auto* inputLiteral = dynamic_cast<const LiteralExpr*>(inputExpression);
+    const bool contextualIntervalInput = sourceType == "unknown" ||
+        (inputLiteral && !inputLiteral->preparedSubquery &&
+         inputLiteral->typeName.empty() && !inputLiteral->analyzedPrimitiveConstant &&
+         isQuotedString(inputLiteral->value));
     if (targetBase=="tsvector") {
         const auto source=common_type_detail::canonical(sourceType);
         if (source!="unknown" && source!="tsvector" && common_type_detail::category(source)!='S')
@@ -5109,8 +5117,19 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
         return ExprValue(geometryTarget,std::move(normalized),false);
     }
     const bool intervalArray = target.size() >= 2 && target.compare(target.size() - 2, 2, "[]") == 0;
-    const auto intervalDeclaration = !intervalArray && (target == "interval" || target.rfind("interval ", 0) == 0 ||
-        target.rfind("interval(", 0) == 0);
+    const auto intervalBase = intervalArray ? target.substr(0, target.size()-2) : target;
+    const bool intervalTarget = intervalBase == "interval" || intervalBase.rfind("interval ", 0) == 0 ||
+        intervalBase.rfind("interval(", 0) == 0;
+    if (intervalArray && intervalTarget) {
+        const auto source = common_type_detail::canonical(sourceType);
+        static const std::set<std::string> strings = {"unknown","text","varchar","bpchar","name"};
+        static const std::set<std::string> elements = {"unknown","text","varchar","bpchar","name","time","interval"};
+        const bool array = common_type_detail::array(source);
+        const auto element = array ? source.substr(0, source.size()-2) : source;
+        if (!(array ? elements.count(element) : strings.count(source)))
+            throw DbError("42846", "cannot cast type " + sourceType + " to interval[]");
+    }
+    const bool intervalDeclaration = !intervalArray && intervalTarget;
     if (intervalDeclaration) {
         const auto declaration = SQLParser::parseTypeSpecification(target);
         const auto spec = interval_type_detail::modifiers(declaration.typeMods);
@@ -5128,7 +5147,8 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
         auto input = v.value;
         // An unadorned numeric input denotes the least-significant field
         // selected by the genuine declaration, not always seconds.
-        if (isNumericLiteral(trimStr(input)) && spec.range != interval_type_detail::fullRange) {
+        if (contextualIntervalInput && isNumericLiteral(trimStr(input)) &&
+            spec.range != interval_type_detail::fullRange) {
             const char* unit = spec.range & interval_type_detail::second ? "seconds" :
                 spec.range & interval_type_detail::minute ? "minutes" :
                 spec.range & interval_type_detail::hour ? "hours" :
@@ -5194,7 +5214,8 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
         const auto sourceArrayType=common_type_detail::canonical(sourceType);
         const bool oidElements=elementType=="regtype" ||
             (common_type_detail::array(sourceArrayType) && sourceArrayType=="regtype[]");
-        const auto sourceElement=oidElements && common_type_detail::array(sourceArrayType)
+        const bool intervalElements = elementType == "interval";
+        const auto sourceElement=(oidElements || intervalElements) && common_type_detail::array(sourceArrayType)
             ?sourceArrayType.substr(0,sourceArrayType.size()-2):std::string("unknown");
         if(elementType=="regtype")regtype_detail::validateCast(sourceElement,elementType);
         std::vector<std::optional<uint32_t>> identities;
@@ -5212,6 +5233,11 @@ ExprValue ExprEvaluator::evalCast(const Expr*, const RowContext&,
                     ExprValue input(sourceElement,arrayElemUnquote(token),toLower(token)=="null");
                     if(oidElements && elementIndex<v.elementOids.size())input.objectOid=v.elementOids[elementIndex];
                     ++elementIndex;
+                    // Array input/element coercion parses an unconstrained
+                    // interval first, even for UNKNOWN array text. Element
+                    // field/precision modifiers are a separate second stage.
+                    if (intervalElements)
+                        input = evalCast(nullptr,RowContext{},input,"interval");
                     const auto converted=evalCast(nullptr,RowContext{},input,elementTarget);
                     if(elementType=="regtype")identities.push_back(converted.objectOid);
                     output+=converted.isNull?"NULL":arrayElemQuote(converted.value);

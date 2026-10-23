@@ -84,10 +84,18 @@ void validateInternalCharInputCast(const std::string& input,const std::string& t
         throw DbError("42846","cannot cast type "+input+" to \"char\"");
 }
 void validateIntervalInputCast(const std::string& input,const std::string& target) {
-    if(common_type_detail::canonical(target)!="interval")return;
+    const auto destination=common_type_detail::canonical(target);
+    if(destination!="interval" && destination!="interval[]")return;
     const auto source=common_type_detail::canonical(input);
     static const std::set<std::string> inputs={"unknown","text","varchar","bpchar","name","time","interval"};
-    if(!inputs.count(source))throw DbError("42846","cannot cast type "+input+" to interval");
+    if(destination=="interval[]") {
+        const bool array=common_type_detail::array(source);
+        const auto element=array?source.substr(0,source.size()-2):source;
+        static const std::set<std::string> strings={"unknown","text","varchar","bpchar","name"};
+        if(!(array?inputs.count(element):strings.count(source)))
+            throw DbError("42846","cannot cast type "+input+" to interval[]");
+    } else if(!inputs.count(source))
+        throw DbError("42846","cannot cast type "+input+" to interval");
 }
 void validateRegtypeInputCast(const std::string& input,const std::string& target) {
     regtype_cast_detail::validate(input,target);

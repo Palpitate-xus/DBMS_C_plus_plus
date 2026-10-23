@@ -1,6 +1,8 @@
 # R236：INTERVAL / INTERVAL[] 的 binary Bind 输入
 
-最新后续：[R237](issue-review-r237-interval-cast-typmod.md)修复独立 typmod 描述错误，原完整143项两侧均全0；新360夹具仍各1个TEXT输入值错误，另列R238继续，不报30全绿。初次失败不重写；以下保留R236提交时状态。
+最新后续：[R238](issue-review-r238-interval-text-input-context.md)已修复原TEXT值上下文错误，原360和143两侧均全0；扩大后的2863仍各114个分析/描述/参数差异，不能报全绿。以下保留本次提交时历史状态。
+
+历史R237后续：[R237](issue-review-r237-interval-cast-typmod.md)修复独立 typmod 描述错误，原完整143项两侧均全0；新360夹具仍各1个TEXT输入值错误，另列R238继续，不报30全绿。初次失败不重写；以下保留R236提交时状态。
 
 初次提交时状态：接收器修复已实现并验证；完整新夹具仍有独立 typmod 描述错误，不能报全绿。
 
