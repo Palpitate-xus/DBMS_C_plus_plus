@@ -46923,6 +46923,12 @@ size_t StorageEngine::vacuum(const std::string& dbname,
                              bool concurrent,
                              int workers) {
     if (!databaseExists(dbname) || !tableExists(dbname, tablename)) return 0;
+    const auto locksBeforeVacuum = lockManager_.captureCheckpoint();
+    struct RestoreVacuumLocks {
+        LockManager& manager;
+        const LockManager::LockCheckpoint& before;
+        ~RestoreVacuumLocks() { manager.rollbackToCheckpoint(before); }
+    } restoreVacuumLocks{lockManager_, locksBeforeVacuum};
     if (concurrent) {
         if (!lockManager_.lockShared(tablename)) return 0;
     } else {
@@ -46931,7 +46937,7 @@ size_t StorageEngine::vacuum(const std::string& dbname,
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     PageAllocator* pa = getPageAllocator(dbname, tablename);
-    if (!pa) { lockManager_.unlock(tablename); return 0; }
+    if (!pa) return 0;
 
     uint32_t np = pa->numPages();
     size_t freedPages = 0;
@@ -46941,17 +46947,29 @@ size_t StorageEngine::vacuum(const std::string& dbname,
     // storage primitive below (buffer pool pins, FSM/VM updates, page
     // frees) is internally serialized.
     auto vacuumPage = [&](uint32_t pid) -> bool {
+        checkForQueryInterrupt();
+        // A buffer pin prevents eviction, not concurrent tuple changes.
+        // Preserve a caller's pre-existing page mode as well as its locks
+        // on other resources; page locks themselves have no nesting count.
+        const auto locksBeforePage = lockManager_.captureCheckpoint();
+        RestoreVacuumLocks restorePageLocks{lockManager_, locksBeforePage};
+        if (!lockManager_.pageLockExclusive(dbname, tablename, pid))
+            throw DbError("55P03", "could not obtain heap page lock during VACUUM");
         char* buf = pa->fetchPage(pid);
-        if (!buf) return false;
+        if (!buf) throw DbError("58030", "could not read heap page during VACUUM");
+        struct PagePinGuard {
+            PageAllocator& allocator;
+            uint32_t pageId;
+            bool pinned = true;
+            void unpin() { if (pinned) { allocator.unpinPage(pageId); pinned = false; } }
+            ~PagePinGuard() { unpin(); }
+        } pinGuard{*pa, pid};
         PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
 
         // Skip pages that are already empty or fully live
         uint16_t beforeLive = page.liveCount();
         uint16_t beforeSlots = page.slotCount();
-        if (beforeSlots == 0 || beforeLive == beforeSlots) {
-            pa->unpinPage(pid);
-            return false;
-        }
+        if (beforeSlots == 0 || beforeLive == beforeSlots) return false;
 
         // Compact: move live records together, keep slotIds stable
         page.compact();
@@ -46959,7 +46977,9 @@ size_t StorageEngine::vacuum(const std::string& dbname,
 
         // Update FSM with reclaimed free space
         size_t freePct = page.freeSpace() * 100 / pa->pageSize();
-        getFSM(dbname, tablename)->setFreePercent(pid, static_cast<uint8_t>(freePct));
+        FreeSpaceMap* fsm = getFSM(dbname, tablename);
+        if (!fsm) throw DbError("58030", "could not open free space map during VACUUM");
+        fsm->setFreePercent(pid, static_cast<uint8_t>(freePct));
 
         // LP_NORMAL only describes line-pointer state; it does not prove
         // that every tuple is visible to every active snapshot. This compact
@@ -46967,15 +46987,15 @@ size_t StorageEngine::vacuum(const std::string& dbname,
         // AllVisible here can hide an older tuple version from a snapshot
         // reader. Stay conservative until VACUUM proves that horizon.
         VisibilityMap* vm = getVM(dbname, tablename);
+        if (!vm) throw DbError("58030", "could not open visibility map during VACUUM");
         vm->setAllVisible(pid, false);
 
         // If page is now empty, return it to the free list
         if (page.liveCount() == 0) {
-            pa->unpinPage(pid);
+            pinGuard.unpin();
             pa->freePage(pid);
             return true;
         }
-        pa->unpinPage(pid);
         return false;
     };
 
@@ -46987,18 +47007,51 @@ size_t StorageEngine::vacuum(const std::string& dbname,
         // slice so no two threads ever pin the same page.
         std::vector<std::thread> pool;
         std::atomic<size_t> freed{0};
+        std::atomic<bool> stop{false};
+        std::mutex failureMutex;
+        std::exception_ptr failure;
+        const auto interruptState = currentQueryInterruptState();
+        const int lockTimeout = lockManager_.getLockTimeout();
+        const auto recordFailure = [&] {
+            std::lock_guard<std::mutex> guard(failureMutex);
+            if (!failure) failure = std::current_exception();
+            stop.store(true, std::memory_order_release);
+        };
         uint32_t chunk = (heapPages + nWorkers - 1) / nWorkers;
-        for (int w = 0; w < nWorkers; ++w) {
-            uint32_t lo = 1 + static_cast<uint32_t>(w) * chunk;
-            uint32_t hi = std::min(lo + chunk, np);
-            if (lo >= hi) break;
-            pool.emplace_back([&](uint32_t a, uint32_t b) {
-                for (uint32_t pid = a; pid < b; ++pid) {
-                    if (vacuumPage(pid)) freed.fetch_add(1);
-                }
-            }, lo, hi);
+        try {
+            pool.reserve(static_cast<size_t>(nWorkers));
+            for (int w = 0; w < nWorkers && !stop.load(std::memory_order_acquire); ++w) {
+                uint32_t lo = 1 + static_cast<uint32_t>(w) * chunk;
+                uint32_t hi = std::min(lo + chunk, np);
+                if (lo >= hi) break;
+                pool.emplace_back([&, interruptState](uint32_t a, uint32_t b) {
+                    bool lockSettingsReady = false;
+                    try {
+                        setCurrentQueryInterruptState(interruptState);
+                        lockManager_.setLockTimeout(lockTimeout);
+                        lockSettingsReady = true;
+                        lockManager_.setInterruptHandler([&] {
+                            checkForQueryInterrupt();
+                            if (stop.load(std::memory_order_acquire))
+                                throw DbError("57014", "parallel VACUUM stopped after worker failure");
+                        });
+                        for (uint32_t pid = a; pid < b && !stop.load(std::memory_order_acquire); ++pid) {
+                            if (vacuumPage(pid)) freed.fetch_add(1);
+                        }
+                    } catch (...) {
+                        recordFailure();
+                    }
+                    if (lockSettingsReady) lockManager_.clearInterruptHandler();
+                    setCurrentQueryInterruptState(nullptr);
+                }, lo, hi);
+            }
+        } catch (...) {
+            // std::thread construction may fail after earlier workers were
+            // launched. Stop and join them before propagating that failure.
+            recordFailure();
         }
         for (auto& t : pool) t.join();
+        if (failure) std::rethrow_exception(failure);
         freedPages = freed.load();
     } else {
         for (uint32_t pid = 1; pid < np; ++pid) {
@@ -47041,10 +47094,15 @@ size_t StorageEngine::vacuumToast(const std::string& dbname,
             if (activeDatabase == dbname) return 0;
         }
     }
+    // Acquiring a stronger mode converts an existing caller token; it
+    // does not necessarily add an acquisition. Do not blindly unlock it.
+    const auto locksBeforeToast = lockManager_.captureCheckpoint();
+    struct RestoreToastLocks {
+        LockManager& manager;
+        const LockManager::LockCheckpoint& before;
+        ~RestoreToastLocks() { manager.rollbackToCheckpoint(before); }
+    } restoreToastLocks{lockManager_, locksBeforeToast};
     if (!lockManager_.lockExclusive(tablename)) return 0;
-    std::unique_ptr<int, std::function<void(int*)>> tableLockGuard(
-        reinterpret_cast<int*>(1),
-        [&](int*) { lockManager_.unlock(tablename); });
 
     const TableSchema tbl = getTableSchema(dbname, tablename);
     std::set<uint64_t> activeToastIds;
@@ -47090,13 +47148,17 @@ size_t StorageEngine::vacuumToast(const std::string& dbname,
     auto collectReferences = [&](PageAllocator& allocator) -> bool {
         const uint32_t pageCount = allocator.numPages();
         for (uint32_t pageId = 1; pageId < pageCount; ++pageId) {
+            const auto locksBeforePage = lockManager_.captureCheckpoint();
+            RestoreToastLocks restorePageLocks{lockManager_, locksBeforePage};
             if (!lockManager_.pageLockShared(dbname, tablename, pageId))
                 return false;
             char* buffer = allocator.fetchPage(pageId);
-            if (!buffer) {
-                lockManager_.pageUnlock(dbname, tablename, pageId);
-                return false;
-            }
+            if (!buffer) return false;
+            struct PagePinGuard {
+                PageAllocator& owner;
+                uint32_t pageId;
+                ~PagePinGuard() { owner.unpinPage(pageId); }
+            } pinGuard{allocator, pageId};
             PageWrapper page(buffer, allocator.pageSize(), tbl.formatVersion);
             bool valid = page.isValid();
             if (valid) {
@@ -47126,8 +47188,6 @@ size_t StorageEngine::vacuumToast(const std::string& dbname,
                     }
                 });
             }
-            allocator.unpinPage(pageId);
-            lockManager_.pageUnlock(dbname, tablename, pageId);
             if (!valid) return false;
         }
         return true;
