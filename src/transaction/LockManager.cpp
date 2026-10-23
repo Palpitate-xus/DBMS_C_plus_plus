@@ -643,6 +643,7 @@ bool LockManager::acquireLock(const std::string& table, LockMode mode) {
         state.holderCounts.erase(self);
     };
 
+    size_t upgradeDepth = 0;
     auto acquirePhysical = [&](LockState& state) {
         switch (mode) {
             case LockMode::Shared:
@@ -668,7 +669,9 @@ bool LockManager::acquireLock(const std::string& table, LockMode mode) {
         }
         state.holders.push_back(self);
         state.holderModes[self] = mode;
-        state.holderCounts[self] = 1;
+        // An upgrade converts the existing token rather than adding one.
+        // Preserve every prior re-entrant acquisition across that conversion.
+        state.holderCounts[self] = upgradeDepth ? upgradeDepth : 1;
         removeWaitEdges(self);
     };
 
@@ -707,6 +710,7 @@ bool LockManager::acquireLock(const std::string& table, LockMode mode) {
                     ++state.holderCounts[self];
                     return true;
                 }
+                upgradeDepth = state.holderCounts.at(self);
                 // Upgrade from a shared/intent lock. Drop this thread's
                 // physical token before waiting for the stronger mode so it
                 // cannot wait on itself.
