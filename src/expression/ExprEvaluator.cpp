@@ -10626,16 +10626,27 @@ void ExprEvaluator::registerBuiltins() {
     functions_["replace"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 3 || a[0].isNull || a[1].isNull || a[2].isNull)
             return ExprValue("text", "", true);
-        std::string s = textArgumentValue(a[0]);
+        const std::string s = textArgumentValue(a[0]);
         const std::string from = textArgumentValue(a[1]);
         const std::string to = textArgumentValue(a[2]);
         if (from.empty()) return ExprValue("text", s, false);
-        size_t pos = 0;
-        while ((pos = s.find(from, pos)) != std::string::npos) {
-            s.replace(pos, from.size(), to);
-            pos += to.size();
-        }
-        return ExprValue("text", s, false);
+        size_t pos = s.find(from);
+        if (pos == std::string::npos) return ExprValue("text", s, false);
+
+        // Search only the original input. Repeated in-place replacements
+        // would move every remaining suffix for dense shrinking/growing
+        // matches. Append each unmatched span and replacement once instead;
+        // inserted text is never searched and matches remain nonoverlapping.
+        std::string result;
+        size_t begin = 0;
+        do {
+            result.append(s, begin, pos - begin);
+            result += to;
+            begin = pos + from.size();
+            pos = s.find(from, begin);
+        } while (pos != std::string::npos);
+        result.append(s, begin, s.size() - begin);
+        return ExprValue("text", std::move(result), false);
     };
     functions_["position"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 2 || a[0].isNull || a[1].isNull)
