@@ -231,6 +231,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/binary_float_parameter_roundtrip_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/array_binary_result_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/interval_binary_result_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/interval_binary_input_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/time_binary_result_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/time_input_normalization_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/time_precision_value_protocol_e2e_test.py)

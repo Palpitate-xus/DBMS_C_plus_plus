@@ -34,6 +34,7 @@
 #include "process/OutputCapture.h"
 #include "process/AdvisoryLockManager.h"
 #include "utils/prepared_stmts.h"
+#include "utils/interval.h"
 #include "Config.h"
 #include "parser/parser.h"
 #include "expression/expr_helper.h"
@@ -785,6 +786,40 @@ std::string jsonbProtocolParameterText(const std::vector<uint8_t>& raw,bool bina
     catch(const DbError& failure) {inputSqlState=failure.sqlState();error=failure.what();return {};}
 }
 
+// interval_recv owns exactly sixteen network-order bytes. Preserve the
+// three independent signed fields, including the two all-field infinities.
+std::string intervalProtocolParameterText(const std::vector<uint8_t>& raw,
+                                         std::string& error,
+                                         std::string& inputSqlState) {
+    if (raw.size() != 16) {
+        inputSqlState = raw.size() < 16 ? "08P01" : "22P03";
+        error = raw.size() < 16 ? "insufficient data left in message"
+                               : "improper binary format in interval parameter";
+        return {};
+    }
+    size_t offset = 0;
+    const auto word = [&](size_t width) {
+        uint64_t result = 0;
+        while (width--) result = (result << 8) | raw[offset++];
+        return result;
+    };
+    const uint64_t clock = word(8);
+    const uint32_t dayBits = static_cast<uint32_t>(word(4));
+    const uint32_t monthBits = static_cast<uint32_t>(word(4));
+    const int64_t micros = clock <= uint64_t(INT64_MAX)
+        ? static_cast<int64_t>(clock) : -1 - static_cast<int64_t>(~clock);
+    const auto signedCalendar = [](uint32_t bits) -> int64_t {
+        return bits <= uint32_t(INT32_MAX) ? static_cast<int64_t>(bits)
+                                         : -1 - static_cast<int64_t>(~bits);
+    };
+    const int64_t days = signedCalendar(dayBits), months = signedCalendar(monthBits);
+    if (micros == INT64_MAX && days == INT32_MAX && months == INT32_MAX)
+        return "infinity";
+    if (micros == INT64_MIN && days == INT32_MIN && months == INT32_MIN)
+        return "-infinity";
+    return formatIntervalInput(months, days, micros, true);
+}
+
 std::string binaryProtocolParameterLiteral(uint32_t typeOid,
                                            const std::vector<uint8_t>& raw,
                                            const std::string& moneyLocale,
@@ -794,7 +829,7 @@ std::string binaryProtocolParameterLiteral(uint32_t typeOid,
     // envelope, not their text input codec. No user-type lookup or automatic
     // array catalog construction belongs to this finite binary receiver.
     const uint32_t arrayElement=typeOid==1005?21:typeOid==1007?23:
-        typeOid==1016?20:typeOid==1009?25:typeOid==1015?1043:typeOid==3807?3802:0;
+        typeOid==1016?20:typeOid==1009?25:typeOid==1015?1043:typeOid==3807?3802:typeOid==1187?1186:0;
     if(arrayElement) {
         const auto invalid=[&](const char* state,const char* message) {
             inputSqlState=state;error=message;return std::string{};
@@ -887,9 +922,10 @@ std::string binaryProtocolParameterLiteral(uint32_t typeOid,
                 }
                 const std::vector<uint8_t> cell(raw.begin()+offset,raw.begin()+offset+length);
                 offset+=length;
-                if(arrayElement==25 || arrayElement==1043 || arrayElement==3802) {
+                if(arrayElement==25 || arrayElement==1043 || arrayElement==3802 || arrayElement==1186) {
                     const std::string value=arrayElement==3802?
-                        jsonbProtocolParameterText(cell,true,error,inputSqlState):std::string(cell.begin(),cell.end());
+                        jsonbProtocolParameterText(cell,true,error,inputSqlState):arrayElement==1186?
+                        intervalProtocolParameterText(cell,error,inputSqlState):std::string(cell.begin(),cell.end());
                     if(!error.empty())return false;
                     if(!validText(value)){invalid("22021","invalid byte sequence for encoding UTF8");return false;}
                     text+='"';
@@ -1015,6 +1051,10 @@ std::string binaryProtocolParameterLiteral(uint32_t typeOid,
                 value += "." + digits;
             }
             return quoteProtocolText(value, error);
+        }
+        case 1186: {
+            const auto value = intervalProtocolParameterText(raw, error, inputSqlState);
+            return error.empty() ? quoteProtocolText(value, error) : std::string{};
         }
         case 1114: case 1184: {
             if (!decodeBinaryUnsigned(raw, 8, bits)) break;
