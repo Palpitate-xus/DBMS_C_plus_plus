@@ -6570,26 +6570,30 @@ StorageEngine::BufferPoolStats StorageEngine::getBufferPoolStats() const {
     for (const auto& kv : pageAllocators_) {
         if (kv.second && kv.second->bufferPool()) {
             auto* bp = kv.second->bufferPool();
-            stats.totalHits += bp->hits();
-            stats.totalMisses += bp->misses();
+            const auto snapshot = bp->statistics();
+            stats.totalHits += snapshot.hits;
+            stats.totalMisses += snapshot.misses;
         }
     }
     // Primary key indexes
     for (const auto& kv : pkIndexCache_) {
         if (kv.second) {
-            stats.totalHits += kv.second->cacheHits();
-            stats.totalMisses += kv.second->cacheMisses();
+            const auto snapshot = kv.second->cacheStatistics();
+            stats.totalHits += snapshot.hits;
+            stats.totalMisses += snapshot.misses;
         }
     }
     // Secondary indexes
     for (const auto& kv : secondaryIndexCache_) {
         if (kv.second) {
-            stats.totalHits += kv.second->cacheHits();
-            stats.totalMisses += kv.second->cacheMisses();
+            const auto snapshot = kv.second->cacheStatistics();
+            stats.totalHits += snapshot.hits;
+            stats.totalMisses += snapshot.misses;
         }
     }
-    size_t total = stats.totalHits + stats.totalMisses;
-    stats.hitRate = total == 0 ? 0.0 : 100.0 * static_cast<double>(stats.totalHits) / static_cast<double>(total);
+    const double total = static_cast<double>(stats.totalHits) +
+                         static_cast<double>(stats.totalMisses);
+    stats.hitRate = total == 0 ? 0.0 : 100.0 * static_cast<double>(stats.totalHits) / total;
     return stats;
 }
 

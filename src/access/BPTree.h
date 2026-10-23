@@ -102,6 +102,12 @@ public:
         return header_.rootPage;
     }
 
+    // Preserve tree -> pool lock order, and return one pair per snapshot.
+    BufferPool::Statistics cacheStatistics() const {
+        std::shared_lock<std::shared_mutex> lock(treeMutex_);
+        return bp_ ? bp_->statistics() : BufferPool::Statistics{};
+    }
+
     // Buffer pool stats
     size_t cacheHits() const {
         std::shared_lock<std::shared_mutex> lock(treeMutex_);

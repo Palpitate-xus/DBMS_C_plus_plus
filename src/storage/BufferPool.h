@@ -122,14 +122,23 @@ public:
     // Whether a cached page currently carries unwritten changes.
     bool isPageDirty(uint32_t pageId) const;
 
-    // Stats
-    size_t hits() const { return hits_; }
-    size_t misses() const { return misses_; }
-    double hitRate() const {
-        size_t total = hits_ + misses_;
-        return total == 0 ? 0.0 : 100.0 * static_cast<double>(hits_) / static_cast<double>(total);
-    }
-    void resetStats() { hits_ = 0; misses_ = 0; }
+    // A value snapshot of one pool, captured under its metadata mutex.
+    // Separate legacy getters remain available but do not form a joint
+    // snapshot when callers invoke them across concurrent fetches/resets.
+    struct Statistics {
+        size_t hits = 0;
+        size_t misses = 0;
+        double hitRate() const {
+            const double total = static_cast<double>(hits) +
+                                 static_cast<double>(misses);
+            return total == 0 ? 0.0 : 100.0 * static_cast<double>(hits) / total;
+        }
+    };
+    Statistics statistics() const;
+    size_t hits() const;
+    size_t misses() const;
+    double hitRate() const;
+    void resetStats();
 
     // Frame info for pg_buffercache
     struct FrameInfo {

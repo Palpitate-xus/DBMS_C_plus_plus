@@ -703,6 +703,21 @@ bool BufferPool::flushPage(uint32_t pageId) {
     return true;
 }
 
+BufferPool::Statistics BufferPool::statistics() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return {hits_, misses_};
+}
+
+size_t BufferPool::hits() const { return statistics().hits; }
+size_t BufferPool::misses() const { return statistics().misses; }
+double BufferPool::hitRate() const { return statistics().hitRate(); }
+
+void BufferPool::resetStats() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    hits_ = 0;
+    misses_ = 0;
+}
+
 std::vector<BufferPool::FrameInfo> BufferPool::getFrameInfo() const {
     std::lock_guard<std::mutex> lock(mutex_);
     std::vector<FrameInfo> result;
