@@ -12329,100 +12329,130 @@ void ExprEvaluator::registerBuiltins() {
     for(const auto* name:{"current_user","session_user","current_database","current_schema"})
         volatility_[name]='s';
     // timestamp 'YYYY-MM-DD[ HH:MM:SS]'.
-    auto extractImpl = [](const std::vector<ExprValue>& a) -> ExprValue {
+    auto extractImpl = [float8Text](const std::vector<ExprValue>& a, bool intervalNumeric) -> ExprValue {
+        const bool declaredInterval = a.size() >= 2 &&
+            toLower(a[1].typeName).find("interval") != std::string::npos;
+        const char* intervalResultType = intervalNumeric || !declaredInterval ? "numeric" : "double precision";
         if (a.size() < 2 || a[0].isNull || a[1].isNull)
-            return ExprValue("numeric", "", true);
+            return ExprValue(intervalResultType, "", true);
         std::string field = toLower(a[0].value);
         const std::string& src = a[1].value;
-        const bool declaredInterval =
-            toLower(a[1].typeName).find("interval") != std::string::npos;
         if (declaredInterval) {
-            const IntervalParts interval = parseIntervalText(src);
-            if (!interval.ok)
-                return ExprValue("numeric", "", true);
-            if (field == "epoch") {
-                const __int128 micros =
-                    static_cast<__int128>(interval.months) * 30 *
-                        86400000000LL +
-                    static_cast<__int128>(interval.days) * 86400000000LL +
-                    interval.micros;
-                return ExprValue("numeric", formatMicrosNumeric(micros),
-                                 false);
-            }
-            if (field == "year")
-                return ExprValue("numeric",
-                                 std::to_string(interval.months / 12), false);
-            if (field == "month")
-                return ExprValue("numeric",
-                                 std::to_string(interval.months % 12), false);
-            if (field == "quarter")
-                return ExprValue(
-                    "numeric",
-                    std::to_string((interval.months % 12) / 3 + 1), false);
-            if (field == "decade")
-                return ExprValue(
-                    "numeric", std::to_string(interval.months / 120), false);
-            if (field == "century")
-                return ExprValue(
-                    "numeric", std::to_string(interval.months / 1200), false);
-            if (field == "millennium")
-                return ExprValue(
-                    "numeric", std::to_string(interval.months / 12000), false);
-            if (field == "day")
-                return ExprValue("numeric", std::to_string(interval.days),
-                                 false);
-            if (field == "hour")
-                return ExprValue(
-                    "numeric",
-                    std::to_string(interval.micros / 3600000000LL), false);
-            if (field == "minute")
-                return ExprValue(
-                    "numeric",
-                    std::to_string(
-                        (interval.micros / 60000000LL) % 60), false);
-            if (field == "second") {
-                const long long secondMicros =
-                    interval.micros % 60000000LL;
-                if (secondMicros % 1000000LL == 0) {
-                    return ExprValue(
-                        "numeric",
-                        std::to_string(secondMicros / 1000000LL), false);
-                }
-                return ExprValue(
-                    "numeric", formatMicrosNumeric(secondMicros), false);
-            }
-            if (field == "milliseconds") {
-                const long long secondMicros =
-                    interval.micros % 60000000LL;
-                const bool negative = secondMicros < 0;
-                const unsigned long long magnitude = negative
-                    ? static_cast<unsigned long long>(-secondMicros)
-                    : static_cast<unsigned long long>(secondMicros);
-                std::string fraction = std::to_string(magnitude % 1000);
-                fraction.insert(fraction.begin(), 3 - fraction.size(), '0');
-                return ExprValue(
-                    "numeric",
-                    (negative ? "-" : "") +
-                        std::to_string(magnitude / 1000) + "." + fraction,
-                    false);
-            }
-            if (field == "microseconds") {
-                return ExprValue(
-                    "numeric",
-                    std::to_string(interval.micros % 60000000LL), false);
-            }
-            static const std::set<std::string> unsupportedIntervalUnits = {
-                "dow", "isodow", "doy", "week", "isoyear", "julian",
-                "timezone", "timezone_hour", "timezone_minute"
+            const auto nullResult = [&] { return ExprValue(intervalResultType, "", true); };
+            const auto integralResult = [&](long long value) {
+                return ExprValue(intervalResultType,
+                    intervalNumeric ? std::to_string(value) : float8Text(static_cast<double>(value)), false);
             };
-            if (unsupportedIntervalUnits.count(field)) {
-                throw std::runtime_error(
-                    "unit \"" + field +
-                    "\" not supported for type interval (SQLSTATE 0A000)");
+            // EXTRACT uses the interval-unit namespace first, then date/time
+            // keywords. PG compares the first ten unit bytes, without trimming
+            // whitespace. Keep this normalization local to INTERVAL input.
+            static const std::map<std::string, std::string> units = {
+                {"year","year"},{"years","year"},{"y","year"},{"yr","year"},{"yrs","year"},
+                {"month","month"},{"months","month"},{"mon","month"},{"mons","month"},
+                {"quarter","quarter"},{"qtr","quarter"},
+                {"decade","decade"},{"decades","decade"},{"dec","decade"},{"decs","decade"},
+                {"century","century"},{"centuries","century"},{"c","century"},{"cent","century"},
+                {"millennium","millennium"},{"millennia","millennium"},{"mil","millennium"},{"mils","millennium"},
+                {"week","week"},{"weeks","week"},{"w","week"},
+                {"day","day"},{"days","day"},{"d","day"},
+                {"hour","hour"},{"hours","hour"},{"h","hour"},{"hr","hour"},{"hrs","hour"},
+                {"minute","minute"},{"minutes","minute"},{"m","minute"},{"min","minute"},{"mins","minute"},{"mm","minute"},
+                {"second","second"},{"seconds","second"},{"s","second"},{"sec","second"},{"secs","second"},
+                {"millisecon","milliseconds"},{"ms","milliseconds"},{"msec","milliseconds"},
+                {"msecond","milliseconds"},{"mseconds","milliseconds"},{"msecs","milliseconds"},
+                {"microsecon","microseconds"},{"us","microseconds"},{"usec","microseconds"},
+                {"usecond","microseconds"},{"useconds","microseconds"},{"usecs","microseconds"},
+                {"epoch","epoch"}
+            };
+            const auto token = field.substr(0, 10);
+            const auto unit = units.find(token);
+            const auto spelling = toLower(trimStr(src));
+            const IntervalParts interval = parseIntervalText(src);
+            const bool positiveInfinity = spelling == "infinity" || spelling == "+infinity" ||
+                (interval.ok && interval.months == std::numeric_limits<int32_t>::max() &&
+                 interval.days == std::numeric_limits<int32_t>::max() &&
+                 interval.micros == std::numeric_limits<int64_t>::max());
+            const bool negativeInfinity = spelling == "-infinity" ||
+                (interval.ok && interval.months == std::numeric_limits<int32_t>::min() &&
+                 interval.days == std::numeric_limits<int32_t>::min() &&
+                 interval.micros == std::numeric_limits<int64_t>::min());
+            const bool infinite = positiveInfinity || negativeInfinity;
+            static const std::set<std::string> unsupported = {
+                "dow","isodow","doy","isoyear","julian","j","jd",
+                "timezone","timezone_h","timezone_m"
+            };
+            static const std::set<std::string> reserved = {
+                "now","today","tomorrow","yesterday","allballs","infinity","+infinity","-infinity"
+            };
+            if (unit == units.end()) {
+                const auto state = unsupported.count(token) || (infinite && reserved.count(token))
+                    ? "0A000" : "22023";
+                throw DbError(state, "unit \"" + field + "\" " +
+                    (std::string(state) == "0A000" ? "not supported" : "not recognized") + " for type interval");
             }
-            throw std::runtime_error(
-                "unit \"" + field +
-                "\" not recognized for type interval (SQLSTATE 22023)");
+            field = unit->second;
+            if (infinite) {
+                if (field == "year" || field == "decade" || field == "century" ||
+                    field == "millennium" || field == "day" || field == "hour" || field == "epoch")
+                    return ExprValue(intervalResultType, negativeInfinity ? "-Infinity" : "Infinity", false);
+                return nullResult();
+            }
+            if (!interval.ok) return nullResult();
+            if (field == "epoch") {
+                // Complete years use 365.25 days; only residual months use
+                // thirty days. Numeric keeps the entire sum exact in micros.
+                if (intervalNumeric) {
+                    const __int128 quarterDays = static_cast<__int128>(interval.months / 12) * 1461 +
+                        static_cast<__int128>(interval.months % 12) * 120 +
+                        static_cast<__int128>(interval.days) * 4;
+                    return ExprValue("numeric", formatMicrosNumeric(quarterDays * 21600000000LL + interval.micros), false);
+                }
+                // DATE_PART owns float8 arithmetic. Preserve the same ordered
+                // additions instead of rounding one exact numeric sum at end.
+                double value = static_cast<double>(interval.micros) / 1000000.0;
+                value += static_cast<double>(interval.months / 12) * 31557600.0;
+                value += static_cast<double>(interval.months % 12) * 2592000.0;
+                value += static_cast<double>(interval.days) * 86400.0;
+                return ExprValue("double precision", float8Text(value), false);
+            }
+            if (field == "year") return integralResult(interval.months / 12);
+            if (field == "month") return integralResult(interval.months % 12);
+            if (field == "quarter") {
+                // PG18.6's int32-minimum endpoint yields +1. Emulate that
+                // captured field result explicitly, without negating INT32_MIN.
+                const auto reflected = interval.months == std::numeric_limits<int32_t>::min()
+                    ? interval.months : -interval.months;
+                return integralResult(interval.months < 0 ? -(reflected % 12 / 3 + 1)
+                                                         : interval.months % 12 / 3 + 1);
+            }
+            if (field == "decade") return integralResult(interval.months / 120);
+            if (field == "century") return integralResult(interval.months / 1200);
+            if (field == "millennium") return integralResult(interval.months / 12000);
+            if (field == "week") return integralResult(interval.days / 7);
+            if (field == "day") return integralResult(interval.days);
+            if (field == "hour") return integralResult(interval.micros / 3600000000LL);
+            if (field == "minute") return integralResult(interval.micros / 60000000LL % 60);
+            const long long secondMicros = interval.micros % 60000000LL;
+            if (field == "microseconds") return integralResult(secondMicros);
+            if (!intervalNumeric) {
+                const auto seconds = secondMicros / 1000000LL;
+                const auto fraction = secondMicros % 1000000LL;
+                const double value = field == "second"
+                    ? static_cast<double>(seconds) + static_cast<double>(fraction) / 1000000.0
+                    : static_cast<double>(seconds) * 1000.0 + static_cast<double>(fraction) / 1000.0;
+                return ExprValue("double precision", float8Text(value), false);
+            }
+            if (field == "second") {
+                // Retain the existing integer-SECOND display boundary; the
+                // separately deferred presentation/carrier work is not resumed.
+                if (secondMicros % 1000000LL == 0) return integralResult(secondMicros / 1000000LL);
+                return ExprValue("numeric", formatMicrosNumeric(secondMicros), false);
+            }
+            const bool negative = secondMicros < 0;
+            const auto magnitude = static_cast<unsigned long long>(negative ? -secondMicros : secondMicros);
+            std::string fraction = std::to_string(magnitude % 1000);
+            fraction.insert(fraction.begin(), 3 - fraction.size(), '0');
+            return ExprValue("numeric", (negative ? "-" : "") + std::to_string(magnitude / 1000) + "." + fraction, false);
         }
 
         static const std::set<std::string> temporalUnits = {
@@ -12690,8 +12720,8 @@ void ExprEvaluator::registerBuiltins() {
         }
         return ExprValue("numeric", std::to_string(r), false);
     };
-    functions_["extract"] = extractImpl;
-    functions_["date_part"] = extractImpl;
+    functions_["extract"] = [extractImpl](const std::vector<ExprValue>& a) { return extractImpl(a, true); };
+    functions_["date_part"] = [extractImpl](const std::vector<ExprValue>& a) { return extractImpl(a, false); };
 
     // make_date(y, m, d) -> 'YYYY-MM-DD'
     functions_["make_date"] = [](const std::vector<ExprValue>& a) {

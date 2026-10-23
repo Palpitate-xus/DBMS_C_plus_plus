@@ -34948,7 +34948,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             "sqrt", "exp", "ln", "log", "power", "sign", "width_bucket",
             "substring", "substr", "translate", "replace", "split_part",
             "concat_ws_null", "to_char", "to_date", "to_number",
-            "to_timestamp", "date_trunc", "date_part", "extract_",
+            "to_timestamp", "date_trunc", "extract_",
             "age", "year", "month", "day", "hour", "minute", "second",
             "justify_days", "justify_hours", "network",
             "abbrev", "family", "host", "masklen", "set_masklen"
@@ -36437,12 +36437,19 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             {}, {}, dbname, expr.sessionUser, engine);
         return evaluated.ok && !evaluated.isNull ? evaluated.value : "";
     }
-    if (expr.funcName == "extract") {
+    if (expr.funcName == "extract" || expr.funcName == "date_part") {
         // The frontend supplies complete SQL. Keep the public native helper's
         // historical {field, operand} form, but treat field as grammar rather
         // than getVal(field): a column named year must not change EXTRACT.
         std::string expression;
-        if (expr.funcArgs.size() == 1) expression = expr.funcArgs.front();
+        if (expr.funcName == "date_part") {
+            expression = "date_part(";
+            for (size_t argument = 0; argument < expr.funcArgs.size(); ++argument) {
+                if (argument) expression += ",";
+                expression += expr.funcArgs[argument];
+            }
+            expression += ")";
+        } else if (expr.funcArgs.size() == 1) expression = expr.funcArgs.front();
         else if (expr.funcArgs.size() == 2)
             expression = "EXTRACT(" + expr.funcArgs[0] + " FROM " + expr.funcArgs[1] + ")";
         else throw DbError("42601", "invalid EXTRACT expression");
@@ -36452,7 +36459,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             ? dynamic_cast<const SelectStmt*>(parsed.stmt.get()) : nullptr;
         const auto* call = select && select->selectList.size() == 1
             ? dynamic_cast<const FunctionCallExpr*>(select->selectList.front().expr.get()) : nullptr;
-        if (!call || !call->schema.empty() || SQLParser::toLower(call->funcName) != "extract")
+        if (!call || !call->schema.empty() || SQLParser::toLower(call->funcName) != expr.funcName)
             throw DbError("42601", "invalid EXTRACT expression");
         std::map<std::string, std::string> values, types;
         std::set<std::string> nulls;

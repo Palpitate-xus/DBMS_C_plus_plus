@@ -232,6 +232,8 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/array_binary_result_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/interval_binary_result_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/interval_justify_sign_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/interval_extract_semantics_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/interval_extract_effect_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/interval_binary_input_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/interval_cast_typmod_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/interval_cast_context_protocol_e2e_test.py)
