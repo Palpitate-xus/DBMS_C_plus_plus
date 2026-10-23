@@ -5443,6 +5443,17 @@ struct DeclaredStrposScalarFunction {
         return callback(args);
     }
 };
+bool isJustifyScalarName(const std::string& name) {
+    return name == "justify_hours" || name == "justify_days" || name == "justify_interval";
+}
+// Only the genuine normalization callback owns the fixed INTERVAL result.
+// Native replacements retain their own value domain, arity and volatility.
+struct DeclaredJustifyScalarFunction {
+    ScalarFunction callback;
+    ExprValue operator()(const std::vector<ExprValue>& args) const {
+        return callback(args);
+    }
+};
 struct DeclaredStringToArrayScalarFunction {
     ScalarFunction callback;
     ExprValue operator()(const std::vector<ExprValue>& args) const {
@@ -6096,6 +6107,7 @@ std::string ExprEvaluator::scalarFunctionResultType(const FunctionCallExpr* call
         if(callback->second.target<SqlTypeOfFunction>())return "regtype";
         if(callback->second.target<SqlVersionFunction>())return "text";
         if(callback->second.target<DeclaredStringToArrayScalarFunction>())return "text[]";
+        if(callback->second.target<DeclaredJustifyScalarFunction>())return "interval";
         if(callback->second.target<DeclaredJsonArrayLengthScalarFunction>())return "integer";
         if(callback->second.target<DeclaredTsVectorScalarFunction>())return "tsvector";
         if (const auto* bound = callback->second.target<BoundScalarRoutine>())
@@ -6141,6 +6153,8 @@ std::string ExprEvaluator::scalarFunctionIdentity(const FunctionCallExpr* call,
                        !callback->second.target<DeclaredTsVectorScalarFunction>()) ||
                       ((resolved.name=="json_array_length" || resolved.name=="jsonb_array_length") &&
                        !callback->second.target<DeclaredJsonArrayLengthScalarFunction>()) ||
+                      (isJustifyScalarName(resolved.name) &&
+                       !callback->second.target<DeclaredJustifyScalarFunction>()) ||
                       (resolved.name=="string_to_array" &&
                        !callback->second.target<DeclaredStringToArrayScalarFunction>()) ||
                       (resolved.name=="width_bucket" &&
@@ -12959,56 +12973,58 @@ void ExprEvaluator::registerBuiltins() {
         }
         return o;
     };
-    auto justifyCommon = [intervalToTextPg](
-                             const std::string& in,
+    auto justifyCommon = [](const std::string& in,
                              int mode) -> std::optional<std::string> {
-        IntervalParts p = parseIntervalText(in);
+        const auto spelling = toLower(trimStr(in));
+        if (spelling == "infinity" || spelling == "+infinity")
+            return std::string("infinity");
+        if (spelling == "-infinity") return spelling;
+        const IntervalParts p = parseIntervalText(in);
         if (!p.ok) return std::nullopt;
         long long months = p.months, days = p.days, micros = p.micros;
-        auto assignRepresentable = [](const __int128 value,
-                                      long long& output) {
-            if (value <= std::numeric_limits<long long>::lowest() ||
-                value > std::numeric_limits<long long>::max()) {
-                return false;
-            }
-            output = static_cast<long long>(value);
-            return true;
+        constexpr long long dayMicros = 86400000000LL;
+        const auto calendar = [](__int128 value) -> long long {
+            if (value < std::numeric_limits<int32_t>::min() ||
+                value > std::numeric_limits<int32_t>::max())
+                throw DbError("22008", "interval out of range");
+            return static_cast<long long>(value);
         };
-        if (mode == 2) {
-            // Normalize so a single sign dominates: decompose |days+time|,
-            // attach the overall sign, fold whole 30-day groups into months.
-            const __int128 totalMicros =
-                static_cast<__int128>(days) * 86400000000LL + micros;
-            const __int128 sign = months != 0
-                ? (months < 0 ? -1 : 1)
-                : (totalMicros < 0 ? -1 : 1);
-            const __int128 magnitude =
-                totalMicros < 0 ? -totalMicros : totalMicros;
-            const __int128 normalizedDays = magnitude / 86400000000LL;
-            if (!assignRepresentable(
-                    static_cast<__int128>(months) +
-                        sign * (normalizedDays / 30),
-                    months) ||
-                !assignRepresentable(sign * (normalizedDays % 30), days) ||
-                !assignRepresentable(
-                    sign * (magnitude % 86400000000LL), micros)) {
-                return std::nullopt;
-            }
-        } else if (mode == 1) {
-            if (!assignRepresentable(
-                    static_cast<__int128>(months) + days / 30, months)) {
-                return std::nullopt;
-            }
+        const auto carryMonths = [&] {
+            months = calendar(static_cast<__int128>(months) + days / 30);
             days %= 30;
-        } else {
-            const long long normalizedDays = micros / 86400000000LL;
-            if (!assignRepresentable(
-                    static_cast<__int128>(days) + normalizedDays, days)) {
-                return std::nullopt;
-            }
-            micros %= 86400000000LL;
+        };
+        if (mode == 2 && ((days > 0 && micros > 0) ||
+                          (days < 0 && micros < 0))) {
+            // Reduce days first when the following same-sign time carry
+            // could otherwise overflow the int32 day field.
+            carryMonths();
         }
-        return intervalToTextPg(months, days, micros);
+        if (mode != 1) {
+            days = calendar(static_cast<__int128>(days) + micros / dayMicros);
+            micros %= dayMicros;
+        }
+        if (mode != 0) {
+            // Check the actual month carry before subsequent sign borrows;
+            // do not reassociate an overflowing intermediate away.
+            carryMonths();
+            if (months > 0 && (days < 0 ||
+                (mode == 2 && days == 0 && micros < 0))) {
+                --months; days += 30;
+            } else if (months < 0 && (days > 0 ||
+                (mode == 2 && days == 0 && micros > 0))) {
+                ++months; days -= 30;
+            }
+        }
+        if (mode != 1) {
+            if (days > 0 && micros < 0) {
+                --days; micros += dayMicros;
+            } else if (days < 0 && micros > 0) {
+                ++days; micros -= dayMicros;
+            }
+        }
+        // Use the shared unsigned-magnitude renderer: justify_days leaves
+        // time unchanged, including a legitimate INT64_MIN microsecond field.
+        return formatIntervalInput(months, days, micros, true);
     };
     // isfinite(interval/date/timestamp): false for infinity/NaN.
     functions_["isfinite"] = [](const std::vector<ExprValue>& a) -> ExprValue {
@@ -13333,6 +13349,8 @@ void ExprEvaluator::registerBuiltins() {
             entry.second=DeclaredTsVectorScalarFunction{std::move(entry.second)};
         else if(entry.first=="json_array_length" || entry.first=="jsonb_array_length")
             entry.second=DeclaredJsonArrayLengthScalarFunction{std::move(entry.second)};
+        else if(isJustifyScalarName(entry.first))
+            entry.second=DeclaredJustifyScalarFunction{std::move(entry.second)};
         else if(entry.first=="string_to_array")
             entry.second=DeclaredStringToArrayScalarFunction{std::move(entry.second)};
         else if(entry.first=="width_bucket")

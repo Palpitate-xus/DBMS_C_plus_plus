@@ -540,7 +540,9 @@ std::string inferAstResultType(
         if (name == "percent_rank" || name == "cume_dist" || name == "date_part")
             return "double precision";
         if (name == "extract") return "numeric";
-        if (name == "age") return "interval";
+        if (name == "age" || name == "justify_hours" ||
+            name == "justify_days" || name == "justify_interval")
+            return "interval";
         if (name == "to_date") return "date";
         if (name == "to_timestamp") return "timestamptz";
         if (name == "timezone")
