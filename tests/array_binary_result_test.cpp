@@ -111,7 +111,7 @@ int main() {
         check(type.oid, "{NULL,NULL}", array(type.typelem, {{},{}}, {true,true}, {{2,1}}));
         check(type.oid, "not an array; explicit SQL NULL", {}, true);
     }
-    require(arrayTypes == 49, "builtin array identity coverage");
+    require(arrayTypes == 50, "builtin array identity coverage");
     check(23, "-7", hex("fffffff9"));
     check(25, "{1,NULL}", {'{','1',',','N','U','L','L','}'});
     check(25, "NULL", {'N','U','L','L'});
@@ -127,6 +127,6 @@ int main() {
     check(1007, "{1}", {}, false, false, 2);
     check(1007, "{1,2}", {'{','1',',','2','}'}, false, true, 0);
     check(1009, "NULL", {}, true, true, 0);
-    require(controls == 182, "control coverage");
+    require(controls == 185, "control coverage");
     std::cout << "[ARRAY BINARY RESULT] all " << controls << " native controls passed\n";
 }

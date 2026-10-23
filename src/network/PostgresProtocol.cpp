@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <cerrno>
 #include <cmath>
 #include <cstdlib>
@@ -257,6 +258,15 @@ bool encodeBinaryValue(const std::string& value, const PgColumnDescription& colu
                 if (number < std::numeric_limits<int16_t>::min() ||
                     number > std::numeric_limits<int16_t>::max()) return false;
                 appendRawUInt16(encoded, static_cast<uint16_t>(static_cast<int16_t>(number)));
+                return true;
+            }
+            case 26: {
+                // oid_send is an unsigned four-byte datum, not int4 or a
+                // host-sized long. Only canonical typed output is accepted.
+                uint32_t number=0;
+                const auto parsed=std::from_chars(value.data(),value.data()+value.size(),number);
+                if(parsed.ec!=std::errc{} || parsed.ptr!=value.data()+value.size())return false;
+                appendRawUInt32(encoded,number);
                 return true;
             }
             case 23: {

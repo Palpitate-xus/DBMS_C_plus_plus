@@ -1883,6 +1883,7 @@ const std::vector<PgTypeRow>& CatalogManager::builtinTypeRows() {
         {1021,"_float4",700},
         {1022,"_float8",701},
         {1027,"_polygon",604},
+        {1028,"_oid",26},
         {629,"_line",628},
         {719,"_circle",718},
         {1040,"_macaddr",829},
