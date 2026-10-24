@@ -1,0 +1,1632 @@
+{
+  "referenceVersion": "18.6",
+  "observedControls": 15,
+  "observations": [
+    {
+      "label": "literal-error",
+      "sql": "SELECT 1/0 AS v",
+      "parameterOids": [],
+      "parseDescribe": {
+        "rows": [],
+        "state": null,
+        "message": "",
+        "columns": [
+          "v"
+        ],
+        "tag": null,
+        "oids": [
+          23
+        ],
+        "messages": [
+          "1",
+          "t",
+          "T",
+          "Z"
+        ],
+        "fields": [
+          [
+            "v",
+            0,
+            0,
+            23,
+            4,
+            -1,
+            0
+          ]
+        ],
+        "ready": [
+          "T"
+        ]
+      },
+      "describeEffectCheck": {
+        "rows": [
+          [
+            "1"
+          ]
+        ],
+        "state": null,
+        "message": "",
+        "columns": [
+          "nextval"
+        ],
+        "tag": "SELECT 1",
+        "oids": [
+          20
+        ],
+        "messages": [
+          "T",
+          "D",
+          "C",
+          "Z"
+        ],
+        "fields": [
+          [
+            "nextval",
+            0,
+            0,
+            20,
+            8,
+            -1,
+            0
+          ]
+        ],
+        "ready": [
+          "T"
+        ]
+      },
+      "bindDescribe": {
+        "rows": [],
+        "state": "22012",
+        "message": "division by zero",
+        "columns": [],
+        "tag": null,
+        "oids": [],
+        "messages": [
+          "E",
+          "Z"
+        ],
+        "fields": [],
+        "ready": [
+          "E"
+        ]
+      }
+    },
+    {
+      "label": "typed-parameter-error",
+      "sql": "SELECT $1::int / 0 AS v",
+      "parameterOids": [
+        23
+      ],
+      "parseDescribe": {
+        "rows": [],
+        "state": null,
+        "message": "",
+        "columns": [
+          "v"
+        ],
+        "tag": null,
+        "oids": [
+          23
+        ],
+        "messages": [
+          "1",
+          "t",
+          "T",
+          "Z"
+        ],
+        "fields": [
+          [
+            "v",
+            0,
+            0,
+            23,
+            4,
+            -1,
+            0
+          ]
+        ],
+        "ready": [
+          "T"
+        ]
+      },
+      "describeEffectCheck": {
+        "rows": [
+          [
+            "1"
+          ]
+        ],
+        "state": null,
+        "message": "",
+        "columns": [
+          "nextval"
+        ],
+        "tag": "SELECT 1",
+        "oids": [
+          20
+        ],
+        "messages": [
+          "T",
+          "D",
+          "C",
+          "Z"
+        ],
+        "fields": [
+          [
+            "nextval",
+            0,
+            0,
+            20,
+            8,
+            -1,
+            0
+          ]
+        ],
+        "ready": [
+          "T"
+        ]
+      },
+      "bindDescribe": {
+        "rows": [],
+        "state": "22012",
+        "message": "division by zero",
+        "columns": [],
+        "tag": null,
+        "oids": [],
+        "messages": [
+          "E",
+          "Z"
+        ],
+        "fields": [],
+        "ready": [
+          "E"
+        ]
+      }
+    },
+    {
+      "label": "typed-cast-error",
+      "sql": "SELECT 1::integer/0 AS v",
+      "parameterOids": [],
+      "parseDescribe": {
+        "rows": [],
+        "state": null,
+        "message": "",
+        "columns": [
+          "v"
+        ],
+        "tag": null,
+        "oids": [
+          23
+        ],
+        "messages": [
+          "1",
+          "t",
+          "T",
+          "Z"
+        ],
+        "fields": [
+          [
+            "v",
+            0,
+            0,
+            23,
+            4,
+            -1,
+            0
+          ]
+        ],
+        "ready": [
+          "T"
+        ]
+      },
+      "describeEffectCheck": {
+        "rows": [
+          [
+            "1"
+          ]
+        ],
+        "state": null,
+        "message": "",
+        "columns": [
+          "nextval"
+        ],
+        "tag": "SELECT 1",
+        "oids": [
+          20
+        ],
+        "messages": [
+          "T",
+          "D",
+          "C",
+          "Z"
+        ],
+        "fields": [
+          [
+            "nextval",
+            0,
+            0,
+            20,
+            8,
+            -1,
+            0
+          ]
+        ],
+        "ready": [
+          "T"
+        ]
+      },
+      "bindDescribe": {
+        "rows": [],
+        "state": "22012",
+        "message": "division by zero",
+        "columns": [],
+        "tag": null,
+        "oids": [],
+        "messages": [
+          "E",
+          "Z"
+        ],
+        "fields": [],
+        "ready": [
+          "E"
+        ]
+      }
+    },
+    {
+      "label": "abs-error",
+      "sql": "SELECT abs(-2147483647 - 1) AS v",
+      "parameterOids": [],
+      "parseDescribe": {
+        "rows": [],
+        "state": null,
+        "message": "",
+        "columns": [
+          "v"
+        ],
+        "tag": null,
+        "oids": [
+          23
+        ],
+        "messages": [
+          "1",
+          "t",
+          "T",
+          "Z"
+        ],
+        "fields": [
+          [
+            "v",
+            0,
+            0,
+            23,
+            4,
+            -1,
+            0
+          ]
+        ],
+        "ready": [
+          "T"
+        ]
+      },
+      "describeEffectCheck": {
+        "rows": [
+          [
+            "1"
+          ]
+        ],
+        "state": null,
+        "message": "",
+        "columns": [
+          "nextval"
+        ],
+        "tag": "SELECT 1",
+        "oids": [
+          20
+        ],
+        "messages": [
+          "T",
+          "D",
+          "C",
+          "Z"
+        ],
+        "fields": [
+          [
+            "nextval",
+            0,
+            0,
+            20,
+            8,
+            -1,
+            0
+          ]
+        ],
+        "ready": [
+          "T"
+        ]
+      },
+      "bindDescribe": {
+        "rows": [],
+        "state": "22003",
+        "message": "integer out of range",
+        "columns": [],
+        "tag": null,
+        "oids": [],
+        "messages": [
+          "E",
+          "Z"
+        ],
+        "fields": [],
+        "ready": [
+          "E"
+        ]
+      }
+    },
+    {
+      "label": "sqrt-error",
+      "sql": "SELECT sqrt(-1::float8) AS v",
+      "parameterOids": [],
+      "parseDescribe": {
+        "rows": [],
+        "state": null,
+        "message": "",
+        "columns": [
+          "v"
+        ],
+        "tag": null,
+        "oids": [
+          701
+        ],
+        "messages": [
+          "1",
+          "t",
+          "T",
+          "Z"
+        ],
+        "fields": [
+          [
+            "v",
+            0,
+            0,
+            701,
+            8,
+            -1,
+            0
+          ]
+        ],
+        "ready": [
+          "T"
+        ]
+      },
+      "describeEffectCheck": {
+        "rows": [
+          [
+            "1"
+          ]
+        ],
+        "state": null,
+        "message": "",
+        "columns": [
+          "nextval"
+        ],
+        "tag": "SELECT 1",
+        "oids": [
+          20
+        ],
+        "messages": [
+          "T",
+          "D",
+          "C",
+          "Z"
+        ],
+        "fields": [
+          [
+            "nextval",
+            0,
+            0,
+            20,
+            8,
+            -1,
+            0
+          ]
+        ],
+        "ready": [
+          "T"
+        ]
+      },
+      "bindDescribe": {
+        "rows": [],
+        "state": "2201F",
+        "message": "cannot take square root of a negative number",
+        "columns": [],
+        "tag": null,
+        "oids": [],
+        "messages": [
+          "E",
+          "Z"
+        ],
+        "fields": [],
+        "ready": [
+          "E"
+        ]
+      }
+    },
+    {
+      "label": "date-part-unit-error",
+      "sql": "SELECT date_part('nonesuch',INTERVAL '1 day') AS v",
+      "parameterOids": [],
+      "parseDescribe": {
+        "rows": [],
+        "state": null,
+        "message": "",
+        "columns": [
+          "v"
+        ],
+        "tag": null,
+        "oids": [
+          701
+        ],
+        "messages": [
+          "1",
+          "t",
+          "T",
+          "Z"
+        ],
+        "fields": [
+          [
+            "v",
+            0,
+            0,
+            701,
+            8,
+            -1,
+            0
+          ]
+        ],
+        "ready": [
+          "T"
+        ]
+      },
+      "describeEffectCheck": {
+        "rows": [
+          [
+            "1"
+          ]
+        ],
+        "state": null,
+        "message": "",
+        "columns": [
+          "nextval"
+        ],
+        "tag": "SELECT 1",
+        "oids": [
+          20
+        ],
+        "messages": [
+          "T",
+          "D",
+          "C",
+          "Z"
+        ],
+        "fields": [
+          [
+            "nextval",
+            0,
+            0,
+            20,
+            8,
+            -1,
+            0
+          ]
+        ],
+        "ready": [
+          "T"
+        ]
+      },
+      "bindDescribe": {
+        "rows": [],
+        "state": "22023",
+        "message": "unit \"nonesuch\" not recognized for type interval",
+        "columns": [],
+        "tag": null,
+        "oids": [],
+        "messages": [
+          "E",
+          "Z"
+        ],
+        "fields": [],
+        "ready": [
+          "E"
+        ]
+      }
+    },
+    {
+      "label": "date-part-inputs-error",
+      "sql": "SELECT date_part($1,$2::interval) AS v",
+      "parameterOids": [
+        25,
+        1186
+      ],
+      "parseDescribe": {
+        "rows": [],
+        "state": null,
+        "message": "",
+        "columns": [
+          "v"
+        ],
+        "tag": null,
+        "oids": [
+          701
+        ],
+        "messages": [
+          "1",
+          "t",
+          "T",
+          "Z"
+        ],
+        "fields": [
+          [
+            "v",
+            0,
+            0,
+            701,
+            8,
+            -1,
+            0
+          ]
+        ],
+        "ready": [
+          "T"
+        ]
+      },
+      "describeEffectCheck": {
+        "rows": [
+          [
+            "1"
+          ]
+        ],
+        "state": null,
+        "message": "",
+        "columns": [
+          "nextval"
+        ],
+        "tag": "SELECT 1",
+        "oids": [
+          20
+        ],
+        "messages": [
+          "T",
+          "D",
+          "C",
+          "Z"
+        ],
+        "fields": [
+          [
+            "nextval",
+            0,
+            0,
+            20,
+            8,
+            -1,
+            0
+          ]
+        ],
+        "ready": [
+          "T"
+        ]
+      },
+      "bindDescribe": {
+        "rows": [],
+        "state": "22023",
+        "message": "unit \"nonesuch\" not recognized for type interval",
+        "columns": [],
+        "tag": null,
+        "oids": [],
+        "messages": [
+          "E",
+          "Z"
+        ],
+        "fields": [],
+        "ready": [
+          "E"
+        ]
+      }
+    },
+    {
+      "label": "extract-unit-error",
+      "sql": "SELECT extract(nonesuch FROM INTERVAL '1 day') AS v",
+      "parameterOids": [],
+      "parseDescribe": {
+        "rows": [],
+        "state": null,
+        "message": "",
+        "columns": [
+          "v"
+        ],
+        "tag": null,
+        "oids": [
+          1700
+        ],
+        "messages": [
+          "1",
+          "t",
+          "T",
+          "Z"
+        ],
+        "fields": [
+          [
+            "v",
+            0,
+            0,
+            1700,
+            -1,
+            -1,
+            0
+          ]
+        ],
+        "ready": [
+          "T"
+        ]
+      },
+      "describeEffectCheck": {
+        "rows": [
+          [
+            "1"
+          ]
+        ],
+        "state": null,
+        "message": "",
+        "columns": [
+          "nextval"
+        ],
+        "tag": "SELECT 1",
+        "oids": [
+          20
+        ],
+        "messages": [
+          "T",
+          "D",
+          "C",
+          "Z"
+        ],
+        "fields": [
+          [
+            "nextval",
+            0,
+            0,
+            20,
+            8,
+            -1,
+            0
+          ]
+        ],
+        "ready": [
+          "T"
+        ]
+      },
+      "bindDescribe": {
+        "rows": [],
+        "state": "22023",
+        "message": "unit \"nonesuch\" not recognized for type interval",
+        "columns": [],
+        "tag": null,
+        "oids": [],
+        "messages": [
+          "E",
+          "Z"
+        ],
+        "fields": [],
+        "ready": [
+          "E"
+        ]
+      }
+    },
+    {
+      "label": "subquery-error",
+      "sql": "SELECT (SELECT 1/0) AS v LIMIT 0",
+      "parameterOids": [],
+      "parseDescribe": {
+        "rows": [],
+        "state": null,
+        "message": "",
+        "columns": [
+          "v"
+        ],
+        "tag": null,
+        "oids": [
+          23
+        ],
+        "messages": [
+          "1",
+          "t",
+          "T",
+          "Z"
+        ],
+        "fields": [
+          [
+            "v",
+            0,
+            0,
+            23,
+            4,
+            -1,
+            0
+          ]
+        ],
+        "ready": [
+          "T"
+        ]
+      },
+      "describeEffectCheck": {
+        "rows": [
+          [
+            "1"
+          ]
+        ],
+        "state": null,
+        "message": "",
+        "columns": [
+          "nextval"
+        ],
+        "tag": "SELECT 1",
+        "oids": [
+          20
+        ],
+        "messages": [
+          "T",
+          "D",
+          "C",
+          "Z"
+        ],
+        "fields": [
+          [
+            "nextval",
+            0,
+            0,
+            20,
+            8,
+            -1,
+            0
+          ]
+        ],
+        "ready": [
+          "T"
+        ]
+      },
+      "bindDescribe": {
+        "rows": [],
+        "state": "22012",
+        "message": "division by zero",
+        "columns": [],
+        "tag": null,
+        "oids": [],
+        "messages": [
+          "E",
+          "Z"
+        ],
+        "fields": [],
+        "ready": [
+          "E"
+        ]
+      }
+    },
+    {
+      "label": "source-error",
+      "sql": "SELECT 1/0 AS v FROM (VALUES(1)) AS t(x) WHERE false",
+      "parameterOids": [],
+      "parseDescribe": {
+        "rows": [],
+        "state": null,
+        "message": "",
+        "columns": [
+          "v"
+        ],
+        "tag": null,
+        "oids": [
+          23
+        ],
+        "messages": [
+          "1",
+          "t",
+          "T",
+          "Z"
+        ],
+        "fields": [
+          [
+            "v",
+            0,
+            0,
+            23,
+            4,
+            -1,
+            0
+          ]
+        ],
+        "ready": [
+          "T"
+        ]
+      },
+      "describeEffectCheck": {
+        "rows": [
+          [
+            "1"
+          ]
+        ],
+        "state": null,
+        "message": "",
+        "columns": [
+          "nextval"
+        ],
+        "tag": "SELECT 1",
+        "oids": [
+          20
+        ],
+        "messages": [
+          "T",
+          "D",
+          "C",
+          "Z"
+        ],
+        "fields": [
+          [
+            "nextval",
+            0,
+            0,
+            20,
+            8,
+            -1,
+            0
+          ]
+        ],
+        "ready": [
+          "T"
+        ]
+      },
+      "bindDescribe": {
+        "rows": [],
+        "state": "22012",
+        "message": "division by zero",
+        "columns": [],
+        "tag": null,
+        "oids": [],
+        "messages": [
+          "E",
+          "Z"
+        ],
+        "fields": [],
+        "ready": [
+          "E"
+        ]
+      }
+    },
+    {
+      "label": "literal-dead-error",
+      "sql": "SELECT 1/0 AS v WHERE false",
+      "parameterOids": [],
+      "parseDescribe": {
+        "rows": [],
+        "state": null,
+        "message": "",
+        "columns": [
+          "v"
+        ],
+        "tag": null,
+        "oids": [
+          23
+        ],
+        "messages": [
+          "1",
+          "t",
+          "T",
+          "Z"
+        ],
+        "fields": [
+          [
+            "v",
+            0,
+            0,
+            23,
+            4,
+            -1,
+            0
+          ]
+        ],
+        "ready": [
+          "T"
+        ]
+      },
+      "describeEffectCheck": {
+        "rows": [
+          [
+            "1"
+          ]
+        ],
+        "state": null,
+        "message": "",
+        "columns": [
+          "nextval"
+        ],
+        "tag": "SELECT 1",
+        "oids": [
+          20
+        ],
+        "messages": [
+          "T",
+          "D",
+          "C",
+          "Z"
+        ],
+        "fields": [
+          [
+            "nextval",
+            0,
+            0,
+            20,
+            8,
+            -1,
+            0
+          ]
+        ],
+        "ready": [
+          "T"
+        ]
+      },
+      "bindDescribe": {
+        "rows": [],
+        "state": "22012",
+        "message": "division by zero",
+        "columns": [],
+        "tag": null,
+        "oids": [],
+        "messages": [
+          "E",
+          "Z"
+        ],
+        "fields": [],
+        "ready": [
+          "E"
+        ]
+      }
+    },
+    {
+      "label": "dead-arm",
+      "sql": "SELECT CASE WHEN false THEN 1/0 ELSE 7 END AS v",
+      "parameterOids": [],
+      "parseDescribe": {
+        "rows": [],
+        "state": null,
+        "message": "",
+        "columns": [
+          "v"
+        ],
+        "tag": null,
+        "oids": [
+          23
+        ],
+        "messages": [
+          "1",
+          "t",
+          "T",
+          "Z"
+        ],
+        "fields": [
+          [
+            "v",
+            0,
+            0,
+            23,
+            4,
+            -1,
+            0
+          ]
+        ],
+        "ready": [
+          "T"
+        ]
+      },
+      "describeEffectCheck": {
+        "rows": [
+          [
+            "1"
+          ]
+        ],
+        "state": null,
+        "message": "",
+        "columns": [
+          "nextval"
+        ],
+        "tag": "SELECT 1",
+        "oids": [
+          20
+        ],
+        "messages": [
+          "T",
+          "D",
+          "C",
+          "Z"
+        ],
+        "fields": [
+          [
+            "nextval",
+            0,
+            0,
+            20,
+            8,
+            -1,
+            0
+          ]
+        ],
+        "ready": [
+          "T"
+        ]
+      },
+      "bindDescribe": {
+        "rows": [],
+        "state": null,
+        "message": "",
+        "columns": [
+          "v"
+        ],
+        "tag": null,
+        "oids": [
+          23
+        ],
+        "messages": [
+          "2",
+          "T",
+          "Z"
+        ],
+        "fields": [
+          [
+            "v",
+            0,
+            0,
+            23,
+            4,
+            -1,
+            0
+          ]
+        ],
+        "ready": [
+          "T"
+        ]
+      },
+      "bindEffectCheck": {
+        "rows": [
+          [
+            "1"
+          ]
+        ],
+        "state": null,
+        "message": "",
+        "columns": [
+          "nextval"
+        ],
+        "tag": "SELECT 1",
+        "oids": [
+          20
+        ],
+        "messages": [
+          "T",
+          "D",
+          "C",
+          "Z"
+        ],
+        "fields": [
+          [
+            "nextval",
+            0,
+            0,
+            20,
+            8,
+            -1,
+            0
+          ]
+        ],
+        "ready": [
+          "T"
+        ]
+      },
+      "execute": {
+        "rows": [
+          [
+            "7"
+          ]
+        ],
+        "state": null,
+        "message": "",
+        "columns": [],
+        "tag": "SELECT 1",
+        "oids": [],
+        "messages": [
+          "D",
+          "C",
+          "Z"
+        ],
+        "fields": [],
+        "ready": [
+          "T"
+        ]
+      }
+    },
+    {
+      "label": "immutable-success",
+      "sql": "SELECT upper('abc') AS v",
+      "parameterOids": [],
+      "parseDescribe": {
+        "rows": [],
+        "state": null,
+        "message": "",
+        "columns": [
+          "v"
+        ],
+        "tag": null,
+        "oids": [
+          25
+        ],
+        "messages": [
+          "1",
+          "t",
+          "T",
+          "Z"
+        ],
+        "fields": [
+          [
+            "v",
+            0,
+            0,
+            25,
+            -1,
+            -1,
+            0
+          ]
+        ],
+        "ready": [
+          "T"
+        ]
+      },
+      "describeEffectCheck": {
+        "rows": [
+          [
+            "1"
+          ]
+        ],
+        "state": null,
+        "message": "",
+        "columns": [
+          "nextval"
+        ],
+        "tag": "SELECT 1",
+        "oids": [
+          20
+        ],
+        "messages": [
+          "T",
+          "D",
+          "C",
+          "Z"
+        ],
+        "fields": [
+          [
+            "nextval",
+            0,
+            0,
+            20,
+            8,
+            -1,
+            0
+          ]
+        ],
+        "ready": [
+          "T"
+        ]
+      },
+      "bindDescribe": {
+        "rows": [],
+        "state": null,
+        "message": "",
+        "columns": [
+          "v"
+        ],
+        "tag": null,
+        "oids": [
+          25
+        ],
+        "messages": [
+          "2",
+          "T",
+          "Z"
+        ],
+        "fields": [
+          [
+            "v",
+            0,
+            0,
+            25,
+            -1,
+            -1,
+            0
+          ]
+        ],
+        "ready": [
+          "T"
+        ]
+      },
+      "bindEffectCheck": {
+        "rows": [
+          [
+            "1"
+          ]
+        ],
+        "state": null,
+        "message": "",
+        "columns": [
+          "nextval"
+        ],
+        "tag": "SELECT 1",
+        "oids": [
+          20
+        ],
+        "messages": [
+          "T",
+          "D",
+          "C",
+          "Z"
+        ],
+        "fields": [
+          [
+            "nextval",
+            0,
+            0,
+            20,
+            8,
+            -1,
+            0
+          ]
+        ],
+        "ready": [
+          "T"
+        ]
+      },
+      "execute": {
+        "rows": [
+          [
+            "ABC"
+          ]
+        ],
+        "state": null,
+        "message": "",
+        "columns": [],
+        "tag": "SELECT 1",
+        "oids": [],
+        "messages": [
+          "D",
+          "C",
+          "Z"
+        ],
+        "fields": [],
+        "ready": [
+          "T"
+        ]
+      }
+    },
+    {
+      "label": "volatile-success",
+      "sql": "SELECT r244_writer() AS v",
+      "parameterOids": [],
+      "parseDescribe": {
+        "rows": [],
+        "state": null,
+        "message": "",
+        "columns": [
+          "v"
+        ],
+        "tag": null,
+        "oids": [
+          23
+        ],
+        "messages": [
+          "1",
+          "t",
+          "T",
+          "Z"
+        ],
+        "fields": [
+          [
+            "v",
+            0,
+            0,
+            23,
+            4,
+            -1,
+            0
+          ]
+        ],
+        "ready": [
+          "T"
+        ]
+      },
+      "describeEffectCheck": {
+        "rows": [
+          [
+            "1"
+          ]
+        ],
+        "state": null,
+        "message": "",
+        "columns": [
+          "nextval"
+        ],
+        "tag": "SELECT 1",
+        "oids": [
+          20
+        ],
+        "messages": [
+          "T",
+          "D",
+          "C",
+          "Z"
+        ],
+        "fields": [
+          [
+            "nextval",
+            0,
+            0,
+            20,
+            8,
+            -1,
+            0
+          ]
+        ],
+        "ready": [
+          "T"
+        ]
+      },
+      "bindDescribe": {
+        "rows": [],
+        "state": null,
+        "message": "",
+        "columns": [
+          "v"
+        ],
+        "tag": null,
+        "oids": [
+          23
+        ],
+        "messages": [
+          "2",
+          "T",
+          "Z"
+        ],
+        "fields": [
+          [
+            "v",
+            0,
+            0,
+            23,
+            4,
+            -1,
+            0
+          ]
+        ],
+        "ready": [
+          "T"
+        ]
+      },
+      "bindEffectCheck": {
+        "rows": [
+          [
+            "1"
+          ]
+        ],
+        "state": null,
+        "message": "",
+        "columns": [
+          "nextval"
+        ],
+        "tag": "SELECT 1",
+        "oids": [
+          20
+        ],
+        "messages": [
+          "T",
+          "D",
+          "C",
+          "Z"
+        ],
+        "fields": [
+          [
+            "nextval",
+            0,
+            0,
+            20,
+            8,
+            -1,
+            0
+          ]
+        ],
+        "ready": [
+          "T"
+        ]
+      },
+      "execute": {
+        "rows": [
+          [
+            "2"
+          ]
+        ],
+        "state": null,
+        "message": "",
+        "columns": [],
+        "tag": "SELECT 1",
+        "oids": [],
+        "messages": [
+          "D",
+          "C",
+          "Z"
+        ],
+        "fields": [],
+        "ready": [
+          "T"
+        ]
+      }
+    },
+    {
+      "label": "volatile-suppressed",
+      "sql": "SELECT r244_writer() AS v WHERE false",
+      "parameterOids": [],
+      "parseDescribe": {
+        "rows": [],
+        "state": null,
+        "message": "",
+        "columns": [
+          "v"
+        ],
+        "tag": null,
+        "oids": [
+          23
+        ],
+        "messages": [
+          "1",
+          "t",
+          "T",
+          "Z"
+        ],
+        "fields": [
+          [
+            "v",
+            0,
+            0,
+            23,
+            4,
+            -1,
+            0
+          ]
+        ],
+        "ready": [
+          "T"
+        ]
+      },
+      "describeEffectCheck": {
+        "rows": [
+          [
+            "1"
+          ]
+        ],
+        "state": null,
+        "message": "",
+        "columns": [
+          "nextval"
+        ],
+        "tag": "SELECT 1",
+        "oids": [
+          20
+        ],
+        "messages": [
+          "T",
+          "D",
+          "C",
+          "Z"
+        ],
+        "fields": [
+          [
+            "nextval",
+            0,
+            0,
+            20,
+            8,
+            -1,
+            0
+          ]
+        ],
+        "ready": [
+          "T"
+        ]
+      },
+      "bindDescribe": {
+        "rows": [],
+        "state": null,
+        "message": "",
+        "columns": [
+          "v"
+        ],
+        "tag": null,
+        "oids": [
+          23
+        ],
+        "messages": [
+          "2",
+          "T",
+          "Z"
+        ],
+        "fields": [
+          [
+            "v",
+            0,
+            0,
+            23,
+            4,
+            -1,
+            0
+          ]
+        ],
+        "ready": [
+          "T"
+        ]
+      },
+      "bindEffectCheck": {
+        "rows": [
+          [
+            "1"
+          ]
+        ],
+        "state": null,
+        "message": "",
+        "columns": [
+          "nextval"
+        ],
+        "tag": "SELECT 1",
+        "oids": [
+          20
+        ],
+        "messages": [
+          "T",
+          "D",
+          "C",
+          "Z"
+        ],
+        "fields": [
+          [
+            "nextval",
+            0,
+            0,
+            20,
+            8,
+            -1,
+            0
+          ]
+        ],
+        "ready": [
+          "T"
+        ]
+      },
+      "execute": {
+        "rows": [],
+        "state": null,
+        "message": "",
+        "columns": [],
+        "tag": "SELECT 0",
+        "oids": [],
+        "messages": [
+          "C",
+          "Z"
+        ],
+        "fields": [],
+        "ready": [
+          "T"
+        ]
+      }
+    }
+  ],
+  "diagnosticFieldsIncludeMessages": true,
+  "compatibilityComparisonExcludesDiagnosticMessages": true,
+  "finiteNotFullProtocolCoverage": true
+}
