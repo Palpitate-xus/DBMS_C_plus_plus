@@ -9,6 +9,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <limits>
 #include <new>
 #include <stdexcept>
 #include <string>
@@ -207,6 +208,25 @@ static bool invalidCase(bool batch) {
     return good;
 }
 
+static bool formatCase(uint64_t segment, const char* filename) {
+    PrivateDirectory temporary;
+    const Xid base = segment * Log::kXidsPerSegment;
+    const Xid first = base + 1, last = base + (Log::kXidsPerSegment - 1);
+    Log writer(temporary.path);
+    writer.setStatus(first, Status::Committed);
+    writer.setStatus(last, Status::Aborted);
+    bool good = writer.flush();
+    good = good && std::filesystem::exists(temporary.path + "/pg_xact/" + filename);
+    for (const auto& file : std::filesystem::directory_iterator(temporary.path + "/pg_xact")) {
+        const auto name = file.path().filename().string();
+        good = good && (name == ".clog.lock" || name == filename);
+    }
+    Log reader(temporary.path);
+    good = good && reader.getStatus(first) == Status::Committed && reader.getStatus(last) == Status::Aborted;
+    std::cout << "CLOG_SEGMENT_PATH_FORMAT segment=" << segment << " filename=" << filename << " good=" << good << '\n';
+    return good;
+}
+
 int main() {
     try {
         std::vector<Configuration> configurations;
@@ -230,6 +250,12 @@ int main() {
             }
         }
         for (bool batch : {false, true}) { ++controls; if (!invalidCase(batch)) ++failures; }
+        const std::pair<uint64_t,const char*> formats[] = {
+            {0,"0"},{1,"1"},{9,"9"},{10,"a"},{15,"f"},{16,"10"},{255,"ff"},{256,"100"},
+            {4095,"fff"},{4096,"1000"},{65535,"ffff"},{65536,"10000"},{0xabcdef,"abcdef"},
+            {std::numeric_limits<Xid>::max()/Log::kXidsPerSegment,"fffffffffff"}
+        };
+        for (const auto& format : formats) { ++controls; if (!formatCase(format.first,format.second)) ++failures; }
         std::cout << "CLOG_STATUS_ATOMIC_NATIVE_COMPLETE " << controls << " FAILURES " << failures
                   << " CONFIGS " << configurations.size() << " INJECTED_ALLOCS " << injected << '\n';
         return failures ? 1 : 0;

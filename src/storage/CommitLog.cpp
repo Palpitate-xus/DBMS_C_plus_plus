@@ -68,9 +68,12 @@ CommitLog::~CommitLog() {
 }
 
 std::string CommitLog::segmentPath(uint64_t segNo) const {
-    std::ostringstream oss;
-    oss << dataDir_ << "/pg_xact/" << std::hex << segNo;
-    return oss.str();
+    // uint64_t needs at most 16 hex digits. Unlike an ostream insertion,
+    // ordinary string construction cannot silently swallow bad_alloc and
+    // return an incomplete pathname for an otherwise real segment.
+    char digits[16];
+    const auto converted = std::to_chars(digits, digits + sizeof(digits), segNo, 16);
+    return dataDir_ + "/pg_xact/" + std::string(digits, converted.ptr);
 }
 
 uint64_t CommitLog::segmentNumber(TxnId xid) {
