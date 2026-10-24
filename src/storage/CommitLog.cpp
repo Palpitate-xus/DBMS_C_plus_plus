@@ -303,8 +303,10 @@ void CommitLog::setStatus(TxnId xid, Status status) {
     size_t off = byteOffset(xid);
     uint8_t shift = shiftForXid(xid);
     uint8_t mask = static_cast<uint8_t>(0x03 << shift);
-    seg.data[off] = static_cast<uint8_t>((seg.data[off] & ~mask) | (statusBits(status) << shift));
+    // Registration can allocate a node or rehash. Do not publish a cached
+    // status until its pending update is guaranteed to remain flushable.
     auto& pending = seg.pendingBits[off];
+    seg.data[off] = static_cast<uint8_t>((seg.data[off] & ~mask) | (statusBits(status) << shift));
     pending.first = static_cast<uint8_t>(pending.first | mask);
     pending.second = static_cast<uint8_t>((pending.second & ~mask) |
                                            (statusBits(status) << shift));
@@ -322,8 +324,10 @@ bool CommitLog::setStatuses(const std::vector<std::pair<TxnId, Status>>& entries
             size_t off = byteOffset(xid);
             uint8_t shift = shiftForXid(xid);
             uint8_t mask = static_cast<uint8_t>(0x03 << shift);
-            seg.data[off] = static_cast<uint8_t>((seg.data[off] & ~mask) | (statusBits(status) << shift));
+            // Earlier entries may already be pending, but this entry must
+            // not change the cache if its own registration cannot allocate.
             auto& pending = seg.pendingBits[off];
+            seg.data[off] = static_cast<uint8_t>((seg.data[off] & ~mask) | (statusBits(status) << shift));
             pending.first = static_cast<uint8_t>(pending.first | mask);
             pending.second = static_cast<uint8_t>((pending.second & ~mask) |
                                                    (statusBits(status) << shift));
