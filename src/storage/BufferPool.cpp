@@ -458,7 +458,6 @@ char* BufferPool::fetchPage(uint32_t pageId) {
     // the lock RELEASED so concurrent hits on other pages are not blocked
     // behind one pread.
     std::unique_lock<std::mutex> lock(mutex_);
-    ++misses_;
 
     // A peer may have cached this page between the fast-path miss and
     // acquiring this lock, or while an orphan wait released it. Recheck all
@@ -473,6 +472,7 @@ char* BufferPool::fetchPage(uint32_t pageId) {
             Frame& frame = frames_[cached->second];
             ++frame.pinCount;
             frame.usageCount = 3;
+            ++hits_;  // peer satisfied this request without another read
             return frame.data.data();
         }
         if (loadingPages_.count(pageId)) {
@@ -531,6 +531,9 @@ char* BufferPool::fetchPage(uint32_t pageId) {
         // holding mutex_ through it serialized every concurrent cache hit, and
         // a shared scratch buffer would race with a concurrent loader.
         std::vector<char> scratch(pageSize_);
+        // misses_ feeds shared_read: count an actual page-load attempt, not
+        // failed admission/allocation. IO or validation failure still counts.
+        ++misses_;
         lock.unlock();
         bool fullPageRead = false;
         const bool readOk = readFromDisk(pageId, scratch.data(), &fullPageRead);
