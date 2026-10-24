@@ -332,15 +332,20 @@ void BufferPool::invalidateAll() {
 bool BufferPool::readFromDisk(uint32_t pageId, char* buf, bool* fullPageRead) {
     if (fd_ < 0) return false;
     off_t offset = static_cast<off_t>(pageId) * pageSize_;
-    ssize_t n = ::pread(fd_, buf, pageSize_, offset);
-    if (n < 0) return false;
-    if (n < static_cast<ssize_t>(pageSize_)) {
-        // New page: zero-fill remainder
-        std::memset(buf + n, 0, pageSize_ - n);
-        if (fullPageRead) *fullPageRead = false;
-    } else if (fullPageRead) {
-        *fullPageRead = true;
+    size_t bytesRead = 0;
+    while (bytesRead < pageSize_) {
+        const ssize_t n = ::pread(fd_, buf + bytesRead, pageSize_ - bytesRead,
+                                  offset + static_cast<off_t>(bytesRead));
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0) return false;
+        if (n == 0) break;  // Only EOF proves the remaining bytes are absent.
+        bytesRead += static_cast<size_t>(n);
     }
+    // A positive short transfer is not EOF. Complete it before deciding
+    // whether this is a new/partial page and whether validation is required.
+    if (bytesRead < pageSize_)
+        std::memset(buf + bytesRead, 0, pageSize_ - bytesRead);
+    if (fullPageRead) *fullPageRead = bytesRead == pageSize_;
     // TDE: transparently decrypt sealed pages on load.  Page 0 (the
     // structural file header) and pages whose sidecar record is the
     // all-zero plaintext marker pass through untouched, so an unencrypted
