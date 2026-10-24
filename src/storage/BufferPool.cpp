@@ -35,6 +35,26 @@ void waitForPageLoadChange(std::unique_lock<std::mutex>& lock,
     }
     unregister();
 }
+// The orphan waiter vector itself remains alive across a wait, even when a
+// draining unpin clears its contents. Remove our own registration on every
+// exit so a spurious wake or allocation failure cannot leave an expired CV.
+template<class WaitAction>
+void waitForOrphanChange(std::unique_lock<std::mutex>& lock,
+                         std::vector<std::condition_variable*>& waiters,
+                         WaitAction waitAction) {
+    std::condition_variable cv;
+    const auto unregister = [&] {
+        waiters.erase(std::remove(waiters.begin(), waiters.end(), &cv), waiters.end());
+    };
+    try {
+        waiters.push_back(&cv);
+        waitAction(cv, lock);
+    } catch (...) {
+        unregister();
+        throw;
+    }
+    unregister();
+}
 }  // namespace
 
 BufferPool::BufferPool(const std::string& filename, size_t numFrames, size_t pageSize)
@@ -255,7 +275,6 @@ void BufferPool::notifyOrphanDrained(uint32_t pageId) {
 void BufferPool::invalidateAll() {
     std::unique_lock<std::mutex> lock(mutex_);
     // Drain every in-flight load before dropping the frames.
-    std::condition_variable cv;
     while (!loadingPages_.empty()) {
         // Register on one in-flight page; notified loads erase their waiter
         // lists, so re-register until the map drains.
@@ -265,9 +284,9 @@ void BufferPool::invalidateAll() {
     // Orphaned frames are unwound by their readers' unpins; a fresh
     // invalidateAll must not race them, so wait for those too.
     while (!orphanedPins_.empty()) {
-        const uint32_t pid = orphanedPins_.begin()->first;
-        orphanWaiters_.push_back(&cv);
-        cv.wait(lock);
+        waitForOrphanChange(lock, orphanWaiters_, [](auto& cv, auto& held) {
+            cv.wait(held);
+        });
     }
     // All previous orphans have drained under this lock. Prepare the entire
     // new ownership map before touching any frame or live mapping. On an
@@ -519,12 +538,9 @@ char* BufferPool::fetchPage(uint32_t pageId) {
             // Preserve the existing bounded self-pin retry: admission cannot
             // give a new copy the old orphan's later unpin.
             if (++orphanAttempts > 50) return nullptr;
-            std::condition_variable cv;
-            orphanWaiters_.push_back(&cv);
-            cv.wait_for(lock, std::chrono::milliseconds(200));
-            orphanWaiters_.erase(
-                std::remove(orphanWaiters_.begin(), orphanWaiters_.end(), &cv),
-                orphanWaiters_.end());
+            waitForOrphanChange(lock, orphanWaiters_, [](auto& cv, auto& held) {
+                cv.wait_for(held, std::chrono::milliseconds(200));
+            });
             continue;
         }
         break;
