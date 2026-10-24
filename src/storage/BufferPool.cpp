@@ -193,8 +193,12 @@ void BufferPool::invalidatePage(uint32_t pageId) {
     auto it = pageMap_.find(pageId);
     if (it == pageMap_.end()) return;
     const size_t idx = it->second;
-    pageMap_.erase(it);
     Frame& f = frames_[idx];
+    // Allocate orphan ownership before removing the only live mapping or
+    // discarding dirty state. A failed allocation must leave caller pins
+    // routable and the original cached bytes eligible for writeback.
+    if (f.pinCount > 0) orphanedPins_[pageId] = {f.pinCount, idx};
+    pageMap_.erase(it);
     f.dirty = false;
     f.usageCount = 0;
     if (f.pinCount == 0) {
@@ -207,7 +211,6 @@ void BufferPool::invalidatePage(uint32_t pageId) {
     // and no new load of this page may start until they drain (the
     // pageMap/orphanedPins mutual exclusion is what keeps unpin routing
     // unambiguous).
-    orphanedPins_[pageId] = {f.pinCount, idx};
     f.pageId = kOrphanedPage;
     f.pinCount = 0;  // the orphan entry now owns the countdown
 }
@@ -243,6 +246,22 @@ void BufferPool::invalidateAll() {
         orphanWaiters_.push_back(&cv);
         cv.wait(lock);
     }
+    // All previous orphans have drained under this lock. Prepare the entire
+    // new ownership map before touching any frame or live mapping. On an
+    // allocation failure only these provisional records need rolling back;
+    // pageMap_, dirty bytes and caller pins remain unchanged.
+    try {
+        for (const auto& [pageId, idx] : pageMap_) {
+            const Frame& frame = frames_[idx];
+            if (frame.pinCount > 0) {
+                orphanedPins_[pageId] = {
+                    static_cast<size_t>(frame.pinCount), idx};
+            }
+        }
+    } catch (...) {
+        orphanedPins_.clear();
+        throw;
+    }
     // Keep frames with outstanding readers alive just as invalidatePage()
     // does.  Clearing their pin counts here lets the clock sweep overwrite a
     // pointer that a caller still holds; its later unpin can then decrement a
@@ -252,8 +271,6 @@ void BufferPool::invalidateAll() {
         frame.dirty = false;
         frame.usageCount = 0;
         if (frame.pinCount > 0) {
-            orphanedPins_[pageId] = {
-                static_cast<size_t>(frame.pinCount), idx};
             frame.pageId = kOrphanedPage;
             frame.pinCount = 0;  // orphanedPins_ now owns the pin count
         } else {
