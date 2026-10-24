@@ -1,10 +1,10 @@
 #include "CommitLog.h"
+#include "common/DbError.h"
 
 #include <charconv>
 #include <cerrno>
 #include <fcntl.h>
 #include <filesystem>
-#include <fstream>
 #include <iostream>
 #include <set>
 #include <string>
@@ -13,6 +13,40 @@
 #include <unistd.h>
 
 namespace dbms {
+
+namespace {
+enum class SegmentRead { Missing, Loaded, Failed };
+
+struct SegmentReadDescriptor {
+    int fd;
+    ~SegmentReadDescriptor() { ::close(fd); }
+};
+
+// Callers provide a zero-filled private buffer. Missing files and real EOF
+// retain the existing InProgress tail convention; IO errors never mean zero.
+SegmentRead readSegmentFile(const std::string& path, std::vector<uint8_t>& data,
+                            struct stat& identity) {
+    int fd;
+    do { fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC); }
+    while (fd < 0 && errno == EINTR);
+    if (fd < 0) return errno == ENOENT ? SegmentRead::Missing : SegmentRead::Failed;
+    const SegmentReadDescriptor descriptor{fd};
+    if (::fstat(fd, &identity) != 0) return SegmentRead::Failed;
+    size_t done = 0;
+    while (done < data.size()) {
+        const auto count = ::read(fd, data.data() + done, data.size() - done);
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) return SegmentRead::Failed;
+        if (count == 0) break;
+        done += static_cast<size_t>(count);
+    }
+    return SegmentRead::Loaded;
+}
+
+DbError segmentReadError(const std::string& path) {
+    return DbError("58030", "could not read transaction status segment: " + path);
+}
+} // namespace
 
 CommitLog::CommitLog(const std::string& dataDir)
     : dataDir_(dataDir) {
@@ -67,22 +101,18 @@ void CommitLog::loadSegment(uint64_t segNo) const {
     seg.data.assign(kSegmentFileSize, 0);
 
     std::string path = segmentPath(segNo);
-    if (std::filesystem::exists(path)) {
-        std::ifstream ifs(path, std::ios::binary);
-        if (ifs) {
-            ifs.read(reinterpret_cast<char*>(seg.data.data()),
-                     static_cast<std::streamsize>(kSegmentFileSize));
-            // 未读满则剩余保持为 0（InProgress）
-        }
+    struct stat identity {};
+    const auto result = readSegmentFile(path, seg.data, identity);
+    if (result == SegmentRead::Failed) throw segmentReadError(path);
+    if (result == SegmentRead::Loaded) {
         std::error_code ec;
         seg.fileTime = std::filesystem::last_write_time(path, ec);
         seg.fileTimeValid = !ec;
-        struct stat status {};
-        if (::stat(path.c_str(), &status) == 0) {
-            seg.fileDevice = static_cast<uint64_t>(status.st_dev);
-            seg.fileInode = static_cast<uint64_t>(status.st_ino);
-            seg.fileIdentityValid = true;
-        }
+        // Associate the cached bytes with the descriptor actually read, not
+        // a possibly newer inode installed at the same pathname afterwards.
+        seg.fileDevice = static_cast<uint64_t>(identity.st_dev);
+        seg.fileInode = static_cast<uint64_t>(identity.st_ino);
+        seg.fileIdentityValid = true;
     }
 
     segments_[segNo] = std::move(seg);
@@ -93,8 +123,12 @@ void CommitLog::refreshSegmentIfChanged(uint64_t segNo) const {
     if (it == segments_.end() || it->second.dirty) return;
 
     const std::string path = segmentPath(segNo);
-    std::error_code ec;
-    if (!std::filesystem::exists(path, ec) || ec) {
+    struct stat status {};
+    int metadataResult;
+    do { metadataResult = ::stat(path.c_str(), &status); }
+    while (metadataResult != 0 && errno == EINTR);
+    if (metadataResult != 0) {
+        if (errno != ENOENT) throw segmentReadError(path);
         if (it->second.fileTimeValid || it->second.fileIdentityValid) {
             it->second.data.assign(kSegmentFileSize, 0);
             it->second.fileTimeValid = false;
@@ -103,30 +137,27 @@ void CommitLog::refreshSegmentIfChanged(uint64_t segNo) const {
         return;
     }
 
+    std::error_code ec;
     const auto stamp = std::filesystem::last_write_time(path, ec);
-    if (ec) return;
-    struct stat status {};
-    const bool identityValid = ::stat(path.c_str(), &status) == 0;
-    const uint64_t device = identityValid
-        ? static_cast<uint64_t>(status.st_dev) : 0;
-    const uint64_t inode = identityValid
-        ? static_cast<uint64_t>(status.st_ino) : 0;
+    if (ec) throw segmentReadError(path);
+    const uint64_t device = static_cast<uint64_t>(status.st_dev);
+    const uint64_t inode = static_cast<uint64_t>(status.st_ino);
     if (it->second.fileTimeValid && it->second.fileTime == stamp &&
-        it->second.fileIdentityValid && identityValid &&
+        it->second.fileIdentityValid &&
         it->second.fileDevice == device && it->second.fileInode == inode) {
         return;
     }
 
     std::vector<uint8_t> data(kSegmentFileSize, 0);
-    std::ifstream ifs(path, std::ios::binary);
-    if (!ifs) return;
-    ifs.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(kSegmentFileSize));
+    struct stat identity {};
+    const auto result = readSegmentFile(path, data, identity);
+    if (result == SegmentRead::Failed) throw segmentReadError(path);
     it->second.data = std::move(data);
     it->second.fileTime = stamp;
-    it->second.fileTimeValid = true;
-    it->second.fileDevice = device;
-    it->second.fileInode = inode;
-    it->second.fileIdentityValid = identityValid;
+    it->second.fileTimeValid = result == SegmentRead::Loaded;
+    it->second.fileDevice = static_cast<uint64_t>(identity.st_dev);
+    it->second.fileInode = static_cast<uint64_t>(identity.st_ino);
+    it->second.fileIdentityValid = result == SegmentRead::Loaded;
 }
 
 void CommitLog::ensureSegment(uint64_t segNo) const {
@@ -174,12 +205,11 @@ bool CommitLog::saveSegment(uint64_t segNo, int heldLockFd) {
     // segment.  Replacing a whole stale in-memory segment could erase a
     // transaction status written by another backend between cache loads.
     std::vector<uint8_t> latest(kSegmentFileSize, 0);
-    if (std::filesystem::exists(path)) {
-        std::ifstream ifs(path, std::ios::binary);
-        if (ifs) {
-            ifs.read(reinterpret_cast<char*>(latest.data()),
-                     static_cast<std::streamsize>(kSegmentFileSize));
-        }
+    struct stat identity {};
+    if (readSegmentFile(path, latest, identity) == SegmentRead::Failed) {
+        releaseLock();
+        std::cerr << "[CLOG] Failed to read segment for merge: " << path << std::endl;
+        return false;
     }
     if (it->second.pendingBits.empty()) {
         latest = it->second.data;
