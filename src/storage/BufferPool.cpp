@@ -9,6 +9,34 @@
 
 namespace dbms {
 
+namespace {
+// A notification can finish one load while another starts before this waiter
+// reacquires the mutex. Register for one wait only, then let the caller recheck
+// state and register for the current generation. Never retain a vector reference
+// across wait: the loader may erase its entire map entry before waking us.
+template<class WaiterMap>
+void waitForPageLoadChange(std::unique_lock<std::mutex>& lock,
+                           WaiterMap& waiters, uint32_t pageId) {
+    std::condition_variable cv;
+    const auto unregister = [&] {
+        const auto entry = waiters.find(pageId);
+        if (entry == waiters.end()) return;
+        auto& registered = entry->second;
+        registered.erase(std::remove(registered.begin(), registered.end(), &cv),
+                         registered.end());
+        if (registered.empty()) waiters.erase(entry);
+    };
+    try {
+        waiters[pageId].push_back(&cv);
+        cv.wait(lock);
+    } catch (...) {
+        unregister();
+        throw;
+    }
+    unregister();
+}
+}  // namespace
+
 BufferPool::BufferPool(const std::string& filename, size_t numFrames, size_t pageSize)
     : filename_(filename), numFrames_(numFrames == 0 ? 1 : numFrames),
       pageSize_(pageSize), clockHand_(0) {
@@ -158,11 +186,9 @@ void BufferPool::close(bool flushPages) {
     std::unique_lock<std::mutex> lock(mutex_);
     // Drain in-flight loads: a loader still holds a Frame& reference and a
     // spare-buffer copy pending memcpy into a frame that close() clears.
-    std::condition_variable cv;
     while (!loadingPages_.empty()) {
         const uint32_t pid = loadingPages_.begin()->first;
-        loadWaiters_[pid].push_back(&cv);
-        cv.wait(lock);
+        waitForPageLoadChange(lock, loadWaiters_, pid);
     }
     if (fd_ >= 0) {
         // Flush under the same lock as close.  Destructors cannot propagate
@@ -185,10 +211,8 @@ void BufferPool::invalidatePage(uint32_t pageId) {
     // If a peer thread is mid-load for this page, wait it out: publishing
     // after our erase would resurrect the invalidated page, and resetting
     // the frame underneath the loader would recycle its buffer.
-    std::condition_variable cv;
     while (loadingPages_.count(pageId)) {
-        loadWaiters_[pageId].push_back(&cv);
-        cv.wait(lock);
+        waitForPageLoadChange(lock, loadWaiters_, pageId);
     }
     auto it = pageMap_.find(pageId);
     if (it == pageMap_.end()) return;
@@ -236,8 +260,7 @@ void BufferPool::invalidateAll() {
         // Register on one in-flight page; notified loads erase their waiter
         // lists, so re-register until the map drains.
         const uint32_t pid = loadingPages_.begin()->first;
-        loadWaiters_[pid].push_back(&cv);
-        cv.wait(lock);
+        waitForPageLoadChange(lock, loadWaiters_, pid);
     }
     // Orphaned frames are unwound by their readers' unpins; a fresh
     // invalidateAll must not race them, so wait for those too.
@@ -410,13 +433,9 @@ char* BufferPool::tryPinCached(uint32_t pageId) {
     while (true) {
         auto lit = loadingPages_.find(pageId);
         if (lit != loadingPages_.end()) {
-            // Another thread is loading this page right now: wait for it.
-            // Stack cv is safe: we only return after being notified AND
-            // erasing ourselves is unnecessary — publishLoad/failLoad erase
-            // the whole waiter list before notifying.
-            std::condition_variable cv;
-            loadWaiters_[pageId].push_back(&cv);
-            cv.wait(lock);
+            // A wake may finish an earlier load generation or be spurious.
+            // End that registration before rechecking the current owner.
+            waitForPageLoadChange(lock, loadWaiters_, pageId);
             continue;  // re-check cache (and loadingPages_) after wakeup
         }
         auto it = pageMap_.find(pageId);
@@ -493,11 +512,7 @@ char* BufferPool::fetchPage(uint32_t pageId) {
             return frame.data.data();
         }
         if (loadingPages_.count(pageId)) {
-            std::condition_variable cv;
-            loadWaiters_[pageId].push_back(&cv);
-            // Keep this registered cv alive across spurious wakeups. The
-            // loader removes its waiter list before notifying it.
-            cv.wait(lock, [&] { return !loadingPages_.count(pageId); });
+            waitForPageLoadChange(lock, loadWaiters_, pageId);
             continue;
         }
         if (orphanedPins_.count(pageId)) {
