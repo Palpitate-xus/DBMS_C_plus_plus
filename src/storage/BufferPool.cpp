@@ -519,48 +519,58 @@ char* BufferPool::fetchPage(uint32_t pageId) {
     f.dirty = false;
     f.pinCount = 1;   // this thread owns the frame while loading
     f.usageCount = 3;
-    loadingPages_[pageId] = idx;
+    // The reserved frame is not caller-owned until publication succeeds.
+    // Allocation, IO adapters and validators may throw after reservation;
+    // roll back that private state and wake peers before preserving the
+    // original exception. close()/invalidate must not wait on a dead loader.
+    try {
+        loadingPages_[pageId] = idx;
 
-    // Read into a PRIVATE scratch buffer WITHOUT the lock, then copy into
-    // the reserved frame. pread on a cold file can take milliseconds;
-    // holding mutex_ through it serialized every concurrent cache hit, and
-    // a shared scratch buffer would race with a concurrent loader.
-    std::vector<char> scratch(pageSize_);
-    lock.unlock();
-    bool fullPageRead = false;
-    const bool readOk = readFromDisk(pageId, scratch.data(), &fullPageRead);
-    lock.lock();
-    if (!readOk) {
-        failLoad(pageId, idx);
-        return nullptr;
-    }
-    std::memcpy(f.data.data(), scratch.data(), pageSize_);
-    // Another loader may have published this page while we held the lock
-    // off. Only one frame may own the page; the loser retires its frame and
-    // redirects to the winner so no mapping ever points at two buffers.
-    {
-        auto pit = pageMap_.find(pageId);
-        if (pit != pageMap_.end() && pit->second != idx) {
-            const size_t winner = pit->second;
-            // Give our pin to the winner's frame.
-            frames_[winner].pinCount++;
-            frames_[winner].usageCount = 3;
-            // Retire our frame (it was only ever ours; readers never saw it).
-            f.pageId = static_cast<uint32_t>(-1);
-            f.pinCount = 0;
-            f.usageCount = 0;
-            f.dirty = false;
-            loadingPages_.erase(pageId);
-            auto w = loadWaiters_.find(pageId);
-            if (w != loadWaiters_.end()) {
-                for (auto* cv : w->second) cv->notify_all();
-                loadWaiters_.erase(w);
-            }
-            return frames_[winner].data.data();
+        // Read into a PRIVATE scratch buffer WITHOUT the lock, then copy into
+        // the reserved frame. pread on a cold file can take milliseconds;
+        // holding mutex_ through it serialized every concurrent cache hit, and
+        // a shared scratch buffer would race with a concurrent loader.
+        std::vector<char> scratch(pageSize_);
+        lock.unlock();
+        bool fullPageRead = false;
+        const bool readOk = readFromDisk(pageId, scratch.data(), &fullPageRead);
+        lock.lock();
+        if (!readOk) {
+            failLoad(pageId, idx);
+            return nullptr;
         }
+        std::memcpy(f.data.data(), scratch.data(), pageSize_);
+        // Another loader may have published this page while we held the lock
+        // off. Only one frame may own the page; the loser retires its frame and
+        // redirects to the winner so no mapping ever points at two buffers.
+        {
+            auto pit = pageMap_.find(pageId);
+            if (pit != pageMap_.end() && pit->second != idx) {
+                const size_t winner = pit->second;
+                // Give our pin to the winner's frame.
+                frames_[winner].pinCount++;
+                frames_[winner].usageCount = 3;
+                // Retire our frame (it was only ever ours; readers never saw it).
+                f.pageId = static_cast<uint32_t>(-1);
+                f.pinCount = 0;
+                f.usageCount = 0;
+                f.dirty = false;
+                loadingPages_.erase(pageId);
+                auto w = loadWaiters_.find(pageId);
+                if (w != loadWaiters_.end()) {
+                    for (auto* cv : w->second) cv->notify_all();
+                    loadWaiters_.erase(w);
+                }
+                return frames_[winner].data.data();
+            }
+        }
+        if (!publishLoadedPage(pageId, idx, fullPageRead)) return nullptr;
+        return f.data.data();
+    } catch (...) {
+        if (!lock.owns_lock()) lock.lock();
+        failLoad(pageId, idx);
+        throw;
     }
-    if (!publishLoadedPage(pageId, idx, fullPageRead)) return nullptr;
-    return f.data.data();
 }
 
 void BufferPool::markDirty(uint32_t pageId) {
