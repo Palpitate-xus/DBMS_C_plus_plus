@@ -1,5 +1,16 @@
 # User-deferred scope and ordinary incomplete work
 
+On 2026-10-24 the user explicitly said "skip it" while R244 retained Bind-time
+planning was active. R244 remains unresolved and user-deferred; its fifteen
+phase observations, nine differences and implementation plan remain in
+[the R244 record](issue-review-r244-bind-planning.md). The unverified prototype
+was archived, its two private builds stopped, and only its own workspace edits
+removed. All 3012 pre-existing working-file hashes and the original staging
+diff were restored exactly. No R244 production fix is accepted. A generic
+continuation does not resume this module or defer other ordinary SQL/storage
+correctness work. The original273 ledger and its15 original deferred items
+remain unchanged.
+
 On 2026-10-20 the user again said "skip it" while R180 POSITION grammar,
 SQL routine identity and native argument conventions were active. R180 is
 unresolved and user-deferred. Its complete24 observations and proposed repair
