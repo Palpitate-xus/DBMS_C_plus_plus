@@ -154,6 +154,7 @@ std::vector<uint8_t> divideByPowerOf10(const std::vector<uint8_t>& d, int drop) 
 Numeric::Numeric(int64_t v) {
     if (v == 0) {
         digits_ = {0};
+        precision_ = 1;
         return;
     }
     sign_ = (v > 0) ? 1 : -1;

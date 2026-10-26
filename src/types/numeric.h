@@ -15,7 +15,7 @@ class Numeric {
 public:
     enum class RoundingMode { HalfUp };
 
-    Numeric() = default;
+    Numeric() : Numeric(int64_t{0}) {}
     explicit Numeric(int64_t v);
     explicit Numeric(const std::string& s);
 
