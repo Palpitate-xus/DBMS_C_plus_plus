@@ -16,13 +16,64 @@
 
 extern dbms::StorageEngine g_engine;
 
+namespace {
+// Test-only polling primitive. The callbacks make transient observations
+// reproducible without depending on the operating system scheduler.
+template <class Done, class HasWait, class Expired, class Pause>
+bool observeLockWait(Done done, HasWait hasWait, Expired expired, Pause pause) {
+    bool observed = false;
+    while (!done() && !(observed = hasWait()) && !expired()) pause();
+    return observed;
+}
+
+int observationReplayControls() {
+    int controls = 0, failures = 0;
+    const auto check = [&](bool good, const char* family, int prefix) {
+        ++controls;
+        if (!good) {
+            ++failures;
+            std::cerr << "VACUUM_WAIT_REPLAY_FAIL " << family
+                      << " prefix=" << prefix << '\n';
+        }
+    };
+    for (int prefix = 0; prefix < 16; ++prefix) {
+        int reads = 0;
+        const bool transient = observeLockWait([] { return false; },
+            [&] { return reads++ == prefix; }, [] { return false; }, [] {});
+        check(transient, "positive-snapshot-followed-by-empty", prefix);
+        reads = 0;
+        const bool stable = observeLockWait([] { return false; },
+            [&] { return reads++ >= prefix; }, [] { return false; }, [] {});
+        check(stable, "stable-positive-snapshot", prefix);
+        reads = 0;
+        const bool absent = observeLockWait([] { return false; },
+            [&] { ++reads; return false; }, [&] { return reads > prefix; }, [] {});
+        check(!absent, "no-wait-before-deadline", prefix);
+    }
+    for (int prefix = 0; prefix < 8; ++prefix) {
+        int reads = 0;
+        const bool afterDone = observeLockWait([&] { return reads >= prefix; },
+            [&] { return reads++ >= prefix; }, [] { return false; }, [] {});
+        check(!afterDone, "wait-only-after-completion", prefix);
+        reads = 0;
+        const bool afterDeadline = observeLockWait([] { return false; },
+            [&] { return reads++ > prefix; }, [&] { return reads > prefix; }, [] {});
+        check(!afterDeadline, "wait-only-after-deadline-exit", prefix);
+    }
+    std::cout << "VACUUM_WAIT_OBSERVATION_COMPLETE " << controls
+              << " FAILURES " << failures << '\n';
+    return failures;
+}
+} // namespace
+
 int main() {
     using namespace dbms;
     TypeRegistry::instance().bootstrap();
+    const int observationFailures = observationReplayControls();
     size_t controls = 0, failures = 0, cases = 0;
     const auto check = [&](bool good, const std::string& label) {
         ++controls;
-        if (!good) { ++failures; std::cerr << "VACUUM_PAGE_LOCK_FAIL " << label << '\n'; }
+        if (!good) { ++failures; std::cerr << "VACUUM_PAGE_LOCK_FAIL " << label << " case=" << cases << '\n'; }
     };
     const std::string database = testDbPath("vacuum_page_lock");
     check(g_engine.createDatabase(database) == DBStatus::OK, "create isolated database");
@@ -107,10 +158,19 @@ int main() {
             finished.store(true, std::memory_order_release);
         });
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-        while (!finished.load(std::memory_order_acquire) && locks.getLockWaits().empty() &&
-               std::chrono::steady_clock::now() < deadline)
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        const bool waited = !locks.getLockWaits().empty();
+        size_t waitSamples = 0, positiveSamples = 0;
+        bool lastSample = false;
+        const bool waited = observeLockWait(
+            [&] { return finished.load(std::memory_order_acquire); },
+            [&] {
+                ++waitSamples;
+                lastSample = !locks.getLockWaits().empty();
+                if (lastSample) ++positiveSamples;
+                return lastSample;
+            },
+            [&] { return std::chrono::steady_clock::now() >= deadline; },
+            [] { std::this_thread::sleep_for(std::chrono::milliseconds(1)); });
+        const bool finishedAtObservation = finished.load(std::memory_order_acquire);
         check(waited, "real wait edge precedes completion while page is owned");
         if (outcome == "cancel") interrupt->cancelRequested.store(true, std::memory_order_release);
         if (outcome != "success") {
@@ -120,15 +180,26 @@ int main() {
         }
         // Once a real waiter or completed old invocation is observed, this
         // specific page is stable. The wall deadline is a hang guard only.
-        bool unchanged = false;
-        if (waited || finished.load(std::memory_order_acquire)) {
+        bool unchanged = false, byteComparisonRan = false, fetched = false;
+        const bool finishedAtByteGate = finished.load(std::memory_order_acquire);
+        if (waited || finishedAtByteGate) {
+            byteComparisonRan = true;
             bytes = allocator->fetchPage(target);
+            fetched = bytes != nullptr;
             unchanged = bytes && std::string(bytes, allocator->pageSize()) == originalBytes;
             if (bytes) allocator->unpinPage(target);
         }
         check(unchanged, "VACUUM never changes bytes under another reader/writer page lock");
         locks.pageUnlock(database, table, target);
         vacuum.join();
+        std::cerr << "VACUUM_WAIT_TRACE case=" << cases << " workers=" << workers
+                  << " shared=" << sharedHolder << " outcome=" << outcome
+                  << " page=" << target << " samples=" << waitSamples
+                  << " positives=" << positiveSamples << " last=" << lastSample
+                  << " waited=" << waited << " finishedAtObservation=" << finishedAtObservation
+                  << " finishedAtBytes=" << finishedAtByteGate << " compared=" << byteComparisonRan
+                  << " fetched=" << fetched << " unchanged=" << unchanged
+                  << " state=" << state << '\n';
         check(state == (outcome == "timeout" ? "55P03" : outcome == "cancel" ? "57014" : ""),
               "precise success/lock-timeout/cancellation result, no worker terminate");
         check(inherited && preserved, "callee releases only its own locks and preserves caller depth/mode");
@@ -146,5 +217,5 @@ int main() {
     cleanupTestDb("vacuum_page_lock");
     if (controls != 119) { ++failures; std::cerr << "VACUUM_PAGE_LOCK_BAD_REACH " << controls << '\n'; }
     std::cout << "VACUUM_PAGE_LOCK_NATIVE_COMPLETE " << controls << " FAILURES " << failures << '\n';
-    return failures ? 1 : 0;
+    return (failures || observationFailures) ? 1 : 0;
 }
