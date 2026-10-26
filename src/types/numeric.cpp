@@ -572,6 +572,14 @@ Numeric Numeric::divideMagnitudes(const Numeric& a, const Numeric& b, int extraS
 Numeric Numeric::withScale(int newScale, RoundingMode mode) const {
     (void)mode; // only half-up implemented
     if (nan_ || inf_) return *this;
+    // Zero keeps a single magnitude digit. Within the parser scale domain,
+    // padding display zeros cannot overflow its significant-digit budget.
+    // Larger scales still follow the existing admission checks below.
+    if (newScale <= kMaxPrecision && isAllZero(digits_)) {
+        Numeric zero(0);
+        zero.scale_ = std::max(0, newScale);
+        return zero;
+    }
     Numeric r;
     if (newScale >= scale_) {
         const int64_t addedDigits =

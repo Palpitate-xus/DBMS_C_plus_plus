@@ -29,6 +29,11 @@ def main():
         assert query("SELECT id,v FROM numeric_zero_values ORDER BY id;") == [["1", "0.00"], ["2", "0.000"]]
         assert query("SELECT count(DISTINCT v) FROM numeric_zero_values;") == [["1"]]
         assert query("SELECT 42;") == [["42"]]
+        boundary_spec = importlib.util.spec_from_file_location(
+            "numeric_zero_boundary", root / "tests/compat/numeric_zero_scale_boundary.py")
+        boundary = importlib.util.module_from_spec(boundary_spec)
+        boundary_spec.loader.exec_module(boundary)
+        boundary.run(client, runner, server=server)
         print("[NUMERIC ZERO SCALE PROTOCOL E2E] passed")
     finally:
         runner.stop_ours(server)
