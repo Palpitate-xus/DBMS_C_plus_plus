@@ -280,32 +280,23 @@ bool PgPage::get(OffsetNumber linePtr, const char*& data, size_t& len) const {
     uint16_t n = numLinePointers();
     if (linePtr > n) return false;
 
-    const ItemIdData* id = itemId(linePtr);
-    uint16_t flags = getLpFlags(id);
-
-    // Follow HOT redirect chain (with simple cycle guard)
-    if (flags == LP_REDIRECT) {
-        OffsetNumber target = getLpOff(id);
-        for (int guard = 0; guard < 16 && target != 0 && target <= n; ++guard) {
-            const ItemIdData* tid = itemId(target);
-            if (getLpFlags(tid) != LP_REDIRECT) {
-                id = tid;
-                flags = getLpFlags(id);
-                linePtr = target;
-                break;
-            }
-            target = getLpOff(tid);
+    // A valid acyclic chain may visit every line pointer on this page.
+    // Bound traversal by the page's slot count, not an arbitrary hop limit;
+    // a chain still redirected after n visits must contain a cycle.
+    for (uint16_t visited = 0; visited < n; ++visited) {
+        const ItemIdData* id = itemId(linePtr);
+        const uint16_t flags = getLpFlags(id);
+        if (flags == LP_NORMAL) {
+            data = buf_ + getLpOff(id);
+            len = getLpLen(id);
+            return true;
         }
-        if (flags == LP_REDIRECT) return false;
+        if (flags != LP_REDIRECT) return false;
+        const OffsetNumber target = getLpOff(id);
+        if (target == 0 || target > n) return false;
+        linePtr = target;
     }
-
-    if (flags != LP_NORMAL) return false;
-
-    uint16_t off = getLpOff(id);
-    uint16_t l = getLpLen(id);
-    data = buf_ + off;
-    len = l;
-    return true;
+    return false;
 }
 
 // ============================================================================
