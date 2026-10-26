@@ -250,7 +250,13 @@ std::string LargeObjectManager::read(int loId, size_t offset, size_t length) con
             fd, data.data() + received, chunk,
             static_cast<off_t>(offset + received));
         if (count < 0 && errno == EINTR) continue;
-        if (count <= 0) break;
+        if (count < 0) {
+            // A hard error must not turn a failed blob read into a seemingly
+            // valid prefix. Keep the existing empty-string error result.
+            (void)::close(fd);
+            return "";
+        }
+        if (count == 0) break;
         received += static_cast<size_t>(count);
     }
     (void)::close(fd);
