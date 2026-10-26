@@ -253,7 +253,9 @@ bool PgPage::restore(OffsetNumber linePtr) {
 // ============================================================================
 
 bool PgPage::redirect(OffsetNumber fromLinePtr, OffsetNumber toLinePtr) {
-    if (fromLinePtr == 0 || toLinePtr == 0) return false;
+    // A self redirect discards the tuple and leaves an unreadable cycle.
+    // Reject it before changing the line pointer or page checksum.
+    if (fromLinePtr == 0 || toLinePtr == 0 || fromLinePtr == toLinePtr) return false;
     uint16_t n = numLinePointers();
     if (fromLinePtr > n || toLinePtr > n) return false;
 
