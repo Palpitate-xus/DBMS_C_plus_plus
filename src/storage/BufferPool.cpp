@@ -753,6 +753,13 @@ bool BufferPool::flushPage(uint32_t pageId) {
     const auto it = pageMap_.find(pageId);
     if (it == pageMap_.end()) return true;  // not cached: nothing to write
     Frame& frame = frames_[it->second];
+    if (writeLastPage_.has_value() && pageId == *writeLastPage_) {
+        // A structural rewrite is never an independent page write: even
+        // previously evicted data must cross the first durability barrier.
+        // Force the requested rewrite when clean, and retain it on failure.
+        frame.dirty = true;
+        return flushUnlocked();
+    }
     if (writebackBarrier_ && !writebackBarrier_()) {
         frame.dirty = true;
         return false;
