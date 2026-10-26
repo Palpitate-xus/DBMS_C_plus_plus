@@ -159,26 +159,42 @@ int LargeObjectManager::create() {
     if (!ready_) return 0;
     while (nextId_ > 0) {
         const int id = nextId_;
+
+        // Complete every potentially allocating preparation before attempting
+        // to create a canonical file or consuming an available ID.
+        const std::filesystem::path path(loPath(id));
+        const auto parent = parentDirectory(path);
+        const auto cached = sizes_.find(id);
+        std::map<int, size_t> prepared;
+        if (cached == sizes_.end()) prepared.emplace(id, 0);
+        const auto publishSize = [&](size_t bytes) {
+            if (cached != sizes_.end()) {
+                cached->second = bytes;
+            } else {
+                // Both maps use the same stateless allocator. Transferring
+                // the prepared node does not allocate after publication.
+                prepared.begin()->second = bytes;
+                sizes_.insert(prepared.extract(prepared.begin()));
+            }
+        };
         nextId_ = id == std::numeric_limits<int>::max() ? 0 : id + 1;
 
         // Materialize the zero-length object and reserve its ID atomically.
         // This also protects separate manager instances from choosing the
         // same ID when they were constructed concurrently.
-        const std::string path = loPath(id);
         const int fd = ::open(path.c_str(),
                               O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC,
                               0600);
         if (fd >= 0) {
             bool durable = (::fsync(fd) == 0);
             if (::close(fd) != 0) durable = false;
-            const auto parent = parentDirectory(path);
             if (durable) durable = index_file::syncDirectory(parent);
             if (!durable) {
                 (void)::unlink(path.c_str());
                 (void)index_file::syncDirectory(parent);
                 return 0;
             }
-            sizes_[id] = 0;
+            publishSize(0);
             return id;
         }
         if (errno != EEXIST) return 0;
@@ -190,7 +206,7 @@ int LargeObjectManager::create() {
             objectStatus.st_size >= 0 &&
             static_cast<uintmax_t>(objectStatus.st_size) <=
                 std::numeric_limits<size_t>::max()) {
-            sizes_[id] = static_cast<size_t>(objectStatus.st_size);
+            publishSize(static_cast<size_t>(objectStatus.st_size));
         }
     }
     return 0;

@@ -276,7 +276,7 @@ bool caseRun(size_t bytes, Flow flow, size_t selected, bool closeError,
     const Outcome result = invoke(seed, flow, selected, closeError);
     const size_t leaked = descriptors();
     if (discovery) {
-        require(selected == noFailure && !closeError && result.allocations > 0, "allocation discovery");
+        require(selected == noFailure && !closeError && (result.allocations > 0 || flow == Flow::CreateCollision), "allocation discovery");
         discovery->count = result.allocations;
         discovery->sizes = fault.sizes;
         std::cout << "ALLOCATION_SITES bytes=" << bytes << " flow=" << static_cast<int>(flow) << " count=" << discovery->count;
@@ -284,11 +284,17 @@ bool caseRun(size_t bytes, Flow flow, size_t selected, bool closeError,
         std::cout << '\n';
     }
     bool good = leaked == 0 && fault.closes == 1 && fault.closeErrors == (closeError ? 1u : 0u);
-    if (selected != noFailure) {
+    const bool allocationFaultExpected = selected != noFailure && expectedSize != 0;
+    if (allocationFaultExpected) {
         require(fault.thrown == 1 && selected < result.allocations && fault.sizes[selected] == expectedSize, "exact allocation fault not reached");
         good = good && !result.success && (result.caughtBadAlloc || flow == Flow::Export);
         if (flow == Flow::CreateCollision) require(!fs::exists(seed.db / ".lobjects/lo_2.dat"), "failed collision created unexpected object");
     } else {
+        if (selected != noFailure) {
+            // A prepared cache node can eliminate this former fd-live site.
+            // Keep its controls, but never pretend an allocation was failed.
+            require(flow == Flow::CreateCollision && result.allocations == 0, "unexpected missing allocation site");
+        }
         good = good && fault.thrown == 0 && !result.caughtBadAlloc &&
             result.success == !(closeError && flow == Flow::Export);
         if (flow == Flow::Export) require(snapshot(seed.destination) == seed.data, "normal export bytes");
@@ -301,7 +307,7 @@ bool caseRun(size_t bytes, Flow flow, size_t selected, bool closeError,
     if (fault.liveFd >= 0 && isTarget(fault.liveFd)) require(::close(fault.liveFd) == 0, "cleanup observed private leak");
     fault.liveFd = fault.watchedFd = -1;
     require(descriptors() == 0, "private leak cleanup");
-    seed.healthyRetry(flow, selected == noFailure ? 3 : 2);
+    seed.healthyRetry(flow, allocationFaultExpected ? 2 : 3);
     return good;
 }
 
@@ -343,7 +349,7 @@ int main() {
                 continue;
             }
             allocationSites += discovery.count;
-            for (size_t ordinal = 0; ordinal < discovery.count; ++ordinal) {
+            for (size_t ordinal = 0; ordinal < std::max<size_t>(discovery.count, 1); ++ordinal) {
                 for (bool closeError : {false, true}) {
                     ++controls;
                     try { if (!caseRun(bytes, flow, ordinal, closeError, nullptr, discovery.sizes[ordinal])) ++failures; }
