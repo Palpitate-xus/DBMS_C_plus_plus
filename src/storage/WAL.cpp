@@ -429,26 +429,33 @@ void WALManager::releaseWalFileLock(int fd) {
     ::flock(fd, LOCK_UN);
 }
 
-// Single-stat check that the on-disk append offset still matches
+// Metadata check that the on-disk tail and its adjacent segment match
 // currentLsn_. Must run under the WAL file lock. Returns false when another
 // process appended (or the stream is damaged) and the caller must rebuild
 // state from disk.
 bool WALManager::validateAppendOffset() {
-    // A manager that has never appended must also verify that the stream is
-    // still empty on disk: another in-process or external writer may have
-    // created records since this manager's ensureOpen() observed an empty
-    // directory. Appending at LSN 0 would then overwrite existing data.
-    const uint32_t seg = currentLsn_ == 0 ? 0u : segmentNumber(currentLsn_ - 1);
+    // A cached empty stream has no retained segment against which to prove
+    // freshness. Rebuild it under the WAL lock, including retained prefixes.
+    if (currentLsn_ == 0) return false;
+    const uint32_t seg = segmentNumber(currentLsn_ - 1);
     std::error_code ec;
     const auto path = segmentPath(seg);
-    if (!std::filesystem::exists(path, ec) || ec) {
-        return currentLsn_ == 0;
-    }
-    auto size = std::filesystem::file_size(path, ec);
-    if (ec) return false;
-    if (size > kSegmentSize) return false;
+    if (!std::filesystem::exists(path, ec) || ec) return false;
+    const auto size = std::filesystem::file_size(path, ec);
+    if (ec || size > kSegmentSize) return false;
     const Lsn onDisk = static_cast<Lsn>(seg) * kSegmentSize + size;
-    return onDisk == currentLsn_;
+    if (onDisk != currentLsn_) return false;
+    if (seg == std::numeric_limits<uint32_t>::max()) return true;
+
+    // At a boundary, a peer can append into the next segment without changing
+    // the full previous file at all. A later segment beside a partial tail
+    // also invalidates this cache, even when a failed cleanup left it empty.
+    const auto next = segmentPath(seg + 1);
+    const bool exists = std::filesystem::exists(next, ec);
+    if (ec) return false;
+    if (!exists) return true;
+    const auto nextSize = std::filesystem::file_size(next, ec);
+    return !ec && segmentOffset(currentLsn_) == 0 && nextSize == 0;
 }
 
 std::filesystem::path WALManager::segmentPath(uint32_t segNo) const {
@@ -892,24 +899,130 @@ bool WALManager::closeWriteFd() {
 
 bool WALManager::appendBytes(const char* buf, size_t len) {
     if (!ensureOpen()) return false;
-    uint64_t offset = currentLsn_;
-    uint64_t remaining = len;
-    const char* ptr = buf;
-    while (remaining > 0) {
-        uint32_t segNo = segmentNumber(offset);
-        uint32_t off = segmentOffset(offset);
-        int fd = segmentWriteFd(segNo);
-        if (fd < 0) return false;
-        if (::lseek(fd, off, SEEK_SET) < 0) {
+    if (len == 0) return true;
+    const Lsn start = currentLsn_;
+    if (len > std::numeric_limits<Lsn>::max() - start) return false;
+    const uint64_t first = start / kSegmentSize;
+    const uint64_t last = (start + len - 1) / kSegmentSize;
+    constexpr size_t capacity = kMaxRecordPayload / kSegmentSize + 2;
+    if (last > std::numeric_limits<uint32_t>::max() ||
+        last - first + 1 > capacity) return false;
+
+    struct AppendSegment {
+        std::filesystem::path path;
+        int fd = -1;
+        bool existed = false;
+        bool modified = false;
+        off_t size = 0;
+        dev_t device = 0;
+        ino_t inode = 0;
+        ~AppendSegment() { if (fd >= 0) ::close(fd); }
+    };
+    std::array<AppendSegment, capacity> segments;
+    const size_t count = static_cast<size_t>(last - first + 1);
+    // Prepare all allocating paths and establish the rollback boundary before
+    // any byte is changed. Future segments may be absent or empty, never data
+    // belonging to a writer whose tail this manager has not refreshed.
+    for (size_t i = 0; i < count; ++i) {
+        auto& segment = segments[i];
+        segment.path = segmentPath(static_cast<uint32_t>(first + i));
+        segment.size = i == 0 ? static_cast<off_t>(start % kSegmentSize) : 0;
+        struct stat status{};
+        if (::stat(segment.path.c_str(), &status) == 0) {
+            if (!S_ISREG(status.st_mode) || status.st_size != segment.size)
+                return false;
+            segment.existed = true;
+            segment.device = status.st_dev;
+            segment.inode = status.st_ino;
+        } else if (errno != ENOENT) {
+            return false;
+        } else if (segment.size != 0) {
             return false;
         }
-        uint64_t chunk = std::min(remaining, kSegmentSize - off);
-        ssize_t wrote = ::write(fd, ptr, static_cast<size_t>(chunk));
-        if (wrote < 0 || static_cast<uint64_t>(wrote) != chunk) return false;
-        ptr += chunk;
-        offset += chunk;
-        remaining -= chunk;
     }
+    const auto sync = [](int fd) {
+        int result;
+        do { result = ::fsync(fd); } while (result != 0 && errno == EINTR);
+        return result == 0;
+    };
+    const auto rollback = [&]() {
+        bool ok = true;
+        bool removed = false;
+        for (size_t i = 0; i < count; ++i) {
+            auto& segment = segments[i];
+            if (segment.fd < 0) continue;
+            if (segment.existed && segment.modified) {
+                int result;
+                do { result = ::ftruncate(segment.fd, segment.size); }
+                while (result != 0 && errno == EINTR);
+                if (result != 0 || !sync(segment.fd)) ok = false;
+            }
+        }
+        // Remove new names from the end. If unlink itself fails, keep the
+        // preceding new names as well: no hole may hide the damaged suffix
+        // from another manager's adjacent-segment refresh check.
+        for (size_t i = count; i-- > 0;) {
+            auto& segment = segments[i];
+            if (segment.fd < 0 || segment.existed) continue;
+            int result;
+            do { result = ::unlink(segment.path.c_str()); }
+            while (result != 0 && errno == EINTR);
+            if (result == 0) removed = true;
+            else if (errno != ENOENT) { ok = false; break; }
+        }
+        if (removed && !sync(directoryFd_)) ok = false;
+        // A failed cleanup cannot be trusted by the hot append fast path.
+        // Reopening must validate the actual on-disk stream before reuse.
+        if (!ok) open_ = false;
+        return false;
+    };
+
+    size_t written = 0;
+    for (size_t i = 0; i < count; ++i) {
+        auto& segment = segments[i];
+        const uint32_t number = static_cast<uint32_t>(first + i);
+        struct stat cached{};
+        if (writeFdValid_ && writeFd_ >= 0 && writeFdSeg_ == number &&
+            segment.existed && ::fstat(writeFd_, &cached) == 0 &&
+            cached.st_dev == segment.device && cached.st_ino == segment.inode &&
+            cached.st_size == segment.size) {
+            segment.fd = writeFd_;
+            writeFd_ = -1;
+            writeFdValid_ = false;
+        } else {
+            closeWriteFd();
+            const int flags = O_WRONLY | (segment.existed ? 0 : O_CREAT | O_EXCL);
+            do { segment.fd = ::open(segment.path.c_str(), flags, 0644); }
+            while (segment.fd < 0 && errno == EINTR);
+            if (segment.fd < 0) return rollback();
+            struct stat opened{};
+            if (::fstat(segment.fd, &opened) != 0 ||
+                !S_ISREG(opened.st_mode) || opened.st_size != segment.size ||
+                (segment.existed && (opened.st_dev != segment.device ||
+                                     opened.st_ino != segment.inode))) {
+                return rollback();
+            }
+        }
+        if (::lseek(segment.fd, segment.size, SEEK_SET) < 0) return rollback();
+        const size_t chunk = static_cast<size_t>(std::min<uint64_t>(
+            len - written, kSegmentSize - static_cast<uint64_t>(segment.size)));
+        size_t complete = 0;
+        while (complete < chunk) {
+            const ssize_t n = ::write(segment.fd, buf + written + complete,
+                                      chunk - complete);
+            if (n < 0 && errno == EINTR) continue;
+            if (n <= 0) return rollback();
+            segment.modified = true;
+            complete += static_cast<size_t>(n);
+        }
+        written += chunk;
+    }
+    // Retain only the last descriptor as the normal cached append fd. The
+    // local owners close earlier segments on success and all on failure.
+    writeFd_ = segments[count - 1].fd;
+    segments[count - 1].fd = -1;
+    writeFdSeg_ = static_cast<uint32_t>(last);
+    writeFdValid_ = true;
     return true;
 }
 
@@ -973,7 +1086,7 @@ Lsn WALManager::XLogInsert(uint8_t rmid, uint8_t info, uint64_t xid,
     std::lock_guard<std::mutex> processLock(*dirMutex_);
     const int walLock = acquireWalFileLock();
     if (walLock < 0) return INVALID_LSN;
-    // Cheap single-stat guard: if another process appended behind our back,
+    // Tail/adjacent-segment guard: if another process appended behind our back,
     // rebuild the tail state from disk instead of silently overwriting.
     if (!validateAppendOffset()) {
         if (!refreshCurrentLsnFromDisk() || !scanWalTail()) {

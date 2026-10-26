@@ -67,15 +67,17 @@ PG continuation/page header、日志padding后的扫描策略或完整并发writ
 新夹具不在StorageEngine恢复的每一阶段注入故障，普通恢复回归也不能证明全部窗口。
 R257及其他所有用户暂缓项保持暂缓；不push，GitHub Actions保持禁用。
 
-## 下一项已观察：append短写（未修复）
+## R259提交时的相邻观察：append短写（后续由R260有限修复）
 
-在当前纯投影WAL对象上另跑3组私有手工观察，实际转发write并按段inode仅限制首次
+以下为R259提交时的历史观察；后续[R260](issue-review-r260-wal-append-recovery.md)已有完整246项及有限回退修复，不代表整个WAL恢复协议闭合。
+
+在当时纯投影WAL对象上另跑3组私有手工观察，实际转发write并按段inode仅限制首次
 成功传输为7字节，或注入首次EINTR。完整32字节seed之后：正常append成功，文件
 64字节且可重试/重开；短写时append返回INVALID_LSN、内存尾仍32、文件实为39，
 健康重试仍失败、全新WALManager打开也失败；EINTR返回失败但文件仍32，健康重试
 和重开成功。诊断进程退出0只表示3组采集完成，不是产品正确性通过。
 
-此项尚无正式全矩阵/Root对照或生产修复，不能把R259读取通过当作append已修好。
+R259当时此项尚无正式全矩阵/Root对照或生产修复，不能把R259读取通过当作append已修好。
 修改方法：先覆盖write短传输与EINTR的完整追加，再验证部分写入后硬错误的尾部
 回退/恢复状态、跨段及peer重试；仅对短写返回false而留下不可打开的尾部不够。
 观察器、原始日志和匹配对象凭据保存在证据目录的`append_observation.cpp`及
