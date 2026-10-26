@@ -303,14 +303,13 @@ bool LargeObjectManager::drop(int loId) {
     // removal is durable. If the directory barrier fails, a hard link can
     // restore the original name without copying a potentially huge object or
     // overwriting a concurrently-created replacement.
-    const std::string templateName = (parent /
+    // Prepare all name storage before creating a file. Reconstructing a path
+    // after mkstemp could throw and strand the empty reservation on disk.
+    std::string backup = (parent /
         (".lo_drop_" + std::to_string(loId) + "_XXXXXX")).string();
-    std::vector<char> temporaryName(templateName.begin(), templateName.end());
-    temporaryName.push_back('\0');
-    const int reservationFd = ::mkstemp(temporaryName.data());
+    const int reservationFd = ::mkstemp(backup.data());
     if (reservationFd < 0) return false;
     const bool reservationClosed = (::close(reservationFd) == 0);
-    const std::filesystem::path backup(temporaryName.data());
     if (!reservationClosed) {
         (void)::unlink(backup.c_str());
         return false;
