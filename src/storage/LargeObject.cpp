@@ -23,6 +23,27 @@ std::filesystem::path parentDirectory(const std::filesystem::path& path) {
         ? std::filesystem::path(".") : path.parent_path();
 }
 
+// Own a descriptor immediately, before any subsequent allocation can throw.
+// Explicit close relinquishes ownership even on an error; retrying close can
+// accidentally close a reused descriptor on systems where it already closed.
+class OwnedObjectFd {
+public:
+    explicit OwnedObjectFd(int fd) noexcept : fd_(fd) {}
+    ~OwnedObjectFd() noexcept { (void)close(); }
+    OwnedObjectFd(const OwnedObjectFd&) = delete;
+    OwnedObjectFd& operator=(const OwnedObjectFd&) = delete;
+
+    int close() noexcept {
+        if (fd_ < 0) return 0;
+        const int fd = fd_;
+        fd_ = -1;
+        return ::close(fd);
+    }
+
+private:
+    int fd_;
+};
+
 int openRegularObject(const std::filesystem::path& path, int flags) {
     const int fd = ::open(path.c_str(), flags | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) return -1;
@@ -111,6 +132,7 @@ LargeObjectManager::LargeObjectManager(const std::string& dbPath) : dbPath_(dbPa
                 if (parsed.ec == std::errc{} && parsed.ptr == last && id > 0) {
                     const int fileFd = openRegularObject(
                         entry->path(), O_RDONLY);
+                    OwnedObjectFd fileOwner(fileFd);
                     struct stat objectStatus {};
                     if (fileFd >= 0 &&
                         ::fstat(fileFd, &objectStatus) == 0 &&
@@ -125,7 +147,6 @@ LargeObjectManager::LargeObjectManager(const std::string& dbPath) : dbPath_(dbPa
                             nextId_ = id + 1;
                         }
                     }
-                    if (fileFd >= 0) (void)::close(fileFd);
                 }
             }
         }
@@ -163,6 +184,7 @@ int LargeObjectManager::create() {
         if (errno != EEXIST) return 0;
 
         const int fileFd = openRegularObject(path, O_RDONLY);
+        OwnedObjectFd fileOwner(fileFd);
         struct stat objectStatus {};
         if (fileFd >= 0 && ::fstat(fileFd, &objectStatus) == 0 &&
             objectStatus.st_size >= 0 &&
@@ -170,7 +192,6 @@ int LargeObjectManager::create() {
                 std::numeric_limits<size_t>::max()) {
             sizes_[id] = static_cast<size_t>(objectStatus.st_size);
         }
-        if (fileFd >= 0) (void)::close(fileFd);
     }
     return 0;
 }
@@ -218,26 +239,23 @@ std::string LargeObjectManager::read(int loId, size_t offset, size_t length) con
     if (!fitsOffset(offset)) return "";
     const int fd = openRegularObject(path, O_RDONLY);
     if (fd < 0) return "";
+    OwnedObjectFd readOwner(fd);
     struct stat status {};
     if (::fstat(fd, &status) != 0 || status.st_size <= 0) {
-        (void)::close(fd);
         return "";
     }
     if (static_cast<uintmax_t>(status.st_size) >
         std::numeric_limits<size_t>::max()) {
-        (void)::close(fd);
         return "";
     }
     const size_t fileSize = static_cast<size_t>(status.st_size);
     if (offset >= fileSize) {
-        (void)::close(fd);
         return "";
     }
     const size_t toRead = length == 0
         ? fileSize - offset : std::min(length, fileSize - offset);
     std::string data;
     if (toRead > data.max_size()) {
-        (void)::close(fd);
         return "";
     }
     data.resize(toRead);
@@ -253,13 +271,11 @@ std::string LargeObjectManager::read(int loId, size_t offset, size_t length) con
         if (count < 0) {
             // A hard error must not turn a failed blob read into a seemingly
             // valid prefix. Keep the existing empty-string error result.
-            (void)::close(fd);
             return "";
         }
         if (count == 0) break;
         received += static_cast<size_t>(count);
     }
-    (void)::close(fd);
     data.resize(received);
     return data;
 }
@@ -424,9 +440,9 @@ bool LargeObjectManager::exportFile(int loId, const std::string& filePath) const
     // would report success and truncate the destination on source failure.
     const int sourceFd = openRegularObject(loPath(loId), O_RDONLY);
     if (sourceFd < 0) return false;
+    OwnedObjectFd sourceOwner(sourceFd);
     struct stat sourceStatus {};
     if (::fstat(sourceFd, &sourceStatus) != 0) {
-        (void)::close(sourceFd);
         return false;
     }
 
@@ -437,13 +453,11 @@ bool LargeObjectManager::exportFile(int loId, const std::string& filePath) const
     if (::stat(filePath.c_str(), &destinationStatus) == 0 &&
         sourceStatus.st_dev == destinationStatus.st_dev &&
         sourceStatus.st_ino == destinationStatus.st_ino) {
-        (void)::close(sourceFd);
         return true;
     }
 
     std::ofstream out(filePath, std::ios::binary | std::ios::trunc);
     if (!out) {
-        (void)::close(sourceFd);
         return false;
     }
     char buffer[64 * 1024];
@@ -459,7 +473,7 @@ bool LargeObjectManager::exportFile(int loId, const std::string& filePath) const
         out.write(buffer, bytes);
     }
     out.flush();
-    if (::close(sourceFd) != 0) readOk = false;
+    if (sourceOwner.close() != 0) readOk = false;
     return readOk && out.good();
 }
 
