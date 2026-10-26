@@ -362,8 +362,21 @@ bool LargeObjectManager::drop(int loId) {
 
 size_t LargeObjectManager::size(int loId) const {
     if (!ready_ || loId <= 0) return 0;
-    auto it = sizes_.find(loId);
-    return (it != sizes_.end()) ? it->second : 0;
+    // Another manager may have created, resized, imported or removed this
+    // object since construction. The local allocation catalog is not an
+    // authoritative source for the current length.
+    const auto known = sizes_.find(loId);
+    const size_t lastKnown = known == sizes_.end() ? 0 : known->second;
+    const int fd = openRegularObject(loPath(loId), O_RDONLY);
+    // Preserve the historical best-effort result on an inaccessible object;
+    // a confirmed absence, unlike an I/O failure, invalidates that result.
+    if (fd < 0) return errno == ENOENT ? 0 : lastKnown;
+    struct stat status {};
+    const bool valid = ::fstat(fd, &status) == 0 && status.st_size >= 0 &&
+        static_cast<uintmax_t>(status.st_size) <=
+            std::numeric_limits<size_t>::max();
+    (void)::close(fd);
+    return valid ? static_cast<size_t>(status.st_size) : lastKnown;
 }
 
 bool LargeObjectManager::importFile(int loId, const std::string& filePath) {
