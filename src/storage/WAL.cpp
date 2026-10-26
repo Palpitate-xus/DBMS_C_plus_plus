@@ -921,16 +921,30 @@ bool WALManager::readBytes(uint64_t offset, char* buf, size_t len) const {
         uint32_t off = segmentOffset(offset);
         auto path = segmentPath(segNo);
         if (!std::filesystem::exists(path)) return false;
-        int fd = ::open(path.c_str(), O_RDONLY);
+        int fd;
+        do {
+            fd = ::open(path.c_str(), O_RDONLY);
+        } while (fd < 0 && errno == EINTR);
         if (fd < 0) return false;
         if (::lseek(fd, off, SEEK_SET) < 0) {
             ::close(fd);
             return false;
         }
         uint64_t chunk = std::min(remaining, kSegmentSize - off);
-        ssize_t n = ::read(fd, ptr, static_cast<size_t>(chunk));
+        size_t received = 0;
+        while (received < chunk) {
+            const ssize_t n = ::read(fd, ptr + received,
+                                     static_cast<size_t>(chunk) - received);
+            if (n < 0 && errno == EINTR) continue;
+            // WAL needs the entire requested range: only a positive
+            // transfer advances it; real EOF and hard errors still fail.
+            if (n <= 0) {
+                ::close(fd);
+                return false;
+            }
+            received += static_cast<size_t>(n);
+        }
         ::close(fd);
-        if (n < 0 || static_cast<uint64_t>(n) != chunk) return false;
         ptr += chunk;
         offset += chunk;
         remaining -= chunk;
