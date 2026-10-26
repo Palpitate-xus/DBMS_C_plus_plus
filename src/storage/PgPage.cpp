@@ -314,7 +314,9 @@ bool PgPage::get(OffsetNumber linePtr, const char*& data, size_t& len) const {
 
 bool PgPage::update(OffsetNumber linePtr, const char* data, size_t len,
                     OffsetNumber* newLinePtr) {
-    if (linePtr == 0) return false;
+    // As with insert(), an empty tuple cannot be a valid live row. Reject
+    // before changing tuple bytes, line pointers, checksum or output slot.
+    if (linePtr == 0 || len == 0) return false;
     uint16_t n = numLinePointers();
     if (linePtr > n) return false;
 
