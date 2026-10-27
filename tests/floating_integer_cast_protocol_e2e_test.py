@@ -170,6 +170,8 @@ def main():
             wire.query("binary",f"SELECT CAST('-5e-324'::double precision AS {wire.target}) AS v",[0])
             wire.ready = b"I";wire.command("COMMIT","COMMIT")
         review.complete(2+len(SOURCES)*len(TARGETS)*(len(INPUTS)*len(MODES)+38+len(table_values)*len(MODES)+3*len(MODES))+len(TARGETS)*8)
+        from compat.integer_cast_text_input import run as run_text_input
+        run_text_input(review.client, review.runner, review.sock)
     finally:
         review.close()
 

@@ -3884,20 +3884,6 @@ static SignedIntegerParseResult parseSignedInteger(
     }
 }
 
-static bool integerFitsTarget(int64_t value, IntegerCastTarget target) {
-    switch (target) {
-        case IntegerCastTarget::SmallInt:
-            return value >= std::numeric_limits<int16_t>::min() &&
-                   value <= std::numeric_limits<int16_t>::max();
-        case IntegerCastTarget::Integer:
-            return value >= std::numeric_limits<int32_t>::min() &&
-                   value <= std::numeric_limits<int32_t>::max();
-        case IntegerCastTarget::BigInt:
-            return true;
-    }
-    return false;
-}
-
 static ExprValue castToInteger(const ExprValue& value,
                                IntegerCastTarget target) {
     const std::string sourceType = ExprHelper::canonicalResultTypeName(value.typeName);
@@ -4018,14 +4004,17 @@ static ExprValue castToInteger(const ExprValue& value,
             integerText = numeric->withScale(0).toString();
         }
 
-        const SignedIntegerParseResult parsed =
-            parseSignedInteger(integerText, converted);
-        if (parsed == SignedIntegerParseResult::Invalid)
+        // Integer text input has radix prefixes and digit separators, and
+        // overflow-vs-trailing-syntax precedence depends on the target width.
+        // Numeric input has already been rounded to an integral decimal above.
+        const unsigned bits = target == IntegerCastTarget::SmallInt ? 16U :
+                              target == IntegerCastTarget::Integer ? 32U : 64U;
+        const auto parsed = parsePostgresIntegerText(integerText, bits);
+        if (parsed.error == IntegerTextError::InvalidSyntax)
             throwIntegerCastSyntaxError(target, trimStr(value.value));
-        if (parsed == SignedIntegerParseResult::OutOfRange)
+        if (parsed.error == IntegerTextError::OutOfRange)
             throwIntegerCastRangeError(target);
-        if (!integerFitsTarget(converted, target))
-            throwIntegerCastRangeError(target);
+        converted = parsed.value;
     }
 
     return ExprValue(integerCastTypeName(target), std::to_string(converted),
