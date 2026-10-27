@@ -34,10 +34,10 @@ static void test_exclude_equality() {
     assert(g_engine.insert(db, "t", {{"id", "1"}, {"room", "101"}}) == dbms::DBStatus::OK);
     assert(g_engine.insert(db, "t", {{"id", "2"}, {"room", "102"}}) == dbms::DBStatus::OK);
     // Duplicate room should be rejected.
-    assert(g_engine.insert(db, "t", {{"id", "3"}, {"room", "101"}}) == dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.insert(db, "t", {{"id", "3"}, {"room", "101"}}) == dbms::DBStatus::EXCLUSION_VIOLATION);
 
     // Updating to a conflicting room should be rejected.
-    assert(g_engine.update(db, "t", {{"room", "101"}}, {"=id 2"}) == dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.update(db, "t", {{"room", "101"}}, {"=id 2"}) == dbms::DBStatus::EXCLUSION_VIOLATION);
     // Updating to a new room is OK.
     assert(g_engine.update(db, "t", {{"room", "103"}}, {"=id 2"}) == dbms::DBStatus::OK);
 
@@ -61,7 +61,7 @@ static void test_exclude_range_overlap() {
     assert(g_engine.insert(db, "t", {{"id", "1"}, {"room", "101"}, {"during", "[1,5)"}}) == dbms::DBStatus::OK);
     assert(g_engine.insert(db, "t", {{"id", "2"}, {"room", "102"}, {"during", "[5,10)"}}) == dbms::DBStatus::OK);
     // Overlapping range should be rejected.
-    assert(g_engine.insert(db, "t", {{"id", "3"}, {"room", "103"}, {"during", "[3,7)"}}) == dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.insert(db, "t", {{"id", "3"}, {"room", "103"}, {"during", "[3,7)"}}) == dbms::DBStatus::EXCLUSION_VIOLATION);
     // Adjacent non-overlapping range is OK.
     assert(g_engine.insert(db, "t", {{"id", "4"}, {"room", "104"}, {"during", "[10,15)"}}) == dbms::DBStatus::OK);
 
@@ -115,7 +115,7 @@ static void test_exclude_survives_table_rename() {
     assert(renamedConstraints[0].name == "no_dup_room");
     assert(g_engine.insert(
                db, "renamed_t", {{"id", "2"}, {"room", "101"}}) ==
-           dbms::DBStatus::INVALID_VALUE);
+           dbms::DBStatus::EXCLUSION_VIOLATION);
 
     // The renamed metadata is durable and the abandoned name is safe to
     // reuse without inheriting the old table's constraint.
@@ -165,7 +165,7 @@ static void test_alter_exclude_typed_bridge() {
     auto exclusions = g_engine.getExclusionConstraints(db, "t");
     assert(exclusions.size() == 1 && exclusions[0].name == "no_dup_room");
     assert(g_engine.insert(db, "t", {{"id", "1"}, {"room", "101"}}) == dbms::DBStatus::OK);
-    assert(g_engine.insert(db, "t", {{"id", "2"}, {"room", "101"}}) == dbms::DBStatus::INVALID_VALUE);
+    assert(g_engine.insert(db, "t", {{"id", "2"}, {"room", "101"}}) == dbms::DBStatus::EXCLUSION_VIOLATION);
 
     assert(!executeAlter("ALTER TABLE t DROP CONSTRAINT no_dup_room"));
     assert(g_engine.getExclusionConstraints(db, "t").empty());

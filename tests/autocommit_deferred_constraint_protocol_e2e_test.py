@@ -67,6 +67,11 @@ def main():
         query("ROLLBACK TO SAVEPOINT auto_sp;", ready=b"T")
         query("SELECT id FROM auto_child;", [], b"T")
         query("COMMIT;")
+        exclusion_spec = importlib.util.spec_from_file_location(
+            "exclusion_sqlstate", root / "tests/compat/exclusion_violation_sqlstate.py")
+        exclusion = importlib.util.module_from_spec(exclusion_spec)
+        exclusion_spec.loader.exec_module(exclusion)
+        exclusion.run(client, runner, server["sock"])
         print("[AUTOCOMMIT DEFERRED CONSTRAINT PROTOCOL E2E] passed")
     finally:
         runner.stop_ours(server)

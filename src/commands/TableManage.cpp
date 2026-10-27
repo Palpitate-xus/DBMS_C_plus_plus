@@ -26304,7 +26304,7 @@ DBStatus StorageEngine::insertInternal(
         bool scanFailed = false;
         if (checkExclusionConflict(
                 dbname, tablename, ec, strippedRow, -1, &scanFailed)) {
-            return failBeforeHeapInsert(DBStatus::INVALID_VALUE);
+            return failBeforeHeapInsert(DBStatus::EXCLUSION_VIOLATION);
         }
         if (scanFailed) return failBeforeHeapInsert(DBStatus::IO_ERROR);
     }
@@ -30349,7 +30349,7 @@ DBStatus StorageEngine::updateInternal(
             bool scanFailed = false;
             if (checkExclusionConflict(dbname, tablename, ec, strippedNewRow, rid, &scanFailed)) {
                 lockManager_.unlock(tablename);
-                return DBStatus::INVALID_VALUE;
+                return DBStatus::EXCLUSION_VIOLATION;
             }
             if (scanFailed) {
                 lockManager_.unlock(tablename);
