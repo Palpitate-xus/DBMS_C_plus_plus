@@ -3806,6 +3806,9 @@ std::string commandTagFor(const std::string& sql, const std::vector<std::string>
     if (keyword == "create") {
         SQLParser parser;
         const auto parsed = parser.parseForBinding(sql);
+        // Persistence modifiers and trivia do not name the created object.
+        if (parsed.isValid() &&
+            parsed.stmt->command == SqlCommand::CreateSequence) return "CREATE SEQUENCE";
         const auto* view = parsed.isValid()
             ? dynamic_cast<const CreateViewStmt*>(parsed.stmt.get()) : nullptr;
         // TEMP/TEMPORARY, OR REPLACE and trivia are syntax, not the object
