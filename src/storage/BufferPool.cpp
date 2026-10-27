@@ -92,21 +92,33 @@ bool BufferPool::openExisting() {
 bool BufferPool::openInternal(bool createIfMissing) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (fd_ >= 0) return true;
-    // close() intentionally releases the potentially large frame storage.
-    // A PageAllocator is nevertheless reusable, so rebuild that storage
-    // before any fetch indexes it by the configured frame count.
-    if (frames_.size() != numFrames_) initializeFramesUnlocked();
-    fd_ = ::open(filename_.c_str(), O_RDWR | (createIfMissing ? O_CREAT : 0), 0644);
-    if (fd_ < 0) return false;
-    // TDE sidecar for the page envelopes.  Absent sidecar = database not
-    // (yet) encrypted; it is created lazily on the first sealed write.
-    tdeFd_ = ::open((filename_ + ".tde").c_str(), O_RDWR | O_CREAT, 0600);
-    if (tdeFd_ < 0 && PageCrypto::enabled()) {
-        ::close(fd_);
+    try {
+        // close() releases frame data. Never retain a partly rebuilt array
+        // after an allocation failure: its size alone is not readiness.
+        if (frames_.size() != numFrames_) initializeFramesUnlocked();
+        fd_ = ::open(filename_.c_str(), O_RDWR | (createIfMissing ? O_CREAT : 0), 0644);
+        if (fd_ < 0) return false;
+        // The existing sidecar policy is unchanged; constructing its name
+        // can itself throw after the main descriptor has been acquired.
+        tdeFd_ = ::open((filename_ + ".tde").c_str(), O_RDWR | O_CREAT, 0600);
+        if (tdeFd_ < 0 && PageCrypto::enabled()) {
+            ::close(fd_);
+            fd_ = -1;
+            return false;
+        }
+        return true;
+    } catch (...) {
+        const int savedError = errno;
+        if (tdeFd_ >= 0) ::close(tdeFd_);
+        if (fd_ >= 0) ::close(fd_);
+        tdeFd_ = -1;
         fd_ = -1;
-        return false;
+        frames_.clear();
+        pageMap_.clear();
+        clockHand_ = 0;
+        errno = savedError;
+        throw;
     }
-    return true;
 }
 
 bool BufferPool::refersToCurrentFiles() const {

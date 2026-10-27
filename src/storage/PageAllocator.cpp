@@ -417,44 +417,40 @@ bool PageAllocator::open() {
         std::cerr << "[storage] truncated or misaligned heap file: " << filename_ << std::endl;
         return false;
     }
-    if (!bp_->open()) return false;
-
-    // Check if page 0 exists and has valid magic
-    char* buf = bp_->fetchPage(0);
-    if (!buf) {
-        bp_->close();
-        return false;
-    }
-    DataFileHeader* fh = reinterpret_cast<DataFileHeader*>(buf);
-    if (fh->magic != DATA_FILE_MAGIC) {
-        if (existingFile) {
-            std::cerr << "[storage] unsupported heap file header: " << filename_ << std::endl;
-            bp_->unpinPage(0);
-            bp_->close();
+    try {
+        if (!bp_->open()) return false;
+        char* buf = bp_->fetchPage(0);
+        if (!buf) {
+            bp_->close(/*flushPages=*/false);
             return false;
         }
-        // New file: initialize file header
-        std::memset(buf, 0, pageSize_);
-        fh->magic = DATA_FILE_MAGIC;
-        fh->numPages = 1;  // only page 0 (header)
-        fh->freeListHead = 0;
-        fh->rowSize = static_cast<uint32_t>(rowSize_);
-        fh->formatVersion = DATA_FILE_FORMAT_VERSION;
-        fh->headerChecksum = computeDataFileHeaderChecksum(*fh);
-        bp_->markDirty(0);
-    } else if (!validateFileHeader(*fh)) {
-        std::cerr << "[storage] invalid heap file header: " << filename_ << std::endl;
-        bp_->unpinPage(0);
-        bp_->close();
-        return false;
-    }
-    // Reconstruct membership before accepting the allocator. Free pages
-    // are empty and the persisted chain must be finite, unique and in range.
-    // Do not publish or rewrite a damaged list during this read-only check.
-    AllocatorPagePin headerPin{*bp_, 0};
-    std::unordered_set<uint32_t> freePages;
-    bool validFreeList = true;
-    try {
+        // Own the header pin before any validation/path allocation can
+        // throw, not just while traversing the free chain.
+        AllocatorPagePin headerPin{*bp_, 0};
+        DataFileHeader* fh = reinterpret_cast<DataFileHeader*>(buf);
+        if (fh->magic != DATA_FILE_MAGIC) {
+            if (existingFile) {
+                std::cerr << "[storage] unsupported heap file header: " << filename_ << std::endl;
+                headerPin.unpin();
+                bp_->close(/*flushPages=*/false);
+                return false;
+            }
+            std::memset(buf, 0, pageSize_);
+            fh->magic = DATA_FILE_MAGIC;
+            fh->numPages = 1;
+            fh->freeListHead = 0;
+            fh->rowSize = static_cast<uint32_t>(rowSize_);
+            fh->formatVersion = DATA_FILE_FORMAT_VERSION;
+            fh->headerChecksum = computeDataFileHeaderChecksum(*fh);
+            bp_->markDirty(0);
+        } else if (!validateFileHeader(*fh)) {
+            std::cerr << "[storage] invalid heap file header: " << filename_ << std::endl;
+            headerPin.unpin();
+            bp_->close(/*flushPages=*/false);
+            return false;
+        }
+        std::unordered_set<uint32_t> freePages;
+        bool validFreeList = true;
         uint32_t current = fh->freeListHead;
         while (current != 0) {
             if (current >= fh->numPages || !freePages.insert(current).second) {
@@ -468,22 +464,28 @@ bool PageAllocator::open() {
             if (page.slotCount() != 0) { validFreeList = false; break; }
             current = page.nextPage();
         }
-    } catch (...) {
+        if (!validFreeList) {
+            std::cerr << "[storage] invalid heap free list: " << filename_ << std::endl;
+            headerPin.unpin();
+            bp_->close(/*flushPages=*/false);
+            return false;
+        }
+        numPages_ = fh->numPages;
+        freePages_.swap(freePages);
         headerPin.unpin();
+        durableHeaderPresent_ = existingFile;
+        return true;
+    } catch (...) {
+        // Pin guards and provisional membership have already unwound. Do
+        // not flush an incomplete header or keep an apparently open pool.
+        const int savedError = errno;
         bp_->close(/*flushPages=*/false);
+        numPages_ = 0;
+        freePages_.clear();
+        durableHeaderPresent_ = false;
+        errno = savedError;
         throw;
     }
-    if (!validFreeList) {
-        std::cerr << "[storage] invalid heap free list: " << filename_ << std::endl;
-        headerPin.unpin();
-        bp_->close(/*flushPages=*/false);
-        return false;
-    }
-    numPages_ = fh->numPages;
-    freePages_.swap(freePages);
-    headerPin.unpin();
-    durableHeaderPresent_ = existingFile;
-    return true;
 }
 
 void PageAllocator::close() {
