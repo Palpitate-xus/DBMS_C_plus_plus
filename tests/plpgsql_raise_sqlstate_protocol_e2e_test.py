@@ -69,6 +69,8 @@ def main():
         ok("SELECT currval('raise_seq');", [[str(len(cases))]])
         from compat.plpgsql_integer_for import run as run_integer_for
         run_integer_for(client, runner, server['sock'])
+        from compat.plpgsql_boolean_conditions import run as run_boolean_conditions
+        run_boolean_conditions(client, runner, server['sock'])
         print('[PLPGSQL RAISE SQLSTATE PROTOCOL] passed')
     finally:
         runner.stop_ours(server)

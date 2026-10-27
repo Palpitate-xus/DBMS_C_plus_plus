@@ -12,6 +12,7 @@
 #include "utils/plpgsql.h"
 #include "common/SqlSyntax.h"
 #include "common/IntegerTextCodec.h"
+#include "common/BooleanCodec.h"
 #include "expression/expr_helper.h"
 #include "parser/parser.h"
 
@@ -1447,6 +1448,48 @@ struct Interp {
         return std::nullopt;
     }
 
+    // A procedural condition uses nullable boolean input, not C++ truthiness
+    // or an explicit SQL numeric-to-boolean cast. PostgreSQL's procedural
+    // coercion falls back to type output/input where no assignment cast exists:
+    // integer 1 is true but integer 2 is invalid (22P02), not nonzero=true.
+    bool evalCondition(const std::string& expression, bool& value) {
+        bool isNull = false;
+        std::string sourceType;
+        std::optional<std::string> evaluated;
+        if (!host.evalExprTyped && !host.evalExpr) {
+            const auto result = ExprHelper::evalStringWithNulls(
+                expression, vars, nullVars, variableTypes);
+            if (!result.ok) return fail(result.error, result.sqlState);
+            evaluated = result.value;
+            isNull = result.isNull;
+            sourceType = result.typeName;
+        } else {
+            evaluated = eval(expression, &isNull, &sourceType);
+        }
+        if (!error.empty()) return false;
+        if (!evaluated) return fail("condition expression evaluation failed");
+        value = false;
+        if (isNull) return true;
+        // Scalar carriers may retain integer source spelling (0001/-0).
+        // Normalize integer output only; text '0001' remains invalid and
+        // NUMERIC scale must not be discarded (1.0 is not boolean input).
+        const std::string type = lowerCopy(sourceType);
+        const int bits = type == "smallint" || type == "int2" ? 16 :
+            type == "integer" || type == "int" || type == "int4" ? 32 :
+            type == "bigint" || type == "int8" ? 64 : 0;
+        if (bits) {
+            const auto integer = parsePostgresIntegerText(*evaluated, bits);
+            if (integer.error != IntegerTextError::None)
+                return fail("invalid integer condition value",
+                    integer.error == IntegerTextError::OutOfRange ? "22003" : "22P02");
+            evaluated = std::to_string(integer.value);
+        }
+        const auto parsed = parsePostgresBoolean(*evaluated);
+        if (!parsed) return fail("invalid input syntax for type boolean", "22P02");
+        value = *parsed;
+        return true;
+    }
+
     bool assignValue(const std::string& name,
                      std::optional<std::string> value,
                      const std::string& sourceType) {
@@ -1699,8 +1742,9 @@ struct Interp {
         }
         if (auto* x = dynamic_cast<const ExitStmt*>(&s)) {
             if (x->hasWhen) {
-                auto v = eval(x->cond);
-                if (v && lowerCopy(*v) != "t") return true;
+                bool value = false;
+                if (!evalCondition(x->cond, value)) return false;
+                if (!value) return true;
             }
             exitLoop = true;
             return true;
@@ -1768,8 +1812,9 @@ struct Interp {
         if (auto* i = dynamic_cast<const IfStmt*>(&s)) {
             for (const auto& b : i->branches) {
                 if (!b.hasCond) return execCompound(b.body);
-                auto v = eval(b.cond);
-                if (v && (lowerCopy(*v) == "t" || *v == "1" || lowerCopy(*v) == "true")) {
+                bool value = false;
+                if (!evalCondition(b.cond, value)) return false;
+                if (value) {
                     return execCompound(b.body);
                 }
             }
@@ -1778,8 +1823,9 @@ struct Interp {
         if (auto* w = dynamic_cast<const WhileStmt*>(&s)) {
             while (true) {
                 if (!budget()) return false;
-                auto v = eval(w->cond);
-                if (!v || lowerCopy(*v) != "t") break;
+                bool value = false;
+                if (!evalCondition(w->cond, value)) return false;
+                if (!value) break;
                 exitLoop = false;
                 if (!execCompound(w->body)) return false;
                 if (hasReturn) return true;
