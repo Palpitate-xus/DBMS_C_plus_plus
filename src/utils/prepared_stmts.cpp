@@ -101,6 +101,22 @@ bool collectDollarParameters(const std::string& sql,
             doubleQuoted = true;
             continue;
         }
+        // Consume an unquoted identifier as one token. A dollar sign is a
+        // legal continuation (including $0, $digits and $tag$), not a new
+        // parameter or string delimiter inside that identifier. Keep UTF-8
+        // bytes together without depending on the process locale.
+        const auto identifierStart = [](unsigned char byte) {
+            return std::isalpha(byte) || byte == '_' || byte >= 0x80;
+        };
+        if (identifierStart(static_cast<unsigned char>(c))) {
+            while (i + 1 < sql.size()) {
+                const auto next = static_cast<unsigned char>(sql[i + 1]);
+                if (!identifierStart(next) && !std::isdigit(next) && next != '$')
+                    break;
+                ++i;
+            }
+            continue;
+        }
         if (c != '$' || i + 1 >= sql.size()) continue;
 
         if (std::isdigit(static_cast<unsigned char>(sql[i + 1]))) {
