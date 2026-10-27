@@ -93,7 +93,7 @@ static bool isFixedFloat8ScalarName(const std::string& name) {
 }
 
 static bool isCoreOverloadedScalarName(const std::string& name) {
-    return name=="abs" || name=="length" || name=="upper" || name=="lower" || name=="scale";
+    return name=="abs" || name=="length" || name=="upper" || name=="lower" || name=="scale" || name=="min_scale";
 }
 
 static bool isIntegralRoundingScalarName(const std::string& name) {
@@ -5539,7 +5539,7 @@ struct ScalarSignature {
     std::string output;
 };
 std::vector<ScalarSignature> scalarSignatures(const std::string& name) {
-    if(name=="scale")return {{{"numeric"},"integer"}};
+    if(name=="scale" || name=="min_scale")return {{{"numeric"},"integer"}};
     if(name=="strpos")return {{{"text","text"},"integer"}};
     if(name=="array_position")return {
         {{"anycompatiblearray","anycompatible"},"integer"},
@@ -5714,10 +5714,10 @@ ResolvedScalarFunction resolveTypedScalar(const std::string& name,
         candidates.erase(std::remove_if(candidates.begin(),candidates.end(),[](const auto& candidate){return candidate.polymorphic;}),candidates.end());
     if(candidates.size()>1)throw DbError("42725","function "+name+" is not unique");
     if(candidates.empty())return {};
-    if(name=="scale" && !candidates.front().stored &&
+    if((name=="scale" || name=="min_scale") && !candidates.front().stored &&
        (call->hasOver || call->distinct || call->filter || !call->orderBy.empty() ||
         !call->aggregateOrderKeys.empty()))
-        throw DbError("42809","scale is not an aggregate or window function");
+        throw DbError("42809",name+" is not an aggregate or window function");
     // After signature selection, an invalid scalar OVER role precedes input
     // conversion. Ordinary UNKNOWN literal conversion still belongs to
     // analysis, including unused branches. Evaluate only a literal codec.
@@ -9524,6 +9524,22 @@ void ExprEvaluator::registerBuiltins() {
         if (!value) throw DbError("22P02", "invalid input syntax for type numeric");
         if (!value->isFinite()) return ExprValue("integer", "", true);
         return ExprValue("integer", std::to_string(value->scale()), false);
+    };
+    functions_["min_scale"] = [](const std::vector<ExprValue>& args) {
+        if (args.size() != 1)
+            throw DbError("42883", "function min_scale requires one numeric argument");
+        if (args.front().isNull) return ExprValue("integer", "", true);
+        const auto value = tryParseNumeric(args.front().value);
+        if (!value) throw DbError("22P02", "invalid input syntax for type numeric");
+        if (!value->isFinite()) return ExprValue("integer", "", true);
+        // Inspect the already-typed exact value, never the SQL spelling or a
+        // floating approximation. Integer zeroes cannot reduce a scale.
+        const auto text = value->toString();
+        const auto dot = text.find('.');
+        if (dot == std::string::npos) return ExprValue("integer", "0", false);
+        auto end = text.size();
+        while (end > dot + 1 && text[end - 1] == '0') --end;
+        return ExprValue("integer", std::to_string(end - dot - 1), false);
     };
     functions_["length"] = [](const std::vector<ExprValue>& a) {
         const std::string type = a.empty()?std::string{}:toLower(a[0].typeName);
@@ -13425,6 +13441,7 @@ void ExprEvaluator::registerBuiltins() {
     // Volatility metadata for builtins (safe default is 'v' set by registerFunction).
     volatility_["abs"] = 'i';
     volatility_["scale"] = 'i';
+    volatility_["min_scale"] = 'i';
     volatility_["length"] = 'i';
     volatility_["array_position"] = 'i';
     volatility_["lower"] = 'i';
