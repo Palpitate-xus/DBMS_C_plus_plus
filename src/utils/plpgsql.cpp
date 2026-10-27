@@ -11,6 +11,8 @@
 
 #include "utils/plpgsql.h"
 #include "common/SqlSyntax.h"
+#include "common/IntegerTextCodec.h"
+#include "expression/expr_helper.h"
 #include "parser/parser.h"
 
 #include <cctype>
@@ -579,7 +581,7 @@ struct WhileStmt : Stmt {
 struct ForStmt : Stmt {
     std::string var;
     bool reverse = false;
-    std::string from, to;
+    std::string from, to, step;
     CompoundStmt body;
 };
 struct Declaration {
@@ -854,14 +856,68 @@ struct Parser {
         if (sc.matchKeyword("reverse")) s->reverse = true;
         std::string range;
         if (!readUntilKeyword(sc, "loop", range)) { fail("FOR without LOOP"); return nullptr; }
-        // a..b
+        if (s->var.empty()) { fail("FOR requires an iterator name"); return nullptr; }
+        // Delimiters inside strings, quoted names, comments, or nested SQL
+        // expressions do not separate the integer range or its BY clause.
+        const auto protectedBytes = sqlProtectedBytes(range);
         size_t dd = std::string::npos;
+        int depth = 0;
         for (size_t i = 0; i + 1 < range.size(); ++i) {
-            if (range[i] == '.' && range[i + 1] == '.') { dd = i; break; }
+            if (protectedBytes[i]) continue;
+            if (range[i] == '(' || range[i] == '[') ++depth;
+            else if (range[i] == ')' || range[i] == ']') --depth;
+            else if (!depth && range[i] == '.' && range[i + 1] == '.') {
+                if (dd != std::string::npos) { fail("invalid FOR range"); return nullptr; }
+                dd = i++;
+            }
         }
         if (dd == std::string::npos) { fail("FOR range without '..'"); return nullptr; }
         s->from = trimCopy(range.substr(0, dd));
-        s->to = trimCopy(range.substr(dd + 2));
+        Scanner upper(range.substr(dd + 2));
+        const bool hasStep = readUntilKeyword(upper, "by", s->to);
+        if (hasStep) {
+            s->step = trimCopy(upper.src.substr(upper.pos));
+            // The step is already an SQL expression: b.by is a qualified
+            // datum, not another BY clause. The upper-bound delimiter keeps
+            // its PL/pgSQL grammar rules; only this duplicate check differs.
+            const auto stepProtected = sqlProtectedBytes(s->step);
+            int stepDepth = 0;
+            char previousToken = '\0';
+            for (size_t position = 0; position < s->step.size();) {
+                position = skipLeadingSqlTrivia(s->step, position);
+                if (position == std::string::npos || position >= s->step.size()) break;
+                if (stepProtected[position]) {
+                    position = protectedUnitEnd(s->step, position);
+                    previousToken = 'q';
+                    continue;
+                }
+                const char c = s->step[position];
+                if (sqlIdentifierContinuation(static_cast<unsigned char>(c))) {
+                    size_t end = position + 1;
+                    while (end < s->step.size() &&
+                           sqlIdentifierContinuation(static_cast<unsigned char>(s->step[end]))) ++end;
+                    const size_t next = skipLeadingSqlTrivia(s->step, end);
+                    if (!stepDepth && lowerCopy(s->step.substr(position, end - position)) == "by" &&
+                        previousToken != '.' &&
+                        (next == std::string::npos || next >= s->step.size() || s->step[next] != '.')) {
+                        fail("duplicate BY in FOR range"); return nullptr;
+                    }
+                    previousToken = 'w'; position = end;
+                    continue;
+                }
+                if (c == '(' || c == '[') ++stepDepth;
+                else if ((c == ')' || c == ']') && stepDepth) --stepDepth;
+                previousToken = c; ++position;
+            }
+        } else s->to = trimCopy(upper.src);
+        const auto hasExpression = [](const std::string& text) {
+            const size_t position = skipLeadingSqlTrivia(text);
+            return position != std::string::npos && position < text.size();
+        };
+        if (!hasExpression(s->from) || !hasExpression(s->to) ||
+            (hasStep && !hasExpression(s->step))) {
+            fail("missing expression in FOR range"); return nullptr;
+        }
         if (!parseCompoundInto(s->body)) return nullptr;
         if (!expectEnd("loop", ";")) return nullptr;
         return s;
@@ -1732,12 +1788,68 @@ struct Interp {
             return true;
         }
         if (auto* f = dynamic_cast<const ForStmt*>(&s)) {
-            auto fromV = eval(f->from);
-            auto toV = eval(f->to);
-            if (!fromV || !toV || !isNum(*fromV) || !isNum(*toV)) {
-                return fail("FOR range not numeric");
-            }
-            long long a = std::stoll(*fromV), b = std::stoll(*toV);
+            // Evaluate and coerce each control expression exactly once, in
+            // lower/upper/BY order. Do not evaluate a later expression after
+            // an earlier NULL, conversion, or expression error.
+            const auto integerControl = [&](const std::string& expression,
+                                            const char* description,
+                                            int64_t& output) {
+                bool isNull = false;
+                std::string sourceType;
+                std::optional<std::string> value;
+                if (!host.evalExprTyped && !host.evalExpr) {
+                    // A hostless control still needs its SQL source type:
+                    // legacy textual arithmetic would turn numeric 2.6 into
+                    // unknown text and incorrectly reject integer assignment.
+                    const auto evaluated = ExprHelper::evalStringWithNulls(
+                        expression, vars, nullVars, variableTypes);
+                    if (!evaluated.ok)
+                        return fail(evaluated.error, evaluated.sqlState);
+                    value = evaluated.value;
+                    isNull = evaluated.isNull; sourceType = evaluated.typeName;
+                } else value = eval(expression, &isNull, &sourceType);
+                if (!error.empty()) return false;
+                if (!value) return fail("FOR expression evaluation failed");
+                const auto nullable = isNull ? std::optional<std::string>{} : value;
+                PlPgsqlQueryResult converted;
+                if (host.coerceValueTyped) {
+                    converted = host.coerceValueTyped(nullable, sourceType, "integer");
+                } else {
+                    // Embedding hosts without assignment conversion still use
+                    // the shared SQL cast rules, not stoll's prefix parsing.
+                    const std::string name = "__plpgsql_for_input";
+                    const auto cast = ExprHelper::evalStringWithNulls(
+                        "CAST(" + name + " AS integer)", {{name, value.value_or("")}},
+                        isNull ? std::set<std::string>{name} : std::set<std::string>{},
+                        {{name, sourceType.empty() ? "unknown" : sourceType}});
+                    converted.ok = cast.ok;
+                    converted.sqlState = cast.sqlState; converted.message = cast.error;
+                    if (cast.ok) {
+                        converted.rowCount = converted.columnCount = 1;
+                        converted.firstRow = {cast.isNull ? std::nullopt :
+                            std::optional<std::string>{cast.value}};
+                    }
+                }
+                if (!converted.ok)
+                    return fail(converted.message.empty() ? "FOR integer conversion failed" :
+                        converted.message, converted.sqlState);
+                if (converted.rowCount != 1 || converted.columnCount != 1 ||
+                    converted.firstRow.size() != 1)
+                    return fail("FOR conversion returned invalid scalar metadata");
+                if (!converted.firstRow.front())
+                    return fail(std::string(description) + " of FOR loop cannot be null", "22004");
+                const auto integer = parsePostgresIntegerText(*converted.firstRow.front(), 32);
+                if (integer.error != IntegerTextError::None)
+                    return fail("FOR integer value out of range or invalid",
+                        integer.error == IntegerTextError::OutOfRange ? "22003" : "22P02");
+                output = integer.value;
+                return true;
+            };
+            int64_t a = 0, b = 0, step = 1;
+            if (!integerControl(f->from, "lower bound", a) ||
+                !integerControl(f->to, "upper bound", b)) return false;
+            if (!f->step.empty() && !integerControl(f->step, "BY value", step)) return false;
+            if (step <= 0) return fail("BY value of FOR loop must be greater than zero", "22023");
             // Integer FOR declares an iterator local to this loop. Its
             // numeric value must not inherit a same-named outer NULL bit,
             // and nested loops/RETURN/errors restore that outer binding.
@@ -1758,35 +1870,36 @@ struct Interp {
                     else types.erase(name);
                 }
             };
-            const auto previous = vars.find(f->var);
-            const auto previousType = variableTypes.find(f->var);
-            IteratorScope iteratorScope{vars, nullVars, variableTypes, f->var,
-                previous == vars.end() ? std::nullopt : std::optional<std::string>{previous->second},
-                nullVars.count(f->var) != 0,
-                previousType == variableTypes.end() ? std::nullopt :
-                    std::optional<std::string>{previousType->second}};
-            variableTypes[f->var] = "integer";
-            if (!f->reverse) {
-                for (long long i = a; i <= b; ++i) {
+            bool found = false;
+            {
+                const auto previous = vars.find(f->var);
+                const auto previousType = variableTypes.find(f->var);
+                IteratorScope iteratorScope{vars, nullVars, variableTypes, f->var,
+                    previous == vars.end() ? std::nullopt : std::optional<std::string>{previous->second},
+                    nullVars.count(f->var) != 0,
+                    previousType == variableTypes.end() ? std::nullopt :
+                        std::optional<std::string>{previousType->second}};
+                variableTypes[f->var] = "integer";
+                // Controls are int4; perform the next-step calculation in int64
+                // so crossing an int4 endpoint terminates without signed overflow.
+                for (int64_t i = a; f->reverse ? i >= b : i <= b;) {
                     if (!budget()) return false;
+                    found = true;
                     vars[f->var] = std::to_string(i);
                     nullVars.erase(f->var);
                     exitLoop = false;
                     if (!execCompound(f->body)) return false;
                     if (hasReturn) return true;
                     if (exitLoop) { exitLoop = false; break; }
-                }
-            } else {
-                for (long long i = a; i >= b; --i) {
-                    if (!budget()) return false;
-                    vars[f->var] = std::to_string(i);
-                    nullVars.erase(f->var);
-                    exitLoop = false;
-                    if (!execCompound(f->body)) return false;
-                    if (hasReturn) return true;
-                    if (exitLoop) { exitLoop = false; break; }
+                    const int64_t next = f->reverse ? i - step : i + step;
+                    if (next < -2147483648LL || next > 2147483647LL) break;
+                    i = next;
                 }
             }
+            // FOUND describes whether the loop ran, but is not changed before
+            // or during its body (which can set FOUND independently).
+            vars["found"] = found ? "t" : "f";
+            nullVars.erase("found");
             return true;
         }
         if (auto* q = dynamic_cast<const SqlStmt*>(&s)) {
