@@ -917,6 +917,20 @@ public:
                 valueTypeOids[call]=mapBuiltinTypeNameToOid(call->resolvedResultType);
                 return call->resolvedResultType;
             }
+            // The legacy parser encodes an in-call ORDER BY as a synthetic
+            // unquoted literal argument. It is a call role, not a SQL value.
+            // Normalize only SCALE's carrier here; other aggregate owners keep
+            // their existing representation and no parser grammar is changed.
+            CatalogManager::QualifiedName scaleName;
+            if(CatalogManager::parseQualifiedName(call->funcName,scaleName,true) &&
+               SQLParser::toLower(scaleName.name)=="scale" && !call->args.empty()) {
+                const auto* order=dynamic_cast<const LiteralExpr*>(call->args.back().get());
+                if(order && order->sourceBegin==std::string::npos &&
+                   order->typeName.empty() && order->value.rfind("ORDER BY ",0)==0) {
+                    call->orderBy=order->value;
+                    call->args.pop_back();
+                }
+            }
             const auto grammarOperation = SQLParser::toLower(call->funcName);
             if (call->schema.empty() && call->args.size() == 3 &&
                 (grammarOperation == "between" || grammarOperation == "not between")) {

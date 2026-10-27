@@ -1245,6 +1245,10 @@ std::string protocolParameterLiteral(uint32_t typeOid,
             error = "invalid input syntax for numeric parameter";
             return {};
         }
+        // NUMERIC special values are typed input, never SQL identifiers.
+        // Keep the existing admission domain and finite rendering unchanged.
+        if (!std::isfinite(std::strtold(value.c_str(), nullptr)))
+            return quoteProtocolText(value, error);
         return value;
     }
     if (typeOid == 1560 || typeOid == 1562) {
@@ -2589,11 +2593,15 @@ bool hasProtocolScalarSignatureCall(const Stmt* statement,const std::string& dat
         if(!expression)return true;
         if(expression->preparedSubquery || expression->type==ExprType::Subquery)return false;
         if(const auto* call=dynamic_cast<const FunctionCallExpr*>(expression)) {
-            if(call->hasOver || call->setReturning || call->distinct || call->filter ||
-               !call->orderBy.empty())return false;
             CatalogManager::QualifiedName name;
             const auto spelling=call->schema.empty()?call->funcName:call->schema+"."+call->funcName;
             const bool parsedName=CatalogManager::parseQualifiedName(spelling,name,true);
+            const bool scaleCall=parsedName && SQLParser::toLower(name.name)=="scale";
+            // A SCALE role still needs whole-query transformation: FILTER's
+            // names and boolean type precede the non-aggregate diagnostic.
+            // Do not send it through the legacy name-only signature probe.
+            if((call->hasOver || call->setReturning || call->distinct || call->filter ||
+                !call->orderBy.empty()) && !scaleCall)return false;
             if(parsedName && (name.schema.empty() || name.schema=="pg_catalog")) {
                 // These are the established frontend aggregate/window/SRF
                 // roles, not a second overload or function-validity resolver.
@@ -2611,7 +2619,7 @@ bool hasProtocolScalarSignatureCall(const Stmt* statement,const std::string& dat
                 // Route only this finite family through real declaration
                 // binding, including unknown parameters and invalid quoted
                 // case. Folding here admits analysis; it never picks a callee.
-                if(parsedName && SQLParser::toLower(name.name)=="strpos")candidate=true;
+                if(parsedName && (SQLParser::toLower(name.name)=="strpos" || SQLParser::toLower(name.name)=="scale"))candidate=true;
                 // Parse/Describe may bind a genuine quoted SQL callee even
                 // when no stored name exists. Do not apply this new entry to
                 // the source-free wire-parameter inference caller: it has no
@@ -2969,7 +2977,7 @@ void validatePreparedScalarArithmetic(const std::string& sql,Session& session,
         }
         if(const auto* call=dynamic_cast<const FunctionCallExpr*>(expression)) {
             static const std::set<std::string> declarations={
-                "char_length","character_length","octet_length","bit_length","strpos","array_position"};
+                "char_length","character_length","octet_length","bit_length","strpos","scale","array_position"};
             CatalogManager::QualifiedName name;
             if(CatalogManager::parseQualifiedName(call->funcName,name,true) &&
                name.schema.empty() && (declarations.count(name.name) || SQLParser::toLower(name.name)=="strpos"))return true;

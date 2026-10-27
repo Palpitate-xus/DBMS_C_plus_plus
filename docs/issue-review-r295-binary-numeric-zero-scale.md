@@ -70,3 +70,10 @@ tested pure projection。原冻结 1492 历史失败、R291 CHECKPOINT 原因和
 | completed-build-receipt.json | `543e8615cc0d58e062b3463faf706ad883aaaa465d9210d9e19a77885eab2166` |
 | completed-candidate-receipt.json | `2c67f659d7dc6c5fb1cadb076d6db8d50935b11aac622efebc0259b4259467a4` |
 | completed-scoped-ubsan-receipt.json | `94ced34db0e933d2bb92d70877810cfadd81ed12ccd4f54aed43669d1e557584` |
+
+## R296 后续闭环
+
+上文 141 个失败/未注册说明保留 R295 提交时的真实历史。随后 [R296](issue-review-r296-numeric-scale-function.md)
+补齐 scale(numeric) 声明及实际前端接入后，本文件引用的原完整 431 项夹具在两侧均
+实际全过；源码、SQL、断言和期限未改，文件名保留，现在按原路径注册到默认 E2E
+列表一次。R295 当时的失败日志和非零收据不改写为成功，也不由此关闭其他 NUMERIC 缺口。

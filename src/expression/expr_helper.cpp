@@ -2479,6 +2479,18 @@ std::string ExprHelper::inferResultType(
     // comparison or for a mixed-width arithmetic operator's result.
     ParseResult structuralParse;
     if (const Expr* structural = parseStoredExpression(trimmed, structuralParse)) {
+        // A source-free declaration query still has real builtin signatures.
+        // Resolve SCALE through its actual callback before textual heuristics
+        // mistake an argument's ::numeric for the call's int4 result.
+        if(const auto* call=dynamic_cast<const FunctionCallExpr*>(structural)) {
+            CatalogManager::QualifiedName name;
+            if(CatalogManager::parseQualifiedName(call->funcName,name,true) && name.name=="scale") {
+                ExprEvaluator declarations;declarations.setCurrentDB(currentDB);
+                const auto routines=collectRoutineResultTypes(structural,currentDB,functionEngine,&declarations,&typeHints);
+                const auto result=inferAstResultType(structural,typeHints,&routines);
+                return result.empty() || result=="unknown" ? "text" : result;
+            }
+        }
         const auto* binary = dynamic_cast<const BinaryOpExpr*>(structural);
         const auto* outerCast = dynamic_cast<const CastExpr*>(structural);
         const auto* grammar = dynamic_cast<const FunctionCallExpr*>(outerCast ? outerCast->operand.get() : structural);
