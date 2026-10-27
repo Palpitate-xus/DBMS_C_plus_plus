@@ -10392,8 +10392,10 @@ void ExprEvaluator::registerBuiltins() {
         uint64_t x = magnitude(left);
         uint64_t y = magnitude(right);
         while (y) { uint64_t t = x % y; x = y; y = t; }
-        if (x > static_cast<uint64_t>(
-                    std::numeric_limits<int64_t>::max())) {
+        const uint64_t maximum = resultType == "bigint"
+            ? static_cast<uint64_t>(std::numeric_limits<int64_t>::max())
+            : static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
+        if (x > maximum) {
             throw std::runtime_error(
                 "integer out of range (SQLSTATE 22003)");
         }
@@ -10428,8 +10430,10 @@ void ExprEvaluator::registerBuiltins() {
         }
         const unsigned __int128 result =
             static_cast<unsigned __int128>(x / gcd) * y;
-        if (result > static_cast<unsigned __int128>(
-                         std::numeric_limits<int64_t>::max())) {
+        const uint64_t maximum = resultType == "bigint"
+            ? static_cast<uint64_t>(std::numeric_limits<int64_t>::max())
+            : static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
+        if (result > maximum) {
             throw std::runtime_error(
                 "integer out of range (SQLSTATE 22003)");
         }
