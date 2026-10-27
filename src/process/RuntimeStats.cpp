@@ -326,19 +326,53 @@ bool loadRuntimeStats(const std::string& dbname,
                       const std::filesystem::path& path) {
     if (dbname.empty()) return false;
     std::error_code ec;
-    if (!std::filesystem::exists(path, ec)) return true;
+    if (!std::filesystem::exists(path, ec)) return !ec;
     StatsFileLock lock(path);
     if (!lock.ok()) return false;
     DurableStatsSnapshot snapshot;
     if (!readSnapshot(path, dbname, snapshot)) return false;
     std::lock_guard<std::mutex> guard(runtimeStatsMutex());
-    persistedDatabaseStatsMap()[dbname] = snapshot.database;
-    databaseStatsMap()[dbname] = snapshot.database;
+    auto& liveDatabases = databaseStatsMap();
+    auto& savedDatabases = persistedDatabaseStatsMap();
+    auto& liveTables = tableStatsMap();
+    auto& savedTables = persistedTableStatsMap();
+    auto& removedTables = removedRuntimeTables();
+
+    // Prepare every allocating key/value copy before changing any live state.
+    // A load replaces one complete database snapshot, not just rows that also
+    // happen to occur in the previous snapshot. Other databases stay intact.
+    std::map<std::string, RuntimeDatabaseStats> nextLiveDatabases, nextSavedDatabases;
+    std::map<std::pair<std::string, std::string>, RuntimeTableStats>
+        nextLiveTables, nextSavedTables;
+    nextLiveDatabases.emplace(dbname, snapshot.database);
+    nextSavedDatabases.emplace(dbname, snapshot.database);
     for (const auto& table : snapshot.tables) {
-        persistedTableStatsMap()[{dbname, table.relname}] = table;
-        removedRuntimeTables().erase({dbname, table.relname});
-        tableStatsMap()[{dbname, table.relname}] = table;
+        const auto key = std::make_pair(dbname, table.relname);
+        nextLiveTables.insert_or_assign(key, table);
+        nextSavedTables.insert_or_assign(key, table);
     }
+
+    // These maps use equal stateless allocators and nonallocating string
+    // comparisons. Erase and transfer prepared nodes while holding the same
+    // mutex, so no allocation failure can publish only half of a snapshot.
+    liveDatabases.erase(dbname);
+    savedDatabases.erase(dbname);
+    for (auto it = liveTables.begin(); it != liveTables.end();) {
+        if (it->first.first == dbname) it = liveTables.erase(it);
+        else ++it;
+    }
+    for (auto it = savedTables.begin(); it != savedTables.end();) {
+        if (it->first.first == dbname) it = savedTables.erase(it);
+        else ++it;
+    }
+    for (auto it = removedTables.begin(); it != removedTables.end();) {
+        if (it->first == dbname) it = removedTables.erase(it);
+        else ++it;
+    }
+    liveDatabases.merge(nextLiveDatabases);
+    savedDatabases.merge(nextSavedDatabases);
+    liveTables.merge(nextLiveTables);
+    savedTables.merge(nextSavedTables);
     return true;
 }
 
