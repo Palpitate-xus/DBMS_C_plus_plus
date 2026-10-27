@@ -5186,6 +5186,9 @@ ParseResult SQLParser::parseCreate(const std::string& sql) {
             r.stmt = parseCreateSchema(tokens, pos);
         } else if (kw == "sequence") {
             r.stmt = parseCreateSequence(tokens, pos);
+            if (r.stmt && isTemp) {
+                static_cast<CreateObjectStmt*>(r.stmt.get())->options["temporary"] = "true";
+            }
         } else if (kw == "domain") {
             r.stmt = parseCreateDomain(tokens, pos);
         } else if (kw == "type") {

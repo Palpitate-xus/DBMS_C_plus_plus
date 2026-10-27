@@ -22019,14 +22019,21 @@ bool StorageEngine::dropSessionTemporaryObjects(const std::string& dbname,
         const auto nameSpace = catalog.getTempNamespace(sessionId);
         if (!nameSpace) return true;
         const Oid namespaceOid = nameSpace->oid;
-        for (const auto& relation : catalog.listClasses()) {
-            if (relation.relnamespace != namespaceOid) continue;
-            if (relation.relkind == 'r') {
-                if (!dropSessionTemporaryTable(dbname, sessionId, relation.relname)) return false;
-            } else if (relation.relkind == 'S' && catalog.getClass(relation.oid)) {
+        const auto relations = catalog.listClasses();
+        // Retire tables first: their owned sequences are removed by the
+        // table path. Independent sequences still need both file and catalog
+        // retirement when DISCARD preserves this session's namespace.
+        for (const auto& relation : relations) {
+            if (relation.relnamespace == namespaceOid && relation.relkind == 'r' &&
+                !dropSessionTemporaryTable(dbname, sessionId, relation.relname)) return false;
+        }
+        for (const auto& relation : relations) {
+            if (relation.relnamespace == namespaceOid && relation.relkind == 'S' &&
+                catalog.getClass(relation.oid)) {
                 const auto status = dropSequence(dbname, sequenceStorageName(
                     "pg_temp_" + std::to_string(sessionId), relation.relname));
                 if (status != DBStatus::OK && status != DBStatus::TABLE_NOT_FOUND) return false;
+                if (!catalog.dropClass(relation.oid)) return false;
             }
         }
         return (preserveNamespace || catalog.dropTempNamespace(sessionId)) &&

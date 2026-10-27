@@ -8183,7 +8183,27 @@ bool DdlExecutor::executeCreateSequence(const CreateObjectStmt* stmt, Session& s
         std::cout << "CREATE SEQUENCE has an invalid name" << std::endl;
         return true;
     }
+    const std::string ownTempSchema = sessionTempSchemaName(s);
+    const auto temporaryOption = stmt->options.find("temporary");
+    const bool temporary =
+        (temporaryOption != stmt->options.end() && temporaryOption->second == "true") ||
+        sequenceName.schema == "pg_temp" || sequenceName.schema == ownTempSchema;
     std::string sequenceSchema = sequenceName.schema;
+    if (temporary) {
+        if (!sequenceSchema.empty() && sequenceSchema != "pg_temp" &&
+            sequenceSchema != ownTempSchema) {
+            if (!g_engine.schemaExists(s.currentDB, sequenceSchema)) {
+                std::cout << "ERROR: schema \"" << sequenceSchema
+                          << "\" does not exist (SQLSTATE 3F000)" << std::endl;
+            } else {
+                std::cout << "ERROR: cannot create temporary relation in "
+                             "non-temporary schema (SQLSTATE 42P16)" << std::endl;
+            }
+            return true;
+        }
+        sequenceSchema = ownTempSchema;
+        g_engine.noteTemporaryObjectAccess(s.currentDB);
+    }
     if (sequenceSchema.empty()) {
         for (const auto& candidate : effectiveSequenceSearchPath(s)) {
             if (candidate == "pg_catalog" || candidate == "pg_temp" ||
@@ -8268,6 +8288,10 @@ bool DdlExecutor::executeCreateSequence(const CreateObjectStmt* stmt, Session& s
         CatalogManager& catalog =
             g_engine.catalogService().get(s.currentDB);
         sequenceCatalog = &catalog;
+        if (temporary && !catalog.getTempNamespace(s.pid)) {
+            txn.markSnapshotDirty();
+            catalog.createTempNamespace(s.pid);
+        }
         const auto sequenceNamespace =
             catalog.getNamespaceByName(sequenceSchema);
         if (!sequenceNamespace) {
@@ -8277,6 +8301,9 @@ bool DdlExecutor::executeCreateSequence(const CreateObjectStmt* stmt, Session& s
             return true;
         }
         sequenceNamespaceOid = sequenceNamespace->oid;
+        // This flag also covers sequence-only sessions, so DISCARD and the
+        // backend guard remove real catalog/file state on session cleanup.
+        if (temporary) s.tempNamespaceCreated = true;
         const auto existing = catalog.getClassByName(
             sequenceName.name, sequenceNamespaceOid);
         if (existing) {
@@ -8842,9 +8869,12 @@ bool DdlExecutor::executeDropSequence(const DropStmt* stmt, Session& s) {
                           << requestedName << std::endl;
                 return true;
             }
-            if (!qualifiedName.schema.empty() &&
-                !g_engine.schemaExists(s.currentDB,
-                                       qualifiedName.schema)) {
+            std::string schema = qualifiedName.schema;
+            if (schema == "pg_temp") schema = sessionTempSchemaName(s);
+            const bool ownTemporarySchema =
+                schema == sessionTempSchemaName(s) && catalog->getTempNamespace(s.pid);
+            if (!schema.empty() && !ownTemporarySchema &&
+                !g_engine.schemaExists(s.currentDB, schema)) {
                 if (stmt->ifExists) {
                     std::cout << "NOTICE: sequence \"" << requestedName
                               << "\" does not exist, skipping"
@@ -8856,7 +8886,6 @@ bool DdlExecutor::executeDropSequence(const DropStmt* stmt, Session& s) {
                           << std::endl;
                 return true;
             }
-            std::string schema = qualifiedName.schema;
             std::optional<PgClassRow> resolvedRelation;
             if (schema.empty()) {
                 resolvedRelation = catalog->resolveRelationSnapshot(

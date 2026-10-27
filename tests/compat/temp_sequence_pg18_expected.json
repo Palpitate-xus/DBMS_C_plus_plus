@@ -1,0 +1,5065 @@
+{
+  "reference": "PostgreSQL18.6/180006",
+  "controls": 182,
+  "primaryReceiptSha256": "a10964e5fa11ad92b2adb85c60a8caf20601ba086e79676555bb9c79c3118a50",
+  "records": [
+    {
+      "ordinal": 0,
+      "profile": "persistent_setup",
+      "label": {
+        "sql": "CREATE SEQUENCE r309_persistent_control START WITH 900"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "CREATE SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 1,
+      "profile": "owner_create",
+      "label": {
+        "case": 0,
+        "prefix": "CREATE TEMP SEQUENCE",
+        "extended": false,
+        "sql": "CREATE TEMP SEQUENCE r309_temp_0 START WITH 11"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "CREATE SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 2,
+      "profile": "owner_implicit",
+      "label": {
+        "case": 0,
+        "prefix": "CREATE TEMP SEQUENCE",
+        "extended": false,
+        "sql": "SELECT nextval('r309_temp_0') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "11"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "0001000000023131"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 3,
+      "profile": "owner_explicit_temp",
+      "label": {
+        "case": 0,
+        "prefix": "CREATE TEMP SEQUENCE",
+        "extended": false,
+        "sql": "SELECT nextval('pg_temp.r309_temp_0') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "12"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "0001000000023132"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 4,
+      "profile": "peer_without_own",
+      "label": {
+        "case": 0,
+        "prefix": "CREATE TEMP SEQUENCE",
+        "extended": false,
+        "sql": "SELECT nextval('r309_temp_0') AS v"
+      },
+      "kinds": [
+        "E",
+        "Z"
+      ],
+      "rows": [],
+      "state": "42P01",
+      "columns": [],
+      "tag": null,
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 5,
+      "profile": "peer_create_own",
+      "label": {
+        "case": 0,
+        "prefix": "CREATE TEMP SEQUENCE",
+        "extended": false,
+        "sql": "CREATE TEMP SEQUENCE r309_temp_0 START WITH 101"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "CREATE SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 6,
+      "profile": "peer_own_value",
+      "label": {
+        "case": 0,
+        "prefix": "CREATE TEMP SEQUENCE",
+        "extended": false,
+        "sql": "SELECT nextval('r309_temp_0') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "101"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "000100000003313031"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 7,
+      "profile": "owner_still_own",
+      "label": {
+        "case": 0,
+        "prefix": "CREATE TEMP SEQUENCE",
+        "extended": false,
+        "sql": "SELECT nextval('r309_temp_0') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "13"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "0001000000023133"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 8,
+      "profile": "peer_discard_temp",
+      "label": {
+        "case": 0,
+        "prefix": "CREATE TEMP SEQUENCE",
+        "extended": false,
+        "sql": "DISCARD TEMP"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "DISCARD TEMP",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 9,
+      "profile": "peer_after_discard",
+      "label": {
+        "case": 0,
+        "prefix": "CREATE TEMP SEQUENCE",
+        "extended": false,
+        "sql": "SELECT nextval('r309_temp_0') AS v"
+      },
+      "kinds": [
+        "E",
+        "Z"
+      ],
+      "rows": [],
+      "state": "42P01",
+      "columns": [],
+      "tag": null,
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 10,
+      "profile": "owner_after_peer_discard",
+      "label": {
+        "case": 0,
+        "prefix": "CREATE TEMP SEQUENCE",
+        "extended": false,
+        "sql": "SELECT nextval('r309_temp_0') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "14"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "0001000000023134"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 11,
+      "profile": "owner_terminate_eof",
+      "label": {
+        "case": 0,
+        "prefix": "CREATE TEMP SEQUENCE",
+        "extended": false
+      },
+      "transportEOF": true
+    },
+    {
+      "ordinal": 12,
+      "profile": "peer_after_owner_exit",
+      "label": {
+        "case": 0,
+        "prefix": "CREATE TEMP SEQUENCE",
+        "extended": false,
+        "sql": "SELECT nextval('r309_temp_0') AS v"
+      },
+      "kinds": [
+        "E",
+        "Z"
+      ],
+      "rows": [],
+      "state": "42P01",
+      "columns": [],
+      "tag": null,
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 13,
+      "profile": "public_after_owner_exit",
+      "label": {
+        "case": 0,
+        "prefix": "CREATE TEMP SEQUENCE",
+        "extended": false,
+        "sql": "SELECT nextval('public.r309_temp_0') AS v"
+      },
+      "kinds": [
+        "E",
+        "Z"
+      ],
+      "rows": [],
+      "state": "42P01",
+      "columns": [],
+      "tag": null,
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 14,
+      "profile": "persistent_after_owner_exit",
+      "label": {
+        "case": 0,
+        "prefix": "CREATE TEMP SEQUENCE",
+        "extended": false,
+        "sql": "SELECT nextval('r309_persistent_control') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "900"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "000100000003393030"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 15,
+      "profile": "cleanup_public_probe",
+      "label": {
+        "case": 0,
+        "prefix": "CREATE TEMP SEQUENCE",
+        "extended": false,
+        "sql": "DROP SEQUENCE IF EXISTS public.r309_temp_0"
+      },
+      "kinds": [
+        "N",
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "DROP SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [
+        [
+          "NOTICE",
+          "00000"
+        ]
+      ],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 16,
+      "profile": "owner_create",
+      "label": {
+        "case": 1,
+        "prefix": "CREATE TEMP SEQUENCE",
+        "extended": true,
+        "sql": "CREATE TEMP SEQUENCE r309_temp_1 START WITH 11"
+      },
+      "kinds": [
+        "1",
+        "2",
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "CREATE SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 17,
+      "profile": "owner_implicit",
+      "label": {
+        "case": 1,
+        "prefix": "CREATE TEMP SEQUENCE",
+        "extended": true,
+        "sql": "SELECT nextval('r309_temp_1') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "11"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "0001000000023131"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 18,
+      "profile": "owner_explicit_temp",
+      "label": {
+        "case": 1,
+        "prefix": "CREATE TEMP SEQUENCE",
+        "extended": true,
+        "sql": "SELECT nextval('pg_temp.r309_temp_1') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "12"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "0001000000023132"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 19,
+      "profile": "peer_without_own",
+      "label": {
+        "case": 1,
+        "prefix": "CREATE TEMP SEQUENCE",
+        "extended": true,
+        "sql": "SELECT nextval('r309_temp_1') AS v"
+      },
+      "kinds": [
+        "E",
+        "Z"
+      ],
+      "rows": [],
+      "state": "42P01",
+      "columns": [],
+      "tag": null,
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 20,
+      "profile": "peer_create_own",
+      "label": {
+        "case": 1,
+        "prefix": "CREATE TEMP SEQUENCE",
+        "extended": true,
+        "sql": "CREATE TEMP SEQUENCE r309_temp_1 START WITH 101"
+      },
+      "kinds": [
+        "1",
+        "2",
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "CREATE SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 21,
+      "profile": "peer_own_value",
+      "label": {
+        "case": 1,
+        "prefix": "CREATE TEMP SEQUENCE",
+        "extended": true,
+        "sql": "SELECT nextval('r309_temp_1') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "101"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "000100000003313031"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 22,
+      "profile": "owner_still_own",
+      "label": {
+        "case": 1,
+        "prefix": "CREATE TEMP SEQUENCE",
+        "extended": true,
+        "sql": "SELECT nextval('r309_temp_1') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "13"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "0001000000023133"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 23,
+      "profile": "peer_discard_temp",
+      "label": {
+        "case": 1,
+        "prefix": "CREATE TEMP SEQUENCE",
+        "extended": true,
+        "sql": "DISCARD TEMP"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "DISCARD TEMP",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 24,
+      "profile": "peer_after_discard",
+      "label": {
+        "case": 1,
+        "prefix": "CREATE TEMP SEQUENCE",
+        "extended": true,
+        "sql": "SELECT nextval('r309_temp_1') AS v"
+      },
+      "kinds": [
+        "E",
+        "Z"
+      ],
+      "rows": [],
+      "state": "42P01",
+      "columns": [],
+      "tag": null,
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 25,
+      "profile": "owner_after_peer_discard",
+      "label": {
+        "case": 1,
+        "prefix": "CREATE TEMP SEQUENCE",
+        "extended": true,
+        "sql": "SELECT nextval('r309_temp_1') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "14"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "0001000000023134"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 26,
+      "profile": "owner_terminate_eof",
+      "label": {
+        "case": 1,
+        "prefix": "CREATE TEMP SEQUENCE",
+        "extended": true
+      },
+      "transportEOF": true
+    },
+    {
+      "ordinal": 27,
+      "profile": "peer_after_owner_exit",
+      "label": {
+        "case": 1,
+        "prefix": "CREATE TEMP SEQUENCE",
+        "extended": true,
+        "sql": "SELECT nextval('r309_temp_1') AS v"
+      },
+      "kinds": [
+        "E",
+        "Z"
+      ],
+      "rows": [],
+      "state": "42P01",
+      "columns": [],
+      "tag": null,
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 28,
+      "profile": "public_after_owner_exit",
+      "label": {
+        "case": 1,
+        "prefix": "CREATE TEMP SEQUENCE",
+        "extended": true,
+        "sql": "SELECT nextval('public.r309_temp_1') AS v"
+      },
+      "kinds": [
+        "E",
+        "Z"
+      ],
+      "rows": [],
+      "state": "42P01",
+      "columns": [],
+      "tag": null,
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 29,
+      "profile": "persistent_after_owner_exit",
+      "label": {
+        "case": 1,
+        "prefix": "CREATE TEMP SEQUENCE",
+        "extended": true,
+        "sql": "SELECT nextval('r309_persistent_control') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "901"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "000100000003393031"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 30,
+      "profile": "cleanup_public_probe",
+      "label": {
+        "case": 1,
+        "prefix": "CREATE TEMP SEQUENCE",
+        "extended": true,
+        "sql": "DROP SEQUENCE IF EXISTS public.r309_temp_1"
+      },
+      "kinds": [
+        "N",
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "DROP SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [
+        [
+          "NOTICE",
+          "00000"
+        ]
+      ],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 31,
+      "profile": "owner_create",
+      "label": {
+        "case": 2,
+        "prefix": "CREATE TEMPORARY SEQUENCE",
+        "extended": false,
+        "sql": "CREATE TEMPORARY SEQUENCE r309_temp_2 START WITH 11"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "CREATE SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 32,
+      "profile": "owner_implicit",
+      "label": {
+        "case": 2,
+        "prefix": "CREATE TEMPORARY SEQUENCE",
+        "extended": false,
+        "sql": "SELECT nextval('r309_temp_2') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "11"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "0001000000023131"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 33,
+      "profile": "owner_explicit_temp",
+      "label": {
+        "case": 2,
+        "prefix": "CREATE TEMPORARY SEQUENCE",
+        "extended": false,
+        "sql": "SELECT nextval('pg_temp.r309_temp_2') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "12"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "0001000000023132"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 34,
+      "profile": "peer_without_own",
+      "label": {
+        "case": 2,
+        "prefix": "CREATE TEMPORARY SEQUENCE",
+        "extended": false,
+        "sql": "SELECT nextval('r309_temp_2') AS v"
+      },
+      "kinds": [
+        "E",
+        "Z"
+      ],
+      "rows": [],
+      "state": "42P01",
+      "columns": [],
+      "tag": null,
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 35,
+      "profile": "peer_create_own",
+      "label": {
+        "case": 2,
+        "prefix": "CREATE TEMPORARY SEQUENCE",
+        "extended": false,
+        "sql": "CREATE TEMPORARY SEQUENCE r309_temp_2 START WITH 101"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "CREATE SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 36,
+      "profile": "peer_own_value",
+      "label": {
+        "case": 2,
+        "prefix": "CREATE TEMPORARY SEQUENCE",
+        "extended": false,
+        "sql": "SELECT nextval('r309_temp_2') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "101"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "000100000003313031"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 37,
+      "profile": "owner_still_own",
+      "label": {
+        "case": 2,
+        "prefix": "CREATE TEMPORARY SEQUENCE",
+        "extended": false,
+        "sql": "SELECT nextval('r309_temp_2') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "13"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "0001000000023133"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 38,
+      "profile": "peer_discard_temp",
+      "label": {
+        "case": 2,
+        "prefix": "CREATE TEMPORARY SEQUENCE",
+        "extended": false,
+        "sql": "DISCARD TEMP"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "DISCARD TEMP",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 39,
+      "profile": "peer_after_discard",
+      "label": {
+        "case": 2,
+        "prefix": "CREATE TEMPORARY SEQUENCE",
+        "extended": false,
+        "sql": "SELECT nextval('r309_temp_2') AS v"
+      },
+      "kinds": [
+        "E",
+        "Z"
+      ],
+      "rows": [],
+      "state": "42P01",
+      "columns": [],
+      "tag": null,
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 40,
+      "profile": "owner_after_peer_discard",
+      "label": {
+        "case": 2,
+        "prefix": "CREATE TEMPORARY SEQUENCE",
+        "extended": false,
+        "sql": "SELECT nextval('r309_temp_2') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "14"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "0001000000023134"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 41,
+      "profile": "owner_terminate_eof",
+      "label": {
+        "case": 2,
+        "prefix": "CREATE TEMPORARY SEQUENCE",
+        "extended": false
+      },
+      "transportEOF": true
+    },
+    {
+      "ordinal": 42,
+      "profile": "peer_after_owner_exit",
+      "label": {
+        "case": 2,
+        "prefix": "CREATE TEMPORARY SEQUENCE",
+        "extended": false,
+        "sql": "SELECT nextval('r309_temp_2') AS v"
+      },
+      "kinds": [
+        "E",
+        "Z"
+      ],
+      "rows": [],
+      "state": "42P01",
+      "columns": [],
+      "tag": null,
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 43,
+      "profile": "public_after_owner_exit",
+      "label": {
+        "case": 2,
+        "prefix": "CREATE TEMPORARY SEQUENCE",
+        "extended": false,
+        "sql": "SELECT nextval('public.r309_temp_2') AS v"
+      },
+      "kinds": [
+        "E",
+        "Z"
+      ],
+      "rows": [],
+      "state": "42P01",
+      "columns": [],
+      "tag": null,
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 44,
+      "profile": "persistent_after_owner_exit",
+      "label": {
+        "case": 2,
+        "prefix": "CREATE TEMPORARY SEQUENCE",
+        "extended": false,
+        "sql": "SELECT nextval('r309_persistent_control') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "902"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "000100000003393032"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 45,
+      "profile": "cleanup_public_probe",
+      "label": {
+        "case": 2,
+        "prefix": "CREATE TEMPORARY SEQUENCE",
+        "extended": false,
+        "sql": "DROP SEQUENCE IF EXISTS public.r309_temp_2"
+      },
+      "kinds": [
+        "N",
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "DROP SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [
+        [
+          "NOTICE",
+          "00000"
+        ]
+      ],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 46,
+      "profile": "owner_create",
+      "label": {
+        "case": 3,
+        "prefix": "CREATE TEMPORARY SEQUENCE",
+        "extended": true,
+        "sql": "CREATE TEMPORARY SEQUENCE r309_temp_3 START WITH 11"
+      },
+      "kinds": [
+        "1",
+        "2",
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "CREATE SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 47,
+      "profile": "owner_implicit",
+      "label": {
+        "case": 3,
+        "prefix": "CREATE TEMPORARY SEQUENCE",
+        "extended": true,
+        "sql": "SELECT nextval('r309_temp_3') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "11"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "0001000000023131"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 48,
+      "profile": "owner_explicit_temp",
+      "label": {
+        "case": 3,
+        "prefix": "CREATE TEMPORARY SEQUENCE",
+        "extended": true,
+        "sql": "SELECT nextval('pg_temp.r309_temp_3') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "12"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "0001000000023132"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 49,
+      "profile": "peer_without_own",
+      "label": {
+        "case": 3,
+        "prefix": "CREATE TEMPORARY SEQUENCE",
+        "extended": true,
+        "sql": "SELECT nextval('r309_temp_3') AS v"
+      },
+      "kinds": [
+        "E",
+        "Z"
+      ],
+      "rows": [],
+      "state": "42P01",
+      "columns": [],
+      "tag": null,
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 50,
+      "profile": "peer_create_own",
+      "label": {
+        "case": 3,
+        "prefix": "CREATE TEMPORARY SEQUENCE",
+        "extended": true,
+        "sql": "CREATE TEMPORARY SEQUENCE r309_temp_3 START WITH 101"
+      },
+      "kinds": [
+        "1",
+        "2",
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "CREATE SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 51,
+      "profile": "peer_own_value",
+      "label": {
+        "case": 3,
+        "prefix": "CREATE TEMPORARY SEQUENCE",
+        "extended": true,
+        "sql": "SELECT nextval('r309_temp_3') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "101"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "000100000003313031"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 52,
+      "profile": "owner_still_own",
+      "label": {
+        "case": 3,
+        "prefix": "CREATE TEMPORARY SEQUENCE",
+        "extended": true,
+        "sql": "SELECT nextval('r309_temp_3') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "13"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "0001000000023133"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 53,
+      "profile": "peer_discard_temp",
+      "label": {
+        "case": 3,
+        "prefix": "CREATE TEMPORARY SEQUENCE",
+        "extended": true,
+        "sql": "DISCARD TEMP"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "DISCARD TEMP",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 54,
+      "profile": "peer_after_discard",
+      "label": {
+        "case": 3,
+        "prefix": "CREATE TEMPORARY SEQUENCE",
+        "extended": true,
+        "sql": "SELECT nextval('r309_temp_3') AS v"
+      },
+      "kinds": [
+        "E",
+        "Z"
+      ],
+      "rows": [],
+      "state": "42P01",
+      "columns": [],
+      "tag": null,
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 55,
+      "profile": "owner_after_peer_discard",
+      "label": {
+        "case": 3,
+        "prefix": "CREATE TEMPORARY SEQUENCE",
+        "extended": true,
+        "sql": "SELECT nextval('r309_temp_3') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "14"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "0001000000023134"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 56,
+      "profile": "owner_terminate_eof",
+      "label": {
+        "case": 3,
+        "prefix": "CREATE TEMPORARY SEQUENCE",
+        "extended": true
+      },
+      "transportEOF": true
+    },
+    {
+      "ordinal": 57,
+      "profile": "peer_after_owner_exit",
+      "label": {
+        "case": 3,
+        "prefix": "CREATE TEMPORARY SEQUENCE",
+        "extended": true,
+        "sql": "SELECT nextval('r309_temp_3') AS v"
+      },
+      "kinds": [
+        "E",
+        "Z"
+      ],
+      "rows": [],
+      "state": "42P01",
+      "columns": [],
+      "tag": null,
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 58,
+      "profile": "public_after_owner_exit",
+      "label": {
+        "case": 3,
+        "prefix": "CREATE TEMPORARY SEQUENCE",
+        "extended": true,
+        "sql": "SELECT nextval('public.r309_temp_3') AS v"
+      },
+      "kinds": [
+        "E",
+        "Z"
+      ],
+      "rows": [],
+      "state": "42P01",
+      "columns": [],
+      "tag": null,
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 59,
+      "profile": "persistent_after_owner_exit",
+      "label": {
+        "case": 3,
+        "prefix": "CREATE TEMPORARY SEQUENCE",
+        "extended": true,
+        "sql": "SELECT nextval('r309_persistent_control') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "903"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "000100000003393033"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 60,
+      "profile": "cleanup_public_probe",
+      "label": {
+        "case": 3,
+        "prefix": "CREATE TEMPORARY SEQUENCE",
+        "extended": true,
+        "sql": "DROP SEQUENCE IF EXISTS public.r309_temp_3"
+      },
+      "kinds": [
+        "N",
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "DROP SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [
+        [
+          "NOTICE",
+          "00000"
+        ]
+      ],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 61,
+      "profile": "owner_create",
+      "label": {
+        "case": 4,
+        "prefix": "CREATE LOCAL TEMP SEQUENCE",
+        "extended": false,
+        "sql": "CREATE LOCAL TEMP SEQUENCE r309_temp_4 START WITH 11"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "CREATE SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 62,
+      "profile": "owner_implicit",
+      "label": {
+        "case": 4,
+        "prefix": "CREATE LOCAL TEMP SEQUENCE",
+        "extended": false,
+        "sql": "SELECT nextval('r309_temp_4') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "11"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "0001000000023131"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 63,
+      "profile": "owner_explicit_temp",
+      "label": {
+        "case": 4,
+        "prefix": "CREATE LOCAL TEMP SEQUENCE",
+        "extended": false,
+        "sql": "SELECT nextval('pg_temp.r309_temp_4') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "12"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "0001000000023132"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 64,
+      "profile": "peer_without_own",
+      "label": {
+        "case": 4,
+        "prefix": "CREATE LOCAL TEMP SEQUENCE",
+        "extended": false,
+        "sql": "SELECT nextval('r309_temp_4') AS v"
+      },
+      "kinds": [
+        "E",
+        "Z"
+      ],
+      "rows": [],
+      "state": "42P01",
+      "columns": [],
+      "tag": null,
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 65,
+      "profile": "peer_create_own",
+      "label": {
+        "case": 4,
+        "prefix": "CREATE LOCAL TEMP SEQUENCE",
+        "extended": false,
+        "sql": "CREATE LOCAL TEMP SEQUENCE r309_temp_4 START WITH 101"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "CREATE SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 66,
+      "profile": "peer_own_value",
+      "label": {
+        "case": 4,
+        "prefix": "CREATE LOCAL TEMP SEQUENCE",
+        "extended": false,
+        "sql": "SELECT nextval('r309_temp_4') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "101"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "000100000003313031"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 67,
+      "profile": "owner_still_own",
+      "label": {
+        "case": 4,
+        "prefix": "CREATE LOCAL TEMP SEQUENCE",
+        "extended": false,
+        "sql": "SELECT nextval('r309_temp_4') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "13"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "0001000000023133"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 68,
+      "profile": "peer_discard_temp",
+      "label": {
+        "case": 4,
+        "prefix": "CREATE LOCAL TEMP SEQUENCE",
+        "extended": false,
+        "sql": "DISCARD TEMP"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "DISCARD TEMP",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 69,
+      "profile": "peer_after_discard",
+      "label": {
+        "case": 4,
+        "prefix": "CREATE LOCAL TEMP SEQUENCE",
+        "extended": false,
+        "sql": "SELECT nextval('r309_temp_4') AS v"
+      },
+      "kinds": [
+        "E",
+        "Z"
+      ],
+      "rows": [],
+      "state": "42P01",
+      "columns": [],
+      "tag": null,
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 70,
+      "profile": "owner_after_peer_discard",
+      "label": {
+        "case": 4,
+        "prefix": "CREATE LOCAL TEMP SEQUENCE",
+        "extended": false,
+        "sql": "SELECT nextval('r309_temp_4') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "14"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "0001000000023134"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 71,
+      "profile": "owner_terminate_eof",
+      "label": {
+        "case": 4,
+        "prefix": "CREATE LOCAL TEMP SEQUENCE",
+        "extended": false
+      },
+      "transportEOF": true
+    },
+    {
+      "ordinal": 72,
+      "profile": "peer_after_owner_exit",
+      "label": {
+        "case": 4,
+        "prefix": "CREATE LOCAL TEMP SEQUENCE",
+        "extended": false,
+        "sql": "SELECT nextval('r309_temp_4') AS v"
+      },
+      "kinds": [
+        "E",
+        "Z"
+      ],
+      "rows": [],
+      "state": "42P01",
+      "columns": [],
+      "tag": null,
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 73,
+      "profile": "public_after_owner_exit",
+      "label": {
+        "case": 4,
+        "prefix": "CREATE LOCAL TEMP SEQUENCE",
+        "extended": false,
+        "sql": "SELECT nextval('public.r309_temp_4') AS v"
+      },
+      "kinds": [
+        "E",
+        "Z"
+      ],
+      "rows": [],
+      "state": "42P01",
+      "columns": [],
+      "tag": null,
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 74,
+      "profile": "persistent_after_owner_exit",
+      "label": {
+        "case": 4,
+        "prefix": "CREATE LOCAL TEMP SEQUENCE",
+        "extended": false,
+        "sql": "SELECT nextval('r309_persistent_control') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "904"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "000100000003393034"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 75,
+      "profile": "cleanup_public_probe",
+      "label": {
+        "case": 4,
+        "prefix": "CREATE LOCAL TEMP SEQUENCE",
+        "extended": false,
+        "sql": "DROP SEQUENCE IF EXISTS public.r309_temp_4"
+      },
+      "kinds": [
+        "N",
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "DROP SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [
+        [
+          "NOTICE",
+          "00000"
+        ]
+      ],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 76,
+      "profile": "owner_create",
+      "label": {
+        "case": 5,
+        "prefix": "CREATE LOCAL TEMP SEQUENCE",
+        "extended": true,
+        "sql": "CREATE LOCAL TEMP SEQUENCE r309_temp_5 START WITH 11"
+      },
+      "kinds": [
+        "1",
+        "2",
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "CREATE SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 77,
+      "profile": "owner_implicit",
+      "label": {
+        "case": 5,
+        "prefix": "CREATE LOCAL TEMP SEQUENCE",
+        "extended": true,
+        "sql": "SELECT nextval('r309_temp_5') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "11"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "0001000000023131"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 78,
+      "profile": "owner_explicit_temp",
+      "label": {
+        "case": 5,
+        "prefix": "CREATE LOCAL TEMP SEQUENCE",
+        "extended": true,
+        "sql": "SELECT nextval('pg_temp.r309_temp_5') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "12"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "0001000000023132"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 79,
+      "profile": "peer_without_own",
+      "label": {
+        "case": 5,
+        "prefix": "CREATE LOCAL TEMP SEQUENCE",
+        "extended": true,
+        "sql": "SELECT nextval('r309_temp_5') AS v"
+      },
+      "kinds": [
+        "E",
+        "Z"
+      ],
+      "rows": [],
+      "state": "42P01",
+      "columns": [],
+      "tag": null,
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 80,
+      "profile": "peer_create_own",
+      "label": {
+        "case": 5,
+        "prefix": "CREATE LOCAL TEMP SEQUENCE",
+        "extended": true,
+        "sql": "CREATE LOCAL TEMP SEQUENCE r309_temp_5 START WITH 101"
+      },
+      "kinds": [
+        "1",
+        "2",
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "CREATE SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 81,
+      "profile": "peer_own_value",
+      "label": {
+        "case": 5,
+        "prefix": "CREATE LOCAL TEMP SEQUENCE",
+        "extended": true,
+        "sql": "SELECT nextval('r309_temp_5') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "101"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "000100000003313031"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 82,
+      "profile": "owner_still_own",
+      "label": {
+        "case": 5,
+        "prefix": "CREATE LOCAL TEMP SEQUENCE",
+        "extended": true,
+        "sql": "SELECT nextval('r309_temp_5') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "13"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "0001000000023133"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 83,
+      "profile": "peer_discard_temp",
+      "label": {
+        "case": 5,
+        "prefix": "CREATE LOCAL TEMP SEQUENCE",
+        "extended": true,
+        "sql": "DISCARD TEMP"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "DISCARD TEMP",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 84,
+      "profile": "peer_after_discard",
+      "label": {
+        "case": 5,
+        "prefix": "CREATE LOCAL TEMP SEQUENCE",
+        "extended": true,
+        "sql": "SELECT nextval('r309_temp_5') AS v"
+      },
+      "kinds": [
+        "E",
+        "Z"
+      ],
+      "rows": [],
+      "state": "42P01",
+      "columns": [],
+      "tag": null,
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 85,
+      "profile": "owner_after_peer_discard",
+      "label": {
+        "case": 5,
+        "prefix": "CREATE LOCAL TEMP SEQUENCE",
+        "extended": true,
+        "sql": "SELECT nextval('r309_temp_5') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "14"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "0001000000023134"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 86,
+      "profile": "owner_terminate_eof",
+      "label": {
+        "case": 5,
+        "prefix": "CREATE LOCAL TEMP SEQUENCE",
+        "extended": true
+      },
+      "transportEOF": true
+    },
+    {
+      "ordinal": 87,
+      "profile": "peer_after_owner_exit",
+      "label": {
+        "case": 5,
+        "prefix": "CREATE LOCAL TEMP SEQUENCE",
+        "extended": true,
+        "sql": "SELECT nextval('r309_temp_5') AS v"
+      },
+      "kinds": [
+        "E",
+        "Z"
+      ],
+      "rows": [],
+      "state": "42P01",
+      "columns": [],
+      "tag": null,
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 88,
+      "profile": "public_after_owner_exit",
+      "label": {
+        "case": 5,
+        "prefix": "CREATE LOCAL TEMP SEQUENCE",
+        "extended": true,
+        "sql": "SELECT nextval('public.r309_temp_5') AS v"
+      },
+      "kinds": [
+        "E",
+        "Z"
+      ],
+      "rows": [],
+      "state": "42P01",
+      "columns": [],
+      "tag": null,
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 89,
+      "profile": "persistent_after_owner_exit",
+      "label": {
+        "case": 5,
+        "prefix": "CREATE LOCAL TEMP SEQUENCE",
+        "extended": true,
+        "sql": "SELECT nextval('r309_persistent_control') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "905"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "000100000003393035"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 90,
+      "profile": "cleanup_public_probe",
+      "label": {
+        "case": 5,
+        "prefix": "CREATE LOCAL TEMP SEQUENCE",
+        "extended": true,
+        "sql": "DROP SEQUENCE IF EXISTS public.r309_temp_5"
+      },
+      "kinds": [
+        "N",
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "DROP SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [
+        [
+          "NOTICE",
+          "00000"
+        ]
+      ],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 91,
+      "profile": "temp_public_forbidden",
+      "label": {
+        "case": 6,
+        "extended": false,
+        "extra": true,
+        "sql": "CREATE TEMP SEQUENCE public.r309_extra_6"
+      },
+      "kinds": [
+        "E",
+        "Z"
+      ],
+      "rows": [],
+      "state": "42P16",
+      "columns": [],
+      "tag": null,
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 92,
+      "profile": "temp_missing_schema",
+      "label": {
+        "case": 6,
+        "extended": false,
+        "extra": true,
+        "sql": "CREATE TEMP SEQUENCE r309_missing.r309_extra_6"
+      },
+      "kinds": [
+        "E",
+        "Z"
+      ],
+      "rows": [],
+      "state": "3F000",
+      "columns": [],
+      "tag": null,
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 93,
+      "profile": "temp_public_ifnot_forbidden",
+      "label": {
+        "case": 6,
+        "extended": false,
+        "extra": true,
+        "sql": "CREATE TEMP SEQUENCE IF NOT EXISTS public.r309_persistent_control"
+      },
+      "kinds": [
+        "E",
+        "Z"
+      ],
+      "rows": [],
+      "state": "42P16",
+      "columns": [],
+      "tag": null,
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 94,
+      "profile": "alias_setup",
+      "label": {
+        "case": 6,
+        "extended": false,
+        "extra": true,
+        "sql": "CREATE SEQUENCE pg_temp.r309_extra_6 START WITH 21"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "CREATE SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 95,
+      "profile": "alias_probe",
+      "label": {
+        "case": 6,
+        "extended": false,
+        "extra": true,
+        "sql": "SELECT nextval('pg_temp.r309_extra_6') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "21"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "0001000000023231"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 96,
+      "profile": "alias_drop",
+      "label": {
+        "case": 6,
+        "extended": false,
+        "extra": true,
+        "sql": "DROP SEQUENCE pg_temp.r309_extra_6"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "DROP SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 97,
+      "profile": "temp_alias_setup",
+      "label": {
+        "case": 6,
+        "extended": false,
+        "extra": true,
+        "sql": "CREATE TEMP SEQUENCE pg_temp.r309_extra_6 START WITH 31"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "CREATE SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 98,
+      "profile": "temp_alias_probe",
+      "label": {
+        "case": 6,
+        "extended": false,
+        "extra": true,
+        "sql": "SELECT nextval('pg_temp.r309_extra_6') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "31"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "0001000000023331"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 99,
+      "profile": "temp_alias_drop",
+      "label": {
+        "case": 6,
+        "extended": false,
+        "extra": true,
+        "sql": "DROP SEQUENCE pg_temp.r309_extra_6"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "DROP SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 100,
+      "profile": "shadow_public_setup",
+      "label": {
+        "case": 6,
+        "extended": false,
+        "extra": true,
+        "sql": "CREATE SEQUENCE public.r309_extra_6 START WITH 701"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "CREATE SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 101,
+      "profile": "shadow_temp_setup",
+      "label": {
+        "case": 6,
+        "extended": false,
+        "extra": true,
+        "sql": "CREATE TEMP SEQUENCE r309_extra_6 START WITH 11"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "CREATE SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 102,
+      "profile": "shadow_temp_probe",
+      "label": {
+        "case": 6,
+        "extended": false,
+        "extra": true,
+        "sql": "SELECT nextval('r309_extra_6') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "11"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "0001000000023131"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 103,
+      "profile": "shadow_public_probe",
+      "label": {
+        "case": 6,
+        "extended": false,
+        "extra": true,
+        "sql": "SELECT nextval('public.r309_extra_6') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "701"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "000100000003373031"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 104,
+      "profile": "shadow_peer_probe",
+      "label": {
+        "case": 6,
+        "extended": false,
+        "extra": true,
+        "sql": "SELECT nextval('r309_extra_6') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "702"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "000100000003373032"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 105,
+      "profile": "shadow_drop_temp",
+      "label": {
+        "case": 6,
+        "extended": false,
+        "extra": true,
+        "sql": "DROP SEQUENCE r309_extra_6"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "DROP SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 106,
+      "profile": "shadow_public_fallback",
+      "label": {
+        "case": 6,
+        "extended": false,
+        "extra": true,
+        "sql": "SELECT nextval('r309_extra_6') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "703"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "000100000003373033"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 107,
+      "profile": "shadow_drop_public",
+      "label": {
+        "case": 6,
+        "extended": false,
+        "extra": true,
+        "sql": "DROP SEQUENCE public.r309_extra_6"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "DROP SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 108,
+      "profile": "tx_begin",
+      "label": {
+        "case": 6,
+        "extended": false,
+        "extra": true,
+        "sql": "BEGIN"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "BEGIN",
+      "oids": [],
+      "ready": "T",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 109,
+      "profile": "tx_savepoint",
+      "label": {
+        "case": 6,
+        "extended": false,
+        "extra": true,
+        "sql": "SAVEPOINT r309_guard"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "SAVEPOINT",
+      "oids": [],
+      "ready": "T",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 110,
+      "profile": "tx_create",
+      "label": {
+        "case": 6,
+        "extended": false,
+        "extra": true,
+        "sql": "CREATE TEMP SEQUENCE r309_extra_6_tx START WITH 41"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "CREATE SEQUENCE",
+      "oids": [],
+      "ready": "T",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 111,
+      "profile": "tx_probe",
+      "label": {
+        "case": 6,
+        "extended": false,
+        "extra": true,
+        "sql": "SELECT nextval('pg_temp.r309_extra_6_tx') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "41"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "T",
+      "notices": [],
+      "dataPayloads": [
+        "0001000000023431"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 112,
+      "profile": "tx_recover",
+      "label": {
+        "case": 6,
+        "extended": false,
+        "extra": true,
+        "sql": "ROLLBACK TO SAVEPOINT r309_guard"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "ROLLBACK",
+      "oids": [],
+      "ready": "T",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 113,
+      "profile": "tx_missing",
+      "label": {
+        "case": 6,
+        "extended": false,
+        "extra": true,
+        "sql": "SELECT nextval('pg_temp.r309_extra_6_tx') AS v"
+      },
+      "kinds": [
+        "E",
+        "Z"
+      ],
+      "rows": [],
+      "state": "42P01",
+      "columns": [],
+      "tag": null,
+      "oids": [],
+      "ready": "E",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 114,
+      "profile": "tx_rollback",
+      "label": {
+        "case": 6,
+        "extended": false,
+        "extra": true,
+        "sql": "ROLLBACK"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "ROLLBACK",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 115,
+      "profile": "tx_public_missing",
+      "label": {
+        "case": 6,
+        "extended": false,
+        "extra": true,
+        "sql": "SELECT nextval('public.r309_extra_6_tx') AS v"
+      },
+      "kinds": [
+        "E",
+        "Z"
+      ],
+      "rows": [],
+      "state": "42P01",
+      "columns": [],
+      "tag": null,
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 116,
+      "profile": "keep_create",
+      "label": {
+        "case": 6,
+        "extended": false,
+        "extra": true,
+        "sql": "CREATE TEMP SEQUENCE r309_extra_6_keep START WITH 51"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "CREATE SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 117,
+      "profile": "keep_begin",
+      "label": {
+        "case": 6,
+        "extended": false,
+        "extra": true,
+        "sql": "BEGIN"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "BEGIN",
+      "oids": [],
+      "ready": "T",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 118,
+      "profile": "keep_savepoint",
+      "label": {
+        "case": 6,
+        "extended": false,
+        "extra": true,
+        "sql": "SAVEPOINT r309_guard"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "SAVEPOINT",
+      "oids": [],
+      "ready": "T",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 119,
+      "profile": "keep_drop",
+      "label": {
+        "case": 6,
+        "extended": false,
+        "extra": true,
+        "sql": "DROP SEQUENCE pg_temp.r309_extra_6_keep"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "DROP SEQUENCE",
+      "oids": [],
+      "ready": "T",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 120,
+      "profile": "keep_recover",
+      "label": {
+        "case": 6,
+        "extended": false,
+        "extra": true,
+        "sql": "ROLLBACK TO SAVEPOINT r309_guard"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "ROLLBACK",
+      "oids": [],
+      "ready": "T",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 121,
+      "profile": "keep_probe",
+      "label": {
+        "case": 6,
+        "extended": false,
+        "extra": true,
+        "sql": "SELECT nextval('pg_temp.r309_extra_6_keep') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "51"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "T",
+      "notices": [],
+      "dataPayloads": [
+        "0001000000023531"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 122,
+      "profile": "keep_rollback",
+      "label": {
+        "case": 6,
+        "extended": false,
+        "extra": true,
+        "sql": "ROLLBACK"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "ROLLBACK",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 123,
+      "profile": "keep_after_rollback",
+      "label": {
+        "case": 6,
+        "extended": false,
+        "extra": true,
+        "sql": "SELECT nextval('pg_temp.r309_extra_6_keep') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "52"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "0001000000023532"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 124,
+      "profile": "keep_final_drop",
+      "label": {
+        "case": 6,
+        "extended": false,
+        "extra": true,
+        "sql": "DROP SEQUENCE pg_temp.r309_extra_6_keep"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "DROP SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 125,
+      "profile": "table_setup",
+      "label": {
+        "case": 6,
+        "extended": false,
+        "extra": true,
+        "sql": "CREATE TEMP TABLE r309_extra_6_table(id integer)"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "CREATE TABLE",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 126,
+      "profile": "table_insert",
+      "label": {
+        "case": 6,
+        "extended": false,
+        "extra": true,
+        "sql": "INSERT INTO r309_extra_6_table VALUES(9)"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "INSERT 0 1",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 127,
+      "profile": "first_table_conflict",
+      "label": {
+        "case": 6,
+        "extended": false,
+        "extra": true,
+        "sql": "CREATE TEMP SEQUENCE r309_extra_6_table START WITH 999"
+      },
+      "kinds": [
+        "E",
+        "Z"
+      ],
+      "rows": [],
+      "state": "42P07",
+      "columns": [],
+      "tag": null,
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 128,
+      "profile": "table_still_usable",
+      "label": {
+        "case": 6,
+        "extended": false,
+        "extra": true,
+        "sql": "SELECT id FROM r309_extra_6_table"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "9"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "id"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        23
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "00010000000139"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 129,
+      "profile": "table_conflict_public_missing",
+      "label": {
+        "case": 6,
+        "extended": false,
+        "extra": true,
+        "sql": "SELECT nextval('public.r309_extra_6_table') AS v"
+      },
+      "kinds": [
+        "E",
+        "Z"
+      ],
+      "rows": [],
+      "state": "42P01",
+      "columns": [],
+      "tag": null,
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 130,
+      "profile": "table_drop",
+      "label": {
+        "case": 6,
+        "extended": false,
+        "extra": true,
+        "sql": "DROP TABLE r309_extra_6_table"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "DROP TABLE",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 131,
+      "profile": "discard_remaining",
+      "label": {
+        "case": 6,
+        "extended": false,
+        "extra": true,
+        "sql": "DISCARD TEMP"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "DISCARD TEMP",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 132,
+      "profile": "cleanup_keep_public",
+      "label": {
+        "case": 6,
+        "extended": false,
+        "extra": true,
+        "sql": "DROP SEQUENCE IF EXISTS public.r309_extra_6_keep"
+      },
+      "kinds": [
+        "N",
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "DROP SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [
+        [
+          "NOTICE",
+          "00000"
+        ]
+      ],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 133,
+      "profile": "cleanup_table_public",
+      "label": {
+        "case": 6,
+        "extended": false,
+        "extra": true,
+        "sql": "DROP SEQUENCE IF EXISTS public.r309_extra_6_table"
+      },
+      "kinds": [
+        "N",
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "DROP SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [
+        [
+          "NOTICE",
+          "00000"
+        ]
+      ],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 134,
+      "profile": "cleanup_tx_public",
+      "label": {
+        "case": 6,
+        "extended": false,
+        "extra": true,
+        "sql": "DROP SEQUENCE IF EXISTS public.r309_extra_6_tx"
+      },
+      "kinds": [
+        "N",
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "DROP SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [
+        [
+          "NOTICE",
+          "00000"
+        ]
+      ],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 135,
+      "profile": "cleanup_forbidden_public",
+      "label": {
+        "case": 6,
+        "extended": false,
+        "extra": true,
+        "sql": "DROP SEQUENCE IF EXISTS public.r309_extra_6"
+      },
+      "kinds": [
+        "N",
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "DROP SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [
+        [
+          "NOTICE",
+          "00000"
+        ]
+      ],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 136,
+      "profile": "temp_public_forbidden",
+      "label": {
+        "case": 7,
+        "extended": true,
+        "extra": true,
+        "sql": "CREATE TEMP SEQUENCE public.r309_extra_7"
+      },
+      "kinds": [
+        "E",
+        "Z"
+      ],
+      "rows": [],
+      "state": "42P16",
+      "columns": [],
+      "tag": null,
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 137,
+      "profile": "temp_missing_schema",
+      "label": {
+        "case": 7,
+        "extended": true,
+        "extra": true,
+        "sql": "CREATE TEMP SEQUENCE r309_missing.r309_extra_7"
+      },
+      "kinds": [
+        "E",
+        "Z"
+      ],
+      "rows": [],
+      "state": "3F000",
+      "columns": [],
+      "tag": null,
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 138,
+      "profile": "temp_public_ifnot_forbidden",
+      "label": {
+        "case": 7,
+        "extended": true,
+        "extra": true,
+        "sql": "CREATE TEMP SEQUENCE IF NOT EXISTS public.r309_persistent_control"
+      },
+      "kinds": [
+        "E",
+        "Z"
+      ],
+      "rows": [],
+      "state": "42P16",
+      "columns": [],
+      "tag": null,
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 139,
+      "profile": "alias_setup",
+      "label": {
+        "case": 7,
+        "extended": true,
+        "extra": true,
+        "sql": "CREATE SEQUENCE pg_temp.r309_extra_7 START WITH 21"
+      },
+      "kinds": [
+        "1",
+        "2",
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "CREATE SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 140,
+      "profile": "alias_probe",
+      "label": {
+        "case": 7,
+        "extended": true,
+        "extra": true,
+        "sql": "SELECT nextval('pg_temp.r309_extra_7') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "21"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "0001000000023231"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 141,
+      "profile": "alias_drop",
+      "label": {
+        "case": 7,
+        "extended": true,
+        "extra": true,
+        "sql": "DROP SEQUENCE pg_temp.r309_extra_7"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "DROP SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 142,
+      "profile": "temp_alias_setup",
+      "label": {
+        "case": 7,
+        "extended": true,
+        "extra": true,
+        "sql": "CREATE TEMP SEQUENCE pg_temp.r309_extra_7 START WITH 31"
+      },
+      "kinds": [
+        "1",
+        "2",
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "CREATE SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 143,
+      "profile": "temp_alias_probe",
+      "label": {
+        "case": 7,
+        "extended": true,
+        "extra": true,
+        "sql": "SELECT nextval('pg_temp.r309_extra_7') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "31"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "0001000000023331"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 144,
+      "profile": "temp_alias_drop",
+      "label": {
+        "case": 7,
+        "extended": true,
+        "extra": true,
+        "sql": "DROP SEQUENCE pg_temp.r309_extra_7"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "DROP SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 145,
+      "profile": "shadow_public_setup",
+      "label": {
+        "case": 7,
+        "extended": true,
+        "extra": true,
+        "sql": "CREATE SEQUENCE public.r309_extra_7 START WITH 701"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "CREATE SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 146,
+      "profile": "shadow_temp_setup",
+      "label": {
+        "case": 7,
+        "extended": true,
+        "extra": true,
+        "sql": "CREATE TEMP SEQUENCE r309_extra_7 START WITH 11"
+      },
+      "kinds": [
+        "1",
+        "2",
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "CREATE SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 147,
+      "profile": "shadow_temp_probe",
+      "label": {
+        "case": 7,
+        "extended": true,
+        "extra": true,
+        "sql": "SELECT nextval('r309_extra_7') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "11"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "0001000000023131"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 148,
+      "profile": "shadow_public_probe",
+      "label": {
+        "case": 7,
+        "extended": true,
+        "extra": true,
+        "sql": "SELECT nextval('public.r309_extra_7') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "701"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "000100000003373031"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 149,
+      "profile": "shadow_peer_probe",
+      "label": {
+        "case": 7,
+        "extended": true,
+        "extra": true,
+        "sql": "SELECT nextval('r309_extra_7') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "702"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "000100000003373032"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 150,
+      "profile": "shadow_drop_temp",
+      "label": {
+        "case": 7,
+        "extended": true,
+        "extra": true,
+        "sql": "DROP SEQUENCE r309_extra_7"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "DROP SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 151,
+      "profile": "shadow_public_fallback",
+      "label": {
+        "case": 7,
+        "extended": true,
+        "extra": true,
+        "sql": "SELECT nextval('r309_extra_7') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "703"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "000100000003373033"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 152,
+      "profile": "shadow_drop_public",
+      "label": {
+        "case": 7,
+        "extended": true,
+        "extra": true,
+        "sql": "DROP SEQUENCE public.r309_extra_7"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "DROP SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 153,
+      "profile": "tx_begin",
+      "label": {
+        "case": 7,
+        "extended": true,
+        "extra": true,
+        "sql": "BEGIN"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "BEGIN",
+      "oids": [],
+      "ready": "T",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 154,
+      "profile": "tx_savepoint",
+      "label": {
+        "case": 7,
+        "extended": true,
+        "extra": true,
+        "sql": "SAVEPOINT r309_guard"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "SAVEPOINT",
+      "oids": [],
+      "ready": "T",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 155,
+      "profile": "tx_create",
+      "label": {
+        "case": 7,
+        "extended": true,
+        "extra": true,
+        "sql": "CREATE TEMP SEQUENCE r309_extra_7_tx START WITH 41"
+      },
+      "kinds": [
+        "1",
+        "2",
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "CREATE SEQUENCE",
+      "oids": [],
+      "ready": "T",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 156,
+      "profile": "tx_probe",
+      "label": {
+        "case": 7,
+        "extended": true,
+        "extra": true,
+        "sql": "SELECT nextval('pg_temp.r309_extra_7_tx') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "41"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "T",
+      "notices": [],
+      "dataPayloads": [
+        "0001000000023431"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 157,
+      "profile": "tx_recover",
+      "label": {
+        "case": 7,
+        "extended": true,
+        "extra": true,
+        "sql": "ROLLBACK TO SAVEPOINT r309_guard"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "ROLLBACK",
+      "oids": [],
+      "ready": "T",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 158,
+      "profile": "tx_missing",
+      "label": {
+        "case": 7,
+        "extended": true,
+        "extra": true,
+        "sql": "SELECT nextval('pg_temp.r309_extra_7_tx') AS v"
+      },
+      "kinds": [
+        "E",
+        "Z"
+      ],
+      "rows": [],
+      "state": "42P01",
+      "columns": [],
+      "tag": null,
+      "oids": [],
+      "ready": "E",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 159,
+      "profile": "tx_rollback",
+      "label": {
+        "case": 7,
+        "extended": true,
+        "extra": true,
+        "sql": "ROLLBACK"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "ROLLBACK",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 160,
+      "profile": "tx_public_missing",
+      "label": {
+        "case": 7,
+        "extended": true,
+        "extra": true,
+        "sql": "SELECT nextval('public.r309_extra_7_tx') AS v"
+      },
+      "kinds": [
+        "E",
+        "Z"
+      ],
+      "rows": [],
+      "state": "42P01",
+      "columns": [],
+      "tag": null,
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 161,
+      "profile": "keep_create",
+      "label": {
+        "case": 7,
+        "extended": true,
+        "extra": true,
+        "sql": "CREATE TEMP SEQUENCE r309_extra_7_keep START WITH 51"
+      },
+      "kinds": [
+        "1",
+        "2",
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "CREATE SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 162,
+      "profile": "keep_begin",
+      "label": {
+        "case": 7,
+        "extended": true,
+        "extra": true,
+        "sql": "BEGIN"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "BEGIN",
+      "oids": [],
+      "ready": "T",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 163,
+      "profile": "keep_savepoint",
+      "label": {
+        "case": 7,
+        "extended": true,
+        "extra": true,
+        "sql": "SAVEPOINT r309_guard"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "SAVEPOINT",
+      "oids": [],
+      "ready": "T",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 164,
+      "profile": "keep_drop",
+      "label": {
+        "case": 7,
+        "extended": true,
+        "extra": true,
+        "sql": "DROP SEQUENCE pg_temp.r309_extra_7_keep"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "DROP SEQUENCE",
+      "oids": [],
+      "ready": "T",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 165,
+      "profile": "keep_recover",
+      "label": {
+        "case": 7,
+        "extended": true,
+        "extra": true,
+        "sql": "ROLLBACK TO SAVEPOINT r309_guard"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "ROLLBACK",
+      "oids": [],
+      "ready": "T",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 166,
+      "profile": "keep_probe",
+      "label": {
+        "case": 7,
+        "extended": true,
+        "extra": true,
+        "sql": "SELECT nextval('pg_temp.r309_extra_7_keep') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "51"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "T",
+      "notices": [],
+      "dataPayloads": [
+        "0001000000023531"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 167,
+      "profile": "keep_rollback",
+      "label": {
+        "case": 7,
+        "extended": true,
+        "extra": true,
+        "sql": "ROLLBACK"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "ROLLBACK",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 168,
+      "profile": "keep_after_rollback",
+      "label": {
+        "case": 7,
+        "extended": true,
+        "extra": true,
+        "sql": "SELECT nextval('pg_temp.r309_extra_7_keep') AS v"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "52"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "v"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        20
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "0001000000023532"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 169,
+      "profile": "keep_final_drop",
+      "label": {
+        "case": 7,
+        "extended": true,
+        "extra": true,
+        "sql": "DROP SEQUENCE pg_temp.r309_extra_7_keep"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "DROP SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 170,
+      "profile": "table_setup",
+      "label": {
+        "case": 7,
+        "extended": true,
+        "extra": true,
+        "sql": "CREATE TEMP TABLE r309_extra_7_table(id integer)"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "CREATE TABLE",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 171,
+      "profile": "table_insert",
+      "label": {
+        "case": 7,
+        "extended": true,
+        "extra": true,
+        "sql": "INSERT INTO r309_extra_7_table VALUES(9)"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "INSERT 0 1",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 172,
+      "profile": "first_table_conflict",
+      "label": {
+        "case": 7,
+        "extended": true,
+        "extra": true,
+        "sql": "CREATE TEMP SEQUENCE r309_extra_7_table START WITH 999"
+      },
+      "kinds": [
+        "1",
+        "2",
+        "E",
+        "Z"
+      ],
+      "rows": [],
+      "state": "42P07",
+      "columns": [],
+      "tag": null,
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 173,
+      "profile": "table_still_usable",
+      "label": {
+        "case": 7,
+        "extended": true,
+        "extra": true,
+        "sql": "SELECT id FROM r309_extra_7_table"
+      },
+      "kinds": [
+        "T",
+        "D",
+        "C",
+        "Z"
+      ],
+      "rows": [
+        [
+          "9"
+        ]
+      ],
+      "state": null,
+      "columns": [
+        "id"
+      ],
+      "tag": "SELECT 1",
+      "oids": [
+        23
+      ],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [
+        "00010000000139"
+      ],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 174,
+      "profile": "table_conflict_public_missing",
+      "label": {
+        "case": 7,
+        "extended": true,
+        "extra": true,
+        "sql": "SELECT nextval('public.r309_extra_7_table') AS v"
+      },
+      "kinds": [
+        "E",
+        "Z"
+      ],
+      "rows": [],
+      "state": "42P01",
+      "columns": [],
+      "tag": null,
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 175,
+      "profile": "table_drop",
+      "label": {
+        "case": 7,
+        "extended": true,
+        "extra": true,
+        "sql": "DROP TABLE r309_extra_7_table"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "DROP TABLE",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 176,
+      "profile": "discard_remaining",
+      "label": {
+        "case": 7,
+        "extended": true,
+        "extra": true,
+        "sql": "DISCARD TEMP"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "DISCARD TEMP",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 177,
+      "profile": "cleanup_keep_public",
+      "label": {
+        "case": 7,
+        "extended": true,
+        "extra": true,
+        "sql": "DROP SEQUENCE IF EXISTS public.r309_extra_7_keep"
+      },
+      "kinds": [
+        "N",
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "DROP SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [
+        [
+          "NOTICE",
+          "00000"
+        ]
+      ],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 178,
+      "profile": "cleanup_table_public",
+      "label": {
+        "case": 7,
+        "extended": true,
+        "extra": true,
+        "sql": "DROP SEQUENCE IF EXISTS public.r309_extra_7_table"
+      },
+      "kinds": [
+        "N",
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "DROP SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [
+        [
+          "NOTICE",
+          "00000"
+        ]
+      ],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 179,
+      "profile": "cleanup_tx_public",
+      "label": {
+        "case": 7,
+        "extended": true,
+        "extra": true,
+        "sql": "DROP SEQUENCE IF EXISTS public.r309_extra_7_tx"
+      },
+      "kinds": [
+        "N",
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "DROP SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [
+        [
+          "NOTICE",
+          "00000"
+        ]
+      ],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 180,
+      "profile": "cleanup_forbidden_public",
+      "label": {
+        "case": 7,
+        "extended": true,
+        "extra": true,
+        "sql": "DROP SEQUENCE IF EXISTS public.r309_extra_7"
+      },
+      "kinds": [
+        "N",
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "DROP SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [
+        [
+          "NOTICE",
+          "00000"
+        ]
+      ],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    },
+    {
+      "ordinal": 181,
+      "profile": "persistent_cleanup",
+      "label": {
+        "sql": "DROP SEQUENCE r309_persistent_control"
+      },
+      "kinds": [
+        "C",
+        "Z"
+      ],
+      "rows": [],
+      "state": null,
+      "columns": [],
+      "tag": "DROP SEQUENCE",
+      "oids": [],
+      "ready": "I",
+      "notices": [],
+      "dataPayloads": [],
+      "dataFramesValid": true,
+      "emptyPayloadsValid": true
+    }
+  ]
+}

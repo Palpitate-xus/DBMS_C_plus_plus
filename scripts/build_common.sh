@@ -383,6 +383,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/factorial_signature_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/sequence_command_tag_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/sequence_duplicate_sqlstate_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/temp_sequence_lifecycle_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/numeric_binary_zero_scale_known_gap.py)
     DBMS_E2E_TESTS+=(tests/sql_execute_argument_once_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/copy_protocol_e2e_test.py)
