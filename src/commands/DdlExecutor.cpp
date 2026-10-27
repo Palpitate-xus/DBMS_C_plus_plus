@@ -8288,7 +8288,7 @@ bool DdlExecutor::executeCreateSequence(const CreateObjectStmt* stmt, Session& s
                 return false;
             }
             std::cout << "ERROR: relation \"" << requestedName
-                      << "\" already exists" << std::endl;
+                      << "\" already exists (SQLSTATE 42P07)" << std::endl;
             return true;
         }
         if (g_engine.sequenceExists(s.currentDB, seqname)) {
