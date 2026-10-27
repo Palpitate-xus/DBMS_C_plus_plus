@@ -13,12 +13,16 @@ StatsFileLock::StatsFileLock(const std::filesystem::path& snapshotPath) {
     fd_ = ::open(lockPath.c_str(), O_CREAT | O_RDWR, 0600);
     if (fd_ < 0) return;
 
+    // A process-associated lock does not exclude sibling threads, and an
+    // unrelated close on this inode would drop every such process lock.
+    // Own this lock through this descriptor instead. OFD locks still
+    // conflict with the legacy POSIX locks used by other server processes.
     struct flock lock{};
     lock.l_type = F_WRLCK;
     lock.l_whence = SEEK_SET;
     int result = 0;
     do {
-        result = ::fcntl(fd_, F_SETLKW, &lock);
+        result = ::fcntl(fd_, F_OFD_SETLKW, &lock);
     } while (result != 0 && errno == EINTR);
     if (result != 0) {
         ::close(fd_);
@@ -31,7 +35,7 @@ StatsFileLock::~StatsFileLock() {
     struct flock lock{};
     lock.l_type = F_UNLCK;
     lock.l_whence = SEEK_SET;
-    ::fcntl(fd_, F_SETLK, &lock);
+    ::fcntl(fd_, F_OFD_SETLK, &lock);
     ::close(fd_);
 }
 
