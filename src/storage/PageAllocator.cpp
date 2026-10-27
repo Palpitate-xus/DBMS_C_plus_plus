@@ -22,6 +22,14 @@ namespace dbms {
 
 namespace {
 
+struct AllocatorPagePin {
+    BufferPool& pool;
+    uint32_t pageId;
+    bool pinned = true;
+    void unpin() { if (pinned) { pool.unpinPage(pageId); pinned = false; } }
+    ~AllocatorPagePin() { unpin(); }
+};
+
 constexpr uint32_t ALLOCATION_FLUSH_MARKER_MAGIC = 0x31465845u;  // "EXF1"
 constexpr uint32_t ALLOCATION_FLUSH_MARKER_VERSION = 1;
 constexpr const char* ALLOCATION_FLUSH_MARKER_SUFFIX = ".extent_pending";
@@ -440,8 +448,40 @@ bool PageAllocator::open() {
         bp_->close();
         return false;
     }
+    // Reconstruct membership before accepting the allocator. Free pages
+    // are empty and the persisted chain must be finite, unique and in range.
+    // Do not publish or rewrite a damaged list during this read-only check.
+    AllocatorPagePin headerPin{*bp_, 0};
+    std::unordered_set<uint32_t> freePages;
+    bool validFreeList = true;
+    try {
+        uint32_t current = fh->freeListHead;
+        while (current != 0) {
+            if (current >= fh->numPages || !freePages.insert(current).second) {
+                validFreeList = false;
+                break;
+            }
+            char* data = bp_->fetchPage(current);
+            if (!data) { validFreeList = false; break; }
+            AllocatorPagePin pagePin{*bp_, current};
+            PageWrapper page(data, pageSize_, formatVersion_);
+            if (page.slotCount() != 0) { validFreeList = false; break; }
+            current = page.nextPage();
+        }
+    } catch (...) {
+        headerPin.unpin();
+        bp_->close(/*flushPages=*/false);
+        throw;
+    }
+    if (!validFreeList) {
+        std::cerr << "[storage] invalid heap free list: " << filename_ << std::endl;
+        headerPin.unpin();
+        bp_->close(/*flushPages=*/false);
+        return false;
+    }
     numPages_ = fh->numPages;
-    bp_->unpinPage(0);
+    freePages_.swap(freePages);
+    headerPin.unpin();
     durableHeaderPresent_ = existingFile;
     return true;
 }
@@ -464,6 +504,7 @@ void PageAllocator::close() {
         }
     }
     numPages_ = 0;
+    freePages_.clear();
     durableHeaderPresent_ = false;
     // The cache is now closed; a subsequent opener may recover an actual
     // failed publication instead of rolling back underneath a live owner.
@@ -491,7 +532,8 @@ uint32_t PageAllocator::allocPage() {
     if (fh->freeListHead != 0) {
         // Reuse a page from the free list
         pageId = fh->freeListHead;
-        if (pageId >= fh->numPages || pageId >= numPages_) {
+        if (pageId >= fh->numPages || pageId >= numPages_ ||
+            freePages_.count(pageId) == 0) {
             bp_->unpinPage(0);
             return 0;
         }
@@ -504,11 +546,13 @@ uint32_t PageAllocator::allocPage() {
         uint32_t nextFree = page.nextPage();
         bp_->unpinPage(pageId);
 
-        if (nextFree >= fh->numPages) {
+        if (nextFree >= fh->numPages || nextFree == pageId ||
+            (nextFree != 0 && freePages_.count(nextFree) == 0)) {
             bp_->unpinPage(0);
             return 0;
         }
         fh->freeListHead = nextFree;
+        freePages_.erase(pageId);
     } else {
         // Extend file with a new page
         if (fh->numPages == std::numeric_limits<uint32_t>::max()) {
@@ -542,33 +586,31 @@ void PageAllocator::freePage(uint32_t pageId) {
     if (!isOpen() || pageId == 0) return;
 
     std::lock_guard<std::mutex> lock(allocMutex_);
-    // Read file header
+    // A second release must not relink this page to itself or cut a cycle
+    // through an interior free page. Membership also survives close/open.
+    if (pageId >= numPages_ || freePages_.count(pageId) != 0) return;
+
     char* fhBuf = bp_->fetchPage(0);
     if (!fhBuf) return;
+    AllocatorPagePin headerPin{*bp_, 0};
     DataFileHeader* fh = reinterpret_cast<DataFileHeader*>(fhBuf);
+    if (pageId >= fh->numPages) return;
 
-    if (pageId >= numPages_) {
-        bp_->unpinPage(0);
-        return;
-    }
-
-    // Initialize the freed page and link it to free list
     char* pageBuf = fetchPage(pageId);
-    if (!pageBuf) {
-        bp_->unpinPage(0);
-        return;
-    }
+    if (!pageBuf) return;
+    AllocatorPagePin pagePin{*bp_, pageId};
+
+    // Reserve membership before the first page mutation. Allocation failure
+    // leaves both images unchanged; the pin guards still release both pins.
+    freePages_.insert(pageId);
     PageWrapper page(pageBuf, pageSize_, formatVersion_);
     page.init(pageId);
     page.setNextPage(fh->freeListHead);
     bp_->markDirty(pageId);
-    bp_->unpinPage(pageId);
 
-    // Update free list head
     fh->freeListHead = pageId;
     fh->headerChecksum = computeDataFileHeaderChecksum(*fh);
     bp_->markDirty(0);
-    bp_->unpinPage(0);
 }
 
 uint32_t PageAllocator::numPages() const {

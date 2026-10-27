@@ -6,6 +6,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <unordered_set>
 
 #include "BufferPool.h"
 #include "DataFileHeader.h"
@@ -89,6 +90,9 @@ private:
     size_t pageSize_;
     uint32_t formatVersion_;
     uint32_t numPages_ = 0;
+    // Rebuilt from the persisted free chain at open, then kept under
+    // allocMutex_. A page must occur only once in that chain.
+    std::unordered_set<uint32_t> freePages_;
     std::unique_ptr<BufferPool> bp_;
     mutable std::mutex allocMutex_;
     mutable std::mutex flushMutex_;
