@@ -2484,7 +2484,7 @@ std::string ExprHelper::inferResultType(
         // mistake an argument's cast for the selected call's result domain.
         if(const auto* call=dynamic_cast<const FunctionCallExpr*>(structural)) {
             CatalogManager::QualifiedName name;
-            if(CatalogManager::parseQualifiedName(call->funcName,name,true) && (name.name=="scale" || name.name=="min_scale" || name.name=="gcd" || name.name=="lcm")) {
+            if(CatalogManager::parseQualifiedName(call->funcName,name,true) && (name.name=="scale" || name.name=="min_scale" || name.name=="gcd" || name.name=="lcm" || name.name=="factorial")) {
                 ExprEvaluator declarations;declarations.setCurrentDB(currentDB);
                 const auto routines=collectRoutineResultTypes(structural,currentDB,functionEngine,&declarations,&typeHints);
                 const auto result=inferAstResultType(structural,typeHints,&routines);

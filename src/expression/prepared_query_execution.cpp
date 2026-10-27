@@ -454,8 +454,11 @@ std::optional<ExprValue> simplifyCaseConstants(ExprPtr& expression,
                 // These concrete numeric overloads have identical input/output
                 // declarations. UNKNOWN SQL strings keep their selected domain,
                 // not the literal evaluator's temporary VARCHAR datum.
-                const auto target=(builtin=="abs" || builtin=="gcd" || builtin=="lcm")
-                    ?roles->resultType(call):std::string{};
+                // FACTORIAL differs: its input is BIGINT, not its NUMERIC
+                // result. Keep the declaration selected before folding.
+                const auto target=builtin=="factorial" ? std::string{"bigint"} :
+                    (builtin=="abs" || builtin=="gcd" || builtin=="lcm")
+                        ?roles->resultType(call):std::string{};
                 if(!target.empty() && ExprHelper::canonicalResultTypeName(value.typeName)!=target) {
                     auto cast=std::make_unique<CastExpr>();cast->typeName=target;cast->implicit=true;
                     cast->operand=std::move(argument);argument=std::move(cast);
@@ -877,9 +880,9 @@ void PreparedQueryExecution::planCompiledConstants(ExprPtr& expression,
         [&](const FunctionCallExpr* call)->std::string {
             CatalogManager::QualifiedName name;
             if(!CatalogManager::parseQualifiedName(call->funcName,name,true) ||
-               (name.name!="abs" && name.name!="array_position" && name.name!="gcd" && name.name!="lcm") ||
+               (name.name!="abs" && name.name!="factorial" && name.name!="array_position" && name.name!="gcd" && name.name!="lcm") ||
                ((name.name=="gcd" || name.name=="lcm") && call->args.size()!=2) ||
-               (name.name=="abs" && call->args.size()!=1) ||
+               ((name.name=="abs" || name.name=="factorial") && call->args.size()!=1) ||
                (name.name=="array_position" && call->args.size()!=2 && call->args.size()!=3) ||
                !call->namedArgs.empty() || call->hasOver || call->filter ||
                call->distinct || !call->orderBy.empty() || !evaluator_.hasScalarFunction(call,engine_))return {};
@@ -889,7 +892,7 @@ void PreparedQueryExecution::planCompiledConstants(ExprPtr& expression,
                 declaration->declaredType=ExprHelper::inferParsedInputType(argument.get(),{},database_,engine_);
                 declaration->origin=ParameterOrigin::MetadataPlaceholder;builtin.args.push_back(std::move(declaration));
             }
-            if((name.name=="array_position" || name.name=="gcd" || name.name=="lcm") &&
+            if((name.name=="array_position" || name.name=="gcd" || name.name=="lcm" || name.name=="factorial") &&
                evaluator_.scalarFunctionIdentity(call,engine_).rfind("builtin",0)!=0)return {};
             if(name.name=="gcd" || name.name=="lcm") {
                 const auto type=ExprHelper::canonicalResultTypeName(
@@ -897,6 +900,9 @@ void PreparedQueryExecution::planCompiledConstants(ExprPtr& expression,
                 if((type!="integer" && type!="bigint" && type!="numeric") ||
                    evaluator_.scalarFunctionVolatility(call,engine_)!='i')return {};
             }
+            if(name.name=="factorial" &&
+               (ExprHelper::canonicalResultTypeName(ExprHelper::inferParsedResultType(call,{},database_,engine_))!="numeric" ||
+                evaluator_.scalarFunctionVolatility(call,engine_)!='i'))return {};
             if(!evaluator_.hasScalarFunction(&builtin,engine_) ||
                evaluator_.scalarFunctionIdentity(call,engine_)!=evaluator_.scalarFunctionIdentity(&builtin,engine_))return {};
             return name.name;

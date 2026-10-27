@@ -6081,7 +6081,7 @@ static bool requiresParsedValueBinding(const dbms::Stmt* root,bool constantScala
             if(call->hasOver && !constantScalarOnly)return true;
             dbms::CatalogManager::QualifiedName routine;
             if(dbms::CatalogManager::parseQualifiedName(call->funcName,routine,true) &&
-               (routine.name=="abs" || (toLower(routine.name)=="scale" || toLower(routine.name)=="min_scale" || toLower(routine.name)=="gcd" || toLower(routine.name)=="lcm") || routine.name=="array_position" || (!constantScalarOnly &&
+               (routine.name=="abs" || (toLower(routine.name)=="scale" || toLower(routine.name)=="min_scale" || toLower(routine.name)=="gcd" || toLower(routine.name)=="lcm" || toLower(routine.name)=="factorial") || routine.name=="array_position" || (!constantScalarOnly &&
                 (declaredScalars.count(routine.name) || toLower(routine.name)=="strpos" || isFixedFloat8ScalarName(routine.name) ||
                  isStringLengthScalarName(routine.name)))))
                 return true; // Validate real overloads even if no row/branch will execute.
@@ -21490,7 +21490,7 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
             if(call->schema.empty()) {
                 dbms::CatalogManager::QualifiedName name;
                 if(dbms::CatalogManager::parseQualifiedName(call->funcName,name,true) && name.schema.empty() &&
-                   (!resolved || isFixedFloat8ScalarName(name.name) || isStringLengthScalarName(name.name) || (toLower(name.name)=="scale" || toLower(name.name)=="min_scale" || toLower(name.name)=="gcd" || toLower(name.name)=="lcm") || name.name=="strpos" || name.name=="array_position")) {
+                   (!resolved || isFixedFloat8ScalarName(name.name) || isStringLengthScalarName(name.name) || (toLower(name.name)=="scale" || toLower(name.name)=="min_scale" || toLower(name.name)=="gcd" || toLower(name.name)=="lcm" || toLower(name.name)=="factorial") || name.name=="strpos" || name.name=="array_position")) {
                     for(const auto& schema:dbms::functionNamespaceSearchPath(g_engine,session.currentDB))
                         if(schema!="pg_catalog" && !g_engine.getUDF(session.currentDB,name.name,schema).expression.empty())
                             return true;
