@@ -724,6 +724,19 @@ public:
 
 using StmtPtr = std::unique_ptr<Stmt>;
 
+// EXECUTE owns the grammar of its argument list, not parameter evaluation.
+// Keep the original expression bytes so the execution receiver never needs
+// to split them again (commas in literals/subqueries are not separators).
+struct ExecuteStmt : public Stmt {
+    std::string name;
+    std::vector<std::string> arguments;
+    bool hasParentheses = false;
+    bool legacyUsing = false;
+    std::string legacyUsingClause;
+    ExecuteStmt() : Stmt(SqlCommand::Execute) {}
+};
+
+
 // ============================================================================
 // SELECT 语句
 // ============================================================================

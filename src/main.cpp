@@ -5257,30 +5257,16 @@ static bool executePreparedInputQuery(const string& sql, const vector<string>& a
     const vector<string>& parameterTypes, Session& session);
 
 static bool handleExecutePrepared(const string& sql, Session& s) {
-    string rest = trim(sql.substr(8));
-    // PostgreSQL:  EXECUTE name [(expr, ...)]
-    // Legacy:       EXECUTE name USING val, val
-    string stmtName, usingClause;
-    bool pgForm = false;
-    size_t op = rest.find('(');
-    if (!rest.empty() && op != string::npos && rest.back() == ')') {
-        pgForm = true;
-        stmtName = trim(rest.substr(0, op));
-        usingClause = trim(rest.substr(op + 1, rest.size() - op - 2));
-    } else {
-        size_t usingPos = rest.find(" using ");
-        if (usingPos == string::npos) {
-            stmtName = rest;
-        } else {
-            stmtName = trim(rest.substr(0, usingPos));
-            usingClause = trim(rest.substr(usingPos + 7));
-        }
-    }
-    if (stmtName.empty()) {
-        cout << "ERROR: EXECUTE requires a prepared statement name "
-                "(SQLSTATE 42601)" << endl;
+    dbms::SQLParser parser;
+    const auto parsed = parser.parseForBinding(sql);
+    const auto* input = dynamic_cast<const dbms::ExecuteStmt*>(parsed.stmt.get());
+    if (!parsed.isValid() || !input) {
+        cout << "ERROR: " << (parsed.error.empty() ? "invalid EXECUTE statement" : parsed.error)
+             << " (SQLSTATE " << (parsed.sqlState.empty() ? "42601" : parsed.sqlState) << ")" << endl;
         return true;
     }
+    const string& stmtName = input->name;
+    const bool pgForm = input->hasParentheses;
     auto it = s.preparedStmts.find(stmtName);
     if (it == s.preparedStmts.end()) {
         cout << "ERROR: prepared statement \"" << stmtName
@@ -5288,9 +5274,9 @@ static bool handleExecutePrepared(const string& sql, Session& s) {
         return true;
     }
     string expanded = it->second;
-    vector<string> values;
-    if (!usingClause.empty()) {
-        values = dbms::ps_splitExecuteArgs(usingClause);
+    vector<string> values = input->arguments;
+    if (input->legacyUsing && !input->legacyUsingClause.empty()) {
+        values = dbms::ps_splitExecuteArgs(input->legacyUsingClause);
     }
     const auto typeIt = s.preparedStmtTypes.find(stmtName);
     const vector<string> noTypes;
@@ -5298,13 +5284,18 @@ static bool handleExecutePrepared(const string& sql, Session& s) {
         ? noTypes : typeIt->second;
     const bool dollarForm = pgForm || !parameterTypes.empty() ||
                             expanded.find('$') != string::npos;
-    if (dollarForm && values.size() != parameterTypes.size()) {
+    // PostgreSQL skips argument transformation/evaluation for a zero-input
+    // prepared statement, but its raw expression grammar was checked above.
+    // Declared-but-unused parameters still occupy real input slots.
+    const bool ignoreExtraArguments = pgForm && !input->legacyUsing && parameterTypes.empty();
+    if (dollarForm && !ignoreExtraArguments && values.size() != parameterTypes.size()) {
         cout << "ERROR: wrong number of parameters for prepared statement \""
              << stmtName << "\": expected " << parameterTypes.size()
              << " but got " << values.size() << " (SQLSTATE 42601)" << endl;
         return true;
     }
     if (dollarForm) {
+        if (ignoreExtraArguments) values.clear();
         return executePreparedInputQuery(expanded, values, parameterTypes, s);
     }
     if (!values.empty() && !dollarForm) {
@@ -22551,7 +22542,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             return handlePrepare(sql, s);
 
         case dbms::SqlCommand::Execute:
-            return handleExecutePrepared(sql, s);
+            return handleExecutePrepared(effectiveRawSql, s);
 
         case dbms::SqlCommand::Deallocate:
             return handleDeallocate(sql, s);

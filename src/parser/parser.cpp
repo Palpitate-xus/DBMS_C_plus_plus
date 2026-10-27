@@ -28,6 +28,7 @@ struct BindingParseContext {
 };
 thread_local BindingParseContext* bindingParse = nullptr;
 thread_local std::string* declarationSyntaxError = nullptr;
+thread_local bool executeArgumentSyntaxOnly = false;
 struct DeclarationSyntaxAbort {};
 static void retainDeclarationSyntaxError(const DbError& error) {
     if(declarationSyntaxError) {
@@ -1759,8 +1760,8 @@ ParseResult SQLParser::parse(const std::string& inputSql) {
     const std::string sql = inputSql.substr(offset);
     BindingSourceScope sourceScope(offset);
     result.error = lexicalError(sql);
-    if (!result.error.empty()) return result;
-    if (const auto duplicate = duplicateCteName(sql)) {
+    if (!result.error.empty()) { result.sqlState = "42601"; return result; }
+    if (!executeArgumentSyntaxOnly) if (const auto duplicate = duplicateCteName(sql)) {
         result.error = "WITH query name \"" + *duplicate +
             "\" specified more than once (SQLSTATE 42712)";
         return result;
@@ -2879,6 +2880,8 @@ static ExprPtr parsePrimaryExprImpl(const std::vector<std::string>& tokens, size
         while (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "when") {
             ++pos;
             auto whenExpr = parseExpr(tokens, pos);
+            if (executeArgumentSyntaxOnly && (pos >= tokens.size() || SQLParser::toLower(tokens[pos]) != "then"))
+                throw DbError("42601", "CASE WHEN requires THEN");
             if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "then") ++pos;
             auto thenExpr = parseExpr(tokens, pos);
             if (whenExpr && thenExpr) {
@@ -2889,6 +2892,8 @@ static ExprPtr parsePrimaryExprImpl(const std::vector<std::string>& tokens, size
             ++pos;
             caseExpr->elseExpr = parseExpr(tokens, pos);
         }
+        if (executeArgumentSyntaxOnly && (pos >= tokens.size() || SQLParser::toLower(tokens[pos]) != "end"))
+            throw DbError("42601", "CASE requires END");
         if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "end") ++pos;
         return caseExpr;
     }
@@ -2980,7 +2985,14 @@ static ExprPtr parsePrimaryExprImpl(const std::vector<std::string>& tokens, size
     if (first.size() > 1 && first.front() == '$' &&
         std::all_of(first.begin() + 1, first.end(), [](unsigned char c) { return std::isdigit(c); })) {
         size_t number = 0;
-        if (!parseNonNegativeInteger(first.substr(1), number) || number == 0) return nullptr;
+        if (!parseNonNegativeInteger(first.substr(1), number) || (number == 0 && !executeArgumentSyntaxOnly)) return nullptr;
+        if (number == 0) {
+            // Grammar-only placeholder, discarded before the command AST is
+            // returned. No input slot is invented for the invalid Bind $0.
+            auto placeholder = std::make_unique<LiteralExpr>();
+            placeholder->value = first;
+            return placeholder;
+        }
         auto parameter = std::make_unique<ParameterExpr>();
         parameter->slot = number - 1;
         parameter->origin = ParameterOrigin::StatementInput;
@@ -3137,10 +3149,12 @@ static ExprPtr parsePrimaryExprImpl(const std::vector<std::string>& tokens, size
         auto parseArg = [&](ExprPtr arg) {
             // Detect named argument: name => value
             if (arg && arg->type == ExprType::ColumnRef && pos + 1 < tokens.size() &&
-                ((tokens[pos] == "=" && tokens[pos + 1] == ">") || tokens[pos] == "=>")) {
+                ((tokens[pos] == "=" && tokens[pos + 1] == ">") || tokens[pos] == "=>" ||
+                 (executeArgumentSyntaxOnly && (tokens[pos] == ":=" ||
+                  (tokens[pos] == ":" && tokens[pos + 1] == "="))))) {
                 FunctionCallExpr::NamedArg na;
                 na.name = static_cast<ColumnRefExpr*>(arg.get())->column;
-                if (tokens[pos] == "=>") {
+                if (tokens[pos] == "=>" || (executeArgumentSyntaxOnly && tokens[pos] == ":=")) {
                     ++pos;
                 } else {
                     pos += 2; // skip '=' and '>'
@@ -3153,6 +3167,14 @@ static ExprPtr parsePrimaryExprImpl(const std::vector<std::string>& tokens, size
         };
 
         while (!keywordTrim && pos < tokens.size() && tokens[pos] != ")") {
+            if (executeArgumentSyntaxOnly && SQLParser::toLower(tokens[pos]) == "variadic") {
+                ++pos;
+                auto argument = parseExpr(tokens, pos);
+                if (!argument || (pos < tokens.size() && tokens[pos] == ","))
+                    throw DbError("42601", "VARIADIC requires a final function argument");
+                parseArg(std::move(argument));
+                break;
+            }
             if (SQLParser::toLower(tokens[pos]) == "distinct") {
                 func->distinct = true;
                 ++pos;
@@ -3669,7 +3691,7 @@ static std::string parseQueryRootClauses(const std::vector<std::string>& tokens,
 ParseResult SQLParser::parseSelect(const std::string& sql) {
     ParseResult r;
     auto tokens = tokenize(sql);
-    if (tokens.size() < 2) {
+    if (tokens.size() < 2 && !executeArgumentSyntaxOnly) {
         r.error = "SELECT statement too short";
         return r;
     }
@@ -3903,7 +3925,9 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
         }
         if (bindingParse) break;
     }
-    if (bindingParse && (stmt->selectList.empty() || (pos && tokens[pos - 1] == ","))) {
+    if (bindingParse && ((stmt->selectList.empty() &&
+        (!executeArgumentSyntaxOnly || stmt->distinct || !stmt->distinctOn.empty())) ||
+        (pos && tokens[pos - 1] == ","))) {
         r.error = "SELECT requires an expression"; return r;
     }
 
@@ -7010,11 +7034,178 @@ ParseResult SQLParser::parsePrepare(const std::string&) {
     return r;
 }
 
-ParseResult SQLParser::parseExecute(const std::string&) {
-    ParseResult r;
-    r.success = true;
-    r.stmt = std::make_unique<Stmt>(SqlCommand::Execute);
-    return r;
+namespace {
+
+void executeSyntaxError(const std::string& message) {
+    throw DbError("42601", message);
+}
+
+void validateExecuteSyntaxExpression(const Expr* expression, bool allowStar = false);
+
+void validateExecuteSyntaxQuery(const std::string& sql) {
+    // A zero-target SELECT is syntactically valid. Its scalar-subquery shape
+    // is a later analysis question and must not be checked for ignored args.
+    if (SQLParser::toLower(SQLParser::trim(sql)) == "select") return;
+    SQLParser parser;
+    const auto parsed = parser.parseForBinding(sql);
+    const auto* query = dynamic_cast<const SelectStmt*>(parsed.stmt.get());
+    if (!parsed.isValid() || !query)
+        executeSyntaxError("invalid EXECUTE argument subquery");
+    for (const auto& target : query->selectList)
+        validateExecuteSyntaxExpression(target.expr.get(), true);
+    if (query->whereClause) validateExecuteSyntaxExpression(query->whereClause.get());
+    if (query->having) validateExecuteSyntaxExpression(query->having.get());
+    for (const auto& item : query->groupBy) validateExecuteSyntaxExpression(item.get());
+    for (const auto& item : query->orderBy) validateExecuteSyntaxExpression(item.expr.get());
+}
+
+void validateExecuteSyntaxExpression(const Expr* expression, bool allowStar) {
+    if (!expression) executeSyntaxError("EXECUTE argument requires an expression");
+    switch (expression->type) {
+        case ExprType::Literal: {
+            const auto& value = static_cast<const LiteralExpr*>(expression)->value;
+            if (value == "*" && !allowStar) executeSyntaxError("unexpected star in EXECUTE argument");
+            if (value.size() >= 2 && value.front() == '(' && value.back() == ')') {
+                const auto child = value.substr(1, value.size() - 2);
+                const auto command = SQLParser::classify(child);
+                if (command == SqlCommand::Select) validateExecuteSyntaxQuery(child);
+            }
+            return;
+        }
+        case ExprType::UnaryOp:
+            validateExecuteSyntaxExpression(static_cast<const UnaryOpExpr*>(expression)->operand.get());
+            return;
+        case ExprType::BinaryOp: {
+            const auto* binary = static_cast<const BinaryOpExpr*>(expression);
+            validateExecuteSyntaxExpression(binary->left.get());
+            validateExecuteSyntaxExpression(binary->right.get());
+            return;
+        }
+        case ExprType::QuantifiedComparison: {
+            const auto* comparison = static_cast<const QuantifiedComparisonExpr*>(expression);
+            validateExecuteSyntaxExpression(comparison->left.get());
+            validateExecuteSyntaxExpression(comparison->right.get());
+            return;
+        }
+        case ExprType::CastExpr:
+            validateExecuteSyntaxExpression(static_cast<const CastExpr*>(expression)->operand.get());
+            return;
+        case ExprType::ArrayExpr:
+            for (const auto& item : static_cast<const ArrayExpr*>(expression)->elements)
+                validateExecuteSyntaxExpression(item.get());
+            return;
+        case ExprType::RowExpr:
+            for (const auto& item : static_cast<const RowExpr*>(expression)->elements)
+                validateExecuteSyntaxExpression(item.get());
+            return;
+        case ExprType::CaseExpr: {
+            const auto* conditional = static_cast<const CaseExpr*>(expression);
+            if (conditional->whenClauses.empty()) executeSyntaxError("CASE requires WHEN");
+            if (conditional->switchExpr) validateExecuteSyntaxExpression(conditional->switchExpr.get());
+            for (const auto& item : conditional->whenClauses) {
+                validateExecuteSyntaxExpression(item.first.get());
+                validateExecuteSyntaxExpression(item.second.get());
+            }
+            if (conditional->elseExpr) validateExecuteSyntaxExpression(conditional->elseExpr.get());
+            return;
+        }
+        case ExprType::FunctionCall: {
+            const auto* call = static_cast<const FunctionCallExpr*>(expression);
+            for (const auto& item : call->args)
+                validateExecuteSyntaxExpression(item.get(), call->args.size() == 1);
+            for (const auto& item : call->namedArgs) validateExecuteSyntaxExpression(item.value.get());
+            if (call->filter) validateExecuteSyntaxExpression(call->filter.get());
+            for (const auto& item : call->aggregateOrderKeys) validateExecuteSyntaxExpression(item.expr.get());
+            for (const auto& item : call->over.partitionBy) validateExecuteSyntaxExpression(item.get());
+            for (const auto& item : call->over.orderBy) validateExecuteSyntaxExpression(item.first.get());
+            if (call->over.frameStart) validateExecuteSyntaxExpression(call->over.frameStart.get());
+            if (call->over.frameEnd) validateExecuteSyntaxExpression(call->over.frameEnd.get());
+            return;
+        }
+        case ExprType::A_Star:
+            if (!allowStar) executeSyntaxError("unexpected star in EXECUTE argument");
+            return;
+        case ExprType::ColumnRef:
+        case ExprType::Parameter:
+        case ExprType::Subquery:
+            return;
+    }
+}
+
+} // namespace
+
+ParseResult SQLParser::parseExecute(const std::string& sql) {
+    ParseResult result;
+    // parse() and parseForBinding() share the same receiver. Establish byte
+    // provenance locally if this is not already a reached-statement parse.
+    BindingParseContext local{sql};
+    auto* previousBinding = bindingParse;
+    if (!bindingParse) bindingParse = &local;
+    struct RestoreBinding {
+        BindingParseContext* previous;
+        ~RestoreBinding() { bindingParse = previous; }
+    } restoreBinding{previousBinding};
+    const bool previousSyntax = executeArgumentSyntaxOnly;
+    struct RestoreSyntax {
+        bool previous;
+        ~RestoreSyntax() { executeArgumentSyntaxOnly = previous; }
+    } restoreSyntax{previousSyntax};
+    executeArgumentSyntaxOnly = true;
+    try {
+        const auto tokens = tokenize(sql);
+        if (tokens.size() < 2) executeSyntaxError("EXECUTE requires a statement name");
+        auto statement = std::make_unique<ExecuteStmt>();
+        statement->name = tokens[1];
+        if (statement->name.empty() || statement->name.front() != '"') statement->name = toLower(statement->name);
+        size_t end = tokens.size();
+        if (end && tokens[end - 1] == ";") --end;
+        size_t pos = 2;
+        if (pos < end && toLower(tokens[pos]) == "using") {
+            // The old project extension keeps its old argument receiver.
+            statement->legacyUsing = true;
+            ++pos;
+            if (pos < end) {
+                const auto span = statementSource(tokens, pos, end);
+                statement->legacyUsingClause = bindingParse->source.substr(span.first, span.second - span.first);
+            }
+            pos = end;
+        } else if (pos < end) {
+            if (tokens[pos++] != "(") executeSyntaxError("unexpected token after EXECUTE name");
+            statement->hasParentheses = true;
+            std::vector<std::string> delimiters;
+            for (size_t i = pos - 1; i < end; ++i) {
+                const auto& token = tokens[i];
+                if (token == "(" || token == "[") delimiters.push_back(token);
+                else if (token == ")" || token == "]") {
+                    if (delimiters.empty() || (token == ")" ? delimiters.back() != "(" : delimiters.back() != "["))
+                        executeSyntaxError("unmatched EXECUTE argument delimiter");
+                    delimiters.pop_back();
+                }
+                if (token == "," && (i == pos || tokens[i - 1] == "(" || tokens[i - 1] == "[" || i + 1 == end || tokens[i + 1] == ")" || tokens[i + 1] == "]" || tokens[i + 1] == ","))
+                    executeSyntaxError("missing expression after comma");
+            }
+            if (!delimiters.empty()) executeSyntaxError("unmatched EXECUTE argument delimiter");
+            if (pos >= end || tokens[pos] == ")") executeSyntaxError("EXECUTE parentheses require an expression");
+            while (pos < end) {
+                const size_t begin = pos;
+                auto expression = parseExpr(tokens, pos);
+                validateExecuteSyntaxExpression(expression.get());
+                if (pos == begin) executeSyntaxError("EXECUTE argument requires an expression");
+                const auto span = statementSource(tokens, begin, pos);
+                statement->arguments.push_back(bindingParse->source.substr(span.first, span.second - span.first));
+                if (pos < end && tokens[pos] == ",") { ++pos; continue; }
+                if (pos >= end || tokens[pos++] != ")") executeSyntaxError("expected comma or closing parenthesis in EXECUTE");
+                break;
+            }
+        }
+        if (pos != end) executeSyntaxError("unexpected token after EXECUTE argument list");
+        result.stmt = std::move(statement);
+        result.success = true;
+    } catch (const DbError& error) {
+        result.sqlState = error.sqlState();
+        result.error = error.what();
+    }
+    return result;
 }
 
 ParseResult SQLParser::parseDeallocate(const std::string&) {
