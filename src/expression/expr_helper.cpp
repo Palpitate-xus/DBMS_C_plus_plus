@@ -2480,11 +2480,11 @@ std::string ExprHelper::inferResultType(
     ParseResult structuralParse;
     if (const Expr* structural = parseStoredExpression(trimmed, structuralParse)) {
         // A source-free declaration query still has real builtin signatures.
-        // Resolve numeric scale functions through actual callbacks before heuristics
-        // mistake an argument's ::numeric for the call's int4 result.
+        // Resolve these numeric functions through actual callbacks before heuristics
+        // mistake an argument's cast for the selected call's result domain.
         if(const auto* call=dynamic_cast<const FunctionCallExpr*>(structural)) {
             CatalogManager::QualifiedName name;
-            if(CatalogManager::parseQualifiedName(call->funcName,name,true) && (name.name=="scale" || name.name=="min_scale")) {
+            if(CatalogManager::parseQualifiedName(call->funcName,name,true) && (name.name=="scale" || name.name=="min_scale" || name.name=="gcd" || name.name=="lcm")) {
                 ExprEvaluator declarations;declarations.setCurrentDB(currentDB);
                 const auto routines=collectRoutineResultTypes(structural,currentDB,functionEngine,&declarations,&typeHints);
                 const auto result=inferAstResultType(structural,typeHints,&routines);

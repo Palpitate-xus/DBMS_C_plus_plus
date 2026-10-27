@@ -82,3 +82,11 @@ DBMS_MAIN=/path/to/current/server python3 tests/gcd_lcm_integer_range_protocol_e
 | completed-candidate-receipt.json | `92ba7d3ebb3183758637f83607a03fe839b4f799535f685931c01b7960d25107` |
 | completed-scoped-ubsan-receipt.json | `5ec3b2070c9506a998eb212a13cbaa10a691636161c0ad1058237342184ad213` |
 | completed-post-observations-receipt.json | `78d5cf051e2865537480a19adfdb5dd13976ac97541581e22b765bdc75586ec2` |
+
+## 后续 R300：声明与规划已复查
+
+[R300](issue-review-r300-gcd-lcm-signatures.md) 在后续版本补齐真实重载、歧义、
+前端/参数接入与既有 primitive 范围内的内建规划。原 42 条 SQL 在新两侧重放
+均与原 PG rows/SQLSTATE/OID 一致，本文历史的两个 smallint OPEN 差异据此修复；
+保留原历史观察，不改写旧结果。本项原 4178/2133 回归在新两侧仍全部通过。
+R271、其他暂缓范围及原 273 条未完成状态不变。

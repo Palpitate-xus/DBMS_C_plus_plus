@@ -93,7 +93,7 @@ static bool isFixedFloat8ScalarName(const std::string& name) {
 }
 
 static bool isCoreOverloadedScalarName(const std::string& name) {
-    return name=="abs" || name=="length" || name=="upper" || name=="lower" || name=="scale" || name=="min_scale";
+    return name=="abs" || name=="length" || name=="upper" || name=="lower" || name=="scale" || name=="min_scale" || name=="gcd" || name=="lcm";
 }
 
 static bool isIntegralRoundingScalarName(const std::string& name) {
@@ -5540,6 +5540,10 @@ struct ScalarSignature {
 };
 std::vector<ScalarSignature> scalarSignatures(const std::string& name) {
     if(name=="scale" || name=="min_scale")return {{{"numeric"},"integer"}};
+    if(name=="gcd" || name=="lcm")return {
+        {{"integer","integer"},"integer"},
+        {{"bigint","bigint"},"bigint"},
+        {{"numeric","numeric"},"numeric"}};
     if(name=="strpos")return {{{"text","text"},"integer"}};
     if(name=="array_position")return {
         {{"anycompatiblearray","anycompatible"},"integer"},
@@ -5714,7 +5718,7 @@ ResolvedScalarFunction resolveTypedScalar(const std::string& name,
         candidates.erase(std::remove_if(candidates.begin(),candidates.end(),[](const auto& candidate){return candidate.polymorphic;}),candidates.end());
     if(candidates.size()>1)throw DbError("42725","function "+name+" is not unique");
     if(candidates.empty())return {};
-    if((name=="scale" || name=="min_scale") && !candidates.front().stored &&
+    if((name=="scale" || name=="min_scale" || name=="gcd" || name=="lcm") && !candidates.front().stored &&
        (call->hasOver || call->distinct || call->filter || !call->orderBy.empty() ||
         !call->aggregateOrderKeys.empty()))
         throw DbError("42809",name+" is not an aggregate or window function");
@@ -13446,6 +13450,8 @@ void ExprEvaluator::registerBuiltins() {
     volatility_["abs"] = 'i';
     volatility_["scale"] = 'i';
     volatility_["min_scale"] = 'i';
+    volatility_["gcd"] = 'i';
+    volatility_["lcm"] = 'i';
     volatility_["length"] = 'i';
     volatility_["array_position"] = 'i';
     volatility_["lower"] = 'i';

@@ -919,11 +919,11 @@ public:
             }
             // The legacy parser encodes an in-call ORDER BY as a synthetic
             // unquoted literal argument. It is a call role, not a SQL value.
-            // Normalize only numeric scale-function carriers; other aggregate owners keep
+            // Normalize only these declared numeric-function carriers; other aggregate owners keep
             // their existing representation and no parser grammar is changed.
             CatalogManager::QualifiedName scaleName;
             if(CatalogManager::parseQualifiedName(call->funcName,scaleName,true) &&
-               (SQLParser::toLower(scaleName.name)=="scale" || SQLParser::toLower(scaleName.name)=="min_scale") && !call->args.empty()) {
+               (SQLParser::toLower(scaleName.name)=="scale" || SQLParser::toLower(scaleName.name)=="min_scale" || SQLParser::toLower(scaleName.name)=="gcd" || SQLParser::toLower(scaleName.name)=="lcm") && !call->args.empty()) {
                 const auto* order=dynamic_cast<const LiteralExpr*>(call->args.back().get());
                 if(order && order->sourceBegin==std::string::npos &&
                    order->typeName.empty() && order->value.rfind("ORDER BY ",0)==0) {
