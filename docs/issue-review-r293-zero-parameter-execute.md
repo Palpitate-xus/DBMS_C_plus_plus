@@ -34,7 +34,7 @@ PostgreSQL 180006 实例共同作为参考。这里的零输入语义不能推�
 忽略的未知列/函数、除零、`$0`、DEFAULT、零列子查询、命名/VARIADIC 表达式。
 真实 sequence 证明忽略参数及其子查询不推进 nextval；零输入 INSERT/UPDATE/DELETE
 证明执行的仍是准备好的命令，而不是忽略整条语句。非零 TEXT/数组参数检查 dollar quote
-内部逗号与 `$1` 文本、E 字符串转义、双引号转义及 ARRAY 的精确值和 OID。
+内部逗号与 `$1` 文本、E 字符串转义、重复单引号转义及 ARRAY 的精确值和 OID。
 旧项目 USING 另有旧/新两侧各三个控制，不冒称 PostgreSQL 标准。
 115/92 是重复模式的失败控制数，不是独立 bug 数；未删案例、弱化断言或增加 deadline。
 
