@@ -62,6 +62,8 @@
 #include <set>
 #include <sstream>
 #include <tuple>
+#include <string_view>
+#include <unordered_map>
 
 // Global engine reference used by sequence builtins.
 extern dbms::StorageEngine g_engine;
@@ -10940,21 +10942,34 @@ void ExprEvaluator::registerBuiltins() {
         const std::string s = textArgumentValue(a[0]);
         const std::string from = textArgumentValue(a[1]);
         const std::string to = textArgumentValue(a[2]);
-        const std::vector<std::string> inputCharacters = splitUtf8Characters(s);
-        const std::vector<std::string> fromCharacters = splitUtf8Characters(from);
-        const std::vector<std::string> toCharacters = splitUtf8Characters(to);
+        if (s.empty() || from.empty()) return ExprValue("text", s, false);
+        // Use the same UTF-8 character boundaries as splitUtf8Characters,
+        // but keep views into these immutable local strings, not one owning
+        // string per input character. Each input character is visited once.
+        const auto nextCharacter = [](const std::string& text, size_t& offset) {
+            const size_t begin = offset++;
+            while (offset < text.size() &&
+                   (static_cast<unsigned char>(text[offset]) & 0xc0) == 0x80)
+                ++offset;
+            return std::string_view(text.data() + begin, offset - begin);
+        };
+        std::unordered_map<std::string_view, std::string_view> replacements;
+        size_t fromOffset = 0, toOffset = 0;
+        while (fromOffset < from.size()) {
+            const auto character = nextCharacter(from, fromOffset);
+            const auto replacement = toOffset < to.size()
+                ? nextCharacter(to, toOffset) : std::string_view{};
+            // A duplicate FROM character still consumes its TO position;
+            // emplace preserves the FIRST occurrence, including deletion.
+            replacements.emplace(character, replacement);
+        }
         std::string out;
-        for (const std::string& character : inputCharacters) {
-            const auto match = std::find(
-                fromCharacters.begin(), fromCharacters.end(), character);
-            if (match == fromCharacters.end()) {
-                out += character;
-                continue;
-            }
-            const size_t index = static_cast<size_t>(
-                std::distance(fromCharacters.begin(), match));
-            if (index < toCharacters.size()) out += toCharacters[index];
-            // else: char is deleted
+        for (size_t offset = 0; offset < s.size();) {
+            const auto character = nextCharacter(s, offset);
+            const auto found = replacements.find(character);
+            const auto replacement = found == replacements.end()
+                ? character : found->second;
+            if (!replacement.empty()) out.append(replacement.data(), replacement.size());
         }
         return ExprValue("text", out, false);
     };
