@@ -143,7 +143,12 @@ bool decodePostgresNumeric(const std::vector<uint8_t>& raw, std::string& text) {
     const size_t maxGroups = (static_cast<size_t>(Numeric::kMaxPrecision) + 3) / 4;
     if (digitCount > maxGroups || displayScale > Numeric::kMaxPrecision) return false;
     if (digitCount == 0) {
+        // A zero magnitude has no base-10000 digits, but still has a scale.
         text = "0";
+        if (displayScale > 0) {
+            text.push_back('.');
+            text.append(static_cast<size_t>(displayScale), '0');
+        }
         return true;
     }
 
