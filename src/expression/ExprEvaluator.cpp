@@ -105,6 +105,10 @@ static bool isStringLengthScalarName(const std::string& name) {
            name=="octet_length" || name=="bit_length";
 }
 
+static bool isCharacterCodeScalarName(const std::string& name) {
+    return name == "ascii" || name == "chr";
+}
+
 static int compareTextWithCollation(const std::string& left,
                                     const std::string& right,
                                     const std::string& requested) {
@@ -5428,6 +5432,14 @@ struct DeclaredJsonArrayLengthScalarFunction {
         return callback(args);
     }
 };
+// These declarations belong to the real ASCII/CHR callbacks only. An opaque
+// registerFunction replacement retains its own arity, inputs and result type.
+struct DeclaredCharacterCodeScalarFunction {
+    ScalarFunction callback;
+    ExprValue operator()(const std::vector<ExprValue>& args) const {
+        return callback(args);
+    }
+};
 struct DeclaredStrposScalarFunction {
     ScalarFunction callback;
     ExprValue operator()(const std::vector<ExprValue>& args) const {
@@ -5484,6 +5496,8 @@ bool ownsScalarSignatures(const std::string& name,const ScalarFunction* callback
         return callback && callback->target<DeclaredArrayPositionScalarFunction>();
     if(isStringLengthScalarName(name))
         return callback && callback->target<DeclaredStringLengthScalarFunction>();
+    if(isCharacterCodeScalarName(name))
+        return callback && callback->target<DeclaredCharacterCodeScalarFunction>();
     if(name=="strpos")
         return callback && callback->target<DeclaredStrposScalarFunction>();
     if(name=="width_bucket")
@@ -5545,6 +5559,8 @@ std::vector<ScalarSignature> scalarSignatures(const std::string& name) {
         {{"integer","integer"},"integer"},
         {{"bigint","bigint"},"bigint"},
         {{"numeric","numeric"},"numeric"}};
+    if(name=="ascii")return {{{"text"},"integer"}};
+    if(name=="chr")return {{{"integer"},"text"}};
     if(name=="strpos")return {{{"text","text"},"integer"}};
     if(name=="array_position")return {
         {{"anycompatiblearray","anycompatible"},"integer"},
@@ -6148,6 +6164,8 @@ std::string ExprEvaluator::scalarFunctionIdentity(const FunctionCallExpr* call,
                        !callback->second.target<ModResultScalarFunction>()) ||
                       (isStringLengthScalarName(resolved.name) &&
                        !callback->second.target<DeclaredStringLengthScalarFunction>()) ||
+                      (isCharacterCodeScalarName(resolved.name) &&
+                       !callback->second.target<DeclaredCharacterCodeScalarFunction>()) ||
                       (resolved.name=="strpos" &&
                        !callback->second.target<DeclaredStrposScalarFunction>()) ||
                       ((resolved.name=="to_tsvector" || resolved.name=="setweight") &&
@@ -13427,6 +13445,8 @@ void ExprEvaluator::registerBuiltins() {
             entry.second=DeclaredFloat8ScalarFunction{std::move(entry.second)};
         else if(isStringLengthScalarName(entry.first))
             entry.second=DeclaredStringLengthScalarFunction{std::move(entry.second)};
+        else if(isCharacterCodeScalarName(entry.first))
+            entry.second=DeclaredCharacterCodeScalarFunction{std::move(entry.second)};
         else if(entry.first=="strpos")
             entry.second=DeclaredStrposScalarFunction{std::move(entry.second)};
         else if(entry.first=="to_tsvector" || entry.first=="setweight")
