@@ -7,6 +7,7 @@
 #include "commands/DdlTransaction.h"
 #include "commands/SchemaNamespace.h"
 #include "commands/SequenceStorageName.h"
+#include "process/StatementNotice.h"
 #include "parser/parser.h"
 #include "catalog/CatalogService.h"
 #include "catalog/systables.h"
@@ -8310,8 +8311,8 @@ bool DdlExecutor::executeCreateSequence(const CreateObjectStmt* stmt, Session& s
             if (stmt->ifNotExists &&
                 (existing->relkind != 'S' ||
                  g_engine.sequenceExists(s.currentDB, seqname))) {
-                std::cout << "NOTICE: relation \"" << requestedName
-                          << "\" already exists, skipping" << std::endl;
+                dbms::emitStatementNotice({"NOTICE", "42P07",
+                    "relation \"" + sequenceName.name + "\" already exists, skipping"});
                 return false;
             }
             std::cout << "ERROR: relation \"" << requestedName

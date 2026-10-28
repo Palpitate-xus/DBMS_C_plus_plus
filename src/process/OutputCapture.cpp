@@ -1,8 +1,10 @@
 #include "OutputCapture.h"
+#include "StatementNotice.h"
 
 #include <iostream>
 #include <mutex>
 #include <streambuf>
+#include <utility>
 
 namespace dbms {
 namespace {
@@ -49,6 +51,28 @@ void ensureInstalled() {
 }
 
 } // namespace
+
+namespace {
+thread_local std::vector<StatementNotice>* g_statementNoticeTarget = nullptr;
+}
+
+ScopedStatementNoticeCapture::ScopedStatementNoticeCapture(
+        std::vector<StatementNotice>& target)
+    : previous_(g_statementNoticeTarget) {
+    g_statementNoticeTarget = &target;
+}
+
+ScopedStatementNoticeCapture::~ScopedStatementNoticeCapture() {
+    g_statementNoticeTarget = previous_;
+}
+
+void emitStatementNotice(StatementNotice notice) {
+    if (g_statementNoticeTarget) {
+        g_statementNoticeTarget->push_back(std::move(notice));
+    } else {
+        std::cout << notice.severity << ": " << notice.message << '\n';
+    }
+}
 
 ScopedOutputCapture::ScopedOutputCapture(std::ostream& target) {
     ensureInstalled();

@@ -32,6 +32,7 @@
 #include "process/SqlStats.h"
 #include "process/RuntimeStats.h"
 #include "process/OutputCapture.h"
+#include "process/StatementNotice.h"
 #include "process/AdvisoryLockManager.h"
 #include "utils/prepared_stmts.h"
 #include "utils/interval.h"
@@ -5334,6 +5335,8 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
     {
         std::ostringstream output;
         dbms::ScopedOutputCapture capture(output);
+        std::vector<dbms::StatementNotice> statementNotices;
+        dbms::ScopedStatementNoticeCapture noticeCapture(statementNotices);
         try {
             if (emitTimeDeclarationNotices) {
                 const auto notices = protocolTimePrecisionNotices(sql, session);
@@ -5388,6 +5391,10 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
             result.errorMessage = "unhandled executor exception";
         }
         outputText = output.str();
+        for (auto& notice : statementNotices) {
+            result.notices.push_back(QueryNotice{std::move(notice.severity),
+                std::move(notice.sqlState), std::move(notice.message)});
+        }
     }
     // Keep the declaration fixed, but preserve the existing post-execution
     // session context used by wire codecs; this is not catalog reanalysis.
