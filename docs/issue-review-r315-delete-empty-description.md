@@ -1,6 +1,18 @@
 # R315：无 RETURNING 的 DELETE 多发零列结果描述
 
-状态：已实际复现，尚未修复，未暂缓；下一项优先处理。
+状态：已实际复现，尚未修复；按用户最新“skip it”暂缓。
+
+本次停止 R315 的无 RETURNING DML 结果种类/协议描述修复。未修改生产代码、
+公共头、永久测试或测试注册；普通 continue 不自动恢复本项，原有严格失败
+断言和全部观察日志保留，不记作通过或完成。其他已接受修复不回退。
+
+暂缓前的扩展观察保存在 `/tmp/dbms-r315-dml-result-kind.MR8wurKB/`：
+独立 PostgreSQL 18.6、工作区投影及已接受源码投影各实际执行 392 个请求，
+覆盖 INSERT/UPDATE/DELETE/MERGE、WITH、有无 RETURNING、零/非零影响行、
+Simple/Extended/二进制输出。此为观察收集，不是 392 项验收通过；
+其中 WITH MERGE 的不支持及延迟唯一约束 RETURNING 帧差异也未修复，
+尚未建立独立根因，不据此宣称修复结果种类即可解决这些差异。
+`completed-observations-receipt.json` 记录三侧收集终态，参考进程已停止。
 
 R314 的冻结 284 项协议检查保留了五个 Simple DELETE：未限定 TEMP、
 `pg_temp`、quoted `pg_temp`、quoted 字面点号名称，以及默认查找顺序下的
