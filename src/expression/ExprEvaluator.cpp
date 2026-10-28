@@ -6369,14 +6369,33 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
     // ARRAY constructors. The descriptor is read before any argument runs;
     // a brace-looking TEXT value never determines the result type.
     const auto declaredResult=arrayExpressionType(e,ctx,currentDB_,this);
+    // The chosen datum must have the query's declared common type, not the
+    // narrower type of the selected arm. Reuse the real implicit cast path
+    // with a runtime cell: this preserves NULL/physical metadata and avoids
+    // explicit CHAR(1)/BIT(1) defaults. No other arm is evaluated here.
+    const auto commonResultValue = [&](ExprValue value) {
+        // Only a real bound declaration owns the common result conversion.
+        // Legacy scalar/native hosts infer display hints too, but those are
+        // not permission to cast an otherwise unbound short-circuit result.
+        if (e->resolvedResultType.empty()) return value;
+        const auto target=ExprHelper::canonicalResultTypeName(e->resolvedResultType);
+        if (target.empty() || target=="unknown" ||
+            ExprHelper::canonicalResultTypeName(value.typeName)==target) return value;
+        CastExpr cast;cast.typeName=e->resolvedResultType;cast.implicit=true;
+        auto input=std::make_unique<ParameterExpr>();input->slot=0;
+        input->declaredType=value.typeName;input->origin=ParameterOrigin::RuntimeCell;
+        cast.operand=std::move(input);
+        RowContext castRow;castRow.setParameters({std::move(value)});
+        return evalCast(&cast,castRow);
+    };
 
     // COALESCE is syntax-like in SQL: stop as soon as the first non-NULL
     // argument is found, so unused arguments are never evaluated.
     if (name == "coalesce") {
         const std::string resultCollation = explicitResultCollation(e);
         const auto target=common_type_detail::canonical(declaredResult);
-        const bool addressTarget=target=="macaddr" || target=="macaddr8" ||
-                                 target=="inet" || target=="cidr";
+        const bool legacyAddressTarget=e->resolvedResultType.empty() &&
+            (target=="macaddr" || target=="macaddr8" || target=="inet" || target=="cidr");
         // Legacy scalar SELECT hosts do not always run query transformation.
         // Validate only genuine UNKNOWN string constants, including unused
         // peers; parameters, functions and prepared children stay lazy.
@@ -6386,16 +6405,18 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
         for (const auto& argument : e->args) {
             ExprValue value = eval(argument.get(), ctx);
             if (!value.isNull) {
+                value=commonResultValue(std::move(value));
                 value.collation = mergeExplicitCollations(
                     value.collation, resultCollation);
-                const auto source=common_type_detail::canonical(value.typeName);
-                if (addressTarget && source!=target)
+                // Preserve the legacy address conversion contract without
+                // extending inferred-type coercion to other unbound calls.
+                if (legacyAddressTarget && common_type_detail::canonical(value.typeName)!=target)
                     value=evalCast(nullptr,ctx,value,target);
                 return value;
             }
         }
-        ExprValue result("unknown", "", true);
-        if (addressTarget)result.typeName=target;
+        ExprValue result=commonResultValue(ExprValue("unknown", "", true));
+        if (legacyAddressTarget) result.typeName=target;
         result.collation = resultCollation;
         return result;
     }
@@ -6472,7 +6493,15 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
     }
 
     std::vector<ExprValue> args;
-    for (const auto& a : e->args) args.push_back(eval(a.get(), ctx));
+    for (const auto& a : e->args) {
+        auto value=eval(a.get(),ctx);
+        // Extrema compare operands AFTER common-type conversion (not just
+        // the winner). Keep each conversion before the next argument's
+        // effects, while still evaluating every demanded argument.
+        if (name=="greatest" || name=="least")
+            value=commonResultValue(std::move(value));
+        args.push_back(std::move(value));
+    }
 
     if(callback!=functions_.end() && !callback->second.target<BoundScalarRoutine>() &&
        !scalarSignatures(name).empty() && ownsScalarSignatures(name,&callback->second)) {
@@ -6658,7 +6687,7 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
     }
     if (name == "greatest") {
         const std::string resultCollation = explicitResultCollation(e);
-        ExprValue best("unknown", "", true);
+        ExprValue best=commonResultValue(ExprValue("unknown", "", true));
         for (auto a : args) {
             if (isCollatableExprType(a.typeName))
                 a.collation = mergeExplicitCollations(a.collation,
@@ -6671,7 +6700,7 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
     }
     if (name == "least") {
         const std::string resultCollation = explicitResultCollation(e);
-        ExprValue best("unknown", "", true);
+        ExprValue best=commonResultValue(ExprValue("unknown", "", true));
         for (auto a : args) {
             if (isCollatableExprType(a.typeName))
                 a.collation = mergeExplicitCollations(a.collation,

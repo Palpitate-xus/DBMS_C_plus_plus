@@ -620,8 +620,23 @@ std::string inferAstResultType(
                 network = network || input=="inet" || input=="cidr";
                 result = mergeProtocolTypes(result, input);
             }
-            if (name=="coalesce" && network)
-                return selectCommonType(inputs,"COALESCE");
+            const bool characterFamily=std::all_of(inputs.begin(),inputs.end(),[](const auto& input) {
+                auto type=common_type_detail::canonical(input);
+                if(common_type_detail::array(type))type.resize(type.size()-2);
+                return type=="unknown" || type=="text" || type=="varchar" || type=="bpchar";
+            });
+            const bool timestampFamily=std::all_of(inputs.begin(),inputs.end(),[](const auto& input) {
+                auto type=common_type_detail::canonical(input);
+                if(common_type_detail::array(type))type.resize(type.size()-2);
+                return type=="unknown" || type=="date" || type=="timestamp" || type=="timestamptz";
+            });
+            // These binary-compatible character families retain the first
+            // concrete common candidate. Always preferring TEXT changes both
+            // the bound output identity and CHAR padding when the evaluator
+            // correctly coerces its selected datum. Keep other declarations
+            // (including named/custom families) on their existing paths.
+            if ((name=="coalesce" && network) || characterFamily || timestampFamily)
+                return selectCommonType(inputs,name=="coalesce"?"COALESCE":name=="greatest"?"GREATEST":"LEAST");
             return result == "unknown" ? "text" : result;
         }
         if (name == "mod") {
