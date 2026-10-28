@@ -609,6 +609,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/strpos_signature_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/character_code_signature_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/starts_with_signature_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/cte_window_owner_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/readonly_temp_target_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/reverse_linear_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/replace_linear_protocol_e2e_test.py)

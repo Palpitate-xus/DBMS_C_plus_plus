@@ -33495,7 +33495,9 @@ bool StorageEngine::ownsPreparedSetReturningCall(const std::string& dbname,
 
 PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
     const std::string& sql, const std::vector<QueryBindingDatum>& bindings,
-    bool finalizeUnknownOutput) const {
+    bool finalizeUnknownOutput,
+    const std::function<std::optional<QueryRelationMetadata>(const std::string&)>&
+        queryRelations) const {
         // Catalog rows are copied under one lock; schema/view loads only read.
         // The lock is released on return, before any prepared AST executes.
         std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
@@ -33518,6 +33520,9 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
         }
         QueryBindingMetadata metadata;
         metadata.finalizeUnknownOutput = finalizeUnknownOutput;
+        // Lexical query sources are distinct from the catalog provider so a
+        // stored view can reset that namespace without losing catalog types.
+        metadata.queryRelation = queryRelations;
         metadata.outputExpressionIdentity=[&](const Expr* expression,const PreparedQuery& query,const SelectStmt* owner) {
             return ExprHelper::preparedSortExpressionIdentity(expression,query,[](const ColumnRefExpr& column) {
                 if(!column.binding)throw DbError("XX000","output equality lost its bound source");

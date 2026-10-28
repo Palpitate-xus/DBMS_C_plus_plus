@@ -5022,7 +5022,7 @@ static bool handleCopy(const string& sql, Session& s) {
     return true;
 }
 
-static bool requiresParsedValueBinding(const dbms::Stmt* root,bool constantScalarOnly=false);
+static bool requiresParsedValueBinding(const dbms::Stmt* root,bool constantScalarOnly=false,bool windowOnly=false);
 
 static dbms::Oid resolvePreparedParameterType(const string& typeSpec,
                                               const Session& s) {
@@ -6064,7 +6064,7 @@ static bool isStringLengthScalarName(const string& name) {
            name=="octet_length" || name=="bit_length";
 }
 
-static bool requiresParsedValueBinding(const dbms::Stmt* root,bool constantScalarOnly) {
+static bool requiresParsedValueBinding(const dbms::Stmt* root,bool constantScalarOnly,bool windowOnly) {
     // These names own concrete overload declarations. This is an analysis
     // route, not permission to execute their arguments during preparation.
     static const set<string> declaredScalars={"upper","lower","length","strpos","ascii","chr","starts_with"};
@@ -6074,13 +6074,13 @@ static bool requiresParsedValueBinding(const dbms::Stmt* root,bool constantScala
     expression=[&](const dbms::Expr* value)->bool {
         if(!value)return false;
         if(const auto* literal=dynamic_cast<const dbms::LiteralExpr*>(value);
-                literal && !constantScalarOnly && literal->typeName.empty() && toLower(literal->value)=="default")
+                literal && !windowOnly && !constantScalarOnly && literal->typeName.empty() && toLower(literal->value)=="default")
             return true;
         if(value->preparedSubquery && statement(value->preparedSubquery.get()))return true;
         if(const auto* call=dynamic_cast<const dbms::FunctionCallExpr*>(value)) {
             if(call->hasOver && !constantScalarOnly)return true;
             dbms::CatalogManager::QualifiedName routine;
-            if(dbms::CatalogManager::parseQualifiedName(call->funcName,routine,true) &&
+            if(!windowOnly && dbms::CatalogManager::parseQualifiedName(call->funcName,routine,true) &&
                (routine.name=="abs" || (toLower(routine.name)=="starts_with" || toLower(routine.name)=="ascii" || toLower(routine.name)=="chr" || toLower(routine.name)=="scale" || toLower(routine.name)=="min_scale" || toLower(routine.name)=="gcd" || toLower(routine.name)=="lcm" || toLower(routine.name)=="factorial") || routine.name=="array_position" || (!constantScalarOnly &&
                 (declaredScalars.count(routine.name) || toLower(routine.name)=="strpos" || isFixedFloat8ScalarName(routine.name) ||
                  isStringLengthScalarName(routine.name)))))
@@ -6455,6 +6455,39 @@ static void bindQueryCte(Session& session, const string& name,
         return;
     }
     throw dbms::DbError("XX000", "CTE binding has no query scope");
+}
+
+// Runtime query children can inherit materialized CTEs which have no
+// catalog relation under their lexical names. This pure provider preserves
+// that execution-owned descriptor; independently stored views clear the role.
+static dbms::PreparedQuery prepareWindowSourceQuery(Session& s, const string& statement) {
+    return g_engine.prepareBoundQuery(s.currentDB, statement, {}, true,
+        [&](const string& spelling) -> optional<dbms::QueryRelationMetadata> {
+            dbms::CatalogManager::QualifiedName requested;
+            if (!dbms::CatalogManager::parseQualifiedName(spelling, requested, true) ||
+                !requested.schema.empty()) return nullopt;
+            for (auto frame = queryCteFrames.rbegin(); frame != queryCteFrames.rend(); ++frame) {
+                if (frame->session != &s || frame->database != s.currentDB) continue;
+                const auto owned = frame->relations.find(requested.name);
+                if (owned != frame->relations.end()) {
+                    auto descriptor = g_engine.prepareBoundQuery(s.currentDB,
+                        "SELECT * FROM pg_temp." + quoteDumpIdentifier(owned->second), {}, true).output;
+                    return dbms::QueryRelationMetadata{"", requested.name, std::move(descriptor), {}};
+                }
+                if (!frame->inheritPrevious) break;
+            }
+            return nullopt;
+        });
+}
+
+static dbms::PreparedQuery prepareRuntimeValueDeclaration(Session& s, const string& statement) {
+    dbms::SQLParser parser;
+    const auto parsed = parser.parseForBinding(statement);
+    // Admission uses genuine window AST roles, not a name or SQL substring.
+    // Ordinary scalar/DEFAULT declarations retain their existing owner.
+    if (requiresParsedValueBinding(parsed.stmt.get(), false, true))
+        return prepareWindowSourceQuery(s, statement);
+    return g_engine.prepareBoundQuery(s.currentDB, statement);
 }
 
 string resolveTableName(Session& s, const string& name, bool foldUnquoted) {
@@ -26686,7 +26719,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                           suppliedParameterError))
             throw dbms::DbError("42P02", suppliedParameterError);
         if (suppliedParameterCount)
-            (void)g_engine.prepareBoundQuery(s.currentDB, effectiveRawSql);
+            (void)prepareRuntimeValueDeclaration(s, effectiveRawSql);
 
         shared_ptr<dbms::PreparedQuery> duplicateOrderAliasQuery;
         {
@@ -26720,7 +26753,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             }
             if(candidate) {
                 duplicateOrderAliasQuery=make_shared<dbms::PreparedQuery>(
-                    g_engine.prepareBoundQuery(s.currentDB,effectiveRawSql));
+                    prepareRuntimeValueDeclaration(s, effectiveRawSql));
                 auto* bound=dynamic_cast<dbms::SelectStmt*>(duplicateOrderAliasQuery->ast.get());
                 const bool windows=any_of(bound->selectList.begin(),bound->selectList.end(),[](const auto& target) {
                     const auto* call=dynamic_cast<const dbms::FunctionCallExpr*>(target.expr.get());return call && call->hasOver;
@@ -26745,7 +26778,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             dbms::SQLParser parser;
             const auto parsed=parser.parseForBinding(effectiveRawSql);
             if(requiresParsedValueBinding(parsed.stmt.get())) {
-                auto query=make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(s.currentDB,effectiveRawSql));
+                auto query=make_shared<dbms::PreparedQuery>(prepareRuntimeValueDeclaration(s, effectiveRawSql));
                 if(requiresParsedValueBinding(parsed.stmt.get(),true)) {
                     // Some legacy CAST/text receivers can return an empty
                     // source without opening a native plan. Run the same pure
@@ -26767,7 +26800,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 ? dynamic_cast<const dbms::SelectStmt*>(probe.stmt.get()) : nullptr;
             if (select && select->having) {
                 auto query = make_shared<dbms::PreparedQuery>(
-                    g_engine.prepareBoundQuery(s.currentDB, effectiveRawSql));
+                    prepareRuntimeValueDeclaration(s, effectiveRawSql));
                 const auto* bound = static_cast<const dbms::SelectStmt*>(query->ast.get());
                 if (dbms::QueryPlanner::supportsPreparedSourceSelectPlan(*bound)) {
                     PreparedWithDmlRuntime runtime(s, query);
@@ -34544,9 +34577,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 return string("double precision");
             if (wf.name == "ntile") return string("integer");
             if (wf.name == "lag" || wf.name == "lead" || wf.isAggregate) {
-                const auto declaration = g_engine.prepareBoundQuery(s.currentDB,
+                const auto declaration = prepareWindowSourceQuery(s,
                     "SELECT " + wf.routineSql + " OVER("+wf.overSql+") FROM " + tnameOrig +
-                    (tableAlias.empty() ? string() : " AS " + tableAlias), {}, true);
+                    (tableAlias.empty() ? string() : " AS " + tableAlias));
                 if (declaration.output.size() != 1)
                     throw dbms::DbError("XX000", "offset window lost its output declaration");
                 return declaration.output.front().type;
@@ -36221,7 +36254,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 const string argumentSql = "SELECT " + function.routineSql + " OVER(" + function.overSql + ") FROM " +
                     tnameOrig + (tableAlias.empty() ? string() : " AS " + tableAlias);
                 argument.query = make_shared<dbms::PreparedQuery>(
-                    g_engine.prepareBoundQuery(s.currentDB, argumentSql, {}, true));
+                    prepareWindowSourceQuery(s, argumentSql));
                 auto* select = dynamic_cast<dbms::SelectStmt*>(argument.query->ast.get());
                 auto* call = select && select->selectList.size() == 1
                     ? dynamic_cast<dbms::FunctionCallExpr*>(select->selectList.front().expr.get()) : nullptr;
@@ -36593,7 +36626,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     keySql += (index ? "," : "") + scalarWindowKeys[index];
                 keySql += " FROM " + tnameOrig + (tableAlias.empty() ? string() : " AS " + tableAlias);
                 scalarWindowQuery = make_shared<dbms::PreparedQuery>(
-                    g_engine.prepareBoundQuery(s.currentDB, keySql, {}, true));
+                    prepareWindowSourceQuery(s, keySql));
                 auto* select = dynamic_cast<dbms::SelectStmt*>(scalarWindowQuery->ast.get());
                 if (!select) throw dbms::DbError("XX000", "window sort lost its prepared SELECT");
                 const auto source = find_if(scalarWindowQuery->sourceRanges.begin(), scalarWindowQuery->sourceRanges.end(),

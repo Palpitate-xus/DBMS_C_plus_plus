@@ -1515,8 +1515,10 @@ public:
                 return range;
             }
         }
-        if (!metadata.relation) throw DbError("42P01", "relation does not exist: " + source);
-        const auto description = metadata.relation(source);
+        const auto owned = metadata.queryRelation ? metadata.queryRelation(source)
+            : std::optional<QueryRelationMetadata>{};
+        if (!owned && !metadata.relation) throw DbError("42P01", "relation does not exist: " + source);
+        const auto description = owned ? *owned : metadata.relation(source);
         Range range{alias.empty() ? description.schema : "", alias.empty() ? description.name : identifier(alias), description.columns};
         range.relationSchema = description.schema;
         range.relationName = description.name;
@@ -1529,7 +1531,9 @@ public:
                 throw DbError("54001", "view binding nesting limit exceeded");
             }
             struct ViewDepth { size_t& depth; ~ViewDepth() { --depth; } } guard{viewDepth};
-            range.viewQuery = std::make_shared<PreparedQuery>(prepareQuery(description.viewSql, {}, metadata));
+            auto viewMetadata = metadata;
+            viewMetadata.queryRelation = {};
+            range.viewQuery = std::make_shared<PreparedQuery>(prepareQuery(description.viewSql, {}, viewMetadata));
             // UNKNOWN strings/NULL finalize to text at the view relation
             // boundary, just as for a derived/CTE source. This is static
             // metadata; never execute a first row to discover the type.

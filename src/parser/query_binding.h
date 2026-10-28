@@ -74,6 +74,11 @@ struct QueryBindingMetadata {
     // Pure analyzed-expression equality for SQL92 output-name lookup.
     // It must preserve source occurrences and resolved routine identities.
     std::function<std::string(const Expr*,const PreparedQuery&,const SelectStmt*)> outputExpressionIdentity;
+    // A caller-owned, already materialized lexical query source. Local WITH
+    // declarations win; ordinary children inherit this metadata-only role,
+    // but independently stored views must explicitly clear it.
+    // Appended to preserve every existing positional callback initializer.
+    std::function<std::optional<QueryRelationMetadata>(const std::string&)> queryRelation;
 };
 struct PreparedQuery {
     struct Use { size_t begin, end, slot; };

@@ -459,7 +459,9 @@ public:
     PreparedQuery prepareBoundQuery(const std::string& dbname,
         const std::string& sql,
         const std::vector<QueryBindingDatum>& bindings = {},
-        bool finalizeUnknownOutput = false) const;
+        bool finalizeUnknownOutput = false,
+        const std::function<std::optional<QueryRelationMetadata>(const std::string&)>&
+            queryRelations = {}) const;
     // Pure provider ownership probe. It resolves routine identity only;
     // argument binding/errors remain at the whole-query analysis boundary.
     bool ownsPreparedSetReturningCall(const std::string& dbname,
