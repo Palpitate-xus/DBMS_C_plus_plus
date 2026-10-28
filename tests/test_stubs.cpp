@@ -23,8 +23,12 @@ void recordSqlStat(const std::string& sql, double ms, const std::string& dbname)
     (void)sql; (void)ms; (void)dbname;
 }
 
+// Optional test-only executor: production executables define execute in
+// main.cpp and never link this file. Other native fixtures retain the no-op.
+extern bool dbmsTestExecute(const std::string&, Session&) __attribute__((weak));
+
 bool execute(const std::string& sql, Session& session) {
-    (void)sql; (void)session;
+    if (dbmsTestExecute) return dbmsTestExecute(sql, session);
     return false;
 }
 

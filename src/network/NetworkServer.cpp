@@ -5236,6 +5236,51 @@ CopyStreamResult sendCopyOut(PostgresProtocol& protocol,
 
 } // namespace
 
+// Merge only diagnostic metadata. Leave row parsing and the existing
+// legacy prefix admission unchanged; never infer a state from message text.
+static void appendOrderedStatementNotices(
+        const std::string& output,
+        std::vector<dbms::StatementNotice>& captured,
+        std::vector<QueryNotice>& destination) {
+    struct OrderedNotice {
+        std::streamoff offset;
+        QueryNotice notice;
+    };
+    std::vector<OrderedNotice> ordered;
+    for (auto& notice : captured) {
+        const auto end = static_cast<std::streamoff>(output.size());
+        const auto offset = notice.outputOffset >= 0
+            ? std::min(notice.outputOffset, end) : end;
+        ordered.push_back({offset, QueryNotice{std::move(notice.severity),
+            std::move(notice.sqlState), std::move(notice.message)}});
+    }
+    std::istringstream input(output);
+    std::string line;
+    std::streamoff offset = 0;
+    while (std::getline(input, line)) {
+        const auto begin = offset;
+        offset += static_cast<std::streamoff>(line.size()) + 1;
+        static const std::pair<const char*, const char*> prefixes[] = {
+            {"NOTICE:", "NOTICE"}, {"WARNING:", "WARNING"}
+        };
+        for (const auto& entry : prefixes) {
+            const auto size = std::strlen(entry.first);
+            if (line.compare(0, size, entry.first) != 0) continue;
+            ordered.push_back({begin, QueryNotice{entry.second,
+                std::string(entry.second) == "WARNING" ? "01000" : "00000",
+                trimText(line.substr(size))}});
+            break;
+        }
+    }
+    // At a shared position, a captured notice was emitted before the next
+    // output byte. Stable sorting also retains consecutive typed notices.
+    std::stable_sort(ordered.begin(), ordered.end(),
+        [](const OrderedNotice& left, const OrderedNotice& right) {
+            return left.offset < right.offset;
+        });
+    for (auto& notice : ordered) destination.push_back(std::move(notice.notice));
+}
+
 QueryResult executeProtocolQuery(const std::string& sql, Session& session,
                                  int statementTimeoutOverrideMs = -1,
                                  bool emitTimeDeclarationNotices = true,
@@ -5264,6 +5309,7 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
     bool structuredError = false;
     bool statementCommitError = false;
     std::string outputText;
+    std::vector<dbms::StatementNotice> statementNotices;
     auto start = std::chrono::steady_clock::now();
     struct QueryInterruptGuard {
         std::shared_ptr<SessionInterruptState> state;
@@ -5335,8 +5381,7 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
     {
         std::ostringstream output;
         dbms::ScopedOutputCapture capture(output);
-        std::vector<dbms::StatementNotice> statementNotices;
-        dbms::ScopedStatementNoticeCapture noticeCapture(statementNotices);
+        dbms::ScopedStatementNoticeCapture noticeCapture(statementNotices, output);
         try {
             if (emitTimeDeclarationNotices) {
                 const auto notices = protocolTimePrecisionNotices(sql, session);
@@ -5391,10 +5436,6 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
             result.errorMessage = "unhandled executor exception";
         }
         outputText = output.str();
-        for (auto& notice : statementNotices) {
-            result.notices.push_back(QueryNotice{std::move(notice.severity),
-                std::move(notice.sqlState), std::move(notice.message)});
-        }
     }
     // Keep the declaration fixed, but preserve the existing post-execution
     // session context used by wire codecs; this is not catalog reanalysis.
@@ -5407,6 +5448,9 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
     }
     dbms::recordSqlStat(sql, elapsedMs, session.currentDB);
 
+    const bool mergeTypedNotices = !statementNotices.empty();
+    if (mergeTypedNotices)
+        appendOrderedStatementNotices(outputText, statementNotices, result.notices);
     auto lines = outputLines(outputText);
     // The legacy executor reports successful diagnostics through stdout.
     // They are asynchronous protocol messages, not row data or command-tag
@@ -5418,11 +5462,11 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
         for (const auto& entry : prefixes) {
             const size_t prefixLength = std::strlen(entry.first);
             if (line.compare(0, prefixLength, entry.first) != 0) continue;
-            result.notices.push_back(QueryNotice{
-                entry.second,
-                std::string(entry.second) == "WARNING" ? "01000" : "00000",
-                trimText(line.substr(prefixLength))
-            });
+            if (!mergeTypedNotices) {
+                result.notices.push_back(QueryNotice{entry.second,
+                    std::string(entry.second) == "WARNING" ? "01000" : "00000",
+                    trimText(line.substr(prefixLength))});
+            }
             return true;
         }
         return false;

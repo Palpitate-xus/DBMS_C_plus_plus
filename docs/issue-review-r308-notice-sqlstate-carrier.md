@@ -87,3 +87,11 @@ RAISE NOTICE 的字面 `(SQLSTATE ...)` 误当元数据。需覆盖用户原样�
 诊断通道草稿；R307 只改实际 ERROR 分支。源、全部原始帧和失败见
 /tmp/dbms-r307-sequence-duplicate.h7qqyppH/completed-original-duplicate-reference-old-receipt.json。
 原 273 未完成；全部已暂缓模块不恢复，不 push，Actions 禁用。
+
+
+## 后续 R311：跨通道顺序
+
+R308 的序列元数据修复不等于混合通知次序已验证。后续独立组件实际复现
+结构化与旧通知跨通道重排；位置/活动接收器修复与全部有限回归见
+[R311 审查记录](issue-review-r311-mixed-notice-order.md)。原 R308 的 20/120 项
+输入保持不变，包括其 8 个已暂缓 DO 执行失败；不声称全项目载体迁移完成。

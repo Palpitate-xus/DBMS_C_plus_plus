@@ -54,20 +54,37 @@ void ensureInstalled() {
 
 namespace {
 thread_local std::vector<StatementNotice>* g_statementNoticeTarget = nullptr;
+thread_local std::streambuf* g_statementNoticeOutput = nullptr;
 }
 
 ScopedStatementNoticeCapture::ScopedStatementNoticeCapture(
         std::vector<StatementNotice>& target)
-    : previous_(g_statementNoticeTarget) {
+    : previous_(g_statementNoticeTarget),
+      previousOutput_(g_statementNoticeOutput) {
     g_statementNoticeTarget = &target;
+    g_statementNoticeOutput = nullptr;
+}
+
+ScopedStatementNoticeCapture::ScopedStatementNoticeCapture(
+        std::vector<StatementNotice>& target, std::ostream& output)
+    : ScopedStatementNoticeCapture(target) {
+    g_statementNoticeOutput = output.rdbuf();
 }
 
 ScopedStatementNoticeCapture::~ScopedStatementNoticeCapture() {
     g_statementNoticeTarget = previous_;
+    g_statementNoticeOutput = previousOutput_;
 }
 
 void emitStatementNotice(StatementNotice notice) {
+    notice.outputOffset = -1;
     if (g_statementNoticeTarget) {
+        if (g_statementNoticeOutput) {
+            const auto offset = g_statementNoticeOutput->pubseekoff(
+                0, std::ios_base::cur, std::ios_base::out);
+            if (offset != std::streampos(std::streamoff(-1)))
+                notice.outputOffset = static_cast<std::streamoff>(offset);
+        }
         g_statementNoticeTarget->push_back(std::move(notice));
     } else {
         std::cout << notice.severity << ": " << notice.message << '\n';
