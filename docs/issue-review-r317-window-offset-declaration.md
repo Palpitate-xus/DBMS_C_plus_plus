@@ -1,6 +1,6 @@
 # R317：LAG/LEAD 的协议声明与参数输入上下文
 
-状态：已完整复现并冻结夹具；尚未实施生产修复，未验收。
+状态：按用户最新要求暂缓（USER-DEFERRED）；已复现，未修复、未验收。
 
 ## 已核实的问题
 
@@ -64,3 +64,17 @@ CTE 执行 6 个失败另见 [R318](issue-review-r318-cte-window-owner.md)，
 声明依据：[PostgreSQL 18 窗口函数](https://www.postgresql.org/docs/18/functions-window.html)。
 原 273 状态 22 complete /166 partial /70 unverified /15 deferred 不变。
 总目标未完成，不 push，Actions 禁用。
+
+## 用户暂缓记录
+
+用户明确要求 “skip it”，本项声明与参数输入修复停止。候选涉及三个生产
+CPP 和测试注册，但构建及回归未完成；不得将候选当作已接受修复或通过结果。
+本轮新增的生产改动、注册和三个测试文件已经从工作区撤回，逐字节恢复到
+本项实施前；其他既有工作区及暂存区改动保持不变。候选源码、冻结夹具和
+已产生日志保留在 `/tmp/dbms-r317-window-declaration-fix.q9OeBOUe/`，
+其中 `root-candidate-preserved/` 保存撤回前的本轮工作区文件，可用于恢复。
+正在执行的构建和补充旧窗口测试已终止，部分日志不是完整验证结果。
+
+普通 continue 不应重启本项；需要用户明确要求恢复。R318 与 R319 是独立
+记录的执行问题，仍 OPEN，不随本项自动标成已修复或暂缓。
+生产版本仍为 R316；本记录仅提交文档，不 push，不启用 GitHub Actions。
