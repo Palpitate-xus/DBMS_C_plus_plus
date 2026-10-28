@@ -560,17 +560,29 @@ std::string resolveTable(Session& s, const std::string& name,
         return name;
     }
     const std::string& table = qualified.name;
-    if (isTempTable(s, table)) return temporaryPhysicalName(table);
-
     std::vector<std::string> entries;
     std::string canonical;
     if (!dbms::parseSessionSearchPath(s.searchPath, entries, canonical)) {
         entries = {"public"};
     }
+    const std::string temporarySchema = sessionTempSchemaName(s);
+    const bool explicitTemporary = std::any_of(entries.begin(), entries.end(),
+        [&](const std::string& entry) {
+            const auto schema = expandSessionSearchPathEntry(entry, s.username);
+            return schema == "pg_temp" || schema == temporarySchema;
+        });
+    // The implicit TEMP namespace is first only when it was not explicitly
+    // positioned in search_path. Keep target selection and the writer aligned.
+    if (!explicitTemporary && isTempTable(s, table))
+        return temporaryPhysicalName(table);
     std::string firstCandidate;
     for (const auto& rawSchema : entries) {
         const std::string schema = dbms::expandSessionSearchPathEntry(
             rawSchema, s.username);
+        if (schema == "pg_temp" || schema == temporarySchema) {
+            if (isTempTable(s, table)) return temporaryPhysicalName(table);
+            continue;
+        }
         if (schema == "pg_catalog" || schema == "pg_temp" ||
             schema.rfind("pg_temp_", 0) == 0 ||
             !g_engine.schemaExists(s.currentDB, schema)) {
@@ -621,6 +633,21 @@ std::string resolveTable(Session& s, const std::string& name,
         }
     }
     return firstCandidate.empty() ? table : firstCandidate;
+}
+
+// Classify the same resolved physical target used by the legacy writer,
+// not the spelling of a qualified name or the mere existence of a TEMP peer.
+// The registry also owns native transient tables, which need not have a
+// persistent catalog row. Do not change the separate ACL helper's contract.
+bool readOnlyTargetIsTemporary(Session& session, const std::string& spelling) {
+    CatalogManager::QualifiedName name;
+    if (!CatalogManager::parseQualifiedName(spelling, name, true) ||
+        !isTempTable(session, name.name)) return false;
+    if (!name.schema.empty() && name.schema != "pg_temp" &&
+        name.schema != sessionTempSchemaName(session)) return false;
+    bool view = false, materialized = false;
+    const auto physical = resolveTable(session, spelling, true, &view, &materialized);
+    return physical == tempTablePrefix(session, name.name);
 }
 
 bool checkInsertTablePermission(Session& s, const std::string& table) {
@@ -6366,15 +6393,15 @@ bool tryDmlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
     if (g_engine.isReadOnly()) {
         std::string target;
         if (const auto* stmt = dynamic_cast<const InsertStmt*>(parsed.stmt.get())) {
-            target = identifier(stmt->tableName);
+            target = stmt->tableName;
         } else if (const auto* stmt = dynamic_cast<const UpdateStmt*>(parsed.stmt.get())) {
-            target = identifier(stmt->tableName);
+            target = stmt->tableName;
         } else if (const auto* stmt = dynamic_cast<const DeleteStmt*>(parsed.stmt.get())) {
-            target = identifier(stmt->tableName);
+            target = stmt->tableName;
         } else if (const auto* stmt = dynamic_cast<const MergeStmt*>(parsed.stmt.get())) {
-            target = identifier(stmt->targetTable);
+            target = stmt->targetTable;
         }
-        if (!target.empty() && !isTempTable(s, target)) {
+        if (!target.empty() && !readOnlyTargetIsTemporary(s, target)) {
             handled = true;
             std::cout << "ERROR: cannot execute " << parsed.stmt->toString()
                       << " in a read-only transaction (SQLSTATE 25006)"

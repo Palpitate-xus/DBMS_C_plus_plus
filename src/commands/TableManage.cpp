@@ -33554,12 +33554,19 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
             const Session* session = currentSession();
             if (!requested.schema.empty()) schemas.push_back(requested.schema);
             else {
-                if (session) schemas.push_back(sessionTempSchemaName(*session));
-                schemas.push_back("pg_catalog");
                 std::string canonical; std::vector<std::string> path;
-                if (session && parseSessionSearchPath(session->searchPath, path, canonical)) {
-                    for (const auto& entry : path) schemas.push_back(expandSessionSearchPathEntry(entry, session->username));
-                } else schemas.push_back("public");
+                if (!session || !parseSessionSearchPath(session->searchPath, path, canonical))
+                    path = {"public"};
+                std::vector<std::string> explicitSchemas;
+                for (const auto& entry : path)
+                    explicitSchemas.push_back(session ? expandSessionSearchPathEntry(entry, session->username) : entry);
+                const bool explicitTemporary = session &&
+                    std::any_of(explicitSchemas.begin(), explicitSchemas.end(), [&](const auto& schema) {
+                        return schema == "pg_temp" || schema == sessionTempSchemaName(*session);
+                    });
+                if (session && !explicitTemporary) schemas.push_back(sessionTempSchemaName(*session));
+                schemas.push_back("pg_catalog");
+                schemas.insert(schemas.end(), explicitSchemas.begin(), explicitSchemas.end());
             }
             for (auto schema : schemas) {
                 if (schema == "pg_temp" && session) schema = sessionTempSchemaName(*session);
