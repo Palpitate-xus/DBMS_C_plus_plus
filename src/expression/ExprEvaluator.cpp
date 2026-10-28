@@ -5440,6 +5440,14 @@ struct DeclaredCharacterCodeScalarFunction {
         return callback(args);
     }
 };
+// Only the genuine STARTS_WITH implementation owns its TEXT/TEXT signature.
+// An opaque replacement keeps its own arity, datums and result domain.
+struct DeclaredStartsWithScalarFunction {
+    ScalarFunction callback;
+    ExprValue operator()(const std::vector<ExprValue>& args) const {
+        return callback(args);
+    }
+};
 struct DeclaredStrposScalarFunction {
     ScalarFunction callback;
     ExprValue operator()(const std::vector<ExprValue>& args) const {
@@ -5498,6 +5506,8 @@ bool ownsScalarSignatures(const std::string& name,const ScalarFunction* callback
         return callback && callback->target<DeclaredStringLengthScalarFunction>();
     if(isCharacterCodeScalarName(name))
         return callback && callback->target<DeclaredCharacterCodeScalarFunction>();
+    if(name=="starts_with")
+        return callback && callback->target<DeclaredStartsWithScalarFunction>();
     if(name=="strpos")
         return callback && callback->target<DeclaredStrposScalarFunction>();
     if(name=="width_bucket")
@@ -5561,6 +5571,7 @@ std::vector<ScalarSignature> scalarSignatures(const std::string& name) {
         {{"numeric","numeric"},"numeric"}};
     if(name=="ascii")return {{{"text"},"integer"}};
     if(name=="chr")return {{{"integer"},"text"}};
+    if(name=="starts_with")return {{{"text","text"},"boolean"}};
     if(name=="strpos")return {{{"text","text"},"integer"}};
     if(name=="array_position")return {
         {{"anycompatiblearray","anycompatible"},"integer"},
@@ -6166,6 +6177,8 @@ std::string ExprEvaluator::scalarFunctionIdentity(const FunctionCallExpr* call,
                        !callback->second.target<DeclaredStringLengthScalarFunction>()) ||
                       (isCharacterCodeScalarName(resolved.name) &&
                        !callback->second.target<DeclaredCharacterCodeScalarFunction>()) ||
+                      (resolved.name=="starts_with" &&
+                       !callback->second.target<DeclaredStartsWithScalarFunction>()) ||
                       (resolved.name=="strpos" &&
                        !callback->second.target<DeclaredStrposScalarFunction>()) ||
                       ((resolved.name=="to_tsvector" || resolved.name=="setweight") &&
@@ -13447,6 +13460,8 @@ void ExprEvaluator::registerBuiltins() {
             entry.second=DeclaredStringLengthScalarFunction{std::move(entry.second)};
         else if(isCharacterCodeScalarName(entry.first))
             entry.second=DeclaredCharacterCodeScalarFunction{std::move(entry.second)};
+        else if(entry.first=="starts_with")
+            entry.second=DeclaredStartsWithScalarFunction{std::move(entry.second)};
         else if(entry.first=="strpos")
             entry.second=DeclaredStrposScalarFunction{std::move(entry.second)};
         else if(entry.first=="to_tsvector" || entry.first=="setweight")

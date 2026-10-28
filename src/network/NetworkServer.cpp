@@ -2597,7 +2597,7 @@ bool hasProtocolScalarSignatureCall(const Stmt* statement,const std::string& dat
             CatalogManager::QualifiedName name;
             const auto spelling=call->schema.empty()?call->funcName:call->schema+"."+call->funcName;
             const bool parsedName=CatalogManager::parseQualifiedName(spelling,name,true);
-            const bool scaleCall=parsedName && (SQLParser::toLower(name.name)=="ascii" || SQLParser::toLower(name.name)=="chr" || SQLParser::toLower(name.name)=="scale" || SQLParser::toLower(name.name)=="min_scale" || SQLParser::toLower(name.name)=="gcd" || SQLParser::toLower(name.name)=="lcm" || SQLParser::toLower(name.name)=="factorial");
+            const bool scaleCall=parsedName && (SQLParser::toLower(name.name)=="starts_with" || SQLParser::toLower(name.name)=="ascii" || SQLParser::toLower(name.name)=="chr" || SQLParser::toLower(name.name)=="scale" || SQLParser::toLower(name.name)=="min_scale" || SQLParser::toLower(name.name)=="gcd" || SQLParser::toLower(name.name)=="lcm" || SQLParser::toLower(name.name)=="factorial");
             // These finite declared calls need whole-query transformation: FILTER's
             // names and boolean type precede the non-aggregate diagnostic.
             // Do not send it through the legacy name-only signature probe.
@@ -2620,7 +2620,7 @@ bool hasProtocolScalarSignatureCall(const Stmt* statement,const std::string& dat
                 // Route only this finite family through real declaration
                 // binding, including unknown parameters and invalid quoted
                 // case. Folding here admits analysis; it never picks a callee.
-                if(parsedName && (SQLParser::toLower(name.name)=="ascii" || SQLParser::toLower(name.name)=="chr" || SQLParser::toLower(name.name)=="strpos" || SQLParser::toLower(name.name)=="scale" || SQLParser::toLower(name.name)=="min_scale" || SQLParser::toLower(name.name)=="gcd" || SQLParser::toLower(name.name)=="lcm" || SQLParser::toLower(name.name)=="factorial"))candidate=true;
+                if(parsedName && (SQLParser::toLower(name.name)=="starts_with" || SQLParser::toLower(name.name)=="ascii" || SQLParser::toLower(name.name)=="chr" || SQLParser::toLower(name.name)=="strpos" || SQLParser::toLower(name.name)=="scale" || SQLParser::toLower(name.name)=="min_scale" || SQLParser::toLower(name.name)=="gcd" || SQLParser::toLower(name.name)=="lcm" || SQLParser::toLower(name.name)=="factorial"))candidate=true;
                 // Parse/Describe may bind a genuine quoted SQL callee even
                 // when no stored name exists. Do not apply this new entry to
                 // the source-free wire-parameter inference caller: it has no
@@ -2978,10 +2978,10 @@ void validatePreparedScalarArithmetic(const std::string& sql,Session& session,
         }
         if(const auto* call=dynamic_cast<const FunctionCallExpr*>(expression)) {
             static const std::set<std::string> declarations={
-                "char_length","character_length","octet_length","bit_length","ascii","chr","strpos","scale","min_scale","gcd","lcm","factorial","array_position"};
+                "char_length","character_length","octet_length","bit_length","ascii","chr","starts_with","strpos","scale","min_scale","gcd","lcm","factorial","array_position"};
             CatalogManager::QualifiedName name;
             if(CatalogManager::parseQualifiedName(call->funcName,name,true) &&
-               name.schema.empty() && (declarations.count(name.name) || SQLParser::toLower(name.name)=="ascii" || SQLParser::toLower(name.name)=="chr" || SQLParser::toLower(name.name)=="strpos"))return true;
+               name.schema.empty() && (declarations.count(name.name) || SQLParser::toLower(name.name)=="starts_with" || SQLParser::toLower(name.name)=="ascii" || SQLParser::toLower(name.name)=="chr" || SQLParser::toLower(name.name)=="strpos"))return true;
             for(const auto& argument:call->args)if(contains(argument.get()))return true;
             for(const auto& argument:call->namedArgs)if(contains(argument.value.get()))return true;
             return contains(call->filter.get());
