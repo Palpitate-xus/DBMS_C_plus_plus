@@ -1820,7 +1820,7 @@ static bool isSupportedValuesTarget(const string& type) {
     static const set<string> supported = {
         "boolean", "smallint", "integer", "bigint", "numeric", "real",
         "double precision", "character", "character varying", "text",
-        "date", "timestamp", "timestamptz", "uuid", "bytea",
+        "date", "timestamp", "timestamptz", "uuid", "bytea", "bit", "bit varying",
         "int4range", "int8range", "numrange", "daterange", "tsrange",
         "tstzrange", "name", "macaddr", "macaddr8", "inet", "cidr"
     };
@@ -1905,8 +1905,14 @@ static bool executeValuesStatement(const string& sql, const Session& session) {
                      << "(SQLSTATE 0A000)" << endl;
                 return true;
             }
+            // VALUES common coercion has no BIT length modifier. The
+            // keyword ::bit means bit(1), which truncates genuine bit/varbit
+            // datums and unknown string inputs. Keep explicit inner BIT(n)
+            // casts intact; the physical builtin name preserves their value.
+            const string coercionType = columnTypes[col] == "bit"
+                ? "pg_catalog.\"bit\"" : columnTypes[col];
             const string evaluatedExpression =
-                "CAST((" + expression + ") AS " + columnTypes[col] + ")";
+                "CAST((" + expression + ") AS " + coercionType + ")";
             const auto evaluated = dbms::ExprHelper::evalString(
                 evaluatedExpression, {}, {}, session.currentDB,
                 session.username);
