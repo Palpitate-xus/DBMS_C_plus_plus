@@ -604,7 +604,8 @@ public:
                 if(array)declaration+="[]";
             }
             const auto type=declaredType(declaration,cast);
-            const auto input=expression(cast->operand, scopes, cast->typeName);
+            const auto input=expression(cast->operand, scopes,
+                type=="bit[]"?declaration:cast->typeName);
             validateBitCastTypes(input,type);
             validateInternalCharInputCast(input,type);
             validateIntervalInputCast(input,type);
@@ -1208,6 +1209,33 @@ public:
             }
             if(!arrayContext.empty())for(const auto& type:types)
                 array_detail::checkExplicitElementCast(type,array->elementType);
+            if(!arrayContext.empty() && std::any_of(types.begin(),types.end(),[](const auto& input) {
+                    const auto type=ExprHelper::canonicalResultTypeName(input);
+                    return type=="integer" || type=="bigint";
+                })) {
+                const auto target=metadata.declaredType?metadata.declaredType(arrayContext).typeOid:
+                    resolveDeclaredTypeName(arrayContext,nullptr,nullptr).typeOid;
+                if(target==1561) {
+                    const auto declaration=SQLParser::parseTypeSpecification(arrayContext);
+                    for(size_t i=0;i<types.size();++i) {
+                        const auto source=ExprHelper::canonicalResultTypeName(types[i]);
+                        if(source!="integer" && source!="bigint")continue;
+                        // Bind the existing explicit cast node's declaration
+                        // only. Never rebind/evaluate its already-bound input.
+                        auto conversion=std::make_unique<CastExpr>();conversion->typeName="bit";
+                        conversion->typeMods=declaration.typeMods;
+                        conversion->sourceBegin=array->elements[i]->sourceBegin;
+                        conversion->sourceEnd=array->elements[i]->sourceEnd;
+                        std::string scalar="bit";
+                        if(!declaration.typeMods.empty()) {
+                            scalar+='(';for(const auto& modifier:declaration.typeMods)scalar+=modifier;scalar+=')';
+                        }
+                        (void)declaredType(scalar,conversion.get());
+                        conversion->operand=std::move(array->elements[i]);
+                        array->elements[i]=std::move(conversion);
+                    }
+                }
+            }
             for (size_t i=0;i<array->elements.size();++i) {
                 validateArrayConstant(array->elements[i].get(),array->elementType);
                 if (metadata.assignmentInput) {

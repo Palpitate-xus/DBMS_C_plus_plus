@@ -2210,7 +2210,16 @@ void ExprHelper::prepareArrayTypes(Expr* expression,
             }
             return;
         }
-        if (auto* cast = dynamic_cast<CastExpr*>(node)) { visit(cast->operand.get(),cast->typeName); return; }
+        if (auto* cast = dynamic_cast<CastExpr*>(node)) {
+            auto context=cast->typeName;
+            if(array_detail::isArray(context) && !cast->typeMods.empty() &&
+               canonicalResultTypeName(declaredTypeInput(context,database,owner))=="bit[]") {
+                context.resize(context.size()-2);context+='(';
+                for(const auto& modifier:cast->typeMods)context+=modifier;
+                context+=")[]";
+            }
+            visit(cast->operand.get(),context);return;
+        }
         if (auto* binary = dynamic_cast<BinaryOpExpr*>(node)) {
             if (binary->op=="::") {
                 const auto* target = dynamic_cast<const LiteralExpr*>(binary->right.get());
@@ -2364,6 +2373,27 @@ void ExprHelper::prepareArrayTypes(Expr* expression,
             array->nestedElements=std::any_of(types.begin(),types.end(),array_detail::isArray);
             if(!types.empty()) (void)array_detail::commonElement(types);
             if(contextual)for(const auto& source:types)array_detail::checkExplicitElementCast(source,array->elementType);
+            if(contextual && std::any_of(types.begin(),types.end(),[](const auto& input) {
+                    const auto type=canonicalResultTypeName(input);
+                    return type=="integer" || type=="bigint";
+                }) && canonicalResultTypeName(declaredTypeInput(context,database,owner))=="bit[]") {
+                const auto declaration=SQLParser::parseTypeSpecification(context);
+                for(size_t i=0;i<types.size();++i) {
+                    const auto source=canonicalResultTypeName(types[i]);
+                    if(source!="integer" && source!="bigint")continue;
+                    // Integer->BIT owns the requested width before the ARRAY
+                    // is formed. Converting to VARBIT first is not a legal
+                    // cast, and cropping a full-width bit string loses the
+                    // low bits. This is an explicit runtime expression, not
+                    // constant evaluation or a second execution of the input.
+                    auto conversion=std::make_unique<CastExpr>();conversion->typeName="bit";
+                    conversion->typeMods=declaration.typeMods;
+                    conversion->sourceBegin=array->elements[i]->sourceBegin;
+                    conversion->sourceEnd=array->elements[i]->sourceEnd;
+                    conversion->operand=std::move(array->elements[i]);
+                    array->elements[i]=std::move(conversion);
+                }
+            }
             if (array->elementType.empty()) {
                 auto declared = type(array); array->elementType = declared.substr(0,declared.size()-2);
             }
