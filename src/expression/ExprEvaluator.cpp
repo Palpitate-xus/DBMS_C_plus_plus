@@ -3012,6 +3012,18 @@ static std::string arrayExpressionType(const Expr* expression, const RowContext&
                            : ExprHelper::inferParsedResultType(expression,hints,database,owner,evaluator);
 }
 
+// A coercion of an already evaluated runtime cell must retain implicit
+// context. SQL keyword CHAR/BIT length-one defaults belong to explicit CAST.
+static ExprValue implicitRuntimeValue(const ExprEvaluator& evaluator,ExprValue value,
+                                      const std::string& target) {
+    CastExpr cast;cast.typeName=target;cast.implicit=true;
+    auto input=std::make_unique<ParameterExpr>();input->slot=0;
+    input->declaredType=value.typeName;input->origin=ParameterOrigin::RuntimeCell;
+    cast.operand=std::move(input);
+    RowContext row;row.setParameters({std::move(value)});
+    return evaluator.eval(&cast,row);
+}
+
 ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& ctx) const {
     if (!e || !e->left || !e->right) return ExprValue{};
     std::string op = toLower(e->op);
@@ -3206,8 +3218,8 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
 
     if (arrayConcat) {
         const auto& binding = *arrayConcat;
-        l = evalCast(nullptr,ctx,l,binding.leftType);
-        r = evalCast(nullptr,ctx,r,binding.rightType);
+        l = implicitRuntimeValue(*this,std::move(l),binding.leftType);
+        r = implicitRuntimeValue(*this,std::move(r),binding.rightType);
         if (binding.leftArray && binding.rightArray) {
             if (l.isNull && r.isNull) return ExprValue(binding.elementType+"[]","",true);
             if (l.isNull) return r;
@@ -4802,6 +4814,18 @@ ExprValue ExprEvaluator::evalCast(const CastExpr* e, const RowContext& ctx) cons
                 v.typeName = target;
                 return v;
             }
+            if(common_type_detail::array(target)) {
+                const auto declaration=SQLParser::parseTypeSpecification(e->typeName);
+                if(declaration.typeMods.empty()) {
+                    const auto element=target.substr(0,target.size()-2);
+                    // Bare implicit array coercion has typmod -1, including
+                    // its elements. A genuine modifier still uses its codec.
+                    if(element=="character" || element=="bpchar")
+                        return evalCast(e->operand.get(),ctx,v,"pg_catalog.bpchar[]");
+                    if(element=="bit")
+                        return evalCast(e->operand.get(),ctx,v,"pg_catalog.\"bit\"[]");
+                }
+            }
         }
         std::string fullT = e->typeName;
         const bool arrayTarget=fullT.size()>=2 && fullT.compare(fullT.size()-2,2,"[]")==0;
@@ -5210,7 +5234,10 @@ ExprValue ExprEvaluator::evalCast(const Expr* inputExpression, const RowContext&
         const bool oidElements=elementType=="regtype" ||
             (common_type_detail::array(sourceArrayType) && sourceArrayType=="regtype[]");
         const bool intervalElements = elementType == "interval";
-        const auto sourceElement=(oidElements || intervalElements) && common_type_detail::array(sourceArrayType)
+        // Element conversion owns the actual source type too. Treating a
+        // BPCHAR array element as UNKNOWN would lose its implicit blank trim
+        // on a real TEXT/VARCHAR target (and other typed cast semantics).
+        const auto sourceElement=common_type_detail::array(sourceArrayType)
             ?sourceArrayType.substr(0,sourceArrayType.size()-2):std::string("unknown");
         if(elementType=="regtype")regtype_detail::validateCast(sourceElement,elementType);
         std::vector<std::optional<uint32_t>> identities;
@@ -6665,7 +6692,7 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
             result=evalSqlValue(&intrinsic,ctx);
         } else result = it->second(args);
         if(declaredResult.size()>=2 && declaredResult.compare(declaredResult.size()-2,2,"[]")==0)
-            result=evalCast(nullptr,ctx,result,declaredResult);
+            result=implicitRuntimeValue(*this,std::move(result),declaredResult);
         if (isCollatableExprType(result.typeName))
             result.collation = mergeExplicitCollations(
                 result.collation, argumentCollation);
