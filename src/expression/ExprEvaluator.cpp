@@ -12,6 +12,7 @@
 #include "catalog/collation.h"
 #include "catalog/catalog.h"
 #include "common/DateType.h"
+#include "common/TemporalStorageCodec.h"
 #include "common/BooleanCodec.h"
 #include "common/NetworkValue.h"
 #include "common/GeometryValue.h"
@@ -5380,10 +5381,28 @@ ExprValue ExprEvaluator::evalCast(const Expr* inputExpression, const RowContext&
             return ExprValue("time", normalizeDefaultTimeInput(v.value, modifier.typmod), false);
     }
     if (target == "date") return castToDate(v);
-    if (target == "timestamp" || target == "timestamp without time zone")
-        return castToTimestamp(v, "timestamp");
-    if (target == "timestamptz" || target == "timestamp with time zone")
-        return castToTimestamp(v, "timestamptz");
+    if (targetBase == "timestamp" || targetBase == "timestamptz") {
+        // Dispatch the genuine builtin identity separately from its precision.
+        // A timestamp(p) spelling is not a new datum type or a text passthrough.
+        const auto declaration = SQLParser::parseTypeSpecification(target);
+        auto value = castToTimestamp(v, targetBase);
+        if (declaration.typeMods.empty()) return value;
+        auto precisionMods = declaration.typeMods;
+        if (precisionMods.size() == 1) {
+            const auto precision = parsePostgresIntegerText(precisionMods.front(), 32);
+            if (precision.error == IntegerTextError::None && precision.value > 6)
+                precisionMods.front() = "6";
+        }
+        const auto modifier = TypeRegistry::instance().applyTypeMods(targetBase, precisionMods);
+        if (!modifier.ok()) throw DbError("22023", modifier.error);
+        const auto micros = temporal_storage_detail::parseTimestampMicros(value.value);
+        const auto rounded = micros ? temporal_storage_detail::roundTimestampMicros(*micros, modifier.typmod)
+                                    : std::optional<int64_t>{};
+        if (!rounded) throw DbError("22008", "timestamp precision adjustment is out of range");
+        value.value = temporal_storage_detail::formatTimestampMicros(*rounded, targetBase == "timestamptz");
+        if (value.value.empty()) throw DbError("22008", "timestamp precision adjustment is out of range");
+        return value;
+    }
     if (target == "int4range" || target == "int8range")
         return castToIntegerRange(v, target);
     if (target == "numrange") return castToNumericRange(v);
