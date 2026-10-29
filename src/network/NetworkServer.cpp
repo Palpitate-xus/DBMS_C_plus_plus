@@ -1919,59 +1919,51 @@ int32_t protocolDeclaredIntervalModifier(const Expr* expression, const Session& 
     }
 }
 
-int32_t protocolDeclaredCastModifier(const Expr* expression, const Session& session) {
+std::optional<int32_t> protocolDeclaredCastModifier(const Expr* expression, const Session& session) {
     const int32_t timePrecision = protocolDeclaredTimePrecision(expression, session);
     if (timePrecision >= 0) return timePrecision;
     const int32_t intervalModifier = protocolDeclaredIntervalModifier(expression, session);
     if (intervalModifier >= 0) return intervalModifier;
-    if (!expression) return -1;
-    std::string typeName;
-    std::vector<std::string> modifiers;
-    if (const auto* cast = dynamic_cast<const CastExpr*>(expression)) {
-        if (cast->implicit) return -1;
-        typeName = lowerProtocolText(cast->typeName);
-        modifiers = cast->typeMods;
-    } else if (const auto* binary =
-                   dynamic_cast<const BinaryOpExpr*>(expression);
-               binary && binary->op == "::" && binary->right) {
-        typeName = lowerProtocolText(binary->right->toString());
-        while (typeName.size() >= 2 && typeName.compare(typeName.size() - 2, 2, "[]") == 0)
-            typeName.resize(typeName.size() - 2);
-        const size_t open = typeName.find('(');
-        if (open != std::string::npos && typeName.back() == ')') {
-            modifiers.push_back(typeName.substr(open + 1,
-                typeName.size() - open - 2));
-            typeName.resize(open);
-        }
-    } else {
-        return -1;
-    }
-    while (typeName.size() >= 2 && typeName.compare(typeName.size() - 2, 2, "[]") == 0)
-        typeName.resize(typeName.size() - 2);
-    if (typeName.compare(0, 11, "pg_catalog.") == 0)
-        typeName.erase(0, 11);
-    const bool fixedCharacter = typeName == "char" ||
-                                typeName == "character" || typeName == "bpchar";
-    const bool varyingCharacter = typeName == "varchar" ||
-                                  typeName == "character varying";
-    const bool fixedBit = typeName == "bit";
-    const bool varyingBit = typeName == "varbit" || typeName == "bit varying";
-    if (!fixedCharacter && !varyingCharacter && !fixedBit && !varyingBit) return -1;
-    if (modifiers.empty()) {
-        return fixedCharacter ? 5 : fixedBit ? 1 : -1;
-    }
-    if (modifiers.size() != 1 || modifiers.front().empty()) return -1;
-    const std::string& lengthText = modifiers.front();
-    if (!std::all_of(lengthText.begin(), lengthText.end(),
-                     [](unsigned char c) { return std::isdigit(c); })) return -1;
+    if (!expression) return std::nullopt;
     try {
-        const unsigned long length = std::stoul(lengthText);
-        const int32_t header = fixedBit || varyingBit ? 0 : 4;
-        if (length > static_cast<unsigned long>(
-                std::numeric_limits<int32_t>::max() - header)) return -1;
-        return static_cast<int32_t>(length + header);
-    } catch (const std::exception&) {
-        return -1;
+        ColumnDef declaration;
+        if (const auto* cast = dynamic_cast<const CastExpr*>(expression)) {
+            if (cast->implicit) return std::nullopt;
+            declaration = SQLParser::parseTypeSpecification(cast->typeName);
+            declaration.typeMods = cast->typeMods;
+        } else if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(expression);
+                   binary && binary->op == "::" && binary->right) {
+            declaration = SQLParser::parseTypeSpecification(binary->right->toString());
+        } else return std::nullopt;
+        // SQL keywords own their length-one defaults; physical type names
+        // (including qualified/quoted bit and bpchar) do not. Resolve the
+        // actual catalog identity before interpreting a length modifier.
+        const auto catalog = regtype_detail::metadata(g_engine, session.currentDB);
+        const auto declared = resolveDeclaredTypeName(declaration.typeName +
+            (declaration.isArray ? "[]" : ""), &catalog, &session);
+        const bool character = declared.typeOid == 1042 || declared.typeOid == 1014 ||
+                               declared.typeOid == 1043 || declared.typeOid == 1015;
+        const bool bit = declared.typeOid == 1560 || declared.typeOid == 1561 ||
+                         declared.typeOid == 1562 || declared.typeOid == 1563;
+        if (!character && !bit) return std::nullopt;
+        if (declaration.typeMods.empty()) {
+            const auto syntax = lowerProtocolText(declaration.typeName);
+            if (syntax == "char" || syntax == "character") return 5;
+            if (syntax == "bit") return 1;
+            return -1; // Authoritative unconstrained declaration, not absence.
+        }
+        if (declaration.typeMods.size() != 1) return std::nullopt;
+        const auto length = parsePostgresIntegerText(declaration.typeMods.front(), 32);
+        const int32_t header = character ? 4 : 0;
+        if (length.error != IntegerTextError::None || length.value < 0 ||
+            length.value > std::numeric_limits<int32_t>::max() - header)
+            return std::nullopt; // Existing declaration analysis owns errors.
+        return static_cast<int32_t>(length.value + header);
+    } catch (const DbError& failure) {
+        const auto& state = failure.sqlState();
+        if (state == "42601" || state == "42704" || state == "3F000" || state == "22023")
+            return std::nullopt;
+        throw; // Never hide I/O, cancellation or corrupt metadata failures.
     }
 }
 
@@ -2153,9 +2145,9 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
                 for (size_t i = 0; i < descriptions.size(); ++i) {
                     if (!protocolHasLengthModifier(descriptions[i].typeOid) ||
                         descriptions[i].tableOid != INVALID_OID) continue;
-                    const int32_t modifier = protocolDeclaredCastModifier(
+                    const auto modifier = protocolDeclaredCastModifier(
                         select->selectList[i].expr.get(), session);
-                    if (modifier >= 0) descriptions[i].typeModifier = modifier;
+                    if (modifier) descriptions[i].typeModifier = *modifier;
                 }
             }
         }
@@ -3755,14 +3747,14 @@ bool describePreparedResultShape(const std::string& sql, Session& session,
     QueryResult shape;
     std::vector<std::string> outputNames;
     std::vector<uint32_t> directParameterOids;
-    std::vector<int32_t> projectionTypeModifiers;
+    std::vector<std::optional<int32_t>> projectionTypeModifiers;
     const auto appendPhysicalColumns = [&]() {
         for (size_t i = 0; i < schema.len; ++i) {
             shape.columns.push_back(schema.cols[i].dataName);
             shape.columnTypes.push_back(protocolPhysicalTypeName(schema.cols[i]));
             outputNames.push_back(schema.cols[i].dataName);
             directParameterOids.push_back(0);
-            projectionTypeModifiers.push_back(-1);
+            projectionTypeModifiers.push_back(std::nullopt);
         }
     };
     const auto qualifierMatches = [&](const ColumnRefExpr& reference) {
@@ -3800,7 +3792,7 @@ bool describePreparedResultShape(const std::string& sql, Session& session,
                 outputNames.push_back(item.alias.empty() ? reference->column
                                                           : outputAlias(item.alias));
                 directParameterOids.push_back(0);
-                projectionTypeModifiers.push_back(-1);
+                projectionTypeModifiers.push_back(std::nullopt);
                 found = true;
                 break;
             }
@@ -3891,8 +3883,8 @@ bool describePreparedResultShape(const std::string& sql, Session& session,
     for (size_t i = 0; i < columns.size(); ++i) {
         columns[i].name = outputNames[i];
         if (protocolHasLengthModifier(columns[i].typeOid) &&
-            projectionTypeModifiers[i] >= 0)
-            columns[i].typeModifier = projectionTypeModifiers[i];
+            projectionTypeModifiers[i])
+            columns[i].typeModifier = *projectionTypeModifiers[i];
         if (directParameterOids[i] != 0) {
             columns[i].typeOid = directParameterOids[i];
             columns[i].typeSize = protocolTypeSize(columns[i].typeOid, Column{});
