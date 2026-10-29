@@ -97,7 +97,8 @@ int main() {
         check(1186,value,{},false,false);check(1187,"{\""+value+"\"}",{},false,false);
     }
     for(const std::string value:{"{{1},{2,3}}","[0:2]={1,2}","bare"})check(1187,value,{},false,false);
-    check(1266,"12:34:56+00",{},false,false);check(114,"1",{},false,false);check(199,"{1}",{},false,false);
+    Bytes timetz;append64(timetz,45296000000LL);append32(timetz,0);
+    check(1266,"12:34:56+00",timetz);check(114,"1",{},false,false);check(199,"{1}",{},false,false);
     check(1186," Infinity ",interval(maximum,max32,max32));check(1186,"\t+INFINITY\n",interval(maximum,max32,max32));
     check(1186," -Infinity ",interval(minimum,min32,min32));check(1186," \t-infinity",interval(minimum,min32,min32));
     frame({"1 day","{\"-1 microsecond\",NULL}"},{1186,1187},{1,1},{false,false},{interval(0,1),array({interval(-1),std::nullopt},{{2,1}})});

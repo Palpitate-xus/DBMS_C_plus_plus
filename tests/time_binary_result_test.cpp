@@ -26,10 +26,10 @@ Bytes interval(int64_t micros,int32_t days=0,int32_t months=0) {
     append32(result,static_cast<uint32_t>(days));append32(result,static_cast<uint32_t>(months));return result;
 }
 Bytes array(const std::vector<std::optional<Bytes>>& values,
-    const std::vector<std::pair<int32_t,int32_t>>& dimensions) {
+    const std::vector<std::pair<int32_t,int32_t>>& dimensions, uint32_t elementOid=1083) {
     Bytes result;append32(result,static_cast<uint32_t>(dimensions.size()));
     bool hasNull=false;for(const auto& value:values)hasNull=hasNull || !value;
-    append32(result,hasNull?1:0);append32(result,1083);
+    append32(result,hasNull?1:0);append32(result,elementOid);
     for(const auto& dimension:dimensions){append32(result,static_cast<uint32_t>(dimension.first));append32(result,static_cast<uint32_t>(dimension.second));}
     for(const auto& value:values){append32(result,value?static_cast<uint32_t>(value->size()):UINT32_MAX);if(value)result.insert(result.end(),value->begin(),value->end());}
     return result;
@@ -96,10 +96,50 @@ int main() {
         check(1083,value,{},false,false);check(1183,"{\""+value+"\"}",{},false,false);
     }
     for(const std::string value:{"{{00:00:00},{00:00:00,01:00:00}}","[0:2]={00:00:00,01:00:00}","bare"})check(1183,value,{},false,false);
-    check(1266,"12:34:56+00",{},false,false);check(199,"{1}",{},false,false);
+    // Actual PG18.6 wire observations: the clock is local, the offset is
+    // seconds WEST, and each non-null timetz datum occupies exactly 12 bytes.
+    auto zoned=[](int64_t micros,int32_t west) {
+        Bytes bytes=clockBytes(micros);append32(bytes,static_cast<uint32_t>(west));return bytes;
+    };
+    check(1266,"12:34:56+00",zoned(45296000000LL,0));check(199,"{1}",{},false,false);
+    const std::vector<std::tuple<std::string,int64_t,int32_t>> timetzCases={
+        {"00:00:00+00",0,0},{"24:00:00+00",86400000000LL,0},
+        {"00:00:00.000001+00",1,0},{"23:59:59.999999+00",86399999999LL,0},
+        {"12:34:56.123456+08:30",45296123456LL,-30600},
+        {"12:34:56.123456-08:30",45296123456LL,30600},
+        {"12:34:56+15:59:59",45296000000LL,-57599},
+        {"12:34:56-15:59:59",45296000000LL,57599},
+        {"12:34:56+00:00:01",45296000000LL,-1},
+        {"12:34:56-00:00:01",45296000000LL,1},
+        {"12:34:56+00:30",45296000000LL,-1800},
+        {"12:34:56-00:30",45296000000LL,1800},
+        {"12:34:56+08",45296000000LL,-28800},
+        {"12:34:56-08",45296000000LL,28800},
+        {"12:34:56+0830",45296000000LL,-30600},
+        {"0:0:0+00",0,0},{"12:34+00",45240000000LL,0},
+        {"12:34:56.9999999+00",45297000000LL,0},
+        {"23:59:60+00",86400000000LL,0}};
+    for(const auto& [value,micros,west]:timetzCases) {
+        const Bytes bytes=zoned(micros,west);
+        check(1266,value,bytes);
+        check(1270,"{\""+value+"\",NULL}",array({bytes,std::nullopt},{{2,1}},1266));
+    }
+    check(1266,"invalid carrier",{},true);check(1270,"not an array",{},true);
+    check(1270,"{}",array({},{},1266));
+    check(1270,"{NULL,NULL}",array({std::nullopt,std::nullopt},{{2,1}},1266));
+    check(1270,"[0:1]={24:00:00+00,12:34:56-15:59:59}",array({zoned(86400000000LL,0),zoned(45296000000LL,57599)},{{2,0}},1266));
+    check(1270,"{{12:34:56+08,NULL},{24:00:00+00,00:00:00-08}}",array({zoned(45296000000LL,-28800),std::nullopt,zoned(86400000000LL,0),zoned(0,28800)},{{2,1},{2,1}},1266));
+    const std::vector<std::string> invalidTimetz={"","bad","12:34:56","25:00:00+00","24:00:01+00","24:00:00.000001+00",
+        "12:60:00+00","12:00:61+00","12:34:56+16","12:34:56-16","12:34:56+00:60","12:34:56+00:00:60",
+        "12:34:56+","12:34:56+08:","12:34:56+08:00:","12:34:56+08:00:00:00","12:34:56+08trailing","12:34:56-083045"};
+    for(const auto& value:invalidTimetz) {
+        check(1266,value,{},false,false);check(1270,"{\""+value+"\"}",{},false,false);
+    }
+    frame({"12:34:56+08","bad"},{1266,1266},{1,1},{false,false},{},false);
+    frame({"12:34:56+08","12:34:56-08"},{1266,1266},{1,1},{false,false},{zoned(45296000000LL,-28800),zoned(45296000000LL,28800)});
     frame({"00:00:00.000001","{24:00:00,NULL}"},{1083,1183},{1,1},{false,false},{clockBytes(1),array({clockBytes(86400000000LL),std::nullopt},{{2,1}})});
     frame({"00:00:00.000001","bad"},{1083,1083},{1,1},{false,false},{},false);
     check(1083,"00:00:00",{},false,false,2);
     std::cout<<"[TIME BINARY RESULT] native controls="<<controls<<" failures="<<failures<<'\n';
-    return cases.size()==30 && controls==121 && !failures?0:1;
+    return cases.size()==30 && timetzCases.size()==19 && invalidTimetz.size()==18 && controls==203 && !failures?0:1;
 }
