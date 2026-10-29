@@ -6754,6 +6754,11 @@ ExprValue ExprEvaluator::evalArrayExpr(const ArrayExpr* array, const RowContext&
     if(elementType.empty()){
         auto type=arrayExpressionType(array,row,currentDB_,this);elementType=type.substr(0,type.size()-2);
     }
+    // Constructor element coercion has no typmod. The SQL CHAR/CHARACTER
+    // keywords instead mean CHAR(1) in an explicit cast, so use the existing
+    // unconstrained BPCHAR input spelling for scalar and nested elements.
+    const std::string elementCastType = elementType == "character" || elementType == "bpchar"
+        ? "pg_catalog.bpchar" : elementType;
     std::string output="{";
     bool nested=array->nestedElements;
     if(array->elementType.empty())for(const auto& item:array->elements){
@@ -6769,7 +6774,7 @@ ExprValue ExprEvaluator::evalArrayExpr(const ArrayExpr* array, const RowContext&
         if(nested){
             if(value.isNull)throw DbError("2202E","multidimensional arrays must have matching dimensions");
             if (elementType != "bit" || value.typeName != "bit[]")
-                value=evalCast(nullptr,row,value,elementType+"[]");
+                value=evalCast(nullptr,row,value,elementCastType+"[]");
             std::vector<std::string> elements;
             if(!parseArrayElements(value.value,elements))throw DbError("22P02","malformed array literal");
             if(i && nestedWidth!=elements.size())throw DbError("2202E","multidimensional arrays must have matching dimensions");
@@ -6786,7 +6791,7 @@ ExprValue ExprEvaluator::evalArrayExpr(const ArrayExpr* array, const RowContext&
                 value=evalCast(nullptr,row,value,"bit varying");
                 value.typeName="bit";
             } else {
-                value=evalCast(nullptr,row,value,elementType);
+                value=evalCast(nullptr,row,value,elementCastType);
             }
             output+=value.isNull?"NULL":arrayElemQuote(value.value);
             if(elementType=="regtype")identities.push_back(value.objectOid);
