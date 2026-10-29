@@ -341,8 +341,17 @@ public:
         const auto* binary=dynamic_cast<const BinaryOpExpr*>(node);
         const bool inputDeclaration=dynamic_cast<const CastExpr*>(node) || dynamic_cast<const LiteralExpr*>(node) ||
             (binary && binary->op=="::");
-        if(inputDeclaration && modifiers.empty() && (syntax=="char" || syntax=="character" || syntax=="bit"))
-            modifiers.push_back("1");
+        if(modifiers.empty() && (syntax=="char" || syntax=="character" || syntax=="bit")) {
+            const auto* literal=dynamic_cast<const LiteralExpr*>(node);
+            const auto* cast=dynamic_cast<const CastExpr*>(node);
+            const bool unconstrainedInput=(literal && !literal->preparedSubquery &&
+                !literal->analyzedPrimitiveConstant && !literal->typeName.empty()) ||
+                (cast && cast->implicit);
+            // Bare typed input and implicit coercion have no length-one
+            // default. Only a genuine explicit keyword CAST owns that rule.
+            if(unconstrainedInput)valueTypeModifiers[node]=-1;
+            else if(inputDeclaration)modifiers.push_back("1");
+        }
         if(!modifiers.empty()) {
             if((scalar=="bpchar" || scalar=="varchar") && modifiers.size()==1) {
                 // Static declarations are not the storage codec's allocation
@@ -1202,7 +1211,18 @@ public:
                     metadata.assignmentInput({"array element",target},array->elements[i].get(),types[i]);
                 }
             }
-            return declaredType(array->elementType + "[]",array);
+            // ARRAY inherits a typmod only from uniformly declared children.
+            // Multidimensional children own array types; scalar children own
+            // the element type. Inspect metadata only, never their values.
+            std::vector<std::pair<std::string,const Expr*>> modifierInputs;
+            for (size_t i=0;i<array->elements.size();++i)
+                modifierInputs.emplace_back(types[i],array->elements[i].get());
+            const auto common = array->elementType +
+                std::string(array->nestedElements ? "[]" : "");
+            const auto modifier=commonModifier(modifierInputs,common);
+            const auto resultType=declaredType(array->elementType + "[]",array);
+            valueTypeModifiers[array]=modifier;
+            return resultType;
         }
         case ExprType::RowExpr: {
             auto* row = static_cast<RowExpr*>(node.get());

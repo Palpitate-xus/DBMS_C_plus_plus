@@ -1981,6 +1981,10 @@ bool protocolHasLengthModifier(uint32_t oid) {
            oid == 1083 || oid == 1183 || oid == 1186 || oid == 1187;
 }
 
+void retainProtocolArrayConstructorModifiers(const std::string& sql,
+    const Session& session,std::vector<PgColumnDescription>& columns,
+    const std::vector<uint32_t>* parameterOids);
+
 std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& result,
                                                           const std::string& sql,
                                                           const Session& session,
@@ -2156,6 +2160,7 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
             }
         }
     }
+    retainProtocolArrayConstructorModifiers(sql,session,descriptions,nullptr);
     return descriptions;
 }
 
@@ -2289,7 +2294,7 @@ bool describePreparedQueryHostResult(const std::string& sql, Session& session,
 // Describe must not execute the statement: even a SELECT can call a function
 // with side effects. Resolve statically knowable SELECT/RETURNING projections
 // against the catalog and leave other query shapes to the execution path.
-std::vector<QueryBindingDatum> protocolMetadataParameters(Session& session,
+std::vector<QueryBindingDatum> protocolMetadataParameters(const Session& session,
     const std::vector<uint32_t>& parameterOids) {
     std::vector<QueryBindingDatum> parameters;
     std::optional<CatalogManager::MetadataSnapshot> catalog;
@@ -2320,6 +2325,101 @@ std::vector<QueryBindingDatum> protocolMetadataParameters(Session& session,
         parameters.push_back(std::move(datum));
     }
     return parameters;
+}
+
+// Recognize constructor-owned ordinary projections structurally. Independent
+// CASE/planning, window and query-child hosts keep their existing owners.
+unsigned int protocolArrayConstructorRole(const Expr* expression,size_t depth=0) {
+    if (!expression) return 0U;
+    if (depth>=128 || expression->preparedSubquery) return 2U;
+    if (const auto* array=dynamic_cast<const ArrayExpr*>(expression)) {
+        unsigned int role=1U;
+        for (const auto& element:array->elements)
+            role|=protocolArrayConstructorRole(element.get(),depth+1);
+        return role;
+    }
+    if (const auto* cast=dynamic_cast<const CastExpr*>(expression))
+        return protocolArrayConstructorRole(cast->operand.get(),depth+1);
+    if (const auto* unary=dynamic_cast<const UnaryOpExpr*>(expression))
+        return protocolArrayConstructorRole(unary->operand.get(),depth+1);
+    if (const auto* binary=dynamic_cast<const BinaryOpExpr*>(expression))
+        return protocolArrayConstructorRole(binary->left.get(),depth+1) |
+            protocolArrayConstructorRole(binary->right.get(),depth+1);
+    if (const auto* call=dynamic_cast<const FunctionCallExpr*>(expression)) {
+        if (call->hasOver || call->setReturning || call->filter ||
+            call->distinct || !call->orderBy.empty()) return 2U;
+        unsigned int role=0U;
+        for (const auto& argument:call->args)
+            role|=protocolArrayConstructorRole(argument.get(),depth+1);
+        for (const auto& argument:call->namedArgs)
+            role|=protocolArrayConstructorRole(argument.value.get(),depth+1);
+        return role;
+    }
+    if (dynamic_cast<const ColumnRefExpr*>(expression) ||
+        dynamic_cast<const LiteralExpr*>(expression) ||
+        dynamic_cast<const ParameterExpr*>(expression)) return 0U;
+    return 2U;
+}
+
+void retainProtocolArrayConstructorModifiers(const std::string& sql,
+    const Session& session,std::vector<PgColumnDescription>& columns,
+    const std::vector<uint32_t>* parameterOids) {
+    if (sql.empty() || columns.empty()) return;
+    static const auto arrayOids=[] {
+        std::set<uint32_t> result;
+        for (const auto& type:CatalogManager::builtinTypeRows())
+            if (type.typcategory=='A' && type.typelem) result.insert(type.oid);
+        return result;
+    }();
+    if (std::none_of(columns.begin(),columns.end(),[&](const auto& column) {
+        return arrayOids.count(column.typeOid);
+    })) return;
+    SQLParser parser;
+    const auto parsed=parser.parseForBinding(sql);
+    const auto* select=parsed.isValid()?dynamic_cast<const SelectStmt*>(parsed.stmt.get()):nullptr;
+    if (!select || !select->ctes.empty() || select->setOp!=SetOp::None ||
+        !select->valuesRows.empty()) return;
+    std::vector<const FromItem*> sources{select->fromClause.get()};
+    while (!sources.empty()) {
+        const auto* source=sources.back();sources.pop_back();
+        if (!source) continue;
+        if (source->type==FromItem::Type::Join) {
+            sources.push_back(source->right.get());
+            sources.push_back(source->left.get());
+            continue;
+        }
+        // Views, virtual catalogs and query children keep their existing
+        // descriptor owners. Iteration also bounds the helper's stack use.
+        if (source->type!=FromItem::Type::Table ||
+            !g_engine.tableExists(session.currentDB,source->tableName)) return;
+    }
+    unsigned int role=0U;
+    for (const auto& item:select->selectList)
+        role|=protocolArrayConstructorRole(item.expr.get());
+    if (!(role&1U) || (role&2U)) return;
+    std::vector<QueryBindingDatum> parameters;
+    if (parameterOids) {
+        parameters=protocolMetadataParameters(session,*parameterOids);
+    } else {
+        size_t count=0;std::string error;
+        if (!dbms::ps_analyzeDollarParams(sql,count,error) || count) return;
+    }
+    // No plan construction or row/routine invocation: the actual declaration
+    // owns both typmod and expanded projection ordinals (including stars).
+    const auto prepared=g_engine.prepareBoundQuery(session.currentDB,sql,parameters);
+    const auto* bound=dynamic_cast<const SelectStmt*>(prepared.ast.get());
+    const auto projections=prepared.projectionBindings.find(bound);
+    if (prepared.output.size()!=columns.size() ||
+        projections==prepared.projectionBindings.end() || projections->second.size()!=columns.size())
+        throw DbError("XX000","ARRAY protocol output differs from its bound descriptor");
+    for (size_t i=0;i<columns.size();++i) {
+        const auto& field=prepared.output[i];
+        if (protocolArrayConstructorRole(projections->second[i].expression)!=1U ||
+            columns[i].tableOid!=INVALID_OID || !field.typeOid ||
+            columns[i].typeOid!=field.typeOid || field.type.size()<2 ||
+            field.type.compare(field.type.size()-2,2,"[]")!=0) continue;
+        columns[i].typeModifier=field.typeMod;
+    }
 }
 
 // A finite computed-output query host, separate from scalar-signature and
@@ -3355,7 +3455,7 @@ bool describePreparedNamespaceCatalog(const std::string& sql,Session& session,
     return !columns.empty();
 }
 
-bool describePreparedResult(const std::string& sql, Session& session,
+bool describePreparedResultShape(const std::string& sql, Session& session,
                             std::vector<PgColumnDescription>& columns,
                             const std::vector<uint32_t>& parameterOids = {}) {
     if(describePreparedNamespaceCatalog(sql,session,columns,parameterOids))return true;
@@ -3798,6 +3898,14 @@ bool describePreparedResult(const std::string& sql, Session& session,
             columns[i].typeSize = protocolTypeSize(columns[i].typeOid, Column{});
         }
     }
+    return true;
+}
+
+bool describePreparedResult(const std::string& sql,Session& session,
+    std::vector<PgColumnDescription>& columns,const std::vector<uint32_t>& parameterOids = {}) {
+    if (!describePreparedResultShape(sql,session,columns,parameterOids)) return false;
+    if (!parameterOids.empty())
+        retainProtocolArrayConstructorModifiers(sql,session,columns,&parameterOids);
     return true;
 }
 
