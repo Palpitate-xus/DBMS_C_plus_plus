@@ -1977,6 +1977,67 @@ void retainProtocolArrayConstructorModifiers(const std::string& sql,
     const Session& session,std::vector<PgColumnDescription>& columns,
     const std::vector<uint32_t>* parameterOids);
 
+std::vector<QueryBindingDatum> protocolMetadataParameters(const Session& session,
+    const std::vector<uint32_t>& parameterOids);
+
+// A VALUES declaration owns modifiers independently of its values. Reuse
+// the existing type binder, not a query plan, data length or cached portal.
+// CASE/query children and other incremental query hosts keep their owners.
+std::optional<QueryRowDescriptor> protocolValuesDeclaration(
+    const std::string& sql,const Session& session,
+    const std::vector<uint32_t>& parameterOids={},
+    const QueryRowDescriptor* supplied=nullptr) {
+    if(firstSqlKeyword(sql)!="values" || session.currentDB.empty())return std::nullopt;
+    SQLParser parser;const auto parsed=parser.parseForBinding(sql);
+    const auto* select=parsed.isValid()?dynamic_cast<const SelectStmt*>(parsed.stmt.get()):nullptr;
+    if(!select || select->command!=SqlCommand::Values || !select->ctes.empty() ||
+       select->fromClause || select->setOp!=SetOp::None || !select->orderBy.empty() ||
+       select->whereClause || select->having || select->limit || select->offset ||
+       !select->windowDefs.empty() || !select->locking.empty())return std::nullopt;
+    std::function<bool(const Expr*)> scalar=[&](const Expr* value) {
+        if(!value || value->preparedSubquery)return false;
+        if(const auto* literal=dynamic_cast<const LiteralExpr*>(value)) {
+            const auto tokens=SQLParser::tokenize(literal->value);
+            if(tokens.size()>1 && tokens[0]=="(") {
+                const auto command=SQLParser::toLower(tokens[1]);
+                if(command=="select" || command=="with" || command=="values")return false;
+            }
+            return true;
+        }
+        if(dynamic_cast<const ParameterExpr*>(value))return true;
+        if(const auto* cast=dynamic_cast<const CastExpr*>(value))return scalar(cast->operand.get());
+        if(const auto* unary=dynamic_cast<const UnaryOpExpr*>(value))return scalar(unary->operand.get());
+        if(const auto* binary=dynamic_cast<const BinaryOpExpr*>(value))
+            return scalar(binary->left.get()) && (binary->op=="::" || scalar(binary->right.get()));
+        if(const auto* array=dynamic_cast<const ArrayExpr*>(value))
+            return std::all_of(array->elements.begin(),array->elements.end(),[&](const auto& member){return scalar(member.get());});
+        if(const auto* call=dynamic_cast<const FunctionCallExpr*>(value)) {
+            if(call->hasOver || call->distinct || call->filter || call->setReturning ||
+               !call->orderBy.empty() || !call->aggregateOrderKeys.empty())return false;
+            return std::all_of(call->args.begin(),call->args.end(),[&](const auto& arg){return scalar(arg.get());}) &&
+                std::all_of(call->namedArgs.begin(),call->namedArgs.end(),[&](const auto& arg){return scalar(arg.value.get());});
+        }
+        return false;
+    };
+    for(const auto& row:select->valuesRows)for(const auto& value:row)
+        if(!scalar(value.get()))return std::nullopt;
+    if(supplied)return *supplied;
+    auto* previous=currentSession();setCurrentSession(const_cast<Session*>(&session));
+    struct Restore {Session* previous;~Restore(){setCurrentSession(previous);}} restore{previous};
+    try {
+        return g_engine.prepareBoundQuery(session.currentDB,sql,
+            protocolMetadataParameters(session,parameterOids)).output;
+    } catch(const DbError& error) {
+        // This optional declaration probe must not change the old input-
+        // validation/error phase. The existing consumer still reports its
+        // semantic errors. Never suppress I/O, cancellation or corruption.
+        const auto& code=error.sqlState();
+        if(code.rfind("22",0)==0 || code.rfind("42",0)==0 ||
+           code=="3F000" || code=="0A000")return std::nullopt;
+        throw;
+    }
+}
+
 std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& result,
                                                           const std::string& sql,
                                                           const Session& session,
@@ -1984,6 +2045,9 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
     std::vector<PgColumnDescription> descriptions;
     descriptions.reserve(result.columns.size());
 
+    const auto valuesDeclaration=protocolValuesDeclaration(sql,session,{},preparedOutput);
+    if(valuesDeclaration && valuesDeclaration->size()!=result.columns.size())
+        throw DbError("XX000","VALUES protocol result width differs from its declaration");
     const auto source = protocolPhysicalSourceFromQuery(sql, session);
     const auto& table = source.table;
     const auto relationOid = source.relationOid;
@@ -2134,9 +2198,16 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
             }
             break;
         }
+        if(valuesDeclaration) {
+            const auto& field=(*valuesDeclaration)[columnIndex];
+            // Only the matching actual identity can supply this modifier.
+            // Do not borrow a different/custom type or repair its OID here.
+            if(field.typeOid!=INVALID_OID && field.typeOid==description.typeOid)
+                description.typeModifier=field.typeMod;
+        }
         descriptions.push_back(std::move(description));
     }
-    if (!descriptions.empty()) {
+    if (!descriptions.empty() && !valuesDeclaration) {
         SQLParser parser;
         ParseResult parsed = parser.parse(sql);
         if (parsed.isValid()) {
@@ -3588,7 +3659,9 @@ bool describePreparedResultShape(const std::string& sql, Session& session,
             shape.columns.push_back("column" + std::to_string(i + 1));
             shape.columnTypes.push_back(std::move(typeName));
         }
-        columns = describeProtocolColumns(shape, sql, session);
+        const auto declaration=protocolValuesDeclaration(sql,session,parameterOids);
+        columns = describeProtocolColumns(shape, sql, session,
+            declaration?&*declaration:nullptr);
         if (select->valuesRows.size() == 1) {
             for (size_t i = 0; i < columns.size(); ++i) {
                 if (directParameterOids[i] == 0) continue;
