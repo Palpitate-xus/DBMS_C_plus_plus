@@ -1803,8 +1803,9 @@ int16_t protocolTypeSize(uint32_t typeOid, const Column& column) {
     return column.isVariableLength ? -1 : static_cast<int16_t>(column.dsize);
 }
 
-int32_t protocolDeclaredTimePrecision(const Expr* expression, const Session& session,
-                                      int32_t* requestedPrecision = nullptr) {
+int32_t protocolDeclaredTemporalPrecision(const Expr* expression, const Session& session,
+    int32_t* requestedPrecision = nullptr, bool timeOnly = false,
+    uint32_t* actualTypeOid = nullptr) {
     std::string spelling;
     if (const auto* cast = dynamic_cast<const CastExpr*>(expression)) {
         if (cast->implicit) return -1;
@@ -1829,21 +1830,34 @@ int32_t protocolDeclaredTimePrecision(const Expr* expression, const Session& ses
     if (spelling.empty()) return -1;
     try {
         const auto declaration = SQLParser::parseTypeSpecification(spelling);
-        if (declaration.typeMods.empty()) return -1;
+        if (timeOnly && declaration.typeMods.empty()) return -1;
         CatalogManager::QualifiedName requested;
-        if (!CatalogManager::parseQualifiedName(declaration.typeName, requested, true) ||
-            (requested.name != "time" && requested.name != "_time")) return -1;
+        if (!CatalogManager::parseQualifiedName(declaration.typeName, requested, true)) return -1;
+        const bool timeName = requested.name == "time" || requested.name == "_time";
+        const bool otherTemporalName = requested.name == "timetz" || requested.name == "_timetz" ||
+            requested.name == "timestamp" || requested.name == "_timestamp" ||
+            requested.name == "timestamptz" || requested.name == "_timestamptz";
+        if (!timeName && (timeOnly || !otherTemporalName)) return -1;
         // Spelling only selects candidates: the actual scalar/array OID
         // owns precision. Never infer a user type from a familiar name.
         const auto catalog = regtype_detail::metadata(g_engine, session.currentDB);
         const auto declared = resolveDeclaredTypeName(spelling, &catalog, &session);
-        if (declared.typeOid != 1083 && declared.typeOid != 1183) return -1;
+        const char* builtin = declared.typeOid == 1083 || declared.typeOid == 1183 ? "time" :
+            declared.typeOid == 1266 || declared.typeOid == 1270 ? "timetz" :
+            declared.typeOid == 1114 || declared.typeOid == 1115 ? "timestamp" :
+            declared.typeOid == 1184 || declared.typeOid == 1185 ? "timestamptz" : nullptr;
+        if (!builtin || (timeOnly && declared.typeOid != 1083 && declared.typeOid != 1183)) return -1;
+        if (declaration.typeMods.empty()) {
+            if (actualTypeOid) *actualTypeOid = declared.typeOid;
+            return -1; // A genuine bare temporal CAST owns unconstrained precision.
+        }
         if (declaration.typeMods.size() != 1) return -1;
         const auto precision = parsePostgresIntegerText(declaration.typeMods.front(), 32);
         if (precision.error != IntegerTextError::None || precision.value < 0) return -1;
         const auto modifier = TypeRegistry::instance().applyTypeMods(
-            "time", {std::to_string(std::min<int64_t>(precision.value, 6))});
+            builtin, {std::to_string(std::min<int64_t>(precision.value, 6))});
         if (!modifier.ok()) return -1;
+        if (actualTypeOid) *actualTypeOid = declared.typeOid;
         if (requestedPrecision) *requestedPrecision = static_cast<int32_t>(precision.value);
         return modifier.typmod;
     } catch (const DbError& failure) {
@@ -1854,6 +1868,12 @@ int32_t protocolDeclaredTimePrecision(const Expr* expression, const Session& ses
             return -1;
         throw;
     }
+}
+
+int32_t protocolDeclaredTimePrecision(const Expr* expression, const Session& session,
+                                      int32_t* requestedPrecision = nullptr) {
+    // Existing TIME notices retain their own type spelling and behavior.
+    return protocolDeclaredTemporalPrecision(expression, session, requestedPrecision, true);
 }
 
 std::vector<QueryNotice> protocolTimePrecisionNotices(const std::string& sql,
@@ -1919,9 +1939,14 @@ int32_t protocolDeclaredIntervalModifier(const Expr* expression, const Session& 
     }
 }
 
-std::optional<int32_t> protocolDeclaredCastModifier(const Expr* expression, const Session& session) {
-    const int32_t timePrecision = protocolDeclaredTimePrecision(expression, session);
-    if (timePrecision >= 0) return timePrecision;
+std::optional<int32_t> protocolDeclaredCastModifier(const Expr* expression, const Session& session,
+    uint32_t* temporalTypeOid = nullptr) {
+    uint32_t actualTypeOid = INVALID_OID;
+    const int32_t precision = protocolDeclaredTemporalPrecision(expression, session, nullptr, false, &actualTypeOid);
+    if (actualTypeOid != INVALID_OID) {
+        if (temporalTypeOid) *temporalTypeOid = actualTypeOid;
+        return precision; // Includes the real outer declaration's -1.
+    }
     const int32_t intervalModifier = protocolDeclaredIntervalModifier(expression, session);
     if (intervalModifier >= 0) return intervalModifier;
     if (!expression) return std::nullopt;
@@ -1970,7 +1995,9 @@ std::optional<int32_t> protocolDeclaredCastModifier(const Expr* expression, cons
 bool protocolHasLengthModifier(uint32_t oid) {
     return oid == 1042 || oid == 1043 || oid == 1014 || oid == 1015 ||
            oid == 1560 || oid == 1561 || oid == 1562 || oid == 1563 ||
-           oid == 1083 || oid == 1183 || oid == 1186 || oid == 1187;
+           oid == 1083 || oid == 1183 || oid == 1266 || oid == 1270 ||
+           oid == 1114 || oid == 1115 || oid == 1184 || oid == 1185 ||
+           oid == 1186 || oid == 1187;
 }
 
 void retainProtocolArrayConstructorModifiers(const std::string& sql,
@@ -2216,9 +2243,12 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
                 for (size_t i = 0; i < descriptions.size(); ++i) {
                     if (!protocolHasLengthModifier(descriptions[i].typeOid) ||
                         descriptions[i].tableOid != INVALID_OID) continue;
+                    uint32_t temporalTypeOid = INVALID_OID;
                     const auto modifier = protocolDeclaredCastModifier(
-                        select->selectList[i].expr.get(), session);
-                    if (modifier) descriptions[i].typeModifier = *modifier;
+                        select->selectList[i].expr.get(), session, &temporalTypeOid);
+                    if (modifier && (temporalTypeOid == INVALID_OID ||
+                                     temporalTypeOid == descriptions[i].typeOid))
+                        descriptions[i].typeModifier = *modifier;
                 }
             }
         }
@@ -3821,6 +3851,7 @@ bool describePreparedResultShape(const std::string& sql, Session& session,
     std::vector<std::string> outputNames;
     std::vector<uint32_t> directParameterOids;
     std::vector<std::optional<int32_t>> projectionTypeModifiers;
+    std::vector<uint32_t> projectionTemporalTypeOids;
     const auto appendPhysicalColumns = [&]() {
         for (size_t i = 0; i < schema.len; ++i) {
             shape.columns.push_back(schema.cols[i].dataName);
@@ -3944,7 +3975,9 @@ bool describePreparedResultShape(const std::string& sql, Session& session,
         directParameterOids.push_back(parameterOid);
         // The physical-descriptor adapter below uses SELECT * and cannot
         // retain a projection cast. Read typmods from the original live AST.
-        projectionTypeModifiers.push_back(protocolDeclaredCastModifier(item.expr.get(), session));
+        uint32_t temporalTypeOid = INVALID_OID;
+        projectionTypeModifiers.push_back(protocolDeclaredCastModifier(item.expr.get(), session, &temporalTypeOid));
+        projectionTemporalTypeOids.push_back(temporalTypeOid);
     }
     if (shape.columns.empty()) return false;
     const std::string descriptionSql =
@@ -3956,7 +3989,9 @@ bool describePreparedResultShape(const std::string& sql, Session& session,
     for (size_t i = 0; i < columns.size(); ++i) {
         columns[i].name = outputNames[i];
         if (protocolHasLengthModifier(columns[i].typeOid) &&
-            projectionTypeModifiers[i])
+            projectionTypeModifiers[i] &&
+            (projectionTemporalTypeOids[i] == INVALID_OID ||
+             projectionTemporalTypeOids[i] == columns[i].typeOid))
             columns[i].typeModifier = *projectionTypeModifiers[i];
         if (directParameterOids[i] != 0) {
             columns[i].typeOid = directParameterOids[i];
