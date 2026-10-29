@@ -1374,7 +1374,12 @@ bool ExprHelper::resolveValuesResultType(
             return type=="macaddr" || type=="macaddr8";
         }) || std::all_of(known.begin(),known.end(),[](const auto& type) {
             return type=="inet" || type=="cidr";
+        }) || std::all_of(known.begin(),known.end(),[](const auto& type) {
+            return type=="bit" || type=="bit varying";
         })) {
+        // BIT and VARBIT have implicit casts in both directions. Keep the
+        // first known input through the shared ordered cast graph, rather
+        // than rejecting the category or choosing a length-one explicit cast.
         resultType=selectCommonType(known,"VALUES");
         return true;
     }

@@ -113,6 +113,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/array_constructor_typmod_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/array_concat_implicit_typmod_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/cast_declaration_modifier_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/bit_common_type_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/quoted_bit_column_predicate_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/bit_comparison_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/bit_unknown_comparison_protocol_e2e_test.py)

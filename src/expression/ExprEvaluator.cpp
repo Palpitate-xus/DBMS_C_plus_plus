@@ -6800,7 +6800,11 @@ ExprValue ExprEvaluator::evalArrayExpr(const ArrayExpr* array, const RowContext&
         if(i)output+=',';
         if(nested){
             if(value.isNull)throw DbError("2202E","multidimensional arrays must have matching dimensions");
-            if (elementType != "bit" || value.typeName != "bit[]")
+            if (elementType == "bit" && value.typeName != "bit[]")
+                // A common ARRAY element has typmod -1, even when its
+                // source is VARBIT[]. Do not reinterpret it as BIT(1)[].
+                value=implicitRuntimeValue(*this,std::move(value),"bit[]");
+            else if (elementType != "bit")
                 value=evalCast(nullptr,row,value,elementCastType+"[]");
             std::vector<std::string> elements;
             if(!parseArrayElements(value.value,elements))throw DbError("22P02","malformed array literal");
