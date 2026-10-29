@@ -1905,12 +1905,12 @@ static bool executeValuesStatement(const string& sql, const Session& session) {
                      << "(SQLSTATE 0A000)" << endl;
                 return true;
             }
-            // VALUES common coercion has no BIT length modifier. The
-            // keyword ::bit means bit(1), which truncates genuine bit/varbit
-            // datums and unknown string inputs. Keep explicit inner BIT(n)
-            // casts intact; the physical builtin name preserves their value.
+            // A VALUES common coercion has no length modifier. SQL
+            // keyword BIT/CHAR default to length one; the actual catalog
+            // names preserve the input, including explicit inner lengths.
             const string coercionType = columnTypes[col] == "bit"
-                ? "pg_catalog.\"bit\"" : columnTypes[col];
+                ? "pg_catalog.\"bit\"" : columnTypes[col] == "character"
+                ? "pg_catalog.bpchar" : columnTypes[col];
             const string evaluatedExpression =
                 "CAST((" + expression + ") AS " + coercionType + ")";
             const auto evaluated = dbms::ExprHelper::evalString(
