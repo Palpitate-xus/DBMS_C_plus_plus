@@ -153,6 +153,10 @@ int main() {
             try{oid=lookup();}catch(const DbError& error){state=error.sqlState();}
             require(state==expected.state && (!state.empty() || oid==expected.oid),role+" "+expected.spelling);
         };
+        check("native no-callback declaration identity",[&] {
+            const auto query=prepareQuery("SELECT NULL::"+expected.spelling+" AS value WHERE false",{},{});
+            return query.output.size()==1?query.output[0].typeOid:Oid(0);
+        });
         check("standalone physical identity",[&]{return resolveDeclaredTypeName(expected.spelling,nullptr,nullptr).typeOid;});
         check("cold scalar input identity",[&]{return mapBuiltinTypeNameToOid(
             ExprHelper::declaredTypeInput(expected.spelling,database,&g_engine));});
@@ -161,6 +165,26 @@ int main() {
             return query.output.size()==1?query.output[0].typeOid:Oid(0);
         });
     }
+    // A metadata-free binder owns builtins, never an ambient session's
+    // custom type catalog. An explicitly supplied declaration callback wins.
+    QueryBindingMetadata custom;
+    size_t declarations=0;
+    custom.declaredType=[&](const std::string&) {
+        ++declarations;
+        return QueryOutputColumn{"","\"application\".\"bpchar\"",false,0,900001,17};
+    };
+    for(const auto* spelling:{"pg_catalog.bpchar","\"application\".\"bpchar\""}) {
+        const auto query=prepareQuery(std::string("SELECT NULL::")+spelling+" AS value WHERE false",{},custom);
+        require(query.output.size()==1 && query.output[0].type=="\"application\".\"bpchar\"" &&
+            query.output[0].typeOid==900001 && query.output[0].typeMod==17,"explicit caller-owned type callback");
+    }
+    require(declarations==2,"explicit declaration callback, not default builtin lookup");
+    bool noValuePass=false;
+    try {
+        const auto noValue=prepareQuery("SELECT ARRAY[(1/0)::pg_catalog.int4,2::integer] AS value WHERE false",{},{});
+        noValuePass=noValue.output.size()==1 && noValue.output[0].type=="integer[]" && noValue.output[0].typeOid==1007;
+    } catch(const DbError& error) {std::cerr<<"native no-value declaration SQLSTATE="<<error.sqlState()<<'\n';}
+    require(noValuePass,"native type inference does not execute division by zero");
     const auto after=g_engine.catalogService().metadataSnapshot(database);
     require(after.types.empty() && after.namespaces.empty() && !g_engine.catalogService().has(database),
         "type lookup/preparation did not initialize or write catalog");
@@ -191,5 +215,5 @@ int main() {
     }
     require(shared,"pure physical definitions equal actual initialized rows");
     std::cout<<"PHYSICAL_CATALOG_CHECKED="<<checked<<" FAILED="<<failed<<'\n';
-    return checked==526 && !failed?0:1;
+    return checked==634 && !failed?0:1;
 }

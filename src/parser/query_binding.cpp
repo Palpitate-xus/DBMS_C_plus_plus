@@ -3,6 +3,7 @@
 #include "expression/unary_type.h"
 #include "parser/parser.h"
 #include "catalog/catalog.h"
+#include "catalog/declared_type.h"
 #include "common/DbError.h"
 #include "expression/common_type.h"
 #include "expression/equality_type.h"
@@ -327,8 +328,14 @@ public:
         return modifier;
     }
     std::string declaredType(const std::string& spelling,const Expr* node) {
-        const auto type=metadata.declaredType?metadata.declaredType(spelling):
-            QueryOutputColumn{"",ExprHelper::canonicalResultTypeName(spelling)};
+        const auto type=[&] {
+            if(metadata.declaredType)return metadata.declaredType(spelling);
+            // A metadata-free caller can resolve actual builtin identities,
+            // not names in an ambient session/catalog. Caller-owned metadata
+            // remains authoritative for user types and search-path lookup.
+            const auto builtin=resolveDeclaredTypeName(spelling,nullptr,nullptr);
+            return QueryOutputColumn{"",builtin.typeName,false,0,builtin.typeOid};
+        }();
         valueTypeOids[node]=type.typeOid;
         valueTypeModifiers[node]=type.typeMod;
         // Keep static input modifiers separately from scalar type identity.
