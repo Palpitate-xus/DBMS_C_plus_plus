@@ -1,5 +1,13 @@
 # DBMS 修改计划表（按 all-gaps-todo.md）
 
+最新有限修复：[R185排序中断传播](issue-review-r185-sort-interrupt-propagation.md)统一执行器12处排序的取消/超时检查，
+保留原比较、类型、NULL/tie及求值规则。修正夹具后旧80控制完整40失败；两侧新80及各19完整入口均实际全0。
+每侧74对象16程序/127头核对，Root正常1CPP并链接/repeat零；Main为同源已验证donor重新链接，不冒fresh TU。
+原273全文已保存在[原子范围账](review-requirement-clauses.json)，仅3项拆为38条件、其余270未拆解含原15暂缓，未声称全审。
+work_mem/spill等仍未闭合；原22/166/70/15不变，登记1493/Root1505、606MD/Root609MD，原12入口/三文档保留。
+不是全1493/修复后完整72/TLS/sanitizer验收，总目标未完成；不push，不启用Actions。以下记录按当时输入解释。
+
+
 最新有限修复：[R184测试数据目录隔离](issue-review-r184-test-data-directory-isolation.md)使公共helper在子程序启动前选私有数据根，
 父环境/cwd不变。旧同一7控制完整4失败，候选及Root完整7通过；两侧各4native/3真实Main通过，调用者标记目录保持不变。
 只改脚本及既有测试，全部CPP/127头和匹配程序不变，不冒fresh编译或修复后新完整72；旧72另记。
@@ -387,7 +395,9 @@ TU重编或新1432全量。原8f完整三失败保留，F8F-03继续处理，R51
 数组查找的typed相等、真实多态声明与用户callee边界见
 [R108](issue-review-r108-array-position-typed-equality.md)；按自身354原生/258协议
 及相关入口验收，不把R86的空数组修复或旧全量作为本项证明。TYPE-16/FUNC-01
-仍partial，ARRAY_POSITIONS及一般复合/域多态继续另项处理。
+仍partial。后续ARRAY_POSITIONS另列[R109](issue-review-r109-array-positions.md)，
+按自身388/248、33native/30协议/3真实Main验收；一般复合/域多态和已确认
+R110 binary/R111构造器规划仍须继续，不将本项变成完整TYPE-16完成。
 
 四个长度函数的有限签名修复与验收记录见[R107](issue-review-r107-string-length-signatures.md)。
 原FUNC-01/SQL-09仍partial；该局部工作不关闭通用函数解析，也不恢复已由用户

@@ -1,0 +1,62 @@
+#include "commands/RelationNameCodec.h"
+#include "storage/HeapWalIdentity.h"
+#include <iostream>
+
+namespace names = dbms::relation_name_codec;
+namespace wal = dbms::heap_wal_identity;
+
+int main() {
+    size_t controls = 0, failures = 0;
+    auto check = [&](bool valid) { ++controls; if (!valid) ++failures; };
+    for (size_t a : {size_t(1), size_t(31), size_t(62), size_t(63)}) {
+        for (size_t b : {size_t(1), size_t(31), size_t(62), size_t(63)}) {
+            const std::string name = std::string(a, 's') + "__" + std::string(b, 't');
+            check(names::valid(name));
+            const std::vector<std::string> expected = {"legacy", name, "quo\"ted"};
+            const auto bytes = names::encode(expected);
+            check(bytes && names::decode(*bytes) == expected);
+            dbms::XLogRecord event{};
+            event.header.xl_info = (uint32_t{dbms::RM_SMGR_ID} << 8) | dbms::XLOG_SMGR_RELATION_CREATE;
+            event.data = wal::event(123, name);
+            wal::Event decoded;
+            check(wal::event(event, decoded) && decoded.name == name && decoded.relationId == 123);
+            std::vector<char> truncate;
+            wal::append(truncate, static_cast<uint32_t>(name.size()));
+            truncate.insert(truncate.end(), name.begin(), name.end()); wal::appendImage(truncate, 123);
+            std::string decodedName; std::optional<uint64_t> identity;
+            check(wal::nameIdentity(truncate, decodedName, identity) && decodedName == name && identity == 123);
+        }
+    }
+    for (const std::string name : std::vector<std::string>{"", ".", "..", "bad/name", "bad\\name", std::string("x\0y",3),
+            std::string(64,'a'), std::string(129,'a'), std::string(64,'a')+"__"+std::string(63,'b'),
+            std::string(63,'a')+"__"+std::string(64,'b')}) {
+        check(!names::valid(name));
+        check(!names::encode({name}));
+        check(wal::event(1,name).empty());
+    }
+    check(names::valid("__tmp_12345_"+std::string(63,'x')));
+    check(!names::valid("__tmp_12345_"+std::string(64,'x')));
+    check(!names::valid("__tmp_x2345_"+std::string(63,'x')));
+    check(!names::encode({"duplicate","duplicate"}));
+    check(names::encode({}) == std::string{});
+    check(names::decode("") == std::vector<std::string>{});
+    const auto legacy = names::encode({"ordinary","quo\"ted","界界"});
+    check(legacy && legacy->size() == 3*64 && legacy->substr(0,8) == "ordinary");
+    check(legacy && names::decode(*legacy) == std::vector<std::string>({"ordinary","quo\"ted","界界"}));
+    std::string nonzeroPadding = *legacy; nonzeroPadding[63] = 'x';
+    check(!names::decode(nonzeroPadding));
+    check(!names::decode(legacy->substr(0,legacy->size()-1)));
+    const std::vector<std::string> full = {"old", std::string(63,'s')+"__"+std::string(63,'t'), "界界__quo\"ted"};
+    const auto encoded = names::encode(full);
+    check(encoded && encoded->substr(0,64) == names::listMagic());
+    check(encoded && names::decode(*encoded) == full);
+    // Every nonempty truncated prefix and every single-bit byte corruption
+    // must fail, rather than exposing a partial list or a truncated alias.
+    for (size_t i = 1; i < encoded->size(); ++i) check(!names::decode(encoded->substr(0,i)));
+    for (size_t i = 0; i < encoded->size(); ++i) {
+        auto damaged = *encoded; damaged[i] ^= 1; check(!names::decode(damaged));
+    }
+    check(!names::decode(*encoded+"x"));
+    std::cout << "QUALIFIED_RELATION_NAME_CODEC_COMPLETE " << controls << " FAILURES " << failures << '\n';
+    return failures ? 1 : 0;
+}

@@ -1402,7 +1402,7 @@ static bool isScalarFunc(const string& name) {
                                          "uuid_extract_version",
                                          "uuid_extract_timestamp",
                                          "array_get", "array_length", "array_contains",
-                                         "array_position", "array_dims", "cardinality",
+                                         "array_position", "array_positions", "array_dims", "cardinality",
                                          "unnest",
                                          "pg_notify", "pg_notification_queue_usage",
                                          "pg_listening_channels",
@@ -3567,7 +3567,7 @@ static bool applyConfigParam(const string& param, const string& val, bool isGlob
     return false;
 }
 
-static bool handleSetCommand(const string& sql, Session& s) {
+static bool handleSetCommand(const string& sql, Session& s, const string& rawSql) {
     // SET ROLE rolename
     if (sql.substr(0, 9) == "set role ") {
         string roleName = trim(sql.substr(9));
@@ -3656,7 +3656,11 @@ static bool handleSetCommand(const string& sql, Session& s) {
                 ? "invalid SET TRANSACTION" : parsed.error);
         }
         if (!g_engine.inTransaction()) {
-            cout << "WARNING: SET TRANSACTION can only be used in transaction blocks" << endl;
+            {
+                std::ostringstream diagnostic;
+                diagnostic << "SET TRANSACTION can only be used in transaction blocks";
+                dbms::emitWarning(diagnostic.str());
+            }
             cout << "SET" << endl;
             return false;
         }
@@ -3683,30 +3687,31 @@ static bool handleSetCommand(const string& sql, Session& s) {
         return false;
     }
 
-    // An explicit SESSION modifier selects this same session-level setting,
-    // not the generic Config fallback. Only use the normalized spelling for
-    // this TimeZone branch; other SET forms retain their existing dispatch.
-    const string timezoneSql = sql.rfind("set session ", 0) == 0
-        ? "set " + trim(sql.substr(12)) : sql;
-    // PostgreSQL interprets signed string offsets using POSIX's west-positive
-    // convention, while numeric hours are east-positive.
-    if (timezoneSql.substr(0, 13) == "set timezone " ||
-        timezoneSql.substr(0, 14) == "set time zone ") {
-        size_t off = (timezoneSql.substr(0, 13) == "set timezone ") ? 13 : 14;
-        string tzVal = trim(timezoneSql.substr(off));
-        // sqlProcessor has normalized keyword whitespace without changing
-        // quoted data. TO belongs to generic SET TimeZone, not to the
-        // legacy SET TIME ZONE value or a quoted name starting with "TO".
-        if (off == 13 && tzVal.compare(0, 3, "to ") == 0)
-            tzVal = trim(tzVal.substr(3));
-        else if (!tzVal.empty() && tzVal[0] == '=') tzVal = trim(tzVal.substr(1));
-        // DEFAULT is a generic SET keyword; LOCAL has reset semantics only
-        // in the dedicated TIME ZONE grammar. Quoted spellings remain data.
-        const bool reset = tzVal == "default" || (off == 14 && tzVal == "local");
-        if (reset ? restoreSessionTimeZone(s) : applySessionTimeZoneValue(tzVal, s))
-            return true;
-        cout << "Timezone set to " << s.timeZone << endl;
-        return false;
+    // Raw-byte AST validation is shared by protocol Parse and execution.
+    // Normalized SQL has collapsed the newlines used by Sconst continuation.
+    {
+        dbms::SQLParser parser;
+        const auto parsed = parser.parseForBinding(rawSql);
+        if (!parsed.success && parsed.sqlState == "42601")
+            throw dbms::DbError("42601", parsed.error);
+        const auto* setting = parsed.success
+            ? dynamic_cast<const dbms::SetStmt*>(parsed.stmt.get()) : nullptr;
+        if (setting && setting->name == "timezone") {
+            if (setting->scope == dbms::SetStmt::Scope::Local)
+                throw dbms::DbError("0A000", "transaction-local TimeZone settings are not supported");
+            if (setting->values.size() > 1)
+                throw dbms::DbError("22023", "SET TimeZone takes only one argument");
+            // Only FROM CURRENT has an empty list. Dedicated LOCAL is
+            // normalized to DEFAULT, not confused with a quoted datum.
+            if (!setting->values.empty()) {
+                const auto& value = setting->values.front();
+                const bool reset = dbms::SQLParser::toLower(value) == "default";
+                if (reset ? restoreSessionTimeZone(s) : applySessionTimeZoneValue(value, s))
+                    return true;
+            }
+            cout << "Timezone set to " << s.timeZone << endl;
+            return false;
+        }
     }
 
     // Match the parameter identifier, never bytes in a value or a
@@ -3778,8 +3783,12 @@ static bool handleSetCommand(const string& sql, Session& s) {
                         "block (SQLSTATE 25001)" << endl;
                 return true;
             }
-            cout << "NOTICE: SET GLOBAL is mapped to ALTER SYSTEM semantics in "
-                    "extended compatibility mode" << endl;
+            {
+                std::ostringstream diagnostic;
+                diagnostic << "SET GLOBAL is mapped to ALTER SYSTEM semantics in "
+                        "extended compatibility mode";
+                dbms::emitNotice(diagnostic.str());
+            }
         }
         // Delimiters inside a datum or quoted identifier are not SET syntax.
         // In particular, TO 'a=b' must not select the literal's equals sign.
@@ -3850,7 +3859,11 @@ static bool handleSetCommand(const string& sql, Session& s) {
                 return true;
             }
             if(isLocal && !g_engine.inTransaction()) {
-                cout << "WARNING: SET LOCAL can only be used in transaction blocks (SQLSTATE 25P01)" << endl;
+                {
+                    std::ostringstream diagnostic;
+                    diagnostic << "SET LOCAL can only be used in transaction blocks (SQLSTATE 25P01)";
+                    dbms::emitWarning(diagnostic.str());
+                }
             } else {
                 if(g_engine.inTransaction())s.searchPathTransaction.begin(s.searchPath);
                 s.searchPathTransaction.assign(s.searchPath,canonical,isLocal);
@@ -5354,6 +5367,7 @@ static bool handleDeallocate(const string& sql, Session& s) {
         s.preparedStmts.clear();
         s.preparedStmtTypes.clear();
         s.preparedStmtParameterOids.clear();
+        s.preparedStmtResultTypes.clear();
         cout << "Deallocated " << n << " prepared statements" << endl;
         return false;
     }
@@ -5369,6 +5383,7 @@ static bool handleDeallocate(const string& sql, Session& s) {
     if (s.preparedStmts.erase(stmtName)) {
         s.preparedStmtTypes.erase(stmtName);
         s.preparedStmtParameterOids.erase(stmtName);
+        s.preparedStmtResultTypes.erase(stmtName);
         cout << "Statement " << stmtName << " deallocated" << endl;
     } else {
         cout << "ERROR: prepared statement \"" << stmtName
@@ -6087,7 +6102,7 @@ static bool requiresParsedValueBinding(const dbms::Stmt* root,bool constantScala
             if(call->hasOver && !constantScalarOnly)return true;
             dbms::CatalogManager::QualifiedName routine;
             if(!windowOnly && dbms::CatalogManager::parseQualifiedName(call->funcName,routine,true) &&
-               (routine.name=="abs" || (toLower(routine.name)=="starts_with" || toLower(routine.name)=="ascii" || toLower(routine.name)=="chr" || toLower(routine.name)=="scale" || toLower(routine.name)=="min_scale" || toLower(routine.name)=="gcd" || toLower(routine.name)=="lcm" || toLower(routine.name)=="factorial") || routine.name=="array_position" || (!constantScalarOnly &&
+               (routine.name=="abs" || (toLower(routine.name)=="starts_with" || toLower(routine.name)=="ascii" || toLower(routine.name)=="chr" || toLower(routine.name)=="scale" || toLower(routine.name)=="min_scale" || toLower(routine.name)=="gcd" || toLower(routine.name)=="lcm" || toLower(routine.name)=="factorial") || routine.name=="array_position" || routine.name=="array_positions" || (!constantScalarOnly &&
                 (declaredScalars.count(routine.name) || toLower(routine.name)=="strpos" || isFixedFloat8ScalarName(routine.name) ||
                  isStringLengthScalarName(routine.name)))))
                 return true; // Validate real overloads even if no row/branch will execute.
@@ -6484,6 +6499,222 @@ static dbms::PreparedQuery prepareWindowSourceQuery(Session& s, const string& st
             }
             return nullopt;
         });
+}
+
+// Value traversal stays inside one query occurrence. Child statements keep
+// their own window and source owners, including scalar subqueries.
+static void visitWindowValueChildren(const dbms::Expr* value,
+                                     const function<void(const dbms::Expr*)>& visit) {
+    if (const auto* call = dynamic_cast<const dbms::FunctionCallExpr*>(value)) {
+        for (const auto& argument : call->args) visit(argument.get());
+        for (const auto& argument : call->namedArgs) visit(argument.value.get());
+        visit(call->filter.get());
+        for (const auto& key : call->aggregateOrderKeys) visit(key.expr.get());
+        for (const auto& key : call->over.partitionBy) visit(key.get());
+        for (const auto& key : call->over.orderBy) visit(key.first.get());
+        visit(call->over.frameStart.get()); visit(call->over.frameEnd.get());
+    } else if (const auto* unary = dynamic_cast<const dbms::UnaryOpExpr*>(value)) visit(unary->operand.get());
+    else if (const auto* cast = dynamic_cast<const dbms::CastExpr*>(value)) visit(cast->operand.get());
+    else if (const auto* binary = dynamic_cast<const dbms::BinaryOpExpr*>(value)) {
+        visit(binary->left.get()); if (binary->op != "::") visit(binary->right.get());
+    } else if (const auto* comparison = dynamic_cast<const dbms::QuantifiedComparisonExpr*>(value)) {
+        visit(comparison->left.get()); visit(comparison->right.get());
+    } else if (const auto* conditional = dynamic_cast<const dbms::CaseExpr*>(value)) {
+        visit(conditional->switchExpr.get());
+        for (const auto& arm : conditional->whenClauses) { visit(arm.first.get()); visit(arm.second.get()); }
+        visit(conditional->elseExpr.get());
+    } else if (const auto* array = dynamic_cast<const dbms::ArrayExpr*>(value)) {
+        for (const auto& item : array->elements) visit(item.get());
+    } else if (const auto* row = dynamic_cast<const dbms::RowExpr*>(value)) {
+        for (const auto& item : row->elements) visit(item.get());
+    }
+}
+
+static void collectProjectionWindows(const dbms::Expr* expression,
+                                      vector<const dbms::FunctionCallExpr*>& calls) {
+    if (!expression || expression->preparedSubquery) return;
+    if (const auto* call = dynamic_cast<const dbms::FunctionCallExpr*>(expression); call && call->hasOver) {
+        calls.push_back(call); return;
+    }
+    visitWindowValueChildren(expression, [&](const dbms::Expr* child) { collectProjectionWindows(child, calls); });
+}
+
+static bool hasCurrentQueryWindows(const dbms::SelectStmt* select) {
+    if (!select) return false;
+    vector<const dbms::FunctionCallExpr*> calls;
+    for (const auto& target : select->selectList) collectProjectionWindows(target.expr.get(), calls);
+    for (const auto& order : select->orderBy) collectProjectionWindows(order.expr.get(), calls);
+    return !calls.empty();
+}
+
+static void validateWindowQueryPlacements(const dbms::Stmt* root) {
+    set<const dbms::Stmt*> visited;
+    function<void(const dbms::Stmt*)> statement;
+    function<void(const dbms::Expr*)> expression;
+    function<void(const dbms::FromItem*)> source;
+    const auto forbid = [&](const dbms::Expr* value, const string& clause) {
+        vector<const dbms::FunctionCallExpr*> calls; collectProjectionWindows(value, calls);
+        if (!calls.empty()) throw dbms::DbError("42P20", "window functions are not allowed in " + clause);
+    };
+    expression = [&](const dbms::Expr* value) {
+        if (!value) return;
+        if (value->preparedSubquery) { statement(value->preparedSubquery.get()); return; }
+        visitWindowValueChildren(value, expression);
+    };
+    source = [&](const dbms::FromItem* item) {
+        if (!item) return;
+        forbid(item->joinCondition.get(), "JOIN conditions"); expression(item->joinCondition.get());
+        statement(item->subquery.get()); source(item->left.get()); source(item->right.get());
+    };
+    statement = [&](const dbms::Stmt* value) {
+        if (!value || !visited.insert(value).second) return;
+        if (const auto* envelope = dynamic_cast<const dbms::WithStmt*>(value)) {
+            for (const auto& cte : envelope->ctes) statement(cte.query.get());
+            statement(envelope->statement.get()); return;
+        }
+        const auto* select = dynamic_cast<const dbms::SelectStmt*>(value); if (!select) return;
+        forbid(select->whereClause.get(), "WHERE"); forbid(select->having.get(), "HAVING");
+        for (const auto& key : select->groupBy) forbid(key.get(), "GROUP BY");
+        for (const auto& group : select->groupByElems) for (const auto& key : group.exprs) forbid(key.get(), "GROUP BY");
+        for (const auto& cte : select->ctes) statement(cte.query.get());
+        for (const auto& target : select->selectList) expression(target.expr.get());
+        for (const auto& order : select->orderBy) expression(order.expr.get());
+        expression(select->whereClause.get()); expression(select->having.get()); source(select->fromClause.get());
+        statement(select->setOpLhs.get()); statement(select->setOpRhs.get());
+    };
+    statement(root);
+}
+
+struct PreparedWindowProjection {
+    shared_ptr<dbms::PreparedQuery> query;
+    const dbms::SelectStmt* select = nullptr;
+    const dbms::PreparedQuery::SourceRange* source = nullptr;
+    vector<const dbms::FunctionCallExpr*> calls;
+    vector<dbms::QueryColumnBinding> slots;
+    vector<WindowFunc> windows;
+    vector<size_t> targetOwners, orderTargets, orderOwners;
+    vector<string> orderTypes;
+    vector<const dbms::Expr*> orderExpressions;
+    unique_ptr<dbms::PreparedQueryExecution> execution;
+};
+
+static unique_ptr<PreparedWindowProjection> prepareNestedWindowProjection(
+        Session& session, const string& sql, const map<string, string>& namedWindows) {
+    const auto selectBody = [](const dbms::Stmt* statement) {
+        if (const auto* envelope = dynamic_cast<const dbms::WithStmt*>(statement)) statement = envelope->statement.get();
+        return dynamic_cast<const dbms::SelectStmt*>(statement);
+    };
+    dbms::SQLParser parser; const auto parsed = parser.parseForBinding(sql);
+    const auto* syntax = parsed.success ? selectBody(parsed.stmt.get()) : nullptr;
+    bool nested = false;
+    if (syntax) {
+        for (const auto& target : syntax->selectList) {
+            vector<const dbms::FunctionCallExpr*> calls; collectProjectionWindows(target.expr.get(), calls);
+            const auto* direct = dynamic_cast<const dbms::FunctionCallExpr*>(target.expr.get());
+            if (!calls.empty() && !(direct && direct->hasOver)) nested = true;
+        }
+        for (const auto& order : syntax->orderBy) {
+            vector<const dbms::FunctionCallExpr*> calls; collectProjectionWindows(order.expr.get(), calls);
+            if (!calls.empty()) nested = true;
+        }
+    }
+    if (!nested) return {};
+    auto result = make_unique<PreparedWindowProjection>();
+    result->query = make_shared<dbms::PreparedQuery>(prepareWindowSourceQuery(session, sql));
+    result->select = selectBody(result->query->ast.get());
+    if (!result->select) throw dbms::DbError("XX000", "window projection lost its prepared SELECT owner");
+    for (const auto& target : result->select->selectList) collectProjectionWindows(target.expr.get(), result->calls);
+    for (const auto& order : result->select->orderBy) collectProjectionWindows(order.expr.get(), result->calls);
+    for (const auto& range : result->query->sourceRanges) if (range.owner == result->select) {
+        if (result->source) throw dbms::DbError("0A000", "window projection requires one prepared source occurrence");
+        result->source = &range;
+    }
+    if (!result->source) throw dbms::DbError("XX000", "window projection lost its prepared source occurrence");
+    result->execution = make_unique<dbms::PreparedQueryExecution>(result->query, &g_engine, session.currentDB);
+    for (const auto* call : result->calls)
+        result->slots.push_back(result->execution->registerAggregateColumn(call, call->resolvedResultType));
+    const auto& projections = result->query->projectionBindings.at(result->select);
+    const auto aliases = result->query->sortOutputOwners.find(result->select);
+    for (size_t i = 0; i < projections.size(); ++i) {
+        const auto owner = aliases == result->query->sortOutputOwners.end() ? i : aliases->second.at(i);
+        if (owner >= projections.size()) throw dbms::DbError("XX000", "window output has an invalid producer ordinal");
+        result->targetOwners.push_back(owner);
+        if (owner == i && !projections[i].column) {
+            auto* value = const_cast<dbms::Expr*>(projections[i].expression);
+            result->execution->prepareExpression(value);
+            result->execution->planExpressionConstants(value);
+        }
+    }
+    const auto identity = [&](const dbms::Expr* value) {
+        return dbms::ExprHelper::preparedSortExpressionIdentity(value, *result->query,
+            [](const dbms::ColumnRefExpr& column) {
+                if (!column.binding) throw dbms::DbError("XX000", "window sort identity lost its bound column");
+                const auto& b = *column.binding;
+                return to_string(b.scopeDepth) + ":" + to_string(b.sourceOrdinal) + ":" + to_string(b.columnOrdinal) + ":" + b.declaredType;
+            }, session.currentDB, &g_engine, false, result->select);
+    };
+    vector<string> orderIdentities;
+    for (const auto& order : result->select->orderBy) {
+        const size_t noTarget = numeric_limits<size_t>::max(); size_t target = noTarget;
+        const auto* value = order.expr.get();
+        if (const auto* column = dynamic_cast<const dbms::ColumnRefExpr*>(value);
+                column && column->table.empty() && column->schema.empty()) {
+            for (size_t i = 0; i < result->query->output.size(); ++i)
+                if (result->query->output[i].name == column->column) { target = result->targetOwners.at(i); break; }
+        } else if (const auto* literal = dynamic_cast<const dbms::LiteralExpr*>(value);
+                literal && literal->typeName.empty() && !literal->value.empty() &&
+                all_of(literal->value.begin(), literal->value.end(), [](unsigned char c) { return c >= '0' && c <= '9'; })) {
+            const auto ordinal = stoull(literal->value);
+            if (!ordinal || ordinal > projections.size()) throw dbms::DbError("42P10", "ORDER BY position is not in select list");
+            target = result->targetOwners.at(ordinal - 1);
+        }
+        string key;
+        if (target == noTarget && !dynamic_cast<const dbms::ColumnRefExpr*>(value)) {
+            key = identity(value);
+            for (size_t i = 0; i < projections.size(); ++i) {
+                if (projections[i].column) continue;
+                if (identity(projections[i].expression) == key) { target = result->targetOwners.at(i); break; }
+            }
+        }
+        const size_t index = result->orderTargets.size(); size_t owner = index;
+        if (target == noTarget) {
+            if (result->select->distinct) throw dbms::DbError("42P10", "for SELECT DISTINCT, ORDER BY expressions must appear in select list");
+            if (key.empty()) key = identity(value);
+            for (size_t i = 0; i < orderIdentities.size(); ++i)
+                if (result->orderTargets[i] == noTarget && orderIdentities[i] == key) { owner = result->orderOwners[i]; break; }
+            if (owner == index) {
+                result->execution->prepareExpression(const_cast<dbms::Expr*>(value));
+                result->execution->planExpressionConstants(const_cast<dbms::Expr*>(value));
+            }
+        }
+        result->orderTargets.push_back(target); result->orderOwners.push_back(owner);
+        result->orderExpressions.push_back(value); orderIdentities.push_back(key);
+        result->orderTypes.push_back(target == noTarget
+            ? dbms::ExprHelper::inferParsedResultType(value, {}, session.currentDB, &g_engine)
+            : result->query->output.at(target).type);
+    }
+    // The existing execution-owned constant planner determines whether a
+    // result slot survives actual expression demand. Unselected CASE and
+    // constant COALESCE arms must not open a volatile window producer.
+    vector<const dbms::FunctionCallExpr*> active; vector<dbms::QueryColumnBinding> slots;
+    for (size_t i = 0; i < result->calls.size(); ++i) {
+        const auto* call = result->calls[i];
+        if (!result->execution->aggregateColumnDemanded(call)) continue;
+        if (call->sourceBegin == string::npos || call->sourceBegin >= call->sourceEnd || call->sourceEnd > result->query->source.size())
+            throw dbms::DbError("XX000", "window result lost its original source span");
+        WindowFunc window;
+        if (!parseWindowFunc(result->query->source.substr(call->sourceBegin, call->sourceEnd-call->sourceBegin), window, namedWindows))
+            throw dbms::DbError("0A000", "unsupported window projection producer");
+        active.push_back(call); slots.push_back(result->slots[i]); result->windows.push_back(std::move(window));
+    }
+    result->calls = std::move(active); result->slots = std::move(slots);
+    const auto prepared = result->query; const string database = session.currentDB;
+    result->execution->setChildCursorFactory([prepared, database](const dbms::Stmt* child, const dbms::RowContext& row) {
+        return dbms::QueryPlanner::makePreparedCursor(
+            dbms::QueryPlanner::buildPreparedQueryPlan(&g_engine, database, prepared, child, row), prepared->statementOutputs.at(child));
+    });
+    result->execution->prepareChildCursors();
+    return result;
 }
 
 static dbms::PreparedQuery prepareRuntimeValueDeclaration(Session& s, const string& statement) {
@@ -9110,53 +9341,11 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
             }
             string fname = expr.substr(0, lp);
             if (nameOk && !s.currentDB.empty()) {
-                auto udf = g_engine.getUDF(s.currentDB, fname);
-                if (!udf.expression.empty() && fname != "pg_typeof" && fname != "version") {
-                    string inner = expr.substr(lp + 1, expr.size() - lp - 2);
-                    vector<string> args;
-                    {
-                        string cur;
-                        int depth = 0;
-                        bool inStr = false;
-                        for (size_t i = 0; i < inner.size(); ++i) {
-                            char c = inner[i];
-                            if (c == '\'') inStr = !inStr;
-                            if (!inStr) {
-                                if (c == '(') ++depth;
-                                else if (c == ')') --depth;
-                                else if (c == ',' && depth == 0) {
-                                    args.push_back(trim(cur));
-                                    cur.clear();
-                                    continue;
-                                }
-                            }
-                            cur += c;
-                        }
-                        if (!trim(cur).empty() || !args.empty()) args.push_back(trim(cur));
-                    }
-                    vector<bool> argNulls;
-                    argNulls.reserve(args.size());
-                    for (auto& a : args) {
-                        const auto evaluated = dbms::ExprHelper::evalString(
-                            a, {}, {}, s.currentDB, s.username);
-                        if (!evaluated.ok) {
-                            cout << "Function " << fname
-                                 << " argument evaluation failed" << endl;
-                            return true;
-                        }
-                        argNulls.push_back(evaluated.isNull);
-                        a = evaluated.isNull ? string{} : evaluated.value;
-                    }
-                    string rv;
-                    bool rvIsNull = false;
-                    if (!g_engine.callUDF(s.currentDB, fname, args, rv,
-                                          &rvIsNull, &argNulls)) {
-                        cout << "Function " << fname << " failed" << endl;
-                        return true;
-                    }
-                    headers.push_back(disp == item ? fname : disp);
-                    appendValue(rvIsNull ? string{} : rv, rvIsNull,
-                                canonicalValuesType(udf.returnType));
+                if(g_engine.udfExists(s.currentDB,fname) && fname!="pg_typeof" && fname!="version") {
+                    const auto value=dbms::ExprHelper::evalString(expr,{}, {},s.currentDB,s.username,&g_engine);
+                    if(!value.ok)throw dbms::DbError(value.sqlState.empty()?"XX000":value.sqlState,value.error);
+                    headers.push_back(disp==item?fname:disp);
+                    appendValue(value.value,value.isNull,value.typeName);
                     continue;
                 }
             }
@@ -11277,9 +11466,13 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd, const st
                         tbl.len = 0;
                         return tbl;
                     }
-                    cout << "NOTICE: type " << ctype
-                         << (isUnsigned ? " unsigned" : "")
-                         << " mapped to " << canonical << endl;
+                    {
+                        std::ostringstream diagnostic;
+                        diagnostic << "type " << ctype
+                             << (isUnsigned ? " unsigned" : "")
+                             << " mapped to " << canonical;
+                        dbms::emitNotice(diagnostic.str());
+                    }
                 } else if (canonical == "integer" && isUnsigned) {
                     if (!dbms::isExtendedCompatMode(session->compatibilityMode)) {
                         cout << "ERROR: type " << ctype
@@ -11288,8 +11481,12 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd, const st
                         tbl.len = 0;
                         return tbl;
                     }
-                    cout << "NOTICE: " << ctype << " unsigned mapped to "
-                         << ctype << endl;
+                    {
+                        std::ostringstream diagnostic;
+                        diagnostic << "" << ctype << " unsigned mapped to "
+                             << ctype;
+                        dbms::emitNotice(diagnostic.str());
+                    }
                 }
             }
 
@@ -13682,6 +13879,182 @@ static std::string processCTEs(const std::string& sql, Session& s, bool& failed)
 }
 
 // Detect and process derived tables (subqueries in FROM clause).
+struct DerivedQuerySource {
+    size_t begin, end, lateralBegin;
+};
+
+// Only a current SELECT's FROM range can own a materialized query. Skip
+// complete child expressions instead of mistaking their FROM/comma tokens
+// for ranges in this query (scalar, predicate, function or nested query).
+static std::optional<DerivedQuerySource> findDerivedQuerySource(
+        const std::string& text, size_t start, bool lateral) {
+    const size_t from = findTopLevelKeyword(text, "from");
+    if (from == std::string::npos) return std::nullopt;
+    size_t limit = text.size();
+    for (const char* clause : {"where", "group", "having", "window", "order",
+                               "limit", "offset", "fetch", "for", "union",
+                               "intersect", "except"}) {
+        const size_t at = findTopLevelKeyword(text, clause, from + 4);
+        if (at != std::string::npos) limit = std::min(limit, at);
+    }
+    const auto protectedBytes = dbms::sqlProtectedBytes(text);
+    bool expectsRange = true;
+    size_t lateralBegin = std::string::npos;
+    for (size_t at = from + 4; at < limit;) {
+        if (protectedBytes[at]) {
+            if (text[at] == '"' && expectsRange) {
+                expectsRange = false;
+                lateralBegin = std::string::npos;
+            }
+            do { ++at; } while (at < limit && protectedBytes[at]);
+            continue;
+        }
+        if (text[at] == '(') {
+            const size_t close = findMatchingParen(text, at);
+            if (close == std::string::npos || close >= limit) return std::nullopt;
+            if (expectsRange && at >= start &&
+                (lateralBegin != std::string::npos) == lateral) {
+                const size_t first = dbms::skipLeadingSqlTrivia(text, at + 1);
+                size_t end = first;
+                if (first != std::string::npos) {
+                    while (end < close && dbms::sqlIdentifierContinuation(
+                               static_cast<unsigned char>(text[end]))) ++end;
+                    const std::string head = toLower(text.substr(first, end - first));
+                    if (head == "select" || head == "values" || head == "with") {
+                        dbms::SQLParser parser;
+                        const auto parsed = parser.parse(text.substr(at + 1, close - at - 1));
+                        if (parsed.isValid() && dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()))
+                            return DerivedQuerySource{at, close, lateralBegin};
+                    }
+                }
+            }
+            at = close + 1;
+            expectsRange = false;
+            lateralBegin = std::string::npos;
+            continue;
+        }
+        if (text[at] == ',') {
+            expectsRange = true;
+            lateralBegin = std::string::npos;
+            ++at;
+            continue;
+        }
+        const auto ch = static_cast<unsigned char>(text[at]);
+        if (std::isalpha(ch) || ch == '_' || ch >= 0x80) {
+            const size_t begin = at++;
+            while (at < limit && dbms::sqlIdentifierContinuation(
+                       static_cast<unsigned char>(text[at]))) ++at;
+            const std::string word = toLower(text.substr(begin, at - begin));
+            if (word == "join") {
+                expectsRange = true;
+                lateralBegin = std::string::npos;
+            } else if (expectsRange && word == "lateral") {
+                lateralBegin = begin;
+            } else if (expectsRange) {
+                expectsRange = false;
+                lateralBegin = std::string::npos;
+            }
+            continue;
+        }
+        ++at;
+    }
+    return std::nullopt;
+}
+
+struct DerivedQueryAlias {
+    std::string spelling, name;
+    std::vector<std::string> columns;
+    size_t end;
+};
+
+// Parse only a source-identifier role; never prepare a query, resolve the
+// placeholder relation, evaluate a value, or execute this syntax probe.
+static bool isDerivedAliasIdentifier(const std::string& spelling) {
+    dbms::SQLParser parser;
+    const auto parsed = parser.parseForBinding(
+        "SELECT * FROM __dbms_alias_syntax__ " + spelling);
+    const auto* query = parsed.isValid()
+        ? dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()) : nullptr;
+    return query && query->fromClause &&
+        query->fromClause->type == dbms::FromItem::Type::Table &&
+        query->fromClause->alias == spelling;
+}
+
+static DerivedQueryAlias anonymousDerivedQueryAlias(const std::string& text,
+                                                     size_t afterQuery) {
+    size_t index = 0;
+    std::string name;
+    do { name = "_dbms_derived_" + std::to_string(index++); }
+    while (text.find(name) != std::string::npos);
+    // The internal namespace must be absent from the input statement, so a
+    // user-written qualifier cannot accidentally resolve to a physical temp.
+    return {name, name, {}, afterQuery};
+}
+
+static std::optional<DerivedQueryAlias> readDerivedQueryAlias(
+        const std::string& text, size_t afterQuery) {
+    size_t at = dbms::skipLeadingSqlTrivia(text, afterQuery);
+    if (at == std::string::npos) return std::nullopt;
+    if (at == text.size() || text[at] == ',' || text[at] == ';')
+        return anonymousDerivedQueryAlias(text, afterQuery);
+    const bool hasAs = text.compare(at, 2, "as") == 0 &&
+        (at + 2 == text.size() || !dbms::sqlIdentifierContinuation(
+            static_cast<unsigned char>(text[at + 2])));
+    if (hasAs) at = dbms::skipLeadingSqlTrivia(text, at + 2);
+    if (at == std::string::npos || at == text.size())
+        throw dbms::DbError("42601", "derived table AS requires an alias");
+    const size_t begin = at;
+    if (text[at] == '"') {
+        ++at;
+        bool closed = false;
+        while (at < text.size()) {
+            if (text[at++] != '"') continue;
+            if (at < text.size() && text[at] == '"') ++at;
+            else { closed = true; break; }
+        }
+        if (!closed) throw dbms::DbError("42601", "unterminated derived-table alias");
+    } else {
+        const auto first = static_cast<unsigned char>(text[at]);
+        if (!(std::isalpha(first) || first == '_' || first >= 0x80))
+            throw dbms::DbError("42601", "invalid derived-table alias");
+        while (at < text.size() && dbms::sqlIdentifierContinuation(
+                   static_cast<unsigned char>(text[at]))) ++at;
+    }
+    const std::string spelling = text.substr(begin, at - begin);
+    if (!isDerivedAliasIdentifier(spelling)) {
+        if (hasAs) throw dbms::DbError("42601", "invalid derived-table AS alias");
+        return anonymousDerivedQueryAlias(text, afterQuery);
+    }
+    dbms::CatalogManager::QualifiedName identity;
+    if (!dbms::CatalogManager::parseQualifiedName(spelling, identity, true) ||
+        !identity.schema.empty()) return std::nullopt;
+    DerivedQueryAlias alias{spelling, identity.name, {}, at};
+    at = dbms::skipLeadingSqlTrivia(text, at);
+    if (at == std::string::npos || at == text.size() || text[at] != '(') return alias;
+    const size_t close = findMatchingParen(text, at);
+    if (close == std::string::npos)
+        throw dbms::DbError("42601", "unterminated derived-table column list");
+    for (const auto& token : splitTopLevelComma(text.substr(at + 1, close - at - 1))) {
+        const std::string name = trim(token);
+        dbms::CatalogManager::QualifiedName column;
+        if (!isDerivedAliasIdentifier(name) ||
+            !dbms::CatalogManager::parseQualifiedName(name, column, true) ||
+            !column.schema.empty())
+            throw dbms::DbError("42601", "invalid derived-table column name");
+        alias.columns.push_back(column.name);
+    }
+    if (alias.columns.empty()) throw dbms::DbError("42601", "empty derived-table column list");
+    alias.end = close + 1;
+    return alias;
+}
+
+static void applyDerivedColumnAliases(std::vector<std::string>& columns,
+        const std::vector<std::string>& aliases) {
+    if (aliases.size() > columns.size())
+        throw dbms::DbError("42P10", "derived table has fewer columns than its alias list");
+    for (size_t index = 0; index < aliases.size(); ++index) columns[index] = aliases[index];
+}
+
 // Replaces (SELECT ...) AS alias with a temporary table name.
 // Returns modified SQL.
 static std::string processDerivedTables(const std::string& sql, Session& s,
@@ -13719,109 +14092,17 @@ static std::string processDerivedTables(const std::string& sql, Session& s,
         }
     }
 
-    auto findDerivedStart = [](const std::string& text, size_t start = 0) {
-        const size_t selectAt = findTextOutsideQuotes(text, "(select", start);
-        const size_t valuesAt = findTextOutsideQuotes(text, "(values", start);
-        if (selectAt == std::string::npos) return valuesAt;
-        if (valuesAt == std::string::npos) return selectAt;
-        return std::min(selectAt, valuesAt);
-    };
-
     while (true) {
-        size_t parenStart = findDerivedStart(result, searchFrom);
-        if (parenStart == std::string::npos) break;
-        // A derived table must be preceded by FROM / JOIN / comma / lateral,
-        // otherwise the "(select" belongs to a scalar or predicate subquery
-        // elsewhere in the statement (e.g. a SELECT-list item).
-        {
-            std::string before = trim(result.substr(0, parenStart));
-            std::string beforeLower;
-            for (char ch : before) beforeLower += static_cast<char>(tolower(static_cast<unsigned char>(ch)));
-            bool fromCtx = false;
-            for (const char* kw : {" from", " join", " cross", " inner",
-                                   " left", " right", " full", " lateral", ","}) {
-                size_t klen = strlen(kw);
-                if (beforeLower.size() >= klen &&
-                    beforeLower.compare(beforeLower.size() - klen, klen, kw) == 0) {
-                    fromCtx = true;
-                    break;
-                }
-            }
-            if (!fromCtx) {
-                // Not a FROM item: advance past it so later FROM subqueries
-                // are still considered without repeatedly revisiting this
-                // scalar/predicate occurrence.
-                searchFrom = parenStart + 1;
-                continue;
-            }
-        }
-        // Skip LATERAL subqueries — they are handled dynamically per left-row
-        std::string beforeParen = trim(result.substr(0, parenStart));
-        if (beforeParen.size() >= 7 && beforeParen.substr(beforeParen.size() - 7) == "lateral") {
-            // Keep searching after this item. Consecutive LATERAL items
-            // must each advance the cursor; otherwise the second item keeps
-            // being rediscovered and the backend spins at 100% CPU.
-            searchFrom = parenStart + 1;
-            continue;
-        }
-        size_t parenEnd = findMatchingParen(result, parenStart);
-        if (parenEnd == std::string::npos) break;
+        const auto source = findDerivedQuerySource(result, searchFrom, false);
+        if (!source) break;
+        const size_t parenStart = source->begin;
+        const size_t parenEnd = source->end;
 
-        // PostgreSQL allows both "(select ...) as alias" and the short
-        // "(select ...) alias" form.  Scan the raw string so the alias
-        // expression extent is measured on real positions.
-        size_t p = parenEnd + 1;
-        while (p < result.size() && isspace((unsigned char)result[p])) ++p;
-        bool hasAs = false;
-        if (p + 2 < result.size() &&
-            tolower((unsigned char)result[p]) == 'a' &&
-            tolower((unsigned char)result[p + 1]) == 's' &&
-            isspace((unsigned char)result[p + 2])) {
-            hasAs = true;
-            p += 3;
-            while (p < result.size() && isspace((unsigned char)result[p])) ++p;
-        }
-        size_t aliasStart = p;
-        while (p < result.size() && (isalnum((unsigned char)result[p]) || result[p] == '_')) ++p;
-        std::string alias = result.substr(aliasStart, p - aliasStart);
-        // The next character must terminate the alias (space, comma, EOS...).
-        if (alias.empty()) break;
-        if (!hasAs) {
-            // Without AS, make sure this bare word is not a SQL keyword that
-            // introduces the next clause (i.e. there is no alias at all).
-            std::string aliasLower;
-            for (char ch : alias) aliasLower += static_cast<char>(tolower(static_cast<unsigned char>(ch)));
-            if (aliasLower == "where" || aliasLower == "group" || aliasLower == "order" ||
-                aliasLower == "limit" || aliasLower == "offset" || aliasLower == "having" ||
-                aliasLower == "join" || aliasLower == "inner" || aliasLower == "cross" ||
-                aliasLower == "left" || aliasLower == "right" || aliasLower == "on" ||
-                aliasLower == "union" || aliasLower == "lateral" || aliasLower == "from")
-                break;
-        }
-        size_t aliasExprStart = p;
-        std::vector<std::string> columnAliases;
-        if (p < result.size() && result[p] == '(') {
-            const size_t close = findMatchingParen(result, p);
-            if (close == std::string::npos) {
-                cout << "ERROR: unterminated derived-table column list "
-                        "(SQLSTATE 42601)" << endl;
-                failed = true;
-                return result;
-            }
-            for (const auto& raw : splitTopLevelComma(
-                     result.substr(p + 1, close - p - 1))) {
-                const std::string name = trim(raw);
-                if (name.empty()) {
-                    cout << "ERROR: empty derived-table column name "
-                            "(SQLSTATE 42601)" << endl;
-                    failed = true;
-                    return result;
-                }
-                columnAliases.push_back(
-                    name.front() == '"' ? decodeQuotedIdentifier(name) : name);
-            }
-            aliasExprStart = close + 1;
-        }
+        const auto sourceAlias = readDerivedQueryAlias(result, parenEnd + 1);
+        if (!sourceAlias) break;
+        const std::string alias = sourceAlias->spelling;
+        const size_t aliasExprStart = sourceAlias->end;
+        const auto& columnAliases = sourceAlias->columns;
 
         std::string afterParen = trim(result.substr(parenEnd + 1));
         std::string innerSelect = trim(result.substr(parenStart + 1, parenEnd - parenStart - 1));
@@ -15125,7 +15406,9 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
     std::string finalScopeName;
 
     while (true) {
-        size_t latPos = findKeywordOutsideQuotes(result, "lateral");
+        const auto source = findDerivedQuerySource(result, 0, true);
+        size_t latPos = source ? source->lateralBegin
+                              : findKeywordOutsideQuotes(result, "lateral");
         const bool foldingTail = latPos == std::string::npos &&
                                  !finalScopeName.empty();
         if (latPos == std::string::npos && !foldingTail) break;
@@ -15133,6 +15416,7 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
         if (fromPos == std::string::npos) break;
         size_t aliasEnd = 0;
         std::string alias;
+        std::vector<std::string> rightColumnAliases;
         std::string innerSelect;
         if (foldingTail) {
             // Ordinary JOINs after the last LATERAL still belong to this
@@ -15149,36 +15433,14 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
                 --latPos;
             aliasEnd = latPos;
         } else {
-            const size_t parenStart = findTextOutsideQuotes(result, "(select", latPos);
-            if (parenStart == std::string::npos) break;
-            const size_t parenEnd = findMatchingParen(result, parenStart);
-            if (parenEnd == std::string::npos) break;
-
-            // Parse the required derived-table alias and retain its exact end so
-            // the lateral FROM item can be replaced without consuming WHERE /
-            // ORDER BY or a following join.
-            size_t aliasStart = parenEnd + 1;
-            while (aliasStart < result.size() &&
-                   isspace(static_cast<unsigned char>(result[aliasStart]))) {
-                ++aliasStart;
-            }
-            if (aliasStart + 2 < result.size() &&
-                result.compare(aliasStart, 2, "as") == 0 &&
-                isspace(static_cast<unsigned char>(result[aliasStart + 2]))) {
-                aliasStart += 2;
-                while (aliasStart < result.size() &&
-                       isspace(static_cast<unsigned char>(result[aliasStart]))) {
-                    ++aliasStart;
-                }
-            }
-            aliasEnd = aliasStart;
-            while (aliasEnd < result.size() &&
-                   (isalnum(static_cast<unsigned char>(result[aliasEnd])) ||
-                    result[aliasEnd] == '_')) {
-                ++aliasEnd;
-            }
-            alias = result.substr(aliasStart, aliasEnd - aliasStart);
-            if (alias.empty()) break;
+            if (!source) break;
+            const size_t parenStart = source->begin;
+            const size_t parenEnd = source->end;
+            const auto sourceAlias = readDerivedQueryAlias(result, parenEnd + 1);
+            if (!sourceAlias) break;
+            alias = sourceAlias->name;
+            aliasEnd = sourceAlias->end;
+            rightColumnAliases = sourceAlias->columns;
 
             // Extract the inner SELECT
             innerSelect = trim(result.substr(parenStart + 1, parenEnd - parenStart - 1));
@@ -15867,6 +16129,7 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
                 }
                 break;
             }
+            applyDerivedColumnAliases(rowColNames, rightColumnAliases);
             if (rightColNames.empty()) {
                 rightColNames = rowColNames;
                 rightColTypes = rowColTypes;
@@ -16029,6 +16292,8 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
                 probeSql, s, rightColNames, &rightColTypes,
                 &probeRows, &probeNulls, &probeStructured);
             allRowsStructured = probeStructured;
+            if (!rightColNames.empty())
+                applyDerivedColumnAliases(rightColNames, rightColumnAliases);
         }
 
         if (rightColNames.empty() && !foldingTail) break;
@@ -17541,8 +17806,12 @@ static bool handleDropPublicationSql(const string& sql, Session& s) {
         return true;
     }
     for (const auto& name : missing) {
-        cout << "NOTICE: publication \"" << name
-             << "\" does not exist, skipping" << endl;
+        {
+            std::ostringstream diagnostic;
+            diagnostic << "publication \"" << name
+                 << "\" does not exist, skipping";
+            dbms::emitNotice(diagnostic.str());
+        }
     }
     cout << "DROP PUBLICATION succeeded" << endl;
     return false;
@@ -18843,7 +19112,7 @@ static bool executePgStatActivityQuery(const string& rawSql,
     }
 
     const string qualifier = select->fromClause->alias.empty()
-        ? "pg_stat_activity" : select->fromClause->alias;
+        ? "pg_stat_activity" : decodeQuotedIdentifier(select->fromClause->alias);
     const vector<pair<string, string>> fields = {
         {"pid", "integer"}, {"datname", "name"}, {"usename", "name"},
         {"state", "text"}, {"query", "text"}};
@@ -19137,7 +19406,7 @@ static bool executePgSettingsQuery(const string& rawSql,
     }
 
     const string qualifier = select->fromClause->alias.empty()
-        ? "pg_settings" : select->fromClause->alias;
+        ? "pg_settings" : decodeQuotedIdentifier(select->fromClause->alias);
     const vector<string> supported = {"name", "setting", "unit"};
     map<string, string> hints;
     for (const auto& column : supported) {
@@ -19292,7 +19561,7 @@ static bool executePgDatabaseQuery(const string& rawSql,
     }
 
     const string qualifier = select->fromClause->alias.empty()
-        ? "pg_database" : select->fromClause->alias;
+        ? "pg_database" : decodeQuotedIdentifier(select->fromClause->alias);
     map<string, string> hints = {{"datname", "name"},
                                  {"encoding", "integer"},
                                  {qualifier + ".datname", "name"},
@@ -19547,7 +19816,7 @@ static bool executePgClassQuery(const string& rawSql, Session& session,
     const vector<string> types = {"oid", "name", "oid", "\"char\"",
                                   "smallint", "\"char\"", "oid"};
     const string qualifier = select->fromClause->alias.empty()
-        ? "pg_class" : select->fromClause->alias;
+        ? "pg_class" : decodeQuotedIdentifier(select->fromClause->alias);
     map<string, string> hints;
     for (size_t i = 0; i < names.size(); ++i) {
         hints[names[i]] = types[i];
@@ -19867,7 +20136,8 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
     dbms::SQLParser parser;
     auto parsed = parser.parseForBinding(rawSql);
     const auto* candidate = parsed.success ? dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()) : nullptr;
-    if (!candidate || !dbms::QueryPlanner::supportsPreparedSelectPlan(*candidate)) return false;
+    if (!candidate || hasCurrentQueryWindows(candidate) ||
+        !dbms::QueryPlanner::supportsPreparedSelectPlan(*candidate)) return false;
     // ARRAY values and bound JSONB/TSVECTOR concatenations retain this existing
     // structured AST receiver. No new physical ProjectSet/SRF lowering is
     // enabled; planner eligibility and real source/column checks still apply.
@@ -20101,6 +20371,33 @@ namespace {
 // One WITH execution owns its descriptors, logical producers and original
 // AST identities. Read producers are driven by next(); write producers are
 // completed once regardless of whether their RETURNING output is consumed.
+// Resolve a known typed catalog by its actual parsed SQL identity before
+// legacy FROM text is interpreted as a physical table. This does not admit
+// arbitrary stored relations in pg_catalog or alter ordinary search paths.
+static bool handlePreparedQualifiedCatalogQuery(const string& rawSql,Session& session,bool& handled) {
+    handled=false;
+    dbms::SQLParser parser;const auto parsed=parser.parseForBinding(rawSql);
+    const auto* select=parsed.success?dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()):nullptr;
+    if(!select || !select->ctes.empty() || select->setOp!=dbms::SetOp::None || !select->fromClause ||
+       select->fromClause->type!=dbms::FromItem::Type::Table)return false;
+    dbms::CatalogManager::QualifiedName name;
+    if(!dbms::CatalogManager::parseQualifiedName(select->fromClause->tableName,name,true) ||
+       name.schema!="pg_catalog")return false;
+    static const set<string> owned={"pg_class","pg_settings","pg_stat_activity","pg_database","pg_type"};
+    if(!owned.count(name.name))return false;
+    // These partial legacy schemas do not own PG ordinal alias metadata.
+    // In particular datname/pid are not PG's first catalog columns. Never
+    // silently rename the wrong supported field as an omitted OID/ACL field.
+    if(name.name!="pg_type" && !select->fromClause->columnAliases.empty())
+        throw dbms::DbError("0A000","catalog column alias lists require the complete source schema");
+    handled=true;
+    if(name.name=="pg_class")return executePgClassQuery(rawSql,session,session.currentDB);
+    if(name.name=="pg_settings")return executePgSettingsQuery(rawSql,session);
+    if(name.name=="pg_stat_activity")return executePgStatActivityQuery(rawSql,session);
+    if(name.name=="pg_database")return executePgDatabaseQuery(rawSql,session);
+    return executePgTypeQuery(rawSql,session);
+}
+
 class PreparedWithDmlRuntime {
     class RetainedCursor final : public dbms::PreparedQueryCursor {
         shared_ptr<dbms::PreparedQueryCursor> cursor_;
@@ -21439,7 +21736,7 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
         parsed.error=="WITH TIES cannot be specified without ORDER BY clause"))
         throw dbms::DbError("42601",parsed.error);
     auto* select=parsed.isValid()?dynamic_cast<dbms::SelectStmt*>(parsed.stmt.get()):nullptr;
-    if(!select)return false;
+    if(!select || hasCurrentQueryWindows(select))return false;
     if(usesInheritedQueryCteSource(*select,session))return false;
     // Scalar SQL children and typed unary operators must consume this same
     // retained whole-query AST, not a later legacy parser with another TEMP
@@ -21529,9 +21826,10 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
             if(call->schema.empty()) {
                 dbms::CatalogManager::QualifiedName name;
                 if(dbms::CatalogManager::parseQualifiedName(call->funcName,name,true) && name.schema.empty() &&
-                   (!resolved || isFixedFloat8ScalarName(name.name) || isStringLengthScalarName(name.name) || (toLower(name.name)=="scale" || toLower(name.name)=="min_scale" || toLower(name.name)=="gcd" || toLower(name.name)=="lcm" || toLower(name.name)=="factorial") || toLower(name.name)=="starts_with" || toLower(name.name)=="ascii" || toLower(name.name)=="chr" || name.name=="strpos" || name.name=="array_position")) {
+                   (!resolved || isFixedFloat8ScalarName(name.name) || isStringLengthScalarName(name.name) || (toLower(name.name)=="scale" || toLower(name.name)=="min_scale" || toLower(name.name)=="gcd" || toLower(name.name)=="lcm" || toLower(name.name)=="factorial") || toLower(name.name)=="starts_with" || toLower(name.name)=="ascii" || toLower(name.name)=="chr" || name.name=="strpos" ||
+                    name.name=="array_position" || name.name=="array_positions")) {
                     for(const auto& schema:dbms::functionNamespaceSearchPath(g_engine,session.currentDB))
-                        if(schema!="pg_catalog" && !g_engine.getUDF(session.currentDB,name.name,schema).expression.empty())
+                        if(schema!="pg_catalog" && g_engine.udfExists(session.currentDB,name.name,schema))
                             return true;
                 }
             }
@@ -21667,6 +21965,32 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
         cout<<'\n';
     }
     dbms::publishLastDmlResult(std::move(result));handled=true;return false;
+}
+
+// Plain VALUES keeps its established host-expression consumer. A genuine
+// WITH/set query must retain its complete AST, lexical CTEs and typed rows.
+static bool handlePreparedValuesEnvelope(const string& raw, Session& session,
+                                         bool& handled) {
+    handled = false;
+    dbms::SQLParser parser;
+    const auto parsed = parser.parseForBinding(raw);
+    const auto* select = parsed.isValid()
+        ? dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()) : nullptr;
+    if (!select || (select->ctes.empty() && select->setOp == dbms::SetOp::None)) return false;
+    if (!checkDB(session)) { handled = true; return true; }
+    auto query = make_shared<dbms::PreparedQuery>(prepareWindowSourceQuery(session, raw));
+    PreparedWithDmlRuntime runtime(session, std::move(query));
+    auto result = runtime.runRead();
+    for (const auto& name : result.columns) cout << name << ' ';
+    cout << '\n';
+    for (size_t row = 0; row < result.rows.size(); ++row) {
+        for (size_t column = 0; column < result.rows[row].size(); ++column)
+            cout << (result.nulls[row][column] ? "NULL" : result.rows[row][column]) << ' ';
+        cout << '\n';
+    }
+    dbms::publishLastDmlResult(std::move(result));
+    handled = true;
+    return false;
 }
 
 static bool handlePreparedNamespaceCatalogQuery(const string& rawSql,Session& session,bool& handled) {
@@ -21806,7 +22130,7 @@ static bool handlePreparedMultirowQuery(const string& raw,Session& session,bool&
     handled=false;
     dbms::SQLParser parser;const auto parsed=parser.parseForBinding(raw);
     const auto* select=parsed.success?dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()):nullptr;
-    if(!select)return false;
+    if(!select || hasCurrentQueryWindows(select))return false;
     const bool quantified=containsPreparedQuantifier(*select);
     // Only a provider actually owned by this receiver may request whole
     // binding here. Other scalar/session host functions retain their own
@@ -22322,6 +22646,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
             break;
         }
         case dbms::SqlCommand::Values: {
+            bool preparedValuesHandled = false;
+            const bool preparedValuesFailed = handlePreparedValuesEnvelope(
+                effectiveRawSql, s, preparedValuesHandled);
+            if (preparedValuesHandled) return preparedValuesFailed;
             bool preparedCaseHandled=false;
             const bool preparedCaseFailed=handlePreparedCaseQuery(effectiveRawSql,s,preparedCaseHandled);
             if(preparedCaseHandled)return preparedCaseFailed;
@@ -22398,6 +22726,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             s.preparedStmts.clear();
             s.preparedStmtTypes.clear();
             s.preparedStmtParameterOids.clear();
+            s.preparedStmtResultTypes.clear();
             s.sequenceLastValues.clear();
             s.sequenceLastValuesByOid.clear();
             s.lastUsedSequenceOid = 0;
@@ -22541,7 +22870,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
         case dbms::SqlCommand::SetRole:
         case dbms::SqlCommand::SetSessionAuthorization:
         case dbms::SqlCommand::SetConstraints:
-            return handleSetCommand(sql, s);
+            return handleSetCommand(sql, s, effectiveRawSql);
 
         case dbms::SqlCommand::Reset:
             return handleResetCommand(sql, s);
@@ -24205,6 +24534,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             tmpS.preparedStmts.clear();
             tmpS.preparedStmtTypes.clear();
             tmpS.preparedStmtParameterOids.clear();
+            tmpS.preparedStmtResultTypes.clear();
             std::stringstream joinOutput;
             {
                 dbms::ScopedOutputCapture capture(joinOutput);
@@ -24508,6 +24838,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             tmpS.preparedStmts.clear();
             tmpS.preparedStmtTypes.clear();
             tmpS.preparedStmtParameterOids.clear();
+            tmpS.preparedStmtResultTypes.clear();
             std::stringstream joinOutput;
             {
                 dbms::ScopedOutputCapture capture(joinOutput);
@@ -25902,7 +26233,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             if (!checkDB(s)) return true;
             auto udfNames = g_engine.getUDFNames(s.currentDB);
             for (const auto& n : udfNames) {
-                auto udf = g_engine.getUDF(s.currentDB, n);
+                for(const auto& udf:g_engine.getUDFOverloads(s.currentDB,n)) {
                 string sig;
                 for (size_t i = 0; i < udf.paramNames.size(); ++i) {
                     if (i > 0) sig += ", ";
@@ -25911,6 +26242,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 }
                 if (sig.empty()) sig = udf.paramName;
                 cout << n << "(" << sig << ") = " << udf.expression << endl;
+                }
             }
             auto tvfNames = g_engine.getTVFNames(s.currentDB);
             for (const auto& n : tvfNames) {
@@ -26627,6 +26959,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
         s.preparedStmts.clear();
         s.preparedStmtTypes.clear();
         s.preparedStmtParameterOids.clear();
+        s.preparedStmtResultTypes.clear();
         s.sequenceLastValues.clear();
         s.sequenceLastValuesByOid.clear();
         s.lastUsedSequenceOid = 0;
@@ -26761,9 +27094,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 duplicateOrderAliasQuery=make_shared<dbms::PreparedQuery>(
                     prepareRuntimeValueDeclaration(s, effectiveRawSql));
                 auto* bound=dynamic_cast<dbms::SelectStmt*>(duplicateOrderAliasQuery->ast.get());
-                const bool windows=any_of(bound->selectList.begin(),bound->selectList.end(),[](const auto& target) {
-                    const auto* call=dynamic_cast<const dbms::FunctionCallExpr*>(target.expr.get());return call && call->hasOver;
-                });
+                const bool windows=hasCurrentQueryWindows(bound);
                 if(!windows && !duplicateOrderAliasQuery->sortOutputOwners.empty()) {
                     PreparedWithDmlRuntime runtime(s,duplicateOrderAliasQuery);auto result=runtime.runRead();
                     for(const auto& name:result.columns)cout<<name<<' ';cout<<'\n';
@@ -26785,6 +27116,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             const auto parsed=parser.parseForBinding(effectiveRawSql);
             if(requiresParsedValueBinding(parsed.stmt.get())) {
                 auto query=make_shared<dbms::PreparedQuery>(prepareRuntimeValueDeclaration(s, effectiveRawSql));
+                validateWindowQueryPlacements(query->ast.get());
                 if(requiresParsedValueBinding(parsed.stmt.get(),true)) {
                     // Some legacy CAST/text receivers can return an empty
                     // source without opening a native plan. Run the same pure
@@ -26837,6 +27169,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 }
             }
         }
+
+        bool qualifiedCatalogHandled=false;
+        const bool qualifiedCatalogFailed=handlePreparedQualifiedCatalogQuery(effectiveRawSql,s,qualifiedCatalogHandled);
+        if(qualifiedCatalogHandled)return qualifiedCatalogFailed;
 
         bool namespaceCatalogHandled=false;
         const bool namespaceCatalogFailed=handlePreparedNamespaceCatalogQuery(effectiveRawSql,s,namespaceCatalogHandled);
@@ -31656,6 +31992,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
             return false;
         }
 
+        dbms::CatalogManager::QualifiedName classSource;
+        const bool virtualPgClass=tname=="pg_class" &&
+            (queryDb=="pg_catalog" || (queryDb==s.currentDB &&
+             dbms::CatalogManager::parseQualifiedName(tnameOrig,classSource,true) && classSource.schema.empty()));
         const bool virtualPgType = tname == "pg_type" &&
             (queryDb == "pg_catalog" ||
              (queryDb == s.currentDB && !g_engine.tableExists(queryDb,tname) &&
@@ -31678,7 +32018,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
               !g_engine.tableExists(queryDb, tname) &&
               !g_engine.viewExists(queryDb, tname)));
         // pg_stat_* virtual tables
-        if (tname == "pg_stat_database" || tname == "pg_stat_tables" || tname == "pg_stat_statements" || tname == "pg_seclabels" || tname == "pg_buffercache" || tname == "pg_locks" || tname == "pg_stat_wait_events" || virtualPgStatActivity || virtualPgDatabase || virtualPgSettings || tname == "pg_tables" || tname == "pg_views" || tname == "pg_indexes" || tname == "pg_class") {
+        if (tname == "pg_stat_database" || tname == "pg_stat_tables" || tname == "pg_stat_statements" || tname == "pg_seclabels" || tname == "pg_buffercache" || tname == "pg_locks" || tname == "pg_stat_wait_events" || virtualPgStatActivity || virtualPgDatabase || virtualPgSettings || tname == "pg_tables" || tname == "pg_views" || tname == "pg_indexes" || virtualPgClass) {
             auto bpStats = g_engine.getBufferPoolStats();
             const std::string catalogDb = queryDb == "pg_catalog"
                 ? s.currentDB : queryDb;
@@ -31839,7 +32179,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 }
             } else if (tname == "pg_settings") {
                 return executePgSettingsQuery(effectiveRawSql, s);
-            } else if (tname == "pg_class") {
+            } else if (virtualPgClass) {
                 return executePgClassQuery(effectiveRawSql, s, catalogDb);
             }
             return false;
@@ -32210,6 +32550,21 @@ static bool executeInternal(const string& rawSql, Session& s) {
                              << bindingSqlState << ")" << endl;
                         return true;
                     }
+                }
+                vector<const dbms::FunctionCallExpr*> sortWindows;
+                if (orderSyntaxSelect && orderSyntaxSelect->selectList.size()==1)
+                    collectProjectionWindows(orderSyntaxSelect->selectList.front().expr.get(), sortWindows);
+                if (!sortWindows.empty()) {
+                    // The genuine query-owned window receiver below binds
+                    // this key. A bare scalar fingerprint cannot own OVER.
+                    dbms::StorageEngine::OrderBySpec spec;
+                    spec.isExpression=true; spec.expressionSql=sortItem;
+                    spec.ascending=asc; spec.nullsFirst=nullsFirst;
+                    spec.hasExplicitNullOrder=nullsSpecified; spec.collation=collation;
+                    exprOrderBySpecs.push_back(std::move(spec));
+                    orderKeyRefs.emplace_back(true,exprOrderBySpecs.size()-1);
+                    orderKeySourceSql[orderKeyRefs.back()]=sortKeySyntax;
+                    continue;
                 }
                 size_t lp = sortItem.find('(');
                 size_t rp = sortItem.rfind(')');
@@ -32729,6 +33084,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
         // Detect aggregate functions, window functions, and scalar functions in columns
         vector<dbms::StorageEngine::AggItem> aggItems;
         vector<WindowFunc> windowFuncs;
+        unique_ptr<PreparedWindowProjection> nestedWindowProjection;
         vector<dbms::StorageEngine::SelectExpr> selectExprs;
         vector<int> exprTypes; // 0=normal, 1=agg, 2=window, 3=scalar
         // selectExprs index -> raw item text (arith items for GROUP BY)
@@ -32825,7 +33181,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 if(legacyOrderedSumCount && orderedCall->schema.empty())
                     for(const auto& schemaName:dbms::functionNamespaceSearchPath(g_engine,s.currentDB))
                         if(schemaName!="pg_catalog" &&
-                           !g_engine.getUDF(s.currentDB,orderedRole,schemaName).expression.empty()) {
+                           g_engine.udfExists(s.currentDB,orderedRole,schemaName)) {
                             legacyOrderedSumCount=false;break;
                         }
             }
@@ -33007,7 +33363,29 @@ static bool executeInternal(const string& rawSql, Session& s) {
             else if (sourceRange.aliased || usesInheritedQueryCteSource(*aggregateSelect, s))
                 typedAggregateSourceAlias = sourceRange.range;
         }
-        {
+        nestedWindowProjection = prepareNestedWindowProjection(s, effectiveRawSql, namedWindows);
+        if (nestedWindowProjection) {
+            if (nestedWindowProjection->source->columns.size() != tbl.len)
+                throw dbms::DbError("XX000", "window projection source descriptor changed");
+            windowFuncs = nestedWindowProjection->windows;
+            hasWindow = true;
+            const auto& bindings = nestedWindowProjection->query->projectionBindings.at(nestedWindowProjection->select);
+            for (size_t i = 0; i < bindings.size(); ++i) {
+                const auto& output = nestedWindowProjection->query->output.at(i);
+                dbms::StorageEngine::AggItem item; item.arg = output.name;
+                dbms::StorageEngine::SelectExpr target; target.displayName = output.name; target.colName = output.name;
+                const bool sourceColumn = bindings[i].column.has_value();
+                if (sourceColumn) {
+                    const auto& binding = *bindings[i].column;
+                    if (binding.sourceOrdinal != nestedWindowProjection->source->ordinal || binding.columnOrdinal >= tbl.len)
+                        throw dbms::DbError("XX000", "window projection column escaped its source owner");
+                    item.arg = tbl.cols[binding.columnOrdinal].dataName;
+                    target.colName = item.arg;
+                }
+                aggItems.push_back(std::move(item)); selectExprs.push_back(std::move(target));
+                exprTypes.push_back(sourceColumn ? 0 : 4);
+            }
+        } else {
             for (const auto& itemRaw : splitSelectColumns(columns)) {
                 string item = trim(itemRaw);
                 // SELECT-list alias: "expr AS name" -- evaluate expr, but
@@ -34617,6 +34995,13 @@ static bool executeInternal(const string& rawSql, Session& s) {
         auto buildWindowProtocolMetadata = [&](bool requireDescriptor = false) {
             dbms::DmlResult metadata;
             if (!requireDescriptor && !shouldPublishQueryMetadata()) return metadata;
+            if (nestedWindowProjection) {
+                for (const auto& column : nestedWindowProjection->query->output) {
+                    metadata.columns.push_back(column.name); metadata.columnTypes.push_back(column.type);
+                }
+                metadata.available = true; metadata.metadataOnly = true;
+                return metadata;
+            }
             for (const auto& rawTarget : splitSelectColumns(columns)) {
                 string item = trim(rawTarget);
                 string alias;
@@ -36223,7 +36608,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             vector<WindowScalarArguments> windowArguments(windowFuncs.size());
             vector<size_t> windowOwners;
             for(size_t i=0;i<windowFuncs.size();++i)windowOwners.push_back(i);
-            if(duplicateOrderAliasQuery) {
+            if(duplicateOrderAliasQuery && !nestedWindowProjection) {
                 const auto* select=dynamic_cast<const dbms::SelectStmt*>(duplicateOrderAliasQuery->ast.get());
                 const auto aliases=duplicateOrderAliasQuery->sortOutputOwners.find(select);
                 if(aliases!=duplicateOrderAliasQuery->sortOutputOwners.end()) {
@@ -36251,6 +36636,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 for(const auto& target:select->selectList)
                     if(const auto* call=dynamic_cast<const dbms::FunctionCallExpr*>(target.expr.get()))
                         if(call->hasOver)originalWindowSites.push_back(call);
+            if (nestedWindowProjection) originalWindowSites = nestedWindowProjection->calls;
             // Bind all value/offset/default signatures and constant
             // conversions before opening sources. Runtime demand remains
             // specific to NTILE or LAG/LEAD, not eager argument evaluation.
@@ -36356,7 +36742,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 if(previous==initializedFrames.end())initializedFrames.emplace(argument.frameIdentity,
                     make_pair(function.preparedFrame.startOffset,function.preparedFrame.endOffset));
             }
-            bool canUseVolcanoWindow = !hasAgg && !hasScalar &&
+            bool canUseVolcanoWindow = !nestedWindowProjection && !hasAgg && !hasScalar &&
                                        distinctOnCols.empty() &&
                                        exprOrderBySpecs.empty() &&
                                        orderBySpecs.size() <= 1;
@@ -36511,7 +36897,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
 
             // Output header
             for (size_t i = 0; i < aggItems.size(); ++i) {
-                if (exprTypes[i] == 2) {
+                if (nestedWindowProjection) {
+                    cout << renderLegacyHeader(selectExprs[i].displayName) << ' ';
+                } else if (exprTypes[i] == 2) {
                     // PG header: the alias when one is given, otherwise the
                     // bare window function name ("row_number", "sum", ...).
                     string aliasName = (i < selectExprs.size())
@@ -36556,6 +36944,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 const dbms::StorageEngine::OrderBySpec* spec;
                 size_t projection = numeric_limits<size_t>::max();
                 size_t scalar = numeric_limits<size_t>::max();
+                size_t ownedExpression = numeric_limits<size_t>::max();
                 string sourceColumn;
                 dbms::Column column;
             };
@@ -36565,10 +36954,32 @@ static bool executeInternal(const string& rawSql, Session& s) {
             // Bind the final SQL sort separately from window input ordering,
             // before opening any source. Output references keep their actual
             // producer ordinal; scalar keys use one retained prepared query.
+            size_t ownedOrderIndex=0;
+            if (nestedWindowProjection && orderKeyRefs.size()!=nestedWindowProjection->orderTargets.size())
+                throw dbms::DbError("XX000","window final sort lost its original key ordinals");
             for (const auto& reference : orderKeyRefs) {
                 const auto& spec = reference.first ? exprOrderBySpecs.at(reference.second)
                     : orderBySpecs.at(reference.second);
                 WindowSortKey key; key.spec = &spec;
+                if (nestedWindowProjection) {
+                    auto& projection=*nestedWindowProjection;
+                    const size_t index=ownedOrderIndex++;
+                    key.projection=projection.orderTargets.at(index);
+                    key.column=sortColumn(projection.orderTypes.at(index));
+                    if (key.projection==numeric_limits<size_t>::max()) {
+                        key.ownedExpression=projection.orderOwners.at(index);
+                        const auto* column=dynamic_cast<const dbms::ColumnRefExpr*>(projection.orderExpressions.at(index));
+                        if(column && column->binding && column->binding->sourceOrdinal==projection.source->ordinal &&
+                           column->binding->columnOrdinal<tbl.len) {
+                            key.sourceColumn=tbl.cols[column->binding->columnOrdinal].dataName;
+                            key.column=partitionColumn(key.sourceColumn);
+                        }
+                    } else if(exprTypes.at(key.projection)==0) {
+                        key.column=partitionColumn(sourceColumnName(selectExprs.at(key.projection).colName));
+                    }
+                    finalWindowKeys.push_back(std::move(key));
+                    continue;
+                }
                 const string expression = spec.isExpression ? orderKeySourceSql.at(reference) : spec.colName;
                 dbms::SQLParser keyParser;
                 const auto keyParsed = keyParser.parseForBinding("SELECT " + orderKeySourceSql.at(reference));
@@ -36602,8 +37013,19 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         throw dbms::DbError("42P10", "ORDER BY position is not in select list");
                     key.projection = ordinal - 1;
                 } else {
-                    for (size_t target = 0; target < selectExprs.size(); ++target)
-                        if (selectExprs[target].colName == expression) { key.projection = target; break; }
+                    // SQL92 output-name lookup keeps the actual output
+                    // ordinal even though the legacy adapter has replaced
+                    // spec.colName with that target's expression spelling.
+                    const auto* outputReference = dynamic_cast<const dbms::ColumnRefExpr*>(keyExpression);
+                    if (nestedWindowProjection && outputReference &&
+                        outputReference->schema.empty() && outputReference->table.empty()) {
+                        const auto& output = nestedWindowProjection->query->output;
+                        for (size_t target = 0; target < output.size(); ++target)
+                            if (output[target].name == outputReference->column) { key.projection = target; break; }
+                    }
+                    if (key.projection == numeric_limits<size_t>::max())
+                        for (size_t target = 0; target < selectExprs.size(); ++target)
+                            if (selectExprs[target].colName == expression) { key.projection = target; break; }
                 }
                 if (key.projection != numeric_limits<size_t>::max()) {
                     if (key.projection >= finalWindowResult.columnTypes.size())
@@ -36757,15 +37179,15 @@ static bool executeInternal(const string& rawSql, Session& s) {
             };
 
             // Sort by partition columns first, then by ORDER BY column
-            const WindowFunc& wf0 = windowFuncs[0];
-            std::stable_sort(rows.begin(), rows.end(), [&](const auto& a, const auto& b) {
+            const WindowFunc* wf0 = windowFuncs.empty() ? nullptr : &windowFuncs.front();
+            if(wf0)std::stable_sort(rows.begin(), rows.end(), [&](const auto& a, const auto& b) {
                 // Compare partition columns first
-                for (const auto& pcol : wf0.partitionByCols) {
+                for (const auto& pcol : wf0->partitionByCols) {
                     const int cmp = comparePartitionColumn(a, b, pcol);
                     if (cmp) return cmp < 0;
                 }
                 // Then compare ORDER BY column
-                return compareWindowOrder(a, b, wf0) < 0;
+                return compareWindowOrder(a, b, *wf0) < 0;
             });
 
             // Helper: check if two rows are in the same partition
@@ -36798,14 +37220,14 @@ static bool executeInternal(const string& rawSql, Session& s) {
             // outputs. A parent LIMIT still consumes OFFSET's prefix, but
             // must not evaluate later aggregate/value arguments.
             bool orderPreservesWindow=finalWindowKeys.empty();
-            if(finalWindowKeys.size()==1 && wf0.partitionByCols.empty()) {
+            if(wf0 && finalWindowKeys.size()==1 && wf0->partitionByCols.empty()) {
                 const auto& key=finalWindowKeys.front();
                 string source=key.sourceColumn;
                 if(key.projection!=numeric_limits<size_t>::max() && exprTypes.at(key.projection)==0)
                     source=sourceColumnName(selectExprs.at(key.projection).colName);
-                orderPreservesWindow=!wf0.orderByCol.empty() && source==wf0.orderByCol &&
-                    key.spec->ascending==wf0.orderByAsc && key.spec->collation.empty() &&
-                    key.spec->nullsFirst==(wf0.hasExplicitOrderNulls?wf0.orderByNullsFirst:!wf0.orderByAsc);
+                orderPreservesWindow=!wf0->orderByCol.empty() && source==wf0->orderByCol &&
+                    key.spec->ascending==wf0->orderByAsc && key.spec->collation.empty() &&
+                    key.spec->nullsFirst==(wf0->hasExplicitOrderNulls?wf0->orderByNullsFirst:!wf0->orderByAsc);
             }
             size_t demandedWindowRows=rows.size();
             if(finiteWindowLimit && windowLimit==0)demandedWindowRows=0;
@@ -37130,12 +37552,12 @@ static bool executeInternal(const string& rawSql, Session& s) {
             // re-sort the computed rows with the same comparator used
             // before computation (stable), with SQL NULLS LAST for ASC
             // (NULLS FIRST for DESC) on the ORDER BY column.
-            std::stable_sort(rows.begin(), rows.end(), [&](const auto& a, const auto& b) {
-                for (const auto& pcol : wf0.partitionByCols) {
+            if(wf0)std::stable_sort(rows.begin(), rows.end(), [&](const auto& a, const auto& b) {
+                for (const auto& pcol : wf0->partitionByCols) {
                     const int cmp = comparePartitionColumn(a, b, pcol);
                     if (cmp) return cmp < 0;
                 }
-                return compareWindowOrder(a, b, wf0) < 0;
+                return compareWindowOrder(a, b, *wf0) < 0;
             });
             // Format results as strings
             vector<string> winAnswers;
@@ -37145,7 +37567,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 string line;
                 vector<string> cells;
                 vector<bool> nulls;
-                for (size_t i = 0; i < aggItems.size(); ++i) {
+                if (nestedWindowProjection) {
+                    cells.resize(nestedWindowProjection->query->output.size());
+                    nulls.assign(cells.size(), true);
+                }
+                for (size_t i = 0; !nestedWindowProjection && i < aggItems.size(); ++i) {
                     if (exprTypes[i] == 2) {
                         size_t wi = 0;
                         for (size_t j = 0; j < i; ++j) {
@@ -37170,6 +37596,56 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 winNulls.push_back(std::move(nulls));
             }
 
+            // Scalar targets are demanded by the final sort/DISTINCT or
+            // emitted row only. OFFSET/LIMIT must not execute skipped targets.
+            const size_t projectionWidth=nestedWindowProjection ? finalWindowResult.columns.size() : 0;
+            vector<vector<bool>> nestedProjectionComputed(rows.size(),vector<bool>(projectionWidth));
+            vector<vector<optional<dbms::ExprValue>>> ownedSortValues(rows.size(),
+                vector<optional<dbms::ExprValue>>(nestedWindowProjection ? nestedWindowProjection->orderExpressions.size() : 0));
+            const auto projectionContext = [&](size_t row) {
+                auto& projection=*nestedWindowProjection;
+                auto context=projection.execution->context();
+                vector<dbms::ExprValue> source;
+                for(size_t column=0;column<tbl.len;++column) {
+                    const auto cell=rows.at(row).find(tbl.cols[column].dataName);
+                    source.emplace_back(projection.source->columns[column].type,
+                        cell==rows[row].end()?string():cell->second,cell==rows[row].end());
+                    source.back().collation=tbl.cols[column].collation;
+                }
+                projection.execution->setSourceRow(context,projection.source->ordinal,source);
+                for(size_t wi=0;wi<projection.slots.size();++wi) {
+                    const auto& slot=projection.slots[wi];
+                    context.setBoundColumn(slot.sourceOrdinal,slot.columnOrdinal,
+                        dbms::ExprValue(slot.declaredType,rows[row].windowValues.at(wi),rows[row].nullWindows.count(wi)));
+                }
+                return context;
+            };
+            const auto ensureWindowProjection = [&](size_t row,size_t target) {
+                if(!nestedWindowProjection || nestedProjectionComputed.at(row).at(target))return;
+                auto& projection=*nestedWindowProjection;
+                const size_t owner=projection.targetOwners.at(target);
+                if(!nestedProjectionComputed.at(row).at(owner)) {
+                    const auto context=projectionContext(row);
+                    const auto& binding=projection.query->projectionBindings.at(projection.select).at(owner);
+                    const auto value=binding.column
+                        ? context.boundColumn(binding.column->sourceOrdinal,binding.column->columnOrdinal)
+                        : projection.execution->evaluate(binding.expression,context);
+                    winCells[row][owner]=value.isNull?string():value.value;
+                    winNulls[row][owner]=value.isNull;
+                    nestedProjectionComputed[row][owner]=true;
+                }
+                winCells[row][target]=winCells[row][owner];
+                winNulls[row][target]=winNulls[row][owner];
+                nestedProjectionComputed[row][target]=true;
+            };
+            const auto ownedWindowSortValue = [&](size_t row,size_t key) {
+                auto& value=ownedSortValues.at(row).at(key);
+                if(!value) {
+                    auto& projection=*nestedWindowProjection;
+                    value=projection.execution->evaluate(projection.orderExpressions.at(key),projectionContext(row));
+                }
+                return *value;
+            };
             vector<string> outputIndices;
             for (size_t index = 0; index < winAnswers.size(); ++index)
                 outputIndices.push_back(to_string(index));
@@ -37193,9 +37669,13 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     const size_t left = stoull(a), right = stoull(b);
                     for (const auto& key : finalWindowKeys) {
                         const auto value = [&](size_t row) {
-                            if (key.projection != numeric_limits<size_t>::max())
+                            if (key.projection != numeric_limits<size_t>::max()) {
+                                ensureWindowProjection(row, key.projection);
                                 return dbms::ExprValue(finalWindowResult.columnTypes.at(key.projection),
                                     winCells[row].at(key.projection), winNulls[row].at(key.projection));
+                            }
+                            if (key.ownedExpression != numeric_limits<size_t>::max())
+                                return ownedWindowSortValue(row,key.ownedExpression);
                             if (key.scalar != numeric_limits<size_t>::max())
                                 return scalarWindowValues.at(row).at(key.scalar);
                             const auto cell = rows[row].find(key.sourceColumn);
@@ -37228,9 +37708,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 for (const auto& index : outputIndices) {
                     const size_t row = stoull(index);
                     string key;
-                    for (size_t column = 0; column < winCells[row].size(); ++column)
+                    for (size_t column = 0; column < winCells[row].size(); ++column) {
+                        ensureWindowProjection(row, column);
                         key += winNulls[row][column] ? "N;" :
                             "V" + to_string(winCells[row][column].size()) + ":" + winCells[row][column];
+                    }
                     if (seen.insert(key).second) deduped.push_back(index);
                 }
                 outputIndices = std::move(deduped);
@@ -37249,6 +37731,15 @@ static bool executeInternal(const string& rawSql, Session& s) {
             }
             for (const auto& index : outputIndices) {
                 const size_t rowIndex = stoull(index);
+                if (nestedWindowProjection) {
+                    string line;
+                    for (size_t target = 0; target < winCells[rowIndex].size(); ++target) {
+                        ensureWindowProjection(rowIndex, target);
+                        if (target) line += ' ';
+                        line += winNulls[rowIndex][target] ? "NULL" : winCells[rowIndex][target];
+                    }
+                    winAnswers[rowIndex] = std::move(line);
+                }
                 const auto& row = winAnswers[rowIndex];
                 cout << row << endl;
                 log(s.username, row, getTime());
@@ -37331,14 +37822,6 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             ? dbms::ExprHelper::inferResultType(
                                 withoutAlias(rawTargets[i]), typeHints, s.currentDB, &g_engine)
                             : preparedScalarTypes[i];
-                        if (preparedScalarTypes.empty() && selectExprs[i].isScalar &&
-                            !selectExprs[i].funcName.empty()) {
-                            const auto udf = g_engine.getUDF(
-                                s.currentDB, selectExprs[i].funcName);
-                            if (!udf.expression.empty()) {
-                                resultType = canonicalValuesType(udf.returnType);
-                            }
-                        }
                         metadata.columnTypes.push_back(std::move(resultType));
                     }
                     structuredScalarResult.columns = metadata.columns;
@@ -39594,10 +40077,31 @@ int main(int argc, char* argv[]) {
     g_engine.setTriggerExecutor([](const std::string& actionSql) -> bool {
         Session* activeSession = dbms::currentSession();
         if (!activeSession) return true;
+        // Trigger SQL has its own result slot. Its completion/RETURNING/SELECT
+        // metadata must not escape as the enclosing statement's wire result,
+        // including early UDF returns and exceptions.
+        struct TriggerResultScope {
+            dbms::DmlResult caller = dbms::takeLastDmlResult();
+            std::ostringstream output;
+            std::optional<dbms::ScopedOutputCapture> capture{std::in_place, output};
+            ~TriggerResultScope() {
+                capture.reset();
+                dbms::publishLastDmlResult(std::move(caller));
+            }
+            void complete(bool failed) {
+                capture.reset();
+                // Real notices use the typed channel. Successful child text
+                // is only a result, even if it starts with ERROR:.
+                if (failed) {
+                    std::cout << output.str();
+                }
+            }
+        } resultScope;
         Session triggerSession = *activeSession;
         triggerSession.preparedStmts.clear();
         triggerSession.preparedStmtTypes.clear();
         triggerSession.preparedStmtParameterOids.clear();
+        triggerSession.preparedStmtResultTypes.clear();
         // EXECUTE FUNCTION actions are stored as "name(args)".  Those are
         // not executable SQL: dispatch them through the UDF runtime (SQL
         // expression or PL/pgSQL interpreter) instead of the SQL pipeline.
@@ -39614,8 +40118,7 @@ int main(int argc, char* argv[]) {
             }
             std::string fname = actionSql.substr(0, lp);
             if (nameOk && triggerSession.currentDB.empty() == false) {
-                auto udf = g_engine.getUDF(triggerSession.currentDB, fname);
-                if (!udf.expression.empty()) {
+                if (g_engine.udfExists(triggerSession.currentDB,fname)) {
                     // Literal arguments only: split on top-level commas and
                     // strip surrounding quotes.
                     std::string inner = actionSql.substr(lp + 1, actionSql.size() - lp - 2);
@@ -39642,6 +40145,7 @@ int main(int argc, char* argv[]) {
                         g_engine.getExecFunctionCtx(), rv);
                     g_engine.clearExecFunctionCtx();
                     dbms::setCurrentSession(activeSession);
+                    resultScope.complete(!ok);
                     return !ok;
                 }
             }
@@ -39689,6 +40193,7 @@ int main(int argc, char* argv[]) {
         }
         g_engine.clearExecFunctionCtx();
         dbms::setCurrentSession(activeSession);
+        resultScope.complete(failed);
         return failed;
     });
 
@@ -39731,6 +40236,9 @@ int main(int argc, char* argv[]) {
     if (serverMode)
         return dbms::startServer(serverPort, allowPlaintext) ? 0 : 1;
 
+    dbms::ScopedDiagnosticCapture cliDiagnostics([](dbms::StatementDiagnostic diagnostic) {
+        std::cerr << diagnostic.severity << ": " << diagnostic.message << '\n';
+    });
     Session s;
     s.compatibilityMode = dbms::defaultCompatibilityMode();
     s.statementTimeoutMs = g_config.statementTimeoutMs;

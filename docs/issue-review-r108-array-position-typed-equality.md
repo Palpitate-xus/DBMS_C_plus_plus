@@ -173,3 +173,8 @@ R86仅修了空数组NULL-start行为，不代表这些问题已修复。ARRAY_P
 任意复合/域/自定义cast及所有多态函数的通用能力不因本项存在而关闭；仍须
 逐项验证/实现。原273账目不提升，R98/R99未接受候选与R106草稿保留、排除于
 本项提交之外；Engine工作区含R98，不可冒称干净HEAD全量通过。Actions禁用。
+
+后续[R109](issue-review-r109-array-positions.md)补ARRAY_POSITIONS，复用本项
+typed查找且保留354/258等原断言，不把本项历史64入口重标为其新证明。本项
+所列ARRAY_POSITIONS缺失是提交时边界；新函数的实际终态见R109。该记录另保留
+R110数组binary输出与R111构造器常量规划的真实未修复发现，原TYPE-16仍partial。

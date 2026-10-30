@@ -1,0 +1,489 @@
+#include "Session.h"
+#include "catalog/CatalogService.h"
+#include "catalog/type_registry.h"
+#include "commands/DdlExecutor.h"
+#include "commands/TableManage.h"
+#include "common/DbError.h"
+#include "expression/ExprEvaluator.h"
+#include "expression/expr_helper.h"
+#include "expression/prepared_query_execution.h"
+#include "parser/parser.h"
+#include "test_utils.h"
+#include <filesystem>
+#include <functional>
+#include <iostream>
+#include <limits>
+#include <memory>
+#include <optional>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+extern dbms::StorageEngine g_engine;
+
+namespace {
+using namespace dbms;
+
+// Keep this exact fixture compilable with the frozen pre-fix headers. The
+// fallback is the old ordinary typed SQL literal, with no test-side datum
+// cache or alternate evaluator. Its lost-identity failures must remain visible.
+template<class T,class = void> struct HasAnalyzedConstant : std::false_type {};
+template<class T> struct HasAnalyzedConstant<T,std::void_t<
+    decltype(std::declval<T&>().analyzedConstant)>> : std::true_type {};
+template<class T> void attach(T& literal,std::shared_ptr<const ExprValue> value) {
+    if constexpr(HasAnalyzedConstant<T>::value) literal.analyzedConstant=std::move(value);
+}
+
+std::string sqlLiteral(const ExprValue& cell) {
+    if(cell.isNull)return "NULL";
+    std::string result="'";
+    for(char ch:cell.value){result+=ch;if(ch=='\'')result+=ch;}
+    return result+'\'';
+}
+std::unique_ptr<LiteralExpr> literal(const ExprValue& cell,
+    std::weak_ptr<const ExprValue>* lifetime=nullptr) {
+    auto result=std::make_unique<LiteralExpr>();
+    result->typeName=cell.typeName;result->value=sqlLiteral(cell);
+    auto owned=std::make_shared<const ExprValue>(cell);
+    if(lifetime)*lifetime=owned;
+    attach(*result,std::move(owned));
+    return result;
+}
+
+std::string cellDifference(const ExprValue& actual,const ExprValue& expected,
+                           const std::string& location="cell") {
+    if(actual.typeName!=expected.typeName)return location+".typeName";
+    if(actual.value!=expected.value)return location+".value";
+    if(actual.isNull!=expected.isNull)return location+".isNull";
+    if(actual.collation!=expected.collation)return location+".collation";
+    if(actual.objectOid!=expected.objectOid)return location+".objectOid";
+    if(actual.elementOids!=expected.elementOids)return location+".elementOids";
+    if(bool(actual.recordFields)!=bool(expected.recordFields))return location+".recordFields engagement";
+    if(actual.recordFields) {
+        if(actual.recordFields->size()!=expected.recordFields->size())return location+".recordFields size";
+        for(size_t i=0;i<actual.recordFields->size();++i) {
+            const auto difference=cellDifference(actual.recordFields->at(i),expected.recordFields->at(i),
+                                                location+".field"+std::to_string(i));
+            if(!difference.empty())return difference;
+        }
+    }
+    return {};
+}
+void demandCell(const ExprValue& actual,const ExprValue& expected) {
+    const auto difference=cellDifference(actual,expected);
+    if(!difference.empty())throw std::runtime_error(difference+" actual-type="+actual.typeName+
+        " actual-value="+actual.value+" expected-type="+expected.typeName+" expected-value="+expected.value);
+}
+void mutate(ExprValue& cell) {
+    cell.typeName="mutated";cell.value="mutated";cell.isNull=!cell.isNull;
+    cell.collation="mutated";cell.objectOid=71;
+    cell.elementOids.push_back(71);
+    if(cell.recordFields) {
+        for(auto& field:*cell.recordFields)mutate(field);
+        cell.recordFields->push_back(ExprValue("integer","71"));
+    } else cell.recordFields.emplace();
+}
+ExprValue reference(const std::string& type,uint32_t oid,const std::string& display="stale reference") {
+    ExprValue cell(type,display);cell.objectOid=oid;return cell;
+}
+ExprValue nullCell(const std::string& type) {return ExprValue(type,"",true);}
+ExprValue record(std::vector<ExprValue> fields,const std::string& text="(retained record)") {
+    ExprValue cell("record",text);cell.recordFields=std::move(fields);return cell;
+}
+ExprValue referenceArray(std::vector<std::optional<uint32_t>> identities,
+                         const std::string& text="{retained,array}") {
+    ExprValue cell("regtype[]",text);cell.elementOids=std::move(identities);return cell;
+}
+struct Harness {
+    size_t controls=0,failures=0;
+    template<class F> void test(const std::string& label,F body) {
+        ++controls;
+        try {body();}
+        catch(const std::exception& error) {
+            ++failures;
+            std::cerr<<"PLANNED_CONSTANT_CELLS_FAIL "<<controls<<' '<<label<<" : "<<error.what()<<'\n';
+        }
+        catch(...) {++failures;std::cerr<<"PLANNED_CONSTANT_CELLS_FAIL "<<controls<<' '<<label<<" : nonstandard exception\n";}
+    }
+};
+void demand(bool good,const std::string& message) {if(!good)throw std::runtime_error(message);}
+std::string identity(const Expr* node) {
+    return ExprHelper::scalarExpressionIdentity(node,[](const ColumnRefExpr&){return "unused column";});
+}
+
+// Independent structural receipts for the original tree and its descriptors.
+// CASE/ROW toString() alone deliberately does not describe their actual tree.
+void field(std::ostringstream& out,const std::string& value) {out<<value.size()<<':'<<value;}
+void tree(std::ostringstream& out,const Expr* expression) {
+    if(!expression){out<<"absent;";return;}
+    out<<expression<<':'<<static_cast<int>(expression->type)<<':'<<expression->sourceBegin<<':'
+       <<expression->sourceEnd<<':'<<expression->preparedSubquery.get()<<';';
+    if(const auto* node=dynamic_cast<const LiteralExpr*>(expression)) {
+        field(out,node->typeName);field(out,node->value);
+    } else if(const auto* node=dynamic_cast<const ParameterExpr*>(expression)) {
+        out<<node->slot<<':'<<static_cast<int>(node->origin);field(out,node->declaredType);
+    } else if(const auto* node=dynamic_cast<const CastExpr*>(expression)) {
+        field(out,node->typeName);out<<node->implicit;
+        for(const auto& modifier:node->typeMods)field(out,modifier);
+        tree(out,node->operand.get());
+    } else if(const auto* node=dynamic_cast<const BinaryOpExpr*>(expression)) {
+        field(out,node->op);field(out,node->comparison?node->comparison->identity:"");
+        tree(out,node->left.get());tree(out,node->right.get());
+    } else if(const auto* node=dynamic_cast<const UnaryOpExpr*>(expression)) {
+        field(out,node->op);tree(out,node->operand.get());
+    } else if(const auto* node=dynamic_cast<const CaseExpr*>(expression)) {
+        tree(out,node->switchExpr.get());out<<node->whenClauses.size();
+        for(const auto& arm:node->whenClauses){tree(out,arm.first.get());tree(out,arm.second.get());}
+        tree(out,node->elseExpr.get());
+        for(const auto& comparison:node->simpleComparisonTypes){field(out,comparison.first);field(out,comparison.second);}
+        for(const auto& comparison:node->simpleEnumComparisons)field(out,comparison?comparison->identity:"");
+    } else if(const auto* node=dynamic_cast<const FunctionCallExpr*>(expression)) {
+        field(out,node->schema);field(out,node->funcName);field(out,node->resolvedResultType);
+        for(const auto& argument:node->args)tree(out,argument.get());
+        for(const auto& argument:node->namedArgs){field(out,argument.name);tree(out,argument.value.get());}
+    } else if(const auto* node=dynamic_cast<const ArrayExpr*>(expression)) {
+        field(out,node->elementType);out<<node->nestedElements;
+        for(const auto& element:node->elements)tree(out,element.get());
+    } else if(const auto* node=dynamic_cast<const RowExpr*>(expression)) {
+        out<<node->constructor;
+        for(const auto& type:node->fieldTypes)field(out,type);
+        for(const auto& element:node->elements)tree(out,element.get());
+    } else {field(out,expression->toString());}
+}
+void descriptor(std::ostringstream& out,const QueryRowDescriptor& columns) {
+    out<<columns.size()<<';';
+    for(const auto& column:columns) {
+        field(out,column.name);field(out,column.type);
+        out<<column.generated<<':'<<column.identity<<':'<<column.typeOid<<':'<<column.typeMod<<';';
+    }
+}
+std::string originalReceipt(const PreparedQuery& query) {
+    std::ostringstream out;out<<query.ast.get()<<';';field(out,query.source);field(out,query.legacySql());
+    const auto* select=dynamic_cast<const SelectStmt*>(query.ast.get());
+    if(select)for(const auto& item:select->selectList){field(out,item.alias);tree(out,item.expr.get());}
+    descriptor(out,query.output);
+    for(const auto& output:query.statementOutputs){out<<output.first;descriptor(out,output.second);}
+    for(const auto& projection:query.projectionBindings) {
+        out<<projection.first;
+        for(const auto& item:projection.second) {
+            out<<item.expression<<':'<<bool(item.column);
+            if(item.column)out<<item.column->scopeDepth<<':'<<item.column->sourceOrdinal<<':'<<item.column->columnOrdinal
+                <<':'<<item.column->typeOid<<':'<<item.column->mergedUsing;
+        }
+    }
+    return out.str();
+}
+void plan(PreparedQueryExecution& execution,PreparedQuery& query,Expr* expression,int mode) {
+    if(mode==1)execution.planExpressionConstants(expression);
+    if(mode==2)execution.planStatementConstants(query.ast.get());
+    execution.prepareExpression(expression);
+}
+
+// SQL controls check physical data separately from the still-open builtin
+// formatter. Exact display bytes are checked by the native carrier controls.
+// No JSON parser/output or builtin type-display expectation is asserted here.
+void suppressReferenceDisplay(ExprValue& actual,const ExprValue& expected) {
+    if(expected.typeName=="regtype" || expected.typeName=="regtype[]" || expected.typeName=="record")
+        actual.value=expected.value;
+    if(actual.recordFields && expected.recordFields && actual.recordFields->size()==expected.recordFields->size())
+        for(size_t i=0;i<actual.recordFields->size();++i)
+            suppressReferenceDisplay(actual.recordFields->at(i),expected.recordFields->at(i));
+}
+void demandPhysical(ExprValue actual,const ExprValue& expected) {
+    suppressReferenceDisplay(actual,expected);demandCell(actual,expected);
+}
+struct SqlControl {std::string expression;ExprValue expected;uint32_t outputOid;};
+} // namespace
+
+int main() {
+    using namespace dbms;
+    TypeRegistry::instance().bootstrap();
+    Harness checks;
+    const std::string fixture="planned_constant_cells",database=testDbPath(fixture);
+    const std::string metadataDatabase=testDbPath("planned_constant_cells_metadata_never_created");
+    Session session;session.username="testuser";session.permission=1;session.currentDB=database;
+    auto* previous=currentSession();setCurrentSession(&session);
+    struct Restore {Session* previous;~Restore(){setCurrentSession(previous);}} restore{previous};
+    const uint32_t maximum=std::numeric_limits<uint32_t>::max();
+
+    auto textNull=ExprValue("text","NULL");textNull.collation="C";
+    auto utf8=ExprValue("text","é 汉 'quoted' \\\nsecond line");utf8.collation="C";
+    auto matrix=referenceArray({25,std::nullopt,0,maximum},"[0:1][-1:0]={{old,NULL},{-,4294967295}}");
+    auto integers=ExprValue("integer[]","[2:3][5:6]={{1,NULL},{-1,23}}");
+    auto customNull=nullCell("\"NoSuchSchema\".\"NullType\"");customNull.value="retained NULL bytes";
+    auto nested=record({reference("regtype",25),matrix,textNull,
+        record({record({},"()"),nullCell("integer"),utf8})});
+    const std::vector<std::pair<std::string,ExprValue>> cells={
+        {"REGTYPE stale display",reference("regtype",25)},
+        {"REGTYPE zero",reference("regtype",0,"-")},
+        {"REGTYPE maximum",reference("regtype",maximum,"4294967295")},
+        {"OID zero",reference("oid",0,"00000")},
+        {"REGCLASS",reference("regclass",77,"old relation")},
+        {"REGNAMESPACE",reference("regnamespace",11,"old schema")},
+        {"REGROLE",reference("regrole",10,"old role")},
+        {"REGPROC",reference("regproc",42,"old routine")},
+        {"REGPROCEDURE",reference("regprocedure",42,"old routine signature")},
+        {"REGOPER",reference("regoper",71,"old operator")},
+        {"REGOPERATOR",reference("regoperator",71,"old operator signature")},
+        {"REGCONFIG",reference("regconfig",17,"old configuration")},
+        {"REGDICTIONARY",reference("regdictionary",17,"old dictionary")},
+        {"REGCOLLATION",reference("regcollation",100,"old collation")},
+        {"typed REGTYPE NULL",nullCell("regtype")},
+        {"named typed NULL",customNull},
+        {"literal NULL text",textNull},
+        {"empty text",ExprValue("text","")},
+        {"quotes UTF8 backslash newline",utf8},
+        {"numeric retained bytes",ExprValue("numeric","001.2300")},
+        {"UNKNOWN retained bytes",ExprValue("unknown","NULL")},
+        {"empty REGTYPE array",referenceArray({},"{}")},
+        {"NULL REGTYPE array",nullCell("regtype[]")},
+        {"multidimensional bounded REGTYPE array",matrix},
+        {"multidimensional bounded integer array",integers},
+        {"same-display different array identities",referenceArray({25,18},"{old,old}")},
+        {"record absent structural fields",ExprValue("record","(1)")},
+        {"record engaged empty fields",record({},"()")},
+        {"typed NULL record",nullCell("record")},
+        {"record typed NULL field",record({nullCell("integer")},"()")},
+        {"nested record and array",nested},
+        {"unknown catalog-independent identity",ExprValue("\"NoSuchSchema\".\"OpaqueType\"","opaque 'é' bytes")}
+    };
+    ExprEvaluator evaluator;
+    for(const auto& control:cells) {
+        std::weak_ptr<const ExprValue> lifetime;
+        auto original=literal(control.second,&lifetime);
+        auto copied=std::make_unique<LiteralExpr>(*original);original.reset();
+        checks.test(control.first+" copy owns lifetime",[&]{demand(!lifetime.expired(),"copied AST lost immutable datum owner");});
+        checks.test(control.first+" exact evaluator datum",[&]{demandCell(evaluator.eval(copied.get(),RowContext{}),control.second);});
+        checks.test(control.first+" returned mutation isolation",[&]{
+            auto value=evaluator.eval(copied.get(),RowContext{});mutate(value);
+            demandCell(evaluator.eval(copied.get(),RowContext{}),control.second);
+        });
+        auto misleading=std::make_unique<LiteralExpr>(*copied);
+        misleading->typeName="\"__pcc_missing_schema__\".\"mirror_type\"";misleading->value="NULL";
+        checks.test(control.first+" stale mirrors cannot override datum",[&]{demandCell(evaluator.eval(misleading.get(),RowContext{}),control.second);});
+        checks.test(control.first+" pure payload type metadata",[&]{
+            const auto expected=ExprHelper::canonicalResultTypeName(control.second.typeName);
+            demand(ExprHelper::inferParsedInputType(misleading.get(),{},metadataDatabase,&g_engine)==expected,"input type came from mirror/catalog");
+            demand(ExprHelper::inferParsedResultType(misleading.get(),{},metadataDatabase,&g_engine)==
+                (expected=="unknown"?"text":expected),"result type came from mirror/catalog");
+            demand(!g_engine.catalogService().has(metadataDatabase) && !std::filesystem::exists(metadataDatabase),
+                   "metadata initialized a catalog/database");
+        });
+        checks.test(control.first+" pure payload collation metadata",[&]{
+            demand(ExprEvaluator::analyzeExplicitResultCollation(misleading.get())==control.second.collation,
+                   "collation was dropped or taken from mirror");
+        });
+    }
+
+    // Identical SQL mirrors cannot substitute for any part of the datum key.
+    const auto compareIdentity=[&](const std::string& label,ExprValue first,ExprValue second,bool equal) {
+        checks.test(label,[&]{
+            auto left=literal(first),right=literal(second);
+            left->typeName=right->typeName="integer";left->value=right->value="7";
+            const auto a=identity(left.get()),b=identity(right.get());
+            demand(!a.empty() && (a==b)==equal,"payload identity collision or unstable copy");
+        });
+    };
+    compareIdentity("identity equal deep copy",nested,nested,true);
+    compareIdentity("identity object OID",reference("regtype",25),reference("regtype",18),false);
+    compareIdentity("identity absent versus zero OID",ExprValue("regtype","same"),reference("regtype",0,"same"),false);
+    compareIdentity("identity zero versus maximum OID",reference("regtype",0),reference("regtype",maximum),false);
+    compareIdentity("identity SQL NULL versus empty",nullCell("text"),ExprValue("text",""),false);
+    compareIdentity("identity physical type",ExprValue("text","same"),ExprValue("name","same"),false);
+    auto posix=textNull;posix.collation="POSIX";
+    compareIdentity("identity explicit collation",textNull,posix,false);
+    compareIdentity("identity array OIDs",referenceArray({25,18}),referenceArray({18,25}),false);
+    compareIdentity("identity NULL versus zero array position",referenceArray({std::nullopt}),referenceArray({0}),false);
+    compareIdentity("identity array identity-vector length",referenceArray({}),referenceArray({std::nullopt}),false);
+    compareIdentity("identity absent versus empty record",ExprValue("record","()"),record({},"()"),false);
+    compareIdentity("identity recursive record OID",record({reference("regtype",25)}),record({reference("regtype",18)}),false);
+    auto differentNested=nested;differentNested.recordFields->at(3).recordFields->at(2).collation="POSIX";
+    compareIdentity("identity nested field collation",nested,differentNested,false);
+    checks.test("identity ignores misleading raw mirrors",[&]{
+        auto left=literal(nested),right=literal(nested);
+        right->typeName="integer";right->value="NULL";
+        demand(identity(left.get())==identity(right.get()),"raw mirror overrode actual datum identity");
+    });
+
+    // Only ordinary scalar enum DDL is used. No enum-array DDL, synthetic
+    // catalog row, private array factory or R151 acceptance is involved.
+    DdlExecutor ddl;
+    checks.test("create private database",[&]{cleanupTestDb(fixture);demand(g_engine.createDatabase(database)==DBStatus::OK,"createDatabase failed");});
+    checks.test("create private schema",[&]{demand(!ddl.executeSql("CREATE SCHEMA pcc_shadow",session),"CREATE SCHEMA failed");});
+    checks.test("create ordinary scalar enum text shadow",[&]{demand(!ddl.executeSql("CREATE TYPE pcc_shadow.text AS ENUM ('z','a')",session),"CREATE TYPE failed");});
+    checks.test("scalar shadow has genuine distinct OID",[&]{
+        const auto snapshot=g_engine.catalogService().metadataSnapshot(database);uint32_t shadow=0;
+        for(const auto& space:snapshot.namespaces)if(space.nspname=="pcc_shadow")
+            for(const auto& type:snapshot.types)if(type.typnamespace==space.oid && type.typname=="text" && type.typtype=='e')shadow=type.oid;
+        demand(shadow && shadow!=25,"actual scalar enum metadata missing");
+    });
+    checks.test("create callback effect receiver",[&]{
+        TableSchema table;table.tablename="pcc_calls";table.append(makeIntColumn("id",false,4));
+        demand(g_engine.createTable(database,table)==DBStatus::OK,"createTable failed");
+    });
+    checks.test("create declared volatile writer",[&]{
+        demand(g_engine.createUDF(database,"pcc_writer",{"p"},{"integer"},
+            "BEGIN INSERT INTO pcc_calls VALUES(1); RETURN p; END;",'v',"plpgsql","integer")==DBStatus::OK,"createUDF failed");
+    });
+    session.searchPath="pcc_shadow,pg_catalog,public";
+    const auto reg=[](uint32_t oid){return std::to_string(oid)+"::pg_catalog.oid::pg_catalog.regtype";};
+    const auto oid=[](uint32_t value){return reference("oid",value,std::to_string(value));};
+    const auto rt=[](uint32_t value){return reference("regtype",value);};
+    const std::string a=reg(25),b=reg(18),c=reg(1009);
+    const std::string bounded="'[0:1][-1:0]={{25,NULL},{18,1009}}'::pg_catalog.regtype[]";
+    // oid[] is advertised by a spelling map but has no bootstrap _oid row.
+    // That separate metadata issue is not silently accepted or repaired here:
+    // physical array conversions deliberately use existing integer[] rows.
+    const std::vector<SqlControl> sqlControls={
+        {a+"::pg_catalog.oid",oid(25),26},
+        {b+"::pg_catalog.oid",oid(18),26},
+        {c+"::pg_catalog.oid",oid(1009),26},
+        {reg(0)+"::pg_catalog.oid",oid(0),26},
+        {reg(maximum)+"::pg_catalog.oid",oid(maximum),26},
+        {"CASE WHEN true THEN "+a+" ELSE "+b+" END",rt(25),2206},
+        {"CASE WHEN false THEN "+a+" ELSE "+b+" END",rt(18),2206},
+        {"CASE "+a+" WHEN "+a+" THEN "+a+" ELSE "+b+" END",rt(25),2206},
+        {"CASE NULL::pg_catalog.regtype WHEN "+b+" THEN "+b+" ELSE "+a+" END",rt(25),2206},
+        {"COALESCE(NULL::pg_catalog.regtype,"+a+")",rt(25),2206},
+        {"COALESCE("+a+","+b+")",rt(25),2206},
+        {a+" BETWEEN "+b+" AND "+c,ExprValue("boolean","t"),16},
+        {a+" NOT BETWEEN "+b+" AND "+c,ExprValue("boolean","f"),16},
+        {a+" IN("+b+","+a+")",ExprValue("boolean","t"),16},
+        {a+" NOT IN("+b+","+a+")",ExprValue("boolean","f"),16},
+        {a+" IN("+b+",NULL::pg_catalog.regtype)",nullCell("boolean"),16},
+        {"ARRAY["+a+",NULL::pg_catalog.regtype,"+b+"]",referenceArray({25,std::nullopt,18}),2211},
+        {"CAST(ARRAY[25,18,-1] AS pg_catalog.regtype[])",referenceArray({25,18,maximum}),2211},
+        {bounded,referenceArray({25,std::nullopt,18,1009}),2211},
+        {"CAST("+bounded+" AS pg_catalog.int4[])",ExprValue("integer[]","[0:1][-1:0]={{25,NULL},{18,1009}}"),1007},
+        {"(ARRAY["+a+","+b+"])[1]::pg_catalog.oid",oid(25),26},
+        {"("+bounded+")[1][0]::pg_catalog.oid",oid(1009),26},
+        {"(NULL::pg_catalog.regtype[])[1]::pg_catalog.oid",nullCell("oid"),26},
+        {"ROW("+a+",'NULL'::pg_catalog.text,NULL::pg_catalog.regtype)",record({rt(25),ExprValue("text","NULL"),nullCell("regtype")}),2249},
+        {"CASE WHEN true THEN ROW("+a+","+b+") ELSE ROW("+b+","+a+") END",record({rt(25),rt(18)}),2249},
+        {"ROW(ROW("+a+"),ARRAY["+a+",NULL::pg_catalog.regtype])",record({record({rt(25)}),referenceArray({25,std::nullopt})}),2249},
+        {"CASE WHEN true THEN ARRAY["+a+","+b+"] ELSE ARRAY["+b+","+a+"] END",referenceArray({25,18}),2211},
+        {"COALESCE(NULL::pg_catalog.regtype[],ARRAY["+a+"])",referenceArray({25}),2211},
+        {"CASE WHEN true THEN NULL::pg_catalog.regtype ELSE "+a+" END",nullCell("regtype"),2206},
+        {"CAST(CASE WHEN true THEN "+a+" ELSE "+b+" END AS pg_catalog.oid)",oid(25),26},
+        {"ROW(CASE WHEN true THEN "+a+" ELSE "+b+" END)::pg_catalog.record",record({rt(25)}),2249},
+        {reg(0)+"=0::pg_catalog.oid",ExprValue("boolean","t"),16}
+    };
+    for(const auto& control:sqlControls)for(int mode=0;mode<3;++mode) {
+        std::shared_ptr<PreparedQuery> query;std::string preparedError,receipt;
+        try {query=std::make_shared<PreparedQuery>(g_engine.prepareBoundQuery(database,"SELECT "+control.expression));receipt=originalReceipt(*query);}
+        catch(const std::exception& error){preparedError=error.what();}
+        for(int repeat=0;repeat<2;++repeat)checks.test("SQL mode"+std::to_string(mode)+" repeat"+std::to_string(repeat)+" "+control.expression,[&]{
+            demand(bool(query),"binding failed: "+preparedError);
+            demand(query->output.size()==1 && query->output.front().typeOid==control.outputOid,"physical output descriptor changed");
+            auto* select=dynamic_cast<SelectStmt*>(query->ast.get());demand(select && select->selectList.size()==1,"missing actual SELECT expression");
+            auto* expression=select->selectList.front().expr.get();
+            PreparedQueryExecution execution(query,&g_engine,database);size_t childCalls=0;
+            execution.setQueryExecutor([&](const Stmt*,const RowContext&,size_t)->PreparedQueryRows {
+                ++childCalls;throw DbError("XX000","constant planning opened child query");
+            });
+            execution.setChildCursorFactory([&](const Stmt*,const RowContext&)->std::unique_ptr<PreparedQueryCursor> {
+                ++childCalls;throw DbError("XX000","constant planning constructed child cursor");
+            });
+            plan(execution,*query,expression,mode);plan(execution,*query,expression,mode);
+            demand(childCalls==0,"planning obtained a child value");
+            demand(originalReceipt(*query)==receipt,"planning mutated original AST/descriptors");
+            demandPhysical(execution.evaluate(expression,execution.context()),control.expected);
+            demandPhysical(execution.evaluate(expression,execution.context()),control.expected);
+            demand(childCalls==0 && originalReceipt(*query)==receipt,"evaluation/repeated planning changed original ownership");
+        });
+    }
+
+    for(const auto origin:{ParameterOrigin::StatementInput,ParameterOrigin::RuntimeCell,ParameterOrigin::MetadataPlaceholder})
+        for(int mode=0;mode<3;++mode) {
+            std::shared_ptr<PreparedQuery> query;std::unique_ptr<PreparedQueryExecution> execution;
+            Expr* expression=nullptr;std::string receipt,preparationError;
+            try {
+                QueryBindingDatum datum={"pcc-owned-parameter","p","regtype",{},false,"25",1};datum.origin=origin;
+                query=std::make_shared<PreparedQuery>(g_engine.prepareBoundQuery(database,
+                    "SELECT CASE WHEN true THEN $1::pg_catalog.oid ELSE 18::pg_catalog.oid END",{datum}));
+                demand(query->parameters.size()==1,"missing real typed parameter frame");
+                query->parameters[0]=reference("regtype",25,"unresolvable frozen parameter display");
+                expression=static_cast<SelectStmt*>(query->ast.get())->selectList.front().expr.get();receipt=originalReceipt(*query);
+                execution=std::make_unique<PreparedQueryExecution>(query,&g_engine,database);
+                plan(*execution,*query,expression,mode);plan(*execution,*query,expression,mode);
+            }catch(const std::exception& error){preparationError=error.what();}
+            for(const auto& input:std::vector<ExprValue>{rt(25),rt(18),nullCell("regtype")})
+                checks.test("parameter origin"+std::to_string(static_cast<int>(origin))+" mode"+std::to_string(mode)+
+                    " input"+(input.isNull?"NULL":std::to_string(*input.objectOid)),[&]{
+                    demand(execution && preparationError.empty(),"parameter preparation failed: "+preparationError);
+                    auto row=execution->context();row.setParameters({input});row=execution->context(row);
+                    const auto expected=origin==ParameterOrigin::StatementInput?oid(25):input.isNull?nullCell("oid"):oid(*input.objectOid);
+                    demandPhysical(execution->evaluate(expression,row),expected);
+                    demand(originalReceipt(*query)==receipt,"parameter planning changed original AST/descriptors");
+                    demandCell(query->parameters.at(0),reference("regtype",25,"unresolvable frozen parameter display"));
+                });
+        }
+
+    for(char volatility:{'v','i'}) {
+        ExprEvaluator callbackEvaluator;size_t calls=0;bool actualArgument=false;
+        callbackEvaluator.registerFunction("pcc_opaque",[&](const std::vector<ExprValue>& arguments){
+            ++calls;actualArgument=arguments.size()==1 && cellDifference(arguments.front(),nested).empty();
+            return ExprValue("integer","7");
+        },volatility);
+        const auto call=[&]{auto result=std::make_unique<FunctionCallExpr>();result->funcName="pcc_opaque";result->args.push_back(literal(nested));return result;};
+        auto expression=call();
+        checks.test("opaque metadata volatility "+std::string(1,volatility),[&]{
+            demand(callbackEvaluator.hasScalarFunction(expression.get(),&g_engine),"missing actual callback");
+            demand(callbackEvaluator.scalarFunctionResultType(expression.get(),&g_engine).empty(),"opaque callback acquired return declaration");
+            demand(ExprHelper::inferParsedInputType(expression.get(),{},"",&g_engine,&callbackEvaluator)=="unknown" && calls==0,
+                   "metadata executed opaque callback or invented result type");
+        });
+        checks.test("opaque binding volatility "+std::string(1,volatility),[&]{
+            callbackEvaluator.bindScalarFunctions(expression.get(),&g_engine);
+            demand(calls==0,"callback evaluated while binding");
+        });
+        checks.test("opaque discarded CASE volatility "+std::string(1,volatility),[&]{
+            CaseExpr conditional;conditional.whenClauses.emplace_back(literal(ExprValue("boolean","false")),call());
+            conditional.elseExpr=literal(ExprValue("integer","7"));
+            demandCell(callbackEvaluator.eval(&conditional,RowContext{}),ExprValue("integer","7"));
+            demand(calls==0,"unused opaque callback was demanded");
+        });
+        checks.test("opaque actual invocation volatility "+std::string(1,volatility),[&]{
+            demandCell(callbackEvaluator.eval(expression.get(),RowContext{}),ExprValue("integer","7"));
+            demand(calls==1 && actualArgument,"callback lost full input datum or invocation ownership");
+        });
+    }
+
+    struct LazyControl {std::string expression,value;size_t effects;};
+    const std::vector<LazyControl> lazy={
+        {"CASE WHEN false THEN pcc_writer(99) ELSE 7 END","7",0},
+        {"COALESCE(7,pcc_writer(99))","7",0},
+        {"CASE WHEN true THEN pcc_writer(9) ELSE 7 END","9",1},
+        {"pcc_writer(11)","11",1}
+    };
+    const auto count=[&]{return g_engine.query(database,"pcc_calls",{},{"id"},{}).size();};
+    for(const auto& control:lazy)for(int mode=0;mode<3;++mode) {
+        std::shared_ptr<PreparedQuery> query;std::unique_ptr<PreparedQueryExecution> execution;
+        Expr* expression=nullptr;size_t before=0;std::string receipt;
+        const auto label="declared callback mode"+std::to_string(mode)+" "+control.expression;
+        checks.test(label+" pure planning",[&]{
+            before=count();query=std::make_shared<PreparedQuery>(g_engine.prepareBoundQuery(database,"SELECT "+control.expression));
+            expression=static_cast<SelectStmt*>(query->ast.get())->selectList.front().expr.get();receipt=originalReceipt(*query);
+            execution=std::make_unique<PreparedQueryExecution>(query,&g_engine,database);
+            plan(*execution,*query,expression,mode);plan(*execution,*query,expression,mode);
+            demand(count()==before && originalReceipt(*query)==receipt,"planning ran writer or mutated query");
+        });
+        checks.test(label+" actual demand",[&]{
+            demand(bool(execution),"planning did not produce an execution");
+            demandCell(execution->evaluate(expression,execution->context()),ExprValue("integer",control.value));
+            demand(count()==before+control.effects,"writer effects do not match actual runtime demand");
+            demand(originalReceipt(*query)==receipt,"runtime changed shared AST/descriptors");
+        });
+    }
+    checks.test("drop only private fixture database",[&]{demand(g_engine.dropDatabase(database)==DBStatus::OK,"dropDatabase failed");});
+    // 32 payloads * 6 + 14 identities + 6 setup + 32 SQL * 3 modes * 2
+    // executions + 3 parameter origins * 3 modes * 3 cells + 2 opaque
+    // volatilities * 4 + 4 declared calls * 3 modes * 2 + 1 cleanup = 464.
+    constexpr size_t expectedControls=464;
+    std::cout<<"PLANNED_CONSTANT_CELLS_NATIVE_COMPLETE "<<checks.controls<<" EXPECTED "<<expectedControls
+             <<" FAILURES "<<checks.failures<<" PAYLOAD_API "<<HasAnalyzedConstant<LiteralExpr>::value<<'\n';
+    return checks.controls==expectedControls && checks.failures==0?0:1;
+}

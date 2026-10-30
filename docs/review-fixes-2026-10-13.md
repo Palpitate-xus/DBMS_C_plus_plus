@@ -1,5 +1,13 @@
 # 2026-10-13 审查问题修复进度
 
+最新有限修复：[R185排序中断传播](issue-review-r185-sort-interrupt-propagation.md)统一执行器12处排序的取消/超时检查，
+保留原比较、类型、NULL/tie及求值规则。修正夹具后旧80控制完整40失败；两侧新80及各19完整入口均实际全0。
+每侧74对象16程序/127头核对，Root正常1CPP并链接/repeat零；Main为同源已验证donor重新链接，不冒fresh TU。
+原273全文已保存在[原子范围账](review-requirement-clauses.json)，仅3项拆为38条件、其余270未拆解含原15暂缓，未声称全审。
+work_mem/spill等仍未闭合；原22/166/70/15不变，登记1493/Root1505、606MD/Root609MD，原12入口/三文档保留。
+不是全1493/修复后完整72/TLS/sanitizer验收，总目标未完成；不push，不启用Actions。以下记录按当时输入解释。
+
+
 最新有限修复：[R184测试数据目录隔离](issue-review-r184-test-data-directory-isolation.md)使公共helper在子程序启动前选私有数据根，
 父环境/cwd不变。旧同一7控制完整4失败，候选及Root完整7通过；两侧各4native/3真实Main通过，调用者标记目录保持不变。
 只改脚本及既有测试，全部CPP/127头和匹配程序不变，不冒fresh编译或修复后新完整72；旧72另记。
@@ -602,6 +610,7 @@ socket超时，精确SQL/栈和原期限保留，尚未确定根因，不称新�
 | R110 | 非 NULL 数组请求二进制结果时报0A000 | 本项单独修复与验收 | 真实内置数组身份、维度/下界、NULL和已有元素发送 codec；实际参考110零失败、旧75失败，182低层控制与独立版本见[记录](issue-review-r110-array-binary-result.md)，其余标量 codec/二进制输入仍开放 |
 | R112 | 具名 BPCHAR/BIT 数组无 typmod 输入被截为长度1 | 本项单独修复与验收 | 实际参考57零失败、旧44失败；保持关键字默认长度和显式 typmod，独立版本与有限门禁见[记录](issue-review-r112-unconstrained-named-array-input.md)，不混入 R109/R110 候选 |
 | R108 | ARRAY_POSITION绕过typed元素相等 | 本范围已修复，独立本地commit | 第五版354/258、原208/80/array库/654及32native/29协议/3真实Main共64完整入口均0，28补充JSONB及核心/最终fence0；旧258/158、320/183、各版失败和原API断言保留，不冒新全量，见[记录](issue-review-r108-array-position-typed-equality.md) |
+| R109 | 缺失ARRAY_POSITIONS全部匹配下标函数 | 用户跳过，保留候选未提交 | 跳过前388/248、normal5/repeat0及66有限完整入口全0，不计接受版本或已修复；源码、测试和旧失败保留，见[记录](issue-review-r109-array-positions.md) |
 | O01 | owner健康重试及测试覆盖 | 已修复 | `c9a1e3c3`；原全部owner断言、新真实peer/dirty冲突及10完整native提交前/后通过；Root R14集成fresh58后两完整owner再次通过，见[验证](issue-review-o01-table-owner-health-retry.md) |
 | O02 | EXISTS索引错误的访问计划/断言 | 已修正回归夹具 | 原完整协议exit 1→0，保留六严格XX001，新增精确t/f，完整EXISTS协议/19native通过；未改产品，见[验证](issue-review-o02-index-access-path-expectations.md) |
 | O03 | EXPLAIN JOIN图及过时断言 | 已修复 | 实际执行的source/cache/join/scan图及相关重绑；最终完整60控制、十二native/十协议CLI全过，OFFSET阳性及42601原/PG对照保留，见[验证](issue-review-o03-explain-join-source-graph.md) |

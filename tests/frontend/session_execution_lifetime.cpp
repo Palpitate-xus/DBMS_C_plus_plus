@@ -145,6 +145,31 @@ int main() {
     }
     caller.defaultTimeZone = "UTC";
     run("SET TimeZone TO 'UTC'");
+    run("SET SESSION\"TimeZone\"='Asia/Kathmandu'");
+    assert(caller.timeZone == "Asia/Kathmandu" && caller.timezoneOffsetMinutes == 345);
+    run("SET TimeZone FROM CURRENT");
+    assert(caller.timeZone == "Asia/Kathmandu" && caller.timezoneOffsetMinutes == 345);
+    run("SET TimeZone=- 5.5");
+    assert(caller.timeZone == "<-05:30>+05:30" && caller.timezoneOffsetMinutes == -330);
+    run("SET TIME ZONE 0x4");
+    assert(caller.timeZone == "<+04>-04" && caller.timezoneOffsetMinutes == 240);
+    run("SET TimeZone TO E'UT\\x43'");
+    assert(caller.timeZone == "UTC" && caller.timezoneOffsetMinutes == 0);
+    run("SET TimeZone TO 'UT'\n'C'");
+    assert(caller.timeZone == "UTC" && caller.timezoneOffsetMinutes == 0);
+    run("SET TimeZone TO 'Pacific/Kiritimati'");
+    for (const std::string invalid : {"SET TimeZone DEFAULT", "SET SESSION TimeZone DEFAULT",
+            "SET TIME ZONE = DEFAULT", "SET SESSION TIME ZONE = DEFAULT",
+            "SET TimeZone 'UTC'", "SET \"TimeZone\" 'UTC'", "SET TIME ZONE TO 'UTC'",
+            "SET TimeZone TO 'UTC' junk", "SET TimeZone TO Asia/Shanghai",
+            "SET TimeZone TO +05:30", "SETTINGS TimeZone='UTC'", "SET TimeZone TO helper()"}) {
+        run(invalid, "42601");
+        assert(caller.timeZone == "Pacific/Kiritimati" && caller.timezoneOffsetMinutes == 840);
+    }
+    run("SET LOCAL TimeZone='UTC'", "0A000");
+    assert(caller.timeZone == "Pacific/Kiritimati" && caller.timezoneOffsetMinutes == 840);
+    assert(parent.timeZone == parentTimeZone);
+    run("SET TimeZone TO 'UTC'");
     run("SELECT 1");
     // The native dispatcher reports this legacy error as bool + diagnostic;
     // lexical and prepared trigger failures below are real DbError throws.

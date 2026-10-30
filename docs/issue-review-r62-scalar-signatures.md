@@ -13,6 +13,9 @@
 ARRAY_POSITION的有限anycompatible声明、UNKNOWN输入、同名用户/原生回调及
 数组参数元数据由[R108](issue-review-r108-array-position-typed-equality.md)
 另项修复并验收；不能据此关闭一般多态或原TYPE-16/FUNC-01。
+后续两参数ARRAY_POSITIONS的INTEGER[]结果、实际参数OID及原生替换/用户
+callee所有权见[R109](issue-review-r109-array-positions.md)，不按名字继承
+ARRAY_POSITION的INTEGER返回值，也不据此关闭全部多态/PROTO-04。
 R60修正窗口routine身份，不等于完成全部标量签名校验。
 后续[R134](issue-review-r134-core-native-callback-ownership.md)修正ABS/LENGTH/UPPER/LOWER
 被registerFunction替换后错误继承内置签名的所有权，旧1320/922失败、同夹具修正后

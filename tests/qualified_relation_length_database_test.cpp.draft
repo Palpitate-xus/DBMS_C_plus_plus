@@ -1,0 +1,119 @@
+#include "catalog/type_registry.h"
+#include "commands/TableManage.h"
+#include "commands/DdlTransaction.h"
+#include <algorithm>
+#include <filesystem>
+#include <fstream>
+#include <functional>
+#include <iostream>
+#include <sys/wait.h>
+#include <unistd.h>
+
+extern dbms::StorageEngine g_engine;
+using namespace dbms;
+namespace fs = std::filesystem;
+
+struct Checks {
+    size_t controls = 0, failures = 0;
+    void check(const std::string& label, const std::function<bool()>& fn) {
+        ++controls;
+        try { if (fn()) return; }
+        catch (const std::exception& e) { std::cerr << label << ": " << e.what() << '\n'; }
+        ++failures; std::cerr << "FAIL " << label << '\n';
+    }
+    int complete(const char* label) {
+        std::cout << label << " " << controls << " FAILURES " << failures << std::endl;
+        return failures ? 1 : 0;
+    }
+};
+
+const std::string database = "r218_native";
+const std::string schema = std::string(63, 's');
+const std::string parent = schema + "__" + std::string(63, 'p');
+const std::string renamed = schema + "__" + std::string(62, 'p') + "q";
+const std::string child = std::string(63, 't') + "__" + std::string(63, 'c');
+
+TableSchema table(const std::string& name, bool primary = true) {
+    TableSchema result; result.tablename = name;
+    result.append(makeIntColumn("n", false, 4, primary));
+    return result;
+}
+
+size_t rows(const std::string& name) {
+    size_t count = 0;
+    if (!g_engine.forEachRow(database, name, [&](uint32_t,uint16_t,const char*,size_t){++count;}))
+        throw std::runtime_error("could not read " + name);
+    return count;
+}
+
+bool childProcess(const std::string& mode) {
+    const pid_t pid = fork();
+    if (pid == 0) { execl("/proc/self/exe", "qualified_relation_length_database", mode.c_str(), nullptr); _exit(127); }
+    int status = 0;
+    return pid > 0 && waitpid(pid,&status,0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+int main(int argc, char** argv) {
+    TypeRegistry::instance().bootstrap();
+    Checks c;
+    if (argc == 2) {
+        const std::string mode = argv[1];
+        const std::string actualParent = mode == "--renamed" ? renamed : parent;
+        c.check("cold recovery",[]{return g_engine.recoverAllDatabases();});
+        for (const auto& name : {std::string("legacy"), actualParent, child}) {
+            c.check("cold existence "+name,[&]{return g_engine.tableExists(database,name);});
+            c.check("cold schema "+name,[&]{const auto s=g_engine.getTableSchema(database,name);return s.tablename==name && s.len==1;});
+            c.check("cold row "+name,[&]{return rows(name)==1;});
+        }
+        c.check("cold FK identity",[&]{const auto s=g_engine.getTableSchema(database,child);return s.fkLen==1 && s.fks[0].refTable==actualParent;});
+        c.check("cold list",[&]{const auto n=g_engine.getTableNames(database);return n.size()==3 && std::find(n.begin(),n.end(),actualParent)!=n.end();});
+        return c.complete("QUALIFIED_RELATION_DATABASE_COLD_COMPLETE");
+    }
+    c.check("create database",[]{return g_engine.createDatabase(database)==DBStatus::OK;});
+    c.check("legacy table",[]{return g_engine.createTable(database,table("legacy"))==DBStatus::OK;});
+    c.check("legacy insert",[]{return g_engine.insert(database,"legacy",{{"n","1"}})==DBStatus::OK;});
+    c.check("long parent",[]{return g_engine.createTable(database,table(parent))==DBStatus::OK;});
+    c.check("parent insert",[]{return g_engine.insert(database,parent,{{"n","41"}})==DBStatus::OK;});
+    c.check("long FK child",[]{auto s=table(child,false);ForeignKey fk;fk.name="r218_fk";fk.colNames={"n"};fk.refCols={"n"};fk.refTable=parent;s.appendFK(fk);return g_engine.createTable(database,s)==DBStatus::OK;});
+    c.check("child insert",[]{return g_engine.insert(database,child,{{"n","41"}})==DBStatus::OK;});
+    c.check("child violation",[]{return g_engine.insert(database,child,{{"n","42"}})==DBStatus::FOREIGN_KEY_VIOLATION;});
+    c.check("duplicate identity",[]{return g_engine.createTable(database,table(parent))==DBStatus::TABLE_ALREADY_EXISTS;});
+    for (const auto& name : {std::string(64,'x'),std::string(64,'s')+"__"+std::string(63,'p'),
+                            std::string(63,'s')+"__"+std::string(64,'p'),std::string("bad/name")})
+        c.check("reject invalid "+name,[&]{return g_engine.createTable(database,table(name))==DBStatus::INVALID_ARGUMENT;});
+    c.check("checkpoint",[]{return g_engine.checkpoint(database);});
+    c.check("real cold process",[]{return childProcess("--cold");});
+    const auto oldNames=g_engine.getTableNames(database);
+    const std::string transient=schema+"__"+std::string(63,'r');
+    c.check("begin snapshot",[]{return g_engine.beginTransaction(database)==DBStatus::OK;});
+    c.check("create in transaction",[&]{
+        // The physical primitive deliberately does not register DDL undo.
+        // Use the same owner/dirty/undo wrapper as production SQL; bare
+        // beginTransaction(true) has a documented manual-restore lifecycle.
+        DdlTransaction ddl(g_engine,database);
+        if (!ddl.enableSnapshotRollback() || !ddl.begin()) return false;
+        ddl.markSnapshotDirty();
+        if (g_engine.createTable(database,table(transient)) != DBStatus::OK) return false;
+        ddl.recordCreate(DdlObjectKind::Table,transient);
+        return ddl.commit();
+    });
+    c.check("rollback",[]{return g_engine.rollbackTransaction()==DBStatus::OK;});
+    c.check("rollback list",[&]{return g_engine.getTableNames(database)==oldNames;});
+    c.check("rollback forks",[&]{return !g_engine.tableExists(database,transient) && !fs::exists(fs::path(database)/(transient+".dt"));});
+    c.check("rename parent",[]{return g_engine.alterTableRenameTable(database,parent,renamed)==DBStatus::OK;});
+    c.check("old name absent",[]{return !g_engine.tableExists(database,parent);});
+    c.check("renamed FK",[]{const auto s=g_engine.getTableSchema(database,child);return s.fkLen==1 && s.fks[0].refTable==renamed;});
+    c.check("renamed child violation",[]{return g_engine.insert(database,child,{{"n","42"}})==DBStatus::FOREIGN_KEY_VIOLATION;});
+    c.check("backup",[]{return g_engine.physicalBackup(database,"r218_backup");});
+    c.check("post-backup mutation",[]{return g_engine.insert(database,"legacy",{{"n","2"}})==DBStatus::OK;});
+    c.check("restore",[]{return g_engine.physicalRestore(database,"r218_backup");});
+    c.check("restored row",[]{return rows("legacy")==1;});
+    c.check("second real cold process",[]{return childProcess("--renamed");});
+    c.check("drop child",[]{return g_engine.dropTable(database,child)==DBStatus::OK;});
+    c.check("truncate renamed",[]{return g_engine.truncateTable(database,renamed)==DBStatus::OK;});
+    c.check("truncate rows",[]{return rows(renamed)==0;});
+    c.check("drop renamed",[]{return g_engine.dropTable(database,renamed)==DBStatus::OK;});
+    c.check("legacy list retained",[]{return g_engine.getTableNames(database)==std::vector<std::string>{"legacy"};});
+    c.check("legacy list encoding",[]{return fs::file_size(fs::path(database)/"tlist.lst")==64;});
+    return c.complete("QUALIFIED_RELATION_DATABASE_NATIVE_COMPLETE");
+}

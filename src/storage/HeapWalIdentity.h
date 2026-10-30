@@ -1,6 +1,7 @@
 #pragma once
 
 #include "storage/WAL.h"
+#include "commands/RelationNameCodec.h"
 #include <cstring>
 #include <optional>
 #include <string>
@@ -11,7 +12,7 @@ namespace dbms::heap_wal_identity {
 constexpr uint32_t kImageMagic = 0x31444948u;  // HID1
 constexpr uint32_t kVersion = 1;
 constexpr uint32_t kEventMagic = 0x31454752u;  // RGE1
-constexpr size_t kMaxName = 64;
+constexpr size_t kMaxName = relation_name_codec::storageWidth;
 
 template <typename T>
 inline void append(std::vector<char>& bytes, const T& value) {
@@ -51,7 +52,7 @@ inline bool nameIdentity(const std::vector<char>& bytes, std::string& name,
         length > bytes.size() - offset) return false;
     name.assign(bytes.data() + offset, length);
     offset += length;
-    if (name.find('\0') != std::string::npos) return false;
+    if (!relation_name_codec::valid(name)) return false;
     if (padding(bytes, offset)) return true;
     uint32_t magic = 0, version = 0;
     uint64_t identity = 0;
@@ -73,6 +74,8 @@ inline bool image(const XLogRecord& record, std::optional<uint64_t>& relationId)
     uint32_t nameLength = 0;
     if (!read(record.data, offset, nameLength) || nameLength == 0 ||
         nameLength >= kMaxName || nameLength > record.data.size() - offset)
+        return false;
+    if (!relation_name_codec::valid(std::string_view(record.data.data() + offset, nameLength)))
         return false;
     offset += nameLength;
     uint32_t block = 0, fork = 0, pageLength = 0;
@@ -100,8 +103,7 @@ struct Event {
 
 inline std::vector<char> event(uint64_t relationId, const std::string& name) {
     std::vector<char> bytes;
-    if (relationId == 0 || name.empty() || name.size() >= kMaxName ||
-        name.find('\0') != std::string::npos) return bytes;
+    if (relationId == 0 || !relation_name_codec::valid(name)) return bytes;
     append(bytes, kEventMagic);
     append(bytes, kVersion);
     append(bytes, relationId);
@@ -125,7 +127,7 @@ inline bool event(const XLogRecord& record, Event& result) {
         return false;
     result.name.assign(record.data.data() + offset, length);
     offset += length;
-    return result.name.find('\0') == std::string::npos && padding(record.data, offset);
+    return relation_name_codec::valid(result.name) && padding(record.data, offset);
 }
 
 }  // namespace dbms::heap_wal_identity

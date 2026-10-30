@@ -247,6 +247,29 @@ def main():
         assert b"50\n" not in b"".join(
             body for kind, body in exported if kind == b"d"), exported
 
+        # The same active COPY interruption contract also owns Execute's
+        # extended-protocol path; preserve all existing rows across its abort.
+        kept_ids = [body for kind, body in exported if kind == b"d"]
+        sock.sendall(
+            client.typed(b"P", parse(
+                "copy_ext_cancel", "COPY copy_wire (id, payload, optional) FROM STDIN")) +
+            client.typed(b"B", bind("copy_ext_cancel_portal", "copy_ext_cancel")) +
+            client.typed(b"E", execute("copy_ext_cancel_portal")))
+        assert client.read_message(sock) == (b"1", b"")
+        assert client.read_message(sock) == (b"2", b"")
+        kind, body = client.read_message(sock)
+        assert kind == b"G", (kind, body)
+        expect_copy_response(body, 3)
+        with socket.create_connection(("127.0.0.1", server["port"]), 15) as cancel:
+            cancel.sendall(struct.pack("!IIII", 16, 80877102, backend_pid, secret))
+        kind, body = client.read_message(sock)
+        assert kind == b"E" and b"C57014\0" in body, (kind, body)
+        sock.sendall(client.typed(b"S"))
+        assert client.read_until_ready(sock) == [(b"Z", b"I")]
+        exported = copy_out(client, sock, "COPY copy_wire (id) TO STDOUT", 1)
+        assert [body for kind, body in exported if kind == b"d"] == kept_ids, exported
+        print("COPY_CANCEL_MODES_COMPLETE 2")
+
         # A COPY TO client that stops reading must not pin the backend in a
         # blocking socket write beyond statement_timeout.  Constrain the
         # receive buffer and make the output larger than the kernel buffers.

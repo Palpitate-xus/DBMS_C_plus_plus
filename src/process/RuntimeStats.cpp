@@ -396,10 +396,9 @@ bool persistRuntimeStats(const std::string& dbname,
     if (baselineIt != persistedDatabaseStatsMap().end()) baseline = baselineIt->second;
     RuntimeDatabaseStats disk = baseline;
     DurableStatsSnapshot onDisk;
-    if (std::filesystem::exists(path, ec)) {
-        if (ec || !readSnapshot(path, dbname, onDisk)) return false;
-        disk = onDisk.database;
-    }
+    const bool exists = std::filesystem::exists(path, ec);
+    if (ec || (exists && !readSnapshot(path, dbname, onDisk))) return false;
+    if (exists) disk = onDisk.database;
     DurableStatsSnapshot snapshot;
     snapshot.database = mergeDatabaseStats(disk, current, baseline);
     std::set<std::pair<std::string, std::string>> currentKeys;
@@ -410,14 +409,14 @@ bool persistRuntimeStats(const std::string& dbname,
         auto baseIt = persistedTableStatsMap().find(key);
         if (baseIt != persistedTableStatsMap().end()) tableBaseline = baseIt->second;
         RuntimeTableStats tableDisk = tableBaseline;
-        if (std::filesystem::exists(path, ec)) {
+        if (exists) {
             auto diskIt = std::find_if(onDisk.tables.begin(), onDisk.tables.end(),
                 [&](const RuntimeTableStats& item) { return item.relname == table.relname; });
             if (diskIt != onDisk.tables.end()) tableDisk = *diskIt;
         }
         snapshot.tables.push_back(mergeTableStats(tableDisk, table, tableBaseline));
     }
-    if (std::filesystem::exists(path, ec)) {
+    if (exists) {
         for (const auto& table : onDisk.tables) {
             const auto key = std::make_pair(dbname, table.relname);
             if (currentKeys.count(key) == 0 && !removedRuntimeTables().count(key)) {
@@ -430,26 +429,49 @@ bool persistRuntimeStats(const std::string& dbname,
             return a.relname < b.relname;
         });
 
-    if (!publishStatsSnapshot(path, [&](const std::filesystem::path& temporary) {
+    auto& liveDatabases = databaseStatsMap();
+    auto& savedDatabases = persistedDatabaseStatsMap();
+    auto& liveTables = tableStatsMap();
+    auto& savedTables = persistedTableStatsMap();
+    auto& removedTables = removedRuntimeTables();
+    std::map<std::string, RuntimeDatabaseStats> nextLiveDatabases, nextSavedDatabases;
+    std::map<std::pair<std::string, std::string>, RuntimeTableStats>
+        nextLiveTables, nextSavedTables;
+    nextLiveDatabases.emplace(dbname, snapshot.database);
+    nextSavedDatabases.emplace(dbname, snapshot.database);
+    for (const auto& table : snapshot.tables) {
+        const auto key = std::make_pair(dbname, table.relname);
+        nextLiveTables.insert_or_assign(key, table);
+        nextSavedTables.insert_or_assign(key, table);
+    }
+
+    const auto publication = publishStatsSnapshotWithStatus(
+        path, [&](const std::filesystem::path& temporary) {
             return writeSnapshot(temporary, snapshot);
-        })) return false;
-    persistedDatabaseStatsMap()[dbname] = snapshot.database;
-    for (auto it = persistedTableStatsMap().begin(); it != persistedTableStatsMap().end();) {
-        if (it->first.first == dbname) it = persistedTableStatsMap().erase(it);
+        });
+    if (publication == StatsSnapshotPublication::NotPublished) return false;
+
+    // A successful rename consumed our delta, including when directory fsync
+    // failed. Transfer only prepared nodes so retries cannot apply it twice.
+    liveDatabases.erase(dbname);
+    savedDatabases.erase(dbname);
+    for (auto it = liveTables.begin(); it != liveTables.end();) {
+        if (it->first.first == dbname) it = liveTables.erase(it);
         else ++it;
     }
-    for (const auto& table : snapshot.tables) {
-        persistedTableStatsMap()[{dbname, table.relname}] = table;
-    }
-    databaseStatsMap()[dbname] = snapshot.database;
-    for (const auto& table : snapshot.tables) {
-        tableStatsMap()[{dbname, table.relname}] = table;
-    }
-    for (auto it = removedRuntimeTables().begin(); it != removedRuntimeTables().end();) {
-        if (it->first == dbname) it = removedRuntimeTables().erase(it);
+    for (auto it = savedTables.begin(); it != savedTables.end();) {
+        if (it->first.first == dbname) it = savedTables.erase(it);
         else ++it;
     }
-    return true;
+    for (auto it = removedTables.begin(); it != removedTables.end();) {
+        if (it->first == dbname) it = removedTables.erase(it);
+        else ++it;
+    }
+    liveDatabases.merge(nextLiveDatabases);
+    savedDatabases.merge(nextSavedDatabases);
+    liveTables.merge(nextLiveTables);
+    savedTables.merge(nextSavedTables);
+    return publication == StatsSnapshotPublication::Durable;
 }
 
 void resetRuntimeDatabaseStats(const std::string& dbname) {

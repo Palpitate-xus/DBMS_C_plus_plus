@@ -37,6 +37,8 @@ src/expression/prepared_query_execution.cpp
 src/expression/expr_helper.cpp
 src/commands/DdlExecutor.cpp
 src/commands/DdlTransaction.cpp
+src/commands/RelationSchemaMove.cpp
+src/commands/RoutineStore.cpp
 src/commands/DmlExecutor.cpp
 src/utils/pg_hba.cpp
 src/utils/prepared_stmts.cpp

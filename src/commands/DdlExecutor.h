@@ -58,6 +58,7 @@ private:
     bool executeDropTrigger(const DropStmt* stmt, Session& s);
     bool executeCreateFunction(const CreateFunctionStmt* stmt, Session& s);
     bool executeDropFunction(const DropStmt* stmt, Session& s);
+    bool executeAlterFunction(const AlterObjectStmt* stmt,Session& session);
     bool executeCreateProcedure(const CreateFunctionStmt* stmt, Session& s);
     bool executeDropProcedure(const DropStmt* stmt, Session& s);
     bool executeDropRoutine(const DropStmt* stmt, Session& s);

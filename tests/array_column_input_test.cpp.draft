@@ -1,0 +1,124 @@
+#include "commands/TableManage.h"
+#include "catalog/type_registry.h"
+#include "test_utils.h"
+#include <iostream>
+#include <optional>
+#include <vector>
+using namespace dbms;
+static size_t checked=0,failed=0;
+static void check(bool pass,const std::string& label){++checked;if(!pass){++failed;std::cerr<<"FAIL "<<label<<'\n';}}
+using Cell=std::optional<std::string>;
+static std::vector<Cell> cells(StorageEngine& owner,const std::string& db,const std::string& table) {
+    const auto schema=owner.getTableSchema(db,table);std::vector<Cell> result;
+    const bool read=owner.forEachRow(db,table,[&](uint32_t page,uint16_t slot,const char* data,size_t size) {
+        const auto rid=StorageEngine::encodeRid(page,slot);
+        if(owner.isColumnNullByRid(db,table,rid,0))result.emplace_back();
+        else result.emplace_back(owner.extractColumnValue(std::string(data,size),schema,0,db));
+    });
+    check(read,"native physical read "+table);return result;
+}
+int main() {
+    TypeRegistry::instance().bootstrap();const auto database=testDbPath("array_column_input");
+    struct Case {std::string type;size_t width;std::string input,state,expected;};
+    // ActualPG18.6 assignment results/errors frozen before the producer;
+    // primitive native API deliberately has coarser INVALID_VALUE for syntax
+    // and fixed BIT-length errors. SQL checks retain exact SQLSTATE separately.
+    const Case cases[]={
+        {"character",4,"{\"abc \"}","","{\"abc \"}"},
+        {"character",4,"{abc,x,NULL,\"\"}","","{\"abc \",\"x   \",NULL,\"    \"}"},
+        {"character",4,"{\"ab   \",\"abcd   \"}","","{\"ab  \",abcd}"},
+        {"character",4,"{abcde}","22001",""},
+        {"character",4,"{\"你好吗\",\"é\",\"😀\"}","","{\"你好吗 \",\"é   \",\"😀   \"}"},
+        {"character",4,"{\"你好吗啊呀\"}","22001",""},
+        {"character",4,"{\"a,b\",\"a\\\\b\",\"a\\\"b\",\"{x}\"}","","{\"a,b \",\"a\\\\b \",\"a\\\"b \",\"{x} \"}"},
+        {"character",4,"[0:1][3:4]={{abc,x},{é,NULL}}","","[0:1][3:4]={{\"abc \",\"x   \"},{\"é   \",NULL}}"},
+        {"character",4,"{}","","{}"},
+        {"character",4,"{NULL}","","{NULL}"},
+        {"character",4,"{{a,b},{c}}","22P02",""},
+        {"character varying",4,"{abc,xy,NULL,\"\"}","","{abc,xy,NULL,\"\"}"},
+        {"character varying",4,"{\"abc  \"}","","{\"abc \"}"},
+        {"character varying",4,"{abcde}","22001",""},
+        {"character varying",4,"{你好吗,é,😀}","","{你好吗,é,😀}"},
+        {"character varying",4,"{你好吗啊呀}","22001",""},
+        {"character varying",4,"[0:1]={abc,xy}","","[0:1]={abc,xy}"},
+        {"character varying",4,"{}","","{}"},
+        {"character varying",4,"{NULL}","","{NULL}"},
+        {"bit",3,"{101,010,NULL}","","{101,010,NULL}"},
+        {"bit",3,"{10}","22026",""},
+        {"bit",3,"{1010}","22026",""},
+        {"bit",3,"{\"\"}","22026",""},
+        {"bit",3,"{b101}","","{101}"},
+        {"bit",3,"{xA}","22026",""},
+        {"bit",3,"{10q}","22P02",""},
+        {"bit",3,"[0:1][3:4]={{101,001},{010,NULL}}","","[0:1][3:4]={{101,001},{010,NULL}}"},
+        {"bit",3,"{}","","{}"},
+        {"bit",3,"{NULL}","","{NULL}"},
+        {"bit varying",3,"{10,101,\"\",NULL}","","{10,101,\"\",NULL}"},
+        {"bit varying",3,"{1010}","22001",""},
+        {"bit varying",3,"{xA}","22001",""},
+        {"bit varying",3,"{b01}","","{01}"},
+        {"bit varying",3,"{10q}","22P02",""},
+        {"bit varying",3,"[0:1]={101,01}","","[0:1]={101,01}"},
+        {"bit varying",3,"{}","","{}"},
+        {"bit varying",3,"{NULL}","","{NULL}"},
+        {"character",1,"{a,\"\",NULL}","","{a,\" \",NULL}"},
+        {"character",1,"{ab}","22001",""},
+        {"character",1,"{\"a  \"}","","{a}"},
+        {"bit",1,"{0,1,NULL}","","{0,1,NULL}"},
+        {"bit",1,"{01}","22026",""},
+        {"bit",1,"{\"\"}","22026",""},
+        {"character varying",65535,"{abcdef,你好吗啊呀,\"\",NULL}","","{abcdef,你好吗啊呀,\"\",NULL}"},
+        {"bit varying",8388608,"{101010,01,\"\",NULL}","","{101010,01,\"\",NULL}"},
+    };
+    std::vector<std::pair<std::string,std::vector<Cell>>> cold;
+    {
+        StorageEngine owner;check(owner.createDatabase(database)==DBStatus::OK,"database create");
+        for(size_t i=0;i<45;++i)for(size_t operation=0;operation<3;++operation) {
+            const auto& item=cases[i];const auto table="a_"+std::to_string(i)+"_"+std::to_string(operation);
+            Column column;
+            if(item.type=="character")column=makeStringColumn("v",true,item.width);
+            else if(item.type=="character varying")column=makeVarCharColumn("v",true,item.width);
+            else if(item.type=="bit")column=makeBitColumn("v",true,item.width);
+            else column=makeVarBitColumn("v",true,item.width);
+            column.isArray=true;column.isVariableLength=true;
+            TableSchema schema;schema.len=1;schema.cols[0]=column;
+            check(owner.createTable(database,table,schema)==DBStatus::OK,"create "+table);
+            const auto persisted=owner.getTableSchema(database,table);
+            check(persisted.cols[0].isArray && persisted.cols[0].dsize==item.width,"declared width "+table);
+            StorageEngine::SqlRow input{{"v",item.input}};const auto before=input;
+            DBStatus status;
+            if(operation==0)status=owner.insertRow(database,table,input);
+            else {
+                check(owner.insertRow(database,table,StorageEngine::SqlRow{{"v",std::nullopt}})==DBStatus::OK,"NULL seed "+table);
+                if(operation==1)status=owner.updateRows(database,table,input,{});
+                else status=owner.updateRows(database,table,{}, {},nullptr,[&](const auto&){return input;});
+            }
+            const auto expectedStatus=item.state.empty()?DBStatus::OK:item.state=="22001"?DBStatus::STRING_DATA_RIGHT_TRUNCATION:DBStatus::INVALID_VALUE;
+            check(status==expectedStatus,table+" status="+std::to_string(int(status))+" expected="+std::to_string(int(expectedStatus)));
+            check(input==before,"caller input bytes unchanged "+table);
+            std::vector<Cell> expected;
+            if(item.state.empty())expected.emplace_back(item.expected);
+            else if(operation)expected.emplace_back();
+            const auto actual=cells(owner,database,table);check(actual==expected,"exact normalized physical values "+table+" input="+item.input);
+            check(!owner.inTransaction(),"no leaked primitive transaction "+table);
+            cold.emplace_back(table,expected);
+        }
+        // A parent transaction retains ownership of an ordinary failed input.
+        TableSchema schema;schema.len=1;schema.cols[0]=makeStringColumn("v",true,4);schema.cols[0].isArray=true;schema.cols[0].isVariableLength=true;
+        check(owner.createTable(database,"parent",schema)==DBStatus::OK,"parent table");
+        check(owner.beginTransaction(database)==DBStatus::OK,"parent begin");
+        check(owner.insertRow(database,"parent",StorageEngine::SqlRow{{"v","{abcde}"}})==DBStatus::STRING_DATA_RIGHT_TRUNCATION,"parent invalid width");
+        check(owner.inTransaction(),"failed input leaves parent active");
+        check(cells(owner,database,"parent").empty(),"parent invalid input no row");
+        check(owner.insertRow(database,"parent",StorageEngine::SqlRow{{"v","{abc}"}})==DBStatus::OK,"parent valid input");
+        check(cells(owner,database,"parent")==std::vector<Cell>{Cell("{\"abc \"}")},"parent full bytes");
+        check(owner.rollbackTransaction()==DBStatus::OK,"parent rollback");
+        check(cells(owner,database,"parent").empty(),"parent rollback restores empty");
+    }
+    {
+        StorageEngine reopened;
+        for(const auto& expected:cold)check(cells(reopened,database,expected.first)==expected.second,"cold exact values "+expected.first);
+    }
+    std::cout<<"ARRAY_COLUMN_INPUT_COMPLETE CHECKED="<<checked<<" FAILURES="<<failed<<'\n';
+    return failed?1:0;
+}

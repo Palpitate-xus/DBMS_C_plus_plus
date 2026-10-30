@@ -577,7 +577,8 @@ public:
             const auto tokens = SQLParser::tokenize(literal->value);
             if (tokens.empty()) return "unknown";
             if (tokens.front() == "(" && tokens.size() > 1 &&
-                (SQLParser::toLower(tokens[1]) == "select" || SQLParser::toLower(tokens[1]) == "with"))
+                (SQLParser::toLower(tokens[1]) == "select" || SQLParser::toLower(tokens[1]) == "with" ||
+                 SQLParser::toLower(tokens[1]) == "values"))
                 return subquery(*literal, scopes);
             if (tokens.size() != 1)
                 throw DbError("0A000", "opaque expression requires structured preparation");
@@ -914,6 +915,11 @@ public:
             const auto element = query ? right : arrayElement(right);
             if (element.empty()) throw DbError("42809", "op ANY/ALL (array) requires array on right side");
             quantified->comparison = ExprEvaluator::resolveComparison(quantified->op,left,element);
+            // Operator input conversion of a genuine UNKNOWN literal belongs
+            // to analysis, before publishing any result descriptor. This does
+            // not evaluate a parameter, function, row or child query.
+            if (left == "unknown")
+                coerceCaseInput(quantified->left, left, quantified->comparison->leftType);
             const auto lcollation = ExprEvaluator::analyzeExplicitResultCollation(quantified->left.get());
             const auto rcollation = ExprEvaluator::analyzeExplicitResultCollation(quantified->right.get());
             if (!lcollation.empty() && !rcollation.empty() && lcollation != rcollation)

@@ -39,6 +39,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/numeric_square_root_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/generate_series_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/pg_typeof_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/enum_array_catalog_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/protocol_parameter_type_identity_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/version_function_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/text_search_catalog_identity_protocol_e2e_test.py)
@@ -86,12 +87,15 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/qualified_scalar_parse_validation_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/array_position_typed_equality_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/array_inspection_projection_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/array_positions_typed_equality_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/string_length_signature_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/float8_scalar_signature_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/angle_conversion_range_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/trigonometric_subnormal_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/floating_value_subnormal_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/floating_integer_cast_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/real_widening_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/real_widening_power_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/integral_rounding_result_type_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/round_result_type_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/mod_result_domain_protocol_e2e_test.py)
@@ -242,13 +246,14 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/protocol_metadata_session_scope_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/binary_float_parameter_roundtrip_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/array_binary_result_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/oid_binary_result_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/interval_binary_result_protocol_e2e_test.py)
-    DBMS_E2E_TESTS+=(tests/interval_justify_sign_protocol_e2e_test.py)
-    DBMS_E2E_TESTS+=(tests/interval_extract_semantics_protocol_e2e_test.py)
-    DBMS_E2E_TESTS+=(tests/interval_extract_effect_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/interval_binary_input_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/interval_cast_typmod_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/interval_cast_context_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/interval_justify_sign_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/interval_extract_semantics_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/interval_extract_effect_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/time_binary_result_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/time_input_normalization_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/time_precision_value_protocol_e2e_test.py)
@@ -293,6 +298,8 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/view_trigger_typed_values_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/view_command_tag_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/temporal_view_materialization_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/trigger_nested_result_isolation_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/trigger_diagnostic_channel_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/table_extract_quoted_operand_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/table_character_cast_describe_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/quoted_arithmetic_describe_protocol_e2e_test.py)
@@ -397,6 +404,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/sequence_duplicate_sqlstate_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/temp_sequence_lifecycle_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/sequence_notice_metadata_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/bind_portal_lifecycle_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/numeric_binary_zero_scale_known_gap.py)
     DBMS_E2E_TESTS+=(tests/sql_execute_argument_once_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/copy_protocol_e2e_test.py)
@@ -417,6 +425,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/check_add_validation_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/insert_omitted_null_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/function_result_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/routine_body_metadata_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/procedure_replace_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/gap_progress_test.py tests/pg_diff_runner_test.py)
     DBMS_E2E_TESTS+=(tests/build_cache_routing_test.py)
@@ -491,6 +500,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/empty_index_equality_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/coalesce_predicate_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/scalar_common_result_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/float8_output_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/nonstrict_predicate_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/numeric_zero_scale_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/integer_index_recheck_protocol_e2e_test.py)
@@ -503,6 +513,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/timezone_expression_header_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/timezone_set_to_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/timezone_default_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/timezone_set_grammar_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/timetz_postfix_projection_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/typed_interval_range_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/interval_arithmetic_range_protocol_e2e_test.py)
@@ -558,6 +569,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/drop_multiple_tables_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/drop_multiple_fk_group_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/foreign_key_insert_sqlstate_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/foreign_key_full_value_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/insert_select_null_bitmap_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/insert_select_conflict_clause_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/insert_select_conflict_owner_protocol_e2e_test.py)
@@ -577,6 +589,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/to_char_exact_rounding_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/cast_explicit_alias_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/pg_class_query_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/quoted_virtual_catalog_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/namespace_catalog_source_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/pg_stat_activity_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/statement_timeout_protocol_e2e_test.py)
@@ -623,6 +636,8 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/character_code_signature_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/starts_with_signature_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/cte_window_owner_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/nested_window_projection_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/derived_with_dispatch_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/readonly_temp_target_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/reverse_linear_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/replace_linear_protocol_e2e_test.py)
@@ -641,9 +656,12 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/tsvector_concat_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/tsvector_input_codec_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/qualified_table_grant_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/ordinary_case_function_label_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/quoted_function_result_label_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/name_binary_result_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/current_schema_projection_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/current_schema_demand_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/trim_signature_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/overlay_boundary_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/text_case_locale_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/bound_dml_query_children_protocol_e2e_test.py)
@@ -711,7 +729,7 @@ dbms_main_needs_rebuild() {
     done
     while IFS= read -r header; do
         [[ "$header" -nt "$binary" ]] && return 0
-    done < <(find "${DBMS_SOURCE_DIR}/src" -type f \( -name '*.h' -o -name '*.hpp' \) -print)
+    done < <(find "${DBMS_SOURCE_DIR}/src" -type f \( -name '*.h' -o -name '*.hpp' -o -name '*.inc' \) -print)
     return 1
 }
 
@@ -724,7 +742,7 @@ dbms_main_compile_signature() {
         local header
         while IFS= read -r header; do
             sha256sum -- "$header"
-        done < <(find "${DBMS_SOURCE_DIR}/src" -type f \( -name '*.h' -o -name '*.hpp' \) -print | sort)
+        done < <(find "${DBMS_SOURCE_DIR}/src" -type f \( -name '*.h' -o -name '*.hpp' -o -name '*.inc' \) -print | sort)
     } | sha256sum | awk '{print $1}'
 }
 
@@ -849,7 +867,7 @@ dbms_newest_header() {
         if [[ -z "$newest" || "$header" -nt "$newest" ]]; then
             newest="$header"
         fi
-    done < <(find "${DBMS_SOURCE_DIR}/src" -type f \( -name '*.h' -o -name '*.hpp' \) -print)
+    done < <(find "${DBMS_SOURCE_DIR}/src" -type f \( -name '*.h' -o -name '*.hpp' -o -name '*.inc' \) -print)
     printf '%s' "$newest"
 }
 
@@ -876,7 +894,7 @@ dbms_cache_signature() {
         while IFS= read -r header; do
             printf 'header %s\n' "${header#"${DBMS_SOURCE_DIR}/"}"
             sha256sum -- "$header"
-        done < <(find "${DBMS_SOURCE_DIR}/src" -type f \( -name '*.h' -o -name '*.hpp' \) -print | sort)
+        done < <(find "${DBMS_SOURCE_DIR}/src" -type f \( -name '*.h' -o -name '*.hpp' -o -name '*.inc' \) -print | sort)
     } | sha256sum | awk '{print $1}'
 }
 

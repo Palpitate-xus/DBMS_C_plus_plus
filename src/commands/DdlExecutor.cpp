@@ -1,3 +1,4 @@
+#include "catalog/declared_type.h"
 // ============================================================================
 // DDL AST Executor — Phase 4 Wave 0.3
 // ============================================================================
@@ -18,6 +19,7 @@
 #include "common/logs.h"
 #include "common/FeatureGate.h"
 #include "common/DbError.h"
+#include "process/OutputCapture.h"
 #include "common/GeometryValue.h"
 #include "common/scram_sha256.h"
 #include "expression/expr_helper.h"
@@ -101,6 +103,130 @@ StoredRoutineDropTarget resolveStoredRoutineDropTarget(
         if(target.scalar || target.table || target.procedure)return target;
     }
     return {identity.name,identity.schema};
+}
+
+
+struct RoutineDdlTarget {
+    enum class Kind { Scalar, Table, Procedure } kind=Kind::Scalar;
+    std::string name,schema;
+    std::vector<uint32_t> inputs;
+    StorageEngine::UDFInfo scalar;
+};
+
+std::vector<uint32_t> routineDdlInputs(const std::vector<std::string>& declarations,
+    const Session& session) {
+    const auto metadata=g_engine.catalogService().metadataSnapshot(session.currentDB);
+    std::vector<uint32_t> result;
+    for(auto declaration:declarations) {
+        auto tokens=SQLParser::tokenize(declaration);
+        bool output=false;
+        if(!tokens.empty()) {
+            const auto mode=SQLParser::toLower(tokens.front());
+            if(mode=="in" || mode=="out" || mode=="inout" || mode=="variadic") {
+                output=mode=="out";tokens.erase(tokens.begin());
+                declaration.clear();for(const auto& part:tokens){if(!declaration.empty())declaration+=' ';declaration+=part;}
+            }
+        }
+        DeclaredTypeBinding type;
+        try {type=resolveDeclaredTypeName(declaration,&metadata,&session);}
+        catch(const DbError& error) {
+            // Optional argument labels are not part of a DROP signature.
+            // Never strip a qualified type's namespace or a typmod token.
+            if(error.sqlState()!="42704" || tokens.size()<2 || tokens[1]=="." ||
+               tokens[1]=="(" || tokens[1]=="[")throw;
+            declaration.clear();
+            for(size_t i=1;i<tokens.size();++i){if(!declaration.empty())declaration+=' ';declaration+=tokens[i];}
+            type=resolveDeclaredTypeName(declaration,&metadata,&session);
+        }
+        if(!output)result.push_back(type.typeOid);
+    }
+    return result;
+}
+
+std::optional<RoutineDdlTarget> resolveRoutineDdl(const RoutineIdentitySpec& spec,
+    const Session& session,bool procedures) {
+    CatalogManager::QualifiedName name;
+    if(!CatalogManager::parseQualifiedName(spec.name,name,true))throw DbError("42601","invalid routine name");
+    std::optional<std::vector<uint32_t>> requested;
+    if(spec.argumentTypes)requested=routineDdlInputs(*spec.argumentTypes,session);
+    std::vector<std::string> path;
+    if(!name.schema.empty())path.push_back(name.schema);
+    else {
+        std::string canonical;
+        if(!parseSessionSearchPath(session.searchPath,path,canonical))throw DbError("22023","invalid search_path");
+        for(auto& schema:path)schema=expandSessionSearchPathEntry(schema,session.username);
+        if(std::find(path.begin(),path.end(),"pg_catalog")==path.end())path.insert(path.begin(),"pg_catalog");
+    }
+    const auto namespaces=declarationNamespaceFacts(session.currentDB);
+    std::vector<RoutineDdlTarget> candidates;
+    std::map<std::vector<uint32_t>,std::string> visible;
+    for(auto schema:path) {
+        if(schema=="pg_temp")schema=sessionTempSchemaName(session);
+        if(!namespaces.count(schema)) {
+            if(!name.schema.empty())throw DbError("3F000","routine namespace does not exist");
+            continue;
+        }
+        const auto add=[&](RoutineDdlTarget value) {
+            if(requested && value.inputs!=*requested)return;
+            const auto found=visible.find(value.inputs);
+            if(found!=visible.end() && found->second!=schema)return;
+            visible[value.inputs]=schema;candidates.push_back(std::move(value));
+        };
+        for(auto value:g_engine.getUDFOverloads(session.currentDB,name.name,schema))
+            add({RoutineDdlTarget::Kind::Scalar,name.name,schema,value.paramTypeOids,std::move(value)});
+        if(procedures && g_engine.procedureExists(session.currentDB,name.name,schema)) {
+            std::vector<std::string> types;
+            for(const auto& parameter:g_engine.getProcedureParams(session.currentDB,name.name,schema))
+                if(SQLParser::toLower(parameter.mode)!="out")types.push_back(parameter.type);
+            add({RoutineDdlTarget::Kind::Procedure,name.name,schema,routineDdlInputs(types,session),{}});
+        }
+        if(schema=="public" && g_engine.tvfExists(session.currentDB,name.name)) {
+            const bool empty=g_engine.getTVFParam(session.currentDB,name.name).empty();
+            // Old table functions do not persist input type declarations.
+            // Their bare-name/zero-argument contract remains explicit; do
+            // not fabricate TEXT or steal a typed scalar signature.
+            if(!requested || (requested->empty() && empty))
+                candidates.push_back({RoutineDdlTarget::Kind::Table,name.name,schema,{}, {}});
+        }
+    }
+    if(candidates.size()>1)throw DbError("42725","routine "+spec.name+" is not unique");
+    if(candidates.empty())return std::nullopt;
+    return std::move(candidates.front());
+}
+
+bool dropRoutineDdl(const DropStmt& statement,Session& session,bool procedures) {
+    if(!checkAdmin(session) || !checkDB(session))return true;
+    if(statement.cascade)throw DbError("0A000","routine CASCADE dependencies are not implemented");
+    std::vector<RoutineDdlTarget> targets;
+    for(const auto& spec:statement.routineTargets) {
+        std::optional<RoutineDdlTarget> target;
+        try {target=resolveRoutineDdl(spec,session,procedures);}
+        catch(const DbError& error){if(!statement.ifExists || error.sqlState()!="3F000")throw;}
+        if(!target) {
+            if(!statement.ifExists)throw DbError("42883","routine "+spec.name+" does not exist");
+            emitNotice("routine "+spec.name+" does not exist, skipping");continue;
+        }
+        targets.push_back(std::move(*target));
+    }
+    DdlTransaction transaction(session);
+    if(!transaction.enableSnapshotRollback() || !transaction.begin())throw DbError("58030","cannot begin routine DDL rollback owner");
+    transaction.markSnapshotDirty();
+    for(const auto& target:targets) {
+        DBStatus status=DBStatus::TABLE_NOT_FOUND;
+        if(target.kind==RoutineDdlTarget::Kind::Scalar) {
+            status=g_engine.dropUDFBySignature(session.currentDB,target.name,target.inputs,target.schema);
+            if(status==DBStatus::OK && target.scalar.oid &&
+               !g_engine.catalogService().get(session.currentDB).dropProc(target.scalar.oid))
+                throw DbError("58030","cannot remove exact routine catalog row");
+        } else if(target.kind==RoutineDdlTarget::Kind::Procedure)
+            status=g_engine.dropProcedure(session.currentDB,target.name,target.schema);
+        else status=g_engine.dropTVF(session.currentDB,target.name);
+        if(status!=DBStatus::OK)throw DbError(status==DBStatus::TABLE_NOT_FOUND?"42883":sqlstateForDBStatus(status),"cannot drop exact routine");
+        transaction.recordDrop(target.kind==RoutineDdlTarget::Kind::Procedure?DdlObjectKind::Procedure:DdlObjectKind::Function,target.name,target.schema);
+    }
+    if(!transaction.commit())return true;
+    std::cout<<(procedures?"DROP ROUTINE":"DROP FUNCTION")<<" succeeded"<<std::endl;
+    return false;
 }
 
 std::string toLower(std::string s) {
@@ -1805,6 +1931,8 @@ bool DdlExecutor::execute(const StmtPtr& stmt, Session& s) {
             return executeDropTrigger(dynamic_cast<const DropStmt*>(stmt.get()), s);
         case SqlCommand::CreateFunction:
             return executeCreateFunction(dynamic_cast<const CreateFunctionStmt*>(stmt.get()), s);
+        case SqlCommand::AlterFunction:
+            return executeAlterFunction(dynamic_cast<const AlterObjectStmt*>(stmt.get()),s);
         case SqlCommand::DropFunction:
             return executeDropFunction(dynamic_cast<const DropStmt*>(stmt.get()), s);
         case SqlCommand::CreateProcedure:
@@ -1897,6 +2025,7 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         case dbms::SqlCommand::CreateTrigger:
         case dbms::SqlCommand::DropTrigger:
         case dbms::SqlCommand::CreateFunction:
+        case dbms::SqlCommand::AlterFunction:
         case dbms::SqlCommand::DropFunction:
         case dbms::SqlCommand::CreateProcedure:
         case dbms::SqlCommand::DropProcedure:
@@ -1937,6 +2066,7 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
     const bool preservesLiteralText =
         authDdl || parsedCmd == dbms::SqlCommand::Comment ||
         parsedCmd == dbms::SqlCommand::CreateFunction ||
+        parsedCmd == dbms::SqlCommand::AlterFunction ||
         parsedCmd == dbms::SqlCommand::DropFunction ||
         parsedCmd == dbms::SqlCommand::CreateProcedure ||
         parsedCmd == dbms::SqlCommand::DropProcedure ||
@@ -2208,7 +2338,11 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                 txn.markSnapshotDirty();
                 status = g_engine.alterTableAddColumn(s.currentDB, tableName, column);
                 if (status == DBStatus::TABLE_ALREADY_EXISTS && sub.ifNotExists) {
-                    std::cout << "NOTICE: column already exists, skipping" << std::endl;
+                    {
+                        std::ostringstream diagnostic;
+                        diagnostic << "column already exists, skipping";
+                        dbms::emitNotice(diagnostic.str());
+                    }
                     break;
                 }
                 if (status == DBStatus::TABLE_ALREADY_EXISTS) {
@@ -2271,8 +2405,11 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     }
                     if (!columnExists) {
                         if (sub.ifExists) {
-                            std::cout << "NOTICE: column does not exist, skipping"
-                                      << std::endl;
+                            {
+                                std::ostringstream diagnostic;
+                                diagnostic << "column does not exist, skipping";
+                                dbms::emitNotice(diagnostic.str());
+                            }
                             break;
                         }
                         std::cout << "ERROR: column \"" << sub.name
@@ -2364,8 +2501,11 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     }
                     if (!sourceColumnExists) {
                         if (sub.ifExists) {
-                            std::cout << "NOTICE: column does not exist, skipping"
-                                      << std::endl;
+                            {
+                                std::ostringstream diagnostic;
+                                diagnostic << "column does not exist, skipping";
+                                dbms::emitNotice(diagnostic.str());
+                            }
                             break;
                         }
                         std::cout << "ERROR: column \"" << sub.name
@@ -2436,7 +2576,11 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                 status = g_engine.alterTableRenameConstraint(s.currentDB, tableName,
                                                              sub.name, sub.newName);
                 if (status == DBStatus::NOT_FOUND && sub.ifExists) {
-                    std::cout << "NOTICE: constraint does not exist, skipping" << std::endl;
+                    {
+                        std::ostringstream diagnostic;
+                        diagnostic << "constraint does not exist, skipping";
+                        dbms::emitNotice(diagnostic.str());
+                    }
                     break;
                 }
                 if (status == DBStatus::NOT_FOUND) {
@@ -2889,13 +3033,14 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                 }
                 break;
             case AlterTableStmt::Action::SetSchema:
+                if (tableIsTemporary)
+                    throw DbError("0A000", "cannot move objects into or out of temporary schemas");
                 status = g_engine.alterTableSetSchema(s.currentDB, tableName, sub.newName);
-                if (status == DBStatus::FEATURE_NOT_SUPPORTED) {
-                    std::cout << "ERROR: ALTER TABLE SET SCHEMA is not supported "
-                              << "(SQLSTATE 0A000)" << std::endl;
+                if (status != DBStatus::OK) {
+                    std::cout << "ERROR: ALTER TABLE SET SCHEMA failed (SQLSTATE "
+                              << sqlstateForDBStatus(status) << ")" << std::endl;
                     return true;
                 }
-                if (!alterStatusOk(status, "Schema")) return true;
                 break;
             case AlterTableStmt::Action::SetTablespace:
                 status = g_engine.alterTableTablespace(s.currentDB, tableName, sub.newName);
@@ -3039,7 +3184,11 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     ? g_engine.dropExclusionConstraint(s.currentDB, sub.name)
                     : g_engine.alterTableDropConstraint(s.currentDB, tableName, sub.name);
                 if (status == DBStatus::INVALID_VALUE && sub.ifExists) {
-                    std::cout << "NOTICE: constraint does not exist, skipping" << std::endl;
+                    {
+                        std::ostringstream diagnostic;
+                        diagnostic << "constraint does not exist, skipping";
+                        dbms::emitNotice(diagnostic.str());
+                    }
                     break;
                 }
                 if (!alterStatusOk(status, "Constraint")) return true;
@@ -3546,8 +3695,12 @@ bool DdlExecutor::executeDropDatabase(const DropStmt* stmt, Session& s) {
     DBStatus res = g_engine.dropDatabase(dbname);
     if (res == DBStatus::NOT_FOUND || res == DBStatus::DATABASE_NOT_FOUND) {
         if (stmt->ifExists) {
-            std::cout << "NOTICE: database \"" << dbname
-                      << "\" does not exist, skipping" << std::endl;
+            {
+                std::ostringstream diagnostic;
+                diagnostic << "database \"" << dbname
+                          << "\" does not exist, skipping";
+                dbms::emitNotice(diagnostic.str());
+            }
             return false;
         }
         std::cout << "ERROR: database \"" << dbname
@@ -3637,8 +3790,11 @@ bool DdlExecutor::executeAlterRole(const AlterObjectStmt* stmt, Session& s) {
     const auto current = authCatalog().getAuthIdByName(roleName);
     if (!current) {
         if (stmt->ifExists) {
-            std::cout << "NOTICE: role \"" << roleName << "\" does not exist, skipping"
-                      << std::endl;
+            {
+                std::ostringstream diagnostic;
+                diagnostic << "role \"" << roleName << "\" does not exist, skipping";
+                dbms::emitNotice(diagnostic.str());
+            }
             return false;
         }
         std::cout << "ERROR: role \"" << roleName << "\" does not exist" << std::endl;
@@ -3994,8 +4150,11 @@ bool DdlExecutor::executeDropRole(const DropStmt* stmt, Session& s) {
         const std::string roleName = canonicalRoleName(rawName);
         if (!roleExists(roleName)) {
             if (stmt->ifExists) {
-                std::cout << "NOTICE: role \"" << roleName << "\" does not exist, skipping"
-                          << std::endl;
+                {
+                    std::ostringstream diagnostic;
+                    diagnostic << "role \"" << roleName << "\" does not exist, skipping";
+                    dbms::emitNotice(diagnostic.str());
+                }
                 continue;
             }
             std::cout << "ERROR: role \"" << roleName << "\" does not exist" << std::endl;
@@ -4401,7 +4560,11 @@ bool DdlExecutor::executeCreateSchema(const CreateObjectStmt* stmt, Session& s) 
     if (!checkAdmin(s) || !checkDB(s)) return true;
     const auto result = createSchemaNamespace(g_engine, s.currentDB, stmt->objectName, &s);
     if (result.status == DBStatus::TABLE_ALREADY_EXISTS && stmt->ifNotExists) {
-        std::cout << "NOTICE: schema already exists, skipping" << std::endl;
+        {
+            std::ostringstream diagnostic;
+            diagnostic << "schema already exists, skipping";
+            dbms::emitNotice(diagnostic.str());
+        }
         return false;
     }
     if (result.status != DBStatus::OK) {
@@ -4424,7 +4587,11 @@ bool DdlExecutor::executeDropSchema(const DropStmt* stmt, Session& s) {
     const std::string& name = stmt->objectNames.front();
     const auto result = dropSchemaNamespace(g_engine, s.currentDB, name, stmt->cascade, &s);
     if (result.status == DBStatus::TABLE_NOT_FOUND && stmt->ifExists) {
-        std::cout << "NOTICE: schema does not exist, skipping" << std::endl;
+        {
+            std::ostringstream diagnostic;
+            diagnostic << "schema does not exist, skipping";
+            dbms::emitNotice(diagnostic.str());
+        }
         return false;
     }
     if (result.status != DBStatus::OK) {
@@ -4591,14 +4758,17 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
             return false;
         }
         if (alias) {
-            std::cout << "NOTICE: type " << baseType << " mapped to "
-                      << (baseType == "tinyint" ? "smallint"
-                          : baseType == "datetime" ? "timestamp"
-                          : baseType == "nvarchar" ? "varchar"
-                          : baseType == "nchar" ? "char"
-                          : baseType == "double" ? "double precision"
-                          : baseType == "long" ? "bigint" : "bytea")
-                      << std::endl;
+            {
+                std::ostringstream diagnostic;
+                diagnostic << "type " << baseType << " mapped to "
+                          << (baseType == "tinyint" ? "smallint"
+                              : baseType == "datetime" ? "timestamp"
+                              : baseType == "nvarchar" ? "varchar"
+                              : baseType == "nchar" ? "char"
+                              : baseType == "double" ? "double precision"
+                              : baseType == "long" ? "bigint" : "bytea");
+                dbms::emitNotice(diagnostic.str());
+            }
         }
     }
     if (baseType == "int" || baseType == "integer") baseType = "int4";
@@ -5382,8 +5552,12 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             if (tableCatalog->getClassByName(
                     targetName.name, targetNamespace->oid)) {
                 if (stmt->ifNotExists) {
-                    std::cout << "NOTICE: relation \"" << stmt->tableName
-                              << "\" already exists, skipping" << std::endl;
+                    {
+                        std::ostringstream diagnostic;
+                        diagnostic << "relation \"" << stmt->tableName
+                                  << "\" already exists, skipping";
+                        dbms::emitNotice(diagnostic.str());
+                    }
                     return false;
                 }
                 std::cout << "ERROR: relation \"" << stmt->tableName
@@ -5404,7 +5578,11 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         : unqualifiedStorageName;
     if (g_engine.tableExists(s.currentDB, tname) || g_engine.viewExists(s.currentDB, tname)) {
         if (stmt->ifNotExists) {
-            std::cout << "NOTICE: table \"" << tname << "\" already exists, skipping" << std::endl;
+            {
+                std::ostringstream diagnostic;
+                diagnostic << "table \"" << tname << "\" already exists, skipping";
+                dbms::emitNotice(diagnostic.str());
+            }
             return false;
         }
         std::cout << "ERROR: relation \"" << tname
@@ -7082,8 +7260,12 @@ static bool executeDropTableSingle(const DropStmt* stmt, Session& s,
            s.transientTempTables.count(tableName.name) != 0)) &&
         !g_engine.schemaExists(s.currentDB, tableName.schema)) {
         if (stmt->ifExists) {
-            std::cout << "NOTICE: table \"" << logicalName
-                      << "\" does not exist, skipping" << std::endl;
+            {
+                std::ostringstream diagnostic;
+                diagnostic << "table \"" << logicalName
+                          << "\" does not exist, skipping";
+                dbms::emitNotice(diagnostic.str());
+            }
             return false;
         }
         std::cout << "ERROR: schema \"" << tableName.schema
@@ -7133,7 +7315,11 @@ static bool executeDropTableSingle(const DropStmt* stmt, Session& s,
     }
     if (!g_engine.tableExists(s.currentDB, tname)) {
         if (stmt->ifExists) {
-            std::cout << "NOTICE: table \"" << tname << "\" does not exist, skipping" << std::endl;
+            {
+                std::ostringstream diagnostic;
+                diagnostic << "table \"" << tname << "\" does not exist, skipping";
+                dbms::emitNotice(diagnostic.str());
+            }
             return false;
         }
         // PG: DROP TABLE on a missing table reports
@@ -7312,8 +7498,12 @@ static bool executeDropTableSingle(const DropStmt* stmt, Session& s,
             }
             hasCatalogDropPlan = true;
         } else {
-            std::cout << "NOTICE: table \"" << tname
-                      << "\" has no catalog entry; falling back to storage drop" << std::endl;
+            {
+                std::ostringstream diagnostic;
+                diagnostic << "table \"" << tname
+                          << "\" has no catalog entry; falling back to storage drop";
+                dbms::emitNotice(diagnostic.str());
+            }
         }
     } catch (const std::exception& e) {
         std::cerr << "WARNING: catalog drop check failed: " << e.what() << std::endl;
@@ -7666,7 +7856,11 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
     }
     if (namedIndexExists(idxName)) {
         if (stmt->ifNotExists) {
-            std::cout << "NOTICE: index \"" << idxName << "\" already exists, skipping" << std::endl;
+            {
+                std::ostringstream diagnostic;
+                diagnostic << "index \"" << idxName << "\" already exists, skipping";
+                dbms::emitNotice(diagnostic.str());
+            }
             return false;
         }
         std::cout << "ERROR: relation \"" << idxName
@@ -7910,8 +8104,12 @@ bool DdlExecutor::executeDropIndex(const DropStmt* stmt, Session& s) {
             !(indexQn.schema == "pg_temp" && tempNamespaceActive) &&
             !g_engine.schemaExists(s.currentDB, indexQn.schema)) {
             if (stmt->ifExists) {
-                std::cout << "NOTICE: index \"" << rawName
-                          << "\" does not exist, skipping" << std::endl;
+                {
+                    std::ostringstream diagnostic;
+                    diagnostic << "index \"" << rawName
+                              << "\" does not exist, skipping";
+                    dbms::emitNotice(diagnostic.str());
+                }
                 continue;
             }
             std::cout << "ERROR: schema \"" << indexQn.schema
@@ -8017,7 +8215,11 @@ bool DdlExecutor::executeDropIndex(const DropStmt* stmt, Session& s) {
 
         if (tableName.empty() || !g_engine.tableExists(s.currentDB, tableName)) {
             if (stmt->ifExists) {
-                std::cout << "NOTICE: index \"" << indexName << "\" does not exist, skipping" << std::endl;
+                {
+                    std::ostringstream diagnostic;
+                    diagnostic << "index \"" << indexName << "\" does not exist, skipping";
+                    dbms::emitNotice(diagnostic.str());
+                }
                 continue;
             }
             std::cout << "ERROR: index \"" << indexName
@@ -8061,7 +8263,11 @@ bool DdlExecutor::executeDropIndex(const DropStmt* stmt, Session& s) {
         }
         if (method.empty()) {
             if (stmt->ifExists) {
-                std::cout << "NOTICE: index \"" << indexName << "\" does not exist, skipping" << std::endl;
+                {
+                    std::ostringstream diagnostic;
+                    diagnostic << "index \"" << indexName << "\" does not exist, skipping";
+                    dbms::emitNotice(diagnostic.str());
+                }
                 continue;
             }
             std::cout << "ERROR: index \"" << indexName
@@ -8635,8 +8841,12 @@ bool DdlExecutor::executeAlterSequence(const AlterObjectStmt* stmt, Session& s) 
                 return true;
             }
             if (stmt->ifExists) {
-                std::cout << "NOTICE: sequence \"" << requestedName
-                          << "\" does not exist, skipping" << std::endl;
+                {
+                    std::ostringstream diagnostic;
+                    diagnostic << "sequence \"" << requestedName
+                              << "\" does not exist, skipping";
+                    dbms::emitNotice(diagnostic.str());
+                }
                 return !txn.commit();
             }
             std::cout << "ERROR: sequence \"" << requestedName
@@ -8877,9 +9087,12 @@ bool DdlExecutor::executeDropSequence(const DropStmt* stmt, Session& s) {
             if (!schema.empty() && !ownTemporarySchema &&
                 !g_engine.schemaExists(s.currentDB, schema)) {
                 if (stmt->ifExists) {
-                    std::cout << "NOTICE: sequence \"" << requestedName
-                              << "\" does not exist, skipping"
-                              << std::endl;
+                    {
+                        std::ostringstream diagnostic;
+                        diagnostic << "sequence \"" << requestedName
+                                  << "\" does not exist, skipping";
+                        dbms::emitNotice(diagnostic.str());
+                    }
                     continue;
                 }
                 std::cout << "ERROR: schema \"" << qualifiedName.schema
@@ -8915,8 +9128,12 @@ bool DdlExecutor::executeDropSequence(const DropStmt* stmt, Session& s) {
                     return true;
                 }
                 if (stmt->ifExists) {
-                    std::cout << "NOTICE: sequence \"" << requestedName
-                              << "\" does not exist, skipping" << std::endl;
+                    {
+                        std::ostringstream diagnostic;
+                        diagnostic << "sequence \"" << requestedName
+                                  << "\" does not exist, skipping";
+                        dbms::emitNotice(diagnostic.str());
+                    }
                     continue;
                 }
                 std::cout << "ERROR: sequence \"" << requestedName
@@ -9272,8 +9489,12 @@ bool DdlExecutor::executeCreateCollation(const CreateObjectStmt* stmt, Session& 
     if (res == DBStatus::TABLE_ALREADY_EXISTS) {
         if (stmt->ifNotExists) {
             if (!txn.commit()) return true;
-            std::cout << "NOTICE: collation " << cname
-                      << " already exists, skipping" << std::endl;
+            {
+                std::ostringstream diagnostic;
+                diagnostic << "collation " << cname
+                          << " already exists, skipping";
+                dbms::emitNotice(diagnostic.str());
+            }
             return false;
         }
         std::cout << "Collation " << cname << " already exists" << std::endl;
@@ -9327,8 +9548,12 @@ bool DdlExecutor::executeDropCollation(const DropStmt* stmt, Session& s) {
     const DBStatus status = g_engine.dropCollation(s.currentDB, cname);
     if (status == DBStatus::TABLE_NOT_FOUND && stmt->ifExists) {
         if (!txn.commit()) return true;
-        std::cout << "NOTICE: collation " << cname
-                  << " does not exist, skipping" << std::endl;
+        {
+            std::ostringstream diagnostic;
+            diagnostic << "collation " << cname
+                      << " does not exist, skipping";
+            dbms::emitNotice(diagnostic.str());
+        }
         return false;
     }
     if (status != DBStatus::OK) {
@@ -9391,7 +9616,11 @@ bool DdlExecutor::executeDropDomain(const DropStmt* stmt, Session& s) {
     if (info.name.empty()) {
         if (stmt->ifExists) {
             if (!txn.commit()) return true;
-            std::cout << "NOTICE: domain does not exist, skipping" << std::endl;
+            {
+                std::ostringstream diagnostic;
+                diagnostic << "domain does not exist, skipping";
+                dbms::emitNotice(diagnostic.str());
+            }
             return false;
         }
         throw DbError("42704", "domain does not exist: " + name);
@@ -9468,8 +9697,12 @@ bool DdlExecutor::executeCreateType(const CreateObjectStmt* stmt, Session& s) {
     if (typeExists) {
         if (stmt->ifNotExists) {
             if (!txn.commit()) return true;
-            std::cout << "NOTICE: type " << typeName
-                      << " already exists, skipping" << std::endl;
+            {
+                std::ostringstream diagnostic;
+                diagnostic << "type " << typeName
+                          << " already exists, skipping";
+                dbms::emitNotice(diagnostic.str());
+            }
             return false;
         }
         std::cout << "Type " << typeName << " already exists" << std::endl;
@@ -9496,9 +9729,14 @@ bool DdlExecutor::executeCreateType(const CreateObjectStmt* stmt, Session& s) {
                 g_engine.catalogService().get(s.currentDB);
             const auto typeNamespace =
                 catalog.getNamespaceByName(typeSchema);
-            if (!typeNamespace ||
-                catalog.getTypeByName(stmt->objectName,
-                                       typeNamespace->oid)) {
+            const auto conflict = typeNamespace
+                ? catalog.getTypeByName(stmt->objectName, typeNamespace->oid) : std::nullopt;
+            const auto element = conflict && conflict->typelem
+                ? catalog.getType(conflict->typelem) : std::nullopt;
+            const bool automaticArray = conflict && element &&
+                conflict->typtype == 'b' && conflict->typcategory == 'A' &&
+                element->typarray == conflict->oid;
+            if (!typeNamespace || (conflict && !automaticArray)) {
                 throw std::runtime_error(
                     "enum namespace/type catalog conflict");
             }
@@ -9685,6 +9923,19 @@ bool DdlExecutor::executeDropType(const DropStmt* stmt, Session& s) {
         }
     }
 
+    // An implicit array is owned by its element even though it has a real
+    // independent pg_type identity; DROP TYPE must not remove it by itself.
+    (void)g_engine.catalogService().get(s.currentDB);
+    const auto typeCatalogOwner = g_engine.catalogService().acquire(s.currentDB);
+    const auto typeNamespace = typeCatalogOwner->getNamespaceByName(schemaName);
+    const auto targetType = typeNamespace
+        ? typeCatalogOwner->getTypeByName(qualifiedName.name, typeNamespace->oid) : std::nullopt;
+    const auto elementType = targetType && targetType->typelem
+        ? typeCatalogOwner->getType(targetType->typelem) : std::nullopt;
+    if (targetType && elementType && targetType->typtype == 'b' &&
+        targetType->typcategory == 'A' && elementType->typarray == targetType->oid)
+        throw DbError("2BP01", "cannot drop an automatic array type independently of its element type");
+
     // Enum dependencies are represented in the physical table schemas.  A
     // previous DROP TYPE path removed only the enum sidecar and left those
     // columns behind with an undeclared type.  Preflight them before touching
@@ -9784,8 +10035,12 @@ bool DdlExecutor::executeDropType(const DropStmt* stmt, Session& s) {
             return true;
         }
         if (!txn.commit()) return true;
-        std::cout << "NOTICE: type " << name
-                  << " does not exist, skipping" << std::endl;
+        {
+            std::ostringstream diagnostic;
+            diagnostic << "type " << name
+                      << " does not exist, skipping";
+            dbms::emitNotice(diagnostic.str());
+        }
         return false;
     }
 
@@ -10176,8 +10431,12 @@ bool DdlExecutor::executeDropView(const DropStmt* stmt, Session& s) {
     }
     if (!physicalExists && !relation) {
         if (stmt->ifExists) {
-            std::cout << "NOTICE: view \"" << viewName
-                      << "\" does not exist, skipping" << std::endl;
+            {
+                std::ostringstream diagnostic;
+                diagnostic << "view \"" << viewName
+                          << "\" does not exist, skipping";
+                dbms::emitNotice(diagnostic.str());
+            }
             return !txn.commit();
         }
         std::cout << "ERROR: view \"" << viewName
@@ -10849,8 +11108,12 @@ bool DdlExecutor::executeDropMaterializedView(const DropStmt* stmt, Session& s) 
         }
         if (!physicalExists && !catalogExists) {
             if (stmt->ifExists) {
-                std::cout << "NOTICE: materialized view \"" << name
-                          << "\" does not exist, skipping" << std::endl;
+                {
+                    std::ostringstream diagnostic;
+                    diagnostic << "materialized view \"" << name
+                              << "\" does not exist, skipping";
+                    dbms::emitNotice(diagnostic.str());
+                }
                 continue;
             }
             std::cout << "ERROR: materialized view \"" << name
@@ -11037,9 +11300,13 @@ bool DdlExecutor::executeDropTrigger(const DropStmt* stmt, Session& s) {
         });
     if (!existsOnRelation) {
         if (stmt->ifExists) {
-            std::cout << "NOTICE: trigger \"" << triggerName
-                      << "\" for relation \"" << stmt->tableName
-                      << "\" does not exist, skipping" << std::endl;
+            {
+                std::ostringstream diagnostic;
+                diagnostic << "trigger \"" << triggerName
+                          << "\" for relation \"" << stmt->tableName
+                          << "\" does not exist, skipping";
+                dbms::emitNotice(diagnostic.str());
+            }
             return false;
         }
         std::cout << "Trigger " << triggerName << " does not exist on relation "
@@ -11080,7 +11347,7 @@ bool DdlExecutor::executeCreateFunction(const CreateFunctionStmt* stmt, Session&
     if (!checkDB(s)) return true;
 
     DdlTransaction txn(s);
-    if (stmt->replace && !txn.enableSnapshotRollback()) {
+    if (!txn.enableSnapshotRollback()) {
         std::cout << "CREATE OR REPLACE FUNCTION could not create rollback "
                      "snapshot" << std::endl;
         return true;
@@ -11236,63 +11503,74 @@ bool DdlExecutor::executeCreateFunction(const CreateFunctionStmt* stmt, Session&
     }
 
     bool replacedExisting = false;
+    std::vector<uint32_t> functionInputs;
     if (toLower(stmt->returnType) == "table") {
         if(functionSchema!="public")throw DbError("0A000","namespaced table functions require a query host");
-        if (lang != "sql") {
-            std::cout << "ERROR: table-valued PL/pgSQL functions are not "
-                         "supported (SQLSTATE 0A000)" << std::endl;
-            return true;
-        }
-        std::string singleParam = stmt->params.empty() ? "" : stmt->params.front().first;
-        res = g_engine.createTVF(s.currentDB, stmt->funcName, singleParam, stmt->body);
+        if(lang!="sql")throw DbError("0A000","table-valued PL/pgSQL functions require a query host");
+        const auto parameter=stmt->params.empty()?"":stmt->params.front().first;
+        res=g_engine.createTVF(s.currentDB,stmt->funcName,parameter,stmt->body);
     } else {
-        if (!validateFunctionType(stmt->returnType, true)) {
-            std::cout << "ERROR: function return type " << stmt->returnType
-                      << " is not supported (SQLSTATE 42704)" << std::endl;
-            return true;
+        if(!validateFunctionType(stmt->returnType,true))
+            throw DbError("42704","unsupported function return type: "+stmt->returnType);
+        auto& catalog=g_engine.catalogService().get(s.currentDB);
+        const auto metadata=catalog.metadataSnapshot();
+        const auto canonical=[&](const std::string& specification) {
+            return resolveDeclaredTypeName(specification,&metadata,&s);
+        };
+        std::vector<std::string> names,types;
+        for(const auto& parameter:stmt->params) {
+            const auto declared=canonical(canonicalFunctionType(parameter.second));
+            names.push_back(parameter.first);types.push_back(declared.typeName);
+            functionInputs.push_back(declared.typeOid);
         }
-        const auto existing = g_engine.getUDF(s.currentDB, stmt->funcName,functionSchema);
-        replacedExisting = stmt->replace && !existing.expression.empty();
-        if (replacedExisting) {
-            std::vector<std::string> requestedTypes;
-            requestedTypes.reserve(stmt->params.size());
-            for (const auto& parameter : stmt->params) {
-                requestedTypes.push_back(
-                    canonicalFunctionType(parameter.second));
-            }
-            std::vector<std::string> storedTypes;
-            storedTypes.reserve(existing.paramTypes.size());
-            for (const auto& parameterType : existing.paramTypes) {
-                storedTypes.push_back(canonicalFunctionType(parameterType));
-            }
-            if (requestedTypes != storedTypes ||
-                canonicalFunctionType(stmt->returnType) !=
-                    canonicalFunctionType(existing.returnType)) {
-                std::cout << "ERROR: CREATE OR REPLACE FUNCTION cannot change "
-                             "argument or return types (SQLSTATE 42P13)"
-                          << std::endl;
-                return true;
-            }
+        const auto output=canonical(canonicalFunctionType(stmt->returnType));
+        const auto existing=g_engine.getUDFBySignature(s.currentDB,stmt->funcName,functionInputs,functionSchema);
+        replacedExisting=!existing.expression.empty();
+        if(replacedExisting && !stmt->replace)
+            throw DbError("42723","function with the same input types already exists");
+        if(replacedExisting) {
+            if(existing.returnTypeOid!=output.typeOid)
+                throw DbError("42P13","cannot change return type of existing function");
+            for(size_t i=0;i<existing.paramNames.size();++i)
+                if(!existing.paramNames[i].empty() && existing.paramNames[i]!=names[i])
+                    throw DbError("42P13","cannot change name of input parameter");
         }
-        if (stmt->params.size() <= 1) {
-            std::string singleParam = stmt->params.empty() ? "" : stmt->params.front().first;
-            std::string singleType = stmt->params.empty() ? "" : canonicalFunctionType(stmt->params.front().second);
-            res = g_engine.createUDF(s.currentDB, stmt->funcName, singleParam,
-                                     stmt->body, provolatile, lang,
-                                     canonicalFunctionType(stmt->returnType), singleType,
-                                     stmt->strict, stmt->replace,functionSchema);
+        if(g_engine.procedureExists(s.currentDB,stmt->funcName,functionSchema)) {
+            std::vector<uint32_t> inputs;
+            for(const auto& parameter:g_engine.getProcedureParams(s.currentDB,stmt->funcName,functionSchema))
+                if(toLower(parameter.mode)!="out")inputs.push_back(canonical(parameter.type).typeOid);
+            if(inputs==functionInputs)throw DbError("42723","routine with the same input types already exists");
+        }
+        const auto space=catalog.getNamespaceByName(functionSchema);
+        if(!space)throw DbError("3F000","function namespace does not exist");
+        PgProcRow row;
+        if(existing.oid) {
+            const auto stored=catalog.getProc(existing.oid);
+            if(!stored || stored->pronamespace!=space->oid || stored->proname!=stmt->funcName ||
+               stored->proargtypes!=functionInputs)throw DbError("58030","routine catalog identity mismatch");
+            row=*stored;
         } else {
-            std::vector<std::string> params;
-            std::vector<std::string> types;
-            for (const auto& p : stmt->params) {
-                params.push_back(p.first);
-                types.push_back(canonicalFunctionType(p.second));
-            }
-            res = g_engine.createUDF(s.currentDB, stmt->funcName, params, types,
-                                     stmt->body, provolatile, lang,
-                                     canonicalFunctionType(stmt->returnType), stmt->strict,
-                                     stmt->replace,functionSchema);
+            for(const auto& candidate:catalog.getProcsByName(stmt->funcName,space->oid))
+                if(candidate.proargtypes==functionInputs) {
+                    if(candidate.prokind!='f')throw DbError("42723","routine signature already exists");
+                    if(row.oid)throw DbError("58030","duplicate routine catalog signature");
+                    row=candidate;
+                }
         }
+        row.proname=stmt->funcName;row.pronamespace=space->oid;row.prokind='f';
+        row.prolang=lang=="plpgsql"?16393:14;row.prorettype=output.typeOid;
+        row.pronargs=static_cast<int16_t>(functionInputs.size());row.proargtypes=functionInputs;
+        row.proargnames=names;row.prosrc=stmt->body;row.provolatile=provolatile;row.proisstrict=stmt->strict;
+        if(!row.proowner) {
+            const auto owner=authCatalog().getAuthIdByName(effectiveSessionRole(s));
+            if(owner)row.proowner=owner->oid;
+        }
+        txn.markSnapshotDirty();
+        if(row.oid) {
+            if(!catalog.updateProc(row))throw DbError("58030","cannot update routine catalog row");
+        } else row.oid=catalog.createProc(row);
+        res=g_engine.createUDF(s.currentDB,stmt->funcName,names,types,stmt->body,provolatile,lang,
+            output.typeName,stmt->strict,stmt->replace,functionSchema,row.oid);
     }
 
     if (res != DBStatus::OK) {
@@ -11305,16 +11583,61 @@ bool DdlExecutor::executeCreateFunction(const CreateFunctionStmt* stmt, Session&
     if (replacedExisting) {
         txn.recordUpdate(DdlObjectKind::Function, stmt->funcName,functionSchema);
     } else {
-        txn.recordCreate(DdlObjectKind::Function, stmt->funcName,
-                         toLower(stmt->returnType)=="table"?"":functionSchema);
+        if(toLower(stmt->returnType)=="table")
+            txn.recordCreate(DdlObjectKind::Function,stmt->funcName,"");
+        else txn.recordCreate(DdlObjectKind::Function,stmt->funcName,functionSchema,functionInputs);
     }
     if (!txn.commit()) return true;
     std::cout << "CREATE FUNCTION succeeded" << std::endl;
     return false;
 }
 
+bool DdlExecutor::executeAlterFunction(const AlterObjectStmt* stmt,Session& session) {
+    if(!stmt)return rejectMalformedDdlAst();
+    if(!checkAdmin(session) || !checkDB(session))return true;
+    RoutineIdentitySpec identity{stmt->schema.empty()?stmt->objectName:stmt->schema+"."+stmt->objectName,stmt->routineInputTypes};
+    auto target=resolveRoutineDdl(identity,session,false);
+    if(!target || target->kind!=RoutineDdlTarget::Kind::Scalar)throw DbError("42883","function does not exist");
+    const auto tokens=SQLParser::tokenize(stmt->subCommand);
+    if(tokens.size()!=3)throw DbError("0A000","unsupported ALTER FUNCTION action");
+    auto schema=target->schema,name=target->name;
+    CatalogManager::QualifiedName destination;
+    if(!CatalogManager::parseQualifiedName(tokens[2],destination,true) || !destination.schema.empty())
+        throw DbError("42601","invalid routine destination");
+    if(toLower(tokens[0])=="rename" && toLower(tokens[1])=="to")name=destination.name;
+    else if(toLower(tokens[0])=="set" && toLower(tokens[1])=="schema")schema=destination.name;
+    else throw DbError("0A000","unsupported ALTER FUNCTION action");
+    if(!declarationNamespaceFacts(session.currentDB).count(schema))throw DbError("3F000","destination namespace does not exist");
+    DdlTransaction transaction(session);
+    if(!transaction.enableSnapshotRollback() || !transaction.begin())throw DbError("58030","cannot begin routine ALTER rollback owner");
+    transaction.markSnapshotDirty();
+    auto moved=g_engine.moveUDF(session.currentDB,target->name,target->inputs,target->schema,name,schema);
+    auto& catalog=g_engine.catalogService().get(session.currentDB);
+    const auto space=catalog.getNamespaceByName(schema);
+    if(!space)throw DbError("3F000","destination catalog namespace does not exist");
+    if(moved.oid) {
+        auto row=catalog.getProc(moved.oid);
+        if(!row)throw DbError("58030","missing altered routine catalog row");
+        row->proname=name;row->pronamespace=space->oid;
+        if(!catalog.updateProc(*row))throw DbError("58030","cannot update altered routine catalog row");
+    } else {
+        PgProcRow row;row.proname=name;row.pronamespace=space->oid;row.proargtypes=moved.paramTypeOids;
+        row.pronargs=static_cast<int16_t>(row.proargtypes.size());row.proargnames=moved.paramNames;
+        row.prorettype=moved.returnTypeOid;row.prosrc=moved.expression;row.provolatile=moved.provolatile;
+        row.proisstrict=moved.strict;row.prolang=moved.language=="plpgsql"?16393:14;
+        row.oid=catalog.createProc(row);
+        const auto status=g_engine.createUDF(session.currentDB,name,moved.paramNames,moved.paramTypes,moved.expression,
+            moved.provolatile,moved.language,moved.returnType,moved.strict,true,schema,row.oid);
+        if(status!=DBStatus::OK)throw DbError(sqlstateForDBStatus(status),"cannot upgrade altered legacy routine");
+    }
+    transaction.recordUpdate(DdlObjectKind::Function,name,schema);
+    if(!transaction.commit())return true;
+    std::cout<<"ALTER FUNCTION succeeded"<<std::endl;return false;
+}
+
 bool DdlExecutor::executeDropFunction(const DropStmt* stmt, Session& s) {
     if (!stmt) return rejectMalformedDdlAst();
+    if(!stmt->routineTargets.empty())return dropRoutineDdl(*stmt,s,false);
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
 
@@ -11353,8 +11676,12 @@ bool DdlExecutor::executeDropFunction(const DropStmt* stmt, Session& s) {
     }
     if (!signatureMatches) {
         if (stmt->ifExists) {
-            std::cout << "NOTICE: function \"" << name
-                      << "\" does not exist, skipping" << std::endl;
+            {
+                std::ostringstream diagnostic;
+                diagnostic << "function \"" << name
+                          << "\" does not exist, skipping";
+                dbms::emitNotice(diagnostic.str());
+            }
             return false;
         }
         std::cout << "ERROR: function \"" << name
@@ -11553,8 +11880,12 @@ bool DdlExecutor::executeDropProcedure(const DropStmt* stmt, Session& s) {
     }
     if (!exists) {
         if (stmt->ifExists) {
-            std::cout << "NOTICE: procedure \"" << name
-                      << "\" does not exist, skipping" << std::endl;
+            {
+                std::ostringstream diagnostic;
+                diagnostic << "procedure \"" << name
+                          << "\" does not exist, skipping";
+                dbms::emitNotice(diagnostic.str());
+            }
             return false;
         }
         std::cout << "ERROR: procedure \"" << name
@@ -11588,6 +11919,7 @@ bool DdlExecutor::executeDropProcedure(const DropStmt* stmt, Session& s) {
 
 bool DdlExecutor::executeDropRoutine(const DropStmt* stmt, Session& s) {
     if (!stmt) return rejectMalformedDdlAst();
+    if(!stmt->routineTargets.empty())return dropRoutineDdl(*stmt,s,true);
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
 
@@ -11632,8 +11964,12 @@ bool DdlExecutor::executeDropRoutine(const DropStmt* stmt, Session& s) {
         static_cast<int>(procedureMatches);
     if (matches == 0) {
         if (stmt->ifExists) {
-            std::cout << "NOTICE: routine \"" << name
-                      << "\" does not exist, skipping" << std::endl;
+            {
+                std::ostringstream diagnostic;
+                diagnostic << "routine \"" << name
+                          << "\" does not exist, skipping";
+                dbms::emitNotice(diagnostic.str());
+            }
             return false;
         }
         std::cout << "ERROR: routine \"" << name

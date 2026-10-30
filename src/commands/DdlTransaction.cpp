@@ -191,8 +191,9 @@ bool DdlTransaction::begin() {
 }
 
 void DdlTransaction::recordCreate(DdlObjectKind kind, const std::string& name,
-                                  const std::string& extra) {
-    RecordedOp op{RecordedOp::Op::Create, kind, name, extra};
+                                  const std::string& extra,
+                                  std::optional<std::vector<uint32_t>> inputTypes) {
+    RecordedOp op{RecordedOp::Op::Create, kind, name, extra,std::move(inputTypes)};
     ops_.push_back(op);
     writeWal(op);
 }
@@ -416,6 +417,13 @@ bool DdlTransaction::undoCreate(StorageEngine& engine, const std::string& db,
             return engine.dropMaterializedView(db, op.name) == DBStatus::OK;
         case DdlObjectKind::Function: {
             const auto schema=op.extra.empty()?"public":op.extra;
+            if(op.inputTypes) {
+                const auto routine=engine.getUDFBySignature(db,op.name,*op.inputTypes,schema);
+                if(routine.expression.empty())return true;
+                if(engine.dropUDFBySignature(db,op.name,*op.inputTypes,schema)!=DBStatus::OK)return false;
+                if(routine.oid)engine.catalogService().get(db).dropProc(routine.oid);
+                return true;
+            }
             const bool hadUdf = engine.udfExists(db, op.name,schema);
             const bool hadTvf = op.extra.empty() && engine.tvfExists(db, op.name);
             if (!hadUdf && !hadTvf) return false;

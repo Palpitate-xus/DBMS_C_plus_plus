@@ -379,6 +379,10 @@ public:
         std::string language;   // "sql" (default) or "plpgsql"
         std::string returnType = "text"; // declared scalar result type
         bool strict = false;    // RETURNS NULL ON NULL INPUT
+        uint32_t oid = 0;
+        std::string schema;
+        std::vector<uint32_t> paramTypeOids;
+        uint32_t returnTypeOid = 0;
     };
     DBStatus createUDF(const std::string& dbname, const std::string& funcname,
                        const std::string& param, const std::string& expression,
@@ -388,7 +392,8 @@ public:
                        const std::string& paramType = "",
                        bool strict = false,
                        bool replace = false,
-                       const std::string& schema = "public");
+                       const std::string& schema = "public",
+                       uint32_t routineOid = 0);
     DBStatus createUDF(const std::string& dbname, const std::string& funcname,
                        const std::vector<std::string>& params,
                        const std::vector<std::string>& types,
@@ -398,13 +403,26 @@ public:
                        const std::string& returnType = "text",
                        bool strict = false,
                        bool replace = false,
-                       const std::string& schema = "public");
+                       const std::string& schema = "public",
+                       uint32_t routineOid = 0);
     DBStatus dropUDF(const std::string& dbname, const std::string& funcname,
                      const std::string& schema = "public");
     bool udfExists(const std::string& dbname, const std::string& funcname,
                     const std::string& schema = "public") const;
     UDFInfo getUDF(const std::string& dbname, const std::string& funcname,
                    const std::string& schema = "public") const;
+    std::vector<UDFInfo> getUDFOverloads(const std::string& dbname,
+        const std::string& funcname,const std::string& schema = "public") const;
+    UDFInfo getUDFBySignature(const std::string& dbname,const std::string& funcname,
+        const std::vector<uint32_t>& inputs,const std::string& schema = "public") const;
+    DBStatus dropUDFBySignature(const std::string& dbname,const std::string& funcname,
+        const std::vector<uint32_t>& inputs,const std::string& schema = "public");
+    UDFInfo moveUDF(const std::string& dbname,const std::string& funcname,
+        const std::vector<uint32_t>& inputs,const std::string& schema,
+        const std::string& newName,const std::string& newSchema);
+    bool callUDFDefinition(const std::string& dbname,const UDFInfo& function,
+        const std::vector<std::string>& values,std::string& result,
+        bool* returnIsNull = nullptr,const std::vector<bool>* nulls = nullptr) const;
     // Invoke a stored UDF with literal argument values.  Dispatches to the
     // PL/pgSQL interpreter or the SQL-expression evaluator; used by trigger
     // EXECUTE FUNCTION actions and any other host-side call sites.
@@ -1656,6 +1674,7 @@ public:
 
     // Catalog service: per-database CatalogManager cache (Phase 2 wiring).
     CatalogService& catalogService();
+    const CatalogService& catalogService() const;
 
 private:
     std::filesystem::path schemaPath(const std::string& dbname, const std::string& tablename) const;

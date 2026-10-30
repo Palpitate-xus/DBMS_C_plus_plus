@@ -1,0 +1,135 @@
+#include "Session.h"
+#include "catalog/type_registry.h"
+#include "commands/DdlExecutor.h"
+#include "commands/TableManage.h"
+#include "expression/ExprEvaluator.h"
+#include "expression/expr_helper.h"
+#include "expression/function_namespace.h"
+#include "expression/prepared_query_execution.h"
+#include "parser/parser.h"
+#include <functional>
+#include <iostream>
+#include <stdexcept>
+
+extern dbms::StorageEngine g_engine;
+namespace {
+const std::string defaultPath = "\"$user\", public";
+void require(bool value, const std::string& message) {
+    if (!value) throw std::runtime_error(message);
+}
+std::string quote(const std::string& value) {
+    std::string result = "\"";
+    for (char c : value) { result += c; if (c == '"') result += c; }
+    return result+'"';
+}
+}
+
+int main() {
+    using namespace dbms;
+    TypeRegistry::instance().bootstrap();
+    size_t controls = 0, failures = 0;
+    const auto check = [&](const std::string& label, const std::function<void()>& action) {
+        ++controls;
+        try { action(); } catch (const std::exception& error) {
+            ++failures;
+            std::cerr << "SEARCH_PATH_DEFAULT_NATIVE_FAIL " << label << " : " << error.what() << '\n';
+        }
+    };
+    for (const std::string username : {"r210_user", "R210.User", "r210_missing", ""}) {
+        Session session;
+        session.username = username;
+        check("initial path "+username, [&] { require(session.searchPath == defaultPath, "wrong built-in effective default"); });
+        check("reset target "+username, [&] { require(session.defaultSearchPath == defaultPath, "wrong built-in reset target"); });
+        check("decoded path "+username, [&] {
+            std::vector<std::string> entries; std::string canonical;
+            require(parseSessionSearchPath(session.searchPath,entries,canonical), "default rejected");
+            require(entries == std::vector<std::string>{"$user","public"} && canonical == defaultPath, "wrong default entries");
+        });
+        check("explicit default grammar "+username, [&] {
+            std::vector<std::string> entries; std::string canonical;
+            require(parseSessionSearchPath(defaultPath,entries,canonical) && canonical == defaultPath, "default canonicalization");
+            require(expandSessionSearchPathEntry(entries.front(),username) == username, "username expansion");
+        });
+        check("copy reset target "+username, [&] {
+            Session copy = session;
+            copy.searchPath = "pg_catalog";
+            require(copy.defaultSearchPath == defaultPath && session.searchPath == defaultPath, "copy changed defaults/source");
+        });
+        for (bool commit : {false,true}) check(std::string(commit ? "commit" : "rollback")+" reset "+username, [&] {
+            Session copy = session;
+            copy.searchPathTransaction.begin(copy.searchPath);
+            copy.searchPathTransaction.assign(copy.searchPath,"pg_catalog",true);
+            copy.searchPathTransaction.save("before_reset",copy.searchPath);
+            copy.searchPathTransaction.assign(copy.searchPath,copy.defaultSearchPath,false);
+            require(copy.searchPath == defaultPath, "RESET did not use default");
+            copy.searchPathTransaction.finish(copy.searchPath,commit);
+            require(copy.searchPath == defaultPath && !copy.searchPathTransaction.active, "transaction restored wrong default");
+        });
+        for (const std::string startup : {"public", "pg_catalog, public", "\"R210.User\", public", ""})
+            check("startup snapshot "+username+" "+startup, [&] {
+                Session copy = session;
+                copy.searchPath = startup;
+                copy.defaultSearchPath = copy.searchPath;
+                copy.searchPathTransaction.begin(copy.searchPath);
+                copy.searchPathTransaction.assign(copy.searchPath,"pg_catalog",true);
+                copy.searchPathTransaction.assign(copy.searchPath,copy.defaultSearchPath,false);
+                copy.searchPathTransaction.finish(copy.searchPath,true);
+                require(copy.searchPath == startup && copy.defaultSearchPath == startup, "explicit startup default was replaced");
+            });
+    }
+
+    const std::string database = "search_default_owned";
+    Session owner; owner.username = "r210_owner"; owner.permission = 1; owner.currentDB = database;
+    auto* previous = currentSession();
+    struct Restore { Session* previous; ~Restore() { setCurrentSession(previous); } } restore{previous};
+    setCurrentSession(&owner);
+    check("owned database", [&] { require(g_engine.createDatabase(database) == DBStatus::OK, "database setup"); });
+    DdlExecutor ddl;
+    for (const std::string schema : {"r210_user", "R210.User"})
+        check("owned namespace "+schema, [&] { require(!ddl.executeSql("CREATE SCHEMA "+quote(schema),owner), "namespace setup"); });
+    for (const std::string username : {"r210_user", "R210.User", "r210_missing", ""}) {
+        Session session; session.username = username; session.currentDB = database;
+        setCurrentSession(&session);
+        const bool exists = username == "r210_user" || username == "R210.User";
+        const auto expected = exists ? username : std::string("public");
+        check("routine lookup path "+username, [&] {
+            const auto path = functionNamespaceSearchPath(g_engine,database);
+            const auto wanted = exists ? std::vector<std::string>{"pg_catalog",username,"public"}
+                                       : std::vector<std::string>{"pg_catalog","public"};
+            require(path == wanted, "default routine namespaces differ");
+        });
+        for (const std::string expression : {"current_schema", "current_schema()", "pg_catalog.current_schema()"}) {
+            const auto valid = [&](const ExprValue& value) {
+                require(value.typeName == "name" && !value.isNull && value.value == expected, "wrong schema/name/NULL bit");
+            };
+            for (bool bind : {false,true}) check(expression+" "+username+(bind ? " bound" : " raw"), [&] {
+                auto parsed = SQLParser().parseForBinding("SELECT "+expression+" AS v");
+                require(parsed.success,parsed.error);
+                auto* select = dynamic_cast<SelectStmt*>(parsed.stmt.get());
+                require(select && select->selectList.size() == 1,"missing target");
+                ExprEvaluator evaluator;
+                if (bind) evaluator.bindScalarFunctions(select->selectList.front().expr.get(),&g_engine);
+                valid(evaluator.eval(select->selectList.front().expr.get(),{}));
+            });
+            check(expression+" "+username+" helper", [&] {
+                const auto value = ExprHelper::evalString(expression,{},{},database,"",&g_engine);
+                require(value.ok,value.error);
+                valid(ExprValue(value.typeName,value.value,value.isNull));
+            });
+            check(expression+" "+username+" prepared", [&] {
+                auto query = std::make_shared<PreparedQuery>(g_engine.prepareBoundQuery(database,"SELECT "+expression+" AS v"));
+                require(query->output.size() == 1 && query->output[0].name == "v" && query->output[0].type == "name" && query->output[0].typeOid == 19,"wrong NAME descriptor");
+                auto* select = static_cast<SelectStmt*>(query->ast.get());
+                auto* target = select->selectList.front().expr.get();
+                PreparedQueryExecution execution(query,&g_engine,database);
+                execution.planStatementConstants(select);
+                execution.prepareExpression(target);
+                valid(execution.evaluate(target,execution.context()));
+            });
+        }
+    }
+    setCurrentSession(previous);
+    if (controls != 99) { ++failures; std::cerr << "SEARCH_PATH_DEFAULT_NATIVE_INVENTORY " << controls << '\n'; }
+    std::cout << "SEARCH_PATH_DEFAULT_NATIVE_COMPLETE " << controls << " FAILURES " << failures << '\n';
+    return failures ? 1 : 0;
+}

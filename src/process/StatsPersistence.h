@@ -25,7 +25,24 @@ private:
 bool syncStatsFile(const std::filesystem::path& path);
 bool syncStatsDirectory(const std::filesystem::path& path);
 
-// The writer receives a unique temporary path and must create/truncate and
+// Rename publishes the new image before directory fsync establishes its
+// durability. Delta-based callers must acknowledge a published image in their
+// prepared memory state even when the final durability barrier fails.
+enum class StatsSnapshotPublication {
+    NotPublished,
+    PublishedNotDurable,
+    Durable
+};
+
+StatsSnapshotPublication publishStatsSnapshotWithStatus(
+    const std::filesystem::path& destination,
+    const std::function<bool(const std::filesystem::path&)>& writer);
+
+// The caller holds StatsFileLock (or equivalent exclusive coordination).
+// The per-destination/process temporary is fully written and synced before
+// rename; failed or throwing writers are cleaned up. The legacy bool result
+// means Durable, not necessarily that a false result left the name unchanged.
+// The writer must create/truncate and
 // fully write it. This helper fsyncs the file, atomically renames it over the
 // destination, fsyncs the parent directory, and removes failed temporaries.
 bool publishStatsSnapshot(

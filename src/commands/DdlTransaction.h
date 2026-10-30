@@ -53,7 +53,8 @@ public:
 
     // 记录 DDL 变更（按操作类型）。同时写一条 CATALOG WAL 记录。
     void recordCreate(DdlObjectKind kind, const std::string& name,
-                      const std::string& extra = {});
+                      const std::string& extra = {},
+                      std::optional<std::vector<uint32_t>> inputTypes = std::nullopt);
     void recordDrop(DdlObjectKind kind, const std::string& name,
                     const std::string& extra = {});
     void recordUpdate(DdlObjectKind kind, const std::string& name,
@@ -81,6 +82,7 @@ public:
         DdlObjectKind kind;
         std::string name;
         std::string extra;
+        std::optional<std::vector<uint32_t>> inputTypes;
     };
 
 private:

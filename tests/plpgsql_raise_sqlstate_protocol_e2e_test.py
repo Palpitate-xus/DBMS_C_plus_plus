@@ -71,6 +71,8 @@ def main():
         run_integer_for(client, runner, server['sock'])
         from compat.plpgsql_boolean_conditions import run as run_boolean_conditions
         run_boolean_conditions(client, runner, server['sock'])
+        from compat.plpgsql_null_statement import run as run_null_statement
+        run_null_statement(client, runner, server['sock'])
         print('[PLPGSQL RAISE SQLSTATE PROTOCOL] passed')
     finally:
         runner.stop_ours(server)

@@ -51,6 +51,32 @@ static std::string trimExec(const std::string& value) {
     return value.substr(first, last - first + 1);
 }
 
+// Sorting may spend substantial time after its child has been drained.
+// Poll at both algorithm boundaries and every 128 comparisons, including
+// worker-local sorts. Copies of the comparator share this invocation's
+// counter; SQL comparison, NULL/tie semantics and key evaluation stay intact.
+template <typename Iterator, typename Compare>
+static void interruptibleSort(Iterator first, Iterator last, Compare compare) {
+    checkForQueryInterrupt();
+    size_t comparisons = 0;
+    std::sort(first, last, [&](const auto& left, const auto& right) {
+        if ((comparisons++ & 127U) == 0) checkForQueryInterrupt();
+        return compare(left, right);
+    });
+    checkForQueryInterrupt();
+}
+
+template <typename Iterator, typename Compare>
+static void interruptibleStableSort(Iterator first, Iterator last, Compare compare) {
+    checkForQueryInterrupt();
+    size_t comparisons = 0;
+    std::stable_sort(first, last, [&](const auto& left, const auto& right) {
+        if ((comparisons++ & 127U) == 0) checkForQueryInterrupt();
+        return compare(left, right);
+    });
+    checkForQueryInterrupt();
+}
+
 // ========================================================================
 // Helper: format a raw row buffer into display string
 // ========================================================================
@@ -575,7 +601,7 @@ class PreparedAggregateOp final : public Operator {
         const auto& aggregate = state_->aggregates[index];
         auto& inputs = inputs_[index];
         if (!aggregate.call->aggregateOrderKeys.empty()) {
-            std::stable_sort(inputs.begin(), inputs.end(), [&](const Entry& left, const Entry& right) {
+            interruptibleStableSort(inputs.begin(), inputs.end(), [&](const Entry& left, const Entry& right) {
                 for (size_t i = 0; i < aggregate.call->aggregateOrderKeys.size(); ++i) {
                     const auto& key = aggregate.call->aggregateOrderKeys[i];
                     const auto& a = left.keys.at(i);
@@ -755,7 +781,7 @@ public:
             rows_.push_back(std::move(row));
         }
         if (child_->hasError()) return propagateChildError(child_.get(), "prepared sort child failed");
-        std::stable_sort(rows_.begin(), rows_.end(), [&](const Row& left, const Row& right) {
+        interruptibleStableSort(rows_.begin(), rows_.end(), [&](const Row& left, const Row& right) {
             for (size_t i = 0; i < state_->keys.size(); ++i) {
                 const auto& a = left.keys[i]; const auto& b = right.keys[i];
                 const auto& key = state_->keys[i];
@@ -1680,7 +1706,7 @@ public:
                 rows_.push_back(std::move(cells));
             }
             if(child_->hasError())return propagateChildError(child_.get(),"set sort child failed");
-            std::stable_sort(rows_.begin(),rows_.end(),[&](const auto& a,const auto& b){return less(a,b);});
+            interruptibleStableSort(rows_.begin(),rows_.end(),[&](const auto& a,const auto& b){return less(a,b);});
             loaded_=true;
         }
         if(position_>=rows_.size()){current_.clear();return false;}
@@ -4095,7 +4121,7 @@ bool WindowOp::open() {
 
         std::vector<size_t> order(input.size());
         for (size_t i = 0; i < order.size(); ++i) order[i] = i;
-        std::stable_sort(order.begin(), order.end(), [&](size_t left, size_t right) {
+        interruptibleStableSort(order.begin(), order.end(), [&](size_t left, size_t right) {
             const auto& leftRow = input[left];
             const auto& rightRow = input[right];
             for (size_t column : partitionColumns) {
@@ -4593,7 +4619,7 @@ bool WindowOp::open() {
         output.push_back(std::move(row));
     }
     if (finalOrderColumn < tbl_.len || !finalPartitionColumns.empty()) {
-        std::stable_sort(output.begin(), output.end(), [&](const OutputRow& left, const OutputRow& right) {
+        interruptibleStableSort(output.begin(), output.end(), [&](const OutputRow& left, const OutputRow& right) {
             for (size_t column : finalPartitionColumns) {
                 const int cmp = compareDeclaredWindowCell(tbl_.cols[column],
                     left.keys[column], left.keyNulls[column],
@@ -4711,7 +4737,7 @@ bool SortOp::open() {
             }
             items.emplace_back(std::move(buffer_[ri]), it);
         }
-        std::sort(items.begin(), items.end(), [&](const auto& a, const auto& b) {
+        interruptibleSort(items.begin(), items.end(), [&](const auto& a, const auto& b) {
             if (a.second.isNull != b.second.isNull)
                 return a.second.isNull == nullsFirst_;
             if (scol.dataType == "char" || scol.isVariableLength) {
@@ -5179,7 +5205,7 @@ static std::string collectionAggregate(
     right->column = "sort_right";
     less.left = std::move(left);
     less.right = std::move(right);
-    std::stable_sort(entries.begin(), entries.end(), [&](const Entry& a, const Entry& b) {
+    interruptibleStableSort(entries.begin(), entries.end(), [&](const Entry& a, const Entry& b) {
         for (size_t i = 0; i < order->orderBy.size(); ++i) {
             const auto& key = order->orderBy[i];
             const auto& av = a.keys[i];
@@ -5203,7 +5229,7 @@ static std::string collectionAggregate(
     // aggregate ORDER BY.  Preserving scan order here made results such as
     // array_agg(DISTINCT int_column) observably incompatible.
     if (call->distinct && order->orderBy.empty()) {
-        std::stable_sort(entries.begin(), entries.end(), [&](const Entry& a,
+        interruptibleStableSort(entries.begin(), entries.end(), [&](const Entry& a,
                                                               const Entry& b) {
             const size_t count = std::min(a.args.size(), b.args.size());
             for (size_t i = 0; i < count; ++i) {
@@ -5823,7 +5849,7 @@ bool ParallelHashJoinOp::open() {
             }
         }
         for (auto& kv : rightHash_) {
-            std::sort(kv.second.begin(), kv.second.end(),
+            interruptibleSort(kv.second.begin(), kv.second.end(),
                       [](const auto& a, const auto& b) { return a.first < b.first; });
         }
         usedParallelWorkers_ = true;
@@ -6062,8 +6088,8 @@ bool MergeJoinOp::open() {
     auto rightCmp = [&](const std::string& a, const std::string& b) {
         return extractJoinKey(a, rightTbl_, rightCol_) < extractJoinKey(b, rightTbl_, rightCol_);
     };
-    std::sort(leftRows_.begin(), leftRows_.end(), leftCmp);
-    std::sort(rightRows_.begin(), rightRows_.end(), rightCmp);
+    interruptibleSort(leftRows_.begin(), leftRows_.end(), leftCmp);
+    interruptibleSort(rightRows_.begin(), rightRows_.end(), rightCmp);
 
     leftPos_ = 0;
     rightPos_ = 0;
@@ -6838,7 +6864,7 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& in
                                 return;
                             }
                             checkForQueryInterrupt();
-                            std::sort(part.begin(), part.end(),
+                            interruptibleSort(part.begin(), part.end(),
                                       [&tbl, &ctx](const std::pair<int64_t, std::string>& a,
                                                    const std::pair<int64_t, std::string>& b) {
                                           const std::string va =

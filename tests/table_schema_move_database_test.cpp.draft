@@ -1,0 +1,151 @@
+#include "access/IndexFileUtil.h"
+#include "catalog/CatalogService.h"
+#include "catalog/type_registry.h"
+#include "commands/DdlExecutor.h"
+#include "commands/TableManage.h"
+#include "common/DbError.h"
+#include <functional>
+#include <iostream>
+#include <sys/wait.h>
+#include <unistd.h>
+
+using namespace dbms;
+extern StorageEngine g_engine;
+const std::string database="r224_native";
+
+struct Checks {
+    size_t controls=0,failures=0;
+    void check(const std::string& label,const std::function<bool()>& body) {
+        ++controls;
+        try {if(body())return;}catch(const std::exception& e){std::cerr<<label<<": "<<e.what()<<'\n';}
+        ++failures;std::cerr<<"FAIL "<<label<<'\n';
+    }
+    int done(const char* label) {
+        std::cout<<label<<" "<<controls<<" FAILURES "<<failures<<std::endl;return failures?1:0;
+    }
+};
+
+bool child(const std::vector<std::string>& arguments) {
+    const pid_t pid=fork();
+    if(pid==0) {
+        std::vector<char*> values{const_cast<char*>("table_schema_move_database")};
+        for(const auto& argument:arguments)values.push_back(const_cast<char*>(argument.c_str()));
+        values.push_back(nullptr);execv("/proc/self/exe",values.data());_exit(127);
+    }
+    int status=0;return pid>0 && waitpid(pid,&status,0)==pid && WIFEXITED(status) && WEXITSTATUS(status)==0;
+}
+
+int main(int argc,char** argv) {
+    TypeRegistry::instance().bootstrap();Checks c;
+    if(argc==2 && std::string(argv[1])=="--seed") {
+        c.check("database",[]{return g_engine.createDatabase(database)==DBStatus::OK;});
+        Session session;session.username="admin";session.permission=1;session.currentDB=database;
+        DdlExecutor ddl;
+        for(const auto& sql:std::vector<std::string>{
+            "CREATE SCHEMA a224","CREATE SCHEMA b224","CREATE SCHEMA c224",
+            "CREATE TABLE a224.parent(id serial PRIMARY KEY,n integer UNIQUE)",
+            "CREATE INDEX r224_idx ON a224.parent(n)",
+            "CREATE TABLE c224.child(n integer REFERENCES a224.parent(id))",
+            "COMMENT ON TABLE a224.parent IS 'retained'"})
+            c.check(sql,[&]{return !ddl.executeSql(sql,session);});
+        c.check("seed parent",[]{return g_engine.insert(database,"a224__parent",{{"n","10"}})==DBStatus::OK;});
+        c.check("seed child",[]{return g_engine.insert(database,"c224__child",{{"n","1"}})==DBStatus::OK;});
+        c.check("seed checkpoint",[]{return g_engine.checkpoint(database);});
+        return c.done("TABLE_SCHEMA_DATABASE_SEED_COMPLETE");
+    }
+    StorageEngine engine; // Explicit owner, distinct from the SQL seed engine.
+    auto classRow=[&](const std::string& schema,const std::string& name) {
+        auto& catalog=engine.catalogService().get(database);
+        const auto ns=catalog.getNamespaceByName(schema);
+        return ns?catalog.getClassByName(name,ns->oid):std::optional<PgClassRow>{};
+    };
+    auto typeRow=[&](const std::string& schema,const std::string& name) {
+        auto& catalog=engine.catalogService().get(database);
+        const auto ns=catalog.getNamespaceByName(schema);
+        return ns?catalog.getTypeByName(name,ns->oid):std::optional<PgTypeRow>{};
+    };
+    auto count=[&](const std::string& name) {
+        size_t rows=0;
+        if(!engine.forEachRow(database,name,[&](uint32_t,uint16_t,const char*,size_t){++rows;}))
+            throw std::runtime_error("could not read "+name);
+        return rows;
+    };
+    if(argc==7 && std::string(argv[1])=="--cold") {
+        c.check("cold recovery",[&]{return engine.recoverAllDatabases();});
+        size_t argument=2;
+        for(const auto& name:std::vector<std::string>{"parent","r224_idx","parent_id_seq"}) {
+            const Oid expected=static_cast<Oid>(std::stoul(argv[argument++]));
+            c.check("cold class "+name,[&]{const auto row=classRow("b224",name);return row && row->oid==expected;});
+            c.check("cold old class absent "+name,[&]{return !classRow("a224",name);});
+        }
+        for(const auto& name:std::vector<std::string>{"parent","_parent"}) {
+            const Oid expected=static_cast<Oid>(std::stoul(argv[argument++]));
+            c.check("cold type "+name,[&]{const auto row=typeRow("b224",name);return row && row->oid==expected;});
+        }
+        c.check("cold rows",[&]{return count("b224__parent")==2;});
+        c.check("cold FK",[&]{const auto s=engine.getTableSchema(database,"c224__child");return s.fkLen==1 && s.fks[0].refTable=="b224__parent";});
+        c.check("cold comment",[&]{return engine.getTableComment(database,"b224__parent")=="retained";});
+        return c.done("TABLE_SCHEMA_DATABASE_COLD_COMPLETE");
+    }
+    c.check("real seed process",[]{return child({"--seed"});});
+    const auto original=classRow("a224","parent");
+    const auto originalIndex=classRow("a224","r224_idx");
+    const auto originalSequence=classRow("a224","parent_id_seq");
+    // Native catalog APIs can already own associated composite/array rows.
+    // Seed actual persisted rows to verify migration of existing metadata;
+    // this does not claim SQL CREATE TABLE now creates its missing row type.
+    Oid rowType=0,arrayType=0;
+    c.check("real associated type metadata",[&]{
+        if(!original)return false;
+        auto& cat=engine.catalogService().get(database);
+        PgTypeRow row;row.typname="parent";row.typnamespace=original->relnamespace;
+        row.typtype='c';row.typcategory='C';row.typrelid=original->oid;rowType=cat.createType(row);
+        PgTypeRow array;array.typname="_parent";array.typnamespace=original->relnamespace;
+        array.typcategory='A';array.typelem=rowType;arrayType=cat.createType(array);
+        row.oid=rowType;row.typarray=arrayType;if(!cat.updateType(rowType,row))return false;
+        auto relation=*original;relation.reltype=rowType;if(!cat.updateClass(relation.oid,relation))return false;
+        PgDependRow dep;dep.classid=PgClassOid_Type;dep.objid=rowType;dep.refclassid=PgClassOid_Class;dep.refobjid=relation.oid;dep.deptype='i';cat.addDepend(dep);
+        dep.objid=arrayType;dep.refclassid=PgClassOid_Type;dep.refobjid=rowType;cat.addDepend(dep);
+        return cat.persistAll();
+    });
+    const Oid tableOid=original?original->oid:0,indexOid=originalIndex?originalIndex->oid:0,sequenceOid=originalSequence?originalSequence->oid:0;
+    c.check("native move",[&]{return engine.alterTableSetSchema(database,"a224__parent","b224")==DBStatus::OK;});
+    c.check("old physical absent",[&]{return !engine.tableExists(database,"a224__parent");});
+    c.check("new physical present",[&]{return engine.tableExists(database,"b224__parent");});
+    for(const auto& entry:std::vector<std::pair<std::string,Oid>>{{"parent",tableOid},{"r224_idx",indexOid},{"parent_id_seq",sequenceOid}}) {
+        c.check("stable class identity "+entry.first,[&]{const auto row=classRow("b224",entry.first);return row && row->oid==entry.second;});
+        c.check("namespace dependency "+entry.first,[&]{
+            auto& cat=engine.catalogService().get(database);const auto ns=cat.getNamespaceByName("b224");if(!ns)return false;
+            size_t edges=0;for(const auto& edge:cat.findDepends(PgClassOid_Class,entry.second))if(edge.refclassid==PgClassOid_Namespace){if(edge.refobjid!=ns->oid)return false;++edges;}return edges==1;
+        });
+    }
+    for(const auto& entry:std::vector<std::pair<std::string,Oid>>{{"parent",rowType},{"_parent",arrayType}})
+        c.check("stable associated type "+entry.first,[&]{const auto row=typeRow("b224",entry.first);return row && row->oid==entry.second;});
+    c.check("same namespace no-op",[&]{return engine.alterTableSetSchema(database,"b224__parent","b224")==DBStatus::OK;});
+    c.check("native default after move",[&]{return engine.insert(database,"b224__parent",{{"n","20"}})==DBStatus::OK;});
+    c.check("inbound FK after move",[&]{return engine.insert(database,"c224__child",{{"n","2"}})==DBStatus::OK;});
+    c.check("FK violation retained",[&]{return engine.insert(database,"c224__child",{{"n","9"}})==DBStatus::FOREIGN_KEY_VIOLATION;});
+    c.check("comment retained",[&]{return engine.getTableComment(database,"b224__parent")=="retained";});
+    c.check("begin rollback",[&]{return engine.beginTransaction(database)==DBStatus::OK;});
+    c.check("move inside transaction",[&]{return engine.alterTableSetSchema(database,"b224__parent","a224")==DBStatus::OK;});
+    c.check("rollback",[&]{return engine.rollbackTransaction()==DBStatus::OK;});
+    c.check("rollback physical identity",[&]{return engine.tableExists(database,"b224__parent") && !engine.tableExists(database,"a224__parent");});
+    c.check("rollback catalog identity",[&]{const auto row=classRow("b224","parent");return row && row->oid==tableOid;});
+    c.check("begin savepoint",[&]{return engine.beginTransaction(database)==DBStatus::OK;});
+    c.check("savepoint",[&]{return engine.savepoint("before_move")==DBStatus::OK;});
+    c.check("savepoint move",[&]{return engine.alterTableSetSchema(database,"b224__parent","a224")==DBStatus::OK;});
+    c.check("rollback to savepoint",[&]{return engine.rollbackToSavepoint("before_move")==DBStatus::OK;});
+    c.check("commit savepoint",[&]{return engine.commitTransaction()==DBStatus::OK;});
+    c.check("savepoint physical identity",[&]{return engine.tableExists(database,"b224__parent") && !engine.tableExists(database,"a224__parent");});
+    c.check("injected durable publication failure",[&]{
+        index_file::failNextDirectorySyncForTesting();bool failed=false;
+        try {failed=engine.alterTableSetSchema(database,"b224__parent","a224")==DBStatus::IO_ERROR;}
+        catch(const DbError& e){failed=e.sqlState()=="58030";}
+        index_file::directorySyncFailureCountForTesting.store(0);return failed;
+    });
+    c.check("failure preserves rows",[&]{return count("b224__parent")==2 && !engine.tableExists(database,"a224__parent");});
+    c.check("failure leaves no transaction",[&]{return !engine.inTransaction();});
+    c.check("checkpoint",[&]{return engine.checkpoint(database);});
+    c.check("real cold process",[&]{return child({"--cold",std::to_string(tableOid),std::to_string(indexOid),std::to_string(sequenceOid),std::to_string(rowType),std::to_string(arrayType)});});
+    return c.done("TABLE_SCHEMA_DATABASE_NATIVE_COMPLETE");
+}

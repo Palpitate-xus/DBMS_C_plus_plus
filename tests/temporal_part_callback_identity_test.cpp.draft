@@ -1,0 +1,80 @@
+#include "catalog/type_registry.h"
+#include "expression/ExprEvaluator.h"
+#include "expression/expr_helper.h"
+#include "parser/parser.h"
+
+#include <iostream>
+#include <string>
+#include <vector>
+
+int main() {
+    using namespace dbms;
+    TypeRegistry::instance().bootstrap();
+    size_t controls = 0, failures = 0;
+    const auto check = [&](bool good, const std::string& label) {
+        ++controls;
+        if (!good) { ++failures; std::cerr << "TEMPORAL_PART_CALLBACK_FAIL " << label << '\n'; }
+    };
+    const auto forms = [](const std::string& name) {
+        return name == "extract" ? std::vector<std::string>{"\"extract\"", "pg_catalog.extract", "\"pg_catalog\".\"extract\""}
+                                 : std::vector<std::string>{"date_part", "\"date_part\"", "pg_catalog.date_part"};
+    };
+    const auto parse = [](SQLParser& parser, const std::string& expression) {
+        auto result = parser.parseForBinding("SELECT " + expression);
+        if (!result.success || !dynamic_cast<SelectStmt*>(result.stmt.get()))
+            throw std::runtime_error("fixture parse failed: " + expression);
+        return result;
+    };
+    for (const std::string name : {"extract", "date_part"}) {
+        for (const auto& form : forms(name)) {
+            for (const auto* type : {"date", "time", "timetz", "timestamp", "timestamptz", "interval"}) {
+                SQLParser parser;
+                auto parsed = parse(parser, form + "('epoch',NULL::" + type + ")");
+                auto* call = dynamic_cast<FunctionCallExpr*>(static_cast<SelectStmt*>(parsed.stmt.get())->selectList.front().expr.get());
+                if (!call) return 2;
+                const std::string resultType = name == "extract" ? "numeric" : "double precision";
+                ExprEvaluator evaluator;
+                try {
+                    const bool metadata = evaluator.scalarFunctionResultType(call) == resultType &&
+                        evaluator.scalarFunctionIdentity(call).rfind("builtin", 0) == 0 &&
+                        ExprHelper::inferParsedInputType(call, {}, "", nullptr, &evaluator) == resultType;
+                    evaluator.bindScalarFunctions(call);
+                    const auto value = evaluator.eval(call, {});
+                    check(metadata && value.isNull && value.typeName == resultType, form + " NULL::" + type);
+                } catch (const std::exception& error) { check(false, form + " " + type + " " + error.what()); }
+            }
+        }
+        for (const auto& form : forms(name))
+            for (const auto volatility : {'v', 'i'})
+                for (const auto* arguments : {"", "'opaque'", "'x','y'", "'x','y','z'"})
+                    for (const auto& expected : std::vector<ExprValue>{{"text", "opaque"}, {"integer", "7"}, {"bytea", "\\x00ff"}}) {
+                        SQLParser parser;
+                        auto parsed = parse(parser, form + "(" + arguments + ")");
+                        auto* call = dynamic_cast<FunctionCallExpr*>(static_cast<SelectStmt*>(parsed.stmt.get())->selectList.front().expr.get());
+                        if (!call) return 2;
+                        ExprEvaluator evaluator;
+                        int calls = 0;
+                        const auto arity = call->args.size();
+                        evaluator.registerFunction(name, [&](const std::vector<ExprValue>& values) {
+                            ++calls;
+                            if (values.size() != arity) throw std::runtime_error("opaque callback arity changed");
+                            return expected;
+                        }, volatility);
+                        try {
+                            const bool metadata = evaluator.hasScalarFunction(call) &&
+                                evaluator.scalarFunctionResultType(call).empty() &&
+                                evaluator.scalarFunctionIdentity(call).rfind("native", 0) == 0 &&
+                                evaluator.scalarFunctionVolatility(call) == volatility &&
+                                ExprHelper::inferParsedInputType(call, {}, "", nullptr, &evaluator) == "unknown" && calls == 0;
+                            evaluator.bindScalarFunctions(call);
+                            const bool pure = calls == 0;
+                            const auto actual = evaluator.eval(call, {});
+                            check(metadata && pure && calls == 1 && !actual.isNull && actual.typeName == expected.typeName && actual.value == expected.value,
+                                  form + "(" + arguments + ") " + expected.typeName);
+                        } catch (const std::exception& error) { check(false, form + " " + expected.typeName + " " + error.what()); }
+                    }
+    }
+    if (controls != 180) { ++failures; std::cerr << "TEMPORAL_PART_CALLBACK_BAD_REACH " << controls << '\n'; }
+    std::cout << "TEMPORAL_PART_CALLBACK_NATIVE_COMPLETE " << controls << " FAILURES " << failures << '\n';
+    return failures ? 1 : 0;
+}

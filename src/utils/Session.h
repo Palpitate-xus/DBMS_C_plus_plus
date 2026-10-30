@@ -184,6 +184,9 @@ struct Session {
     // Protocol OIDs for the same statement registry.  SQL PREPARE and wire
     // Parse share this namespace; zero means an as-yet unspecified type.
     std::map<std::string, std::vector<uint32_t>> preparedStmtParameterOids;
+    // A successfully analyzed query's output identities are fixed across
+    // Bind. Reanalysis may not emit a changed type under its old descriptor.
+    std::map<std::string,std::vector<std::pair<uint32_t,int32_t>>> preparedStmtResultTypes;
     // SELECT/UPDATE/DELETE ... FROM ONLY t: suppress inheritance expansion
     // for the next statement (reset after each execution).
     bool onlyNext = false;

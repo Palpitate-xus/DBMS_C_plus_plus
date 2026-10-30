@@ -172,6 +172,8 @@ def main():
         ok('ROLLBACK;')
         print('QUANT DEMAND FAILURES',failures,flush=True)
         assert not failures,failures
+        from compat.typed_scalar_in import run as run_typed_scalar_in
+        run_typed_scalar_in(c,r,sock)
         print('[QUANTIFIED QUERY DEMAND] all',len(CASES),'controls and ordinary receiver passed',flush=True)
     finally:
         if server:r.stop_ours(server)

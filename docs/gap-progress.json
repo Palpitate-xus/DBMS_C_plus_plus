@@ -2,6 +2,32 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "R185 cooperative cancellation in all12 ExecutionPlan sorting algorithm sites",
+      "gap_ids": [
+        "P0-14",
+        "OPT-10",
+        "OPT-17"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/issue-review-r185-sort-interrupt-propagation.md",
+        "docs/review-requirement-clauses.json"
+      ],
+      "tests": [
+        "tests/executor_sort_interrupt_test.cpp",
+        "tests/statement_timeout_protocol_e2e_test.py",
+        "tests/statement_timeout_cli_e2e_test.py"
+      ],
+      "verification": {
+        "current": "Oldsame80 actual1/40fails; new80 actual0 both. Each19complete=12native3realMain3wire1CLI actual0; original190raw/906 preserved, default15/fsyncunchanged.",
+        "provenance": "Each74objects16bins127headers. Rootnormal1CPP+link/repeat0; cleanreusesinitialcandidatefresh1CPP andmatched57. Main3eachverifieddonors/newlinks,no freshTUclaim.",
+        "scope": "All273originalIDs/text/claims preserved, only3requirements decomposed38clauses;270notderived incloriginal15deferred. No fullatomic requirement proved. work_mem/spill and broaderinterrupt/resourceowner stillopen.",
+        "boundary": "Notfull1493/currentfull72/TLS/sanitizer; no originalitemstatuschanges,no push,Actionsnotenabled.",
+        "proof": "/tmp/dbms-r185-independent-pre-proof.vvl1i9_g/completed-proof.json",
+        "proof_sha256": "11f415bb0b70378e335a31f22e8db591ba25d30f6987a8c4065ce448711a3a36"
+      }
+    },
+    {
       "issue": "R184 fixed public native/Main test-helper child data-directory inheritance",
       "gap_ids": [],
       "status": "partial",
@@ -1293,6 +1319,19 @@
         "focused_tests": "Own ExprEvaluator.cpp only; two iterations normal1CPP/repeat0 each actually0. Candidate1 missed CHARACTER canonical name: all24/57 BPCHAR failures and R110one/110 retained. Candidate2 fixes both named inputs, complete57/110 and22wholewire0; newnative fixture count134 retained separately. Final frozen15native+22wire=37unique wholeentries all actual0; new182/110 andown57 all0. Final normal/repeat0 productionCPP unchanged. Matching binary/cache dualstamps/all58receipts/57testbytes/source-test-scriptseal and unchanged header fences0. Full working static and own12path projectedindex532MD/887native/514Python zero; not cleanHEAD/full registered/TLS/sanitizer proof.",
         "full_suite": "One new registered protocol driver; independent index887native+3Main+514Python=1404, not a new complete registered run. Working tree also contains preserved R98/R99/R109 and R110 candidates; their source/tests/docs excluded from this item. Only own12path projected changes accepted.",
         "scope": "Original273 item states and checkboxes unchanged22complete166partial70unverified15deferred. No implicit graph, public header, provider lifetime, wire byte or user-defined array rewrite in this issue. R106 and other explicit deferrals not resumed. CurrentR109 skipped/preserved/uncommitted. R110 binary result output independently validated/committed next. No push; Actions disabled."
+      }
+    },
+    {
+      "issue": "R109 missing ARRAY_POSITIONS all-match builtin with real polymorphic declarations",
+      "gap_ids": ["TYPE-16", "FUNC-01", "SQL-09", "PROTO-04"],
+      "status": "deferred_by_user",
+      "evidence": ["docs/issue-review-r109-array-positions.md"],
+      "tests": ["tests/array_positions_typed_equality_test.cpp", "tests/array_positions_typed_equality_protocol_e2e_test.py"],
+      "verification": {
+        "reproduction": "Actual180006/immutable75e8 each29 observers0 have20semantic differences, notbehaviorpasses. Actualpg_proc OID3279 declares anycompatiblearray/anycompatible toint4array nonSTRICT. Final248reference0/old160fail actually1; earlier242/154 and228reference0 retained. Wholeoldnative388/290fail actually1, all101corecases3modes+ownership/nativecells/userdecls executed.",
+        "focused_tests": "User says skip current item; candidate source/tests/records preserved unstaged, not accepted. Historical own normal5CPP/repeat0, core388/354/208/arraylibrary andwire248/258/80/654, finite33native/30wire/3realMain=66 andartifactfences all actually0 on frozen c1f5/cache7687/sealea5. This is bounded historical candidate evidence, not a committed fix or new full registered run.",
+        "full_suite": "Candidate entries are unaccepted and uncommitted; do not add them to accepted manifest counts. No new complete registered suite or full-engine sanitizer/realTLS proof. Keep all R109 hunks, tests and records, without discarding or committing them during other issue fixes.",
+        "scope": "Original273items/checkboxes unchanged22complete166partial70unverified15deferred. R110 independentarraybinaryresult2/10 andR111 ARRAYconstructorplanning4/16 actualdifferences documentedwithfixmethods andunresolved, notuserdeferred orclosedbynewfunction. Generalcomposite/domain polymorphism, fullcomparison/hash/assignment/record-arraybinaryIO notcompleted. Explicitdeferrals preserved, nopush, Actionsdisabled."
       }
     },
     {

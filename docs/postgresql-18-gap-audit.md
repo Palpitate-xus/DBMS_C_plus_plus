@@ -1,5 +1,13 @@
 # 2026-10-13 全仓库审查
 
+最新有限修复：[R185排序中断传播](issue-review-r185-sort-interrupt-propagation.md)统一执行器12处排序的取消/超时检查，
+保留原比较、类型、NULL/tie及求值规则。修正夹具后旧80控制完整40失败；两侧新80及各19完整入口均实际全0。
+每侧74对象16程序/127头核对，Root正常1CPP并链接/repeat零；Main为同源已验证donor重新链接，不冒fresh TU。
+原273全文已保存在[原子范围账](review-requirement-clauses.json)，仅3项拆为38条件、其余270未拆解含原15暂缓，未声称全审。
+work_mem/spill等仍未闭合；原22/166/70/15不变，登记1493/Root1505、606MD/Root609MD，原12入口/三文档保留。
+不是全1493/修复后完整72/TLS/sanitizer验收，总目标未完成；不push，不启用Actions。以下记录按当时输入解释。
+
+
 最新有限修复：[R184测试数据目录隔离](issue-review-r184-test-data-directory-isolation.md)使公共helper在子程序启动前选私有数据根，
 父环境/cwd不变。旧同一7控制完整4失败，候选及Root完整7通过；两侧各4native/3真实Main通过，调用者标记目录保持不变。
 只改脚本及既有测试，全部CPP/127头和匹配程序不变，不冒fresh编译或修复后新完整72；旧72另记。
@@ -441,10 +449,15 @@ R114观察到的非物化TEMP VIEW完成tag错误后续按[R116](issue-review-r1
 真实无 typmod 声明和关键字默认长度分开处理。原273项状态与勾选不提升，
 不把本项验收扩为通用数组、二进制能力或所有问题完成。
 
+后续[R109 ARRAY_POSITIONS](issue-review-r109-array-positions.md)补全部匹配
+下标而非只返回首个；实际参考248/旧160失败、旧原生388/290保留，最终本项
+388/248及66完整邻接门禁以记录为准。R110数组binary输出和R111纯ARRAY
+构造器规划实际缺口另已记录，均未修复/非用户暂缓；原273状态/勾选不变。
+
 后续[R108数组查找](issue-review-r108-array-position-typed-equality.md)处理真实
 元素相等、多态输入与用户重载/数组参数元数据；参考258零失败、旧258/158失败，
-354原生/258协议及完整邻接入口的验收以该记录为准。ARRAY_POSITIONS、通用
-多态和原TYPE-16/FUNC-01仍未完成；原273状态/勾选不变，R106不恢复。
+354原生/258协议及完整邻接入口的验收以该记录为准。ARRAY_POSITIONS后续另列
+R109；通用多态和原TYPE-16/FUNC-01仍未完成，原273状态/勾选不变，R106不恢复。
 
 后续[R107长度函数签名](issue-review-r107-string-length-signatures.md)记录四名
 11条声明及字符/字节/位区别、空结果/Parse阶段检查、同名用户函数与原生回调

@@ -1,5 +1,13 @@
 # 全部文档检查清单
 
+最新有限修复：[R185排序中断传播](issue-review-r185-sort-interrupt-propagation.md)统一执行器12处排序的取消/超时检查，
+保留原比较、类型、NULL/tie及求值规则。修正夹具后旧80控制完整40失败；两侧新80及各19完整入口均实际全0。
+每侧74对象16程序/127头核对，Root正常1CPP并链接/repeat零；Main为同源已验证donor重新链接，不冒fresh TU。
+原273全文已保存在[原子范围账](review-requirement-clauses.json)，仅3项拆为38条件、其余270未拆解含原15暂缓，未声称全审。
+work_mem/spill等仍未闭合；原22/166/70/15不变，登记1493/Root1505、606MD/Root609MD，原12入口/三文档保留。
+不是全1493/修复后完整72/TLS/sanitizer验收，总目标未完成；不push，不启用Actions。以下记录按当时输入解释。
+
+
 最新有限修复：[R184测试数据目录隔离](issue-review-r184-test-data-directory-isolation.md)使公共helper在子程序启动前选私有数据根，
 父环境/cwd不变。旧同一7控制完整4失败，候选及Root完整7通过；两侧各4native/3真实Main通过，调用者标记目录保持不变。
 只改脚本及既有测试，全部CPP/127头和匹配程序不变，不冒fresh编译或修复后新完整72；旧72另记。
@@ -130,7 +138,7 @@ R173函数签名类型依赖及R176真实聚合排序仍独立开放；R156等�
 
 ## 历史记录（以下状态与数量均指记录当时）
 
-审查输入和发现见[代码审查报告](code-review-2026-10-13.md)。基准提交 `a502ffa3` 包含 412 份已跟踪 Markdown；首次审查含新增报告共 417 份。当前本轮逐文件复查 605 份 Markdown，下表覆盖全部；历史数量不改写。
+审查输入和发现见[代码审查报告](code-review-2026-10-13.md)。基准提交 `a502ffa3` 包含 412 份已跟踪 Markdown；首次审查含新增报告共 417 份。当前本轮逐文件复查 609 份 Markdown，下表覆盖全部；历史数量不改写。
 
 检查逐文件读取 UTF-8 内容并验证 Markdown 内联链接的本地文件目标是否存在。它不验证外部网址、锚点、所有引用式链接，也不证明文中每个历史技术结论在当前版本成立。
 使用手册、部署、命令参考、模块 README 和状态入口另作人工一致性核查；`issue-*.md` 保留原始提交和运行证据，其结论须按对应输入读取。
@@ -486,6 +494,7 @@ R173函数签名类型依赖及R176真实聚合排序仍独立开放；R156等�
 | [docs/issue-review-r182-utf8-split-linear.md](issue-review-r182-utf8-split-linear.md) | V2共享UTF-8线性拆分；新76/329、两端23入口；原V1错误oracle和-6完整保留，R183独立修复 | 部分 |
 | [docs/issue-review-r183-string-to-array-callback-identity.md](issue-review-r183-string-to-array-callback-identity.md) | 实际callback元数据/身份；旧native60完整60失败，两端21入口全0，R182性能仍未接受 | 部分 |
 | [docs/issue-review-r184-test-data-directory-isolation.md](issue-review-r184-test-data-directory-isolation.md) | 子程序启动前显式私有数据根；旧7控制4失败，两侧7控制及各4native/3Main通过；非全1492 | 通过 |
+| [docs/issue-review-r185-sort-interrupt-propagation.md](issue-review-r185-sort-interrupt-propagation.md) | 12处排序取消/超时；原80/40失败、两侧80及各19入口全0；273范围保留，仅3项38原子条件 | 部分 |
 | [docs/issue-review-r18-catalog-value-snapshots.md](issue-review-r18-catalog-value-snapshots.md) | 历史问题证据 | 通过 |
 | [docs/issue-review-r19-stale-temp-startup.md](issue-review-r19-stale-temp-startup.md) | 历史问题证据 | 通过 |
 | [docs/issue-review-r20-returning-query-owner.md](issue-review-r20-returning-query-owner.md) | 历史问题证据 | 通过 |
@@ -559,6 +568,8 @@ R173函数签名类型依赖及R176真实聚合排序仍独立开放；R156等�
 | [docs/issue-review-r95-legacy-global-boolean-arguments.md](issue-review-r95-legacy-global-boolean-arguments.md) | 问题与修复方法 | 通过 |
 | [docs/issue-review-r96-collation-exit-user-deferred.md](issue-review-r96-collation-exit-user-deferred.md) | 用户暂缓与原始证据 | 通过 |
 | [docs/issue-review-r97-typed-before-row-assignments.md](issue-review-r97-typed-before-row-assignments.md) | 问题与修复方法 | 通过 |
+| [docs/issue-review-r98-trigger-nested-result-isolation.md](issue-review-r98-trigger-nested-result-isolation.md) | 问题与修复方法 | 通过 |
+| [docs/issue-review-r99-multiline-stored-function-body.md](issue-review-r99-multiline-stored-function-body.md) | 已复现待修复与验收计划 | 通过 |
 | [docs/issue-review-r100-geometric-coordinate-delimiters.md](issue-review-r100-geometric-coordinate-delimiters.md) | 历史问题证据 | 通过 |
 | [docs/issue-review-r101-macaddr-input-and-widths.md](issue-review-r101-macaddr-input-and-widths.md) | 问题与修复方法 | 通过 |
 | [docs/issue-review-r102-network-input-notation.md](issue-review-r102-network-input-notation.md) | 问题与修复方法 | 通过 |
@@ -624,6 +635,7 @@ R173函数签名类型依赖及R176真实聚合排序仍独立开放；R156等�
 | [docs/issue-review-r167-domain-drop-targets.md](issue-review-r167-domain-drop-targets.md) | DROP DOMAIN目标有限修复与组合回归证据 | 通过 |
 | [docs/issue-review-r168-composite-namespace-owner.md](issue-review-r168-composite-namespace-owner.md) | composite命名空间归属有限修复与组合回归证据 | 通过 |
 | [docs/issue-review-r169-simple-query-raw-syntax.md](issue-review-r169-simple-query-raw-syntax.md) | Simple Query有限原始语法修复与组合回归证据 | 通过 |
+| [docs/issue-review-r109-array-positions.md](issue-review-r109-array-positions.md) | 问题与修复方法 | 通过 |
 | [docs/issue-root-numeric-publication.md](issue-root-numeric-publication.md) | 历史问题证据 | 通过 |
 | [docs/issue-root-row-publication.md](issue-root-row-publication.md) | 历史问题证据 | 通过 |
 | [docs/issue-root-sql-value-publication.md](issue-root-sql-value-publication.md) | 历史问题证据 | 通过 |

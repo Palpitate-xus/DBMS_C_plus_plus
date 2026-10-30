@@ -25,6 +25,7 @@
 #include "expression/sql_value.h"
 #include "common/DbError.h"
 #include "common/IntegerTextCodec.h"
+#include "expression/float8_output.inc"
 #include "common/version.h"
 #include "common/SqlArrayText.h"
 #include "common/NotificationManager.h"
@@ -566,6 +567,14 @@ double ExprValue::asDouble() const {
     } catch (...) {
         return 0.0;
     }
+}
+
+// Computational consumers must read a REAL's physical float4 value before
+// promotion. Keep the public, permissive asDouble() API unchanged for callers.
+static double scalarDoubleArgument(const ExprValue& value) {
+    if (!value.isNull && ExprHelper::canonicalResultTypeName(value.typeName) == "real")
+        return static_cast<double>(parseRealCastValue(value));
+    return value.asDouble();
 }
 
 // ============================================================================
@@ -2003,7 +2012,7 @@ int ExprEvaluator::compareValues(const ExprValue& a, const ExprValue& b) {
         bool floatB = b.value.find('.') != std::string::npos ||
                       tb == "double precision" || tb == "real" || tb == "numeric";
         if (floatA || floatB) {
-            double da = a.asDouble(), db = b.asDouble();
+            double da = scalarDoubleArgument(a), db = scalarDoubleArgument(b);
             return (da > db) - (da < db);
         }
         int64_t ia = a.asInt(), ib = b.asInt();
@@ -2496,10 +2505,10 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
             double k = 0;
             if (lIv && !rIv) {
                 iv = parseIntervalText(l.value);
-                k = r.asDouble();
+                k = scalarDoubleArgument(r);
             } else if (rIv && !lIv && op == "*") {
                 iv = parseIntervalText(r.value);
-                k = l.asDouble();
+                k = scalarDoubleArgument(l);
             } else {
                 return ExprValue("interval", "", true);
             }
@@ -2788,8 +2797,8 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
                 ? static_cast<double>(parseRealCastValue(value))
                 : parseDoubleCastValue(value);
         };
-        double a = floatingOperands ? powerOperand(l) : l.asDouble();
-        double b = floatingOperands ? powerOperand(r) : r.asDouble();
+        double a = floatingOperands ? powerOperand(l) : scalarDoubleArgument(l);
+        double b = floatingOperands ? powerOperand(r) : scalarDoubleArgument(r);
         double res = 0;
         if (op == "+") res = a + b;
         else if (op == "-") res = a - b;
@@ -4127,6 +4136,8 @@ static float parseRealCastValue(const ExprValue& value) {
 
 static double parseDoubleCastValue(const ExprValue& value) {
     rejectBooleanFloatingCast(value, "double precision");
+    if (ExprHelper::canonicalResultTypeName(value.typeName) == "real")
+        return static_cast<double>(parseRealCastValue(value));
     const std::string text = trimStr(value.value);
     if (text.empty())
         throwFloatingCastSyntaxError("double precision", text);
@@ -4146,6 +4157,8 @@ static double parseDoubleCastValue(const ExprValue& value) {
 
 template <typename Floating>
 static std::string formatFloatingCastValue(Floating value) {
+    if constexpr (std::is_same_v<Floating, double>)
+        return float8_output_detail::format(value);
     if (std::isnan(value)) return "NaN";
     if (std::isinf(value))
         return std::signbit(value) ? "-Infinity" : "Infinity";
@@ -5500,6 +5513,17 @@ struct DeclaredStrposScalarFunction {
         return callback(args);
     }
 };
+bool isTrimScalarName(const std::string& name) {
+    return name=="btrim" || name=="ltrim" || name=="rtrim";
+}
+// Only the actual catalog callbacks own TRIM's concrete overloads. Native
+// replacements keep their original arity, argument datums and result domain.
+struct DeclaredTrimScalarFunction {
+    ScalarFunction callback;
+    ExprValue operator()(const std::vector<ExprValue>& args) const {
+        return callback(args);
+    }
+};
 bool isJustifyScalarName(const std::string& name) {
     return name == "justify_hours" || name == "justify_days" || name == "justify_interval";
 }
@@ -5517,7 +5541,10 @@ struct DeclaredStringToArrayScalarFunction {
         return callback(args);
     }
 };
-struct DeclaredArrayPositionScalarFunction {
+bool isArraySearchScalarName(const std::string& name) {
+    return name=="array_position" || name=="array_positions";
+}
+struct DeclaredArraySearchScalarFunction {
     ScalarFunction callback;
     ExprValue operator()(const std::vector<ExprValue>& args) const {
         return callback(args);
@@ -5546,8 +5573,8 @@ struct ModResultScalarFunction {
 bool ownsScalarSignatures(const std::string& name,const ScalarFunction* callback) {
     if(isCoreOverloadedScalarName(name))
         return callback && callback->target<DeclaredCoreScalarFunction>();
-    if(name=="array_position")
-        return callback && callback->target<DeclaredArrayPositionScalarFunction>();
+    if(isArraySearchScalarName(name))
+        return callback && callback->target<DeclaredArraySearchScalarFunction>();
     if(isStringLengthScalarName(name))
         return callback && callback->target<DeclaredStringLengthScalarFunction>();
     if(isCharacterCodeScalarName(name))
@@ -5556,6 +5583,8 @@ bool ownsScalarSignatures(const std::string& name,const ScalarFunction* callback
         return callback && callback->target<DeclaredStartsWithScalarFunction>();
     if(name=="strpos")
         return callback && callback->target<DeclaredStrposScalarFunction>();
+    if(isTrimScalarName(name))
+        return callback && callback->target<DeclaredTrimScalarFunction>();
     if(name=="width_bucket")
         return callback && callback->target<DeclaredWidthBucketScalarFunction>();
     // Preserve ownership of the existing R62 and fixed-float8 families.
@@ -5619,6 +5648,9 @@ std::vector<ScalarSignature> scalarSignatures(const std::string& name) {
     if(name=="chr")return {{{"integer"},"text"}};
     if(name=="starts_with")return {{{"text","text"},"boolean"}};
     if(name=="strpos")return {{{"text","text"},"integer"}};
+    if(isTrimScalarName(name))return {{{"text"},"text"},{{"text","text"},"text"},
+        {{"bytea","bytea"},"bytea"}};
+    if(name=="array_positions")return {{{"anycompatiblearray","anycompatible"},"integer[]"}};
     if(name=="array_position")return {
         {{"anycompatiblearray","anycompatible"},"integer"},
         {{"anycompatiblearray","anycompatible","integer"},"integer"}};
@@ -5670,21 +5702,22 @@ bool legacyNativeTextArray(const FunctionCallExpr* call) {
         (value.front()=='{' || value.front()=='[');
 }
 
-std::vector<ScalarSignature> arrayPositionSignatures(
+std::vector<ScalarSignature> arraySearchSignatures(const std::string& name,
     const std::vector<std::string>& inputs,const FunctionCallExpr* call) {
     using namespace common_type_detail;
-    if(inputs.size()!=2 && inputs.size()!=3)return {};
+    const bool all=name=="array_positions";
+    if(inputs.size()!=2 && (all || inputs.size()!=3))return {};
     const bool legacyText=inputs[0]=="text" && legacyNativeTextArray(call);
     if(inputs[0]!="unknown" && !array(inputs[0]) && !legacyText)return {};
     if(array(inputs[1]))return {};
     const auto element=legacyText?"text":inputs[0]=="unknown"?"unknown":inputs[0].substr(0,inputs[0].size()-2);
     std::string common;
-    try {common=selectCommonType({element,inputs[1]},"array_position");}
+    try {common=selectCommonType({element,inputs[1]},name);}
     catch(const DbError& error) {
         if(error.sqlState()=="42804" || error.sqlState()=="42846")return {};
         throw;
     }
-    ScalarSignature signature{{common+"[]",common},"integer"};
+    ScalarSignature signature{{common+"[]",common},all?"integer[]":"integer"};
     if(inputs.size()==3) {
         // Public cell-based native calls historically apply the int4 input
         // codec inside the callback. SQL-origin calls use real declarations.
@@ -5740,21 +5773,22 @@ ResolvedScalarFunction resolveTypedScalar(const std::string& name,
     };
     for(const auto& ns:path) {
         if(ns=="pg_catalog") {
-            const auto signatures=name=="array_position"?arrayPositionSignatures(inputs,call):scalarSignatures(name);
+            const auto signatures=isArraySearchScalarName(name)?arraySearchSignatures(name,inputs,call):scalarSignatures(name);
             for(const auto& signature:signatures) {
                 ResolvedScalarFunction candidate;candidate.found=true;candidate.name=name;candidate.schema=ns;
-                candidate.polymorphic=name=="array_position";
+                candidate.polymorphic=isArraySearchScalarName(name);
                 candidate.inputs=signature.inputs;candidate.output=signature.output;append(std::move(candidate));
             }
         } else if(!database.empty()) {
-            auto routine=engine->getUDF(database,name,ns);
-            if(routine.expression.empty())continue;
-            ResolvedScalarFunction candidate;candidate.found=candidate.stored=true;candidate.name=name;candidate.schema=ns;
-            for(const auto& input:routine.paramTypes)candidate.inputs.push_back(scalarSignatureInputType(input));
-            if(candidate.inputs.size()==1 && candidate.inputs.front()=="unknown" &&
-               routine.paramNames.size()==1 && routine.paramNames.front().empty())candidate.inputs.clear();
-            candidate.output=ExprHelper::canonicalResultTypeName(routine.returnType);candidate.routine=std::move(routine);
-            append(std::move(candidate));
+            for(auto routine:engine->getUDFOverloads(database,name,ns)) {
+                if(routine.expression.empty())continue;
+                ResolvedScalarFunction candidate;candidate.found=candidate.stored=true;candidate.name=name;candidate.schema=ns;
+                for(const auto& input:routine.paramTypes)candidate.inputs.push_back(scalarSignatureInputType(input));
+                if(candidate.inputs.size()==1 && candidate.inputs.front()=="unknown" &&
+                   routine.paramNames.size()==1 && routine.paramNames.front().empty())candidate.inputs.clear();
+                candidate.output=ExprHelper::canonicalResultTypeName(routine.returnType);candidate.routine=std::move(routine);
+                append(std::move(candidate));
+            }
         }
     }
     const auto retainBest=[&](const auto& score) {
@@ -5777,14 +5811,54 @@ ResolvedScalarFunction resolveTypedScalar(const std::string& name,
     });
     retainBest([&](const auto& candidate){int count=0;for(size_t i=0;i<inputs.size();++i)
         if(!placeholder(candidate,i) && inputs[i]!="unknown" && common_type_detail::category(inputs[i])==inputCategory(candidate,i) && common_type_detail::preferred(candidate.inputs[i]))++count;return count;});
-    for(size_t i=0;i<inputs.size() && candidates.size()>1;++i)if(inputs[i]=="unknown") {
-        std::set<char> categories;for(const auto& candidate:candidates)categories.insert(inputCategory(candidate,i));
-        const char category=categories.count('S')?'S':categories.size()==1?*categories.begin():0;
-        if(!category)throw DbError("42725","function "+name+" is not unique");
-        candidates.erase(std::remove_if(candidates.begin(),candidates.end(),[&](const auto& candidate){return inputCategory(candidate,i)!=category;}),candidates.end());
-        const auto preferredInput=[&](const auto& candidate){return !placeholder(candidate,i) && common_type_detail::preferred(candidate.inputs[i]);};
-        const bool preferred=std::any_of(candidates.begin(),candidates.end(),preferredInput);
-        if(preferred)candidates.erase(std::remove_if(candidates.begin(),candidates.end(),[&](const auto& candidate){return !preferredInput(candidate);}),candidates.end());
+    // Analyze all UNKNOWN slots against the same candidate generation. A
+    // sequential filter would pick (text,int) for the genuinely ambiguous
+    // (int,int)/(int,text)/(text,int) call with two unknown arguments.
+    if(candidates.size()>1) {
+        std::vector<char> categories(inputs.size(),0);
+        std::vector<bool> preferred(inputs.size(),false);
+        bool consistent=true;
+        for(size_t i=0;i<inputs.size();++i)if(inputs[i]=="unknown") {
+            std::set<char> choices;
+            for(const auto& candidate:candidates)choices.insert(inputCategory(candidate,i));
+            categories[i]=choices.count('S')?'S':choices.size()==1?*choices.begin():0;
+            if(!categories[i]){consistent=false;break;}
+            for(const auto& candidate:candidates)
+                if(inputCategory(candidate,i)==categories[i] && !placeholder(candidate,i) &&
+                   common_type_detail::preferred(candidate.inputs[i]))preferred[i]=true;
+        }
+        if(consistent) {
+            std::vector<ResolvedScalarFunction> filtered;
+            for(const auto& candidate:candidates) {
+                bool match=true;
+                for(size_t i=0;i<inputs.size();++i)if(inputs[i]=="unknown" &&
+                    (inputCategory(candidate,i)!=categories[i] ||
+                     (preferred[i] && (placeholder(candidate,i) ||
+                                      !common_type_detail::preferred(candidate.inputs[i])))))match=false;
+                if(match)filtered.push_back(candidate);
+            }
+            // No compatible category combination is ambiguity, not a missing
+            // function. Keep the original set for the final known-type rule.
+            if(!filtered.empty())candidates=std::move(filtered);
+        }
+        if(candidates.size()>1) {
+            std::string known;
+            bool same=true,unknown=false;
+            for(const auto& type:inputs) {
+                if(type=="unknown"){unknown=true;continue;}
+                if(known.empty())known=type;else if(type!=known)same=false;
+            }
+            if(same && unknown && !known.empty()) {
+                std::vector<ResolvedScalarFunction> filtered;
+                for(const auto& candidate:candidates) {
+                    bool match=true;
+                    for(size_t i=0;i<inputs.size();++i)
+                        if(inputs[i]=="unknown" && !common_type_detail::implicit(known,candidate.inputs[i]))match=false;
+                    if(match)filtered.push_back(candidate);
+                }
+                if(filtered.size()==1)candidates=std::move(filtered);
+            }
+        }
     }
     if(candidates.size()>1 && std::all_of(candidates.begin(),candidates.end(),[&](const auto& candidate){
             return candidate.inputs==candidates.front().inputs;
@@ -5831,7 +5905,7 @@ ResolvedScalarFunction resolveGenericStoredScalar(const std::string& name,
     ResolvedScalarFunction pending;
     for(const auto& schema:path) {
         if(schema=="pg_catalog")continue;
-        auto routine=engine->getUDF(database,name,schema);
+        for(auto routine:engine->getUDFOverloads(database,name,schema)) {
         size_t arity=routine.paramNames.size();
         if(arity==1 && routine.paramNames.front().empty() &&
            (routine.paramTypes.empty() || routine.paramTypes.front().empty()))arity=0;
@@ -5844,6 +5918,7 @@ ResolvedScalarFunction resolveGenericStoredScalar(const std::string& name,
                ExprHelper::canonicalResultTypeName(routine.returnType))
                 pending.routine.returnType="unknown";
             pending.routine.provolatile=std::max(pending.routine.provolatile,routine.provolatile);
+        }
         }
     }
     if(pending.found) {
@@ -5919,7 +5994,7 @@ struct BoundScalarRoutine {
         for(const auto& arg:converted) {values.push_back(arg.value);nulls.push_back(arg.isNull);}
         std::string value;
         bool isNull = false;
-        if (!engine->callUDF(database, selected.name, values, value, &isNull, &nulls,selected.schema))
+        if (!engine->callUDFDefinition(database, selected.routine, values, value, &isNull, &nulls))
             throw DbError("22023", "stored-function evaluation failed: " + selected.name);
         return ExprValue(ExprHelper::canonicalResultTypeName(selected.routine.returnType),
                          value, isNull);
@@ -6055,7 +6130,7 @@ ResolvedScalarFunction resolveScalarFunction(
             continue;
         }
         if(database.empty())continue;
-        auto routine=engine->getUDF(database,result.name,candidateSchema);
+        for(auto routine:engine->getUDFOverloads(database,result.name,candidateSchema)) {
         if (!routine.expression.empty()) {
             size_t arity = routine.paramNames.size();
             if (arity == 1 && routine.paramNames.front().empty() &&
@@ -6114,6 +6189,7 @@ ResolvedScalarFunction resolveScalarFunction(
                     result.found = result.stored = true;return result;
                 }
             }
+        }
         }
     }
     if(typeOfCandidate){result.found=true;result.schema="pg_catalog";return result;}
@@ -6231,14 +6307,16 @@ std::string ExprEvaluator::scalarFunctionIdentity(const FunctionCallExpr* call,
                        !callback->second.target<DeclaredTsVectorScalarFunction>()) ||
                       ((resolved.name=="json_array_length" || resolved.name=="jsonb_array_length") &&
                        !callback->second.target<DeclaredJsonArrayLengthScalarFunction>()) ||
+                      (isTrimScalarName(resolved.name) &&
+                       !callback->second.target<DeclaredTrimScalarFunction>()) ||
                       (isJustifyScalarName(resolved.name) &&
                        !callback->second.target<DeclaredJustifyScalarFunction>()) ||
                       (resolved.name=="string_to_array" &&
                        !callback->second.target<DeclaredStringToArrayScalarFunction>()) ||
                       (resolved.name=="width_bucket" &&
                        !callback->second.target<DeclaredWidthBucketScalarFunction>()) ||
-                      (resolved.name=="array_position" &&
-                       !callback->second.target<DeclaredArrayPositionScalarFunction>()))
+                      (isArraySearchScalarName(resolved.name) &&
+                       !callback->second.target<DeclaredArraySearchScalarFunction>()))
                 opaqueResultDomain=true;
         }
     }
@@ -9628,11 +9706,11 @@ void ExprEvaluator::registerBuiltins() {
         }
         if (type == "real" || type == "float4") {
             const float value = std::fabs(
-                static_cast<float>(a[0].asDouble()));
+                static_cast<float>(scalarDoubleArgument(a[0])));
             return ExprValue(
                 "real", formatFloatingCastValue(value), false);
         }
-        const double value = std::fabs(a[0].asDouble());
+        const double value = std::fabs(scalarDoubleArgument(a[0]));
         return ExprValue(
             "double precision", formatFloatingCastValue(value), false);
     };
@@ -9791,7 +9869,7 @@ void ExprEvaluator::registerBuiltins() {
             }
         }
         // float8 round: half-to-even (rint), like PG float8.
-        double v = a[0].asDouble();
+        double v = scalarDoubleArgument(a[0]);
         if (a.size() >= 2) {
             long long requestedScale = 0;
             if (!parseInt64Exact(a[1].value, requestedScale) ||
@@ -9903,7 +9981,7 @@ void ExprEvaluator::registerBuiltins() {
                     false);
             }
         }
-        const long double result = expl(a[0].asDouble());
+        const long double result = expl(scalarDoubleArgument(a[0]));
         if (!std::isfinite(result)) {
             throw std::runtime_error(
                 "numeric value out of range (SQLSTATE 22003)");
@@ -9918,7 +9996,7 @@ void ExprEvaluator::registerBuiltins() {
             if (exact->isInfinite() && exact->toString().front() != '-')
                 return ExprValue("numeric", "Infinity", false);
         }
-        const long double value = a[0].asDouble();
+        const long double value = scalarDoubleArgument(a[0]);
         requireLogarithmArgument(value);
         return numericFixed(logl(value), 16);
     };
@@ -9955,7 +10033,7 @@ void ExprEvaluator::registerBuiltins() {
                 (exactValue && exactValue->isNaN())) {
                 return ExprValue("numeric", "NaN", false);
             }
-            long double b = a[0].asDouble(), x = a[1].asDouble();
+            long double b = scalarDoubleArgument(a[0]), x = scalarDoubleArgument(a[1]);
             requireLogarithmArgument(b, false);
             requireLogarithmArgument(x);
             if (exactBase && exactBase->isInfinite()) {
@@ -9974,7 +10052,7 @@ void ExprEvaluator::registerBuiltins() {
             if (exact->isInfinite() && exact->toString().front() != '-')
                 return ExprValue("numeric", "Infinity", false);
         }
-        const long double value = a[0].asDouble();
+        const long double value = scalarDoubleArgument(a[0]);
         requireLogarithmArgument(value);
         long double v = log10l(value);
         if (!argHasDot(a) && v == floorl(v))
@@ -9989,7 +10067,7 @@ void ExprEvaluator::registerBuiltins() {
             if (exact->isInfinite() && exact->toString().front() != '-')
                 return ExprValue("numeric", "Infinity", false);
         }
-        const long double value = a[0].asDouble();
+        const long double value = scalarDoubleArgument(a[0]);
         requireLogarithmArgument(value);
         long double v = log10l(value);
         if (!argHasDot(a) && v == floorl(v))
@@ -10030,7 +10108,7 @@ void ExprEvaluator::registerBuiltins() {
         }
 
         const double result = towardPositiveInfinity
-            ? std::ceil(a[0].asDouble()) : std::floor(a[0].asDouble());
+            ? std::ceil(scalarDoubleArgument(a[0])) : std::floor(scalarDoubleArgument(a[0]));
         return ExprValue("double precision", float8Text(result), false);
     };
     functions_["cbrt"]  = [float8Unary](const auto& a) { return float8Unary(a, std::cbrt); };
@@ -10105,7 +10183,7 @@ void ExprEvaluator::registerBuiltins() {
             }
         }
 
-        double v = a[0].asDouble();
+        double v = scalarDoubleArgument(a[0]);
         if (a.size() >= 2) {
             long long requestedScale = 0;
             if (!parseInt64Exact(a[1].value, requestedScale) ||
@@ -10132,7 +10210,7 @@ void ExprEvaluator::registerBuiltins() {
     // power(a, b): PG numeric-power semantics. Both args integral and the
     // result exact -> bare integer; otherwise 16 fractional digits (PG's
     // numeric exp/ln presentation, e.g. power(2.5,2) -> 6.2500000000000000).
-    functions_["power"] = [](const std::vector<ExprValue>& a) {
+    functions_["power"] = [float8Text](const std::vector<ExprValue>& a) {
         if (a.size() < 2)
             return ExprValue("double precision", "", true);
         const std::string leftType = toLower(a[0].typeName);
@@ -10144,8 +10222,32 @@ void ExprEvaluator::registerBuiltins() {
         const char* resultType = exactNumeric ? "numeric" : "double precision";
         if (a[0].isNull || a[1].isNull)
             return ExprValue(resultType, "", true);
-        const long double baseValue = a[0].asDouble();
-        const long double exponentValue = a[1].asDouble();
+        // A floating overload computes in binary64, not by reparsing a
+        // display string as an exact decimal. Preserve IEEE special values.
+        if (!exactNumeric) {
+            const double base = scalarDoubleArgument(a[0]);
+            const double exponent = scalarDoubleArgument(a[1]);
+            double result = 0.0;
+            if (std::isnan(base) || std::isnan(exponent)) {
+                result = exponent == 0.0 || base == 1.0
+                    ? 1.0 : std::numeric_limits<double>::quiet_NaN();
+            } else {
+                if ((base == 0.0 && exponent < 0.0) ||
+                    (base < 0.0 && std::isfinite(exponent) &&
+                     std::floor(exponent) != exponent))
+                    throw DbError("2201F", "invalid argument for power function");
+                errno = 0;
+                result = std::pow(base, exponent);
+                const int error = errno;
+                if (std::isfinite(base) && std::isfinite(exponent) &&
+                    (error == ERANGE || !std::isfinite(result) ||
+                     (result == 0.0 && base != 0.0)))
+                    throw DbError("22003", "floating-point value out of range");
+            }
+            return ExprValue("double precision", float8Text(result), false);
+        }
+        const long double baseValue = scalarDoubleArgument(a[0]);
+        const long double exponentValue = scalarDoubleArgument(a[1]);
         if ((baseValue == 0 && exponentValue < 0) ||
             (baseValue < 0 && std::isfinite(exponentValue) &&
              std::trunc(exponentValue) != exponentValue)) {
@@ -10202,7 +10304,7 @@ void ExprEvaluator::registerBuiltins() {
             }
         }
         // PG numeric power computes exp/ln in extended precision; long double matches its 16-digit output.
-        long double lv = powl(a[0].asDouble(), a[1].asDouble());
+        long double lv = powl(scalarDoubleArgument(a[0]), scalarDoubleArgument(a[1]));
         if (!std::isfinite(lv) && !exactNumeric) {
             throw std::runtime_error(
                 "numeric value out of range (SQLSTATE 22003)");
@@ -10304,7 +10406,7 @@ void ExprEvaluator::registerBuiltins() {
                 result = value->toString().front() == '-' ? -1 : 1;
             return ExprValue("numeric", std::to_string(result), false);
         }
-        const double value = a[0].asDouble();
+        const double value = scalarDoubleArgument(a[0]);
         return ExprValue(
             "double precision",
             std::to_string(value > 0 ? 1 : (value < 0 ? -1 : 0)), false);
@@ -11928,10 +12030,12 @@ void ExprEvaluator::registerBuiltins() {
         return ExprValue("text", dimensions, false);
     };
 
-    functions_["array_position"] = [](const std::vector<ExprValue>& a) {
-        if (a.size() < 2 || a[0].isNull) return ExprValue("integer", "", true);
+    const auto searchArray = [](const std::vector<ExprValue>& a,bool all) {
+        const std::string resultType=all?"integer[]":"integer";
+        const auto noMatch=[&](){return ExprValue(resultType,all?"{}":"",!all);};
+        if (a.size() < 2 || a[0].isNull) return ExprValue(resultType, "", true);
         std::vector<std::string> elems;
-        if (!parseArrayElements(a[0].value, elems)) return ExprValue("integer", "", true);
+        if (!parseArrayElements(a[0].value, elems)) return ExprValue(resultType, "", true);
         const auto literal=sql_array_text::parse(a[0].value);
         const int64_t lower=literal.dimensions.empty()?1:literal.dimensions.front().lower;
         for (const auto& elem : elems) {
@@ -11947,19 +12051,19 @@ void ExprEvaluator::registerBuiltins() {
         });
         // No NULL bitmap means a NULL needle cannot match. This shortcut
         // precedes NULL-start validation and default equality lookup.
-        if(a[1].isNull && !hasNull)return ExprValue("integer","",true);
+        if(a[1].isNull && !hasNull)return noMatch();
         long long initialPosition = lower;
-        if (a.size() >= 3) {
+        if (!all && a.size() >= 3) {
             if (a[2].isNull) {
                 // An empty array has no search position to validate. Keep
                 // non-NULL start parsing below, including invalid input.
-                if (elems.empty()) return ExprValue("integer", "", true);
+                if (elems.empty()) return noMatch();
                 throw std::runtime_error(
                     "initial position must not be null (SQLSTATE 22004)");
             }
             initialPosition = parseInt32Argument(a[2]);
         }
-        if(elems.empty())return ExprValue("integer","",true);
+        if(elems.empty())return noMatch();
         const auto elementType=array_detail::elementType(a[0].typeName);
         static const std::set<std::string> noDefaultEquality={
             "point","line","lseg","box","path","polygon","circle","json","xml"};
@@ -12008,17 +12112,28 @@ void ExprEvaluator::registerBuiltins() {
         size_t first = 0;
         if (initialPosition > lower) {
             if (static_cast<unsigned long long>(initialPosition-lower) >= elems.size())
-                return ExprValue("integer", "", true);
+                return noMatch();
             first = static_cast<size_t>(initialPosition - lower);
         }
+        std::string positions="{";
         for (size_t i = first; i < elems.size(); ++i) {
             const auto& element=elements[i];
             if ((a[1].isNull && element.isNull) ||
                 (!a[1].isNull && !element.isNull && equal(element,a[1]))) {
-                return ExprValue("integer", std::to_string(static_cast<int64_t>(i)+lower), false);
+                const auto position=std::to_string(static_cast<int64_t>(i)+lower);
+                if(!all)return ExprValue("integer",position,false);
+                if(positions.size()>1)positions+=',';
+                positions+=position;
             }
         }
-        return ExprValue("integer", "", true);
+        if(all)return ExprValue("integer[]",positions+'}',false);
+        return noMatch();
+    };
+    functions_["array_position"] = [searchArray](const std::vector<ExprValue>& a) {
+        return searchArray(a,false);
+    };
+    functions_["array_positions"] = [searchArray](const std::vector<ExprValue>& a) {
+        return searchArray(a,true);
     };
     // array_to_string(arr, delim [, null_string]) — join non-NULL elements
     functions_["array_to_string"] = [](const std::vector<ExprValue>& a) {
@@ -13472,7 +13587,7 @@ void ExprEvaluator::registerBuiltins() {
         const bool exactNumeric = tn == "numeric" || tn == "decimal" ||
             tn == "integer" || tn == "int" || tn == "smallint" ||
             tn == "bigint" || tn == "int2" || tn == "int4" || tn == "int8";
-        return ExprValue("text", formatNumeric(a[0].asDouble(), fmt,
+        return ExprValue("text", formatNumeric(scalarDoubleArgument(a[0]), fmt,
             exactNumeric ? vval : std::string()), false);
     };
 
@@ -13552,14 +13667,18 @@ void ExprEvaluator::registerBuiltins() {
             entry.second=DeclaredTsVectorScalarFunction{std::move(entry.second)};
         else if(entry.first=="json_array_length" || entry.first=="jsonb_array_length")
             entry.second=DeclaredJsonArrayLengthScalarFunction{std::move(entry.second)};
+        else if(isTrimScalarName(entry.first)) {
+            entry.second=DeclaredTrimScalarFunction{std::move(entry.second)};
+            volatility_[entry.first]='i';
+        }
         else if(isJustifyScalarName(entry.first))
             entry.second=DeclaredJustifyScalarFunction{std::move(entry.second)};
         else if(entry.first=="string_to_array")
             entry.second=DeclaredStringToArrayScalarFunction{std::move(entry.second)};
         else if(entry.first=="width_bucket")
             entry.second=DeclaredWidthBucketScalarFunction{std::move(entry.second)};
-        else if(entry.first=="array_position")
-            entry.second=DeclaredArrayPositionScalarFunction{std::move(entry.second)};
+        else if(isArraySearchScalarName(entry.first))
+            entry.second=DeclaredArraySearchScalarFunction{std::move(entry.second)};
         else if(isIntegralRoundingScalarName(entry.first) || entry.first=="round")
             entry.second=IntegralRoundingScalarFunction{std::move(entry.second)};
         else if(entry.first=="mod")
@@ -13575,6 +13694,7 @@ void ExprEvaluator::registerBuiltins() {
     volatility_["factorial"] = 'i';
     volatility_["length"] = 'i';
     volatility_["array_position"] = 'i';
+    volatility_["array_positions"] = 'i';
     volatility_["lower"] = 'i';
     volatility_["upper"] = 'i';
     volatility_["substring"] = 'i';

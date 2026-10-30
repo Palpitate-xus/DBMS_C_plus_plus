@@ -59,23 +59,39 @@ bool syncStatsDirectory(const std::filesystem::path& path) {
     return ok;
 }
 
+StatsSnapshotPublication publishStatsSnapshotWithStatus(
+    const std::filesystem::path& destination,
+    const std::function<bool(const std::filesystem::path&)>& writer) {
+    // Complete every path allocation before a file can be created or renamed.
+    const auto parent = destination.parent_path();
+    const std::filesystem::path directory = parent.empty()
+        ? std::filesystem::path(".") : parent;
+    const std::filesystem::path temporary = destination.string() + ".tmp." +
+        std::to_string(static_cast<long long>(::getpid()));
+    struct Cleanup {
+        const std::filesystem::path& path;
+        bool renamed = false;
+        ~Cleanup() noexcept {
+            if (!renamed) (void)::unlink(path.c_str());
+        }
+    } cleanup{temporary};
+
+    if (!writer(temporary) || !syncStatsFile(temporary))
+        return StatsSnapshotPublication::NotPublished;
+    if (::rename(temporary.c_str(), destination.c_str()) != 0)
+        return StatsSnapshotPublication::NotPublished;
+    cleanup.renamed = true;
+    // No path construction or other allocating work may follow publication.
+    return syncStatsDirectory(directory)
+        ? StatsSnapshotPublication::Durable
+        : StatsSnapshotPublication::PublishedNotDurable;
+}
+
 bool publishStatsSnapshot(
     const std::filesystem::path& destination,
     const std::function<bool(const std::filesystem::path&)>& writer) {
-    const auto parent = destination.parent_path();
-    const auto temporary = destination.string() + ".tmp." +
-        std::to_string(static_cast<long long>(::getpid()));
-    std::error_code ec;
-    if (!writer(temporary) || !syncStatsFile(temporary)) {
-        std::filesystem::remove(temporary, ec);
-        return false;
-    }
-    if (::rename(temporary.c_str(), destination.c_str()) != 0 ||
-        !syncStatsDirectory(parent.empty() ? "." : parent)) {
-        std::filesystem::remove(temporary, ec);
-        return false;
-    }
-    return true;
+    return publishStatsSnapshotWithStatus(destination, writer) ==
+        StatsSnapshotPublication::Durable;
 }
 
 } // namespace dbms

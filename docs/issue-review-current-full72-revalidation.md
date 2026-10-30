@@ -1,5 +1,8 @@
 # 当前源码的原完整72入口复验
 
+后续[R185排序中断修复](issue-review-r185-sort-interrupt-propagation.md)各19入口另记。
+本页72对应其CPP修复前输入，不能改称修复后已重新跑72。
+
 后续公共测试helper修复见[R184](issue-review-r184-test-data-directory-isolation.md)。
 本页完整72对应该脚本修复前源码；C++/程序未变，但不能改称修复后新跑72。
 

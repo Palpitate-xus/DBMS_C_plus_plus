@@ -72,6 +72,11 @@ def main():
         exclusion = importlib.util.module_from_spec(exclusion_spec)
         exclusion_spec.loader.exec_module(exclusion)
         exclusion.run(client, runner, server["sock"])
+        command_spec = importlib.util.spec_from_file_location(
+            "exclusion_command", root / "tests/compat/exclusion_command_visibility.py")
+        command = importlib.util.module_from_spec(command_spec)
+        command_spec.loader.exec_module(command)
+        command.run(client, runner, server["sock"])
         print("[AUTOCOMMIT DEFERRED CONSTRAINT PROTOCOL E2E] passed")
     finally:
         runner.stop_ours(server)

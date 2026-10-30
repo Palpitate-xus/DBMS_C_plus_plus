@@ -3,6 +3,7 @@
 #include "common/DbError.h"
 #include "common/SqlTrivia.h"
 #include "commands/DmlExecutor.h"
+#include "executor/ExecutionPlan.h"
 #include "TableManage.h"
 #include "permissions.h"
 #include "PostgresProtocol.h"
@@ -399,13 +400,16 @@ struct ProtocolPortal {
           sql(std::move(query)),
           preparedSql(std::move(sourceQuery)),
           parameterOids(std::move(sourceParameterOids)),
-          resultFormats(std::move(formats)) {}
+          resultFormats(std::move(formats)), defined(true) {}
 
     std::string statement;
     std::string sql;
     std::string preparedSql;
     std::vector<uint32_t> parameterOids;
     std::vector<uint16_t> resultFormats;
+    // Allocation precedes input conversion and plan acquisition. A failed
+    // Bind can leave a real, undefined portal, never the replaced result.
+    bool defined = false;
     QueryResult result;
     size_t rowOffset = 0;
     bool executed = false;
@@ -2836,7 +2840,7 @@ bool hasProtocolScalarSignatureCall(const Stmt* statement,const std::string& dat
                     // when its arity/types are wrong. An unbound column probe
                     // cannot decide that signature or suppress Parse errors.
                     for(const auto& schema:functionNamespaceSearchPath(g_engine,database))
-                        if(schema!="pg_catalog" && !g_engine.getUDF(database,name.name,schema).expression.empty()) {
+                        if(schema!="pg_catalog" && g_engine.udfExists(database,name.name,schema)) {
                             candidate=true;
                             break;
                         }
@@ -2946,7 +2950,7 @@ void validatePreparedStoredSignatures(const std::string& sql,Session& session,
                 CatalogManager::QualifiedName name;
                 if(CatalogManager::parseQualifiedName(call->funcName,name,true) && name.schema.empty())
                     for(const auto& schema:functionNamespaceSearchPath(g_engine,session.currentDB))
-                        if(schema!="pg_catalog" && !g_engine.getUDF(session.currentDB,name.name,schema).expression.empty())
+                        if(schema!="pg_catalog" && g_engine.udfExists(session.currentDB,name.name,schema))
                             storedName=true;
                 // An unbound $n is not an UNKNOWN argument. Use the supplied
                 // OIDs before choosing among this stored name and builtins.
@@ -3171,7 +3175,7 @@ void validatePreparedScalarArithmetic(const std::string& sql,Session& session,
         }
         if(const auto* call=dynamic_cast<const FunctionCallExpr*>(expression)) {
             static const std::set<std::string> declarations={
-                "char_length","character_length","octet_length","bit_length","ascii","chr","starts_with","strpos","scale","min_scale","gcd","lcm","factorial","array_position"};
+                "char_length","character_length","octet_length","bit_length","ascii","chr","starts_with","strpos","scale","min_scale","gcd","lcm","factorial","array_position","array_positions"};
             CatalogManager::QualifiedName name;
             if(CatalogManager::parseQualifiedName(call->funcName,name,true) &&
                name.schema.empty() && (declarations.count(name.name) || SQLParser::toLower(name.name)=="starts_with" || SQLParser::toLower(name.name)=="ascii" || SQLParser::toLower(name.name)=="chr" || SQLParser::toLower(name.name)=="strpos"))return true;
@@ -3548,9 +3552,90 @@ bool describePreparedNamespaceCatalog(const std::string& sql,Session& session,
     return !columns.empty();
 }
 
+// A typed quantified consumer owns whole-query metadata, not a guessed
+// BOOLEAN descriptor. Reuse pure preparation/planning before Describe so
+// missing names, operand types and constant-plan failures cannot arrive after
+// a fabricated RowDescription. No cursor/source is opened here.
+bool describePreparedQuantified(const std::string& sql, Session& session,
+    std::vector<PgColumnDescription>& columns,const std::vector<uint32_t>& parameterOids) {
+    SQLParser parser;const auto parsed=parser.parseForBinding(sql);
+    if(!parsed.isValid() || !dynamic_cast<const SelectStmt*>(parsed.stmt.get()))return false;
+    std::function<bool(const Expr*)> value;
+    std::function<bool(const Stmt*)> statement;
+    std::function<bool(const FromItem*)> source;
+    value=[&](const Expr* expression) {
+        if(!expression)return false;
+        if(dynamic_cast<const QuantifiedComparisonExpr*>(expression))return true;
+        if(expression->preparedSubquery)return statement(expression->preparedSubquery.get());
+        if(const auto* binary=dynamic_cast<const BinaryOpExpr*>(expression))
+            return value(binary->left.get()) || (binary->op!="::" && value(binary->right.get()));
+        if(const auto* unary=dynamic_cast<const UnaryOpExpr*>(expression))return value(unary->operand.get());
+        if(const auto* cast=dynamic_cast<const CastExpr*>(expression))return value(cast->operand.get());
+        if(const auto* call=dynamic_cast<const FunctionCallExpr*>(expression)) {
+            for(const auto& arg:call->args)if(value(arg.get()))return true;
+            for(const auto& arg:call->namedArgs)if(value(arg.value.get()))return true;
+            if(value(call->filter.get()))return true;
+            for(const auto& key:call->aggregateOrderKeys)if(value(key.expr.get()))return true;
+            for(const auto& item:call->over.partitionBy)if(value(item.get()))return true;
+            for(const auto& key:call->over.orderBy)if(value(key.first.get()))return true;
+            if(value(call->over.frameStart.get()) || value(call->over.frameEnd.get()))return true;
+        }
+        if(const auto* conditional=dynamic_cast<const CaseExpr*>(expression)) {
+            if(value(conditional->switchExpr.get()) || value(conditional->elseExpr.get()))return true;
+            for(const auto& arm:conditional->whenClauses)if(value(arm.first.get()) || value(arm.second.get()))return true;
+        }
+        if(const auto* array=dynamic_cast<const ArrayExpr*>(expression))
+            for(const auto& item:array->elements)if(value(item.get()))return true;
+        if(const auto* row=dynamic_cast<const RowExpr*>(expression))
+            for(const auto& item:row->elements)if(value(item.get()))return true;
+        if(const auto* literal=dynamic_cast<const LiteralExpr*>(expression);literal && literal->typeName.empty()) {
+            const auto tokens=SQLParser::tokenize(literal->value);
+            if(tokens.size()>2 && tokens.front()=="(" && tokens.back()==")" &&
+                (SQLParser::toLower(tokens[1])=="select" || SQLParser::toLower(tokens[1])=="with" || SQLParser::toLower(tokens[1])=="values")) {
+                const auto child=parser.parseForBinding(literal->value.substr(1,literal->value.size()-2));
+                if(child.isValid() && statement(child.stmt.get()))return true;
+            }
+        }
+        return false;
+    };
+    source=[&](const FromItem* item) {
+        if(!item)return false;
+        return value(item->joinCondition.get()) || source(item->left.get()) || source(item->right.get()) ||
+            (item->type==FromItem::Type::Subquery && statement(item->subquery.get()));
+    };
+    statement=[&](const Stmt* node) {
+        const auto* select=dynamic_cast<const SelectStmt*>(node);if(!select)return false;
+        if(value(select->whereClause.get()) || value(select->having.get()) || source(select->fromClause.get()))return true;
+        for(const auto& item:select->selectList)if(value(item.expr.get()))return true;
+        for(const auto& key:select->orderBy)if(value(key.expr.get()))return true;
+        for(const auto& item:select->groupBy)if(value(item.get()))return true;
+        for(const auto& group:select->groupByElems)for(const auto& item:group.exprs)if(value(item.get()))return true;
+        for(const auto& row:select->valuesRows)for(const auto& item:row)if(value(item.get()))return true;
+        for(const auto& cte:select->ctes)if(statement(cte.query.get()))return true;
+        return statement(select->setOpLhs.get()) || statement(select->setOpRhs.get());
+    };
+    if(!statement(parsed.stmt.get()))return false;
+    auto* previous=currentSession();setCurrentSession(&session);
+    struct Restore {Session* previous;~Restore(){setCurrentSession(previous);}} restore{previous};
+    auto prepared=std::make_shared<PreparedQuery>(g_engine.prepareBoundQuery(session.currentDB,sql,
+        protocolMetadataParameters(session,parameterOids)));
+    try {
+        // Constructing a plan performs immutable expression planning, not
+        // execution. Session-host-only graphs retain their existing owner.
+        (void)QueryPlanner::buildPreparedQueryPlan(&g_engine,session.currentDB,prepared,prepared->ast.get(),{});
+    } catch(const DbError& error) {
+        if(error.sqlState()!="0A000")throw;
+    }
+    QueryResult shape;
+    for(const auto& field:prepared->output){shape.columns.push_back(field.name);shape.columnTypes.push_back(field.type);}
+    columns=describeProtocolColumns(shape,sql,session,&prepared->output);
+    return !columns.empty();
+}
+
 bool describePreparedResultShape(const std::string& sql, Session& session,
                             std::vector<PgColumnDescription>& columns,
                             const std::vector<uint32_t>& parameterOids = {}) {
+    if(describePreparedQuantified(sql,session,columns,parameterOids))return true;
     if(describePreparedNamespaceCatalog(sql,session,columns,parameterOids))return true;
     if (describePreparedBitNegation(sql,session,columns,parameterOids)) return true;
     if (describePreparedHavingResult(sql, session, columns, parameterOids)) return true;
@@ -3946,8 +4031,11 @@ bool describePreparedResultShape(const std::string& sql, Session& session,
                     [&](const std::string& declaration) {
                         return ExprHelper::declaredTypeInput(declaration,session.currentDB,&g_engine);
                     }).first;
-            } else if (dynamic_cast<const CaseExpr*>(item.expr.get())) {
-                outputName = "case";
+            } else if (const auto* conditional=dynamic_cast<const CaseExpr*>(item.expr.get())) {
+                outputName = ExprHelper::projectionLabel(conditional,
+                    [&](const std::string& declaration) {
+                        return ExprHelper::declaredTypeInput(declaration,session.currentDB,&g_engine);
+                    }).first;
             } else if (reference && relation.empty() &&
                        (inferredType == "name" || inferredType == "date" ||
                         inferredType == "timestamp" ||
@@ -5138,12 +5226,11 @@ CopyStreamResult receiveCopyIn(PostgresProtocol& protocol,
                                const CopyWirePlan& plan,
                                Session& session,
                                const std::function<bool()>& abortBeforeError,
-                               std::chrono::steady_clock::time_point deadline) {
+                               std::chrono::steady_clock::time_point deadline,
+                               CopyInterruptGuard& interruptGuard,
+                               const TableSchema& table) {
     CopyStreamResult result;
     std::string pending;
-    const TableSchema table =
-        g_engine.getTableSchema(session.currentDB, plan.physicalTable);
-    CopyInterruptGuard interruptGuard(session, deadline);
     const auto checkCopyInterrupt = [&]() {
         if (deadline != std::chrono::steady_clock::time_point::max() &&
             std::chrono::steady_clock::now() >= deadline) {
@@ -5329,11 +5416,9 @@ CopyStreamResult receiveCopyIn(PostgresProtocol& protocol,
 CopyStreamResult sendCopyOut(PostgresProtocol& protocol,
                              const CopyWirePlan& plan,
                              Session& session,
-                             std::chrono::steady_clock::time_point deadline) {
+                             std::chrono::steady_clock::time_point deadline,
+                             const TableSchema& table) {
     CopyStreamResult result;
-    const TableSchema table =
-        g_engine.getTableSchema(session.currentDB, plan.physicalTable);
-    CopyInterruptGuard interruptGuard(session, deadline);
     const auto checkCopyInterrupt = [&]() {
         if (deadline != std::chrono::steady_clock::time_point::max() &&
             std::chrono::steady_clock::now() >= deadline) {
@@ -5444,56 +5529,15 @@ CopyStreamResult sendCopyOut(PostgresProtocol& protocol,
 
 } // namespace
 
-// Merge only diagnostic metadata. Leave row parsing and the existing
-// legacy prefix admission unchanged; never infer a state from message text.
-static void appendOrderedStatementNotices(
-        const std::string& output,
-        std::vector<dbms::StatementNotice>& captured,
-        std::vector<QueryNotice>& destination) {
-    struct OrderedNotice {
-        std::streamoff offset;
-        QueryNotice notice;
-    };
-    std::vector<OrderedNotice> ordered;
-    for (auto& notice : captured) {
-        const auto end = static_cast<std::streamoff>(output.size());
-        const auto offset = notice.outputOffset >= 0
-            ? std::min(notice.outputOffset, end) : end;
-        ordered.push_back({offset, QueryNotice{std::move(notice.severity),
-            std::move(notice.sqlState), std::move(notice.message)}});
-    }
-    std::istringstream input(output);
-    std::string line;
-    std::streamoff offset = 0;
-    while (std::getline(input, line)) {
-        const auto begin = offset;
-        offset += static_cast<std::streamoff>(line.size()) + 1;
-        static const std::pair<const char*, const char*> prefixes[] = {
-            {"NOTICE:", "NOTICE"}, {"WARNING:", "WARNING"}
-        };
-        for (const auto& entry : prefixes) {
-            const auto size = std::strlen(entry.first);
-            if (line.compare(0, size, entry.first) != 0) continue;
-            ordered.push_back({begin, QueryNotice{entry.second,
-                std::string(entry.second) == "WARNING" ? "01000" : "00000",
-                trimText(line.substr(size))}});
-            break;
-        }
-    }
-    // At a shared position, a captured notice was emitted before the next
-    // output byte. Stable sorting also retains consecutive typed notices.
-    std::stable_sort(ordered.begin(), ordered.end(),
-        [](const OrderedNotice& left, const OrderedNotice& right) {
-            return left.offset < right.offset;
-        });
-    for (auto& notice : ordered) destination.push_back(std::move(notice.notice));
-}
-
 QueryResult executeProtocolQuery(const std::string& sql, Session& session,
                                  int statementTimeoutOverrideMs = -1,
                                  bool emitTimeDeclarationNotices = true,
                                  bool retainOrdinarySourceDeclaration = true) {
     QueryResult result;
+    ScopedDiagnosticCapture diagnostics([&result](StatementDiagnostic diagnostic) {
+        result.notices.push_back(QueryNotice{std::move(diagnostic.severity),
+            std::move(diagnostic.sqlState), std::move(diagnostic.message)});
+    });
     dbms::clearLastDmlResult();
     // Stored-NULL row bindings must not leak across statements (a sort
     // rebind from the previous statement would poison extraction here).
@@ -5517,7 +5561,6 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
     bool structuredError = false;
     bool statementCommitError = false;
     std::string outputText;
-    std::vector<dbms::StatementNotice> statementNotices;
     auto start = std::chrono::steady_clock::now();
     struct QueryInterruptGuard {
         std::shared_ptr<SessionInterruptState> state;
@@ -5589,6 +5632,7 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
     {
         std::ostringstream output;
         dbms::ScopedOutputCapture capture(output);
+        std::vector<dbms::StatementNotice> statementNotices;
         dbms::ScopedStatementNoticeCapture noticeCapture(statementNotices, output);
         try {
             if (emitTimeDeclarationNotices) {
@@ -5644,6 +5688,10 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
             result.errorMessage = "unhandled executor exception";
         }
         outputText = output.str();
+        for (auto& notice : statementNotices) {
+            result.notices.push_back(QueryNotice{std::move(notice.severity),
+                std::move(notice.sqlState), std::move(notice.message)});
+        }
     }
     // Keep the declaration fixed, but preserve the existing post-execution
     // session context used by wire codecs; this is not catalog reanalysis.
@@ -5656,29 +5704,9 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
     }
     dbms::recordSqlStat(sql, elapsedMs, session.currentDB);
 
-    const bool mergeTypedNotices = !statementNotices.empty();
-    if (mergeTypedNotices)
-        appendOrderedStatementNotices(outputText, statementNotices, result.notices);
     auto lines = outputLines(outputText);
-    // The legacy executor reports successful diagnostics through stdout.
-    // They are asynchronous protocol messages, not row data or command-tag
-    // text.  Remove them before interpreting the remaining command output.
-    lines.erase(std::remove_if(lines.begin(), lines.end(), [&](const std::string& line) {
-        static const std::pair<const char*, const char*> prefixes[] = {
-            {"NOTICE:", "NOTICE"}, {"WARNING:", "WARNING"}
-        };
-        for (const auto& entry : prefixes) {
-            const size_t prefixLength = std::strlen(entry.first);
-            if (line.compare(0, prefixLength, entry.first) != 0) continue;
-            if (!mergeTypedNotices) {
-                result.notices.push_back(QueryNotice{entry.second,
-                    std::string(entry.second) == "WARNING" ? "01000" : "00000",
-                    trimText(line.substr(prefixLength))});
-            }
-            return true;
-        }
-        return false;
-    }), lines.end());
+    // Diagnostics use a typed channel. Row bytes are never messages, and
+    // multiline diagnostic payloads must not be split into result rows.
     if (executionError || (!lines.empty() && lines.front().rfind("ERROR:", 0) == 0)) {
         result.error = true;
         if (result.errorMessage.empty()) {
@@ -7050,17 +7078,25 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         outcome.failedInExistingTransaction =
             boundary.originallyInTransaction;
 
+        const TableSchema table =
+            g_engine.getTableSchema(session.currentDB, plan.physicalTable);
         const std::vector<uint16_t> formats(plan.columnIndexes.size(), 0);
         if (plan.direction == CopyWireDirection::FromStdin) {
-            if (!protocol.sendCopyInResponse(0, formats)) {
+            CopyStreamResult stream;
+            bool responseSent = false;
+            {
+                CopyInterruptGuard interruptGuard(session, copyDeadline);
+                responseSent = protocol.sendCopyInResponse(0, formats);
+                if (responseSent) stream = receiveCopyIn(
+                    protocol, plan, session, abortCopyTransaction,
+                    copyDeadline, interruptGuard, table);
+            }
+            if (!responseSent) {
                 QueryResult ignored;
                 (void)finishCopyBoundary(boundary, false, ignored);
                 outcome.connectionOk = false;
                 return outcome;
             }
-            CopyStreamResult stream = receiveCopyIn(
-                protocol, plan, session, abortCopyTransaction,
-                copyDeadline);
             outcome.connectionOk = stream.transportOk;
             outcome.syncConsumed = stream.syncConsumed;
             QueryResult finishError;
@@ -7097,14 +7133,20 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             return outcome;
         }
 
-        if (!protocol.sendCopyOutResponse(0, formats)) {
+        CopyStreamResult stream;
+        bool responseSent = false;
+        {
+            CopyInterruptGuard interruptGuard(session, copyDeadline);
+            responseSent = protocol.sendCopyOutResponse(0, formats);
+            if (responseSent) stream = sendCopyOut(
+                protocol, plan, session, copyDeadline, table);
+        }
+        if (!responseSent) {
             QueryResult ignored;
             (void)finishCopyBoundary(boundary, false, ignored);
             outcome.connectionOk = false;
             return outcome;
         }
-        CopyStreamResult stream = sendCopyOut(
-            protocol, plan, session, copyDeadline);
         QueryResult finishError;
         const bool finished = finishCopyBoundary(
             boundary, stream.success, finishError);
@@ -7246,6 +7288,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             session.preparedStmts.erase("");
             session.preparedStmtTypes.erase("");
             session.preparedStmtParameterOids.erase("");
+            session.preparedStmtResultTypes.erase("");
             portals.erase("");
             if (!SQLParser::lexicalError(sql).empty()) {
                 const QueryResult result = executeForProtocol(sql);
@@ -7427,6 +7470,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             size_t offset = 0;
             std::string statement;
             std::string sql;
+            std::optional<std::vector<std::pair<uint32_t,int32_t>>> resultIdentity;
             if (!PostgresProtocol::readCString(message.payload, offset, statement) ||
                 !PostgresProtocol::readCString(message.payload, offset, sql) ||
                 offset + 2 > message.payload.size()) {
@@ -7574,6 +7618,11 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                         !describePreparedQueryHostResult(sql,session,staticColumns))
                         (void)describePreparedOrdinarySourceResult(sql,session,staticColumns);
                 }
+                std::vector<PgColumnDescription> resultColumns;
+                if(describePreparedResult(sql,session,resultColumns,parameterTypes)) {
+                    resultIdentity.emplace();
+                    for(const auto& column:resultColumns)resultIdentity->emplace_back(column.typeOid,column.typeModifier);
+                }
                 for (const auto& notice : protocolTimePrecisionNotices(sql, session))
                     protocol.sendNoticeResponse(notice.message, notice.severity, notice.sqlState);
             } catch (const DbError& error) {
@@ -7587,6 +7636,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 session.preparedStmts.erase(statement);
                 session.preparedStmtTypes.erase(statement);
                 session.preparedStmtParameterOids.erase(statement);
+                session.preparedStmtResultTypes.erase(statement);
                 portals.erase("");
             }
             session.preparedStmts[statement] = std::move(sql);
@@ -7594,6 +7644,8 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 std::vector<std::string>(parameterTypes.size());
             session.preparedStmtParameterOids[statement] =
                 std::move(parameterTypes);
+            if(resultIdentity)session.preparedStmtResultTypes[statement]=std::move(*resultIdentity);
+            else session.preparedStmtResultTypes.erase(statement);
             protocol.sendParseComplete();
             continue;
         }
@@ -7670,6 +7722,16 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 !prepareExtendedQuerySnapshot(preparedSql)) {
                 continue;
             }
+            if (!portal.empty() && portals.count(portal) != 0) {
+                sendExtendedProtocolError("42P03",
+                    "portal \"" + portal + "\" already exists");
+                extendedQueryError = true;
+                continue;
+            }
+            // Replace only after statement/shape/transaction admission,
+            // but before any value codec or planning can fail. Named portal
+            // conflicts take precedence over invalid input values.
+            portals[portal] = ProtocolPortal{};
             std::vector<std::string> literals;
             literals.reserve(valueCount);
             bool bindError = false;
@@ -7808,11 +7870,19 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 sendExtendedProtocolError(error.sqlState(), error.message());
                 continue;
             }
-            if (!portal.empty() && portals.count(portal) != 0) {
-                sendExtendedProtocolError("42P03",
-                    "portal \"" + portal + "\" already exists");
-                extendedQueryError = true;
-                continue;
+            try {
+                const auto fixed=session.preparedStmtResultTypes.find(statement);
+                if(fixed!=session.preparedStmtResultTypes.end()) {
+                    std::vector<PgColumnDescription> current;
+                    const bool available=describePreparedResult(preparedSql,session,current,preparedParameterTypes);
+                    std::vector<std::pair<uint32_t,int32_t>> identity;
+                    for(const auto& column:current)identity.emplace_back(column.typeOid,column.typeModifier);
+                    if(!available || identity!=fixed->second)
+                        throw DbError("0A000","cached plan must not change result type");
+                }
+            } catch(const DbError& error) {
+                sendExtendedProtocolError(error.sqlState(),error.message());
+                extendedQueryError=true;continue;
             }
             portals[portal] = ProtocolPortal{
                 statement, std::move(expandedSql), preparedSql,
@@ -7843,6 +7913,17 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             if (portalIt == portals.end()) {
                 sendExtendedProtocolError("34000", "portal does not exist");
                 extendedQueryError = true;
+                continue;
+            }
+            if (!portalIt->second.defined) {
+                if (!protocol.sendEmptyQueryResponse()) extendedQueryError = true;
+                continue;
+            }
+            // A buffered/suspended result cannot bypass the transaction's
+            // failure state merely because its query already executed.
+            if (transactionFailed && !isTransactionRecoveryCommand(portalIt->second.sql)) {
+                sendExtendedProtocolError("25P02",
+                    "current transaction is aborted, commands ignored until end of transaction block");
                 continue;
             }
             if (!portalIt->second.executed &&
@@ -8076,6 +8157,11 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                     sendExtendedProtocolError(error.sqlState(), error.message());
                     continue;
                 }
+                if (transactionFailed && hasColumns) {
+                    sendExtendedProtocolError("25P02",
+                        "current transaction is aborted, commands ignored until end of transaction block");
+                    continue;
+                }
                 if (!protocol.sendParameterDescription(oidIt->second) ||
                     !(hasColumns ? protocol.sendRowDescription(columns)
                                  : protocol.sendNoData())) {
@@ -8090,6 +8176,10 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                     extendedQueryError = true;
                     continue;
                 }
+                if (!portalIt->second.defined) {
+                    if (!protocol.sendNoData()) extendedQueryError = true;
+                    continue;
+                }
                 std::vector<PgColumnDescription> columns;
                 bool hasColumns;
                 try {
@@ -8097,6 +8187,11 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                                                         portalIt->second.parameterOids);
                 } catch (const DbError& error) {
                     sendExtendedProtocolError(error.sqlState(), error.message());
+                    continue;
+                }
+                if (transactionFailed && hasColumns) {
+                    sendExtendedProtocolError("25P02",
+                        "current transaction is aborted, commands ignored until end of transaction block");
                     continue;
                 }
                 if (!hasColumns) {
@@ -8144,6 +8239,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 session.preparedStmts.erase(name);
                 session.preparedStmtTypes.erase(name);
                 session.preparedStmtParameterOids.erase(name);
+                session.preparedStmtResultTypes.erase(name);
             } else if (target == 'P') {
                 portals.erase(name);
             } else {

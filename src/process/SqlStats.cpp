@@ -398,21 +398,29 @@ bool persistSqlStats(const std::string& dbname, const std::filesystem::path& pat
         else ++it;
     }
     trimSqlStatsLocked(merged);
-    if (!publishStatsSnapshot(path, [&](const std::filesystem::path& temporary) {
+    auto& live = sqlStatsMap();
+    auto& saved = persistedSqlStatsMap();
+    // Copy every allocating key/value before file publication. Both prepared
+    // maps use the same stateless allocator as their destination maps.
+    auto nextLive = merged;
+    auto nextSaved = merged;
+    const auto publication = publishStatsSnapshotWithStatus(
+        path, [&](const std::filesystem::path& temporary) {
             return writeSnapshot(temporary, dbname, merged);
-        })) return false;
+        });
+    if (publication == StatsSnapshotPublication::NotPublished) return false;
 
-    for (auto it = persistedSqlStatsMap().begin(); it != persistedSqlStatsMap().end();) {
-        if (it->second.dbname == dbname) it = persistedSqlStatsMap().erase(it);
+    for (auto it = saved.begin(); it != saved.end();) {
+        if (it->second.dbname == dbname) it = saved.erase(it);
         else ++it;
     }
-    for (const auto& [key, entry] : merged) persistedSqlStatsMap()[key] = entry;
-    for (auto it = sqlStatsMap().begin(); it != sqlStatsMap().end();) {
-        if (it->second.dbname == dbname) it = sqlStatsMap().erase(it);
+    for (auto it = live.begin(); it != live.end();) {
+        if (it->second.dbname == dbname) it = live.erase(it);
         else ++it;
     }
-    for (const auto& [key, entry] : merged) sqlStatsMap()[key] = entry;
-    return true;
+    saved.merge(nextSaved);
+    live.merge(nextLive);
+    return publication == StatsSnapshotPublication::Durable;
 }
 
 void resetSqlDatabaseStats(const std::string& dbname) {

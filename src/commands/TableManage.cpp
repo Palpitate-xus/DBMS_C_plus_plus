@@ -1,4 +1,6 @@
 #include "TableManage.h"
+#include "commands/RelationSchemaMove.h"
+#include "commands/RoutineStore.h"
 #include "commands/SchemaNamespace.h"
 #include "commands/SequenceStorageName.h"
 #include "common/DbError.h"
@@ -9,6 +11,7 @@
 #include "expression/geometric_input.h"
 #include "common/NotificationManager.h"
 #include "common/QueryHostProvider.h"
+#include "process/OutputCapture.h"
 #include "common/sha256.h"
 #include "utils/plpgsql.h"
 #include "utils/interval.h"
@@ -44,6 +47,7 @@
 #include "utils/Session.h"
 #include "common/TimeZoneRules.h"
 #include "common/TemporalStorageCodec.h"
+#include "expression/float8_output.inc"
 #include "process/RuntimeStats.h"
 #include "process/SqlStats.h"
 #include "access/BrinIndexFormat.h"
@@ -61,6 +65,7 @@
 #include "CommitLog.h"
 #include "WAL.h"
 #include "storage/HeapWalIdentity.h"
+#include "commands/RelationNameCodec.h"
 #include "HashIndex.h"
 #include "BloomIndex.h"
 #include "SPGiSTIndex.h"
@@ -1546,6 +1551,16 @@ static bool validStoredIdentifier(const std::string& value, size_t fieldSize) {
            value != "." && value != "..";
 }
 
+static bool validStoredRelationName(const std::string& value) {
+    return relation_name_codec::valid(value);
+}
+
+static bool writeRelationListAtomically(const std::filesystem::path& path,
+                                        const std::vector<std::string>& names) {
+    const auto bytes = relation_name_codec::encode(names);
+    return bytes && index_file::writeAtomically(path, *bytes);
+}
+
 static std::string primaryKeyConstraintName(const TableSchema& table) {
     if (!table.hasPrimaryKey()) return {};
     const auto storedName = table.storageParams.find(
@@ -1619,7 +1634,10 @@ static bool validateTableSchemaIdentifiers(const TableSchema& tbl, std::string* 
         if (error) *error = std::string(kind) + " exceeds the current 63-byte identifier limit";
         return true;
     };
-    if (reject(tbl.tablename, MAX_TABLE_NAME_LEN, "table name")) return false;
+    if (!validStoredRelationName(tbl.tablename)) {
+        if (error) *error = "invalid table storage identity (each SQL identifier is limited to 63 bytes)";
+        return false;
+    }
     if (tbl.len > MAX_COLUMNS || tbl.fkLen > MAX_COLUMNS) {
         if (error) *error = "table exceeds the current column or constraint limit";
         return false;
@@ -1706,7 +1724,7 @@ static bool validateTableSchemaIdentifiers(const TableSchema& tbl, std::string* 
         std::string normalizedDelete;
         std::string normalizedUpdate;
         if (reject(tbl.fks[i].name, MAX_TABLE_NAME_LEN, "constraint name") ||
-            reject(tbl.fks[i].refTable, MAX_TABLE_NAME_LEN, "table name") ||
+            !validStoredRelationName(tbl.fks[i].refTable) ||
             !normalizeForeignKeyAction(
                 tbl.fks[i].onDelete, normalizedDelete) ||
             !normalizeForeignKeyAction(
@@ -3309,7 +3327,7 @@ bool decodeTruncateWalPayload(const std::vector<char>& data,
                               std::string& tablename,
                               std::optional<uint64_t>& relationId) {
     return heap_wal_identity::nameIdentity(data, tablename, relationId) &&
-        validStoredIdentifier(tablename, MAX_TABLE_NAME_LEN);
+        validStoredRelationName(tablename);
 }
 
 bool decodeHeapWalTableName(const XLogRecord& record,
@@ -3321,12 +3339,12 @@ bool decodeHeapWalTableName(const XLogRecord& record,
     }
     uint32_t length = 0;
     std::memcpy(&length, record.data.data(), sizeof(length));
-    if (length == 0 || length >= MAX_TABLE_NAME_LEN ||
+    if (length == 0 || length >= relation_name_codec::storageWidth ||
         length > record.data.size() - sizeof(length)) {
         return false;
     }
     tablename.assign(record.data.data() + sizeof(length), length);
-    return validStoredIdentifier(tablename, MAX_TABLE_NAME_LEN);
+    return validStoredRelationName(tablename);
 }
 
 bool syncDirectoryDurably(const std::filesystem::path& path) {
@@ -4474,6 +4492,35 @@ bool constraintColumnValuesEqual(const Column& column,
            canonicalColumnKeyValue(column, right);
 }
 
+// A complete FK datum may use a different accepted spelling from its heap
+// representation. Do not use the ordering helper as a universal equality
+// predicate: some fixed-width SQL key types have no ordering branch there.
+static bool foreignKeyColumnValuesEqual(const Column& column,
+                                         const std::string& left,
+                                         const std::string& right) {
+    if (constraintColumnValuesEqual(column, left, right)) return true;
+    if (column.isArray) return false;
+    if (column.dataType == "inet" || column.dataType == "cidr") {
+        NetworkAddressValue a, b;
+        const bool cidr = column.dataType == "cidr";
+        return parseNetworkAddress(left, a, cidr) &&
+            parseNetworkAddress(right, b, cidr) && compareNetworkAddresses(a, b) == 0;
+    }
+    if (column.dataType == "macaddr" || column.dataType == "macaddr8") {
+        std::array<uint8_t, 8> a{}, b{};
+        const size_t bytes = column.dataType == "macaddr" ? 6 : 8;
+        return parseMacAddress(left, bytes, a) && parseMacAddress(right, bytes, b) && a == b;
+    }
+    if (column.storageCodec == Column::StorageCodec::Legacy &&
+        (column.dataType == "date" || column.dataType == "time" ||
+         column.dataType == "timestamp" || column.dataType == "timestamptz" ||
+         column.dataType == "datetime")) {
+        return StorageEngine::compareValues(
+            column, left, false, right, false, "=") == StorageEngine::PredicateTruth::True;
+    }
+    return false;
+}
+
 bool constraintKeyValuesEqual(const TableSchema& table,
                               const std::vector<size_t>& columns,
                               const std::vector<std::string>& left,
@@ -4608,7 +4655,7 @@ DBStatus StorageEngine::dropCollation(const std::string& dbname,
         }
         const std::string tableName = filename.substr(
             0, filename.size() - schemaSuffix.size());
-        if (!validStoredIdentifier(tableName, MAX_TABLE_NAME_LEN)) {
+        if (!validStoredRelationName(tableName)) {
             return DBStatus::CORRUPTED_DATA;
         }
         std::ifstream schemaInput(entry->path(), std::ios::binary);
@@ -5364,6 +5411,199 @@ static bool readRoutineMetadataField(const std::string& input, size_t& offset,
     return true;
 }
 
+// Function metadata is not a line-oriented language: bodies and quoted
+// parameter names can contain real LF/CRLF. This version frames every field
+// and checks the entire record before publishing a decoded declaration.
+static constexpr char udfRecordMagic[] = "\x89" "DBMS_UDF3\r\n";
+static constexpr size_t udfRecordMagicSize = sizeof(udfRecordMagic) - 1;
+
+static bool validUdfVolatility(char value) {
+    return value == 'i' || value == 's' || value == 'v';
+}
+
+static std::string udfLanguage(const std::string& value) {
+    std::string result = trim(value);
+    for (char& c : result)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return result;
+}
+
+[[maybe_unused]] static std::string encodeUdfRecord(
+    const std::vector<std::string>& names,
+    const std::vector<std::string>& types, const std::string& body,
+    char volatility, const std::string& language,
+    const std::string& returnType, bool strict) {
+    if (!validUdfVolatility(volatility)) return {};
+    std::ostringstream stream;
+    stream << udfRecordMagic;
+    appendRoutineMetadataField(stream, std::to_string(names.size()));
+    for (size_t i = 0; i < names.size(); ++i) {
+        appendRoutineMetadataField(stream, names[i]);
+        appendRoutineMetadataField(stream, i < types.size() ? types[i] : "");
+    }
+    appendRoutineMetadataField(stream, body);
+    appendRoutineMetadataField(stream, std::string(1, volatility));
+    const std::string storedLanguage = udfLanguage(language);
+    const std::string storedReturnType = trim(returnType);
+    appendRoutineMetadataField(stream, storedLanguage.empty() ? "sql" : storedLanguage);
+    appendRoutineMetadataField(stream, storedReturnType.empty() ? "text" : storedReturnType);
+    appendRoutineMetadataField(stream, strict ? "1" : "0");
+    std::string bytes = stream.str();
+    const auto checksum = SHA256::digestBytes(bytes);
+    bytes.append(reinterpret_cast<const char*>(checksum.data()), checksum.size());
+    return bytes;
+}
+
+static bool decodeFramedUdfRecord(const std::string& bytes,
+                                  StorageEngine::UDFInfo& result) {
+    if (bytes.size() < udfRecordMagicSize + 32 ||
+        bytes.compare(0, udfRecordMagicSize, udfRecordMagic) != 0) return false;
+    const std::string payload = bytes.substr(0, bytes.size() - 32);
+    const auto checksum = SHA256::digestBytes(payload);
+    if (std::memcmp(checksum.data(), bytes.data() + payload.size(), checksum.size()) != 0)
+        return false;
+    size_t offset = udfRecordMagicSize;
+    std::string countText;
+    if (!readRoutineMetadataField(payload, offset, countText) || countText.empty())
+        return false;
+    size_t count = 0;
+    const auto parsed = std::from_chars(countText.data(), countText.data() + countText.size(), count);
+    if (parsed.ec != std::errc{} || parsed.ptr != countText.data() + countText.size() ||
+        countText != std::to_string(count) || count > (payload.size() - offset) / 4)
+        return false;
+    StorageEngine::UDFInfo info;
+    info.paramNames.reserve(count);
+    info.paramTypes.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+        std::string name, type;
+        if (!readRoutineMetadataField(payload, offset, name) ||
+            !readRoutineMetadataField(payload, offset, type)) return false;
+        info.paramNames.push_back(std::move(name));
+        info.paramTypes.push_back(std::move(type));
+    }
+    std::string volatility, strict;
+    if (!readRoutineMetadataField(payload, offset, info.expression) ||
+        !readRoutineMetadataField(payload, offset, volatility) ||
+        !readRoutineMetadataField(payload, offset, info.language) ||
+        !readRoutineMetadataField(payload, offset, info.returnType) ||
+        !readRoutineMetadataField(payload, offset, strict) || offset != payload.size() ||
+        volatility.size() != 1 || !validUdfVolatility(volatility.front()) ||
+        info.language.empty() || info.returnType.empty() || (strict != "0" && strict != "1"))
+        return false;
+    info.provolatile = volatility.front();
+    info.strict = strict == "1";
+    info.language = udfLanguage(info.language);
+    info.returnType = trim(info.returnType);
+    if (info.language.empty() || info.returnType.empty()) return false;
+    info.paramName = info.paramNames.empty() ? "" : info.paramNames.front();
+    result = std::move(info);
+    return true;
+}
+
+// The old complete footer gives a boundary at the END of a legacy body,
+// not at its first LF. Old short single-line records retain their defaults.
+// Legacy files have no checksum: this does not authenticate or reconstruct
+// already lost bytes, and malformed/incomplete field boundaries fail closed.
+static bool decodeLegacyUdfRecord(const std::string& bytes,
+                                  StorageEngine::UDFInfo& info) {
+    const size_t headerEnd = bytes.find('\n');
+    if (headerEnd == std::string::npos) return false;
+    size_t bodyBegin = headerEnd + 1;
+    const std::string header = bytes.substr(0, headerEnd);
+    if (bytes.compare(0, 8, "PARAMS2:") == 0) {
+        size_t offset = 8;
+        while (offset < bytes.size() && bytes[offset] != '\n') {
+            std::string name, type;
+            if (!readRoutineMetadataField(bytes, offset, name) ||
+                !readRoutineMetadataField(bytes, offset, type)) return false;
+            info.paramNames.push_back(std::move(name));
+            info.paramTypes.push_back(std::move(type));
+        }
+        if (offset >= bytes.size() || bytes[offset] != '\n') return false;
+        bodyBegin = offset + 1;
+    } else if (header.rfind("PARAMS:", 0) == 0) {
+        const std::string rest = header.substr(7);
+        for (size_t begin = 0; begin < rest.size();) {
+            const size_t comma = rest.find(',', begin);
+            const std::string part = rest.substr(begin, comma - begin);
+            if (!part.empty()) {
+                const size_t colon = part.find(':');
+                info.paramNames.push_back(part.substr(0, colon));
+                if (colon != std::string::npos)
+                    info.paramTypes.push_back(part.substr(colon + 1));
+            }
+            if (comma == std::string::npos) break;
+            begin = comma + 1;
+        }
+    } else {
+        // A framed record with a damaged leading byte must not acquire a
+        // valid legacy declaration merely by falling through this branch.
+        if (header.find('\0') != std::string::npos) return false;
+        info.paramNames.push_back(header);
+    }
+    info.paramName = info.paramNames.empty() ? "" : info.paramNames.front();
+    struct Line { size_t begin, end; };
+    std::vector<Line> lines;
+    for (size_t begin = bodyBegin; begin < bytes.size();) {
+        const size_t newline = bytes.find('\n', begin);
+        lines.push_back({begin, newline == std::string::npos ? bytes.size() : newline});
+        if (newline == std::string::npos) break;
+        begin = newline + 1;
+    }
+    if (lines.empty()) return false;
+    const auto text = [&](size_t index) {
+        return bytes.substr(lines[index].begin, lines[index].end - lines[index].begin);
+    };
+    const auto properties = [&](const std::string& volatility,
+                                const std::string& language,
+                                const std::string& returns,
+                                const std::string& strict) {
+        if ((!volatility.empty() &&
+             (volatility.size() != 1 || !validUdfVolatility(volatility.front()))) ||
+            (!returns.empty() && returns.rfind("RETURNS:", 0) != 0) ||
+            (!strict.empty() && strict.rfind("STRICT:", 0) != 0)) return false;
+        const std::string flag = strict.empty() ? "0" : trim(strict.substr(7));
+        if (flag != "0" && flag != "1") return false;
+        info.provolatile = volatility.empty() ? 'v' : volatility.front();
+        info.language = trim(language);
+        for (char& c : info.language)
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (info.language.empty()) info.language = "sql";
+        info.returnType = returns.empty() ? "text" : trim(returns.substr(8));
+        if (info.returnType.empty()) info.returnType = "text";
+        info.strict = flag == "1";
+        return true;
+    };
+    const size_t count = lines.size();
+    if (count >= 5 && text(count - 1).rfind("STRICT:", 0) == 0) {
+        if (!properties(text(count - 4), text(count - 3), text(count - 2), text(count - 1)))
+            return false;
+        const size_t footer = lines[count - 4].begin;
+        if (footer <= bodyBegin || bytes[footer - 1] != '\n') return false;
+        info.expression = bytes.substr(bodyBegin, footer - bodyBegin - 1);
+        return true;
+    }
+    if (count > 4) return false;
+    info.expression = text(0);
+    return properties(count > 1 ? text(1) : "", count > 2 ? text(2) : "",
+                      count > 3 ? text(3) : "", "");
+}
+
+static StorageEngine::UDFInfo readUdfRecord(
+    const std::filesystem::path& path, const std::string& name) {
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream) return {};
+    const std::string bytes{std::istreambuf_iterator<char>(stream),
+                            std::istreambuf_iterator<char>()};
+    if (stream.bad()) return {};
+    StorageEngine::UDFInfo info;
+    const bool framed = !bytes.empty() && static_cast<unsigned char>(bytes.front()) == 0x89;
+    if (!(framed ? decodeFramedUdfRecord(bytes, info) : decodeLegacyUdfRecord(bytes, info)))
+        return {};
+    info.name = name;
+    return info;
+}
+
 static std::string encodeRoutineStatement(const std::string& statement) {
     static constexpr char digits[] = "0123456789abcdef";
     std::string encoded;
@@ -5609,14 +5849,11 @@ DBStatus StorageEngine::renameSchema(const std::string& dbname,
 DBStatus StorageEngine::alterTableSetSchema(const std::string& dbname,
                                             const std::string& tablename,
                                             const std::string& targetSchema) {
-    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
-    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
-    if (!schemaExists(dbname, targetSchema)) return DBStatus::TABLE_NOT_FOUND;
-    // A schema is a namespace inside dbname. The former implementation
-    // interpreted targetSchema as a database and moved a subset of relation
-    // files across databases without updating catalog, WAL or dependencies.
-    // Until a transactional in-database namespace move exists, fail closed.
-    return DBStatus::FEATURE_NOT_SUPPORTED;
+    return moveTableSchema(*this, dbname, tablename, targetSchema,
+        [&](const TableSchema& schema) {
+            std::lock_guard<std::recursive_mutex> guard(cacheMutex_);
+            return writeSchemaFile(dbname, schema.tablename, schema);
+        });
 }
 
 bool StorageEngine::schemaExists(const std::string& dbname,
@@ -5682,96 +5919,143 @@ std::vector<std::string> StorageEngine::getTablesInSchema(
 // User-defined functions (simple expression-based)
 // ========================================================================
 
-static std::filesystem::path udfPath(const std::string& dbname,
-                                     const std::string& funcname,
-                                     const std::string& schema = "public") {
-    // Public's historical flat files remain byte-for-byte compatible. Other
-    // namespaces have separate directories; never concatenate decoded names
-    // into an ambiguous "schema.name" or "schema__name" storage identity.
-    if (schema == "public")
-        return std::filesystem::path(dbname) / ".funcs" / (funcname + ".func");
-    return std::filesystem::path(dbname) / ".funcs" / ".namespaces" /
-        schema / (funcname + ".func");
+static StorageEngine::UDFInfo readLegacyUdf(const std::filesystem::path& path,
+    const std::string& funcname) {
+    return readUdfRecord(path, funcname);
 }
 
-DBStatus StorageEngine::createUDF(const std::string& dbname,
-                                   const std::string& funcname,
-                                   const std::string& param,
-                                   const std::string& expression,
-                                   char provolatile,
-                                   const std::string& language,
-                                   const std::string& returnType,
-                                   const std::string& paramType,
-                                   bool strict,
-                                   bool replace,
-                                   const std::string& schema) {
-    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
-    if (!validMetadataObjectName(funcname) || !validMetadataObjectName(schema)) return DBStatus::INVALID_ARGUMENT;
-    auto fdir = udfPath(dbname,funcname,schema).parent_path();
-    if (!ensureMetadataDirectory(fdir)) return DBStatus::IO_ERROR;
-    if (!replace && std::filesystem::exists(udfPath(dbname, funcname,schema))) {
-        return DBStatus::TABLE_ALREADY_EXISTS;
-    }
-    std::ostringstream serialized;
-    serialized << "PARAMS2:";
-    if (!param.empty() || !paramType.empty()) {
-        appendRoutineMetadataField(serialized, param);
-        appendRoutineMetadataField(serialized, paramType);
-    }
-    serialized << "\n" << expression << "\n" << provolatile << "\n"
-               << (language.empty() ? "sql" : language) << "\n"
-               << "RETURNS:" << (returnType.empty() ? "text" : returnType) << "\n"
-               << "STRICT:" << (strict ? '1' : '0') << "\n";
-    return persistMetadata(udfPath(dbname, funcname,schema), serialized.str());
+
+static DeclaredTypeBinding udfDeclaredType(const StorageEngine& engine,
+    const std::string& database,const std::string& declaration) {
+    const auto catalog=engine.catalogService().metadataSnapshot(database);
+    return resolveDeclaredTypeName(declaration,
+        catalog.namespaces.empty() && catalog.types.empty()?nullptr:&catalog,currentSession());
 }
 
-DBStatus StorageEngine::createUDF(const std::string& dbname,
-                                   const std::string& funcname,
-                                   const std::vector<std::string>& params,
-                                   const std::vector<std::string>& types,
-                                   const std::string& expression,
-                                   char provolatile,
-                                   const std::string& language,
-                                   const std::string& returnType,
-                                   bool strict,
-                                   bool replace,
-                                   const std::string& schema) {
-    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
-    if (!validMetadataObjectName(funcname) || !validMetadataObjectName(schema)) return DBStatus::INVALID_ARGUMENT;
-    auto fdir = udfPath(dbname,funcname,schema).parent_path();
-    if (!ensureMetadataDirectory(fdir)) return DBStatus::IO_ERROR;
-    if (!replace && std::filesystem::exists(udfPath(dbname, funcname,schema))) {
-        return DBStatus::TABLE_ALREADY_EXISTS;
+static StoredRoutine storedUdf(const StorageEngine& engine,const std::string& database,
+    const StorageEngine::UDFInfo& udf,const std::string& schema) {
+    StoredRoutine result;
+    result.schema=schema;result.name=udf.name;result.oid=udf.oid;
+    result.parameterNames=udf.paramNames;result.parameterTypes=udf.paramTypes;
+    // Old pre-PARAMS records represented zero arguments as one empty name.
+    if(result.parameterNames.size()==1 && result.parameterNames.front().empty() &&
+       (result.parameterTypes.empty() || result.parameterTypes.front().empty())) {
+        result.parameterNames.clear();result.parameterTypes.clear();
     }
-    std::ostringstream serialized;
-    serialized << "PARAMS2:";
-    for (size_t i = 0; i < params.size(); ++i) {
-        appendRoutineMetadataField(serialized, params[i]);
-        appendRoutineMetadataField(
-            serialized, i < types.size() ? types[i] : "");
-    }
-    serialized << "\n" << expression << "\n" << provolatile << "\n"
-               << (language.empty() ? "sql" : language) << "\n"
-               << "RETURNS:" << (returnType.empty() ? "text" : returnType) << "\n"
-               << "STRICT:" << (strict ? '1' : '0') << "\n";
-    return persistMetadata(udfPath(dbname, funcname,schema), serialized.str());
+    result.parameterTypes.resize(result.parameterNames.size());
+    for(const auto& type:result.parameterTypes)
+        result.inputTypeOids.push_back(type.empty()?0:udfDeclaredType(engine,database,type).typeOid);
+    result.returnType=udf.returnType.empty()?"text":udf.returnType;
+    result.returnTypeOid=udfDeclaredType(engine,database,result.returnType).typeOid;
+    result.language=udf.language.empty()?"sql":SQLParser::toLower(trim(udf.language));
+    result.body=udf.expression;result.volatility=udf.provolatile;result.strict=udf.strict;
+    return result;
 }
 
-DBStatus StorageEngine::dropUDF(const std::string& dbname,
-                                 const std::string& funcname,const std::string& schema) {
-    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
-    if (!validMetadataObjectName(funcname) || !validMetadataObjectName(schema)) return DBStatus::INVALID_ARGUMENT;
-    auto path = udfPath(dbname, funcname,schema);
-    if (!std::filesystem::exists(path)) return DBStatus::TABLE_NOT_FOUND;
-    std::error_code error;
-    if (!std::filesystem::remove(path, error) || error) return DBStatus::IO_ERROR;
+static StorageEngine::UDFInfo loadedUdf(const StoredRoutine& value) {
+    StorageEngine::UDFInfo result;
+    result.name=value.name;result.schema=value.schema;result.oid=value.oid;
+    result.paramNames=value.parameterNames;result.paramTypes=value.parameterTypes;
+    result.paramName=result.paramNames.empty()?"":result.paramNames.front();
+    result.paramTypeOids=value.inputTypeOids;result.returnType=value.returnType;
+    result.returnTypeOid=value.returnTypeOid;result.language=value.language;
+    result.expression=value.body;result.provolatile=value.volatility;result.strict=value.strict;
+    return result;
+}
+
+static RoutineStore udfStore(const StorageEngine& engine,const std::string& database) {
+    return RoutineStore(database,[&engine,database](const auto& file,const auto& schema,
+        const auto& name)->std::optional<StoredRoutine> {
+        const auto old=readLegacyUdf(file,name);
+        if(old.expression.empty())return std::nullopt;
+        return storedUdf(engine,database,old,schema);
+    });
+}
+
+DBStatus StorageEngine::createUDF(const std::string& dbname,const std::string& funcname,
+    const std::string& param,const std::string& expression,char provolatile,
+    const std::string& language,const std::string& returnType,const std::string& paramType,
+    bool strict,bool replace,const std::string& schema,uint32_t routineOid) {
+    std::vector<std::string> names,types;
+    if(!param.empty() || !paramType.empty()){names.push_back(param);types.push_back(paramType);}
+    return createUDF(dbname,funcname,names,types,expression,provolatile,language,
+        returnType,strict,replace,schema,routineOid);
+}
+
+DBStatus StorageEngine::createUDF(const std::string& dbname,const std::string& funcname,
+    const std::vector<std::string>& params,const std::vector<std::string>& types,
+    const std::string& expression,char provolatile,const std::string& language,
+    const std::string& returnType,bool strict,bool replace,const std::string& schema,
+    uint32_t routineOid) {
+    if(!databaseExists(dbname))return DBStatus::DATABASE_NOT_FOUND;
+    if(!validMetadataObjectName(funcname) || !validMetadataObjectName(schema) ||
+       types.size()>params.size())return DBStatus::INVALID_ARGUMENT;
+    UDFInfo value;value.name=funcname;value.paramNames=params;value.paramTypes=types;
+    value.expression=expression;value.provolatile=provolatile;value.language=language;
+    value.returnType=returnType;value.strict=strict;value.oid=routineOid;
+    try {udfStore(*this,dbname).put(storedUdf(*this,dbname,value,schema),replace);}
+    catch(const DbError& error) {
+        if(error.sqlState()=="42723")return DBStatus::TABLE_ALREADY_EXISTS;
+        if(error.sqlState()=="58030")return DBStatus::IO_ERROR;
+        throw;
+    }
     return DBStatus::OK;
 }
 
-bool StorageEngine::udfExists(const std::string& dbname,
-                              const std::string& funcname,const std::string& schema) const {
-    return databaseExists(dbname) && validMetadataObjectName(funcname) && validMetadataObjectName(schema) &&
-           std::filesystem::exists(udfPath(dbname, funcname,schema));
+std::vector<StorageEngine::UDFInfo> StorageEngine::getUDFOverloads(
+    const std::string& dbname,const std::string& funcname,const std::string& schema) const {
+    if(!databaseExists(dbname) || !validMetadataObjectName(funcname) ||
+       !validMetadataObjectName(schema))return {};
+    std::vector<UDFInfo> result;
+    for(const auto& value:udfStore(*this,dbname).candidates(schema,funcname))
+        result.push_back(loadedUdf(value));
+    return result;
+}
+
+StorageEngine::UDFInfo StorageEngine::getUDF(const std::string& dbname,
+    const std::string& funcname,const std::string& schema) const {
+    auto candidates=getUDFOverloads(dbname,funcname,schema);
+    if(candidates.empty())return {};
+    if(candidates.size()!=1)throw DbError("42725","function "+funcname+" is not unique");
+    return std::move(candidates.front());
+}
+
+StorageEngine::UDFInfo StorageEngine::getUDFBySignature(const std::string& dbname,
+    const std::string& funcname,const std::vector<uint32_t>& inputs,const std::string& schema) const {
+    for(auto& value:getUDFOverloads(dbname,funcname,schema))
+        if(value.paramTypeOids==inputs)return std::move(value);
+    return {};
+}
+
+bool StorageEngine::udfExists(const std::string& dbname,const std::string& funcname,
+    const std::string& schema) const {return !getUDFOverloads(dbname,funcname,schema).empty();}
+
+DBStatus StorageEngine::dropUDFBySignature(const std::string& dbname,
+    const std::string& funcname,const std::vector<uint32_t>& inputs,const std::string& schema) {
+    if(!databaseExists(dbname))return DBStatus::DATABASE_NOT_FOUND;
+    try {return udfStore(*this,dbname).erase(schema,funcname,inputs)?DBStatus::OK:DBStatus::TABLE_NOT_FOUND;}
+    catch(const DbError& error){if(error.sqlState()=="58030")return DBStatus::IO_ERROR;throw;}
+}
+
+DBStatus StorageEngine::dropUDF(const std::string& dbname,const std::string& funcname,
+    const std::string& schema) {
+    if(!databaseExists(dbname))return DBStatus::DATABASE_NOT_FOUND;
+    const auto candidates=getUDFOverloads(dbname,funcname,schema);
+    if(candidates.empty())return DBStatus::TABLE_NOT_FOUND;
+    // Internal namespace teardown deliberately removes the whole family.
+    // SQL DROP and CREATE undo must use the exact-signature API instead.
+    for(const auto& value:candidates) {
+        const auto status=dropUDFBySignature(dbname,funcname,value.paramTypeOids,schema);
+        if(status!=DBStatus::OK)return status;
+    }
+    return DBStatus::OK;
+}
+
+StorageEngine::UDFInfo StorageEngine::moveUDF(const std::string& dbname,
+    const std::string& funcname,const std::vector<uint32_t>& inputs,const std::string& schema,
+    const std::string& newName,const std::string& newSchema) {
+    if(!databaseExists(dbname))throw DbError("3D000","database does not exist");
+    return loadedUdf(udfStore(*this,dbname).move(schema,funcname,inputs,newSchema,newName));
 }
 
 // Defined near applyScalarFunc; shared by scalar dispatch and callUDF.
@@ -5828,81 +6112,6 @@ eng.setExecFunctionCtx(std::move(ctx));
 }
 
 
-StorageEngine::UDFInfo StorageEngine::getUDF(const std::string& dbname,
-                                              const std::string& funcname,const std::string& schema) const {
-    UDFInfo info;
-    if (!databaseExists(dbname) || !validMetadataObjectName(funcname) || !validMetadataObjectName(schema)) return info;
-    auto path = udfPath(dbname, funcname,schema);
-    std::ifstream ifs(path);
-    if (!ifs) return info;
-    std::string line;
-    if (std::getline(ifs, line)) {
-        if (line.rfind("PARAMS2:", 0) == 0) {
-            const std::string encoded = line.substr(8);
-            size_t offset = 0;
-            while (offset < encoded.size()) {
-                std::string name;
-                std::string type;
-                if (!readRoutineMetadataField(encoded, offset, name) ||
-                    !readRoutineMetadataField(encoded, offset, type)) {
-                    return {};
-                }
-                info.paramNames.push_back(std::move(name));
-                info.paramTypes.push_back(std::move(type));
-            }
-            info.paramName =
-                info.paramNames.empty() ? "" : info.paramNames.front();
-        } else if (line.rfind("PARAMS:", 0) == 0) {
-            std::string rest = line.substr(7);
-            size_t p = 0;
-            while (p < rest.size()) {
-                size_t comma = rest.find(',', p);
-                std::string part = rest.substr(p, comma - p);
-                if (!part.empty()) {
-                    size_t colon = part.find(':');
-                    if (colon != std::string::npos) {
-                        info.paramNames.push_back(part.substr(0, colon));
-                        info.paramTypes.push_back(part.substr(colon + 1));
-                    } else {
-                        info.paramNames.push_back(part);
-                    }
-                }
-                if (comma == std::string::npos) break;
-                p = comma + 1;
-            }
-            info.paramName = info.paramNames.empty() ? "" : info.paramNames[0];
-        } else {
-            info.paramName = line;
-            info.paramNames.push_back(line);
-        }
-    }
-    std::getline(ifs, info.expression);
-    std::string volLine;
-    if (std::getline(ifs, volLine) && !volLine.empty()) {
-        info.provolatile = volLine[0];
-    } else {
-        info.provolatile = 'v';
-    }
-    std::string langLine;
-    if (std::getline(ifs, langLine)) {
-        std::string lang = langLine;
-        for (char& c : lang) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        info.language = trim(lang).empty() ? "sql" : trim(lang);
-    } else {
-        info.language = "sql";
-    }
-    std::string returnLine;
-    if (std::getline(ifs, returnLine) && returnLine.rfind("RETURNS:", 0) == 0) {
-        info.returnType = trim(returnLine.substr(8));
-        if (info.returnType.empty()) info.returnType = "text";
-    }
-    std::string strictLine;
-    if (std::getline(ifs, strictLine) && strictLine.rfind("STRICT:", 0) == 0) {
-        info.strict = trim(strictLine.substr(7)) == "1";
-    }
-    info.name = funcname;
-    return info;
-}
 
 
 bool StorageEngine::callUDF(const std::string& dbname, const std::string& funcname,
@@ -5910,11 +6119,20 @@ bool StorageEngine::callUDF(const std::string& dbname, const std::string& funcna
                             std::string& returnValue,
                             bool* returnIsNull,
                             const std::vector<bool>* argNulls,const std::string& schema) const {
-    auto udf = getUDF(dbname, funcname,schema);
-    if (udf.expression.empty()) return false;
-    return evalUDFBody(udf, funcname, argValues,
-                       const_cast<StorageEngine*>(this), dbname, returnValue,
-                       nullptr, returnIsNull, argNulls);
+    std::optional<UDFInfo> selected;
+    for(auto& value:getUDFOverloads(dbname,funcname,schema))if(value.paramNames.size()==argValues.size()) {
+        if(selected)throw DbError("42725","untyped native call has multiple matching signatures");
+        selected=std::move(value);
+    }
+    if(!selected)return false;
+    return callUDFDefinition(dbname,*selected,argValues,returnValue,returnIsNull,argNulls);
+}
+
+bool StorageEngine::callUDFDefinition(const std::string& dbname,const UDFInfo& function,
+    const std::vector<std::string>& values,std::string& result,bool* returnIsNull,
+    const std::vector<bool>* nulls) const {
+    return evalUDFBody(function,function.name,values,const_cast<StorageEngine*>(this),
+        dbname,result,nullptr,returnIsNull,nulls);
 }
 
 bool StorageEngine::callUDFWithCtx(const std::string& dbname,
@@ -5924,8 +6142,13 @@ bool StorageEngine::callUDFWithCtx(const std::string& dbname,
                                    std::string& returnValue,
                                    bool* returnIsNull,
                                    const std::vector<bool>* argNulls) const {
-    auto udf = getUDF(dbname, funcname);
-    if (udf.expression.empty()) return false;
+    std::optional<UDFInfo> selected;
+    for(auto& value:getUDFOverloads(dbname,funcname))if(value.paramNames.size()==argValues.size()) {
+        if(selected)throw DbError("42725","untyped trigger call has multiple matching signatures");
+        selected=std::move(value);
+    }
+    if(!selected)return false;
+    const auto& udf=*selected;
     return evalUDFBody(udf, funcname, argValues,
                        const_cast<StorageEngine*>(this), dbname, returnValue,
                        &ctx.vars, returnIsNull, argNulls);
@@ -5936,21 +6159,9 @@ std::vector<std::string> StorageEngine::getUDFNames(const std::string& dbname) c
 }
 
 std::vector<std::string> StorageEngine::getUDFNames(
-    const std::string& dbname, const std::string& schema) const {
-    std::vector<std::string> result;
-    if (!databaseExists(dbname)) return result;
-    if (!validMetadataObjectName(schema)) return result;
-    auto fdir = udfPath(dbname, "", schema).parent_path();
-    if (!std::filesystem::exists(fdir)) return result;
-    for (const auto& entry : std::filesystem::directory_iterator(fdir)) {
-        if (entry.is_regular_file()) {
-            std::string name = entry.path().filename().string();
-            if (name.size() > 5 && name.substr(name.size() - 5) == ".func") {
-                result.push_back(name.substr(0, name.size() - 5));
-            }
-        }
-    }
-    return result;
+    const std::string& dbname,const std::string& schema) const {
+    if(!databaseExists(dbname) || !validMetadataObjectName(schema))return {};
+    return udfStore(*this,dbname).names(schema);
 }
 
 // ========================================================================
@@ -10351,7 +10562,8 @@ std::string StorageEngine::extractColumnValueStatic(const std::string& rowBuffer
     } else if (col.dataType == "double" || col.dataType == "decimal" || col.dataType == "numeric") {
         double val = 0.0;
         std::memcpy(&val, rowBuffer.data() + offset, sizeof(double));
-        return formatFloatingValue(val);
+        return col.dataType == "double" ? float8_output_detail::format(val)
+                                        : formatFloatingValue(val);
     } else if (col.dataType == "point") {
         double x = 0.0, y = 0.0;
         std::memcpy(&x, rowBuffer.data() + offset, sizeof(double));
@@ -11327,6 +11539,18 @@ bool StorageEngine::checkExclusionConflict(const std::string& dbname, const std:
     }
 
     bool conflict = false;
+    // Constraints must include this transaction's earlier writes from the
+    // current command. Keep the statement snapshot unchanged for ordinary
+    // SELECT/source scans, and retain its other MVCC/isolation fields.
+    ReadView constraintView;
+    const ReadView* constraintReadView = nullptr;
+    const auto& context = transactionContext();
+    if (context.inTransaction && context.txnDB == dbname &&
+        context.readView.commandIdVisibility) {
+        constraintView = context.readView;
+        constraintView.commandIdVisibility = false;
+        constraintReadView = &constraintView;
+    }
     const bool scanOk = const_cast<StorageEngine*>(this)->forEachRow(dbname, tablename, [&](uint32_t pid, uint16_t sid, const char* data, size_t len) {
         if (conflict) return;
         int64_t rid = static_cast<int64_t>(encodeRid(pid, sid));
@@ -11375,7 +11599,7 @@ bool StorageEngine::checkExclusionConflict(const std::string& dbname, const std:
             }
         }
         if (allMatch) conflict = true;
-    });
+    }, constraintReadView);
     if (!scanOk) {
         if (scanFailed) *scanFailed = true;
         return false;
@@ -14901,7 +15125,7 @@ std::vector<std::string> StorageEngine::getDatabaseNames() const {
 bool StorageEngine::tableExists(const std::string& dbname,
                                  const std::string& tablename) const {
     if (dbname.empty() || !validStoredIdentifier(dbname, MAX_TABLE_NAME_LEN) ||
-        tablename.empty() || !validStoredIdentifier(tablename, MAX_TABLE_NAME_LEN)) {
+        tablename.empty() || !validStoredRelationName(tablename)) {
         return false;
     }
     lockManager_.setResourceNamespace(dbname);
@@ -15144,6 +15368,8 @@ constexpr int32_t SCHEMA_PHYSICAL_ID_FORMAT_VERSION = 0x4442000A;
 constexpr int32_t SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION = 0x4442000B;
 constexpr int32_t SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION = 0x4442000C;
 constexpr int32_t SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION = 0x4442000D;
+// E widens only persisted FK relation identities, never SQL identifier fields.
+constexpr int32_t SCHEMA_LONG_RELATION_FORMAT_VERSION = 0x4442000E;
 constexpr uint32_t SCHEMA_TEMPORAL_CODEC_MAGIC = 0x314D4354; // "TCM1"
 constexpr uint32_t SCHEMA_COLUMN_TYPEMOD_MAGIC = 0x314D5449; // "ITM1"
 constexpr uint32_t SCHEMA_PHYSICAL_ID_MAGIC = 0x31444952;  // "RID1"
@@ -15215,6 +15441,13 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
             return;
         }
     }
+    bool longReferences = false;
+    for (size_t i = 0; i < tbl.fkLen; ++i) {
+        if (!validStoredRelationName(tbl.fks[i].refTable)) {
+            out.setstate(std::ios::failbit); return;
+        }
+        longReferences = longReferences || tbl.fks[i].refTable.size() >= MAX_TABLE_NAME_LEN;
+    }
     bool hasDefaultOrigins = false;
     bool hasColumnTypeMods = false;
     bool hasTemporalCodecs = false;
@@ -15248,7 +15481,7 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
     }
     // Old readers reject B before consuming it rather than treating an
     // implicit domain default as a frozen SQL column expression.
-    const int32_t schemaFormat = hasTemporalCodecs ? SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION : hasColumnTypeMods ? SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION : hasDefaultOrigins ? SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION : tbl.physicalRelationId == 0
+    const int32_t schemaFormat = longReferences ? SCHEMA_LONG_RELATION_FORMAT_VERSION : hasTemporalCodecs ? SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION : hasColumnTypeMods ? SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION : hasDefaultOrigins ? SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION : tbl.physicalRelationId == 0
         ? SCHEMA_FORMAT_VERSION : SCHEMA_PHYSICAL_ID_FORMAT_VERSION;
     out.write(reinterpret_cast<const char*>(&schemaFormat), sizeof(schemaFormat));
     int32_t len = static_cast<int32_t>(tbl.len);
@@ -15300,7 +15533,7 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
             writeFixedString(out, tbl.fks[i].colNames[ci], MAX_COL_NAME_LEN);
             writeFixedString(out, tbl.fks[i].refCols[ci], MAX_COL_NAME_LEN);
         }
-        writeFixedString(out, tbl.fks[i].refTable, MAX_TABLE_NAME_LEN);
+        writeFixedString(out, tbl.fks[i].refTable, longReferences ? relation_name_codec::storageWidth : MAX_TABLE_NAME_LEN);
         writeFixedString(out, tbl.fks[i].onDelete, 10);
         writeFixedString(out, tbl.fks[i].onUpdate, 10);
     }
@@ -15467,7 +15700,7 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
     uint16_t longDefaultCount = 0;
     for (size_t i = 0; i < tbl.len; ++i)
         if (tbl.cols[i].defaultValue.size() > MAX_COL_NAME_LEN) ++longDefaultCount;
-    if (longDefaultCount != 0 || !tbl.rangePartitions.empty() || tbl.physicalRelationId != 0 || hasDefaultOrigins || hasColumnTypeMods || hasTemporalCodecs) {
+    if (longDefaultCount != 0 || !tbl.rangePartitions.empty() || tbl.physicalRelationId != 0 || hasDefaultOrigins || hasColumnTypeMods || hasTemporalCodecs || longReferences) {
         out.write(reinterpret_cast<const char*>(&SCHEMA_LONG_DEFAULT_MAGIC),
                   sizeof(SCHEMA_LONG_DEFAULT_MAGIC));
         out.write(reinterpret_cast<const char*>(&longDefaultCount),
@@ -15484,7 +15717,7 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
 
     // Persist lower endpoints without changing the legacy schema prefix. Old
     // schemas infer them as MINVALUE followed by the preceding upper bound.
-    if (!tbl.rangePartitions.empty() || tbl.physicalRelationId != 0 || hasDefaultOrigins || hasColumnTypeMods || hasTemporalCodecs) {
+    if (!tbl.rangePartitions.empty() || tbl.physicalRelationId != 0 || hasDefaultOrigins || hasColumnTypeMods || hasTemporalCodecs || longReferences) {
         out.write(reinterpret_cast<const char*>(&SCHEMA_RANGE_LOWER_BOUNDS_MAGIC),
                   sizeof(SCHEMA_RANGE_LOWER_BOUNDS_MAGIC));
         const int32_t lowerBoundCount =
@@ -15499,13 +15732,13 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
             writeFixedString(out, lower, MAX_COL_NAME_LEN);
         }
     }
-    if (tbl.physicalRelationId != 0 || hasDefaultOrigins || hasColumnTypeMods || hasTemporalCodecs) {
+    if (tbl.physicalRelationId != 0 || hasDefaultOrigins || hasColumnTypeMods || hasTemporalCodecs || longReferences) {
         out.write(reinterpret_cast<const char*>(&SCHEMA_PHYSICAL_ID_MAGIC),
                   sizeof(SCHEMA_PHYSICAL_ID_MAGIC));
         out.write(reinterpret_cast<const char*>(&tbl.physicalRelationId),
                   sizeof(tbl.physicalRelationId));
     }
-    if (hasDefaultOrigins || hasColumnTypeMods || hasTemporalCodecs) {
+    if (hasDefaultOrigins || hasColumnTypeMods || hasTemporalCodecs || longReferences) {
         out.write(reinterpret_cast<const char*>(&SCHEMA_DEFAULT_ORIGIN_MAGIC),sizeof(SCHEMA_DEFAULT_ORIGIN_MAGIC));
         const uint16_t count = static_cast<uint16_t>(tbl.len);
         out.write(reinterpret_cast<const char*>(&count),sizeof(count));
@@ -15520,14 +15753,14 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
             out.write(tbl.cols[i].domainName.data(),length);
         }
     }
-    if (hasColumnTypeMods || hasTemporalCodecs) {
+    if (hasColumnTypeMods || hasTemporalCodecs || longReferences) {
         out.write(reinterpret_cast<const char*>(&SCHEMA_COLUMN_TYPEMOD_MAGIC), sizeof(SCHEMA_COLUMN_TYPEMOD_MAGIC));
         const uint16_t count = static_cast<uint16_t>(tbl.len);
         out.write(reinterpret_cast<const char*>(&count), sizeof(count));
         for (size_t i = 0; i < tbl.len; ++i)
             out.write(reinterpret_cast<const char*>(&tbl.cols[i].typeMod), sizeof(tbl.cols[i].typeMod));
     }
-    if (hasTemporalCodecs) {
+    if (hasTemporalCodecs || longReferences) {
         out.write(reinterpret_cast<const char*>(&SCHEMA_TEMPORAL_CODEC_MAGIC), sizeof(SCHEMA_TEMPORAL_CODEC_MAGIC));
         const uint16_t count = static_cast<uint16_t>(tbl.len);
         out.write(reinterpret_cast<const char*>(&count), sizeof(count));
@@ -15545,7 +15778,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     in.read(reinterpret_cast<char*>(&firstInt), 4);
     if (!in) return {};
 
-    if (firstInt != SCHEMA_FORMAT_VERSION && firstInt != SCHEMA_PHYSICAL_ID_FORMAT_VERSION && firstInt != SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION && firstInt != SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION && firstInt != SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION) {
+    if (firstInt != SCHEMA_FORMAT_VERSION && firstInt != SCHEMA_PHYSICAL_ID_FORMAT_VERSION && firstInt != SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION && firstInt != SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION && firstInt != SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION && firstInt != SCHEMA_LONG_RELATION_FORMAT_VERSION) {
         std::cerr << "[catalog] unsupported schema format for table " << tablename
                   << "; recreate the database with the current binary" << std::endl;
         return {};
@@ -15644,7 +15877,9 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
                 tbl.fks[i].colNames.push_back(readFixedString(in, MAX_COL_NAME_LEN));
                 tbl.fks[i].refCols.push_back(readFixedString(in, MAX_COL_NAME_LEN));
             }
-            tbl.fks[i].refTable = readFixedString(in, MAX_TABLE_NAME_LEN);
+            tbl.fks[i].refTable = readFixedString(in, firstInt == SCHEMA_LONG_RELATION_FORMAT_VERSION
+                ? relation_name_codec::storageWidth : MAX_TABLE_NAME_LEN);
+            if (!in || !validStoredRelationName(tbl.fks[i].refTable)) return {};
             tbl.fks[i].onDelete = readFixedString(in, 10);
             tbl.fks[i].onUpdate = readFixedString(in, 10);
         }
@@ -15854,7 +16089,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     if (!in) return {};
     if (in.peek() == std::char_traits<char>::eof()) {
         if (!in.eof()) return {};
-        if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION || firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION || firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION || firstInt == SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION) return {};
+        if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION || firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION || firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION || firstInt == SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION || firstInt == SCHEMA_LONG_RELATION_FORMAT_VERSION) return {};
         in.clear();
         return tbl;
     }
@@ -15900,7 +16135,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     // them as SERIAL-like auto-increment columns (identityKind == 0).
     if (in.peek() == std::char_traits<char>::eof()) {
         if (!in.eof()) return {};
-        if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION || firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION || firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION || firstInt == SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION) return {};
+        if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION || firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION || firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION || firstInt == SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION || firstInt == SCHEMA_LONG_RELATION_FORMAT_VERSION) return {};
         in.clear();
         return tbl;
     }
@@ -15921,7 +16156,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     }
     if (in.peek() == std::char_traits<char>::eof()) {
         if (!in.eof()) return {};
-        if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION || firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION || firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION || firstInt == SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION) return {};
+        if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION || firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION || firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION || firstInt == SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION || firstInt == SCHEMA_LONG_RELATION_FORMAT_VERSION) return {};
         in.clear();
         return tbl;
     }
@@ -15949,7 +16184,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     }
     if (in.peek() == std::char_traits<char>::eof()) {
         if (!in.eof()) return {};
-        if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION || firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION || firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION || firstInt == SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION) return {};
+        if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION || firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION || firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION || firstInt == SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION || firstInt == SCHEMA_LONG_RELATION_FORMAT_VERSION) return {};
         // A zero-entry DFT1 block is emitted only with the new RANGE-bound
         // extension; an EOF here therefore means a truncated new schema.
         if (defaultCount == 0 && !tbl.rangePartitions.empty()) return {};
@@ -15987,7 +16222,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
         }
         persistedLowerBounds.push_back(std::move(lower));
     }
-    if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION || firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION || firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION || firstInt == SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION) {
+    if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION || firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION || firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION || firstInt == SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION || firstInt == SCHEMA_LONG_RELATION_FORMAT_VERSION) {
         uint32_t physicalIdMagic = 0;
         in.read(reinterpret_cast<char*>(&physicalIdMagic), sizeof(physicalIdMagic));
         in.read(reinterpret_cast<char*>(&tbl.physicalRelationId), sizeof(tbl.physicalRelationId));
@@ -15995,7 +16230,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
             (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION && tbl.physicalRelationId == 0))
             return {};
     }
-    if (firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION || firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION || firstInt == SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION) {
+    if (firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION || firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION || firstInt == SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION || firstInt == SCHEMA_LONG_RELATION_FORMAT_VERSION) {
         uint32_t magic = 0; uint16_t count = 0;
         in.read(reinterpret_cast<char*>(&magic),sizeof(magic));
         in.read(reinterpret_cast<char*>(&count),sizeof(count));
@@ -16017,7 +16252,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
             }
         }
     }
-    if (firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION || firstInt == SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION) {
+    if (firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION || firstInt == SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION || firstInt == SCHEMA_LONG_RELATION_FORMAT_VERSION) {
         uint32_t magic = 0; uint16_t count = 0;
         in.read(reinterpret_cast<char*>(&magic), sizeof(magic));
         in.read(reinterpret_cast<char*>(&count), sizeof(count));
@@ -16035,7 +16270,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
             }
         }
     }
-    if (firstInt == SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION) {
+    if (firstInt == SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION || firstInt == SCHEMA_LONG_RELATION_FORMAT_VERSION) {
         uint32_t magic = 0; uint16_t count = 0;
         in.read(reinterpret_cast<char*>(&magic), sizeof(magic));
         in.read(reinterpret_cast<char*>(&count), sizeof(count));
@@ -16050,7 +16285,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
             hasTemporalCodec = hasTemporalCodec ||
                 tbl.cols[i].storageCodec != Column::StorageCodec::Legacy;
         }
-        if (!hasTemporalCodec) return {};
+        if (!hasTemporalCodec && firstInt != SCHEMA_LONG_RELATION_FORMAT_VERSION) return {};
     }
     if (in.peek() != std::char_traits<char>::eof() || !in.eof()) return {};
     tbl.rangePartitionLowerBounds = std::move(persistedLowerBounds);
@@ -17377,9 +17612,7 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
         }
 
         if (tableListMutationAttempted) {
-            if (!writeFixedStringRecordsAtomically(
-                    tableListPath(dbname), priorTableNames,
-                    MAX_TABLE_NAME_LEN)) {
+            if (!writeRelationListAtomically(tableListPath(dbname), priorTableNames)) {
                 std::cerr << "[catalog] failed to restore table list after "
                           << "CREATE TABLE rollback: " << dbname << std::endl;
             }
@@ -17489,9 +17722,7 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
                   tbl.tablename) == updatedTableNames.end()) {
         updatedTableNames.push_back(tbl.tablename);
     }
-    if (!writeFixedStringRecordsAtomically(
-            tableListPath(dbname), updatedTableNames,
-            MAX_TABLE_NAME_LEN)) {
+    if (!writeRelationListAtomically(tableListPath(dbname), updatedTableNames)) {
         invalidateCatalogTableList(dbname);
         return failCreate("could not update table list");
     }
@@ -17986,8 +18217,7 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
     auto names = getTableNames(dbname);
     names.erase(std::remove(names.begin(), names.end(), tablename),
                 names.end());
-    const bool tableListPersisted = writeFixedStringRecordsAtomically(
-        tableListPath(dbname), names, MAX_TABLE_NAME_LEN);
+    const bool tableListPersisted = writeRelationListAtomically(tableListPath(dbname), names);
     if (!tableListPersisted) {
         std::cerr << "[catalog] DROP TABLE removed relation files but could "
                   << "not durably publish tlist.lst: " << dbname << "/"
@@ -19333,7 +19563,7 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
                                                const std::string& oldName,
                                                const std::string& newName) {
     if (!tableExists(dbname, oldName)) return DBStatus::TABLE_NOT_FOUND;
-    if (!validStoredIdentifier(newName, MAX_TABLE_NAME_LEN)) return DBStatus::INVALID_VALUE;
+    if (!validStoredRelationName(newName)) return DBStatus::INVALID_VALUE;
     if (tableExists(dbname, newName)) return DBStatus::TABLE_ALREADY_EXISTS;
     std::string conflictingRelationName;
     const auto relationDirectory = relationDir(dbname, oldName).lexically_normal();
@@ -19811,8 +20041,7 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
         foundOldName = true;
     }
     if (!foundOldName) names.push_back(newName);
-    const bool tableListPersisted = writeFixedStringRecordsAtomically(
-        tableListPath(dbname), names, MAX_TABLE_NAME_LEN);
+    const bool tableListPersisted = writeRelationListAtomically(tableListPath(dbname), names);
     if (!tableListPersisted) {
         std::cerr << "[catalog] ALTER TABLE RENAME changed relation files but "
                   << "could not durably publish tlist.lst: " << dbname << "/"
@@ -20884,7 +21113,7 @@ DBStatus StorageEngine::alterTableAddFKConstraint(const std::string& dbname,
         return DBStatus::INVALID_VALUE;
     }
     if (!validStoredIdentifier(name, MAX_TABLE_NAME_LEN) ||
-        !validStoredIdentifier(refTable, MAX_TABLE_NAME_LEN)) return DBStatus::INVALID_VALUE;
+        !validStoredRelationName(refTable)) return DBStatus::INVALID_VALUE;
     if (localCols.empty() ||
         (!refCols.empty() && localCols.size() != refCols.size()) ||
         localCols.size() > MAX_COLUMNS) {
@@ -21851,13 +22080,17 @@ std::vector<std::string> StorageEngine::getTableNames(const std::string& dbname)
         }
     }
 
-    std::vector<std::string> names;
     std::ifstream in(tableListPath(dbname), std::ios::binary);
-    if (!in) return names;
-    while (in) {
-        std::string name = readFixedString(in, MAX_TABLE_NAME_LEN);
-        if (!name.empty()) names.push_back(name);
-    }
+    if (!in) return {};
+    std::error_code listError;
+    const auto listSize = std::filesystem::file_size(tableListPath(dbname), listError);
+    if (listError || listSize > relation_name_codec::maxListBytes)
+        throw DbError("XX001", "invalid relation list size");
+    const std::string bytes{std::istreambuf_iterator<char>(in),
+                            std::istreambuf_iterator<char>()};
+    const auto decoded = relation_name_codec::decode(bytes);
+    if (in.bad() || !decoded) throw DbError("XX001", "invalid relation list");
+    auto names = *decoded;
 
     {
         std::lock_guard<std::mutex> lock(catalogSnapshotMutex_);
@@ -21891,9 +22124,7 @@ bool StorageEngine::cleanupStaleSessionTemporaryFiles() {
                     retainedNames.push_back(name);
                 }
             }
-            if (!writeFixedStringRecordsAtomically(
-                    tableListPath(dbname), retainedNames,
-                    MAX_TABLE_NAME_LEN)) {
+            if (!writeRelationListAtomically(tableListPath(dbname), retainedNames)) {
                 std::cerr << "[catalog] startup could not durably clean "
                           << "temporary table names from " << dbname
                           << std::endl;
@@ -23305,7 +23536,7 @@ TableSchema StorageEngine::getTableSchema(const std::string& dbname,
     if (status != DBStatus::OK)
         throw DbError(sqlstateForDBStatus(status), "could not acquire database transaction ownership");
     if (dbname.empty() || !validStoredIdentifier(dbname, MAX_TABLE_NAME_LEN) ||
-        tablename.empty() || !validStoredIdentifier(tablename, MAX_TABLE_NAME_LEN)) {
+        tablename.empty() || !validStoredRelationName(tablename)) {
         return {};
     }
     const auto withDomainIdentity = [&](TableSchema schema) {
@@ -26180,9 +26411,33 @@ DBStatus StorageEngine::insertInternal(
             std::map<std::string, std::string> referencedKeyValues;
             referencedKeyValues[fk.refCols.front()] =
                 actualValues.at(fk.colNames.front());
-            int64_t dummy = -1;
-            if (!refIdx->search(
-                    refTbl.buildPKValue(referencedKeyValues), dummy)) {
+            int64_t referencedRid = -1;
+            const auto lookup = refIdx->searchChecked(
+                refTbl.buildPKValue(referencedKeyValues), referencedRid);
+            if (lookup == BPTree::SearchResult::Error) {
+                lockManager_.unlock(tablename);
+                return DBStatus::IO_ERROR;
+            }
+            if (lookup == BPTree::SearchResult::NotFound) {
+                lockManager_.unlock(tablename);
+                return DBStatus::FOREIGN_KEY_VIOLATION;
+            }
+            // A physical B+Tree key is a 20-byte prefix, not proof of SQL
+            // equality. Recheck the visible heap datum before accepting an FK.
+            std::string referencedRow;
+            bool readFailed = false;
+            const auto& context = transactionContext();
+            const ReadView* view = context.inTransaction && context.txnDB == dbname
+                ? &context.readView : nullptr;
+            if (!readIndexedRowByRid(dbname, fk.refTable, referencedRid,
+                    referencedRow, refTbl, view, &readFailed)) {
+                lockManager_.unlock(tablename);
+                return readFailed ? DBStatus::IO_ERROR : DBStatus::FOREIGN_KEY_VIOLATION;
+            }
+            const size_t referencedColumn = referencedColumns.front();
+            if (!foreignKeyColumnValuesEqual(refTbl.cols[referencedColumn],
+                    extractColumnValue(referencedRow, refTbl, referencedColumn, dbname),
+                    actualValues.at(fk.colNames.front()))) {
                 lockManager_.unlock(tablename);
                 return DBStatus::FOREIGN_KEY_VIOLATION;
             }
@@ -32514,7 +32769,7 @@ std::vector<std::string> StorageEngine::query(
             if (!rows.empty()) return rows;
         }
         if (dbname.empty() || !validStoredIdentifier(dbname, MAX_TABLE_NAME_LEN) ||
-            tablename.empty() || !validStoredIdentifier(tablename, MAX_TABLE_NAME_LEN)) {
+            tablename.empty() || !validStoredRelationName(tablename)) {
             return result;
         }
     }
@@ -34087,10 +34342,19 @@ PlPgsqlQueryResult StorageEngine::plpgsqlQueryPrepared(const std::string& dbname
             command != SqlCommand::Insert && command != SqlCommand::Update && command != SqlCommand::Delete &&
             command != SqlCommand::Explain && command != SqlCommand::CreateTable)
             return plpgsqlQuery(dbname, sql, options);
-        const auto prepared = prepareBoundQuery(dbname, sql, bindings);
+        auto prepared = std::make_shared<PreparedQuery>(prepareBoundQuery(dbname, sql, bindings));
         // No catalog/cache mutex is retained while SQL or a called routine
         // executes. A nested DDL command can upgrade the transaction fence.
-        return plpgsqlQuery(dbname, prepared.legacySql(), options);
+        if (command == SqlCommand::Select || command == SqlCommand::Values) {
+            // Both procedural expressions and SELECT INTO need the actual
+            // prepared owner, typed cells and child identities. Re-rendering
+            // and reparsing would discard correlation and subquery metadata.
+            auto execution = options;
+            execution.preparedQuery = prepared;
+            execution.preparedStatement = prepared->ast.get();
+            return plpgsqlQuery(dbname, sql, execution);
+        }
+        return plpgsqlQuery(dbname, prepared->legacySql(), options);
     } catch (const DbError& error) {
         PlPgsqlQueryResult result; result.sqlState = error.sqlState(); result.message = error.message(); return result;
     }
@@ -34182,7 +34446,6 @@ static PlPgsqlQueryResult plpgsqlEvalBoundExpression(
         };
         evaluator.registerFunction("current_user", userValue, 's');
         evaluator.registerFunction("session_user", userValue, 's');
-        size_t functionPosition = 0;
         std::vector<std::pair<FunctionCallExpr*,std::string>> functionNames;
         std::function<void(Expr*)> bind;
         bind = [&](Expr* node) {
@@ -34265,45 +34528,18 @@ static PlPgsqlQueryResult plpgsqlEvalBoundExpression(
                 const bool builtin = name == SQLParser::toLower(name) &&
                     (schemaName.empty() || schemaName == "pg_catalog") &&
                     (evaluator.hasFunction(name) || syntaxFunctions.count(name));
-                std::string evaluatorName = name;
-                bool stored = false;
-                if (!builtin && sqlFunctionEngine &&
-                    (schemaName.empty() || schemaName == "public")) {
-                    const auto nested = sqlFunctionEngine->getUDF(dbname, name);
-                    if (!nested.expression.empty()) {
-                        if (!function->namedArgs.empty())
-                            throw DbError("0A000", "named SQL-function arguments are not supported");
-                        // ExprEvaluator folds registry names. Canonical
-                        // quoted Foo/foo and schema-bound calls must never
-                        // share such a key; bind each actual AST call to a
-                        // private slot without invoking it during preparation.
-                        evaluatorName = "__dbms_sql_function_" + std::to_string(functionPosition++);
-                        evaluator.registerFunction(evaluatorName,
-                            [sqlFunctionEngine, dbname, name, nested](const std::vector<ExprValue>& arguments) {
-                            std::vector<std::string> values;
-                            std::vector<bool> nulls;
-                            for (const auto& argument : arguments) {
-                                values.push_back(argument.value);
-                                nulls.push_back(argument.isNull);
-                            }
-                            std::string value;
-                            bool isNull = false;
-                            if (!sqlFunctionEngine->callUDF(dbname, name, values, value, &isNull, &nulls))
-                                throw DbError("22023", "nested SQL-function evaluation failed: " + name);
-                            return ExprValue(ExprHelper::canonicalResultTypeName(nested.returnType),
-                                             value, isNull);
-                        }, nested.provolatile);
-                        stored = true;
-                    }
+                if(!builtin) {
+                    // Reuse the real typed scalar binder after its argument
+                    // variables are transformed. A name-only private callback
+                    // cannot select or retain one of several input signatures.
+                    for(auto& argument:function->args)bind(argument.get());
+                    for(auto& argument:function->namedArgs)bind(argument.value.get());
+                    evaluator.bindScalarFunctions(function,sqlFunctionEngine);
+                    if(!evaluator.hasScalarFunction(function,sqlFunctionEngine))
+                        throw DbError("42883","function does not exist: "+function->funcName);
+                    return;
                 }
-                if (!builtin && !stored) {
-                    // Preserve typed preparation diagnostics (for example
-                    // SUM/AVG's unknown-literal overload ambiguity), rather
-                    // than relabeling every unresolved callback as 42883.
-                    evaluator.hasScalarFunction(function, sqlFunctionEngine);
-                    throw DbError("42883", "function does not exist: " + function->funcName);
-                }
-                functionNames.emplace_back(function,evaluatorName);
+                functionNames.emplace_back(function,name);
                 // SQL EXTRACT's field is syntax, not a procedural variable.
                 // The shared parser represents it as the first argument.
                 if (name == "extract" && !function->args.empty()) {
@@ -34546,7 +34782,11 @@ static bool evalUDFBody(const StorageEngine::UDFInfo& udf,
         };
         std::string rv, err, sqlState, plpgsqlReturnType;
         bool plpgsqlIsNull = false;
-        if (!PlPgsql::run(udf.expression, params, host, rv, err, nullptr,
+        const auto notice = [](const std::string& level, const std::string& message) {
+            if (level == "notice") emitNotice(message);
+            else if (level == "warning") emitWarning(message);
+        };
+        if (!PlPgsql::run(udf.expression, params, host, rv, err, notice,
                           &plpgsqlIsNull, &nullParams, &sqlState, &plpgsqlReturnType)) {
             if (!sqlState.empty()) throw DbError(sqlState, err);
             return false;
@@ -34958,6 +35198,43 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         return characters + 1;
     };
 
+    if (expr.funcName == "abs" && expr.funcArgs.size() == 1) {
+        std::map<std::string, std::string> types;
+        for (size_t i = 0; i < tbl.len; ++i)
+            types[tbl.cols[i].dataName] = tbl.cols[i].dataType +
+                (tbl.cols[i].isArray ? "[]" : "");
+        // This is a declaration probe, never a value/effect probe. Keep
+        // REAL, NUMERIC and unbound legacy inputs on their existing paths.
+        SQLParser parser;
+        const auto parsed = parser.parse("SELECT " + expr.funcArgs.front());
+        const auto* select = parsed.success
+            ? dynamic_cast<const SelectStmt*>(parsed.stmt.get()) : nullptr;
+        if (select && select->selectList.size() == 1 &&
+            ExprHelper::canonicalResultTypeName(ExprHelper::inferParsedResultType(
+                select->selectList.front().expr.get(), types, dbname, engine)) == "double precision") {
+            std::map<std::string, std::string> values;
+            std::set<std::string> nulls;
+            for (size_t i = 0; i < tbl.len; ++i) {
+                bool isNull = false;
+                const auto value = engine && !dbname.empty()
+                    ? engine->extractColumnValue(rowBuffer, tbl, i, dbname, true, &isNull)
+                    : StorageEngine::extractColumnValueStatic(rowBuffer, tbl, i);
+                values[tbl.cols[i].dataName] = value;
+                if (isNull || (!engine && value.empty())) nulls.insert(tbl.cols[i].dataName);
+            }
+            // The existing typed callback owns FLOAT8 ABS and its output.
+            // Handle this call before the legacy strictness pre-read below:
+            // typed ABS already owns NULL and evaluates its argument once.
+            const auto result = ExprHelper::evalStringWithNulls(
+                "abs(" + expr.funcArgs.front() + ")", values, nulls, types,
+                dbname, expr.sessionUser, engine);
+            if (!result.ok) {
+                const auto error = plpgsqlScalarResult(result);
+                throw DbError(error.sqlState, error.message);
+            }
+            return publishScalarResult(result);
+        }
+    }
     // PG strict functions return NULL when any argument is NULL.  Column
     // arguments read as empty for physically-NULL values, so consult the
     // stored null bit before dispatching to the per-function bodies.
@@ -42782,6 +43059,11 @@ WALManager* StorageEngine::getWAL(const std::string& dbname) const {
     return ptr;
 }
 
+const CatalogService& StorageEngine::catalogService() const {
+    if (!catalogService_) throw DbError("55000", "catalog service is not initialized");
+    return *catalogService_;
+}
+
 CatalogService& StorageEngine::catalogService() {
     const auto status = ensureDatabaseTransactionOwnership();
     if (status != DBStatus::OK)
@@ -43002,7 +43284,7 @@ Lsn StorageEngine::walSmgrTruncate(const std::string& dbname,
                                    const std::string& tablename) {
     WALManager* wal = getWAL(dbname);
     if (!wal || tablename.empty() ||
-        tablename.size() >= MAX_TABLE_NAME_LEN) {
+        !validStoredRelationName(tablename)) {
         return INVALID_LSN;
     }
     const uint32_t length = static_cast<uint32_t>(tablename.size());
@@ -44473,7 +44755,7 @@ bool StorageEngine::recoverAllDatabases() {
                  record->info() == XLOG_SMGR_RELATION_RETIRE_COMPLETE)) {
                 heap_wal_identity::Event event;
                 if (!heap_wal_identity::event(*record, event) ||
-                    !validStoredIdentifier(event.name, MAX_TABLE_NAME_LEN) ||
+                    !validStoredRelationName(event.name) ||
                     event.relationId == std::numeric_limits<uint64_t>::max()) {
                     std::cerr << "[recovery] invalid relation identity event in "
                               << dbname << " at LSN " << historyLsn << '\n';
@@ -51223,7 +51505,7 @@ static bool readPreparedRecord(const std::filesystem::path& path,
                     entry.tableName = storedTable;
                 }
                 if (entry.tableName.empty() ||
-                    !validStoredIdentifier(entry.tableName, MAX_TABLE_NAME_LEN)) {
+                    !validStoredRelationName(entry.tableName)) {
                     return false;
                 }
                 const std::string rowRid = line.substr(pos, ridEnd - pos);
@@ -51284,7 +51566,7 @@ static bool readPreparedRecord(const std::filesystem::path& path,
                 }
                 if (!preparedHexDecode(encodedTable, change.table) ||
                     change.table.empty() ||
-                    !validStoredIdentifier(change.table, MAX_TABLE_NAME_LEN) ||
+                    !validStoredRelationName(change.table) ||
                     !preparedHexDecode(encodedOldRow, change.oldRow) ||
                     !preparedHexDecode(encodedNewRow, change.newRow)) {
                     return false;
@@ -51501,7 +51783,7 @@ DBStatus StorageEngine::prepareTransaction(const std::string& xid) {
         else if (change.op == 2) op = "DELETE";
         else if (change.op == 3) op = "TRUNCATE";
         if (!op || change.table.empty() ||
-            !validStoredIdentifier(change.table, MAX_TABLE_NAME_LEN)) {
+            !validStoredRelationName(change.table)) {
             return DBStatus::CORRUPTED_DATA;
         }
         prepared << "LOGICAL " << op << " "

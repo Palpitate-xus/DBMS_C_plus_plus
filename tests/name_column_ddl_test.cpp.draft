@@ -1,0 +1,96 @@
+#include "Session.h"
+#include "catalog/type_registry.h"
+#include "commands/DdlExecutor.h"
+#include "commands/TableManage.h"
+#include "common/DbError.h"
+#include "executor/ExecutionPlan.h"
+#include "expression/expr_helper.h"
+#include <functional>
+#include <iostream>
+#include <sstream>
+#include <stdexcept>
+
+extern dbms::StorageEngine g_engine;
+namespace {
+void require(bool value,const std::string& message) { if(!value)throw std::runtime_error(message); }
+}
+int main() {
+    using namespace dbms;
+    TypeRegistry::instance().bootstrap();
+    size_t controls=0,failures=0;
+    const auto check=[&](const std::string& label,const std::function<void()>& action) {
+        ++controls;
+        try { action(); } catch(const std::exception& error) {
+            ++failures;std::cerr<<"NAME_COLUMN_DDL_NATIVE_FAIL "<<label<<" : "<<error.what()<<'\n';
+        }
+    };
+    const std::string database="name_column_owned";
+    Session session;session.username="testuser";session.permission=1;session.currentDB=database;session.searchPath="public";
+    auto* previous=currentSession();setCurrentSession(&session);
+    struct Restore {Session* previous;~Restore(){setCurrentSession(previous);}} restore{previous};
+    DdlExecutor ddl;
+    const auto success=[&](const std::string& sql) { require(!ddl.executeSql(sql,session),sql); };
+    const auto rejected=[&](const std::string& sql) {
+        // The native DDL API owns a rejection Boolean; its stdout is not a
+        // structured protocol SQLSTATE contract. The complete wire fixture
+        // separately checks the exact PostgreSQL SQLSTATE.
+        std::ostringstream output;
+        auto* saved=std::cout.rdbuf(output.rdbuf());
+        bool failed=false;
+        try { failed=ddl.executeSql(sql,session); }
+        catch(const DbError&) { failed=true; }
+        catch(...) { std::cout.rdbuf(saved);throw; }
+        std::cout.rdbuf(saved);
+        require(failed,"invalid declaration accepted: "+sql);
+    };
+    check("owned database",[&]{require(g_engine.createDatabase(database)==DBStatus::OK,"database creation");});
+    const std::vector<std::string> spellings={"name","NAME","\"name\"","pg_catalog.name","\"pg_catalog\".\"name\"","pg_catalog.\"name\"","pg_catalog.NAME"};
+    for(size_t index=0;index<spellings.size();++index) {
+        const auto table="name_case_"+std::to_string(index);
+        const auto& type=spellings[index];
+        check(type+" CREATE",[&]{success("CREATE TABLE "+table+"(i integer PRIMARY KEY,n "+type+" NOT NULL DEFAULT 'seed'::name CHECK(n <> 'bad'::name),a "+type+"[])");});
+        check(type+" persisted attributes",[&]{
+            const auto schema=g_engine.getTableSchema(database,table);
+            require(schema.len==3,"wrong column count");
+            const auto& n=schema.cols[1];const auto& a=schema.cols[2];
+            require(n.dataName=="n" && n.dataType=="name" && n.dsize==64 && !n.isArray && !n.isVariableLength && !n.isNull && n.typeMod==-1,"wrong scalar NAME layout/nullability");
+            require(!n.defaultValue.empty() && n.defaultOrigin==Column::DefaultOrigin::Column && !n.checkExpr.empty(),"default/check lost");
+            require(a.dataName=="a" && a.dataType=="name" && a.isArray && a.isVariableLength && a.isNull && a.typeMod==-1,"wrong NAME array layout");
+        });
+        check(type+" default insert",[&]{require(g_engine.insertRow(database,table,{{"i","1"}})==DBStatus::OK,"default insert failed");});
+        check(type+" default value",[&]{require(g_engine.query(database,table,{"=i 1"},{"n"},{})==std::vector<std::string>{"seed "},"wrong persisted default");});
+        check(type+" explicit NAME/array insert",[&]{require(g_engine.insertRow(database,table,{{"i","2"},{"n","NULL"},{"a","{\"\",\"NULL\",NULL,\"界\"}"}})==DBStatus::OK,"literal NULL/NAME array insert failed");});
+        check(type+" actual typed rows",[&]{
+            auto query=std::make_shared<PreparedQuery>(g_engine.prepareBoundQuery(database,"SELECT n,a FROM "+table+" WHERE i=2"));
+            require(query->output.size()==2 && query->output[0].typeOid==19 && query->output[1].typeOid==1003,"actual persisted OIDs differ");
+            const auto result=QueryPlanner::executePlanChecked(QueryPlanner::buildPreparedQueryPlan(&g_engine,database,query,query->ast.get()));
+            result.throwIfFailed();
+            require(result.structuredRowsAvailable && result.structuredRows.size()==1 && result.structuredRows[0].size()==2 && result.structuredRows[0][0]=="NULL" && result.structuredNulls==std::vector<std::vector<bool>>{{false,false}},"literal NULL turned into SQL NULL or rows lost");
+        });
+        check(type+" CHECK rejection",[&]{require(g_engine.tableExists(database,table),"missing CHECK target");require(g_engine.insertRow(database,table,{{"i","3"},{"n","bad"}})!=DBStatus::OK,"CHECK ignored");});
+        check(type+" NOT NULL rejection",[&]{require(g_engine.tableExists(database,table),"missing NOT NULL target");require(g_engine.insertRow(database,table,{{"i","4"},{"n",std::nullopt}})!=DBStatus::OK,"NOT NULL ignored");});
+        check(type+" rejected writes leave no rows",[&]{require(g_engine.tableExists(database,table),"missing mutation target");require(g_engine.query(database,table,{"=i 3"},{"i"},{}).empty() && g_engine.query(database,table,{"=i 4"},{"i"},{}).empty(),"rejected write persisted");});
+    }
+    for(const auto& type:spellings) for(const std::string modifiers:{"1","0","-1","'x'","a","1,2"}) for(bool array:{false,true})
+        check(type+" invalid modifier "+modifiers+(array?"[]":""),[&]{rejected("CREATE TABLE rejected_name(n "+type+"("+modifiers+")"+(array?"[]":"")+")");require(!g_engine.tableExists(database,"rejected_name"),"invalid declaration left a table");});
+    for(const std::string type:{"\"NAME\"","pg_catalog.\"NAME\"","\"PG_CATALOG\".name","r214_absent.name","\"Name\""})
+        check(type+" invalid identity",[&]{rejected("CREATE TABLE rejected_identity(n "+type+")");require(!g_engine.tableExists(database,"rejected_identity"),"wrong identity created a table");});
+    check("shadow namespace",[&]{success("CREATE SCHEMA r214_shadow");});
+    check("shadow domain",[&]{success("CREATE DOMAIN r214_shadow.name AS integer CHECK(VALUE > 0)");});
+    session.searchPath="r214_shadow, pg_catalog, public";
+    check("actual user domain selection",[&]{success("CREATE TABLE public.domain_choice(v name)");});
+    check("user domain attributes",[&]{const auto schema=g_engine.getTableSchema(database,"domain_choice");require(schema.len==1 && !schema.cols[0].domainName.empty() && ExprHelper::canonicalResultTypeName(schema.cols[0].dataType)=="integer","domain replaced by builtin NAME");});
+    check("user domain write",[&]{require(g_engine.insertRow(database,"domain_choice",{{"v","7"}})==DBStatus::OK,"domain write failed");});
+    check("user domain CHECK",[&]{require(g_engine.insertRow(database,"domain_choice",{{"v","-1"}})!=DBStatus::OK,"domain CHECK ignored");});
+    check("explicit builtin selection",[&]{success("CREATE TABLE public.builtin_qualified(v pg_catalog.name)");});
+    check("explicit builtin attributes",[&]{const auto schema=g_engine.getTableSchema(database,"builtin_qualified");require(schema.len==1 && schema.cols[0].dataType=="name" && schema.cols[0].domainName.empty() && schema.cols[0].dsize==64,"explicit builtin captured a user domain");});
+    session.searchPath="pg_catalog, r214_shadow, public";
+    check("builtin first selection",[&]{success("CREATE TABLE public.builtin_first(v name)");});
+    check("builtin first attributes",[&]{const auto schema=g_engine.getTableSchema(database,"builtin_first");require(schema.len==1 && schema.cols[0].dataType=="name" && schema.cols[0].domainName.empty() && schema.cols[0].dsize==64,"builtin precedence ignored");});
+    session.searchPath="r214_shadow, pg_catalog, public";
+    check("quoted user domain selection",[&]{success("CREATE TABLE public.quoted_domain(v \"name\")");});
+    check("quoted domain attributes",[&]{const auto schema=g_engine.getTableSchema(database,"quoted_domain");require(schema.len==1 && !schema.cols[0].domainName.empty() && ExprHelper::canonicalResultTypeName(schema.cols[0].dataType)=="integer","quoted user type captured by builtin");});
+    if(controls!=165){++failures;std::cerr<<"NAME_COLUMN_DDL_NATIVE_INVENTORY "<<controls<<'\n';}
+    std::cout<<"NAME_COLUMN_DDL_NATIVE_COMPLETE "<<controls<<" FAILURES "<<failures<<'\n';
+    return failures?1:0;
+}

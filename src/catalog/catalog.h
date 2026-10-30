@@ -177,6 +177,7 @@ public:
     // pg_proc
     // =====================================================================
     Oid createProc(const PgProcRow& row);
+    bool updateProc(const PgProcRow& row);
     const PgProcRow* findProc(Oid oid) const;
     std::vector<const PgProcRow*> findProcsByName(const std::string& name, Oid nspOid) const;
     std::optional<PgProcRow> getProc(Oid oid) const;

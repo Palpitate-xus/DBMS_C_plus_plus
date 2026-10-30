@@ -115,6 +115,8 @@ def main(include_open_namespace=False):
                 print('BINDING_QUALIFIED_EXTRACT_PRE_EFFECT', 'PASS' if passed else 'FAIL', side, counter, following, flush=True)
                 if not passed: failures.append(('qualified_extract_pre_effect', side, counter, following))
         assert not failures, failures
+        from compat.plpgsql_scalar_queries import run as run_scalar_queries
+        run_scalar_queries(client, runner, server['sock'])
         print('[PLPGSQL QUERY BINDING PROTOCOL E2E] passed', len(cases), '+ two sequence pre-effect controls')
     finally:
         runner.stop_ours(server)

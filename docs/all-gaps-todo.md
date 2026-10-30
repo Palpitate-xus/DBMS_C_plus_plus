@@ -1,5 +1,13 @@
 # DBMS 全部 Gap TODO（历史记录）
 
+最新有限修复：[R185排序中断传播](issue-review-r185-sort-interrupt-propagation.md)统一执行器12处排序的取消/超时检查，
+保留原比较、类型、NULL/tie及求值规则。修正夹具后旧80控制完整40失败；两侧新80及各19完整入口均实际全0。
+每侧74对象16程序/127头核对，Root正常1CPP并链接/repeat零；Main为同源已验证donor重新链接，不冒fresh TU。
+原273全文已保存在[原子范围账](review-requirement-clauses.json)，仅3项拆为38条件、其余270未拆解含原15暂缓，未声称全审。
+work_mem/spill等仍未闭合；原22/166/70/15不变，登记1493/Root1505、606MD/Root609MD，原12入口/三文档保留。
+不是全1493/修复后完整72/TLS/sanitizer验收，总目标未完成；不push，不启用Actions。以下记录按当时输入解释。
+
+
 最新有限修复：[R184测试数据目录隔离](issue-review-r184-test-data-directory-isolation.md)使公共helper在子程序启动前选私有数据根，
 父环境/cwd不变。旧同一7控制完整4失败，候选及Root完整7通过；两侧各4native/3真实Main通过，调用者标记目录保持不变。
 只改脚本及既有测试，全部CPP/127头和匹配程序不变，不冒fresh编译或修复后新完整72；旧72另记。
@@ -257,7 +265,9 @@ DEFAULT仍普通开放；R137仍按用户要求暂缓，不改历史勾选。
 
 数组查找不能以解码后字符串是否相同判断元素相等；typed值、多态输入与同名
 用户重载的有限实现/验收见[R108](issue-review-r108-array-position-typed-equality.md)。
-ARRAY_POSITIONS和原TYPE-16/FUNC-01仍未完成，不据历史Wave勾选关闭。
+后续ARRAY_POSITIONS的实现与验收见[R109](issue-review-r109-array-positions.md)；
+原TYPE-16/FUNC-01仍未完成，数组binary/构造器规划等未修复边界保留，不据历史
+Wave勾选关闭。
 
 四个字符串长度函数的真实签名、字符/字节/位单位及用户重载范围见
 [R107](issue-review-r107-string-length-signatures.md)；旧Wave的函数存在性不等于

@@ -1,5 +1,13 @@
 # DBMS 使用手册
 
+最新有限修复：[R185排序中断传播](issue-review-r185-sort-interrupt-propagation.md)统一执行器12处排序的取消/超时检查，
+保留原比较、类型、NULL/tie及求值规则。修正夹具后旧80控制完整40失败；两侧新80及各19完整入口均实际全0。
+每侧74对象16程序/127头核对，Root正常1CPP并链接/repeat零；Main为同源已验证donor重新链接，不冒fresh TU。
+原273全文已保存在[原子范围账](review-requirement-clauses.json)，仅3项拆为38条件、其余270未拆解含原15暂缓，未声称全审。
+work_mem/spill等仍未闭合；原22/166/70/15不变，登记1493/Root1505、606MD/Root609MD，原12入口/三文档保留。
+不是全1493/修复后完整72/TLS/sanitizer验收，总目标未完成；不push，不启用Actions。以下记录按当时输入解释。
+
+
 最新有限修复：[R184测试数据目录隔离](issue-review-r184-test-data-directory-isolation.md)使公共helper在子程序启动前选私有数据根，
 父环境/cwd不变。旧同一7控制完整4失败，候选及Root完整7通过；两侧各4native/3真实Main通过，调用者标记目录保持不变。
 只改脚本及既有测试，全部CPP/127头和匹配程序不变，不冒fresh编译或修复后新完整72；旧72另记。
@@ -543,7 +551,12 @@ BC/完整大年份及所有日期函数输入不由此声明完成。上方各R1
 ABS/LENGTH/UPPER/LOWER也按实际callback拥有签名；C++ registerFunction同名替换
 不继承被替换函数的arity/参数转换/结果类型。未声明结果为UNKNOWN，显式AST
 结果提示保留，分析不执行callback；有限验证见[R134](issue-review-r134-core-native-callback-ownership.md)。
-`array_positions`和通用复合/域多态能力尚未完成。
+`array_positions(array,needle)`收集全部匹配下标，返回INTEGER[]；例如
+`array_positions('{1.00,2,1.0}'::numeric[],1::numeric)`得到`{1,3}`。无匹配/空
+输入为`{}`，SQL NULL数组输入仍为SQL NULL，不提供start参数。真实Bind、数据
+行与同名callee的验证范围见[R109](issue-review-r109-array-positions.md)。
+通用复合/域多态和完整binary I/O仍未完成，已确认的数组binary结果与ARRAY
+构造器规划问题也在该记录中列为独立待修复项。
 
 网络类型的格式、CAST源类型和协议验收范围见[R102输入检查](issue-review-r102-network-input-notation.md)
 与[R101 MAC检查](issue-review-r101-macaddr-input-and-widths.md)，不能据类型存在

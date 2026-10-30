@@ -1,5 +1,13 @@
 # 代码审查索引
 
+最新有限修复：[R185排序中断传播](issue-review-r185-sort-interrupt-propagation.md)统一执行器12处排序的取消/超时检查，
+保留原比较、类型、NULL/tie及求值规则。修正夹具后旧80控制完整40失败；两侧新80及各19完整入口均实际全0。
+每侧74对象16程序/127头核对，Root正常1CPP并链接/repeat零；Main为同源已验证donor重新链接，不冒fresh TU。
+原273全文已保存在[原子范围账](review-requirement-clauses.json)，仅3项拆为38条件、其余270未拆解含原15暂缓，未声称全审。
+work_mem/spill等仍未闭合；原22/166/70/15不变，登记1493/Root1505、606MD/Root609MD，原12入口/三文档保留。
+不是全1493/修复后完整72/TLS/sanitizer验收，总目标未完成；不push，不启用Actions。以下记录按当时输入解释。
+
+
 最新有限修复：[R184测试数据目录隔离](issue-review-r184-test-data-directory-isolation.md)使公共helper在子程序启动前选私有数据根，
 父环境/cwd不变。旧同一7控制完整4失败，候选及Root完整7通过；两侧各4native/3真实Main通过，调用者标记目录保持不变。
 只改脚本及既有测试，全部CPP/127头和匹配程序不变，不冒fresh编译或修复后新完整72；旧72另记。
@@ -563,6 +571,7 @@ TU重编或新1432全量。原8f完整三失败保留，F8F-03继续处理，R51
 | [R115 标量别名投影metadata](issue-review-r115-scalar-alias-projection-metadata.md) | 含数组表的星号展开与真实列身份 | 实际参考228零失败、固定旧13失败；只修规范类型拼写与typmod，有限回归/独立版本见记录，R114另项 |
 | [R110 数组二进制结果](issue-review-r110-array-binary-result.md) | 类型 OID、维度/下界与元素 codec | 实际参考110零失败、旧75失败；182低层控制、有限回归与独立版本见记录，不等同数组二进制输入或所有元素 codec 完成 |
 | [R112 无 typmod 具名数组输入](issue-review-r112-unconstrained-named-array-input.md) | BPCHAR/BIT 真实声明与 wire Bind | 实际180006参考57零失败、旧44失败；逐版修复、有限回归和版本范围见记录，不关闭原TYPE-16或原273 |
+| [R109 ARRAY_POSITIONS缺失](issue-review-r109-array-positions.md) | 用户要求跳过当前待提交项 | 候选源码/测试/记录保留、未提交，不计已修复；跳过前388/248与66有限完整入口全0的历史证据保留，不扩为接受版本或原273完成 |
 | [R108 ARRAY_POSITION元素相等](issue-review-r108-array-position-typed-equality.md) | `95be64fb`后对照与逐版修复 | 第五版354/258、原208/80/array库/654及32native/29协议/3真实Main共64完整入口均0；28补充JSONB及核心/最终fence0。旧258/158、320/183及各版失败保留，独立本地commit，不冒新全量 |
 | [R107 长度函数签名](issue-review-r107-string-length-signatures.md) | `25925345`后四名11条声明 | PG/Root654、607原生及24native/18协议/3真实Main均0；实际2/1/1增量normal/repeat、核心/最终独立核对0，单项本地commit。旧654/392、607/440和首两版失败保留，不冒新全量，R106暂缓 |
 | [R106 COALESCE显式CAST输入分析](issue-review-r106-coalesce-explicit-input-analysis.md) | `2556a3d8`后只读复查 | 用户2026-10-16明确跳过，未修复；四条观察及未注册612控制（参考零失败/旧168失败）保留，无生产改动，不扩R104证明或重开专项 |

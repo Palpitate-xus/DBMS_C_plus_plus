@@ -1,0 +1,95 @@
+#include "Session.h"
+#include "catalog/type_registry.h"
+#include "commands/DdlExecutor.h"
+#include "commands/TableManage.h"
+#include "expression/ExprEvaluator.h"
+#include "expression/expr_helper.h"
+#include "expression/function_namespace.h"
+#include "expression/prepared_query_execution.h"
+#include "parser/parser.h"
+#include <functional>
+#include <iostream>
+#include <stdexcept>
+
+extern dbms::StorageEngine g_engine;
+namespace {
+void require(bool good, const std::string& message) {
+    if (!good) throw std::runtime_error(message);
+}
+std::string quote(const std::string& value) {
+    std::string result="\"";
+    for(char c:value){result+=c;if(c=='"')result+=c;}
+    return result+'"';
+}
+}
+
+int main() {
+    using namespace dbms;
+    TypeRegistry::instance().bootstrap();
+    size_t controls=0,failures=0;
+    const auto check=[&](const std::string& label,const std::function<void()>& action) {
+        ++controls;
+        try{action();}catch(const std::exception& error){++failures;std::cerr<<"SEARCH_PATH_ROLE_NATIVE_FAIL "<<label<<" : "<<error.what()<<'\n';}
+    };
+    Session owner;owner.username="native_owner";owner.permission=1;
+    const std::string database="search_role_owned";owner.currentDB=database;
+    auto* previous=currentSession();
+    struct Restore{Session* value;~Restore(){setCurrentSession(value);}} restore{previous};
+    setCurrentSession(&owner);DdlExecutor ddl;
+    check("owned database",[&]{require(g_engine.createDatabase(database)==DBStatus::OK,"database setup");});
+    for(const std::string name:{"login_user","active_role","Role.Dot"})
+        check("owned namespace "+name,[&]{require(!ddl.executeSql("CREATE SCHEMA "+quote(name),owner),"namespace setup");});
+    const std::vector<std::pair<std::string,std::string>> definitions={
+        {"public","smallint"},{"login_user","text"},{"active_role","integer"},{"Role.Dot","bigint"}};
+    for(const auto& [name,type]:definitions) {
+        const auto schema=quote(name);
+        check("domain "+name,[&]{require(!ddl.executeSql("CREATE DOMAIN "+schema+".r210_domain AS "+type,owner),"domain setup");});
+        check("table "+name,[&]{require(!ddl.executeSql("CREATE TABLE "+schema+".r210_lookup(v "+type+")",owner),"table setup");});
+        const auto body=type=="text"?std::string("'login'::text"):std::string("1::")+type;
+        check("function "+name,[&]{require(!ddl.executeSql("CREATE FUNCTION "+schema+".r210_call() RETURNS "+type+" LANGUAGE SQL IMMUTABLE AS $$SELECT "+body+"$$",owner),"function setup");});
+    }
+    for(const std::string role:{"","active_role","Role.Dot","missing_role"}) {
+        Session session;session.username="login_user";session.currentRole=role;
+        session.permission=1;session.currentDB=database;session.searchPath="\"$user\", public";
+        setCurrentSession(&session);
+        const auto user=role.empty()?std::string("login_user"):role;
+        const auto schema=role=="missing_role"?std::string("public"):user;
+        const auto type=schema=="public"?std::string("smallint"):schema=="login_user"?std::string("text"):
+                        schema=="active_role"?std::string("integer"):std::string("bigint");
+        check("current user "+role,[&]{const auto value=ExprHelper::evalString("current_user",{},{},database,"",&g_engine);
+            require(value.ok && !value.isNull && value.typeName=="name" && value.value==user,"current-user identity mismatch");});
+        check("routine path "+role,[&]{const auto actual=functionNamespaceSearchPath(g_engine,database);
+            const auto expected=schema=="public"?std::vector<std::string>{"pg_catalog","public"}:
+                std::vector<std::string>{"pg_catalog",schema,"public"};require(actual==expected,"path used login instead of active role");});
+        for(const std::string expression:{"current_schema","current_schema()","pg_catalog.current_schema()"}) {
+            const auto valid=[&](const ExprValue& value){require(!value.isNull && value.typeName=="name" && value.value==schema,"wrong schema/name/NULL");};
+            for(bool bind:{false,true})check(expression+" "+role+(bind?" bound":" raw"),[&]{
+                auto parsed=SQLParser().parseForBinding("SELECT "+expression+" AS v");require(parsed.success,parsed.error);
+                auto* select=dynamic_cast<SelectStmt*>(parsed.stmt.get());require(select && select->selectList.size()==1,"target missing");
+                ExprEvaluator evaluator;evaluator.setCurrentDB(database);
+                if(bind)evaluator.bindScalarFunctions(select->selectList.front().expr.get(),&g_engine);
+                valid(evaluator.eval(select->selectList.front().expr.get(),{}));});
+            check(expression+" "+role+" helper",[&]{const auto value=ExprHelper::evalString(expression,{},{},database,"",&g_engine);
+                require(value.ok,value.error);valid(ExprValue(value.typeName,value.value,value.isNull));});
+            check(expression+" "+role+" prepared",[&]{auto query=std::make_shared<PreparedQuery>(g_engine.prepareBoundQuery(database,"SELECT "+expression+" AS v"));
+                require(query->output.size()==1 && query->output[0].type=="name" && query->output[0].typeOid==19,"wrong NAME metadata");
+                auto* select=static_cast<SelectStmt*>(query->ast.get());auto* target=select->selectList[0].expr.get();
+                PreparedQueryExecution execution(query,&g_engine,database);execution.planStatementConstants(select);execution.prepareExpression(target);
+                valid(execution.evaluate(target,execution.context()));});
+        }
+        check("declared domain "+role,[&]{require(ExprHelper::declaredTypeInput("r210_domain",database,&g_engine)==type,"wrong declared domain input");});
+        check("stored domain "+role,[&]{require(g_engine.resolveDomainAncestry(database,"r210_domain").baseType==type,"wrong stored domain ancestry");});
+        check("bound table "+role,[&]{const auto query=g_engine.prepareBoundQuery(database,"SELECT v FROM r210_lookup");
+            require(query.output.size()==1 && query.output[0].type==type,"wrong relation namespace/type");});
+        check("bound function "+role,[&]{const auto query=g_engine.prepareBoundQuery(database,"SELECT r210_call() AS v");
+            require(query.output.size()==1 && query.output[0].type==type,"wrong routine namespace/type");});
+        check("helper function "+role,[&]{require(ExprHelper::inferResultType("r210_call()",{},database,&g_engine)==type,"wrong routine helper result");});
+        check("copied role "+role,[&]{Session copy=session;copy.currentRole="active_role";setCurrentSession(&copy);
+            const auto value=ExprHelper::evalString("current_schema",{},{},database,"",&g_engine);
+            setCurrentSession(&session);require(value.ok && !value.isNull && value.value=="active_role","copied role was ignored");});
+    }
+    setCurrentSession(previous);
+    if(controls!=96){++failures;std::cerr<<"SEARCH_PATH_ROLE_NATIVE_INVENTORY "<<controls<<'\n';}
+    std::cout<<"SEARCH_PATH_ROLE_NATIVE_COMPLETE "<<controls<<" FAILURES "<<failures<<'\n';
+    return failures?1:0;
+}

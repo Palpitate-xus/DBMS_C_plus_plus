@@ -841,7 +841,8 @@ RoutineResultTypes collectRoutineResultTypes(
                         else routineTypes.opaqueIntegralCalls.insert(call);
                     } else if(CatalogManager::parseQualifiedName(call->funcName,name,true) && name.schema.empty() &&
                               (name.name=="char_length" || name.name=="character_length" ||
-                               name.name=="octet_length" || name.name=="bit_length" || name.name=="array_position") &&
+                               name.name=="octet_length" || name.name=="bit_length" ||
+                               name.name=="array_position" || name.name=="array_positions") &&
                               evaluator.scalarFunctionIdentity(call,functionEngine).rfind("native",0)==0) {
                         // An opaque replacement does not inherit INTEGER from
                         // the builtin name or execute to discover a result type.
@@ -2080,10 +2081,9 @@ std::pair<std::string,int> ExprHelper::projectionLabel(const Expr* expression,
     if(!expression)return {"",0};
     if(const auto* column=dynamic_cast<const ColumnRefExpr*>(expression))return {column->column,2};
     if(const auto* call=dynamic_cast<const FunctionCallExpr*>(expression)) {
-        if(call->schema.empty() && SQLParser::toLower(call->funcName)=="case_when") {
-            const auto label=call->args.size()%2?projectionLabel(call->args.back().get(),declaredType):std::make_pair(std::string(),0);
-            return label.second==2?label:std::make_pair(std::string("case"),1);
-        }
+        // SQL function identity is independent of its spelling or arity.
+        // Only the actual CaseExpr below owns CASE's ELSE-name rules; the
+        // legacy SelectExpr evaluator wrapper has its own display contract.
         CatalogManager::QualifiedName name;
         return CatalogManager::parseQualifiedName(call->funcName,name,true)
             ?std::make_pair(name.name,2):std::make_pair(std::string(),0);

@@ -82,7 +82,8 @@ inline WriteResult writeAtomicallyImpl(const std::filesystem::path& target,
         fd = ::open(tempName.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
     }
     if (fd < 0) return WriteResult::IO_ERROR;
-    const std::filesystem::path temp(tempName);
+    // tempName already owns the complete name. Do not allocate a path
+    // after creating the file, including on the error-cleanup paths.
 
     bool ok = true;
     size_t written = 0;
@@ -95,15 +96,13 @@ inline WriteResult writeAtomicallyImpl(const std::filesystem::path& target,
     if (::close(fd) != 0) ok = false;
 
     if (!ok) {
-        std::error_code ignored;
-        std::filesystem::remove(temp, ignored);
+        (void)::unlink(tempName.c_str());
         return WriteResult::IO_ERROR;
     }
     if (noReplace) {
-        if (::link(temp.c_str(), target.c_str()) != 0) {
+        if (::link(tempName.c_str(), target.c_str()) != 0) {
             const int publishError = errno;
-            std::error_code ignored;
-            std::filesystem::remove(temp, ignored);
+            (void)::unlink(tempName.c_str());
             return publishError == EEXIST ? WriteResult::ALREADY_EXISTS
                                           : WriteResult::IO_ERROR;
         }
@@ -113,13 +112,13 @@ inline WriteResult writeAtomicallyImpl(const std::filesystem::path& target,
         if (!syncDirectory(parent)) {
             struct stat tempStat {};
             struct stat targetStat {};
-            if (::lstat(temp.c_str(), &tempStat) == 0 &&
+            if (::lstat(tempName.c_str(), &tempStat) == 0 &&
                 ::lstat(target.c_str(), &targetStat) == 0 &&
                 tempStat.st_dev == targetStat.st_dev &&
                 tempStat.st_ino == targetStat.st_ino) {
                 (void)::unlink(target.c_str());
             }
-            (void)::unlink(temp.c_str());
+            (void)::unlink(tempName.c_str());
             (void)syncDirectory(parent);
             return WriteResult::IO_ERROR;
         }
@@ -127,10 +126,9 @@ inline WriteResult writeAtomicallyImpl(const std::filesystem::path& target,
         // hidden temporary alias must not turn a successful CREATE into an
         // error with a visible object left behind; a stale alias is harmless
         // and does not match any schema-marker name.
-        if (::unlink(temp.c_str()) == 0) (void)syncDirectory(parent);
-    } else if (::rename(temp.c_str(), target.c_str()) != 0) {
-        std::error_code ignored;
-        std::filesystem::remove(temp, ignored);
+        if (::unlink(tempName.c_str()) == 0) (void)syncDirectory(parent);
+    } else if (::rename(tempName.c_str(), target.c_str()) != 0) {
+        (void)::unlink(tempName.c_str());
         return WriteResult::IO_ERROR;
     }
 

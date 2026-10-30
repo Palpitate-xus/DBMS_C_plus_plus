@@ -80,6 +80,91 @@ exit "$task_child_status"
     assert not failures, failures
 
 
+def check_implementation_headers(common):
+    """Implementation includes participate in both cache signatures and mtimes."""
+    invocation = r'''
+set -eu
+source "$1"
+DBMS_SOURCE_DIR="$2"
+DBMS_MANIFEST="$2/cmake/dbms_sources.txt"
+DBMS_CXXFLAGS=(-std=c++17 -O2)
+DBMS_PRODUCTION_INCLUDES=(-Isrc)
+DBMS_TEST_INCLUDES=(-Itests)
+DBMS_LDFLAGS=()
+DBMS_TLS_SOURCE=src/network/TLSWrapper_stub.cpp
+DBMS_HAS_ZLIB=0
+DBMS_MANIFEST_SOURCES=(src/main.cpp)
+DBMS_MAIN_SOURCES=(src/main.cpp "$DBMS_TLS_SOURCE")
+case "$3" in
+    compile) dbms_main_compile_signature ;;
+    cache) dbms_cache_signature ;;
+    newest) dbms_newest_header ;;
+    needs) if dbms_main_needs_rebuild; then printf '1'; else printf '0'; fi ;;
+esac
+'''
+    checked, failures = 0, []
+    for extension in ("h", "hpp", "inc"):
+        with tempfile.TemporaryDirectory(prefix="dbms-implementation-input-") as temporary:
+            root = Path(temporary) / ("source " + extension)
+            files = {
+                "src/main.cpp": "int main() { return 0; }\n",
+                "src/network/TLSWrapper_stub.cpp": "// test fixture\n",
+                "src/base.h": "// unchanged\n",
+                "cmake/dbms_sources.txt": "src/main.cpp\n",
+                "scripts/build_common.sh": "// timestamp fixture; not executed\n",
+            }
+            for relative, contents in files.items():
+                target = root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(contents, encoding="utf-8")
+                os.utime(target, (100, 100))
+            os.utime(root / "src/base.h", (200, 200))
+            header = root / ("src/implementation." + extension)
+            header.write_text("// first revision\n", encoding="utf-8")
+            os.utime(header, (100, 100))
+            for relative in ("src/main.cpp", "src/network/TLSWrapper_stub.cpp"):
+                target = root / ("build/main_obj/" + relative + ".o")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text("object fixture\n", encoding="utf-8")
+            binary = root / "dbms_main"
+            binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            binary.chmod(0o700)
+            os.utime(binary, (300, 300))
+
+            def query(operation):
+                result = subprocess.run(
+                    ["bash", "-c", invocation, "implementation-input", str(common), str(root), operation],
+                    cwd=root, env=dict(PATH=os.environ.get("PATH", os.defpath), LC_ALL="C"),
+                    capture_output=True, text=True, check=True)
+                return result.stdout.strip()
+
+            compile_before, cache_before = query("compile"), query("cache")
+            stamp = root / "build/.dbms_main-build-config.sha256"
+            stamp.write_text(cache_before + "\n", encoding="utf-8")
+            assert query("needs") == "0"
+            header.write_text("// second revision, deliberately old mtime\n", encoding="utf-8")
+            os.utime(header, (100, 100))
+            compile_after, cache_after = query("compile"), query("cache")
+            conditions = [
+                ("main compile fingerprint", compile_before != compile_after),
+                ("production cache fingerprint", cache_before != cache_after),
+                ("old-mtime content rebuild", query("needs") == "1"),
+            ]
+            stamp.write_text(cache_after + "\n", encoding="utf-8")
+            os.utime(header, (400, 400))
+            conditions.extend([
+                ("newest implementation input", query("newest") == str(header)),
+                ("newer-input rebuild", query("needs") == "1"),
+            ])
+            for label, valid in conditions:
+                checked += 1
+                if not valid:
+                    failures.append(extension + ": " + label)
+    assert checked == 15
+    print("BUILD_IMPLEMENTATION_INPUT_COMPLETE", checked, "FAILURES", len(failures), flush=True)
+    assert not failures, failures
+
+
 def main():
     one = (REPO / "scripts" / "build_one_test.sh").read_text(encoding="utf-8")
     all_tests = (REPO / "scripts" / "build_tests.sh").read_text(encoding="utf-8")
@@ -112,6 +197,7 @@ def main():
             ["bash", "-n", str(REPO / "scripts" / script)], check=True)
 
     check_isolated_data_directory(REPO / "scripts" / "build_common.sh")
+    check_implementation_headers(REPO / "scripts" / "build_common.sh")
 
     print("[BUILD CACHE ROUTING] passed")
 

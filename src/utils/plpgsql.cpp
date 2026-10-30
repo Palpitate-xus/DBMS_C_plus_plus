@@ -545,6 +545,8 @@ using StmtPtr = std::unique_ptr<Stmt>;
 struct CompoundStmt : Stmt {
     std::vector<StmtPtr> body;
 };
+// A procedural placeholder, never an SQL statement or a NULL value.
+struct NullStmt : Stmt {};
 struct AssignStmt : Stmt {
     std::string var;
     std::string expr;
@@ -661,6 +663,14 @@ struct Parser {
         }
         size_t at;
         std::string kw = sc.peekKeyword(&at);
+        if (kw == "null") {
+            sc.pos = at + kw.size();
+            if (!sc.matchOp(";")) {
+                fail("NULL statement requires ';'");
+                return nullptr;
+            }
+            return std::make_unique<NullStmt>();
+        }
         if (kw == "if") return parseIf();
         if (kw == "while") return parseWhile();
         if (kw == "for") return parseFor();
@@ -1415,6 +1425,39 @@ struct Interp {
                 return variable->second;
             }
         }
+        if (host.queryPrepared) {
+            // A procedural expression is a complete SELECT envelope. Keep
+            // current typed namespaces and genuine query children instead of
+            // treating a parser-retained subquery as a textual literal.
+            // Unlike INTO demand or an inner scalar subquery, this outer
+            // query runs to completion before its row/column checks (PG SPI).
+            const auto result = host.queryPrepared("SELECT " + expr, bindings(), {});
+            if (!result.ok) {
+                fail(result.message.empty() ? "expression query failed" : result.message,
+                     result.sqlState);
+                return std::nullopt;
+            }
+            if (result.columnCount != 1) {
+                fail("expression query must return one column", "42601");
+                return std::nullopt;
+            }
+            if (valueType && result.columnTypes.size() == 1)
+                *valueType = result.columnTypes.front();
+            if (result.rowCount == 0) {
+                if (valueIsNull) *valueIsNull = true;
+                return std::string("null");
+            }
+            if (result.rowCount != 1) {
+                fail("expression query returned more than one row", "21000");
+                return std::nullopt;
+            }
+            if (result.firstRow.size() != 1) {
+                fail("expression query returned invalid scalar metadata");
+                return std::nullopt;
+            }
+            if (valueIsNull) *valueIsNull = !result.firstRow.front();
+            return result.firstRow.front().value_or("null");
+        }
         if (host.evalExprTyped) {
             auto values = vars;
             auto nulls = nullVars;
@@ -1456,7 +1499,7 @@ struct Interp {
         bool isNull = false;
         std::string sourceType;
         std::optional<std::string> evaluated;
-        if (!host.evalExprTyped && !host.evalExpr) {
+        if (!host.queryPrepared && !host.evalExprTyped && !host.evalExpr) {
             const auto result = ExprHelper::evalStringWithNulls(
                 expression, vars, nullVars, variableTypes);
             if (!result.ok) return fail(result.error, result.sqlState);
@@ -1690,6 +1733,7 @@ struct Interp {
     }
 
     bool exec(const Stmt& s) {
+        if (dynamic_cast<const NullStmt*>(&s)) return true;
         if (const auto* block = dynamic_cast<const BlockStmt*>(&s)) {
             auto savedVars = vars; auto savedNulls = nullVars; auto savedTypes = variableTypes;
             pushScope(block->label, block->declarations);
@@ -1843,7 +1887,7 @@ struct Interp {
                 bool isNull = false;
                 std::string sourceType;
                 std::optional<std::string> value;
-                if (!host.evalExprTyped && !host.evalExpr) {
+                if (!host.queryPrepared && !host.evalExprTyped && !host.evalExpr) {
                     // A hostless control still needs its SQL source type:
                     // legacy textual arithmetic would turn numeric 2.6 into
                     // unknown text and incorrectly reject integer assignment.

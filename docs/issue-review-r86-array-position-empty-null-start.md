@@ -70,6 +70,10 @@ start输入转换、UNKNOWN needle隐式转换及TEXT start应拒绝等另需真
 208/80断言不变。R86此处的“未修”是历史边界；新范围的真实验证以R108为准。
 ARRAY_POSITIONS、任意复合/域及通用多态能力仍未完成，不由任一局部修复关闭。
 
+ARRAY_POSITIONS后续另列[R109](issue-review-r109-array-positions.md)，此处缺失
+描述保留为R86历史范围。共享查找实现仍保留本项全部208/80断言；binary、
+构造器规划、一般复合/域等剩余能力不能据新函数存在而关闭。
+
 [最新冻结全量](issue-full-registered-27bac6ee.md)的六个失败及捕获到的COPY
 超时保持未解决。新组合为865 native +3真实Main frontend +502 Python =1370
 入口，本项定向验收不是新组合全量通过。原273项22 complete/166 partial/

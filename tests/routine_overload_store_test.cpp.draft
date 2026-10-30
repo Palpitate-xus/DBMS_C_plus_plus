@@ -1,0 +1,197 @@
+// Standalone R222 candidate-layer checks. Not registered or DB acceptance.
+#include "commands/RoutineStore.h"
+#include "access/IndexFileUtil.h"
+#include "common/DbError.h"
+#include "common/sha256.h"
+#include <algorithm>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <iterator>
+#include <map>
+#include <stdexcept>
+#include <sys/wait.h>
+#include <unistd.h>
+
+namespace {
+using namespace dbms;
+struct Checks {
+    size_t controls = 0, failures = 0;
+    template<class Action> void test(const std::string& label, Action action) {
+        ++controls;
+        try { action(); }
+        catch (const std::exception& error) {
+            ++failures;
+            std::cerr << "ROUTINE_STORE_FAIL " << controls << ' ' << label << ": " << error.what() << '\n';
+        }
+    }
+};
+void require(bool value, const std::string& message) {
+    if (!value) throw std::runtime_error(message);
+}
+template<class Action> void rejects(const std::string& state, Action action) {
+    try { action(); }
+    catch (const DbError& error) {
+        require(error.sqlState() == state, "wrong SQLSTATE " + error.sqlState() + ", wanted " + state);
+        return;
+    }
+    throw std::runtime_error("expected SQLSTATE " + state);
+}
+StoredRoutine definition(std::string schema, std::string name,
+                         std::vector<uint32_t> inputs, uint32_t oid = 10000) {
+    StoredRoutine result;
+    result.schema = std::move(schema);
+    result.name = std::move(name);
+    result.oid = oid;
+    result.inputTypeOids = std::move(inputs);
+    result.returnType = "integer";
+    result.returnTypeOid = 23;
+    result.body = "SELECT 101";
+    for (size_t i = 0; i < result.inputTypeOids.size(); ++i) {
+        result.parameterNames.push_back("p" + std::to_string(i));
+        result.parameterTypes.push_back(result.inputTypeOids[i] == 23 ? "integer" :
+            result.inputTypeOids[i] == 25 ? "text" : "bigint");
+    }
+    return result;
+}
+std::string bytes(const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    require(static_cast<bool>(input), "cannot open test metadata");
+    return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+}
+void write(const std::filesystem::path& path, const std::string& value) {
+    std::filesystem::create_directories(path.parent_path());
+    std::ofstream output(path, std::ios::binary);
+    output.write(value.data(), static_cast<std::streamsize>(value.size()));
+    output.flush();
+    require(static_cast<bool>(output), "cannot publish test bytes");
+}
+void same(const StoredRoutine& a, const StoredRoutine& b) {
+    require(RoutineStore::encode(a) == RoutineStore::encode(b), "declaration bytes or identity changed");
+}
+std::string checksum(std::string payload) {
+    const auto digest = SHA256::digestBytes(payload);
+    payload.append(reinterpret_cast<const char*>(digest.data()), digest.size());
+    return payload;
+}
+}
+
+int main() {
+    using namespace dbms;
+    Checks checks;
+    char pattern[] = "/tmp/dbms-r222-store-test.XXXXXX";
+    const char* created = ::mkdtemp(pattern);
+    if (!created) return 2;
+    const std::filesystem::path root(created);
+    RoutineStore store(root);
+    for (size_t count = 0; count <= 100; ++count) {
+        std::vector<uint32_t> inputs(count, 23);
+        if (count) inputs.back() = count%2 ? 25 : 20;
+        auto value = definition("public", "roundtrip", inputs, 10000+count);
+        value.body += " + " + std::to_string(count);
+        value.strict = count%2;
+        value.volatility = count%3 == 0 ? 'i' : count%3 == 1 ? 's' : 'v';
+        checks.test("complete codec " + std::to_string(count), [&] {same(value, RoutineStore::decode(RoutineStore::encode(value)));});
+        checks.test("same-name signature publication " + std::to_string(count), [&] {same(value, store.put(value));});
+        checks.test("ordered identity lookup " + std::to_string(count), [&] {auto found=store.find("public","roundtrip",inputs);require(found.has_value(),"missing signature");same(value,*found);});
+        checks.test("cold reader " + std::to_string(count), [&] {auto found=RoutineStore(root).find("public","roundtrip",inputs);require(found.has_value(),"missing on reopen");same(value,*found);});
+    }
+    checks.test("all 101 overloads coexist", [&] {require(store.candidates("public","roundtrip").size()==101,"arity-only/name-only store");});
+    checks.test("one logical name", [&] {require(store.names("public")==std::vector<std::string>{"roundtrip"},"signature leaked into SQL name");});
+    auto rich = definition("Schema.With.Dot", "Say\"Hi", {23,25});
+    rich.language = "plpgsql";
+    rich.body = std::string("BEGIN\n  -- ownership\r\n  RETURN '") + std::string(65536,'x') + std::string("';\0END",7);
+    checks.test("owned binary metadata fields", [&] {same(rich,RoutineStore::decode(RoutineStore::encode(rich)));});
+    checks.test("owned disk metadata fields", [&] {store.put(rich);same(rich,*RoutineStore(root).find(rich.schema,rich.name,rich.inputTypeOids));});
+    // This is a codec ownership check, not a claim about executing PL/pgSQL,
+    // resuming deferred multiline function work, or PostgreSQL NUL syntax.
+    auto codec = definition("public","codec",{23,25});
+    const auto encoded = RoutineStore::encode(codec);
+    for (size_t length = 0; length < encoded.size(); ++length)
+        checks.test("truncated record " + std::to_string(length), [&] {rejects("58030",[&]{(void)RoutineStore::decode(encoded.substr(0,length));});});
+    for (size_t offset = 0; offset < encoded.size(); ++offset)
+        checks.test("changed record byte " + std::to_string(offset), [&] {auto changed=encoded;changed[offset]^=1;rejects("58030",[&]{(void)RoutineStore::decode(changed);});});
+    for (size_t length = 1; length <= 32; ++length)
+        checks.test("trailing bytes " + std::to_string(length), [&] {rejects("58030",[&]{(void)RoutineStore::decode(encoded+std::string(length,'x'));});});
+    const size_t countOffset=std::string("DBMS_ROUTINE_V3\n").size()+4+codec.schema.size()+4+codec.name.size()+4;
+    checks.test("checksummed invalid count", [&] {auto payload=encoded.substr(0,encoded.size()-32);payload.replace(countOffset,4,std::string(4,'\xff'));rejects("58030",[&]{(void)RoutineStore::decode(checksum(payload));});});
+    checks.test("checksummed invalid field length", [&] {auto payload=encoded.substr(0,encoded.size()-32);payload.replace(countOffset+4,4,std::string(4,'\xff'));rejects("58030",[&]{(void)RoutineStore::decode(checksum(payload));});});
+    checks.test("checksummed invalid flag", [&] {auto payload=encoded.substr(0,encoded.size()-32);payload.back()=2;rejects("58030",[&]{(void)RoutineStore::decode(checksum(payload));});});
+    checks.test("too many parameters", [&] {auto value=definition("public","many",std::vector<uint32_t>(101,23));rejects("54023",[&]{store.put(value);});});
+    checks.test("unequal descriptor vectors", [&] {auto value=codec;value.parameterNames.clear();rejects("58030",[&]{store.put(value);});});
+    for (const std::string& name : {std::string{},std::string(64,'x'),std::string("a\0b",3)})
+        checks.test("invalid identity", [&] {auto value=codec;value.name=name;rejects("42602",[&]{store.put(value);});});
+
+    const std::vector<std::vector<uint32_t>> signatures={{},{23},{25},{20},{23,25},{25,23}};
+    std::map<std::vector<uint32_t>,StoredRoutine> family;
+    for(size_t i=0;i<signatures.size();++i) {
+        auto value=definition("family","pick",signatures[i],20000+i);
+        value.body="SELECT "+std::to_string(i);
+        checks.test("family put "+std::to_string(i),[&]{family[value.inputTypeOids]=store.put(value);});
+        checks.test("duplicate is non-mutating "+std::to_string(i),[&]{auto changed=value;changed.body="SELECT 999";rejects("42723",[&]{store.put(changed);});same(value,*store.find(value.schema,value.name,value.inputTypeOids));});
+    }
+    checks.test("same-arity different types retained",[&]{require(store.candidates("family","pick").size()==6,"collapsed overloads");});
+    checks.test("return type is not overload identity",[&]{auto changed=family.at({23});changed.returnType="text";changed.returnTypeOid=25;rejects("42P13",[&]{store.put(changed,true);});same(family.at({23}),*store.find("family","pick",{23}));});
+    checks.test("named parameters cannot silently change",[&]{auto changed=family.at({23});changed.parameterNames[0]="other";rejects("42P13",[&]{store.put(changed,true);});});
+    checks.test("aliases do not create another signature",[&]{auto changed=family.at({23});changed.parameterTypes[0]="int4";rejects("42723",[&]{store.put(changed);});});
+    checks.test("replace preserves oid",[&]{auto changed=family.at({23});changed.oid=0;changed.body="SELECT 111";changed=store.put(changed,true);require(changed.oid==family.at({23}).oid,"replacement changed OID");family[{23}]=changed;});
+    for(const auto& pair:family)
+        checks.test("replace preserves neighbor",[&]{same(pair.second,*store.find("family","pick",pair.first));});
+    checks.test("missing exact signature does not erase neighbors",[&]{require(!store.erase("family","pick",{16}),"erased wrong signature");require(store.candidates("family","pick").size()==6,"neighbor disappeared");});
+    checks.test("rename preserves oid and neighbors",[&]{auto moved=store.move("family","pick",{23},"family","renamed");require(moved.schema=="family"&&moved.name=="renamed","wrong rename target");auto restoredName=moved;restoredName.name="pick";same(family.at({23}),restoredName);require(!store.find("family","pick",{23})&&store.candidates("family","pick").size()==5,"rename erased family");});
+    checks.test("namespace move preserves identity",[&]{auto moved=store.move("family","renamed",{23},"other","renamed");require(moved.oid==family.at({23}).oid&&store.names("other")==std::vector<std::string>{"renamed"},"bad move");});
+    checks.test("move collision preserves both objects",[&]{auto decoy=definition("other","pick",{23},30000);store.put(decoy);rejects("42723",[&]{store.move("other","renamed",{23},"other","pick");});same(decoy,*store.find("other","pick",{23}));require(store.find("other","renamed",{23}).has_value(),"failed move erased source");});
+    checks.test("remove one overload only",[&]{require(store.erase("family","pick",{23,25}),"missing drop");require(store.find("family","pick",{25,23}).has_value()&&store.candidates("family","pick").size()==4,"order or arity collision");});
+
+    // The store's legacy-reader contract is exercised against a retained
+    // historical-path fixture. Production PARAMS/PARAMS2 decoder integration
+    // and SQL catalog migration remain separate required DB-level checks.
+    auto historical=definition("public","legacy",{23},40000);
+    historical.body="SELECT 7";
+    const auto flat=root/".funcs"/"legacy.func";
+    const std::string historicalBytes="PARAMS2:2:p07:integer\nSELECT 7\ni\nsql\nRETURNS:integer\nSTRICT:0\n";
+    write(flat,historicalBytes);
+    size_t legacyReads=0;
+    RoutineStore mixed(root,[&](const auto& file,const auto& schema,const auto& name)->std::optional<StoredRoutine>{
+        ++legacyReads;require(file==flat&&schema=="public"&&name=="legacy","wrong legacy owner");
+        require(bytes(file)==historicalBytes,"legacy bytes reinterpreted");return historical;
+    });
+    checks.test("read legacy adapter without writes",[&]{same(historical,*mixed.find("public","legacy",{23}));require(bytes(flat)==historicalBytes&&legacyReads>0,"mutating lookup");});
+    checks.test("new overload leaves old declaration intact",[&]{auto value=definition("public","legacy",{25},40001);mixed.put(value);require(bytes(flat)==historicalBytes&&mixed.candidates("public","legacy").size()==2,"old overload overwritten");});
+    checks.test("legacy signature duplicate",[&]{rejects("42723",[&]{mixed.put(historical);});require(bytes(flat)==historicalBytes,"legacy duplicate modified data");});
+    checks.test("replacement retires matching legacy only",[&]{auto value=historical;value.body="SELECT 8";mixed.put(value,true);require(!std::filesystem::exists(flat)&&mixed.candidates("public","legacy").size()==2,"legacy retirement lost neighbor");});
+    checks.test("published generation wins stale fallback",[&]{write(flat,historicalBytes);require(mixed.candidates("public","legacy").size()==2,"duplicate fallback became ambiguous");require(mixed.find("public","legacy",{23})->body=="SELECT 8","old body resurrected");});
+    checks.test("drop cannot resurrect stale fallback",[&]{require(mixed.erase("public","legacy",{23}),"no legacy drop");require(!std::filesystem::exists(flat)&&!mixed.find("public","legacy",{23})&&mixed.find("public","legacy",{25}),"wrong legacy drop");});
+
+    auto fault=definition("fault","retained",{23},50000);
+    store.put(fault);
+    const auto faultPath=store.path(fault.schema,fault.name,fault.inputTypeOids);
+    const auto oldBytes=bytes(faultPath);
+    checks.test("directory durability error propagates",[&]{auto value=definition("fault","new_name",{23});index_file::failNextDirectorySyncForTesting();rejects("58030",[&]{store.put(value);});require(!store.find("fault","new_name",{23}),"partial routine published");same(fault,*store.find("fault","retained",{23}));});
+    checks.test("replace barrier error leaves only complete generations",[&]{auto value=fault;value.body="SELECT 112";index_file::failNextDirectorySyncForTesting();rejects("58030",[&]{store.put(value,true);});const auto actual=RoutineStore::decode(bytes(faultPath));require(actual.body==fault.body||actual.body==value.body,"torn replacement");require(index_file::writeAtomically(faultPath,oldBytes),"fixture snapshot restore failed");same(fault,*store.find("fault","retained",{23}));});
+    checks.test("disk corruption is not silently ignored",[&]{auto changed=oldBytes;changed.back()^=1;write(faultPath,changed);rejects("58030",[&]{(void)store.candidates("fault","retained");});write(faultPath,oldBytes);same(fault,*store.find("fault","retained",{23}));});
+    checks.test("no-clobber concurrent create",[&]{
+        std::vector<pid_t> children;
+        // Precreate this directory so the process race targets publication,
+        // not the caller-owned namespace's directory durability protocol.
+        const auto target=store.path("parallel","pick",{23});
+        std::filesystem::create_directories(target.parent_path());
+        for(unsigned i=0;i<4;++i) {
+            const auto pid=::fork();require(pid>=0,"fork failed");
+            if(pid==0) {
+                try{auto value=definition("parallel","pick",{23},60000+i);value.body="SELECT "+std::to_string(i);RoutineStore(root).put(value);::_exit(0);}
+                catch(const DbError& error){::_exit(error.sqlState()=="42723"?17:18);}
+                catch(...){::_exit(19);}
+            }
+            children.push_back(pid);
+        }
+        size_t winners=0,duplicates=0;
+        for(auto pid:children){int status=0;require(::waitpid(pid,&status,0)==pid&&WIFEXITED(status),"child failed");winners+=WEXITSTATUS(status)==0;duplicates+=WEXITSTATUS(status)==17;}
+        require(winners==1&&duplicates==3,"publication overwrote a concurrent creator");
+        require(store.candidates("parallel","pick").size()==1,"duplicate on-disk generation");
+    });
+    std::cout<<"ROUTINE_STORE_TEST_DIRECTORY "<<root<<'\n';
+    std::cout<<"ROUTINE_STORE_NATIVE_COMPLETE "<<checks.controls<<" FAILURES "<<checks.failures<<'\n';
+    return checks.failures?1:0;
+}

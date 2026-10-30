@@ -1120,7 +1120,13 @@ struct CreateDatabaseStmt : public Stmt {
 // DROP 语句
 // ============================================================================
 
+struct RoutineIdentitySpec {
+    std::string name;
+    std::optional<std::vector<std::string>> argumentTypes;
+};
+
 struct DropStmt : public Stmt {
+    std::vector<RoutineIdentitySpec> routineTargets;
     std::vector<std::string> objectNames;
     std::string objectType;    // TABLE, INDEX, VIEW, SCHEMA, DATABASE, ...
     std::string tableName;     // optional table name for the legacy DROP INDEX ... ON ... form
@@ -1144,6 +1150,7 @@ struct AlterObjectStmt : public Stmt {
     bool ifExists = false;
     bool only = false;
     std::string subCommand;    // raw remainder of statement for later analysis
+    std::optional<std::vector<std::string>> routineInputTypes;
 
     AlterObjectStmt(SqlCommand cmd) : Stmt(cmd) {}
     std::string toString() const override { return "ALTER " + objectType; }

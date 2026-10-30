@@ -447,7 +447,7 @@ std::optional<ExprValue> simplifyCaseConstants(ExprPtr& expression,
                 // A SQL UNKNOWN string remains UNKNOWN while resolving a
                 // polymorphic call. The literal evaluator's VARCHAR datum
                 // must not become a new, incompatible input declaration.
-                if(builtin=="array_position" &&
+                if((builtin=="array_position" || builtin=="array_positions") &&
                    ExprHelper::inferParsedInputType(call->args[i].get())=="unknown")
                     value.typeName="unknown";
                 auto argument=constantExpression(value,nullptr);
@@ -880,10 +880,11 @@ void PreparedQueryExecution::planCompiledConstants(ExprPtr& expression,
         [&](const FunctionCallExpr* call)->std::string {
             CatalogManager::QualifiedName name;
             if(!CatalogManager::parseQualifiedName(call->funcName,name,true) ||
-               (name.name!="abs" && name.name!="factorial" && name.name!="array_position" && name.name!="gcd" && name.name!="lcm") ||
+               (name.name!="abs" && name.name!="factorial" && name.name!="array_position" && name.name!="array_positions" && name.name!="gcd" && name.name!="lcm") ||
                ((name.name=="gcd" || name.name=="lcm") && call->args.size()!=2) ||
                ((name.name=="abs" || name.name=="factorial") && call->args.size()!=1) ||
                (name.name=="array_position" && call->args.size()!=2 && call->args.size()!=3) ||
+               (name.name=="array_positions" && call->args.size()!=2) ||
                !call->namedArgs.empty() || call->hasOver || call->filter ||
                call->distinct || !call->orderBy.empty() || !evaluator_.hasScalarFunction(call,engine_))return {};
             FunctionCallExpr builtin;builtin.funcName=name.name;builtin.schema="pg_catalog";
@@ -892,7 +893,7 @@ void PreparedQueryExecution::planCompiledConstants(ExprPtr& expression,
                 declaration->declaredType=ExprHelper::inferParsedInputType(argument.get(),{},database_,engine_);
                 declaration->origin=ParameterOrigin::MetadataPlaceholder;builtin.args.push_back(std::move(declaration));
             }
-            if((name.name=="array_position" || name.name=="gcd" || name.name=="lcm" || name.name=="factorial") &&
+            if((name.name=="array_position" || name.name=="array_positions" || name.name=="gcd" || name.name=="lcm" || name.name=="factorial") &&
                evaluator_.scalarFunctionIdentity(call,engine_).rfind("builtin",0)!=0)return {};
             if(name.name=="gcd" || name.name=="lcm") {
                 const auto type=ExprHelper::canonicalResultTypeName(

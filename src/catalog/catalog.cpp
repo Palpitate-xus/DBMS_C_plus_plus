@@ -329,6 +329,172 @@ void upgradeLegacyAttributeLengths(std::vector<PgAttributeRow>& attributes,
 }
 } // namespace
 
+namespace {
+// Callers hold the catalog mutex. These helpers only update owned rows and
+// reserve OIDs; they never publish files or open another catalog/provider.
+using TypeIndex = std::unordered_map<Oid, size_t>;
+
+static std::string automaticArrayName(const std::string& base, Oid ns,
+                                      const std::vector<PgTypeRow>& types) {
+    for (uint64_t pass = 0;; ++pass) {
+        const std::string suffix = pass ? "_" + std::to_string(pass) : "";
+        const size_t limit = 63 - 1 - suffix.size();
+        size_t length = std::min(base.size(), limit);
+        if (length < base.size())
+            while (length && (static_cast<unsigned char>(base[length]) & 0xc0) == 0x80)
+                --length;
+        const std::string name = "_" + base.substr(0, length) + suffix;
+        if (std::none_of(types.begin(), types.end(), [&](const auto& row) {
+                return row.typnamespace == ns && row.typname == name;
+            })) return name;
+        if (pass == std::numeric_limits<uint64_t>::max())
+            throw DbError("54000", "could not choose a unique array type name");
+    }
+}
+
+static void ensureTypeDependency(std::vector<PgDependRow>& depends, Oid oid,
+                                 Oid referenceClass, Oid reference, char kind) {
+    if (!reference) return;
+    if (std::any_of(depends.begin(), depends.end(), [&](const auto& row) {
+            return row.classid == PgClassOid_Type && row.objid == oid &&
+                   row.objsubid == 0 && row.refclassid == referenceClass &&
+                   row.refobjid == reference && row.refobjsubid == 0 &&
+                   row.deptype == kind;
+        })) return;
+    PgDependRow row;
+    row.classid = PgClassOid_Type; row.objid = oid; row.objsubid = 0;
+    row.refclassid = referenceClass; row.refobjid = reference; row.refobjsubid = 0;
+    row.deptype = kind;
+    depends.push_back(std::move(row));
+}
+
+static bool ownedArrayType(const PgTypeRow& row,
+                            const std::vector<PgTypeRow>& types,
+                            const TypeIndex& index) {
+    const auto owner = index.find(row.typelem);
+    return row.typtype == 'b' && row.typcategory == 'A' && row.typelem &&
+           owner != index.end() && types[owner->second].typarray == row.oid;
+}
+
+static void moveAutomaticArrayName(const PgTypeRow& requested,
+                                   std::vector<PgTypeRow>& types,
+                                   const TypeIndex& index) {
+    if (requested.typcategory == 'A') return;
+    const auto collision = std::find_if(types.begin(), types.end(), [&](const auto& row) {
+        return row.typnamespace == requested.typnamespace && row.typname == requested.typname;
+    });
+    if (collision != types.end() && ownedArrayType(*collision, types, index)) {
+        const std::string name = automaticArrayName(
+            collision->typname, collision->typnamespace, types);
+        collision->typname = name;
+    }
+}
+
+static void ensureEnumArray(Oid oid, std::vector<PgTypeRow>& types,
+                            TypeIndex& index, std::vector<PgDependRow>& depends,
+                            OidGenerator* generator) {
+    if (!generator) return; // A read-only snapshot must never invent identities.
+    const auto found = index.find(oid);
+    if (found == index.end()) return;
+    const PgTypeRow base = types[found->second];
+    if (base.typtype != 'e' || !base.typisdefined || base.typname.empty()) return;
+    Oid arrayOid = INVALID_OID;
+    if (base.typarray) {
+        const auto linked = index.find(base.typarray);
+        if (linked != index.end()) {
+            const auto& row = types[linked->second];
+            if (row.typcategory != 'A' || row.typtype != 'b' ||
+                row.typelem != oid || row.typnamespace != base.typnamespace)
+                throw DbError("XX001", "enum array backlink has an inconsistent catalog identity");
+            arrayOid = row.oid;
+        }
+    }
+    if (!arrayOid) {
+        for (const auto& row : types) {
+            if (row.typcategory != 'A' || row.typtype != 'b' ||
+                row.typelem != oid || row.typnamespace != base.typnamespace) continue;
+            if (arrayOid && arrayOid != row.oid)
+                throw DbError("XX001", "enum has multiple competing array identities");
+            arrayOid = row.oid;
+        }
+    }
+    if (!arrayOid) {
+        PgTypeRow array;
+        do { array.oid = generator->allocate(); }
+        while (!array.oid || index.count(array.oid));
+        array.typname = automaticArrayName(base.typname, base.typnamespace, types);
+        array.typnamespace = base.typnamespace; array.typowner = base.typowner;
+        array.typlen = -1; array.typbyval = false;
+        array.typtype = 'b'; array.typcategory = 'A';
+        array.typelem = oid; array.typalign = 'i'; array.typstorage = 'x';
+        array.typinput = 750; array.typoutput = 751;
+        array.typreceive = 2400; array.typsend = 2401;
+        arrayOid = array.oid;
+        index[arrayOid] = types.size();
+        types.push_back(std::move(array));
+    }
+    // Vector growth above invalidates borrowed row pointers/references.
+    types[index.at(oid)].typarray = arrayOid;
+    ensureTypeDependency(depends, oid, PgClassOid_Namespace, base.typnamespace, 'n');
+    ensureTypeDependency(depends, arrayOid, PgClassOid_Namespace, base.typnamespace, 'n');
+    ensureTypeDependency(depends, arrayOid, PgClassOid_Type, oid, 'i');
+}
+
+static void ensureEnumArrays(std::vector<PgTypeRow>& types, TypeIndex& index,
+                             std::vector<PgDependRow>& depends, OidGenerator* generator) {
+    if (!generator) return;
+    std::vector<Oid> enums;
+    for (const auto& row : types) if (row.typtype == 'e') enums.push_back(row.oid);
+    for (Oid oid : enums) ensureEnumArray(oid, types, index, depends, generator);
+}
+
+} // namespace
+
+
+// V3 pg_proc rows own all signature and execution attributes. Hex string
+// fields preserve CR/LF, quotes and delimiters without breaking record lines.
+static void writeRoutineCatalogRow(std::ostream& out,const PgProcRow& r) {
+    out<<"P3,"<<r.oid<<',';writeString(out,hexEncode(r.proname));out<<',';
+    out<<r.pronamespace<<','<<r.proowner<<','<<r.prolang<<','
+       <<std::setprecision(std::numeric_limits<float>::max_digits10)<<r.procost<<','<<r.prorows<<','
+       <<r.provariadic<<','<<r.prokind<<','<<r.prosecdef<<','<<r.proleakproof<<','
+       <<r.proisstrict<<','<<r.proretset<<','<<r.provolatile<<','<<r.proparallel<<','
+       <<r.pronargs<<','<<r.pronargdefaults<<','<<r.prorettype<<',';
+    out<<r.proargtypes.size()<<',';for(auto oid:r.proargtypes)out<<oid<<',';
+    out<<r.proallargtypes.size()<<',';for(auto oid:r.proallargtypes)out<<oid<<',';
+    writeString(out,hexEncode(std::string(r.proargmodes.begin(),r.proargmodes.end())));out<<',';
+    out<<r.proargnames.size()<<',';
+    for(const auto& name:r.proargnames){writeString(out,hexEncode(name));out<<',';}
+    writeString(out,hexEncode(r.prosrc));out<<',';writeString(out,hexEncode(r.probin));out<<'\n';
+}
+static bool readRoutineCatalogRow(std::istringstream& in,PgProcRow& r) {
+    const auto text=[&](std::string& value,bool final=false) {
+        const auto encoded=readString(in);
+        if(!hexDecode(encoded,value) || !in)return false;
+        if(final){in>>std::ws;return in.eof();}
+        char delimiter=0;return static_cast<bool>(in.get(delimiter)) && delimiter==',';
+    };
+    if(!readCatalogCsvField(in,r.oid) || !text(r.proname) ||
+       !readCatalogCsvField(in,r.pronamespace) || !readCatalogCsvField(in,r.proowner) ||
+       !readCatalogCsvField(in,r.prolang) || !readCatalogCsvField(in,r.procost) ||
+       !readCatalogCsvField(in,r.prorows) || !readCatalogCsvField(in,r.provariadic) ||
+       !readCatalogCsvField(in,r.prokind) || !readCatalogCsvField(in,r.prosecdef) ||
+       !readCatalogCsvField(in,r.proleakproof) || !readCatalogCsvField(in,r.proisstrict) ||
+       !readCatalogCsvField(in,r.proretset) || !readCatalogCsvField(in,r.provolatile) ||
+       !readCatalogCsvField(in,r.proparallel) || !readCatalogCsvField(in,r.pronargs) ||
+       !readCatalogCsvField(in,r.pronargdefaults) || !readCatalogCsvField(in,r.prorettype))return false;
+    uint32_t count=0;
+    if(!readCatalogCsvField(in,count))return false;
+    for(uint32_t i=0;i<count;++i){Oid value=0;if(!readCatalogCsvField(in,value))return false;r.proargtypes.push_back(value);}
+    if(!readCatalogCsvField(in,count))return false;
+    for(uint32_t i=0;i<count;++i){Oid value=0;if(!readCatalogCsvField(in,value))return false;r.proallargtypes.push_back(value);}
+    std::string modes;
+    if(!text(modes) || !readCatalogCsvField(in,count))return false;
+    r.proargmodes.assign(modes.begin(),modes.end());
+    for(uint32_t i=0;i<count;++i){std::string value;if(!text(value))return false;r.proargnames.push_back(std::move(value));}
+    return text(r.prosrc) && text(r.probin,true);
+}
+
 CatalogManager::CatalogManager(const std::string& dbPath)
     : CatalogManager(dbPath, true) {}
 
@@ -1004,6 +1170,7 @@ Oid CatalogManager::createType(const PgTypeRow& row) {
     Oid oid = (row.oid != INVALID_OID) ? row.oid : oidGen_->allocate();
     PgTypeRow r = row;
     r.oid = oid;
+    moveAutomaticArrayName(r, types_, typeByOid_);
     size_t idx = types_.size();
     types_.push_back(r);
     typeByOid_[oid] = idx;
@@ -1018,6 +1185,7 @@ Oid CatalogManager::createType(const PgTypeRow& row) {
         dep.deptype = 'n';
         depends_.push_back(dep);
     }
+    ensureEnumArray(oid, types_, typeByOid_, depends_, oidGen_.get());
     return oid;
 }
 
@@ -1038,13 +1206,24 @@ bool CatalogManager::updateType(Oid oid, const PgTypeRow& row) {
         return false;
     PgTypeRow replacement = row;
     replacement.oid = oid;
+    const bool promotedEnum = types_[found->second].typtype != 'e' && replacement.typtype == 'e';
     types_[found->second] = std::move(replacement);
+    if (promotedEnum) ensureEnumArray(oid, types_, typeByOid_, depends_, oidGen_.get());
     return true;
 }
 
 bool CatalogManager::dropTypeUnlocked(Oid oid) {
     auto it = typeByOid_.find(oid);
     if (it == typeByOid_.end() || it->second >= types_.size()) return false;
+    const auto parent = types_[it->second];
+    if (parent.typtype == 'e' && parent.typarray && parent.typarray != oid) {
+        const auto array = typeByOid_.find(parent.typarray);
+        if (array != typeByOid_.end() && types_[array->second].typcategory == 'A' &&
+            types_[array->second].typelem == oid) {
+            if (!dropTypeUnlocked(parent.typarray)) return false;
+            it = typeByOid_.find(oid); // Erasing a vector row can move the parent.
+        }
+    }
     size_t idx = it->second;
     removeDependRecordsUnlocked(PgClassOid_Type, oid);
     if (idx + 1 < types_.size()) {
@@ -1206,6 +1385,27 @@ Oid CatalogManager::createProc(const PgProcRow& row) {
         depends_.push_back(dep);
     }
     return oid;
+}
+
+
+bool CatalogManager::updateProc(const PgProcRow& row) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto found=procByOid_.find(row.oid);
+    if(found==procByOid_.end() || found->second>=procs_.size())return false;
+    const auto oldNamespace=procs_[found->second].pronamespace;
+    if(oldNamespace!=row.pronamespace) {
+        depends_.erase(std::remove_if(depends_.begin(),depends_.end(),[&](const PgDependRow& dep) {
+            return dep.classid==PgClassOid_Proc && dep.objid==row.oid &&
+                dep.refclassid==PgClassOid_Namespace && dep.refobjid==oldNamespace;
+        }),depends_.end());
+        if(row.pronamespace!=INVALID_OID) {
+            PgDependRow dep;dep.classid=PgClassOid_Proc;dep.objid=row.oid;
+            dep.refclassid=PgClassOid_Namespace;dep.refobjid=row.pronamespace;dep.deptype='n';
+            depends_.push_back(dep);
+        }
+    }
+    procs_[found->second]=row;
+    return true;
 }
 
 const PgProcRow* CatalogManager::findProc(Oid oid) const {
@@ -1609,6 +1809,13 @@ bool CatalogManager::setComment(const std::string& objType,
 CatalogManager::DropPlan CatalogManager::planDropUnlocked(Oid classid, Oid objid,
                                                            DropBehavior behavior) const {
     DropPlan plan;
+    if (classid == PgClassOid_Type) {
+        const auto type = typeByOid_.find(objid);
+        if (type != typeByOid_.end() && ownedArrayType(types_[type->second], types_, typeByOid_)) {
+            plan.error = "cannot drop an automatic array type independently of its element type";
+            return plan;
+        }
+    }
 
     std::vector<std::pair<Oid, Oid>> toDrop;       // 后序遍历结果
     std::set<std::pair<Oid, Oid>> visited;
@@ -1975,6 +2182,7 @@ void CatalogManager::bootstrapSystemTypes() {
         }
     }
     upgradeLegacyAttributeLengths(attributes_,types_,typeByOid_);
+    ensureEnumArrays(types_, typeByOid_, depends_, oidGen_.get());
 }
 
 // ============================================================================
@@ -2126,17 +2334,7 @@ std::map<std::string, std::string> CatalogManager::serializeAllLocked() const {
 
     // pg_proc
     persist("proc", [&](std::ostream& out) {
-        for (const auto& r : procs_) {
-            writeOid(out, r.oid); out << ',';
-            writeString(out, r.proname); out << ',';
-            writeOid(out, r.pronamespace); out << ',';
-            out << r.prokind << ',';
-            writeOid(out, r.prorettype); out << ',';
-            out << r.pronargs << ',';
-            writeString(out, r.prosrc); out << ',';
-            out << r.provolatile;
-            out << '\n';
-        }
+        for(const auto& row:procs_)writeRoutineCatalogRow(out,row);
     });
 
     // pg_depend
@@ -2288,6 +2486,9 @@ void CatalogManager::loadAll() {
     std::lock_guard<std::mutex> lock(mutex_);
     std::lock_guard<std::mutex> publicationLock(persistence_->publication->mutex);
     loadAllLocked();
+    // The disk baseline has already been recorded. Repairs remain real dirty
+    // rows until persistAll publishes them; read-only consumers allocate none.
+    ensureEnumArrays(types_, typeByOid_, depends_, oidGen_.get());
 }
 
 void CatalogManager::loadAllLocked() {
@@ -2614,6 +2815,11 @@ void CatalogManager::loadAllLocked() {
         std::string line;
         while (std::getline(in, line)) {
             if (line.empty()) continue;
+            if(line.rfind("P3,",0)==0) {
+                std::istringstream encoded(line.substr(3));PgProcRow row;
+                if(!readRoutineCatalogRow(encoded,row))throw DbError("58030","invalid pg_proc record");
+                procs_.push_back(std::move(row));continue;
+            }
             std::istringstream iss(line);
             PgProcRow r;
             iss >> r.oid; iss.ignore(1);

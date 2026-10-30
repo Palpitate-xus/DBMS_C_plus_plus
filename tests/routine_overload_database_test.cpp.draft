@@ -1,0 +1,124 @@
+// R222 real-engine/cold-process checks; unregistered until full acceptance.
+#include "commands/TableManage.h"
+#include "commands/DdlExecutor.h"
+#include "catalog/CatalogService.h"
+#include "catalog/type_registry.h"
+#include "expression/ExprEvaluator.h"
+#include "expression/expr_helper.h"
+#include "common/DbError.h"
+#include "access/IndexFileUtil.h"
+#include "process/OutputCapture.h"
+#include "Session.h"
+#include <filesystem>
+#include <iostream>
+#include <set>
+#include <sstream>
+#include <stdexcept>
+#include <sys/wait.h>
+#include <unistd.h>
+extern dbms::StorageEngine g_engine;
+
+namespace {
+using namespace dbms;
+struct Checks {
+    size_t controls=0,failures=0;
+    template<class Action> void test(const std::string& label,Action action) {
+        ++controls;
+        try{action();}catch(const std::exception& error){++failures;std::cerr<<"ROUTINE_DATABASE_FAIL "<<controls<<' '<<label<<": "<<error.what()<<'\n';}
+    }
+};
+void require(bool valid,const std::string& message){if(!valid)throw std::runtime_error(message);}
+template<class Action> void rejects(const std::string& state,Action action) {
+    try{action();}catch(const DbError& error){require(error.sqlState()==state,"wrong SQLSTATE "+error.sqlState());return;}
+    throw std::runtime_error("missing SQLSTATE "+state);
+}
+void ddl(const std::string& sql,Session& session,const std::string& expected={}) {
+    std::ostringstream output;bool failed=false;std::string state;
+    try{ScopedOutputCapture capture(output);DdlExecutor executor;failed=executor.executeSql(sql,session);}
+    catch(const DbError& error){state=error.sqlState();}
+    if(state.empty() && failed){const auto at=output.str().find("SQLSTATE ");if(at!=std::string::npos)state=output.str().substr(at+9,5);}
+    require(state==expected && (expected.empty()?!failed:true),"DDL "+sql+" state="+state+" output="+output.str());
+}
+void value(StorageEngine& engine,const std::string& db,const std::string& expression,
+           uint32_t oid,const std::string& expected,bool null=false) {
+    auto query=engine.prepareBoundQuery(db,"SELECT "+expression+" AS v");
+    require(query.output.size()==1 && query.output[0].name=="v" && query.output[0].typeOid==oid,"wrong bound descriptor");
+    auto* select=dynamic_cast<SelectStmt*>(query.ast.get());require(select,"not a SELECT");
+    ExprEvaluator evaluator;evaluator.setCurrentDB(db);evaluator.bindScalarFunctions(select->selectList[0].expr.get(),&engine);
+    const auto result=evaluator.eval(select->selectList[0].expr.get(),RowContext{});
+    require(result.isNull==null && (null || result.value==expected),"wrong function result ["+result.value+"]");
+    require(ExprHelper::canonicalResultTypeName(result.typeName)==ExprHelper::canonicalResultTypeName(query.output[0].type),"value/type descriptor disagreement");
+}
+struct Definition {std::string args,input,output,body,expression,result;uint32_t oid;std::vector<uint32_t> inputs;};
+const std::vector<Definition> definitions={
+    {"","","integer","10","","10",23,{}},
+    {"p integer","integer","integer","101","1","111",23,{23}},
+    {"p bigint","bigint","bigint","10000000003::bigint","1::bigint","10000000003",20,{20}},
+    {"p text","text","text","'text'","'x'","text",25,{25}},
+    {"p boolean","boolean","text","'bool'","true","bool",25,{16}},
+    {"p integer[]","integer[]","integer","401","ARRAY[1,2]","401",23,{1007}},
+    {"p integer,q integer","integer,integer","integer","201","1,2","201",23,{23,23}},
+    {"p integer,q text","integer,text","text","'inttext'","1,'x'","inttext",25,{23,25}},
+    {"p text,q integer","text,integer","text","'textint'","'x',1","textint",25,{25,23}},
+    {"p integer,q integer,r integer","integer,integer,integer","integer","301","1,2,3","301",23,{23,23,23}},
+};
+void verifyFamily(Checks& checks,StorageEngine& engine,const std::string& db) {
+    checks.test("all real overloads retained",[&]{require(engine.getUDFOverloads(db,"pick","r222_a").size()==definitions.size(),"family collapsed");});
+    const auto snapshot=engine.catalogService().metadataSnapshot(db);
+    uint32_t namespaceOid=0;for(const auto& entry:snapshot.namespaces)if(entry.nspname=="r222_a")namespaceOid=entry.oid;
+    std::set<uint32_t> seen;
+    for(const auto& item:definitions) {
+        checks.test("exact stored signature "+item.input,[&]{const auto stored=engine.getUDFBySignature(db,"pick",item.inputs,"r222_a");require(!stored.expression.empty()&&stored.paramTypeOids==item.inputs&&stored.returnTypeOid==item.oid&&stored.oid,"wrong stored identity");require(seen.insert(stored.oid).second,"overloads share an OID");});
+        checks.test("actual function evaluation "+item.input,[&]{value(engine,db,"r222_a.pick("+item.expression+")",item.oid,item.result);});
+        checks.test("actual catalog signature "+item.input,[&]{const auto stored=engine.getUDFBySignature(db,"pick",item.inputs,"r222_a");size_t matches=0;for(const auto& row:snapshot.routines)if(row.pronamespace==namespaceOid&&row.proname=="pick"&&row.proargtypes==item.inputs){++matches;require(row.oid==stored.oid&&row.prorettype==item.oid&&row.pronargs==static_cast<int16_t>(item.inputs.size())&&row.prosrc==stored.expression&&row.proargnames==stored.paramNames&&row.proisstrict==stored.strict&&row.provolatile==stored.provolatile&&row.prolang==14,"catalog attributes disagree");}require(matches==1,"missing/duplicate catalog row");});
+    }
+}
+void child(const std::string& executable,const std::vector<std::string>& arguments) {
+    const auto pid=::fork();require(pid>=0,"fork failed");
+    if(pid==0){std::vector<char*> args;args.push_back(const_cast<char*>(executable.c_str()));for(const auto& arg:arguments)args.push_back(const_cast<char*>(arg.c_str()));args.push_back(nullptr);::execv(executable.c_str(),args.data());::_exit(127);}
+    int status=0;require(::waitpid(pid,&status,0)==pid&&WIFEXITED(status)&&WEXITSTATUS(status)==0,"cold process failed");
+}
+}
+
+int main(int argc,char** argv) {
+    using namespace dbms;TypeRegistry::instance().bootstrap();Checks checks;
+    const bool cold=argc>=2&&std::string(argv[1])=="--cold";
+    const bool legacyCold=argc>=2&&std::string(argv[1])=="--legacy-cold";
+    const std::string db=legacyCold?"r222_legacy":"r222_native";
+    Session session;session.username="admin";session.permission=1;session.currentDB=db;session.searchPath="r222_a, r222_b, public, pg_catalog";
+    auto* previous=currentSession();setCurrentSession(&session);struct Restore{Session* before;~Restore(){setCurrentSession(before);}} restore{previous};
+    if(cold){verifyFamily(checks,g_engine,db);std::cout<<"ROUTINE_DATABASE_COLD_COMPLETE "<<checks.controls<<" FAILURES "<<checks.failures<<'\n';return checks.failures?1:0;}
+    if(legacyCold){checks.test("migrated legacy body after exec",[&]{value(g_engine,db,"public.legacy_i(4)",23,"6");});checks.test("other overload after exec",[&]{value(g_engine,db,"public.legacy_i('x'::text)",25,"text");});std::cout<<"ROUTINE_DATABASE_LEGACY_COLD_COMPLETE "<<checks.controls<<" FAILURES "<<checks.failures<<'\n';return checks.failures?1:0;}
+    if(argc!=2)return 2;
+    checks.test("private database",[&]{require(g_engine.createDatabase(db)==DBStatus::OK,"create database failed");});
+    for(const auto& schema:{"r222_a","r222_b"})checks.test("schema",[&]{ddl(std::string("CREATE SCHEMA ")+schema,session);});
+    for(const auto& item:definitions)checks.test("create independent input signature "+item.input,[&]{ddl("CREATE FUNCTION r222_a.pick("+item.args+") RETURNS "+item.output+" LANGUAGE SQL IMMUTABLE AS $$SELECT "+item.body+"$$",session);});
+    checks.test("same signature alias rejected",[&]{ddl("CREATE FUNCTION r222_a.pick(p int4) RETURNS integer LANGUAGE SQL AS $$SELECT 0$$",session,"42723");});
+    uint32_t original=0;
+    checks.test("copy original identity",[&]{original=g_engine.getUDFBySignature(db,"pick",{23},"r222_a").oid;require(original,"missing original oid");});
+    checks.test("replace exact input signature",[&]{ddl("CREATE OR REPLACE FUNCTION r222_a.pick(p integer) RETURNS integer LANGUAGE SQL AS $$SELECT 111$$",session);require(g_engine.getUDFBySignature(db,"pick",{23},"r222_a").oid==original,"replacement changed oid");});
+    verifyFamily(checks,g_engine,db);
+    checks.test("unknown cross-signatures remain ambiguous",[&]{rejects("42725",[&]{(void)g_engine.prepareBoundQuery(db,"SELECT r222_a.pick(NULL,NULL)");});});
+    checks.test("name-only API refuses ambiguity",[&]{rejects("42725",[&]{(void)g_engine.getUDF(db,"pick","r222_a");});});
+    checks.test("exact CREATE undo preserves old family",[&]{require(g_engine.beginTransaction(db)==DBStatus::OK,"begin failed");ddl("CREATE FUNCTION r222_a.pick(p double precision) RETURNS double precision LANGUAGE SQL AS $$SELECT 6.5$$",session);require(g_engine.getUDFOverloads(db,"pick","r222_a").size()==11,"missing transactional overload");require(g_engine.rollbackTransaction()==DBStatus::OK,"rollback failed");require(!g_engine.getUDFBySignature(db,"pick",{701},"r222_a").oid,"create undo left new signature");require(g_engine.getUDFBySignature(db,"pick",{23},"r222_a").oid==original,"create undo erased old signature");});
+    checks.test("savepoint exact identity",[&]{require(g_engine.beginTransaction(db)==DBStatus::OK,"begin failed");require(g_engine.savepoint("before") == DBStatus::OK,"savepoint failed");ddl("CREATE FUNCTION r222_a.pick(p integer,q bigint) RETURNS integer LANGUAGE SQL AS $$SELECT 211$$",session);require(g_engine.rollbackToSavepoint("before")==DBStatus::OK,"rollback-to failed");require(g_engine.getUDFBySignature(db,"pick",{23,20},"r222_a").expression.empty(),"savepoint left overload");require(g_engine.rollbackTransaction()==DBStatus::OK,"rollback failed");});
+    checks.test("typed DROP rollback",[&]{require(g_engine.beginTransaction(db)==DBStatus::OK,"begin failed");ddl("DROP FUNCTION r222_a.pick(integer)",session);require(g_engine.getUDFBySignature(db,"pick",{23},"r222_a").expression.empty(),"wrong exact drop");require(g_engine.rollbackTransaction()==DBStatus::OK,"rollback failed");require(g_engine.getUDFBySignature(db,"pick",{23},"r222_a").oid==original,"drop rollback changed oid");});
+    checks.test("rename then move and return",[&]{ddl("ALTER FUNCTION r222_a.pick(integer) RENAME TO renamed",session);require(g_engine.getUDFBySignature(db,"renamed",{23},"r222_a").oid==original,"rename changed oid");ddl("ALTER FUNCTION r222_a.renamed(integer) SET SCHEMA r222_b",session);require(g_engine.getUDFBySignature(db,"renamed",{23},"r222_b").oid==original,"namespace move changed oid");ddl("ALTER FUNCTION r222_b.renamed(integer) SET SCHEMA r222_a",session);ddl("ALTER FUNCTION r222_a.renamed(integer) RENAME TO pick",session);});
+    checks.test("multiple DROP validates before mutation",[&]{ddl("DROP FUNCTION r222_a.pick(integer),r222_a.pick(missing_r222_type)",session,"42704");require(g_engine.getUDFBySignature(db,"pick",{23},"r222_a").oid==original,"failed multi-drop erased existing function");});
+    checks.test("IO failure restores function/catalog state",[&]{index_file::failNextDirectorySyncForTesting();ddl("CREATE FUNCTION r222_a.pick(p double precision) RETURNS double precision LANGUAGE SQL AS $$SELECT 6.5$$",session,"58030");require(g_engine.getUDFBySignature(db,"pick",{701},"r222_a").expression.empty(),"failed create left function");});
+    verifyFamily(checks,g_engine,db);
+    checks.test("real cold process catalog and bodies",[&]{child(std::filesystem::absolute(argv[0]).string(),{"--cold"});});
+
+    checks.test("actual historical producer",[&]{child(std::filesystem::absolute(argv[1]).string(),{"r222_legacy"});});
+    session.currentDB="r222_legacy";session.searchPath="public, pg_catalog";
+    checks.test("real PARAMS2 legacy declaration",[&]{const auto old=g_engine.getUDFBySignature(session.currentDB,"legacy_i",{23});require(old.paramNames==std::vector<std::string>{"p"}&&old.language=="sql"&&old.returnTypeOid==23&&old.strict,"legacy declaration changed");value(g_engine,session.currentDB,"legacy_i(4)",23,"5");value(g_engine,session.currentDB,"legacy_i(NULL::integer)",23,"",true);});
+    checks.test("real zero-argument legacy",[&]{value(g_engine,session.currentDB,"legacy_zero()",23,"17");});
+    checks.test("real namespaced multi-argument legacy",[&]{value(g_engine,session.currentDB,"legacy_ns.legacy_many(4,'x')",23,"6");});
+    checks.test("real comma-typmod legacy metadata",[&]{const auto old=g_engine.getUDFBySignature(session.currentDB,"legacy_numeric",{1700});require(old.paramTypes==std::vector<std::string>{"numeric(8,2)"}&&old.returnTypeOid==1700,"PARAMS2 comma envelope lost");});
+    checks.test("add overload without overwriting historical function",[&]{ddl("CREATE FUNCTION public.legacy_i(p text) RETURNS text LANGUAGE SQL AS $$SELECT 'text'$$",session);require(std::filesystem::exists(std::filesystem::path(session.currentDB)/".funcs/legacy_i.func"),"unrelated legacy retired");value(g_engine,session.currentDB,"legacy_i(4)",23,"5");value(g_engine,session.currentDB,"legacy_i('x'::text)",25,"text");});
+    checks.test("replace upgrades exact historical signature",[&]{ddl("CREATE OR REPLACE FUNCTION public.legacy_i(p integer) RETURNS integer LANGUAGE SQL STRICT AS $$SELECT p+2$$",session);require(!std::filesystem::exists(std::filesystem::path(session.currentDB)/".funcs/legacy_i.func"),"old fallback not retired");value(g_engine,session.currentDB,"legacy_i(4)",23,"6");require(g_engine.getUDFOverloads(session.currentDB,"legacy_i").size()==2,"migration lost neighbor");});
+    checks.test("real cold process after legacy migration",[&]{child(std::filesystem::absolute(argv[0]).string(),{"--legacy-cold"});});
+    std::cout<<"ROUTINE_DATABASE_TEST_DIRECTORY "<<std::filesystem::current_path()<<'\n';
+    std::cout<<"ROUTINE_DATABASE_NATIVE_COMPLETE "<<checks.controls<<" FAILURES "<<checks.failures<<'\n';
+    return checks.failures?1:0;
+}

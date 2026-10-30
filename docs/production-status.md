@@ -1,5 +1,13 @@
 # 生产化状态
 
+最新有限修复：[R185排序中断传播](issue-review-r185-sort-interrupt-propagation.md)统一执行器12处排序的取消/超时检查，
+保留原比较、类型、NULL/tie及求值规则。修正夹具后旧80控制完整40失败；两侧新80及各19完整入口均实际全0。
+每侧74对象16程序/127头核对，Root正常1CPP并链接/repeat零；Main为同源已验证donor重新链接，不冒fresh TU。
+原273全文已保存在[原子范围账](review-requirement-clauses.json)，仅3项拆为38条件、其余270未拆解含原15暂缓，未声称全审。
+work_mem/spill等仍未闭合；原22/166/70/15不变，登记1493/Root1505、606MD/Root609MD，原12入口/三文档保留。
+不是全1493/修复后完整72/TLS/sanitizer验收，总目标未完成；不push，不启用Actions。以下记录按当时输入解释。
+
+
 最新有限修复：[R184测试数据目录隔离](issue-review-r184-test-data-directory-isolation.md)使公共helper在子程序启动前选私有数据根，
 父环境/cwd不变。旧同一7控制完整4失败，候选及Root完整7通过；两侧各4native/3真实Main通过，调用者标记目录保持不变。
 只改脚本及既有测试，全部CPP/127头和匹配程序不变，不冒fresh编译或修复后新完整72；旧72另记。
@@ -453,6 +461,10 @@ DATE/TIME/TIMETZ/INTERVAL及数组的逻辑字段长度修复见[R114](issue-rev
 R110 二进制输出另项验收。原273不提升，不把局部修复写成新完整注册回归。
 
 状态入口更新：2026-10-16。当前发现及验证范围见[代码审查报告](code-review-2026-10-13.md)与[逐项修复](review-fixes-2026-10-13.md)；下方工程批次记录截至其各自标注日期。
+
+后续[R109 ARRAY_POSITIONS](issue-review-r109-array-positions.md)按用户要求跳过，
+候选388/248和66有限入口全0的历史证据保留，源码/测试未提交，不计已修复。
+R110 二进制输出另项验收，R111 构造器规划仍开放；原273不提升。
 
 数组查找的typed值比较和真实声明/用户重载边界见
 [R108](issue-review-r108-array-position-typed-equality.md)，第五版自身354/258及

@@ -10,6 +10,7 @@ namespace dbms {
 namespace {
 
 thread_local std::streambuf* g_threadCapture = nullptr;
+thread_local const DiagnosticSink* g_threadDiagnosticSink = nullptr;
 
 class MultiplexingStreambuf final : public std::streambuf {
 public:
@@ -52,6 +53,33 @@ void ensureInstalled() {
 
 } // namespace
 
+ScopedDiagnosticCapture::ScopedDiagnosticCapture(DiagnosticSink sink)
+    : sink_(std::move(sink)), previous_(g_threadDiagnosticSink) {
+    g_threadDiagnosticSink = &sink_;
+}
+
+ScopedDiagnosticCapture::~ScopedDiagnosticCapture() {
+    g_threadDiagnosticSink = previous_;
+}
+
+void emitDiagnostic(StatementDiagnostic diagnostic) {
+    if (g_threadDiagnosticSink) {
+        (*g_threadDiagnosticSink)(std::move(diagnostic));
+    } else {
+        // Embedded callers retain a printable fallback; protocol/CLI owners
+        // install a sink independently of stdout row-output capture.
+        std::cout << diagnostic.severity << ": " << diagnostic.message << '\n';
+    }
+}
+
+void emitNotice(std::string message) {
+    emitDiagnostic({"NOTICE", "00000", std::move(message)});
+}
+
+void emitWarning(std::string message) {
+    emitDiagnostic({"WARNING", "01000", std::move(message)});
+}
+
 namespace {
 thread_local std::vector<StatementNotice>* g_statementNoticeTarget = nullptr;
 thread_local std::streambuf* g_statementNoticeOutput = nullptr;
@@ -77,6 +105,16 @@ ScopedStatementNoticeCapture::~ScopedStatementNoticeCapture() {
 }
 
 void emitStatementNotice(StatementNotice notice) {
+    // Preserve the pre-existing Root diagnostic receiver without adopting
+    // its draft API into the accepted implementation. Standalone new
+    // receivers still own their messages; protocol-bound ones share the
+    // already active Root receiver to preserve the emission order.
+    if (g_threadDiagnosticSink &&
+        (!g_statementNoticeTarget || g_statementNoticeOutput)) {
+        emitDiagnostic({std::move(notice.severity), std::move(notice.sqlState),
+                        std::move(notice.message)});
+        return;
+    }
     notice.outputOffset = -1;
     if (g_statementNoticeTarget) {
         if (g_statementNoticeOutput) {

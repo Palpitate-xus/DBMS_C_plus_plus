@@ -1415,13 +1415,39 @@ SqlCommand SQLParser::classify(const std::string& sql) {
         const auto queryTokens = tokenize(sql.substr(offset));
         if (queryTokens.empty() || toLower(queryTokens.front()) != "with")
             return SqlCommand::Unknown;
-        int depth = 0;
-        for (size_t index = 1; index < queryTokens.size(); ++index) {
-            if (queryTokens[index] == "(") { ++depth; continue; }
-            if (queryTokens[index] == ")") { --depth; continue; }
-            if (depth != 0) continue;
-            const std::string word = toLower(queryTokens[index]);
+        size_t position = 1;
+        if (position < queryTokens.size() && toLower(queryTokens[position]) == "recursive") ++position;
+        const auto skipGroup = [&](size_t& at) {
+            if (at >= queryTokens.size() || queryTokens[at] != "(") return false;
+            size_t depth = 0;
+            do {
+                if (queryTokens[at] == "(") ++depth;
+                else if (queryTokens[at] == ")" && --depth == 0) { ++at; return true; }
+                ++at;
+            } while (at < queryTokens.size());
+            return false;
+        };
+        // Skip complete CTE declarations, including column aliases and
+        // materialization modifiers. A CTE named values is not the body.
+        while (position < queryTokens.size()) {
+            ++position; // one lexical CTE name
+            if (position < queryTokens.size() && queryTokens[position] == "(" && !skipGroup(position))
+                return SqlCommand::Unknown;
+            if (position >= queryTokens.size() || toLower(queryTokens[position++]) != "as")
+                return SqlCommand::Unknown;
+            if (position < queryTokens.size() && toLower(queryTokens[position]) == "not") {
+                ++position;
+                if (position >= queryTokens.size() || toLower(queryTokens[position++]) != "materialized")
+                    return SqlCommand::Unknown;
+            } else if (position < queryTokens.size() && toLower(queryTokens[position]) == "materialized") ++position;
+            if (!skipGroup(position)) return SqlCommand::Unknown;
+            if (position < queryTokens.size() && queryTokens[position] == ",") { ++position; continue; }
+            break;
+        }
+        if (position < queryTokens.size()) {
+            const std::string word = toLower(queryTokens[position]);
             if (word == "select") return SqlCommand::Select;
+            if (word == "values") return SqlCommand::Values;
             if (word == "insert") return SqlCommand::Insert;
             if (word == "update") return SqlCommand::Update;
             if (word == "delete") return SqlCommand::Delete;
@@ -1793,7 +1819,7 @@ ParseResult SQLParser::parse(const std::string& inputSql) {
         case SqlCommand::Merge:
             return parseMerge(sql);
         case SqlCommand::Values:
-            return parseValues(sql);
+            return parseSelect(sql);
 
         case SqlCommand::CreateTable: case SqlCommand::CreateIndex:
         case SqlCommand::CreateFullTextIndex: case SqlCommand::CreateHashIndex:
@@ -2278,9 +2304,12 @@ static ExprPtr parseRangeExpr(const std::vector<std::string>& tokens, size_t& po
         bin->op = negated ? "NOT IN" : "IN";
         bin->left = std::move(left);
         if (pos < tokens.size() && tokens[pos] == "(") {
+            const size_t queryBegin = pos;
             ++pos;
             if (pos < tokens.size() &&
-                SQLParser::toLower(tokens[pos]) == "select") {
+                (SQLParser::toLower(tokens[pos]) == "select" ||
+                 SQLParser::toLower(tokens[pos]) == "with" ||
+                 SQLParser::toLower(tokens[pos]) == "values")) {
                 // Subquery IN predicates are planned separately; retain their
                 // SQL text for that path rather than treating SELECT as a
                 // scalar list element.
@@ -2295,16 +2324,35 @@ static ExprPtr parseRangeExpr(const std::vector<std::string>& tokens, size_t& po
                         value += tokens[pos++];
                     }
                 }
-                if (pos < tokens.size() && tokens[pos] == ")") ++pos;
+                if (pos >= tokens.size() || tokens[pos] != ")") return nullptr;
+                ++pos;
                 list->value = value;
+                markSource(list.get(), tokens, queryBegin, pos);
                 // This RHS is a row-valued query grammar role, not a scalar
                 // IN-list datum or an already-bound scalar child. The mature
                 // relational row-IN consumer owns it until typed row-SubLink
                 // lowering is available.
                 if (const auto* row = dynamic_cast<const RowExpr*>(bin->left.get());
-                    row && row->constructor)
+                    row && row->constructor) {
                     list->type = ExprType::Subquery;
-                bin->right = std::move(list);
+                    bin->right = std::move(list);
+                } else {
+                    // The ordinary dispatcher must see the same typed query
+                    // consumer as the binder; an opaque IN literal otherwise
+                    // enters legacy text/list evaluation before preparation.
+                    auto any = std::make_unique<QuantifiedComparisonExpr>();
+                    any->op = "=";
+                    any->left = std::move(bin->left);
+                    list->value = "(" + list->value + ")";
+                    any->right = std::move(list);
+                    if (negated) {
+                        auto result = std::make_unique<UnaryOpExpr>();
+                        result->op = "NOT";
+                        result->operand = std::move(any);
+                        return result;
+                    }
+                    return any;
+                }
             } else {
                 auto list = std::make_unique<RowExpr>();
                 while (pos < tokens.size() && tokens[pos] != ")") {
@@ -3461,6 +3509,21 @@ static bool parseReturningClause(const std::vector<std::string>& tokens,
     return true;
 }
 
+static int identifierKeywordKind(const std::string& word);
+
+// FROM aliases and their column-name lists use ColId, not the parser's
+// broad inventory of all SQL keywords. Quoted identifiers retain spelling.
+static bool fromAliasIdentifier(const std::string& token) {
+    if (token.empty()) return false;
+    if (token.front() == '"') return token.size() > 1 && token.back() == '"';
+    const auto first = static_cast<unsigned char>(token.front());
+    if (!(std::isalpha(first) || first == '_' || first >= 0x80)) return false;
+    for (const unsigned char ch : token)
+        if (!(std::isalnum(ch) || ch == '_' || ch == '$' || ch >= 0x80)) return false;
+    const int category = identifierKeywordKind(SQLParser::toLower(token));
+    return category == 0 || category == 1;
+}
+
 // Parse one relation or derived query before composing JOINs. Never turn the
 // opening parenthesis into a physical relation name and lose its query tree.
 static std::unique_ptr<FromItem> parseFromAtom(const std::vector<std::string>& tokens, size_t& pos) {
@@ -3482,16 +3545,16 @@ static std::unique_ptr<FromItem> parseFromAtom(const std::vector<std::string>& t
     // AS alias or implicit alias
     if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "as") {
         ++pos;
-        if (pos < tokens.size()) item->alias = tokens[pos++];
-    } else if (pos < tokens.size() && !SQLParser::isKeyword(tokens[pos])
-               && tokens[pos] != "," && tokens[pos] != ")") {
+        if (pos >= tokens.size() || !fromAliasIdentifier(tokens[pos])) return nullptr;
+        item->alias = tokens[pos++];
+    } else if (pos < tokens.size() && fromAliasIdentifier(tokens[pos])) {
         item->alias = tokens[pos++];
     }
 
     if(!item->alias.empty() && pos<tokens.size() && tokens[pos]=="(") {
         ++pos;
         while(pos<tokens.size() && tokens[pos]!=")") {
-            if(tokens[pos]=="," || tokens[pos]=="(" || tokens[pos]==";" || SQLParser::isKeyword(tokens[pos]))return nullptr;
+            if(!fromAliasIdentifier(tokens[pos]))return nullptr;
             item->columnAliases.push_back(tokens[pos++]);
             if(pos<tokens.size() && tokens[pos]==","){++pos;if(pos>=tokens.size() || tokens[pos]==")")return nullptr;}
             else break;
@@ -3785,6 +3848,8 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
         return child;
     }
 
+    if (toLower(tokens.front()) == "values") return parseValues(sql);
+
     auto stmt = std::make_unique<SelectStmt>();
     size_t pos = 0;
 
@@ -3880,6 +3945,18 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
             r.success = true;
             return r;
         }
+    }
+
+    if (pos < tokens.size() && toLower(tokens[pos]) == "values") {
+        auto body = parse(joinParserTokens(tokens, pos, tokens.size()));
+        auto* values = body.isValid() ? dynamic_cast<SelectStmt*>(body.stmt.get()) : nullptr;
+        if (!values) {
+            r.error = body.error.empty() ? "WITH requires a query body" : body.error;
+            r.sqlState = body.sqlState;
+            return r;
+        }
+        values->ctes = std::move(stmt->ctes);
+        return body;
     }
 
     // Skip SELECT
@@ -6039,6 +6116,175 @@ ParseResult SQLParser::parseRelease(const std::string& sql) {
 // SET / SHOW / RESET / USE / DISCARD
 // ------------------------------------------------------------------------
 
+// PG18.6 pg_get_keywords() factual categories. SET's generic values accept
+// non-reserved words; dedicated TIME ZONE accepts IDENT, not keywords.
+// Keep this grammar-only table independent from the broad legacy isKeyword.
+static int timeZoneValueKeywordKind(const std::string& token) {
+    struct Keyword { const char* word; int kind; };
+    static constexpr Keyword keywords[] = {
+        {"abort", 1}, {"absent", 1}, {"absolute", 1}, {"access", 1},
+        {"action", 1}, {"add", 1}, {"admin", 1}, {"after", 1},
+        {"aggregate", 1}, {"all", 2}, {"also", 1}, {"alter", 1},
+        {"always", 1}, {"analyse", 2}, {"analyze", 2}, {"and", 2},
+        {"any", 2}, {"array", 2}, {"as", 2}, {"asc", 2},
+        {"asensitive", 1}, {"assertion", 1}, {"assignment", 1}, {"asymmetric", 2},
+        {"at", 1}, {"atomic", 1}, {"attach", 1}, {"attribute", 1},
+        {"authorization", 1}, {"backward", 1}, {"before", 1}, {"begin", 1},
+        {"between", 1}, {"bigint", 1}, {"binary", 1}, {"bit", 1},
+        {"boolean", 1}, {"both", 2}, {"breadth", 1}, {"by", 1},
+        {"cache", 1}, {"call", 1}, {"called", 1}, {"cascade", 1},
+        {"cascaded", 1}, {"case", 2}, {"cast", 2}, {"catalog", 1},
+        {"chain", 1}, {"char", 1}, {"character", 1}, {"characteristics", 1},
+        {"check", 2}, {"checkpoint", 1}, {"class", 1}, {"close", 1},
+        {"cluster", 1}, {"coalesce", 1}, {"collate", 2}, {"collation", 1},
+        {"column", 2}, {"columns", 1}, {"comment", 1}, {"comments", 1},
+        {"commit", 1}, {"committed", 1}, {"compression", 1}, {"concurrently", 1},
+        {"conditional", 1}, {"configuration", 1}, {"conflict", 1}, {"connection", 1},
+        {"constraint", 2}, {"constraints", 1}, {"content", 1}, {"continue", 1},
+        {"conversion", 1}, {"copy", 1}, {"cost", 1}, {"create", 2},
+        {"cross", 1}, {"csv", 1}, {"cube", 1}, {"current", 1},
+        {"current_catalog", 2}, {"current_date", 2}, {"current_role", 2}, {"current_schema", 1},
+        {"current_time", 2}, {"current_timestamp", 2}, {"current_user", 2}, {"cursor", 1},
+        {"cycle", 1}, {"data", 1}, {"database", 1}, {"day", 1},
+        {"deallocate", 1}, {"dec", 1}, {"decimal", 1}, {"declare", 1},
+        {"default", 2}, {"defaults", 1}, {"deferrable", 2}, {"deferred", 1},
+        {"definer", 1}, {"delete", 1}, {"delimiter", 1}, {"delimiters", 1},
+        {"depends", 1}, {"depth", 1}, {"desc", 2}, {"detach", 1},
+        {"dictionary", 1}, {"disable", 1}, {"discard", 1}, {"distinct", 2},
+        {"do", 2}, {"document", 1}, {"domain", 1}, {"double", 1},
+        {"drop", 1}, {"each", 1}, {"else", 2}, {"empty", 1},
+        {"enable", 1}, {"encoding", 1}, {"encrypted", 1}, {"end", 2},
+        {"enforced", 1}, {"enum", 1}, {"error", 1}, {"escape", 1},
+        {"event", 1}, {"except", 2}, {"exclude", 1}, {"excluding", 1},
+        {"exclusive", 1}, {"execute", 1}, {"exists", 1}, {"explain", 1},
+        {"expression", 1}, {"extension", 1}, {"external", 1}, {"extract", 1},
+        {"false", 2}, {"family", 1}, {"fetch", 2}, {"filter", 1},
+        {"finalize", 1}, {"first", 1}, {"float", 1}, {"following", 1},
+        {"for", 2}, {"force", 1}, {"foreign", 2}, {"format", 1},
+        {"forward", 1}, {"freeze", 1}, {"from", 2}, {"full", 1},
+        {"function", 1}, {"functions", 1}, {"generated", 1}, {"global", 1},
+        {"grant", 2}, {"granted", 1}, {"greatest", 1}, {"group", 2},
+        {"grouping", 1}, {"groups", 1}, {"handler", 1}, {"having", 2},
+        {"header", 1}, {"hold", 1}, {"hour", 1}, {"identity", 1},
+        {"if", 1}, {"ilike", 1}, {"immediate", 1}, {"immutable", 1},
+        {"implicit", 1}, {"import", 1}, {"in", 2}, {"include", 1},
+        {"including", 1}, {"increment", 1}, {"indent", 1}, {"index", 1},
+        {"indexes", 1}, {"inherit", 1}, {"inherits", 1}, {"initially", 2},
+        {"inline", 1}, {"inner", 1}, {"inout", 1}, {"input", 1},
+        {"insensitive", 1}, {"insert", 1}, {"instead", 1}, {"int", 1},
+        {"integer", 1}, {"intersect", 2}, {"interval", 1}, {"into", 2},
+        {"invoker", 1}, {"is", 1}, {"isnull", 1}, {"isolation", 1},
+        {"join", 1}, {"json", 1}, {"json_array", 1}, {"json_arrayagg", 1},
+        {"json_exists", 1}, {"json_object", 1}, {"json_objectagg", 1}, {"json_query", 1},
+        {"json_scalar", 1}, {"json_serialize", 1}, {"json_table", 1}, {"json_value", 1},
+        {"keep", 1}, {"key", 1}, {"keys", 1}, {"label", 1},
+        {"language", 1}, {"large", 1}, {"last", 1}, {"lateral", 2},
+        {"leading", 2}, {"leakproof", 1}, {"least", 1}, {"left", 1},
+        {"level", 1}, {"like", 1}, {"limit", 2}, {"listen", 1},
+        {"load", 1}, {"local", 1}, {"localtime", 2}, {"localtimestamp", 2},
+        {"location", 1}, {"lock", 1}, {"locked", 1}, {"logged", 1},
+        {"mapping", 1}, {"match", 1}, {"matched", 1}, {"materialized", 1},
+        {"maxvalue", 1}, {"merge", 1}, {"merge_action", 1}, {"method", 1},
+        {"minute", 1}, {"minvalue", 1}, {"mode", 1}, {"month", 1},
+        {"move", 1}, {"name", 1}, {"names", 1}, {"national", 1},
+        {"natural", 1}, {"nchar", 1}, {"nested", 1}, {"new", 1},
+        {"next", 1}, {"nfc", 1}, {"nfd", 1}, {"nfkc", 1},
+        {"nfkd", 1}, {"no", 1}, {"none", 1}, {"normalize", 1},
+        {"normalized", 1}, {"not", 2}, {"nothing", 1}, {"notify", 1},
+        {"notnull", 1}, {"nowait", 1}, {"null", 2}, {"nullif", 1},
+        {"nulls", 1}, {"numeric", 1}, {"object", 1}, {"objects", 1},
+        {"of", 1}, {"off", 1}, {"offset", 2}, {"oids", 1},
+        {"old", 1}, {"omit", 1}, {"on", 2}, {"only", 2},
+        {"operator", 1}, {"option", 1}, {"options", 1}, {"or", 2},
+        {"order", 2}, {"ordinality", 1}, {"others", 1}, {"out", 1},
+        {"outer", 1}, {"over", 1}, {"overlaps", 1}, {"overlay", 1},
+        {"overriding", 1}, {"owned", 1}, {"owner", 1}, {"parallel", 1},
+        {"parameter", 1}, {"parser", 1}, {"partial", 1}, {"partition", 1},
+        {"passing", 1}, {"password", 1}, {"path", 1}, {"period", 1},
+        {"placing", 2}, {"plan", 1}, {"plans", 1}, {"policy", 1},
+        {"position", 1}, {"preceding", 1}, {"precision", 1}, {"prepare", 1},
+        {"prepared", 1}, {"preserve", 1}, {"primary", 2}, {"prior", 1},
+        {"privileges", 1}, {"procedural", 1}, {"procedure", 1}, {"procedures", 1},
+        {"program", 1}, {"publication", 1}, {"quote", 1}, {"quotes", 1},
+        {"range", 1}, {"read", 1}, {"real", 1}, {"reassign", 1},
+        {"recursive", 1}, {"ref", 1}, {"references", 2}, {"referencing", 1},
+        {"refresh", 1}, {"reindex", 1}, {"relative", 1}, {"release", 1},
+        {"rename", 1}, {"repeatable", 1}, {"replace", 1}, {"replica", 1},
+        {"reset", 1}, {"restart", 1}, {"restrict", 1}, {"return", 1},
+        {"returning", 2}, {"returns", 1}, {"revoke", 1}, {"right", 1},
+        {"role", 1}, {"rollback", 1}, {"rollup", 1}, {"routine", 1},
+        {"routines", 1}, {"row", 1}, {"rows", 1}, {"rule", 1},
+        {"savepoint", 1}, {"scalar", 1}, {"schema", 1}, {"schemas", 1},
+        {"scroll", 1}, {"search", 1}, {"second", 1}, {"security", 1},
+        {"select", 2}, {"sequence", 1}, {"sequences", 1}, {"serializable", 1},
+        {"server", 1}, {"session", 1}, {"session_user", 2}, {"set", 1},
+        {"setof", 1}, {"sets", 1}, {"share", 1}, {"show", 1},
+        {"similar", 1}, {"simple", 1}, {"skip", 1}, {"smallint", 1},
+        {"snapshot", 1}, {"some", 2}, {"source", 1}, {"sql", 1},
+        {"stable", 1}, {"standalone", 1}, {"start", 1}, {"statement", 1},
+        {"statistics", 1}, {"stdin", 1}, {"stdout", 1}, {"storage", 1},
+        {"stored", 1}, {"strict", 1}, {"string", 1}, {"strip", 1},
+        {"subscription", 1}, {"substring", 1}, {"support", 1}, {"symmetric", 2},
+        {"sysid", 1}, {"system", 1}, {"system_user", 2}, {"table", 2},
+        {"tables", 1}, {"tablesample", 1}, {"tablespace", 1}, {"target", 1},
+        {"temp", 1}, {"template", 1}, {"temporary", 1}, {"text", 1},
+        {"then", 2}, {"ties", 1}, {"time", 1}, {"timestamp", 1},
+        {"to", 2}, {"trailing", 2}, {"transaction", 1}, {"transform", 1},
+        {"treat", 1}, {"trigger", 1}, {"trim", 1}, {"true", 2},
+        {"truncate", 1}, {"trusted", 1}, {"type", 1}, {"types", 1},
+        {"uescape", 1}, {"unbounded", 1}, {"uncommitted", 1}, {"unconditional", 1},
+        {"unencrypted", 1}, {"union", 2}, {"unique", 2}, {"unknown", 1},
+        {"unlisten", 1}, {"unlogged", 1}, {"until", 1}, {"update", 1},
+        {"user", 2}, {"using", 2}, {"vacuum", 1}, {"valid", 1},
+        {"validate", 1}, {"validator", 1}, {"value", 1}, {"values", 1},
+        {"varchar", 1}, {"variadic", 2}, {"varying", 1}, {"verbose", 1},
+        {"version", 1}, {"view", 1}, {"views", 1}, {"virtual", 1},
+        {"volatile", 1}, {"when", 2}, {"where", 2}, {"whitespace", 1},
+        {"window", 2}, {"with", 2}, {"within", 1}, {"without", 1},
+        {"work", 1}, {"wrapper", 1}, {"write", 1}, {"xml", 1},
+        {"xmlattributes", 1}, {"xmlconcat", 1}, {"xmlelement", 1}, {"xmlexists", 1},
+        {"xmlforest", 1}, {"xmlnamespaces", 1}, {"xmlparse", 1}, {"xmlpi", 1},
+        {"xmlroot", 1}, {"xmlserialize", 1}, {"xmltable", 1}, {"year", 1},
+        {"yes", 1}, {"zone", 1},
+    };
+    const auto word = SQLParser::toLower(token);
+    const auto* end = keywords + sizeof(keywords) / sizeof(keywords[0]);
+    const auto* found = std::lower_bound(keywords, end, word,
+        [](const Keyword& entry, const std::string& value) { return value.compare(entry.word) > 0; });
+    return found != end && word == found->word ? found->kind : 0;
+}
+
+static bool timeZoneNumericToken(const std::string& token) {
+    if (isNumericToken(token)) return true;
+    if (token.size() > 2 && token[0] == '0') {
+        const char prefix = static_cast<char>(std::tolower(static_cast<unsigned char>(token[1])));
+        const unsigned base = prefix == 'x' ? 16 : prefix == 'o' ? 8 : prefix == 'b' ? 2 : 0;
+        if (base) {
+            const auto digit = [base](unsigned char c) {
+                const unsigned value = c >= '0' && c <= '9' ? c - '0'
+                    : c >= 'a' && c <= 'f' ? c - 'a' + 10
+                    : c >= 'A' && c <= 'F' ? c - 'A' + 10 : 99;
+                return value < base;
+            };
+            bool seen = false;
+            for (size_t i = 2; i < token.size(); ++i) {
+                if (digit(static_cast<unsigned char>(token[i]))) { seen = true; continue; }
+                if (token[i] != '_' || i + 1 == token.size() ||
+                    !digit(static_cast<unsigned char>(token[i + 1]))) return false;
+            }
+            return seen;
+        }
+    }
+    std::string decimal;
+    for (size_t i = 0; i < token.size(); ++i) {
+        if (token[i] != '_') { decimal += token[i]; continue; }
+        if (i == 0 || i + 1 == token.size() ||
+            !std::isdigit(static_cast<unsigned char>(token[i - 1])) ||
+            !std::isdigit(static_cast<unsigned char>(token[i + 1]))) return false;
+    }
+    return isNumericToken(decimal);
+}
+
 // PostgreSQL 18.6 kwlist.h categories: quote non-unreserved keywords;
 // 0 = IDENT/unreserved, 1 = column-name, 2 = reserved, 3 = type/function-name.
 // Generic SET values allow 0/1/3 plus TRUE/FALSE/ON; target ColId allows 0/1.
@@ -6109,6 +6355,11 @@ ParseResult SQLParser::parseSet(const std::string& sql) {
     if (isSetTransactionStatement(sql)) return parseBegin(sql);
     ParseResult r;
     auto tokens = tokenize(sql);
+    if (tokens.empty() || toLower(tokens.front()) != "set") {
+        r.error = "SET keyword is required";
+        r.sqlState = "42601";
+        return r;
+    }
     if (tokens.size() < 2) {
         r.error = "SET statement too short";
         return r;
@@ -6177,6 +6428,158 @@ ParseResult SQLParser::parseSet(const std::string& sql) {
             }
         }
         stmt->name = std::move(name);
+        r.success = true; r.stmt = std::move(stmt); return r;
+    }
+
+    const bool genericTimeZone = pos < tokens.size() &&
+        toLower(parseRoutineIdentifier(tokens[pos])) == "timezone" &&
+        (pos + 1 == tokens.size() || tokens[pos + 1] != ".");
+    const bool dedicatedTimeZone = pos + 1 < tokens.size() &&
+        toLower(tokens[pos]) == "time" && toLower(tokens[pos + 1]) == "zone";
+    if (genericTimeZone || dedicatedTimeZone) {
+        // Only this statement's scalar SET grammar needs local raw spans.
+        // Preserve newline string continuation; normalized execution SQL has
+        // already collapsed precisely the whitespace that matters here.
+        BindingParseContext context{sql};
+        auto* previous = bindingParse;
+        bindingParse = &context;
+        struct Restore { BindingParseContext* previous; ~Restore() { bindingParse = previous; } } restore{previous};
+        const auto values = tokenize(sql);
+        const auto& spans = context.tokens.at(values.data()).spans;
+        size_t end = values.size();
+        if (end && values[end - 1] == ";") --end;
+        size_t value = pos + (dedicatedTimeZone ? 2 : 1);
+        const auto syntax = [](const char* message) {
+            ParseResult failed;
+            failed.error = message;
+            failed.sqlState = "42601";
+            return failed;
+        };
+        stmt->name = "timezone";
+        if (genericTimeZone) {
+            if (value + 2 == end && toLower(values[value]) == "from" &&
+                toLower(values[value + 1]) == "current") {
+                r.success = true; r.stmt = std::move(stmt); return r;
+            }
+            if (value == end || (values[value] != "=" && toLower(values[value]) != "to"))
+                return syntax("SET TimeZone requires TO or =");
+            ++value;
+        }
+        if (value == end) return syntax("SET TimeZone requires a value");
+        const std::string first = toLower(values[value]);
+        if (first == "default" || (dedicatedTimeZone && first == "local")) {
+            if (value + 1 != end) return syntax("unexpected tokens after TimeZone reset keyword");
+            stmt->values = {"default"};
+            r.success = true; r.stmt = std::move(stmt); return r;
+        }
+        const auto identifier = [](const std::string& token) {
+            if (token.size() >= 2 && token.front() == '"' && token.back() == '"') return token.size() > 2;
+            if (token.empty()) return false;
+            const auto first = static_cast<unsigned char>(token.front());
+            if (!std::isalpha(first) && first != '_' && first < 0x80) return false;
+            for (const unsigned char c : token)
+                if (!std::isalnum(c) && c != '_' && c != '$' && c < 0x80) return false;
+            return true;
+        };
+        const auto continuation = [&](size_t before, size_t after) {
+            if (sql[spans[after].first] != '\'') return false;
+            const size_t begin = spans[before].second, limit = spans[after].first;
+            bool newline = false;
+            for (size_t i = begin; i < limit;) {
+                if (std::isspace(static_cast<unsigned char>(sql[i]))) {
+                    newline = newline || sql[i] == '\n' || sql[i] == '\r';
+                    ++i;
+                } else if (sql[i] == '-' && i + 1 < limit && sql[i + 1] == '-') {
+                    i += 2;
+                    while (i < limit && sql[i] != '\n' && sql[i] != '\r') ++i;
+                } else return false; // block comments do not continue Sconst
+            }
+            return newline;
+        };
+        const auto stringValue = [&](size_t& at, std::string& result) {
+            if (at == end || !isStringLiteralToken(values[at])) return false;
+            const size_t raw = spans[at].first;
+            const bool escape = (sql[raw] == 'e' || sql[raw] == 'E') &&
+                raw + 1 < sql.size() && sql[raw + 1] == '\'';
+            const bool canContinue = sql[raw] == '\'' || escape;
+            result = values[at++];
+            while (canContinue && at < end && isStringLiteralToken(values[at]) &&
+                   continuation(at - 1, at)) {
+                const auto next = escape ? normalizeEscapeStringToken("E" + values[at]) : values[at];
+                result.pop_back();
+                result += next.substr(1);
+                ++at;
+            }
+            return true;
+        };
+        if (dedicatedTimeZone && first == "interval") {
+            const size_t begin = value++;
+            bool precision = false;
+            if (value < end && values[value] == "(") {
+                precision = true;
+                ++value;
+                if (value == end || values[value].empty() ||
+                    !std::all_of(values[value].begin(), values[value].end(),
+                        [](unsigned char c) { return std::isdigit(c); }))
+                    return syntax("INTERVAL precision requires an integer constant");
+                if (++value == end || values[value++] != ")")
+                    return syntax("unterminated INTERVAL precision");
+            }
+            std::string literal;
+            if (!stringValue(value, literal)) return syntax("TimeZone INTERVAL requires a string literal");
+            if (!precision && value < end) {
+                const std::string field = toLower(values[value++]);
+                if (field != "hour" && field != "minute")
+                    return syntax("time zone interval must be HOUR or HOUR TO MINUTE");
+                if (value < end) {
+                    if (field != "hour" || value + 2 != end ||
+                        toLower(values[value]) != "to" || toLower(values[value + 1]) != "minute")
+                        return syntax("invalid time zone interval qualifier");
+                    value += 2;
+                }
+            }
+            if (value != end) return syntax("unexpected tokens after TimeZone INTERVAL");
+            stmt->values = {joinParserTokens(values, begin, end)};
+            r.success = true; r.stmt = std::move(stmt); return r;
+        }
+        const auto scalar = [&](size_t& at, std::string& result) {
+            if (stringValue(at, result)) return true;
+            if (at == end) return false;
+            const auto& token = values[at];
+            if (token == "+" || token == "-" ||
+                (!token.empty() && (std::isdigit(static_cast<unsigned char>(token.front())) || token.front() == '.'))) {
+                result.clear();
+                if (token == "+" || token == "-") { result = token; ++at; }
+                if (at == end || values[at].empty() ||
+                    (!std::isdigit(static_cast<unsigned char>(values[at].front())) && values[at].front() != '.'))
+                    return false;
+                size_t last = at + 1;
+                while (last < end && values[last] != "," && spans[last - 1].second == spans[last].first)
+                    ++last;
+                const std::string number = sql.substr(spans[at].first, spans[last - 1].second - spans[at].first);
+                if (!timeZoneNumericToken(number)) return false;
+                result += number;
+                at = last;
+                return true;
+            }
+            if (!identifier(token)) return false;
+            const bool quoted = token.front() == '"';
+            const int category = quoted ? 0 : timeZoneValueKeywordKind(token);
+            const std::string word = toLower(token);
+            if (dedicatedTimeZone ? category != 0
+                : category == 2 && word != "true" && word != "false" && word != "on") return false;
+            result = token;
+            ++at;
+            return true;
+        };
+        for (;;) {
+            std::string literal;
+            if (!scalar(value, literal)) return syntax("invalid TimeZone value syntax");
+            stmt->values.push_back(std::move(literal));
+            if (value == end) break;
+            if (dedicatedTimeZone || values[value++] != "," || value == end)
+                return syntax("unexpected tokens after TimeZone value");
+        }
         r.success = true; r.stmt = std::move(stmt); return r;
     }
 
@@ -6319,6 +6722,11 @@ ParseResult SQLParser::parseSet(const std::string& sql) {
         return r;
     }
     stmt->name = tokens[pos++];
+    // A qualified custom parameter is not the builtin named by its first token.
+    while (pos + 1 < tokens.size() && tokens[pos] == ".") {
+        stmt->name += tokens[pos] + tokens[pos + 1];
+        pos += 2;
+    }
 
     if (pos < tokens.size() && (toLower(tokens[pos]) == "to" || tokens[pos] == "=")) ++pos;
 
@@ -10102,23 +10510,66 @@ StmtPtr SQLParser::parseDropType(const std::vector<std::string>& tokens, size_t&
     return stmt;
 }
 
-StmtPtr SQLParser::parseDropFunction(const std::vector<std::string>& tokens, size_t& pos) {
-    auto stmt = std::make_unique<DropStmt>(SqlCommand::DropFunction);
-    stmt->objectType = "FUNCTION";
-    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
-        stmt->ifExists = true; pos += 2;
+
+static bool parseRoutineIdentity(const std::vector<std::string>& tokens,size_t& pos,
+                                 RoutineIdentitySpec& result) {
+    if(!parseQualifiedRoutineName(tokens,pos,result.name))return false;
+    if(pos==tokens.size() || tokens[pos]!="(")return true;
+    ++pos;result.argumentTypes.emplace();
+    if(pos<tokens.size() && tokens[pos]==")"){++pos;return true;}
+    std::vector<std::string> part;
+    unsigned depth=0;
+    while(pos<tokens.size()) {
+        const auto& token=tokens[pos];
+        if(token==";")return false;
+        if(!depth && (token=="," || token==")")) {
+            if(part.empty())return false;
+            std::string declaration;
+            for(const auto& item:part){if(!declaration.empty())declaration+=' ';declaration+=item;}
+            result.argumentTypes->push_back(std::move(declaration));part.clear();++pos;
+            if(token==")")return true;
+            continue;
+        }
+        if(token=="(")++depth;
+        else if(token==")"){if(!depth)return false;--depth;}
+        part.push_back(token);++pos;
     }
-    std::string name;
-    if (!parseQualifiedRoutineName(tokens, pos, name)) return nullptr;
-    stmt->objectNames.push_back(std::move(name));
-    while (pos < tokens.size() && tokens[pos] != ";") {
-        std::string w = toLower(tokens[pos]);
-        if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
-        if (w == "restrict") { ++pos; continue; }
-        if (w == ",") { ++pos; continue; }
-        stmt->objectNames.push_back(tokens[pos++]);
+    return false;
+}
+
+static StmtPtr parseRoutineDrop(const std::vector<std::string>& tokens,size_t& pos,
+    SqlCommand command,const std::string& kind) {
+    auto stmt=std::make_unique<DropStmt>(command);stmt->objectType=kind;
+    if(pos+1<tokens.size() && SQLParser::toLower(tokens[pos])=="if" &&
+       SQLParser::toLower(tokens[pos+1])=="exists"){stmt->ifExists=true;pos+=2;}
+    bool behavior=false;
+    while(pos<tokens.size() && tokens[pos]!=";") {
+        RoutineIdentitySpec identity;
+        const size_t first=pos;
+        if(!parseRoutineIdentity(tokens,pos,identity))return nullptr;
+        // Preserve the old observation fields for native AST clients, while
+        // actual DDL consumes the structured target/signature below.
+        stmt->objectNames.push_back(identity.name);
+        size_t nameEnd=first+1;
+        if(nameEnd<tokens.size() && tokens[nameEnd]==".")nameEnd+=2;
+        for(size_t i=nameEnd;i<pos;++i)if(tokens[i]!=",")stmt->objectNames.push_back(tokens[i]);
+        stmt->routineTargets.push_back(std::move(identity));
+        if(pos<tokens.size() && tokens[pos]==","){++pos;if(pos==tokens.size() || tokens[pos]==";")return nullptr;continue;}
+        if(pos<tokens.size() && (SQLParser::toLower(tokens[pos])=="cascade" || SQLParser::toLower(tokens[pos])=="restrict")) {
+            behavior=true;stmt->cascade=SQLParser::toLower(tokens[pos++])=="cascade";
+        }
+        if(pos<tokens.size() && tokens[pos]!=";")return nullptr;
+        break;
     }
+    (void)behavior;
+    if(stmt->routineTargets.empty())return nullptr;
+    if(pos<tokens.size() && tokens[pos]==";")++pos;
+    if(pos!=tokens.size())return nullptr;
     return stmt;
+}
+
+StmtPtr SQLParser::parseDropFunction(const std::vector<std::string>& tokens,size_t& pos) {
+    return parseRoutineDrop(tokens,pos,SqlCommand::DropFunction,"FUNCTION");
 }
 
 StmtPtr SQLParser::parseDropProcedure(const std::vector<std::string>& tokens, size_t& pos) {
@@ -10140,23 +10591,8 @@ StmtPtr SQLParser::parseDropProcedure(const std::vector<std::string>& tokens, si
     return stmt;
 }
 
-StmtPtr SQLParser::parseDropRoutine(const std::vector<std::string>& tokens, size_t& pos) {
-    auto stmt = std::make_unique<DropStmt>(SqlCommand::DropRoutine);
-    stmt->objectType = "ROUTINE";
-    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
-        stmt->ifExists = true; pos += 2;
-    }
-    std::string name;
-    if (!parseQualifiedRoutineName(tokens, pos, name)) return nullptr;
-    stmt->objectNames.push_back(std::move(name));
-    while (pos < tokens.size() && tokens[pos] != ";") {
-        std::string w = toLower(tokens[pos]);
-        if (w == "cascade") { stmt->cascade = true; ++pos; continue; }
-        if (w == "restrict") { ++pos; continue; }
-        if (w == ",") { ++pos; continue; }
-        stmt->objectNames.push_back(tokens[pos++]);
-    }
-    return stmt;
+StmtPtr SQLParser::parseDropRoutine(const std::vector<std::string>& tokens,size_t& pos) {
+    return parseRoutineDrop(tokens,pos,SqlCommand::DropRoutine,"ROUTINE");
 }
 
 StmtPtr SQLParser::parseDropTrigger(const std::vector<std::string>& tokens, size_t& pos) {
@@ -11170,8 +11606,23 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
             } else if (pos < tokens.size() && toLower(tokens[pos]) == "unlogged") {
                 sub.action = AlterTableStmt::Action::SetUnlogged; ++pos; recognized = true;
             } else if (pos < tokens.size() && toLower(tokens[pos]) == "schema") {
+                // SET SCHEMA is a standalone action and consumes one ColId,
+                // not a raw SQL token or a qualified destination path.
                 sub.action = AlterTableStmt::Action::SetSchema; ++pos;
-                if (pos < tokens.size()) sub.newName = tokens[pos++];
+                if (!stmt->subCommands.empty() || pos >= tokens.size()) return nullptr;
+                const auto& token = tokens[pos++];
+                const bool quoted = token.size() >= 2 && token.front() == '"' && token.back() == '"';
+                if (!quoted) {
+                    if (token.empty() || identifierKeywordKind(toLower(token)) > 1) return nullptr;
+                    const auto first = static_cast<unsigned char>(token.front());
+                    if (!std::isalpha(first) && first != '_' && first < 128) return nullptr;
+                    for (const unsigned char c : token)
+                        if (!std::isalnum(c) && c != '_' && c != '$' && c < 128) return nullptr;
+                }
+                sub.newName = parseRoutineIdentifier(token);
+                if (sub.newName.empty()) return nullptr;
+                if (pos < tokens.size() && tokens[pos] == ";") ++pos;
+                if (pos != tokens.size()) return nullptr;
                 recognized = true;
             } else if (pos < tokens.size() && toLower(tokens[pos]) == "tablespace") {
                 sub.action = AlterTableStmt::Action::SetTablespace; ++pos;
@@ -11519,31 +11970,20 @@ StmtPtr SQLParser::parseAlterType(const std::vector<std::string>& tokens, size_t
     return stmt;
 }
 
-StmtPtr SQLParser::parseAlterFunction(const std::vector<std::string>& tokens, size_t& pos) {
-    auto stmt = std::make_unique<AlterObjectStmt>(SqlCommand::AlterFunction);
-    stmt->objectType = "FUNCTION";
-    if (pos + 1 < tokens.size() && match(tokens, pos, "if") && match(tokens, pos + 1, "exists")) {
-        stmt->ifExists = true; pos += 2;
+StmtPtr SQLParser::parseAlterFunction(const std::vector<std::string>& tokens,size_t& pos) {
+    auto stmt=std::make_unique<AlterObjectStmt>(SqlCommand::AlterFunction);
+    stmt->objectType="FUNCTION";
+    RoutineIdentitySpec identity;
+    if(!parseRoutineIdentity(tokens,pos,identity))return nullptr;
+    stmt->objectName=std::move(identity.name);
+    stmt->routineInputTypes=std::move(identity.argumentTypes);
+    while(pos<tokens.size() && tokens[pos]!=";") {
+        if(!stmt->subCommand.empty())stmt->subCommand+=' ';
+        stmt->subCommand+=tokens[pos++];
     }
-    if (pos < tokens.size() && toLower(tokens[pos]) == "only") {
-        stmt->only = true; ++pos;
-    }
-    if (pos < tokens.size()) {
-        stmt->objectName = tokens[pos++];
-        if (pos < tokens.size() && tokens[pos] == ".") {
-            ++pos;
-            if (pos < tokens.size()) {
-                stmt->schema = stmt->objectName;
-                stmt->objectName = tokens[pos++];
-            }
-        }
-    }
-    std::string rest;
-    while (pos < tokens.size() && tokens[pos] != ";") {
-        if (!rest.empty()) rest += " ";
-        rest += tokens[pos++];
-    }
-    stmt->subCommand = rest;
+    if(stmt->subCommand.empty())return nullptr;
+    if(pos<tokens.size() && tokens[pos]==";")++pos;
+    if(pos!=tokens.size())return nullptr;
     return stmt;
 }
 
