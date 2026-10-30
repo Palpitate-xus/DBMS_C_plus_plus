@@ -1,27 +1,6 @@
 # 2026-10-13 审查与验证入口
 
-最新有限修复：[R185排序中断传播](issue-review-r185-sort-interrupt-propagation.md)统一执行器12处排序的取消/超时检查，
-保留原比较、类型、NULL/tie及求值规则。修正夹具后旧80控制完整40失败；两侧新80及各19完整入口均实际全0。
-每侧74对象16程序/127头核对，Root正常1CPP并链接/repeat零；Main为同源已验证donor重新链接，不冒fresh TU。
-原273全文已保存在[原子范围账](review-requirement-clauses.json)，仅3项拆为38条件、其余270未拆解含原15暂缓，未声称全审。
-work_mem/spill等仍未闭合；原22/166/70/15不变，登记1493/Root1505、606MD/Root609MD，原12入口/三文档保留。
-不是全1493/修复后完整72/TLS/sanitizer验收，总目标未完成；不push，不启用Actions。以下记录按当时输入解释。
-
-
-最新有限修复：[R184测试数据目录隔离](issue-review-r184-test-data-directory-isolation.md)使公共helper在子程序启动前选私有数据根，
-父环境/cwd不变。旧同一7控制完整4失败，候选及Root完整7通过；两侧各4native/3真实Main通过，调用者标记目录保持不变。
-只改脚本及既有测试，全部CPP/127头和匹配程序不变，不冒fresh编译或修复后新完整72；旧72另记。
-跟踪605MD/1492入口，Root608MD/1504入口；原12未接受入口与三份文档保留，原273状态22/166/70/15不变。
-总目标未完成，历史R164超时原因未定、明确暂缓不恢复；不push，不启用Actions。以下记录按当时输入解释。
-
-
-当前完整矩阵复验：[原72入口](issue-review-current-full72-revalidation.md)在accepted-only clean与工作区各72实际全0，
-原35native/34协议/3真实Main、956及190额外raw门均保留，默认15秒/持久化未弱化。
-每侧97对象39程序核对，零C++编译、38新链接，donor不冒fresh；2206accepted源码与tested clean一致，Root2325保留。
-这不是全1492或原273验收：仅15条总账含本矩阵直接引用测试，258条不能据此关闭；require-complete两侧仍实际1。
-R164旧超时日志和未定根因保留，新通过不倒推原因已修。原22/166/70/15状态及明确暂缓不变。
-不push，Actions禁用。以下记录按当时输入和范围解释。
-
+近期修复与历次验证集中见[审查索引](review-index.md#近期修复与验证记录)，当前实现和性能范围见[状态说明](production-status.md#当前状态与验证范围)。
 
 ## 原273项的下一阶段验收计划
 
@@ -47,84 +26,6 @@ R182还保留数组组合表达式最大样本约6.22秒的残余开销，尚未
 本次原文/引用映射：`/tmp/dbms-ledger-requirement-preflight._xa5xdjw/requirements-and-evidence-map.json`，SHA256 `9b84c7a0d37f53a01f7eb14d85c0ab1010765defc4e14e74aca9fa2026aef75b`。
 共273行；22勾选与JSON一致，原证据/测试引用未发现未跟踪路径。此映射是审计输入，
 不是273项已审完或全功能验收。当前跟踪603MD/1492入口，Root606MD/1504入口；原12未接受入口仍分离。
-
-最新总清单复查：accepted-only 17f06229的R164原完整956项实际0，保持默认15秒/原断言，
-仅监视本次自有进程；不是当前完整72通过，历史两次超时原因仍未确定，未冒称R164全部关闭。
-原273项全文、状态与证据引用已建立逐项映射；22 complete/166 partial/70 unverified/15 deferred，
-22个勾选与JSON一致、引用均已跟踪，但文件存在或既有complete标签本身不是当前充分证明。
-明确未完成示例：OPT-08执行计划仍注明index-only scan未实现，VisibilityMap头注释不能替代执行证据。
-下一阶段先复验完整矩阵，再按P0及原未验证/部分项分解原子要求、补实现与回归，逐项有证据后更新状态。
-本轮原功能项未重写；R180等用户暂缓不恢复，总目标未完成。不push，Actions禁用。
-
-最新有限修复：[R182共享UTF-8拆分](issue-review-r182-utf8-split-linear.md)统一修复TRIM、LPAD/RPAD、
-TRANSLATE各实参和STRING_TO_ARRAY(NULL delimiter)的平方级前缀扫描，保留各自规则。
-PG完整329、旧R183完整329及V2 native76语义全0；这是性能修复，不是旧兼容性错值。
-Root与accepted-only clean各23完整入口实际全0，含新76/329及原80/96/294/80/190/654、三个真实Main。
-每侧76对象18当前程序/127头已核对；fresh1生产1native，57生产13native/stub/3Main为已验证donor，
-所有程序新链接当前库；Root normal1CPP并链接/repeat零编译零链接，clean显式构建。
-全部2206已接受源码投影等于tested clean；Root2325保留其他改动及2323源码/118缓存恢复副本。
-跟踪603份MD、921native+568注册Python+3Main=1492入口；工作区606份MD、927+574+3=1504，
-原12未接受入口与三份文档仍分离；V1九个错误类型期望/-6中止及R183独立修复保留，未删检查。
-这不是全1492/完整72/TLS/整库sanitizer验收。
-R180及其他用户暂缓不恢复，R164超时仍未解决；原273仍22/166/70/15，总目标未完成。
-不push，Actions禁用。以下状态与数量均指记录当时。
-
-最新有限修复：[R183 STRING_TO_ARRAY回调身份](issue-review-r183-string-to-array-callback-identity.md)
-已按实际callback提供数组元数据，opaque替换保持未知声明/原生身份，不再错误强转数组。
-旧native60完整1/60失败，非60个独立bug；Root及accepted-only clean各21入口实际全0，
-含新native60、原完整数组库、80/96/294/80/190/654及三个真实Main。
-每侧75对象17当前程序/127头核对；fresh1生产2native，57生产11native/stub/3Main为匹配donor，
-全部新链接当前库；Root normal1CPP并链接、repeat零编译零链接，clean显式编译。
-2204已接受源码投影与tested clean相同，Root2323保留外来改动及2322源码/118缓存恢复副本。
-跟踪603份MD、920native+567注册Python+3Main=1490入口；Root606份MD、926+573+3=1502，
-原12未接受入口分离；[R182拆分性能](issue-review-r182-utf8-split-linear.md)仍未接受，V1失败原样保留，需新版本继续。
-R164仍未解决，R180及其他暂缓不恢复；原273仍22/166/70/15，总目标未完成。
-不是全1490/完整72/TLS/整库sanitizer验收；不push，Actions禁用。以下记录按当时状态解释。
-
-最新开放：[R182共享UTF-8拆分](issue-review-r182-utf8-split-linear.md)已完成PG329与旧版329全0对照，
-候选已编译但未验收；首轮原生检查因错误ARRAY类型期望及真实opaque回调数组强转异常而中止，完整失败保留。
-[R183 STRING_TO_ARRAY回调身份](issue-review-r183-string-to-array-callback-identity.md)单列真实缺陷，
-先独立修复实际callee元数据，再恢复R182严格验证；不删除失败检查、不将候选计作已修复。
-跟踪603份MD、919native+567注册Python+3Main=1489入口；Root606份MD、925+573+3=1501，
-新增文档不等于新增接受测试，原12未接受入口仍分离。R164未解决，R180等暂缓不恢复。
-原273仍22/166/70/15，总目标未完成；不push，Actions禁用。以下记录按当时状态解释。
-
-最新有限修复：[R181 REVERSE线性扫描](issue-review-r181-reverse-linear.md)消除长文本反转的平方级前缀扫描，
-保留UTF-8码点、TEXT/CHAR、NULL、BYTEA及实参求值语义；这是性能修复，不是旧版兼容性错值。
-PG完整96、旧版完整96及native80语义全0；Root及accepted-only clean各19入口实际全0，
-包含新80/96、原294/80/190/654及三个新链接当前库的真实Main，clean本轮fresh3、Root验证复用3。
-每侧73对象15程序/127头已核对；fresh1生产/2native，57生产/9native/stub为已验证donor。
-Root normal1CPP并链接、repeat零编译零链接；clean显式编译，未冒称normal/repeat或donor fresh。
-全部2203已接受源码投影与tested clean一致；Root2322保留其他改动及2320源码/118缓存恢复副本。
-跟踪601份MD、919native+567注册Python+3Main=1489入口；工作区604份MD、925+573+3=1501，
-原12未接受入口和三份文档仍分离；不是1489全量、完整72、TLS或整库sanitizer验收。
-R180按最新skip it暂缓，其他暂缓不恢复；R164超时仍未解决。原273仍22/166/70/15，总目标未完成。
-不push，Actions禁用。以下记录中的状态和数量均指记录当时。
-
-最新用户暂缓：[R180 POSITION语法/参数约定](issue-review-r180-position-call-identity.md)按最新“skip it”停止实现。
-两侧各24次观察及修改方法继续保留；没有生产修改、注册测试或修复通过声明，普通continue不恢复本项。
-下一项独立审查为字符串REVERSE的重复UTF-8前缀扫描；目前仅源码观察，尚未验收修复。
-已接受仍为下述R179有限修复；R164及总273继续未完成，其他用户暂缓不恢复。不push，Actions禁用。
-
-最新有限修复：[R179 STRPOS声明](issue-review-r179-strpos-signatures.md)已完成真实TEXT/TEXT签名、
-错误阶段/空输入/参数推断/同名重载及opaque native覆盖修复。PG294全0；旧294有140断言差异、
-旧native76有49失败，均完整记录，非140/49个独立缺陷。Root及accepted-only clean各16入口实际全0，
-含native76、完整294/80/190/654和三个本轮fresh编译、新链接当前库的真实Main。
-每侧71对象13程序/127头独立核对；Root normal3CPP并链接、repeat零编译/零链接，clean显式3CPP加55已核对donor，
-未冒称clean normal/repeat或donor fresh；全部2201已接受源码投影与tested clean一致，Root2320保留原有其他改动。
-跟踪600份MD、918native+566注册Python+3Main=1487入口；工作区603份MD、924+572+3=1499，
-原12未接受入口及三份文档仍分离。[R180 POSITION](issue-review-r180-position-call-identity.md)仍开放，不用本项关闭。
-这不是1487全量/完整72/TLS/整库sanitizer验收；R164两次超时仍未解决，R177等用户暂缓不恢复。
-原273仍22 complete/166 partial/70 unverified/15 deferred，总目标未完成；不push，Actions禁用。
-
-最新有限修复：[R178空字符串REPEAT](issue-review-r178-repeat-empty-input.md)在参数校验后直接返回，
-避免按次数进行空追加；不是兼容性错值修复，PG也有相似旧耗时。PG完整80项通过，
-工作区及accepted-only clean各11入口（8native/3协议）实际全0，包含80/190/654完整协议。
-原生增加4个空输入边界控制；首轮8通过/3启动失败及数据目录驱动修正记录保留。
-跟踪598份MD、917native+565注册Python+3Main=1485入口；工作区601份MD、923+571+3=1497，
-原12个未接受入口及三份文档仍分开保留；这不是1485全量、完整72、TLS或整库sanitizer验收。
-R177按用户要求暂缓，不恢复R173/R156等分支；R164超时仍未解决，非新增暂缓。
-原273仍22 complete /166 partial /70 unverified /15 deferred，总目标未完成；不push，Actions禁用。
 
 ## 历史记录（以下状态与数量均指记录当时）
 

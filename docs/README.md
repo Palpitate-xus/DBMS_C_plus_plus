@@ -3,6 +3,9 @@
 使用项目从 [README](../README.md)、[使用手册](MANUAL.md)和[打包与部署](PACKAGING.md)开始。
 接口范围以[兼容性契约](compatibility-contract.md)为准；命令示例不代表所有组合均已实现。
 
+当前实现、已验证范围及剩余瓶颈集中见[状态说明](production-status.md#当前状态与验证范围)。
+文档清单覆盖仓库 Markdown；历史问题和发布快照保留对应批次结论，不作为当前版本的全部能力声明。
+
 ## 审查、问题与验证
 
 - [代码审查索引](review-index.md)：当前审查报告、复现、修复方法与验证边界。
@@ -19,11 +22,12 @@
 - [SQL 命令参考](commandsList.md)
 - [解析器](../src/parser/README.md)、[执行器](../src/executor/README.md)、[系统目录](../src/catalog/README.md)、[复制模块](../src/replication/README.md)
 - [变更记录](../CHANGELOG.md)与[生产化状态](production-status.md)
+- 文档维护检查：在仓库根目录运行 `python3 scripts/check_docs.py`；新增、移动或删除文档后用 `--update-inventory` 更新[清单](documentation-inventory.md)。
 
 ## 如何阅读历史文档
 
 `issue-*.md` 保存对应提交、失败和局部验证证据；其中的 PASS 只适用于文档明确标注的输入与范围。
-`archive/`、旧版本发布说明和按日期追加的批次记录用于追溯，不是当前版本的能力声明。
+历史计划、旧 TODO、`archive/`、旧版本发布说明和按日期追加的批次记录用于追溯，不是当前版本的能力声明。
 后续审查可以推翻旧结论，最新报告会说明依据，原始失败记录继续保留。
 
 完整回归、静态审查、差分测试、sanitizer 和并发测试覆盖不同问题。任何单项通过都不能证明没有 bug。
