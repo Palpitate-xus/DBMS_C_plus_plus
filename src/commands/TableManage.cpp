@@ -1,4 +1,5 @@
 #include "TableManage.h"
+#include "commands/StoredRowNull.h"
 #include "commands/RelationSchemaMove.h"
 #include "commands/RoutineStore.h"
 #include "commands/SchemaNamespace.h"
@@ -2463,6 +2464,24 @@ StorageEngine::TransactionContext& StorageEngine::transactionContext() const {
     auto& context = transactionContexts_[worker];
     if (!context) context = std::make_unique<TransactionContext>();
     return *context;
+}
+
+std::optional<uint64_t> StorageEngine::indexReadSnapshotFence(
+        const std::string& dbname) const {
+    const auto& context = transactionContext();
+    const bool currentReader = context.inTransaction && context.txnDB == dbname &&
+        context.currentTxnId != 0 && context.snapshotAcquired && !context.hasWrite &&
+        context.txnLog.empty() && context.ddlUndoActions.empty() &&
+        !context.transactionBackupDirty && context.readView.activeTxnIds.empty();
+    std::lock_guard<std::mutex> lock(globalTxnMutex());
+    const uint64_t fence = TxnIdGenerator::instance().maxCommittedTxId();
+    if (context.inTransaction &&
+        (!currentReader || context.readView.lowLimitId != fence + 1))
+        return std::nullopt;
+    for (const auto& [xid, database] : activeTransactionDatabases())
+        if (database == dbname && !(currentReader && xid == context.currentTxnId))
+            return std::nullopt;
+    return fence;
 }
 
 void StorageEngine::endBackendSession() {
@@ -8652,26 +8671,7 @@ bool StorageEngine::isColumnNullByRid(const std::string& dbname,
                                       const std::string& tablename,
                                       int64_t rid, size_t colIdx) const {
     const TableSchema tbl = getTableSchema(dbname, tablename);
-    if (colIdx >= tbl.len || !tbl.cols[colIdx].isNull) return false;
-    PageAllocator* pa = getPageAllocator(dbname, tablename);
-    if (!pa) return false;
-
-    uint32_t pageId = 0;
-    uint16_t slotId = 0;
-    decodeRid(rid, pageId, slotId);
-    char* buf = pa->fetchPage(pageId);
-    if (!buf) return false;
-    PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
-    const char* data = nullptr;
-    size_t len = 0;
-    const bool ok = page.read(slotId, data, len);
-    bool result = false;
-    if (ok && usesHeapTupleHeader(tbl.formatVersion) &&
-        len >= sizeof(HeapTupleHeaderData)) {
-        result = dbms::isNull(castHeapHeader(data), static_cast<int>(colIdx));
-    }
-    pa->unpinPage(pageId);
-    return result;
+    return detail::storedRowColumnIsNull(*this, dbname, tablename, tbl, rid, colIdx);
 }
 
 std::string StorageEngine::extractPKValue(const std::string& rowBuffer, const TableSchema& tbl) {
@@ -10453,15 +10453,15 @@ std::string StorageEngine::extractColumnValueStatic(const std::string& rowBuffer
         }
     } else if (g_nullRowEngine && g_nullRowRid >= 0 && colIdx < g_nullRowNatts &&
         tbl.tablename == g_nullRowTable) {
-        if (g_nullRowEngine->isColumnNullByRid(g_nullRowDb, tbl.tablename,
-                                               g_nullRowRid, colIdx)) {
+        if (detail::storedRowColumnIsNull(*g_nullRowEngine, g_nullRowDb,
+                tbl.tablename, tbl, g_nullRowRid, colIdx)) {
             return "";
         }
         storedNullKnown = usesHeapTupleHeader(tbl.formatVersion);
     } else if (g_condNullEngine && g_condNullRid >= 0 &&
                tbl.tablename == g_condNullTable) {
-        if (g_condNullEngine->isColumnNullByRid(
-                g_condNullDb, tbl.tablename, g_condNullRid, colIdx)) {
+        if (detail::storedRowColumnIsNull(*g_condNullEngine,
+                g_condNullDb, tbl.tablename, tbl, g_condNullRid, colIdx)) {
             return "";
         }
         storedNullKnown = usesHeapTupleHeader(tbl.formatVersion);
@@ -10538,8 +10538,8 @@ std::string StorageEngine::extractColumnValueStatic(const std::string& rowBuffer
                 }
                 if (g_condNullEngine && g_condNullRid >= 0 &&
                     tbl.tablename == g_condNullTable &&
-                    !g_condNullEngine->isColumnNullByRid(
-                        g_condNullDb, tbl.tablename, g_condNullRid, colIdx)) {
+                    !detail::storedRowColumnIsNull(*g_condNullEngine,
+                        g_condNullDb, tbl.tablename, tbl, g_condNullRid, colIdx)) {
                     return "-infinity";
                 }
             }
@@ -10641,8 +10641,8 @@ std::string StorageEngine::extractColumnValue(const std::string& rowBuffer,
     } else if (g_nullRowEngine && g_nullRowRid >= 0 && colIdx < g_nullRowNatts &&
         tbl.tablename == g_nullRowTable &&
         (col.generatedKind != 'v' || !computeVirtual)) {
-        if (g_nullRowEngine->isColumnNullByRid(g_nullRowDb, tbl.tablename,
-                                               g_nullRowRid, colIdx)) {
+        if (detail::storedRowColumnIsNull(*g_nullRowEngine, g_nullRowDb,
+                tbl.tablename, tbl, g_nullRowRid, colIdx)) {
             if (valueIsNull) *valueIsNull = true;
             return "";
         }
@@ -10650,8 +10650,8 @@ std::string StorageEngine::extractColumnValue(const std::string& rowBuffer,
     if (!bufferedNullKnown && g_condNullEngine && g_condNullRid >= 0 &&
         tbl.tablename == g_condNullTable &&
         (col.generatedKind != 'v' || !computeVirtual) &&
-        g_condNullEngine->isColumnNullByRid(
-            g_condNullDb, tbl.tablename, g_condNullRid, colIdx)) {
+        detail::storedRowColumnIsNull(*g_condNullEngine,
+            g_condNullDb, tbl.tablename, tbl, g_condNullRid, colIdx)) {
         if (valueIsNull) *valueIsNull = true;
         return "";
     }
@@ -24154,8 +24154,8 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
     if (!buffered && col.generatedKind != 'v' &&
         g_condNullEngine && g_condNullRid >= 0 &&
         tbl.tablename == g_condNullTable &&
-        g_condNullEngine->isColumnNullByRid(g_condNullDb, tbl.tablename,
-                                            g_condNullRid, ci)) {
+        detail::storedRowColumnIsNull(*g_condNullEngine, g_condNullDb,
+            tbl.tablename, tbl, g_condNullRid, ci)) {
         physNull = true;
     }
     if (!storedPatternOperator(cond.op).empty()) {
@@ -24203,8 +24203,8 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
             if (!buffered && tbl.cols[rci].generatedKind != 'v' &&
                 g_condNullEngine && g_condNullRid >= 0 &&
                 tbl.tablename == g_condNullTable &&
-                g_condNullEngine->isColumnNullByRid(g_condNullDb, tbl.tablename,
-                                                    g_condNullRid, rci)) {
+                detail::storedRowColumnIsNull(*g_condNullEngine, g_condNullDb,
+                    tbl.tablename, tbl, g_condNullRid, rci)) {
                 rNull = true;
             }
             if (rNull) return false;

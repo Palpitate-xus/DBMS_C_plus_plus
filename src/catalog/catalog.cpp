@@ -2399,9 +2399,12 @@ std::map<std::string, std::string> CatalogManager::serializeAllLocked() const {
 CatalogManager::PublicationState CatalogManager::publicationState() const {
     std::lock_guard<std::mutex> lock(mutex_);
     std::lock_guard<std::mutex> publicationLock(persistence_->publication->mutex);
-    const auto images = serializeAllLocked();
     bool changed = false;
-    for (const auto& image : images) {
+    // loadAllLocked retains an image for every catalog family, including
+    // empty ones. Their names are independent of row edits. Check physical
+    // generations first: a current reader need not serialize all catalog
+    // rows merely to prove that no peer replaced an image.
+    for (const auto& image : persistence_->baseline) {
         CatalogFileGeneration generation;
         if (!catalogGeneration(catalogFilePath(image.first), generation) ||
             (generation.exists && !generation.regular))
@@ -2414,8 +2417,10 @@ CatalogManager::PublicationState CatalogManager::publicationState() const {
         }
     }
     if (!changed) return PublicationState::Current;
-    return images == persistence_->baseline ? PublicationState::CleanPeerChange
-                                            : PublicationState::Conflict;
+    // Only a peer change requires the complete dirty comparison. Keep the
+    // byte comparison so edits through borrowed native rows still conflict.
+    return serializeAllLocked() == persistence_->baseline
+        ? PublicationState::CleanPeerChange : PublicationState::Conflict;
 }
 
 bool CatalogManager::hasUnpublishedChanges() const {

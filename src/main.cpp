@@ -26,6 +26,7 @@
 #include "utils/prepared_stmts.h"
 #include "utils/PlanCacheEpoch.h"
 #include "ExecutionPlan.h"
+#include "executor/PreparedTableSource.h"
 #include "NetworkServer.h"
 #include "network/ConnectionPool.h"
 #include "replication/LogicalDecoder.h"
@@ -20727,7 +20728,7 @@ class PreparedWithDmlRuntime {
             node->occurrences.push_back(range.ordinal);
             for(size_t i=0;i<range.columns.size();++i)node->visible.push_back({range.columns[i].name,{range.ordinal,i}});
             shared_ptr<dbms::PreparedQueryCursor> cursor;
-            shared_ptr<dbms::TableScanOp> scan;
+            shared_ptr<dbms::Operator> scan;
             shared_ptr<PreparedWithDmlRuntime> viewRuntime;
             shared_ptr<dbms::PreparedQueryRows> virtualRows;
             dbms::TableSchema scanSchema;
@@ -20764,7 +20765,11 @@ class PreparedWithDmlRuntime {
                 }
                 scanSchema=g_engine.getTableSchema(session_.currentDB,table);
                 if(scanSchema.len!=range.columns.size())throw dbms::DbError("XX000","mutation source descriptor differs from physical relation");
-                scan=make_shared<dbms::TableScanOp>(&g_engine,session_.currentDB,table);
+                dbms::OpPtr physicalScan=make_unique<dbms::TableScanOp>(&g_engine,session_.currentDB,table);
+                if(auto* select=dynamic_cast<const dbms::SelectStmt*>(owner))
+                    physicalScan=dbms::makePreparedTableSource(&g_engine,session_.currentDB,
+                        query_,const_cast<dbms::SelectStmt*>(select),scanSchema,std::move(physicalScan));
+                scan=shared_ptr<dbms::Operator>(std::move(physicalScan));
                 node->planChildren.push_back(scan.get());
             } else if(item->type!=dbms::FromItem::Type::Table || !range.cteStatement)
                 throw dbms::DbError("0A000","mutation source requires additional function-range lowering");
@@ -20874,6 +20879,37 @@ class PreparedWithDmlRuntime {
             comparison->left=operand(key.first);comparison->right=operand(key.second);
             comparisons->push_back(std::move(comparison));
         }
+        struct IntegerJoinKey {
+            DmlSourceNode::Cell left,right;
+            string type;
+        };
+        optional<IntegerJoinKey> integerJoinKey;
+        // A pure, same-type integer equality can reject a candidate before
+        // copying every bound column into a combined context. Keep source
+        // demand order and the original ON evaluation for surviving pairs.
+        if(!merged)if(const auto* equality=dynamic_cast<const dbms::BinaryOpExpr*>(item->joinCondition.get())) {
+            const auto* a=dynamic_cast<const dbms::ColumnRefExpr*>(equality->left.get());
+            const auto* b=dynamic_cast<const dbms::ColumnRefExpr*>(equality->right.get());
+            if(equality->op=="=" && a && b && !a->preparedSubquery && !b->preparedSubquery &&
+                a->binding && b->binding && !a->binding->scopeDepth && !b->binding->scopeDepth &&
+                !a->binding->mergedUsing && !b->binding->mergedUsing) {
+                const auto type=dbms::ExprHelper::canonicalResultTypeName(a->binding->declaredType);
+                const bool builtin=!equality->comparison || (equality->comparison->strict &&
+                    equality->comparison->identity=="builtin-comparison:=("+type+","+type+")");
+                if(builtin && (type=="smallint" || type=="integer" || type=="bigint") &&
+                    dbms::ExprHelper::canonicalResultTypeName(b->binding->declaredType)==type) {
+                    const auto belongs=[](const shared_ptr<DmlSourceNode>& side,size_t ordinal) {
+                        return find(side->occurrences.begin(),side->occurrences.end(),ordinal)!=side->occurrences.end();
+                    };
+                    if(belongs(right,a->binding->sourceOrdinal) && belongs(left,b->binding->sourceOrdinal))swap(a,b);
+                    if(belongs(left,a->binding->sourceOrdinal) && belongs(right,b->binding->sourceOrdinal)) {
+                        integerJoinKey=IntegerJoinKey{{a->binding->sourceOrdinal,a->binding->columnOrdinal},
+                            {b->binding->sourceOrdinal,b->binding->columnOrdinal},type};
+                        node->planAttributes["integerKeyPrefilter"]="true";
+                    }
+                }
+            }
+        }
         struct JoinPosition {
             size_t left=0,right=0,unmatchedRight=0;
             bool matched=false,leftComplete=false;
@@ -20885,7 +20921,7 @@ class PreparedWithDmlRuntime {
             if(item->joinCondition)(*executionOwner)->prepareExpression(item->joinCondition.get());
             left->rebind(row);right->rebind(row);*position=JoinPosition{};
         };
-        node->read=[executionOwner,currentOuter,left,right,leftJoin,rightJoin,merged,item,keys,comparisons,position]
+        node->read=[executionOwner,currentOuter,left,right,leftJoin,rightJoin,merged,item,keys,comparisons,position,integerJoinKey]
             (size_t,dbms::RowContext& output) {
             const auto& execution=*executionOwner;
             dbms::ExprEvaluator comparator;
@@ -20919,6 +20955,18 @@ class PreparedWithDmlRuntime {
                 while(right->readAt(position->right,b)) {
                     const auto occurrence=position->right++;
                     if(position->rightMatched.size()<=occurrence)position->rightMatched.resize(occurrence+1,false);
+                    if(integerJoinKey) {
+                        const auto& l=a.boundColumn(integerJoinKey->left.first,integerJoinKey->left.second);
+                        const auto& r=b.boundColumn(integerJoinKey->right.first,integerJoinKey->right.second);
+                        if(l.typeName==integerJoinKey->type && r.typeName==integerJoinKey->type) {
+                            if(l.isNull || r.isNull)continue;
+                            int64_t lk=0,rk=0;
+                            const auto lp=from_chars(l.value.data(),l.value.data()+l.value.size(),lk);
+                            const auto rp=from_chars(r.value.data(),r.value.data()+r.value.size(),rk);
+                            if(lp.ec==errc{} && lp.ptr==l.value.data()+l.value.size() &&
+                                rp.ec==errc{} && rp.ptr==r.value.data()+r.value.size() && lk!=rk)continue;
+                        }
+                    }
                     auto row=combine(&a,&b);bool valid=true;
                     for(const auto& comparison:*comparisons) {
                         const auto value=comparator.eval(comparison.get(),row);

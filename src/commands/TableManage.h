@@ -1626,6 +1626,10 @@ public:
     uint32_t currentCommandId() const {
         return transactionContext().currentCommandId;
     }
+    // Current-version indexes are complete only for an unmodified current
+    // snapshot without overlapping owners. Recheck the allocation fence
+    // after probing an index; a changed fence requires the heap path.
+    std::optional<uint64_t> indexReadSnapshotFence(const std::string& dbname) const;
     const ReadView* getCurrentReadView() const {
         // Physical consumers may copy this view. Never export a deferred
         // null-CLOG view into the legacy snapshot-only visibility fallback.

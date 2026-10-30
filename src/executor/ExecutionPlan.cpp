@@ -1,4 +1,6 @@
 #include "ExecutionPlan.h"
+#include "executor/PreparedTableSource.h"
+#include "commands/StoredRowNull.h"
 #include "common/DbError.h"
 #include "common/TemporalStorageCodec.h"
 #include "access/BPTree.h"
@@ -1385,6 +1387,240 @@ static void prepareAggregateRoles(PreparedSelectState& state) {
     for (auto& key : state.select().orderBy) grouped(key.expr.get());
 }
 
+static bool isSingleColumnPrimaryKey(const TableSchema&, const std::string&);
+
+static std::string integerIndexCastType(const std::string& spelling) {
+    CatalogManager::QualifiedName name;
+    if (CatalogManager::parseQualifiedName(spelling, name) && name.schema == "pg_catalog") {
+        if (name.name == "int2") return "smallint";
+        if (name.name == "int4") return "integer";
+        if (name.name == "int8") return "bigint";
+    }
+    const auto keyword = SQLParser::toLower(spelling);
+    if (keyword == "smallint" || keyword == "integer" || keyword == "bigint") return keyword;
+    if (keyword == "int") return "integer";
+    return {};
+}
+
+static bool integerIndexLiteralTree(const Expr* expression) {
+    if (!expression || expression->preparedSubquery) return false;
+    if (const auto* literal = dynamic_cast<const LiteralExpr*>(expression)) {
+        const auto type = SQLParser::toLower(literal->typeName);
+        return type.empty() || type == "unknown" || type == "text" ||
+            type == "smallint" || type == "integer" || type == "bigint";
+    }
+    if (const auto* cast = dynamic_cast<const CastExpr*>(expression))
+        return cast->typeMods.empty() && !integerIndexCastType(cast->typeName).empty() &&
+            integerIndexLiteralTree(cast->operand.get());
+    if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(expression))
+        return (unary->op == "+" || unary->op == "-") && integerIndexLiteralTree(unary->operand.get());
+    return false;
+}
+
+// Wire Bind inputs can reach the legacy planner as CAST(literal AS
+// "pg_catalog"."int4"). Decode only a structural builtin constant, never
+// a parameter, routine or subquery. Errors retain their original predicate
+// demand: an unusable input simply keeps the existing heap/filter path.
+static std::optional<ExprValue> constantIntegerIndexInput(const Expr* expression,
+                                                         const std::string& type) {
+    const auto* literal = dynamic_cast<const LiteralExpr*>(expression);
+    if ((!dynamic_cast<const CastExpr*>(expression) &&
+         !(literal && literal->analyzedPrimitiveConstant)) || !integerIndexLiteralTree(expression))
+        return std::nullopt;
+    try {
+        ExprEvaluator evaluator;
+        auto value = evaluator.eval(expression, RowContext{});
+        if (value.isNull || ExprHelper::canonicalResultTypeName(value.typeName) != type)
+            return std::nullopt;
+        return value;
+    } catch (const DbError&) {
+        return std::nullopt;
+    }
+}
+
+// Bind input is read when this physical source opens, including cursor
+// restarts. The typed Filter above it remains the final predicate owner.
+// Reuse IndexScan's checked heap/MVCC/NULL access and keep the conservative
+// heap path whenever current-version indexes cannot serve the snapshot.
+class PreparedParameterIndexScanOp final : public Operator {
+    StorageEngine* engine_;
+    std::string database_, table_, column_, type_;
+    std::shared_ptr<PreparedQuery> query_;
+    size_t slot_;
+    OpPtr fallback_, index_, heapFilter_;
+    Operator* active_ = nullptr;
+    bool opened_ = false, locked_ = false, usedFallback_ = false;
+
+    bool sameKey(const TableSchema& schema) const {
+        if (schema.partitionType != TableSchema::PartitionType::None ||
+            !isSingleColumnPrimaryKey(schema, column_)) return false;
+        for (size_t i = 0; i < schema.len; ++i) {
+            if (schema.cols[i].generatedKind == 'v') return false;
+            if (schema.cols[i].dataName == column_ &&
+                (schema.cols[i].isArray || schema.cols[i].isUnsigned || !schema.cols[i].domainName.empty() ||
+                 schema.cols[i].generatedKind ||
+                 ExprHelper::canonicalResultTypeName(schema.cols[i].dataType) != type_))
+                return false;
+        }
+        return true;
+    }
+    bool key(std::string& value) const {
+        if (slot_ >= query_->parameters.size()) return false;
+        const auto& input = query_->parameters[slot_];
+        if (input.isNull || ExprHelper::canonicalResultTypeName(input.typeName) != type_)
+            return false;
+        int64_t integer = 0;
+        const auto parsed = std::from_chars(input.value.data(),
+            input.value.data() + input.value.size(), integer);
+        if (parsed.ec != std::errc{} || parsed.ptr != input.value.data() + input.value.size())
+            return false;
+        if ((type_ == "smallint" && (integer < -32768 || integer > 32767)) ||
+            (type_ == "integer" && (integer < INT32_MIN || integer > INT32_MAX))) return false;
+        value = std::to_string(integer);
+        return true;
+    }
+public:
+    PreparedParameterIndexScanOp(StorageEngine* engine, std::string database,
+        std::string table, std::string column, std::string type,
+        std::shared_ptr<PreparedQuery> query, size_t slot, OpPtr fallback)
+        : engine_(engine), database_(std::move(database)), table_(std::move(table)),
+          column_(std::move(column)), type_(std::move(type)), query_(std::move(query)),
+          slot_(slot), fallback_(std::move(fallback)) {}
+    ~PreparedParameterIndexScanOp() override {
+        if (opened_) try { close(); } catch (...) {}
+    }
+    bool open() override {
+        OpenInstrument instrumentation(this);
+        clearError(); active_ = nullptr; index_.reset(); heapFilter_.reset(); usedFallback_ = false;
+        auto& locks = engine_->getLockManager();
+        locks.setResourceNamespace(database_);
+        if (!locks.lockShared(table_)) throw DbError("55P03", "could not obtain lock on relation \"" + table_ + "\"");
+        locked_ = true; opened_ = true;
+        const auto schema = engine_->getTableSchema(database_, table_);
+        engine_->noteQuerySnapshot();
+        std::string value;
+        const auto fence = engine_->indexReadSnapshotFence(database_);
+        const bool usableKey = sameKey(schema) && key(value) &&
+            engine_->getInheritedChildren(database_, table_).empty();
+        if (fence && usableKey &&
+            engine_->getIsolationLevel() != IsolationLevel::SERIALIZABLE &&
+            !engine_->rlsAppliesTo(database_, table_)) {
+            index_ = std::make_unique<IndexScanOp>(engine_, database_, table_, column_, value);
+            active_ = index_.get();
+            if (!active_->open()) return propagateChildError(active_, "parameter index source failed");
+            if (engine_->indexReadSnapshotFence(database_) == fence) return true;
+            // Allocation/ownership changed during the candidate probe.
+            active_->close(); active_ = nullptr;
+        }
+        usedFallback_ = true;
+        if (usableKey) {
+            // Old/overlapping snapshots still scan the visible heap. Apply
+            // the same proven integer equality before the legacy typed
+            // predicate rebuilds a full expression context for each row.
+            // TableScan retains RLS and serializable dependency ownership.
+            StorageEngine::Condition condition;
+            condition.op = "=";
+            condition.colName = column_;
+            condition.value = value;
+            condition.decodedLiteralRhs = true;
+            heapFilter_ = std::make_unique<FilterOp>(
+                std::make_unique<TableScanOp>(engine_, database_, table_), schema,
+                std::vector<StorageEngine::Condition>{std::move(condition)});
+        }
+        active_ = heapFilter_ ? heapFilter_.get() : fallback_.get();
+        return active_->open() || propagateChildError(active_, "parameter heap source failed");
+    }
+    bool next(std::string& row) override {
+        NextInstrument instrumentation(this);
+        if (!active_ || !active_->next(row)) {
+            if (active_ && active_->hasError())
+                return propagateChildError(active_, "parameter source failed");
+            return false;
+        }
+        instrumentation.emitted = true;
+        return true;
+    }
+    bool lastColumnIsNull(size_t column) const override {
+        return active_ && active_->lastColumnIsNull(column);
+    }
+    ScanOrigin scanOrigin() const override {
+        return active_ ? active_->scanOrigin() : ScanOrigin{};
+    }
+    std::vector<Operator*> preparedPlanChildren() const override {
+        std::vector<Operator*> result;
+        if (index_) result.push_back(index_.get());
+        if (usedFallback_) result.push_back(heapFilter_ ? heapFilter_.get() : fallback_.get());
+        return result;
+    }
+    std::vector<IOperator*> children() override {
+        const auto result = preparedPlanChildren();
+        return {result.begin(), result.end()};
+    }
+    std::string preparedPlanNodeName() const override {
+        return "TypedEqualityScan(table=" + table_ + ", col=" + column_ + ")";
+    }
+    double estimatedRows() const override { return 1; }
+    void close() override {
+        if (!opened_) return;
+        opened_ = false;
+        std::exception_ptr error;
+        try { if (active_) active_->close(); } catch (...) { error = std::current_exception(); }
+        if (locked_) {
+            locked_ = false;
+            engine_->getLockManager().setResourceNamespace(database_);
+            engine_->getLockManager().unlock(table_);
+        }
+        if (error) std::rethrow_exception(error);
+    }
+};
+
+OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& database,
+    const std::shared_ptr<PreparedQuery>& query, SelectStmt* select,
+    const TableSchema& schema, OpPtr source) {
+    const auto* physical = dynamic_cast<const TableScanOp*>(source.get());
+    const auto* equality = dynamic_cast<const BinaryOpExpr*>(select->whereClause.get());
+    if (!physical || !select->fromClause || select->fromClause->type != FromItem::Type::Table ||
+        !equality || equality->op != "=" || schema.partitionType != TableSchema::PartitionType::None)
+        return source;
+    const auto* column = dynamic_cast<const ColumnRefExpr*>(equality->left.get());
+    const Expr* input = equality->right.get();
+    if (!column) {
+        column = dynamic_cast<const ColumnRefExpr*>(equality->right.get());
+        input = equality->left.get();
+    }
+    const auto* parameter = dynamic_cast<const ParameterExpr*>(input);
+    if (!column || !column->binding || column->binding->scopeDepth ||
+        column->binding->mergedUsing || column->binding->columnOrdinal >= schema.len)
+        return source;
+    bool sameRange = false;
+    for (const auto& range : query->sourceRanges)
+        if (range.owner == select && range.source == select->fromClause.get() &&
+            range.ordinal == column->binding->sourceOrdinal) sameRange = true;
+    const auto& key = schema.cols[column->binding->columnOrdinal];
+    const auto type = ExprHelper::canonicalResultTypeName(key.dataType);
+    if (!sameRange || (type != "smallint" && type != "integer" && type != "bigint") ||
+        key.isArray || key.isUnsigned || !key.domainName.empty() || key.generatedKind ||
+        ExprHelper::canonicalResultTypeName(column->binding->declaredType) != type ||
+        !isSingleColumnPrimaryKey(schema, key.dataName)) return source;
+    if (equality->comparison && (equality->comparison->identity !=
+        "builtin-comparison:=(" + type + "," + type + ")" || !equality->comparison->strict))
+        return source;
+    const auto table = physical->tableName();
+    if (!parameter) {
+        const auto value = constantIntegerIndexInput(input, type);
+        if (!value) return source;
+        auto frozen = std::make_shared<PreparedQuery>();
+        frozen->parameters.push_back(*value);
+        return std::make_unique<PreparedParameterIndexScanOp>(engine, database, table,
+            key.dataName, type, std::move(frozen), 0, std::move(source));
+    }
+    if (parameter->origin != ParameterOrigin::StatementInput ||
+        parameter->slot >= query->parameters.size() ||
+        ExprHelper::canonicalResultTypeName(parameter->declaredType) != type) return source;
+    return std::make_unique<PreparedParameterIndexScanOp>(engine, database, table,
+        key.dataName, type, query, parameter->slot, std::move(source));
+}
+
 OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
     const std::string& dbname, const std::string& tablename, PreparedQuery prepared) {
     auto* select = dynamic_cast<SelectStmt*>(prepared.ast.get());
@@ -1540,6 +1776,8 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
         state->targetsBeforeSort.push_back(!state->containsVolatile(target));
     }
     state->prepareExecution();
+    source = makePreparedTableSource(engine, dbname, state->query, select,
+                                    sourceSchema, std::move(source));
     OpPtr root = std::move(source);
     if (select->whereClause) root = std::make_unique<PreparedFilterOp>(std::move(root), state);
     if (!state->aggregates.empty() || select->having)
@@ -2178,7 +2416,7 @@ bool TableScanOp::next(std::string& outRow) {
 }
 
 bool TableScanOp::lastColumnIsNull(size_t colIdx) const {
-    return engine_->isColumnNullByRid(dbname_, tablename_, lastRid_, colIdx);
+    return detail::storedRowColumnIsNull(*engine_, dbname_, tablename_, tbl_, lastRid_, colIdx);
 }
 
 void TableScanOp::close() {
@@ -2570,7 +2808,7 @@ bool IndexScanOp::next(std::string& outRow) {
             outRow, tbl_, columnIndex, dbname_, true, &valueIsNull);
         valueIsNull = valueIsNull ||
             (tbl_.cols[columnIndex].generatedKind != 'v' &&
-             engine_->isColumnNullByRid(dbname_, tablename_, rid, columnIndex));
+             detail::storedRowColumnIsNull(*engine_, dbname_, tablename_, tbl_, rid, columnIndex));
         if (StorageEngine::compareValues(tbl_.cols[columnIndex], actual,
                 valueIsNull, integerEqualityValue(tbl_, colname_, value_),
                 false, "=") != StorageEngine::PredicateTruth::True)
@@ -2583,7 +2821,7 @@ bool IndexScanOp::next(std::string& outRow) {
 
 bool IndexScanOp::lastColumnIsNull(size_t colIdx) const {
     return lastRid_ > 0 && colIdx < tbl_.len &&
-        engine_->isColumnNullByRid(dbname_, tablename_, lastRid_, colIdx);
+        detail::storedRowColumnIsNull(*engine_, dbname_, tablename_, tbl_, lastRid_, colIdx);
 }
 
 void IndexScanOp::close() {
@@ -6681,6 +6919,41 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& in
         }
     }
 
+    if (!root) {
+        // Keep the original typed predicate above a candidate-only lookup.
+        // This also covers wire parameters expanded to explicit builtin
+        // casts by the legacy frontend, rather than direct ParameterExprs.
+        if (!rlsApplies && remainingConds.size() == 1 && remainingConds.front().op == "typedexpr") {
+            SQLParser parser;
+            auto parsed = parser.parseForBinding("SELECT " + remainingConds.front().value);
+            const auto* select = parsed.success ? dynamic_cast<const SelectStmt*>(parsed.stmt.get()) : nullptr;
+            const auto* equality = select && select->selectList.size() == 1 && !select->fromClause
+                ? dynamic_cast<const BinaryOpExpr*>(select->selectList.front().expr.get()) : nullptr;
+            if (equality && equality->op == "=") {
+                const auto* column = dynamic_cast<const ColumnRefExpr*>(equality->left.get());
+                const Expr* input = equality->right.get();
+                if (!column) { column = dynamic_cast<const ColumnRefExpr*>(equality->right.get()); input = equality->left.get(); }
+                if (column && column->schema.empty() && column->table.empty() &&
+                    isSingleColumnPrimaryKey(table, column->column)) {
+                    for (size_t i = 0; i < table.len; ++i) {
+                        const auto& key = table.cols[i];
+                        const auto type = ExprHelper::canonicalResultTypeName(key.dataType);
+                        if (key.dataName != column->column || key.isArray || key.generatedKind ||
+                            !key.domainName.empty() || key.isUnsigned ||
+                            (type != "smallint" && type != "integer" && type != "bigint")) continue;
+                        const auto value = constantIntegerIndexInput(input, type);
+                        if (!value) continue;
+                        auto frozen = std::make_shared<PreparedQuery>();
+                        frozen->parameters.push_back(*value);
+                        root = std::make_unique<PreparedParameterIndexScanOp>(engine, ctx.dbname,
+                            ctx.tablename, key.dataName, type, std::move(frozen), 0,
+                            std::make_unique<TableScanOp>(engine, ctx.dbname, ctx.tablename));
+                        break;
+                    }
+                }
+            }
+        }
+    }
     if (!root) {
         if (!rlsApplies && parallelWorkers_ > 1) {
             root = std::make_unique<ParallelTableScanOp>(
