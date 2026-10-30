@@ -24,6 +24,8 @@ using namespace dbms;
 static void cleanupDb(const std::string& db) {
     if (g_engine.databaseExists(db)) {
         const auto status = g_engine.dropDatabase(db);
+        if (status != DBStatus::OK && status != DBStatus::DATABASE_NOT_FOUND)
+            std::cerr << "PARALLEL_VACUUM_CLEANUP_STATUS " << static_cast<int>(status) << '\n';
         assert(status == DBStatus::OK || status == DBStatus::DATABASE_NOT_FOUND);
     }
     std::error_code ec;

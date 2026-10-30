@@ -6,6 +6,7 @@
 #include "commands/DdlExecutor.h"
 #include "commands/DmlExecutor.h"
 #include "commands/DdlTransaction.h"
+#include "commands/DdlRewrite.h"
 #include "commands/SchemaNamespace.h"
 #include "commands/SequenceStorageName.h"
 #include "process/StatementNotice.h"
@@ -2336,7 +2337,10 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     return true;
                 }
                 txn.markSnapshotDirty();
-                status = g_engine.alterTableAddColumn(s.currentDB, tableName, column);
+                {
+                    detail::DdlRewriteScope rewriting(txn, g_engine, s.currentDB, tableName);
+                    status = g_engine.alterTableAddColumn(s.currentDB, tableName, column);
+                }
                 if (status == DBStatus::TABLE_ALREADY_EXISTS && sub.ifNotExists) {
                     {
                         std::ostringstream diagnostic;
@@ -2392,7 +2396,10 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                               << std::endl;
                     return true;
                 }
-                status = g_engine.alterTableDropColumn(s.currentDB, tableName, sub.name);
+                {
+                    detail::DdlRewriteScope rewriting(txn, g_engine, s.currentDB, tableName);
+                    status = g_engine.alterTableDropColumn(s.currentDB, tableName, sub.name);
+                }
                 if (status == DBStatus::INVALID_VALUE) {
                     const TableSchema currentSchema =
                         g_engine.getTableSchema(s.currentDB, tableName);
@@ -2733,8 +2740,11 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     if (declaredColumnTypeMod(cd, varcharModifier)) {
                         declaredVarcharMods[sub.name] = varcharModifier;
                     }
-                    status = g_engine.alterTableAlterColumnType(
-                        s.currentDB, tableName, sub.name, column, cd.typeMods);
+                    {
+                        detail::DdlRewriteScope rewriting(txn, g_engine, s.currentDB, tableName);
+                        status = g_engine.alterTableAlterColumnType(
+                            s.currentDB, tableName, sub.name, column, cd.typeMods);
+                    }
                     if (status == DBStatus::DUPLICATE_KEY) {
                         throw DbError("23505", "could not rebuild unique index after altering column \"" +
                             sub.name + "\"");
@@ -4489,6 +4499,7 @@ SchemaNamespaceResult dropSchemaNamespace(StorageEngine& engine,
     txn.markSnapshotDirty();
     SchemaNamespaceResult result;
     for (const auto& column : columns) {
+        detail::DdlRewriteScope rewriting(txn, engine, database, column.table);
         const auto columnStatus = engine.alterTableDropColumn(database, column.table, column.column);
         if (columnStatus != DBStatus::OK)
             return {columnStatus, "dependent column removal failed: " + column.table + "." + column.column, {}};

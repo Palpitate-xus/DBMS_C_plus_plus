@@ -86,10 +86,11 @@ private:
         // while holding the process/file lock, so independent backends cannot
         // overwrite each other's transaction states.
         std::unordered_map<size_t, std::pair<uint8_t, uint8_t>> pendingBits;
-        std::filesystem::file_time_type fileTime{};
-        bool fileTimeValid = false;
         uint64_t fileDevice = 0;
         uint64_t fileInode = 0;
+        uint64_t fileSize = 0;
+        int64_t modifiedSeconds = 0, modifiedNanoseconds = 0;
+        int64_t changedSeconds = 0, changedNanoseconds = 0;
         bool fileIdentityValid = false;
     };
     mutable std::unordered_map<uint64_t, Segment> segments_;

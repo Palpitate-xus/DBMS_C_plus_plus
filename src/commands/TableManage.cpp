@@ -1,5 +1,7 @@
 #include "TableManage.h"
 #include "commands/StoredRowNull.h"
+#include "commands/DdlRewrite.h"
+#include "commands/DdlTransaction.h"
 #include "commands/RelationSchemaMove.h"
 #include "commands/RoutineStore.h"
 #include "commands/SchemaNamespace.h"
@@ -72,6 +74,7 @@
 #include "SPGiSTIndex.h"
 #include <array>
 #include <charconv>
+#include <condition_variable>
 #include <cmath>
 #include <cctype>
 #include <cstdlib>
@@ -245,7 +248,68 @@ static constexpr const char* kPhysicalBackupManifest = ".dbms_backup_manifest";
 
 namespace dbms {
 
+namespace detail {
+namespace { thread_local const DdlRewriteScope* currentRewrite = nullptr; }
+DdlRewriteScope::DdlRewriteScope(const DdlTransaction& owner, StorageEngine& engine,
+        const std::string& database, const std::string& table)
+    : owner_(&owner), engine_(&engine), database_(database), table_(table), previous_(currentRewrite) {
+    if (!covers(engine, database, table))
+        throw DbError("XX000", "heap rewrite requires an active physical DDL rollback owner");
+    currentRewrite = this;
+}
+DdlRewriteScope::~DdlRewriteScope() { currentRewrite = previous_; }
+bool DdlRewriteScope::covers(const StorageEngine& engine, const std::string& database,
+        const std::string& table) const {
+    return engine_ == &engine && database_ == database && table_ == table &&
+        owner_->isActive() && !owner_->isCommitted() && engine.inTransaction() &&
+        engine.transactionDatabase() == database && engine.hasTransactionBackup() &&
+        engine.transactionBackupDirty();
+}
+bool ownsDdlRewrite(const StorageEngine& engine, const std::string& database, const std::string& table) {
+    return currentRewrite && currentRewrite->covers(engine, database, table);
+}
+} // namespace detail
+
 namespace {
+enum class MaintenanceKind { None, Checkpoint, Vacuum, Writeback, Drop };
+struct MaintenanceState {
+    std::mutex mutex;
+    std::condition_variable finished;
+    MaintenanceKind running = MaintenanceKind::None;
+    std::thread::id owner;
+    uint64_t completedCheckpoints = 0;
+    bool lastCheckpointSucceeded = false;
+    const StorageEngine* lastCheckpointOwner = nullptr;
+};
+std::shared_ptr<MaintenanceState> maintenanceStateFor(const std::string& database) {
+    static std::mutex mutex;
+    static std::map<std::string,std::weak_ptr<MaintenanceState>> states;
+    std::lock_guard<std::mutex> lock(mutex);
+    auto& entry = states[database];
+    auto state = entry.lock();
+    if (!state) { state = std::make_shared<MaintenanceState>(); entry = state; }
+    return state;
+}
+struct MaintenanceCompletion {
+    std::shared_ptr<MaintenanceState> state;
+    MaintenanceKind kind;
+    const StorageEngine* engine;
+    bool succeeded = false;
+    ~MaintenanceCompletion() {
+        {
+            std::lock_guard<std::mutex> lock(state->mutex);
+            if (kind == MaintenanceKind::Checkpoint) {
+                ++state->completedCheckpoints;
+                state->lastCheckpointSucceeded = succeeded;
+                state->lastCheckpointOwner = engine;
+            }
+            state->owner = {};
+            state->running = MaintenanceKind::None;
+        }
+        state->finished.notify_all();
+    }
+};
+
 std::shared_ptr<std::shared_mutex> databaseTxnLockFor(
     const std::string& dbname);
 bool databaseRollbackPending(const std::string& dbname);
@@ -2732,6 +2796,18 @@ void StorageEngine::backgroundAutoVacuum() {
     }
     for (const auto& [dbname, tablename] : todo) {
         if (!databaseExists(dbname)) continue;
+        auto maintenance = maintenanceStateFor(dbname);
+        {
+            std::lock_guard<std::mutex> lock(maintenance->mutex);
+            if (maintenance->running != MaintenanceKind::None) {
+                std::lock_guard<std::mutex> pendingLock(autoVacuumMutex_);
+                autoVacuumPending_[{dbname, tablename}] = true;
+                continue;
+            }
+            maintenance->running = MaintenanceKind::Vacuum;
+            maintenance->owner = std::this_thread::get_id();
+        }
+        MaintenanceCompletion completion{maintenance, MaintenanceKind::Vacuum, this};
         const auto mutex = databaseTxnLockFor(dbname);
         std::shared_lock<std::shared_mutex> databaseLock(*mutex, std::try_to_lock);
         if (!databaseLock.owns_lock()) {
@@ -2786,6 +2862,16 @@ void StorageEngine::backgroundBufferFlush() {
         // Other databases retain their usual writeback behavior.
         if (databaseRollbackPending(dbname)) continue;
         const std::string tableName = kv.first.substr(separator + 1);
+        auto maintenance = maintenanceStateFor(dbname);
+        {
+            std::lock_guard<std::mutex> lock(maintenance->mutex);
+            // This worker already holds cacheMutex_. Never wait for a
+            // checkpoint/DDL owner that may need that cache lock to finish.
+            if (maintenance->running != MaintenanceKind::None) continue;
+            maintenance->running = MaintenanceKind::Writeback;
+            maintenance->owner = std::this_thread::get_id();
+        }
+        MaintenanceCompletion completion{maintenance, MaintenanceKind::Writeback, this};
         // Resolving a heap path reads catalog/domain files. Do not consume
         // another thread's uncommitted namespace image or wait while holding
         // the cache lock needed by its DDL owner.
@@ -2820,17 +2906,19 @@ void StorageEngine::backgroundBufferFlush() {
 }
 
 void StorageEngine::backgroundCheckpoint() {
-    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
-    auto now = std::chrono::steady_clock::now();
-    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-        now - lastBackgroundCheckpoint_).count();
-    if (elapsed < static_cast<int64_t>(backgroundCheckpointIntervalMs_)) {
-        return;
+    std::vector<std::string> dbs;
+    {
+        std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+        const auto now = std::chrono::steady_clock::now();
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - lastBackgroundCheckpoint_).count();
+        if (elapsed < static_cast<int64_t>(backgroundCheckpointIntervalMs_)) return;
+        lastBackgroundCheckpoint_ = now;
+        dbs = getDatabaseNames();
     }
-    lastBackgroundCheckpoint_ = now;
 
-    // checkpointer: run checkpoint for every known database.
-    auto dbs = getDatabaseNames();
+    // A peer checkpoint can already own the database lock and need cache
+    // access to finish. Never wait for it while retaining cacheMutex_.
     for (const auto& dbname : dbs) {
         const auto t0 = std::chrono::steady_clock::now();
         checkpoint(dbname);
@@ -11726,7 +11814,7 @@ bool StorageEngine::runDeferredCheck(const DeferredCheck& dc) const {
             return !readFailed;
         }
         if (tbl.cols[static_cast<size_t>(colIdx)].isNull &&
-            isColumnNullByRid(dc.dbname, dc.tablename, currentRid,
+            dbms::detail::storedRowColumnIsNull(*this, dc.dbname, dc.tablename, tbl, currentRid,
                               static_cast<size_t>(colIdx))) {
             return true;
         }
@@ -11743,8 +11831,8 @@ bool StorageEngine::runDeferredCheck(const DeferredCheck& dc) const {
             const int64_t rid = encodeRid(pageId, slot);
             if (rid == currentRid) return;
             if (uniqueColumn.isNull &&
-                isColumnNullByRid(
-                    dc.dbname, dc.tablename, rid,
+                dbms::detail::storedRowColumnIsNull(
+                    *this, dc.dbname, dc.tablename, tbl, rid,
                     static_cast<size_t>(colIdx))) {
                 return;
             }
@@ -11851,7 +11939,7 @@ bool StorageEngine::runDeferredCheck(const DeferredCheck& dc) const {
                 }
             }
             if (columnIndex >= localTbl.len) return false;
-            if (isColumnNullByRid(dc.dbname, dc.tablename, currentRid, columnIndex)) {
+            if (dbms::detail::storedRowColumnIsNull(*this, dc.dbname, dc.tablename, localTbl, currentRid, columnIndex)) {
                 return true; // MATCH SIMPLE ignores real SQL NULL, not empty text.
             }
             payloadValues.push_back(
@@ -11883,7 +11971,7 @@ bool StorageEngine::runDeferredCheck(const DeferredCheck& dc) const {
                 const std::string row(data, len);
                 for (size_t valueIndex = 0;
                      valueIndex < referencedColumns.size(); ++valueIndex) {
-                    if (isColumnNullByRid(dc.dbname, dc.refTable,
+                    if (dbms::detail::storedRowColumnIsNull(*this, dc.dbname, dc.refTable, refTbl,
                             encodeRid(pageId, slotId), referencedColumns[valueIndex])) {
                         return;
                     }
@@ -12360,8 +12448,7 @@ DBStatus StorageEngine::createIndex(const std::string& dbname, const std::string
         }
         if (unique) {
             const int64_t rid = encodeRid(pageId, slotId);
-            if (!(tbl.cols[colIdx].isNull && isColumnNullByRid(
-                    dbname, tablename, rid, colIdx))) {
+            if (!(tbl.cols[colIdx].isNull && dbms::detail::storedRowColumnIsNull(*this, dbname, tablename, tbl, rid, colIdx))) {
                 const std::string value = extractColumnValue(
                     row, tbl, colIdx, dbname, true);
                 if (needsCollationScan) {
@@ -12653,8 +12740,7 @@ DBStatus StorageEngine::createCompositeIndex(const std::string& dbname,
             key.reserve(columnIndices.size());
             bool containsNull = false;
             for (const size_t columnIndex : columnIndices) {
-                if (tbl.cols[columnIndex].isNull && isColumnNullByRid(
-                        dbname, tablename, rid, columnIndex)) {
+                if (tbl.cols[columnIndex].isNull && dbms::detail::storedRowColumnIsNull(*this, dbname, tablename, tbl, rid, columnIndex)) {
                     containsNull = true;
                     break;
                 }
@@ -15228,6 +15314,38 @@ DBStatus StorageEngine::dropDatabase(const std::string& dbname) {
     if (context.inTransaction && context.txnDB == dbname) {
         return DBStatus::DATABASE_IN_USE;
     }
+    const auto activeUserTransaction = [&] {
+        std::lock_guard<std::mutex> lock(globalTxnMutex());
+        for (const auto& [xid, database] : activeTransactionDatabases()) {
+            (void)xid;
+            if (database == dbname) return true;
+        }
+        return false;
+    };
+    if (activeUserTransaction()) return DBStatus::DATABASE_IN_USE;
+    auto maintenance = maintenanceStateFor(dbname);
+    {
+        std::unique_lock<std::mutex> lock(maintenance->mutex);
+        if (maintenance->running != MaintenanceKind::None &&
+            maintenance->owner == std::this_thread::get_id()) return DBStatus::DATABASE_IN_USE;
+        while (maintenance->running != MaintenanceKind::None) {
+            maintenance->finished.wait_for(lock, std::chrono::milliseconds(20));
+            // BEGIN may hold globalTxnMutex while acquiring cacheMutex_.
+            // The writer completing this maintenance pass can hold the
+            // cache lock, so release the coordinator before inspecting xids.
+            lock.unlock();
+            checkForQueryInterrupt();
+            const bool active = activeUserTransaction();
+            lock.lock();
+            if (active) return DBStatus::DATABASE_IN_USE;
+        }
+        maintenance->running = MaintenanceKind::Drop;
+        maintenance->owner = std::this_thread::get_id();
+    }
+    // Background writeback/vacuum is not a live application session. Wait
+    // for that bounded ownership and reserve the name against the next pass
+    // while keeping the existing refusal for user/physical transaction locks.
+    MaintenanceCompletion completion{maintenance, MaintenanceKind::Drop, this};
     // BEGIN holds this mutex until commit/rollback completes. Take it before
     // cacheMutex_ so DROP cannot remove files under an active transaction or
     // race with a newly starting one. A busy database is not dropped.
@@ -18391,7 +18509,7 @@ DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
         for (size_t i = 0; i < tbl.len; ++i) {
             if (!tbl.cols[i].generatedExpr.empty()) continue;
             if (tbl.cols[i].isNull &&
-                isColumnNullByRid(dbname, tablename, rid, i)) {
+                dbms::detail::storedRowColumnIsNull(*this, dbname, tablename, tbl, rid, i)) {
                 values[tbl.cols[i].dataName] = std::nullopt;
             } else {
                 values[tbl.cols[i].dataName] =
@@ -18562,7 +18680,13 @@ DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
     if (!transactionContext().inTransaction) lockManager_.unlock(tablename);
 
     for (const auto& values : rows) {
-        DBStatus status = insertRow(dbname, tablename, values);
+        DBStatus status;
+        if (detail::ownsDdlRewrite(*this, dbname, tablename)) {
+            std::map<std::string, std::string> stored;
+            std::set<std::string> nulls;
+            splitSqlRow(values, stored, nulls);
+            status = insertInternal(dbname, tablename, stored, nulls, nullptr, IdentityOverride::None);
+        } else status = insertRow(dbname, tablename, values);
         if (status != DBStatus::OK) return status;
     }
 
@@ -18753,7 +18877,7 @@ DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
         for (size_t i = 0; i < tbl.len; ++i) {
             if (i == dropIdx || !tbl.cols[i].generatedExpr.empty()) continue;
             if (tbl.cols[i].generatedKind != 'v' && tbl.cols[i].isNull &&
-                isColumnNullByRid(dbname, tablename, rid, i)) {
+                dbms::detail::storedRowColumnIsNull(*this, dbname, tablename, tbl, rid, i)) {
                 values[tbl.cols[i].dataName] = std::nullopt;
             } else {
                 values[tbl.cols[i].dataName] =
@@ -18874,7 +18998,13 @@ DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
     lockManager_.unlock(tablename);
 
     for (const auto& values : rows) {
-        DBStatus status = insertRow(dbname, tablename, values);
+        DBStatus status;
+        if (detail::ownsDdlRewrite(*this, dbname, tablename)) {
+            std::map<std::string, std::string> stored;
+            std::set<std::string> nulls;
+            splitSqlRow(values, stored, nulls);
+            status = insertInternal(dbname, tablename, stored, nulls, nullptr, IdentityOverride::None);
+        } else status = insertRow(dbname, tablename, values);
         if (status != DBStatus::OK) return status;
     }
     DBStatus indexStatus = reindex(dbname, tablename);
@@ -19008,7 +19138,7 @@ DBStatus StorageEngine::alterTableAlterColumnType(const std::string& dbname,
         const int64_t rid = encodeRid(pageId, slotId);
         for (size_t i = 0; i < tbl.len; ++i) {
             if (tbl.cols[i].generatedKind != 'v' && tbl.cols[i].isNull &&
-                isColumnNullByRid(dbname, tablename, rid, i)) {
+                dbms::detail::storedRowColumnIsNull(*this, dbname, tablename, tbl, rid, i)) {
                 values[tbl.cols[i].dataName] = std::nullopt;
             } else {
                 values[tbl.cols[i].dataName] =
@@ -19190,7 +19320,13 @@ DBStatus StorageEngine::alterTableAlterColumnType(const std::string& dbname,
     // 6. Re-insert all rows: re-encodes the target column under its new type and
     //    rebuilds PK + secondary indexes from the surviving meta files.
     for (const auto& values : rows) {
-        const DBStatus status = insertRow(dbname, tablename, values);
+        DBStatus status;
+        if (detail::ownsDdlRewrite(*this, dbname, tablename)) {
+            std::map<std::string, std::string> stored;
+            std::set<std::string> nulls;
+            splitSqlRow(values, stored, nulls);
+            status = insertInternal(dbname, tablename, stored, nulls, nullptr, IdentityOverride::None);
+        } else status = insertRow(dbname, tablename, values);
         if (status != DBStatus::OK) return status;
     }
 
@@ -20686,8 +20822,7 @@ DBStatus StorageEngine::alterTableSetNotNull(const std::string& dbname,
             dbname, tablename,
             [&](uint32_t pageId, uint16_t slotId, const char*, size_t) {
                 if (hasNull) return;
-                hasNull = isColumnNullByRid(
-                    dbname, tablename, encodeRid(pageId, slotId), colIdx);
+                hasNull = dbms::detail::storedRowColumnIsNull(*this, dbname, tablename, tbl, encodeRid(pageId, slotId), colIdx);
             })) {
         lockManager_.unlock(tablename);
         return DBStatus::IO_ERROR;
@@ -20791,8 +20926,7 @@ DBStatus StorageEngine::alterTableAddCheckConstraint(const std::string& dbname,
             for (size_t columnIndex = 0;
                  columnIndex < tbl.len; ++columnIndex) {
                 if (tbl.cols[columnIndex].isNull &&
-                    isColumnNullByRid(
-                        dbname, tablename, rid, columnIndex)) {
+                    dbms::detail::storedRowColumnIsNull(*this, dbname, tablename, tbl, rid, columnIndex)) {
                     rowValues[tbl.cols[columnIndex].dataName] = "";
                 } else {
                     rowValues[tbl.cols[columnIndex].dataName] =
@@ -20903,8 +21037,7 @@ DBStatus StorageEngine::alterTableAddUniqueConstraint(const std::string& dbname,
             key.reserve(colIndices.size());
             for (const size_t columnIndex : colIndices) {
                 if (tbl.cols[columnIndex].isNull &&
-                    isColumnNullByRid(
-                        dbname, tablename, rid, columnIndex)) {
+                    dbms::detail::storedRowColumnIsNull(*this, dbname, tablename, tbl, rid, columnIndex)) {
                     return;  // UNIQUE treats NULL keys as distinct.
                 }
                 key.push_back(extractColumnValue(
@@ -21012,8 +21145,7 @@ DBStatus StorageEngine::alterTableAddPrimaryKey(const std::string& dbname,
                    key.reserve(colIndices.size());
                    for (size_t ci : colIndices) {
                        if (tbl.cols[ci].isNull &&
-                           isColumnNullByRid(
-                               dbname, tablename, rid, ci)) {
+                           dbms::detail::storedRowColumnIsNull(*this, dbname, tablename, tbl, rid, ci)) {
                            violation = true;
                            return;
                        }
@@ -21199,8 +21331,7 @@ DBStatus StorageEngine::alterTableAddFKConstraint(const std::string& dbname,
             key.reserve(referencedColumnIndices.size());
             for (const size_t columnIndex : referencedColumnIndices) {
                 if (referencedTable.cols[columnIndex].isNull &&
-                    isColumnNullByRid(
-                        dbname, refTable, rid, columnIndex)) {
+                    dbms::detail::storedRowColumnIsNull(*this, dbname, refTable, referencedTable, rid, columnIndex)) {
                     return;
                 }
                 key.push_back(canonicalColumnKeyValue(
@@ -21226,8 +21357,7 @@ DBStatus StorageEngine::alterTableAddFKConstraint(const std::string& dbname,
                 const size_t localColumnIndex =
                     localColumnIndices[valueIndex];
                 if (tbl.cols[localColumnIndex].isNull &&
-                    isColumnNullByRid(
-                        dbname, tablename, rid, localColumnIndex)) {
+                    dbms::detail::storedRowColumnIsNull(*this, dbname, tablename, tbl, rid, localColumnIndex)) {
                     return;  // MATCH SIMPLE: any NULL suppresses the check.
                 }
                 key.push_back(canonicalColumnKeyValue(
@@ -25619,8 +25749,7 @@ DBStatus StorageEngine::insertInternal(
                                if (duplicate) return;
                                const int64_t existingRid =
                                    encodeRid(pageId, slotId);
-                               if (col.isNull && isColumnNullByRid(
-                                       dbname, tablename, existingRid, i)) {
+                               if (col.isNull && dbms::detail::storedRowColumnIsNull(*this, dbname, tablename, tbl, existingRid, i)) {
                                    return;
                                }
                                duplicate = constraintColumnValuesEqual(
@@ -25685,9 +25814,7 @@ DBStatus StorageEngine::insertInternal(
                         existingKey.reserve(columns.size());
                         for (const size_t columnIndex : columns) {
                             if (tbl.cols[columnIndex].isNull &&
-                                isColumnNullByRid(
-                                    dbname, tablename, existingRid,
-                                    columnIndex)) {
+                                dbms::detail::storedRowColumnIsNull(*this, dbname, tablename, tbl, existingRid, columnIndex)) {
                                 return;
                             }
                             existingKey.push_back(extractColumnValue(
@@ -25732,9 +25859,7 @@ DBStatus StorageEngine::insertInternal(
                         existingValues.reserve(columns.size());
                         for (const size_t columnIndex : columns) {
                             if (tbl.cols[columnIndex].isNull &&
-                                isColumnNullByRid(
-                                    dbname, tablename, existingRid,
-                                    columnIndex)) {
+                                dbms::detail::storedRowColumnIsNull(*this, dbname, tablename, tbl, existingRid, columnIndex)) {
                                 return;
                             }
                             existingValues.push_back(extractColumnValue(
@@ -26450,7 +26575,7 @@ DBStatus StorageEngine::insertInternal(
                 std::string row(data, len);
                 for (size_t valueIndex = 0;
                      valueIndex < referencedColumns.size(); ++valueIndex) {
-                    if (isColumnNullByRid(dbname, fk.refTable,
+                    if (dbms::detail::storedRowColumnIsNull(*this, dbname, fk.refTable, refTbl,
                             encodeRid(pageId, slotId), referencedColumns[valueIndex])) {
                         return;
                     }
@@ -28290,7 +28415,7 @@ DBStatus StorageEngine::removeInternal(
             SqlRow rowValues;
             for (size_t i = 0; i < tbl.len; ++i) {
                 if (tbl.cols[i].isNull &&
-                    isColumnNullByRid(dbname, tablename, rid, i)) {
+                    dbms::detail::storedRowColumnIsNull(*this, dbname, tablename, tbl, rid, i)) {
                     rowValues[tbl.cols[i].dataName] = std::nullopt;
                 } else {
                     rowValues[tbl.cols[i].dataName] =
@@ -28447,9 +28572,7 @@ DBStatus StorageEngine::removeInternal(
                                             referencedColumnIndex];
                                     const bool localIsNull =
                                         otherTbl.cols[localColumnIndex].isNull &&
-                                        isColumnNullByRid(
-                                            dbname, otherTable, orid,
-                                            localColumnIndex);
+                                        dbms::detail::storedRowColumnIsNull(*this, dbname, otherTable, otherTbl, orid, localColumnIndex);
                                     if (referencedIsNull || localIsNull) {
                                         allMatch = false;
                                         break;
@@ -29819,7 +29942,7 @@ DBStatus StorageEngine::updateInternal(
             SqlRow rowValues;
             for (size_t i = 0; i < tbl.len; ++i) {
                 if (tbl.cols[i].isNull &&
-                    isColumnNullByRid(dbname, tablename, rid, i)) {
+                    dbms::detail::storedRowColumnIsNull(*this, dbname, tablename, tbl, rid, i)) {
                     rowValues[tbl.cols[i].dataName] = std::nullopt;
                 } else {
                     rowValues[tbl.cols[i].dataName] =
@@ -30734,7 +30857,7 @@ DBStatus StorageEngine::updateInternal(
                         const std::string referencedRow(data, length);
                         for (size_t valueIndex = 0;
                              valueIndex < referencedColumns.size(); ++valueIndex) {
-                            if (isColumnNullByRid(dbname, foreignKey.refTable,
+                            if (dbms::detail::storedRowColumnIsNull(*this, dbname, foreignKey.refTable, referenced,
                                     encodeRid(pageId, slotId), referencedColumns[valueIndex])) {
                                 return;
                             }
@@ -30835,9 +30958,7 @@ DBStatus StorageEngine::updateInternal(
                         const int64_t otherRid =
                             encodeRid(otherPage, otherSlot);
                         if (tbl.cols[columnIndex].isNull &&
-                            isColumnNullByRid(
-                                dbname, tablename, otherRid,
-                                columnIndex)) {
+                            dbms::detail::storedRowColumnIsNull(*this, dbname, tablename, tbl, otherRid, columnIndex)) {
                             return;
                         }
                         if (!constraintColumnValuesEqual(
@@ -31150,9 +31271,7 @@ DBStatus StorageEngine::updateInternal(
                                 const size_t localColumnIndex =
                                     fkColIndices[valueIndex];
                                 if (otherTbl.cols[localColumnIndex].isNull &&
-                                    isColumnNullByRid(
-                                        dbname, otherTable, orid,
-                                        localColumnIndex)) {
+                                    dbms::detail::storedRowColumnIsNull(*this, dbname, otherTable, otherTbl, orid, localColumnIndex)) {
                                     matched = false;
                                     break;
                                 }
@@ -33028,8 +33147,7 @@ std::vector<std::string> StorageEngine::query(
                         mr.second, tbl, sortIdx, dbname, true, &valueIsNull);
                     const Column& scol = tbl.cols[sortIdx];
                     const bool resultIsNull = valueIsNull ||
-                        (scol.generatedKind != 'v' && isColumnNullByRid(
-                            dbname, tbl.tablename, mr.first, sortIdx));
+                        (scol.generatedKind != 'v' && dbms::detail::storedRowColumnIsNull(*this, dbname, tbl.tablename, tbl, mr.first, sortIdx));
                     k.isNulls.push_back(resultIsNull);
                     if (scol.dataType == "numeric") {
                         k.vals.emplace_back(
@@ -33280,8 +33398,7 @@ std::vector<std::string> StorageEngine::query(
                     &valueIsNull);
                 rowNulls[tbl.cols[ci].dataName] = valueIsNull ||
                     (tbl.cols[ci].generatedKind != 'v' &&
-                     isColumnNullByRid(
-                         dbname, tbl.tablename, matchRows[ri].first, ci));
+                     dbms::detail::storedRowColumnIsNull(*this, dbname, tbl.tablename, tbl, matchRows[ri].first, ci));
             }
             size_t expressionIndex = 0;
             std::map<std::string, ExprEvalResult> expressionValues;
@@ -33438,8 +33555,7 @@ std::vector<std::string> StorageEngine::query(
                         mr.second, tbl, idx, dbname, true, &valueIsNull);
                     const bool resultIsNull = valueIsNull ||
                         (tbl.cols[idx].generatedKind != 'v' &&
-                         isColumnNullByRid(
-                             dbname, tbl.tablename, mr.first, idx));
+                         dbms::detail::storedRowColumnIsNull(*this, dbname, tbl.tablename, tbl, mr.first, idx));
                     keyValues.push_back(
                         resultIsNull ? std::string{} :
                             canonicalColumnKeyValue(tbl.cols[idx], value));
@@ -33470,8 +33586,7 @@ std::vector<std::string> StorageEngine::query(
             // VIRTUAL generated columns carry the evaluator's NULL result;
             // their unused heap slot cannot describe logical nullness.
             const bool resultIsNull = valueIsNull ||
-                (col.generatedKind != 'v' && isColumnNullByRid(
-                    dbname, tbl.tablename, mr.first, i));
+                (col.generatedKind != 'v' && dbms::detail::storedRowColumnIsNull(*this, dbname, tbl.tablename, tbl, mr.first, i));
             // Apply session timezone for TIMESTAMPTZ columns
             if (col.dataType == "timestamptz" && !col.isArray &&
                 !resultIsNull && !val.empty()) {
@@ -34944,12 +35059,12 @@ static bool scalarArgColumnIsNull(const std::string& arg,
         // Condition-scope context (forEachRow scans)...
         if (g_condNullEngine && g_condNullRid >= 0 &&
             tbl.tablename == g_condNullTable)
-            return engine->isColumnNullByRid(dbname, tbl.tablename,
+            return dbms::detail::storedRowColumnIsNull(*engine, dbname, tbl.tablename, tbl,
                                              g_condNullRid, i);
         // ...or the extraction-scope NullRowBinding (rid-keyed agg loops).
         if (g_nullRowEngine && g_nullRowRid >= 0 && i < g_nullRowNatts &&
             tbl.tablename == g_nullRowTable)
-            return engine->isColumnNullByRid(g_nullRowDb, tbl.tablename,
+            return dbms::detail::storedRowColumnIsNull(*engine, g_nullRowDb, tbl.tablename, tbl,
                                              g_nullRowRid, i);
         return false;
     }
@@ -39269,7 +39384,7 @@ std::vector<std::string> StorageEngine::queryExpr(
                 if (tbl.cols[i].dataName != expr.colName) continue;
                 val = extractColumnValue(mr.second, tbl, i, dbname, true, &valueIsNull);
                 if (valueIsNull || (val.empty() && tbl.cols[i].generatedKind != 'v' &&
-                    isColumnNullByRid(dbname, tbl.tablename, mr.first, i))) val = "NULL";
+                    dbms::detail::storedRowColumnIsNull(*this, dbname, tbl.tablename, tbl, mr.first, i))) val = "NULL";
                 break;
             }
         }
@@ -39769,7 +39884,7 @@ std::unordered_set<std::string> arraySeen;
                     // counts.  The stored null bit is the authoritative test.
                     if (colIdx < tbl.len &&
                         tbl.cols[colIdx].generatedKind != 'v' &&
-                        isColumnNullByRid(dbname, tablename, rid, colIdx)) {
+                        dbms::detail::storedRowColumnIsNull(*this, dbname, tablename, tbl, rid, colIdx)) {
                         continue;
                     }
                     if (colName == "*") { count++; continue; }
@@ -40425,14 +40540,14 @@ std::unordered_set<std::string> arraySeen;
                     // counts.  The stored null bit is the authoritative test.
                     if (colIdx < tbl.len &&
                         tbl.cols[colIdx].generatedKind != 'v' &&
-                        isColumnNullByRid(dbname, tablename, rid, colIdx)) {
+                        dbms::detail::storedRowColumnIsNull(*this, dbname, tablename, tbl, rid, colIdx)) {
                         continue;
                     }
                     // PG count(col) skips only NULL rows; an empty string
                     // counts.  The stored null bit is the authoritative test.
                     if (colIdx < tbl.len &&
                         tbl.cols[colIdx].generatedKind != 'v' &&
-                        isColumnNullByRid(dbname, tablename, rid, colIdx)) {
+                        dbms::detail::storedRowColumnIsNull(*this, dbname, tablename, tbl, rid, colIdx)) {
                         continue;
                     }
                     if (colName == "*") { count++; continue; }
@@ -40988,7 +41103,7 @@ std::unordered_set<std::string> arraySeen;
                     if (colIdx >= tbl.len) continue;
                     // PG count(col) skips only NULL rows; empty strings count.
                     if (tbl.cols[colIdx].generatedKind != 'v' &&
-                        isColumnNullByRid(dbname, tablename, rid, colIdx)) continue;
+                        dbms::detail::storedRowColumnIsNull(*this, dbname, tablename, tbl, rid, colIdx)) continue;
                     bool valueIsNull = false;
                     (void)logicalValue(row, colIdx, &valueIsNull);
                     if (valueIsNull) continue;
@@ -45368,6 +45483,40 @@ bool StorageEngine::checkpoint(const std::string& dbname) {
     const auto& context = transactionContext();
     if (context.inTransaction && context.txnDB == dbname) return false;
     if (ensureDatabaseTransactionOwnership() != DBStatus::OK) return false;
+    const auto activeUserTransaction = [&] {
+        std::lock_guard<std::mutex> lock(globalTxnMutex());
+        for (const auto& [xid, database] : activeTransactionDatabases()) {
+            (void)xid;
+            if (database == dbname) return true;
+        }
+        return false;
+    };
+    if (activeUserTransaction()) return false;
+    auto maintenance = maintenanceStateFor(dbname);
+    {
+        std::unique_lock<std::mutex> lock(maintenance->mutex);
+        if (maintenance->running != MaintenanceKind::None &&
+            maintenance->owner == std::this_thread::get_id()) return false;
+        const auto completed = maintenance->completedCheckpoints;
+        while (maintenance->running != MaintenanceKind::None) {
+            maintenance->finished.wait_for(lock, std::chrono::milliseconds(20));
+            const bool completedHere = maintenance->completedCheckpoints != completed &&
+                maintenance->lastCheckpointOwner == this;
+            const bool succeeded = maintenance->lastCheckpointSucceeded;
+            lock.unlock();
+            checkForQueryInterrupt();
+            const bool active = activeUserTransaction();
+            lock.lock();
+            if (completedHere) return succeeded;
+            if (active) return false;
+        }
+        maintenance->running = MaintenanceKind::Checkpoint;
+        maintenance->owner = std::this_thread::get_id();
+    }
+    // Coalesce overlapping checkpoints and wait for background vacuum's
+    // shared database ownership. Active user transactions retain the normal
+    // nonblocking refusal below; no durability failure is converted to OK.
+    MaintenanceCompletion completion{maintenance, MaintenanceKind::Checkpoint, this};
     const auto databaseMutex = databaseTxnLockFor(dbname);
     std::unique_lock<std::shared_mutex> checkpointDatabaseLock(
         *databaseMutex, std::try_to_lock);
@@ -45393,10 +45542,14 @@ bool StorageEngine::checkpoint(const std::string& dbname) {
     // flush re-baselines its whole-file WAL image pair (see
     // flushWalLoggedIndex).  Entries committed since the last epoch ride on
     // the physical flush that already happened at their commit.
-    ++indexImageEpoch_;
+    {
+        std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+        ++indexImageEpoch_;
+    }
 
     // Flush all loaded heap and index caches through the WAL-aware path.
     if (!flushDatabaseCaches(dbname)) {
+        std::cerr << "[checkpoint] heap/index flush failed for " << dbname << std::endl;
         return false;
     }
 
@@ -45444,10 +45597,14 @@ bool StorageEngine::checkpoint(const std::string& dbname) {
     if (!persistSqlStats(dbname, dbPath(dbname) / ".sql_stats")) return false;
 
     // Archive WAL before truncation
-    if (!archiveWal(dbname)) return false;
+    if (!archiveWal(dbname)) {
+        std::cerr << "[checkpoint] archive publication failed for " << dbname << std::endl;
+        return false;
+    }
     // Only archived segments strictly before the checkpoint are reclaimable;
     // the segment containing the checkpoint remains the recovery start.
-    return wal->truncateBefore(checkpointLsn);
+    completion.succeeded = wal->truncateBefore(checkpointLsn);
+    return completion.succeeded;
 }
 
 // ========================================================================
@@ -49054,7 +49211,7 @@ DBStatus StorageEngine::validateImmediateForeignKeyChecks() {
                     if (readFailed) return DBStatus::IO_ERROR;
                     continue; // Inserted and subsequently deleted in this statement.
                 }
-                if (isColumnNullByRid(check.dbname, check.tablename, localRid, localColumn)) {
+                if (dbms::detail::storedRowColumnIsNull(*this, check.dbname, check.tablename, table, localRid, localColumn)) {
                     continue;
                 }
                 const std::string localValue = extractColumnValue(
@@ -54286,7 +54443,7 @@ DBStatus StorageEngine::updateEnumType(const std::string& dbname, const EnumType
                     const int64_t rid = encodeRid(pageId, slotId);
                     for (const size_t columnIndex : rewrite.columns) {
                         if (rewrite.original.cols[columnIndex].isNull &&
-                            isColumnNullByRid(dbname, rewrite.tableName, rid,
+                            dbms::detail::storedRowColumnIsNull(*this, dbname, rewrite.tableName, rewrite.original, rid,
                                               columnIndex)) {
                             continue;
                         }

@@ -1,6 +1,7 @@
 #include "CommitLog.h"
 #include "common/DbError.h"
 
+#include <algorithm>
 #include <charconv>
 #include <cerrno>
 #include <fcntl.h>
@@ -21,6 +22,30 @@ struct SegmentReadDescriptor {
     int fd;
     ~SegmentReadDescriptor() { ::close(fd); }
 };
+
+template<class Segment>
+void rememberGeneration(Segment& segment, const struct stat& identity) {
+    segment.fileDevice = static_cast<uint64_t>(identity.st_dev);
+    segment.fileInode = static_cast<uint64_t>(identity.st_ino);
+    segment.fileSize = static_cast<uint64_t>(identity.st_size);
+    segment.modifiedSeconds = identity.st_mtim.tv_sec;
+    segment.modifiedNanoseconds = identity.st_mtim.tv_nsec;
+    segment.changedSeconds = identity.st_ctim.tv_sec;
+    segment.changedNanoseconds = identity.st_ctim.tv_nsec;
+    segment.fileIdentityValid = true;
+}
+
+template<class Segment>
+bool sameGeneration(const Segment& segment, const struct stat& identity) {
+    return segment.fileIdentityValid &&
+        segment.fileDevice == static_cast<uint64_t>(identity.st_dev) &&
+        segment.fileInode == static_cast<uint64_t>(identity.st_ino) &&
+        segment.fileSize == static_cast<uint64_t>(identity.st_size) &&
+        segment.modifiedSeconds == identity.st_mtim.tv_sec &&
+        segment.modifiedNanoseconds == identity.st_mtim.tv_nsec &&
+        segment.changedSeconds == identity.st_ctim.tv_sec &&
+        segment.changedNanoseconds == identity.st_ctim.tv_nsec;
+}
 
 // Callers provide a zero-filled private buffer. Missing files and real EOF
 // retain the existing InProgress tail convention; IO errors never mean zero.
@@ -108,14 +133,9 @@ void CommitLog::loadSegment(uint64_t segNo) const {
     const auto result = readSegmentFile(path, seg.data, identity);
     if (result == SegmentRead::Failed) throw segmentReadError(path);
     if (result == SegmentRead::Loaded) {
-        std::error_code ec;
-        seg.fileTime = std::filesystem::last_write_time(path, ec);
-        seg.fileTimeValid = !ec;
         // Associate the cached bytes with the descriptor actually read, not
         // a possibly newer inode installed at the same pathname afterwards.
-        seg.fileDevice = static_cast<uint64_t>(identity.st_dev);
-        seg.fileInode = static_cast<uint64_t>(identity.st_ino);
-        seg.fileIdentityValid = true;
+        rememberGeneration(seg, identity);
     }
 
     segments_[segNo] = std::move(seg);
@@ -132,35 +152,24 @@ void CommitLog::refreshSegmentIfChanged(uint64_t segNo) const {
     while (metadataResult != 0 && errno == EINTR);
     if (metadataResult != 0) {
         if (errno != ENOENT) throw segmentReadError(path);
-        if (it->second.fileTimeValid || it->second.fileIdentityValid) {
+        if (it->second.fileIdentityValid) {
             it->second.data.assign(kSegmentFileSize, 0);
-            it->second.fileTimeValid = false;
             it->second.fileIdentityValid = false;
         }
         return;
     }
 
-    std::error_code ec;
-    const auto stamp = std::filesystem::last_write_time(path, ec);
-    if (ec) throw segmentReadError(path);
-    const uint64_t device = static_cast<uint64_t>(status.st_dev);
-    const uint64_t inode = static_cast<uint64_t>(status.st_ino);
-    if (it->second.fileTimeValid && it->second.fileTime == stamp &&
-        it->second.fileIdentityValid &&
-        it->second.fileDevice == device && it->second.fileInode == inode) {
-        return;
-    }
+    // One stat supplies identity, length, mtime and ctime. Checking ctime
+    // also catches in-place edits whose mtime was restored by a peer.
+    if (sameGeneration(it->second, status)) return;
 
     std::vector<uint8_t> data(kSegmentFileSize, 0);
     struct stat identity {};
     const auto result = readSegmentFile(path, data, identity);
     if (result == SegmentRead::Failed) throw segmentReadError(path);
     it->second.data = std::move(data);
-    it->second.fileTime = stamp;
-    it->second.fileTimeValid = result == SegmentRead::Loaded;
-    it->second.fileDevice = static_cast<uint64_t>(identity.st_dev);
-    it->second.fileInode = static_cast<uint64_t>(identity.st_ino);
-    it->second.fileIdentityValid = result == SegmentRead::Loaded;
+    if (result == SegmentRead::Loaded) rememberGeneration(it->second, identity);
+    else it->second.fileIdentityValid = false;
 }
 
 void CommitLog::ensureSegment(uint64_t segNo) const {
@@ -233,18 +242,45 @@ bool CommitLog::saveSegment(uint64_t segNo, int heldLockFd) {
         return false;
     }
 
-    const uint8_t* data = latest.data();
-    size_t remaining = kSegmentFileSize;
-    bool ok = true;
-    while (remaining > 0) {
-        const ssize_t written = ::write(fd, data, remaining);
-        if (written < 0 && errno == EINTR) continue;
-        if (written <= 0) {
-            ok = false;
-            break;
+    // Keep the complete, fixed-size two-bit image and atomic replacement,
+    // but let zero-only blocks remain holes. A typical young segment has
+    // only a few populated blocks; writing its zero tail on every commit
+    // needlessly dirties another 256 KiB. Reads of holes still return the
+    // exact InProgress bytes, including statuses explicitly cleared to zero.
+    int sized;
+    do { sized = ::ftruncate(fd, static_cast<off_t>(kSegmentFileSize)); }
+    while (sized != 0 && errno == EINTR);
+    bool ok = sized == 0;
+    constexpr size_t blockSize = 4096;
+    for (size_t offset = 0; ok && offset < latest.size();) {
+        const size_t length = std::min(blockSize, latest.size() - offset);
+        if (std::all_of(latest.begin() + offset, latest.begin() + offset + length,
+                        [](uint8_t byte) { return byte == 0; })) {
+            offset += length;
+            continue;
         }
-        data += written;
-        remaining -= static_cast<size_t>(written);
+        // Mature segments usually have a dense prefix. Publish adjacent
+        // populated blocks in one transfer instead of adding a syscall for
+        // every 4 KiB block when there are no holes to skip.
+        size_t end = offset + length;
+        while (end < latest.size()) {
+            const size_t next = std::min(blockSize, latest.size() - end);
+            if (std::all_of(latest.begin() + end, latest.begin() + end + next,
+                            [](uint8_t byte) { return byte == 0; })) break;
+            end += next;
+        }
+        off_t position;
+        do { position = ::lseek(fd, static_cast<off_t>(offset), SEEK_SET); }
+        while (position < 0 && errno == EINTR);
+        if (position != static_cast<off_t>(offset)) { ok = false; break; }
+        size_t done = 0;
+        while (done < end - offset) {
+            const ssize_t written = ::write(fd, latest.data() + offset + done, end - offset - done);
+            if (written < 0 && errno == EINTR) continue;
+            if (written <= 0) { ok = false; break; }
+            done += static_cast<size_t>(written);
+        }
+        offset = end;
     }
     if (ok && ::fsync(fd) != 0) ok = false;
     if (::close(fd) != 0) ok = false;
@@ -262,21 +298,20 @@ bool CommitLog::saveSegment(uint64_t segNo, int heldLockFd) {
         std::cerr << "[CLOG] Failed to durably write segment: " << path << std::endl;
         return false;
     }
-    releaseLock();
     it->second.data = std::move(latest);
     it->second.pendingBits.clear();
-    std::error_code ec;
-    it->second.fileTime = std::filesystem::last_write_time(path, ec);
-    it->second.fileTimeValid = !ec;
     struct stat status {};
     if (::stat(path.c_str(), &status) == 0) {
-        it->second.fileDevice = static_cast<uint64_t>(status.st_dev);
-        it->second.fileInode = static_cast<uint64_t>(status.st_ino);
-        it->second.fileIdentityValid = true;
+        rememberGeneration(it->second, status);
     } else {
         it->second.fileIdentityValid = false;
     }
     it->second.dirty = false;
+    // Keep the publication lock until the cached bytes and their generation
+    // agree. A peer may replace the inode immediately after LOCK_UN; taking
+    // its metadata after unlocking would label our older bytes as that newer
+    // image and suppress the next refresh.
+    releaseLock();
     return true;
 }
 
@@ -410,7 +445,6 @@ void CommitLog::truncate(TxnId oldestXid) {
             // the in-memory image authoritative for this backend.
             auto it = segments_.find(segNo);
             if (it != segments_.end()) {
-                it->second.fileTimeValid = false;
                 it->second.fileIdentityValid = false;
             }
         }

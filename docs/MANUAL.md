@@ -1,5 +1,10 @@
 # DBMS 使用手册
 
+性能优化、35 类操作的耗时对照及复现方法见 [2026-10-30 性能测试报告](performance-report-2026-10-30.md)。
+查询使用 `scripts/benchmark_queries.py`，增删改、事务、DDL、COPY、索引和维护使用 `scripts/benchmark_operations.py`。
+两者均要求显式指定待测二进制与新的输出目录，并创建私有数据目录；默认持久化设置保持开启。
+报告区分可比较的完整测量窗口、失败记录与剩余瓶颈；下文按版本保留的兼容性结论和暂缓范围继续按各自证据解释。
+
 最新有限修复：[R185排序中断传播](issue-review-r185-sort-interrupt-propagation.md)统一执行器12处排序的取消/超时检查，
 保留原比较、类型、NULL/tie及求值规则。修正夹具后旧80控制完整40失败；两侧新80及各19完整入口均实际全0。
 每侧74对象16程序/127头核对，Root正常1CPP并链接/repeat零；Main为同源已验证donor重新链接，不冒fresh TU。

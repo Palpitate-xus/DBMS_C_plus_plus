@@ -235,6 +235,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/prepared_read_root_planning_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/prepared_parameter_index_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/integer_join_prefilter_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/dml_integer_prefilter_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/explain_root_constant_planning_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/dml_explain_execution_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/insert_default_planning_protocol_e2e_test.py)

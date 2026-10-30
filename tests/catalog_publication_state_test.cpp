@@ -77,7 +77,12 @@ int main() {
         fs::create_symlink(saved, path);
         assert(observer.publicationState() == conflict);
         fs::remove(path);
-        fs::rename(saved, path);
+        // Restoring the same inode by rename can retain the observed file
+        // generation on coarse timestamp filesystems. Keep the original
+        // inode alive while creating its replacement so the peer change is
+        // guaranteed, independently of timestamp granularity.
+        fs::copy_file(saved, path);
+        fs::remove(saved);
         assert(observer.publicationState() == peer);
         observer.loadAll();
         assert(observer.publicationState() == current);

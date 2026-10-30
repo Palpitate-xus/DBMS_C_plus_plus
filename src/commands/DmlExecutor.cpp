@@ -26,9 +26,11 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <charconv>
 #include <functional>
 #include <iostream>
 #include <map>
+#include <limits>
 #include <sstream>
 #include <set>
 #include <string>
@@ -5623,6 +5625,45 @@ class BoundDmlExecution {
         const auto value=execution_->evaluate(where,context(values));
         return !value.isNull && value.asBool();
     }
+    std::vector<std::string> integerEqualityCandidates(const Expr* where) const {
+        const auto* equality=dynamic_cast<const BinaryOpExpr*>(where);
+        if(!equality || equality->op!="=" || equality->preparedSubquery)return {};
+        const auto* column=dynamic_cast<const ColumnRefExpr*>(equality->left.get());
+        const Expr* input=equality->right.get();
+        if(!column) {column=dynamic_cast<const ColumnRefExpr*>(equality->right.get());input=equality->left.get();}
+        if(!column || column->preparedSubquery || !column->binding || column->binding->scopeDepth ||
+            column->binding->mergedUsing || column->binding->sourceOrdinal!=target_->ordinal ||
+            column->binding->columnOrdinal>=table_.len || !input || input->preparedSubquery)return {};
+        const auto& stored=table_.cols[column->binding->columnOrdinal];
+        const auto type=ExprHelper::canonicalResultTypeName(stored.dataType);
+        if((type!="smallint" && type!="integer" && type!="bigint") || stored.isArray || stored.isUnsigned ||
+            !stored.domainName.empty() || stored.generatedKind || stored.dataName.empty() ||
+            !std::all_of(stored.dataName.begin(),stored.dataName.end(),[](unsigned char ch){return std::isalnum(ch) || ch=='_';}) ||
+            ExprHelper::canonicalResultTypeName(column->binding->declaredType)!=type)return {};
+        if(equality->comparison && (!equality->comparison->strict ||
+            equality->comparison->identity!="builtin-comparison:=("+type+","+type+")"))return {};
+        std::string value,inputType;
+        if(const auto* literal=dynamic_cast<const LiteralExpr*>(input)) {
+            value=literal->value;
+            inputType=literal->typeName.empty()?ExprHelper::inferValuesResultType(value):literal->typeName;
+        } else if(const auto* parameter=dynamic_cast<const ParameterExpr*>(input)) {
+            if(parameter->origin!=ParameterOrigin::StatementInput || parameter->slot>=query_->parameters.size() ||
+                ExprHelper::canonicalResultTypeName(parameter->declaredType)!=type)return {};
+            const auto& bound=query_->parameters[parameter->slot];
+            if(bound.isNull)return {};
+            value=bound.value;inputType=bound.typeName;
+        } else return {};
+        if(ExprHelper::canonicalResultTypeName(inputType)!=type)return {};
+        int64_t number=0;
+        const auto parsed=std::from_chars(value.data(),value.data()+value.size(),number);
+        if(parsed.ec!=std::errc{} || parsed.ptr!=value.data()+value.size() ||
+            (type=="smallint" && (number<-32768 || number>32767)) ||
+            (type=="integer" && (number<std::numeric_limits<int32_t>::min() || number>std::numeric_limits<int32_t>::max())))return {};
+        // This is only a necessary heap predicate. The typed WHERE matcher
+        // below still owns evaluation and the engine retains MVCC/RLS/SSI.
+        // No expression, routine or child query is evaluated to obtain it.
+        return {"="+stored.dataName+" "+std::to_string(number)};
+    }
     DmlResult result(const std::vector<ReturningRowImage>& rows,const std::string& command,size_t count,
                      const std::vector<RowContext>* sources=nullptr) {
         DmlResult output;output.available=true;
@@ -5906,14 +5947,14 @@ private:
                 }
                 return true;
             };
-            const auto status=g_engine.updateRows(session_.currentDB,physical_,{}, {},returning_->empty()?nullptr:&images,
+            const auto status=g_engine.updateRows(session_.currentDB,physical_,{}, integerEqualityCandidates(update->whereClause.get()),returning_->empty()?nullptr:&images,
                 resolver,matcher,&count,returning_->empty()?nullptr:&changes);
             if(status!=DBStatus::OK)throw DbError(sqlstateForDBStatus(status),"WITH UPDATE failed");
             return result(updatedReturningImages(changes),"UPDATE",count);
         }
         auto* remove=static_cast<DeleteStmt*>(statement_);
         const auto matcher=[&](const SqlRow& old){return matches(remove->whereClause.get(),old);};
-        const auto status=g_engine.removeRows(session_.currentDB,physical_,{},returning_->empty()?nullptr:&images,matcher,&count);
+        const auto status=g_engine.removeRows(session_.currentDB,physical_,integerEqualityCandidates(remove->whereClause.get()),returning_->empty()?nullptr:&images,matcher,&count);
         if(status!=DBStatus::OK)throw DbError(sqlstateForDBStatus(status),"WITH DELETE failed");
         return result(deletedReturningImages(images),"DELETE",count);
     }

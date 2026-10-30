@@ -9,6 +9,7 @@
 - [逐项修复进度](review-fixes-2026-10-13.md)：审查问题的修复、独立提交和验收结果。
 - [全部文档检查清单](documentation-inventory.md)：逐文件分类和本地链接检查。
 - [测试报告](test-report.md)：当前验证入口与按版本保留的结果。
+- [2026-10-30 性能测试报告](performance-report-2026-10-30.md)：35 类数据库操作的测量、优化实现、回归范围与剩余瓶颈。
 - [PostgreSQL 18 总清单](postgresql-18-gap-audit.md)与[机器可读状态](gap-progress.json)：唯一的功能完成状态来源。
 - [实现蓝图](postgresql-18-implementation-blueprint.md)与[复查计划](review-closeout-plan.md)：工作顺序和验收方法。
 - [用户暂缓范围](deferred-scope.md)：明确暂缓的模块及保留的未修复状态。

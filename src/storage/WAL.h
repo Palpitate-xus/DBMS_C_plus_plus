@@ -224,6 +224,7 @@ private:
     uint32_t lastRecordTotLen_ = 0; // xl_tot_len of that record
     Lsn lastSyncedLsn_ = 0;         // bytes [0, lastSyncedLsn_) are fsync'd
     mutable uint32_t earliestSeg_ = 0; // first segment present on this timeline
+    mutable Lsn earliestRecordLsn_ = 0;
     mutable bool earliestSegValid_ = false;
     // Long-lived descriptors: the cross-process wal.lock fd and the write fd
     // of the segment currently being appended to. Reopened only on segment

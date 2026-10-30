@@ -20,6 +20,52 @@ namespace dbms {
 
 namespace {
 
+// A retained segment can begin in the middle of a record whose first bytes
+// were archived with the previous segment. The existing durable checkpoint
+// file supplies an exact record anchor; follow its checked xl_prev links
+// backwards, rather than guessing headers inside arbitrary payload bytes.
+std::optional<Lsn> retainedRecordStart(const WALManager& wal,
+                                     const std::filesystem::path& checkpoint,
+                                     Lsn segmentStart, Lsn limit) {
+    if (const auto first = wal.ReadRecord(segmentStart)) {
+        if ((segmentStart == 0 && first->header.xl_prev == 0) ||
+            (segmentStart != 0 && first->header.xl_prev < segmentStart))
+            return segmentStart;
+    }
+    if (segmentStart == 0) return std::nullopt;
+    const int fd = ::open(checkpoint.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return std::nullopt;
+    std::array<uint64_t, 3> metadata{};
+    struct stat status{};
+    bool valid = ::fstat(fd, &status) == 0 && S_ISREG(status.st_mode) &&
+        status.st_size == static_cast<off_t>(sizeof(metadata));
+    size_t done = 0;
+    while (valid && done < sizeof(metadata)) {
+        const auto count = ::read(fd, reinterpret_cast<char*>(metadata.data()) + done,
+                                  sizeof(metadata) - done);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) { valid = false; break; }
+        done += static_cast<size_t>(count);
+    }
+    ::close(fd);
+    const Lsn anchor = metadata[2];
+    if (!valid || anchor < segmentStart || anchor > limit ||
+        anchor >= wal.currentWriteLsn()) return std::nullopt;
+    auto record = wal.ReadRecord(anchor);
+    if (!record || record->rmid() != RM_CHECKPOINT_ID) return std::nullopt;
+    Lsn current = anchor;
+    while (record->header.xl_prev >= segmentStart) {
+        const Lsn previous = record->header.xl_prev;
+        if (previous >= current) return std::nullopt;
+        auto prior = wal.ReadRecord(previous);
+        if (!prior || prior->header.xl_tot_len != current - previous)
+            return std::nullopt;
+        current = previous;
+        record = std::move(prior);
+    }
+    return current;
+}
+
 // Each WAL directory gets its own in-process mutex instead of one global for
 // the whole process: different databases no longer serialize their WAL
 // appends. The file lock below still protects separate processes; this map
@@ -279,6 +325,7 @@ bool WALManager::ensureOpen(bool createDirectory) {
 
     if (!refreshCurrentLsnFromDisk()) return false;
     open_ = true;
+    earliestSegValid_ = false;
     if (!validateRecordsOnDisk()) {
         open_ = false;
         return false;
@@ -747,7 +794,7 @@ Lsn WALManager::earliestAvailableLsn() const {
     // truncateBefore()/reset(), both of which invalidate the cache. The
     // directory walk used to run on every XLogFlush.
     if (earliestSegValid_) {
-        return static_cast<Lsn>(earliestSeg_) * kSegmentSize;
+        return earliestRecordLsn_;
     }
     if (!std::filesystem::is_directory(walDir_)) return 0;
 
@@ -765,12 +812,22 @@ Lsn WALManager::earliestAvailableLsn() const {
     }
     if (firstSeg == std::numeric_limits<uint32_t>::max()) {
         earliestSeg_ = 0;
+        earliestRecordLsn_ = 0;
         earliestSegValid_ = true;
         return 0;
     }
     earliestSeg_ = firstSeg;
+    const Lsn boundary = static_cast<Lsn>(firstSeg) * kSegmentSize;
+    const auto first = open_ && firstSeg != 0
+        ? retainedRecordStart(*this, walDir_.parent_path() / "checkpoint",
+                              boundary, currentLsn_)
+        : std::optional<Lsn>{boundary};
+    // An absent, corrupt or unrelated checkpoint does not authorize skipping
+    // bytes. Fall back to the segment boundary so the normal CRC/chain scan
+    // rejects a malformed retained prefix.
+    earliestRecordLsn_ = first.value_or(boundary);
     earliestSegValid_ = true;
-    return static_cast<Lsn>(firstSeg) * kSegmentSize;
+    return earliestRecordLsn_;
 }
 
 bool WALManager::truncateBefore(Lsn lsn) {
@@ -809,6 +866,16 @@ bool WALManager::truncateBefore(Lsn lsn) {
             releaseWalFileLock(walLock);
             return false;
         }
+    }
+
+    // Do not create an unreadable retained prefix. Engine checkpoints publish
+    // the durable anchor before this call; standalone callers can truncate at
+    // a real record boundary without such an anchor. Other cuts fail closed.
+    if (!candidates.empty() &&
+        !retainedRecordStart(*this, walDir_.parent_path() / "checkpoint",
+                             static_cast<Lsn>(keepSeg) * kSegmentSize, lsn)) {
+        releaseWalFileLock(walLock);
+        return false;
     }
 
     bool ok = true;
@@ -1291,6 +1358,7 @@ void WALManager::reset() {
     lastRecordTotLen_ = 0;
     lastSyncedLsn_ = 0;
     earliestSeg_ = 0;
+    earliestRecordLsn_ = 0;
     earliestSegValid_ = false;
     releaseWalFileLock(walLock);
 }

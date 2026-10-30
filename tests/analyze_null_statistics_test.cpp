@@ -84,6 +84,9 @@ int main() {
     const std::map<std::string, size_t> partitionMcv(partitioned.mcv.begin(), partitioned.mcv.end());
     assert((partitionMcv == std::map<std::string, size_t>{{"", 1}, {"other", 1}}));
     assert(nullFraction(db, "partitioned", "text_value") == 0.5);
-    assert(g_engine.dropDatabase(db) == dbms::DBStatus::OK);
+    const auto dropStatus = g_engine.dropDatabase(db);
+    if (dropStatus != dbms::DBStatus::OK)
+        std::cerr << "ANALYZE_NULL_CLEANUP_STATUS " << static_cast<int>(dropStatus) << '\n';
+    assert(dropStatus == dbms::DBStatus::OK);
     std::cout << "[ANALYZE NULL STATISTICS] passed\n";
 }
