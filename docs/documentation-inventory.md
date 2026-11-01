@@ -15,7 +15,7 @@
 
 | 项目 | 方法与结果 |
 | --- | --- |
-| 版本、构建入口 | `version_consistency_test.py`、`compatibility_contract_test.py` 通过；CMake 与脚本引用同一份 61 项生产源码清单，另按环境选择 TLS 实现。四个构建/打包脚本的 `bash -n` 通过。当前环境缺少 `cmake`，配置生成尝试退出 127，未声称 CMake 构建通过。 |
+| 版本、构建入口 | `version_consistency_test.py`、`compatibility_contract_test.py` 通过；CMake 与脚本引用同一份 61 项生产源码清单，另按环境选择 TLS 实现。四个构建/打包脚本的 `bash -n` 通过。首次配置尝试因缺少 `cmake` 退出 127，原日志保留；同日已补装并通过完整构建，详见下方补充验证。 |
 | 显式数据目录与版本协议 | `data_directory_e2e_test.py`、`version_function_protocol_e2e_test.py` 通过，后者 16 条内部检查无失败；使用当前根目录程序和独立数据目录。 |
 | README SQL 与模式门控 | 按原文提取并运行 9 条 SQL，核对查询及保存点回滚后的完整结果；验证默认模式拒绝 `USE`、extended 模式允许 `USE`，以及两种模式均拒绝未实现的扩展运行时。 |
 | 配置加载与重载 | 原生 `config_test` 通过。私有服务核对默认与自定义的 `pg_settings`，验证 reload 保留 `buffer_pool_frames` 启动值、更新 `checkpoint_interval` 显示值，重启后读取新的启动值。与上一行共 23 条真实协议观察，无失败。 |
@@ -35,6 +35,34 @@
 
 协议检查使用私有目录和本地明文模式；没有重做真实 TLS、Docker、全仓库回归、全部历史示例或完整 PostgreSQL 行为认证。
 源码追踪、实际运行和旧记录复核按上表分别说明，功能总账及用户暂缓状态未更改。
+
+### CMake 补充验证（2026-11-01）
+
+使用 `a82c0c28` 的源码，按[官方列出的 pip 渠道](https://cmake.org/download/)安装 CMake **4.4.4**：
+
+```bash
+python3 -m pip install --user --only-binary=:all: cmake
+cmake --version
+cmake -S . -B build/cmake
+cmake --build build/cmake --parallel 8
+DBMS_MAIN="$PWD/build/cmake/dbms_main" python3 tests/data_directory_e2e_test.py
+DBMS_MAIN="$PWD/build/cmake/dbms_main" python3 tests/version_function_protocol_e2e_test.py
+```
+
+`cmake`、`ctest` 和 `cpack` 已安装到 `~/.local/bin`，该目录已在 PATH 中。
+配置生成与完整编译通过：GNU C++ 13.3.0、C++17、`-O2`，新编译 62 个单元（61 项清单加 TLS stub），
+构建耗时约 410 秒；随后增量构建通过且没有重复编译。zlib 1.3、ICU 74.2 检测成功；
+未找到 OpenSSL 开发库，按既有构建逻辑使用 TLS stub，本轮协议验证采用本地明文模式。
+
+上面两个入口均使用新生成的 `build/cmake/dbms_main` 并通过；另对该程序重新执行了
+23 条文档运行观察，包括 README 原文 9 条 SQL、配置加载/重载/重启和模式门控，全部通过。
+`ctest --test-dir build/cmake --show-only=json-v1` 确认注册了规范完整回归入口，
+但没有执行完整 CTest、性能或兼容性矩阵，也没有将这些定向测试写成全量通过。
+
+新程序 SHA-256 为 `996c0b6ee761116f413f4594e722138e5972c58229f42f48bc98b3cc3f72702f`；
+根目录原程序保持不变。安装、构建、增量、测试及运行观察证据位于
+`build/cmake-validation-20261101-gt_0c248/`，汇总为 `build-steps.json`、`validation-steps.json`、
+`validation.json` 和 `runtime-smoke.json`，完整日志一并保留。
 
 ## 检查方法与更新
 
