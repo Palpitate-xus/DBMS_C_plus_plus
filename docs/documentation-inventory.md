@@ -1,12 +1,40 @@
 # 全部文档检查清单
 
-## 当前检查（2026-10-30）
+## 文档结构检查（2026-10-30）
 
 本次整理以 `master` 基线 `03c01158` 为输入。当前 Markdown 总数和逐文件分类由下方清单自动生成。问题与验证证据按各自输入、提交和运行批次保留，不等同于当前缺陷数量或当前验收通过。
 
 检查结果：没有内容完全相同的整份文档，没有空文档；12 份汇总文档中重复的近期状态段落统一保留在[审查索引](review-index.md#近期修复与验证记录)，其他入口改为引用。历史问题记录保留原文件名和证据，未批量删除。
 
 [当前状态](production-status.md#当前状态与验证范围)、[功能测试](test-report.md)、[性能实测](performance-report-2026-10-30.md)分别说明当前批次的范围；兼容性状态仍以[契约](compatibility-contract.md)、[总清单](postgresql-18-gap-audit.md)和[机器可读状态](gap-progress.json)为准。本次文档整理不改变功能总账或重新声明全仓库测试通过。
+
+## 文档与系统一致性核查（2026-11-01）
+
+以 `master` 的 `c0e0a303` 为核查输入，检查当前使用入口的构建、启动、SQL 示例、配置和运行时边界。
+结构检查覆盖全部 Markdown；以下内容核查只覆盖所列项目，没有逐条运行 754 份文档中的全部历史 SQL。
+
+| 项目 | 方法与结果 |
+| --- | --- |
+| 版本、构建入口 | `version_consistency_test.py`、`compatibility_contract_test.py` 通过；CMake 与脚本引用同一份 61 项生产源码清单，另按环境选择 TLS 实现。四个构建/打包脚本的 `bash -n` 通过。当前环境缺少 `cmake`，配置生成尝试退出 127，未声称 CMake 构建通过。 |
+| 显式数据目录与版本协议 | `data_directory_e2e_test.py`、`version_function_protocol_e2e_test.py` 通过，后者 16 条内部检查无失败；使用当前根目录程序和独立数据目录。 |
+| README SQL 与模式门控 | 按原文提取并运行 9 条 SQL，核对查询及保存点回滚后的完整结果；验证默认模式拒绝 `USE`、extended 模式允许 `USE`，以及两种模式均拒绝未实现的扩展运行时。 |
+| 配置加载与重载 | 原生 `config_test` 通过。私有服务核对默认与自定义的 `pg_settings`，验证 reload 保留 `buffer_pool_frames` 启动值、更新 `checkpoint_interval` 显示值，重启后读取新的启动值。与上一行共 23 条真实协议观察，无失败。 |
+| 缓冲池与 checkpoint | 追踪 `PageAllocator.cpp`、`BPTree.cpp`、`Config.h`、`main.cpp` 与 `TableManage.h/.cpp` 的参数消费者；修正手册的越界夹取说法，说明实际帧数来自环境变量、两个配置值的显示/资源接线限制，以及 CLI 计数与后台间隔的区别。实际池容量和 5 分钟后台间隔为源码核查，没有当作内存或定时实测。 |
+| 后端与归档边界 | 追踪 `ProcessManager.cpp` 和 `NetworkServer.cpp`，将“后端进程池”修正为登记接口及实际连接线程模型。手册已正确说明归档只执行 `dir:` 内建复制；同步纠正 `Config.h` 中声称可执行外部命令的旧注释。 |
+| 性能报告数据 | 核对既有原始记录中的 123 项原生入口、45 项协议入口、35 类操作/315 个最终样本、每版本 210 个公共窗口样本，以及三份重开夹具；保留旧版第三轮失败。这里只复核记录，没有重新运行该性能批次。 |
+
+具体配置限制已同步到[手册第 17b 节](MANUAL.md#17b-运行时性能参数环境变量)、
+[第 25 节](MANUAL.md#25-guc-参数配置)、[命令清单](commandsList.md)和[部署说明](PACKAGING.md)。
+相关测试入口均通过；原生配置入口复用已核对的性能批次核心对象重新链接运行。
+
+运行证据保存在 `build/docs-system-consistency-20261101-9kvbiqsk/`：
+`initial-tests.json`、各入口日志、`runtime-smoke.py/.json/.log`、`provenance-check.json` 和 `performance-record-check.json`；
+原生日志在 `build/database-all-ops-20261030-kl187edl/stage-m-wal-retained-prefix/native-docs-consistency-20261101/`。
+核查使用的 `dbms_main` SHA-256 为 `f47176388afe16f9e346db82e5e89b5af7588232921f63d9cf4a2ac10df4490e`。
+生产文件仅 `Config.h` 注释有变化，其修改前后 GCC C++17 预处理结果完全相同，执行逻辑未改。
+
+协议检查使用私有目录和本地明文模式；没有重做真实 TLS、Docker、全仓库回归、全部历史示例或完整 PostgreSQL 行为认证。
+源码追踪、实际运行和旧记录复核按上表分别说明，功能总账及用户暂缓状态未更改。
 
 ## 检查方法与更新
 

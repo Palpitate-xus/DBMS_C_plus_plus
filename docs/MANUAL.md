@@ -1334,9 +1334,13 @@ export DBMS_BUFFER_FRAMES=1024
 export DBMS_INDEX_BUFFER_FRAMES=256
 ```
 
-两个变量均接受 16..4096 并夹取到该区间；未设置时使用默认值。缓冲池为每关系独立，
-总内存占用 ≈ 帧数 × 8 KiB × 打开的关系数，调大时请评估进程驻留内存。
-页完整性校验（Fletcher-16 + 结构校验）只在页面从磁盘加载时执行一次，缓冲命中不重复校验。
+两个变量均接受 16..4096 范围内的整数；未设置、空值、无法完整解析或越界时，
+分别回退到 256 / 128 帧，不会夹取到上下限。每个值在进程首次创建相应缓冲池时读取并缓存；
+修改后需重启进程，`SET` 或 `pg_reload_conf()` 不会改变已缓存的帧数。
+堆池按关系、索引池按索引实例独立创建，帧内存约为各池帧数 × 8 KiB 的总和，另有管理开销。
+`dbms.conf` 的 `buffer_pool_frames` 当前没有接入这些池的容量，详见第 25 节。
+堆页完整性校验（Fletcher-16 + 结构校验）在从磁盘加载时执行，缓冲命中不重复校验；
+新格式 B+Tree 页使用 CRC32C，格式与旧页限制见[部署说明](PACKAGING.md)。
 
 ---
 
@@ -1479,7 +1483,7 @@ archive_command='dir:/var/dbms/archive'
 ```
 
 归档触发在 checkpoint 边界: 完整写满的段先标记 `archive_status/<seg>.ready`,
-复制成功后翻转为 `.done`; 失败保留 `.ready`,后台归档线程每轮重试。
+复制成功后翻转为 `.done`; 失败保留 `.ready`,后台维护循环后续重试。
 
 ### 强制切换段 (pg_switch_wal)
 
@@ -1557,13 +1561,18 @@ host    all       all       0.0.0.0/0       reject
 
 ## 24. 多进程管理
 
-系统内置 `ProcessManager`，管理后端进程池：
+`ProcessManager` 当前提供后端信息的登记、列举和关闭标记接口。`spawnBackend()`
+只添加内存记录，`pid` 为内部编号，不会创建操作系统进程或线程。其类别枚举包括：
 
 ```cpp
 // BackendType: ClientBackend, WalWriter, BgWriter, Checkpointer,
 //             AutoVacuumLauncher/Worker, ReplicationSender, Archiver,
 //             StatsCollector, LogicalLauncher/Worker
 ```
+
+枚举存在不代表已有对应的独立进程运行时。网络服务当前在一个服务端进程中为每个
+客户端创建工作线程；存储引擎另行启动后台维护线程。这些线程不是由 `ProcessManager`
+派生的 PostgreSQL 式多进程后端池。部署形态见[打包与部署说明](PACKAGING.md#服务端部署形态)。
 
 ---
 
@@ -1610,6 +1619,21 @@ SET compatibility_mode = extended;           -- 显式启用项目扩展层
 SET compatibility_mode = postgresql18;       -- 回到 PostgreSQL 18 语义
 SHOW dbms.extensions;                        -- 审计当前会话启用的偏移
 ```
+
+### 配置值与实际运行资源的边界
+
+参数能写入配置或出现在 `pg_settings` 中，并不表示已实现 PostgreSQL 的同名调度或资源语义。
+当前两项需特别区分：
+
+| 项目 | 当前实现 |
+| --- | --- |
+| `buffer_pool_frames` | 配置默认 16，可保存、加载，并显示为 `pg_settings.shared_buffers`（单位 `8kB`）；reload 保留启动值。当前没有传给堆/索引池，不代表实际池容量。实际容量由第 17b 节的两个环境变量决定。 |
+| `checkpoint_interval` | 默认 30，合法范围 1..1000000；控制交互式 CLI 主循环的语句计数阈值，达到阈值后尝试 checkpoint。网络查询不走该计数器。存储引擎后台 checkpoint 的默认检查间隔另为 300000 毫秒（5 分钟），此配置未接入该间隔。 |
+
+`pg_settings.checkpoint_timeout` 当前将 `checkpoint_interval` 显示为单位 `s`；这是尚未修正的映射/单位问题，
+不能据此推断后台 checkpoint 每 30 秒执行。后台检查也可能因事务或维护状态跳过，5 分钟不是完成期限。
+修改配置后，可 reload 的字段需管理员执行 `SELECT pg_reload_conf()`；启动字段须重启。
+`ALTER SYSTEM SET` 和 extended 模式的 `SET GLOBAL` 都只负责持久化。
 
 ### 25.1 兼容模式与能力门控（0A000）
 

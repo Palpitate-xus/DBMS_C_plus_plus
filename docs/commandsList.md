@@ -1623,8 +1623,7 @@ SET GLOBAL variable_name = value
 ```
 
 **支持的变量**
-| 变量名 | 类型 | 说明 |
-|--------|------|------|
+
 普通 `SET` 只修改当前连接的会话状态：
 
 | 参数 | 类型 | 作用域 |
@@ -1634,10 +1633,15 @@ SET GLOBAL variable_name = value
 | `deadlock_timeout` | `INT` | 当前会话，毫秒 |
 
 慢查询、checkpoint、planner、审计、自动维护和统计上限等进程级参数必须使用
-`SET GLOBAL`（管理员）或 `ALTER SYSTEM SET`，避免一个连接污染其他连接。
+`SET GLOBAL`（extended 模式，管理员）或 `ALTER SYSTEM SET`。两者只持久化，
+可 reload 的字段需执行 `SELECT pg_reload_conf()`，启动字段需重启。
 参数也可以写入显式 data directory 的 `dbms.conf`；服务启动和 `pg_reload_conf()` 对配置文件采用严格
 fail-closed 校验。未知键、重复键、非法布尔值、数值尾随字符、越界值或非有限浮点值都会
 拒绝加载，不会用坏值覆盖当前运行配置。
+
+`checkpoint_interval` 默认 30，控制 CLI 主循环的语句计数阈值，不控制网络服务
+后台 checkpoint 的时间间隔。`buffer_pool_frames` 当前只保存/显示配置，未接入
+实际缓冲池容量；`pg_settings` 的相关显示限制见[手册第 25 节](MANUAL.md#25-guc-参数配置)。
 
 typed DDL 的列类型也采用 fail-closed 边界：未知类型或非法类型修饰符会在 CREATE/ALTER
 真正写入关系文件前报错，不会自动改写为 `varchar`；当前已支持的别名和 `serial` 自动序列
@@ -1647,6 +1651,7 @@ typed DDL 的列类型也采用 fail-closed 边界：未知类型或非法类型
 ```sql
 SET statement_timeout = 5000;
 SET lock_timeout = 1000;
+SET compatibility_mode = extended;
 SET GLOBAL slow_query_threshold = 100.0;
 SET GLOBAL checkpoint_interval = 100;
 SET GLOBAL audit_level = 2;

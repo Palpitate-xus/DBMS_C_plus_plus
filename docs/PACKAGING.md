@@ -102,10 +102,15 @@ marker 不得手工编辑或改成 symlink；location 不得与 data directory �
 | `info/tlist.lst` | 数据库清单（每行一个数据库名） |
 | `<dbname>/pg_tblspc/*.path` | 当前数据库的外部 tablespace canonical root marker；只允许普通单行文件 |
 | `pg_hba.conf` | 访问规则示例：`host all <user> 127.0.0.1/32 scram-sha-256`。空规则或无匹配规则返回 `FATAL / 28000` 并关闭连接，不会等待后续认证 |
-| `dbms.conf` | 可选 `key=value`：`tde_keyring`、`pool_mode`、`pool_size`、`checkpoint_interval`（1..1000000，0 非法）、`audit_level` 等。服务端启动时读取一次；CLI 每进程读取 |
+| `dbms.conf` | 可选 `key=value`：`tde_keyring`、`pool_mode`、`pool_size`、`checkpoint_interval`（1..1000000，0 非法）、`audit_level` 等。进程启动时加载；管理员可用 `SELECT pg_reload_conf()` 应用可 reload 字段，启动字段需重启 |
 | `<dbname>/` | 每数据库一目录：`*.dt` 堆文件、`*.idx` 索引、`<file>.tde` TDE 边车信封（48B/页 nonce+MAC）、`.publication` 逻辑复制目录、`.runtime_stats` |
 | `*.wal` / WAL 段 | 每数据库目录下 16MiB 段文件 |
 | `dbms.log` / `slow_query.log` / `audit.log` / `auto_explain.log` | data directory 下的运行日志 |
+
+容量与调度存在尚未接通的配置：`buffer_pool_frames` 不控制实际堆/索引池，
+应使用 `DBMS_BUFFER_FRAMES` / `DBMS_INDEX_BUFFER_FRAMES`；`checkpoint_interval`
+是 CLI 的语句计数阈值，不是网络服务后台 checkpoint 的秒数。对应的 `pg_settings`
+显示值也不能作为实际容量或周期依据，详见[手册第 25 节](MANUAL.md#25-guc-参数配置)。
 
 ## 服务端部署形态
 

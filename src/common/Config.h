@@ -10,9 +10,9 @@ namespace dbms {
 struct Config {
     int maxConnections = 64;
     double slowQueryThresholdMs = 100.0;
-    int checkpointInterval = 30;
+    int checkpointInterval = 30; // CLI statement-count threshold, not the background interval
     int statementTimeoutMs = 0;
-    size_t bufferPoolFrames = 16;
+    size_t bufferPoolFrames = 16; // persisted/reported; actual pool sizing uses environment variables
     bool enableQueryPlanCache = true;
     size_t queryPlanCacheSize = 100;
     int passwordPolicyLevel = 0; // 0=none, 1=warn, 2=medium required, 3=strong required
@@ -30,13 +30,9 @@ struct Config {
     bool enableMergeJoin = true;   // enable merge join
     int maxParallelWorkersPerGather = 0; // 0 disables parallel heap scans
     // WAL archiving (PITR): when set, fully-written WAL segments marked
-    // .ready at checkpoint boundaries are copied/executed per this command.
-    // Two forms are accepted:
-    //   dir:<absolute path>   built-in copy into that directory (safe, no
-    //                         shell), %p/%f not needed
-    //   <anything else>       external command; %p expands to the segment's
-    //                         absolute source path, %f to its file name;
-    //                         exit code 0 = archived
+    // .ready at checkpoint boundaries are copied into dir:<path> (no shell).
+    // Other nonempty values can be persisted but are not executed; external
+    // command execution and %p/%f expansion are not implemented.
     std::string archiveCommand;
     bool autoExplainEnabled = false; // auto_explain: log query plan for slow queries
     double autoExplainThresholdMs = 100.0; // threshold for auto_explain
