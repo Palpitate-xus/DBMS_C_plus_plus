@@ -1,5 +1,35 @@
 # DBMS 功能测试报告
 
+## 2026-11-02 普通物理排序预算与外部归并
+
+当前 61 个 core 对象通过 29 个原生入口：前批 24、三个新排序入口及 redo_crash_recovery/recovery_integrity。
+新入口完整 39 控制（17 内存、16 I/O/清理、6 真堆/TOAST），冻结旧版分别 13/15/4 不符，新版均全过；不是 32 个独立缺陷。
+逐输入调用边界及 EOF 的分配观察分开记录，完整消费所有结果；另验单个 256 KiB 超大行。
+真实 syscall 包装只用于测试程序，验证短传输、EINTR、ENOSPC、EMFILE、EOF/EIO、截断失败、取消及原异常/清理次数；没有生产故障注入 hook。
+新测试的链接注解由整批、单项及 sanitizer 构建脚本共同读取，现有构建路由检查通过；本批没有运行整库 sanitizer。
+
+随后只改 Main 接入和函数拆分，全部 61 个 core 哈希仍相同，因此复用这些明确不链接 Main 的原生结果；
+最终 O2 实际 Main 另完整跑 22 个协议入口，结果 **21 通过、1 失败**。
+新增完整 **47 条**在严格 PG 18.6/最终程序全过，冻结旧版 1 条 ORDER BY 1 整数按文本排序失败。
+覆盖实例配置 64 KiB、NULL 顺序/空串/文本 NULL、浮点特殊值、日期/时间、BIGINT、参数/二进制结果、投影重排、别名/序号、AND 及未扩大的其他分流。
+NUMERIC >2^53 控制继续走原比较所有者，没有因接入物理 Sort 变成 double 比较。
+
+未通过的是既有暂缓的 Bind/portal 完整 463：旧/最终 40 处差异、全部观察逐字节相同。
+前一 `1865fddb` 候选的完整 22 为 20/2，另一项为 statement_timeout 的部分 COPY 帧关闭；
+隔离旧/新/旧也均未通过，失败点不同，不能认定同一根因。最终该完整入口通过，不擦除前述失败、不声明 R197 修复。
+专属 R197 记录中的既有 COPY 响应/中断暂缓补入[中央索引](deferred-scope.md)，没有继续相关实现；NetworkServer 和共享 CPU 排序中断 helper 保持原字节。
+
+初始 37 条的 `pg_settings.setting::integer` 在 PG 全过、本项目一处 0A000；该目录表达式缺口保持未修复。
+配置核验改成原生 text 列后保留全部其他 36 控制，并扩展为 47；最初失败和 PG 对照没有删除。
+首个仅算子候选虽然通过原生/协议控制，却在真实 SQL 文件观察中失败；补 SQL 接入后才捕获实际匿名文件。
+O0 Main 的快速功能构建只作预验，最终声明使用另行 O2 构建的真实 Main。
+
+最终 Main 的实际匿名文件内 SIGKILL、无命名残留、重开 1,000 行/4,000 单元格及再次全值排序通过。
+35 类操作也完成预热和一轮现有检查，只作有限 smoke；后续独立最终延迟 504 样本、前期 756 样本及 900 查询 CPU 诊断分开保存。
+收益与较慢控制完整列于[报告](performance-report-2026-10-30.md#普通物理排序的内存预算与外部归并2026-11-02)；不据此通过全仓库、真实 TLS、全故障恢复或完整 PG 行为验收。
+证据目录 `build/pg-feature-sort-1be1avdu/` 的 `native-final.json`、`protocol-final.json`、旧/PG/新日志、
+`timeout-isolated.json`、`main-sort-crash-outlined.json`、`operations-outlined/operations.json` 和 `final-provenance.json` 保存范围与来源。
+
 ## 2026-11-02 普通 LIMIT 需求与运行错误前缀
 
 最终 24 个原生入口通过。新增结果前缀原生完整 16 项验证 SQL 错误、hasError、open/close 错误、非 SQL 异常身份、

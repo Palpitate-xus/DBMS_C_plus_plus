@@ -837,6 +837,7 @@ public:
     SortOp(OpPtr child, const TableSchema& tbl,
            const std::string& orderByCol, bool asc,
            bool nullsFirst = false, bool hasExplicitNullOrder = false);
+    ~SortOp() override;
 
     bool open() override;
     bool next(std::string& outRow) override;
@@ -846,10 +847,8 @@ public:
     // Stored-NULL bit of the most recently re-emitted row, from the sort's
     // own origin tracking (the child scan is drained and its lastRid_ stale).
     bool lastColumnIsNull(size_t colIdx) const override;
-    ScanOrigin scanOrigin() const override {
-        return pos_ > 0 && pos_ - 1 < sortedOrigins_.size()
-            ? sortedOrigins_[pos_ - 1] : ScanOrigin{};
-    }
+    bool lastStoredNullBitmap(std::vector<bool>& nulls) const override;
+    ScanOrigin scanOrigin() const override { return lastOrigin_; }
 
 private:
     OpPtr child_;
@@ -857,10 +856,11 @@ private:
     std::string orderByCol_;
     bool asc_;
     bool nullsFirst_;
-    std::vector<std::string> buffer_;
-    std::vector<Operator::ScanOrigin> origins_;  // parallel to buffer_ pre-sort
-    std::vector<Operator::ScanOrigin> sortedOrigins_;  // parallel to buffer_ post-sort
-    size_t pos_ = 0;
+    struct State;
+    std::unique_ptr<State> state_;
+    ScanOrigin lastOrigin_;
+    std::vector<bool> lastNulls_;
+    bool childOpened_ = false, rowAvailable_ = false;
 };
 
 // ========================================================================

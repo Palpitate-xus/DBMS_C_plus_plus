@@ -34,6 +34,8 @@ def main():
     parser.add_argument("--samples", type=int, default=4)
     parser.add_argument("--include-scan-limit", action="store_true",
                         help="Also compare an existing typed LIMIT path and a plain LIMIT control")
+    parser.add_argument("--include-full-sort", action="store_true",
+                        help="Also compare the ordinary single-key physical Sort path")
     args = parser.parse_args()
     if min(args.rows, args.rounds, args.samples) < 1:
         parser.error("rows, rounds and samples must be positive")
@@ -70,6 +72,11 @@ def main():
         specs["sort_full"] = (
             lambda _: "SELECT id,amount FROM bench_rows ORDER BY amount DESC,id ASC",
             lambda _: [[str(i), str(i % 1000)] for i in ordered])
+        if args.include_full_sort:
+            specs["sort_full_single"] = (
+                lambda _: "SELECT amount,grp FROM bench_rows ORDER BY amount DESC",
+                lambda _: [[str(i % 1000), str(i % 100)]
+                           for i in sorted(range(1, args.rows + 1), key=lambda i: -(i % 1000))])
         if args.include_scan_limit:
             # Array projection already enters the typed executor on the
             # frozen baseline. Plain projection exposes remaining dispatcher

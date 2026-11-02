@@ -259,6 +259,43 @@ static const dbms::ColumnRefExpr* queryDemandPhysicalOrderColumn(
     return dynamic_cast<const dbms::ColumnRefExpr*>(expression);
 }
 
+// Keep parser/AST temporaries out of executeInternal's large hot-path frame.
+// This is execution admission only, after the existing SQL preparation.
+[[gnu::noinline]] static bool lowerStructuredPhysicalSort(
+    const string& sql, const dbms::TableSchema& table,
+    const vector<string>& conditions,
+    vector<dbms::StorageEngine::OrderBySpec>& orders,
+    vector<dbms::StorageEngine::OrderBySpec>& structuredOrders,
+    bool expressionOrder, bool distinct, bool withTies) {
+    if (currentQueryRowDemand() || distinct || withTies || expressionOrder ||
+        orders.size() != 1 || structuredOrders.size() != 1 ||
+        orders.front().isExpression || !orders.front().collation.empty() ||
+        find(conditions.begin(),conditions.end(),"or") != conditions.end() ||
+        any_of(table.cols,table.cols+table.len,
+            [](const auto& column) { return column.generatedKind == 'v'; })) return false;
+    dbms::SQLParser parser;
+    const auto syntax = parser.parseForBinding(sql);
+    const auto* select = syntax.success
+        ? dynamic_cast<const dbms::SelectStmt*>(syntax.stmt.get()) : nullptr;
+    const auto* key = select && select->orderBy.size() == 1
+        ? queryDemandPhysicalOrderColumn(*select,select->orderBy.front()) : nullptr;
+    if (!key) return false;
+    static const set<string> types = {"smallint","integer","bigint","real",
+        "double precision","text","character","character varying","date",
+        "time without time zone","timestamp without time zone","time","timestamp"};
+    for (size_t column = 0; column < table.len; ++column) {
+        const auto& physical = table.cols[column];
+        if (physical.dataName != key->column || physical.isArray || !physical.enumValues.empty() ||
+            !types.count(dbms::ExprHelper::canonicalResultTypeName(physical.dataType))) continue;
+        // Both consumers must use the same real ColumnRef for an output
+        // alias/ordinal; a later text adapter must not reorder typed integers.
+        orders.front().colName = key->column;
+        structuredOrders.front().colName = key->column;
+        return true;
+    }
+    return false;
+}
+
 static bool shouldPublishQueryMetadata() {
     return executeDepth == 1 ||
            (metadataCaptureDepth != 0 && executeDepth == metadataCaptureDepth);
@@ -38588,6 +38625,16 @@ static bool executeInternal(const string& rawSql, Session& s) {
             }
             bool useDistinct = isDistinct && distinctOnCols.empty();
 
+            // ProjectOp now retains the physical row's complete NULL bitmap,
+            // and checked execution returns its structured cells. A supported
+            // single physical-key sort can therefore use work_mem/spill even
+            // when the top-level SQL receiver needs typed metadata. Other
+            // dispatchers keep their existing consumers; no Bind/Parse phase
+            // or retained execution-owner policy is changed here.
+            const bool structuredPhysicalSort = captureStructuredPlain &&
+                lowerStructuredPhysicalSort(effectiveRawSql,tbl,condTokens,
+                    orderBySpecs,structuredPlainOrderSpecs,!exprOrderBySpecs.empty(),useDistinct,queryFetchWithTies);
+
             // Correlated scalar aggregate subqueries must bypass both the
             // volcano and plain paths: neither can evaluate a per-row
             // aggregate.  tryCorrelatedScalarAggFilter fills `answers`
@@ -38622,7 +38669,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             bool volcanoUsed = corrAggHandled;
             if (corrAggHandled) {
                 // answers already filled by the correlated scalar filter.
-            } else if (captureStructuredPlain || !exprOrderBySpecs.empty()) {
+            } else if ((captureStructuredPlain && !structuredPhysicalSort) || !exprOrderBySpecs.empty()) {
                 // Deliberately enter the StorageEngine fallback below.
             } else if (condTokens.empty()) {
                 volcanoUsed = executeVolcanoSelect(tname, selectCols, {},

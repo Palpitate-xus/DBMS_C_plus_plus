@@ -815,7 +815,7 @@ SELECT * FROM users ORDER BY AGE NULLS FIRST;
 所有必要排序键仍对全部输入求值；不参与排序的 volatile 输出按实际输出需求求值。
 `DISTINCT`、`WITH TIES`、聚合/分组及边界溢出的路径不使用这个普通候选上限。
 这只约束排序候选内存：普通非分区 `TableScanOp` 已按页供给，分区/RLS、并行扫描及其他旧分流仍可能全量物化；
-尚未实现完整 `work_mem` 预算或临时文件归并。
+类型化排序等其余路径尚未实现完整 `work_mem` 预算；下述普通物理排序的外部归并另行说明。
 测量与适用范围见[Top-N 性能记录](performance-report-2026-10-30.md#有界排序-top-n2026-11-02)。
 
 按页扫描为现有类型化消费者保留固定 MVCC 视图及打开时的堆页范围，每次只保留一页未展开的行，
@@ -828,6 +828,16 @@ SELECT * FROM users ORDER BY AGE NULLS FIRST;
 支持的顶层类型化 SELECT 若在输出期间发生 SQL 错误，Simple Query 及不限 portal 行数的 Extended Execute 会先返回已产生的类型化行，再发送 ErrorResponse，不发送成功标签。
 这不是网络端完全流式或有限行数 portal 的完成声明；R303/R304/R305 仍遵守[暂缓边界](deferred-scope.md)。
 回归使用固定堆夹具观察行顺序；没有 ORDER BY 的生产查询不承诺固定的结果子集。
+
+普通物理 `SortOp` 现在按 `dbms.conf` 中的 `work_mem_kb`（默认 4096 KiB）限制排序批次，
+超预算时生成有序段并作临时文件归并；内存内完成时不创建排序文件。文件立即取消目录链接，最多使用两个文件描述符，
+关闭、异常、取消及进程退出时释放。预算控制排序工作数据，单个超大行和有限的归并读头可超出预算；不是全进程 RSS 上限。
+
+普通单表、单个物理列 ORDER BY 的受支持内置整数、浮点、字符及日期/时间键，在 Simple Query 或不限 portal 行数的 Execute 中可接入该路径；
+能够解析到真实列的输出别名、ORDER BY 序号，以及普通 AND 筛选也可接入。保留 NULL、空串、文本 NULL、类型元数据与列顺序。
+NUMERIC、数组/对象身份、多个排序键、DISTINCT/WITH TIES、OR 分流、显式排序 COLLATE、虚拟生成列和有限行数 portal 等仍由各自既有路径处理，
+不能据此认定它们也已受此预算约束。类型化排序/Top-N、哈希/聚合/窗口/JOIN 及结果接收器的完整内存治理仍未完成。
+`SET work_mem` 的会话语义尚未实现；这里使用已有实例配置及 reload，详细验证和性能范围见[外部排序报告](performance-report-2026-10-30.md#普通物理排序的内存预算与外部归并2026-11-02)。
 
 ### 聚合
 

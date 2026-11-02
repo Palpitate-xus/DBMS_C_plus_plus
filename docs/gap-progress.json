@@ -2,6 +2,33 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-02 ordinary physical sort budget,external merge and actual SQL admission",
+      "gap_ids": [
+        "P0-14",
+        "OPT-10",
+        "QRY-10"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/performance-report-2026-10-30.md",
+        "docs/test-report.md",
+        "docs/deferred-scope.md"
+      ],
+      "tests": [
+        "tests/sort_spill_memory_test.cpp",
+        "tests/sort_spill_io_test.cpp",
+        "tests/sort_spill_heap_test.cpp",
+        "tests/sort_spill_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "correctness": "Current61core verified by29native;3new complete39controls old13/15/4fail,new0. Final realO2Main full22wire21pass/1existing deferred Bind fail;full47wire PG18.6/final0,old1. Full463 old/new40 differences byte-identical. Actual Main sort-spool SIGKILL/reopen1000rows4000cells plus35operation smoke pass.",
+        "performance": "Final same1000row fixture two independent252-sample old/new/old windows: default full single sort about1.27-1.40x;64KB about1.29-1.39x. Slower controls retained;not proven regression-free. Earlier756latencies and900 CPU diagnostic queries retained separately.64KB input-boundary live allocation peak18.2MB to51-55KB,not entire query/RSS.",
+        "failures": "Operator-only first realSQL spool probe failed,then production routing fixed. Initial37 pg_settings CAST guard PG0/ours1 remains an independent open gap;plain-text configuration guard used with other36 controls retained. Inlined1865 full22 wire20pass2fail plus isolated old/new/old statement_timeout failures at differing locations retained;final timeout test pass is not R197 repair. No R197/R303/R304/R305 investigation resumed.",
+        "scope": "Supported ordinary physical single-key sort,normal Simple/unbounded Execute and AND only;real column alias/ordinal lowering fixes integer lexical ordering. Instance config only,no sessionSET/full typed/multikey/numeric/other-operator budgets or full result-buffer governor. Shared interrupt helpers/NetworkServer/dedicated deferral records/original273items/atomicclauses unchanged;central R197 index intentionally reconciled.Goal active.",
+        "proof": "build/pg-feature-sort-1be1avdu/final-provenance.json"
+      }
+    },
+    {
       "issue": "2026-11-02 ordinary physical LIMIT demand and SQL runtime row prefix",
       "gap_ids": ["P0-14", "OPT-10"],
       "status": "partial",

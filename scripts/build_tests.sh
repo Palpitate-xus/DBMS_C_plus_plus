@@ -109,7 +109,8 @@ for test_file in tests/*_test.cpp; do
         continue
     fi
     echo "[test-build] Linking/running ${binary} ..."
-    if ! g++ "${DBMS_CXXFLAGS[@]}" "$test_object" "${link_objects[@]}" "${DBMS_LDFLAGS[@]}" -o "$binary"; then
+    dbms_test_link_flags "$test_file"
+    if ! g++ "${DBMS_CXXFLAGS[@]}" "$test_object" "${link_objects[@]}" "${DBMS_LDFLAGS[@]}" "${DBMS_TEST_EXTRA_LDFLAGS[@]}" -o "$binary"; then
         echo "[test-build] ${name} LINK FAILED" >&2
         FAILED=1
         continue

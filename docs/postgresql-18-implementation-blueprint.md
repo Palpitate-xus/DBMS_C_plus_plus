@@ -9,12 +9,12 @@
 
 | 数据库与一手来源 | 借鉴的做法 | 本项目的应用边界 |
 | --- | --- | --- |
-| [PostgreSQL 18 tuplesort](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/utils/sort/tuplesort.c) | 有限结果使用有界堆；无界大排序按内存预算生成有序段并归并 | 先实现普通有序 LIMIT 的有界候选保留，完整 `work_mem`/临时文件归并另行验收 |
+| [PostgreSQL 18 tuplesort](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/utils/sort/tuplesort.c)与[工作内存](https://www.postgresql.org/docs/18/runtime-config-resource.html) | 工作预算属于每个操作；超预算排序生成有序段并归并 | 有序 LIMIT 保留有界候选；普通物理 Sort 按实例预算生成匿名临时段并有限 k 路归并，其余排序及其他算子的完整治理仍开放 |
 | [PostgreSQL tuple slots](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/executor/execTuples.c) | 行槽保留已解码属性及 NULL 标记，避免反复拆解相同属性 | 按物理行读取一次 NULL 位图并复用，去除排序的重复解码；仍保留文件身份核验、TOAST 和虚拟列的原有解码职责 |
 | [PostgreSQL SeqScan](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/executor/nodeSeqscan.c)与[heap scan](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/access/heap/heapam.c) | 扫描状态保留 snapshot，按需求获取后续 tuple，结束时释放扫描资源 | 普通非分区 TableScan 按页供给、复制拥有的行/NULL 位图，页锁和 pin 不跨表达式求值；分区/RLS/其他分流仍分别验收 |
 | [PostgreSQL LIMIT/OFFSET](https://www.postgresql.org/docs/18/queries-limit.html)与[Limit 算子](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/executor/nodeLimit.c) | 在子计划行流上计数，零条不请求输入；OFFSET 行仍被计算 | 普通单表 LIMIT 进入既有类型化链，保留 WHERE/投影需求、聚合和 DISTINCT 的输入职责；错误前缀用独立 SQL 接收契约，不放宽默认 checked 失败契约 |
 | [DuckDB TopN 优化](https://duckdb.org/2024/11/14/optimizers)及[排序设计](https://duckdb.org/2025/09/24/sorting-again) | ORDER BY 与 LIMIT 联合优化，保留有限候选；外部排序需要独立的可溢写布局 | OFFSET 纳入候选数量，保留类型化键与原始行上下文，避免重新求值和丢失 NULL/对象身份 |
-| [SQLite 临时文件](https://www.sqlite.org/tempfiles.html)与[原子提交](https://sqlite.org/atomiccommit.html) | 可用有序索引时减少排序；临时排序结构与事务日志承担不同职责，日志按变更页保护回滚 | 后续评估排序 spill 和修改路径的快照开销；本轮不删除持久化或回滚保护来换取速度 |
+| [SQLite 临时文件](https://www.sqlite.org/tempfiles.html)与[原子提交](https://sqlite.org/atomiccommit.html) | 可用有序索引时减少排序；临时排序结构与事务日志承担不同职责，日志按变更页保护回滚 | 普通物理排序临时文件与 WAL 分离；修改快照和细粒度撤销仍需推进，未删除持久化或回滚保护 |
 
 首批已完成的有限范围：
 
@@ -37,8 +37,14 @@
 网络端仍缓冲结果；有限行数 portal 的错误需求没有完成。R303/R304/R305 已有暂缓条目同步到中央索引，
 不据此恢复 retained planning、portal 生命周期或格式 2 输出需求；接下来在非暂缓范围推进剩余扫描/排序资源治理和修改开销。
 
+第四批基于 `d09cb6c1` 实现普通物理 Sort 的工作内存预算和临时文件归并，执行阶段接入受支持的单表物理单键排序，
+保留原始行、NULL 位图、行来源及结构化结果；列别名/序号降低到真实列，修复普通 ORDER BY 1 对整数作文本排序。
+实例配置不等同于 PostgreSQL 会话 SET；完整范围和验证见[外部排序报告](performance-report-2026-10-30.md#普通物理排序的内存预算与外部归并2026-11-02)。
+首个仅改算子的候选没有覆盖实际 SQL 分流；随后补接入，且把判定移出大型 SQL 函数，再独立复验。
+COPY 响应中断已有 R197 用户暂缓记录补入中央索引；完整回归中的失败仍保留，不恢复其修复或将失败排除后宣称全绿。
+
 此后依次评估剩余分流/物化、常见修改快照工作量、完整工作内存与 spill、统计和计划选择，再扩大数据量与并发验证。
-分区/RLS/并行等剩余物化、无界排序/work_mem/spill 和虚拟生成列表达式失败返回 NULL 的既有差异仍开放；
+类型化/多键等其余排序、会话 work_mem、最终归并按需输出、分区/RLS/并行等剩余物化及虚拟生成列表达式失败返回 NULL 的既有差异仍开放；
 原 273 项状态与原子条款不因本批通过而关闭。各批次最终通过范围以测试报告、性能报告及对应提交为准。
 
 > 蓝图描述目标和验收方法，不代表实现已完成。本轮实际 bug 及修复方案见[代码审查报告](code-review-2026-10-13.md)；完成状态仍取自原总账。

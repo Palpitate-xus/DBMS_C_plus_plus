@@ -346,6 +346,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/prepared_topn_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/table_scan_effect_snapshot_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/physical_limit_demand_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/sort_spill_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/quantified_query_demand_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/projectset_quantified_execution_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/scalar_subquery_sort_slot_protocol_e2e_test.py)
@@ -875,6 +876,21 @@ dbms_newest_header() {
         fi
     done < <(find "${DBMS_SOURCE_DIR}/src" -type f \( -name '*.h' -o -name '*.hpp' -o -name '*.inc' \) -print)
     printf '%s' "$newest"
+}
+
+# Optional native-test linker arguments are literal words, never shell code.
+# Fault probes can wrap only their own executable's syscalls without changing
+# production flags or adding test hooks to the database implementation.
+dbms_test_link_flags() {
+    DBMS_TEST_EXTRA_LDFLAGS=()
+    local line count=0
+    while IFS= read -r line && (( count++ < 5 )); do
+        if [[ "$line" == '// test_link_flags: '* ]]; then
+            IFS=$' \t' read -r -a DBMS_TEST_EXTRA_LDFLAGS <<< "${line#'// test_link_flags: '}"
+            return 0
+        fi
+    done < "$1"
+    return 0
 }
 
 dbms_cache_signature() {

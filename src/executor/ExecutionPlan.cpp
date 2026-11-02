@@ -1,5 +1,6 @@
 #include "ExecutionPlan.h"
 #include "executor/PreparedTableSource.h"
+#include "executor/SortSpill.h"
 #include "commands/StoredRowNull.h"
 #include "common/DbError.h"
 #include "common/TemporalStorageCodec.h"
@@ -5050,140 +5051,314 @@ void WindowOp::close() {
 // SortOp
 // ========================================================================
 
+struct SortOp::State {
+    struct Row {
+        std::string raw, key, nulls;
+        ScanOrigin origin;
+        int64_t integer = 0;
+        double floating = 0;
+        Date date;
+        uint64_t ordinal = 0;
+        bool isNull = false;
+        size_t bytes() const {
+            return sizeof(Row) + raw.capacity() + key.capacity() + nulls.capacity() +
+                origin.dbname.capacity() + origin.tablename.capacity();
+        }
+    };
+    struct RecordHeader {
+        uint64_t raw = 0, key = 0, database = 0, table = 0, ordinal = 0, engine = 0;
+        int64_t integer = 0, rid = 0;
+        double floating = 0;
+        int32_t year = 0, month = 0, day = 0;
+        uint8_t isNull = 0;
+    };
+    std::vector<Row> rows;
+    size_t position = 0, dynamicBytes = 0, maximumRowBytes = 1;
+    size_t budget, bufferSize, nullBytes;
+    Column column;
+    bool haveColumn, ascending, nullsFirst;
+    uint64_t total = 0, runCount = 0, extent = 0;
+    std::unique_ptr<sort_detail::File> input, scratch;
+    std::unique_ptr<sort_detail::Writer> writer;
+    std::unique_ptr<sort_detail::Reader> output;
+    uint64_t outputRows = 0;
+
+    State(const TableSchema& schema, size_t ordinal, bool asc, bool first)
+        : budget(g_config.workMemKb > std::numeric_limits<size_t>::max() / 1024
+              ? std::numeric_limits<size_t>::max() : std::max<size_t>(1, g_config.workMemKb) * 1024),
+          bufferSize(std::max<size_t>(64, std::min<size_t>(65536, budget / 16))),
+          nullBytes((schema.len + 7) / 8), haveColumn(ordinal < schema.len),
+          ascending(asc), nullsFirst(first) {
+        if (haveColumn) column = schema.cols[ordinal];
+    }
+    bool less(const Row& a, const Row& b) const {
+        if (a.isNull != b.isNull) return a.isNull == nullsFirst;
+        if (!a.isNull && haveColumn) {
+            bool lower = false, greater = false;
+            if (column.dataType == "char" || column.isVariableLength) {
+                lower = StorageEngine::compareValues(column, a.key, false, b.key, false, "<") ==
+                    StorageEngine::PredicateTruth::True;
+                if (!lower) greater = StorageEngine::compareValues(column, b.key, false, a.key, false, "<") ==
+                    StorageEngine::PredicateTruth::True;
+            } else if (column.dataType == "date") {
+                lower = a.date < b.date; greater = b.date < a.date;
+            } else if (column.dataType == "float" || column.dataType == "double" || column.dataType == "decimal") {
+                const bool an = std::isnan(a.floating), bn = std::isnan(b.floating);
+                lower = !an && (bn || a.floating < b.floating);
+                greater = !bn && (an || b.floating < a.floating);
+            } else {
+                lower = a.integer < b.integer; greater = b.integer < a.integer;
+            }
+            if (lower) return ascending;
+            if (greater) return !ascending;
+        }
+        // One total peer order is shared by in-memory runs and merge passes.
+        // SQL without an additional ORDER key still has no promised peer order.
+        return a.ordinal < b.ordinal;
+    }
+    void key(Row& row, std::string value) const {
+        if (column.dataType == "char" || column.isVariableLength) row.key = std::move(value);
+        else if (column.dataType == "date") row.date = value.empty() ? Date{} : Date(value.c_str());
+        else if (column.storageCodec == Column::StorageCodec::TemporalMicros)
+            row.integer = value.empty() ? 0 : (column.dataType == "time"
+                ? temporal_storage_detail::parseTimeMicros(value).value_or(0)
+                : temporal_storage_detail::parseTimestampMicros(value).value_or(0));
+        else if (column.dataType == "timestamp") row.integer = value.empty() ? 0 : parseTimestampToSeconds(value);
+        else if (column.dataType == "float" || column.dataType == "double" || column.dataType == "decimal") {
+            try { row.floating = std::stod(value); } catch (...) { row.floating = 0; }
+        } else row.integer = value.empty() ? 0 : StorageEngine::parseInt(value);
+    }
+    void writeRow(const Row& row, sort_detail::Writer& target) const {
+        RecordHeader header{};
+        header.raw = row.raw.size(); header.key = row.key.size();
+        header.database = row.origin.dbname.size(); header.table = row.origin.tablename.size();
+        header.ordinal = row.ordinal; header.engine = reinterpret_cast<uintptr_t>(row.origin.engine);
+        header.rid = row.origin.rid; header.integer = row.integer; header.floating = row.floating;
+        header.year = row.date.year; header.month = row.date.month; header.day = row.date.day;
+        header.isNull = row.isNull;
+        target.scalar(header);
+        target.append(row.raw.data(), row.raw.size()); target.append(row.key.data(), row.key.size());
+        target.append(row.origin.dbname.data(), row.origin.dbname.size());
+        target.append(row.origin.tablename.data(), row.origin.tablename.size());
+        target.append(row.nulls.data(), row.nulls.size());
+    }
+    Row readRow(sort_detail::Reader& reader) const {
+        const auto header = reader.scalar<RecordHeader>();
+        uint64_t remaining = reader.remaining();
+        for (const auto length : {header.raw, header.key, header.database, header.table, uint64_t(nullBytes)}) {
+            if (length > remaining || length > std::numeric_limits<size_t>::max())
+                throw DbError("58030", "invalid sort temporary record extent");
+            remaining -= length;
+        }
+        if (header.isNull > 1 || header.engine > std::numeric_limits<uintptr_t>::max())
+            throw DbError("58030", "invalid sort temporary record");
+        Row row;
+        row.raw = reader.string(header.raw); row.key = reader.string(header.key);
+        row.origin.dbname = reader.string(header.database); row.origin.tablename = reader.string(header.table);
+        row.nulls = reader.string(nullBytes); row.origin.engine = reinterpret_cast<StorageEngine*>(uintptr_t(header.engine));
+        row.origin.rid = header.rid; row.integer = header.integer; row.floating = header.floating;
+        row.date.year = header.year; row.date.month = header.month; row.date.day = header.day;
+        row.ordinal = header.ordinal; row.isNull = header.isNull;
+        return row;
+    }
+    sort_detail::RunHeader runHeader(uint64_t offset) const {
+        if (offset > extent || extent - offset < sizeof(sort_detail::RunHeader))
+            throw DbError("58030", "invalid sort temporary run header");
+        sort_detail::Reader reader(input->fd(), offset, offset + sizeof(sort_detail::RunHeader), sizeof(sort_detail::RunHeader));
+        auto header = reader.scalar<sort_detail::RunHeader>();
+        if (header.bytes < sizeof(header) || header.bytes > extent - offset || !header.rows)
+            throw DbError("58030", "invalid sort temporary run extent");
+        return header;
+    }
+    void flushRun() {
+        if (rows.empty()) return;
+        interruptibleSort(rows.begin(), rows.end(), [&](const Row& a, const Row& b) { return less(a,b); });
+        if (!input) {
+            input = std::make_unique<sort_detail::File>();
+            writer = std::make_unique<sort_detail::Writer>(input->fd(), bufferSize);
+        }
+        const auto start = writer->position();
+        writer->scalar(sort_detail::RunHeader{});
+        for (const auto& row : rows) { checkForQueryInterrupt(); writeRow(row, *writer); }
+        const sort_detail::RunHeader header{writer->position() - start, rows.size()};
+        writer->flush();
+        sort_detail::writeAt(input->fd(), start, reinterpret_cast<const char*>(&header), sizeof(header));
+        ++runCount; extent = writer->position();
+        std::vector<Row>().swap(rows); dynamicBytes = 0;
+    }
+    void add(Row row) {
+        maximumRowBytes = std::max(maximumRowBytes, row.bytes());
+        const size_t extra = row.bytes() - sizeof(Row);
+        // Include vector capacity, strings and the captured NULL bitmap.
+        // Leave room for I/O buffers. A single oversized row is permitted;
+        // it becomes its own run rather than accumulating more oversized rows.
+        const size_t capacity = rows.size() < rows.capacity() ? rows.capacity() :
+            rows.capacity() > std::numeric_limits<size_t>::max() / 2 ? rows.size() + 1 :
+            std::max<size_t>(1, rows.capacity() * 2);
+        const size_t allowance = budget - budget / 4;
+        if (!rows.empty() && (capacity > allowance / sizeof(Row) ||
+            extra > allowance - std::min(allowance, capacity * sizeof(Row)) ||
+            dynamicBytes > allowance - std::min(allowance, capacity * sizeof(Row) + extra))) flushRun();
+        if (rows.size() == rows.capacity()) {
+            const size_t next = std::max<size_t>(1, rows.capacity() * 2);
+            rows.reserve(next);
+        }
+        dynamicBytes += extra;
+        rows.push_back(std::move(row)); ++total;
+        if (rows.capacity() > allowance / sizeof(Row) ||
+            dynamicBytes >= allowance - std::min(allowance, rows.capacity() * sizeof(Row))) flushRun();
+    }
+    void finish() {
+        if (!runCount) {
+            interruptibleSort(rows.begin(), rows.end(), [&](const Row& a,const Row& b) { return less(a,b); });
+            return;
+        }
+        flushRun(); writer.reset();
+        // Bounded k-way merge: at most16 heads, fewer for wide records. Run
+        // headers stay on disk, not in an input-sized directory or fd array.
+        const size_t fanIn = std::max<size_t>(2, std::min<size_t>(16,
+            budget / std::max<size_t>(1, maximumRowBytes + bufferSize)));
+        while (runCount > 1) {
+            checkForQueryInterrupt();
+            if (!scratch) scratch = std::make_unique<sort_detail::File>();
+            else scratch->truncate();
+            sort_detail::Writer target(scratch->fd(), bufferSize);
+            uint64_t offset = 0, newRuns = 0;
+            while (offset < extent) {
+                struct Input { std::unique_ptr<sort_detail::Reader> reader; Row row; uint64_t left; };
+                std::vector<Input> heads;
+                heads.reserve(fanIn);
+                uint64_t count = 0;
+                for (size_t i = 0; i < fanIn && offset < extent; ++i) {
+                    const auto header = runHeader(offset);
+                    auto reader = std::make_unique<sort_detail::Reader>(input->fd(),
+                        offset + sizeof(header), offset + header.bytes, bufferSize);
+                    auto row = readRow(*reader);
+                    heads.push_back({std::move(reader), std::move(row), header.rows - 1});
+                    offset += header.bytes; count += header.rows;
+                }
+                std::vector<size_t> heap;
+                for (size_t i = 0; i < heads.size(); ++i) heap.push_back(i);
+                const auto later = [&](size_t a,size_t b) { return less(heads[b].row,heads[a].row); };
+                std::make_heap(heap.begin(),heap.end(),later);
+                const auto start = target.position();
+                target.scalar(sort_detail::RunHeader{});
+                while (!heap.empty()) {
+                    checkForQueryInterrupt();
+                    std::pop_heap(heap.begin(),heap.end(),later);
+                    const auto index = heap.back(); heap.pop_back();
+                    auto& head = heads[index]; writeRow(head.row,target);
+                    if (head.left) {
+                        head.row = readRow(*head.reader); --head.left;
+                        heap.push_back(index); std::push_heap(heap.begin(),heap.end(),later);
+                    } else if (head.reader->remaining()) throw DbError("58030", "invalid sort temporary run row count");
+                }
+                const sort_detail::RunHeader header{target.position() - start,count};
+                target.flush();
+                sort_detail::writeAt(scratch->fd(),start,reinterpret_cast<const char*>(&header),sizeof(header));
+                ++newRuns;
+            }
+            extent = target.position(); runCount = newRuns; input.swap(scratch);
+        }
+        scratch.reset();
+        const auto header = runHeader(0);
+        if (header.bytes != extent || header.rows != total)
+            throw DbError("58030", "sort temporary output count mismatch");
+        output = std::make_unique<sort_detail::Reader>(input->fd(),sizeof(header),extent,bufferSize);
+        outputRows = header.rows;
+    }
+    bool next(Row& row) {
+        if (!output) {
+            if (position == rows.size()) return false;
+            row = std::move(rows[position++]); return true;
+        }
+        if (!outputRows) {
+            if (output->remaining()) throw DbError("58030", "invalid sort temporary output extent");
+            return false;
+        }
+        row = readRow(*output); --outputRows; return true;
+    }
+};
+
 SortOp::SortOp(OpPtr child, const TableSchema& tbl,
                 const std::string& orderByCol, bool asc,
                 bool nullsFirst, bool hasExplicitNullOrder)
     : child_(std::move(child)), tbl_(tbl), orderByCol_(orderByCol), asc_(asc),
       nullsFirst_(hasExplicitNullOrder ? nullsFirst : !asc) {}
 
-bool SortOp::open() {
-    if (!child_->open()) return false;
-    size_t sortIdxPre = tbl_.len;
-    for (size_t i = 0; i < tbl_.len; ++i) {
-        if (tbl_.cols[i].dataName == orderByCol_) { sortIdxPre = i; break; }
-    }
-    // Extract each row's sort value WHILE the child's stored-NULL
-    // binding is still live (the binding is cleared on close).
-    std::string row;
-    std::vector<std::string> preVals;
-    std::vector<bool> preNulls;
-    origins_.clear();
-    while (child_->next(row)) {
-        buffer_.push_back(std::move(row));
-        Operator::ScanOrigin org = child_->scanOrigin();
-        origins_.push_back(org);
-        // Rows not traced to a heap scan carry no stored-NULL bitmap:
-        // clear any stale binding so extraction reads raw values.
-        if (!org.engine) StorageEngine::unbindNullRow();
-        else StorageEngine::bindNullRow(org.engine, org.dbname, org.tablename, org.rid, tbl_.len);
-        if (sortIdxPre < tbl_.len) {
-            preVals.push_back(StorageEngine::extractColumnValueStatic(
-                buffer_.back(), tbl_, sortIdxPre));
-            const auto origin = child_->scanOrigin();
-            preNulls.push_back(origin.engine && origin.rid != 0
-                ? child_->lastColumnIsNull(sortIdxPre)
-                : rawColumnIsNull(buffer_.back(), tbl_, sortIdxPre));
-        }
-    }
-    if (child_->hasError()) return propagateChildError(child_.get(), "sort child failed");
-    child_->close();
+SortOp::~SortOp() { try { close(); } catch (...) {} }
 
-    size_t sortIdx = sortIdxPre;
-    if (sortIdx < tbl_.len) {
-        struct Item { std::string s; int64_t n; Date d; double f; bool isNull; size_t originIdx; };
-        std::vector<std::pair<std::string, Item>> items;
-        const Column& scol = tbl_.cols[sortIdx];
-        for (size_t ri = 0; ri < buffer_.size(); ++ri) {
-            std::string val = (ri < preVals.size()) ? preVals[ri] : "";
-            // PG default: NULLS LAST for ASC, NULLS FIRST for DESC.
-            const bool valNull = ri < preNulls.size()
-                ? preNulls[ri]
-                : (val.empty() || val == "NULL" || val == "null");
-            Item it{"", 0, {}, 0.0, valNull, ri};
-            if (scol.dataType == "char" || scol.isVariableLength) {
-                it.s = val;
-            } else if (scol.dataType == "date") {
-                it.d = val.empty() ? Date{} : Date(val.c_str());
-            } else if (scol.storageCodec == Column::StorageCodec::TemporalMicros) {
-                it.n = val.empty() ? 0 : (scol.dataType == "time"
-                    ? temporal_storage_detail::parseTimeMicros(val).value_or(0)
-                    : temporal_storage_detail::parseTimestampMicros(val).value_or(0));
-            } else if (scol.dataType == "timestamp") {
-                it.n = val.empty() ? 0 : parseTimestampToSeconds(val);
-            } else if (scol.dataType == "float" || scol.dataType == "double" || scol.dataType == "decimal") {
-                try { it.f = std::stod(val); } catch (...) { it.f = 0.0; }
-            } else {
-                it.n = val.empty() ? 0 : StorageEngine::parseInt(val);
+bool SortOp::open() {
+    OpenInstrument startup(this);
+    close(); clearError();
+    size_t sortIndex = tbl_.len;
+    for (size_t i = 0; i < tbl_.len; ++i)
+        if (tbl_.cols[i].dataName == orderByCol_) { sortIndex = i; break; }
+    state_ = std::make_unique<State>(tbl_,sortIndex,asc_,nullsFirst_);
+    try {
+        childOpened_ = true;
+        if (!child_->open()) return propagateChildError(child_.get(), "sort child could not open");
+        std::string raw;
+        while (child_->next(raw)) {
+            checkForQueryInterrupt();
+            State::Row row; row.raw = std::move(raw); row.origin = child_->scanOrigin();
+            if (!row.origin.engine) StorageEngine::unbindNullRow();
+            else StorageEngine::bindNullRow(row.origin.engine,row.origin.dbname,row.origin.tablename,row.origin.rid,tbl_.len);
+            std::vector<bool> nulls;
+            if (!child_->lastStoredNullBitmap(nulls) || nulls.size() != tbl_.len) {
+                nulls.assign(tbl_.len,false);
+                for (size_t i = 0; i < tbl_.len; ++i)
+                    nulls[i] = row.origin.engine ? child_->lastColumnIsNull(i) :
+                        child_->lastColumnIsNull(i) || rawColumnIsNull(row.raw,tbl_,i);
             }
-            items.emplace_back(std::move(buffer_[ri]), it);
+            row.nulls.assign(state_->nullBytes,'\0');
+            for (size_t i = 0; i < nulls.size(); ++i)
+                if (nulls[i]) row.nulls[i/8] |= static_cast<char>(1U << (i%8));
+            if (sortIndex < tbl_.len) {
+                row.isNull = nulls[sortIndex];
+                state_->key(row,StorageEngine::extractColumnValueStatic(row.raw,tbl_,sortIndex));
+            }
+            row.ordinal = state_->total;
+            if (state_->total == std::numeric_limits<uint64_t>::max()) throw DbError("54000", "too many sort input rows");
+            state_->add(std::move(row));
         }
-        interruptibleSort(items.begin(), items.end(), [&](const auto& a, const auto& b) {
-            if (a.second.isNull != b.second.isNull)
-                return a.second.isNull == nullsFirst_;
-            if (scol.dataType == "char" || scol.isVariableLength) {
-                const auto comparison = StorageEngine::compareValues(
-                    scol, a.second.s, false, b.second.s, false, "<");
-                if (asc_)
-                    return comparison == StorageEngine::PredicateTruth::True;
-                return StorageEngine::compareValues(
-                           scol, b.second.s, false, a.second.s, false, "<") ==
-                       StorageEngine::PredicateTruth::True;
-            }
-            if (scol.dataType == "date") return asc_ ? (a.second.d < b.second.d) : (b.second.d < a.second.d);
-            if (scol.dataType == "float" || scol.dataType == "double" || scol.dataType == "decimal") {
-                const double left = asc_ ? a.second.f : b.second.f;
-                const double right = asc_ ? b.second.f : a.second.f;
-                // SQL orders NaN after every non-NaN value. Native floating
-                // '<' alone makes NaN equivalent to every value, violating
-                // the strict weak ordering required by the sorting algorithm.
-                if (std::isnan(left)) return false;
-                return std::isnan(right) || left < right;
-            }
-            return asc_ ? (a.second.n < b.second.n) : (b.second.n < a.second.n);
-        });
-        buffer_.clear();
-        sortedOrigins_.clear();
-        for (auto& it : items) {
-            buffer_.push_back(std::move(it.first));
-            sortedOrigins_.push_back(it.second.originIdx < origins_.size()
-                ? origins_[it.second.originIdx] : Operator::ScanOrigin{});
-        }
+        if (child_->hasError()) return propagateChildError(child_.get(),"sort child failed");
+        childOpened_ = false; child_->close();
+        state_->finish();
+        return true;
+    } catch (...) {
+        const auto failure = std::current_exception();
+        try { close(); } catch (...) {}
+        std::rethrow_exception(failure);
     }
-    pos_ = 0;
-    return true;
 }
 
 bool SortOp::next(std::string& outRow) {
-    NextInstrument rtInstr_(this);  // EXPLAIN ANALYZE per-node stats
-    if (pos_ >= buffer_.size()) return false;
-    // Re-bind stored-NULL visibility for the re-emitted row so
-    // downstream projection sees the correct null bitmap.
-    if (pos_ < sortedOrigins_.size()) {
-        const auto& org = sortedOrigins_[pos_];
-        if (org.engine && org.rid != 0)
-            StorageEngine::bindNullRow(org.engine, org.dbname, org.tablename,
-                                       org.rid, tbl_.len);
-        else
-            StorageEngine::unbindNullRow();
-    }
-    outRow = buffer_[pos_];
-    ++pos_;
-    rtInstr_.emitted = true;
+    NextInstrument instrumentation(this);
+    checkForQueryInterrupt();
+    State::Row row;
+    if (!state_ || !state_->next(row)) return false;
+    lastOrigin_ = std::move(row.origin); lastNulls_.assign(tbl_.len,false);
+    for (size_t i = 0; i < tbl_.len; ++i)
+        lastNulls_[i] = (static_cast<unsigned char>(row.nulls[i/8]) & (1U << (i%8))) != 0;
+    if (lastOrigin_.engine && lastOrigin_.rid > 0)
+        StorageEngine::bindNullRow(lastOrigin_.engine,lastOrigin_.dbname,lastOrigin_.tablename,lastOrigin_.rid,tbl_.len);
+    else StorageEngine::unbindNullRow();
+    outRow = std::move(row.raw); rowAvailable_ = true; instrumentation.emitted = true;
     return true;
 }
 
 void SortOp::close() {
-    buffer_.clear();
+    state_.reset(); rowAvailable_ = false; lastOrigin_ = {}; lastNulls_.clear();
+    if (childOpened_) { childOpened_ = false; child_->close(); }
 }
 
 bool SortOp::lastColumnIsNull(size_t colIdx) const {
-    // The re-emitted row stored-NULL bit: consult the sort own origin
-    // for the row at pos_ - 1 (the row most recently handed upstream),
-    // not the drained child scan stale lastRid_.
-    if (pos_ == 0 || pos_ - 1 >= sortedOrigins_.size()) return false;
-    const auto& org = sortedOrigins_[pos_ - 1];
-    if (!org.engine || org.rid == 0) return false;
-    return org.engine->isColumnNullByRid(org.dbname, org.tablename, org.rid, colIdx);
+    return rowAvailable_ && colIdx < lastNulls_.size() && lastNulls_[colIdx];
+}
+bool SortOp::lastStoredNullBitmap(std::vector<bool>& nulls) const {
+    if (!rowAvailable_) return false;
+    nulls = lastNulls_; return true;
 }
 
 // ========================================================================

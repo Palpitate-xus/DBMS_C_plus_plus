@@ -1,5 +1,16 @@
 # User-deferred scope and ordinary incomplete work
 
+The dedicated [R197 COPY response/interrupt-scope record](issue-review-r197-copy-response-interrupt-scope.md)
+also preserves an existing user deferral: “不再继续本项测试或实现，也不将候选计入已接受修复。”
+Its COPY response/input interrupt ownership remains unresolved; a generic
+continuation does not resume that investigation. Registered regressions that
+include partial COPY frames may be retained as unfiltered observations, without
+claiming every failure has that same cause or repairing the deferred scope.
+This reconciles the existing record rather than creating a new deferral or
+deferring all COPY, ordinary sort resources, or all cancellation work. Shared
+CPU-sort interrupt helpers and the dedicated R185 record are unchanged by the
+ordinary physical-sort budget/spill work.
+
 The later 2026-10-27 instruction is also recorded in the dedicated
 [R303 planning](issue-review-r303-prepared-constant-planning-phase.md),
 [R304 portal lifecycle](issue-review-r304-bind-portal-lifecycle.md), and

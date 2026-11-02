@@ -134,6 +134,7 @@ run_sanitized() {
         fi
         local bin="${out_dir}/${t}"
         echo "[sanitizer] linking $t"
+        dbms_test_link_flags "$test_src"
         if ! g++ -std=c++17 $san_flags -g -O1 -fno-omit-frame-pointer \
                  -I"$SRC_DIR/src" \
                  -I"$SRC_DIR/src/common" \
@@ -151,7 +152,7 @@ run_sanitized() {
                  -I"$SRC_DIR/src/replication" \
                  -I"$SRC_DIR/src/process" \
                  -DHAS_ZLIB=1 \
-                 "$test_src" tests/test_stubs.cpp "${objects[@]}" -o "$bin" -lpthread -lz 2> "${out_dir}/link_${t}.log"; then
+                 "$test_src" tests/test_stubs.cpp "${objects[@]}" "${DBMS_TEST_EXTRA_LDFLAGS[@]}" -o "$bin" -lpthread -lz 2> "${out_dir}/link_${t}.log"; then
             echo "[sanitizer] LINK FAILED: $t" >&2
             tail -5 "${out_dir}/link_${t}.log" >&2
             test_failed=1
