@@ -11,6 +11,7 @@
 - [测试](#测试)与[参与贡献](#参与贡献)：验证改动和报告问题。
 - [性能测试报告](docs/performance-report-2026-10-30.md)：查询、增删改、事务、DDL、COPY、索引与维护操作的实测对照及复现方法。
 - [兼容性契约](docs/compatibility-contract.md)：与 PostgreSQL 接口的差异和边界。
+- [与 PostgreSQL 的距离](docs/postgresql-comparison.md)：273 项功能总账、主要缺口和 PostgreSQL 18.6 同机性能对照。
 - [当前状态与验证范围](docs/production-status.md#当前状态与验证范围)：最新性能批次、剩余瓶颈及文档检查入口。
 
 ## 项目定位与兼容性

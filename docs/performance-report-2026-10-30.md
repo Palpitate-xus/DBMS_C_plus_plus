@@ -1,5 +1,7 @@
 # 数据库操作性能测试报告（2026-10-30）
 
+2026-11-02 已补充 [PostgreSQL 18.6 同机对照](#postgresql-186-同机对照2026-11-02)，原 10 月 30 日内部优化记录继续按原批次解释。
+
 本轮在已有查询优化的基础上，继续优化提交状态、增删改、约束校验、DDL 重写和后台维护。编译标准仍为 C++17；收益来自执行路径和写放大优化，没有把语言标准升级计作加速因素。
 
 ## 测试范围与口径
@@ -180,6 +182,94 @@ python3 scripts/benchmark_queries.py \
 - `stage-m-wal-retained-prefix/{build.json,native-final/,protocol-final/}`、`final-provenance.json`：构建依赖、每个测试源文件/日志 SHA-256 与实际退出码。
 - `driver/sha256.json`：两侧实际使用的固定驱动和 helper 哈希；其中操作驱动 SHA-256 为 `0ddc77735c997b7b9fe5b4ec5700830e069972922432298d8ff6012d6e6cffd7`。
 - `original/`、`metadata.json`、`optimization.patch` 与各候选阶段日志：起始内容、本轮增量和失败追溯。
+
+## PostgreSQL 18.6 同机对照（2026-11-02）
+
+本节是新增的小表探索性对照，与上文 10 月 30 日的本项目版本比较分开解释。
+新建夹具、数据库文件和后台状态与旧批次不同，不能把本节较低的绝对延迟解释成新增源码优化收益。
+两边各 35 类操作、每类 6 个计时样本，共 **420 个计时样本**；另各执行一轮 35 类不计时预热。
+最终记录完整结束，既有驱动的结果/协议检查均通过。这里的数值回答指定夹具的客户端往返延迟，不能代表整体数据库性能。
+
+### 环境、方法和限制
+
+- 复用 [benchmark_operations.py](../scripts/benchmark_operations.py) 的 35 类操作与既有 oracle，新增 [benchmark_postgresql.py](../scripts/benchmark_postgresql.py) 负责两个独立的本地进程及配对计时。没有使用或修改已有数据库；临时服务均已正常退出。
+- 主表 1,000 行、关联表 100 行，修改批量 20 行、DDL 夹具 5 行；同一主机、同一文件系统、回环 TCP_NODELAY，各复用一个连接，无 TLS。两轮每类各 3 次，固定种子打乱操作顺序；第一轮每项先本项目后 PostgreSQL，第二轮反过来。预热后再测，未清 OS 缓存。
+- PostgreSQL 精确核验为 18.6（`server_version_num=180006`），发行二进制来自 `public.ecr.aws/docker/library/postgres:18.6-bookworm`，提取后以本机进程运行；manifest digest 为 `sha256:5c4783a8cc3f0074912164f94dfa1be4e043438f0f707cf968d7af9a0d31a2c8`，所需额外库仅作用于该进程。
+- PostgreSQL 的 `fsync`、`synchronous_commit`、`full_page_writes`、`data_checksums` 均为 `on`；`shared_buffers=128MB`、`work_mem=4MB`、`checkpoint_timeout=5min`、`jit=on`。本项目使用默认持久化与后台维护，堆/索引池默认 256/128 帧。**未统一两边的内存额度或调优参数**，不能声称完全相同配置。
+- 本项目使用 11 月 1 日 CMake 4.4.4 全新构建的 C++17 / `-O2` / TLS stub 程序，SHA-256 为 `996c0b6ee761116f413f4594e722138e5972c58229f42f48bc98b3cc3f72702f`；生产输入为 `9b71e118`，运行期间未修改生产代码。根目录原程序未替换。
+- 计时包括 action、响应及客户端解码；SELECT oracle 在 action 中，修改后的额外读取验证、setup 与 cleanup 不计时。只读事务和序列仍沿用原驱动的有限检查，见本报告开头。COPY TO 也包含流量和客户端处理，不是纯服务器执行耗时。
+- 这是共享主机、两轮配对的小样本观察，单项 PostgreSQL 测量时间很短，客户端/调度噪声会影响亚毫秒值；6 个样本的 p95 就是最大值，没有置信区间，不能推导 p99、并发吞吐、冷缓存或大表曲线。CPU/I/O 统计范围在 PG 多进程与本项目多线程间不同，本节不比较这些计数。
+- 没有运行标准 pgbench/TPC 或长时间压力测试；[PostgreSQL 官方 pgbench 建议](https://www.postgresql.org/docs/18/pgbench.html)强调足够长的重复测量和规模/维护/客户端瓶颈控制。下面倍率仅是本轮对应操作的延迟比，不是总体“落后倍数”。
+
+### 完整结果
+
+延迟比 = 本项目 p50 / PostgreSQL p50；大于 1 表示本项目在该操作样本中延迟更高。
+原始延迟和 p95 均保留在 JSON/CSV；表内保留 p50，避免将六个样本的最大值解读为稳定尾延迟。
+
+| 操作 | 本项目 p50 ms | PostgreSQL 18.6 p50 ms | 延迟比 |
+| --- | ---: | ---: | ---: |
+| SELECT 1 | 1.780 | 0.246 | 7.2× |
+| 普通主键点查 | 15.280 | 0.360 | 42.5× |
+| 参数化主键点查 int4 | 16.024 | 0.320 | 50.2× |
+| 无索引文本等值 | 57.339 | 0.569 | 100.8× |
+| 范围 SUM（100 行） | 118.290 | 0.537 | 220.4× |
+| GROUP BY 聚合 | 75.109 | 2.946 | 25.5× |
+| 双键排序 LIMIT 20 | 60.028 | 1.417 | 42.4× |
+| JOIN 后 COUNT | 279.252 | 0.999 | 279.5× |
+| INSERT 单行自动提交 | 20.323 | 0.625 | 32.5× |
+| INSERT 多 VALUES（20 行） | 92.355 | 0.925 | 99.9× |
+| INSERT 显式事务（20 条） | 133.274 | 4.225 | 31.5× |
+| UPDATE 主键单行 | 55.423 | 0.653 | 84.9× |
+| UPDATE 单行并维护二级索引 | 63.590 | 0.756 | 84.2× |
+| CTE UPDATE 单行 RETURNING | 23.411 | 0.796 | 29.4× |
+| UPDATE 范围（20 行） | 130.900 | 0.858 | 152.5× |
+| DELETE 主键单行 | 26.934 | 0.573 | 47.0× |
+| CTE DELETE 单行 RETURNING | 34.143 | 0.729 | 46.8× |
+| DELETE 范围（20 行） | 110.730 | 0.923 | 120.0× |
+| 只读事务 BEGIN/SELECT/COMMIT | 12.390 | 0.569 | 21.8× |
+| 写事务 INSERT 后 ROLLBACK | 27.660 | 0.658 | 42.0× |
+| 事务 UPDATE/保存点/回滚/提交 | 113.760 | 1.538 | 74.0× |
+| 序列 nextval | 12.049 | 0.250 | 48.2× |
+| COPY FROM（20 行） | 76.849 | 0.813 | 94.5× |
+| COPY TO（1,000 行） | 83.468 | 15.481 | 5.4× |
+| TOAST INSERT（6 KiB） | 33.381 | 0.774 | 43.1× |
+| CREATE TABLE 空表 | 913.311 | 2.027 | 450.5× |
+| ALTER ADD COLUMN（5 行） | 920.287 | 0.916 | 1004.3× |
+| TRUNCATE（5 行） | 1081.687 | 1.191 | 908.1× |
+| DROP TABLE（5 行） | 1027.397 | 1.517 | 677.4× |
+| CREATE INDEX B-tree（1,000 行） | 992.384 | 2.293 | 432.9× |
+| CREATE INDEX Hash（1,000 行） | 922.623 | 3.216 | 286.9× |
+| ANALYZE（1,000 行） | 309.694 | 2.951 | 105.0× |
+| VACUUM 删除表 | 2.515 | 0.521 | 4.8× |
+| REINDEX（1,000 行） | 235.688 | 3.768 | 62.5× |
+| CHECKPOINT | 19.966 | 13.762 | 1.5× |
+
+本轮普通点查约 42.5×、单行 INSERT 约 32.5×、主键 UPDATE 约 84.9×、主键 DELETE 约 47.0×；
+5 行表 ALTER ADD COLUMN 约 1,004.3×。CHECKPOINT 约 1.5×，不能据此推导 WAL/恢复能力已等价。
+不同操作差别很大，未计算一个综合性能百分比，也没有将这些倍率与上文内部优化倍率相乘。
+
+### 复现与原始证据
+
+需要独立可运行的 PostgreSQL 18.6 安装；驱动自行初始化新 cluster，拒绝把其他版本当参考：
+
+```bash
+python3 scripts/benchmark_postgresql.py \
+  --binary "$PWD/build/cmake/dbms_main" \
+  --pg-bin /path/to/postgresql-18.6/bin \
+  --output build/pg-comparison-new-run \
+  --rows 1000 --batch 20 --ddl-rows 5 --rounds 2 --samples 3
+```
+
+可选 `--pg-library-dir /path/to/private/libs` 只给参考进程设置库查找路径；output 必须是新目录。
+本机证据在 `build/pg-gap-assessment-20261102-i3wba7p7/`：`postgres-bundle.json`、`inputs.json`、
+`paired-run-v3/comparison.{json,csv}`、`paired-run-v3.log`、双方启动日志和原始 EXPLAIN。
+`comparison.json` 包含两个轮次的每个样本、预热记录、PostgreSQL 设置、双方操作计数、二进制/驱动哈希；
+`assessment-verification.json` 记录对样本数、oracle、总账/生产输入未变及文档表格的复核。
+这是本地 build 证据；跨机器复核需保存该目录和所用 PostgreSQL 安装/镜像，不能只依赖本地路径。
+
+环境准备的失败也保留：原默认 `pgref` 实际为 17.2，未用作 18.6 对照；Docker Hub 首次拉取超时后改用镜像渠道。
+前两次私有初始化分别缺 `libpq.so.5` 和配置样本的链接目标，记录在 `paired-run/`、`paired-run-v2/`；
+这两次没有计时样本，补齐运行文件后才完成 v3，未将失败尝试写成通过。未重启已有参考服务或用户数据库。
 
 ## 剩余瓶颈与适用范围
 

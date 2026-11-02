@@ -4,6 +4,7 @@
 接口范围以[兼容性契约](compatibility-contract.md)为准；命令示例不代表所有组合均已实现。
 
 当前实现、已验证范围及剩余瓶颈集中见[状态说明](production-status.md#当前状态与验证范围)。
+[与 PostgreSQL 的差距评估](postgresql-comparison.md)汇总功能总账、实际能力边界及 18.6 同机小表性能对照。
 文档清单覆盖仓库 Markdown；历史问题和发布快照保留对应批次结论，不作为当前版本的全部能力声明。
 
 ## 审查、问题与验证
