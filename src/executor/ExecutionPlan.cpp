@@ -265,8 +265,13 @@ struct PreparedSelectState {
             const auto origin = source.scanOrigin();
             if (origin.engine == engine && origin.dbname == dbname &&
                 origin.tablename == schema.tablename) {
-                if (const auto bitmap = detail::storedRowNullBitmap(
-                        *engine, dbname, origin.tablename, schema, origin.rid)) {
+                std::vector<bool> captured;
+                if (source.lastStoredNullBitmap(captured)) {
+                    detail::decodeStoredRowValues(*engine, dbname, raw, schema,
+                                                 captured, structured, nulls);
+                    available = true;
+                } else if (const auto bitmap = detail::storedRowNullBitmap(
+                               *engine, dbname, origin.tablename, schema, origin.rid)) {
                     detail::decodeStoredRowValues(*engine, dbname, raw, schema,
                                                  *bitmap, structured, nulls);
                     available = true;
@@ -536,6 +541,9 @@ public:
         empty_ = false;
     }
     bool lastColumnIsNull(size_t ordinal) const override { return child_->lastColumnIsNull(ordinal); }
+    bool lastStoredNullBitmap(std::vector<bool>& nulls) const override {
+        return child_->lastStoredNullBitmap(nulls);
+    }
     bool supportsStructuredRows() const override { return child_->supportsStructuredRows(); }
     bool supportsPreparedContexts() const override { return child_->supportsPreparedContexts(); }
     bool lastPreparedContext(RowContext& row) const override { return child_->lastPreparedContext(row); }
@@ -2363,8 +2371,12 @@ TableScanOp::TableScanOp(StorageEngine* engine, const std::string& dbname,
                           const std::string& tablename)
     : engine_(engine), dbname_(dbname), tablename_(tablename) {}
 
+TableScanOp::~TableScanOp() { try { close(); } catch (...) {} }
+
 bool TableScanOp::open() {
     OpenInstrument startup(this);
+    if (tableLockHeld_) close();
+    clearError();
     auto& lockManager = engine_->getLockManager();
     lockManager.setResourceNamespace(dbname_);
     if (!lockManager.lockShared(tablename_)) {
@@ -2375,6 +2387,12 @@ bool TableScanOp::open() {
     tbl_ = engine_->getTableSchema(dbname_, tablename_);
     rows_.clear();
     lastRid_ = 0;
+    pos_ = 0; lastNulls_.clear(); cursor_.reset();
+    if (tbl_.partitionType == TableSchema::PartitionType::None &&
+        !engine_->rlsAppliesTo(dbname_, tablename_)) {
+        cursor_ = engine_->beginHeapScan(dbname_, tablename_, tbl_);
+        return true;
+    }
     bool toastFailed = false;
     const auto appendRow = [&](uint32_t pageId, uint16_t slotId,
                                const char* data, size_t len) {
@@ -2495,6 +2513,22 @@ TableSchema unnestTableSchema() {
 
 bool TableScanOp::next(std::string& outRow) {
     NextInstrument rtInstr_(this);  // EXPLAIN ANALYZE per-node stats
+    if (cursor_) {
+        HeapScanRow row;
+        if (!cursor_->next(row)) {
+            if (!statsRecorded_) {
+                recordTableScan(dbname_, tablename_, pos_, false, true);
+                statsRecorded_ = true;
+            }
+            return false;
+        }
+        lastRid_ = row.rid; lastNulls_ = std::move(row.nulls);
+        StorageEngine::bindNullRow(engine_, dbname_, tablename_, lastRid_, tbl_.len);
+        bool ok = false;
+        outRow = engine_->resolveToastValues(dbname_, tablename_, row.data, tbl_, &ok);
+        if (!ok) { setError("TOAST value read failed"); return false; }
+        ++pos_; rtInstr_.emitted = true; return true;
+    }
     if (pos_ >= rows_.size()) return false;
     lastRid_ = rows_[pos_].first;
     outRow = rows_[pos_].second;
@@ -2507,18 +2541,35 @@ bool TableScanOp::next(std::string& outRow) {
 }
 
 bool TableScanOp::lastColumnIsNull(size_t colIdx) const {
+    if (cursor_ && colIdx < lastNulls_.size()) return lastNulls_[colIdx];
     return detail::storedRowColumnIsNull(*engine_, dbname_, tablename_, tbl_, lastRid_, colIdx);
 }
 
+bool TableScanOp::lastStoredNullBitmap(std::vector<bool>& nulls) const {
+    if (!cursor_ || !lastRid_) return false;
+    nulls = lastNulls_; return true;
+}
+
 void TableScanOp::close() {
+    if (!tableLockHeld_ && !cursor_ && rows_.empty()) return;
+    const bool partialScan = cursor_ && !statsRecorded_;
+    cursor_.reset(); lastNulls_.clear();
     rows_.clear();
     lastRid_ = 0;
     StorageEngine::unbindNullRow();
-    statsRecorded_ = false;
+    std::exception_ptr statsFailure;
+    if (partialScan) {
+        // Publish before releasing the relation token: DROP/recreate must
+        // not reset statistics between our unlock and this publication.
+        try { recordTableScan(dbname_, tablename_, pos_, false, false); }
+        catch (...) { statsFailure = std::current_exception(); }
+    }
     if (tableLockHeld_) {
         engine_->getLockManager().unlock(tablename_);
         tableLockHeld_ = false;
     }
+    statsRecorded_ = false; pos_ = 0;
+    if (statsFailure) std::rethrow_exception(statsFailure);
 }
 
 // ========================================================================

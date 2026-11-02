@@ -1,4 +1,5 @@
 #include "TableManage.h"
+#include "commands/HeapScanCursor.h"
 #include "commands/StoredRowNull.h"
 #include "commands/DdlRewrite.h"
 #include "commands/DdlTransaction.h"
@@ -8166,12 +8167,10 @@ void StorageEngine::noteTemporaryRelationAccess(
     }
 }
 
-bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tablename,
-                                const std::function<void(uint32_t, uint16_t, const char*, size_t)>& callback,
-                                const ReadView* readView,
-                                const std::vector<std::string>& targetPartitions,
-                                bool registerSiread,
-                                bool indexMaintenanceView) const {
+const StorageEngine::ReadView* StorageEngine::prepareRowScanView(
+    const std::string& dbname, const std::string& tablename,
+    const ReadView* readView, bool indexMaintenanceView,
+    ReadView& autocommitView, ReadView& commandInternalView) const {
     const auto status = ensureDatabaseTransactionOwnership(dbname);
     if (status != DBStatus::OK)
         throw DbError(sqlstateForDBStatus(status), "could not acquire database transaction ownership");
@@ -8191,8 +8190,6 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
         transactionContext().querySnapshotUsed = true;
     }
     const ReadView* rv = readView;
-    ReadView autocommitView;
-    ReadView commandInternalView;
     if (indexMaintenanceView) {
         rv = nullptr;
     } else if (!rv && transactionContext().inTransaction &&
@@ -8221,6 +8218,41 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
         commandInternalView.commandIdVisibility = false;
         rv = &commandInternalView;
     }
+    return rv;
+}
+
+void StorageEngine::noteScanSiread(const std::string& dbname,
+                                  const std::string& tablename,
+                                  std::optional<int64_t> rid) const {
+    auto& tx = transactionContext();
+    if (!tx.inTransaction || tx.txnDB != dbname ||
+        tx.txnIsolationLevel != IsolationLevel::SERIALIZABLE) return;
+    if (!rid) {
+        const auto relation = ssiRelationKey(dbname, tablename);
+        tx.txnReadRelations.insert(relation);
+        std::lock_guard<std::mutex> lock(ssiMutex_);
+        ssiReadRelations_[tx.currentTxnId].insert(relation);
+    } else {
+        uint32_t pageId = 0; uint16_t slotId = 0;
+        decodeRid(*rid, pageId, slotId);
+        auto key = ssiRidKey(dbname, tablename, *rid);
+        auto page = ssiPageKey(dbname, tablename, pageId);
+        tx.txnReadRids.insert(key); tx.txnReadPages.insert(page);
+        std::lock_guard<std::mutex> lock(ssiMutex_);
+        ssiReadSets_[tx.currentTxnId].insert(std::move(key));
+        ssiReadPages_[tx.currentTxnId].insert(std::move(page));
+    }
+}
+
+bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tablename,
+                                const std::function<void(uint32_t, uint16_t, const char*, size_t)>& callback,
+                                const ReadView* readView,
+                                const std::vector<std::string>& targetPartitions,
+                                bool registerSiread,
+                                bool indexMaintenanceView) const {
+    ReadView autocommitView, commandInternalView;
+    const auto* rv = prepareRowScanView(dbname, tablename, readView,
+        indexMaintenanceView, autocommitView, commandInternalView);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
 
@@ -8228,14 +8260,7 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
     // scan returns no rows.  It is conservative (and therefore may reduce
     // serializable concurrency), but it closes the correctness hole where a
     // concurrent INSERT could otherwise evade row-level SSI tracking.
-    if (registerSiread && transactionContext().inTransaction &&
-        transactionContext().txnDB == dbname &&
-        transactionContext().txnIsolationLevel == IsolationLevel::SERIALIZABLE) {
-        const std::string relation = ssiRelationKey(dbname, tablename);
-        transactionContext().txnReadRelations.insert(relation);
-        std::lock_guard<std::mutex> lock(ssiMutex_);
-        ssiReadRelations_[transactionContext().currentTxnId].insert(relation);
-    }
+    if (registerSiread) noteScanSiread(dbname, tablename);
 
     // Helper: visibility check, SSI tracking, header stripping, then callback
     const CommitLog* indexCommitLog =
@@ -8310,19 +8335,7 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
         } else if (rv) {
             if (!rv->isVisible(data, len, fmtVer)) return;
         }
-        if (registerSiread && this->transactionContext().inTransaction &&
-            this->transactionContext().txnDB == dbname &&
-            this->transactionContext().txnIsolationLevel ==
-                IsolationLevel::SERIALIZABLE) {
-            int64_t rid = this->encodeRid(pid, sid);
-            std::string key = ssiRidKey(dbname, tablename, rid);
-            std::string page = ssiPageKey(dbname, tablename, pid);
-            this->transactionContext().txnReadRids.insert(key);
-            this->transactionContext().txnReadPages.insert(page);
-            std::lock_guard<std::mutex> lock(ssiMutex_);
-            ssiReadSets_[this->transactionContext().currentTxnId].insert(std::move(key));
-            ssiReadPages_[this->transactionContext().currentTxnId].insert(std::move(page));
-        }
+        if (registerSiread) noteScanSiread(dbname, tablename, encodeRid(pid, sid));
         size_t off = dataOffset(fmtVer, natts);
         if (usesHeapTupleHeader(fmtVer)) {
             const auto* htup = castHeapHeader(data);
@@ -8408,6 +8421,107 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
         lockManager_.pageUnlock(dbname, tablename, pid);
     }
     return true;
+}
+
+namespace {
+class PageHeapScanCursor final : public HeapScanCursor {
+    std::function<bool(std::vector<HeapScanRow>&)> readPage_;
+    std::vector<HeapScanRow> rows_;
+    size_t position_ = 0;
+    bool eof_ = false;
+public:
+    explicit PageHeapScanCursor(std::function<bool(std::vector<HeapScanRow>&)> reader)
+        : readPage_(std::move(reader)) {}
+    bool next(HeapScanRow& row) override {
+        checkForQueryInterrupt();
+        while (position_ == rows_.size()) {
+            if (eof_) return false;
+            rows_.clear(); position_ = 0;
+            if (!readPage_(rows_)) { eof_ = true; return false; }
+        }
+        row = std::move(rows_[position_++]);
+        return true;
+    }
+};
+} // namespace
+
+std::unique_ptr<HeapScanCursor> StorageEngine::beginHeapScan(
+    const std::string& dbname, const std::string& tablename,
+    const TableSchema& schema) const {
+    if (schema.partitionType != TableSchema::PartitionType::None ||
+        rlsAppliesTo(dbname, tablename))
+        throw DbError("0A000", "relation requires its policy or partition scan path");
+    ReadView autocommitView, commandInternalView;
+    const auto* view = prepareRowScanView(dbname, tablename, nullptr, false,
+                                         autocommitView, commandInternalView);
+    noteScanSiread(dbname, tablename);
+    std::shared_ptr<PageAllocator> allocator;
+    {
+        std::lock_guard<std::recursive_mutex> lock(cacheMutex_);
+        // Retain the validated allocator, including existing missing-file,
+        // tablespace and format checks. A cursor never creates a lost heap.
+        if (!getPageAllocator(dbname, tablename))
+            throw DbError("58030", "could not open heap scan");
+        allocator = pageAllocators_.at(dbname + "/" + tablename);
+    }
+    struct State {
+        std::shared_ptr<PageAllocator> allocator;
+        TableSchema schema;
+        ReadView view;
+        uint32_t page = 1, end = 0;
+    };
+    auto state = std::make_shared<State>();
+    state->allocator = std::move(allocator); state->schema = schema;
+    state->view = *view; state->end = state->allocator->numPages();
+    return std::make_unique<PageHeapScanCursor>(
+        [this, state, dbname, tablename](std::vector<HeapScanRow>& rows) {
+            checkForQueryInterrupt();
+            if (state->page >= state->end) return false;
+            // Nested commands may create combo IDs after this scan began.
+            // Their decoding table can grow without advancing our snapshot's
+            // command ID, xmin/xmax horizon or active transaction set.
+            const auto& current = transactionContext();
+            if (current.inTransaction && current.txnDB == dbname &&
+                current.currentTxnId == state->view.creatorTxnId)
+                state->view.comboCommandIds.insert(current.readView.comboCommandIds.begin(),
+                                                   current.readView.comboCommandIds.end());
+            const auto pageId = state->page++;
+            if (!lockManager_.pageLockShared(dbname, tablename, pageId))
+                throw DbError("55P03", "could not obtain heap page lock");
+            struct PageRead {
+                LockManager& locks; PageAllocator& allocator;
+                const std::string& db; const std::string& table;
+                uint32_t page; bool pinned = false;
+                ~PageRead() {
+                    if (pinned) allocator.unpinPage(page);
+                    locks.pageUnlock(db, table, page);
+                }
+            } guard{lockManager_, *state->allocator, dbname, tablename, pageId};
+            char* buffer = state->allocator->fetchPage(pageId);
+            if (!buffer) throw DbError("58030", "could not read heap page");
+            guard.pinned = true;
+            const auto& table = state->schema;
+            PageWrapper page(buffer, state->allocator->pageSize(), table.formatVersion);
+            page.forEachLive([&](uint16_t slotId, const char* bytes, size_t length) {
+                checkForQueryInterrupt();
+                if (length <= rowHeaderSize(table.formatVersion, table.len) ||
+                    !state->view.isVisible(bytes, length, table.formatVersion)) return;
+                const size_t offset = usesHeapTupleHeader(table.formatVersion)
+                    ? castHeapHeader(bytes)->t_hoff : dataOffset(table.formatVersion, table.len);
+                if (offset >= length) return;
+                HeapScanRow row;
+                row.rid = encodeRid(pageId, slotId);
+                noteScanSiread(dbname, tablename, row.rid);
+                row.data.assign(bytes + offset, length - offset);
+                row.nulls.assign(table.len, false);
+                if (usesHeapTupleHeader(table.formatVersion))
+                    for (size_t i = 0; i < table.len; ++i)
+                        if (table.cols[i].isNull)
+                            row.nulls[i] = dbms::isNull(castHeapHeader(bytes), static_cast<int>(i));
+                rows.push_back(std::move(row));
+            });
+            return true;
+        });
 }
 
 bool StorageEngine::forEachVisibleRow(

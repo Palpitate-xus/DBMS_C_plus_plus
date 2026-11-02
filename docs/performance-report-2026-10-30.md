@@ -352,6 +352,88 @@ DBMS_MAIN="$PWD/build/cmake/dbms_main" python3 tests/prepared_topn_protocol_e2e_
 `native-before.log`、`native-keycache.json`、`protocol-keycache.json`、`protocol-{old,reference}-48.log` 保留完整检查；
 `operations-smoke/operations.json`、`fixture-10000-failure.json`、`virtual-demand-three-way.json` 记录操作回归及未关闭差异；
 `final-provenance.json` 记录生产输入、实际对象、测试与程序哈希。
+
+## 按页物理扫描（2026-11-02）
+
+### 实现与验证
+
+以 `17df7ff3` 的 Top-N 版本为旧版继续优化。参考 PostgreSQL 18 的
+[SeqScan](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/executor/nodeSeqscan.c)和
+[heap scan](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/access/heap/heapam.c)：
+保留扫描状态、snapshot 和资源生命周期，由上层按需求取后续行，避免 open 时就读完整张表。
+实现为本项目自有游标，没有移植 PostgreSQL 文件格式。
+
+- 普通非分区 `TableScanOp` 打开时保留一个 MVCC 视图和堆页范围，逐页复制可见行及 NULL 位图，
+  页锁/pin 在交付前释放，避免持锁调用写函数；新出现的 combo ID 仅补充解码表，不推进该扫描的 command ID 或可见性边界。
+- 同一套扫描初始化和 SSI 登记被回调扫描与游标复用；空扫描仍登记 relation SIREAD，读取页内候选时保留原 tuple/page 覆盖。
+  游标拥有 allocator 引用，继续使用原有文件身份、缺失文件、tablespace 和格式核验。
+- 最多保留一页未展开的行；只对当前交付行展开 TOAST，类型化消费者直接使用捕获的 NULL 位图。
+  扫描行缓冲不再随表内行数线性增长；buffer pool、snapshot/SSI 跟踪、上层结果缓存和单个大值不包含在这项界限内。
+- 提前停止记录实际交付行数，只有到 EOF 才发布完整 live-row 估计；重复 close 不重复计数，析构、I/O 错误与未打开子算子均核验资源/NULL 绑定。
+
+最终 **23 个原生入口、17 个真实协议入口** 全过，另 35 类操作预热及一轮既有结果检查全过。
+新增物理扫描完整 6 项旧版 1 个内存失败、新版全过；跨后端修改和 fresh scan 共 8 项覆盖自提交、RC、RR、SERIALIZABLE，均保留正确 OLD/NEW 与 TOAST 值。
+新增写函数排序协议完整 13 条在冻结旧版、PG 18.6 和新版均全过；相邻完整 48/80/190/69 及其他范围见[测试报告](test-report.md#2026-11-02-按页物理扫描与固定快照)。
+
+### 内存与延迟
+
+同一原生夹具含 192 行，普通非 NULL payload 为 16 KiB，并含 NULL、空串和字面文本 NULL；
+先完整读过 heap/TOAST 而不保留行，再以 `mallinfo2` 测扫描 open 前后的活跃分配增量。
+冻结旧版为 **2,820,192 字节（约 2.69 MiB）**，新版为 **17,088 字节（约 16.7 KiB）**，约降低 99.4%。
+这不是 RSS、峰值或整条查询内存；最终仍检查完整 192 行、TOAST 值、NULL、提前关闭及重开。
+
+延迟使用与前批相同的闭合 1,000 行夹具，三个独立副本按旧/新/旧启动；源文件逐项哈希不变。
+每类预热 3 次，3 轮×4 个已完整校验样本，六类共 **216 个计时样本**，不与构建或其他测试重叠。
+默认耐久性、15 秒 socket、单连接、回环 TCP_NODELAY、热缓存及计时内结果验证均保持不变。
+
+| 操作 | 旧首轮 p50 ms | 新 p50 ms | 旧末轮 p50 ms | 结论 |
+| --- | ---: | ---: | ---: | --- |
+| amount DESC,id ASC LIMIT 20 | 53.883 | 50.111 | 55.118 | 约快 1.08–1.10 倍 |
+| 同排序 LIMIT 20 OFFSET 500 | 56.884 | 57.428 | 56.940 | 未证明提速 |
+| 已有类型化 ARRAY[id] LIMIT 1 | 31.893 | 23.128 | 33.955 | 约快 1.38–1.47 倍 |
+| 普通列投影 id LIMIT 1 | 43.985 | 43.106 | 48.122 | 仍走旧分流，未证明稳定提速 |
+| 主键点查控制 | 22.702 | 24.593 | 24.419 | 未证明提速，此窗口略慢 |
+| 无 LIMIT 排序控制 | 107.620 | 108.408 | 107.282 | 未证明提速 |
+
+最终统计锁发布修正前的六类 **216 样本**也保留：按上表顺序，旧/新/旧分别为
+37.827/32.737/37.298、38.450/33.965/38.552、17.274/9.739/16.965、
+22.969/22.755/23.789、9.947/9.387/10.209、87.579/90.310/89.795 ms。
+该窗口类型化 LIMIT 的改善约 1.75 倍，最终窗口约 1.4 倍；包括未改旧程序在内的绝对延迟明显波动，不能把前阶段较好的倍率当作最终稳定收益。
+
+此前还完成四类旧/新/旧 **144 样本**：排序 LIMIT 20 为 39.574/34.960/37.829 ms，
+OFFSET 500 为 40.559/39.668/39.993 ms，点查为 12.067/11.577/9.656 ms，无界排序为 89.799/92.357/88.234 ms。
+三次观察不合并择优；OFFSET 等收益会受窗口波动影响。此处不推导大表、并发、p99、完整业务负载或新的 PG 性能比。
+
+### 构建、失败与未完成范围
+
+最终程序 SHA-256 为 `531a7ef325c604ec23a57a707d38e3b45607c535e84c50953a6506c56076d02c`，
+GCC 13.3 / C++17 / O2 / ICU / zlib / TLS stub 未变。公共头变化触发 13 个单元重编；
+另明确重编两次 ExecutionPlan，保证资源释放及统计锁边界修改已进入对象；共链接当前 62 个生产对象，复建不再编译/链接。
+统计在释放关系锁前发布，避免 DROP/重建重置统计后又被旧扫描写回；最后修正后完整重跑上述 23/17 入口及 35 类操作。
+验收后的同一候选原子替换根目录程序，旧程序保留备份，既有服务未重启。
+
+PG 参考首次监听后尚未就绪，返回 57P03，专项 SQL 尚未运行；原日志保留。
+辅助驱动补 `pg_isready` 探针，在原 15 秒启动期限内确认就绪后才认证、核验 18.6 并完成 13 条检查，没有放宽协议断言或期限。
+新增扫描测量前试选的 `~id` 投影在冻结旧版报 42703，保留探针记录；最终采用已支持的数组投影，未据此认定整数位非功能已完成。
+
+分区/RLS 保留原路径，ParallelTableScan 和其他 legacy 消费者仍可能全量缓冲；普通 `SELECT id ... LIMIT 1` 尚未普遍接入按需执行，
+是下一批明确的执行分流缺口。无界排序/work_mem/spill、生成列表达式错误传播、修改快照成本及大表加载失败仍开放。
+本批不修改 Bind 规划、用户暂缓项或原始 273 项状态，也不是全仓库/真实 TLS/崩溃恢复验收。
+
+### 复现与证据
+
+```bash
+python3 scripts/benchmark_topn.py \
+  --before /path/to/17df7ff3-dbms_main --after "$PWD/build/cmake/dbms_main" \
+  --output build/scan-new-run --rows 1000 --rounds 3 --samples 4 --include-scan-limit
+DBMS_MAIN="$PWD/build/cmake/dbms_main" python3 tests/table_scan_effect_snapshot_protocol_e2e_test.py
+```
+
+本机证据 `build/pg-feature-scan-20261102-i7t0b3bo/`：`latency-release/comparison.json` 为最终 216 样本，
+`latency-with-scan/comparison.json` 与 `latency/comparison.json` 为前阶段 216/144 样本；`native-before.log`、`native-release.json`、`protocol-release.json`、
+`statistics-final.json`、`table_scan_snapshot_test-release.log`、`protocol-reference-v2.log` 保留实际退出码和完整控制。
+`operations-release/operations.json`、`limit-probe-v2.json`、首个 PG 启动失败日志、CMake 编译/复建日志及 `final-provenance.json` 保留来源与边界。
+
 ## 剩余瓶颈与适用范围
 
 普通修改、保存点和其他 DDL 仍有物理快照、WAL 全文件映像及同步 I/O 开销；大数据库下会继续放大。整数 DML 筛选仍扫描堆，JOIN 优化仍可能枚举大量键对，索引覆盖、统计信息、计划选择、批处理及更细粒度的回滚机制仍有优化空间。

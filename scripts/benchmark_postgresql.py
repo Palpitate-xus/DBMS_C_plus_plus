@@ -74,6 +74,19 @@ def postgres(args, output):
             while True:
                 if process.poll() is not None:
                     raise RuntimeError("private PostgreSQL exited; inspect postgres-server.log")
+                # A listening socket precedes authentication readiness during
+                # recovery/startup. Probe PostgreSQL's own readiness boundary
+                # rather than passing a transient 57P03 into the wire oracle.
+                ready = subprocess.run(
+                    [str(args.pg_bin / "pg_isready"), "-h", "127.0.0.1",
+                     "-p", str(port), "-t", "1"], env=environment,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=2)
+                if ready.returncode:
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError("private PostgreSQL startup deadline exceeded")
+                    time.sleep(0.05)
+                    continue
                 try:
                     client = ReferenceClient(port, "postgres")
                     break

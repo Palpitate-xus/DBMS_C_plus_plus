@@ -11,6 +11,7 @@
 | --- | --- | --- |
 | [PostgreSQL 18 tuplesort](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/utils/sort/tuplesort.c) | 有限结果使用有界堆；无界大排序按内存预算生成有序段并归并 | 先实现普通有序 LIMIT 的有界候选保留，完整 `work_mem`/临时文件归并另行验收 |
 | [PostgreSQL tuple slots](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/executor/execTuples.c) | 行槽保留已解码属性及 NULL 标记，避免反复拆解相同属性 | 按物理行读取一次 NULL 位图并复用，去除排序的重复解码；仍保留文件身份核验、TOAST 和虚拟列的原有解码职责 |
+| [PostgreSQL SeqScan](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/executor/nodeSeqscan.c)与[heap scan](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/access/heap/heapam.c) | 扫描状态保留 snapshot，按需求获取后续 tuple，结束时释放扫描资源 | 普通非分区 TableScan 按页供给、复制拥有的行/NULL 位图，页锁和 pin 不跨表达式求值；分区/RLS/其他分流仍分别验收 |
 | [DuckDB TopN 优化](https://duckdb.org/2024/11/14/optimizers)及[排序设计](https://duckdb.org/2025/09/24/sorting-again) | ORDER BY 与 LIMIT 联合优化，保留有限候选；外部排序需要独立的可溢写布局 | OFFSET 纳入候选数量，保留类型化键与原始行上下文，避免重新求值和丢失 NULL/对象身份 |
 | [SQLite 临时文件](https://www.sqlite.org/tempfiles.html)与[原子提交](https://sqlite.org/atomiccommit.html) | 可用有序索引时减少排序；临时排序结构与事务日志承担不同职责，日志按变更页保护回滚 | 后续评估排序 spill 和修改路径的快照开销；本轮不删除持久化或回滚保护来换取速度 |
 
@@ -24,8 +25,14 @@
 - 最终 11 个原生、11 个协议入口及 35 类操作有限检查通过；新增完整 48 条在 PG 18.6/新版全过，旧版有 11 条失败。
   独立旧/新/旧中 LIMIT/OFFSET 约快 1.4 倍，内存观测和早期失败见[性能报告](performance-report-2026-10-30.md#有界排序-top-n2026-11-02)。
 
-此后依次评估常见修改的快照/扫描工作量、完整工作内存与 spill、统计和计划选择，再扩大数据量与并发验证。
-底层 TableScan 全量物化、无界排序/work_mem/spill 和虚拟生成列表达式失败返回 NULL 的既有差异仍开放；
+第二批基于 `17df7ff3` 完成普通非分区 TableScan 的按页游标，保留固定 MVCC、堆范围、SSI 及捕获的 NULL 位图，
+在页锁/pin 释放后交付行并展开当前 TOAST。23 个原生、17 个协议入口及 35 类操作检查通过；
+四种事务场景的跨后端修改、同语句写函数/回滚、部分扫描统计及 I/O 失败释放均有实际控制，新增完整 13 条协议也与 PG 18.6 对照通过。
+内存和旧/新/旧 216 样本见[按页扫描报告](performance-report-2026-10-30.md#按页物理扫描2026-11-02)。
+普通列投影 LIMIT 仍走旧分流，是接下来统一执行的具体缺口；先验证未排序投影需求、参数/类型元数据及错误边界，再扩大接入。
+
+此后依次评估剩余分流/物化、常见修改快照工作量、完整工作内存与 spill、统计和计划选择，再扩大数据量与并发验证。
+分区/RLS/并行等剩余物化、无界排序/work_mem/spill 和虚拟生成列表达式失败返回 NULL 的既有差异仍开放；
 原 273 项状态与原子条款不因本批通过而关闭。各批次最终通过范围以测试报告、性能报告及对应提交为准。
 
 > 蓝图描述目标和验收方法，不代表实现已完成。本轮实际 bug 及修复方案见[代码审查报告](code-review-2026-10-13.md)；完成状态仍取自原总账。

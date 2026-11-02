@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "TableManage.h"
+#include "commands/HeapScanCursor.h"
 #include "executor.h"
 #include "parser/query_binding.h"
 #include "common/DbError.h"
@@ -41,6 +42,12 @@ public:
     virtual bool lastColumnIsNull(size_t colIdx) const {
         (void)colIdx;
         return false;
+    }
+
+    // Physical scan rows may carry the captured tuple bitmap without
+    // re-fetching the page. A missing bitmap retains the RID-based fallback.
+    virtual bool lastStoredNullBitmap(std::vector<bool>& nulls) const {
+        (void)nulls; return false;
     }
 
     // Operators that synthesize result cells (aggregates, joins, windows)
@@ -279,10 +286,12 @@ class TableScanOp : public Operator {
 public:
     TableScanOp(StorageEngine* engine, const std::string& dbname,
                 const std::string& tablename);
+    ~TableScanOp() override;
 
     bool open() override;
     bool next(std::string& outRow) override;
     bool lastColumnIsNull(size_t colIdx) const override;
+    bool lastStoredNullBitmap(std::vector<bool>& nulls) const override;
     void close() override;
     const std::string& tableName() const { return tablename_; }
     // RID of the row emitted by the last next() call (0 before first).
@@ -299,6 +308,8 @@ private:
     std::string tablename_;
     TableSchema tbl_;
     std::vector<std::pair<int64_t, std::string>> rows_;
+    std::unique_ptr<HeapScanCursor> cursor_;
+    std::vector<bool> lastNulls_;
     size_t pos_ = 0;
     int64_t lastRid_ = 0;
     bool statsRecorded_ = false;

@@ -9,7 +9,7 @@
 - [构建](#构建)与[运行](#运行)：环境准备、编译和启动。
 - [SQL 示例](#sql-示例)与[使用手册](docs/MANUAL.md)：查询和事务操作。
 - [测试](#测试)与[参与贡献](#参与贡献)：验证改动和报告问题。
-- [性能测试报告](docs/performance-report-2026-10-30.md)：查询、增删改、事务、DDL、COPY、索引与维护实测；含 11 月 2 日有界排序优化与复现方法。
+- [性能测试报告](docs/performance-report-2026-10-30.md)：查询、增删改、事务、DDL、COPY、索引与维护实测；含 11 月 2 日有界排序、按页扫描及复现方法。
 - [兼容性契约](docs/compatibility-contract.md)：与 PostgreSQL 接口的差异和边界。
 - [与 PostgreSQL 的距离](docs/postgresql-comparison.md)：273 项功能总账、主要缺口和 PostgreSQL 18.6 同机性能对照。
 - [当前状态与验证范围](docs/production-status.md#当前状态与验证范围)：最新性能批次、剩余瓶颈及文档检查入口。

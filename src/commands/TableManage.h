@@ -34,6 +34,7 @@ struct SessionInterruptState;
 namespace dbms {
 
 class CatalogService;
+class HeapScanCursor;
 struct SavepointImageReceipt;
 
 // Storage/index classes appear only as unique_ptr members in this header;
@@ -1411,6 +1412,13 @@ public:
                     const std::vector<std::string>& targetPartitions = {},
                     bool registerSiread = true,
                     bool indexMaintenanceView = false) const;
+    // Caller holds the relation's shared lock for the complete cursor lifetime.
+    // Captures one MVCC view and heap extent, buffers at most one raw page,
+    // and releases page locks/pins before returning any owned row. Partitioned
+    // and RLS scans retain forEachRow/forEachVisibleRow until separately lowered.
+    std::unique_ptr<HeapScanCursor> beginHeapScan(
+        const std::string& dbname, const std::string& tablename,
+        const TableSchema& schema) const;
     // Relation-aware scan that applies the current session's RLS SELECT/command
     // policies before invoking the callback. Returns false when a policy cannot
     // be parsed or evaluated; callers must treat that as a statement error or
@@ -1788,6 +1796,13 @@ public:
     std::vector<std::string> listTablespaces(const std::string& dbname) const;
 
 private:
+
+    const ReadView* prepareRowScanView(
+        const std::string& dbname, const std::string& tablename,
+        const ReadView* supplied, bool indexMaintenanceView,
+        ReadView& autocommitView, ReadView& commandInternalView) const;
+    void noteScanSiread(const std::string& dbname, const std::string& tablename,
+                        std::optional<int64_t> rid = std::nullopt) const;
 
     // Auto-increment sequence helpers
     int64_t readNextSeq(const std::string& dbname, const std::string& tablename, const std::string& colname);

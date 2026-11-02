@@ -32,6 +32,8 @@ def main():
     parser.add_argument("--rows", type=int, default=1000)
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--samples", type=int, default=4)
+    parser.add_argument("--include-scan-limit", action="store_true",
+                        help="Also compare an existing typed LIMIT path and a plain LIMIT control")
     args = parser.parse_args()
     if min(args.rows, args.rounds, args.samples) < 1:
         parser.error("rows, rounds and samples must be positive")
@@ -68,6 +70,16 @@ def main():
         specs["sort_full"] = (
             lambda _: "SELECT id,amount FROM bench_rows ORDER BY amount DESC,id ASC",
             lambda _: [[str(i), str(i % 1000)] for i in ordered])
+        if args.include_scan_limit:
+            # Array projection already enters the typed executor on the
+            # frozen baseline. Plain projection exposes remaining dispatcher
+            # gaps instead of implying every SQL LIMIT uses this scan node.
+            specs["scan_limit_typed"] = (
+                lambda _: "SELECT ARRAY[id] AS a FROM bench_rows LIMIT 1",
+                lambda _: [["{1}"]])
+            specs["scan_limit_plain"] = (
+                lambda _: "SELECT id FROM bench_rows LIMIT 1",
+                lambda _: [["1"]])
         for label, binary in (("old-first", before), ("new", after), ("old-last", before)):
             data = output / label
             shutil.copytree(fixture, data)
