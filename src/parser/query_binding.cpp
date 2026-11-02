@@ -160,6 +160,9 @@ public:
     // Nested queries still resolve their own ranges normally. Validation is
     // performed after the count's bigint coercion, using occurrence identity.
     std::vector<std::vector<size_t>*> countReferences;
+    struct CountContext { const Stmt* owner; const char* clause; };
+    std::vector<CountContext> countContexts;
+    std::map<size_t,std::vector<ParameterExpr*>> metadataParameterNodes;
     Binder(const std::string& sql, const std::vector<QueryBindingDatum>& values,
            const QueryBindingMetadata& descriptions) : datums(values), metadata(descriptions) {
         result.source = sql;
@@ -203,11 +206,35 @@ public:
         if (inserted) result.parameters.emplace_back(datum.type,
             datum.value.value_or(""), !datum.value.has_value());
         auto bound = std::make_unique<ParameterExpr>();
-        bound->slot = position->second; bound->declaredType = datum.type;
+        bound->slot = position->second;
+        bound->declaredType = datum.origin==ParameterOrigin::MetadataPlaceholder
+            ? result.parameters.at(position->second).typeName : datum.type;
         bound->origin = datum.origin;
         bound->sourceBegin = node->sourceBegin; bound->sourceEnd = node->sourceEnd;
         result.uses.push_back({bound->sourceBegin, bound->sourceEnd, bound->slot});
-        node = std::move(bound); return datum.type;
+        const auto type=bound->declaredType;
+        if(bound->origin==ParameterOrigin::MetadataPlaceholder)
+            metadataParameterNodes[bound->slot].push_back(bound.get());
+        node = std::move(bound); return type;
+    }
+
+    bool inferMetadataInput(Expr* expression,const std::string& targetType) {
+        auto* parameter=dynamic_cast<ParameterExpr*>(expression);
+        if(!parameter || parameter->origin!=ParameterOrigin::MetadataPlaceholder ||
+           common_type_detail::canonical(parameter->declaredType)!="unknown")return false;
+        const auto target=common_type_detail::canonical(targetType);
+        if(target.empty() || target=="unknown")return false;
+        if(parameter->slot>=result.parameters.size())throw DbError("XX000","metadata parameter lost its original slot");
+        auto& cell=result.parameters[parameter->slot];
+        if(common_type_detail::canonical(cell.typeName)!="unknown" &&
+           common_type_detail::canonical(cell.typeName)!=target)
+            throw DbError("42P08","inconsistent types deduced for parameter");
+        cell.typeName=targetType;
+        for(auto* use:metadataParameterNodes[parameter->slot]) {
+            use->declaredType=targetType;
+            (void)declaredType(targetType,use);
+        }
+        return true;
     }
 
     void coerceCaseInput(ExprPtr& input, const std::string& sourceType,
@@ -218,6 +245,7 @@ public:
             null->value = "null";
             input = std::move(null);
         }
+        if(common_type_detail::canonical(sourceType)=="unknown" && inferMetadataInput(input.get(),targetType))return;
         if (common_type_detail::canonical(sourceType) == targetType) return;
         auto cast = std::make_unique<CastExpr>();
         cast->typeName = targetType;
@@ -612,6 +640,7 @@ public:
             const auto type=declaredType(declaration,cast);
             const auto input=expression(cast->operand, scopes,
                 type=="bit[]"?declaration:cast->typeName);
+            if(common_type_detail::canonical(input)=="unknown")inferMetadataInput(cast->operand.get(),type);
             validateBitCastTypes(input,type);
             validateInternalCharInputCast(input,type);
             validateIntervalInputCast(input,type);
@@ -674,6 +703,7 @@ public:
             if (binary->op == "::") {
                 const auto* type = dynamic_cast<const LiteralExpr*>(binary->right.get());
                 if (!type) throw DbError("42601", "cast requires a type name");
+                if(common_type_detail::canonical(left)=="unknown")inferMetadataInput(binary->left.get(),castType);
                 validateBitCastTypes(left,castType);
                 validateInternalCharInputCast(left,castType);
                 validateIntervalInputCast(left,castType);
@@ -739,6 +769,8 @@ public:
             if (binary->op=="||") {
                 binary->arrayConcat = ExprHelper::resolveArrayConcatTypes(left,right,true);
                 if (binary->arrayConcat) {
+                    if(common_type_detail::canonical(left)=="unknown")inferMetadataInput(binary->left.get(),binary->arrayConcat->leftType);
+                    if(common_type_detail::canonical(right)=="unknown")inferMetadataInput(binary->right.get(),binary->arrayConcat->rightType);
                     validateArrayConstant(binary->left.get(),binary->arrayConcat->leftType);
                     validateArrayConstant(binary->right.get(),binary->arrayConcat->rightType);
                     if (metadata.assignmentInput) {
@@ -784,6 +816,8 @@ public:
                 if ((concatLeft=="tsvector" && common_type_detail::category(concatRight)!='S') ||
                     (concatRight=="tsvector" && common_type_detail::category(concatLeft)!='S'))
                     throw DbError("42883","operator does not exist for tsvector and non-tsvector operands");
+                if(concatLeft=="unknown")inferMetadataInput(binary->left.get(),"text");
+                if(concatRight=="unknown")inferMetadataInput(binary->right.get(),"text");
                 return declaredType("text",binary);
             }
             static const std::set<std::string> predicates = {"=", "<>", "!=", "<", ">", "<=", ">=",
@@ -792,6 +826,16 @@ public:
             static const std::set<std::string> comparisons={"=","<>","!=","<",">","<=",">=","IS DISTINCT FROM","IS NOT DISTINCT FROM"};
             if(comparisons.count(binary->op)) {
                 binary->comparison=enumComparison(binary->op,binary->left,binary->right,left,right);
+                const auto metadataInput=[](const Expr* value) {
+                    const auto* input=dynamic_cast<const ParameterExpr*>(value);
+                    return input && input->origin==ParameterOrigin::MetadataPlaceholder &&
+                        common_type_detail::canonical(input->declaredType)=="unknown";
+                };
+                if(!binary->comparison && (metadataInput(binary->left.get()) || metadataInput(binary->right.get()))) {
+                    const auto selected=ExprEvaluator::resolveComparison(binary->op,left,right);
+                    inferMetadataInput(binary->left.get(),selected.leftType);
+                    inferMetadataInput(binary->right.get(),selected.rightType);
+                }
                 // Integer input functions transform genuine UNKNOWN SQL
                 // literals during binding, even if no source row is demanded.
                 // Parameters, routines, typed casts and query children are
@@ -890,8 +934,20 @@ public:
                 return declaredType("text",binary);
             // A predicate's result identity is the catalog-owned boolean,
             // not either input OID (and not an untyped label with OID zero).
-            if(const auto type=arithmetic_detail::resultType(binary->op,left,right))
+            const auto unknownMetadata=[](const Expr* expression) {
+                const auto* parameter=dynamic_cast<const ParameterExpr*>(expression);
+                return parameter && parameter->origin==ParameterOrigin::MetadataPlaceholder &&
+                    common_type_detail::canonical(parameter->declaredType)=="unknown";
+            };
+            if(common_type_detail::canonical(left)=="unknown" && common_type_detail::canonical(right)=="unknown" &&
+               (unknownMetadata(binary->left.get()) || unknownMetadata(binary->right.get())) &&
+               (binary->op=="+" || binary->op=="-" || binary->op=="*" || binary->op=="/" || binary->op=="%" || binary->op=="^"))
+                throw DbError("42725","operator is not unique: unknown "+binary->op+" unknown");
+            if(const auto type=arithmetic_detail::resultType(binary->op,left,right)) {
+                if(common_type_detail::canonical(left)=="unknown")inferMetadataInput(binary->left.get(),right);
+                if(common_type_detail::canonical(right)=="unknown")inferMetadataInput(binary->right.get(),left);
                 return declaredType(*type,binary);
+            }
             return predicates.count(binary->op) ? declaredType("boolean",binary) : left;
         }
         case ExprType::QuantifiedComparison: {
@@ -945,6 +1001,13 @@ public:
                 valueTypeOids[call]=mapBuiltinTypeNameToOid(call->resolvedResultType);
                 return call->resolvedResultType;
             }
+            std::vector<size_t> functionReferences;
+            const bool collectReferences=!countContexts.empty();
+            if(collectReferences)countReferences.push_back(&functionReferences);
+            struct RestoreFunctionReferences {
+                std::vector<std::vector<size_t>*>& stack;bool active;
+                ~RestoreFunctionReferences(){if(active)stack.pop_back();}
+            } restoreFunctionReferences{countReferences,collectReferences};
             // The legacy parser encodes an in-call ORDER BY as a synthetic
             // unquoted literal argument. It is a call role, not a SQL value.
             // Normalize only these declared numeric-function carriers; other aggregate owners keep
@@ -1082,6 +1145,31 @@ public:
             // just like CAST and CASE. Returning only its spelling loses the
             // OID at query-output/child boundaries; never run it to infer one.
             call->resolvedResultType=declaredType(type.empty() ? first : type,call);
+            if(!countContexts.empty()) {
+                const Stmt* semanticOwner=statementOwners.empty()?nullptr:statementOwners.back();
+                // Only ranges visible at this actual call can determine an
+                // upper aggregate level. Child-local occurrences collected
+                // below a real subquery are absent from these namespaces.
+                if(metadata.aggregateFunction && metadata.aggregateFunction(call)) {
+                    bool found=false;
+                    for(const auto& scope:scopes) {
+                        for(const auto& range:scope)if(std::find(functionReferences.begin(),functionReferences.end(),range.occurrence)!=functionReferences.end()) {
+                            const auto source=std::find_if(result.sourceRanges.begin(),result.sourceRanges.end(),[&](const auto& value){return value.ordinal==range.occurrence;});
+                            if(source==result.sourceRanges.end())throw DbError("XX000","aggregate reference lost its source owner");
+                            semanticOwner=source->owner;found=true;break;
+                        }
+                        if(found)break;
+                    }
+                    for(const auto& count:countContexts)if(count.owner==semanticOwner)
+                        throw DbError("42803",std::string("aggregate functions are not allowed in ")+count.clause);
+                }
+                if(call->hasOver)for(const auto& count:countContexts)
+                    if(!statementOwners.empty() && count.owner==statementOwners.back())
+                        throw DbError("42P20",std::string("window functions are not allowed in ")+count.clause);
+            }
+            if(call->schema.empty() && (grammarOperation=="coalesce" || grammarOperation=="greatest" || grammarOperation=="least"))
+                for(size_t i=0;i<argumentTypes.size();++i)if(common_type_detail::canonical(argumentTypes[i].first)=="unknown")
+                    inferMetadataInput(call->args[i].get(),call->resolvedResultType);
             if (call->distinct && !call->aggregateOrderKeys.empty()) {
                 const auto* owner = statementOwners.empty() ? nullptr
                     : dynamic_cast<const SelectStmt*>(statementOwners.back());
@@ -1757,12 +1845,30 @@ public:
                           int32_t targetTypeMod = -1) {
         coerceSetInput(statement,ordinal,"unknown",targetType,targetTypeMod);
     }
-    QueryRowDescriptor setColumns(SelectStmt& select,QueryRowDescriptor left,QueryRowDescriptor right) {
-        // A parenthesized inline VALUES set can retain VALUES as its command
-        // role. Its global count expressions need separate set lowering;
-        // never silently discard an expression accepted by that grammar.
-        if(select.limitExpr || select.offsetExpr)
-            throw DbError("0A000","set query row-count expressions require additional lowering");
+    void bindRowCount(ExprPtr& count,const char* clause,
+                      const std::vector<Namespace>& scopes,const Stmt* owner) {
+        if(!count)return;
+        std::vector<size_t> references;
+        const auto previousOrder=setOrderScope;setOrderScope=nullptr;
+        countReferences.push_back(&references);countContexts.push_back({owner,clause});
+        struct Restore {
+            std::vector<std::vector<size_t>*>& references;
+            std::vector<CountContext>& contexts;
+            const QueryRowDescriptor*& order;const QueryRowDescriptor* previous;
+            ~Restore(){contexts.pop_back();references.pop_back();order=previous;}
+        } restore{countReferences,countContexts,setOrderScope,previousOrder};
+        const auto source=expression(count,scopes);
+        const auto base=patternBaseType(source,count.get());
+        if(base!="unknown" && base!="smallint" && base!="integer" && base!="bigint" &&
+           base!="numeric" && base!="real" && base!="double precision")
+            throw DbError("42804",std::string("argument of ")+clause+" must be type bigint, not "+source);
+        coerceCaseInput(count,source,"bigint");
+        if(!scopes.empty())for(const auto& range:scopes.front())
+            if(std::find(references.begin(),references.end(),range.occurrence)!=references.end())
+                throw DbError("42P10",std::string("argument of ")+clause+" must not contain variables");
+    }
+    QueryRowDescriptor setColumns(SelectStmt& select,QueryRowDescriptor left,QueryRowDescriptor right,
+                                  const std::vector<Namespace>& outer) {
         if(left.size()!=right.size())throw DbError("42601","set query column count mismatch");
         auto output=left;
         for(size_t i=0;i<left.size();++i) {
@@ -1837,7 +1943,13 @@ public:
             // catalog OID. No branch datum or namespace guess prepares it.
             order.enumComparison=enumSortComparison(output[ordinal].type,output[ordinal].typeOid);
         }
-        if(select.fetchFirst && select.withTies && !select.limit && !select.signedFetchCount)
+        // Global set counts have their own empty current-query namespace.
+        // The temporary ORDER output namespace and either branch FROM are
+        // not visible; genuine ancestor scopes retain their exact depth.
+        auto countScopes=outer;countScopes.insert(countScopes.begin(),Namespace{});
+        bindRowCount(select.offsetExpr,"OFFSET",countScopes,&select);
+        bindRowCount(select.limitExpr,"LIMIT",countScopes,&select);
+        if(select.fetchFirst && select.withTies && !select.limit && !select.signedFetchCount && !select.limitExpr)
             throw DbError("2201W","row count cannot be null in FETCH FIRST ... WITH TIES clause");
         return output;
     }
@@ -1880,7 +1992,7 @@ public:
                         if(selfReference) {
                             for(size_t i=0;i<columns.size();++i)if(columns[i].type=="unknown")
                                 coerceSetUnknown(recursive->setOpLhs?recursive->setOpLhs.get():recursive,i,"text");
-                            const auto common=setColumns(*recursive,seed,std::move(rhs));
+                            const auto common=setColumns(*recursive,seed,std::move(rhs),cteOuter);
                             for(size_t i=0;i<seed.size();++i)
                                 if(common_type_detail::canonical(common[i].type)!=common_type_detail::canonical(seed[i].type) ||
                                    common[i].typeMod!=seed[i].typeMod ||
@@ -1888,7 +2000,7 @@ public:
                                     throw DbError("42804","recursive query column "+std::to_string(i+1)+
                                         " has a different type or type modifier in its non-recursive term");
                             columns=std::move(seed);
-                        } else columns=setColumns(*recursive,std::move(columns),std::move(rhs));
+                        } else columns=setColumns(*recursive,std::move(columns),std::move(rhs),cteOuter);
                     }
                 } else columns = statement(*cte.query, cteOuter, ctes);
                 applyNames(columns, cte.columnNames);
@@ -1910,7 +2022,7 @@ public:
             if (select->setOpLhs) {
                 auto columns = statement(*select->setOpLhs, outer, ctes);
                 if(!select->setOpRhs)throw DbError("42601","set query right operand is missing");
-                return setColumns(*select,std::move(columns),statement(*select->setOpRhs,outer,ctes));
+                return setColumns(*select,std::move(columns),statement(*select->setOpRhs,outer,ctes),outer);
             }
             auto scopes = outer;
             scopes.insert(scopes.begin(), from(select->fromClause.get(), outer, ctes));
@@ -1979,13 +2091,14 @@ public:
             // common output is visible only to this query's ORDER namespace,
             // including correctly correlated children of ORDER expressions.
             auto orderScopes=scopes;
-            const bool valuesOrder=select->command==SqlCommand::Values && !select->orderBy.empty();
-            const bool valuesCounts=select->command==SqlCommand::Values && (select->limitExpr || select->offsetExpr);
+            const bool setBody=select->setOp!=SetOp::None;
+            const bool valuesOrder=!setBody && select->command==SqlCommand::Values && !select->orderBy.empty();
+            const bool valuesCounts=!setBody && select->command==SqlCommand::Values && (select->limitExpr || select->offsetExpr);
             if(valuesOrder || valuesCounts) {
                 Range outputRange;outputRange.columns=columns;
                 orderScopes.front().push_back(registerSource(std::move(outputRange)));
             }
-            for (auto& order : select->orderBy) {
+            if(!setBody)for (auto& order : select->orderBy) {
                 const auto* ref = dynamic_cast<ColumnRefExpr*>(order.expr.get());
                 const bool outputAlias = !valuesOrder && ref && ref->table.empty() && ref->schema.empty() &&
                     std::any_of(columns.begin(), columns.end(), [&](const auto& col) { return col.name == ref->column; });
@@ -2037,32 +2150,16 @@ public:
                 }
                 order.enumComparison=enumSortComparison(orderType,orderOid);
             }
-            const auto bindCount=[&](ExprPtr& count,const char* clause) {
-                if(!count)return;
-                std::vector<size_t> references;
-                countReferences.push_back(&references);
-                struct Restore {
-                    std::vector<std::vector<size_t>*>& stack;
-                    ~Restore(){stack.pop_back();}
-                } restore{countReferences};
-                const auto source=expression(count,orderScopes);
-                const auto base=patternBaseType(source,count.get());
-                if(base!="unknown" && base!="smallint" && base!="integer" && base!="bigint" &&
-                   base!="numeric" && base!="real" && base!="double precision")
-                    throw DbError("42804",std::string("argument of ")+clause+" must be type bigint, not "+source);
-                coerceCaseInput(count,source,"bigint");
-                for(const auto& range:orderScopes.front())
-                    if(std::find(references.begin(),references.end(),range.occurrence)!=references.end())
-                        throw DbError("42P10",std::string("argument of ")+clause+" must not contain variables");
-            };
-            bindCount(select->offsetExpr,"OFFSET");
-            bindCount(select->limitExpr,"LIMIT");
-            if(select->fetchFirst && select->withTies && !select->limit && !select->signedFetchCount)
+            if(!setBody) {
+                bindRowCount(select->offsetExpr,"OFFSET",orderScopes,select);
+                bindRowCount(select->limitExpr,"LIMIT",orderScopes,select);
+            }
+            if(!setBody && select->fetchFirst && select->withTies && !select->limit && !select->signedFetchCount && !select->limitExpr)
                 throw DbError("2201W","row count cannot be null in FETCH FIRST ... WITH TIES clause");
             if(select->command!=SqlCommand::Values)
                 for (auto& row : select->valuesRows) for (auto& value : row) expression(value, scopes);
             if (select->setOpRhs)
-                return setColumns(*select,std::move(columns),statement(*select->setOpRhs,outer,ctes));
+                return setColumns(*select,std::move(columns),statement(*select->setOpRhs,outer,ctes),outer);
             return columns;
         }
         if (auto* insert = dynamic_cast<InsertStmt*>(&node)) {

@@ -21201,7 +21201,7 @@ class PreparedWithDmlRuntime {
             return dbms::QueryPlanner::buildPreparedUnionAllPlan(&g_engine,session_.currentDB,query_,select,
                 [this,outer,frames](dbms::SelectStmt* branch,bool body,dbms::QueryPlanner::PreparedExecutionProvider owner) {
                     return selectPlan(branch,outer,frames,false,false,std::move(owner),body);
-                },reader(frames),cursorFactory(frames),true,planRootConstants,std::move(executionProvider));
+                },reader(frames),cursorFactory(frames),true,planRootConstants,std::move(executionProvider),outer);
         if(!selectBodyOnly)if(auto set=dbms::QueryPlanner::buildPreparedSetReturningPlan(&g_engine,session_.currentDB,
             query_,select,outer,reader(frames),cursorFactory(frames),planRootConstants))return set;
         if(select->command==dbms::SqlCommand::Values) {
@@ -21454,8 +21454,28 @@ public:
         // through validate(). Do not install the root definitions twice.
         auto plan=selectPlan(readRoot_,validation_.context(),frames,true,true);
         const auto command=[&] {
-            auto evaluated=dbms::QueryPlanner::executePlanChecked(std::move(plan),
-                receiverRows ? receiverRows : currentQueryRowDemand());
+            // Ordinary top-level count failures happen after analysis has
+            // established the output descriptor. Keep that descriptor and
+            // any genuine row prefix on the existing SQL error receiver.
+            const bool countOutput=executeDepth==1 && !hasWriter && readRoot_->hasRowCountClause &&
+                (readRoot_->command==dbms::SqlCommand::Values || readRoot_->setOp!=dbms::SetOp::None);
+            const auto demand=receiverRows ? receiverRows : currentQueryRowDemand();
+            auto evaluated=countOutput
+                ? dbms::QueryPlanner::executePlanWithPrefix(std::move(plan),demand)
+                : dbms::QueryPlanner::executePlanChecked(std::move(plan),demand);
+            if(!evaluated.ok && countOutput) {
+                dbms::DmlResult prefix;prefix.available=true;prefix.runtimeErrorMetadata=true;
+                prefix.metadataOnly=!evaluated.structuredRowsAvailable;
+                prefix.rowDescriptor=output(readRoot_);
+                for(const auto& column:prefix.rowDescriptor) {
+                    prefix.columns.push_back(column.name);
+                    prefix.columnTypes.push_back(column.type=="unknown"?"text":column.type);
+                }
+                if(evaluated.structuredRowsAvailable) {
+                    prefix.rows=std::move(evaluated.structuredRows);prefix.nulls=std::move(evaluated.structuredNulls);
+                }
+                dbms::publishLastDmlResult(std::move(prefix));
+            }
             evaluated.throwIfFailed();
             if(!evaluated.structuredRowsAvailable)throw dbms::DbError("XX000","prepared CASE query lost typed rows");
             dbms::DmlResult result;result.available=true;

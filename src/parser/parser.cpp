@@ -3688,10 +3688,18 @@ static std::unique_ptr<FromItem> parseDmlSourceList(const std::vector<std::strin
 // Clauses outside a parenthesized query or after a complete set expression
 // belong to that query root, not the rightmost SELECT body. This helper
 // consumes the original token stream so expression byte provenance survives.
-static std::string parseValuesRowCount(const std::vector<std::string>& tokens,
-                                      size_t& pos, SelectStmt& statement, bool offset) {
+enum class RootRowCount { Limit, Offset, Fetch };
+static std::string parseRootRowCount(const std::vector<std::string>& tokens,
+                                    size_t& pos, SelectStmt& statement, RootRowCount kind) {
     const auto word = [&](size_t index) {
         return index < tokens.size() ? SQLParser::toLower(tokens[index]) : std::string{};
+    };
+    const bool offset = kind == RootRowCount::Offset;
+    const bool fetch = kind == RootRowCount::Fetch;
+    const auto rowWord = [&](size_t index) {return word(index) == "row" || word(index) == "rows";};
+    const auto fetchSuffix = [&](size_t index) {
+        return rowWord(index) && (word(index+1) == "only" ||
+            (word(index+1) == "with" && word(index+2) == "ties"));
     };
     const size_t begin = pos;
     size_t end = begin;
@@ -3700,13 +3708,10 @@ static std::string parseValuesRowCount(const std::vector<std::string>& tokens,
         const auto& token = tokens[end];
         const auto next = word(end);
         const bool attribute = end != begin && tokens[end - 1] == ".";
-        const bool rowSuffix = offset && (next == "row" || next == "rows") &&
-            !(next == "row" && end + 1 < tokens.size() && tokens[end + 1] == "(");
         if (delimiters.empty() && (token == ";" || token == "," || token == ")" ||
-                (!attribute &&
-                (next == "limit" || next == "offset" || next == "fetch" || next == "for" ||
+                (!attribute && (next == "limit" || next == "offset" || next == "fetch" || next == "for" ||
                  next == "order" || next == "union" || next == "intersect" || next == "except" ||
-                 rowSuffix)))) break;
+                 (fetch && fetchSuffix(end)))))) break;
         if (token == "(" || token == "[") delimiters.push_back(token);
         else if (token == ")" || token == "]") {
             if (delimiters.empty() || delimiters.back() != (token == ")" ? "(" : "["))
@@ -3715,27 +3720,33 @@ static std::string parseValuesRowCount(const std::vector<std::string>& tokens,
         }
     }
     if (begin == end || !delimiters.empty()) return "row count requires a complete expression";
-    if (end == begin + 1 && word(begin) == "null") {
-        pos = end;
-        if (offset) statement.offset = 0;
-        else statement.limit.reset();
-        return {};
+    const auto suffixAt = [&](size_t index) {
+        return offset && index + 1 == end && rowWord(index);
+    };
+    const auto complete = [&](size_t index) {return index == end || suffixAt(index);};
+    const auto nullCount = [&] {
+        if (offset) {statement.offset = 0;statement.signedOffsetCount.reset();statement.offsetExpr.reset();}
+        else {
+            statement.limit.reset();statement.limitExpr.reset();
+            if (fetch) statement.signedFetchCount.reset();else statement.signedLimitCount.reset();
+        }
+    };
+    if (word(begin) == "null" && complete(begin+1)) {
+        pos = begin+1;nullCount();return {};
     }
-    if (!offset && end == begin + 1 && word(begin) == "all") {
-        pos = end;
-        return {};
+    if (kind == RootRowCount::Limit && end == begin+1 && word(begin) == "all") {
+        pos = end;return {};
     }
-    if (word(begin) == "all" || word(begin) == "default")
-        return "invalid row count expression";
+    if (word(begin) == "all" || word(begin) == "default") return "invalid row count expression";
     size_t integerEnd = begin;
     int64_t count = 0;
-    if (parseFetchInteger(tokens, integerEnd, count) && integerEnd == end) {
-        pos = end;
-        auto& signedCount = offset ? statement.signedOffsetCount : statement.signedLimitCount;
+    if (parseFetchInteger(tokens, integerEnd, count) && complete(integerEnd)) {
+        pos = integerEnd;
+        auto& signedCount = offset ? statement.signedOffsetCount :
+            (fetch ? statement.signedFetchCount : statement.signedLimitCount);
         auto& executableCount = offset ? statement.offset : statement.limit;
         signedCount = count;
-        if (count >= 0) executableCount = static_cast<size_t>(count);
-        else executableCount.reset();
+        if (count >= 0) executableCount = static_cast<size_t>(count);else executableCount.reset();
         return {};
     }
     const bool previousSyntax = rowCountExpressionSyntax;
@@ -3746,14 +3757,43 @@ static std::string parseValuesRowCount(const std::vector<std::string>& tokens,
     rowCountExpressionSyntax = true;
     ExprPtr expression;
     try {
-        expression = parseSimpleExpr(tokens, pos);
-        if (!expression || pos != end) return "row count requires a complete expression";
-        validateExecuteSyntaxExpression(expression.get(), false);
-    }
-    catch (const DbError& error) {
+        // SQL FETCH (and OFFSET ... ROWS) admits c_expr or a signed numeric
+        // literal, rather than arbitrary unparenthesized a_expr. Parse the
+        // original stream, retaining child/parameter identities and spans.
+        const bool signedNumber = (word(begin) == "+" || word(begin) == "-") &&
+            begin+1 < end && isNumericToken(tokens[begin+1]) && complete(begin+2);
+        if (fetch) {
+            if ((word(begin) == "+" || word(begin) == "-") && !signedNumber)
+                return "FETCH requires a simple value expression";
+            expression = signedNumber ? parseSimpleExpr(tokens,pos) : parsePostfixExpr(tokens,pos);
+            if (!expression || pos != end) return "FETCH requires a complete simple value expression";
+        } else if (offset && end > begin+1 && rowWord(end-1)) {
+            expression = signedNumber ? parseSimpleExpr(tokens,pos) : parsePostfixExpr(tokens,pos);
+            if (!expression || !suffixAt(pos)) {
+                // A last unquoted column named rows can itself belong to an
+                // ordinary OFFSET a_expr; do not manufacture a noise suffix.
+                pos = begin;expression = parseSimpleExpr(tokens,pos);
+                if (!expression || pos != end) return "OFFSET ROWS requires a simple value expression";
+            }
+        } else {
+            expression = parseSimpleExpr(tokens,pos);
+            if (!expression || pos != end) return "row count requires a complete expression";
+        }
+        validateExecuteSyntaxExpression(expression.get(),false);
+    } catch (const DbError& error) {
         if (error.sqlState() != "42601") throw;
         return "invalid row count expression";
+    } catch (const DeclarationSyntaxAbort&) {
+        // Keep the declaration receiver's original diagnostic, while the
+        // reached query-root count owner publishes its structured role.
+        return "invalid row count expression";
     }
+    // Parentheses do not wrap PostgreSQL's raw A_Const NULL. Only a genuine
+    // typed/computed/parameter expression may hide NULL from WITH TIES' raw
+    // null check; no expression is evaluated or constant-folded here.
+    if (fetch) if (const auto* literal = dynamic_cast<const LiteralExpr*>(expression.get()))
+        if (literal->typeName.empty() && !literal->preparedSubquery && word(begin) != "default" &&
+            SQLParser::toLower(literal->value) == "null") {nullCount();return {};}
     (offset ? statement.offsetExpr : statement.limitExpr) = std::move(expression);
     return {};
 }
@@ -3795,8 +3835,8 @@ static std::string parseQueryRootClauses(const std::vector<std::string>& tokens,
             if (sawLimit) return "multiple LIMIT/FETCH clauses";
             statement.hasRowCountClause = true;
             sawLimit = true; ++pos;
-            if (statement.command == SqlCommand::Values) {
-                if (auto error = parseValuesRowCount(tokens, pos, statement, false); !error.empty()) return error;
+            if (statement.command == SqlCommand::Values || statement.setOp != SetOp::None) {
+                if (auto error = parseRootRowCount(tokens,pos,statement,RootRowCount::Limit); !error.empty()) return error;
             } else if (word(pos) == "all") ++pos;
             else if (word(pos) == "null") {
                 ++pos; statement.limit.reset(); statement.signedLimitCount.reset();
@@ -3809,8 +3849,8 @@ static std::string parseQueryRootClauses(const std::vector<std::string>& tokens,
             if (sawOffset) return "multiple OFFSET clauses";
             statement.hasRowCountClause = true;
             sawOffset = true; ++pos;
-            if (statement.command == SqlCommand::Values) {
-                if (auto error = parseValuesRowCount(tokens, pos, statement, true); !error.empty()) return error;
+            if (statement.command == SqlCommand::Values || statement.setOp != SetOp::None) {
+                if (auto error = parseRootRowCount(tokens,pos,statement,RootRowCount::Offset); !error.empty()) return error;
             } else if (word(pos) == "null") {
                 ++pos; statement.offset = 0; statement.signedOffsetCount.reset();
             } else {
@@ -3825,7 +3865,12 @@ static std::string parseQueryRootClauses(const std::vector<std::string>& tokens,
             sawLimit = true; ++pos;
             if (word(pos) != "first" && word(pos) != "next") return "FETCH requires FIRST or NEXT";
             ++pos; statement.fetchFirst = true;
-            if (word(pos) == "null") {
+            const bool expressionOwner=statement.command==SqlCommand::Values || statement.setOp!=SetOp::None;
+            const bool omitted=(word(pos)=="row" || word(pos)=="rows") &&
+                (word(pos+1)=="only" || (word(pos+1)=="with" && word(pos+2)=="ties"));
+            if (expressionOwner && !omitted) {
+                if (auto error=parseRootRowCount(tokens,pos,statement,RootRowCount::Fetch);!error.empty())return error;
+            } else if (word(pos) == "null") {
                 ++pos; statement.limit.reset(); statement.signedFetchCount.reset();
             } else if (word(pos) == "row" || word(pos) == "rows") {statement.limit = 1;statement.signedFetchCount=1;}
             else {
@@ -3882,12 +3927,14 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
         ParseResult left = bindingParse ? parse(leftSql) : parseSelect(leftSql);
         if (!left.success || !left.stmt) {
             r.error = left.error.empty() ? "invalid left set-operation operand" : left.error;
+            r.sqlState=left.sqlState;r.rowCountSyntaxError=left.rowCountSyntaxError;
             return r;
         }
         const auto rightSql = joinParserTokens(tokens, rhsBegin, tail);
         ParseResult right = bindingParse ? parse(rightSql) : parseSelect(rightSql);
         if (!right.success || !right.stmt) {
             r.error = right.error.empty() ? "invalid right set-operation operand" : right.error;
+            r.sqlState=right.sqlState;r.rowCountSyntaxError=right.rowCountSyntaxError;
             return r;
         }
         auto* leftSelect = dynamic_cast<SelectStmt*>(left.stmt.get());
@@ -3921,7 +3968,10 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
         if (tail < tokens.size()) {
             size_t position = tail;
             r.error = parseQueryRootClauses(tokens, position, *wrapper);
-            if (!r.error.empty()) return r;
+            if (!r.error.empty()) {
+                r.sqlState="42601";r.rowCountSyntaxError=wrapper->hasRowCountClause;
+                return r;
+            }
         }
         r.success = true;
         r.stmt = std::move(wrapper);
@@ -3937,10 +3987,19 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
         if (closing == tokens.size()) { r.error = "unterminated parenthesized query"; return r; }
         auto child = parse(joinParserTokens(tokens, 1, closing));
         auto* query = child.isValid() ? dynamic_cast<SelectStmt*>(child.stmt.get()) : nullptr;
-        if (!query) { r.error = child.error.empty() ? "parenthesized query requires SELECT/VALUES" : child.error; return r; }
+        if (!query) {
+            r.error = child.error.empty() ? "parenthesized query requires SELECT/VALUES" : child.error;
+            r.sqlState=child.sqlState;r.rowCountSyntaxError=child.rowCountSyntaxError;
+            return r;
+        }
         size_t position = closing + 1;
         r.error = parseQueryRootClauses(tokens, position, *query);
-        if (!r.error.empty()) return r;
+        if (!r.error.empty()) {
+            r.sqlState="42601";
+            r.rowCountSyntaxError=query->hasRowCountClause &&
+                (query->command==SqlCommand::Values || query->setOp!=SetOp::None);
+            return r;
+        }
         return child;
     }
 
@@ -4040,6 +4099,23 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
             r.stmt = std::move(envelope);
             r.success = true;
             return r;
+        }
+    }
+
+    if (pos < tokens.size() && tokens[pos] == "(" && !stmt->ctes.empty()) {
+        // WITH may prefix a parenthesized complete set query. Parse its real
+        // source interval, rather than letting '(' become a SELECT target.
+        // An already nested WITH owns a separate scope and is not flattened.
+        auto body = parse(joinParserTokens(tokens,pos,tokens.size()));
+        if (!body.isValid()) {
+            r.error=body.error;r.sqlState=body.sqlState;r.rowCountSyntaxError=body.rowCountSyntaxError;
+            return r;
+        }
+        auto* setRoot=dynamic_cast<SelectStmt*>(body.stmt.get());
+        if (setRoot && setRoot->setOp!=SetOp::None && setRoot->ctes.empty()) {
+            setRoot->ctes=std::move(stmt->ctes);
+            body.originalSql=sql;
+            return body;
         }
     }
 
@@ -5276,6 +5352,7 @@ ParseResult SQLParser::parseValues(const std::string& sql) {
     if (const auto error = parseQueryRootClauses(tokens, pos, *stmt); !error.empty()) {
         r.error = error;
         r.sqlState = "42601";
+        r.rowCountSyntaxError=stmt->hasRowCountClause;
         return r;
     }
     if (stmt->withTies && stmt->orderBy.empty()) {

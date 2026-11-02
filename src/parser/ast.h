@@ -1609,6 +1609,11 @@ struct ParseResult {
     // Empty retains the legacy diagnostic contract where not yet supplied.
     std::string sqlState;
 
+    // A genuine VALUES/set count clause failed raw grammar. Protocol hosts
+    // may report this error without broadening legacy SELECT parse policy
+    // or inspecting rendered SQL text.
+    bool rowCountSyntaxError = false;
+
     bool isValid() const { return success && stmt != nullptr; }
     SqlCommand command() const { return stmt ? stmt->command : SqlCommand::Unknown; }
 };

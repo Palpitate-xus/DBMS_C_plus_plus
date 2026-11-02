@@ -1304,3 +1304,156 @@ python3 scripts/benchmark_set_sort.py \
 普通修改、保存点和其他 DDL 仍有物理快照、WAL 全文件映像及同步 I/O 开销；大数据库下会继续放大。整数 DML 筛选仍扫描堆，JOIN 优化仍可能枚举大量键对，索引覆盖、统计信息、计划选择、批处理及更细粒度的回滚机制仍有优化空间。
 
 本次未改变 C++ 标准、存储逻辑格式或持久化契约，未做 TLS、跨主机网络、大数据冷缓存、长时间压力测试或全仓库兼容性验收。既有兼容性缺口、明确暂缓项及历史 R164 超时根因不因这一性能批次自动关闭，参见[测试报告](test-report.md)与[兼容性契约](compatibility-contract.md)。
+
+## 全局计数表达式与动态排序上限（2026-11-02）
+
+本批输入baba4bcb/95defdc5…，保持C++17、product0.2.0、PG18.6行为基线、GCC13.3/-O2、ICU/zlib与TLS stub。
+证据目录为 `build/pg-feature-global-count-xqbytfo5/`，构建、全部对照、初次失败和最终哈希分别见该目录的回执；这些本地证据不是可移植发行包。
+
+### 参考实现与生产范围
+
+[PG18.6 nodeLimit](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/nodeLimit.c)在每次执行/重扫重新读取实际参数，先OFFSET后LIMIT，零上限不向子计划取行，动态NULL上限表示无界。
+[parse_clause](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/parser/parse_clause.c)区分FETCH WITH TIES的原始NULL常量和运行时NULL；
+[gram.y](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/parser/gram.y)限制FETCH和带ROWS后缀的OFFSET为c_expr/有符号数字，括号内才容纳一般算术。
+[analyze.c](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/parser/analyze.c)在全局集合计数分析前恢复临时ORDER命名空间，
+[parse_param.c](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/parser/parse_param.c)按实际输入上下文推导参数声明。
+[DuckDB1.5.6 PhysicalLimit](https://github.com/duckdb/duckdb/blob/v1.5.6/src/execution/operator/helper/physical_limit.cpp)把未求值边界保存在执行状态，并处理NULL与最大边界；其求值顺序与本项目的PG目标不能直接等同。
+[SQLite3.50.4 select.c](https://github.com/sqlite/sqlite/blob/version-3.50.4/src/select.c)用LIMIT/OFFSET寄存器控制临时排序索引；本项目复用已有有界排序设施，仍按PG规则处理负数、作用域与错误阶段。
+
+真正的UNION ALL根（SELECT、inline VALUES、括号集合及受支持CTE/derived/physical分支）现可绑定并执行全局LIMIT/OFFSET表达式；VALUES/set FETCH保留真实计数AST、角色与源字节。
+全局计数只有空的本层范围与真实祖先，不能借用ORDER输出列或分支FROM；子查询仍有自己的局部范围。OFFSET先分析/求值，失败不触碰LIMIT，零结果不打开数据分支。
+当前层aggregate/window/SRF按实际函数身份与语义来源拒绝；同名已选stored scalar不从拼写继承aggregate角色。
+普通MetadataPlaceholder沿原identity/slot和实际选中输入类型推导声明，更新同一输入既有使用处；Network仅在现有Parse元数据阶段按真实源位置映射到$n，并整体验证后发布。
+已选CAST/算术/比较/连接/CASE/COALESCE上下文有覆盖；这不是所有函数重载、域/OID或参数约束的完整PG推导，也没有修改实际参数帧、保留计划或portal所有权。
+
+动态计数借用原Append的执行开始/结束回调；它们移到真实Count/Sort/Append外围，未另建或替换borrowed owner。
+关闭时先释放原子图/文件再结束原owner，保留主异常。真正同一图重绑定使用当前祖先行与允许覆盖的原参数来源；StatementInput继续不可被调用方伪装成RuntimeCell。
+有限非TIES的limit+offset安全相加后作为本次排序上限；每次open都重置，NULL、TIES和溢出组合回到完整预算排序。全部源值和排序键仍需求值，错误不能因候选被丢弃而消失。
+新动态路径也用于已有VALUES表达式计数，K很小时允许不落盘；完整输出metadata、预算和匿名文件上限保持。普通独立SELECT的表达式计数和其他集合算法没有因此全部补齐。
+顶层无写CTE的这些真实计数查询复用已有运行错误接收器，执行失败保留真实RowDescription及已产生的行前缀；分析/规划失败不提前发布描述符，不改格式或portal策略。
+
+### 严格对照与保留的失败
+
+最终正式 CMake 18 次成功编译、16 个不同 CPP（另一次非冻结私有诊断编译不作验收证据），两次链接各62对象；相关头文件消费者与新test stub同代，未声称重编全部62对象。
+最终程序58c94e05…与212源码/62对象哈希冻结；48原生入口全过，新增global count执行33、binding34、grammar840全过，同最终测试源旧ABI分别33/31/572处失败。
+新运行协议75与FETCH协议900在PG18.6/最终程序全过，旧版分别61/604处不符；binding58在PG全过、旧53处不符、新版仍1处窗口宿主差异。上述观察数不是独立bug数。900协议逐项比较rows、SQLSTATE、headers、tag、OID、frames、Ready及parameter OID八字段，完整错误诊断raw保留，未声明所有错误文案与PG相同。
+原完整364SQL/910协议观察仍保留：首候选25处不符中，接受范围内16个Simple负FETCH缺RowDescription已修复；最终前900全过，另4个独立SELECT的10观察中9个差异仍开放，没有从原始记录删除。
+
+原860语法控制首候选恰2处失败：旧断言拒绝PG合法的括号参数FETCH。保留原源码/日志后仅迁移为严格合法AST/参数源位置检查，其他858字节/顺序不变，最终860全过。
+既有VALUES执行63首候选仅1个资源前提失败：K1已有界排序不应强制落盘。该控制改为真实动态NULL以保证先落盘再排序键错误，所有22012/文件/终止断言保留；新增K1控制由PG核实精确源/键计数25/24，最终64全过，旧64仅新增成本契约失败。
+新原生最初32中2个同类落盘前提失败的源码/日志也保留；修正为有限无I/O→NULL落盘→再有限不新增I/O，并追加独立K1被丢弃候选错误，最终33全过。
+
+所选原33协议首候选31/2：除既有暂缓Bind完整463/40外，普通锁前SELECT出现57014；原源码和失败日志保留。最终全部按原参数单独顺序执行，原33为32/1，该超时入口通过；未改超时、连接、重试或中断策略。
+加新75/58/900三个入口后，最终36入口按各自完整结果为34通过/2失败：上述Bind日志与前版逐字节相同；另一项是新58中的窗口子查询宿主缺口，未当成暂缓或从严格矩阵排除。
+
+
+实际Main最终12资源控制全过，共4161行/12483单元完整值和精确描述符，最多2个排序FD，EOF全部释放；固定夹具1072文件未变。
+35类操作是每类一次的有限正确性检查，其并行负载下时间不用于速度结论；匿名全局计数排序文件打开时对自建进程SIGKILL，重开核对1000行/4000单元并再排序2000行通过，不能推及任意写入崩溃恢复或真实TLS。
+
+
+窗口子查询 `LIMIT (SELECT row_number() OVER())` 已在PG合法、当前真实执行宿主仍报0A000；严格58项中的该差异保留，未新设暂缓项或将它算作通过。
+未知参数全约束、任意窗口/聚合/其他集合lowering、统一资源治理及全部原始功能要求继续开放。
+原273项仍22 complete/166 partial/70 unverified/15 deferred；原始项与725受保护记录保持，整体Goal active。
+
+### 性能方法与完整结果
+
+三个预算64kB/4MB/16MB、每例每label12样本与3次预热，全部串行old/new/old。六个预定窗口完成1620计时样本（VALUES432、既有静态集合1188）、405预热与36次SET/SHOW，共2061次SQL校验，无删除/重测或样本调整。
+前版95defdc5…/新版58c94e05…、canonical脚本39b1450e…/VALUES脚本59c59442…、原1072文件夹具均不变。
+
+四个新对照只用前后版本共同支持的VALUES表达式计数：1000行、1536字符payload尾、精确大于2^53的整数或C字节文本键、LIMIT20/OFFSET500，SQL约1.6MB；独立Python oracle校验全部返回单元。
+既有静态集合沿用原canonical脚本和1000行fixture，未把旧版不支持的global-set表达式SQL算作速度收益。
+两driver均计入请求/解析/网络及完整值比较，raw/hash/JSON写入在单样本计时外。VALUES预先准备SQL/oracle；canonical的execute_case在计时内调用SQL/expected生成器，分别解释各自前后对照。
+构建、正确性测试和资源探针都已终止后才开始计时；共享宿主的其他负载没有由此排除。每label12样本，不作置信区间或普遍无回退声明。
+
+下表为全部45例的中位数，单位ms；最后一列依次是“新版对旧首/新版对旧回测”的百分比，正数表示较慢。全部min/max、漂移和每样本完整值见 `runtime-performance-summary.csv/.json` 及其六个原始comparison路径。
+
+| 预算 | 路径 | 旧首 | 新版 | 旧回测 | 新对旧首/旧回测 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 64kB | `VALUES integer_limit20` | 2326.700 | 2440.648 | 2458.232 | +4.9% / -0.7% |
+| 64kB | `VALUES integer_offset500` | 2338.878 | 2415.781 | 2451.795 | +3.3% / -1.5% |
+| 64kB | `VALUES text_limit20` | 2490.506 | 2507.286 | 2529.758 | +0.7% / -0.9% |
+| 64kB | `VALUES text_offset500` | 2537.030 | 2569.724 | 2612.343 | +1.3% / -1.6% |
+| 64kB | `union_text_full` | 291.040 | 272.397 | 274.903 | -6.4% / -0.9% |
+| 64kB | `union_numeric_full` | 408.769 | 396.188 | 424.088 | -3.1% / -6.6% |
+| 64kB | `union_float_full` | 485.349 | 478.176 | 473.033 | -1.5% / +1.1% |
+| 64kB | `union_real_full` | 384.783 | 370.679 | 374.494 | -3.7% / -1.0% |
+| 64kB | `union_integer_full` | 193.483 | 196.648 | 190.306 | +1.6% / +3.3% |
+| 64kB | `union_stable_peers` | 199.489 | 195.239 | 180.443 | -2.1% / +8.2% |
+| 64kB | `union_limit` | 149.324 | 143.600 | 144.436 | -3.8% / -0.6% |
+| 64kB | `union_offset` | 158.530 | 153.155 | 151.618 | -3.4% / +1.0% |
+| 64kB | `union_ties` | 150.937 | 149.658 | 164.121 | -0.8% / -8.8% |
+| 64kB | `integer_topn_control` | 37.769 | 35.013 | 35.159 | -7.3% / -0.4% |
+| 64kB | `pk_lookup_control` | 12.986 | 13.566 | 12.131 | +4.5% / +11.8% |
+| 4MB | `VALUES integer_limit20` | 2339.081 | 2348.506 | 2288.715 | +0.4% / +2.6% |
+| 4MB | `VALUES integer_offset500` | 2329.020 | 2287.373 | 2320.789 | -1.8% / -1.4% |
+| 4MB | `VALUES text_limit20` | 2332.329 | 2334.331 | 2346.631 | +0.1% / -0.5% |
+| 4MB | `VALUES text_offset500` | 2344.556 | 2379.820 | 2328.149 | +1.5% / +2.2% |
+| 4MB | `union_text_full` | 236.213 | 254.126 | 343.138 | +7.6% / -25.9% |
+| 4MB | `union_numeric_full` | 370.573 | 386.552 | 424.901 | +4.3% / -9.0% |
+| 4MB | `union_float_full` | 417.952 | 421.002 | 473.911 | +0.7% / -11.2% |
+| 4MB | `union_real_full` | 351.501 | 370.111 | 391.872 | +5.3% / -5.6% |
+| 4MB | `union_integer_full` | 184.642 | 204.147 | 197.171 | +10.6% / +3.5% |
+| 4MB | `union_stable_peers` | 186.323 | 202.277 | 204.564 | +8.6% / -1.1% |
+| 4MB | `union_limit` | 144.879 | 173.353 | 170.487 | +19.7% / +1.7% |
+| 4MB | `union_offset` | 145.566 | 156.832 | 156.697 | +7.7% / +0.1% |
+| 4MB | `union_ties` | 145.595 | 173.395 | 172.651 | +19.1% / +0.4% |
+| 4MB | `integer_topn_control` | 36.817 | 40.839 | 40.206 | +10.9% / +1.6% |
+| 4MB | `pk_lookup_control` | 13.729 | 18.029 | 17.819 | +31.3% / +1.2% |
+| 16MB | `VALUES integer_limit20` | 2327.953 | 2456.218 | 2311.315 | +5.5% / +6.3% |
+| 16MB | `VALUES integer_offset500` | 2280.406 | 2303.361 | 2311.418 | +1.0% / -0.3% |
+| 16MB | `VALUES text_limit20` | 2319.640 | 2332.816 | 2335.783 | +0.6% / -0.1% |
+| 16MB | `VALUES text_offset500` | 2343.659 | 2317.537 | 2406.004 | -1.1% / -3.7% |
+| 16MB | `union_text_full` | 246.626 | 248.347 | 247.733 | +0.7% / +0.2% |
+| 16MB | `union_numeric_full` | 382.807 | 410.088 | 373.104 | +7.1% / +9.9% |
+| 16MB | `union_float_full` | 433.061 | 762.679 | 425.205 | +76.1% / +79.4% |
+| 16MB | `union_real_full` | 360.739 | 361.523 | 368.218 | +0.2% / -1.8% |
+| 16MB | `union_integer_full` | 206.268 | 192.747 | 192.664 | -6.6% / +0.0% |
+| 16MB | `union_stable_peers` | 204.092 | 211.344 | 193.783 | +3.6% / +9.1% |
+| 16MB | `union_limit` | 145.802 | 166.316 | 149.940 | +14.1% / +10.9% |
+| 16MB | `union_offset` | 148.587 | 149.714 | 148.416 | +0.8% / +0.9% |
+| 16MB | `union_ties` | 169.116 | 150.759 | 148.876 | -10.9% / +1.3% |
+| 16MB | `integer_topn_control` | 35.913 | 37.896 | 36.363 | +5.5% / +4.2% |
+| 16MB | `pk_lookup_control` | 11.179 | 12.442 | 10.911 | +11.3% / +14.0% |
+
+整条VALUES SQL未证明普遍提速；16MB整数LIMIT20为2327.953/2456.218/2311.315ms，新值比两旧值慢约5.5%/6.3%，继续开放。
+4MB静态旧首/旧回漂移明显，例如text236.213→343.138ms，不能把单一前后倍率直接归因于代码。
+16MB静态float8为433.061/762.679/425.205ms，新12个原样本的后6个约1034–1783ms，前6个约415–492ms，整个慢簇保留，没有剔除或另测一组替代。
+原生资源证明动态小K可不落盘，未据此推导端到端速度；这些慢值与其他瓶颈仍需后续独立归因和优化。
+
+### 已绑定执行阶段的独立对照
+
+在上述六窗口全部结束后，再串行编译/运行一个仅用既有public API的同源原生驱动，旧头/旧61core/旧stub与新头/新61core/新stub分别匹配，没有私有算子克隆、SQL重写或参数帧替代。
+固定四条SQL/独立Python oracle与wholeSQL的specifications对象逐项相等；同样1000行/1536字符尾、三预算、每例3预热/12样本、old/new/old，四例按固定洗牌三轮执行。
+初始prepareBoundQuery（解析+绑定合并）和buildPreparedQueryPlan/makePreparedCursor放计时外并单独保留36条preparation记录；计时含真实同图restart(RowContext{})→consume→close→完整owning值/metadata及图身份校验，evidence写入在计时外。
+原生432计时+108预热共540调用、10800行/32400单元校验全过，9进程exit0、原夹具与源码/core/header/stub输入均稳定。
+它测public cursor执行的墙钟时间；每次重启仍包含真实执行owner/表达式准备，不能当成排序CPU、wire prepared/保留计划性能或R303修复，也不能和wholeSQL直接相减归因。
+
+| 预算 | 路径 | 旧首ms | 新版ms | 旧回测ms |
+| --- | --- | ---: | ---: | ---: |
+| 64kB | `integer_limit20` | 601.459 | 575.879 | 588.664 |
+| 64kB | `integer_offset500` | 599.521 | 576.055 | 582.680 |
+| 64kB | `text_limit20` | 678.158 | 648.592 | 655.284 |
+| 64kB | `text_offset500` | 679.743 | 658.013 | 681.877 |
+| 4MB | `integer_limit20` | 572.658 | 570.643 | 572.208 |
+| 4MB | `integer_offset500` | 586.738 | 583.943 | 576.529 |
+| 4MB | `text_limit20` | 627.241 | 597.790 | 609.378 |
+| 4MB | `text_offset500` | 623.136 | 627.820 | 614.868 |
+| 16MB | `integer_limit20` | 566.255 | 561.893 | 574.040 |
+| 16MB | `integer_offset500` | 566.110 | 569.077 | 583.433 |
+| 16MB | `text_limit20` | 613.485 | 587.727 | 621.266 |
+| 16MB | `text_offset500` | 610.354 | 611.377 | 619.679 |
+
+这组也未证明普遍/显著提速：4MB textOFFSET为623.136/627.820/614.868ms，新值比两个旧值均慢；若干LIMIT有小幅改善，基线也波动。
+初始合并解析+绑定206.307–242.332ms、建图/初始准备453.918–524.358ms另记；没有细分parser/analyzer CPU或断言某一阶段解释了全部开销。
+后续还需要优化并归因执行准备、非整数比较与整条SQL开销。原wholeSQL六窗的慢值仍独立保留，未用这组替代它们。
+完整每次值/CSV/图身份、初始准备、旧新编译输入见 `bound-values-results/execution-summary.json` 与 `prepared-values-cursor-plan.json` 的冻结方法和命令。
+
+
+复现：以本目录 `runtime-performance-plan.json` 和 `runtime-performance-windows-receipt.json` 的六条冻结命令/输出为准；
+例如 `python3 scripts/benchmark_set_sort.py --before build/pg-feature-global-count-xqbytfo5/before-dbms_main --after build/pg-feature-global-count-xqbytfo5/candidate2-dbms_main --fixture build/pg-feature-topn-20261102-bc582b_s/fixture-1000 --output build/pg-feature-global-count-reproduce --work-mem 64kB --rows 1000 --rounds 3 --samples 4`。
+输出目录必须是新的私有目录。VALUES driver、固定SQL和独立oracle同样留在本批build证据目录；原始输入/前后旧版本、raw慢值和方法缺一不可，当前代码重建不能冒充旧二进制。
+
+最终文档检查的初次脚本误继承前批scope-audit命令，覆盖了本地前批的一份 `scope-audit.json`；该旧JSON已不匹配原证据索引的哈希。
+误运行报告、原预期哈希和完整性说明保存在本批 `prior-audit-overwrite-incident.json`，旧通过日志/原证据索引仍保留；没有改写原哈希来假装恢复。
+源码、已提交文档、原生/协议原始日志、性能raw与二进制未被该误运行修改。本批范围检查改为独立对照baba4bcb与更早未改的保护索引；不再用被覆盖的旧JSON证明本批通过。
+另一次本地链接检查器未识别旧文档合法的`:行号`文件链接，已仅修检查器；受保护旧文档未动。最初检查结果保留。

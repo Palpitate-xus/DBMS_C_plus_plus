@@ -2308,6 +2308,10 @@ public:
         evaluator_.setCurrentDB(database);
     }
     ~PreparedSetSortOp() override { try { close(); } catch (...) {} }
+    void setRowBound(std::optional<size_t> bound) {
+        if(opened_)throw DbError("XX000","cannot change an open set sort bound");
+        bound_=bound;
+    }
     bool open() override {
         OpenInstrument instrument(this); clearError();
         runs_.reset(); current_ = Row{}; loaded_ = available_ = false;
@@ -2479,7 +2483,7 @@ public:
     bool bindPreparedOuterRow(const RowContext& row) override {return child_->bindPreparedOuterRow(row);}
 };
 
-// Expression counts belong to the genuine VALUES execution. Evaluate them
+// Expression counts belong to the genuine query execution. Evaluate them
 // once per open, before opening the producer, and retain its actual sort keys
 // for WITH TIES. No parameter frame or SQL child is owned by this wrapper.
 class PreparedValuesCountOp final : public Operator {
@@ -2573,12 +2577,110 @@ public:
     bool supportsPreparedOuterRow() const override {return child_->supportsPreparedOuterRow();}
     bool bindPreparedOuterRow(const RowContext& row) override {close();return child_->bindPreparedOuterRow(row);}
 };
+
+// The same execution owner that normally surrounds Append must also surround
+// dynamic counts: count expressions run before either branch opens. Borrowed
+// owners keep empty callbacks and are never replaced or closed here.
+class PreparedSetExecutionOp final : public Operator {
+    OpPtr child_;
+    std::function<void()> begin_,finish_;
+    std::shared_ptr<RowContext> caller_;
+    bool active_=false,opened_=false;
+    bool fail(const char* message) {
+        propagateChildError(child_.get(),message);
+        try{close();}catch(...){}return false;
+    }
+public:
+    PreparedSetExecutionOp(OpPtr child,std::function<void()> begin,std::function<void()> finish,
+        std::shared_ptr<RowContext> caller)
+        :child_(std::move(child)),begin_(std::move(begin)),finish_(std::move(finish)),caller_(std::move(caller)) {}
+    ~PreparedSetExecutionOp() override {try{close();}catch(...) {}}
+    bool open() override {
+        OpenInstrument instrument(this);clearError();close();
+        try {
+            active_=true;if(begin_)begin_();
+            opened_=true;
+            return child_->open() || fail("set count execution open failed");
+        } catch(...) {
+            const auto primary=std::current_exception();try{close();}catch(...){}std::rethrow_exception(primary);
+        }
+    }
+    bool next(std::string& display) override {
+        NextInstrument instrument(this);
+        if(!opened_)return false;
+        try {
+            checkForQueryInterrupt();
+            if(child_->next(display)){instrument.emitted=true;return true;}
+            if(child_->hasError())return fail("set count execution failed");
+            close();return false;
+        } catch(...) {
+            const auto primary=std::current_exception();try{close();}catch(...){}std::rethrow_exception(primary);
+        }
+    }
+    void close() override {
+        std::exception_ptr primary;
+        if(opened_){opened_=false;try{child_->close();}catch(...){primary=std::current_exception();}}
+        if(active_){active_=false;try{if(finish_)finish_();}catch(...){if(!primary)primary=std::current_exception();}}
+        if(primary)std::rethrow_exception(primary);
+    }
+    bool supportsStructuredRows() const override {return child_->supportsStructuredRows();}
+    bool lastStructuredValues(std::vector<ExprValue>& row) const override {return child_->lastStructuredValues(row);}
+    bool lastStructuredRow(std::vector<std::string>& cells,std::vector<bool>& nulls) const override {
+        return child_->lastStructuredRow(cells,nulls);
+    }
+    std::string preparedPlanNodeName() const override {return "Result";}
+    std::vector<Operator*> preparedPlanChildren() const override {return {child_.get()};}
+    bool supportsPreparedOuterRow() const override {return child_->supportsPreparedOuterRow();}
+    bool bindPreparedOuterRow(const RowContext& row) override {
+        close();if(!child_->bindPreparedOuterRow(row))return false;
+        *caller_=row;return true;
+    }
+};
+
+std::function<std::pair<std::optional<size_t>,size_t>()> preparedRowCounts(
+    SelectStmt* select,QueryPlanner::PreparedExecutionProvider executionProvider,
+    std::function<RowContext()> contextProvider,PreparedSetSortOp* sorted) {
+    return [select,executionProvider,contextProvider,sorted] {
+        const auto actual=executionProvider();
+        if(!actual)throw DbError("XX000","row count lost its live execution owner");
+        auto context=actual->context(contextProvider());
+        const auto count=[&](Expr* expression,std::optional<size_t> fallback,
+                             std::optional<int64_t> signedCount,const char* clause,const char* state) {
+            if(!expression) {
+                if(signedCount && *signedCount<0)throw DbError(state,std::string(clause)+" must not be negative");
+                return fallback;
+            }
+            actual->prepareExpression(expression);
+            const auto value=actual->evaluate(expression,context);
+            if(value.isNull)return std::optional<size_t>{};
+            int64_t number=0;
+            const auto parsed=std::from_chars(value.value.data(),value.value.data()+value.value.size(),number);
+            if(parsed.ec!=std::errc{} || parsed.ptr!=value.value.data()+value.value.size())
+                throw DbError("XX000","row count lost its bound bigint value");
+            if(number<0)throw DbError(state,std::string(clause)+" must not be negative");
+            if(static_cast<uint64_t>(number)>std::numeric_limits<size_t>::max())throw DbError("54000","row count is too large");
+            return std::optional<size_t>{static_cast<size_t>(number)};
+        };
+        // OFFSET is evaluated first, and a failure must not prepare LIMIT.
+        const auto offset=count(select->offsetExpr.get(),select->offset,select->signedOffsetCount,"OFFSET","2201X");
+        const auto limit=count(select->limitExpr.get(),select->limit,
+            select->fetchFirst?select->signedFetchCount:select->signedLimitCount,
+            "LIMIT","2201W");
+        if(sorted) {
+            std::optional<size_t> bound;
+            if(limit && *limit && !select->withTies && *limit<=std::numeric_limits<size_t>::max()-offset.value_or(0))
+                bound=*limit+offset.value_or(0);
+            sorted->setRowBound(bound);
+        }
+        return std::make_pair(limit,offset.value_or(0));
+    };
+}
 }
 
 OpPtr QueryPlanner::buildPreparedUnionAllPlan(StorageEngine* engine,const std::string& database,
     std::shared_ptr<PreparedQuery> query,SelectStmt* select,PreparedSetBranchFactory branchFactory,
     PreparedChildExecutor reader,PreparedChildCursorFactory cursor,bool ownsScalarChildren,
-    bool planRootConstants,PreparedExecutionProvider executionProvider) {
+    bool planRootConstants,PreparedExecutionProvider executionProvider,const RowContext& outerRow) {
     if(!engine || !query || !select || !branchFactory || select->setOp!=SetOp::Union ||
         !select->setOpAll || !select->setOpRhs)
         throw DbError("0A000","typed set plan currently requires genuine UNION ALL operands");
@@ -2617,8 +2719,13 @@ OpPtr QueryPlanner::buildPreparedUnionAllPlan(StorageEngine* engine,const std::s
     auto leftPlan=branchFactory(left,!select->setOpLhs,executionProvider);
     auto rightPlan=branchFactory(right,false,executionProvider);
     if(!leftPlan || !rightPlan)throw DbError("XX000","typed set branch factory returned no actual graph");
+    const bool expressionCounts=bool(select->limitExpr || select->offsetExpr ||
+        (select->signedLimitCount && *select->signedLimitCount<0) ||
+        (select->signedOffsetCount && *select->signedOffsetCount<0));
     OpPtr root=std::make_unique<PreparedAppendOp>(std::move(leftPlan),std::move(rightPlan),
-        inputs->second.left,inputs->second.right,output->second,std::move(begin),std::move(finish));
+        inputs->second.left,inputs->second.right,output->second,
+        expressionCounts?std::function<void()>{}:std::move(begin),
+        expressionCounts?std::function<void()>{}:std::move(finish));
     PreparedSetSortOp* sorted=nullptr;
     if(!select->orderBy.empty()) {
         const auto keys=query->setOrderColumns.find(select);
@@ -2626,7 +2733,7 @@ OpPtr QueryPlanner::buildPreparedUnionAllPlan(StorageEngine* engine,const std::s
         std::optional<size_t> bound;
         // Every branch output is still evaluated. Only the final ordinary
         // prefix may discard candidates; WITH TIES must retain every peer.
-        if(select->limit && *select->limit && !select->withTies &&
+        if(!expressionCounts && select->limit && *select->limit && !select->withTies &&
             (!select->signedFetchCount || *select->signedFetchCount>=0)) {
             const size_t offset=select->offset.value_or(0);
             if(*select->limit<=std::numeric_limits<size_t>::max()-offset)bound=offset+*select->limit;
@@ -2634,6 +2741,12 @@ OpPtr QueryPlanner::buildPreparedUnionAllPlan(StorageEngine* engine,const std::s
         root=std::make_unique<PreparedSetSortOp>(std::move(root),keys->second,select->orderBy,
             output->second,bound,database);
         sorted=static_cast<PreparedSetSortOp*>(root.get());
+    }
+    if(expressionCounts) {
+        auto caller=std::make_shared<RowContext>(outerRow);
+        auto counts=preparedRowCounts(select,executionProvider,[caller]{return *caller;},sorted);
+        root=std::make_unique<PreparedValuesCountOp>(std::move(root),std::move(counts),*select,sorted,database);
+        return std::make_unique<PreparedSetExecutionOp>(std::move(root),std::move(begin),std::move(finish),std::move(caller));
     }
     if(select->offset && *select->offset)root=std::make_unique<OffsetOp>(std::move(root),*select->offset);
     if(select->signedFetchCount && *select->signedFetchCount<0)
@@ -2735,34 +2848,7 @@ OpPtr QueryPlanner::applyPreparedValuesClauses(StorageEngine* engine,const std::
     if(select->withTies && !sorted)throw DbError("42601","WITH TIES cannot be specified without ORDER BY");
     if(expressionCounts) {
         if(!executionProvider || !contextProvider)throw DbError("XX000","VALUES count lost its execution context");
-        auto counts=[select,executionProvider,contextProvider] {
-            const auto actual=executionProvider();
-            if(!actual)throw DbError("XX000","VALUES count lost its live execution owner");
-            auto context=actual->context(contextProvider());
-            const auto count=[&](Expr* expression,std::optional<size_t> fallback,
-                                 std::optional<int64_t> signedCount,const char* clause,const char* state) {
-                if(!expression) {
-                    if(signedCount && *signedCount<0)throw DbError(state,std::string(clause)+" must not be negative");
-                    return fallback;
-                }
-                actual->prepareExpression(expression);
-                const auto value=actual->evaluate(expression,context);
-                if(value.isNull)return std::optional<size_t>{};
-                int64_t number=0;
-                const auto parsed=std::from_chars(value.value.data(),value.value.data()+value.value.size(),number);
-                if(parsed.ec!=std::errc{} || parsed.ptr!=value.value.data()+value.value.size())
-                    throw DbError("XX000","VALUES count lost its bound bigint value");
-                if(number<0)throw DbError(state,std::string(clause)+" must not be negative");
-                if(static_cast<uint64_t>(number)>std::numeric_limits<size_t>::max())throw DbError("54000","VALUES row count is too large");
-                return std::optional<size_t>{static_cast<size_t>(number)};
-            };
-            const auto offset=count(select->offsetExpr.get(),select->offset,select->signedOffsetCount,"OFFSET","2201X");
-            const auto limit=count(select->limitExpr.get(),select->limit,
-                select->fetchFirst?select->signedFetchCount:select->signedLimitCount,
-                select->fetchFirst?"FETCH":"LIMIT","2201W");
-            if(select->withTies && !limit)throw DbError("2201W","row count cannot be null in FETCH FIRST ... WITH TIES clause");
-            return std::make_pair(limit,offset.value_or(0));
-        };
+        auto counts=preparedRowCounts(select,executionProvider,contextProvider,sorted);
         return std::make_unique<PreparedValuesCountOp>(std::move(source),std::move(counts),*select,sorted,database);
     }
     // PostgreSQL checks OFFSET before LIMIT, even when LIMIT is zero.
@@ -2836,7 +2922,7 @@ OpPtr QueryPlanner::buildPreparedQueryPlan(StorageEngine* engine,const std::stri
         return buildPreparedUnionAllPlan(engine,database,query,select,
             [engine,database,query,outer](SelectStmt* branch,bool body,PreparedExecutionProvider owner) {
                 return buildPreparedQueryPlan(engine,database,query,branch,outer,std::move(owner),body);
-            },{},childFactory,false,false,std::move(executionProvider));
+            },{},childFactory,false,false,std::move(executionProvider),outer);
     if(!selectBodyOnly)if(auto set=buildPreparedSetReturningPlan(engine,database,query,select,outer,{},childFactory))return set;
     if(select->command==SqlCommand::Values) {
         if(select->whereClause || (!selectBodyOnly && select->setOp!=SetOp::None))

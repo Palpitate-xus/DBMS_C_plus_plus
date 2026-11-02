@@ -2,6 +2,42 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-02 global UNION ALL count expressions, FETCH grammar and dynamic sort bounds",
+      "gap_ids": [
+        "QRY-06",
+        "OPT-10",
+        "P0-14"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/performance-report-2026-10-30.md",
+        "docs/test-report.md",
+        "docs/MANUAL.md",
+        "src/parser/parser.cpp",
+        "src/parser/query_binding.cpp",
+        "src/executor/ExecutionPlan.cpp",
+        "src/main.cpp",
+        "src/network/NetworkServer.cpp"
+      ],
+      "tests": [
+        "tests/global_count_execution_test.cpp",
+        "tests/global_count_binding_test.cpp",
+        "tests/query_root_count_grammar_test.cpp",
+        "tests/global_count_expression_protocol_e2e_test.py",
+        "tests/global_count_binding_protocol_e2e_test.py",
+        "tests/query_root_fetch_protocol_e2e_test.py",
+        "tests/values_query_clause_execution_test.cpp",
+        "tests/values_query_clause_grammar_test.cpp"
+      ],
+      "verification": {
+        "correctness": "Final48native0; new33/34/840 oldABI33/31/572 observations. New75+900 PG/final0 old61/604; binding58 PG0/old53/final1 genuine window-child0A000 remains open. Final36wire34/2 includes full existingBind463/40 wholelog byte equal; prior normalSELECT timeout retained/final exactsource passed. Full910 retained, accepted9000+standalone10/9differences.",
+        "resources": "Main12/0 exact4161rows12483cells/metadata/max2FD/EOFclean/1072fixturefiles unchanged; 35 finite operations/owned dynamicSetSort live anonymousFD SIGKILL+reopen1000rows4000cells+2000sortpass.",
+        "scope": "Only ordinary supported UNIONALL/VALUES count grammar/namespace/execution and existing Parse metadata constraints; real caller/providers/slot/origins, offsetfirst/zero no branch, dynamicboundreset. Top-level no-writer runtime prefix; no retained-plan/actual-frame/portal/format/shared-R185/R177 execution changes. Original273items/725protected unchanged; goalactive.",
+        "performance": "Six frozen windows1620timed405warmups36SET-SHOW=2061SQLchecks; all raw and drift retained. VALUES no universal end-to-end gain;16MBintLIMIT2327.953/2456.218/2311.315ms slower;4MB static drift and16MBfloat8433.061/762.679/425.205ms slow cluster open. Separate public-cursor432timed108warmup540calls10800rows32400cells full owning/samegraph pass;4MBtextOFFSET623.136/627.820/614.868ms remains slower, no universal phase gain. No all-query speed or complete PostgreSQL compatibility claim.",
+        "proof": "build/pg-feature-global-count-xqbytfo5/final-provenance.json"
+      }
+    },
+    {
       "issue": "2026-11-02 exact builtin integer set-key cache and owning comparison copies",
       "gap_ids": [
         "P0-14",

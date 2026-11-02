@@ -851,7 +851,8 @@ SELECT * FROM users ORDER BY AGE NULLS FIRST;
 单键物理快路径不为此改走类型化排序。这项入口扩展仍受现有类型化查询形状约束，不表示所有 SQL 都会进入同一排序器。
 虚拟生成列、有限行数 portal，以及未接入的 OR/其他旧分流仍按各自既有路径解释。
 已接入的 `UNION ALL` 全局 `SetSort` 也使用相同的会话预算、完整类型快照和匿名段归并；
-存在非零静态 LIMIT、没有 WITH TIES 且 LIMIT+OFFSET 加法安全时保留有界候选，但仍计算两个分支所需的全部输入。
+静态计数或每次执行求出的非零有限计数，在没有 WITH TIES 且 LIMIT+OFFSET 加法安全时保留有界候选。
+动态上限在每次打开或重开时重新设置，计数变为 NULL 时撤销上次上限；有序查询仍计算两个分支所需的全部输入。
 浮点 NaN/Infinity/float4 精度和枚举次序使用实际绑定的比较规则；同行的输入 ordinal 只用于稳定输出。
 已绑定为内置 `smallint`、`integer`、`bigint` 的集合排序键可在求值后缓存精确 int64 值，
 比较仅在两侧原类型相同、缓存有效且没有枚举比较绑定时使用该值；NULL、升降序和同行规则保持。
@@ -874,19 +875,43 @@ R303/R304/R305 继续遵守既有[暂缓边界](deferred-scope.md)。普通类�
 LIMIT/OFFSET 支持有实际声明类型的参数与表达式，转换为 bigint，每次执行先求 OFFSET 再求 LIMIT；
 OFFSET NULL 按零行处理，LIMIT NULL 表示不限行数；OFFSET/LIMIT 负数分别报 `2201X`/`2201W`。
 本层输出列不能作为计数变量，报 `42P10`；外层关联和子查询自身的局部列分别按真实作用域绑定。
-LIMIT 零不会执行行源或排序键，但仍求值计数表达式。表达式计数当前使用有预算的完整排序，尚未动态下推 Top-N。
-FETCH 此处保留原有整数与 NULL 字面量计数：NULL 配合 ONLY 不限行数，配合 WITH TIES 在分析时报 `2201W`；FETCH 表达式计数尚未实现。
-括号集合查询的全局表达式计数仍缺单独的执行路径，已解析到该形式时明确报 `0A000`，不会默默忽略计数；各 VALUES 分支自身的表达式计数按本段执行。
-未指定类型 OID 的计数参数推导尚不完整，不能据此宣称任意 PG Extended Query 参数组合通过。
+LIMIT 零仍先求计数表达式，不打开行源或排序器；已接入排序的动态计数也使用上述逐次更新的 Top-N 上限。
+
+普通 `UNION ALL` 的全局 LIMIT/OFFSET 也支持表达式、参数和真实标量子查询，括号与未括号集合根使用同一计数路径。
+全局计数没有集合输出列或任一分支 FROM 的本层命名空间；只存在于集合输出中的别名报 `42703`，引用不可见的分支限定名报 `42P01`。
+真实祖先引用仍可关联，子查询自己的局部列可遮蔽祖先同名列；分支括号内的局部计数与全局计数分别生效。
+执行使用该集合查询原有的实际上下文，每次重开先更新上下文，再按 OFFSET、LIMIT 顺序求值一次。
+OFFSET 失败不会继续求 LIMIT；计数失败或为零时不打开两个分支。无排序时保持按需读取，有排序时保留全部输入表达式的原有需求。
+
+已接入的 VALUES/集合根支持 `FETCH FIRST|NEXT` 的参数、函数调用、括号表达式等 `c_expr` 及带符号数字字面量；省略计数时为 1。
+FETCH 的任意算术表达式应加括号，例如 `FETCH FIRST (1+1) ROWS ONLY`；`FETCH FIRST 1+1 ROWS ONLY` 报 `42601`。
+带 ROW/ROWS 后缀的 OFFSET 使用相同的简单值表达式语法；普通 LIMIT/OFFSET 不带该后缀时可使用完整表达式。
+裸 NULL（包括只加括号的 NULL）配合 FETCH WITH TIES 在分析时报 `2201W`；
+`(NULL::bigint)`、CASE 或参数等表达式在执行时得到 NULL 则不限行数，WITH TIES 也不把它改成零或错误。
+WITH TIES 仍要求 ORDER BY，判断同行只使用真实排序键，并取消普通 Top-N 截断。
+
+未指定类型 OID 的参数已支持按实际选中的计数、算术、CAST、CASE/COALESCE 等上下文推导输入声明，
+同一参数的多处引用保持实际身份与槽位；计数结果为 bigint 不表示每个输入都声明为 bigint。
+这仍是普通元数据分析的有限子集，完整函数签名推导和任意多处参数组合继续开放。
+合法窗口标量子查询（例如计数中的 `SELECT row_number() OVER()`）仍因缺少实际执行宿主报 `0A000`，不是已完成的窗口子查询支持。
+本层计数直接使用聚合、窗口或集合返回函数时，仍按真实角色拒绝；子查询自身的合法角色不因此被当作本层调用。
+这些扩展不改变保留计划、参数帧、provider、portal 或无效结果格式的既有边界，QRY-06 与原 273 项不因此关闭。
 
 ```sql
 VALUES (3, 'c'), (1, 'a'), (2, 'b')
 ORDER BY column1 + 1 DESC LIMIT 1 OFFSET 1;
+
+(VALUES (3), (1), (2) UNION ALL VALUES (4))
+ORDER BY 1 LIMIT (1+1) OFFSET (1-1);
+
+VALUES (3), (1), (1), (2)
+ORDER BY column1 FETCH FIRST (1+0) ROWS WITH TIES;
 ```
 
 查询结果中的实际绑定描述符继续携带枚举类型 OID、长度和 typmod，正常 text/binary 输出使用枚举标签；
 SQL NULL、空标签和文本 `NULL` 区分。该支持不等于枚举数组二进制输入/输出、任意自定义类型编解码或有限行数 portal 完成。
-实现、严格 PG 对照及资源/速度边界见[集合排序与 VALUES 报告](performance-report-2026-10-30.md#集合排序预算与-values-查询子句2026-11-02)。
+预算排序和枚举结果描述符的历史实测见[集合排序与 VALUES 报告](performance-report-2026-10-30.md#集合排序预算与-values-查询子句2026-11-02)；
+全局计数与 FETCH 的本轮验证进度、实际性能和开放项以[性能报告](performance-report-2026-10-30.md)的后续记录为准。
 
 会话 `SET [SESSION|LOCAL] work_mem` 现在驱动上述普通物理、普通类型化及已接入的 UNION ALL/VALUES 排序路径，支持 DEFAULT、FROM CURRENT、SHOW、RESET/RESET ALL/DISCARD ALL 与启动 options。
 SQL 值范围为 64..2147483647 kB，支持 B/kB/MB/GB/TB（单位区分大小写）及按 PostgreSQL 规则舍入。

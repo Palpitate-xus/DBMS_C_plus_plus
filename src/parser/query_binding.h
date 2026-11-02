@@ -79,6 +79,10 @@ struct QueryBindingMetadata {
     // but independently stored views must explicitly clear it.
     // Appended to preserve every existing positional callback initializer.
     std::function<std::optional<QueryRelationMetadata>(const std::string&)> queryRelation;
+    // Pure resolved query-host role, after ordinary argument/signature
+    // analysis. A stored scalar selected before a builtin aggregate must
+    // remain scalar; expression contexts must not guess from its spelling.
+    std::function<bool(const FunctionCallExpr*)> aggregateFunction;
 };
 struct PreparedQuery {
     struct Use { size_t begin, end, slot; };

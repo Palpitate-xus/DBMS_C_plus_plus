@@ -1369,7 +1369,7 @@ public:
         std::shared_ptr<PreparedQuery>, SelectStmt*, PreparedSetBranchFactory,
         PreparedChildExecutor = {}, PreparedChildCursorFactory = {},
         bool cursorOwnsScalarChildren = true, bool planRootConstants = false,
-        PreparedExecutionProvider executionProvider = {});
+        PreparedExecutionProvider executionProvider = {}, const RowContext& outerRow = {});
     // Apply clauses to a genuine VALUES output. Keys borrow the same live
     // execution/context as the producer; no replacement parameter frame.
     static OpPtr applyPreparedValuesClauses(StorageEngine*, const std::string&,

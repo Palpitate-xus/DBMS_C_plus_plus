@@ -3076,10 +3076,11 @@ void inferProtocolConcatParameters(const std::string& sql,Session& session,
     // The VALUES clause parser supplies its syntax diagnostic structurally.
     // Reject it at this existing metadata phase; malformed counts must not
     // become a successful retained declaration or reach row execution.
-    if(!parsed.isValid() && parsed.sqlState=="42601" && SQLParser::classify(sql)==SqlCommand::Values)
+    if(!parsed.isValid() && parsed.sqlState=="42601" &&
+       (parsed.rowCountSyntaxError || SQLParser::classify(sql)==SqlCommand::Values))
         throw DbError(parsed.sqlState,parsed.error);
     if(!parsed.isValid() || !dynamic_cast<const SelectStmt*>(parsed.stmt.get()))return;
-    bool valuesCountExpressions=false;
+    bool queryCountClauses=false;
     std::function<void(const Expr*)> observe;
     std::function<void(const Expr*)> expression;
     std::function<void(const Stmt*)> statement;
@@ -3115,8 +3116,8 @@ void inferProtocolConcatParameters(const std::string& sql,Session& session,
     };
     statement=[&](const Stmt* value) {
         const auto* select=dynamic_cast<const SelectStmt*>(value);if(!select)return;
-        valuesCountExpressions=valuesCountExpressions || (select->command==SqlCommand::Values &&
-            (select->limitExpr || select->offsetExpr));
+        queryCountClauses=queryCountClauses ||
+            ((select->command==SqlCommand::Values || select->setOp!=SetOp::None) && select->hasRowCountClause);
         for(const auto& cte:select->ctes)statement(cte.query.get());
         statement(select->setOpLhs.get());statement(select->setOpRhs.get());source(select->fromClause.get());
         for(const auto& item:select->selectList)expression(item.expr.get());
@@ -3131,14 +3132,33 @@ void inferProtocolConcatParameters(const std::string& sql,Session& session,
         if(const auto* binary=dynamic_cast<const BinaryOpExpr*>(value))
             concatenation=concatenation || binary->op=="||";
     };
-    statement(parsed.stmt.get());if(!concatenation && !valuesCountExpressions)return;
+    statement(parsed.stmt.get());if(!concatenation && !queryCountClauses)return;
     auto* previous=currentSession();setCurrentSession(&session);
     struct Restore {Session* previous;~Restore(){setCurrentSession(previous);}} restore{previous};
     const auto prepared=g_engine.prepareBoundQuery(session.currentDB,sql,
         protocolMetadataParameters(session,parameterOids));
-    // New VALUES count syntax has ordinary Parse-time analysis, using the
-    // actual input declarations. Do not infer unknown wire inputs from an
-    // assumed BIGINT target or add a planning/evaluation phase here.
+    if(queryCountClauses) {
+        // Ordinary metadata binding selects each input declaration from its
+        // real expression context. Occurrence slots are not wire positions:
+        // recover $n only through the binder's original source provenance.
+        auto inferred=parameterOids;
+        for(const auto& use:prepared.uses) {
+            if(use.slot>=prepared.parameters.size() || use.begin>use.end || use.end>prepared.source.size())
+                throw DbError("XX000","row count parameter has no source provenance");
+            const auto spelling=prepared.source.substr(use.begin,use.end-use.begin);
+            if(spelling.size()<2 || spelling.front()!='$' ||
+               !std::all_of(spelling.begin()+1,spelling.end(),[](unsigned char c){return std::isdigit(c);}))continue;
+            const auto position=std::stoul(spelling.substr(1));
+            if(!position || position>inferred.size())throw DbError("42P02","invalid row count parameter");
+            if(inferred[position-1])continue;
+            const auto oid=mapBuiltinTypeNameToOid(ExprHelper::canonicalResultTypeName(prepared.parameters[use.slot].typeName));
+            if(oid && oid!=705)inferred[position-1]=oid;
+        }
+        if(inferred!=parameterOids) {
+            (void)g_engine.prepareBoundQuery(session.currentDB,sql,protocolMetadataParameters(session,inferred));
+            parameterOids=std::move(inferred);
+        }
+    }
     if(!concatenation)return;
     struct Input {size_t begin,position;uint32_t oid;};
     std::vector<Input> selected;

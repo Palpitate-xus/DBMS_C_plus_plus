@@ -580,7 +580,7 @@ int main() {
     check("expression count wrapper terminates and releases spool on key error",[&] {
         session.workMem.assign(64,false);
         auto query=std::make_shared<PreparedQuery>(g_engine.prepareBoundQuery(database,metadataValues()+
-            " ORDER BY 1/(column1-23),column1 LIMIT (1+0)"));
+            " ORDER BY 1/(column1-23),column1 LIMIT (NULL::bigint)"));
         auto plan=QueryPlanner::buildPreparedQueryPlan(&g_engine,database,query,query->ast.get());
         bool good=plan->open();std::string display,state;
         try{if(plan->next(display))good=false;}catch(const DbError& error){state=error.sqlState();}
@@ -617,9 +617,35 @@ int main() {
         good=!plan->next(display) && rows==1 && exact && immediate && good;
         plan->close();plan->close();return good && cleaned() && observed.maxFds<=2;
     });
+    check("dynamic K1 still demands discarded source cells and error keys without spool",[&] {
+        session.workMem.assign(64,false);
+        const auto sourceName=sequence(),keyName=sequence();
+        std::string sql="VALUES";
+        for(size_t id=0;id<48;++id) {
+            if(id)sql+=',';
+            sql+='('+std::to_string(id)+",'"+std::string(8192,'a'+id%23)+"'::text,nextval('"+sourceName+"'))";
+        }
+        sql+=" ORDER BY 1/(column1-23),column1,nextval('"+keyName+"') LIMIT (1+0)";
+        auto query=std::make_shared<PreparedQuery>(g_engine.prepareBoundQuery(database,sql));
+        auto plan=QueryPlanner::buildPreparedQueryPlan(&g_engine,database,query,query->ast.get());
+        bool good=g_engine.currval(database,sourceName)==1 && g_engine.currval(database,keyName)==1 && plan->open();
+        good=good && g_engine.currval(database,sourceName)==1 && g_engine.currval(database,keyName)==1;
+        std::string display,state;size_t rows=0;
+        try{if(plan->next(display))++rows;}catch(const DbError& error){state=error.sqlState();}
+        // Row 23 evaluates its source cell before its first ORDER key fails;
+        // the later volatile ORDER key completed for rows 0 through 22 only.
+        const auto sourceCalls=g_engine.currval(database,sourceName),keyCalls=g_engine.currval(database,keyName);
+        good=good && state=="22012" && rows==0 && sourceCalls==25 && keyCalls==24 &&
+            observed.creates==0 && cleaned();
+        const auto reads=observed.reads,writes=observed.writes;
+        good=!plan->next(display) && !plan->next(display) && observed.reads==reads && observed.writes==writes && good;
+        plan->close();plan->close();
+        std::cout<<"VALUES_K1_ERROR_DEMAND source_counter="<<sourceCalls<<" key_counter="<<keyCalls<<'\n';
+        return good && cleaned() && g_engine.currval(database,sourceName)==25 && g_engine.currval(database,keyName)==24;
+    });
     const bool dropped=g_engine.dropDatabase(database)==DBStatus::OK;
     g_config.workMemKb=budget;setCurrentSession(previous);
-    constexpr size_t expectedControls=63;
+    constexpr size_t expectedControls=64;
     if(controls!=expectedControls || !dropped)++failures;
     std::cout<<"VALUES_QUERY_CLAUSE_EXECUTION_COMPLETE "<<controls<<" FAILURES "<<failures<<'\n';
     return failures?1:0;

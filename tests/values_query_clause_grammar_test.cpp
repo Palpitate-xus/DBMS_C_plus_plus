@@ -503,8 +503,19 @@ int main() {
     for (const auto& suffix : invalidCounts) for (const bool binding : {false,true}) {
         const std::string sql = "VALUES(1),(2) ORDER BY column1 " + suffix;
         const auto parsed = parse(sql,binding);
-        check(!parsed.isValid() && !parsed.error.empty(),
-            std::to_string(binding) + ":strict count syntax rejection " + sql);
+        if (suffix == "FETCH FIRST ($1) ROWS ONLY") {
+            const auto* root = query(parsed.stmt.get());
+            const auto* input = root ? dynamic_cast<const ParameterExpr*>(CountTrees<SelectStmt>::limit(root)) : nullptr;
+            check(parsed.isValid() && rows(root,{{"L:1"},{"L:2"}}) && input && input->slot == 0 &&
+                input->origin == ParameterOrigin::StatementInput && input->declaredType.empty() &&
+                root->fetchFirst && !root->withTies && !root->limit && !root->signedFetchCount &&
+                !CountTrees<SelectStmt>::offset(root) && CountTrees<SelectStmt>::role(root) &&
+                countSpan(input,sql,"FETCH FIRST","$1",binding),
+                std::to_string(binding) + ":genuine FETCH parameter AST and original byte provenance " + sql);
+        } else {
+            check(!parsed.isValid() && !parsed.error.empty(),
+                std::to_string(binding) + ":strict count syntax rejection " + sql);
+        }
     }
     std::cout << "VALUES_QUERY_CLAUSE_GRAMMAR_COMPLETE " << checked << " FAILURES " << failures << '\n';
     if (checked != 860) return 2;

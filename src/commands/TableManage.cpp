@@ -34503,6 +34503,12 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
                 const_cast<StorageEngine*>(this));
             return type;
         };
+        metadata.aggregateFunction = [&](const FunctionCallExpr* function) {
+            // Reuse the same actual scalar-first role as functionType above;
+            // an identically named selected stored scalar is not an aggregate.
+            return !aggregate_type_detail::builtinName(function).empty() &&
+                !evaluator.hasScalarFunction(function,const_cast<StorageEngine*>(this));
+        };
         metadata.assignmentInput = [&](const QueryOutputColumn& target,
                                       const Expr* source, const std::string& sourceType) {
             validateAssignmentInput(target, source, sourceType);

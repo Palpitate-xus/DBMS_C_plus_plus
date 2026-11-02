@@ -13,7 +13,7 @@
 | [PostgreSQL SET](https://www.postgresql.org/docs/18/sql-set.html)与[RESET](https://www.postgresql.org/docs/18/sql-reset.html) | 会话覆盖和 LOCAL 分开，回滚/保存点恢复；RESET 使用当前默认来源 | 会话 work_mem 接入普通物理、普通类型化及已接入的 UNION ALL/VALUES Sort，保留启动/文件优先级；配置函数、例程作用域与其他算子治理仍开放 |
 | [PostgreSQL tuple slots](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/executor/execTuples.c) | 行槽保留已解码属性及 NULL 标记，避免反复拆解相同属性 | 按物理行读取一次 NULL 位图并复用，去除排序的重复解码；仍保留文件身份核验、TOAST 和虚拟列的原有解码职责 |
 | [PostgreSQL SeqScan](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/executor/nodeSeqscan.c)与[heap scan](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/access/heap/heapam.c) | 扫描状态保留 snapshot，按需求获取后续 tuple，结束时释放扫描资源 | 普通非分区 TableScan 按页供给、复制拥有的行/NULL 位图，页锁和 pin 不跨表达式求值；分区/RLS/其他分流仍分别验收 |
-| [PostgreSQL LIMIT/OFFSET](https://www.postgresql.org/docs/18/queries-limit.html)与[Limit 算子](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/executor/nodeLimit.c) | 在子计划行流上计数，零条不请求输入；OFFSET 行仍被计算 | 普通单表 LIMIT 进入既有类型化链，保留 WHERE/投影需求、聚合和 DISTINCT 的输入职责；错误前缀用独立 SQL 接收契约，不放宽默认 checked 失败契约 |
+| [PostgreSQL LIMIT/OFFSET](https://www.postgresql.org/docs/18/queries-limit.html)与[Limit 算子](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/executor/nodeLimit.c) | 在子计划行流上计数，零条不请求输入；OFFSET 行仍被计算 | 普通单表 LIMIT 进入既有类型化链；已接入 VALUES/UNION ALL 的计数表达式使用实际上下文、OFFSET 先求值及逐次更新的安全 Top-N 上限；保留 WHERE/投影、聚合与 DISTINCT 的输入职责，不放宽默认 checked 失败契约 |
 | [DuckDB TopN 优化](https://duckdb.org/2024/11/14/optimizers)及[排序设计](https://duckdb.org/2025/09/24/sorting-again) | ORDER BY 与 LIMIT 联合优化，保留有限候选；外部排序需要独立的可溢写布局 | OFFSET 纳入候选数量，保留类型化键与原始行上下文，避免重新求值和丢失 NULL/对象身份 |
 | [SQLite 临时文件](https://www.sqlite.org/tempfiles.html)与[原子提交](https://sqlite.org/atomiccommit.html) | 可用有序索引时减少排序；临时排序结构与事务日志承担不同职责，日志按变更页保护回滚 | 普通物理排序临时文件与 WAL 分离；修改快照和细粒度撤销仍需推进，未删除持久化或回滚保护 |
 
@@ -57,10 +57,21 @@ COPY 响应中断已有 R197 用户暂缓记录补入中央索引；完整回归
 第八批基于 `8a8532a0` 为普通 UNION ALL/VALUES Sort 复用有预算的完整值归并，补真实 VALUES ORDER/计数表达式与实际枚举结果描述符。
 44 原生全过；新 347 协议与 52 类型阶段控制在 PG/最终程序全过。完整 31 首轮 29/2，连接前失败同源复测通过，既有 463/40 完整观察不变。
 新增52永久协议入口独立验证通过；全部32个已运行入口按各自最终结果复核为31/1。
-动态 Top-N、FETCH/全局集合表达式计数、未知 OID 计数参数推导和其他算子仍开放，研究与完整速度数据见[集合排序与 VALUES 报告](performance-report-2026-10-30.md#集合排序预算与-values-查询子句2026-11-02)。
+该批记录时，动态 Top-N、FETCH/全局集合表达式计数及未知 OID 参数推导仍开放；
+研究与当时完整速度数据保留在[集合排序与 VALUES 历史报告](performance-report-2026-10-30.md#集合排序预算与-values-查询子句2026-11-02)，当前支持范围见下述更新。
 
 第九批基于bb74ae97缓存精确集合整数键、减少原比较参数的重复owning复制，保留共享堆/中断/执行owner。
 45原生通过、33协议32/1（原463/40不变）、新66在PG/旧/新全过；1980延迟含所有慢值见[集合键缓存报告](performance-report-2026-10-30.md#集合整数键缓存与比较参数复制2026-11-02)，未关闭原273条款。
+
+本轮基于 `baba4bcb` 接通普通 UNION ALL 全局 LIMIT/OFFSET 表达式，以及 VALUES/集合根的 FETCH `c_expr` 计数。
+全局计数使用空本层命名空间和真实祖先作用域，不能借用集合 ORDER 输出名或分支 FROM；局部分支计数保持自己的作用域。
+同一实际执行上下文每次重开更新后，先求 OFFSET 再求 LIMIT；零计数不打开分支，NULL offset 为零、NULL count 不限行数。
+裸 NULL FETCH WITH TIES 在分析时报错，typed/computed NULL 在执行时不限行数；WITH TIES 不使用普通候选截断。
+安全的有限 LIMIT+OFFSET 可驱动动态 Top-N，每次执行重置，后续不限行数时撤销旧上限，保留有序输入的表达式需求。
+未声明 OID 参数已支持实际选中上下文的普通元数据推导，保持原身份、槽位与来源；完整函数签名和所有参数组合仍为 partial。
+合法窗口计数子查询仍明确报 `0A000`，需要独立的真实窗口宿主降层；不能把该开放项改写为已完成或用户暂缓。
+保留计划、实际参数帧/provider、portal、共享排序 helper 和所有专属暂缓边界不变。
+本轮验证终态及性能另见[性能报告](performance-report-2026-10-30.md)的后续记录；QRY-06 及原 273 项状态保持。
 
 此后依次评估剩余分流/物化、常见修改快照工作量、完整工作内存与 spill、统计和计划选择，再扩大数据量与并发验证。
 聚合/HAVING/未接入集合分流、配置函数/例程 GUC 完整作用域、分区/RLS/并行等剩余物化及虚拟生成列表达式失败返回 NULL 的既有差异仍开放；
