@@ -1370,6 +1370,11 @@ public:
         PreparedChildExecutor = {}, PreparedChildCursorFactory = {},
         bool cursorOwnsScalarChildren = true, bool planRootConstants = false,
         PreparedExecutionProvider executionProvider = {});
+    // Apply clauses to a genuine VALUES output. Keys borrow the same live
+    // execution/context as the producer; no replacement parameter frame.
+    static OpPtr applyPreparedValuesClauses(StorageEngine*, const std::string&,
+        std::shared_ptr<PreparedQuery>, SelectStmt*, OpPtr,
+        PreparedExecutionProvider, std::function<RowContext()>, bool selectBodyOnly = false);
     // Compile a retained SELECT/VALUES child; no SQL is rendered/reparsed and
     // source execution is driven only by the returned plan's next().
     static OpPtr buildPreparedQueryPlan(StorageEngine*,const std::string&,

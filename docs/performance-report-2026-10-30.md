@@ -988,6 +988,153 @@ python3 scripts/benchmark_typed_sort.py \
 聚合/GROUP/HAVING/SetSort、窗口/哈希/JOIN 本身、结果接收器、虚拟生成列/未接入旧分流、完整配置函数/GUC 和其他原始功能族继续开放。
 原始 273 项、原子要求与专属暂缓原文不变，Goal 继续 active；无新 Markdown、分支或推送。
 
+## 集合排序预算与 VALUES 查询子句（2026-11-02）
+
+本批以 `8a8532a0` 为输入，冻结旧程序 `6d6f1724…`，最终程序为 `a3bdab66…`。
+产品仍为 0.2.0 / C++17、PG18.6 行为基线 / wire3.0，GCC13.3/-O2、ICU/zlib、TLS stub；不将本批写成整库 PG 等价或 TLS 验收。
+
+### 调研与实现边界
+
+| 一手来源 | 本批采用的做法与限制 |
+| --- | --- |
+| [PostgreSQL18.6 Sort](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/nodeSort.c) | 从真实输出描述符和 work_mem 初始化排序，首次实际需求才读取输入；静态 LIMIT 可给有界候选，仍处理所需全部输入。 |
+| [PostgreSQL VALUES](https://www.postgresql.org/docs/18/sql-values.html)与[分析器](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/parser/analyze.c) | VALUES 各列先选择共同类型，随后注册真实输出范围供排序使用；不把列名称伪装成运行时参数或物理表。 |
+| [PostgreSQL Limit](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/nodeLimit.c)与[计数分析](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/parser/parse_clause.c) | 计数是 bigint 表达式，拒绝本查询层变量，按每次实际调用求 OFFSET 再求 LIMIT；零条不要求行源，WITH TIES 使用真实边界键。 |
+| [SQLite vdbesort](https://github.com/sqlite/sqlite/blob/master/src/vdbesort.c) | 超预算生成有序段，记录同时保存排序键和输出；复用本项目完整 owning codec，保持 NULL、collation、OID、数组和递归 record 元数据。 |
+| [DuckDB 排序设计](https://duckdb.org/2025/09/24/sorting-again) | 比较开销和可溢写布局同样影响速度；本批只惰性缓存原表达式比较描述符，没有实现其字节规范化键或并行向量执行。 |
+
+[ExecutionPlan.cpp](../src/executor/ExecutionPlan.cpp)的普通 UNION ALL SetSort 复用现有 BoundedRuns/TypedSortRowCodec，
+按打开时的会话预算分批、最多两个匿名文件 FD、稳定 ordinal、最终按需归并。
+存在非零静态 LIMIT、没有 WITH TIES、LIMIT+OFFSET 加法安全时保留有界候选；动态 VALUES 计数目前使用完整有预算排序，没有动态下推 Top-N。
+键比较仍由原表达式/绑定类型所有者执行；scalar float4/float8 的 NaN/Infinity 与枚举次序采用真实比较元数据，嵌套复合类型的其他既有比较缺口不因此关闭。
+
+VALUES 的原 token/span、共同类型、真实 column1/column2 范围、关联子查询及隐藏排序键均保留；
+LIMIT/OFFSET 表达式在实际生产者的同一执行器中求值，新调用由既有 VALUES owner 刷新自己的 carrier，无新参数帧所有者。
+[prepared_query_execution.cpp](../src/expression/prepared_query_execution.cpp)只新增两项 AST 子节点索引，原 retained constant-planning 算法不改。
+原 PreparedAppend 整类/执行器工厂 owner 前缀、共享 CPU-sort helpers 和用户暂缓模块保持原字节。
+
+[DmlResult](../src/commands/DmlExecutor.h)拥有真实输出描述符，正常 Network 描述及结果传递实际 OID/typmod/目录长度；
+验证为 scalar enum 的二进制输出发送标签字节，保留物理 table/attribute origin 与 NULL/空标签/文本 NULL 区别。
+输入解码器、既有 Parse/Bind/portal/format2 策略及 handleClient 主体不改。未知 OID 计数参数推导、enum 数组二进制输入/输出及任意自定义类型 codec 仍不完整。
+
+### 正确性、失败与实际资源
+
+最终 44 个原生入口全部通过；新 SetSort26、grammar860、VALUES execution63 共 949 控制全部通过。
+同最终源码完整旧 ABI/旧头/旧 stub 基线分别有 20/694/63 项不符，不能把控制数当成独立缺陷数。
+
+| 固定协议矩阵 | PG18.6 | 最终程序 | 冻结旧版不符 |
+| --- | ---: | ---: | ---: |
+| 集合排序112 | 112/0 | 112/0 | 8 |
+| VALUES查询子句143 | 143/0 | 143/0 | 127 |
+| 实际枚举描述符33 | 33/0 | 33/0 | 20 |
+| 显式输入 OID 计数59 | 59/0 | 59/0 | 51 |
+| 计数类型/语法阶段52 | 52/0 | 52/0 | 48 |
+
+原 31 个协议入口整批首轮为 29通过/2失败；暂缓 Bind/portal 完整 463 项及其中 40 差异整份日志与前版逐字节相同。
+另一项在 runner.start_ours 的 sock.connect、发送任何 SQL 之前 ConnectionAbortedError；同程序/源码完整独立重跑通过，最终逐入口复核为 30/1。
+原始整批 JSON/连接错误留存，没有改启动重试、socket超时或网络策略。新增52永久入口另按同一程序验证，全32个已运行入口按各自最终结果复核为31/1；不把两次验证冒称一次全库测试。
+
+记录全部失败而不放宽成多种可接受结果：
+
+- C1 SetSort26 有两处真实取消/超时清理失败，修复原 TIES 包装器在成功取得一行后的主异常清理，C2起26/0。
+- C2 set112仍有4处 VALUES语法/枚举 RowDescriptionOID 差异；C3 enum33/set112/旧typed108全过，但VALUES143仍7处失败。补真实 Main scalar VALUES admission与计数AST/绑定后最终143/0。
+- C3原生44中的两个失败为 grammar child/span oracle 与 collation规范值夹具；按真实单一 AST/运行期 c修正，原始620/14和30/4保留。C4的4个::AST形状及4个参数槽位预期也仅修fixture，参数仍按真实PreparedQuery.uses关联，没有重排生产帧。
+- C4 grammar860中缺操作数两处是真语法错误；type52探针完成49观察后在Extended Parse不完整CASE处SIGABRT，另外3观察未执行。修复局部语法边界/异常返回与结构化42601，最终相同完整52/0；绝不将该首轮称作完整52项结果。
+- 实际PG/C4反例证明括号inline VALUES集合的全局表达式计数曾被静默忽略；现已解析到该形状时明确0A000，仍列未实现，未括号全局形式还可能42601。9个局部/静态正对照与PG一致；额外工具对未括号形式的错误预测及全部13观察保留。
+
+实际 Main 同一七项全部4,107行/12,321单元值正确。旧版4项资源失败；最终低64kB全排/OFFSET/TIES/超大行实际落盘，高16MB全排/OFFSET和低预算LIMIT1无文件，最多2 FD且结束全部关闭/无命名残留。
+首轮采样曾截到mkstemp→unlink间的瞬时命名FD；工具原“所有瞬时目标必须已deleted”断言失败，原源码/报告保留。
+修正后的观察器严格校验实际数据目录归属、同FD/path随后deleted或确实关闭且路径消失，且spill必须有真实deleted证据；SQL、预算、全值、FD上限、最终清理要求不变，旧/新完整7项重新验证。
+生产匿名文件 helper没有为此修改。预算按拥有值估算，稳定排序scratch、分配器、超大行/固定读头、上游与结果接收器仍可额外占用，不能称硬RSS上限。
+
+35类操作现有有限检查全部通过；真实全局SetSort匿名文件仍打开时，仅向验证exe/data-dir/start-ticks的自建PID发送SIGKILL，
+同一私有目录重开核对1,000行/4,000单元，再次核对2,000行集合排序及清理。源fixture1,072文件SHA不变；不是任意修改崩溃矩阵或全库恢复验收。
+
+### 相邻旧/新/旧 SQL 延迟：全部操作
+
+同一已关闭1,000行fixture，每次独立私有副本；集合排序实际有两个分支，共2,000行输入，三列完整输出。
+11类各3轮×4次、旧/新/旧共396计时/预算；64kB、4MB、16MB共1,188计时、297预热、18条SET/SHOW，合计1,503条全值/预算校验通过。
+固定种子打乱轮内次序，保留默认持久化/后台维护、15秒socket与TCP_NODELAY；准备在计时外，完整结果校验在计时内。
+计时前所有自建编译/回归/资源进程已终态，窗口内不启动其他测试或编译；共享主机48逻辑CPU，非并发/冷缓存/大数据验收，无置信区间。
+同行顺序只属于冻结heap夹具，不承诺没有完整ORDER键的生产查询固定子集；NUMERIC性能夹具是常规值，超2^53精度另由正确性测试验证。
+表中为全部12样本p50毫秒，没有删慢值或追加择优窗口。
+
+#### 64kB
+
+| 操作 | 旧版先测 ms | 最终版 ms | 旧版后测 ms |
+| --- | ---: | ---: | ---: |
+| 文本全排序 | 257.193 | 296.194 | 249.444 |
+| NUMERIC 全排序 | 380.867 | 410.851 | 374.816 |
+| float8 全排序 | 454.178 | 489.810 | 441.665 |
+| float4 全排序 | 397.745 | 383.115 | 396.692 |
+| 整数全排序 | 241.006 | 268.703 | 228.674 |
+| 固定夹具同行稳定排序 | 247.592 | 272.855 | 237.755 |
+| LIMIT 20 | 195.501 | 181.917 | 185.988 |
+| LIMIT 20 OFFSET 500 | 196.011 | 198.347 | 188.215 |
+| WITH TIES | 204.690 | 201.640 | 198.980 |
+| 普通整数 TopN 控制 | 35.369 | 35.428 | 34.236 |
+| 主键点查控制 | 11.945 | 12.600 | 11.653 |
+
+#### 4MB
+
+| 操作 | 旧版先测 ms | 最终版 ms | 旧版后测 ms |
+| --- | ---: | ---: | ---: |
+| 文本全排序 | 253.475 | 260.524 | 255.186 |
+| NUMERIC 全排序 | 380.262 | 379.447 | 388.789 |
+| float8 全排序 | 443.540 | 436.245 | 453.670 |
+| float4 全排序 | 399.986 | 366.521 | 399.462 |
+| 整数全排序 | 234.316 | 243.532 | 236.073 |
+| 固定夹具同行稳定排序 | 257.177 | 249.853 | 246.380 |
+| LIMIT 20 | 192.492 | 185.582 | 195.918 |
+| LIMIT 20 OFFSET 500 | 187.691 | 233.081 | 189.220 |
+| WITH TIES | 200.362 | 208.650 | 225.586 |
+| 普通整数 TopN 控制 | 36.174 | 34.579 | 36.437 |
+| 主键点查控制 | 12.045 | 13.442 | 13.992 |
+
+#### 16MB
+
+| 操作 | 旧版先测 ms | 最终版 ms | 旧版后测 ms |
+| --- | ---: | ---: | ---: |
+| 文本全排序 | 250.781 | 264.514 | 251.167 |
+| NUMERIC 全排序 | 376.221 | 388.562 | 377.866 |
+| float8 全排序 | 437.895 | 444.773 | 443.356 |
+| float4 全排序 | 397.567 | 361.624 | 390.029 |
+| 整数全排序 | 229.612 | 239.280 | 229.361 |
+| 固定夹具同行稳定排序 | 242.945 | 235.692 | 243.289 |
+| LIMIT 20 | 196.006 | 191.012 | 194.417 |
+| LIMIT 20 OFFSET 500 | 195.155 | 227.381 | 189.901 |
+| WITH TIES | 195.336 | 210.169 | 207.504 |
+| 普通整数 TopN 控制 | 33.919 | 35.731 | 35.035 |
+| 主键点查控制 | 12.705 | 11.793 | 12.581 |
+
+float4全排序在本窗口改善；4MB的LIMIT20为192.492/185.582/195.918ms，幅度有限。
+低64kB的多项全排变慢，旧SetSort不执行该预算而新版承担临时编码/I/O成本；资源约束不能当成普遍加速。
+即使4MB/16MB不以落盘解释，也有未解决慢值：OFFSET分别187.691/233.081/189.220ms与195.155/227.381/189.901ms，文本/整数全排及部分控制也较慢。
+有界堆、比较临时上下文/值拷贝及其他执行成本仍需后续profiling与优化；本批未证明全部查询提速、无回退或达到PostgreSQL性能水平。
+
+### 构建与复现
+
+C3/C4/C5标准CMake target分别523.40/522.38/32.60秒，成功重编17/16/3对象，共36次/17不同CPP，最终链接62对象（61core+Main）。
+这是按依赖重建，不声称62对象全部fresh；AST/DmlResult ABI变化的所有依赖者与原生test_stubs使用同代头和对象。
+最后仅三CPP变化，Main不因此重编；最终44原生与实际Main所有协议/资源使用相同冻结61core/程序。
+全部212输入源码、62对象、61core、测试/驱动及工件SHA保存在`final-provenance.json`；初始const Expr*编译错误及所有候选失败留存。
+
+复现驱动[benchmark_set_sort.py](../scripts/benchmark_set_sort.py)复用[benchmark_queries.py](../scripts/benchmark_queries.py)真实服务/客户端。
+计时artifact脚本1099dfa1…与仓库脚本39b1450e…仅REPO.parents[2]→[1]，源码逆替换和AST归一完全相等。
+
+```bash
+python3 scripts/benchmark_set_sort.py \
+  --before build/pg-feature-set-sort-wi9y4qzg/before-dbms_main \
+  --after build/cmake/dbms_main \
+  --fixture build/pg-feature-topn-20261102-bc582b_s/fixture-1000 \
+  --work-mem 64kB --rows 1000 --rounds 3 --samples 4 \
+  --output build/retest-set-sort-64k
+```
+
+4MB/16MB使用对应参数与新目录。旧程序、fixture与完整raw样本/PG对照/失败/资源/crash/source snapshots在本机`build/pg-feature-set-sort-wi9y4qzg/`，不是已打包可分发发布物；仓库提交永久测试、驱动和文档。
+原始273 items/原子要求/725受保护记录未改，R185/R197/R244/R303/R304/R305等用户暂缓保持；Goal继续active。
+聚合/其他集合分流/窗口/哈希/JOIN/结果接收器/完整GUC与其他原始功能族继续开放；无新Markdown、分支或推送。
+
 ## 剩余瓶颈与适用范围
 
 普通修改、保存点和其他 DDL 仍有物理快照、WAL 全文件映像及同步 I/O 开销；大数据库下会继续放大。整数 DML 筛选仍扫描堆，JOIN 优化仍可能枚举大量键对，索引覆盖、统计信息、计划选择、批处理及更细粒度的回滚机制仍有优化空间。

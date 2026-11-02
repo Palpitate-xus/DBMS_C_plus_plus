@@ -156,6 +156,10 @@ public:
     std::map<const Expr*,uint32_t> valueTypeOids;
     std::map<const Expr*,int32_t> valueTypeModifiers;
     const QueryRowDescriptor* setOrderScope = nullptr;
+    // Collect real source occurrences while binding a row-count expression.
+    // Nested queries still resolve their own ranges normally. Validation is
+    // performed after the count's bigint coercion, using occurrence identity.
+    std::vector<std::vector<size_t>*> countReferences;
     Binder(const std::string& sql, const std::vector<QueryBindingDatum>& values,
            const QueryBindingMetadata& descriptions) : datums(values), metadata(descriptions) {
         result.source = sql;
@@ -550,6 +554,7 @@ public:
                 if(unsupportedNamespaceAcl)
                     throw DbError("0A000","pg_namespace column nspacl is not implemented");
                 column->binding = std::move(resolved);
+                for(auto* references:countReferences)references->push_back(column->binding->sourceOrdinal);
                 return sourceType;
             }
             if (datum) {
@@ -1340,6 +1345,7 @@ public:
                 select->existsTargetPrunable = !targetSrfOrWindow && !writes &&
                     select->setOp == SetOp::None && select->groupBy.empty() && select->groupByElems.empty() &&
                     !select->having && !select->offset && select->locking.empty() && select->windowDefs.empty() &&
+                    !select->limitExpr && !select->offsetExpr &&
                     (!select->limit || *select->limit > 0) &&
                     (!select->signedFetchCount || *select->signedFetchCount >= 0);
             }
@@ -1752,6 +1758,11 @@ public:
         coerceSetInput(statement,ordinal,"unknown",targetType,targetTypeMod);
     }
     QueryRowDescriptor setColumns(SelectStmt& select,QueryRowDescriptor left,QueryRowDescriptor right) {
+        // A parenthesized inline VALUES set can retain VALUES as its command
+        // role. Its global count expressions need separate set lowering;
+        // never silently discard an expression accepted by that grammar.
+        if(select.limitExpr || select.offsetExpr)
+            throw DbError("0A000","set query row-count expressions require additional lowering");
         if(left.size()!=right.size())throw DbError("42601","set query column count mismatch");
         auto output=left;
         for(size_t i=0;i<left.size();++i) {
@@ -1822,7 +1833,12 @@ public:
                 throw DbError("42601","non-integer constant in ORDER BY");
             } else throw DbError("0A000", "invalid UNION/INTERSECT/EXCEPT ORDER BY clause");
             keys.push_back(ordinal);
+            // The common output owns enum identity, including a genuine
+            // catalog OID. No branch datum or namespace guess prepares it.
+            order.enumComparison=enumSortComparison(output[ordinal].type,output[ordinal].typeOid);
         }
+        if(select.fetchFirst && select.withTies && !select.limit && !select.signedFetchCount)
+            throw DbError("2201W","row count cannot be null in FETCH FIRST ... WITH TIES clause");
         return output;
     }
     QueryRowDescriptor statementImpl(Stmt& node, const std::vector<Namespace>& outer, Ctes ctes) {
@@ -1959,9 +1975,19 @@ public:
                     throw DbError("42P20","window \""+identifier(value.name)+"\" is already defined");
                 window(value, scopes);
             }
+            // VALUES inputs were analyzed without this range. Its genuine
+            // common output is visible only to this query's ORDER namespace,
+            // including correctly correlated children of ORDER expressions.
+            auto orderScopes=scopes;
+            const bool valuesOrder=select->command==SqlCommand::Values && !select->orderBy.empty();
+            const bool valuesCounts=select->command==SqlCommand::Values && (select->limitExpr || select->offsetExpr);
+            if(valuesOrder || valuesCounts) {
+                Range outputRange;outputRange.columns=columns;
+                orderScopes.front().push_back(registerSource(std::move(outputRange)));
+            }
             for (auto& order : select->orderBy) {
                 const auto* ref = dynamic_cast<ColumnRefExpr*>(order.expr.get());
-                const bool outputAlias = ref && ref->table.empty() && ref->schema.empty() &&
+                const bool outputAlias = !valuesOrder && ref && ref->table.empty() && ref->schema.empty() &&
                     std::any_of(columns.begin(), columns.end(), [&](const auto& col) { return col.name == ref->column; });
                 std::string orderType;
                 uint32_t orderOid=0;
@@ -1992,20 +2018,47 @@ public:
                     }
                     orderType=output->type;orderOid=output->typeOid;
                 } else {
-                    orderType=expression(order.expr,scopes);
+                    orderType=expression(order.expr,orderScopes);
                     orderOid=expressionTypeOid(order.expr.get());
                     const auto* literal=dynamic_cast<const LiteralExpr*>(order.expr.get());
                     if(literal && !literal->value.empty() && std::all_of(literal->value.begin(),literal->value.end(),
                         [](unsigned char c){return c>='0' && c<='9';})) {
                         size_t ordinal=0;
                         for(char c:literal->value){if(ordinal>columns.size())break;ordinal=ordinal*10+size_t(c-'0');}
+                        if(valuesOrder && (!ordinal || ordinal>columns.size()))
+                            throw DbError("42P10","ORDER BY position is not in select list");
                         if(ordinal && ordinal<=columns.size()) {
                             orderType=columns[ordinal-1].type;orderOid=columns[ordinal-1].typeOid;
                         }
+                    } else if(valuesOrder && literal && literal->typeName.empty() && !literal->preparedSubquery) {
+                        if(decimalIntegerConstant(literal->value))throw DbError("42P10","ORDER BY position is not in select list");
+                        throw DbError("42601","non-integer constant in ORDER BY");
                     }
                 }
                 order.enumComparison=enumSortComparison(orderType,orderOid);
             }
+            const auto bindCount=[&](ExprPtr& count,const char* clause) {
+                if(!count)return;
+                std::vector<size_t> references;
+                countReferences.push_back(&references);
+                struct Restore {
+                    std::vector<std::vector<size_t>*>& stack;
+                    ~Restore(){stack.pop_back();}
+                } restore{countReferences};
+                const auto source=expression(count,orderScopes);
+                const auto base=patternBaseType(source,count.get());
+                if(base!="unknown" && base!="smallint" && base!="integer" && base!="bigint" &&
+                   base!="numeric" && base!="real" && base!="double precision")
+                    throw DbError("42804",std::string("argument of ")+clause+" must be type bigint, not "+source);
+                coerceCaseInput(count,source,"bigint");
+                for(const auto& range:orderScopes.front())
+                    if(std::find(references.begin(),references.end(),range.occurrence)!=references.end())
+                        throw DbError("42P10",std::string("argument of ")+clause+" must not contain variables");
+            };
+            bindCount(select->offsetExpr,"OFFSET");
+            bindCount(select->limitExpr,"LIMIT");
+            if(select->fetchFirst && select->withTies && !select->limit && !select->signedFetchCount)
+                throw DbError("2201W","row count cannot be null in FETCH FIRST ... WITH TIES clause");
             if(select->command!=SqlCommand::Values)
                 for (auto& row : select->valuesRows) for (auto& value : row) expression(value, scopes);
             if (select->setOpRhs)
@@ -2300,6 +2353,7 @@ void Binder::rebase(Stmt& root, size_t offset) {
             for (auto& value : select->distinctOn) expr(value);
             expr(select->having); for (auto& order : select->orderBy) expr(order.expr);
             for (auto& row : select->valuesRows) for (auto& value : row) expr(value);
+            expr(select->limitExpr); expr(select->offsetExpr);
             for (auto& def : select->windowDefs) window(def);
         } else if (auto* insert = dynamic_cast<InsertStmt*>(&statement)) {
             for (auto& row : insert->values) for (auto& value : row) expr(value);

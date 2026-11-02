@@ -850,7 +850,10 @@ SELECT * FROM users ORDER BY AGE NULLS FIRST;
 真实 Main 入口还接入了普通无 LIMIT 单表查询中的多键、表达式键及不能使用单键物理快路径的受支持类型；
 单键物理快路径不为此改走类型化排序。这项入口扩展仍受现有类型化查询形状约束，不表示所有 SQL 都会进入同一排序器。
 虚拟生成列、有限行数 portal，以及未接入的 OR/其他旧分流仍按各自既有路径解释。
-聚合、GROUP BY/HAVING、UNION 等集合运算的 `SetSort`、窗口、哈希、JOIN 本身及结果接收器的完整内存治理仍开放；
+已接入的 `UNION ALL` 全局 `SetSort` 也使用相同的会话预算、完整类型快照和匿名段归并；
+存在非零静态 LIMIT、没有 WITH TIES 且 LIMIT+OFFSET 加法安全时保留有界候选，但仍计算两个分支所需的全部输入。
+浮点 NaN/Infinity/float4 精度和枚举次序使用实际绑定的比较规则；同行的输入 ordinal 只用于稳定输出。
+聚合、GROUP BY/HAVING、其他未接入的集合分流、窗口、哈希、JOIN 本身及结果接收器的完整内存治理仍开放；
 即使 JOIN 输出接入普通 `TypedSort`，预算也只约束其下游排序快照。
 普通类型化排序同样允许单个超大行与固定数量归并读头超出预算；分配器开销和批次稳定排序的临时工作区也不在拥有值的容量估算内。
 该估算约束批次及固定读头，不是全查询或全进程 RSS 上限。
@@ -858,7 +861,27 @@ SELECT * FROM users ORDER BY AGE NULLS FIRST;
 R303/R304/R305 继续遵守既有[暂缓边界](deferred-scope.md)。普通类型化排序的实现与性能证据见
 [普通类型化排序报告](performance-report-2026-10-30.md#普通类型化排序的预算与比较缓存2026-11-02)。
 
-会话 `SET [SESSION|LOCAL] work_mem` 现在驱动上述普通物理及普通类型化排序路径，支持 DEFAULT、FROM CURRENT、SHOW、RESET/RESET ALL/DISCARD ALL 与启动 options。
+普通 `VALUES` 查询支持自身的 ORDER BY 表达式及 LIMIT/OFFSET/FETCH 子句。输入各列先按共同类型绑定，
+排序表达式随后看到真实的 `column1`、`column2` 等输出列；这些名称不因此在 VALUES 输入表达式中可见。
+排序键可引用本层输出或通过标量子查询关联，复用实际执行上下文；落盘保留已经求值的隐藏键，WITH TIES 不重新执行键表达式。
+LIMIT/OFFSET 支持有实际声明类型的参数与表达式，转换为 bigint，每次执行先求 OFFSET 再求 LIMIT；
+OFFSET NULL 按零行处理，LIMIT NULL 表示不限行数；OFFSET/LIMIT 负数分别报 `2201X`/`2201W`。
+本层输出列不能作为计数变量，报 `42P10`；外层关联和子查询自身的局部列分别按真实作用域绑定。
+LIMIT 零不会执行行源或排序键，但仍求值计数表达式。表达式计数当前使用有预算的完整排序，尚未动态下推 Top-N。
+FETCH 此处保留原有整数与 NULL 字面量计数：NULL 配合 ONLY 不限行数，配合 WITH TIES 在分析时报 `2201W`；FETCH 表达式计数尚未实现。
+括号集合查询的全局表达式计数仍缺单独的执行路径，已解析到该形式时明确报 `0A000`，不会默默忽略计数；各 VALUES 分支自身的表达式计数按本段执行。
+未指定类型 OID 的计数参数推导尚不完整，不能据此宣称任意 PG Extended Query 参数组合通过。
+
+```sql
+VALUES (3, 'c'), (1, 'a'), (2, 'b')
+ORDER BY column1 + 1 DESC LIMIT 1 OFFSET 1;
+```
+
+查询结果中的实际绑定描述符继续携带枚举类型 OID、长度和 typmod，正常 text/binary 输出使用枚举标签；
+SQL NULL、空标签和文本 `NULL` 区分。该支持不等于枚举数组二进制输入/输出、任意自定义类型编解码或有限行数 portal 完成。
+实现、严格 PG 对照及资源/速度边界见[集合排序与 VALUES 报告](performance-report-2026-10-30.md#集合排序预算与-values-查询子句2026-11-02)。
+
+会话 `SET [SESSION|LOCAL] work_mem` 现在驱动上述普通物理、普通类型化及已接入的 UNION ALL/VALUES 排序路径，支持 DEFAULT、FROM CURRENT、SHOW、RESET/RESET ALL/DISCARD ALL 与启动 options。
 SQL 值范围为 64..2147483647 kB，支持 B/kB/MB/GB/TB（单位区分大小写）及按 PostgreSQL 规则舍入。
 普通 SET 在提交后保留，回滚取消；LOCAL 在事务结束时恢复，保存点回滚也恢复。块外 LOCAL 警告 25P01 且无持久效果，非法值仍报错。
 没有显式覆盖时跟随最新实例重载，启动 options 的重置默认值保留，FROM CURRENT 成为显式覆盖。排序打开后不改变其已截取的预算。

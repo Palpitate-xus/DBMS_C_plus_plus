@@ -854,6 +854,22 @@ struct SelectStmt : public Stmt {
     // barriers retain their ordinary projection/sort consumers.
     bool existsTargetPrunable = false;
 
+    // Grammar role survives even when LIMIT ALL has no executable cap or
+    // a negative FETCH count has no non-negative limit value.
+    bool hasRowCountClause = false;
+
+    // VALUES literal counts retain their signed grammar input separately
+    // from an executable non-negative cap. Ordinary SELECT count policy
+    // keeps its existing parser/runtime boundary.
+    std::optional<int64_t> signedLimitCount;
+    std::optional<int64_t> signedOffsetCount;
+
+    // Genuine VALUES count expressions retain the original expression tree
+    // and source provenance. Simple integer/NULL/ALL counts keep the fields
+    // above, including the existing executable cap used by bounded Sort.
+    ExprPtr limitExpr;
+    ExprPtr offsetExpr;
+
     SelectStmt() : Stmt(SqlCommand::Select) {}
     std::string toString() const override { return "SELECT"; }
 };

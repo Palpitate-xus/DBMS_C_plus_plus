@@ -37,6 +37,8 @@ struct PgColumnDescription {
     int32_t typeModifier = -1;
     int16_t formatCode = 0;      // text format
     std::string moneyLocale = "C"; // session lc_monetary for binary cash I/O
+    // Set only from the actual bound scalar type's catalog identity.
+    bool enumType = false;
 };
 
 class PostgresProtocol {

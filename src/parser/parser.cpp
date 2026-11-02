@@ -29,6 +29,8 @@ struct BindingParseContext {
 thread_local BindingParseContext* bindingParse = nullptr;
 thread_local std::string* declarationSyntaxError = nullptr;
 thread_local bool executeArgumentSyntaxOnly = false;
+thread_local bool rowCountExpressionSyntax = false;
+void validateExecuteSyntaxExpression(const Expr* expression, bool allowStar);
 struct DeclarationSyntaxAbort {};
 static void retainDeclarationSyntaxError(const DbError& error) {
     if(declarationSyntaxError) {
@@ -2788,6 +2790,8 @@ static WindowDef parseWindowDefinition(const std::vector<std::string>& tokens,si
 
 static ExprPtr parsePrimaryExprImpl(const std::vector<std::string>& tokens, size_t& pos) {
     if (pos >= tokens.size()) return nullptr;
+    if (rowCountExpressionSyntax &&
+        (tokens[pos] == ")" || tokens[pos] == "," || tokens[pos] == ";")) return nullptr;
     if (tokens[pos] == "[" || tokens[pos] == "]") return nullptr;
     if (SQLParser::toLower(tokens[pos]) == "default") {
         // DEFAULT is a grammar value, not a bare column. Its permitted
@@ -2928,7 +2932,8 @@ static ExprPtr parsePrimaryExprImpl(const std::vector<std::string>& tokens, size
         while (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "when") {
             ++pos;
             auto whenExpr = parseExpr(tokens, pos);
-            if (executeArgumentSyntaxOnly && (pos >= tokens.size() || SQLParser::toLower(tokens[pos]) != "then"))
+            if ((executeArgumentSyntaxOnly || rowCountExpressionSyntax) &&
+                (pos >= tokens.size() || SQLParser::toLower(tokens[pos]) != "then"))
                 throw DbError("42601", "CASE WHEN requires THEN");
             if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "then") ++pos;
             auto thenExpr = parseExpr(tokens, pos);
@@ -2940,7 +2945,8 @@ static ExprPtr parsePrimaryExprImpl(const std::vector<std::string>& tokens, size
             ++pos;
             caseExpr->elseExpr = parseExpr(tokens, pos);
         }
-        if (executeArgumentSyntaxOnly && (pos >= tokens.size() || SQLParser::toLower(tokens[pos]) != "end"))
+        if ((executeArgumentSyntaxOnly || rowCountExpressionSyntax) &&
+            (pos >= tokens.size() || SQLParser::toLower(tokens[pos]) != "end"))
             throw DbError("42601", "CASE requires END");
         if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "end") ++pos;
         return caseExpr;
@@ -2984,7 +2990,8 @@ static ExprPtr parsePrimaryExprImpl(const std::vector<std::string>& tokens, size
         // Check for subquery
         if (pos < tokens.size() &&
             (SQLParser::toLower(tokens[pos]) == "select" ||
-             SQLParser::toLower(tokens[pos]) == "with")) {
+             SQLParser::toLower(tokens[pos]) == "with" ||
+             SQLParser::toLower(tokens[pos]) == "values")) {
             std::string subq;
             int depth = 1;
             while (pos < tokens.size() && depth > 0) {
@@ -3681,6 +3688,76 @@ static std::unique_ptr<FromItem> parseDmlSourceList(const std::vector<std::strin
 // Clauses outside a parenthesized query or after a complete set expression
 // belong to that query root, not the rightmost SELECT body. This helper
 // consumes the original token stream so expression byte provenance survives.
+static std::string parseValuesRowCount(const std::vector<std::string>& tokens,
+                                      size_t& pos, SelectStmt& statement, bool offset) {
+    const auto word = [&](size_t index) {
+        return index < tokens.size() ? SQLParser::toLower(tokens[index]) : std::string{};
+    };
+    const size_t begin = pos;
+    size_t end = begin;
+    std::vector<std::string> delimiters;
+    for (; end < tokens.size(); ++end) {
+        const auto& token = tokens[end];
+        const auto next = word(end);
+        const bool attribute = end != begin && tokens[end - 1] == ".";
+        const bool rowSuffix = offset && (next == "row" || next == "rows") &&
+            !(next == "row" && end + 1 < tokens.size() && tokens[end + 1] == "(");
+        if (delimiters.empty() && (token == ";" || token == "," || token == ")" ||
+                (!attribute &&
+                (next == "limit" || next == "offset" || next == "fetch" || next == "for" ||
+                 next == "order" || next == "union" || next == "intersect" || next == "except" ||
+                 rowSuffix)))) break;
+        if (token == "(" || token == "[") delimiters.push_back(token);
+        else if (token == ")" || token == "]") {
+            if (delimiters.empty() || delimiters.back() != (token == ")" ? "(" : "["))
+                return "invalid delimiter in row count expression";
+            delimiters.pop_back();
+        }
+    }
+    if (begin == end || !delimiters.empty()) return "row count requires a complete expression";
+    if (end == begin + 1 && word(begin) == "null") {
+        pos = end;
+        if (offset) statement.offset = 0;
+        else statement.limit.reset();
+        return {};
+    }
+    if (!offset && end == begin + 1 && word(begin) == "all") {
+        pos = end;
+        return {};
+    }
+    if (word(begin) == "all" || word(begin) == "default")
+        return "invalid row count expression";
+    size_t integerEnd = begin;
+    int64_t count = 0;
+    if (parseFetchInteger(tokens, integerEnd, count) && integerEnd == end) {
+        pos = end;
+        auto& signedCount = offset ? statement.signedOffsetCount : statement.signedLimitCount;
+        auto& executableCount = offset ? statement.offset : statement.limit;
+        signedCount = count;
+        if (count >= 0) executableCount = static_cast<size_t>(count);
+        else executableCount.reset();
+        return {};
+    }
+    const bool previousSyntax = rowCountExpressionSyntax;
+    struct RestoreCountSyntax {
+        bool previous;
+        ~RestoreCountSyntax() { rowCountExpressionSyntax = previous; }
+    } restoreSyntax{previousSyntax};
+    rowCountExpressionSyntax = true;
+    ExprPtr expression;
+    try {
+        expression = parseSimpleExpr(tokens, pos);
+        if (!expression || pos != end) return "row count requires a complete expression";
+        validateExecuteSyntaxExpression(expression.get(), false);
+    }
+    catch (const DbError& error) {
+        if (error.sqlState() != "42601") throw;
+        return "invalid row count expression";
+    }
+    (offset ? statement.offsetExpr : statement.limitExpr) = std::move(expression);
+    return {};
+}
+
 static std::string parseQueryRootClauses(const std::vector<std::string>& tokens,
                                         size_t& pos, SelectStmt& statement) {
     const auto word = [&](size_t index) { return index < tokens.size() ? SQLParser::toLower(tokens[index]) : std::string{}; };
@@ -3709,31 +3786,48 @@ static std::string parseQueryRootClauses(const std::vector<std::string>& tokens,
         }
         if (statement.orderBy.empty() || (pos && tokens[pos - 1] == ",")) return "ORDER BY requires an expression";
     }
-    bool sawLimit = statement.limit.has_value() || statement.signedFetchCount.has_value(), sawOffset = statement.offset.has_value();
+    bool sawLimit = statement.limit.has_value() || statement.signedFetchCount.has_value() ||
+        statement.signedLimitCount.has_value() || statement.limitExpr;
+    bool sawOffset = statement.offset.has_value() || statement.signedOffsetCount.has_value() || statement.offsetExpr;
     while (pos < tokens.size()) {
         const auto clause = word(pos);
         if (clause == "limit") {
             if (sawLimit) return "multiple LIMIT/FETCH clauses";
+            statement.hasRowCountClause = true;
             sawLimit = true; ++pos;
-            if (word(pos) == "all") ++pos;
-            else {
+            if (statement.command == SqlCommand::Values) {
+                if (auto error = parseValuesRowCount(tokens, pos, statement, false); !error.empty()) return error;
+            } else if (word(pos) == "all") ++pos;
+            else if (word(pos) == "null") {
+                ++pos; statement.limit.reset(); statement.signedLimitCount.reset();
+            } else {
                 size_t count = 0;
                 if (!parseNonNegativeInteger(tokens, pos, count)) return "LIMIT requires a non-negative integer or ALL";
                 statement.limit = count;
             }
         } else if (clause == "offset") {
             if (sawOffset) return "multiple OFFSET clauses";
+            statement.hasRowCountClause = true;
             sawOffset = true; ++pos;
-            size_t count = 0;
-            if (!parseNonNegativeInteger(tokens, pos, count)) return "OFFSET requires a non-negative integer";
-            statement.offset = count;
+            if (statement.command == SqlCommand::Values) {
+                if (auto error = parseValuesRowCount(tokens, pos, statement, true); !error.empty()) return error;
+            } else if (word(pos) == "null") {
+                ++pos; statement.offset = 0; statement.signedOffsetCount.reset();
+            } else {
+                size_t count = 0;
+                if (!parseNonNegativeInteger(tokens, pos, count)) return "OFFSET requires a non-negative integer";
+                statement.offset = count;
+            }
             if (word(pos) == "row" || word(pos) == "rows") ++pos;
         } else if (clause == "fetch") {
             if (sawLimit) return "multiple LIMIT/FETCH clauses";
+            statement.hasRowCountClause = true;
             sawLimit = true; ++pos;
             if (word(pos) != "first" && word(pos) != "next") return "FETCH requires FIRST or NEXT";
             ++pos; statement.fetchFirst = true;
-            if (word(pos) == "row" || word(pos) == "rows") {statement.limit = 1;statement.signedFetchCount=1;}
+            if (word(pos) == "null") {
+                ++pos; statement.limit.reset(); statement.signedFetchCount.reset();
+            } else if (word(pos) == "row" || word(pos) == "rows") {statement.limit = 1;statement.signedFetchCount=1;}
             else {
                 int64_t count=0;
                 if(!parseFetchInteger(tokens,pos,count))return "FETCH requires a signed integer count";
@@ -3801,12 +3895,14 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
             r.error = "set operation operand must be SELECT";
             return r;
         }
-        if (tokens.front() != "(" && (!leftSelect->orderBy.empty() || leftSelect->limit || leftSelect->offset || !leftSelect->locking.empty())) {
+        if (tokens.front() != "(" && (!leftSelect->orderBy.empty() || leftSelect->limit || leftSelect->offset ||
+            leftSelect->hasRowCountClause || leftSelect->signedFetchCount || !leftSelect->locking.empty())) {
             r.error = "set operand with ORDER/LIMIT requires parentheses";
             return r;
         }
         if (tail == tokens.size() && leftSelect->setOp == SetOp::None && !leftSelect->setOpLhs &&
-            leftSelect->orderBy.empty() && !leftSelect->limit && !leftSelect->offset && leftSelect->locking.empty()) {
+            leftSelect->orderBy.empty() && !leftSelect->limit && !leftSelect->offset &&
+            !leftSelect->hasRowCountClause && !leftSelect->signedFetchCount && leftSelect->locking.empty()) {
             leftSelect->setOp = setLocation.op;
             leftSelect->setOpAll = setLocation.all;
             leftSelect->setOpRhs = std::move(right.stmt);
@@ -4215,6 +4311,7 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
     const auto rowClause = toLower(tokens[pos]);
     if (rowClause == "limit") {
         if (sawLimit) { r.error = "multiple LIMIT/FETCH clauses"; return r; }
+        stmt->hasRowCountClause = true;
         sawLimit = true;
         ++pos;
         if (pos >= tokens.size()) {
@@ -4223,6 +4320,8 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
         }
         if (toLower(tokens[pos]) == "all") {
             ++pos;
+        } else if (toLower(tokens[pos]) == "null") {
+            ++pos; stmt->limit.reset();
         } else {
             size_t limit = 0;
             if (!parseNonNegativeInteger(tokens, pos, limit)) {
@@ -4240,18 +4339,23 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
     }
     if (rowClause == "offset") {
         if (sawOffset) { r.error = "multiple OFFSET clauses"; return r; }
+        stmt->hasRowCountClause = true;
         sawOffset = true;
         ++pos;
         if (pos >= tokens.size()) {
             r.error = "OFFSET requires a non-negative integer";
             return r;
         }
-        size_t offset = 0;
-        if (!parseNonNegativeInteger(tokens, pos, offset)) {
-            r.error = "OFFSET requires a non-negative integer";
-            return r;
+        if (toLower(tokens[pos]) == "null") {
+            ++pos; stmt->offset = 0;
+        } else {
+            size_t offset = 0;
+            if (!parseNonNegativeInteger(tokens, pos, offset)) {
+                r.error = "OFFSET requires a non-negative integer";
+                return r;
+            }
+            stmt->offset = offset;
         }
-        stmt->offset = offset;
         if (pos < tokens.size() &&
             (toLower(tokens[pos]) == "row" || toLower(tokens[pos]) == "rows")) ++pos;
         continue;
@@ -4259,6 +4363,7 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
     // FETCH { FIRST | NEXT } [ count ] { ROW | ROWS } { ONLY | WITH TIES }
     if (rowClause == "fetch") {
         if (sawLimit) { r.error = "multiple LIMIT/FETCH clauses"; return r; }
+        stmt->hasRowCountClause = true;
         sawLimit = true;
         ++pos;
         if (pos >= tokens.size() || (toLower(tokens[pos]) != "first" && toLower(tokens[pos]) != "next")) {
@@ -4268,7 +4373,9 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
         ++pos;
         stmt->fetchFirst = true;
 
-        if (pos < tokens.size() && (toLower(tokens[pos]) == "row" || toLower(tokens[pos]) == "rows")) {
+        if (pos < tokens.size() && toLower(tokens[pos]) == "null") {
+            ++pos; stmt->limit.reset(); stmt->signedFetchCount.reset();
+        } else if (pos < tokens.size() && (toLower(tokens[pos]) == "row" || toLower(tokens[pos]) == "rows")) {
             stmt->limit = 1;stmt->signedFetchCount=1;
         } else {
             if (pos >= tokens.size()) {
@@ -5153,13 +5260,6 @@ ParseResult SQLParser::parseValues(const std::string& sql) {
         stmt->valuesRows.push_back(std::move(row));
 
         if (pos == tokens.size()) break;
-        if (tokens[pos] == ";") {
-            ++pos;
-            if (pos != tokens.size()) {
-                return fail("unexpected token after VALUES statement");
-            }
-            break;
-        }
         if (tokens[pos] == ",") {
             ++pos;
             if (pos >= tokens.size() || tokens[pos] == ";") {
@@ -5167,10 +5267,21 @@ ParseResult SQLParser::parseValues(const std::string& sql) {
             }
             continue;
         }
-        return fail("unexpected token after VALUES statement: " +
-                    tokens[pos]);
+        break;
     }
 
+    // VALUES is a genuine query primary. Its trailing query clauses belong
+    // to this same node, including inside a parenthesized set operand. Keep
+    // the original token stream so value and ORDER expression spans survive.
+    if (const auto error = parseQueryRootClauses(tokens, pos, *stmt); !error.empty()) {
+        r.error = error;
+        r.sqlState = "42601";
+        return r;
+    }
+    if (stmt->withTies && stmt->orderBy.empty()) {
+        r.error = "WITH TIES cannot be specified without ORDER BY clause";
+        r.sqlState = "42601"; return r;
+    }
     r.success = true;
     r.stmt = std::move(stmt);
     return r;
@@ -7490,6 +7601,8 @@ void validateExecuteSyntaxQuery(const std::string& sql) {
     if (query->having) validateExecuteSyntaxExpression(query->having.get());
     for (const auto& item : query->groupBy) validateExecuteSyntaxExpression(item.get());
     for (const auto& item : query->orderBy) validateExecuteSyntaxExpression(item.expr.get());
+    if (query->limitExpr) validateExecuteSyntaxExpression(query->limitExpr.get());
+    if (query->offsetExpr) validateExecuteSyntaxExpression(query->offsetExpr.get());
 }
 
 void validateExecuteSyntaxExpression(const Expr* expression, bool allowStar) {

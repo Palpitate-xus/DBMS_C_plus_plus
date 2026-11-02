@@ -389,6 +389,7 @@ struct QueryResult {
     std::vector<std::vector<bool>> nulls;
     std::vector<QueryNotice> notices;
     std::string commandTag;
+    QueryRowDescriptor rowDescriptor;
 };
 
 struct ProtocolPortal {
@@ -1634,6 +1635,7 @@ struct ProtocolPhysicalSource {
     Oid relationOid = INVALID_OID;
     std::vector<PgAttributeRow> attributes;
     std::vector<std::optional<std::string>> projections;
+    std::set<Oid> scalarEnumOids;
 };
 
 ProtocolPhysicalSource protocolPhysicalSourceFromQuery(const std::string& sql,
@@ -1731,6 +1733,7 @@ ProtocolPhysicalSource protocolPhysicalSourceFromQuery(const std::string& sql,
                         const PgTypeRow* type = nullptr;
                         for (const auto& candidate : catalog.types)
                             if (candidate.oid == valueAttribute.atttypid) { type = &candidate; break; }
+                        if (type && type->typtype == 'e') result.scalarEnumOids.insert(type->oid);
                         if (!type || type->typtype != 'd') break;
                         if (ancestry.size() >= 64 || !ancestry.insert(type->oid).second ||
                             type->typbasetype == INVALID_OID)
@@ -1816,6 +1819,56 @@ int16_t protocolTypeSize(uint32_t typeOid, const Column& column) {
     const auto declared = lengths.find(typeOid);
     if (declared != lengths.end()) return declared->second;
     return column.isVariableLength ? -1 : static_cast<int16_t>(column.dsize);
+}
+
+void applyBoundProtocolDescriptor(std::vector<PgColumnDescription>& columns,
+                                  const QueryRowDescriptor& descriptor,
+                                  const Session& session) {
+    if (descriptor.empty()) return;
+    if (descriptor.size() != columns.size())
+        throw DbError("XX000", "protocol output width differs from its bound descriptor");
+    static const auto builtinTypes = [] {
+        std::unordered_map<Oid, PgTypeRow> result;
+        for (const auto& type : CatalogManager::builtinTypeRows())
+            if (type.typnamespace == 11) result.emplace(type.oid, type);
+        return result;
+    }();
+    std::optional<CatalogManager::MetadataSnapshot> catalog;
+    const auto findType = [&](Oid oid) -> const PgTypeRow* {
+        const auto builtin = builtinTypes.find(oid);
+        if (builtin != builtinTypes.end()) return &builtin->second;
+        if (!catalog) catalog = g_engine.catalogService().metadataSnapshot(session.currentDB);
+        const auto found = std::find_if(catalog->types.begin(), catalog->types.end(),
+            [&](const auto& type) { return type.oid == oid; });
+        return found == catalog->types.end() ? nullptr : &*found;
+    };
+    for (size_t i = 0; i < columns.size(); ++i) {
+        const auto& field = descriptor[i];
+        if (field.typeOid == INVALID_OID) continue;
+        auto& column = columns[i];
+        column.typeOid = field.typeOid;
+        column.typeModifier = field.typeMod;
+        column.enumType = false;
+        std::set<Oid> ancestry;
+        for (;;) {
+            const auto* type = findType(column.typeOid);
+            if (!type) throw DbError("42704", "bound output type does not exist");
+            column.typeSize = type->typlen;
+            if (type->typtype != 'd') {
+                column.enumType = type->typtype == 'e';
+                break;
+            }
+            if (ancestry.size() >= 64 || !ancestry.insert(type->oid).second ||
+                type->typbasetype == INVALID_OID)
+                throw DbError("XX001", "invalid domain catalog ancestry");
+            // Keep the existing wire representation of domains: the actual
+            // catalog OID supplies its base and inherited modifier, without
+            // resolving a spelling through the current search_path.
+            if (column.typeModifier < 0 && type->typtypmod >= 0)
+                column.typeModifier = type->typtypmod;
+            column.typeOid = type->typbasetype;
+        }
+    }
 }
 
 int32_t protocolDeclaredTemporalPrecision(const Expr* expression, const Session& session,
@@ -2086,6 +2139,7 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
                                                           const QueryRowDescriptor* preparedOutput = nullptr) {
     std::vector<PgColumnDescription> descriptions;
     descriptions.reserve(result.columns.size());
+    std::optional<QueryRowDescriptor> physicalEnumOutput;
 
     const auto valuesDeclaration=protocolValuesDeclaration(sql,session,{},preparedOutput);
     if(valuesDeclaration && valuesDeclaration->size()!=result.columns.size())
@@ -2235,6 +2289,15 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
                     }
                     if (temporalPrecisionMatchesPhysical)
                         description.typeModifier = column.typeMod;
+                    if (!column.isArray && source.scalarEnumOids.count(attribute.atttypid)) {
+                        // Only this AST's genuine physical projection and
+                        // matched catalog attribute can supply the identity.
+                        // An output alias or type spelling cannot select it.
+                        if (!physicalEnumOutput) physicalEnumOutput.emplace(result.columns.size());
+                        auto& field = (*physicalEnumOutput)[columnIndex];
+                        field.typeOid = attribute.atttypid;
+                        field.typeMod = attribute.atttypmod;
+                    }
                     break;
                 }
             }
@@ -2269,6 +2332,10 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
         }
     }
     retainProtocolArrayConstructorModifiers(sql,session,descriptions,nullptr);
+    if (physicalEnumOutput) applyBoundProtocolDescriptor(descriptions, *physicalEnumOutput, session);
+    if (preparedOutput) applyBoundProtocolDescriptor(descriptions, *preparedOutput, session);
+    else if (viewOutput) applyBoundProtocolDescriptor(descriptions, *viewOutput, session);
+    else if (valuesDeclaration) applyBoundProtocolDescriptor(descriptions, *valuesDeclaration, session);
     return descriptions;
 }
 
@@ -2302,7 +2369,7 @@ bool describePreparedSetResult(const std::string& sql, Session& session,
             // string data or a search for UNION in rendered expression text.
             const auto origin = SQLParser::tokenize(literal->value);
             if (origin.size()>1 && origin.front()=="(" &&
-                (SQLParser::toLower(origin[1])=="select" || SQLParser::toLower(origin[1])=="with")) {
+                (SQLParser::toLower(origin[1])=="select" || SQLParser::toLower(origin[1])=="with" || SQLParser::toLower(origin[1])=="values")) {
                 const auto parsedChild=parser.parseForBinding(literal->value);
                 return parsedChild.isValid() && setQuery(dynamic_cast<const SelectStmt*>(parsedChild.stmt.get()));
             }
@@ -2340,6 +2407,7 @@ bool describePreparedSetResult(const std::string& sql, Session& session,
     // Set outputs have no physical table/attribute origin, even when their
     // label happens to name the left branch's actual physical column.
     columns = describeProtocolColumns(shape, std::string{}, session);
+    applyBoundProtocolDescriptor(columns, prepared.output, session);
     return !columns.empty();
 }
 
@@ -2359,7 +2427,7 @@ bool describePreparedQueryHostResult(const std::string& sql, Session& session,
             const auto origin = SQLParser::tokenize(literal->value);
             return origin.size() > 1 && origin.front() == "(" &&
                 (SQLParser::toLower(origin[1]) == "select" ||
-                 SQLParser::toLower(origin[1]) == "with");
+                 SQLParser::toLower(origin[1]) == "with" || SQLParser::toLower(origin[1]) == "values");
         }
         if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(value))
             return queryChild(binary->left.get()) ||
@@ -2396,6 +2464,7 @@ bool describePreparedQueryHostResult(const std::string& sql, Session& session,
     // Source-free expression outputs cannot borrow a child table's physical
     // attribute origin merely because their labels happen to match it.
     columns=describeProtocolColumns(shape,std::string{},session);
+    applyBoundProtocolDescriptor(columns, prepared.output, session);
     return !columns.empty();
 }
 
@@ -2528,6 +2597,7 @@ void retainProtocolArrayConstructorModifiers(const std::string& sql,
             field.type.compare(field.type.size()-2,2,"[]")!=0) continue;
         columns[i].typeModifier=field.typeMod;
     }
+    applyBoundProtocolDescriptor(columns, prepared.output, session);
 }
 
 // A finite computed-output query host, separate from scalar-signature and
@@ -2676,6 +2746,7 @@ bool describePreparedOrdinarySourceResult(const std::string& sql, Session& sessi
     columns.front().typeModifier=field.typeMod;
     Column declared;declared.dataType=field.type;declared.isVariableLength=true;
     columns.front().typeSize=protocolTypeSize(oid,declared);
+    applyBoundProtocolDescriptor(columns, prepared.output, session);
     return true;
 }
 
@@ -2734,6 +2805,7 @@ bool describePreparedRecursiveCteResult(const std::string& sql,Session& session,
             }
         }
     }
+    applyBoundProtocolDescriptor(columns, prepared.output, session);
     return !columns.empty();
 }
 
@@ -2775,6 +2847,7 @@ bool describePreparedExplainResult(const std::string& sql, Session& session,
     QueryResult shape;
     for(const auto& field:prepared.output){shape.columns.push_back(field.name);shape.columnTypes.push_back(field.type);}
     columns=describeProtocolColumns(shape,std::string{},session);
+    applyBoundProtocolDescriptor(columns, prepared.output, session);
     return !columns.empty();
 }
 
@@ -2882,7 +2955,7 @@ bool hasProtocolScalarSignatureCall(const Stmt* statement,const std::string& dat
             // Leave that owner intact, and never inspect arbitrary string data.
             const auto origin=SQLParser::tokenize(literal->value);
             if(origin.size()>1 && origin.front()=="(" &&
-               (SQLParser::toLower(origin[1])=="select" || SQLParser::toLower(origin[1])=="with"))return false;
+               (SQLParser::toLower(origin[1])=="select" || SQLParser::toLower(origin[1])=="with" || SQLParser::toLower(origin[1])=="values"))return false;
         }
         return true;
     };
@@ -3000,7 +3073,13 @@ void inferProtocolConcatParameters(const std::string& sql,Session& session,
     // validation, even with no unknown parameters. Do this before emitting
     // ParseComplete; metadata preparation never executes its routines/rows.
     SQLParser parser;const auto parsed=parser.parseForBinding(sql);
+    // The VALUES clause parser supplies its syntax diagnostic structurally.
+    // Reject it at this existing metadata phase; malformed counts must not
+    // become a successful retained declaration or reach row execution.
+    if(!parsed.isValid() && parsed.sqlState=="42601" && SQLParser::classify(sql)==SqlCommand::Values)
+        throw DbError(parsed.sqlState,parsed.error);
     if(!parsed.isValid() || !dynamic_cast<const SelectStmt*>(parsed.stmt.get()))return;
+    bool valuesCountExpressions=false;
     std::function<void(const Expr*)> observe;
     std::function<void(const Expr*)> expression;
     std::function<void(const Stmt*)> statement;
@@ -3036,10 +3115,13 @@ void inferProtocolConcatParameters(const std::string& sql,Session& session,
     };
     statement=[&](const Stmt* value) {
         const auto* select=dynamic_cast<const SelectStmt*>(value);if(!select)return;
+        valuesCountExpressions=valuesCountExpressions || (select->command==SqlCommand::Values &&
+            (select->limitExpr || select->offsetExpr));
         for(const auto& cte:select->ctes)statement(cte.query.get());
         statement(select->setOpLhs.get());statement(select->setOpRhs.get());source(select->fromClause.get());
         for(const auto& item:select->selectList)expression(item.expr.get());
         expression(select->whereClause.get());expression(select->having.get());
+        expression(select->limitExpr.get());expression(select->offsetExpr.get());
         for(const auto& key:select->groupBy)expression(key.get());
         for(const auto& key:select->orderBy)expression(key.expr.get());
         for(const auto& row:select->valuesRows)for(const auto& member:row)expression(member.get());
@@ -3049,11 +3131,15 @@ void inferProtocolConcatParameters(const std::string& sql,Session& session,
         if(const auto* binary=dynamic_cast<const BinaryOpExpr*>(value))
             concatenation=concatenation || binary->op=="||";
     };
-    statement(parsed.stmt.get());if(!concatenation)return;
+    statement(parsed.stmt.get());if(!concatenation && !valuesCountExpressions)return;
     auto* previous=currentSession();setCurrentSession(&session);
     struct Restore {Session* previous;~Restore(){setCurrentSession(previous);}} restore{previous};
     const auto prepared=g_engine.prepareBoundQuery(session.currentDB,sql,
         protocolMetadataParameters(session,parameterOids));
+    // New VALUES count syntax has ordinary Parse-time analysis, using the
+    // actual input declarations. Do not infer unknown wire inputs from an
+    // assumed BIGINT target or add a planning/evaluation phase here.
+    if(!concatenation)return;
     struct Input {size_t begin,position;uint32_t oid;};
     std::vector<Input> selected;
     const auto capture=[&](const Expr* input,std::string target) {
@@ -3459,6 +3545,7 @@ bool prepareProtocolBitBetween(const std::string& sql, Session& session,
         QueryResult shape;
         for (const auto& field : prepared.output) {shape.columns.push_back(field.name); shape.columnTypes.push_back(field.type);}
         *columns = describeProtocolColumns(shape, std::string{}, session);
+        applyBoundProtocolDescriptor(*columns, prepared.output, session);
     }
     return true;
 }
@@ -3797,6 +3884,7 @@ bool describePreparedResultShape(const std::string& sql, Session& session,
                     protocolTypeSize(columns[i].typeOid, Column{});
             }
         }
+        if (declaration) applyBoundProtocolDescriptor(columns, *declaration, session);
         return !columns.empty();
     }
     const std::vector<SelectItem>* projections = nullptr;
@@ -5915,10 +6003,12 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
         result.resultSet = true;
         result.columns = structuredDml.columns;
         result.columnTypes = structuredDml.columnTypes;
+        result.rowDescriptor = structuredDml.rowDescriptor;
         result.rows = structuredDml.rows;
         result.nulls = structuredDml.nulls;
         result.columnDescriptions = ordinarySourceColumns.empty()
             ? describeProtocolColumns(result, sql, session) : ordinarySourceColumns;
+        applyBoundProtocolDescriptor(result.columnDescriptions, result.rowDescriptor, session);
         result.commandTag = structuredDml.commandTag;
         dbms::recordQueryExecution(sql, elapsedMs, session.currentDB, true,
                                    result.rows.size());
@@ -5948,6 +6038,7 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
                 if (!structuredDml.columns.empty())
                     result.columns = structuredDml.columns;
                 result.columnTypes = structuredDml.columnTypes;
+                result.rowDescriptor = structuredDml.rowDescriptor;
             }
             for (size_t i = 1; i < lines.size(); ++i) {
                 // The legacy executor prints one column as the complete line.
@@ -5998,6 +6089,7 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
         result.columnDescriptions = !explainColumns.empty()
             ? explainColumns : !ordinarySourceColumns.empty()
                 ? ordinarySourceColumns : describeProtocolColumns(result, sql, session);
+        applyBoundProtocolDescriptor(result.columnDescriptions, result.rowDescriptor, session);
     }
     result.commandTag =
         structuredDml.available && structuredDml.metadataOnly &&

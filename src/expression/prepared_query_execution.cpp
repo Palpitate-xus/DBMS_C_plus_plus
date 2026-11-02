@@ -1553,6 +1553,7 @@ void PreparedQueryExecution::indexStatement(const Stmt* statement, const Stmt* p
         for (const auto& expr : node->distinctOn) value(expr);
         for (const auto& order : node->orderBy) value(order.expr);
         for (const auto& row : node->valuesRows) for (const auto& expr : row) value(expr);
+        value(node->limitExpr); value(node->offsetExpr);
         for (const auto& def : node->windowDefs) window(def);
     } else if (const auto* node = dynamic_cast<const InsertStmt*>(statement)) {
         for (const auto& row : node->values) for (const auto& expr : row) value(expr);

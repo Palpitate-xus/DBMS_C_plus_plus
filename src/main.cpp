@@ -20223,7 +20223,8 @@ static pair<bool, bool> scalarQueryRoles(const dbms::Expr* expression, bool scal
         const bool query = expression->preparedSubquery ||
             (tokens.size() > 1 && tokens[0] == "(" &&
              (dbms::SQLParser::toLower(tokens[1]) == "select" ||
-              dbms::SQLParser::toLower(tokens[1]) == "with"));
+              dbms::SQLParser::toLower(tokens[1]) == "with" ||
+              dbms::SQLParser::toLower(tokens[1]) == "values"));
         return {query && scalar, query && !scalar};
     }
     pair<bool, bool> result{};
@@ -21204,7 +21205,7 @@ class PreparedWithDmlRuntime {
         if(!selectBodyOnly)if(auto set=dbms::QueryPlanner::buildPreparedSetReturningPlan(&g_engine,session_.currentDB,
             query_,select,outer,reader(frames),cursorFactory(frames),planRootConstants))return set;
         if(select->command==dbms::SqlCommand::Values) {
-            if(!select->orderBy.empty() || select->whereClause || (!selectBodyOnly && select->setOp!=dbms::SetOp::None))
+            if(select->whereClause || (!selectBodyOnly && select->setOp!=dbms::SetOp::None))
                 throw dbms::DbError("0A000","WITH VALUES requires additional clause lowering");
             auto execution=executionProvider?executionProvider():make_shared<dbms::PreparedQueryExecution>(query_,&g_engine,session_.currentDB);
             if(!executionProvider) {
@@ -21213,6 +21214,11 @@ class PreparedWithDmlRuntime {
             }
             if(planRootConstants && !executionProvider)execution->planStatementConstants(select);
             for(auto& row:select->valuesRows)for(auto& value:row)execution->prepareExpression(value.get());
+            if(!selectBodyOnly)for(auto& order:select->orderBy)execution->prepareExpression(order.expr.get());
+            if(!selectBodyOnly) {
+                if(select->limitExpr)execution->prepareExpression(select->limitExpr.get());
+                if(select->offsetExpr)execution->prepareExpression(select->offsetExpr.get());
+            }
             execution->prepareChildCursors();
             const auto descriptor=selectBodyOnly?query_->setOperationInputs.at(select).left:output(select);
             auto source=make_unique<dbms::PreparedSourceRowsOp>(descriptor,[select,execution,executionProvider,outer,descriptor](size_t index,vector<dbms::ExprValue>& cells){
@@ -21231,7 +21237,9 @@ class PreparedWithDmlRuntime {
                 }
                 return true;
             });
-            return source;
+            return dbms::QueryPlanner::applyPreparedValuesClauses(&g_engine,session_.currentDB,query_,select,std::move(source),
+                [execution,executionProvider]{return executionProvider?executionProvider():execution;},
+                [outer]{return outer;},selectBodyOnly);
         }
         dbms::TableSchema schema;dbms::OpPtr source;
         if(!select->fromClause) {
@@ -21451,6 +21459,7 @@ public:
             evaluated.throwIfFailed();
             if(!evaluated.structuredRowsAvailable)throw dbms::DbError("XX000","prepared CASE query lost typed rows");
             dbms::DmlResult result;result.available=true;
+            result.rowDescriptor=output(readRoot_);
             for(const auto& column:output(readRoot_)) {
                 result.columns.push_back(column.name);
                 result.columnTypes.push_back(column.type=="unknown"?"text":column.type);
@@ -21604,6 +21613,7 @@ static bool executePreparedInputQuery(const string& sql, const vector<string>& a
                 result.columns[i] = query->output[i].name;
                 result.columnTypes[i] = query->output[i].type;
             }
+            result.rowDescriptor=query->output;
         }
     }
     if (result.available) dbms::publishLastDmlResult(std::move(result));
@@ -22201,8 +22211,8 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
     dbms::publishLastDmlResult(std::move(result));handled=true;return false;
 }
 
-// Plain VALUES keeps its established host-expression consumer. A genuine
-// WITH/set query must retain its complete AST, lexical CTEs and typed rows.
+// Plain VALUES keeps its established host-expression consumer. Query clauses
+// and genuine WITH/set queries retain their AST, scopes and typed producer.
 static bool handlePreparedValuesEnvelope(const string& raw, Session& session,
                                          bool& handled) {
     handled = false;
@@ -22210,7 +22220,9 @@ static bool handlePreparedValuesEnvelope(const string& raw, Session& session,
     const auto parsed = parser.parseForBinding(raw);
     const auto* select = parsed.isValid()
         ? dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()) : nullptr;
-    if (!select || (select->ctes.empty() && select->setOp == dbms::SetOp::None)) return false;
+    const bool valuesClauses=select && select->command==dbms::SqlCommand::Values &&
+        (!select->orderBy.empty() || select->hasRowCountClause);
+    if (!select || (!valuesClauses && select->ctes.empty() && select->setOp == dbms::SetOp::None)) return false;
     if (!checkDB(session)) { handled = true; return true; }
     auto query = make_shared<dbms::PreparedQuery>(prepareWindowSourceQuery(session, raw));
     PreparedWithDmlRuntime runtime(session, std::move(query));

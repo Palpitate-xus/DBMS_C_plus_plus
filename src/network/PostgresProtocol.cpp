@@ -216,6 +216,12 @@ bool encodeBinaryArray(const std::string& value, const PgColumnDescription& colu
 bool encodeBinaryValue(const std::string& value, const PgColumnDescription& column,
                        std::vector<uint8_t>& encoded) {
     try {
+        // enumsend carries the label bytes. The result descriptor's actual
+        // catalog type admits this scalar codec; arbitrary OIDs do not.
+        if (column.enumType) {
+            encoded.insert(encoded.end(), value.begin(), value.end());
+            return true;
+        }
         // Only genuine immutable builtin catalog identities are admitted here.
         // A result name or an arbitrary user OID cannot select an array codec.
         // This shared bootstrap producer does not acquire a live catalog or do I/O.

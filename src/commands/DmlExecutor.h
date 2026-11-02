@@ -39,6 +39,9 @@ struct DmlResult {
     // value; only a true entry here is sent as a protocol NULL.
     std::vector<std::vector<bool>> nulls;
     std::string commandTag;
+    // Actual bound output metadata owned by this result. Empty retains the
+    // legacy declaration path; no prepared-query or runtime frame is borrowed.
+    QueryRowDescriptor rowDescriptor;
 };
 
 enum class StructuredSetOperation { Union, Intersect, Except };
