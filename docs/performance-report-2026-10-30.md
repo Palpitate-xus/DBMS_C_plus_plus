@@ -628,6 +628,8 @@ python3 scripts/benchmark_topn.py \
 
 ## 最终归并按需输出与排序绑定恢复（2026-11-02）
 
+以下是 `471dad3f`→`049c0bce` 批次的历史记录；会话 SET 的当时缺口已在[后续批次](#会话工作内存与实际排序预算2026-11-02)补充，其他原范围和数据保持。
+
 基于 `471dad3f`，进一步参考 [PostgreSQL 18 tuplesort 的最终归并](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/utils/sort/tuplesort.c)：
 顺序访问的消费者不必把最后一个完整归并结果重新写入临时文件。普通物理 Sort 现在只完成必要中间轮次，剩余至多 2–16 个段时保留有限读头和堆，按 `next()` 合并输出。
 输入及必要排序键仍在输出前全部消费/求值；不把这个改动描述为跳过输入或扩展所有排序分流。
@@ -712,6 +714,119 @@ C++17/O2、ICU/zlib/TLS stub、耐久性、数据格式和 socket 期限保持�
 `protocol-reference.json`、`existing-deferred-comparison.json`、`main-sort-crash-final.json`、`operations/operations.json`、
 `mixed-controls.json`、`merge-benchmark.json`、`latency-{default,low64}/comparison.json`、构建日志及 `final-provenance.json`。
 复现沿用上一节脚本，将 `--before` 改为本批冻结的 `471dad3f` 程序；新原生源码位于 tests，包装 syscall 的链接注解由现有构建入口读取。
+
+## 会话工作内存与实际排序预算（2026-11-02）
+
+基于 `049c0bce`，按 [PostgreSQL SET](https://www.postgresql.org/docs/18/sql-set.html)、
+[RESET](https://www.postgresql.org/docs/18/sql-reset.html)及
+[work_mem](https://www.postgresql.org/docs/18/runtime-config-resource.html)的会话/事务语义，补齐原来仅有实例配置的运行接线。
+普通物理排序的算法与前一批保持同一职责；这次让每个连接选择自己的预算，不将设置成功等同所有算子均受控。
+
+- 支持 `SET [SESSION|LOCAL] work_mem`、DEFAULT、FROM CURRENT、SHOW、RESET/RESET ALL/DISCARD ALL、启动参数/options 与现有 `pg_settings(setting,unit)` 子集。
+  数值按 PG 18.6 的 64..INT_MAX kB、大小写敏感单位和舍入处理；SQL 数值常量与引号内 GUC 文本分别保留各自解释。
+  `work_mem` 配置别名使用同一解析器，既有项目 `work_mem_kb` 仍可设置原生微型预算，不把它当 PG SQL 会话别名。
+- 状态属于 Session，区分继承文件默认、启动覆盖、显式 SET、事务原值/持久值和本地值；保存点支持重复名称、释放和回滚。
+  RESET 继续继承最新重载文件默认，启动 options 的默认优先级保留，FROM CURRENT 则成为显式覆盖。
+  顶层隐式语句的失败与显式事务/保存点恢复分别收束；没有把错误清理延至下一次无关查询。
+- 普通物理 Sort 在 open 时截取有效预算；输入期间修改设置不影响已打开的排序，重开使用新值。
+  SHOW、pg_settings 和现有 EXPLAIN SETTINGS 读取同一有效值，普通 EXPLAIN 文本缓存也区分会话值，避免陈旧或跨连接设置观察。
+- 工作内存不是 GUC_REPORT 参数，不新增 ParameterStatus；SHOW 的固定 text 描述无需执行查询读取值。
+  新的执行期作用域只区分顶层 SET LOCAL 的显式用户块与协议内部隐式块，块外返回 WARNING/25P01 且不修改设置。
+  没有修改何时创建隐式事务、保留计划、Bind/portal/输出格式或 COPY 中断所有权策略。
+
+### 正确性、失败候选与实际资源观察
+
+最终 **36 个原生入口全部通过**：前批 31、两个新入口及 Config/搜索路径/时区语法入口。
+新入口完整 **163 个控制**：解析/会话状态 136、实际 Sort/Config 27；其单位/舍入的 82 个字符串输入有独立 PG 18.6 实测，嵌入 NUL 为原生边界检查。
+最终真实 Main 的所选完整 **25 个协议入口为 24 通过/1 失败**，新完整 **470 条**在严格 PG 18.6/最终程序全过。
+唯一最终失败是已有暂缓 Bind/portal 的 463/40；本批与前版全部 463 条观察逐字节相同。
+`b190` 的完整同组 25 曾为 23/2，另一个是部分 COPY 帧超时关闭检查；最终完整入口通过不改写原失败，
+没有恢复 R197 的专属调查或宣称它已修复。R303/R304/R305、原子条款及专属暂缓记录保持。
+
+同一最终 Main 的 35 类操作完成现有 oracle 检查，仅作有限 smoke；实际匿名排序文件存活时强杀，
+重开完整核对 1,000 行/4,000 单元格并再次排序通过，不概括为全部修改故障/恢复、真实 TLS 或整库兼容性验收。
+
+首候选 `11486506` 的完整 448 条有 **8 处不符**：2 个块外 SET LOCAL 警告、3 个缓存 EXPLAIN 值、2 个 Simple RESET 语法错误码、1 个 Extended SHOW 语法错误阶段。
+前两处警告分别是 01000 和未发送警告；其值/行/Ready 检查仍正确。旧/PG/首候选同源完整结果和实际首候选程序均保留。
+随后补普通缓存键、Simple 的原语法校验、SHOW 42601 及独立执行期显式块上下文，再完整重跑；没有将断言改成多个可接受值/帧。
+原 391 条保持步骤/断言及顺序，追加 13 个缓存和 44 个语法控制后成为 448；该 448 条旧版完整 382 不符，不等同 382 个独立 bug。
+进一步核对 [PG SET 执行顺序](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/utils/misc/guc_funcs.c)，发现块外 LOCAL 的非法值/非法多值也必须先警告再报错。
+新增独立 22 项，严格校验 Simple 的 N/E/Z、Extended 的 1/2/n/N/E/Z 及语法错误无警告；
+原 448 控制与断言保持，扩展为 **470**，PG 全过、旧版 404 不符，`b190c065` 虽通过 448 仍有新增 4 处不符。
+保留该候选和全部完整日志，再移动警告至值校验前，没有通过删除错误路径关闭这个差异。
+第一版检查器另有 143 个 bytes/str 字段名期待错误，已保留原源码/PG 日志；只修检查器表示后，原 391 在 PG 全过，再扩展 448。
+
+实际 Main 使用测试进程的 LD_PRELOAD/mkstemp 计数，只观察 `.dbms-sort-` 创建，不含生产注入 hook，也不用于计时。
+31 个完整控制核对两个连接、64 KiB 与 4 MiB、LOCAL 结束恢复、文件重载/显式值/RESET/FROM CURRENT：
+低预算实际 SQL 每次创建一个匿名排序文件，高预算为零，完成后无临时描述符；最后完整核对 1,000 行/4,000 单元格。
+原生另完整核验 512×2 KiB、>2^53 整数、三列 NULL、空行来源、两个同时存在的排序、预算打开时快照及错误清理；不把合成来源伪装为堆 RID。
+
+### 性能与尚未完成的范围
+
+沿用闭合 1,000 行夹具，各窗口旧/新/旧独立副本，七类各预热 3 次、3 轮×4 样本，每窗口 252，合计 **504 个完整校验样本**。
+默认耐久性、15 秒 socket、TCP_NODELAY 不变；计时阶段没有本任务编译、测试或其他基准并行，没有重测 PG 延迟。
+
+默认 4 MiB，p50 ms：
+
+| 查询 | 旧首 | 新 | 旧末 |
+| --- | ---: | ---: | ---: |
+| 普通物理单键无界排序 | 75.976 | 84.046 | 82.820 |
+| 类型化双键 LIMIT 20 | 34.814 | 42.266 | 37.495 |
+| 同排序 OFFSET 500 | 34.107 | 40.169 | 39.469 |
+| 其他分流的双键无界排序 | 90.779 | 94.554 | 96.302 |
+| 主键点查 | 10.495 | 14.206 | 11.913 |
+| ARRAY[id] LIMIT 1 | 10.768 | 12.779 | 12.931 |
+| 普通 id LIMIT 1 | 9.740 | 11.486 | 11.242 |
+
+64 KiB，p50 ms：
+
+| 查询 | 旧首 | 新 | 旧末 |
+| --- | ---: | ---: | ---: |
+| 普通物理单键无界排序 | 77.242 | 69.557 | 77.659 |
+| 类型化双键 LIMIT 20 | 36.637 | 34.599 | 33.041 |
+| 同排序 OFFSET 500 | 36.433 | 35.434 | 35.795 |
+| 其他分流的双键无界排序 | 90.035 | 80.373 | 87.935 |
+| 主键点查 | 12.462 | 11.798 | 11.297 |
+| ARRAY[id] LIMIT 1 | 11.991 | 11.781 | 12.118 |
+| 普通 id LIMIT 1 | 10.681 | 9.896 | 10.926 |
+
+默认窗口 Top-N 为 34.814/42.266/37.495 ms、点查 10.495/14.206/11.913 ms，存在明显慢值；
+64 KiB 的普通单键排序为 77.242/69.557/77.659 ms。**未证明 SQL 延迟稳定改善或所有查询无回退**，
+不能把不同窗口的较低值挑出后推广为全面加速，也未证明全部差异由环境造成。
+
+另有 **600 次**默认预算诊断，旧/新/旧每类 50 查询，CPU 按服务进程的每批累计计数折算：
+
+| 查询 | 旧首 CPU ms/次 | 新 | 旧末 |
+| --- | ---: | ---: | ---: |
+| 双键 LIMIT | 31.800 | 30.000 | 31.800 |
+| 点查 | 8.400 | 8.800 | 7.800 |
+| 普通 LIMIT | 6.600 | 10.200 | 9.800 |
+| 数组 LIMIT | 9.600 | 10.600 | 10.800 |
+
+这些不是逐请求 CPU 中位数，不与 504 延迟样本合并。旧末普通 LIMIT 和数组控制也发生漂移，尚未定位既有慢值的共同原因。
+本批的确定收益是会话可独立控制实际普通排序预算与生命周期；查询热路径、其他算子的预算及剩余开销继续优化。
+
+
+配置函数 `current_setting`/`set_config` 仍没有实现，函数 SET 子句与内部 CALL/DML 保存点的完整 GUC 联动尚未验收；
+这些是普通未完成工作，不新增用户暂缓项。语法诊断的消息文本/位置还未逐项对齐 PG，work_mem 的共享标量解析分支仍有 TimeZone 措辞。
+会话 work_mem 已接普通物理 Sort，类型化/多键/Top-N 其他分流及 hash/aggregate/window/join、结果接收器仍缺完整预算。
+没有据本批关闭整个资源治理要求、原始 273 项或完整 PG 兼容性门；Goal 保持 active。
+
+### 构建与证据
+
+反汇编检查显示 dd5/114/b190 三份 executeInternal 的栈序言均为 0xd000 探测加 0xf78；
+新设置 helper 在调用处均为独立函数调用，没有支持“新 helper 内联扩大主函数栈”的假设，因此没有加入无证据的 noinline 修改。
+代码布局是否影响延迟仍未证实。
+
+最终程序 SHA-256 为 `af67a1cfd6c7e4ce2774e23345e288acaa366038054bd738b81dd97eb04bc8fb`。
+公共 Session 头及新增工作内存状态使首次 CMake 重编 16 个生产单元；后续两次 Main 单元重编和一次 Main/Network/Parser 重编，
+合计 21 次成功 CPP 编译、16 个不同 CPP，最终链接 62 个当前生产对象，未称 fresh 全部编译。
+最后仅移动 Main 中警告顺序，逐对象核对原生所链接的 61 个 core 哈希相同，复用明确不含 Main 的最终 36 原生结果；实际 Main 完整重跑协议/资源/操作/强杀观察。
+C++17/O2/ICU/zlib/TLS stub 的构建范围保持，原始 273 项及专属记录不变；验收后原子安装同一程序，直接在 master 提交，不推送或重启既有服务。
+
+证据目录 `build/pg-feature-workmem-_a2m0fg2/`：`native-final.json`、`protocol-final.json`、391/448/470 的旧/PG/各候选完整日志与冻结源码，
+`parser-reference-observations.json`、`parser-reference-state-receipt.json`、`runtime-main-accepted.json`、`operations-accepted/operations.json`、
+`main-sort-crash-accepted.json`、延迟窗口、实际构建记录及 `final-provenance.json`。
 
 ## 剩余瓶颈与适用范围
 

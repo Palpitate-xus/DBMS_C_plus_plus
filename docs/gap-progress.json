@@ -2,6 +2,31 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-02 session work_mem utility/transaction/default-source and actual physical sort budget",
+      "gap_ids": [
+        "P0-14",
+        "OPT-10"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/performance-report-2026-10-30.md",
+        "docs/test-report.md",
+        "docs/MANUAL.md"
+      ],
+      "tests": [
+        "tests/work_mem_setting_test.cpp",
+        "tests/work_mem_sort_runtime_test.cpp",
+        "tests/work_mem_session_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "correctness": "Final36native pass,new136+27controls0. Full25wire24pass/1existing deferredBindfail;new470 PG18.6/final0,old404. Original391/448 assertions preserved; old completeobservations retained. ActualMain31budget/reload/fd controls,35ops smoke andread-onlyspoolSIGKILL/reopen1000rows4000cells pass. Full463/40 byte-equal.",
+        "performance": "Two separate252-sample1000row old/new/old windows504total. Default TopN34.814/42.266/37.495ms,point10.495/14.206/11.913 slower;64KBsingle-sort77.242/69.557/77.659 lower. No stable SQL speedup/regression-free claim;600processCPU batch diagnostic queries retained separately.",
+        "failures": "First114865 full4488fail (warning2/cache3/RESET2/SHOWphase1); b190 full4480 butadded22localwarning-error controls4fail. OriginalPGchecker143bytes/str mismatches retained. b190full25=23/2includespaused partialCOPYtimeout;finaltimeoutpass doesnotrepairR197. No tests loosened or deferred module resumed.",
+        "scope": "Utilitywork_mem64..INT_MAXKB withunits,Session-owned inherited/startup/explicit/local source,transaction/savepoint/implicitstatement restoration,fixedSHOWmetadata andordinaryEXPLAINcachekey. Sort budget snapshotatopen. Configurationfunctions/current_setting/set_config,routineSET/internal-savepointGUC andotheroperatorbudgets remainopen,notnewuserdeferrals. Original273items/atomicclauses/dedicatedrecords/sharedinterrupthelpers unchanged.Goalactive.",
+        "proof": "build/pg-feature-workmem-_a2m0fg2/final-provenance.json"
+      }
+    },
+    {
       "issue": "2026-11-02 on-demand final physical sort merge and caller NULL binding lifetime",
       "gap_ids": [
         "P0-14",

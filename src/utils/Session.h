@@ -8,6 +8,7 @@
 #include <set>
 #include <string>
 #include <vector>
+#include "common/WorkMemSetting.h"
 
 namespace dbms {
 
@@ -255,6 +256,9 @@ struct Session {
     // A session's pg_temp alias remains resolvable after its last temp table
     // is dropped; it is not equivalent to tempTables being nonempty.
     bool tempNamespaceCreated = false;
+    // Runtime work_mem belongs to this connection; an unset value follows
+    // its startup option or the current reloaded instance default.
+    dbms::SessionWorkMem workMem;
 };
 
 inline std::string tempTablePrefix(const Session& session, const std::string& name) {

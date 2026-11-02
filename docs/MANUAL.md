@@ -838,7 +838,24 @@ SELECT * FROM users ORDER BY AGE NULLS FIRST;
 能够解析到真实列的输出别名、ORDER BY 序号，以及普通 AND 筛选也可接入。保留 NULL、空串、文本 NULL、类型元数据与列顺序。
 NUMERIC、数组/对象身份、多个排序键、DISTINCT/WITH TIES、OR 分流、显式排序 COLLATE、虚拟生成列和有限行数 portal 等仍由各自既有路径处理，
 不能据此认定它们也已受此预算约束。类型化排序/Top-N、哈希/聚合/窗口/JOIN 及结果接收器的完整内存治理仍未完成。
-`SET work_mem` 的会话语义尚未实现；这里使用已有实例配置及 reload，详细验证和性能范围见[外部排序报告](performance-report-2026-10-30.md#普通物理排序的内存预算与外部归并2026-11-02)。
+会话 `SET [SESSION|LOCAL] work_mem` 现在驱动该普通物理排序路径，支持 DEFAULT、FROM CURRENT、SHOW、RESET/RESET ALL/DISCARD ALL 与启动 options。
+SQL 值范围为 64..2147483647 kB，支持 B/kB/MB/GB/TB（单位区分大小写）及按 PostgreSQL 规则舍入。
+普通 SET 在提交后保留，回滚取消；LOCAL 在事务结束时恢复，保存点回滚也恢复。块外 LOCAL 警告 25P01 且无持久效果，非法值仍报错。
+没有显式覆盖时跟随最新实例重载，启动 options 的重置默认值保留，FROM CURRENT 成为显式覆盖。排序打开后不改变其已截取的预算。
+
+```sql
+SET work_mem = '16MB';
+SHOW work_mem;
+BEGIN;
+SET LOCAL work_mem = '64kB';
+SELECT * FROM users ORDER BY AGE;
+COMMIT;
+RESET work_mem;
+```
+
+`pg_settings.setting/unit` 与现有 EXPLAIN SETTINGS 观察有效会话值；目录仍是已有有限列子集。
+`current_setting`/`set_config`、函数 SET 子句和内部例程 GUC 完整作用域尚未实现/验收；其他排序/算子的完整预算也保持开放。
+实例 `work_mem_kb` 仍保留项目原生的微型测试预算，区别于 PG SQL 的 64 kB 下限。验证及性能见[会话工作内存报告](performance-report-2026-10-30.md#会话工作内存与实际排序预算2026-11-02)。
 
 最新按需归并的验证、性能与仍开放的资源边界见[最终归并报告](performance-report-2026-10-30.md#最终归并按需输出与排序绑定恢复2026-11-02)。
 

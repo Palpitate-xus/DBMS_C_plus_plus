@@ -6434,9 +6434,12 @@ ParseResult SQLParser::parseSet(const std::string& sql) {
     const bool genericTimeZone = pos < tokens.size() &&
         toLower(parseRoutineIdentifier(tokens[pos])) == "timezone" &&
         (pos + 1 == tokens.size() || tokens[pos + 1] != ".");
+    const bool workMem = pos < tokens.size() &&
+        toLower(parseRoutineIdentifier(tokens[pos])) == "work_mem" &&
+        (pos + 1 == tokens.size() || tokens[pos + 1] != ".");
     const bool dedicatedTimeZone = pos + 1 < tokens.size() &&
         toLower(tokens[pos]) == "time" && toLower(tokens[pos + 1]) == "zone";
-    if (genericTimeZone || dedicatedTimeZone) {
+    if (genericTimeZone || dedicatedTimeZone || workMem) {
         // Only this statement's scalar SET grammar needs local raw spans.
         // Preserve newline string continuation; normalized execution SQL has
         // already collapsed precisely the whitespace that matters here.
@@ -6455,8 +6458,8 @@ ParseResult SQLParser::parseSet(const std::string& sql) {
             failed.sqlState = "42601";
             return failed;
         };
-        stmt->name = "timezone";
-        if (genericTimeZone) {
+        stmt->name = workMem ? "work_mem" : "timezone";
+        if (genericTimeZone || workMem) {
             if (value + 2 == end && toLower(values[value]) == "from" &&
                 toLower(values[value + 1]) == "current") {
                 r.success = true; r.stmt = std::move(stmt); return r;
@@ -6558,7 +6561,14 @@ ParseResult SQLParser::parseSet(const std::string& sql) {
                     ++last;
                 const std::string number = sql.substr(spans[at].first, spans[last - 1].second - spans[at].first);
                 if (!timeZoneNumericToken(number)) return false;
-                result += number;
+                if (workMem) {
+                    // SQL numeric constants are normalized before GUC input;
+                    // quoted numeric text keeps the GUC's own base/unit rules.
+                    const auto integer = parsePostgresIntegerText(number, 64);
+                    if (integer.error == IntegerTextError::None)
+                        result += std::to_string(integer.value);
+                    else for (const auto ch : number) if (ch != '_') result += ch;
+                } else result += number;
                 at = last;
                 return true;
             }
@@ -6759,6 +6769,7 @@ ParseResult SQLParser::parseShow(const std::string& sql) {
                                parameter == "\"transaction_isolation\"";
     const bool parallelName = parameter == "max_parallel_workers_per_gather" ||
                               parameter == "\"max_parallel_workers_per_gather\"";
+    const bool workMemName = parameter == "work_mem" || parameter == "\"work_mem\"";
     if (parameter == "transaction") {
         if (pos + 1 >= tokens.size() ||
             toLower(tokens[pos]) != "isolation" ||
@@ -6768,11 +6779,12 @@ ParseResult SQLParser::parseShow(const std::string& sql) {
         }
         pos += 2;
     }
-    if (isolationName || parameter == "transaction" || parallelName) {
-        stmt->name = parallelName ? "max_parallel_workers_per_gather" : "transaction_isolation";
+    if (isolationName || parameter == "transaction" || parallelName || workMemName) {
+        stmt->name = workMemName ? "work_mem" : parallelName ? "max_parallel_workers_per_gather" : "transaction_isolation";
         if (pos < tokens.size() && tokens[pos] == ";") ++pos;
         if (pos != tokens.size()) {
             r.error = "unexpected input after SHOW " + stmt->name;
+            if (workMemName) r.sqlState = "42601";
             return r;
         }
     }
@@ -6795,6 +6807,16 @@ ParseResult SQLParser::parseReset(const std::string& sql) {
         stmt->name = "all"; ++pos;
     } else if (pos < tokens.size()) {
         stmt->name = tokens[pos++];
+    }
+    const auto name = toLower(parseRoutineIdentifier(stmt->name));
+    if (name == "work_mem") {
+        stmt->name = name;
+        if (pos < tokens.size() && tokens[pos] == ";") ++pos;
+        if (pos != tokens.size()) {
+            r.error = "unexpected input after RESET work_mem";
+            r.sqlState = "42601";
+            return r;
+        }
     }
     r.success = true;
     r.stmt = std::move(stmt);

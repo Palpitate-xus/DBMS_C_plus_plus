@@ -25,6 +25,7 @@
 #include "TableManage.h"
 #include "utils/prepared_stmts.h"
 #include "utils/PlanCacheEpoch.h"
+#include "common/WorkMemUtilityContext.h"
 #include "ExecutionPlan.h"
 #include "executor/PreparedTableSource.h"
 #include "NetworkServer.h"
@@ -473,7 +474,9 @@ static void trimPlanCacheLocked() {
 // explicit instead of relying on schema invalidation, because SET/ALTER
 // SYSTEM can change plan selection without changing catalog metadata.
 static std::string planCacheSettingsKey() {
-    return ":cfg=" + std::to_string(g_config.workMemKb) +
+    const auto* session = dbms::currentSession();
+    const auto workMem = session ? session->workMem.effective(g_config.workMemKb) : g_config.workMemKb;
+    return ":cfg=" + std::to_string(workMem) +
            ":seq=" + (g_config.enableSeqScan ? "1" : "0") +
            ":hash=" + (g_config.enableHashJoin ? "1" : "0") +
            ":merge=" + (g_config.enableMergeJoin ? "1" : "0") +
@@ -3017,6 +3020,7 @@ static bool handleBeginTransaction(const string& sql, Session& s) {
     }
     if (!hadTransaction) {
         s.searchPathTransaction.begin(s.searchPath);
+        s.workMem.begin();
         s.transactionChainOrigin = false;
         s.transactionChainReadOnly = false;
     }
@@ -3042,6 +3046,7 @@ static bool commitBeforeLegacyDdl(Session& s) {
     if (!prepareNotificationTransactionCommit(s)) {
         (void)g_engine.rollbackTransaction();
         s.searchPathTransaction.finish(s.searchPath,false);
+        s.workMem.finish(false);
         rollbackNotificationTransaction(s);
         dbms::advisoryLockManager().releaseTransaction(advisoryOwner(s));
         return false;
@@ -3049,7 +3054,7 @@ static bool commitBeforeLegacyDdl(Session& s) {
 
     const DBStatus status = g_engine.commitTransaction();
     if (status != DBStatus::OK) {
-        if(!g_engine.inTransaction())s.searchPathTransaction.finish(s.searchPath,false);
+        if(!g_engine.inTransaction()){ s.searchPathTransaction.finish(s.searchPath,false); s.workMem.finish(false); }
         if (!g_engine.inTransaction())
             dbms::advisoryLockManager().releaseTransaction(advisoryOwner(s));
         if (!g_engine.inTransaction()) rollbackNotificationTransaction(s);
@@ -3058,6 +3063,7 @@ static bool commitBeforeLegacyDdl(Session& s) {
         return false;
     }
     s.searchPathTransaction.finish(s.searchPath,true);
+    s.workMem.finish(true);
     dbms::advisoryLockManager().releaseTransaction(advisoryOwner(s));
     if (!commitNotificationTransaction(s)) return false;
     cout << "Note: DDL caused implicit commit of open transaction" << endl;
@@ -3088,6 +3094,7 @@ static bool handleCommitTransaction(const string& sql, Session& s) {
     if (hadTransaction && !prepareNotificationTransactionCommit(s)) {
         (void)g_engine.rollbackTransaction();
         s.searchPathTransaction.finish(s.searchPath,false);
+        s.workMem.finish(false);
         rollbackNotificationTransaction(s);
         dbms::advisoryLockManager().releaseTransaction(advisoryOwner(s));
         return true;
@@ -3096,6 +3103,7 @@ static bool handleCommitTransaction(const string& sql, Session& s) {
     if (res != DBStatus::OK) {
         if (!g_engine.inTransaction()) {
             s.searchPathTransaction.finish(s.searchPath,false);
+            s.workMem.finish(false);
             rollbackNotificationTransaction(s);
             dbms::advisoryLockManager().releaseTransaction(advisoryOwner(s));
         }
@@ -3104,6 +3112,7 @@ static bool handleCommitTransaction(const string& sql, Session& s) {
         return true;
     }
     s.searchPathTransaction.finish(s.searchPath,true);
+    s.workMem.finish(true);
     if (hadTransaction)
         dbms::advisoryLockManager().releaseTransaction(advisoryOwner(s));
     if (hadTransaction && !commitNotificationTransaction(s)) return true;
@@ -3169,6 +3178,7 @@ static bool handleRollbackTransaction(const string& sql, Session& s) {
         throw dbms::DbError(dbms::sqlstateForDBStatus(res), "Rollback failed");
     }
     s.searchPathTransaction.finish(s.searchPath,false);
+    s.workMem.finish(false);
     if (hadTransaction) {
         rollbackNotificationTransaction(s);
         dbms::advisoryLockManager().releaseTransaction(advisoryOwner(s));
@@ -3247,6 +3257,7 @@ static bool handleSavepoint(const string& sql, Session& s) {
     }
     dbms::advisoryLockManager().savepoint(advisoryOwner(s), name);
     s.searchPathTransaction.save(name,s.searchPath);
+    s.workMem.save(name);
     cout << "Savepoint " << name << " created" << endl;
     log(s.username, "savepoint " + name, getTime());
     return false;
@@ -3274,6 +3285,7 @@ static bool handleReleaseSavepoint(const string& sql, Session& s) {
     (void)dbms::notificationManager().releaseSavepoint(s.pid, name);
     dbms::advisoryLockManager().releaseSavepoint(advisoryOwner(s), name);
     s.searchPathTransaction.release(name);
+    s.workMem.release(name);
     cout << "Savepoint " << name << " released" << endl;
     log(s.username, "release savepoint " + name, getTime());
     return false;
@@ -3302,6 +3314,7 @@ static bool handleRollbackToSavepoint(const string& sql, Session& s) {
     (void)dbms::notificationManager().rollbackToSavepoint(s.pid, name);
     dbms::advisoryLockManager().rollbackToSavepoint(advisoryOwner(s), name);
     s.searchPathTransaction.rollback(name,s.searchPath);
+    s.workMem.rollback(name);
     cout << "Rolled back to savepoint " << name << endl;
     log(s.username, "rollback to savepoint " + name, getTime());
     return false;
@@ -3439,6 +3452,16 @@ static bool handleResetCommand(const string& sql, Session& s) {
         g_engine.setIsolationLevel(dbms::IsolationLevel::REPEATABLE_READ);
     };
     string rest = (sql == "reset all") ? "all" : trim(sql.substr(6));
+    const auto resetTokens = dbms::SQLParser::tokenize(sql);
+    if (resetTokens.size() > 1 &&
+        toLower(decodeQuotedIdentifier(resetTokens[1])) == "work_mem" &&
+        (resetTokens.size() == 2 || resetTokens[2] != ".")) {
+        dbms::SQLParser parser;
+        const auto syntax = parser.parseForBinding(sql);
+        if (!syntax.success)
+            throw dbms::DbError("42601", syntax.error.empty() ? "invalid RESET work_mem" : syntax.error);
+        rest = "work_mem";
+    }
     if (rest == "all") {
         if (restoreSessionTimeZone(s)) return true;
         string authUser = s.authenticatedUser.empty() ? s.username : s.authenticatedUser;
@@ -3453,6 +3476,8 @@ static bool handleResetCommand(const string& sql, Session& s) {
         s.searchPathTransaction.assign(s.searchPath,s.defaultSearchPath,false);
         s.lcMonetary = s.defaultLcMonetary;
         s.statementTimeoutMs = s.defaultStatementTimeoutMs;
+        if (g_engine.inTransaction()) s.workMem.begin();
+        s.workMem.assign(std::nullopt, false);
         s.lockTimeoutMs = g_config.lockTimeoutMs;
         s.deadlockTimeoutMs = g_config.deadlockTimeoutMs;
         g_engine.getLockManager().setLockTimeout(s.lockTimeoutMs);
@@ -3490,6 +3515,12 @@ static bool handleResetCommand(const string& sql, Session& s) {
     if (rest == "statement_timeout" || rest == "statement_timeout_ms") {
         s.statementTimeoutMs = s.defaultStatementTimeoutMs;
         cout << "RESET " << rest << endl;
+        return false;
+    }
+    if (toLower(decodeQuotedIdentifier(rest)) == "work_mem") {
+        if (g_engine.inTransaction()) s.workMem.begin();
+        s.workMem.assign(std::nullopt, false);
+        cout << "RESET" << endl;
         return false;
     }
     if (rest == "lock_timeout" || rest == "lock_timeout_ms") {
@@ -3587,7 +3618,7 @@ static bool applyConfigParam(const string& param, const string& val, bool isGlob
         cout << "Failed to read persisted configuration" << endl;
         return true;
     }
-    if (!candidate.setParameter(param, val)) {
+    if (!candidate.setParameter(param, param == "work_mem" ? stripQuotes(val) : val)) {
         cout << "Invalid value or unknown parameter: " << param << endl;
         return true;
     }
@@ -3903,7 +3934,7 @@ static bool handleSetCommand(const string& sql, Session& s, const string& rawSql
                     dbms::emitWarning(diagnostic.str());
                 }
             } else {
-                if(g_engine.inTransaction())s.searchPathTransaction.begin(s.searchPath);
+                if(g_engine.inTransaction()){ s.searchPathTransaction.begin(s.searchPath); s.workMem.begin(); }
                 s.searchPathTransaction.assign(s.searchPath,canonical,isLocal);
             }
             cout << "SET" << endl;
@@ -3966,10 +3997,51 @@ static std::optional<bool> handleSearchPathSetCommand(const string& rawSql, Sess
     if (local && !g_engine.inTransaction()) {
         cout << "WARNING: SET LOCAL can only be used in transaction blocks (SQLSTATE 25P01)" << endl;
     } else {
-        if (g_engine.inTransaction()) s.searchPathTransaction.begin(s.searchPath);
+        if (g_engine.inTransaction()) { s.searchPathTransaction.begin(s.searchPath); s.workMem.begin(); }
         // Values already carry GUC_LIST_QUOTE; reformatting would lose
         // keyword/numeric/string argument distinctions.
         s.searchPathTransaction.assign(s.searchPath, value, local);
+    }
+    cout << "SET" << endl;
+    return false;
+}
+
+// Parse the original scalar SET spelling, so quoted units, signed numbers,
+// DEFAULT and FROM CURRENT retain their distinct SQL meanings.
+static std::optional<bool> handleWorkMemSetCommand(const string& rawSql, Session& s) {
+    const auto tokens = dbms::SQLParser::tokenize(rawSql);
+    size_t target = 1;
+    if (target < tokens.size() &&
+        (dbms::SQLParser::toLower(tokens[target]) == "session" ||
+         dbms::SQLParser::toLower(tokens[target]) == "local")) ++target;
+    if (target >= tokens.size() ||
+        dbms::SQLParser::toLower(decodeQuotedIdentifier(tokens[target])) != "work_mem" ||
+        (target + 1 < tokens.size() && tokens[target + 1] == ".")) return std::nullopt;
+    dbms::SQLParser parser;
+    const auto parsed = parser.parseForBinding(rawSql);
+    const auto* setting = parsed.success ? dynamic_cast<const dbms::SetStmt*>(parsed.stmt.get()) : nullptr;
+    if (!setting || setting->name != "work_mem")
+        throw dbms::DbError("42601", parsed.error.empty() ? "invalid SET work_mem" : parsed.error);
+    const bool local = setting->scope == dbms::SetStmt::Scope::Local;
+    const bool outsideBlock = local && (!g_engine.inTransaction() ||
+        (executeDepth == 1 && !dbms::ScopedWorkMemUtilityContext::localAllowed()));
+    // PostgreSQL warns before flattening/checking the value, even when that
+    // check subsequently raises an error. Syntax errors remain parse errors.
+    if (outsideBlock)
+        dbms::emitDiagnostic({"WARNING", "25P01", "SET LOCAL can only be used in transaction blocks"});
+    std::optional<size_t> value;
+    if (setting->values.empty()) value = s.workMem.effective(g_config.workMemKb);
+    else if (setting->values.size() != 1)
+        throw dbms::DbError("22023", "SET work_mem takes only one argument");
+    else if (setting->values.front() != "default") {
+        const auto& datum = setting->values.front();
+        value = dbms::parseWorkMemKb(!datum.empty() && datum.front() == '"'
+            ? decodeQuotedIdentifier(datum) : stripQuotes(datum));
+        if (!value) throw dbms::DbError("22023", "invalid value for parameter \"work_mem\"");
+    }
+    if (!outsideBlock) {
+        if (g_engine.inTransaction()) s.workMem.begin();
+        s.workMem.assign(value, local);
     }
     cout << "SET" << endl;
     return false;
@@ -5139,8 +5211,10 @@ static bool handlePrepare(const string& sql, Session& s) {
             return true;
         }
         auto res = g_engine.prepareTransaction(xid);
-        if(res!=DBStatus::OK && !g_engine.inTransaction())
+        if(res!=DBStatus::OK && !g_engine.inTransaction()) {
             s.searchPathTransaction.finish(s.searchPath,false);
+            s.workMem.finish(false);
+        }
         if (res == DBStatus::OK) {
             if (!dbms::advisoryLockManager().prepareTransaction(
                     advisoryOwner(s), xid)) {
@@ -5149,12 +5223,14 @@ static bool handlePrepare(const string& sql, Session& s) {
                     advisoryOwner(s));
                 rollbackNotificationTransaction(s);
                 s.searchPathTransaction.finish(s.searchPath,false);
+                s.workMem.finish(false);
                 cout << "ERROR: advisory lock ownership could not be "
                         "transferred to prepared transaction (SQLSTATE "
                         "XX000)" << endl;
                 return true;
             }
             s.searchPathTransaction.finish(s.searchPath,true);
+            s.workMem.finish(true);
             rollbackNotificationTransaction(s);
             cout << "PREPARE TRANSACTION " << xid << endl;
             log(s.username, "prepare transaction " + xid, getTime());
@@ -19357,7 +19433,7 @@ static dbms::PreparedQueryRows preparedPgSettingsRows(const Session& session) {
     };
     add("max_connections", to_string(g_config.maxConnections));
     add("shared_buffers", to_string(g_config.bufferPoolFrames), "8kB");
-    add("work_mem", to_string(g_config.workMemKb), "kB");
+    add("work_mem", to_string(session.workMem.effective(g_config.workMemKb)), "kB");
     add("max_notify_queue_pages",
                to_string(dbms::notificationManager().queueCapacityBytes() / 8192));
     add("checkpoint_timeout", to_string(g_config.checkpointInterval), "s");
@@ -22984,6 +23060,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
             return handleRollbackToSavepoint(sql, s);
 
         case dbms::SqlCommand::Set:
+            if (const auto memoryResult = handleWorkMemSetCommand(effectiveRawSql, s))
+                return *memoryResult;
             if (const auto pathResult = handleSearchPathSetCommand(effectiveRawSql, s))
                 return *pathResult;
             [[fallthrough]];
@@ -25835,6 +25913,12 @@ static bool executeInternal(const string& rawSql, Session& s) {
             cout << shown->name << endl << value << endl;
             return false;
         }
+        if (shown && shown->isShow && shown->name == "work_mem") {
+            const auto value = dbms::formatWorkMemKb(s.workMem.effective(g_config.workMemKb));
+            publishStructuredUtilityResult({"work_mem"}, {"text"}, {{value}}, {{false}}, "SHOW");
+            cout << "work_mem" << endl << value << endl;
+            return false;
+        }
         if (shown && shown->isShow && shown->name == "transaction_isolation") {
             // Outside a block, show the default used by a fresh SQL BEGIN,
             // not the engine's retained characteristics of an ended block.
@@ -27086,6 +27170,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
         s.lastUsedSequenceOid = 0;
         s.lastUsedSequenceDatabase.clear();
         // Reset session variables
+        s.workMem.assign(std::nullopt, false);
         s.timezoneOffsetMinutes = 0;
         s.statementTimeoutMs = s.defaultStatementTimeoutMs;
         s.lockTimeoutMs = g_config.lockTimeoutMs;
@@ -39806,6 +39891,20 @@ static bool executeWithCteInheritance(const std::string& inputSql, Session& s,
         changesPlanCache(dbms::SQLParser::classify(rawSql)));
     const bool outermost = executeDepth == 0;
     const auto command = dbms::SQLParser::classify(rawSql);
+    // A calling statement can execute SET in a SQL function before it fails.
+    // Own the GUC transaction independently of the storage transaction so
+    // utility-only statements and a failed implicit BEGIN also unwind it.
+    struct WorkMemStatementScope {
+        Session& session;
+        bool owns, success = false;
+        WorkMemStatementScope(Session& value, bool outer)
+            : session(value), owns(outer && !g_engine.inTransaction()) {
+            if (owns) session.workMem.begin();
+        }
+        ~WorkMemStatementScope() {
+            if (owns && !g_engine.inTransaction()) session.workMem.finish(success);
+        }
+    } workMemStatementScope(s, outermost);
     // A successfully consumed tree is not yet a successful calling statement:
     // immediate FK validation or durable commit can still fail. Defer only
     // this public EXPLAIN result; nested SPI captures keep their own output.
@@ -39983,6 +40082,7 @@ static bool executeWithCteInheritance(const std::string& inputSql, Session& s,
                                         "statement transaction commit failed");
     }
     if (!error && !explainPublication.empty()) cout << explainPublication;
+    workMemStatementScope.success = !error;
     return error;
 }
 

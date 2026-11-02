@@ -10,6 +10,7 @@
 | 数据库与一手来源 | 借鉴的做法 | 本项目的应用边界 |
 | --- | --- | --- |
 | [PostgreSQL 18 tuplesort](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/utils/sort/tuplesort.c)与[工作内存](https://www.postgresql.org/docs/18/runtime-config-resource.html) | 工作预算属于每个操作；超预算排序生成有序段并归并 | 有序 LIMIT 保留有界候选；普通物理 Sort 按实例预算生成匿名临时段并有限 k 路归并，最终一轮按需输出；其余排序及其他算子的完整治理仍开放 |
+| [PostgreSQL SET](https://www.postgresql.org/docs/18/sql-set.html)与[RESET](https://www.postgresql.org/docs/18/sql-reset.html) | 会话覆盖和 LOCAL 分开，回滚/保存点恢复；RESET 使用当前默认来源 | 会话 work_mem 接入普通物理 Sort，保留启动/文件优先级；配置函数、例程作用域与其他算子治理仍开放 |
 | [PostgreSQL tuple slots](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/executor/execTuples.c) | 行槽保留已解码属性及 NULL 标记，避免反复拆解相同属性 | 按物理行读取一次 NULL 位图并复用，去除排序的重复解码；仍保留文件身份核验、TOAST 和虚拟列的原有解码职责 |
 | [PostgreSQL SeqScan](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/executor/nodeSeqscan.c)与[heap scan](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/access/heap/heapam.c) | 扫描状态保留 snapshot，按需求获取后续 tuple，结束时释放扫描资源 | 普通非分区 TableScan 按页供给、复制拥有的行/NULL 位图，页锁和 pin 不跨表达式求值；分区/RLS/其他分流仍分别验收 |
 | [PostgreSQL LIMIT/OFFSET](https://www.postgresql.org/docs/18/queries-limit.html)与[Limit 算子](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/executor/nodeLimit.c) | 在子计划行流上计数，零条不请求输入；OFFSET 行仍被计算 | 普通单表 LIMIT 进入既有类型化链，保留 WHERE/投影需求、聚合和 DISTINCT 的输入职责；错误前缀用独立 SQL 接收契约，不放宽默认 checked 失败契约 |
@@ -46,8 +47,11 @@ COPY 响应中断已有 R197 用户暂缓记录补入中央索引；完整回归
 第五批基于 `471dad3f` 完成上述普通物理 Sort 的最终按需归并，补 NULL 绑定恢复和错误终止清理。
 31 个原生通过；所选完整 22 协议仍为 21/1，新增 40 原生控制全过；宽行原生约快 1.78–1.86 倍，小表 SQL 未证明稳定改善，见[最终归并报告](performance-report-2026-10-30.md#最终归并按需输出与排序绑定恢复2026-11-02)。
 
+第六批基于 `049c0bce` 接通会话 work_mem、启动/文件/显式值优先级、事务/保存点以及普通物理 Sort 的有效预算。
+36 原生通过，新 163 控制全过；完整所选 25 协议为 24/1，新 470 在 PG/最终程序全过；504 延迟仍有慢值，见[会话工作内存报告](performance-report-2026-10-30.md#会话工作内存与实际排序预算2026-11-02)。
+
 此后依次评估剩余分流/物化、常见修改快照工作量、完整工作内存与 spill、统计和计划选择，再扩大数据量与并发验证。
-类型化/多键等其余排序、会话 work_mem、分区/RLS/并行等剩余物化及虚拟生成列表达式失败返回 NULL 的既有差异仍开放；
+类型化/多键等其余排序、配置函数/例程 GUC 完整作用域、分区/RLS/并行等剩余物化及虚拟生成列表达式失败返回 NULL 的既有差异仍开放；
 原 273 项状态与原子条款不因本批通过而关闭。各批次最终通过范围以测试报告、性能报告及对应提交为准。
 
 > 蓝图描述目标和验收方法，不代表实现已完成。本轮实际 bug 及修复方案见[代码审查报告](code-review-2026-10-13.md)；完成状态仍取自原总账。

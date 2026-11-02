@@ -1,4 +1,5 @@
 #include "Config.h"
+#include "WorkMemSetting.h"
 
 #include <cmath>
 #include <fcntl.h>
@@ -87,7 +88,7 @@ bool Config::validate() const {
            autoVacuumThreshold > 0 && autoVacuumThreshold <= 100000000 &&
            autoAnalyzeThreshold > 0 && autoAnalyzeThreshold <= 100000000 &&
            lockTimeoutMs >= 0 && deadlockTimeoutMs >= 0 &&
-           workMemKb > 0 && workMemKb <= 100000000 &&
+           workMemKb > 0 && workMemKb <= 2147483647 &&
            maxNotifyQueuePages > 0 &&
            maxNotifyQueuePages <= std::numeric_limits<size_t>::max() / 8192 &&
            maxParallelWorkersPerGather >= 0 &&
@@ -125,7 +126,12 @@ bool assignParameter(Config& config, const std::string& key,
     else if (key == "auto_analyze_threshold") parsed = parseInt(value, config.autoAnalyzeThreshold);
     else if (key == "lock_timeout_ms" || key == "lock_timeout") parsed = parseInt(value, config.lockTimeoutMs);
     else if (key == "deadlock_timeout_ms" || key == "deadlock_timeout") parsed = parseInt(value, config.deadlockTimeoutMs);
-    else if (key == "work_mem_kb" || key == "work_mem") parsed = parseSize(value, config.workMemKb);
+    else if (key == "work_mem_kb") parsed = parseSize(value, config.workMemKb);
+    else if (key == "work_mem") {
+        const auto memory = parseWorkMemKb(value);
+        parsed = memory.has_value();
+        if (memory) config.workMemKb = *memory;
+    }
     else if (key == "max_notify_queue_pages") {
         parsed = parseSize(value, config.maxNotifyQueuePages);
     }

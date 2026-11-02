@@ -21,6 +21,7 @@
 #include "common/DateType.h"
 #include "common/TimeZoneRules.h"
 #include "common/BooleanCodec.h"
+#include "common/WorkMemUtilityContext.h"
 #include "common/IntegerTextCodec.h"
 #include "common/NetworkValue.h"
 #include "common/GeometryValue.h"
@@ -523,6 +524,16 @@ bool applyStartupRuntimeParameter(Session& session,
             return false;
         }
         session.searchPath = std::move(canonical);
+        return true;
+    }
+    if (name == "work_mem") {
+        const auto parsed = parseWorkMemKb(value);
+        if (!parsed) {
+            sqlState = "22023";
+            error = "invalid value for parameter \"work_mem\"";
+            return false;
+        }
+        session.workMem.setStartup(*parsed);
         return true;
     }
     if (name == "lc_monetary") {
@@ -3654,7 +3665,8 @@ bool describePreparedResultShape(const std::string& sql, Session& session,
         if (shown->isShow && (name == "transaction_isolation" ||
                               name == "max_parallel_workers_per_gather" ||
                               name == "application_name" || name == "client_encoding" ||
-                              name == "search_path" || name == "lc_monetary")) {
+                              name == "search_path" || name == "lc_monetary" ||
+                              name == "work_mem")) {
             // These scalar GUCs have a fixed text schema. Describe must not
             // execute SHOW, sample its value, or infer columns from stdout.
             QueryResult shape;
@@ -6703,6 +6715,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             if (g_engine.rollbackToSavepoint(*recovery) != DBStatus::OK)
                 return false;
             session.searchPathTransaction.rollback(*recovery,session.searchPath);
+            session.workMem.rollback(*recovery);
             (void)notificationManager().rollbackToSavepoint(
                 session.pid, *recovery);
             if (session.advisoryOwnerId != 0) {
@@ -6716,6 +6729,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         }
         if (g_engine.inTransaction()) return false;
         session.searchPathTransaction.finish(session.searchPath,false);
+        session.workMem.finish(false);
         notificationManager().rollbackTransaction(session.pid);
         if (session.advisoryOwnerId != 0) {
             advisoryLockManager().releaseTransaction(session.advisoryOwnerId);
@@ -6820,10 +6834,17 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 execSession = &rented->session;
             }
         }
-        QueryResult result = executeProtocolQuery(
-            effectiveSql, *execSession,
-            remainingExtendedQueryTimeoutMs(), !typeDeclarationsAnalyzed,
-            retainOrdinarySourceDeclaration);
+        QueryResult result;
+        {
+            // A protocol-owned implicit transaction is not a user BEGIN
+            // block for a top-level SET LOCAL work_mem utility statement.
+            ScopedWorkMemUtilityContext workMemContext(
+                wasInTransaction && !extendedImplicitTransaction);
+            result = executeProtocolQuery(
+                effectiveSql, *execSession,
+                remainingExtendedQueryTimeoutMs(), !typeDeclarationsAnalyzed,
+                retainOrdinarySourceDeclaration);
+        }
         if (!result.error && (!wasInTransaction || extendedImplicitTransaction) &&
             SQLParser::isSetTransactionStatement(sql)) {
             SQLParser parser;

@@ -5051,6 +5051,17 @@ void WindowOp::close() {
 // SortOp
 // ========================================================================
 
+static size_t effectiveWorkMemKb() {
+    const auto* session = currentSession();
+    return session ? session->workMem.effective(g_config.workMemKb) : g_config.workMemKb;
+}
+
+static size_t sortWorkMemBytes() {
+    const auto kilobytes = effectiveWorkMemKb();
+    return kilobytes > std::numeric_limits<size_t>::max() / 1024
+        ? std::numeric_limits<size_t>::max() : std::max<size_t>(1, kilobytes) * 1024;
+}
+
 struct SortOp::State {
     struct Row {
         std::string raw, key, nulls;
@@ -5092,8 +5103,7 @@ struct SortOp::State {
     StorageEngine::NullRowBindingState callerNullBinding;
 
     State(const TableSchema& schema, size_t ordinal, bool asc, bool first)
-        : budget(g_config.workMemKb > std::numeric_limits<size_t>::max() / 1024
-              ? std::numeric_limits<size_t>::max() : std::max<size_t>(1, g_config.workMemKb) * 1024),
+        : budget(sortWorkMemBytes()),
           bufferSize(std::max<size_t>(64, std::min<size_t>(65536, budget / 16))),
           nullBytes((schema.len + 7) / 8), haveColumn(ordinal < schema.len),
           ascending(asc), nullsFirst(first),
@@ -8444,7 +8454,7 @@ std::string QueryPlanner::explain(OpPtr& plan, StorageEngine* engine,
     CostEstimate total = explainOp(plan.get(), 0, engine, dbname, result, opts);
     if (opts.settings) {
         auto cfg = g_config;
-        result += "Settings: work_mem=" + std::to_string(cfg.workMemKb) + "kB";
+        result += "Settings: work_mem=" + std::to_string(effectiveWorkMemKb()) + "kB";
         result += ", enable_seqscan=" + std::string(cfg.enableSeqScan ? "on" : "off");
         result += ", enable_hashjoin=" + std::string(cfg.enableHashJoin ? "on" : "off");
         result += ", enable_mergejoin=" + std::string(cfg.enableMergeJoin ? "on" : "off");
@@ -8790,7 +8800,7 @@ static std::string explainJsonDocument(Operator* plan, StorageEngine* engine,
     if (opts.settings) {
         auto cfg = g_config;
         result += ",\n  \"settings\": {\n";
-        result += "    \"workMemKb\": " + std::to_string(cfg.workMemKb) + ",\n";
+        result += "    \"workMemKb\": " + std::to_string(effectiveWorkMemKb()) + ",\n";
         result += "    \"enableSeqScan\": " + std::string(cfg.enableSeqScan ? "true" : "false") + ",\n";
         result += "    \"enableHashJoin\": " + std::string(cfg.enableHashJoin ? "true" : "false") + ",\n";
         result += "    \"enableMergeJoin\": " + std::string(cfg.enableMergeJoin ? "true" : "false") + ",\n";
