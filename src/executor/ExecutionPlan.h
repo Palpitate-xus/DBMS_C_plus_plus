@@ -1445,6 +1445,10 @@ public:
 
     // Checked production entry point: EOF and execution failure are distinct.
     static PlanExecutionResult executePlanChecked(OpPtr plan, size_t maxRows = 0);
+    // A top-level SQL output receiver can retain the rows actually produced
+    // before a typed runtime failure. ok remains false and throwIfFailed keeps
+    // the original exception; ordinary checked/nested consumers still discard.
+    static PlanExecutionResult executePlanWithPrefix(OpPtr plan, size_t maxRows = 0);
     // A demand-driven receiver over the same retained typed operator graph.
     // No SQL rewriting, pre-execution, transaction or snapshot reset occurs.
     static std::unique_ptr<PreparedQueryCursor> makePreparedCursor(

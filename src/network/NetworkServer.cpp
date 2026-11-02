@@ -5870,12 +5870,16 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
         } else {
             result.sqlState = "XX000";
         }
-        if(structuredError && structuredDml.available && structuredDml.metadataOnly &&
+        if(structuredError && structuredDml.available &&
             structuredDml.runtimeErrorMetadata && !structuredDml.columns.empty()) {
             result.resultSet=true;
             result.columns=structuredDml.columns;result.columnTypes=structuredDml.columnTypes;
-            result.rows.clear();result.nulls.clear();result.commandTag.clear();
-            result.columnDescriptions=describeProtocolColumns(result,sql,session);
+            if (!structuredDml.metadataOnly) {
+                result.rows=structuredDml.rows;result.nulls=structuredDml.nulls;
+            }
+            result.commandTag.clear();
+            result.columnDescriptions=ordinarySourceColumns.empty()
+                ? describeProtocolColumns(result,sql,session) : ordinarySourceColumns;
         }
         if (statementCommitError && structuredDml.available &&
             !structuredDml.metadataOnly) {
@@ -8051,6 +8055,36 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             }
             result.notices.clear();
             if (result.error) {
+                // An unbounded Execute can deliver the typed SELECT prefix
+                // accepted before a runtime error, without a success tag.
+                // Row-limited portal execution still needs a live cursor;
+                // do not exceed its quota with an already buffered prefix.
+                if (maxRows == 0 && result.resultSet && !result.rows.empty()) {
+                    auto columns = result.columnDescriptions;
+                    if (columns.size() != result.columns.size()) {
+                        columns.clear();
+                        for (const auto& name : result.columns) columns.push_back(PgColumnDescription{name});
+                    }
+                    if (!portalState.resultFormats.empty() && portalState.resultFormats.size() != 1 &&
+                        portalState.resultFormats.size() != columns.size()) {
+                        sendExtendedProtocolError("08P01", "result format count does not match result columns");
+                        continue;
+                    }
+                    for (size_t i = 0; i < columns.size(); ++i)
+                        if (!portalState.resultFormats.empty()) columns[i].formatCode = static_cast<int16_t>(
+                            portalState.resultFormats[portalState.resultFormats.size() == 1 ? 0 : i]);
+                    bool sent = true;
+                    for (size_t i = portalState.rowOffset; i < result.rows.size(); ++i) {
+                        auto row = result.rows[i]; row.resize(columns.size());
+                        const auto nulls = i < result.nulls.size() ? result.nulls[i] : std::vector<bool>{};
+                        if (!protocol.sendDataRow(row, columns, nulls)) { sent = false; break; }
+                    }
+                    if (!sent) {
+                        sendExtendedProtocolError("0A000", "binary result type is not supported");
+                        continue;
+                    }
+                    portalState.rowOffset = result.rows.size();
+                }
                 protocol.sendErrorResponse("ERROR", result.sqlState, result.errorMessage);
                 extendedQueryError = true;
             }

@@ -12,6 +12,7 @@
 | [PostgreSQL 18 tuplesort](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/utils/sort/tuplesort.c) | 有限结果使用有界堆；无界大排序按内存预算生成有序段并归并 | 先实现普通有序 LIMIT 的有界候选保留，完整 `work_mem`/临时文件归并另行验收 |
 | [PostgreSQL tuple slots](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/executor/execTuples.c) | 行槽保留已解码属性及 NULL 标记，避免反复拆解相同属性 | 按物理行读取一次 NULL 位图并复用，去除排序的重复解码；仍保留文件身份核验、TOAST 和虚拟列的原有解码职责 |
 | [PostgreSQL SeqScan](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/executor/nodeSeqscan.c)与[heap scan](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/access/heap/heapam.c) | 扫描状态保留 snapshot，按需求获取后续 tuple，结束时释放扫描资源 | 普通非分区 TableScan 按页供给、复制拥有的行/NULL 位图，页锁和 pin 不跨表达式求值；分区/RLS/其他分流仍分别验收 |
+| [PostgreSQL LIMIT/OFFSET](https://www.postgresql.org/docs/18/queries-limit.html)与[Limit 算子](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/executor/nodeLimit.c) | 在子计划行流上计数，零条不请求输入；OFFSET 行仍被计算 | 普通单表 LIMIT 进入既有类型化链，保留 WHERE/投影需求、聚合和 DISTINCT 的输入职责；错误前缀用独立 SQL 接收契约，不放宽默认 checked 失败契约 |
 | [DuckDB TopN 优化](https://duckdb.org/2024/11/14/optimizers)及[排序设计](https://duckdb.org/2025/09/24/sorting-again) | ORDER BY 与 LIMIT 联合优化，保留有限候选；外部排序需要独立的可溢写布局 | OFFSET 纳入候选数量，保留类型化键与原始行上下文，避免重新求值和丢失 NULL/对象身份 |
 | [SQLite 临时文件](https://www.sqlite.org/tempfiles.html)与[原子提交](https://sqlite.org/atomiccommit.html) | 可用有序索引时减少排序；临时排序结构与事务日志承担不同职责，日志按变更页保护回滚 | 后续评估排序 spill 和修改路径的快照开销；本轮不删除持久化或回滚保护来换取速度 |
 
@@ -29,7 +30,12 @@
 在页锁/pin 释放后交付行并展开当前 TOAST。23 个原生、17 个协议入口及 35 类操作检查通过；
 四种事务场景的跨后端修改、同语句写函数/回滚、部分扫描统计及 I/O 失败释放均有实际控制，新增完整 13 条协议也与 PG 18.6 对照通过。
 内存和旧/新/旧 216 样本见[按页扫描报告](performance-report-2026-10-30.md#按页物理扫描2026-11-02)。
-普通列投影 LIMIT 仍走旧分流，是接下来统一执行的具体缺口；先验证未排序投影需求、参数/类型元数据及错误边界，再扩大接入。
+第三批基于 `bcde5b3e` 将可支持的普通单表 LIMIT 接入同一链，修复未请求行错误和过量副作用、负数计数及单列星号类型，
+新增顶层 SQL 错误前缀接收器。完整 62 条 PG 18.6/候选全过，旧版 9 条失败；24 原生入口通过。
+所选完整 21 协议为 20 通过、1 个既有暂缓入口失败，旧/新完整 463 的 40 处差异逐条相同。
+1,000 行普通 LIMIT 1 的相邻对照约快 2.3 倍，见[报告](performance-report-2026-10-30.md#普通-limit-按需执行与错误前缀2026-11-02)。
+网络端仍缓冲结果；有限行数 portal 的错误需求没有完成。R303/R304/R305 已有暂缓条目同步到中央索引，
+不据此恢复 retained planning、portal 生命周期或格式 2 输出需求；接下来在非暂缓范围推进剩余扫描/排序资源治理和修改开销。
 
 此后依次评估剩余分流/物化、常见修改快照工作量、完整工作内存与 spill、统计和计划选择，再扩大数据量与并发验证。
 分区/RLS/并行等剩余物化、无界排序/work_mem/spill 和虚拟生成列表达式失败返回 NULL 的既有差异仍开放；

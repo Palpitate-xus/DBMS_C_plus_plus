@@ -8689,7 +8689,7 @@ std::unique_ptr<PreparedQueryCursor> QueryPlanner::makePreparedCursor(
     return std::make_unique<PreparedOperatorCursor>(std::move(plan), std::move(descriptor));
 }
 
-PlanExecutionResult QueryPlanner::executePlanChecked(OpPtr plan, size_t maxRows) {
+static PlanExecutionResult executePlanResult(OpPtr plan, size_t maxRows, bool retainPrefix) {
     PlanExecutionResult result;
     if (!plan) {
         result.ok = false;
@@ -8762,13 +8762,21 @@ PlanExecutionResult QueryPlanner::executePlanChecked(OpPtr plan, size_t maxRows)
         try { closePlan(); } catch (...) {}
         std::rethrow_exception(failure);
     }
-    if (!result.ok) {
+    if (!result.ok && !retainPrefix) {
         result.rows.clear();
         result.structuredRows.clear();
         result.structuredNulls.clear();
         result.structuredRowsAvailable = false;
     }
     return result;
+}
+
+PlanExecutionResult QueryPlanner::executePlanChecked(OpPtr plan, size_t maxRows) {
+    return executePlanResult(std::move(plan), maxRows, false);
+}
+
+PlanExecutionResult QueryPlanner::executePlanWithPrefix(OpPtr plan, size_t maxRows) {
+    return executePlanResult(std::move(plan), maxRows, true);
 }
 
 // Check if an index provides the required pathkey ordering.

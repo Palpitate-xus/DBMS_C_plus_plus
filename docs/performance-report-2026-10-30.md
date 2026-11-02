@@ -434,6 +434,73 @@ DBMS_MAIN="$PWD/build/cmake/dbms_main" python3 tests/table_scan_effect_snapshot_
 `statistics-final.json`、`table_scan_snapshot_test-release.log`、`protocol-reference-v2.log` 保留实际退出码和完整控制。
 `operations-release/operations.json`、`limit-probe-v2.json`、首个 PG 启动失败日志、CMake 编译/复建日志及 `final-provenance.json` 保留来源与边界。
 
+## 普通 LIMIT 按需执行与错误前缀（2026-11-02）
+
+### 实现与适用范围
+
+以 `bcde5b3e` 为旧版，参考 PostgreSQL 的 [LIMIT/OFFSET 语义](https://www.postgresql.org/docs/18/queries-limit.html)、
+[Limit 算子](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/executor/nodeLimit.c)及
+[SELECT 求值说明](https://www.postgresql.org/docs/18/sql-select.html)，把普通、可支持的单表 LIMIT 接入已有类型化算子链。
+之前只有数组、特定标量角色或有序 LIMIT 等会接入，普通列投影仍先做全表工作。
+
+- 执行阶段接入普通有限 LIMIT；LIMIT 0 不打开输入，OFFSET 行仍按原投影需求求值，未请求的后续行不额外执行 WHERE/投影。
+  DISTINCT/聚合仍完成其所需输入，不直接截断原输入。没有 ORDER BY 时不承诺固定子集，本轮验证使用固定无索引堆夹具。
+- 共享计数辅助函数对可识别的负数 LIMIT/OFFSET 返回 2201W/2201X；保留负零、NULL/ALL 等原有解析边界。
+  单列星号保留已绑定列类型，避免扩大接入后把星号推断为 unknown/text。
+- 新增显式 `executePlanWithPrefix` 接收契约：失败仍为失败，保留原 SQL 异常及恰好一次清理，但允许顶层 SQL 接收器保留已经产生的类型化行/NULL 位图。
+  默认 `executePlanChecked` 和嵌套调用继续失败即清空。Simple Query 和不限 portal 行数的 Extended Execute 在正常格式下先发送该前缀再报错，不发送成功标签。
+- 这仍是结果缓冲接收器，不是网络端完全流式。有限行数 portal 的错误/悬停需求没有完成；未修改 Bind/Parse 规划、参数帧、custom/generic 或格式 2 策略。
+  R303/R304/R305 继续按[已有用户暂缓](deferred-scope.md)处理，不能据普通 SQL LIMIT 修复恢复其共享生命周期调查。
+
+### 正确性、未通过项与构建
+
+**24 个原生入口通过**，其中新增前缀接收完整 16 项：默认清空与显式保留、SQL/非 SQL 异常身份、open/close/hasError、主错误不被清理覆盖、清理一次、NULL/空串/文本 NULL/UTF-8 和正常 EOF/限额。
+完整所选 **21 个协议入口为 20 通过、1 失败**；新增完整 **62 条**在 PostgreSQL 18.6/候选各全过，冻结旧版有 9 条失败。
+覆盖 Simple、text/binary Bind 及结果、计数与求值需求、序列/写函数次数、阻塞 DISTINCT/聚合、OID/typmod/属性来源及错误前原始帧。
+
+首份 54 条夹具误用“错误前无行”的通用检查，PG 在第 6 行除零前已经发出 5 行；原失败保留，随后改成精确检查 5 行及 T/D/E/Z 顺序，再扩展为 62 条。
+仅修改分流的中间候选仍有错误前缀和负数 LIMIT 2 条失败，补生产实现后才全过。
+未通过入口为既有 R304/R305 完整 463：旧/新均 40 处差异，463 条观察逐字节一致；不是 40 个独立 bug，也没有排除后称全绿。
+额外有限行数 portal 共 6 条观察，PG 全过、旧/新各相同 2 条差异，保留而不接受为修复；相关共享模块继续暂缓。
+中央索引此前遗漏 2026-10-27 的专属暂缓记录，本轮补入原引用，不创建新暂缓项或改变原始 273 项状态。
+
+35 类操作完成预热及一轮现有 oracle 检查；与相邻编译/回归重叠，只作有限正确性 smoke。
+生产程序 SHA-256 为 `8a428080cc42e1809cf41ef8f3d09f5658d6d42f095623326d0d18b5ae00ebf6`，仍为 GCC 13.3 / C++17 / O2 / ICU / zlib / TLS stub。
+先重编 1 个 Main，再因接收器 API/头变化重编 6 个单元，共 7 次编译、6 个不同单元；链接当前 62 个生产对象，不冒称 fresh 62。
+原生前缀测试先链接已完成的 61 个 core 对象，再逐项哈希确认与最终对象相同；其余原生重新编译/链接，未以 stub 代替真实协议 Main。
+验收后同一程序原子安装到根目录，原版保留备份，既有服务未重启；不是全仓库、真实 TLS、恢复或完整 PG 行为验收。
+
+### 六类相邻旧／新／旧延迟
+
+与前批相同的闭合 1,000 行夹具复制为三个独立目录，源文件哈希不变；每类预热 3 次、3 轮×4 个计时样本，六类共 **216 个样本**。
+不与构建或其他测试重叠；默认耐久性、15 秒 socket、单连接、热缓存、回环 TCP_NODELAY 和完整结果校验均未变。
+
+| 操作 | 旧首轮 p50 ms | 新 p50 ms | 旧末轮 p50 ms | 结论 |
+| --- | ---: | ---: | ---: | --- |
+| 普通列投影 id LIMIT 1 | 22.893 | 9.791 | 22.670 | 约快 2.32–2.34 倍，延迟约降低 57% |
+| 已有类型化 ARRAY[id] LIMIT 1 | 10.166 | 10.136 | 11.438 | 作为原路径控制，不认定稳定提速 |
+| amount DESC,id ASC LIMIT 20 | 33.646 | 33.696 | 34.348 | 未证明稳定提速 |
+| 同排序 LIMIT 20 OFFSET 500 | 36.969 | 37.363 | 36.131 | 未证明提速 |
+| 主键点查 | 9.453 | 10.118 | 11.224 | 窗口波动，不认定提速 |
+| 无 LIMIT 排序 | 94.457 | 84.531 | 85.651 | 旧两侧漂移，不认定稳定提速 |
+
+只将普通列 LIMIT 1 的改善归属于本批接入，不用其他窗口倍率相乘，也不推导大表、并发、p99、全业务或新的 PG 性能比。
+主结果仍在主机共享负载下测量，不能把绝对延迟当作固定保证。
+
+### 复现与原始证据
+
+```bash
+python3 scripts/benchmark_topn.py \
+  --before /path/to/bcde5b3e-dbms_main --after "$PWD/build/cmake/dbms_main" \
+  --output build/ordinary-limit-new-run --rows 1000 --rounds 3 --samples 4 --include-scan-limit
+DBMS_MAIN="$PWD/build/cmake/dbms_main" python3 tests/physical_limit_demand_protocol_e2e_test.py
+```
+
+证据目录 `build/pg-feature-limit-20261102-tafn38be/`：`latency/comparison.json`、`native-final.json`、`protocol-final.json`、
+`protocol-{before,reference,after}-62.log`、`protocol-before-reference-62.json`、`executor_result_prefix_test.log`、
+`portal-existing-failure-comparison.json`、两侧完整生命周期日志及 `portal-quota-{before,reference,after}.log` 保留全部观察。
+`operations-smoke/operations.json`、各次 CMake 编译/复建日志与 `final-provenance.json` 记录结果、来源和实际构建范围。
+
 ## 剩余瓶颈与适用范围
 
 普通修改、保存点和其他 DDL 仍有物理快照、WAL 全文件映像及同步 I/O 开销；大数据库下会继续放大。整数 DML 筛选仍扫描堆，JOIN 优化仍可能枚举大量键对，索引覆盖、统计信息、计划选择、批处理及更细粒度的回滚机制仍有优化空间。

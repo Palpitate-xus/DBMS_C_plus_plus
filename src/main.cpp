@@ -8858,7 +8858,8 @@ static string ungroupedProjectionColumn(
 static bool evaluateQueryRowCount(const string& expression, Session& s,
                                   size_t& value, bool& isNull,
                                   string& error, string& sqlState,
-                                  string* unboundColumn = nullptr) {
+                                  string* unboundColumn = nullptr,
+                                  bool offsetCount = false) {
     const string text = trim(expression);
     if (text.empty()) return false;
     if (!validateFromlessColumnBindings(
@@ -8878,7 +8879,18 @@ static bool evaluateQueryRowCount(const string& expression, Session& s,
         return true;
     }
     const string number = trim(result.value);
-    if (number.empty() || number.front() == '-') return false;
+    if (number.empty()) return false;
+    if (number.front() == '-') {
+        try {
+            size_t consumed = 0;
+            const auto signedValue = std::stoll(number, &consumed);
+            if (consumed == number.size() && signedValue < 0) {
+                error = offsetCount ? "OFFSET must not be negative" : "LIMIT must not be negative";
+                sqlState = offsetCount ? "2201X" : "2201W";
+            }
+        } catch (...) {}
+        return false;
+    }
     try {
         size_t consumed = 0;
         const auto parsed = std::stoull(number, &consumed);
@@ -8942,7 +8954,7 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
             string error, sqlState;
             if (!evaluateQueryRowCount(
                     expression, s, queryOffset, isNull,
-                    error, sqlState)) {
+                    error, sqlState, nullptr, true)) {
                 if (!error.empty()) {
                     cout << "ERROR: " << error << " (SQLSTATE "
                          << sqlState << ")" << endl;
@@ -20215,11 +20227,10 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
         (candidate->whereClause || candidate->limit || candidate->offset);
     const bool physicalColumnCandidate = candidate->fromClause &&
         candidate->fromClause->type == dbms::FromItem::Type::Table;
-    // A sorted limited base-table query needs the complete typed key list
-    // and projection demand, including after protocol parameter expansion.
+    // LIMIT on a base table controls source and projection demand, with or
+    // without sorting, including after protocol parameter expansion.
     // Admit it at execution, without changing Parse/Bind planning phases.
-    const bool orderedDemand = physicalColumnCandidate && candidate->limit &&
-        !candidate->orderBy.empty();
+    const bool physicalLimitDemand = physicalColumnCandidate && candidate->limit;
     const bool possibleBitNegation=physicalColumnCandidate && candidate->ctes.empty() &&
         candidate->setOp==dbms::SetOp::None && candidate->groupBy.empty() &&
         candidate->groupByElems.empty() && !candidate->having && candidate->windowDefs.empty() &&
@@ -20238,7 +20249,7 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
         // aliases retain their established consumers. This plan lowers a
         // single actual base range; no alternate namespace is fabricated.
         if (!g_engine.tableExists(session.currentDB, physical)) return false;
-        if (!roles.first && !scalarOrder && !possibleArray && !fromlessDemand && !possibleBitNegation && !orderedDemand) {
+        if (!roles.first && !scalarOrder && !possibleArray && !fromlessDemand && !possibleBitNegation && !physicalLimitDemand) {
             const auto schema = g_engine.getTableSchema(session.currentDB, physical);
             if (none_of(schema.cols, schema.cols + schema.len,
                         [](const dbms::Column& column) { return column.isArray; })) return false;
@@ -20261,7 +20272,7 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
     const bool arrayOutput = any_of(prepared.output.begin(), prepared.output.end(),
         [](const dbms::QueryOutputColumn& column) { return dbms::array_detail::isArray(column.type); });
     const bool bitNegationOutput=possibleBitNegation && bitNegation(select,true);
-    if(!roles.first && !scalarOrder && !queryArrays(select,true) && !arrayOutput && !fromlessDemand && !bitNegationOutput && !orderedDemand)return false;
+    if(!roles.first && !scalarOrder && !queryArrays(select,true) && !arrayOutput && !fromlessDemand && !bitNegationOutput && !physicalLimitDemand)return false;
     // Preserve column grants on precisely the bound source cells used by
     // this query (including correlated child references), not SELECT *.
     if (select->fromClause && !sessionIsAdmin(session)) {
@@ -20342,8 +20353,14 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
     vector<string> columns, types;
     for (const auto& column : prepared.output) { columns.push_back(column.name); types.push_back(column.type); }
     if (select->selectList.size() == types.size()) {
-        for (size_t i = 0; i < types.size(); ++i)
-            types[i] = dbms::ExprHelper::inferParsedResultType(select->selectList[i].expr.get(), {}, session.currentDB, &g_engine);
+        for (size_t i = 0; i < types.size(); ++i) {
+            const auto* expression = select->selectList[i].expr.get();
+            const auto* column = dynamic_cast<const dbms::ColumnRefExpr*>(expression);
+            const auto* literal = dynamic_cast<const dbms::LiteralExpr*>(expression);
+            if (expression && (expression->type == dbms::ExprType::A_Star ||
+                (column && column->column == "*") || (literal && literal->value == "*"))) continue;
+            types[i] = dbms::ExprHelper::inferParsedResultType(expression, {}, session.currentDB, &g_engine);
+        }
     }
     for (auto& type : types) if (type == "unknown") type = "text";
     dbms::OpPtr plan;
@@ -20360,7 +20377,21 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
         plan = dbms::QueryPlanner::buildPreparedSelectPlan(&g_engine,session.currentDB,
             physical,std::move(prepared));
     }
-    auto result = dbms::QueryPlanner::executePlanChecked(std::move(plan), currentQueryRowDemand());
+    const bool topLevelOutput = executeDepth == 1;
+    auto result = topLevelOutput
+        ? dbms::QueryPlanner::executePlanWithPrefix(std::move(plan), currentQueryRowDemand())
+        : dbms::QueryPlanner::executePlanChecked(std::move(plan), currentQueryRowDemand());
+    if (!result.ok && topLevelOutput) {
+        dbms::DmlResult prefix;
+        prefix.available = true; prefix.runtimeErrorMetadata = true;
+        prefix.metadataOnly = !result.structuredRowsAvailable;
+        prefix.columns = columns; prefix.columnTypes = types;
+        if (result.structuredRowsAvailable) {
+            prefix.rows = std::move(result.structuredRows);
+            prefix.nulls = std::move(result.structuredNulls);
+        }
+        dbms::publishLastDmlResult(std::move(prefix));
+    }
     result.throwIfFailed();
     if (!result.structuredRowsAvailable) throw dbms::DbError("XX000", "prepared query lost typed rows");
     for (const auto& column : columns) cout << column << ' ';
@@ -27622,7 +27653,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             string unboundColumn;
             if (!evaluateQueryRowCount(
                     expression, s, parsedOffset, isNull,
-                    error, sqlState, &unboundColumn)) {
+                    error, sqlState, &unboundColumn, true)) {
                 if (sqlState == "42703" &&
                     isCurrentInputColumn(unboundColumn)) {
                     error = "argument of OFFSET must not contain variables";

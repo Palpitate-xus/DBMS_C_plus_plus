@@ -1,5 +1,28 @@
 # DBMS 功能测试报告
 
+## 2026-11-02 普通 LIMIT 需求与运行错误前缀
+
+最终 24 个原生入口通过。新增结果前缀原生完整 16 项验证 SQL 错误、hasError、open/close 错误、非 SQL 异常身份、
+close 恰好一次、NULL/空串/文本 NULL/UTF-8，以及保留前缀与默认 checked 清空之间的独立契约。
+原 23 项扫描、MVCC/快照、TOAST、索引、聚合、排序取消等入口全部重跑通过。
+
+完整所选 21 个协议入口 **20 通过、1 失败**。新增 `physical_limit_demand_protocol_e2e_test` 完整 62 条在严格 PostgreSQL 18.6/候选全过，冻结旧版有 9 条失败。
+覆盖 Simple/text Bind/binary Bind 与结果、LIMIT 0/超量/OFFSET、未请求行中的错误、序列及存储写函数调用次数、DISTINCT/聚合、
+FETCH、负数/负零计数、单列星号/NULL，以及 OID/typmod/属性来源。另检查错误前 5 行的原始帧与二进制值，随后 22012 且没有 CommandComplete。
+首份 54 条夹具误用“错误前无行”的通用 helper，实际 PG 在第 6 行失败前发送 5 行；保留该失败，改成明确校验 PG 原始行前缀及帧顺序后扩展为 62 条，没有放宽断言。
+仅执行分流的中间候选仍有错误前缀和负数 LIMIT 2 条失败，后续才补生产修复。
+
+未通过项为既有 `bind_portal_lifecycle_protocol_e2e_test`：完整 463 中旧/新各 40 处不符，全部观察逐字节一致；不算 40 个独立 bug。
+专属 [R304](issue-review-r304-bind-portal-lifecycle.md)/[R305](issue-review-r305-result-format-demand.md)已记录用户暂缓，此次只保留未过滤回归，不修改 Bind/格式策略或恢复调查。
+额外有限行数 portal 观察共 6 条，PG 全过，旧/新各有相同 2 条差异；没有接受该观察为修复，不以本轮不限额 Execute 的前缀通过关闭共享 portal 能力。
+R303/R304/R305 既有范围补入[中央索引](deferred-scope.md)，专属暂缓记录与原始 273 项状态保留。
+
+35 类操作完成预热及一轮现有检查；该 smoke 与相邻编译/回归重叠，不用于性能结论。
+另有隔离的六类 216 个旧/新/旧延迟样本，见[性能报告](performance-report-2026-10-30.md#普通-limit-按需执行与错误前缀2026-11-02)。
+本批不是全仓库、恢复/故障注入、真实 TLS 或完整行为兼容验收；默认持久化和 15 秒协议期限未放宽。
+证据目录 `build/pg-feature-limit-20261102-tafn38be/` 的 `native-final.json`、`protocol-final.json` 包含实际退出码，
+`portal-existing-failure-comparison.json`、`protocol-before-reference-62.json` 和 `final-provenance.json` 保留未通过范围、参考版本及当前源/对象/程序核对。
+
 ## 2026-11-02 按页物理扫描与固定快照
 
 最终候选通过 23 个原生入口、17 个协议入口，既有 35 类操作也完成预热及一轮现有 oracle 检查。

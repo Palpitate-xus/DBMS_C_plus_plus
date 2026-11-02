@@ -820,8 +820,14 @@ SELECT * FROM users ORDER BY AGE NULLS FIRST;
 
 按页扫描为现有类型化消费者保留固定 MVCC 视图及打开时的堆页范围，每次只保留一页未展开的行，
 释放页锁和 pin 后才执行表达式/展开当前行 TOAST。提前停止时统计实际交付行数，只有读到 EOF 才更新完整行数估计。
-这不表示每种 SELECT 都已进入同一执行器；例如当前 `SELECT ARRAY[id] FROM t LIMIT 1` 已可按需停止，
-普通 `SELECT id FROM t LIMIT 1` 的旧分流仍有全表工作量，见[扫描实测](performance-report-2026-10-30.md#按页物理扫描2026-11-02)。
+这不表示每种 SELECT 都已进入同一执行器；随后补充的普通单表 `SELECT id FROM t LIMIT 1` 已与数组等投影共用按需执行，
+可支持形状之外的 JOIN、分组、视图和 LIMIT 表达式等仍按各自既有路径解释，见[普通 LIMIT 实测](performance-report-2026-10-30.md#普通-limit-按需执行与错误前缀2026-11-02)。
+
+普通 LIMIT 路径保留真实投影需求：LIMIT 0 不打开输入；OFFSET 跳过的行仍可计算投影并产生副作用；
+未被请求的后续行不会额外执行 WHERE/投影函数。DISTINCT 和聚合仍先完成各自所需输入，不把 LIMIT 下推为错误的输入截断。
+支持的顶层类型化 SELECT 若在输出期间发生 SQL 错误，Simple Query 及不限 portal 行数的 Extended Execute 会先返回已产生的类型化行，再发送 ErrorResponse，不发送成功标签。
+这不是网络端完全流式或有限行数 portal 的完成声明；R303/R304/R305 仍遵守[暂缓边界](deferred-scope.md)。
+回归使用固定堆夹具观察行顺序；没有 ORDER BY 的生产查询不承诺固定的结果子集。
 
 ### 聚合
 

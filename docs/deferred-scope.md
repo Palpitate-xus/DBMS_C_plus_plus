@@ -1,5 +1,20 @@
 # User-deferred scope and ordinary incomplete work
 
+The later 2026-10-27 instruction is also recorded in the dedicated
+[R303 planning](issue-review-r303-prepared-constant-planning-phase.md),
+[R304 portal lifecycle](issue-review-r304-bind-portal-lifecycle.md), and
+[R305 result-format demand](issue-review-r305-result-format-demand.md) records:
+“暂停当前 R303 prepared planning 与关联 portal 模块，包括未提交的 R304 候选和 R305 输出需求问题。”
+This index entry reconciles those existing user instructions; it creates no new
+deferral and does not change the original273 items. Do not resume retained
+custom/generic planning or parameter-frame ownership, failed-Bind portal
+lifecycle, or format-2 output/error-demand work on a generic continuation.
+Ordinary SQL LIMIT source/projection demand and valid-format SQL runtime error
+rows remain separate correctness work; they do not authorize changing the
+deferred planning/portal/format policies. Existing unfiltered registered
+regression failures can still be retained as observations, without investigating
+or repairing the deferred modules.
+
 On 2026-10-24 the user explicitly said "skip it" while R244 retained Bind-time
 planning was active. R244 remains unresolved and user-deferred; its fifteen
 phase observations, nine differences and implementation plan remain in
